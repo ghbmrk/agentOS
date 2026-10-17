@@ -52,6 +52,7 @@ type fakeHooks struct {
 	pending     []byte // the newest seed waiting for a code
 	enrolls     int
 	trusted     *bool
+	trustErr    error // returned by TrustHost, which then saves nothing
 	keys        map[string]string
 	finished    string
 	connected   bool
@@ -76,6 +77,9 @@ type fakeHooks struct {
 	// the vault hears it and cleared once it records it; Finish refuses
 	// while any is owed.
 	owed map[string]bool
+	// down is agentosd's socket down: SetPrivateOK fails before agentosd
+	// hears the answer, so nothing is owed either (ONB-private-save-fail s3).
+	down bool
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -152,6 +156,9 @@ func (f *fakeHooks) ConfirmCode(code string) (bool, error) {
 func (f *fakeHooks) TrustHost(t bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.trustErr != nil {
+		return f.trustErr
+	}
 	f.trusted = &t
 	return nil
 }
@@ -171,6 +178,9 @@ func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.privates++
+	if f.down {
+		return errors.New("localui.sock: connection refused")
+	}
 	if f.owed == nil {
 		f.owed = map[string]bool{}
 	}
@@ -199,19 +209,19 @@ func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	f.connected = true
 	return nil
 }
-func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
+func (f *fakeHooks) StartDeviceCode(id string) (string, string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deviceErr != nil {
-		return "", "", f.deviceErr
+		return "", "", "", f.deviceErr
 	}
 	if f.device {
 		f.connected = true // the owner finishes on the provider's site
 	}
 	if f.deviceLink != "" {
-		return f.deviceLink, "WXYZ-1234", nil
+		return f.deviceLink, "WXYZ-1234", "Example", nil
 	}
-	return "https://example.invalid/device", "WXYZ-1234", nil
+	return "https://example.invalid/device", "WXYZ-1234", "Example", nil
 }
 func (f *fakeHooks) Finish(n string) error {
 	f.mu.Lock()
@@ -387,6 +397,30 @@ func (r *rig) runSetup() {
 func (r *rig) runSetupToAI() {
 	t := r.t
 	t.Helper()
+	r.runSetupToHost()
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted == nil || !*r.hooks.trusted {
+		t.Fatal("PC not trusted by default")
+	}
+	// Connect AI waits for the first-boot update (ONB-4), nothing else.
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+	if !strings.Contains(r.setupErr(), "still updating") || r.hooks.keys != nil {
+		t.Fatal("AI connected before the first-boot update finished")
+	}
+	r.hooks.mu.Lock()
+	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	r.hooks.mu.Unlock()
+	// CAP-9: the private-data question is asked, unticked on an API key
+	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
+		t.Fatalf("no private-data question, or ticked by default: %s", p)
+	}
+}
+
+// runSetupToHost walks setup up to its host step.
+func (r *rig) runSetupToHost() {
+	t := r.t
+	t.Helper()
 	if loc := r.do("GET", "/", nil).Header().Get("Location"); loc != "/setup" {
 		t.Fatalf("root before setup: %q", loc)
 	}
@@ -439,23 +473,6 @@ func (r *rig) runSetupToAI() {
 	page = r.get("/setup")
 	if !strings.Contains(page, "This is not my PC") || !strings.Contains(page, "Defaults: spend cap") {
 		t.Fatalf("host step: %s", page)
-	}
-	r.post("/setup/host", url.Values{})
-	if r.hooks.trusted == nil || !*r.hooks.trusted {
-		t.Fatal("PC not trusted by default")
-	}
-	// Connect AI waits for the first-boot update (ONB-4), nothing else.
-	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
-	if !strings.Contains(r.setupErr(), "still updating") || r.hooks.keys != nil {
-		t.Fatal("AI connected before the first-boot update finished")
-	}
-	r.hooks.mu.Lock()
-	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
-	r.hooks.mu.Unlock()
-	// CAP-9: the private-data question is asked, unticked on an API key
-	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
-	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
-		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }
 

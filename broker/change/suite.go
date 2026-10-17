@@ -2,6 +2,7 @@ package change
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -134,7 +135,42 @@ func (p *Pipeline) AddTaskCase(c Case) error {
 	}
 	c.Goal = st.Intent.GoalID
 	c.At = p.cfg.Now()
-	return p.addCase(c)
+	return p.addTaskCase(c)
+}
+
+// addTaskCase adds task case c, or supersedes the case its task already
+// has under that ID (OP-7: a later revision supersedes the earlier one,
+// and the held-out suite uses the latest). The case keeps its ID, so its
+// side of the split, and only its outcome and reference change: nothing
+// is removed, so no owner approval is asked (CHG-2). Another case under
+// the ID is a conflict, and an implicit acceptance never supersedes an
+// owner's case. A successful revision makes the quality trigger due at
+// once, so the adoptions it held for this case are re-evaluated on it.
+func (p *Pipeline) addTaskCase(c Case) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old, dup := p.st.Cases[c.ID]
+	switch {
+	case !dup:
+	case old.Security || old.Task != c.Task || old.Class != c.Class ||
+		!bytes.Equal(old.Input, c.Input) || old.Finding != c.Finding:
+		return fmt.Errorf("%w: %w", ErrDuplicate, ErrConflict)
+	case old.Outcome == c.Outcome && bytes.Equal(old.Expect, c.Expect) && old.Implicit == c.Implicit,
+		c.Implicit && !old.Implicit:
+		return ErrDuplicate
+	}
+	next := p.st.copyCases()
+	next[c.ID] = c
+	prev := p.st.Cases
+	p.st.Cases = next
+	if err := p.saveLocked(); err != nil {
+		p.st.Cases = prev
+		return err
+	}
+	if dup {
+		p.qualityRetry = time.Time{}
+	}
+	return nil
 }
 
 // ImplicitSuffix marks the verdict source of an implicit acceptance: the
@@ -221,7 +257,15 @@ func (p *Pipeline) LinkedHold(finding string) (linked int, hold bool) {
 // a candidate from goal still being evaluated is never adopted (security
 // C1 on #120, C23). On a failed save the saved state is reloaded and
 // re-applied, so a retry does it all again.
+// Each adoption it undoes owes a revert intent, journaled once the lock
+// is free (oweLocked, flushOwed).
 func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
+	ids, err := p.forgetGoal(goal)
+	p.flushOwed(context.Background())
+	return ids, err
+}
+
+func (p *Pipeline) forgetGoal(goal string) ([]string, error) {
 	if goal == "" {
 		return nil, errors.New("change: forget needs a goal")
 	}
@@ -234,6 +278,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 		p.gone = map[string]bool{}
 	}
 	p.gone[goal] = true
+	p.retryStrayLocked() // candidate bytes a failed delete left (AJS-1)
 	var ids []string
 	for id, c := range p.st.Cases {
 		if !c.Security && c.Goal == goal {
@@ -252,6 +297,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	if err := p.activateLocked(p.st.Active, tree, touched); err != nil {
 		return nil, err
 	}
+	p.oweRevertsLocked(p.st.Adoptions, ads)
 	p.st.Cases, p.st.Adoptions, p.st.Active = next, ads, tree
 	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {

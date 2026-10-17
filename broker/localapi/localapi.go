@@ -65,10 +65,26 @@ const (
 	// same name, and agentos-ap serves it (Down then Up). It needs a
 	// session (Auth) and nothing else.
 	OpRotateAPNet = "page_rotate_ap_net"
+	// OpPlanSignInReady (Auth) answers a PlanSignIn: whether the owner's
+	// plan is signed out and its sign-in may start (ONB-3, ONB-9, #1264),
+	// and the link and code of a sign-in the page started that still waits,
+	// to the session it is kept for only (#1945).
+	// OpPlanSignIn (PlanSignInStart) starts that sign-in after setup and
+	// answers a PlanSignInStarted, within DeviceCodeTimeout. Whoever
+	// approves its code becomes the plan's login (CRED-5), so it always
+	// takes a code-generator code, as OpSIM does, except from the session a
+	// waiting sign-in is kept for, which gets its link and code back; a good
+	// code from another session gets them too and keeps them for it.
+	// ErrBadArgs when the sign-in is not offered, ErrSignInBusy while a
+	// sign-in the page did not start waits, ErrLimited past
+	// DeviceCodesPerMinute starts or the socket's wrong-code limit; busy
+	// and the start bound are refused before the code is checked.
+	OpPlanSignInReady = "page_plan_sign_in_ready"
+	OpPlanSignIn      = "page_plan_sign_in"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -167,6 +183,32 @@ type Line struct {
 
 // SIMLen is a SIM tag's length.
 const SIMLen = 16
+
+// PlanSignIn says whether the page offers the plan's sign-in and, when one
+// the page started still waits, its link and code (empty otherwise).
+type PlanSignIn struct {
+	Ready bool `json:"ready"`
+	DeviceCode
+}
+
+// PlanSignInWait is how long a plan sign-in waits for the owner to approve
+// its code: agentosd's runner waits this long, and the page's busy text
+// names it (CH-12, #1945).
+const PlanSignInWait = 15 * time.Minute
+
+// PlanSignInStart starts the plan's sign-in with a code-generator code.
+type PlanSignInStart struct {
+	Token string `json:"token"`
+	Code  string `json:"code,omitempty"`
+}
+
+// PlanSignInStarted is a started sign-in's link and code, or a Refusal
+// (RefusedCodeNeeded, RefusedWrongCode, RefusedTooMany) with its Text.
+type PlanSignInStarted struct {
+	Refusal string `json:"refusal,omitempty"`
+	Text    string `json:"text,omitempty"`
+	DeviceCode
+}
 
 // AdoptSIM adopts the SIM the page showed under SIM as the owner line's,
 // with a code-generator code or the asked grid cell. Its reply is an

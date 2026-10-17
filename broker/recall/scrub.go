@@ -127,7 +127,7 @@ func (sc *Scrubber) Scrub(s string) string {
 	s = authHeader.ReplaceAllString(s, "${1} "+Removed)
 	s = authScheme.ReplaceAllString(s, "${1} "+Removed)
 	s = secretKV.ReplaceAllString(s, "${1}"+Removed)
-	s = knownTokens.ReplaceAllString(s, Removed)
+	s = scrubKnownTokens(s)
 	s = urlRe.ReplaceAllStringFunc(s, scrubURL)
 	s = groupedCode.ReplaceAllStringFunc(s, func(m string) string {
 		if (hasDigit(m) && hasLetter(m)) || evenGroups(m) {
@@ -136,6 +136,33 @@ func (sc *Scrubber) Scrub(s string) string {
 		return m
 	})
 	return scrubRandom(s)
+}
+
+// scrubKnownTokens replaces each known token shape together with the
+// dash-, underscore- or alphanumeric run it starts inside: a shape such as
+// xoxs- can begin at a later group of a grouped code, and replacing only
+// from there would keep the code's leading groups (#1844).
+func scrubKnownTokens(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range knownTokens.FindAllStringIndex(s, -1) {
+		start := m[0]
+		for start > last && isTokenByte(s[start-1]) {
+			start--
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(Removed)
+		last = m[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func isTokenByte(c byte) bool {
+	return c == '-' || c == '_' || c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
 // scrubURL drops userinfo, credential-named query values, the fragment when

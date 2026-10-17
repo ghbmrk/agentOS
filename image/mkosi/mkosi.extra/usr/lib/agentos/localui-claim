@@ -1,7 +1,9 @@
 #!/bin/sh
 # Hands the Wi-Fi page the claim state the seller sealed into the broker's root-only directory
-# (D-105, claim.StatePath), once, at the page's first start (#1270). The page records the claim and
-# the card step's latch beside it, in its own state directory; root only moves the file, never reads it.
+# (D-105, claim.StatePath), once, before the page's first start (#1270), from
+# agentos-localui-claim.service: the page's own unit masks /var/lib/agentos for every command it runs.
+# The page records the claim and the card step's latch beside it, in its own state directory, which
+# this creates if the page has not run yet; root only moves the file, never reads it.
 # AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
 set -eu
 R=${AGENTOS_HEALTH_ROOT:-}
@@ -9,6 +11,10 @@ src=$R/var/lib/agentos/claim.json
 dst=$R/var/lib/agentos-localui/claim.json
 if [ -e "$dst" ] || [ -L "$dst" ] || [ ! -f "$src" ] || [ -L "$src" ]; then
 	exit 0
+fi
+if [ ! -d "$R/var/lib/agentos-localui" ]; then
+	mkdir -m 0700 "$R/var/lib/agentos-localui"
+	chown agentos-localui:agentos-localui "$R/var/lib/agentos-localui"
 fi
 chown agentos-localui:agentos-localui "$src"
 mv -T "$src" "$dst"

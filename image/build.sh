@@ -54,20 +54,28 @@ while read -r pkg name bin; do
 done < "$OUT/fuzz-targets"
 rm -f "$OUT/fuzz-targets"
 
-# gVisor, the same release and hash as CI's machine tests.
+# gVisor, the same release and hash as CI's machine tests, with its sidecars beside runsc as CI
+# installs them: this release's runsc refuses to start a sandbox without gvisor-bin/ (#1701).
 curl -fsSLo "$OUT/gvisor.tar.bz2" \
 	"https://storage.googleapis.com/gvisor/releases/release/${GVISOR#release-}/x86_64/gvisor.tar.bz2"
 echo "$GVISOR_SHA512  $OUT/gvisor.tar.bz2" | sha512sum -c -
 mkdir -p "$OUT/gvisor" && tar -xjf "$OUT/gvisor.tar.bz2" -C "$OUT/gvisor"
 install -m 0755 "$OUT/gvisor/runsc" "$STAGE/usr/lib/agentos/runsc"
+mkdir -p "$STAGE/usr/lib/agentos/gvisor-bin"
+install -m 0755 "$OUT"/gvisor/gvisor-bin/* "$STAGE/usr/lib/agentos/gvisor-bin/"
 rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
+# The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
+# agentosd registers it (-image codex=); the CLI is pinned by npm's integrity hash.
+sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
+sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui-claim.service" "$STAGE/usr/lib/systemd/system/agentos-localui-claim.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-ap/agentos-ap.service" "$STAGE/usr/lib/systemd/system/agentos-ap.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-modem/agentos-modem.service" "$STAGE/usr/lib/systemd/system/agentos-modem.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.service" "$STAGE/usr/lib/systemd/system/agentos-netjoin.service"

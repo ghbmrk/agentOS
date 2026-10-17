@@ -194,6 +194,117 @@ class PullRequestTest(unittest.TestCase):
         ])
 
 
+class StaleLabelTest(unittest.TestCase):
+    """REQ: STALE-1-1, STALE-1-2, STALE-1-3"""
+
+    PRS = [{"number": 22, "title": "W-3: fix", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"},
+           {"number": 23, "title": "A-3: spec", "state": "closed", "merged_at": "2026-10-11T00:00:00Z"},
+           {"number": 24, "title": "A-3: follow-up", "state": "open", "merged_at": None},
+           {"number": 25, "title": "A-1: abandoned", "state": "closed", "merged_at": None}]
+
+    def run_stale(self, *args, comments=(), prs=None):
+        posted = []
+
+        def fetch(path, method="GET", payload=None):
+            if method == "POST":
+                posted.append((path, payload["body"]))
+                return {}
+            if path.endswith("/comments"):
+                return list(comments)
+            if path.startswith("/repos/o/r/issues"):
+                return opened(issues())
+            if path.startswith("/repos/o/r/pulls"):
+                want = path.partition("state=")[2]
+                every = list(self.PRS if prs is None else prs)
+                return [p for p in every if want == "all" or p["state"] == want]
+            raise AssertionError(path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["stale", "--repo", "o/r", *args], read=lambda: BOARD, fetch=fetch)
+        return code, out.getvalue(), posted
+
+    def test_a_merged_pr_on_an_open_row_is_flagged(self):
+        found = board.stale(issues(), self.PRS)
+        # W-3 (escalated) is flagged; A-3 is not, because another A-3 PR is still open; A-1's PR never merged.
+        self.assertEqual([(i["title"][:3], p["number"]) for i, p in found], [("W-3", 22)])
+
+    def test_newest_merged_pr_is_named(self):
+        prs = [{"number": 31, "title": "W-3: new", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"},
+               {"number": 22, "title": "W-3: old", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
+        self.assertEqual([p["number"] for _, p in board.stale(issues(), prs)], [31])
+
+    def test_flagging_changes_nothing_and_exits_zero(self):
+        code, out, posted = self.run_stale()
+        self.assertEqual((code, posted), (0, []))
+        self.assertIn("W-3 (#", out)
+        self.assertIn("state escalated but PR #22 merged", out)
+
+    def test_comment_is_posted_once_per_issue_and_pr(self):
+        code, _, posted = self.run_stale("--comment")
+        self.assertEqual((code, len(posted)), (0, 1))
+        path, body = posted[0]
+        self.assertTrue(path.endswith("/comments"))
+        self.assertIn(board.STALE_MARK.format(22), body)
+        self.assertIn("state:merged", body)
+        again = self.run_stale("--comment", comments=[{"body": body}])
+        self.assertEqual(again[2], [])
+        # A later merged PR on the same row is a new fact and is flagged again.
+        later = self.PRS + [{"number": 30, "title": "W-3: more", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"}]
+        self.assertEqual(len(self.run_stale("--comment", comments=[{"body": body}], prs=later)[2]), 1)
+
+    def test_workflow_comments_with_the_issue_token_only(self):
+        wf = (ROOT / ".github" / "workflows" / "stale-labels.yml").read_text()
+        self.assertIn("board.py stale --repo", wf)
+        self.assertIn("issues: write", wf)
+        self.assertNotIn("contents: write", wf)
+        self.assertNotIn("pull_request_target", wf)
+
+
+class IntakeProblemsTest(unittest.TestCase):
+    """CX-BOARD-INTAKE: one run names every malformed work-item issue, and still writes nothing."""
+
+    def malformed(self):
+        a, b, c, d, e = (dict(i, author_association="OWNER") for i in issues()[:1] * 5)
+        for n, i in enumerate((a, b, c, d, e), start=200):
+            i["number"] = n
+        a["labels"] = [x for x in a["labels"] if not x.startswith("state:")]  # no state label
+        b["labels"] = [x for x in b["labels"] if not x.startswith("state:")] + ["state:review"]  # unknown
+        c["body"] = "no block"
+        d["title"] = "untitled"
+        e["body"] = e["body"].replace('"section": "Harness"', '"section": "Nowhere"')
+        return [a, b, c, d, e]
+
+    def test_render_collects_every_problem(self):
+        with self.assertRaises(board.Malformed) as ctx:
+            board.render(BOARD, self.malformed())
+        got = ctx.exception.problems
+        self.assertEqual(len(got), 5, got)
+        for n in range(200, 205):
+            self.assertEqual(sum(f"#{n}" in p for p in got), 1, got)
+
+    def test_duplicate_id_and_cell_count_are_reported_together(self):
+        planned = issues()
+        dup = dict(planned[0], number=999)
+        wide = dict(planned[1], number=998, body=planned[1]["body"].replace('"cells": [', '"cells": ["extra", '))
+        wide["title"] = "A-9: wide"
+        with self.assertRaises(board.Malformed) as ctx:
+            board.render(BOARD, [*planned, dup, wide])
+        text = str(ctx.exception)
+        self.assertIn("issue #999: a second issue for A-1", text)
+        self.assertIn("issue #998: ", text)
+
+    def test_render_and_check_print_all_and_write_nothing(self):
+        items = [dict(i, author_association="OWNER") for i in self.malformed()]
+        for command in ("render", "check"):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = board.main([command, "--repo", "o/r"], read=lambda: BOARD + board.GENERATED + "\n",
+                                  fetch=github(items))
+            self.assertEqual((code, out.getvalue()), (1, ""), command)
+            lines = [x for x in err.getvalue().splitlines() if x.startswith("board: issue #")]
+            self.assertEqual(len(lines), 5, err.getvalue())
+
+
 class CliTest(unittest.TestCase):
     def run_tool(self, *args, text=BOARD):
         out, err = io.StringIO(), io.StringIO()

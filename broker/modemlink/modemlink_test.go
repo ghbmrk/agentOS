@@ -631,3 +631,79 @@ func TestAdoptRecordsOnlyTheShownSIM(t *testing.T) {
 		t.Fatalf("adopt with no recorder: %v", err)
 	}
 }
+
+// Bridged, which ends agentosd's shutdown drain early (owner O34; Security
+// S5, Potency P6 on #1746), holds while a poll is in flight, while a text
+// the bridge took has no result, and for BridgeGap after its last poll or
+// result; never polled, or gone longer, it does not.
+func TestBridgedWhileTheBridgePollsOrHoldsAText(t *testing.T) {
+	l, clk := rig(t)
+	if l.Bridged() {
+		t.Fatal("bridged before any poll")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	polled := make(chan struct{})
+	go func() {
+		defer close(polled)
+		l.Ops()[bridgeproto.OpOutbox](ctx, sockets.Peer{Kind: "owner"}, json.RawMessage(`{}`))
+	}()
+	for deadline := time.Now().Add(2 * time.Second); !l.Bridged(); {
+		if time.Now().After(deadline) {
+			t.Fatal("not bridged while a poll is in flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clk.add(time.Hour)
+	if !l.Bridged() {
+		t.Fatal("not bridged while a poll is in flight, however long")
+	}
+	cancel()
+	<-polled
+	if !l.Bridged() {
+		t.Fatal("not bridged just after a poll")
+	}
+	clk.add(BridgeGap)
+	if l.Bridged() {
+		t.Fatal("bridged BridgeGap after the last poll")
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	done := sendAsync(l, ownerNum, "Box: all well.")
+	it := poll(t, l)
+	clk.add(time.Hour)
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if !l.Bridged() {
+		t.Fatal("not bridged while the bridge holds a text")
+	}
+	if err := call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: it.ID, Code: bridgeproto.CodeOK}, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if !l.Bridged() {
+		t.Fatal("not bridged just after a result")
+	}
+	clk.add(BridgeGap)
+	if l.Bridged() {
+		t.Fatal("bridged BridgeGap after the last result")
+	}
+}
+
+// Queued counts what waits for the bridge, not what it holds (#1810: a
+// drain test needs to know a text is queued before it changes the line).
+func TestQueuedCountsTextsWaitingForTheBridge(t *testing.T) {
+	l, _ := rig(t)
+	if n := l.Queued(); n != 0 {
+		t.Fatalf("Queued before any text: %d", n)
+	}
+	go l.Send(ownerNum, "one")
+	deadline := time.Now().Add(5 * time.Second)
+	for l.Queued() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Queued with a text waiting: %d", l.Queued())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	it := poll(t, l)
+	if n := l.Queued(); n != 0 {
+		t.Fatalf("Queued once the bridge took %q: %d", it.Text, n)
+	}
+}

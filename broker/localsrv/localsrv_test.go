@@ -157,7 +157,8 @@ func newRig(t *testing.T) *rig {
 		RotateAPNet: func() error {
 			r.rotated++
 			return nil
-		}})
+		},
+		PlanSignIn: &fakePlanSignIn{ready: true, link: "https://auth.openai.com/codex/device"}})
 	r.ops = r.srv.Ops()
 	return r
 }
@@ -210,22 +211,24 @@ func code(err error) string {
 // tokenOps are the ops that need a token, with args carrying tok.
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
-		localapi.OpSignOut:     localapi.Auth{Token: tok},
-		localapi.OpSession:     localapi.Auth{Token: tok},
-		localapi.OpLines:       localapi.Auth{Token: tok},
-		localapi.OpLine:        localapi.Auth{Token: tok},
-		localapi.OpResume:      localapi.Resume{Token: tok},
-		localapi.OpRequests:    localapi.Auth{Token: tok},
-		localapi.OpWaiting:     localapi.Auth{Token: tok},
-		localapi.OpAnswer:      localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
-		localapi.OpFollowRoot:  localapi.FollowRoot{Token: tok, Root: []byte("root")},
-		localapi.OpFollow:      localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
-		localapi.OpPaused:      localapi.Auth{Token: tok},
-		localapi.OpAskResume:   localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
-		localapi.OpSIM:         localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
-		localapi.OpForgetTasks: localapi.Auth{Token: tok},
-		localapi.OpForget:      localapi.Forget{Token: tok, ID: "owner:a"},
-		localapi.OpRotateAPNet: localapi.Auth{Token: tok},
+		localapi.OpSignOut:         localapi.Auth{Token: tok},
+		localapi.OpSession:         localapi.Auth{Token: tok},
+		localapi.OpLines:           localapi.Auth{Token: tok},
+		localapi.OpLine:            localapi.Auth{Token: tok},
+		localapi.OpResume:          localapi.Resume{Token: tok},
+		localapi.OpRequests:        localapi.Auth{Token: tok},
+		localapi.OpWaiting:         localapi.Auth{Token: tok},
+		localapi.OpAnswer:          localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpFollowRoot:      localapi.FollowRoot{Token: tok, Root: []byte("root")},
+		localapi.OpFollow:          localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
+		localapi.OpPaused:          localapi.Auth{Token: tok},
+		localapi.OpAskResume:       localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+		localapi.OpSIM:             localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
+		localapi.OpForgetTasks:     localapi.Auth{Token: tok},
+		localapi.OpForget:          localapi.Forget{Token: tok, ID: "owner:a"},
+		localapi.OpRotateAPNet:     localapi.Auth{Token: tok},
+		localapi.OpPlanSignInReady: localapi.Auth{Token: tok},
+		localapi.OpPlanSignIn:      localapi.PlanSignInStart{Token: tok, Code: good},
 	}
 }
 

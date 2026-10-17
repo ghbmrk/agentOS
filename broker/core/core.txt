@@ -113,6 +113,7 @@ allow loops journal.Engine.RecordQuality -- Loop 1 records the quality signal on
 allow modelroute journal.Engine.RecordEgress -- each routed model call leaves its egress note (modelroute.Recorder)
 allow vm guest.Plane.Open -- a machine's sandbox opens its own guest socket at creation (vm.Services)
 allow vm guest.Plane.Close -- and closes it when the machine is destroyed (vm.Services)
+allow vm guest.Plane.Reset -- and drops the tool results it held for the machine when a forget resets it (vm.Resetter, CAP-3)
 allow recall journal.FileStore.Append -- shape only: recall.Store matches the journal's store, and wiring gives recall its own FileStore
 allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Append
 allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
@@ -121,3 +122,8 @@ allow recall journal.MemStore.Rewrite -- shape only: as journal.FileStore.Append
 # The home Wi-Fi helper (P2-2w c3) runs as its own user with no capabilities
 # and serves one socket, to agentosd only (Security L8.1).
 allow cmd/agentos-netjoin sockets.Server.* -- the helper serves its own socket to agentosd only (Security L8.1, P2-2w c3)
+
+# A plan route's declaration (hosts, paths, kinds) is a pure value: the
+# in-image e2e stand-in provider (#1701, boxe2e E10) answers exactly its
+# endpoints. Building the route (egress.NewWorkerRoute) stays a write path.
+open egress.Codex

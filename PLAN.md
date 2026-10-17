@@ -1,4 +1,4 @@
-# AgentOS — Build Plan
+# agentOS — Build Plan
 
 Builds the spec in `SPEC.md` (v0.12 at P0 exit; v0.11 started at `/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
 Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands, money, or decision.
@@ -13,7 +13,7 @@ Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands,
 4. **Write as little as possible.** Reuse mature components wherever they meet a requirement; the broker is the only large original component. Every line written is a line to review, test, and maintain within budget.
 5. **Loops need stop rules more than they need intelligence.** An unbounded loop converts budget into nothing. Every loop has a budget cap, a progress test, and an escalation target.
 6. **Independent verification.** The model that built something never approves it. A fresh context, ideally a different model tier, reviews against requirement IDs.
-7. **Dogfood the architecture.** The build harness *is* an early version of AgentOS loop 1 (§11A): journal, candidates, held-out tests, adoption. What's learned building it transfers directly.
+7. **Dogfood the architecture.** The build harness *is* an early version of agentOS loop 1 (§11A): journal, candidates, held-out tests, adoption. What's learned building it transfers directly.
 
 ---
 
@@ -133,7 +133,7 @@ Work packages, in dependency order:
 - Recall index, event bus, compiled skills, attention optimizer (CAP-3–6).
 - Leverage benchmark vs unmodified OpenClaw (A10). **[Mark]** supplies a real recurring workload.
 
-**Dogfood point:** once P3's pipeline works, the L2/L3/L4 harness migrates onto an AgentOS box. From then on, AgentOS helps build AgentOS. [Inference] This should cut later-phase cost; whether it actually does is measured in L4, not assumed.
+**Dogfood point:** once P3's pipeline works, the L2/L3/L4 harness migrates onto an agentOS box. From then on, agentOS helps build agentOS. [Inference] This should cut later-phase cost; whether it actually does is measured in L4, not assumed.
 
 ### P4 — Open source (Gate G5: A12) (≈5%)
 - Hint schema, clean-room builder, leakage audit (OSS-1–7).
@@ -188,7 +188,7 @@ Usage credits are off.
 **Rules (flexible by design):**
 Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget", or allowance that resets unused. So the only **hard** limit is the subscription itself (B-4). Everything else is a **target with a checkpoint**: on reaching it, the loop decides on evidence whether continuing is worth it, and records why.
 
-- **B-1 Weekly envelope (adaptive):** *superseded 2026-10-04 by §4B's pacing rule (~100% used at each reset, ~14% a day).* The original default target was ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
+- **B-1 Weekly envelope (adaptive):** *superseded 2026-10-04 by §4B's pacing rule (~100% used at each reset); the ~14%/day figure is itself superseded by D-109.* The original default target was ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
   - The protected share for Mark shrinks as the week goes on: from ~30% early in the week to ~10% in the final day, adjusted to his actual recent usage.
   - Late in the week the build may use what Mark predictably won't.
   - If Mark's own usage spikes, the build backs off first.
@@ -220,6 +220,8 @@ This totals roughly **3–5 months** of calendar time at this plan level. That f
 |---|---|---|---|
 | 10:58 | 14% | 11% | spec design (mostly Mark's own thread) |
 | 19:50 | 23% | 11% | +9 points: three spikes' review fixes, three lens reviews, arbitration, the spec PRs, PR reviews, this package, and P1-1, P1-2, P1-5 building in parallel |
+
+*Superseded by D-109 (2026-10-13; Mark, 2026-10-16: "The 14% was dropped some time ago"): the ~14%/day figure below is history, not a daily ceiling. Current rule: CLAUDE.md §Budget (~100% of the weekly limit by each reset, no daily ceiling while spend is not wasteful).*
 
 **Pace: tokens are the binding constraint, and the whole allowance is used.** The week reset at 06:00 Sunday, so 23% is one day's spend, about 160% of the week if sustained. **Pacing rule (Mark, 2026-10-04 23:55: "faster and sooner, should be 100% at reset"):** aim to have used ~100% of the weekly limit at each reset, spread evenly so it never runs out early: ~14% a day, with as many parallel threads as that pace allows. This replaces the 70% default envelope (B-1) and the short-lived 8%/day rule. Usage credits stay off (B-4), so the limit itself is the only hard stop. Mark's own use counts inside the 100%, and the build backs off when it spikes. Day one's 23% is ahead of pace, so the following days run lighter until the cumulative line meets ~14% × days.
 

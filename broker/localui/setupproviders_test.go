@@ -35,7 +35,7 @@ type viaProviders struct{ viaAgentosd }
 func (v viaProviders) Providers() []Provider                 { return v.a.Providers() }
 func (v viaProviders) ConnectAPIKey(id, key string) error    { return v.a.ConnectAPIKey(id, key) }
 func (v viaProviders) SetPrivateOK(id string, ok bool) error { return v.a.SetPrivateOK(id, ok) }
-func (v viaProviders) StartDeviceCode(id string) (string, string, error) {
+func (v viaProviders) StartDeviceCode(id string) (string, string, string, error) {
 	return v.a.StartDeviceCode(id)
 }
 
@@ -61,7 +61,7 @@ func TestTheAIStepConnectsAProviderThroughAgentosd(t *testing.T) {
 	}
 	defer srv.Wait()
 	defer cancel()
-	a := AgentosdSetup{Socket{Path: filepath.Join(dir, localapi.Socket)}}
+	a := AgentosdSetup{Owner: Socket{Path: filepath.Join(dir, localapi.Socket)}}
 	r.via = viaProviders{viaAgentosd{r.hooks, a}}
 	r.srv = r.open(&MemStore{})
 
@@ -96,7 +96,7 @@ func TestTheAIStepConnectsAProviderThroughAgentosd(t *testing.T) {
 	if err := a.SetPrivateOK("openai", true); !refused(err, localapi.ErrSetupClosed) {
 		t.Fatalf("private answer after finish: %v", err)
 	}
-	if _, _, err := a.StartDeviceCode("anthropic"); err != errNotServed {
-		t.Fatalf("device code: %v", err)
+	if _, _, _, err := a.StartDeviceCode("anthropic"); !refused(err, localapi.ErrSetupClosed) {
+		t.Fatalf("device code after finish: %v", err)
 	}
 }

@@ -157,6 +157,13 @@ type Verified struct {
 	// meets CH-10's existence rule, and the reply carries attachments.
 	ThreadVerified bool
 	Attachments    bool
+	// Thread names the conversation Record belongs to, as the source
+	// says: for mail, the record's own Message-ID, its In-Reply-To and
+	// its References. Two sends whose Threads share an entry are in the
+	// same thread, so the same body to the same recipients there is a
+	// repeat even in reply to another message of it (recentRepeat,
+	// Security R21 on #1433). Empty: only Record says.
+	Thread []string
 }
 
 // Config configures New.
@@ -334,6 +341,7 @@ type heldImplicit struct {
 type wait struct {
 	item    owner.Item // as the owner was asked it
 	base    owner.Item // without the queued note: what an approval covers
+	rep     repeat     // the repeat marks item shows (B10)
 	local   bool       // also needs local confirmation
 	onlyUI  bool       // waits for the local page (a hold); never texted
 	request string     // owner request ID, "" while batched
@@ -364,9 +372,14 @@ type decision struct {
 	// owner's (owner Queued.Late): no verdict (security B1(a) on PW3).
 	late bool
 	// req is the request the decision answered (an auto-reply's ID).
-	req   string
-	at    time.Time
-	item  owner.Item
+	req  string
+	at   time.Time
+	item owner.Item
+	// rep is what the line the owner approved said of the same send under
+	// other requests (its Sent and Retried marks, and so any MoneyRetry
+	// raise): an approval covers only those (covers, Security B10 on
+	// #1433).
+	rep   repeat
 	local bool
 	// hold is the UNDO ID a held effect was under, and attempt which hold
 	// of the intent it was (REV-3).
@@ -376,6 +389,49 @@ type decision struct {
 	// The approval covers the next one only: the journal's dispatch
 	// record uses it up (GR8, Security on #76).
 	tries int
+	// sum is owner.ItemSum of the item the owner answered, for a decision
+	// rebuilt from the journal, which keeps no item (Invariant C); the
+	// recheck then matches the item by it. Empty for a live decision.
+	sum string
+}
+
+// sameAs reports whether it is the item d answered.
+func (d decision) sameAs(it owner.Item) bool {
+	if d.sum != "" {
+		return owner.ItemSum(it) == d.sum
+	}
+	return sameItem(d.item, it)
+}
+
+// note is d as the journal keeps it (journal.RecAnswer): no code, no
+// item text, the item as its digest only.
+func (d decision) note(confirmed bool) journal.AnswerNote {
+	n := journal.AnswerNote{Approved: d.approved, Why: d.why, Request: d.req, Local: d.local,
+		Confirmed: d.local && confirmed, Asked: d.asked, Implicit: d.implicit, Late: d.late,
+		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear}
+	if d.asked {
+		n.Sum = owner.ItemSum(d.item)
+	}
+	return n
+}
+
+// denialGuest is the fixed reason the guest sees for a denial the owner
+// did not give (release item 1, lens on #396); "owner" and "not chosen"
+// keep the default.
+func denialGuest(why string) guesterr.Literal {
+	switch why {
+	case "expired":
+		return "the owner did not answer in time"
+	case "void":
+		return "a wrong code was given too many times"
+	case "restart":
+		return "the broker restarted before the owner answered"
+	case "it changed since the page showed it":
+		return "it changed since the page showed it"
+	case "its staged copy could not be made":
+		return "its staged copy could not be made"
+	}
+	return ""
 }
 
 // New returns a gate that denies everything until Attach.
@@ -448,9 +504,55 @@ func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 	if own == nil {
 		return
 	}
+	g.rebuildLocked(eng)
 	for _, st := range eng.List() {
-		if st.State == journal.Pending {
+		if _, answered := g.decided[st.Intent.ID]; st.State == journal.Pending && !answered {
 			g.carried[st.Intent.ID] = true
+		}
+	}
+}
+
+// rebuildLocked restores the owner's answers a restart would otherwise
+// lose (OP-11, SM-AJ-2, SM-AJ-3): each pending or held (authorized)
+// intent's latest journaled answer becomes its decision again, timed from
+// when it was journaled, so Fresh is not restarted, and its local
+// confirmation is kept. An answer an attempt has since used, or one on a
+// held effect (REV-3), whose hold the owner channel's boot settles, is
+// not rebuilt. Reissue settles the pending ones. g.mu is held.
+func (g *Gate) rebuildLocked(eng *journal.Engine) {
+	last := map[string]journal.Record{}
+	confirmed := map[string]bool{}
+	trail := eng.Trail()
+	// A clock behind the journal cannot age an answer (SM-AJ-2, OP-3):
+	// nothing is rebuilt and what is open is asked again.
+	now := g.cfg.Now()
+	for _, r := range trail {
+		if now.Before(r.At) {
+			return
+		}
+	}
+	for _, r := range trail {
+		if r.Type != journal.RecAnswer || r.Answer == nil {
+			continue
+		}
+		if r.Answer.Confirm {
+			confirmed[r.ID] = true
+			continue
+		}
+		last[r.ID] = r
+	}
+	for id, r := range last {
+		n := r.Answer
+		st, err := eng.Get(id)
+		if err != nil || (st.State != journal.Pending && st.State != journal.Authorized) ||
+			n.Hold || n.Tries != len(st.Attempts) {
+			continue
+		}
+		g.decided[id] = decision{approved: n.Approved, why: n.Why, guest: denialGuest(n.Why), asked: n.Asked,
+			implicit: n.Implicit, late: n.Late, req: n.Request, at: r.At, sum: n.Sum,
+			rep: repeat{went: n.Went, unclear: n.Unclear}, local: n.Local, tries: n.Tries}
+		if n.Confirmed || confirmed[id] {
+			g.confirmed[id] = true
 		}
 	}
 }
@@ -478,7 +580,24 @@ func (g *Gate) Reissue(cs []owner.Carried) {
 		g.reissue = append(g.reissue, owner.Carried{Ref: id})
 	}
 	g.carried = map[string]bool{}
+	var answered []string
+	if g.eng != nil {
+		for id, d := range g.decided {
+			if d.approved && d.local && !g.confirmed[id] {
+				continue // waits for the local page
+			}
+			if st, err := g.eng.Get(id); err == nil && st.State == journal.Pending {
+				answered = append(answered, id)
+			}
+		}
+	}
 	g.mu.Unlock()
+	sort.Strings(answered)
+	// The answers a restart rebuilt (Attach) are acted on as they would
+	// have been: none is asked again (SM-AJ-3).
+	for _, id := range answered {
+		g.settle(id)
+	}
 	g.reissueDue()
 }
 
@@ -525,7 +644,7 @@ func (g *Gate) reissueDue() {
 		it.Asked = c.Asked
 		g.mu.Lock()
 		if g.waiting[c.Ref] == nil {
-			g.waiting[c.Ref] = &wait{item: it, base: v.item, local: v.local, expires: c.Expires}
+			g.waiting[c.Ref] = &wait{item: it, base: v.item, rep: v.rep, local: v.local, expires: c.Expires}
 			if len(g.batch) == 0 {
 				g.first = now
 			}
@@ -641,10 +760,82 @@ type verdict struct {
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
+	// rep is the same send under another request: one known to have gone
+	// within repeatWindow, or one that may have gone (recentRepeat,
+	// D-116 confirm repeats). Like note, it is shown but not part of what
+	// the dispatch recheck compares.
+	rep repeat
+}
+
+// repeat is what an ask says of the same send under other requests
+// (recentRepeat).
+type repeat struct {
+	// sent is when the first of them known to have gone within
+	// repeatWindow was sent, or zero.
+	sent time.Time
+	// tried is when the first of them that may still take effect (in
+	// flight, or unknown, an unclear one's parked try included) was
+	// first tried, at any age, or zero.
+	tried time.Time
+	// went and unclear are those requests' IDs: what an approval of a
+	// line with these marks covers (decision.covers).
+	went, unclear []string
+}
+
+func (r repeat) zero() bool { return r.sent.IsZero() && r.tried.IsZero() }
+
+// covers reports whether the owner's approval d was given on a line that
+// showed every repeat now due (Security B10 on #1433). An approval given
+// before the same send went, or before another request for it started,
+// was not asked about that repeat, so it is not the owner's confirmation
+// of it: the dispatch recheck refuses it and settle asks again, with the
+// marks. A send known to have gone is covered only by an approval of a
+// line that said it was already sent; one that may have gone by a line
+// that warned it may go twice or said it was sent. An auto-reply whose
+// undo window passed (implicit, late) confirms no repeat at all: silence
+// is not the explicit confirmation D-116 requires.
+func (d decision) covers(now repeat) bool {
+	if now.zero() {
+		return true
+	}
+	if d.implicit || d.late {
+		return false
+	}
+	for _, id := range now.went {
+		if !slices.Contains(d.rep.went, id) {
+			return false
+		}
+	}
+	for _, id := range now.unclear {
+		if !slices.Contains(d.rep.went, id) && !slices.Contains(d.rep.unclear, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // shown is the item as the owner is asked it.
-func (v verdict) shown() owner.Item { return withNote(v.item, v.note) }
+func (v verdict) shown() owner.Item { return v.marked(withNote(v.item, v.note)) }
+
+// marked is it with v.rep's marks. A send known to have gone: the line
+// says it was already sent and when, and asks whether to send it again
+// (Sent); its tier is the one its facts give (CH-10), so money above the
+// owner-set limit takes the code generator and money under it a texted
+// code. A send that may have gone: the line warns "may go twice, first
+// tried <when>" (Retried), and money takes the code generator, as an
+// owner retry does (MoneyRetry).
+func (v verdict) marked(it owner.Item) owner.Item {
+	if !v.rep.sent.IsZero() {
+		it.Sent = v.rep.sent
+	}
+	if !v.rep.tried.IsZero() {
+		it.Retried = v.rep.tried
+		if it.Facts.HasAmount || it.Amount != "" {
+			it.Facts.Kind = owner.MoneyRetry
+		}
+	}
+	return it
+}
 
 // reissued is the item a restart re-sends for an ask whose shown item had
 // digest sum: v's item with the queued note the owner was sent, which may
@@ -659,7 +850,7 @@ func (v verdict) reissued(sum, action string) (owner.Item, bool) {
 		if n > 0 {
 			note = queuedNote(n, action)
 		}
-		if it := withNote(v.item, note); owner.ItemSum(it) == sum {
+		if it := v.marked(withNote(v.item, note)); owner.ItemSum(it) == sum {
 			return it, true
 		}
 	}
@@ -798,6 +989,13 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 				}
 				continue
 			}
+			// Confirm repeats (D-116): a pre-allowed send, an
+			// auto-reply included, that repeats one known to have gone
+			// in the last 24h, or one that may have gone, is asked of
+			// the owner instead of sent unseen.
+			if rep := g.recentRepeat(ctx, in); !rep.zero() {
+				return verdict{kind: ask, item: item, rep: rep}
+			}
 			if r.Spec.Rule.Reply {
 				body, _ := in.Params[ParamBody].(string)
 				return verdict{kind: autoReply, item: item, reply: &owner.AutoReply{
@@ -806,10 +1004,113 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: allow}
 		}
 		if queued > 0 {
-			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action)}
+			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action), rep: g.recentRepeat(ctx, in)}
 		}
 	}
-	return verdict{kind: ask, item: item}
+	return verdict{kind: ask, item: item, rep: g.recentRepeat(ctx, in)}
+}
+
+// RepeatSinceApproval is the dispatch recheck's reason for an approval
+// that does not cover a repeat now due (decision.covers).
+const RepeatSinceApproval = "the same send went or may have gone since the owner approved it; ask again"
+
+// repeatWindow is how long after a send is known to have gone the same
+// send under another request needs the owner's confirmation (D-116).
+const repeatWindow = 24 * time.Hour
+
+// recentRepeat returns what the owner must be told of other requests
+// making the same send as in, on its account and action, to the same
+// recipients (sendKey, as sentSince compares them):
+//
+//   - sent: when the first of them known to have gone within repeatWindow
+//     went, counting the window from when its success became known
+//     (journal Use.Known: a success a check proves late counts from the
+//     proof, Security B11 on #1433), of those with the same body
+//     (sameBody: ParamBody with whitespace normalised, empty when the
+//     action has none) that act on the same record, or on another record
+//     of the same thread (Verified.Thread, Security R21): a reply that
+//     says something new in a thread is a new send, while an identical
+//     one is a repeat even in reply to another message of the thread;
+//   - tried: when the first of them that may still take effect was first
+//     tried (in flight or unknown, at any age; for an unclear one, its
+//     parked try, journal Use.Tried), of those on the same record whatever
+//     their body, or of the same thread with the same body: a send that
+//     may have gone, resubmitted reworded, may still go twice (Potency P12
+//     on #1433).
+//
+// An erased send (CAP-3, a recall reset) no longer names its record or
+// body, so it cannot be compared: it is taken as the same send, on both
+// sides (Security R23 on #1433).
+//
+// Confirm repeats (Mark, D-116, 2026-10-14): under journal rule (b) a
+// request made after the effect went is a new send, so the owner may
+// approve it, but one within repeatWindow of a known success never goes
+// unseen: evaluateEffect asks the owner even under a pre-allowance, and
+// the ask says it was already sent and when. A send that may have gone
+// is marked "may go twice" (UX U12).
+func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return repeat{}
+	}
+	k := g.sendID(ctx, in)
+	if k.rec == "" {
+		return repeat{}
+	}
+	body := sameBody(in)
+	since := g.cfg.Now().Add(-repeatWindow)
+	var r repeat
+	first := func(at *time.Time, t time.Time) {
+		if !t.IsZero() && (at.IsZero() || t.Before(*at)) {
+			*at = t
+		}
+	}
+	for _, u := range eng.InUse(in.Account, in.Action, since) {
+		if !u.Started || u.Intent.ID == in.ID {
+			continue
+		}
+		record, content := u.Erased, u.Erased
+		if !u.Erased {
+			k2 := g.sendID(ctx, u.Intent)
+			if !sameSet(k2.rcpt, k.rcpt) {
+				continue
+			}
+			content = sameBody(u.Intent) == body
+			record = k2.rec == k.rec || (content && sharesThread(k.thread, k2.thread))
+			content = content && record
+		}
+		if content && !u.Went.IsZero() && !u.Known.Before(since) {
+			first(&r.sent, u.Went)
+			r.went = append(r.went, u.Intent.ID)
+		}
+		if record && !u.Tried.IsZero() {
+			first(&r.tried, u.Tried)
+			r.unclear = append(r.unclear, u.Intent.ID)
+		}
+	}
+	return r
+}
+
+// sameBody is in's body as the repeat rule compares it (Security R20 on
+// #1433): leading and trailing whitespace trimmed, every run of
+// whitespace, line endings included, folded to one space. Case is kept:
+// "Thanks" and "thanks" are different text (grants GR35).
+func sameBody(in journal.Intent) string {
+	b, _ := in.Params[ParamBody].(string)
+	return strings.Join(strings.Fields(b), " ")
+}
+
+// sharesThread reports whether two Verified.Thread lists name a common
+// message.
+func sharesThread(a, b []string) bool {
+	for _, x := range a {
+		if x != "" && slices.Contains(b, x) {
+			return true
+		}
+	}
+	return false
 }
 
 // detailMax is the owner line's Detail width (owner.Item.line).
@@ -1444,11 +1745,25 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if v.local && !g.isConfirmed(in.ID) {
 		return refuse("needs confirmation on the local Wi-Fi page")
 	}
-	if !sameItem(d.item, v.item) {
+	if !d.sameAs(v.item) {
 		return refuse("the details changed after the owner approved; ask again")
 	}
-	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
-		return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+	if !d.covers(v.rep) {
+		// Confirm repeats (D-116): the same send went or may have gone
+		// since the line the owner approved was shown, or the approval
+		// was an auto-reply's silence (Security B10 on #1433).
+		return refusal{RepeatSinceApproval, "the same send went or may have gone since the owner approved; ask again"}
+	}
+	if phase == journal.PhaseDispatch {
+		// A negative age means the clock went back past the answer: it
+		// cannot say the approval is fresh (SM-AJ-2, OP-3).
+		age := g.cfg.Now().Sub(d.at)
+		if age < 0 {
+			return refusal{"the clock is behind the owner's approval; ask again", "the approval could not be checked; ask again"}
+		}
+		if age > g.cfg.Fresh {
+			return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+		}
 	}
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
@@ -1638,7 +1953,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
-			g.waiting[id] = &wait{item: v.shown(), base: v.item, local: v.local, onlyUI: onlyUI}
+			g.waiting[id] = &wait{item: v.shown(), base: v.item, rep: v.rep, local: v.local, onlyUI: onlyUI}
 			if !onlyUI {
 				now := g.cfg.Now()
 				if len(g.batch) == 0 {
@@ -2094,9 +2409,10 @@ func (g *Gate) Decide(d owner.Decision) {
 		return
 	}
 	var item owner.Item
+	var rp repeat
 	local := false
 	if w != nil {
-		item, local = w.base, w.local
+		item, rp, local = w.base, w.rep, w.local
 	}
 	delete(g.waiting, d.Ref)
 	delete(g.carried, d.Ref)
@@ -2107,16 +2423,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	changed := false
 	var guest guesterr.Literal
 	if !d.Approved {
-		// Denials the owner did not give name their own cause (release
-		// item 1, lens on #396); "owner" and "not chosen" keep the default.
-		switch d.Why {
-		case "expired":
-			guest = "the owner did not answer in time"
-		case "void":
-			guest = "a wrong code was given too many times"
-		case "restart":
-			guest = "the broker restarted before the owner answered"
-		}
+		guest = denialGuest(d.Why)
 	}
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
@@ -2125,7 +2432,7 @@ func (g *Gate) Decide(d owner.Decision) {
 			g.confirmed[d.Ref] = true
 		} else {
 			d.Approved, why, changed = false, "it changed since the page showed it", true
-			guest = "it changed since the page showed it"
+			guest = denialGuest(why)
 		}
 	}
 	hold, attempt := "", 0
@@ -2141,16 +2448,37 @@ func (g *Gate) Decide(d owner.Decision) {
 			// Released without its staged copy: the owner approved it as
 			// staged, so it is not sent (arbitrator on #76).
 			d.Approved, why = false, "its staged copy could not be made"
-			guest = "its staged copy could not be made"
+			guest = denialGuest(why)
 		}
 	}
 	unheld := d.Approved && (w == nil || !w.held)
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
-		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
-	wait := d.Approved && local && !g.confirmed[d.Ref]
+	dec := decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
+		req: d.Request, at: g.cfg.Now(), item: item, rep: rp, local: local, hold: hold, attempt: attempt, tries: tries}
+	confirmed := g.confirmed[d.Ref]
 	own, eng := g.own, g.eng
+	g.mu.Unlock()
+	// The answer is journaled before the gate acts on it (OP-12, SM-AJ-1),
+	// outside g.mu: the engine's policy calls take it. An approval the
+	// journal cannot take is not acted on; the intent stays pending and
+	// the agent's retry asks again. A denial goes ahead: it can only
+	// refuse.
+	if eng == nil {
+		return
+	}
+	if err := eng.RecordAnswer(d.Ref, dec.note(confirmed)); err != nil {
+		g.cfg.Logf("grants: journaling the owner's answer on %s: %v", d.Ref, err)
+		if dec.approved {
+			g.mu.Lock()
+			delete(g.confirmed, d.Ref)
+			g.mu.Unlock()
+			return
+		}
+	}
+	g.mu.Lock()
+	g.decided[d.Ref] = dec
+	wait := d.Approved && local && !g.confirmed[d.Ref]
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
@@ -2472,6 +2800,10 @@ func (g *Gate) ConfirmLocal(id string) error {
 			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
+	// Journaled first, so a restart keeps it (OP-12, SM-AJ-2).
+	if err := g.eng.RecordAnswer(id, journal.AnswerNote{Confirm: true}); err != nil {
+		return fmt.Errorf("grants: journaling the confirmation of %s: %w", clip(id), err)
+	}
 	g.mu.Lock()
 	g.confirmed[id] = true
 	d, ok := g.decided[id]
@@ -2494,6 +2826,9 @@ func (g *Gate) settle(id string) {
 		g.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+		if g.reask(ctx, id, d) {
+			return
+		}
 		st, err := g.eng.Authorize(ctx, id)
 		if err == nil && st.State == journal.Authorized {
 			st, err = g.eng.Dispatch(ctx, id)
@@ -2562,6 +2897,39 @@ func (g *Gate) settle(id string) {
 			}
 		}
 	}()
+}
+
+// reask asks the owner again, instead of authorizing, a pending intent
+// whose approval d does not cover a repeat now due (decision.covers,
+// Security B10 on #1433): the same send went, or another request for it
+// started, after the line the owner approved was shown, or d released an
+// auto-reply at the end of its undo window. The owner is asked as for a
+// new request, with the line's marks ("already sent ...; send it
+// again?", "may go twice"), at the tier they give, so no repeat goes on
+// an approval that did not see it. A held effect (REV-3) is not asked
+// again here: the recheck refuses it and its staged copy is settled as
+// for any refusal. A repeat that appears after this check is refused at
+// the recheck, never sent.
+func (g *Gate) reask(ctx context.Context, id string, d decision) bool {
+	if !d.approved || d.hold != "" {
+		return false
+	}
+	st, err := g.eng.Get(id)
+	if err != nil || st.State != journal.Pending {
+		return false
+	}
+	v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
+	if v.kind != ask || !d.sameAs(v.item) || d.covers(v.rep) {
+		return false
+	}
+	g.mu.Lock()
+	delete(g.decided, id)
+	delete(g.confirmed, id)
+	g.mu.Unlock()
+	if _, err := g.Authorize(ctx, id); err != nil {
+		g.cfg.Logf("grants: asking %s again for a repeat: %v", id, err)
+	}
+	return true
 }
 
 // The reasons Tick releases an auto-reply with: its undo window passed, on

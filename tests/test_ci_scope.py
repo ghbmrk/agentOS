@@ -1,4 +1,5 @@
 """Tests for tools/ci_scope.py and its wiring into the workflows (CI-docs)."""
+import re
 import pathlib
 import subprocess
 import sys
@@ -23,6 +24,22 @@ class ScopeTest(unittest.TestCase):
                   "decisions/D-098.md", "briefs/DOC-6.md", "handoff/CURRENT.md"):
             self.assertEqual(ci_scope.scope_of([p]), ("records", None), p)
 
+    def test_prose_no_test_reads_is_a_record(self):
+        # REQ: CI-PATHS
+        for p in ("README.md", "PLAN.md", "SPEC.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
+                  "docs/LANES.md", "docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md", "docs/conv-3-triage.md", "docs/conv-5-uncovered.md",
+                  "docs/development/trial-measurements.md", "docs/learning/new.md",
+                  "docs/security/provider-worker-isolation.md", "docs/security/deep/x.md"):
+            self.assertEqual(ci_scope.scope_of([p]), ("records", None), p)
+
+    def test_prose_a_test_or_tool_reads_stays_full(self):
+        # REQ: CI-PATHS
+        # owners-guide.md: broker/hostchange's Go test reads it. The rest are not Markdown
+        # prose, or sit outside the listed paths.
+        for p in ("docs/owners-guide.md", "docs/security/provider-worker-surfaces.csv",
+                  "docs/development/x.sh", "docs/new-top-level.md"):
+            self.assertEqual(ci_scope.scope_of([p]), ("full", p), p)
+
     def test_the_records_pr_that_cost_97_minutes_is_records_only(self):
         # #1083's files.
         paths = ["BOARD.md", "LATER.md", "reviews/potency/2026-10-12-pr1082.md",
@@ -30,8 +47,7 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(ci_scope.scope_of(paths)[0], "records")
 
     def test_anything_else_is_full(self):
-        for p in ("SPEC.md", "CLAUDE.md", "README.md", "PLAN.md", "AGENTS.md", "docs/OPERATING.md",
-                  "docs/LANES.md", "broker/go.mod", "broker/vault/vault.go", "broker/vault/ASSUMPTIONS.md",
+        for p in ("docs/owners-guide.md", "broker/go.mod", "broker/vault/vault.go", "broker/vault/ASSUMPTIONS.md",
                   "tests/test_board.py", "tools/ci_scope.py", "tools/doclint.py",
                   ".github/workflows/ci.yml", ".github/workflows/scope.yml", ".claude/settings.json",
                   "image/build.sh", "image/README.md", "guest/openclaw/package-lock.json",
@@ -100,9 +116,12 @@ class WiringTest(unittest.TestCase):
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("uses: ./.github/workflows/scope.yml", ci)
-        for job in ("broker", "machines", "hostcheck"):
+        for job in ("broker-race", "broker-checks", "machines", "hostcheck"):
             self.assertIn(f"  {job}:\n    needs: scope\n"
                           "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci, job)
+        # The required `broker` check gathers the split jobs (CI-SHARD) and skips with them.
+        self.assertIn("    needs: [scope, broker-race, broker-checks]\n"
+                      "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci)
         self.assertIn("  checks:\n    needs: scope\n    if: ${{ !cancelled() }}\n", ci)
         # The document checks never depend on scope.
         for step in ("python tools/trace.py && python tools/trace.py --check", "python tools/doclint.py",
@@ -111,6 +130,32 @@ class WiringTest(unittest.TestCase):
             step_text = ci[ci.rindex("- name:", 0, i):i]
             self.assertNotIn("RECORDS", step_text, step)
         self.assertIn("if: env.RECORDS == 'true'\n        run: python -m unittest tests.test_ci_scope tests.test_board", ci)
+
+    def test_go_jobs_restore_a_build_cache_and_the_records_run_checks_prose(self):
+        # REQ: CI-PATHS
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        for job, key in (("broker-race", "broker-race"), ("broker-checks", "broker"), ("machines", "machines")):
+            body = ci[ci.index(f"\n  {job}:\n") + 1:]
+            nxt = re.search(r"^  [a-z][a-z-]*:\n", body[1:], re.M)
+            body = body[:nxt.start() + 1] if nxt else body
+            self.assertIn("uses: actions/cache/restore@", body, job)
+            self.assertIn("uses: actions/cache/save@", body, job)
+            self.assertNotIn("uses: actions/cache@", body, job)
+            self.assertIn(f"key: go-build-{key}-", body, job)
+            # Only a push to main writes the cache that PRs restore (D29).
+            save = body[body.index("uses: actions/cache/save@"):]
+            self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'",
+                          body[:body.index("uses: actions/cache/save@")].rsplit("- name:", 1)[1], job)
+            self.assertIn("go-build", save)
+        self.assertIn("tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest -v", ci)
+
+    def test_no_privileged_workflow_uses_a_cache(self):
+        # REQ: CI-PATHS
+        # pull_request_target and workflow_run run with a token that can write main's cache scope.
+        for wf in sorted(WORKFLOWS.glob("*.yml")):
+            text = wf.read_text()
+            if re.search(r"^\s{0,4}(pull_request_target|workflow_run):", text, re.M):
+                self.assertNotIn("actions/cache", text, wf.name)
 
     def test_assurance_skips_only_on_records(self):
         wf = (WORKFLOWS / "assurance.yml").read_text()

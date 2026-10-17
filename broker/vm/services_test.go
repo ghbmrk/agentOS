@@ -19,6 +19,7 @@ type recServices struct {
 	mu     sync.Mutex
 	open   map[string]bool
 	closed []string
+	resets []string
 	opened []string
 	fail   bool
 }
@@ -32,6 +33,13 @@ func (s *recServices) Open(id string) (string, error) {
 	s.open[id] = true
 	s.opened = append(s.opened, id)
 	return filepath.Join(s.root, id), nil
+}
+
+// Reset records the machine-reset notice ForgetSince sends (CAP-3).
+func (s *recServices) Reset(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resets = append(s.resets, id)
 }
 
 func (s *recServices) Close(id string) {

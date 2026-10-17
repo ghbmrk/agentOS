@@ -9,17 +9,21 @@
 # step's latch (#1270). Both live in its own state directory.
 [Unit]
 Description=agentOS Wi-Fi page
-After=agentosd.service agentos-egress.service
-Requires=agentosd.service
+After=agentosd.service agentos-egress.service agentos-localui-claim.service
+# Requires=, not Wants=, on the claim hand-over: if the move fails, the page
+# must not start without its claim state, or a preloaded box would serve
+# setup without the sticker code. A hand-over skipped by its condition
+# (already moved, or a download box) still counts as success.
+Requires=agentosd.service agentos-localui-claim.service
 Wants=agentos-egress.service
 
 [Service]
 User=agentos-localui
 Group=agentos-localui
-# The seller's sealed claim state moves here at the first start (localui-claim).
+# The seller's sealed claim state moves here before the first start
+# (agentos-localui-claim.service).
 StateDirectory=agentos-localui
 StateDirectoryMode=0700
-ExecStartPre=+/usr/lib/agentos/localui-claim
 ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface wlan0 -addr 10.42.0.1/24 \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \
         -card-latch /var/lib/agentos-localui/card-latch.json
@@ -66,8 +70,9 @@ MemoryMax=512M
 RestrictAddressFamilies=AF_UNIX AF_INET
 IPAddressDeny=any
 IPAddressAllow=10.42.0.0/24
-# None of the broker's state (L18): localui-claim, outside this mask, moves
-# the claim state to the page's own directory, which stays writable.
+# None of the broker's state (L18). The mask binds every command of this
+# unit, `+` ones too, so agentos-localui-claim.service, a unit of its own,
+# moves the claim state to the page's own directory, which stays writable.
 TemporaryFileSystem=/var/lib/agentos:ro
 # The claim and the card step pass codes through this process (IMG-nodump).
 LimitCORE=0

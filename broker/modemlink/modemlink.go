@@ -47,6 +47,10 @@ const (
 	MaxQueued = 64
 	// InboundPerMinute caps texts handed in per minute (security S-B4).
 	InboundPerMinute = 20
+	// BridgeGap is how long after its last outbox poll or result the
+	// bridge still counts as there (Bridged): its outbox loop polls again
+	// straight away, so a longer gap means it has gone.
+	BridgeGap = time.Second
 )
 
 // ErrRecipient is a Send to anyone but the owner: the owner channel texts
@@ -121,6 +125,10 @@ type Link struct {
 	// unbound ("": none, or unreadable); adopted, the one Adopt recorded,
 	// until the bridge reports another state or SIM.
 	iccid, adopted string
+	// polls counts outbox polls in flight; polled is when one last ended
+	// or a result came (Bridged).
+	polls  int
+	polled time.Time
 }
 
 // New returns a Link. Until the bridge reports the owner line's state, it
@@ -223,7 +231,8 @@ func newID() string {
 
 // Send texts the owner through the bridge and waits for the result: nil,
 // or modem.ErrDown when the owner line is down, swapped or unbound, the
-// bridge is silent or full, or the text did not go. A text that could not
+// bridge is silent or full, or the text did not go; modem.ErrNotSent, an
+// ErrDown, when SendReceipt would answer NotSent. A text that could not
 // go while the line was unusable is counted for the recovery text.
 func (l *Link) Send(to, text string) error { return l.send(to, text, false) }
 
@@ -260,8 +269,11 @@ type Receipt struct {
 }
 
 func (r Receipt) err() error {
-	if r.Outcome == ReceiptAccepted {
+	switch r.Outcome {
+	case ReceiptAccepted:
 		return nil
+	case ReceiptNotSent:
+		return modem.ErrNotSent
 	}
 	return modem.ErrDown
 }
@@ -365,6 +377,14 @@ func (l *Link) TimedOut() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.timedOut
+}
+
+// Queued counts texts waiting for the bridge to take them from the
+// outbox; one it took and has no result for is not among them.
+func (l *Link) Queued() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.queue)
 }
 
 // Others counts texts on the owner line from anyone but the owner, set
@@ -472,6 +492,26 @@ func simEnds(iccid string) string {
 	return s[max(0, len(s)-4):]
 }
 
+// Bridged says a modem bridge is still there to take queued texts: an
+// outbox poll is in flight, a text it took has no result yet, or it polled
+// or reported within BridgeGap. agentosd's shutdown drain ends once it
+// says no (daemon Config.OwnerDrainLive), as when systemd has stopped
+// agentos-modem first, rather than wait out its bound (owner O34).
+func (l *Link) Bridged() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.polls > 0 || len(l.out) > 0 || !l.polled.IsZero() && l.cfg.Now().Sub(l.polled) < BridgeGap
+}
+
+// DrainOps are the bridge ops agentosd still serves while it drains the
+// owner channel's texts at shutdown (daemon Config.OwnerDrainOps): the
+// outbox hands out what is queued, sent and state hear how it went.
+// Inbound is not among them: nothing reads the inbox then, so the bridge
+// keeps the text for the next start.
+func DrainOps() []string {
+	return []string{bridgeproto.OpOutbox, bridgeproto.OpSent, bridgeproto.OpState}
+}
+
 // Ops are owner.sock's bridge ops.
 func (l *Link) Ops() map[string]sockets.Handler {
 	return map[string]sockets.Handler{
@@ -543,6 +583,15 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 }
 
 func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
+	l.mu.Lock()
+	l.polls++
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		l.polls--
+		l.polled = l.cfg.Now()
+		l.mu.Unlock()
+	}()
 	wait := time.NewTimer(l.cfg.PollWait)
 	defer wait.Stop()
 	began := l.cfg.Now()
@@ -588,6 +637,7 @@ func (l *Link) sent(_ context.Context, _ sockets.Peer, args json.RawMessage) (an
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.heardLocked(l.cfg.Now())
+	l.polled = l.cfg.Now()
 	it, ok := l.out[s.ID]
 	if !ok {
 		l.stray++

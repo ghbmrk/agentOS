@@ -3,7 +3,30 @@
   "forbidden_host_patterns": [
     "*agentos*"
   ],
-  "endpoints": [],
+  "endpoints": [
+    {
+      "host": "auth.openai.com",
+      "class": "optional",
+      "dependency": "Codex CLI provider worker (CAP-11, optional per DEP-3): OpenAI's device sign-in page. The worker's CLI reaches it only through the egress sign-in route, and the owner opens it on their phone to enter the code (ONB-3 step 6, #1264)."
+    }
+  ],
+  "claim_literals": [
+    {
+      "file": "broker/egress/codexlogin.go",
+      "host": "api.openai.com",
+      "why": "JWT claim key (https://api.openai.com/auth) read and written in the placeholder id_token; never contacted (#1015, CRED-5)."
+    },
+    {
+      "file": "broker/e2e/boxe2e/codexstub/stub.go",
+      "host": "api.openai.com",
+      "why": "JWT claim key (https://api.openai.com/auth) in the e2e stub's synthetic id_token; test-only, never contacted (#1701)."
+    },
+    {
+      "file": "broker/provagent/declare.go",
+      "host": "openai.com",
+      "why": "TermsURL of the codex qualification record: the terms page the owner read, recorded as data and never contacted (#809, D-117)."
+    }
+  ],
   "inert_literals": [
     {
       "file": "broker/vendor/rsc.io/qr/png.go",

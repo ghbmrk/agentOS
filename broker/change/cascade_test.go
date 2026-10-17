@@ -469,9 +469,12 @@ func TestAnEmptyFileSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As at start: the forget replay runs before Attach rebuilds the
+	// adoptions from the journal, which then forgets them again.
 	if _, err := p.ForgetGoal("owner:g1"); err != nil {
 		t.Fatal(err)
 	}
+	e.open(p)
 	if _, ok := p.Files("skills")["skills/empty"]; ok {
 		t.Fatal("after a restart, the forget left the empty file")
 	}
@@ -521,9 +524,12 @@ func TestAnEmptyFileDeletedSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As at start: the forget replay runs before Attach rebuilds the
+	// adoptions from the journal, which then forgets them again.
 	if _, err := p.ForgetGoal("owner:g1"); err != nil {
 		t.Fatal(err)
 	}
+	e.open(p)
 	if b, ok := p.Files("skills")["skills/empty"]; !ok || len(b) != 0 {
 		t.Fatalf("after a restart, the forget left %q, %v; want the empty file", b, ok)
 	}
@@ -544,6 +550,7 @@ func TestTheForgottenMarkSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.open(p)
 	if more, err := p.More(a.Short); err != nil || !strings.Contains(more[0], "skills/greet (forgotten)") {
 		t.Fatalf("MORE after a restart: %q %v", more, err)
 	}

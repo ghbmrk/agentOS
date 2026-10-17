@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +40,7 @@ type pacedOwnerRig struct {
 	mu    sync.Mutex
 	now   time.Time
 	phone *modem.Line
+	box   *modem.Line
 	ch    *ownerch.Channel
 }
 
@@ -44,6 +50,7 @@ func pacedOwner(t *testing.T, p ownerch.Pacing, now time.Time) *pacedOwnerRig {
 	carrier := modem.NewCarrier()
 	carrier.SetClock(r.clock)
 	box := carrier.Line("+15550000100")
+	r.box = box
 	r.phone = carrier.Line(ownerNum)
 	st := &ownerch.MemStore{}
 	if err := st.Save(ownerch.State{Pacing: p}); err != nil {
@@ -262,8 +269,8 @@ func TestMainWiresThePacer(t *testing.T) {
 	if cfg.Grants.Quiet == nil || cfg.Grants.Urgent == nil || cfg.Grants.Allowance == nil {
 		t.Fatal("grants hooks not wired")
 	}
-	if len(cfg.Notes) != 1 {
-		t.Fatalf("STATUS notes %d, want the held line", len(cfg.Notes))
+	if len(cfg.Notes) != 2 {
+		t.Fatalf("STATUS notes %d, want the held and unsaved-answer lines", len(cfg.Notes))
 	}
 	r := pacedOwner(t, quiet22to7(), at23)
 	if err := r.ch.Inform("Update one."); err != nil {
@@ -397,5 +404,99 @@ func TestLearningWiresTheClearedCheck(t *testing.T) {
 	}
 	if l := d.Owner().HeldNote(); l != "" {
 		t.Fatalf("a confirmed clear waits after attach: %q", l)
+	}
+}
+
+// failingStore is an owner store whose saves fail while fail is set.
+type failingStore struct {
+	ownerch.MemStore
+	fail atomic.Bool
+}
+
+func (f *failingStore) Save(s ownerch.State) error {
+	if f.fail.Load() {
+		return errors.New("disk full")
+	}
+	return f.MemStore.Save(s)
+}
+
+// REQ: SM-AJ-4, OP-11 (OWNER-retire-surface)
+
+// TestStatusSaysAnUnsavedAnswer: when the owner's answer to an approval
+// cannot be saved, the owner channel refuses new requests on the same
+// store. STATUS says so in fixed words through the notes newOwnerPacer
+// adds, the tick logs the cause once, and both clear once a save works.
+func TestStatusSaysAnUnsavedAnswer(t *testing.T) {
+	var cfg daemon.Config
+	p := newOwnerPacer(&cfg)
+	st := &failingStore{}
+	r := pacedOwner(t, ownerch.Pacing{}, day0.Add(12*time.Hour))
+	ch, err := ownerch.New(ownerch.Config{
+		Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: st,
+		Secrets:  ownerch.Secrets{TOTPSeed: []byte("12345678901234567890"), GridSeed: []byte("synthetic-grid-seed")},
+		Location: time.UTC, Now: r.clock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ch = ch
+	p.ch.Store(ch)
+	status := func() []string {
+		var out []string
+		for _, n := range cfg.Notes {
+			if l := n(); l != "" {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	item := ownerch.Item{Ref: "a", Object: "invoice 1042", Recipient: "billing@acme.example",
+		Facts: ownerch.Facts{Verb: "send", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}}
+	if _, err := ch.Request([]ownerch.Item{item}, 0); err != nil {
+		t.Fatal(err)
+	}
+	var m []string
+	for deadline := time.Now().Add(5 * time.Second); m == nil && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+		for _, s := range r.sent() {
+			if mm := regexp.MustCompile(`YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindStringSubmatch(s); mm != nil {
+				m = mm
+			}
+		}
+	}
+	if m == nil {
+		t.Fatal("no approval request texted")
+	}
+	if l := status(); len(l) != 0 {
+		t.Fatalf("STATUS before any failure: %q", l)
+	}
+
+	st.fail.Store(true)
+	ch.Handle(context.Background(), ownerNum, "YES "+m[1]+" "+m[2])
+	l := status()
+	if len(l) != 1 || strings.Contains(l[0], "disk full") {
+		t.Fatalf("STATUS after an unsaved answer: %q", l)
+	}
+	p.tick()
+	p.tick()
+	if n := strings.Count(buf.String(), "disk full"); n != 1 {
+		t.Fatalf("cause logged %d times, want once: %q", n, buf.String())
+	}
+
+	st.fail.Store(false)
+	if _, err := ch.Request([]ownerch.Item{item}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if l := status(); len(l) != 0 {
+		t.Fatalf("STATUS after a save worked: %q", l)
+	}
+	p.tick()
+	if n := strings.Count(buf.String(), "disk full"); n != 1 {
+		t.Fatalf("cause logged again after it cleared: %q", buf.String())
 	}
 }

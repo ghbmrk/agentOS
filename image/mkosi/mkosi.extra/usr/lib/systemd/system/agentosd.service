@@ -22,13 +22,19 @@ NoNewPrivileges=yes
 # The Owner Card passphrase lives in this process's memory and cannot be zeroed (card C13): it
 # never dumps core (IMG-nodump; the image also discards dumps and has no swap).
 LimitCORE=0
+# agentos-modem's roles directory, where agentosd records the SIM setup binds (-modem-roles): made
+# before agentos-modem starts (After=agentosd.service), since that unit binds it in only if it exists
+# (G1-e2e). No tmpfiles line: tmpfiles also runs at image build, which ships /var/lib/agentos empty.
+StateDirectory=agentos/modem
+StateDirectoryMode=0755
 # Only on the drive this PC booted (drive-id: no other disk carries the boot partition's GUID).
 ExecStartPre=/usr/lib/agentos/drive-id check
 # with-uids swaps each @uid:NAME for that user's uid (agentos-setup.conf).
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
         -netjoin-sock /run/agentos-netjoin/netjoin.sock \
-        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
+        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \
+        -image codex=/usr/lib/agentos/images/codex -worker-image openclaw
 Restart=on-failure
 
 [Install]

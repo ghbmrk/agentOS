@@ -37,7 +37,7 @@ var (
 )
 
 // providerNames are the built-in adapters' names as the page shows them.
-var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic"}
+var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic", planProvider: "ChatGPT plan"}
 
 // setupOpen is the guard every setup provider op runs under: the vault
 // open and setup's enrollment open. Caller holds mu.
@@ -49,28 +49,45 @@ func (c *custody) setupOpen() error {
 }
 
 // setupProviders lists each built-in adapter, whether the vault holds its
-// key and the owner's private-data answer. It never reads a key's value.
+// key and the owner's saved private-data answer, never the -private-ok
+// flag: setup's box defaults to that answer, and saving it records a
+// lasting owner answer (D-115, Security S1 on #1588). It never reads a
+// key's value.
 func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.setupOpen(); err != nil {
 		return nil, err
 	}
-	return c.providersLocked(), nil
+	return c.providersLocked(false), nil
 }
 
-// providersLocked lists the built-in providers. Caller holds mu with the
-// vault open.
-func (c *custody) providersLocked() []modelroute.SetupProvider {
+// providersLocked lists the built-in providers, then the plan route, which
+// is connected once its sign-in is stored. With withFlag, a provider's
+// private answer is the router's (route.go privateOK): its
+// -private-ok flag or the owner's marker (#1420); without, the marker
+// only. Caller holds mu with the vault open.
+func (c *custody) providersLocked(withFlag bool) []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
+		flag := withFlag && c.privateFlags[a.Name]
 		out = append(out, modelroute.SetupProvider{
-			ID:        a.Name,
-			Name:      providerName(a.Name),
-			Connected: hasKind(c.v, a.Credential, vault.KindAPIKey),
-			PrivateOK: hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
+			ID:              a.Name,
+			Name:            providerName(a.Name),
+			Connected:       hasKind(c.v, a.Credential, vault.KindAPIKey),
+			PrivateOK:       flag || hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
+			PrivateByConfig: flag,
 		})
 	}
+	flag := withFlag && c.privateFlags[planProvider]
+	out = append(out, modelroute.SetupProvider{
+		ID:              planProvider,
+		Name:            providerName(planProvider),
+		Connected:       hasKind(c.v, "plan-login-"+planProvider, egress.LoginKind),
+		PrivateOK:       flag || hasKind(c.v, PrivateOKPrefix+planProvider, KindPrivateOK),
+		PrivateByConfig: flag,
+		Plan:            true,
+	})
 	return out
 }
 

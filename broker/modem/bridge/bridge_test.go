@@ -60,6 +60,9 @@ type rig struct {
 	srv     *sockets.Server
 	srvStop context.CancelFunc
 	last    *atsim.Device
+	// gate, if set, holds each owner-line send until it is closed, as a
+	// modem still sending does; the modem closing ends the send.
+	gate chan struct{}
 }
 
 // startAgentosd serves owner.sock with a fresh Link, as agentosd does when
@@ -111,13 +114,18 @@ func newRigWith(t *testing.T, iccid func(*atsim.Device) string, preload func(*at
 			}
 			// Each open is a fresh port, as a reopened serial device is.
 			dev := r.newDevice()
-			return at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum, CheckSIM: check, KeepUntilAck: true,
+			m, err := at.Open(ctx, at.Config{Profile: at.SIMCom, Port: dev.Port(), Number: boxNum, CountryCode: "1", Owner: ownerNum, CheckSIM: check, KeepUntilAck: true,
 				Poll: 5 * time.Millisecond, Sweep: 20 * time.Millisecond})
+			if err != nil {
+				return nil, err
+			}
+			return gated{Owner: m, r: r}, nil
 		},
 		OwnerICCID:   func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.iccid },
 		Retry:        50 * time.Millisecond,
 		StateEvery:   time.Hour, // only the open's own report reaches agentosd
 		InboundRetry: 10 * time.Millisecond,
+		FlushWait:    2 * time.Second,
 		Logf:         t.Logf,
 	}
 	go func() { r.done <- bridge.Run(ctx, cfg) }()

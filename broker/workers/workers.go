@@ -87,6 +87,9 @@ type Tools struct {
 	// still decides each start.
 	Free  func(admission.Class) int64
 	Avail func() (int64, error)
+	// Provider, if set, serves provider_run (CAP-11). Nil offers no such
+	// tool.
+	Provider ProviderRunner
 
 	// mu guards used and pending. Creating workers reserves their IDs in
 	// pending under it, so the per-lineage count cannot be raced past
@@ -164,7 +167,7 @@ var (
 
 // List is the worker tools' descriptions.
 func (t *Tools) List() []map[string]any {
-	return []map[string]any{
+	tools := []map[string]any{
 		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the host refuses it when there is no room. It holds your data label: a worker made by a private machine is private. Smaller workers fit more: on the smallest box 7 fit beside you at 256 MiB, 8 at 192 MiB; worker_fit says how many fit now.",
 			"inputSchema": obj(map[string]any{"name": pName, "mem_mb": map[string]any{"type": "number", "description": fmt.Sprintf("Memory budget in MiB; default %d, at most %d.", DefaultMemMB, t.MaxMemMB)}}, "name")},
 		{"name": toolExec, "description": "Run a command in a worker, as root from /, and wait for it. Returns exit_code, stdout, stderr (each capped), truncated and timed_out. A non-zero exit is a result, not an error. " +
@@ -204,6 +207,10 @@ func (t *Tools) List() []map[string]any {
 		{"name": toolList, "description": "List your workers: name, state, label, memory and newest snapshot.",
 			"inputSchema": obj(map[string]any{})},
 	}
+	if t.Provider != nil {
+		tools = append(tools, providerTool())
+	}
+	return tools
 }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
@@ -231,7 +238,7 @@ type caller struct {
 // Call serves one worker tool for machine of lineage; handled is false for
 // names it does not serve.
 func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw json.RawMessage) (text string, handled bool, err error) {
-	if !strings.HasPrefix(name, "worker_") {
+	if !strings.HasPrefix(name, "worker_") && !(name == toolProviderRun && t.Provider != nil) {
 		return "", false, nil
 	}
 	// Every error leaves through guestErr, a panic's too, so none carries
@@ -260,7 +267,7 @@ func (t *Tools) call(ctx context.Context, machine, lineage, name string, raw jso
 	t.called(machine, 1)
 	defer t.called(machine, -1)
 	var out any
-	if (name == toolCreate || name == toolFork || name == toolRollback) && t.Stopped != nil && t.Stopped() {
+	if (name == toolCreate || name == toolFork || name == toolRollback || name == toolProviderRun) && t.Stopped != nil && t.Stopped() {
 		return "", true, errStartStopped
 	}
 	switch name {
@@ -290,6 +297,11 @@ func (t *Tools) call(ctx context.Context, machine, lineage, name string, raw jso
 		out, err = t.keep(ctx, c, raw)
 	case toolDelete:
 		out, err = t.del(ctx, c, raw)
+	case toolProviderRun:
+		if t.Provider == nil {
+			return "", true, say("no tool %q", guest(name))
+		}
+		out, err = t.providerRun(ctx, c, raw)
 	default:
 		return "", true, say("no tool %q", guest(name))
 	}
@@ -315,6 +327,9 @@ func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 	if !nameRE.MatchString(name) {
 		return vm.Machine{}, said{"name: lowercase letters, digits and '-', at most 20"}
 	}
+	if isProviderName(name) {
+		return vm.Machine{}, errNoWorker
+	}
 	w, err := t.M.Get(workerID(c.lineage, name))
 	if err != nil || w.Lineage != c.lineage {
 		return vm.Machine{}, errNoWorker
@@ -329,6 +344,9 @@ func (t *Tools) worker(c caller, name string) (vm.Machine, error) {
 func (t *Tools) owned(c caller, name string) (string, error) {
 	if !nameRE.MatchString(name) {
 		return "", said{"name: lowercase letters, digits and '-', at most 20"}
+	}
+	if isProviderName(name) {
+		return "", errNoWorker
 	}
 	id := workerID(c.lineage, name)
 	if !slices.Contains(t.M.Workers(c.lineage), id) {
@@ -423,6 +441,9 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	}
 	if !nameRE.MatchString(a.Name) {
 		return nil, said{"name: lowercase letters, digits and '-', at most 20"}
+	}
+	if isProviderName(a.Name) {
+		return nil, errProviderName
 	}
 	if a.MemMB == 0 {
 		a.MemMB = DefaultMemMB
@@ -676,6 +697,9 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	for _, n := range a.Into {
 		if !nameRE.MatchString(n) {
 			return nil, say("into: bad name %q", guest(n))
+		}
+		if isProviderName(n) {
+			return nil, errProviderName
 		}
 	}
 	var skipped []string

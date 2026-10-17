@@ -131,7 +131,6 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
-<p class="muted">I text you when the account is changed or removed.</p>
 {{else}}
 <p>A second line lets me text and call businesses for you from my own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
 <p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear my message asking them to text instead.</p>
@@ -252,6 +251,14 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Use the SIM ending in {{.SIMEnds}} for my number</button></form></section>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}{{end}}
+{{if .Plan.Link}}<section class="card"><p>Open <a href="{{.Plan.Link}}">{{.Plan.Link}}</a> and enter <span class="mono">{{.Plan.Code}}</span>.</p><p>This code is from {{.Plan.From}}, not from your code generator.</p><p><a href="/home">I signed in</a></p></section>
+{{else if .PlanReady}}<section class="card"><form method="post" action="/plan/signin">
+<p>Sign in to your ChatGPT plan again. Whoever approves the next step becomes the plan's sign-in, so do it on your own phone.</p>
+<label>Code from your code generator{{with .Cell}}, or grid cell <b>{{.}}</b> from your card{{end}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+{{with .PlanErr}}<p class="err">{{.}}</p>{{end}}
+<button>Sign in to ChatGPT</button></form></section>
+{{else}}{{with .PlanErr}}<p class="err">{{.}}</p>{{end}}{{end}}
 {{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
@@ -276,17 +283,17 @@ form { margin: .6em 0 1.2em; }
 {{else}}
 {{if .NoneAllowed}}<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>{{end}}
 {{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
-{{if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
+{{if .PrivateByConfig}}<p>{{.Name}} may see your private data (mail, files) to do tasks. My configuration allows it, so it can't be withdrawn here.</p>
+{{else if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
 {{end}}{{end}}
-<p class="muted">I text you when this changes.</p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
-<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<label>Your home Wi-Fi{{if .}}<select name="ssid"><option value="" disabled selected>Choose your network</option>{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <label>Not listed? Type its name<input type="text" name="other" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
 <label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
 <button>Join</button>
@@ -306,7 +313,7 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
-{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
+{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Check that the SIM is in the modem and the modem is plugged in, then reload this page.</p>
 {{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
 {{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
@@ -371,7 +378,8 @@ form { margin: .6em 0 1.2em; }
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{$id := .ID}}{{with index $.Unsaved .ID}}<p>Your answer about private content for {{.Name}} was not saved yet. Setup finishes once it is.</p><form method="post" action="/setup/ai-private"><input type="hidden" name="provider" value="{{$id}}">{{template "private" .}}<button>Save</button></form>{{end}}
 {{if not .Connected}}
-{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p>This code is from {{index $d 2}}, not from your code generator.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if not (or .DeviceCode .APIKey)}}<p>I can't sign in to your {{.Name}} yet. Use another provider for now.</p>{{end}}
 {{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Key .ID)}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}
 {{end}}

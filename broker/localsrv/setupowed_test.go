@@ -351,3 +351,86 @@ func TestTheProvidersListOwesOnlyWhatTheRecordOwes(t *testing.T) {
 		t.Fatalf("the vault's claim is owed: %v", *o)
 	}
 }
+
+// sealedList is the vault after a seal: its provider list answers
+// EnrollClosed (K17), and onList, when set, runs first on each list.
+type sealedList struct {
+	*fakeProviders
+	onList func()
+}
+
+func (s *sealedList) Providers() ([]localapi.SetupProvider, error) {
+	if s.onList != nil {
+		s.onList()
+	}
+	s.calls++
+	return nil, EnrollClosed
+}
+
+// sealThenLoseFinish seals the vault through finish with the finished
+// record failing to save, so setup stays open in agentosd while the
+// vault's list answers EnrollClosed.
+func sealThenLoseFinish(t *testing.T) (*setupRig, *fakeProviders, *failRecord, *sealedList) {
+	t.Helper()
+	r, f := providersRig(t)
+	r.enrollAndConfirm()
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic", OK: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec := &failRecord{FileRecord: FileRecord{Path: r.path}, fail: true}
+	r.s.cfg.Record = rec
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); code(err) != localapi.ErrFailed {
+		t.Fatalf("finish with its record failing answered %v", err)
+	}
+	if !r.vault.sealed || len(r.finished) != 0 {
+		t.Fatal("the vault did not seal, or setup finished")
+	}
+	rec.fail = false
+	sl := &sealedList{fakeProviders: f}
+	r.s.cfg.Providers = sl
+	return r, f, rec, sl
+}
+
+// #1623 (#1554 delta S-1): after a seal whose finished record failed to
+// save, an answer posted to the sealed vault is not taken and not owed:
+// it answers enrollment unavailable, and finish then records.
+func TestAnAnswerAfterASealIsNotOwed(t *testing.T) {
+	r, f, _, _ := sealThenLoseFinish(t)
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic"}, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("an answer to a sealed vault answered %v", err)
+	}
+	if len(recordOwed(r)) != 0 || f.sets != 1 || !f.private["anthropic"] {
+		t.Fatalf("the answer is owed or reached the vault: %v, %d sets", recordOwed(r), f.sets)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); err != nil {
+		t.Fatalf("finish after the seal answered %v", err)
+	}
+	if got, ok := r.s.Owner(); !ok || got != ownerNumber || len(r.finished) != 1 {
+		t.Fatalf("owner %q %v, finished %v", got, ok, r.finished)
+	}
+}
+
+// #1623: an answer left owed when the sealed vault could take nothing
+// (its restore could not be written) owes nothing to a vault that lists
+// nothing, so finish records rather than answering answer owed for good.
+// The vault keeps the answer it held at the seal, which finish checked
+// was owed nothing (CAP-9).
+func TestASealedVaultOwesNothingToFinish(t *testing.T) {
+	r, f, rec, sl := sealThenLoseFinish(t)
+	sl.onList = func() { rec.fail = true } // the restore cannot be written
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic"}, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("an answer to a sealed vault answered %v", err)
+	}
+	if o, ok := recordOwed(r)["anthropic"]; !ok || o {
+		t.Fatalf("the unrestored no is not owed: %v", recordOwed(r))
+	}
+	sl.onList, rec.fail = nil, false
+	r.start() // and across a restart
+	r.s.cfg.Providers = sl
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); err != nil {
+		t.Fatalf("finish after the seal answered %v", err)
+	}
+	if len(r.finished) != 1 || f.sets != 1 || !f.private["anthropic"] {
+		t.Fatalf("finished %v, %d sets", r.finished, f.sets)
+	}
+}

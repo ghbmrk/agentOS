@@ -201,12 +201,16 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	if err != nil {
 		return nil, err
 	}
+	code := ""
+	if tier == Low {
+		if code, err = c.freshLowCodeLocked(); err != nil {
+			return nil, err
+		}
+	}
 	c.reqN++
 	r := &request{id: id, n: c.reqN, local: local, items: append([]Item(nil), items...), tier: tier,
 		expires: now.Add(ttl), done: make([]bool, len(items))}
-	if tier == Low {
-		r.code = c.codes.textedCode()
-	}
+	r.code = code
 	asked := now
 	if len(items) == 1 && !items[0].Asked.IsZero() {
 		// A re-issued item keeps the time it was first asked, through any
@@ -220,8 +224,33 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	if err := c.codes.commit(func(s *State) { s.Pending = append(s.Pending, ref) }); err != nil {
 		return nil, err
 	}
+	c.retireErr = nil // the whole state was saved, any retirement with it
 	c.open[id] = r
 	return r, nil
+}
+
+// codeDraws bounds the redraws for a low-tier code that collides with an
+// open one. A collision is a 1-in-10^6 event per open request, so the bound
+// is never reached in use; an exhausted bound refuses the request.
+const codeDraws = 16
+
+// freshLowCodeLocked draws a texted code that no open low-tier request
+// holds, so an ID-less YES names exactly one request (CH-18).
+func (c *Channel) freshLowCodeLocked() (string, error) {
+	for i := 0; i < codeDraws; i++ {
+		code := c.codes.textedCode()
+		clash := false
+		for _, o := range c.open {
+			if o.tier == Low && eq(code, o.code) {
+				clash = true
+				break
+			}
+		}
+		if !clash {
+			return code, nil
+		}
+	}
+	return "", errors.New("owner: no free approval code")
 }
 
 // dropOpen closes requests whose text was never sent.
@@ -248,6 +277,18 @@ func (c *Channel) renderLocked(r *request) string {
 		pre := ""
 		if it.Unverified {
 			pre = "UNVERIFIED: "
+		}
+		if !it.Sent.IsZero() {
+			// A repeat of a send known to have gone (confirm repeats,
+			// D-116): the notice says so and asks.
+			return fmt.Sprintf("%s: %s%s \"%s\" was already sent %s. Send it again? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+		}
+		if !it.Retried.IsZero() {
+			// An owner retry (OP-2): the notice warns of a duplicate and
+			// names no recipient, which the page shows.
+			return fmt.Sprintf("%s: %s%s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if SMSApprovable(it) {
 			// A change that needs the page's confirmation (CH-3,
@@ -316,6 +357,17 @@ func (c *Channel) moreLocked(id string) string {
 // be approved.
 func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, page bool) (out []string, accepted, wrong bool) {
 	r, msg := c.findLocked(rp)
+	for r != nil && !now.Before(r.expires) {
+		// Expiry guard (CH-10, #1923): a request past its expiry is
+		// expired here, not answered, even if the caller did not run
+		// expireLocked first; the reply is then the one for a request
+		// that is no longer open.
+		var exp []Decision
+		c.closeLocked(r, func(int) (bool, bool) { return true, false }, "expired", now, &exp)
+		c.addExpiredLocked(exp)
+		*decided = append(*decided, exp...)
+		r, msg = c.findLocked(rp)
+	}
 	if r == nil {
 		if rp.word == "YES" && rp.code != "" && rp.id == "" {
 			// A code that names no request is a wrong code, or texted
@@ -541,10 +593,14 @@ func (c *Channel) closeLocked(r *request, pick func(int) (settle, approve bool),
 }
 
 // retireLocked drops an ID from the restart record and keeps it from reuse
-// for RetireFor. The save is best effort: if it fails, a restart reports
-// the request as dropped, and Decide ignores what is already settled.
+// for RetireFor. It fails closed (SM-AJ-4): if the save fails, the ID is
+// retired in memory anyway, so it is not pending and cannot be reused in
+// this run, and RetireErr reports the failure. openLocked refuses a new
+// request while the record cannot be saved, and the first save that
+// works writes the retirement with it. A restart before then carries the
+// request to Reissue; the gate skips an intent whose answer it journaled.
 func (c *Channel) retireLocked(id string, now time.Time) {
-	_ = c.codes.commit(func(s *State) {
+	retire := func(s *State) {
 		var p []PendingRef
 		for _, x := range s.Pending {
 			if x.ID != id {
@@ -565,7 +621,37 @@ func (c *Channel) retireLocked(id string, now time.Time) {
 			}
 		}
 		s.Retired[id] = now
-	})
+	}
+	if err := c.codes.commit(retire); err != nil {
+		next := copyState(c.codes.st)
+		retire(&next)
+		c.codes.st = next
+		c.retireErr = fmt.Errorf("owner: retiring request %s was not saved: %w", id, err)
+		return
+	}
+	c.retireErr = nil
+}
+
+// RetireErr reports a retirement whose save failed, or nil once a later
+// retirement or new request saved the whole record. A save by another
+// path may already have carried it; the report errs on the side of
+// showing the failure.
+func (c *Channel) RetireErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.retireErr
+}
+
+// retireNote is STATUS's line while a retirement is unsaved (SM-AJ-4):
+// fixed words, since the cause can name a path; the daemon log has it.
+const retireNote = "Approvals: an answer could not be saved; new approval requests fail until a save works."
+
+// RetireNote is STATUS's line while RetireErr is set, else empty.
+func (c *Channel) RetireNote() string {
+	if c.RetireErr() != nil {
+		return retireNote
+	}
+	return ""
 }
 
 // expireLocked denies requests past their expiry and drops stale held

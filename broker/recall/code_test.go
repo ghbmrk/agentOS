@@ -60,6 +60,33 @@ func TestGroupedCodesRemoved(t *testing.T) {
 	// Seed 17034256731814298294: a group ("tial") that is a substring of the
 	// Removed marker, which a substring check took for a leak.
 	checkCodeInText(t, sc, "qrio-tial-pubt-wtqm-wjxk-exax-sbuk")
+	// Seed 407785017061060441 (#1844): a later group ("xoxs") starts a Slack
+	// token shape, which matched from there and left the first group behind.
+	v := "ycqg-xoxs-hwxw-ogjc-gnwj-tmai-qcgw-ywfo"
+	if out := sc.Scrub(v); out != Removed {
+		t.Fatalf("alone: %q -> %q", v, out)
+	}
+	checkCodeInText(t, sc, v)
+}
+
+// A known token shape that starts inside a dash- or underscore-joined run is
+// removed with the whole run, so no leading part of the credential is kept,
+// even when the run is not a grouped code by itself (uneven, no digits).
+func TestKnownTokenLeadingPartRemoved(t *testing.T) {
+	sc := NewScrubber(nil)
+	for _, v := range []string{
+		"abcde-" + "xox" + "b-abcd-efghij-klm",
+		"ab12-" + "sk" + "-ant-QWERTYuiopASDFghjk12",
+		"wxyz_" + "gh" + "p_QWERTYuiopASDFghjkZXCVbnm123456789",
+		"pre-" + "AK" + "IAABCDEFGHIJKLMNOP",
+	} {
+		if out := sc.Scrub(v); out != Removed {
+			t.Errorf("alone: %q -> %q", v, out)
+		}
+		if out, want := sc.Scrub("see "+v+" now"), "see "+Removed+" now"; out != want {
+			t.Errorf("in text: %q -> %q", v, out)
+		}
+	}
 }
 
 // checkCodeInText requires the whole code, and only the code, to be replaced

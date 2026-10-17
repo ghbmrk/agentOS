@@ -33,6 +33,9 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
                                  issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr
+  board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
+           [--comment]           queued, building, in review or escalated (STALE-1); with --comment, say so
+                                 once per item and PR on the issue. Flags only: never relabels or closes.
   board.py archive --base FILE --changed PATH...
                                  once the base's BOARD.md carries the GENERATED line: fail if a
                                  changed path is an archive (ARCHIVED) or a retired file (RETIRED)
@@ -177,6 +180,14 @@ def _names(labels):
     return [x if isinstance(x, str) else x["name"] for x in labels]
 
 
+class Malformed(ValueError):
+    """Every problem found in one pass over the issues, one line each (str() joins them)."""
+
+    def __init__(self, problems):
+        self.problems = list(problems)
+        super().__init__("\n".join(self.problems))
+
+
 def issue_id(item):
     m = re.match(rf"({ID}): ", item["title"])
     if not m:
@@ -214,18 +225,25 @@ def render(skeleton, items):
     """BOARD.md: the skeleton's text with its rows replaced by the live rows of items."""
     lines = skeleton.splitlines()
     widths = {s: len(_cells(lines[n])) - 2 for n, kind, s in _table_lines(skeleton) if kind == "header"}
-    by_section, seen = {}, set()
+    by_section, seen, problems = {}, {}, []
     for item in items:
-        row = row_of(item)
+        try:
+            row = row_of(item)
+        except ValueError as e:
+            problems.append(str(e))
+            continue
         if row["id"] in seen:
-            raise ValueError(f"issue #{row['number']}: a second issue for {row['id']}")
-        seen.add(row["id"])
+            problems.append(f"issue #{row['number']}: a second issue for {row['id']} (first is #{seen[row['id']]})")
+            continue
+        seen[row["id"]] = row["number"]
         if row["section"] not in widths:
-            raise ValueError(f"issue #{row['number']}: no section {row['section']!r} in BOARD.md")
-        if len(row["cells"]) != widths[row["section"]]:
-            raise ValueError(f"issue #{row['number']}: {len(row['cells'])} middle cells, its table has {widths[row['section']]}")
-        if row["state"] in OPEN_STATES:
+            problems.append(f"issue #{row['number']}: no section {row['section']!r} in BOARD.md")
+        elif len(row["cells"]) != widths[row["section"]]:
+            problems.append(f"issue #{row['number']}: {len(row['cells'])} middle cells, its table has {widths[row['section']]}")
+        elif row["state"] in OPEN_STATES:
             by_section.setdefault(row["section"], []).append(row)
+    if problems:
+        raise Malformed(problems)
     out = []
     for n, kind, section in _table_lines(skeleton):
         if kind == "row":
@@ -283,6 +301,46 @@ def pr_notes(items, prs):
         elif merged and not opened:
             notes.append(f"{row['id']}: state {row['state']} but PR #{merged[0]['number']} merged")
     return notes
+
+
+STALE_MARK = "<!-- board-stale: #{} -->"
+
+
+def stale(items, prs):
+    """(issue, merged PR) for each open row whose ID-named PR merged while no open PR names it:
+    the label says the work is still to do, so the next session pays to find it done (STALE-1)."""
+    out = []
+    for item in items:
+        if "pull_request" in item:
+            continue
+        row = row_of(item)
+        if row["state"] not in OPEN_STATES:
+            continue
+        mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
+        merged = [p for p in mine if p.get("merged_at")]
+        if merged and not any(p["state"] == "open" for p in mine):
+            out.append((item, max(merged, key=lambda p: p["merged_at"])))
+    return out
+
+
+def stale_comment(row_id, state, pr):
+    return (f"{STALE_MARK.format(pr['number'])}\n{row_id} still reads `state:{state}`, but PR #{pr['number']} "
+            "merged. If the work is done, set the issue's state label to `state:merged`; "
+            "if more is owed, keep the label and name the follow-up here.")
+
+
+def report_stale(fetch, repo, comment):
+    items = work_items(fetch, repo)
+    found = stale(items, fetch(f"/repos/{repo}/pulls?state=all"))
+    for item, pr in found:
+        row = row_of(item)
+        print(f"board: {row['id']} (#{item['number']}): state {row['state']} but PR #{pr['number']} merged")
+        if comment:
+            seen = fetch(f"/repos/{repo}/issues/{item['number']}/comments")
+            if not any(STALE_MARK.format(pr["number"]) in (c.get("body") or "") for c in seen):
+                fetch(f"/repos/{repo}/issues/{item['number']}/comments", "POST",
+                      {"body": stale_comment(row["id"], row["state"], pr)})
+    return len(found)
 
 
 def rate_limit_wait(code, headers, now):
@@ -348,11 +406,21 @@ def work_items(fetch, repo):
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render", "archive"))
+    ap.add_argument("command", choices=("check", "render", "archive", "stale"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
+    ap.add_argument("--comment", action="store_true", help="stale: comment once on each flagged issue")
     args = ap.parse_args(argv)
+    if args.command == "stale":
+        if not args.repo:
+            ap.error("stale needs --repo")
+        try:
+            report_stale(fetch, args.repo, args.comment)
+        except ValueError as e:
+            print(f"board: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "archive":
         if not args.base:
             ap.error("archive needs --base")
@@ -367,9 +435,9 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     try:
         if args.repo and (args.command == "render" or GENERATED in text):
             items = work_items(fetch, args.repo)
+            generated = render(text, items)  # raises Malformed with every bad issue before notes
             for note in pr_notes(items, fetch(f"/repos/{args.repo}/pulls?state=all")):
                 print(f"board: {note}", file=sys.stderr)
-            generated = render(text, items)
             if args.command == "render":
                 sys.stdout.write(generated)
                 return 0
@@ -387,6 +455,9 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
             return 0
         items = [dict(i, number=n) for n, i in enumerate(plan(text), start=1)]
         generated = render(text, items)
+    except Malformed as e:
+        print(*(f"board: {p}" for p in e.problems), sep="\n", file=sys.stderr)
+        return 1
     except ValueError as e:
         print(f"board: {e}", file=sys.stderr)
         return 1

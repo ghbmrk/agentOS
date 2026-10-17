@@ -1,4 +1,4 @@
-# AgentOS
+# agentOS
 
 A computer for delegated work. Frontier AI you already pay for does the reasoning; a drive you plug into any PC does the executing, remembering, and improving, under your sole control. You direct it by text or phone call.
 
@@ -19,6 +19,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
 | [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | either peer subscription |
 | [docs/conv-3-triage.md](docs/conv-3-triage.md) | state | Class of every open PR (merge-ready, finish, parts bin, superseded, stale) and the close list (Q3, D-090). | CONV-3, then L1 |
+| [docs/conv-2-reaudit.md](docs/conv-2-reaudit.md) | state | First-pass re-audit of queued and building rows already done on main, with the proposed issue changes. | CONV-2, then L1 |
 | [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | state | What blocks each requirement ID TRACE.md lists as uncovered, and the BOARD rows that close them. | CONV-5 builder, L1 |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |
 | [docs/BOARD-HISTORY.md](docs/BOARD-HISTORY.md) | record | BOARD.md's merged and dropped rows up to the 2026-10-10 cutover to issues; frozen. | nobody |
@@ -36,8 +37,8 @@ Read in this order and stop when you have what you need. Token counts are approx
 
 | Role | Read | About |
 |---|---|---|
-| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites; the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
-| Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff; the cited SPEC.md IDs; the brief | 5k + diff |
+| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites (`python3 tools/specslice.py --ids A-1,B-2`); the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
+| Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff, the cited SPEC IDs and the brief (an optional aid: `python3 tools/reviewpacket.py <PR>` bundles them with the tier, and its claims are checked against the source) | 5k + diff |
 | Lens screen | OPERATING §4 checklist; active DECISIONS rows; the lens READMEs; the bundle's diffs | 10k + diffs |
 | Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` (not `frozen`) and `decision` issues; recent DECISIONS rows | 15k |
 | Another team | AGENTS.md; CLAUDE.md; docs/LANES.md (your lane); OPERATING §7; then the builder row above | 6k + builder |

@@ -219,6 +219,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/signout", s.post(s.signout))
 	s.mux.Handle("/home", s.signedIn(http.HandlerFunc(s.home)))
 	s.mux.Handle("/line/sim", s.signedIn(s.post(s.adoptSIM)))
+	s.mux.Handle("/plan/signin", s.signedIn(s.post(s.planSignIn)))
 	s.mux.HandleFunc("/box.vcf", s.contact)
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
@@ -631,6 +632,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 // homePage is the signed-in home page, with msg or errText from a form
 // on it.
 func (s *Server) homePage(w http.ResponseWriter, r *http.Request, msg, errText string) {
+	s.homeView(w, r, msg, errText, "", localapi.DeviceCode{})
+}
+
+// homeView is homePage with planErr, an error from the plan's sign-in
+// form, or plan, the sign-in it started (#1264).
+func (s *Server) homeView(w http.ResponseWriter, r *http.Request, msg, errText, planErr string, plan localapi.DeviceCode) {
 	s.mu.Lock()
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
@@ -643,7 +650,12 @@ func (s *Server) homePage(w http.ResponseWriter, r *http.Request, msg, errText s
 		// d2b); Cell is the grid cell its code field may take.
 		SIM, SIMEnds, Cell string
 		Msg, Err           string
-	}{Mounts: ms, Msg: msg, Err: errText}
+		// PlanReady offers the plan's sign-in again (ONB-9, #1264); Plan
+		// is the one started, PlanErr the form's error.
+		PlanReady bool
+		Plan      localapi.DeviceCode
+		PlanErr   string
+	}{Mounts: ms, Msg: msg, Err: errText, Plan: plan, PlanErr: planErr}
 	auth := localapi.Auth{Token: cookieToken(r)}
 	var rq localapi.Requests
 	if s.call(r.Context(), localapi.OpRequests, auth, &rq) == nil {
@@ -655,7 +667,16 @@ func (s *Server) homePage(w http.ResponseWriter, r *http.Request, msg, errText s
 		v.LineNote, v.LineTexts = line.Note, lineTexts(line, time.Local)
 		v.SIM, v.SIMEnds = line.SIM, line.SIMEnds
 	}
-	if v.SIM != "" {
+	// A sign-in this session started that still waits comes back in place
+	// of the form (#1945).
+	var ps localapi.PlanSignIn
+	if plan.Link == "" && s.call(r.Context(), localapi.OpPlanSignInReady, auth, &ps) == nil {
+		v.PlanReady = ps.Ready
+		if ps.Ready && ps.Link != "" {
+			v.Plan = ps.DeviceCode
+		}
+	}
+	if v.SIM != "" || v.PlanReady {
 		var cell localapi.Text
 		if s.call(r.Context(), localapi.OpGridCell, struct{}{}, &cell) == nil {
 			v.Cell = cell.Text

@@ -454,7 +454,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.fuzz},
+		Sources:   []loops.Source{sleepSource{qualitySource{learn, l.pipe, modelWired}, &l.sleep}, l.fuzz},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,
