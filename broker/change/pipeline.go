@@ -355,6 +355,10 @@ type state struct {
 	// and saved that the journal has not yet recorded (CHG-forget-revert-
 	// journal): replay applies them and flushOwed journals them.
 	Unjournaled []string `json:"unjournaled,omitempty"`
+	// Swept: every proposal ID up to c<Swept> that no intent waits on has
+	// no blob in Content (sweepOrphansLocked). A state saved before it
+	// reads 0 and is swept from c1.
+	Swept int `json:"swept,omitempty"`
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
