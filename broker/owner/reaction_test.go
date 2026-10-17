@@ -368,23 +368,24 @@ func TestUnlistedReactionFormsNeverShowACodedText(t *testing.T) {
 	}
 	// The agent's own text with digits in it. A code-shaped agent text is
 	// held back (Disclose), so the owner can only quote one with ordinary
-	// digits, which CH-3 lets reach the agent. An unlisted form is read as a
-	// listed one is: the agent gets the event quoting its own words, not the
-	// owner's text raw.
+	// digits, which CH-3 lets reach the agent. An unlisted form quoting it
+	// has no CH-3 reason to be read as a reaction, so it is chat, whole, and
+	// the owner's own words reach the agent; a listed form stays a reaction.
 	agentSaid := "Order 482913 ships Tuesday, tracking to follow."
 	if err := r.ch.Converse(agentSaid); err != nil {
 		t.Fatal(err)
 	}
 	r.inbox()
-	r.say("Pinned “" + AgentPrefix + agentSaid + "”")
+	pinnedText := "Pinned “" + AgentPrefix + agentSaid + "”"
+	r.say(pinnedText)
 	r.say("Liked “" + AgentPrefix + agentSaid + "”")
 	g := r.agent.got()
 	pinned, liked := g[len(g)-2], g[len(g)-1]
-	if !strings.HasPrefix(pinned, "Owner reaction: reacted to your text ") || strings.Contains(pinned, "Pinned") {
-		t.Fatalf("unlisted form on the agent's text gave %q, want a reaction event", pinned)
+	if !strings.Contains(pinned, pinnedText) || strings.HasPrefix(pinned, "Owner reaction:") {
+		t.Fatalf("unlisted form on the agent's text gave %q, want the owner's text whole as chat", pinned)
 	}
-	if strings.TrimPrefix(pinned, "Owner reaction: reacted to") != strings.TrimPrefix(liked, "Owner reaction: liked") {
-		t.Fatalf("unlisted %q and listed %q forms differ beyond the kind", pinned, liked)
+	if !strings.HasPrefix(liked, "Owner reaction: liked your text ") {
+		t.Fatalf("listed form on the agent's text gave %q, want a reaction event", liked)
 	}
 }
 

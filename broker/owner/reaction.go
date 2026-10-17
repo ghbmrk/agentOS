@@ -69,9 +69,9 @@ var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]
 // a listed form whose quote holds quote marks, when the quote marks a recent
 // box text (a request or a RUN offer quotes its own words), and an unlisted
 // form, when the quote marks a text to the owner that is a request or holds
-// a code. Who wrote that text does not matter: the event is worded as for a
-// listed form (reactionEvent), so a request or a box code is never shown and
-// the agent's own text is quoted back as its own.
+// a box code (CH-3). The agent's own text is never a reason: its digits
+// already passed Disclose, so an unlisted form quoting it stays chat and the
+// owner's words reach the agent whole (CH-11).
 func (c *Channel) readReaction(text string) (reaction, bool) {
 	if rx, ok := parseReaction(text); ok {
 		return rx, true
@@ -87,7 +87,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		return reaction{}, false
 	}
 	t, ok := c.recent.match(m[2], c.cfg.Now())
-	if !ok || !(t.request || carriesCode.MatchString(t.text)) {
+	if !ok || !(t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))) {
 		return reaction{}, false
 	}
 	return reaction{kind: "reacted to", quoted: m[2]}, true
