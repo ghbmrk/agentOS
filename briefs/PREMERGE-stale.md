@@ -14,4 +14,4 @@ Board row: issue #1946 (release finding from the Security review of PR #1944, PR
 
 ## Scope
 
-`.github/workflows/premerge.yml`, `tests/test_workflows.py`, `tools/ASSUMPTIONS.md` (D33), this brief.
+`.github/workflows/premerge.yml`, `tests/test_workflows.py`, `tools/ASSUMPTIONS.md` (D36), this brief.
