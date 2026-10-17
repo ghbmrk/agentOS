@@ -234,9 +234,14 @@ class ListTest(unittest.TestCase):
         self.assertTrue(g.parse_list(G2_LIST, "g1_scope_g2.txt")[0])
 
     def test_every_entry_exists(self):  # G1-freeze-f
+        # Listed before the INFER-SVC build (briefs/INFER-SVC.md) creates them; that PR empties this.
+        not_yet = {"broker/infer/", "broker/cmd/agentos-infer/"}
         for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
             _, _, allow, frozen, _ = g.parse_list(text, name)
             for e in allow + frozen:
+                if e in not_yet:
+                    self.assertFalse((ROOT / e).exists(), f"{e} exists now: delete the not_yet set in this test")
+                    continue
                 self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
 
     def test_frozen_paths_stay_out(self):  # G1-freeze-a, -h
