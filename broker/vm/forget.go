@@ -25,7 +25,9 @@ import (
 // every snapshot of the lineage taken at or after since is deleted,
 // including those of destroyed machines. A snapshot taken before this
 // release recorded lineages has none: if its machine is gone, it is
-// deleted when taken at or after since, whatever lineage it was.
+// deleted when taken at or after since, whatever lineage it was; it is
+// also of the lineage named by its machine ID, the one load gives a
+// machine recorded before lineages, whoever holds that ID now.
 //
 // Labels do not fall (REV-5). Replay machines are never in a live lineage.
 // ForgetSince is idempotent and may be repeated after a failure; a
@@ -172,6 +174,12 @@ func (m *Manager) lineageSnaps(lineage string, since time.Time) []Snapshot {
 				l = mc.Lineage
 			} else {
 				l = lineage // unknown: delete rather than keep
+			}
+			// Recorded before lineages, its machine had then the lineage
+			// load gives such a machine: its ID. The ID's holder now may
+			// be a replacement of another lineage, so match both (#1660).
+			if s.Machine == lineage {
+				l = lineage
 			}
 		}
 		if l == lineage {

@@ -68,12 +68,21 @@ var providerIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // worker at most routeCalls calls are in flight, each holding at most one
 // request body (egress.DefaultMaxBody); past that a call is refused with 503
 // before its body is read. tests/test_egress_memory.py counts routeCalls
-// in the vault process's memory ceiling.
+// in the vault process's memory ceiling. One worker holds at most
+// routeShare of those calls (#1857), so a worker that holds its calls open
+// leaves the rest to the others; past its share its next call is refused
+// with 503 before it takes a process slot.
 const (
 	routeConns = 8
 	routeCalls = 8
+	routeShare = routeCalls / 2
 	// routeReadTimeout bounds reading one request, headers and body.
 	routeReadTimeout = time.Minute
+	// routeWriteTimeout bounds each write of a reply, renewed per write and
+	// flush: a worker that stops reading its stream has the call cut there
+	// and its slot freed (#1857). A slow upstream is not cut; a stalled
+	// reader is.
+	routeWriteTimeout = 30 * time.Second
 )
 
 // workerRoutes opens and closes provider workers' route sockets.
@@ -92,6 +101,10 @@ type workerRoutes struct {
 	signedIn func(worker string) bool
 	conns    int
 	calls    chan struct{}
+	// share is how many of calls one worker's route may hold.
+	share int
+	// writeTimeout is routeWriteTimeout; tests shorten it.
+	writeTimeout time.Duration
 
 	mu   sync.Mutex
 	open map[string]*routeServer
@@ -111,6 +124,7 @@ func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, 
 	return &workerRoutes{
 		dir: dir, config: config, forget: forget, seed: seed,
 		conns: routeConns, calls: make(chan struct{}, routeCalls),
+		share: routeShare, writeTimeout: routeWriteTimeout,
 		open: map[string]*routeServer{},
 	}
 }
@@ -271,26 +285,72 @@ func (p *workerRoutes) openRoute(id string, signIn bool) (string, error) {
 		os.RemoveAll(dir)
 		return "", err
 	}
-	srv := newServer(p.bounded(h))
+	// The share is the route's own: a reopen's srv.Close cuts the old
+	// route's connections, which cancels their calls and frees their slots.
+	srv := newServer(p.bounded(make(chan struct{}, p.share), h))
 	srv.ReadTimeout = routeReadTimeout
 	go srv.Serve(newLimitListener(ln, p.conns))
 	p.open[id] = &routeServer{dir: dir, srv: srv}
 	return dir, nil
 }
 
-// bounded refuses a call with 503 while routeCalls calls are in flight
-// across every worker route, before the call's body is read.
-func (p *workerRoutes) bounded(h http.Handler) http.Handler {
+// bounded refuses a call with 503, before the call's body is read, while
+// this worker's route holds its whole share of calls or routeCalls calls
+// are in flight across every worker route. Each reply write carries the
+// write deadline.
+func (p *workerRoutes) bounded(share chan struct{}, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case share <- struct{}{}:
+			defer func() { <-share }()
+		default:
+			http.Error(w, "egress busy: this worker has too many provider calls", http.StatusServiceUnavailable)
+			return
+		}
 		select {
 		case p.calls <- struct{}{}:
 			defer func() { <-p.calls }()
-			h.ServeHTTP(w, r)
 		default:
 			http.Error(w, "egress busy: too many provider calls", http.StatusServiceUnavailable)
+			return
 		}
+		dw := &deadlineWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: p.writeTimeout}
+		h.ServeHTTP(dw, r)
+		// net/http flushes what is buffered after the handler returns.
+		dw.renew()
 	})
 }
+
+// deadlineWriter renews the connection's write deadline before every
+// write and flush, so a write the reader stalls fails at the deadline: the
+// buffered writer keeps that error, the route's next write fails and the
+// call ends (egress worker routes stop on a write error).
+type deadlineWriter struct {
+	http.ResponseWriter
+	rc *http.ResponseController
+	d  time.Duration
+}
+
+func (w *deadlineWriter) renew() { w.rc.SetWriteDeadline(time.Now().Add(w.d)) }
+
+func (w *deadlineWriter) WriteHeader(code int) {
+	w.renew()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *deadlineWriter) Write(b []byte) (int, error) {
+	w.renew()
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush is the route's flush per chunk (egress.workerRoute asserts
+// http.Flusher).
+func (w *deadlineWriter) Flush() {
+	w.renew()
+	w.rc.Flush()
+}
+
+func (w *deadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // close ends id's route for good and forgets its placeholders.
 func (p *workerRoutes) close(id string) {

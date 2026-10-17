@@ -62,6 +62,8 @@ type Owner interface {
 	// released auto-reply after its release (owner O18).
 	UndoneAfterRelease(id string) bool
 	Inform(text string) error
+	// Post sends text under a pacing class (W5-Dc-r23).
+	Post(class owner.Class, text string) error
 }
 
 // Changes is the change pipeline (change.Pipeline) as the gate uses it:
@@ -1025,18 +1027,20 @@ const repeatWindow = 24 * time.Hour
 //   - sent: when the first of them known to have gone within repeatWindow
 //     went, counting the window from when its success became known
 //     (journal Use.Known: a success a check proves late counts from the
-//     proof, Security B11 on #1433), of those with the same body
-//     (sameBody: ParamBody with whitespace normalised, empty when the
-//     action has none) that act on the same record, or on another record
-//     of the same thread (Verified.Thread, Security R21): a reply that
-//     says something new in a thread is a new send, while an identical
-//     one is a repeat even in reply to another message of the thread;
+//     proof, Security B11 on #1433);
 //   - tried: when the first of them that may still take effect was first
 //     tried (in flight or unknown, at any age; for an unclear one, its
-//     parked try, journal Use.Tried), of those on the same record whatever
-//     their body, or of the same thread with the same body: a send that
-//     may have gone, resubmitted reworded, may still go twice (Potency P12
-//     on #1433).
+//     parked try, journal Use.Tried): a send that may have gone,
+//     resubmitted reworded, may still go twice (Potency P12 on #1433).
+//
+// Both count those on the same record whatever their body, as SPEC OP-2
+// defines an identical repeat (the same record to the same recipients by
+// the same action; #1677), and those on another record of the same
+// thread (Verified.Thread, Security R21) only with the same body
+// (sameBody: ParamBody with whitespace normalised, empty when the action
+// has none): a reply that says something new elsewhere in a thread is a
+// new send, while an identical one is a repeat even in reply to another
+// message of the thread.
 //
 // An erased send (CAP-3, a recall reset) no longer names its record or
 // body, so it cannot be compared: it is taken as the same send, on both
@@ -1071,21 +1075,22 @@ func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 		if !u.Started || u.Intent.ID == in.ID {
 			continue
 		}
-		record, content := u.Erased, u.Erased
+		same := u.Erased
 		if !u.Erased {
 			k2 := g.sendID(ctx, u.Intent)
 			if !sameSet(k2.rcpt, k.rcpt) {
 				continue
 			}
-			content = sameBody(u.Intent) == body
-			record = k2.rec == k.rec || (content && sharesThread(k.thread, k2.thread))
-			content = content && record
+			same = k2.rec == k.rec || (sameBody(u.Intent) == body && sharesThread(k.thread, k2.thread))
 		}
-		if content && !u.Went.IsZero() && !u.Known.Before(since) {
+		if !same {
+			continue
+		}
+		if !u.Went.IsZero() && !u.Known.Before(since) {
 			first(&r.sent, u.Went)
 			r.went = append(r.went, u.Intent.ID)
 		}
-		if record && !u.Tried.IsZero() {
+		if !u.Tried.IsZero() {
 			first(&r.tried, u.Tried)
 			r.unclear = append(r.unclear, u.Intent.ID)
 		}
@@ -1969,7 +1974,9 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
+			// Approval class, like the request it announces, so quiet
+			// hours never hold it past that request (W5-Dc-r23, CH-15).
+			_ = own.Post(owner.ClassApproval, "Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)

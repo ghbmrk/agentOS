@@ -92,10 +92,15 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	thread := Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true}
-	r.ver.set("thr-1", thread)
+	// Each reply answers its own message: another reply to the same one
+	// is a repeat whatever its body (D-116, #1677).
 	reply := func(id string) {
+		rec := "thr-" + id
+		v := thread
+		v.Record = rec
+		r.ver.set(rec, v)
 		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+			Params: map[string]any{"record": rec, "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 	reply("reply-1/r1")
 	r.advance(11 * time.Minute)
@@ -271,11 +276,17 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	})
 	r.grant(mailGrant())
 	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
-	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
-		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
-		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
-	r.submit(journal.Intent{ID: "reply-1/late", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (late)."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	// Each reply answers its own message: another reply to the same one
+	// is a repeat whatever its body (D-116, #1677).
+	reply := func(id, word string) {
+		rec := "thr-" + id
+		r.ver.set(rec, Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
+			Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
+			Recipients: []string{"sam@example.com"}, Record: rec, ThreadVerified: true})
+		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+			Params: map[string]any{"record": rec, "body": "Thanks, got it (" + word + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	}
+	reply("reply-1/late", "late")
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Late = true
 	r.own.mu.Unlock()
@@ -293,8 +304,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	// the silence not the owner's either.
 	for _, at := range []string{"alert", "release"} {
 		id := "reply-1/quiet-" + at
-		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + at + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+		reply(id, at)
 		r.own.mu.Lock()
 		alerted := r.now()
 		r.own.due[len(r.own.due)-1].Alerted = alerted
@@ -312,8 +322,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 		}
 	}
 	*quiet = func(time.Time) bool { return false }
-	r.submit(journal.Intent{ID: "reply-1/awake", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (awake)."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	reply("reply-1/awake", "awake")
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Alerted = r.now()
 	r.own.mu.Unlock()

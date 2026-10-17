@@ -349,9 +349,10 @@ func TestReissuedItemLapsesAtItsOriginalExpiry(t *testing.T) {
 // TestContextScopedReplies: a reply composed in an isolated machine under a
 // reply rule is queued with an undo window and released after it; UNDO
 // denies it; a reply that matches the commitment filter becomes a request;
-// a reply from the main agent is asked as usual. Each reply says
-// something new; an identical one is a repeat (confirm repeats, D-116,
-// TestConfirmRepeatsAPreAllowedIdenticalReply).
+// a reply from the main agent is asked as usual. Each reply answers its
+// own message and says something new; another reply to the same message
+// is a repeat whatever its body (confirm repeats, D-116, #1677,
+// TestARewordedAutoReplyToTheSameMessageIsAsked).
 func TestContextScopedReplies(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Isolated = func(m string) bool { return m == "reply-1" } })
 	r.grant(mailGrant())
@@ -359,10 +360,13 @@ func TestContextScopedReplies(t *testing.T) {
 	thread := Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true}
-	r.ver.set("thr-1", thread)
 	reply := func(id, origin string) journal.Status {
+		rec := "thr-" + id
+		v := thread
+		v.Record = rec
+		r.ver.set(rec, v)
 		return r.submit(journal.Intent{ID: id, Origin: origin, Machine: strings.TrimPrefix(origin, "guest:"), Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+			Params: map[string]any{"record": rec, "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 
 	st := reply("reply-1/r1", "guest:reply-1")
