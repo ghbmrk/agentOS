@@ -52,3 +52,39 @@ func TestARepeatSaysItWasAlreadySentAndAsks(t *testing.T) {
 		t.Fatalf("page repeat notice %q", text)
 	}
 }
+
+// REQ: OP2-ER-2
+// A repeat whose only known success was erased (CAP-3) cannot be said to
+// have been sent: its record and recipient are gone. The text and the
+// page notice say it may repeat a send whose record was erased, never
+// "already sent". The mark is not part of ItemSum.
+func TestAnErasedOnlyRepeatSaysItMayRepeat(t *testing.T) {
+	r := newRig(t, nil)
+	sent := r.clock().Add(-2 * time.Hour)
+	at := sent.In(r.ch.cfg.Location).Format("15:04 Jan 2")
+
+	low := lowItem("i1")
+	low.Sent, low.SentErased = sent, true
+	if ItemSum(low) != ItemSum(lowItem("i1")) {
+		t.Fatal("the mark changes ItemSum")
+	}
+	if _, err := r.ch.Request([]Item{low}, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	text := r.inbox()
+	if !strings.Contains(text, "may repeat a send whose record was erased (it went "+at+"); send it?") ||
+		strings.Contains(text, "already sent") || !lowCodeRe.MatchString(text) {
+		t.Fatalf("low erased repeat %q", text)
+	}
+
+	loc := localItem("i2")
+	loc.Sent, loc.SentErased = sent, true
+	if _, err := r.ch.RequestLocalEach([]Item{loc}, []time.Duration{0}); err != nil {
+		t.Fatal(err)
+	}
+	text = r.inbox()
+	if !strings.Contains(text, "your agent wants to ") || !strings.Contains(text, ". It may repeat a send whose record was erased ("+at+"). Approve or deny") ||
+		strings.Contains(text, "already sent") {
+		t.Fatalf("page erased repeat notice %q", text)
+	}
+}

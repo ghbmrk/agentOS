@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Mutation testing on the tier-A broker packages (MUT-tierA, #1814).
+
+Runs gremlins (github.com/go-gremlins/gremlins, an existing Go mutation tool) per package,
+reports the surviving mutants, and fails a PR that claims coverage of code where a mutant
+survives.
+
+  tools/mutgate.py packages                  list the tier-A broker packages
+  tools/mutgate.py run [PKG...] [--out DIR]  run gremlins per package (default: all tier A),
+                                             one JSON file per package in DIR (default mutants/)
+  tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
+  tools/mutgate.py gate DIR --git BASE [HEAD]
+                                             exit 1 if the diff BASE...HEAD adds a REQ marker
+                                             to a package and adds a line carrying a LIVED mutant
+
+The gate's claim: a diff that adds `REQ: ID` to a file under broker/<pkg>/ says the package's
+tests cover ID. A LIVED mutant on a line that diff added to a non-test .go file in the same
+package is code those tests run (gremlins mutates only covered code) but do not check. Not
+covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
+Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+"""
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import risk_tier  # noqa: E402
+
+BROKER = ROOT / "broker"
+MARKER = re.compile(r"\+.*REQ:\s*[A-Z]{2,4}-\d+")
+HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
+
+
+def tier_a_packages(broker=BROKER):
+    """Tier-A package paths under broker/ that exist and hold Go source, sorted."""
+    core, wiring, allowed = risk_tier.core_list()
+    names = core | wiring | allowed | risk_tier.TIER_A_BROKER
+    return sorted(n for n in names if any((broker / n).glob("*.go")))
+
+
+def survivors(results_dir):
+    """{package: [(file, line, type)]} of LIVED mutants in the per-package JSON files."""
+    out = {}
+    for f in sorted(pathlib.Path(results_dir).glob("*.json")):
+        pkg = f.stem.replace("__", "/")
+        data = json.loads(f.read_text())
+        live = [
+            (m_file["file_name"], m["line"], m["type"])
+            for m_file in data.get("files") or []
+            for m in m_file.get("mutations") or []
+            if m.get("status") == "LIVED"
+        ]
+        out[pkg] = sorted(live)
+    return out
+
+
+def added_lines(diff_text):
+    """({path: set(line)} of added lines, set of paths whose added lines carry a REQ marker)."""
+    added, marked, path, line = {}, set(), None, 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("+++ "):
+            path = raw[6:] if raw.startswith("+++ b/") else None
+            continue
+        m = HUNK.match(raw)
+        if m:
+            line = int(m.group(1))
+            continue
+        if path is None or raw.startswith(("--- ", "diff ")):
+            continue
+        if raw.startswith("+"):
+            added.setdefault(path, set()).add(line)
+            if MARKER.match(raw):
+                marked.add(path)
+            line += 1
+        elif not raw.startswith("-"):
+            line += 1
+    return added, marked
+
+
+def package_of(path):
+    """The broker/ package directory of a repo path, as survivors() names it, or None."""
+    parts = path.split("/")
+    if parts[0] != "broker" or len(parts) < 3:
+        return None
+    return "/".join(parts[1:-1])
+
+
+def violations(diff_text, live):
+    """Lines the diff adds where a mutant lived, in packages the diff claims coverage of."""
+    added, marked = added_lines(diff_text)
+    claimed = {package_of(p) for p in marked} - {None}
+    found = []
+    for pkg in sorted(claimed):
+        for fname, line, kind in live.get(pkg, []):
+            path = f"broker/{pkg}/{fname}"
+            if fname.endswith("_test.go"):
+                continue
+            if line in added.get(path, ()):
+                found.append((pkg, path, line, kind))
+    return found
+
+
+def cmd_run(args):
+    pkgs = args.pkg or tier_a_packages()
+    out = pathlib.Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    bad = 0
+    for pkg in pkgs:
+        dest = out / (pkg.replace("/", "__") + ".json")
+        r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "-o", str(dest)], cwd=BROKER)
+        if r.returncode != 0 or not dest.exists():
+            print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
+            bad += 1
+    return 1 if bad else 0
+
+
+def cmd_report(args):
+    live = survivors(args.dir)
+    for pkg, items in live.items():
+        print(f"{pkg}: {len(items)} surviving")
+        for fname, line, kind in items:
+            print(f"  {fname}:{line} {kind}")
+    return 0
+
+
+def cmd_gate(args):
+    diff = subprocess.run(
+        ["git", "diff", "-U0", f"{args.git}...{args.head}", "--", "broker"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    found = violations(diff, survivors(args.dir))
+    for pkg, path, line, kind in found:
+        print(f"mutgate: {path}:{line} {kind} survives, in package {pkg} where this PR claims REQ coverage")
+    if found:
+        print("mutgate: add a test that fails when the line changes, or drop the REQ claim")
+    return 1 if found else 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("packages")
+    p = sub.add_parser("run")
+    p.add_argument("pkg", nargs="*")
+    p.add_argument("--out", default="mutants")
+    p = sub.add_parser("report")
+    p.add_argument("dir")
+    p = sub.add_parser("gate")
+    p.add_argument("dir")
+    p.add_argument("--git", required=True, metavar="BASE")
+    p.add_argument("head", nargs="?", default="HEAD")
+    args = ap.parse_args(argv)
+    if args.cmd == "packages":
+        print("\n".join(tier_a_packages()))
+        return 0
+    return {"run": cmd_run, "report": cmd_report, "gate": cmd_gate}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -38,6 +38,20 @@ func TestInboundTextIsValidUTF8(t *testing.T) {
 	}
 }
 
+// REQ: CH-12, CH12-mms-c
+// A picture (an MMS notice) is passed with no text: one that claims text
+// is refused, so nothing reads a picture as a command.
+func TestInboundPictureCarriesNoText(t *testing.T) {
+	in := Inbound{Line: LineOwner, From: "+15550000999", Picture: true, ID: "p1"}
+	if !in.Valid() {
+		t.Fatal("a picture was refused")
+	}
+	in.Text = "STOP"
+	if in.Valid() {
+		t.Fatal("a picture with text was taken")
+	}
+}
+
 // P2-2w d2b: a swapped or unbound state carries the SIM serial the bridge
 // sees, so agentosd can record it once the owner confirms it with a code.
 // A serial is digits (and a hex pad), normalized before it is sent.

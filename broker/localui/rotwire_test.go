@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -528,5 +529,61 @@ func TestRotationLateConfirmKeepsTheResultForAGrace(t *testing.T) {
 				t.Fatalf("shown = %v, want %v: %d", got, tc.shown, w.Code)
 			}
 		})
+	}
+}
+
+// REQ: REC-4, HW-1
+
+// #1338: the waiting display (the new parts, and after its confirm the new
+// code generator's seed) is the starting session's. Another signed-in
+// session's GET and POST of /rotate/card are sent home with neither, the
+// vault process sees no commit, and the starter still confirms and gets
+// the result.
+func TestRotationDisplayIsTheStartingSessions(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDIIIIII"}
+	form := x.group()
+	group := form.Get("group")
+	x.asOther(func() {
+		x.signIn()
+		for _, w := range []*httptest.ResponseRecorder{x.do("GET", "/rotate/card", nil), x.post("/rotate/card", form)} {
+			b := w.Body.String()
+			if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/home" || strings.Contains(b, group) || strings.Contains(b, "CANARYSEED") || strings.Contains(b, "SYNTH-NOTE") {
+				t.Fatalf("another session reached the display: %d %s %s", w.Code, w.Header().Get("Location"), b)
+			}
+		}
+		if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
+			t.Fatalf("another session read a result: %d", w.Code)
+		}
+	})
+	if _, committed, _ := x.v.n(); committed != 0 {
+		t.Fatalf("another session's post committed %d", committed)
+	}
+	if p := x.get("/rotate/card"); !strings.Contains(p, group) {
+		t.Fatal("the starter lost the display")
+	}
+	if w := x.post("/rotate/card", form); w.Header().Get("Location") != "/rotate/done" {
+		t.Fatalf("the starter's confirm: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if done := x.get("/rotate/done"); !strings.Contains(done, "SYNTH-NOTE") || !strings.Contains(done, "<svg") {
+		t.Fatalf("the starter lost its result: %s", done)
+	}
+}
+
+// #1338: a start not posted by a session has no starter, so its display
+// is shown to no session.
+func TestRotationDisplayWithNoStarterIsShownToNone(t *testing.T) {
+	x := newWireRig(t)
+	if err := x.r.Start(context.Background(), RotationBegin{Recovery: "SYNTH-RK", Parts: card.Parts{Recovery: true}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []*httptest.ResponseRecorder{x.do("GET", "/rotate/card", nil), x.post("/rotate/card", x.group())} {
+		if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/home" {
+			t.Fatalf("a display with no starter was served: %d %s", w.Code, w.Header().Get("Location"))
+		}
+	}
+	if _, committed, _ := x.v.n(); committed != 0 {
+		t.Fatal("a display with no starter committed")
 	}
 }
