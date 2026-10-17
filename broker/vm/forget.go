@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
@@ -189,11 +190,20 @@ func (m *Manager) lineageSnaps(lineage string, since time.Time) []Snapshot {
 	return out
 }
 
+// syncSnapDir is a seam: tests fail it.
+var syncSnapDir = durable.SyncDir
+
 // removeSnapshot deletes a snapshot: its metadata first, so a crash
-// part-way leaves a directory Open drops as never published.
+// part-way leaves a directory Open drops as never published. The unlink is
+// made durable before the snapshot is reported gone, so a reset recorded
+// after this returns cannot meet the snapshot again after a power cut
+// (CAP-3, #1240); a failed sync is returned, and the reset stays retryable.
 func (m *Manager) removeSnapshot(id string) error {
 	dir := m.snapDir(id)
 	if err := os.Remove(filepath.Join(dir, "meta.json")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := syncSnapDir(dir); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	m.mu.Lock()

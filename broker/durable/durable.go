@@ -21,8 +21,8 @@ import (
 // handle on the replaced file swaps it before returning this error.
 var ErrDirSync = errors.New("durable: directory sync after rename failed")
 
-// TempPrefix starts the name of every temporary file WriteFile creates;
-// SweepTemp removes files with it.
+// TempPrefix starts the name of every temporary file WriteFile creates,
+// and of PublishDir's stages; SweepTemp removes the files.
 const TempPrefix = ".durable-"
 
 // file is the part of *os.File WriteFile uses.
@@ -41,11 +41,15 @@ var fsys = struct {
 	rename     func(oldpath, newpath string) error
 	remove     func(name string) error
 	syncDir    func(dir string) error
+	mkdir      func(name string, perm os.FileMode) error
+	syncFile   func(name string) error
 }{
 	createTemp: func(dir, pattern string) (file, error) { return os.CreateTemp(dir, pattern) },
 	rename:     os.Rename,
 	remove:     os.Remove,
 	syncDir:    syncDir,
+	mkdir:      os.Mkdir,
+	syncFile:   syncFile,
 }
 
 // WriteFile replaces path with data and mode perm: a temporary file in the
@@ -117,6 +121,89 @@ func syncDir(dir string) error {
 	}
 	err = d.Sync()
 	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// StageDir is where PublishDir fills dir before publishing it: beside dir,
+// named TempPrefix and dir's name. A caller that bounds path lengths under
+// dir bounds them under this longer root too.
+func StageDir(dir string) string {
+	return filepath.Join(filepath.Dir(dir), TempPrefix+filepath.Base(dir))
+}
+
+// PublishDir creates directory dir, with mode perm, holding what fill
+// writes, so that a crash or power cut leaves either no dir or all of it.
+// fill writes into StageDir(dir); then every regular file and directory in
+// the stage is fsynced, directories bottom-up, the stage renamed to dir,
+// and dir's parent fsynced. Nothing is at dir until all of it is durable.
+//
+// dir must not exist, nor its stage: a stage a crash left is the caller's
+// to remove at start, as an unpublished one. On error before the rename,
+// dir does not exist and the stage is removed; after it, a failed sync of
+// the parent returns an error wrapping ErrDirSync, and dir is complete but
+// its name may not survive a power cut.
+func PublishDir(dir string, perm os.FileMode, fill func(stage string) error) error {
+	if _, err := os.Lstat(dir); err == nil {
+		return fmt.Errorf("durable: publish %s: %w", dir, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	stage := StageDir(dir)
+	if err := fsys.mkdir(stage, perm); err != nil {
+		return err
+	}
+	err := fill(stage)
+	if err == nil {
+		err = syncTree(stage)
+	}
+	if err == nil {
+		err = fsys.rename(stage, dir)
+	}
+	if err != nil {
+		os.RemoveAll(stage)
+		return err
+	}
+	return dirSynced(filepath.Dir(dir))
+}
+
+// syncTree fsyncs every regular file under root, then every directory,
+// deepest first and root last. Links, devices (overlay whiteouts among
+// them), fifos and sockets have no data of their own: their entries and
+// metadata are made durable by the sync of the directory holding them.
+func syncTree(root string) error {
+	var dirs []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir():
+			dirs = append(dirs, p)
+		case d.Type().IsRegular():
+			return fsys.syncFile(p)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// The walk visits a directory before anything in it.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := fsys.syncDir(dirs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncFile(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	return err
