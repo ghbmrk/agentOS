@@ -789,6 +789,10 @@ type repeat struct {
 	// went and unclear are those requests' IDs: what an approval of a
 	// line with these marks covers (decision.covers).
 	went, unclear []string
+	// erasedOnly is true when every request in went was erased (CAP-3)
+	// after it went, so the ask cannot say this send was already sent
+	// (OP2-ER-2).
+	erasedOnly bool
 }
 
 func (r repeat) zero() bool { return r.sent.IsZero() && r.tried.IsZero() }
@@ -836,6 +840,7 @@ func (v verdict) shown() owner.Item { return v.marked(withNote(v.item, v.note)) 
 func (v verdict) marked(it owner.Item) owner.Item {
 	if !v.rep.sent.IsZero() {
 		it.Sent = v.rep.sent
+		it.SentErased = v.rep.erasedOnly
 	}
 	if !v.rep.tried.IsZero() {
 		it.Retried = v.rep.tried
@@ -1050,8 +1055,10 @@ const repeatWindow = 24 * time.Hour
 // message of the thread.
 //
 // An erased send (CAP-3, a recall reset) no longer names its record or
-// body, so it cannot be compared: it is taken as the same send, on both
-// sides (Security R23 on #1433).
+// body, so they cannot be compared, but it keeps its recipients: one to
+// the same recipients is taken as the same send, on both sides (Security
+// R23 on #1433), and one to others is not a repeat (OP2-ER-1, #1678). A
+// mark that rests only on erased sends says so (erasedOnly, OP2-ER-2).
 //
 // Confirm repeats (Mark, D-116, 2026-10-14): under journal rule (b) a
 // request made after the effect went is a new send, so the owner may
@@ -1082,19 +1089,26 @@ func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 		if !u.Started || u.Intent.ID == in.ID {
 			continue
 		}
-		same := u.Erased
-		if !u.Erased {
+		if u.Erased {
+			if !sameSet(fold(u.Intent.Recipients), k.rcpt) {
+				continue
+			}
+		} else {
 			k2 := g.sendID(ctx, u.Intent)
 			if !sameSet(k2.rcpt, k.rcpt) {
 				continue
 			}
-			same = k2.rec == k.rec || (sameBody(u.Intent) == body && sharesThread(k.thread, k2.thread))
-		}
-		if !same {
-			continue
+			if k2.rec != k.rec && (sameBody(u.Intent) != body || !sharesThread(k.thread, k2.thread)) {
+				continue
+			}
 		}
 		if !u.Went.IsZero() && !u.Known.Before(since) {
 			first(&r.sent, u.Went)
+			if len(r.went) == 0 {
+				r.erasedOnly = u.Erased
+			} else if !u.Erased {
+				r.erasedOnly = false
+			}
 			r.went = append(r.went, u.Intent.ID)
 		}
 		if !u.Tried.IsZero() {
