@@ -214,6 +214,34 @@ class LintTest(unittest.TestCase):
             self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
 
     # REQ: FIRST-PASS
+    def test_acceptance_heading_and_short_marker_forms_are_recognised(self):
+        for text in ("# A-1\n\n## Acceptance tests\n\n- `tests/x.py::a`\n",
+                     "# A-1\n\n## Acceptance tests\n\nPlain text naming `tests/x.py::a`.\n",
+                     "# A-1\n\n**Acceptance:** `tests/x.py::a`\n",
+                     "# A-1\n\n**Acceptance:**\n- `tests/x.py::a`\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
+
+    # REQ: FIRST-PASS
+    def test_empty_heading_or_short_marker_fails(self):
+        for text in ("# A-1\n\n## Acceptance tests\n\n## Next\n- `x`\n", "# A-1\n\n## Acceptance tests\n",
+                     "# A-1\n\n**Acceptance:**\n"):
+            self.assertEqual(len(self.lint(**{"briefs/A-1.md": text})), 1, text)
+
+    # REQ: FIRST-PASS
+    def test_empty_marker_before_an_unrelated_list_item_is_empty(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n\n- **Scope:** tools/x.py\n",
+                     "# A-1\n\n**Acceptance tests:**\n\n**Scope:** tools/x.py\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}),
+                             ["briefs/A-1.md: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"], text)
+
+    # REQ: FIRST-PASS
+    def test_table_or_plain_text_under_the_marker_is_not_empty(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n| ID | Test |\n|---|---|\n| A-1 | tests/x.py::a |\n",
+                     "# A-1\n\n**Acceptance tests:**\n\n| ID | Test |\n|---|---|\n",
+                     "# A-1\n\n**Acceptance tests:**\nEach ID is covered by tests/x.py.\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
+
+    # REQ: FIRST-PASS
     def test_baselined_brief_with_a_listed_acceptance_test_must_leave_the_baseline(self):
         got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`\n",
                            "tools/brief_acceptance_baseline.txt": "A-1.md\n"})
