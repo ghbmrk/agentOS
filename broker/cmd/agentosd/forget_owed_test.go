@@ -708,7 +708,7 @@ func TestForgetItem2ReportOfAnotherTakeBackIsNotTold(t *testing.T) {
 }
 
 // W3-forget-reach-r1-1 and -r3-1 (brief IDs).
-// REQ: CAP-3, UX-182-3
+// REQ: CAP-3
 
 // heldWork is fakeWork whose take-back first keeps a copy of the owed
 // file as it was when the take-back began, before recall recorded it
