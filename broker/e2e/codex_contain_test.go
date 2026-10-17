@@ -170,6 +170,7 @@ func TestIntegrationCodexContainment(t *testing.T) {
 		}
 	}
 	t.Logf("tool: %s", line)
+	t.Logf("tool output sent back: %s", tail(ep.toolOutput()))
 	var p probeResult
 	if err := json.Unmarshal([]byte(line), &p); err != nil {
 		t.Fatalf("the probe never ran as a CLI tool: %v; result %q", err, tail(stream))
@@ -238,6 +239,23 @@ type containEndpoint struct {
 	mu        sync.Mutex
 	calls     int
 	sawCanary bool
+	second    []byte // the second request's body, which carries the tool's output
+}
+
+// toolOutput is the custom_tool_call_output the CLI sent back for the tool call.
+func (e *containEndpoint) toolOutput() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var req struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	json.Unmarshal(e.second, &req)
+	for _, in := range req.Input {
+		if strings.Contains(string(in), `"custom_tool_call_output"`) {
+			return string(in)
+		}
+	}
+	return tail(string(e.second))
 }
 
 func (e *containEndpoint) seen() (int, bool) {
@@ -247,7 +265,7 @@ func (e *containEndpoint) seen() (int, bool) {
 }
 
 func (e *containEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	io.Copy(io.Discard, r.Body)
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/responses") {
 		http.NotFound(w, r)
 		return
@@ -255,6 +273,9 @@ func (e *containEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	e.mu.Lock()
 	turn := e.calls
 	e.calls++
+	if turn == 1 {
+		e.second = body
+	}
 	if r.Header.Get("Authorization") == e.bearer && r.Header.Get("Chatgpt-Account-Id") == e.account {
 		e.sawCanary = true
 	}
