@@ -661,7 +661,7 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 func (m *Manager) admit(mc *machine) error {
 	mc.mu.Lock()
 	mc.revoked = false
-	r := admission.Request{ID: mc.ID, Class: mc.Spec.Class, MemMB: mc.Spec.MemMB}
+	r := admission.Request{ID: mc.ID, Class: mc.Spec.Class, MemMB: mc.Spec.MemMB, Instance: mc.Instance}
 	mc.mu.Unlock()
 	mc.admitMu.Lock()
 	defer mc.admitMu.Unlock()
@@ -2086,10 +2086,26 @@ func (m *Manager) destroy(ctx context.Context, mc *machine) error {
 // kills the sandbox under that operation, which then fails, and the
 // machine is recorded as preempted once the operation lets go. While that
 // is pending the machine cannot be started again.
-func (m *Manager) Preempt(id string) error {
+func (m *Manager) Preempt(id string) error { return m.preempt(id, nil) }
+
+// PreemptInstance is Preempt of one life of machine id (admission's
+// LifePreempter). If id now names another life, a successor created after
+// admission picked the victim, it is refused with ErrUnknown and left as
+// it is: the picked life was destroyed, which released its memory (#2144).
+func (m *Manager) PreemptInstance(id, instance string) error {
+	return m.preempt(id, &instance)
+}
+
+// preempt is Preempt, of the life instance names if it is not nil.
+// Instance never changes once a machine is in m.machines, so it is read
+// without the machine's lock.
+func (m *Manager) preempt(id string, instance *string) error {
 	mc, err := m.get(id)
 	if err != nil {
 		return nil // already gone: nothing holds memory
+	}
+	if instance != nil && mc.Instance != *instance {
+		return fmt.Errorf("%w: machine %s is another life", ErrUnknown, id)
 	}
 	mc.preempting.Store(true)
 	if mc.mu.TryLock() {

@@ -69,6 +69,18 @@ func (p *preempter) Preempt(id string) error {
 	return m.Preempt(id)
 }
 
+// PreemptInstance forwards too, so admission preempts the life it picked
+// and never a successor given its ID (#2144).
+func (p *preempter) PreemptInstance(id, instance string) error {
+	m := p.m.Load()
+	if m == nil {
+		return errors.New("machine manager not open")
+	}
+	return m.PreemptInstance(id, instance)
+}
+
+var _ admission.LifePreempter = (*preempter)(nil)
+
 // machines adapts the machine manager to the guest plane.
 type machines struct{ m *vm.Manager }
 
@@ -987,6 +999,7 @@ func main() {
 	// card's network (#1525).
 	if apNetPath != "" {
 		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
+		go watchCommittedWiFi(ctx, apNetPath, verifySocket) // #1696
 	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.

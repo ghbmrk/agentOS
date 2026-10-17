@@ -43,6 +43,11 @@ type Request struct {
 	// room's. Experiments cannot carry it. It makes accepted work count as
 	// the owner's for BusyCause and RevokedForOwner (PE5, security P2).
 	Owner bool
+	// Instance, if set, names this life of the machine (a machine
+	// destroyed and recreated under its ID gets a new one). Admission only
+	// passes it back, to a LifePreempter, so a preemption reaches the
+	// machine that was picked and never a successor given its ID (#2144).
+	Instance string
 }
 
 // Decision is a successful admission and what was preempted for it.
@@ -54,6 +59,16 @@ type Decision struct {
 // the machine's memory is released.
 type Preempter interface {
 	Preempt(id string) error
+}
+
+// LifePreempter is a Preempter that can preempt one life of a machine.
+// Admission calls PreemptInstance, rather than Preempt, for a victim
+// admitted with an Instance. It preempts the machine only if id still
+// names that life, and otherwise refuses with an error: a same-ID
+// successor admitted after the victim was picked is left running (#2144).
+type LifePreempter interface {
+	Preempter
+	PreemptInstance(id, instance string) error
 }
 
 // Config holds the declared budget (RES-2).
@@ -132,11 +147,13 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 	}
 	var victims []string
 	picked := map[string]uint64{} // victim ID -> the admission it was picked as
+	lives := map[string]string{}  // victim ID -> the life it was picked as
 	for i := len(c.order) - 1; i >= 0 && need > 0; i-- {
 		v := c.running[c.order[i]]
 		if v.Class == Experiment && r.Class.Outranks(Experiment) && !c.yielding[v.ID] {
 			victims = append(victims, v.ID)
 			picked[v.ID] = c.gens[v.ID]
+			lives[v.ID] = v.Instance
 			need -= v.MemMB
 		}
 	}
@@ -167,8 +184,15 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 
 	var done []string
 	var firstErr error
+	lp, _ := c.pre.(LifePreempter)
 	for _, id := range victims {
-		if err := c.pre.Preempt(id); err != nil {
+		var err error
+		if inst := lives[id]; lp != nil && inst != "" {
+			err = lp.PreemptInstance(id, inst)
+		} else {
+			err = c.pre.Preempt(id)
+		}
+		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("admission: preempting %s: %w", id, err)
 			}

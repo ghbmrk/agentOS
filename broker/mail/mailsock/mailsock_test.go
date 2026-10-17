@@ -19,7 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/mail/mailtest"
 )
 
-// REQ: CRED-1, CRED-7, OP-3, ADP-2
+// REQ: CRED-1, CRED-7, CRED-8, OP-3, ADP-2
 
 var ctx = context.Background()
 
@@ -509,5 +509,81 @@ func TestEmptyGenerationFailsClosed(t *testing.T) {
 	}
 	if _, err := c.Pin("").Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
 		t.Fatalf("empty both sides: %v", err)
+	}
+}
+
+// refusingIMAP is a raw IMAP server that logs in and refuses every
+// SELECT, sending unilateral "* n EXISTS" lines around the refusal: the
+// SR3-mail-k18c case, where go-imap's reader once died holding its state
+// lock and the session's Logout never returned.
+func refusingIMAP(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	exists := strings.Repeat("* 3 EXISTS\r\n", 200)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(30 * time.Second))
+				c.Write([]byte("* OK [CAPABILITY IMAP4rev1] ready\r\n"))
+				buf := make([]byte, 4096)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					f := strings.Fields(string(buf[:n]))
+					if len(f) < 2 {
+						return
+					}
+					switch strings.ToUpper(f[1]) {
+					case "LOGIN":
+						c.Write([]byte(f[0] + " OK done\r\n"))
+					case "SELECT", "EXAMINE":
+						c.Write([]byte(exists + f[0] + " NO no such folder\r\n" + exists))
+					default:
+						c.Write([]byte("* BYE bye\r\n" + f[0] + " OK done\r\n"))
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return l.Addr().String()
+}
+
+// TestHostileSelectCostsOneCall (CRED-8, egress K18): a server that
+// refuses SELECT and sends unilateral EXISTS around the refusal gets a
+// "failed" answer on the socket for every call, well inside the client's
+// deadline; none is left unanswered. The race it guards is between two
+// goroutines in the vault process, so the call repeats.
+func TestHostileSelectCostsOneCall(t *testing.T) {
+	addr := refusingIMAP(t)
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: addr, SMTP: addr, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
+		From: me, Timeout: 30 * time.Second, Credential: func(context.Context) (imapsmtp.Login, error) {
+			return imapsmtp.Login{User: "canary-user", Secret: "canary-secret"}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := serve(t, func() (mailsock.Account, error) {
+		return mailsock.Account{Store: st, Address: me, Generation: testGen}, nil
+	})
+	c := mailsock.NewClient(path).Pin(testGen)
+	for i := 0; i < 100; i++ {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, _, err := c.UIDs(cctx, "INBOX")
+		cancel()
+		if !errors.Is(err, mailsock.ErrFailed) {
+			t.Fatalf("call %d: got %v, want the socket to answer failed", i, err)
+		}
 	}
 }
