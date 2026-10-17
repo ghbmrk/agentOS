@@ -81,8 +81,10 @@ type Controller struct {
 
 	mu       sync.Mutex
 	running  map[string]Request
-	order    []string        // admission order, for newest-first preemption
-	yielding map[string]bool // experiments being preempted right now
+	order    []string          // admission order, for newest-first preemption
+	gens     map[string]uint64 // per running ID, which admission put it there
+	gen      uint64            // the last admission's number
+	yielding map[string]bool   // experiments being preempted right now
 	// revokes records, per victim, whether it was preempted for the
 	// owner's work without pressure (RevokedForOwner).
 	revokes map[string]bool
@@ -93,7 +95,7 @@ func New(cfg Config, pre Preempter) (*Controller, error) {
 	if cfg.HeadroomMB < 0 || cfg.CapacityMB <= cfg.HeadroomMB {
 		return nil, fmt.Errorf("admission: need capacity > headroom >= 0, got %+v", cfg)
 	}
-	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}, yielding: map[string]bool{}}, nil
+	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}, gens: map[string]uint64{}, yielding: map[string]bool{}}, nil
 }
 
 // Admit admits r or refuses it, preempting experiments when r outranks them
@@ -129,10 +131,12 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		need = r.MemMB
 	}
 	var victims []string
+	picked := map[string]uint64{} // victim ID -> the admission it was picked as
 	for i := len(c.order) - 1; i >= 0 && need > 0; i-- {
 		v := c.running[c.order[i]]
 		if v.Class == Experiment && r.Class.Outranks(Experiment) && !c.yielding[v.ID] {
 			victims = append(victims, v.ID)
+			picked[v.ID] = c.gens[v.ID]
 			need -= v.MemMB
 		}
 	}
@@ -143,7 +147,10 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		}
 		return Decision{}, ErrNoRoom
 	}
+	c.gen++
+	mine := c.gen
 	c.running[r.ID] = r
+	c.gens[r.ID] = mine
 	c.order = append(c.order, r.ID)
 	forOwner := !pressured && (r.Class == Foreground || r.Class == Accepted && r.Owner)
 	if len(c.revokes)+len(victims) > maxRevokes {
@@ -176,12 +183,19 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		delete(c.yielding, id)
 	}
 	for _, id := range done {
-		c.removeLocked(id)
+		// Only the entry that was picked: if the victim left the books
+		// while it yielded and a successor was admitted under its ID, the
+		// successor stays counted (#1707).
+		if g, ok := c.gens[id]; ok && g == picked[id] {
+			c.removeLocked(id)
+		}
 	}
 	// Admit if what did yield made enough room; otherwise give the
 	// reservation back. A preempted experiment stays preempted either way.
 	if c.freeLocked() < 0 {
-		c.removeLocked(r.ID)
+		if c.gens[r.ID] == mine { // not a later admission under r's ID
+			c.removeLocked(r.ID)
+		}
 		if firstErr == nil {
 			firstErr = ErrNoRoom
 		}
@@ -315,6 +329,7 @@ func (c *Controller) removeLocked(id string) {
 		return
 	}
 	delete(c.running, id)
+	delete(c.gens, id)
 	for i, o := range c.order {
 		if o == id {
 			c.order = append(c.order[:i], c.order[i+1:]...)
