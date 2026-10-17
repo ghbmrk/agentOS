@@ -29,10 +29,10 @@ func heap() int64 {
 }
 
 // holdUploads opens n uploads to path over the socket in dir, each
-// declaring size bytes of {"x":"aaa..."} and sending all but the last
-// 1 MiB, then holding. It returns once the uploads are held, with a func
+// declaring size bytes of {"x":"aaa..."} and sending the first hold
+// bytes, then holding. It returns once the uploads are held, with a func
 // that finishes them and returns their status codes.
-func holdUploads(t *testing.T, dir, path string, n, size int) func() []int {
+func holdUploads(t *testing.T, dir, path string, n, size, hold int) func() []int {
 	t.Helper()
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, Socket))
@@ -41,7 +41,6 @@ func holdUploads(t *testing.T, dir, path string, n, size int) func() []int {
 	head, tail := `{"x":"`, `"}`
 	pad := strings.Repeat("a", size-len(head)-len(tail))
 	body := []byte(head + pad + tail) // shared, so the guest side holds one copy
-	hold := size - 1<<20
 	release := make(chan struct{})
 	sent := make(chan struct{}, n)
 	codes := make([]int, n)
@@ -98,29 +97,47 @@ func bigMeter(t *testing.T) *meter.Meter {
 // hold the broker's memory to its budget, not one buffer each, and each
 // waits for room rather than being refused.
 func TestHeldUploadsKeepHeapBoundedAndWait(t *testing.T) {
-	for name, path := range map[string]string{"model": "/model/v1/chat/completions", "result": "/cleanroom/result"} {
-		t.Run(name, func(t *testing.T) {
+	// Each budget admits one upload at a time (a 1 MiB model call reserves
+	// ~108 MiB, a 1 MiB result ~32 MiB), so the heap holds one body while
+	// unbounded buffering would hold n. Small bodies keep it fast under -race.
+	for _, tc := range []struct {
+		name, path string
+		budget     int64
+	}{
+		{"model", "/model/v1/chat/completions", 256 << 20},
+		{"result", "/cleanroom/result", 128 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, func(c *Config) {
 				c.Meter, c.Model = bigMeter(t), func(string) http.Handler { return http.NotFoundHandler() }
-				c.InFlightBytes = 2 << 30
+				c.InFlightBytes = tc.budget
 				c.Timeout = 2 * time.Minute
 			})
-			const n, size = 32, 8 << 20
+			const n, size, hold, bound = 32, 1 << 20, 1<<20 - 4<<10, 8 << 20
 			var grew int64
 			var codes []int
+			guested := make(chan struct{})
 			r.f.guest = func(id, dir string) {
+				defer close(guested)
 				base := heap()
-				finish := holdUploads(t, dir, path, n, size)
+				finish := holdUploads(t, dir, tc.path, n, size, hold)
 				grew = heap() - base
 				codes = finish()
 				call(client(dir), "POST", "/cleanroom/result", goodResult())
 			}
 			r.b.Send(nextDay(), [][]byte{skillHint(t)})
 			r.run()
+			// The uploads run one at a time, which takes longer than
+			// waitFor's 5 s under -race; wait for the guest first.
+			select {
+			case <-guested:
+			case <-time.After(time.Minute):
+				t.Fatal("the guest's uploads did not finish")
+			}
 			waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 			r.f.wg.Wait()
-			if grew > 128<<20 {
-				t.Errorf("heap grew %d MiB with %d uploads of %d MiB held", grew>>20, n, size>>20)
+			if grew > bound {
+				t.Errorf("heap grew %d KiB with %d uploads of %d KiB held", grew>>10, n, size>>10)
 			}
 			for i, c := range codes {
 				switch c {
