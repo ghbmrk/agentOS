@@ -29,8 +29,17 @@ func replyKind(text string) string {
 			return k.kind
 		}
 	}
+	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
+		return "outage"
+	}
 	return "other"
 }
+
+// outagePrefix and outageMark frame the owner line's recovery notice
+// (modemlink's recoveryText, UX U-B1): sent once the line is back after a
+// text to the owner could not go, ahead of anything queued. It answers no
+// command, so the step passes over it wherever it lands (E16).
+const outagePrefix, outageMark = "I couldn't text you from ", " didn't reach you"
 
 // otherWords are the letter-only words a failure may quote from a text
 // replyKind does not know, so a run shows which notice it was.
@@ -94,7 +103,8 @@ type phoneRun struct {
 // session was locked and the fresh code unlocked it (CH-14). After the
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
-// comes before the barrier's (CH-1, CH-3).
+// comes before the barrier's (CH-1, CH-3). The owner line's recovery
+// notice is passed over wherever it lands (E16).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -128,6 +138,8 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 func (r *phoneRun) reply(text string) {
 	k := replyKind(text)
 	switch {
+	case k == "outage":
+		// Not a reply: the box's account of a text it lost earlier.
 	case !r.statusSent:
 		if k == "help" {
 			r.probed = true
