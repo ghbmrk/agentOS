@@ -1,6 +1,7 @@
 package main
 
-// REQ: CAP-3, UX-182-3, R2A, R2B
+// REQ: CAP-3, R2A, R2B
+// Also serves the UX lens duty UX-182-3 (not a SPEC ID, so not in the marker).
 
 import (
 	"context"
