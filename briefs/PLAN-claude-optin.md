@@ -23,7 +23,7 @@ Needed, because current SPEC text says otherwise or is silent:
 4. **CH-11:** `CLAUDE OFF` joins the closed control words (pause, with the revoke link in the reply).
 5. **CAP-9 routing:** a Claude run starts only from an owner-initiated task; a task that reads web pages or inbound mail never routes to Claude.
 6. **ONB-3 opt-in:** a confirmed step to turn off "Help improve Claude", with its link.
-7. **A14:** the canary runs on every release that bumps the pinned Claude Code version.
+7. **A14:** the canary runs on every agentOS release, whether or not it bumps the pinned Claude Code version.
 Scope: `SPEC.md`, `briefs/PLAN-claude-optin.md`. **Acceptance tests:** none: SPEC text only; `tools/doclint.py` and the spec-diff review by Mark. **Guard files:** none. 20k tokens.
 
 ## Build packages (each needs the SPEC diff merged first; order C1 to C5)
@@ -54,7 +54,7 @@ Scope: `SPEC.md`, `briefs/PLAN-claude-optin.md`. **Acceptance tests:** none: SPE
 
 **C4 PLAN-claude-optin-4: routing policy.** A (owner-initiated only), D (web or inbound-mail tasks never routed), C (`CLAUDE OFF` pauses and replies with the claude.ai revoke link), the #819 pause, API fallback, and the CRED-7 scan of Claude results for the token pattern without reading the real token. Scope: `broker/modelroute/claude_policy.go` (new), `broker/modelroute/claude_policy_test.go` (new), `broker/control/` (word handler and test), `broker/provagent/gate.go`, `broker/provagent/gate_test.go`. **Acceptance tests:** CAP-9: `TestLoopTaskNeverRoutesToClaude`, `TestWebReadingTaskNeverRoutesToClaude`, `TestMailReadingTaskNeverRoutesToClaude`, `TestPauseFallsBackToAPI`; CH-11: `TestClaudeOffPausesAndRepliesWithRevokeLink`; CRED-7: `TestResultWithTokenPatternWithheld`. **Guard files:** `broker/control/` core list; confirm. 90k.
 
-**C5 PLAN-claude-optin-5: per-release canary and terms re-read.** The A14 canary (adversarial brief, canary login surfaces nowhere) on every release that bumps the pinned version; the terms re-read gate that checks each quoted clause against the page at each release. Scope: `broker/provagent/claude_release.go` (new), `broker/provagent/claude_release_test.go` (new), `tools/` release check (name it in the PR). **Acceptance tests:** A14: `TestCanaryRunsOnVersionBump`, `TestReleaseBlockedWithoutCanaryPass`; CRED-5: `TestReleaseBlockedWhenQuotedClauseChanged`. **Guard files:** `tools/risk_tier.py` and `tools/ci_scope*` are Mark-only merges if touched; avoid. 70k.
+**C5 PLAN-claude-optin-5: per-release canary and terms re-read.** The A14 canary (adversarial brief, canary login surfaces nowhere) on every agentOS release, not only a Claude Code bump; the terms re-read gate that checks each quoted clause against the page at each release. Scope: `broker/provagent/claude_release.go` (new), `broker/provagent/claude_release_test.go` (new), `tools/` release check (name it in the PR). **Acceptance tests:** A14: `TestCanaryRunsOnEveryRelease`, `TestReleaseBlockedWithoutCanaryPass`; CRED-5: `TestReleaseBlockedWhenQuotedClauseChanged`. **Guard files:** `tools/risk_tier.py` and `tools/ci_scope*` are Mark-only merges if touched; avoid. 70k.
 
 **Conflicts (D-111) at 2026-10-17 00:43Z.** C1 and C4 edit `broker/provagent` (held by #2015, and by PLAN-grok and PLAN-muse in `declare.go`). C3 depends on PR #2063. Build order by that: after #2015 and PLAN-grok.
 
