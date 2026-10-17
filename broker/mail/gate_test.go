@@ -71,6 +71,7 @@ func (o *ownerFake) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error
 func (o *ownerFake) DueAutoReplies() []owner.Queued { return nil }
 func (o *ownerFake) UndoneAfterRelease(string) bool { return false }
 func (o *ownerFake) Inform(string) error            { return nil }
+func (o *ownerFake) Post(owner.Class, string) error { return nil }
 
 func (o *ownerFake) last() (string, []owner.Item) {
 	o.mu.Lock()
