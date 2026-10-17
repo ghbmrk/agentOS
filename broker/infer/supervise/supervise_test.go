@@ -441,6 +441,62 @@ func TestServiceCannotOpenEgressSocket(t *testing.T) {
 	}
 }
 
+// INF-6: in the production layout (agentos-egress and broker/sockets: a
+// 0711 directory, a 0666 socket) the service's connect succeeds, since it
+// has no mount namespace; what refuses it is the listener's SO_PEERCRED
+// check. So the peer credential must carry the service's real uid and gid,
+// never root's or the broker's, whatever its user namespace maps.
+func TestEgressPeerCheckSeesTheServiceUID(t *testing.T) {
+	needRoot(t)
+	dir, err := os.MkdirTemp("", "infer-egress-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(dir, "vault.sock")
+	ln, err := net.Listen("unix", vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(vault, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	peer := make(chan *syscall.Ucred, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		raw, err := c.(*net.UnixConn).SyscallConn()
+		if err != nil {
+			return
+		}
+		raw.Control(func(fd uintptr) {
+			cred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+			if err == nil {
+				peer <- cred
+			}
+		})
+	}()
+	_, sock := service(t, Options{}, "unix", vault)
+	if got := ask(t, sock); got != "connected" {
+		t.Fatalf("dial of %s from the service: %s, want connected (the production layout lets it connect)", vault, got)
+	}
+	select {
+	case cred := <-peer:
+		if cred.Uid != testUID || cred.Gid != testGID {
+			t.Fatalf("peer credential uid %d gid %d, want the service's %d/%d", cred.Uid, cred.Gid, testUID, testGID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listener never read a peer credential")
+	}
+}
+
 // INF-6, INF-8: the service's environment is childproc's allowlist with
 // only PATH, so a variable set in the parent never reaches it.
 func TestServiceEnvIsAllowlist(t *testing.T) {
