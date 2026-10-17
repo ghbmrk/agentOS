@@ -706,3 +706,99 @@ func TestForgetItem2ReportOfAnotherTakeBackIsNotTold(t *testing.T) {
 		t.Fatalf("owed %v", a.entries(t))
 	}
 }
+
+// W3-forget-reach-r1-1 and -r3-1 (brief IDs).
+// REQ: CAP-3, UX-182-3
+
+// heldWork is fakeWork whose take-back first keeps a copy of the owed
+// file as it was when the take-back began, before recall recorded it
+// (the state before MarkTakeBack(false)), then, if hold is set, reports
+// on held and waits on hold.
+type heldWork struct {
+	*fakeWork
+	store *countStore
+	at    []byte
+	held  chan struct{}
+	hold  chan struct{}
+}
+
+func (w *heldWork) TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {
+	b, _ := w.store.Load()
+	w.at = append([]byte(nil), b...)
+	if w.hold != nil {
+		w.held <- struct{}{}
+		<-w.hold
+	}
+	return w.fakeWork.TakeBack(ctx, lineage, since, approved)
+}
+
+// r1-1: recall opens while this process's agentBack is between its owe
+// and its take-back. resumeAgent leaves that item 2 to agentBack (the
+// owing guard in judgeAgent): recall holds no take-back yet, so judging
+// it would drop the owed entry before the done text is told.
+func TestForgetItem2ResumeDuringAnAgentBackIsNotJudged(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	since, _ := forgetSince(a.in.ID)
+	hw := &heldWork{fakeWork: w, store: a.store, held: make(chan struct{}), hold: make(chan struct{})}
+	a.f.agent.Store(&forgetAgent{work: hw, lineage: func() (string, error) { return "agent.l1", nil }})
+	a.d.setUp()
+	ran := make(chan journal.Outcome, 1)
+	go func() { ran <- a.f.Execute(context.Background(), a.in, 1) }()
+	within(t, hw.held)
+	if st, known := w.TakeBackOf(since); !known || st != recalltool.TakeBackNone {
+		t.Fatalf("recall holds %v (known %v) before the take-back", st, known)
+	}
+	a.f.resumeAgent(context.Background()) // recall opens now
+	if got := a.d.got(); len(got) != 0 {
+		t.Fatalf("told %q before the take-back", got)
+	}
+	if e, ok := a.entries(t)[a.in.ID]; !ok || !e.Agent || !e.Taking {
+		t.Fatalf("owed entry not kept while taking back: %v", a.entries(t))
+	}
+	give(t, hw.hold, struct{}{})
+	var out journal.Outcome
+	select {
+	case out = <-ran:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out")
+	}
+	a.f.resumeAgent(context.Background())
+	if got := a.d.got(); out.Result != journal.ResultSucceeded || len(got) != 1 || got[0] != forgetAgentDone {
+		t.Fatalf("%v: sent %q", out, got)
+	}
+	if len(a.entries(t)) != 0 || len(w.backs) != 1 {
+		t.Fatalf("owed %v, took back %v", a.entries(t), w.backs)
+	}
+}
+
+// r3-1: a crash after item 2's owe and before recall recorded its
+// take-back. Once recall opens and holds none, the owed entry is dropped
+// untold (nothing was taken back), and the journal's re-run of item 2
+// takes the agent back and tells it done, once.
+func TestForgetItem2CrashAfterOweBeforeTakeBackLeavesNoEntry(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	since, _ := forgetSince(a.in.ID)
+	hw := &heldWork{fakeWork: w, store: a.store}
+	a.f.agent.Store(&forgetAgent{work: hw, lineage: func() (string, error) { return "agent.l1", nil }})
+	a.f.Execute(context.Background(), a.in, 1)
+	if e, ok := owedIn(t, hw.at)[a.in.ID]; !ok || !e.Agent || !e.Taking {
+		t.Fatalf("not owed before the take-back: %q", hw.at)
+	}
+	a.gate.st[a.in.ID] = journal.InFlight // the crash: Execute never returned
+	recall := &fakeWork{worked: true, ok: true}
+	recall.setState(since, recalltool.TakeBackNone) // MarkTakeBack never ran
+	again := a.nextStart(t, hw.at, recall)
+	if len(again.texts) != 0 || len(again.f.owed.goals()) != 0 || len(recall.backs) != 0 {
+		t.Fatalf("after the crash: told %q owed %v took back %v", again.texts, again.f.owed.goals(), recall.backs)
+	}
+	recall.setState(since, recalltool.TakeBackDone)       // recall records it at the re-run
+	out := again.f.Execute(context.Background(), a.in, 2) // the journal re-runs item 2
+	if out.Result != journal.ResultSucceeded || strings.Join(again.texts, "|") != forgetAgentDone || len(recall.backs) != 1 {
+		t.Fatalf("re-run %v: told %q took back %v", out, again.texts, recall.backs)
+	}
+	if len(again.f.owed.goals()) != 0 {
+		t.Fatalf("owed %v after the re-run", again.f.owed.goals())
+	}
+}
