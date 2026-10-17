@@ -1,6 +1,6 @@
 # FUZZ-broker: native fuzz targets on the broker's state-transition code
 
-Board row: issue #1813. Class: release. Tier: B (test files only). Usage estimate: 120k tokens, checkpoint at 90k.
+Board row: issue #1813. Class: release. Tier: A (test files only, but in tier-A packages; `risk_tier.py` prints A). Usage estimate: 120k tokens, checkpoint at 90k.
 
 **Why.** The tier-A packages below hold state across many calls (a gateway cache, live sessions, approvals, key slots), and their tests drive hand-picked sequences. A fuzzer that drives random sequences of the same operations against a small model finds orderings no table test names. Go's stdlib fuzzing needs no new dependency; the seeds run under plain `go test`, and a short `-fuzz` run in CI explores past them.
 
