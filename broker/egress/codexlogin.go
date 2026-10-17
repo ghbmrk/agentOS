@@ -32,7 +32,7 @@ var (
 )
 
 // LoginKind is the vault kind of a plan login entry.
-const LoginKind = "plan-login"
+const LoginKind = vault.KindPlanLogin
 
 // LoginStore is the part of the vault a plan login needs.
 type LoginStore interface {

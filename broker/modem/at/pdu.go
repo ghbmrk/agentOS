@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -111,17 +112,37 @@ func EncodeSubmit(number, text string, ref byte) ([]Submit, error) {
 	return out, nil
 }
 
-// EncodeDeliver encodes an SMS-DELIVER from number, split as a network would.
-// Only the simulator uses it.
+// sctsFixed is the service centre time stamp of EncodeDeliver's PDUs.
+var sctsFixed = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+
+// EncodeDeliver encodes an SMS-DELIVER from number, split as a network would,
+// stamped 2026-10-04 12:00:00 UTC. Only the simulator uses it.
 func EncodeDeliver(from, text string, ref byte) ([]string, error) {
+	return EncodeDeliverAt(from, text, ref, sctsFixed)
+}
+
+// EncodeDeliverAt is EncodeDeliver stamped at (UTC, to the second), as a
+// network stamps each delivery: the same words sent again later make a
+// different PDU, which the driver does not take for a replay (#1714).
+func EncodeDeliverAt(from, text string, ref byte, at time.Time) ([]string, error) {
 	oa, err := encodeAddr(from)
 	if err != nil {
 		return nil, err
 	}
-	return encodeDeliver(oa, 0x00, text, ref)
+	return encodeDeliver(oa, 0x00, text, ref, at)
 }
 
-func encodeDeliver(oa []byte, pid byte, text string, ref byte) ([]string, error) {
+// scts encodes t (in UTC) as TP-SCTS: swapped semi-octets, zone 0.
+func scts(t time.Time) []byte {
+	t = t.UTC()
+	b := make([]byte, 0, 7)
+	for _, v := range []int{t.Year() % 100, int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second()} {
+		b = append(b, byte(v%10)<<4|byte(v/10))
+	}
+	return append(b, 0x00)
+}
+
+func encodeDeliver(oa []byte, pid byte, text string, ref byte, at time.Time) ([]string, error) {
 	parts, ucs2, err := split(text)
 	if err != nil {
 		return nil, err
@@ -136,14 +157,15 @@ func encodeDeliver(oa []byte, pid byte, text string, ref byte) ([]string, error)
 		if udh != nil {
 			fo |= 0x40
 		}
-		// SMSC +15550000000, timestamp 2026-10-04 12:00:00 UTC.
+		// SMSC +15550000000.
 		b := []byte{0x07, 0x91, 0x51, 0x55, 0x00, 0x00, 0x00, 0xF0, fo}
 		b = append(b, oa...)
 		dcs := byte(0x00)
 		if ucs2 {
 			dcs = 0x08
 		}
-		b = append(b, pid, dcs, 0x62, 0x01, 0x40, 0x21, 0x00, 0x00, 0x00)
+		b = append(b, pid, dcs)
+		b = append(b, scts(at)...)
 		b = append(b, userData(p, udh, ucs2)...)
 		out = append(out, strings.ToUpper(hex.EncodeToString(b)))
 	}

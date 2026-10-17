@@ -186,7 +186,13 @@ func (d *Device) receive() {
 	var ref byte
 	for m := range d.line.Inbox() {
 		ref++
-		pdus, err := at.EncodeDeliver(m.From, m.Text, ref)
+		// Stamp the carrier's delivery time, as a network does: the same
+		// words sent twice make two PDUs, not a replay (#1714).
+		when := m.At
+		if when.IsZero() {
+			when = time.Now()
+		}
+		pdus, err := at.EncodeDeliverAt(m.From, m.Text, ref, when)
 		if err != nil {
 			continue
 		}

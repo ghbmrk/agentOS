@@ -405,6 +405,20 @@ func TestWorkerRouteBodyCheck(t *testing.T) {
 	if w := r.do(responses(full)); w.Code != http.StatusOK {
 		t.Fatalf("CLI request shape: %d %s", w.Code, w.Body)
 	}
+
+	// The pinned CLI also sends a top-level client_metadata map (seen on
+	// the box image's guest-task, #1701); refusing it fails every run.
+	r = newWorkerRig(t, false)
+	if w := r.do(responses(withKey(`"client_metadata":{"x-codex-installation-id":"synthetic-0000"}`))); w.Code != http.StatusOK {
+		t.Fatalf("client_metadata: %d %s", w.Code, w.Body)
+	}
+	// It carries text only: anything else in it is refused, not forwarded.
+	for _, bad := range []string{`"x"`, `["x"]`, `{"k":{"url":"x"}}`, `{"k":1}`} {
+		r = newWorkerRig(t, false)
+		if w := r.do(responses(withKey(`"client_metadata":` + bad))); w.Code != http.StatusForbidden || r.up.count() != 0 {
+			t.Fatalf("client_metadata %s: %d, upstream %d", bad, w.Code, r.up.count())
+		}
+	}
 }
 
 // withKey adds one top-level key to a CLI-shaped body.
