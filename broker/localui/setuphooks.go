@@ -179,7 +179,7 @@ func (a AgentosdSetup) Providers() []Provider {
 	}
 	out := make([]Provider, 0, len(ps.Providers))
 	for _, p := range ps.Providers {
-		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, Owed: p.Owed})
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, PrivateByConfig: p.PrivateByConfig, Owed: p.Owed})
 	}
 	return out
 }
