@@ -32,34 +32,55 @@ func TestLoopsAreOnByDefaultAndSaidInOneLine(t *testing.T) {
 		t.Fatalf("spare meter cap %+v, want no fixed budget", limit)
 	}
 	line := DefaultsLine(set.SpareCalls)
-	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || strings.Contains(line, "calls a day") || !strings.Contains(line, "and check for updates") {
+	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "spare plan quota") || !strings.Contains(line, "at most 1500 AI calls a day while a pay-per-token key") || !strings.Contains(line, "and check for updates") {
 		t.Fatalf("defaults line %q", line)
 	}
 }
 
-// LOOP-0 (#2291): the default spare budget is all spare quota, with no
-// fixed call budget; a budget the owner sets narrows it without approval,
-// and model work runs under the default.
-func TestDefaultSpareBudgetHasNoFixedCallLimit(t *testing.T) {
-	big := SpareLimits(NoSpareBudget)
-	if big.Calls < 1<<30 || big.Tokens < 1<<50 {
-		t.Fatalf("no-budget cap %+v is a fixed budget in disguise", big)
+// LOOP-0 (#2291) and OP-8: the default has no fixed call budget, but loop
+// calls can reach pay-per-token routes, which keep a money cap, so the
+// spare meter holds the OP-8 default cap. Security's repro on #2319: 2000
+// replay calls of 10 000 tokens (20M) were all admitted; past the cap they
+// are refused. A budget at or under the cap applies on text; above it is a
+// raise.
+func TestNoFixedBudgetKeepsThePaidRouteMoneyCap(t *testing.T) {
+	if SpareLimits(NoSpareBudget) != meter.DefaultOverallCap {
+		t.Fatalf("no-budget cap %+v, want the OP-8 default %+v", SpareLimits(NoSpareBudget), meter.DefaultOverallCap)
 	}
 	if SpareLimits(0) != (meter.Limits{Calls: 1, Tokens: 1}) {
 		t.Fatalf("a zero budget must fit no call: %+v", SpareLimits(0))
 	}
 	r := newRig(t)
+	admitted := 0
+	for i := 0; i < 2000; i++ {
+		c, err := r.spare.Start("eval-"+strconv.Itoa(i), 9000, 1000)
+		if err != nil {
+			break
+		}
+		c.Done(10000)
+		admitted++
+	}
+	if admitted != int(meter.DefaultOverallCap.Calls) {
+		t.Fatalf("%d loop calls admitted with no fixed budget, want the paid-route cap %d", admitted, meter.DefaultOverallCap.Calls)
+	}
+	used, _ := r.spare.Overall()
+	if used.Tokens > meter.DefaultOverallCap.Tokens {
+		t.Fatalf("%d tokens spent, over the paid-route cap", used.Tokens)
+	}
 	ctx := context.Background()
-	if _, limit := r.spare.Overall(); limit.Calls <= MaxSpareCalls {
-		t.Fatalf("default cap %+v is under what an owner text may set", limit)
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 2000", true); ok && r.s.Settings().SpareCalls == 2000 {
+		t.Fatalf("a budget above the paid-route cap applied on text: %q", got)
 	}
-	if got, ok := r.s.Text(ctx, "SPARE BUDGET "+strconv.Itoa(MaxSpareCalls), true); !ok || r.s.Settings().SpareCalls != MaxSpareCalls {
-		t.Fatalf("setting a budget from none is narrowing and applies on text: %q %v", got, ok)
+	if asked := r.pol.wasAsked(); len(asked) != 1 || asked[0] != "loops:n1:budget:2000" {
+		t.Fatalf("a budget above the paid-route cap is a raise to ask: %v", asked)
 	}
-	if asked := r.pol.wasAsked(); len(asked) != 0 {
-		t.Fatalf("setting a budget from none asked the owner: %v", asked)
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 1500", true); !ok || r.s.Settings().SpareCalls != 1500 {
+		t.Fatalf("a budget at the cap is narrowing and applies on text: %q %v", got, ok)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(MaxSpareCalls) {
+	if asked := r.pol.wasAsked(); len(asked) != 1 {
+		t.Fatalf("a budget at the cap asked the owner: %v", asked)
+	}
+	if _, limit := r.spare.Overall(); limit != SpareLimits(1500) {
 		t.Fatalf("set budget not applied to the spare meter: %+v", limit)
 	}
 }

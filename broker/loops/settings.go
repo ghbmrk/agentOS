@@ -115,23 +115,37 @@ func (s Settings) On(l Loop) bool { return !s.Off && !s.Paused[l] }
 
 // NoSpareBudget is the default spare budget: no fixed call budget, so
 // loops use spare quota above the owner reserve (LOOP-0, RES-5, LOOP-1).
-// An owner's SPARE BUDGET n sets a fixed one, which narrows it.
+// An owner's SPARE BUDGET n sets a fixed one.
 const NoSpareBudget int64 = -1
 
-// withinBudget reports whether calls is at most the budget cur; no fixed
-// budget (cur < 0) holds every budget.
-func withinBudget(calls, cur int64) bool { return cur < 0 || calls <= cur }
+// PaidRouteCap is what the spare meter holds with no fixed budget. Loop
+// calls through the model socket can reach pay-per-token API routes, which
+// keep a money cap (OP-8), and until RES-5a the meter cannot tell those
+// from plan quota, so no fixed budget is the OP-8 default cap, not
+// unlimited (security and combined fix-lists on #2319).
+var PaidRouteCap = meter.DefaultOverallCap
+
+// budgetCalls is the calls a day the budget cur allows: the paid-route
+// cap when there is no fixed budget.
+func budgetCalls(cur int64) int64 {
+	if cur < 0 {
+		return PaidRouteCap.Calls
+	}
+	return cur
+}
+
+// withinBudget reports whether calls is at most the budget cur.
+func withinBudget(calls, cur int64) bool { return calls <= budgetCalls(cur) }
 
 // TokensPerCall turns the owner's call count into the meter's token cap.
 const TokensPerCall = 10_000
 
 // SpareLimits is the meter cap for a spare budget of calls. The meter has
 // no zero cap, so a zero budget is one call of one token: no real call
-// fits under it. The meter has no unlimited cap either, so no fixed budget
-// is a cap no day reaches, small enough that used+use cannot overflow.
+// fits under it. No fixed budget is PaidRouteCap.
 func SpareLimits(calls int64) meter.Limits {
 	if calls < 0 {
-		return meter.Limits{Calls: 1 << 40, Tokens: 1 << 60}
+		return PaidRouteCap
 	}
 	if calls == 0 {
 		return meter.Limits{Calls: 1, Tokens: 1}
@@ -347,10 +361,7 @@ func (s *Scheduler) BudgetAsk(in journal.Intent) (string, error) {
 	if !ok || r.Kind != KindBudget {
 		return "", errors.New("loops: not a budget intent")
 	}
-	cur := s.Settings().SpareCalls
-	if cur < 0 {
-		return "", errors.New("loops: no fixed budget to raise")
-	}
+	cur := budgetCalls(s.Settings().SpareCalls)
 	return fmt.Sprintf("Raise spare-time AI use from %d to %d calls a day?", cur, r.Calls), nil
 }
 
@@ -370,11 +381,7 @@ func (s *Scheduler) Line(in journal.Intent) (owner.Item, error) {
 	if !ok || r.Kind != KindBudget || in.Action != ActionBudget {
 		return owner.Item{}, errors.New("loops: no owner line for this intent")
 	}
-	cur := s.Settings().SpareCalls
-	if cur < 0 {
-		// No fixed budget holds every budget: setting one is never a raise.
-		return owner.Item{}, errors.New("loops: no fixed budget to raise")
-	}
+	cur := budgetCalls(s.Settings().SpareCalls)
 	kind := owner.Ordinary
 	if r.Calls > 2*cur || r.Calls > LowTierRaiseMax {
 		kind = owner.GrantChange
@@ -503,7 +510,7 @@ var errNoSharing = errors.New("loops: sharing is not wired")
 func DefaultsLine(calls int64) string {
 	if calls < 0 {
 		return "In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, " +
-			"using spare plan quota beyond what you need; reply LOOPS OFF to stop that."
+			fmt.Sprintf("using spare plan quota beyond what you need, at most %d AI calls a day while a pay-per-token key may be used; reply LOOPS OFF to stop that.", PaidRouteCap.Calls)
 	}
 	return fmt.Sprintf("In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, "+
 		"using up to %d AI calls a day; reply LOOPS OFF to stop that.", calls)

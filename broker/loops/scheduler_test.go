@@ -253,7 +253,7 @@ func TestModelWorkRunsWithNoFixedBudget(t *testing.T) {
 		t.Fatal("model work did not run under the default spare budget")
 	}
 	d := strings.Join(r.s.Digest(), "\n")
-	if !strings.Contains(d, "Spare-time AI use, last 24 hours: 2 calls (self-tests and learning).") || strings.Contains(d, " of ") {
+	if !strings.Contains(d, "Spare-time AI use, last 24 hours: 2 of 1500 calls (self-tests and learning).") {
 		t.Fatalf("digest with no fixed budget: %q", d)
 	}
 }

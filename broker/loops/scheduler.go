@@ -667,10 +667,8 @@ func (s *Scheduler) Digest() []string {
 		}
 	}
 	used, _ := s.cfg.Spare.Overall()
-	if used.Calls > 0 && set.SpareCalls < 0 {
-		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d calls (self-tests and learning).", used.Calls))
-	} else if used.Calls > 0 {
-		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, set.SpareCalls))
+	if used.Calls > 0 {
+		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, budgetCalls(set.SpareCalls)))
 	}
 	for _, src := range s.cfg.Sources {
 		if d, ok := src.(Digester); ok && set.On(src.Loop()) {
