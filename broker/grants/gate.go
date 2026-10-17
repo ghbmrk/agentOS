@@ -1651,7 +1651,7 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	if l.Facts.Kind == owner.Ordinary && !local {
 		kind = owner.Ordinary // a tested, undoable learned change: low tier
 	}
-	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
 		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
@@ -1675,7 +1675,7 @@ func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journa
 	if err != nil {
 		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
-	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
 		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 

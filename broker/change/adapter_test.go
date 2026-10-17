@@ -5,10 +5,13 @@ package change
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
@@ -231,4 +234,93 @@ func TestADP6AdapterRemovalGoesToTheOwner(t *testing.T) {
 // the owner, who said no (the env's owner refuses unless approve is set).
 func refusedByOwner(e *env, rep Report) bool {
 	return rep.State == StateRejected && rep.Basis == BasisOwner && !rep.Neutral && e.owner.wasAsked(adoptID(rep.ID))
+}
+
+// ADP-6, ADP-2 (Security, L3 and UX finding on #2049): the owner's item
+// for an adapter names the tool, every grant it asks for, each operation
+// that acts irreversibly and each left unmapped (draft only), never reads
+// as a learned procedure, and is always high tier.
+func TestADP6AdapterOwnerItemNamesToolGrantsAndOperations(t *testing.T) {
+	const body = `{"operations":{"list":"read","save":"draft","deliver":"send","forward":""},"grants":["mail","contacts"]}`
+	obs := truthful()
+	obs["forward"] = []string{verb.Draft}
+	e, _ := adapterEnv(t, obs)
+	e.p.Attach(holdJournal{e.eng})
+	e.owner.approve = true
+	rep := e.propose(adapterCandidate(body))
+	if rep.State != StateAwaitingOwner {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+	it, err := e.p.Line(journal.Intent{ID: adoptID(rep.ID), Action: ActionAdopt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Facts.Kind != owner.GrantChange || it.Facts.Verb != "adopt" {
+		t.Fatalf("facts %+v: want a high-tier adopt", it.Facts)
+	}
+	if it.Object != "a connection to mail" {
+		t.Fatalf("object %q", it.Object)
+	}
+	if it.Detail != "can send; asks for mail, contacts; 1 draft only" {
+		t.Fatalf("detail %q", it.Detail)
+	}
+	ts, ok := it.Terms.List()
+	if !ok {
+		t.Fatalf("terms %q", it.Terms)
+	}
+	want := []owner.Term{
+		{Label: "Tool", Value: "mail"},
+		{Label: "Asks for", Value: "mail"},
+		{Label: "Asks for", Value: "contacts"},
+		{Label: "Acts for good", Value: "deliver: send"},
+		{Label: "Draft only", Value: "forward, until you choose what it does"},
+		{Label: "Also", Value: "list: read"},
+		{Label: "Also", Value: "save: draft"},
+	}
+	if !slices.Equal(ts, want) {
+		t.Fatalf("terms\n got %v\nwant %v", ts, want)
+	}
+	for _, s := range append([]string{it.Object, it.Detail}, termText(ts)...) {
+		if strings.Contains(s, "learned") || strings.Contains(s, "adapters/") {
+			t.Fatalf("%q reads as a learned change or shows a file path", s)
+		}
+	}
+	a := &Adoption{Classes: []Class{ClassAdapter}, Edits: []Edit{{Path: "adapters/mail.json", After: []byte(body)}}}
+	if got := e.p.what(a); got != "Connected mail" {
+		t.Fatalf("what %q", got)
+	}
+	a.Edits[0].After = nil
+	if got := e.p.what(a); got != "Removed the connection to mail" {
+		t.Fatalf("what %q", got)
+	}
+}
+
+// ADP-6: removing an adapter names the tool and is high tier.
+func TestADP6AdapterRemovalOwnerItem(t *testing.T) {
+	e, d := adapterEnv(t, truthful())
+	e.owner.approve = true
+	if rep := e.propose(adapterCandidate(mailAdapter)); rep.State != StateAdopted {
+		t.Fatal(rep)
+	}
+	d.err = errors.New("no demo environment")
+	e.p.Attach(holdJournal{e.eng})
+	rep := e.propose(Candidate{Source: Local, Delete: []string{"adapters/mail.json"}})
+	if rep.State != StateAwaitingOwner {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+	it, err := e.p.Line(journal.Intent{ID: adoptID(rep.ID), Action: ActionAdopt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Facts.Kind != owner.GrantChange || it.Facts.Verb != "remove" || it.Object != "the connection to mail" || it.Terms != "" {
+		t.Fatalf("item %+v", it)
+	}
+}
+
+func termText(ts []owner.Term) []string {
+	var out []string
+	for _, t := range ts {
+		out = append(out, t.Label, t.Value)
+	}
+	return out
 }

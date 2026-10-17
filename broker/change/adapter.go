@@ -28,10 +28,10 @@ type DemoHarness interface {
 }
 
 // checkAdapter qualifies a change to an adapter (ADP-6). An adapter is
-// never authority-neutral: the owner is asked, and sees its grants and any
-// unmapped operation in the file. A new or changed adapter is adopted only
-// if its demo run passes the mismatch check (ADP-8). Removing one needs no
-// demo. A shared source cannot carry one (classify, CHG-5) and Export
+// never authority-neutral: the owner is asked, on an item naming the tool,
+// its grants and its irreversible and unmapped operations (adapterItem).
+// A new or changed adapter is adopted only if its demo run passes the
+// mismatch check (ADP-8). Removing one needs no demo. A shared source cannot carry one (classify, CHG-5) and Export
 // never shares one, so an adapter stays private-derived (OSS-3).
 func (p *Pipeline) checkAdapter(cl *classification, e Edit) {
 	cl.neutral = false
