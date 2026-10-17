@@ -479,6 +479,7 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	notices := newNoticeQueue()
 	c, err := mw.bind(&custody{
 		guard:     guard,
 		keysPath:  *keysPath,
@@ -488,7 +489,7 @@ func serveCmd(args []string) error {
 		},
 		ttl:       *ttl,
 		now:       time.Now,
-		notify:    func(s string) { log.Print(s) },
+		notify:    ownerNotify(notices),
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
@@ -505,6 +506,14 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	noticeSrv, err := serveNotices(*run, notices, *brokerUID)
+	if err != nil {
+		for _, s := range srvs {
+			s.Close()
+		}
+		return err
+	}
+	srvs = append(srvs, noticeSrv)
 	mailLn, err := serveMail(*run, c, *brokerUID)
 	if err != nil {
 		for _, s := range srvs {
