@@ -230,6 +230,16 @@ class PremergeTest(unittest.TestCase):
                                cwd=self.r, capture_output=True, text=True)
             self.assertEqual((r.returncode, r.stdout.split()), (1, ["mark", "sub/CLAUDE.md"]), argv)
 
+    def test_cli_needs_mark_rejects_a_second_positional(self):
+        # `--needs-mark origin/main pr` read origin/main as the head and printed `agent` for any PR.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("CLAUDE.md", "rules\n")
+        self.commit("rules")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "main", "pr"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("agent", r.stdout.split())
+
     def test_check_gate(self):
         import json
         git(self.r, "checkout", "-q", "-b", "pr")
