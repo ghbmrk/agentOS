@@ -620,19 +620,33 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	tried := false
 	if err == nil {
 		var h *diskHold
 		if h, err = m.reserveSeed(mc); err == nil {
+			tried = true
 			err = m.startFrom(ctx, mc, nil)
 			h.release()
 		}
 	}
+	var live error
 	if err != nil {
-		m.stopRuntime(ctx, mc)
-		os.RemoveAll(m.machineDir(id))
+		if tried && !mc.gone {
+			live = m.cleanStart(ctx, mc)
+		} else {
+			m.stopRuntime(ctx, mc)
+		}
+		if live == nil {
+			os.RemoveAll(m.machineDir(id))
+		}
 	}
 	out := mc.Machine
 	mc.mu.Unlock()
+	if live != nil {
+		// Not known dead: it keeps its admission and its record, so a
+		// later Preempt or Destroy kills it again.
+		return Machine{}, errors.Join(err, live)
+	}
 	if err != nil {
 		m.release(mc)
 		m.unreserve(mc)
@@ -1243,48 +1257,47 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 	}
 	defer h.release()
 	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage, Instance: mc.Instance}
-	dir := m.snapDir(s.ID)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	// Everything, meta.json last, is written to a stage and synced before
+	// it is published under the snapshot's name: load takes any snapshot
+	// directory holding its meta.json, so none may be there before all of
+	// it would survive a power cut (CAP-3 restore points, #1240).
+	err = publishSnap(m.snapDir(s.ID), func(dir string) error {
+		if err := overlay.Copy(m.launch(mc).Upper, filepath.Join(dir, "fs")); err != nil {
+			return err
+		}
+		if t == Full {
+			mem := filepath.Join(dir, "mem")
+			if err := os.Mkdir(mem, 0o700); err != nil {
+				return err
+			}
+			if err := m.cfg.Runtime.Checkpoint(ctx, mc.ID, mem); err != nil {
+				return err
+			}
+		}
+		// A preemption that began before the copy or checkpoint returned may
+		// have killed the sandbox under it, and a runtime need not report that
+		// as an error: the image may be cut short. Such a snapshot is never
+		// published (Security R2 on #124). Preempt marks the machine before it
+		// kills, so a mark not seen here means the kill came after the image
+		// was whole.
+		if mc.preempting.Load() {
+			return fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID)
+		}
+		// Stamped once the capture is complete: a record handed to the machine
+		// while it was being copied may be in it, so the snapshot must not
+		// read as taken before that (CAP-3 restore points, V26).
+		s.Taken = time.Now().UTC()
+		if sleep {
+			h, err := treeHash(dir)
+			if err != nil {
+				return err
+			}
+			s.Sleep, s.Starts, s.Hash = true, mc.Starts, h
+		}
+		return writeJSON(filepath.Join(dir, "meta.json"), s)
+	})
+	if err != nil {
 		return Snapshot{}, err
-	}
-	fail := func(err error) (Snapshot, error) {
-		os.RemoveAll(dir)
-		return Snapshot{}, err
-	}
-	if err := overlay.Copy(m.launch(mc).Upper, filepath.Join(dir, "fs")); err != nil {
-		return fail(err)
-	}
-	if t == Full {
-		mem := filepath.Join(dir, "mem")
-		if err := os.Mkdir(mem, 0o700); err != nil {
-			return fail(err)
-		}
-		if err := m.cfg.Runtime.Checkpoint(ctx, mc.ID, mem); err != nil {
-			return fail(err)
-		}
-	}
-	// A preemption that began before the copy or checkpoint returned may
-	// have killed the sandbox under it, and a runtime need not report that
-	// as an error: the image may be cut short. Such a snapshot is never
-	// published (Security R2 on #124). Preempt marks the machine before it
-	// kills, so a mark not seen here means the kill came after the image
-	// was whole.
-	if mc.preempting.Load() {
-		return fail(fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID))
-	}
-	// Stamped once the capture is complete: a record handed to the machine
-	// while it was being copied may be in it, so the snapshot must not
-	// read as taken before that (CAP-3 restore points, V26).
-	s.Taken = time.Now().UTC()
-	if sleep {
-		h, err := treeHash(dir)
-		if err != nil {
-			return fail(err)
-		}
-		s.Sleep, s.Starts, s.Hash = true, mc.Starts, h
-	}
-	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
-		return fail(err)
 	}
 	m.mu.Lock()
 	m.snaps[s.ID] = s
@@ -1298,10 +1311,11 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 // #174): refused as a disk budget the guest can act on, never taken as no
 // use. Every copy of a layer is measured against the longest root any copy
 // of it can have, so a layer one step accepts no later restore or fork
-// refuses (L3 MUST-A on #174).
+// refuses (L3 MUST-A on #174). A snapshot's longest is its stage's, where
+// the copy is written before it is published.
 func (m *Manager) measure(dir string) (overlay.Usage, error) {
 	longest := max(len(filepath.Join(m.diskDir(strings.Repeat("x", maxIDLen)), "upper")),
-		len(filepath.Join(m.snapDir(snapName(0)), "fs")))
+		len(filepath.Join(durable.StageDir(m.snapDir(snapName(0))), "fs")))
 	u, err := overlay.MeasureUnder(dir, longest)
 	if errors.Is(err, overlay.ErrTooDeep) {
 		err = fmt.Errorf("%w (%w)", ErrQuota, err)
@@ -1499,14 +1513,33 @@ func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) err
 		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
 	}
 	err := m.stopRuntime(ctx, mc)
-	if err == nil {
+	tried := err == nil
+	if tried {
 		err = m.startFrom(ctx, mc, s)
 	}
 	if err != nil {
-		// A guest that could not be killed stays Running.
-		if m.stopRuntime(ctx, mc) == nil {
+		// A guest that could not be killed stays Running, and so does one
+		// startFrom may have launched before failing.
+		if tried {
+			if m.cleanStart(ctx, mc) == nil {
+				mc.State = Stopped
+			}
+		} else if m.stopRuntime(ctx, mc) == nil {
 			mc.State = Stopped
 		}
+		m.saveMachine(mc)
+	}
+	return err
+}
+
+// cleanStart kills what a failed startFrom may have launched. A guest not
+// known dead is recorded Running, even one that failed before Running, so
+// it stays counted: the caller keeps its admission and its record, and a
+// later Preempt or Destroy kills it again (RES-2). Called with mc.mu held.
+func (m *Manager) cleanStart(ctx context.Context, mc *machine) error {
+	err := m.stopRuntime(ctx, mc)
+	if err != nil {
+		mc.State = Running
 		m.saveMachine(mc)
 	}
 	return err
@@ -1668,19 +1701,41 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
-		if err == nil {
+		tried := err == nil
+		if tried {
 			err = m.startFrom(ctx, mc, &s)
 		}
+		var live error
 		if err != nil && !mc.gone {
-			m.stopRuntime(ctx, mc)
-			os.RemoveAll(m.machineDir(mc.ID))
+			if tried {
+				live = m.cleanStart(ctx, mc)
+			} else {
+				m.stopRuntime(ctx, mc)
+			}
+			if live == nil {
+				os.RemoveAll(m.machineDir(mc.ID))
+			}
 		}
 		mc.mu.Unlock()
 		if err != nil {
-			for _, done := range reserved[:i] {
-				m.destroy(ctx, done)
+			// A fork not known dead keeps its admission and its record, so
+			// a later Preempt or Destroy kills it again; a destroyed one
+			// was released and left the table already.
+			undone := reserved[i+1:]
+			if live == nil {
+				undone = append(undone, mc)
+			} else {
+				err = errors.Join(err, live)
 			}
-			undo()
+			for _, done := range reserved[:i] {
+				if derr := m.destroy(ctx, done); derr != nil {
+					err = errors.Join(err, fmt.Errorf("undoing fork %s: %w", done.ID, derr))
+				}
+			}
+			for _, f := range undone {
+				m.release(f)
+				m.unreserve(f)
+			}
 			return Snapshot{}, err
 		}
 	}
@@ -1796,8 +1851,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
 	out, restarted, err := m.mergeLocked(ctx, dm, base, ss)
+	live := dm.State == Running // a guest that could not be killed
 	dm.mu.Unlock()
-	if err != nil && restarted {
+	if err != nil && restarted && !live {
 		m.release(dm)
 	}
 	return out, err
@@ -1854,47 +1910,45 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	conflicts = append(conflicts, subtreeConflicts(mine, changes)...)
 	// Build the merged layer beside the snapshots, then publish it as one.
 	out = Snapshot{ID: m.nextSnapID(), Machine: dst, Tier: FS, Label: maxLabel(dm.Label, ss.Label), Image: ds.Image, Taken: time.Now().UTC(), Lineage: dm.Lineage, Instance: dm.Instance}
-	dir := m.snapDir(out.ID)
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return Snapshot{}, false, err
-	}
-	fail := func(err error) (Snapshot, bool, error) {
-		os.RemoveAll(dir)
-		return Snapshot{}, false, err
-	}
-	merged := overlay.View{Lower: m.cfg.Images[ds.Image], Upper: filepath.Join(dir, "fs")}
-	if err := overlay.Copy(m.view(ds).Upper, merged.Upper); err != nil {
-		return fail(err)
-	}
-	for _, c := range changes {
-		mine, _, err := m.view(ds).Lookup(c.Path)
-		if err != nil {
-			return fail(err)
+	// Like a capture, the merged layer is synced before it is published
+	// (#1240).
+	err = publishSnap(m.snapDir(out.ID), func(dir string) error {
+		merged := overlay.View{Lower: m.cfg.Images[ds.Image], Upper: filepath.Join(dir, "fs")}
+		if err := overlay.Copy(m.view(ds).Upper, merged.Upper); err != nil {
+			return err
 		}
-		switch {
-		case len(conflicts) > 0: // report only; merge nothing
-			if !mine.Same(c.From) && !mine.Same(c.To) {
+		for _, c := range changes {
+			mine, _, err := m.view(ds).Lookup(c.Path)
+			if err != nil {
+				return err
+			}
+			switch {
+			case len(conflicts) > 0: // report only; merge nothing
+				if !mine.Same(c.From) && !mine.Same(c.To) {
+					conflicts = append(conflicts, c.Path)
+				}
+			case mine.Same(c.From): // dst left it alone: take the fork's
+				if err := overlay.Put(merged, m.view(ss), c.Path); err != nil {
+					return err
+				}
+			case mine.Same(c.To): // both made the same change
+			default:
 				conflicts = append(conflicts, c.Path)
 			}
-		case mine.Same(c.From): // dst left it alone: take the fork's
-			if err := overlay.Put(merged, m.view(ss), c.Path); err != nil {
-				return fail(err)
-			}
-		case mine.Same(c.To): // both made the same change
-		default:
-			conflicts = append(conflicts, c.Path)
 		}
-	}
-	if len(conflicts) > 0 {
-		sort.Strings(conflicts)
-		return fail(fmt.Errorf("%w: %s", ErrConflict, strings.Join(conflicts, ", ")))
-	}
-	if err := writeJSON(filepath.Join(dir, "meta.json"), out); err != nil {
-		return fail(err)
-	}
-	// The label is saved before the merged files reach dst's layer.
-	if err := m.raiseLocked(dm, out.Label); err != nil {
-		return fail(err)
+		if len(conflicts) > 0 {
+			sort.Strings(conflicts)
+			return fmt.Errorf("%w: %s", ErrConflict, strings.Join(conflicts, ", "))
+		}
+		if err := writeJSON(filepath.Join(dir, "meta.json"), out); err != nil {
+			return err
+		}
+		// The label is saved before the merged files reach dst's layer, and
+		// before they are published.
+		return m.raiseLocked(dm, out.Label)
+	})
+	if err != nil {
+		return Snapshot{}, false, err
 	}
 	m.mu.Lock()
 	m.snaps[out.ID] = out
@@ -2249,6 +2303,29 @@ func writeJSON(path string, v any) error {
 
 // writeFile is durable.WriteFile; a variable so a test can fail one save.
 var writeFile = durable.WriteFile
+
+// publishDir is durable.PublishDir; a variable so a test can cut a
+// publication short.
+var publishDir = durable.PublishDir
+
+// publishSnap publishes snapshot directory dir as fill writes it, all of it
+// synced first. When only the sync of the snapshots directory failed, the
+// snapshot is complete but its name may not survive a power cut: it is
+// reported as failed and removed, and should a power cut bring it back,
+// load finds a whole snapshot no machine points at. Its meta.json goes
+// first, with its directory synced, so a power cut part-way through the
+// removal leaves a directory load drops, never a meta.json over a partly
+// removed layer (CAP-3).
+func publishSnap(dir string, fill func(stage string) error) error {
+	err := publishDir(dir, 0o700, fill)
+	if errors.Is(err, durable.ErrDirSync) {
+		if os.Remove(filepath.Join(dir, "meta.json")) == nil {
+			syncSnapDir(dir) // best effort: the publish has failed already
+		}
+		os.RemoveAll(dir)
+	}
+	return err
+}
 
 func readJSON(path string, v any) error {
 	b, err := os.ReadFile(path)

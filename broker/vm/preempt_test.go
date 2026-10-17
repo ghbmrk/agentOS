@@ -399,3 +399,150 @@ func TestRES1FailedKillOnResumeKeepsTheAdmission(t *testing.T) {
 		t.Fatal("foreground admitted on the memory of a guest still running")
 	}
 }
+
+// REQ: RES-2
+
+// fgSpec needs memory only a guest that failed to start would free.
+var fgSpec = Spec{Image: "base", Class: admission.Foreground, MemMB: 1000}
+
+// A create whose guest launched, failed to start, and could not be killed
+// keeps its admission and its record: the guest still holds the memory, and
+// a later Destroy kills it and frees it (P1-4-killfail-create (a)).
+func TestRES2FailedCreateCleanupKillKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.halfStart("exp")
+	if _, err := e.m.Create(bg, "exp", Spec{Image: "base", Class: admission.Experiment, MemMB: 1500}); err == nil {
+		t.Fatal("create reported success; its start failed")
+	}
+	if _, ok := e.rt.memOf("exp"); !ok {
+		t.Fatal("fake: the launched guest should still be running")
+	}
+	if _, err := e.m.Create(bg, "call", fgSpec); err == nil {
+		t.Fatal("foreground admitted on the memory of a guest still running")
+	}
+
+	e.rt.mu.Lock()
+	e.rt.refuseKill = nil
+	e.rt.mu.Unlock()
+	must(t, e.m.Destroy(bg, "exp"))
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("destroy left the guest running")
+	}
+	e.create("call", admission.Foreground, 1000)
+}
+
+// A fork whose guest launched, failed to start, and could not be killed
+// keeps that fork's admission (P1-4-killfail-create (a)).
+func TestRES2FailedForkCleanupKillKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 1500)
+	e.create("src", admission.Experiment, 500)
+	e.halfStart("f1")
+	if _, err := e.m.Fork(bg, "src", []string{"f1"}); err == nil {
+		t.Fatal("fork reported success; its start failed")
+	}
+	if _, ok := e.rt.memOf("f1"); !ok {
+		t.Fatal("fake: the launched fork should still be running")
+	}
+	if _, err := e.m.Get("f1"); err != nil {
+		t.Fatalf("the unkilled fork left the table, so nothing can kill it again: %v", err)
+	}
+	if _, err := e.m.Create(bg, "call", fgSpec); err == nil {
+		t.Fatal("foreground admitted on the memory of a fork still running")
+	}
+}
+
+// A fork that fails part-way destroys the forks already started; one whose
+// destroy fails keeps its admission and record (P1-4-killfail-create (c)).
+func TestRES2FailedForkUndoDestroyKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 1500)
+	e.create("src", admission.Experiment, 500)
+	e.rt.onStart = func(id string) {
+		if id == "f2" {
+			e.rt.mu.Lock()
+			e.rt.failNext = errors.New("fake: start failed")
+			e.rt.mu.Unlock()
+		}
+	}
+	e.rt.onKill = func(id string) {
+		e.rt.mu.Lock()
+		if id == "f1" {
+			e.rt.refuseKill = errors.New("fake: kill refused")
+		} else {
+			e.rt.refuseKill = nil
+		}
+		e.rt.mu.Unlock()
+	}
+	if _, err := e.m.Fork(bg, "src", []string{"f1", "f2"}); err == nil {
+		t.Fatal("fork reported success; f2 failed to start")
+	}
+	if _, ok := e.rt.memOf("f1"); !ok {
+		t.Fatal("fake: f1 should still be running")
+	}
+	if _, err := e.m.Get("f1"); err != nil {
+		t.Fatalf("the undestroyed fork left the table, so nothing can kill it again: %v", err)
+	}
+	if _, err := e.m.Get("f2"); err == nil {
+		t.Fatal("f2, which never started, is still listed")
+	}
+	if _, err := e.m.Create(bg, "call", fgSpec); err == nil {
+		t.Fatal("foreground admitted on the memory of a fork still running")
+	}
+}
+
+// A rollback, rebuild or resume whose start launched the guest and then
+// failed before Running, and whose cleanup kill failed, keeps the admission
+// (P1-4-killfail-create (b)).
+func TestRES2HalfStartWithFailedKillKeepsTheAdmission(t *testing.T) {
+	for _, op := range []string{"rollback", "rebuild", "resume"} {
+		t.Run(op, func(t *testing.T) {
+			e := newEnv(t, 2000)
+			e.create("exp", admission.Experiment, 1500)
+			s, err := e.m.Checkpoint(bg, "exp")
+			must(t, err)
+			if op == "resume" {
+				must(t, e.m.Preempt("exp"))
+				waitState(t, e, "exp", Preempted)
+				e.adm.Release("exp") // as admission does after a preemption
+			}
+			e.halfStart("exp")
+			switch op {
+			case "rollback":
+				err = e.m.Rollback(bg, "exp", s.ID)
+			case "rebuild":
+				err = e.m.Rebuild(bg, "exp")
+			default:
+				err = e.m.Resume(bg, "exp")
+			}
+			if err == nil {
+				t.Fatalf("%s reported success; its start failed", op)
+			}
+			if _, ok := e.rt.memOf("exp"); !ok {
+				t.Fatal("fake: the launched guest should still be running")
+			}
+			if _, err := e.m.Create(bg, "call", fgSpec); err == nil {
+				t.Fatal("foreground admitted on the memory of a guest still running")
+			}
+		})
+	}
+}
+
+// A merge restarts its destination; one whose start launched the guest and
+// then failed before Running, and whose cleanup kill failed, keeps the
+// destination's admission (P1-4-killfail-create (b)).
+func TestRES2MergeHalfStartWithFailedKillKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("dst", admission.Experiment, 700)
+	_, err := e.m.Fork(bg, "dst", []string{"win"})
+	must(t, err)
+	e.guestWrite("win", "src/a.go", "a1")
+	e.halfStart("dst")
+	if _, err := e.m.Merge(bg, "dst", "win"); err == nil {
+		t.Fatal("merge reported success; its restart failed")
+	}
+	if _, ok := e.rt.memOf("dst"); !ok {
+		t.Fatal("fake: the launched guest should still be running")
+	}
+	if _, err := e.m.Create(bg, "call", fgSpec); err == nil {
+		t.Fatal("foreground admitted on the memory of a guest still running")
+	}
+}
