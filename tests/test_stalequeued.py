@@ -29,7 +29,7 @@ def pr(number, title="x", body="", state="closed", merged="2026-10-17T00:00:00Z"
 ISSUES = [issue(1, "AB-1"), issue(2, "AB-1-b"), issue(3, "CD-2"), issue(4, "EF-3", "building"),
           issue(5, "GH-4"), issue(6, "IJ-5")]
 PRS = [pr(10, "AB-1: build it"),                                   # title prefix -> AB-1
-       pr(11, "Fix things (CD-2)"),                                # id inside the title -> CD-2
+       pr(11, "CD-2: fix things"),                                 # title prefix -> CD-2
        pr(12, "EF-3: x"),                                          # EF-3 is building, not queued
        pr(13, "Other", "Record: PR #13 · package GH-4 · head abc"),  # body record line -> GH-4
        pr(14, "IJ-5: more", state="open", merged=None),            # open PR names IJ-5 ...
@@ -44,10 +44,16 @@ class StaleQueuedTest(unittest.TestCase):
                  for i, p, how in stalequeued.stale_queued(ISSUES, PRS)]
         self.assertEqual(found, [("AB-1", 10, "title"), ("CD-2", 11, "title"), ("GH-4", 13, "body")])
 
+    def test_a_pr_that_only_mentions_the_id_does_not_name_it(self):
+        for title in ("Brief for AB-1", "BOARD: add AB-1 row (queued)", "Fix things (AB-1)"):
+            self.assertIsNone(stalequeued.names(pr(1, title), "AB-1"), title)
+        self.assertIsNone(stalequeued.names(pr(1, "x", "builds on package AB-1 and more"), "AB-1"))
+        self.assertIsNone(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "Brief for AB-1")]) or None)
+
     def test_id_match_is_a_whole_token(self):
         self.assertIsNone(stalequeued.names(pr(1, "AB-1-b: x"), "AB-1"))
         self.assertIsNone(stalequeued.names(pr(1, "XAB-1: x"), "AB-1"))
-        self.assertEqual(stalequeued.names(pr(1, "x", "package AB-1."), "AB-1"), "body")
+        self.assertEqual(stalequeued.names(pr(1, "x", "Record: PR #1 · package AB-1 · head abc"), "AB-1"), "body")
 
     def test_newest_merged_pr_is_named(self):
         prs = [pr(20, "AB-1: old", merged="2026-10-10T00:00:00Z"), pr(21, "AB-1: new")]

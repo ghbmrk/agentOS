@@ -24,10 +24,12 @@ def _token(row_id):
 
 
 def names(pr, row_id):
-    """How the PR names the package: 'title', 'body' or None."""
-    if re.search(_token(row_id), pr.get("title") or ""):
+    """How the PR names the package: 'title', 'body' or None. A title names it only as its
+    prefix (board.stale's rule): brief and BOARD-row PRs mention IDs they have not built. A body
+    names it only in a `Record: PR #N · package <ID> · head <SHA>` line."""
+    if re.match(_token(row_id), pr.get("title") or ""):
         return "title"
-    if re.search(rf"\bpackage {_token(row_id)}", pr.get("body") or ""):
+    if re.search(rf"^Record: PR #\d+ · package {_token(row_id)} · head ", pr.get("body") or "", re.M):
         return "body"
     return None
 
