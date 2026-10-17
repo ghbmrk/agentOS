@@ -620,19 +620,33 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	tried := false
 	if err == nil {
 		var h *diskHold
 		if h, err = m.reserveSeed(mc); err == nil {
+			tried = true
 			err = m.startFrom(ctx, mc, nil)
 			h.release()
 		}
 	}
+	var live error
 	if err != nil {
-		m.stopRuntime(ctx, mc)
-		os.RemoveAll(m.machineDir(id))
+		if tried && !mc.gone {
+			live = m.cleanStart(ctx, mc)
+		} else {
+			m.stopRuntime(ctx, mc)
+		}
+		if live == nil {
+			os.RemoveAll(m.machineDir(id))
+		}
 	}
 	out := mc.Machine
 	mc.mu.Unlock()
+	if live != nil {
+		// Not known dead: it keeps its admission and its record, so a
+		// later Preempt or Destroy kills it again.
+		return Machine{}, errors.Join(err, live)
+	}
 	if err != nil {
 		m.release(mc)
 		m.unreserve(mc)
@@ -1499,14 +1513,33 @@ func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) err
 		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
 	}
 	err := m.stopRuntime(ctx, mc)
-	if err == nil {
+	tried := err == nil
+	if tried {
 		err = m.startFrom(ctx, mc, s)
 	}
 	if err != nil {
-		// A guest that could not be killed stays Running.
-		if m.stopRuntime(ctx, mc) == nil {
+		// A guest that could not be killed stays Running, and so does one
+		// startFrom may have launched before failing.
+		if tried {
+			if m.cleanStart(ctx, mc) == nil {
+				mc.State = Stopped
+			}
+		} else if m.stopRuntime(ctx, mc) == nil {
 			mc.State = Stopped
 		}
+		m.saveMachine(mc)
+	}
+	return err
+}
+
+// cleanStart kills what a failed startFrom may have launched. A guest not
+// known dead is recorded Running, even one that failed before Running, so
+// it stays counted: the caller keeps its admission and its record, and a
+// later Preempt or Destroy kills it again (RES-2). Called with mc.mu held.
+func (m *Manager) cleanStart(ctx context.Context, mc *machine) error {
+	err := m.stopRuntime(ctx, mc)
+	if err != nil {
+		mc.State = Running
 		m.saveMachine(mc)
 	}
 	return err
@@ -1668,19 +1701,41 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
-		if err == nil {
+		tried := err == nil
+		if tried {
 			err = m.startFrom(ctx, mc, &s)
 		}
+		var live error
 		if err != nil && !mc.gone {
-			m.stopRuntime(ctx, mc)
-			os.RemoveAll(m.machineDir(mc.ID))
+			if tried {
+				live = m.cleanStart(ctx, mc)
+			} else {
+				m.stopRuntime(ctx, mc)
+			}
+			if live == nil {
+				os.RemoveAll(m.machineDir(mc.ID))
+			}
 		}
 		mc.mu.Unlock()
 		if err != nil {
-			for _, done := range reserved[:i] {
-				m.destroy(ctx, done)
+			// A fork not known dead keeps its admission and its record, so
+			// a later Preempt or Destroy kills it again; a destroyed one
+			// was released and left the table already.
+			undone := reserved[i+1:]
+			if live == nil {
+				undone = append(undone, mc)
+			} else {
+				err = errors.Join(err, live)
 			}
-			undo()
+			for _, done := range reserved[:i] {
+				if derr := m.destroy(ctx, done); derr != nil {
+					err = errors.Join(err, fmt.Errorf("undoing fork %s: %w", done.ID, derr))
+				}
+			}
+			for _, f := range undone {
+				m.release(f)
+				m.unreserve(f)
+			}
 			return Snapshot{}, err
 		}
 	}
@@ -1796,8 +1851,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
 	out, restarted, err := m.mergeLocked(ctx, dm, base, ss)
+	live := dm.State == Running // a guest that could not be killed
 	dm.mu.Unlock()
-	if err != nil && restarted {
+	if err != nil && restarted && !live {
 		m.release(dm)
 	}
 	return out, err
