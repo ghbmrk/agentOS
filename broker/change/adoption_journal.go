@@ -482,7 +482,42 @@ func (p *Pipeline) replayLocked(j Journal) {
 			return
 		}
 	}
+	p.sweepOrphansLocked()
 	p.reforgetLocked()
+}
+
+// sweepOrphansLocked deletes the proposal blob of each ID minted since the
+// last sweep that no intent waits on. A stop between putProposalLocked
+// and the submit of its adopt intent leaves such a blob; no intent names
+// it, so replay and a forget would never reach its bytes (CAP-3, C23,
+// OPS-1). IDs are minted in order and their sequence saved before the
+// put, so c<Swept+1>..c<Seq> covers every one. A failed delete goes to
+// stray and holds the mark below it, so the next forget and the next
+// start both retry it (OPS-2); the mark is saved, so each ID is swept
+// once (OPS-3).
+func (p *Pipeline) sweepOrphansLocked() {
+	if p.st.Swept >= p.st.Seq {
+		return
+	}
+	mark := p.st.Seq
+	for n := p.st.Swept + 1; n <= p.st.Seq; n++ {
+		id := "c" + strconv.Itoa(n)
+		if p.props[id] != nil {
+			continue
+		}
+		p.deleteProposalLocked(id)
+		if p.stray[id] && mark == p.st.Seq {
+			mark = n - 1
+		}
+	}
+	if mark == p.st.Swept {
+		return
+	}
+	p.st.Swept = mark
+	if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+		// The next start sweeps the same IDs again; deletes are idempotent.
+		p.cfg.Logf("change: proposal sweep mark not saved (%s)", errClass(err))
+	}
 }
 
 // reforgetLocked forgets again each goal forgotten before Attach: the
