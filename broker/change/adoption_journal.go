@@ -380,6 +380,7 @@ func (p *Pipeline) replayLocked(j Journal) {
 	// the bodies holding a lifecycle, put again without it.
 	trusted := !p.st.LegacyInState
 	var strip []string
+	legacyMoved := false
 	for _, c := range done {
 		id := c.parts[1]
 		switch {
@@ -400,6 +401,14 @@ func (p *Pipeline) replayLocked(j Journal) {
 				// The state holds the legacy lifecycle; the body's is ignored (ABT-1).
 				legacy = nil
 				if l := p.st.Legacy[id]; l != nil {
+					if owedRevert(l.Reverted) {
+						// A pre-journal state's forget or settings revert
+						// (migrateLocked): owed once below, and cleared from
+						// the state so a later start does not owe it again.
+						tail[id] = l.Reverted
+						l.Reverted = ""
+						legacyMoved = true
+					}
 					c := *l
 					legacy = &c
 				}
@@ -482,7 +491,7 @@ func (p *Pipeline) replayLocked(j Journal) {
 			owes = true
 		}
 	}
-	if trusted {
+	if trusted || legacyMoved {
 		p.st.LegacyInState = true
 		resave = true
 	}

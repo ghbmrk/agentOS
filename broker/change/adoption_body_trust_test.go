@@ -126,8 +126,53 @@ func TestEarlierBuildLegacyMovesToTheState(t *testing.T) {
 func TestPreJournalLegacyIsInTheState(t *testing.T) {
 	e, rep := forgetEnv(t)
 	plain := e.body(rep.ID)
-	a := e.adoption(rep.ID)
-	a.Reverted = WhyDropped
+	e.asPreJournal(t, rep.ID, WhyDropped)
+	if got := e.reverted(rep.ID); got != WhyDropped {
+		t.Fatalf("pre-journal revert lost: %q", got)
+	}
+	if st := e.savedState(); !st.LegacyInState || st.Legacy[rep.ID] == nil || st.Legacy[rep.ID].Reverted != WhyDropped {
+		t.Fatalf("legacy lifecycle not in the state: %+v", st.Legacy)
+	}
+	if !bytes.Equal(e.body(rep.ID), plain) {
+		t.Fatalf("the body holds a lifecycle: %s", e.body(rep.ID))
+	}
+	e.putBody(rep.ID, withLegacy(plain, `{}`))
+	e.reopen()
+	if got := e.reverted(rep.ID); got != WhyDropped {
+		t.Fatalf("a rewritten body changed the legacy lifecycle: %q", got)
+	}
+}
+
+// ABT-2: a pre-journal state's forget or settings revert is journaled
+// once by the migration, and not again on a later reopen (#1995).
+func TestPreJournalOwedRevertIsJournaledOnce(t *testing.T) {
+	for _, why := range []string{WhyForgotten, WhySettings} {
+		var e *env
+		var rep Report
+		if why == WhyForgotten {
+			e, rep = forgetEnv(t)
+		} else {
+			e, rep, _ = settingsEnv(t)
+		}
+		e.asPreJournal(t, rep.ID, why)
+		for i := 0; i < 2; i++ {
+			if got := e.revertsJournaled(rep.ID); len(got) != 1 || got[0] != why {
+				t.Fatalf("%s, reopen %d: revert intents: %q", why, i+1, got)
+			}
+			if got := e.reverted(rep.ID); got != why {
+				t.Fatalf("%s, reopen %d: reverted: %q", why, i+1, got)
+			}
+			e.reopen()
+		}
+	}
+}
+
+// asPreJournal saves the state as a build before the journal held the
+// lifecycle did, with the adoption reverted for why, and reopens.
+func (e *env) asPreJournal(t *testing.T, id, why string) {
+	t.Helper()
+	a := e.adoption(id)
+	a.Reverted = why
 	raw, err := e.store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -144,20 +189,6 @@ func TestPreJournalLegacyIsInTheState(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.reopen()
-	if got := e.reverted(rep.ID); got != WhyDropped {
-		t.Fatalf("pre-journal revert lost: %q", got)
-	}
-	if st := e.savedState(); !st.LegacyInState || st.Legacy[rep.ID] == nil || st.Legacy[rep.ID].Reverted != WhyDropped {
-		t.Fatalf("legacy lifecycle not in the state: %+v", st.Legacy)
-	}
-	if !bytes.Equal(e.body(rep.ID), plain) {
-		t.Fatalf("the body holds a lifecycle: %s", e.body(rep.ID))
-	}
-	e.putBody(rep.ID, withLegacy(plain, `{}`))
-	e.reopen()
-	if got := e.reverted(rep.ID); got != WhyDropped {
-		t.Fatalf("a rewritten body changed the legacy lifecycle: %q", got)
-	}
 }
 
 // ABT-3: the mark and the legacy lifecycle are saved before any body
