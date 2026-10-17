@@ -1,6 +1,6 @@
 // REQ: CH-23, CH-26, OP-11, CAP-3, RES-4
 
-package photo
+package keep
 
 import (
 	"bytes"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/photo"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
 
@@ -74,12 +75,12 @@ func (r *rig) open() {
 	r.eng.Reconcile(context.Background())
 }
 
-func photoN(n int) Photo {
-	return Photo{Format: "png", Width: 40 + n, Height: 30, ThumbWidth: 4, ThumbHeight: 3,
+func photoN(n int) photo.Photo {
+	return photo.Photo{Format: "png", Width: 40 + n, Height: 30, ThumbWidth: 4, ThumbHeight: 3,
 		Image: []byte(fmt.Sprintf("synthetic-image-%d", n)), Thumb: []byte(fmt.Sprintf("synthetic-thumb-%d", n))}
 }
 
-func upload(ps ...Photo) []Received {
+func upload(ps ...photo.Photo) []Received {
 	out := make([]Received, len(ps))
 	for i, p := range ps {
 		out[i] = Received{Photo: p, Source: SourceUpload, Task: "task-1"}
@@ -87,7 +88,7 @@ func upload(ps ...Photo) []Received {
 	return out
 }
 
-func (r *rig) keep(ps ...Photo) []Entry {
+func (r *rig) keep(ps ...photo.Photo) []Entry {
 	r.t.Helper()
 	got, err := r.s.Keep(context.Background(), upload(ps...))
 	if err != nil {
@@ -220,15 +221,14 @@ func TestStoreJournalsReceiptDeliveryDeletion(t *testing.T) {
 }
 
 func TestStoreDailyCap200(t *testing.T) {
-	l, ok := journal.LifecycleOf(ActionKeep + SourceUpload)
-	if !ok || l.DailyCap != DailyCap || DailyCap != 200 || l.Inverse != journal.Irreversible {
-		t.Fatalf("keep lifecycle %+v, %v", l, ok)
+	if DailyCap != 200 {
+		t.Fatalf("DailyCap = %d, want 200", DailyCap)
 	}
 	r := newRig(t)
 	ctx := context.Background()
 	n := 0
 	for b := 0; b < 20; b++ {
-		var ps []Photo
+		var ps []photo.Photo
 		for i := 0; i < MaxPerUpload; i++ {
 			n++
 			ps = append(ps, photoN(n))
@@ -263,7 +263,7 @@ func TestStoreDailyCap200(t *testing.T) {
 	// 19th at 23:30 UTC on the 18th.
 	r.s.Location = time.FixedZone("UTC+1", 3600)
 	r.now = time.Date(2026, 10, 18, 23, 30, 0, 0, time.UTC)
-	var ps []Photo
+	var ps []photo.Photo
 	for i := 0; i < MaxPerUpload; i++ {
 		ps = append(ps, photoN(2000+i))
 	}
@@ -277,7 +277,7 @@ func TestStoreDailyCap200(t *testing.T) {
 
 func TestStoreTenPerUpload(t *testing.T) {
 	r := newRig(t)
-	var ps []Photo
+	var ps []photo.Photo
 	for i := 0; i <= MaxPerUpload; i++ {
 		ps = append(ps, photoN(i))
 	}
@@ -363,6 +363,15 @@ func crashAt(t *testing.T, n int) *rig {
 	return crash
 }
 
+func (r *rig) dailyCount() int {
+	r.t.Helper()
+	v, err := r.s.view()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return v.dailyCount(r.now.In(r.s.loc()))
+}
+
 func copyDir(t *testing.T, from, to string) {
 	t.Helper()
 	if err := os.MkdirAll(to, 0o700); err != nil {
@@ -394,6 +403,11 @@ func TestStoreCrashLeavesNoPartial(t *testing.T) {
 		}
 		if got := c.keep(photoN(2)); got[0].ID != "P2" {
 			t.Fatalf("after a crash the next ID is %s", got[0].ID)
+		}
+		// The daily cap counts only receipts that may have applied: the
+		// crashed one, known not applied, takes no place; P2 takes one.
+		if got := c.dailyCount(); got != 1 {
+			t.Fatalf("crash at rename %d: daily count %d, want 1", n, got)
 		}
 	}
 	c := crashAt(t, 3) // both renames done, the outcome not yet journaled

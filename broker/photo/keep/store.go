@@ -1,4 +1,4 @@
-package photo
+package keep
 
 import (
 	"context"
@@ -18,13 +18,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/photo"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
 
 // The photo store (CH-26). A kept photo is content named by its hash in
 // Dir (OP-11: content); its receipt, each delivery to a machine and its
 // deletion are journal intents, and the listing is a pure fold of the
-// journal. Receipts are a journal.Lifecycle with a cap of 200 a day (CH-26);
+// journal. Receipts are capped at 200 a day, counted from the journal (CH-26);
 // deleting a photo removes its bytes and erases its intents' content from
 // the journal and its entries from recall (CAP-3).
 
@@ -33,7 +34,7 @@ const (
 	Executor = "photo"
 	// Origin is the origin of every intent the store submits.
 	Origin = "broker:photo"
-	// Kind is the receipt lifecycle's action prefix.
+	// Kind is the receipt action prefix.
 	Kind = "photo.keep."
 	// ActionKeep, plus the source, is a receipt: photo.keep.upload.
 	ActionKeep    = Kind
@@ -63,19 +64,6 @@ var (
 	ErrUntrustedClock = errors.New("photo: the clock is not trusted; nothing expires by time")
 	ErrNotDone        = errors.New("photo: the journal did not record the effect as done")
 )
-
-var keepLifecycle = journal.Lifecycle{
-	Kind:     Kind,
-	Inverse:  journal.Irreversible,
-	Bounds:   []string{"photo", "hash"},
-	DailyCap: DailyCap,
-}
-
-func init() {
-	if err := journal.Register(keepLifecycle); err != nil {
-		panic(err)
-	}
-}
 
 // Journal is what the store needs of journal.Engine.
 type Journal interface {
@@ -136,7 +124,7 @@ var renameDurable = durable.Rename
 
 // Received is one photo to keep.
 type Received struct {
-	Photo  Photo
+	Photo  photo.Photo
 	Source string // SourceUpload or SourceMMS
 	Task   string // the task it came in for, if any
 }
@@ -292,7 +280,7 @@ func (s *Store) Keep(ctx context.Context, rs []Received) ([]Entry, error) {
 		return nil, err
 	}
 	now := s.now()
-	if keepLifecycle.DailyCount(v.records, journal.BrokerAccount, now.In(s.loc()))+len(rs) > DailyCap {
+	if v.dailyCount(now.In(s.loc()))+len(rs) > DailyCap {
 		return nil, ErrDailyCap
 	}
 	if s.Reserve != nil {
@@ -340,9 +328,6 @@ func (s *Store) keepOne(ctx context.Context, id string, r Received, received, ex
 		"width": e.Width, "height": e.Height, "bytes": e.Bytes,
 		"received": e.Received.Unix(), "expires": e.Expires.Unix(),
 	})
-	if err := keepLifecycle.Check(in); err != nil {
-		return Entry{}, err
-	}
 	if err := s.run(ctx, in); err != nil {
 		return Entry{}, err
 	}
@@ -669,9 +654,10 @@ func (s *Store) Reconcile(_ context.Context, in journal.Intent, _ int) journal.O
 
 // view is the store's state folded from the journal.
 type view struct {
-	records []journal.Record
-	photos  map[string]*photoFacts
-	live    map[string]*Entry
+	// receipts are the keep intents, for the daily cap.
+	receipts []*intentFacts
+	photos   map[string]*photoFacts
+	live     map[string]*Entry
 	// unsettled holds the hashes of receipts dispatched with no outcome
 	// yet, which may still own their files.
 	unsettled map[string]map[string]bool // hash -> photo IDs
@@ -689,6 +675,8 @@ type intentFacts struct {
 	dispatch  bool
 	result    journal.Result
 	succeeded bool
+	firstSent time.Time
+	sent      map[int]journal.Result // latest observation per dispatched attempt
 }
 
 func (s *Store) view() (*view, error) {
@@ -702,21 +690,30 @@ func (s *Store) view() (*view, error) {
 		switch r.Type {
 		case journal.RecSubmitted:
 			if r.Intent != nil && r.Intent.Executor == Executor && facts[r.ID] == nil {
-				facts[r.ID] = &intentFacts{in: *r.Intent}
+				facts[r.ID] = &intentFacts{in: *r.Intent, sent: map[int]journal.Result{}}
 				order = append(order, r.ID)
 			}
 		case journal.RecDispatched:
 			if f := facts[r.ID]; f != nil {
 				f.dispatch, f.result = true, ""
+				if f.firstSent.IsZero() || r.At.Before(f.firstSent) {
+					f.firstSent = r.At
+				}
+				if _, ok := f.sent[r.Attempt]; !ok {
+					f.sent[r.Attempt] = ""
+				}
 			}
 		case journal.RecObserved:
 			if f := facts[r.ID]; f != nil {
 				f.result = r.Result
 				f.succeeded = f.succeeded || r.Result == journal.ResultSucceeded
+				if _, ok := f.sent[r.Attempt]; ok {
+					f.sent[r.Attempt] = r.Result
+				}
 			}
 		}
 	}
-	v := &view{records: recs, photos: map[string]*photoFacts{}, live: map[string]*Entry{},
+	v := &view{photos: map[string]*photoFacts{}, live: map[string]*Entry{},
 		unsettled: map[string]map[string]bool{}, next: 1}
 	photo := func(id string) *photoFacts {
 		p := v.photos[id]
@@ -733,6 +730,7 @@ func (s *Store) view() (*view, error) {
 			continue
 		}
 		photo(rest)
+		v.receipts = append(v.receipts, f)
 		if n, err := strconv.Atoi(strings.TrimPrefix(rest, "P")); err == nil && n >= v.next {
 			v.next = n + 1
 		}
@@ -783,6 +781,31 @@ func (s *Store) view() (*view, error) {
 		sort.Strings(e.Machines)
 	}
 	return v, nil
+}
+
+// dailyCount is the number of receipts first dispatched on day's calendar
+// date in day's location that may have applied: some dispatched attempt is
+// not known to have failed (journal.Lifecycle.DailyCount's rule, kept here
+// because the lifecycle's methods are core write paths; ASSUMPTIONS P-14).
+// Receipts are counted though since deleted or erased, so deleting does not
+// free the day's cap.
+func (v *view) dailyCount(day time.Time) int {
+	y, mo, d := day.Date()
+	from := time.Date(y, mo, d, 0, 0, 0, 0, day.Location())
+	to := from.AddDate(0, 0, 1)
+	n := 0
+	for _, f := range v.receipts {
+		if f.firstSent.IsZero() || f.firstSent.Before(from) || !f.firstSent.Before(to) {
+			continue
+		}
+		for _, res := range f.sent {
+			if res != journal.ResultNotApplied {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // held reports whether a live photo or an unsettled receipt other than
