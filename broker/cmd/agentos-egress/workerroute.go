@@ -187,6 +187,13 @@ func (p *workerRoutes) handler() http.Handler {
 				http.Error(w, errRouteLocked.Error(), http.StatusServiceUnavailable)
 				return
 			}
+			if errors.Is(err, egress.ErrNoLogin) {
+				// One line, the sentinel's own text however it was
+				// wrapped: modelroute.RouteControl maps it to
+				// modelroute.ErrNoPlanLogin, the sign-in line (#1858).
+				http.Error(w, egress.ErrNoLogin.Error(), http.StatusConflict)
+				return
+			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
