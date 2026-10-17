@@ -3,49 +3,39 @@ package egress
 import (
 	"errors"
 	"net/http"
-	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/journal"
 )
 
-// REQ: CRED-5, OP-11, CRED-RS-3
+// REQ: CRED-5, OP-11, CRED-RS-3, CRED-RS-4, CRED-RS-5, CRED-RS-6
 
-// routeStops is a RouteStops whose map outlives the Proxy, as the journal
-// does across a restart.
-type routeStops struct {
-	mu   sync.Mutex
-	m    map[string]string
-	fail bool // every write fails
+// stopStore is a journal store that refuses every write once fail is set,
+// as a full or failing disk does.
+type stopStore struct {
+	journal.MemStore
+	fail bool
 }
 
 var errStopWrite = errors.New("journal refused the record")
 
-func (s *routeStops) StopRoute(route, cause string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *stopStore) Append(line []byte) error {
 	if s.fail {
 		return errStopWrite
 	}
-	if _, ok := s.m[route]; !ok {
-		s.m[route] = cause
-	}
-	return nil
+	return s.MemStore.Append(line)
 }
 
-func (s *routeStops) ReopenRoute(route string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fail {
-		return errStopWrite
+// journalStops opens a journal engine over st: the RouteStops agentosd
+// shares with provagent, and a restart when opened again over the same
+// store (CRED-RS-6).
+func journalStops(t *testing.T, st journal.Store) *journal.Engine {
+	t.Helper()
+	e, err := journal.Open(st, nil, nil, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
 	}
-	delete(s.m, route)
-	return nil
-}
-
-func (s *routeStops) RouteStopped(route string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.m[route]
-	return c, ok
+	return e
 }
 
 // rebuild builds the rig's proxy again over st, as a broker restart does.
@@ -62,12 +52,13 @@ func (r *planRig) rebuild(t *testing.T, st RouteStops) {
 	r.proxy = p
 }
 
-// CRED-RS-3: a stop is in the store, so a proxy built again over it (a
-// restart) still refuses the route without reaching the provider. A
-// refused login's stop is lifted by Resume; an unswappable one is not,
-// only by Requalify (the release).
+// CRED-RS-3, CRED-RS-5, CRED-RS-6: a stop is in the journal, so a proxy
+// built again over it (a restart) still refuses the route without reaching
+// the provider. A refused login's stop is lifted by Resume; an unswappable
+// one is not, only by Requalify (the release).
 func TestProxyStopSurvivesARestart(t *testing.T) {
-	st := &routeStops{m: map[string]string{}}
+	store := &journal.MemStore{}
+	st := journalStops(t, store)
 	r := newPlanRig(t)
 	r.rebuild(t, st)
 	canary := synthetic(t, "canary-")
@@ -103,6 +94,7 @@ func TestProxyStopSurvivesARestart(t *testing.T) {
 	if c, _ := st.RouteStopped("plan"); c != StopUnswappable {
 		t.Fatalf("store after an unswappable response: %q", c)
 	}
+	st = journalStops(t, store)
 	r.rebuild(t, st)
 	if err := r.proxy.Resume("plan"); !errors.Is(err, ErrRequalify) {
 		t.Fatalf("Resume after a restart = %v, want ErrRequalify", err)
@@ -117,15 +109,17 @@ func TestProxyStopSurvivesARestart(t *testing.T) {
 	if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != 200 {
 		t.Fatalf("after Requalify got %d", w.Code)
 	}
+	if _, ok := journalStops(t, store).RouteStopped("plan"); ok {
+		t.Fatal("Requalify's reopening is not in the journal")
+	}
 }
 
-// CRED-RS-3: a stop the store cannot record still stops the route in this
-// proxy and tells the owner once; a reopening it cannot record is refused
-// and leaves the route stopped.
+// CRED-RS-3, CRED-RS-6: a stop the journal cannot record still stops the
+// route in this proxy and tells the owner once; a reopening it cannot
+// record is refused and leaves the route stopped.
 func TestProxyStopWriteFailureFailsClosed(t *testing.T) {
-	st := &routeStops{m: map[string]string{}, fail: true}
 	r := newPlanRig(t)
-	r.rebuild(t, st)
+	r.rebuild(t, journalStops(t, &stopStore{fail: true}))
 	r.answer(http.StatusForbidden, "application/json", `{"error":"account restricted"}`)
 	for i := 0; i < 3; i++ {
 		if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != http.StatusServiceUnavailable {
@@ -136,7 +130,12 @@ func TestProxyStopWriteFailureFailsClosed(t *testing.T) {
 		t.Fatalf("provider reached %d times, owner told %v", r.provider.count(), r.fails.list())
 	}
 
-	st = &routeStops{m: map[string]string{"plan": StopLoginRefused}, fail: true}
+	store := &stopStore{}
+	st := journalStops(t, store)
+	if err := st.StopRoute("plan", StopLoginRefused); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
 	r = newPlanRig(t)
 	r.rebuild(t, st)
 	if err := r.proxy.Resume("plan"); err == nil {
@@ -145,5 +144,46 @@ func TestProxyStopWriteFailureFailsClosed(t *testing.T) {
 	r.answer(200, "application/json", `{"content":[]}`)
 	if w := r.do(t, "w1", chat("/plan/v1/messages")); w.Code != http.StatusServiceUnavailable || r.provider.count() != 0 {
 		t.Fatalf("unrecorded reopening: got %d, provider reached %d times", w.Code, r.provider.count())
+	}
+}
+
+// CRED-RS-4: an unswappable exchange on a route a refused login stopped (a
+// request already past the stop check, or a stop provagent wrote) raises
+// the stop, in the journal or, when the journal cannot record it, in the
+// proxy; the owner is told again, and Resume no longer reopens it.
+func TestProxyRaisesALoginRefusedStop(t *testing.T) {
+	store := &journal.MemStore{}
+	st := journalStops(t, store)
+	if err := st.StopRoute("plan", StopLoginRefused); err != nil {
+		t.Fatal(err)
+	}
+	r := newPlanRig(t)
+	r.rebuild(t, st)
+	r.proxy.stop("plan", ReasonUnswappable)
+	if c, _ := journalStops(t, store).RouteStopped("plan"); c != StopUnswappable {
+		t.Fatalf("journal after the unswappable response: %q", c)
+	}
+	if f := r.fails.list(); len(f) != 1 {
+		t.Fatalf("owner told %v, want the raised stop once", f)
+	}
+	r.proxy.stop("plan", ReasonUnswappable)
+	r.proxy.stop("plan", ReasonLoginRefused)
+	if f := r.fails.list(); len(f) != 1 {
+		t.Fatalf("a stop that raises nothing told the owner again: %v", f)
+	}
+	if err := r.proxy.Resume("plan"); !errors.Is(err, ErrRequalify) {
+		t.Fatalf("Resume of a raised stop = %v, want ErrRequalify", err)
+	}
+
+	r = newPlanRig(t)
+	failing := &stopStore{fail: true}
+	r.rebuild(t, journalStops(t, failing))
+	r.proxy.stop("plan", ReasonLoginRefused)
+	r.proxy.stop("plan", ReasonUnswappable)
+	if f := r.fails.list(); len(f) != 2 {
+		t.Fatalf("owner told %v, want the stop and its raising", f)
+	}
+	if err := r.proxy.Resume("plan"); !errors.Is(err, ErrRequalify) {
+		t.Fatalf("Resume of a raised stop held in the proxy = %v, want ErrRequalify", err)
 	}
 }

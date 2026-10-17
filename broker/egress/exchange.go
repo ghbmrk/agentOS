@@ -237,10 +237,12 @@ const (
 
 // RouteStops is the durable record of stopped routes (the journal's
 // StopRoute, ReopenRoute and RouteStopped, OP-11). A route stopped twice
-// keeps its first cause.
+// keeps its cause, unless the second outranks it: every cause outranks
+// StopLoginRefused (CRED-RS-4). ReopenRoute lifts a stop only while it has
+// the cause named, and fails otherwise (CRED-RS-5).
 type RouteStops interface {
 	StopRoute(route, cause string) error
-	ReopenRoute(route string) error
+	ReopenRoute(route, cause string) error
 	RouteStopped(route string) (cause string, stopped bool)
 }
 
@@ -248,12 +250,20 @@ type RouteStops interface {
 type memStops map[string]string
 
 func (m memStops) StopRoute(route, cause string) error {
-	if _, ok := m[route]; !ok {
+	if cur, ok := m[route]; !ok || cur == StopLoginRefused {
 		m[route] = cause
 	}
 	return nil
 }
-func (m memStops) ReopenRoute(route string) error { delete(m, route); return nil }
+
+func (m memStops) ReopenRoute(route, cause string) error {
+	if cur, ok := m[route]; ok && cur != cause {
+		return fmt.Errorf("egress: %s is stopped for %s, not %s", route, cur, cause)
+	}
+	delete(m, route)
+	return nil
+}
+
 func (m memStops) RouteStopped(route string) (string, bool) {
 	c, ok := m[route]
 	return c, ok
@@ -282,26 +292,34 @@ func (p *Proxy) stopped(adapter string) (string, bool) {
 	return p.stoppedLocked(adapter)
 }
 
+// stoppedLocked is the higher of the recorded stop and the one held here
+// (CRED-RS-4).
 func (p *Proxy) stoppedLocked(adapter string) (string, bool) {
-	if c, ok := p.stops.RouteStopped(adapter); ok {
-		return stopReason(c), true
+	r, ok := "", false
+	if c, stored := p.stops.RouteStopped(adapter); stored {
+		r, ok = stopReason(c), true
 	}
-	r, ok := p.held[adapter]
+	if h, held := p.held[adapter]; held && (!ok || r == ReasonLoginRefused) {
+		r, ok = h, true
+	}
 	return r, ok
 }
 
-// stop stops adapter's route and tells the owner, once per stop. A stop
-// the store cannot record is held in this proxy (fail closed).
+// stop stops adapter's route and tells the owner, once per stop; an
+// unswappable stop raises a refused login's, and the owner is told again,
+// since signing in no longer helps (CRED-RS-4). A stop the store cannot
+// record is held in this proxy (fail closed).
 func (p *Proxy) stop(adapter, reason string) {
 	p.mu.Lock()
-	_, already := p.stoppedLocked(adapter)
-	if !already {
+	cur, already := p.stoppedLocked(adapter)
+	raise := !already || (cur == ReasonLoginRefused && reason != ReasonLoginRefused)
+	if raise {
 		if err := p.stops.StopRoute(adapter, stopCause(reason)); err != nil {
 			p.held[adapter] = reason
 		}
 	}
 	p.mu.Unlock()
-	if !already {
+	if raise {
 		p.xch.routeFailed(adapter, reason)
 	}
 }
@@ -322,7 +340,7 @@ func (p *Proxy) Resume(adapter string) error {
 	if r, ok := p.stoppedLocked(adapter); ok && r != ReasonLoginRefused {
 		return ErrRequalify
 	}
-	return p.reopen(adapter)
+	return p.reopen(adapter, StopLoginRefused)
 }
 
 // Requalify reopens adapter's route whatever stopped it: the release
@@ -330,14 +348,16 @@ func (p *Proxy) Resume(adapter string) error {
 func (p *Proxy) Requalify(adapter string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.reopen(adapter)
+	c, _ := p.stops.RouteStopped(adapter)
+	return p.reopen(adapter, c)
 }
 
-// reopen lifts adapter's stop. mu must be held.
-func (p *Proxy) reopen(adapter string) error {
+// reopen lifts adapter's stop if it is recorded for cause; the store
+// refuses one recorded for another (CRED-RS-5). mu must be held.
+func (p *Proxy) reopen(adapter, cause string) error {
 	if _, ok := p.stops.RouteStopped(adapter); ok {
-		if err := p.stops.ReopenRoute(adapter); err != nil {
-			return fmt.Errorf("egress: route stays stopped, its reopening was not recorded: %w", err)
+		if err := p.stops.ReopenRoute(adapter, cause); err != nil {
+			return fmt.Errorf("egress: route stays stopped: %w", err)
 		}
 	}
 	delete(p.held, adapter)

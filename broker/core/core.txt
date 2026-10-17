@@ -113,7 +113,7 @@ allow control guest.OwnerAgent.Deliver -- owner chat goes to the owner's agent m
 allow loops journal.Engine.RecordQuality -- Loop 1 records the quality signal on a finished intent (loops.JournalReader)
 allow modelroute journal.Engine.RecordEgress -- each routed model call leaves its egress note (modelroute.Recorder)
 allow provagent journal.Engine.StopRoute -- a refused login stops the provider's route in the journal, so it stays stopped across a restart (CRED-5, OP-11; provagent.RouteStops)
-allow provagent journal.Engine.ReopenRoute -- the owner's stored sign-in reopens a route a refused login stopped (CRED-5; provagent.RouteStops)
+allow provagent journal.Engine.ReopenRoute -- the owner's stored sign-in reopens a route only while it is stopped for a refused login; the journal refuses the reopening for any other cause (CRED-5, CRED-RS-5; provagent.RouteStops)
 allow vm guest.Plane.Open -- a machine's sandbox opens its own guest socket at creation (vm.Services)
 allow vm guest.Plane.Close -- and closes it when the machine is destroyed (vm.Services)
 allow vm guest.Plane.Reset -- and drops the tool results it held for the machine when a forget resets it (vm.Resetter, CAP-3)
