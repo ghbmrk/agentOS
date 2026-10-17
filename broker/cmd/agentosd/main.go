@@ -692,10 +692,13 @@ func main() {
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
 	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
+	pictures := &pictureJournal{}
 	if modemBridge {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
-		// recorded where the bridge reads it at its next open.
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
+		// recorded where the bridge reads it at its next open. A picture
+		// texted to the box is journaled and counted in STATUS (CH-12).
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell})
+		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
@@ -795,6 +798,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pictures.open(d.Engine().RecordPicture)
 	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)

@@ -81,6 +81,11 @@ type Config struct {
 	// Record records iccid as the owner line's SIM, where the bridge reads
 	// it at its next open (agentos-modem's roles file); nil refuses Adopt.
 	Record func(iccid string) error
+	// Picture is told of each picture or file texted to the owner line
+	// (an MMS notice), and whether it came from the owner, outside the
+	// Link's lock; at most InboundPerMinute a minute, past which pictures
+	// are only counted. nil: counted only.
+	Picture func(owner bool)
 }
 
 // Outage is a stretch when the owner line could not be used, and how many
@@ -103,18 +108,22 @@ type Link struct {
 	cfg   Config
 	inbox chan modem.SMS
 
-	mu          sync.Mutex
-	ready       chan struct{} // closed and replaced when an item is queued
-	queue       []*item
-	out         map[string]*item
-	state       string
-	seen        time.Time
-	outage      *Outage
-	last        Outage
-	stray       int
-	dropped     bool
-	others      int
-	timedOut    int
+	mu       sync.Mutex
+	ready    chan struct{} // closed and replaced when an item is queued
+	queue    []*item
+	out      map[string]*item
+	state    string
+	seen     time.Time
+	outage   *Outage
+	last     Outage
+	stray    int
+	dropped  bool
+	others   int
+	timedOut int
+	// pictures counts MMS notices from the owner [0] and from others [1];
+	// pictureTime, those passed to Config.Picture in the last minute.
+	pictures    [2]int
+	pictureTime []time.Time
 	inboundIDs  map[string]time.Time // taken inbound IDs, kept for IDTTL
 	inboundTime []time.Time
 	// okSince is when the owner line last became usable. A poll that
@@ -528,6 +537,12 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errBadInbound
 	}
 	now := l.cfg.Now()
+	var tell func() // runs after the unlock
+	defer func() {
+		if tell != nil {
+			tell()
+		}
+	}()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.heardLocked(now)
@@ -546,6 +561,12 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	}
 	if _, again := l.inboundIDs[in.ID]; again && in.ID != "" {
 		return struct{}{}, nil // a try whose answer was lost
+	}
+	if in.Picture {
+		// A picture or file: counted, never read, never in the inbox, and
+		// taken before the rate limit so it cannot spend the owner's.
+		tell = l.pictureLocked(in, now)
+		return struct{}{}, nil
 	}
 	if in.Named || in.From != l.cfg.Owner {
 		// Set aside before the rate limit and the inbox, so no one else's
@@ -580,6 +601,47 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		l.inboundIDs[in.ID] = now
 	}
 	return struct{}{}, nil
+}
+
+// pictureLocked counts a picture and remembers its ID; it returns the
+// Config.Picture call to make once l.mu is released, or nil.
+func (l *Link) pictureLocked(in bridgeproto.Inbound, now time.Time) func() {
+	owner := !in.Named && in.From == l.cfg.Owner
+	if owner {
+		l.pictures[0]++
+	} else {
+		l.pictures[1]++
+	}
+	if in.ID != "" {
+		if l.inboundIDs == nil {
+			l.inboundIDs = map[string]time.Time{}
+		}
+		l.inboundIDs[in.ID] = now
+	}
+	kept := l.pictureTime[:0]
+	for _, t := range l.pictureTime {
+		if now.Sub(t) < time.Minute {
+			kept = append(kept, t)
+		}
+	}
+	l.pictureTime = kept
+	if l.cfg.Picture == nil || len(kept) >= InboundPerMinute {
+		return nil
+	}
+	l.pictureTime = append(l.pictureTime, now)
+	f := l.cfg.Picture
+	return func() { f(owner) }
+}
+
+// PictureNote is STATUS's line on pictures or files texted to the owner
+// line since start, or "" when none came. Nothing opens them yet.
+func (l *Link) PictureNote() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pictures == [2]int{} {
+		return ""
+	}
+	return fmt.Sprintf("Pictures by text: %d from you, %d from others. Not opened yet.", l.pictures[0], l.pictures[1])
 }
 
 func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
