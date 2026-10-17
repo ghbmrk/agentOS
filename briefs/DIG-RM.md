@@ -4,11 +4,11 @@ Board section: Integration. Decision D-097 (Mark, Decisions cards 2026-10-10): "
 
 **Failure path (checked at main aa1a1c9):** SPEC still sends the owner to a digest in ten places (table below), so a builder working from OP-2, CH-11, CRED-5 or DEV-10 builds or keeps digest behaviour CH-15 forbids. agentosd still runs it: `main.go:652` builds `newDigestBox`, `main.go:851` runs `go dg.run(ctx)`, and `digest.go` pushes "Daily digest: %s; reply STATUS for more." at `digestHour = 8`. That is an unasked text of a non-urgent class every day, which CH-15 forbids.
 
-**Conflict to settle first (Q1).** D-116 (2026-10-14, after D-097) parks unclear effects "in the daily digest without interrupting the owner", lets RETRY act on digest items, and lists a refused resend "in the next digest"; Mark approved that wording of OP-2, OP-4 and CH-11 the same day. Both decisions hold if the parked list moves to STATUS. The owner is still never interrupted (D-116's point) and never texted it unasked (D-097's point). This brief takes that reading; Q1 asks Mark to confirm it.
+**Conflict settled (Q1).** D-116 (2026-10-14, after D-097) parks unclear effects "in the daily digest without interrupting the owner", lets RETRY act on digest items, and lists a refused resend "in the next digest"; Mark approved that wording of OP-2, OP-4 and CH-11 the same day. Both decisions hold if the parked list moves to STATUS. The owner is still never interrupted (D-116's point) and never texted it unasked (D-097's point). Mark confirmed that reading on 2026-10-17 (Q1 below).
 
 ## Reference map
 
-Each live digest reference, where D-097 puts it, and the recommended wording. Change-log rows (lines 721, 746, 748, 760) are history and stay as written. "Marked" means D-097 does not settle the reference; the brief takes the reading closest to D-097 and lists the reference under Questions.
+Each live digest reference, where D-097 puts it, and the recommended wording. Change-log rows (lines 721, 746, 748, 760) are history and stay as written. "Marked" means D-097 alone did not settle the reference; Mark settled each on 2026-10-17 (Decisions below).
 
 | # | SPEC line, ID | Today | D-097 home | Recommended wording |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Each live digest reference, where D-097 puts it, and the recommended wording. Ch
 | 6 | 503, DEV-5 | "counted in the digest" | STATUS line | "counted in STATUS" (one line per device that acted today, e.g. "Thermostat: 4 changes today."). Dropping the count is the alternative; it is the owner's only view of the cap. |
 | 7 | 510, DEV-9 | "the digest names a cut-off device that reports outdated firmware" | STATUS line | "STATUS names a cut-off device that reports outdated firmware, for as long as it does (OP-9)" |
 | 8 | 523, DEV-10 | "Discovery results reach the owner as one digest line ("Found a printer and 3 lights. …") and on the local page." | STATUS line | "Discovery results appear as one STATUS line ("Found a printer and 3 lights. Connect them on my Wi-Fi page.") and on the local page." |
-| 9 | 523, DEV-10 | "gets its own digest line, … with an ID unique among open requests (CH-12) that stays open until the next digest" | STATUS line; new ID lifetime (marked, Q3) | "gets its own STATUS line, … with an ID unique among open requests (CH-12) that stays open while discovery still finds the device and it is neither connected nor dismissed, and for at most 7 days (owner-set)" |
+| 9 | 523, DEV-10 | "gets its own digest line, … with an ID unique among open requests (CH-12) that stays open until the next digest" | STATUS line; new ID lifetime (marked, Q3) | "gets its own STATUS line, … with an ID unique among open requests (CH-12) that stays open while discovery still finds the device and it is neither connected nor dismissed, with no time cap" |
 | 10 | 523, DEV-10 | "A grant unused for 60 days (owner-set) appears in the digest with `REVOKE <id>`." | STATUS line | "… appears in STATUS with `REVOKE <id>` until it is used or revoked." |
 | 11 | 216, CH-3 table | "in reply to the digest line" | STATUS line | "in reply to its STATUS line" |
 | 12 | 516, DEV-10 table | "Code-generator code in reply to its digest line (`CONNECT <id> <code>`)" | STATUS line | "… in reply to its STATUS line (`CONNECT <id> <code>`)" |
@@ -29,11 +29,11 @@ No reference maps to an urgent text: none blocks work, carries a deadline, holds
 
 ## DIG-RM-spec: SPEC.md loses the digest (L1 spec-diff, Mark approves)
 
-**Requirement IDs:** OP-2, OP-4, CH-11, CH-3 (table), CRED-5, DEV-5, DEV-9, DEV-10, as amended per the map; CH-15 unchanged. **Change:** the twelve edits in the map, worded as there unless Mark answers Q1 to Q3 otherwise; one change-log row citing D-097 and this brief. No other SPEC text moves.
+**Requirement IDs:** OP-2, OP-4, CH-11, CH-3 (table), CRED-5, DEV-5, DEV-9, DEV-10, as amended per the map; CH-15 unchanged. **Change:** the twelve edits in the map, worded as there (Mark's answers to Q1 to Q3 match); one change-log row citing D-097 and this brief. No other SPEC text moves.
 
 **Acceptance tests:** none: a SPEC-only PR has no code; the check is `grep -n -i digest SPEC.md` printing only change-log rows and CH-15's "There is no digest", plus `python3 tools/doclint.py` clean. Mark's approval of the PR at its head is the acceptance.
 
-**Guard files:** none (no package added). **Scope:** `SPEC.md`. **Tier and model:** per `tools/risk_tier.py` (SPEC.md is L1; Mark merges). **Usage estimate:** 30k tokens, checkpoint 20k. **Dependencies:** this brief merged; Q1 to Q3 answered or the recommended readings accepted.
+**Guard files:** none (no package added). **Scope:** `SPEC.md`. **Tier and model:** per `tools/risk_tier.py` (SPEC.md is L1; Mark merges). **Usage estimate:** 30k tokens, checkpoint 20k. **Dependencies:** this brief merged; none left (Q1 to Q3 answered 2026-10-17).
 
 ## DIG-RM-a: every digest line is shown in STATUS (tier A)
 
@@ -60,7 +60,7 @@ No reference maps to an urgent text: none blocks work, carries a deadline, holds
 
 **Guard files:** none (no package added, no import added to `cmd/agentosd` beyond its arc2 allowlist). **Scope:** `broker/cmd/agentosd/{main.go,capoff.go,unclear.go,mail.go,forget.go,secondline.go,qualitywire.go,sleepwire.go}`, `broker/cmd/agentosd/status_sources_test.go` (new), `broker/daemon/{daemon.go,retry.go}` (comments and, if needed, a STATUS note hook), and a non-draining read in `broker/question/question.go` and `broker/events/attention.go` only if DRA-2 needs one. Not `broker/digestqueue`, not `digest.go` (DIG-RM-b deletes them). **Guards:** `digestgate2_test.go`'s `bootOrder` stays green (the digest still runs here); the source-scanning lint tests in `cmd/agentosd` stay green; STATUS lines are fixed broker wording (CH-12), no agent text.
 
-**Tier and model:** A (`broker/cmd/agentosd`): strongest model. **Usage estimate:** 110k tokens, checkpoint 80k. **Dependencies:** DIG-RM-spec merged (or Q1 answered); no open PR touches the scope files (D-111, check at start).
+**Tier and model:** A (`broker/cmd/agentosd`): strongest model. **Usage estimate:** 110k tokens, checkpoint 80k. **Dependencies:** DIG-RM-spec merged; no open PR touches the scope files (D-111, check at start).
 
 ## DIG-RM-b: delete the digest (tier A, Mark merges)
 
@@ -96,7 +96,7 @@ Touching risk_tier.py and the g1 lists makes `premerge.py --needs-mark` print `m
 
 ## SIM-pull and board dispositions
 
-SIM-pull (briefs/SIM.md) already plans the same deletion, but it waits on SIM-owner-hold, SIM-sd and SIM-cases, so the daily push CH-15 forbids would keep running until that chain lands. **Recommended (Q4):** run DIG-RM-a/b standalone now and narrow SIM-pull's Change to the STATUS projection and urgent push, dropping "`broker/digestqueue` in whole … the digest gate" once DIG-RM-b merges. SIM-cases' digest cases are retired by DIG-RM-b's list.
+SIM-pull (briefs/SIM.md) already plans the same deletion, but it waits on SIM-owner-hold, SIM-sd and SIM-cases, so the daily push CH-15 forbids would keep running until that chain lands. **Decided (Q4, Mark 2026-10-17):** run DIG-RM-a/b standalone now and narrow SIM-pull's Change to the STATUS projection and urgent push, dropping "`broker/digestqueue` in whole … the digest gate" once DIG-RM-b merges. SIM-cases' digest cases are retired by DIG-RM-b's list.
 
 Rows to change on their work-item issues once this brief merges (the coordinator or the next builder applies them; BOARD.md is never hand-edited):
 
@@ -114,28 +114,18 @@ Rows to change on their work-item issues once this brief merges (the coordinator
 
 **Finding (release):** CH-15's weekly liveness line has no code at aa1a1c9. With the digest gone, an owner who rarely pulls has no sign the box is up. This needs a new work-item row, not part of DIG-RM.
 
-## Questions for Mark
+## Decisions (Mark, 2026-10-17, via the coordinator's cards)
 
-- **Q1. Where parked unclear effects go (D-116 vs D-097).**
-  - (a) STATUS lists them, and RETRY acts on that list. **Recommended:** it keeps both decisions and never texts unasked.
-  - (b) One urgent text when an effect is parked. This makes parking an urgent class.
-  - (c) Keep D-116's digest for this one class. This contradicts CH-15.
-- **Q2. CRED-5 mid-life pause.**
-  - (a) STATUS and ONB-9 only. **Recommended:** work goes on by other routes, so nothing is blocked.
-  - (b) One urgent text, because which plan does the work changed.
-- **Q3. How long a CONNECT ID stays open.**
-  - (a) While discovery finds the device and it is not connected or dismissed, at most 7 days, owner-set. **Recommended.**
-  - (b) Until connected or dismissed, with no time cap.
-  - (c) A fixed 24 hours.
-- **Q4. Order of work.**
-  - (a) DIG-RM-a/b standalone now, and narrow SIM-pull. **Recommended:** the forbidden daily push stops sooner.
-  - (b) Fold the deletion into SIM-pull and wait for its chain.
+- **Q1. Where parked unclear effects go.** STATUS lists them, and RETRY acts on that list (map rows 1 to 4). It reconciles D-116 with D-097.
+- **Q2. CRED-5 mid-life pause.** STATUS and ONB-9 only, no push (row 5).
+- **Q3. CONNECT ID lifetime.** It is listed in STATUS while discovery still finds the device and it is neither connected nor dismissed, with no time cap (row 9). Mark: "Fine to have a passive list of devices to connect, as long as device still there".
+- **Q4. Order.** DIG-RM-a/b run standalone now, and SIM-pull narrows.
 
 ## Assumptions
 
 | # | Assumption | Basis | If it changes |
 |---|---|---|---|
-| 1 | D-116's intent is "park without interrupting", not "use the digest". | decisions/D-116.md; D-097 predates it and was not mentioned there. | If Mark meant the digest, Q1(c), and CH-15 needs an exception. |
+| 1 | D-116's intent is "park without interrupting", not "use the digest". | Mark's Q1 answer, 2026-10-17. | Settled. |
 | 2 | `daemon.Config.Notes` is the STATUS note hook, and STATUS has room for the moved lines. | `daemon.go:163-165`. STATUS is pulled, so length costs one MORE page (CH-12). | If STATUS must stay short, DIG-RM-a adds a summary line with MORE. |
 | 3 | CH-15's liveness line is not built yet, so deleting the digest removes no liveness behaviour. | `grep -rn "Still running" broker` finds nothing at aa1a1c9. | If the digest turns out to carry it, DIG-RM-b keeps it on its own timer. Building it is a separate `class:release` row (finding below). |
 | 4 | No live SPEC requirement other than the twelve mapped names the digest. | `grep -n -i digest SPEC.md` at aa1a1c9 (change log aside). | DIG-RM-spec adds the row. |
