@@ -125,6 +125,9 @@ NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
+# Root carries project quotas, so each agent machine writes under its own hard quota (RES-4, #1386),
+# and the agentosd command systemd loaded ends -disk-quota on (flag=on).
+has "$W/console.log" "agentos-quota: root=ext4 prjquota flag=on"
 # The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.
 # Positive: an interface and an address on the report's one line, so a damaged line is no lease.
 lease='agentos-uplink: [a-z0-9]+ [0-9.]+/[0-9]+ agentos-boot: bless=good'
@@ -174,6 +177,7 @@ done
 # The same drive boots again on its own GUIDs (the entry is already blessed) and keeps them.
 TMO=600 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
+has "$W/console-reboot.log" "agentos-quota: root=ext4 prjquota flag=on"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
 has "$W/console-reboot.log" "agentos-uplink: none"
 
