@@ -2,10 +2,11 @@
 """List state:queued work items whose package a merged PR already names (read-only).
 
 A PR that never links its issue leaves the row queued after the work merged, so a dispatcher
-that lists queued rows starts a build for finished work. A merged PR names a row's package
-when its title carries the ID as a whole token (anywhere, not only as the prefix board.py
-stale reads) or its body carries `package <ID>` (the `Record: PR #N · package <ID> · head <SHA>`
-line). An open PR that names the ID too means more is owed, so the row is not listed.
+that lists queued rows starts a build for finished work. A merged PR counts when it names the
+package (its title starts with the ID, board.py stale's rule, or its body has the line
+`Record: PR #N · package <ID> · head <SHA>`) and changed code, tests, the image or spikes: PRs
+that only add a brief, a BOARD row, spec or docs name IDs they have not built. An open PR that
+names the ID too means more is owed, so the row is not listed.
 
   stalequeued.py --repo o/r      print "<ID> (#issue): merged PR #N (title|body)" per row; exit 0
                                  whether or not any is found. GETs only: never relabels or comments.
@@ -34,8 +35,17 @@ def names(pr, row_id):
     return None
 
 
-def stale_queued(items, prs):
-    """(issue, merged PR, how) for each queued row a merged PR names and no open PR names."""
+BUILD_DIRS = ("broker/", "guest/", "image/", "spikes/", "tests/", "tools/")
+
+
+def builds(files):
+    """True when any changed file is code, a test, the image or a spike."""
+    return any(f.startswith(BUILD_DIRS) for f in files)
+
+
+def stale_queued(items, prs, files=lambda pr: ["tools/x"]):
+    """(issue, merged PR, how) for each queued row a merged PR names, with a build change
+    (files(pr) lists its changed paths), and no open PR names."""
     out = []
     for item in items:
         if "pull_request" in item:
@@ -47,7 +57,7 @@ def stale_queued(items, prs):
         hits = [(p, how) for p, how in hits if how]
         if any(p["state"] == "open" for p, _ in hits):
             continue
-        merged = [(p, how) for p, how in hits if p.get("merged_at")]
+        merged = [(p, how) for p, how in hits if p.get("merged_at") and builds(files(p))]
         if merged:
             pr, how = max(merged, key=lambda h: h[0]["merged_at"])
             out.append((item, pr, how))
@@ -60,7 +70,8 @@ def main(argv=None, fetch=board.github):
     args = ap.parse_args(argv)
     try:
         items = board.work_items(fetch, args.repo)
-        found = stale_queued(items, fetch(f"/repos/{args.repo}/pulls?state=all"))
+        found = stale_queued(items, fetch(f"/repos/{args.repo}/pulls?state=all"),
+                             lambda pr: [f["filename"] for f in fetch(f"/repos/{args.repo}/pulls/{pr['number']}/files")])
     except ValueError as e:
         print(f"stalequeued: {e}", file=sys.stderr)
         return 1

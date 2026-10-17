@@ -50,6 +50,13 @@ class StaleQueuedTest(unittest.TestCase):
         self.assertIsNone(stalequeued.names(pr(1, "x", "builds on package AB-1 and more"), "AB-1"))
         self.assertIsNone(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "Brief for AB-1")]) or None)
 
+    def test_docs_only_pr_with_id_prefixed_title_is_not_a_build(self):
+        docs = {"briefs/AB-1.md", "BOARD.md", "SPEC.md", "docs/x.md"}
+        self.assertEqual(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "AB-1: brief")],
+                                                  lambda p: sorted(docs)), [])
+        self.assertEqual(len(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "AB-1: build")],
+                                                      lambda p: ["briefs/AB-1.md", "spikes/a.py"])), 1)
+
     def test_id_match_is_a_whole_token(self):
         self.assertIsNone(stalequeued.names(pr(1, "AB-1-b: x"), "AB-1"))
         self.assertIsNone(stalequeued.names(pr(1, "XAB-1: x"), "AB-1"))
@@ -73,6 +80,8 @@ class StaleQueuedTest(unittest.TestCase):
 
         def fetch(path, method="GET", payload=None):
             calls.append(method)
+            if path.endswith("/files"):
+                return [{"filename": "tools/a.py"}]
             return ISSUES if path.startswith("/repos/o/r/issues") else PRS
         out = io.StringIO()
         with redirect_stdout(out):
