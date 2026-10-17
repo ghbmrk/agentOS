@@ -642,7 +642,7 @@ func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
 func init() {
 	template.Must(tmpl.Parse(`{{define "signoutfail"}}{{template "head" ""}}
 <h1>Sign-out incomplete</h1>
-<p class="err">The box did not confirm that this phone is signed out, so it may still be signed in. Try again; if it keeps failing, wait a minute and try once more.</p>
+<p class="err">I could not confirm that this phone is signed out, so it may still be signed in. Try again; if it keeps failing, wait a minute and try once more.</p>
 <form method="post" action="/signout"><button>Try sign-out again</button></form>
 <p><a href="/status">Status</a></p>
 {{template "foot"}}{{end}}`))
