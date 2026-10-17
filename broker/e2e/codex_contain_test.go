@@ -54,7 +54,7 @@ func TestIntegrationCodexContainment(t *testing.T) {
 	if out, err := exec.Command("cp", "-a", rootfs, img).CombinedOutput(); err != nil {
 		t.Fatalf("copy image: %v: %s", err, out)
 	}
-	build := exec.Command("go", "build", "-trimpath", "-o", filepath.Join(img, containProbe), "./codexprobe")
+	build := exec.Command("go", "build", "-trimpath", "-o", filepath.Join(img, containProbe), "./testdata/codexprobe")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build probe: %v: %s", err, out)
