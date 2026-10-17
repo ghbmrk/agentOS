@@ -25,8 +25,8 @@ import (
 
 // Synthetic card networks, the shape card.Generate makes.
 var (
-	cardNet    = apnet.Network{SSID: "AgentOS-AB2C", Password: "ABCD-EFGH-JKLM-NP23"}
-	rotatedNet = apnet.Network{SSID: "AgentOS-AB2C", Password: "QRST-UVWX-YZ23-4567"}
+	cardNet    = apnet.Network{SSID: apnet.Prefix + "AB2C", Password: "ABCD-EFGH-JKLM-NP23"}
+	rotatedNet = apnet.Network{SSID: apnet.Prefix + "AB2C", Password: "QRST-UVWX-YZ23-4567"}
 )
 
 func writeAPNet(t *testing.T, n apnet.Network) string {
@@ -107,9 +107,9 @@ func TestARotatedWiFiNetworkNeedsTheVaultsOneShotPermit(t *testing.T) {
 
 func TestARotatedWiFiNetworkIsRefusedUnlessItRotatesTheCardsOwn(t *testing.T) {
 	for name, n := range map[string]apnet.Network{
-		"another name":     {SSID: "AgentOS-ZZ99", Password: "QRST-UVWX-YZ23-4567"},
-		"not a card shape": {SSID: "AgentOS-AB2C", Password: "short"},
-		"injection":        {SSID: "AgentOS-AB2C", Password: "QRST-UVWX-YZ23-456\n"},
+		"another name":     {SSID: apnet.Prefix + "ZZ99", Password: "QRST-UVWX-YZ23-4567"},
+		"not a card shape": {SSID: apnet.Prefix + "AB2C", Password: "short"},
+		"injection":        {SSID: apnet.Prefix + "AB2C", Password: "QRST-UVWX-YZ23-456\n"},
 	} {
 		p := writeAPNet(t, cardNet)
 		before, _ := os.ReadFile(p)
@@ -297,9 +297,9 @@ func TestReconcileRetriesUntilTheVaultAnswers(t *testing.T) {
 
 func TestReconcileRefusesAnotherNameOrAnInvalidNetwork(t *testing.T) {
 	for name, n := range map[string]apnet.Network{
-		"another name":     {SSID: "AgentOS-ZZ99", Password: "QRST-UVWX-YZ23-4567"},
-		"not a card shape": {SSID: "AgentOS-AB2C", Password: "short"},
-		"injection":        {SSID: "AgentOS-AB2C", Password: "QRST-UVWX-YZ23-456\n"},
+		"another name":     {SSID: apnet.Prefix + "ZZ99", Password: "QRST-UVWX-YZ23-4567"},
+		"not a card shape": {SSID: apnet.Prefix + "AB2C", Password: "short"},
+		"injection":        {SSID: apnet.Prefix + "AB2C", Password: "QRST-UVWX-YZ23-456\n"},
 	} {
 		p := writeAPNet(t, cardNet)
 		before, _ := os.ReadFile(p)
