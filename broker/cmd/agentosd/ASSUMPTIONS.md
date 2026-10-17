@@ -267,3 +267,9 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | RS1 | **An unsaved approval answer shows in STATUS (OWNER-retire-surface, #1971).** `newOwnerPacer` adds the owner's `RetireNote` to `cfg.Notes` after its held line; the pacer's minute tick logs `RetireErr` once per distinct cause, and again only after it has cleared and recurs. No owner text is sent: the failure is a full or broken state disk, which an owner text would not fix and which STATUS already reports on ask. | SM-AJ-4, OP-11 | If the owner should be texted unprompted, add it to the digest's problem lines, not a new text. |
+
+## The box clock guard on its own (#1246)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| CG1 | **No open guard means restricted.** `questions.openClock` opens the guard before the owner channel and question book, so neither failing leaves the sleeper or STATUS without it. While no guard is open (before `qs.start`, or after `clock.New` fails) `restricted()` holds and STATUS says the time check is not running. The sleeper is wired after `qs.start`, so in a healthy start it never sees the nil window. | TIM-1 | If something time-sensitive must run before `qs.start`, open the guard earlier in `main.go`. |
