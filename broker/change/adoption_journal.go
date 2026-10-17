@@ -382,6 +382,12 @@ func (p *Pipeline) replayLocked(j Journal) {
 			}
 			a.Reverted, a.Staged, a.Confirmed, a.WithdrawnFor = "", false, false, ""
 			if legacy != nil {
+				if owedRevert(legacy.Reverted) {
+					// A pre-journal state's forget or settings revert:
+					// the journal holds it, or it is owed below (#1995).
+					tail[id] = legacy.Reverted
+					legacy.Reverted = ""
+				}
 				p.legacy[id] = legacy
 				a.Staged, a.Confirmed, a.Reverted, a.WithdrawnFor = legacy.Staged, legacy.Confirmed, legacy.Reverted, legacy.WithdrawnFor
 			} else {
@@ -430,14 +436,21 @@ func (p *Pipeline) replayLocked(j Journal) {
 	resave := len(owed) != len(p.st.Unjournaled)
 	p.st.Unjournaled = owed
 	// A body an earlier build saved with a forget or settings revert in
-	// it, on an adoption the journal leaves active: owe it once.
+	// it, top-level or in its legacy lifecycle, on an adoption the journal
+	// leaves active: owe it once. Every such body is put again without it.
 	var migrated []string
+	owes := false
 	for _, a := range ads {
-		if why := tail[a.ID]; why != "" && a.Reverted == "" {
+		why := tail[a.ID]
+		if why == "" {
+			continue
+		}
+		if a.Reverted == "" {
 			a.Reverted = why
 			p.oweLocked(a.ID, why)
-			migrated = append(migrated, a.ID)
+			owes = true
 		}
+		migrated = append(migrated, a.ID)
 	}
 	p.st.Adoptions = ads
 	p.savedAds = cloneAdoptions(ads)
@@ -454,7 +467,7 @@ func (p *Pipeline) replayLocked(j Journal) {
 	}
 	// The debt is saved before a migrated body loses its revert, so a
 	// crash or failed save between the two keeps the revert somewhere.
-	if resave || len(migrated) > 0 {
+	if resave || owes {
 		if err := p.saveLocked(); err != nil {
 			p.brokenLocked("owed reverts not saved", err)
 			return
