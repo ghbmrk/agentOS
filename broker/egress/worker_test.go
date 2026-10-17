@@ -397,13 +397,27 @@ func TestWorkerRouteBodyCheck(t *testing.T) {
 	r = newWorkerRig(t, false)
 	full := withKey(`"instructions":"be brief","parallel_tool_calls":false,"store":false,` +
 		`"reasoning":{"effort":"medium","summary":"auto"},"prompt_cache_key":"k","text":{"verbosity":"low"},` +
-		`"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"tools":{"type":"string"}}}}]`)
+		`"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"wait","parameters":{"type":"object","properties":{"tools":{"type":"string"}}}}]}]`)
 	full = strings.Replace(full, `"input":[`, `"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"s"}],"encrypted_content":"e"},`+
 		`{"type":"function_call","name":"f","arguments":"{}","call_id":"c1"},{"type":"function_call_output","call_id":"c1","output":"ok"},`+
 		`{"type":"custom_tool_call","name":"exec","input":"ls","call_id":"c2"},{"type":"custom_tool_call_output","call_id":"c2","output":"ok"},`+
 		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"x"}]},`, 1)
 	if w := r.do(responses(full)); w.Code != http.StatusOK {
 		t.Fatalf("CLI request shape: %d %s", w.Code, w.Body)
+	}
+
+	// The pinned CLI also sends a top-level client_metadata map (seen on
+	// the box image's guest-task, #1701); refusing it fails every run.
+	r = newWorkerRig(t, false)
+	if w := r.do(responses(withKey(`"client_metadata":{"x-codex-installation-id":"synthetic-0000"}`))); w.Code != http.StatusOK {
+		t.Fatalf("client_metadata: %d %s", w.Code, w.Body)
+	}
+	// It carries text only: anything else in it is refused, not forwarded.
+	for _, bad := range []string{`"x"`, `["x"]`, `{"k":{"url":"x"}}`, `{"k":1}`} {
+		r = newWorkerRig(t, false)
+		if w := r.do(responses(withKey(`"client_metadata":` + bad))); w.Code != http.StatusForbidden || r.up.count() != 0 {
+			t.Fatalf("client_metadata %s: %d, upstream %d", bad, w.Code, r.up.count())
+		}
 	}
 }
 

@@ -313,7 +313,8 @@ func TestSourcesTellRoutersApartBehindOneGatewayAddress(t *testing.T) {
 		t.Fatalf("back on router A: %v, want %v", n.External, eA)
 	}
 	// The NAT-PMP request itself resolves the neighbour entry: an answer read
-	// with no entry at the start is filed under the MAC seen after it.
+	// with no entry at the start is a move (#1725), so the router at the MAC
+	// seen after it is asked again, and its answer is filed under that MAC.
 	eC := netip.MustParseAddr("9.9.9.9")
 	g.gw.Store("0103A8C0")
 	g.mac.Store("")
@@ -514,5 +515,45 @@ func TestGateway4InterfaceIsTheChosenRoutes(t *testing.T) {
 		"eth0\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\n"
 	if g, dev := gateway4(tbl); g != netip.MustParseAddr("192.168.0.1") || dev != "wlan0" {
 		t.Fatalf("gateway4: %v %q, want 192.168.0.1 on wlan0", g, dev)
+	}
+}
+
+// With no neighbour entry at the start of a read, a router swap at the same
+// address and interface during the NAT-PMP wait is still a move: the first
+// answer may be the old router's, so it is not filed under the new router's
+// key, and the new router's cached address stays refused when its own
+// request times out (#1725).
+func TestUnknownStartMACThenRouterSwapKeepsTheEndRoutersAddress(t *testing.T) {
+	eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	g.mac.Store("02:00:00:00:00:0b")
+	g.ext = func(context.Context) (netip.Addr, error) { return eB, nil }
+	s := g.sources()
+	if n, _ := s.Read(); n.External != eB {
+		t.Fatalf("router B read: %+v", n)
+	}
+	g.mac.Store("") // the neighbour entry is flushed, then router A is back
+	calls := 0
+	g.ext = func(context.Context) (netip.Addr, error) {
+		calls++
+		if calls == 1 { // router A answers, then B replaces it
+			g.mac.Store("02:00:00:00:00:0b")
+			return eA, nil
+		}
+		return netip.Addr{}, context.DeadlineExceeded // B's request times out
+	}
+	n, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.External != eB {
+		t.Fatalf("read ended on router B with %v, want B's %v", n.External, eB)
+	}
+	if calls != 2 {
+		t.Errorf("router asked %d times, want 2", calls)
+	}
+	if n, _ := s.ReadLocal(); n.External != eB {
+		t.Fatalf("router B's quick read got %v, want %v", n.External, eB)
 	}
 }

@@ -82,10 +82,20 @@ func (r *Runtime) cmd(ctx context.Context, o childproc.Options, args ...string) 
 	return childproc.Command(ctx, childproc.NewEnv(runscEnv...), o, r.Bin, r.argv(args...)...)
 }
 
-// argv is runsc's argv after its name: the global flags, then args.
+// argv is runsc's argv after its name: args with the runtime's global
+// flags pinned after the caller's own and just before the subcommand.
+// runsc takes a flag's last value and defines no --network past the
+// subcommand, so no caller's argument starts a guest with a network or
+// another root, platform or host-socket reach (A14, A14-r2-1). Callers
+// pass global flags as -name=value: a bare value would read as the
+// subcommand, and runsc then fails to parse the command rather than run it.
 func (r *Runtime) argv(args ...string) []string {
-	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open"}
-	return append(base, args...)
+	n := 0
+	for n < len(args) && strings.HasPrefix(args[n], "-") {
+		n++
+	}
+	out := append(slices.Clone(args[:n]), "--root", r.StateDir, "--platform="+r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open")
+	return append(out, args[n:]...)
 }
 
 // runscEnv is all of runsc's environment: a fixed PATH. runsc runs as
@@ -115,7 +125,9 @@ func (r *Runtime) Restore(ctx context.Context, l vm.Launch, image string) error 
 
 // launchArgs is the subcommand and its flags that start a guest: run, or
 // restore from image when image is set. Every global flag comes from
-// argv, which TestAGuestCannotDial checks together with these (A14).
+// argv through cmd, which pins --network=none whatever launch passes:
+// TestRunscStartsEveryGuestWithoutANetwork and
+// TestStartAndRestorePassRunscNoNetwork check the argv runsc gets (A14).
 func (r *Runtime) launchArgs(l vm.Launch, image string) []string {
 	if image == "" {
 		return []string{"run", "--bundle", r.bundle(l), "-detach", cid(l.ID)}

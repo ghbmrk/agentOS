@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -336,5 +337,54 @@ func TestONB3SetupModeWiresThePlanSignIn(t *testing.T) {
 	}
 	if d.Link != "https://auth.openai.com/codex/device" || d.Code != "ABCD-EF23" || d.From != "OpenAI" || si.starts.Load() != 1 {
 		t.Fatalf("plan sign-in answered %q %q %q after %d starts", d.Link, d.Code, d.From, si.starts.Load())
+	}
+}
+
+// verbSock is a fake provider control socket: it records each verb and
+// answers an open with the worker's route directory.
+func verbSock(t *testing.T) (string, func() []string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "vs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "c.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var verbs []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		verbs = append(verbs, strings.TrimPrefix(r.URL.Path, "/"))
+		mu.Unlock()
+		fmt.Fprintf(w, `{"Dir":%q}`, "/routes/"+r.URL.Query().Get("machine"))
+	})}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	return path, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), verbs...)
+	}
+}
+
+// The worker a setup sign-in marks opens its route as a sign-in route: the
+// runner that marks it and the machines that open it share one route
+// control. Two controls opened setup's sign-in worker on a run route,
+// which refuses the CLI's device-code calls (#1701, G1 guest-task).
+func TestONB3SetupSignInWorkerOpensASignInRoute(t *testing.T) {
+	sock, verbs := verbSock(t)
+	c := setupMachines{rc: modelroute.NewRouteControl(sock)}
+	_, si := newSetupPlane(c, nil)
+	id := vm.ProviderPrefix + "abc123"
+	si.r.SignInFor(id)
+	if _, err := c.providerRoutes().Open(id); err != nil {
+		t.Fatal(err)
+	}
+	if got := verbs(); len(got) != 1 || got[0] != "signin" {
+		t.Fatalf("the sign-in worker's route opened with %v, not signin", got)
 	}
 }

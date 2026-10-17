@@ -44,15 +44,17 @@ const (
 )
 
 // relayer is one forwarder's relay: the route socket it dials and its bounds. It is fixed before
-// serve starts and never written after, so relay goroutines read it without locks.
+// serve starts and never written after, so relay goroutines read it without locks. dialSaid is
+// set once the first failed dial of the socket has been logged.
 type relayer struct {
 	socket   string
 	maxConns int
 	idle     time.Duration
+	dialSaid *atomic.Bool
 }
 
 func newRelayer(socket string) relayer {
-	return relayer{socket: socket, maxConns: defaultMaxConns, idle: defaultIdle}
+	return relayer{socket: socket, maxConns: defaultMaxConns, idle: defaultIdle, dialSaid: new(atomic.Bool)}
 }
 
 // childVars are the variables the CLI is given from the forwarder's own environment (the
@@ -168,6 +170,12 @@ func (r relayer) pipe(c net.Conn) {
 	defer c.Close()
 	u, err := net.Dial("unix", r.socket)
 	if err != nil {
+		// The first failure only, on stderr, which the sign-in writes to its output file
+		// (provagent SignInCommand): the error names the socket path and nothing the route
+		// carries (#1701).
+		if !r.dialSaid.Swap(true) {
+			log.Printf("route socket: %v", err)
+		}
 		return
 	}
 	defer u.Close()

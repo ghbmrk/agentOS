@@ -4822,6 +4822,31 @@ class SetupServicesTest(unittest.TestCase):
         self.assertEqual(s["Service"]["ExecStart"], "/usr/lib/agentos/egress-setup --restart")
         self.assertIn("+/usr/lib/agentos/egress-setup", ini(UNITS / "agentos-egress.service")["Service"]["ExecStartPre"])
 
+    def test_the_setup_vault_s_oneshot_is_sandboxed(self):
+        # #1387: the root oneshot keeps only what egress-setup uses (a lock and a temporary directory
+        # in /run, setpriv, chown, the vault's state directory, systemctl over /run/systemd/private).
+        # Each line is pinned, so deleting one fails here.
+        got = settings(UNITS / "agentos-egress-setup.service")
+        for k, want in {
+            "CapabilityBoundingSet": ["CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE"],
+            "AmbientCapabilities": [], "NoNewPrivileges": ["yes"], "ProtectSystem": ["strict"],
+            # "-": egress-setup exits 0 with no vault directory; the namespace must not fail first.
+            "ReadWritePaths": ["/run -/var/lib/agentos-egress"],
+            "ProtectHome": ["yes"], "PrivateTmp": ["yes"], "PrivateDevices": ["yes"],
+            "PrivateNetwork": ["yes"], "RestrictAddressFamilies": ["AF_UNIX"],
+            "ProtectKernelTunables": ["yes"], "ProtectKernelModules": ["yes"], "ProtectKernelLogs": ["yes"],
+            "ProtectControlGroups": ["yes"], "ProtectClock": ["yes"], "ProtectHostname": ["yes"],
+            "RestrictNamespaces": ["yes"], "RestrictRealtime": ["yes"], "RestrictSUIDSGID": ["yes"],
+            "LockPersonality": ["yes"], "MemoryDenyWriteExecute": ["yes"],
+            "SystemCallArchitectures": ["native"], "SystemCallFilter": ["@system-service"],
+            "UMask": ["0077"], "ProtectProc": ["invisible"], "PrivateIPC": ["yes"],
+            "User": [], "DynamicUser": [],
+            # Not ProcSubset=pid: the claim check reads /proc/sys/kernel/random/boot_id.
+            "ProcSubset": [],
+        }.items():
+            with self.subTest(k):
+                self.assertEqual(got.get(k, []), want)
+
 
 class EgressSetupTest(unittest.TestCase):
     """egress-setup makes the setup vault (init -setup) once the page has recorded the claim, as the

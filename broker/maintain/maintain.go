@@ -47,10 +47,11 @@ const ChannelPinned = loops.ChannelPinned
 // Proposer is the part of the change pipeline Loop 3 uses.
 type Proposer interface {
 	ProposeRelease(ctx context.Context, v *update.Verified) (change.Report, error)
-	// Lapsed reports, once, that proposal id was dropped because the
-	// owner's request closed unanswered (change.Pipeline.Lapsed). It must
-	// not call into Loop 3: it is called under Loop 3's lock.
-	Lapsed(id string) bool
+	// Closed reports, once, how the owner's request for proposal id
+	// closed without an adoption (change.Pipeline.Closed): a change.Closed
+	// kind, or "" while it is open or adopted. It must not call into
+	// Loop 3: it is called under Loop 3's lock.
+	Closed(id string) string
 	// Adoptions lists the pipeline's adoptions (change.Pipeline.Adoptions),
 	// read to find one the applier dropped (Reverted == change.WhyDropped,
 	// SR3-4f-2-r1). It must not call into Loop 3.
@@ -168,9 +169,18 @@ type state struct {
 	Seen       map[string]time.Time   `json:"seen,omitempty"`
 	Proposed   map[int64]change.State `json:"proposed,omitempty"`
 	ProposedAt map[int64]time.Time    `json:"proposed_at,omitempty"`
-	// ProposalID is the pipeline's proposal ID per proposed version, so a
-	// check can ask whether one awaiting the owner lapsed (M8).
+	// ProposalID is the pipeline's proposal ID per proposed version, so
+	// Loop 3 can ask how a request awaiting the owner closed (M8).
 	ProposalID map[int64]string `json:"proposal_id,omitempty"`
+	// Ended is, per version no longer proposed, how and when its owner's
+	// request closed (P2-2a-f4). A check does not propose a version the
+	// owner declined or left out again; it proposes a lapsed or failed one
+	// again and clears its entry.
+	Ended map[int64]ended `json:"ended,omitempty"`
+	// Tries counts, per version, approved installs that failed and staged
+	// adoptions the applier dropped, so STATUS can say a release keeps
+	// failing (P2-2a-f4f).
+	Tries map[int64]int `json:"tries,omitempty"`
 	// DigestCurrent: the last digest already said the box is up to date,
 	// so the next stays quiet while it still is.
 	DigestCurrent bool `json:"digest_current,omitempty"`
@@ -201,6 +211,12 @@ type state struct {
 	// began, so a check is due at once and each TestedBy claim is
 	// retired unless its release still holds its authority (SR3-6f-4).
 	Recheck bool `json:"recheck,omitempty"`
+}
+
+// ended is how and when the owner's request for a version closed.
+type ended struct {
+	Why string    `json:"why"` // a change.Closed kind
+	At  time.Time `json:"at"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -313,6 +329,9 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
+	if l.syncLocked() {
+		l.saveLocked()
+	}
 	if !online {
 		l.noteOfflineLocked()
 		return loops.Job{}, false
@@ -337,6 +356,42 @@ func (l *Loop3) unproposeLocked(v int64) {
 	delete(l.st.TestedBy, v)
 	delete(l.st.Evidence, v)
 	delete(l.held, v)
+}
+
+// syncLocked asks the pipeline how each request awaiting the owner
+// closed, if it did, and records it (P2-2a-f4): the proposal is
+// forgotten, Ended says how and when, and a failed install counts a try.
+// It reports whether anything changed, for the caller to save.
+func (l *Loop3) syncLocked() bool {
+	changed := false
+	for v, s := range l.st.Proposed {
+		id := l.st.ProposalID[v]
+		if s != change.StateAwaitingOwner || id == "" {
+			continue
+		}
+		why := l.cfg.Pipeline.Closed(id)
+		if why == "" {
+			continue
+		}
+		l.unproposeLocked(v)
+		if l.st.Ended == nil {
+			l.st.Ended = map[int64]ended{}
+		}
+		l.st.Ended[v] = ended{Why: why, At: l.cfg.Now()}
+		if why == change.ClosedFailed {
+			l.tryLocked(v)
+		}
+		changed = true
+	}
+	return changed
+}
+
+// tryLocked counts a failed or dropped install of version v.
+func (l *Loop3) tryLocked(v int64) {
+	if l.st.Tries == nil {
+		l.st.Tries = map[int64]int{}
+	}
+	l.st.Tries[v]++
 }
 
 // retireClaims, after an attestor change, forgets each proposed version
@@ -466,6 +521,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	_ = l.retireClaims()
 
 	l.mu.Lock()
+	l.syncLocked()
 	l.st.LastAttempt, l.st.OfflineSince = now, time.Time{}
 	if l.changes.Load() == gen {
 		// No attestor change since this check's read: its claims and
@@ -487,6 +543,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		// store refuses a release checked under another root.
 		l.st.Source = src.RootSHA256
 		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence, l.st.ProposalID = nil, nil, nil, nil, nil
+		l.st.Ended, l.st.Tries = nil, nil
 	}
 	l.st.FreshFailed = res.FreshnessFailed
 	if res.RootRotatedTo > 0 {
@@ -513,6 +570,16 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.unproposeLocked(v)
 		}
 	}
+	for v := range l.st.Ended {
+		if v <= installed.Version {
+			delete(l.st.Ended, v)
+		}
+	}
+	for v := range l.st.Tries {
+		if v <= installed.Version {
+			delete(l.st.Tries, v)
+		}
+	}
 	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
 	l.st.Next = now.Add(l.cfg.Interval)
 	if rel == nil {
@@ -529,17 +596,18 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.Seen[key] = now
 	}
 	seen := l.st.Seen[key]
-	if l.st.Proposed[v] == change.StateAwaitingOwner && l.st.ProposalID[v] != "" && l.cfg.Pipeline.Lapsed(l.st.ProposalID[v]) {
-		// The owner's request closed unanswered and the pipeline dropped
-		// the proposal (change.Decided): offer it again now.
-		l.unproposeLocked(v)
-	}
 	if id := l.st.ProposalID[v]; id != "" && dropped[id] {
 		// The applier dropped the adoption saved for v (SR3-4f-2-r1): offer
 		// it again now, under a new ID, with this check's authority.
+		l.tryLocked(v)
 		l.unproposeLocked(v)
 	}
 	_, proposed := l.st.Proposed[v]
+	if e, ok := l.st.Ended[v]; ok && (e.Why == change.ClosedDeclined || e.Why == change.ClosedLeftOut) {
+		// The owner said no to v, or left it out: the next release is
+		// offered, not v again (P2-2a-f4b, P2-2a-f4d).
+		proposed = true
+	}
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPinned}
 	}
@@ -572,6 +640,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposalID = map[int64]string{}
 		}
 		l.st.ProposalID[v] = o.id
+		delete(l.st.Ended, v)
 		if l.st.Evidence == nil {
 			l.st.Evidence = map[int64][2]int{}
 		}
@@ -839,6 +908,9 @@ func (l *Loop3) Status() Status {
 	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.syncLocked() {
+		l.saveLocked()
+	}
 	return l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 }
 
@@ -901,9 +973,34 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 		return Status{Line: pendingLine(p)}
 	}
 	if st.Newest > in.Version {
+		name := fmt.Sprintf("Update %d", st.Newest)
+		if st.NewestSecurity {
+			name = "Security update " + name[len("Update "):]
+		}
+		if e, ok := st.Ended[st.Newest]; ok {
+			// How the owner's request closed (P2-2a-f4b, P2-2a-f4c).
+			day := e.At.Format("Mon 2 Jan")
+			switch e.Why {
+			case change.ClosedDeclined:
+				return Status{Line: fmt.Sprintf("%s: you said no on %s. I will offer the next update when it is out.", name, day)}
+			case change.ClosedLeftOut:
+				return Status{Line: fmt.Sprintf("%s: you left it out on %s. I will offer the next update when it is out.", name, day)}
+			case change.ClosedLapsed:
+				return Status{Line: fmt.Sprintf("%s: your approval request closed on %s without an answer. I will ask again at the next daily check.", name, day)}
+			case change.ClosedFailed:
+				if k := st.Tries[st.Newest]; k >= repeatedTries {
+					return Status{Line: repeatedLine(name, k)}
+				}
+				return Status{Line: name + " was approved but could not be installed. I will try again at the next daily check."}
+			}
+		}
 		if id := st.ProposalID[st.Newest]; id != "" && dropped[id] {
-			// Until the next check offers it again (SR3-4f-2-r1, UX2 on #605).
-			return Status{Line: fmt.Sprintf("Update %d was not installed; I will offer it again.", st.Newest)}
+			// Until the next check offers it again (SR3-4f-2-r1, UX2 on
+			// #605); this drop is counted at that check (P2-2a-f4e, f).
+			if k := st.Tries[st.Newest] + 1; k >= repeatedTries {
+				return Status{Line: repeatedLine(name, k)}
+			}
+			return Status{Line: name + " was not installed: it was set aside before it could install. I will try again at the next daily check."}
 		}
 		switch st.Proposed[st.Newest] {
 		case change.StateRejected:
@@ -943,6 +1040,14 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 	return Status{Current: true, Line: fmt.Sprintf("Updates: up to date (checked %s).", last)}
 }
 
+// repeatedTries is the failed or dropped try from which STATUS counts
+// them rather than repeating one line (P2-2a-f4f).
+const repeatedTries = 3
+
+func repeatedLine(name string, k int) string {
+	return fmt.Sprintf("%s has failed to install %d times. I will try again at the next daily check.", name, k)
+}
+
 func pendingLine(p *pending) string {
 	switch {
 	case p.Why == waitPinned && p.Security:
@@ -971,6 +1076,9 @@ func (l *Loop3) Digest() []string {
 	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.syncLocked() {
+		l.saveLocked()
+	}
 	st := l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 	var out []string
 	if serr == nil && src.RootSHA256 != l.st.SaidSource {
