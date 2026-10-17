@@ -442,6 +442,15 @@ jobs:
           cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_BUILDER_ROOTFS=/tmp/lbroot \
             go test -count=1 -v -run '^TestIntegrationBuilderImage$' ./e2e
+      - name: Codex CLI containment under gVisor (S8-W1-contain, #1720)
+        # The pinned CLI runs one tool call in a pw- machine from the built image, holding only a
+        # synthetic placeholder login; the tool must not reach the forwarder, the route socket or
+        # CODEX_HOME, and must run under the CLI's bwrap and seccomp (CRED-5, C5).
+        run: |
+          sh guest/codex/build-rootfs.sh /tmp/cxroot
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CODEX_ROOTFS=/tmp/cxroot \
+            go test -count=1 -v -run '^TestIntegrationCodexContainment$' ./e2e
       - name: Floor box admission and preemption (P2-5)
         # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
         working-directory: broker

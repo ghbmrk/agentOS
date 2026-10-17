@@ -1,0 +1,9 @@
+# broker/e2e assumptions
+
+## S8-W1-contain (#1720): Codex CLI containment under gVisor
+
+- E1. The scripted endpoint stands where the upstream would: the forwarder relays bytes to `route.sock`, so a plain HTTP server on that socket sees the CLI's requests exactly as egress would. Checked: the endpoint sees `Authorization: Bearer <canary>-access` and the canary account id.
+- E2. Tool output reaches the test only through the CLI's `--json` result file (`command_execution.aggregated_output`). A probe line absent there fails the test: a tool that never ran is not counted as contained.
+- E3. The control run (the probe started beside the CLI with the same env, without the CLI) reaches the forwarder, the socket and `CODEX_HOME`. Measured 2026-10-17: all reachable, Seccomp 0, NoNewPrivs 0. So a denial in the CLI run is the CLI's sandbox, not the machine.
+- E4. **Measured 2026-10-17, gVisor release-20260928.0, CLI 0.162.1: the CLI's bundled bwrap cannot start a tool.** Every tool call fails with `bwrap: loopback: Failed RTM_NEWADDR`. Cause: runsc gives every new network namespace a loopback that already holds 127.0.0.1/8 and ::1/128 (runsc/boot/loader.go, the sandbox netstack creator), and bwrap's loopback setup adds 127.0.0.1/8 with `NLM_F_CREATE|NLM_F_EXCL` and dies on any error (bubblewrap network.c, unchanged on main). A probe in the worker measured `EEXIST` with `NLM_F_EXCL` and success without it. On Linux a new netns's lo has no address, so the same call succeeds. Containment therefore holds only by failing closed, and C5 fails; the test stays red until a fix lands. The errno bwrap prints ("No child process") is not reconciled with the `EEXIST` measured; it does not change the cause.
+- E5. bwrap needs a user namespace in the worker: root there lacks CAP_SYS_ADMIN, so `--unshare-net` alone gets EPERM. The CLI's sandbox already unshares the user namespace.

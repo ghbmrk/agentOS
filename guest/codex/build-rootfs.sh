@@ -11,7 +11,8 @@
 # still checked against the pinned hash.
 # Hook for #809 (the runsc measurement of guest/codex/ASSUMPTIONS.md C1-C15): register OUT_DIR as
 # an image with agentosd (-image codex=OUT_DIR) and run the measurements in a machine from it.
-# Nothing here is measured under runsc.
+# broker/e2e/codex_contain_test.go (#1720) runs the pinned CLI in a machine from OUT_DIR under runsc
+# and checks that its tools cannot reach the forwarder, the route socket or CODEX_HOME.
 set -eu
 CODEX_VERSION=0.162.1
 CODEX_PKG=codex-$CODEX_VERSION-linux-x64
