@@ -6,7 +6,7 @@ Board row: work item #1380. Tier A for every build package. Needs: #1314 (merged
 
 ## Decisions
 
-- **P1 Login volume opaque.** agentOS never reads it; it is encrypted at rest under a vault key (CRED-8); the volume holds only what the CLI writes there. W2's schema check is dropped for Claude.
+- **P1 Login volume opaque.** agentOS never reads it; it is encrypted at rest under a vault key (CRED-8); the volume holds the pasted token as one sealed file the launcher pipes to the CLI, plus what the CLI writes there (C1 evidence: on this path the CLI writes no credential). W2's schema check is dropped for Claude.
 - **P2 The login is `claude setup-token`** (inference-only scope, CRED-5 W3).
 - **P3 No preinstall.** Claude Code installs after opt-in, only at the version and hash in the signed release metadata. A version is adopted only after it has been public two weeks.
 - **P4 No relay of sign-in codes.** The owner runs `setup-token` on their own device and pastes the token into the worker's sealed sign-in. If the pinned CLI cannot take a token that way, the route does not ship; this path is untested, so it is the first check of C1.
@@ -18,7 +18,7 @@ Board row: work item #1380. Tier A for every build package. Needs: #1314 (merged
 
 Needed, because current SPEC text says otherwise or is silent:
 1. **CRED-5 worker-held W2:** the schema check at every mount does not apply to the Claude opt-in (volume opaque, encrypted under a vault key, CRED-8). CRED-8 gains the sentence that a provider login volume is encrypted under a vault key.
-2. **CRED-5 owner opt-in:** "the owner runs Claude's own sign-in flow ... agentOS code never reads, copies or serves" conflicts with a paste into a page. State that the owner pastes a `setup-token` into the worker's sealed sign-in, which the broker passes to the CLI's login command without storing, logging or reading it, and that a CLI that cannot take it so means no route.
+2. **CRED-5 owner opt-in:** "the owner runs Claude's own sign-in flow ... agentOS code never reads, copies or serves" conflicts with a paste into a page. State that the owner pastes a `setup-token` into the worker's sealed sign-in, which the worker launcher hands to the CLI through a pipe on `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (the CLI has no login command that takes a token; C1 evidence below), never logging, parsing or serving it, and that a CLI that cannot take it so means no route.
 3. **CAP-11 versions:** "versions change only through image updates" gains the exception: Claude Code installs after opt-in at the version and hash in signed release metadata, adopted two weeks after publication.
 4. **CH-11:** `CLAUDE OFF` joins the closed control words (pause, with the revoke link in the reply).
 5. **CAP-9 routing:** a Claude run starts only from an owner-initiated task; a task that reads web pages or inbound mail never routes to Claude.
@@ -29,6 +29,24 @@ Scope: `SPEC.md`, `briefs/PLAN-claude-optin.md`. **Acceptance tests:** none: SPE
 ## Build packages (each needs the SPEC diff merged first; order C1 to C5)
 
 **C1 PLAN-claude-optin-1: first check, opt-in record and page.** First, a supervised check (a spike under `spikes/`, no production code) that the pinned CLI accepts a pasted `setup-token` in a headless worker; if not, stop and tell the coordinator, the route does not ship. Then the opt-in record (journaled, revocable), the warning page, the "Help improve Claude" confirmation step. Scope: `broker/localui/claude_optin.go` (new), `broker/localui/claude_optin_test.go` (new), `broker/localui/ASSUMPTIONS.md`, `broker/provagent/declare.go`, `broker/provagent/declare_test.go`, `spikes/claude-setup-token/` (new). **Acceptance tests:** CRED-5: `TestClaudeRefusesWithoutOptIn`, `TestOptInRevokeRefuses`; ONB-3: `TestOptInRequiresHelpImproveStep` (fails if the step is skippable); `TestWarningQuotesClausesAndLink`. **Guard files:** `broker/provagent/declare.go` is tier A through `broker/core/core.txt`. 90k.
+
+**C1 first check: evidence (2026-10-17). Verdict: GO, with the mechanism changed.** Script: `spikes/claude-setup-token/run.sh` (synthetic canary `sk-ant-oat01-PLACEHOLDER-S8`, all egress to a local stub; no real credential used).
+- **CLI:** 2.1.288, the newest release public 14 days on 2026-10-17 (published 2026-10-02T18:30Z); linux-x64 binary sha256 `0298068b686e7fdbaf9402a7a587bb7f49c0b0e084de09f69145a0719207640c`.
+- **Docs** (code.claude.com/docs/en/authentication, read 2026-10-17): `claude setup-token` runs the browser flow on the owner's device, prints a one-year OAuth token and "does not save the token anywhere"; it is consumed as `CLAUDE_CODE_OAUTH_TOKEN`; it "can only make model requests" (no Remote Control, no claude.ai connectors); needs Pro, Max, Team or Enterprise; `--bare` does not read it. No refresh: re-paste yearly or after revoke.
+- **No login command takes a token.** `claude auth login` has only `--claudeai`, `--console`, `--email`, `--sso`; `setup-token` has no options; nothing reads a token from stdin or an argument. The binary reads `CLAUDE_CODE_OAUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (reads the fd to newline, then deletes the variable). With neither set it falls back to the fixed path `/home/claude/.claude/remote/.oauth_token`, and writes the token there only when `CLAUDE_CODE_REMOTE` is set (from strings; the no-credential case could not be isolated in this test container, which has its own file at that path).
+- **Measured** (fresh HOME, `-p` with a Bash tool turn, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`):
+
+| Case | Model calls | Bearer sent | Exit | Token in HOME | Token in the CLI's `/proc` |
+|---|---|---|---|---|---|
+| env var | 2 | canary | 0 | no | `environ` |
+| fd 3 from a file | 2 | canary | 0 | no | `fd/3` (file stays open) |
+| fd 3 from a pipe | 1 | canary | — | no | nowhere |
+| `--bare` + env var | 0 | — | 1 | no | — |
+| stub answers 401 | 2 | canary | 1, "Failed to authenticate. API Error: 401 …" | no | — |
+
+- **Disk writes in HOME, every case:** `.claude.json`, `.claude/backups/.claude.json.backup.*`, and the session transcript `.claude/projects/<cwd>/<session>.jsonl`. None held the token.
+- **Mechanism for C3:** the sealed sign-in stores the pasted token as one file on the encrypted login volume; the launcher pipes it to the CLI on fd 3 with `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3` and closes its end. Never the env var (readable in `/proc/<pid>/environ`), never an fd onto the file. Keep `CLAUDE_CODE_REMOTE` unset and never mount `/home/claude/.claude/remote/`. The tool sandbox must still deny the token file and the CLI's `/proc/<pid>/` (same-uid memory reads stay possible), and the transcript directory must stay off the login volume and out of the journal.
+- **SPEC impact:** item 2 of the SPEC diff above is corrected to the pipe (it named a login command that does not exist); P1 now says the volume also holds the pasted token. Not verified without a real token: acceptance by the real API, the real expired-token message, and an org-restricted account.
 
 **C2 PLAN-claude-optin-2: install after opt-in.** Install at the signed release metadata's version and hash only; refuse a version public under 14 days; no install before opt-in. Scope: `broker/update/claude_install.go` (new), `broker/update/claude_install_test.go` (new), `broker/update/ASSUMPTIONS.md`. **Acceptance tests:** CAP-11: `TestClaudeNoInstallBeforeOptIn`, `TestClaudeInstallRefusesWrongHash`, `TestClaudeInstallRefusesVersionUnderTwoWeeks`. **Guard files:** none expected; name any in the PR. 70k.
 
@@ -41,5 +59,5 @@ Scope: `SPEC.md`, `briefs/PLAN-claude-optin.md`. **Acceptance tests:** none: SPE
 **Conflicts (D-111) at 2026-10-17 00:43Z.** C1 and C4 edit `broker/provagent` (held by #2015, and by PLAN-grok and PLAN-muse in `declare.go`). C3 depends on PR #2063. Build order by that: after #2015 and PLAN-grok.
 
 **Acceptance tests:** none: the brief builds nothing; each package above names its own, and each gets its own brief file when it starts.
-**Scope:** `briefs/PLAN-claude-optin.md` only. **Guard files:** none.
+**Scope:** `briefs/PLAN-claude-optin.md`, `spikes/claude-setup-token/` (C1 first check). **Guard files:** none.
 **Usage estimate:** brief only. Builders: strongest model, two reviews each.
