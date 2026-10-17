@@ -142,10 +142,13 @@ func TestProxyDefaultInFlightBudget(t *testing.T) {
 	if ir.p.budget != DefaultInFlightBytes || DefaultInFlightBytes != 320<<20 {
 		t.Fatalf("default in-flight budget %d, constant %d", ir.p.budget, DefaultInFlightBytes)
 	}
-	// The costliest body MaxBody allows that is not a refusal outright: a
-	// maximal plain string must fit the default budget on its own.
-	if c := bodyCost(bytes.Repeat([]byte("a"), DefaultMaxBody)); c > DefaultInFlightBytes {
-		t.Fatalf("a maximal string body costs %d, over the budget", c)
+	// A maximal body of plain or non-ASCII text, as an owner's long prompt
+	// is, must fit the default budget on its own.
+	for name, text := range map[string]string{"ascii": "a", "cjk": "\u6f22"} {
+		body := bytes.Repeat([]byte(text), DefaultMaxBody/len(text))
+		if c := bodyCost(body); c > DefaultInFlightBytes {
+			t.Errorf("a maximal %s body costs %d, over the budget", name, c)
+		}
 	}
 }
 
@@ -225,10 +228,13 @@ func TestBodyCostBoundsApply(t *testing.T) {
 		fmt.Fprintf(&uniq, `,"%x":0`, i)
 	}
 	uniq.WriteString("}")
-	depth := 9000 // under encoding/json's nesting limit
+	depth := 9990 // under encoding/json's nesting limit of 10000
 	shapes := map[string][]byte{
 		"unique keys":  []byte(uniq.String()),
 		"nested":       []byte(strings.Repeat(`{"a":`, depth) + "0" + strings.Repeat("}", depth)),
+		"deep arrays":  []byte(`{"model":"m","a":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + "}"),
+		"deep mixed":   []byte(`{"model":"m","a":` + strings.Repeat(`[{"a":`, depth/2) + "0" + strings.Repeat("}]", depth/2) + "}"),
+		"cjk":          array(`"` + strings.Repeat("\u6f22", 1365) + `"`),
 		"string":       array(`"` + strings.Repeat("a", 4096) + `"`),
 		"invalid utf8": array(`"` + strings.Repeat("\xff", 4096) + `"`),
 		"u2028":        array(`"` + strings.Repeat("\u2028", 1365) + `"`),
@@ -240,16 +246,28 @@ func TestBodyCostBoundsApply(t *testing.T) {
 	}
 	var worst float64
 	for name, body := range shapes {
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		out, err := op.Body.apply(body, false)
-		runtime.ReadMemStats(&after)
+		// A fresh goroutine starts on a small stack, so what its stack
+		// grows to while apply recurses is counted with the heap.
+		var heap, stack int64
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			var out []byte
+			out, err = op.Body.apply(body, false)
+			runtime.ReadMemStats(&after)
+			runtime.KeepAlive(out)
+			heap = int64(after.TotalAlloc - before.TotalAlloc)
+			stack = int64(after.StackInuse) - int64(before.StackInuse)
+		}()
+		<-done
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		runtime.KeepAlive(out)
-		peak := int64(len(body)) + int64(after.TotalAlloc-before.TotalAlloc)
+		peak := int64(len(body)) + heap + max(stack, 0)
 		c := bodyCost(body)
 		if peak > c {
 			t.Errorf("%s: %d bytes allocate %d, over bodyCost %d", name, len(body), peak, c)
@@ -257,7 +275,7 @@ func TestBodyCostBoundsApply(t *testing.T) {
 		if r := float64(peak) / float64(c); r > worst {
 			worst = r
 		}
-		t.Logf("%-14.14s %8d bytes: %6.1fx, %3.0f%% of bodyCost", name, len(body), float64(peak)/float64(len(body)), 100*float64(peak)/float64(c))
+		t.Logf("%-14.14s %8d bytes: %6.1fx (stack %d KiB), %3.0f%% of bodyCost", name, len(body), float64(peak)/float64(len(body)), stack>>10, 100*float64(peak)/float64(c))
 	}
 	t.Logf("tightest shape uses %.0f%% of its bodyCost", 100*worst)
 }

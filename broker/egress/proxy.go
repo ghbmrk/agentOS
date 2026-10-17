@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -62,14 +63,19 @@ const (
 	// costPerByte covers the body, the decoder's copy of it, the decoded
 	// strings and the re-encoded output, with the buffers' growth.
 	costPerByte = 16
-	// costPerHigh covers a byte >= 0x80 that decodes and re-encodes as
-	// three (an invalid UTF-8 byte becomes U+FFFD).
-	costPerHigh = 28
+	// costPerInvalid covers an invalid UTF-8 byte, which decodes and
+	// re-encodes as the three bytes of U+FFFD, and each byte of U+2028 and
+	// U+2029, which re-encode escaped. Other valid UTF-8 does not grow.
+	costPerInvalid = 28
 	// costPerObject is one decoded map[string]any with its first entries.
 	costPerObject = 640
 	// costPerToken is one value or key: its interface, slice or map slot
 	// and the slice and map growth that holds it.
 	costPerToken = 160
+	// costPerDepth is one level of the deepest nesting: the stack frames
+	// that decoding, checking and re-encoding recurse through, doubled
+	// because a goroutine's stack grows by doubling and copying.
+	costPerDepth = 4 << 10
 	// callFloor is what any request holds besides its body: buffers,
 	// headers and the response copy.
 	callFloor = 64 << 10
@@ -421,11 +427,20 @@ func readCost(n int64) int64 { return callFloor + 3*n }
 // bodyCost is what BodyRule.apply can hold for body at its peak, from one
 // pass over the body that counts what decoding it allocates per unit.
 func bodyCost(body []byte) int64 {
-	var high, objects, tokens int64
+	var invalid, objects, tokens, depth, deepest int64
 	in, esc := false, false
-	for _, c := range body {
+	for i := 0; i < len(body); i++ {
+		c := body[i]
 		if c >= 0x80 {
-			high++
+			r, n := utf8.DecodeRune(body[i:])
+			if r == '\u2028' || r == '\u2029' {
+				invalid += int64(n) // re-encoded as a six-byte escape
+			}
+			if r != utf8.RuneError || n != 1 {
+				i += n - 1
+				continue
+			}
+			invalid++
 		}
 		switch {
 		case esc:
@@ -434,15 +449,21 @@ func bodyCost(body []byte) int64 {
 			esc, in = c == '\\', c != '"'
 		case c == '"':
 			in = true
-		case c == '{':
-			objects++
+		case c == '{' || c == '[':
+			depth++
+			deepest = max(deepest, depth)
 			tokens++
-		case c == '[' || c == ',' || c == ':':
+			if c == '{' {
+				objects++
+			}
+		case c == '}' || c == ']':
+			depth--
+		case c == ',' || c == ':':
 			tokens++
 		}
 	}
-	return callFloor + costPerByte*int64(len(body)) + costPerHigh*high +
-		costPerObject*objects + costPerToken*tokens
+	return callFloor + costPerByte*int64(len(body)) + costPerInvalid*invalid +
+		costPerObject*objects + costPerToken*tokens + costPerDepth*deepest
 }
 
 func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
