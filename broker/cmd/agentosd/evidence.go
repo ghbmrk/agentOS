@@ -572,11 +572,17 @@ func (e *evidence) wire(cfg *daemon.Config) {
 // attach starts routing through the running daemon's gate and owner
 // channel.
 func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
-	e.notify = converse(d.Owner)
+	e.wireOwner(d.Owner)
 	e.gate.Store(&evidenceGateBox{d.Gate()})
 	e.shown, _ = d.Gate().Evidence()
 	go e.run(ctx)
 	e.poke()
+}
+
+// wireOwner routes outbox replies to the owner channel as conversation.
+// attach calls it; it is the only place e.notify is set outside tests.
+func (e *evidence) wireOwner(channel func() *owner.Channel) {
+	e.notify = converse(channel)
 }
 
 // converse sends an agent reply to the owner as conversation (CH-15):
