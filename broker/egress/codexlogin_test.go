@@ -668,3 +668,12 @@ func TestSignedInByIsOnlyThisSignInsCommit(t *testing.T) {
 		t.Fatal("SignedInBy outlived Remove")
 	}
 }
+
+// REQ: CRED-7
+// Per-token redaction in the vault matches on vault.KindPlanLogin; the
+// egress producer must write that same kind or redaction silently turns off.
+func TestLoginKindIsVaultPlanLoginKind(t *testing.T) {
+	if LoginKind != vault.KindPlanLogin {
+		t.Fatalf("egress.LoginKind = %q, vault.KindPlanLogin = %q", LoginKind, vault.KindPlanLogin)
+	}
+}
