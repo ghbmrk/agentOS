@@ -85,6 +85,7 @@ jobs:
       # BOT_PR_TOKEN (optional; decision #1769): a token whose pushes start
       # pull_request workflows normally. Without it the job uses GITHUB_TOKEN as before.
       GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      BOT_TOKEN_SET: ${{ secrets.BOT_PR_TOKEN != '' }}
       BRANCH: bot/board
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -119,6 +120,7 @@ jobs:
           # Mark, 2026-10-10 (Decisions): bot PRs merge themselves once required checks pass.
           gh pr merge "$BRANCH" --auto --squash \
             || echo "::warning::auto-merge unavailable (repo setting 'Allow auto-merge'); merge the $BRANCH PR by hand"
-          # PR events from GITHUB_TOKEN start no workflows, but workflow_dispatch does, and
-          # its check runs land on the branch head, where required checks look for them.
-          gh workflow run ci.yml --ref "$BRANCH"
+          # A BOT_PR_TOKEN push already starts ci.yml's pull_request run. Only GITHUB_TOKEN
+          # pushes start none, so only then dispatch it: its check runs land on the branch
+          # head, where required checks look for them.
+          if [ "$BOT_TOKEN_SET" != true ]; then gh workflow run ci.yml --ref "$BRANCH"; fi
