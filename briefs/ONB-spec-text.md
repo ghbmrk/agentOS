@@ -9,6 +9,8 @@ Tier B (SPEC text). Builder: Sonnet 5.5. Usage estimate: 30k tokens. Needs Mark'
 - **#1368** New ONB-11 names the box's own model per hardware profile and ships it in the image; step 6 lists Local only first, then plan, local compute, API key; the plan-exhaustion line falls back to the local model; ONB-11 counts a serving local route as allowed for private content (#1368 comment, Potency P-1).
 
 ## Acceptance
+**Acceptance tests:** none: text-only SPEC change; no requirement gains code, so checks are doclint and the L3 wording review below.
+
 Text-only: no requirement ID gains code. `python3 tools/doclint.py` passes; `python3 tools/risk_tier.py --git origin/main HEAD` prints B or C; a fresh L3 checks the wording against CRED-5, CAP-9, CAP-13, REV-6 and D-113. Failure path: a reader takes "no setting sends credentials to any provider" as forbidding the proxy's injection of a Codex login.
 
 ## Scope
