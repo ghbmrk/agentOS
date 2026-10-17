@@ -66,6 +66,9 @@ type Inbound struct {
 	// was lost is not taken twice (a repeated approval code would count as
 	// a wrong one). Up to MaxID characters; "" is never matched.
 	ID string `json:"id,omitempty"`
+	// Picture: an MMS notice, a picture or file texted to the line and
+	// left unfetched at the carrier. It carries no Text.
+	Picture bool `json:"picture,omitempty"`
 }
 
 // MaxID bounds Inbound.ID.
@@ -80,9 +83,9 @@ const (
 
 // Valid says in is within the limits: a known line, a printable sender of
 // at most MaxFrom characters (a number is + and digits), UTF-8 text of at
-// most MaxText bytes.
+// most MaxText bytes, and none with a picture.
 func (in Inbound) Valid() bool {
-	if in.Line != LineOwner && in.Line != LineSecond {
+	if in.Line != LineOwner && in.Line != LineSecond || in.Picture && in.Text != "" {
 		return false
 	}
 	if len(in.ID) > MaxID || in.From == "" || len(in.From) > MaxFrom || !utf8.ValidString(in.Text) || len(in.Text) > MaxText {

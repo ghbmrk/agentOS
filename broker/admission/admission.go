@@ -43,6 +43,11 @@ type Request struct {
 	// room's. Experiments cannot carry it. It makes accepted work count as
 	// the owner's for BusyCause and RevokedForOwner (PE5, security P2).
 	Owner bool
+	// Instance, if set, names this life of the machine (a machine
+	// destroyed and recreated under its ID gets a new one). Admission only
+	// passes it back, to a LifePreempter, so a preemption reaches the
+	// machine that was picked and never a successor given its ID (#2144).
+	Instance string
 }
 
 // Decision is a successful admission and what was preempted for it.
@@ -54,6 +59,16 @@ type Decision struct {
 // the machine's memory is released.
 type Preempter interface {
 	Preempt(id string) error
+}
+
+// LifePreempter is a Preempter that can preempt one life of a machine.
+// Admission calls PreemptInstance, rather than Preempt, for a victim
+// admitted with an Instance. It preempts the machine only if id still
+// names that life, and otherwise refuses with an error: a same-ID
+// successor admitted after the victim was picked is left running (#2144).
+type LifePreempter interface {
+	Preempter
+	PreemptInstance(id, instance string) error
 }
 
 // Config holds the declared budget (RES-2).
@@ -81,8 +96,10 @@ type Controller struct {
 
 	mu       sync.Mutex
 	running  map[string]Request
-	order    []string        // admission order, for newest-first preemption
-	yielding map[string]bool // experiments being preempted right now
+	order    []string          // admission order, for newest-first preemption
+	gens     map[string]uint64 // per running ID, which admission put it there
+	gen      uint64            // the last admission's number
+	yielding map[string]bool   // experiments being preempted right now
 	// revokes records, per victim, whether it was preempted for the
 	// owner's work without pressure (RevokedForOwner).
 	revokes map[string]bool
@@ -93,7 +110,7 @@ func New(cfg Config, pre Preempter) (*Controller, error) {
 	if cfg.HeadroomMB < 0 || cfg.CapacityMB <= cfg.HeadroomMB {
 		return nil, fmt.Errorf("admission: need capacity > headroom >= 0, got %+v", cfg)
 	}
-	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}, yielding: map[string]bool{}}, nil
+	return &Controller{cfg: cfg, pre: pre, running: map[string]Request{}, gens: map[string]uint64{}, yielding: map[string]bool{}}, nil
 }
 
 // Admit admits r or refuses it, preempting experiments when r outranks them
@@ -129,10 +146,14 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		need = r.MemMB
 	}
 	var victims []string
+	picked := map[string]uint64{} // victim ID -> the admission it was picked as
+	lives := map[string]string{}  // victim ID -> the life it was picked as
 	for i := len(c.order) - 1; i >= 0 && need > 0; i-- {
 		v := c.running[c.order[i]]
 		if v.Class == Experiment && r.Class.Outranks(Experiment) && !c.yielding[v.ID] {
 			victims = append(victims, v.ID)
+			picked[v.ID] = c.gens[v.ID]
+			lives[v.ID] = v.Instance
 			need -= v.MemMB
 		}
 	}
@@ -143,7 +164,10 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		}
 		return Decision{}, ErrNoRoom
 	}
+	c.gen++
+	mine := c.gen
 	c.running[r.ID] = r
+	c.gens[r.ID] = mine
 	c.order = append(c.order, r.ID)
 	forOwner := !pressured && (r.Class == Foreground || r.Class == Accepted && r.Owner)
 	if len(c.revokes)+len(victims) > maxRevokes {
@@ -160,8 +184,15 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 
 	var done []string
 	var firstErr error
+	lp, _ := c.pre.(LifePreempter)
 	for _, id := range victims {
-		if err := c.pre.Preempt(id); err != nil {
+		var err error
+		if inst := lives[id]; lp != nil && inst != "" {
+			err = lp.PreemptInstance(id, inst)
+		} else {
+			err = c.pre.Preempt(id)
+		}
+		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("admission: preempting %s: %w", id, err)
 			}
@@ -176,12 +207,19 @@ func (c *Controller) Admit(r Request) (Decision, error) {
 		delete(c.yielding, id)
 	}
 	for _, id := range done {
-		c.removeLocked(id)
+		// Only the entry that was picked: if the victim left the books
+		// while it yielded and a successor was admitted under its ID, the
+		// successor stays counted (#1707).
+		if g, ok := c.gens[id]; ok && g == picked[id] {
+			c.removeLocked(id)
+		}
 	}
 	// Admit if what did yield made enough room; otherwise give the
 	// reservation back. A preempted experiment stays preempted either way.
 	if c.freeLocked() < 0 {
-		c.removeLocked(r.ID)
+		if c.gens[r.ID] == mine { // not a later admission under r's ID
+			c.removeLocked(r.ID)
+		}
 		if firstErr == nil {
 			firstErr = ErrNoRoom
 		}
@@ -315,6 +353,7 @@ func (c *Controller) removeLocked(id string) {
 		return
 	}
 	delete(c.running, id)
+	delete(c.gens, id)
 	for i, o := range c.order {
 		if o == id {
 			c.order = append(c.order[:i], c.order[i+1:]...)

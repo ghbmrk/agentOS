@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // The step's texts and the box's replies, by kind, for building logs.
@@ -76,5 +83,150 @@ func TestControlErr(t *testing.T) {
 	}
 	if controlErr(append(seq(before), pass[2:]...), 1) == nil {
 		t.Error("a help reply before the step's start counted")
+	}
+}
+
+// REQ: CH-11, HW-10. A text of no known kind is named by its leading
+// letter-only words, so a failed run shows which notice it was, and the
+// lead stops before any word with a digit or mark: a code, number, time or
+// token is never quoted.
+func TestOtherLeadQuotesNoCode(t *testing.T) {
+	for _, c := range []struct{ text, want string }{
+		{"Daily digest: 2 items held.", "Daily digest"},
+		{"Your agent is not running.", "Your agent is"},
+		{"Codes 123456 ignored", "Codes"},
+		{"canary-e2e-7f3a held", ""},
+		{"Too many wrong codes", "Too many wrong"},
+		{"Supercalifragilistic word", ""},
+		{"", ""},
+	} {
+		if got := otherLead(c.text); got != c.want {
+			t.Errorf("otherLead(%q) = %q, want %q", c.text, got, c.want)
+		}
+	}
+	log := seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: 482913 canary-e2e-7f3a"})
+	err := controlErr(log, 0)
+	if err == nil || err.Error() != `HELP drew other ("Daily digest")` {
+		t.Fatalf("controlErr = %v", err)
+	}
+}
+
+// outageNotice is the text the box's owner line sends when it recovers
+// from an outage in which a text to the owner could not go: modemlink's
+// own, made by driving a real Link through one.
+func outageNotice(t *testing.T) string { t.Helper(); return outageNoticeOf(t, 1, 0) }
+
+// outageNoticeOf is the notice after an outage in which texts plain texts
+// and requests approval requests could not go.
+func outageNoticeOf(t *testing.T, texts, requests int) string {
+	t.Helper()
+	at := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); at = at.Add(time.Second); return at }
+	l := modemlink.New(modemlink.Config{Owner: phoneNum, Now: now, PollWait: time.Second, Location: time.UTC})
+	for i := 0; i < texts+requests; i++ {
+		send := l.Send
+		if i >= texts {
+			send = l.SendRequest
+		}
+		if err := send(phoneNum, "Daily digest: 482913 canary-e2e-7f3a"); err == nil {
+			t.Fatal("a send before the bridge reported the line went")
+		}
+	}
+	ops := l.Ops()
+	if _, err := ops[bridgeproto.OpState](context.Background(), sockets.Peer{}, json.RawMessage(`{"owner_line":"ok"}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ops[bridgeproto.OpOutbox](context.Background(), sockets.Peer{}, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	it, _ := got.(map[string]any)["item"].(bridgeproto.Item)
+	if it.To != phoneNum || it.Text == "" {
+		t.Fatalf("no recovery text queued: %#v", got)
+	}
+	return it.Text
+}
+
+// REQ: CH-1, CH-3, CH-14. The owner line's recovery notice (UX U-B1) is
+// the box's account of a text lost while the line was down, as the
+// setup-to-agentosd hand-over can lose one (E9, P2-2w c4c r1); it answers
+// no command, so wherever it lands in the step it is passed over, and
+// every other check still holds. A text that only starts like it is still
+// other (G1 #1688: main's image runs failed "HELP drew other").
+func TestOutageNoticeIsNotAReply(t *testing.T) {
+	n := modem.SMS{From: boxNum, To: phoneNum, Text: outageNotice(t)}
+	if k := replyKind(n.Text); k != "outage" {
+		t.Fatalf("replyKind(recovery text) = %q, want outage", k)
+	}
+	passes := [][]modem.SMS{
+		seq(n, probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
+		seq(probe, n, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, n, unlockR, statusR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, unlockR, n, statusR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, unlockR, statusR, stranger, n, probe, helpReply),
+		seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, n, helpReply),
+		seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply, n),
+	}
+	for i, log := range passes {
+		if err := controlErr(log, 0); err != nil {
+			t.Errorf("notice at %d: %v", i, err)
+		}
+	}
+	fails := []struct {
+		log  []modem.SMS
+		want string
+	}{
+		{seq(probe, n), "after 1 HELP attempt(s)"},
+		{seq(probe, helpReply, coded, n, statusR), "no unlock first"},
+		{seq(probe, helpReply, coded, unlockR, statusR, stranger, n, statusR, probe, helpReply), "unpaired number's text drew status"},
+		{seq(probe, n, modem.SMS{From: boxNum, To: strangerNum, Text: n.Text}), "went to the unpaired number"},
+		{seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "I couldn't text you from 12:00 canary-e2e-7f3a"}), `HELP drew other ("I couldn't text")`},
+	}
+	for _, c := range fails {
+		if err := controlErr(c.log, 0); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v, want %q", err, c.want)
+		}
+	}
+}
+
+// REQ: CH-1. Passing over a recovery notice is not silent (G1-1688 f1,
+// #2170): the run counts the notices and what each says did not reach the
+// owner, texts in all and approval requests among them, read from
+// modemlink's own wording; the note carries those counts only, never a
+// time or a text, and a run with no notice has none.
+func TestPassedOverNoticesAreCounted(t *testing.T) {
+	ok := seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply)
+	if n := readPhoneRun(ok, 0).noticeNote(); n != "" {
+		t.Fatalf("a run with no notice noted %q", n)
+	}
+	for _, c := range []struct {
+		texts, requests int
+		want            string
+	}{
+		{1, 0, "passed-over recovery notices=1 texts=1 requests=0"},
+		{3, 0, "passed-over recovery notices=1 texts=3 requests=0"},
+		{0, 1, "passed-over recovery notices=1 texts=1 requests=1"},
+		{2, 2, "passed-over recovery notices=1 texts=4 requests=2"},
+	} {
+		n := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, c.texts, c.requests)}
+		log := seq(probe, n, helpReply, coded, unlockR, statusR, stranger, probe, helpReply)
+		r := readPhoneRun(log, 0)
+		if err := controlErr(log, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.noticeNote(); got != c.want {
+			t.Errorf("%d texts, %d requests: note %q, want %q", c.texts, c.requests, got, c.want)
+		}
+	}
+	a := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, 1, 0)}
+	b := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, 1, 1)}
+	log := seq(a, probe, helpReply, coded, unlockR, b, statusR, stranger, probe, helpReply)
+	if got, want := readPhoneRun(log, 0).noticeNote(), "passed-over recovery notices=2 texts=3 requests=1"; got != want {
+		t.Errorf("two notices: %q, want %q", got, want)
+	}
+	// Nothing of the text but its counts: no digit outside a count, no letters of the notice.
+	if got := readPhoneRun(log, 0).noticeNote(); strings.ContainsAny(got, ":.;'") || strings.Contains(got, "12") {
+		t.Errorf("note quotes the notice: %q", got)
 	}
 }

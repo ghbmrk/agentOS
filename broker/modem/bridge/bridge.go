@@ -315,7 +315,7 @@ func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 		rand.Read(r[:])
 		id = hex.EncodeToString(r[:])
 	}
-	in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: sms.From, Text: sms.Text, Named: sms.Alphanumeric, ID: id}
+	in := bridgeproto.Inbound{Line: bridgeproto.LineOwner, From: sms.From, Text: sms.Text, Named: sms.Alphanumeric, ID: id, Picture: sms.Picture}
 	if !in.Valid() {
 		b.cfg.Logf("bridge: a malformed text was dropped")
 		if sms.Ref != "" && m.Ack(sms.Ref) != nil {

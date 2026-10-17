@@ -1,6 +1,7 @@
 package at
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -66,6 +67,11 @@ type Deliver struct {
 	Text string
 	// Concat is set on one part of a concatenated text.
 	Concat *Concat
+	// Push marks an 8-bit WAP push to port 2948 that is an MMS notice or a
+	// later part of one: never a text. Picture marks the notice itself (the
+	// first or only part), which says a picture or file waits at the
+	// carrier; nothing here fetches it.
+	Push, Picture bool
 }
 
 // Concat identifies one part of a concatenated text.
@@ -460,10 +466,6 @@ func decode(h string, submit bool) (Deliver, error) {
 	if r.err != nil {
 		return Deliver{}, r.err
 	}
-	alpha, ok := alphabet(dcs)
-	if !ok {
-		return Deliver{}, ErrPDU
-	}
 	hdrLen := 0
 	if fo&0x40 != 0 {
 		if len(ud) < 1 || int(ud[0])+1 > len(ud) {
@@ -471,6 +473,22 @@ func decode(h string, submit bool) (Deliver, error) {
 		}
 		hdrLen = int(ud[0]) + 1
 		d.Concat = concat(ud[1:hdrLen])
+	}
+	alpha, ok := alphabet(dcs)
+	if !ok {
+		// An MMS notice is the one 8-bit PDU the broker recognises.
+		if submit || !eightBit(dcs) || hdrLen == 0 || udl < hdrLen || udl > len(ud) || pushPort(ud[1:hdrLen]) != wapPush {
+			return Deliver{}, ErrPDU
+		}
+		switch {
+		case d.Concat != nil && d.Concat.Seq > 1:
+			d.Push = true
+		case mmsPush(ud[hdrLen:udl]):
+			d.Push, d.Picture = true, true
+		default:
+			return Deliver{}, ErrPDU
+		}
+		return d, nil
 	}
 	switch alpha {
 	case 0:
@@ -498,7 +516,8 @@ func decode(h string, submit bool) (Deliver, error) {
 }
 
 // alphabet reads TP-DCS: 0 for GSM-7, 2 for UCS-2. 8-bit data and
-// compressed text are not texts the broker reads.
+// compressed text are not texts the broker reads; decode recognises an MMS
+// notice among the 8-bit data.
 func alphabet(dcs byte) (int, bool) {
 	switch {
 	case dcs&0xC0 == 0x00: // general data coding
@@ -515,6 +534,82 @@ func alphabet(dcs byte) (int, bool) {
 		return 0, dcs&0x04 == 0
 	}
 	return 0, false
+}
+
+// eightBit reports a TP-DCS of uncompressed 8-bit data.
+func eightBit(dcs byte) bool {
+	switch {
+	case dcs&0xC0 == 0x00:
+		return dcs&0x20 == 0 && dcs>>2&0x3 == 1
+	case dcs&0xF0 == 0xF0:
+		return dcs&0x04 != 0
+	}
+	return false
+}
+
+// wapPush is the WAP push destination port (WAP-259 WDP), where an MMS
+// notice arrives.
+const wapPush = 2948
+
+// pushPort returns the destination port of a 16-bit application port
+// element (IEI 0x05) in a UDH, or -1.
+func pushPort(h []byte) int {
+	for i := 0; i+1 < len(h); {
+		iei, l := h[i], int(h[i+1])
+		if iei == 0x05 && l == 4 && i+6 <= len(h) {
+			return int(h[i+2])<<8 | int(h[i+3])
+		}
+		i += 2 + l
+	}
+	return -1
+}
+
+// mmsMedia is the MMS content type, well-known value 0x3E (WAP-230 WSP).
+const mmsMedia = "application/vnd.wap.mms-message"
+
+// mmsPush reports a WSP push (connectionless: transaction ID, then PDU
+// type 0x06 push or 0x07 confirmed push) whose content type is the MMS
+// one, as a short integer, in the general form or as text.
+func mmsPush(b []byte) bool {
+	if len(b) < 3 || (b[1] != 0x06 && b[1] != 0x07) {
+		return false
+	}
+	hl, n := uintvar(b[2:])
+	if n == 0 || hl == 0 || 2+n+hl > len(b) {
+		return false
+	}
+	ct := b[2+n : 2+n+hl]
+	switch {
+	case ct[0] <= 0x1E: // Value-length, then the media type
+		ct = ct[1:min(1+int(ct[0]), len(ct))]
+	case ct[0] == 0x1F:
+		l, m := uintvar(ct[1:])
+		if m == 0 {
+			return false
+		}
+		ct = ct[1+m : min(1+m+l, len(ct))]
+	}
+	if len(ct) == 0 {
+		return false
+	}
+	if ct[0] == 0x80|0x3E {
+		return true
+	}
+	end := bytes.IndexByte(ct, 0)
+	return end > 0 && strings.EqualFold(string(ct[:end]), mmsMedia)
+}
+
+// uintvar reads a WSP variable-length unsigned integer: its value and the
+// octets it took, 0 when malformed.
+func uintvar(b []byte) (int, int) {
+	v := 0
+	for i := 0; i < len(b) && i < 5; i++ {
+		v = v<<7 | int(b[i]&0x7F)
+		if b[i]&0x80 == 0 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
 }
 
 // concat finds a concatenation element (8- or 16-bit reference) in a UDH.

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -228,12 +229,7 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		addr, acct = g.Evidence()
 	}
 	if !private || addr == "" {
-		if len(owner.AgentPrefix)+len(text) <= maxText {
-			e.send(machine, text)
-			return
-		}
-		e.kept.keep(text)
-		e.send(machine, clip(text, maxText-len(owner.AgentPrefix)-1-len(keptLong))+" "+keptLong)
+		e.sendSplit(machine, text)
 		return
 	}
 	tail := "Full reply sent to " + maskAddress(addr) + "."
@@ -258,6 +254,37 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		tail = failNote
 	}
 	e.send(machine, join(summarize(text, summary, smsSegment-len(owner.AgentPrefix)-1-len(tail)), tail))
+}
+
+// sendSplit texts a reply as up to maxReplyTexts consecutive texts
+// (CH-12, D-127); one longer than that is kept whole and the third text
+// ends with keptLong. CH-19's check runs on the whole reply first: a
+// secret-shaped reply goes as one text, which the owner channel replaces
+// with its local-UI pointer, so no code is split past the check. A text
+// that does not go stops the rest, so none arrives out of order, and the
+// reply is kept.
+func (e *evidence) sendSplit(machine, text string) {
+	room := maxText - len(owner.AgentPrefix)
+	if owner.SecretShaped(text) {
+		if len(text) > room {
+			e.kept.keep(text)
+		}
+		e.send(machine, text)
+		return
+	}
+	parts, cut := splitReply(text, room)
+	if cut {
+		e.kept.keep(text)
+	}
+	for i, p := range parts {
+		if err := e.notify(p); err != nil {
+			e.logf("reply from %s not sent (text %d of %d): %v", machine, i+1, len(parts), err)
+			if len(parts) > 1 && !cut {
+				e.kept.keep(text)
+			}
+			return
+		}
+	}
 }
 
 func (e *evidence) send(machine, text string) {
@@ -366,6 +393,74 @@ func opening(text string) string {
 		}
 	}
 	return t
+}
+
+// maxReplyTexts is how many texts one agent reply may take (CH-12).
+const maxReplyTexts = 3
+
+// splitReply cuts text into at most maxReplyTexts parts of at most room
+// bytes. cut says the reply did not fit: the last part then ends with
+// keptLong. Each cut is at the strongest boundary in the second half of
+// the part (a paragraph, then a line, then a sentence end, then a word),
+// so a part is never a stub; failing all of these, the last word
+// boundary, else a rune boundary outside any joined emoji.
+func splitReply(text string, room int) (parts []string, cut bool) {
+	rest := strings.TrimSpace(text)
+	for len(parts) < maxReplyTexts-1 && len(rest) > room {
+		i := cutAt(rest, room)
+		parts = append(parts, strings.TrimSpace(rest[:i]))
+		rest = strings.TrimSpace(rest[i:])
+	}
+	if len(rest) <= room {
+		return append(parts, rest), false
+	}
+	i := cutAt(rest, room-1-len(keptLong))
+	return append(parts, strings.TrimSpace(rest[:i])+" "+keptLong), true
+}
+
+// cutAt is where to end a part of s (longer than max) at most max bytes
+// long: s[:i] is the part.
+func cutAt(s string, max int) int {
+	paragraph := func(p int) bool { return strings.HasPrefix(s[p:], "\n\n") }
+	line := func(p int) bool { return s[p] == '\n' }
+	word := func(p int) bool { return s[p] == ' ' || s[p] == '\n' || s[p] == '\t' }
+	sentence := func(p int) bool {
+		t := strings.TrimRight(s[:p], `"')`)
+		return word(p) && t != "" && strings.ContainsRune(".!?", rune(t[len(t)-1]))
+	}
+	for _, at := range []func(int) bool{paragraph, line, sentence, word} {
+		for p := max; p > max/2; p-- {
+			if at(p) {
+				return p
+			}
+		}
+	}
+	for p := max / 2; p > 0; p-- {
+		if word(p) {
+			return p
+		}
+	}
+	p := max
+	for p > 0 && !joinable(s, p) {
+		p--
+	}
+	if p == 0 {
+		return max
+	}
+	return p
+}
+
+// joinable says s may be cut at byte p: on a rune boundary, not before a
+// joiner, variation selector or mark, and not after a joiner, so an emoji
+// built from several characters (👩‍💻) stays in one text.
+func joinable(s string, p int) bool {
+	if !utf8.RuneStart(s[p]) {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(s[p:])
+	prev, _ := utf8.DecodeLastRuneInString(s[:p])
+	return prev != '\u200d' && next != '\u200d' && !unicode.Is(unicode.Mn, next) && !unicode.Is(unicode.Me, next) &&
+		!unicode.Is(unicode.Variation_Selector, next) && !(next >= 0x1F3FB && next <= 0x1F3FF)
 }
 
 // clip cuts s to max bytes on a rune boundary, marking the cut.
@@ -572,17 +667,30 @@ func (e *evidence) wire(cfg *daemon.Config) {
 // attach starts routing through the running daemon's gate and owner
 // channel.
 func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
-	e.notify = func(text string) error {
-		ch := d.Owner()
-		if ch == nil {
-			return errors.New("no owner channel")
-		}
-		return ch.Notify(text)
-	}
+	e.wireOwner(d.Owner)
 	e.gate.Store(&evidenceGateBox{d.Gate()})
 	e.shown, _ = d.Gate().Evidence()
 	go e.run(ctx)
 	e.poke()
+}
+
+// wireOwner routes outbox replies to the owner channel as conversation.
+// attach calls it; it is the only place e.notify is set outside tests.
+func (e *evidence) wireOwner(channel func() *owner.Channel) {
+	e.notify = converse(channel)
+}
+
+// converse sends an agent reply to the owner as conversation (CH-15):
+// every reply in the outbox answers one owner message (guest
+// POST /owner/reply), so it is never held or paced.
+func converse(channel func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		ch := channel()
+		if ch == nil {
+			return errors.New("no owner channel")
+		}
+		return ch.Converse(text)
+	}
 }
 
 // Kept replies: a reply that could not be emailed, or was too long for a

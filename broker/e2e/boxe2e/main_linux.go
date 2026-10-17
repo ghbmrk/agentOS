@@ -65,7 +65,7 @@ func main() {
 		return
 	}
 	r := newReport(os.Stdout, xfail)
-	d := &driver{carrier: modem.NewCarrier()}
+	d := &driver{carrier: modem.NewCarrier(), note: r.note}
 	r.step("harness", d.harness)
 	r.step("claim", d.claim)
 	r.step("sms-pair", d.smsPair)
@@ -116,6 +116,9 @@ type driver struct {
 	// with the owner channel.
 	now   func() time.Time
 	sleep func(time.Duration)
+	// note prints a non-failing line under the running step; nil prints
+	// nothing.
+	note func(string)
 }
 
 // childEnv is every child's whole environment: systemd's own PATH for
@@ -878,6 +881,12 @@ func (d *driver) phoneControl() error {
 		return fmt.Errorf("setup not finished: GET /setup %d %q at %s", st, loc, heading(b))
 	}
 	start := len(d.carrier.Log())
+	defer func() {
+		// The notices the step passed over, pass or fail (#2170).
+		if n := readPhoneRun(d.carrier.Log(), start).noticeNote(); n != "" && d.note != nil {
+			d.note(n)
+		}
+	}()
 	phone := d.carrier.Line(phoneNum)
 	// agentosd takes the modem from setup's line only after setup
 	// finishes, and the hand-over can lose texts: after setup the bridge

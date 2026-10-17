@@ -470,3 +470,30 @@ func TestRoomForGuards(t *testing.T) {
 		t.Fatalf("overcommitted RoomFor(Accepted) = %d, want only the experiment's 1000", got)
 	}
 }
+
+// A victim whose entry leaves the books while it yields (its machine was
+// destroyed, or Preempt found it gone and released it) must not take a
+// same-ID successor's entry with it when Admit relocks: the successor
+// would run uncounted (#1707, Security R1 of #1575).
+func TestRES2SameIDSuccessorDuringYieldIsNeverUncounted(t *testing.T) {
+	p := &recPreempter{}
+	c := newCtl(p)
+	mustAdmit(t, c, Request{ID: "x", Class: Experiment, MemMB: 3000})
+	succ := Request{ID: "x", Class: Experiment, MemMB: 500}
+	var succErr error
+	p.during = func() {
+		c.Release("x") // destroyed while yielding
+		_, succErr = c.Admit(succ)
+	}
+	mustAdmit(t, c, Request{ID: "call", Class: Foreground, MemMB: 1500})
+	got, counted := c.Snapshot().Running["x"]
+	if succErr != nil {
+		t.Fatalf("successor admit while x yields: %v", succErr)
+	}
+	if !counted || got != succ {
+		t.Fatalf("successor admitted in the window, then dropped from the books: running %v", c.Snapshot().Running)
+	}
+	if free := c.Snapshot().FreeMB; free != 3900-1500-500 {
+		t.Fatalf("free %d MB, want both the call and the successor counted", free)
+	}
+}

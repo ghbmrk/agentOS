@@ -209,6 +209,10 @@ type Channel struct {
 	// allowance was last checked and a text last counted, so a test can
 	// pin a paced check and its count to one hold (#1638).
 	checkedIn, countedIn uint64
+	// spent are the counts Spend made for approval request texts not yet
+	// sent, oldest first; sendRequest sends on one instead of counting
+	// again, and Refund takes back one no request used (#1685).
+	spent []time.Time
 }
 
 // holdMutex is a sync.Mutex that numbers its holds.
@@ -1068,11 +1072,11 @@ func (c *Channel) askRetry() string {
 	}
 	var errs []error
 	if len(text) > 0 {
-		_, err := c.RequestEach(text, make([]time.Duration, len(text)))
+		_, err := c.RequestEach(text, make([]time.Time, len(text)))
 		errs = append(errs, err)
 	}
 	if len(local) > 0 {
-		_, err := c.RequestLocalEach(local, make([]time.Duration, len(local)))
+		_, err := c.RequestLocalEach(local, make([]time.Time, len(local)))
 		errs = append(errs, err)
 	}
 	switch err := errors.Join(errs...); {
