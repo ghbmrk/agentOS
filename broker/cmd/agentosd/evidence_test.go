@@ -4,8 +4,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -687,5 +692,70 @@ func TestDEL1f1ForgetDuringARoute(t *testing.T) {
 	}
 	if k := r.ev.kept.list(); len(k) != 0 {
 		t.Fatalf("kept after the deletion: %+v", k)
+	}
+}
+
+// CH-11 (#2196): once the evidence worker serves the guest plane's
+// outbox, an agent reaction a guest posts is refused in the answer to
+// its POST, a 400 the bridge does not retry, in broker-written words; it
+// is never queued or texted, and a text reply to the same message then
+// goes out. Before, the plane answered 204 and Converse's refusal later
+// reached only the log.
+func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
+	// REQ: CH-11
+	r := newEvRig(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ev.wake = make(chan struct{}, 1)
+	plane, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: oneLineage{}, Effects: canaryEffects{}, Replies: r.ev.poke})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plane.Shutdown()
+	go r.ev.run(ctx)
+	r.ev.serve(plane)
+	mdir, err := plane.Open("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(mdir, guest.Socket)
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	do := func(method, path, body string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://broker"+path, strings.NewReader(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(b))
+	}
+	id, err := plane.DeliverOwner("m1", "can you book the dentist?", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do("GET", "/owner/next", ""); code != 200 || !strings.Contains(body, id) {
+		t.Fatalf("next: %d %s", code, body)
+	}
+	reply := func(text string) string {
+		b, _ := json.Marshal(map[string]string{"id": id, "text": text})
+		return string(b)
+	}
+	code, body := do("POST", "/owner/reply", reply(`Liked "can you book the dentist?"`))
+	if code != http.StatusBadRequest || body != guestReactionRefused {
+		t.Fatalf("reaction: %d %q", code, body)
+	}
+	if n := len(plane.PendingReplies()); n != 0 || len(r.texts()) != 0 {
+		t.Fatalf("refused reaction queued %d, texted %q", n, r.texts())
+	}
+	if code, body := do("POST", "/owner/reply", reply("Booked for Tuesday at 10.")); code != http.StatusNoContent {
+		t.Fatalf("text reply: %d %s", code, body)
+	}
+	waitFor(t, "the text reply", func() bool { return len(r.texts()) == 1 && len(plane.PendingReplies()) == 0 })
+	if got := r.texts(); got[0] != "Booked for Tuesday at 10." {
+		t.Fatalf("texted %q", got)
 	}
 }
