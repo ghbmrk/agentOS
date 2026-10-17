@@ -183,10 +183,11 @@ func (r *rig) inbox() string {
 }
 
 // checkFormat holds every broker text to CH-12: GSM-7, at most three
-// segments.
+// segments. Agent text, behind AgentPrefix, keeps the three-segment limit
+// in its own encoding (UCS-2 when it is not GSM-7).
 func (r *rig) checkFormat(s string) {
 	r.t.Helper()
-	if n, gsm := modem.Segments(s); !gsm || n > MaxSegments {
+	if n, gsm := modem.Segments(s); (!gsm && !strings.HasPrefix(s, AgentPrefix)) || n > MaxSegments {
 		r.t.Errorf("text breaks CH-12 (%d segments, gsm7=%v): %q", n, gsm, s)
 	}
 }

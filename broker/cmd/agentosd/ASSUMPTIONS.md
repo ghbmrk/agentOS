@@ -301,3 +301,11 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | SP1 | **The modem keeps send order.** `sendSplit` sends a reply's texts one after another and stops at the first that does not go, so the owner never gets a later part without an earlier one; the phone's display order is the carrier's. | CH-12 | If sends become concurrent or queued out of order, number the parts. |
 | SP2 | **A cut is never a stub.** Each cut takes the strongest boundary (paragraph, line, sentence end, word) in the second half of the text, so an early line break does not cost a fourth text. | CH-12 | If the spec ranks boundaries strictly, drop the second-half window. |
 | SP3 | **No page pointer yet.** Past three texts the third ends with `keptLong`, not CH-12's local-UI pointer, because the local page shows kept replies only once CH-20p lands (UX U2). | CH-12, CH-19, CH-20 | When CH-20p ships, `keptLong` becomes the pointer to the kept reply. |
+
+## Agent text keeps its encoding (CH12-ucs2)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| U1 | **The modem chooses the encoding.** Agent text goes to the modem as written; `modem/at` sends UCS-2 PDUs when any character is not GSM-7, and `owner.Room` counts with the same `modem.Segments` table, so a part the split accepts is one the modem sends in three segments. | CH-12 | If the modem's GSM-7 table or PDU split changes, `Room` follows it, since both read `modem.Segments`. |
+| U2 | **Cleaning before checking.** `sendSplit` runs `owner.CleanAgentText` before the whole-reply CH-19 check, and the owner channel runs it again (idempotent) before `Disclose`, so the text checked is the text sent. | CH-12, CH-19 | If another path sends agent text without `agentText`, it must clean first too. |
+| U3 | **Over-long pushes stay GSM-7.** A push (NotifyAs, NotifyNow) longer than three segments in its own encoding still falls back to `control.Fit`, which keeps it in one text but turns emoji and LF into `?`. | CH-12 | If pushes are split like replies, drop the fallback. |

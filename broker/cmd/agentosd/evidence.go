@@ -265,6 +265,7 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 // reply is kept.
 func (e *evidence) sendSplit(machine, text string) {
 	room := maxText - len(owner.AgentPrefix)
+	text = owner.CleanAgentText(text)
 	if owner.SecretShaped(text) {
 		if len(text) > room {
 			e.kept.keep(text)
@@ -406,16 +407,30 @@ const maxReplyTexts = 3
 // boundary, else a rune boundary outside any joined emoji.
 func splitReply(text string, room int) (parts []string, cut bool) {
 	rest := strings.TrimSpace(text)
-	for len(parts) < maxReplyTexts-1 && len(rest) > room {
-		i := cutAt(rest, room)
+	for len(parts) < maxReplyTexts-1 && len(rest) > partRoom(rest, room, "") {
+		i := cutAt(rest, partRoom(rest, room, ""))
 		parts = append(parts, strings.TrimSpace(rest[:i]))
 		rest = strings.TrimSpace(rest[i:])
 	}
-	if len(rest) <= room {
+	if len(rest) <= partRoom(rest, room, "") {
 		return append(parts, rest), false
 	}
-	i := cutAt(rest, room-1-len(keptLong))
+	i := cutAt(rest, partRoom(rest, room-1-len(keptLong), " "+keptLong))
 	return append(parts, strings.TrimSpace(rest[:i])+" "+keptLong), true
+}
+
+// partRoom is how many bytes of s the next text can take: at most room, and
+// no more than three segments in the encoding that text needs once
+// AgentPrefix and suffix are added, so a part with an emoji is cut for
+// UCS-2's 201 units rather than GSM-7's 459 septets (CH-12).
+func partRoom(s string, room int, suffix string) int {
+	if len(s) > room {
+		for room > 0 && !utf8.RuneStart(s[room]) {
+			room--
+		}
+		s = s[:room] // a part is never longer, so a long reply costs no more
+	}
+	return owner.Room(s, suffix)
 }
 
 // cutAt is where to end a part of s (longer than max) at most max bytes

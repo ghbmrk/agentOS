@@ -280,11 +280,16 @@ func (c *Channel) NotifyNow(text string) error {
 	return c.sendReserved(at, text)
 }
 
-// agentText discloses agent-derived text, prefixes it with AgentPrefix
-// unless it was withheld, and fits it to one text.
+// agentText cleans and discloses agent-derived text and prefixes it with
+// AgentPrefix unless it was withheld. Text that fits one text in its own
+// encoding goes as it is, emoji and line breaks kept (UCS-2 when needed);
+// longer text is fitted to GSM-7 (CH-12).
 func agentText(text string) string {
-	if text = Disclose(text); text != Hidden {
+	if text = Disclose(CleanAgentText(text)); text != Hidden {
 		text = AgentPrefix + text
+	}
+	if oneText(text) {
+		return text
 	}
 	return control.Fit(text)
 }
