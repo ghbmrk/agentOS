@@ -587,3 +587,153 @@ func TestDeleteReachesRecall(t *testing.T) {
 		t.Fatal("deletion by time did not reach recall")
 	}
 }
+
+// A box clock behind the guard's floor must not stamp a receipt with a
+// passed expiry: the photo stays its full days once the clock is trusted.
+func TestExpiryNeverEarlyOnBoxClockBehind(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	guard := t0
+	r.clk.t = &guard
+	r.clk.st = clock.Status{State: clock.Unchecked}
+	r.now = t0.AddDate(0, 0, -60)
+	e := r.keep(photoN(1))[0]
+	if e.Received.Before(t0) || e.Expires.Before(t0.AddDate(0, 0, DefaultDays)) {
+		t.Fatalf("received %v expires %v on a box clock behind the floor", e.Received, e.Expires)
+	}
+	guard, r.clk.st = t0.AddDate(0, 0, 1), verified
+	if n, err := r.s.Sweep(ctx); err != nil || n != 0 {
+		t.Fatalf("sweep a day after receipt = %d, %v", n, err)
+	}
+	guard = t0.AddDate(0, 0, DefaultDays)
+	if n, err := r.s.Sweep(ctx); err != nil || n != 1 {
+		t.Fatalf("sweep at expiry = %d, %v", n, err)
+	}
+}
+
+// submitDelete leaves a delete intent submitted and never run, as a run
+// that failed after Submit does, carrying a removal decision that may go
+// stale.
+func (r *rig) submitDelete(id string, last bool) {
+	r.t.Helper()
+	e := r.s.mustEntry(r.t, id)
+	in := r.s.intent(deleteID(id), ActionDelete, map[string]any{"photo": id, "hash": e.Hash, "last": last, "why": "owner"})
+	if _, err := r.eng.Submit(in); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func (s *Store) mustEntry(t *testing.T, id string) Entry {
+	t.Helper()
+	es, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		if e.ID == id {
+			return e
+		}
+	}
+	t.Fatalf("%s not live", id)
+	return Entry{}
+}
+
+// Whether a delete removes shared bytes is decided when it runs: a retried
+// delete neither leaves the last copy's bytes nor removes a live photo's.
+func TestDeleteDecidesSharedBytesAtRun(t *testing.T) {
+	ctx := context.Background()
+	t.Run("last copy deleted after a stale retry", func(t *testing.T) {
+		r := newRig(t)
+		r.keep(photoN(1), photoN(1))
+		r.submitDelete("P1", false)
+		for _, id := range []string{"P2", "P1"} {
+			if _, err := r.s.Delete(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := files(t, r.dir); len(got) != 0 {
+			t.Fatalf("both photos deleted, files left %v", got)
+		}
+	})
+	t.Run("retry keeps a newer copy's bytes", func(t *testing.T) {
+		r := newRig(t)
+		r.keep(photoN(1))
+		r.submitDelete("P1", true)
+		r.keep(photoN(1))
+		if _, err := r.s.Delete(ctx, "P1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.s.Image("P2"); err != nil {
+			t.Fatalf("P2 after P1's retried delete: %v", err)
+		}
+		if _, err := r.s.Thumb("P2"); err != nil {
+			t.Fatalf("P2 thumbnail after P1's retried delete: %v", err)
+		}
+	})
+}
+
+// failRecall fails DeleteSource for one photo.
+type failRecall struct{ ref string }
+
+func (f *failRecall) DeleteSource(_, _, ref string) (recall.DeleteReport, error) {
+	if ref == f.ref {
+		return recall.DeleteReport{}, errors.New("synthetic recall failure")
+	}
+	return recall.DeleteReport{}, nil
+}
+
+// denyFirstDelete denies the first photo delete it is asked to authorize.
+type denyFirstDelete struct{ done bool }
+
+func (d *denyFirstDelete) Check(_ context.Context, _ journal.Phase, in journal.Intent) error {
+	if in.Action == ActionDelete && !d.done {
+		d.done = true
+		return errors.New("synthetic denial")
+	}
+	return nil
+}
+
+// One photo that cannot be deleted does not hold the others past their
+// expiry, and a deletion left part way is finished on a later sweep.
+func TestSweepContinuesPastFailure(t *testing.T) {
+	ctx := context.Background()
+	t.Run("denied", func(t *testing.T) {
+		r := newRig(t)
+		r.keep(photoN(1), photoN(2), photoN(3))
+		var err error
+		r.eng, err = journal.Open(r.mem, &denyFirstDelete{}, map[string]journal.Executor{Executor: r.s},
+			func(s string) string { return s }, journal.WithClock(func() time.Time { return r.now }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.s.Journal = r.eng
+		r.now = t0.AddDate(0, 0, DefaultDays+1)
+		n, err := r.s.Sweep(ctx)
+		if n != 2 || err == nil {
+			t.Fatalf("sweep with P1 denied = %d, %v", n, err)
+		}
+		if es := r.list(); len(es) != 1 || es[0].ID != "P1" {
+			t.Fatalf("live after sweep %v", es)
+		}
+	})
+	t.Run("recall fails", func(t *testing.T) {
+		r := newRig(t)
+		r.keep(photoN(1), photoN(2))
+		fr := &failRecall{ref: "P1"}
+		r.s.Recall = fr
+		r.now = t0.AddDate(0, 0, DefaultDays+1)
+		if n, err := r.s.Sweep(ctx); n != 1 || err == nil {
+			t.Fatalf("sweep with P1's recall failing = %d, %v", n, err)
+		}
+		if len(r.list()) != 0 {
+			t.Fatal("expired photos still live")
+		}
+		fr.ref = ""
+		if n, err := r.s.Sweep(ctx); n != 1 || err != nil {
+			t.Fatalf("sweep finishing P1 = %d, %v", n, err)
+		}
+		if in, ok := photoIntents(t, r.eng)[keepID("P1")]; !ok || in.Params != nil {
+			t.Fatalf("P1's receipt not erased: %+v", in)
+		}
+	})
+}

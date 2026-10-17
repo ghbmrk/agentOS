@@ -124,6 +124,10 @@ type Store struct {
 	Now      func() time.Time
 
 	mu sync.Mutex
+	// fs orders Execute and Reconcile, which the engine may also call
+	// outside mu (a retry), so a removal decided from the view and a
+	// receipt's renames never interleave. Taken last, never held for mu.
+	fs sync.Mutex
 	// rename is durable.Rename; tests replace it to cut a keep short.
 	rename func(from, to string) error
 }
@@ -263,7 +267,10 @@ func (s *Store) Open() error {
 }
 
 // Keep keeps an upload's photos, all or none past the checks: at most
-// MaxPerUpload, within the daily cap, and within the reserve.
+// MaxPerUpload, within the daily cap, and within the reserve. Past them each
+// photo is kept whole or not at all; if one fails, those already kept are
+// returned with the error, so a non-empty result with an error is a part
+// kept.
 func (s *Store) Keep(ctx context.Context, rs []Received) ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -293,9 +300,12 @@ func (s *Store) Keep(ctx context.Context, rs []Received) ([]Entry, error) {
 			return nil, fmt.Errorf("%w: %v", ErrReserve, err)
 		}
 	}
+	// The later of the box clock and the guard's latest reading, which
+	// is floored even while unverified: a box clock behind never fixes an
+	// expiry that has already passed (CH-26).
 	received := now
 	if s.Clock != nil {
-		if t, st := s.Clock.Latest(ctx); trusted(st) {
+		if t, _ := s.Clock.Latest(ctx); t.After(received) {
 			received = t
 		}
 	}
@@ -443,14 +453,16 @@ func (s *Store) DeleteAll(ctx context.Context) ([]Confirmation, error) {
 		return nil, err
 	}
 	var out []Confirmation
+	var errs []error
 	for _, e := range v.entries() {
 		c, err := s.delete(ctx, e.ID, "owner")
 		if err != nil {
-			return out, err
+			errs = append(errs, err)
+			continue
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // delete removes the bytes (unless another live photo shares them), the
@@ -476,8 +488,7 @@ func (s *Store) delete(ctx context.Context, id, why string) (Confirmation, error
 			c.Backups = s.Backups(e.Received)
 		}
 		if !p.deleteSubmitted {
-			last := !v.held(e.Hash, id)
-			in := s.intent(deleteID(id), ActionDelete, map[string]any{"photo": id, "hash": e.Hash, "last": last, "why": why})
+			in := s.intent(deleteID(id), ActionDelete, map[string]any{"photo": id, "hash": e.Hash, "why": why})
 			if _, err := s.Journal.Submit(in); err != nil {
 				return Confirmation{}, err
 			}
@@ -527,17 +538,24 @@ func (s *Store) sweep(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := 0
+	// A photo that fails does not hold the others: each is tried, and one
+	// left part way (bytes gone, recall or erase not done) is finished.
+	ids := v.unfinished()
 	for _, e := range v.entries() {
-		if e.Expires.After(t) {
-			continue
+		if !e.Expires.After(t) {
+			ids = append(ids, e.ID)
 		}
-		if _, err := s.delete(ctx, e.ID, "expired"); err != nil {
-			return n, err
+	}
+	n := 0
+	var errs []error
+	for _, id := range ids {
+		if _, err := s.delete(ctx, id, "expired"); err != nil {
+			errs = append(errs, err)
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // Run sweeps now and then every interval until ctx ends.
@@ -564,6 +582,8 @@ func (s *Store) Execute(_ context.Context, in journal.Intent, _ int) journal.Out
 		if _, err := os.Stat(stage); err != nil {
 			return journal.Outcome{Result: journal.ResultNotApplied}
 		}
+		s.fs.Lock()
+		defer s.fs.Unlock()
 		// The thumbnail goes first: the image's rename is the commit.
 		if err := s.doRename(stage+thumbSuffix, s.thumbPath(hash)); err != nil {
 			return journal.Outcome{Result: journal.ResultUnknown}
@@ -575,8 +595,15 @@ func (s *Store) Execute(_ context.Context, in journal.Intent, _ int) journal.Out
 	case in.Action == ActionDeliver:
 		return journal.Outcome{Result: journal.ResultSucceeded}
 	case in.Action == ActionDelete:
-		if in.Params["last"] == true {
-			hash := str(in.Params["hash"])
+		// Whether the bytes go is decided now, not at submit: another
+		// photo with the same bytes may have been kept or deleted since.
+		s.fs.Lock()
+		defer s.fs.Unlock()
+		v, err := s.view()
+		if err != nil {
+			return journal.Outcome{Result: journal.ResultUnknown}
+		}
+		if hash := str(in.Params["hash"]); !v.held(hash, str(in.Params["photo"])) {
 			for _, p := range []string{s.imagePath(hash), s.thumbPath(hash)} {
 				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 					return journal.Outcome{Result: journal.ResultUnknown}
@@ -594,9 +621,12 @@ func (s *Store) Execute(_ context.Context, in journal.Intent, _ int) journal.Out
 // Reconcile settles an attempt a crash or an error left unknown
 // (journal.Executor). A receipt went if both its files are there; if the
 // image is not, it never will be, and a thumbnail no other photo holds is
-// removed. A deletion went if the bytes are gone or were not its to remove.
+// removed. A deletion went if the bytes are gone or, by the current view,
+// are not its to remove.
 func (s *Store) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	hash := str(in.Params["hash"])
+	s.fs.Lock()
+	defer s.fs.Unlock()
 	switch {
 	case strings.HasPrefix(in.Action, Kind):
 		_, ierr := os.Stat(s.imagePath(hash))
@@ -620,12 +650,16 @@ func (s *Store) Reconcile(_ context.Context, in journal.Intent, _ int) journal.O
 	case in.Action == ActionDeliver:
 		return journal.Outcome{Result: journal.ResultSucceeded}
 	case in.Action == ActionDelete:
-		if in.Params["last"] != true {
-			return journal.Outcome{Result: journal.ResultSucceeded}
-		}
 		_, ierr := os.Stat(s.imagePath(hash))
 		_, terr := os.Stat(s.thumbPath(hash))
 		if os.IsNotExist(ierr) && os.IsNotExist(terr) {
+			return journal.Outcome{Result: journal.ResultSucceeded}
+		}
+		v, err := s.view()
+		if err != nil {
+			return journal.Outcome{Result: journal.ResultUnknown}
+		}
+		if v.held(hash, str(in.Params["photo"])) {
 			return journal.Outcome{Result: journal.ResultSucceeded}
 		}
 		return journal.Outcome{Result: journal.ResultNotApplied}
@@ -646,6 +680,7 @@ type view struct {
 
 type photoFacts struct {
 	deleteSubmitted bool
+	content         bool // the receipt's params are not erased yet
 	delivers        []string
 }
 
@@ -705,6 +740,7 @@ func (s *Store) view() (*view, error) {
 		if p == nil {
 			continue
 		}
+		v.photos[rest].content = true
 		if f.dispatch && !f.succeeded && (f.result == "" || f.result == journal.ResultUnknown) {
 			h := str(p["hash"])
 			if v.unsettled[h] == nil {
@@ -763,6 +799,19 @@ func (v *view) held(hash, except string) bool {
 		}
 	}
 	return false
+}
+
+// unfinished lists the photos deleted whose recall entries or journal
+// content may remain, a deletion that stopped part way.
+func (v *view) unfinished() []string {
+	var out []string
+	for id, p := range v.photos {
+		if p.deleteSubmitted && p.content && v.live[id] == nil {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return idNum(out[i]) < idNum(out[j]) })
+	return out
 }
 
 func (v *view) entries() []Entry {
