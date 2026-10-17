@@ -34,7 +34,7 @@ Everything else, including defaults, tiers, and timeouts, is tradable when the t
 
 ## Output
 
-Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and why it dominates, and any fork escalated. A spec-wide run writes `YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
+Per PR with a conflict, a PR comment marked `<!-- record: arbitration -->`: the conflict, its resolution and why it dominates, and any fork escalated. A spec-wide run writes `YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
 
 ## Spec-wide runs
 
@@ -45,4 +45,4 @@ Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and 
 
 ## Records
 
-Per-PR resolutions are the files `YYYY-MM-DD-pr<N>.md` in this directory, in filename order, with no run number. Each has a `Record:` line giving PR, package and head SHA directly under the title (bot records open with a `Verdict:` line, then the title, then `Record:`); `tools/doclint.py` checks it on files dated 2026-10-09 or later. No resolution rows are appended to this README (DOC-4).
+Per-PR resolutions up to cut 4 are the files `YYYY-MM-DD-pr<N>.md` in this directory, in filename order, with no run number. Each has a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. Since cut 4 (#2172) a resolution is a PR comment marked `<!-- record: arbitration -->` instead (docs/OPERATING.md §4). No resolution rows are appended to this README (DOC-4).
