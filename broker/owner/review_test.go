@@ -441,7 +441,7 @@ func TestRequestEachGivesEveryItemItsOwnCode(t *testing.T) {
 	first := r.clock().Add(-10 * time.Minute)
 	a := lowItem("a")
 	a.Asked = first
-	ids, err := r.ch.RequestEach([]Item{a, lowItem("b")}, []time.Duration{5 * time.Minute, 5 * time.Minute})
+	ids, err := r.ch.RequestEach([]Item{a, lowItem("b")}, []time.Time{r.clock().Add(5 * time.Minute), r.clock().Add(5 * time.Minute)})
 	if err != nil || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
 		t.Fatalf("ids %v: %v", ids, err)
 	}
