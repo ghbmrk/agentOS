@@ -94,8 +94,10 @@ func (d *driver) providerTask() error {
 func (d *driver) providerRun(c *mcpClient, run int) error {
 	route := egress.Codex()
 	before, refused := d.stub.Hits()["responses"], d.stub.Refused()
+	w := d.watchRun()
 	raw, err := c.call("tools/call", map[string]any{"name": "provider_run",
 		"arguments": map[string]string{"provider": route.Provider, "brief": taskBrief, "task_class": "code"}})
+	out := w.stop()
 	if err != nil {
 		return err
 	}
@@ -119,7 +121,10 @@ func (d *driver) providerRun(c *mcpClient, run int) error {
 		case run > 1 && strings.HasPrefix(text, "provider_run: pool-at-reserve:"):
 			return errors.New("the plan's usage reading never landed: provider_run 2 was refused as pool-at-reserve")
 		}
-		return fmt.Errorf("provider_run %d refused: %s", run, short(text))
+		// The refusal is a closed reason only (CRED-5); what the run's
+		// CLI wrote says why (#1701, ASSUMPTIONS E14).
+		return fmt.Errorf("provider_run %d refused: %s; stub %v refused %d; %s", run, short(text),
+			d.stub.Hits(), d.stub.Refused(), d.workerDiag("result", out))
 	}
 	hits := d.stub.Hits()["responses"]
 	switch {
