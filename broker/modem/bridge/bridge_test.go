@@ -21,7 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-1, CH-2
+// REQ: CH-1, CH-2, CH-19
 
 const (
 	ownerNum = "+15550000999"
@@ -63,6 +63,8 @@ type rig struct {
 	// gate, if set, holds each owner-line send until it is closed, as a
 	// modem still sending does; the modem closing ends the send.
 	gate chan struct{}
+	// states is every state the bridge reported, heard or not.
+	states []bridgeproto.State
 }
 
 // startAgentosd serves owner.sock with a fresh Link, as agentosd does when
@@ -147,6 +149,11 @@ type flaky struct {
 }
 
 func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
+	if st, ok := args.(bridgeproto.State); ok {
+		f.r.mu.Lock()
+		f.r.states = append(f.r.states, st)
+		f.r.mu.Unlock()
+	}
 	if st, ok := args.(bridgeproto.State); ok && st.OwnerLine != bridgeproto.StateOK {
 		return f.c.Call(ctx, op, args, out) // only an ok report counts
 	}
@@ -246,6 +253,29 @@ func TestOwnerTextsBothWays(t *testing.T) {
 	}
 	if got := r.phoneGets(); got != "Box: all well." {
 		t.Fatalf("phone got %q", got)
+	}
+}
+
+// P2-2w d2b, CH-19 (#927, M12): the SIM's serial goes to agentosd only
+// while the line is swapped or unbound, for the owner to confirm; an ok
+// line reports none.
+func TestAnOkLineReportsNoSIMSerial(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oks := 0
+	for _, st := range r.states {
+		if st.OwnerLine != bridgeproto.StateOK {
+			continue
+		}
+		oks++
+		if st.ICCID != "" {
+			t.Fatalf("an ok line reported a SIM serial: %+v", st)
+		}
+	}
+	if oks == 0 {
+		t.Fatalf("no ok report among %+v", r.states)
 	}
 }
 
