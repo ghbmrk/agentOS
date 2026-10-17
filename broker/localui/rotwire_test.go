@@ -542,7 +542,7 @@ func TestRotationLateConfirmKeepsTheResultForAGrace(t *testing.T) {
 func TestRotationDisplayIsTheStartingSessions(t *testing.T) {
 	x := newWireRig(t)
 	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
-	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDIIIIII"}
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDIIIIII"}
 	form := x.group()
 	group := form.Get("group")
 	x.asOther(func() {
