@@ -45,10 +45,35 @@ const DefaultMaxBody = 8 << 20
 // DefaultMaxConcurrent caps one machine's requests in flight.
 const DefaultMaxConcurrent = 4
 
-// DefaultMaxInFlight caps the requests in flight across every machine. Each
-// holds up to MaxBody in memory, so this bounds the proxy's share of the
-// vault process's memory (egress K18); the per-machine cap alone would not.
-const DefaultMaxInFlight = 16
+// DefaultInFlightBytes is the memory the requests in flight across every
+// machine may hold at once (egress K18, #1771). A request reserves what it
+// can hold before it holds it: readCost while its body is read, then
+// bodyCost for the body it read. So the bound follows what requests cost in
+// memory rather than how many there are: a hostile body that decodes to
+// many times its size takes as much of it as it holds, and small ones leave
+// room for many. tests/test_egress_memory.py reads it into the vault
+// unit's memory derivation.
+const DefaultInFlightBytes = 320 << 20
+
+// The terms of bodyCost, bytes per unit, each an upper bound that
+// TestBodyCostBoundsApply measures against BodyRule.apply's allocations
+// for the costliest body shapes.
+const (
+	// costPerByte covers the body, the decoder's copy of it, the decoded
+	// strings and the re-encoded output, with the buffers' growth.
+	costPerByte = 16
+	// costPerHigh covers a byte >= 0x80 that decodes and re-encodes as
+	// three (an invalid UTF-8 byte becomes U+FFFD).
+	costPerHigh = 28
+	// costPerObject is one decoded map[string]any with its first entries.
+	costPerObject = 640
+	// costPerToken is one value or key: its interface, slice or map slot
+	// and the slice and map growth that holds it.
+	costPerToken = 160
+	// callFloor is what any request holds besides its body: buffers,
+	// headers and the response copy.
+	callFloor = 64 << 10
+)
 
 // Event is one proxy decision. It carries no header or body content, so it
 // cannot carry a credential.
@@ -125,9 +150,9 @@ type Config struct {
 	// MaxConcurrent caps one machine's requests in flight; zero means
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
-	// MaxInFlight caps requests in flight across every machine; zero means
-	// DefaultMaxInFlight.
-	MaxInFlight int
+	// InFlightBytes caps the memory requests in flight may reserve across
+	// every machine; zero means DefaultInFlightBytes.
+	InFlightBytes int64
 	// Cap is applied to each machine separately.
 	Cap Cap
 	// Label returns a machine's REV-5 data label. Nil, or any answer other
@@ -172,13 +197,13 @@ type Proxy struct {
 	audit    Auditor
 	maxBody  int64
 	maxConc  int
-	maxTotal int
+	budget   int64
 	cap      Cap
 	now      func() time.Time
 	xch      exchangeHooks
 
 	mu       sync.Mutex
-	inFlight int // across every machine
+	reserved int64 // bytes reserved by requests in flight, every machine
 	usage    map[string]*machineUsage
 	stops    RouteStops        // adapter -> why its route stopped (CRED-5t)
 	held     map[string]string // adapter -> a stop stops could not record
@@ -212,7 +237,7 @@ func New(cfg Config) (*Proxy, error) {
 		audit:    cfg.Audit,
 		maxBody:  cfg.MaxBody,
 		maxConc:  cfg.MaxConcurrent,
-		maxTotal: cfg.MaxInFlight,
+		budget:   cfg.InFlightBytes,
 		cap:      cfg.Cap,
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
@@ -281,8 +306,8 @@ func New(cfg Config) (*Proxy, error) {
 	if p.maxConc <= 0 {
 		p.maxConc = DefaultMaxConcurrent
 	}
-	if p.maxTotal <= 0 {
-		p.maxTotal = DefaultMaxInFlight
+	if p.budget <= 0 {
+		p.budget = DefaultInFlightBytes
 	}
 	if p.now == nil {
 		p.now = time.Now
@@ -334,12 +359,12 @@ func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Audit
 	})
 }
 
-// admit takes a global and a per-machine concurrency slot and checks the
-// cap; release returns both slots.
-func (p *Proxy) admit(machine string) (string, bool) {
+// admit reserves n bytes of the in-flight budget and a per-machine
+// concurrency slot and checks the cap; release returns both.
+func (p *Proxy) admit(machine string, n int64) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.inFlight >= p.maxTotal {
+	if p.reserved+n > p.budget {
 		return "too many requests in flight", false
 	}
 	u := p.usage[machine]
@@ -356,8 +381,21 @@ func (p *Proxy) admit(machine string) (string, bool) {
 		return "byte cap reached", false
 	}
 	u.inFlight++
-	p.inFlight++
+	p.reserved += n
 	return "", true
+}
+
+// resize changes an admitted request's reservation by d bytes. A shrink
+// always succeeds; a growth fails, changing nothing, when the budget lacks
+// the room.
+func (p *Proxy) resize(d int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 && p.reserved+d > p.budget {
+		return false
+	}
+	p.reserved += d
+	return true
 }
 
 func (p *Proxy) charge(machine string, requests, bytes int64) {
@@ -368,11 +406,43 @@ func (p *Proxy) charge(machine string, requests, bytes int64) {
 	p.mu.Unlock()
 }
 
-func (p *Proxy) release(machine string) {
+func (p *Proxy) release(machine string, n int64) {
 	p.mu.Lock()
 	p.usage[machine].inFlight--
-	p.inFlight--
+	p.reserved -= n
 	p.mu.Unlock()
+}
+
+// readCost is what reading a body of up to n bytes can hold: io.ReadAll's
+// buffer, which grows by copying, so the old and the new buffer are live
+// together.
+func readCost(n int64) int64 { return callFloor + 3*n }
+
+// bodyCost is what BodyRule.apply can hold for body at its peak, from one
+// pass over the body that counts what decoding it allocates per unit.
+func bodyCost(body []byte) int64 {
+	var high, objects, tokens int64
+	in, esc := false, false
+	for _, c := range body {
+		if c >= 0x80 {
+			high++
+		}
+		switch {
+		case esc:
+			esc = false
+		case in:
+			esc, in = c == '\\', c != '"'
+		case c == '"':
+			in = true
+		case c == '{':
+			objects++
+			tokens++
+		case c == '[' || c == ',' || c == ':':
+			tokens++
+		}
+	}
+	return callFloor + costPerByte*int64(len(body)) + costPerHigh*high +
+		costPerObject*objects + costPerToken*tokens
 }
 
 func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
@@ -436,11 +506,18 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 
-	if reason, ok := p.admit(machine); !ok {
+	// Reserve for the body before reading it: its declared length when it
+	// has one (the server reads no further), MaxBody when it does not.
+	n := r.ContentLength
+	if n < 0 || n > p.maxBody {
+		n = p.maxBody
+	}
+	held := readCost(n)
+	if reason, ok := p.admit(machine, held); !ok {
 		deny(http.StatusTooManyRequests, reason)
 		return
 	}
-	defer p.release(machine)
+	defer func() { p.release(machine, held) }()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, p.maxBody+1))
 	if err != nil {
@@ -451,6 +528,22 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		deny(http.StatusRequestEntityTooLarge, "body too large")
 		return
 	}
+	// Then hold what the body costs from here on: itself, or what checking
+	// it takes. A body no budget could check is refused for good, not as
+	// a retry.
+	need := callFloor + int64(len(body))
+	if op.Body != nil {
+		need = bodyCost(body)
+	}
+	if need > p.budget {
+		deny(http.StatusRequestEntityTooLarge, "body too costly to check")
+		return
+	}
+	if !p.resize(need - held) {
+		deny(http.StatusTooManyRequests, "too many requests in flight")
+		return
+	}
+	held = need
 	if op.Body != nil {
 		if body, err = op.Body.apply(body, labelOf() == LabelPublic); err != nil {
 			deny(http.StatusForbidden, err.Error())
