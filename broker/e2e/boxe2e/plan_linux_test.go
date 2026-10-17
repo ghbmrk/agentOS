@@ -118,11 +118,11 @@ func fakeDriver(f *fakeBox) *driver {
 // link on the provider's own host, the code approved at the stub, setup
 // finished, and no issued token on any page. Until the page offers the
 // sign-in, and until the agent machine is offered provider_run (#1721),
-// guest-task fails with the not-driven text, so it reads XFAIL; any other
-// failure reads FAIL.
+// guest-task fails with the not-driven text, which reads FAIL since it left
+// the expected-failure list (#1701).
 func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	ok := func(f *fakeBox) error { return fakeDriver(f).guestTask() }
-	want := xfail["guest-task"].want
+	want := notDriven
 
 	f := &fakeBox{stub: codexstub.New(), host: "auth.openai.com"}
 	if err := ok(f); err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "#1264") {

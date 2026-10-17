@@ -221,8 +221,8 @@ func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 	for mode, says := range map[string]string{"absent": "#1721", "unqualified": "#809"} {
 		d, _ := signedIn(t, mode)
 		err := d.guestTask()
-		if err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) || !strings.Contains(err.Error(), says) {
-			t.Errorf("%s: %v does not read XFAIL naming %s", mode, err, says)
+		if err == nil || !strings.HasPrefix(err.Error(), notDriven) || !strings.Contains(err.Error(), says) {
+			t.Errorf("%s: %v does not say not driven, naming %s", mode, err, says)
 		}
 	}
 
