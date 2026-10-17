@@ -3,6 +3,7 @@
 No SPEC requirement IDs: process tooling (CLAUDE.md, OPERATING). All data is synthetic.
 """
 import io
+from contextlib import redirect_stderr
 import json
 import pathlib
 import sys
@@ -51,6 +52,15 @@ class StaleQueuedTest(unittest.TestCase):
     def test_newest_merged_pr_is_named(self):
         prs = [pr(20, "AB-1: old", merged="2026-10-10T00:00:00Z"), pr(21, "AB-1: new")]
         self.assertEqual(stalequeued.stale_queued([issue(1, "AB-1")], prs)[0][1]["number"], 21)
+
+    def test_malformed_issue_is_skipped_and_named_not_fatal(self):
+        bad = {"number": 999, "title": "AB-1: x", "labels": [{"name": "work-item"}], "body": "no block",
+               "author_association": "OWNER"}
+        err = io.StringIO()
+        with redirect_stderr(err):
+            found = stalequeued.stale_queued([bad, *ISSUES], PRS)
+        self.assertEqual(len(found), 3)
+        self.assertIn("issue #999", err.getvalue())
 
     def test_main_prints_rows_and_only_reads(self):
         calls = []

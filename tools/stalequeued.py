@@ -38,8 +38,8 @@ def stale_queued(items, prs):
     for item in items:
         if "pull_request" in item:
             continue
-        row = board.row_of(item)
-        if row["state"] != "queued":
+        row = board.readable_row(item)
+        if row is None or row["state"] != "queued":
             continue
         hits = [(p, names(p, row["id"])) for p in prs]
         hits = [(p, how) for p, how in hits if how]

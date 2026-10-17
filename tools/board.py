@@ -306,6 +306,16 @@ def pr_notes(items, prs):
 STALE_MARK = "<!-- board-stale: #{} -->"
 
 
+def readable_row(item):
+    """row_of(item), or None after naming a malformed issue on stderr: a read-only scan skips it
+    instead of failing the whole run (render and check still raise, so a bad row is never hidden)."""
+    try:
+        return row_of(item)
+    except ValueError as e:
+        print(f"board: skipped, {e}", file=sys.stderr)
+        return None
+
+
 def stale(items, prs):
     """(issue, merged PR) for each open row whose ID-named PR merged while no open PR names it:
     the label says the work is still to do, so the next session pays to find it done (STALE-1)."""
@@ -313,8 +323,8 @@ def stale(items, prs):
     for item in items:
         if "pull_request" in item:
             continue
-        row = row_of(item)
-        if row["state"] not in OPEN_STATES:
+        row = readable_row(item)
+        if row is None or row["state"] not in OPEN_STATES:
             continue
         mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
         merged = [p for p in mine if p.get("merged_at")]
@@ -333,7 +343,7 @@ def report_stale(fetch, repo, comment):
     items = work_items(fetch, repo)
     found = stale(items, fetch(f"/repos/{repo}/pulls?state=all"))
     for item, pr in found:
-        row = row_of(item)
+        row = row_of(item)  # stale() already read it
         print(f"board: {row['id']} (#{item['number']}): state {row['state']} but PR #{pr['number']} merged")
         if comment:
             seen = fetch(f"/repos/{repo}/issues/{item['number']}/comments")
