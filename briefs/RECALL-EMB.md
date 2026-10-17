@@ -16,9 +16,7 @@ Package IDs:
 - **EMB-5** Measured on the N95 fixture box (HW-4), recorded in the PR and in `broker/recall/ASSUMPTIONS.md`: embedder RSS at idle and at peak over 10,000 items, p50 and p95 latency of a single-query embed and of a full `Search`, `Reembed` throughput (items per second), and the `TestInt8RankingAccuracy` overlap with the real embedder at 512 and 256. Limits (inference, from RES-2 and R8; the builder may tighten them from the first measurement, never loosen without a PR note): embedder RSS peak <= 1.0 GB (half the 2.0 GB inference budget, leaving the other passes room), single-query embed p95 <= 250 ms, `Search` p95 <= 400 ms at 10,000 items, int8 overlap floor stays 0.85 (or the measured value is recorded and the floor moved in this PR with the reason).
 - **EMB-6** No fixture, log or STATUS line carries credentials or personal data; fixtures are synthetic text. Embedding input goes through the same scrub as indexed text (`prepare`), so a removed credential is never sent to the service.
 
-**Acceptance tests:**
-
-CI tests use a deterministic fake embedder (a fixed concept table mapping words to vectors) behind the same interface, plus the real model only in the N95 step.
+**Acceptance tests:** each ID below. CI tests use a deterministic fake embedder (a fixed concept table mapping words to vectors) behind the same interface, plus the real model only in the N95 step.
 
 - EMB-1: `TestEmbGemmaID` and `TestMatryoshkaTruncation` (`broker/recall/embgemma_test.go`, new): ID changes with file hash and dimension; truncation to 512 and 256 renormalises to unit length; fake service returns 768 and the client truncates. Catches a stale ID that lets old and new vectors compare.
 - EMB-2: `TestNoKeywordQueryRanksTop5WithEmbedder` (`broker/recall/embgemma_test.go`): the fixture asserts first that the query shares no stemmed token with its target (so the test cannot pass by keyword), then rank <= 5 with the fake embedder and rank > 5 or absent with nil. The N95 step repeats it with the real model and records the ranks. Catches a pass that is really BM25.
