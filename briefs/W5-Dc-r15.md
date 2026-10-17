@@ -13,7 +13,7 @@ Package IDs:
 - **W5-Dc-r15-1** A zero `Pacing` (and any old state file) reads `approval` urgent; `security` urgent; `agent` and `update` not.
 - **W5-Dc-r15-2** `URGENT APPROVAL OFF` persists across a restart and holds approval; `URGENT APPROVAL ON` clears it; the corrupt-setting fallback lands on the defaults above.
 
-## Acceptance tests
+**Acceptance tests:** the five below (W5-Dc-r15-1 and -2).
 - `broker/owner/pacer_test.go::TestPacingDefaultsFromAnOldState` (per-class default, old state and corrupt state).
 - `TestPacingSettingsNeedUnlock` (ON/OFF round trip, saved).
 - `TestQuietHoursHoldUpdatesButNotSecurity`, `TestAgentTextIsNeverPackedWithOtherTexts`: tests that expect a held approval set `ApprovalHeld: true`.
