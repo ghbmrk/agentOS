@@ -30,6 +30,24 @@ func (e *DeniedError) Error() string {
 
 func (e *DeniedError) Is(target error) bool { return target == ErrDenied }
 
+// holdEndedError is a held dial whose own context ended before the hold did:
+// nothing is dialled, so it matches ErrDenied, but the cause is the caller's
+// cancellation or deadline (its ctx.Err()), not a netguard refusal, so Check
+// does not journal it (#1540).
+type holdEndedError struct {
+	denied *DeniedError
+	ctxErr error
+}
+
+func (e *holdEndedError) Error() string   { return e.denied.Error() + ": " + e.ctxErr.Error() }
+func (e *holdEndedError) Unwrap() []error { return []error{e.denied, e.ctxErr} }
+
+// heldReason is the refusal of a dial held past the bound. A gateway is its
+// address, interface and router MAC (#1536), so the hold also covers a new
+// router behind an unchanged address: the reason names the network's router,
+// not the gateway (#1555).
+const heldReason = "the external address of this network's router is not learned yet"
+
 // Purpose says why a dial is made. The zero value gets no exception: it is
 // what every agent request and every ordinary component dial carries.
 type Purpose int
@@ -478,7 +496,8 @@ func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto str
 		a = a.Unmap()
 	}
 	err := p.check(ctx, r, a, port, proto)
-	if err != nil && p.onDeny != nil {
+	var held *holdEndedError
+	if err != nil && p.onDeny != nil && !errors.As(err, &held) {
 		var de *DeniedError
 		reason := err.Error()
 		if errors.As(err, &de) {
@@ -504,9 +523,9 @@ func (p *Policy) check(ctx context.Context, r request, a netip.Addr, port uint16
 		select {
 		case <-hold:
 		case <-ctx.Done():
-			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+			return &holdEndedError{&DeniedError{a, heldReason}, ctx.Err()}
 		case <-deadline:
-			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+			return &DeniedError{a, heldReason}
 		}
 	}
 }
