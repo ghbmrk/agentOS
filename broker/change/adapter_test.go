@@ -1,0 +1,234 @@
+package change
+
+// REQ: ADP-8, ADP-6, ADP-2, A13
+
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/ghbmrk/agentos/broker/verb"
+)
+
+// demoTarget is the adapters target with its demo harness: it reports
+// the effects it is set to observe for each operation, never anything the
+// adapter declares.
+type demoTarget struct {
+	mu      sync.Mutex
+	tree    Tree
+	observe map[string][]string // operation -> observed effects; absent: not run
+	err     error
+	demoed  []string // tools demoed
+}
+
+func (d *demoTarget) Current() (Tree, error) { return Tree{}, nil }
+
+func (d *demoTarget) Apply(t Tree) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.tree = t
+	return nil
+}
+
+func (d *demoTarget) Demo(tool string, a Adapter) ([]verb.DemoRun, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.demoed = append(d.demoed, tool)
+	if d.err != nil {
+		return nil, d.err
+	}
+	var runs []verb.DemoRun
+	for op := range a.Operations {
+		if eff, ok := d.observe[op]; ok {
+			runs = append(runs, verb.DemoRun{Operation: op, Effects: eff})
+		}
+	}
+	return runs, nil
+}
+
+const mailAdapter = `{"operations":{"list":"read","save":"draft","deliver":"send"},"grants":["mail"]}`
+
+func adapterEnv(t *testing.T, observe map[string][]string) (*env, *demoTarget) {
+	d := &demoTarget{observe: observe}
+	e := newEnv(t, func(c *Config) { c.Targets = map[string]Target{"adapters": d} })
+	return e, d
+}
+
+func adapterCandidate(body string) Candidate {
+	return Candidate{Source: Local, Origin: "adapter-builder", Files: Tree{"adapters/mail.json": []byte(body)}}
+}
+
+func truthful() map[string][]string {
+	return map[string][]string{"list": {verb.Read}, "save": {verb.Draft}, "deliver": {verb.Send}}
+}
+
+// A13, ADP-8: an agent-drafted adapter whose operation labelled "draft"
+// sends in the demo environment is not adopted, and the owner is never
+// asked to adopt it. The effect comes from the harness, not the adapter.
+func TestA13MislabelledDraftThatSendsBlocksAdoption(t *testing.T) {
+	obs := truthful()
+	obs["save"] = []string{verb.Draft, verb.Send}
+	e, d := adapterEnv(t, obs)
+	e.owner.approve = true
+	rep := e.propose(adapterCandidate(mailAdapter))
+	if rep.State != StateRejected || !strings.Contains(rep.Reason, `"save"`) || !strings.Contains(rep.Reason, "send") {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+	if len(d.demoed) != 1 || d.demoed[0] != "mail" {
+		t.Fatalf("demoed %v, want the mail tool once", d.demoed)
+	}
+	if _, ok := e.p.Files("adapters")["adapters/mail.json"]; ok {
+		t.Fatal("the mislabelled adapter is active")
+	}
+	if len(e.owner.asked) != 0 {
+		t.Fatalf("the owner was asked to adopt it: %v", e.owner.asked)
+	}
+}
+
+// ADP-6: the same adapter, truthful in the demo environment, is never
+// authority-neutral: the owner is asked, sees its grants and mappings in
+// the file, and only then is it applied.
+func TestADP6AdapterGoesToTheOwner(t *testing.T) {
+	e, d := adapterEnv(t, truthful())
+	rep := e.propose(adapterCandidate(mailAdapter))
+	if !refusedByOwner(e, rep) || d.tree["adapters/mail.json"] != nil {
+		t.Fatalf("got %s neutral=%v %q: want the owner asked and refusing", rep.State, rep.Neutral, rep.Reason)
+	}
+	e.owner.approve = true
+	rep = e.propose(adapterCandidate(mailAdapter))
+	if rep.State != StateAdopted || !e.owner.wasAsked(adoptID(rep.ID)) {
+		t.Fatalf("got %s %q, asked=%v", rep.State, rep.Reason, e.owner.asked)
+	}
+	if string(d.tree["adapters/mail.json"]) != mailAdapter {
+		t.Fatalf("applied %q", d.tree)
+	}
+}
+
+// Brief item 5: an operation the harness never exercised is not a pass.
+func TestADP8AdapterWithAnUnexercisedOperationIsNotAdopted(t *testing.T) {
+	obs := truthful()
+	delete(obs, "deliver")
+	e, _ := adapterEnv(t, obs)
+	e.owner.approve = true
+	rep := e.propose(adapterCandidate(mailAdapter))
+	if rep.State != StateRejected || !strings.Contains(rep.Reason, `"deliver"`) || !strings.Contains(rep.Reason, "never exercised") {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+}
+
+// Brief item 6: a payment mapped to send blocks, though both are
+// irreversible (the owner may pre-allow send, ADP-9).
+func TestADP8PaymentMappedToSendIsNotAdopted(t *testing.T) {
+	obs := truthful()
+	obs["deliver"] = []string{verb.Buy}
+	e, _ := adapterEnv(t, obs)
+	e.owner.approve = true
+	rep := e.propose(adapterCandidate(mailAdapter))
+	if rep.State != StateRejected || !strings.Contains(rep.Reason, `"deliver"`) || !strings.Contains(rep.Reason, "buy") {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+}
+
+// ADP-8 fails closed: no harness, or a harness that cannot run the demo
+// (no demo environment), adopts nothing.
+func TestADP8AdapterWithoutADemoRunIsNotAdopted(t *testing.T) {
+	e := newEnv(t, nil)
+	e.owner.approve = true
+	if rep := e.propose(adapterCandidate(mailAdapter)); rep.State != StateRejected || !strings.Contains(rep.Reason, "demo") {
+		t.Fatalf("no harness: got %s %q", rep.State, rep.Reason)
+	}
+	e2, d := adapterEnv(t, truthful())
+	e2.owner.approve = true
+	d.err = errors.New("no demo environment")
+	if rep := e2.propose(adapterCandidate(mailAdapter)); rep.State != StateRejected || !strings.Contains(rep.Reason, "no demo environment") {
+		t.Fatalf("harness error: got %s %q", rep.State, rep.Reason)
+	}
+}
+
+// ADP-2: an unmapped operation is checked as draft-only and goes to the
+// owner with the rest; one that sends blocks. An adapter cannot set a
+// class or name a verb off the list.
+func TestADP2AdapterMappingRules(t *testing.T) {
+	odd := `{"operations":{"list":"read","odd":""}}`
+	e, _ := adapterEnv(t, map[string][]string{"list": nil, "odd": {verb.Draft}})
+	if rep := e.propose(adapterCandidate(odd)); !refusedByOwner(e, rep) {
+		t.Fatalf("unmapped that drafts: got %s neutral=%v %q", rep.State, rep.Neutral, rep.Reason)
+	}
+	e, _ = adapterEnv(t, map[string][]string{"list": nil, "odd": {verb.Send}})
+	if rep := e.propose(adapterCandidate(odd)); rep.State != StateRejected || !strings.Contains(rep.Reason, `"odd"`) {
+		t.Fatalf("unmapped that sends: got %s %q", rep.State, rep.Reason)
+	}
+	for name, body := range map[string]string{
+		"claims a class": `{"operations":{"list":"read"},"class":"reversible"}`,
+		"claims effects": `{"operations":{"list":"read"},"effects":{"list":[]}}`,
+		"verb off list":  `{"operations":{"list":"peek"}}`,
+		"no operations":  `{"operations":{}}`,
+		"not json":       `operations: list`,
+	} {
+		e, _ := adapterEnv(t, map[string][]string{"list": nil})
+		e.owner.approve = true
+		if rep := e.propose(adapterCandidate(body)); rep.State != StateRejected {
+			t.Errorf("%s: got %s", name, rep.State)
+		}
+	}
+	e, _ = adapterEnv(t, truthful())
+	e.owner.approve = true
+	c := adapterCandidate(mailAdapter)
+	c.Files = Tree{"adapters/mail/v2.json": []byte(mailAdapter)}
+	if rep := e.propose(c); rep.State != StateRejected {
+		t.Fatalf("nested adapter path: got %s", rep.State)
+	}
+}
+
+// ADP-6, OSS-3: an adapter is private-derived. A shared package cannot
+// carry one, and an adopted one is never exported, even from public
+// inputs.
+func TestADP6AdapterIsPrivateDerived(t *testing.T) {
+	e, _ := adapterEnv(t, truthful())
+	e.owner.approve = true
+	pkg, err := json.Marshal(Package{Format: PackageFormat, Files: Tree{"adapters/mail.json": []byte(mailAdapter)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.p.Import(bg, pkg); err == nil || !strings.Contains(err.Error(), "CHG-5") {
+		t.Fatalf("imported a shared adapter: %v", err)
+	}
+	if cl := e.p.classify([]Edit{{Path: "adapters/mail.json", After: []byte(mailAdapter)}}, Tree{}, Shared); cl.forbidden == "" {
+		t.Fatal("a shared source may carry an adapter")
+	}
+	c := adapterCandidate(mailAdapter)
+	c.Public = true
+	rep := e.propose(c)
+	if rep.State != StateAdopted {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+	if err := e.p.SetSharing(bg, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.p.Export(bg, rep.ID); !errors.Is(err, ErrNotShareable) {
+		t.Fatalf("exported an adapter: %v", err)
+	}
+}
+
+// Removing an adapter narrows authority: no demo, but still the owner's.
+func TestADP6AdapterRemovalGoesToTheOwner(t *testing.T) {
+	e, d := adapterEnv(t, truthful())
+	e.owner.approve = true
+	if rep := e.propose(adapterCandidate(mailAdapter)); rep.State != StateAdopted {
+		t.Fatal(rep)
+	}
+	d.err = errors.New("no demo environment")
+	e.owner.approve = false
+	rep := e.propose(Candidate{Source: Local, Delete: []string{"adapters/mail.json"}})
+	if !refusedByOwner(e, rep) {
+		t.Fatalf("got %s neutral=%v %q", rep.State, rep.Neutral, rep.Reason)
+	}
+}
+
+// refusedByOwner reports that rep qualified, was not neutral, and went to
+// the owner, who said no (the env's owner refuses unless approve is set).
+func refusedByOwner(e *env, rep Report) bool {
+	return rep.State == StateRejected && rep.Basis == BasisOwner && !rep.Neutral && e.owner.wasAsked(adoptID(rep.ID))
+}
