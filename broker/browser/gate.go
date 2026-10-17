@@ -84,7 +84,11 @@ type Gate struct {
 	lines   chan []byte
 	stopped bool
 	// refs is what the last snapshot the driver returned showed, per ref.
-	refs      map[string]link
+	refs map[string]link
+	// typed is what the agent typed, per ref, on the page the driver
+	// named in its reply; typedText is the same text on any page (G10).
+	typed     map[string]typedField
+	typedText map[string]bool
 	holds     map[string]Hold
 	holdOrder []string
 }
@@ -221,7 +225,38 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 			return g.hold(req, l)
 		}
 	}
-	return g.send(ctx, req)
+	res := g.send(ctx, req)
+	if req.Verb == "type" && res.OK {
+		g.remember(req, res.URL)
+	}
+	return res
+}
+
+type typedField struct{ text, url string }
+
+// maxTyped bounds what the gate remembers of the agent's typing.
+const maxTyped = 64
+
+func (g *Gate) remember(req Request, url string) {
+	if g.typed == nil || len(g.typed) >= maxTyped || len(g.typedText) >= maxTyped {
+		g.typed, g.typedText = map[string]typedField{}, map[string]bool{}
+	}
+	g.typed[req.Ref] = typedField{text: req.Text, url: url}
+	g.typedText[req.Text] = true
+}
+
+// omit derives the password refs from the snapshot itself, not from the
+// driver (K14, G10), and omits their values (CRED-4). It returns the
+// snapshot and the number of fields omitted.
+func (g *Gate) omit(snapshot, url string) (string, int) {
+	typed := map[string]string{}
+	for ref, f := range g.typed {
+		if f.url == url {
+			typed[ref] = f.text
+		}
+	}
+	refs := entryRefs(snapshot, typed)
+	return omitValues(snapshot, refs, g.typedText), len(refs)
 }
 
 // send forwards a request the gate has allowed.
@@ -296,6 +331,8 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 		// Read before filtering: a redaction must not hide a link's target.
 		g.refs = parseRefs(res.Snapshot, res.URL)
 	}
+	// The driver's count is not trusted: the gate reports its own.
+	res.Snapshot, res.PasswordFields = g.omit(res.Snapshot, res.URL)
 	return g.post(req.Verb, res)
 }
 

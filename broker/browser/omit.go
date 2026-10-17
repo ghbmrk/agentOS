@@ -9,6 +9,15 @@ import (
 
 const omittedMark = "[password omitted]"
 
+// minScrub is the shortest value scrubbed from the rest of the page: a
+// shorter one ("1", "yes") would wipe ordinary text. It is still omitted
+// from its own field (G10).
+const minScrub = 4
+
+// entryRoles are the roles an <input> or <textarea> that can hold a
+// password is given (G10).
+var entryRoles = map[string]bool{"textbox": true, "searchbox": true}
+
 var (
 	refToken = regexp.MustCompile(`\[ref=((?:f[0-9]+)?e[0-9]+)\]`)
 	roleRE   = regexp.MustCompile(`^[ \t]*- '?[A-Za-z][A-Za-z-]*`)
@@ -138,6 +147,81 @@ func omitChild(line string) (string, string) {
 	return in + "- " + omittedMark, strings.TrimPrefix(line[len(in):], "- ")
 }
 
+// entryRefs derives the password refs the gate passes to OmitValues
+// from the snapshot alone, without the driver's word for which fields are
+// passwords (K14, CRED-4): every entry field that shows a value, on its
+// own line or in a child other than its placeholder, unless the value is
+// the text typed[ref] the agent itself typed into that field. A line
+// with an entry role that cannot be parsed gives every ref on it (fail
+// closed).
+func entryRefs(snapshot string, typed map[string]string) map[string]bool {
+	refs := map[string]bool{}
+	lines := strings.Split(snapshot, "\n")
+	for i, line := range lines {
+		r := roleRE.FindString(line)
+		if r == "" || !entryRoles[strings.TrimLeft(strings.TrimSpace(r)[2:], "'")] {
+			continue
+		}
+		start, ok := nameEnd(line)
+		if !ok {
+			for _, m := range refToken.FindAllStringSubmatch(line, -1) {
+				refs[m[1]] = true
+			}
+			continue
+		}
+		m := refToken.FindStringSubmatchIndex(line[start:])
+		if m == nil {
+			continue
+		}
+		ref := line[start+m[2] : start+m[3]]
+		rest := line[start+m[1]:]
+		rest = strings.TrimLeft(rest[len(attrsRE.FindString(rest)):], "'")
+		var values []string
+		if strings.HasPrefix(rest, ":") {
+			values = append(values, rest[1:])
+		}
+		depth := len(indent(line))
+		for _, c := range lines[i+1:] {
+			if strings.TrimSpace(c) == "" || len(indent(c)) <= depth {
+				break
+			}
+			if cm := childRE.FindStringSubmatch(c); cm == nil {
+				values = append(values, c)
+			} else if !strings.HasSuffix(cm[1], "- /placeholder") {
+				values = append(values, cm[2])
+			}
+		}
+		t, isTyped := typed[ref]
+		for _, v := range values {
+			if v = yamlValue(v); v != "" && (!isTyped || v != t) {
+				refs[ref] = true
+			}
+		}
+	}
+	return refs
+}
+
+// scrubForms replaces every form in line outside its [ref=...] tokens, so
+// a value never rewrites a ref the agent clicks by.
+func scrubForms(line string, forms []string) string {
+	var b strings.Builder
+	at := 0
+	for _, m := range refToken.FindAllStringIndex(line, -1) {
+		b.WriteString(scrubText(line[at:m[0]], forms))
+		b.WriteString(line[m[0]:m[1]])
+		at = m[1]
+	}
+	b.WriteString(scrubText(line[at:], forms))
+	return b.String()
+}
+
+func scrubText(s string, forms []string) string {
+	for _, f := range forms {
+		s = strings.ReplaceAll(s, f, "\x00")
+	}
+	return strings.ReplaceAll(s, "\x00", omittedMark)
+}
+
 // valueForms are the ways a value can appear in another element's
 // accessible name: as is, with whitespace collapsed, JSON-escaped inside
 // a quoted name, and each of those with ' doubled, because a key that
@@ -152,7 +236,7 @@ func valueForms(values []string) []string {
 			for _, e := range []string{d, c, esc.Replace(d), esc.Replace(c)} {
 				for _, f := range []string{e, strings.ReplaceAll(e, "'", "''")} {
 					f = strings.TrimSpace(f)
-					if f != "" && !strings.Contains(f, "\x00") && !seen[f] {
+					if len(f) >= minScrub && !strings.Contains(f, "\x00") && !seen[f] {
 						seen[f] = true
 						forms = append(forms, f)
 					}
@@ -168,10 +252,18 @@ func valueForms(values []string) []string {
 // refs, and of the lines nested under them. The line stays, so a login
 // form is still visible. Every other copy of a removed value is also
 // replaced, because the accessible name of a row, cell, link or button
-// holding the field, or labelled by it, includes the value. A short
-// value can over-redact, which fails closed. refs are password fields
-// (CRED-4).
+// holding the field, or labelled by it, includes the value, except
+// inside [ref=...] tokens. A value shorter than minScrub is omitted only
+// from its own field; a longer one can over-redact, which fails closed.
+// refs are password fields (CRED-4).
 func OmitValues(snapshot string, refs map[string]bool) string {
+	return omitValues(snapshot, refs, nil)
+}
+
+// omitValues is OmitValues, except that a removed value in keep is not
+// scrubbed from the rest of the page: the agent typed it, so a copy
+// tells it nothing (G10).
+func omitValues(snapshot string, refs, keep map[string]bool) string {
 	lines := strings.Split(snapshot, "\n")
 	var values []string
 	for i := 0; i < len(lines); i++ {
@@ -180,12 +272,17 @@ func OmitValues(snapshot string, refs map[string]bool) string {
 			continue
 		}
 		lines[i] = line
-		values = append(values, v)
+		add := func(v string) {
+			if !keep[yamlValue(v)] {
+				values = append(values, v)
+			}
+		}
+		add(v)
 		depth := len(indent(line))
 		for i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" && len(indent(lines[i+1])) > depth {
 			i++
 			lines[i], v = omitChild(lines[i])
-			values = append(values, v)
+			add(v)
 		}
 	}
 	forms := valueForms(values)
@@ -194,11 +291,7 @@ func OmitValues(snapshot string, refs map[string]bool) string {
 	}
 	for i, line := range lines {
 		kept := strings.TrimSuffix(line, ": "+omittedMark)
-		for _, f := range forms {
-			kept = strings.ReplaceAll(kept, f, "\x00")
-		}
-		kept = strings.ReplaceAll(kept, "\x00", omittedMark)
-		lines[i] = kept + line[len(strings.TrimSuffix(line, ": "+omittedMark)):]
+		lines[i] = scrubForms(kept, forms) + line[len(kept):]
 	}
 	return strings.Join(lines, "\n")
 }

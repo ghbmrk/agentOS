@@ -504,3 +504,112 @@ func TestOversizedSnapshotIsCapped(t *testing.T) {
 		t.Fatalf("ok=%v truncated=%v len=%d", r.OK, r.Truncated, len(r.Snapshot))
 	}
 }
+
+// Synthetic canaries only (CLAUDE.md).
+const pwCanary = "hunter2Canary"
+
+func snapReply(snapshot string, pw int) map[string]any {
+	return map[string]any{"ok": true, "url": "https://shop.example.test/login",
+		"snapshot": snapshot, "password_fields": pw}
+}
+
+// K14: the gate derives the fields to omit from the snapshot itself, so a
+// password field the driver did not report (a mislabelled field, or no
+// refs at all) still has its value omitted.
+func TestGateOmitsEntryValuesTheDriverDidNotReport(t *testing.T) {
+	snap := "- textbox \"Code\" [ref=e5]: " + pwCanary + "\n- button \"Go\" [ref=e6]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("value reached the agent: %q", r.Snapshot)
+	}
+	if !strings.Contains(r.Snapshot, `- textbox "Code" [ref=e5]: `+omittedMark) {
+		t.Fatalf("field line lost: %q", r.Snapshot)
+	}
+	if r.PasswordFields != 1 {
+		t.Fatalf("PasswordFields = %d, want the gate's count 1", r.PasswordFields)
+	}
+	if got := h.do(t, `{"v":0,"verb":"click","ref":"e6"}`); !got.OK {
+		t.Fatalf("click after omission refused: %+v", got)
+	}
+}
+
+// A field with a placeholder shows its value as a `- text:` child; every
+// copy of the value elsewhere on the page goes too.
+func TestGateOmitsChildValuesAndCopies(t *testing.T) {
+	snap := "- searchbox \"Find\" [ref=e3]:\n  - /placeholder: Search\n  - text: " + pwCanary +
+		"\n- row \"Find " + pwCanary + "\" [ref=e4]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("value reached the agent: %q", r.Snapshot)
+	}
+	for _, want := range []string{"/placeholder: Search", "[ref=e3]", "[ref=e4]"} {
+		if !strings.Contains(r.Snapshot, want) {
+			t.Fatalf("%q lost: %q", want, r.Snapshot)
+		}
+	}
+}
+
+// A field's value the agent itself typed into that field on that page
+// stays visible: nothing leaks, and the agent can check its own input.
+func TestGateKeepsTextTheAgentTyped(t *testing.T) {
+	snap := "- textbox \"Search\" [ref=e3]: kettle\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{
+		"type":     snapReply("", 0),
+		"snapshot": snapReply(snap, 0),
+	}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if !strings.Contains(r.Snapshot, `[ref=e3]: kettle`) {
+		t.Fatalf("typed text hidden: %q", r.Snapshot)
+	}
+	if strings.Contains(r.Snapshot, pwCanary) || r.PasswordFields != 1 {
+		t.Fatalf("untyped value kept or miscounted (%d): %q", r.PasswordFields, r.Snapshot)
+	}
+}
+
+// Text typed into one field exempts only that field: otherwise typing a
+// guess elsewhere would tell the agent whether it matches a password.
+func TestGateTypedTextIsNoOracle(t *testing.T) {
+	snap := "- textbox \"Note\" [ref=e3]: " + pwCanary + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{
+		"type":     snapReply("", 0),
+		"snapshot": snapReply(snap, 0),
+	}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+pwCanary+`"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if !strings.Contains(r.Snapshot, `[ref=e5]: `+omittedMark) {
+		t.Fatalf("a guess typed into e3 unmasked e5: %q", r.Snapshot)
+	}
+}
+
+// A short value is omitted from its own field but not scrubbed from the
+// rest of the page, and refs are never rewritten.
+func TestGateShortValueKeepsPageAndRefs(t *testing.T) {
+	snap := "- textbox \"Qty\" [ref=e1]: \"1\"\n- text: Total 1 item, 12.10\n- textbox \"Ref\" [ref=e7]: ref=e1\n- button \"Pay\" [ref=e12]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for _, want := range []string{"Total 1 item, 12.10", "[ref=e12]", "[ref=e1]: " + omittedMark, "[ref=e7]: " + omittedMark} {
+		if !strings.Contains(r.Snapshot, want) {
+			t.Fatalf("%q lost: %q", want, r.Snapshot)
+		}
+	}
+}
+
+// On another page the field the agent typed into is omitted again, but
+// text it typed is not scrubbed from the rest of that page, so a search
+// does not hide its own results.
+func TestGateTypedTextStaysOnTheNextPage(t *testing.T) {
+	results := map[string]any{"ok": true, "url": "https://shop.example.test/results",
+		"snapshot": "- searchbox \"Search\" [ref=e3]: kettle\n- link \"Steel kettle\" [ref=e9]"}
+	h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": results}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":true}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if !strings.Contains(r.Snapshot, `[ref=e3]: `+omittedMark) || !strings.Contains(r.Snapshot, `"Steel kettle"`) {
+		t.Fatalf("got %q", r.Snapshot)
+	}
+}
