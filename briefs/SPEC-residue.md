@@ -1,6 +1,6 @@
 # SPEC-residue: portable-drive and digest leftovers
 
-Tier B (SPEC text). Builder: Sonnet 5.5. Usage estimate: 40k tokens. Needs Mark's approval of the SPEC diff (L1 spec-diff PR). Issue #1690.
+Tier B (SPEC text). Builder: Sonnet 5.5; also deletes HW-8a (L3 fix-list, PR #2325). Usage estimate: 40k tokens. Needs Mark's approval of the SPEC diff (L1 spec-diff PR). Issue #1690.
 
 **Why.** D-102 made the controller a mini PC with an internal SSD and a USB stick only a flasher or recovery stick; D-097/DIG-RM removed the digest. Mark approved the cleanup 2026-10-14 18:01Z (cmsg_01R63S2yrPkq32thy8WQCuvDBG8j9So4uCVzPNt14ZmBL5).
 
