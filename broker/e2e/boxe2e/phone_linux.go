@@ -32,6 +32,42 @@ func replyKind(text string) string {
 	return "other"
 }
 
+// otherWords are the letter-only words a failure may quote from a text
+// replyKind does not know, so a run shows which notice it was.
+const otherWords, otherWordLen = 3, 12
+
+// otherLead is up to otherWords leading words of text, each letters only
+// (trailing punctuation dropped) and at most otherWordLen long. It stops at
+// the first word with a digit or any other mark, so it never quotes a code,
+// a number, a time or a token; the carrier is synthetic, but a failure
+// still prints no more of a text than names it (E15).
+func otherLead(text string) string {
+	var out []string
+	for _, w := range strings.Fields(text) {
+		if len(out) == otherWords {
+			break
+		}
+		w = strings.TrimRight(w, ".,:;!?")
+		if w == "" || len(w) > otherWordLen || strings.IndexFunc(w, func(c rune) bool {
+			return (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '\''
+		}) >= 0 {
+			break
+		}
+		out = append(out, w)
+	}
+	return strings.Join(out, " ")
+}
+
+// kindLead is replyKind's kind, and for other the text's otherLead in
+// quotes, as a failure names it.
+func kindLead(text string) string {
+	k := replyKind(text)
+	if k != "other" {
+		return k
+	}
+	return fmt.Sprintf("other (%q)", otherLead(text))
+}
+
 // phoneRun is how far phone-control got, read from the carrier's log in
 // the order the texts went (E9). The step's texts, in order: the paired
 // phone's HELP probes until one is answered; one STATUS with a fresh code;
@@ -83,23 +119,24 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 		case m.From == boxNum && m.To == strangerNum:
 			r.toStranger++
 		case m.From == boxNum && m.To == phoneNum:
-			r.reply(replyKind(m.Text))
+			r.reply(m.Text)
 		}
 	}
 	return r
 }
 
-func (r *phoneRun) reply(k string) {
+func (r *phoneRun) reply(text string) {
+	k := replyKind(text)
 	switch {
 	case !r.statusSent:
 		if k == "help" {
 			r.probed = true
 			return
 		}
-		r.err = fmt.Errorf("HELP drew %s", k)
+		r.err = fmt.Errorf("HELP drew %s", kindLead(text))
 	case r.strangerSent:
 		if k != "help" || !r.barrierSent {
-			r.err = fmt.Errorf("the unpaired number's text drew %s to the paired number", k)
+			r.err = fmt.Errorf("the unpaired number's text drew %s to the paired number", kindLead(text))
 			return
 		}
 		r.barrier = true
@@ -112,11 +149,11 @@ func (r *phoneRun) reply(k string) {
 	case !r.unlocked && k == "already-unlocked":
 		r.err = errors.New("already unlocked: the code unlocked nothing")
 	case !r.unlocked:
-		r.err = fmt.Errorf("STATUS with a fresh code drew %s, not the unlock", k)
+		r.err = fmt.Errorf("STATUS with a fresh code drew %s, not the unlock", kindLead(text))
 	case !r.status && k == "status":
 		r.status = true
 	default:
-		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", k)
+		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", kindLead(text))
 	}
 }
 
@@ -130,7 +167,7 @@ func (r phoneRun) failed() error {
 
 // controlErr is the step's verdict on the whole log from index from: every
 // stage reached in order, and nothing to the stranger. It names reply
-// kinds and counts, never a text.
+// kinds and counts, and for a text of no known kind only its otherLead.
 func controlErr(log []modem.SMS, from int) error {
 	r := readPhoneRun(log, from)
 	if err := r.failed(); err != nil {

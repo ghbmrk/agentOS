@@ -78,3 +78,28 @@ func TestControlErr(t *testing.T) {
 		t.Error("a help reply before the step's start counted")
 	}
 }
+
+// REQ: CH-11, HW-10. A text of no known kind is named by its leading
+// letter-only words, so a failed run shows which notice it was, and the
+// lead stops before any word with a digit or mark: a code, number, time or
+// token is never quoted.
+func TestOtherLeadQuotesNoCode(t *testing.T) {
+	for _, c := range []struct{ text, want string }{
+		{"Daily digest: 2 items held.", "Daily digest"},
+		{"Your agent is not running.", "Your agent is"},
+		{"Codes 123456 ignored", "Codes"},
+		{"canary-e2e-7f3a held", ""},
+		{"Too many wrong codes", "Too many wrong"},
+		{"Supercalifragilistic word", ""},
+		{"", ""},
+	} {
+		if got := otherLead(c.text); got != c.want {
+			t.Errorf("otherLead(%q) = %q, want %q", c.text, got, c.want)
+		}
+	}
+	log := seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: 482913 canary-e2e-7f3a"})
+	err := controlErr(log, 0)
+	if err == nil || err.Error() != `HELP drew other ("Daily digest")` {
+		t.Fatalf("controlErr = %v", err)
+	}
+}
