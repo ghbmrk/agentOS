@@ -47,6 +47,29 @@ def legacy(root):
     return {tuple(l.split(None, 1)) for l in path.read_text().splitlines() if l.strip() and not l.startswith("#")}
 
 
+def growth(root, base_text):
+    """Legacy lines the tree has beyond base_text (the base branch's copy of the list)."""
+    base = {l for l in base_text.splitlines() if l.strip() and not l.startswith("#")}
+    path = pathlib.Path(root) / LEGACY
+    now = path.read_text().splitlines() if path.is_file() else []
+    for line in now:
+        if line.strip() and not line.startswith("#") and line not in base:
+            yield f"{LEGACY}: `{line}` is new in the legacy list; it only shrinks, so give the row a package-scoped ID instead"
+
+
+def base_legacy(root):
+    """The base side's copy of the list, when HEAD is a PR test merge (two parents) that has one; else None."""
+    try:
+        parents = subprocess.run(["git", "rev-list", "--parents", "-n", "1", "HEAD"], cwd=root,
+                                 capture_output=True, text=True, check=True).stdout.split()
+        if len(parents) < 3:
+            return None
+        return subprocess.run(["git", "show", f"HEAD^1:{LEGACY}"], cwd=root, capture_output=True, text=True,
+                              check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def check(root, files):
     """One problem line for each row whose ID is neither package-scoped nor legacy."""
     old = legacy(root)

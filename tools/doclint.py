@@ -9,7 +9,8 @@
                 RECORD_FROM or later has a `Record:` line directly under its title (PR, package,
                 head or main SHA)
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
-  ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md; a new row's ID is package-scoped (tools/assumptions_ids.py)
+  ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md; a new row's ID is package-scoped and the
+                legacy list does not grow vs the PR's base side (tools/assumptions_ids.py)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
                 none keeps its own `**State:**` line (state lives on the work-item issue), and each
                 has an `**Acceptance tests:**` line unless listed in tools/brief_acceptance_baseline.txt
@@ -221,7 +222,9 @@ def main(argv):
         base = args[i + 1]
         del args[i:i + 2]
     root = args[0] if args else pathlib.Path(__file__).resolve().parent.parent
-    problems = [*lint(root), *(baseline_growth(root, base) if base else [])]
+    base_ids = assumptions_ids.base_legacy(root)
+    problems = [*lint(root), *(baseline_growth(root, base) if base else []),
+                *(assumptions_ids.growth(root, base_ids) if base_ids is not None else [])]
     for p in problems:
         print(p)
     return 1 if problems else 0

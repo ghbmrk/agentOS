@@ -119,10 +119,21 @@ class LintTest(unittest.TestCase):
         self.assertEqual(list(assumptions_ids.check(ROOT, assumptions_ids.assumption_files(ROOT))), [])
 
     def test_parallel_packages_never_share_an_id(self):
-        a, b = "| # | A |\n|---|---|\n| PKG-A-1 | a |\n", "| # | A |\n|---|---|\n| PKG-B-1 | b |\n"
-        self.assertNotEqual(a.splitlines()[-1].split("|")[1], b.splitlines()[-1].split("|")[1])
-        merged = a + b.splitlines()[-1] + "\n"
-        self.assertEqual(self.lint(**{"tools/ASSUMPTIONS.md": merged}), [])
+        base = "| # | A |\n|---|---|\n| PKG-0-1 | x |\n"
+        scoped = base + "| PKG-A-1 | a |\n| PKG-B-1 | b |\n"
+        bare = base + "| D37 | a |\n"
+        self.assertEqual(self.lint(**{"tools/ASSUMPTIONS.md": scoped}), [])
+        self.assertEqual(len(self.lint(**{"tools/ASSUMPTIONS.md": bare})), 1)
+
+    def test_legacy_list_may_not_grow(self):
+        import assumptions_ids
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "tools").mkdir()
+            (pathlib.Path(d) / "tools/assumptions_legacy_ids.txt").write_text("# c\nf D1\nf D37\n")
+            got = list(assumptions_ids.growth(d, "# c\nf D1\n"))
+        self.assertEqual(len(got), 1)
+        self.assertIn("f D37", got[0])
+        self.assertEqual(list(assumptions_ids.growth(ROOT, (ROOT / "tools/assumptions_legacy_ids.txt").read_text())), [])
 
     def test_duplicate_decision_id(self):
         text = "# D\n\n| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n" \
