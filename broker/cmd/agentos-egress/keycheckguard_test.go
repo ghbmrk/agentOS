@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-1, DEV-2
+// REQ: CRED-1, DEV-2, EGRESS-NOPROXY-2
 
 // rebindResolver answers every name with one address and records the
 // names it was asked.
@@ -39,7 +39,23 @@ func (r *rebindResolver) LookupNetIP(_ context.Context, _, host string) ([]netip
 // a connection, so the key cannot reach a home-network host (CRED-1,
 // DEV-2). The policy's resolver must be the one asked: a bare transport,
 // or a fresh policy in place of custody's, would ask another.
+//
+// EGRESS-NOPROXY-2 (#1611): the check runs with HTTPS_PROXY set, as on an
+// owner host that has one. A transport that took the proxy from the
+// environment would ask the guard for the proxy's name, not the provider's,
+// and the resolver check below fails.
 func TestSetupKeyCheckSendsThroughTheGuard(t *testing.T) {
+	const proxy = "http://proxy.home.example:3128"
+	for _, v := range []string{"HTTPS_PROXY", "https_proxy"} {
+		t.Setenv(v, proxy)
+	}
+	// net/http reads the proxy environment once per process; if an earlier
+	// test read it first, this one cannot see a proxy and would pass blind.
+	probe, _ := http.NewRequest("GET", "https://api.openai.com/", nil)
+	if u, _ := http.ProxyFromEnvironment(probe); u == nil {
+		t.Fatal("net/http sees no proxy from the environment; the setting above came too late to test the check")
+	}
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
