@@ -175,3 +175,38 @@ func TestBoundRefusesInputItsBytesDoNotBound(t *testing.T) {
 		t.Fatalf("Wrap refused an image call: %d", w.Code)
 	}
 }
+
+// OP-8 (combined on #2327): a call's timeout starts when it is admitted, so
+// the time it waited for room is not taken from its provider call.
+func TestBoundWaitDoesNotShortenTheCall(t *testing.T) {
+	const timeout = time.Second
+	m, _, _ := open(t, Config{MachineCap: Limits{Calls: 100, Tokens: 3000}, OverallCap: big, MaxReserve: 10, CallTimeout: timeout})
+	release, started := make(chan struct{}), make(chan struct{}, 2)
+	left := make(chan time.Duration, 2)
+	h := m.WrapBound("m1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		d, _ := r.Context().Deadline()
+		left <- time.Until(d)
+		started <- struct{}{}
+		<-release
+		io.WriteString(w, `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	first := make(chan int)
+	go func() { first <- post(h, upload(2000)).Code }()
+	<-started
+	<-left
+	second := make(chan int)
+	go func() { second <- post(h, upload(2000)).Code }()
+	time.Sleep(timeout / 2)
+	release <- struct{}{}
+	if c := <-first; c != 200 {
+		t.Fatalf("first call: %d", c)
+	}
+	if d := <-left; d < timeout*3/4 {
+		t.Fatalf("the admitted call had %v of its %v timeout left after its wait", d, timeout)
+	}
+	close(release)
+	if c := <-second; c != 200 {
+		t.Fatalf("second call: %d", c)
+	}
+}

@@ -781,8 +781,6 @@ func (m *Meter) wrap(machine string, next http.Handler, bound bool) http.Handler
 			http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
-		defer cancel()
 		var c *Call
 		admit := in
 		if bound {
@@ -816,6 +814,10 @@ func (m *Meter) wrap(machine string, next http.Handler, bound bool) http.Handler
 			}})
 			return
 		}
+		// The call's timeout starts once it is admitted, so a bound call's
+		// wait for room does not cut its provider call short.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
+		defer cancel()
 		rep := &reportSlot{call: c, in: admit, reserve: reserve}
 		r = r.WithContext(context.WithValue(ctx, reportKey{}, rep))
 		r.Body = io.NopCloser(bytes.NewReader(body))
