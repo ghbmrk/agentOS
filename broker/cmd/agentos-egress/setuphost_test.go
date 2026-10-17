@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -139,6 +140,57 @@ func TestSetupHostNotMineFailsClosedWhenTheTPMIsSilent(t *testing.T) {
 	}
 	if r.tpmSlots(t) != 1 {
 		t.Fatalf("%d slots", r.tpmSlots(t))
+	}
+}
+
+// "Not mine" with a silent TPM falls back to the keys file's slot list;
+// when that list cannot be read either, the answer is not saved, and the
+// slot stays (PR #1241 Security S4, #1253).
+func TestSetupHostNotMineFailsClosedWhenTheKeysFileIsUnreadable(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	r.inSetup(t, true)
+	if _, err := r.c.setupHost(true); err != nil {
+		t.Fatal(err)
+	}
+	r.c.host.(*tpmHost).openTPM = func() (transport.TPMCloser, error) { return nil, errors.New("tpm: device busy") }
+	aside := r.keys + ".aside"
+	if err := os.Rename(r.keys, aside); err != nil {
+		t.Fatal(err)
+	}
+	_, err := r.c.setupHost(false)
+	if err := os.Rename(aside, r.keys); err != nil {
+		t.Fatal(err)
+	}
+	if err == nil {
+		t.Fatal("not mine saved while the slot list could not be read")
+	}
+	if r.tpmSlots(t) != 1 {
+		t.Fatalf("%d slots", r.tpmSlots(t))
+	}
+}
+
+// "Not mine" whose slot removal fails before the change is decided is not
+// saved: it reports an error, not success, and the slot stays (#1253).
+func TestSetupHostNotMineFailsWhenTheSlotRemovalFails(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	r.inSetup(t, true)
+	if _, err := r.c.setupHost(true); err != nil {
+		t.Fatal(err)
+	}
+	r.notes = nil
+	restore := vault.InjectStageFault(errors.New("input/output error"))
+	_, err := r.c.setupHost(false)
+	restore()
+	if err != errInternal {
+		t.Fatalf("not mine with the removal failed: %v", err)
+	}
+	if r.tpmSlots(t) != 1 {
+		t.Fatalf("%d slots", r.tpmSlots(t))
+	}
+	if r.noted("a trusted host was removed") {
+		t.Fatalf("owner told of a removal that did not happen: %q", r.notes)
 	}
 }
 
