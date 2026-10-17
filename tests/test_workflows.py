@@ -434,8 +434,8 @@ class PremergeRunTest(unittest.TestCase):
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
 
     def test_failure_verdict_posts_failure_but_job_passes(self):
-        # A red push-time `premerge-gate` job outlives the accept and blocks auto-merge, so a
-        # failing verdict must ride only on the `premerge` status.
+        # The `premerge` status is the gate, not the job: a failing verdict rides only on the
+        # status, so comment-time runs (attached to main's head) don't read as main breaking.
         self.assertEqual(self.run_gate("no-verdict"), (0, ["failure"]))
         self.assertEqual(self.run_gate("fix-list"), (0, ["failure"]))
 

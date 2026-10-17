@@ -11,11 +11,13 @@ name: premerge
 # objects for `git merge-tree` and `git diff`; it is never checked out, imported or executed.
 # Fail closed: anything but a clean `same` or `bot` posts `failure`.
 # PREMERGE-stale (#1946): the job's own result is not the gate, the status is. A `failure`
-# verdict leaves the job green, because a red `premerge-gate` run on the head (the push-time
-# run, before the accept) outlives the later comment-time runs, which attach to main, and
-# GitHub then refuses auto-merge on the accepted head. The job goes red only when the script
-# errors; once the head is known, an error exit still posts `failure` (the EXIT trap), so a
-# rerun that dies cannot leave an earlier `success` standing on the head.
+# verdict leaves the job green: comment-time runs attach to main's head, so a red run there
+# reads as main breaking, and the push-time red run would sit on the PR head after the accept.
+# The job's colour plays no part in arming: `premerge` is a required status on main (#1994),
+# so a head whose status is missing or `failure` cannot merge yet and can be armed, and the
+# rerun's `success` releases it. The job goes red only when the
+# script errors; once the head is known, an error exit still posts `failure` (the EXIT trap),
+# so a rerun that dies cannot leave an earlier `success` standing on the head.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
