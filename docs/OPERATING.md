@@ -60,6 +60,7 @@ The PR's Findings line also names every `class:later` issue the PR closes, inclu
 Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
 
 - **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
+- **Diff scope.** A blocker cites a head-side `path:line` the PR's diff adds or changes: the defect itself, or the PR's line that newly reaches or breaks older code (a new call site, a changed argument). `python3 tools/difflines.py path:line ...` prints `in-diff` or `unchanged` for each. A finding only on unchanged lines is pre-existing code: `release` or `later`, never a blocker, however severe (a tier-A security one is `release` at least). Blocking a PR on code it didn't write adds rounds without making the PR any less safe; the old defect is tracked as its own issue.
 - **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one `work-item` issue per finding grouped under it, not one package each.
 - **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` and every tier-A `class:later` issue (and the archived docs/LATER-HISTORY.md) and promotes any that now block an acceptance test.
 
@@ -105,6 +106,12 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 - `defect`: the code breaks a cited requirement or an invariant.
 - `scope`: the review asks for something outside the cited IDs; such points are `release` or `later` (§2), not blockers, and the verdict should normally have been accept.
 
+**Blocker evidence.** Each blocker point names, after its class, the in-diff `path:line` (§2 "Diff scope") and a `Repro:`: the failing test, command, mutant or input the reviewer ran that shows the failure. Where no run can show it (a power cut, a race the harness can't force), the point gives the failure path step by step instead, and before the fix-list posts a fresh Sonnet session, given only the diff and that point, confirms the path; a point it can't confirm is posted as `later` tagged `recheck`. A false blocker spends a builder wake and a delta review for nothing, while a verifier session on every blocker would add a cold start to every fix-list; on 2026-10-17's fix-lists (#2141, #2143, #2149, #2154) every blocker already carried a reproduction and was real, so the verifier runs only where none exists.
+
+**Re-review.** A review of a later head is a delta review: it reads `git diff <last reviewed head> HEAD` and checks each earlier blocker, and it raises a new blocker only on lines that delta adds or changes. It never re-posts a finding already posted on the PR; an unfixed one is cited as `still open: <comment link> point N`. Each blocker names its bug class (for example "an error path that drops the lock"), and the builder fixes every instance in the PR's diff and says in its reply how it searched, so the next round doesn't find the same class one line further on. The Claude Code team found that 59% of what its reviewer kept flagging on later rounds was code present at the first pass, and with these rules plus the round cap its mean reviews to pass fell from 2.08 to 1.32 ("How the Claude Code team does code review", 2026-10-15).
+
+**Round cap.** A round is one reviewed head, and a fix-list round when any review of that head posts a fix-list (Security and a combined pass on the same head are one round). After three fix-list rounds on one PR, the review that would post a fourth posts `Verdict: reject` instead, with the `Cause:` that runs through the rounds, its open blockers cited, and `Next: step back` naming what to reconsider: the approach (defect: a fresh builder re-plans from a hand-off packet, or the package splits), the brief (brief-gap), the spec (spec-gap: an L1 spec-diff), or the reviews' own points outside the cited IDs (scope: they drop to `release` or `later`). It labels the work item `state:escalated` and the coordinator routes it. By a fourth round the fixes are not converging (on #2141 both rounds traced back to one per-line design); this matches the builder's stop after two failed fixes of one test (CLAUDE.md). A doubt about direction (should this package exist, is the approach right) goes to the coordinator when the brief is written or at the first review, not as a blocker on a finished PR.
+
 **Verdict comment shape.** The daily records bot (`tools/records.py`) turns a verdict comment into a `reviews/` file only when the comment has this shape, so every L3 and lens verdict uses it:
 
 - `Verdict:` first, then `Cause:` unless the verdict is accept;
@@ -122,7 +129,7 @@ Cause: defect
 Record: PR #400 · package DOC-4 · head a74ee45
 <!-- record: l3 -->
 
-1. blocker (defect, DOC-4.2): the index skips the last entry.
+1. blocker (defect, DOC-4.2) tools/index.py:42: the index skips the last entry. Repro: `python3 -m unittest tests.test_index.Last` fails.
 
 Next: fix 1, then a delta L3 review; owed: none
 ```
