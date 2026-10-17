@@ -13,7 +13,8 @@ const unsubURL = "https://shop.example.test/unsubscribe?token=synthCanaryTok123"
 // A page with a mail-style action link, a relative confirm link, a link
 // named like an action, an ordinary link, a button, and elements nested in
 // links: an image in an unsubscribe link and an action-named child of an
-// ordinary link.
+// ordinary link. Then an anchor with role="button" and a GET form's button,
+// which show no target, and a hash-routed action link.
 const actionPage = `- generic [ref=e1]:
   - link "Stop these emails" [ref=e2] [cursor=pointer]:
     - /url: /unsubscribe?token=synthCanaryTok123
@@ -35,7 +36,11 @@ const actionPage = `- generic [ref=e1]:
     - img "logo" [ref=e11]
   - link "Kettles" [ref=e12]:
     - /url: /products/kettles
-    - generic "Unsubscribe" [ref=e13]`
+    - generic "Unsubscribe" [ref=e13]
+  - button "Unsubscribe" [ref=e14] [cursor=pointer]
+  - button "Unsubscribe me" [ref=e15]
+  - link "Manage" [ref=e16]:
+    - /url: /#/unsubscribe?token=synthCanaryT4`
 
 func pageReply(snapshot string) map[string]any {
 	return map[string]any{"ok": true, "url": "https://shop.example.test/mail/", "snapshot": snapshot}
@@ -112,6 +117,9 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 		"e10": unsubURL,
 		"e11": unsubURL,
 		"e13": "https://shop.example.test/products/kettles",
+		"e14": "",
+		"e15": "",
+		"e16": "https://shop.example.test/#/unsubscribe?token=synthCanaryT4",
 	} {
 		for _, verb := range []string{"click", "download"} {
 			r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"`+ref+`"}`)
@@ -132,15 +140,21 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 // the gate looks at the page again first.
 func TestHeldClickReleaseRechecksThePage(t *testing.T) {
 	moved := strings.Replace(actionPage, "/unsubscribe?token=synthCanaryTok123", "/unsubscribe?token=otherSynthTok", 1)
+	moved = strings.Replace(moved, `button "Unsubscribe" [ref=e14]`, `button "Unsubscribe from all" [ref=e14]`, 1)
 	h := newHarness(t, map[string]any{"snapshot": []any{pageReply(actionPage), pageReply(moved)}}, "", 0)
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	id := h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).Hold
+	button := h.do(t, `{"v":0,"verb":"click","ref":"e14"}`).Hold
 	ctx := context.Background()
 	if r := h.g.Release(ctx, id, unsubURL); r.OK || len(forwarded(t, h, "click")) != 0 {
 		t.Fatalf("released a click whose link changed: %+v", r)
 	}
 	if _, ok := h.g.Held(id); ok {
 		t.Fatal("a hold whose link changed is still stored")
+	}
+	// A held button shows no target; it is bound to its role and name.
+	if r := h.g.Release(ctx, button, ""); r.OK || len(forwarded(t, h, "click")) != 0 {
+		t.Fatalf("released a button whose name changed: %+v", r)
 	}
 	id = h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).Hold
 	if id == "" {
@@ -222,13 +236,22 @@ func TestStateLinkPatterns(t *testing.T) {
 		"https://shop.example.test/account/close":                       true,
 		"https://shop.example.test/account/close/now":                   true,
 		"https://shop.example.test/p?a=%zz":                             true,
+		"https://shop.example.test/#/unsubscribe?token=synthCanaryT4":   true,
+		"https://shop.example.test/app#/orders/7/cancel":                true,
+		"https://shop.example.test/app#/p?nonce=synth1":                 true,
+		"https://shop.example.test/oneclickunsubscribe?u=synth1":        true,
+		"https://shop.example.test/unsubscribed":                        true,
+		"https://shop.example.test/orders/7/canceled":                   true,
+		"https://shop.example.test/account/deletion":                    true,
+		"https://shop.example.test/products/kettle#unsubscribe":         true,
 		"https://shop.example.test/":                                    false,
 		"https://shop.example.test/products/kettle":                     false,
 		"https://shop.example.test/search?q=kettle&page=2":              false,
 		"https://shop.example.test/account/orders":                      false,
 		"https://shop.example.test/subscriptions/manage":                false,
 		"https://shop.example.test/signature-dishes":                    false,
-		"https://shop.example.test/products/kettle#unsubscribe":         false,
+		"https://shop.example.test/products/kettle#reviews":             false,
+		"https://shop.example.test/app#/orders?page=2":                  false,
 	} {
 		if got := p.match(u); got != want {
 			t.Errorf("%s: got %v, want %v", u, got, want)

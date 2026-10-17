@@ -66,12 +66,36 @@ func words(s string) []string {
 	return out
 }
 
+// actionStems catch inflected and run-together forms of the action words
+// ("unsubscribed", "oneclickunsubscribe", "canceled", "deletion"). A stem
+// inside an unrelated word over-matches, which fails closed (AS2).
+var actionStems = strings.Fields(`unsub optout cancel delet remov confirm verif revok`)
+
 // hasWord reports whether a word, or two adjacent words joined ("opt-out"),
 // is in set.
 func hasWord(ws []string, set map[string]bool) bool {
 	for i, w := range ws {
 		if set[w] || i+1 < len(ws) && set[w+ws[i+1]] {
 			return true
+		}
+	}
+	return false
+}
+
+// hasAction reports whether ws name a state change: an action word, or a
+// word or adjacent pair containing an action stem.
+func hasAction(ws []string) bool {
+	if hasWord(ws, actionWords) {
+		return true
+	}
+	for i, w := range ws {
+		if i+1 < len(ws) {
+			w += ws[i+1]
+		}
+		for _, s := range actionStems {
+			if strings.Contains(w, s) {
+				return true
+			}
 		}
 	}
 	return false
@@ -100,7 +124,9 @@ func newStateLinks(list []string, origins Origins) (stateLinks, error) {
 }
 
 // match reports whether a GET to raw may change state. A URL that cannot
-// be parsed matches (fail closed).
+// be parsed matches (fail closed). A hash-routed app keeps its route in the
+// fragment ("/#/unsubscribe?token=…"), so the fragment is checked like a
+// path and query too.
 func (s stateLinks) match(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -112,20 +138,26 @@ func (s stateLinks) match(raw string) bool {
 			return true
 		}
 	}
-	if hasWord(words(u.Path), actionWords) {
+	fpath, fquery, _ := strings.Cut(u.Fragment, "?")
+	return pathQueryMatch(u.Path, u.RawQuery) || pathQueryMatch(fpath, fquery)
+}
+
+// pathQueryMatch applies the word rules to a decoded path and a raw query.
+func pathQueryMatch(path, rawQuery string) bool {
+	if hasAction(words(path)) {
 		return true
 	}
-	q, err := url.ParseQuery(u.RawQuery)
+	q, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		return true
 	}
 	for k, vs := range q {
 		kw := words(k)
-		if hasWord(kw, actionWords) || hasWord(kw, tokenWords) {
+		if hasAction(kw) || hasWord(kw, tokenWords) {
 			return true
 		}
 		for _, v := range vs {
-			if hasWord(words(v), actionWords) {
+			if hasAction(words(v)) {
 				return true
 			}
 		}
@@ -133,10 +165,12 @@ func (s stateLinks) match(raw string) bool {
 	return false
 }
 
-// link is what the last snapshot showed for one ref. Only a link has a
-// target; any other element is recorded so its ref is known.
+// link is what the last snapshot showed for one ref. Only a link, or an
+// element inside one, has a target; any other element is recorded with its
+// role and name so its ref is known and a held click on it can be bound.
 type link struct {
 	isLink bool
+	role   string
 	name   string
 	target string
 }
@@ -176,7 +210,7 @@ func parseRefs(snapshot, page string) map[string]link {
 		for len(links) > 0 && links[len(links)-1].depth >= depth {
 			links = links[:len(links)-1]
 		}
-		l := link{isLink: role == "link", name: name}
+		l := link{isLink: role == "link", role: role, name: name}
 		if l.isLink {
 			// Only a direct child names the target, not a nested element's.
 			child := -1
@@ -190,9 +224,7 @@ func parseRefs(snapshot, page string) map[string]link {
 				c := childRE.FindStringSubmatch(lines[j])
 				if c != nil && strings.TrimSpace(c[1]) == "- /url" {
 					if href, err := url.Parse(yamlValue(c[2])); err == nil && base != nil {
-						href = base.ResolveReference(href)
-						href.Fragment, href.RawFragment = "", ""
-						l.target = href.String()
+						l.target = base.ResolveReference(href).String()
 					}
 					break
 				}
@@ -215,10 +247,14 @@ func parseRefs(snapshot, page string) map[string]link {
 
 // Hold is a request the gate keeps for the owner's approval instead of
 // sending: a GET to URL on Origin, from a navigate or from a click or
-// download on Ref.
+// download on Ref. A click on an element that shows no target (a button
+// named "Unsubscribe") is held with an empty URL, Origin and Method, and is
+// bound to the ref's Role and Name.
 type Hold struct {
 	Verb   string
 	Ref    string
+	Role   string
+	Name   string
 	Origin string
 	Method string
 	URL    string
@@ -229,16 +265,20 @@ type Hold struct {
 // approving a dropped hold sends nothing (AS4).
 const maxHolds = 32
 
-func (g *Gate) hold(req Request, target string) Result {
+func (g *Gate) hold(req Request, l link) Result {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	id := "h" + hex.EncodeToString(b[:])
-	key, _ := originKey(target)
+	h := Hold{Verb: req.Verb, Ref: req.Ref, Role: l.role, Name: l.name, URL: l.target, req: req}
+	if l.target != "" {
+		h.Origin, _ = originKey(l.target)
+		h.Method = "GET"
+	}
 	if len(g.holdOrder) >= maxHolds {
 		delete(g.holds, g.holdOrder[0])
 		g.holdOrder = g.holdOrder[1:]
 	}
-	g.holds[id] = Hold{Verb: req.Verb, Ref: req.Ref, Origin: key, Method: "GET", URL: target, req: req}
+	g.holds[id] = h
 	g.holdOrder = append(g.holdOrder, id)
 	return Result{Error: "held", Hold: id,
 		Detail: "this link may change state at the site; held for the owner's approval (ADP-14)"}
@@ -268,7 +308,7 @@ var errNotHeld = Result{Error: "not_held", Detail: "no such hold, or the URL is 
 // broker's call, not a protocol verb, so an agent cannot reach it. url
 // must equal the held URL; any other value sends nothing and keeps the
 // hold. A held click or download is sent only if a fresh snapshot shows
-// the ref still pointing at the held URL; otherwise the hold is void.
+// the ref with the same role, name and target; otherwise the hold is void.
 func (g *Gate) Release(ctx context.Context, id, url string) Result {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -285,7 +325,7 @@ func (g *Gate) Release(ctx context.Context, id, url string) Result {
 		if !ok {
 			return snap
 		}
-		if l, seen := g.refs[h.Ref]; !snap.OK || !seen || !l.isLink || l.target != h.URL {
+		if l, seen := g.refs[h.Ref]; !snap.OK || !seen || l.role != h.Role || l.name != h.Name || l.target != h.URL {
 			return Result{Error: "not_held", Detail: "the link changed since it was held; nothing was sent"}
 		}
 	}
