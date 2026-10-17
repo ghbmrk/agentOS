@@ -208,3 +208,46 @@ func TestRedactorScrubsDeclaredFormatSplitAcrossWrites(t *testing.T) {
 		t.Errorf("tail of a streamed match emitted")
 	}
 }
+
+// The stream hold-back is bounded as FormatMaxLen says: every write holds
+// back its last FormatMaxLen-1 bytes, a shorter match running to the end is
+// held whole, and of a longer one at least the first FormatMaxLen bytes are
+// redacted (P17).
+// REQ: CRED-7
+func TestFormatStreamHoldBounds(t *testing.T) {
+	r := formatRedactor(t)
+	stream := func(in []byte) (emitted, out []byte) {
+		var buf bytes.Buffer
+		w := r.Writer(&buf)
+		for k := 0; k < len(in); k += 100 {
+			e := k + 100
+			if e > len(in) {
+				e = len(in)
+			}
+			if _, err := w.Write(in[k:e]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		emitted = append([]byte(nil), buf.Bytes()...)
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return emitted, buf.Bytes()
+	}
+	clean := bytes.Repeat([]byte("x"), 6000)
+	if emitted, _ := stream(clean); len(clean)-len(emitted) != FormatMaxLen-1 {
+		t.Errorf("clean stream held back %d bytes, want %d", len(clean)-len(emitted), FormatMaxLen-1)
+	}
+	short := "rt_" + strings.Repeat("a", FormatMaxLen-4)
+	if _, out := stream([]byte(short + " end")); string(out) != Placeholder+" end" {
+		t.Errorf("match of %d bytes: got %.40q...", len(short), out)
+	}
+	long := "rt_" + strings.Repeat("a", 5000)
+	_, out := stream([]byte(long + " end"))
+	if !bytes.HasPrefix(out, []byte(Placeholder)) {
+		t.Fatalf("long match: no placeholder first: %.40q", out)
+	}
+	if leaked := len(out) - len(Placeholder) - len(" end"); leaked > len(long)-FormatMaxLen {
+		t.Errorf("long match: %d bytes of it emitted, want at most %d", leaked, len(long)-FormatMaxLen)
+	}
+}

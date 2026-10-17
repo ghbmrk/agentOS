@@ -35,8 +35,14 @@ type Redactor struct {
 	formats []*regexp.Regexp
 }
 
-// FormatMaxLen is the longest format match a stream holds back whole. A
-// longer one is redacted in pieces, which still leaves none of it.
+// FormatMaxLen bounds what a stream holds back for formats. A Writer for a
+// redactor with formats holds back the last FormatMaxLen-1 bytes of every
+// write, match or not, and a format match running to the end of what it has
+// seen until it ends, if it is shorter than FormatMaxLen. Of a longer match
+// at least the first FormatMaxLen bytes are redacted and the rest of it may
+// be emitted (TestFormatStreamHoldBounds): the built-in
+// formats are prefix-anchored, so the continuation no longer matches. No
+// provider token the formats describe is that long.
 const FormatMaxLen = 4096
 
 type pattern struct {
@@ -258,11 +264,14 @@ func (r *Redactor) earliest(b []byte) (at, n int, format bool) {
 	for _, re := range r.formats {
 		// An empty match (a bare \b, say) redacts nothing: take the first
 		// match with a byte in it.
-		var loc []int
-		for _, l := range re.FindAllIndex(b, -1) {
-			if l[1] > l[0] {
-				loc = l
-				break
+		loc := re.FindIndex(b)
+		if loc != nil && loc[1] == loc[0] {
+			loc = nil
+			for _, l := range re.FindAllIndex(b, -1) {
+				if l[1] > l[0] {
+					loc = l
+					break
+				}
 			}
 		}
 		if loc == nil {
@@ -276,9 +285,9 @@ func (r *Redactor) earliest(b []byte) (at, n int, format bool) {
 }
 
 // Writer returns a writer that redacts a stream on its way to w. It holds
-// back at most MaxLen()-1 bytes that could begin a match split across
-// writes, or a format match up to FormatMaxLen until it ends; Close writes
-// them. Close does not close w.
+// back the last MaxLen()-1 bytes, which could begin a match split across
+// writes, and a format match running to the end as FormatMaxLen says; Close
+// writes them. Close does not close w.
 func (r *Redactor) Writer(w io.Writer) *Writer { return &Writer{r: r, w: w} }
 
 // scanner is what a Writer streams through: Redactor or HashRedactor.

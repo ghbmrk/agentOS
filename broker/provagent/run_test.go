@@ -847,7 +847,3 @@ func TestADeclarationWithMalformedFormatsDoesNotRun(t *testing.T) {
 		}
 	}
 }
-
-func ok_(text string) func(vm.Command, *stub) vm.ExecResult {
-	return ok("here you go " + text + " done")
-}
