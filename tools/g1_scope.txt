@@ -32,7 +32,10 @@
 # is listed file by file; the code they share with the guest's chat path stays listed. The
 # Grok, Muse and Claude plan routes (#1378-#1380) freeze with their rows.
 
-freeze on
+# Off (D-128): G1 is proven. Image run 39042850372, job 117425650304, at a397cb9: the
+# G1-e2e DONE line reads "DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0", then "G1 PROVEN".
+# The G2 list (tools/g1_scope_g2.txt) now freezes paths until G2 passes.
+freeze off
 since 2026-10-14T21:11:52Z
 # #1748: #809's plan-route measurement scripts (spikes/S8-live/), which are G1 work:
 # #809 enables the one model route (above). Mark 2026-10-14 23:32Z, "Amend PR".

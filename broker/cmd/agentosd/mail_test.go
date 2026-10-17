@@ -112,7 +112,7 @@ func (o *mailOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	return id, nil
 }
 
-func (o *mailOwner) RequestEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+func (o *mailOwner) RequestEach(items []owner.Item, _ []time.Time) ([]string, error) {
 	var ids []string
 	for _, it := range items {
 		id, _ := o.Request([]owner.Item{it}, 0)
@@ -121,8 +121,8 @@ func (o *mailOwner) RequestEach(items []owner.Item, _ []time.Duration) ([]string
 	return ids, nil
 }
 
-func (o *mailOwner) RequestLocalEach(items []owner.Item, ttls []time.Duration) ([]string, error) {
-	return o.RequestEach(items, ttls)
+func (o *mailOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) ([]string, error) {
+	return o.RequestEach(items, deadlines)
 }
 
 func (o *mailOwner) Tier(f owner.Facts) owner.Tier {

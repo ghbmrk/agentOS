@@ -62,7 +62,7 @@ var plainLocks = map[string]struct {
 	// handle the same way. The deferred completion runs only after a live
 	// kill, and on a machine retired since, preemptLocked only marks it
 	// revoked.
-	"Manager.Preempt": {2, "TryLock refuses a retired machine with ErrUnknown, not success, so admission keeps a same-ID successor's entry; the deferred completion follows a live kill, and on a since-retired (Stopped) machine only marks it revoked"},
+	"Manager.preempt": {2, "Preempt and PreemptInstance: a life other than the one asked for is refused before any lock; TryLock refuses a retired machine with ErrUnknown, not success, so admission keeps a same-ID successor's entry; the deferred completion follows a live kill, and on a since-retired (Stopped) machine only marks it revoked"},
 }
 
 // TestMachineLockOnlyThroughLockLive type-checks package vm's non-test

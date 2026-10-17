@@ -18,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -389,6 +390,8 @@ var heldSteps = map[string]*regexp.Regexp{
 	"connect-all":     regexp.MustCompile(`(?i)every backup destination connected`),
 	"starts-shortly":  regexp.MustCompile(`(?i)starts again shortly`),
 	"open-the-backup": regexp.MustCompile(`(?i)open the backup`),
+	"confirm-page":    regexp.MustCompile(`(?i)\bconfirm\w* on (?:my|the|the box's) (?:Wi-Fi|local) page`),
+	"recovery-key":    regexp.MustCompile(`(?i)\brecovery key\b`),
 }
 
 // The CH-12 recurring kind "a problem text names a step that cannot work"
@@ -438,6 +441,9 @@ func TestHeldOwnerTextsNameOnlyStepsThatWork(t *testing.T) {
 		text{"notice-missing", recovery.PendingNotice(recovery.PendingMissing), []string{"wait-update"}, 0},
 		text{"notice-rolled-back", recovery.PendingNotice(recovery.PendingRolledBack), []string{"restore-again", "connect-all", "wait-update"}, 0},
 		text{"notice-forged", recovery.PendingNotice(recovery.PendingForged), []string{"wait-update"}, 0},
+		// Grants' held-install notice (#2066): no build has the page or
+		// a recovery-key flow, so it may name neither.
+		text{"held-install", grants.HeldInstallNotice, nil, 0},
 	)
 	for _, tx := range texts {
 		t.Run(tx.name, func(t *testing.T) {

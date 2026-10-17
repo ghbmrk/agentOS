@@ -283,6 +283,9 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 			iv.Undo = "Cannot be undone."
 		}
 		switch {
+		case !it.Sent.IsZero() && it.SentErased:
+			// Only an erased send matched (OP2-ER-2).
+			iv.Undo = "A send on this account went at " + it.Sent.In(s.cfg.Now().Location()).Format("15:04 Jan 2") + " and its record was later erased, so this may repeat it. Approve only if it should go. " + iv.Undo
 		case !it.Sent.IsZero():
 			// A repeat of a send known to have gone (confirm repeats,
 			// D-116).

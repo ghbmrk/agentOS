@@ -65,6 +65,14 @@ mkdir -p "$STAGE/usr/lib/agentos/gvisor-bin"
 install -m 0755 "$OUT"/gvisor/gvisor-bin/* "$STAGE/usr/lib/agentos/gvisor-bin/"
 rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 
+# The photo decoder's one-shot root (CH-23, ARC-5): the static agentos-photo and empty mount
+# points, nothing else. The broker mounts it read-only (gvisor.OneShot.Root).
+PHOTO=$STAGE/usr/lib/agentos/images/photo
+mkdir -p "$PHOTO/proc" "$PHOTO/dev" "$PHOTO/sys"
+(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+	-o "$PHOTO/agentos-photo" ./cmd/agentos-photo)
+chmod 0755 "$PHOTO/agentos-photo"
+
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and

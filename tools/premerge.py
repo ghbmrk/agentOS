@@ -15,8 +15,10 @@ neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved else
 `git patch-id`: it ignores whitespace. Prints `same` and exits 0, or `changed <files>` and exits 1:
 those files need a delta review. Git 2.38 or later, no network; fetch first.
 
-`--needs-mark` lists the files of base..head that make the PR one that merges only on Mark's own approval of
-it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
+`--needs-mark` lists the files of merge-base..head, plus those the merge changes on base (a criss-cross merge,
+#2138), that make the PR one that merges only on Mark's own approval of it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
+(the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
+usage error (exit 2).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
@@ -39,11 +41,11 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 
 
 # A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
-# CLAUDE*.md, AGENTS.md, .mcp.json and .claude/ count at any depth; broker/core/core.txt sets risk tiers
-# (risk_tier.py); the tests that pin the merge gates count too (PREMERGE-paths, #1835). Matched with
-# fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
+# broker/core/core.txt sets risk tiers (risk_tier.py); the tests that pin the merge gates count too
+# (PREMERGE-paths, #1835). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
 _CFG = r"(?:.*/)?"
-MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude/.*|"
+MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
                         r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*",
                         re.DOTALL)
@@ -51,6 +53,18 @@ MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\
 
 def mark_paths(files):
     return sorted(f for f in files if MARK_PATHS.fullmatch(f))
+
+
+def mark_range(cwd, base, head):
+    """Files the PR changes (merge-base..head) plus the files its merge changes on base (base..merge result).
+
+    The second list catches a criss-cross merge (two merge bases), where `git merge-base` can pick the one at
+    which head's Mark-only file is unchanged although the merge reverts base's copy of it (#2138). A conflicted
+    merge-tree keeps its markers, so a conflicted file reads as changed."""
+    def names(a, b):
+        return {f for f in _git(cwd, *DIFF, a, b).decode(errors="surrogateescape").split("\0") if f}
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    return sorted(names(onto, head) | names(base, _replayed(cwd, base, head)))
 
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
@@ -83,7 +97,7 @@ def _replayed(cwd, reviewed, onto):
 
 
 # Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml (and metrics-refresh.yml), board.yml, records.yml.
+# metrics.yml, board.yml, records.yml.
 BOT = {
     "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
     "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
@@ -154,10 +168,15 @@ def main(argv):
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
+        if len(args) > 1:  # `--needs-mark origin/main pr` would read origin/main as the head: pass --base
+            print(__doc__)
+            return 2
         head = args[0] if args else "HEAD"
-        onto = _git(".", "merge-base", base, head).decode().strip()
-        out = _git(".", *DIFF, onto, head).decode(errors="surrogateescape")
-        hit = mark_paths(f for f in out.split("\0") if f)
+        files = mark_range(".", base, head)
+        if not files:  # `--needs-mark origin/main` reads origin/main as the head: an empty range is never `agent`
+            print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
+            return 2
+        hit = mark_paths(files)
         print("mark " + " ".join(hit) if hit else "agent")
         return 1 if hit else 0
     if not 1 <= len(args) <= 2:
