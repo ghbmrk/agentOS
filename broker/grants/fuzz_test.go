@@ -26,11 +26,12 @@ type fuzzAnswer struct {
 // named, within DefaultFresh of that approval, and never once its grant is
 // revoked.
 func FuzzApprovals(f *testing.F) {
-	f.Add([]byte{0, 0, 1, 0, 2, 0})                         // submit, flush, approve
-	f.Add([]byte{0, 0, 0, 1, 1, 0, 3, 2, 2, 0, 2, 1, 5, 0}) // approve, then too late
-	f.Add([]byte{6, 0, 0, 0, 1, 0, 2, 0, 4, 1, 7, 0, 5, 0}) // under STOP, record moves
-	f.Add([]byte{0, 2, 1, 0, 2, 0, 8, 0, 7, 0, 5, 2})       // revoke while held
-	f.Add([]byte{0, 0, 1, 0, 2, 4, 2, 0})                   // deny, then approve
+	f.Add([]byte{0, 0, 1, 0, 2, 0})                         // approve, and it runs
+	f.Add([]byte{0, 0, 1, 0, 6, 0, 2, 0, 3, 2, 7, 0, 5, 0}) // approve under STOP, then too late
+	f.Add([]byte{0, 0, 1, 0, 6, 0, 2, 0, 4, 6, 7, 0, 5, 0}) // approve under STOP, then the recipient moves
+	f.Add([]byte{0, 0, 1, 0, 6, 0, 2, 0, 8, 0, 7, 0, 5, 0}) // approve under STOP, then revoke
+	f.Add([]byte{0, 0, 1, 0, 2, 1, 2, 0, 5, 0})             // deny, then approve
+	f.Add([]byte{0, 0, 0, 1, 1, 0, 2, 0, 2, 4, 3, 1, 5, 1}) // two effects, approved one by one
 	f.Fuzz(func(t *testing.T, b []byte) {
 		r := newRig(t, nil)
 		gid := r.grant(mailGrant())
@@ -91,8 +92,19 @@ func FuzzApprovals(f *testing.F) {
 				r.own.mu.Lock()
 				var req string
 				var items []owner.Item
-				if n := len(r.own.order); n > 0 {
-					req = r.own.order[int(arg>>2)%n]
+				// Only requests about an effect: the grant's own request is
+				// answered by the rig, so picking it reaches no effect path.
+				var effects []string
+				for _, q := range r.own.order {
+					for _, it := range r.own.reqs[q] {
+						if recOf(ids, recs, it.Ref) != "" {
+							effects = append(effects, q)
+							break
+						}
+					}
+				}
+				if n := len(effects); n > 0 {
+					req = effects[int(arg>>2)%n]
 					items = append(items, r.own.reqs[req]...)
 				}
 				r.own.mu.Unlock()
