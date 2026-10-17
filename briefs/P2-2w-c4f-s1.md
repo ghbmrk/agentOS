@@ -1,0 +1,94 @@
+# P2-2w c4f s1: the claim decision and the card-confirm witness move out of the Wi-Fi page's reach
+
+Board section: P2-2w c4f; work item #1385. From #1302 Security S-R1 (builder release 2) and, as a second item, #1407 Security S-R5 (from the issue's comments). Today the Wi-Fi page (uid agentos-localui) owns two files that decide root- and vault-side actions:
+
+- **The claim state.** `localui-claim` (root) moves the seller's sealed `/var/lib/agentos/claim.json` into `/var/lib/agentos-localui/claim.json`; the page runs `claim.Open`/`claim.Try` on it (firstboot/start.go, firstboot/claim.go) and writes the try counts. `agentos-egress-setup.path` fires on every change to that file, and `egress-setup` copies it and runs `agentos-egress init -setup -claim <copy>` as agentos-egress, whose check (`claim.Claimed`, agentos-egress main.go `initCmd`) accepts `{"claimed":true}` with no verifier. A compromised page therefore writes `{"claimed":true}`, gets a setup vault made, and provisions its own Owner Card on an unclaimed box (HW-10, K5, egress K22).
+- **The card-confirm latch.** agentos-ap (root) burns the sticker's setup network when the page-writable `/var/lib/agentos-localui/card-latch.json` says `card_confirmed:true` (`-card-latch`, `firstboot.SetupNetwork`, `firstboot.CardConfirmed`). A compromised page burns the setup network on an unconfirmed box, which moves the access point to the card's password before any card exists, leaving the owner with no way in short of reinstalling (CH-7: the burn happens at the Owner Card confirm, not before).
+
+**Requirements:**
+- HW-10: the claim sticker's code unlocks nothing, dies at first claim, and a claim on a claimed box is refused. A compromised page must not be able to mark the box claimed, reset the try count, or skip the lockout. No secret exists before the claim (claim K5), so the setup vault and its key are made only after a claim the vault process itself checked (egress K22).
+- CH-7: the box burns the setup Wi-Fi password at the Owner Card confirm. What this package proves is narrower than "the owner confirmed": the burn needs a root-written witness that exists only when (a) the vault process itself checked the claim (item 1), and (b) at the confirm the vault process reports that it holds a provisioned Owner Card. The witness is written at the confirm, not at setup's finish, because the setup network burns there (F16, D-112): the rest of setup, including the owner's number and provider credentials, runs over the card network. The page still provisions the card over the unlock socket, so a compromised page on a claimed box can provision a card of its own and trigger the burn; that residual is recorded under Out of scope and in ASSUMPTIONS (item 4), not closed here. What is closed is #1407 S-R5: a page-written latch alone, on an unclaimed box or with no card held, burns nothing.
+
+**Acceptance:** A1 (the booted image, through the G1 box e2e and CI's QEMU boot test). **Implementation risk:** tier A (labelled; a briefs-only diff reads tier C in `tools/risk_tier.py`). **Needs:** PR #1302 (merged), PR #2032 (merged, 24c33943), and the open PRs under Sequencing. **Gate:** lenses (security: strongest tier, with an explicit threat check of the page uid as attacker).
+
+## Sequencing (D-111)
+
+The build does not start while an open PR touches a file in the scope below. At the time of writing:
+
+- #2044 touches `broker/cmd/agentos-egress/server.go` (the unlock socket's mux), `broker/cmd/agentosd/main.go` and both packages' ASSUMPTIONS.md. It also adds the vault process's `GET /committed-wifi`, which item 2 may use.
+- #2015 touches `broker/cmd/agentosd/main.go` and `broker/egress/*`.
+- #2127 touches `broker/cmd/agentosd/main.go` (pacer wiring), the file item 2's witness path flag edits.
+- #2128 touches `broker/e2e/boxe2e/ASSUMPTIONS.md` and `phone_linux*`; this package edits that ASSUMPTIONS.md and runs the same box e2e.
+- #2039 (`broker/localui/server.go`) is merged and is this brief's base.
+- #2032 is merged: it changed `broker/cmd/agentos-ap/agentos-ap.service` and the agentos-ap unit test, which item 2 rewrites; build on main after it.
+- #2065 (`agentos-egress/providers.go`) and #2069 (`agentos-egress/keycheckguard_test.go`) touch the same directory but no file below; they do not block.
+- P2-2w c4f s3 (queued, not started) sandboxes `agentos-egress-setup.service`, which this package removes. Build s1 first; s3's brief is then rewritten for whatever root step remains (the coordinator re-scopes s3 when s1 merges).
+
+Start when #2044, #2015, #2127 and #2128 have merged or closed. Item 1's egress and page parts may start once #2044 alone has merged if the builder keeps out of `agentosd/main.go` and `broker/e2e/boxe2e/` until #2015, #2127 and #2128 have merged or closed.
+
+## Scope (files)
+
+Item 1, the claim:
+- `broker/claim/claim.go`, `claim_test.go`, `ASSUMPTIONS.md` (K5): whatever the vault-side claim needs (a `Store`-based API exists; keep the seal format the seller writes).
+- `broker/cmd/agentos-egress/`: a new `claimroute.go` and `claimroute_test.go` for the claim routes; `server.go` gains only their registration on the unlock socket; `main.go` (`initCmd`: `-claim` goes, the state path is the vault's own); `ASSUMPTIONS.md` (K22).
+- `broker/firstboot/start.go`, `claim.go`, `claim_test.go`, `start_test.go`, `ASSUMPTIONS.md`: `Begin` takes a claim client instead of a `Store` it parses.
+- `broker/localui/firstboot.go`, `claim.go`, a new `claimrelay.go` and `claimrelay_test.go`, `ASSUMPTIONS.md` (L42): the page relays to the vault process. `broker/localui/server.go` only if the `BoxClaim` config cannot carry the relay unchanged.
+- `broker/cmd/agentos-localui/main.go`: `-claim-state` goes.
+- `broker/cmd/agentos-seller/prep.go` only if a test shows the sealed file must change (expected: unchanged, it still writes `claim.StatePath` as root).
+- `broker/e2e/boxe2e/main_linux.go` and its ASSUMPTIONS.md: the claim path the G1 e2e drives.
+- `broker/cmd/agentos-localui/agentos-localui.service` (no `-claim-state`, no `Requires=` on the claim move) and `agentos-localui-claim.service` (removed).
+- `image/mkosi/mkosi.extra/usr/lib/agentos/localui-claim` (replaced by `egress-claim`), `egress-setup`, `boot-report` (its claim-move line names the new step), `usr/lib/systemd/system/agentos-egress.service`, `agentos-egress-setup.path` and `agentos-egress-setup.service` (removed), `agentos-boot-report.service` (`After=`), `image/e2e/agentos-e2e-seal.service` (`Before=`), `image/build.sh` (the unit install line), `image/ASSUMPTIONS.md`.
+- A new `tests/test_image_claim.py`, kept apart from tests/test_image.py; `tests/test_image.py` only for lines that pin a removed unit or script.
+
+Item 2, the confirm witness:
+- `broker/localapi/setup.go` and its test (the `page_card_confirm` op).
+- `broker/cmd/agentosd/setup.go`, a new `cardwitness.go` and `cardwitness_test.go`, and `main.go` only for the witness path flag (wait for #2044, #2015 and #2127), `ASSUMPTIONS.md` (the witness's guarantees and the CH-7 residual).
+- `broker/cmd/agentos-ap/main.go`, a new `witness_test.go`, `agentos-ap.service`, `ASSUMPTIONS.md`.
+- `broker/firstboot/start.go` (`SetupNetwork`, `CardConfirmed`), `card.go` (the latch keeps page-local state only), `setupnet_test.go`, `ASSUMPTIONS.md` (F10, F15).
+- `broker/cmd/agentos-egress/` only if #2044's `GET /committed-wifi` does not answer "the provisioned Owner Card is held" (then a new `cardheld.go` route on the verify socket).
+
+**Guard files:** none (no broker package is added or linked; agentos-ap reads a JSON file with packages it already imports).
+
+## What to build
+
+1. **The vault process owns the claim state.** A root first-start step (`egress-claim`, run as `ExecStartPre=+` of agentos-egress.service before `egress-setup`) moves `/var/lib/agentos/claim.json` to `/var/lib/agentos-egress/claim.json`, owned by agentos-egress, once, the way `localui-claim` moves it today: root moves, never parses. Nothing the page uid can write is read by root or by the vault process for the claim afterwards.
+2. **Claim over the unlock socket.** The vault process serves, on the unlock socket and under its existing peer-uid check, the claim operations the page needs: try a typed code (`claim.Try` against its own state, with the try count and lockout kept there), check a claimant token, and report the state (unclaimed, claimed, locked out with the wait). The page's `/claim` relays the typed code and keeps the claimant cookie it gets back; every claimant check goes through the vault process. The page keeps no claim file. The vault process must serve these routes before any vault exists; if it does not today, making it do so is part of this item.
+3. **The setup vault follows the vault's own claim.** `init -setup` reads only the vault process's state directory (no `-claim` flag), so a file the page wrote can no longer reach it. On a successful try the vault process makes the setup vault itself, with the code `init -setup` uses, and opens it (CTRL-setup-open). `egress-setup` stays as the restart path for a crash between the claim and the vault (claimed, no `vault.keys`), runs `init -setup` as agentos-egress without copying any page file, and `agentos-egress-setup.path` and its service go. If making the vault inside the serving process fails review or test, the fallback is that a successful try exits the process for systemd to restart it through `egress-setup`; record the choice in egress ASSUMPTIONS K22.
+4. **Item 2: a root-owned confirm witness.** agentosd (root) writes `/var/lib/agentos/card-confirmed.json` (0600, root) at the Owner Card confirm: the page's confirm step asks agentosd with a new `page_card_confirm` request (localapi, beside `page_setup_finish`), and agentosd writes the witness only when the vault process then confirms over the verify socket that it holds the provisioned Owner Card. #2044's `GET /committed-wifi` answers 200 only when the card is stored; the builder relies on that and records it in agentosd ASSUMPTIONS, or adds a dedicated route if a test shows otherwise. agentos-ap reads that witness and owner.json for the burn and for `CardConfirmed`, never the page latch; `-card-latch` goes from its unit. The page latch keeps only page-local UI state (Preloaded routing, F15).
+   - **Why a reset after the witness is safe.** `/card/reset` stays page-callable until finish's seal, and an F18 rerun resets the vault and shows a new card while the box is already confirmed, so "witness present, vault remade" does arise and is allowed. The witness only gates a burn, and the burn is one-way: the setup network is gone after the first confirm (F16) and never comes back, and agentos-ap keeps serving the card network it was given, exactly as F18 keeps the page latch confirmed today. So nothing clears the witness. A reset never brings the setup network back, and a rerun's new confirm writes the witness again. The test resets the vault after the witness and checks that the witness is kept, agentos-ap still serves the card network, and the setup network stays burned. The builder records this one-way rule in agentos-ap ASSUMPTIONS beside the CH-7 residual.
+   - **The residual, recorded, not closed.** The page provisions the card itself, so on a claimed box a compromised page can provision a card of its own, send the confirm, and so trigger the burn, leaving the owner locked out of the access point. The builder records this in agentosd ASSUMPTIONS (beside the witness row) and in agentos-ap ASSUMPTIONS as a required entry naming CH-7 and L42. Out of scope says who closes it.
+
+**Integration owner:** this package owns the whole path from the seller's sealed file to the setup network's burn: seller seal, root move, page relay, vault-side try, setup vault, card provision, witness, burn. Its box e2e run is the integration test.
+
+### Stage × outcome matrix
+
+Each cell is a test (named under Acceptance tests); "page" means the page uid acting as an attacker with its own files and sockets.
+
+| Stage | Success | Failure or attack | Restart in the middle |
+|---|---|---|---|
+| Seal and move | Sealed file lands in the vault's state dir, owner agentos-egress, 0600 | Symlink or non-file source: not moved, logged | Move is idempotent; a moved file is never moved again |
+| Wrong code | Try count rises in vault state; page shows the wait | Page writes any file it owns: count and lockout unchanged | Count survives restart |
+| Lockout | Further tries refused with the wait | Page cannot reset it | Lockout survives restart |
+| Right code | Claimed; claimant token returned; setup vault made and opened | Second claim refused "already claimed" | Claimed, no vault: `egress-setup` makes it at the next start |
+| Forged claim | n/a | Page writes `{"claimed":true}` anywhere it can: no setup vault, no `vault.keys`, no setup key | n/a |
+| Card confirm | Page sends `page_card_confirm`, the vault confirms the card, the witness is written; agentos-ap burns | Page writes `card_confirmed:true` in its latch: no witness, no burn. Confirm without a held card: no witness | Restart between the latch and the witness: the page's start finds the latch confirmed and sends `page_card_confirm` again, so the witness is written; no burn before it |
+| Reset (F10, F18, K22) | Vault remade; the witness is kept; the setup network stays burned and agentos-ap serves the card network | A reset never restores the setup network | Owned box (owner.json) burns regardless, as today |
+
+## Acceptance tests
+
+**Acceptance tests:** HW-10 (K5, K22): `broker/cmd/agentos-egress/claimroute_test.go` (`TestClaimTryOverUnlockSock`, `TestClaimLockoutHeldByVault`, `TestInitSetupIgnoresPageState`, `TestForgedClaimMakesNoVault`), `broker/localui/claimrelay_test.go` (`TestClaimRelaysToVault`, `TestClaimantCheckedByVault`), `broker/firstboot/claim_test.go`; CH-7: `broker/cmd/agentosd/cardwitness_test.go` (`TestWitnessOnlyAfterVaultHoldsCard`, `TestWitnessOnPageConfirm`, `TestResetKeepsWitness`), `broker/cmd/agentos-ap/witness_test.go` (`TestPageLatchDoesNotBurn`, `TestWitnessBurns`), `broker/firstboot/setupnet_test.go`; A1: `tests/test_image_claim.py` (`ClaimStateOwnerTest`, `NoPageFileReadTest`, `ApUnitTest`) and the G1 box e2e claim run (`broker/e2e/boxe2e`).
+
+1. Over a real unlock socket, a wrong code raises the count and a right code returns a claimant token; the count and lockout live in the vault's state and survive a restart; a second claim answers "already claimed".
+2. With the page's state directory holding `{"claimed":true}` and every file the page can write set to claim, `init -setup` and the serving process make no vault, no `vault.keys` and no setup key (K5's canary scan, extended to this case).
+3. The page holds no claim file after first start, and its `/claim` and every claimant check call the vault process (a stub that refuses makes the page refuse).
+4. agentos-ap with a page latch saying `card_confirmed:true` and no witness does not burn; with the witness it burns; with owner.json it burns as today. agentosd writes the witness on the page's `page_card_confirm`, before setup's finish, and only when the vault then reports the card held, never on the page's report alone. A vault reset after the witness keeps it, and the setup network stays burned.
+5. The image: `egress-claim` moves the file into `/var/lib/agentos-egress` as agentos-egress; no shipped unit or script under image/ reads `/var/lib/agentos-localui/claim.json` or passes `-claim-state`, `-claim` or `-card-latch`; `agentos-egress-setup.path` is gone; agentos-ap's unit names the witness and owner.json.
+6. The G1 box e2e claims a box through the page and reaches the card step, with the claim state in the vault's directory.
+
+## Out of scope
+
+Making agentosd's finish refuse without a provisioned card in general (L42's residual, beyond the witness here). Also out of scope: proving that the card the vault holds is the owner's and not one a compromised page provisioned on a claimed box (item 4's CH-7 residual). That residual sits beside L42's, needs the card provision moved out of the page's reach, and is recorded in ASSUMPTIONS by this package. Further out of scope: s3's sandbox of the remaining root step; any migration of a box claimed under the old layout (no box has shipped; record that in claim ASSUMPTIONS K5); verifying the seal against a seller key.
+
+## Estimate
+
+About 130k tokens for one session. The figure is a checkpoint, not a cap (docs/OPERATING.md §5). If the checkpoint arrives with item 1 green and item 2 not started, item 2 ships as a second PR under this brief, citing CH-7.
