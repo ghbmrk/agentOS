@@ -14,7 +14,7 @@ Mark (relayed 2026-10-17): the owner just attaches a photo to a text, as to a fr
 
 ## What #2146 covers and what it does not
 
-Covered: the Wi-Fi upload path (CH-22 (2)), the intake checks that apply to it (CH-23), delivery (CH-24), storage and erase (CH-26) and the owner texts (CH-27). Not covered: picture texts (CH-22 (1)), which wait on HW-2 qualification of the modem's MMS receive path and bearer and get their own row once HW-2 is met; they reuse CH-photo-a, b, d and e unchanged, adding only the modem fetch and the CH-14 hold. The silent-drop notice for picture texts is the separate fix CH-22 names.
+Covered: the Wi-Fi upload path (CH-22 (2)), the intake checks that apply to it (CH-23), delivery (CH-24), storage and erase (CH-26, including the hosted route's own retention stated on its Wi-Fi line, in CH-photo-e) and the owner texts (CH-27). Not covered: picture texts (CH-22 (1)), which wait on HW-2 qualification of the modem's MMS receive path and bearer and get their own row once HW-2 is met; they reuse CH-photo-a, b, d and e unchanged, adding only the modem fetch and the CH-14 hold. The silent-drop notice for picture texts is the separate fix CH-22 names.
 
 ## Design
 
