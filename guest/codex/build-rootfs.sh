@@ -5,10 +5,11 @@
 # (#1015 writes the placeholder into CODEX_HOME at machine create).
 #
 # Usage: build-rootfs.sh OUT_DIR
-# Needs: Go (unless FORWARDER_BIN is set), curl (unless CODEX_TARBALL is set), openssl, tar, sha256sum, and the host's /bin/sh,
-# /bin/bash and coreutils, which are copied in with their libraries.
-# CODEX_TARBALL=<file> uses a local copy of the pinned tarball instead of downloading it; it is
-# still checked against the pinned hash.
+# Needs: Go (unless FORWARDER_BIN is set), curl (unless both tarballs are set), openssl, tar, xz,
+# patch, cc with a static libcap (libcap-dev), sha256sum, and the host's /bin/sh, /bin/bash and
+# coreutils, which are copied in with their libraries.
+# CODEX_TARBALL=<file> and BWRAP_TARBALL=<file> use local copies of the pinned tarballs instead of
+# downloading them; each is still checked against its pinned hash.
 # Hook for #809 (the runsc measurement of guest/codex/ASSUMPTIONS.md C1-C15): register OUT_DIR as
 # an image with agentosd (-image codex=OUT_DIR) and run the measurements in a machine from it.
 # broker/e2e/codex_contain_test.go (#1720) runs the pinned CLI in a machine from OUT_DIR under runsc
@@ -20,6 +21,11 @@ CODEX_URL=https://registry.npmjs.org/@openai/codex/-/$CODEX_PKG.tgz
 # npm's published integrity for the tarball (registry.npmjs.org/@openai/codex/0.162.1-linux-x64).
 CODEX_INTEGRITY=sha512-cjK2mdHIfEepZ1lQ1MX3aTQC+8ncIsvnacl/6vI2dIIcfP8/MrhTQ2+qRlkXFNDzJSj1d36quIszP+3/4CUJWQ==
 VENDOR=package/vendor/x86_64-unknown-linux-musl
+# The bubblewrap release the CLI vendors, rebuilt with bwrap-loopback.patch (#1720): under runsc
+# every new network namespace already has 127.0.0.1/8 on lo, and stock bwrap dies on that EEXIST.
+BWRAP_VERSION=0.11.2
+BWRAP_URL=https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz
+BWRAP_SHA256=69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
 
 here=$(cd "$(dirname "$0")" && pwd)
 # A fresh directory only: the image is exactly what this script writes.
@@ -39,18 +45,32 @@ fi
 got=sha512-$(openssl dgst -sha512 -binary "$work/codex.tgz" | openssl base64 -A)
 [ "$got" = "$CODEX_INTEGRITY" ] || { echo "codex tarball integrity $got" >&2; exit 1; }
 
+if [ -n "${BWRAP_TARBALL:-}" ]; then
+	cp "$BWRAP_TARBALL" "$work/bwrap.tar.xz"
+else
+	curl -fsSLo "$work/bwrap.tar.xz" "$BWRAP_URL"
+fi
+echo "$BWRAP_SHA256  $work/bwrap.tar.xz" | sha256sum -c --quiet - || { echo "bwrap tarball hash" >&2; exit 1; }
+mkdir "$work/bwrap"
+tar -xJf "$work/bwrap.tar.xz" -C "$work/bwrap" --strip-components=1
+(cd "$work/bwrap" && patch -p1 --quiet <"$here/bwrap-loopback.patch")
+printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$work/bwrap/config.h"
+(cd "$work/bwrap" && cc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c \
+	-l:libcap.a -o bwrap)
+
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \
 	var/lib/agentos-codex/tmp var/lib/agentos-work tmp proc dev sys run/agentos root
 # Only what a headless turn needs: the CLI, the helper it starts from beside its binary, its
-# bundled bwrap and ripgrep. The voice libraries and zsh are left out.
+# bwrap and ripgrep. The voice libraries and zsh are left out. The bundled bwrap is replaced by the
+# patched build at both paths the CLI looks in (PATH first, then codex-resources).
 tar -xzf "$work/codex.tgz" -C opt/codex --strip-components=1 \
 	"$VENDOR/codex-package.json" "$VENDOR/bin/codex" "$VENDOR/bin/codex-code-mode-host" \
 	"$VENDOR/codex-resources/bwrap" "$VENDOR/codex-path/rg"
 v=/opt/codex/vendor/x86_64-unknown-linux-musl
 ln -s "$v/bin/codex" usr/local/bin/codex
-cp "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" usr/bin/bwrap
-chmod 0755 usr/bin/bwrap
+install -m 0755 "$work/bwrap/bwrap" usr/bin/bwrap
+install -m 0755 "$work/bwrap/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 
 # The managed layers (they beat CODEX_HOME and the command line: ASSUMPTIONS C1, C12), the tool
 # wrapper and the launch spec, all root-owned.

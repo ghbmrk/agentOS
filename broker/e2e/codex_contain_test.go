@@ -178,7 +178,6 @@ func TestIntegrationCodexContainment(t *testing.T) {
 		"the forwarder's loopback port": p.TCP,
 		"the route socket":              p.Unix,
 		"the placeholder auth.json":     p.Auth,
-		"a listing of CODEX_HOME":       p.CodexHomeList,
 		"a write to /":                  p.RootWrite,
 		"a write to CODEX_HOME":         p.CodexHomeWrite,
 		"a write to /tmp":               p.SlashTmpWrite,
@@ -187,6 +186,9 @@ func TestIntegrationCodexContainment(t *testing.T) {
 			t.Errorf("the tool reached %s", name)
 		}
 	}
+	// Names under CODEX_HOME stay listable: the deny list covers its entries, not the directory
+	// (guest/codex/requirements.toml, C12; ASSUMPTIONS E7). Logged, not asserted.
+	t.Logf("CODEX_HOME listable from the tool: %v", p.CodexHomeList)
 	if !p.WorkWrite {
 		t.Errorf("the tool must still write its workspace")
 	}
