@@ -688,25 +688,26 @@ func (a *Adapter) expire(old time.Time) {
 func pinned(o Op) bool { return o.Verb == verb.Organize || o.Verb == verb.DeleteRemote }
 
 // takePin removes intent id's judgements, so one Execute consumes them,
-// and returns the one they agree on. It reports false when there are
-// none, or when any two differ in the message or in whether they
-// escalated hiding an alert (SR3-5-f1a). A poisoned judgement's zero Ref
-// differs from every message's, and no plan resolves to it.
-func (a *Adapter) takePin(id string) (pin, bool) {
+// and returns the one they agree on. It returns errNoCheck when there
+// are none, and errChecksDiffer when any two differ in the message or in
+// whether they escalated hiding an alert (SR3-5-f1a, SR3-5-f4). A
+// poisoned judgement's zero Ref differs from every message's, and no
+// plan resolves to it.
+func (a *Adapter) takePin(id string) (pin, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	xs := a.pins[id]
 	delete(a.pins, id)
 	if len(xs) == 0 {
-		return pin{}, false
+		return pin{}, errNoCheck
 	}
 	p := xs[len(xs)-1]
 	for _, x := range xs {
 		if x.ref != p.ref || x.alert != p.alert {
-			return pin{}, false
+			return pin{}, errChecksDiffer
 		}
 	}
-	return p, true
+	return p, nil
 }
 
 // keepJudged keeps the pin an attempt ran under when its outcome is
