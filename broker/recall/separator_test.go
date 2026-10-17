@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Synthetic codes (RECALL-canary-3); never real values.
@@ -314,6 +315,80 @@ func TestGroupedCodesRemovedAnySeparator(t *testing.T) {
 					t.Fatalf("keyed: %q -> %q", key+v, out)
 				}
 			}
+		}
+	}
+}
+
+// Mail from anyone reaches the scrubber, so a crafted run must not stall it:
+// trying every window of a 4 KB `a-a-a-…` run took 14 s before the window
+// was bounded (review of #2228). Each input here is 16 KB; the bound is far
+// above linear cost and far below the old cubic one.
+func TestCraftedRunsScrubFast(t *testing.T) {
+	sc := NewScrubber(nil)
+	for name, in := range map[string]string{
+		"dash":   strings.Repeat("a-", 8192),
+		"mixed":  strings.Repeat("a1-b-", 3277),
+		"dot":    strings.Repeat("ab12.", 3277),
+		"space":  strings.Repeat("AB12 ", 3277),
+		"keyed":  "recovery codes: " + strings.Repeat("A1 ", 5461),
+		"under":  strings.Repeat("x_", 8192),
+		"single": strings.Repeat("ab12-", 3277) + "ab12",
+	} {
+		start := time.Now()
+		sc.Scrub(in)
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("%s: %v for %d bytes", name, d, len(in))
+		}
+	}
+	fs := make([]Fact, 500)
+	for i := range fs {
+		fs[i] = Fact{Subject: "u", Predicate: "note", Object: strings.Repeat("ab12-", 20)}
+	}
+	start := time.Now()
+	sc.ScrubFacts(fs)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("facts: %v for %d facts", d, len(fs))
+	}
+}
+
+// A code longer than the window is still removed as one span.
+func TestLongCodeRemovedPastWindow(t *testing.T) {
+	sc := NewScrubber(nil)
+	gs := make([]string, 3*maxCodeGroups+1)
+	for i := range gs {
+		gs[i] = "Q7XK"
+	}
+	v := strings.Join(gs, "-")
+	if out := sc.Scrub("codes " + v + " end"); out != "codes "+Removed+" end" {
+		t.Fatalf("want one removal, got %q", out)
+	}
+}
+
+// Folding must not hide a token the written text shows: a look-alike or
+// fullwidth letter folded to ASCII next to a known token joins the two, so
+// the token's word boundary is lost (security review of #2228). Synthetic
+// shapes only.
+func TestKnownTokensBesideLookAlikes(t *testing.T) {
+	sc := NewScrubber(nil)
+	tokens := []string{
+		"AKIA" + strings.Repeat("0", 16),
+		"xoxb-" + strings.Repeat("a", 12),
+		"sk-" + strings.Repeat("a", 24),
+		"ghp_" + strings.Repeat("a", 24),
+		"eyJ" + strings.Repeat("a", 8) + "." + strings.Repeat("b", 8) + "." + strings.Repeat("c", 8),
+	}
+	for _, tok := range tokens {
+		for _, n := range []string{"а", "Ａ", "ａ", "ο"} { // Cyrillic a, fullwidth A and a, Greek o
+			for _, in := range []string{n + tok, tok + n, n + tok + n, "id " + n + tok + " end"} {
+				if out := sc.Scrub(in); strings.Contains(out, tok[3:]) || !strings.Contains(out, Removed) {
+					t.Errorf("Scrub(%q) = %q", in, out)
+				}
+			}
+		}
+	}
+	for _, in := range []string{"аpassword: Zq9vLm2x", "Ａapi_key=Zq9vLm2x", "аbearer Zq9vLm2xWp", "ｐassword: Zq9vLm2x"} {
+		if out := sc.Scrub(in); strings.Contains(out, "Zq9vLm2x") {
+			t.Errorf("Scrub(%q) = %q", in, out)
 		}
 	}
 }

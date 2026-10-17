@@ -258,6 +258,13 @@ func scrubGroupedCodes(s string) string {
 	return b.String()
 }
 
+// maxCodeGroups bounds the window scrubRun tries from each group, so a long
+// crafted run (`a-a-a-…`) costs linear time, not cubic. Generated codes have
+// far fewer groups; a longer code is removed by sliding the window along it.
+const maxCodeGroups = 16
+
+// scrubRun replaces, from each group in turn, the longest window of groups
+// with one separator that codeLike accepts.
 func scrubRun(run string) string {
 	gs := strings.FieldsFunc(run, func(r rune) bool { return r == '-' || r == '.' || r == '_' })
 	var seps []byte
@@ -268,10 +275,17 @@ func scrubRun(run string) string {
 	}
 	var b strings.Builder
 	for i := 0; i < len(gs); {
-		j := len(gs)
+		j := min(len(gs), i+maxCodeGroups)
 		for ; j >= i+2; j-- {
 			if same(seps[i:j-1]) && codeLike(gs[i:j], seps[i]) {
 				break
+			}
+		}
+		// A full window that matched extends while its sliding tail of
+		// maxCodeGroups groups still matches, so a long code stays one span.
+		if j == i+maxCodeGroups {
+			for j < len(gs) && seps[j-1] == seps[i] && codeLike(gs[j+1-maxCodeGroups:j+1], seps[i]) {
+				j++
 			}
 		}
 		if j >= i+2 {

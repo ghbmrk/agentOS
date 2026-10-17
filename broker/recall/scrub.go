@@ -113,8 +113,10 @@ func tokenParam(k string) bool {
 }
 
 // Scrub returns s with credential material replaced by Removed. It scrubs
-// the text as fold spells it, and returns s as written when nothing is
-// removed.
+// the word-anchored shapes as written, then everything as fold spells it,
+// keeping the folded spelling only when that pass removes more: folding a
+// look-alike next to a token or key joins the two and hides the word boundary
+// the written text had.
 func (sc *Scrubber) Scrub(s string) string {
 	if s == "" {
 		return s
@@ -122,6 +124,7 @@ func (sc *Scrubber) Scrub(s string) string {
 	if sc != nil && sc.vault != nil {
 		s = sc.vault(s)
 	}
+	s = scrubAnchored(s)
 	f := fold(s)
 	if out := scrubText(f); out != f {
 		return out
@@ -130,16 +133,42 @@ func (sc *Scrubber) Scrub(s string) string {
 }
 
 func scrubText(s string) string {
+	s = scrubAnchored(s)
+	s = scrubKeyedCodes(s)
+	s = scrubGroupedCodes(s)
+	return scrubRandom(s)
+}
+
+// scrubAnchored removes the shapes found by a key, scheme or prefix. Each
+// leaves Removed as it is, so running it again changes nothing.
+func scrubAnchored(s string) string {
 	s = pemBlock.ReplaceAllString(s, Removed)
 	s = otpauthURI.ReplaceAllString(s, Removed)
 	s = authHeader.ReplaceAllString(s, "${1} "+Removed)
 	s = authScheme.ReplaceAllString(s, "${1} "+Removed)
-	s = secretKV.ReplaceAllString(s, "${1}"+Removed)
-	s = scrubKeyedCodes(s)
+	s = scrubSecretKV(s)
 	s = scrubKnownTokens(s)
-	s = urlRe.ReplaceAllStringFunc(s, scrubURL)
-	s = scrubGroupedCodes(s)
-	return scrubRandom(s)
+	return urlRe.ReplaceAllStringFunc(s, scrubURL)
+}
+
+// scrubSecretKV replaces each keyed value with Removed, leaving a value that
+// is already Removed as it is, so a second pass does not mangle the marker.
+func scrubSecretKV(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range secretKV.FindAllStringSubmatchIndex(s, -1) {
+		if strings.HasPrefix(s[m[4]:], Removed) {
+			continue
+		}
+		b.WriteString(s[last:m[4]])
+		b.WriteString(Removed)
+		last = m[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // scrubKnownTokens replaces each known token shape together with the
