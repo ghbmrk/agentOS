@@ -4,7 +4,7 @@
 **Priority:** release. **Class:** release. **Implementation risk:** tier A.
 **Board section:** Controller and helper system (D-102).
 **Requirements:** ARC-1, CRED-1, REC-4
-**Acceptance tests:** ARC-1, CRED-1 `broker/cmd/agentos-ap/unit_test.go::TestTheUnitIsBounded`; REC-4 review of `broker/apnet/ASSUMPTIONS.md` N5 (prose, no test).
+**Acceptance tests:** ARC-1, CRED-1 `broker/cmd/agentos-ap/unit_test.go::TestTheUnitIsBounded`, `TestEgressKeepsTheMaskedDirectory`; REC-4 review of `broker/apnet/ASSUMPTIONS.md` N5 (prose, no test).
 **Dependencies:** PR #1590 (#1426, P2-1 s2), merged.
 **Source:** Security R2 of PR #1614 (head b8323e16), issue #1628.
 
@@ -14,12 +14,13 @@ The vault process's verify socket (`/run/agentos-egress/verify.sock`, `broker/cm
 
 ## Scope and intended change
 
-`broker/cmd/agentos-ap/agentos-ap.service` (add `-/run/agentos-egress` to `InaccessiblePaths`), `broker/cmd/agentos-ap/unit_test.go` (pin it), `broker/apnet/ASSUMPTIONS.md` (N5's "who takes" residual), this brief. Not in scope: narrowing the socket itself to agentosd (#1629) and any other egress file.
+`broker/cmd/agentos-ap/agentos-ap.service` (add `-/run/agentos-egress` to `InaccessiblePaths`), `broker/cmd/agentos-ap/unit_test.go` (pin it), `broker/apnet/ASSUMPTIONS.md` (N5's "who takes" residual), `image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-egress.service` (`RuntimeDirectoryPreserve=yes`, so the mask survives an egress restart: Security and L3 blocker on 55c5527), this brief. Not in scope: narrowing the socket itself to agentosd (#1629) and any other egress file.
 
 ## Acceptance tests
 
 1. `TestTheUnitIsBounded` fails if `-/run/agentos-egress` is dropped from agentos-ap's `InaccessiblePaths` (ARC-1, CRED-1).
-2. apnet N5's "who takes" residual says the broker uid is root in the shipped unit and names agentos-ap as denied the socket, matching the unit (REC-4).
+2. `TestEgressKeepsTheMaskedDirectory` fails if agentos-egress.service drops `RuntimeDirectoryPreserve=yes`, without which an egress restart recreates `/run/agentos-egress` and detaches the mask (ARC-1, CRED-1).
+3. apnet N5's "who takes" residual says the broker uid is root in the shipped unit and names agentos-ap as denied the socket, matching the unit (REC-4).
 
 Failure path: a compromised hostapd or loader on the radio takes the rotated Wi-Fi permit and keeps a lost card's password on the air.
 

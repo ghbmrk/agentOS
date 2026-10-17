@@ -19,7 +19,9 @@
 Description=agentOS access point loader
 # The inbound drop is in place before any radio is brought up. The masks
 # below cover only paths that exist at start: egress's state and runtime
-# directories do by then; agentosd's subtrees made after its fork (Type=simple) may
+# directories do by then, and egress keeps its runtime directory across
+# restarts (RuntimeDirectoryPreserve, #1628) so the mask on its sockets
+# holds; agentosd's subtrees made after its fork (Type=simple) may
 # not, and a restart covers those.
 Requires=agentos-inbound.service
 After=agentos-inbound.service agentos-egress.service agentosd.service

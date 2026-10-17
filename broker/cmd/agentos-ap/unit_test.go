@@ -85,3 +85,28 @@ func TestTheUnitIsBounded(t *testing.T) {
 		t.Errorf("sysusers.d declares no %s user", hostapdUser)
 	}
 }
+
+// The mask on /run/agentos-egress is a mount over that directory; if egress's
+// stop removed it, the kernel would detach the mask and the recreated
+// directory, with fresh sockets, would show through until the loader
+// restarts. A compromised loader can force that restart (CAP_KILL), so
+// egress keeps the directory (#1628).
+func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
+	b, err := os.ReadFile("../../../image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-egress.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dir, keep []string
+	for _, l := range strings.Split(string(b), "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
+		switch k {
+		case "RuntimeDirectory":
+			dir = append(dir, v)
+		case "RuntimeDirectoryPreserve":
+			keep = append(keep, v)
+		}
+	}
+	if !slices.Equal(dir, []string{"agentos-egress"}) || !slices.Equal(keep, []string{"yes"}) {
+		t.Errorf("RuntimeDirectory = %q, RuntimeDirectoryPreserve = %q; want agentos-egress, yes", dir, keep)
+	}
+}
