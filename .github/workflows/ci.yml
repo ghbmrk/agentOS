@@ -449,9 +449,12 @@ jobs:
         # The pinned CLI runs one tool call in a pw- machine from the built image, holding only a
         # synthetic placeholder login; the tool must not reach the forwarder, the route socket or
         # CODEX_HOME's auth.json, and must run under the CLI's bwrap and seccomp (CRED-5, C5).
+        # Built as root, as the rootfs test builds it: inside the CLI's user namespace root keeps no override
+        # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sh guest/codex/build-rootfs.sh /tmp/cxroot
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CODEX_ROOTFS=/tmp/cxroot \
             go test -count=1 -v -run '^TestIntegrationCodexContainment$' ./e2e
