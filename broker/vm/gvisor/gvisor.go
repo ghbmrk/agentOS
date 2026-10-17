@@ -62,6 +62,11 @@ type Runtime struct {
 	// outlives the incarnation it was meant for (GVISOR-stale-kill).
 	pendingMu sync.Mutex
 	pending   map[string]*sync.WaitGroup
+
+	// oneShot serialises RunOnce calls per name: a name's runs share one
+	// runsc container ID.
+	oneShotMu sync.Mutex
+	oneShot   map[string]*sync.Mutex
 }
 
 var _ vm.Runtime = (*Runtime)(nil)
