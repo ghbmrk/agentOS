@@ -16,7 +16,7 @@ import (
 const toolProviderRun = "provider_run"
 
 // ProviderRequest is one provider_run call: the guest's provider, brief and
-// task class, and the caller's machine (charged for the run, OP-8), label,
+// task class, and the caller's machine (journaled with the run, OP-8), label,
 // class and reservation.
 type ProviderRequest struct {
 	Machine                    string
@@ -98,7 +98,7 @@ var providerReasons = map[ProviderReason]said{
 	"unsigned":         {"provider_run: unsigned: the owner has not signed in to this plan and has been asked to; use another route meanwhile"},
 	"private-unmarked": {"provider_run: private-unmarked: the owner has not allowed private data on this plan; use another route"},
 	"pool-at-reserve":  {"provider_run: pool-at-reserve: the plan is at the owner's reserve, or its usage is unread; use another route"},
-	"used-up":          {"provider_run: used-up: the plan's limit, or this machine's spend limit, is used up; use another route"},
+	"used-up":          {"provider_run: used-up: the plan's limit is used up; use another route"},
 	"login-refused":    {"provider_run: login-refused: the provider refused the plan's login and the owner has been asked to sign in again; use another route"},
 	"vault-locked":     {"provider_run: vault-locked: the owner's vault is locked; ask the owner to unlock it, or use another route"},
 	"route-busy":       {"provider_run: route-busy: the plan route is busy; try again later, or use another route"},

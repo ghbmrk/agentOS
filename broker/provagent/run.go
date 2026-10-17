@@ -75,14 +75,14 @@ type Caps struct {
 // Event is one run's journal entry (OP-8). It carries metadata only: never
 // the brief, the result, or anything the CLI printed.
 type Event struct {
-	Machine, Provider, TaskClass, Outcome string // Machine: the caller's, as charged
+	Machine, Provider, TaskClass, Outcome string // Machine: the caller's
 	ResultBytes                           int
 	Elapsed                               time.Duration
 }
 
 // Request is one provider_run call.
 type Request struct {
-	Machine                    string // the calling agent machine, charged for the run (OP-8)
+	Machine                    string // the calling agent machine, journaled with the run (OP-8)
 	Provider, Brief, TaskClass string
 	Label                      vm.Label // the caller's data label
 	Class                      admission.Class
@@ -103,13 +103,10 @@ type Runner struct {
 	Reserve      func(provider, pool string) float64 // the owner's reserve, 0..1 (OP-5)
 	Scan         func(string) bool
 	// Journal hears each run that passed admission, once it ends (OP-8);
-	// a refusal before admission is not journaled. Charge charges the run
-	// to q.Machine just after admission, and done settles it when the run
-	// ends. A Charge error refuses the run before the VM: with its reason
-	// when it is a *Refusal, else UsedUp (the machine's limit). With
-	// either nil, Run logs once that provider runs are unmetered.
+	// a refusal before admission is not journaled. It is the run's only
+	// metering: a plan run is never charged to the spend meter. With it
+	// nil, Run logs once that provider runs are unmetered.
 	Journal func(Event)
-	Charge  func(machine string) (done func(), err error)
 	// SignIn sets the ONB-9 sign-in line and OnSignedIn clears it. Both are
 	// called with the runner's lock held, in the same hold that changes
 	// the route's stopped state, so the line always matches it; neither
@@ -294,8 +291,8 @@ func Command(d Declaration, brief string) vm.Command {
 // result. Every refusal is a *Refusal with a closed reason; FallsBack says
 // which the caller answers with another route.
 func (r *Runner) Run(ctx context.Context, q Request) (string, error) {
-	if r.Journal == nil || r.Charge == nil {
-		r.unmetered.Do(func() { r.logf("provagent: provider runs are unmetered: no journal or charge is wired (OP-8)") })
+	if r.Journal == nil {
+		r.unmetered.Do(func() { r.logf("provagent: provider runs are unmetered: no journal is wired (OP-8)") })
 	}
 	start := time.Now()
 	out, n, outcome, admitted, err := r.run(ctx, q)
@@ -351,19 +348,6 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	// next run (after a sign-in, say) may probe at once.
 	ran := false
 	defer func() { r.release(d.ID, probe && !ran) }()
-	// One call charged to the caller (OP-8): a machine at its cap is
-	// refused here, and the deferred release frees the slot.
-	if r.Charge != nil {
-		done, cerr := r.Charge(q.Machine)
-		if cerr != nil {
-			var rf *Refusal
-			if errors.As(cerr, &rf) {
-				return fail(rf.Reason)
-			}
-			return fail(UsedUp)
-		}
-		defer done()
-	}
 
 	id := r.NewID()
 	seed, serr := r.Seeder.Seed(d.ID, id)

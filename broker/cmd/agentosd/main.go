@@ -900,16 +900,11 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
-			// One spend meter for model calls and provider runs (OP-8).
-			mtr, merr := openMeter(d.Engine(), meterPath)
-			if merr != nil {
-				log.Printf("spend meter: %v", merr)
-			}
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
 				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
-				meterProviderRuns(pr, d.Engine(), mtr)
+				journalProviderRuns(pr, d.Engine())
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
@@ -920,7 +915,7 @@ func main() {
 			if wt != nil {
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, mtr, inboxPath, egressSocket, retries, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 				caps.agentOff(agentNoMachines)
@@ -1144,9 +1139,8 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
 // fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
 // wirePlanUsage (#1856); without them admission refuses (RES-5 fails
-// closed). Its Journal logs each run until meterProviderRuns wires it and
-// Charge to the engine journal and the spend meter (OP-8); until then Run
-// logs once that runs are unmetered. Nothing calls StartSignIn until the setup page does (#1264
+// closed). Its Journal logs each run until journalProviderRuns wires it
+// to the engine journal (OP-8). Nothing calls StartSignIn until the setup page does (#1264
 // c4e2b). A nil rc or note leaves those inputs closed, as nil pins
 // leave the gate.
 func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
@@ -1162,7 +1156,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
 		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
 	}
-	r.Journal = providerJournal{}.journal // logged until meterProviderRuns (PJ-1)
+	r.Journal = providerJournal{}.journal // logged until journalProviderRuns (PJ-1)
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
 		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
@@ -1336,11 +1330,10 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-// openMeter opens the model-spend meter at path (OP-8), journaling each
-// exhaustion to eng.
-func openMeter(eng egressRecorder, path string) (*meter.Meter, error) {
-	return meter.Open(meter.Config{
-		Path:           path,
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
+	eng := d.Engine()
+	mtr, err := meter.Open(meter.Config{
+		Path:           meterPath,
 		MachineCap:     meter.DefaultMachineCap,
 		OverallCap:     meter.DefaultOverallCap,
 		DailyExtension: meter.DefaultDailyExtension,
@@ -1352,14 +1345,9 @@ func openMeter(eng egressRecorder, path string) (*meter.Meter, error) {
 			}
 		},
 	})
-}
-
-// openGuestPlane needs the spend meter mtr: with none, machines stay off.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir string, mtr *meter.Meter, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
-	if mtr == nil {
-		return nil, errors.New("no spend meter")
+	if err != nil {
+		return nil, err
 	}
-	eng := d.Engine()
 	// ARC-6: each machine gets its own guest socket. Its model route is
 	// metered here, then forwarded to the vault process (P2-4a), which
 	// holds the vault and runs the router and egress proxy; this process

@@ -177,7 +177,6 @@ func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
 		Reserve: func(string, string) float64 { return 0.1 },
 		Now:     g.clock,
 		Journal: func(e Event) { g.mu.Lock(); g.events = append(g.events, e); g.mu.Unlock() },
-		Charge:  func(string) (func(), error) { return func() {}, nil },
 		SignIn:  func(p string) { g.mu.Lock(); g.signins = append(g.signins, p); g.mu.Unlock() },
 		Logf:    func(f string, a ...any) { g.mu.Lock(); g.logs = append(g.logs, fmt.Sprintf(f, a...)); g.mu.Unlock() },
 		Caps:    Caps{Wall: 2 * time.Second, Result: 1 << 10, Brief: 1 << 10},
@@ -791,7 +790,7 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 }
 
 // REQ: OP-8
-func TestRefusalBeforeChargeCostsNothing(t *testing.T) {
+func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
 	cases := []struct {
 		name string
 		set  func(g *rig, r *Request)
@@ -802,57 +801,35 @@ func TestRefusalBeforeChargeCostsNothing(t *testing.T) {
 	}
 	for _, c := range cases {
 		g := newRig(ok("x"))
-		calls := 0
-		g.r.Charge = func(string) (func(), error) { calls++; return func() {}, nil }
 		rq := req("b")
 		c.set(g, &rq)
 		if _, err := g.r.Run(context.Background(), rq); err == nil {
 			t.Fatalf("%s: ran", c.name)
 		}
-		if calls != 0 || len(g.events) != 0 {
-			t.Errorf("%s: %d charges, %d journal entries", c.name, calls, len(g.events))
+		if len(g.events) != 0 {
+			t.Errorf("%s: %d journal entries", c.name, len(g.events))
 		}
 	}
 }
 
 // REQ: OP-8
-func TestChargedRunIsChargedOnceAndJournaledAfterAdmission(t *testing.T) {
+func TestAdmittedRunIsJournaledOnceWithItsMachine(t *testing.T) {
 	g := newRig(ok("x"))
-	var got []string
-	done := 0
-	g.r.Charge = func(m string) (func(), error) { got = append(got, m); return func() { done++ }, nil }
 	rq := req("b")
 	rq.Machine = "wk-a"
 	if _, err := g.r.Run(context.Background(), rq); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []string{"wk-a"}) || done != 1 || len(g.events) != 1 || g.events[0].Machine != "wk-a" {
-		t.Errorf("charges %v, done %d, events %+v", got, done, g.events)
+	if len(g.events) != 1 || g.events[0].Machine != "wk-a" || g.events[0].Outcome != "ok" {
+		t.Errorf("events %+v", g.events)
 	}
-	// A refusal after admission is journaled and settled too.
+	// A refusal after admission is journaled too.
 	g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 1} }
 	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != Failed {
 		t.Fatalf("failing CLI: %v", err)
 	}
-	if len(got) != 2 || done != 2 || len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
-		t.Errorf("charges %v, done %d, events %+v", got, done, g.events)
-	}
-}
-
-// REQ: OP-8
-func TestChargeRefusalFreesTheSlotAndNeverStartsTheVM(t *testing.T) {
-	g := newRig(ok("x"))
-	g.r.PerPool = 1
-	g.r.Charge = func(string) (func(), error) { return nil, errors.New("machine at its cap") }
-	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != UsedUp {
-		t.Fatalf("charge refused: %v", err)
-	}
-	if len(g.h.created) != 0 || len(g.sd.calls) != 0 || len(g.events) != 1 || g.events[0].Outcome != string(UsedUp) {
-		t.Errorf("created %v, seeded %v, events %+v", g.h.created, g.sd.calls, g.events)
-	}
-	g.r.Charge = nil
-	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
-		t.Errorf("slot kept after a charge refusal: %v", err)
+	if len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
+		t.Errorf("events %+v", g.events)
 	}
 }
 

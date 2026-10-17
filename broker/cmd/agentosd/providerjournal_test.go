@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,7 +10,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/workers"
@@ -72,21 +69,10 @@ type okSeeder struct{}
 func (okSeeder) Seed(string, string) (map[string][]byte, error) { return map[string][]byte{}, nil }
 func (okSeeder) Close(string)                                   {}
 
-// meteredRunner is agentosd's runner with every gate open on Codex, a host
-// that runs, and its Journal and Charge wired to rec and a meter allowing
-// calls calls per machine.
-func meteredRunner(t *testing.T, calls int64) (*provagent.Runner, *runHost, *notes, *meter.Meter) {
+// journaledRunner is agentosd's runner with every gate open on Codex, a
+// host that runs, and its Journal wired to rec.
+func journaledRunner(t *testing.T) (*provagent.Runner, *runHost, *notes) {
 	t.Helper()
-	mtr, err := meter.Open(meter.Config{
-		Path:           filepath.Join(t.TempDir(), "meter.json"),
-		MachineCap:     meter.Limits{Calls: calls, Tokens: 1000},
-		OverallCap:     meter.Limits{Calls: 100, Tokens: 100000},
-		DailyExtension: meter.Limits{Calls: 1, Tokens: 1},
-		Notify:         func(meter.Exhausted) {},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	h, rec := &runHost{result: canaryResult}, &notes{}
 	r := providerRunner(nil, nil, nil, nil)
 	r.Host, r.Seeder = h, okSeeder{}
@@ -100,8 +86,8 @@ func meteredRunner(t *testing.T, calls int64) (*provagent.Runner, *runHost, *not
 	}
 	r.Reserve = func(string, string) float64 { return 0.1 }
 	r.PerPool = 1
-	meterProviderRuns(r, rec, mtr)
-	return r, h, rec, mtr
+	journalProviderRuns(r, rec)
+	return r, h, rec
 }
 
 func codexReq(machine string) provagent.Request {
@@ -113,18 +99,14 @@ func TestProviderRunnerHasJournal(t *testing.T) {
 	if r.Journal == nil {
 		t.Fatal("providerRunner leaves Journal nil")
 	}
-	meterProviderRuns(r, &notes{}, nil)
-	if r.Journal == nil || r.Charge == nil {
-		t.Fatal("meterProviderRuns leaves Journal or Charge nil")
-	}
-	// No meter: a run is refused, never charged to nobody.
-	if _, err := r.Charge("wk-a"); err == nil {
-		t.Fatal("charged with no meter")
+	journalProviderRuns(r, &notes{})
+	if r.Journal == nil {
+		t.Fatal("journalProviderRuns leaves Journal nil")
 	}
 }
 
 func TestProviderRunWritesOneEntryWithNoBrief(t *testing.T) {
-	r, _, rec, _ := meteredRunner(t, 5)
+	r, _, rec := journaledRunner(t)
 	out, err := r.Run(context.Background(), codexReq("wk-a"))
 	if err != nil || out != canaryResult {
 		t.Fatalf("run: %q %v", out, err)
@@ -153,57 +135,46 @@ func TestProviderRunWritesOneEntryWithNoBrief(t *testing.T) {
 	}
 }
 
-func TestProviderRunChargesTheCallerMachine(t *testing.T) {
-	r, _, rec, mtr := meteredRunner(t, 5)
-	for i := 0; i < 2; i++ {
-		if _, err := r.Run(context.Background(), codexReq("wk-a")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if u := mtr.Usage("wk-a"); u.Calls != 2 || u.Tokens != 0 {
-		t.Errorf("wk-a usage %+v, want 2 calls and 0 tokens", u)
-	}
-	if u := mtr.Usage("wk-b"); u.Calls != 0 {
-		t.Errorf("wk-b charged: %+v", u)
-	}
-	// The worker tool's caller machine is what agentosd's adapter charges.
-	if _, err := (providerTool{r}).Run(context.Background(), workers.ProviderRequest{Machine: "wk-c", Provider: "codex", Brief: canaryBrief, TaskClass: "code", Label: vm.Public}); err != nil {
-		t.Fatal(err)
-	}
-	if u := mtr.Usage("wk-c"); u.Calls != 1 {
-		t.Errorf("providerTool charged wk-c %+v", u)
-	}
-	// No caller: journaled unattributed and refused, never charged.
-	if _, err := r.Run(context.Background(), codexReq("")); err == nil {
-		t.Fatal("an unattributed run ran")
-	}
-	if last := rec.n[len(rec.n)-1]; last.Machine != unattributed || !strings.Contains(last.Reason, "failed") {
-		t.Errorf("unattributed entry %+v", last)
-	}
-}
-
-func TestProviderRunRefusedAtMachineCap(t *testing.T) {
-	r, h, rec, mtr := meteredRunner(t, 1)
+func TestProviderRunIsJournaledUnderTheCallerMachine(t *testing.T) {
+	r, _, rec := journaledRunner(t)
 	if _, err := r.Run(context.Background(), codexReq("wk-a")); err != nil {
 		t.Fatal(err)
 	}
-	created := len(h.created)
-	_, err := r.Run(context.Background(), codexReq("wk-a"))
-	var ref *provagent.Refusal
-	if !errors.As(err, &ref) || ref.Reason != provagent.UsedUp {
-		t.Fatalf("at the cap: %v", err)
+	// The worker tool's caller machine is what agentosd's adapter journals.
+	if _, err := (providerTool{r}).Run(context.Background(), workers.ProviderRequest{Machine: "wk-c", Provider: "codex", Brief: canaryBrief, TaskClass: "code", Label: vm.Public}); err != nil {
+		t.Fatal(err)
 	}
-	if len(h.created) != created {
-		t.Errorf("a VM started at the cap: %v", h.created)
+	// No caller: the run is journaled unattributed, not refused.
+	if _, err := r.Run(context.Background(), codexReq("")); err != nil {
+		t.Fatalf("an unattributed run: %v", err)
 	}
-	if u := mtr.Usage("wk-a"); u.Calls != 1 {
-		t.Errorf("usage %+v after a refusal", u)
+	var got []string
+	for _, n := range rec.n {
+		got = append(got, n.Machine)
 	}
-	if last := rec.n[len(rec.n)-1]; !strings.Contains(last.Reason, string(provagent.UsedUp)) {
-		t.Errorf("refusal entry %+v", last)
+	if strings.Join(got, ",") != "wk-a,wk-c,"+unattributed {
+		t.Errorf("journaled machines %v", got)
 	}
-	// The provider slot (PerPool 1) is free: another machine runs.
-	if _, err := r.Run(context.Background(), codexReq("wk-b")); err != nil {
-		t.Errorf("slot kept by the refused run: %v", err)
+}
+
+// A plan run is metered by its journal entry alone: it is never refused or
+// counted by the spend meter, so many runs from one machine all run, each
+// journaled once (OP-8 as #2291 wrote it: zero spend, bounded by plan
+// quota and the reserve). journalProviderRuns takes no meter at all.
+func TestPlanRunIsNeverRefusedOrCountedBySpendMeter(t *testing.T) {
+	r, h, rec := journaledRunner(t)
+	const runs = 8
+	for i := 0; i < runs; i++ {
+		if _, err := r.Run(context.Background(), codexReq("wk-a")); err != nil {
+			t.Fatalf("run %d refused: %v", i, err)
+		}
+	}
+	if len(h.created) != runs || len(rec.n) != runs {
+		t.Errorf("%d VMs, %d journal entries, want %d each", len(h.created), len(rec.n), runs)
+	}
+	for _, n := range rec.n {
+		if !strings.HasPrefix(n.Reason, "provider run ok") {
+			t.Errorf("entry %+v", n)
+		}
 	}
 }

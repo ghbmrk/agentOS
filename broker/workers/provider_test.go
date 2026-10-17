@@ -175,7 +175,7 @@ func (r *rig) provider() *fakeProvider {
 
 // CAP-11: provider_run hands the runner the brief as data and the caller's
 // label, class and reservation, and returns the result. OP-8: and the
-// caller's machine, which the run is charged to.
+// caller's machine, which the run is journaled under.
 // REQ: OP-8
 func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	r := newRig(t, 4096)
