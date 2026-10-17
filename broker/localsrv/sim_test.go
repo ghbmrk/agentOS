@@ -102,3 +102,22 @@ func TestTheSIMToAdoptNeedsAToken(t *testing.T) {
 		t.Fatalf("line: %+v %v", out, err)
 	}
 }
+
+// SR3-1 (#927, M14): a lock between the token check and the code kills
+// the session; the good code alone does not adopt the SIM or revive it.
+func TestALockDuringTheCodeDropsTheSessionAndAdoptsNothing(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	r.own.mu.Lock()
+	r.own.relock = true // the status read passes, then the owner locks
+	r.own.mu.Unlock()
+	if _, err := r.adopt(tok, simTag, good); code(err) != localapi.ErrUnauthorized || len(r.adopted) != 0 {
+		t.Fatalf("locked mid-call: %v %v", err, r.adopted)
+	}
+	r.own.mu.Lock()
+	r.own.relock = false
+	r.own.mu.Unlock()
+	if _, err := r.adopt(tok, simTag, good); code(err) != localapi.ErrUnauthorized || len(r.adopted) != 0 {
+		t.Fatalf("session after the lock: %v %v", err, r.adopted)
+	}
+}
