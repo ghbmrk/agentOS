@@ -155,8 +155,58 @@ READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "sys
                                                 for d in ("", ".d"))
 
 
+_MAKERS = None  # #1829: tmpfiles_makers and tmpfiles_removers by root while violations() runs, else None
+
+
 def violations(root):
-    root = str(root)
+    """Every reason the tree at ROOT must not ship, one line each."""
+    global _MAKERS
+    _MAKERS = {}
+    try:
+        return _violations(str(root))
+    finally:
+        _MAKERS = None
+
+
+def tmpfiles_maker(root, parts, st=None, lacks=False):
+    """#1803, #1829: (file, line number, what) of the first tmpfiles.d line tmpfiles_makers counts
+    that names step PARTS, or None. Inside violations() the makers are read once per root. ST: the
+    held step's tree_lstat; a line giving group write (a Z line also on the steps below it) counts
+    when ST's gid is not root, whatever group another line claims to set. LACKS: the tree lacks the
+    step; ST then carries no mode and its parent's gid."""
+    for rel, n, (paths, what, compose) in cached(tmpfiles_makers, root):
+        if compose is None:
+            if any(len(m) == len(parts) and glob_reaches(m, parts) for m in paths):
+                return rel, n, what
+        elif st is not None and st.st_gid != TREE_GROUP and any(
+                (len(m) == len(parts) or compose[0] and len(m) < len(parts))
+                and glob_reaches(m, parts, ancestor=True) for m in paths):
+            return rel, n, "%s %s gid %d" % (what, "under a parent of" if lacks else "over the tree's", st.st_gid)
+    return None
+
+
+def cached(fn, root):
+    """FN(ROOT), read once per root inside violations() (#1829)."""
+    if _MAKERS is None:
+        return fn(root)
+    if (fn, root) not in _MAKERS:
+        _MAKERS[fn, root] = fn(root)
+    return _MAKERS[fn, root]
+
+
+def tmpfiles_remover(root, parts):
+    """#1829 (security delta 3): (file, line number) of the first tmpfiles.d line that can remove step
+    PARTS on the box, or None: r names it, R names it or a parent, and D (with --remove) or a line with
+    an age (systemd-tmpfiles-clean) names a parent. The box may then make it again, so it counts as
+    lacking."""
+    for rel, n, (paths, reach) in cached(tmpfiles_removers, root):
+        if any(glob_reaches(m, parts, ancestor=True) and (len(m) == len(parts) if reach == "self"
+               else len(m) < len(parts) if reach == "below" else len(m) <= len(parts)) for m in paths):
+            return rel, n
+    return None
+
+
+def _violations(root):
     out = []
     try:
         if Conf(root, "etc/machine-id").text().strip() not in ("", "uninitialized"):
@@ -194,8 +244,9 @@ def violations(root):
             # #1702: any entry anyone on the box can write, file or directory, sticky or not, wherever
             # it is but in or below the directories the box makes world-writable (nothing reads
             # configuration there, and a link into them is refused): a unit, a drop-in, a rules file
-            # or a generator elsewhere is then the user's. A group-write rule is deliberately absent
-            # (stock trixie has 2775 var/mail and var/local).
+            # or a generator elsewhere is then the user's. A tree-wide group-write rule is deliberately
+            # absent (stock trixie has 2775 var/mail and var/local); a link's steps and the directories
+            # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
@@ -231,9 +282,13 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
     anything inside one: a local user, or a compromised service user, then decides what the link
     reads, whatever reads it (a unit, a generator, udev). The directory itself counts, since every
     name inside it is the user's. So is one through a step of the tree that a uid other than
-    TREE_OWNER owns or that carries a POSIX ACL (#1803: the mode alone does not say who can write it),
-    and one through a step the tree lacks that a tmpfiles.d line makes a link, or makes for someone
-    else to write (#1803: the line, not the tree, decides where it leads). Any other link that
+    TREE_OWNER owns, that a group other than TREE_GROUP can write, that carries a POSIX ACL (#1803,
+    #1829: the mode alone does not say who can write it) or that a tmpfiles.d line remakes a link or
+    for someone else to write (#1829: the box runs the line after the build), and one through a step
+    the tree lacks that such a line makes (#1803, a C line counting too: the line, not the tree,
+    decides where it leads). The tree directories holding the link itself are held to the same step
+    rules, before anything but the box mount rule (#1829): whoever can write one can replace the
+    link, whatever it names. Any other link that
     reaches a box mount is refused too (default deny). A link at a box mount point itself
     (BOX_MOUNTS) is refused before anything else: the box moves its mount onto where the link leads.
     Then the stock links in BOX_LINKS (matched by path and exact target) and a mask pass, and skip
@@ -251,6 +306,24 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         return ("a link to %s; /%s is where the box mounts its %s, and a link there would move the "
                 "mount (#1702)" % (target, rel, {"dev": "devtmpfs", "proc": "proc", "sys": "sysfs"}
                                    .get(rel, "tmpfs")))
+    held = rel.split("/", 1)[0] not in BOX_MOUNTS
+    if held or made:
+        # #1829 (Security R1 gap 5): the directories holding the link, as far as the tree holds them
+        # without a link. A link the tree holds under a box mount is hidden by the mount; one a
+        # tmpfiles.d line makes there is held to the world-writable and SERVICE_DIRS rules only.
+        holders, gid = rel.split("/")[:-1], TREE_GROUP
+        for k in range(1, len(holders) + 1):
+            d = "/".join(holders[:k])
+            try:
+                st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
+            except OSError:
+                break
+            why = step_refusal(root, d, target, held, st, via="in", gid=gid)
+            if why:
+                return why
+            if st is None or stat.S_ISLNK(st.st_mode):
+                break
+            gid = step_gid(root, d, st, gid)
     if target == MASK or target in BOX_LINKS.get(rel, ()):
         return None
     if ".." in path.split("/"):
@@ -265,22 +338,28 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, True)
         if why:
             return why
+    gid = TREE_GROUP
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
         try:
             st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
         except OSError:
             continue
-        why = step_refusal(root, d, target, not path.startswith("/"), st)
+        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)
         if why:
             return why
-        if st is None and not path.startswith("/"):
+        if st is not None:
+            gid = step_gid(root, d, st, gid)
+        elif not path.startswith("/"):
             # #1803: the tree lacks this step, so a tmpfiles.d line may make it on the box: a link
-            # (whose target the tree never chased here) or a directory someone else can write.
-            for rel_, n, why in tmpfiles_makers(root):
-                if any(len(m) == k and glob_reaches(m, parts[:k]) for m in why[0]):
-                    return ("a link to %s, through /%s, which the tree lacks and %s line %d makes %s; "
-                            "ship the step in the tree (#1803)" % (target, d, rel_, n, why[1]))
+            # (whose target the tree never chased here) or a directory someone else can write. #1829
+            # (security delta 2, combined delta 2): it may take its parent's group (a setgid bit the
+            # tree or a line sets), so the lines that make it are weighed with that gid.
+            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, 0, 0, 0, 0)),
+                                  lacks=True)
+            if made:
+                return ("a link to %s, through /%s, which the tree lacks and %s line %d makes %s; "
+                        "ship the step in the tree (#1803)" % ((target, d) + made))
     if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):
         # Default deny (#1702 delta 2): the chase stopped at a box mount (tree_chase gives only such a
         # path a leading '/'), and only BOX_LINKS' exact links may end there. A link the tree holds
@@ -293,10 +372,21 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
     return None
 
 
-def step_refusal(root, d, target, held, st=False):
-    """#1543, #1702, #1803: why a link to TARGET whose chase steps into tree directory D is refused,
-    or None. ST: D's tree_lstat (None if the tree lacks it), looked up when not given. HELD: D is a
-    step of the tree, not under a box mount, so its owner and ACL count too."""
+def step_gid(root, d, st, gid):
+    """#1829 (security delta 3): the gid weighed for held step D's children: the tree's (ST), or, when
+    a tmpfiles.d line can remove D (tmpfiles_remover) and the box make it again, its parent's (GID),
+    if the tree's is root. Either group may hold D on the box; only whether it is root counts."""
+    if st.st_gid == TREE_GROUP and tmpfiles_remover(root, path_parts(d)):
+        return gid
+    return st.st_gid
+
+
+def step_refusal(root, d, target, held, st=False, via="through", gid=None):
+    """#1543, #1702, #1803, #1829: why a link to TARGET whose chase steps into tree directory D, or
+    that D holds (VIA "in"), is refused, or None. ST: D's tree_lstat (None if the tree lacks it),
+    looked up when not given. HELD: D is a step of the tree, not under a box mount, so its owner,
+    group write, ACL and the tmpfiles.d lines that remake it count too. GID: the gid weighed for D's
+    parent (step_gid), looked up when not given."""
     if st is False:
         try:
             st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
@@ -314,9 +404,37 @@ def step_refusal(root, d, target, held, st=False):
         except OSError as e:
             acl = ["unreadable (%s)" % e.strerror]
         if st.st_uid != TREE_OWNER or acl:
-            return ("a link to %s, through /%s, which %s; that user would decide what it reads (#1803)"
-                    % (target, d, "uid %d owns" % st.st_uid if st.st_uid != TREE_OWNER
+            return ("a link to %s, %s /%s, which %s; that user would decide what it reads (#1803)"
+                    % (target, via, d, "uid %d owns" % st.st_uid if st.st_uid != TREE_OWNER
                        else "carries a POSIX ACL (%s)" % ", ".join(acl)))
+        if st.st_mode & 0o020 and st.st_gid != TREE_GROUP:
+            # #1829 (gap 3): no named exceptions. Debian's var/spool/mail link into 2775 var/mail is
+            # removed by mkosi.conf's RemoveFiles; no other stock link goes through var/mail or var/local.
+            return ("a link to %s, %s /%s, which gid %d can write; that group would decide what it "
+                    "reads (#1829)" % (target, via, d, st.st_gid))
+        # #1829 (gap 2): the box runs tmpfiles.d after the build, so a line naming a held step decides
+        # its mode, owner, ACL or whether it is a link, whatever the tree ships. Every step of a link's
+        # path is asked, so a Z or A line on an ancestor is caught there.
+        made = tmpfiles_maker(root, path_parts(d), st)
+        if made:
+            return ("a link to %s, %s /%s, which %s line %d remakes %s on the box; the line, not the "
+                    "tree, decides who can write it (#1829)" % ((target, via, d) + made))
+        # #1829 (security delta 3): a line that can remove the step leaves it to whatever line makes
+        # it again, so those lines are weighed as for a step the tree lacks, with the parent's gid.
+        removed = tmpfiles_remover(root, path_parts(d))
+        if removed:
+            if gid is None:
+                try:
+                    up = tree_lstat(root, "/".join(path_parts(d)[:-1]))
+                except OSError:
+                    up = None
+                gid = TREE_GROUP if up is None else up.st_gid
+            made = tmpfiles_maker(root, path_parts(d), os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, 0, 0, 0, 0)),
+                                  lacks=True)
+            if made:
+                return ("a link to %s, %s /%s, which %s line %d can remove and %s line %d makes %s on the "
+                        "box; the lines, not the tree, decide who can write it (#1829)"
+                        % ((target, via, d) + removed + made))
     return None
 
 
@@ -526,6 +644,7 @@ class OwnerRefused(StepRefused):
 # Stock packages and mkosi.extra give root-owned 0644 files and 0755 directories. The tests set it to
 # their own uid, since they cannot make root-owned trees.
 TREE_OWNER = 0
+TREE_GROUP = 0  # #1829: the only group that may write a step of a link (step_refusal)
 
 
 def owned(here, st):
@@ -1421,37 +1540,75 @@ def tmpfiles_link_refusal(root, path, to):
 
 
 def tmpfiles_makers(root):
-    """#1803: (file, line number, (paths, what)) for each tmpfiles.d line that makes a path a link,
-    or makes it for a user other than root to write: PATHS are the glob components it may name (as
-    written, with the /var/run rewrite, and through the image's links), WHAT says how."""
+    """#1803, #1829: (file, line number, (paths, what, compose)) for each tmpfiles.d line that makes a
+    path a link or a copy (C, whatever its source: the tree check never chases what the copy holds),
+    or makes it, or may make it, for a user other than root to write: PATHS are the glob components it
+    may name (as written, with the /var/run rewrite, and through the image's links), WHAT says how.
+    COMPOSE is None, or (recursive,) for a line whose mode gives group write and that names no group
+    but root: it counts only where the step's group, from the tree or a parent, is not root."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
-        words = tmpfiles_words(ln)[0] if n is not None else []
+        words, arg = tmpfiles_words(ln) if n is not None else ([], "")
         if len(words) < 2:
             continue
         typ, _, mode, user, group = (words + ["-"] * 5)[:5]
-        m = mode.lstrip(":~")
+        m, compose = mode.lstrip(":~"), None
         if typ[:1] == "L":
             what = "a link"
+        elif typ[:1] == "C":
+            what = "a copy of %s" % (arg.strip() if arg.strip() not in ("", "-") else "its factory default")
         elif typ[:1] in ("a", "A"):
             what = "with a POSIX ACL"
         elif m != "-" and not re.fullmatch(r"[0-7]{1,4}", m):
             what = "with a mode it cannot parse (%s)" % mode
-        elif user not in ("-", "", "root", "0") or m != "-" and (
-                int(m, 8) & 0o002 or int(m, 8) & 0o020 and group not in ("-", "", "root", "0")):
+        elif user.lstrip(":") not in ("-", "", "root", "0") or group.lstrip(":") not in ("-", "", "root", "0") \
+                or m != "-" and int(m, 8) & 0o002:
+            # #1829 (combined delta 2): a non-root group counts whatever the mode, since the step's
+            # mode, another line or a setgid bit may give that group write.
+            what = "mode %s for %s:%s" % (mode, user, group)
+        elif m != "-" and int(m, 8) & 0o020:
+            # #1829: group write for the step's own group, which the tree or a parent gives it; the
+            # check never trusts a line to replace that group (systemd skips duplicate lines, and Z
+            # stops at a link), so tmpfiles_maker weighs it with the tree's gid.
+            compose = (typ[:1] == "Z",)
             what = "mode %s for %s:%s" % (mode, user, group)
         else:
             continue
-        parts = path_parts(tmpfiles_expand(words[1]))
-        if parts[:2] == ["var", "run"]:
-            parts = ["run"] + parts[2:]
-        paths = [parts]
-        try:
-            paths.append(tree_resolve(root, parts))
-        except OSError:
-            pass
-        out.append((rel, n, (paths, what)))
+        out.append((rel, n, (tmpfiles_paths(root, words[1], typ[:1] == "L"), what, compose)))
     return out
+
+
+def tmpfiles_removers(root):
+    """#1829 (security delta 3): (file, line number, (paths, reach)) for each tmpfiles.d line that can
+    remove a path on the box: REACH is "self" for r, "self+below" for R, and "below" for D (the box
+    runs --remove at boot) or a line with an age (systemd-tmpfiles-clean; x and X only exclude)."""
+    out = []
+    for rel, n, ln in tmpfiles_entries(root):
+        words, _ = tmpfiles_words(ln) if n is not None else ([], "")
+        if len(words) < 2:
+            continue
+        typ, age = words[0][:1], (words + ["-"] * 6)[5]
+        reach = {"r": "self", "R": "self+below", "D": "below"}.get(typ)
+        if reach is None and typ not in ("x", "X") and age not in ("-", ""):
+            reach = "below"
+        if reach is not None:
+            out.append((rel, n, (tmpfiles_paths(root, words[1]), reach)))
+    return out
+
+
+def tmpfiles_paths(root, path, link=False):
+    """#1803, #1829: the glob components a tmpfiles.d PATH may name: as written, with the /var/run
+    rewrite, and through the image's links. LINK: an L line makes its last component the link, so only
+    the steps before it are resolved; it does not remake where a link the tree already holds leads."""
+    parts = path_parts(tmpfiles_expand(path))
+    if parts[:2] == ["var", "run"]:
+        parts = ["run"] + parts[2:]
+    paths = [parts]
+    try:
+        paths.append(tree_resolve(root, parts[:-1]) + parts[-1:] if link else tree_resolve(root, parts))
+    except OSError:
+        pass
+    return paths
 
 
 def tmpfiles_lines(data):
