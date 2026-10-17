@@ -19,7 +19,9 @@ rule is B, so a new top-level directory gets a lens pass until it is classed.
 
 Usage:
   tools/risk_tier.py PATH...            tier of the listed paths
-  tools/risk_tier.py --git BASE [HEAD]  tier of `git diff --name-only BASE...HEAD`
+  tools/risk_tier.py --git BASE [HEAD]  tier of `git diff --name-only BASE...HEAD`; with HEAD
+                                        (the default) uncommitted and untracked paths count too;
+                                        an empty diff prints no tier and exits 2
   --markdown                            print a short table (for a CI step summary)
   --pr-branch BRANCH --pr-title TITLE   lane gate: exit 1 if the PR belongs to a lane
                                         (docs/LANES.md) whose tier limit the change exceeds
@@ -256,16 +258,25 @@ def tier_of_change(paths):
     return top, sorted(p for p, (t, _) in tiers.items() if t == top)
 
 
+def _git_paths(*args):
+    out = subprocess.run(["git", *args], check=True, capture_output=True).stdout
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
 def changed_paths(base, head):
     # --no-renames lists a moved file under its old path too, so moving
     # image/build.sh to docs/ is still tier A. -z keeps git from quoting
     # names with non-ASCII bytes, quotes or newlines, which would match
     # no prefix.
-    out = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}"],
-        check=True, capture_output=True,
-    ).stdout
-    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
+    paths = _git_paths("diff", "--name-only", "-z", "--no-renames", f"{base}...{head}")
+    if head == "HEAD":
+        # A run before commit (#2272): staged, unstaged and untracked paths
+        # count too, against the same merge base the committed diff uses.
+        mb = subprocess.run(["git", "merge-base", base, head], check=True,
+                            capture_output=True, text=True).stdout.strip()
+        paths += _git_paths("diff", "--name-only", "-z", "--no-renames", mb)
+        paths += _git_paths("ls-files", "-z", "--others", "--exclude-standard")
+    return list(dict.fromkeys(paths))
 
 
 def main(argv=None):
@@ -277,7 +288,12 @@ def main(argv=None):
     ap.add_argument("--pr-title")
     a = ap.parse_args(argv)
     gate = a.pr_branch is not None or a.pr_title is not None
-    paths = changed_paths(a.git[0], a.git[1] if len(a.git) > 1 else "HEAD") if a.git else a.paths
+    head = a.git[1] if a.git and len(a.git) > 1 else "HEAD"
+    paths = changed_paths(a.git[0], head) if a.git else a.paths
+    if a.git and not paths:
+        # No tier for a diff it never saw: an empty diff used to print C.
+        print(f"risk_tier: no changes between {a.git[0]} and {head} to tier", file=sys.stderr)
+        return 2
     tier, why = tier_of_change(paths)
     if a.markdown:
         print(f"### Risk tier {tier}: {REASONS[tier]}\n")

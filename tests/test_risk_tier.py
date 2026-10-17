@@ -492,6 +492,61 @@ class RiskTierTest(unittest.TestCase):
         self.assertFalse(rt.lane_gate("pkg/codex-x", "", "B")[0])
         self.assertTrue(rt.lane_gate("claude/x", "", "A")[0])
 
+    def _uncommitted_repo(self, d):
+        """main at one commit; the checkout is main with nothing committed ahead."""
+        def git(*args):
+            subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+                           check=True, capture_output=True)
+        git("init", "-q", "-b", "main")
+        os.makedirs(os.path.join(d, "docs"))
+        os.makedirs(os.path.join(d, "image"))
+        for p in ("docs/x.md", "image/build.sh"):
+            with open(os.path.join(d, p), "w") as f:
+                f.write("x\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        return git
+
+    def _run(self, d, *args):
+        return subprocess.run([sys.executable, str(ROOT / "tools" / "risk_tier.py"), *args],
+                              cwd=d, capture_output=True, text=True)
+
+    # RT-3a (briefs/RT-3.md; a local ID with no SPEC row, so no REQ marker)
+    def test_uncommitted_changes_count_against_head(self):
+        # #2272: a run before the first commit printed a bare C.
+        cases = {
+            "unstaged": lambda d, git: open(os.path.join(d, "image", "build.sh"), "a").write("y\n"),
+            "staged": lambda d, git: (open(os.path.join(d, "image", "build.sh"), "a").write("y\n"),
+                                      git("add", "image/build.sh")),
+            "untracked": lambda d, git: open(os.path.join(d, "image", "new.sh"), "w").write("y\n"),
+        }
+        for name, change in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = self._uncommitted_repo(d)
+                change(d, git)
+                r = self._run(d, "--git", "main", "HEAD")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+                r = self._run(d, "--git", "main")  # HEAD by default
+                self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+
+    # RT-3b
+    def test_empty_diff_prints_no_tier(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = self._uncommitted_repo(d)
+            for args in (["--git", "main", "HEAD"], ["--git", "main", "--markdown"]):
+                with self.subTest(args=args):
+                    r = self._run(d, *args)
+                    self.assertEqual(r.returncode, 2)
+                    self.assertEqual(r.stdout, "")
+                    self.assertIn("no changes between main and HEAD", r.stderr)
+            # A named head commit ignores the working tree, as CI's runs do.
+            open(os.path.join(d, "image", "build.sh"), "a").write("y\n")
+            git("tag", "t")
+            r = self._run(d, "--git", "main", "t")
+            self.assertEqual(r.returncode, 2)
+            self.assertEqual(r.stdout, "")
+
     def test_markdown_output(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
