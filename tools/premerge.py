@@ -83,7 +83,7 @@ def _replayed(cwd, reviewed, onto):
 
 
 # Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml (and metrics-refresh.yml), board.yml, records.yml.
+# metrics.yml, board.yml, records.yml.
 BOT = {
     "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
     "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
