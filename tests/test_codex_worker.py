@@ -541,9 +541,10 @@ class ToolSandboxTest(unittest.TestCase):
         bad.chmod(0o755)
         return bad
 
-    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=()):
+    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=(), skip_outlives=False):
+        flag = ("--skip-outlives",) if skip_outlives else ()
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
-                        toolsh=toolsh, codex_home=codex_home, extra=extra)
+                        *flag, toolsh=toolsh, codex_home=codex_home, extra=extra)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -561,7 +562,8 @@ class ToolSandboxTest(unittest.TestCase):
         self.assertFalse(tool["session"], "tool shares the CLI's session")
         self.assertFalse(tool["tmp"], "tool saw the worker's /tmp or /var/tmp")
         self.assertEqual(tool["fds"], [], "tool inherited the CLI's descriptors")
-        self.assertFalse(tool["outlives"], "tool outlived its wrapper")
+        # Is False, not falsy: a run that skipped the outlives probe has no verdict to pass.
+        self.assertIs(tool.get("outlives"), False, "tool outlived its wrapper, or was not checked")
         self.assertTrue(tool["work_write"], "tool must still write its workspace")
         self.assertEqual(tool["ifaces"], ["lo"], "tool must have no interface but its own lo")
 
@@ -768,7 +770,7 @@ echo "func=$?"
                 self.assertEqual(r.returncode == 126 and "non-numeric" in r.stderr, refused,
                                  r.stderr)
 
-    # REQ: CRED-5, A14
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-1)
     def test_descriptors_closed_in_a_pid_namespace_with_the_hosts_proc(self):
         # The CLI may itself run in a pid namespace that still mounts the host's /proc: there $$
         # names some other process, so a loop over /proc/$$/fd closes the wrong descriptors (or
@@ -778,9 +780,30 @@ echo "func=$?"
         bad = self.mutant("toolsh-pid",
                           ("[ -d /proc/self/fd ]", '[ -d "/proc/$$/fd" ]'),
                           ("for fd in /proc/self/fd/*", 'for fd in "/proc/$$"/fd/*'))
-        tool = self.run_worker(toolsh=bad, extra=pidns)["tool"]
+        # The mutant run asks only about descriptors; its refused wrapper never starts the
+        # beat, so the outlives probe would just wait out its 10s (A4).
+        tool = self.run_worker(toolsh=bad, extra=pidns, skip_outlives=True)["tool"]
         self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
                          "the $$ mutant must leak descriptors or refuse")
+
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-2)
+    def test_skipping_the_outlives_probe_keeps_the_descriptor_probe_and_fails_containment(self):
+        # A4: the stub CLI's --skip-outlives drops only the last phase. The descriptor probe
+        # still runs, and the result carries no outlives verdict, so assert_contained fails it:
+        # a run that must prove containment cannot skip the check unnoticed.
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        "--skip-outlives", extra=("--unshare-pid",))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool = json.loads(r.stdout)["tool"]
+        self.assertEqual((tool["exit"], tool["fds"]), (0, []), tool)
+        self.assertNotIn("outlives", tool)
+        self.assertIn("outlives skipped", r.stderr)
+        self.assertNotIn("beat", r.stderr, "the beat tool must not start")
+        with self.assertRaises(AssertionError):
+            self.assert_contained(tool)
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        "--skip-outlive")
+        self.assertEqual(r.returncode, 2, "an unknown flag must not run a partial check")
 
     # REQ: CRED-5, A14
     def test_a_stalled_worker_fails_with_a_diagnosis_and_leaves_nothing_running(self):
