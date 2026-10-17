@@ -38,24 +38,20 @@ esac
 # Each agent machine writes under its own hard quota on root (RES-4), which needs root mounted with
 # project quotas (rootflags=prjquota, image/ASSUMPTIONS.md I15); agentosd keeps machines off
 # otherwise. Say which, from the mount itself; CI's boot test needs the on line on every boot.
-# flag=on: the command systemd loaded for agentosd, after every unit path and drop-in, is one command
-# that starts with the shipped -owner ${AGENTOS_OWNER}, then holds plain words only (systemctl shows
-# variables unexpanded, and a quoted word could hold " ; "), ends -disk-quota on and names
-# disk-quota nowhere else (Security #2110). Anything else reads overridden.
+# flag=on: the command systemd loaded for agentosd, after every unit path and drop-in, is exactly the
+# shipped one (systemctl shows variables unexpanded), with ignore_errors=no and no further field that
+# a quoted word or a second command would add. Parsers that allowed variations were bypassed three
+# review rounds running, so nothing varies (Security #2110 re-sign 3). Anything else reads overridden.
 x=$(systemctl show -P ExecStart agentosd.service 2>/dev/null) || x=
-a=${x#*argv\[\]=}
-a=${a%% ; ignore_errors=*}
-p='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} '
-r=${a#"$p"}
+c='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui -netjoin-sock /run/agentos-netjoin/netjoin.sock -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw -image codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on'
+t=${x#"{ path=/usr/lib/agentos/with-uids ; argv[]=$c ; ignore_errors="}
 case $x in
-*"argv[]="*"argv[]="*) f=overridden ;;
-*"argv[]="*" ; ignore_errors="*)
-	case $r in
-	"$a" | *[!A-Za-z0-9/_.,=:@+\ -]* | *disk-quota*disk-quota*) f=overridden ;;
-	*" -disk-quota on") f=on ;;
+"$t") case $x in *"argv[]="*) f=overridden ;; *) f=unknown ;; esac ;;
+*) case $t in
+	*ignore_errors=* | *"argv[]="* | *path=*) f=overridden ;;
+	"no ; start_time="*) f=on ;;
 	*) f=overridden ;;
 	esac ;;
-*) f=unknown ;;
 esac
 fs=$(findmnt -no FSTYPE / 2>/dev/null) || fs=unknown
 case ",$(findmnt -no OPTIONS / 2>/dev/null)," in
