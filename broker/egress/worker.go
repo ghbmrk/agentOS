@@ -132,8 +132,8 @@ func Codex() PlanRoute {
 		},
 		ToolTypes: []string{"namespace", "function", "custom"},
 		// The CLI's request: #809 saw model, input, tool_choice, include
-		// and stream, and the box image's guest-task saw client_metadata
-		// (#1701); the rest are the fields the CLI's request type sets.
+		// and stream; the rest are the fields the CLI's request type sets.
+		// client_metadata is text only (checkResponses).
 		BodyKeys: []string{
 			"model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls",
 			"reasoning", "store", "stream", "include", "prompt_cache_key", "text", "client_metadata",
@@ -834,6 +834,17 @@ func (w *workerRoute) checkResponses(body []byte) ([]byte, string) {
 		return nil, "store must be false"
 	}
 	obj["store"] = false
+	if m, ok := obj["client_metadata"]; ok {
+		meta, ok := m.(map[string]any)
+		if !ok {
+			return nil, "client_metadata out of shape"
+		}
+		for _, v := range meta {
+			if _, text := v.(string); !text {
+				return nil, "client_metadata out of shape"
+			}
+		}
+	}
 	if t, ok := obj["tools"]; ok {
 		if r := w.checkTools(t, 0); r != "" {
 			return nil, r
