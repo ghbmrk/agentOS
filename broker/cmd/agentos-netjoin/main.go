@@ -54,7 +54,7 @@ type config struct {
 	// station and ap are the join's interfaces (S-R4, #1428): with no
 	// station, or one in ap, every join answers failed.
 	station string
-	ap      []string
+	ap      ifaces
 }
 
 // ifaces is a repeatable string flag.
@@ -70,7 +70,7 @@ func parseFlags(args []string) (config, error) {
 	// agentosd runs as root (its unit sets no User=).
 	fs.IntVar(&c.agentosdUID, "agentosd-uid", 0, "the only uid served")
 	fs.StringVar(&c.station, "station", "", "the one interface the home connection may use (none: every join fails)")
-	fs.Var((*ifaces)(&c.ap), "ap-iface", "an interface agentos-ap may run the access point on (its -iface; repeatable)")
+	fs.Var(&c.ap, "ap-iface", "an interface agentos-ap may run the access point on (its -iface; repeatable)")
 	err := fs.Parse(args)
 	return c, err
 }
