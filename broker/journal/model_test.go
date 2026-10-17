@@ -867,9 +867,17 @@ func TestOP2SameEffectModel(t *testing.T) {
 	}
 	more, _ := strconv.Atoi(os.Getenv("MODEL_DEPTH"))
 	// The search keeps every level's nodes live; collecting less often
-	// halves its time.
+	// halves its time. GOGC=300 alone lets the heap reach four times the
+	// live set (about 3 GB live, over 10 GB heap across the parallel
+	// cases), which killed CI's 16 GB runner mid-step ("runner has received
+	// a shutdown signal", exit 143). The soft limit makes the collector run
+	// harder only above it, unless GOMEMLIMIT already set one.
 	old := debug.SetGCPercent(300)
 	t.Cleanup(func() { debug.SetGCPercent(old) })
+	if os.Getenv("GOMEMLIMIT") == "" {
+		oldLimit := debug.SetMemoryLimit(6 << 30)
+		t.Cleanup(func() { debug.SetMemoryLimit(oldLimit) })
+	}
 	for _, m := range []mModel{
 		{ids: []string{"a", "b"}, depth: 10},
 		{ids: []string{"a", "b", "c"}, depth: 9},
