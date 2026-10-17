@@ -254,13 +254,20 @@ type Config struct {
 	// now (W5-Dc-r1b QH-8): it replaces grants' own count and
 	// RequestsPerHour, so approval requests and questions spend the
 	// owner's one budget, once. It takes the owner's lock, so the gate
-	// calls it without g.mu.
+	// calls it without g.mu. Spend and Refund, when set, are the owner's
+	// check-and-count (owner Channel.Spend, Refund): the gate spends each
+	// request text through Spend when it grants it, before it checks the
+	// next, in place of reading Allowance, and refunds each spend once its
+	// request call returned; the owner keeps a spend its request used
+	// (#1685). They take the owner's lock too.
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
 	Urgent          func(owner.Item) bool
 	Quiet           func(time.Time) bool
 	Allowance       func(time.Time) int
+	Spend           func(paced bool) (at time.Time, ok bool)
+	Refund          func(at time.Time)
 	Fresh           time.Duration
 	Now             func() time.Time
 	Logf            func(format string, args ...any)
@@ -2187,19 +2194,44 @@ func (g *Gate) Reserve(aged bool) bool {
 // take counts n request texts about to be sent and returns how many may
 // go. Paced, it grants only what the budget has left; unpaced (an urgent
 // item, an owner active in chat) it grants all. Counted before sending,
-// so no question is reserved in between.
-func (g *Gate) take(paced bool, n int) int {
+// so no question is reserved in between. With Config.Spend, each text is
+// spent on the owner's hour before the next is checked, and the spends
+// are appended to spent for refund once the request call returned.
+func (g *Gate) take(paced bool, n int, spent *[]time.Time) int {
 	now := g.cfg.Now()
-	allowance := g.allowance(now)
+	if g.cfg.Spend != nil {
+		k := 0
+		for ; k < n; k++ {
+			at, ok := g.cfg.Spend(paced)
+			if !ok {
+				break
+			}
+			*spent = append(*spent, at)
+		}
+		n = k
+	} else if paced {
+		allowance := g.allowance(now)
+		g.mu.Lock()
+		n = max(0, min(n, g.roomLocked(now, allowance)))
+		g.mu.Unlock()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if paced {
-		n = max(0, min(n, g.roomLocked(now, allowance)))
-	}
 	for range n {
 		g.sent = append(g.sent, now)
 	}
 	return n
+}
+
+// refund returns the spends take made that the owner's request calls did
+// not use, and empties spent.
+func (g *Gate) refund(spent *[]time.Time) {
+	if g.cfg.Refund != nil {
+		for _, at := range *spent {
+			g.cfg.Refund(at)
+		}
+	}
+	*spent = nil
 }
 
 // requeue puts items the budget did not cover back in the batch.
@@ -2276,13 +2308,15 @@ func (g *Gate) flush(paced bool) {
 	}
 	// Each re-issued intent is its own request text: counted, but never
 	// paced, so none lapses unseen behind a spent budget (security R3).
-	g.take(false, len(again))
+	var spent []time.Time
+	g.take(false, len(again), &spent)
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
 		if own != nil {
 			reqs, err = own.RequestEach(again, ttls)
 		}
+		g.refund(&spent)
 		g.mu.Lock()
 		for i, it := range again {
 			w := g.waiting[it.Ref]
@@ -2305,12 +2339,12 @@ func (g *Gate) flush(paced bool) {
 	for i, it := range page {
 		// Each counts like a request; re-issued ones always go, as above.
 		// Their notices share texts (Potency R2).
-		if pageTTLs[i] == 0 && g.take(paced, 1) == 0 {
+		if pageTTLs[i] == 0 && g.take(paced, 1, &spent) == 0 {
 			g.requeue([]owner.Item{it})
 			continue
 		}
 		if pageTTLs[i] != 0 {
-			g.take(false, 1)
+			g.take(false, 1, &spent)
 		}
 		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
 	}
@@ -2320,6 +2354,7 @@ func (g *Gate) flush(paced bool) {
 		if own != nil {
 			reqs, err = own.RequestLocalEach(ask, askTTLs)
 		}
+		g.refund(&spent)
 		g.mu.Lock()
 		for i, it := range ask {
 			if w := g.waiting[it.Ref]; w != nil {
@@ -2351,7 +2386,7 @@ func (g *Gate) flush(paced bool) {
 		}
 		items = textable
 		for len(items) > 0 {
-			if g.take(paced, 1) == 0 {
+			if g.take(paced, 1, &spent) == 0 {
 				g.requeue(items)
 				break
 			}
@@ -2363,6 +2398,7 @@ func (g *Gate) flush(paced bool) {
 			if own != nil {
 				req, err = own.Request(chunk, 0)
 			}
+			g.refund(&spent)
 			g.mu.Lock()
 			for _, it := range chunk {
 				w := g.waiting[it.Ref]
