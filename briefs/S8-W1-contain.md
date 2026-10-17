@@ -15,7 +15,7 @@ Board section: Release rows. Source: work item #1720. Tier A (vm, credentials, t
 - `broker/e2e/codex_contain_test.go`, `TestIntegrationCodexContainment`: copies the built rootfs, adds the probe, seeds a chatgpt-mode placeholder `auth.json` carrying a synthetic canary, and creates a `pw-` worker with the codex declaration. A scripted Responses endpoint on the route socket asks for one `exec` tool call running the probe. A control run of the probe beside the CLI (same env, no CLI) must reach every surface; the run through the CLI must reach none but the workspace, under seccomp mode 2 and no_new_privs, in namespaces other than the control's.
 - A CI step in the machines job builds the rootfs and runs the test.
 
-**Tests first.** `TestIntegrationCodexContainment` is the acceptance test.
+**Acceptance tests:** CRED-5, CRED-1, A14, C5: `TestIntegrationCodexContainment` (broker/e2e/codex_contain_test.go).
 
 **Revert mutants (each must turn the test red).**
 - Drop `--unshare-net` from the CLI's sandbox (the tool reaches the forwarder).
