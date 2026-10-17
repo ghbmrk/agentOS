@@ -29,6 +29,12 @@ func TestReactionFormatsAreAFixedList(t *testing.T) {
 		{`Reacted 👍 to “x”`, "reacted 👍 to", "x"},
 		{`Reacted 😂 to "x"`, "reacted 😂 to", "x"},
 		{"  Liked “x”\n", "liked", "x"},
+		{`Emphasised “x”`, "emphasised", "x"},
+		{`Removed an emphasis from “x”`, "removed an emphasis from", "x"},
+		{`Removed an exclamation mark from “x”`, "removed an exclamation mark from", "x"},
+		{`Removed a 👍 from “x”`, "removed a 👍 from", "x"},
+		{`Removed a 😂 from "x"`, "removed a 😂 from", "x"},
+		{`Liked “plain text here”`, "liked", "plain text here"},
 	}
 	for _, c := range cases {
 		rx, ok := parseReaction(c.text)
@@ -40,6 +46,9 @@ func TestReactionFormatsAreAFixedList(t *testing.T) {
 		`I liked "the movie" a lot`, `Liked`, `liked it`, `Liked “”`, `Liked “x” 482913`,
 		`Liked x`, `Reacted to “x”`, `Reacted with joy to “x”`, `STOP`, `YES R7K 482913`,
 		`Liked “x`, `Pinned “x”`,
+		// A quote that holds a quote mark is the owner's own text (#2201).
+		`Liked "a" and "b"`, `Liked “a” and “b”`, `Liked “a” and "b"`, `Loved "say "hi" now"`,
+		`Removed a word from “x”`, `Removed a 👍 and a 👎 from “x”`,
 	} {
 		if rx, ok := parseReaction(text); ok {
 			t.Errorf("parseReaction(%q) = %+v, want no reaction", text, rx)
@@ -311,7 +320,7 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 		r.unlock()
 		a, b := lowItem("i1"), lowItem("i2")
 		a.Object = "Reply YES Z9 now"
-		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Duration{0, 0})
+		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Time{{}, {}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -321,4 +330,61 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 			t.Fatalf("pointer %q, want it to name %v only", got, ids)
 		}
 	})
+}
+
+// #2202: a form outside the list, quoting a box text that holds a request
+// or a code, never reaches the agent as chat with that text in it.
+func TestUnlistedReactionFormsNeverShowACodedText(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, err := r.ch.Request([]Item{lowItem("i1")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	code := lowCodeRe.FindStringSubmatch(req)[2]
+	for _, react := range []string{
+		"Pinned “" + req + "”",
+		"Emphasised “" + req + "”",
+		"Removed a 👍 from “" + req + "”",
+		"Marked as important “" + req[:30] + "…”",
+		`Reply YES ` + id + ` ` + code + ` — "` + req + `"`,
+	} {
+		got := r.say(react)
+		if strings.Contains(got, code) {
+			t.Fatalf("reaction %q replied with the code: %q", react, got)
+		}
+	}
+	for _, m := range r.agent.got() {
+		if strings.Contains(m, code) || strings.Contains(m, "Reply YES") {
+			t.Fatalf("agent got the request's text or code: %q", m)
+		}
+	}
+	if len(r.agent.got()) != 5 {
+		t.Fatalf("agent got %q, want 5 reaction events", r.agent.got())
+	}
+	if d := r.decisions(); len(d) != 0 {
+		t.Fatalf("a reaction decided %v", d)
+	}
+	// A quote of a text with a code in it, not a request.
+	r.ch.Converse("Your sign-in code is 482913 for the page.")
+	r.inbox()
+	r.say(`Pinned “Agent: Your sign-in code is 482913 for the page.”`)
+	g := r.agent.got()
+	if last := g[len(g)-1]; strings.Contains(last, "482913") {
+		t.Fatalf("agent got the code: %q", last)
+	}
+}
+
+// #2201: the owner's own text that starts like a reaction and holds a
+// second quote is chat, delivered whole.
+func TestOwnerTextWithInnerQuotesIsChat(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	r.say(`Liked "a" and "b"`)
+	r.say(`Loved “the plan” or “the other plan”`)
+	want := []string{`Liked "a" and "b"`, `Loved “the plan” or “the other plan”`}
+	if got := r.agent.got(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("agent got %q, want the texts as chat %q", got, want)
+	}
 }
