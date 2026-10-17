@@ -443,3 +443,18 @@ func TestOP2SettlePathsAreClean(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CH-12, CH12-mms-c
+// A picture record is audit only: a trail with one is clean, and one that
+// names an intent is caught.
+func TestPictureRecordsNameNoIntent(t *testing.T) {
+	tr := &trail{}
+	tr.add(journal.Record{Type: journal.RecPicture, Picture: &journal.PictureNote{From: journal.PictureOwner}})
+	if v := Journal(tr.recs, Options{}); len(v) > 0 {
+		t.Fatalf("a picture record rejected: %v", v)
+	}
+	tr.add(journal.Record{Type: journal.RecPicture, ID: "x", Picture: &journal.PictureNote{From: journal.PictureOther}})
+	if v := Journal(tr.recs, Options{}); len(v) != 1 || !strings.Contains(v[0].Detail, "names an intent") {
+		t.Fatalf("a picture record naming an intent: %v", v)
+	}
+}
