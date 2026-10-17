@@ -2,9 +2,11 @@
 
 Board row: issue #1725 (tier A, class:release). Requirement IDs: DEV-2, CH-7, CH-12.
 
-**Scope:** `broker/netguard/sources.go`, `broker/netguard/sources_test.go`, `broker/netguard/ASSUMPTIONS.md` (N9), `broker/localui/server.go`, a new `broker/localui/signout_test.go`. No other localui file (open builds touch `pages.go`, `setup.go`, `setuphooks.go`; D-111).
+**Scope:** `broker/netguard/sources.go`, `broker/netguard/sources_test.go`, `broker/netguard/watch_test.go` (the flushed-entry case now takes one more read), `broker/netguard/ASSUMPTIONS.md` (N9), `broker/localui/server.go`, a new `broker/localui/signout_test.go`. No other localui file (open builds touch `pages.go`, `setup.go`, `setuphooks.go`; D-111).
 
 **Gate:** tier A: L3 and security lens on the strongest model.
+
+**Acceptance tests:** DEV-2: `TestUnknownStartMACThenRouterSwapKeepsTheEndRoutersAddress` (`broker/netguard/sources_test.go`). CH-7, CH-12: `TestSignOutRefusedBeforeRevokeIsIncompleteAndRetries`, `TestSignOutWithNoOwnerIsIncomplete`, `TestSignOutOfUnknownTokenEnds`, `TestSignOutLostResponseThenRetryEnds`, `TestSignOutConfirmedEnds`, `TestSignOutRetryIsSameOriginOnly` (`broker/localui/signout_test.go`).
 
 ## Defect 1: netguard (DEV-2)
 `Sources.Read` compares the gateway MAC across the NAT-PMP wait only when one was known at the start. With no MAC at the start, a swap from router A to router B at the same address and interface files A's answer under B's key, so B's real external address stops being refused.
