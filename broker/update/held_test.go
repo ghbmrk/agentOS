@@ -123,7 +123,7 @@ func TestNonAnchorNoteErrorStillFails(t *testing.T) {
 
 // heldStep is each owner step an anchor-held line may name.
 var heldStep = map[string]*regexp.Regexp{
-	"unlock":     regexp.MustCompile(`(?i)unlock the box with your card`),
+	"unlock":     regexp.MustCompile(`(?i)unlock me with your card`),
 	"trust":      regexp.MustCompile(`(?i)trust this PC again`),
 	"restart":    regexp.MustCompile(`(?i)\brestart\b`),
 	"move-drive": regexp.MustCompile(`(?i)move the drive back`),

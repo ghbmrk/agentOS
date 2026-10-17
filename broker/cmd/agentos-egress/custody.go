@@ -136,7 +136,7 @@ const noteCounterReset = "This PC's copy check was reset. If you cleared this PC
 // an update counter and this PC has no TPM to read it (SR3-6-f5c): the
 // counter is intact and trust answers errNoTPM here, so the steps are a
 // restart (a chip not found at start) and the PC the drive was set up on.
-const noteAnchorElsewhere = "This PC has no security chip the box can use, so it can't check updates. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
+const noteAnchorElsewhere = "This PC has no security chip I can use, so I can't check updates. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
 
 // noteTPMSilent is the owner's notice when this PC's TPM does not answer
 // the rollback check; the detail goes to the log only (UX-45-3).

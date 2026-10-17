@@ -189,9 +189,9 @@ func (e heldErr) Unwrap() []error { return []error{ErrAnchorHeld, e.error} }
 // names only a step that works, and none carries error text.
 const (
 	heldPrefix      = "Updates that need a tester's report are waiting: "
-	heldLocked      = heldPrefix + "unlock the box with your card."
+	heldLocked      = heldPrefix + "unlock me with your card."
 	heldMissing     = heldPrefix + "unlock with your card to trust this PC again."
-	heldElsewhere   = heldPrefix + "this PC has no security chip the box can use. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
+	heldElsewhere   = heldPrefix + "this PC has no security chip I can use. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
 	heldNotAnswered = heldPrefix + "this PC's security chip didn't answer. Restart the PC."
 )
 
