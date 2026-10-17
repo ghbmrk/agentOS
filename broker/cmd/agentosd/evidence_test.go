@@ -234,17 +234,17 @@ func noPage(t *testing.T, s string) {
 	}
 }
 
-// TestLongRepliesAreKept: with no destination, a reply too long for one
-// text is kept whole (potency C1) and the text says where it was cut and
-// what to ask (UX ruling on #148).
+// TestLongRepliesAreKept: with no destination, a reply too long for three
+// texts is kept whole (potency C1) and the third text says where it was
+// cut and what to ask (UX ruling on #148; CH-12, D-127).
 func TestLongRepliesAreKept(t *testing.T) {
 	if maxText != control.MaxText {
 		t.Fatal("the owner channel's text limit changed")
 	}
 	r := newEvRig(t, "")
-	long := strings.Repeat("All of this is the reply. ", 30)
+	long := strings.Repeat("All of this is the reply. ", 80)
 	r.ev.reply("agent", true, long, "")
-	got := r.texts()[0]
+	got := r.texts()[2]
 	if len(owner.AgentPrefix+got) > control.MaxText || !strings.HasSuffix(got, " "+keptLong) || !strings.HasPrefix(got, "All of this") {
 		t.Fatalf("text %q", got)
 	}
@@ -254,7 +254,7 @@ func TestLongRepliesAreKept(t *testing.T) {
 	}
 	fits := strings.Repeat("x", control.MaxText-len(owner.AgentPrefix))
 	r.ev.reply("agent", false, fits, "")
-	if r.texts()[1] != fits || len(r.ev.kept.list()) != 1 {
+	if r.texts()[3] != fits || len(r.ev.kept.list()) != 1 {
 		t.Fatal("a reply that fits was kept")
 	}
 }

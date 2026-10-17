@@ -271,6 +271,12 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 |---|---|---|---|
 | RS1 | **An unsaved approval answer shows in STATUS (OWNER-retire-surface, #1971).** `newOwnerPacer` adds the owner's `RetireNote` to `cfg.Notes` after its held line; the pacer's minute tick logs `RetireErr` once per distinct cause, and again only after it has cleared and recurs. No owner text is sent: the failure is a full or broken state disk, which an owner text would not fix and which STATUS already reports on ask. | SM-AJ-4, OP-11 | If the owner should be texted unprompted, add it to the digest's problem lines, not a new text. |
 
+## ap-net.json reconciled with the vault (#1696)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| AR1 | **agentosd puts the vault's committed Wi-Fi network back in `ap-net.json` (CTRL-card-rot-ap-2-s8).** `watchCommittedWiFi` asks the verify socket's `GET /committed-wifi` at start and every `apUpEvery`; after a reconcile it only asks, so it writes again only after the vault was seen locked and then open again. It writes only over a file that parses and holds the same SSID, a network that passes `apnet.Validate`, by `durable.WriteFile` at 0600 (a failed directory sync counts as written), and not at all when the file already matches. A missing or invalid file, another name or an invalid network is refused once per open and logged without either network (CH-7). No card, a Wi-Fi part still owed, or no answer is asked again on the next tick. | REC-4, CH-7 | A lock-and-unlock missed between two ticks is not seen; the next unlock is. A rotation that changes the SSID would need the name rule changed here and in `rotateAPNet`. |
+| AR2 | `apNetMu` is held across the vault read and the write in both `reconcileAPNet` and `rotateAPNet`'s page rotation, so a reconcile that read the vault before a commit cannot overwrite that rotation's newer network. | REC-4 | A third writer of `ap-net.json` in this process must take it too. |
 ## FORGET item 2 with recall off and no agent machine (JRN-startup-reconcile s5, #1412)
 
 | # | Assumption | Spec basis | If it changes |
@@ -281,3 +287,17 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | CG1 | **No open guard means restricted.** `questions.openClock` opens the guard before the owner channel and question book, so neither failing leaves the sleeper or STATUS without it. While no guard is open (before `qs.start`, or after `clock.New` fails) `restricted()` holds and STATUS says the time check is not running. The sleeper is wired after `qs.start`, so in a healthy start it never sees the nil window. | TIM-1 | If something time-sensitive must run before `qs.start`, open the guard earlier in `main.go`. |
+
+## Agent replies are conversation (CH15-converse)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| CV1 | **Every outbox reply answers one owner message.** `evidence.attach` sends outbox replies through `owner.Channel.Converse`, unheld and uncounted, because guest `POST /owner/reply` binds each to one pending owner message ID (first answer only, 404 unknown, 409 different hash). The owner's own texts therefore bound how many go. | CH-15, CH-19 | If the outbox ever carries agent text the owner did not ask for, that text must go through `Notify` (paced) instead. |
+
+## Long agent replies go as up to three texts (CH12-reply-split)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| SP1 | **The modem keeps send order.** `sendSplit` sends a reply's texts one after another and stops at the first that does not go, so the owner never gets a later part without an earlier one; the phone's display order is the carrier's. | CH-12 | If sends become concurrent or queued out of order, number the parts. |
+| SP2 | **A cut is never a stub.** Each cut takes the strongest boundary (paragraph, line, sentence end, word) in the second half of the text, so an early line break does not cost a fourth text. | CH-12 | If the spec ranks boundaries strictly, drop the second-half window. |
+| SP3 | **No page pointer yet.** Past three texts the third ends with `keptLong`, not CH-12's local-UI pointer, because the local page shows kept replies only once CH-20p lands (UX U2). | CH-12, CH-19, CH-20 | When CH-20p ships, `keptLong` becomes the pointer to the kept reply. |

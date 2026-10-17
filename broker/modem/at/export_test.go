@@ -1,6 +1,10 @@
 package at
 
-import "time"
+import (
+	"encoding/hex"
+	"strings"
+	"time"
+)
 
 func init() { simRetry = time.Millisecond }
 
@@ -53,4 +57,22 @@ func (m *Modem) PendingFrom(addr string) int {
 		}
 	}
 	return n
+}
+
+// DeliverPush encodes an 8-bit SMS-DELIVER from a number carrying udh (the
+// IEIs, without the length octet) and body, as a WAP push arrives. A dcs
+// of 0 means 0x04 (8-bit data).
+func DeliverPush(from string, dcs byte, udh, body []byte) string {
+	oa, _ := encodeAddr(from)
+	if dcs == 0 {
+		dcs = 0x04
+	}
+	b := []byte{0x07, 0x91, 0x51, 0x55, 0x00, 0x00, 0x00, 0xF0, 0x44}
+	b = append(b, oa...)
+	b = append(b, 0x00, dcs)
+	b = append(b, scts(sctsFixed)...)
+	ud := append(append([]byte{byte(len(udh))}, udh...), body...)
+	b = append(b, byte(len(ud)))
+	b = append(b, ud...)
+	return strings.ToUpper(hex.EncodeToString(b))
 }

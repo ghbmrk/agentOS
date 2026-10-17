@@ -141,8 +141,12 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		mutate   func(l *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS
 		late     bool   // holdLate holds the reply the stranger's text drew
 		want     string // "" passes
+		notice   bool   // the box's line sends recoveryNotice before its first reply
+		note     string // the step's note, "" for none
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
+		{name: "recovery notice passed over and noted", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			notice: true, note: "passed-over recovery notices=1 texts=2 requests=1"},
 		{name: "setup not finished", st: owner.State{LastStep: step}, enrolled: true, want: `setup not finished: GET /setup 200 "" at "7. AI"`},
 		{name: "stranger answered", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(l *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
@@ -201,6 +205,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 					case <-ctx.Done():
 						return
 					case m := <-line.Inbox():
+						if c.notice {
+							c.notice = false
+							_ = line.Send(phoneNum, recoveryNotice)
+						}
 						if c.mutate != nil {
 							n := len(carrier.Log())
 							m = c.mutate(line, carrier, m)
@@ -231,8 +239,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			go ch.Run(ctx)
+			var notes []string
 			d := &driver{carrier: carrier, seed: seed, now: clk.now, sleep: clk.sleep,
-				phone: &http.Client{Transport: c.done, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+				phone: &http.Client{Transport: c.done, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+				note:  func(s string) { notes = append(notes, s) }}
 			if c.enrolled {
 				d.codeStep = step
 			}
@@ -243,9 +253,16 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
 				t.Fatalf("%v, want %q", err, c.want)
 			}
+			if got := strings.Join(notes, "|"); got != c.note {
+				t.Fatalf("notes %q, want %q", got, c.note)
+			}
 		})
 	}
 }
+
+// recoveryNotice is modemlink's notice after an outage that lost one
+// approval request and one other text, as recoveryText words it.
+const recoveryNotice = "I couldn't text you from 12:00 to 12:05. 1 approval request and 1 other text didn't reach you; your agent can ask again."
 
 // answered reports whether a text from the box is among ms.
 func answered(ms []modem.SMS) bool {

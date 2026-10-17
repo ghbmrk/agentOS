@@ -1,10 +1,11 @@
-"""Tests for tools/g1_scope.py, its lists and its workflow (G1-freeze, #1687).
+"""Tests for tools/g1_scope.py, its lists and its workflow (G1-freeze, #1687; G2, D-128).
 
-No requirement IDs: CI tooling that holds work to the G1 path (A1, D-104), not SPEC.md
-behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
+No requirement IDs: CI tooling that holds work to a gate's path (G1: A1, D-104; G2: A4, A5,
+A9 and A14, D-128), not SPEC.md behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
 G1 fixes pass), -b (PRs opened before the freeze and exempt-pr lines), -c (records-only and empty changes), -d (the
 switch), -e (fail closed), -f (the list keeps up with the G1 binaries' imports) and -g (a PR
 reopened, force-pushed or retargeted after the freeze began loses the time exemption, #1717).
+D-128 adds -h: every gate's list applies, G1's is off and G2's is on.
 """
 import os
 import pathlib
@@ -19,6 +20,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import g1_scope as g  # noqa: E402
 
 LIST = (ROOT / "tools" / "g1_scope.txt").read_text()
+G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_text()
+G2 = g.GATES[1]
 
 # The binaries the G1 path ships or runs (see the header of tools/g1_scope.txt).
 G1_BINARIES = (
@@ -26,6 +29,8 @@ G1_BINARIES = (
     "agentos-netjoin", "agentos-guest-bridge", "agentos-seller", "agentos-checker",
     "agentos-clock-boot", "agentos-hostdisk",
 )
+# G2's binaries: G1's plus the key holder and the release signer (header of g1_scope_g2.txt).
+G2_BINARIES = G1_BINARIES + ("agentos-holder", "agentos-release")
 
 SMALL = """
 freeze on
@@ -153,8 +158,8 @@ class CheckTest(unittest.TestCase):
             pathlib.Path(d, "f").write_text("0")
             git("add", "f")
             git("commit", "-qm", "base")
-            os.makedirs(pathlib.Path(d, "broker/voice"))
-            pathlib.Path(d, "broker/voice/v.go").write_text("package voice")
+            os.makedirs(pathlib.Path(d, "broker/attention"))
+            pathlib.Path(d, "broker/attention/a.go").write_text("package attention")
             git("add", ".")
             git("commit", "-qm", "head")
             cwd = os.getcwd()
@@ -175,6 +180,36 @@ class CheckTest(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_messages_name_the_gate_and_its_list(self):  # G1-freeze-h
+        ok, msg = g.check(["broker/attention/a.go"], SMALL, gate=G2)
+        self.assertFalse(ok)
+        self.assertTrue(msg[0].startswith("g2 freeze:"), msg)
+        text = "\n".join(msg)
+        self.assertIn("outside the G2 list (tools/g1_scope_g2.txt)", text)
+        self.assertIn("A4, A5, A9 and A14 pass on a VM", text)
+        self.assertNotIn("g1_scope.txt", text)
+        with self.assertRaisesRegex(g.ListError, "g1_scope_g2.txt"):
+            g.check(["x"], "freeze on\n", gate=G2)
+
+    def test_a_pr_must_pass_every_gate(self):  # G1-freeze-h
+        with tempfile.TemporaryDirectory() as d:
+            here, g.HERE = g.HERE, pathlib.Path(d)
+            shutil.copy(here / "ci_scope.py", d)
+            try:
+                lists = {"g1_scope.txt": SMALL.replace("freeze on", "freeze off"),
+                         "g1_scope_g2.txt": SMALL}
+                for name, text in lists.items():
+                    pathlib.Path(d, name).write_text(text)
+                with _quiet():
+                    self.assertEqual(g.main(["broker/localui/x.go"]), 0)
+                    self.assertEqual(g.main(["broker/voice/v.go"]), 1)
+                    pathlib.Path(d, "g1_scope.txt").write_text(SMALL.replace("allow image/\n", ""))
+                    self.assertEqual(g.main(["image/build.sh"]), 1)
+                    pathlib.Path(d, "g1_scope_g2.txt").unlink()
+                    self.assertEqual(g.main(["broker/localui/x.go"]), 2)
+            finally:
+                g.HERE = here
+
 
 class _quiet:
     def __enter__(self):
@@ -187,36 +222,48 @@ class _quiet:
 
 
 class ListTest(unittest.TestCase):
-    def test_checked_in_list_parses(self):  # G1-freeze-d, -e
-        g.parse_list(LIST)
-        # The switch is one line, so lifting the freeze is a one-line diff.
-        self.assertEqual(len([l for l in LIST.splitlines() if l.startswith("freeze ")]), 1)
+    def test_checked_in_lists_parse(self):  # G1-freeze-d, -e, -h
+        for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
+            g.parse_list(text, name)
+            # The switch is one line, so lifting a freeze is a one-line diff.
+            self.assertEqual(len([l for l in text.splitlines() if l.startswith("freeze ")]), 1, name)
+
+    def test_g1_is_off_and_g2_is_on(self):  # G1-freeze-h (D-128)
+        self.assertEqual([gate[1] for gate in g.GATES], ["g1_scope.txt", "g1_scope_g2.txt"])
+        self.assertFalse(g.parse_list(LIST)[0])
+        self.assertTrue(g.parse_list(G2_LIST, "g1_scope_g2.txt")[0])
 
     def test_every_entry_exists(self):  # G1-freeze-f
-        _, _, allow, frozen, _ = g.parse_list(LIST)
-        # broker/provagent/ is listed ahead of #1314 (CAP-11-plan), which creates it.
-        new = {"broker/provagent/"}
-        for e in allow + frozen:
-            if e not in new:
-                self.assertTrue((ROOT / e).exists(), f"{e} names nothing in the repo")
+        for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
+            _, _, allow, frozen, _ = g.parse_list(text, name)
+            for e in allow + frozen:
+                self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
 
-    def test_frozen_paths_stay_out(self):  # G1-freeze-a
-        for p in ("broker/voice/v.go", "broker/cmd/agentos-builder/main.go", "guest/builder/x",
-                  "spikes/S10-pact/x", "broker/loops/x.go", "broker/newpkg/x.go", "newdir/x",
-                  # One model route (D-104, ChatGPT plan): the API-key adapters freeze.
-                  "broker/route/anthropic.go", "broker/route/testdata/anthropic_stream.sse",
-                  "broker/route/openai.go", "broker/route/testdata/openai_stream.sse"):
-            self.assertFalse(g.check([p], LIST)[0], p)
+    def test_frozen_paths_stay_out(self):  # G1-freeze-a, -h
+        # D-098's groups and what no G2 test needs.
+        for p in ("broker/loops/x.go", "broker/loop7/x.go", "broker/machprobe/x.go",
+                  "broker/sockprobe/x.go", "broker/compile/x.go", "broker/skill/x.go",
+                  "broker/cleanroom/x.go", "broker/hint/x.go", "broker/pubid/x.go",
+                  "broker/pubsend/x.go", "broker/sipsign/x.go", "broker/smsapi/x.go",
+                  "broker/sendrules/x.go", "broker/attention/x.go", "broker/floor/x.go",
+                  "broker/photo/x.go", "broker/probecmd/x.go", "broker/cmd/agentos-builder/main.go",
+                  "broker/cmd/agentos-a8scan/main.go", "guest/builder/x", "spikes/S10-pact/x",
+                  "evals/review/x", "broker/newpkg/x.go", "newdir/x"):
+            self.assertFalse(g.check([p], G2_LIST, gate=G2)[0], p)
         for p in ("broker/localui/x.go", "broker/cmd/agentosd/main.go", "image/build.sh",
-                  "guest/openclaw/x", "spikes/CTRL-spike/x", "tools/g1_scope.txt", "SPEC.md",
-                  "guest/codex/x", "broker/provagent/x.go", "broker/route/route.go"):
-            self.assertTrue(g.check([p], LIST)[0], p)
+                  "guest/openclaw/x", "guest/codex/x", "spikes/CTRL-spike/x", "spikes/S8-live/x",
+                  "tools/g1_scope_g2.txt", "SPEC.md", "broker/provagent/x.go",
+                  "broker/route/route.go", "broker/route/anthropic.go", "broker/voice/v.go",
+                  "broker/browser/x.go", "broker/recall/x.go", "broker/projection/x.go",
+                  "broker/holder/x.go", "broker/cmd/agentos-holder/main.go",
+                  "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh"):
+            self.assertTrue(g.check([p], G2_LIST, gate=G2)[0], p)
 
 
 class GoImportsTest(unittest.TestCase):
     # Its own class so the records-only CI run, which sets up no Go, can name the other two:
     # a records-only change cannot change what the G1 binaries import.
-    def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f
+    def test_lists_cover_their_binaries_imports(self):  # G1-freeze-f, -h
         go = shutil.which("go")
         if not go:
             if os.environ.get("CI"):
@@ -225,18 +272,19 @@ class GoImportsTest(unittest.TestCase):
         broker = ROOT / "broker"
         mod = subprocess.run([go, "list", "-m"], cwd=broker, check=True,
                              capture_output=True, text=True).stdout.strip()
-        out = subprocess.run([go, "list", "-deps", *[f"./cmd/{b}" for b in G1_BINARIES]],
-                             cwd=broker, check=True, capture_output=True, text=True).stdout
-        _, _, allow, frozen, _ = g.parse_list(LIST)
-        missing = []
-        for pkg in out.split():
-            if pkg.startswith(mod + "/"):
-                path = "broker/" + pkg[len(mod) + 1:] + "/"
-                # A package listed file by file (broker/route/) counts when any entry is in it.
-                if not any(path.startswith(e) if e.endswith("/") else e.startswith(path)
-                           for e in allow + frozen):
-                    missing.append(path)
-        self.assertEqual(missing, [], "G1 binaries import packages tools/g1_scope.txt does not name")
+        for gate, text, binaries in (("G1", LIST, G1_BINARIES), ("G2", G2_LIST, G2_BINARIES)):
+            out = subprocess.run([go, "list", "-deps", *[f"./cmd/{b}" for b in binaries]],
+                                 cwd=broker, check=True, capture_output=True, text=True).stdout
+            _, _, allow, frozen, _ = g.parse_list(text)
+            missing = []
+            for pkg in out.split():
+                if pkg.startswith(mod + "/"):
+                    path = "broker/" + pkg[len(mod) + 1:] + "/"
+                    # A package listed file by file (broker/route/) counts when any entry is in it.
+                    if not any(path.startswith(e) if e.endswith("/") else e.startswith(path)
+                               for e in allow + frozen):
+                        missing.append(path)
+            self.assertEqual(missing, [], f"{gate} binaries import packages its list does not name")
 
 
 if __name__ == "__main__":

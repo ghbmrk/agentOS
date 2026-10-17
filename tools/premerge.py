@@ -16,7 +16,9 @@ neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved else
 those files need a delta review. Git 2.38 or later, no network; fetch first.
 
 `--needs-mark` lists the files of base..head that make the PR one that merges only on Mark's own approval of
-it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
+it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
+(the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
+usage error (exit 2).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
@@ -83,7 +85,7 @@ def _replayed(cwd, reviewed, onto):
 
 
 # Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml (and metrics-refresh.yml), board.yml, records.yml.
+# metrics.yml, board.yml, records.yml.
 BOT = {
     "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
     "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
@@ -154,10 +156,16 @@ def main(argv):
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
+        if len(args) > 1:  # `--needs-mark origin/main pr` would read origin/main as the head: pass --base
+            print(__doc__)
+            return 2
         head = args[0] if args else "HEAD"
         onto = _git(".", "merge-base", base, head).decode().strip()
-        out = _git(".", *DIFF, onto, head).decode(errors="surrogateescape")
-        hit = mark_paths(f for f in out.split("\0") if f)
+        files = [f for f in _git(".", *DIFF, onto, head).decode(errors="surrogateescape").split("\0") if f]
+        if not files:  # `--needs-mark origin/main` reads origin/main as the head: an empty range is never `agent`
+            print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
+            return 2
+        hit = mark_paths(files)
         print("mark " + " ".join(hit) if hit else "agent")
         return 1 if hit else 0
     if not 1 <= len(args) <= 2:
