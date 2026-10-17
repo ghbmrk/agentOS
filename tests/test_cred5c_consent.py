@@ -73,7 +73,7 @@ class Consent(unittest.TestCase):
                             r"reply PLAN ChatGPT ON\.\"\)",
                          f"SPEC.md:{n} CH-11 bare RESUME no longer names the route command")
         self.assertIn("when the owner paused that route, withdrew or has not yet given its consent, or had its login refused; "
-                      "for a route a security notice paused it replies with that route's STATUS line instead (CRED-5)", t,
+                      "for a route a security notice paused it replies with that route's STATUS line instead;", t,
                       f"SPEC.md:{n} CH-11 bare RESUME names PLAN ON for a notice-paused route")
 
     def check_step6(self, t, n):
