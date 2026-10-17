@@ -1,0 +1,20 @@
+# In-flight memory budget: assumptions
+
+Built for RES-5-membudget against SPEC RES-5 and OP-8. It replaces the
+clean room's fixed `maxInFlight` and loopbuild's `maxConns`, `maxInFlight`
+and one-call model lock with admission by memory, on the egress proxy's
+design (#2294): a byte budget, a reservation before buffering, a measured
+cost factor, with waiting in place of refusal. Mark's "Widen" tap on
+Decisions 7 (2026-10-17T21:39:07Z) extends the D-098 exemption for the
+frozen clean room to this change.
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| I1 | **The budget is a quarter of the process's memory limit.** `MemoryLimit` is the least of GOMEMLIMIT, the host's MemTotal, and `memory.max` and `memory.high` on the cgroup v2 path from the process's group to the root (D-111). With no unit limit set, that is MemTotal, so the budget is MemTotal/4; agentosd's unit should set `MemoryMax`. The other three quarters are for the rest of the process. Every guest socket in a process shares the one budget (`Default`); a test or caller may pass its own size. | RES-5, D-111 | Set the unit's MemoryMax, or change the divisor in `Default`. |
+| I2 | **Costs are measured worst cases.** `Model` (4 MiB + 64 KiB, plus 104 per body byte) covers meter.Wrap reading the body, decoding it top level into a map and re-encoding it, for the costliest shape measured (many short top-level keys, 96x), plus one caller copy. `Decode` (64 KiB plus 32 per byte) covers a struct holding a map of strings (30x). `ConnCost` (128 KiB) covers a connection's goroutine, buffers and one `MaxHeaderBytes` (16 KiB) header block. `TestRouteCostsCoverWhatHandlersAllocate` in each package checks the route costs against what the handlers allocate. | RES-5 | A handler change that allocates more fails that test first; remeasure and raise the factor. |
+| I3 | **The provider honours the call's output limit.** The model floor holds the provider's answer as the meter examines it, sized for a 4 MiB answer. A provider that ignores `max_tokens` and streams a larger answer is outside the reservation. | OP-8 | Cap the response read in the meter, or raise the floor. |
+| I4 | **Waiting, not refusal.** A request that does not fit waits, unread, in arrival order (x/sync `semaphore.Weighted` is FIFO), for up to the gate's wait (10 min on both sockets), then gets 503 with `Retry-After: 1`. Only a request that could never fit in the guest's share gets 413, before its body is read. A body sent without a length reserves the route's largest body, so a guest should send `Content-Length`. Reservations never grow after a read, so a waiting request cannot deadlock one already reading. | RES-5 | — |
+| I5 | **One guest holds at most half the budget.** Each gate has its own share of size/2 inside the process budget, so one guest cannot starve a second. With more than two busy guests, the process budget can be full and a guest waits for others; its waits time out at 10 min. | RES-5, OP-8 | Make the share a fraction of the number of guests. |
+| I6 | **Connections yield to requests.** Each open connection holds `ConnCost`; past the share, `Accept` waits and further connections wait in the kernel's queue with no file descriptor. A waiting `Accept` polls (20 ms) with `TryAcquire`, which fails while any request waits, so it never sits at the head of the queue in front of the requests that would let a guest's connections close. Open descriptors are bounded by budget/ConnCost, which must stay under the unit's `LimitNOFILE`. | RES-5, OP-8 | — |
+| I7 | **meter.Wrap's `MaxBody` stays 8 MiB** (`ModelBody`). The model route admits bodies up to it and reserves from it. | OP-8 | Change `ModelBody` with it. |
+| I8 | **The job token cap is soft by one call (loopbuild B5).** Model calls run at once; each is checked against the job's use including in-flight reservations, so concurrent calls cannot each pass on a stale reading. A call's input is still reserved at a quarter token per byte and charged at what the provider reports, so the cap can be passed by one call plus that underestimate. | OP-8 | Reserve input tokens from a tokenizer count. |
