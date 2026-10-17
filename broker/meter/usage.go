@@ -119,8 +119,9 @@ func Report(ctx context.Context, u Usage) bool {
 }
 
 // Another asks the metered call running on ctx to cover one more upstream
-// attempt at its worst charge (its input estimate plus its full output
-// reservation; Attempt.charge). The meter holds that much more for the
+// attempt at its worst charge (its input as admitted, the estimate or
+// under WrapBound the bound, plus its full output reservation;
+// Attempt.charge). The meter holds that much more for the
 // call against every limit it counts against, or refuses if the hold
 // would pass one. A hold is settled with the call (Done), so what was not
 // used is refunded. False when ctx is not a metered call.

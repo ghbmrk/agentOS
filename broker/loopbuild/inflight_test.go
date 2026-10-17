@@ -253,3 +253,64 @@ func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
 		}
 	}
 }
+
+// RES-5 (security on #2327): model calls in flight together cannot pass
+// the job token cap by more than one call, even when the provider counts a
+// token per byte, four times the meter's estimate.
+func TestParallelCallsKeepJobTokenCap(t *testing.T) {
+	const cap, n, rounds, pad = 10000, 16, 3, 2000
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	in, biggest := 0, 0
+	all := make(chan struct{})
+	var once sync.Once
+	var jobID string
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		jobID = id
+		c := guestClient(dir)
+		for range rounds {
+			var wg sync.WaitGroup
+			for range n {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 10, "pad": strings.Repeat("a", pad)})
+				}()
+			}
+			wg.Wait()
+		}
+		call(c, "POST", "/done", nil)
+	}
+	b := newBuilder(t, f, func(c *Config) {
+		c.Meter, c.JobTokens = mtr, cap
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				in++
+				biggest = max(biggest, len(body))
+				if in == n {
+					once.Do(func() { close(all) })
+				}
+				mu.Unlock()
+				select {
+				case <-all:
+				case <-time.After(300 * time.Millisecond):
+				}
+				mu.Lock()
+				in--
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"usage":{"prompt_tokens":%d,"completion_tokens":10}}`, len(body))
+			})
+		}
+	})
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	if got, most := mtr.Usage(jobID).Tokens, int64(cap+biggest+10); got > most {
+		t.Errorf("job used %d tokens; the cap is %d, soft by one call (%d)", got, cap, most)
+	}
+}

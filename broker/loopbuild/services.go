@@ -315,7 +315,10 @@ func (s *session) model() http.Handler {
 	// counts the call's input and its whole output reservation at once)
 	// run under one lock, so each call is checked against every earlier
 	// call's charge, in flight or settled, and concurrent calls cannot
-	// pass the cap together (security R3 on #126). The body is read before
+	// pass the cap together (security R3 on #126). WrapBound charges each
+	// call's input at one token per byte, its upper bound, until it
+	// settles, so calls in flight together cannot pass the cap by their
+	// input estimates' shortfall either (security on #2327). The body is read before
 	// the lock and the lock is let go once the call is charged, so calls
 	// run at once and a slow upload holds no other call back (RES-5).
 	var mu sync.Mutex
@@ -338,7 +341,7 @@ func (s *session) model() http.Handler {
 			http.Error(w, "this job's model budget is spent", http.StatusTooManyRequests)
 			return
 		}
-		b.cfg.Meter.Wrap(s.id, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.cfg.Meter.WrapBound(s.id, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			unlock() // charged: Wrap calls next only after StartFor
 			model.ServeHTTP(w, r)
 		})).ServeHTTP(w, r)

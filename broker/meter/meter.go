@@ -738,6 +738,20 @@ func Tokens(n int64) int64 { return (n + 3) / 4 }
 // never reaches next. The call counts against the goal the broker put on
 // the request's context (WithGoal), if any.
 func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
+	return m.wrap(machine, next, false)
+}
+
+// WrapBound is Wrap admitting each call at its input's upper bound, one
+// token per body byte (a byte-level token is at least one byte), not the
+// estimate; the call still settles at what the provider reports. Calls in
+// flight at once then cannot pass a limit together by their estimates'
+// shortfall, so a caller that runs a machine's calls concurrently uses it
+// (RES-5, OP-8).
+func (m *Meter) WrapBound(machine string, next http.Handler) http.Handler {
+	return m.wrap(machine, next, true)
+}
+
+func (m *Meter) wrap(machine string, next http.Handler, bound bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, m.cfg.MaxBody+1))
 		if err != nil {
@@ -754,7 +768,11 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		c, err := m.StartFor(machine, GoalFrom(r.Context()), in, reserve)
+		admit := in
+		if bound {
+			admit = max(in, int64(len(body)))
+		}
+		c, err := m.StartFor(machine, GoalFrom(r.Context()), admit, reserve)
 		if err != nil {
 			code, msg := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it"
 			if !errors.Is(err, ErrExhausted) {
@@ -769,7 +787,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
 		defer cancel()
-		rep := &reportSlot{call: c, in: in, reserve: reserve}
+		rep := &reportSlot{call: c, in: admit, reserve: reserve}
 		r = r.WithContext(context.WithValue(ctx, reportKey{}, rep))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))

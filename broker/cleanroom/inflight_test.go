@@ -278,3 +278,63 @@ func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
 		}
 	}
 }
+
+// RES-5 (security on #2327): model calls in flight together cannot pass
+// the meter's per-machine cap, even when the provider counts a token per
+// byte, four times the meter's estimate.
+func TestParallelCallsKeepMachineCap(t *testing.T) {
+	const tokens, n, rounds, pad = 10000, 16, 3, 2000
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 1 << 20, Tokens: tokens}, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	in := 0
+	all := make(chan struct{})
+	var once sync.Once
+	var machine string
+	r := newRig(t, func(c *Config) {
+		c.Meter = mtr
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				if in++; in == n {
+					once.Do(func() { close(all) })
+				}
+				mu.Unlock()
+				select {
+				case <-all:
+				case <-time.After(300 * time.Millisecond):
+				}
+				mu.Lock()
+				in--
+				mu.Unlock()
+				fmt.Fprintf(w, `{"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":10}}`, len(body))
+			})
+		}
+	})
+	body := []byte(`{"model":"m","max_tokens":10,"messages":[],"pad":"` + strings.Repeat("a", pad) + `"}`)
+	r.f.guest = func(id, dir string) {
+		machine = id
+		for range rounds {
+			var wg sync.WaitGroup
+			for range n {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					call(client(dir), "POST", "/model/v1/chat/completions", body)
+				}()
+			}
+			wg.Wait()
+		}
+		call(client(dir), "POST", "/cleanroom/result", goodResult())
+	}
+	r.b.Send(nextDay(), [][]byte{skillHint(t)})
+	r.run()
+	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
+	r.f.wg.Wait()
+	if got := mtr.Usage(machine).Tokens; got > tokens {
+		t.Errorf("machine used %d tokens; its cap is %d", got, tokens)
+	}
+}
