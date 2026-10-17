@@ -228,20 +228,77 @@ func (op Operation) refused(status int) bool {
 	return false
 }
 
+// The causes a route stop records in RouteStops: codes, where the Reason
+// constants are the text the owner and the journal's denials read.
+const (
+	StopLoginRefused = "login-refused"
+	StopUnswappable  = "unswappable"
+)
+
+// RouteStops is the durable record of stopped routes (the journal's
+// StopRoute, ReopenRoute and RouteStopped, OP-11). A route stopped twice
+// keeps its first cause.
+type RouteStops interface {
+	StopRoute(route, cause string) error
+	ReopenRoute(route string) error
+	RouteStopped(route string) (cause string, stopped bool)
+}
+
+// memStops keeps route stops for a proxy with no Config.Stops.
+type memStops map[string]string
+
+func (m memStops) StopRoute(route, cause string) error {
+	if _, ok := m[route]; !ok {
+		m[route] = cause
+	}
+	return nil
+}
+func (m memStops) ReopenRoute(route string) error { delete(m, route); return nil }
+func (m memStops) RouteStopped(route string) (string, bool) {
+	c, ok := m[route]
+	return c, ok
+}
+
+func stopCause(reason string) string {
+	if reason == ReasonLoginRefused {
+		return StopLoginRefused
+	}
+	return StopUnswappable
+}
+
+// stopReason is a recorded cause's Reason. A cause this proxy does not
+// know is held as unswappable: only a release lifts it.
+func stopReason(cause string) string {
+	if cause == StopLoginRefused {
+		return ReasonLoginRefused
+	}
+	return ReasonUnswappable
+}
+
 // stopped returns why adapter's route is stopped, if it is.
 func (p *Proxy) stopped(adapter string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	r, ok := p.stops[adapter]
+	return p.stoppedLocked(adapter)
+}
+
+func (p *Proxy) stoppedLocked(adapter string) (string, bool) {
+	if c, ok := p.stops.RouteStopped(adapter); ok {
+		return stopReason(c), true
+	}
+	r, ok := p.held[adapter]
 	return r, ok
 }
 
-// stop stops adapter's route and tells the owner, once per stop.
+// stop stops adapter's route and tells the owner, once per stop. A stop
+// the store cannot record is held in this proxy (fail closed).
 func (p *Proxy) stop(adapter, reason string) {
 	p.mu.Lock()
-	_, already := p.stops[adapter]
+	_, already := p.stoppedLocked(adapter)
 	if !already {
-		p.stops[adapter] = reason
+		if err := p.stops.StopRoute(adapter, stopCause(reason)); err != nil {
+			p.held[adapter] = reason
+		}
 	}
 	p.mu.Unlock()
 	if !already {
@@ -250,20 +307,39 @@ func (p *Proxy) stop(adapter, reason string) {
 }
 
 // ErrRequalify is Resume's answer for a route stopped by an unswappable
-// response: only a release that requalifies the declaration reopens it,
-// by building a new Proxy.
+// response: only a release that requalifies the declaration reopens it
+// (Requalify).
 var ErrRequalify = errors.New("egress: route stays fallen back until a release requalifies it")
 
 // Resume is the owner's path back to a route the provider refused the login
 // on, once the owner has signed in again. Its caller authenticates the
 // owner (CH-10). It does not reopen a route stopped by an unswappable
-// response (ErrRequalify).
+// response (ErrRequalify), nor one whose reopening the store cannot
+// record.
 func (p *Proxy) Resume(adapter string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if r, ok := p.stops[adapter]; ok && r != ReasonLoginRefused {
+	if r, ok := p.stoppedLocked(adapter); ok && r != ReasonLoginRefused {
 		return ErrRequalify
 	}
-	delete(p.stops, adapter)
+	return p.reopen(adapter)
+}
+
+// Requalify reopens adapter's route whatever stopped it: the release
+// that requalified its declaration calls it (CRED-5t).
+func (p *Proxy) Requalify(adapter string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reopen(adapter)
+}
+
+// reopen lifts adapter's stop. mu must be held.
+func (p *Proxy) reopen(adapter string) error {
+	if _, ok := p.stops.RouteStopped(adapter); ok {
+		if err := p.stops.ReopenRoute(adapter); err != nil {
+			return fmt.Errorf("egress: route stays stopped, its reopening was not recorded: %w", err)
+		}
+	}
+	delete(p.held, adapter)
 	return nil
 }
