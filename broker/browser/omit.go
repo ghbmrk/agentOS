@@ -310,9 +310,10 @@ func omitValues(snapshot string, refs, keep map[string]bool) string {
 	return strings.Join(lines, "\n")
 }
 
-// keptValues maps the index of each line that holds the value of a field
-// in keep to where that value starts: after the ref and attributes on the
-// field's own line, and the whole of a child other than /placeholder.
+// keptValues maps the index of each line that holds the value of an
+// entry field in keep to where that value starts: after the ref and
+// attributes on the field's own line, and the whole of a child other
+// than /placeholder. A typed node with another role keeps nothing.
 func keptValues(lines []string, keep map[string]bool) map[int]int {
 	own := map[int]int{}
 	if len(keep) == 0 {
@@ -320,7 +321,7 @@ func keptValues(lines []string, keep map[string]bool) map[int]int {
 	}
 	for i, line := range lines {
 		start, ok := nameEnd(line)
-		if !ok {
+		if !ok || !isEntry(line) {
 			continue
 		}
 		m := refToken.FindStringSubmatchIndex(line[start:])

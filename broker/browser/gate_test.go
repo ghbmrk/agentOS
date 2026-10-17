@@ -673,3 +673,17 @@ func TestGateOmitsValuesOfFieldsWithoutRefs(t *testing.T) {
 		t.Fatalf("no field counted: %q", r.Snapshot)
 	}
 }
+
+// Security delta 6239752326: typing into a node that is not an entry
+// field (an editable group) exempts nothing under it, so a password copy
+// nested there is still scrubbed.
+func TestGateTypedNonEntryKeepsNothing(t *testing.T) {
+	snap := "- group \"Editor\" [ref=e3]:\n  - text: Note " + pwCanary + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Note"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("copy under a typed group shown: %q", r.Snapshot)
+	}
+}
