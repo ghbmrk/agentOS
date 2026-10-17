@@ -17,6 +17,10 @@ const (
 	wifiSwitched = "My Wi-Fi now uses your new card"
 	wifiKept     = "My Wi-Fi still uses your old card"
 	wifiWarning  = "my Wi-Fi switches to the new password on this card"
+	// #1526 U-2, U-3: the drop is expected now, and the way back names
+	// the Home entry that rotates.
+	wifiDropNow = "Your phone may drop off now"
+	wifiRetry   = "again from Replace Owner Card parts on Home"
 )
 
 // nets counts the Wi-Fi hand-offs agentosd took; the network itself
@@ -46,7 +50,7 @@ func TestRotationOfTheWiFiPasswordSwitchesTheAccessPoint(t *testing.T) {
 		t.Fatalf("handed off %d networks", n)
 	}
 	done := x.get("/rotate/done")
-	if !strings.Contains(done, wifiSwitched) || strings.Contains(done, wifiKept) {
+	if !strings.Contains(done, wifiSwitched) || !strings.Contains(done, wifiDropNow) || strings.Contains(done, wifiKept) {
 		t.Fatalf("done page: %s", done)
 	}
 	if strings.Contains(done, x.gen.WiFiPassword) {
@@ -65,7 +69,7 @@ func TestRotationOfTheWiFiPasswordThatCannotSwitchSaysSo(t *testing.T) {
 		t.Fatalf("confirm: %d %s", w.Code, w.Header().Get("Location"))
 	}
 	done := x.get("/rotate/done")
-	if !strings.Contains(done, wifiKept) || strings.Contains(done, wifiSwitched) {
+	if !strings.Contains(done, wifiKept) || !strings.Contains(done, wifiRetry) || strings.Contains(done, wifiSwitched) {
 		t.Fatalf("done page: %s", done)
 	}
 }
@@ -188,6 +192,24 @@ func TestRotationWithNoConfirmerHandsOffNothing(t *testing.T) {
 	}
 	if n := x.nets(); n != 0 {
 		t.Fatalf("handed off %d networks", n)
+	}
+}
+
+// #1526 L-2 (mutant M14): a post's hand-off is cleared when the post
+// ends, so a later commit outside any post (here ConfirmAnswers after a
+// mismatched post) hands off nothing.
+func TestAPostsWiFiHandOffEndsWithThePost(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"wifi", "recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	if w := x.post("/rotate/card", url.Values{"group": {"ZZZZ"}}); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched post: %d", w.Code)
+	}
+	_, g := x.r.Display().Asks()
+	if err := x.r.Display().ConfirmAnswers(card.Answers{Group: strings.Split(x.gen.RecoveryKey, "-")[g-1]}); err != nil {
+		t.Fatal(err)
+	}
+	if n := x.nets(); n != 0 {
+		t.Fatalf("handed off %d networks after the post ended", n)
 	}
 }
 
