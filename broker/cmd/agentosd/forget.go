@@ -710,6 +710,9 @@ func (f *ownerForget) doneLater(undone int, since time.Time, agentBack, logged b
 // when agent.
 type forgetLogger interface {
 	Append(goal string, at, since time.Time, agent bool) error
+	// Done appends a done marker for goal: its forget's done text has
+	// sent, so a restore owes none (W3-forget-b2c-f1-r2).
+	Done(goal string, at time.Time) error
 }
 
 // logForget appends an approved forget to the forget log, reporting whether it
@@ -1423,6 +1426,7 @@ func (f *ownerForget) say(text string) error {
 func (f *ownerForget) done(ctx context.Context, goal, text string, e owedForget) {
 	err := f.say(text)
 	if err == nil {
+		f.markDone(goal, e)
 		f.paid(goal)
 		return
 	}
@@ -1430,12 +1434,12 @@ func (f *ownerForget) done(ctx context.Context, goal, text string, e owedForget)
 	if err := f.owed.owe(goal, e); err != nil {
 		log.Printf("forget: done text not kept for a restart: %v", err)
 	}
-	go f.tellLater(context.WithoutCancel(ctx), goal, text)
+	go f.tellLater(context.WithoutCancel(ctx), goal, text, e)
 }
 
 // tellLater sends text with backoff until it goes, then drops goal as
 // owed.
-func (f *ownerForget) tellLater(ctx context.Context, goal, text string) {
+func (f *ownerForget) tellLater(ctx context.Context, goal, text string, e owedForget) {
 	if f.toldLater != nil {
 		defer f.toldLater()
 	}
@@ -1447,8 +1451,23 @@ func (f *ownerForget) tellLater(ctx context.Context, goal, text string) {
 			log.Printf("forget: done text not sent yet: %v", err)
 			continue
 		}
+		f.markDone(goal, e)
 		f.paid(goal)
 		return
+	}
+}
+
+// markDone appends a done marker for an item 1 forget in the forget log
+// once its done text has sent, so a restore of a backup from before it
+// owes the owner no second one (R2A). It follows the text: a crash between
+// the two repeats the text, the lesser harm. A failed append is logged and
+// changes nothing else.
+func (f *ownerForget) markDone(goal string, e owedForget) {
+	if f.forgetLog == nil || !e.Logged || e.Agent || goal == owedLostKey {
+		return
+	}
+	if err := f.forgetLog.Done(goal, f.now()); err != nil {
+		log.Printf("forget: forget log done marker: %v", err)
 	}
 }
 
