@@ -43,7 +43,7 @@ const (
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings.
 const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF."
