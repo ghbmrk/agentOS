@@ -2009,10 +2009,9 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		own := g.own
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
-			// Arbitrator Q1 on #48: one fixed line, no code.
-			// Approval class, like the request it announces, so quiet
-			// hours never hold it past that request (W5-Dc-r23, CH-15).
-			_ = own.Post(owner.ClassApproval, "Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
+			// Arbitrator Q1 on #48: one fixed line, no code. It asks
+			// nothing, so it is an update (W5-Dc-r23 f1, #2066).
+			_ = own.Post(owner.ClassUpdate, HeldInstallNotice)
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -2033,6 +2032,13 @@ func (g *Gate) reissuing(id string) bool {
 
 // annotate explains a pending intent to the guest. It never names the
 // request or its code.
+// HeldInstallNotice is the one text the gate sends when it holds an install
+// (a release adoption) for want of a local page. The gate holds one only
+// when no page exists, and no build has a recovery-key flow, so it names
+// neither and asks nothing: CH-12 allows a text to name only steps that work
+// (W5-Dc-r23 f1, #2066). The request stays pending, never denied (GR17).
+const HeldInstallNotice = "A software update is waiting. I can install it once my Wi-Fi page is set up; nothing to do now."
+
 func (g *Gate) annotate(st *journal.Status) {
 	if st.State != journal.Pending {
 		return
