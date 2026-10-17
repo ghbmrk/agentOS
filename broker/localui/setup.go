@@ -956,7 +956,7 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 
 // errPairedUnsent is the number step's note when the paired text did not
 // go (#1293). The pairing stands, so the page moves on and shows it once.
-var errPairedUnsent = errors.New("You are paired, but my text from this box did not go. Save the number my code came from as agentOS.")
+var errPairedUnsent = errors.New("You are paired, but my text did not go. Save the number my code came from as agentOS.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
