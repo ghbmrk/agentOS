@@ -5013,6 +5013,17 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("console| agentos-e2e: PASS a\n", out)
         self.assertNotIn("\r", out)
 
+    def test_e2e_console_passes_a_note_that_is_no_step(self):
+        # REQ: HW-10, CH-1. phone-control's count of the recovery notices it passed over (#2170):
+        # echoed, counted as no step, and DONE's counts still match the step lines.
+        note = b"[   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery notices=1 texts=1 requests=0\n"
+        rc, out, done = self.e2e_console(b"agentos-e2e: PASS a\n" + note +
+                                         b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("console| [   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery "
+                      "notices=1 texts=1 requests=0\n", out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+
     def test_e2e_console_accepts_the_journald_lead_in_of_the_real_console(self):
         # REQ: HW-10. CI run 38655868696 (XFAIL text as at 789d072): each line carries
         # "[ time] box-e2e[pid]: ", and the login prompt can land in front of one.
@@ -5039,6 +5050,9 @@ class UplinkTest(unittest.TestCase):
                 ("a FAIL hidden by the counts", step + b"agentos-e2e: FAIL b no\n" + done),
                 ("DONE counts below the steps", step + step + done),
                 ("unknown driver line", step + b"agentos-e2e: OK b\n" + done),
+                ("NOTE after DONE", step + done + b"agentos-e2e: NOTE a texts=1\n"),
+                ("NOTE with no step", step + b"agentos-e2e: NOTE \n" + done),
+                ("NOTE quoting text", step + b"agentos-e2e: NOTE a I couldn't text you from 12:00\n" + done),
                 ("step line mid-line", step + b"junk agentos-e2e: PASS b\n" + done),
                 ("another unit's tag", b"[ 1.0] box-e2e[7]: " + step + b"[ 1.1] evil[5]: " + done),
                 ("another unit's tag on a step", b"[ 1.0] sshd[7]: " + step + b"[ 1.1] box-e2e[7]: " + done),
