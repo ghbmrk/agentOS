@@ -1,0 +1,49 @@
+# RECALL-EMB: A real local embedder for recall
+
+Board row: issue #1134 (section Phase 3: compounding). Class: release. Tier: A declared (the row says B, but `tools/risk_tier.py` prints A for `broker/recall/recall.go`, recall custody, so the build needs the strongest model and the tier-A review stages; this brief itself is docs-only). Builder: strongest model. Usage estimate: 90k tokens, checkpoint at 70k. Needs: P3-3b (merged). Brief only: the N95 steps need the hardware, so a builder with no N95 ships the code and CI tests, leaves the row `state:building` with the measurement step open, and says so in the PR (OPERATING §5 hand-off).
+
+**Why (facts, verified at main).** `broker/recall/text.go` defines `Embedder{ID, Embed}` and the default `HashEmbedder` (feature hashing, no model: fuzzy on spelling, blind to meaning). `Index.Search` (`recall.go` ~1105) embeds the query and, on an `Embed` error, silently ranks by BM25 alone; `Index.Reembed(limit)` (`recall.go:558`) re-embeds items whose stored vector ID differs from `Embedder.ID()`. `TestInt8RankingAccuracy` (`capacity_test.go:211`, floor 0.85) was left for this package to re-measure against a real embedder (P3-3b, arbitrator). Nothing yet puts a real model behind the interface, so a query that shares no keyword with the relevant item finds nothing (CAP-3, CAP-13 retrieve pass).
+
+## Requirements (from SPEC.md)
+
+- **CAP-3** recall is full text, embeddings and facts; **CAP-13** retrieve is a local pass; **HW-4** every acceptance test passes at the floor (N95, 8 GB, no accelerator, no compute host); **RES-2** local inference budget 2.0 GB; **ARC-2** model code runs in the local inference service, never in the broker; **DEP-1** degradation to a documented fallback, said in STATUS.
+
+Package IDs:
+- **EMB-1** An `Embedder` backed by EmbeddingGemma 2 270M, reached through the local inference service (an untrusted service, SPEC §3; the broker holds a client, not the model), with Matryoshka truncation to 512 or 256 dimensions chosen in config (default 512) and L2 renormalised after truncation. `ID()` names model, model file hash and dimension (`embgemma2-270m/<sha8>/512`), so a different model, file or dimension is a different space.
+- **EMB-2** Held-out retrieval: over a synthetic fixture whose relevant item shares no keyword with its query (after the recall tokenizer's lowercasing and stemming), the relevant item ranks in the top 5 with the embedder and does not with BM25 alone (the same index with the embedder nil).
+- **EMB-3** Fallback: with the model file absent, truncated or failing its hash at start, or the service erroring or timing out per query, `Search` answers from BM25 (no error, no empty result for a query BM25 can answer), and STATUS carries one line saying recall is on keyword search and why (`missing`, `corrupt`, `unavailable`), cleared when the embedder recovers. The box does not fail to start.
+- **EMB-4** `Reembed` runs in the background after the model, file hash or dimension changes: vectors of the old ID are replaced in batches, search keeps answering throughout (old-ID items match by BM25 only until re-embedded), the pass resumes after a restart, and items ingested during it get the new ID at ingest. STATUS shows progress as a count, not a percentage claim it cannot back.
+- **EMB-5** Measured on the N95 fixture box (HW-4), recorded in the PR and in `broker/recall/ASSUMPTIONS.md`: embedder RSS at idle and at peak over 10,000 items, p50 and p95 latency of a single-query embed and of a full `Search`, `Reembed` throughput (items per second), and the `TestInt8RankingAccuracy` overlap with the real embedder at 512 and 256. Limits (inference, from RES-2 and R8; the builder may tighten them from the first measurement, never loosen without a PR note): embedder RSS peak <= 1.0 GB (half the 2.0 GB inference budget, leaving the other passes room), single-query embed p95 <= 250 ms, `Search` p95 <= 400 ms at 10,000 items, int8 overlap floor stays 0.85 (or the measured value is recorded and the floor moved in this PR with the reason).
+- **EMB-6** No fixture, log or STATUS line carries credentials or personal data; fixtures are synthetic text. Embedding input goes through the same scrub as indexed text (`prepare`), so a removed credential is never sent to the service.
+
+**Acceptance tests:**
+
+CI tests use a deterministic fake embedder (a fixed concept table mapping words to vectors) behind the same interface, plus the real model only in the N95 step.
+
+- EMB-1: `TestEmbGemmaID` and `TestMatryoshkaTruncation` (`broker/recall/embgemma_test.go`, new): ID changes with file hash and dimension; truncation to 512 and 256 renormalises to unit length; fake service returns 768 and the client truncates. Catches a stale ID that lets old and new vectors compare.
+- EMB-2: `TestNoKeywordQueryRanksTop5WithEmbedder` (`broker/recall/embgemma_test.go`): the fixture asserts first that the query shares no stemmed token with its target (so the test cannot pass by keyword), then rank <= 5 with the fake embedder and rank > 5 or absent with nil. The N95 step repeats it with the real model and records the ranks. Catches a pass that is really BM25.
+- EMB-3: `TestSearchFallsBackToBM25WhenModelBroken` (table: file absent, truncated, bad hash, service error, service timeout) asserts `Search` returns the BM25 result, no error, and the STATUS line names the cause; `TestFallbackClearsOnRecovery`. Catches the failure path in the row: nothing returned, or a box that fails to start.
+- EMB-4: `TestReembedOnModelChange`, `TestReembedResumesAfterRestart`, `TestSearchAnswersDuringReembed` (`broker/recall/review_test.go`): change ID, run the pass in slices of `limit`, search between slices, reopen mid-pass. Catches a half-converted index that drops results or compares across spaces.
+- EMB-5: `broker/recall/embgemma_n95_test.go` behind a build tag `n95` and an env path to the model; it prints the figures the PR records and fails over the limits above. CI runs it with the tag off (compiles only, `go vet -tags n95`). The PR body carries the N95 output.
+- EMB-6: `TestEmbedInputIsScrubbed`: a synthetic canary credential in an item never reaches the fake service's recorded inputs.
+
+## Design
+
+- New `broker/recall/embgemma.go`: `ServiceEmbedder` implementing `Embedder` (and `CosineFloor` with a floor measured on the N95 fixture; record it, do not copy the hash embedder's 0.2). Transport is the local inference service's existing socket protocol (find it under `broker/modelroute` and `broker/guest`; reuse, do not add a new protocol). If no such embedding call exists yet, add the smallest one and name it in the PR under Findings (release) rather than widening scope here.
+- `NewServiceEmbedder` verifies the model file hash against a pinned value in config before use; a mismatch is `corrupt`. No new Go dependency in the broker: the model runs in the service, so `broker/go.mod` should not change (the row lists it; drop it from scope if unused).
+- Status: expose `Index.EmbedStatus() (state, cause string, pending int)`; the owner-visible line is wired through the existing STATUS path for recall (the "memory: loading" line is the precedent, UX-51-1), not a new channel.
+- `Reembed` scheduling: a goroutine started by the daemon wiring on ID change, small batches, yields to foreground work (RES-2 priorities); progress in `EmbedStatus`.
+
+## Assumptions (recorded in `broker/recall/ASSUMPTIONS.md` as R12+, unless a later row is taken; renumber on merge)
+
+- The model's licence permits shipping or fetching it onto the box (verify before building; if not, stop and escalate).
+- The 270M model at int8 or q8 fits the RSS limit with the service's other passes loaded; if measurement says no, EMB-5's limit is the decision point, not a silent change.
+- Query-time embed on the floor CPU is fast enough for interactive `Search`; if p95 exceeds the limit, the fallback is BM25 for that query only (EMB-3), and the finding is recorded.
+
+## Out of scope
+
+Mail backfill and its coverage line (P3-3b carried items), choosing a different model, GPU or compute-host embedding, changing the int8 storage format.
+
+## Scope
+
+`broker/recall/embgemma.go`, `broker/recall/embgemma_test.go`, `broker/recall/embgemma_n95_test.go`, `broker/recall/review_test.go`, `broker/recall/recall.go` (EmbedStatus and Reembed scheduling only), `broker/recall/ASSUMPTIONS.md`, the daemon wiring for the status line and Reembed start, `briefs/RECALL-EMB.md`. `broker/go.mod` and `go.sum` only if the transport needs them.
