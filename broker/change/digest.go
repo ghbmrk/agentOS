@@ -543,7 +543,7 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 
 // adapterItem is the owner's item for adopting or removing adapters
 // (ADP-6, ADP-2): the object names the tool, the detail says which grants
-// it asks for and which irreversible verbs it can run, and the terms the
+// it asks for and which irreversible or secret verbs it can run, and the terms the
 // local page shows list every grant and every operation, those left
 // unmapped as draft only. It is always high tier: the owner decides what
 // a tool may do, so a passing test never makes it ordinary. The tool,
@@ -579,10 +579,12 @@ func adapterItem(edits []Edit, undo string) owner.Item {
 			switch c, _ := verb.ClassOf(v); {
 			case v == "":
 				drafts = append(drafts, owner.Term{Label: "Draft only", Value: named(op) + ", until you choose what it does"})
-			case c == verb.Irreversible:
-				acts = append(acts, owner.Term{Label: "Acts for good", Value: named(op) + ": " + v})
-				if !slices.Contains(verbs, v) {
-					verbs = append(verbs, v)
+			case c != verb.Reversible:
+				// Irreversible and secret verbs; an unknown verb reports
+				// Secret, so it lands here too (fail closed).
+				acts = append(acts, owner.Term{Label: "Acts for good", Value: named(op) + ": " + named(v)})
+				if !slices.Contains(verbs, named(v)) {
+					verbs = append(verbs, named(v))
 				}
 			default:
 				also = append(also, owner.Term{Label: "Also", Value: named(op) + ": " + named(v)})

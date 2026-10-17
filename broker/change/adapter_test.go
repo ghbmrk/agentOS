@@ -317,6 +317,37 @@ func TestADP6AdapterRemovalOwnerItem(t *testing.T) {
 	}
 }
 
+// ADP-6, CRED-6 (Security delta on #2049): an operation mapped to the
+// secret verb is shown as acting for good and leads the texted detail,
+// never filed under "Also", so key export cannot be approved unseen.
+func TestADP6AdapterSecretOperationIsNamedToTheOwner(t *testing.T) {
+	const body = `{"operations":{"list":"read","export":"reveal-or-create-secret"},"grants":["mail"]}`
+	obs := map[string][]string{"list": {verb.Read}, "export": {verb.RevealSecret}}
+	e, _ := adapterEnv(t, obs)
+	e.p.Attach(holdJournal{e.eng})
+	e.owner.approve = true
+	rep := e.propose(adapterCandidate(body))
+	if rep.State != StateAwaitingOwner {
+		t.Fatalf("got %s %q", rep.State, rep.Reason)
+	}
+	it, err := e.p.Line(journal.Intent{ID: adoptID(rep.ID), Action: ActionAdopt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(it.Detail, "can reveal-or-create-secret") {
+		t.Fatalf("detail %q: want the secret verb first", it.Detail)
+	}
+	ts, _ := it.Terms.List()
+	if !slices.Contains(ts, owner.Term{Label: "Acts for good", Value: "export: reveal-or-create-secret"}) {
+		t.Fatalf("terms %q", termText(ts))
+	}
+	for _, x := range ts {
+		if x.Label == "Also" && strings.Contains(x.Value, "secret") {
+			t.Fatalf("secret op filed under Also: %q", termText(ts))
+		}
+	}
+}
+
 func termText(ts []owner.Term) []string {
 	var out []string
 	for _, t := range ts {
