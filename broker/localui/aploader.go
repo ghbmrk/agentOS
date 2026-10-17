@@ -192,7 +192,10 @@ func (l *APLoader) Down(ctx context.Context) error {
 
 // Station runs join, which puts iface into station mode, only after a
 // Start named iface, while iface is not running the access point and its last BringDown
-// succeeded.
+// succeeded. The home Wi-Fi join (agentosd through agentos-netjoin) does
+// not pass through here: netjoin refuses any station that agentos-ap may
+// run the access point on and pins its connection to its own station
+// interface instead (S-R4, #1428, netjoin ASSUMPTIONS N13).
 func (l *APLoader) Station(ctx context.Context, iface string, join func(context.Context) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

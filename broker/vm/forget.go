@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
@@ -25,7 +26,9 @@ import (
 // every snapshot of the lineage taken at or after since is deleted,
 // including those of destroyed machines. A snapshot taken before this
 // release recorded lineages has none: if its machine is gone, it is
-// deleted when taken at or after since, whatever lineage it was.
+// deleted when taken at or after since, whatever lineage it was; it is
+// also of the lineage named by its machine ID, the one load gives a
+// machine recorded before lineages, whoever holds that ID now.
 //
 // Labels do not fall (REV-5). Replay machines are never in a live lineage.
 // ForgetSince is idempotent and may be repeated after a failure; a
@@ -88,6 +91,11 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		return nil
 	}
 	defer mc.mu.Unlock()
+	// Before the reset can fail: what the guest was handed is forgotten
+	// even when its machine cannot be put back.
+	if r, ok := m.servicesFor(mc.ID).(Resetter); ok {
+		r.Reset(mc.ID)
+	}
 	target := m.restoreTarget(mc, since)
 	if target != nil && target.Label > mc.Label {
 		// Saved before the target's content reaches the layer (LABEL-durable).
@@ -168,6 +176,12 @@ func (m *Manager) lineageSnaps(lineage string, since time.Time) []Snapshot {
 			} else {
 				l = lineage // unknown: delete rather than keep
 			}
+			// Recorded before lineages, its machine had then the lineage
+			// load gives such a machine: its ID. The ID's holder now may
+			// be a replacement of another lineage, so match both (#1660).
+			if s.Machine == lineage {
+				l = lineage
+			}
 		}
 		if l == lineage {
 			out = append(out, s)
@@ -176,11 +190,20 @@ func (m *Manager) lineageSnaps(lineage string, since time.Time) []Snapshot {
 	return out
 }
 
+// syncSnapDir is a seam: tests fail it.
+var syncSnapDir = durable.SyncDir
+
 // removeSnapshot deletes a snapshot: its metadata first, so a crash
-// part-way leaves a directory Open drops as never published.
+// part-way leaves a directory Open drops as never published. The unlink is
+// made durable before the snapshot is reported gone, so a reset recorded
+// after this returns cannot meet the snapshot again after a power cut
+// (CAP-3, #1240); a failed sync is returned, and the reset stays retryable.
 func (m *Manager) removeSnapshot(id string) error {
 	dir := m.snapDir(id)
 	if err := os.Remove(filepath.Join(dir, "meta.json")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := syncSnapDir(dir); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	m.mu.Lock()

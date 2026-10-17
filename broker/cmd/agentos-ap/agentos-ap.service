@@ -18,8 +18,10 @@
 [Unit]
 Description=agentOS access point loader
 # The inbound drop is in place before any radio is brought up. The masks
-# below cover only paths that exist at start: egress's state directory
-# does by then; agentosd's subtrees made after its fork (Type=simple) may
+# below cover only paths that exist at start: egress's state and runtime
+# directories do by then, and egress keeps its runtime directory across
+# restarts (RuntimeDirectoryPreserve, #1628) so the mask on its sockets
+# holds; agentosd's subtrees made after its fork (Type=simple) may
 # not, and a restart covers those.
 Requires=agentos-inbound.service
 After=agentos-inbound.service agentos-egress.service agentosd.service
@@ -58,10 +60,11 @@ NoNewPrivileges=yes
 # file's directory: the burn is a durable rename beside the file, so a
 # narrower path cannot hold it. The secrets that share that directory,
 # and the vault's, are hidden instead (a path that does not exist yet is
-# skipped).
+# skipped), and so are the vault's sockets: their only peer check is the
+# broker uid, which is root, and the access point never calls them (#1628).
 ProtectSystem=strict
 ReadWritePaths=/var/lib/agentos
-InaccessiblePaths=-/var/lib/agentos-egress -/var/lib/agentos/vault -/var/lib/agentos/machines -/var/lib/agentos/slots -/var/lib/agentos/journal -/var/lib/agentos/journal.log -/var/lib/agentos/change -/var/lib/agentos/recall -/var/lib/agentos/learn -/var/lib/agentos/skills -/var/lib/agentos/modem -/var/lib/agentos/claim.json -/var/lib/agentos/drive-id
+InaccessiblePaths=-/var/lib/agentos-egress -/run/agentos-egress -/var/lib/agentos/vault -/var/lib/agentos/machines -/var/lib/agentos/slots -/var/lib/agentos/journal -/var/lib/agentos/journal.log -/var/lib/agentos/change -/var/lib/agentos/recall -/var/lib/agentos/learn -/var/lib/agentos/skills -/var/lib/agentos/modem -/var/lib/agentos/claim.json -/var/lib/agentos/drive-id
 ProtectHome=yes
 PrivateTmp=yes
 PrivateIPC=yes

@@ -184,6 +184,9 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = "http", "agentos-egress", "agentos-egress"
 				dropOurs(pr.Out.Header)
+				// A guest-declared trailer of ours would reach the vault
+				// process too.
+				dropOurs(pr.Out.Trailer)
 				label := "private"
 				if !eval && cfg.Label(machine) == "public" {
 					label = "public"
@@ -391,10 +394,11 @@ func (u Usage) valid(allowed int) bool {
 }
 
 // dropOurs removes every Agentos- header, and the proxy's own denial mark
-// (egress.DeniedHeader, X-Agentos-Egress-Denied).
+// (egress.DeniedHeader, X-Agentos-Egress-Denied), under whatever key the
+// map holds it.
 func dropOurs(h http.Header) {
 	for k := range h {
-		if k := http.CanonicalHeaderKey(k); strings.HasPrefix(k, headerPrefix) || strings.HasPrefix(k, "X-"+headerPrefix) {
+		if c := http.CanonicalHeaderKey(k); strings.HasPrefix(c, headerPrefix) || strings.HasPrefix(c, "X-"+headerPrefix) {
 			delete(h, k)
 		}
 	}

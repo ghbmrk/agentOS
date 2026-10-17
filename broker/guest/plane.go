@@ -257,6 +257,12 @@ func (p *Plane) Open(id string) (string, error) {
 	return dir, nil
 }
 
+// Reset drops what the plane holds for machine id's guest memory, without
+// closing the machine: ForgetSince rolled the machine back (CAP-3), so the
+// tool results held for it, which only that memory could name, go too. The
+// socket and the inbox stay. It does nothing for an unknown machine.
+func (p *Plane) Reset(id string) { p.folds.Drop(id) }
+
 // Close stops serving machine id, removes its directory, and drops its
 // unanswered owner messages: the machine is gone. Idempotent.
 func (p *Plane) Close(id string) { p.close(id, true) }

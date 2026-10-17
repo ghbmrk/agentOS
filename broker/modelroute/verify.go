@@ -178,6 +178,42 @@ func (v *Verifier) TakeRotatedWiFi() (RotatedWiFi, error) {
 	return w, nil
 }
 
+// ErrNoCommittedWiFi means the vault keeps no Owner Card, so no Wi-Fi
+// network is committed.
+var ErrNoCommittedWiFi = errors.New("no Wi-Fi network is committed")
+
+// ErrWiFiOwed means a card rotation stopped part way and still owes its
+// Wi-Fi part, so the committed network is not certain.
+var ErrWiFiOwed = errors.New("an unfinished card rotation owes the Wi-Fi network")
+
+// CommittedWiFi reads the Owner Card's committed Wi-Fi network from the
+// open vault, for agentosd to put back in ap-net.json (#1696). It takes
+// nothing: TakeRotatedWiFi's permit is left as it is.
+func (v *Verifier) CommittedWiFi() (RotatedWiFi, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/committed-wifi"} // over the Unix socket
+	resp, err := v.c.Get(u.String())
+	if err != nil {
+		return RotatedWiFi{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return RotatedWiFi{}, ErrNoCommittedWiFi
+	case http.StatusConflict:
+		return RotatedWiFi{}, ErrWiFiOwed
+	case http.StatusServiceUnavailable:
+		return RotatedWiFi{}, ErrVaultLocked
+	default:
+		return RotatedWiFi{}, fmt.Errorf("committed Wi-Fi: vault process answered %s", resp.Status)
+	}
+	var w RotatedWiFi
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&w); err != nil {
+		return RotatedWiFi{}, errors.New("committed Wi-Fi: malformed answer")
+	}
+	return w, nil
+}
+
 // EnrollResult is the vault process's answer to an enroll: the new
 // code-generator seed's otpauth:// link, handed out this once (Security L7
 // on the P2-2w plan). It is never logged.

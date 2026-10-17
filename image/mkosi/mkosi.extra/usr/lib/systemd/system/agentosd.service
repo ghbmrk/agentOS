@@ -30,11 +30,14 @@ StateDirectoryMode=0755
 # Only on the drive this PC booted (drive-id: no other disk carries the boot partition's GUID).
 ExecStartPre=/usr/lib/agentos/drive-id check
 # with-uids swaps each @uid:NAME for that user's uid (agentos-setup.conf).
+# -disk-quota on is the default, passed so the image never runs another value (RES-4, #1386): with
+# no project quota on root agentosd keeps agent machines off. The off value is never passed (tests/test_image_quota.py).
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
         -netjoin-sock /run/agentos-netjoin/netjoin.sock \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \
-        -image codex=/usr/lib/agentos/images/codex -worker-image openclaw
+        -image codex=/usr/lib/agentos/images/codex -worker-image openclaw \
+        -disk-quota on
 Restart=on-failure
 
 [Install]

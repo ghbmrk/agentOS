@@ -178,6 +178,12 @@ type Item struct {
 	// went, and the line ends "already sent 14:02 Oct 13; send it
 	// again?". It is not part of ItemSum.
 	Sent time.Time
+	// SentErased, with Sent, says every send behind Sent was erased
+	// (CAP-3) after it went, so its record and recipient can no longer be
+	// checked: the line ends "may repeat a send whose record was erased
+	// (it went 14:02 Oct 13); send it?" instead (OP2-ER-2). It is not
+	// part of ItemSum.
+	SentErased bool
 }
 
 // Term is one field of a broker-rendered summary: a fixed label and the
@@ -213,7 +219,7 @@ func (l TermList) List() (ts []Term, ok bool) {
 }
 
 // ItemSum is a digest of everything an item shows the owner or is
-// classified on, without Ref, Asked, Retried or Sent. A restart keeps it, never the
+// classified on, without Ref, Asked, Retried, Sent or SentErased. A restart keeps it, never the
 // item, so a re-issue can prove the item is unchanged (OP-3).
 func ItemSum(it Item) string {
 	f := it.Facts
@@ -246,6 +252,9 @@ func (c *Channel) itemLine(it Item) string {
 		s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
 	}
 	switch {
+	case !it.Sent.IsZero() && it.SentErased:
+		// Only an erased send matched (OP2-ER-2): it may not be this one.
+		s += ", may repeat a send whose record was erased (it went " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "); send it?"
 	case !it.Sent.IsZero():
 		// Confirm repeats (D-116): said plainly, as a question.
 		s += ", already sent " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "; send it again?"

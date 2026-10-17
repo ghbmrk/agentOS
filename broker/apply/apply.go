@@ -49,7 +49,8 @@ type Activator interface {
 	// slot is the slot not booted, whatever the update store holds as
 	// installed; never the running slot. A blessed entry on that slot
 	// leaves the boot menu, and the running root's entry becomes the
-	// default, before any byte of the slot is written (A12).
+	// default, durably (ESP written and synced), before any byte of the
+	// slot is written (A12); activatortest.Check is its acceptance check.
 	Install(ctx context.Context, v *update.Verified) error
 	// Abandon undoes an Install the box did not restart into: the
 	// inactive slot is no longer the next boot. It is safe to call when

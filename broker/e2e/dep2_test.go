@@ -32,7 +32,10 @@ var thirdPartyHosts = map[string]bool{
 	// OpenAI's device sign-in page, which the owner opens on their phone
 	// (ONB-3 step 6, provagent P11).
 	"auth.openai.com": true,
-	"nodejs.org":      true, "registry.npmjs.org": true,
+	// OpenAI's terms page, the codex qualification record's TermsURL
+	// (provagent P1, D-117).
+	"openai.com": true,
+	"nodejs.org": true, "registry.npmjs.org": true,
 }
 
 // projectHost names a domain the project could run: anything carrying

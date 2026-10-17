@@ -202,6 +202,7 @@ type Record struct {
 	Egress    *EgressNote    `json:"egress,omitempty"`
 	Sleep     *SleepNote     `json:"sleep,omitempty"`
 	RouteStop *RouteStopNote `json:"route_stop,omitempty"`
+	Picture   *PictureNote   `json:"picture,omitempty"`
 	Answer    *AnswerNote    `json:"answer,omitempty"`
 	// FP and EFP carry an erased intent's fingerprints, so OP-1 still
 	// recognises a resubmission once its parameters are gone.

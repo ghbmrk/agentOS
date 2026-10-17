@@ -46,7 +46,9 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := qs.Clock(); l != "" {
+	// Until the guard opens, STATUS says the time check is not running
+	// (#1246).
+	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: not running") {
 		t.Fatalf("clock line before the guard opened: %q", l)
 	}
 	if err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir)); err != nil {
@@ -154,5 +156,69 @@ func TestClockLineOnlyForExceptions(t *testing.T) {
 		if l := clockLine(clock.Status{State: st}, time.UTC); !strings.HasPrefix(l, "Time check: ") {
 			t.Fatalf("state %v: %q", st, l)
 		}
+	}
+}
+
+// REQ: TIM-1
+
+// CLOCK-guard-own (#1246): the box clock guard is its own dependency. A
+// question store that fails to load, or no owner channel, leaves the
+// guard open, so the sleeper and STATUS still read it; a guard that never
+// opened reads as restricted.
+func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
+	var unopened questions
+	if !unopened.restricted() {
+		t.Fatal("an unopened clock guard did not restrict")
+	}
+	if l := unopened.Clock(); !strings.HasPrefix(l, "Time check: not running") {
+		t.Fatalf("STATUS clock line with no guard: %q", l)
+	}
+
+	for _, ownerless := range []bool{false, true} {
+		dir := t.TempDir()
+		qs := &questions{}
+		cfg := daemon.Config{
+			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+			OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+			OwnerState: filepath.Join(dir, "owner.json"),
+		}
+		if ownerless {
+			cfg.OwnerState = ""
+		}
+		qs.wire(&cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		d, err := daemon.Run(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc := defaultQuestionConfig(dir)
+		// An unreadable saved check restricts the guard until phone-network
+		// time agrees, which here is never; the question store is corrupt.
+		for _, p := range []string{qc.ClockPath, qc.Path} {
+			if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		caps := newCapState("")
+		qs.start(ctx, d, &preempter{}, qc, caps)
+		if !caps.questionsOff.Load() {
+			t.Fatalf("ownerless %v: questions opened on a corrupt store", ownerless)
+		}
+		if qs.tools() != nil {
+			t.Fatalf("ownerless %v: question tools offered", ownerless)
+		}
+		if qs.g.Load() == nil {
+			t.Fatalf("ownerless %v: the clock guard did not open", ownerless)
+		}
+		no := func() bool { return false }
+		w := sleepWork{intent: no, undo: no, gate: no, handed: no, qs: qs}
+		if !w.checks()["clock"]() {
+			t.Fatalf("ownerless %v: the guard's restriction did not keep the agent awake", ownerless)
+		}
+		if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") {
+			t.Fatalf("ownerless %v: STATUS clock line: %q", ownerless, l)
+		}
+		cancel()
+		qs.wait()
 	}
 }

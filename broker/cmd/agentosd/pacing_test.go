@@ -111,6 +111,12 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if cfg.Quiet == nil || cfg.Urgent == nil || cfg.Allowance == nil {
 		t.Fatal("grants hooks not wired")
 	}
+	if cfg.Spend == nil || cfg.Refund == nil {
+		t.Fatal("grants spend hooks not wired")
+	}
+	if _, ok := cfg.Spend(true); ok {
+		t.Fatal("before attach: a paced request spent")
+	}
 	if cfg.Allowance(at23) != 0 || cfg.Urgent(ownerch.Item{}) {
 		t.Fatal("before attach: paced texts may go")
 	}
@@ -132,6 +138,15 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	}
 	if got := cfg.Allowance(day); got != 2 {
 		t.Fatalf("allowance after an update %d, want 2: one budget", got)
+	}
+	// REQ: CH-15 (#1685)
+	at, ok := cfg.Spend(true)
+	if !ok || cfg.Allowance(day) != 1 {
+		t.Fatal("Spend does not count on the owner's hour")
+	}
+	cfg.Refund(at)
+	if got := cfg.Allowance(day); got != 2 {
+		t.Fatalf("allowance after a refund %d, want 2", got)
 	}
 	u := pacedOwner(t, quiet22to7(ownerch.ClassApproval), at23)
 	p.ch.Store(u.ch)

@@ -24,12 +24,13 @@ type fakeOwner struct {
 	queued     []owner.AutoReply
 	due        []owner.Queued
 	notes      []string
-	commit     bool     // QueueAutoReply turns replies into requests
-	down       bool     // Request fails
-	lineDown   bool     // Request fails: the owner's line is down
-	active     bool     // the owner is texting
-	each       []string // requests opened by RequestEach
-	local      []string // requests opened by RequestLocalEach
+	classes    []owner.Class // the class of each note
+	commit     bool          // QueueAutoReply turns replies into requests
+	down       bool          // Request fails
+	lineDown   bool          // Request fails: the owner's line is down
+	active     bool          // the owner is texting
+	each       []string      // requests opened by RequestEach
+	local      []string      // requests opened by RequestLocalEach
 	localCalls int
 	lateUndo   map[string]bool // UndoneAfterRelease
 }
@@ -138,6 +139,15 @@ func (f *fakeOwner) Inform(text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.notes = append(f.notes, text)
+	f.classes = append(f.classes, owner.ClassUpdate)
+	return nil
+}
+
+func (f *fakeOwner) Post(class owner.Class, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notes = append(f.notes, text)
+	f.classes = append(f.classes, class)
 	return nil
 }
 

@@ -161,19 +161,29 @@ type env struct {
 	img  string
 	cfg  Config
 	cgrp string
+	// beforePreempt, set by tests, runs where admission has picked a
+	// victim and dropped its lock, just before preempting it.
+	beforePreempt func(id string)
 }
 
 // preempter forwards to the manager once it exists (admission is built first).
-type preempter struct{ m **Manager }
+type preempter struct{ e *env }
 
-func (p preempter) Preempt(id string) error { return (*p.m).Preempt(id) }
+func (p preempter) Preempt(id string) error { return p.e.m.Preempt(id) }
+
+func (p preempter) PreemptInstance(id, inst string) error {
+	if h := p.e.beforePreempt; h != nil {
+		h(id)
+	}
+	return p.e.m.PreemptInstance(id, inst)
+}
 
 func newEnv(t *testing.T, capacityMB int64) *env {
 	t.Helper()
 	e := &env{t: t, rt: newFake(), img: t.TempDir()}
 	write(t, e.img, "etc/os-release", "image v1")
 	write(t, e.img, "app/main", "main v1")
-	adm, err := admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{&e.m})
+	adm, err := admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{e})
 	must(t, err)
 	e.adm = adm
 	e.cfg = Config{
@@ -309,4 +319,26 @@ func failSave(path string) func() {
 		return real(p, b, perm)
 	}
 	return func() { writeFile = real }
+}
+
+// halfStart makes id's next start launch the guest and then fail before the
+// machine is Running, as a preemption racing the start does, and refuses
+// every kill from then on: the launched guest lives on, not known dead.
+func (e *env) halfStart(id string) {
+	e.t.Helper()
+	e.rt.onStart = func(sid string) {
+		if sid != id {
+			return
+		}
+		e.rt.onStart = nil
+		mc, err := e.m.get(id)
+		if err != nil {
+			e.t.Errorf("halfStart %s: %v", id, err)
+			return
+		}
+		mc.preempting.Store(true)
+		e.rt.mu.Lock()
+		e.rt.refuseKill = errors.New("fake: kill refused")
+		e.rt.mu.Unlock()
+	}
 }

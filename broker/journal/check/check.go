@@ -158,7 +158,7 @@ func trailComplete(recs []journal.Record, _ Options) []Violation {
 			bad("sequence %d, want %d", r.Seq, i+1)
 		}
 		switch r.Type {
-		case journal.RecStop, journal.RecResume, journal.RecEgress, journal.RecSleep, journal.RecRouteStop:
+		case journal.RecStop, journal.RecResume, journal.RecEgress, journal.RecSleep, journal.RecRouteStop, journal.RecPicture:
 			if r.ID != "" {
 				bad("%s record names an intent", r.Type)
 			}

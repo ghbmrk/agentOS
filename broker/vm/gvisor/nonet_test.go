@@ -1,9 +1,10 @@
 package gvisor
 
-// REQ: A14, ARC-6
+// REQ: A14, ARC-6, A14-r2-1, A14-r2-2
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -251,4 +253,115 @@ func hostDial(network, addr string) string {
 		return "ERR " + err.Error()
 	}
 	return strings.TrimSpace(line)
+}
+
+// recordingRunsc is a Runtime whose runsc records each argv it is run
+// with, one argument a line and a blank line after each run, and exits 0.
+// runs reads them back.
+func recordingRunsc(t *testing.T) (*Runtime, func() [][]string) {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "argv")
+	bin := filepath.Join(dir, "runsc")
+	sh := "#!/bin/sh\n{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo; } >> '" + log + "'\n"
+	if err := os.WriteFile(bin, []byte(sh), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return &Runtime{Bin: bin, StateDir: filepath.Join(dir, "state")}, func() [][]string {
+		b, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runs [][]string
+		for _, run := range strings.Split(strings.TrimSuffix(string(b), "\n\n"), "\n\n") {
+			runs = append(runs, strings.Split(run, "\n"))
+		}
+		return runs
+	}
+}
+
+// launched fails unless runs holds a runsc sub, and every run of runs
+// that names sub is one runsc itself takes as starting no network:
+// --network=none is runsc's last global value for the flag, and no network
+// flag follows the subcommand.
+func launched(t *testing.T, runs [][]string, sub string) {
+	t.Helper()
+	seen := false
+	for _, args := range runs {
+		i := slices.Index(args, sub)
+		if i < 0 {
+			continue
+		}
+		seen = true
+		noNetwork(t, args[:i])
+		if v := lastFlag(args[i:], "network"); v != "" {
+			t.Fatalf("runsc %s gets --network=%s after the subcommand: %q", sub, v, args)
+		}
+	}
+	if !seen {
+		t.Fatalf("runsc was never run with %s: %q", sub, runs)
+	}
+}
+
+// TestRunscStartsEveryGuestWithoutANetwork checks the argv runsc itself
+// receives from the launch path, not the launchArgs helper alone: what
+// startConsole runs for run and restore, and what cmd runs for a caller
+// that passes its own --network ahead of the subcommand. cmd pins
+// --network=none after every caller global flag, so runsc takes none
+// (A14, A14-r2-2).
+func TestRunscStartsEveryGuestWithoutANetwork(t *testing.T) {
+	r, runs := recordingRunsc(t)
+	if err := os.MkdirAll(r.StateDir, 0o700); err != nil { // as launch does
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	l := vm.Launch{ID: "m1", Dir: dir, Root: filepath.Join(dir, "root")}
+	for sub, image := range map[string]string{"run": "", "restore": filepath.Join(dir, "image")} {
+		if err := r.startConsole(context.Background(), l, childproc.Options{}, r.launchArgs(l, image)...); err != nil {
+			t.Fatalf("%s: %v", sub, err)
+		}
+		launched(t, runs(), sub)
+	}
+	for _, extra := range [][]string{{"--network=host"}, {"-network=sandbox"}, {"--network=host", "--log=/dev/null"}} {
+		args := append(slices.Clone(extra), r.launchArgs(l, "")...)
+		if err := r.cmd(context.Background(), childproc.Options{}, args...).Run(); err != nil {
+			t.Fatal(err)
+		}
+		got := runs()
+		launched(t, got[len(got)-1:], "run")
+	}
+}
+
+// TestStartAndRestorePassRunscNoNetwork runs Start and Restore, mount and
+// all, against a runsc that records its argv, so a launch path that builds
+// its own command or flags past cmd is caught (A14-r2-1). It mounts the
+// overlay, so it needs root: the integration job runs it.
+func TestStartAndRestorePassRunscNoNetwork(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("mounts the machine's overlay: run as root (CI integration job)")
+	}
+	r, runs := recordingRunsc(t)
+	dir := t.TempDir()
+	for sub, image := range map[string]string{"run": "", "restore": filepath.Join(dir, "image")} {
+		l := vm.Launch{ID: "m-" + sub, Dir: filepath.Join(dir, sub), Argv: []string{"/bin/true"}}
+		l.Root, l.Lower, l.Upper, l.Work, l.Services = filepath.Join(l.Dir, "root"), filepath.Join(l.Dir, "lower"), filepath.Join(l.Dir, "upper"), filepath.Join(l.Dir, "work"), filepath.Join(l.Dir, "svc")
+		for _, d := range []string{l.Root, l.Lower, l.Upper, l.Work, l.Services} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var err error
+		if image == "" {
+			err = r.Start(context.Background(), l)
+		} else {
+			err = r.Restore(context.Background(), l, image)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", sub, err)
+		}
+		if err := r.Kill(context.Background(), l); err != nil {
+			t.Fatalf("%s: kill: %v", sub, err)
+		}
+		launched(t, runs(), sub)
+	}
 }

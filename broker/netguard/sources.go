@@ -102,9 +102,10 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 //
 // The host is read again after each router request (answered or timed
 // out), and the network at that point is the one returned. The answer is
-// kept only if the gateway is the one asked: the same address and
-// interface, and the same MAC where one was known at the start (the request
-// itself resolves an unknown one). After a move during the wait, the answer
+// kept only if the gateway is the one asked: the same address, interface
+// and MAC. A MAC unknown at the start and known after the wait counts as a
+// move too, since the router that answered cannot be told from another
+// behind the same address (#1725). After a move during the wait, the answer
 // may be another router's, so it is dropped and the gateway the read ended
 // on is asked in its place; a second move returns ErrGatewayMoved (#1536).
 func (s *Sources) Read() (Network, error) {
@@ -124,7 +125,7 @@ func (s *Sources) Read() (Network, error) {
 		if merr != nil || !m.Gateway.IsValid() {
 			return m, merr
 		}
-		if m.Gateway != n.Gateway || m.GatewayDev != n.GatewayDev || (n.GatewayMAC != "" && n.GatewayMAC != m.GatewayMAC) {
+		if m.Gateway != n.Gateway || m.GatewayDev != n.GatewayDev || m.GatewayMAC != n.GatewayMAC {
 			if try == 0 {
 				n = m
 				continue

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +20,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 )
 
 // REQ: CRED-8, CRED-9, HW-5a, A8, CH-12, HW-8
@@ -1403,5 +1406,145 @@ func TestStagedKeysSyncFailureWithoutAPINDoesNotAskForAPIN(t *testing.T) {
 	}
 	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
 		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}
+
+// refuseChangeAuth is a TPM connection that fails TPM2_HierarchyChangeAuth,
+// as a TPM refusing to take the lockout authorization would.
+type refuseChangeAuth struct{ transport.TPMCloser }
+
+func (r refuseChangeAuth) Send(in []byte) ([]byte, error) {
+	if len(in) >= 10 && binary.BigEndian.Uint32(in[6:10]) == uint32(tpm2.TPMCCHierarchyChanegAuth) {
+		return nil, errors.New("TPM refused the lockout change")
+	}
+	return r.TPMCloser.Send(in)
+}
+
+func (r *pcRig) refuseLockoutChange() {
+	h := r.c.host.(*tpmHost)
+	open := h.openTPM
+	h.openTPM = func() (transport.TPMCloser, error) {
+		t, err := open()
+		if err != nil {
+			return nil, err
+		}
+		return refuseChangeAuth{t}, nil
+	}
+}
+
+// policyState is the policy file as tpmHost reads it.
+func (r *pcRig) policyState(t *testing.T) string {
+	t.Helper()
+	pf, err := r.c.host.(*tpmHost).readFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(pf)
+	return string(raw)
+}
+
+// REQ: HW-8, CRED-9, TRUST-PBL-1
+// A PIN trust that fails before the PC is trusted leaves the approved boot
+// paths as they were, so "nothing was changed" holds for them (#1781).
+func TestFailedPINTrustLeavesTheBootPathsAsTheyWere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want error
+		set  func(r *pcRig) func()
+	}{
+		{"TPM refuses the lockout change", errHostNotSaved, func(r *pcRig) func() {
+			r.refuseLockoutChange()
+			return func() {}
+		}},
+		{"lockout owned by other software", errLockoutOwned, func(r *pcRig) func() {
+			other, _ := tpmseal.NewLockoutAuth()
+			if err := tpmseal.TakeLockout(r.tpm.TPM(), other, false); err != nil {
+				t.Fatal(err)
+			}
+			return func() {}
+		}},
+		{"vault sync fails", errHostNotDurable, func(*pcRig) func() {
+			return vault.InjectSyncFault(errors.New("input/output error"))
+		}},
+		{"staged keys sync fails", errHostNotDurable, func(*pcRig) func() {
+			return vault.InjectStageFault(errors.New("input/output error"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPCRig(t)
+			r.unknownHostUnlock(t)
+			before := r.policyState(t)
+			restore := tc.set(r)
+			defer restore()
+			if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, tc.want) {
+				t.Fatalf("trust: %v, want %v", err, tc.want)
+			}
+			restore()
+			if r.tpmSlots(t) != 0 {
+				t.Fatal("slot added anyway")
+			}
+			if after := r.policyState(t); after != before {
+				t.Fatalf("approved boot paths changed by a failed trust:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+}
+
+// REQ: HW-8, CRED-9, HW-5a, TRUST-PBL-2
+// A trusted PC started on a changed boot path stays locked after a trust
+// there fails: the failed trust must not approve the new path for the
+// PC's earlier slot (#1781).
+func TestFailedTrustDoesNotApproveANewBootPath(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("changed boot path unlocked")
+	}
+	r.unknownHostUnlock(t)
+	r.refuseLockoutChange()
+	if _, err := r.c.trust(r.code(), "246810"); err != errHostNotSaved {
+		t.Fatalf("trust with the TPM refusing: %v", err)
+	}
+	r.start(t, r.tpm)
+	if r.phase() != locked || r.c.model() != nil {
+		t.Fatal("a failed trust approved the changed boot path")
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("the earlier trust was lost: phase %v, notes %q", r.phase(), r.notes)
+	}
+}
+
+// REQ: TRUST-PBL-2, CRED-9, HW-5a
+// A trust whose slot change errors after the slot is decided
+// (vault.ErrSlotDecided) did trust this boot path, so the owner is told
+// "trusted" and the path's policy stays: the PC opens on it after a restart.
+func TestDecidedTrustKeepsTheNewBootPath(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("changed boot path unlocked")
+	}
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	if _, err := r.c.trust(r.code(), ""); !errors.Is(err, errHostSlotDecided) {
+		t.Fatalf("trust after the seal: %v", err)
+	}
+	restore()
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("a decided trust lost the new boot path: phase %v, notes %q", r.phase(), r.notes)
 	}
 }

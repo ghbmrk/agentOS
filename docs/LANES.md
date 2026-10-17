@@ -9,7 +9,6 @@ Mark's two Claude subscriptions are equal peers (2026-10-10): neither is primary
 | Lane | Team | Label | Prefix | Paths |
 |---|---|---|---|---|
 | none | peers (Mark's two Claude subscriptions, D-099) | none | none (`D-NNN`) | all paths |
-| codex | codex (OpenAI Codex CLI on Mark's ChatGPT plan, D-110) | `lane:codex` | `CX-` rows, `D-codex-NNN` | tier-C hygiene only: work-item issue titles and labels; product-name text edits in prose, comments and docs; and fixes a CX row names to the board tooling outside `.github/` (`tools/board.py`, `tools/metrics.py`, `tools/doclint.py` and their tests); never a change that `python3 tools/risk_tier.py` rates A or B, so the board.yml workflow file stays out |
 
 A lane is added by an onboarding PR for each other team (another vendor's agent, a teammate). The claude2 lane of 2026-10-07 (broker/browser, broker/desktop, broker/adopt, spikes/S5-browser-actions, rows CRED-4b, ADP-5, ADP-8) is lifted: those paths and rows are open to either subscription, with claims on BOARD.md as usual.
 
@@ -21,7 +20,9 @@ A lane is added by an onboarding PR for each other team (another vendor's agent,
 - **Tiers:** the browser and desktop executors hold credentials and gate effects, so they are tier A. The PR that creates `broker/browser/` or `broker/desktop/` adds that name to `TIER_A_BROKER` in `tools/risk_tier.py`; that one edit is inside your lane.
 - **Access:** your project uses Mark's GitHub login; push branches with your `pkg/claude2-…` stem to the repo (no fork). Main's ruleset holds you to the same gates as everyone. Merging is covered in OPERATING §7.
 
-## Onboarding: codex (2026-10-13)
+## Onboarding: codex (2026-10-13, historical; lane retired 2026-10-17)
+
+Retired by D-126 (Mark, 2026-10-17 00:27:44Z: "Codex lane can close - won't use it for this again"). No team holds this lane; the CX- rows are `lane:primary` and open to either peer, with claims as usual. The rules below are kept as a record only.
 
 Mark approved a Codex lane for tier-C hygiene in the project's Questions thread, 2026-10-13 14:04:06Z ("Tier c hygiene works; give me the prompt"; D-110). AGENTS.md is Codex's entry point.
 

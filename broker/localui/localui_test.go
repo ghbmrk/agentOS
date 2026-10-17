@@ -43,26 +43,28 @@ func testAP() APConfig {
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
 // adapters.
 type fakeHooks struct {
-	mu          sync.Mutex
-	progress    Progress
-	joined      string
-	sent        []modem.SMS
-	now         func() time.Time
-	seed        []byte // the vault's sealed code-generator seed
-	pending     []byte // the newest seed waiting for a code
-	enrolls     int
-	trusted     *bool
-	trustErr    error // returned by TrustHost, which then saves nothing
-	keys        map[string]string
-	finished    string
-	connected   bool
-	device      bool // the device-code sign-in completes on the provider's site
-	private     map[string]bool
-	setUp       bool
-	finishes    int
-	finishCalls int    // Finish calls, refused ones too
-	onConfirm   func() // runs inside ConfirmCode, for races
-	finishErr   error  // returned by Finish after the owner channel exists
+	mu           sync.Mutex
+	progress     Progress
+	joined       string
+	sent         []modem.SMS
+	now          func() time.Time
+	seed         []byte // the vault's sealed code-generator seed
+	pending      []byte // the newest seed waiting for a code
+	enrolls      int
+	trusted      *bool
+	trustErr     error // returned by TrustHost, which then saves nothing
+	keys         map[string]string
+	finished     string
+	connected    bool
+	device       bool // the device-code sign-in completes on the provider's site
+	private      map[string]bool
+	setUp        bool
+	finishes     int
+	finishCalls  int                    // Finish calls, refused ones too
+	onConfirm    func()                 // runs inside ConfirmCode, for races
+	finishErr    error                  // returned by Finish after the owner channel exists
+	refuseFinish func() error           // when set and it errs, Finish refuses with it and sets nothing up
+	sendFails    func(text string) bool // a send whose text it matches fails (after being recorded)
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool   // the box cannot text: BoxNumber answers "", false
@@ -108,6 +110,9 @@ func (f *fakeHooks) Send(to, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, modem.SMS{To: to, Text: text})
+	if f.sendFails != nil && f.sendFails(text) {
+		return errors.New("modem busy")
+	}
 	return nil
 }
 
@@ -229,6 +234,11 @@ func (f *fakeHooks) Finish(n string) error {
 	f.finishCalls++
 	if len(f.owed) > 0 {
 		return errors.New("answer owed")
+	}
+	if f.refuseFinish != nil {
+		if err := f.refuseFinish(); err != nil {
+			return err
+		}
 	}
 	f.finished = n
 	f.finishes++
@@ -542,7 +552,7 @@ func TestPairingFallbacks(t *testing.T) {
 		t.Fatal("non-pairing text handled")
 	}
 	reply, ok := r.srv.OfferText(ownerNum, "PAIR "+strings.ToLower(r.card.SetupCode))
-	if !ok || !strings.HasPrefix(reply, "AgentOS is running on") {
+	if !ok || !strings.HasPrefix(reply, "agentOS is running on") {
 		t.Fatalf("card setup code: %q", reply)
 	}
 	// Once paired, nobody else can pair.
@@ -562,18 +572,19 @@ func TestPairingFallbacks(t *testing.T) {
 	if r.srv.setup.st.Owner != ownerNum {
 		t.Fatal("typed number not paired")
 	}
-	if last := r.hooks.sent[len(r.hooks.sent)-1]; !strings.HasPrefix(last.Text, "AgentOS is running on") {
+	if last := r.hooks.sent[len(r.hooks.sent)-1]; !strings.HasPrefix(last.Text, "agentOS is running on") {
 		t.Fatalf("no reply from the box's number: %q", last.Text)
 	}
 }
 
 // Pairing guesses by text are bounded: after PairTriesPerHour wrong codes
-// the box stays silent, even for the right code, until the hour passes.
+// the box stays silent, even for the right code, until the hour passes. A
+// wrong code itself gets no reply (P2-2w c4c s2, #1290).
 func TestPairingGuessesAreBounded(t *testing.T) {
 	r := newRig(t)
 	for i := 0; i < PairTriesPerHour; i++ {
-		if reply, _ := r.srv.OfferText("+15550009999", "PAIR AAAA-AAAA"); reply == "" {
-			t.Fatalf("try %d: no reply", i)
+		if reply, ok := r.srv.OfferText("+15550009999", "PAIR AAAA-AAAA"); reply != "" || !ok {
+			t.Fatalf("try %d: %q %v", i, reply, ok)
 		}
 	}
 	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); reply != "" || !ok || r.srv.setup.st.Owner != "" {
@@ -919,7 +930,7 @@ func TestCardCodePairingIsClaimedWithThePageCode(t *testing.T) {
 			r.post("/setup/claim", url.Values{"code": {"000000"}})
 		}
 	})
-	if len(r.hooks.sent) != 1 || !strings.HasPrefix(r.hooks.sent[0].Text, "AgentOS page code:") || r.hooks.sent[0].To != ownerNum {
+	if len(r.hooks.sent) != 1 || !strings.HasPrefix(r.hooks.sent[0].Text, "agentOS page code:") || r.hooks.sent[0].To != ownerNum {
 		t.Fatalf("no fresh page code texted to the owner: %+v", r.hooks.sent)
 	}
 	r.post("/setup/claim", url.Values{"code": {pc[1]}})

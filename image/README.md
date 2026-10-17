@@ -13,8 +13,9 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `build.sh` | Stages the broker, runsc and guest, runs mkosi, finishes the image, writes SHA256SUMS |
 | `mkosi/mkosi.conf` | Packages, boot chain, pinned snapshot, seed |
 | `mkosi/mkosi.repart/` | Disk layout: ESP, `/usr` A and B with verity, root last |
-| `mkosi/mkosi.finalize` | Fails the build on per-install state or socket files (HW-1, V15), a tree that could dump the broker's memory, load Bluetooth, forward, tell the LAN about the box, link configuration where the build cannot see it or let another user write it, link anything into a world-writable directory, and any tmpfiles.d line not on `tmpfiles.allow` (#1543); each refusal is a line of the build log |
+| `mkosi/mkosi.finalize` | Fails the build on per-install state or socket files (HW-1, V15), a tree that could dump the broker's memory, load Bluetooth, forward, tell the LAN about the box, link configuration where the build cannot see it or let another user write it, link anything into a world-writable directory, any tmpfiles.d line not on `tmpfiles.allow` (#1543), and any udev rule, generator or modules-load.d file not on `exec.allow` (#1556); each refusal is a line of the build log |
 | `mkosi/tmpfiles.allow` | Every tmpfiles.d line the image may ship; `mkosi.finalize` fails the build on any other (#1543) |
+| `mkosi/exec.allow` | Every udev rules file, generator and modules-load.d file the image may ship, by its SHA-256; `mkosi.finalize` fails the build on any other (#1556) |
 | `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth |
 | `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop |

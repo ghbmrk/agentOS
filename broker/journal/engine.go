@@ -1673,6 +1673,12 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecPicture {
+		if r.Picture == nil || !r.Picture.valid() || r.ID != "" {
+			return fmt.Errorf("picture record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecRouteStop {
 		if r.RouteStop == nil || !r.RouteStop.valid() || r.ID != "" {
 			return fmt.Errorf("route stop record without a valid note")
@@ -1821,7 +1827,7 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress, RecSleep:
+	case RecEgress, RecSleep, RecPicture:
 		return
 	case RecRouteStop:
 		e.applyRouteStop(r.RouteStop)

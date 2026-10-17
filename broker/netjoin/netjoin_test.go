@@ -1,6 +1,6 @@
 package netjoin
 
-// REQ: ONB-3, ONB-1, CRED-1
+// REQ: ONB-3, ONB-1, CRED-1, DEV-2, CH-7
 
 import (
 	"bufio"
@@ -160,8 +160,15 @@ func (c *fakeClock) sleep(ctx context.Context, d time.Duration) error {
 	return nil
 }
 
+// The tests' station and access point interfaces (S-R4): a station
+// distinct from the one interface agentos-ap may serve on.
+const (
+	station = "wlan1"
+	apIface = "wlan0"
+)
+
 func joiner(f *fakeNM) (*Joiner, *fakeClock) {
-	j := NewJoiner(f)
+	j := NewJoiner(f, station, []string{apIface})
 	c := &fakeClock{t: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)}
 	j.now, j.sleep = c.now, c.sleep
 	return j, c
@@ -221,6 +228,7 @@ func want(ssid, psk string) Settings {
 		"connection": {
 			"type": "802-11-wireless", "id": "agentos-home",
 			"uuid": "8907ba39-4053-4e84-9cbf-931587303e08", "autoconnect": true,
+			"interface-name": station,
 		},
 		"802-11-wireless":          {"mode": "infrastructure", "ssid": []byte(ssid), "hidden": false},
 		"802-11-wireless-security": {"key-mgmt": "wpa-psk", "psk": psk, "psk-flags": uint32(0)},
@@ -244,6 +252,63 @@ func sameSettings(t *testing.T, got, want Settings) {
 				t.Fatalf("%s.%s differs from L8.4", g, k)
 			}
 		}
+	}
+}
+
+// S-R4 (#1428): the join never takes an interface agentos_ap may hold.
+// With no station, a malformed one, lo, one agentos-ap may run the access
+// point on, or no access point interface known, Join answers failed (setup
+// says to use Ethernet) before any NetworkManager call, so nothing is
+// written and nothing can autoconnect.
+func TestJoinRefusesTheAccessPointInterface(t *testing.T) {
+	cases := []struct {
+		name, station string
+		ap            []string
+	}{
+		{"no station", "", []string{apIface}},
+		{"station is the access point", apIface, []string{apIface}},
+		{"station is a second access point radio", "wlan2", []string{apIface, "wlan2"}},
+		{"no access point interface known", station, nil},
+		{"an empty access point interface", station, []string{""}},
+		{"a malformed access point interface", station, []string{"wlan 0"}},
+		{"lo", "lo", []string{apIface}},
+		{"dot", ".", []string{apIface}},
+		{"dot dot", "..", []string{apIface}},
+		{"too long", "wlan0123456789ab", []string{apIface}},
+		{"a space", "wlan 1", []string{apIface}},
+		{"a slash", "wlan/1", []string{apIface}},
+		{"a NUL", "wlan\x001", []string{apIface}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			j := NewJoiner(f, c.station, c.ap)
+			if got := j.Join(context.Background(), home, canary); got != Failed {
+				t.Fatalf("answered %q, want failed", got)
+			}
+			if len(f.calls) != 0 || len(f.sent) != 0 {
+				t.Fatalf("a refused join reached NetworkManager: %v", f.calls)
+			}
+		})
+	}
+	// A request that fails Valid is still refused first.
+	if got := NewJoiner(newFake(), "", nil).Join(context.Background(), "", canary); got != Refused {
+		t.Fatalf("invalid request answered %q, want refused", got)
+	}
+}
+
+// S-R4: the connection names its one interface, so NetworkManager never
+// activates it on another device, the access point's included, at the
+// join or at any later autoconnect.
+func TestTheConnectionIsPinnedToTheStation(t *testing.T) {
+	if got := ConnectionSettings(home, canary, station)["connection"]["interface-name"]; got != station {
+		t.Fatalf("interface-name = %v, want %q", got, station)
+	}
+	f := newFake()
+	j, _ := joiner(f)
+	j.Join(context.Background(), home, canary)
+	if len(f.sent) != 1 || f.sent[0]["connection"]["interface-name"] != station {
+		t.Fatalf("the written connection is not pinned to %s", station)
 	}
 }
 
@@ -383,7 +448,7 @@ func TestTheWaitRunsOutAsSaved(t *testing.T) {
 	// A caller that goes away ends the wait as saved: the write is done.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	j2 := NewJoiner(newFake())
+	j2 := NewJoiner(newFake(), station, []string{apIface})
 	j2.sleep = sleep
 	if got := j2.Join(ctx, home, canary); got != Saved {
 		t.Fatalf("cancelled join answered %q", got)

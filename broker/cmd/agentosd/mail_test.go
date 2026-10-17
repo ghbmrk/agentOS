@@ -135,6 +135,7 @@ func (o *mailOwner) QueueAutoReply(owner.AutoReply) (owner.QueueResult, error) {
 func (o *mailOwner) DueAutoReplies() []owner.Queued { return nil }
 func (o *mailOwner) UndoneAfterRelease(string) bool { return false }
 func (o *mailOwner) Inform(string) error            { return nil }
+func (o *mailOwner) Post(owner.Class, string) error { return nil }
 func (o *mailOwner) last() (string, []owner.Item) {
 	o.mu.Lock()
 	defer o.mu.Unlock()

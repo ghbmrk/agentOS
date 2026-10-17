@@ -116,6 +116,7 @@ allow provagent journal.Engine.StopRoute -- a refused login stops the provider's
 allow provagent journal.Engine.ReopenRoute -- the owner's stored sign-in reopens a route a refused login stopped (CRED-5; provagent.RouteStops)
 allow vm guest.Plane.Open -- a machine's sandbox opens its own guest socket at creation (vm.Services)
 allow vm guest.Plane.Close -- and closes it when the machine is destroyed (vm.Services)
+allow vm guest.Plane.Reset -- and drops the tool results it held for the machine when a forget resets it (vm.Resetter, CAP-3)
 allow recall journal.FileStore.Append -- shape only: recall.Store matches the journal's store, and wiring gives recall its own FileStore
 allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Append
 allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
