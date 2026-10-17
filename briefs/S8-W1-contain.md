@@ -30,6 +30,6 @@ Board section: Release rows. Source: work item #1720. Tier A (vm, credentials, t
 
 **Out of scope.** The forwarder itself (#1014), the vault entry (#1015), live qualification (#809), the Claude opt-in volume (#1380), `guest/codex/ASSUMPTIONS.md` (#1504).
 
-**Scope:** `broker/e2e/codex_contain_test.go`, `broker/e2e/codexprobe/*`, `broker/e2e/ASSUMPTIONS.md`, `guest/codex/build-rootfs.sh` (header comment and any fix the test needs), `guest/codex/bwrap-loopback.patch` (new: bwrap under runsc, ASSUMPTIONS E4), `guest/codex/managed_config.toml` (`shell_snapshot = false`, E6), `.github/workflows/ci.yml` (one machines step, and libcap-dev for the steps that build the rootfs), this brief.
+**Scope:** `broker/e2e/codex_contain_test.go`, `broker/e2e/codexprobe/*`, `broker/e2e/ASSUMPTIONS.md`, `guest/codex/build-rootfs.sh` (header comment and any fix the test needs), `guest/codex/bwrap-loopback.patch` (new: bwrap under runsc, ASSUMPTIONS E4), `guest/codex/managed_config.toml` (`shell_snapshot = false`, E6), `broker/e2e/dep2_test.go` (one `thirdPartyHosts` entry, `github.com`, for the hash-pinned bubblewrap tarball under Mark's "Patch bwrap" decision; excluded only while #1951 was open, which has merged), `.github/workflows/ci.yml` (one machines step, and libcap-dev for the steps that build the rootfs), this brief.
 
 **Usage estimate:** 120k tokens. Builder model: Opus-class (tier A).
