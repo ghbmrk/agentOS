@@ -355,6 +355,17 @@ type state struct {
 	// and saved that the journal has not yet recorded (CHG-forget-revert-
 	// journal): replay applies them and flushOwed journals them.
 	Unjournaled []string `json:"unjournaled,omitempty"`
+	// Swept: every proposal ID up to c<Swept> that no intent waits on has
+	// no blob in Content (sweepOrphansLocked). A state saved before it
+	// reads 0 and is swept from c1.
+	Swept int `json:"swept,omitempty"`
+	// Legacy is the lifecycle of each adoption a state saved before the
+	// journal held it; replay starts such an adoption from it.
+	// LegacyInState: the bodies were migrated, so replay reads no
+	// lifecycle from a body, which Content's writers could forge
+	// (CHG-adoption-body-trust). A state saved before it reads false.
+	Legacy        map[string]*lifecycle `json:"legacy,omitempty"`
+	LegacyInState bool                  `json:"legacy_in_state,omitempty"`
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
@@ -407,10 +418,11 @@ type Pipeline struct {
 	// stray holds proposals whose Content delete failed; the next forget
 	// retries them (AJS-1). Memory only: replay deletes them again.
 	stray map[string]bool
-	// lapsed holds release proposals dropped because the owner's request
-	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
-	// props: a restart drops both, and Loop 3 re-asks after one anyway.
-	lapsed map[string]bool
+	// closed holds how the owner's request for a release proposal closed
+	// without adopting it (a Closed kind), until Loop 3 asks (Closed,
+	// Lapsed). Memory only, like props: a restart drops both, and Loop 3
+	// re-asks a release it had not yet read as closed (C25).
+	closed map[string]string
 	// qualityRetry: RecheckQuality left an adoption due (an evaluator
 	// outage or a failed revert); the trigger waits until then. Memory
 	// only: a restart retries at once.
@@ -447,12 +459,10 @@ type Pipeline struct {
 	// content holds adoption and proposal bodies (Config.Content);
 	// lastBody each adoption body as last put, so a save puts only what
 	// changed; savedAds the adoptions as of the last save, for
-	// reloadLocked; legacy the lifecycle of adoptions saved before the
-	// journal held it. replayed: Attach rebuilt the adoptions once.
+	// reloadLocked. replayed: Attach rebuilt the adoptions once.
 	content  Content
 	lastBody map[string][]byte
 	savedAds []*Adoption
-	legacy   map[string]*lifecycle
 	replayed bool
 }
 
@@ -481,7 +491,7 @@ func New(cfg Config) (*Pipeline, error) {
 		cfg.Rand = rand.Reader
 	}
 	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}, kept: map[string]pairResult{},
-		content: cfg.Content, lastBody: map[string][]byte{}, legacy: map[string]*lifecycle{}}
+		content: cfg.Content, lastBody: map[string][]byte{}}
 	if p.content == nil {
 		if b, ok := cfg.Store.(interface{ Bodies() Content }); ok {
 			p.content = b.Bodies()
@@ -877,25 +887,37 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 // request expired, was voided, or was dropped by a restart), and one denied
 // for any other reason (an approval gone stale before dispatch) is not the
 // owner's no: both drop the proposal and record nothing, so only the
-// owner's NO reads as a decline. A release dropped this way is reported
-// once by Lapsed, so the next update check (UPD-5, maintain Loop 3) offers
-// it again (C25); one left out of a partial YES is dropped without a
-// decline and is not reported, so it is not re-asked. A local change is
-// proposed again only if Loop 1 produces it again.
+// owner's NO reads as a decline. One left out of a partial YES is dropped
+// without a decline. For a release, how the request closed is reported
+// once by Closed (P2-2a-f4a), so Loop 3 can say it and offer a lapsed or
+// failed release again at the next update check (UPD-5, C25). A local
+// change is proposed again only if Loop 1 produces it again.
 func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, why string) {
 	parts := parseID(in.ID)
 	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
 		return
 	}
+	id := parts[1]
 	st, err := p.j.Get(in.ID)
 	switch {
 	case err != nil:
 	case why == "not chosen" && (st.State == journal.Pending || st.State == journal.Denied):
-		p.drop(parts[1])
+		p.close(id, ClosedLeftOut)
 	case st.State == journal.Pending, st.State == journal.Denied && why != "owner":
-		p.lapse(parts[1])
+		p.close(id, ClosedLapsed)
 	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
-		_, _ = p.Settle(ctx, parts[1])
+		pr := p.prop(id)
+		rep, _ := p.Settle(ctx, id)
+		if pr == nil || pr.cand.Source != Upstream || p.Waiting(id) || rep.State == StateAdopted {
+			return
+		}
+		kind := ClosedFailed
+		if st.State == journal.Denied {
+			kind = ClosedDeclined
+		}
+		p.mu.Lock()
+		p.noteClosedLocked(id, kind)
+		p.mu.Unlock()
 	}
 }
 
@@ -982,30 +1004,62 @@ func (p *Pipeline) prop(id string) *proposal {
 // dropped once adopted, declined, refused or lapsed.
 func (p *Pipeline) Waiting(id string) bool { return p.prop(id) != nil }
 
+// How the owner's request for a release proposal closed without adopting
+// it, as Closed reports it (P2-2a-f4a).
+const (
+	// ClosedLapsed: the request closed without the owner's answer.
+	ClosedLapsed = "lapsed"
+	// ClosedDeclined: the owner said NO.
+	ClosedDeclined = "declined"
+	// ClosedLeftOut: the owner left it out of a partial YES.
+	ClosedLeftOut = "left out"
+	// ClosedFailed: the owner approved it and it was not installed.
+	ClosedFailed = "failed"
+)
+
+// Closed reports, once, how the owner's request for release proposal id
+// closed without adopting it: ClosedLapsed, ClosedDeclined, ClosedLeftOut
+// or ClosedFailed. It is "" for one still waiting, adopted, refused before
+// the owner was asked, or not a release, and after it has been reported.
+func (p *Pipeline) Closed(id string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kind := p.closed[id]
+	delete(p.closed, id)
+	return kind
+}
+
 // Lapsed reports, once, whether release proposal id was dropped because
 // the owner's request closed without the owner's answer (Decided), so Loop
 // 3 offers the release again. It is false for one still waiting, adopted,
-// declined or refused, and after it has been reported.
+// declined, left out or refused, and after it has been reported; it leaves
+// any other kind for Closed.
 func (p *Pipeline) Lapsed(id string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	ok := p.lapsed[id]
-	delete(p.lapsed, id)
+	ok := p.closed[id] == ClosedLapsed
+	if ok {
+		delete(p.closed, id)
+	}
 	return ok
 }
 
-// lapse drops proposal id unanswered and, for a release, keeps that for
-// Lapsed.
-func (p *Pipeline) lapse(id string) {
+// close drops proposal id and, for a release, keeps how its request
+// closed for Closed.
+func (p *Pipeline) close(id, kind string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if pr := p.props[id]; pr != nil && pr.cand.Source == Upstream {
-		if p.lapsed == nil {
-			p.lapsed = map[string]bool{}
-		}
-		p.lapsed[id] = true
+		p.noteClosedLocked(id, kind)
 	}
 	p.dropLocked(id)
+}
+
+func (p *Pipeline) noteClosedLocked(id, kind string) {
+	if p.closed == nil {
+		p.closed = map[string]string{}
+	}
+	p.closed[id] = kind
 }
 
 func (p *Pipeline) drop(id string) {

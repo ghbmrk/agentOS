@@ -298,47 +298,116 @@ func (h *heldUntil) Hold() error {
 	return nil
 }
 
-// Brief test 4, the page's side: CardFinish sends no report while the
-// card is held, so agentosd's finish refuses (card pending); once the card
-// is confirmed it reports, then finishes. A refused report stops the
-// finish.
-func TestCardFinishReportsTheConfirmedCard(t *testing.T) {
+// #1330 and external review 12 item 12: CardFinish makes one finish call.
+// A held card sends card false, so agentosd's finish refuses (card
+// pending); a confirmed card sends card true in that same call. A card
+// pending after a confirmed report reruns the card step and answers
+// ErrCardAgain; a rerun that fails answers neither that nor card pending's
+// refusal alone, and a refusal for a held card reruns nothing.
+func TestCardFinishSendsOneCall(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
-	reported, refuse := false, false
+	vaultHasCard := true
 	ops := InProcess{
-		localapi.OpSetupCard: func(_ context.Context, _ sockets.Peer, raw json.RawMessage) (any, error) {
+		localapi.OpSetupFinish: func(_ context.Context, _ sockets.Peer, raw json.RawMessage) (any, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			calls = append(calls, localapi.OpSetupCard)
-			var c localapi.SetupCard
-			if json.Unmarshal(raw, &c) != nil || !c.Confirmed || refuse {
+			var f localapi.Finish
+			if json.Unmarshal(raw, &f) != nil || f.Owner != ownerNum {
 				return nil, sockets.Code(localapi.ErrBadArgs)
 			}
-			reported = true
-			return struct{}{}, nil
-		},
-		localapi.OpSetupFinish: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			calls = append(calls, localapi.OpSetupFinish)
-			if !reported {
+			calls = append(calls, fmt.Sprintf("%s card=%v", localapi.OpSetupFinish, f.Card))
+			if !f.Card || !vaultHasCard {
 				return nil, sockets.Code(localapi.ErrCardPending)
 			}
 			return struct{}{}, nil
 		},
 	}
 	hold := &heldUntil{held: true}
-	f := CardFinish{AgentosdSetup: AgentosdSetup{Owner: ops}, Card: hold}
-	if err := f.Finish(ownerNum); err == nil || fmt.Sprint(calls) != "["+localapi.OpSetupFinish+"]" {
-		t.Fatalf("held card: %v, calls %v", err, calls)
+	agains := 0
+	var againErr error
+	f := CardFinish{AgentosdSetup: AgentosdSetup{Owner: ops}, Card: hold,
+		Again: func() error { agains++; return againErr }}
+	if err := f.Finish(ownerNum); !refused(err, localapi.ErrCardPending) || fmt.Sprint(calls) != "[page_setup_finish card=false]" || agains != 0 {
+		t.Fatalf("held card: %v, calls %v, reruns %d", err, calls, agains)
 	}
-	hold.held, refuse, calls = false, true, nil
-	if err := f.Finish(ownerNum); err == nil || fmt.Sprint(calls) != "["+localapi.OpSetupCard+"]" {
-		t.Fatalf("refused report: %v, calls %v", err, calls)
-	}
-	refuse, calls = false, nil
-	if err := f.Finish(ownerNum); err != nil || fmt.Sprint(calls) != "["+localapi.OpSetupCard+" "+localapi.OpSetupFinish+"]" {
+	hold.held, calls = false, nil
+	if err := f.Finish(ownerNum); err != nil || fmt.Sprint(calls) != "[page_setup_finish card=true]" {
 		t.Fatalf("confirmed card: %v, calls %v", err, calls)
+	}
+	vaultHasCard, calls = false, nil
+	if err := f.Finish(ownerNum); !errors.Is(err, ErrCardAgain) || agains != 1 || len(calls) != 1 {
+		t.Fatalf("vault without a card: %v, reruns %d, calls %v", err, agains, calls)
+	}
+	againErr = errors.New("vault busy")
+	if err := f.Finish(ownerNum); err == nil || errors.Is(err, ErrCardAgain) || agains != 2 {
+		t.Fatalf("failed rerun: %v, reruns %d", err, agains)
+	}
+	if err := (AgentosdSetup{Owner: ops}).Finish(ownerNum); !refused(err, localapi.ErrCardPending) {
+		t.Fatalf("AgentosdSetup reported a card: %v", err)
+	}
+}
+
+// #1330: a finish refused because the vault holds no Owner Card (CardFinish
+// reran the step: ErrCardAgain) shows the fixed message, routes setup back
+// to the card step with a new card, and once that card is confirmed and
+// the recovery step done again, setup finishes.
+func TestCardPendingMakesTheCardAgain(t *testing.T) {
+	cr := newCardRig(t)
+	cr.toCard()
+	cr.get("/setup/card")
+	w, g := cr.answers()
+	cr.post("/setup/card", url.Values{"word": {w}, "group": {g}})
+	if cr.step.Hold() != nil {
+		t.Fatal("first card not confirmed")
+	}
+	first := *cr.shown
+	resets := 0
+	reruns := 0
+	cr.hooks.mu.Lock()
+	cr.hooks.refuseFinish = func() error {
+		if reruns > 0 {
+			return nil
+		}
+		reruns++
+		if err := cr.step.Again(func() error { resets++; return nil }); err != nil {
+			return err
+		}
+		return ErrCardAgain
+	}
+	cr.hooks.connected = true
+	cr.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	cr.hooks.mu.Unlock()
+	cr.post("/setup/recovery", url.Values{"stored": {"1"}})
+	cr.post("/setup/host", url.Values{}) // the last step's post runs the finish
+	if cr.srv.setup.done() || reruns != 1 || resets != 1 {
+		t.Fatalf("done %v, reruns %d, resets %d", cr.srv.setup.done(), reruns, resets)
+	}
+	page := html.UnescapeString(cr.get("/setup"))
+	if !strings.Contains(page, cardAgain) || !strings.Contains(page, `href="/setup/card"`) {
+		t.Fatalf("not the card step with the message: %s", page)
+	}
+	if strings.Contains(page, "Could not finish setup") {
+		t.Fatal("the dead-end message")
+	}
+	cr.get("/setup/card")
+	if cr.shown.RecoveryKey == first.RecoveryKey {
+		t.Fatal("the same card shown again")
+	}
+	w, g = cr.answers()
+	cr.post("/setup/card", url.Values{"word": {w}, "group": {g}})
+	if cr.step.Hold() != nil || cr.made != 2 {
+		t.Fatalf("new card: hold %v, provisions %d", cr.step.Hold(), cr.made)
+	}
+	if !strings.Contains(cr.get("/setup"), `action="/setup/recovery"`) {
+		t.Fatal("the recovery step was not asked again")
+	}
+	cr.post("/setup/recovery", url.Values{"stored": {"1"}})
+	cr.srv.setup.maybeFinish()
+	if !cr.srv.setup.done() || cr.hooks.finishes != 1 {
+		t.Fatalf("done %v, finishes %d", cr.srv.setup.done(), cr.hooks.finishes)
+	}
+	if _, gsm := modem.Segments(cardAgain); !gsm {
+		t.Fatalf("not GSM-7: %q", cardAgain)
 	}
 }

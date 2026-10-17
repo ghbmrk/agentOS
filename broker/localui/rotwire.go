@@ -287,11 +287,11 @@ func handOffWiFi(wifi func() error, c *card.Card) bool {
 }
 
 // wifiSwitchedNote tells the owner the Wi-Fi switched and how to rejoin.
-const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. If your phone drops off, rejoin with the Wi-Fi QR code on your new card."
+const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. Your phone may drop off now: rejoin with the Wi-Fi QR code on your new card."
 
 // withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
 func withWiFiNote(res RotationResult, switched bool) RotationResult {
-	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Home."
+	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Replace Owner Card parts on Home."
 	if switched {
 		note = wifiSwitchedNote
 	}

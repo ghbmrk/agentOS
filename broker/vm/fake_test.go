@@ -310,3 +310,25 @@ func failSave(path string) func() {
 	}
 	return func() { writeFile = real }
 }
+
+// halfStart makes id's next start launch the guest and then fail before the
+// machine is Running, as a preemption racing the start does, and refuses
+// every kill from then on: the launched guest lives on, not known dead.
+func (e *env) halfStart(id string) {
+	e.t.Helper()
+	e.rt.onStart = func(sid string) {
+		if sid != id {
+			return
+		}
+		e.rt.onStart = nil
+		mc, err := e.m.get(id)
+		if err != nil {
+			e.t.Errorf("halfStart %s: %v", id, err)
+			return
+		}
+		mc.preempting.Store(true)
+		e.rt.mu.Lock()
+		e.rt.refuseKill = errors.New("fake: kill refused")
+		e.rt.mu.Unlock()
+	}
+}

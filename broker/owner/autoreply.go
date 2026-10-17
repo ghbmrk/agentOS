@@ -86,9 +86,17 @@ func (w watchedLine) SendRequest(to, text string) error {
 
 // sendRequest texts the owner an approval request. Grants paces these,
 // so the owner never holds one, but each counts toward the hour (CH-15)
-// before it is sent, and is settled as a sent text is (#1638).
+// before it is sent, and is settled as a sent text is (#1638). A request
+// grants already counted with Spend goes on that count (#1685).
 func (c *Channel) sendRequest(text string) error {
-	at := c.reserve()
+	c.mu.Lock()
+	var at time.Time
+	if len(c.spent) > 0 {
+		at, c.spent = c.spent[0], c.spent[1:]
+	} else {
+		at = c.reserveLocked(c.cfg.Now())
+	}
+	c.mu.Unlock()
 	var err error
 	if rs, ok := c.cfg.Modem.(RequestSender); ok {
 		err = rs.SendRequest(c.cfg.Owner, text)

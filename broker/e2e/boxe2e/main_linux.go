@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -44,6 +45,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/provagent"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 const (
@@ -103,6 +105,12 @@ type driver struct {
 	// runscLog is agentosd's runsc exec log, where a machine's failed
 	// start leaves runsc's message; nil reads the box's.
 	runscLog func() string
+	// signInOut is the sign-in CLI's output file in a live provider
+	// worker's layer, "" for none; nil reads the box's (signInOutFile).
+	signInOut func() string
+	// runOut is a provider run's result file in a live provider worker's
+	// layer, "" for none; nil reads the box's (runOutFile).
+	runOut func() string
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -541,10 +549,17 @@ func (d *driver) guestTask() error {
 
 // signInDiag says why the sign-in did not start: agentosd's setup and
 // provagent journal lines, where StartSignIn logs the step that refused it
-// (#1701), and the end of runsc's exec log, where a worker's failed start
-// leaves runsc's message, cut short with the stub's tokens cut out
-// (ASSUMPTIONS E8).
-func (d *driver) signInDiag() string {
+// (#1701), the end of runsc's exec log, where a worker's failed start
+// leaves runsc's message, and the end of out, what the sign-in CLI and
+// its forwarder printed (watchSignIn), each cut short with the stub's
+// tokens cut out (ASSUMPTIONS E8, E13).
+func (d *driver) signInDiag(out string) string {
+	return d.workerDiag("sign-in output", out)
+}
+
+// workerDiag is signInDiag with out, a provider worker's output, quoted
+// under the name what.
+func (d *driver) workerDiag(what, out string) string {
 	read := d.agentosdLog
 	if read == nil {
 		read = func() string {
@@ -576,13 +591,129 @@ func (d *driver) signInDiag() string {
 		}
 	}
 	return "diag: agentosd: " + redactLog(chunked(strings.Join(keep, "\n"), secrets), 8, secrets...) +
-		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...)
+		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...) +
+		"; " + what + ": " + redactLog(chunked(ansiSeq.ReplaceAllString(out, ""), secrets), 6, secrets...)
+}
+
+// ansiSeq is a terminal escape sequence, cut from the CLI's output.
+var ansiSeq = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
+
+// signInWatch keeps the last thing a sign-in worker's output file held.
+// agentosd destroys the worker, and the file with it, as soon as its CLI
+// exits without a code, and logs only the exit status (CRED-5); this
+// driver is root on the box, so it reads the file from the worker's layer
+// on the host while the sign-in runs (ASSUMPTIONS E13).
+type signInWatch struct {
+	mu   sync.Mutex
+	last string
+	end  chan struct{}
+	done chan struct{}
+}
+
+// watchSignIn reads the sign-in output every 50ms until stop.
+func (d *driver) watchSignIn() *signInWatch {
+	return d.watchWorker(d.signInOut, ".agentos-signin")
+}
+
+// watchRun reads a provider run's result file every 50ms until stop: the
+// CLI's JSON events, which say why a run failed, and which agentosd
+// destroys with the worker (ASSUMPTIONS E14).
+func (d *driver) watchRun() *signInWatch {
+	return d.watchWorker(d.runOut, filepath.Base(provagent.Builtins()[egress.Codex().Provider].ResultPath))
+}
+
+// watchWorker reads read, or else the file name in the newest provider
+// worker's workspace, every 50ms until stop.
+func (d *driver) watchWorker(read func() string, name string) *signInWatch {
+	if read == nil {
+		argv := d.agentosdArgv
+		if argv == nil {
+			argv = unitArgv
+		}
+		args, _ := argv()
+		dir := machinesDir(args)
+		read = func() string { return workerOutFile(dir, name) }
+	}
+	w := &signInWatch{end: make(chan struct{}), done: make(chan struct{})}
+	poll := func() {
+		if s := read(); s != "" {
+			w.mu.Lock()
+			w.last = s
+			w.mu.Unlock()
+		}
+	}
+	go func() {
+		defer close(w.done)
+		t := time.NewTicker(50 * time.Millisecond)
+		defer t.Stop()
+		for {
+			poll()
+			select {
+			case <-w.end:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return w
+}
+
+// stop ends the watch and returns the last output read.
+func (w *signInWatch) stop() string {
+	close(w.end)
+	<-w.done
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last
+}
+
+// signInOutMax is how much of the output file is read.
+const signInOutMax = 64 << 10
+
+// signInOutFile is the sign-in output file of the newest provider worker
+// under the machines directory, at its end, "" for none: the worker's
+// guest writes land in its overlay's upper layer (vm Manager.diskDir).
+func signInOutFile(machines string) string {
+	return workerOutFile(machines, ".agentos-signin")
+}
+
+// workerOutFile is file name in the workspace of the newest provider
+// worker under the machines directory, at its end, "" for none.
+func workerOutFile(machines, name string) string {
+	cwd := provagent.Builtins()[egress.Codex().Provider].Cwd
+	paths, _ := filepath.Glob(filepath.Join(machines, "machines", vm.ProviderPrefix+"*", "disk", "upper", cwd, name))
+	var best string
+	var at time.Time
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && !fi.ModTime().Before(at) {
+			best, at = p, fi.ModTime()
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	f, err := os.Open(best)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > signInOutMax {
+		f.Seek(fi.Size()-signInOutMax, io.SeekStart)
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, signInOutMax))
+	return string(b)
 }
 
 // execLogPath is runsc's exec log under agentosd's -machines directory
 // (gvisor.Runtime's StateDir is its runsc subdirectory), the flag's
 // default when args set none.
 func execLogPath(args []string) string {
+	return filepath.Join(machinesDir(args), "runsc", "exec.log")
+}
+
+// machinesDir is agentosd's -machines directory, the flag's default when
+// args set none.
+func machinesDir(args []string) string {
 	dir := "/var/lib/agentos/machines"
 	for i, a := range args {
 		v, ok := strings.CutPrefix(strings.TrimLeft(a, "-"), "machines=")
@@ -593,7 +724,7 @@ func execLogPath(args []string) string {
 			dir = v
 		}
 	}
-	return filepath.Join(dir, "runsc", "exec.log")
+	return dir
 }
 
 // chunked is log with secrets cut out and each line split into
@@ -650,7 +781,10 @@ func (d *driver) planSignIn() error {
 		return errors.New("no plan stub")
 	}
 	form := url.Values{"provider": {route.Provider}, "private": {"1"}}
-	if st, _, err := d.post("/setup/ai-device", form); err != nil || st != http.StatusSeeOther {
+	w := d.watchSignIn()
+	st, _, err := d.post("/setup/ai-device", form)
+	out := w.stop()
+	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/ai-device %d %v", st, err)
 	}
 	if pg, err = d.page(); err != nil {
@@ -666,7 +800,7 @@ func (d *driver) planSignIn() error {
 		if has, err := d.hasImage(image); err == nil && !has {
 			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
 		}
-		return errors.New("no sign-in link after sign in " + where(pg) + "; " + d.signInDiag())
+		return errors.New("no sign-in link after sign in " + where(pg) + "; " + d.signInDiag(out))
 	}
 	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
 		// The host alone is safe to print; the rest may carry the code.

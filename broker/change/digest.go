@@ -12,6 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/routerule"
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // idLetters avoids I and O, as the owner channel's IDs do.
@@ -94,6 +95,19 @@ func (p *Pipeline) what(a *Adoption) string {
 			return "Staged update " + v + "; I will install it when I am free" // C27
 		}
 		return "Installed update " + v
+	case has[ClassAdapter]:
+		var added, removed []string
+		for _, e := range a.Edits {
+			if tool, ok := adapterTool(e.Path); ok && e.After != nil {
+				added = append(added, tool)
+			} else if ok {
+				removed = append(removed, tool)
+			}
+		}
+		if len(added) > 0 {
+			return "Connected " + strings.Join(added, ", ")
+		}
+		return "Removed the connection to " + strings.Join(removed, ", ")
 	case has[ClassConfig]:
 		return "Changed a setting"
 	case has[ClassRouting]:
@@ -488,6 +502,9 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 	for _, c := range pr.classes {
 		has[c] = true
 	}
+	if has[ClassAdapter] {
+		return adapterItem(pr.edits, undo), nil
+	}
 	obj := "a learned procedure"
 	switch {
 	case has[ClassConfig]:
@@ -516,12 +533,112 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 	case has[ClassSkill]:
 		obj = "a learned skill"
 	}
-	learned := pr.cand.Source == Local && !has[ClassConfig] && !has[ClassRouting] && !has[ClassContext]
+	learned := pr.cand.Source == Local && !has[ClassConfig] && !has[ClassRouting] && !has[ClassContext] && !has[ClassAdapter]
 	if learned && s.HeldOut > 0 && undo != "" {
 		return owner.Item{Object: obj, Detail: tested, UndoBy: undo,
 			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "adopt", NoRecipient: true}}, nil
 	}
 	return high("adopt", obj, tested, undo), nil
+}
+
+// adapterItem is the owner's item for adopting or removing adapters
+// (ADP-6, ADP-2): the object names the tool, the detail says which grants
+// it asks for and which irreversible or secret verbs it can run, and the terms the
+// local page shows list every grant and every operation, those left
+// unmapped as draft only. It is always high tier: the owner decides what
+// a tool may do, so a passing test never makes it ordinary. The tool,
+// operation and grant names come from the file and pass through named;
+// every other word is broker text.
+func adapterItem(edits []Edit, undo string) owner.Item {
+	var tools, removed, grants, verbs []string
+	var acts, drafts, also []owner.Term
+	for _, e := range edits {
+		tool, ok := adapterTool(e.Path)
+		if !ok {
+			continue
+		}
+		if e.After == nil {
+			removed = append(removed, tool)
+			continue
+		}
+		tools = append(tools, tool)
+		var a Adapter
+		if decodeStrict(e.After, &a) != nil {
+			continue // classify forbade it; nothing reaches the owner
+		}
+		for _, g := range a.Grants {
+			grants = append(grants, named(g))
+		}
+		ops := make([]string, 0, len(a.Operations))
+		for op := range a.Operations {
+			ops = append(ops, op)
+		}
+		sort.Strings(ops)
+		for _, op := range ops {
+			v := a.Operations[op]
+			switch c, _ := verb.ClassOf(v); {
+			case v == "":
+				drafts = append(drafts, owner.Term{Label: "Draft only", Value: named(op) + ", until you choose what it does"})
+			case c != verb.Reversible:
+				// Irreversible and secret verbs; an unknown verb reports
+				// Secret, so it lands here too (fail closed).
+				acts = append(acts, owner.Term{Label: "Acts for good", Value: named(op) + ": " + named(v)})
+				if !slices.Contains(verbs, named(v)) {
+					verbs = append(verbs, named(v))
+				}
+			default:
+				also = append(also, owner.Term{Label: "Also", Value: named(op) + ": " + named(v)})
+			}
+		}
+	}
+	item := func(act, obj, detail string, ts []owner.Term) owner.Item {
+		return owner.Item{Object: obj, Detail: detail, UndoBy: undo, Terms: owner.NewTerms(ts),
+			Facts: owner.Facts{Kind: owner.GrantChange, Verb: act, NoRecipient: true}}
+	}
+	if len(tools) == 0 {
+		return item("remove", "the connection to "+strings.Join(removed, ", "), "", nil)
+	}
+	var ts []owner.Term
+	for _, t := range tools {
+		ts = append(ts, owner.Term{Label: "Tool", Value: t})
+	}
+	for _, t := range removed {
+		ts = append(ts, owner.Term{Label: "Removes", Value: t})
+	}
+	// The detail leads with what cannot be undone, as the owner channel
+	// cuts it at 40 characters; the terms carry the full list.
+	var detail []string
+	if len(verbs) > 0 {
+		detail = append(detail, "can "+strings.Join(verbs, ", "))
+	}
+	if len(grants) > 0 {
+		detail = append(detail, "asks for "+strings.Join(grants, ", "))
+	}
+	for _, g := range grants {
+		ts = append(ts, owner.Term{Label: "Asks for", Value: g})
+	}
+	if len(drafts) > 0 {
+		detail = append(detail, fmt.Sprintf("%d draft only", len(drafts)))
+	}
+	ts = append(append(append(ts, acts...), drafts...), also...)
+	return item("adopt", "a connection to "+strings.Join(tools, ", "), strings.Join(detail, "; "), ts)
+}
+
+// adapterTool is the tool an adapters/<tool>.json path names.
+func adapterTool(path string) (string, bool) {
+	tool, ok := strings.CutSuffix(strings.TrimPrefix(path, "adapters/"), ".json")
+	if !ok || !strings.HasPrefix(path, "adapters/") || tool == "" || strings.Contains(tool, "/") {
+		return "", false
+	}
+	return named(tool), true
+}
+
+// named is a file-given name as the owner sees it: safe, and never blank.
+func named(s string) string {
+	if s = safe(s); s == "" {
+		return "(unnamed)"
+	}
+	return s
 }
 
 func testedText(s Score) string {

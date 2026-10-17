@@ -11,7 +11,10 @@ After=dbus.service NetworkManager.service
 [Service]
 User=agentos-netjoin
 Group=agentos-netjoin
-ExecStart=/usr/lib/agentos/agentos-netjoin -dir /run/agentos-netjoin -agentosd-uid 0
+# -ap-iface is agentos-ap's -iface, so the join never takes the radio
+# agentos_ap holds (S-R4, #1428); no -station until #936 ships a station
+# device, so every join answers failed and setup points to Ethernet.
+ExecStart=/usr/lib/agentos/agentos-netjoin -dir /run/agentos-netjoin -agentosd-uid 0 -ap-iface wlan0
 Restart=always
 RestartSec=5
 

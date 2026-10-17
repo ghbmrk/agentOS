@@ -51,16 +51,18 @@ func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
 	}
 }
 
-// REQ: HW-10. The step not driven yet fails with the text the xfail table
-// expects, so it reads XFAIL and not FAIL; phone-control is driven, so it
-// is off the list and an unpassed run reads FAIL.
+// REQ: HW-10. A step not driven yet still says so, but no step is on the
+// expected-failure list any more: guest-task is driven (#1701) and
+// phone-control is driven (#1714), so an unpassed run reads FAIL.
 func TestNotDrivenStepsFailWithTheExpectedText(t *testing.T) {
 	d := &driver{}
-	if err := fakeDriver(&fakeBox{}).guestTask(); err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) {
-		t.Errorf("guest-task: %v does not start with %q", err, xfail["guest-task"].want)
+	if err := fakeDriver(&fakeBox{}).guestTask(); err == nil || !strings.HasPrefix(err.Error(), notDriven) {
+		t.Errorf("guest-task: %v does not start with %q", err, notDriven)
 	}
-	if _, ok := xfail["phone-control"]; ok {
-		t.Error("phone-control is driven (#1714) but still on the expected-failure list")
+	for _, step := range []string{"guest-task", "phone-control"} {
+		if _, ok := xfail[step]; ok {
+			t.Errorf("%s is driven but still on the expected-failure list", step)
+		}
 	}
 	if err := d.phoneControl(); err == nil || strings.HasPrefix(err.Error(), notDriven) {
 		t.Errorf("phone-control without a paired phone: %v", err)

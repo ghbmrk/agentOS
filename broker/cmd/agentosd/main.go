@@ -456,6 +456,11 @@ func main() {
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
+	// One opening serves setup's sign-in worker and the owner's plane:
+	// the first moves the broker below the delegate mark (#1701).
+	boxMachines := onceMachines(func() (*cgroup.Group, error) {
+		return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+	})
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
 	namedAgentImage := agentImage // the builder never runs it, agent or not
@@ -543,15 +548,12 @@ func main() {
 		// and closed before agentosd opens its own below.
 		var signInHost *setupHost
 		if runsc != "" && workerRoutes != "" {
-			signInHost = newSetupHost(setupMachines{
-				runsc: runsc, stateDir: stateDir, routes: workerRoutes, diskQuota: diskQuota,
+			signInHost, m.SignIn = newSetupPlane(setupMachines{
+				runsc: runsc, stateDir: stateDir, rc: modelroute.NewRouteControl(workerRoutes), diskQuota: diskQuota,
 				images: imgs, admit: cfg.Admission,
-				cgroups: func() (*cgroup.Group, error) {
-					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
-				},
+				cgroups:       boxMachines,
 				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
-			}.open)
-			m.SignIn = newSetupSignIn(signInHost, modelroute.NewRouteControl(workerRoutes), pins)
+			}, pins)
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)
@@ -590,7 +592,7 @@ func main() {
 	psiPath := "/proc/pressure/memory"
 	agentOff := mem.AgentOff
 	if runsc != "" {
-		g, err := openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+		g, err := boxMachines()
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
@@ -1455,6 +1457,7 @@ func (p *ownerPacer) wire(g *grants.Config) {
 	g.Quiet = p.quiet
 	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
 	g.Allowance = p.allowance
+	g.Spend, g.Refund = p.spend, p.refund
 }
 
 func (p *ownerPacer) quiet(t time.Time) bool {
@@ -1472,6 +1475,21 @@ func (p *ownerPacer) allowance(t time.Time) int {
 		return ch.Allowance(t)
 	}
 	return 0
+}
+
+// spend counts a request text on the owner's hour as grants grants it
+// (#1685); until the channel is attached, nothing paced goes.
+func (p *ownerPacer) spend(paced bool) (time.Time, bool) {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Spend(paced)
+	}
+	return time.Time{}, !paced
+}
+
+func (p *ownerPacer) refund(at time.Time) {
+	if ch := p.ch.Load(); ch != nil {
+		ch.Refund(at)
+	}
 }
 
 // note is STATUS's held line (QH-10).

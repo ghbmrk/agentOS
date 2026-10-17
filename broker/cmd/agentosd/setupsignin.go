@@ -192,14 +192,16 @@ func (s *setupHost) Close(ctx context.Context) {
 
 // setupMachines is what setup's sign-in worker needs of the box: the
 // same runtime, images, state directory, budgets and quotas as agentosd's
-// own machines, opened only once a sign-in starts.
+// own machines, opened only once a sign-in starts. rc is the route control
+// the sign-in runner marks its worker's route on (newSetupPlane).
 type setupMachines struct {
-	runsc, stateDir, routes, diskQuota string
-	images                             images
-	cgroups                            func() (*cgroup.Group, error)
-	admit                              admission.Config
-	diskReserveMB, machineDiskMB       int64
-	workerLayerMB                      int64
+	runsc, stateDir, diskQuota   string
+	rc                           *modelroute.RouteControl
+	images                       images
+	cgroups                      func() (*cgroup.Group, error)
+	admit                        admission.Config
+	diskReserveMB, machineDiskMB int64
+	workerLayerMB                int64
 }
 
 // open opens the manager. Admission is a controller of its own over the
@@ -228,7 +230,7 @@ func (c setupMachines) open(ctx context.Context) (provagent.Host, error) {
 		DiskReserveBytes: c.diskReserveMB << 20,
 		MachineDiskBytes: c.machineDiskMB << 20,
 		WorkerLayerBytes: workerLayerBytes(c.workerLayerMB),
-		ProviderRoutes:   modelroute.NewRouteControl(c.routes),
+		ProviderRoutes:   c.providerRoutes(),
 	}
 	md.set(&vmc)
 	m, err := vm.Open(ctx, vmc)
@@ -236,6 +238,19 @@ func (c setupMachines) open(ctx context.Context) (provagent.Host, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// providerRoutes is what opens a provider worker's route: the sign-in
+// runner's own route control, so a worker it marks opens on a sign-in
+// route. A control of its own would not know the mark and open a run
+// route, which refuses the CLI's sign-in calls (#1701).
+func (c setupMachines) providerRoutes() vm.Services { return c.rc }
+
+// newSetupPlane builds setup's sign-in over c's machines, both on c's one
+// route control.
+func newSetupPlane(c setupMachines, pins imagePins) (*setupHost, setupSignIn) {
+	h := newSetupHost(c.open)
+	return h, newSetupSignIn(h, c.rc, pins)
 }
 
 // noPreempt preempts nothing.

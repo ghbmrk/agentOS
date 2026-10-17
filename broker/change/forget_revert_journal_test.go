@@ -199,6 +199,7 @@ func TestOwedRevertJournaledAfterACrash(t *testing.T) {
 // intent, is journaled once and leaves the body.
 func TestBodyRevertFromAnEarlierBuildIsJournaled(t *testing.T) {
 	e, rep := forgetEnv(t)
+	e.asEarlierBuild()
 	old := bytes.Replace(e.body(rep.ID), []byte(`{`), []byte(`{"reverted":"forgotten",`), 1)
 	e.putBody(rep.ID, old)
 	e.reopen()
@@ -238,6 +239,7 @@ func TestForgedForgetRevertIsDenied(t *testing.T) {
 // start migrates it.
 func TestBodyRevertMigrationSurvivesAFailedSave(t *testing.T) {
 	e, rep, _ := settingsEnv(t)
+	e.asEarlierBuild()
 	old := bytes.Replace(e.body(rep.ID), []byte(`{`), []byte(`{"reverted":"settings",`), 1)
 	e.putBody(rep.ID, old)
 	e.p.cfg.Store = &flakyStore{MemStore: e.store, failSave: true}

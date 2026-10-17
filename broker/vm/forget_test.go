@@ -5,6 +5,7 @@ package vm
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -266,5 +267,51 @@ func TestForgetSinceResetsTheMachinesServices(t *testing.T) {
 	}
 	if len(svc.resets) != 2 || svc.resets[1] != "m" {
 		t.Fatalf("services reset %v after a failed reset, want m twice", svc.resets)
+	}
+}
+
+// A snapshot recorded before lineages belongs to the lineage its machine
+// had then: the machine's ID, as load gives a pre-lineage machine. Once
+// that machine is destroyed and its ID taken by a machine of another
+// lineage, a forget of the original lineage still erases it (#1660,
+// #1575 Security S-R1).
+func TestCAP3ForgetSinceErasesPreLineageSnapshotAfterIDReplaced(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("h", admission.Experiment, 500)
+	since := time.Now().UTC()
+	time.Sleep(5 * time.Millisecond)
+	e.guestWrite("h", "notes", "secret")
+	s, err := e.m.Checkpoint(bg, "h")
+	must(t, err)
+
+	// Rewrite both as recorded before lineages, then load: h's lineage is
+	// its ID.
+	mc := e.m.machines["h"]
+	mc.mu.Lock()
+	mc.Lineage = ""
+	must(t, writeJSON(filepath.Join(e.m.machineDir("h"), "meta.json"), mc.Machine))
+	mc.mu.Unlock()
+	s.Lineage = ""
+	must(t, writeJSON(filepath.Join(e.m.snapDir(s.ID), "meta.json"), s))
+	e.adm.Release("h")
+	e.open()
+	if h, _ := e.m.Get("h"); h.Lineage != "h" {
+		t.Fatalf("pre-lineage machine loaded with lineage %q, want its ID", h.Lineage)
+	}
+
+	// Its holder is destroyed and replaced under the same ID by a machine
+	// of another lineage.
+	must(t, e.m.Destroy(bg, "h"))
+	e.create("h", admission.Experiment, 500)
+	if h, _ := e.m.Get("h"); h.Lineage == "h" {
+		t.Fatal("replacement shares the original lineage; the test needs another")
+	}
+
+	must(t, e.m.ForgetSince(bg, "h", since))
+	if _, err := e.m.Snapshot(s.ID); err == nil {
+		t.Fatal("pre-lineage snapshot of the forgotten lineage survived its holder's replacement")
+	}
+	if _, err := os.Stat(e.m.snapDir(s.ID)); !os.IsNotExist(err) {
+		t.Fatal("pre-lineage snapshot left on disk")
 	}
 }

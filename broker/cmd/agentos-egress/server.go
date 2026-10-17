@@ -608,10 +608,20 @@ func unlockHandler(c *custody) http.Handler {
 // second line waits on the owner (egress K13), and GET /second-line/texts
 // whether its texting account's polls are failing (K16), and nothing
 // else.
+// anchorAnswer* name the 409's conflict for the client (SR3-6-f5b). They
+// are anchorsock's values (TestAnchorAnswerHeaderMatchesClient); the vault
+// process does not link package update for them.
+const (
+	anchorAnswerHeader    = "Anchor-Answer"
+	anchorAnswerMissing   = "missing"
+	anchorAnswerElsewhere = "elsewhere"
+)
+
 // updateAnchorHandler serves the update store's anchor (SR3-6f-2c): GET
 // reads it, POST raises it to 1. Nothing lowers it. {"anchored":false} is
 // a vault that never had a counter, on a PC with no TPM; a recorded
-// counter that is gone, or on a TPM this PC lacks, is 409.
+// counter that is gone, or on a TPM this PC lacks, is 409, named in the
+// Anchor-Answer header (SR3-6-f5b).
 func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	read := c.updateAnchorRead
 	if r.Method == http.MethodPost {
@@ -621,7 +631,11 @@ func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-	case err == errUpdateAnchorMissing, err == errUpdateAnchorElsewhere:
+	case err == errUpdateAnchorMissing:
+		w.Header().Set(anchorAnswerHeader, anchorAnswerMissing)
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err == errUpdateAnchorElsewhere:
+		w.Header().Set(anchorAnswerHeader, anchorAnswerElsewhere)
 		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, errInternal.Error(), http.StatusInternalServerError)

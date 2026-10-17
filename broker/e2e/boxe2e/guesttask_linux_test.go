@@ -94,6 +94,8 @@ func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch g.mode {
 	case "unqualified":
 		text("provider_run: unqualified: this provider's route is not qualified yet; use another route", true)
+	case "failed":
+		text("provider_run: failed: the run failed, or its brief or result was over the size cap; shorten the brief, or use another route", true)
 	case "usedup":
 		text("provider_run: used up: this provider's plan has no quota left until it resets; use another route", true)
 	case "noCall":
@@ -219,8 +221,8 @@ func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 	for mode, says := range map[string]string{"absent": "#1721", "unqualified": "#809"} {
 		d, _ := signedIn(t, mode)
 		err := d.guestTask()
-		if err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) || !strings.Contains(err.Error(), says) {
-			t.Errorf("%s: %v does not read XFAIL naming %s", mode, err, says)
+		if err == nil || !strings.HasPrefix(err.Error(), notDriven) || !strings.Contains(err.Error(), says) {
+			t.Errorf("%s: %v does not say not driven, naming %s", mode, err, says)
 		}
 	}
 
@@ -320,5 +322,44 @@ func TestGuestTaskFailsWithoutTheAgentSocket(t *testing.T) {
 	err := d.guestTask()
 	if err == nil || strings.HasPrefix(err.Error(), notDriven) || !strings.Contains(err.Error(), "guest socket never appeared") {
 		t.Fatalf("no socket: %v", err)
+	}
+}
+
+// A provider_run refused as failed quotes why (#1701): the stub's calls,
+// agentosd's setup and provagent lines, the end of runsc's exec log, and
+// the end of what the run's CLI wrote to its result file, each with every
+// issued token and canary cut out (ASSUMPTIONS E14).
+func TestHW10AFailedRunQuotesItsOutput(t *testing.T) {
+	d, f := signedIn(t, "failed")
+	d.agentosdLog = func() string {
+		return "agentosd: listening\nprovagent: destroy provider worker pw-2: busy\n"
+	}
+	d.runscLog = func() string { return "pw-2: runsc exec failed (exit status 1)\n" }
+	d.runOut = func() string {
+		return `{"type":"thread.started"}` + "\n" + strings.Repeat(`{"type":"noise"}`+"\n", 10) +
+			`{"type":"error","message":"unexpected status 401 Unauthorized ` + f.stub.Tokens()[0] + `"}` + "\n" +
+			`{"type":"turn.failed","error":{"message":"stream disconnected ` + codexstub.Canary + `"}}` + "\n"
+	}
+	err := d.guestTask()
+	switch {
+	case err == nil:
+		t.Fatal("failed run: passed")
+	case strings.HasPrefix(err.Error(), notDriven):
+		t.Fatalf("failed run: %v reads XFAIL", err)
+	case !strings.Contains(err.Error(), "provider_run 1 refused: provider_run: failed"):
+		t.Errorf("failed run: %v does not name the refusal", err)
+	case !strings.Contains(err.Error(), "stub map[") || !strings.Contains(err.Error(), "provagent: destroy provider worker pw-2") ||
+		!strings.Contains(err.Error(), "runsc exec failed (exit status 1)"):
+		t.Errorf("failed run: %v quotes no stub, provagent or runsc line", err)
+	case !strings.Contains(err.Error(), "result: ") || !strings.Contains(err.Error(), "401 Unauthorized [redacted]") ||
+		!strings.Contains(err.Error(), "stream disconnected [redacted]") || strings.Contains(err.Error(), "thread.started"):
+		t.Errorf("failed run: %v does not quote the end of the result file", err)
+	case strings.Contains(err.Error(), codexstub.Canary) || strings.Contains(err.Error(), "listening"):
+		t.Errorf("failed run: %v quotes the canary or an unrelated line", err)
+	}
+	for _, tok := range f.stub.Tokens() {
+		if err != nil && strings.Contains(err.Error(), tok) {
+			t.Error("failed run: the failure quotes an issued token")
+		}
 	}
 }

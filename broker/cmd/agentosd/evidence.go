@@ -167,6 +167,7 @@ func (e *evidence) g() evidenceGate {
 // disk from the guest's 204 until it has gone out (DEL-1b): replies a
 // crash left there go first.
 func (e *evidence) serve(src replySource) {
+	e.kept.attach(src)
 	e.src.Store(&replySourceBox{src})
 	e.poke()
 }
@@ -195,11 +196,22 @@ func (e *evidence) run(ctx context.Context) {
 		if b == nil {
 			continue
 		}
-		for _, p := range b.s.PendingReplies() {
-			if ctx.Err() != nil {
-				return
+		// The outbox is read again before each reply, so none a deletion
+		// dropped meanwhile goes out (DEL-1-f1c).
+		var last guest.PendingReply
+		for ctx.Err() == nil {
+			gen, l := e.kept.pending(b.s)
+			if len(l) == 0 {
+				break
 			}
+			p := l[0]
+			if p.Machine == last.Machine && p.ID == last.ID {
+				e.logf("evidence: reply %s stays in the outbox", p.ID)
+				break
+			}
+			last = p
 			e.reply(p.Machine, p.Private, p.Text, p.Summary)
+			e.kept.settle(gen)
 			if err := b.s.ReplyDone(p.Machine, p.ID); err != nil {
 				e.logf("evidence: reply %s left in the outbox store: %v", p.ID, err)
 			}
@@ -593,6 +605,42 @@ type keptReplies struct {
 	logf  func(string, ...any)
 
 	mu sync.Mutex
+
+	// fmu orders a deletion (forget) against the worker's reads of the
+	// outbox: src is the outbox a deletion also drops (DEL-1-f1), and gen
+	// counts deletions, so a reply routed across one is not kept.
+	fmu sync.Mutex
+	src replySource
+	gen uint64
+}
+
+// attach makes src, the guest plane's outbox, part of what forget drops.
+func (k *keptReplies) attach(src replySource) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	k.src = src
+}
+
+// pending reads the outbox for the worker, with the deletion count it
+// read it under.
+func (k *keptReplies) pending(src replySource) (uint64, []guest.PendingReply) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	return k.gen, src.PendingReplies()
+}
+
+// settle runs after a reply read under gen was routed. A reply in flight
+// when a deletion ran cannot be recalled, but any copy it kept after the
+// deletion dropped the kept replies is dropped now (DEL-1-f1c).
+func (k *keptReplies) settle(gen uint64) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	if k.gen == gen {
+		return
+	}
+	if err := k.drop(); err != nil && k.logf != nil {
+		k.logf("kept replies not dropped after a deletion: %v", err)
+	}
 }
 
 func (k *keptReplies) keep(text string) {
@@ -612,8 +660,26 @@ func (k *keptReplies) saveLocked(l []keptReply) {
 	}
 }
 
-// forget drops every kept reply.
+// forget drops every kept reply and every reply waiting in the guest
+// plane's outbox, once it is attached: no waiting reply names the task it
+// is about, so a deletion drops them all, as it does the kept ones
+// (DEL-1-f1b).
 func (k *keptReplies) forget() error {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	k.gen++
+	err := k.drop()
+	if k.src == nil {
+		return err
+	}
+	o, ok := k.src.(interface{ ForgetReplies() error })
+	if !ok {
+		return errors.Join(err, errors.New("the reply outbox cannot drop replies"))
+	}
+	return errors.Join(err, o.ForgetReplies())
+}
+
+func (k *keptReplies) drop() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.store.Save([]byte("[]"))
@@ -641,8 +707,9 @@ func (k *keptReplies) loadLocked() []keptReply {
 }
 
 // forgetFan is what a deletion reaches beyond the journal (recalltool
-// Cases): the learning plane's cases, if it runs, and every kept reply,
-// since a kept reply may quote the deleted record (security C6 on #148).
+// Cases): the learning plane's cases, if it runs, and every kept reply
+// and reply waiting in the guest outbox, since either may quote the
+// deleted record (security C6 on #148, DEL-1-f1).
 type forgetFan struct {
 	cases recallCases
 	kept  *keptReplies

@@ -39,9 +39,9 @@ type proposer struct {
 	got   []*update.Verified
 	state change.State
 	err   error
-	// lapsed holds proposal IDs the pipeline dropped unanswered; Lapsed
-	// reports each once, as change.Pipeline does.
-	lapsed map[string]bool
+	// closed holds how the pipeline closed proposal IDs without adopting
+	// them; Closed reports each once, as change.Pipeline does.
+	closed map[string]string
 	// adoptions is what Adoptions returns, as change.Pipeline does.
 	adoptions []change.Adoption
 }
@@ -63,22 +63,26 @@ func (p *proposer) adopt(id string, f func(*change.Adoption)) {
 	p.adoptions = append(p.adoptions, a)
 }
 
-func (p *proposer) Lapsed(id string) bool {
+func (p *proposer) Closed(id string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	ok := p.lapsed[id]
-	delete(p.lapsed, id)
-	return ok
+	kind := p.closed[id]
+	delete(p.closed, id)
+	return kind
 }
 
-func (p *proposer) lapse(id string) {
+// close records that the owner's request for id closed as kind (a
+// change.Closed kind).
+func (p *proposer) close(id, kind string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.lapsed == nil {
-		p.lapsed = map[string]bool{}
+	if p.closed == nil {
+		p.closed = map[string]string{}
 	}
-	p.lapsed[id] = true
+	p.closed[id] = kind
 }
+
+func (p *proposer) lapse(id string) { p.close(id, change.ClosedLapsed) }
 
 func (p *proposer) ProposeRelease(_ context.Context, v *update.Verified) (change.Report, error) {
 	p.mu.Lock()
