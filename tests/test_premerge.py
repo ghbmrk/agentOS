@@ -338,7 +338,7 @@ class PremergeTest(unittest.TestCase):
         git(self.r, "checkout", "-q", "-b", "pr")
         self.write("SPEC.md", "spec\n")
         sha = self.commit("spec")
-        accept = lambda extra="", who="OWNER": {"author_association": who, "created_at": "1",
+        accept = lambda extra="", who="OWNER", at="1": {"author_association": who, "created_at": at,
             "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n{extra}"}
         approved = lambda head, who="OWNER": {"author_association": who, "created_at": "2",
                                               "body": f"Mark-approved: cmsg_01Abc · head {head[:7]}"}
@@ -354,6 +354,11 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([accept("Transcribes: cmsg_01Abc, cmsg_02Def\n")]), (0, ["same"]))
         for bad in ("Transcribes:\n", "Transcribes: see Decisions\n", "x Transcribes: cmsg_01Abc\n"):
             self.assertEqual(run([accept(bad)]), (1, ["needs-mark", "SPEC.md"]), bad)
+        # every accept must carry the line: one reviewer withholding it is not overridden, in either order
+        tx = "Transcribes: cmsg_01Abc\n"
+        self.assertEqual(run([accept(at="1"), accept(tx, at="3")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(tx, at="1"), accept(at="3")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(tx, at="1"), accept(tx, at="3")]), (0, ["same"]))
         self.assertEqual(run([accept(), approved(sha)]), (0, ["same"]))
         self.assertEqual(run([accept(), approved(sha, who="NONE")]), (1, ["needs-mark", "SPEC.md"]))
         self.assertEqual(run([accept(), approved("0" * 40)]), (1, ["needs-mark", "SPEC.md"]))  # unknown head

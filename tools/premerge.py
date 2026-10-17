@@ -79,14 +79,20 @@ _APPROVED = re.compile(r"Mark-approved: cmsg_\w+ · head ([0-9a-f]{7,40})")
 
 
 def verdict(comments, pr):
-    """(verdict, reviewed-sha, transcribes) of the newest trusted L3 verdict comment for PR `pr`, or None."""
-    found = None
+    """(verdict, reviewed-sha, transcribes) of the newest trusted L3 verdict comment for PR `pr`, or None.
+
+    `transcribes` holds only when every trusted L3 accept on the PR carries the `Transcribes:` line (D-130):
+    one reviewer withholding it is not overridden by a later accept that has it."""
+    found, tx = None, True
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
         if (c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and _L3.search(body)):
-            found = (first.split(":", 1)[1].strip().lower(), rec.group(1), bool(_TRANSCRIBES.search(body)))
+            v = first.split(":", 1)[1].strip().lower()
+            if v == "accept":
+                tx = tx and bool(_TRANSCRIBES.search(body))
+            found = (v, rec.group(1), tx)
     return found
 
 
