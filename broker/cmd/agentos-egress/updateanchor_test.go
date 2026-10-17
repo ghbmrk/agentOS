@@ -1,6 +1,6 @@
 package main
 
-// REQ: SR3-6f-2b, SR3-6f-2c
+// REQ: SR3-6f-2b, SR3-6f-2c, SR3-6-f5b, SR3-6-f5c
 // SR3-6f-2b: the update store's outside-attestor record is anchored in a
 // TPM NV counter the vault process keeps (swtpm, no hardware). A counter
 // that was defined and is gone fails closed; the owner's re-trust defines
@@ -17,10 +17,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/attest"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 	"github.com/ghbmrk/agentos/broker/update"
@@ -95,8 +98,8 @@ func TestUndefinedUpdateCounterFailsClosed(t *testing.T) {
 	if code := verifyStatus(r.c, http.MethodPost, anchorsock.AnchorRaisePath); code != http.StatusConflict {
 		t.Fatalf("socket raise of an undefined counter: %d, want 409", code)
 	}
-	if _, err := socketAnchor(r.c).Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
-		t.Fatalf("client read of an undefined counter = %v; want an error, not ErrNoAnchor", err)
+	if _, err := socketAnchor(r.c).Read(); !errors.Is(err, update.ErrAnchorMissing) || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("client read of an undefined counter = %v; want ErrAnchorMissing, not ErrNoAnchor", err)
 	}
 	if box.interimCounts(t) {
 		t.Fatal("an undefined counter and a deleted record revived the interim rule")
@@ -158,6 +161,9 @@ func TestUpdateAnchorWithoutTPM(t *testing.T) {
 	if code := verifyStatus(r.c, http.MethodGet, anchorsock.AnchorPath); code != http.StatusServiceUnavailable {
 		t.Fatalf("locked vault: %d, want 503", code)
 	}
+	if _, err := socketAnchor(r.c).Read(); !errors.Is(err, update.ErrAnchorLocked) {
+		t.Fatalf("locked vault: client read = %v, want ErrAnchorLocked", err)
+	}
 	r.c.confirm(r.unlock(t), r.code())
 	if anchored, _, err := r.c.updateAnchorRead(); err != nil || anchored {
 		t.Fatalf("no TPM: read = %v, %v; want not anchored", anchored, err)
@@ -189,14 +195,108 @@ func TestUpdateAnchorWithoutTPM(t *testing.T) {
 			t.Fatalf("no TPM, counter recorded: %s %s = %d, want 409", m.method, m.path, code)
 		}
 	}
-	if _, err := a.Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
-		t.Fatalf("no TPM, counter recorded: client read = %v; want an error, not ErrNoAnchor", err)
+	if _, err := a.Read(); !errors.Is(err, update.ErrAnchorElsewhere) || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("no TPM, counter recorded: client read = %v; want ErrAnchorElsewhere, not ErrNoAnchor", err)
 	}
-	if err := a.Raise(); err == nil || errors.Is(err, update.ErrNoAnchor) {
-		t.Fatalf("no TPM, counter recorded: client raise = %v; want an error, not ErrNoAnchor", err)
+	if err := a.Raise(); !errors.Is(err, update.ErrAnchorElsewhere) || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("no TPM, counter recorded: client raise = %v; want ErrAnchorElsewhere, not ErrNoAnchor", err)
+	}
+	// SR3-6-f5c: the counter is intact and trust answers errNoTPM here, so
+	// the notice is the anchor-elsewhere one, once, and never "reset".
+	if n := countNote(r.notes, noteAnchorElsewhere); n != 1 {
+		t.Fatalf("no TPM, counter recorded: anchor-elsewhere notice shown %d times: %q", n, r.notes)
+	}
+	if n := countNote(r.notes, noteCounterReset); n != 0 {
+		t.Fatalf("no TPM, counter recorded: counter-reset notice shown %d times: %q", n, r.notes)
+	}
+}
+
+// SR3-6-f5c: the anchor-elsewhere notice has its own once-flag, so it does
+// not suppress a later genuine counter-reset notice, and re-trust clears it.
+func TestAnchorElsewhereNoticeKeepsCounterResetNotice(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	if _, _, err := r.c.updateAnchorRaise(); err != nil {
+		t.Fatalf("raise: %v", err)
+	}
+	r.c.mu.Lock()
+	host := r.c.host
+	r.c.host = nil
+	r.c.mu.Unlock()
+	r.notes = nil
+	for range 2 {
+		if _, _, err := r.c.updateAnchorRead(); !errors.Is(err, errUpdateAnchorElsewhere) {
+			t.Fatalf("PC without its chip: read = %v, want anchor elsewhere", err)
+		}
+	}
+	if n := countNote(r.notes, noteAnchorElsewhere); n != 1 {
+		t.Fatalf("anchor-elsewhere notice shown %d times: %q", n, r.notes)
+	}
+	r.c.mu.Lock()
+	r.c.host = host
+	r.c.mu.Unlock()
+
+	undefineUpdateCounter(t, r)
+	r.notes = nil
+	if _, _, err := r.c.updateAnchorRead(); !errors.Is(err, errUpdateAnchorMissing) {
+		t.Fatalf("read of an undefined counter = %v, want anchor missing", err)
 	}
 	if n := countNote(r.notes, noteCounterReset); n != 1 {
-		t.Fatalf("no TPM, counter recorded: counter-reset notice shown %d times: %q", n, r.notes)
+		t.Fatalf("after an anchor-elsewhere notice, counter-reset notice shown %d times: %q", n, r.notes)
+	}
+
+	// Re-trust clears both flags: the anchor-elsewhere notice shows again.
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("re-trust: %v", err)
+	}
+	r.c.mu.Lock()
+	r.c.host = nil
+	r.c.mu.Unlock()
+	r.notes = nil
+	r.c.updateAnchorRead()
+	r.c.mu.Lock()
+	r.c.host = host
+	r.c.mu.Unlock()
+	if n := countNote(r.notes, noteAnchorElsewhere); n != 1 {
+		t.Fatalf("after re-trust, anchor-elsewhere notice shown %d times: %q", n, r.notes)
+	}
+}
+
+// SR3-6-f5b: the vault's 409 names its conflict in the header the client
+// reads.
+func TestAnchorAnswerHeaderMatchesClient(t *testing.T) {
+	if anchorAnswerHeader != anchorsock.AnswerHeader || anchorAnswerMissing != anchorsock.AnswerMissing || anchorAnswerElsewhere != anchorsock.AnswerElsewhere {
+		t.Fatal("the vault's Anchor-Answer values differ from anchorsock's")
+	}
+}
+
+// anchorStep is each owner step the anchor-elsewhere notice may name.
+var anchorStep = map[string]*regexp.Regexp{
+	"unlock":     regexp.MustCompile(`(?i)\bunlock\b`),
+	"trust":      regexp.MustCompile(`(?i)\btrust\b`),
+	"restart":    regexp.MustCompile(`(?i)\brestart\b`),
+	"move-drive": regexp.MustCompile(`(?i)move the drive back`),
+}
+
+// SR3-6-f5c (CH-12): the anchor-elsewhere notice is GSM-7, within three
+// segments, and names only the steps that work on a PC without the chip:
+// restart, then move the drive back. Trust answers errNoTPM there.
+func TestAnchorElsewhereNoticeNamesOnlyStepsThatWork(t *testing.T) {
+	if n, gsm7 := modem.Segments(noteAnchorElsewhere); !gsm7 || n > 3 {
+		t.Fatalf("%d segments, gsm7 %v: %q", n, gsm7, noteAnchorElsewhere)
+	}
+	var named []string
+	for s, re := range anchorStep {
+		if re.MatchString(noteAnchorElsewhere) {
+			named = append(named, s)
+		}
+	}
+	sort.Strings(named)
+	if got := strings.Join(named, ","); got != "move-drive,restart" {
+		t.Fatalf("anchor-elsewhere notice names %s, want move-drive,restart: %q", got, noteAnchorElsewhere)
+	}
+	if strings.Contains(noteAnchorElsewhere, "reset") {
+		t.Fatalf("anchor-elsewhere notice says reset: %q", noteAnchorElsewhere)
 	}
 }
 

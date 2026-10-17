@@ -1,8 +1,10 @@
 package anchorsock
 
-// REQ: SR3-6f-2c
+// REQ: SR3-6f-2c, SR3-6-f5b
 // The client maps the vault process's answers: a count, no TPM
-// (update.ErrNoAnchor), and anything else as an error the store fails closed on.
+// (update.ErrNoAnchor), a locked vault, a missing counter, a counter on a
+// chip this PC lacks (SR3-6-f5b), and anything else as an error the store
+// fails closed on.
 
 import (
 	"errors"
@@ -17,17 +19,21 @@ func TestSocketAnchorAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
+		answer string // the Anchor-Answer header
 		body   string
 		want   uint64
-		err    error // nil: no error; update.ErrNoAnchor; errAny: some other error
+		err    error // nil: no error; a sentinel errors.Is matches; errAny: some other error
 	}{
-		{"count", 200, `{"anchored":true,"count":3}`, 3, nil},
-		{"zero", 200, `{"anchored":true}`, 0, nil},
-		{"no TPM", 200, `{"anchored":false}`, 0, update.ErrNoAnchor},
-		{"missing", 409, "anchor missing", 0, errAny},
-		{"locked", 503, "the vault is locked", 0, errAny},
-		{"malformed", 200, `{"anchored":`, 0, errAny},
-		{"count without anchor", 200, `{"anchored":false,"count":1}`, 0, errAny},
+		{"count", 200, "", `{"anchored":true,"count":3}`, 3, nil},
+		{"zero", 200, "", `{"anchored":true}`, 0, nil},
+		{"no TPM", 200, "", `{"anchored":false}`, 0, update.ErrNoAnchor},
+		{"missing", 409, AnswerMissing, "anchor missing", 0, update.ErrAnchorMissing},
+		{"elsewhere", 409, AnswerElsewhere, "anchor elsewhere", 0, update.ErrAnchorElsewhere},
+		{"conflict unnamed", 409, "", "anchor missing", 0, errAny},
+		{"conflict unknown", 409, "synthetic", "anchor missing", 0, errAny},
+		{"locked", 503, "", "the vault is locked", 0, update.ErrAnchorLocked},
+		{"malformed", 200, "", `{"anchored":`, 0, errAny},
+		{"count without anchor", 200, "", `{"anchored":false,"count":1}`, 0, errAny},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var raised int
@@ -39,6 +45,9 @@ func TestSocketAnchorAnswers(t *testing.T) {
 				default:
 					http.Error(w, "no", http.StatusMethodNotAllowed)
 					return
+				}
+				if tc.answer != "" {
+					w.Header().Set(AnswerHeader, tc.answer)
 				}
 				w.WriteHeader(tc.status)
 				w.Write([]byte(tc.body))
@@ -69,11 +78,17 @@ var errAny = errors.New("any error but update.ErrNoAnchor")
 
 func checkAnchorErr(t *testing.T, op string, got, want error) {
 	t.Helper()
+	typed := []error{update.ErrNoAnchor, update.ErrAnchorLocked, update.ErrAnchorMissing, update.ErrAnchorElsewhere}
 	switch {
-	case want == nil && got != nil, want == update.ErrNoAnchor && !errors.Is(got, update.ErrNoAnchor):
+	case want == nil && got != nil, want != nil && want != errAny && !errors.Is(got, want):
 		t.Fatalf("%s = %v, want %v", op, got, want)
-	case want == errAny && (got == nil || errors.Is(got, update.ErrNoAnchor)):
-		t.Fatalf("%s = %v, want an error that is not update.ErrNoAnchor", op, got)
+	case want == errAny && got == nil:
+		t.Fatalf("%s = nil, want an error", op)
+	}
+	for _, e := range typed {
+		if e != want && errors.Is(got, e) {
+			t.Fatalf("%s = %v, which is also %v", op, got, e)
+		}
 	}
 }
 
