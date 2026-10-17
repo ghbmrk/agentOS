@@ -3447,6 +3447,35 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                   "gid %d on the box" % (step, how, mode, st.st_gid), self.v())
                 finally:
                     f.unlink()
+        # Combined delta: two lines that each supply half are weighed together, in either order, in
+        # one file or two, and a ':' (create-only) mode leaves the tree's group write a candidate.
+        for lines, gid, mode, how in (
+                (("z /usr/lib/x 0775 - -", "z /usr/lib/x - - 1000"), None, 0o755,
+                 "mode 0775 for -:- and line 2's mode - for -:1000"),
+                (("z /usr/lib/x - - 1000", "z /usr/lib/x 0775 - -"), None, 0o755,
+                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
+                (("z /usr/lib/x 0775 - root", "z /usr/lib/x - - 1000"), None, 0o755,
+                 "mode 0775 for -:root and line 2's mode - for -:1000"),
+                (("z /usr/lib/x 0755 - 1000", "Z /usr 0775 - -"), None, 0o755,
+                 "mode 0755 for -:1000 and line 2's mode 0775 for -:-"),
+                (("z /usr/lib/x :0755 - 1000",), None, 0o775, "mode :0755 for -:1000")):
+            with self.subTest(lines=lines), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                st = check.tree_lstat(self.root, "usr/lib/x")
+                f = self.tmpfiles("\n".join(lines) + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s over the tree's mode %04o and "
+                                  "gid %d on the box" % (how, mode, st.st_gid), self.v())
+                finally:
+                    f.unlink()
+        f = self.tmpfiles("z /usr/lib/x 0775 - -\n")
+        g = write(self.root, "etc/tmpfiles.d/y.conf", "z /usr/lib/x - - 1000\n")
+        try:
+            self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 remakes mode 0775 for -:- and etc/tmpfiles.d/y.conf "
+                          "line 1's mode - for -:1000 over the tree's mode 0755", self.v())
+        finally:
+            f.unlink()
+            g.unlink()
         # L3 point 2: a directory the chase walks through, off the final path.
         (self.root / self.RULES).unlink()
         (self.root / "opt/d").mkdir(parents=True)
@@ -3470,7 +3499,9 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         # Combined R1: an explicit root group, or a tree mode without group write, keeps it root's.
         other = check.TREE_GROUP + 1000
         for ln, gid, mode in (("z /usr/lib/x 0775 - root", other, 0o755), ("z /usr/lib/x - - 1000", None, 0o755),
-                              ("Z /usr - - 1000", None, 0o755), ("z /usr/lib/x 0775 - 0", other, 0o755)):
+                              ("Z /usr - - 1000", None, 0o755), ("z /usr/lib/x 0775 - 0", other, 0o755),
+                              ("z /usr/lib/x 0755 - 1000", None, 0o775),
+                              ("z /usr/lib/x 0775 - root\nz /usr/lib/x 0755 - -", None, 0o755)):
             with self.subTest(ln=ln), self.attrs("usr/lib/x", gid=gid, mode=mode):
                 f = self.tmpfiles(ln + "\n")
                 try:

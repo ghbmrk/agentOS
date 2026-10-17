@@ -171,25 +171,36 @@ def violations(root):
 def tmpfiles_maker(root, parts, st=None):
     """#1803, #1829: (file, line number, what) of the first tmpfiles.d line tmpfiles_makers counts
     that names step PARTS, or None. Inside violations() the makers are read once per root. ST: the
-    held step's tree_lstat; a line that sets only one of group write and a non-root group counts
-    when the step's tree mode or gid supplies the other (a Z line also on the steps below it)."""
+    held step's tree_lstat; the lines that set its mode or group (a Z line also on the steps below
+    it) are weighed together with the tree, whatever order the box applies them in: the step counts
+    when some line or the tree may give it group write and some line or the tree a non-root group. A
+    z, Z, d, D or e line that sets the mode or the group, without a ':' prefix, replaces the tree's."""
     makers = _MAKERS.get(root) if _MAKERS is not None else None
     if makers is None:
         makers = tmpfiles_makers(root)
         if _MAKERS is not None:
             _MAKERS[root] = makers
+    weighed = []
     for rel, n, (paths, what, compose) in makers:
         if compose is None:
             if any(len(m) == len(parts) and glob_reaches(m, parts) for m in paths):
                 return rel, n, what
         elif st is not None and any((len(m) == len(parts) or compose[2] and len(m) < len(parts))
                                     and glob_reaches(m, parts, ancestor=True) for m in paths):
-            bits, group = compose[:2]
-            if (st.st_mode if bits is None else bits) & 0o020 and (
-                    st.st_gid != TREE_GROUP if group is None else group not in ("root", "0")):
-                return rel, n, "%s over the tree's mode %04o and gid %d" % (
-                    what, stat.S_IMODE(st.st_mode), st.st_gid)
-    return None
+            weighed.append((rel, n, what, compose))
+    if not weighed:
+        return None
+    # #1829 (combined delta): two lines may each supply half, so they are judged together.
+    keeps = lambda i: not any(c[i] is not None and c[3 + i] for _, _, _, c in weighed)
+    gw = [c for _, _, _, c in weighed if c[0] is not None and c[0] & 0o020]
+    grp = [c for _, _, _, c in weighed if c[1] is not None and c[1] not in ("root", "0")]
+    if not (gw or keeps(0) and st.st_mode & 0o020) or not (grp or keeps(1) and st.st_gid != TREE_GROUP) \
+            or not (gw or grp):
+        return None
+    (rel, n, what, _), rest = weighed[0], weighed[1:]
+    return rel, n, "%s%s over the tree's mode %04o and gid %d" % (
+        what, "".join(" and %sline %d's %s" % ("" if r == rel else r + " ", k, w) for r, k, w, _ in rest),
+        stat.S_IMODE(st.st_mode), st.st_gid)
 
 
 def _violations(root):
@@ -1497,8 +1508,9 @@ def tmpfiles_makers(root):
     path a link or a copy (C, whatever its source: the tree check never chases what the copy holds),
     or makes it, or may make it, for a user other than root to write: PATHS are the glob components it
     may name (as written, with the /var/run rewrite, and through the image's links), WHAT says how.
-    COMPOSE is None, or (mode bits or None, group or None, recursive) for a line that sets group write
-    or a non-root group but leaves the other as the step has it (tmpfiles_maker weighs it)."""
+    COMPOSE is None, or (mode bits or None, group or None, recursive, replaces the tree's mode,
+    replaces its group) for any other line that sets a mode or a group: alone it gives no user but
+    root write, so tmpfiles_maker weighs it with the tree and the other such lines on the step."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
         words, arg = tmpfiles_words(ln) if n is not None else ([], "")
@@ -1517,11 +1529,14 @@ def tmpfiles_makers(root):
         elif user not in ("-", "", "root", "0") or m != "-" and (
                 int(m, 8) & 0o002 or int(m, 8) & 0o020 and group not in ("-", "", "root", "0")):
             what = "mode %s for %s:%s" % (mode, user, group)
-        elif m == "-" and group not in ("-", "", "root", "0") or m != "-" and int(m, 8) & 0o020 \
-                and group in ("-", ""):
-            # #1829: it leaves the mode or the group as the step has it, so it counts only on a held
-            # step whose tree attributes supply the other half (tmpfiles_maker).
-            compose = (None if m == "-" else int(m, 8), None if group in ("-", "") else group, typ[:1] == "Z")
+        elif m != "-" or group not in ("-", ""):
+            # #1829: it sets the mode or the group but alone gives no user but root write, so it counts
+            # only with the tree attributes or other lines that supply the other half (tmpfiles_maker).
+            # A ':' prefix applies the mode or group only when the line creates the path, so then the
+            # tree's stays as a candidate too.
+            sets = typ[:1] in ("z", "Z", "d", "D", "e")
+            compose = (None if m == "-" else int(m, 8), None if group in ("-", "") else group.lstrip(":"),
+                       typ[:1] == "Z", sets and not mode.startswith(":"), sets and not group.startswith(":"))
             what = "mode %s for %s:%s" % (mode, user, group)
         else:
             continue
