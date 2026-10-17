@@ -78,6 +78,10 @@ type PlanRoute struct {
 	// ToolTypes are the tool types a model call may declare: client-side
 	// ones only, so the provider never runs a tool for the worker.
 	ToolTypes []string
+	// Tools are the tools a model call may declare, by namespace and name,
+	// each of one of ToolTypes: the CLI's own, so a tool the pinned CLI does
+	// not declare (a hosted one above all) is refused, not forwarded (#1503).
+	Tools []DeclaredTool
 	// BodyKeys, InputTypes and ContentTypes are the shape a model call may
 	// take: its top-level keys, its input items' types, and the types of a
 	// message's content parts. Anything else is refused, not forwarded.
@@ -99,6 +103,12 @@ type PlanRoute struct {
 	// redacted.
 	ResponseHeaders  []string
 	ResponsePrefixes []string
+}
+
+// DeclaredTool is one tool a plan route allows. Namespace is the namespace
+// the CLI declares it in; an empty one is a tool outside any namespace.
+type DeclaredTool struct {
+	Namespace, Name, Type string
 }
 
 // clientToolTypes are the only tool types any plan route may allow: the
@@ -131,6 +141,22 @@ func Codex() PlanRoute {
 			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: KindCode, SignIn: true},
 		},
 		ToolTypes: []string{"namespace", "function", "custom"},
+		// The tools CLI 0.162.1 declares in code mode under the image's
+		// managed config, as captured (testdata/codex-0.162.1-codemode.json):
+		// all in an additional_tools item, none at the top level.
+		Tools: []DeclaredTool{
+			{"functions", "exec", "custom"},
+			{"functions", "wait", "function"},
+			{"functions", "request_user_input", "function"},
+			{"functions", "request_user_input_async", "function"},
+			{"clock", "sleep", "function"},
+			{"collaboration", "followup_task", "function"},
+			{"collaboration", "interrupt_agent", "function"},
+			{"collaboration", "list_agents", "function"},
+			{"collaboration", "send_message", "function"},
+			{"collaboration", "spawn_agent", "function"},
+			{"collaboration", "wait_agent", "function"},
+		},
 		// The CLI's request: #809 saw model, input, tool_choice, include
 		// and stream; the rest are the fields the CLI's request type sets.
 		// client_metadata is text only (checkResponses).
@@ -284,6 +310,22 @@ func (r PlanRoute) validate() error {
 			return fmt.Errorf("plan route %s: tool type %q is not client-side", r.Provider, t)
 		}
 	}
+	routed, declared := set(r.ToolTypes), map[DeclaredTool]bool{}
+	if len(r.Tools) == 0 {
+		return fmt.Errorf("plan route %s: no declared tools", r.Provider)
+	}
+	for _, t := range r.Tools {
+		key := DeclaredTool{Namespace: t.Namespace, Name: t.Name}
+		switch {
+		case t.Name == "" || declared[key]:
+			return fmt.Errorf("plan route %s: declared tool %q unnamed or repeated", r.Provider, t.Name)
+		case t.Type == "namespace" || !routed[t.Type] || !clientToolTypes[t.Type]:
+			return fmt.Errorf("plan route %s: declared tool %q of type %q not allowed", r.Provider, t.Name, t.Type)
+		case t.Namespace != "" && !routed["namespace"]:
+			return fmt.Errorf("plan route %s: declared tool %q in a namespace the route does not allow", r.Provider, t.Name)
+		}
+		declared[key] = true
+	}
 	if len(r.BodyKeys) == 0 || len(r.InputTypes) == 0 || len(r.ContentTypes) == 0 {
 		return fmt.Errorf("plan route %s: no body shape", r.Provider)
 	}
@@ -385,6 +427,8 @@ type workerRoute struct {
 	endpoints []PlanEndpoint
 	headers   []string
 	tools     map[string]bool
+	declared  map[DeclaredTool]string
+	spaces    map[string]bool
 	keys      map[string]bool
 	inputs    map[string]bool
 	parts     map[string]bool
@@ -440,6 +484,13 @@ func NewWorkerRoute(c WorkerRouteConfig) (http.Handler, error) {
 	}
 	w.tools, w.keys = set(c.Route.ToolTypes), set(c.Route.BodyKeys)
 	w.inputs, w.parts = set(c.Route.InputTypes), set(c.Route.ContentTypes)
+	w.declared, w.spaces = map[DeclaredTool]string{}, map[string]bool{}
+	for _, t := range c.Route.Tools {
+		w.declared[DeclaredTool{Namespace: t.Namespace, Name: t.Name}] = t.Type
+		if t.Namespace != "" {
+			w.spaces[t.Namespace] = true
+		}
+	}
 	return w, nil
 }
 
@@ -846,7 +897,7 @@ func (w *workerRoute) checkResponses(body []byte) ([]byte, string) {
 		}
 	}
 	if t, ok := obj["tools"]; ok {
-		if r := w.checkTools(t, 0); r != "" {
+		if r := w.checkTools(t, ""); r != "" {
 			return nil, r
 		}
 	}
@@ -899,7 +950,7 @@ func (w *workerRoute) checkInput(v any) string {
 		for k, f := range item {
 			switch {
 			case k == "tools" && t == "additional_tools":
-				if r := w.checkTools(f, 0); r != "" {
+				if r := w.checkTools(f, ""); r != "" {
 					return r
 				}
 			case k == "tools":
@@ -971,13 +1022,13 @@ func noTools(v any, depth int) string {
 	return ""
 }
 
-func (w *workerRoute) checkTools(v any, depth int) string {
+// checkTools allows only the route's declared tools: a namespace the route
+// declares, holding its declared tools, or a declared tool outside any
+// namespace, each of its declared type. ns is the enclosing namespace.
+func (w *workerRoute) checkTools(v any, ns string) string {
 	list, ok := v.([]any)
 	if !ok {
 		return "tools is not a list"
-	}
-	if depth > 4 {
-		return "tools nested too deep"
 	}
 	for _, it := range list {
 		tool, ok := it.(map[string]any)
@@ -988,14 +1039,27 @@ func (w *workerRoute) checkTools(v any, depth int) string {
 		if !w.tools[t] {
 			return "tool type " + sanitized(t) + " refused"
 		}
+		name, _ := tool["name"].(string)
 		nested, has := tool["tools"]
-		if t == "namespace" && !has {
-			return "namespace without a tools list"
-		}
-		if has {
-			if r := w.checkTools(nested, depth+1); r != "" {
+		if t == "namespace" {
+			switch {
+			case ns != "":
+				return "namespace inside a namespace"
+			case !w.spaces[name]:
+				return "namespace " + sanitized(name) + " not declared"
+			case !has:
+				return "namespace without a tools list"
+			}
+			if r := w.checkTools(nested, name); r != "" {
 				return r
 			}
+			continue
+		}
+		if has {
+			return "tools outside a declared position"
+		}
+		if d, ok := w.declared[DeclaredTool{Namespace: ns, Name: name}]; !ok || d != t {
+			return "tool " + sanitized(name) + " not declared"
 		}
 	}
 	return ""
