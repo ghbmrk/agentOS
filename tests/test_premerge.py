@@ -331,6 +331,46 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
+    def test_check_gate_spec_needs_a_transcription_or_marks_approval(self):
+        # D-130: a SPEC.md change passes on an accept that names the Mark decision it transcribes, or on
+        # Mark's approval at a head whose diff equals this one (main merged in after the tap keeps it).
+        import json
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("SPEC.md", "spec\n")
+        sha = self.commit("spec")
+        accept = lambda extra="", who="OWNER": {"author_association": who, "created_at": "1",
+            "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n{extra}"}
+        approved = lambda head, who="OWNER": {"author_association": who, "created_at": "2",
+                                              "body": f"Mark-approved: cmsg_01Abc · head {head[:7]}"}
+        def run(comments):
+            f = pathlib.Path(self._d.name + ".comments.json")
+            self.addCleanup(lambda: f.unlink(missing_ok=True))
+            f.write_text(json.dumps(comments))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run([accept()]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept("Transcribes: cmsg_01Abc\n")]), (0, ["same"]))
+        self.assertEqual(run([accept("Transcribes: cmsg_01Abc, cmsg_02Def\n")]), (0, ["same"]))
+        for bad in ("Transcribes:\n", "Transcribes: see Decisions\n", "x Transcribes: cmsg_01Abc\n"):
+            self.assertEqual(run([accept(bad)]), (1, ["needs-mark", "SPEC.md"]), bad)
+        self.assertEqual(run([accept(), approved(sha)]), (0, ["same"]))
+        self.assertEqual(run([accept(), approved(sha, who="NONE")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(), approved("0" * 40)]), (1, ["needs-mark", "SPEC.md"]))  # unknown head
+        # main merged in after the tap: the approval carries; the accept's Record head still equals too
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "main\n")
+        self.commit("main moves")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        self.assertEqual(run([accept(), approved(sha)]), (0, ["same"]))
+        # a tap at a head whose diff differs does not carry
+        git(self.r, "checkout", "-q", "-b", "other", "main")
+        self.write("SPEC.md", "other\n")
+        other = self.commit("other spec")
+        git(self.r, "checkout", "-q", "pr")
+        self.assertEqual(run([accept(), approved(other)]), (1, ["needs-mark", "SPEC.md"]))
+
     def test_bot_gate(self):
         # PREMERGE-wire (#1860): the generated-file bot PRs carry no L3 verdict, so `--bot` passes
         # them only when the branch is a known bot branch and the diff is that bot's file alone.
