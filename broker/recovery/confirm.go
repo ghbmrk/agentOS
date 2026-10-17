@@ -186,13 +186,16 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 
 // decoyStream is the bytes newQuestion draws the decoys from: an
 // HMAC-SHA256 counter stream under a key derived from rk, over the
-// restored log's last entry (its ID with none, a fixed label with no
+// restored log's last forget (its ID with none, a fixed label with no
 // log). Every restore of a backup, and of any backup with the same last
-// forget, draws the same bytes, which no one without rk can predict.
+// forget, draws the same bytes, which no one without rk can predict. A
+// done marker is not a forget: seeding from it would let a backup taken
+// after a marker ask unlike one taken before, and comparing the two would
+// show the answer.
 func decoyStream(rk RecoveryKey, l forgetLog, has bool) io.Reader {
 	in := []byte("no-log")
-	if has && len(l.Entries) > 0 {
-		in = append([]byte("entry\x00"), l.Entries[len(l.Entries)-1].MAC...)
+	if e, ok := l.lastForget(); has && ok {
+		in = append([]byte("entry\x00"), e.MAC...)
 	} else if has {
 		in = append([]byte("log\x00"), l.ID...)
 	}

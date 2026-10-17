@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +62,25 @@ func TestTheQuestionDatesTheLastForgetNotItsMarker(t *testing.T) {
 	must(t, err)
 	if f.Answer < 0 || f.Answer >= len(q.Dates) || !q.Dates[f.Answer].Equal(civil(forgot)) {
 		t.Fatalf("answer %d of %v, want %v", f.Answer, q.Dates, civil(forgot))
+	}
+}
+
+// R2C, CAP-3 (ASSUMPTIONS Q1): a backup taken after a forget's done
+// marker asks the question a backup taken before it asks, so comparing
+// the two shows no date in common but the answer.
+func TestADoneMarkerDoesNotChangeTheQuestion(t *testing.T) {
+	x := newBox(t)
+	now := t0
+	forgot := ForgetEntry{Seq: 1, Goal: "goal-1", At: now.Add(-200 * 24 * time.Hour), MAC: "forget-mac"}
+	marker := ForgetEntry{Seq: 2, Goal: "goal-1", At: forgot.At.Add(time.Hour), Done: true, MAC: "marker-mac"}
+	ask := func(l forgetLog) []string {
+		f, err := newQuestion(PendingUnanchored, l, true, now, nil, now, decoyStream(x.rk, l, true))
+		must(t, err)
+		return f.Dates
+	}
+	before := ask(forgetLog{ID: []byte("log"), Entries: []ForgetEntry{forgot}})
+	after := ask(forgetLog{ID: []byte("log"), Entries: []ForgetEntry{forgot, marker}})
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Fatalf("a done marker changed the question:\n before %v\n after  %v", before, after)
 	}
 }
