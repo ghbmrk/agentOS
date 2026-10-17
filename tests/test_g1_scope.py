@@ -234,9 +234,14 @@ class ListTest(unittest.TestCase):
         self.assertTrue(g.parse_list(G2_LIST, "g1_scope_g2.txt")[0])
 
     def test_every_entry_exists(self):  # G1-freeze-f
+        # Listed before the INFER-SVC build (briefs/INFER-SVC.md) creates them; that PR empties this.
+        not_yet = {"broker/infer/", "broker/cmd/agentos-infer/"}
         for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
             _, _, allow, frozen, _ = g.parse_list(text, name)
             for e in allow + frozen:
+                if e in not_yet:
+                    self.assertFalse((ROOT / e).exists(), f"{e} exists now: delete the not_yet set in this test")
+                    continue
                 self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
 
     def test_frozen_paths_stay_out(self):  # G1-freeze-a, -h
@@ -246,7 +251,7 @@ class ListTest(unittest.TestCase):
                   "broker/cleanroom/x.go", "broker/hint/x.go", "broker/pubid/x.go",
                   "broker/pubsend/x.go", "broker/sipsign/x.go", "broker/smsapi/x.go",
                   "broker/sendrules/x.go", "broker/attention/x.go", "broker/floor/x.go",
-                  "broker/photo/x.go", "broker/probecmd/x.go", "broker/cmd/agentos-builder/main.go",
+                  "broker/probecmd/x.go", "broker/cmd/agentos-builder/main.go",
                   "broker/cmd/agentos-a8scan/main.go", "guest/builder/x", "spikes/S10-pact/x",
                   "evals/review/x", "broker/newpkg/x.go", "newdir/x"):
             self.assertFalse(g.check([p], G2_LIST, gate=G2)[0], p)
@@ -256,7 +261,8 @@ class ListTest(unittest.TestCase):
                   "broker/route/route.go", "broker/route/anthropic.go", "broker/voice/v.go",
                   "broker/browser/x.go", "broker/recall/x.go", "broker/projection/x.go",
                   "broker/holder/x.go", "broker/cmd/agentos-holder/main.go",
-                  "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh"):
+                  "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh",
+                  "broker/photo/x.go", "broker/cmd/agentos-photo/main.go"):
             self.assertTrue(g.check([p], G2_LIST, gate=G2)[0], p)
 
 

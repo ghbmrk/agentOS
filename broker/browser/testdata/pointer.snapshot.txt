@@ -1,0 +1,6 @@
+- generic [active] [ref=e1] [cursor=pointer]:
+  - link "Products" [ref=e2]:
+    - /url: /products
+  - searchbox "Search" [ref=e3]
+  - link "Log out" [ref=e4]:
+    - /url: /logout

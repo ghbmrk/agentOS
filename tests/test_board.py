@@ -228,6 +228,15 @@ class StaleLabelTest(unittest.TestCase):
         # W-3 (escalated) is flagged; A-3 is not, because another A-3 PR is still open; A-1's PR never merged.
         self.assertEqual([(i["title"][:3], p["number"]) for i, p in found], [("W-3", 22)])
 
+    def test_malformed_issue_is_skipped_and_named_not_fatal(self):
+        bad = {"number": 999, "title": "no row block", "labels": [{"name": "work-item"}], "body": "x",
+               "author_association": "OWNER"}
+        err = io.StringIO()
+        with redirect_stderr(err):
+            found = board.stale([bad, *issues()], self.PRS)
+        self.assertEqual([p["number"] for _, p in found], [22])
+        self.assertIn("issue #999", err.getvalue())
+
     def test_newest_merged_pr_is_named(self):
         prs = [{"number": 31, "title": "W-3: new", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"},
                {"number": 22, "title": "W-3: old", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
