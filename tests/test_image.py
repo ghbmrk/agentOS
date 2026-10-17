@@ -3270,6 +3270,84 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                 finally:
                     f.unlink()
 
+    def test_security_delta_3_steps_a_line_can_remove_are_weighed_as_lacking(self):
+        # REQ: HW-1, DEV-2 (#1829, security delta 3): a line that removes a held step (r, R on it or a
+        # parent, D or an age on a parent) leaves it to the line that makes it again, which the box
+        # runs with the step taking its parent's group, so that line is weighed with the parent's gid.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x/c/e").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        made = "usr/lib/tmpfiles.d/x.conf line 2 makes mode 0775 for -:- under a parent of gid %d" % other
+        cases = ("R /usr/lib/x/c\n", "R /usr/lib/x/*\n", "r /usr/lib/x/c\n", "D /usr/lib/x\n",
+                 "d /usr/lib/x - - - 10d\n", "e /usr/lib/x - - - 1h\n")
+        for rm in cases:
+            with self.subTest(rm=rm), self.attrs("usr/lib/x", gid=other, mode=0o2755):
+                f = self.tmpfiles(rm + "d /usr/lib/x/c 0775\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x/c, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box" % made, self.v())
+                finally:
+                    f.unlink()
+        # The parent's gid is carried down a removed step to the next one, which goes with it.
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/usr/lib/x/c/e/r")
+        with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+            f = self.tmpfiles("R /usr/lib/x/c\nd /usr/lib/x/c/e 0775\n")
+            try:
+                self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/e/r, through /usr/lib/x/c/e, which "
+                              "usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box" % made, self.v())
+            finally:
+                f.unlink()
+        # A tmpfiles.d link in a removed step is held to it as well.
+        (self.root / self.RULES).unlink()
+        with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+            f = self.tmpfiles("D /usr/lib/x\nd /usr/lib/x/c 0775\nL /usr/lib/x/c/l - - - - /etc/machine-id\n")
+            try:
+                self.assertIn("x.conf: line 3: L /usr/lib/x/c/l - - - - /etc/machine-id; a link to /etc/machine-id, "
+                              "in /usr/lib/x/c, which usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box"
+                              % made, self.v())
+            finally:
+                f.unlink()
+        # Passes: a root-group parent, a line that only removes, an age on the step itself (it cleans
+        # what is below), and x/X lines, whose age only excludes.
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        for text, gid in (("R /usr/lib/x/c\nd /usr/lib/x/c 0775\n", check.TREE_GROUP),
+                          ("D /usr/lib/x\nd /usr/lib/x/c 0775\n", check.TREE_GROUP),
+                          ("R /usr/lib/x/c\n", other), ("D /usr/lib/x/c\nd /usr/lib/x/c 0775\n", other),
+                          ("d /usr/lib/x/c - - - 10d\nd /usr/lib/x/c 0775\n", other),
+                          ("x /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", other),
+                          ("X /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", other)):
+            with self.subTest(text=text, gid=gid), self.attrs("usr/lib/x", gid=gid, mode=0o2755):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_removal_rules_those_links_pass(self):
+        # Without the remover check, the gid it carries down, or the age rule, a delta 3 case passes.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x/c/e").mkdir(parents=True, exist_ok=True)
+        for old, new, text, to in (
+                ("        removed = tmpfiles_remover(root, path_parts(d))\n", "        removed = None\n",
+                 "R /usr/lib/x/c\nd /usr/lib/x/c 0775\n", "/usr/lib/x/c/r"),
+                ("    if st.st_gid == TREE_GROUP and tmpfiles_remover(root, path_parts(d)):\n", "    if False:\n",
+                 "R /usr/lib/x/c\nd /usr/lib/x/c/e 0775\n", "/usr/lib/x/c/e/r"),
+                ('        if reach is None and typ not in ("x", "X") and age not in ("-", ""):\n',
+                 "        if False:\n", "d /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", "/usr/lib/x/c/r")):
+            with self.subTest(text=text):
+                m = self.mutant(old, new)
+                link(self.root, self.RULES, to)
+                f = self.tmpfiles(text)
+                try:
+                    with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+                        with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+                        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+                finally:
+                    f.unlink()
+                    (self.root / self.RULES).unlink()
+
     def test_without_the_parent_gid_or_group_rules_those_links_pass(self):
         # A missing step that took root's group, a non-root group line weighed by its mode, or a g+w
         # line that ignored the step's gid would each let a case above through.
@@ -3277,7 +3355,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         link(self.root, self.RULES, "/usr/lib/x/c/r")
         other = check.TREE_GROUP + 1000
         for old, new, text, at in (
-                ("            gid = st.st_gid\n", "            gid = TREE_GROUP\n", "d /usr/lib/x/c 0775\n", "usr/lib/x"),
+                ("        if st is not None:\n            gid = step_gid(root, d, st, gid)\n",
+                 "        if st is not None:\n            gid = TREE_GROUP\n", "d /usr/lib/x/c 0775\n", "usr/lib/x"),
                 ('        elif user.lstrip(":") not in ("-", "", "root", "0") or group.lstrip(":") not in '
                  '("-", "", "root", "0") \\\n', '        elif user.lstrip(":") not in ("-", "", "root", "0") \\\n',
                  "z /usr/lib/x 0755 - 1000\n", None),
@@ -3461,8 +3540,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         link(self.root, self.RULES, "/opt/nope/r")
         self.tmpfiles("d /usr/local/nope 1777 root root\n")
         self.assertIn("etc/udev/rules.d: a link to /opt/nope/r, through /opt/nope, which the tree lacks", self.v())
-        m = self.mutant('            paths.append(tree_resolve(root, parts[:-1]) + parts[-1:] if typ[:1] == "L"\n'
-                        "                         else tree_resolve(root, parts))\n", "            pass\n")
+        m = self.mutant("        paths.append(tree_resolve(root, parts[:-1]) + parts[-1:] if link else tree_resolve(root, parts))\n",
+                        "        pass\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
 
     def test_a_link_to_a_file_another_uid_owns_or_with_an_acl_is_refused(self):
@@ -3476,8 +3555,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                         if rel == "usr/lib/x/r" else real(root, rel)):
             self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
         self.assertNotIn("etc/udev/rules.d:", self.v())
-        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st)\n',
-                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st)\n')
+        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)\n',
+                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st, gid=gid)\n')
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
                                         if rel == "usr/lib/x/r" else []):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
@@ -3683,7 +3762,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertNotIn("etc/foo.d", self.v())
 
     def test_without_the_holder_rule_those_links_pass(self):
-        m = self.mutant("        why = step_refusal(root, d, target, held, st, via=\"in\")\n", "        why = None\n")
+        m = self.mutant("            why = step_refusal(root, d, target, held, st, via=\"in\", gid=gid)\n", "            why = None\n")
         (self.root / "etc/foo.d").mkdir(parents=True)
         link(self.root, "etc/foo.d/r", "/usr/lib/x/r")
         self.tmpfiles("z /etc/foo.d 0777\n")
