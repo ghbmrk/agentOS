@@ -128,6 +128,26 @@ func TestTheScanListsShowableNamesStrongestFirst(t *testing.T) {
 	}
 }
 
+// REQ: ONB-3, NETJOIN-SCAN-BEST-1
+// A weaker duplicate seen after a stronger one, on the same device or a
+// later one, does not lower the name's strength (#1284).
+func TestTheScanKeepsABestStrengthOverALaterWeakerDuplicate(t *testing.T) {
+	f := newScan()
+	f.wifi("/d/1",
+		"Home Net", 80,
+		"Cafe", 60,
+		"Home Net", 20, // the same name, weaker, seen later
+	)
+	f.wifi("/d/2", "Cafe", 10) // weaker again, on a later device
+	f.wifi("/d/3", "Upstairs", 30)
+
+	got := NewScanner(f).Scan(context.Background())
+	want := []string{"Home Net", "Cafe", "Upstairs"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Scan = %q, want %q", got, want)
+	}
+}
+
 func TestTheScanIsCappedAndAFailedDeviceListIsEmpty(t *testing.T) {
 	f := newScan()
 	var aps []any
