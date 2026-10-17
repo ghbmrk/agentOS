@@ -12,7 +12,7 @@
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
                 none keeps its own `**State:**` line (state lives on the work-item issue), and each
-                has an `**Acceptance tests:**` line unless listed in tools/brief_acceptance_baseline.txt
+                has an `**Acceptance tests:**` line (or `## Acceptance tests` heading, `**Acceptance:**`) unless listed in tools/brief_acceptance_baseline.txt
                 (FIRST-PASS, #1818)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
@@ -70,22 +70,39 @@ def operating_refs(root, files):
                         yield f"{name}:{n}: OPERATING §{num} does not exist"
 
 
-ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*(.*)$", re.M)
+ACCEPTANCE_LINE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]*)?(?:\*\*Acceptance(?: tests?)?:?\*\*(?P<bold>.*)|#{1,6}[ \t]+Acceptance tests?[ \t:]*(?P<head>))$",
+    re.M | re.I)
 LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+\S")
+FIELD = re.compile(r"^\s*(?:[-*+]\s*)?\*\*[^*]+:?\*\*:?")  # a sibling `**Label:**` field, not acceptance content
+HEADING = re.compile(r"^#{1,6}\s")
+TABLE_ROW = re.compile(r"^\s*\|")
 
 
 def acceptance_named(text, line):
-    """True when the marker line has text after it, or a list item follows it (OPERATING §5: a line or list)."""
-    if line.group(1).strip().strip(":").strip():
+    """True when the marker names its tests (OPERATING §5): text after it, a heading's body, a list, a table, or
+    text on the next line. A sibling `**Label:**` field or the next heading does not count."""
+    if (line.group("bold") or "").strip().strip(":").strip():
         return True
-    rest = [l for l in text[line.end():].splitlines() if l.strip()]
-    item = LIST_ITEM.match(rest[0]) if rest else None
-    if not item:
-        return False
-    own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
-    marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
-    # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
-    return not marker or len(item.group(1)) > len(marker.group(1))
+    lines = text[line.end() + 1:].splitlines()
+    heading = line.group("head") is not None
+    gap = False
+    for l in lines:
+        if not l.strip():
+            gap = True
+            continue
+        if HEADING.match(l) or (not heading and FIELD.match(l)):
+            return False
+        if heading or TABLE_ROW.match(l):
+            return True
+        item = LIST_ITEM.match(l)
+        if item:
+            own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
+            marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
+            # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
+            return not marker or len(item.group(1)) > len(marker.group(1))
+        return not gap  # plain text counts only directly under the marker
+    return False
 
 
 def brief_baseline(root):
