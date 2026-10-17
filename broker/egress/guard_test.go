@@ -1,6 +1,6 @@
 package egress
 
-// REQ: DEV-2, REV-5, ARC-6, CAP-2, CAP-13
+// REQ: DEV-2, REV-5, ARC-6, CAP-2, CAP-13, EGRESS-NOPROXY-1
 
 import (
 	"context"
@@ -115,6 +115,20 @@ func TestDefaultTransportRefusesPrivateAnswer(t *testing.T) {
 	}
 	if dialed.Load() != 0 {
 		t.Fatal("a refused address must not be connected")
+	}
+}
+
+// EGRESS-NOPROXY-1 (#1611, DEV-2): the default transport takes no proxy
+// from the environment. A proxy resolves the provider's name itself, so
+// netguard's address policy would never see the answer; the owner host's
+// HTTPS_PROXY must not route the proxy's upstream traffic or setup's key
+// check around it.
+func TestDefaultTransportTakesNoProxyFromTheEnvironment(t *testing.T) {
+	for _, v := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(v, "http://proxy.home.example:3128")
+	}
+	if tr := DefaultTransport(netguard.New(netguard.Config{})); tr.Proxy != nil {
+		t.Fatal("DefaultTransport sets Proxy; the guard must resolve the provider's name itself")
 	}
 }
 
