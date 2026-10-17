@@ -185,28 +185,22 @@ class WorkflowTest(unittest.TestCase):
                     self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
 
     def test_no_workflow_pushes_to_main(self):
-        # main requires status checks, so a workflow push to it would be rejected; trace.yml,
-        # metrics.yml and records.yml push a bot branch and open its PR instead; ci.yml is dispatched
+        # main requires status checks, so a workflow push to it would be rejected; trace.yml
+        # and metrics.yml push a bot branch and open its PR instead; ci.yml is dispatched
         # there only when BOT_PR_TOKEN is unset, since a BOT_PR_TOKEN push already starts its run.
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"git push\b[^\n]*\bmain\b", f.name)
         self.assertIn("workflow_dispatch:", (WORKFLOWS / "ci.yml").read_text())
-        for name in ("trace.yml", "metrics.yml", "records.yml"):
+        for name in ("trace.yml", "metrics.yml"):
             text = (WORKFLOWS / name).read_text()
             self.assertIn("gh pr create --base main", text, name)
             self.assertIn('if [ "$BOT_TOKEN_SET" != true ]; then gh workflow run ci.yml --ref "$BRANCH"; fi', text, name)
             self.assertIn("BOT_TOKEN_SET: ${{ secrets.BOT_PR_TOKEN != '' }}", text, name)
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
-    def test_records_batch_runs_at_most_daily(self):
-        # RECORDS-INLINE (#1816, D-120): the bot batch is the only writer of records, so it runs on a
-        # daily schedule or by hand, never on every push to main.
-        text = (WORKFLOWS / "records.yml").read_text()
-        on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
-        self.assertRegex(on, r"(?m)^\s+schedule:\s*$")
-        self.assertRegex(on, r"cron:\s*'\d+ \d+ \* \* \*'")
-        self.assertRegex(on, r"(?m)^\s+workflow_dispatch:")
-        self.assertNotRegex(on, r"(?m)^\s+push:")
+    def test_no_records_bot(self):
+        # Cut 4 (#2172): the verdict comment on the PR is the record, so no workflow writes reviews/.
+        self.assertFalse((WORKFLOWS / "records.yml").exists())
 
     def test_trace_batch_runs_at_most_daily(self):
         # One TRACE.md PR a day instead of one per merge (GitHub process audit, 2026-10-17):
@@ -228,7 +222,7 @@ class WorkflowTest(unittest.TestCase):
             jobs = re.split(r"(?m)^  (?=[a-z][\w-]*:\n)", f.read_text().split("\njobs:\n", 1)[-1])
             for job in jobs:
                 writes, env = "contents: write" in job, bool(re.search(r"(?m)^    environment: bot$", job))
-                if f.name in ("board.yml", "trace.yml", "metrics.yml", "records.yml"):
+                if f.name in ("board.yml", "trace.yml", "metrics.yml"):
                     self.assertEqual(writes, env, f"{f.name}: {job.split(':', 1)[0]}")
                 else:
                     self.assertFalse(env or "BOT_PR_TOKEN" in job, f.name)

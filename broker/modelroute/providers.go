@@ -17,7 +17,8 @@ import (
 // socket's list PrivateOK is whether private data may go to it: the
 // owner's marker or the vault process's -private-ok flag, as the router
 // asks (#1420), and PrivateByConfig says the flag allows it, which no
-// page can withdraw. Setup's list reports the owner's marker only. Plan
+// page can withdraw. Setup's list reports the owner's marker only as
+// PrivateOK, and the flag as PrivateByConfig (#1608). Plan
 // marks a plan route (CRED-5): Connected then means its sign-in is
 // stored, and it takes no API key.
 type SetupProvider struct {
