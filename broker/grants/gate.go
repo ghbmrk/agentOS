@@ -1090,7 +1090,10 @@ func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 			continue
 		}
 		if u.Erased {
-			if !sameSet(fold(u.Intent.Recipients), k.rcpt) {
+			// As distinct addresses on both sides: k.rcpt may be the
+			// verifier's participants, one per person, while the erased
+			// intent kept its own list, duplicates and all (#2178).
+			if !sameSet(distinct(fold(u.Intent.Recipients)), distinct(k.rcpt)) {
 				continue
 			}
 		} else {
@@ -3414,6 +3417,19 @@ func stricter(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// distinct returns rs without repeats, in first-seen order.
+func distinct(rs []string) []string {
+	seen := make(map[string]bool, len(rs))
+	var out []string
+	for _, r := range rs {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func sameSet(a, b []string) bool {

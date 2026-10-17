@@ -62,3 +62,23 @@ func TestAnErasedOnlyRepeatIsMarkedErased(t *testing.T) {
 		t.Fatalf("kept match: %+v, want Sent without SentErased", it)
 	}
 }
+
+// REQ: OP2-ER-1
+// An erased send whose intent named its recipient twice still matches a
+// later send to that one person: the mail adapter sent it once (#2178).
+func TestAnErasedSendWithARepeatedRecipientIsStillARepeat(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "invoice.send", Params: map[string]string{"template": "invoice"}, AmountCap: 100000, PerRecord: 20, PerDay: 50, HoldDays: 7}})
+	r.ver.set("inv-1042", sam())
+	r.effect("agent/s1", "invoice.send", invoice("inv-1042"), "sam@example.com", "SAM@example.com")
+	r.g.Flush()
+	r.decide(true, "owner")
+	if st, _ := r.eng.Get("agent/s1"); st.State != journal.Succeeded {
+		t.Fatalf("s1: %s", st.State)
+	}
+	r.eng.Erase([]string{"agent/s1"})
+	if st := r.effect("agent/s2", "invoice.send", invoice("inv-1042"), "sam@example.com"); st.State == journal.Succeeded {
+		t.Fatal("s2 went unasked after an erased send to the same person")
+	}
+}
