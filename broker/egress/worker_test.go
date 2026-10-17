@@ -397,7 +397,7 @@ func TestWorkerRouteBodyCheck(t *testing.T) {
 	r = newWorkerRig(t, false)
 	full := withKey(`"instructions":"be brief","parallel_tool_calls":false,"store":false,` +
 		`"reasoning":{"effort":"medium","summary":"auto"},"prompt_cache_key":"k","text":{"verbosity":"low"},` +
-		`"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"tools":{"type":"string"}}}}]`)
+		`"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"wait","parameters":{"type":"object","properties":{"tools":{"type":"string"}}}}]}]`)
 	full = strings.Replace(full, `"input":[`, `"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"s"}],"encrypted_content":"e"},`+
 		`{"type":"function_call","name":"f","arguments":"{}","call_id":"c1"},{"type":"function_call_output","call_id":"c1","output":"ok"},`+
 		`{"type":"custom_tool_call","name":"exec","input":"ls","call_id":"c2"},{"type":"custom_tool_call_output","call_id":"c2","output":"ok"},`+
