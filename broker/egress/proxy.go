@@ -133,6 +133,10 @@ type Config struct {
 	// why (a Reason constant); required when any operation declares a
 	// Response or Refused statuses. It is called once per stop.
 	RouteFailed func(adapter, reason string)
+	// Stops records which routes are stopped, so a stop outlives the
+	// proxy (OP-11: the journal). Nil keeps them in this proxy, so a new
+	// one starts with every route open.
+	Stops RouteStops
 	// Granted, if set, grants per request what Grants does not: it is
 	// asked with the calling machine itself, never the grants entry a
 	// replay machine borrows, and the adapter, only when no static grant
@@ -166,7 +170,8 @@ type Proxy struct {
 
 	mu    sync.Mutex
 	usage map[string]*machineUsage
-	stops map[string]string // adapter -> why its route stopped (CRED-5t)
+	stops RouteStops        // adapter -> why its route stopped (CRED-5t)
+	held  map[string]string // adapter -> a stop stops could not record
 }
 
 type machineUsage struct {
@@ -202,7 +207,11 @@ func New(cfg Config) (*Proxy, error) {
 		usage:    map[string]*machineUsage{},
 		labelOf:  cfg.Label,
 		xch:      exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
-		stops:    map[string]string{},
+		stops:    cfg.Stops,
+		held:     map[string]string{},
+	}
+	if p.stops == nil {
+		p.stops = memStops{}
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
