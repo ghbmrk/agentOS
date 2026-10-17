@@ -68,10 +68,38 @@ class NoQuotaOffTest(unittest.TestCase):
                     hits.append(str(f.relative_to(ROOT)))
         self.assertEqual(hits, [])
 
-    def test_the_unit_passes_quotas_on_explicitly(self):
-        exe = ini(UNIT)["Service"]["ExecStart"]
-        vals = re.findall(r"(?:^|\s)--?disk-quota[=\s]+[\"']?(\w+)", exe)
-        self.assertEqual(vals, ["on"])
+    def assert_quota_last_and_once(self, unit_text):
+        # Go's flag package takes the last value, so `-disk-quota on` as the last argument wins over
+        # anything before it, however spelled (${VAR}, systemd escapes, split quotes: Security #2110
+        # point 1). disk-quota appears nowhere else in the command, and there is one ExecStart=.
+        starts = [l for l in unit_text.splitlines() if l.startswith("ExecStart=")]
+        self.assertEqual(len(starts), 1, starts)
+        p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+        p.optionxform = str
+        p.read_string(unit_text)
+        argv = p["Service"]["ExecStart"].replace("\\\n", " ").split()
+        self.assertEqual(argv[-2:], ["-disk-quota", "on"], argv)
+        self.assertEqual(sum("disk-quota" in a for a in argv), 1, argv)
+
+    def test_the_unit_passes_quotas_on_last_and_once(self):
+        self.assert_quota_last_and_once(UNIT.read_text())
+
+    def test_the_check_catches_an_override(self):
+        text = UNIT.read_text()
+        last = "-worker-image openclaw \\\n        -disk-quota on\n"
+        self.assertIn(last, text)
+        for mutant in ("-worker-image openclaw \\\n        -disk-quota on -disk-quota=${DQ}\n",
+                       "-worker-image openclaw \\\n        -disk-quota=${DQ} -disk-quota on\n",
+                       "-worker-image openclaw \\\n        -disk-quota on -image x=/y\n",
+                       "-worker-image openclaw\n",
+                       last + "ExecStart=/usr/lib/agentos/agentosd -disk-quota=of\\x66\n"):
+            with self.subTest(mutant=mutant):
+                with self.assertRaises(AssertionError):
+                    self.assert_quota_last_and_once(text.replace(last, mutant))
+
+    def test_no_drop_in_overrides_the_unit(self):
+        # A drop-in could replace ExecStart= or set the flag's value (Security #2110 point 1).
+        self.assertEqual(sorted(str(d.relative_to(ROOT)) for d in IMG.rglob("agentosd.service.d")), [])
 
 
 class BootReportQuotaTest(unittest.TestCase):

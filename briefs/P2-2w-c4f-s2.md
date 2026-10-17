@@ -29,7 +29,7 @@ Not touched, because open PRs own them (D-111): `broker/cmd/agentosd/main.go` (#
 **Acceptance tests:** RES-4, ARC-3: `tests/test_image_quota.py` (`NoQuotaOffTest`, `BootReportQuotaTest`, `BootTestReadsQuotaTest`), and the image workflow's QEMU boot test (`image/ci_boot.sh`) reading the quota line on both boots.
 
 1. The scanner flags `-disk-quota off`, `--disk-quota=off`, `-disk-quota="off"` and `-disk-quota 'off'` in synthetic text, does not flag `-disk-quota on`, and finds none under image/.
-2. agentosd.service's ExecStart passes `-disk-quota on` exactly once, and no `-disk-quota` with another value.
+2. agentosd.service has one ExecStart=, whose last argument is `-disk-quota on` and which names disk-quota nowhere else (Go takes the last value, so nothing before it can turn quotas off), and no `agentosd.service.d/` drop-in ships under image/.
 3. boot-report, with findmnt stubbed: ext4 with `prjquota` prints `agentos-quota: root=ext4 prjquota`; ext4 without it, another file system, and a findmnt that fails each print the off form and never the on form; the first line keeps its exact text.
 4. ci_boot.sh checks the on line on console.log and console-reboot.log.
 
