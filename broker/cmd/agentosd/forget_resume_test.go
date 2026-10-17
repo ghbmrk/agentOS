@@ -55,7 +55,7 @@ func (w *fakeWork) backCount() int {
 	return len(w.backs)
 }
 
-// REQ: CAP-3, OP-4
+// REQ: CAP-3, OP-4, CH-12, RCH-4
 // #1370 and Security S1 on #1382: the resume wireResume sets up runs an
 // interrupted item 2 once, at the right time, whichever comes first,
 // startup reconcile finding it or the boot's resume. Startup reconcile
@@ -67,18 +67,29 @@ func (w *fakeWork) backCount() int {
 //     run before it, it would tell "item 2 goes only with item 1" (no
 //     gate) or promise a later take-back (no agent), and drain the queue.
 //   - Recall on: the agent is taken back once and told done.
+//
+// With no agent machine (JRN-startup-reconcile s5, Security R3 on #1382),
+// recall off still tells forgetAgentNotOpen: a take-back "when it runs
+// again" cannot happen with recall off, even once the agent runs. Recall
+// on keeps that promise (forgetAgentNoAgent), since the agent's next run
+// can be taken back.
 func TestForgetItem2ResumeWaitsForBootSetup(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		recall bool
-		early  bool
-		want   string
-		backs  int
+		name    string
+		recall  bool
+		early   bool
+		noAgent bool
+		want    string
+		backs   int
 	}{
-		{"recall off, reconciled before boot setup", false, true, forgetAgentNotOpen, 0},
-		{"recall off, reconciled after boot", false, false, forgetAgentNotOpen, 0},
-		{"recall on, reconciled before boot setup", true, true, forgetAgentDone, 1},
-		{"recall on, reconciled after recall opened", true, false, forgetAgentDone, 1},
+		{"recall off, reconciled before boot setup", false, true, false, forgetAgentNotOpen, 0},
+		{"recall off, reconciled after boot", false, false, false, forgetAgentNotOpen, 0},
+		{"recall on, reconciled before boot setup", true, true, false, forgetAgentDone, 1},
+		{"recall on, reconciled after recall opened", true, false, false, forgetAgentDone, 1},
+		{"recall off, no agent, reconciled before boot setup", false, true, true, forgetAgentNotOpen, 0},
+		{"recall off, no agent, reconciled after boot", false, false, true, forgetAgentNotOpen, 0},
+		{"recall on, no agent, reconciled before boot setup", true, true, true, forgetAgentNoAgent, 0},
+		{"recall on, no agent, reconciled after recall opened", true, false, true, forgetAgentNoAgent, 0},
 	} {
 		r := newForgetRig(t)
 		w := &fakeWork{worked: true, ok: true}
@@ -104,7 +115,9 @@ func TestForgetItem2ResumeWaitsForBootSetup(t *testing.T) {
 		boot := r.f.wireResume(ctx, onOpen)
 		setup := func() {
 			r.f.gate.Store(gate)
-			r.withAgent(w)
+			if !c.noAgent {
+				r.withAgent(w)
+			}
 			boot()
 			if c.recall {
 				rec.Open()
@@ -146,7 +159,7 @@ func waitIdle(f *ownerForget) {
 }
 
 // The resume is wired in one place: nothing in agentosd assigns an
-// ownerForget's resume or whenOpen but wireResume, and main wires through
+// ownerForget's resume, whenOpen or noRecall but wireResume, and main wires through
 // it once, with recall's OnOpen, and runs the boot's resume it returns
 // (PT1 and S3 on #1382: dropping the wiring passed every other test).
 // REQ: CAP-3, OP-4
@@ -165,7 +178,7 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 				switch n := n.(type) {
 				case *ast.AssignStmt:
 					for i, l := range n.Lhs {
-						if s, ok := l.(*ast.SelectorExpr); ok && (s.Sel.Name == "resume" || s.Sel.Name == "whenOpen") && !inWire {
+						if s, ok := l.(*ast.SelectorExpr); ok && (s.Sel.Name == "resume" || s.Sel.Name == "whenOpen" || s.Sel.Name == "noRecall") && !inWire {
 							t.Errorf("%s: %s assigned outside wireResume", fset.Position(l.Pos()), s.Sel.Name)
 						}
 						if name != "main.go" || i >= len(n.Rhs) {
