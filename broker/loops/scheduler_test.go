@@ -11,7 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 )
 
-// REQ: LOOP-1, LOOP-2, LOOP-3, RES-1
+// REQ: LOOP-0, LOOP-1, LOOP-2, LOOP-3, RES-1
 //
 // The scheduler runs loop work only in spare capacity, yields to
 // foreground work within the preemption target, keeps loop model use
@@ -232,6 +232,29 @@ func TestSpareBudgetIsNeverExceeded(t *testing.T) {
 	}
 	if d := strings.Join(r.s.Digest(), "\n"); !strings.Contains(d, "Spare-time AI use, last 24 hours: 2 of 2 calls") {
 		t.Fatalf("digest does not show spare use: %q", d)
+	}
+}
+
+// LOOP-0 (#2291): with no fixed call budget, model work runs, and STATUS
+// shows spare use without a call limit.
+func TestModelWorkRunsWithNoFixedBudget(t *testing.T) {
+	r := newRig(t)
+	modelWork := &source{loop: Improve, clk: r.clk, queue: -1, value: 1, model: true}
+	r.restart(modelWork)
+	for i := 0; i < 2; i++ {
+		c, err := r.spare.Start("eval-1", 10, 10)
+		must(t, err)
+		c.Done(20)
+	}
+	for i := 0; i < 3; i++ {
+		r.s.Tick(context.Background())
+	}
+	if modelWork.count() == 0 {
+		t.Fatal("model work did not run under the default spare budget")
+	}
+	d := strings.Join(r.s.Digest(), "\n")
+	if !strings.Contains(d, "Spare-time AI use, last 24 hours: 2 calls (self-tests and learning).") || strings.Contains(d, " of ") {
+		t.Fatalf("digest with no fixed budget: %q", d)
 	}
 }
 

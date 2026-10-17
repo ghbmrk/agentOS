@@ -113,18 +113,27 @@ var channelWords = map[string]string{"STABLE": ChannelStable, "FAST": ChannelFas
 // On reports whether loop l may run.
 func (s Settings) On(l Loop) bool { return !s.Off && !s.Paused[l] }
 
-// DefaultSpareCalls is the default spare budget: a conservative share of a
-// day's model use (LOOP-0), small next to meter.DefaultOverallCap.
-const DefaultSpareCalls = 100
+// NoSpareBudget is the default spare budget: no fixed call budget, so
+// loops use spare quota above the owner reserve (LOOP-0, RES-5, LOOP-1).
+// An owner's SPARE BUDGET n sets a fixed one, which narrows it.
+const NoSpareBudget int64 = -1
+
+// withinBudget reports whether calls is at most the budget cur; no fixed
+// budget (cur < 0) holds every budget.
+func withinBudget(calls, cur int64) bool { return cur < 0 || calls <= cur }
 
 // TokensPerCall turns the owner's call count into the meter's token cap.
 const TokensPerCall = 10_000
 
 // SpareLimits is the meter cap for a spare budget of calls. The meter has
 // no zero cap, so a zero budget is one call of one token: no real call
-// fits under it.
+// fits under it. The meter has no unlimited cap either, so no fixed budget
+// is a cap no day reaches, small enough that used+use cannot overflow.
 func SpareLimits(calls int64) meter.Limits {
-	if calls <= 0 {
+	if calls < 0 {
+		return meter.Limits{Calls: 1 << 40, Tokens: 1 << 60}
+	}
+	if calls == 0 {
 		return meter.Limits{Calls: 1, Tokens: 1}
 	}
 	return meter.Limits{Calls: calls, Tokens: calls * TokensPerCall}
@@ -339,11 +348,14 @@ func (s *Scheduler) BudgetAsk(in journal.Intent) (string, error) {
 		return "", errors.New("loops: not a budget intent")
 	}
 	cur := s.Settings().SpareCalls
+	if cur < 0 {
+		return "", errors.New("loops: no fixed budget to raise")
+	}
 	return fmt.Sprintf("Raise spare-time AI use from %d to %d calls a day?", cur, r.Calls), nil
 }
 
 // LowTierRaiseMax is the most spare calls a day a low-tier raise may set.
-const LowTierRaiseMax = 5 * DefaultSpareCalls
+const LowTierRaiseMax = 500
 
 // Line is the owner request for an intent Check sent to the owner (the
 // grants gate's Loops.Line): raising the spare budget, with the old and
@@ -359,6 +371,10 @@ func (s *Scheduler) Line(in journal.Intent) (owner.Item, error) {
 		return owner.Item{}, errors.New("loops: no owner line for this intent")
 	}
 	cur := s.Settings().SpareCalls
+	if cur < 0 {
+		// No fixed budget holds every budget: setting one is never a raise.
+		return owner.Item{}, errors.New("loops: no fixed budget to raise")
+	}
 	kind := owner.Ordinary
 	if r.Calls > 2*cur || r.Calls > LowTierRaiseMax {
 		kind = owner.GrantChange
@@ -462,7 +478,7 @@ func (s *Scheduler) narrowing(r Request) bool {
 	case KindLoops, KindSharing:
 		return !r.On
 	case KindBudget:
-		return r.Calls <= s.Settings().SpareCalls
+		return withinBudget(r.Calls, s.Settings().SpareCalls)
 	// Update settings narrow when they make updates slower or more
 	// cautious, as UPDATE CHECKS OFF does: a later channel, a longer soak,
 	// asking before security fixes.
@@ -485,6 +501,10 @@ var errNoSharing = errors.New("loops: sharing is not wired")
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
+	if calls < 0 {
+		return "In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, " +
+			"using spare plan quota beyond what you need; reply LOOPS OFF to stop that."
+	}
 	return fmt.Sprintf("In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, "+
 		"using up to %d AI calls a day; reply LOOPS OFF to stop that.", calls)
 }
@@ -657,7 +677,7 @@ func (s *Scheduler) Set(ctx context.Context, r Request) error {
 	case KindBudget:
 		params["calls"] = r.Calls
 		action = ActionBudget
-		if r.Calls <= cur.SpareCalls {
+		if withinBudget(r.Calls, cur.SpareCalls) {
 			action = ActionBudgetLower
 		}
 	}
@@ -721,7 +741,7 @@ func (s *Scheduler) Check(_ context.Context, _ journal.Phase, in journal.Intent)
 	case r.Kind == KindLoops && r.On && in.Action == ActionOn:
 		return nil
 	case r.Kind == KindBudget && in.Action == ActionBudgetLower:
-		if r.Calls > cur {
+		if !withinBudget(r.Calls, cur) {
 			return errors.New("loops: not a lower budget")
 		}
 		return nil
@@ -778,7 +798,7 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 	case KindSecurity:
 		next.Updates.SecurityAsk = !r.On
 	case KindBudget:
-		if in.Action == ActionBudgetLower && r.Calls > prev.SpareCalls {
+		if in.Action == ActionBudgetLower && !withinBudget(r.Calls, prev.SpareCalls) {
 			// Check allowed it as narrowing; the budget changed since.
 			return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not a lower budget"}
 		}
