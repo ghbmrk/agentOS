@@ -261,6 +261,22 @@ func (p *Pipeline) Digest() []string {
 			}
 			out = append(out, "Update "+safe(strings.TrimPrefix(a.Origin, "update:"))+line)
 			a.ConcernSeen = true
+		} else if a.Concern == WhySecurity && !a.ConcernFollowedUp && a.Reverted == "" && !a.protected() {
+			// Still not undone: one follow-up a day after it was raised,
+			// never a second. No owner step settles it (C45), so it names
+			// the day it was already waiting on. A Concern saved before
+			// ConcernAt starts its day now.
+			if now := p.cfg.Now(); a.ConcernAt.IsZero() {
+				a.ConcernAt = now
+				_ = p.saveLocked()
+			} else if now.Sub(a.ConcernAt) >= ConcernFollowUpAfter {
+				line := " I will not start it."
+				if a.ConcernStarts {
+					line = " it may start before I can undo it."
+				}
+				out = append(out, "Update "+safe(strings.TrimPrefix(a.Origin, "update:"))+" failed a security check and is still waiting to be undone, as it was on "+a.ConcernAt.Format("Mon 2 Jan")+";"+line+" Nothing is needed from you.")
+				a.ConcernFollowedUp = true
+			}
 		} else if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
 			s := a.ConcernScore
 			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
