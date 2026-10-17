@@ -122,9 +122,10 @@ Built for W3-forget-b2c-f1-r1 against CAP-3, UX-182-3 and CH-12. Covers `openLea
 
 | ID | Assumption | Source | If wrong |
 |---|---|---|---|
-| R5 | **A restored entry with no `Agent` and no `Since` is a retry-path forget**: `Execute`, `retry` and `finishOwed` append that shape before any done text, and the done path always logs its `since`. Such an entry whose goal the restored learn dir neither tombstoned nor owes is owed (`owedForget{Logged: true}`, count and time unknown, so `doneLater`'s countless text) before its tombstone, and `finishOwed` tells it once; the next boot finds the tombstone and owes nothing. A retry-path forget that finished and was told done before the restore is told done a second time: the lesser harm next to a missing one (`paid`). | brief R1A, R1B; L3 release 2 on #559 | Log a done marker in the forget log (`broker/recovery`, out of scope) so the restore can tell the two apart. |
+| R5 | **A restored entry with no `Agent` and no `Since` is a retry-path forget**: `Execute`, `retry` and `finishOwed` append that shape before any done text, and the done path always logs its `since`. Such an entry whose goal the restored learn dir neither tombstoned nor owes is owed (`owedForget{Logged: true}`, count and time unknown, so `doneLater`'s countless text) before its tombstone, and `finishOwed` tells it once; the next boot finds the tombstone and owes nothing. One that finished and was told done before the restore is not told again when the log holds its done marker (R8). | brief R1A, R1B; L3 release 2 on #559 | — |
 | R6 | **The restore asks the digest queue to forget every restored goal at each attach**, done text or not. The digest box keeps a refused goal itself, so one call per boot suffices; repeating it is idempotent. | brief R1D; Security 1 on #602 | Persist the purge per goal. |
 | R7 | **STATUS counts item 1 goals in `retry` or `purgeLater` in this process only**, with `forgetNotSaved`'s words and no task words. A forget owed from a previous boot shows only while `finishOwed`'s `purgeLater` retries its digest step; the start-up replay has already tombstoned it. | brief R1C; CH-12 | Count the owed file's item 1 entries too. |
+| R8 | **A done marker means the done text sent** (W3-forget-b2c-f1-r2). `markDone` appends one after any logged item 1 done text sends (`done` or `tellLater`), never for item 2 or the lost-owed text, so a crash between text and marker repeats the text (the lesser harm). The restore owes nothing for a goal whose last forget entry is followed by a marker, and drops the restored learn dir's owe of it when not tombstoned; it still tombstones and purges the goal. A goal the backup had already tombstoned and owes is still told again (LATER l14). Until the vault process wires the log (W3-forget-b1-5) no marker is written. | brief R2A, R2B; UX 2 on #610 | Keep the marker's seq in the owed record. |
 
 ## LOOP-7 fuzz rounds (P3-4b-3a)
 
@@ -270,6 +271,11 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 |---|---|---|---|
 | RS1 | **An unsaved approval answer shows in STATUS (OWNER-retire-surface, #1971).** `newOwnerPacer` adds the owner's `RetireNote` to `cfg.Notes` after its held line; the pacer's minute tick logs `RetireErr` once per distinct cause, and again only after it has cleared and recurs. No owner text is sent: the failure is a full or broken state disk, which an owner text would not fix and which STATUS already reports on ask. | SM-AJ-4, OP-11 | If the owner should be texted unprompted, add it to the digest's problem lines, not a new text. |
 
+## FORGET item 2 with recall off and no agent machine (JRN-startup-reconcile s5, #1412)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| RO1 | **Recall off is known only from the wiring.** `wireResume` with no `onOpen` (recall not configured) sets `noRecall`; `agentBack` with no agent machine then tells `forgetAgentNotOpen`, not `forgetAgentNoAgent`'s "when it runs again", since with recall off no later run can take the agent back. Recall on with no agent machine keeps the `forgetAgentNoAgent` promise. Before `wireResume` runs (tests that build `ownerForget` by hand) `noRecall` is false, the earlier behavior. It is set only in `wireResume`, before startup reconcile, like `whenOpen` (`TestForgetResumeIsWiredOnlyThroughWireResume`). | CH-12, RCH-4 | If recall can be turned on or off while agentosd runs, `noRecall` must follow it (an atomic read of recall's state), or the text can name the wrong step. |
 ## The box clock guard on its own (#1246)
 
 | # | Assumption | Spec basis | If it changes |

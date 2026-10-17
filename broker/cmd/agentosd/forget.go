@@ -209,6 +209,10 @@ type ownerForget struct {
 	// after the boot's resume may already have run (#1370). Set only by
 	// wireResume, before startup reconcile runs.
 	resume func()
+	// noRecall is set by wireResume when recall is off: an item 2 with no
+	// agent machine then cannot be taken back even once the agent runs,
+	// so agentBack does not promise it (JRN-startup-reconcile s5).
+	noRecall bool
 	// resuming serializes resumeAgent: recall's open runs every queued
 	// OnOpen together, and each run must see the take-backs the one
 	// before it did (Handled), so none is taken back or told twice.
@@ -706,6 +710,9 @@ func (f *ownerForget) doneLater(undone int, since time.Time, agentBack, logged b
 // when agent.
 type forgetLogger interface {
 	Append(goal string, at, since time.Time, agent bool) error
+	// Done appends a done marker for goal: its forget's done text has
+	// sent, so a restore owes none (W3-forget-b2c-f1-r2).
+	Done(goal string, at time.Time) error
 }
 
 // logForget appends an approved forget to the forget log, reporting whether it
@@ -780,6 +787,10 @@ func (f *ownerForget) executeAgent(ctx context.Context, in journal.Intent) journ
 func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time) journal.Outcome {
 	f.logForget(grants.ForgetAgentGoal(id), since, true)
 	a := f.agent.Load()
+	if a == nil && f.noRecall {
+		f.promise(forgetAgentNotOpen)
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: recall off, no agent machine"}
+	}
 	if a == nil {
 		f.promise(forgetAgentNoAgent)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: no agent machine"}
@@ -1253,15 +1264,19 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 // then would judge item 2 without the gate or the agent, tell the owner
 // something false, and drain the queue the boot's resume reads, so the
 // owner would never hear that it cannot be done (forgetAgentNotOpen).
+// Recall off also marks noRecall, so an item 2 with no agent machine is
+// told forgetAgentNotOpen, not a take-back once the agent runs again.
 // resumeAgent's queue makes one of the two runs tell it, once.
 func (f *ownerForget) wireResume(ctx context.Context, onOpen func(func())) (boot func()) {
 	run := func() { go f.resumeAgent(ctx) }
 	if onOpen != nil {
 		f.whenOpen = func() { onOpen(run) }
 		f.resume = f.whenOpen
+		f.noRecall = false
 		return f.whenOpen
 	}
 	f.whenOpen = nil
+	f.noRecall = true
 	booted := make(chan struct{})
 	f.resume = func() {
 		go func() {
@@ -1411,6 +1426,7 @@ func (f *ownerForget) say(text string) error {
 func (f *ownerForget) done(ctx context.Context, goal, text string, e owedForget) {
 	err := f.say(text)
 	if err == nil {
+		f.markDone(goal, e)
 		f.paid(goal)
 		return
 	}
@@ -1418,12 +1434,12 @@ func (f *ownerForget) done(ctx context.Context, goal, text string, e owedForget)
 	if err := f.owed.owe(goal, e); err != nil {
 		log.Printf("forget: done text not kept for a restart: %v", err)
 	}
-	go f.tellLater(context.WithoutCancel(ctx), goal, text)
+	go f.tellLater(context.WithoutCancel(ctx), goal, text, e)
 }
 
 // tellLater sends text with backoff until it goes, then drops goal as
 // owed.
-func (f *ownerForget) tellLater(ctx context.Context, goal, text string) {
+func (f *ownerForget) tellLater(ctx context.Context, goal, text string, e owedForget) {
 	if f.toldLater != nil {
 		defer f.toldLater()
 	}
@@ -1435,8 +1451,23 @@ func (f *ownerForget) tellLater(ctx context.Context, goal, text string) {
 			log.Printf("forget: done text not sent yet: %v", err)
 			continue
 		}
+		f.markDone(goal, e)
 		f.paid(goal)
 		return
+	}
+}
+
+// markDone appends a done marker for an item 1 forget in the forget log
+// once its done text has sent, so a restore of a backup from before it
+// owes the owner no second one (R2A). It follows the text: a crash between
+// the two repeats the text, the lesser harm. A failed append is logged and
+// changes nothing else.
+func (f *ownerForget) markDone(goal string, e owedForget) {
+	if f.forgetLog == nil || !e.Logged || e.Agent || goal == owedLostKey {
+		return
+	}
+	if err := f.forgetLog.Done(goal, f.now()); err != nil {
+		log.Printf("forget: forget log done marker: %v", err)
 	}
 }
 
