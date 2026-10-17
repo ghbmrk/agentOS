@@ -85,8 +85,10 @@ func TestPacingDefaultsFromAnOldState(t *testing.T) {
 				t.Errorf("%s: quiet at +%dh with no window set", name, h)
 			}
 		}
-		if !r.ch.Urgent(ClassSecurity) || r.ch.Urgent(ClassApproval) || r.ch.Urgent(ClassAgent) || r.ch.Urgent(ClassUpdate) {
-			t.Errorf("%s: urgent classes not the default (security only)", name)
+		// D-129: security and approval are urgent by default; agent and
+		// update are not.
+		if !r.ch.Urgent(ClassSecurity) || !r.ch.Urgent(ClassApproval) || r.ch.Urgent(ClassAgent) || r.ch.Urgent(ClassUpdate) {
+			t.Errorf("%s: urgent classes not the default (security and approval)", name)
 		}
 	}
 	check("old state file")
