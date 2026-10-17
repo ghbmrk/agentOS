@@ -14,6 +14,11 @@ const RecRouteStop RecordType = "route_stop"
 const (
 	RouteStoppedEvent  = "stopped"
 	RouteReopenedEvent = "reopened"
+	// RouteRaisedEvent replaces a stopped route's cause with one that
+	// outranks it (CRED-RS-4). It is its own event, not a second "stopped",
+	// so a binary from before it refuses the journal (fails closed) rather
+	// than keep the first cause and let a sign-in lift the stop.
+	RouteRaisedEvent = "raised"
 )
 
 // routeCauseSignIn is the one cause the owner's sign-in lifts (CRED-5).
@@ -48,6 +53,8 @@ func (n RouteStopNote) valid() bool {
 	switch n.Event {
 	case RouteStoppedEvent:
 		return n.Cause != ""
+	case RouteRaisedEvent:
+		return n.Cause != "" && n.Cause != routeCauseSignIn
 	case RouteReopenedEvent:
 		return true
 	}
@@ -56,7 +63,8 @@ func (n RouteStopNote) valid() bool {
 
 // StopRoute journals that route is stopped for cause. A route already
 // stopped keeps its cause and nothing is written, unless cause outranks it
-// (an unswappable stop over a refused login's, CRED-RS-4). STOP does not
+// (an unswappable stop over a refused login's, CRED-RS-4): that is written
+// as a raise. STOP does not
 // hold it: it records an observation, not an effect.
 func (e *Engine) StopRoute(route, cause string) error {
 	n := RouteStopNote{Route: route, Event: RouteStoppedEvent, Cause: cause}
@@ -68,8 +76,11 @@ func (e *Engine) StopRoute(route, cause string) error {
 	if e.broken != nil {
 		return e.broken
 	}
-	if cur, ok := e.routeStops[route]; ok && !outranks(cause, cur) {
-		return nil
+	if cur, ok := e.routeStops[route]; ok {
+		if !outranks(cause, cur) {
+			return nil
+		}
+		n.Event = RouteRaisedEvent
 	}
 	return e.commit(Record{Type: RecRouteStop, RouteStop: &n})
 }

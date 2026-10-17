@@ -191,3 +191,41 @@ func TestReopenRecordsReplayByCause(t *testing.T) {
 		t.Fatal("a cause-less reopen record from before CRED-RS-5 did not lift the stop")
 	}
 }
+
+// CRED-RS-4: raising a refused login's stop is its own event, which a
+// binary from before #2016 does not know and so refuses the journal over
+// (fails closed); recorded as a second "stopped", that binary would keep
+// the first cause and the owner's sign-in would lift an unswappable stop.
+// A raise to the sign-in cause is not a raise and is invalid.
+func TestRaiseIsItsOwnEvent(t *testing.T) {
+	st := &MemStore{}
+	e := mustOpen(t, st, newPolicy(), newService())
+	if err := e.StopRoute("codex", "login-refused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StopRoute("codex", "unswappable"); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.Trail()
+	last := tr[len(tr)-1].RouteStop
+	if last == nil || last.Event != RouteRaisedEvent || last.Cause != "unswappable" {
+		t.Fatalf("raise recorded as %+v", last)
+	}
+	for _, n := range []RouteStopNote{
+		{Route: "codex", Event: RouteRaisedEvent, Cause: "login-refused"},
+		{Route: "codex", Event: RouteRaisedEvent},
+	} {
+		if n.valid() {
+			t.Fatalf("%+v is valid", n)
+		}
+	}
+	// A raise replays by the precedence rule, also onto an open route.
+	e.applyRouteStop(&RouteStopNote{Route: "claude", Event: RouteRaisedEvent, Cause: "unswappable"})
+	if c, _ := e.RouteStopped("claude"); c != "unswappable" {
+		t.Fatalf("raise onto an open route: %q", c)
+	}
+	e2 := mustOpen(t, st, newPolicy(), newService())
+	if c, _ := e2.RouteStopped("codex"); c != "unswappable" {
+		t.Fatalf("after a restart: %q", c)
+	}
+}
