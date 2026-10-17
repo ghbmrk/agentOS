@@ -3732,10 +3732,70 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                 finally:
                     f.unlink()
 
-    def test_without_the_copy_rule_the_link_passes(self):
+    def test_without_the_copy_rule_the_type_allowlist_still_refuses_the_link(self):
+        # #2174: C is off TMPFILES_STEP_TYPES, so the copy rule now only names what the line does.
         m = self.mutant('        elif typ[:1] == "C":\n', "        elif False:\n")
         link(self.root, self.RULES, "/opt/nope/x")
         self.tmpfiles("C /opt/nope - - - - /var/tmp/u\n")
+        self.assertIn("makes type C (off the step check's allowlist, #2174)",
+                      " | ".join(m.world_writable_link(str(self.root), self.RULES)))
+        self.assertIn("makes a copy of /var/tmp/u", " | ".join(check.world_writable_link(str(self.root), self.RULES)))
+    # REQ: HW-1, DEV-2
+    # #2174 (TREE-STEP-ALLOW): the step check is an allowlist of line types. A type or modifier not
+    # known to leave a step root-only counts as making it writable, so a t or T line that sets an ACL
+    # through its xattr (system.posix_acl_access) is refused like an a or A line.
+    def test_a_tmpfiles_line_of_a_type_off_the_allowlist_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln, step, typ in (("t /usr/lib/x - - - - system.posix_acl_access=0sAgAAAAEABgD", "usr/lib/x", "t"),
+                              ("T /usr - - - - system.posix_acl_default=0sAgAAAAEABgD", "usr", "T"),
+                              ("t+ /usr/lib/x - - - - user.canary=1", "usr/lib/x", "t+"),
+                              ("h /usr/lib/x - - - - -i", "usr/lib/x", "h"),
+                              ("H /usr/lib - - - - -i", "usr/lib", "H"),
+                              ("p /usr/lib/x 0600", "usr/lib/x", "p"),
+                              ("c+ /usr/lib/x 0600 - - - 1:3", "usr/lib/x", "c+"),
+                              ("b /usr/lib/x 0600 - - - 8:0", "usr/lib/x", "b"),
+                              ("Y /usr/lib/x 0755", "usr/lib/x", "Y"),
+                              ("f^ /usr/lib/x 0644 - - - canary.cred", "usr/lib/x", "f^"),
+                              ("d= /usr/lib/x 0755", "usr/lib/x", "d="),
+                              ("z? /usr/lib/x 0755", "usr/lib/x", "z?")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes type %s (off the step check's "
+                                  "allowlist, #2174) on the box" % (step, typ), self.v())
+                finally:
+                    f.unlink()
+        # A step the tree lacks.
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/opt/nope/x")
+        f = self.tmpfiles("t /opt/nope - - - - user.canary=1\n")
+        try:
+            self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/nope, which the tree lacks and "
+                          "usr/lib/tmpfiles.d/x.conf line 1 makes type t (off the step check's allowlist, #2174)",
+                          self.v())
+        finally:
+            f.unlink()
+
+    def test_a_tmpfiles_line_of_an_allowlisted_type_keeping_a_step_root_only_passes(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln in ("f /usr/lib/x 0644", "f+! /usr/lib/x 0644 root root - y", "w /usr/lib/x - - - - y",
+                   "w+ /usr/lib/x - - - - y", "d /usr/lib/x 0755", "d- /usr/lib/x 0755", "d$ /usr/lib/x 0755",
+                   "D! /usr/lib/x 0755 root root", "e /usr/lib/x 0755", "v /usr/lib/x 0755", "q /usr/lib/x 0755",
+                   "Q /usr/lib/x 0755", "z /usr/lib/x 0755", "Z /usr 0755 root root", "f~ /usr/lib/x 0644 - - - eQ==",
+                   "x /usr/lib/x", "X /usr/lib/x", "t /usr/lib/y - - - - user.canary=1"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_type_allowlist_a_t_line_passes(self):
+        m = self.mutant("        elif typ[:1] not in TMPFILES_STEP_TYPES or not set(typ[1:]) <= TMPFILES_STEP_MODIFIERS:\n",
+                        "        elif False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        self.tmpfiles("t /usr/lib/x - - - - system.posix_acl_access=0sAgAAAAEABgD\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
         self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
 
@@ -5013,6 +5073,17 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("console| agentos-e2e: PASS a\n", out)
         self.assertNotIn("\r", out)
 
+    def test_e2e_console_passes_a_note_that_is_no_step(self):
+        # REQ: HW-10, CH-1. phone-control's count of the recovery notices it passed over (#2170):
+        # echoed, counted as no step, and DONE's counts still match the step lines.
+        note = b"[   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery notices=1 texts=1 requests=0\n"
+        rc, out, done = self.e2e_console(b"agentos-e2e: PASS a\n" + note +
+                                         b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("console| [   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery "
+                      "notices=1 texts=1 requests=0\n", out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+
     def test_e2e_console_accepts_the_journald_lead_in_of_the_real_console(self):
         # REQ: HW-10. CI run 38655868696 (XFAIL text as at 789d072): each line carries
         # "[ time] box-e2e[pid]: ", and the login prompt can land in front of one.
@@ -5039,6 +5110,9 @@ class UplinkTest(unittest.TestCase):
                 ("a FAIL hidden by the counts", step + b"agentos-e2e: FAIL b no\n" + done),
                 ("DONE counts below the steps", step + step + done),
                 ("unknown driver line", step + b"agentos-e2e: OK b\n" + done),
+                ("NOTE after DONE", step + done + b"agentos-e2e: NOTE a texts=1\n"),
+                ("NOTE with no step", step + b"agentos-e2e: NOTE \n" + done),
+                ("NOTE quoting text", step + b"agentos-e2e: NOTE a I couldn't text you from 12:00\n" + done),
                 ("step line mid-line", step + b"junk agentos-e2e: PASS b\n" + done),
                 ("another unit's tag", b"[ 1.0] box-e2e[7]: " + step + b"[ 1.1] evil[5]: " + done),
                 ("another unit's tag on a step", b"[ 1.0] sshd[7]: " + step + b"[ 1.1] box-e2e[7]: " + done),

@@ -213,7 +213,7 @@ g1_verdict() {
 # Every line carrying the driver's prefix is echoed with ANSI, CR and other non-printable bytes cleaned out and "console| " in front,
 # so a guest line can neither start with "ci_boot:" (the host's verdict prefix) nor with "::" (a
 # workflow command). Exits non-zero, printing why, unless every such line starts with the prefix and
-# is a PASS, FAIL, XFAIL(#N), XPASS or BLOCKED line or the DONE line, there is exactly one DONE and
+# is a PASS, FAIL, XFAIL(#N), XPASS, BLOCKED or NOTE line or the DONE line, there is exactly one DONE and
 # it is the last, and its counts equal the step lines before it. The counts are the in-guest
 # driver's own; this cross-check raises the cost of a forged console but a guest that forges the
 # whole of it still passes (tools/ASSUMPTIONS.md D27).
@@ -242,6 +242,8 @@ e2e_console() {
 	r ~ /^XFAIL\(#[0-9]+\) [A-Za-z0-9_-]+ / { c["xfail"]++; next }
 	r ~ /^XPASS [A-Za-z0-9_-]+ expected to fail \(#[0-9]+\) but passed$/ { c["xpass"]++; next }
 	r ~ /^BLOCKED [A-Za-z0-9_-]+ after [A-Za-z0-9_-]+$/ { c["blocked"]++; next }
+	# A note names its step and carries lower-case words and counts only; it is no step (#2170).
+	r ~ /^NOTE [A-Za-z0-9_-]+ [a-z0-9=-]+( [a-z0-9=-]+)*$/ { next }
 	r ~ /^DONE pass=[0-9]+ fail=[0-9]+ xfail=[0-9]+ xpass=[0-9]+ blocked=[0-9]+$/ {
 		ndone++
 		done = "agentos-e2e: " r

@@ -1320,6 +1320,11 @@ TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"
 # makes the empty stores (credstore_violations refuses anything in them); and four relative links
 # whose ".." is the link's own parent (debian.conf, legacy.conf, systemd-resolve.conf; CI build of
 # #1543 at 14cb555). Nothing else is exempt.
+# #2174: the tmpfiles.d types and modifiers tmpfiles_makers weighs by their mode, user and group
+# fields, which is all they can grant a step (x, X, r and R grant nothing; L, C, a and A have their own
+# texts). Any other type or modifier counts as making the step writable by someone other than root.
+TMPFILES_STEP_TYPES = frozenset("fwdDevqQzZxXrR")
+TMPFILES_STEP_MODIFIERS = frozenset("+!-~$")
 TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L /var/run - - - - /run",
                   "L+ /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
                   "L+ /etc/mtab - - - - ../proc/self/mounts",
@@ -1544,6 +1549,7 @@ def tmpfiles_link_refusal(root, path, to):
 def tmpfiles_makers(root):
     """#1803, #1829: (file, line number, (paths, what, compose)) for each tmpfiles.d line that makes a
     path a link or a copy (C, whatever its source: the tree check never chases what the copy holds),
+    is of a type or modifier off TMPFILES_STEP_TYPES and TMPFILES_STEP_MODIFIERS (#2174),
     or makes it, or may make it, for a user other than root to write: PATHS are the glob components it
     may name (as written, with the /var/run rewrite, and through the image's links), WHAT says how.
     COMPOSE is None, or (recursive,) for a line whose mode gives group write and that names no group
@@ -1561,6 +1567,11 @@ def tmpfiles_makers(root):
             what = "a copy of %s" % (arg.strip() if arg.strip() not in ("", "-") else "its factory default")
         elif typ[:1] in ("a", "A"):
             what = "with a POSIX ACL"
+        elif typ[:1] not in TMPFILES_STEP_TYPES or not set(typ[1:]) <= TMPFILES_STEP_MODIFIERS:
+            # #2174: an allowlist, not a denylist. t and T set any xattr, system.posix_acl_* included;
+            # h, H, p, c, b, a type systemd adds later, = (replace a path of another type) and ^ (content
+            # from a credential, not the tree) are not known to leave the step root-only.
+            what = "type %s (off the step check's allowlist, #2174)" % typ
         elif m != "-" and not re.fullmatch(r"[0-7]{1,4}", m):
             what = "with a mode it cannot parse (%s)" % mode
         elif user.lstrip(":") not in ("-", "", "root", "0") or group.lstrip(":") not in ("-", "", "root", "0") \
