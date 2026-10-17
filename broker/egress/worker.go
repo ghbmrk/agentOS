@@ -132,10 +132,11 @@ func Codex() PlanRoute {
 		},
 		ToolTypes: []string{"namespace", "function", "custom"},
 		// The CLI's request: #809 saw model, input, tool_choice, include
-		// and stream; the rest are the fields the CLI's request type sets.
+		// and stream, and the box image's guest-task saw client_metadata
+		// (#1701); the rest are the fields the CLI's request type sets.
 		BodyKeys: []string{
 			"model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls",
-			"reasoning", "store", "stream", "include", "prompt_cache_key", "text",
+			"reasoning", "store", "stream", "include", "prompt_cache_key", "text", "client_metadata",
 		},
 		InputTypes: []string{
 			"message", "reasoning", "function_call", "function_call_output",
