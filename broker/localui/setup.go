@@ -829,7 +829,7 @@ func (s *Server) OfferText(from, text string) (reply string, handled bool) {
 	if phone == "" && !byCard {
 		u.wrong = append(u.wrong, now)
 		u.mu.Unlock()
-		return "That pairing code did not match. Check the setup page.", true
+		return "", true
 	}
 	var claim string
 	if byCard {
