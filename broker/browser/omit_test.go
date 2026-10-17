@@ -192,7 +192,7 @@ func TestCRED4RefOnlyInAttributePosition(t *testing.T) {
 	if refs["e4"] || !refs[noRef] {
 		t.Fatalf("refs = %v", refs)
 	}
-	got := omitValues(snap, refs, map[string]bool{"e4": true})
+	got := omitValues(snap, refs, map[string]bool{"e4": true}, []string{"x"})
 	want := "- textbox \"Ed\" [ref=e4]: x\n- textbox \"K\": " + omittedMark
 	if got != want {
 		t.Fatalf("got %q", got)

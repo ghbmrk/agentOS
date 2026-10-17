@@ -767,3 +767,49 @@ func TestGateRefInValueCannotBorrowTypedRef(t *testing.T) {
 		t.Fatalf("got %q", r.Snapshot)
 	}
 }
+
+// PR #2273 reviews (combined 6240595360, security 6240595981): every echo
+// of text the agent put on a page is handled the same way whether or not
+// it is a password value, so a guess's snapshot never depends on whether
+// it was right. Each layout is run with a wrong and a right guess.
+func TestGateGuessEchoIsNoOracle(t *testing.T) {
+	const search, account = "https://shop.example.test/search", "https://shop.example.test/account"
+	pw := "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	cases := []struct {
+		name, verb, req, url string
+		snap                 func(g string) string
+		withheld             bool
+	}{
+		{"heading after type", "type", `"ref":"e3","text":"%s"`, search,
+			func(g string) string {
+				return "- textbox \"Q\" [ref=e3]: " + g + "\n- heading \"Results for " + g + "\" [level=1]" + pw
+			}, true},
+		{"cleared field on the next page", "type", `"ref":"e3","text":"%s"`, account,
+			func(g string) string {
+				return "- textbox \"Q\" [ref=e3]\n- heading \"Results for " + g + "\" [level=1]" + pw
+			}, true},
+		{"shared row", "type", `"ref":"e3","text":"%s"`, account,
+			func(g string) string {
+				return "- row \"" + g + " " + pwCanary + "\" [ref=e4]:\n  - textbox \"Code\" [ref=e5]: " + pwCanary
+			}, false},
+		{"navigate query", "navigate", `"url":"` + search + `?q=%s"`, search,
+			func(g string) string { return "- heading \"Results for " + g + "\" [level=1]" + pw }, true},
+	}
+	for _, c := range cases {
+		var seen []string
+		for _, guess := range []string{"wrongGuess1", pwCanary} {
+			reply := map[string]any{"ok": true, "url": c.url, "snapshot": c.snap(guess)}
+			h := newHarness(t, map[string]any{c.verb: reply, "snapshot": reply}, "", 0)
+			h.g.refs["e3"] = link{}
+			h.do(t, `{"v":0,"verb":"`+c.verb+`",`+fmt.Sprintf(c.req, guess)+`}`)
+			r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+			if strings.Contains(r.Snapshot, pwCanary) || (r.Snapshot == withheldMark) != c.withheld {
+				t.Fatalf("%s, guess %q: got %q", c.name, guess, r.Snapshot)
+			}
+			seen = append(seen, r.Snapshot)
+		}
+		if seen[0] != seen[1] {
+			t.Fatalf("%s: right and wrong guesses differ:\n%q\n%q", c.name, seen[0], seen[1])
+		}
+	}
+}

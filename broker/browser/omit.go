@@ -357,14 +357,20 @@ func ancestors(lines []string, i int) []int {
 // snapshot: replacing it would tell the agent which text equals the
 // value. refs are password fields (CRED-4, #2245).
 func OmitValues(snapshot string, refs map[string]bool) string {
-	return omitValues(snapshot, refs, nil)
+	return omitValues(snapshot, refs, nil, nil)
 }
 
 // omitValues is OmitValues, except that the value of a field whose ref is
 // in keep, on its line and in its children, is never scrubbed nor counted
 // as a copy: it is the text the agent typed there, and treating it
-// differently when it matches a password would answer a guess (G10).
-func omitValues(snapshot string, refs, keep map[string]bool) string {
+// differently when it matches a password would answer a guess (G10). said
+// is the text the agent put on pages (typed, or in a URL it navigated to).
+// Once any field is omitted, the page's echo of it is handled whether or
+// not it matches a value, for the same reason: on an omitted field's own
+// lines and ancestors it is scrubbed like the field's value, and a copy of
+// minScrub or more characters on any other line, a kept field's value
+// aside, withholds the snapshot (#2245, PR #2273 reviews).
+func omitValues(snapshot string, refs, keep map[string]bool, said []string) string {
 	lines := strings.Split(snapshot, "\n")
 	own := keptValues(lines, keep)
 	type field struct {
@@ -397,10 +403,26 @@ func omitValues(snapshot string, refs, keep map[string]bool) string {
 		}
 		return e
 	}
+	if len(fields) == 0 {
+		return strings.Join(lines, "\n")
+	}
+	near := map[int]bool{}
+	for _, f := range fields {
+		for _, j := range f.lines {
+			near[j] = true
+		}
+	}
+	if far := valueForms(said, minScrub); len(far) > 0 {
+		for j := range lines {
+			if !near[j] && containsForm(lines[j][:end(j)], far) {
+				return withheldMark
+			}
+		}
+	}
 	scrub := map[int][]string{}
 	for _, f := range fields {
 		near := map[int]bool{}
-		forms := valueForms(f.values, 1)
+		forms := valueForms(append(f.values, said...), 1)
 		for _, j := range f.lines {
 			near[j] = true
 			scrub[j] = append(scrub[j], forms...)

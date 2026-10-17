@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,7 +88,10 @@ type Gate struct {
 	refs map[string]link
 	// typed is what the agent typed, per ref, on the page the driver
 	// named in its reply (G10).
-	typed     map[string]typedField
+	typed map[string]typedField
+	// said is the text the agent put on pages, by type or in a URL it
+	// navigated to, kept on every page (G10, #2245).
+	said      []string
 	holds     map[string]Hold
 	holdOrder []string
 }
@@ -224,6 +228,12 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 			return g.hold(req, l)
 		}
 	}
+	switch req.Verb {
+	case "type":
+		g.say(req.Text)
+	case "navigate":
+		g.say(urlWords(req.URL)...)
+	}
 	res := g.send(ctx, req)
 	if req.Verb == "type" && res.OK {
 		g.remember(req, res.URL)
@@ -235,6 +245,33 @@ type typedField struct{ text, url string }
 
 // maxTyped bounds what the gate remembers of the agent's typing.
 const maxTyped = 64
+
+// say records text the agent put on pages, before the reply that can
+// echo it is filtered.
+func (g *Gate) say(texts ...string) {
+	for _, t := range texts {
+		if len(g.said) >= maxTyped {
+			g.said = nil
+		}
+		g.said = append(g.said, t)
+	}
+}
+
+// urlWords is the text a page most often echoes from a URL the agent
+// chose: its query values and fragment, decoded. Path segments and query
+// keys name pages ("account", "login") and would withhold most of them,
+// so they are left out (G10).
+func urlWords(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var w []string
+	for _, vs := range u.Query() {
+		w = append(w, vs...)
+	}
+	return append(w, u.Fragment)
+}
 
 func (g *Gate) remember(req Request, url string) {
 	if g.typed == nil || len(g.typed) >= maxTyped {
@@ -263,7 +300,7 @@ func (g *Gate) omit(snapshot, url string) (string, int) {
 	for ref := range typed {
 		keep[ref] = !refs[ref]
 	}
-	return omitValues(snapshot, refs, keep), len(refs)
+	return omitValues(snapshot, refs, keep, g.said), len(refs)
 }
 
 // send forwards a request the gate has allowed.
