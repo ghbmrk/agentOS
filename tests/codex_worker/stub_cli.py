@@ -6,7 +6,8 @@
 # /tmp and /var/tmp, and prints one JSON object. Last it starts a tool that keeps writing to the
 # workspace, kills the wrapper and reports whether the tool outlived it. It marks each phase on
 # stderr, so a test that stalls can say where (#1542).
-# argv: forwarder port, synthetic canary.
+# argv: forwarder port, synthetic canary, and optionally --skip-outlives, which skips the last
+# phase and leaves the outlives verdict out, for a run that asks only about descriptors.
 import json
 import os
 import pathlib
@@ -63,7 +64,11 @@ def outlives_wrapper():
 
 
 def main():
-    port, canary = int(sys.argv[1]), sys.argv[2]
+    port, canary, *flags = sys.argv[1:]
+    port = int(port)
+    if flags not in ([], ["--skip-outlives"]):
+        print(f"stub_cli: unknown flags {flags}", file=sys.stderr)
+        sys.exit(2)
     phase("started")
     try:
         auth = canary in pathlib.Path(AUTH).read_text()
@@ -105,7 +110,10 @@ def main():
     tool["canary_anywhere"] = canary in r.stdout or canary in r.stderr
     tool.pop("environ", None)
     tool.pop("auth_text", None)
-    tool["outlives"] = outlives_wrapper()
+    if flags:
+        phase("outlives skipped")
+    else:
+        tool["outlives"] = outlives_wrapper()
     print(json.dumps({"cli": cli, "tool": tool}))
 
 
