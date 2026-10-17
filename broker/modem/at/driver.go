@@ -84,7 +84,7 @@ const GarbledText = "Message garbled, please resend."
 // PictureText is the reply to a picture or file the owner texts to the box
 // (an MMS notice), at most once an hour. Nothing fetches the picture yet;
 // when the photo-input path ships, this names where to send it instead.
-const PictureText = "This box can't open pictures or files sent by text yet. Please describe it in words."
+const PictureText = "I can't open pictures or files sent by text yet. Please describe it in words."
 
 // Errors.
 var (

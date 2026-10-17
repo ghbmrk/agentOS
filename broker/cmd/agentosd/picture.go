@@ -28,6 +28,6 @@ func (p *pictureJournal) tell(owner bool) {
 		n.From = journal.PictureOwner
 	}
 	if err := (*r)(n); err != nil {
-		log.Printf("a picture texted to the box was not journaled: %v", err)
+		log.Printf("picture notice not journaled: %v", err)
 	}
 }
