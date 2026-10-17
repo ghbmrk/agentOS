@@ -156,6 +156,18 @@ READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "sys
                                                 ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
                                                 for d in ("", ".d"))
 
+# #1556, #2176: the channels that run code as root at boot outside unit Exec lines, each held to
+# exec.allow (below): (directory below each of EXEC_TOPS, the suffix its reader reads, whether kmod
+# lists it). modprobe.d's install and remove lines run a root shell when a module loads; sysctl.d's
+# kernel.modprobe and kernel.hotplug name the kernel's usermode helpers; binfmt.d registers
+# interpreters; system-shutdown and system-sleep hold programs systemd runs as root (systemd 257 runs
+# them only from /usr/lib/systemd, so the other tops are a superset). Every file is hashed whole, so
+# no key or line is refused by name.
+EXEC_CHANNELS = (("udev/rules.d", ".rules", False), ("systemd/system-generators", "", False),
+                 ("systemd/system-environment-generators", "", False), ("modules-load.d", ".conf", False),
+                 ("modprobe.d", ".conf", True), ("sysctl.d", ".conf", False), ("binfmt.d", ".conf", False),
+                 ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False))
+EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
 
 _MAKERS = None  # #1829: tmpfiles_makers and tmpfiles_removers by root while violations() runs, else None
 
@@ -1312,9 +1324,9 @@ CREDSTORE_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/fi
 # seeing it. This is a list of refused paths, so it cannot see what a chain of lines builds; the
 # allowlist above is what holds the line set fixed.
 TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
-                    ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",)) + tuple(
-    tuple(("%s/%s" % (top, n)).split("/")) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
-    for n in READ_CONF + ("modprobe.d", "systemd/system-generators", "credstore", "credstore.encrypted"))
+                    ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",), ("etc", "modules")) + tuple(
+    tuple(("%s/%s" % (top, n)).split("/")) for top in EXEC_TOPS + ("run",)
+    for n in READ_CONF + tuple(d for d, _, _ in EXEC_CHANNELS if d not in READ_CONF) + ("credstore", "credstore.encrypted"))
 # Debian's own lines that touch one, as whole lines with runs of blanks collapsed: /var/run is
 # /run, and /etc/mtab names the mount table, a file (debian.conf, var.conf); trixie's credstore.conf
 # makes the empty stores (credstore_violations refuses anything in them); and four relative links
@@ -1743,10 +1755,6 @@ TMPFILES_ALLOW_HEADER = """\
 EXEC_ALLOW = "exec.allow"
 EXEC_ALLOW_REPO = "image/mkosi/" + EXEC_ALLOW
 EXEC_REGENERATE = "mkosi.finalize --exec-allowlist ROOT"
-# (directory below each of etc, usr/local/lib, usr/lib and lib, the suffix udevd, systemd or kmod reads)
-EXEC_CHANNELS = (("udev/rules.d", ".rules"), ("systemd/system-generators", ""),
-                 ("systemd/system-environment-generators", ""), ("modules-load.d", ".conf"))
-EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
 # Links the stock tree ships that are read through: the link's path, its exact target, and the
 # in-image file whose content is hashed in its place. Any other link is refused (Conf.content).
 EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules")}
@@ -1768,9 +1776,9 @@ def exec_entries(root):
     winner-only list could miss the one that runs. A directory is resolved inside the image (lib is
     usr/lib's link), and each file is listed once under its in-image path."""
     root, seen = str(root), set()
-    for d, suffix in EXEC_CHANNELS:
+    for d, suffix, kmod in EXEC_CHANNELS:
         for top in EXEC_TOPS:
-            for f in conf_files(root, ("%s/%s" % (top, d),), suffix):
+            for f in conf_files(root, ("%s/%s" % (top, d),), suffix, kmod):
                 if f.rel in seen:
                     continue
                 seen.add(f.rel)
@@ -1791,10 +1799,10 @@ def exec_allow_violations(root, allowed=None):
     unlisted file ends in the entry that would allow it, for review."""
     allowed = exec_allowed() if allowed is None else allowed
     if allowed is None:
-        return ["%s: missing; every udev rules file, generator and modules-load.d file must be on it (#1556)"
-                % EXEC_ALLOW]
+        return ["%s: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, modprobe.d, "
+                "sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)" % EXEC_ALLOW]
     out = []
-    for d, _ in EXEC_CHANNELS:
+    for d, _, _ in EXEC_CHANNELS:
         try:
             present = tree_lstat(root, "run/" + d) is not None
         except OSError:
@@ -1819,7 +1827,8 @@ def exec_allowlist_text(root):
 
 EXEC_ALLOW_HEADER = """\
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
-# (#1556): udev rules, system and environment generators, and modules-load.d, in etc, usr/local/lib,
+# (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
+# sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
