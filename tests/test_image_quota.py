@@ -42,9 +42,9 @@ finalize = load("image_check_quota", MK / "mkosi.finalize")
 # An ExecStart word systemd passes through unchanged: no quote, backslash, specifier (%) or bare $, so
 # str.split() is systemd's word splitting. ${NAME} is allowed only where VAR_SLOTS says.
 WORD = re.compile(r"(?:[A-Za-z0-9/_.,=:@+-]|\$\{[A-Za-z_][A-Za-z0-9_]*\})+")
-# Flags whose value may be a variable: string flags (broker/cmd/agentosd/main.go:385 for -owner),
-# which take the next word whatever it holds. After a bool flag a variable would be read as flags.
-VAR_SLOTS = {"-owner"}
+# agentosd's bool flags, which take no next word (Go's flag package); every other flag does.
+BOOLS = set(re.findall(r'flag\.Bool(?:Var)?\((?:&[\w.]+, )?"([^"]+)"',
+                       (ROOT / "broker/cmd/agentosd/main.go").read_text()))
 AGENTOSD = "/usr/lib/agentos/agentosd"
 
 
@@ -56,6 +56,29 @@ def stub(d, name, body):
 
 def off_uses(text):
     return OFF.findall(text)
+
+
+def go_flags(args):
+    """Why Go's flag package, reading agentosd's ARGS, might not reach the last pair as the unit means
+    it (empty when it does). Every word in a flag position is a single-dash flag name, so no `--`,
+    positional or variable stops parsing or turns into a flag; a non-bool flag takes the next word;
+    a variable is only -owner's value as the first flag, a slot no earlier word can shift (Security
+    #2110 re-sign 2)."""
+    out, i = [], 0
+    while i < len(args):
+        w = args[i]
+        if not re.fullmatch(r"-[a-z][a-z0-9-]*", w):
+            return out + ["word %d %r is not a flag name; Go stops or reads it as a flag" % (i, w)]
+        if w[1:] in BOOLS:
+            i += 1
+            continue
+        if i + 1 == len(args):
+            return out + ["%s has no value" % w]
+        v = args[i + 1]
+        if "$" in v and not (i == 0 and w == "-owner"):
+            out.append("%s %s: a variable only as -owner's value, first" % (w, v))
+        i += 2
+    return out
 
 
 class NoQuotaOffTest(unittest.TestCase):
@@ -102,9 +125,7 @@ class NoQuotaOffTest(unittest.TestCase):
         self.assertEqual(argv[-2:], ["-disk-quota", "on"], argv)
         self.assertEqual(sum("disk-quota" in a for a in argv), 1, argv)
         self.assertIn(AGENTOSD, argv)
-        first = argv.index(AGENTOSD) + 1
-        stray = [w for i, w in enumerate(argv) if "$" in w and not (i > first and argv[i - 1] in VAR_SLOTS)]
-        self.assertEqual(stray, [], argv)
+        self.assertEqual(go_flags(argv[argv.index(AGENTOSD) + 1:]), [], argv)
 
     def test_the_unit_passes_quotas_on_last_and_once(self):
         self.assert_quota_last_and_once(UNIT.read_text())
@@ -125,7 +146,12 @@ class NoQuotaOffTest(unittest.TestCase):
                        "-worker-image openclaw \\\n        \"-x y\" -disk-quota on\n",
                        "-worker-image openclaw \\\n        -modem-bridge ${X} x -disk-quota on\n",
                        "-worker-image openclaw \\\n        %i -disk-quota on\n",
-                       "-worker-image openclaw \\\n        $X x -disk-quota on\n"):
+                       "-worker-image openclaw \\\n        $X x -disk-quota on\n",
+                       # Security #2110 re-sign 2: -owner as another flag's value, then -- or x.
+                       "-worker-image openclaw \\\n        -worker-image -owner ${X} -- -disk-quota on\n",
+                       "-worker-image openclaw \\\n        -worker-image -owner ${X} x -disk-quota on\n",
+                       "-worker-image openclaw \\\n        -owner-message -owner ${X} -disk-quota on\n",
+                       "-worker-image openclaw \\\n        -disk-quota\n"):
             with self.subTest(mutant=mutant):
                 with self.assertRaises(AssertionError):
                     self.assert_quota_last_and_once(text.replace(last, mutant))
