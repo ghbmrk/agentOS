@@ -78,6 +78,7 @@ allow broker/cmd/agentos-egress/
 allow broker/cmd/agentos-guest-bridge/
 allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/
+allow broker/cmd/agentos-infer/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
 allow broker/cmd/agentos-netjoin/
@@ -118,6 +119,7 @@ allow broker/guest/
 allow broker/guesterr/
 allow broker/holder/
 allow broker/hostdisk/
+allow broker/infer/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
