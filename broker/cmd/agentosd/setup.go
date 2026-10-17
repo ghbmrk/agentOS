@@ -285,7 +285,7 @@ func (e enroller) Providers() ([]localapi.SetupProvider, error) {
 	}
 	out := make([]localapi.SetupProvider, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: !p.Plan, DeviceCode: p.Plan, Connected: p.Connected, PrivateOK: p.PrivateOK})
+		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: !p.Plan, DeviceCode: p.Plan, Connected: p.Connected, PrivateOK: p.PrivateOK, PrivateByConfig: p.PrivateByConfig})
 	}
 	return out, nil
 }
