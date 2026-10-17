@@ -1,6 +1,6 @@
 package vm
 
-// REQ: CAP-3, REV-4, REV-5
+// REQ: CAP-3, REV-4, REV-5, FORGET-FOLDS-1
 
 import (
 	"errors"
@@ -237,5 +237,34 @@ func TestCAP3ForgetSinceReopensServices(t *testing.T) {
 	must(t, e.m.ForgetSince(bg, mc.Lineage, since))
 	if len(svc.opened) != before+1 || svc.opened[len(svc.opened)-1] != "m" || !svc.open["m"] {
 		t.Fatalf("services opened %v (before the reset: %d)", svc.opened, before)
+	}
+}
+
+// FORGET-FOLDS-1 (CAP-3): ForgetSince tells the machine's services it was
+// reset, so results held for the guest go with the memory they came from.
+// Only the machines of the forgotten lineage are told.
+func TestForgetSinceResetsTheMachinesServices(t *testing.T) {
+	e := newEnv(t, 8192)
+	svc := &recServices{root: t.TempDir(), open: map[string]bool{}}
+	e.cfg.Services = svc
+	e.open()
+	e.create("m", admission.Accepted, 500)
+	e.create("other", admission.Accepted, 500)
+	_, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	time.Sleep(2 * time.Millisecond)
+	since := time.Now().UTC()
+	mc, _ := e.m.Get("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, since))
+	if len(svc.resets) != 1 || svc.resets[0] != "m" {
+		t.Fatalf("services reset %v, want only m", svc.resets)
+	}
+	// A reset that fails still drops what the guest was handed.
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	if err := e.m.ForgetSince(bg, mc.Lineage, since); err == nil {
+		t.Fatal("reset refused but ForgetSince succeeded")
+	}
+	if len(svc.resets) != 2 || svc.resets[1] != "m" {
+		t.Fatalf("services reset %v after a failed reset, want m twice", svc.resets)
 	}
 }

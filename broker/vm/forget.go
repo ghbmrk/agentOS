@@ -88,6 +88,11 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		return nil
 	}
 	defer mc.mu.Unlock()
+	// Before the reset can fail: what the guest was handed is forgotten
+	// even when its machine cannot be put back.
+	if r, ok := m.servicesFor(mc.ID).(Resetter); ok {
+		r.Reset(mc.ID)
+	}
 	target := m.restoreTarget(mc, since)
 	if target != nil && target.Label > mc.Label {
 		// Saved before the target's content reaches the layer (LABEL-durable).
