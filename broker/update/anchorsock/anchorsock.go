@@ -29,6 +29,16 @@ const (
 	AnchorRaisePath = "/update-anchor/raise"
 )
 
+// AnswerHeader names which conflict a 409 is (SR3-6-f5b): AnswerMissing,
+// a counter that was defined and is gone (update.ErrAnchorMissing), or
+// AnswerElsewhere, a counter on a chip this PC lacks
+// (update.ErrAnchorElsewhere). A 409 without it is a plain error.
+const (
+	AnswerHeader    = "Anchor-Answer"
+	AnswerMissing   = "missing"
+	AnswerElsewhere = "elsewhere"
+)
+
 // AnchorState is the answer to both requests. Anchored false means this
 // PC has no TPM (update.ErrNoAnchor); a counter that was defined and is gone is
 // an error status, never this.
@@ -78,7 +88,20 @@ func (a *SocketAnchor) do(method, path string) (AnchorState, error) {
 		return AnchorState{}, fmt.Errorf("update: anchor: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return AnchorState{}, fmt.Errorf("update: anchor: %s: %s", resp.Status, bytesTrim(body))
+		err := fmt.Errorf("update: anchor: %s: %s", resp.Status, bytesTrim(body))
+		var typed error
+		switch {
+		case resp.StatusCode == http.StatusServiceUnavailable:
+			typed = update.ErrAnchorLocked
+		case resp.StatusCode == http.StatusConflict && resp.Header.Get(AnswerHeader) == AnswerMissing:
+			typed = update.ErrAnchorMissing
+		case resp.StatusCode == http.StatusConflict && resp.Header.Get(AnswerHeader) == AnswerElsewhere:
+			typed = update.ErrAnchorElsewhere
+		}
+		if typed != nil {
+			return AnchorState{}, fmt.Errorf("%w (%w)", err, typed)
+		}
+		return AnchorState{}, err
 	}
 	var st AnchorState
 	if err := json.Unmarshal(body, &st); err != nil {

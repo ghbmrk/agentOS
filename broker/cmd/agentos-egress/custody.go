@@ -132,6 +132,12 @@ const noteChangeUnfinished = "Your passphrase change did not finish, so your old
 // ruling on #45, B3). Wording fixed by that ruling.
 const noteCounterReset = "This PC's copy check was reset. If you cleared this PC's security chip, that's expected: unlock with your card to trust it again. If you didn't, an older copy of your drive may have been opened."
 
+// noteAnchorElsewhere is the owner's notice, once, when the vault records
+// an update counter and this PC has no TPM to read it (SR3-6-f5c): the
+// counter is intact and trust answers errNoTPM here, so the steps are a
+// restart (a chip not found at start) and the PC the drive was set up on.
+const noteAnchorElsewhere = "This PC has no security chip the box can use, so it can't check updates. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
+
 // noteTPMSilent is the owner's notice when this PC's TPM does not answer
 // the rollback check; the detail goes to the log only (UX-45-3).
 const noteTPMSilent = "This PC's security chip didn't respond, so I stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
@@ -301,6 +307,9 @@ type custody struct {
 	// counterReset: the owner was told this PC's rollback counter is
 	// gone (noteCounterReset); cleared when the PC is trusted again.
 	counterReset bool
+	// anchorElsewhere: the owner was told the update counter is on a chip
+	// this PC lacks (noteAnchorElsewhere); cleared with counterReset.
+	anchorElsewhere bool
 	// bootChanged: this PC is trusted but booted a path the box never
 	// approved; bootUpdated: and it runs another release than last time.
 	// The fallback unlock may then keep the PC trusted (confirmKeep).
@@ -852,7 +861,10 @@ func (c *custody) updateAnchorLocked(raise bool) (bool, uint64, error) {
 	sec, ok := c.v.Secret(UpdateAnchorName)
 	if c.host == nil {
 		if ok {
-			c.noteCounterResetLocked()
+			if !c.anchorElsewhere {
+				c.anchorElsewhere = true
+				c.notify(noteAnchorElsewhere)
+			}
 			return false, 0, errUpdateAnchorElsewhere
 		}
 		return false, 0, nil
@@ -1448,7 +1460,7 @@ func (c *custody) trustThis(v *vault.Vault, pin string) (string, error) {
 		return "", errHostNotSaved
 	}
 	c.mu.Lock()
-	c.counterReset = false
+	c.counterReset, c.anchorElsewhere = false, false
 	c.mu.Unlock()
 	name, err := c.host.enroll(v, pin)
 	if errors.Is(err, tpmseal.ErrLockoutOwned) {
