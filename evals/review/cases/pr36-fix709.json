@@ -1,0 +1,262 @@
+{
+ "diff": "diff --git a/broker/route/ASSUMPTIONS.md b/broker/route/ASSUMPTIONS.md\nindex c44bf28ba..e93462ca2 100644\n--- a/broker/route/ASSUMPTIONS.md\n+++ b/broker/route/ASSUMPTIONS.md\n@@ -20,6 +20,6 @@ spec, or a gap left for a later package, that a reviewer may want to change.\n | R11 | Decisions go to a required `Audit` function and carry no request or response content. Like the proxy's events (P1-3 E6), they are not journal records yet. | ADP-10 | Wire with the proxy's auditor. |\n | R12 | The router holds no credential and opens no connection: it calls the proxy's handler in process through a pipe. A test pins this (no vault, egress, net, or TLS imports; no HTTP client). | CRED-1, CRED-5 | \u2014 |\n | R13 | Fixtures are written from the providers' documented shapes (Anthropic Messages `2023-06-01`, OpenAI Chat Completions), not captured: the build sessions have no keys and no route to the APIs. A live capture on the box should replace them (`testdata/README.md`). | \u2014 | Replace with captures. |\n-| R14 | Usage: every served call's `Decision` carries the provider-reported usage (input, output, cache reads, cache writes), streamed or not and whether or not the guest asked for it: OpenAI streams always request `include_usage` (the usage-only chunk is dropped again if the guest did not ask), and Anthropic usage is read from `message_start` and `message_delta`. Output is capped: every call goes upstream with `max_tokens`/`max_completion_tokens` at or below the owner's ceiling (`MaxOutputTokens`, default 32,000), so the OP-8 meter can reserve input plus that ceiling before the call. Arbitrator ruling: reported usage on a complete response is authoritative; when `Reported` is false or `Complete` is false (a cut-off stream), the meter falls back to `OutputChars` (content and tool-argument characters the provider produced), which is also the floor for a cut-off stream. The router hands each served call's usage to its caller through the request context (`WithUsage`); the meter settles from it (P1-7). An Anthropic stream is `Complete` only when it reached `message_stop` and `message_delta` reported the output count. A provider answer the router cannot use (unreadable, too large, untranslatable) is reported with its size as `OutputChars`, since it may still be billed. `n` other than 1 never reaches the router: the meter in front of it refuses it. | OP-8 (v0.12), CAP-9 | Tune the default with the budget re-estimate. |\n+| R14 | Usage: every served call's `Decision` carries the provider-reported usage (input, output, cache reads, cache writes), streamed or not and whether or not the guest asked for it: OpenAI streams always request `include_usage` (the usage-only chunk is dropped again if the guest did not ask), and Anthropic usage is read from `message_start` and `message_delta`. Output is capped: every call goes upstream with `max_tokens`/`max_completion_tokens` at or below the owner's ceiling (`MaxOutputTokens`, default 32,000), so the OP-8 meter can reserve input plus that ceiling before the call. Arbitrator ruling: reported usage on a complete response is authoritative; when `Reported` is false or `Complete` is false (a cut-off stream), the meter falls back to `OutputChars` (content and tool-argument characters the provider produced), which is also the floor for a cut-off stream. The router hands each served call's usage to its caller through the request context (`WithUsage`); the meter settles from it (P1-7). Usage is `Reported` only when the provider gave an output count (`output_tokens`, `completion_tokens`); a usage object without one would charge no output, so the meter counts content instead. An Anthropic stream is `Complete` only when it reached `message_stop` and `message_delta` reported the output count. A provider answer the router cannot use (unreadable, too large, untranslatable) is reported with its size as `OutputChars`, since it may still be billed. `n` other than 1 never reaches the router: the meter in front of it refuses it. | OP-8 (v0.12), CAP-9 | Tune the default with the budget re-estimate. |\n | R15 | Prompt caching: Anthropic requests carry four ephemeral cache breakpoints (last tool, end of the system prompt, last two messages), the API's limit. Agent loops resend a growing prefix, and cache reads cost about a tenth of input. Cache reads are reported to the guest as `prompt_tokens_details.cached_tokens`, with prompt tokens including cached ones as in OpenAI's usage. OpenAI caches prefixes automatically. | CAP-9 (cost) | \u2014 |\n | R16 | Redaction (CRED-7) runs in the proxy over provider bytes. A vault value split across two SSE deltas is not one byte run there, so it passes the redactor; this is defense in depth (P1-3 V4), and custody does not rely on it. Running a redactor over the translated text is a later option. | CRED-7 | Inject a `Redactor` if a canary shows the gap matters. |\ndiff --git a/broker/route/anthropic.go b/broker/route/anthropic.go\nindex a27ca581b..eb7cbfdd4 100644\n--- a/broker/route/anthropic.go\n+++ b/broker/route/anthropic.go\n@@ -279,15 +279,20 @@ type aResponse struct {\n }\n \n type aUsage struct {\n-\tInputTokens              int64 `json:\"input_tokens\"`\n-\tOutputTokens             int64 `json:\"output_tokens\"`\n-\tCacheReadInputTokens     int64 `json:\"cache_read_input_tokens\"`\n-\tCacheCreationInputTokens int64 `json:\"cache_creation_input_tokens\"`\n+\tInputTokens              int64  `json:\"input_tokens\"`\n+\tOutputTokens             *int64 `json:\"output_tokens\"` // nil: not reported\n+\tCacheReadInputTokens     int64  `json:\"cache_read_input_tokens\"`\n+\tCacheCreationInputTokens int64  `json:\"cache_creation_input_tokens\"`\n }\n \n+// usage is reported only with an output count: without one the meter\n+// would charge no output, so it counts content instead.\n func (u aUsage) usage() Usage {\n-\treturn Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens,\n-\t\tReported: u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0}\n+\tout := Usage{Input: u.InputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens, Reported: u.OutputTokens != nil}\n+\tif u.OutputTokens != nil {\n+\t\tout.Output = *u.OutputTokens\n+\t}\n+\treturn out\n }\n \n // merge takes the nonzero counts of a later usage report (message_delta\n@@ -297,13 +302,17 @@ func (u *aUsage) merge(o aUsage) {\n \t\tdst *int64\n \t\tsrc int64\n \t}{\n-\t\t{&u.InputTokens, o.InputTokens}, {&u.OutputTokens, o.OutputTokens},\n+\t\t{&u.InputTokens, o.InputTokens},\n \t\t{&u.CacheReadInputTokens, o.CacheReadInputTokens}, {&u.CacheCreationInputTokens, o.CacheCreationInputTokens},\n \t} {\n \t\tif f.src != 0 {\n \t\t\t*f.dst = f.src\n \t\t}\n \t}\n+\tif o.OutputTokens != nil && (u.OutputTokens == nil || *o.OutputTokens != 0) {\n+\t\tn := *o.OutputTokens\n+\t\tu.OutputTokens = &n\n+\t}\n }\n \n func finishReason(stop string) string {\n@@ -505,7 +514,7 @@ func (anthropic) Stream(dst io.Writer, flush func(), src io.Reader, class string\n \t\tcase \"message_delta\":\n \t\t\tif ev.Usage != nil {\n \t\t\t\tusage.merge(*ev.Usage)\n-\t\t\t\tfinal = final || ev.Usage.OutputTokens > 0\n+\t\t\t\tfinal = final || (ev.Usage.OutputTokens != nil && *ev.Usage.OutputTokens > 0)\n \t\t\t}\n \t\t\tif ev.Delta != nil && ev.Delta.StopReason != \"\" {\n \t\t\t\terr = chunk(map[string]any{}, finishReason(ev.Delta.StopReason))\ndiff --git a/broker/route/anthropic_test.go b/broker/route/anthropic_test.go\nindex ce14494ef..59bdd3998 100644\n--- a/broker/route/anthropic_test.go\n+++ b/broker/route/anthropic_test.go\n@@ -368,3 +368,20 @@ func TestTypedAllowLists(t *testing.T) {\n \t\tt.Fatalf(\"re-encoded %s\", b)\n \t}\n }\n+\n+// A response whose usage has no output count is not reported usage: the\n+// meter then charges the content it can count instead of zero output.\n+func TestUsageWithoutOutputCountIsNotReported(t *testing.T) {\n+\t_, u, err := Anthropic().Response([]byte(`{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"usage\":{\"input_tokens\":12}}`), \"default\")\n+\tif err != nil || u.Reported || u.OutputChars != 5 {\n+\t\tt.Fatalf(\"anthropic: %+v %v\", u, err)\n+\t}\n+\t_, u, err = OpenAI().Response([]byte(`{\"choices\":[{\"message\":{\"content\":\"hello\"}}],\"usage\":{\"prompt_tokens\":12}}`), \"default\")\n+\tif err != nil || u.Reported || u.OutputChars != 5 {\n+\t\tt.Fatalf(\"openai: %+v %v\", u, err)\n+\t}\n+\t_, u, _ = OpenAI().Response([]byte(`{\"choices\":[{\"message\":{\"content\":\"hello\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":0}}`), \"default\")\n+\tif !u.Reported {\n+\t\tt.Fatalf(\"an explicit zero output count is a report: %+v\", u)\n+\t}\n+}\ndiff --git a/broker/route/chat.go b/broker/route/chat.go\nindex c66189f81..bf61a6e92 100644\n--- a/broker/route/chat.go\n+++ b/broker/route/chat.go\n@@ -297,13 +297,18 @@ func (u Usage) openAI() map[string]any {\n \n // oaUsage is a chat-completions usage object as OpenAI reports it.\n type oaUsage struct {\n-\tPromptTokens        int64 `json:\"prompt_tokens\"`\n-\tCompletionTokens    int64 `json:\"completion_tokens\"`\n+\tPromptTokens        int64  `json:\"prompt_tokens\"`\n+\tCompletionTokens    *int64 `json:\"completion_tokens\"` // nil: not reported\n \tPromptTokensDetails struct {\n \t\tCachedTokens int64 `json:\"cached_tokens\"`\n \t} `json:\"prompt_tokens_details\"`\n }\n \n+// usage is reported only with an output count (see aUsage.usage).\n func (o oaUsage) usage() Usage {\n-\treturn Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, Output: o.CompletionTokens, CacheRead: o.PromptTokensDetails.CachedTokens, Reported: true}\n+\tu := Usage{Input: o.PromptTokens - o.PromptTokensDetails.CachedTokens, CacheRead: o.PromptTokensDetails.CachedTokens, Reported: o.CompletionTokens != nil}\n+\tif o.CompletionTokens != nil {\n+\t\tu.Output = *o.CompletionTokens\n+\t}\n+\treturn u\n }\n",
+ "expected": {
+  "BOARD.md": [
+   [
+    139,
+    139
+   ]
+  ],
+  "LATER.md": [
+   [
+    690,
+    690
+   ]
+  ],
+  "broker/cmd/agentos-guest-bridge/main.go": [
+   [
+    160,
+    160
+   ],
+   [
+    195,
+    196
+   ],
+   [
+    198,
+    204
+   ],
+   [
+    206,
+    206
+   ],
+   [
+    208,
+    208
+   ]
+  ],
+  "broker/cmd/agentos-guest-bridge/owner_test.go": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/cmd/agentosd/agent.go": [
+   [
+    23,
+    23
+   ]
+  ],
+  "broker/cmd/agentosd/evidence.go": [
+   [
+    17,
+    17
+   ],
+   [
+    77,
+    77
+   ],
+   [
+    90,
+    93
+   ],
+   [
+    95,
+    95
+   ],
+   [
+    142,
+    142
+   ],
+   [
+    152,
+    158
+   ],
+   [
+    160,
+    160
+   ],
+   [
+    162,
+    162
+   ],
+   [
+    168,
+    169
+   ],
+   [
+    522,
+    522
+   ],
+   [
+    523,
+    523
+   ]
+  ],
+  "broker/cmd/agentosd/evidence_test.go": [
+   [
+    334,
+    353
+   ]
+  ],
+  "broker/cmd/agentosd/main.go": [
+   [
+    221,
+    221
+   ],
+   [
+    224,
+    224
+   ],
+   [
+    798,
+    798
+   ],
+   [
+    1153,
+    1157
+   ]
+  ],
+  "broker/cmd/agentosd/outbox_test.go": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/guest/ASSUMPTIONS.md": [
+   [
+    14,
+    14
+   ],
+   [
+    28,
+    28
+   ]
+  ],
+  "broker/guest/outbox_test.go": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/guest/owner.go": [
+   [
+    5,
+    5
+   ],
+   [
+    26,
+    26
+   ],
+   [
+    44,
+    44
+   ],
+   [
+    76,
+    76
+   ],
+   [
+    77,
+    77
+   ],
+   [
+    79,
+    79
+   ],
+   [
+    155,
+    155
+   ],
+   [
+    157,
+    157
+   ],
+   [
+    159,
+    165
+   ],
+   [
+    166,
+    166
+   ],
+   [
+    168,
+    168
+   ],
+   [
+    289,
+    292
+   ],
+   [
+    301,
+    302
+   ],
+   [
+    306,
+    306
+   ],
+   [
+    309,
+    309
+   ]
+  ],
+  "broker/guest/plane.go": [
+   [
+    89,
+    89
+   ],
+   [
+    90,
+    90
+   ]
+  ],
+  "broker/guest/plane_test.go": [
+   [
+    747,
+    747
+   ]
+  ],
+  "broker/guest/store.go": [
+   [
+    24,
+    24
+   ],
+   [
+    26,
+    26
+   ],
+   [
+    35,
+    36
+   ],
+   [
+    57,
+    57
+   ],
+   [
+    68,
+    68
+   ],
+   [
+    131,
+    131
+   ],
+   [
+    136,
+    136
+   ]
+  ],
+  "broker/vm/gvisor/testdata/guest/main.go": [
+   [
+    210,
+    210
+   ]
+  ]
+ },
+ "fix_pr": 709,
+ "head": "efb132d3e21575e06ce7b20a308b9fe0abe8e724",
+ "id": "pr36-fix709",
+ "intro_pr": 36,
+ "kind": "defect"
+}

@@ -79,12 +79,14 @@ def cause(body):
     return m.group(1).lower() if m else None
 
 
+RECORD_HEAD = re.compile(r"^[ \t>*_-]*Record:.*?\bhead\W{0,3}([0-9a-f]{7,40})\b", re.I | re.M)
 HEAD_SHA = re.compile(r"\bhead\W{0,3}([0-9a-f]{7,40})\b", re.I)
 
 
 def review_head(body):
-    """The head SHA a verdict names (`Record: ... head <SHA>`, OPERATING §4), else None."""
-    m = HEAD_SHA.search(body or "")
+    """The head SHA a verdict's `Record: ... head <SHA>` line names (OPERATING §4); a verdict with no
+    Record line falls back to the first `head <SHA>` in its text, else None."""
+    m = RECORD_HEAD.search(body or "") or HEAD_SHA.search(body or "")
     return m.group(1).lower() if m else None
 
 

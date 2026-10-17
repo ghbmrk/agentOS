@@ -1,0 +1,108 @@
+{
+ "diff": "diff --git a/broker/cmd/agentos-guest-bridge/ASSUMPTIONS.md b/broker/cmd/agentos-guest-bridge/ASSUMPTIONS.md\nindex 5c5c8e244..24fedd0fc 100644\n--- a/broker/cmd/agentos-guest-bridge/ASSUMPTIONS.md\n+++ b/broker/cmd/agentos-guest-bridge/ASSUMPTIONS.md\n@@ -7,4 +7,4 @@ Rows are added per package that touches this command. A reading a later spec ver\n | TREE-fold-wipe-1 | A `managed_tree` answer that is not `unchanged` always carries a non-empty `version` (agentosd's tree hash), and the guest plane never folds it (`guest.TreeTool`, TREE-fold-evict). So a non-unchanged answer with no version, a fold stand-in included, is not a tree, and the bridge refuses it without touching its tree directory. The bridge never calls `result_read`. | ARC-2, CAP-5 | If the plane folded `managed_tree` again, every tree over 8 KiB would be refused and the agent would keep its older skills; if an empty tree could carry an empty version, the refusal would keep a stale tree instead of emptying it. |\n | TREE-fold-wipe-2 | Tree polling never touches the machine's fold store (32 records, 4 MiB, shared with the agent's own held results), whether a sync succeeds or keeps failing: the plane hands `managed_tree` back whole (TREE-fold-evict, #1461). Corrected: before #1461 this held only once a sync had succeeded, and a failing sync (unwritable tree directory, ENOSPC, a bad path) folded the tree on every 30 s poll and evicted the agent's results after about 32 polls. A failing sync still refetches the whole tree every poll, up to `guest.MaxTreeAnswer` (8 MiB) of socket traffic per 30 s. | ARC-2, CAP-5, A11 | If the plane folds `managed_tree` again, a failing sync evicts the agent's held results again. |\n | TREE-answer-bound | The bridge reads a `managed_tree` answer up to `guest.MaxTreeAnswer`, the same constant the guest plane refuses answers past (guest G21), so a tree the plane sends is never cut short at the read and refetched every poll. | ARC-6, CAP-5 | If the two limits come apart again, a large tree fails every poll and the agent keeps its older skills. |\n-| TREE-undo-invalidate | A mirror that fails may have written part of the new tree, so the bridge then holds no version and its next fetch asks with an empty one; the broker answers that whole, never `unchanged`. So an owner's UNDO to the version held before the failure re-applies it and removes the failed tree's files (CHG-6). Any mirror failure drops the version, an answer refused for a bad path included, though that one wrote nothing; a failure before the mirror (a tool error, an answer that is not a tree, or an `unchanged` for another version) keeps it, since nothing was written. Since #1572 the mirror also clears what an earlier tree left in a new file's way (a file where it needs a directory, or a directory where it needs the file), so a tree that swaps one for the other, and an UNDO back, mirror whole; a symlink in the way is left and fails the write. | CHG-6, CAP-5 | If the broker ever answered an empty version `unchanged`, a partial tree would stay after an UNDO. |\n+| TREE-undo-invalidate | A mirror that fails may have written part of the new tree, so the bridge then holds no version and its next fetch asks with an empty one; the broker answers that whole, never `unchanged`. So an owner's UNDO to the version held before the failure re-applies it and removes the failed tree's files (CHG-6). Any mirror failure drops the version, an answer refused for a bad path included, though that one wrote nothing; a failure before the mirror (a tool error, an answer that is not a tree, or an `unchanged` for another version) keeps it, since nothing was written. Since #1572 the mirror also clears what an earlier tree left in a new file's way (a file where it needs a directory, or a directory where it needs the file), so a tree that swaps one for the other, and an UNDO back, mirror whole; a symlink on the path of a tree file, whether a namespace (skills, procedures or context, checked first, so an empty tree or a tree with no file in it cannot walk through one), a directory below it or the file itself, is refused before anything is cleared or written, the sync fails and the link stays (TREE-clearway-symlink, #1630; before it, a symlink at the file was replaced by the rename and one that stayed inside the tree directory was followed, so a clear-way or the removal walk could delete a directory outside the namespaces). A symlink elsewhere in the tree directory is not looked at. The check is not atomic: a guest process that swaps a directory for a link between the check and the act can still redirect a removal inside the tree directory (#1732). The refusal lasts until guest root (which may be the agent), a machine reset or a reseed removes the link; the owner cannot reach into the guest, and sees nothing meanwhile, since the agent keeps its older skills and every poll refetches the whole tree and fails again (owner signal: #1733). | CHG-6, CAP-5, ARC-7 | If the broker ever answered an empty version `unchanged`, a partial tree would stay after an UNDO. If a symlink on a tree path were followed again, a sync could delete a directory inside the tree directory but outside the namespaces; only guest root can plant one (ARC-7). |\ndiff --git a/broker/cmd/agentos-guest-bridge/tree.go b/broker/cmd/agentos-guest-bridge/tree.go\nindex 7e1f44e40..1e2bdf1eb 100644\n--- a/broker/cmd/agentos-guest-bridge/tree.go\n+++ b/broker/cmd/agentos-guest-bridge/tree.go\n@@ -27,7 +27,9 @@ import (\n // nothing: a replay machine, whose broker serves no such tool, keeps the\n // tree it was seeded with, and a public machine keeps none.\n \n-// treeNamespaces are the only directories a sync writes or removes in.\n+// treeNamespaces are the only directories a sync writes or removes in, as\n+// long as no process in the guest changes the tree directory while it runs\n+// (#1732).\n var treeNamespaces = []string{\"procedures\", \"skills\", \"context\"}\n \n type treeAnswer struct {\n@@ -166,7 +168,15 @@ func mirror(dir string, files map[string][]byte) error {\n \t\treturn err\n \t}\n \tdefer root.Close()\n+\tfor _, ns := range treeNamespaces {\n+\t\tif err := refuseLinks(root, ns); err != nil {\n+\t\t\treturn err\n+\t\t}\n+\t}\n \tfor p, b := range files {\n+\t\tif err := refuseLinks(root, p); err != nil {\n+\t\t\treturn err\n+\t\t}\n \t\tif old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {\n \t\t\tcontinue\n \t\t}\n@@ -217,9 +227,40 @@ func mirror(dir string, files map[string][]byte) error {\n \treturn nil\n }\n \n+// refuseLinks fails if any component of p, from its namespace down to p\n+// itself, is a symlink. The os.Root follows one that stays inside the tree\n+// directory, so without this check a link such as skills/l -> ../other\n+// would let a write or a removal land in other, outside the namespaces.\n+// mirror checks the three namespaces themselves first, so the removal walk\n+// cannot follow one either. A component that does not exist yet is not a\n+// link, and nothing below it exists either. The error names the tree\n+// directory and the link, never p, so it is the same for every file and\n+// syncTree logs it once. The check is not atomic: a process in the guest\n+// that swaps a directory for a link between the check and the write or\n+// removal is not stopped (#1732).\n+func refuseLinks(root *os.Root, p string) error {\n+\tvar path []string\n+\tfor a := p; a != \".\"; a = filepath.Dir(a) {\n+\t\tpath = append(path, a)\n+\t}\n+\tfor i := len(path) - 1; i >= 0; i-- {\n+\t\tfi, err := root.Lstat(path[i])\n+\t\tif err != nil {\n+\t\t\treturn nil\n+\t\t}\n+\t\tif fi.Mode()&fs.ModeSymlink != 0 {\n+\t\t\tdir, _ := filepath.Abs(root.Name())\n+\t\t\treturn fmt.Errorf(\"tree directory %s: %s is a symlink; the sync is refused until it is removed\", dir, path[i])\n+\t\t}\n+\t}\n+\treturn nil\n+}\n+\n // clearWay removes what an earlier tree left in the way of the file p: a\n-// regular file where p needs a directory, or a directory at p itself. A\n-// symlink is left, so the write fails rather than follow it.\n+// regular file where p needs a directory, or a directory at p itself. The\n+// caller has checked with refuseLinks that no symlink lay on p's path a\n+// moment ago, so the Lstat and RemoveAll here act on the path they name\n+// unless a guest process swaps one in between (#1732).\n func clearWay(root *os.Root, p string) error {\n \tns, _, _ := strings.Cut(p, \"/\")\n \tvar up []string\ndiff --git a/broker/cmd/agentos-guest-bridge/tree_test.go b/broker/cmd/agentos-guest-bridge/tree_test.go\nindex 94ef83d14..11001b75b 100644\n--- a/broker/cmd/agentos-guest-bridge/tree_test.go\n+++ b/broker/cmd/agentos-guest-bridge/tree_test.go\n@@ -218,32 +218,25 @@ func TestBridgeReadsATreeAnswerOfTheBoundWhole(t *testing.T) {\n \t}\n }\n \n-// undoTrees are A and a B whose write to context fails, through a\n-// symlink planted there that leads outside the tree, after it may have\n-// written some of its skills.\n-func undoTrees(t *testing.T, dir string, skills int) (a, b treeAnswer, outside string) {\n+// undoTrees are A and a B whose write to context fails, because the file\n+// name is longer than the file system allows, after it may have written\n+// some of its skills.\n+func undoTrees(t *testing.T, dir string, skills int) (a, b treeAnswer) {\n \tt.Helper()\n-\toutside = t.TempDir()\n-\tif err := os.Symlink(outside, filepath.Join(dir, \"context\")); err != nil {\n-\t\tt.Fatal(err)\n-\t}\n \ta = treeAnswer{Version: \"vA\", Files: map[string][]byte{\"skills/x\": []byte(\"a\")}}\n-\tb = treeAnswer{Version: \"vB\", Files: map[string][]byte{\"context/y.md\": []byte(\"y\")}}\n+\tb = treeAnswer{Version: \"vB\", Files: map[string][]byte{\"context/\" + strings.Repeat(\"y\", 300): []byte(\"y\")}}\n \tfor i := 0; i < skills; i++ {\n \t\tb.Files[fmt.Sprintf(\"skills/b%d.json\", i)] = []byte(\"b\")\n \t}\n-\treturn a, b, outside\n+\treturn a, b\n }\n \n-// undone reports whether dir holds A again and nothing reached outside.\n-func undone(t *testing.T, dir, outside string) {\n+// undone reports whether dir holds A again.\n+func undone(t *testing.T, dir string) {\n \tt.Helper()\n \tif ents, _ := os.ReadDir(filepath.Join(dir, \"skills\")); len(ents) != 1 || read(t, filepath.Join(dir, \"skills/x\")) != \"a\" {\n \t\tt.Fatalf(\"UNDO left %d entries in skills, skills/x = %q\", len(ents), read(t, filepath.Join(dir, \"skills/x\")))\n \t}\n-\tif ents, _ := os.ReadDir(outside); len(ents) != 0 {\n-\t\tt.Fatal(\"the mirror reached outside the tree\")\n-\t}\n }\n \n // TREE-undo-invalidate (#1562, CHG-6): a mirror that fails part way has\n@@ -257,7 +250,7 @@ func TestBridgeUndoAfterAPartialMirrorRestoresTheOldTree(t *testing.T) {\n \t\t\tt.Fatal(\"no partial mirror in 100 tries\")\n \t\t}\n \t\tdir := t.TempDir()\n-\t\ttreeA, treeB, outside := undoTrees(t, dir, 20)\n+\t\ttreeA, treeB := undoTrees(t, dir, 20)\n \t\tf := &fakeTree{ans: treeA}\n \t\tc := f.serve(t)\n \t\tv, err := syncOnce(context.Background(), c, dir, \"\")\n@@ -268,7 +261,7 @@ func TestBridgeUndoAfterAPartialMirrorRestoresTheOldTree(t *testing.T) {\n \t\tf.ans = treeB\n \t\tf.mu.Unlock()\n \t\tif v, err = syncOnce(context.Background(), c, dir, v); err == nil {\n-\t\t\tt.Fatal(\"B was written through a symlink\")\n+\t\t\tt.Fatal(\"B was written with a name too long\")\n \t\t}\n \t\tif ents, _ := os.ReadDir(filepath.Join(dir, \"skills\")); len(ents) < 2 {\n \t\t\tcontinue // the failing path came first: nothing of B landed\n@@ -279,7 +272,7 @@ func TestBridgeUndoAfterAPartialMirrorRestoresTheOldTree(t *testing.T) {\n \t\tif v, err = syncOnce(context.Background(), c, dir, v); err != nil || v != \"vA\" {\n \t\t\tt.Fatalf(\"UNDO: %q %v\", v, err)\n \t\t}\n-\t\tundone(t, dir, outside)\n+\t\tundone(t, dir)\n \t\treturn\n \t}\n }\n@@ -289,7 +282,7 @@ func TestBridgeUndoAfterAPartialMirrorRestoresTheOldTree(t *testing.T) {\n // and an UNDO to A is answered whole rather than Unchanged.\n func TestBridgePollAfterAFailedMirrorAsksForTheWholeTree(t *testing.T) {\n \tdir := t.TempDir()\n-\ttreeA, treeB, outside := undoTrees(t, dir, 1)\n+\ttreeA, treeB := undoTrees(t, dir, 1)\n \t// A whole, A unchanged, B failing, then the owner's UNDO to A.\n \tf := &fakeTree{script: []treeAnswer{treeA, treeA, treeB, treeA, treeA}, done: make(chan struct{})}\n \tc := f.serve(t)\n@@ -305,7 +298,7 @@ func TestBridgePollAfterAFailedMirrorAsksForTheWholeTree(t *testing.T) {\n \tif want := \",vA,vA,,vA\"; asked != want {\n \t\tt.Fatalf(\"asked for versions %q, want %q\", asked, want)\n \t}\n-\tundone(t, dir, outside)\n+\tundone(t, dir)\n }\n \n // Security R1 on #1572: a tree that swaps a file for a directory of the\n@@ -337,3 +330,134 @@ func TestBridgeUndoAcrossAFileToDirectorySwap(t *testing.T) {\n \t\tt.Fatalf(\"UNDO left skills/x as %v, %q\", fi, read(t, filepath.Join(dir, \"skills/x\")))\n \t}\n }\n+\n+// TREE-clearway-symlink (#1630, #1572 Security S-1; CHG-6, ARC-7): a\n+// symlink anywhere on a file's path, the namespace and the file itself\n+// included, is refused and left. One that stays inside the tree directory\n+// is no exception: it must not let a sync remove or write a directory\n+// outside skills, procedures and context.\n+func TestBridgeRefusesASymlinkOnTheWayOfAFile(t *testing.T) {\n+\tfor _, tc := range []struct{ name, link, file string }{\n+\t\t{\"ancestor\", \"skills/l\", \"skills/l/keep\"},\n+\t\t{\"deep ancestor\", \"skills/d/l\", \"skills/d/l/keep\"},\n+\t\t{\"namespace\", \"skills\", \"skills/keep\"},\n+\t\t{\"the file itself\", \"skills/keep\", \"skills/keep\"},\n+\t} {\n+\t\tt.Run(tc.name, func(t *testing.T) {\n+\t\t\tdir := t.TempDir()\n+\t\t\t// other is inside the tree directory but outside every namespace.\n+\t\t\tother := filepath.Join(dir, \"other\")\n+\t\t\tos.MkdirAll(filepath.Join(other, \"keep\"), 0o755)\n+\t\t\tos.WriteFile(filepath.Join(other, \"keep\", \"f\"), []byte(\"mine\"), 0o644)\n+\t\t\tif tc.link != \"skills\" {\n+\t\t\t\tos.MkdirAll(filepath.Join(dir, \"skills/d\"), 0o755)\n+\t\t\t}\n+\t\t\ttarget, _ := filepath.Rel(filepath.Dir(filepath.Join(dir, tc.link)), other)\n+\t\t\tif err := os.Symlink(target, filepath.Join(dir, tc.link)); err != nil {\n+\t\t\t\tt.Fatal(err)\n+\t\t\t}\n+\t\t\tf := &fakeTree{ans: treeAnswer{Version: \"v1\", Files: map[string][]byte{tc.file: []byte(\"new\")}}}\n+\t\t\tv, err := syncOnce(context.Background(), f.serve(t), dir, \"\")\n+\t\t\tif err == nil || v != \"\" {\n+\t\t\t\tt.Fatalf(\"synced through a symlink: %q %v\", v, err)\n+\t\t\t}\n+\t\t\tif fi, err := os.Lstat(filepath.Join(dir, tc.link)); err != nil || fi.Mode()&os.ModeSymlink == 0 {\n+\t\t\t\tt.Fatalf(\"the symlink %s was not left: %v\", tc.link, err)\n+\t\t\t}\n+\t\t\tif read(t, filepath.Join(other, \"keep\", \"f\")) != \"mine\" {\n+\t\t\t\tt.Fatal(\"the sync removed a directory outside the namespaces\")\n+\t\t\t}\n+\t\t\tif ents, _ := os.ReadDir(other); len(ents) != 1 {\n+\t\t\t\tt.Fatalf(\"the sync wrote outside the namespaces: %d entries\", len(ents))\n+\t\t\t}\n+\t\t})\n+\t}\n+}\n+\n+// A symlink on the path of a file whose content is already right is refused\n+// too: the tree directory must be a copy of the tree, and a link there is\n+// not.\n+func TestBridgeRefusesASymlinkEvenWhenTheContentMatches(t *testing.T) {\n+\tdir := t.TempDir()\n+\tos.MkdirAll(filepath.Join(dir, \"other\"), 0o755)\n+\tos.WriteFile(filepath.Join(dir, \"other\", \"keep\"), []byte(\"same\"), 0o644)\n+\tos.MkdirAll(filepath.Join(dir, \"skills\"), 0o755)\n+\tif err := os.Symlink(\"../other\", filepath.Join(dir, \"skills\", \"l\")); err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\tf := &fakeTree{ans: treeAnswer{Version: \"v1\", Files: map[string][]byte{\"skills/l/keep\": []byte(\"same\")}}}\n+\tif _, err := syncOnce(context.Background(), f.serve(t), dir, \"\"); err == nil {\n+\t\tt.Fatal(\"accepted a symlink on the path\")\n+\t}\n+}\n+\n+// TREE-clearway-symlink (#1630, reviews of #1728): a namespace that is\n+// itself a symlink is refused before anything is written or removed, even\n+// when the tree holds no file in it, or no file at all: the removal walk\n+// would otherwise follow it and delete the files of another directory.\n+func TestBridgeRefusesASymlinkedNamespaceWithNoFileInIt(t *testing.T) {\n+\tfor _, tc := range []struct {\n+\t\tname, link string\n+\t\tfiles      map[string][]byte\n+\t}{\n+\t\t{\"empty tree\", \"skills\", map[string][]byte{}},\n+\t\t{\"tree of another namespace\", \"context\", map[string][]byte{\"skills/x\": []byte(\"x\")}},\n+\t\t{\"procedures\", \"procedures\", map[string][]byte{\"skills/x\": []byte(\"x\")}},\n+\t} {\n+\t\tt.Run(tc.name, func(t *testing.T) {\n+\t\t\tdir := t.TempDir()\n+\t\t\tother := filepath.Join(dir, \"other\")\n+\t\t\tos.MkdirAll(other, 0o755)\n+\t\t\tos.WriteFile(filepath.Join(other, \"keep\"), []byte(\"mine\"), 0o644)\n+\t\t\tif err := os.Symlink(\"other\", filepath.Join(dir, tc.link)); err != nil {\n+\t\t\t\tt.Fatal(err)\n+\t\t\t}\n+\t\t\tf := &fakeTree{ans: treeAnswer{Version: \"v1\", Files: tc.files}}\n+\t\t\tv, err := syncOnce(context.Background(), f.serve(t), dir, \"\")\n+\t\t\tif err == nil || v != \"\" {\n+\t\t\t\tt.Fatalf(\"synced past a symlinked namespace: %q %v\", v, err)\n+\t\t\t}\n+\t\t\tif read(t, filepath.Join(other, \"keep\")) != \"mine\" {\n+\t\t\t\tt.Fatal(\"the sync removed a file outside the namespaces\")\n+\t\t\t}\n+\t\t\tif _, err := os.Lstat(filepath.Join(dir, \"skills\", \"x\")); err == nil && tc.link != \"skills\" {\n+\t\t\t\tt.Fatal(\"the sync wrote before refusing\")\n+\t\t\t}\n+\t\t})\n+\t}\n+}\n+\n+// The refusal names the tree directory, the link and the remedy, and not\n+// the file being written: mirror visits files in map order, so a message\n+// that named one would differ between polls and defeat syncTree's\n+// once-per-message log.\n+func TestBridgeSymlinkRefusalIsTheSameForEveryFile(t *testing.T) {\n+\tdir := t.TempDir()\n+\tos.MkdirAll(filepath.Join(dir, \"other\"), 0o755)\n+\tos.MkdirAll(filepath.Join(dir, \"skills\"), 0o755)\n+\tif err := os.Symlink(\"../other\", filepath.Join(dir, \"skills\", \"l\")); err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\tfiles := map[string][]byte{}\n+\tfor i := 0; i < 20; i++ {\n+\t\tfiles[fmt.Sprintf(\"skills/l/f%d\", i)] = []byte(\"x\")\n+\t}\n+\tf := &fakeTree{ans: treeAnswer{Version: \"v1\", Files: files}}\n+\tc := f.serve(t)\n+\tmsgs := map[string]bool{}\n+\tfor i := 0; i < 20; i++ {\n+\t\t_, err := syncOnce(context.Background(), c, dir, \"\")\n+\t\tif err == nil {\n+\t\t\tt.Fatal(\"synced through a symlink\")\n+\t\t}\n+\t\tmsgs[err.Error()] = true\n+\t}\n+\tif len(msgs) != 1 {\n+\t\tt.Fatalf(\"%d distinct messages: %v\", len(msgs), msgs)\n+\t}\n+\tfor m := range msgs {\n+\t\tif !strings.Contains(m, dir) || !strings.Contains(m, \"skills/l\") || !strings.Contains(m, \"remove\") || strings.Contains(m, \"/f\") {\n+\t\t\tt.Fatalf(\"message %q should name the directory, the link and the remedy, not a file\", m)\n+\t\t}\n+\t}\n+}\n",
+ "expected": {
+  "broker/cmd/agentos-guest-bridge/ASSUMPTIONS.md": [
+   [
+    10,
+    10
+   ]
+  ],
+  "broker/cmd/agentos-guest-bridge/tree.go": [
+   [
+    20,
+    20
+   ],
+   [
+    30,
+    32
+   ],
+   [
+    149,
+    150
+   ],
+   [
+    166,
+    166
+   ],
+   [
+    170,
+    170
+   ],
+   [
+    172,
+    173
+   ],
+   [
+    177,
+    177
+   ],
+   [
+    180,
+    180
+   ],
+   [
+    183,
+    186
+   ],
+   [
+    189,
+    192
+   ],
+   [
+    196,
+    198
+   ],
+   [
+    200,
+    201
+   ],
+   [
+    203,
+    204
+   ],
+   [
+    207,
+    207
+   ],
+   [
+    209,
+    209
+   ],
+   [
+    211,
+    223
+   ],
+   [
+    227,
+    227
+   ],
+   [
+    230,
+    253
+   ],
+   [
+    255,
+    255
+   ],
+   [
+    259,
+    277
+   ],
+   [
+    279,
+    280
+   ]
+  ],
+  "broker/cmd/agentos-guest-bridge/tree_race_test.go": [
+   [
+    1,
+    1
+   ]
+  ]
+ },
+ "fix_pr": 1768,
+ "head": "aa92b13277ad2c7a5d5a3110d041f25aa0aa76a1",
+ "id": "pr1728-fix1768",
+ "intro_pr": 1728,
+ "kind": "defect"
+}

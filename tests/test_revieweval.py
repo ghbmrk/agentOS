@@ -51,25 +51,51 @@ class EvalTest(unittest.TestCase):
                          {"caught": None, "false_blockers": 0})
         self.assertEqual(ev.score_case(clean, [{"file": "a", "line": 1, "class": "blocker"}])["false_blockers"], 1)
 
+    def test_later_findings_never_catch(self):  # REQ: REVIEW-eval-2
+        case = {"kind": "defect", "expected": {"a.go": [[11, 12]]}}
+        spam = [{"file": "a.go", "line": n, "class": c} for n in range(1, 60) for c in ("later", "release")]
+        self.assertEqual(ev.score_case(case, spam), {"caught": False, "false_blockers": 0})
+
     def test_build_pairs_fix_pr_with_the_pr_that_introduced_the_defect(self):  # REQ: REVIEW-eval-1
-        pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged": True, "reviewed_head": "abc1234"},
-                 {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged": True},
-                 {"number": 6, "title": "OTHER-1: clean", "body": "", "merged": True}]
+        pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01", "reviewed_head": "abc1234"},
+                 {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
+                 {"number": 6, "title": "OTHER-1: clean", "body": "", "merged_at": "2026-10-02"}]
         diffs = {"intro:5": "diff5", "fix:9": FIX, "intro:6": "diff6"}
         cases, defective = ev.build_cases(pulls, diffs)
         self.assertEqual([(c["id"], c["head"], c["diff"]) for c in cases], [("pr5-fix9", "abc1234", "diff5")])
         self.assertEqual(defective, [5])
-        self.assertEqual(ev.add_clean(pulls, diffs, [6], defective)[0]["id"], "pr6-clean")
-        with self.assertRaises(SystemExit):
-            ev.add_clean(pulls, diffs, [5], defective)
+        self.assertEqual([c["id"] for c in ev.pick_clean(pulls, diffs, 3)], ["pr6-clean"])
+
+    def test_fix_pairs_only_with_prs_merged_before_it(self):  # REQ: REVIEW-eval-1
+        pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01"},
+                 {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
+                 {"number": 12, "title": "CRED-1: later rework", "body": "", "merged_at": "2026-10-09"},
+                 {"number": 7, "title": "CRED-1: reopened", "body": "", "merged_at": None}]
+        diffs = {"intro:5": "d5", "intro:12": "d12", "intro:7": "d7", "fix:9": FIX}
+        cases, _ = ev.build_cases(pulls, diffs)
+        self.assertEqual([c["intro_pr"] for c in cases], [5])
 
     def test_change_is_kept_only_when_the_score_rises(self):  # REQ: REVIEW-eval-2
-        old = {"caught": 3, "false_blockers": 2}
-        self.assertTrue(ev.keep(old, {"caught": 4, "false_blockers": 2}))
-        self.assertTrue(ev.keep(old, {"caught": 3, "false_blockers": 1}))
-        self.assertFalse(ev.keep(old, dict(old)))
-        self.assertFalse(ev.keep(old, {"caught": 4, "false_blockers": 3}))
-        self.assertFalse(ev.keep(old, {"caught": 2, "false_blockers": 0}))
+        def sc(caught, false):
+            return {"caught": caught, "false_blockers": false, "score": caught - false, "case_set": "s"}
+        old = sc(3, 2)
+        self.assertTrue(ev.keep(old, sc(4, 2)))
+        self.assertTrue(ev.keep(old, sc(3, 1)))
+        self.assertFalse(ev.keep(old, sc(3, 2)))
+        self.assertFalse(ev.keep(old, sc(4, 3)))
+        self.assertFalse(ev.keep(old, sc(2, 0)))
+        self.assertFalse(ev.keep(old, sc(9, 9)))
+
+    def test_noise_cannot_win_and_case_sets_must_match(self):  # REQ: REVIEW-eval-2
+        cases = [{"id": "a", "kind": "defect", "diff": "d", "expected": {"a.go": [[1, 1]]}},
+                 {"id": "b", "kind": "clean", "diff": "d"}]
+        quiet = ev.summarize([ev.score_case(cases[0], []), ev.score_case(cases[1], [])], cases)
+        loud = [{"file": "a.go", "line": n, "class": "blocker"} for n in range(1, 30)]
+        noisy = ev.summarize([ev.score_case(cases[0], loud), ev.score_case(cases[1], loud)], cases)
+        self.assertFalse(ev.keep(quiet, noisy))
+        other = ev.summarize([], cases[:1])
+        with self.assertRaises(SystemExit):
+            ev.keep(quiet, other)
 
     def test_runner_and_cli_round_trip(self):  # REQ: REVIEW-eval-2
         with tempfile.TemporaryDirectory() as d:
@@ -80,6 +106,18 @@ class EvalTest(unittest.TestCase):
             out = d / "s.json"
             self.assertEqual(ev.main(["score", "--cases", str(d), "--cmd", cmd, "--out", str(out)]), 0)
             self.assertEqual(json.loads(out.read_text())["caught"], 1)
+            self.assertEqual(ev.main(["compare", str(out), str(out)]), 1)
+
+    def test_build_writes_the_corpus_from_saved_pr_data(self):  # REQ: REVIEW-eval-1
+        pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01", "reviewed_head": "abc1234"},
+                 {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
+                 {"number": 6, "title": "OTHER-1: clean", "body": "", "merged_at": "2026-10-02"}]
+        diffs = {"intro:5": "diff5", "fix:9": FIX, "intro:6": "diff6"}
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "p.json").write_text(json.dumps({"pulls": pulls, "diffs": diffs}))
+            self.assertEqual(ev.main(["build", "--pulls", str(d / "p.json"), "--out", str(d / "c"), "--clean", "1"]), 0)
+            self.assertEqual(sorted(f.name for f in (d / "c").glob("*.json")), ["pr5-fix9.json", "pr6-clean.json"])
 
 
 class NoiseAndRoundsTest(unittest.TestCase):
@@ -101,6 +139,10 @@ class NoiseAndRoundsTest(unittest.TestCase):
         again = "Verdict: accept\nRecord: PR #1 · package X · head def5678901234"
         self.assertEqual(metrics.count_rounds([a, b, sec, again]), 2)
         self.assertEqual(metrics.count_rounds(["Verdict: accept", "Verdict: accept (L3)"]), 2)
+        # an earlier SHA in the prose is not the reviewed head; the Record line is
+        prose = "Verdict: fix-list\n# t\nRecord: PR #1 · package X · head def5678\nfixed in head 1111111 earlier"
+        self.assertEqual(metrics.review_head(prose), "def5678")
+        self.assertEqual(metrics.count_rounds([prose, b]), 1)
 
     def test_collect_counts_rounds_by_head_and_reads_builder_finding_lines(self):  # REQ: REVIEW-eval-4, REVIEW-eval-3
         def api(repo, path, token):

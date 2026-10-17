@@ -1,0 +1,74 @@
+{
+ "diff": "diff --git a/broker/cmd/agentosd/evidence.go b/broker/cmd/agentosd/evidence.go\nindex d0cfea571..633163aa0 100644\n--- a/broker/cmd/agentosd/evidence.go\n+++ b/broker/cmd/agentosd/evidence.go\n@@ -111,7 +111,15 @@ const (\n \tevidenceNone     = \"Private replies already come by text.\"\n \tevidenceStarting = \"I'm still starting. Try again in a minute.\"\n \tevidenceFailed   = \"I couldn't save that setting. Try again later.\"\n-\tevidenceNoPage   = \"Not changed: turning this on needs my Wi-Fi page, which I'm not serving. Private replies still come by text.\"\n+\t// evidenceFenced answers while a restart fence holds the broker\n+\t// account (OP-4): trying again works only once STATUS no longer lists\n+\t// the earlier change (UX U3 on #1382). loops' fencedReply, word for word.\n+\tevidenceFenced = \"I'm holding settings until I can confirm a change from before the restart. Send this again once STATUS no longer lists it.\"\n+\t// evidenceHeld answers a change held behind the same change whose\n+\t// outcome is not known yet (journal.HeldError, OP-2): no restart, and\n+\t// STATUS does not list it. loops' heldReply, word for word.\n+\tevidenceHeld   = \"I'm holding this setting: the same change is already under way and not confirmed yet. Try again later.\"\n+\tevidenceNoPage = \"Not changed: turning this on needs my Wi-Fi page, which I'm not serving. Private replies still come by text.\"\n \t// evidenceNoPageSet is the same refusal while replies already go to\n \t// an address (%s, masked).\n \tevidenceNoPageSet = \"Not changed: this needs my Wi-Fi page, which I'm not serving. Private replies still go to %s.\"\n@@ -477,7 +485,7 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str\n \tswitch {\n \tcase err != nil:\n \t\te.logf(\"evidence setting: %v\", err)\n-\t\treturn evidenceFailed, true\n+\t\treturn settingFailed(err), true\n \tcase st.State == journal.Denied:\n \t\t// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).\n \t\te.logf(\"evidence setting refused: %s\", st.Permission.Reason)\n@@ -507,7 +515,7 @@ func (e *evidence) off(ctx context.Context, g evidenceGate) string {\n \t}\n \tif err != nil || st.State != journal.Succeeded {\n \t\te.logf(\"evidence off: %v (%s)\", err, st.State)\n-\t\treturn evidenceFailed\n+\t\treturn settingFailed(err)\n \t}\n \te.mu.Lock()\n \te.digest = append(e.digest, \"Emailing private replies was turned off by text at \"+at+\".\")\n@@ -516,6 +524,20 @@ func (e *evidence) off(ctx context.Context, g evidenceGate) string {\n \treturn evidenceOff\n }\n \n+// settingFailed words a destination change that did not run. A fence or a\n+// same-effect hold says what to wait for; a HeldError also matches\n+// ErrUnreconciled, so it is checked first.\n+func settingFailed(err error) string {\n+\tvar held *journal.HeldError\n+\tswitch {\n+\tcase errors.As(err, &held):\n+\t\treturn evidenceHeld\n+\tcase errors.Is(err, journal.ErrUnreconciled):\n+\t\treturn evidenceFenced\n+\t}\n+\treturn evidenceFailed\n+}\n+\n // wire adds the setting ahead of the loops' (cfg.Settings), STATUS's line,\n // and the gate's destination check. Call attach once the daemon runs.\n func (e *evidence) wire(cfg *daemon.Config) {\ndiff --git a/broker/cmd/agentosd/evidence_test.go b/broker/cmd/agentosd/evidence_test.go\nindex c1f8be0dc..4e9cba075 100644\n--- a/broker/cmd/agentosd/evidence_test.go\n+++ b/broker/cmd/agentosd/evidence_test.go\n@@ -506,3 +506,86 @@ func TestADeletionForgetsKeptReplies(t *testing.T) {\n \t\tt.Fatalf(\"without learning: %v\", err)\n \t}\n }\n+\n+// fencedEvidenceGate is a real journal engine as the evidence setting\n+// uses it, its destination fixed: the reply under a fence comes from the\n+// engine's own error, not a fake's.\n+type fencedEvidenceGate struct {\n+\t*journal.Engine\n+\taddr string\n+}\n+\n+func (f fencedEvidenceGate) Evidence() (string, string) { return f.addr, \"mail\" }\n+\n+// unknownExec never learns what happened, so an intent it runs stays\n+// outcome_unknown and, after a restart, fences its account.\n+type unknownExec struct{}\n+\n+func (unknownExec) Execute(context.Context, journal.Intent, int) journal.Outcome {\n+\treturn journal.Outcome{Result: journal.ResultUnknown}\n+}\n+func (unknownExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {\n+\treturn journal.Outcome{Result: journal.ResultUnknown}\n+}\n+\n+func openEvidenceEngine(t *testing.T, store journal.Store) *journal.Engine {\n+\tt.Helper()\n+\te, err := journal.Open(store, allowAll{}, map[string]journal.Executor{grants.ExecutorName: unknownExec{}},\n+\t\tfunc(s string) string { return s })\n+\tif err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\treturn e\n+}\n+\n+// runUnknown leaves in outcome_unknown on e.\n+func runUnknown(t *testing.T, e *journal.Engine, in journal.Intent) {\n+\tt.Helper()\n+\tctx := context.Background()\n+\tif _, err := e.Submit(in); err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\tif _, err := e.Authorize(ctx, in.ID); err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\tif st, _ := e.Dispatch(ctx, in.ID); st.State != journal.OutcomeUnknown {\n+\t\tt.Fatalf(\"setup: %s is %s\", in.ID, st.State)\n+\t}\n+}\n+\n+// REQ: OP-4, CH-12\n+// EMAIL REPLIES OFF while a restart fence holds the broker account answers\n+// with the held wording that points at STATUS, not \"Try again later\",\n+// which cannot work until the fence settles (UX U3 on #1382). A same-effect\n+// hold, which no restart caused, gets the hold reply instead.\n+func TestEvidenceOffUnderAFenceSaysWhatToWaitFor(t *testing.T) {\n+\tctx := context.Background()\n+\tfor _, msg := range []string{\"EMAIL REPLIES OFF\", \"EVIDENCE OFF\"} {\n+\t\tstore := &journal.MemStore{}\n+\t\trunUnknown(t, openEvidenceEngine(t, store), grants.EvidenceIntent(\"owner/evidence/before\", grants.OriginOwner, \"other@example.test\", \"mail\"))\n+\t\te := openEvidenceEngine(t, store) // the restart\n+\t\tif len(e.Fenced(journal.BrokerAccount)) == 0 {\n+\t\t\tt.Fatal(\"setup: broker account not fenced\")\n+\t\t}\n+\t\tr := newEvRig(t, destAddr)\n+\t\tr.ev.gate.Store(&evidenceGateBox{fencedEvidenceGate{Engine: e, addr: destAddr}})\n+\t\tgot, ok := r.ev.settings(ctx, msg, true)\n+\t\tif !ok || got != evidenceFenced || got == evidenceFailed || !strings.Contains(got, \"STATUS\") {\n+\t\t\tt.Fatalf(\"%s under a fence: %q %v\", msg, got, ok)\n+\t\t}\n+\t}\n+\n+\t// The same change already under way, no restart: the hold reply,\n+\t// which names neither a restart nor STATUS.\n+\te := openEvidenceEngine(t, &journal.MemStore{})\n+\trunUnknown(t, e, grants.EvidenceIntent(\"owner/evidence/earlier\", grants.OriginOwner, \"\", \"\"))\n+\tif len(e.Fenced(journal.BrokerAccount)) != 0 {\n+\t\tt.Fatal(\"setup: fenced without a restart\")\n+\t}\n+\tr := newEvRig(t, destAddr)\n+\tr.ev.gate.Store(&evidenceGateBox{fencedEvidenceGate{Engine: e, addr: destAddr}})\n+\tgot, _ := r.ev.settings(ctx, \"EMAIL REPLIES OFF\", true)\n+\tif got != evidenceHeld || strings.Contains(got, \"restart\") || strings.Contains(got, \"STATUS\") {\n+\t\tt.Fatalf(\"held: %q\", got)\n+\t}\n+}\n",
+ "expected": {
+  "briefs/JRN-startup-reconcile-s5.md": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/cmd/agentosd/ASSUMPTIONS.md": [
+   [
+    270,
+    270
+   ]
+  ],
+  "broker/cmd/agentosd/forget.go": [
+   [
+    211,
+    211
+   ],
+   [
+    782,
+    782
+   ],
+   [
+    1255,
+    1255
+   ],
+   [
+    1261,
+    1261
+   ],
+   [
+    1264,
+    1264
+   ]
+  ],
+  "broker/cmd/agentosd/forget_resume_test.go": [
+   [
+    58,
+    58
+   ],
+   [
+    69,
+    69
+   ],
+   [
+    72,
+    76
+   ],
+   [
+    78,
+    81
+   ],
+   [
+    107,
+    107
+   ],
+   [
+    149,
+    149
+   ],
+   [
+    168,
+    168
+   ]
+  ]
+ },
+ "fix_pr": 2033,
+ "head": "3129c4f0a2af5d5606684b298e7fb788b07017d6",
+ "id": "pr1587-fix2033",
+ "intro_pr": 1587,
+ "kind": "defect"
+}

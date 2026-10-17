@@ -1,0 +1,226 @@
+{
+ "diff": "diff --git a/broker/localui/ASSUMPTIONS.md b/broker/localui/ASSUMPTIONS.md\nindex 108f2a38c..c5627cf22 100644\n--- a/broker/localui/ASSUMPTIONS.md\n+++ b/broker/localui/ASSUMPTIONS.md\n@@ -18,7 +18,7 @@ gap left for a later package, that a reviewer may want to change.\n | L9 | **Setup is bound to the phone that paired.** Every phone that opens setup gets a setup cookie (SameSite=Strict, HttpOnly) and its own one-time pairing code. Before the owner's number is known any phone on the Wi-Fi may set up; once it is, only the phone whose code paired (or that typed the number and its code) sees or posts later steps, so another phone on the Wi-Fi can neither replace the number nor see the code-generator seed. Pairing by the card's setup code binds no phone: the reply texts a page code, and the phone that types it continues (3 tries, then a fresh code, at most 3 texts an hour). Other phones see \"Setup is continuing on the phone that texted the box\", and later steps show the number masked. Lost-device escape (arbitrator): the paired phone can start setup over, and any other phone can with the card's setup secret, printed as the reset secret on the recovery sheet (5 wrong tries an hour); starting over re-asks pairing, enrollment, the recovery acknowledgment and the trusted-PC choice. Setup pages are open without sign-in only until setup is done; then they redirect to status and their forms do nothing. Setup progress is persisted (`SetupStore`) without any secret; the code-generator seed stays in memory until the entered code confirms it, then goes to the vault (`Hooks.SaveCodeSeed`) and is wiped. Steps run in \u00a78.1's order, and \"this PC is trusted\" is accepted only after enrollment and the recovery acknowledgment. Ethernet makes the network step a no-op. At every start where setup is not done, it is treated as done if `Hooks.AlreadySetUp` reports that Finish completed (the owner channel exists), so neither a lost state file nor a failed save after Finish reopens enrollment; an enrolled seed alone never closes setup, so a reboot mid-setup or after starting over resumes where it was. `AlreadySetUp` must read a durable marker Finish writes and answer true when in doubt; it is also asked after a failed Finish, so a Finish that fails after the owner channel exists still closes setup. Once setup is done no step changes its state (checked under the setup lock), and starting over is refused while Finish runs. The setup cookie lasts 7 days (`SetupCookieFor`) so it survives a browser restart; pairing codes beyond 8 phones evict the oldest; an enrollment checked against a seed that a restart replaced is not saved. Hooks that write to the vault or render a QR code run outside the setup lock, so the modem loop's `OfferText` never waits on them. | ONB-3, \u00a78.1, CH-4 | `setup.go`. |\n | L10 | Pairing (ONB-6): the `sms:` link prefills `PAIR <one-time code>` to the box's number (`?&body=`, read by iOS and Android). A text `PAIR <code>` with that code or the card's setup code makes its sender the owner's number, and the box replies \"AgentOS is running on [host]\" from its own number. Wrong pairing texts are capped at 10 an hour, then the box is silent. Fallback: type the number, the box texts a 6-digit code (3 texts an hour, 3 tries, 15 min). The broker's modem loop calls `Server.OfferText` until an owner exists. | ONB-6, \u00a78.1 | `OfferText`, `number`. |\n | L11 | Enrollment accepts the code for the box's current 30-second step or one either side, since the phone's clock may differ slightly. A box whose clock is minutes off fails enrollment; that is visible at once and is a hardware-time matter (\u00a713). | ONB-3 | Learn a clock offset at enrollment. |\n-| L12 | Connect AI waits only on the first-boot update (`Progress.Updated`), as ONB-4 says. An API key typed here goes to `Hooks.ConnectAPIKey` and is never kept, echoed, or logged; a device-code sign-in shows the provider's https page and code. Each connection asks once, naming the provider (\"Let ChatGPT see your private content: ...\"), whether it may see private content: ticked by default on a plan sign-in and unticked on an API key unless that provider already has a yes (D-115, \u00a78.1 step 6; a private hosted model is added only on the local page and keeps default no, CAP-9). The answer is passed through `Hooks.SetPrivateOK` only after the key is stored or the sign-in started; a form that did not go through re-renders its box as the owner left it (U-4, #1422). Under the box the page says that, unticked, tasks needing mail or files wait until a provider is allowed on the AI providers page, whose own line saying so shows only while no connected provider is allowed (U-5; L47, REV-6). Setup finishes as soon as one provider reports connected, checked after each step and on each page load (so a device-code sign-in completed on the provider's site finishes it), and calls `Hooks.Finish` at most once, whose caller starts the owner channel and sends `AllSetText` (ONB-8): three example tasks suited to connected accounts, then \"HELP for commands\", within three GSM-7 segments. With no provider allowed private data, task text has no route unless it is PUBLIC (\u00a75), so the examples are PUBLIC tasks without accounts. | ONB-3, ONB-4, ONB-8, CRED-5 | `aiKey`, `maybeFinish`. |\n+| L12 | Connect AI waits only on the first-boot update (`Progress.Updated`), as ONB-4 says. An API key typed here goes to `Hooks.ConnectAPIKey` and is never kept, echoed, or logged; a device-code sign-in shows the provider's https page and code. Each connection asks once, naming the provider (\"Let ChatGPT see your private content: ...\"), whether it may see private content: ticked by default on a plan sign-in and unticked on an API key unless that provider already has a yes (D-115, \u00a78.1 step 6; a private hosted model is added only on the local page and keeps default no, CAP-9). The answer is passed through `Hooks.SetPrivateOK` after the sign-in started or, with a key, a yes after the key is stored and a no before (a refused key then leaves the no recorded, which only narrows); a form that did not go through re-renders its box as the owner left it (U-4, #1422); an answer that fails to save holds setup open (L49). Under the box the page says that, unticked, tasks needing mail or files wait until a provider is allowed on the AI providers page, whose own line saying so shows only while no connected provider is allowed (U-5; L47, REV-6). Setup finishes as soon as one provider reports connected, checked after each step and on each page load (so a device-code sign-in completed on the provider's site finishes it), and calls `Hooks.Finish` at most once, whose caller starts the owner channel and sends `AllSetText` (ONB-8): three example tasks suited to connected accounts, then \"HELP for commands\", within three GSM-7 segments. With no provider allowed private data, task text has no route unless it is PUBLIC (\u00a75), so the examples are PUBLIC tasks without accounts. | ONB-3, ONB-4, ONB-8, CRED-5 | `aiKey`, `maybeFinish`. |\n | L13 | Pages have no script (the vault page's photo shrink, L17, is the one exception and optional); the status page refreshes itself while the box is starting (ONB-4), and the setup page only while it waits on the update with nothing to type, so a refresh never wipes what the owner is typing. | ONB-1, ONB-4 | \u2014 |\n | L15 | **Condition for wiring (P1-7 or P2-1):** the local UI runs as its own uid and process, reaching the owner channel through a narrow socket authenticated by SO_PEERCRED, never inside agentosd, so a bug in an HTTP parser on the Wi-Fi cannot reach broker memory. The ARC-2 import test stays. The page footer and the contact card carry the box page address (card C10). | ARC-2, CH-9 | Wiring package. |\n | L14 | Not built here: the live browser view (P2-6), diff and file review, the rules page, card rotation (REC-4, which setup should offer in one line once it exists), and the DIY first-boot card page (\u00a78.4). Each mounts on `Server` without changing it. | CH-8, REC-4, CRED-8 | Later packages. |\n@@ -55,3 +55,4 @@ gap left for a later package, that a reviewer may want to change.\n | L46 | **The committed rotation result is the confirming session's (ROT-result-bind, #1316; REC-4).** The result can carry the new code generator's otpauth seed, so `Rotation` binds it to a SHA-256 of the confirming session's token: `/rotate/card` posts go through `Rotation.serveCard`, which holds a lock across the display's handler so the provisioner knows whose post committed. `/rotate/done` shows it once to that session only; another session is sent home and the result stays for the confirmer. It expires at the vault process's confirm window (`RotationStarted.Expires`), capped at `resultTTL` (30 minutes, recovery.PendingTTL) after the start when that is later or absent. `/rotate/enroll` and `/rotate/show` clear it (on any post, matched or not), as does Start, and each bumps a generation, so a commit whose answer arrives after one of them (within the 2-minute commit limit) stores nothing. A commit reached other than through a session's post has no confirmer and its result shows to none. Rests on agentosd session tokens being per-phone and secret (the cookie is HttpOnly, SameSite=Strict). The display itself is still shown to any signed-in session while it waits (L37); that is #1338's concern, not this row's. | REC-4 | `rotwire.go`, `rotation.go`. |\n | L47 | **The AI providers page (#1266; CAP-9, CH-3, CH-7, CRED-1).** With `Config.Providers` (the vault process's unlock socket, egress K25; it needs `Vault`) the page at `/providers/` behind sign-in lists each provider, whether it is connected and whether it may see private data. Allowing takes a code from the code generator, which the vault process checks; withdrawing asks first and takes none. The page's footer says changes are texted; until P2-3 the vault process only logs them (egress K6, K25). The page shows the vault process's own words only for a code's refusal (403, 429); any other refusal reads \"That didn't go through. Try again.\", and the locked and starting views mirror the second line page's (L23). Changing the answer by text (CH-11, ADP-9) is not built: release item filed from #1266. | CAP-9, CH-3, CH-7, CRED-1, REV-6 | If the answer moves to agentosd's localapi, only `Providers` changes. |\n | L48 | **Wi-Fi join unavailable is its own answer (#1429, from #1407's reviews; ONB-3, CH-12; amends Security L8.4).** The helper's `failed` (a D-Bus or NetworkManager error, such as NetworkManager absent) maps to `localsrv.JoinUnavailable` in agentosd's `joiner` and to the wire code `join unavailable` (`localapi.ErrJoinUnavailable`); `not_joined`, `refused`, `busy` and a broken helper call stay `not joined`. The page says \"I cannot join Wi-Fi yet. Plug in an Ethernet cable, then tap \"I plugged in an Ethernet cable\".\" instead of asking to check the password, because no password can help. L8.4 mapped every non-success code to one error; `failed` reveals nothing about the password, so splitting it out leaks no guess oracle. When `Config.Station` reports no station device (L44), the page shows the same text and makes no join call, so the network is not saved for a station device added later: the owner joins again then, or uses Ethernet. Nil `Station` still calls agentosd. | ONB-3, CH-12, L28, L41, L44 | `localui/setup.go`, `setuphooks.go`, `localsrv/setup.go`, `cmd/agentosd/setup.go`. |\n+| L49 | **An unsaved private-content answer holds setup open (#1467, from #1436 Security S1; CAP-9, U-4, REV-6, ONB-3).** `aiKey` saves a no before calling `ConnectAPIKey` and a yes after it, so at every failure or restart point the vault is no wider than the owner's answer: a no that fails to save stores no key. A save that fails on any AI route (`aiKey`, `aiDevice`, `aiPrivate`) puts the owner's answer in `SetupState.Unsaved`, and any later save of an answer for that provider clears it; `maybeFinish` does not finish while anything is held, so setup cannot finish with the provider keeping an older answer (such as a plan sign-in's yes, D-115). A hold the setup store fails to save still holds in memory; a clear it fails to save does not clear. One AI post per provider runs at a time, none runs while `Finish` does, and `maybeFinish` waits for posts in flight, so a page load or a second post cannot finish setup or record an answer between a key and its answer. After a failed save the AI step shows \"Could not save. Try again.\" once; then, while held, it shows a note that the answer was not saved yet and, for that provider, a box-only form (`/setup/ai-private`) set to the answer last given; it needs the host step and the setup phone like every AI post, and refuses a provider with nothing held. A failed save in `aiDevice` also shows no link, dropping one an earlier sign-in showed. Starting over keeps the hold, because the vault keeps what the failed save left. The hold lasts only as long as the `SetupStore`: agentos-localui keeps setup in memory, so a restart loses it. The save order makes that safe on the probed path (no key was stored); a provider already connected with a yes whose no then fails, followed by a restart, can still finish with the yes (#1534 S2, release, due before c4e2). The hold lives in the setup record, which holds no secret. | CAP-9, U-4, REV-6, ONB-3, L12 | `aiKey`, `aiDevice`, `aiPrivate`, `privateOK`, `begin`, `maybeFinish`. |\ndiff --git a/broker/localui/localui_test.go b/broker/localui/localui_test.go\nindex bad881cab..0c7f20825 100644\n--- a/broker/localui/localui_test.go\n+++ b/broker/localui/localui_test.go\n@@ -69,6 +69,8 @@ type fakeHooks struct {\n \tjoins       int    // JoinNetwork calls\n \tdeviceErr   error  // StartDeviceCode's answer when set\n \tdeviceLink  string // StartDeviceCode's link when set\n+\tprivateErr  error  // SetPrivateOK's answer when set; nothing is recorded\n+\tprivates    int    // SetPrivateOK calls\n }\n \n func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }\n@@ -157,6 +159,10 @@ func (f *fakeHooks) Providers() []Provider {\n func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {\n \tf.mu.Lock()\n \tdefer f.mu.Unlock()\n+\tf.privates++\n+\tif f.privateErr != nil {\n+\t\treturn f.privateErr\n+\t}\n \tif f.private == nil {\n \t\tf.private = map[string]bool{}\n \t}\ndiff --git a/broker/localui/pages.go b/broker/localui/pages.go\nindex 1e3f2c415..de9c9a04d 100644\n--- a/broker/localui/pages.go\n+++ b/broker/localui/pages.go\n@@ -369,6 +369,7 @@ form { margin: .6em 0 1.2em; }\n {{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}\n {{else}}<p class=\"muted\">One is enough. You can add more later.</p>\n {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>\n+{{$id := .ID}}{{with index $.Unsaved .ID}}<p>Your answer about private content for {{.Name}} was not saved yet. Setup finishes once it is.</p><form method=\"post\" action=\"/setup/ai-private\"><input type=\"hidden\" name=\"provider\" value=\"{{$id}}\">{{template \"private\" .}}<button>Save</button></form>{{end}}\n {{if not .Connected}}\n {{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href=\"{{index $d 0}}\">{{index $d 0}}</a> and enter <span class=\"mono\">{{index $d 1}}</span>.</p><p><a href=\"/setup\">I signed in</a></p>{{else}}<form method=\"post\" action=\"/setup/ai-device\"><input type=\"hidden\" name=\"provider\" value=\"{{.ID}}\">{{template \"private\" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}\n {{if .APIKey}}<form method=\"post\" action=\"/setup/ai-key\"><input type=\"hidden\" name=\"provider\" value=\"{{.ID}}\">{{template \"private\" (index $.Key .ID)}}<label>Or paste an API key<input type=\"password\" name=\"key\" autocomplete=\"off\"></label><button class=\"plain\">Save key</button></form>{{end}}\ndiff --git a/broker/localui/setup.go b/broker/localui/setup.go\nindex 61f107d05..fc72a2af4 100644\n--- a/broker/localui/setup.go\n+++ b/broker/localui/setup.go\n@@ -139,7 +139,13 @@ type SetupState struct {\n \tRecovery     bool `json:\"recovery\"`\n \tHost         bool `json:\"host\"`\n \tHostTrusted  bool `json:\"host_trusted\"`\n-\tDone         bool `json:\"done\"`\n+\t// Unsaved maps a provider to the owner's private-content answer that\n+\t// the vault did not record (#1467). It is set when the save fails and\n+\t// cleared once an answer for that provider is saved, so setup does not\n+\t// finish with the provider keeping an older answer. It lasts only as\n+\t// long as the SetupStore does.\n+\tUnsaved map[string]bool `json:\"unsaved,omitempty\"`\n+\tDone    bool            `json:\"done\"`\n }\n \n // SetupStore persists SetupState.\n@@ -307,10 +313,13 @@ type setup struct {\n \tanswer    map[string]bool\n \terr       map[string]string // per phone\n \tfinishing bool\n+\t// busy is the providers with an AI post in flight: one at a time\n+\t// each, none while Finish runs, and no Finish while any is (#1467).\n+\tbusy map[string]bool\n }\n \n func newSetup(s *Server, st SetupState) *setup {\n-\treturn &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}}\n+\treturn &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}\n }\n \n func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }\n@@ -412,6 +421,7 @@ func (u *setup) routes(mux *http.ServeMux) {\n \t\t\"/setup/host\":        u.host,\n \t\t\"/setup/ai-key\":      u.aiKey,\n \t\t\"/setup/ai-device\":   u.aiDevice,\n+\t\t\"/setup/ai-private\":  u.aiPrivate,\n \t\t\"/setup/restart\":     u.restart,\n \t} {\n \t\tpath, f := path, f\n@@ -482,6 +492,9 @@ type setupView struct {\n \t// Plan and Key are each provider's private-content box on its plan\n \t// sign-in and API key forms.\n \tPlan, Key map[string]privateBox\n+\t// Unsaved is the retry box of each provider whose answer did not\n+\t// save (#1467).\n+\tUnsaved map[string]*privateBox\n \t// Refresh reloads the page only while it waits on the box and has\n \t// nothing to type into (ONB-4).\n \tRefresh string\n@@ -611,11 +624,14 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {\n \t\t}\n \tcase \"ai\":\n \t\tv.Providers = u.s.cfg.Hooks.Providers()\n-\t\tv.Plan, v.Key = map[string]privateBox{}, map[string]privateBox{}\n+\t\tv.Plan, v.Key, v.Unsaved = map[string]privateBox{}, map[string]privateBox{}, map[string]*privateBox{}\n \t\tu.mu.Lock()\n \t\tfor _, pr := range v.Providers {\n \t\t\tv.Plan[pr.ID] = u.boxLocked(\"ai-device\", pr)\n \t\t\tv.Key[pr.ID] = u.boxLocked(\"ai-key\", pr)\n+\t\t\tif ok, held := u.st.Unsaved[pr.ID]; held {\n+\t\t\t\tv.Unsaved[pr.ID] = &privateBox{Name: pr.Name, Checked: ok}\n+\t\t\t}\n \t\t}\n \t\tu.mu.Unlock()\n \t\tif !p.Updated {\n@@ -1070,20 +1086,83 @@ func (u *setup) keepAnswer(r *http.Request, form, id string) {\n \tu.mu.Unlock()\n }\n \n+// errUnsaved is the page's text for a private-content answer that did not\n+// save.\n+var errUnsaved = errors.New(\"Could not save. Try again.\")\n+\n // privateOK records the owner's CAP-9 answer for a provider once its form\n-// went through, never before (U-4).\n+// went through, never before (U-4), and releases the provider's hold. A\n+// failed save keeps the box as the owner left it and holds setup open on\n+// the answer (#1467).\n func (u *setup) privateOK(r *http.Request, form, id string) error {\n+\tok := r.PostFormValue(\"private\") != \"\"\n+\tif err := u.s.cfg.Hooks.SetPrivateOK(id, ok); err != nil {\n+\t\tu.keepAnswer(r, form, id)\n+\t\tu.mu.Lock()\n+\t\tu.holdLocked(id, &ok)\n+\t\tu.mu.Unlock()\n+\t\treturn errUnsaved\n+\t}\n \tu.mu.Lock()\n+\tdefer u.mu.Unlock()\n \tdelete(u.answer, form+\" \"+id)\n-\tu.mu.Unlock()\n-\tif err := u.s.cfg.Hooks.SetPrivateOK(id, r.PostFormValue(\"private\") != \"\"); err != nil {\n-\t\treturn errors.New(\"Could not save. Try again.\")\n+\tif err := u.holdLocked(id, nil); err != nil {\n+\t\treturn errUnsaved\n+\t}\n+\treturn nil\n+}\n+\n+// holdLocked sets provider id's unsaved answer to *ok, or clears it when\n+// ok is nil, in the setup record (#1467). A hold the store fails to save\n+// still holds in memory; a clear the store fails to save does not clear.\n+// Caller holds u.mu.\n+func (u *setup) holdLocked(id string, ok *bool) error {\n+\tif _, held := u.st.Unsaved[id]; !held && ok == nil {\n+\t\treturn nil\n+\t}\n+\tm := make(map[string]bool, len(u.st.Unsaved)+1) // save copies the state shallowly\n+\tfor k, v := range u.st.Unsaved {\n+\t\tm[k] = v\n+\t}\n+\tif ok == nil {\n+\t\tdelete(m, id)\n+\t} else {\n+\t\tm[id] = *ok\n+\t}\n+\tif len(m) == 0 {\n+\t\tm = nil\n+\t}\n+\terr := u.save(func(s *SetupState) { s.Unsaved = m })\n+\tif err != nil && ok != nil && !u.st.Done {\n+\t\tu.st.Unsaved = m\n+\t}\n+\treturn err\n+}\n+\n+// begin claims provider id for one AI post, or refuses while another post\n+// for it is in flight or Finish runs; end releases it.\n+func (u *setup) begin(id string) error {\n+\tu.mu.Lock()\n+\tdefer u.mu.Unlock()\n+\tswitch {\n+\tcase u.st.Done:\n+\t\treturn errSetupDone\n+\tcase u.finishing:\n+\t\treturn errors.New(\"Setup is finishing. Reload the page.\")\n+\tcase u.busy[id]:\n+\t\treturn errors.New(\"I am still saving your last answer for this provider. Reload the page in a moment.\")\n \t}\n+\tu.busy[id] = true\n \treturn nil\n }\n \n+func (u *setup) end(id string) { u.mu.Lock(); delete(u.busy, id); u.mu.Unlock() }\n+\n // aiKey takes an API key typed on this page, never by text (\u00a78.1 step 6).\n // The key goes to the vault hook and is not kept, echoed, or logged.\n+// A no is saved before the key and a yes after it, so a failure or a\n+// restart at any point leaves the provider with no wider answer than the\n+// owner gave: a no that fails stores no key (#1467).\n func (u *setup) aiKey(r *http.Request, _ string) error {\n \tif err := u.aiReady(); err != nil {\n \t\treturn err\n@@ -1092,13 +1171,45 @@ func (u *setup) aiKey(r *http.Request, _ string) error {\n \tif !u.providerHas(id, func(p Provider) bool { return p.APIKey }) || key == \"\" || len(key) > 512 || !printable(key) {\n \t\treturn errors.New(\"Paste the API key from your provider's page.\")\n \t}\n+\tif err := u.begin(id); err != nil {\n+\t\treturn err\n+\t}\n+\tdefer u.end(id)\n+\tif r.PostFormValue(\"private\") == \"\" {\n+\t\tif err := u.privateOK(r, \"ai-key\", id); err != nil {\n+\t\t\treturn err\n+\t\t}\n+\t}\n \tif err := u.s.cfg.Hooks.ConnectAPIKey(id, key); err != nil {\n \t\tu.keepAnswer(r, \"ai-key\", id)\n \t\treturn errors.New(keyErrText(err))\n \t}\n+\tif r.PostFormValue(\"private\") == \"\" {\n+\t\treturn nil\n+\t}\n \treturn u.privateOK(r, \"ai-key\", id)\n }\n \n+// aiPrivate retries the private-content answer of a provider held by\n+// Unsaved, with the box alone (#1467).\n+func (u *setup) aiPrivate(r *http.Request, _ string) error {\n+\tif err := u.aiReady(); err != nil {\n+\t\treturn err\n+\t}\n+\tid := r.PostFormValue(\"provider\")\n+\tu.mu.Lock()\n+\t_, held := u.st.Unsaved[id]\n+\tu.mu.Unlock()\n+\tif !held {\n+\t\treturn errors.New(\"Choose a provider.\")\n+\t}\n+\tif err := u.begin(id); err != nil {\n+\t\treturn err\n+\t}\n+\tdefer u.end(id)\n+\treturn u.privateOK(r, \"ai-private\", id)\n+}\n+\n // keyErrText is the page's text for a key the vault did not store: only a\n // key the provider refused is blamed on the provider (U-2, #1265).\n func keyErrText(err error) string {\n@@ -1127,6 +1238,10 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {\n \tif !u.providerHas(id, func(p Provider) bool { return p.DeviceCode }) {\n \t\treturn errors.New(\"Choose a provider.\")\n \t}\n+\tif err := u.begin(id); err != nil {\n+\t\treturn err\n+\t}\n+\tdefer u.end(id)\n \tlink, code, err := u.s.cfg.Hooks.StartDeviceCode(id)\n \tif err == nil {\n \t\tif pu, perr := url.Parse(link); perr != nil || pu.Scheme != \"https\" {\n@@ -1138,6 +1253,9 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {\n \t\treturn errors.New(\"Could not start sign-in with that provider. Try again.\")\n \t}\n \tif err := u.privateOK(r, \"ai-device\", id); err != nil {\n+\t\tu.mu.Lock()\n+\t\tdelete(u.device, id) // no link while the answer is unsaved\n+\t\tu.mu.Unlock()\n \t\treturn err\n \t}\n \tu.mu.Lock()\n@@ -1161,7 +1279,8 @@ func (u *setup) providerHas(id string, f func(Provider) bool) bool {\n // called at most once at a time, and not again once it succeeded.\n func (u *setup) maybeFinish() {\n \tu.mu.Lock()\n-\tif !u.st.Host || u.st.Done || u.finishing {\n+\t// An unsaved answer, or an AI post in flight, holds setup open (#1467).\n+\tif !u.st.Host || u.st.Done || u.finishing || len(u.st.Unsaved) > 0 || len(u.busy) > 0 {\n \t\tu.mu.Unlock()\n \t\treturn\n \t}\ndiff --git a/broker/localui/setupunsaved_test.go b/broker/localui/setupunsaved_test.go\nnew file mode 100644\nindex 000000000..7bc662d94\n--- /dev/null\n+++ b/broker/localui/setupunsaved_test.go\n@@ -0,0 +1,396 @@\n+package localui\n+\n+import (\n+\t\"errors\"\n+\t\"net/http/cookiejar\"\n+\t\"net/url\"\n+\t\"path/filepath\"\n+\t\"strings\"\n+\t\"sync\"\n+\t\"testing\"\n+)\n+\n+// REQ: CAP-9, REV-6, ONB-3\n+\n+// failPrivate makes SetPrivateOK fail, or succeed again.\n+func (r *rig) failPrivate(fail bool) {\n+\tr.hooks.mu.Lock()\n+\tr.hooks.privateErr = nil\n+\tif fail {\n+\t\tr.hooks.privateErr = errors.New(\"vault busy\")\n+\t}\n+\tr.hooks.mu.Unlock()\n+}\n+\n+// #1467 (#1436 Security S1): the path the review probed. A plan sign-in\n+// records yes (D-115), then the owner unticks the box with an API key and\n+// the save of that no fails. The no is saved before the key, so no key is\n+// stored; the error shows once, then a box-only retry holds setup open.\n+func TestAnUnsavedAnswerHoldsSetupOpen(t *testing.T) {\n+\tr := newRig(t)\n+\tr.runSetupToAI()\n+\tr.post(\"/setup/ai-device\", url.Values{\"provider\": {\"anthropic\"}, \"private\": {\"1\"}})\n+\tif !r.hooks.private[\"anthropic\"] {\n+\t\tt.Fatal(\"plan default not recorded as yes\")\n+\t}\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"anthropic\"}, \"key\": {apiCanary}})\n+\tif r.hooks.keys != nil || r.hooks.connected {\n+\t\tt.Fatal(\"a key was stored with the owner's no unsaved\")\n+\t}\n+\tif r.srv.setup.done() || r.hooks.finishes != 0 {\n+\t\tt.Fatal(\"setup finished with the owner's answer unsaved\")\n+\t}\n+\tif page := r.get(\"/setup\"); !strings.Contains(page, \"Could not save. Try again.\") {\n+\t\tt.Fatalf(\"error not shown:\\n%s\", page)\n+\t}\n+\t// Later loads show the note and the retry, with the box as the owner\n+\t// left it (unticked) and no key field; the error showed once.\n+\tpage := r.get(\"/setup\")\n+\tif strings.Contains(page, \"Could not save. Try again.\") || !strings.Contains(page, \"was not saved yet\") {\n+\t\tt.Fatalf(\"error shown again, or no note:\\n%s\", page)\n+\t}\n+\tf, ok := setupForms(t, page)[\"ai-private anthropic\"]\n+\tif !ok || !strings.Contains(f, `name=\"private\" value=\"1\">`) || strings.Contains(f, \"checked\") {\n+\t\tt.Fatalf(\"no retry, or the owner's unticked box came back ticked:\\n%s\", f)\n+\t}\n+\tif strings.Contains(f, `name=\"key\"`) {\n+\t\tt.Fatalf(\"the retry asks for the key again:\\n%s\", f)\n+\t}\n+\tif r.srv.setup.done() || !r.hooks.private[\"anthropic\"] {\n+\t\tt.Fatal(\"page load finished setup, or the old yes changed\")\n+\t}\n+\t// A failed retry keeps holding and keeps the retry's own answer, so a\n+\t// held yes renders ticked (#1534 M9, M11).\n+\tr.post(\"/setup/ai-private\", url.Values{\"provider\": {\"anthropic\"}, \"private\": {\"1\"}})\n+\tif r.srv.setup.done() || !strings.Contains(r.setupErr(), \"Could not save\") {\n+\t\tt.Fatal(\"failed retry finished setup or showed no error\")\n+\t}\n+\tif f := setupForms(t, r.get(\"/setup\"))[\"ai-private anthropic\"]; !strings.Contains(f, \"checked\") {\n+\t\tt.Fatalf(\"the failed retry's yes came back unticked:\\n%s\", f)\n+\t}\n+\t// A saved retry releases the hold; nothing is connected, so setup\n+\t// stays open until a key is.\n+\tr.failPrivate(false)\n+\tr.post(\"/setup/ai-private\", url.Values{\"provider\": {\"anthropic\"}})\n+\tif ok, set := r.hooks.private[\"anthropic\"]; !set || ok {\n+\t\tt.Fatal(\"retry did not record the owner's no\")\n+\t}\n+\tif _, held := setupForms(t, r.get(\"/setup\"))[\"ai-private anthropic\"]; held || r.srv.setup.done() {\n+\t\tt.Fatal(\"hold kept after a saved answer, or setup finished unconnected\")\n+\t}\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"anthropic\"}, \"key\": {apiCanary}})\n+\tif !r.srv.setup.done() || r.hooks.finishes != 1 || r.hooks.private[\"anthropic\"] {\n+\t\tt.Fatal(\"setup did not finish with the owner's no\")\n+\t}\n+}\n+\n+// #1534 Security S1: the hold lasts only as long as the SetupStore, and\n+// agentos-localui's store is in memory. A restart that loses the hold,\n+// even one keeping every other step, finds nothing connected after the\n+// failed no above, so setup does not finish on the old yes.\n+func TestARestartAfterAFailedNoFinishesNothing(t *testing.T) {\n+\tr := newRig(t)\n+\tst := &MemStore{}\n+\tr.srv = r.open(st)\n+\tr.runSetupToAI()\n+\tr.post(\"/setup/ai-device\", url.Values{\"provider\": {\"anthropic\"}, \"private\": {\"1\"}})\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"anthropic\"}, \"key\": {apiCanary}})\n+\tkept, _ := st.Load()\n+\tif len(kept.Unsaved) != 1 || !kept.Host {\n+\t\tt.Fatalf(\"no hold saved: %+v\", kept.Unsaved)\n+\t}\n+\tkept.Unsaved = nil\n+\tr.srv = r.open(&MemStore{s: kept})\n+\tr.get(\"/setup\")\n+\tif r.srv.setup.done() || r.hooks.finishes != 0 || r.hooks.keys != nil {\n+\t\tt.Fatal(\"restart finished setup on the unsaved answer\")\n+\t}\n+}\n+\n+// A yes is saved after the key: a yes that fails leaves the key stored\n+// without the yes, so the vault is never wider than the owner's answer,\n+// and holds setup open with the box ticked.\n+func TestAnUnsavedYesHoldsWithTheKeyStored(t *testing.T) {\n+\tr := newRig(t)\n+\tr.runSetupToAI()\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\tif r.hooks.keys[\"openai\"] != apiCanary || r.hooks.private[\"openai\"] {\n+\t\tt.Fatal(\"key not stored, or the yes recorded\")\n+\t}\n+\tif f := setupForms(t, r.get(\"/setup\"))[\"ai-private openai\"]; !strings.Contains(f, \"checked\") || r.srv.setup.done() {\n+\t\tt.Fatalf(\"setup finished, or the retry lost the owner's yes:\\n%s\", f)\n+\t}\n+}\n+\n+// orderHooks records the vault calls and loads setup inside each, so a\n+// page load racing a save cannot finish setup (#1534 L-1).\n+type orderHooks struct {\n+\t*fakeHooks\n+\tr       *rig\n+\tcalls   []string\n+\tdoneMid bool\n+}\n+\n+func (h *orderHooks) mid(call string) {\n+\th.calls = append(h.calls, call)\n+\th.r.srv.setup.maybeFinish()\n+\th.doneMid = h.doneMid || h.r.srv.setup.done()\n+}\n+\n+func (h *orderHooks) SetPrivateOK(id string, ok bool) error {\n+\tif ok {\n+\t\th.mid(\"yes\")\n+\t} else {\n+\t\th.mid(\"no\")\n+\t}\n+\treturn h.fakeHooks.SetPrivateOK(id, ok)\n+}\n+\n+func (h *orderHooks) ConnectAPIKey(id, key string) error {\n+\th.mid(\"key\")\n+\treturn h.fakeHooks.ConnectAPIKey(id, key)\n+}\n+\n+// A no is saved before the key and a yes after it, and setup finishes\n+// only after both, never from a load while either is in flight.\n+func TestTheAnswerAndKeyOrder(t *testing.T) {\n+\tfor _, c := range []struct {\n+\t\tprivate string\n+\t\twant    string\n+\t}{{\"\", \"no key\"}, {\"1\", \"key yes\"}} {\n+\t\tr := newRig(t)\n+\t\th := &orderHooks{fakeHooks: r.hooks, r: r}\n+\t\tr.via = h\n+\t\tr.srv = r.open(&MemStore{})\n+\t\tr.runSetupToAI()\n+\t\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {c.private}})\n+\t\tif got := strings.Join(h.calls, \" \"); got != c.want {\n+\t\t\tt.Fatalf(\"private=%q: calls %q, want %q\", c.private, got, c.want)\n+\t\t}\n+\t\tif h.doneMid || !r.srv.setup.done() {\n+\t\t\tt.Fatalf(\"private=%q: finished mid-save, or not after\", c.private)\n+\t\t}\n+\t}\n+}\n+\n+// failStore fails every Save while fail is set.\n+type failStore struct {\n+\tMemStore\n+\tmu   sync.Mutex\n+\tfail bool\n+}\n+\n+func (f *failStore) Save(s SetupState) error {\n+\tf.mu.Lock()\n+\tfail := f.fail\n+\tf.mu.Unlock()\n+\tif fail {\n+\t\treturn errors.New(\"disk full\")\n+\t}\n+\treturn f.MemStore.Save(s)\n+}\n+\n+// #1534 M8/M13: a hold the setup store fails to save still holds in\n+// memory, so setup does not finish with the answer unsaved.\n+func TestAHoldTheStoreFailsStillHolds(t *testing.T) {\n+\tr := newRig(t)\n+\tst := &failStore{}\n+\tr.srv = r.open(st)\n+\tr.runSetupToAI()\n+\tst.mu.Lock()\n+\tst.fail = true\n+\tst.mu.Unlock()\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\tif r.srv.setup.done() || r.hooks.finishes != 0 {\n+\t\tt.Fatal(\"setup finished with the answer unsaved\")\n+\t}\n+\tif _, ok := setupForms(t, r.get(\"/setup\"))[\"ai-private openai\"]; !ok {\n+\t\tt.Fatal(\"no retry\")\n+\t}\n+}\n+\n+// #1534 M5: a key the vault refuses leaves an earlier hold as it was.\n+func TestARefusedKeyKeepsAnEarlierHold(t *testing.T) {\n+\tr := newRig(t)\n+\tr.runSetupToAI()\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}})\n+\tr.failPrivate(false)\n+\tr.hooks.mu.Lock()\n+\tr.hooks.keyErr = ErrKeyRefused\n+\tr.hooks.mu.Unlock()\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\tf, ok := setupForms(t, r.get(\"/setup\"))[\"ai-private openai\"]\n+\tif !ok || strings.Contains(f, \"checked\") {\n+\t\tt.Fatalf(\"refused key dropped or changed the earlier hold:\\n%s\", f)\n+\t}\n+}\n+\n+// A key that the vault refuses sets no hold, so setup is not held for an\n+// answer that was never owed (#1467). This passes on main too: it guards\n+// the hold from being set before the key.\n+func TestARefusedKeyLeavesNoHold(t *testing.T) {\n+\tr := newRig(t)\n+\tr.runSetupToAI()\n+\tr.hooks.mu.Lock()\n+\tr.hooks.keyErr = ErrKeyRefused\n+\tr.hooks.mu.Unlock()\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\tif _, ok := setupForms(t, r.get(\"/setup\"))[\"ai-private openai\"]; ok {\n+\t\tt.Fatal(\"refused key left a retry\")\n+\t}\n+\tr.hooks.mu.Lock()\n+\tr.hooks.keyErr = nil\n+\tr.hooks.mu.Unlock()\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}})\n+\tif !r.srv.setup.done() {\n+\t\tt.Fatal(\"setup did not finish\")\n+\t}\n+}\n+\n+// #1467 test 2: SetPrivateOK failing in aiDevice shows no link, shows the\n+// error, and keeps the box as the owner left it; a failed re-post drops\n+// the link an earlier sign-in showed (#1534 M7).\n+func TestAnUnsavedPlanAnswerShowsNoLink(t *testing.T) {\n+\tr := newRig(t)\n+\tr.runSetupToAI()\n+\tr.post(\"/setup/ai-device\", url.Values{\"provider\": {\"anthropic\"}, \"private\": {\"1\"}})\n+\tif !strings.Contains(r.get(\"/setup\"), \"WXYZ-1234\") {\n+\t\tt.Fatal(\"no link after a saved sign-in\")\n+\t}\n+\tr.failPrivate(true)\n+\tr.post(\"/setup/ai-device\", url.Values{\"provider\": {\"anthropic\"}})\n+\tpage := r.get(\"/setup\")\n+\tif strings.Contains(page, \"example.invalid/device\") || strings.Contains(page, \"WXYZ-1234\") {\n+\t\tt.Fatalf(\"link shown with the answer unsaved:\\n%s\", page)\n+\t}\n+\tif !strings.Contains(page, \"Could not save. Try again.\") {\n+\t\tt.Fatalf(\"error not shown:\\n%s\", page)\n+\t}\n+\tif f := setupForms(t, r.get(\"/setup\"))[\"ai-device anthropic\"]; !strings.Contains(f, `name=\"private\" value=\"1\">`) || strings.Contains(f, \"checked\") {\n+\t\tt.Fatalf(\"the owner's unticked box came back ticked:\\n%s\", f)\n+\t}\n+}\n+\n+// postInside posts one AI form from inside a vault call, once.\n+type postInside struct {\n+\t*fakeHooks\n+\tr      *rig\n+\tinKey  url.Values\n+\tinDone url.Values\n+}\n+\n+func (h *postInside) ConnectAPIKey(id, key string) error {\n+\tif f := h.inKey; f != nil {\n+\t\th.inKey = nil\n+\t\th.r.post(\"/setup/ai-key\", f)\n+\t}\n+\treturn h.fakeHooks.ConnectAPIKey(id, key)\n+}\n+\n+func (h *postInside) Finish(n string) error {\n+\tif f := h.inDone; f != nil {\n+\t\th.inDone = nil\n+\t\th.r.post(\"/setup/ai-key\", f)\n+\t}\n+\treturn h.fakeHooks.Finish(n)\n+}\n+\n+// #1534 S3/P-1: one AI post per provider at a time, and none while Finish\n+// runs, so a second post cannot record an answer the first one overrides.\n+func TestAIPostsWaitTheirTurn(t *testing.T) {\n+\tr := newRig(t)\n+\th := &postInside{fakeHooks: r.hooks, r: r,\n+\t\tinKey: url.Values{\"provider\": {\"openai\"}, \"key\": {\"sk-second\"}, \"private\": {\"1\"}}}\n+\tr.via = h\n+\tr.srv = r.open(&MemStore{})\n+\tr.runSetupToAI()\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}})\n+\tif r.hooks.keys[\"openai\"] != apiCanary || r.hooks.private[\"openai\"] || r.hooks.privates != 1 {\n+\t\tt.Fatalf(\"a post during another for the provider went through: %d answers\", r.hooks.privates)\n+\t}\n+\n+\tr = newRig(t)\n+\th = &postInside{fakeHooks: r.hooks, r: r,\n+\t\tinDone: url.Values{\"provider\": {\"openai\"}, \"key\": {apiCanary}, \"private\": {\"1\"}}}\n+\tr.via = h\n+\tr.srv = r.open(&MemStore{})\n+\tr.runSetupToAI()\n+\tr.post(\"/setup/ai-key\", url.Values{\"provider\": {\"anthropic\"}, \"key\": {apiCanary}})\n+\tif !r.srv.setup.done() || r.hooks.keys[\"openai\"] != \"\" || r.hooks.private[\"openai\"] {\n+\t\tt.Fatal(\"a post while Finish ran stored a key or an answer\")\n+\t}\n+}\n+\n+// #1534 M16: the hold survives a FileStore round trip.\n+func TestFileStoreKeepsTheHold(t *testing.T) {\n+\tst := FileStore{Path: filepath.Join(t.TempDir(), \"setup.json\")}\n+\tif err := st.Save(SetupState{Unsaved: map[string]bool{\"openai\": true, \"anthropic\": false}}); err != nil {\n+\t\tt.Fatal(err)\n+\t}\n+\ts, err := st.Load()\n+\tif err != nil || len(s.Unsaved) != 2 || !s.Unsaved[\"openai\"] || s.Unsaved[\"anthropic\"] {\n+\t\tt.Fatalf(\"Unsaved %v, %v\", s.Unsaved, err)\n+\t}\n+}\n+\n+// #1467 test 3: an unknown provider id, or one without that route, on\n+// any AI post records nothing, connects nothing and keeps no answer.\n+func TestUnknownProvidersRecordNothing(t *testing.T) {\n+\tfor _, c := range []struct{ path, id string }{\n+\t\t{\"/setup/ai-key\", \"mistral\"},\n+\t\t{\"/setup/ai-key\", \"\"},\n+\t\t{\"/setup/ai-device\", \"mistral\"},\n+\t\t{\"/setup/ai-device\", \"openai\"}, // no device code\n+\t\t{\"/setup/ai-private\", \"mistral\"},\n+\t\t{\"/setup/ai-private\", \"openai\"}, // nothing unsaved\n+\t} {\n+\t\tt.Run(c.path+\" \"+c.id, func(t *testing.T) {\n+\t\t\tr := newRig(t)\n+\t\t\tr.runSetupToAI()\n+\t\t\tr.post(c.path, url.Values{\"provider\": {c.id}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\t\t\tif r.hooks.keys != nil || r.hooks.privates != 0 || r.hooks.connected {\n+\t\t\t\tt.Fatalf(\"recorded: keys %v, %d answers\", r.hooks.keys, r.hooks.privates)\n+\t\t\t}\n+\t\t\tif r.setupErr() == \"\" {\n+\t\t\t\tt.Fatal(\"no error shown\")\n+\t\t\t}\n+\t\t\tpage := r.get(\"/setup\")\n+\t\t\tif strings.Contains(page, \"example.invalid/device\") || strings.Contains(page, \"ai-private\") {\n+\t\t\t\tt.Fatalf(\"link or retry shown:\\n%s\", page)\n+\t\t\t}\n+\t\t\tif f := setupForms(t, page)[\"ai-key openai\"]; strings.Contains(f, \"checked\") {\n+\t\t\t\tt.Fatalf(\"an answer was kept:\\n%s\", f)\n+\t\t\t}\n+\t\t})\n+\t}\n+}\n+\n+// #1467 test 4: before the host step, the AI posts record nothing. Before\n+// an owner exists any phone may post setup steps, so this gate keeps a\n+// stranger off the AI step.\n+func TestAIStepNeedsTheHostStep(t *testing.T) {\n+\tfor _, path := range []string{\"/setup/ai-key\", \"/setup/ai-device\", \"/setup/ai-private\"} {\n+\t\tt.Run(path, func(t *testing.T) {\n+\t\t\tr := newRig(t)\n+\t\t\tr.hooks.mu.Lock()\n+\t\t\tr.hooks.progress = Progress{Phase: \"ready\", Updated: true, Online: true}\n+\t\t\tr.hooks.mu.Unlock()\n+\t\t\tfor i := 0; i < 2; i++ { // the setup phone, then a stranger\n+\t\t\t\tr.jar, _ = cookiejar.New(nil)\n+\t\t\t\tr.get(\"/setup\")\n+\t\t\t\tr.post(path, url.Values{\"provider\": {\"anthropic\"}, \"key\": {apiCanary}, \"private\": {\"1\"}})\n+\t\t\t\tif r.hooks.keys != nil || r.hooks.privates != 0 || r.hooks.connected {\n+\t\t\t\t\tt.Fatalf(\"AI post before the host step recorded: keys %v, %d answers\", r.hooks.keys, r.hooks.privates)\n+\t\t\t\t}\n+\t\t\t\tif !strings.Contains(r.setupErr(), \"Finish the earlier steps first.\") {\n+\t\t\t\t\tt.Fatal(\"no error shown\")\n+\t\t\t\t}\n+\t\t\t}\n+\t\t})\n+\t}\n+}\n",
+ "expected": {
+  "broker/cmd/agentosd/ASSUMPTIONS.md": [
+   [
+    246,
+    246
+   ]
+  ],
+  "broker/localapi/setup.go": [
+   [
+    26,
+    26
+   ],
+   [
+    41,
+    41
+   ],
+   [
+    117,
+    117
+   ],
+   [
+    257,
+    257
+   ]
+  ],
+  "broker/localsrv/setup.go": [
+   [
+    29,
+    29
+   ],
+   [
+    115,
+    115
+   ],
+   [
+    166,
+    166
+   ],
+   [
+    408,
+    408
+   ]
+  ],
+  "broker/localsrv/setupowed_test.go": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/localsrv/setupproviders.go": [
+   [
+    53,
+    53
+   ],
+   [
+    79,
+    79
+   ],
+   [
+    85,
+    85
+   ],
+   [
+    88,
+    88
+   ],
+   [
+    90,
+    90
+   ],
+   [
+    93,
+    93
+   ],
+   [
+    124,
+    124
+   ]
+  ],
+  "broker/localsrv/setupproviders_test.go": [
+   [
+    21,
+    21
+   ],
+   [
+    22,
+    22
+   ],
+   [
+    32,
+    32
+   ],
+   [
+    50,
+    50
+   ],
+   [
+    53,
+    53
+   ]
+  ],
+  "broker/localui/ASSUMPTIONS.md": [
+   [
+    58,
+    58
+   ]
+  ],
+  "broker/localui/localui_test.go": [
+   [
+    47,
+    64
+   ],
+   [
+    74,
+    74
+   ],
+   [
+    157,
+    157
+   ],
+   [
+    158,
+    158
+   ],
+   [
+    163,
+    163
+   ],
+   [
+    170,
+    170
+   ],
+   [
+    203,
+    203
+   ]
+  ],
+  "broker/localui/setup.go": [
+   [
+    59,
+    59
+   ],
+   [
+    146,
+    146
+   ],
+   [
+    231,
+    231
+   ],
+   [
+    268,
+    268
+   ],
+   [
+    1290,
+    1290
+   ],
+   [
+    1299,
+    1299
+   ],
+   [
+    1307,
+    1307
+   ],
+   [
+    1308,
+    1308
+   ]
+  ],
+  "broker/localui/setuphooks.go": [
+   [
+    114,
+    114
+   ],
+   [
+    119,
+    119
+   ],
+   [
+    141,
+    142
+   ],
+   [
+    150,
+    150
+   ]
+  ],
+  "broker/localui/setuphooks_test.go": [
+   [
+    6,
+    6
+   ],
+   [
+    21,
+    21
+   ],
+   [
+    387,
+    387
+   ]
+  ],
+  "broker/localui/setupunsaved_test.go": [
+   [
+    284,
+    284
+   ],
+   [
+    290,
+    290
+   ],
+   [
+    396,
+    396
+   ]
+  ]
+ },
+ "fix_pr": 1554,
+ "head": "b4e9feec65259fd9e1c2f50880e54e48d1a09717",
+ "id": "pr1534-fix1554",
+ "intro_pr": 1534,
+ "kind": "defect"
+}

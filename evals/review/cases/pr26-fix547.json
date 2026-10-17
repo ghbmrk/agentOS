@@ -1,0 +1,98 @@
+{
+ "diff": "diff --git a/broker/vm/fake_test.go b/broker/vm/fake_test.go\nindex e18e57cc8..e8f4b35fd 100644\n--- a/broker/vm/fake_test.go\n+++ b/broker/vm/fake_test.go\n@@ -25,6 +25,7 @@ type fakeRuntime struct {\n \tlaunches []Launch\n \tkills    int\n \tfailNext error\n+\tonPause  func(id string) // runs as the guest is paused\n }\n \n func newFake() *fakeRuntime {\n@@ -73,6 +74,9 @@ func (f *fakeRuntime) Pause(_ context.Context, id string) error {\n \tif _, ok := f.running[id]; !ok {\n \t\treturn fmt.Errorf(\"fake: pause %s: not running\", id)\n \t}\n+\tif f.onPause != nil {\n+\t\tf.onPause(id)\n+\t}\n \tf.paused[id] = true\n \treturn nil\n }\ndiff --git a/broker/vm/vm.go b/broker/vm/vm.go\nindex 3354b493a..d3366a633 100644\n--- a/broker/vm/vm.go\n+++ b/broker/vm/vm.go\n@@ -801,6 +801,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot,\n \t\treturn Snapshot{}, fmt.Errorf(\"%s: fork(%d): %w\", id, n, err)\n \t}\n \tdefer h.release()\n+\tsrc.mu.Lock()\n+\tprevLast := src.Last\n+\tsrc.mu.Unlock()\n \ts, err := m.take(ctx, id, Full)\n \tif err != nil {\n \t\tundo()\n@@ -812,6 +815,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot,\n \t\terr = h.grow(n*v.Bytes - h.n)\n \t}\n \tif err != nil {\n+\t\t// No fork will use the checkpoint, so it goes too: a refused fork\n+\t\t// leaves nothing behind.\n+\t\tm.dropSnapshot(src, s.ID, prevLast)\n \t\tundo()\n \t\treturn Snapshot{}, fmt.Errorf(\"%s: fork(%d): %w\", id, n, err)\n \t}\n@@ -839,6 +845,21 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot,\n \treturn s, nil\n }\n \n+// dropSnapshot deletes snapshot id, just taken of mc, that nothing uses;\n+// mc's newest snapshot goes back to prev.\n+func (m *Manager) dropSnapshot(mc *machine, id, prev string) {\n+\tm.mu.Lock()\n+\tdelete(m.snaps, id)\n+\tm.mu.Unlock()\n+\tos.RemoveAll(m.snapDir(id))\n+\tmc.mu.Lock()\n+\tif mc.Last == id {\n+\t\tmc.Last = prev\n+\t\tm.saveMachine(mc)\n+\t}\n+\tmc.mu.Unlock()\n+}\n+\n // Diff lists file-system changes from snapshot a to snapshot b (REV-4).\n // The requesting machine learns about both snapshots' contents, so its\n // label rises to theirs (REV-5).\ndiff --git a/broker/vm/vm_test.go b/broker/vm/vm_test.go\nindex 813cbf691..19c679d06 100644\n--- a/broker/vm/vm_test.go\n+++ b/broker/vm/vm_test.go\n@@ -737,3 +737,39 @@ func TestRES4MergeRefusedLeavesDestinationRunning(t *testing.T) {\n \t\tt.Fatalf(\"merge with room: %v\", err)\n \t}\n }\n+\n+// RES-4: a guest that grows its layer while the fork checkpoints it can\n+// push the fork over the disk budget after the checkpoint is taken; the\n+// fork is refused and its checkpoint is not left behind.\n+func TestRES4ForkRefusedAfterCheckpointLeavesNoSnapshot(t *testing.T) {\n+\te := newEnv(t, 4096)\n+\te.cfg.DiskReserveBytes = 1 << 20\n+\tcalls := 0\n+\te.cfg.FreeBytes = func(string) (int64, error) {\n+\t\tcalls++\n+\t\tif calls > 2 { // the reservation before the checkpoint, the checkpoint's own\n+\t\t\treturn 1<<20 + 64<<10, nil\n+\t\t}\n+\t\treturn 1 << 40, nil\n+\t}\n+\te.open()\n+\te.create(\"src\", admission.Accepted, 1)\n+\te.guestWrite(\"src\", \"small\", \"x\")\n+\te.rt.onPause = func(id string) {\n+\t\te.rt.onPause = nil\n+\t\te.guestWrite(id, \"grown\", strings.Repeat(\"x\", 256<<10))\n+\t}\n+\tbefore := e.adm.Snapshot().FreeMB\n+\tif _, err := e.m.Fork(bg, \"src\", []string{\"f1\", \"f2\"}); !errors.Is(err, ErrQuota) {\n+\t\tt.Fatalf(\"fork over budget after checkpoint: %v\", err)\n+\t}\n+\tif calls != 3 {\n+\t\tt.Fatalf(\"disk checked %d times, want the post-checkpoint check to run\", calls)\n+\t}\n+\tm, _ := e.m.Get(\"src\")\n+\tents, _ := os.ReadDir(filepath.Join(e.cfg.StateDir, \"snapshots\"))\n+\tif len(e.m.Snapshots(\"src\")) != 0 || len(ents) != 0 || m.Last != \"\" || m.State != Running ||\n+\t\tlen(e.m.Machines()) != 1 || e.adm.Snapshot().FreeMB != before {\n+\t\tt.Fatalf(\"refused fork left state: %d snapshots, %d dirs, last %q, %s\", len(e.m.Snapshots(\"src\")), len(ents), m.Last, m.State)\n+\t}\n+}\n",
+ "expected": {
+  ".github/workflows/ci.yml": [
+   [
+    90,
+    90
+   ],
+   [
+    92,
+    92
+   ],
+   [
+    95,
+    95
+   ]
+  ],
+  "BOARD.md": [
+   [
+    91,
+    91
+   ]
+  ],
+  "briefs/P1-4-flake.md": [
+   [
+    1,
+    1
+   ]
+  ],
+  "broker/loop7/ASSUMPTIONS.md": [
+   [
+    13,
+    13
+   ]
+  ],
+  "broker/vm/ASSUMPTIONS.md": [
+   [
+    41,
+    41
+   ],
+   [
+    42,
+    42
+   ]
+  ],
+  "broker/vm/gvisor/gvisor.go": [
+   [
+    308,
+    308
+   ],
+   [
+    310,
+    310
+   ]
+  ],
+  "broker/vm/gvisor/panic_test.go": [
+   [
+    53,
+    55
+   ],
+   [
+    57,
+    57
+   ],
+   [
+    59,
+    61
+   ],
+   [
+    62,
+    62
+   ],
+   [
+    68,
+    68
+   ]
+  ],
+  "broker/vm/gvisor/testdata/fakerunsc.sh": [
+   [
+    16,
+    17
+   ],
+   [
+    77,
+    77
+   ],
+   [
+    79,
+    79
+   ]
+  ]
+ },
+ "fix_pr": 547,
+ "head": "048f2fa7590e4eafdef7d0c70430973be87a510c",
+ "id": "pr26-fix547",
+ "intro_pr": 26,
+ "kind": "defect"
+}
