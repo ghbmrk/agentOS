@@ -51,12 +51,18 @@ FORWARDER = "http://127.0.0.1:18432"
 FORWARDER_SRC = ROOT / "broker/egress/cmd/agentos-codex-forwarder/main.go"
 CODEX_HOME = "/var/lib/agentos-codex"
 WORK = "/var/lib/agentos-work"
+# The model G1's model-backed task (provider_run on the Codex plan route) sends (#1396,
+# guest/codex/ASSUMPTIONS.md C19): the default of the pinned CLI's bundled catalog, pinned so a
+# catalog refresh from the provider cannot change it between the qualification run and G1.
+MODEL = "gpt-6.1-sol"
+MODEL_LINE = f'model = "{MODEL}"\n'
 
 # Settings that must hold exactly. The key names were measured against Codex CLI 0.162.1
 # (guest/codex/ASSUMPTIONS.md C1); a missing key counts as on, since the CLI's default may be on,
 # and a lower config layer can add any key the managed file leaves out.
 REQUIRED = {
     ("model_provider",): "agentos",
+    ("model",): MODEL,
     ("model_providers", "agentos", "base_url"): FORWARDER + "/backend-api/codex",
     ("model_providers", "agentos", "wire_api"): "responses",
     ("model_providers", "agentos", "requires_openai_auth"): True,
@@ -213,6 +219,8 @@ class ManagedConfigTest(unittest.TestCase):
             "base_url off the forwarder": put(("model_providers", "agentos", "base_url"),
                                               "https://chatgpt.com/backend-api/codex"),
             "other provider": put(("model_provider",), "openai"),
+            "model unpinned (catalog default)": drop(("model",)),
+            "other model": put(("model",), "gpt-5.5"),
             "auto-update check on": put(("check_for_update_on_startup",), True),
             "analytics on": put(("analytics", "enabled"), True),
             "telemetry exported": put(("otel", "exporter"), "otlp-http"),
@@ -542,9 +550,10 @@ class ToolSandboxTest(unittest.TestCase):
         bad.chmod(0o755)
         return bad
 
-    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=()):
+    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=(), skip_outlives=False):
+        flag = ("--skip-outlives",) if skip_outlives else ()
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
-                        toolsh=toolsh, codex_home=codex_home, extra=extra)
+                        *flag, toolsh=toolsh, codex_home=codex_home, extra=extra)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -562,7 +571,8 @@ class ToolSandboxTest(unittest.TestCase):
         self.assertFalse(tool["session"], "tool shares the CLI's session")
         self.assertFalse(tool["tmp"], "tool saw the worker's /tmp or /var/tmp")
         self.assertEqual(tool["fds"], [], "tool inherited the CLI's descriptors")
-        self.assertFalse(tool["outlives"], "tool outlived its wrapper")
+        # Is False, not falsy: a run that skipped the outlives probe has no verdict to pass.
+        self.assertIs(tool.get("outlives"), False, "tool outlived its wrapper, or was not checked")
         self.assertTrue(tool["work_write"], "tool must still write its workspace")
         self.assertEqual(tool["ifaces"], ["lo"], "tool must have no interface but its own lo")
 
@@ -769,7 +779,7 @@ echo "func=$?"
                 self.assertEqual(r.returncode == 126 and "non-numeric" in r.stderr, refused,
                                  r.stderr)
 
-    # REQ: CRED-5, A14
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-1)
     def test_descriptors_closed_in_a_pid_namespace_with_the_hosts_proc(self):
         # The CLI may itself run in a pid namespace that still mounts the host's /proc: there $$
         # names some other process, so a loop over /proc/$$/fd closes the wrong descriptors (or
@@ -779,9 +789,30 @@ echo "func=$?"
         bad = self.mutant("toolsh-pid",
                           ("[ -d /proc/self/fd ]", '[ -d "/proc/$$/fd" ]'),
                           ("for fd in /proc/self/fd/*", 'for fd in "/proc/$$"/fd/*'))
-        tool = self.run_worker(toolsh=bad, extra=pidns)["tool"]
+        # The mutant run asks only about descriptors; its refused wrapper never starts the
+        # beat, so the outlives probe would just wait out its 10s (A4).
+        tool = self.run_worker(toolsh=bad, extra=pidns, skip_outlives=True)["tool"]
         self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
                          "the $$ mutant must leak descriptors or refuse")
+
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-2)
+    def test_skipping_the_outlives_probe_keeps_the_descriptor_probe_and_fails_containment(self):
+        # A4: the stub CLI's --skip-outlives drops only the last phase. The descriptor probe
+        # still runs, and the result carries no outlives verdict, so assert_contained fails it:
+        # a run that must prove containment cannot skip the check unnoticed.
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        "--skip-outlives", extra=("--unshare-pid",))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool = json.loads(r.stdout)["tool"]
+        self.assertEqual((tool["exit"], tool["fds"]), (0, []), tool)
+        self.assertNotIn("outlives", tool)
+        self.assertIn("outlives skipped", r.stderr)
+        self.assertNotIn("beat", r.stderr, "the beat tool must not start")
+        with self.assertRaises(AssertionError):
+            self.assert_contained(tool)
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        "--skip-outlive")
+        self.assertEqual(r.returncode, 2, "an unknown flag must not run a partial check")
 
     # REQ: CRED-5, A14
     def test_a_stalled_worker_fails_with_a_diagnosis_and_leaves_nothing_running(self):
@@ -1039,6 +1070,8 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
             self.assertNotIn(name, tool["environ"])
         self.assertEqual(got["marks"], set(), "a program from a lower layer ran")
         self.assertNotIn("project-config-model", [q["model"] for q in requests])
+        # Every turn asks for the pinned model, whatever the catalog says (#1396, C19).
+        self.assertEqual({q["model"] for q in requests if q["method"] == "POST"}, {MODEL})
         self.assertFalse(any(q["upgrade"] for q in requests), "WebSocket transport used")
 
     # REQ: CRED-5, A14
@@ -1070,7 +1103,10 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
             "/tmp exclusion": ((("exclude_slash_tmp = true", "exclude_slash_tmp = false"),), (),
                                "write /tmp"),
             "notify": ((('notify = []\n', ""),), (), "notify"),
-            "workspace trust": ((('trust_level = "untrusted"\n', ""),), (), "trust"),
+            # The managed model pin beats a trusted project's model too, so the trust mutant
+            # drops it as well; the control below shows the trust pin alone still holds.
+            "workspace trust": ((('trust_level = "untrusted"\n', ""), (MODEL_LINE, "")), (),
+                                "trust"),
             "MCP allowlist": ((), (("[mcp_servers]\n", ""),), "mcp"),
             "deny_read": ((), ((deny_text, "deny_read = []"),), "auth"),
         }
@@ -1078,6 +1114,9 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
             with self.subTest(mutant=name):
                 self.assertTrue(shows(self.turn(config_edits, requirements_edits), what),
                                 f"{name} dropped went unnoticed")
+        with self.subTest(control="model pin dropped, trust pin kept"):
+            self.assertFalse(shows(self.turn(((MODEL_LINE, ""),)), "trust"),
+                             "an untrusted workspace's config was loaded")
 
 
 def userns_restricted():

@@ -385,6 +385,11 @@ func (p *Plane) PendingReplies() []PendingReply { return p.store.pending() }
 // restart, so the reply may be handed on again.
 func (p *Plane) ReplyDone(machine, id string) error { return p.store.retire(machine, id) }
 
+// ForgetReplies drops every reply waiting in the outbox, durably: a
+// deletion reaches them (CAP-3, DEL-1-f1). A reply already handed on is
+// not recalled.
+func (p *Plane) ForgetReplies() error { return p.store.forget() }
+
 // RepliesWaiting reports that a guest's reply was refused because the
 // outbox is full, until the consumer next removes one (DEL-1e).
 func (p *Plane) RepliesWaiting() bool { return p.store.waiting() }

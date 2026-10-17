@@ -589,3 +589,103 @@ func TestEvidenceOffUnderAFenceSaysWhatToWaitFor(t *testing.T) {
 		t.Fatalf("held: %q", got)
 	}
 }
+
+// forgettingOutbox is an outbox a deletion can reach, as the guest
+// plane's is (guest.Plane.ForgetReplies).
+type forgettingOutbox struct {
+	fakeOutbox
+	fail error
+	done []string // replies the worker retired
+}
+
+func (f *forgettingOutbox) ForgetReplies() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pending = nil
+	return f.fail
+}
+
+func (f *forgettingOutbox) ReplyDone(machine, id string) error {
+	f.mu.Lock()
+	f.done = append(f.done, id)
+	f.mu.Unlock()
+	return f.fakeOutbox.ReplyDone(machine, id)
+}
+
+func (f *forgettingOutbox) retired() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.done)
+}
+
+// REQ: CAP-3 (DEL-1-f1b, DEL-1-f1c)
+// DEL-1-f1b: a deletion's reach (CAP-3) takes in the replies waiting in
+// the guest plane's outbox, which may quote the deleted record as a kept
+// reply may; a failure to drop them is reported, and an outbox that
+// cannot drop them fails the deletion rather than passing it.
+func TestDEL1f1DeletionReachesTheOutbox(t *testing.T) {
+	r := newEvRig(t, "")
+	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+		t.Fatalf("before the plane opens: %v", err)
+	}
+	src := &forgettingOutbox{fakeOutbox: fakeOutbox{sent: r.texts}}
+	src.add("quotes the record")
+	r.ev.kept.keep("quotes it too")
+	r.ev.serve(src)
+	c := &fakeCases{}
+	if _, err := (forgetFan{cases: c, kept: r.ev.kept}).ForgetTasks("agent/1"); err == nil || !slices.Equal(c.ids, []string{"agent/1"}) {
+		t.Fatalf("forget: %v %v", err, c.ids)
+	}
+	if len(src.PendingReplies()) != 0 || len(r.ev.kept.list()) != 0 {
+		t.Fatalf("left %d waiting, %d kept", len(src.PendingReplies()), len(r.ev.kept.list()))
+	}
+	src.fail = errors.New("outbox not saved")
+	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); !errors.Is(err, src.fail) {
+		t.Fatalf("failed drop: %v", err)
+	}
+	r.ev.serve(&fakeOutbox{sent: r.texts})
+	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err == nil {
+		t.Fatal("an outbox the deletion cannot reach passed")
+	}
+}
+
+// DEL-1-f1c: a deletion while the worker is routing a reply: no other
+// reply that was waiting is handed on afterwards, and the reply in
+// flight, which cannot be recalled, leaves no kept copy behind though
+// its delivery failed after the deletion.
+func TestDEL1f1ForgetDuringARoute(t *testing.T) {
+	r := newEvRig(t, destAddr)
+	r.gate.state = journal.NotApplied
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.ev.sleep = func(time.Duration) { once.Do(func() { close(started); <-release }) }
+	src := &forgettingOutbox{fakeOutbox: fakeOutbox{sent: r.texts}}
+	for i := 0; i < 3; i++ {
+		src.add(fmt.Sprint("canary-del1f1-", i))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ev.wake = make(chan struct{}, 1)
+	go r.ev.run(ctx)
+	r.ev.serve(src)
+	<-started
+	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(src.retired()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	r.ev.poke()
+	time.Sleep(20 * time.Millisecond)
+	if got := src.retired(); !slices.Equal(got, []string{"idcanary-del1f1-0"}) {
+		t.Fatalf("handed on %q", got)
+	}
+	if got := r.texts(); len(got) != 1 {
+		t.Fatalf("texted %q", got)
+	}
+	if k := r.ev.kept.list(); len(k) != 0 {
+		t.Fatalf("kept after the deletion: %+v", k)
+	}
+}

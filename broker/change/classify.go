@@ -52,6 +52,8 @@ func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification 
 			}
 		case ClassRouting:
 			p.checkRouting(&cl, e)
+		case ClassAdapter:
+			p.checkAdapter(&cl, e)
 		case ClassContext:
 			p.checkContext(&cl, e)
 			// Every text file a Loop 1 builder may write gets the same

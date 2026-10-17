@@ -192,7 +192,9 @@ var learningPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
+	// change reads the closed verb list to check an adapter's demo runs
+	// before adoption (ADP-8b); verb is standard library only.
+	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
 	"loops":  {[]string{"change", "journal", "meter", "owner", "skill/format", "vm"}, forbiddenStd},
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.

@@ -22,6 +22,9 @@ StateDirectoryMode=0700
 # Its sockets: each one admits only its peer's uid (SO_PEERCRED).
 RuntimeDirectory=agentos-egress
 RuntimeDirectoryMode=0711
+# Kept across stops and restarts (#1628): agentos-ap masks this directory, and a mask on a
+# removed directory is detached, so a recreated one would show through until agentos-ap restarts.
+RuntimeDirectoryPreserve=yes
 # Only on the drive this PC booted, as the broker (drive-id).
 ExecStartPre=+/usr/lib/agentos/drive-id check
 ExecStartPre=+/usr/lib/agentos/egress-setup

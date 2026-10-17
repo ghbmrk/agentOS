@@ -26,10 +26,14 @@ type cardState struct {
 // shows it to the paired phone; nothing of it is written until the
 // confirm, when the box provisions from it, latches, and erases its copy.
 type CardStep struct {
-	state Store
-	mu    sync.Mutex
-	done  bool
-	d     *card.Display
+	state     Store
+	cfg       card.DisplayConfig
+	preloaded bool
+
+	mu   sync.Mutex
+	done bool
+	gen  int // the display whose confirm may latch; Again moves it on
+	d    *card.Display
 }
 
 // NewCardStep loads the latch and, if the card was not confirmed yet,
@@ -49,20 +53,36 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 			return nil, fmt.Errorf("firstboot: card state: %w", err)
 		}
 	}
-	s := &CardStep{state: st, done: cs.Confirmed}
+	s := &CardStep{state: st, cfg: cfg, preloaded: cs.Preloaded, done: cs.Confirmed}
 	if s.done {
 		return s, nil
 	}
+	if s.d, err = s.display(0); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// display builds generation gen's card display: its confirm provisions,
+// latches and releases the hold, unless Again has moved on since.
+func (s *CardStep) display(gen int) (*card.Display, error) {
+	cfg := s.cfg
 	prov := cfg.Provision
 	cfg.Provision = func(c *card.Card) error {
+		s.mu.Lock()
+		stale := s.gen != gen
+		s.mu.Unlock()
+		if stale {
+			return errors.New("firstboot: this Owner Card was replaced; use the new one")
+		}
 		if err := prov(c); err != nil {
 			return err
 		}
-		b, err := json.Marshal(cardState{Confirmed: true, Preloaded: cs.Preloaded})
+		b, err := json.Marshal(cardState{Confirmed: true, Preloaded: s.preloaded})
 		if err != nil {
 			return err
 		}
-		if err := st.Save(b); err != nil {
+		if err := s.state.Save(b); err != nil {
 			return err
 		}
 		s.mu.Lock()
@@ -70,10 +90,40 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 		s.mu.Unlock()
 		return nil
 	}
-	if s.d, err = card.NewDisplay(cfg); err != nil {
-		return nil, err
+	return card.NewDisplay(cfg)
+}
+
+// Again reruns the card step for a vault that holds no card although the
+// latch says confirmed (#1330): the hold refuses at once, reset runs (the
+// vault's card reset, a no-op on a vault remade empty), then a new card
+// is shown whose confirm provisions and latches as before. The disk latch
+// is kept until that confirm: agentos-ap serves the card's network while
+// it reads confirmed, and the setup network is burned (ASSUMPTIONS.md).
+// A failed reset shows no card; Again may be called again.
+func (s *CardStep) Again(reset func() error) error {
+	if reset == nil {
+		return errors.New("firstboot: incomplete card reset config")
 	}
-	return s, nil
+	s.mu.Lock()
+	s.done = false
+	s.gen++
+	gen := s.gen
+	s.d = nil
+	s.mu.Unlock()
+	if err := reset(); err != nil {
+		return fmt.Errorf("firstboot: resetting the vault for a new card: %w", err)
+	}
+	d, err := s.display(gen)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen {
+		return errors.New("firstboot: the card step was rerun again")
+	}
+	s.d = d
+	return nil
 }
 
 // ResetUnlatched runs reset unless st's latch says the card was
@@ -106,8 +156,12 @@ func ResetUnlatched(st Store, reset func() error) error {
 }
 
 // Display is the card's display for the local page: nil when the card was
-// confirmed on an earlier start.
-func (s *CardStep) Display() *card.Display { return s.d }
+// confirmed on an earlier start, and while Again resets the vault.
+func (s *CardStep) Display() *card.Display {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.d
+}
 
 // Hold returns ErrCardPending, with the owner's next step, until the card
 // is confirmed; nil after. The setup finish path calls it first.

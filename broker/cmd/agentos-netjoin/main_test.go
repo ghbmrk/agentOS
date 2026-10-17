@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/netjoin"
 )
 
-// REQ: ONB-3, CRED-1
+// REQ: ONB-3, CRED-1, DEV-2, CH-7
 
 const canary = "CANARY-netjoin-cmd-5b1e"
 
@@ -85,7 +86,7 @@ func TestTheHelperMakesOnlyItsOwnCalls(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 	b := &fakeBus{}
-	j := netjoin.NewJoiner(nmBus{obj: b.obj})
+	j := netjoin.NewJoiner(nmBus{obj: b.obj}, "wlan1", []string{"wlan0"})
 	for i := range 2 {
 		if c := j.Join(context.Background(), "home", canary); c != netjoin.Joined {
 			t.Fatalf("join %d: %s", i, c)
@@ -118,7 +119,7 @@ func TestTheHelperMakesOnlyItsOwnCalls(t *testing.T) {
 		s := w.args[0].(map[string]map[string]dbus.Variant)
 		for _, f := range []struct{ group, key, sig string }{
 			{"connection", "id", "s"}, {"connection", "uuid", "s"}, {"connection", "type", "s"},
-			{"connection", "autoconnect", "b"},
+			{"connection", "autoconnect", "b"}, {"connection", "interface-name", "s"},
 			{"802-11-wireless", "ssid", "ay"}, {"802-11-wireless", "mode", "s"}, {"802-11-wireless", "hidden", "b"},
 			{"802-11-wireless-security", "key-mgmt", "s"}, {"802-11-wireless-security", "psk", "s"},
 			{"802-11-wireless-security", "psk-flags", "u"},
@@ -131,7 +132,7 @@ func TestTheHelperMakesOnlyItsOwnCalls(t *testing.T) {
 		if s["802-11-wireless-security"]["psk"].Value() != canary || !bytes.Equal(s["802-11-wireless"]["ssid"].Value().([]byte), []byte("home")) {
 			t.Error("the request's SSID and PSK were not sent")
 		}
-		want := netjoin.ConnectionSettings("home", canary)
+		want := netjoin.ConnectionSettings("home", canary, "wlan1")
 		if len(s) != len(want) {
 			t.Errorf("groups %d, want %d", len(s), len(want))
 		}
@@ -160,7 +161,7 @@ func TestLookupErrorsAndPathsAreChecked(t *testing.T) {
 		t.Fatal("a non-connection path was accepted")
 	}
 	n := len(b.calls)
-	if err := nm.Update2(context.Background(), "/org/freedesktop/NetworkManager/Devices/1", netjoin.ConnectionSettings("home", canary)); err == nil {
+	if err := nm.Update2(context.Background(), "/org/freedesktop/NetworkManager/Devices/1", netjoin.ConnectionSettings("home", canary, "wlan1")); err == nil {
 		t.Fatal("Update2 on a non-connection path")
 	}
 	if _, err := nm.ActiveUUID(context.Background(), "/org/freedesktop/systemd1"); err == nil {
@@ -225,6 +226,88 @@ func TestTheUnitIsHardened(t *testing.T) {
 	exec := strings.Join(set["ExecStart"], "")
 	if !strings.Contains(exec, " -dir /run/agentos-netjoin ") {
 		t.Errorf("ExecStart %q does not serve the RuntimeDirectory", exec)
+	}
+}
+
+// execArgs is a unit's ExecStart split into its arguments, the binary
+// dropped, with backslash continuations joined.
+func execArgs(t *testing.T, unit string) []string {
+	t.Helper()
+	b, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(b), "\\\n", " ")
+	for _, l := range strings.Split(text, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "ExecStart="); ok {
+			return strings.Fields(v)[1:]
+		}
+	}
+	t.Fatalf("%s has no ExecStart", unit)
+	return nil
+}
+
+// S-R4 (#1428): the unit names every interface agentos-ap's unit may run
+// the access point on, and no station until #936 ships one, so the
+// helper as installed refuses every join before any bus call.
+func TestTheUnitRefusesTheAccessPointInterface(t *testing.T) {
+	c, err := parseFlags(execArgs(t, "agentos-netjoin.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.station != "" {
+		t.Errorf("the unit names station %q before #936 ships one", c.station)
+	}
+	ap := execArgs(t, "../agentos-ap/agentos-ap.service")
+	var served []string
+	for i, a := range ap {
+		if a == "-iface" && i+1 < len(ap) {
+			served = append(served, ap[i+1])
+		}
+	}
+	if len(served) == 0 {
+		t.Fatal("agentos-ap's unit names no -iface")
+	}
+	for _, s := range served {
+		if !slices.Contains(c.ap, s) {
+			t.Errorf("agentos-ap serves on %s, which -ap-iface %v leaves out", s, c.ap)
+		}
+	}
+	b := &fakeBus{}
+	if got := c.joiner(nmBus{obj: b.obj}).Join(context.Background(), "home", canary); got != netjoin.Failed || len(b.calls) != 0 {
+		t.Fatalf("the unit's helper answered %q after %d bus calls, want failed after none", got, len(b.calls))
+	}
+}
+
+// The flags reach the Joiner: -station and every -ap-iface.
+func TestTheFlagsReachTheJoiner(t *testing.T) {
+	c, err := parseFlags([]string{"-dir", "/run/x", "-agentosd-uid", "7", "-station", "wlan1", "-ap-iface", "wlan0", "-ap-iface", "wlan2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.dir != "/run/x" || c.agentosdUID != 7 || c.station != "wlan1" || !slices.Equal(c.ap, []string{"wlan0", "wlan2"}) {
+		t.Fatalf("parsed %+v", c)
+	}
+	for _, tc := range []struct {
+		args []string
+		want netjoin.Code
+	}{
+		{[]string{"-station", "wlan1", "-ap-iface", "wlan0"}, netjoin.Joined},
+		{[]string{"-station", "wlan0", "-ap-iface", "wlan0"}, netjoin.Failed},
+		{[]string{"-station", "wlan2", "-ap-iface", "wlan0", "-ap-iface", "wlan2"}, netjoin.Failed},
+		{[]string{"-station", "wlan1"}, netjoin.Failed},
+	} {
+		c, err := parseFlags(tc.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := &fakeBus{}
+		if got := c.joiner(nmBus{obj: b.obj}).Join(context.Background(), "home", canary); got != tc.want {
+			t.Errorf("%v: answered %q, want %q", tc.args, got, tc.want)
+		}
+	}
+	if _, err := parseFlags([]string{"-bogus"}); err == nil {
+		t.Error("an unknown flag parsed")
 	}
 }
 
