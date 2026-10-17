@@ -287,6 +287,10 @@ type SetupProvider struct {
 	DeviceCode bool   `json:"device_code"`
 	Connected  bool   `json:"connected"`
 	PrivateOK  bool   `json:"private_ok"`
+	// PrivateByConfig: the vault process's configuration allows this
+	// provider private data whatever the owner answers, so setup shows
+	// its box as fixed (#1608, CAP-9). PrivateOK stays the owner's answer.
+	PrivateByConfig bool `json:"private_by_config,omitempty"`
 	// Owed is the owner's private-data answer agentosd recorded for this
 	// provider and the vault has not confirmed (#1544), or nil. agentosd
 	// sets it from its own setup record, never from the vault's list, and
