@@ -2256,10 +2256,16 @@ var publishDir = durable.PublishDir
 // synced first. When only the sync of the snapshots directory failed, the
 // snapshot is complete but its name may not survive a power cut: it is
 // reported as failed and removed, and should a power cut bring it back,
-// load finds a whole snapshot no machine points at.
+// load finds a whole snapshot no machine points at. Its meta.json goes
+// first, with its directory synced, so a power cut part-way through the
+// removal leaves a directory load drops, never a meta.json over a partly
+// removed layer (CAP-3).
 func publishSnap(dir string, fill func(stage string) error) error {
 	err := publishDir(dir, 0o700, fill)
 	if errors.Is(err, durable.ErrDirSync) {
+		if os.Remove(filepath.Join(dir, "meta.json")) == nil {
+			syncSnapDir(dir) // best effort: the publish has failed already
+		}
 		os.RemoveAll(dir)
 	}
 	return err

@@ -86,6 +86,21 @@ func TestCAP3SnapshotPublishedOnlyWhole(t *testing.T) {
 			must(t, os.RemoveAll(dir))
 			return ferr
 		})
+		// The removal after the rename drops meta.json, durably, before
+		// the rest, so a power cut part-way through leaves nothing load
+		// takes.
+		synced := 0
+		oldSync := syncSnapDir
+		syncSnapDir = func(d string) error {
+			if _, err := os.Stat(filepath.Join(d, "meta.json")); !os.IsNotExist(err) {
+				t.Errorf("%s: snapshot dir synced with meta.json still there: %v", name, err)
+			}
+			if _, err := os.Stat(filepath.Join(d, "fs")); err != nil {
+				t.Errorf("%s: layer removed before meta.json: %v", name, err)
+			}
+			synced++
+			return oldSync(d)
+		}
 		before := len(e.m.Snapshots("m"))
 		if _, err := e.m.Step(bg, "m"); !errors.Is(err, ferr) {
 			t.Fatalf("%s: Step = %v", name, err)
@@ -97,6 +112,10 @@ func TestCAP3SnapshotPublishedOnlyWhole(t *testing.T) {
 		must(t, err)
 		if len(ents) != before {
 			t.Fatalf("%s: %d entries on disk, want %d: %v", name, len(ents), before, ents)
+		}
+		syncSnapDir = oldSync
+		if want := map[bool]int{true: 1}[errors.Is(ferr, durable.ErrDirSync)]; synced != want {
+			t.Fatalf("%s: snapshot dir synced %d times, want %d", name, synced, want)
 		}
 	}
 	e.restart("m")
