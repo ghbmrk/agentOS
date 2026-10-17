@@ -97,8 +97,8 @@ func day(t time.Time, loc *time.Location) time.Time {
 }
 
 // newQuestion builds the question for a restore held for reason. has
-// says the restored vault holds log; its last entry's date is the answer,
-// or "never" with none. The decoys sit decoyGap to twice that apart, on
+// says the restored vault holds log; its last forget's date (a done marker
+// is not one) is the answer, or "never" with none. The decoys sit decoyGap to twice that apart, on
 // both sides of the real date as far as the backup's date (created)
 // allows, so the real date is at any place in the list; with no real
 // date, a past day takes its place as one more decoy. now gives only the
@@ -116,8 +116,8 @@ func newQuestion(reason string, l forgetLog, has bool, now time.Time, newer []Ba
 	f := confirmFile{Format: confirmFmt, Reason: reason}
 	bound := day(created, now.Location())
 	pivot, answer := time.Time{}, -1
-	if has && len(l.Entries) > 0 {
-		pivot = day(l.Entries[len(l.Entries)-1].At, now.Location())
+	if e, ok := l.lastForget(); has && ok {
+		pivot = day(e.At, now.Location())
 		answer = 0
 	} else {
 		n, err := rnd(decoyGap, 366)
@@ -233,4 +233,14 @@ func writeQuestion(path string, f confirmFile) error {
 		return err
 	}
 	return durable.WriteFile(path+ConfirmSuffix, enc, 0o600)
+}
+
+// lastForget is l's last entry that is a forget, not a done marker.
+func (l forgetLog) lastForget() (ForgetEntry, bool) {
+	for i := len(l.Entries) - 1; i >= 0; i-- {
+		if !l.Entries[i].Done {
+			return l.Entries[i], true
+		}
+	}
+	return ForgetEntry{}, false
 }

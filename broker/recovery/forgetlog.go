@@ -79,6 +79,11 @@ type ForgetEntry struct {
 	Since time.Time `json:"since,omitempty"`
 	// Agent: the forget took the agent's own machines back too.
 	Agent bool `json:"agent,omitempty"`
+	// Done marks the done text of Goal's forget as sent (agentosd,
+	// W3-forget-b2c-f1-r2): not itself a forget, so a restore owes no done
+	// text for Goal but still forgets it. Omitted when false, so a log with
+	// no marker reads and verifies as before.
+	Done bool `json:"done,omitempty"`
 	// Count is the counter value this entry advanced the PC's counter to;
 	// 0 for an entry made without one.
 	Count uint64 `json:"count,omitempty"`
