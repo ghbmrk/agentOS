@@ -18,8 +18,9 @@
 # frozen-import lines), fuzz in the loop (loop7, machprobe, sockprobe) and learning sources
 # beyond one candidate (compile, corpus, loopbuild, loops, skill). Also off the list because
 # no G2 test needs them: attention (CAP-6, G4), floor (A2, G3), the A8 scanner (G3), the
-# builder guest and binary (A11), probecmd (LOOP-7), photo (CH-22-27), evals/, and the
-# other spikes.
+# builder guest and binary (A11), probecmd (LOOP-7), evals/, and the other spikes. Photo
+# (CH-22-27: broker/photo/, broker/cmd/agentos-photo/) is listed so its chain can build;
+# no G2 binary imports it.
 
 freeze on
 since 2026-10-17T17:06:19Z
@@ -81,9 +82,11 @@ allow broker/cmd/agentos-egress/
 allow broker/cmd/agentos-guest-bridge/
 allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/
+allow broker/cmd/agentos-infer/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
 allow broker/cmd/agentos-netjoin/
+allow broker/cmd/agentos-photo/
 allow broker/cmd/agentos-release/
 allow broker/cmd/agentos-seller/
 allow broker/cmd/agentosd/
@@ -121,6 +124,7 @@ allow broker/guest/
 allow broker/guesterr/
 allow broker/holder/
 allow broker/hostdisk/
+allow broker/infer/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
@@ -134,6 +138,7 @@ allow broker/modemlink/
 allow broker/netguard/
 allow broker/netjoin/
 allow broker/owner/
+allow broker/photo/
 allow broker/procguard/
 allow broker/projection/
 allow broker/provagent/

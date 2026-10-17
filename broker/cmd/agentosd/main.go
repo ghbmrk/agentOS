@@ -902,7 +902,8 @@ func main() {
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
-				pr.Background = ctx // a sign-in's wait ends at shutdown
+				pr.Background = ctx   // a sign-in's wait ends at shutdown
+				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
