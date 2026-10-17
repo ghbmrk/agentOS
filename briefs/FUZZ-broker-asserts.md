@@ -1,6 +1,6 @@
 # FUZZ-broker-asserts: the broker fuzz targets assert what the FUZZ-broker brief names, and show they can fail
 
-Board rows: issues #2238 and #2239, both release findings from the delta L3 review of #2149 (FUZZ-broker). Tier: A per the issues' labels and `briefs/FUZZ-broker.md`; the coordinator handed it to a tier-C builder because the diff is test files only, so `tools/risk_tier.py` on the real diff decides before the PR opens (OPERATING §3). Builder: Sonnet-class. Usage estimate: 60k tokens, checkpoint at 90k.
+Board rows: issues #2238 and #2239, both release findings from the delta L3 review of #2149 (FUZZ-broker). Tier: A. `tools/risk_tier.py --git origin/main HEAD` prints A for all four `broker/{netguard,vault,localsrv,grants}/fuzz_test.go` (broker test files take their package's tier), so a tier-A builder on the strongest model finishes it after a Sonnet-class start (OPERATING §3, §5). Usage estimate: 60k tokens, checkpoint at 90k.
 
 **Why (verified at main).** `broker/netguard/fuzz_test.go` never references `ErrGatewayMoved` (FUZZ-1 names it); `broker/vault/fuzz_test.go` never scans the files it writes for the data key (FUZZ-4 names it); only `broker/sockets/fuzz_test.go` has a planted-defect control, though FUZZ-5 asks for one per target. Failure path: a change makes a second gateway move return a cached answer or nil, or a rekey writes the unwrapped key into the keys file, or an oracle quietly stops checking; each target stays green.
 
@@ -8,7 +8,7 @@ Board rows: issues #2238 and #2239, both release findings from the delta L3 revi
 
 - **FUZZ-1** `FuzzSourcesRead` and `FuzzGatewayPolicy` assert that `Sources.Read` and `Policy.Refresh` return `ErrGatewayMoved` exactly when the gateway moved during both router requests of one read, and a seed input drives that case.
 - **FUZZ-4** `FuzzSlots` scans the vault file and the keys file after every operation for every data key the vault has held, raw, hex and base64, and fails when one appears.
-- **FUZZ-5** Each of `FuzzSourcesRead`, `FuzzGatewayPolicy`, `FuzzCheck`, `FuzzSessions`, `FuzzApprovals` and `FuzzSlots` has a planted-defect control: its oracle is factored to report through a small interface, a recorder collects what a planted defect trips, and the same input passes against the real code (the pattern in `broker/sockets/fuzz_test.go`).
+- **FUZZ-5** Each of `FuzzSourcesRead`, `FuzzGatewayPolicy`, `FuzzCheck`, `FuzzSessions`, `FuzzApprovals` and `FuzzSlots` has a planted-defect control: its oracle is factored to report through a small interface, a recorder collects what a planted defect trips, the control asserts the failure message of the oracle it targets (so an unrelated oracle firing does not pass it), and the same input passes against the real code (the pattern in `broker/sockets/fuzz_test.go`).
 
 Doc comments: the targets' `FUZZ-n` numbers already match main's FUZZ-1..4 (checked); `FuzzCheck` stays the "extra" target, so there is nothing to renumber.
 

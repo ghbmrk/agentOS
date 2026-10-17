@@ -65,6 +65,17 @@ func (r *recorder) run(f func(fuzzT)) (msgs []string) {
 	return r.msgs
 }
 
+// reports runs f and says whether the oracle reported a failure containing
+// want, so a control fails when only an unrelated oracle fires.
+func (r *recorder) reports(f func(fuzzT), want string) bool {
+	for _, m := range r.run(f) {
+		if strings.Contains(m, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // fuzzSessions drives the sessions as the input says. call2, when set,
 // stands in for the server's ops: a planted defect.
 func fuzzSessions(t *testing.T, rep fuzzT, b []byte, call2 func(r *rig, op string, args any) (any, error)) {
@@ -244,13 +255,14 @@ func TestFuzzSessionsReportsAPlantedDefect(t *testing.T) {
 	for name, c := range map[string]struct {
 		in   []byte
 		call func(*rig, string, any) (any, error)
+		want string
 	}{
-		"sign-out does nothing": {[]byte{0, 0, 3, 0, 2, 0}, signOutIgnored},
-		"any token accepted":    {[]byte{0, 0, 2, 255}, acceptsAnyToken},
+		"sign-out does nothing": {[]byte{0, 0, 3, 0, 2, 0}, signOutIgnored, "signed out is accepted again"},
+		"any token accepted":    {[]byte{0, 0, 2, 255}, acceptsAnyToken, "accepted true, want false"},
 	} {
 		var rec recorder
-		if len(rec.run(func(ft fuzzT) { fuzzSessions(t, ft, c.in, c.call) })) == 0 {
-			t.Errorf("%s: the oracle did not report the planted defect", name)
+		if !rec.reports(func(ft fuzzT) { fuzzSessions(t, ft, c.in, c.call) }, c.want) {
+			t.Errorf("%s: the oracle did not report %q: %v", name, c.want, rec.msgs)
 		}
 		rec = recorder{}
 		if msgs := rec.run(func(ft fuzzT) { fuzzSessions(t, ft, c.in, nil) }); len(msgs) != 0 {

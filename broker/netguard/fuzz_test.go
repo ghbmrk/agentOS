@@ -67,6 +67,17 @@ func (r *recorder) run(f func(fuzzT)) (msgs []string) {
 	return r.msgs
 }
 
+// reports runs f and says whether the oracle reported a failure containing
+// want, so a control fails when only an unrelated oracle fires.
+func (r *recorder) reports(f func(fuzzT), want string) bool {
+	for _, m := range r.run(f) {
+		if strings.Contains(m, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // fuzzPlant switches a defect on in what an oracle drives: nil fields run
 // the real code, and lie makes the router's answers go unrecorded.
 type fuzzPlant struct {
@@ -302,13 +313,17 @@ var (
 	seedRefreshed  = []byte{2, 0, 1, 2, 0, 1, 2, 0}
 )
 
+// controlSeeds go in both targets' corpora too, so the fuzz run itself, not
+// only the controls, drives a refresh across two moves (FUZZ-1).
+var controlSeeds = [][]byte{seedAnswered, seedMovedTwice, seedRefreshed}
+
 // FuzzSourcesRead (FUZZ-1): over any sequence of router moves, before or
 // after a router's answer, Read and ReadLocal return only an external
 // address the gateway they ended on gave, the cache holds only such
 // addresses and at most maxGatewayExternals of them, and a nil error has
 // prefixes.
 func FuzzSourcesRead(f *testing.F) {
-	for _, b := range fuzzSeeds {
+	for _, b := range append(fuzzSeeds, controlSeeds...) {
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) { fuzzSourcesRead(t, b, fuzzPlant{}) })
@@ -338,7 +353,7 @@ func fuzzSourcesRead(t fuzzT, b []byte, pl fuzzPlant) {
 // reads and full refreshes, while the policy's learned gateway is one whose
 // router's external address was filed, that address is denied.
 func FuzzGatewayPolicy(f *testing.F) {
-	for _, b := range fuzzSeeds {
+	for _, b := range append(fuzzSeeds, controlSeeds...) {
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) { fuzzGatewayPolicy(t, b, fuzzPlant{}) })
@@ -639,15 +654,16 @@ func TestFuzzSourcesReadReportsAPlantedDefect(t *testing.T) {
 		return m, err
 	}
 	for name, c := range map[string]struct {
-		in []byte
-		pl fuzzPlant
+		in   []byte
+		pl   fuzzPlant
+		want string
 	}{
-		"unrecorded answer":     {[]byte{2, 0, 1, 2, 0, 1, 1, 0}, fuzzPlant{lie: true}},
-		"swallowed second move": {[]byte{2, 0, 1, 2, 0, 1, 1, 1, 2, 1, 3}, fuzzPlant{read: swallow}},
+		"unrecorded answer":     {[]byte{2, 0, 1, 2, 0, 1, 1, 0}, fuzzPlant{lie: true}, "was never answered"},
+		"swallowed second move": {[]byte{2, 0, 1, 2, 0, 1, 1, 1, 2, 1, 3}, fuzzPlant{read: swallow}, "ErrGatewayMoved only when"},
 	} {
 		var rec recorder
-		if len(rec.run(func(ft fuzzT) { fuzzSourcesRead(ft, c.in, c.pl) })) == 0 {
-			t.Errorf("%s: the oracle did not report the planted defect", name)
+		if !rec.reports(func(ft fuzzT) { fuzzSourcesRead(ft, c.in, c.pl) }, c.want) {
+			t.Errorf("%s: the oracle did not report %q: %v", name, c.want, rec.msgs)
 		}
 		rec = recorder{}
 		if msgs := rec.run(func(ft fuzzT) { fuzzSourcesRead(ft, c.in, fuzzPlant{}) }); len(msgs) != 0 {
@@ -665,15 +681,16 @@ func TestFuzzGatewayPolicyReportsAPlantedDefect(t *testing.T) {
 	}
 	allowAll := func(*Policy, context.Context, netip.Addr, uint16, string) error { return nil }
 	for name, c := range map[string]struct {
-		in []byte
-		pl fuzzPlant
+		in   []byte
+		pl   fuzzPlant
+		want string
 	}{
-		"swallowed second move": {seedMovedTwice, fuzzPlant{refresh: swallow}},
-		"allowed external":      {seedRefreshed, fuzzPlant{check: allowAll}},
+		"swallowed second move": {seedMovedTwice, fuzzPlant{refresh: swallow}, "ErrGatewayMoved only when"},
+		"allowed external":      {seedRefreshed, fuzzPlant{check: allowAll}, "its router's external"},
 	} {
 		var rec recorder
-		if len(rec.run(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, c.pl) })) == 0 {
-			t.Errorf("%s: the oracle did not report the planted defect", name)
+		if !rec.reports(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, c.pl) }, c.want) {
+			t.Errorf("%s: the oracle did not report %q: %v", name, c.want, rec.msgs)
 		}
 		rec = recorder{}
 		if msgs := rec.run(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, fuzzPlant{}) }); len(msgs) != 0 {
@@ -690,19 +707,22 @@ func TestFuzzCheckReportsAPlantedDefect(t *testing.T) {
 		}
 		return nil
 	}
-	for name, pl := range map[string]fuzzPlant{
-		"allows every destination": {check: allowAll},
-		"denies without ErrDenied": {check: wrongError},
+	for name, c := range map[string]struct {
+		pl   fuzzPlant
+		want string
+	}{
+		"allows every destination": {fuzzPlant{check: allowAll}, "allowed"},
+		"denies without ErrDenied": {fuzzPlant{check: wrongError}, "is not ErrDenied"},
 	} {
 		reported := false
 		for _, in := range fuzzCheckSeeds {
 			var rec recorder
-			if len(rec.run(func(ft fuzzT) { fuzzCheck(ft, in, pl) })) != 0 {
+			if rec.reports(func(ft fuzzT) { fuzzCheck(ft, in, c.pl) }, c.want) {
 				reported = true
 			}
 		}
 		if !reported {
-			t.Errorf("%s: the oracle did not report the planted defect on any seed", name)
+			t.Errorf("%s: the oracle did not report %q on any seed", name, c.want)
 		}
 	}
 	for _, in := range fuzzCheckSeeds {

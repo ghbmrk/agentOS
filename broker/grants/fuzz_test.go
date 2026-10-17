@@ -3,6 +3,7 @@ package grants
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,17 @@ func (r *recorder) run(f func(fuzzT)) (msgs []string) {
 	}()
 	f(r)
 	return r.msgs
+}
+
+// reports runs f and says whether the oracle reported a failure containing
+// want, so a control fails when only an unrelated oracle fires.
+func (r *recorder) reports(f func(fuzzT), want string) bool {
+	for _, m := range r.run(f) {
+		if strings.Contains(m, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // fuzzApprovals drives the grants as the input says. defect, when set, runs
@@ -217,21 +229,22 @@ func TestFuzzApprovalsReportsAPlantedDefect(t *testing.T) {
 	for name, c := range map[string]struct {
 		in     []byte
 		defect func(*rig, int, string)
+		want   string
 	}{
 		"runs with no approval": {[]byte{0, 0, 1, 0, 2, 0}, func(r *rig, op int, id string) {
 			if op == 0 {
 				runNow(r, id)
 			}
-		}},
+		}, "with no approval first"},
 		"runs twice": {[]byte{0, 0, 1, 0, 2, 0, 5, 0}, func(r *rig, op int, id string) {
 			if op == 5 && r.exec.runs(id) > 0 {
 				runNow(r, id)
 			}
-		}},
+		}, "more than once"},
 	} {
 		var rec recorder
-		if len(rec.run(func(ft fuzzT) { fuzzApprovals(t, ft, c.in, c.defect) })) == 0 {
-			t.Errorf("%s: the oracle did not report the planted defect", name)
+		if !rec.reports(func(ft fuzzT) { fuzzApprovals(t, ft, c.in, c.defect) }, c.want) {
+			t.Errorf("%s: the oracle did not report %q: %v", name, c.want, rec.msgs)
 		}
 		rec = recorder{}
 		if msgs := rec.run(func(ft fuzzT) { fuzzApprovals(t, ft, c.in, nil) }); len(msgs) != 0 {

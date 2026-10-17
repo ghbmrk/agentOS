@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,17 @@ func (r *recorder) run(f func(fuzzT)) (msgs []string) {
 	}()
 	f(r)
 	return r.msgs
+}
+
+// reports runs f and says whether the oracle reported a failure containing
+// want, so a control fails when only an unrelated oracle fires.
+func (r *recorder) reports(f func(fuzzT), want string) bool {
+	for _, m := range r.run(f) {
+		if strings.Contains(m, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // slotsDefect is a planted defect: it runs after each operation and may
@@ -226,10 +238,16 @@ func TestFuzzSlotsReportsAPlantedDefect(t *testing.T) {
 		}
 	}
 	in := []byte{0, 0, 1, 0, 2, 3, 3, 0}
-	for name, d := range map[string]slotsDefect{"leaks the data key": leak, "removal keeps the slot": staleSlot} {
+	for name, c := range map[string]struct {
+		d    slotsDefect
+		want string
+	}{
+		"leaks the data key":     {leak, "the data key is in"},
+		"removal keeps the slot": {staleSlot, "opens true, want false"},
+	} {
 		var rec recorder
-		if len(rec.run(func(ft fuzzT) { fuzzSlots(t, ft, in, d) })) == 0 {
-			t.Errorf("%s: the oracle did not report the planted defect", name)
+		if !rec.reports(func(ft fuzzT) { fuzzSlots(t, ft, in, c.d) }, c.want) {
+			t.Errorf("%s: the oracle did not report %q: %v", name, c.want, rec.msgs)
 		}
 	}
 	var rec recorder
