@@ -100,6 +100,7 @@ TIER_A_BROKER = {
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check
     "modem", "modemlink", "owner",
+    "photo",                      # owner photos; also (b): runs their decoder in a one-shot sandbox
     "question",                   # the owner's texted answers
     "sipsign", "smsapi",          # also (a)
     # wiring: every binary's main, and the core list itself

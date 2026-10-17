@@ -14,6 +14,7 @@
   {"pkg": "modem/at", "name": "FuzzTIM1ParseNetworkTime", "binary": "modem_at.test"},
   {"pkg": "modemlink", "name": "FuzzInbound", "binary": "modemlink.test"},
   {"pkg": "owner", "name": "FuzzParseReply", "binary": "owner.test"},
+  {"pkg": "photo/decoder", "name": "FuzzDecode", "binary": "photo_decoder.test"},
   {"pkg": "recovery", "name": "FuzzParseRecoveryKey", "binary": "recovery.test"},
   {"pkg": "sockets", "name": "FuzzFrames", "binary": "sockets.test"},
   {"pkg": "sockets", "name": "FuzzRequest", "binary": "sockets.test"},
