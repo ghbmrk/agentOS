@@ -13,6 +13,9 @@ Board row: DEL-1-f1 (#1047), follow-up of DEL-1 from #709's Findings. Risk tier 
 
 **Scope.** broker/guest/{store.go, owner.go, outbox_test.go, ASSUMPTIONS.md}; broker/cmd/agentosd/{evidence.go, evidence_test.go}; this brief.
 
-**Acceptance tests.** `TestDEL1f1ForgetDropsWaitingReplies` (broker/guest), `TestDEL1f1DeletionReachesTheOutbox` and `TestDEL1f1ForgetDuringARoute` (broker/cmd/agentosd).
+**Acceptance tests:**
+- DEL-1-f1a: `broker/guest/outbox_test.go::TestDEL1f1ForgetDropsWaitingReplies` and `::TestDEL1f1ForgetWriteFailure`: replies waiting at a forget are gone after a reopen, a retry queues nothing, and a failed write is reported. Catches a forget that only clears memory.
+- DEL-1-f1b: `broker/cmd/agentosd/evidence_test.go::TestDEL1f1DeletionReachesTheOutbox`: the forget fan drops the served outbox and reports its failure; an outbox that cannot drop fails the deletion. Catches a fan that skips the outbox.
+- DEL-1-f1c: `broker/cmd/agentosd/evidence_test.go::TestDEL1f1ForgetDuringARoute`: a deletion mid-route sends no other waiting reply and leaves no kept copy. Catches a worker iterating a stale snapshot.
 
 **Out of scope.** A reply already handed to the owner channel cannot be recalled. Per-task selection needs a task link on the reply (DEL-sd).
