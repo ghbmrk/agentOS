@@ -82,6 +82,8 @@ install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.service" "$
 # The home Wi-Fi helper's NetworkManager grant, and the rule that gives
 # qualified modems' nodes to the bridge's user.
 install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" "$STAGE/usr/share/polkit-1/rules.d/50-agentos-netjoin.rules"
+# Its system bus policy: NetworkManager sees only the helper's own calls.
+install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.conf" "$STAGE/usr/share/dbus-1/system.d/agentos-netjoin.conf"
 install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"
 chmod -R u+w,go-w "$STAGE"
 
