@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-5, OP-11, CRED-RS-1
+// REQ: CRED-5, OP-11, CRED-RS-1, CRED-RS-4, CRED-RS-5
 
 // CRED-RS-1: a route stop is a journal record, so an engine reopened from the
 // same store still holds it, and a reopen record clears it.
@@ -18,12 +18,13 @@ func TestRouteStopSurvivesReopen(t *testing.T) {
 	if err := e.StopRoute("claude", "unswappable"); err != nil {
 		t.Fatal(err)
 	}
-	// A second stop keeps the first cause and writes nothing.
+	// A second stop for the same cause, or a reopening of an open route,
+	// writes nothing.
 	n := len(e.Trail())
-	if err := e.StopRoute("codex", "unswappable"); err != nil {
+	if err := e.StopRoute("codex", "login-refused"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ReopenRoute("nowhere"); err != nil {
+	if err := e.ReopenRoute("nowhere", "login-refused"); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.Trail()) != n {
@@ -37,7 +38,7 @@ func TestRouteStopSurvivesReopen(t *testing.T) {
 	if c, ok := e2.RouteStopped("claude"); !ok || c != "unswappable" {
 		t.Fatalf("after a restart claude: %q %v", c, ok)
 	}
-	if err := e2.ReopenRoute("codex"); err != nil {
+	if err := e2.ReopenRoute("codex", "login-refused"); err != nil {
 		t.Fatal(err)
 	}
 	e3 := mustOpen(t, st, newPolicy(), newService())
@@ -69,10 +70,124 @@ func TestRouteStopRefusesBadNotes(t *testing.T) {
 			t.Fatalf("%+v: %v, want ErrInvalid", c, err)
 		}
 	}
-	if err := e.ReopenRoute("code x"); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("reopen: %v, want ErrInvalid", err)
+	for _, c := range []struct{ route, cause string }{
+		{"code x", "login-refused"},
+		{"codex", ""},
+		{"codex", "the provider said " + canary},
+	} {
+		if err := e.ReopenRoute(c.route, c.cause); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("reopen %+v: %v, want ErrInvalid", c, err)
+		}
 	}
 	if len(e.Trail()) != 0 {
 		t.Fatal("a refused note was written")
+	}
+}
+
+// CRED-RS-4: an unswappable stop outranks a refused login's, live and on
+// replay; a refused login never lowers an unswappable stop, and a cause
+// the journal does not know ranks as unswappable.
+func TestUnswappableOutranksLoginRefused(t *testing.T) {
+	st := &MemStore{}
+	e := mustOpen(t, st, newPolicy(), newService())
+	if err := e.StopRoute("codex", "login-refused"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(e.Trail())
+	if err := e.StopRoute("codex", "unswappable"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Trail()) != n+1 {
+		t.Fatal("raising the stop wrote no record")
+	}
+	if c, _ := e.RouteStopped("codex"); c != "unswappable" {
+		t.Fatalf("raised stop: %q", c)
+	}
+	n = len(e.Trail())
+	if err := e.StopRoute("codex", "login-refused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StopRoute("codex", "unswappable"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Trail()) != n {
+		t.Fatal("a stop that does not raise the cause wrote a record")
+	}
+	if err := e.StopRoute("claude", "login-refused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StopRoute("claude", "revoked"); err != nil {
+		t.Fatal(err)
+	}
+
+	e2 := mustOpen(t, st, newPolicy(), newService())
+	if c, _ := e2.RouteStopped("codex"); c != "unswappable" {
+		t.Fatalf("after a restart codex: %q", c)
+	}
+	if c, _ := e2.RouteStopped("claude"); c != "revoked" {
+		t.Fatalf("after a restart claude: %q", c)
+	}
+}
+
+// CRED-RS-5: a reopening lifts the stop only while it has the cause the
+// caller read, and replay compares the reopen record's cause too.
+func TestReopenComparesTheCause(t *testing.T) {
+	st := &MemStore{}
+	e := mustOpen(t, st, newPolicy(), newService())
+	if err := e.StopRoute("codex", "login-refused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.StopRoute("codex", "unswappable"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(e.Trail())
+	if err := e.ReopenRoute("codex", "login-refused"); !errors.Is(err, ErrRouteCause) {
+		t.Fatalf("a sign-in's reopening of an unswappable stop: %v, want ErrRouteCause", err)
+	}
+	if len(e.Trail()) != n {
+		t.Fatal("a refused reopening wrote a record")
+	}
+	if c, ok := e.RouteStopped("codex"); !ok || c != "unswappable" {
+		t.Fatalf("after a refused reopening: %q %v", c, ok)
+	}
+	if err := e.ReopenRoute("codex", "unswappable"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.RouteStopped("codex"); ok {
+		t.Fatal("the release's reopening did not lift the stop")
+	}
+	if rec := e.Trail()[len(e.Trail())-1]; rec.RouteStop == nil || rec.RouteStop.Cause != "unswappable" {
+		t.Fatalf("the reopen record does not carry the cause it lifted: %+v", rec.RouteStop)
+	}
+	if _, ok := mustOpen(t, st, newPolicy(), newService()).RouteStopped("codex"); ok {
+		t.Fatal("the reopening did not survive a restart")
+	}
+}
+
+// CRED-RS-5: replay compares a reopen record's cause, and a reopen record
+// without one (written before CRED-RS-5) still lifts any stop.
+func TestReopenRecordsReplayByCause(t *testing.T) {
+	st := &MemStore{}
+	e := mustOpen(t, st, newPolicy(), newService())
+	for _, n := range []RouteStopNote{
+		{Route: "codex", Event: RouteStoppedEvent, Cause: "unswappable"},
+		{Route: "codex", Event: RouteReopenedEvent, Cause: "login-refused"},
+		{Route: "claude", Event: RouteStoppedEvent, Cause: "unswappable"},
+		{Route: "claude", Event: RouteReopenedEvent},
+	} {
+		n := n
+		e.mu.Lock()
+		err := e.commit(Record{Type: RecRouteStop, RouteStop: &n})
+		e.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	e2 := mustOpen(t, st, newPolicy(), newService())
+	if c, ok := e2.RouteStopped("codex"); !ok || c != "unswappable" {
+		t.Fatalf("a reopen record of another cause lifted the stop: %q %v", c, ok)
+	}
+	if _, ok := e2.RouteStopped("claude"); ok {
+		t.Fatal("a cause-less reopen record from before CRED-RS-5 did not lift the stop")
 	}
 }

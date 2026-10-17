@@ -1,6 +1,9 @@
 package journal
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // RecRouteStop journals a provider route stopping or reopening (CRED-5,
 // CRED-5t). OP-11 keeps no durable state beside the journal, so the stop
@@ -13,9 +16,25 @@ const (
 	RouteReopenedEvent = "reopened"
 )
 
+// routeCauseSignIn is the one cause the owner's sign-in lifts (CRED-5).
+// Every other cause ("unswappable", or one this journal does not know)
+// outranks it: only a release lifts it (CRED-5t).
+const routeCauseSignIn = "login-refused"
+
+// ErrRouteCause is ReopenRoute's answer for a route stopped for another
+// cause than the one the caller would lift: it stays stopped.
+var ErrRouteCause = errors.New("journal: the route is stopped for another cause")
+
+// outranks reports whether a stop for cause replaces one for cur.
+func outranks(cause, cur string) bool {
+	return cur == routeCauseSignIn && cause != routeCauseSignIn
+}
+
 // RouteStopNote is one stop or reopening of a provider route. Route and
 // Cause are identifier-like codes (an adapter ID; "login-refused" or
-// "unswappable"), never free text, so they are kept as written.
+// "unswappable"), never free text, so they are kept as written. A
+// reopening's Cause is the cause it lifted; one written before CRED-RS-5
+// has none and lifts any.
 type RouteStopNote struct {
 	Route string `json:"route"`
 	Event string `json:"event"`
@@ -30,14 +49,15 @@ func (n RouteStopNote) valid() bool {
 	case RouteStoppedEvent:
 		return n.Cause != ""
 	case RouteReopenedEvent:
-		return n.Cause == ""
+		return true
 	}
 	return false
 }
 
 // StopRoute journals that route is stopped for cause. A route already
-// stopped keeps its first cause and nothing is written. STOP does not hold
-// it: it records an observation, not an effect.
+// stopped keeps its cause and nothing is written, unless cause outranks it
+// (an unswappable stop over a refused login's, CRED-RS-4). STOP does not
+// hold it: it records an observation, not an effect.
 func (e *Engine) StopRoute(route, cause string) error {
 	n := RouteStopNote{Route: route, Event: RouteStoppedEvent, Cause: cause}
 	if !n.valid() {
@@ -48,26 +68,32 @@ func (e *Engine) StopRoute(route, cause string) error {
 	if e.broken != nil {
 		return e.broken
 	}
-	if _, ok := e.routeStops[route]; ok {
+	if cur, ok := e.routeStops[route]; ok && !outranks(cause, cur) {
 		return nil
 	}
 	return e.commit(Record{Type: RecRouteStop, RouteStop: &n})
 }
 
-// ReopenRoute journals that route is open again. An open route writes
-// nothing.
-func (e *Engine) ReopenRoute(route string) error {
-	n := RouteStopNote{Route: route, Event: RouteReopenedEvent}
-	if !n.valid() {
-		return fmt.Errorf("%w: a route reopening needs a code-like route", ErrInvalid)
+// ReopenRoute journals that route is open again, if it is stopped for
+// cause (CRED-RS-5): one stopped for another cause stays stopped
+// (ErrRouteCause), so a sign-in cannot lift a stop raised after it read
+// the cause. An open route writes nothing.
+func (e *Engine) ReopenRoute(route, cause string) error {
+	n := RouteStopNote{Route: route, Event: RouteReopenedEvent, Cause: cause}
+	if cause == "" || !n.valid() {
+		return fmt.Errorf("%w: a route reopening needs a code-like route and cause", ErrInvalid)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.broken != nil {
 		return e.broken
 	}
-	if _, ok := e.routeStops[route]; !ok {
+	cur, ok := e.routeStops[route]
+	if !ok {
 		return nil
+	}
+	if cur != cause {
+		return fmt.Errorf("%w: %s is stopped for %s, not %s", ErrRouteCause, route, cur, cause)
 	}
 	return e.commit(Record{Type: RecRouteStop, RouteStop: &n})
 }
@@ -81,14 +107,17 @@ func (e *Engine) RouteStopped(route string) (string, bool) {
 }
 
 func (e *Engine) applyRouteStop(n *RouteStopNote) {
+	cur, ok := e.routeStops[n.Route]
 	if n.Event == RouteReopenedEvent {
-		delete(e.routeStops, n.Route)
+		if n.Cause == "" || n.Cause == cur {
+			delete(e.routeStops, n.Route)
+		}
 		return
 	}
 	if e.routeStops == nil {
 		e.routeStops = map[string]string{}
 	}
-	if _, ok := e.routeStops[n.Route]; !ok {
+	if !ok || outranks(n.Cause, cur) {
 		e.routeStops[n.Route] = n.Cause
 	}
 }
