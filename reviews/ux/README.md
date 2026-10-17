@@ -10,7 +10,7 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 
 ## In the lens screen
 
-Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go to `reviews/ux/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
+Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go in a PR comment marked `<!-- record: ux -->` (combined passes marked `combined`), in the L3 format and verdict comment shape of docs/OPERATING.md §4.
 
 Not on assurance tooling: a tier-A diff confined to `tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests gets no UX pass. Those tools' operators are CI and builders, and their messages are `later` (OPERATING §2, D-086). If one of them gains a human operator on the box, restore the pass with one line here.
 
@@ -38,7 +38,7 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 
 ## Records
 
-Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each has a `Record:` line giving PR, package and head SHA directly under the title (bot records open with a `Verdict:` line, then the title, then `Record:`); `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
+Per-PR and per-bundle records up to cut 4 are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each has a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. Since cut 4 (#2172) no new files are written: each verdict is a PR comment carrying `Record:` and `<!-- record: ux -->` (docs/OPERATING.md §4 "Verdict comment shape"), and these files are the history before it. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
 
 ## Recurring kinds (to become checks)
 

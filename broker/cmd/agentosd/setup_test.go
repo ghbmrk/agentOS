@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,5 +199,34 @@ func TestTheVaultsEnrollRefusalsMap(t *testing.T) {
 		if got := enrollErr(in); got != in {
 			t.Errorf("%v: %v", in, got)
 		}
+	}
+}
+
+// REQ: CAP-9, OWN-7
+// The vault's private_by_config reaches setup's provider list (#1608), so
+// the AI step can show a provider the configuration allows as fixed; the
+// owner's marker stays PrivateOK.
+func TestSetupProvidersCarryPrivateByConfig(t *testing.T) {
+	path := filepath.Join(shortDir(t), "v.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"providers":[{"id":"openai","name":"OpenAI","private_ok":true},{"id":"anthropic","name":"Anthropic","private_by_config":true}]}`)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	ps, err := enroller{modelroute.NewVerifier(path)}.Providers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []localapi.SetupProvider{
+		{ID: "openai", Name: "OpenAI", APIKey: true, PrivateOK: true},
+		{ID: "anthropic", Name: "Anthropic", APIKey: true, PrivateByConfig: true},
+	}
+	if len(ps) != len(want) || ps[0] != want[0] || ps[1] != want[1] {
+		t.Fatalf("providers: %+v", ps)
 	}
 }
