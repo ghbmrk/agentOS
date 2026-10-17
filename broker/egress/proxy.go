@@ -566,7 +566,7 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	}
 	held = need
 	if op.Body != nil {
-		if body, err = op.Body.apply(body, labelOf() == LabelPublic); err != nil {
+		if body, err = checkApart(op.Body, body, labelOf() == LabelPublic); err != nil {
 			deny(http.StatusForbidden, err.Error())
 			return
 		}
@@ -769,6 +769,37 @@ func heldExchange(resp *http.Response) ([]byte, error) {
 
 // apply checks a JSON object body against the rule and returns the body to
 // forward: the proxy's own encoding of what it checked.
+// checkApart runs a body check on a goroutine of its own. Checking a deeply
+// nested body grows the stack it runs on by megabytes; a goroutine that
+// exits frees its stack, while a keep-alive connection's goroutine would
+// keep it after release returned the reservation. A panic in the check is
+// raised again here, so it fails only this request.
+func checkApart(b *BodyRule, body []byte, public bool) ([]byte, error) {
+	type result struct {
+		out      []byte
+		err      error
+		panicked bool
+		value    any
+	}
+	done := make(chan result, 1)
+	go func() {
+		r := result{panicked: true}
+		defer func() {
+			if r.panicked {
+				r.value = recover()
+			}
+			done <- r
+		}()
+		r.out, r.err = b.apply(body, public)
+		r.panicked = false
+	}()
+	r := <-done
+	if r.panicked {
+		panic(r.value)
+	}
+	return r.out, r.err
+}
+
 func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()

@@ -349,3 +349,62 @@ func TestProxyInFlightSlotsReturned(t *testing.T) {
 		}
 	})
 }
+
+func TestProxyCheckStackFreedAfterRelease(t *testing.T) {
+	// T6: deeply nested bodies sent over keep-alive connections to a real
+	// server leave no grown stack behind once their reservations return.
+	r := newRig(t, nil)
+	srv := httptest.NewServer(r.proxy.Handler("m1"))
+	t.Cleanup(srv.Close)
+	const depth, clients = 9990, 200
+	body := []byte(`{"model":"m","messages":[],"a":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + "}")
+	transports := make([]*http.Transport, clients)
+	for i := range transports {
+		transports[i] = &http.Transport{}
+	}
+	t.Cleanup(func() {
+		for _, tr := range transports {
+			tr.CloseIdleConnections()
+		}
+	})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	work := make(chan *http.Transport)
+	codes := make(chan int, clients)
+	for w := 0; w < 4; w++ { // the per-machine cap
+		go func() {
+			for tr := range work {
+				req, _ := http.NewRequest("POST", srv.URL+"/openai/v1/chat/completions", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer placeholder")
+				resp, err := (&http.Client{Transport: tr}).Do(req)
+				if err != nil {
+					codes <- 0
+					continue
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				codes <- resp.StatusCode
+			}
+		}()
+	}
+	for _, tr := range transports {
+		work <- tr
+	}
+	close(work)
+	for i := 0; i < clients; i++ {
+		if c := <-codes; c != http.StatusOK {
+			t.Fatalf("deep body got %d", c)
+		}
+	}
+	if held, _ := (&inFlightRig{p: r.proxy}).slots(); held != 0 {
+		t.Fatalf("%d bytes still reserved", held)
+	}
+	runtime.ReadMemStats(&after) // no GC: a forced one would halve what is kept
+	grown := int64(after.StackInuse) - int64(before.StackInuse)
+	t.Logf("stack grew %d KiB over %d idle connections", grown>>10, clients)
+	if limit := int64(clients) * 64 << 10; grown > limit {
+		t.Fatalf("stack grew %d KiB after release, over %d KiB", grown>>10, limit>>10)
+	}
+}
