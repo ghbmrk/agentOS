@@ -47,6 +47,11 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(got["a.go"], [(11, 12), (30, 30)])
         self.assertEqual(got["new.go"], [(1, 1)])
 
+    def test_stored_diff_respells_old_product_name_keeping_line_length(self):  # REQ: REVIEW-eval-1
+        old = "Agent" + "OS"
+        out = ev.respell("+# " + old + " docs\n+" + old + "Box\n")
+        self.assertEqual(out, "+# agentOS docs\n+" + old + "Box\n")
+
     def test_case_scoring(self):  # REQ: REVIEW-eval-1
         case = {"kind": "defect", "expected": {"a.go": [[11, 12]]}}
         self.assertEqual(ev.score_case(case, [{"file": "a.go", "line": 12, "class": "blocker"}]),

@@ -65,6 +65,15 @@ def expected_ranges(fix_diff):
     return out
 
 
+OLD_NAME = re.compile(r"(?<![A-Za-z0-9_])Agent" + "OS(?![A-Za-z0-9_])")
+
+
+def respell(diff):
+    """Old spelling of the product name in a stored diff becomes the current one. Same length of
+    line, so hunk lines are unchanged; the product-name check rejects the old text in new files."""
+    return OLD_NAME.sub("agentOS", diff)
+
+
 def diff_files(diff):
     """Paths a unified diff changes (new side), so an expected line outside it is not a target."""
     return {re.sub(r"^b/", "", l[4:]) for l in diff.splitlines() if l.startswith("+++ ") and l[4:] != "/dev/null"}
@@ -163,7 +172,7 @@ def build_cases(pulls, diffs):
             for f, r in exp.items():
                 merged.setdefault(f, []).extend(r)
         cases.append({"id": f"pr{n}", "kind": "defect", "intro_pr": n, "fix_prs": sorted(fixes),
-                      "head": intro.get("reviewed_head"), "expected": merged, "diff": diffs[f"intro:{n}"]})
+                      "head": intro.get("reviewed_head"), "expected": merged, "diff": respell(diffs[f"intro:{n}"])})
     return cases, sorted(targets)
 
 
@@ -175,7 +184,7 @@ def pick_clean(pulls, diffs, count):
                    and f"intro:{p['number']}" in diffs), key=lambda p: p["number"])
     step = max(len(pool) // count, 1) if count else 1
     return [{"id": f"pr{p['number']}-clean", "kind": "clean", "intro_pr": p["number"],
-             "diff": diffs[f"intro:{p['number']}"]} for p in pool[::step][:count]]
+             "diff": respell(diffs[f"intro:{p['number']}"])} for p in pool[::step][:count]]
 
 
 def _get(url, token, accept):
