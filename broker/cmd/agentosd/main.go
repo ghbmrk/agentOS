@@ -543,14 +543,15 @@ func main() {
 		// and closed before agentosd opens its own below.
 		var signInHost *setupHost
 		if runsc != "" && workerRoutes != "" {
-			signInHost, m.SignIn = newSetupPlane(setupMachines{
-				runsc: runsc, stateDir: stateDir, rc: modelroute.NewRouteControl(workerRoutes), diskQuota: diskQuota,
+			signInHost = newSetupHost(setupMachines{
+				runsc: runsc, stateDir: stateDir, routes: workerRoutes, diskQuota: diskQuota,
 				images: imgs, admit: cfg.Admission,
 				cgroups: func() (*cgroup.Group, error) {
 					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
 				},
 				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
-			}, pins)
+			}.open)
+			m.SignIn = newSetupSignIn(signInHost, modelroute.NewRouteControl(workerRoutes), pins)
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)

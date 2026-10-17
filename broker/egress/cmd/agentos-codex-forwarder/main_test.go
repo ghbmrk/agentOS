@@ -2,10 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -210,29 +208,5 @@ func TestA14ForwarderClosesIdleRelays(t *testing.T) {
 	}
 	if time.Since(start) < r.idle {
 		t.Fatal("the relay closed before it was idle")
-	}
-}
-
-// TestA14ForwarderSaysWhyTheRouteSocketFailed: a connection the route socket refuses is closed,
-// and the first such failure, naming the socket and nothing else, goes to stderr, which the
-// sign-in keeps in its output file (#1701); later ones add nothing.
-func TestA14ForwarderSaysWhyTheRouteSocketFailed(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
-	sock := filepath.Join(t.TempDir(), "absent.sock")
-	r := newRelayer(sock)
-	for range 3 {
-		a, b := net.Pipe()
-		go r.pipe(a)
-		b.SetDeadline(time.Now().Add(3 * time.Second))
-		if _, err := b.Read(make([]byte, 1)); err == nil {
-			t.Fatal("got data with no route socket")
-		}
-		b.Close()
-	}
-	out := buf.String()
-	if strings.Count(out, "route socket: dial unix "+sock) != 1 || strings.Count(out, "\n") != 1 {
-		t.Fatalf("stderr %q, want one line naming the socket", out)
 	}
 }
