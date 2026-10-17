@@ -246,6 +246,9 @@ func TestAStaleNetworkIsPutBackAtStartAndAfterUnlock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() { cancel(); <-done }()
 	go func() { reconcileAPNetLoop(ctx, p, v.committed, tick, func(error) {}); close(done) }()
+	// A send returns once the loop takes the tick, before it reads the
+	// vault; a second send returns only after that pass has finished.
+	pass := func() { tick <- time.Time{}; tick <- time.Time{} }
 
 	waitFor(t, "at start", func() bool { return readAPNet(t, p) == rotatedNet })
 	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
@@ -256,18 +259,17 @@ func TestAStaleNetworkIsPutBackAtStartAndAfterUnlock(t *testing.T) {
 	// written until a lock and an unlock (the page's permit covers that).
 	third := apnet.Network{SSID: cardNet.SSID, Password: "MNPQ-RSTU-VWXY-Z234"}
 	v.set(true, third)
-	tick <- time.Time{}
-	tick <- time.Time{}
+	pass()
 	if readAPNet(t, p) != rotatedNet {
 		t.Fatal("rewritten while open with no unlock")
 	}
 	v.set(false, third)
-	tick <- time.Time{}
+	pass()
 	if readAPNet(t, p) != rotatedNet {
 		t.Fatal("rewritten while locked")
 	}
 	v.set(true, third)
-	tick <- time.Time{}
+	pass()
 	waitFor(t, "after unlock", func() bool { return readAPNet(t, p) == third })
 }
 
@@ -282,6 +284,7 @@ func TestReconcileRetriesUntilTheVaultAnswers(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	go func() { reconcileAPNetLoop(ctx, p, v.committed, tick, func(error) {}); close(done) }()
 	tick <- time.Time{}
+	tick <- time.Time{} // the first retry has finished
 	if readAPNet(t, p) != cardNet {
 		t.Fatal("written with no committed network")
 	}
