@@ -34,7 +34,6 @@ const (
 	MaxCandidateBytes = 512 << 10
 	maxPath           = 160
 	maxConns          = 4 // connections a builder may hold open (L3 MUST 2 on #126)
-	maxInFlight       = 4
 	maxBriefSteps     = 256
 )
 
@@ -147,7 +146,6 @@ type session struct {
 	mu       sync.Mutex
 	dir      string
 	srv      *http.Server
-	slot     chan struct{}
 	done     chan struct{}
 	finished bool
 	files    map[string][]byte
@@ -237,7 +235,7 @@ func (b *Builder) open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.dir, s.slot = dir, make(chan struct{}, maxInFlight)
+	s.dir = dir
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -286,16 +284,7 @@ func (s *session) handler() http.Handler {
 	mux.HandleFunc("/candidate", s.candidate)
 	mux.HandleFunc("/done", s.giveUp)
 	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case s.slot <- struct{}{}:
-			defer func() { <-s.slot }()
-		default:
-			http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return mux
 }
 
 // model is the metered model route, refused once the job has used its
