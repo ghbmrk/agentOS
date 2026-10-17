@@ -17,7 +17,8 @@ those files need a delta review. Git 2.38 or later, no network; fetch first.
 
 `--needs-mark` lists the files of base..head that make the PR one that merges only on Mark's own approval of
 it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
-(the head); a base goes after `--base`, so a second positional is a usage error (exit 2).
+(the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
+usage error (exit 2).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
@@ -160,8 +161,11 @@ def main(argv):
             return 2
         head = args[0] if args else "HEAD"
         onto = _git(".", "merge-base", base, head).decode().strip()
-        out = _git(".", *DIFF, onto, head).decode(errors="surrogateescape")
-        hit = mark_paths(f for f in out.split("\0") if f)
+        files = [f for f in _git(".", *DIFF, onto, head).decode(errors="surrogateescape").split("\0") if f]
+        if not files:  # `--needs-mark origin/main` reads origin/main as the head: an empty range is never `agent`
+            print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
+            return 2
+        hit = mark_paths(files)
         print("mark " + " ".join(hit) if hit else "agent")
         return 1 if hit else 0
     if not 1 <= len(args) <= 2:
