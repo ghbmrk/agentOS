@@ -242,9 +242,10 @@ func Builtins() map[string]Declaration {
 			// agent's messages are item events and are never matched.
 			ErrorEvents: []string{"error", "turn.failed"},
 			UsedUp:      []string{"usage_limit_reached"},
-			// The image's Codex config points the issuer at the forwarder,
-			// so the CLI prints the forwarder's page (P11).
-			SignInArgv:  []string{"codex", "login", "--device-auth"},
+			// The argv points the CLI's issuer at the forwarder, so the CLI
+			// asks the forwarder for its code and prints the forwarder's
+			// page (P11, #1701).
+			SignInArgv:  []string{"codex", "login", "--device-auth", "--experimental_issuer", "http://127.0.0.1:18432"},
 			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
 			SignInPage:  "https://auth.openai.com/codex/device",
 			SignInFrom:  "OpenAI",
