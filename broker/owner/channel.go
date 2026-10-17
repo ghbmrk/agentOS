@@ -178,7 +178,8 @@ type Channel struct {
 	lineFailed  atomic.Int64
 	resumeTexts []time.Time
 	held        *heldMsg
-	rename      *renameReq // a NAME waiting for its code (name.go)
+	recent      recentWindow // texts to the owner a reaction may mark (CH-11)
+	rename      *renameReq   // a NAME waiting for its code (name.go)
 	limited     []time.Time
 	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
@@ -237,6 +238,7 @@ type resumeCode struct {
 // on RUN, because the code proves the unlock, not who wrote the held text.
 type heldMsg struct {
 	text    string
+	react   string // a held reaction's event, delivered in place of text (CH-11)
 	expires time.Time
 	ready   bool
 }
@@ -320,6 +322,7 @@ type route struct {
 	replies  []string
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
+	react    string // a reaction event for the agent (CH-11)
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
 	retry    bool   // RETRY: ask about the digest's unclear effects, outside the lock
 	undo     string // an UNDO ID the channel does not hold, for the hook
@@ -350,6 +353,9 @@ func (c *Channel) Handle(ctx context.Context, from, text string) []string {
 func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, bool) {
 	if !c.IsOwner(from) || control.Parse(text).Word != control.WordStop {
 		return nil, false
+	}
+	if _, ok := parseReaction(text); ok {
+		return nil, false // a reaction is never a control word (CH-11)
 	}
 	c.stopMu.Lock()
 	c.stops.Add(1)
@@ -416,6 +422,12 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 		c.mu.Unlock()
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
+	if rt.react != "" {
+		c.mu.Lock()
+		c.active = rt.at
+		c.mu.Unlock()
+		replies = append(replies, c.ctrl.Event(ctx, from, rt.react)...)
+	}
 	if rt.undo != "" {
 		replies = append(replies, c.undoElsewhere(ctx, rt.undo))
 	}
@@ -469,6 +481,11 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 // routeLocked answers the channel's own words and decides what reaches the
 // control handler.
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
+	// A reaction is read first: never a control word, a code, RUN or an
+	// approval, whatever it quotes (CH-11).
+	if rx, ok := parseReaction(text); ok {
+		return c.reactionLocked(text, rx, now, c.codes.unlocked(now))
+	}
 	if c.codes.st.Challenged {
 		if rt, ok := c.challengeLocked(text, now); ok {
 			return rt
@@ -500,6 +517,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		case "RUN":
 			if h := c.held; h != nil && h.ready && unlocked {
 				c.held = nil
+				if h.react != "" {
+					return route{react: h.react}
+				}
 				return route{delegate: h.text, run: true}
 			}
 			return route{replies: []string{"Nothing is held."}, limited: !unlocked}
@@ -597,7 +617,7 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		return route{replies: []string{msg}, delegate: rest, run: true}
 	}
 	if h := c.held; h != nil && now.Before(h.expires) {
-		if n, ok := parseName(h.text); ok && n.name != "" && n.code == "" {
+		if n, ok := parseName(h.text); ok && h.react == "" && n.name != "" && n.code == "" {
 			// A held NAME is not run by RUN: the unlock code proves
 			// the owner, not who wrote it, so it gets the texted
 			// confirmation instead. Its name passed the check when held.

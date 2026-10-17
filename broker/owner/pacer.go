@@ -244,6 +244,9 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
+	if err := refuseReaction(text); err != nil {
+		return err
+	}
 	return c.post(class, agentText(text), true)
 }
 
@@ -262,6 +265,9 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
+	}
+	if err := refuseReaction(text); err != nil {
+		return err
 	}
 	text = agentText(text)
 	if c.Urgent(ClassAgent) {

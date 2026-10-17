@@ -146,7 +146,7 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		} else if reply, ok := h.answer(ctx, cmd); ok {
 			out = append(out, reply)
 		} else if !h.deliver(ctx, cmd) {
-			out = append(out, "Your agent is not running. STOP, RESUME, STATUS and HELP still work.")
+			out = append(out, agentDown)
 		}
 		for i := range out {
 			out[i] = Fit(out[i])
@@ -193,6 +193,25 @@ func (h *Handler) answer(ctx context.Context, cmd Command) (string, bool) {
 	}
 	return h.Answer(ctx, cmd.Text)
 }
+
+// Event hands the agent a broker-worded event for one owner message, such
+// as a reaction (CH-11). It goes as task chat does, only in an unlocked
+// session and within DeliverTimeout, but past the Settings and Answer
+// hooks: its text is the broker's, not the owner's, so it is never a
+// setting or a question's answer.
+func (h *Handler) Event(ctx context.Context, from, text string) []string {
+	switch {
+	case !h.Auth.IsOwner(from):
+		return nil
+	case !h.Auth.SessionUnlocked(h.now()):
+		return []string{unlockText}
+	case !h.deliver(ctx, Command{Text: text}):
+		return []string{agentDown}
+	}
+	return nil
+}
+
+const agentDown = "Your agent is not running. STOP, RESUME, STATUS and HELP still work."
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
 	if h.Agent == nil {

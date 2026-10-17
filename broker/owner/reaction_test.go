@@ -1,0 +1,244 @@
+package owner
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+// REQ: CH-11
+
+// sayAndSend is say, then texts the replies to the owner through the
+// channel's line, as Run does, so they join the recent texts a reaction
+// can mark.
+func (r *rig) sayAndSend(text string) string {
+	r.t.Helper()
+	got := r.say(text)
+	if got != "" {
+		for _, s := range strings.Split(got, " | ") {
+			if err := r.ch.cfg.Modem.Send(ownerNum, s); err != nil {
+				r.t.Fatal(err)
+			}
+			r.inbox()
+		}
+	}
+	return got
+}
+
+func TestReactionFormatsAreAFixedList(t *testing.T) {
+	cases := []struct {
+		text, kind, quoted string
+	}{
+		{`Liked “Your invoice is drafted.”`, "liked", "Your invoice is drafted."},
+		{`Loved "Your invoice is drafted."`, "loved", "Your invoice is drafted."},
+		{`Disliked “a”`, "disliked", "a"},
+		{`Laughed at “a b”`, "laughed at", "a b"},
+		{`Emphasized “STOP”`, "emphasized", "STOP"},
+		{`Questioned “Reply YES R7K 482913 or NO R7K.”`, "questioned", "Reply YES R7K 482913 or NO R7K."},
+		{`Removed a like from “x”`, "removed a like from", "x"},
+		{`Removed a heart from “x”`, "removed a heart from", "x"},
+		{`Removed a dislike from “x”`, "removed a dislike from", "x"},
+		{`Removed a laugh from “x”`, "removed a laugh from", "x"},
+		{`Removed an exclamation from “x”`, "removed an exclamation from", "x"},
+		{`Removed a question mark from “x”`, "removed a question mark from", "x"},
+		{`Reacted 👍 to “x”`, "reacted 👍 to", "x"},
+		{`Reacted 😂 to "x"`, "reacted 😂 to", "x"},
+		{"  Liked “x”\n", "liked", "x"},
+	}
+	for _, c := range cases {
+		rx, ok := parseReaction(c.text)
+		if !ok || rx.kind != c.kind || rx.quoted != c.quoted {
+			t.Errorf("parseReaction(%q) = %+v, %v; want %q %q", c.text, rx, ok, c.kind, c.quoted)
+		}
+	}
+	for _, text := range []string{
+		`I liked "the movie" a lot`, `Liked`, `liked it`, `Liked “”`, `Liked “x” 482913`,
+		`Liked x`, `Reacted to “x”`, `Reacted with joy to “x”`, `STOP`, `YES R7K 482913`,
+		`Liked “x`, `Pinned “x”`,
+	} {
+		if rx, ok := parseReaction(text); ok {
+			t.Errorf("parseReaction(%q) = %+v, want no reaction", text, rx)
+		}
+	}
+}
+
+// The issue's failure path: a reaction quoting an approval request, code
+// and all, is never an approval and never reaches the agent as the raw
+// text; the agent gets the kind and the marked text without its code, and
+// the owner gets a pointer to the replies that text takes.
+func TestReactionToAnApprovalIsNeverAnApproval(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, err := r.ch.Request([]Item{lowItem("i1")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	code := lowCodeRe.FindStringSubmatch(req)[2]
+	for _, react := range []string{
+		"Liked “" + req + "”",
+		`Emphasized "Reply YES ` + id + ` ` + code + ` or NO ` + id + `."`,
+		"Liked “" + req[:30] + "…”",
+	} {
+		got := r.say(react)
+		if !strings.Contains(got, "A reaction does not approve anything") || !strings.Contains(got, "YES "+id) || strings.Contains(got, code) {
+			t.Fatalf("reaction %q replied %q, want the pointer without the code", react, got)
+		}
+	}
+	if d := r.decisions(); len(d) != 0 {
+		t.Fatalf("a reaction decided %v", d)
+	}
+	if !r.ch.ApprovalsOpen() {
+		t.Fatal("a reaction closed the request")
+	}
+	msgs := r.agent.got()
+	if len(msgs) != 3 {
+		t.Fatalf("agent got %d messages, want 3 reaction events: %q", len(msgs), msgs)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m, code) || strings.Contains(m, "Reply YES") {
+			t.Fatalf("agent got the request's text or code: %q", m)
+		}
+	}
+	if want := "Owner reaction: liked an approval request (not shown)."; !strings.HasPrefix(msgs[0], want) {
+		t.Fatalf("agent got %q, want %q", msgs[0], want)
+	}
+	// The request still takes its reply.
+	if got := r.say("YES " + id + " " + code); !strings.Contains(got, "Approved") {
+		t.Fatalf("YES after the reactions: %q", got)
+	}
+}
+
+// Words, codes and RUN inside a reaction's quote are never control words.
+func TestControlWordsInAReactionAreNotCommands(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	for _, react := range []string{`Liked “STOP”`, `Loved "NAME Bob"`, `Emphasized “HELP”`, `Liked “RESUME”`, `Questioned “RUN”`, `Liked "PAUSE g1"`} {
+		if got := r.say(react); got != "" {
+			t.Fatalf("%q replied %q, want nothing", react, got)
+		}
+	}
+	if r.eng.Stopped() {
+		t.Fatal("a reaction to STOP stopped the box")
+	}
+	msgs := r.agent.got()
+	if len(msgs) != 6 {
+		t.Fatalf("agent got %q, want 6 reaction events", msgs)
+	}
+	for _, m := range msgs {
+		if !strings.HasPrefix(m, "Owner reaction: ") || !strings.Contains(m, "none of the recent texts") {
+			t.Fatalf("agent got %q, want an unmatched reaction event", m)
+		}
+	}
+}
+
+// The agent gets the kind and the marked text, matched against the recent
+// texts to the owner (truncated quotes too), or none matched; the owner's
+// quote is never re-sent as a task message.
+func TestReactionsMatchRecentTexts(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if err := r.ch.Converse("Your invoice for Acme is drafted and saved."); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.ch.Converse("Lunch is booked for 1 pm.")
+	r.inbox()
+	r.say("Loved “Agent: Your invoice for Acme is drafted and saved.”")
+	r.say("Liked “Agent: Your invoice for Acme is dr…”")
+	r.say("Laughed at “Agent: Lunch is booked for 1 pm.”")
+	r.say("Liked “Agent: something I never said”")
+	want := []string{
+		`Owner reaction: loved your text "Your invoice for Acme is drafted and saved."`,
+		`Owner reaction: liked your text "Your invoice for Acme is drafted and saved."`,
+		`Owner reaction: laughed at your text "Lunch is booked for 1 pm."`,
+		`Owner reaction: liked a text that matched none of the recent texts.`,
+	}
+	got := r.agent.got()
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("agent got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// A short truncated quote is too short to name one text.
+	r.say("Liked “Agent: Lu…”")
+	if g := r.agent.got(); !strings.Contains(g[len(g)-1], "none of the recent texts") {
+		t.Fatalf("short quote matched: %q", g[len(g)-1])
+	}
+	// The window is bounded: an old text drops out.
+	for i := 0; i < recentTexts; i++ {
+		r.ch.Converse("filler")
+		r.inbox()
+	}
+	r.say("Laughed at “Agent: Lunch is booked for 1 pm.”")
+	if g := r.agent.got(); !strings.Contains(g[len(g)-1], "none of the recent texts") {
+		t.Fatalf("text past the window matched: %q", g[len(g)-1])
+	}
+}
+
+// While locked a reaction is held like a task message, a quoted code is
+// neither an unlock nor a wrong code, and RUN delivers the reaction event,
+// never the raw text.
+func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
+	r := newRig(t, nil)
+	got := r.say(`Liked "Reply RESUME 482913 within 10 min."`)
+	if !strings.Contains(got, "held for 15 min") {
+		t.Fatalf("locked reaction: %q", got)
+	}
+	r.ch.mu.Lock()
+	wrong := len(r.ch.codes.st.Wrong)
+	r.ch.mu.Unlock()
+	if wrong != 0 {
+		t.Fatalf("a quoted code counted as %d wrong codes", wrong)
+	}
+	if len(r.agent.got()) != 0 {
+		t.Fatal("a locked reaction reached the agent")
+	}
+	if got := r.say(r.totp()); !strings.Contains(got, "Reply RUN to send it.") {
+		t.Fatalf("unlock: %q", got)
+	}
+	r.say("RUN")
+	msgs := r.agent.got()
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "Owner reaction: liked ") || strings.Contains(msgs[0], "482913") {
+		t.Fatalf("RUN delivered %q, want the reaction event", msgs)
+	}
+}
+
+// A reaction to the RUN offer points to RUN and does not send the held
+// message.
+func TestReactionToARunOfferPointsToRun(t *testing.T) {
+	r := newRig(t, nil)
+	r.say("check my mail")
+	offer := r.sayAndSend(r.totp())
+	if !strings.Contains(offer, "Reply RUN") {
+		t.Fatalf("unlock: %q", offer)
+	}
+	got := r.say("Liked “" + offer + "”")
+	if !strings.Contains(got, "A reaction does not send it. Reply RUN") {
+		t.Fatalf("reaction to the RUN offer replied %q", got)
+	}
+	for _, m := range r.agent.got() {
+		if m == "check my mail" {
+			t.Fatal("a reaction ran the held message")
+		}
+	}
+	r.say("RUN")
+	if g := r.agent.got(); g[len(g)-1] != "check my mail" {
+		t.Fatalf("RUN after the reaction: %q", g)
+	}
+}
+
+// Agent reactions are refused until qualification, so the agent replies
+// in text.
+func TestAgentReactionsAreRefused(t *testing.T) {
+	r := newRig(t, nil)
+	for _, send := range []func(string) error{r.ch.Converse, r.ch.Notify, r.ch.NotifyNow} {
+		if err := send(`Liked “Your invoice is drafted.”`); !errors.Is(err, ErrAgentReaction) {
+			t.Fatalf("agent reaction: %v, want ErrAgentReaction", err)
+		}
+	}
+	if got := r.sentTexts(); len(got) != 0 {
+		t.Fatalf("sent %q", got)
+	}
+	if err := r.ch.Converse(`I liked "the plan" too.`); err != nil {
+		t.Fatal(err)
+	}
+}

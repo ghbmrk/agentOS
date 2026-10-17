@@ -54,9 +54,16 @@ type watchedLine struct {
 }
 
 func (w watchedLine) Send(to, text string) error {
-	err := w.Modem.Send(to, text)
+	return w.sent(to, text, false, w.Modem.Send(to, text))
+}
+
+// sent records a failed send, and a text that reached the owner in the
+// window a reaction is matched against (CH-11).
+func (w watchedLine) sent(to, text string, request bool, err error) error {
 	if err != nil {
 		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
+	} else if to == w.c.cfg.Owner {
+		w.c.recent.add(sentText{text: text, at: w.c.cfg.Now(), request: request})
 	}
 	return err
 }
@@ -75,13 +82,9 @@ type RequestSender interface {
 func (w watchedLine) SendRequest(to, text string) error {
 	rs, ok := w.Modem.(RequestSender)
 	if !ok {
-		return w.Send(to, text)
+		return w.sent(to, text, true, w.Modem.Send(to, text))
 	}
-	err := rs.SendRequest(to, text)
-	if err != nil {
-		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
-	}
-	return err
+	return w.sent(to, text, true, rs.SendRequest(to, text))
 }
 
 // sendRequest texts the owner an approval request. Grants paces these,
