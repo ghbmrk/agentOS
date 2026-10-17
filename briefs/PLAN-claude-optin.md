@@ -40,6 +40,6 @@ Scope: `SPEC.md`, `briefs/PLAN-claude-optin.md`. **Acceptance tests:** none: SPE
 
 **Conflicts (D-111) at 2026-10-17 00:43Z.** C1 and C4 edit `broker/provagent` (held by #2015, and by PLAN-grok and PLAN-muse in `declare.go`). C3 depends on PR #2063. Build order by that: after #2015 and PLAN-grok.
 
-**Acceptance tests (this brief):** none: the brief builds nothing; each package above names its own, and each gets its own brief file when it starts.
+**Acceptance tests:** none: the brief builds nothing; each package above names its own, and each gets its own brief file when it starts.
 **Scope:** `briefs/PLAN-claude-optin.md` only. **Guard files:** none.
 **Usage estimate:** brief only. Builders: strongest model, two reviews each.
