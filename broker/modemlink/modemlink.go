@@ -47,6 +47,10 @@ const (
 	MaxQueued = 64
 	// InboundPerMinute caps texts handed in per minute (security S-B4).
 	InboundPerMinute = 20
+	// OtherPicturesPerHour caps the pictures from others told to
+	// Config.Picture an hour, apart from the owner's: a stranger's flood
+	// can neither keep the owner's out nor fill the journal.
+	OtherPicturesPerHour = 1
 	// BridgeGap is how long after its last outbox poll or result the
 	// bridge still counts as there (Bridged): its outbox loop polls again
 	// straight away, so a longer gap means it has gone.
@@ -83,8 +87,9 @@ type Config struct {
 	Record func(iccid string) error
 	// Picture is told of each picture or file texted to the owner line
 	// (an MMS notice), and whether it came from the owner, outside the
-	// Link's lock; at most InboundPerMinute a minute, past which pictures
-	// are only counted. nil: counted only.
+	// Link's lock; the owner's at most InboundPerMinute a minute and
+	// others' at most OtherPicturesPerHour an hour, each apart, past which
+	// pictures are only counted. nil: counted only.
 	Picture func(owner bool)
 }
 
@@ -121,9 +126,10 @@ type Link struct {
 	others   int
 	timedOut int
 	// pictures counts MMS notices from the owner [0] and from others [1];
-	// pictureTime, those passed to Config.Picture in the last minute.
+	// pictureTime, the same split, those passed to Config.Picture within
+	// their window.
 	pictures    [2]int
-	pictureTime []time.Time
+	pictureTime [2][]time.Time
 	inboundIDs  map[string]time.Time // taken inbound IDs, kept for IDTTL
 	inboundTime []time.Time
 	// okSince is when the owner line last became usable. A poll that
@@ -607,28 +613,28 @@ func (l *Link) inbound(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 // Config.Picture call to make once l.mu is released, or nil.
 func (l *Link) pictureLocked(in bridgeproto.Inbound, now time.Time) func() {
 	owner := !in.Named && in.From == l.cfg.Owner
+	k, window, limit := 1, time.Hour, OtherPicturesPerHour
 	if owner {
-		l.pictures[0]++
-	} else {
-		l.pictures[1]++
+		k, window, limit = 0, time.Minute, InboundPerMinute
 	}
+	l.pictures[k]++
 	if in.ID != "" {
 		if l.inboundIDs == nil {
 			l.inboundIDs = map[string]time.Time{}
 		}
 		l.inboundIDs[in.ID] = now
 	}
-	kept := l.pictureTime[:0]
-	for _, t := range l.pictureTime {
-		if now.Sub(t) < time.Minute {
+	kept := l.pictureTime[k][:0]
+	for _, t := range l.pictureTime[k] {
+		if now.Sub(t) < window {
 			kept = append(kept, t)
 		}
 	}
-	l.pictureTime = kept
-	if l.cfg.Picture == nil || len(kept) >= InboundPerMinute {
+	l.pictureTime[k] = kept
+	if l.cfg.Picture == nil || len(kept) >= limit {
 		return nil
 	}
-	l.pictureTime = append(l.pictureTime, now)
+	l.pictureTime[k] = append(l.pictureTime[k], now)
 	f := l.cfg.Picture
 	return func() { f(owner) }
 }

@@ -8,13 +8,13 @@ Board row: none; a defect fix on merged code (the P2-3 driver, P2-3w bridge) ask
 
 - **CH12-mms-a (recognise the notice).** `DecodeDeliver` reads an 8-bit PDU whose UDH addresses port 2948 (IEI 0x05) and whose WSP push (PDU type 0x06 or 0x07) names the MMS content type (well-known 0x3E, in short or general form, or as the text string) as `Deliver{Picture: true, Push: true}` with no text. A later part (sequence above 1) of a concatenated port-2948 push is `Push` without `Picture`. Any other 8-bit PDU, a port-2948 push of another content type (service indication, provisioning) included, stays `ErrPDU`.
 - **CH12-mms-b (the modem never fetches it, and answers only the owner).** `receive` deletes a push as it is read, never keeps it, and never counts it in `Dropped`. A notice delivered once (the `seen` replay guard holds) goes to `Inbox` as `modem.SMS{Picture: true}` with no text, and is counted (`Pictures`). From the owner's number it gets the fixed `PictureText`, GSM-7, one segment, saying what the owner can do, at most once an hour (like `GarbledText`). From any other number, or an alphanumeric sender, it gets no reply, so the box is no oracle for who its owner is. A later part is deleted with no count and no reply. Nothing fetches the MMS.
-- **CH12-mms-c (agentosd journals and counts it).** The bridge passes the notice as `bridgeproto.Inbound{Picture: true}` (`Valid` refuses a picture with text). `modemlink` takes it before the owner's rate limit and inbox, counts it once per ID, apart for the owner and for others, and calls `Config.Picture` with whether it came from the owner. agentosd's hook journals a `picture` record (`journal.PictureNote{From: "owner"|"other"}`, no number), and `PictureNote` gives STATUS's exception line while any arrived since start: `Pictures by text: N from you, M from others. Not opened yet.` `journal/check` knows the record type.
+- **CH12-mms-c (agentosd journals and counts it).** The bridge passes the notice as `bridgeproto.Inbound{Picture: true}` (`Valid` refuses a picture with text). `modemlink` takes it before the owner's rate limit and inbox, counts it once per ID, apart for the owner and for others, and calls `Config.Picture` with whether it came from the owner, within separate budgets (the owner's `InboundPerMinute` a minute, others' `OtherPicturesPerHour` an hour) so a stranger's flood cannot keep the owner's out or fill the journal. agentosd's hook journals a `picture` record (`journal.PictureNote{From: "owner"|"other"}`, no number), and `PictureNote` gives STATUS's exception line while any arrived since start: `Pictures by text: N from you, M from others. Not opened yet.` `journal/check` knows the record type.
 - **CH12-mms-d (record).** Update ASSUMPTIONS M2 (`broker/modem/at`) and add the modemlink and journal rows.
 
 **Acceptance tests:**
 - CH12-mms-a: `TestMMSNoticeDecodesAsAPicture` (`broker/modem/at/picture_test.go`).
 - CH12-mms-b: `TestOwnersPictureGetsOneReplyAnHour` and `TestOthersPictureGetsNoReply` (same file); `TestAPictureTextedToTheBoxReachesAgentosd` (`broker/modem/bridge/bridge_test.go`).
-- CH12-mms-c: `TestInboundPictureCarriesNoText` (`broker/bridgeproto/bridgeproto_test.go`); `TestPicturesAreCountedAndJournaledNeverInboxed` (`broker/modemlink/picture_test.go`); `TestPictureNote` (`broker/journal/picture_test.go`); `TestPictureRecordsNameNoIntent` (`broker/journal/check/check_test.go`); `TestPictureJournal` (`broker/cmd/agentosd/picture_test.go`).
+- CH12-mms-c: `TestInboundPictureCarriesNoText` (`broker/bridgeproto/bridgeproto_test.go`); `TestPicturesAreCountedAndJournaledNeverInboxed` and `TestOthersPictureFloodLeavesTheOwnersBudget` (`broker/modemlink/picture_test.go`); `TestPictureNote` (`broker/journal/picture_test.go`); `TestPictureRecordsNameNoIntent` (`broker/journal/check/check_test.go`); `TestPictureJournal` (`broker/cmd/agentosd/picture_test.go`).
 
 Failing-test-first: each acceptance test fails at main; quote one message per ID in the PR.
 
@@ -24,7 +24,7 @@ Failing-test-first: each acceptance test fails at main; quote one message per ID
 
 ## Out of scope
 
-Fetching the MMS (WSP/HTTP GET of the content location), reading the picture, and pointing the owner at the Wi-Fi page's upload: the photo-input package. When that ships, `PictureText` changes to name where to send the picture. The second line's MMS (it has no owner reply by design).
+Fetching the MMS (WSP/HTTP GET of the content location), reading the picture, and pointing the owner at the Wi-Fi page's upload: the photo-input package. When that ships, `PictureText` changes to name where to send the picture. The second line's MMS (it has no owner reply by design; still dropped, #2153).
 
 ## Done
 
