@@ -35,3 +35,16 @@ failed) echo "agentos-page: down claim=failed (power-cycle; if it persists, cont
 active | inactive) echo "agentos-page: claim=ok" ;;
 *) echo "agentos-page: claim=unknown" ;;
 esac
+# Each agent machine writes under its own hard quota on root (RES-4), which needs root mounted with
+# project quotas (rootflags=prjquota, image/ASSUMPTIONS.md I15); agentosd keeps machines off
+# otherwise. Say which, from the mount itself; CI's boot test needs the on line on every boot.
+fs=$(findmnt -no FSTYPE / 2>/dev/null) || fs=unknown
+case ",$(findmnt -no OPTIONS / 2>/dev/null)," in
+*,prjquota,*) [ "$fs" = ext4 ] && q=on || q=off ;;
+*) q=off ;;
+esac
+if [ "$q" = on ]; then
+	echo "agentos-quota: root=ext4 prjquota"
+else
+	echo "agentos-quota: off root=${fs:-unknown} (agent machines stay off)"
+fi
