@@ -22,10 +22,17 @@ import (
 // their removals, and the emoji form ("Reacted 👍 to"). Qualification
 // records the formats the owner's phones send; Loop 2 extends the list
 // (LOOP-10).
-var reactionForm = regexp.MustCompile(`(?is)^(liked|loved|disliked|laughed at|emphasized|questioned|` +
+var reactionForm = regexp.MustCompile(`(?is)^(liked|loved|disliked|laughed at|emphasi[sz]ed|questioned|` +
 	`removed a like from|removed a heart from|removed a dislike from|removed a laugh from|` +
-	`removed an exclamation from|removed a question mark from|reacted \S+ to) ` +
+	`removed an exclamation from|removed an exclamation mark from|removed an emphasis from|` +
+	`removed a question mark from|removed an? [^\p{L}\s]+ from|reacted \S+ to) ` +
 	`["“](.+)["”]$`)
+
+// quoteMarks are the quote characters a phone puts round a quote. A quote
+// that holds one is not read as a reaction on its form alone: the owner's own
+// text that starts like a form and holds a second quote is chat (#2201). It
+// is a reaction only when the quote marks a recent box text (readReaction).
+const quoteMarks = `"“”`
 
 // reaction is one owner reaction: its kind in lower case, as the agent
 // reads it, and the quoted text.
@@ -36,12 +43,54 @@ type reaction struct {
 
 // parseReaction reports whether text, whole, is a reaction form.
 func parseReaction(text string) (reaction, bool) {
+	rx, ok := parseForm(text)
+	if !ok || strings.ContainsAny(rx.quoted, quoteMarks) {
+		return reaction{}, false
+	}
+	return rx, true
+}
+
+// parseForm is parseReaction without the check on quote marks in the quote.
+func parseForm(text string) (reaction, bool) {
 	m := reactionForm.FindStringSubmatch(strings.TrimSpace(text))
 	if m == nil || strings.TrimSpace(m[2]) == "" {
 		return reaction{}, false
 	}
-	kind := strings.Join(strings.Fields(strings.ToLower(m[1])), " ")
-	return reaction{kind: kind, quoted: m[2]}, true
+	return reaction{kind: strings.Join(strings.Fields(strings.ToLower(m[1])), " "), quoted: m[2]}, true
+}
+
+// unlistedForm matches text outside the fixed list that still has the shape
+// of a reaction: a short lead-in of words or emoji, then a quote that runs to
+// the end of the text. It is read as a reaction only when the quote marks a
+// recent box text that holds a request or a code (#2202).
+var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]{1,40}?) ["“](.+)["”]$`)
+
+// readReaction is parseReaction, plus two cases that need the recent texts:
+// a listed form whose quote holds quote marks, when the quote marks a recent
+// box text (a request or a RUN offer quotes its own words), and an unlisted
+// form, when the quote marks a text to the owner that is a request or holds
+// a box code (CH-3). The agent's own text is never a reason: its digits
+// already passed Disclose, so an unlisted form quoting it stays chat and the
+// owner's words reach the agent whole (CH-11).
+func (c *Channel) readReaction(text string) (reaction, bool) {
+	if rx, ok := parseReaction(text); ok {
+		return rx, true
+	}
+	if rx, ok := parseForm(text); ok {
+		if _, found := c.recent.match(rx.quoted, c.cfg.Now()); found {
+			return rx, true
+		}
+		return reaction{}, false
+	}
+	m := unlistedForm.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil || len(strings.Fields(m[1])) > 5 {
+		return reaction{}, false
+	}
+	t, ok := c.recent.match(m[2], c.cfg.Now())
+	if !ok || !(t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))) {
+		return reaction{}, false
+	}
+	return reaction{kind: "reacted to", quoted: m[2]}, true
 }
 
 // ErrAgentReaction refuses agent text that is a reaction form: until

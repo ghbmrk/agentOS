@@ -58,13 +58,21 @@ func (r *rig) restarted() {
 
 func quiet22to7() Pacing { return Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60} }
 
+// quiet22to7Held is quiet22to7 with URGENT APPROVAL OFF: approval is
+// urgent by default (D-129), so a test of held approval texts says so.
+func quiet22to7Held() Pacing {
+	p := quiet22to7()
+	p.ApprovalHeld = true
+	return p
+}
+
 func (r *rig) held() []HeldText {
 	r.ch.mu.Lock()
 	defer r.ch.mu.Unlock()
 	return append([]HeldText(nil), r.ch.codes.st.Held...)
 }
 
-// REQ: CH-15 (W5-Dc-r1a QH-1)
+// REQ: CH-15 (W5-Dc-r1a QH-1), W5-Dc-r15-1, W5-Dc-r15-2
 func TestPacingDefaultsFromAnOldState(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "owner.json")
@@ -85,8 +93,10 @@ func TestPacingDefaultsFromAnOldState(t *testing.T) {
 				t.Errorf("%s: quiet at +%dh with no window set", name, h)
 			}
 		}
-		if !r.ch.Urgent(ClassSecurity) || r.ch.Urgent(ClassApproval) || r.ch.Urgent(ClassAgent) || r.ch.Urgent(ClassUpdate) {
-			t.Errorf("%s: urgent classes not the default (security only)", name)
+		// D-129: security and approval are urgent by default; agent and
+		// update are not.
+		if !r.ch.Urgent(ClassSecurity) || !r.ch.Urgent(ClassApproval) || r.ch.Urgent(ClassAgent) || r.ch.Urgent(ClassUpdate) {
+			t.Errorf("%s: urgent classes not the default (security and approval)", name)
 		}
 	}
 	check("old state file")
@@ -102,6 +112,9 @@ func TestPacingDefaultsFromAnOldState(t *testing.T) {
 		{PerHour: 21},
 		{Urgent: []Class{ClassUpdate}},
 		{Urgent: []Class{"everything"}},
+		// A corrupt setting that also held approval still lands on the
+		// default, approval urgent (W5-Dc-r15-2).
+		{PerHour: -1, ApprovalHeld: true},
 	} {
 		st := &MemStore{}
 		st.Save(State{Pacing: bad})
@@ -145,7 +158,7 @@ func TestFourthUpdateInAnHourIsHeld(t *testing.T) {
 
 // REQ: CH-15 (W5-Dc-r1a QH-2)
 func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
-	r := pacedRig(t, quiet22to7(), 23, 0)
+	r := pacedRig(t, quiet22to7Held(), 23, 0)
 	if !r.ch.Quiet(r.clock()) {
 		t.Fatal("23:00 box-local is not quiet under 22-7")
 	}
@@ -174,7 +187,7 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 	if got := r.sentTexts(); len(got) != 1 || !strings.HasPrefix(got[0], "Box restarted.") {
 		t.Fatalf("restart text in quiet hours: %q", got)
 	}
-	// Agent text: held, prefix kept.
+	// Agent text, and approval with URGENT APPROVAL OFF: held, prefix kept.
 	if err := r.ch.Notify("hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -189,31 +202,32 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 		t.Fatalf("held: %+v", h)
 	}
 
-	// With URGENT approval ON, the restart text and NotifyAs(approval) go.
-	r = pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: []Class{ClassApproval}}, 23, 0)
+	// By default (D-129) approval is urgent: the restart text and
+	// NotifyAs(approval) go.
+	r = pacedRig(t, quiet22to7(), 23, 0)
 	r.restarted()
 	r.ch.Boot()
 	if got := r.sentTexts(); len(got) != 1 || !strings.HasPrefix(got[0], "Box restarted.") {
-		t.Fatalf("restart text with URGENT approval: %q", got)
+		t.Fatalf("restart text by default: %q", got)
 	}
 	r.ch.Notify("hello")
 	if got := r.sentTexts(); len(got) != 0 {
-		t.Fatalf("agent text went with only URGENT approval: %q", got)
+		t.Fatalf("agent text went with only approval urgent: %q", got)
 	}
 	r.ch.NotifyAs(ClassApproval, "taken back")
 	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"taken back" {
-		t.Fatalf("NotifyAs(approval) with URGENT approval: %q", got)
+		t.Fatalf("NotifyAs(approval) by default: %q", got)
 	}
 
 	// With URGENT agent ON, Notify goes at once and keeps the prefix.
-	r = pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: []Class{ClassAgent}}, 23, 0)
+	r = pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: []Class{ClassAgent}, ApprovalHeld: true}, 23, 0)
 	r.ch.Notify("hello")
 	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"hello" {
 		t.Fatalf("Notify with URGENT agent: %q", got)
 	}
 	r.ch.NotifyAs(ClassApproval, "taken back")
 	if got := r.sentTexts(); len(got) != 0 {
-		t.Fatalf("NotifyAs(approval) went with only URGENT agent: %q", got)
+		t.Fatalf("NotifyAs(approval) went with only agent urgent: %q", got)
 	}
 }
 
@@ -435,7 +449,37 @@ func TestReleasePacksAndKeepsOrder(t *testing.T) {
 	}
 }
 
-// REQ: CH-15 (W5-Dc-r1a QH-6), CH-3, CH-11
+// REQ: CH-15, W5-Dc-r15-1
+func TestApprovalGoesInQuietHoursAndCounts(t *testing.T) {
+	// D-129: an approval text skips quiet hours and the hourly limit by
+	// default, but still counts toward the limit.
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	before := r.ch.Allowance(r.clock())
+	if before != DefaultTextsPerHour {
+		t.Fatalf("allowance %d before any text, want %d", before, DefaultTextsPerHour)
+	}
+	for i := 0; i <= DefaultTextsPerHour; i++ {
+		if err := r.ch.NotifyAs(ClassApproval, fmt.Sprintf("approve %d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+fmt.Sprintf("approve %d", i) {
+			t.Fatalf("approval %d in quiet hours: sent %q, held %+v", i, got, r.held())
+		}
+	}
+	if h := r.held(); len(h) != 0 {
+		t.Fatalf("approval held by default: %+v", h)
+	}
+	if a := r.ch.Allowance(r.clock()); a != 0 {
+		t.Fatalf("allowance %d after %d approval texts, want 0: they must count", a, DefaultTextsPerHour+1)
+	}
+	// The hour passes and the count frees up.
+	r.advance(8 * time.Hour)
+	if a := r.ch.Allowance(r.clock()); a != DefaultTextsPerHour {
+		t.Fatalf("allowance %d an hour later", a)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1a QH-6), CH-3, CH-11, W5-Dc-r15-2
 func TestPacingSettingsNeedUnlock(t *testing.T) {
 	r := newRig(t, nil)
 	at23 := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
@@ -450,7 +494,7 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	}
 	// The code unlocks; RUN then applies the held setting.
 	r.unlock()
-	const quietSet = "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts. Reply QUIET OFF to end them."
+	const quietSet = "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts and approval requests. Reply QUIET OFF to end them."
 	if got := r.say("RUN"); got != quietSet {
 		t.Fatalf("QUIET after unlock: %q", got)
 	}
@@ -463,11 +507,28 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	if st, _ := r.store.Load(); st.Pacing.QuietFrom != 22*60 || st.Pacing.QuietTo != 7*60 {
 		t.Fatalf("not saved: %+v", st.Pacing)
 	}
+	// W5-Dc-r15-2: approval is urgent by default (D-129); OFF is
+	// saved and survives a restart, and ON clears it.
+	if got := r.say("URGENT approval OFF"); !strings.HasPrefix(got, "Approval requests now wait") {
+		t.Fatalf("URGENT approval OFF: %q", got)
+	}
+	if r.ch.Urgent(ClassApproval) {
+		t.Fatal("URGENT approval OFF not applied")
+	}
+	if st, _ := r.store.Load(); !st.Pacing.ApprovalHeld {
+		t.Fatalf("URGENT approval OFF not saved: %+v", st.Pacing)
+	}
+	if again := newRig(t, r.store); again.ch.Urgent(ClassApproval) {
+		t.Fatal("URGENT approval OFF lost on restart")
+	}
 	if got := r.say("URGENT approval ON"); !strings.HasPrefix(got, "Approval requests now go at once") {
 		t.Fatalf("URGENT approval ON: %q", got)
 	}
 	if !r.ch.Urgent(ClassApproval) {
 		t.Fatal("URGENT approval ON not applied")
+	}
+	if st, _ := r.store.Load(); st.Pacing.ApprovalHeld {
+		t.Fatalf("URGENT approval ON not saved: %+v", st.Pacing)
 	}
 	if got := r.say("Quiet hours set: "); strings.Contains(got, "Quiet hours set") {
 		t.Fatalf("chat taken as a setting: %q", got)
@@ -583,7 +644,7 @@ func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	}
 
 	// NotifyAs of another class is agent text too.
-	r = pacedRig(t, quiet22to7(), 23, 0)
+	r = pacedRig(t, quiet22to7Held(), 23, 0)
 	r.ch.Inform("One.")
 	r.ch.NotifyAs(ClassApproval, probe)
 	r.advance(8 * time.Hour)

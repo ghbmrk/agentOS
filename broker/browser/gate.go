@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,7 +88,14 @@ type Gate struct {
 	refs map[string]link
 	// typed is what the agent typed, per ref, on the page the driver
 	// named in its reply (G10).
-	typed     map[string]typedField
+	typed map[string]typedField
+	// said is the text the agent put on pages, by type or in a URL it
+	// navigated to, kept on every page (G10, #2245).
+	said []string
+	// lost is set once typed or said overflows maxTyped. From then on
+	// every snapshot with an omitted field is withheld: forgetting agent
+	// text would let its echo answer a guess (PR #2273 security delta).
+	lost      bool
 	holds     map[string]Hold
 	holdOrder []string
 }
@@ -224,6 +232,12 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 			return g.hold(req, l)
 		}
 	}
+	switch req.Verb {
+	case "type":
+		g.say(req.Text)
+	case "navigate":
+		g.say(urlWords(req.URL)...)
+	}
 	res := g.send(ctx, req)
 	if req.Verb == "type" && res.OK {
 		g.remember(req, res.URL)
@@ -233,19 +247,56 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 
 type typedField struct{ text, url string }
 
-// maxTyped bounds what the gate remembers of the agent's typing.
-const maxTyped = 64
+// maxTyped bounds what the gate remembers of the agent's typing: typed
+// refs, and texts it put on pages.
+const maxTyped = 1024
+
+// say records text the agent put on pages, before the reply that can
+// echo it is filtered.
+func (g *Gate) say(texts ...string) {
+	for _, t := range texts {
+		if t == "" {
+			continue
+		}
+		if len(g.said) >= maxTyped {
+			g.lost = true
+			return
+		}
+		g.said = append(g.said, t)
+	}
+}
+
+// urlWords is the text a page most often echoes from a URL the agent
+// chose: its query values and fragment, decoded. Path segments and query
+// keys name pages ("account", "login") and would withhold most of them,
+// so they are left out (G10).
+func urlWords(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var w []string
+	for _, vs := range u.Query() {
+		w = append(w, vs...)
+	}
+	return append(w, u.Fragment)
+}
 
 func (g *Gate) remember(req Request, url string) {
-	if g.typed == nil || len(g.typed) >= maxTyped {
+	if g.typed == nil {
 		g.typed = map[string]typedField{}
+	}
+	if _, ok := g.typed[req.Ref]; !ok && len(g.typed) >= maxTyped {
+		g.lost = true
+		return
 	}
 	g.typed[req.Ref] = typedField{text: req.Text, url: url}
 }
 
 // omit derives the password refs from the snapshot itself, not from the
-// driver (K14, G10), and omits their values (CRED-4). It returns the
-// snapshot and the number of fields omitted.
+// driver (K14, G10), and omits their values (CRED-4). A typed ref whose
+// field shows other text is forgotten (#2245). It returns the snapshot and
+// the number of fields omitted.
 func (g *Gate) omit(snapshot, url string) (string, int) {
 	typed := map[string]string{}
 	for ref, f := range g.typed {
@@ -253,12 +304,19 @@ func (g *Gate) omit(snapshot, url string) (string, int) {
 			typed[ref] = f.text
 		}
 	}
-	refs := entryRefs(snapshot, typed)
+	refs, stale := entryRefs(snapshot, typed)
+	for ref := range stale {
+		delete(g.typed, ref)
+		delete(typed, ref)
+	}
 	keep := map[string]bool{}
 	for ref := range typed {
 		keep[ref] = !refs[ref]
 	}
-	return omitValues(snapshot, refs, keep), len(refs)
+	if g.lost && len(refs) > 0 {
+		return withheldMark, len(refs)
+	}
+	return omitValues(snapshot, refs, keep, g.said), len(refs)
 }
 
 // send forwards a request the gate has allowed.
@@ -272,6 +330,12 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 		}
 		if !snap.OK || snap.Redactions > 0 {
 			return Result{Error: "withheld", Detail: "page shows a value the detector matched (CRED-10)",
+				RefusedNavigations: snap.RefusedNavigations}
+		}
+		// CRED-4: pixels cannot be omitted, so a page with a field value the
+		// agent did not type is not shot at all (#2245).
+		if snap.PasswordFields > 0 {
+			return Result{Error: "withheld", Detail: "page shows a field value you did not type (CRED-4)",
 				RefusedNavigations: snap.RefusedNavigations}
 		}
 	}
@@ -288,10 +352,14 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 		}
 		// The page may have changed between the first look and the shot.
 		snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
-		if !ok || !snap.OK || snap.Redactions > 0 {
+		if !ok || !snap.OK || snap.Redactions > 0 || snap.PasswordFields > 0 {
 			_ = os.Remove(filepath.Join(g.ws, res.Path))
 			if !ok {
 				return snap
+			}
+			if snap.OK && snap.Redactions == 0 {
+				return Result{Error: "withheld", Detail: "page showed a field value you did not type during the screenshot (CRED-4)",
+					RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
 			}
 			return Result{Error: "withheld", Detail: "page showed a value the detector matched during the screenshot (CRED-10)",
 				RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
