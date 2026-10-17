@@ -240,6 +240,7 @@ class ListTest(unittest.TestCase):
             _, _, allow, frozen, _ = g.parse_list(text, name)
             for e in allow + frozen:
                 if e in not_yet:
+                    self.assertFalse((ROOT / e).exists(), f"{e} exists now: delete the not_yet set in this test")
                     continue
                 self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
 
