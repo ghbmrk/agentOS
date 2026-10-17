@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -40,6 +42,25 @@ func replyKind(text string) string {
 // text to the owner could not go, ahead of anything queued. It answers no
 // command, so the step passes over it wherever it lands (E16).
 const outagePrefix, outageMark = "I couldn't text you from ", " didn't reach you"
+
+// noticeCounts reads what a recovery notice says did not reach the owner,
+// in recoveryText's wording: "N text(s)", or "N approval request(s)" and
+// optionally "and M other text(s)". texts counts both; ok is false for a
+// notice worded otherwise.
+var noticeCounts = regexp.MustCompile(`\. ([0-9]+) (texts?|approval requests?)(?: and ([0-9]+) other texts?)? didn't reach you`)
+
+func readNotice(text string) (texts, requests int, ok bool) {
+	m := noticeCounts.FindStringSubmatch(text)
+	if m == nil {
+		return 0, 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	if strings.HasPrefix(m[2], "text") {
+		return n, 0, true
+	}
+	other, _ := strconv.Atoi(m[3])
+	return n + other, n, true
+}
 
 // otherWords are the letter-only words a failure may quote from a text
 // replyKind does not know, so a run shows which notice it was.
@@ -92,6 +113,10 @@ type phoneRun struct {
 	barrierSent  bool
 	barrier      bool // a help reply came after the stranger's text
 	toStranger   int
+	// notices counts the recovery notices passed over, and noticeTexts and
+	// noticeRequests what they say did not reach the owner (#2170);
+	// unread counts the notices whose counts could not be read.
+	notices, noticeTexts, noticeRequests, unread int
 	// err is the first reply out of order; it ends the step.
 	err error
 }
@@ -140,6 +165,13 @@ func (r *phoneRun) reply(text string) {
 	switch {
 	case k == "outage":
 		// Not a reply: the box's account of a text it lost earlier.
+		r.notices++
+		texts, requests, ok := readNotice(text)
+		if !ok {
+			r.unread++
+		}
+		r.noticeTexts += texts
+		r.noticeRequests += requests
 	case !r.statusSent:
 		if k == "help" {
 			r.probed = true
@@ -167,6 +199,20 @@ func (r *phoneRun) reply(text string) {
 	default:
 		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", kindLead(text))
 	}
+}
+
+// noticeNote is the step's one line on the notices it passed over: their
+// counts only, so the run shows that a text was lost and how many, never
+// when or which (E15, E16). It is "" when there was none.
+func (r phoneRun) noticeNote() string {
+	if r.notices == 0 {
+		return ""
+	}
+	n := fmt.Sprintf("passed-over recovery notices=%d texts=%d requests=%d", r.notices, r.noticeTexts, r.noticeRequests)
+	if r.unread > 0 {
+		n += fmt.Sprintf(" unread=%d", r.unread)
+	}
+	return n
 }
 
 // failed is the verdict so far: an error once the run cannot pass.
