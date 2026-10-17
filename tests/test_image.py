@@ -86,6 +86,14 @@ def nodump(root):
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
 
 
+def without_exec_allow(test):
+    """Patches out the boot-code allowlist for TEST, a test of another check that writes sysctl.d or
+    modprobe.d files the allowlist refuses as unlisted (#2176); ExecAllowTest is the allowlist's."""
+    patch = unittest.mock.patch.object(check, "exec_allow_violations", return_value=[])
+    patch.start()
+    test.addCleanup(patch.stop)
+
+
 def radio(root):
     # Stand-ins for firmware-mediatek's MT7922 files (#1415), and the image's Bluetooth block.
     for rel in check.RADIO_FIRMWARE:
@@ -360,6 +368,7 @@ class TreeCheckTest(unittest.TestCase):
     # REQ: DEV-2, CH-9
     def test_sysctl_forwarding_stays_off(self):
         # #1478: a sysctl.d file may not turn routing on, for one device, a glob, or all of them.
+        without_exec_allow(self)
         for line in ("net.ipv4.ip_forward = 1", "net.ipv4.conf.eth0.forwarding=1", "net/ipv4/conf/all/forwarding=1",
                      "net.ipv4.conf.*.forwarding = 1", "-net.ipv6.conf.all.forwarding = 1",
                      "net.ipv6.conf.default.forwarding=1", "net.ipv6.conf.eth0.force_forwarding=1",
@@ -406,6 +415,7 @@ class TreeCheckTest(unittest.TestCase):
         # #1508: systemd-sysctl ends a line at LF, CR or NUL; Python's splitlines does not split at
         # NUL or CR the same way and also splits at \x0b, \x1c and U+2028. The check refuses those
         # bytes in every sysctl file, for the forwarding keys and for kernel.core_pattern alike.
+        without_exec_allow(self)
         for key, val in (("net.ipv4.ip_forward", "0"), ("kernel.core_pattern", "|/usr/bin/false")):
             for name, text in (("NUL", "a.b=1\x00%s=9\n"), ("CR", "a.b=1\r%s=9\n"),
                                ("x1c", "%%s=9\na.b=1\x1c%%s=%s\n" % val), ("x0b", "%%s=9\na.b=1\x0b%%s=%s\n" % val),
@@ -569,6 +579,7 @@ class TreeCheckTest(unittest.TestCase):
     def test_bluetooth_block_read_as_kmod_reads_lines(self):
         # #1528: each tree passes main's Python reader while kmod's first install for btusb is not a
         # refusal (the reviewer ran real kmod 31 on each; KmodDiffTest checks the reader against it).
+        without_exec_allow(self)
         block = (MK / "mkosi.extra" / BT_BLOCK).read_bytes()
         over = "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1]
         k1 = lambda pre: (over, block.replace(b"install btusb", pre + b"install btusb"), "btusb is not blocked")
@@ -597,6 +608,7 @@ class TreeCheckTest(unittest.TestCase):
     def test_no_install_line_loads_bluetooth_another_way(self):
         # Security R2 on #1543: another module's install or remove command can load btusb past its
         # own install line (modprobe -i skips install lines; insmod never reads them).
+        without_exec_allow(self)
         for line in (b"install snd_x /sbin/modprobe --ignore-install btusb",
                      b"install snd_x /sbin/modprobe --ignore-install snd_x; /sbin/modprobe -i x",
                      b"install snd_x modprobe -qi snd_y", b"install snd_x modprobe --ignore-i snd_y",
@@ -1689,6 +1701,7 @@ class NoDumpTest(unittest.TestCase):
         nodump(self.root)
         radio(self.root)
         uplink(self.root)
+        without_exec_allow(self)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -2026,6 +2039,7 @@ class ConfFilesTest(unittest.TestCase):
         nodump(self.root)
         radio(self.root)
         uplink(self.root)
+        without_exec_allow(self)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -2859,7 +2873,10 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "systemd/system.control", "systemd/system.attached", "systemd/system.conf",
                  "systemd/system.conf.d", "systemd/coredump.conf", "systemd/coredump.conf.d",
                  "systemd/networkd.conf", "systemd/networkd.conf.d", "systemd/resolved.conf",
-                 "systemd/resolved.conf.d", "systemd/system-generators", "credstore", "credstore.encrypted")
+                 "systemd/resolved.conf.d", "systemd/system-generators", "credstore", "credstore.encrypted",
+                 # #2176: every boot-code channel exec.allow holds.
+                 "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
+                 "systemd/system-shutdown", "systemd/system-sleep")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -2895,7 +2912,17 @@ TMPFILES_PROBES = (
     "f /run/credstore.encrypted/tmpfiles.extra", "f /usr/lib/credstore/sysctl.extra",
     "f /etc/systemd/system-generators/x 0755 - - - #!/bin/sh",
     "L /etc/systemd/system-generators/zram-generator - - - - /usr/lib/x/zram",
-    "f /etc/agentos/modem.env - - - - COUNTRY_CODE=1", "f /lib/firmware/x.bin")
+    "f /etc/agentos/modem.env - - - - COUNTRY_CODE=1", "f /lib/firmware/x.bin",
+    # #2176 item 3: a file planted at boot in a boot-code channel exec.allow holds, by link or copy,
+    # and kmod's /etc/modules, which Debian's modules-load.d/modules.conf links to.
+    "L /etc/udev/rules.d/99-x.rules - - - - /usr/share/x/x.rules",
+    "C /run/udev/rules.d/99-x.rules - - - - /usr/share/x/x.rules",
+    "L /etc/modules-load.d/x.conf - - - - /usr/share/x/x.conf", "C /run/modules-load.d - - - - /usr/share/x",
+    "L /etc/systemd/system-environment-generators/x - - - - /usr/share/x/x",
+    "C /run/systemd/system-environment-generators/x - - - - /usr/share/x/x",
+    "L /etc/binfmt.d/x.conf - - - - /usr/share/x/x.conf", "C /run/binfmt.d/x.conf - - - - /usr/share/x/x.conf",
+    "L /usr/lib/systemd/system-shutdown/x - - - - /usr/share/x/x",
+    "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -3114,10 +3141,13 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
 
     # (a) A tmpfiles.d L line makes a link on the box, so the tree's link rules apply to it.
 
+    # The tmpfiles lines link /etc/udev/hwdb.d: a link into rules.d is refused before the link rule
+    # runs, by the guarded-path check (#2176).
+
     def test_a_tmpfiles_link_into_a_world_writable_or_service_directory_is_refused(self):
-        for ln in ("L /etc/udev/rules.d - - - - /var/tmp", "L+ /etc/udev/rules.d - - - - /var/tmp/r",
-                   "L /etc/udev/rules.d - - - - /tmp", "L /etc/udev/rules.d - - - - /var/lib/agentos-egress",
-                   "L /etc/udev/rules.d - - - - /run/agentos-netjoin/r", "L /etc/x - - - - /home/u",
+        for ln in ("L /etc/udev/hwdb.d - - - - /var/tmp", "L+ /etc/udev/hwdb.d - - - - /var/tmp/r",
+                   "L /etc/udev/hwdb.d - - - - /tmp", "L /etc/udev/hwdb.d - - - - /var/lib/agentos-egress",
+                   "L /etc/udev/hwdb.d - - - - /run/agentos-netjoin/r", "L /etc/x - - - - /home/u",
                    "L /etc/x - - - - %V", "L /etc/x - - - - /dev/shm"):
             with self.subTest(ln=ln):
                 f = self.tmpfiles(ln + "\n")
@@ -3129,7 +3159,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
     def test_a_tmpfiles_link_into_what_the_box_fills_is_refused(self):
         # Default deny: /dev/fd/3 is the reader's fd 3. A tmpfiles link under a box mount is made on
         # the box, after the mount, so unlike a tree link there it is not hidden.
-        for ln in ("L /etc/udev/rules.d - - - - /dev/fd/3", "L /run/x - - - - /dev/fd/4",
+        for ln in ("L /etc/udev/hwdb.d - - - - /dev/fd/3", "L /run/x - - - - /dev/fd/4",
                    "L /etc/y - - - - /run/agentos", "L /var/run/x - - - - /dev/stdin"):
             with self.subTest(ln=ln):
                 f = self.tmpfiles(ln + "\n")
@@ -3164,7 +3194,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
     def test_without_the_tmpfiles_link_rule_its_links_pass(self):
         m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
                         "            elif False:\n")
-        self.tmpfiles("L /etc/udev/rules.d - - - - /var/tmp\n")
+        self.tmpfiles("L /etc/udev/hwdb.d - - - - /var/tmp\n")
         self.assertNotIn("x.conf: line", self.v(m))
         self.assertIn("x.conf: line", self.v())
 
@@ -3489,7 +3519,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
     def test_a_tmpfiles_link_through_a_directory_another_uid_owns_is_refused(self):
         (self.root / "opt/d").mkdir(parents=True)
         link(self.root, "opt/d/x", "/usr/lib/x")
-        ln = "L /etc/udev/rules.d - - - - /opt/d/x"
+        ln = "L /etc/udev/hwdb.d - - - - /opt/d/x"
         self.tmpfiles(ln + "\n")
         with self.owned("opt/d"):
             self.assertIn("x.conf: line 1: %s; a link to /opt/d/x, through /opt/d, which uid %d owns"
@@ -4258,7 +4288,22 @@ class ExecAllowTest(unittest.TestCase):
                 "usr/lib/udev/rules.d/99-x.rules", "etc/systemd/system-generators/x",
                 "usr/local/lib/systemd/system-generators/x", "usr/lib/systemd/system-generators/x",
                 "etc/systemd/system-environment-generators/x", "usr/lib/systemd/system-environment-generators/x",
-                "etc/modules-load.d/x.conf", "usr/local/lib/modules-load.d/x.conf", "usr/lib/modules-load.d/x.conf")
+                "etc/modules-load.d/x.conf", "usr/local/lib/modules-load.d/x.conf", "usr/lib/modules-load.d/x.conf",
+                # #2176: modprobe.d install lines, sysctl.d helpers, binfmt.d, shutdown and sleep hooks.
+                "etc/modprobe.d/x.conf", "usr/local/lib/modprobe.d/x.conf", "usr/lib/modprobe.d/x.conf",
+                "lib/modprobe.d/x.conf", "etc/sysctl.d/x.conf", "usr/local/lib/sysctl.d/x.conf",
+                "usr/lib/sysctl.d/x.conf", "etc/binfmt.d/x.conf", "usr/lib/binfmt.d/x.conf",
+                "usr/lib/systemd/system-shutdown/x", "usr/lib/systemd/system-sleep/x",
+                "etc/systemd/system-shutdown/x", "usr/local/lib/systemd/system-sleep/x")
+    # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
+    PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
+             "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
+             "etc/sysctl.d/y.conf": "kernel/hotplug=/usr/local/bin/x\n",
+             "usr/lib/binfmt.d/x.conf": ":x:E::x::/usr/local/bin/x:\n",
+             "usr/lib/systemd/system-shutdown/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             "usr/lib/systemd/system-sleep/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+    GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
+                  "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -4283,11 +4328,17 @@ class ExecAllowTest(unittest.TestCase):
                 rel, tab, value = ln.partition("\t")
                 self.assertTrue(tab, ln)
                 self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
-                                      r"(environment-)?generators/[^/]+|modules-load\.d/[^/]+\.conf)$")
+                                      r"((environment-)?generators|shutdown|sleep)/[^/]+|"
+                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
         self.assertIn((self.TPM, self.entry(tpm)), allowed)
+        # So are its modprobe.d and sysctl.d files (#2176), and neither sysv generator.
+        for rel in (BT_BLOCK, "usr/lib/sysctl.d/99-agentos-nodump.conf"):
+            self.assertIn((rel, self.entry((MK / "mkosi.extra" / rel).read_text())), allowed)
+        for rel in self.GENERATORS:
+            self.assertNotIn(rel, {r for r, _ in allowed})
         self.assertEqual(self.v(), [])
         self.assertEqual(check.violations(self.root), [])
 
@@ -4311,6 +4362,35 @@ class ExecAllowTest(unittest.TestCase):
         # The image's own file, changed.
         write(self.root, self.TPM, (MK / "mkosi.extra" / self.TPM).read_text() + self.HARM)
         self.assertIn("%s: not on the boot-code allowlist" % self.TPM, " | ".join(check.violations(self.root)))
+
+    def test_2176_failure_paths(self):
+        for rel, data in self.PATHS.items():
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, data, 0o755)
+                want = "%s: not on the boot-code allowlist (%s, #1556)" % (rel, check.EXEC_ALLOW_REPO)
+                self.assertIn(want, " | ".join(check.violations(self.root)))
+                self.assertEqual(self.v(check.exec_allowed() | {(rel, self.entry(data))}), [])
+                p.unlink()
+        # The sysv and rc-local generators turn /etc/init.d and /etc/rc.local into units; the image
+        # removes them, so one that comes back fails.
+        for rel in self.GENERATORS:
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, "\x7fELF", 0o755)
+                self.assertIn("%s: not on the boot-code allowlist" % rel, " | ".join(check.violations(self.root)))
+                p.unlink()
+        conf = (MK / "mkosi.conf").read_text()
+        for rel in self.GENERATORS:
+            self.assertRegex(conf, r"(?m)^\s*(RemoveFiles=)?/%s$" % re.escape(rel))
+
+    def test_modprobe_listing_follows_kmod(self):
+        # kmod reads only *.conf and skips only dot names, so a backup name is skipped by its suffix;
+        # it reads a non-directory modprobe.d as one file, which must then be listed.
+        for rel in ("usr/lib/modprobe.d/x.conf~", "usr/lib/modprobe.d/.x.conf", "usr/lib/modprobe.d/x.txt"):
+            write(self.root, rel, self.PATHS["usr/lib/modprobe.d/x.conf"])
+        self.assertEqual(self.v(), [])
+        shutil.rmtree(self.root / "usr/lib/modprobe.d")
+        write(self.root, "etc/modprobe.d", "install tun /bin/true\n")
+        self.assertIn("etc/modprobe.d: not on the boot-code allowlist", " | ".join(self.v()))
 
     def test_every_file_is_listed_not_only_the_winner(self):
         # systemd runs a generator only if it is executable, and a non-executable file of the same name
@@ -4363,7 +4443,8 @@ class ExecAllowTest(unittest.TestCase):
 
     def test_run_and_unreadable_are_refused(self):
         for d in ("run/udev/rules.d", "run/systemd/system-generators", "run/systemd/system-environment-generators",
-                  "run/modules-load.d"):
+                  "run/modules-load.d", "run/modprobe.d", "run/sysctl.d", "run/binfmt.d",
+                  "run/systemd/system-shutdown", "run/systemd/system-sleep"):
             with self.subTest(d=d):
                 write(self.root, d + "/x", self.HARM)
                 self.assertIn("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d,
@@ -4385,8 +4466,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.allow_path(moved.EXEC_ALLOW), str(MK / check.EXEC_ALLOW))
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
-                want = ["exec.allow: missing; every udev rules file, generator and modules-load.d file must be on it "
-                        "(#1556)"]
+                want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
@@ -4402,8 +4483,9 @@ class ExecAllowTest(unittest.TestCase):
         f.write_text(out.getvalue())
         allowed = check.exec_allowed(str(f))
         self.assertEqual(allowed, {("etc/udev/rules.d/99-x.rules", self.entry(self.HARM)),
-                                   ("usr/lib/systemd/system-generators/y", "mask"),
-                                   (self.TPM, self.entry((MK / "mkosi.extra" / self.TPM).read_text()))})
+                                   ("usr/lib/systemd/system-generators/y", "mask")} | {
+                                   (rel, self.entry((MK / "mkosi.extra" / rel).read_text()))
+                                   for rel in (self.TPM, BT_BLOCK, "usr/lib/sysctl.d/99-agentos-nodump.conf")})
         self.assertEqual(self.v(allowed), [])
         self.assertNotEqual(self.v(allowed - {("usr/lib/systemd/system-generators/y", "mask")}), [])
 
