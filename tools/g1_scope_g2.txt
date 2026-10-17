@@ -23,6 +23,9 @@
 
 freeze on
 since 2026-10-17T17:06:19Z
+# #2198: in flight before the freeze began (opened 16:16:15Z); a base swap to refresh its
+# stale g1-freeze base logged base_ref_changed at 17:52:57Z, voiding the time exemption.
+exempt-pr 2198
 
 # Project machinery and records.
 allow .claude/
