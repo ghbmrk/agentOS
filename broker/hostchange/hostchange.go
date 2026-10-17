@@ -1,4 +1,4 @@
-// Package hostchange is HW-8's list of everything an AgentOS session may
+// Package hostchange is HW-8's list of everything an agentOS session may
 // change on the host PC: the firmware-level changes the box cannot avoid
 // and discloses. The owner's guide (docs/owners-guide.md) lists each one
 // in plain words under ChangesHeading, and the list there is the whole of
@@ -54,7 +54,7 @@ var All = []Change{
 
 // Headings of the owner's guide sections this package pins.
 const (
-	StartHeading          = "Starting AgentOS on your PC"
-	ChangesHeading        = "What AgentOS changes on your PC"
+	StartHeading          = "Starting agentOS on your PC"
+	ChangesHeading        = "What agentOS changes on your PC"
 	RecoveryPromptHeading = "If Windows asks for a recovery key"
 )
