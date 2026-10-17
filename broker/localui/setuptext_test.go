@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"net/url"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 type textLine struct {
 	mu       sync.Mutex
 	noNumber bool // the SIM texts but does not report its number
+	fails    int  // the next fails sends fail and are not sent
 	sent     [][2]string
 	inbox    chan [2]string
 }
@@ -38,6 +40,10 @@ func (l *textLine) Number() string {
 func (l *textLine) Send(_ context.Context, to, text string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.fails > 0 {
+		l.fails--
+		return errors.New("modem busy")
+	}
 	l.sent = append(l.sent, [2]string{to, text})
 	return nil
 }

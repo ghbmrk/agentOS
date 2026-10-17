@@ -333,6 +333,10 @@ const cardRestartNote = "If I restart before you confirm, I make a new card: a c
 // cannotFinish is what the page says on ErrCodesUnavailable.
 const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
 
+// cardAgain is what the page says on ErrCardAgain (#1330): the vault holds
+// no Owner Card, so setup goes back to the card step with a new one.
+const cardAgain = "I need to make your Owner Card again. Any card I showed you before will not work."
+
 // answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
 // reload adopts the owed answer as a hold and asks the question again.
 const answerOwed = "Your answer about private content was not saved yet. Reload this page to answer again."
@@ -942,9 +946,17 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 	if err != nil {
 		return err
 	}
-	_ = u.s.cfg.Hooks.Send(to, pairedText(u.s.cfg.Hooks.HostInfo()))
+	if u.s.cfg.Hooks.Send(to, pairedText(u.s.cfg.Hooks.HostInfo())) != nil {
+		// #1293: paired regardless; the owner learns the box's number
+		// from the code text instead.
+		return errPairedUnsent
+	}
 	return nil
 }
+
+// errPairedUnsent is the number step's note when the paired text did not
+// go (#1293). The pairing stands, so the page moves on and shows it once.
+var errPairedUnsent = errors.New("You are paired, but my text from this box did not go. Save the number my code came from as AgentOS.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
@@ -1459,10 +1471,20 @@ func (u *setup) maybeFinish() {
 			msg = cannotFinish
 		case errors.Is(err, ErrAnswerOwed):
 			msg = answerOwed
+		case errors.Is(err, ErrCardAgain):
+			msg = cardAgain
 		}
 		u.mu.Lock()
+		defer u.mu.Unlock()
 		u.err[u.st.Device] = msg
-		u.mu.Unlock()
+		if errors.Is(err, ErrCardAgain) {
+			// The card step comes before the recovery step: the new card
+			// is shown only once the recovery step is open again. A store
+			// that fails to save still routes in memory.
+			if u.save(func(s *SetupState) { s.Recovery = false }) != nil {
+				u.st.Recovery = false
+			}
+		}
 		return
 	}
 	// Finish succeeded, or failed after the owner channel came to exist:

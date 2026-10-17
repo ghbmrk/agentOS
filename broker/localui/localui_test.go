@@ -43,26 +43,28 @@ func testAP() APConfig {
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
 // adapters.
 type fakeHooks struct {
-	mu          sync.Mutex
-	progress    Progress
-	joined      string
-	sent        []modem.SMS
-	now         func() time.Time
-	seed        []byte // the vault's sealed code-generator seed
-	pending     []byte // the newest seed waiting for a code
-	enrolls     int
-	trusted     *bool
-	trustErr    error // returned by TrustHost, which then saves nothing
-	keys        map[string]string
-	finished    string
-	connected   bool
-	device      bool // the device-code sign-in completes on the provider's site
-	private     map[string]bool
-	setUp       bool
-	finishes    int
-	finishCalls int    // Finish calls, refused ones too
-	onConfirm   func() // runs inside ConfirmCode, for races
-	finishErr   error  // returned by Finish after the owner channel exists
+	mu           sync.Mutex
+	progress     Progress
+	joined       string
+	sent         []modem.SMS
+	now          func() time.Time
+	seed         []byte // the vault's sealed code-generator seed
+	pending      []byte // the newest seed waiting for a code
+	enrolls      int
+	trusted      *bool
+	trustErr     error // returned by TrustHost, which then saves nothing
+	keys         map[string]string
+	finished     string
+	connected    bool
+	device       bool // the device-code sign-in completes on the provider's site
+	private      map[string]bool
+	setUp        bool
+	finishes     int
+	finishCalls  int                    // Finish calls, refused ones too
+	onConfirm    func()                 // runs inside ConfirmCode, for races
+	finishErr    error                  // returned by Finish after the owner channel exists
+	refuseFinish func() error           // when set and it errs, Finish refuses with it and sets nothing up
+	sendFails    func(text string) bool // a send whose text it matches fails (after being recorded)
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool   // the box cannot text: BoxNumber answers "", false
@@ -108,6 +110,9 @@ func (f *fakeHooks) Send(to, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, modem.SMS{To: to, Text: text})
+	if f.sendFails != nil && f.sendFails(text) {
+		return errors.New("modem busy")
+	}
 	return nil
 }
 
@@ -229,6 +234,11 @@ func (f *fakeHooks) Finish(n string) error {
 	f.finishCalls++
 	if len(f.owed) > 0 {
 		return errors.New("answer owed")
+	}
+	if f.refuseFinish != nil {
+		if err := f.refuseFinish(); err != nil {
+			return err
+		}
 	}
 	f.finished = n
 	f.finishes++
