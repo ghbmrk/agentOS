@@ -3,7 +3,8 @@ CI's boot test reads it, and nothing under image/ passes agentosd -disk-quota of
 
 Kept apart from tests/test_image.py, which several open PRs edit (D-111)."""
 # REQ: RES-4, ARC-3
-import configparser
+import importlib.machinery
+import importlib.util
 import os
 import pathlib
 import re
@@ -16,18 +17,35 @@ IMG = ROOT / "image"
 MK = IMG / "mkosi"
 AGENTOS_LIB = MK / "mkosi.extra/usr/lib/agentos"
 UNIT = MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service"
-ON = "agentos-quota: root=ext4 prjquota"
+ON = "agentos-quota: root=ext4 prjquota flag=on"
+EXEC = ("{ path=/usr/lib/agentos/with-uids ; argv[]=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd "
+        "-owner ${AGENTOS_OWNER} -worker-image openclaw %s ; ignore_errors=no ; start_time=[n/a] ; "
+        "stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
 
 # Every spelling Go's flag package accepts for turning quotas off: one or two dashes, then a space
 # or "=", the value bare or quoted. A line continuation between flag and value counts as a space.
 OFF = re.compile(r"""(?<![\w-])--?disk-quota(?:\s|\\\n)*[=\s](?:\s|\\\n)*["']?off\b""")
 
 
-def ini(path):
-    p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
-    p.optionxform = str
-    p.read(path)
-    return p
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# The image check's model of systemd 257's unit parsing (config_lines) and drop-in names, reused so
+# this test reads the unit the way systemd does (Security #2110 re-sign).
+finalize = load("image_check_quota", MK / "mkosi.finalize")
+
+# An ExecStart word systemd passes through unchanged: no quote, backslash, specifier (%) or bare $, so
+# str.split() is systemd's word splitting. ${NAME} is allowed only where VAR_SLOTS says.
+WORD = re.compile(r"(?:[A-Za-z0-9/_.,=:@+-]|\$\{[A-Za-z_][A-Za-z0-9_]*\})+")
+# Flags whose value may be a variable: string flags (broker/cmd/agentosd/main.go:385 for -owner),
+# which take the next word whatever it holds. After a bool flag a variable would be read as flags.
+VAR_SLOTS = {"-owner"}
+AGENTOSD = "/usr/lib/agentos/agentosd"
 
 
 def stub(d, name, body):
@@ -70,16 +88,23 @@ class NoQuotaOffTest(unittest.TestCase):
 
     def assert_quota_last_and_once(self, unit_text):
         # Go's flag package takes the last value, so `-disk-quota on` as the last argument wins over
-        # anything before it, however spelled (${VAR}, systemd escapes, split quotes: Security #2110
-        # point 1). disk-quota appears nowhere else in the command, and there is one ExecStart=.
-        starts = [l for l in unit_text.splitlines() if l.startswith("ExecStart=")]
+        # anything before it (Security #2110 point 1). The unit is read as systemd reads it
+        # (indented keys, continuations, comments), with one ExecStart= and no reset; its words are
+        # plain, so splitting matches systemd's; disk-quota is in no other word, so nothing before
+        # the last pair can set it, and a variable fills only a string flag's value, so its content
+        # is never read as a flag (re-sign items 1 and 2).
+        starts = [v for sec, k, v in finalize.config_lines(unit_text.encode())
+                  if sec == "Service" and k == "ExecStart"]
         self.assertEqual(len(starts), 1, starts)
-        p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
-        p.optionxform = str
-        p.read_string(unit_text)
-        argv = p["Service"]["ExecStart"].replace("\\\n", " ").split()
+        argv = starts[0].split()
+        bad = [w for w in argv if not WORD.fullmatch(w)]
+        self.assertEqual(bad, [], argv)
         self.assertEqual(argv[-2:], ["-disk-quota", "on"], argv)
         self.assertEqual(sum("disk-quota" in a for a in argv), 1, argv)
+        self.assertIn(AGENTOSD, argv)
+        first = argv.index(AGENTOSD) + 1
+        stray = [w for i, w in enumerate(argv) if "$" in w and not (i > first and argv[i - 1] in VAR_SLOTS)]
+        self.assertEqual(stray, [], argv)
 
     def test_the_unit_passes_quotas_on_last_and_once(self):
         self.assert_quota_last_and_once(UNIT.read_text())
@@ -92,27 +117,46 @@ class NoQuotaOffTest(unittest.TestCase):
                        "-worker-image openclaw \\\n        -disk-quota=${DQ} -disk-quota on\n",
                        "-worker-image openclaw \\\n        -disk-quota on -image x=/y\n",
                        "-worker-image openclaw\n",
-                       last + "ExecStart=/usr/lib/agentos/agentosd -disk-quota=of\\x66\n"):
+                       last + "ExecStart=/usr/lib/agentos/agentosd -disk-quota=of\\x66\n",
+                       # Security #2110 re-sign: an indented reset and second ExecStart=, a C escape
+                       # before a positional, a quoted word, a variable read as flags.
+                       last + "Restart=on-failure\n  ExecStart=\n  ExecStart=/usr/lib/agentos/agentosd -disk-quota=${DQ}\n",
+                       "-worker-image openclaw \\\n        -disk\\x2dquota=of\\x66 x -disk-quota on\n",
+                       "-worker-image openclaw \\\n        \"-x y\" -disk-quota on\n",
+                       "-worker-image openclaw \\\n        -modem-bridge ${X} x -disk-quota on\n",
+                       "-worker-image openclaw \\\n        %i -disk-quota on\n",
+                       "-worker-image openclaw \\\n        $X x -disk-quota on\n"):
             with self.subTest(mutant=mutant):
                 with self.assertRaises(AssertionError):
                     self.assert_quota_last_and_once(text.replace(last, mutant))
 
-    def test_no_drop_in_overrides_the_unit(self):
-        # A drop-in could replace ExecStart= or set the flag's value (Security #2110 point 1).
-        self.assertEqual(sorted(str(d.relative_to(ROOT)) for d in IMG.rglob("agentosd.service.d")), [])
+    def test_the_unit_is_the_only_one_and_has_no_drop_in(self):
+        # A unit of the same name at a higher-priority path replaces it wholesale, and a drop-in
+        # (agentosd.service.d, or service.d for every service) can reset ExecStart= or set the flag
+        # (Security #2110 re-sign item 3). Neither exists anywhere under image/, in any tree mkosi
+        # copies; the boot test also reads the unit systemd actually loaded (agentos-quota-flag).
+        units = sorted(str(f.relative_to(ROOT)) for f in IMG.rglob("agentosd.service"))
+        self.assertEqual(units, [str(UNIT.relative_to(ROOT))])
+        self.assertFalse(UNIT.is_symlink())
+        dirs = ["%s.d" % n for n in finalize.unit_dropin_names("agentosd.service")] + ["service.d"]
+        self.assertIn("agentosd.service.d", dirs)
+        found = sorted(str(f.relative_to(ROOT)) for d in dirs for f in IMG.rglob(d))
+        self.assertEqual(found, [])
 
 
 class BootReportQuotaTest(unittest.TestCase):
     """boot-report says whether root carries project quotas, read from the mount itself."""
 
-    def report(self, fstype, options, findmnt_fails=False):
+    def report(self, fstype, options, findmnt_fails=False, exec_start=EXEC % "-disk-quota on"):
         with tempfile.TemporaryDirectory() as t:
             t = pathlib.Path(t)
             (t / "net").mkdir()
             stub(t, "sleep", ":")
             stub(t, "ip", ":")
             stub(t, "systemd-bless-boot", "echo good")
-            stub(t, "systemctl", "echo inactive")
+            (t / "exec").write_text(exec_start + "\n")
+            stub(t, "systemctl", 'case "$1" in show) [ -s %s ] && cat %s || exit 1 ;; *) echo inactive ;; esac'
+                 % (t / "exec", t / "exec"))
             if findmnt_fails:
                 stub(t, "findmnt", 'case "$*" in *SIZE*) echo 1073741824 ;; *) exit 1 ;; esac')
             else:
@@ -142,6 +186,19 @@ class BootReportQuotaTest(unittest.TestCase):
                 q = self.quota_line(self.report(fstype, options))
                 self.assertNotIn(ON, q)
                 self.assertTrue(q.startswith("agentos-quota: off "), q)
+
+    def test_the_flag_is_on_only_for_one_command_ending_quotas_on(self):
+        on = "-disk-quota on"
+        for exec_start, want in ((EXEC % on, "on"),
+                                 (EXEC % (on + " -disk-quota=${DQ}"), "overridden"),
+                                 (EXEC % ("-disk-quota=off x " + on), "overridden"),
+                                 (EXEC % (on + " -image x=/y"), "overridden"),
+                                 (EXEC % "", "overridden"),
+                                 (EXEC % on + " " + EXEC % on, "overridden"),
+                                 ("", "unknown")):
+            with self.subTest(exec_start=exec_start):
+                q = self.quota_line(self.report("ext4", "rw,prjquota", exec_start=exec_start))
+                self.assertEqual(q, "agentos-quota: root=ext4 prjquota flag=" + want)
 
     def test_an_unreadable_mount_reads_off(self):
         q = self.quota_line(self.report(None, None, findmnt_fails=True))

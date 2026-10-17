@@ -38,13 +38,23 @@ esac
 # Each agent machine writes under its own hard quota on root (RES-4), which needs root mounted with
 # project quotas (rootflags=prjquota, image/ASSUMPTIONS.md I15); agentosd keeps machines off
 # otherwise. Say which, from the mount itself; CI's boot test needs the on line on every boot.
+# flag=on: the command systemd loaded for agentosd, after every unit path and drop-in, is one command
+# whose last argument is -disk-quota on and which names disk-quota nowhere else (Security #2110).
+x=$(systemctl show -P ExecStart agentosd.service 2>/dev/null) || x=
+a=${x#*argv\[\]=}
+a=${a%% ; *}
+case $x in
+*"argv[]="*"argv[]="*) f=overridden ;;
+*"argv[]="*) case $a in *disk-quota*disk-quota*) f=overridden ;; *" -disk-quota on") f=on ;; *) f=overridden ;; esac ;;
+*) f=unknown ;;
+esac
 fs=$(findmnt -no FSTYPE / 2>/dev/null) || fs=unknown
 case ",$(findmnt -no OPTIONS / 2>/dev/null)," in
 *,prjquota,*) [ "$fs" = ext4 ] && q=on || q=off ;;
 *) q=off ;;
 esac
 if [ "$q" = on ]; then
-	echo "agentos-quota: root=ext4 prjquota"
+	echo "agentos-quota: root=ext4 prjquota flag=$f"
 else
-	echo "agentos-quota: off root=${fs:-unknown} (agent machines stay off)"
+	echo "agentos-quota: off root=${fs:-unknown} flag=$f (agent machines stay off)"
 fi

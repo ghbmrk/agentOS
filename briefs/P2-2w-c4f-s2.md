@@ -20,8 +20,8 @@ Not touched, because open PRs own them (D-111): `broker/cmd/agentosd/main.go` (#
 ## What to build
 
 1. **Unit.** agentosd.service passes `-disk-quota on`, so the value the image runs with is the reviewed one, not a default a later main.go change could flip.
-2. **Boot report.** After its existing lines, boot-report prints `agentos-quota: root=ext4 prjquota` when `/` is ext4 and its mount options carry `prjquota`, otherwise `agentos-quota: off root=<fstype> (machines stay off)`. One line, one write (I24). The existing first line is unchanged, since test_image.py pins it.
-3. **Boot test.** ci_boot.sh needs the quota line on the first boot and on the reboot.
+2. **Boot report.** After its existing lines, boot-report prints `agentos-quota: root=ext4 prjquota flag=<f>` when `/` is ext4 and its mount options carry `prjquota`, otherwise `agentos-quota: off root=<fstype> flag=<f> (machines stay off)`. `flag=on` only when `systemctl show -P ExecStart agentosd.service` (the command systemd loaded, after every unit path and drop-in) is one command ending `-disk-quota on` and naming disk-quota nowhere else; `overridden` or `unknown` otherwise. One line, one write (I24). The existing first line is unchanged, since test_image.py pins it.
+3. **Boot test.** ci_boot.sh needs the quota line with `flag=on` on the first boot and on the reboot.
 4. **Guard.** A test fails if any shipped file under image/ passes `-disk-quota off` in any spelling Go's flag package accepts (`-`/`--`, space or `=`, quoted or not).
 
 ## Acceptance tests
@@ -29,9 +29,9 @@ Not touched, because open PRs own them (D-111): `broker/cmd/agentosd/main.go` (#
 **Acceptance tests:** RES-4, ARC-3: `tests/test_image_quota.py` (`NoQuotaOffTest`, `BootReportQuotaTest`, `BootTestReadsQuotaTest`), and the image workflow's QEMU boot test (`image/ci_boot.sh`) reading the quota line on both boots.
 
 1. The scanner flags `-disk-quota off`, `--disk-quota=off`, `-disk-quota="off"` and `-disk-quota 'off'` in synthetic text, does not flag `-disk-quota on`, and finds none under image/.
-2. agentosd.service has one ExecStart=, whose last argument is `-disk-quota on` and which names disk-quota nowhere else (Go takes the last value, so nothing before it can turn quotas off), and no `agentosd.service.d/` drop-in ships under image/.
-3. boot-report, with findmnt stubbed: ext4 with `prjquota` prints `agentos-quota: root=ext4 prjquota`; ext4 without it, another file system, and a findmnt that fails each print the off form and never the on form; the first line keeps its exact text.
-4. ci_boot.sh checks the on line on console.log and console-reboot.log.
+2. Read the way systemd reads it (mkosi.finalize's `config_lines`: indented keys, continuations, comments), agentosd.service has one ExecStart= and no reset, whose words carry no quote, backslash, `%` or bare `$` (so splitting on spaces is systemd's word splitting), whose last argument is `-disk-quota on`, which names disk-quota in no other word, and whose only variable fills `-owner`, a string flag (Go takes the last value, so nothing before it can turn quotas off). It is the only `agentosd.service` under image/, and no `agentosd.service.d/` or `service.d/` drop-in directory ships there. Mutants of each bypass found in review are caught.
+3. boot-report, with findmnt stubbed: ext4 with `prjquota` prints `agentos-quota: root=ext4 prjquota flag=on`, and with systemctl stubbed, a second command, a later or earlier disk-quota word, a missing flag or no answer each print another flag; ext4 without it, another file system, and a findmnt that fails each print the off form and never the on form; the first line keeps its exact text.
+4. ci_boot.sh checks the on line with `flag=on` on console.log and console-reboot.log.
 
 ## Out of scope
 
