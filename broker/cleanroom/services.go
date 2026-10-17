@@ -21,6 +21,9 @@ import (
 // agent machine (guest G1).
 const Socket = "broker.sock"
 
+// maxInFlight bounds one clean room's concurrent requests.
+const maxInFlight = 4
+
 // session is one job's clean room as the broker serves it.
 type session struct {
 	b       *Builder
@@ -32,6 +35,7 @@ type session struct {
 	mu       sync.Mutex
 	dir      string
 	srv      *http.Server
+	slot     chan struct{}
 	done     chan struct{}
 	finished bool
 	storing  bool
@@ -120,7 +124,7 @@ func (b *Builder) open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.dir = dir
+	s.dir, s.slot = dir, make(chan struct{}, maxInFlight)
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -170,7 +174,16 @@ func (s *session) handler() http.Handler {
 	mux.HandleFunc("/cleanroom/result", s.result)
 	mux.HandleFunc("/cleanroom/unable", s.unable)
 	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.slot <- struct{}{}:
+			defer func() { <-s.slot }()
+		default:
+			http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (s *session) model() http.Handler {
