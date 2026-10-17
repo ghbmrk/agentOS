@@ -45,6 +45,11 @@ const DefaultMaxBody = 8 << 20
 // DefaultMaxConcurrent caps one machine's requests in flight.
 const DefaultMaxConcurrent = 4
 
+// DefaultMaxInFlight caps the requests in flight across every machine. Each
+// holds up to MaxBody in memory, so this bounds the proxy's share of the
+// vault process's memory (egress K18); the per-machine cap alone would not.
+const DefaultMaxInFlight = 16
+
 // Event is one proxy decision. It carries no header or body content, so it
 // cannot carry a credential.
 type Event struct {
@@ -120,6 +125,9 @@ type Config struct {
 	// MaxConcurrent caps one machine's requests in flight; zero means
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
+	// MaxInFlight caps requests in flight across every machine; zero means
+	// DefaultMaxInFlight.
+	MaxInFlight int
 	// Cap is applied to each machine separately.
 	Cap Cap
 	// Label returns a machine's REV-5 data label. Nil, or any answer other
@@ -164,14 +172,16 @@ type Proxy struct {
 	audit    Auditor
 	maxBody  int64
 	maxConc  int
+	maxTotal int
 	cap      Cap
 	now      func() time.Time
 	xch      exchangeHooks
 
-	mu    sync.Mutex
-	usage map[string]*machineUsage
-	stops RouteStops        // adapter -> why its route stopped (CRED-5t)
-	held  map[string]string // adapter -> a stop stops could not record
+	mu       sync.Mutex
+	inFlight int // across every machine
+	usage    map[string]*machineUsage
+	stops    RouteStops        // adapter -> why its route stopped (CRED-5t)
+	held     map[string]string // adapter -> a stop stops could not record
 }
 
 type machineUsage struct {
@@ -202,6 +212,7 @@ func New(cfg Config) (*Proxy, error) {
 		audit:    cfg.Audit,
 		maxBody:  cfg.MaxBody,
 		maxConc:  cfg.MaxConcurrent,
+		maxTotal: cfg.MaxInFlight,
 		cap:      cfg.Cap,
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
@@ -270,6 +281,9 @@ func New(cfg Config) (*Proxy, error) {
 	if p.maxConc <= 0 {
 		p.maxConc = DefaultMaxConcurrent
 	}
+	if p.maxTotal <= 0 {
+		p.maxTotal = DefaultMaxInFlight
+	}
 	if p.now == nil {
 		p.now = time.Now
 	}
@@ -320,11 +334,14 @@ func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Audit
 	})
 }
 
-// admit takes a concurrency slot and checks the cap; release returns the
-// slot and charges bytes.
+// admit takes a global and a per-machine concurrency slot and checks the
+// cap; release returns both slots.
 func (p *Proxy) admit(machine string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.inFlight >= p.maxTotal {
+		return "too many requests in flight", false
+	}
 	u := p.usage[machine]
 	if u == nil {
 		u = &machineUsage{}
@@ -339,6 +356,7 @@ func (p *Proxy) admit(machine string) (string, bool) {
 		return "byte cap reached", false
 	}
 	u.inFlight++
+	p.inFlight++
 	return "", true
 }
 
@@ -353,6 +371,7 @@ func (p *Proxy) charge(machine string, requests, bytes int64) {
 func (p *Proxy) release(machine string) {
 	p.mu.Lock()
 	p.usage[machine].inFlight--
+	p.inFlight--
 	p.mu.Unlock()
 }
 
