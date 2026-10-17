@@ -79,7 +79,7 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		// Not a tree: mirroring it would delete the whole tree. The broker
 		// never folds managed_tree (guest.TreeTool), so a fold stand-in is
 		// refused here too.
-		return version, errors.New("broker answer: no tree version; nothing changed")
+		return version, errors.New("refused a managed_tree answer with no version; kept the current tree")
 	}
 	if ans.Unchanged {
 		if ans.Version != version {
