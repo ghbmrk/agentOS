@@ -578,12 +578,13 @@ func TestPairingFallbacks(t *testing.T) {
 }
 
 // Pairing guesses by text are bounded: after PairTriesPerHour wrong codes
-// the box stays silent, even for the right code, until the hour passes.
+// the box stays silent, even for the right code, until the hour passes. A
+// wrong code itself gets no reply (P2-2w c4c s2, #1290).
 func TestPairingGuessesAreBounded(t *testing.T) {
 	r := newRig(t)
 	for i := 0; i < PairTriesPerHour; i++ {
-		if reply, _ := r.srv.OfferText("+15550009999", "PAIR AAAA-AAAA"); reply == "" {
-			t.Fatalf("try %d: no reply", i)
+		if reply, ok := r.srv.OfferText("+15550009999", "PAIR AAAA-AAAA"); reply != "" || !ok {
+			t.Fatalf("try %d: %q %v", i, reply, ok)
 		}
 	}
 	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); reply != "" || !ok || r.srv.setup.st.Owner != "" {
