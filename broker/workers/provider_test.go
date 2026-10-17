@@ -174,7 +174,9 @@ func (r *rig) provider() *fakeProvider {
 }
 
 // CAP-11: provider_run hands the runner the brief as data and the caller's
-// label, class and reservation, and returns the result.
+// label, class and reservation, and returns the result. OP-8: and the
+// caller's machine, which the run is charged to.
+// REQ: OP-8
 func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	r := newRig(t, 4096)
 	r.agent("a1", vm.Private)
@@ -193,6 +195,9 @@ func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	}
 	if q.Label != vm.Private || q.Class != admission.Experiment || q.MemMB != 500 {
 		t.Fatalf("request lost the caller's label, class or reservation: %+v", q)
+	}
+	if q.Machine != "a1" {
+		t.Fatalf("request lost the caller's machine: %+v", q)
 	}
 }
 
