@@ -1,0 +1,11 @@
+# Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
+# (#1556): udev rules, system and environment generators, and modules-load.d, in etc, usr/local/lib,
+# usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
+# listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
+# with that value, and on anything under the same directories in /run.
+# To update after a reviewed package update or an edit to mkosi.extra: the failed build prints each
+# new or changed file as "entry: <file><TAB><value>"; review the file, then add it here (and drop the
+# old entry). With the image tree at hand:
+#   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
+usr/lib/udev/rules.d/60-agentos-tpm.rules	sha256:e87aea30414ef2b2aa3d508e456e28dc7e3d2946d6074ceac048c3d22325876f
