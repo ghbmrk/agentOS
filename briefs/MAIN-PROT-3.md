@@ -20,13 +20,17 @@ Work item: #757 (BOARD: release; the issue label reads `class:later`, fix the la
 
 **Scope:** `.github/rulesets/bot-branches.json` (new), `tests/test_ruleset_bot_branches.py` (new), this brief. Not `tools/premerge.py` (read only), not the four bot workflows, not `tools/ASSUMPTIONS.md`.
 
-**Admin step (Mark, after merge; one command):** `gh api -X POST repos/ghbmrk/agentOS/rulesets --input .github/rulesets/bot-branches.json`. Verify: `git push origin HEAD:refs/heads/bot/zz-probe` as Mark's login is rejected; the next daily `trace` run still opens its PR. Roll back: delete the ruleset in Settings, Rules. **If the repo secret `BOT_PR_TOKEN` is set, the bot pushes as Mark's login, not the app, and this ruleset would block it: Mark checks Settings, Secrets first and the apply waits until it is removed or a GitHub App replaces it.**
+**Residual, stated for Mark's card:** a bypass for the Actions app (15368) admits the `GITHUB_TOKEN` of any workflow run in this repo, including one that a branch's own `pull_request` or `push` workflow defines. A writer who can push a branch with a workflow can therefore update `bot/trace` through the app, and `premerge --bot` then checks only the path, not who produced the content. This ruleset closes the shared-login path (a PAT or any non-app token) and leaves the branch-workflow path open. Closing it needs a dedicated GitHub App with its key held in a `main`-only environment as the sole bypass actor and the bot workflows moved to that environment (a larger change: a new App, an environment and four workflow edits, all `.github/`). **Decision for Mark:** accept the residual (recommended for now, label it in the ruleset description) or take the App key as a follow-up row.
+
+**Admin step (Mark, after merge; no local clone, the file comes from main):**
+`gh api repos/ghbmrk/agentOS/contents/.github/rulesets/bot-branches.json?ref=main -H 'Accept: application/vnd.github.raw' | gh api -X POST repos/ghbmrk/agentOS/rulesets --input -`
+Verify by reading back: `gh api repos/ghbmrk/agentOS/rulesets --jq '.[] | select(.name=="bot-branches") | .enforcement'` prints `active`, and the next daily `trace` run still opens its PR. Roll back: delete the ruleset in Settings, Rules. **If the repo secret `BOT_PR_TOKEN` is set, the bot pushes as Mark's login, not the app, and this ruleset would block it: Mark checks Settings, Secrets first and the apply waits until it is removed or a GitHub App replaces it.**
 
 **Not in this package:** who may post the `premerge` status (#1943); CTRL-check-pin (separate file, no overlap); content-regeneration checks for `bot/trace`.
 
 **Tier and merge:** tier A (`.github/`): Security plus L3 on the strongest model, threat check below. Mark-only (D-125): nobody arms it.
 
-**Threat check to answer in the PR:** can any non-app login still update `bot/**`; can a branch named `bot/x` outside the pattern reach main unreviewed; does the bypass cover a force-push from the app (the bot rebuilds the branch each run); what happens to a deleted bot branch when auto-merge is armed.
+**Threat check to answer in the PR:** the residual above, and can any non-app login still update `bot/**`; can a branch named `bot/x` outside the pattern reach main unreviewed; does the bypass cover a force-push from the app (the bot rebuilds the branch each run); what happens to a deleted bot branch when auto-merge is armed.
 
 **Guard files:** none. **Dependencies:** MAIN-PROT-2 (merged). **Usage estimate:** small, under 60k tokens.
 
@@ -34,6 +38,6 @@ Work item: #757 (BOARD: release; the issue label reads `class:later`, fix the la
 
 | # | Assumption | Basis | If it changes |
 |---|---|---|---|
-| 1 | A ruleset bypass actor of type Integration 15368 covers pushes made with `GITHUB_TOKEN`. | GitHub rulesets docs, bypass list; unproven on this repo | The probe push in the admin step shows it; the next `trace` run fails and the ruleset is deleted. |
+| 1 | A ruleset bypass actor of type Integration 15368 covers pushes made with `GITHUB_TOKEN`. | GitHub rulesets docs, bypass list; unproven on this repo | The next `trace` run fails; delete the ruleset. |
 | 2 | The repo is a user account, so team and org-admin bypass types are unavailable. | `ghbmrk` is a user login | Another bypass type would be a cleaner pin; revisit. |
 | 3 | `BOT_PR_TOKEN` is unset. | `trace.yml` falls back to `github.token` and warns when auto-merge is unavailable; the secret itself is unreadable from here | See the bold line above. |

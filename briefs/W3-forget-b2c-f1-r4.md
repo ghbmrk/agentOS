@@ -16,9 +16,9 @@ Board section: Integration. Follows W3-forget-b2c-f1-r1 (ASSUMPTIONS R5, R6 in `
 - F1R4-2: `::TestDigestStillRunsWhenLearningIsOn`.
 Mutants: start the run unconditionally; skip it on every start.
 
-**Scope:** `broker/cmd/agentosd/main.go` (the `go dg.run` guard, extracted to a small helper the test calls), `broker/cmd/agentosd/digest_learning_off_test.go` (new), this brief. Not `tools/ASSUMPTIONS.md`; `broker/cmd/agentosd/ASSUMPTIONS.md` R6 gets a "closed by r4" note only if the builder finds it says the leak is accepted.
+**Scope:** `broker/cmd/agentosd/main.go` (an inline `lp != nil` guard around the one `go dg.run(ctx)`; no helper, `go dg.run` stays a single statement in main), `broker/cmd/agentosd/digest_learning_off_test.go` (new), `broker/cmd/agentosd/digestgate2_test.go` only if its `bootOrder` fixtures need the guard, this brief. Not `tools/ASSUMPTIONS.md`; `broker/cmd/agentosd/ASSUMPTIONS.md` R6 gets a "closed by r4" note only if the builder finds it says the leak is accepted.
 
-**Guards:** the source-scanning lint tests in the package (`forget_inform_lint_test.go`, `deadline_send_lint_test.go`) stay green; no new owner-facing text; the helper adds no import (arc2 and `netOK` untouched).
+**Guards:** `broker/cmd/agentosd/digestgate2_test.go` (`bootOrder` reads main's source and wants exactly one `go dg.run`, after `wireDigest` and `lp.attach`; a helper would break it, so the guard is inline and the test must stay green); the source-scanning lint tests in the package (`forget_inform_lint_test.go`, `deadline_send_lint_test.go`) stay green; no new owner-facing text; the guard adds no import (arc2 and `netOK` untouched).
 
 **Tier and model:** A (`tools/risk_tier.py` prints A for `broker/cmd/agentosd`): strongest model. **Dependencies:** none; no open PR touches `main.go` in scope (check at start, D-111). **Usage estimate:** 40k tokens, checkpoint 30k.
 
