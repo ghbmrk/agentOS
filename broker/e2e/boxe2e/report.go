@@ -16,6 +16,7 @@ type report struct {
 	xfail   map[string]expectedFailure
 	blocker string
 	n       map[string]int
+	running string // the step being run, for note
 }
 
 // expectedFailure is a known failure: its work-item issue and the text its
@@ -39,7 +40,9 @@ func (r *report) step(name string, run func() error) {
 		r.line("blocked", "BLOCKED "+name+" after "+r.blocker)
 		return
 	}
+	r.running = name
 	err := run()
+	r.running = ""
 	ef, listed := r.xfail[name]
 	expected := listed && err != nil && strings.Contains(err.Error(), ef.want)
 	switch {
@@ -54,6 +57,12 @@ func (r *report) step(name string, run func() error) {
 		r.blocker = name
 		r.line("fail", "FAIL "+name+" "+oneLine(err.Error()))
 	}
+}
+
+// note is a NOTE line under the running step: what the step saw that
+// does not decide it. It counts as no step, so DONE's counts are unchanged.
+func (r *report) note(rest string) {
+	fmt.Fprintf(r.w, "agentos-e2e: NOTE %s %s\n", r.running, oneLine(rest))
 }
 
 func (r *report) done() {

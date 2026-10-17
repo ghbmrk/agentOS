@@ -7,8 +7,8 @@ on:
   # these same checks; without this trigger a queued PR never gets them and stalls.
   # PR-only steps (BOARD, TRACE.md, risk tier) stay skipped: the PR run already did them.
   merge_group:
-  # trace.yml and metrics.yml dispatch it on their bot branches: PRs opened with
-  # GITHUB_TOKEN start no pull_request runs, and main requires these checks.
+  # The bot workflows dispatch it on their bot branches when BOT_PR_TOKEN is unset: PRs
+  # opened with GITHUB_TOKEN start no pull_request runs, and main requires these checks.
   workflow_dispatch:
 permissions:
   contents: read
@@ -150,7 +150,7 @@ jobs:
             && [ "$(git diff --name-only HEAD^1...HEAD^2)" = TRACE.md ]; then
             echo "bot/trace PR changes only TRACE.md: allowed"; exit 0
           fi
-          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
+          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main daily. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
         # Advisory summary only. The lane limit (docs/LANES.md) is enforced in lane-gate.yml,
