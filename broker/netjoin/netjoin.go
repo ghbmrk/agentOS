@@ -134,16 +134,21 @@ func isHex(b byte) bool {
 // property name, then value (D-Bus a{sa{sv}}).
 type Settings map[string]map[string]any
 
-// ConnectionSettings is exactly L8.4's list, and nothing else: the caller
-// sets only the SSID and the PSK. No interface, address, DNS, route, MAC,
-// priority, proxy, 802.1X or permissions are set.
-func ConnectionSettings(ssid, psk string) Settings {
+// ConnectionSettings is exactly L8.4's list plus the station interface
+// (S-R4, ASSUMPTIONS N13), and nothing else: the request sets only the
+// SSID and the PSK, and the interface is the helper's own -station, never
+// the request's. No address, DNS, route, MAC, priority, proxy, 802.1X or
+// permissions are set.
+func ConnectionSettings(ssid, psk, station string) Settings {
 	return Settings{
 		"connection": {
 			"type":        "802-11-wireless",
 			"id":          ID,
 			"uuid":        UUID,
 			"autoconnect": true,
+			// The one device NetworkManager may activate it on (S-R4):
+			// never the access point's.
+			"interface-name": station,
 		},
 		"802-11-wireless": {
 			"mode":   "infrastructure",

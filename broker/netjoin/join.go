@@ -3,6 +3,7 @@ package netjoin
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -43,6 +44,10 @@ const poll = 500 * time.Millisecond
 // runs one join at a time.
 type Joiner struct {
 	nm NM
+	// station is the one interface the home connection may use; ap the
+	// interfaces agentos-ap may run the access point on (S-R4).
+	station string
+	ap      []string
 
 	wait  time.Duration
 	every time.Duration
@@ -52,9 +57,40 @@ type Joiner struct {
 	mu sync.Mutex
 }
 
-// NewJoiner returns a Joiner over nm with the fixed Wait.
-func NewJoiner(nm NM) *Joiner {
-	return &Joiner{nm: nm, wait: Wait, every: poll, now: time.Now, sleep: sleep}
+// NewJoiner returns a Joiner over nm with the fixed Wait. station is the
+// one interface the home connection may use (#936's station device) and
+// ap every interface agentos-ap may run the access point on (its -iface),
+// which are the only ones agentos_ap can hold. Join refuses unless station
+// is a plain interface name outside ap (StationOK).
+func NewJoiner(nm NM, station string, ap []string) *Joiner {
+	return &Joiner{nm: nm, station: station, ap: append([]string(nil), ap...),
+		wait: Wait, every: poll, now: time.Now, sleep: sleep}
+}
+
+// ifaceRe is a kernel interface name, as localui's access point config
+// takes it.
+var ifaceRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+
+func ifaceName(s string) bool {
+	return ifaceRe.MatchString(s) && s != "." && s != ".."
+}
+
+// StationOK reports whether the home connection may be written for
+// station (S-R4, #1428): a plain interface name, not lo, with at least one
+// access point interface known, every one of them a plain name and none
+// equal to station. agentosd -> netjoin -> NetworkManager does not pass
+// through localui.APLoader.Station, so this refusal, and the connection's
+// interface-name, keep the join off the interface agentos_ap holds.
+func StationOK(station string, ap []string) bool {
+	if !ifaceName(station) || station == "lo" || len(ap) == 0 {
+		return false
+	}
+	for _, a := range ap {
+		if !ifaceName(a) || a == station {
+			return false
+		}
+	}
+	return true
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -73,7 +109,9 @@ func sleep(ctx context.Context, d time.Duration) error {
 // it writes the connection (created the first time, updated on its own
 // path after that) and reports what autoconnect did within the wait. It
 // takes nothing down and activates nothing: NetworkManager autoconnects
-// the connection on a free Wi-Fi device, if there is one.
+// the connection on the station interface, the only one it names. With no
+// usable station (StationOK), a valid request answers failed before any
+// D-Bus call: setup then says to use Ethernet (#1429).
 //
 // An active connection that already carried the UUID before the write is
 // not counted, so a join while the home connection is up answers saved:
@@ -81,6 +119,9 @@ func sleep(ctx context.Context, d time.Duration) error {
 func (j *Joiner) Join(ctx context.Context, ssid, psk string) Code {
 	if !Valid(ssid, psk) {
 		return Refused
+	}
+	if !StationOK(j.station, j.ap) {
+		return Failed
 	}
 	if !j.mu.TryLock() {
 		return Busy
@@ -90,7 +131,7 @@ func (j *Joiner) Join(ctx context.Context, ssid, psk string) Code {
 	if err != nil {
 		return Failed
 	}
-	s := ConnectionSettings(ssid, psk)
+	s := ConnectionSettings(ssid, psk, j.station)
 	path, err := j.nm.GetConnectionByUuid(ctx, UUID)
 	switch {
 	case errors.Is(err, ErrNoConnection):
