@@ -617,12 +617,35 @@ func (s *Server) statusPageResume(w http.ResponseWriter, r *http.Request, msg st
 	s.statusPageWith(w, r, msg, true)
 }
 
+// signout revokes the phone's session in agentosd and clears its cookie.
+// A token agentosd refuses as unauthorized is already dead (never minted, or
+// revoked by an earlier try whose answer was lost), so that ends the sign-out
+// too. Any other failure leaves the session possibly live: the cookie is kept,
+// since the retry needs it, and the page says the sign-out is incomplete and
+// offers that retry, a same-origin POST like this one (#1725, CH-12).
 func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
 	if tok := cookieToken(r); tok != "" {
-		_ = s.call(r.Context(), localapi.OpSignOut, localapi.Auth{Token: tok}, nil)
+		err := s.call(r.Context(), localapi.OpSignOut, localapi.Auth{Token: tok}, nil)
+		if err != nil && !refused(err, localapi.ErrUnauthorized) {
+			w.Header().Set("Cache-Control", "no-store")
+			s.render(w, "signoutfail", nil)
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/status", http.StatusSeeOther)
+}
+
+// The sign-out failure page is defined here, beside its handler, and parsed
+// into tmpl at init like the other handler-owned pages, so every pagesFor
+// clone carries it.
+func init() {
+	template.Must(tmpl.Parse(`{{define "signoutfail"}}{{template "head" ""}}
+<h1>Sign-out incomplete</h1>
+<p class="err">The box did not confirm that this phone is signed out, so it may still be signed in. Try again; if it keeps failing, wait a minute and try once more.</p>
+<form method="post" action="/signout"><button>Try sign-out again</button></form>
+<p><a href="/status">Status</a></p>
+{{template "foot"}}{{end}}`))
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {

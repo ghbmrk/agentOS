@@ -804,7 +804,8 @@ func holdOpen(p *Policy) bool {
 // another router) asks the router it ended on, with or without a change
 // event: public destinations stay held until that router answers, never on
 // the first router's answer, and the router's address it learns is refused
-// (#1536).
+// (#1536). An answer to a request sent while no entry was known is not that
+// router's either, so the flushed case takes one more read (#1725).
 func TestFullReadAcrossGatewayChangeAsksTheEndRouter(t *testing.T) {
 	for _, tc := range []struct{ name, gw, mac, resolved string }{
 		{"new address", "0102A8C0", "02:00:00:00:00:0b", ""},
@@ -864,15 +865,33 @@ func TestFullReadAcrossGatewayChangeAsksTheEndRouter(t *testing.T) {
 							}
 						}
 						return eB, nil
+					case 3: // asked again with the entry known (#1725)
+						if tc.resolved != "" {
+							return eB, nil
+						}
 					}
 					t.Errorf("router asked %d times", calls)
 					return netip.Addr{}, errors.New("no answer")
 				}
+				want := 2
+				if tc.resolved != "" {
+					// The second request went out with no entry, so its
+					// answer cannot be told from another router's behind
+					// the same address: the read is a second move, the
+					// hold stays, and the next read asks router B.
+					want = 3
+					if err := p.Refresh(); !errors.Is(err, ErrGatewayMoved) {
+						t.Fatalf("read across an unresolved entry: %v, want ErrGatewayMoved", err)
+					}
+					if !holdOpen(p) {
+						t.Fatal("hold ended with no answer from router B")
+					}
+				}
 				if err := p.Refresh(); err != nil {
 					t.Fatal(err)
 				}
-				if calls != 2 {
-					t.Fatalf("router asked %d times, want 2", calls)
+				if calls != want {
+					t.Fatalf("router asked %d times, want %d", calls, want)
 				}
 				p.mu.RLock()
 				n := p.net
