@@ -101,9 +101,10 @@ func TestHeldUploadsKeepHeapBoundedAndWait(t *testing.T) {
 		n, size, hold     int
 		budget, heapBound int64
 	}{
-		// One 8 MiB model call fits a 1 GiB share at a time; 32 held
-		// unbounded would be 224 MiB.
-		{"model", "/model/v1/chat/completions", 32, 8 << 20, 7 << 20, 2 << 30, 32 << 20},
+		// One 1 MiB model call (~108 MiB reserved) fits a 128 MiB share at
+		// a time; 32 held unbounded would be about 32 MiB. Small bodies
+		// keep it fast under -race.
+		{"model", "/model/v1/chat/completions", 32, 1 << 20, 1<<20 - 4<<10, 256 << 20, 8 << 20},
 		// Three 1 MiB candidates fit a 128 MiB share at a time; 128 held
 		// unbounded would be 64 MiB.
 		{"candidate", "/candidate", 128, 2 * MaxCandidateBytes, MaxCandidateBytes, 256 << 20, 16 << 20},
