@@ -2,47 +2,11 @@
 
 Read SPEC.md for what to build and PLAN.md for how. This file is the working contract for builder (L2) and reviewer (L3) agents: rules only, one line each. docs/OPERATING.md gives the procedures and reasons behind them, and README.md maps every document and gives each role its reading order.
 
-## Builder (L2)
-- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; a brief listed in `tools/brief_acceptance_baseline.txt` predates that rule, so name its tests in the PR body and carry on (OPERATING §5).
-- **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
-- Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow opens a PR with the regenerated file once a day.
-- "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
-- **Stop on lack of progress, not on spend:**
-  - The brief's usage figure is an *estimate and checkpoint*, not a ceiling. At the checkpoint, continue if tests are moving toward green (note the extension in the PR), otherwise escalate.
-  - Same test still failing after 2 fix attempts: stop, write a diagnosis in the PR, and set its work-item issue's label to `state:escalated`.
-  - Diff growing while the pass count is flat: stop and escalate.
-- BOARD.md is generated from `work-item` issues (tools/board.py): change a row by editing its issue, never the file. Don't start a row labelled `class:later` or `frozen` (D-098). Class every finding you raise or receive as **blocker** (fix in this PR), **release** (new `work-item` issue labelled `class:release`) or **later** (an issue labelled `class:later`), and list them on the PR's Findings line (OPERATING §2).
-- A **release** finding names the acceptance test or invariant it serves and one failure path. Unsure between release and later: `later` tagged `recheck`. Tooling messages, and findings on a follow-up of a follow-up, are `later` unless they are a false pass or exploit path (OPERATING §2, D-086).
-- Record what the package rests on in its `ASSUMPTIONS.md` (OPERATING §5).
-- Prefer reusing mature components. A new component needs a sentence in the PR on why reuse fails.
+## Role rules (load before acting; the rules live in skills, not here)
+- **Builder (L2):** before touching any file for a package, load the `agentos-builder` skill (`.claude/skills/agentos-builder/SKILL.md`). If the Skill tool is unavailable, Read that file.
+- **Reviewer (L3 or lens):** before reading the diff or posting any verdict, load the `agentos-reviewer` skill (`.claude/skills/agentos-reviewer/SKILL.md`). A review that skipped it is invalid. If the Skill tool is unavailable, Read that file.
+- **Budget:** builders, reviewers and coordinators also load the `agentos-budget` skill (`.claude/skills/agentos-budget/SKILL.md`) before spawning a session, picking a model or writing a hand-off.
 - Never put credentials, tokens, or personal data in code, tests, fixtures, or logs. Use synthetic canaries only.
-
-## Reviewer (L3)
-- Review in a fresh context, from the diff plus the cited requirement IDs. Don't rely on the builder's reasoning.
-- First line `Verdict: accept|fix-list|reject`; any verdict but accept adds `Cause: spec-gap|brief-gap|defect|scope`. Each point cites a requirement ID or a concrete defect and carries its class (OPERATING §4). Last line: the PR's next step and the reviews still owed.
-- A point outside the cited IDs, or only on lines the diff doesn't change (`tools/difflines.py`), is `release` or `later`, never a blocker. The release findings from one PR's reviews make one follow-up brief.
-- Each blocker names its in-diff `path:line` and a `Repro:` the reviewer ran; with no repro, a fresh verifier checks it first. The verifier is Sonnet on tiers B and C, where an unconfirmed point is `release` at the lowest. On tier A it runs on the review's model, and the point stays a blocker unless the verifier refutes it. A lens's first review reads the whole PR; its re-review reads only the delta since its own last reviewed head and never repeats a posted finding. A missed in-diff finding outside the delta is `release` at least, or a blocker when it is an exploit path, a false pass or tier-A security; each blocker names its bug class and the builder fixes every instance. After three fix-list rounds (reviewed heads), the next review posts `Verdict: reject` with `Next: step back` and escalates (OPERATING §4).
-- Review depth follows the risk tier `python3 tools/risk_tier.py --git origin/main HEAD` prints; the stages each tier needs are in OPERATING §3–4. Tier A needs the strongest model and an explicit threat check.
-- **The verdict comment is the record** (cut 4, #2172; supersedes the records bot of D-120). Post each L3 and lens verdict as a PR comment in the shape OPERATING §4 "Verdict comment shape" shows: `Verdict:` (and `Cause:`) first, then `Record: PR #N · package <ID> · head <SHA>`, then one `<!-- record: <lens> -->` per lens (`l3`, `security`, `potency`, `ux`, `combined`); the required `premerge` check reads those lines. No one writes new `reviews/<lens>/` files; the existing ones are history. Answer each finding with a `Finding <class>: <outcome>` line in a PR conversation comment, not an inline thread reply (OPERATING §4). After an accept, push to the PR only to fix another review's finding: disarm first if armed, push, get a delta review (one line for a comment-only or test-only delta as OPERATING §4 defines them: a comment a tool reads, such as a build tag, lint suppression or `REQ:` marker, is code), then re-arm.
-- **The last accept arms the merge** (ARM-AT-ACCEPT, #1819). The session that posts the last required accept arms auto-merge itself, only when the head equals the accepted head, CI is green and every review the tier requires accepted that head (the arm note lists the verdict comment ids and the tier). Disable auto-merge before any push to an armed PR (OPERATING §7); a new head needs a delta review before re-arming. `python3 tools/premerge.py --needs-mark` prints `mark` for a PR that touches any CLAUDE.md or CLAUDE.local.md, AGENTS.md, `.mcp.json`, docs/OPERATING.md, docs/LANES.md, `.claude/`, `.github/`, broker/core/core.txt, tools/risk_tier.py, premerge.py, ci_scope* or g1_scope*: nobody arms those; an agent merges one only on Mark's own approval of that PR at its current head (a card tap or his typed words naming the PR number and head SHA; the merging session fetches that message and checks it, and cites its id on the PR), never on its own judgement or a standing rule (D-125, OPERATING §7).
-- Each review runs in a new session. There are no standing reviewer or lens sessions; lens memory lives in DECISIONS.md and `reviews/<lens>/README.md`.
-- A kind of finding seen on a second PR becomes a lint rule, test or CI check in that same follow-up PR, named on its Findings line and listed in the lens README (OPERATING §4, FIRST-PASS).
-
-## Budget (reasons: OPERATING §1, §5)
-- The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset (Mark, 2026-10-04). ~14% a day is not a ceiling: "14% a day shouldn't be a ceiling. No ceiling as long as not wasteful" (Mark, 2026-10-13 12:40Z). Spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
-- Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
-- Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
-- Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).
-- Pick the model at spawn; never switch models mid-session. A second opinion is a fresh session.
-- A session past 150k that will idle over an hour writes a hand-off packet and stops watching. The coordinator routes; investigation goes to a thread.
-- `.claude/settings.json` compacts at 200k tokens; don't raise it.
-- Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
-- One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
-- Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
-- Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-13 reset): tier B and C builder sessions run on a Sonnet-class model, tier A on the strongest model. Run `tools/risk_tier.py` before opening the PR; on A, stop and hand off.
-- Live state lives on GitHub: every review verdict comment ends with the PR's next step and the reviews still owed. A cold session starts from `handoff/CURRENT.md` (rebuild steps and standing decisions; updated only when a standing decision changes), then GitHub (OPERATING §5, §7).
-- Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist. Per thread, post one acknowledgement, one result and one blocker reply at most.
-- Coordinators of chat-based projects follow the chat layout and coordinator cost rules in OPERATING §5 (D-094).
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md).
