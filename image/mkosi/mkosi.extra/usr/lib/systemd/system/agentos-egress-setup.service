@@ -5,3 +5,37 @@ Description=agentOS setup vault
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/agentos/egress-setup --restart
+# Root, but only what egress-setup uses (#1387): setpriv to the page's and the vault's users,
+# chown of its temporary directory, and search of their 0700 state directories and removal of the
+# vault-owned copy (DAC_OVERRIDE). It drops to those users before reading the claim or writing the
+# vault, and its systemctl try-restart reaches PID 1 over /run/systemd/private.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Its lock and temporary directory are in /run; init -setup writes the vault's state directory.
+# "-": with no vault directory the script exits 0, so the namespace must not fail first.
+ReadWritePaths=/run -/var/lib/agentos-egress
+ProtectHome=yes
+PrivateTmp=yes
+# init -setup reads only the claim and the kernel's random source: no TPM, no network.
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# @system-service holds @setuid and @chown, which setpriv and chown need.
+SystemCallFilter=@system-service
+UMask=0077
+# Not ProcSubset=pid: the claim check reads /proc/sys/kernel/random/boot_id.
+ProtectProc=invisible
+PrivateIPC=yes
