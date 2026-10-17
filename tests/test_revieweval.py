@@ -15,6 +15,13 @@ import metrics  # noqa: E402
 import test_metrics  # noqa: E402
 import revieweval as ev  # noqa: E402
 
+INTRO = """diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1,2 +1,2 @@
++x
+"""
+
 FIX = """--- a/a.go
 +++ b/a.go
 @@ -10,4 +10,3 @@ func f
@@ -60,9 +67,9 @@ class EvalTest(unittest.TestCase):
         pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01", "reviewed_head": "abc1234"},
                  {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
                  {"number": 6, "title": "OTHER-1: clean", "body": "", "merged_at": "2026-10-02"}]
-        diffs = {"intro:5": "diff5", "fix:9": FIX, "intro:6": "diff6"}
+        diffs = {"intro:5": INTRO, "fix:9": FIX, "intro:6": "diff6"}
         cases, defective = ev.build_cases(pulls, diffs)
-        self.assertEqual([(c["id"], c["head"], c["diff"]) for c in cases], [("pr5-fix9", "abc1234", "diff5")])
+        self.assertEqual([(c["id"], c["head"], c["diff"]) for c in cases], [("pr5", "abc1234", INTRO)])
         self.assertEqual(defective, [5])
         self.assertEqual([c["id"] for c in ev.pick_clean(pulls, diffs, 3)], ["pr6-clean"])
 
@@ -71,9 +78,25 @@ class EvalTest(unittest.TestCase):
                  {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
                  {"number": 12, "title": "CRED-1: later rework", "body": "", "merged_at": "2026-10-09"},
                  {"number": 7, "title": "CRED-1: reopened", "body": "", "merged_at": None}]
-        diffs = {"intro:5": "d5", "intro:12": "d12", "intro:7": "d7", "fix:9": FIX}
+        diffs = {"intro:5": INTRO, "intro:12": "x", "intro:7": "d7", "fix:9": FIX}
         cases, _ = ev.build_cases(pulls, diffs)
         self.assertEqual([c["intro_pr"] for c in cases], [5])
+
+    def test_one_case_per_intro_and_only_files_the_intro_touches(self):  # REQ: REVIEW-eval-2
+        fix2 = "--- a/a.go\n+++ b/a.go\n@@ -40,2 +40,1 @@\n ctx\n-bad3\n"
+        elsewhere = "--- a/other.go\n+++ b/other.go\n@@ -1,2 +1,1 @@\n ctx\n-bad\n"
+        pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01"},
+                 {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
+                 {"number": 10, "title": "CRED-1-f2: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-04"},
+                 {"number": 11, "title": "CRED-1-f3: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-05"}]
+        diffs = {"intro:5": INTRO, "fix:9": FIX, "fix:10": fix2, "fix:11": elsewhere}
+        cases, defective = ev.build_cases(pulls, diffs)
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["fix_prs"], [9, 10])  # fix 11 touches no file of the intro
+        self.assertEqual(sorted(cases[0]["expected"]), ["a.go"])
+        both = [{"file": "a.go", "line": 11, "class": "blocker"}, {"file": "a.go", "line": 41, "class": "blocker"}]
+        self.assertEqual(ev.score_case(cases[0], both), {"caught": True, "false_blockers": 0})
+        self.assertEqual(ev.build_cases(pulls[:2] + pulls[3:], {"intro:5": INTRO, "fix:9": elsewhere, "fix:11": elsewhere}), ([], []))
 
     def test_change_is_kept_only_when_the_score_rises(self):  # REQ: REVIEW-eval-2
         def sc(caught, false):
@@ -94,7 +117,7 @@ class EvalTest(unittest.TestCase):
         noisy = ev.summarize([ev.score_case(cases[0], loud), ev.score_case(cases[1], loud)], cases)
         self.assertFalse(ev.keep(quiet, noisy))
         other = ev.summarize([], cases[:1])
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ev.CaseSetMismatch):
             ev.keep(quiet, other)
 
     def test_runner_and_cli_round_trip(self):  # REQ: REVIEW-eval-2
@@ -107,17 +130,20 @@ class EvalTest(unittest.TestCase):
             self.assertEqual(ev.main(["score", "--cases", str(d), "--cmd", cmd, "--out", str(out)]), 0)
             self.assertEqual(json.loads(out.read_text())["caught"], 1)
             self.assertEqual(ev.main(["compare", str(out), str(out)]), 1)
+            other = d / "o.json"
+            other.write_text(json.dumps({**json.loads(out.read_text()), "case_set": "different"}))
+            self.assertEqual(ev.main(["compare", str(out), str(other)]), 2)  # not the discard code
 
     def test_build_writes_the_corpus_from_saved_pr_data(self):  # REQ: REVIEW-eval-1
         pulls = [{"number": 5, "title": "CRED-1: store", "body": "", "merged_at": "2026-10-01", "reviewed_head": "abc1234"},
                  {"number": 9, "title": "CRED-1-f1: fix", "body": "Defect: CRED-1\n", "merged_at": "2026-10-03"},
                  {"number": 6, "title": "OTHER-1: clean", "body": "", "merged_at": "2026-10-02"}]
-        diffs = {"intro:5": "diff5", "fix:9": FIX, "intro:6": "diff6"}
+        diffs = {"intro:5": INTRO, "fix:9": FIX, "intro:6": "diff6"}
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "p.json").write_text(json.dumps({"pulls": pulls, "diffs": diffs}))
             self.assertEqual(ev.main(["build", "--pulls", str(d / "p.json"), "--out", str(d / "c"), "--clean", "1"]), 0)
-            self.assertEqual(sorted(f.name for f in (d / "c").glob("*.json")), ["pr5-fix9.json", "pr6-clean.json"])
+            self.assertEqual(sorted(f.name for f in (d / "c").glob("*.json")), ["pr5.json", "pr6-clean.json"])
 
 
 class NoiseAndRoundsTest(unittest.TestCase):
@@ -140,9 +166,9 @@ class NoiseAndRoundsTest(unittest.TestCase):
         self.assertEqual(metrics.count_rounds([a, b, sec, again]), 2)
         self.assertEqual(metrics.count_rounds(["Verdict: accept", "Verdict: accept (L3)"]), 2)
         # an earlier SHA in the prose is not the reviewed head; the Record line is
-        prose = "Verdict: fix-list\n# t\nRecord: PR #1 · package X · head def5678\nfixed in head 1111111 earlier"
+        prose = "Verdict: accept\n# t\nDelta from head abc1234 to def5678\nRecord: PR #1 · package X · head def5678"
         self.assertEqual(metrics.review_head(prose), "def5678")
-        self.assertEqual(metrics.count_rounds([prose, b]), 1)
+        self.assertEqual(metrics.count_rounds([a, prose]), 2)
 
     def test_collect_counts_rounds_by_head_and_reads_builder_finding_lines(self):  # REQ: REVIEW-eval-4, REVIEW-eval-3
         def api(repo, path, token):

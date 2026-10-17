@@ -10,7 +10,7 @@ score rose on the same case set.
   revieweval.py build --repo owner/name [--out evals/review/cases]   (reads GITHUB_TOKEN)
   revieweval.py build --pulls pulls.json                             (saved PR data, no network)
   revieweval.py score --cases evals/review/cases --cmd "<reviewer>" --out score.json
-  revieweval.py compare old.json new.json                            (exit 0 = keep the change)
+  revieweval.py compare old.json new.json                            (exit 0 keep, 1 discard, 2 different case sets)
 
 The reviewer command reads the case diff on stdin and prints a JSON list of findings,
 `[{"file": "a.go", "line": 12, "class": "blocker"}]`. Only a `blocker` can catch a defect. It is the caller's command: a prompt, tool
@@ -65,6 +65,11 @@ def expected_ranges(fix_diff):
     return out
 
 
+def diff_files(diff):
+    """Paths a unified diff changes (new side), so an expected line outside it is not a target."""
+    return {re.sub(r"^b/", "", l[4:]) for l in diff.splitlines() if l.startswith("+++ ") and l[4:] != "/dev/null"}
+
+
 def hit(finding, expected):
     return any(a <= finding.get("line", -1) <= b for a, b in expected.get(finding.get("file"), []))
 
@@ -97,12 +102,16 @@ def summarize(results, cases=()):
             "score": caught - false, "case_set": case_set(cases)}
 
 
+class CaseSetMismatch(Exception):
+    """Two scores ran on different cases; `compare` exits 2, not the discard code 1."""
+
+
 def keep(old, new):
     """Keep a reviewer change only when the score (caught - false blockers) rose without fewer
     catches, so neither silence nor noise wins. Equal scores keep the old reviewer. Scores from
-    different case sets are not comparable and raise."""
+    different case sets are not comparable and raise CaseSetMismatch."""
     if old.get("case_set") != new.get("case_set"):
-        raise SystemExit("scores come from different case sets; re-score both on the same cases")
+        raise CaseSetMismatch("scores come from different case sets; re-score both on the same cases")
     return new["caught"] >= old["caught"] and new["score"] > old["score"]
 
 
@@ -126,11 +135,13 @@ def build_cases(pulls, diffs):
     `diffs`: {key: unified diff} with keys `intro:<n>` and `fix:<n>`. A fix PR names its defective
     ID on a `Defect: <ID>` line; the defective PR is the latest merged PR whose title starts with
     that ID and that merged before the fix. PRs with no diff on hand are skipped. Returns
-    (cases, defective PR numbers)."""
+    (cases, defective PR numbers). One case per introducing PR: the expected lines of all its fixes
+    merged, limited to files the introducing diff touches, so a blocker for any one defect is not
+    false; a fix with no such file is no target."""
     by_id = {}
     for p in sorted((p for p in pulls if p.get("merged_at")), key=lambda p: p["merged_at"]):
         by_id.setdefault(_pid(p), []).append(p)
-    cases, defective = [], set()
+    targets = {}  # intro PR number -> (intro, {fix number: expected})
     for fix in pulls:
         if not fix.get("merged_at"):
             continue
@@ -141,14 +152,19 @@ def build_cases(pulls, diffs):
             intro = intros[-1]
             if f"intro:{intro['number']}" not in diffs or f"fix:{fix['number']}" not in diffs:
                 continue
-            exp = expected_ranges(diffs[f"fix:{fix['number']}"])
+            seen = diff_files(diffs[f"intro:{intro['number']}"])
+            exp = {f: r for f, r in expected_ranges(diffs[f"fix:{fix['number']}"]).items() if f in seen}
             if exp:
-                defective.add(intro["number"])
-                cases.append({"id": f"pr{intro['number']}-fix{fix['number']}", "kind": "defect",
-                              "intro_pr": intro["number"], "fix_pr": fix["number"],
-                              "head": intro.get("reviewed_head"), "expected": exp,
-                              "diff": diffs[f"intro:{intro['number']}"]})
-    return cases, sorted(defective)
+                targets.setdefault(intro["number"], (intro, {}))[1][fix["number"]] = exp
+    cases = []
+    for n, (intro, fixes) in sorted(targets.items()):
+        merged = {}
+        for exp in fixes.values():
+            for f, r in exp.items():
+                merged.setdefault(f, []).extend(r)
+        cases.append({"id": f"pr{n}", "kind": "defect", "intro_pr": n, "fix_prs": sorted(fixes),
+                      "head": intro.get("reviewed_head"), "expected": merged, "diff": diffs[f"intro:{n}"]})
+    return cases, sorted(targets)
 
 
 def pick_clean(pulls, diffs, count):
@@ -248,7 +264,11 @@ def main(argv=None):
         print(text)
         return 0
     old, new = (json.loads(pathlib.Path(x).read_text()) for x in (a.old, a.new))
-    ok = keep(old, new)
+    try:
+        ok = keep(old, new)
+    except CaseSetMismatch as e:
+        print(e, file=sys.stderr)
+        return 2
     print("keep" if ok else "discard")
     return 0 if ok else 1
 
