@@ -788,3 +788,66 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 		t.Errorf("event %+v", g.events[0])
 	}
 }
+
+// builtinCanaries holds one synthetic canary per built-in credential
+// format. A format added to Builtins without a canary fails the test.
+var builtinCanaries = map[string]string{
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:              "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`: "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
+	`(?i)\brt_[a-z0-9._-]{20,}`:                                      "RT_CanaryCANARYcanary000000",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:      "sk-ant-oat01-CANARYcanary0000000000000000",
+}
+
+// REQ: CRED-7
+func TestResultWithADeclaredFormatCanaryIsWithheld(t *testing.T) {
+	for id, b := range Builtins() {
+		for _, f := range b.CredFormats {
+			canary, found := builtinCanaries[f]
+			if !found {
+				t.Errorf("%s: no canary for format %s", id, f)
+				continue
+			}
+			g := newRig(ok("here you go " + canary + " done"))
+			d := g.r.Decls["stub"]
+			d.CredFormats = b.CredFormats
+			g.r.Decls["stub"] = d
+			// The default shapes see nothing, so only the declared
+			// formats can withhold the result.
+			g.r.Scan = func(string) bool { return false }
+			out, err := g.r.Run(context.Background(), req("b"))
+			if reasonOf(err) != Withheld {
+				t.Errorf("%s %s: %q %v", id, f, out, err)
+				continue
+			}
+			all := fmt.Sprintf("%q %v %+v %q", out, err, g.events, g.logs)
+			for _, part := range []string{canary, canary[:len(canary)/2], canary[len(canary)/2:]} {
+				if strings.Contains(all, part) {
+					t.Errorf("%s %s: canary leaked: %s", id, f, all)
+				}
+			}
+			if len(g.events) != 1 || g.events[0].Outcome != string(Withheld) {
+				t.Errorf("%s %s: journal %+v", id, f, g.events)
+			}
+		}
+	}
+}
+
+// A declaration whose formats are malformed does not run (FMT-4).
+//
+// REQ: CRED-7
+func TestADeclarationWithMalformedFormatsDoesNotRun(t *testing.T) {
+	for name, f := range map[string][]string{"missing": nil, "matches empty": {`x*`}, "does not compile": {`(`}} {
+		g := newRig(ok("fine"))
+		d := g.r.Decls["stub"]
+		d.CredFormats = f
+		g.r.Decls["stub"] = d
+		out, err := g.r.Run(context.Background(), req("b"))
+		if reasonOf(err) != Unqualified || len(g.h.created) != 0 {
+			t.Errorf("%s: %q %v, created %v", name, out, err, g.h.created)
+		}
+	}
+}
+
+func ok_(text string) func(vm.Command, *stub) vm.ExecResult {
+	return ok("here you go " + text + " done")
+}

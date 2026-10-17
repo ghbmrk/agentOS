@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -298,6 +299,11 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if !ok || !contains(d.TaskClasses, q.TaskClass) {
 		return fail(Unqualified)
 	}
+	// No provider runs with the default scan alone (FMT-4).
+	formats, ferr := d.Formats()
+	if ferr != nil {
+		return fail(Unqualified)
+	}
 	g := Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}
 	if err := g.Check(d); err != nil {
 		return fail(err.(*Refusal).Reason)
@@ -412,10 +418,19 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if scan == nil {
 		scan = LooksLikeCredential
 	}
-	if scan(body) {
+	if scan(body) || matchesAny(formats, body) {
 		return fail(Withheld)
 	}
 	return body, len(body), "ok", nil
+}
+
+func matchesAny(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(l []string, s string) bool {
