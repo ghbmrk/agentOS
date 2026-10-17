@@ -58,6 +58,9 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CRED-5 no longer names the resume command")
         self.assertIn("the low-tier code never stands in for it", t,
                       f"SPEC.md:{n} CRED-5 lets the low-tier code stand in for consent")
+        self.assertIn("it applies to a route the owner paused, whose consent they withdrew or have not yet given, "
+                      "or whose login was refused", t,
+                      f"SPEC.md:{n} CRED-5 PLAN ON no longer applies to a route awaiting first consent")
         self.assertIn("A route a security notice paused (below) counts as withdrawn on that box: "
                       "`PLAN <plan> ON` refuses it", t,
                       f"SPEC.md:{n} CRED-5 lets a notice-paused route be resumed")
@@ -69,7 +72,7 @@ class Consent(unittest.TestCase):
                             r"with that route's command \(\"Not stopped\. To turn your ChatGPT plan back on, "
                             r"reply PLAN ChatGPT ON\.\"\)",
                          f"SPEC.md:{n} CH-11 bare RESUME no longer names the route command")
-        self.assertIn("when the owner paused that route, withdrew its consent or had its login refused; "
+        self.assertIn("when the owner paused that route, withdrew or has not yet given its consent, or had its login refused; "
                       "for a route a security notice paused it replies with that route's STATUS line instead (CRED-5)", t,
                       f"SPEC.md:{n} CH-11 bare RESUME names PLAN ON for a notice-paused route")
 
@@ -117,10 +120,12 @@ class Consent(unittest.TestCase):
                 ("are journal records (OP-11)", "are kept in memory"),
                 ("the low-tier code never stands in for it", "the low-tier code stands in for it"),
                 ("`PLAN <plan> ON` refuses it", "`PLAN <plan> ON` resumes it"),
+                ("whose consent they withdrew or have not yet given,", "whose consent they withdrew,"),
             ]),
             (ch11, self.check_ch11, [
                 ("reply PLAN ChatGPT ON", "reply RESUME"),
                 ("replies with that route's STATUS line instead", "replies with that route's command too"),
+                ("withdrew or has not yet given its consent,", "withdrew its consent"),
             ]),
             (step6, self.check_step6, [
                 ("which never records consent", "which also records consent"),
