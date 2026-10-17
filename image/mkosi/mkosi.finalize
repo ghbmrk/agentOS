@@ -168,13 +168,14 @@ def violations(root):
         _MAKERS = None
 
 
-def tmpfiles_maker(root, parts, st=None):
+def tmpfiles_maker(root, parts, st=None, lacks=False):
     """#1803, #1829: (file, line number, what) of the first tmpfiles.d line tmpfiles_makers counts
     that names step PARTS, or None. Inside violations() the makers are read once per root. ST: the
     held step's tree_lstat; the lines that set its mode or group (a Z line also on the steps below
     it) are weighed together with the tree, whatever order the box applies them in: the step counts
     when some line or the tree may give it group write and some line or the tree a non-root group. A
-    z, Z, d, D or e line that sets the mode or the group, without a ':' prefix, replaces the tree's."""
+    z, Z, d, D or e line that sets the mode or the group, without a ':' prefix, replaces the tree's.
+    LACKS: the tree lacks the step; ST then carries no mode and the gid a setgid parent gives it."""
     makers = _MAKERS.get(root) if _MAKERS is not None else None
     if makers is None:
         makers = tmpfiles_makers(root)
@@ -198,9 +199,10 @@ def tmpfiles_maker(root, parts, st=None):
             or not (gw or grp):
         return None
     (rel, n, what, _), rest = weighed[0], weighed[1:]
-    return rel, n, "%s%s over the tree's mode %04o and gid %d" % (
-        what, "".join(" and %sline %d's %s" % ("" if r == rel else r + " ", k, w) for r, k, w, _ in rest),
-        stat.S_IMODE(st.st_mode), st.st_gid)
+    what += "".join(" and %sline %d's %s" % ("" if r == rel else r + " ", k, w) for r, k, w, _ in rest)
+    if lacks:
+        return rel, n, what + ("" if st.st_gid == TREE_GROUP else " under a setgid parent of gid %d" % st.st_gid)
+    return rel, n, "%s over the tree's mode %04o and gid %d" % (what, stat.S_IMODE(st.st_mode), st.st_gid)
 
 
 def _violations(root):
@@ -334,6 +336,7 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, True)
         if why:
             return why
+    gid = TREE_GROUP
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
         try:
@@ -343,10 +346,15 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, not path.startswith("/"), st)
         if why:
             return why
-        if st is None and not path.startswith("/"):
+        if st is not None:
+            gid = st.st_gid if stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISGID else TREE_GROUP
+        elif not path.startswith("/"):
             # #1803: the tree lacks this step, so a tmpfiles.d line may make it on the box: a link
-            # (whose target the tree never chased here) or a directory someone else can write.
-            made = tmpfiles_maker(root, parts[:k])
+            # (whose target the tree never chased here) or a directory someone else can write. #1829
+            # (security delta 2): it takes its group from a setgid parent, as a step the tree holds
+            # takes the tree's, so the lines that make it are weighed with that gid.
+            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, 0, 0, 0, 0)),
+                                  lacks=True)
             if made:
                 return ("a link to %s, through /%s, which the tree lacks and %s line %d makes %s; "
                         "ship the step in the tree (#1803)" % ((target, d) + made))

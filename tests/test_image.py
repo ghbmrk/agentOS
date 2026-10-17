@@ -3202,8 +3202,34 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertIn("etc/udev/rules.d: a link to /var/cache/man/r, through /var/cache/man, which the tree "
                       "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
 
+    def test_lines_that_make_a_missing_step_group_writable_are_refused(self):
+        # REQ: HW-1, DEV-2 (#1829, security delta 2): a step the tree lacks takes its group from a
+        # setgid parent, and two lines may each give half; a d line with only g+w passes elsewhere.
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        other = check.TREE_GROUP + 1000
+        for text, gid, mode, how in (
+                ("d /usr/lib/x/c 0775\n", other, 0o2755, "mode 0775 for -:- under a setgid parent of gid %d" % other),
+                ("d /usr/lib/x/c 0775\nz /usr/lib/x/c - - 1000\n", None, 0o755,
+                 "mode 0775 for -:- and line 2's mode - for -:1000")):
+            with self.subTest(text=text), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x/c, which the tree "
+                                  "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes %s; ship the step" % how, self.v())
+                finally:
+                    f.unlink()
+        for gid, mode in ((other, 0o755), (check.TREE_GROUP, 0o2755)):
+            with self.subTest(gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles("d /usr/lib/x/c 0775\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
     def test_without_the_tmpfiles_step_rule_the_link_passes(self):
-        m = self.mutant("            made = tmpfiles_maker(root, parts[:k])\n", "            made = None\n")
+        m = self.mutant("            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, "
+                        "0, 0, 0, 0)),\n                                  lacks=True)\n", "            made = None\n")
         link(self.root, self.RULES, "/opt/nope/x")
         self.tmpfiles("d /opt/nope 1777 root root\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
@@ -3456,6 +3482,14 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                  "mode - for -:1000 and line 2's mode 0775 for -:-"),
                 (("z /usr/lib/x 0775 - root", "z /usr/lib/x - - 1000"), None, 0o755,
                  "mode 0775 for -:root and line 2's mode - for -:1000"),
+                (("d /usr/lib/x 0775", "z /usr/lib/x - - 1000"), None, 0o755,
+                 "mode 0775 for -:- and line 2's mode - for -:1000"),
+                (("e /usr/lib/x 0775", "z /usr/lib/x - - 1000"), None, 0o755,
+                 "mode 0775 for -:- and line 2's mode - for -:1000"),
+                (("Z /usr - - 1000", "z /usr/lib/x 0775 - -"), None, 0o755,
+                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
+                (("z /usr/lib/* - - 1000", "z /usr/lib/x 0775"), None, 0o755,
+                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
                 (("z /usr/lib/x 0755 - 1000", "Z /usr 0775 - -"), None, 0o755,
                  "mode 0755 for -:1000 and line 2's mode 0775 for -:-"),
                 (("z /usr/lib/x :0755 - 1000",), None, 0o775, "mode :0755 for -:1000")):
