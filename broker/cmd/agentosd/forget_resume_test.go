@@ -55,7 +55,7 @@ func (w *fakeWork) backCount() int {
 	return len(w.backs)
 }
 
-// REQ: CAP-3, OP-4, CH-12, RCH-4
+// REQ: CAP-3, OP-4, CH-12
 // #1370 and Security S1 on #1382: the resume wireResume sets up runs an
 // interrupted item 2 once, at the right time, whichever comes first,
 // startup reconcile finding it or the boot's resume. Startup reconcile
