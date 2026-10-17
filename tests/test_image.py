@@ -42,6 +42,7 @@ check = load("image_check", MK / "mkosi.finalize")
 # The tree check takes configuration only through steps owned by root (TREE_OWNER, #1543 Security R1);
 # a test cannot make root-owned trees, so it takes its own uid in root's place.
 check.TREE_OWNER = os.geteuid()
+check.TREE_GROUP = os.getegid()
 finish = load("image_finish", IMG / "finish_image.py")
 
 
@@ -2405,6 +2406,7 @@ class ConfFilesTest(unittest.TestCase):
         (pathlib.Path(tmp.name) / check.TMPFILES_ALLOW).write_text((MK / check.TMPFILES_ALLOW).read_text())
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()
+        m.TREE_GROUP = os.getegid()
         return m
 
     def test_without_the_default_deny_the_box_links_pass(self):
@@ -3201,8 +3203,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                       "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
 
     def test_without_the_tmpfiles_step_rule_the_link_passes(self):
-        m = self.mutant("            for rel_, n, why in tmpfiles_makers(root):\n",
-                        "            for rel_, n, why in []:\n")
+        m = self.mutant("            made = tmpfiles_maker(root, parts[:k])\n", "            made = None\n")
         link(self.root, self.RULES, "/opt/nope/x")
         self.tmpfiles("d /opt/nope 1777 root root\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
@@ -3243,7 +3244,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         def boom(root, rel):
             raise OSError(errno.EIO, "Input/output error")
         with unittest.mock.patch.object(check, "tree_xattrs", boom):
-            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr, which carries a POSIX ACL "
+            # #1829: the directory holding the link is asked first.
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, in /etc, which carries a POSIX ACL "
                           "(unreadable (Input/output error))", self.v())
 
     def test_tree_xattrs_reads_the_names_and_none_where_unsupported(self):
@@ -3366,7 +3368,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         link(self.root, self.RULES, "/opt/nope/r")
         self.tmpfiles("d /usr/local/nope 1777 root root\n")
         self.assertIn("etc/udev/rules.d: a link to /opt/nope/r, through /opt/nope, which the tree lacks", self.v())
-        m = self.mutant("            paths.append(tree_resolve(root, parts))\n", "            pass\n")
+        m = self.mutant('            paths.append(tree_resolve(root, parts[:-1]) + parts[-1:] if typ[:1] == "L"\n'
+                        "                         else tree_resolve(root, parts))\n", "            pass\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
 
     def test_a_link_to_a_file_another_uid_owns_or_with_an_acl_is_refused(self):
@@ -3385,6 +3388,168 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
                                         if rel == "usr/lib/x/r" else []):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
+    # (g) #1829: what the box does to a step after the build, and the directories a link sits in.
+    # REQ: HW-1, DEV-2
+
+    def attrs(self, rel, uid=None, gid=None, mode=None):
+        # tree_lstat with REL given another owner, group or permission bits.
+        real = check.tree_lstat
+
+        def lstat(root, r):
+            st = real(root, r)
+            if r != rel or st is None:
+                return st
+            t = list(st)
+            if mode is not None:
+                t[0] = stat.S_IFMT(st.st_mode) | mode
+            t[4] = st.st_uid if uid is None else uid
+            t[5] = st.st_gid if gid is None else gid
+            return os.stat_result(tuple(t))
+        return unittest.mock.patch.object(check, "tree_lstat", lstat)
+
+    def test_a_tmpfiles_line_that_changes_a_held_step_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln, step, how in (("z /usr/lib/x 0777 - - -", "usr/lib/x", "mode 0777 for -:-"),
+                              ("a+ /usr/lib/x - - - - u:1000:rwx", "usr/lib/x", "with a POSIX ACL"),
+                              ("Z /usr 0757 - -", "usr", "mode 0757 for -:-"),
+                              ("A+ /usr/lib - - - - d:u:1000:rwx", "usr/lib", "with a POSIX ACL"),
+                              ("D /usr/lib/x 0755 1000 -", "usr/lib/x", "mode 0755 for 1000:-"),
+                              ("e /usr/lib/x 0775 root 1000", "usr/lib/x", "mode 0775 for root:1000"),
+                              ("z /usr/lib/* 0777", "usr/lib/x", "mode 0777 for -:-"),
+                              ("z /usr/lib/x ~0777", "usr/lib/x", "mode ~0777 for -:-"),
+                              ("L+ /usr/lib/x - - - - /var/tmp", "usr/lib/x", "a link"),
+                              ("C+ /usr/lib/x - - - - /var/tmp/u", "usr/lib/x", "a copy of /var/tmp/u")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box" % (step, how), self.v())
+                finally:
+                    f.unlink()
+        # L3 point 2: a directory the chase walks through, off the final path.
+        (self.root / self.RULES).unlink()
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        self.tmpfiles("d /opt/d 0777\n")
+        self.assertIn("etc/udev/rules.d: a link to /opt/d/x, through /opt/d, which usr/lib/tmpfiles.d/x.conf "
+                      "line 1 remakes mode 0777 for -:- on the box", self.v())
+
+    def test_a_tmpfiles_line_that_keeps_a_held_step_root_only_passes(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln in ("z /usr/lib/x 0755 root root", "d /usr/lib/x 0755 - -", "Z /usr 0755 root root",
+                   "a+ /usr/lib/y - - - - u:1000:rwx", "z /usr/lib/x/r/q 0777", "e /usr/lib/x 0775 root root",
+                   "L /etc/other - - - - /usr/lib/x"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_held_step_tmpfiles_rule_those_links_pass(self):
+        m = self.mutant("        made = tmpfiles_maker(root, path_parts(d))\n", "        made = None\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        self.tmpfiles("z /usr/lib/x 0777 - - -\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_held_step_a_non_root_group_can_write_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        other = check.TREE_GROUP + 1000
+        with self.attrs("usr/lib/x", gid=other, mode=0o775):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which gid %d can write"
+                          % other, self.v())
+        # var/mail and var/local are stock 2775 for mail and staff: a link through them is refused too.
+        (self.root / "var/mail").mkdir(parents=True)
+        link(self.root, "etc/udev/hwdb.d", "/var/mail/h")
+        with self.attrs("var/mail", gid=other, mode=0o2775):
+            self.assertIn("etc/udev/hwdb.d: a link to /var/mail/h, through /var/mail, which gid %d can write"
+                          % other, self.v())
+        for gid, mode in ((check.TREE_GROUP, 0o775), (other, 0o755)):
+            with self.subTest(gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_without_the_group_write_rule_the_link_passes(self):
+        m = self.mutant("        if st.st_mode & 0o020 and st.st_gid != TREE_GROUP:\n", "        if False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with self.attrs("usr/lib/x", gid=check.TREE_GROUP + 1000, mode=0o775):
+            with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+            self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_tree_link_through_a_step_a_copy_line_makes_is_refused(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln, how in (("C /opt/nope - - - - /var/tmp/u", "a copy of /var/tmp/u"),
+                        ("C /opt/nope", "a copy of its factory default"),
+                        ("C+ /opt/* 0755 root root - /usr/lib/x", "a copy of /usr/lib/x")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/nope, which the tree lacks "
+                                  "and usr/lib/tmpfiles.d/x.conf line 1 makes %s" % how, self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_copy_rule_the_link_passes(self):
+        m = self.mutant('        elif typ[:1] == "C":\n', "        elif False:\n")
+        link(self.root, self.RULES, "/opt/nope/x")
+        self.tmpfiles("C /opt/nope - - - - /var/tmp/u\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_link_in_a_directory_someone_else_can_write_is_refused(self):
+        (self.root / "etc/foo.d").mkdir(parents=True)
+        link(self.root, "etc/foo.d/r", "/usr/lib/x/r")
+        other = check.TREE_OWNER + 1000
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which uid %d owns" % other, self.v())
+        with self.attrs("etc/foo.d", gid=check.TREE_GROUP + 1000, mode=0o775):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which gid %d can write"
+                          % (check.TREE_GROUP + 1000), self.v())
+        real = check.tree_xattrs
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "etc/foo.d" else real(root, rel)):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which carries a POSIX ACL", self.v())
+        # A mask is replaced as easily as any other link.
+        link(self.root, "etc/foo.d/m", "/dev/null")
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("etc/foo.d/m: a link to /dev/null, in /etc/foo.d, which uid %d owns" % other, self.v())
+        self.tmpfiles("z /etc/foo.d 0777\n")
+        self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which usr/lib/tmpfiles.d/x.conf "
+                      "line 1 remakes mode 0777 for -:- on the box", self.v())
+        # A link a tmpfiles.d L line makes there.
+        ln = "L /etc/foo.d/t - - - - /usr/lib/x"
+        self.tmpfiles(ln + "\n")
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("x.conf: line 1: %s; a link to /usr/lib/x, in /etc/foo.d, which uid %d owns" % (ln, other),
+                          self.v())
+        self.assertNotIn("etc/foo.d", self.v())
+
+    def test_without_the_holder_rule_those_links_pass(self):
+        m = self.mutant("        why = step_refusal(root, d, target, held, st, via=\"in\")\n", "        why = None\n")
+        (self.root / "etc/foo.d").mkdir(parents=True)
+        link(self.root, "etc/foo.d/r", "/usr/lib/x/r")
+        self.tmpfiles("z /etc/foo.d 0777\n")
+        self.assertEqual(m.world_writable_link(str(self.root), "etc/foo.d/r"), [])
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), "etc/foo.d/t", "/usr/lib/x"))
+        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/foo.d/r"), [])
+        self.assertIsNotNone(check.tmpfiles_link_refusal(str(self.root), "etc/foo.d/t", "/usr/lib/x"))
+
+    def test_violations_reads_the_makers_once(self):
+        for i in range(3):
+            link(self.root, "etc/udev/rules.d/%d" % i, "/usr/lib/x/%d" % i)
+        self.tmpfiles("L /etc/y - - - - /usr/lib/x\n")
+        real = check.tmpfiles_makers
+        with unittest.mock.patch.object(check, "tmpfiles_makers", side_effect=real) as makers:
+            check.violations(self.root)
+            self.assertEqual(makers.call_count, 1)
+            # Outside violations() nothing is kept: a direct call reads the tree as it is now.
+            check.world_writable_link(str(self.root), "etc/udev/rules.d/0")
+            check.world_writable_link(str(self.root), "etc/udev/rules.d/0")
+            self.assertGreater(makers.call_count, 2)
+        self.assertIsNone(check._MAKERS)
 
     # SERVICE_DIRS lists every directory a unit's service user owns.
 
