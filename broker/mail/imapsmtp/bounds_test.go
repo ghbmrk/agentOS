@@ -290,3 +290,140 @@ func TestFlagsUpdateKeepsTheBody(t *testing.T) {
 		t.Fatalf("got %+v, want the one message with its body", got)
 	}
 }
+
+// smtpFlood is a raw SMTP server that answers each command with 250
+// (AUTH 235, DATA 354 and then 250, QUIT 221) until the client sends
+// one starting with on, and then writes prefix
+// and chunk, over and over, until the client stops reading. An empty on
+// floods the greeting. It stands in for a hostile mail host that never
+// ends an SMTP reply (SR3-mail-k18d-smtp). The number of bytes it wrote
+// is sent on the returned channel when the connection ends.
+func smtpFlood(t testing.TB, on, prefix, chunk string) (string, <-chan int64) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	wrote := make(chan int64, 1)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(30 * time.Second))
+		pour := func() {
+			n, err := c.Write([]byte(prefix))
+			total := int64(n)
+			for err == nil {
+				n, err = c.Write([]byte(chunk))
+				total += int64(n)
+			}
+			wrote <- total
+		}
+		if on == "" {
+			pour()
+			return
+		}
+		c.Write([]byte("220 ready\r\n"))
+		r := bufio.NewReader(c)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				wrote <- 0
+				return
+			}
+			cmd := strings.ToUpper(line)
+			switch {
+			case strings.HasPrefix(cmd, on):
+				pour()
+				return
+			case strings.HasPrefix(cmd, "AUTH"):
+				c.Write([]byte("235 ok\r\n"))
+			case strings.HasPrefix(cmd, "DATA"):
+				c.Write([]byte("354 go on\r\n"))
+				for line != ".\r\n" {
+					if line, err = r.ReadString('\n'); err != nil {
+						wrote <- 0
+						return
+					}
+				}
+				c.Write([]byte("250 ok\r\n"))
+			case strings.HasPrefix(cmd, "QUIT"):
+				c.Write([]byte("221 bye\r\n"))
+			default:
+				c.Write([]byte("250 ok\r\n"))
+			}
+		}
+	}()
+	return l.Addr().String(), wrote
+}
+
+// TestHostileSMTPReplyIsBounded (SR3-mail-k18d-smtp): net/smtp reads a
+// reply with textproto's ReadResponse, which has no line or reply limit,
+// so an SMTP reply that never ends would be held in memory until the
+// store's timeout. With the read budget it costs one call and bounded
+// memory, as an IMAP reply does (M21).
+func TestHostileSMTPReplyIsBounded(t *testing.T) {
+	big := strings.Repeat("x", 64<<10)
+	more := strings.Repeat("250-"+strings.Repeat("x", 60)+"\r\n", 1<<10)
+	for _, c := range []struct{ name, on, prefix, chunk string }{
+		{"endless greeting line", "", "220 ", big},
+		{"endless greeting continuation", "", "", strings.ReplaceAll(more, "250-", "220-")},
+		{"endless EHLO line", "EHLO", "250 ", big},
+		{"endless EHLO continuation", "EHLO", "", more},
+		{"endless MAIL reply", "MAIL", "250 ", big},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			addr, wrote := smtpFlood(t, c.on, c.prefix, c.chunk)
+			s := hostileStore(t, addr, 8*time.Second)
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			peak := heapPeak()
+			start := time.Now()
+			err := s.Submit(context.Background(), []string{"friend@example.test"},
+				[]byte("From: owner@example.test\r\nTo: friend@example.test\r\n\r\nhi\r\n"))
+			d := time.Since(start)
+			grew := peak()
+			runtime.ReadMemStats(&after)
+			if err == nil {
+				t.Fatal("an endless reply was answered as success")
+			}
+			if d > 5*time.Second {
+				t.Fatalf("the call took %v: it read until the timeout instead of stopping at its budget", d)
+			}
+			var n int64
+			select {
+			case n = <-wrote:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the connection was left open after the call failed")
+			}
+			budget := int64(smtpReplyBudget)
+			if n > budget+32<<20 {
+				t.Fatalf("the server wrote %d bytes before the client hung up; budget %d", n, budget)
+			}
+			a := after.TotalAlloc - before.TotalAlloc
+			if a > uint64(8*budget+16<<20) {
+				t.Fatalf("the call allocated %d bytes; budget %d", a, budget)
+			}
+			if grew > uint64(8*budget+16<<20) {
+				t.Fatalf("the heap grew by %d bytes at its peak; budget %d", grew, budget)
+			}
+			t.Logf("server wrote %d bytes, the call allocated %d, peak heap growth %d; budget %d", n, a, grew, budget)
+		})
+	}
+}
+
+// TestSMTPSubmitWithinBudget: an ordinary submission, greeting to QUIT,
+// reads far less than the SMTP budget, so the bound refuses no real
+// server.
+func TestSMTPSubmitWithinBudget(t *testing.T) {
+	addr, _ := smtpFlood(t, "NEVER", "", "")
+	s := hostileStore(t, addr, 8*time.Second)
+	if err := s.Submit(context.Background(), []string{"friend@example.test"},
+		[]byte("From: owner@example.test\r\nTo: friend@example.test\r\n\r\nhi\r\n")); err != nil {
+		t.Fatalf("an ordinary submission failed: %v", err)
+	}
+}

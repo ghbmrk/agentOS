@@ -467,6 +467,14 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 	})
 }
 
+// An SMTP session may read 1 MiB from the server (SR3-mail-k18d-smtp).
+// net/smtp reads each reply through textproto, which bounds neither a
+// line nor the continuation lines of one reply, so without a budget a
+// server that never ends a reply grows the vault's memory until the
+// timeout. A submission's replies, and a STARTTLS handshake read through
+// the same budget, take a few kilobytes.
+const smtpReplyBudget = 1 << 20
+
 // Submit sends raw over SMTP submission from the configured address.
 func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
@@ -489,7 +497,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 		return errors.New("imapsmtp: unknown connection security")
 	}
 	host, _, _ := net.SplitHostPort(s.cfg.SMTP)
-	c, err := smtp.NewClient(conn, host)
+	c, err := smtp.NewClient(&budgetConn{conn, smtpReplyBudget}, host)
 	if err != nil {
 		conn.Close()
 		return err
