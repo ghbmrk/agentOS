@@ -168,9 +168,31 @@ func (e *evidence) g() evidenceGate {
 // disk from the guest's 204 until it has gone out (DEL-1b): replies a
 // crash left there go first.
 func (e *evidence) serve(src replySource) {
+	if c, ok := src.(replyChecker); ok {
+		c.CheckReplies(refuseGuestReply)
+	}
 	e.kept.attach(src)
 	e.src.Store(&replySourceBox{src})
 	e.poke()
+}
+
+// replyChecker is an outbox that can refuse a reply before storing it
+// (guest.Plane.CheckReplies).
+type replyChecker interface {
+	CheckReplies(check func(text string) string)
+}
+
+// guestReactionRefused is what a guest hears when its reply is an agent
+// reaction: fixed broker words, never the error's own text.
+const guestReactionRefused = "agent reactions are refused; reply in text"
+
+// refuseGuestReply refuses, at the guest's POST, a reply Converse would
+// refuse after the 204, when only the log would hear it (CH-11, #2196).
+func refuseGuestReply(text string) string {
+	if owner.RefuseAgentText(text) != nil {
+		return guestReactionRefused
+	}
+	return ""
 }
 
 // poke tells the worker the outbox has a new reply (guest.Config.Replies).

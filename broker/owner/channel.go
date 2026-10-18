@@ -486,7 +486,7 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
 	// A reaction is read first: never a control word, a code, RUN or an
 	// approval, whatever it quotes (CH-11).
-	if rx, ok := parseReaction(text); ok {
+	if rx, ok := c.readReaction(text); ok {
 		return c.reactionLocked(text, rx, now, c.codes.unlocked(now))
 	}
 	if c.codes.st.Challenged {

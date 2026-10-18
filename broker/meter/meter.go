@@ -92,7 +92,10 @@ var (
 )
 
 // Defaults until the numeric targets are frozen before A4. They are
-// deliberately small: a guest that hits them waits for the owner.
+// deliberately small: a guest that hits them waits for the owner. They
+// are money caps on pay-per-token API routes only (OP-8): a plan route
+// has no fixed call cap, and its runs are metered by the provider-agent
+// journal entry, not by this meter.
 var (
 	DefaultMachineCap     = Limits{Calls: 300, Tokens: 3_000_000}
 	DefaultOverallCap     = Limits{Calls: 1500, Tokens: 15_000_000}
