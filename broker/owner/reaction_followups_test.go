@@ -3,6 +3,7 @@ package owner
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -513,4 +514,90 @@ func TestAForgetWaitsForAReleaseInFlight(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the forget never returned")
 	}
+}
+
+// After a restart a quote cut inside a code at one end only is still a
+// reaction: the other end may hold digits that are no code (a time, the
+// request's ID), or the text may start with a digit, so the head and the
+// tail are masked alone as well as together.
+func TestAQuoteCutInsideACodeAtOneEndIsAReactionAfterARestart(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if _, err := r.ch.Request([]Item{lowItem("i1")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	m := lowCodeRe.FindStringSubmatch(req)
+	id, code := m[1], m[2]
+	expires := regexp.MustCompile(`Expires ([0-9]{1,2}:[0-9]{2})\.`).FindStringSubmatch(req)
+	if expires == nil {
+		t.Fatalf("request %q names no expiry time", req)
+	}
+	const bank = "2 factor code for your bank is 482913."
+	if err := r.ch.sendTemplate(bank); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.advance(time.Minute)
+	r.ch = r.open()
+	before := len(r.agent.got())
+	quotes := []string{
+		"Liked “" + code[3:] + " or NO " + id,
+		"Pinned “Liked “" + code[3:] + " or NO " + id,
+		"Liked “ " + expires[1] + ". Reply YES " + id + " " + code[:3] + "…",
+		"Liked “2 factor code for your bank is 48…",
+	}
+	for _, q := range quotes {
+		if got := r.say(q); !strings.Contains(got, "reaction") {
+			t.Fatalf("after a restart %q replied %q, want it read as a reaction", q, got)
+		}
+	}
+	got := r.agent.got()[before:]
+	if len(got) != len(quotes) {
+		t.Fatalf("agent got %q, want %d reaction events", got, len(quotes))
+	}
+	for _, g := range got {
+		if strings.Contains(g, code[:3]) || strings.Contains(g, code[3:]) || strings.Contains(g, "48") || strings.Contains(g, "YES") {
+			t.Fatalf("agent got %q, want an event with no code digits or text", g)
+		}
+	}
+}
+
+// A quote cut at its start with an ellipsis is matched without it, live
+// and after a restart, so a live code in it never reaches the agent as
+// chat.
+func TestAQuoteWithALeadingEllipsisIsAReaction(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if _, err := r.ch.Request([]Item{lowItem("i1")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	m := lowCodeRe.FindStringSubmatch(req)
+	id, code := m[1], m[2]
+	quotes := []string{
+		"Liked “… YES " + id + " " + code + "…",
+		"Liked “...YES " + id + " " + code + " or NO " + id + ".”",
+	}
+	check := func(when string) {
+		before := len(r.agent.got())
+		for _, q := range quotes {
+			if got := r.say(q); !strings.Contains(got, "reaction") {
+				t.Fatalf("%s %q replied %q, want it read as a reaction", when, q, got)
+			}
+		}
+		got := r.agent.got()[before:]
+		if len(got) != len(quotes) {
+			t.Fatalf("%s agent got %q, want %d reaction events", when, got, len(quotes))
+		}
+		for _, g := range got {
+			if strings.Contains(g, code) || strings.Contains(g, "YES") {
+				t.Fatalf("%s agent got %q, want an event with no code", when, g)
+			}
+		}
+	}
+	check("live")
+	r.advance(time.Minute)
+	r.ch = r.open()
+	check("after a restart")
 }

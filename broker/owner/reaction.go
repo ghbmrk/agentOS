@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -365,13 +366,20 @@ var (
 )
 
 // maskedForms is the normalized quote q with its codes masked, and, if it
-// ends or starts inside a code, with that part masked too. A text kept
-// masked (restore) is matched against these.
+// ends or starts inside a code, with that part masked too: the head alone,
+// the tail alone, and both, since a quote may be cut inside a code at one
+// end while the other end holds digits that are no code (a time, a
+// request's ID). A text kept masked (restore) is matched against these.
 func maskedForms(q string) []string {
 	m := maskCodes(q)
+	head := cutCodeHead.ReplaceAllString(m, "#")
+	tail := cutCodeTail.ReplaceAllString(m, "#")
+	both := cutCodeHead.ReplaceAllString(tail, "#")
 	forms := []string{m}
-	if c := cutCodeHead.ReplaceAllString(cutCodeTail.ReplaceAllString(m, "#"), "#"); c != m {
-		forms = append(forms, c)
+	for _, f := range []string{head, tail, both} {
+		if !slices.Contains(forms, f) {
+			forms = append(forms, f)
+		}
 	}
 	return forms
 }
@@ -416,12 +424,13 @@ func (c *Channel) remember(t sentText) {
 }
 
 // normQuote folds quotes and case, collapses whitespace, and drops a
-// trailing ellipsis.
+// leading and a trailing ellipsis (a phone cuts a quote at either end).
 func normQuote(s string) string {
 	s = strings.NewReplacer("“", `"`, "”", `"`, "‘", "'", "’", "'").Replace(s)
 	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
 	for _, e := range []string{"…", "..."} {
 		s = strings.TrimSpace(strings.TrimSuffix(s, e))
+		s = strings.TrimSpace(strings.TrimPrefix(s, e))
 	}
 	return s
 }
