@@ -80,6 +80,10 @@ in_app_browser = false
 browser_use_full_cdp_access = false
 tool_suggest = false
 guardian_approval = false
+# The shell snapshot (stable and on by default in 0.162.1) is written under CODEX_HOME, which tools
+# cannot read, and every tool command first sources it: dash exits 2 on that failed `.`, so no
+# tool command runs at all (#1720, broker/e2e/ASSUMPTIONS.md E6).
+shell_snapshot = false
 
 # No telemetry, feedback upload or saved history.
 [analytics]

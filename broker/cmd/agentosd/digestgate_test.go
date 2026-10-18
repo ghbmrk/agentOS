@@ -14,11 +14,13 @@ import (
 
 // deliverAllowed are the broker's Deliver selectors that are not the
 // digest transport's, by file and enclosing function: the corpus check's
-// field, the control handler's agent and lateAgent's own. Only
+// field, the control handler's agent, the owner channel's chat-marking
+// wrapper of that agent (B1 on #2372) and lateAgent's own. Only
 // digestqueue's Sender calls a digest Transport (DC-6).
 var deliverAllowed = map[string]string{
 	"loops/corpus.go":      "ClosedCheck.hit",
 	"control/handler.go":   "Handler.deliver",
+	"owner/channel.go":     "chatAgent.Deliver",
 	"cmd/agentosd/main.go": "lateAgent.Deliver",
 }
 

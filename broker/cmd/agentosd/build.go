@@ -16,15 +16,12 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
-// builderShareMax is the most of the spare budget Loop 1's builder
-// machines may use, so building never starves evaluation (potency
-// C-3c-5: about 30-40%). It reserves nothing.
-const builderShareMax = 0.35
-
 // builderShare is Loop 1's builder machines' share of the spare meter;
-// Loop 2's fix machines have their own (loop2FixShare).
+// Loop 2's fix machines have their own (loop2FixShare). It reserves
+// nothing and has no fixed maximum: LOOP-0 sets no fixed split between
+// loops or between building and fixing (#2291).
 func builderShare() meter.Share {
-	return meter.Share{Prefix: loopbuild.BuildPrefix, Max: builderShareMax}
+	return meter.Share{Prefix: loopbuild.BuildPrefix}
 }
 
 // errNoBuilder: the box has no builder machines (no -builder-image, or no
