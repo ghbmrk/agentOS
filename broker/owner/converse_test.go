@@ -98,3 +98,32 @@ func TestCH12ConverseSendsEmojiWhole(t *testing.T) {
 		t.Fatalf("released %q", got)
 	}
 }
+
+// gapControls are the controls a reply might put between a code word and
+// its code; stripped, each must still leave the two apart (#2346).
+var gapControls = []string{"\r", "\v", "\f", "\u0085", "\x01", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200F"}
+
+// TestCH12ControlGapStillWithholdsCode: a code word and a code joined only
+// by a stripped control are still withheld on every agent path (CH-19,
+// CH-12, #2346).
+func TestCH12ControlGapStillWithholdsCode(t *testing.T) {
+	for _, gap := range gapControls {
+		text := "Your code" + gap + "482913"
+		if !SecretShaped(control.StripControls(text)) {
+			t.Errorf("%q: stripped text not secret-shaped", text)
+		}
+		for name, send := range map[string]func(*Channel) error{
+			"Converse":  func(c *Channel) error { return c.Converse(text) },
+			"NotifyAs":  func(c *Channel) error { return c.NotifyAs(ClassAgent, text) },
+			"NotifyNow": func(c *Channel) error { return c.NotifyNow(text) },
+		} {
+			r := pacedRig(t, quiet22to7(), 12, 0)
+			if err := send(r.ch); err != nil {
+				t.Fatalf("%s %q: %v", name, text, err)
+			}
+			if got := r.sentTexts(); len(got) != 1 || got[0] != Hidden {
+				t.Errorf("%s %q sent %q", name, text, got)
+			}
+		}
+	}
+}

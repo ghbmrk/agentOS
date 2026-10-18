@@ -799,3 +799,23 @@ func TestCH12SplitCountsUCS2Room(t *testing.T) {
 		t.Fatalf("a reply that fits three texts was kept: %d", len(k))
 	}
 }
+
+// TestCH12ControlGapStillWithholdsReply: a reply, or the summary texted
+// when its email fails, whose code word and code are joined only by a
+// stripped control is still withheld (CH-19, CH-12, #2346).
+func TestCH12ControlGapStillWithholdsReply(t *testing.T) {
+	for _, gap := range []string{"\r", "\v", "\f", "\u0085", "\x01", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200F"} {
+		text := "Your code" + gap + "482913"
+		r := newEvRig(t, "")
+		r.ev.reply("agent", true, text, "")
+		if got := r.texts(); len(got) != 1 || owner.Disclose(got[0]) != owner.Hidden {
+			t.Errorf("reply %q texted %q", text, got)
+		}
+		r = newEvRig(t, destAddr)
+		r.gate.state = journal.NotApplied
+		r.ev.reply("agent", true, longReply, text)
+		if got := r.texts(); len(got) != 1 || strings.Contains(got[0], "482913") {
+			t.Errorf("summary %q texted %q", text, got)
+		}
+	}
+}
