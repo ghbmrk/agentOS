@@ -962,7 +962,7 @@ func (p *Pipeline) concern(id, why string, s Score, starts bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if a := p.adoptionLocked(id); a != nil && a.Reverted == "" && a.Concern == "" {
-		a.Concern, a.ConcernScore, a.ConcernStarts = why, s, starts
+		a.Concern, a.ConcernScore, a.ConcernStarts, a.ConcernAt = why, s, starts, p.cfg.Now()
 		_ = p.saveLocked()
 	}
 }
