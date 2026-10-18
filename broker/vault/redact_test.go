@@ -105,11 +105,11 @@ var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
 // declaredFormats mirror provagent's built-in credential formats, each with
 // a synthetic canary (FMT-3).
 var declaredFormats = map[string]string{
-	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:              "sk-proj-CANARYcanary0000000000000000",
-	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`: "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
-	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:           canaryRefresh,
-	`\brt_[A-Za-z0-9_-]{40,}`:                                        "rt_CANARYcanary-0123456789_CANARYcanary-0123456789",
-	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:      "sk-ant-oat01-CANARYcanary0000000000000000",
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                      "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:         "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                   canaryRefresh,
+	`(?:\b|\\[a-z]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:              "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 
 func formatRedactor(t *testing.T, values ...[]byte) *Redactor {
@@ -155,6 +155,25 @@ func TestRedactorScrubsDeclaredFormats(t *testing.T) {
 	for _, bad := range [][]string{{`(`}, {`x*`}, {""}, {`\bsk-[a-z]{4,}`, `[`}} {
 		if _, err := base.WithFormats(bad...); err == nil {
 			t.Errorf("%q: accepted", bad)
+		}
+	}
+}
+
+// An rt_ token after a JSON escape or a percent-encoded byte, or with a dot
+// in it, is redacted whole.
+// REQ: CRED-7
+func TestRedactorScrubsEscapedAndDottedRtTokens(t *testing.T) {
+	r := formatRedactor(t)
+	for _, tok := range []string{
+		"rt_" + strings.Repeat("a", 40),
+		"rt_" + strings.Repeat("SYNTHqz_0", 5) + "." + strings.Repeat("SYNTHqz-0", 5),
+	} {
+		for _, esc := range []string{`\n`, `\t`, `\u0022`, `\"`, `"`, "%22", "refresh_token%3D", " "} {
+			msg := []byte(`{"text":"line1` + esc + tok + `"}`)
+			got := r.Redact(msg)
+			if leaks(got, tok[3:]) || !bytes.Contains(got, []byte(Placeholder)) {
+				t.Errorf("%q: got %q", msg, got)
+			}
 		}
 	}
 }

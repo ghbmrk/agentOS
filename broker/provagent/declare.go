@@ -288,12 +288,15 @@ func Builtins() map[string]Declaration {
 			// word boundary, so an escaped or percent-encoded prefix
 			// cannot hide it. The public rt_ refresh shape and the API key
 			// stay declared, since the issuer is server-side and a plan
-			// sign-in issues no API key (ASSUMPTIONS.md P17).
+			// sign-in issues no API key (ASSUMPTIONS.md P17). The rt_
+			// shape is case-sensitive and consumes a JSON escape or a
+			// percent-encoded byte in place of a word boundary, so an
+			// escaped token is caught but rt_ inside a word is not.
 			CredFormats: []string{
 				`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`,
 				`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
 				`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`,
-				`\brt_[A-Za-z0-9_-]{40,}`,
+				`(?:\b|\\[a-z]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`,
 			},
 			// The record is #809's: CLIVersion equals Version and
 			// guest/codex/build-rootfs.sh CODEX_VERSION, and Evidence must

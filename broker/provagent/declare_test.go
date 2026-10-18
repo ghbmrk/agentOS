@@ -60,6 +60,13 @@ func TestDeclarationNeedsCredentialFormats(t *testing.T) {
 // [A-Za-z0-9._], dot segments 2.1.191, no prefix.
 var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
 
+// rt40 and rtDotted are synthetic tokens in the public rt_ shape: the
+// shortest body it matches, and a body with a dot in it.
+var (
+	rt40     = "rt_" + strings.Repeat("a", 40)
+	rtDotted = "rt_" + strings.Repeat("SYNTHqz_0", 5) + "." + strings.Repeat("SYNTHqz-0", 5)
+)
+
 // The Codex declaration matches a refresh token in the measured shape whole,
 // wherever it sits, and none of its formats matches ordinary text.
 // REQ: CRED-7
@@ -111,8 +118,11 @@ func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
 		"Z-.-." + canaryRefresh[5:],
 		canaryRefresh[:5+160],
 		"ab.c." + strings.Repeat("a-", 100),
-		// The public rt_ shape stays declared (case-sensitive).
+		// The public rt_ shape stays declared (case-sensitive), from a
+		// 40-character body up, dots allowed.
 		"rt_" + strings.Repeat("CANARYcanary-0123456789_", 3),
+		rt40,
+		rtDotted,
 	} {
 		for _, s := range []string{tok, `{"refresh_token":"` + tok + `"}`, "x " + tok + "\n"} {
 			if m := match(s); m != tok {
@@ -120,18 +130,43 @@ func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
 			}
 		}
 	}
+	// An rt_ token after a JSON escape or a percent-encoded byte has no
+	// word boundary before it; the format consumes the escape instead, so
+	// the match is the escape and the whole token.
+	for _, tok := range []string{rt40, rtDotted} {
+		for _, esc := range []string{`\n`, `\t`, `\u0022`, `"`, "%22", "%3D"} {
+			for _, pre := range []string{"line1", "a:", "refresh_token", `{"t":`} {
+				s := pre + esc + tok + `"}`
+				want := tok
+				if esc != `"` {
+					want = esc + tok
+				}
+				if m := match(s); m != want {
+					t.Errorf("token %.12q... in %.40q...: matched %q, want %q", tok, s, m, want)
+				}
+			}
+		}
+	}
 	tail := strings.Repeat("a", 191)
+	// With no word boundary, a longer first segment is matched from its
+	// last two characters on.
+	if m := match("abc.d." + tail); m != "bc.d."+tail {
+		t.Errorf("long segment one: matched %q", m)
+	}
 	for name, s := range map[string]string{
-		"prose":            "The run finished. See v1.2.3 and https://example.com/a.b.c for details.",
-		"version":          "codex-cli 0.162.1 (rustc 1.90.0) build ab.c.d",
-		"sha256 hex":       "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-		"uuid":             "account 3f2c1a9e-4b7d-4c1e-9a2f-0d6b8e5c7a31",
-		"short tail":       "ab.c." + tail[:159],
-		"no segments":      "abc" + tail,
-		"long segment one": "abc.d." + tail[:150],
-		"code identifier":  "rt_sigprocmask_handler_wrapper(); rt_tables_lookup_function",
-		"short rt_":        "rt_" + strings.Repeat("a", 39),
-		"spaced":           "ab . c . " + tail,
+		"prose":             "The run finished. See v1.2.3 and https://example.com/a.b.c for details.",
+		"version":           "codex-cli 0.162.1 (rustc 1.90.0) build ab.c.d",
+		"sha256 hex":        "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+		"uuid":              "account 3f2c1a9e-4b7d-4c1e-9a2f-0d6b8e5c7a31",
+		"short tail":        "ab.c." + tail[:159],
+		"no segments":       "abc" + tail,
+		"short segment one": "a.b." + tail,
+		"long segment two":  "ab.cd." + tail,
+		"code identifier":   "rt_sigprocmask_handler_wrapper(); rt_tables_lookup_function",
+		"short rt_":         "rt_" + strings.Repeat("a", 39),
+		"upper-case RT_":    "RT_" + strings.Repeat("a", 40),
+		"rt_ inside word":   "start_" + strings.Repeat("a", 40),
+		"spaced":            "ab . c . " + tail,
 	} {
 		if m := match(s); m != "" {
 			t.Errorf("%s: matched %q", name, m)
