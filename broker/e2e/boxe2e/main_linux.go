@@ -944,7 +944,10 @@ func (d *driver) phoneControl() error {
 	// the log is read until settle has passed (await returns early on a
 	// failure).
 	d.await(start, settle, func(phoneRun) bool { return false })
-	return controlErr(d.carrier.Log(), start)
+	if err := controlErr(d.carrier.Log(), start); err != nil {
+		return err
+	}
+	return passedOverErr(readPhoneRun(d.carrier.Log(), start))
 }
 
 // settle is how long phoneControl keeps reading the log after the

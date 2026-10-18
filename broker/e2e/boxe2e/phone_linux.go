@@ -216,6 +216,17 @@ func (r phoneRun) noticeNote() string {
 	return n
 }
 
+// passedOverErr fails a run that otherwise passed when it passed over a
+// recovery notice: after setup the owner line should lose no text, so a
+// notice means one was lost (#1291's acceptance, #2170 item 2; E16). The
+// notice and lost-send notes still say which.
+func passedOverErr(r phoneRun) error {
+	if r.notices == 0 {
+		return nil
+	}
+	return fmt.Errorf("passed over %d recovery notice(s): a text to the owner was lost after setup (#1291)", r.notices)
+}
+
 // lostSendMax bounds the lost sends phone-control notes: the last ones.
 const lostSendMax = 5
 
