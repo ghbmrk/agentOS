@@ -560,18 +560,20 @@ func (d *driver) signInDiag(out string) string {
 	return d.workerDiag("sign-in output", out)
 }
 
+// journal is agentosd's journal this boot.
+func (d *driver) journal() string {
+	if d.agentosdLog != nil {
+		return d.agentosdLog()
+	}
+	out, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-u", "agentosd.service").Output()
+	return string(out)
+}
+
 // workerDiag is signInDiag with out, a provider worker's output, quoted
 // under the name what.
 func (d *driver) workerDiag(what, out string) string {
-	read := d.agentosdLog
-	if read == nil {
-		read = func() string {
-			out, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-u", "agentosd.service").Output()
-			return string(out)
-		}
-	}
 	var keep []string
-	for _, l := range strings.Split(read(), "\n") {
+	for _, l := range strings.Split(d.journal(), "\n") {
 		if strings.Contains(l, "setup: ") || strings.Contains(l, "provagent: ") {
 			keep = append(keep, l)
 		}
@@ -882,9 +884,17 @@ func (d *driver) phoneControl() error {
 	}
 	start := len(d.carrier.Log())
 	defer func() {
-		// The notices the step passed over, pass or fail (#2170).
-		if n := readPhoneRun(d.carrier.Log(), start).noticeNote(); n != "" && d.note != nil {
+		// The digests and notices the step passed over, pass or fail, and
+		// the sends agentosd logged as lost while the line was down (#2170).
+		r := readPhoneRun(d.carrier.Log(), start)
+		if n := r.digestNote(); n != "" && d.note != nil {
 			d.note(n)
+		}
+		if n := r.noticeNote(); n != "" && d.note != nil {
+			d.note(n)
+			for _, l := range lostSendNotes(d.journal()) {
+				d.note(l)
+			}
 		}
 	}()
 	phone := d.carrier.Line(phoneNum)
@@ -938,7 +948,10 @@ func (d *driver) phoneControl() error {
 	// the log is read until settle has passed (await returns early on a
 	// failure).
 	d.await(start, settle, func(phoneRun) bool { return false })
-	return controlErr(d.carrier.Log(), start)
+	if err := controlErr(d.carrier.Log(), start); err != nil {
+		return err
+	}
+	return passedOverErr(readPhoneRun(d.carrier.Log(), start))
 }
 
 // settle is how long phoneControl keeps reading the log after the

@@ -251,7 +251,8 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	return c.post(class, agentText(text), true)
@@ -279,7 +280,8 @@ func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return ErrNoModem
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	text = agentText(text)
@@ -299,13 +301,43 @@ func (c *Channel) NotifyNow(text string) error {
 	return c.sendReserved(at, text)
 }
 
-// agentText discloses agent-derived text, prefixes it with AgentPrefix
-// unless it was withheld, and fits it to one text.
-func agentText(text string) string {
-	if text = Disclose(text); text != Hidden {
-		text = AgentPrefix + text
+// checkAgent strips agent-derived text of control and bidi characters
+// (control.StripControls), refuses a reaction form, and discloses it
+// (AgentSecret), so the reaction check and CH-19 read the text the
+// owner's phone shows (CH-12). Callers send the text it returns.
+func checkAgent(text string) (string, error) {
+	s := control.StripControls(text)
+	if err := refuseReaction(s); err != nil {
+		return s, err
 	}
-	return control.Fit(text)
+	if AgentSecret(text) {
+		return Hidden, nil
+	}
+	return s, nil
+}
+
+// AgentSecret reports whether agent text is secret-shaped (SecretShaped)
+// in any of three readings: as written, stripped with a Cc's gap as a
+// space (control.StripControls, the text that is sent, so a control cannot
+// join a code word to its code), or with every control removed and no gap
+// (control.JoinControls, so a control cannot split a key or a code in two)
+// (CH-19, #2346).
+func AgentSecret(text string) bool {
+	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
+}
+
+// agentText strips and discloses agent-derived text, prefixes it with
+// AgentPrefix unless it was withheld, and fits it to one text in the
+// encoding it needs, emoji and line breaks kept (CH-12).
+func agentText(text string) string {
+	if text != Hidden {
+		if AgentSecret(text) {
+			text = Hidden
+		} else {
+			text = AgentPrefix + control.StripControls(text)
+		}
+	}
+	return control.FitAgent(text)
 }
 
 // sendCounted counts text toward the hour, sends it to the owner, and
@@ -553,9 +585,10 @@ func (c *Channel) releasePaced() error {
 
 // packHeld joins the dropped-texts line and the oldest held texts into
 // one text of at most control.MaxText. Agent text always goes alone, so a
-// " / " inside it cannot pass for the start of a broker text (CH-19). It
-// returns the text, how many held texts it carries, and the drops it
-// reports.
+// " / " inside it cannot pass for the start of a broker text (CH-19), and
+// is fitted as agent text, so its emoji and line breaks survive the hold
+// (CH-12). It returns the text, how many held texts it carries, and the
+// drops it reports.
 func packHeld(dropped int, held []HeldText) (string, int, int) {
 	var parts []string
 	size := 0
@@ -584,7 +617,7 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 		}
 		n++
 		if h.Agent {
-			break
+			return control.FitAgent(h.Text), n, dropped
 		}
 	}
 	return control.Fit(strings.Join(parts, heldSep)), n, dropped
