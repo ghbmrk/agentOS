@@ -69,6 +69,18 @@ func (p *preempter) Preempt(id string) error {
 	return m.Preempt(id)
 }
 
+// PreemptInstance forwards too, so admission preempts the life it picked
+// and never a successor given its ID (#2144).
+func (p *preempter) PreemptInstance(id, instance string) error {
+	m := p.m.Load()
+	if m == nil {
+		return errors.New("machine manager not open")
+	}
+	return m.PreemptInstance(id, instance)
+}
+
+var _ admission.LifePreempter = (*preempter)(nil)
+
 // machines adapts the machine manager to the guest plane.
 type machines struct{ m *vm.Manager }
 
@@ -456,6 +468,11 @@ func main() {
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
+	// One opening serves setup's sign-in worker and the owner's plane:
+	// the first moves the broker below the delegate mark (#1701).
+	boxMachines := onceMachines(func() (*cgroup.Group, error) {
+		return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+	})
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
 	namedAgentImage := agentImage // the builder never runs it, agent or not
@@ -543,15 +560,12 @@ func main() {
 		// and closed before agentosd opens its own below.
 		var signInHost *setupHost
 		if runsc != "" && workerRoutes != "" {
-			signInHost = newSetupHost(setupMachines{
-				runsc: runsc, stateDir: stateDir, routes: workerRoutes, diskQuota: diskQuota,
+			signInHost, m.SignIn = newSetupPlane(setupMachines{
+				runsc: runsc, stateDir: stateDir, rc: modelroute.NewRouteControl(workerRoutes), diskQuota: diskQuota,
 				images: imgs, admit: cfg.Admission,
-				cgroups: func() (*cgroup.Group, error) {
-					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
-				},
+				cgroups:       boxMachines,
 				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
-			}.open)
-			m.SignIn = newSetupSignIn(signInHost, modelroute.NewRouteControl(workerRoutes), pins)
+			}, pins)
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)
@@ -590,7 +604,7 @@ func main() {
 	psiPath := "/proc/pressure/memory"
 	agentOff := mem.AgentOff
 	if runsc != "" {
-		g, err := openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+		g, err := boxMachines()
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
@@ -690,10 +704,13 @@ func main() {
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
 	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
+	pictures := &pictureJournal{}
 	if modemBridge {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
-		// recorded where the bridge reads it at its next open.
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
+		// recorded where the bridge reads it at its next open. A picture
+		// texted to the box is journaled and counted in STATUS (CH-12).
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell})
+		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
@@ -793,6 +810,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pictures.open(d.Engine().RecordPicture)
 	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
@@ -884,7 +902,8 @@ func main() {
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
-				pr.Background = ctx // a sign-in's wait ends at shutdown
+				pr.Background = ctx   // a sign-in's wait ends at shutdown
+				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
@@ -981,6 +1000,7 @@ func main() {
 	// card's network (#1525).
 	if apNetPath != "" {
 		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
+		go watchCommittedWiFi(ctx, apNetPath, verifySocket) // #1696
 	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.
@@ -1454,6 +1474,7 @@ func (p *ownerPacer) wire(g *grants.Config) {
 	g.Quiet = p.quiet
 	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
 	g.Allowance = p.allowance
+	g.Spend, g.Refund = p.spend, p.refund
 }
 
 func (p *ownerPacer) quiet(t time.Time) bool {
@@ -1471,6 +1492,21 @@ func (p *ownerPacer) allowance(t time.Time) int {
 		return ch.Allowance(t)
 	}
 	return 0
+}
+
+// spend counts a request text on the owner's hour as grants grants it
+// (#1685); until the channel is attached, nothing paced goes.
+func (p *ownerPacer) spend(paced bool) (time.Time, bool) {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Spend(paced)
+	}
+	return time.Time{}, !paced
+}
+
+func (p *ownerPacer) refund(at time.Time) {
+	if ch := p.ch.Load(); ch != nil {
+		ch.Refund(at)
+	}
 }
 
 // note is STATUS's held line (QH-10).

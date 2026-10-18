@@ -5,12 +5,16 @@
 # synthetic canary, and which of HOME, TMPDIR, /tmp and CODEX_HOME it can write. It also reports
 # what would let it undo the sandbox: capabilities, a nested user namespace, the CLI's session,
 # the worker's /tmp, descriptors the CLI left open.
-# argv: "probe" and the forwarder port, or "beat" (append to ./beat until killed, at most 10s).
+# argv: "probe" and the forwarder port, "beat" (append to ./beat until killed, at most 10s), or
+# "reread" (poll auth.json for up to 20s, as when the CLI replaces it while the tool runs, and
+# report what it read and when it last tried).
 import ctypes
 import json
 import os
 import pathlib
+import select
 import socket
+import struct
 import sys
 import time
 
@@ -99,9 +103,45 @@ def beat():
         time.sleep(0.1)
 
 
+def reread():
+    def read():
+        try:
+            return pathlib.Path(AUTH).read_text()
+        except OSError:
+            return None
+    # The CLI ends the turn (and kills the tool) within milliseconds of a mid-turn refresh, so the
+    # tool waits on inotify for a change in CODEX_HOME rather than polling, and writes each attempt
+    # to ./reread.json, where the caller finds the last one even if the tool is killed.
+    libc = ctypes.CDLL(None, use_errno=True)
+    watch = libc.inotify_init1(os.O_NONBLOCK)
+    libc.inotify_add_watch(watch, os.path.dirname(AUTH).encode(), 0x100 | 0x80 | 0x8 | 0x2)
+    at_start = text = read()
+    events, end = [], time.monotonic() + 20
+    while True:
+        state = {"reread": text, "readable_at_start": at_start is not None, "events": events}
+        with open("reread.json.tmp", "w") as f:
+            json.dump(state, f)
+        os.replace("reread.json.tmp", "reread.json")
+        if text is not None or time.monotonic() > end:
+            break
+        select.select([watch], [], [], 0.05)
+        try:
+            buf = os.read(watch, 65536)
+        except BlockingIOError:
+            buf = b""
+        while buf:  # struct inotify_event: wd, mask, cookie, len, then the name
+            mask, size = struct.unpack_from("iIII", buf)[1::2]
+            events.append([buf[16:16 + size].rstrip(b"\0").decode(), mask])
+            buf = buf[16 + size:]
+        text = read()
+    print(json.dumps(state))
+
+
 def main():
     if sys.argv[1] == "beat":
         return beat()
+    if sys.argv[1] == "reread":
+        return reread()
     port = int(sys.argv[2])
     try:
         auth_text = pathlib.Path(AUTH).read_text()

@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -29,7 +31,71 @@ func replyKind(text string) string {
 			return k.kind
 		}
 	}
+	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
+		return "outage"
+	}
 	return "other"
+}
+
+// outagePrefix and outageMark frame the owner line's recovery notice
+// (modemlink's recoveryText, UX U-B1): sent once the line is back after a
+// text to the owner could not go, ahead of anything queued. It answers no
+// command, so the step passes over it wherever it lands (E16).
+const outagePrefix, outageMark = "I couldn't text you from ", " didn't reach you"
+
+// noticeCounts reads what a recovery notice says did not reach the owner,
+// in recoveryText's wording: "N text(s)", or "N approval request(s)" and
+// optionally "and M other text(s)". texts counts both; ok is false for a
+// notice worded otherwise.
+var noticeCounts = regexp.MustCompile(`\. ([0-9]+) (texts?|approval requests?)(?: and ([0-9]+) other texts?)? didn't reach you`)
+
+func readNotice(text string) (texts, requests int, ok bool) {
+	m := noticeCounts.FindStringSubmatch(text)
+	if m == nil {
+		return 0, 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	if strings.HasPrefix(m[2], "text") {
+		return n, 0, true
+	}
+	other, _ := strconv.Atoi(m[3])
+	return n + other, n, true
+}
+
+// otherWords are the letter-only words a failure may quote from a text
+// replyKind does not know, so a run shows which notice it was.
+const otherWords, otherWordLen = 3, 12
+
+// otherLead is up to otherWords leading words of text, each letters only
+// (trailing punctuation dropped) and at most otherWordLen long. It stops at
+// the first word with a digit or any other mark, so it never quotes a code,
+// a number, a time or a token; the carrier is synthetic, but a failure
+// still prints no more of a text than names it (E15).
+func otherLead(text string) string {
+	var out []string
+	for _, w := range strings.Fields(text) {
+		if len(out) == otherWords {
+			break
+		}
+		w = strings.TrimRight(w, ".,:;!?")
+		if w == "" || len(w) > otherWordLen || strings.IndexFunc(w, func(c rune) bool {
+			return (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '\''
+		}) >= 0 {
+			break
+		}
+		out = append(out, w)
+	}
+	return strings.Join(out, " ")
+}
+
+// kindLead is replyKind's kind, and for other the text's otherLead in
+// quotes, as a failure names it.
+func kindLead(text string) string {
+	k := replyKind(text)
+	if k != "other" {
+		return k
+	}
+	return fmt.Sprintf("other (%q)", otherLead(text))
 }
 
 // phoneRun is how far phone-control got, read from the carrier's log in
@@ -47,6 +113,10 @@ type phoneRun struct {
 	barrierSent  bool
 	barrier      bool // a help reply came after the stranger's text
 	toStranger   int
+	// notices counts the recovery notices passed over, and noticeTexts and
+	// noticeRequests what they say did not reach the owner (#2170);
+	// unread counts the notices whose counts could not be read.
+	notices, noticeTexts, noticeRequests, unread int
 	// err is the first reply out of order; it ends the step.
 	err error
 }
@@ -58,7 +128,8 @@ type phoneRun struct {
 // session was locked and the fresh code unlocked it (CH-14). After the
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
-// comes before the barrier's (CH-1, CH-3).
+// comes before the barrier's (CH-1, CH-3). The owner line's recovery
+// notice is passed over wherever it lands (E16).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -83,23 +154,33 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 		case m.From == boxNum && m.To == strangerNum:
 			r.toStranger++
 		case m.From == boxNum && m.To == phoneNum:
-			r.reply(replyKind(m.Text))
+			r.reply(m.Text)
 		}
 	}
 	return r
 }
 
-func (r *phoneRun) reply(k string) {
+func (r *phoneRun) reply(text string) {
+	k := replyKind(text)
 	switch {
+	case k == "outage":
+		// Not a reply: the box's account of a text it lost earlier.
+		r.notices++
+		texts, requests, ok := readNotice(text)
+		if !ok {
+			r.unread++
+		}
+		r.noticeTexts += texts
+		r.noticeRequests += requests
 	case !r.statusSent:
 		if k == "help" {
 			r.probed = true
 			return
 		}
-		r.err = fmt.Errorf("HELP drew %s", k)
+		r.err = fmt.Errorf("HELP drew %s", kindLead(text))
 	case r.strangerSent:
 		if k != "help" || !r.barrierSent {
-			r.err = fmt.Errorf("the unpaired number's text drew %s to the paired number", k)
+			r.err = fmt.Errorf("the unpaired number's text drew %s to the paired number", kindLead(text))
 			return
 		}
 		r.barrier = true
@@ -112,12 +193,26 @@ func (r *phoneRun) reply(k string) {
 	case !r.unlocked && k == "already-unlocked":
 		r.err = errors.New("already unlocked: the code unlocked nothing")
 	case !r.unlocked:
-		r.err = fmt.Errorf("STATUS with a fresh code drew %s, not the unlock", k)
+		r.err = fmt.Errorf("STATUS with a fresh code drew %s, not the unlock", kindLead(text))
 	case !r.status && k == "status":
 		r.status = true
 	default:
-		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", k)
+		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", kindLead(text))
 	}
+}
+
+// noticeNote is the step's one line on the notices it passed over: their
+// counts only, so the run shows that a text was lost and how many, never
+// when or which (E15, E16). It is "" when there was none.
+func (r phoneRun) noticeNote() string {
+	if r.notices == 0 {
+		return ""
+	}
+	n := fmt.Sprintf("passed-over recovery notices=%d texts=%d requests=%d", r.notices, r.noticeTexts, r.noticeRequests)
+	if r.unread > 0 {
+		n += fmt.Sprintf(" unread=%d", r.unread)
+	}
+	return n
 }
 
 // failed is the verdict so far: an error once the run cannot pass.
@@ -130,7 +225,7 @@ func (r phoneRun) failed() error {
 
 // controlErr is the step's verdict on the whole log from index from: every
 // stage reached in order, and nothing to the stranger. It names reply
-// kinds and counts, never a text.
+// kinds and counts, and for a text of no known kind only its otherLead.
 func controlErr(log []modem.SMS, from int) error {
 	r := readPhoneRun(log, from)
 	if err := r.failed(); err != nil {

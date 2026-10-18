@@ -33,7 +33,7 @@ func (o *ownerFake) Request(items []owner.Item, _ time.Duration) (string, error)
 	return id, nil
 }
 
-func (o *ownerFake) RequestEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+func (o *ownerFake) RequestEach(items []owner.Item, _ []time.Time) ([]string, error) {
 	var ids []string
 	for _, it := range items {
 		id, _ := o.Request([]owner.Item{it}, 0)
@@ -42,7 +42,7 @@ func (o *ownerFake) RequestEach(items []owner.Item, _ []time.Duration) ([]string
 	return ids, nil
 }
 
-func (o *ownerFake) RequestLocalEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+func (o *ownerFake) RequestLocalEach(items []owner.Item, _ []time.Time) ([]string, error) {
 	ids := make([]string, len(items))
 	for i, it := range items {
 		id, err := o.Request([]owner.Item{it}, 0)
@@ -71,6 +71,7 @@ func (o *ownerFake) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error
 func (o *ownerFake) DueAutoReplies() []owner.Queued { return nil }
 func (o *ownerFake) UndoneAfterRelease(string) bool { return false }
 func (o *ownerFake) Inform(string) error            { return nil }
+func (o *ownerFake) Post(owner.Class, string) error { return nil }
 
 func (o *ownerFake) last() (string, []owner.Item) {
 	o.mu.Lock()

@@ -704,3 +704,60 @@ func TestARotatedPasswordReplacesTheOldOnTheAir(t *testing.T) {
 	}
 	served(b.startedAt(2))
 }
+
+// #1427 (M21): a setup file emptied while it is served, on a box neither
+// owned nor confirmed, brings the access point down and leaves the loader
+// idling: the sticker's network is not left on the air, and the unit does
+// not restart it.
+func TestAnEmptiedSetupFileWhileServingBringsTheAccessPointDown(t *testing.T) {
+	b := newBox(t, "wlan0")
+	cancel, done := b.runAsync(t)
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	stops := func() int { b.ap.mu.Lock(); defer b.ap.mu.Unlock(); return b.ap.stops }
+	before := stops()
+	if err := os.WriteFile(b.cfg.Setup, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return stops() > before })
+	select {
+	case err := <-done:
+		t.Fatalf("run returned %v after the setup file was emptied; it should idle", err)
+	case <-time.After(5 * b.cfg.Poll):
+	}
+	if b.startedCount() != 1 {
+		t.Fatalf("the access point started %d times", b.startedCount())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #1427 (M22): a latch that does not parse while the setup network is
+// served brings the access point down and fails, so the unit retries;
+// the setup network is not left on the air.
+func TestAGarbageLatchWhileServingBringsTheAccessPointDownAndFails(t *testing.T) {
+	b := newBox(t, "wlan0")
+	cancel, done := b.runAsync(t)
+	defer cancel()
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	stops := func() int { b.ap.mu.Lock(); defer b.ap.mu.Unlock(); return b.ap.stops }
+	before := stops()
+	if err := os.WriteFile(b.cfg.Latch, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run took a garbage latch without an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run kept serving after a garbage latch")
+	}
+	if stops() <= before {
+		t.Fatal("the access point was not brought down at the garbage latch")
+	}
+	if b.startedCount() != 1 {
+		t.Fatalf("the access point started %d times", b.startedCount())
+	}
+}

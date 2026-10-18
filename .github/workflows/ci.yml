@@ -7,8 +7,8 @@ on:
   # these same checks; without this trigger a queued PR never gets them and stalls.
   # PR-only steps (BOARD, TRACE.md, risk tier) stay skipped: the PR run already did them.
   merge_group:
-  # trace.yml and metrics.yml dispatch it on their bot branches: PRs opened with
-  # GITHUB_TOKEN start no pull_request runs, and main requires these checks.
+  # The bot workflows dispatch it on their bot branches when BOT_PR_TOKEN is unset: PRs
+  # opened with GITHUB_TOKEN start no pull_request runs, and main requires these checks.
   workflow_dispatch:
 permissions:
   contents: read
@@ -150,7 +150,7 @@ jobs:
             && [ "$(git diff --name-only HEAD^1...HEAD^2)" = TRACE.md ]; then
             echo "bot/trace PR changes only TRACE.md: allowed"; exit 0
           fi
-          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
+          echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main daily. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
         # Advisory summary only. The lane limit (docs/LANES.md) is enforced in lane-gate.yml,
@@ -282,8 +282,10 @@ jobs:
         run: go vet ./...
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
         # The search is sequential, so the race detector finds nothing in it and
-        # the race step skips it; here it runs at the bounds A19 states.
-        run: go test -count=1 -timeout 20m -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
+        # the race step skips it; here it runs at the bounds A19 states. -parallel 2 holds the
+        # five configurations to two searches at once: four (GOMAXPROCS) exhausted runner memory
+        # and the step was killed with exit 143.
+        run: go test -count=1 -timeout 20m -parallel 2 -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
       - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
         # Each target already ran its seeds and planted-decoder control in the race shards;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py

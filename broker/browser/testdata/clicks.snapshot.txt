@@ -1,0 +1,55 @@
+- generic [active] [ref=e1]:
+  - paragraph [ref=e2]: Your mail
+  - button [ref=e3] [cursor=pointer]:
+    - img "mail icon" [ref=e4]
+    - text: Unsubscribe
+  - button [ref=e6]:
+    - img "trash" [ref=e7]
+    - text: Delete
+  - link [ref=e8] [cursor=pointer]:
+    - /url: /x
+    - img "logo" [ref=e9]
+    - text: Unsubscribe
+  - button "Cancel subscription" [ref=e10]
+  - generic [ref=e11] [cursor=pointer]: Unsubscribe
+  - dialog "Remove item?" [ref=e12]:
+    - button "Cancel" [ref=e13]
+    - button "Remove" [ref=e14]
+    - button "Not now" [ref=e15]
+  - generic [ref=e16]:
+    - text: Confirm password
+    - textbox "Confirm password" [ref=e17]
+  - generic [ref=e18]:
+    - checkbox "Unsubscribe from news" [ref=e19]
+    - text: Unsubscribe from news
+  - link "Explore movies" [ref=e20] [cursor=pointer]:
+    - /url: /movies
+  - link "Falcon firmware" [ref=e21] [cursor=pointer]:
+    - /url: /products/falcon
+  - link "Encode letters" [ref=e22] [cursor=pointer]:
+    - /url: /code/letters
+  - button "Add to basket" [ref=e23]
+  - button "Close" [ref=e24]
+  - list [ref=e26]:
+    - listitem [ref=e27]:
+      - button "Kettle" [ref=e28]
+  - searchbox "Search" [ref=e29]
+  - generic [ref=e30]:
+    - text: "[ref=e14]"
+    - textbox "Note" [ref=e31]
+  - list [ref=e32]:
+    - listitem [ref=e33] [cursor=pointer]:
+      - link "Kettle" [ref=e34]:
+        - /url: /products/kettle
+      - button "Remove from wishlist" [ref=e35]
+  - table [ref=e36]:
+    - rowgroup [ref=e37]:
+      - row [ref=e38] [cursor=pointer]:
+        - cell [ref=e39]:
+          - link "Order 42" [ref=e40]:
+            - /url: /orders/42
+        - cell [ref=e41]:
+          - button "Cancel order" [ref=e42]
+  - link "Manage" [ref=e43] [cursor=pointer]:
+    - /url: /unsubscribe%zz?token=synthCanaryT6
+  - button "Unsubscribe\ud800" [ref=e44]: x

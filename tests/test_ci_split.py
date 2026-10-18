@@ -261,6 +261,14 @@ class WiringTest(unittest.TestCase):
                      "tools/fuzzrun.py", 'rm -rf "$(go env GOCACHE)/fuzz"'):
             self.assertIn(step, checks, step)
 
+    def test_the_op2_model_step_caps_its_parallel_subtests(self):
+        # The five model configurations are parallel subtests; the default -parallel
+        # (GOMAXPROCS) runs four searches at once and the step was killed (exit 143).
+        checks = job(self.ci, "broker-checks")
+        step = checks[checks.index("- name: OP-2 same-effect model"):]
+        step = step[:step.index("- name: Fuzz the socket")]
+        self.assertIn("go test -count=1 -timeout 20m -parallel 2 -run ", step)
+
     def test_the_peaks_step_skips_only_on_an_exact_skip(self):
         machines = job(self.ci, "machines")
         self.assertIn("fetch-depth: 2", machines)

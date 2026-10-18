@@ -123,6 +123,10 @@ const (
 	ClassConfig     Class = "config"
 	ClassGuestImage Class = "guest-image"
 	ClassHostImage  Class = "host-image"
+	// ClassAdapter is a tool's adapter (ADP-1): never authority-neutral,
+	// and adopted only after its demo run passes the mismatch check
+	// (ADP-6, ADP-8).
+	ClassAdapter Class = "adapter"
 	// Changes no candidate may carry (LOOP-10, CHG-2): authority and the
 	// pipeline's own evaluation and policy.
 	ClassAuthority  Class = "authority"
@@ -149,6 +153,7 @@ var namespaces = map[string]Class{
 	"config":      ClassConfig,
 	"guest-image": ClassGuestImage,
 	"host-image":  ClassHostImage,
+	"adapters":    ClassAdapter,
 	// What an agent may do, with what, and where data goes.
 	"grants":   ClassAuthority,
 	"verbs":    ClassAuthority,

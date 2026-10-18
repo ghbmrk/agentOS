@@ -140,19 +140,23 @@ func TestConfirmRepeatsMoneyAboveTheLimitTakesTheCodeGenerator(t *testing.T) {
 }
 
 // An identical auto-reply in the same thread is a repeat too (ADP-11):
-// asked, not queued. A reply that says something new is not.
+// asked, not queued. A reply to another message that says something new
+// is not (another reply to the same message is, whatever its body:
+// TestARewordedAutoReplyToTheSameMessageIsAsked).
 func TestConfirmRepeatsAPreAllowedIdenticalReply(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Isolated = func(m string) bool { return m == "reply-1" } })
 	r.grant(mailGrant())
 	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 5, PerDay: 20, Reply: true}})
-	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
-		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
-		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
-	reply := func(id, body string) journal.Status {
-		return r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": body}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	for _, rec := range []string{"thr-1", "thr-2"} {
+		r.ver.set(rec, Verified{Item: owner.Item{Object: "reply in thread", Recipient: "sam@example.com",
+			Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
+			Recipients: []string{"sam@example.com"}, Record: rec, ThreadVerified: true})
 	}
-	reply("reply-1/r1", "Thanks, got it.")
+	reply := func(id, rec, body string) journal.Status {
+		return r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
+			Params: map[string]any{"record": rec, "body": body}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+	}
+	reply("reply-1/r1", "thr-1", "Thanks, got it.")
 	r.advance(11 * time.Minute)
 	r.g.Tick()
 	r.g.Wait()
@@ -161,14 +165,14 @@ func TestConfirmRepeatsAPreAllowedIdenticalReply(t *testing.T) {
 	}
 	went := r.state("reply-1/r1").Attempts[0].Dispatched
 	queued := len(r.own.queued)
-	if st := reply("reply-1/r2", "Thanks, got it."); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" || len(r.own.queued) != queued {
+	if st := reply("reply-1/r2", "thr-1", "Thanks, got it."); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" || len(r.own.queued) != queued {
 		t.Fatalf("identical reply: %s %q, queued %d", st.State, st.Permission.Reason, len(r.own.queued)-queued)
 	}
 	r.g.Flush()
 	if _, items := r.own.last(t); len(items) != 1 || items[0].Ref != "reply-1/r2" || !items[0].Sent.Equal(went) {
 		t.Fatalf("identical reply asked %+v", items)
 	}
-	if st := reply("reply-1/r3", "And the second file, thanks."); st.State != journal.Pending || len(r.own.queued) != queued+1 {
+	if st := reply("reply-1/r3", "thr-2", "And the second file, thanks."); st.State != journal.Pending || len(r.own.queued) != queued+1 {
 		t.Fatalf("new reply: %s %q", st.State, st.Permission.Reason)
 	}
 }

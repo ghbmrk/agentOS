@@ -266,3 +266,75 @@ func TestDEL1FullOutboxRefusesWithoutLoss(t *testing.T) {
 		t.Fatalf("outbox after retry: %d", len(got))
 	}
 }
+
+// REQ: CAP-3 (DEL-1-f1a)
+// DEL-1-f1a: a deletion drops every reply waiting in the outbox in one
+// durable write. After a reopen none is pending, and a guest that
+// retries a dropped reply gets a 204 that queues nothing.
+func TestDEL1f1ForgetDropsWaitingReplies(t *testing.T) {
+	shortPoll(t)
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	r.client("m2")
+	a := r.hand("m1", "book the dentist")
+	b := r.hand("m2", "and the vet")
+	for _, c := range []struct{ machine, body string }{
+		{"m1", reply(a, "canary-del1f1-a booked")},
+		{"m2", reply(b, "canary-del1f1-b vet on Friday")},
+	} {
+		if code, _ := r.do(c.machine, "POST", "/owner/reply", c.body); code != 204 {
+			t.Fatalf("reply: %d", code)
+		}
+	}
+	if len(r.p.PendingReplies()) != 2 {
+		t.Fatalf("outbox %+v", r.p.PendingReplies())
+	}
+	if err := r.p.ForgetReplies(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.p.PendingReplies(); len(got) != 0 {
+		t.Fatalf("after forget: %+v", got)
+	}
+	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), "canary-del1f1") {
+		t.Fatalf("store still holds a dropped reply: %v %s", err, raw)
+	}
+	r.p.Shutdown()
+
+	w := wakes.Load()
+	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
+	if got := r2.p.PendingReplies(); len(got) != 0 {
+		t.Fatalf("after reopen: %+v", got)
+	}
+	r2.client("m1")
+	if code, _ := r2.do("m1", "POST", "/owner/reply", reply(a, "canary-del1f1-a booked")); code != 204 {
+		t.Fatalf("retry: %d", code)
+	}
+	if got := r2.p.PendingReplies(); len(got) != 0 || wakes.Load() != w {
+		t.Fatalf("a retry was queued again: %+v, wakes %d", got, wakes.Load()-w)
+	}
+	if code, _ := r2.do("m1", "GET", "/owner/next", ""); code != 204 {
+		t.Fatal("a dropped reply's message was handed out again")
+	}
+}
+
+// DEL-1-f1a: a forget whose write fails says so and still holds nothing
+// it dropped in memory.
+func TestDEL1f1ForgetWriteFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	a := r.hand("m1", "book the dentist")
+	if code, _ := r.do("m1", "POST", "/owner/reply", reply(a, "booked")); code != 204 {
+		t.Fatalf("reply: %d", code)
+	}
+	r.p.store.path = filepath.Join(path, "not-a-dir", "inbox.json")
+	if err := r.p.ForgetReplies(); err == nil {
+		t.Fatal("a failed write was not reported")
+	}
+	if got := r.p.PendingReplies(); len(got) != 0 {
+		t.Fatalf("held after a failed forget: %+v", got)
+	}
+}

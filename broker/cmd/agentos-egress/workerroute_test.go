@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -63,13 +64,29 @@ type upstream struct {
 	mu    sync.Mutex
 	seen  []*http.Request
 	quota http.Header // headers the next replies carry
+	size  int64       // a reply body this long instead of one event
+}
+
+type zeros struct{}
+
+func (zeros) Read(b []byte) (int, error) {
+	clear(b)
+	return len(b), nil
 }
 
 func (u *upstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	u.mu.Lock()
 	u.seen = append(u.seen, r)
-	quota := u.quota.Clone()
+	quota, size := u.quota.Clone(), u.size
 	u.mu.Unlock()
+	if size > 0 {
+		return &http.Response{
+			StatusCode: http.StatusOK, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+			Header:  http.Header{"Content-Type": {"text/event-stream"}},
+			Body:    io.NopCloser(io.LimitReader(zeros{}, size)),
+			Request: r,
+		}, nil
+	}
 	rec := httptest.NewRecorder()
 	for k, v := range quota {
 		rec.Header()[k] = v
@@ -871,5 +888,83 @@ func TestRES5ServedRoutesFeedTheServedUsage(t *testing.T) {
 	}
 	if strings.Contains(string(body), realAccess) {
 		t.Fatal("the usage reply carries a login")
+	}
+}
+
+// waitSlots waits until n route calls are in flight across every worker.
+func waitSlots(t *testing.T, p *workerRoutes, n int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(p.calls) != n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %d calls in flight, want %d", what, len(p.calls), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// WROUTE-SHARE-1 (#1857): one worker holds at most its share of the route
+// calls, below the process cap, so a worker that holds its calls open
+// cannot turn every other worker away with 503.
+func TestCRED5OneWorkerCannotHoldEveryRouteCall(t *testing.T) {
+	r := newWorkerRig(t)
+	if routeShare >= routeCalls {
+		t.Fatalf("routeShare %d is not below routeCalls %d", routeShare, routeCalls)
+	}
+	r.p.calls = make(chan struct{}, 2)
+	r.p.share = 1
+	da, db := r.open(t, "pw-a"), r.open(t, "pw-b")
+	sa := filepath.Join(da, RouteSocket)
+	release, held := slowCall(t, sa, "ph-access-pw-a")
+	defer func() { release(); <-held }()
+	waitSlots(t, r.p, 1, "worker a's held call")
+	resp, err := through(t, sa, "ph-access-pw-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("worker a past its share: status %d, want 503", resp.StatusCode)
+	}
+	if n := len(r.p.calls); n != 1 {
+		t.Fatalf("a call refused at its share took a process slot: %d in flight", n)
+	}
+	resp, err = through(t, filepath.Join(db, RouteSocket), "ph-access-pw-b", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker b while a holds its share: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// WROUTE-SHARE-2 (#1857): a response the worker stops reading is cut at the
+// write deadline and frees its call, so a worker that opens a streaming call
+// and never reads it cannot keep the slot; another worker then gets through.
+func TestCRED5StalledResponseFreesItsRouteCall(t *testing.T) {
+	r := newWorkerRig(t)
+	r.p.calls = make(chan struct{}, 1)
+	r.p.writeTimeout = 200 * time.Millisecond
+	r.up.size = 64 << 20 // far past every socket buffer
+	da, db := r.open(t, "pw-a"), r.open(t, "pw-b")
+	c, err := net.Dial("unix", filepath.Join(da, RouteSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	body := `{"model":"gpt-x","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+	fmt.Fprintf(c, "POST /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1:18432\r\n"+
+		"Authorization: Bearer ph-access-pw-a\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	// Worker a never reads its reply.
+	waitSlots(t, r.p, 1, "worker a's unread stream")
+	waitSlots(t, r.p, 0, "worker a's unread stream past the write deadline")
+	resp, err := through(t, filepath.Join(db, RouteSocket), "ph-access-pw-b", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker b after a's stall: status %d, want 200", resp.StatusCode)
 	}
 }

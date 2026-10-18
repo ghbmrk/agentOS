@@ -22,6 +22,15 @@ type fakeForgetLog struct {
 	err  error
 	got  []string
 	back []time.Time
+	done []string
+}
+
+func (l *fakeForgetLog) Done(goal string, at time.Time) error {
+	if l.err != nil {
+		return l.err
+	}
+	l.done = append(l.done, goal)
+	return nil
 }
 
 func (l *fakeForgetLog) Append(goal string, at, since time.Time, agent bool) error {

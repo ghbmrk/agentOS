@@ -25,7 +25,8 @@ type Class string
 const (
 	// ClassSecurity is always urgent: a security text is never held.
 	ClassSecurity Class = "security"
-	// ClassApproval and ClassAgent are urgent only if the owner says so.
+	// ClassApproval is urgent unless the owner switches it off (D-129);
+	// ClassAgent is urgent only if the owner switches it on.
 	ClassApproval Class = "approval"
 	ClassAgent    Class = "agent"
 	// ClassUpdate is never urgent.
@@ -42,7 +43,7 @@ const (
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings.
 const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF."
@@ -50,7 +51,7 @@ const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
 // Pacing is the owner's pacing setting. The zero value is the default:
-// no quiet hours, DefaultTextsPerHour, and only security urgent.
+// no quiet hours, DefaultTextsPerHour, and security and approval urgent.
 type Pacing struct {
 	// QuietFrom and QuietTo are minutes of the box-local day
 	// (Config.Location); equal means no quiet hours. The window may wrap
@@ -63,6 +64,10 @@ type Pacing struct {
 	// Urgent lists the classes beyond security that go at once
 	// (approval, agent).
 	Urgent []Class `json:"urgent,omitempty"`
+	// ApprovalHeld is set when the owner switched URGENT APPROVAL OFF:
+	// approval is urgent by default (D-129), so the zero value must be
+	// urgent and the off switch has to be stored.
+	ApprovalHeld bool `json:"approval_held,omitempty"`
 }
 
 // valid reports whether p is a setting the owner could have made.
@@ -93,7 +98,9 @@ func (p Pacing) urgent(class Class) bool {
 	switch class {
 	case ClassSecurity:
 		return true
-	case ClassApproval, ClassAgent:
+	case ClassApproval:
+		return !p.ApprovalHeld
+	case ClassAgent:
 		for _, u := range p.Urgent {
 			if u == class {
 				return true
@@ -244,6 +251,9 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
+	if err := refuseReaction(text); err != nil {
+		return err
+	}
 	return c.post(class, agentText(text), true)
 }
 
@@ -262,6 +272,9 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
+	}
+	if err := refuseReaction(text); err != nil {
+		return err
 	}
 	text = agentText(text)
 	if c.Urgent(ClassAgent) {
@@ -306,7 +319,8 @@ func (c *Channel) sendReserved(at time.Time, text string) error {
 // that provably did not go (modem.ErrNotSent) is uncounted. Any other
 // outcome may have sent it, so it stays counted, moved to now: a send can
 // wait minutes in the modem's queue, and the text spends the hour from
-// when it went, not from when it was counted.
+// when it went, not from when it was counted. A count pruned while the
+// send was in the modem is made again at now.
 func (c *Channel) settle(at time.Time, err error) {
 	if errors.Is(err, modem.ErrNotSent) {
 		c.unreserve(at)
@@ -327,6 +341,9 @@ func (c *Channel) settle(at time.Time, err error) {
 				return
 			}
 		}
+		// Another count pruned it while the send outlived the hour; it
+		// went, so it counts from now (#1685).
+		s.Sent = append(slices.Clone(s.Sent), now)
 	})
 }
 
@@ -356,6 +373,43 @@ func (c *Channel) reserveLocked(now time.Time) time.Time {
 func (c *Channel) unreserve(at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.unreserveLocked(at)
+}
+
+// Spend counts one approval request text toward the hour for grants, at
+// the time it grants the request, and returns the time it counted (CH-15,
+// #1685). Paced, it counts only if the hour has room, checked in the same
+// hold of c.mu, so no send beside it sees stale room; unpaced (an urgent
+// or re-issued request) it always counts. The next request text sent
+// goes on this count rather than counting again; grants calls Refund
+// with at once its requests returned, for a count none of them used.
+func (c *Channel) Spend(paced bool) (at time.Time, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.cfg.Now()
+	if paced && c.allowanceLocked(now) <= 0 {
+		return time.Time{}, false
+	}
+	at = c.reserveLocked(now)
+	c.spent = append(c.spent, at)
+	return at, true
+}
+
+// Refund takes back the count Spend made at at if no request text went on
+// it; one that did is settled by its send, and Refund leaves it.
+func (c *Channel) Refund(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, t := range c.spent {
+		if t.Equal(at) {
+			c.spent = slices.Delete(c.spent, i, i+1)
+			c.unreserveLocked(at)
+			return
+		}
+	}
+}
+
+func (c *Channel) unreserveLocked(at time.Time) {
 	_ = c.saveLocked(func(s *State) {
 		for i := len(s.Sent) - 1; i >= 0; i-- {
 			if s.Sent[i].Equal(at) {
@@ -641,7 +695,9 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 					u = append(u, x)
 				}
 			}
-			if on {
+			if class == ClassApproval {
+				p.ApprovalHeld = !on
+			} else if on {
 				u = append(u, class)
 			}
 			p.Urgent = u

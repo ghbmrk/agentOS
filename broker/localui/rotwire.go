@@ -63,10 +63,13 @@ type RotationVault interface {
 // current recovery key, replaces it. Passphrase is the current vault
 // passphrase, needed to replace the passphrase or the recovery key. PIN
 // is this PC's boot PIN, for a recovery key rotation on a PC trusted with
-// one. ID names the rotation (S-R1); Start draws it.
+// one. ID names the rotation (S-R1); Start draws it. Starter is the
+// starting session's tokenKey, the only session the display is served to
+// (#1338); it is the page's own and is never sent to the vault process.
 type RotationBegin struct {
 	ID, Code, Recovery, Passphrase, PIN string
 	Parts                               card.Parts
+	Starter                             string
 }
 
 // newRotationID is a fresh rotation ID: 32 hex digits from crypto/rand.
@@ -133,6 +136,9 @@ type Rotation struct {
 	wifi func() error
 	mu   sync.Mutex
 	d    *card.Display
+	// starter is d's starting session's tokenKey (#1338); empty serves d
+	// to no session.
+	starter string
 	// until is the waiting rotation's confirm window.
 	until time.Time
 	// gen counts what voids a commit's result: a start, an enroll or a
@@ -169,7 +175,7 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 	defer r.startMu.Unlock()
 	r.mu.Lock()
 	old := r.d
-	r.d = nil
+	r.d, r.starter = nil, ""
 	r.voidLocked()
 	r.mu.Unlock()
 	if old != nil {
@@ -209,7 +215,7 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 		return err
 	}
 	r.mu.Lock()
-	r.d, r.until = d, until
+	r.d, r.starter, r.until = d, b.Starter, until
 	r.mu.Unlock()
 	return nil
 }
@@ -287,11 +293,11 @@ func handOffWiFi(wifi func() error, c *card.Card) bool {
 }
 
 // wifiSwitchedNote tells the owner the Wi-Fi switched and how to rejoin.
-const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. If your phone drops off, rejoin with the Wi-Fi QR code on your new card."
+const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. Your phone may drop off now: rejoin with the Wi-Fi QR code on your new card."
 
 // withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
 func withWiFiNote(res RotationResult, switched bool) RotationResult {
-	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Home."
+	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Replace Owner Card parts on Home."
 	if switched {
 		note = wifiSwitchedNote
 	}
@@ -311,10 +317,15 @@ func (r *Rotation) cancel(id string) {
 }
 
 // serveCard serves the display d to the session posting r, with the
-// display's own checks (signedIn is the session check); a post holds
+// display's own checks (signedIn is the session check), only when that
+// session started d (#1338); any other request is sent home. A post holds
 // postMu so that provision binds the result to its session. wifi hands a
 // committed Wi-Fi password to agentosd as that session (#1191).
 func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, wifi func(r *http.Request) error, next string, w http.ResponseWriter, r *http.Request) {
+	if !rot.startedBy(d, r) {
+		http.Redirect(w, r, "/home", http.StatusSeeOther)
+		return
+	}
 	h := d.Handler(signedIn, next)
 	if r.Method != http.MethodPost {
 		h.ServeHTTP(w, r)
@@ -329,6 +340,15 @@ func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) boo
 	}
 	defer func() { rot.confirmer = ""; rot.setWiFi(nil) }()
 	h.ServeHTTP(w, r)
+}
+
+// startedBy reports whether d is the waiting display and r's session
+// started it.
+func (rot *Rotation) startedBy(d *card.Display, r *http.Request) bool {
+	tok := cookieToken(r)
+	rot.mu.Lock()
+	defer rot.mu.Unlock()
+	return d != nil && d == rot.d && tok != "" && rot.starter != "" && tokenKey(tok) == rot.starter
 }
 
 func (rot *Rotation) setWiFi(f func() error) {
@@ -594,6 +614,9 @@ func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotati
 	}
 	b := RotationBegin{Code: r.PostForm.Get("code"), Recovery: r.PostForm.Get("recovery"),
 		Passphrase: r.PostForm.Get("passphrase"), PIN: r.PostForm.Get("pin")}
+	if tok := cookieToken(r); tok != "" {
+		b.Starter = tokenKey(tok)
+	}
 	for _, n := range r.PostForm["parts"] {
 		if !partSet(&b.Parts, n) {
 			w.WriteHeader(http.StatusBadRequest)

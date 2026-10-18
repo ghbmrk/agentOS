@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
@@ -83,6 +84,28 @@ func openMachines(h cgroupHost, flagRoot string, vouched bool, mem budget.Memory
 		log.Print(n)
 	}
 	return g, nil
+}
+
+// onceMachines shares one opening of the machines between setup's sign-in
+// worker and the owner's plane. Opening moves the broker into broker/,
+// below the delegate mark, so a second delegation check would refuse
+// (#1701). A failed opening is not kept, so the next caller tries again.
+func onceMachines(open func() (*cgroup.Group, error)) func() (*cgroup.Group, error) {
+	var mu sync.Mutex
+	var g *cgroup.Group
+	return func() (*cgroup.Group, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if g != nil {
+			return g, nil
+		}
+		o, err := open()
+		if err != nil {
+			return nil, err
+		}
+		g = o
+		return g, nil
+	}
 }
 
 // ioWeightNote says why I/O weights are inert, or "" when iocost weighs

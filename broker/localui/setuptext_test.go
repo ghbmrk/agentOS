@@ -3,6 +3,8 @@ package localui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"html"
 	"net/url"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 type textLine struct {
 	mu       sync.Mutex
 	noNumber bool // the SIM texts but does not report its number
+	fails    int  // the next fails sends fail and are not sent
 	sent     [][2]string
 	inbox    chan [2]string
 }
@@ -38,6 +41,10 @@ func (l *textLine) Number() string {
 func (l *textLine) Send(_ context.Context, to, text string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.fails > 0 {
+		l.fails--
+		return errors.New("modem busy")
+	}
 	l.sent = append(l.sent, [2]string{to, text})
 	return nil
 }
@@ -129,7 +136,7 @@ func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing
 	if w := r.post("/setup/number", url.Values{"number": {ownerNum}}); w.Code >= 400 || r.setupErr() != "" {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
-	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "AgentOS setup code: ") {
+	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "agentOS setup code: ") {
 		t.Fatalf("setup code text %q", got[0])
 	}
 }
@@ -146,7 +153,7 @@ func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
 	got := line.texts(t, 1)
-	m := regexp.MustCompile(`^AgentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
+	m := regexp.MustCompile(`^agentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
 	if got[0][0] != ownerNum || m == nil {
 		t.Fatalf("setup code text %q", got[0])
 	}
@@ -159,7 +166,8 @@ func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 
 // §8.1, CH-1, CH-12: PAIR texts that reach the box come to the page
 // through agentosd, and each reply goes back from the box's number: a
-// wrong code's, the card code's with its page code, and a new page code.
+// wrong code's nothing (P2-2w c4c s2), the card code's with its page code,
+// and a new page code.
 func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 	r, line, a := textRig(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,13 +176,10 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 	defer func() { cancel(); <-done }()
 
 	line.inbox <- [2]string{"+15550000002", "PAIR AAAA-AAAA"}
-	if got := line.texts(t, 1); got[0] != [2]string{"+15550000002", "That pairing code did not match. Check the setup page."} {
-		t.Fatalf("mismatch reply %q", got[0])
-	}
 	line.inbox <- [2]string{ownerNum, "PAIR " + r.card.SetupCode}
-	got := line.texts(t, 2)
-	if got[1][0] != ownerNum || !regexp.MustCompile(`^`+regexp.QuoteMeta(pairedText(a.HostInfo()))+` Page code: [0-9]{6}\.$`).MatchString(got[1][1]) {
-		t.Fatalf("card reply %q", got[1])
+	got := line.texts(t, 1)
+	if got[0][0] != ownerNum || !regexp.MustCompile(`^`+regexp.QuoteMeta(pairedText(a.HostInfo()))+` Page code: [0-9]{6}\.$`).MatchString(got[0][1]) {
+		t.Fatalf("card reply %q", got[0])
 	}
 	r.asOther(func() {
 		r.get("/setup")
@@ -182,9 +187,9 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 			r.post("/setup/claim", url.Values{"code": {"000000"}})
 		}
 	})
-	got = line.texts(t, 3)
-	if got[2][0] != ownerNum || !regexp.MustCompile(`^AgentOS page code: [0-9]{6}\.`).MatchString(got[2][1]) {
-		t.Fatalf("new page code %q", got[2])
+	got = line.texts(t, 2)
+	if len(got) != 2 || got[1][0] != ownerNum || !regexp.MustCompile(`^agentOS page code: [0-9]{6}\.`).MatchString(got[1][1]) {
+		t.Fatalf("new page code %q", got)
 	}
 	if r.srv.setup.st.Owner != ownerNum {
 		t.Fatal("the card's PAIR text did not pair")
@@ -203,5 +208,60 @@ func TestPairTextsStopWhenSetupCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("PairTexts kept asking a closed setup")
+	}
+}
+
+// REQ: P2-2w-c4c-s2-1
+// §8.1, CH-12 (#1290): a wrong PAIR code gets no reply. Its sender is
+// unverified, so a reply would let a stranger aim the box's texts at
+// anyone and spend setup's shared send budget. PairTexts handles texts in
+// order, so once the owner's paired reply is out every wrong code before
+// it has been answered, by nothing.
+func TestWrongPairCodesTextNoOne(t *testing.T) {
+	r, line, a := textRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.PairTexts(ctx, r.srv, time.Millisecond); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	for i := 0; i < PairTriesPerHour-1; i++ {
+		line.inbox <- [2]string{fmt.Sprintf("+155500001%02d", i), "PAIR AAAA-AAAA"}
+	}
+	line.inbox <- [2]string{ownerNum, "PAIR " + r.card.SetupCode}
+	line.texts(t, 1)
+	time.Sleep(20 * time.Millisecond)
+	line.mu.Lock()
+	got := append([][2]string(nil), line.sent...)
+	line.mu.Unlock()
+	if len(got) != 1 || got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "agentOS is running on ") {
+		t.Fatalf("texts sent %q", got)
+	}
+}
+
+// REQ: P2-2w-c4c-s2-3
+// ONB-6, A1 (#1290): wrong PAIR codes can close pairing by text for the
+// hour, but not setup: the typed number still pairs the owner, since its
+// code text and tries are its own.
+func TestTheTypedNumberPairsAfterTheWrongCodeCap(t *testing.T) {
+	r, line, _ := textRig(t)
+	for i := 0; i < PairTriesPerHour; i++ {
+		if reply, ok := r.srv.OfferText("+15550009999", "PAIR AAAA-AAAA"); reply != "" || !ok {
+			t.Fatalf("try %d: %q %v", i, reply, ok)
+		}
+	}
+	if _, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || r.srv.setup.st.Owner != "" {
+		t.Fatal("the cap did not close pairing by text")
+	}
+	if w := r.post("/setup/number", url.Values{"number": {ownerNum}}); w.Code >= 400 || r.setupErr() != "" {
+		t.Fatalf("number: %d %q", w.Code, r.setupErr())
+	}
+	got := line.texts(t, 1)
+	m := regexp.MustCompile(`^agentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
+	if got[0][0] != ownerNum || m == nil {
+		t.Fatalf("setup code text %q", got[0])
+	}
+	r.post("/setup/number-code", url.Values{"code": {m[1]}})
+	if r.srv.setup.st.Owner != ownerNum {
+		t.Fatalf("not paired by the typed number after the cap: %q", r.setupErr())
 	}
 }

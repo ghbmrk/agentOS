@@ -164,6 +164,53 @@ type Anchor interface {
 // so for STATUS.
 var ErrNoAnchor = errors.New("update: no anchor on this PC")
 
+// An anchor that does not answer holds attestation authority, not the
+// whole check (SR3-6-f5a): every Read or Raise error but ErrNoAnchor is
+// ErrAnchorHeld once the store wraps it. ErrAnchorLocked, ErrAnchorMissing
+// and ErrAnchorElsewhere are the answers an Anchor may give so the owner
+// is told the step that works (AnchorHeldLine).
+var (
+	ErrAnchorHeld = errors.New("update: the outside-attestor anchor did not answer")
+	// ErrAnchorLocked: the vault that keeps the counter is locked.
+	ErrAnchorLocked = errors.New("update: anchor: the vault is locked")
+	// ErrAnchorMissing: the counter was defined and is gone.
+	ErrAnchorMissing = errors.New("update: anchor: the counter is missing")
+	// ErrAnchorElsewhere: the vault records a counter on a chip this PC
+	// lacks.
+	ErrAnchorElsewhere = errors.New("update: anchor: the counter is on another PC")
+)
+
+// heldErr marks an anchor error as ErrAnchorHeld and keeps its text.
+type heldErr struct{ error }
+
+func (e heldErr) Unwrap() []error { return []error{ErrAnchorHeld, e.error} }
+
+// The owner's lines for a check the anchor held (SR3-6-f5b, CH-12): each
+// names only a step that works, and none carries error text.
+const (
+	heldPrefix      = "Updates that need a tester's report are waiting: "
+	heldLocked      = heldPrefix + "unlock me with your card."
+	heldMissing     = heldPrefix + "unlock with your card to trust this PC again."
+	heldElsewhere   = heldPrefix + "this PC has no security chip I can use. Restart the PC; if it still happens, move the drive back to the PC you set it up on."
+	heldNotAnswered = heldPrefix + "this PC's security chip didn't answer. Restart the PC."
+)
+
+// AnchorHeldLine is the owner's line for an anchor error, or "" for an
+// error that is not the anchor's.
+func AnchorHeldLine(err error) string {
+	switch {
+	case !errors.Is(err, ErrAnchorHeld):
+		return ""
+	case errors.Is(err, ErrAnchorLocked):
+		return heldLocked
+	case errors.Is(err, ErrAnchorMissing):
+		return heldMissing
+	case errors.Is(err, ErrAnchorElsewhere):
+		return heldElsewhere
+	}
+	return heldNotAnswered
+}
+
 // Anchored reports whether the outside record is anchored off the store.
 // A nil anchor, or one answering ErrNoAnchor, is not; an anchor that
 // cannot be read returns its error.
@@ -277,6 +324,9 @@ type Verified struct {
 	// attested: WithAttestations counted an independent pass, so the
 	// release's admission rested on the attestor policy (SR3-6f-4).
 	attested bool
+	// judged: made by WithAttestations. A raw Check result was not, so
+	// Stage binds it when its check listed any attestor (SR3-6-f6).
+	judged bool
 	// The store that checked it, and the root and targets versions it
 	// trusted then: Stage refuses it once either moved (L3 on #133).
 	storeDir       string
@@ -359,6 +409,25 @@ func (v *Verified) policyCurrent() error {
 	return nil
 }
 
+// Bound reports whether v's admission still holds under the box's
+// attestor policy: true for a release that never rested on the policy (a
+// copy judged with no independent pass, or a raw result checked with no
+// attestor listed), and otherwise only while the policy is the one v was
+// checked under. It is false for a nil or unsealed v and
+// when the store cannot be read (SR3-6-f6).
+func (v *Verified) Bound() bool {
+	return v.ok() && (!v.restsOnPolicy() || v.policyCurrent() == nil)
+}
+
+// restsOnPolicy: v's admission may rest on the attestor policy, so Stage
+// binds it. A release WithAttestations did not judge (the raw Check
+// result) rests on it when its check listed any attestor, since a caller
+// may have admitted it on passes: staging it cannot step around the
+// binding of the copy that was judged (SR3-6-f6).
+func (v *Verified) restsOnPolicy() bool {
+	return v.security || v.attested || (!v.judged && (len(v.allowed) > 0 || len(v.pinned) > 0))
+}
+
 // WithAttestations returns a copy whose Security reflects
 // SecurityAutoStage(atts, own), and which Stage binds to the attestor
 // policy when any independent pass counted. An unsealed v gives nil.
@@ -369,6 +438,7 @@ func (v *Verified) WithAttestations(atts [][]byte, own ed25519.PublicKey) *Verif
 	c := *v
 	c.security = v.SecurityAutoStage(atts, own) == nil
 	c.attested = v.IndependentPasses(atts, own) > 0
+	c.judged = true
 	return &c
 }
 
@@ -452,6 +522,9 @@ type Result struct {
 	// newer ordinary release does not hide it: the updater treats the
 	// newest as carrying the fix (maintain M5, security lens C2).
 	SecurityFix int64
+	// Held is the owner's line when the anchor did not answer, so this
+	// check granted no attestation authority (SR3-6-f5), else "".
+	Held string
 }
 
 // lock serializes checks and commits across processes sharing Dir, so two
@@ -523,9 +596,17 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	}
 	// Record an outside attestor first, so a check that fails later still
 	// ends the interim rule.
+	// An anchor that does not answer holds only attestation authority:
+	// proto then has no allowed or pinned keys and a policy that never
+	// matches, and the owner's path goes on (SR3-6-f5a).
 	var proto Verified
+	var held string
 	if proto.interim, err = s.noteAttestors(o.Attestors, o.InterimAttestors, &proto); err != nil {
-		return Result{}, err
+		if !errors.Is(err, ErrAnchorHeld) {
+			return Result{}, err
+		}
+		log.Printf("update: check holds attestation: %v", err)
+		held = AnchorHeldLine(err)
 	}
 	if o.Channel == "" {
 		o.Channel = ChannelStable
@@ -721,6 +802,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 			res.FreshnessFailed = true
 		}
 	}
+	res.Held = held
 	return res, nil
 }
 
@@ -775,9 +857,15 @@ func (s *Store) NoteAttestors(allow, interim []ed25519.PublicKey) error {
 
 // noteAttestors fills v's allowed and pinned sets, records any outside
 // listing, and reports whether the interim rule holds. The caller holds
-// the lock.
-func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (bool, error) {
-	var err error
+// the lock. An anchor error (ErrAnchorHeld) still writes the noted list,
+// then leaves v with no allowed or pinned keys, the interim rule off and
+// a policy no store computes, and is returned (SR3-6-f5a).
+func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (_ bool, err error) {
+	defer func() {
+		if errors.Is(err, ErrAnchorHeld) {
+			v.allowed, v.pinned, v.policy = map[string]bool{}, map[string]bool{}, policyHeld
+		}
+	}()
 	if v.allowed, err = keySet(allow); err != nil {
 		return false, err
 	}
@@ -790,13 +878,17 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 			outside = true
 		}
 	}
+	var raised error
 	if outside {
-		if err := s.recordOutside(); err != nil {
-			return false, err
+		if raised = s.recordOutside(); raised != nil && !errors.Is(raised, ErrAnchorHeld) {
+			return false, raised
 		}
 	}
 	if err := s.writeAllowList(v.allowed, v.pinned); err != nil {
 		return false, err
+	}
+	if raised != nil {
+		return false, raised
 	}
 	listed, err := s.outsideListed()
 	if err != nil {
@@ -807,6 +899,10 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 	}
 	return !listed && len(v.allowed) > 0, nil
 }
+
+// policyHeld is the policy of a release checked while the anchor did not
+// answer: policy() always ends "|outside=<bool>", so it never matches.
+const policyHeld = "anchor-held"
 
 // allowListFile holds the digest of the allow-list and interim keys last
 // noted, so a release checked under another list is told apart (SR3-6).
@@ -837,7 +933,7 @@ func (s *Store) recordOutside() error {
 	var raised error
 	if s.Anchor != nil {
 		if err := s.Anchor.Raise(); err != nil && !errors.Is(err, ErrNoAnchor) {
-			raised = fmt.Errorf("update: raise the outside-attestor anchor: %w", err)
+			raised = fmt.Errorf("update: raise the outside-attestor anchor: %w", heldErr{err})
 		}
 	}
 	if err := durable.WriteFile(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
@@ -868,7 +964,7 @@ func (s *Store) outsideListed() (bool, error) {
 		}
 		return listed, nil
 	case err != nil:
-		return false, fmt.Errorf("update: read the outside-attestor anchor: %w", err)
+		return false, fmt.Errorf("update: read the outside-attestor anchor: %w", heldErr{err})
 	}
 	if listed && n == 0 {
 		// A record from before the anchor (or an anchor defined after
@@ -1076,8 +1172,9 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	// The commit point for attestation authority: under the lock that
 	// NoteAttestors takes, so a narrowing it returned from is seen here.
-	// An ordinary release admitted on passes is bound too (SR3-6f-4).
-	if v.security || v.attested {
+	// An ordinary release admitted on passes is bound too (SR3-6f-4), and
+	// so is one WithAttestations never judged (SR3-6-f6).
+	if v.restsOnPolicy() {
 		if err := v.policyCurrent(); err != nil {
 			return err
 		}

@@ -609,7 +609,7 @@ func TestTheTextedCodeHintNeedsASavedTry(t *testing.T) {
 func TestPageRequestsOpenedTogetherShareAText(t *testing.T) {
 	r := newRig(t, nil)
 	before := len(r.carrier.Log())
-	ids, err := r.ch.RequestLocalEach([]Item{localItem("i1"), localItem("i2")}, []time.Duration{0, time.Hour})
+	ids, err := r.ch.RequestLocalEach([]Item{localItem("i1"), localItem("i2")}, []time.Time{{}, r.now.Add(time.Hour)})
 	if err != nil || len(ids) != 2 || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
 		t.Fatalf("ids %v err %v", ids, err)
 	}
@@ -639,7 +639,7 @@ func confirmItem(ref string) Item {
 // and a G4 code does not then pass for G5.
 func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 	r := newRig(t, nil)
-	ids, err := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Duration{0, 0})
+	ids, err := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Time{{}, {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +683,7 @@ func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 // it is the alert for a decision the owner may not have made.
 func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
 	r := newRig(t, nil)
-	ids, _ := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Duration{0, 0})
+	ids, _ := r.ch.RequestLocalEach([]Item{confirmItem("g4"), confirmItem("g5")}, []time.Time{{}, {}})
 	r.inbox()
 	at := r.clock().Format("15:04")
 	if _, err := r.ch.LocalAnswer(ids[0], r.sum(ids[0]), true, r.totp()); err != nil {
@@ -701,7 +701,7 @@ func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
 		t.Fatalf("denied: %q", got)
 	}
 	// Coalesced, with the same alert tail.
-	more, _ := r.ch.RequestLocalEach([]Item{confirmItem("g6"), confirmItem("g7")}, []time.Duration{0, 0})
+	more, _ := r.ch.RequestLocalEach([]Item{confirmItem("g6"), confirmItem("g7")}, []time.Time{{}, {}})
 	r.inbox()
 	at1 := r.clock().Format("15:04")
 	r.ch.LocalAnswer(more[0], r.sum(more[0]), false, "") // within the hour: held

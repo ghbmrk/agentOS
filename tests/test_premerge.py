@@ -230,6 +230,79 @@ class PremergeTest(unittest.TestCase):
                                cwd=self.r, capture_output=True, text=True)
             self.assertEqual((r.returncode, r.stdout.split()), (1, ["mark", "sub/CLAUDE.md"]), argv)
 
+    def test_cli_needs_mark_rejects_a_second_positional(self):
+        # `--needs-mark origin/main pr` read origin/main as the head and printed `agent` for any PR.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("CLAUDE.md", "rules\n")
+        self.commit("rules")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "main", "pr"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("agent", r.stdout.split())
+
+    def test_cli_needs_mark_rejects_an_empty_range(self):
+        # `--needs-mark origin/main` read origin/main as the head: base..base is empty and printed `agent`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("CLAUDE.md", "rules\n")
+        self.commit("rules")
+        git(self.r, "update-ref", "refs/remotes/origin/main", "main")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "origin/main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("agent", r.stdout.split())
+
+    def needs_mark(self, head="pr"):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main", head],
+                           cwd=self.r, capture_output=True, text=True)
+        return r.returncode, r.stdout.split()
+
+    def test_cli_needs_mark_sees_a_revert_made_by_a_criss_cross_merge(self):
+        # #2138: with two merge bases, `git merge-base` picked the one where the head's CLAUDE.md was
+        # unchanged, so a PR whose merge reverts main's CLAUDE.md printed `agent`.
+        self.write("CLAUDE.md", "v0\n")
+        m0 = self.commit("m0")
+        git(self.r, "checkout", "-q", "-b", "side")
+        self.write("CLAUDE.md", "v1\n")
+        m2 = self.commit("m2")
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "m1\n")
+        m1 = self.commit("m1")
+        git(self.r, "checkout", "-q", "-b", "pr", m1)
+        git(self.r, "merge", "-q", "--no-edit", m2)
+        self.write("CLAUDE.md", "v0\n")
+        self.write("a.txt", "pr\n")
+        git(self.r, "add", "."), git(self.r, "commit", "-q", "--amend", "--no-edit")
+        git(self.r, "checkout", "-q", "main")
+        git(self.r, "merge", "-q", "--no-edit", m2)
+        self.assertEqual(len(git(self.r, "merge-base", "--all", "main", "pr").split()), 2, m0)
+        merged = git(self.r, "merge-tree", "--write-tree", "main", "pr")
+        self.assertEqual(git(self.r, "show", f"{merged}:CLAUDE.md"), "v0")  # the merge reverts main's v1
+        self.assertEqual(self.needs_mark(), (1, ["mark", "CLAUDE.md"]))
+
+    def test_cli_needs_mark_sees_a_mark_file_the_merge_resolves_in_conflict(self):
+        # #2138: a conflicted merge-tree keeps its markers, so the conflicted file still reads as changed.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("CLAUDE.md", "pr\n")
+        self.commit("pr rules")
+        git(self.r, "checkout", "-q", "main")
+        self.write("CLAUDE.md", "main\n")
+        self.commit("main rules")
+        self.assertEqual(self.needs_mark(), (1, ["mark", "CLAUDE.md"]))
+
+    def test_cli_needs_mark_sees_a_claude_symlink(self):
+        # #2138: `.claude/` needed a slash, so `broker/.claude -> ../cfg` plus cfg/settings.json printed `agent`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "cfg").mkdir()
+        (self.r / "broker").mkdir()
+        self.write("cfg/settings.json", "{}\n")
+        (self.r / "broker/.claude").symlink_to("../cfg")
+        self.commit("linked settings")
+        self.assertEqual(self.needs_mark(), (1, ["mark", "broker/.claude"]))
+        for f in (".claude", "a/.claude", "a/.claude/x"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in (".claudex", "a/.claude.bak", "a/x.claude", ".claude\n"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+
     def test_check_gate(self):
         import json
         git(self.r, "checkout", "-q", "-b", "pr")
@@ -257,6 +330,51 @@ class PremergeTest(unittest.TestCase):
         new = self.commit("later")
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
+
+    def test_check_gate_spec_needs_a_transcription_or_marks_approval(self):
+        # D-130: a SPEC.md change passes on an accept that names the Mark decision it transcribes, or on
+        # Mark's approval at a head whose diff equals this one (main merged in after the tap keeps it).
+        import json
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("SPEC.md", "spec\n")
+        sha = self.commit("spec")
+        accept = lambda extra="", who="OWNER", at="1": {"author_association": who, "created_at": at,
+            "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n{extra}"}
+        approved = lambda head, who="OWNER": {"author_association": who, "created_at": "2",
+                                              "body": f"Mark-approved: cmsg_01Abc · head {head[:7]}"}
+        def run(comments):
+            f = pathlib.Path(self._d.name + ".comments.json")
+            self.addCleanup(lambda: f.unlink(missing_ok=True))
+            f.write_text(json.dumps(comments))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run([accept()]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept("Transcribes: cmsg_01Abc\n")]), (0, ["same"]))
+        self.assertEqual(run([accept("Transcribes: cmsg_01Abc, cmsg_02Def\n")]), (0, ["same"]))
+        for bad in ("Transcribes:\n", "Transcribes: see Decisions\n", "x Transcribes: cmsg_01Abc\n"):
+            self.assertEqual(run([accept(bad)]), (1, ["needs-mark", "SPEC.md"]), bad)
+        # every accept must carry the line: one reviewer withholding it is not overridden, in either order
+        tx = "Transcribes: cmsg_01Abc\n"
+        self.assertEqual(run([accept(at="1"), accept(tx, at="3")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(tx, at="1"), accept(at="3")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(tx, at="1"), accept(tx, at="3")]), (0, ["same"]))
+        self.assertEqual(run([accept(), approved(sha)]), (0, ["same"]))
+        self.assertEqual(run([accept(), approved(sha, who="NONE")]), (1, ["needs-mark", "SPEC.md"]))
+        self.assertEqual(run([accept(), approved("0" * 40)]), (1, ["needs-mark", "SPEC.md"]))  # unknown head
+        # main merged in after the tap: the approval carries; the accept's Record head still equals too
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "main\n")
+        self.commit("main moves")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        self.assertEqual(run([accept(), approved(sha)]), (0, ["same"]))
+        # a tap at a head whose diff differs does not carry
+        git(self.r, "checkout", "-q", "-b", "other", "main")
+        self.write("SPEC.md", "other\n")
+        other = self.commit("other spec")
+        git(self.r, "checkout", "-q", "pr")
+        self.assertEqual(run([accept(), approved(other)]), (1, ["needs-mark", "SPEC.md"]))
 
     def test_bot_gate(self):
         # PREMERGE-wire (#1860): the generated-file bot PRs carry no L3 verdict, so `--bot` passes

@@ -27,12 +27,10 @@ import (
 )
 
 func main() {
-	var dir string
-	var agentosdUID int
-	flag.StringVar(&dir, "dir", "/run/agentos-netjoin", "the socket's directory (the unit's RuntimeDirectory)")
-	// agentosd runs as root (its unit sets no User=).
-	flag.IntVar(&agentosdUID, "agentosd-uid", 0, "the only uid served")
-	flag.Parse()
+	c, err := parseFlags(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
 	log.SetFlags(0)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -42,11 +40,43 @@ func main() {
 	}
 	defer conn.Close()
 	nm := nmBus{obj: func(p dbus.ObjectPath) dbus.BusObject { return conn.Object(nmDest, p) }}
-	s := &sockets.Server{Dir: dir}
-	if err := s.Start(ctx, netjoin.Endpoint(netjoin.NewJoiner(nm), netjoin.NewScanner(nm), agentosdUID)); err != nil {
+	s := &sockets.Server{Dir: c.dir}
+	if err := s.Start(ctx, netjoin.Endpoint(c.joiner(nm), netjoin.NewScanner(nm), c.agentosdUID)); err != nil {
 		log.Fatalf("agentos-netjoin: %v", err)
 	}
 	s.Wait()
+}
+
+// config is the helper's flags.
+type config struct {
+	dir         string
+	agentosdUID int
+	// station and ap are the join's interfaces (S-R4, #1428): with no
+	// station, or one in ap, every join answers failed.
+	station string
+	ap      ifaces
+}
+
+// ifaces is a repeatable string flag.
+type ifaces []string
+
+func (f *ifaces) String() string     { return strings.Join(*f, ",") }
+func (f *ifaces) Set(v string) error { *f = append(*f, v); return nil }
+
+func parseFlags(args []string) (config, error) {
+	var c config
+	fs := flag.NewFlagSet("agentos-netjoin", flag.ContinueOnError)
+	fs.StringVar(&c.dir, "dir", "/run/agentos-netjoin", "the socket's directory (the unit's RuntimeDirectory)")
+	// agentosd runs as root (its unit sets no User=).
+	fs.IntVar(&c.agentosdUID, "agentosd-uid", 0, "the only uid served")
+	fs.StringVar(&c.station, "station", "", "the one interface the home connection may use (none: every join fails)")
+	fs.Var(&c.ap, "ap-iface", "an interface agentos-ap may run the access point on (its -iface; repeatable)")
+	err := fs.Parse(args)
+	return c, err
+}
+
+func (c config) joiner(nm netjoin.NM) *netjoin.Joiner {
+	return netjoin.NewJoiner(nm, c.station, c.ap)
 }
 
 // NetworkManager's D-Bus names (the D-Bus API of NetworkManager 1.22+,

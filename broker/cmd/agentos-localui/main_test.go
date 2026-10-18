@@ -217,7 +217,7 @@ func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Con
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cfg.Hooks.(localui.CardFinish); !ok || cfg.Card == nil || cfg.CodesVoid != void {
+	if cf, ok := cfg.Hooks.(localui.CardFinish); !ok || cf.Again == nil || cfg.Card == nil || cfg.CodesVoid != void {
 		t.Fatalf("route %s: hooks %T, card %v", route, cfg.Hooks, cfg.Card)
 	}
 	return cfg, route

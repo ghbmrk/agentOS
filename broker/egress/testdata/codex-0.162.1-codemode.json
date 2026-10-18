@@ -1,0 +1,456 @@
+{
+ "model": "gpt-6.1-sol",
+ "stream": true,
+ "input": [
+  {
+   "type": "additional_tools",
+   "id": "at_00000000-0000-4000-8000-000000000001",
+   "role": "developer",
+   "tools": [
+    {
+     "type": "namespace",
+     "name": "functions",
+     "description": "",
+     "tools": [
+      {
+       "type": "custom",
+       "name": "exec",
+       "description": "(elided: 14027 bytes of the CLI's text)",
+       "format": {
+        "type": "grammar",
+        "syntax": "lark",
+        "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+       }
+      },
+      {
+       "type": "function",
+       "name": "wait",
+       "description": "(elided: 769 bytes of the CLI's text)",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "cell_id": {
+          "type": "string",
+          "description": "Identifier of the running exec cell."
+         },
+         "max_tokens": {
+          "type": "number",
+          "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+         },
+         "terminate": {
+          "type": "boolean",
+          "description": "True stops the running exec cell; false or omitted waits for output."
+         },
+         "yield_time_ms": {
+          "type": "number",
+          "description": "Wait before yielding more output. Defaults to 10000 ms."
+         }
+        },
+        "required": [
+         "cell_id"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "request_user_input",
+       "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "questions": {
+          "type": "array",
+          "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+          "items": {
+           "type": "object",
+           "properties": {
+            "header": {
+             "type": "string",
+             "description": "Short header label shown in the UI (12 or fewer chars)."
+            },
+            "id": {
+             "type": "string",
+             "description": "Stable identifier for mapping answers (snake_case)."
+            },
+            "options": {
+             "type": "array",
+             "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+             "items": {
+              "type": "object",
+              "properties": {
+               "description": {
+                "type": "string",
+                "description": "One short sentence explaining impact/tradeoff if selected."
+               },
+               "label": {
+                "type": "string",
+                "description": "User-facing label (1-5 words)."
+               }
+              },
+              "required": [
+               "label",
+               "description"
+              ],
+              "additionalProperties": false
+             }
+            },
+            "question": {
+             "type": "string",
+             "description": "Single-sentence prompt shown to the user."
+            }
+           },
+           "required": [
+            "id",
+            "header",
+            "question",
+            "options"
+           ],
+           "additionalProperties": false
+          }
+         }
+        },
+        "required": [
+         "questions"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "request_user_input_async",
+       "description": "(elided: 556 bytes of the CLI's text)",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "questions": {
+          "type": "array",
+          "description": "One or more self-contained questions to present together, in display order.",
+          "items": {
+           "type": "object",
+           "properties": {
+            "options": {
+             "type": "array",
+             "description": "(elided: 324 bytes of the CLI's text)",
+             "items": {
+              "type": "string"
+             },
+             "minItems": 1
+            },
+            "title": {
+             "type": "string",
+             "description": "The complete question shown to the user, including any context needed to answer it."
+            }
+           },
+           "required": [
+            "title"
+           ],
+           "additionalProperties": false
+          },
+          "minItems": 1
+         }
+        },
+        "required": [
+         "questions"
+        ],
+        "additionalProperties": false
+       }
+      }
+     ]
+    },
+    {
+     "type": "namespace",
+     "name": "clock",
+     "description": "Tools for reading and waiting on time.",
+     "tools": [
+      {
+       "type": "function",
+       "name": "sleep",
+       "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "duration_ms": {
+          "type": "number",
+          "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+         }
+        },
+        "required": [
+         "duration_ms"
+        ],
+        "additionalProperties": false
+       }
+      }
+     ]
+    },
+    {
+     "type": "namespace",
+     "name": "collaboration",
+     "description": "Tools for spawning and managing sub-agents.",
+     "tools": [
+      {
+       "type": "function",
+       "name": "followup_task",
+       "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "message": {
+          "type": "string",
+          "description": "Message text to send to the target agent.",
+          "encrypted": true
+         },
+         "target": {
+          "type": "string",
+          "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+         }
+        },
+        "required": [
+         "target",
+         "message"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "interrupt_agent",
+       "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "target": {
+          "type": "string",
+          "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+         }
+        },
+        "required": [
+         "target"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "list_agents",
+       "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path_prefix": {
+          "type": "string",
+          "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+         }
+        },
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "send_message",
+       "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "message": {
+          "type": "string",
+          "description": "Message text to queue on the target agent.",
+          "encrypted": true
+         },
+         "target": {
+          "type": "string",
+          "description": "Relative or canonical task name to message (from spawn_agent)."
+         }
+        },
+        "required": [
+         "target",
+         "message"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "spawn_agent",
+       "description": "(elided: 1829 bytes of the CLI's text)",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "fork_turns": {
+          "type": "string",
+          "description": "Parent history to inherit. Defaults to `all`; use `none` to start without parent history. Only `all` and `none` are supported."
+         },
+         "message": {
+          "type": "string",
+          "description": "Initial plain-text task for the new agent.",
+          "encrypted": true
+         },
+         "model": {
+          "type": "string",
+          "description": "Model override for the new agent. Omit unless an explicit override is needed."
+         },
+         "reasoning_effort": {
+          "type": "string",
+          "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+         },
+         "task_name": {
+          "type": "string",
+          "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+         }
+        },
+        "required": [
+         "task_name",
+         "message"
+        ],
+        "additionalProperties": false
+       }
+      },
+      {
+       "type": "function",
+       "name": "wait_agent",
+       "description": "(elided: 383 bytes of the CLI's text)",
+       "strict": false,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "timeout_ms": {
+          "type": "number",
+          "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000002",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "(elided: 21769 bytes of the CLI's text)"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000003",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "(elided: 1960 bytes of the CLI's text)"
+    },
+    {
+     "type": "input_text",
+     "text": "(elided: 1044 bytes of the CLI's text)"
+    },
+    {
+     "type": "input_text",
+     "text": "(elided: 920 bytes of the CLI's text)"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000004",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "(elided: 2400 bytes of the CLI's text)"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000005",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000006",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<environment_context>\n  <cwd>/var/lib/agentos-work</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-17</current_date>\n  <timezone>Etc/UTC</timezone>\n  <filesystem><workspace_roots><root>/var/lib/agentos-work</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry><entry access=\"write\"><path>/var/lib/agentos-work</path></entry><entry access=\"read\"><path>/var/lib/agentos-work/.git</path></entry><entry access=\"read\"><path>/var/lib/agentos-work/.agents</path></entry><entry access=\"read\"><path>/var/lib/agentos-work/.codex</path></entry><entry access=\"read\"><path>/var/lib/agentos-work/.aws</path></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/[!t]*</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/[!t]*/**</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/t[!m]*</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/t[!m]*/**</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/tm[!p]*</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/tm[!p]*/**</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/tmp?*</glob></entry><entry access=\"deny\" escalatable=\"false\"><glob>/var/lib/agentos-codex/tmp?*/**</glob></entry><entry access=\"deny\" escalatable=\"false\"><path>/var/lib/agentos-codex/t</path></entry></file_system></permission_profile></filesystem>\n</environment_context>"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_00000000-0000-4000-8000-000000000007",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "brief\n"
+    }
+   ]
+  },
+  {
+   "type": "custom_tool_call",
+   "call_id": "c0",
+   "name": "exec",
+   "input": "const r = await tools.exec_command({cmd: \"true\", yield_time_ms: 10000}); text(JSON.stringify(r));"
+  },
+  {
+   "type": "custom_tool_call_output",
+   "id": "ctco_00000000-0000-4000-8000-000000000008",
+   "call_id": "c0",
+   "output": [
+    {
+     "type": "input_text",
+     "text": "Script completed\nWall time 0.3 seconds\nOutput:\n"
+    },
+    {
+     "type": "input_text",
+     "text": "{\"chunk_id\":\"964f13\",\"wall_time_seconds\":0.003082802,\"exit_code\":0,\"original_token_count\":0,\"output\":\"\"}"
+    }
+   ]
+  }
+ ],
+ "tool_choice": "auto",
+ "parallel_tool_calls": false,
+ "reasoning": {
+  "effort": "low",
+  "context": "all_turns"
+ },
+ "store": false,
+ "include": [
+  "reasoning.encrypted_content"
+ ],
+ "prompt_cache_key": "00000000-0000-4000-8000-000000000009",
+ "text": {
+  "verbosity": "low"
+ },
+ "client_metadata": {
+  "turn_id": "00000000-0000-4000-8000-000000000010",
+  "x-codex-installation-id": "00000000-0000-4000-8000-000000000011",
+  "session_id": "00000000-0000-4000-8000-000000000009",
+  "x-codex-window-id": "00000000-0000-4000-8000-000000000009:0",
+  "root_turn_id": "00000000-0000-4000-8000-000000000010",
+  "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-4000-8000-000000000011\",\"session_id\":\"00000000-0000-4000-8000-000000000009\",\"thread_id\":\"00000000-0000-4000-8000-000000000009\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-4000-8000-000000000010\",\"window_id\":\"00000000-0000-4000-8000-000000000009:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-4000-8000-000000000012\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-4000-8000-000000000010\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"workspace-write\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792204993377,\"analytics_enabled\":false,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+  "thread_id": "00000000-0000-4000-8000-000000000009"
+ }
+}

@@ -59,6 +59,10 @@ type Provider struct {
 	// (CAP-9, REV-6). Asked once at connection: ticked by default on a
 	// plan sign-in, unticked on an API key (D-115).
 	PrivateOK bool
+	// PrivateByConfig: the box's configuration allows this provider
+	// private content whatever the owner answers, so the AI step shows
+	// the box ticked and fixed and records no answer for it (#1608).
+	PrivateByConfig bool
 	// Owed: the answer agentosd recorded as owed to the vault and the
 	// vault has not confirmed (#1544), or nil.
 	Owed *bool
@@ -68,6 +72,7 @@ type Provider struct {
 type privateBox struct {
 	Name    string
 	Checked bool
+	Fixed   bool // the configuration allows it; the owner can't change it
 }
 
 // Hooks connect setup to the rest of the box. Each is implemented by the
@@ -324,7 +329,7 @@ var (
 
 // replaceCodesNote is the codes step's note after the vault voided the code
 // generator entry (F10, #1210 R1). It is GSM-7, like the page's texts.
-const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old AgentOS entry, then add the new one below."
+const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old agentOS entry, then add the new one below."
 
 // cardRestartNote is the card step's note (LATER CTRL-card l2): a box that
 // restarts before the confirm makes a new card.
@@ -332,6 +337,10 @@ const cardRestartNote = "If I restart before you confirm, I make a new card: a c
 
 // cannotFinish is what the page says on ErrCodesUnavailable.
 const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
+
+// cardAgain is what the page says on ErrCardAgain (#1330): the vault holds
+// no Owner Card, so setup goes back to the card step with a new one.
+const cardAgain = "I need to make your Owner Card again. Any card I showed you before will not work."
 
 // answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
 // reload adopts the owed answer as a hold and asks the question again.
@@ -706,7 +715,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 			v.Plan[pr.ID] = u.boxLocked("ai-device", pr)
 			v.Key[pr.ID] = u.boxLocked("ai-key", pr)
 			if ok, held := u.st.Unsaved[pr.ID]; held {
-				v.Unsaved[pr.ID] = &privateBox{Name: pr.Name, Checked: ok}
+				v.Unsaved[pr.ID] = &privateBox{Name: pr.Name, Checked: ok || pr.PrivateByConfig, Fixed: pr.PrivateByConfig}
 			}
 		}
 		u.mu.Unlock()
@@ -825,7 +834,7 @@ func (s *Server) OfferText(from, text string) (reply string, handled bool) {
 	if phone == "" && !byCard {
 		u.wrong = append(u.wrong, now)
 		u.mu.Unlock()
-		return "That pairing code did not match. Check the setup page.", true
+		return "", true
 	}
 	var claim string
 	if byCard {
@@ -870,7 +879,7 @@ func pairedText(host string) string {
 	if host == "" {
 		host = "this PC"
 	}
-	return "AgentOS is running on " + host + ". This is your box's number; save it as AgentOS."
+	return "agentOS is running on " + host + ". This is your box's number; save it as agentOS."
 }
 
 // number is the typing fallback for pairing (ONB-6): the owner types their
@@ -905,7 +914,7 @@ func (u *setup) number(r *http.Request, key string) error {
 	u.texts = append(u.texts, now)
 	u.numTo, u.numDevice, u.numCode, u.numExpires, u.numTries = n, key, code, now.Add(numberCodeTTL), 0
 	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.Send(n, "AgentOS setup code: "+code+". Type it on the setup page."); err != nil {
+	if err := u.s.cfg.Hooks.Send(n, "agentOS setup code: "+code+". Type it on the setup page."); err != nil {
 		return errors.New("I could not send a text. Check the SIM, or use Text my box.")
 	}
 	return nil
@@ -942,9 +951,17 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 	if err != nil {
 		return err
 	}
-	_ = u.s.cfg.Hooks.Send(to, pairedText(u.s.cfg.Hooks.HostInfo()))
+	if u.s.cfg.Hooks.Send(to, pairedText(u.s.cfg.Hooks.HostInfo())) != nil {
+		// #1293: paired regardless; the owner learns the box's number
+		// from the code text instead.
+		return errPairedUnsent
+	}
 	return nil
 }
+
+// errPairedUnsent is the number step's note when the paired text did not
+// go (#1293). The pairing stands, so the page moves on and shows it once.
+var errPairedUnsent = errors.New("You are paired, but my text did not go. Save the number my code came from as agentOS.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
@@ -986,7 +1003,7 @@ func (u *setup) claim(r *http.Request, key string) error {
 	u.claimCode, u.claimExpires, u.claimTries = code, now.Add(numberCodeTTL), 0
 	to := u.st.Owner
 	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.Send(to, "AgentOS page code: "+code+". Type it on the setup page."); err != nil {
+	if err := u.s.cfg.Hooks.Send(to, "agentOS page code: "+code+". Type it on the setup page."); err != nil {
 		return errors.New("I could not send a text. Check the SIM.")
 	}
 	return errors.New("That code did not match. I texted you a new page code.")
@@ -1166,8 +1183,12 @@ func (u *setup) aiReady() error {
 
 // boxLocked is a form's private-content box: as the owner left it on a
 // form that did not go through, else yes on a plan sign-in and no on an
-// API key (D-115, §8.1 step 6). Caller holds u.mu.
+// API key (D-115, §8.1 step 6). A provider the configuration allows is
+// ticked and fixed (#1608). Caller holds u.mu.
 func (u *setup) boxLocked(form string, p Provider) privateBox {
+	if p.PrivateByConfig {
+		return privateBox{Name: p.Name, Checked: true, Fixed: true}
+	}
 	checked, ok := u.answer[form+" "+p.ID]
 	if !ok {
 		// A yes already given for this provider holds on every route, so
@@ -1198,8 +1219,18 @@ var errUnkept = errors.New("I could not save your answer, and I could not keep i
 // privateOK records the owner's CAP-9 answer for a provider once its form
 // went through, never before (U-4), and releases the provider's hold. A
 // failed save keeps the box as the owner left it and holds setup open on
-// the answer (#1467).
+// the answer (#1467). A provider the configuration allows takes no answer
+// from the page, whatever was posted: its box is fixed (#1608).
 func (u *setup) privateOK(r *http.Request, form, id string) error {
+	if u.providerHas(id, func(p Provider) bool { return p.PrivateByConfig }) {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		delete(u.answer, form+" "+id)
+		if err := u.holdLocked(id, nil); err != nil {
+			return errUnsaved
+		}
+		return nil
+	}
 	ok := r.PostFormValue("private") != ""
 	if err := u.s.cfg.Hooks.SetPrivateOK(id, ok); err != nil {
 		u.keepAnswer(r, form, id)
@@ -1459,10 +1490,20 @@ func (u *setup) maybeFinish() {
 			msg = cannotFinish
 		case errors.Is(err, ErrAnswerOwed):
 			msg = answerOwed
+		case errors.Is(err, ErrCardAgain):
+			msg = cardAgain
 		}
 		u.mu.Lock()
+		defer u.mu.Unlock()
 		u.err[u.st.Device] = msg
-		u.mu.Unlock()
+		if errors.Is(err, ErrCardAgain) {
+			// The card step comes before the recovery step: the new card
+			// is shown only once the recovery step is open again. A store
+			// that fails to save still routes in memory.
+			if u.save(func(s *SetupState) { s.Recovery = false }) != nil {
+				u.st.Recovery = false
+			}
+		}
 		return
 	}
 	// Finish succeeded, or failed after the owner channel came to exist:

@@ -86,7 +86,7 @@ func TestBitLockerOnlyInTheRecoveryPromptAnswer(t *testing.T) {
 		t.Error("guide mentions BitLocker outside the recovery-prompt answer")
 	}
 	for _, want := range []string{"aka.ms/myrecoverykey", "Microsoft account", "IT department",
-		"not the recovery key on your AgentOS card", "BitLocker"} {
+		"not the recovery key on your agentOS card", "BitLocker"} {
 		if !strings.Contains(answer, want) {
 			t.Errorf("recovery-prompt answer lacks %q", want)
 		}

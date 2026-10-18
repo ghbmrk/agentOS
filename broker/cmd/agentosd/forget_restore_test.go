@@ -38,6 +38,26 @@ type lockedForgetLog struct {
 	always bool
 	tries  int
 	got    []loggedForget
+	// done is the goals given a done marker, in order; doneErr fails
+	// every marker append.
+	done    []string
+	doneErr error
+}
+
+func (l *lockedForgetLog) Done(goal string, at time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.doneErr != nil {
+		return l.doneErr
+	}
+	l.done = append(l.done, goal)
+	return nil
+}
+
+func (l *lockedForgetLog) marks() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.done...)
 }
 
 func (l *lockedForgetLog) Append(goal string, at, since time.Time, agent bool) error {

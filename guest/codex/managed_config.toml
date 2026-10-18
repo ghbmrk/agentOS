@@ -8,8 +8,19 @@
 # TOML puts every key after a [table] header into that table, so top-level keys come first.
 
 # The only route out: the in-worker forwarder (#1014), which relays to the egress socket, where
-# the proxy swaps the placeholder login for the owner's. The refresh URL override is in launch.json.
+# the proxy swaps the placeholder login for the owner's. The forwarder sets the refresh URL
+# override when it starts the CLI (ASSUMPTIONS C18).
 model_provider = "agentos"
+
+# Plan-login traffic goes to the forwarder too; unset, a plan login calls chatgpt.com directly
+# (#2085). A refresh in the middle of a turn still loses that turn on 0.162.1 (ASSUMPTIONS C20).
+chatgpt_base_url = "http://127.0.0.1:18432/backend-api/"
+
+# The model is pinned, not left to the CLI: unset, 0.162.1 takes the default of its model catalog,
+# which it refreshes from the provider at every start, so the provider could change the model
+# between the qualification run and G1. This is the bundled catalog's default for 0.162.1, the
+# model G1's provider_run sends (ASSUMPTIONS C19, #1396). A pin bump re-reads it there.
+model = "gpt-6.1-sol"
 
 # Hosted tools off: tools OpenAI runs on its side when the request asks for them ride inside the
 # one declared responses request, so the endpoint list cannot stop them. #1014's request-body

@@ -608,10 +608,20 @@ func unlockHandler(c *custody) http.Handler {
 // second line waits on the owner (egress K13), and GET /second-line/texts
 // whether its texting account's polls are failing (K16), and nothing
 // else.
+// anchorAnswer* name the 409's conflict for the client (SR3-6-f5b). They
+// are anchorsock's values (TestAnchorAnswerHeaderMatchesClient); the vault
+// process does not link package update for them.
+const (
+	anchorAnswerHeader    = "Anchor-Answer"
+	anchorAnswerMissing   = "missing"
+	anchorAnswerElsewhere = "elsewhere"
+)
+
 // updateAnchorHandler serves the update store's anchor (SR3-6f-2c): GET
 // reads it, POST raises it to 1. Nothing lowers it. {"anchored":false} is
 // a vault that never had a counter, on a PC with no TPM; a recorded
-// counter that is gone, or on a TPM this PC lacks, is 409.
+// counter that is gone, or on a TPM this PC lacks, is 409, named in the
+// Anchor-Answer header (SR3-6-f5b).
 func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	read := c.updateAnchorRead
 	if r.Method == http.MethodPost {
@@ -621,7 +631,11 @@ func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-	case err == errUpdateAnchorMissing, err == errUpdateAnchorElsewhere:
+	case err == errUpdateAnchorMissing:
+		w.Header().Set(anchorAnswerHeader, anchorAnswerMissing)
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err == errUpdateAnchorElsewhere:
+		w.Header().Set(anchorAnswerHeader, anchorAnswerElsewhere)
 		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
@@ -658,6 +672,11 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(modelroute.RotatedWiFi{SSID: ssid, Password: password})
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/committed-wifi" {
+			// agentosd's read of the card's network, to repair ap-net.json (#1696).
+			committedWiFiHandler(c, w)
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/second-line" {
@@ -699,7 +718,7 @@ func verifyHandler(c *custody) http.Handler {
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private, /update-anchor/raise or /rotate/wifi, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private, /update-anchor/raise or /rotate/wifi, or GET /committed-wifi, /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,10 @@ type Runner struct {
 	// sign-in took; a login stored earlier, or the CLI's exit status, is
 	// not one.
 	SignInStored func(id string) bool
+	// Stops holds which routes are stopped and why, so a stop outlives
+	// the process (OP-11: agentosd passes its journal). Nil keeps them
+	// in memory.
+	Stops RouteStops
 	// Background bounds a sign-in's wait for the owner, which outlives
 	// StartSignIn's caller; nil is never cancelled.
 	Background  context.Context
@@ -129,12 +134,13 @@ type Runner struct {
 	MaxAge      time.Duration // how long a reading is current; zero is DefaultMaxAge
 	PerPool     int           // concurrent runs per provider; zero is DefaultPerPool
 
-	// mu guards stopped, told, signing, running and probed, and orders the sign-in line's
-	// changes. A refused login stops the provider's route for every later
-	// run (CRED-5: no retry, since retries can worsen a restriction), and
-	// the owner is told once, until SignedIn.
+	// mu guards Stops, stopped, told, signing, running and probed, and
+	// orders the sign-in line's changes. A refused login stops the
+	// provider's route for every later run (CRED-5: no retry, since
+	// retries can worsen a restriction), and the owner is told once per
+	// process, until SignedIn.
 	mu      sync.Mutex
-	stopped map[string]bool      // provider: a refused login stopped its route
+	stopped map[string]bool      // provider: a stop Stops failed to record, held here (fail closed)
 	told    map[string]bool      // provider: SignIn already called
 	signing map[string]bool      // provider: a sign-in is running (StartSignIn)
 	running map[string]int       // provider: runs admitted and not yet ended
@@ -146,12 +152,28 @@ type Runner struct {
 // login, its route runs again, a later refusal tells the owner again, and
 // it reports true. Otherwise (no record, or no SignInStored) the stop and
 // the sign-in line stay (CRED-5, #1925).
+//
+// Only a refused login's stop is the owner's to lift: a route stopped for
+// another cause (an unswappable exchange, CRED-5t, which only a release
+// requalifies) stays stopped and SignedIn reports false, as it does when
+// Stops cannot record the reopening. The reopening names the cause, so a
+// stop egress raises after the read below stays (CRED-RS-5).
 func (r *Runner) SignedIn(provider, worker string) bool {
 	if r.SignInStored == nil || !r.SignInStored(worker) { // asked outside mu: it is a vault round trip
 		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	st := r.stops()
+	if cause, ok := st.RouteStopped(provider); ok {
+		if cause != StopLoginRefused {
+			return false
+		}
+		if err := st.ReopenRoute(provider, StopLoginRefused); err != nil {
+			r.logf("provagent: %s route stays stopped: %v", provider, err)
+			return false
+		}
+	}
 	delete(r.stopped, provider)
 	delete(r.told, provider)
 	if r.OnSignedIn != nil {
@@ -160,10 +182,67 @@ func (r *Runner) SignedIn(provider, worker string) bool {
 	return true
 }
 
-func (r *Runner) isStopped(provider string) bool {
+// The causes a route stop records.
+const (
+	StopLoginRefused = "login-refused" // CRED-5: the owner's sign-in lifts it
+	StopUnswappable  = "unswappable"   // CRED-5t: only a release lifts it (egress records it)
+)
+
+// RouteStops is the durable record of stopped routes (the journal's
+// StopRoute, ReopenRoute and RouteStopped). A route stopped twice keeps
+// its cause, unless the second outranks it: every cause outranks
+// StopLoginRefused (CRED-RS-4). ReopenRoute lifts a stop only while it has
+// the cause named, and fails otherwise (CRED-RS-5).
+type RouteStops interface {
+	StopRoute(route, cause string) error
+	ReopenRoute(route, cause string) error
+	RouteStopped(route string) (cause string, stopped bool)
+}
+
+var errRouteCause = errors.New("provagent: the route is stopped for another cause")
+
+// memStops keeps route stops for a Runner with no Stops.
+type memStops map[string]string
+
+func (m memStops) StopRoute(route, cause string) error {
+	if cur, ok := m[route]; !ok || cur == StopLoginRefused {
+		m[route] = cause
+	}
+	return nil
+}
+
+func (m memStops) ReopenRoute(route, cause string) error {
+	if cur, ok := m[route]; ok && cur != cause {
+		return errRouteCause
+	}
+	delete(m, route)
+	return nil
+}
+
+func (m memStops) RouteStopped(route string) (string, bool) {
+	c, ok := m[route]
+	return c, ok
+}
+
+// stops is r.Stops, made in memory if unset. mu must be held.
+func (r *Runner) stops() RouteStops {
+	if r.Stops == nil {
+		r.Stops = memStops{}
+	}
+	return r.Stops
+}
+
+// stopCause reports whether provider's route is stopped, and why.
+func (r *Runner) stopCause(provider string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.stopped[provider]
+	if c, ok := r.stops().RouteStopped(provider); ok {
+		return c, true
+	}
+	if r.stopped[provider] {
+		return StopLoginRefused, true
+	}
+	return "", false
 }
 
 // signIn sets provider's sign-in line once until SignedIn; stop also stops
@@ -171,10 +250,13 @@ func (r *Runner) isStopped(provider string) bool {
 func (r *Runner) signIn(provider string, stop bool) {
 	r.mu.Lock()
 	if stop {
-		if r.stopped == nil {
-			r.stopped = map[string]bool{}
+		if err := r.stops().StopRoute(provider, StopLoginRefused); err != nil {
+			r.logf("provagent: %s route stop was not recorded, held in memory: %v", provider, err)
+			if r.stopped == nil {
+				r.stopped = map[string]bool{}
+			}
+			r.stopped[provider] = true
 		}
-		r.stopped[provider] = true
 	}
 	first := !r.told[provider]
 	if first {
@@ -230,6 +312,11 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if !ok || !contains(d.TaskClasses, q.TaskClass) {
 		return fail(Unqualified)
 	}
+	// No provider runs with the default scan alone (FMT-4).
+	formats, ferr := d.Formats()
+	if ferr != nil {
+		return fail(Unqualified)
+	}
 	g := Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}
 	if err := g.Check(d); err != nil {
 		return fail(err.(*Refusal).Reason)
@@ -245,7 +332,14 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if d.Custody != BrokerHeld {
 		return fail(Unqualified)
 	}
-	if r.isStopped(d.ID) {
+	// A stop outlives the process, the sign-in line does not: a stopped
+	// route tells the owner once more. A stop the sign-in cannot lift
+	// falls back without the line.
+	if cause, ok := r.stopCause(d.ID); ok {
+		if cause != StopLoginRefused {
+			return fail(Failed)
+		}
+		r.signIn(d.ID, false)
 		return fail(LoginRefused)
 	}
 	if len(q.Brief) > r.Caps.Brief {
@@ -337,10 +431,19 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if scan == nil {
 		scan = LooksLikeCredential
 	}
-	if scan(body) {
+	if scan(body) || matchesAny(formats, body) {
 		return fail(Withheld)
 	}
 	return body, len(body), "ok", nil
+}
+
+func matchesAny(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(l []string, s string) bool {
@@ -489,4 +592,9 @@ func signalled(body string, events, signals []string) bool {
 		}
 	}
 	return false
+}
+
+func (r *Runner) isStopped(provider string) bool {
+	_, ok := r.stopCause(provider)
+	return ok
 }

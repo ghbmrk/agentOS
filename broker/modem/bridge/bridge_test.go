@@ -21,7 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-1, CH-2
+// REQ: CH-1, CH-2, CH-19
 
 const (
 	ownerNum = "+15550000999"
@@ -63,6 +63,8 @@ type rig struct {
 	// gate, if set, holds each owner-line send until it is closed, as a
 	// modem still sending does; the modem closing ends the send.
 	gate chan struct{}
+	// states is every state the bridge reported, heard or not.
+	states []bridgeproto.State
 }
 
 // startAgentosd serves owner.sock with a fresh Link, as agentosd does when
@@ -147,6 +149,11 @@ type flaky struct {
 }
 
 func (f *flaky) Call(ctx context.Context, op string, args, out any) error {
+	if st, ok := args.(bridgeproto.State); ok {
+		f.r.mu.Lock()
+		f.r.states = append(f.r.states, st)
+		f.r.mu.Unlock()
+	}
 	if st, ok := args.(bridgeproto.State); ok && st.OwnerLine != bridgeproto.StateOK {
 		return f.c.Call(ctx, op, args, out) // only an ok report counts
 	}
@@ -246,6 +253,29 @@ func TestOwnerTextsBothWays(t *testing.T) {
 	}
 	if got := r.phoneGets(); got != "Box: all well." {
 		t.Fatalf("phone got %q", got)
+	}
+}
+
+// P2-2w d2b, CH-19 (#927, M12): the SIM's serial goes to agentosd only
+// while the line is swapped or unbound, for the owner to confirm; an ok
+// line reports none.
+func TestAnOkLineReportsNoSIMSerial(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oks := 0
+	for _, st := range r.states {
+		if st.OwnerLine != bridgeproto.StateOK {
+			continue
+		}
+		oks++
+		if st.ICCID != "" {
+			t.Fatalf("an ok line reported a SIM serial: %+v", st)
+		}
+	}
+	if oks == 0 {
+		t.Fatalf("no ok report among %+v", r.states)
 	}
 }
 
@@ -664,4 +694,44 @@ func TestTheOwnerAdoptsANewSIM(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.waitNote(func(n string) bool { return n == "" })
+}
+
+// REQ: CH-12, CH12-mms-b
+
+// CH12-mms: a picture the owner texts to the box (an MMS notice: an 8-bit
+// WAP push to port 2948) reaches agentosd as a picture, counted for
+// STATUS, and the owner's phone gets the one fixed line saying what to do.
+func TestAPictureTextedToTheBoxReachesAgentosd(t *testing.T) {
+	r := newRig(t, recorded)
+	r.waitNote(func(n string) bool { return n == "" })
+	// SMSC, SMS-DELIVER with UDHI, the owner's number, PID 0, DCS 8-bit,
+	// a timestamp, then UDH port 2948 and a synthetic WSP push naming
+	// application/vnd.wap.mms-message (0xBE).
+	pdu := []byte{0x07, 0x91, 0x51, 0x55, 0x00, 0x00, 0x00, 0xF0, 0x44,
+		0x0B, 0x91, 0x51, 0x55, 0x00, 0x00, 0x99, 0xF9, 0x00, 0x04,
+		0x62, 0x01, 0x71, 0x00, 0x00, 0x00, 0x00}
+	ud := []byte{0x06, 0x05, 0x04, 0x0B, 0x84, 0x23, 0xF0, 0x01, 0x06, 0x03, 0xBE, 0xAF, 0x84, 0x8C, 0x82, 0x98}
+	ud = append(ud, "T-synthetic\x00"...)
+	pdu = append(append(pdu, byte(len(ud))), ud...)
+	r.mu.Lock()
+	r.last.StorePDU(fmt.Sprintf("%X", pdu))
+	r.mu.Unlock()
+	if got := r.phoneGets(); got != at.PictureText {
+		t.Fatalf("owner got %q", got)
+	}
+	for deadline := time.Now().Add(5 * time.Second); r.link.PictureNote() != "Pictures by text: 1 from you, 0 from others. Not opened yet."; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("note %q", r.link.PictureNote())
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); r.stored() != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d texts left on the modem", r.stored())
+		}
+	}
+	select {
+	case m := <-r.link.Inbox():
+		t.Fatalf("a picture reached the owner channel as %+v", m)
+	default:
+	}
 }
