@@ -8,7 +8,7 @@ A preloaded box's setup network keeps the sticker's WPA3 password until the Owne
 
 ## Scope
 
-SPEC.md (HW-10, CH-7, ARC-1, §8.1 step 1, risk 26), broker/claim/ (setup network rotation), broker/localui/claim.go, claimwifi.go and server.go (the claim's Wi-Fi step), broker/localapi/setup.go (the page-mode ops), broker/cmd/agentosd/ (the root-side write), broker/cmd/agentos-localui/main.go (wiring), broker/apnet/apnet.go (shared password check). agentos-ap needs no change: it already restarts the network when the file's password changes.
+SPEC.md (HW-10, CH-7, ARC-1, §8.1 step 1, risk 26), broker/claim/ (setup network rotation), broker/localui/claim.go, claimwifi.go and server.go (the claim's Wi-Fi step), broker/localapi/setup.go (the page-mode ops), broker/cmd/agentosd/ (the root-side write), broker/cmd/agentos-localui/main.go (wiring), broker/apnet/apnet.go (shared password check), broker/e2e/boxe2e/ (the image run takes the Wi-Fi step after the claim). agentos-ap needs no change: it already restarts the network when the file's password changes.
 
 ## Acceptance tests
 
