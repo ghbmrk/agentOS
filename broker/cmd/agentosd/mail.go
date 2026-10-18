@@ -300,8 +300,8 @@ func (l *lateMail) poll(ctx context.Context, eng *journal.Engine, src mailAddres
 // time), read back from the journal; the day's UNDO ID is a keyed hash of
 // the account and the day, so it is the same after a restart, names
 // neither, and cannot be worked out for another account or day without
-// the key. No daily text carries them (DRB-1): STATUS shows the newest
-// complete day still undoable, and the owner asks for it.
+// the key. No daily text carries them (DRB-1): STATUS shows each complete
+// day still undoable, and the owner asks for it.
 
 // undoLookback bounds the days an UNDO ID is looked for: past the window.
 const undoLookback = 8
@@ -416,32 +416,50 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 	return "", false
 }
 
-// mailNote is the mail STATUS note: the newest complete day in the undo
-// window with organize changes, its count and its UNDO. It names no
-// sender (CH-12) and is "" until wireMail stores the days.
+// mailNote is the mail STATUS notes: one line per complete day still in
+// its undo window with organize changes, newest first, each with its
+// count, the security alerts labelled but left in the inbox, and its
+// UNDO. Every day mailDays.undo accepts is shown while it is undoable.
+// It names no sender (CH-12) and is empty until wireMail stores the days.
 type mailNote struct{ days atomic.Pointer[mailDays] }
 
-func (n *mailNote) line() string {
+func (n *mailNote) lines() []string {
 	d := n.days.Load()
 	if d == nil {
-		return ""
+		return nil
 	}
 	now := d.now().In(d.loc)
 	all := d.changes()
+	var out []string
 	for i := 1; i <= undoLookback; i++ {
 		day := now.AddDate(0, 0, -i).Format(dayFormat)
 		start := d.dayStart(day)
 		if !now.Before(start.Add(mail.UndoWindow)) {
 			break
 		}
-		total := mail.Summarize(all[day]).Total
-		if total == 0 {
+		sum := mail.Summarize(all[day])
+		if sum.Total == 0 {
 			continue
 		}
+		alerts := ""
+		if sum.GuardHits > 0 {
+			alerts = fmt.Sprintf(" %d security alerts left in inbox.", sum.GuardHits)
+		}
 		until := start.Add(mail.UndoWindow - time.Nanosecond)
-		return fmt.Sprintf("Mail organized %d on %s. UNDO %s until %s.", total, start.Format("Mon Jan 2"), undoID(d.key, d.account, day), until.Format("Mon Jan 2"))
+		out = append(out, fmt.Sprintf("Mail organized %d on %s.%s UNDO %s until %s.", sum.Total, start.Format("Mon Jan 2"), alerts, undoID(d.key, d.account, day), until.Format("Mon Jan 2")))
 	}
-	return ""
+	return out
+}
+
+// slot is the STATUS note for the k-th newest undoable day, "" when there
+// are fewer: STATUS takes one line per note.
+func (n *mailNote) slot(k int) func() string {
+	return func() string {
+		if l := n.lines(); k < len(l) {
+			return l[k]
+		}
+		return ""
+	}
 }
 
 // wireMail starts l's binder on the vault process's mail socket and, once

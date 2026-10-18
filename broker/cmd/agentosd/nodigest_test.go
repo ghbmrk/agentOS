@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/mail"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -92,13 +95,16 @@ func TestMainStartsNoDigest(t *testing.T) {
 
 // DIG-RM-b DRB-1 (brief ID).
 
-// TestStartsWithOldDigestDir: an upgraded box keeps the old digest
-// directory and its four files on disk. Nothing reads them, no unit passes
-// the removed flag (which would stop agentosd at its flag parse), and the
-// flag set main builds has no "digest" flag.
+// TestStartsWithOldDigestDir: nothing reads the old digest directory or
+// its four files (only removeOldDigest names the directory, to delete it),
+// no unit passes the removed flag (which would stop agentosd at its flag
+// parse), and the flag set main builds has no "digest" flag.
 func TestStartsWithOldDigestDir(t *testing.T) {
 	old := []string{"/var/lib/agentos/digest", "queue.json", "digest-sources.json", "unclear-digest.json", "mail-digest.json"}
 	for p, src := range agentosdSources(t) {
+		if p == "main.go" {
+			src = strings.Replace(src, `const oldDigestDir = "/var/lib/agentos/digest"`, "", 1)
+		}
 		for _, o := range old {
 			if strings.Contains(src, `"`+o+`"`) || strings.Contains(src, `"`+o+`/`) {
 				t.Errorf("%s still names %s", p, o)
@@ -262,5 +268,201 @@ func TestOwnerTextsLeaveOnlyByPushOrConversation(t *testing.T) {
 		if len(directSends(mut)) == 0 {
 			t.Errorf("%s: not caught", name)
 		}
+	}
+}
+
+// DIG-RM DRA-3 (brief ID); ADP-2, OP-2, CH-12.
+
+// statusNow is the fixed clock the STATUS note tests read, in UTC.
+var statusNow = time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+
+// mailTrail is a journal trail with one Succeeded organize change per
+// entry, made daysAgo days before statusNow; alert marks a guard hit.
+type mailChange struct {
+	daysAgo int
+	alert   bool
+}
+
+func mailTrail(account string, cs []mailChange) []journal.Record {
+	var out []journal.Record
+	for i, c := range cs {
+		id := fmt.Sprintf("i%d", i)
+		at := statusNow.AddDate(0, 0, -c.daysAgo).Add(-time.Hour)
+		op := mail.OpArchive
+		if c.alert {
+			op = mail.OpLabel
+		}
+		ev, _ := json.Marshal(mail.Change{Op: op, Record: "r" + id, From: "INBOX", Alert: c.alert})
+		out = append(out,
+			journal.Record{Type: journal.RecSubmitted, ID: id, At: at, Intent: &journal.Intent{ID: id, Account: account, Executor: mail.Tool, Action: op}},
+			journal.Record{Type: journal.RecObserved, ID: id, At: at, Result: journal.ResultSucceeded, Evidence: string(ev)})
+	}
+	return out
+}
+
+func statusMailDays(cs []mailChange) *mailDays {
+	trail := mailTrail("acct", cs)
+	return &mailDays{account: "acct", key: []byte("synthetic-undo-key"), loc: time.UTC,
+		now: func() time.Time { return statusNow }, trail: func() []journal.Record { return trail }, m: newLateMail()}
+}
+
+// Every complete day mailDays.undo still accepts has its own STATUS line,
+// newest first, with its count, its security alerts and its UNDO; today
+// and lapsed days have none.
+func TestMailNoteEveryUndoableDay(t *testing.T) {
+	days := statusMailDays([]mailChange{{0, false}, {1, false}, {1, true}, {3, false}, {6, false}, {7, false}})
+	note := &mailNote{}
+	note.days.Store(days)
+	lines := note.lines()
+	want := []struct {
+		ago   int
+		count string
+	}{{1, "Mail organized 2 on Sun Oct 11. 1 security alerts left in inbox. UNDO "}, {3, "Mail organized 1 on Fri Oct 9. UNDO "}, {6, "Mail organized 1 on Tue Oct 6. UNDO "}}
+	if len(lines) != len(want) {
+		t.Fatalf("lines %q", lines)
+	}
+	for i, w := range want {
+		day := statusNow.AddDate(0, 0, -w.ago).Format(dayFormat)
+		id := undoID(days.key, "acct", day)
+		if !strings.HasPrefix(lines[i], w.count+id+" until ") {
+			t.Errorf("line %d: %q", i, lines[i])
+		}
+		checkNote(t, lines[i])
+		if got := note.slot(i)(); got != lines[i] {
+			t.Errorf("slot %d: %q", i, got)
+		}
+		if s, ok := days.undo(context.Background(), id); !ok || !strings.Contains(s, "not connected") {
+			t.Errorf("UNDO %s for a shown day: %v %q", id, ok, s)
+		}
+	}
+	if s := note.slot(len(want))(); s != "" {
+		t.Errorf("slot past the days: %q", s)
+	}
+	lapsed := undoID(days.key, "acct", statusNow.AddDate(0, 0, -7).Format(dayFormat))
+	if s, ok := days.undo(context.Background(), lapsed); !ok || !strings.Contains(s, "past its undo window") {
+		t.Errorf("lapsed day: %v %q", ok, s)
+	}
+	// The longest line still fits STATUS whole.
+	many := make([]mailChange, 0, 2000)
+	for i := 0; i < 1000; i++ {
+		many = append(many, mailChange{1, false}, mailChange{1, true})
+	}
+	note.days.Store(statusMailDays(many))
+	if l := note.lines(); len(l) != 1 || len(l[0]) > 100 || !strings.Contains(l[0], " 1000 security alerts left in inbox.") {
+		t.Errorf("long line: %q", l)
+	}
+}
+
+// wireStatusNotes adds the unclear note and one note per undoable mail
+// day, all empty until the daemon's state is set.
+func TestWireStatusNotes(t *testing.T) {
+	cfg := daemon.Config{Notes: []func() string{func() string { return "clock" }}}
+	unclear, mailStatus := wireStatusNotes(&cfg)
+	if len(cfg.Notes) != 2+undoLookback {
+		t.Fatalf("%d notes", len(cfg.Notes))
+	}
+	for i, n := range cfg.Notes[1:] {
+		if l := n(); l != "" {
+			t.Fatalf("note %d before the daemon runs: %q", i, l)
+		}
+	}
+	waiting := []journal.ParkedIntent{{Intent: journal.Intent{Executor: "sms"}}}
+	unclear.set(func() []journal.ParkedIntent { return waiting })
+	mailStatus.days.Store(statusMailDays([]mailChange{{1, false}, {2, false}}))
+	var got []string
+	for _, n := range cfg.Notes {
+		if l := n(); l != "" {
+			got = append(got, l)
+		}
+	}
+	if len(got) != 4 || got[0] != "clock" || !strings.Contains(got[1], "not retried") ||
+		!strings.Contains(got[2], " on Sun Oct 11.") || !strings.Contains(got[3], " on Sat Oct 10.") {
+		t.Fatalf("STATUS %q", got)
+	}
+}
+
+// main wires the STATUS notes before the daemon copies its config, sets
+// the unclear note and the mail days once it runs, and removes the old
+// digest directory at start.
+func TestMainWiresStatusNotes(t *testing.T) {
+	var code []string
+	for _, l := range strings.Split(agentosdSources(t)["main.go"], "\n") {
+		if c := strings.Index(l, "//"); c >= 0 && !strings.Contains(l[:c], `"`) {
+			l = l[:c]
+		}
+		code = append(code, strings.TrimSpace(l))
+	}
+	src := strings.Join(code, "\n")
+	at := func(s string) int {
+		t.Helper()
+		i := strings.Index(src, s)
+		if i < 0 || strings.Count(src, s) != 1 {
+			t.Fatalf("main.go has %d of %q", strings.Count(src, s), s)
+		}
+		return i
+	}
+	parse := at("flag.Parse()")
+	remove := at("removeOldDigest(oldDigestDir)")
+	wire := at("unclear, mailStatus := wireStatusNotes(&cfg)")
+	run := at("d, err := daemon.Run(ctx, cfg)")
+	set := at("unclear.set(d.RetryWaiting)")
+	mailWire := at("wireMail(ctx, mw, d, mailSocket, learn.Dir, mailStatus, cfg.Now)")
+	if !(parse < remove && remove < wire && wire < run && run < set && run < mailWire) {
+		t.Fatalf("order: parse %d remove %d wire %d run %d set %d mail %d", parse, remove, wire, run, set, mailWire)
+	}
+	if regexp.MustCompile(`cfg\.Notes\s*=\s*cfg\.Notes\[:`).MatchString(src) {
+		t.Fatal("main drops notes it wired")
+	}
+}
+
+// The old digest directory goes once at start, through no link.
+func TestRemoveOldDigest(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(outside, "keep.json")
+	if err := os.WriteFile(keep, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(root, "digest")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"queue.json", "digest-sources.json", "unclear-digest.json", "mail-digest.json"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte(`{"canary":"synthetic"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := removeOldDigest(dir); !removed || err != nil {
+		t.Fatalf("dir: %v %v", removed, err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir left: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("followed a link inside: %v", err)
+	}
+
+	if err := os.Symlink(outside, dir); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := removeOldDigest(dir); !removed || err != nil {
+		t.Fatalf("link: %v %v", removed, err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("link left: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("followed the link: %v", err)
+	}
+
+	if removed, err := removeOldDigest(dir); removed || err != nil {
+		t.Fatalf("absent: %v %v", removed, err)
 	}
 }

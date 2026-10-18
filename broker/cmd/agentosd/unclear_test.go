@@ -78,8 +78,9 @@ func TestStatusListsUnclearEffects(t *testing.T) {
 }
 
 // An effect a check proved was not done, whose resend was refused, did not
-// go and cannot go twice, so the note does not say it may; a refused owner
-// retry leaves it waiting, and the note still names it (OP-2c).
+// go and cannot go twice, so the note does not say it may; the note reads
+// RetryWaiting on each STATUS, so an effect a refused retry leaves listed
+// there stays named (OP-2c). Refusal itself is the daemon's to test.
 func TestRefusedRetryStaysInStatus(t *testing.T) {
 	waiting := []journal.ParkedIntent{
 		{Intent: journal.Intent{ID: "m1/r1", Executor: "mail", Recipients: []string{"canary@example.invalid"}}, Attempt: 1, Seq: 7,
@@ -87,7 +88,7 @@ func TestRefusedRetryStaysInStatus(t *testing.T) {
 	}
 	n := unclearNoteOver(&waiting)
 	const want = "An email first tried 14:02 Oct 13 did not go; not resent. Text RETRY to send it."
-	for range 2 { // before and after a refused retry: RetryWaiting still lists it
+	for range 2 { // read again on each STATUS
 		if l := n.line(); l != want {
 			t.Fatalf("line %q", l)
 		}

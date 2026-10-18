@@ -451,6 +451,12 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
+	// The removed digest's queue held private text (DRB-2).
+	if removed, err := removeOldDigest(oldDigestDir); err != nil {
+		log.Printf("old digest directory not removed: %v", err)
+	} else if removed {
+		log.Printf("old digest directory removed")
+	}
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -641,12 +647,8 @@ func main() {
 	capLines := newCapLines(caps)
 	capLines.wire(&cfg)
 	// No daily text (DRB-1): what waits on the owner is in STATUS, read
-	// when asked. Effects left unclear and parked rather than retried, or
-	// proved not done (OP-2, DRA-3), and the newest mail day's UNDO
-	// (ADP-2); both read the daemon once it runs.
-	unclear := &unclearNote{loc: time.Local}
-	mailStatus := &mailNote{}
-	cfg.Notes = append(cfg.Notes, unclear.line, mailStatus.line)
+	// when asked.
+	unclear, mailStatus := wireStatusNotes(&cfg)
 	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
 	// is never called, and STATUS says update checks are not running.
 	agent := &lateAgent{}
@@ -1521,4 +1523,29 @@ func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
 			p.tick()
 		}
 	}
+}
+
+// oldDigestDir is where the daily digest kept its queue and state (the
+// -digest flag's default) before it was removed (DRB-1).
+const oldDigestDir = "/var/lib/agentos/digest"
+
+// removeOldDigest deletes the digest's old directory at dir once at start:
+// its queue held private text no part of agentosd reads any more (DRB-2).
+// It never follows a link: a link at dir is removed itself, and
+// os.RemoveAll does not descend through links inside. Nothing there is
+// not an error.
+func removeOldDigest(dir string) (removed bool, err error) {
+	fi, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if fi.IsDir() {
+		err = os.RemoveAll(dir)
+	} else {
+		err = os.Remove(dir)
+	}
+	return err == nil, err
 }
