@@ -39,7 +39,8 @@ const quoteMarks = `"“”`
 type reaction struct {
 	kind     string
 	quoted   string
-	unlisted bool // read from an unlisted form: the owner's lead-in is dropped
+	unlisted bool   // read from an unlisted form: the owner's lead-in is dropped
+	lead     string // an unlisted form's lead-in, for the STOP hint (#2264)
 }
 
 // readAsReaction tells the owner that an unlisted form was read as a
@@ -97,7 +98,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	if !ok || !(t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))) {
 		return reaction{}, false
 	}
-	return reaction{kind: "reacted to", quoted: m[2], unlisted: true}, true
+	return reaction{kind: "reacted to", quoted: m[2], unlisted: true, lead: m[1]}, true
 }
 
 // ErrAgentReaction refuses agent text that is a reaction form: until
@@ -255,6 +256,9 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	event, pointer := c.reactionEvent(rx)
 	var replies []string
 	if rx.unlisted {
+		if hint, ok := c.ctrl.StopHint(rx.lead); ok {
+			replies = append(replies, hint)
+		}
 		replies = append(replies, readAsReaction)
 	}
 	if pointer != "" {

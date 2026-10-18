@@ -166,6 +166,17 @@ const stopHint = "To pause everything, reply STOP."
 // not be able to make the box text the owner repeatedly (CH-15).
 const HintQuiet = time.Hour
 
+// StopHint is the STOP hint for an owner text the owner channel read before
+// Handle could (an unlisted reaction, #2264), when lead, the owner's own
+// words, is STOP or a near-miss of it. It spends Handle's quiet window, so a
+// spoofed reaction cannot repeat it either (CH-15).
+func (h *Handler) StopHint(lead string) (string, bool) {
+	if (Parse(lead).Word != WordStop && !StopNearMiss(lead)) || !h.takeHint() {
+		return "", false
+	}
+	return stopHint, true
+}
+
 func (h *Handler) takeHint() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
