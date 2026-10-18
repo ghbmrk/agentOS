@@ -9,7 +9,7 @@ Board row: issue #2313. Source: CAP-11-plan-fu4 (ASSUMPTIONS P17: the Codex `Cre
 - **SHP-1** `spikes/S8-live/SHAPES.md` states the host, the owner's sign-in steps (device code), what leaves the machine and where the result is recorded.
 - **SHP-2** `spikes/S8-live/shapes/` reads the pinned CLI's `auth.json` and prints only shapes: length, a public or generic prefix, character classes, dot-segment lengths, JWT `alg`/`typ` from an allowlist and header and claim names, and for each declared Codex format `full`, `partial` or `none`. No value, or any 6-byte window of one past its public prefix, appears in the output.
 - **SHP-3** The extractor's formats are the declaration's verbatim, so a change to `declare.go` fails the spike's test.
-- **SHP-4** `run.sh shapes` runs the sign-in in a gVisor machine with no network but loopback, through `fwd.py` in relay mode (model calls refused), writes only `shapes.json` to the work volume, and logs out and removes `auth.json` before the machine exits.
+- **SHP-4** `run.sh shapes` runs the sign-in in a gVisor machine with no network but loopback, through `fwd.py` in relay mode (model calls refused), carries only the shapes out, on the machine's stdout between markers (the memory overlay covers volumes, so nothing written inside reaches the host), and logs out and removes `auth.json` before the machine exits.
 
 **Acceptance tests** (each carries `REQ: CRED-7`), in `spikes/S8-live/shapes/main_test.go`:
 - SHP-2: `TestOutputHoldsNoValue`, `TestShapes`.
