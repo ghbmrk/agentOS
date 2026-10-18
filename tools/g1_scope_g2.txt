@@ -30,6 +30,12 @@ exempt-pr 2198
 # #2319 (LOOP-0-nocap): Mark exempted it from the G2 freeze (Decisions tap 2026-10-17
 # 22:18:51Z; typed 2026-10-18 12:08:38Z, cmsg_01R63S2yrPkq32thy8WQCuvDFbgWfJAq8AyCQutcf8FxvF).
 exempt-pr 2319
+# #2399 (doclint ID renames, incl. one row in frozen broker/loops/ASSUMPTIONS.md) and #2327
+# (RES-5-membudget: the clean-room/loopbuild memory limit): Mark exempted both, typed
+# 2026-10-18 20:47:34Z, cmsg_01R63S2yrPkq32thy8WQCuvDX4TkwXSNydBjcLHtQWtPom (#2327 "Gate" tap
+# 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
+exempt-pr 2399
+exempt-pr 2327
 
 # Project machinery and records.
 allow .claude/
