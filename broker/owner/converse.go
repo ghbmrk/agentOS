@@ -32,6 +32,7 @@ func (c *Channel) Converse(text string) error {
 		return err
 	}
 	c.mu.Lock()
+	c.replies++
 	c.stopAckLocked()
 	c.mu.Unlock()
 	return nil
@@ -46,11 +47,13 @@ const AckText = "On it."
 // one already due covers this message too, so the owner gets at most one
 // for the messages of one wait (OWN-4). c.mu is held.
 func (c *Channel) armAckLocked(at time.Time) {
-	if c.ackStop != nil || c.cfg.Modem == nil {
+	if c.cfg.Modem == nil || c.ackStop != nil && c.ackStops == c.stops.Load() {
 		return
 	}
+	c.stopAckLocked() // one voided by a STOP since
 	c.ackGen++
 	gen := c.ackGen
+	c.ackStops = c.stops.Load()
 	c.ackStop = c.cfg.AfterFunc(c.codes.st.Pacing.ackAfter()-c.cfg.Now().Sub(at), func() { c.ack(gen) })
 }
 
@@ -63,17 +66,18 @@ func (c *Channel) stopAckLocked() {
 	c.ackGen++
 }
 
-// ack sends the acknowledgement armed as gen unless a reply went out or a
-// later one replaced it. It is conversation (CH-15): it goes at once, in
+// ack sends the acknowledgement armed as gen unless a reply went out, a
+// STOP came ("On it." never follows "Stopped."), or a later one replaced
+// it. It is conversation (CH-15): it goes at once, in
 // quiet hours too, uncounted, with no agent prefix. ackSend orders it
 // against Converse, so it never follows the reply that stopped it.
 func (c *Channel) ack(gen uint64) {
 	c.ackSend.Lock()
 	defer c.ackSend.Unlock()
 	c.mu.Lock()
-	if gen != c.ackGen || c.ackStop == nil {
+	if gen != c.ackGen || c.ackStop == nil || c.stops.Load() != c.ackStops {
 		c.mu.Unlock()
-		return
+		return // replaced, replied to, or voided by a STOP since
 	}
 	c.ackStop = nil
 	m := c.cfg.Modem

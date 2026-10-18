@@ -294,8 +294,12 @@ func (c *Channel) deliverReaction(ctx context.Context, from string, rt route) []
 	if stale {
 		return nil
 	}
-	return c.ctrl.Event(ctx, from, rt.react)
+	return c.ctrl.Event(context.WithValue(ctx, eventDelivery{}, true), from, rt.react)
 }
+
+// eventDelivery marks a delivery as an event, not task chat, so it arms
+// no acknowledgement (OWN-4).
+type eventDelivery struct{}
 
 // reactionEvent is the broker-worded text the agent gets for rx, and the
 // pointer the owner gets when the marked text expects a reply.

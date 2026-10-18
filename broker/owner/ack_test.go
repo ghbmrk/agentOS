@@ -1,7 +1,9 @@
 package owner
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -197,5 +199,149 @@ func TestOWN4AckWithNoModem(t *testing.T) {
 	a.fire(time.Minute)
 	if err := r.ch.Converse("x"); !errors.Is(err, ErrNoModem) {
 		t.Fatalf("Converse with no modem: %v", err)
+	}
+}
+
+// replyAgent answers each delivery before Deliver returns.
+type replyAgent struct{ r *rig }
+
+func (a replyAgent) Deliver(context.Context, string, bool) error {
+	return a.r.ch.Converse("Booked for eight.")
+}
+
+// TestOWN4NoAckForReactions: a reaction is an event, not task chat, so it
+// arms no acknowledgement, whether it is to a reply or to "On it." itself.
+func TestOWN4NoAckForReactions(t *testing.T) {
+	r, a := ackRig(t)
+	r.say("book a table")
+	if err := r.ch.Converse("Booked for eight."); err != nil {
+		t.Fatal(err)
+	}
+	r.sentTexts()
+	r.say(`Liked “Booked for eight.”`)
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after a reaction to a reply", n)
+	}
+
+	r, a = ackRig(t)
+	r.say("book a table")
+	a.fire(20 * time.Second)
+	if n := r.acks(); n != 1 {
+		t.Fatalf("%d acknowledgements, want 1", n)
+	}
+	for i := 0; i < 3; i++ {
+		r.say(`Liked “On it.”`)
+		a.fire(time.Hour)
+		if n := r.acks(); n != 0 {
+			t.Fatalf("%d acknowledgements after a reaction to %q", n, AckText)
+		}
+	}
+	if len(r.agent.got()) < 2 {
+		t.Fatal("the reaction never reached the agent")
+	}
+}
+
+// TestOWN4NoAckAfterReplyDuringDelivery: a reply that went out before
+// Deliver returned is a reply to the task, so no acknowledgement follows.
+func TestOWN4NoAckAfterReplyDuringDelivery(t *testing.T) {
+	r := newRig(t, nil)
+	a := &ackTimers{r: r}
+	r.edit = func(c *Config) { c.AfterFunc = a.after; c.Agent = replyAgent{r} }
+	r.ch = r.open()
+	r.unlock()
+	r.sentTexts()
+	r.say("book a table")
+	r.sentTexts()
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after a reply sent during delivery", n)
+	}
+}
+
+// TestOWN4NoAckAfterStop: STOP, by text or from the local page, voids an
+// acknowledgement due, so "On it." never follows "Stopped."; task chat
+// after it arms its own.
+func TestOWN4NoAckAfterStop(t *testing.T) {
+	r, a := ackRig(t)
+	r.say("book a table")
+	a.fire(5 * time.Second)
+	if got := r.say("STOP"); !strings.Contains(got, "Stopped") {
+		t.Fatalf("STOP: %q", got)
+	}
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after STOP", n)
+	}
+	r.say("book a table")
+	a.fire(20 * time.Second)
+	if n := r.acks(); n != 1 {
+		t.Fatalf("%d acknowledgements for task chat after STOP, want 1", n)
+	}
+
+	r, a = ackRig(t)
+	r.say("book a table")
+	if err := r.ch.LocalStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after a local STOP", n)
+	}
+}
+
+// TestOWN4QuestionInChatStopsAck: a question asked while the chat is open
+// goes through Converse, so it is a reply and stops the acknowledgement.
+func TestOWN4QuestionInChatStopsAck(t *testing.T) {
+	r, a := ackRig(t)
+	r.say("book a table")
+	if !r.ch.ChatOpen() {
+		t.Fatal("chat not open after task chat")
+	}
+	if err := r.ch.Converse("For how many?"); err != nil {
+		t.Fatal(err)
+	}
+	r.sentTexts()
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after a question in chat", n)
+	}
+}
+
+// TestOWN4AckBoundsAsOwnerCommands: ACK 5 and ACK 120, the bounds, are
+// taken from the owner and set the wait.
+func TestOWN4AckBoundsAsOwnerCommands(t *testing.T) {
+	for _, n := range []int{5, 120} {
+		r, a := ackRig(t)
+		if got := r.say(fmt.Sprintf("ACK %d", n)); !strings.HasPrefix(got, fmt.Sprintf("Acknowledgement set: %d seconds.", n)) {
+			t.Fatalf("ACK %d: %q", n, got)
+		}
+		r.say("book a table")
+		a.fire(time.Duration(n)*time.Second - time.Second)
+		if k := r.acks(); k != 0 {
+			t.Fatalf("ACK %d: %d acknowledgements early", n, k)
+		}
+		a.fire(time.Second)
+		if k := r.acks(); k != 1 {
+			t.Fatalf("ACK %d: %d acknowledgements, want 1", n, k)
+		}
+	}
+}
+
+// TestOWN4NoAckAfterRunEnds: an acknowledgement due when Run returns is
+// stopped, so no timer outlives the channel.
+func TestOWN4NoAckAfterRunEnds(t *testing.T) {
+	r, a := ackRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.ch.Run(ctx) }()
+	r.ch.mu.Lock()
+	r.ch.armAckLocked(r.clock())
+	r.ch.mu.Unlock()
+	cancel()
+	<-done
+	a.fire(time.Hour)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements after Run ended", n)
 	}
 }
