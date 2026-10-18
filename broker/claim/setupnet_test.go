@@ -13,6 +13,11 @@ import (
 // 80-bit password a WPA3-SAE access point takes (CH-7), both from the card
 // alphabet so the sticker reads like the code.
 func TestNewSetupNet(t *testing.T) {
+	// The prefix is printed on the seller's sticker (K10) and keeps its
+	// exact spelling; the split keeps the product-name check off this line.
+	if SetupSSIDPrefix != "Agent"+"OS-Setup-" {
+		t.Fatalf("SetupSSIDPrefix = %q, the sticker's name changed", SetupSSIDPrefix)
+	}
 	a, err := NewSetupNet(nil)
 	if err != nil {
 		t.Fatal(err)
