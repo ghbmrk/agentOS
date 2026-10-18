@@ -94,21 +94,26 @@ func TestTheClaimRotatesTheSetupWiFiOnce(t *testing.T) {
 	}
 }
 
-// With no -setup-net path, or a card step the page does not hold, neither
-// op is served.
-func TestNoSetupNetPathServesNoWiFiOp(t *testing.T) {
+// With no -setup-net path both ops answer "no setup wifi", so the page
+// skips the step only when told to (a missing op fails closed there); for
+// a card step the page does not hold, neither op is served.
+func TestNoSetupNetPathAnswersNoWiFi(t *testing.T) {
 	m := newBareSetupMode(t)
 	m.Card = pageCardStep
 	start(context.Background(), m)
-	if err := setupCall(t, m)(localapi.OpSetupWiFiName, nil, nil); err == nil {
-		t.Fatal("served with no path")
+	call := setupCall(t, m)
+	if err := call(localapi.OpSetupWiFiName, nil, nil); err == nil || !strings.Contains(err.Error(), localapi.ErrNoSetupWiFi) {
+		t.Fatalf("name with no path: %v", err)
+	}
+	if err := call(localapi.OpSetupWiFi, localapi.SetupWiFi{Password: "ZZZZ-YYYY-XXXX-WWWW"}, nil); err == nil || !strings.Contains(err.Error(), localapi.ErrNoSetupWiFi) {
+		t.Fatalf("rotation with no path: %v", err)
 	}
 
 	m2, f := newCardSetup(t)
 	m2.SetupNet = filepath.Join(t.TempDir(), "setup-net.json")
 	start(context.Background(), m2)
 	f.step(t)
-	call := setupCall(t, m2)
+	call = setupCall(t, m2)
 	if err := call(localapi.OpSetupWiFiName, nil, nil); err == nil {
 		t.Fatal("name served for a card step the page does not hold")
 	}

@@ -14,8 +14,8 @@ SPEC.md (HW-10, CH-7, ARC-1, §8.1 step 1, risk 26), broker/claim/ (setup networ
 
 **Acceptance tests:** HW-10 and CH-7: `broker/localui` `TestTheClaimRotatesTheSetupWiFi`, `TestTheWiFiStepFailsClosed`; `broker/claim` `TestRotateSetupNet`. ARC-1 and CRED-1: `broker/cmd/agentosd` setup Wi-Fi tests (`setupwifi_test.go`). The SPEC wording is checked by Mark's approval.
 
-1. `TestTheClaimRotatesTheSetupWiFi` (localui): the step-1 claim leads to a page with the new password and its Wi-Fi QR, only for the claimant; setup waits; the commit writes exactly the shown password, once.
-2. `TestTheWiFiStepFailsClosed` (localui): no network means no step; agentosd failing keeps setup closed; a lost answer reads as done.
+1. `TestTheClaimRotatesTheSetupWiFi` (localui): the step-1 claim leads to a page with the new password and its Wi-Fi QR, only for the claimant; setup waits; the commit needs the password's last four characters typed back and writes exactly the shown password, once.
+2. `TestTheWiFiStepFailsClosed` (localui): only agentosd's "no setup wifi" skips the step; agentosd failing, a missing op, or a failed rotation keeps setup closed; a lost answer reads as done.
 3. `TestRotateSetupNet` (claim) and the agentosd setup Wi-Fi tests: the file is rewritten root 0600 with the same name, rotated once.
 4. SPEC HW-10 amended with the seller-hardware trust caveat (L1 spec diff, Mark approves wording).
 

@@ -4,12 +4,12 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/localapi"
-	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // SetupWiFi is a preloaded box's setup network as the claim step sees it
@@ -32,14 +32,15 @@ var ErrNoSetupWiFi = errors.New("localui: no setup network")
 // errWiFiRotated: the setup network's password was already rotated.
 var errWiFiRotated = errors.New("localui: setup network already rotated")
 
-// SetupWiFi reads the setup network's name from agentosd. A setup session
-// that serves no setup Wi-Fi op (setup finished, or no -setup-net) counts
-// as no setup network.
+// SetupWiFi reads the setup network's name from agentosd. Only agentosd's
+// "no setup wifi" (no file, burned, or -setup-net set empty) skips the
+// step; a session that serves no such op is an error, so a preloaded box
+// whose agentosd cannot rotate keeps setup closed (fails closed).
 func (a AgentosdSetup) SetupWiFi() (string, bool, error) {
 	var n localapi.SetupWiFiName
 	err := a.call(localapi.OpSetupWiFiName, nil, &n)
 	switch {
-	case refused(err, localapi.ErrNoSetupWiFi), refused(err, string(sockets.ErrUnknownOp)):
+	case refused(err, localapi.ErrNoSetupWiFi):
 		return "", false, ErrNoSetupWiFi
 	case err != nil:
 		return "", false, err
@@ -52,7 +53,7 @@ func (a AgentosdSetup) SetupWiFi() (string, bool, error) {
 func (a AgentosdSetup) RotateSetupWiFi(password string) error {
 	err := a.call(localapi.OpSetupWiFi, localapi.SetupWiFi{Password: password}, nil)
 	switch {
-	case refused(err, localapi.ErrNoSetupWiFi), refused(err, string(sockets.ErrUnknownOp)):
+	case refused(err, localapi.ErrNoSetupWiFi):
 		return ErrNoSetupWiFi
 	case refused(err, localapi.ErrWiFiRotated):
 		return errWiFiRotated
@@ -83,12 +84,14 @@ func init() {
 {{.QR}}
 <p>Wi-Fi name: <span class="mono">{{.SSID}}</span><br>New password: <span class="mono">{{.Password}}</span></p>
 <p><strong>Take a screenshot of this page, or write the password down, before you go on.</strong></p>
-<p>When you tap the button, my Wi-Fi restarts with the new password and this phone drops off it. Join <span class="mono">{{.SSID}}</span> again with the new password (or scan the code above from your screenshot), then open <span class="mono">http://{{boxhost}}/setup</span> to carry on.</p>
-<form method="post" action="/claim/wifi"><button>I saved it: switch now</button></form>
+<p>If you lose it before setup is done, the sticker no longer lets you back onto my Wi-Fi, and you will need to reinstall me from a download stick.</p>
+<p>When you switch, my Wi-Fi restarts with the new password and this phone drops off it. Join <span class="mono">{{.SSID}}</span> again with the new password (or scan the code above from your screenshot), then open <span class="mono">http://{{boxhost}}/setup</span> to carry on. If your phone says the password is wrong, choose Forget This Network, then join again.</p>
+<form method="post" action="/claim/wifi"><label>To show you saved it, type the last four characters of the new password: <input name="last" autocomplete="off" autocapitalize="characters" maxlength="4"></label>
+<button>Switch now</button></form>
 {{template "foot"}}{{end}}`))
 	template.Must(tmpl.Parse(`{{define "claimwifidone"}}{{template "head" ""}}
 <h1>Switching my Wi-Fi</h1>
-<p>My Wi-Fi is restarting with the new password. Join <span class="mono">{{.SSID}}</span> again with the password you saved, then open <span class="mono">http://{{boxhost}}/setup</span>.</p>
+<p>My Wi-Fi is restarting with the new password. Join <span class="mono">{{.SSID}}</span> again with the password you saved, then open <span class="mono">http://{{boxhost}}/setup</span>. If your phone says the password is wrong, choose Forget This Network, then join again.</p>
 <p><a href="/setup">Carry on with setup</a></p>
 {{template "foot"}}{{end}}`))
 }
@@ -139,7 +142,9 @@ func (s *Server) claimWiFiGate(w http.ResponseWriter, r *http.Request) bool {
 
 // claimWiFiPage is /claim/wifi, for the claimant only: GET shows the new
 // password and its Wi-Fi QR; POST commits it (HW-10, #1692). A POST
-// commits only the password a GET showed.
+// commits only the password a GET showed, and only with its last four
+// characters typed back, so a tap without saving it does not lock the
+// owner out.
 func (s *Server) claimWiFiPage(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.Claim.Status().Claimed || !s.isClaimant(r) {
 		http.Redirect(w, r, "/claim", http.StatusSeeOther)
@@ -172,6 +177,10 @@ func (s *Server) claimWiFiPage(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/claim/wifi", http.StatusSeeOther)
 			return
 		}
+		if !lastFour(c.pending, r.PostFormValue("last")) {
+			s.showClaimWiFi(w, http.StatusBadRequest, ssid, c.pending, "Those are not the last four characters of the new password. Check what you saved, then type them again.")
+			return
+		}
 		err := s.cfg.SetupWiFi.RotateSetupWiFi(c.pending)
 		switch {
 		case err == nil:
@@ -194,6 +203,12 @@ func (s *Server) claimWiFiPage(w http.ResponseWriter, r *http.Request) {
 		c.pending = pw
 	}
 	s.showClaimWiFi(w, http.StatusOK, ssid, c.pending, "")
+}
+
+// lastFour reports whether typed is password's last four characters,
+// ignoring case and spaces.
+func lastFour(password, typed string) bool {
+	return len(password) >= 4 && strings.EqualFold(strings.ReplaceAll(typed, " ", ""), password[len(password)-4:])
 }
 
 func (s *Server) showClaimWiFi(w http.ResponseWriter, code int, ssid, pw, msg string) {

@@ -30,9 +30,13 @@ type setupWiFi struct {
 }
 
 // readSetupWiFi reads the setup network at path: ErrNoSetupWiFi when the
-// file is absent or empty (no setup network, or burned at the confirm),
-// ErrFailed when it cannot be read or parsed.
+// path is empty (-setup-net set empty: not rotated) or the file is absent
+// or empty (no setup network, or burned at the confirm), ErrFailed when it
+// cannot be read or parsed.
 func readSetupWiFi(path string) (setupWiFi, error) {
+	if path == "" {
+		return setupWiFi{}, sockets.Code(localapi.ErrNoSetupWiFi)
+	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) || err == nil && len(b) == 0 {
 		return setupWiFi{}, sockets.Code(localapi.ErrNoSetupWiFi)

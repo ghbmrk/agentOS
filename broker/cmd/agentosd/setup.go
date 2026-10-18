@@ -176,10 +176,10 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		if m.APNet != "" {
 			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
 		}
-		if m.SetupNet != "" {
-			ops[localapi.OpSetupWiFiName] = setupWiFiNameOp(m.SetupNet)
-			ops[localapi.OpSetupWiFi] = setupWiFiOp(m.SetupNet)
-		}
+		// Served with an empty -setup-net too, answering "no setup
+		// wifi": the page reads a missing op as a fault (#1692).
+		ops[localapi.OpSetupWiFiName] = setupWiFiNameOp(m.SetupNet)
+		ops[localapi.OpSetupWiFi] = setupWiFiOp(m.SetupNet)
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()

@@ -22,14 +22,15 @@ const wifiSSID = "AgentOS-setup-CANARYXX"
 
 // fakeSetupNet stands in for agentosd's setup Wi-Fi ops (#1692): it holds
 // the network and refuses as agentosd does. fail, when set, refuses every
-// call with it.
+// call with it; rotateFail refuses only the rotation, after a good read.
 type fakeSetupNet struct {
-	mu      sync.Mutex
-	none    bool
-	rotated bool
-	pw      string
-	fail    sockets.Code
-	writes  int
+	mu         sync.Mutex
+	none       bool
+	rotated    bool
+	pw         string
+	fail       sockets.Code
+	rotateFail sockets.Code
+	writes     int
 }
 
 func (f *fakeSetupNet) ops() InProcess {
@@ -55,6 +56,8 @@ func (f *fakeSetupNet) ops() InProcess {
 			switch {
 			case f.fail != "":
 				return nil, f.fail
+			case f.rotateFail != "":
+				return nil, f.rotateFail
 			case f.none:
 				return nil, sockets.Code(localapi.ErrNoSetupWiFi)
 			case f.rotated:
@@ -97,6 +100,10 @@ func shownPassword(t *testing.T, body string) string {
 	return pw
 }
 
+// saved is the commit form with the password's last four characters typed
+// back, as an owner who saved it does.
+func saved(pw string) url.Values { return url.Values{"last": {strings.ToLower(pw[len(pw)-4:])}} }
+
 // HW-10 (#1692): right after the claim, the claiming phone is shown a new
 // setup Wi-Fi password with its QR, and setup waits until the phone
 // commits it; only then is the sticker's password replaced, once, with the
@@ -128,7 +135,8 @@ func TestTheClaimRotatesTheSetupWiFi(t *testing.T) {
 		t.Fatalf("shown password %q is not 16 card symbols", pw)
 	}
 	if !strings.Contains(body, wifiSSID) || !strings.Contains(body, "<svg") || !strings.Contains(body, "screenshot") ||
-		!strings.Contains(body, "http://10.42.0.1/setup") {
+		!strings.Contains(body, "http://10.42.0.1/setup") || !strings.Contains(body, "Forget This Network") ||
+		!strings.Contains(body, "reinstall me") {
 		t.Fatalf("Wi-Fi step page: %s", body)
 	}
 	// A reload shows the same password, and nothing is written yet.
@@ -142,14 +150,24 @@ func TestTheClaimRotatesTheSetupWiFi(t *testing.T) {
 	if w := r.do("GET", "/claim/wifi", nil); w.Code != 303 || strings.Contains(w.Body.String(), pw) {
 		t.Fatalf("other phone's Wi-Fi step: %d", w.Code)
 	}
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 303 || f.writes != 0 {
+	if w := r.post("/claim/wifi", saved(pw)); w.Code != 303 || f.writes != 0 {
 		t.Fatalf("other phone's commit: %d, %d writes", w.Code, f.writes)
 	}
 	r.jar, r.ip = claimant, phoneIP
 
+	// A tap without the saved password's last four characters switches
+	// nothing and shows the same password again.
+	for _, last := range []string{"", "ZZZZ", pw[:4]} {
+		w := r.post("/claim/wifi", url.Values{"last": {last}})
+		if w.Code != 400 || f.writes != 0 || shownPassword(t, w.Body.String()) != pw {
+			t.Fatalf("commit with %q typed: %d, %d writes", last, w.Code, f.writes)
+		}
+	}
+
 	// The claimant commits: the password shown is the one written.
-	w := r.post("/claim/wifi", url.Values{})
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "restarting with the new password") {
+	w := r.post("/claim/wifi", saved(pw))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "restarting with the new password") ||
+		!strings.Contains(w.Body.String(), "Forget This Network") {
 		t.Fatalf("commit: %d %s", w.Code, w.Body.String())
 	}
 	if f.pw != pw || f.writes != 1 || strings.Contains(w.Body.String(), pw) {
@@ -166,68 +184,96 @@ func TestTheClaimRotatesTheSetupWiFi(t *testing.T) {
 	if w := r.do("GET", "/setup", nil); w.Code != 200 {
 		t.Fatalf("setup after a restart: %d", w.Code)
 	}
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 303 || f.writes != 1 {
+	if w := r.post("/claim/wifi", saved(pw)); w.Code != 303 || f.writes != 1 {
 		t.Fatalf("commit after the step: %d, %d writes", w.Code, f.writes)
 	}
 }
 
-// A box with no setup network (none preloaded, burned, or setup over so
-// agentosd serves no op) has no Wi-Fi step; one agentosd cannot answer for
-// keeps setup closed (fails closed), and a failed commit can be tried
-// again with the same password.
+// A box with no setup network (none preloaded, burned, or -setup-net set
+// empty, all answered "no setup wifi" by agentosd) has no Wi-Fi step. One
+// agentosd cannot answer for, or serves no setup Wi-Fi op for, keeps setup
+// closed (fails closed), and a failed commit leaves setup closed and can
+// be tried again with the same password.
 func TestTheWiFiStepFailsClosed(t *testing.T) {
-	for name, ops := range map[string]InProcess{"no network": (&fakeSetupNet{none: true}).ops(), "no op": {}} {
+	r := newClaimRig(t)
+	r.withWiFi((&fakeSetupNet{none: true}).ops())
+	r.post("/claim", url.Values{"code": {claimCode}})
+	if w := r.do("GET", "/setup", nil); w.Code != 200 {
+		t.Fatalf("no network: setup: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := r.do("GET", "/claim/wifi", nil); w.Code != 303 || w.Header().Get("Location") != "/setup" {
+		t.Fatalf("no network: Wi-Fi step: %d", w.Code)
+	}
+
+	for name, f := range map[string]*fakeSetupNet{"agentosd fails": {fail: sockets.ErrFailed}, "no op": nil} {
 		r := newClaimRig(t)
+		ops := InProcess{}
+		if f != nil {
+			ops = f.ops()
+		}
 		r.withWiFi(ops)
 		r.post("/claim", url.Values{"code": {claimCode}})
-		if w := r.do("GET", "/setup", nil); w.Code != 200 {
-			t.Fatalf("%s: setup: %d %q", name, w.Code, w.Header().Get("Location"))
+		if w := r.do("GET", "/setup", nil); w.Code != 503 {
+			t.Fatalf("%s: setup: %d", name, w.Code)
 		}
-		if w := r.do("GET", "/claim/wifi", nil); w.Code != 303 || w.Header().Get("Location") != "/setup" {
+		if w := r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != 503 {
+			t.Fatalf("%s: setup post: %d", name, w.Code)
+		}
+		if w := r.do("GET", "/claim/wifi", nil); w.Code != 503 {
 			t.Fatalf("%s: Wi-Fi step: %d", name, w.Code)
 		}
 	}
 
-	r := newClaimRig(t)
-	f := &fakeSetupNet{fail: sockets.ErrFailed}
+	// Only the rotation fails, after a good read: the commit answers 503,
+	// setup stays closed, and a retry writes the password shown.
+	r = newClaimRig(t)
+	f := &fakeSetupNet{}
 	r.withWiFi(f.ops())
 	r.post("/claim", url.Values{"code": {claimCode}})
-	if w := r.do("GET", "/setup", nil); w.Code != 503 {
-		t.Fatalf("setup while agentosd fails: %d", w.Code)
-	}
-	if w := r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != 503 {
-		t.Fatalf("setup post while agentosd fails: %d", w.Code)
-	}
-	f.set(func(f *fakeSetupNet) { f.fail = "" })
 	pw := shownPassword(t, r.get("/claim/wifi"))
-	f.set(func(f *fakeSetupNet) { f.fail = sockets.ErrFailed })
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 503 {
-		t.Fatalf("commit while agentosd fails: %d", w.Code)
+	f.set(func(f *fakeSetupNet) { f.rotateFail = sockets.ErrFailed })
+	if w := r.post("/claim/wifi", saved(pw)); w.Code != 503 || shownPassword(t, w.Body.String()) != pw {
+		t.Fatalf("commit while the rotation fails: %d", w.Code)
 	}
-	f.set(func(f *fakeSetupNet) { f.fail = "" })
-	if w := r.do("GET", "/setup", nil); w.Code != 303 || w.Header().Get("Location") != "/claim/wifi" {
-		t.Fatalf("setup after a failed commit: %d", w.Code)
+	for _, p := range []string{"/setup", "/setup/card"} {
+		if w := r.do("GET", p, nil); w.Code != 303 || w.Header().Get("Location") != "/claim/wifi" {
+			t.Fatalf("GET %s after a failed commit: %d %q", p, w.Code, w.Header().Get("Location"))
+		}
 	}
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 200 || f.pw != pw {
+	if w := r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != 403 {
+		t.Fatalf("setup post after a failed commit: %d", w.Code)
+	}
+	if w := r.do("GET", "/claim/wifi", nil); w.Code != 200 || shownPassword(t, w.Body.String()) != pw {
+		t.Fatalf("Wi-Fi step after a failed commit: %d", w.Code)
+	}
+	f.set(func(f *fakeSetupNet) { f.rotateFail = "" })
+	if w := r.post("/claim/wifi", saved(pw)); w.Code != 200 || f.pw != pw || f.writes != 1 {
 		t.Fatalf("retried commit: %d wrote %q, shown %q", w.Code, f.pw, pw)
 	}
 
-	// A commit that landed although its answer was lost reads as done.
-	r = newClaimRig(t)
-	f = &fakeSetupNet{}
-	r.withWiFi(f.ops())
-	r.post("/claim", url.Values{"code": {claimCode}})
-	r.get("/claim/wifi")
-	f.set(func(f *fakeSetupNet) { f.rotated = true })
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 303 || w.Header().Get("Location") != "/setup" {
-		t.Fatalf("commit after it landed: %d %q", w.Code, w.Header().Get("Location"))
+	// The rotation answers that it already landed (a lost answer) or that
+	// the network is gone (burned): the step is over and setup goes on.
+	for name, code := range map[string]sockets.Code{"rotated": localapi.ErrWiFiRotated, "burned": localapi.ErrNoSetupWiFi} {
+		r := newClaimRig(t)
+		f := &fakeSetupNet{}
+		r.withWiFi(f.ops())
+		r.post("/claim", url.Values{"code": {claimCode}})
+		pw := shownPassword(t, r.get("/claim/wifi"))
+		f.set(func(f *fakeSetupNet) { f.rotateFail = code })
+		if w := r.post("/claim/wifi", saved(pw)); w.Code != 303 || w.Header().Get("Location") != "/setup" {
+			t.Fatalf("%s: commit: %d %q", name, w.Code, w.Header().Get("Location"))
+		}
+		if w := r.do("GET", "/setup", nil); w.Code != 200 {
+			t.Fatalf("%s: setup: %d", name, w.Code)
+		}
 	}
+
 	// A POST with no password shown commits nothing.
 	r = newClaimRig(t)
 	f = &fakeSetupNet{}
 	r.withWiFi(f.ops())
 	r.post("/claim", url.Values{"code": {claimCode}})
-	if w := r.post("/claim/wifi", url.Values{}); w.Code != 303 || w.Header().Get("Location") != "/claim/wifi" || f.writes != 0 {
+	if w := r.post("/claim/wifi", url.Values{"last": {"ABCD"}}); w.Code != 303 || w.Header().Get("Location") != "/claim/wifi" || f.writes != 0 {
 		t.Fatalf("unshown commit: %d, %d writes", w.Code, f.writes)
 	}
 }
