@@ -10,8 +10,8 @@ Issue: #2190 (SPEC-D127, #2157). Tier A (`tools/risk_tier.py`: broker/owner); th
 
 **Out of scope:** low/high-tier `itemLine` texts (render.go), MORE pages, reply texts. Raise as a `release` finding if the reviewer wants them.
 
-**Acceptance tests (REQ: CH-12):**
-- `TestTheLocalNoticeNamesTheActionAndTheDeadline`: exact text, every verified field present.
-- `TestAConfirmationTakesOneCodeOnThePage`: question form, verb, object, deadline, NO code, no YES, no recipient.
-- `TestPageErasedRepeatNoticeIsAQuestion` (repeat_test.go): erased time kept, question form.
-- `TestPageNoticesFitTheirSegmentBudget` (new): every page notice with maximal fields is GSM-7 and within `MaxSegments`, and no "your agent wants" remains.
+**Acceptance tests:** REQ: CH-12.
+- `TestTheLocalNoticeNamesTheActionAndTheDeadline` (localapprove_test.go): exact question text, every verified field present.
+- `TestAConfirmationTakesOneCodeOnThePage` (localapprove_test.go): question form, verb, object, deadline, NO code, no YES, no recipient.
+- `TestAnErasedOnlyRepeatSaysItMayRepeat` (repeat_test.go): erased time kept, question form.
+- `TestPageNoticesAreQuestionsWithinTheirBudget` (localapprove_test.go, new): every page notice with maximal fields is a "Can I" question, GSM-7 and within `MaxSegments`, and no "your agent wants" remains.
