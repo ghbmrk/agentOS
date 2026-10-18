@@ -37,9 +37,16 @@ const quoteMarks = `"“”`
 // reaction is one owner reaction: its kind in lower case, as the agent
 // reads it, and the quoted text.
 type reaction struct {
-	kind   string
-	quoted string
+	kind     string
+	quoted   string
+	unlisted bool // read from an unlisted form: the owner's lead-in is dropped
 }
+
+// readAsReaction tells the owner that an unlisted form was read as a
+// reaction, so its lead-in never reached the agent (#2277). It is fixed and
+// never echoes the quote, which holds a request or a code (CH-3).
+const readAsReaction = "I read that as a reaction to one of my texts, so it did not go to the agent. " +
+	"To tell the agent something, send it without quoting that text."
 
 // parseReaction reports whether text, whole, is a reaction form.
 func parseReaction(text string) (reaction, bool) {
@@ -90,7 +97,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	if !ok || !(t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))) {
 		return reaction{}, false
 	}
-	return reaction{kind: "reacted to", quoted: m[2]}, true
+	return reaction{kind: "reacted to", quoted: m[2], unlisted: true}, true
 }
 
 // ErrAgentReaction refuses agent text that is a reaction form: until
@@ -247,6 +254,9 @@ func replyPointer(t sentText) string {
 func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlocked bool) route {
 	event, pointer := c.reactionEvent(rx)
 	var replies []string
+	if rx.unlisted {
+		replies = append(replies, readAsReaction)
+	}
 	if pointer != "" {
 		replies = append(replies, pointer)
 	}
