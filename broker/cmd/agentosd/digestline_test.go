@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +19,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: CH-15, CH-1 (#1291, #2170)
+// REQ: CH-1 (#1291, #2170). A temporary change to the digest sender that
+// lasts only until DIG-RM-b deletes the digest (D-097, DIG-RM).
 
 // TestDigestWaitsForTheOwnerLine: a digest due while the owner line is
 // down is not handed to the transport; it stays Ready, costing no
@@ -107,5 +112,101 @@ func report(t *testing.T, link *modemlink.Link, st string) {
 	}
 	if _, err := link.Ops()[bridgeproto.OpState](context.Background(), sockets.Peer{}, args); err != nil {
 		t.Fatalf("state %s: %v", st, err)
+	}
+}
+
+// lineDownWired checks main's source: each block that gives a digest
+// box its owner-line transport, `X.cfg.Transport = newDigestTransport(L,
+// …)`, also sets `X.cfg.LineDown = digestLineDown(L)` for the same box and
+// link, so the wait above cannot be unwired without failing CI.
+func lineDownWired(src string) error {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", src, 0)
+	if err != nil {
+		return err
+	}
+	// cfgSet returns the box and the call's first argument of `X.cfg.<field>
+	// = fn(L, …)`, or "" when s is not that.
+	cfgSet := func(s ast.Stmt, field, fn string) (box, link string) {
+		as, ok := s.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 || as.Tok != token.ASSIGN {
+			return "", ""
+		}
+		sel, ok := as.Lhs[0].(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != field {
+			return "", ""
+		}
+		cfg, ok := sel.X.(*ast.SelectorExpr)
+		if !ok || cfg.Sel.Name != "cfg" {
+			return "", ""
+		}
+		x, ok := cfg.X.(*ast.Ident)
+		call, ok2 := as.Rhs[0].(*ast.CallExpr)
+		if !ok || !ok2 || len(call.Args) == 0 {
+			return "", ""
+		}
+		name, ok := call.Fun.(*ast.Ident)
+		arg, ok2 := call.Args[0].(*ast.Ident)
+		if !ok || !ok2 || name.Name != fn {
+			return "", ""
+		}
+		return x.Name, arg.Name
+	}
+	transports := 0
+	var bad error
+	ast.Inspect(f, func(n ast.Node) bool {
+		b, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for _, s := range b.List {
+			box, link := cfgSet(s, "Transport", "newDigestTransport")
+			if box == "" {
+				continue
+			}
+			transports++
+			wired := false
+			for _, o := range b.List {
+				if ob, ol := cfgSet(o, "LineDown", "digestLineDown"); ob == box && ol == link {
+					wired = true
+				}
+			}
+			if !wired && bad == nil {
+				bad = fmt.Errorf("%s.cfg.Transport is set over %s with no %s.cfg.LineDown = digestLineDown(%s) beside it", box, link, box, link)
+			}
+		}
+		return true
+	})
+	if bad == nil && transports == 0 {
+		bad = fmt.Errorf("no digest transport is set")
+	}
+	return bad
+}
+
+// TestDigestLineDownIsWired: main sets the digest's LineDown over the
+// same link as its transport, and the check fails each unwiring mutant:
+// the line deleted, read over another link, or set on another box.
+func TestDigestLineDownIsWired(t *testing.T) {
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if err := lineDownWired(src); err != nil {
+		t.Fatalf("main.go: %v", err)
+	}
+	const wire = "dg.cfg.LineDown = digestLineDown(link)"
+	if strings.Count(src, wire) != 1 {
+		t.Fatalf("main.go has %d copies of %q, want 1", strings.Count(src, wire), wire)
+	}
+	for name, to := range map[string]string{
+		"deleted":    "",
+		"nil":        "dg.cfg.LineDown = nil",
+		"other box":  "other.cfg.LineDown = digestLineDown(link)",
+		"other link": "dg.cfg.LineDown = digestLineDown(spare)",
+		"never down": "dg.cfg.LineDown = func() bool { return false }",
+	} {
+		if err := lineDownWired(strings.Replace(src, wire, to, 1)); err == nil {
+			t.Errorf("mutant %s passed", name)
+		}
 	}
 }

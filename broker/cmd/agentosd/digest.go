@@ -99,7 +99,8 @@ type digestConfig struct {
 	// batches then wait, Ready and costing no attempt, for the first step
 	// after it is back, so a digest due at boot, before the bridge's first
 	// state report, is not one the link counts missed and owns up to in a
-	// recovery notice (#1291, #2170). Nil: never down.
+	// recovery notice (#1291, #2170). A temporary sender change: it lasts
+	// only until DIG-RM-b deletes the digest (D-097). Nil: never down.
 	LineDown func() bool
 	Now      func() time.Time
 	Loc      *time.Location

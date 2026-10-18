@@ -35,17 +35,21 @@ func replyKind(text string) string {
 	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
 		return "outage"
 	}
-	if strings.HasPrefix(text, digestPrefix) {
-		return "digest"
+	for _, p := range digestPrefixes {
+		if strings.HasPrefix(text, p) {
+			return "digest"
+		}
 	}
 	return "other"
 }
 
-// digestPrefix leads every text agentosd's daily digest sends (its
-// digestHead and status lines). The digest waits for the owner line
-// (#1291), so on a fresh box it can land during the step; it answers no
-// command, so the step passes over it wherever it lands (E17).
-const digestPrefix = "Daily digest: "
+// digestPrefixes lead every text agentosd's daily digest sends: its
+// digestHead and status lines, and digestLateHead for a batch sent late.
+// The digest waits for the owner line (#1291), so on a fresh box it can
+// land during the step; it answers no command, so the step passes over it
+// wherever it lands and counts it (E17). They go with the digest when
+// DIG-RM-b deletes it (D-097).
+var digestPrefixes = []string{"Daily digest: ", "Digest of "}
 
 // outagePrefix and outageMark frame the owner line's recovery notice
 // (modemlink's recoveryText, UX U-B1): sent once the line is back after a
@@ -127,6 +131,8 @@ type phoneRun struct {
 	// noticeRequests what they say did not reach the owner (#2170);
 	// unread counts the notices whose counts could not be read.
 	notices, noticeTexts, noticeRequests, unread int
+	// digests counts the digest texts passed over (E17).
+	digests int
 	// err is the first reply out of order; it ends the step.
 	err error
 }
@@ -176,6 +182,7 @@ func (r *phoneRun) reply(text string) {
 	switch {
 	case k == "digest":
 		// Not a reply: the day's digest, sent once the line is up.
+		r.digests++
 	case k == "outage":
 		// Not a reply: the box's account of a text it lost earlier.
 		r.notices++
@@ -226,6 +233,15 @@ func (r phoneRun) noticeNote() string {
 		n += fmt.Sprintf(" unread=%d", r.unread)
 	}
 	return n
+}
+
+// digestNote is the step's one line on the digest texts it passed over,
+// their count only (E17). It is "" when there was none.
+func (r phoneRun) digestNote() string {
+	if r.digests == 0 {
+		return ""
+	}
+	return fmt.Sprintf("passed-over digests=%d", r.digests)
 }
 
 // passedOverErr fails a run that otherwise passed when it passed over a
