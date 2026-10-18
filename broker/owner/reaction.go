@@ -94,6 +94,11 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		if _, found := c.recent.match(rx.quoted, now); found {
 			return rx, true
 		}
+		// A form whose quote holds quote marks may be a nest round a
+		// guarded text (`Liked “Loved “<request>””`).
+		if _, found := c.recent.matchGuarded(rx.quoted, now); found {
+			return rx, true
+		}
 		// After a deletion the quote may mark a forgotten text, which as
 		// chat would reach the agent whole: read it as a reaction that
 		// matched none until the forgotten texts are past the window
@@ -110,15 +115,19 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	}
 	now := c.cfg.Now()
 	unlisted := reaction{kind: "reacted to", quoted: m[2], tell: true}
-	if t, ok := c.recent.match(m[2], now); ok && t.guarded() {
+	if _, ok := c.recent.matchGuarded(m[2], now); ok {
 		return unlisted, true
 	}
 	// After a deletion an unlisted form quoting an agent text may quote a
 	// forgotten reply, which as chat would reach the agent whole: read it
 	// as a reaction until the forgotten texts are past the window (CAP-3,
 	// #2360). A forgotten text no longer matches, so its event matches none.
-	if c.recent.forgotWithin(now) && strings.HasPrefix(normQuote(m[2]), normQuote(AgentPrefix)) {
-		return unlisted, true
+	if c.recent.forgotWithin(now) {
+		for _, l := range quoteLayers(m[2]) {
+			if strings.HasPrefix(normQuote(l), normQuote(AgentPrefix)) {
+				return unlisted, true
+			}
+		}
 	}
 	return reaction{}, false
 }
@@ -153,6 +162,10 @@ type sentText struct {
 	request bool     // an approval request (sendRequest)
 	ids     []string // the requests it asks, from the broker's record
 	local   bool     // approvable on the local page only
+	// restored marks a guarded text read back from State.Guarded after a
+	// restart: text is then normalized and code-masked (maskCodes), and
+	// request says whether it was an approval request.
+	restored bool
 }
 
 // guarded reports whether a reaction to t is never shown to the agent with
@@ -160,7 +173,7 @@ type sentText struct {
 // The agent's own text is never guarded: its digits already passed
 // Disclose.
 func (t sentText) guarded() bool {
-	return t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))
+	return t.restored || t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))
 }
 
 // recentWindow is the window of texts to the owner.
@@ -234,11 +247,129 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		if now.Sub(t.at) > recentMaxAge {
 			break
 		}
-		if n := normQuote(t.text); n == q || (!short && strings.Contains(n, q)) {
+		n, q := normQuote(t.text), q
+		if t.restored {
+			n, q = t.text, maskCodes(q)
+		}
+		if n == q || (!short && strings.Contains(n, q)) {
 			return t, true
 		}
 	}
 	return sentText{}, false
+}
+
+// nestDepth bounds how many forms a quote is peeled through.
+const nestDepth = 6
+
+// quoteLayers is the quote and the quotes inside it: while a layer is
+// itself a reaction form, its own quote is the next layer. A phone that
+// reacts to a reaction sends such a nest (`Pinned “Liked “<text>””`).
+func quoteLayers(quoted string) []string {
+	layers := []string{quoted}
+	for len(layers) < nestDepth {
+		inner, ok := peelForm(layers[len(layers)-1])
+		if !ok {
+			break
+		}
+		layers = append(layers, inner)
+	}
+	return layers
+}
+
+// peelForm is the quote of text if text is a listed or unlisted form.
+func peelForm(text string) (string, bool) {
+	if rx, ok := parseForm(text); ok {
+		return rx.quoted, true
+	}
+	if m := unlistedForm.FindStringSubmatch(strings.TrimSpace(text)); m != nil && len(strings.Fields(m[1])) <= 5 {
+		return m[2], true
+	}
+	return "", false
+}
+
+// matchGuarded finds a guarded text the quote marks, however it is
+// wrapped: the quote is the text, or part of it, or a form around either
+// (quoteLayers), or other words around the whole text. Only guarded texts
+// count, so a nest around the agent's own text stays chat (CH-11).
+func (r *recentWindow) matchGuarded(quoted string, now time.Time) (sentText, bool) {
+	for _, l := range quoteLayers(quoted) {
+		if t, ok := r.match(l, now); ok && t.guarded() {
+			return t, true
+		}
+		if t, ok := r.within(l, now); ok {
+			return t, true
+		}
+	}
+	return sentText{}, false
+}
+
+// within finds the latest guarded text, of at least minQuote characters,
+// that the quote holds whole.
+func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
+	q := normQuote(quoted)
+	mq := maskCodes(q)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.texts) - 1; i >= 0; i-- {
+		t := r.texts[i]
+		if now.Sub(t.at) > recentMaxAge {
+			break
+		}
+		if !t.guarded() {
+			continue
+		}
+		n, hay := normQuote(t.text), q
+		if t.restored {
+			n, hay = t.text, mq
+		}
+		if utf8.RuneCountInString(n) >= minQuote && strings.Contains(hay, n) {
+			return t, true
+		}
+	}
+	return sentText{}, false
+}
+
+// maskCodes replaces every code and challenge token in s with "#", so a
+// text can be kept and matched without its code.
+func maskCodes(s string) string { return carriesCode.ReplaceAllString(s, "#") }
+
+// restore puts the saved guarded texts back in the window after a restart,
+// the ones still inside its age.
+func (r *recentWindow) restore(marks []GuardedMark, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range marks {
+		if now.Sub(m.At) <= recentMaxAge {
+			r.texts = append(r.texts, sentText{text: m.Text, at: m.At, request: m.Request, restored: true})
+		}
+	}
+}
+
+// remember adds t to the recent texts and, if it is guarded, to the saved
+// guard, with its codes masked, so a restart keeps guarding it (CH-3,
+// #2381). Nothing is saved that is not already on disk but the words of a
+// text the owner's phone holds too.
+func (c *Channel) remember(t sentText) {
+	c.recent.add(t)
+	if !t.guarded() {
+		return
+	}
+	m := GuardedMark{Text: maskCodes(normQuote(t.text)), At: t.at, Request: t.request}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.saveLocked(func(s *State) {
+		keep := s.Guarded[:0:0]
+		for _, g := range s.Guarded {
+			if t.at.Sub(g.At) <= recentMaxAge {
+				keep = append(keep, g)
+			}
+		}
+		keep = append(keep, m)
+		if n := len(keep) - recentTexts; n > 0 {
+			keep = append(keep[:0:0], keep[n:]...)
+		}
+		s.Guarded = keep
+	})
 }
 
 // normQuote folds quotes and case, collapses whitespace, and drops a
@@ -267,13 +398,30 @@ var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-
 func (c *Channel) ForgetRecent() {
 	c.reactMu.Lock()
 	defer c.reactMu.Unlock()
+	// pmu first, as every pacing path takes it: a release in flight
+	// finishes before the hold is cleaned, so none sends after this
+	// returns.
+	c.pmu.Lock()
+	defer c.pmu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now()
 	c.recent.forget(now)
 	// A failed save still holds for this run; only a restart before the
-	// next save would lose it.
-	_ = c.saveLocked(func(s *State) { s.ForgotAt = now })
+	// next save would lose it. The held agent texts go in the same save:
+	// each may quote a forgotten reply, and a release would send it after
+	// the deletion and put it back in the window (#2374). They are not
+	// counted as dropped, which would tell the owner of them.
+	_ = c.saveLocked(func(s *State) {
+		s.ForgotAt = now
+		keep := s.Held[:0:0]
+		for _, h := range s.Held {
+			if !h.Agent {
+				keep = append(keep, h)
+			}
+		}
+		s.Held = keep
+	})
 	if c.held != nil && c.held.react != "" {
 		c.held = nil
 	}
@@ -300,7 +448,11 @@ func (c *Channel) deliverReaction(ctx context.Context, from string, rt route) []
 // reactionEvent is the broker-worded text the agent gets for rx, and the
 // pointer the owner gets when the marked text expects a reply.
 func (c *Channel) reactionEvent(rx reaction) (event, pointer string) {
-	t, ok := c.recent.match(rx.quoted, c.cfg.Now())
+	now := c.cfg.Now()
+	t, ok := c.recent.match(rx.quoted, now)
+	if !ok {
+		t, ok = c.recent.matchGuarded(rx.quoted, now)
+	}
 	if !ok {
 		return fmt.Sprintf("Owner reaction: %s a text that matched none of the recent texts.", rx.kind), ""
 	}
@@ -311,7 +463,7 @@ func (c *Channel) reactionEvent(rx reaction) (event, pointer string) {
 		// The agent's own text: no pointer, so the broker never vouches
 		// for replies the agent's words name.
 		return fmt.Sprintf("Owner reaction: %s your text %q", rx.kind, strings.TrimPrefix(t.text, AgentPrefix)), ""
-	case carriesCode.MatchString(t.text):
+	case t.restored || carriesCode.MatchString(t.text):
 		event = fmt.Sprintf("Owner reaction: %s a text from the box with a code in it (not shown).", rx.kind)
 	default:
 		event = fmt.Sprintf("Owner reaction: %s the box's text %q", rx.kind, t.text)
@@ -328,7 +480,7 @@ func (c *Channel) recordReplies(from string, out []string) {
 	}
 	now := c.cfg.Now()
 	for _, t := range out {
-		c.recent.add(sentText{text: t, at: now})
+		c.remember(sentText{text: t, at: now})
 	}
 }
 

@@ -70,6 +70,18 @@ type State struct {
 	// ForgotAt is the last deletion that cleared the reaction window, so
 	// its 24 h rule outlives a restart (CAP-3, #2360, O44).
 	ForgotAt time.Time `json:"forgot_at"`
+	// Guarded are the recent texts to the owner that a reaction must never
+	// show the agent, kept with their codes masked so a restart does not
+	// empty the reaction window of them (CH-3, #2381, O42).
+	Guarded []GuardedMark `json:"guarded,omitempty"`
+}
+
+// GuardedMark is a guarded text to the owner as the reaction window kept
+// it, masked by maskCodes, so no code is saved with it.
+type GuardedMark struct {
+	Text    string    `json:"text"`
+	At      time.Time `json:"at"`
+	Request bool      `json:"request,omitempty"`
 }
 
 // PendingRef is an open request as a restart sees it. Asked, Expires,
@@ -130,6 +142,7 @@ func copyState(s State) State {
 	s.Retired = r
 	s.Pacing.Urgent = append([]Class(nil), s.Pacing.Urgent...)
 	s.Held = append([]HeldText(nil), s.Held...)
+	s.Guarded = append([]GuardedMark(nil), s.Guarded...)
 	s.Sent = append([]time.Time(nil), s.Sent...)
 	return s
 }
