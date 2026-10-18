@@ -263,12 +263,14 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 // NotifyNow is Notify for agent-derived text that starts a deadline when
 // it is sent, such as an owner question whose wait begins at its text
 // (CAP-10). It is never held: a held text would return nil while its
-// deadline ran (#989, #1563). Unless the agent class is urgent, it
-// returns ErrPaced in quiet hours or with no allowance left, checked and
-// counted in one step before it is sent, so no concurrent send can spend
-// the last text first (#1638); the caller keeps the text and tries later. The caller still reserves
-// the CH-15 budget it shares with approval requests (grants.Gate.Reserve)
-// before calling. A text sent counts toward the hour.
+// deadline ran (#989, #1563). A deadline makes it approval class (D-129,
+// #2250), so while approval is urgent it goes at once. Under URGENT
+// APPROVAL OFF it returns ErrPaced in quiet hours or with no allowance
+// left, checked and counted in one step before it is sent, so no
+// concurrent send can spend the last text first (#1638); the caller keeps
+// the text and tries later, reserving the CH-15 budget it shares with
+// approval requests (grants.Gate.Reserve) before calling. A text sent
+// counts toward the hour.
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
@@ -277,7 +279,7 @@ func (c *Channel) NotifyNow(text string) error {
 		return err
 	}
 	text = agentText(text)
-	if c.Urgent(ClassAgent) {
+	if c.Urgent(ClassApproval) {
 		return c.sendCounted(text)
 	}
 	c.pmu.Lock()
