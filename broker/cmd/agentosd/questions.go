@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/guesterr"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -126,11 +128,16 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	}
 	b, err := question.New(question.Config{
 		// Never held: a question's wait starts at its text, so the book
-		// paces it itself (#1563). Its deadline makes it approval class
-		// (D-129, #2250): while approval is urgent it ignores quiet hours
-		// and the hourly limit; under URGENT APPROVAL OFF it keeps quiet
-		// hours and reserves the CH-15 budget before sending.
-		Send:       ch.NotifyNow,
+		// paces it itself (#1563), up to the owner's TEXTS an hour (#2363).
+		// Its deadline makes it approval class (D-129, #2250): while
+		// approval is urgent it ignores quiet hours and the shared
+		// reservation, not the book's limit; under URGENT APPROVAL OFF it
+		// keeps quiet hours and reserves the CH-15 budget before sending.
+		// In an open task chat it is conversation, not counted (CH-15).
+		Send:       questionSend(ch.NotifyNow),
+		Converse:   questionSend(ch.Converse),
+		PerHour:    ch.TextsPerHour,
+		Chat:       questionChatting(ch),
 		Now:        guard.Now,
 		Quiet:      questionQuiet(ch),
 		QuietHours: questionQuietHours(ch),
@@ -200,6 +207,34 @@ func questionQuiet(ch quietSource) func(time.Time) bool {
 func questionQuietHours(ch quietSource) func() bool {
 	return func() bool {
 		return !ch.Urgent(owner.ClassApproval) && ch.QuietHours()
+	}
+}
+
+// questionChat is how long after the owner's last task chat reached the
+// agent their chat counts as open, so an agent question is conversation
+// (CH-15).
+const questionChat = 30 * time.Minute
+
+// questionChatting opens the chat only on task chat the agent got, never
+// on a control word, setting or answer, which a spoofed owner number can
+// send (security B1 on #2372).
+func questionChatting(ch interface{ Chatting(time.Duration) bool }) func() bool {
+	return func() bool { return ch.Chatting(questionChat) }
+}
+
+// questionSend marks the owner channel's refusals, which provably sent
+// nothing, as question.ErrNotSent, so the book keeps those questions
+// held under the same IDs; any other error may have reached the owner
+// and is booked as sent (#2363, D-116).
+func questionSend(send func(string) error) func(string) error {
+	return func(text string) error {
+		err := send(text)
+		for _, not := range []error{modem.ErrNotSent, owner.ErrPaced, owner.ErrAgentReaction, owner.ErrNoModem} {
+			if errors.Is(err, not) {
+				return fmt.Errorf("%w: %w", question.ErrNotSent, err)
+			}
+		}
+		return err
 	}
 }
 

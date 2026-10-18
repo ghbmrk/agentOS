@@ -20,18 +20,46 @@ import (
 // the owner has not seen. Such a sender paces itself and sends through
 // owner.Channel.NotifyNow, which never holds.
 
-// deadlineSenders names, per config type, the field that sends a
-// deadline-bearing text: an owner question's wait starts at its text.
-var deadlineSenders = map[string]string{"question.Config": "Send"}
+// deadlineSenders names, per config type, the fields that send a
+// deadline-bearing text and the owner channel's never-held send each
+// must call: an owner question's wait starts at its text, pushed or, in
+// an open task chat, as conversation (#2363).
+var deadlineSenders = map[string]map[string]string{
+	"question.Config": {"Send": "NotifyNow", "Converse": "Converse"},
+}
 
-// nonHolding is the owner channel's never-held send path for agent text.
-var nonHolding = map[string]bool{"NotifyNow": true}
+// sendWrappers are the agentosd helpers a send may be wrapped in: they
+// only map its errors (questionSend, #2363).
+var sendWrappers = map[string]bool{"questionSend": true}
+
+// nonHoldingSend reports whether v is the send want, alone or wrapped.
+func nonHoldingSend(v ast.Expr, want string) bool {
+	if call, ok := v.(*ast.CallExpr); ok {
+		fn, ok := call.Fun.(*ast.Ident)
+		if !ok || !sendWrappers[fn.Name] || len(call.Args) != 1 {
+			return false
+		}
+		v = call.Args[0]
+	}
+	sel, ok := v.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == want
+}
 
 // selfPacing names, per config type, the fields through which the sender
 // paces itself and the agentosd helper each must call: without them a
-// non-holding send would text in the owner's quiet hours (M9-M11).
+// non-holding send would text in the owner's quiet hours (M9-M11), and
+// an uncounted question would follow any owner text, not task chat
+// (#2372).
 var selfPacing = map[string]map[string]string{
-	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours"},
+	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours", "Chat": "questionChatting"},
+}
+
+// ownerSettings names, per config type, the fields that must read an
+// owner setting from the channel, and the channel method each must be:
+// the question book's hourly limit is the owner's TEXTS (#2363, potency
+// A3 on #2372).
+var ownerSettings = map[string]map[string]string{
+	"question.Config": {"PerHour": "TextsPerHour"},
 }
 
 // TestDeadlineTextsNeverUseTheHoldingPath checks every deadline sender
@@ -69,32 +97,63 @@ func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 			if !ok {
 				return true
 			}
-			field, ok := deadlineSenders[pkg.Name+"."+sel.Sel.Name]
+			typ := pkg.Name + "." + sel.Sel.Name
+			fields, ok := deadlineSenders[typ]
 			if !ok {
 				return true
 			}
 			found++
-			checkPacing(t, fset, lit, pkg.Name+"."+sel.Sel.Name)
-			for _, el := range lit.Elts {
-				kv, ok := el.(*ast.KeyValueExpr)
-				if !ok {
-					continue
+			checkPacing(t, fset, lit, typ)
+			checkSettings(t, fset, lit, typ)
+			for field, want := range fields {
+				set := false
+				for _, el := range lit.Elts {
+					kv, ok := el.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != field {
+						continue
+					}
+					set = true
+					if !nonHoldingSend(kv.Value, want) {
+						t.Errorf("%s: %s.%s is not a non-holding send (owner.Channel.%s)", fset.Position(kv.Pos()), typ, field, want)
+					}
 				}
-				if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != field {
-					continue
+				if !set {
+					t.Errorf("%s: %s %s not set", fset.Position(lit.Pos()), typ, field)
 				}
-				if v, ok := kv.Value.(*ast.SelectorExpr); ok && nonHolding[v.Sel.Name] {
-					return true
-				}
-				t.Errorf("%s: %s.%s is not a non-holding send (owner.Channel.NotifyNow)", fset.Position(kv.Pos()), pkg.Name+"."+sel.Sel.Name, field)
-				return true
 			}
-			t.Errorf("%s: %s.%s %s not set", fset.Position(lit.Pos()), pkg.Name, sel.Sel.Name, field)
 			return true
 		})
 	}
 	if found == 0 {
 		t.Fatal("no deadline sender found; the lint is checking nothing")
+	}
+}
+
+// checkSettings reports each owner-setting field of lit that is unset or
+// not the channel method named in ownerSettings.
+func checkSettings(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, typ string) {
+	t.Helper()
+	for field, method := range ownerSettings[typ] {
+		set := false
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != field {
+				continue
+			}
+			set = true
+			if sel, ok := kv.Value.(*ast.SelectorExpr); !ok || sel.Sel.Name != method {
+				t.Errorf("%s: %s.%s is not the owner channel's %s", fset.Position(kv.Pos()), typ, field, method)
+			}
+		}
+		if !set {
+			t.Errorf("%s: %s.%s not set", fset.Position(lit.Pos()), typ, field)
+		}
 	}
 }
 

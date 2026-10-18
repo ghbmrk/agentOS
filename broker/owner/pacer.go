@@ -258,6 +258,10 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	return c.post(class, agentText(text), true)
 }
 
+// ErrNoModem is NotifyNow's and Converse's refusal with no modem: the
+// text was not sent (#2363).
+var ErrNoModem = errors.New("owner: no modem")
+
 // ErrPaced is NotifyNow's refusal in quiet hours or past the allowance.
 var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 
@@ -274,7 +278,7 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 // counts toward the hour.
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
-		return errors.New("owner: no modem")
+		return ErrNoModem
 	}
 	text, err := checkAgent(text)
 	if err != nil {
@@ -658,6 +662,15 @@ func (c *Channel) Urgent(class Class) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.codes.st.Pacing.urgent(class)
+}
+
+// TextsPerHour is the owner's TEXTS setting, the unsolicited texts an
+// hour (CH-15): the question book's hourly limit reads it at each send,
+// so a change takes effect at once (#2363).
+func (c *Channel) TextsPerHour() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.codes.st.Pacing.perHour()
 }
 
 // Allowance is the unsolicited texts left in the hour before now,
