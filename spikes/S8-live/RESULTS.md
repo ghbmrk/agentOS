@@ -66,6 +66,6 @@ Findings:
 - **The refresh token does not match F2.** It has no `rt_` prefix: it is two
   characters, a dot, one character, a dot, then 191 characters of
   `[A-Za-z0-9_]`. No declared format matches it, so the result scan and the
-  vault redactor (P17) miss a Codex refresh token today. The fix to
-  `CredFormats` and P17 is the tier-A follow-up.
+  vault redactor (CAP-11-plan-fu4-P17) miss a Codex refresh token today. The fix to
+  `CredFormats` and CAP-11-plan-fu4-P17 is the tier-A follow-up.
 - No API key is issued on a plan sign-in, so F0 stays the public shape.
