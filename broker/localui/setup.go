@@ -19,6 +19,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -342,6 +343,11 @@ const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask wh
 // no Owner Card, so setup goes back to the card step with a new one.
 const cardAgain = "I need to make your Owner Card again. Any card I showed you before will not work."
 
+// cardNotMade is what the page says while the card step's rerun has shown
+// no card because its vault reset failed (#2362): each reload by the
+// paired phone retries it.
+const cardNotMade = "I could not make your new Owner Card yet. Reload this page to try again. Any card I showed you before will not work."
+
 // answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
 // reload adopts the owed answer as a hold and asks the question again.
 const answerOwed = "Your answer about private content was not saved yet. Reload this page to answer again."
@@ -392,6 +398,12 @@ type setup struct {
 	// back once the answer saves, since the sign-in still waits for the
 	// owner and a new one would only meet it busy (#1888 PUX L1).
 	parked map[string][3]string
+	// lapsed is a shown sign-in's link, code and issuer that a failed new
+	// code took off the page: the provider's contract cannot say whether
+	// it ended (expired, declined, failed) or still waits, so it is no
+	// longer shown as current, and comes back only when a Sign in meets
+	// that provider busy, which proves it still waits (UX3-1).
+	lapsed map[string][3]string
 	// answer is the owner's private-content answer from a Connect AI form
 	// that did not go through, keyed by form ("ai-key openai"), so the
 	// box comes back as the owner left it (U-4).
@@ -404,7 +416,7 @@ type setup struct {
 }
 
 func newSetup(s *Server, st SetupState) *setup {
-	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][3]string{}, parked: map[string][3]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
+	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][3]string{}, parked: map[string][3]string{}, lapsed: map[string][3]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
 }
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
@@ -506,6 +518,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/host":        u.host,
 		"/setup/ai-key":      u.aiKey,
 		"/setup/ai-device":   u.aiDevice,
+		"/setup/ai-retry":    u.aiRetry,
 		"/setup/ai-private":  u.aiPrivate,
 		"/setup/restart":     u.restart,
 	} {
@@ -599,6 +612,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.voidCodes()
+	u.retryCard(key)
 	p := u.s.cfg.Hooks.Progress()
 	if u.stepIs("ai") {
 		u.maybeFinish()
@@ -1044,7 +1058,7 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.gen++
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
-	u.device, u.parked, u.answer = map[string][3]string{}, map[string][3]string{}, map[string]bool{}
+	u.device, u.parked, u.lapsed, u.answer = map[string][3]string{}, map[string][3]string{}, map[string][3]string{}, map[string]bool{}
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
 	})
@@ -1387,29 +1401,99 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return err
 	}
 	defer u.end(id)
-	link, code, from, err := u.s.cfg.Hooks.StartDeviceCode(id)
-	if err == nil {
-		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" || pu.Host == "" {
-			err = errors.New("not https")
-		} else if from == "" {
-			err = errors.New("no issuer") // the page names who sent the code (§8.1 step 6)
-		}
-	}
+	d, err := u.startDevice(id)
 	if errors.Is(err, ErrSignInBusy) {
 		u.mu.Lock()
 		d, parked := u.parked[id]
+		if !parked { // this page's own sign-in a failed new code took off
+			d, parked = u.lapsed[id]
+		}
 		u.mu.Unlock()
-		if parked { // this page's own sign-in, waiting on the answer
+		if parked { // this page's own sign-in, still waiting
 			return u.showDevice(r, "ai-device", id, d)
 		}
 		u.keepAnswer(r, "ai-device", id)
 		return errors.New("A sign-in with that provider is still waiting. Enter its code on the provider's page, or try again once the code expires.")
 	}
 	if err != nil {
+		if errors.Is(err, errRefused) { // a new sign-in started, so no older one waits
+			u.mu.Lock()
+			delete(u.parked, id)
+			delete(u.lapsed, id)
+			u.mu.Unlock()
+		}
 		u.keepAnswer(r, "ai-device", id)
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
-	return u.showDevice(r, "ai-device", id, [3]string{link, code, from})
+	return u.showDevice(r, "ai-device", id, d)
+}
+
+// errRefused: the provider started a new sign-in but the page will not
+// show it. The provider's older sign-in has then ended, since a start
+// while one waits answers busy.
+var errRefused = errors.New("sign-in refused")
+
+// startDevice starts provider id's device-code sign-in and answers its
+// link, code and issuer, refusing (errRefused) a link that is not https
+// or a code with no issuer.
+func (u *setup) startDevice(id string) ([3]string, error) {
+	link, code, from, err := u.s.cfg.Hooks.StartDeviceCode(id)
+	if err == nil {
+		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" || pu.Host == "" {
+			err = fmt.Errorf("%w: not https", errRefused)
+		} else if from == "" {
+			err = fmt.Errorf("%w: no issuer", errRefused) // the page names who sent the code (§8.1 step 6)
+		}
+	}
+	return [3]string{link, code, from}, err
+}
+
+// aiRetry gets a new code for the sign-in this page shows (UX3-1): the
+// owner asks once the shown code expired or was declined on the
+// provider's page. While the provider's sign-in still waits it keeps the
+// shown code, which still works; a new one replaces it; any other answer
+// takes the shown code off the page (lapsed), since nothing then shows
+// it still waits, and offers Sign in again. A new code the page refuses
+// drops the shown one outright: its sign-in has ended. The private answer was saved
+// when the shown sign-in started, so it is not asked or saved again.
+func (u *setup) aiRetry(r *http.Request, _ string) error {
+	if err := u.aiReady(); err != nil {
+		return err
+	}
+	id := r.PostFormValue("provider")
+	u.mu.Lock()
+	_, shown := u.device[id]
+	u.mu.Unlock()
+	if !shown || !u.providerHas(id, func(p Provider) bool { return p.DeviceCode }) {
+		return errors.New("Choose a provider.")
+	}
+	if err := u.begin(id); err != nil {
+		return err
+	}
+	defer u.end(id)
+	d, err := u.startDevice(id)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	old, shown := u.device[id]
+	if !shown { // a restart took it meanwhile
+		return errors.New("Choose a provider.")
+	}
+	switch {
+	case errors.Is(err, ErrSignInBusy):
+		return errors.New("Your code is still waiting. Enter it on the provider's page, or get a new code once it expires.")
+	case errors.Is(err, errRefused): // the shown code's sign-in ended
+		delete(u.device, id)
+		delete(u.parked, id)
+		delete(u.lapsed, id)
+		return errors.New("Could not get a new code. Sign in again, or try again in a minute.")
+	case err != nil:
+		delete(u.device, id)
+		u.lapsed[id] = old
+		return errors.New("Could not get a new code. Sign in again, or try again in a minute.")
+	}
+	delete(u.lapsed, id)
+	u.device[id] = d
+	return nil
 }
 
 // showDevice saves the owner's private answer for a started sign-in and
@@ -1425,6 +1509,7 @@ func (u *setup) showDevice(r *http.Request, form, id string, d [3]string) error 
 		return err
 	}
 	delete(u.parked, id)
+	delete(u.lapsed, id)
 	u.device[id] = d
 	return nil
 }
@@ -1495,8 +1580,15 @@ func (u *setup) maybeFinish() {
 		}
 		u.mu.Lock()
 		defer u.mu.Unlock()
+		// A rerun that failed (its vault reset did) leaves the card held
+		// with none shown (#2362): back to the card step, whose page
+		// retries it.
+		rerunFailed := !errors.Is(err, ErrCardAgain) && u.cardHeld()
+		if rerunFailed {
+			msg = cardNotMade
+		}
 		u.err[u.st.Device] = msg
-		if errors.Is(err, ErrCardAgain) {
+		if errors.Is(err, ErrCardAgain) || rerunFailed {
 			// The card step comes before the recovery step: the new card
 			// is shown only once the recovery step is open again. A store
 			// that fails to save still routes in memory.
@@ -1515,6 +1607,32 @@ func (u *setup) maybeFinish() {
 		// called twice, and let AlreadySetUp close it after a restart.
 		u.st.Done = true
 	}
+}
+
+// retryCard retries the card step's rerun when its vault reset failed
+// (#2362, firstboot.RetryRerun), so setup does not wait for a restart. Only
+// the paired phone's page load retries it.
+func (u *setup) retryCard(key string) {
+	if u.s.cfg.Card == nil {
+		return
+	}
+	u.mu.Lock()
+	paired := !u.st.Done && u.st.Device != "" && key == u.st.Device
+	u.mu.Unlock()
+	if !paired {
+		return
+	}
+	retried, err := firstboot.RetryRerun(u.s.cfg.Card)
+	if !retried {
+		return
+	}
+	msg := cardAgain
+	if err != nil {
+		msg = cardNotMade
+	}
+	u.mu.Lock()
+	u.err[key] = msg
+	u.mu.Unlock()
 }
 
 func recentTimes(ts []time.Time, now time.Time, d time.Duration) []time.Time {

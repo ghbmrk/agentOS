@@ -31,6 +31,35 @@ const setupSSIDSymbols = 4
 type SetupNet struct {
 	SSID     string `json:"ssid"`
 	Password string `json:"password"`
+	// Rotated is set once the claim has replaced the sticker's password
+	// (Rotate): the sticker no longer opens the network. A seller's file
+	// leaves it unset.
+	Rotated bool `json:"rotated,omitempty"`
+}
+
+// ErrRotated is Rotate's refusal for a network the claim already rotated:
+// the password changes once, at the claim (HW-10).
+var ErrRotated = errors.New("claim: setup network already rotated")
+
+// NewSetupPassword is a new setup network password in the claim code's
+// format, for the claim's rotation (HW-10).
+func NewSetupPassword(r io.Reader) (string, error) { return NewCode(r) }
+
+// Rotate is n with the sticker's password replaced by password: the same
+// name, Rotated set. It refuses a network already rotated and a password
+// NewSetupPassword would not make.
+func (n SetupNet) Rotate(password string) (SetupNet, error) {
+	if n.Rotated {
+		return SetupNet{}, ErrRotated
+	}
+	if err := n.Validate(); err != nil {
+		return SetupNet{}, err
+	}
+	r := SetupNet{SSID: n.SSID, Password: password, Rotated: true}
+	if err := r.Validate(); err != nil {
+		return SetupNet{}, err
+	}
+	return r, nil
 }
 
 // NewSetupNet makes a setup network for the seller flow: a name from

@@ -386,7 +386,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
@@ -423,6 +423,7 @@ func main() {
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
+	flag.StringVar(&setupNetPath, "setup-net", defaultSetupNet, "a preloaded box's setup network (HW-10, #1692): the claim rotates its password here, root-only, for agentos-ap; empty, it is not rotated")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -545,12 +546,15 @@ func main() {
 		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
 			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
-			Card: pageCardStep, APNet: apNetPath}
+			Card: pageCardStep, APNet: apNetPath, SetupNet: setupNetPath}
 		if modemBridge {
 			// The box texts its setup and pairing texts on its own line
 			// (P2-2w c4c), and records the SIM it finds as that line's.
 			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
 			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+			// Once setup is finished the bridge learns the owner's number
+			// from its environment file (P2-2w c4c r1).
+			m.ModemEnv = modemEnvFile
 		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
@@ -708,8 +712,9 @@ func main() {
 	if modemBridge {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
 		// recorded where the bridge reads it at its next open. A picture
-		// texted to the box is journaled and counted in STATUS (CH-12).
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell})
+		// texted to the box is journaled and counted in STATUS (CH-12). A text
+		// the down line drops is logged by kind and caller (#2170).
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell, Logf: log.Printf})
 		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
@@ -718,6 +723,7 @@ func main() {
 		cfg.BridgeOnly = !ownerMessage
 		if dg != nil {
 			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
+			dg.cfg.LineDown = digestLineDown(link)
 		}
 	}
 
@@ -904,6 +910,7 @@ func main() {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
 				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
+				journalProviderRuns(pr, d.Engine())
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
@@ -1138,8 +1145,8 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
 // fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
 // wirePlanUsage (#1856); without them admission refuses (RES-5 fails
-// closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
-// its owner. Nothing calls StartSignIn until the setup page does (#1264
+// closed). Its Journal logs each run until journalProviderRuns wires it
+// to the engine journal (OP-8). Nothing calls StartSignIn until the setup page does (#1264
 // c4e2b). A nil rc or note leaves those inputs closed, as nil pins
 // leave the gate.
 func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
@@ -1155,6 +1162,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
 		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
 	}
+	r.Journal = providerJournal{}.journal // logged until journalProviderRuns (PJ-1)
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
 		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
@@ -1173,7 +1181,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 type providerTool struct{ r *provagent.Runner }
 
 func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
-	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
+	out, err := p.r.Run(ctx, provagent.Request{Machine: q.Machine, Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
 		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
 	var ref *provagent.Refusal
 	if errors.As(err, &ref) {
@@ -1188,14 +1196,14 @@ func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (strin
 // provider is refused before it is asked (#1378, #1379, #1380 add theirs).
 type planSeeder struct{ rc *modelroute.RouteControl }
 
-func (s planSeeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s planSeeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	if provider != "codex" {
 		return nil, fmt.Errorf("no plan seed for provider %q", provider)
 	}
 	if s.rc == nil {
 		return nil, errors.New("no plan route control")
 	}
-	seed, err := s.rc.Seed(id)
+	seed, err := s.rc.Seed(id, private)
 	switch {
 	case err == nil:
 		return seed, nil

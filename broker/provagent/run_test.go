@@ -101,15 +101,16 @@ type seeder struct {
 	err       error
 	calls     []string
 	providers []string
+	private   []bool
 	closed    []string
 }
 
 func (s *seeder) Close(id string) { s.mu.Lock(); s.closed = append(s.closed, id); s.mu.Unlock() }
 
-func (s *seeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s *seeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls, s.providers = append(s.calls, id), append(s.providers, provider)
+	s.calls, s.providers, s.private = append(s.calls, id), append(s.providers, provider), append(s.private, private)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -208,6 +209,24 @@ func TestRunsAStubEndToEnd(t *testing.T) {
 	}
 	if len(g.sd.calls) != 1 || g.sd.calls[0] != g.h.created[0] || g.sd.providers[0] != "stub" {
 		t.Errorf("seed for %v: %v %v", g.h.created, g.sd.calls, g.sd.providers)
+	}
+}
+
+// The run's label is bound to its route at the seed, so the vault process
+// rechecks a Private run's permission per content request and a withdrawal
+// reaches a run already admitted (CAP-9, CH-3; #2359). A Public run is
+// not bound.
+func TestCAP9SeedBindsTheRunsLabelToItsRoute(t *testing.T) {
+	g := newRig(ok("x"))
+	for _, l := range []vm.Label{vm.Private, vm.Public} {
+		rq := req("b")
+		rq.Label = l
+		if _, err := g.r.Run(context.Background(), rq); err != nil {
+			t.Fatalf("%v run: %v", l, err)
+		}
+	}
+	if !reflect.DeepEqual(g.sd.private, []bool{true, false}) {
+		t.Fatalf("seeded private = %v, want [true false] for a Private then a Public run", g.sd.private)
 	}
 }
 
@@ -789,13 +808,37 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 	}
 }
 
+// REQ: OP-8
+func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(g *rig, r *Request)
+	}{
+		{"unknown provider", func(_ *rig, r *Request) { r.Provider = "nope" }},
+		{"over-brief", func(_ *rig, r *Request) { r.Brief = strings.Repeat("b", 2<<10) }},
+		{"admit refused", func(g *rig, _ *Request) { g.usage.Readings = []Reading{fresh("5h", 0.05)} }},
+	}
+	for _, c := range cases {
+		g := newRig(ok("x"))
+		rq := req("b")
+		c.set(g, &rq)
+		if _, err := g.r.Run(context.Background(), rq); err == nil {
+			t.Fatalf("%s: ran", c.name)
+		}
+		if len(g.events) != 0 {
+			t.Errorf("%s: %d journal entries", c.name, len(g.events))
+		}
+	}
+}
+
 // builtinCanaries holds one synthetic canary per built-in credential
 // format. A format added to Builtins without a canary fails the test.
 var builtinCanaries = map[string]string{
-	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:              "sk-proj-CANARYcanary0000000000000000",
-	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`: "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
-	`(?i)\brt_[a-z0-9._-]{20,}`:                                      "RT_CanaryCANARYcanary000000",
-	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:      "sk-ant-oat01-CANARYcanary0000000000000000",
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                      "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:         "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                   canaryRefresh,
+	`(?:\b|\\[a-z]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:              "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 
 // REQ: CRED-7
@@ -829,6 +872,47 @@ func TestResultWithADeclaredFormatCanaryIsWithheld(t *testing.T) {
 				t.Errorf("%s %s: journal %+v", id, f, g.events)
 			}
 		}
+	}
+}
+
+// REQ: OP-8
+func TestAdmittedRunIsJournaledOnceWithItsMachine(t *testing.T) {
+	g := newRig(ok("x"))
+	rq := req("b")
+	rq.Machine = "wk-a"
+	if _, err := g.r.Run(context.Background(), rq); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.events) != 1 || g.events[0].Machine != "wk-a" || g.events[0].Outcome != "ok" {
+		t.Errorf("events %+v", g.events)
+	}
+	// A refusal after admission is journaled too.
+	g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 1} }
+	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != Failed {
+		t.Fatalf("failing CLI: %v", err)
+	}
+	if len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
+		t.Errorf("events %+v", g.events)
+	}
+}
+
+// REQ: OP-8
+func TestNilJournalRunLogsUnmetered(t *testing.T) {
+	g := newRig(ok("x"))
+	g.r.Journal = nil
+	for i := 0; i < 2; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, l := range g.logs {
+		if strings.Contains(l, "unmetered") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("unmetered lines %d: %q", n, g.logs)
 	}
 }
 

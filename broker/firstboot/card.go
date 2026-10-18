@@ -34,6 +34,9 @@ type CardStep struct {
 	done bool
 	gen  int // the display whose confirm may latch; Again moves it on
 	d    *card.Display
+	// failed is the reset of the latest rerun when that rerun showed no
+	// card; RetryRerun runs it again (#2362).
+	failed func() error
 }
 
 // NewCardStep loads the latch and, if the card was not confirmed yet,
@@ -99,7 +102,8 @@ func (s *CardStep) display(gen int) (*card.Display, error) {
 // is shown whose confirm provisions and latches as before. The disk latch
 // is kept until that confirm: agentos-ap serves the card's network while
 // it reads confirmed, and the setup network is burned (ASSUMPTIONS.md).
-// A failed reset shows no card; Again may be called again.
+// A failed reset shows no card and keeps the hold; RetryRerun runs it
+// again (#2362).
 func (s *CardStep) Again(reset func() error) error {
 	if reset == nil {
 		return errors.New("firstboot: incomplete card reset config")
@@ -109,12 +113,15 @@ func (s *CardStep) Again(reset func() error) error {
 	s.gen++
 	gen := s.gen
 	s.d = nil
+	s.failed = nil
 	s.mu.Unlock()
 	if err := reset(); err != nil {
+		s.fail(gen, reset)
 		return fmt.Errorf("firstboot: resetting the vault for a new card: %w", err)
 	}
 	d, err := s.display(gen)
 	if err != nil {
+		s.fail(gen, reset)
 		return err
 	}
 	s.mu.Lock()
@@ -124,6 +131,41 @@ func (s *CardStep) Again(reset func() error) error {
 	}
 	s.d = d
 	return nil
+}
+
+// fail keeps reset for RetryRerun unless a later rerun has started.
+func (s *CardStep) fail(gen int, reset func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen == gen {
+		s.failed = reset
+	}
+}
+
+// RetryRerun reruns c's card step again when its latest rerun (Again)
+// showed no card, with that rerun's reset, and reports whether it did.
+// Without it setup stays held with no card to confirm until a restart
+// (#2362, ASSUMPTIONS.md F18). c is a route's card step (FirstBoot.Card);
+// a claimed card's step is retried, any other has none to retry.
+func RetryRerun(c CardHold) (bool, error) {
+	var s *CardStep
+	switch v := c.(type) {
+	case *CardStep:
+		s = v
+	case *ClaimedCard:
+		s = v.Card()
+	}
+	if s == nil {
+		return false, nil
+	}
+	s.mu.Lock()
+	reset := s.failed
+	s.failed = nil // one retry at a time; a failed one sets it again
+	s.mu.Unlock()
+	if reset == nil {
+		return false, nil
+	}
+	return true, s.Again(reset)
 }
 
 // ResetUnlatched runs reset unless st's latch says the card was

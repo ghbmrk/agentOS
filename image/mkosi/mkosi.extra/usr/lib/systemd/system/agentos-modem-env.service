@@ -1,0 +1,34 @@
+# Started by agentos-modem-env.path: agentos-modem reads OWNER_NUMBER only at start. try-restart
+# leaves a stopped bridge (no modem line) stopped; --no-block does not wait out its stop.
+[Unit]
+Description=agentOS modem bridge restart for the owner's number
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block try-restart agentos-modem.service
+# Root, for PID 1's /run/systemd/private, and nothing else: no capability, nothing writable, no
+# network but that socket.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+ProtectProc=invisible
+PrivateIPC=yes

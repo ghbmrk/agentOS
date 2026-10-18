@@ -103,8 +103,14 @@ func (c *RouteControl) Open(id string) (string, error) {
 // Seed returns the vm seed the vault process minted for provider worker id
 // (egress PlanLogins.Seed: its placeholder auth.json), for the broker to put
 // in the machine before it starts and opens its route (egress K28, #1015).
-func (c *RouteControl) Seed(id string) (map[string][]byte, error) {
-	body, err := c.call("seed", id, 64<<10)
+// private binds a Private run to the route, which then asks the owner's
+// private-data answer before each content request (CAP-9, CH-3; #2359).
+func (c *RouteControl) Seed(id string, private bool) (map[string][]byte, error) {
+	q := url.Values{"machine": {id}}
+	if private {
+		q.Set("private", "1")
+	}
+	body, err := c.callQ("seed", id, q, 64<<10)
 	if err != nil {
 		return nil, err
 	}

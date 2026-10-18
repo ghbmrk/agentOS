@@ -32,7 +32,20 @@ func TestNeedsOwnerIsRecognizedWithoutImportingLoops(t *testing.T) {
 
 func TestABudgetRaiseIsALowTierLineFromBrokerState(t *testing.T) {
 	r := newRig(t)
-	it, err := r.s.Line(journal.Intent{ID: "loops:n7:budget:400", Action: ActionBudget})
+	// No fixed budget (LOOP-0) still has the paid-route cap (OP-8): a
+	// budget above it is a raise from it, a large one by code generator.
+	it, err := r.s.Line(journal.Intent{ID: "loops:n7:budget:4000", Action: ActionBudget})
+	must(t, err)
+	if it.Detail != "from 1500 to 4000 paid AI calls a day" || it.Facts.Kind != owner.GrantChange {
+		t.Fatalf("raise from no fixed budget: %+v", it)
+	}
+	if q, err := r.s.BudgetAsk(journal.Intent{ID: "loops:n7:budget:4000", Action: ActionBudget}); err != nil || q != "Raise spare-time AI use from 1500 to 4000 calls a day?" {
+		t.Fatalf("raise ask from no fixed budget: %q %v", q, err)
+	}
+	if got, ok := r.s.Text(context.Background(), "SPARE BUDGET 100", true); !ok || r.s.Settings().SpareCalls != 100 {
+		t.Fatalf("setting a budget from none: %q %v", got, ok)
+	}
+	it, err = r.s.Line(journal.Intent{ID: "loops:n7:budget:400", Action: ActionBudget})
 	must(t, err)
 	want := owner.Item{Object: "spare-time AI use", Detail: "from 100 to 400 paid AI calls a day", UndoBy: "SPARE BUDGET 100 any time",
 		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "raise", NoRecipient: true}}
@@ -77,6 +90,9 @@ func TestOwnerTextChangesSettingsAndLeavesTaskChatAlone(t *testing.T) {
 	if !r.s.Settings().Paused[Improve] {
 		t.Fatal("LEARNING OFF did not pause Loop 1")
 	}
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 100", true); !ok || r.s.Settings().SpareCalls != 100 {
+		t.Fatalf("setting a budget from none: %q %v", got, ok)
+	}
 	// The rig's policy refuses a raise outright; the reply says so.
 	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400", true); !ok || got != "Not allowed: needs the owner's approval." {
 		t.Fatalf("%q %v", got, ok)
@@ -87,7 +103,7 @@ func TestOwnerTextChangesSettingsAndLeavesTaskChatAlone(t *testing.T) {
 		t.Fatalf("%q %v", got, ok)
 	}
 	r.s.Attach(r.eng)
-	if r.s.Settings().SpareCalls != DefaultSpareCalls {
+	if r.s.Settings().SpareCalls != 100 {
 		t.Fatal("a raise took effect without approval")
 	}
 	if got, ok := r.s.Text(ctx, "help loops", true); !ok || got != HelpText {
@@ -287,7 +303,7 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 // load, malformed IDs first, and the next apply prunes to keepApplied.
 func TestOldStateIsOrderedOnLoad(t *testing.T) {
 	r := newRig(t)
-	old := state{Seq: 300, Settings: Settings{SpareCalls: DefaultSpareCalls}, Applied: map[string]bool{"bad": true}}
+	old := state{Seq: 300, Settings: Settings{SpareCalls: 100}, Applied: map[string]bool{"bad": true}}
 	for n := 300; n > 300-keepApplied-5; n-- {
 		old.Applied[fmt.Sprintf("loops:n%d:off:all", n)] = true
 	}

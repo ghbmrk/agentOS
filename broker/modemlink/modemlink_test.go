@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -745,5 +746,34 @@ func TestQueuedCountsTextsWaitingForTheBridge(t *testing.T) {
 	it := poll(t, l)
 	if n := l.Queued(); n != 0 {
 		t.Fatalf("Queued once the bridge took %q: %d", it.Text, n)
+	}
+}
+
+// A text the down line cannot carry is logged once, naming its kind and
+// the calls that sent it, never its words, so the box's journal says which
+// send the recovery text counts (#2170).
+func TestAMissedSendIsLoggedWithItsCaller(t *testing.T) {
+	var logged []string
+	l := New(Config{Owner: ownerNum, Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }})
+	if err := l.Send(ownerNum, "synthetic-canary-text"); err == nil {
+		t.Fatal("a send before the bridge's first state went")
+	}
+	if err := l.SendRequest(ownerNum, "synthetic-canary-request"); err == nil {
+		t.Fatal("a request before the bridge's first state went")
+	}
+	if len(logged) != 2 {
+		t.Fatalf("logged %q, want two lines", logged)
+	}
+	for i, kind := range []string{"kind=text", "kind=request"} {
+		g := logged[i]
+		if !strings.HasPrefix(g, MissedLog+" "+kind+" via modemlink.TestAMissedSendIsLoggedWithItsCaller") {
+			t.Errorf("line %d %q, want %q, its kind and this test as the caller", i, g, MissedLog)
+		}
+		if strings.Contains(g, "canary") || strings.Contains(g, "(*Link)") {
+			t.Errorf("line %d %q carries the text or the Link's own calls", i, g)
+		}
+		if n := strings.Count(g, " via "); n < 1 || n > missedFrames {
+			t.Errorf("line %d %q names %d calls, want 1 to %d", i, g, n, missedFrames)
+		}
 	}
 }
