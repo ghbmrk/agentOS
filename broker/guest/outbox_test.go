@@ -338,3 +338,38 @@ func TestDEL1f1ForgetWriteFailure(t *testing.T) {
 		t.Fatalf("held after a failed forget: %+v", got)
 	}
 }
+
+// REQ: CAP-3 (DEL-1-f1a)
+// DEL-1-f1a (#2361): a forget whose write failed is not done until a
+// write succeeds. Its retry writes even though memory already holds
+// nothing, reports the failure while the store is still unwritable, and
+// once it succeeds a reopen from disk holds no dropped reply.
+func TestDEL1f1ForgetRetryAfterFailedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	a := r.hand("m1", "book the dentist")
+	if code, _ := r.do("m1", "POST", "/owner/reply", reply(a, "canary-2361 booked")); code != 204 {
+		t.Fatalf("reply: %d", code)
+	}
+	good := r.p.store.path
+	r.p.store.path = filepath.Join(path, "not-a-dir", "inbox.json")
+	for i := 0; i < 2; i++ {
+		if err := r.p.ForgetReplies(); err == nil {
+			t.Fatalf("forget %d reported done before a write succeeded", i)
+		}
+	}
+	r.p.store.path = good
+	if err := r.p.ForgetReplies(); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), "canary-2361") {
+		t.Fatalf("store still holds a dropped reply: %v %s", err, raw)
+	}
+	r.p.Shutdown()
+	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
+	if got := r2.p.PendingReplies(); len(got) != 0 {
+		t.Fatalf("after reopen: %+v", got)
+	}
+}

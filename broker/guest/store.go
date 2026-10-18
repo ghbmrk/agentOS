@@ -29,6 +29,10 @@ type store struct {
 	outbox  []PendingReply
 	done    []doneReply
 	refused bool // a reply was refused because the outbox was full
+	// unsaved says a forget's write failed, so the file may still hold
+	// replies memory dropped; the next forget writes even with an empty
+	// outbox, and any successful write clears it (CAP-3, #2361).
+	unsaved bool
 }
 
 // doneReply is a reply that has left the outbox.
@@ -246,11 +250,13 @@ func (s *store) retire(machine, id string) error {
 // no reply names the task it is about, so none can be kept). Each moves
 // to done, so the guest's retry of it is recognised and not queued
 // again; done holds no text. Memory is cleared even if the write fails,
-// and the error is returned so the deletion reports it.
+// and the error is returned so the deletion reports it; a retry writes
+// again until a write succeeds, so the deletion is not done while the
+// file still holds a dropped reply.
 func (s *store) forget() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.outbox) == 0 {
+	if len(s.outbox) == 0 && !s.unsaved {
 		return nil
 	}
 	for _, r := range s.outbox {
@@ -258,6 +264,7 @@ func (s *store) forget() error {
 	}
 	s.outbox = nil
 	s.refused = false
+	s.unsaved = true
 	return s.save()
 }
 
@@ -275,5 +282,9 @@ func (s *store) save() error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(s.path, b, 0o600)
+	if err := durable.WriteFile(s.path, b, 0o600); err != nil {
+		return err
+	}
+	s.unsaved = false
+	return nil
 }
