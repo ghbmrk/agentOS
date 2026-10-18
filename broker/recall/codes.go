@@ -155,52 +155,62 @@ type keyedTok struct {
 	stop       bool // trailing punctuation ended the sentence
 }
 
-// keyedRun returns the span of the codes listed from p, or end -1.
+// keyedRun returns the span of the codes listed from p, or end -1. It reads
+// the list one token ahead of the decision, so a key costs only the tokens
+// its run takes, not the rest of the text: a mail of many keys each followed
+// by prose would otherwise be read to its end once per key, quadratic time.
 func keyedRun(s string, p int, explicit bool) (int, int) {
 	var toks []keyedTok
 	item := -1
-	for p < len(s) {
-		nl := 0
-		for p < len(s) && strings.IndexByte(" \t\r\n,;", s[p]) >= 0 {
-			if s[p] == '\n' {
-				nl++
+	done := false
+	// more reads the next listed token into toks; false at the list's end.
+	more := func() bool {
+		for !done && p < len(s) {
+			nl := 0
+			for p < len(s) && strings.IndexByte(" \t\r\n,;", s[p]) >= 0 {
+				if s[p] == '\n' {
+					nl++
+				}
+				p++
 			}
-			p++
-		}
-		if nl >= 2 || p == len(s) {
-			break
-		}
-		if item < 0 {
-			item = p
-		}
-		if strings.HasPrefix(s[p:], Removed) {
-			toks = append(toks, keyedTok{start: item, end: p + len(Removed), core: Removed})
-			p += len(Removed)
-			item = -1
-			continue
-		}
-		q := p
-		for q < len(s) && strings.IndexByte(" \t\r\n,;", s[q]) < 0 {
-			q++
-		}
-		tok := s[p:q]
-		if listMark.MatchString(tok) {
+			if nl >= 2 || p == len(s) {
+				break
+			}
+			if item < 0 {
+				item = p
+			}
+			if strings.HasPrefix(s[p:], Removed) {
+				toks = append(toks, keyedTok{start: item, end: p + len(Removed), core: Removed})
+				p += len(Removed)
+				item = -1
+				return true
+			}
+			q := p
+			for q < len(s) && strings.IndexByte(" \t\r\n,;", s[q]) < 0 {
+				q++
+			}
+			tok := s[p:q]
+			if listMark.MatchString(tok) {
+				p = q
+				continue
+			}
+			core := strings.TrimLeft(tok, "(")
+			lead := len(tok) - len(core)
+			core = strings.TrimRight(core, ".:)!?")
+			if len(core) < 3 || !codeToken.MatchString(core) {
+				break
+			}
+			toks = append(toks, keyedTok{start: item, end: p + lead + len(core), core: core, stop: p+lead+len(core) < q})
 			p = q
-			continue
+			item = -1
+			return true
 		}
-		core := strings.TrimLeft(tok, "(")
-		lead := len(tok) - len(core)
-		core = strings.TrimRight(core, ".:)!?")
-		if len(core) < 3 || !codeToken.MatchString(core) {
-			break
-		}
-		toks = append(toks, keyedTok{start: item, end: p + lead + len(core), core: core, stop: p+lead+len(core) < q})
-		p = q
-		item = -1
+		done = true
+		return false
 	}
 	n := 0
 	prev := 0
-	for n < len(toks) {
+	for n < len(toks) || more() {
 		t := toks[n]
 		ok := false
 		switch {
@@ -211,7 +221,7 @@ func keyedRun(s string, p int, explicit bool) (int, int) {
 		case !explicit:
 		case n == 0:
 			ok = true
-		case oneCase(t.core) && (len(t.core) == prev || prev == 0 && n+1 < len(toks) && len(toks[n+1].core) == len(t.core) && oneCase(toks[n+1].core)):
+		case oneCase(t.core) && (len(t.core) == prev || prev == 0 && (n+1 < len(toks) || more()) && len(toks[n+1].core) == len(t.core) && oneCase(toks[n+1].core)):
 			ok = true
 		}
 		if !ok {
