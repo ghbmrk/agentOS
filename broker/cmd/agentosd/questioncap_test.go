@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -31,21 +30,22 @@ func TestQuestionSendMarksOnlyRefusalsAsNotSent(t *testing.T) {
 	}
 }
 
-// chatSource is a fake owner channel: it records the window asked and
-// answers open as set.
+// chatSource is a fake owner channel: it counts the asks and answers
+// open as set.
 type chatSource struct {
-	asked []time.Duration
+	asked int
 	open  bool
 }
 
-func (c *chatSource) Chatting(d time.Duration) bool {
-	c.asked = append(c.asked, d)
+func (c *chatSource) ChatOpen() bool {
+	c.asked++
 	return c.open
 }
 
 // TestQuestionChattingFollowsTheChannel (potency A2 on #2372): the book
 // sees the chat open only when the owner channel says task chat reached
-// the agent within the 30-minute window, never otherwise.
+// the agent within the owner's window, never otherwise, and asks the
+// channel each time rather than caching.
 func TestQuestionChattingFollowsTheChannel(t *testing.T) {
 	ch := &chatSource{}
 	chatting := questionChatting(ch)
@@ -60,12 +60,7 @@ func TestQuestionChattingFollowsTheChannel(t *testing.T) {
 	if chatting() {
 		t.Fatal("chat stayed open after the channel closed it")
 	}
-	for _, d := range ch.asked {
-		if d != 30*time.Minute {
-			t.Fatalf("asked the channel for a %v window, want 30m", d)
-		}
-	}
-	if len(ch.asked) != 3 {
-		t.Fatalf("asked the channel %d times, want 3", len(ch.asked))
+	if ch.asked != 3 {
+		t.Fatalf("asked the channel %d times, want 3", ch.asked)
 	}
 }

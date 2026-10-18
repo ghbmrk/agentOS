@@ -1,5 +1,7 @@
 package owner
 
+import "time"
+
 // Converse texts the owner the agent's reply to a message the owner sent:
 // conversation, not a push (CH-15). It goes at once, in quiet hours too
 // and with the hour's texts spent, and does not count toward the hour,
@@ -19,4 +21,21 @@ func (c *Channel) Converse(text string) error {
 		return err
 	}
 	return c.cfg.Modem.Send(c.cfg.Owner, agentText(text))
+}
+
+// ChatOpen reports whether a task chat is open: owner task chat reached
+// the agent within the owner's CHAT window (CH-15), so the agent's
+// questions are conversation. It is Chatting with the owner's setting.
+func (c *Channel) ChatOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.chat.IsZero() && c.cfg.Now().Sub(c.chat) < c.codes.st.Pacing.chatWindow()
+}
+
+// ChatWindow is how long a task chat stays open after the owner's last
+// message reached the agent (CH-15).
+func (c *Channel) ChatWindow() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.codes.st.Pacing.chatWindow()
 }

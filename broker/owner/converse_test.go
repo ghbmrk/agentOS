@@ -2,6 +2,7 @@ package owner
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -205,5 +206,130 @@ func TestCH12CcInsideATokenStillWithholds(t *testing.T) {
 	}
 	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked Thursday 9am" {
 		t.Fatalf("sent %q", got)
+	}
+}
+
+// REQ: CH-15
+// TestCH15WindowOpenRepliesUnpaced: owner task chat that reached the
+// agent opens the chat; five minutes later, in quiet hours with the
+// hour's texts spent, the chat is still open and a reply in it goes at
+// once and spends nothing.
+func TestCH15WindowOpenRepliesUnpaced(t *testing.T) {
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.unlock()
+	r.say("book a table for two")
+	if len(r.agent.got()) != 1 {
+		t.Fatalf("task chat did not reach the agent: %q", r.agent.got())
+	}
+	for i := 0; i < DefaultTextsPerHour; i++ {
+		if err := r.ch.Post(ClassSecurity, "Security alert."); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.sentTexts()
+	r.advance(5 * time.Minute)
+	if !r.ch.ChatOpen() {
+		t.Fatal("the chat closed five minutes after the owner's message")
+	}
+	if err := r.ch.Converse("Booked for 8pm."); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked for 8pm." {
+		t.Fatalf("reply in the open chat: %q, want it sent at once", got)
+	}
+	if a := r.ch.Allowance(r.clock()); a != 0 {
+		t.Fatalf("allowance %d after a reply in the chat, want it unspent at 0", a)
+	}
+	if len(r.held()) != 0 {
+		t.Fatalf("reply in the open chat held: %+v", r.held())
+	}
+}
+
+// REQ: CH-15
+// TestCH15WindowEdge: the chat is open at 29:59 after the owner's last
+// message that reached the agent and closed at 30:01; a new owner message
+// re-opens it; under CHAT 60 it lasts an hour.
+func TestCH15WindowEdge(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch = r.open()
+	if r.ch.ChatOpen() {
+		t.Fatal("chat open before any owner message")
+	}
+	r.unlock()
+	if r.ch.ChatOpen() {
+		t.Fatal("the unlock code opened the chat")
+	}
+	r.say("book a table")
+	r.advance(29*time.Minute + 59*time.Second)
+	if !r.ch.ChatOpen() {
+		t.Fatal("chat closed at 29:59")
+	}
+	r.advance(2 * time.Second)
+	if r.ch.ChatOpen() {
+		t.Fatal("chat open at 30:01")
+	}
+	r.say("and a taxi at 7")
+	if !r.ch.ChatOpen() {
+		t.Fatal("a new owner message did not re-open the chat")
+	}
+	if got := r.say("CHAT 60"); !strings.HasPrefix(got, "Chat set: 60 minutes.") {
+		t.Fatalf("CHAT 60: %q", got)
+	}
+	r.say("make it 8")
+	r.advance(59*time.Minute + 59*time.Second)
+	if !r.ch.ChatOpen() {
+		t.Fatal("chat closed at 59:59 under CHAT 60")
+	}
+	r.advance(2 * time.Second)
+	if r.ch.ChatOpen() {
+		t.Fatal("chat open at 60:01 under CHAT 60")
+	}
+}
+
+// REQ: CH-15
+// TestCH15WindowSettingBounds: CHAT takes 5 to 240 minutes, only in an
+// unlocked session; a value out of range gets the forms and changes
+// nothing; the setting survives a restart, and a saved value out of range
+// fails closed to the default.
+func TestCH15WindowSettingBounds(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch = r.open()
+	if got := r.say("CHAT 60"); strings.HasPrefix(got, "Chat set") {
+		t.Fatalf("locked CHAT 60 took effect: %q", got)
+	}
+	if w := r.ch.ChatWindow(); w != DefaultChatMinutes*time.Minute {
+		t.Fatalf("window %v by default, want %d minutes", w, DefaultChatMinutes)
+	}
+	r.unlock()
+	for _, bad := range []string{"CHAT 0", "CHAT 4", "CHAT 241", "CHAT 1000"} {
+		if got := r.say(bad); got != pacingForms {
+			t.Fatalf("%s: %q", bad, got)
+		}
+	}
+	if w := r.ch.ChatWindow(); w != DefaultChatMinutes*time.Minute {
+		t.Fatalf("a refused CHAT changed the window to %v", w)
+	}
+	for _, n := range []int{MinChatMinutes, MaxChatMinutes} {
+		got := r.say(fmt.Sprintf("chat %d", n))
+		if !strings.HasPrefix(got, fmt.Sprintf("Chat set: %d minutes.", n)) {
+			t.Fatalf("CHAT %d: %q", n, got)
+		}
+		if w := r.ch.ChatWindow(); w != time.Duration(n)*time.Minute {
+			t.Fatalf("window %v after CHAT %d", w, n)
+		}
+	}
+	if st, _ := r.store.Load(); st.Pacing.ChatMinutes != MaxChatMinutes {
+		t.Fatalf("CHAT %d not saved: %+v", MaxChatMinutes, st.Pacing)
+	}
+	if again := newRig(t, r.store); again.ch.ChatWindow() != MaxChatMinutes*time.Minute {
+		t.Fatalf("CHAT %d lost on restart: %v", MaxChatMinutes, again.ch.ChatWindow())
+	}
+	if !strings.Contains(pacingHelp, "CHAT") || !strings.Contains(pacingForms, "CHAT 5 to 240") {
+		t.Fatalf("HELP or the forms do not name CHAT: %q / %q", pacingHelp, pacingForms)
+	}
+	for _, m := range []int{-1, 1, 4, 241} {
+		if (Pacing{ChatMinutes: m}).valid() {
+			t.Fatalf("a saved CHAT of %d minutes is valid", m)
+		}
 	}
 }

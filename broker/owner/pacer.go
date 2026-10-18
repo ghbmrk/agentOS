@@ -40,13 +40,20 @@ const (
 	MaxTextsPerHour = 20
 	// MaxHeld is the most texts the hold keeps (SG-r1-3).
 	MaxHeld = 32
+	// DefaultChatMinutes is how long a task chat stays open after the
+	// owner's last message reached the agent when the owner set none
+	// (CH-15).
+	DefaultChatMinutes = 30
+	// MinChatMinutes and MaxChatMinutes bound CHAT.
+	MinChatMinutes = 5
+	MaxChatMinutes = 240
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings.
-const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF."
+const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF. CHAT 30: minutes a chat stays open."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
@@ -68,6 +75,10 @@ type Pacing struct {
 	// approval is urgent by default (D-129), so the zero value must be
 	// urgent and the off switch has to be stored.
 	ApprovalHeld bool `json:"approval_held,omitempty"`
+	// ChatMinutes is how long a task chat stays open after the owner's
+	// last message reached the agent (CH-15); 0 means
+	// DefaultChatMinutes.
+	ChatMinutes int `json:"chat_minutes,omitempty"`
 }
 
 // valid reports whether p is a setting the owner could have made.
@@ -77,6 +88,9 @@ func (p Pacing) valid() bool {
 		return false
 	}
 	if p.PerHour < 0 || p.PerHour > MaxTextsPerHour {
+		return false
+	}
+	if p.ChatMinutes != 0 && (p.ChatMinutes < MinChatMinutes || p.ChatMinutes > MaxChatMinutes) {
 		return false
 	}
 	for _, u := range p.Urgent {
@@ -92,6 +106,14 @@ func (p Pacing) perHour() int {
 		return DefaultTextsPerHour
 	}
 	return p.PerHour
+}
+
+// chatWindow is how long a task chat stays open (CH-15).
+func (p Pacing) chatWindow() time.Duration {
+	if p.ChatMinutes == 0 {
+		return DefaultChatMinutes * time.Minute
+	}
+	return time.Duration(p.ChatMinutes) * time.Minute
 }
 
 func (p Pacing) urgent(class Class) bool {
@@ -691,7 +713,8 @@ func (c *Channel) allowanceLocked(now time.Time) int {
 }
 
 // pacingSetting answers the owner's pacing settings (QH-6, SG-r1-5):
-// QUIET a-b, QUIET OFF, TEXTS n, URGENT APPROVAL|AGENT ON|OFF. A message
+// QUIET a-b, QUIET OFF, TEXTS n, URGENT APPROVAL|AGENT ON|OFF, CHAT n
+// (CH-15). A message
 // of another shape returns ok false. Locked, a pacing setting also
 // returns ok false, so it gets the unlock prompt and changes nothing.
 func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
@@ -729,6 +752,15 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 		change = func(p *Pacing) { p.PerHour = n }
 		reply = func(p Pacing) string {
 			return fmt.Sprintf("Texts set: %d an hour. More wait for the next hour, except %s and replies to you.", n, urgentNames(p))
+		}
+	case "CHAT":
+		n, err := strconv.Atoi(f[1])
+		if err != nil || n < MinChatMinutes || n > MaxChatMinutes {
+			return pacingForms, true
+		}
+		change = func(p *Pacing) { p.ChatMinutes = n }
+		reply = func(Pacing) string {
+			return fmt.Sprintf("Chat set: %d minutes. A chat stays open that long after your last message; replies in it go at once.", n)
 		}
 	case "URGENT":
 		class := Class(strings.ToLower(f[1]))
@@ -783,7 +815,7 @@ func pacingShape(f []string) bool {
 	switch f[0] {
 	case "QUIET":
 		return (len(f) == 2 && f[1] == "OFF") || (len(f) == 3 && isDigits(f[1]) && isDigits(f[2]))
-	case "TEXTS":
+	case "TEXTS", "CHAT":
 		return len(f) == 2 && isDigits(f[1])
 	case "URGENT":
 		if len(f) != 3 {

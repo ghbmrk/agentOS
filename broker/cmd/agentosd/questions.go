@@ -210,16 +210,12 @@ func questionQuietHours(ch quietSource) func() bool {
 	}
 }
 
-// questionChat is how long after the owner's last task chat reached the
-// agent their chat counts as open, so an agent question is conversation
-// (CH-15).
-const questionChat = 30 * time.Minute
-
 // questionChatting opens the chat only on task chat the agent got, never
 // on a control word, setting or answer, which a spoofed owner number can
-// send (security B1 on #2372).
-func questionChatting(ch interface{ Chatting(time.Duration) bool }) func() bool {
-	return func() bool { return ch.Chatting(questionChat) }
+// send (security B1 on #2372), and keeps it open for the owner's CHAT
+// window, 30 minutes unless set (CH-15).
+func questionChatting(ch interface{ ChatOpen() bool }) func() bool {
+	return func() bool { return ch.ChatOpen() }
 }
 
 // questionSend marks the owner channel's refusals, which provably sent
