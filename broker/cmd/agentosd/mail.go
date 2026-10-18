@@ -418,20 +418,37 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 }
 
 // mailNote is the mail STATUS notes, two lines whatever the number of
-// days so STATUS keeps its other lines (control.Fit cuts the reply): the
-// UNDO of every complete day still in its undo window with organize
-// changes, newest first by weekday, and the security alerts those days
-// labelled but left in the inbox. Every day mailDays.undo accepts is
-// shown while it is undoable. It names no sender (CH-12) and is empty
-// until wireMail stores the days.
-type mailNote struct{ days atomic.Pointer[mailDays] }
+// days: the UNDO of every complete day still in its undo window with
+// organize changes, oldest first by weekday, the one whose window ends
+// today marked, and the security alerts those days labelled but left in
+// the inbox. Every day mailDays.undo accepts is shown while it is
+// undoable. STATUS adds a note whole or not at all (control), so no ID is
+// cut. It names no sender (CH-12) and is empty until wireMail stores the
+// days.
+type mailNote struct {
+	days atomic.Pointer[mailDays]
+	// kept is the alerts line of the last codes read, for the alerts
+	// note that STATUS asks for right after: one STATUS reads the trail
+	// once, and its two lines describe the same days.
+	mu   sync.Mutex
+	kept keptAlerts
+}
 
-func (n *mailNote) read() (codes, alerts string) {
-	d := n.days.Load()
+type keptAlerts struct {
+	d      *mailDays
+	at     time.Time // wall clock, for keptFor
+	alerts string
+}
+
+// keptFor is how long a kept alerts line serves.
+const keptFor = time.Second
+
+func (n *mailNote) read(d *mailDays) (codes, alerts string) {
 	if d == nil {
 		return "", ""
 	}
 	now := d.now().In(d.loc)
+	tomorrow := d.dayStart(now.AddDate(0, 0, 1).Format(dayFormat))
 	all := d.changes()
 	var ids []string
 	hits := 0
@@ -447,7 +464,11 @@ func (n *mailNote) read() (codes, alerts string) {
 		}
 		hits += sum.GuardHits
 		// At most six days are undoable, so each weekday names one.
-		ids = append(ids, start.Format("Mon")+" "+undoID(d.key, d.account, day))
+		id := start.Format("Mon") + " " + undoID(d.key, d.account, day)
+		if !start.Add(mail.UndoWindow).After(tomorrow) {
+			id += " (ends today)"
+		}
+		ids = append([]string{id}, ids...)
 	}
 	if len(ids) > 0 {
 		codes = "Mail UNDO codes, 7 days each: " + strings.Join(ids, ", ") + "."
@@ -460,9 +481,29 @@ func (n *mailNote) read() (codes, alerts string) {
 	return codes, alerts
 }
 
-// codes and alerts are the two STATUS notes.
-func (n *mailNote) codes() string  { c, _ := n.read(); return c }
-func (n *mailNote) alerts() string { _, a := n.read(); return a }
+// codes is the first mail STATUS note; it keeps the alerts line.
+func (n *mailNote) codes() string {
+	d := n.days.Load()
+	c, a := n.read(d)
+	n.mu.Lock()
+	n.kept = keptAlerts{d: d, at: time.Now(), alerts: a}
+	n.mu.Unlock()
+	return c
+}
+
+// alerts is the second: the line codes kept, once, or a fresh read.
+func (n *mailNote) alerts() string {
+	n.mu.Lock()
+	k := n.kept
+	n.kept = keptAlerts{}
+	n.mu.Unlock()
+	d := n.days.Load()
+	if k.d != nil && k.d == d && time.Since(k.at) < keptFor {
+		return k.alerts
+	}
+	_, a := n.read(d)
+	return a
+}
 
 // wireMail starts l's binder on the vault process's mail socket and, once
 // the values key is read, the owner channel's UNDO hook and the mail

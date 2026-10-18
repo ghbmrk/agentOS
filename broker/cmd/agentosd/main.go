@@ -634,21 +634,23 @@ func main() {
 	// Agents' questions (W9): owner replies are answered before task chat
 	// reaches the agent.
 	qs := &questions{}
-	// STATUS notes read in wiring order: the time check, then the
-	// capability-off lines (OP-9, capoff.go), then spare-time work not
+	// STATUS notes read in wiring order: the time check, then what waits
+	// on the owner (unclear effects, the mail UNDO codes and alerts), then
+	// the capability-off lines (OP-9, capoff.go), then spare-time work not
 	// running (learningOff, below), then recall's (an agent holding a
-	// deleted record, or memory not open), then the second line's. Keep
-	// the clock first.
+	// deleted record, or memory not open), then the second line's. The
+	// texted STATUS leaves out whole notes that do not fit, from the
+	// end, so keep the clock first and the waiting lines before the rest.
 	qs.wire(&cfg)
+	// No daily text (DRB-1): what waits on the owner is in STATUS, read
+	// when asked.
+	unclear, mailStatus := wireStatusNotes(&cfg)
 	// Each line reads live state set as the box opens below; the daemon
 	// copies the notes, so they are wired now.
 	caps := newCapState(egressSocket)
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
 	capLines.wire(&cfg)
-	// No daily text (DRB-1): what waits on the owner is in STATUS, read
-	// when asked.
-	unclear, mailStatus := wireStatusNotes(&cfg)
 	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
 	// is never called, and STATUS says update checks are not running.
 	agent := &lateAgent{}

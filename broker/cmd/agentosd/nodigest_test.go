@@ -14,9 +14,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	clockpkg "github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -308,14 +310,14 @@ func statusMailDays(cs []mailChange) *mailDays {
 }
 
 // Every complete day mailDays.undo still accepts has its UNDO on STATUS's
-// mail line, newest first, and the alerts line sums those days' security
+// mail line, oldest first with the one ending today marked, and the alerts line sums those days' security
 // alerts; today and lapsed days have neither.
 func TestMailNoteEveryUndoableDay(t *testing.T) {
 	days := statusMailDays([]mailChange{{0, true}, {1, false}, {1, true}, {3, false}, {6, true}, {7, true}})
 	note := &mailNote{}
 	note.days.Store(days)
 	id := func(ago int) string { return undoID(days.key, "acct", statusNow.AddDate(0, 0, -ago).Format(dayFormat)) }
-	want := "Mail UNDO codes, 7 days each: Sun " + id(1) + ", Fri " + id(3) + ", Tue " + id(6) + "."
+	want := "Mail UNDO codes, 7 days each: Tue " + id(6) + " (ends today), Fri " + id(3) + ", Sun " + id(1) + "."
 	if got := note.codes(); got != want {
 		t.Fatalf("codes %q, want %q", got, want)
 	}
@@ -340,23 +342,35 @@ func TestMailNoteEveryUndoableDay(t *testing.T) {
 	}
 }
 
-// statusEngine is an idle engine for control.Handler.
-type statusEngine struct{}
+// statusEngine is an engine for control.Handler whose List is the effects
+// the unclear note's parked intents leave open.
+type statusEngine struct{ list []journal.Status }
 
 func (statusEngine) Stop(context.Context) (journal.StopReport, error) {
 	return journal.StopReport{}, nil
 }
-func (statusEngine) Resume() error          { return nil }
-func (statusEngine) Stopped() bool          { return false }
-func (statusEngine) List() []journal.Status { return nil }
+func (statusEngine) Resume() error            { return nil }
+func (statusEngine) Stopped() bool            { return false }
+func (e statusEngine) List() []journal.Status { return e.list }
+
+// statusOwner is the owner, unlocked.
+type statusOwner struct{}
+
+func (statusOwner) IsOwner(string) bool            { return true }
+func (statusOwner) SessionUnlocked(time.Time) bool { return true }
 
 // wireStatusNotes adds the unclear note and the two mail notes, all empty
-// until the daemon's state is set. With every undoable day organized and
-// alerting, and the unclear and machines lines at their longest, STATUS
-// still fits one reply whole: every UNDO and the line after the notes
-// (the owner channel's Wi-Fi page line) survive control.Fit.
+// until the daemon's state is set, before the capability lines. The texted
+// STATUS, at its longest (parked effects in the header, a held clock,
+// update checks off and the 99-byte model line, every undoable day
+// organized and alerting), stays within one reply: the Wi-Fi page line,
+// the owner channel's first note, is kept, and the mail codes line is
+// shown whole or left out and counted, never cut mid-ID.
 func TestWireStatusNotes(t *testing.T) {
-	cfg := daemon.Config{Notes: []func() string{func() string { return "clock" }}}
+	var clock atomic.Pointer[string]
+	ok := ""
+	clock.Store(&ok)
+	cfg := daemon.Config{Notes: []func() string{func() string { return *clock.Load() }}}
 	unclear, mailStatus := wireStatusNotes(&cfg)
 	if len(cfg.Notes) != 4 {
 		t.Fatalf("%d notes", len(cfg.Notes))
@@ -366,7 +380,17 @@ func TestWireStatusNotes(t *testing.T) {
 			t.Fatalf("note %d before the daemon runs: %q", i, l)
 		}
 	}
-	waiting := []journal.ParkedIntent{{Intent: journal.Intent{Executor: "sms"}}, {Intent: journal.Intent{Executor: "sms"}}}
+	// As main wires them: no update-check loop, so that line is on, and
+	// no model socket, so the 99-byte model line is on too.
+	newCapLines(newCapState("")).wire(&cfg)
+
+	label := journal.Intent{Action: strings.Repeat("a", 20), Account: strings.Repeat("b", 16)}
+	var waiting []journal.ParkedIntent
+	var open []journal.Status
+	for i := 0; i < 4; i++ {
+		waiting = append(waiting, journal.ParkedIntent{Intent: journal.Intent{Executor: "sms"}})
+		open = append(open, journal.Status{Intent: label, State: journal.OutcomeUnknown})
+	}
 	unclear.set(func() []journal.ParkedIntent { return waiting })
 	var cs []mailChange
 	for ago := 0; ago <= undoLookback; ago++ {
@@ -376,36 +400,88 @@ func TestWireStatusNotes(t *testing.T) {
 	}
 	days := statusMailDays(cs)
 	mailStatus.days.Store(days)
-	var got []string
-	for _, n := range cfg.Notes {
-		if l := n(); l != "" {
-			checkNote(t, l)
-			got = append(got, l)
-		}
-	}
-	if len(got) != 4 || got[0] != "clock" || !strings.Contains(got[1], "not retried") ||
-		!strings.HasPrefix(got[2], "Mail UNDO codes, ") || got[3] != "6000 security alerts labelled but left in the inbox." {
-		t.Fatalf("STATUS %q", got)
-	}
-	last := "999 waiting for you on my Wi-Fi page."
-	h := &control.Handler{Engine: statusEngine{}, Machines: func() string { return strings.Repeat("m", 80) },
-		Notes: append(cfg.Notes, func() string { return last })}
-	s := h.Status()
-	if control.Fit(s) != s || !strings.HasSuffix(s, " "+last) {
-		t.Fatalf("STATUS cut (%d bytes): %q", len(s), s)
-	}
-	shown := 0
+	var ids []string
 	for ago := 1; ago <= undoLookback; ago++ {
 		id := undoID(days.key, "acct", statusNow.AddDate(0, 0, -ago).Format(dayFormat))
-		r, _ := days.undo(context.Background(), id)
-		if undoable := strings.Contains(r, "not connected"); undoable != strings.Contains(s, " "+id) {
-			t.Errorf("day %d: undoable %v, shown %v", ago, undoable, !undoable)
-		} else if undoable {
-			shown++
+		if r, _ := days.undo(context.Background(), id); strings.Contains(r, "not connected") {
+			ids = append(ids, id)
 		}
 	}
-	if shown != 6 {
-		t.Fatalf("%d undoable days shown", shown)
+	if len(ids) != 6 {
+		t.Fatalf("%d undoable days", len(ids))
+	}
+	codes := mailStatus.codes()
+	for i, id := range ids {
+		if !strings.Contains(codes, " "+id) || i > 0 && strings.Index(codes, " "+id) > strings.Index(codes, " "+ids[i-1]) {
+			t.Fatalf("codes %q: %s missing or not oldest first", codes, id)
+		}
+	}
+	if !strings.Contains(codes, " "+ids[5]+" (ends today)") || strings.Count(codes, "(ends today)") != 1 {
+		t.Fatalf("codes %q: the code that ends today is not marked", codes)
+	}
+
+	wifi := "2 waiting for you on my Wi-Fi page."
+	h := &control.Handler{Engine: statusEngine{}, Auth: statusOwner{}, Machines: func() string { return strings.Repeat("m", 80) },
+		// owner.Channel puts its page line first.
+		Notes: append([]func() string{func() string { return wifi }}, cfg.Notes...)}
+	held := clockpkg.Status{State: clockpkg.Held, Since: statusNow, Skew: 3 * time.Hour, Verified: true}.Line(time.UTC)
+	for _, c := range []struct {
+		name       string
+		clock      string
+		parked     bool
+		codesShown bool
+	}{
+		{"clock agrees, nothing open", clockpkg.Status{State: clockpkg.Agreed, Verified: true}.Line(time.UTC), false, true},
+		{"worst case", held, true, false},
+	} {
+		clock.Store(&c.clock)
+		e := statusEngine{}
+		if c.parked {
+			e.list = open
+		}
+		h.Engine = e
+		var got []string
+		for _, n := range cfg.Notes {
+			if l := n(); l != "" {
+				checkNote(t, l)
+				got = append(got, l)
+			}
+		}
+		if len(got) != 6 || got[0] != c.clock || !strings.Contains(got[1], "not retried") || got[2] != codes ||
+			got[3] != "6000 security alerts labelled but left in the inbox." || got[4] != modelUnset || got[5] != updateChecksOff {
+			t.Fatalf("%s: notes %q", c.name, got)
+		}
+		r := h.Handle(context.Background(), "owner", "STATUS")
+		if len(r) != 1 || len(r[0]) > control.MaxText || control.Fit(r[0]) != r[0] {
+			t.Fatalf("%s: reply (%d bytes) %q", c.name, len(r[0]), r)
+		}
+		s := r[0]
+		if c.parked && !strings.Contains(s, "4 may have happened ("+label.Action+"/"+label.Account) {
+			t.Fatalf("%s: no header sample: %q", c.name, s)
+		}
+		if !strings.Contains(s, " "+wifi) {
+			t.Fatalf("%s: Wi-Fi page line lost: %q", c.name, s)
+		}
+		// Each note is in the reply whole or not at all.
+		for _, l := range got {
+			if i := strings.Index(s, l[:20]); i >= 0 && !strings.Contains(s, l) {
+				t.Fatalf("%s: note cut: %q in %q", c.name, l, s)
+			}
+		}
+		if strings.Contains(s, codes) != c.codesShown {
+			t.Fatalf("%s: codes shown %v: %q", c.name, !c.codesShown, s)
+		}
+		for _, id := range ids {
+			if strings.Contains(s, id) != c.codesShown {
+				t.Fatalf("%s: UNDO %s: %q", c.name, id, s)
+			}
+		}
+		if !c.codesShown && !strings.HasSuffix(s, " more lines on my Wi-Fi page.") {
+			t.Fatalf("%s: left-out notes not counted: %q", c.name, s)
+		}
+		if page := h.Status(); !strings.Contains(page, codes) || !strings.Contains(page, wifi) || strings.Contains(page, "more line") {
+			t.Fatalf("%s: page STATUS %q", c.name, page)
+		}
 	}
 }
 
@@ -432,6 +508,9 @@ func TestMainWiresStatusNotes(t *testing.T) {
 	parse := at("flag.Parse()")
 	remove := at("removeOldDigest(oldDigestDir)")
 	wire := at("unclear, mailStatus := wireStatusNotes(&cfg)")
+	if caps := at("capLines.wire(&cfg)"); caps < wire {
+		t.Fatal("capability lines wired before the waiting lines")
+	}
 	run := at("d, err := daemon.Run(ctx, cfg)")
 	set := at("unclear.set(d.RetryWaiting)")
 	mailWire := at("wireMail(ctx, mw, d, mailSocket, learn.Dir, mailStatus, cfg.Now)")

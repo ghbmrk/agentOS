@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -404,5 +405,46 @@ func TestStatusCarriesEachNote(t *testing.T) {
 	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
 	if !strings.HasSuffix(r, " Machines: 1 work. Time check: phone network only (offline). Spare-time work: not running.") {
 		t.Fatalf("%q", r)
+	}
+}
+
+// The texted STATUS adds whole notes only, in order, while the reply fits
+// one text; a note that does not fit is left out, never cut, and counted.
+// The page's STATUS shows every note.
+func TestStatusAddsWholeNotesOnly(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, nil)
+	var notes []string
+	for i := 0; i < 6; i++ {
+		l := fmt.Sprintf("Note %d: ", i) + strings.Repeat("x", 80) + "."
+		notes = append(notes, l)
+		h.Notes = append(h.Notes, func() string { return l })
+	}
+	short := "Short note."
+	h.Notes = append(h.Notes, func() string { return short })
+	s := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	shown := 0
+	for _, l := range notes {
+		if strings.Contains(s, l) {
+			shown++
+		} else if strings.Contains(s, l[:7]) {
+			t.Fatalf("note cut: %q", s)
+		}
+	}
+	if shown == 0 || shown == len(notes) || !strings.Contains(s, " "+short+" ") ||
+		!strings.HasSuffix(s, fmt.Sprintf(" %d more lines on my Wi-Fi page.", len(notes)-shown)) {
+		t.Fatalf("%d shown: %q", shown, s)
+	}
+	page := h.Status()
+	for _, l := range append(notes, short) {
+		if !strings.Contains(page, l) {
+			t.Fatalf("page lacks %q: %q", l, page)
+		}
+	}
+	if strings.Contains(page, "more line") {
+		t.Fatalf("page: %q", page)
+	}
+	h.Notes = h.Notes[:1]
+	if s := one(t, h.Handle(context.Background(), owner, "STATUS")); !strings.HasSuffix(s, " "+notes[0]) {
+		t.Fatalf("fits: %q", s)
 	}
 }

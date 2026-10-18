@@ -114,8 +114,8 @@ func (r *capLines) add(key string, class capClass, line func() string) {
 }
 
 // wire puts every entry but owner choices into STATUS's notes. Call it
-// once, before daemon.Run (the daemon copies the notes), right after the
-// clock note so the clock stays first.
+// once, before daemon.Run (the daemon copies the notes), after the clock
+// note and the waiting lines (wireStatusNotes), so those stay first.
 func (r *capLines) wire(cfg *daemon.Config) {
 	var notes []func() string
 	for _, e := range r.entries {
