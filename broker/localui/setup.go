@@ -19,6 +19,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -342,6 +343,11 @@ const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask wh
 // no Owner Card, so setup goes back to the card step with a new one.
 const cardAgain = "I need to make your Owner Card again. Any card I showed you before will not work."
 
+// cardNotMade is what the page says while the card step's rerun has shown
+// no card because its vault reset failed (#2362): each reload by the
+// paired phone retries it.
+const cardNotMade = "I could not make your new Owner Card yet. Reload this page to try again. Any card I showed you before will not work."
+
 // answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
 // reload adopts the owed answer as a hold and asks the question again.
 const answerOwed = "Your answer about private content was not saved yet. Reload this page to answer again."
@@ -599,6 +605,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.voidCodes()
+	u.retryCard(key)
 	p := u.s.cfg.Hooks.Progress()
 	if u.stepIs("ai") {
 		u.maybeFinish()
@@ -1495,8 +1502,15 @@ func (u *setup) maybeFinish() {
 		}
 		u.mu.Lock()
 		defer u.mu.Unlock()
+		// A rerun that failed (its vault reset did) leaves the card held
+		// with none shown (#2362): back to the card step, whose page
+		// retries it.
+		rerunFailed := !errors.Is(err, ErrCardAgain) && u.cardHeld()
+		if rerunFailed {
+			msg = cardNotMade
+		}
 		u.err[u.st.Device] = msg
-		if errors.Is(err, ErrCardAgain) {
+		if errors.Is(err, ErrCardAgain) || rerunFailed {
 			// The card step comes before the recovery step: the new card
 			// is shown only once the recovery step is open again. A store
 			// that fails to save still routes in memory.
@@ -1515,6 +1529,32 @@ func (u *setup) maybeFinish() {
 		// called twice, and let AlreadySetUp close it after a restart.
 		u.st.Done = true
 	}
+}
+
+// retryCard retries the card step's rerun when its vault reset failed
+// (#2362, firstboot.RetryRerun), so setup does not wait for a restart. Only
+// the paired phone's page load retries it.
+func (u *setup) retryCard(key string) {
+	if u.s.cfg.Card == nil {
+		return
+	}
+	u.mu.Lock()
+	paired := !u.st.Done && u.st.Device != "" && key == u.st.Device
+	u.mu.Unlock()
+	if !paired {
+		return
+	}
+	retried, err := firstboot.RetryRerun(u.s.cfg.Card)
+	if !retried {
+		return
+	}
+	msg := cardAgain
+	if err != nil {
+		msg = cardNotMade
+	}
+	u.mu.Lock()
+	u.err[key] = msg
+	u.mu.Unlock()
 }
 
 func recentTimes(ts []time.Time, now time.Time, d time.Duration) []time.Time {
