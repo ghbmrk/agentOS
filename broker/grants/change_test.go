@@ -2,7 +2,7 @@ package grants
 
 // The gate delegates meta.change.* to the change pipeline (change C8) and
 // never turns an unanswered owner request into a decline (change C7).
-// REQ: OP-3, OP-5, CHG-2, CHG-3, CHG-6, CH-10, CH-12
+// REQ: OP-3, OP-5, CHG-2, CHG-3, CHG-6, CH-10, CH-12, ADP-6
 
 import (
 	"context"
@@ -321,7 +321,7 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	if noUI.own.count() != n {
 		t.Fatal("texted a code that cannot complete without the local page")
 	}
-	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on my Wi-Fi page, or your recovery key." {
+	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != HeldInstallNotice {
 		t.Fatalf("%q", notes)
 	}
 	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
@@ -358,7 +358,7 @@ type fakeChanges struct{ err error }
 
 func (f fakeChanges) Check(context.Context, journal.Phase, journal.Intent) error { return f.err }
 func (fakeChanges) Line(journal.Intent) (owner.Item, error) {
-	return owner.Item{Object: "x", Facts: owner.Facts{Verb: "adopt"}}, nil
+	return owner.Item{Object: "x", Terms: owner.NewTerms([]owner.Term{{Label: "Asks for", Value: "mail"}}), Facts: owner.Facts{Verb: "adopt"}}, nil
 }
 func (fakeChanges) Decided(context.Context, journal.Intent, string) {}
 
@@ -378,6 +378,16 @@ func TestOnlyNeedsOwnerItselfAsks(t *testing.T) {
 	g := New(Config{Changes: fakeChanges{change.ErrNeedsOwner}})
 	if v := g.evaluateChange(context.Background(), journal.PhaseAuthorize, journal.Intent{ID: "chg:c1:adopt", Action: change.ActionAdopt}); v.kind != ask {
 		t.Fatal(v.kind)
+	}
+}
+
+// ADP-6: the terms the change pipeline lists for a change (an adapter's
+// grants and operations) reach the owner's item, and so its sum.
+func TestChangeItemKeepsItsTerms(t *testing.T) {
+	g := New(Config{Changes: fakeChanges{change.ErrNeedsOwner}})
+	v := g.evaluateChange(context.Background(), journal.PhaseAuthorize, journal.Intent{ID: "chg:c1:adopt", Action: change.ActionAdopt})
+	if ts, ok := v.item.Terms.List(); v.kind != ask || !ok || len(ts) != 1 || ts[0].Value != "mail" {
+		t.Fatalf("%v terms %q", v.kind, v.item.Terms)
 	}
 }
 

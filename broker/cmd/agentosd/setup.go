@@ -72,8 +72,8 @@ const errCardPending = localapi.ErrCardPending
 
 // pageCard is the Owner Card step's hold when the step runs in
 // agentos-localui (#1115): the page builds, shows and latches the card and
-// reports it confirmed with OpSetupCard just before finish. The report
-// holds for this process only; the page reports again before each finish.
+// reports it confirmed in the finish call (localapi.Finish.Card). The
+// report holds for this process only; the page reports it in each finish.
 type pageCard struct {
 	mu        sync.Mutex
 	confirmed bool
@@ -90,16 +90,11 @@ func (c *pageCard) Hold() error {
 	return nil
 }
 
-// report is OpSetupCard: only a report of a confirmed card is taken.
-func (c *pageCard) report(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	var r localapi.SetupCard
-	if json.Unmarshal(args, &r) != nil || !r.Confirmed {
-		return nil, sockets.Code(localapi.ErrBadArgs)
-	}
+// report takes the finish call's report of a confirmed card.
+func (c *pageCard) report() {
 	c.mu.Lock()
 	c.confirmed = true
 	c.mu.Unlock()
-	return nil, nil
 }
 
 // apNetOp is OpSetupAPNet: it writes the card's network to path, 0600,
@@ -162,14 +157,18 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	s := localsrv.NewSetup(cfg)
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
+	pc, page := step.(*pageCard)
 	ops[localapi.OpSetupFinish] = func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
+		var f localapi.Finish
+		if page && json.Unmarshal(args, &f) == nil && f.Card {
+			pc.report()
+		}
 		if step.Hold() != nil {
 			return nil, sockets.Code(errCardPending)
 		}
 		return finish(ctx, p, args)
 	}
-	if pc, ok := step.(*pageCard); ok {
-		ops[localapi.OpSetupCard] = pc.report
+	if page {
 		if m.APNet != "" {
 			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
 		}
@@ -286,7 +285,7 @@ func (e enroller) Providers() ([]localapi.SetupProvider, error) {
 	}
 	out := make([]localapi.SetupProvider, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: !p.Plan, DeviceCode: p.Plan, Connected: p.Connected, PrivateOK: p.PrivateOK})
+		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: !p.Plan, DeviceCode: p.Plan, Connected: p.Connected, PrivateOK: p.PrivateOK, PrivateByConfig: p.PrivateByConfig})
 	}
 	return out, nil
 }

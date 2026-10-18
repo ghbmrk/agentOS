@@ -632,6 +632,46 @@ func TestAdoptRecordsOnlyTheShownSIM(t *testing.T) {
 	}
 }
 
+// #927 (M7): an adoption under way ends when the bridge reports another
+// SIM, or an ok line: the page then offers the SIM it now reports, never
+// "setting up" one no longer in the modem.
+func TestAnAdoptionEndsWhenTheBridgeReportsAnotherState(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 13, 5, 0, 0, time.UTC)}
+	l := New(Config{Owner: ownerNum, Now: clk.now, Record: func(string) error { return nil }})
+	const other = "89012600000000099999"
+	swapped := func(iccid string) {
+		t.Helper()
+		call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: iccid}, nil)
+	}
+	adopt := func() {
+		t.Helper()
+		tag, _ := l.SIM()
+		if err := l.Adopt(tag); err != nil {
+			t.Fatalf("adopt: %v", err)
+		}
+		if tag, _ := l.SIM(); tag != "" {
+			t.Fatal("a SIM offered while adopting")
+		}
+	}
+	swapped(newSIM)
+	adopt()
+	swapped(other)
+	if tag, _ := l.SIM(); tag != simTag(other) {
+		t.Fatalf("another SIM after adopting: offered %q", tag)
+	}
+	if n := l.OwnerLineNote(); n != "The SIM in my phone modem changed. Texts to and from you are paused until you confirm it below." {
+		t.Fatalf("note for another SIM: %q", n)
+	}
+	// The same SIM again after an ok line is a new swap to confirm.
+	swapped(newSIM)
+	adopt()
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	swapped(newSIM)
+	if tag, _ := l.SIM(); tag != simTag(newSIM) {
+		t.Fatalf("the SIM after an ok line: offered %q", tag)
+	}
+}
+
 // Bridged, which ends agentosd's shutdown drain early (owner O34; Security
 // S5, Potency P6 on #1746), holds while a poll is in flight, while a text
 // the bridge took has no result, and for BridgeGap after its last poll or

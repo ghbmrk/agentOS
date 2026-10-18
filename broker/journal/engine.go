@@ -49,6 +49,9 @@ type Engine struct {
 	shapeIx map[coldShape]uint32
 	pinned  bool
 	stopped bool
+	// routeStops maps each stopped provider route to its cause. It is
+	// set by route_stop records' apply, so replay rebuilds it (OP-11).
+	routeStops map[string]string
 	// stoppedAt holds every attempt that was in flight or unknown when a
 	// STOP was recorded: the only attempts a cancel_requested record may
 	// name. It is set by the stop record's apply, so replay rebuilds it,
@@ -1670,6 +1673,18 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecPicture {
+		if r.Picture == nil || !r.Picture.valid() || r.ID != "" {
+			return fmt.Errorf("picture record without a valid note")
+		}
+		return nil
+	}
+	if r.Type == RecRouteStop {
+		if r.RouteStop == nil || !r.RouteStop.valid() || r.ID != "" {
+			return fmt.Errorf("route stop record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -1812,7 +1827,10 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress, RecSleep:
+	case RecEgress, RecSleep, RecPicture:
+		return
+	case RecRouteStop:
+		e.applyRouteStop(r.RouteStop)
 		return
 	case RecSubmitted:
 		en := newEntry(r)

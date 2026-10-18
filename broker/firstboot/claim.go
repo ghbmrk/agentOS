@@ -104,3 +104,16 @@ func (c *ClaimedCard) Hold() error {
 	}
 	return s.Hold()
 }
+
+// Again reruns the card step (CardStep.Again); ErrUnclaimed before the
+// claim.
+func (c *ClaimedCard) Again(reset func() error) error {
+	if !c.cl.Claimed() {
+		return fmt.Errorf("%w: scan or type the claim code on my sticker", ErrUnclaimed)
+	}
+	s, err := c.card()
+	if err != nil {
+		return err
+	}
+	return s.Again(reset)
+}

@@ -6,6 +6,7 @@ import ast
 import base64
 import contextlib
 import errno
+import hashlib
 import json
 import configparser
 import io
@@ -42,6 +43,7 @@ check = load("image_check", MK / "mkosi.finalize")
 # The tree check takes configuration only through steps owned by root (TREE_OWNER, #1543 Security R1);
 # a test cannot make root-owned trees, so it takes its own uid in root's place.
 check.TREE_OWNER = os.geteuid()
+check.TREE_GROUP = os.getegid()
 finish = load("image_finish", IMG / "finish_image.py")
 
 
@@ -2352,7 +2354,9 @@ class ConfFilesTest(unittest.TestCase):
             self.assertNotEqual(self.v(), [], target)
             f.unlink()
         f = link(self.root, "etc/udev/rules.d", "../../usr/lib/../share/f")
-        self.assertEqual(check.violations(self.root), [])
+        # The boot-code allowlist refuses any linked rules.d (ExecAllowTest); the link check is under test.
+        with unittest.mock.patch.object(check, "exec_allow_violations", return_value=[]):
+            self.assertEqual(check.violations(self.root), [])
         f.unlink()
 
     # #1702 (delta 2, Security 1, P/UX 1): links through what the box makes at boot, none with a '..'.
@@ -2402,9 +2406,11 @@ class ConfFilesTest(unittest.TestCase):
         mut = pathlib.Path(tmp.name) / "mutant.py"
         mut.write_text(src.replace(old, new))
         # Beside the mutant, where it looks for its allowlist, so its whole check can run.
-        (pathlib.Path(tmp.name) / check.TMPFILES_ALLOW).write_text((MK / check.TMPFILES_ALLOW).read_text())
+        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW):
+            (pathlib.Path(tmp.name) / name).write_text((MK / name).read_text())
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()
+        m.TREE_GROUP = os.getegid()
         return m
 
     def test_without_the_default_deny_the_box_links_pass(self):
@@ -3093,10 +3099,12 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         (self.root / "usr/lib/x").mkdir(parents=True)
         link(self.root, "var/run", "/run")
         link(self.root, "var/lock", "/run/lock")
-        # The guarded-path and link checks are under test here; TmpfilesAllowTest is the allowlist's.
-        patch = unittest.mock.patch.object(check, "tmpfiles_allow_violations", return_value=[])
-        patch.start()
-        self.addCleanup(patch.stop)
+        # The guarded-path and link checks are under test here; TmpfilesAllowTest and ExecAllowTest
+        # are the allowlists' (the latter refuses any linked rules.d).
+        for name in ("tmpfiles_allow_violations", "exec_allow_violations"):
+            patch = unittest.mock.patch.object(check, name, return_value=[])
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def tmpfiles(self, text):
         return write(self.root, "usr/lib/tmpfiles.d/x.conf", text)
@@ -3200,9 +3208,180 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertIn("etc/udev/rules.d: a link to /var/cache/man/r, through /var/cache/man, which the tree "
                       "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
 
+    def test_lines_that_make_a_missing_step_group_writable_are_refused(self):
+        # REQ: HW-1, DEV-2 (#1829, security and combined delta 2): a step the tree lacks takes its
+        # parent's group (the tree or a line may set the setgid bit), and a line naming a non-root
+        # group is refused outright; a d line with only g+w passes under a root-group parent.
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        other = check.TREE_GROUP + 1000
+        for text, gid, mode, n, how in (
+                ("d /usr/lib/x/c 0775\n", other, 0o2755, 1, "mode 0775 for -:- under a parent of gid %d" % other),
+                ("d /usr/lib/x/c 0775\n", other, 0o755, 1, "mode 0775 for -:- under a parent of gid %d" % other),
+                # G1b: the parent's mode is the tree's or a line's; the gid is what the child takes.
+                ("z /usr/lib/x 2755\nd /usr/lib/x/c 0775\n", other, 0o755, 2,
+                 "mode 0775 for -:- under a parent of gid %d" % other),
+                ("d /usr/lib/x/c 0775\nz /usr/lib/x/c - - 1000\n", None, 0o755, 2, "mode - for -:1000")):
+            with self.subTest(text=text, gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x/c, which the tree "
+                                  "lacks and usr/lib/tmpfiles.d/x.conf line %d makes %s; ship the step" % (n, how),
+                                  self.v())
+                finally:
+                    f.unlink()
+        # G1: a line that gives the parent a non-root group and the setgid bit is refused at the parent.
+        f = self.tmpfiles("z /usr/lib/x 2755 - 1000\nd /usr/lib/x/c 0775\n")
+        try:
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x, which "
+                          "usr/lib/tmpfiles.d/x.conf line 1 remakes mode 2755 for -:1000 on the box", self.v())
+        finally:
+            f.unlink()
+        for gid, mode in ((check.TREE_GROUP, 0o755), (check.TREE_GROUP, 0o2755)):
+            with self.subTest(gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles("d /usr/lib/x/c 0775\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_security_delta_2_cases_are_refused(self):
+        # REQ: HW-1, DEV-2 (#1829, security delta 2): a setgid line on a missing parent (P3, and a
+        # gid carried down two missing steps), and lines systemd drops (a relative path, P4; a
+        # duplicate d line, P8) trusted to reset the tree's mode.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/b/c/r")
+        for text, gid, mode, step, n, how in (
+                ("d /usr/lib/x/b 2755 - 1000\nd /usr/lib/x/b/c 0775\n", None, None, "b", 1, "mode 2755 for -:1000"),
+                ("d /usr/lib/x/b 2755\nd /usr/lib/x/b/c 0775\n", other, 0o755, "b/c", 2,
+                 "mode 0775 for -:- under a parent of gid %d" % other)):
+            with self.subTest(text=text), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/b/c/r, through /usr/lib/x/%s, which the tree "
+                                  "lacks and usr/lib/tmpfiles.d/x.conf line %d makes %s; ship the step" % (step, n, how),
+                                  self.v())
+                finally:
+                    f.unlink()
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for text, n in (("z usr/lib/x 0755 - -\nz /usr/lib/x - - 1000\n", 2),
+                        ("d /usr/lib/x - - -\nd /usr/lib/x 0755 - -\nz /usr/lib/x - - 1000\n", 3)):
+            with self.subTest(text=text), self.attrs("usr/lib/x", mode=0o775):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which "
+                                  "usr/lib/tmpfiles.d/x.conf line %d remakes mode - for -:1000 on the box" % n, self.v())
+                finally:
+                    f.unlink()
+
+    def test_security_delta_3_steps_a_line_can_remove_are_weighed_as_lacking(self):
+        # REQ: HW-1, DEV-2 (#1829, security delta 3): a line that removes a held step (r, R on it or a
+        # parent, D or an age on a parent) leaves it to the line that makes it again, which the box
+        # runs with the step taking its parent's group, so that line is weighed with the parent's gid.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x/c/e").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        made = "usr/lib/tmpfiles.d/x.conf line 2 makes mode 0775 for -:- under a parent of gid %d" % other
+        cases = ("R /usr/lib/x/c\n", "R /usr/lib/x/*\n", "r /usr/lib/x/c\n", "D /usr/lib/x\n",
+                 "d /usr/lib/x - - - 10d\n", "e /usr/lib/x - - - 1h\n")
+        for rm in cases:
+            with self.subTest(rm=rm), self.attrs("usr/lib/x", gid=other, mode=0o2755):
+                f = self.tmpfiles(rm + "d /usr/lib/x/c 0775\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x/c, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box" % made, self.v())
+                finally:
+                    f.unlink()
+        # The parent's gid is carried down a removed step to the next one, which goes with it.
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/usr/lib/x/c/e/r")
+        with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+            f = self.tmpfiles("R /usr/lib/x/c\nd /usr/lib/x/c/e 0775\n")
+            try:
+                self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/e/r, through /usr/lib/x/c/e, which "
+                              "usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box" % made, self.v())
+            finally:
+                f.unlink()
+        # A tmpfiles.d link in a removed step is held to it as well.
+        (self.root / self.RULES).unlink()
+        with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+            f = self.tmpfiles("D /usr/lib/x\nd /usr/lib/x/c 0775\nL /usr/lib/x/c/l - - - - /etc/machine-id\n")
+            try:
+                self.assertIn("x.conf: line 3: L /usr/lib/x/c/l - - - - /etc/machine-id; a link to /etc/machine-id, "
+                              "in /usr/lib/x/c, which usr/lib/tmpfiles.d/x.conf line 1 can remove and %s on the box"
+                              % made, self.v())
+            finally:
+                f.unlink()
+        # Passes: a root-group parent, a line that only removes, an age on the step itself (it cleans
+        # what is below), and x/X lines, whose age only excludes.
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        for text, gid in (("R /usr/lib/x/c\nd /usr/lib/x/c 0775\n", check.TREE_GROUP),
+                          ("D /usr/lib/x\nd /usr/lib/x/c 0775\n", check.TREE_GROUP),
+                          ("R /usr/lib/x/c\n", other), ("D /usr/lib/x/c\nd /usr/lib/x/c 0775\n", other),
+                          ("d /usr/lib/x/c - - - 10d\nd /usr/lib/x/c 0775\n", other),
+                          ("x /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", other),
+                          ("X /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", other)):
+            with self.subTest(text=text, gid=gid), self.attrs("usr/lib/x", gid=gid, mode=0o2755):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_removal_rules_those_links_pass(self):
+        # Without the remover check, the gid it carries down, or the age rule, a delta 3 case passes.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x/c/e").mkdir(parents=True, exist_ok=True)
+        for old, new, text, to in (
+                ("        removed = tmpfiles_remover(root, path_parts(d))\n", "        removed = None\n",
+                 "R /usr/lib/x/c\nd /usr/lib/x/c 0775\n", "/usr/lib/x/c/r"),
+                ("    if st.st_gid == TREE_GROUP and tmpfiles_remover(root, path_parts(d)):\n", "    if False:\n",
+                 "R /usr/lib/x/c\nd /usr/lib/x/c/e 0775\n", "/usr/lib/x/c/e/r"),
+                ('        if reach is None and typ not in ("x", "X") and age not in ("-", ""):\n',
+                 "        if False:\n", "d /usr/lib/x - - - 10d\nd /usr/lib/x/c 0775\n", "/usr/lib/x/c/r")):
+            with self.subTest(text=text):
+                m = self.mutant(old, new)
+                link(self.root, self.RULES, to)
+                f = self.tmpfiles(text)
+                try:
+                    with self.attrs("usr/lib/x", gid=other, mode=0o2755):
+                        with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+                        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+                finally:
+                    f.unlink()
+                    (self.root / self.RULES).unlink()
+
+    def test_without_the_parent_gid_or_group_rules_those_links_pass(self):
+        # A missing step that took root's group, a non-root group line weighed by its mode, or a g+w
+        # line that ignored the step's gid would each let a case above through.
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        other = check.TREE_GROUP + 1000
+        for old, new, text, at in (
+                ("        if st is not None:\n            gid = step_gid(root, d, st, gid)\n",
+                 "        if st is not None:\n            gid = TREE_GROUP\n", "d /usr/lib/x/c 0775\n", "usr/lib/x"),
+                ('        elif user.lstrip(":") not in ("-", "", "root", "0") or group.lstrip(":") not in '
+                 '("-", "", "root", "0") \\\n', '        elif user.lstrip(":") not in ("-", "", "root", "0") \\\n',
+                 "z /usr/lib/x 0755 - 1000\n", None),
+                ("        elif st is not None and st.st_gid != TREE_GROUP and any(\n",
+                 "        elif st is not None and False and any(\n", "z /usr/lib/x 0775 - -\n", "usr/lib/x")):
+            with self.subTest(text=text):
+                m = self.mutant(old, new)
+                f = self.tmpfiles(text)
+                try:
+                    with self.attrs("usr/lib/x", gid=other, mode=0o755) if at else contextlib.nullcontext():
+                        with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+                        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+                finally:
+                    f.unlink()
+
     def test_without_the_tmpfiles_step_rule_the_link_passes(self):
-        m = self.mutant("            for rel_, n, why in tmpfiles_makers(root):\n",
-                        "            for rel_, n, why in []:\n")
+        m = self.mutant("            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, "
+                        "0, 0, 0, 0)),\n                                  lacks=True)\n", "            made = None\n")
         link(self.root, self.RULES, "/opt/nope/x")
         self.tmpfiles("d /opt/nope 1777 root root\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
@@ -3243,7 +3422,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         def boom(root, rel):
             raise OSError(errno.EIO, "Input/output error")
         with unittest.mock.patch.object(check, "tree_xattrs", boom):
-            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr, which carries a POSIX ACL "
+            # #1829: the directory holding the link is asked first.
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, in /etc, which carries a POSIX ACL "
                           "(unreadable (Input/output error))", self.v())
 
     def test_tree_xattrs_reads_the_names_and_none_where_unsupported(self):
@@ -3366,7 +3546,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         link(self.root, self.RULES, "/opt/nope/r")
         self.tmpfiles("d /usr/local/nope 1777 root root\n")
         self.assertIn("etc/udev/rules.d: a link to /opt/nope/r, through /opt/nope, which the tree lacks", self.v())
-        m = self.mutant("            paths.append(tree_resolve(root, parts))\n", "            pass\n")
+        m = self.mutant("        paths.append(tree_resolve(root, parts[:-1]) + parts[-1:] if link else tree_resolve(root, parts))\n",
+                        "        pass\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
 
     def test_a_link_to_a_file_another_uid_owns_or_with_an_acl_is_refused(self):
@@ -3380,11 +3561,295 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                         if rel == "usr/lib/x/r" else real(root, rel)):
             self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
         self.assertNotIn("etc/udev/rules.d:", self.v())
-        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st)\n',
-                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st)\n')
+        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)\n',
+                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st, gid=gid)\n')
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
                                         if rel == "usr/lib/x/r" else []):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
+    # (g) #1829: what the box does to a step after the build, and the directories a link sits in.
+    # REQ: HW-1, DEV-2
+
+    def attrs(self, rel, uid=None, gid=None, mode=None):
+        # tree_lstat with REL given another owner, group or permission bits.
+        real = check.tree_lstat
+
+        def lstat(root, r):
+            st = real(root, r)
+            if r != rel or st is None:
+                return st
+            t = list(st)
+            if mode is not None:
+                t[0] = stat.S_IFMT(st.st_mode) | mode
+            t[4] = st.st_uid if uid is None else uid
+            t[5] = st.st_gid if gid is None else gid
+            return os.stat_result(tuple(t))
+        return unittest.mock.patch.object(check, "tree_lstat", lstat)
+
+    def test_a_tmpfiles_line_that_changes_a_held_step_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln, step, how in (("z /usr/lib/x 0777 - - -", "usr/lib/x", "mode 0777 for -:-"),
+                              ("a+ /usr/lib/x - - - - u:1000:rwx", "usr/lib/x", "with a POSIX ACL"),
+                              ("Z /usr 0757 - -", "usr", "mode 0757 for -:-"),
+                              ("A+ /usr/lib - - - - d:u:1000:rwx", "usr/lib", "with a POSIX ACL"),
+                              ("D /usr/lib/x 0755 1000 -", "usr/lib/x", "mode 0755 for 1000:-"),
+                              ("e /usr/lib/x 0775 root 1000", "usr/lib/x", "mode 0775 for root:1000"),
+                              ("z /usr/lib/* 0777", "usr/lib/x", "mode 0777 for -:-"),
+                              ("z /usr/lib/x ~0777", "usr/lib/x", "mode ~0777 for -:-"),
+                              ("L+ /usr/lib/x - - - - /var/tmp", "usr/lib/x", "a link"),
+                              ("C+ /usr/lib/x - - - - /var/tmp/u", "usr/lib/x", "a copy of /var/tmp/u")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box" % (step, how), self.v())
+                finally:
+                    f.unlink()
+        # Combined delta 2: a line naming a non-root group is refused whatever the mode, as the step's
+        # mode, another line or a setgid bit may give that group write.
+        other = check.TREE_GROUP + 1000
+        for ln, step, how in (("z /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("e /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("d /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("z /usr/lib/x 0755 - 1000", "usr/lib/x", "mode 0755 for -:1000"),
+                              ("z /usr/lib/x :0755 - 1000", "usr/lib/x", "mode :0755 for -:1000"),
+                              ("z /usr/lib/* - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("Z /usr - - 1000", "usr", "mode - for -:1000"),
+                              ("z /usr/lib/x 2755 - 1000\nz /usr/lib/x 0775 - -", "usr/lib/x", "mode 2755 for -:1000")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box; the line, not the tree, "
+                                  "decides who can write it" % (step, how), self.v())
+                finally:
+                    f.unlink()
+        # A g+w line that names no group but root counts where the step's tree gid is not root: no line
+        # is trusted to replace that group, since systemd skips a duplicate line for a path (G2), and
+        # Z does not follow a link (G3). A Z line counts on the steps below it too.
+        link(self.root, "opt/l", "/usr/lib")
+        for lines, step in ((("z /usr/lib/x 0775 - -",), "usr/lib/x"),
+                            (("d /usr/lib/x 0775",), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - root",), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - 0",), "usr/lib/x"),
+                            (("Z /usr 0775 - -",), "usr/lib/x"),
+                            (("d /usr/lib/x 0775 - -", "d /usr/lib/x - - root"), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - -", "Z /opt/l - - root"), "usr/lib/x")):
+            with self.subTest(lines=lines), self.attrs("usr/lib/x", gid=other, mode=0o755):
+                f = self.tmpfiles("\n".join(lines) + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes mode %s for -:%s over the tree's gid %d "
+                                  "on the box" % (step, lines[0].split()[2], lines[0].split()[4] if len(
+                                      lines[0].split()) > 4 else "-", other), self.v())
+                finally:
+                    f.unlink()
+        # G2 across two files: the reset in another file is skipped just the same.
+        f = self.tmpfiles("d /usr/lib/x 0775 - -\n")
+        g = write(self.root, "etc/tmpfiles.d/a.conf", "d /usr/lib/x - - root\n")
+        try:
+            with self.attrs("usr/lib/x", gid=other, mode=0o755):
+                self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 remakes mode 0775 for -:- over the tree's gid %d"
+                              % other, self.v())
+        finally:
+            f.unlink()
+            g.unlink()
+        (self.root / "opt/l").unlink()
+        # L3 point 2: a directory the chase walks through, off the final path.
+        (self.root / self.RULES).unlink()
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        self.tmpfiles("d /opt/d 0777\n")
+        self.assertIn("etc/udev/rules.d: a link to /opt/d/x, through /opt/d, which usr/lib/tmpfiles.d/x.conf "
+                      "line 1 remakes mode 0777 for -:- on the box", self.v())
+
+    def test_a_tmpfiles_line_that_keeps_a_held_step_root_only_passes(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln in ("z /usr/lib/x 0755 root root", "d /usr/lib/x 0755 - -", "Z /usr 0755 root root",
+                   "a+ /usr/lib/y - - - - u:1000:rwx", "z /usr/lib/x/r/q 0777", "e /usr/lib/x 0775 root root",
+                   "L /etc/other - - - - /usr/lib/x"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+        # A g+w line over a root-group step, or a line without group write over a non-root one.
+        other = check.TREE_GROUP + 1000
+        for ln, gid, mode in (("z /usr/lib/x 0775 - -", None, 0o755), ("z /usr/lib/x 0775 - root", None, 0o755),
+                              ("d /usr/lib/x 0775", None, 0o755), ("Z /usr 0775 root root", None, 0o755),
+                              ("z /usr/lib/x 0755 - -", other, 0o755), ("z /usr/lib/x 2755 - root", other, 0o755),
+                              ("z /usr/lib/x 0775 - root\nz /usr/lib/x 0755 - -", None, 0o755)):
+            with self.subTest(ln=ln, gid=gid), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_held_step_tmpfiles_rule_those_links_pass(self):
+        m = self.mutant("        made = tmpfiles_maker(root, path_parts(d), st)\n", "        made = None\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        self.tmpfiles("z /usr/lib/x 0777 - - -\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_held_step_a_non_root_group_can_write_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        other = check.TREE_GROUP + 1000
+        with self.attrs("usr/lib/x", gid=other, mode=0o775):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which gid %d can write"
+                          % other, self.v())
+        # var/mail and var/local are stock 2775 for mail and staff: a link through them is refused too.
+        (self.root / "var/mail").mkdir(parents=True)
+        link(self.root, "etc/udev/hwdb.d", "/var/mail/h")
+        with self.attrs("var/mail", gid=other, mode=0o2775):
+            self.assertIn("etc/udev/hwdb.d: a link to /var/mail/h, through /var/mail, which gid %d can write"
+                          % other, self.v())
+        for gid, mode in ((check.TREE_GROUP, 0o775), (other, 0o755)):
+            with self.subTest(gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_without_the_group_write_rule_the_link_passes(self):
+        m = self.mutant("        if st.st_mode & 0o020 and st.st_gid != TREE_GROUP:\n", "        if False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with self.attrs("usr/lib/x", gid=check.TREE_GROUP + 1000, mode=0o775):
+            with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+            self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_tree_link_through_a_step_a_copy_line_makes_is_refused(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln, how in (("C /opt/nope - - - - /var/tmp/u", "a copy of /var/tmp/u"),
+                        ("C /opt/nope", "a copy of its factory default"),
+                        ("C+ /opt/* 0755 root root - /usr/lib/x", "a copy of /usr/lib/x")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/nope, which the tree lacks "
+                                  "and usr/lib/tmpfiles.d/x.conf line 1 makes %s" % how, self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_copy_rule_the_type_allowlist_still_refuses_the_link(self):
+        # #2174: C is off TMPFILES_STEP_TYPES, so the copy rule now only names what the line does.
+        m = self.mutant('        elif typ[:1] == "C":\n', "        elif False:\n")
+        link(self.root, self.RULES, "/opt/nope/x")
+        self.tmpfiles("C /opt/nope - - - - /var/tmp/u\n")
+        self.assertIn("makes type C (off the step check's allowlist, #2174)",
+                      " | ".join(m.world_writable_link(str(self.root), self.RULES)))
+        self.assertIn("makes a copy of /var/tmp/u", " | ".join(check.world_writable_link(str(self.root), self.RULES)))
+    # REQ: HW-1, DEV-2
+    # #2174 (TREE-STEP-ALLOW): the step check is an allowlist of line types. A type or modifier not
+    # known to leave a step root-only counts as making it writable, so a t or T line that sets an ACL
+    # through its xattr (system.posix_acl_access) is refused like an a or A line.
+    def test_a_tmpfiles_line_of_a_type_off_the_allowlist_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln, step, typ in (("t /usr/lib/x - - - - system.posix_acl_access=0sAgAAAAEABgD", "usr/lib/x", "t"),
+                              ("T /usr - - - - system.posix_acl_default=0sAgAAAAEABgD", "usr", "T"),
+                              ("t+ /usr/lib/x - - - - user.canary=1", "usr/lib/x", "t+"),
+                              ("h /usr/lib/x - - - - -i", "usr/lib/x", "h"),
+                              ("H /usr/lib - - - - -i", "usr/lib", "H"),
+                              ("p /usr/lib/x 0600", "usr/lib/x", "p"),
+                              ("c+ /usr/lib/x 0600 - - - 1:3", "usr/lib/x", "c+"),
+                              ("b /usr/lib/x 0600 - - - 8:0", "usr/lib/x", "b"),
+                              ("Y /usr/lib/x 0755", "usr/lib/x", "Y"),
+                              ("f^ /usr/lib/x 0644 - - - canary.cred", "usr/lib/x", "f^"),
+                              ("d= /usr/lib/x 0755", "usr/lib/x", "d="),
+                              ("z? /usr/lib/x 0755", "usr/lib/x", "z?")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes type %s (off the step check's "
+                                  "allowlist, #2174) on the box" % (step, typ), self.v())
+                finally:
+                    f.unlink()
+        # A step the tree lacks.
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/opt/nope/x")
+        f = self.tmpfiles("t /opt/nope - - - - user.canary=1\n")
+        try:
+            self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/nope, which the tree lacks and "
+                          "usr/lib/tmpfiles.d/x.conf line 1 makes type t (off the step check's allowlist, #2174)",
+                          self.v())
+        finally:
+            f.unlink()
+
+    def test_a_tmpfiles_line_of_an_allowlisted_type_keeping_a_step_root_only_passes(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for ln in ("f /usr/lib/x 0644", "f+! /usr/lib/x 0644 root root - y", "w /usr/lib/x - - - - y",
+                   "w+ /usr/lib/x - - - - y", "d /usr/lib/x 0755", "d- /usr/lib/x 0755", "d$ /usr/lib/x 0755",
+                   "D! /usr/lib/x 0755 root root", "e /usr/lib/x 0755", "v /usr/lib/x 0755", "q /usr/lib/x 0755",
+                   "Q /usr/lib/x 0755", "z /usr/lib/x 0755", "Z /usr 0755 root root", "f~ /usr/lib/x 0644 - - - eQ==",
+                   "x /usr/lib/x", "X /usr/lib/x", "t /usr/lib/y - - - - user.canary=1"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_type_allowlist_a_t_line_passes(self):
+        m = self.mutant("        elif typ[:1] not in TMPFILES_STEP_TYPES or not set(typ[1:]) <= TMPFILES_STEP_MODIFIERS:\n",
+                        "        elif False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        self.tmpfiles("t /usr/lib/x - - - - system.posix_acl_access=0sAgAAAAEABgD\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_link_in_a_directory_someone_else_can_write_is_refused(self):
+        (self.root / "etc/foo.d").mkdir(parents=True)
+        link(self.root, "etc/foo.d/r", "/usr/lib/x/r")
+        other = check.TREE_OWNER + 1000
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which uid %d owns" % other, self.v())
+        with self.attrs("etc/foo.d", gid=check.TREE_GROUP + 1000, mode=0o775):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which gid %d can write"
+                          % (check.TREE_GROUP + 1000), self.v())
+        real = check.tree_xattrs
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "etc/foo.d" else real(root, rel)):
+            self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which carries a POSIX ACL", self.v())
+        # A mask is replaced as easily as any other link.
+        link(self.root, "etc/foo.d/m", "/dev/null")
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("etc/foo.d/m: a link to /dev/null, in /etc/foo.d, which uid %d owns" % other, self.v())
+        self.tmpfiles("z /etc/foo.d 0777\n")
+        self.assertIn("etc/foo.d/r: a link to /usr/lib/x/r, in /etc/foo.d, which usr/lib/tmpfiles.d/x.conf "
+                      "line 1 remakes mode 0777 for -:- on the box", self.v())
+        # A link a tmpfiles.d L line makes there.
+        ln = "L /etc/foo.d/t - - - - /usr/lib/x"
+        self.tmpfiles(ln + "\n")
+        with self.attrs("etc/foo.d", uid=other):
+            self.assertIn("x.conf: line 1: %s; a link to /usr/lib/x, in /etc/foo.d, which uid %d owns" % (ln, other),
+                          self.v())
+        self.assertNotIn("etc/foo.d", self.v())
+
+    def test_without_the_holder_rule_those_links_pass(self):
+        m = self.mutant("            why = step_refusal(root, d, target, held, st, via=\"in\", gid=gid)\n", "            why = None\n")
+        (self.root / "etc/foo.d").mkdir(parents=True)
+        link(self.root, "etc/foo.d/r", "/usr/lib/x/r")
+        self.tmpfiles("z /etc/foo.d 0777\n")
+        self.assertEqual(m.world_writable_link(str(self.root), "etc/foo.d/r"), [])
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), "etc/foo.d/t", "/usr/lib/x"))
+        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/foo.d/r"), [])
+        self.assertIsNotNone(check.tmpfiles_link_refusal(str(self.root), "etc/foo.d/t", "/usr/lib/x"))
+
+    def test_violations_reads_the_makers_once(self):
+        for i in range(3):
+            link(self.root, "etc/udev/rules.d/%d" % i, "/usr/lib/x/%d" % i)
+        self.tmpfiles("L /etc/y - - - - /usr/lib/x\n")
+        real = check.tmpfiles_makers
+        with unittest.mock.patch.object(check, "tmpfiles_makers", side_effect=real) as makers:
+            check.violations(self.root)
+            self.assertEqual(makers.call_count, 1)
+            # Outside violations() nothing is kept: a direct call reads the tree as it is now.
+            check.world_writable_link(str(self.root), "etc/udev/rules.d/0")
+            check.world_writable_link(str(self.root), "etc/udev/rules.d/0")
+            self.assertGreater(makers.call_count, 2)
+        self.assertIsNone(check._MAKERS)
 
     # SERVICE_DIRS lists every directory a unit's service user owns.
 
@@ -3593,6 +4058,8 @@ def clean_tree(root):
     radio(root)
     uplink(root)
     write(root, "usr/lib/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
+    tpm = "usr/lib/udev/rules.d/60-agentos-tpm.rules"
+    write(root, tpm, (MK / "mkosi.extra" / tpm).read_text())
     return root
 
 
@@ -3777,6 +4244,168 @@ class TmpfilesAllowTest(unittest.TestCase):
         self.assertIn(("etc/tmpfiles.d/x.conf", "L+ /var/run - - - - ../run"), allowed)
         self.assertEqual(check.tmpfiles_allow_violations(self.root, allowed), [])
         self.assertNotEqual(check.tmpfiles_allow_violations(self.root, allowed - {("etc/tmpfiles.d/x.conf", "d /run/y 0755")}), [])
+
+
+class ExecAllowTest(unittest.TestCase):
+    """#1556: the code root runs at boot outside unit Exec lines (udev rules, system and environment
+    generators, modules-load.d) is held to image/mkosi/exec.allow: every file in every directory
+    systemd 257 reads them from, by its path and the SHA-256 of what the box reads. A rule that runs
+    sysctl, or a changed stock generator, fails the build until it is reviewed and listed."""
+    # REQ: DEV-2, CH-9
+    TPM = "usr/lib/udev/rules.d/60-agentos-tpm.rules"
+    HARM = 'ACTION=="add", SUBSYSTEM=="net", RUN+="/usr/sbin/sysctl -w net.ipv4.ip_forward=1"\n'
+    CHANNELS = ("etc/udev/rules.d/99-x.rules", "usr/local/lib/udev/rules.d/99-x.rules",
+                "usr/lib/udev/rules.d/99-x.rules", "etc/systemd/system-generators/x",
+                "usr/local/lib/systemd/system-generators/x", "usr/lib/systemd/system-generators/x",
+                "etc/systemd/system-environment-generators/x", "usr/lib/systemd/system-environment-generators/x",
+                "etc/modules-load.d/x.conf", "usr/local/lib/modules-load.d/x.conf", "usr/lib/modules-load.d/x.conf")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = clean_tree(self.tmp.name)
+
+    def v(self, allowed=None):
+        return check.exec_allow_violations(self.root, allowed)
+
+    @staticmethod
+    def entry(data):
+        return "sha256:" + hashlib.sha256(data.encode()).hexdigest()
+
+    def test_allowlist_file(self):
+        text = (MK / check.EXEC_ALLOW).read_text()
+        self.assertTrue(text.startswith(check.EXEC_ALLOW_HEADER))
+        self.assertIn(check.EXEC_REGENERATE.replace("ROOT", ""), check.EXEC_ALLOW_HEADER)
+        allowed = check.exec_allowed()
+        self.assertIsNotNone(allowed)
+        for ln in text.split("\n"):
+            if ln and not ln.startswith("#"):
+                rel, tab, value = ln.partition("\t")
+                self.assertTrue(tab, ln)
+                self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
+                                      r"(environment-)?generators/[^/]+|modules-load\.d/[^/]+\.conf)$")
+                self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
+        # The image's own rules file is on it by its hash, so an edit to it fails here first.
+        tpm = (MK / "mkosi.extra" / self.TPM).read_text()
+        self.assertIn((self.TPM, self.entry(tpm)), allowed)
+        self.assertEqual(self.v(), [])
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_listed_files_pass_and_others_fail(self):
+        self.assertEqual(self.v(), [])
+        for rel in self.CHANNELS:
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, self.HARM, 0o755)
+                want = "%s: not on the boot-code allowlist (%s, #1556)" % (rel, check.EXEC_ALLOW_REPO)
+                v = self.v()
+                self.assertEqual(len(v), 1, v)
+                self.assertTrue(v[0].startswith(want), v)
+                self.assertTrue(v[0].endswith("entry: %s\t%s" % (rel, self.entry(self.HARM))), v)
+                self.assertIn(want, " | ".join(check.violations(self.root)))
+                allowed = check.exec_allowed() | {(rel, self.entry(self.HARM))}
+                self.assertEqual(self.v(allowed), [])
+                # One byte changed, and the listed file fails again.
+                write(self.root, rel, self.HARM.replace("=1", "=0"), 0o755)
+                self.assertTrue(self.v(allowed) and self.v(allowed)[0].startswith(want))
+                p.unlink()
+        # The image's own file, changed.
+        write(self.root, self.TPM, (MK / "mkosi.extra" / self.TPM).read_text() + self.HARM)
+        self.assertIn("%s: not on the boot-code allowlist" % self.TPM, " | ".join(check.violations(self.root)))
+
+    def test_every_file_is_listed_not_only_the_winner(self):
+        # systemd runs a generator only if it is executable, and a non-executable file of the same name
+        # in /etc does not take the name, so the /usr/lib one still runs: every file is listed.
+        rel = "usr/lib/systemd/system-generators/x"
+        write(self.root, rel, "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n", 0o755)
+        write(self.root, "etc/systemd/system-generators/x", "", 0o644)
+        allowed = check.exec_allowed() | {("etc/systemd/system-generators/x", "mask")}
+        self.assertIn("%s: not on the boot-code allowlist" % rel, " | ".join(self.v(allowed)))
+        # Hidden and backup names are skipped as systemd skips them; other suffixes in udev and
+        # modules-load.d too, since neither reads them.
+        (self.root / rel).unlink()
+        for rel in ("usr/lib/udev/rules.d/.x.rules", "usr/lib/udev/rules.d/x.rules~", "usr/lib/udev/rules.d/x.txt",
+                    "usr/lib/modules-load.d/x.conf.dpkg-old", "usr/lib/systemd/system-generators/x.bak"):
+            write(self.root, rel, self.HARM, 0o755)
+        self.assertEqual(self.v(allowed), [])
+
+    def test_links_and_masks(self):
+        rel = "etc/udev/rules.d/60-agentos-tpm.rules"
+        write(self.root, "var/tmp/x.rules", self.HARM)
+        for target in ("/var/tmp/x.rules", "../../../var/tmp/x.rules", "/" + self.TPM):
+            with self.subTest(target=target):
+                f = link(self.root, rel, target)
+                self.assertIn("%s: unreadable (%s is a link to %s;" % (rel, rel, target), " | ".join(self.v()))
+                f.unlink()
+        # A mask (a link to exactly /dev/null, or an empty file) is listed as one.
+        for make in (lambda: link(self.root, rel, "/dev/null"), lambda: write(self.root, rel, "")):
+            f = make()
+            self.assertIn("entry: %s\tmask" % rel, " | ".join(self.v()))
+            self.assertEqual(self.v(check.exec_allowed() | {(rel, "mask")}), [])
+            f.unlink()
+        # A linked directory is refused, whatever it holds.
+        (self.root / "var/tmp/r").mkdir()
+        (self.root / "etc/udev/rules.d").rmdir()
+        f = link(self.root, "etc/udev/rules.d", "/var/tmp/r")
+        self.assertIn("etc/udev/rules.d: unreadable (etc/udev/rules.d is a link to /var/tmp/r;", " | ".join(self.v()))
+        f.unlink()
+        # Debian kmod's modules.conf -> ../modules is read through, as kmod's /etc/modules; any other
+        # target of that link is refused.
+        write(self.root, "etc/modules", "tun\n")
+        f = link(self.root, "etc/modules-load.d/modules.conf", "../modules")
+        self.assertIn("entry: etc/modules-load.d/modules.conf\t%s" % self.entry("tun\n"), " | ".join(self.v()))
+        self.assertEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}), [])
+        write(self.root, "etc/modules", "tun\nbr_netfilter\n")
+        self.assertNotEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}),
+                            [])
+        f.unlink()
+        link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
+        self.assertIn("etc/modules-load.d/modules.conf: unreadable", " | ".join(self.v()))
+
+    def test_run_and_unreadable_are_refused(self):
+        for d in ("run/udev/rules.d", "run/systemd/system-generators", "run/systemd/system-environment-generators",
+                  "run/modules-load.d"):
+            with self.subTest(d=d):
+                write(self.root, d + "/x", self.HARM)
+                self.assertIn("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d,
+                              " | ".join(self.v()))
+                shutil.rmtree(self.root / d)
+        (self.root / "usr/lib/udev/rules.d/y.rules").mkdir()
+        self.assertIn("usr/lib/udev/rules.d/y.rules: unreadable", " | ".join(self.v()))
+        (self.root / "usr/lib/udev/rules.d/y.rules").rmdir()
+        p = write(self.root, "usr/lib/modules-load.d/x.conf", "tun\n")
+        p.chmod(0o666)
+        self.assertIn("usr/lib/modules-load.d/x.conf: unreadable", " | ".join(self.v()))
+
+    def test_found_under_mkosi_and_missing_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(MK / "mkosi.finalize", os.path.join(tmp, "finalize"))
+            moved = load("image_check_moved_exec", os.path.join(tmp, "finalize"))
+            moved.TREE_OWNER = check.TREE_OWNER
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": str(MK)}):
+                self.assertEqual(moved.allow_path(moved.EXEC_ALLOW), str(MK / check.EXEC_ALLOW))
+                self.assertEqual(moved.exec_allow_violations(self.root), [])
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
+                want = ["exec.allow: missing; every udev rules file, generator and modules-load.d file must be on it "
+                        "(#1556)"]
+                self.assertEqual(moved.exec_allow_violations(self.root), want)
+                self.assertIn(want[0], moved.violations(self.root))
+
+    def test_regenerate(self):
+        write(self.root, "etc/udev/rules.d/99-x.rules", self.HARM)
+        link(self.root, "usr/lib/systemd/system-generators/y", "/dev/null")
+        out = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", "--exec-allowlist", str(self.root)]), \
+                contextlib.redirect_stdout(out):
+            check.main()
+        self.assertTrue(out.getvalue().startswith(check.EXEC_ALLOW_HEADER))
+        f = pathlib.Path(self.tmp.name) / "allow"
+        f.write_text(out.getvalue())
+        allowed = check.exec_allowed(str(f))
+        self.assertEqual(allowed, {("etc/udev/rules.d/99-x.rules", self.entry(self.HARM)),
+                                   ("usr/lib/systemd/system-generators/y", "mask"),
+                                   (self.TPM, self.entry((MK / "mkosi.extra" / self.TPM).read_text()))})
+        self.assertEqual(self.v(allowed), [])
+        self.assertNotEqual(self.v(allowed - {("usr/lib/systemd/system-generators/y", "mask")}), [])
 
 
 class CredstoreTest(unittest.TestCase):
@@ -3988,12 +4617,13 @@ class TreeAccessTest(unittest.TestCase):
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
-    a link on the build host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
+    a link on the build host, and in the two functions that read the repository's allowlists (tmpfiles.allow,
+    exec.allow), not the tree. Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "tmpfiles_allow_path", "tmpfiles_allowed"))
+                         "allow_path", "allow_entries"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -4148,6 +4778,12 @@ class UplinkTest(unittest.TestCase):
         # image; the tree check refuses any that would (TreeCheckTest).
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_the_mail_spool_link_is_removed_from_the_image(self):
+        # REQ: HW-1, DEV-2 (#1829): Debian's var/spool/mail links to 2775 root:mail var/mail, a step
+        # gid 8 can write, so the tree check refuses it; the box runs no mail, so the link goes.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/var/spool/mail", removed)
 
     def test_uplink_tells_the_lan_nothing_about_the_box(self):
         # REQ: DEV-2 (#1479): no hostname in DHCP (every box is "agentos"), and IPv6 addresses that
@@ -4437,6 +5073,17 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("console| agentos-e2e: PASS a\n", out)
         self.assertNotIn("\r", out)
 
+    def test_e2e_console_passes_a_note_that_is_no_step(self):
+        # REQ: HW-10, CH-1. phone-control's count of the recovery notices it passed over (#2170):
+        # echoed, counted as no step, and DONE's counts still match the step lines.
+        note = b"[   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery notices=1 texts=1 requests=0\n"
+        rc, out, done = self.e2e_console(b"agentos-e2e: PASS a\n" + note +
+                                         b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("console| [   90.1] box-e2e[817]: agentos-e2e: NOTE phone-control passed-over recovery "
+                      "notices=1 texts=1 requests=0\n", out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+
     def test_e2e_console_accepts_the_journald_lead_in_of_the_real_console(self):
         # REQ: HW-10. CI run 38655868696 (XFAIL text as at 789d072): each line carries
         # "[ time] box-e2e[pid]: ", and the login prompt can land in front of one.
@@ -4463,6 +5110,9 @@ class UplinkTest(unittest.TestCase):
                 ("a FAIL hidden by the counts", step + b"agentos-e2e: FAIL b no\n" + done),
                 ("DONE counts below the steps", step + step + done),
                 ("unknown driver line", step + b"agentos-e2e: OK b\n" + done),
+                ("NOTE after DONE", step + done + b"agentos-e2e: NOTE a texts=1\n"),
+                ("NOTE with no step", step + b"agentos-e2e: NOTE \n" + done),
+                ("NOTE quoting text", step + b"agentos-e2e: NOTE a I couldn't text you from 12:00\n" + done),
                 ("step line mid-line", step + b"junk agentos-e2e: PASS b\n" + done),
                 ("another unit's tag", b"[ 1.0] box-e2e[7]: " + step + b"[ 1.1] evil[5]: " + done),
                 ("another unit's tag on a step", b"[ 1.0] sshd[7]: " + step + b"[ 1.1] box-e2e[7]: " + done),
@@ -4821,6 +5471,31 @@ class SetupServicesTest(unittest.TestCase):
         self.assertEqual(s["Service"]["Type"], "oneshot")
         self.assertEqual(s["Service"]["ExecStart"], "/usr/lib/agentos/egress-setup --restart")
         self.assertIn("+/usr/lib/agentos/egress-setup", ini(UNITS / "agentos-egress.service")["Service"]["ExecStartPre"])
+
+    def test_the_setup_vault_s_oneshot_is_sandboxed(self):
+        # #1387: the root oneshot keeps only what egress-setup uses (a lock and a temporary directory
+        # in /run, setpriv, chown, the vault's state directory, systemctl over /run/systemd/private).
+        # Each line is pinned, so deleting one fails here.
+        got = settings(UNITS / "agentos-egress-setup.service")
+        for k, want in {
+            "CapabilityBoundingSet": ["CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE"],
+            "AmbientCapabilities": [], "NoNewPrivileges": ["yes"], "ProtectSystem": ["strict"],
+            # "-": egress-setup exits 0 with no vault directory; the namespace must not fail first.
+            "ReadWritePaths": ["/run -/var/lib/agentos-egress"],
+            "ProtectHome": ["yes"], "PrivateTmp": ["yes"], "PrivateDevices": ["yes"],
+            "PrivateNetwork": ["yes"], "RestrictAddressFamilies": ["AF_UNIX"],
+            "ProtectKernelTunables": ["yes"], "ProtectKernelModules": ["yes"], "ProtectKernelLogs": ["yes"],
+            "ProtectControlGroups": ["yes"], "ProtectClock": ["yes"], "ProtectHostname": ["yes"],
+            "RestrictNamespaces": ["yes"], "RestrictRealtime": ["yes"], "RestrictSUIDSGID": ["yes"],
+            "LockPersonality": ["yes"], "MemoryDenyWriteExecute": ["yes"],
+            "SystemCallArchitectures": ["native"], "SystemCallFilter": ["@system-service"],
+            "UMask": ["0077"], "ProtectProc": ["invisible"], "PrivateIPC": ["yes"],
+            "User": [], "DynamicUser": [],
+            # Not ProcSubset=pid: the claim check reads /proc/sys/kernel/random/boot_id.
+            "ProcSubset": [],
+        }.items():
+            with self.subTest(k):
+                self.assertEqual(got.get(k, []), want)
 
 
 class EgressSetupTest(unittest.TestCase):

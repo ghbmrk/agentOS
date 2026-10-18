@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -44,6 +45,41 @@ const DefaultMaxBody = 8 << 20
 
 // DefaultMaxConcurrent caps one machine's requests in flight.
 const DefaultMaxConcurrent = 4
+
+// DefaultInFlightBytes is the memory the requests in flight across every
+// machine may hold at once (egress K18, #1771). A request reserves what it
+// can hold before it holds it: readCost while its body is read, then
+// bodyCost for the body it read. So the bound follows what requests cost in
+// memory rather than how many there are: a hostile body that decodes to
+// many times its size takes as much of it as it holds, and small ones leave
+// room for many. tests/test_egress_memory.py reads it into the vault
+// unit's memory derivation.
+const DefaultInFlightBytes = 320 << 20
+
+// The terms of bodyCost, bytes per unit, each an upper bound that
+// TestBodyCostBoundsApply measures against BodyRule.apply's allocations
+// for the costliest body shapes.
+const (
+	// costPerByte covers the body, the decoder's copy of it, the decoded
+	// strings and the re-encoded output, with the buffers' growth.
+	costPerByte = 16
+	// costPerInvalid covers an invalid UTF-8 byte, which decodes and
+	// re-encodes as the three bytes of U+FFFD, and each byte of U+2028 and
+	// U+2029, which re-encode escaped. Other valid UTF-8 does not grow.
+	costPerInvalid = 28
+	// costPerObject is one decoded map[string]any with its first entries.
+	costPerObject = 640
+	// costPerToken is one value or key: its interface, slice or map slot
+	// and the slice and map growth that holds it.
+	costPerToken = 160
+	// costPerDepth is one level of the deepest nesting: the stack frames
+	// that decoding, checking and re-encoding recurse through, doubled
+	// because a goroutine's stack grows by doubling and copying.
+	costPerDepth = 4 << 10
+	// callFloor is what any request holds besides its body: buffers,
+	// headers and the response copy.
+	callFloor = 64 << 10
+)
 
 // Event is one proxy decision. It carries no header or body content, so it
 // cannot carry a credential.
@@ -120,6 +156,9 @@ type Config struct {
 	// MaxConcurrent caps one machine's requests in flight; zero means
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
+	// InFlightBytes caps the memory requests in flight may reserve across
+	// every machine; zero means DefaultInFlightBytes.
+	InFlightBytes int64
 	// Cap is applied to each machine separately.
 	Cap Cap
 	// Label returns a machine's REV-5 data label. Nil, or any answer other
@@ -133,6 +172,10 @@ type Config struct {
 	// why (a Reason constant); required when any operation declares a
 	// Response or Refused statuses. It is called once per stop.
 	RouteFailed func(adapter, reason string)
+	// Stops records which routes are stopped, so a stop outlives the
+	// proxy (OP-11: the journal). Nil keeps them in this proxy, so a new
+	// one starts with every route open.
+	Stops RouteStops
 	// Granted, if set, grants per request what Grants does not: it is
 	// asked with the calling machine itself, never the grants entry a
 	// replay machine borrows, and the adapter, only when no static grant
@@ -160,13 +203,16 @@ type Proxy struct {
 	audit    Auditor
 	maxBody  int64
 	maxConc  int
+	budget   int64
 	cap      Cap
 	now      func() time.Time
 	xch      exchangeHooks
 
-	mu    sync.Mutex
-	usage map[string]*machineUsage
-	stops map[string]string // adapter -> why its route stopped (CRED-5t)
+	mu       sync.Mutex
+	reserved int64 // bytes reserved by requests in flight, every machine
+	usage    map[string]*machineUsage
+	stops    RouteStops        // adapter -> why its route stopped (CRED-5t)
+	held     map[string]string // adapter -> a stop stops could not record
 }
 
 type machineUsage struct {
@@ -197,12 +243,17 @@ func New(cfg Config) (*Proxy, error) {
 		audit:    cfg.Audit,
 		maxBody:  cfg.MaxBody,
 		maxConc:  cfg.MaxConcurrent,
+		budget:   cfg.InFlightBytes,
 		cap:      cfg.Cap,
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
 		labelOf:  cfg.Label,
 		xch:      exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
-		stops:    map[string]string{},
+		stops:    cfg.Stops,
+		held:     map[string]string{},
+	}
+	if p.stops == nil {
+		p.stops = memStops{}
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
@@ -261,6 +312,9 @@ func New(cfg Config) (*Proxy, error) {
 	if p.maxConc <= 0 {
 		p.maxConc = DefaultMaxConcurrent
 	}
+	if p.budget <= 0 {
+		p.budget = DefaultInFlightBytes
+	}
 	if p.now == nil {
 		p.now = time.Now
 	}
@@ -311,11 +365,14 @@ func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Audit
 	})
 }
 
-// admit takes a concurrency slot and checks the cap; release returns the
-// slot and charges bytes.
-func (p *Proxy) admit(machine string) (string, bool) {
+// admit reserves n bytes of the in-flight budget and a per-machine
+// concurrency slot and checks the cap; release returns both.
+func (p *Proxy) admit(machine string, n int64) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.reserved+n > p.budget {
+		return "too many requests in flight", false
+	}
 	u := p.usage[machine]
 	if u == nil {
 		u = &machineUsage{}
@@ -330,7 +387,21 @@ func (p *Proxy) admit(machine string) (string, bool) {
 		return "byte cap reached", false
 	}
 	u.inFlight++
+	p.reserved += n
 	return "", true
+}
+
+// resize changes an admitted request's reservation by d bytes. A shrink
+// always succeeds; a growth fails, changing nothing, when the budget lacks
+// the room.
+func (p *Proxy) resize(d int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 && p.reserved+d > p.budget {
+		return false
+	}
+	p.reserved += d
+	return true
 }
 
 func (p *Proxy) charge(machine string, requests, bytes int64) {
@@ -341,10 +412,58 @@ func (p *Proxy) charge(machine string, requests, bytes int64) {
 	p.mu.Unlock()
 }
 
-func (p *Proxy) release(machine string) {
+func (p *Proxy) release(machine string, n int64) {
 	p.mu.Lock()
 	p.usage[machine].inFlight--
+	p.reserved -= n
 	p.mu.Unlock()
+}
+
+// readCost is what reading a body of up to n bytes can hold: io.ReadAll's
+// buffer, which grows by copying, so the old and the new buffer are live
+// together.
+func readCost(n int64) int64 { return callFloor + 3*n }
+
+// bodyCost is what BodyRule.apply can hold for body at its peak, from one
+// pass over the body that counts what decoding it allocates per unit.
+func bodyCost(body []byte) int64 {
+	var invalid, objects, tokens, depth, deepest int64
+	in, esc := false, false
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if c >= 0x80 {
+			r, n := utf8.DecodeRune(body[i:])
+			if r == '\u2028' || r == '\u2029' {
+				invalid += int64(n) // re-encoded as a six-byte escape
+			}
+			if r != utf8.RuneError || n != 1 {
+				i += n - 1
+				continue
+			}
+			invalid++
+		}
+		switch {
+		case esc:
+			esc = false
+		case in:
+			esc, in = c == '\\', c != '"'
+		case c == '"':
+			in = true
+		case c == '{' || c == '[':
+			depth++
+			deepest = max(deepest, depth)
+			tokens++
+			if c == '{' {
+				objects++
+			}
+		case c == '}' || c == ']':
+			depth--
+		case c == ',' || c == ':':
+			tokens++
+		}
+	}
+	return callFloor + costPerByte*int64(len(body)) + costPerInvalid*invalid +
+		costPerObject*objects + costPerToken*tokens + costPerDepth*deepest
 }
 
 func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
@@ -408,11 +527,18 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 
-	if reason, ok := p.admit(machine); !ok {
+	// Reserve for the body before reading it: its declared length when it
+	// has one (the server reads no further), MaxBody when it does not.
+	n := r.ContentLength
+	if n < 0 || n > p.maxBody {
+		n = p.maxBody
+	}
+	held := readCost(n)
+	if reason, ok := p.admit(machine, held); !ok {
 		deny(http.StatusTooManyRequests, reason)
 		return
 	}
-	defer p.release(machine)
+	defer func() { p.release(machine, held) }()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, p.maxBody+1))
 	if err != nil {
@@ -423,8 +549,24 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		deny(http.StatusRequestEntityTooLarge, "body too large")
 		return
 	}
+	// Then hold what the body costs from here on: itself, or what checking
+	// it takes. A body no budget could check is refused for good, not as
+	// a retry.
+	need := callFloor + int64(len(body))
 	if op.Body != nil {
-		if body, err = op.Body.apply(body, labelOf() == LabelPublic); err != nil {
+		need = bodyCost(body)
+	}
+	if need > p.budget {
+		deny(http.StatusRequestEntityTooLarge, "body too costly to check")
+		return
+	}
+	if !p.resize(need - held) {
+		deny(http.StatusTooManyRequests, "too many requests in flight")
+		return
+	}
+	held = need
+	if op.Body != nil {
+		if body, err = checkApart(op.Body, body, labelOf() == LabelPublic); err != nil {
 			deny(http.StatusForbidden, err.Error())
 			return
 		}
@@ -627,6 +769,37 @@ func heldExchange(resp *http.Response) ([]byte, error) {
 
 // apply checks a JSON object body against the rule and returns the body to
 // forward: the proxy's own encoding of what it checked.
+// checkApart runs a body check on a goroutine of its own. Checking a deeply
+// nested body grows the stack it runs on by megabytes; a goroutine that
+// exits frees its stack, while a keep-alive connection's goroutine would
+// keep it after release returned the reservation. A panic in the check is
+// raised again here, so it fails only this request.
+func checkApart(b *BodyRule, body []byte, public bool) ([]byte, error) {
+	type result struct {
+		out      []byte
+		err      error
+		panicked bool
+		value    any
+	}
+	done := make(chan result, 1)
+	go func() {
+		r := result{panicked: true}
+		defer func() {
+			if r.panicked {
+				r.value = recover()
+			}
+			done <- r
+		}()
+		r.out, r.err = b.apply(body, public)
+		r.panicked = false
+	}()
+	r := <-done
+	if r.panicked {
+		panic(r.value)
+	}
+	return r.out, r.err
+}
+
 func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()

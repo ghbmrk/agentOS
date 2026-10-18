@@ -31,3 +31,22 @@ func TestThePageSaysARepeatWasAlreadySent(t *testing.T) {
 		t.Fatalf("page:\n%s", p)
 	}
 }
+
+// REQ: OP2-ER-2
+// A repeat whose only known success was erased: the page says a send went
+// and its record was erased, never "Already sent".
+func TestThePageSaysAnErasedOnlyRepeatMayRepeat(t *testing.T) {
+	a := newApprovalRig(t)
+	sent := a.clock().Add(-90 * time.Minute)
+	it := pageItem("i1")
+	it.Sent, it.SentErased = sent, true
+	if _, err := a.ch.RequestLocal(it, 0); err != nil {
+		t.Fatal(err)
+	}
+	p := html.UnescapeString(a.get("/approvals/"))
+	want := "A send on this account went at " + sent.In(a.clock().Location()).Format("15:04 Jan 2") +
+		" and its record was later erased, so this may repeat it. Approve only if it should go."
+	if strings.Count(p, want) != 1 || strings.Contains(p, "Already sent") {
+		t.Fatalf("page:\n%s", p)
+	}
+}

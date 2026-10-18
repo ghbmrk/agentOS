@@ -15,14 +15,19 @@ neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved else
 `git patch-id`: it ignores whitespace. Prints `same` and exits 0, or `changed <files>` and exits 1:
 those files need a delta review. Git 2.38 or later, no network; fetch first.
 
-`--needs-mark` lists the files of base..head that make the PR one that merges only on Mark's own approval of
-it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
+`--needs-mark` lists the files of merge-base..head, plus those the merge changes on base (a criss-cross merge,
+#2138), that make the PR one that merges only on Mark's own approval of it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
+(the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
+usage error (exit 2).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
 prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
-fix-list and a PR never reviewed all fail (PREMERGE-required, #1834).
+fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A PR that changes SPEC.md also needs
+Mark (D-130): that accept carries a `Transcribes: <message id>` line (the reviewer confirms the diff transcribes
+that Mark decision and interprets nothing), or a trusted comment `Mark-approved: <message id> · head <SHA>`
+names a head whose diff equals `head`'s; otherwise it prints `needs-mark SPEC.md` and exits 1.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -39,11 +44,11 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 
 
 # A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
-# CLAUDE*.md, AGENTS.md, .mcp.json and .claude/ count at any depth; broker/core/core.txt sets risk tiers
-# (risk_tier.py); the tests that pin the merge gates count too (PREMERGE-paths, #1835). Matched with
-# fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
+# broker/core/core.txt sets risk tiers (risk_tier.py); the tests that pin the merge gates count too
+# (PREMERGE-paths, #1835). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
 _CFG = r"(?:.*/)?"
-MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude/.*|"
+MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
                         r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*",
                         re.DOTALL)
@@ -53,20 +58,48 @@ def mark_paths(files):
     return sorted(f for f in files if MARK_PATHS.fullmatch(f))
 
 
+def mark_range(cwd, base, head):
+    """Files the PR changes (merge-base..head) plus the files its merge changes on base (base..merge result).
+
+    The second list catches a criss-cross merge (two merge bases), where `git merge-base` can pick the one at
+    which head's Mark-only file is unchanged although the merge reverts base's copy of it (#2138). A conflicted
+    merge-tree keeps its markers, so a conflicted file reads as changed."""
+    def names(a, b):
+        return {f for f in _git(cwd, *DIFF, a, b).decode(errors="surrogateescape").split("\0") if f}
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    return sorted(names(onto, head) | names(base, _replayed(cwd, base, head)))
+
+
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
+# D-130: a SPEC.md change merges on the accept that names the Mark decision it transcribes, else on Mark's approval.
+SPEC_PATHS = re.compile(r"SPEC\.md")
+_TRANSCRIBES = re.compile(r"^Transcribes: cmsg_\w+(?:,? cmsg_\w+)*\s*$", re.M)
+_APPROVED = re.compile(r"Mark-approved: cmsg_\w+ · head ([0-9a-f]{7,40})")
 
 
 def verdict(comments, pr):
-    """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None."""
-    found = None
+    """(verdict, reviewed-sha, transcribes) of the newest trusted L3 verdict comment for PR `pr`, or None.
+
+    `transcribes` holds only when every trusted L3 accept on the PR carries the `Transcribes:` line (D-130):
+    one reviewer withholding it is not overridden by a later accept that has it."""
+    found, tx = None, True
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
         if (c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and _L3.search(body)):
-            found = (first.split(":", 1)[1].strip().lower(), rec.group(1))
+            v = first.split(":", 1)[1].strip().lower()
+            if v == "accept":
+                tx = tx and bool(_TRANSCRIBES.search(body))
+            found = (v, rec.group(1), tx)
     return found
+
+
+def mark_approved(comments):
+    """Heads named by trusted comments whose first line is `Mark-approved: <message id> · head <SHA>`."""
+    return [m.group(1) for c in comments if c.get("author_association") in TRUSTED
+            for m in [_APPROVED.fullmatch((c.get("body") or "").split("\n", 1)[0].strip())] if m]
 
 
 def _git(cwd, *args, ok=(0,)):
@@ -83,7 +116,7 @@ def _replayed(cwd, reviewed, onto):
 
 
 # Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml (and metrics-refresh.yml), board.yml, records.yml.
+# metrics.yml, board.yml, records.yml.
 BOT = {
     "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
     "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
@@ -123,6 +156,14 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
 
 
+def _same(approved, head, base):
+    """True when the approved head's diff equals `head`'s; an unknown SHA is never an approval."""
+    try:
+        return not compare(".", approved, head, base)
+    except subprocess.CalledProcessError:
+        return False
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -138,9 +179,17 @@ def main(argv):
         if v is None or v[0] != "accept":
             print("no-verdict" if v is None else "not-accepted")
             return 1
-        changed = compare(".", v[1], args[0] if args else "HEAD", base)
-        print("changed " + " ".join(changed) if changed else "same")
-        return 1 if changed else 0
+        head = args[0] if args else "HEAD"
+        changed = compare(".", v[1], head, base)
+        if changed:
+            print("changed " + " ".join(changed))
+            return 1
+        spec = [f for f in mark_range(".", base, head) if SPEC_PATHS.fullmatch(f)]
+        if spec and not v[2] and not any(_same(a, head, base) for a in mark_approved(comments)):
+            print("needs-mark " + " ".join(spec))
+            return 1
+        print("same")
+        return 0
     if args[:1] == ["--bot"]:
         if len(args) < 2:
             print(__doc__)
@@ -154,10 +203,15 @@ def main(argv):
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
+        if len(args) > 1:  # `--needs-mark origin/main pr` would read origin/main as the head: pass --base
+            print(__doc__)
+            return 2
         head = args[0] if args else "HEAD"
-        onto = _git(".", "merge-base", base, head).decode().strip()
-        out = _git(".", *DIFF, onto, head).decode(errors="surrogateescape")
-        hit = mark_paths(f for f in out.split("\0") if f)
+        files = mark_range(".", base, head)
+        if not files:  # `--needs-mark origin/main` reads origin/main as the head: an empty range is never `agent`
+            print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
+            return 2
+        hit = mark_paths(files)
         print("mark " + " ".join(hit) if hit else "agent")
         return 1 if hit else 0
     if not 1 <= len(args) <= 2:

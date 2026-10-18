@@ -322,7 +322,9 @@ func TestAResubmissionWithANewBodyOfASendThatMayHaveGoneIsMarked(t *testing.T) {
 // Security R20 on #1433 (probe TestZZSec8NearIdenticalBody): bodies are
 // compared with whitespace trimmed and folded, line endings included, so
 // a regenerated reply that differs only in spacing is a repeat and is
-// asked. Case is not folded: "thanks" is other text than "Thanks".
+// asked. Case is not folded: "thanks" is other text than "Thanks", which
+// matters only in reply to another message of the thread; another reply
+// to the same message is a repeat whatever its body (#1677).
 func TestABodyThatDiffersOnlyInWhitespaceIsARepeat(t *testing.T) {
 	for _, body := range []string{"Thanks, got it.\n", " Thanks, got it.", "Thanks,  got it.", "Thanks,\r\ngot it.", "\tThanks, got\tit. \n"} {
 		r, reply, went := sentReply(t)
@@ -337,7 +339,7 @@ func TestABodyThatDiffersOnlyInWhitespaceIsARepeat(t *testing.T) {
 	}
 	r, reply, _ := sentReply(t)
 	q := len(r.own.queued)
-	if st := reply("reply-1/r2", "thr-1", "thanks, got it."); st.State != journal.Pending || len(r.own.queued) != q+1 {
+	if st := reply("reply-1/r2", "thr-2", "thanks, got it."); st.State != journal.Pending || len(r.own.queued) != q+1 {
 		t.Fatalf("other case: %s %q, queued %d", st.State, st.Permission.Reason, len(r.own.queued)-q)
 	}
 }

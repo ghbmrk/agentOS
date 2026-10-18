@@ -13,3 +13,23 @@ Credentialed browser executor in the broker (plan P2 item 6; CRED-4, CRED-6): S5
 **Part 1 (PR #300):** the broker gate (`broker/browser`: closed v0 protocol, declared origins, CRED-10 output filter outside the driver) on `pkg/claude2-CRED-4b-browser-gate`.
 
 **Part 2:** the driver in its own broker-owned sandbox, vault-held and A5 canary sessions, CRED-6 intents, and a CI job running the real driver ([assumptions](../broker/browser/ASSUMPTIONS.md) K1-K14). Part 2 cannot close until a trusted source outside the driver derives the password-ref set and the gate calls `OmitValues` on every snapshot (K14, CRED-4).
+
+## CRED-4b-r1 (#1111): the gate derives the password refs
+
+**Requirements:** CRED-4. **Class:** release. **Finding:** #211 combined lens point 4 (K14): a page that mislabels a password field, or a driver that reports no password refs, gets its value through.
+
+**Scope:** `broker/browser/gate.go`, `broker/browser/omit.go`, `broker/browser/gate_test.go`, `broker/browser/omit_test.go`, `broker/browser/ASSUMPTIONS.md`, this brief.
+
+**Change:** the gate derives the password refs from the snapshot (every entry field showing a value the agent did not type into it on that page) and calls `OmitValues` on every snapshot before the CRED-10 filter; `password_fields` becomes the gate's count ([assumptions](../broker/browser/ASSUMPTIONS.md) G10, K14).
+
+**Acceptance tests:** `TestGateOmitsEntryValuesTheDriverDidNotReport`, `TestGateOmitsChildValuesAndCopies`, `TestGateKeepsTextTheAgentTyped`, `TestGateTypedTextIsNoOracle`, `TestGateShortValueKeepsPageAndRefs`, `TestGateTypedTextFollowsTheTypeReply`, `TestGateTypedGuessIsNoOracleThroughCopies`, `TestGateTypedFieldShowsAGuessEitherWay`, `TestGateOmitsValuesOfFieldsWithoutRefs`, `TestGateTypedNonEntryKeepsNothing` (`broker/browser/gate_test.go`), `TestEntryRefs` (`broker/browser/omit_test.go`), and every existing `OmitValues` test.
+
+## CRED-4b-r2 (#2245): password-field follow-ups
+
+**Requirements:** CRED-4. **Class:** release. **Finding:** #2245 (#2246 reviews 6239557715, 6239610403, comments 6239722241, 6239829840): a page can echo a typed guess beside an equal password value, borrow the typed field's ref through a `[ref=…]` token in a value, give a password input `role="spinbutton"`, show a value in a screenshot's pixels, or refill a field with the text the agent once typed.
+
+**Scope:** `broker/browser/gate.go`, `broker/browser/omit.go`, `broker/browser/gate_test.go`, `broker/browser/omit_test.go`, `broker/browser/ASSUMPTIONS.md`, this brief.
+
+**Change:** a line's ref is taken only from its attribute run; `spinbutton` is an entry role; a rich-text child (paragraph, generic) is structure, not a value; a value of a field also showing on any line outside the field and its ancestors withholds the whole snapshot (the verb's outcome stays), and inside its ancestors it is scrubbed at any length; text the agent put on pages (typed, or a navigate URL's query values and fragment) is treated the same whether or not it matches, withheld when 4 or more characters of a whole text show outside an omitted field's ancestors and scrubbed inside them, and past 1024 remembered texts or typed refs every page with an omitted field is withheld (PR #2273 reviews); a typed record is forgotten once a snapshot shows that field with other text or empty; a screenshot is not taken, or is discarded, when the page shows a field value the agent did not type ([assumptions](../broker/browser/ASSUMPTIONS.md) G8, G10, K14).
+
+**Acceptance tests:** `TestGateOmitsSpinbuttonValue`, `TestGateScreenshotWithheldForUntypedFieldValue`, `TestGateForgetsStaleTypedText`, `TestGateEchoOutsideFieldWithholdsSnapshot`, `TestGateRefInValueCannotBorrowTypedRef`, `TestGateGuessEchoIsNoOracle`, `TestGateGuessEchoAfterOverflowIsNoOracle`, `TestGateOmitsChildValuesAndCopies` (`broker/browser/gate_test.go`), `TestCRED4PasswordValueScrubbedFromOtherNames`, `TestCRED4RefOnlyInAttributePosition`, `TestCRED4RichTextChildrenAreNotValues`, `TestCRED4ShortValueScrubbedFromAncestors`, `TestEntryRefsStaleTyped`, `TestEntryRefs` (`broker/browser/omit_test.go`), and every existing gate and `OmitValues` test.

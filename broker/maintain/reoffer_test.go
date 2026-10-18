@@ -10,7 +10,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
-// REQ: UPD-1, UPD-5, UPD-8, CH-12, SR3-4f-2-r1a, SR3-4f-2-r1b, SR3-4f-2-r1c, SR3-4f-2-r1d
+// REQ: UPD-1, UPD-5, UPD-8, CH-12, SR3-4f-2-r1a, SR3-4f-2-r1b, SR3-4f-2-r1c, SR3-4f-2-r1d, P2-2a-f4e, P2-2a-f4f
 
 // adoptedFast has release 2 on the fast channel adopted by the pipeline
 // as c1 at the first check.
@@ -86,7 +86,7 @@ func TestRevertedNotDroppedIsNotReoffered(t *testing.T) {
 		if n := len(r.p.proposed()); n != 1 {
 			t.Fatalf("%s: proposed %d times", name, n)
 		}
-		if st := r.l.Status(); strings.Contains(st.Line, "offer it again") {
+		if st := r.l.Status(); strings.Contains(st.Line, "not installed") {
 			t.Fatalf("%s: status %q", name, st.Line)
 		}
 	}
@@ -130,13 +130,13 @@ func TestDroppedSecurityFixGoesToTheOwnerWithoutAnAttestor(t *testing.T) {
 	}
 }
 
-// Between the drop and the next check, the owner is told the release was
-// not installed and will be offered again; no check comes before the
-// daily one.
+// P2-2a-f4e: between the drop and the next check, the owner is told the
+// release was not installed, why, and when it is tried again; no check
+// comes before the daily one.
 func TestDroppedReleaseLine(t *testing.T) {
 	r := adoptedFast(t)
 	r.p.adopt("c1", dropped)
-	const want = "Update 2 was not installed; I will offer it again."
+	const want = "Update 2 was not installed: it was set aside before it could install. I will try again at the next daily check."
 	if st := r.l.Status(); st.Line != want {
 		t.Fatalf("status %q, want %q", st.Line, want)
 	}
@@ -148,6 +148,27 @@ func TestDroppedReleaseLine(t *testing.T) {
 		t.Fatal("a check before the daily one")
 	}
 	if n := len(r.p.proposed()); n != 1 {
+		t.Fatalf("proposed %d times", n)
+	}
+}
+
+// P2-2a-f4f: the same release dropped again and again is counted, so the
+// line does not repeat unchanged.
+func TestRepeatedDropLine(t *testing.T) {
+	r := adoptedFast(t)
+	r.p.adopt("c1", dropped)
+	r.nextCheck()
+	r.p.adopt("c2", dropped)
+	if st := r.l.Status(); !strings.HasPrefix(st.Line, "Update 2 was not installed:") {
+		t.Fatalf("second drop: %q", st.Line)
+	}
+	r.nextCheck()
+	r.p.adopt("c3", dropped)
+	const want = "Update 2 has failed to install 3 times. I will try again at the next daily check."
+	if st := r.l.Status(); st.Line != want {
+		t.Fatalf("status %q, want %q", st.Line, want)
+	}
+	if n := len(r.p.proposed()); n != 3 {
 		t.Fatalf("proposed %d times", n)
 	}
 }

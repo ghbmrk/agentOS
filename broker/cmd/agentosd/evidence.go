@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -167,8 +168,31 @@ func (e *evidence) g() evidenceGate {
 // disk from the guest's 204 until it has gone out (DEL-1b): replies a
 // crash left there go first.
 func (e *evidence) serve(src replySource) {
+	if c, ok := src.(replyChecker); ok {
+		c.CheckReplies(refuseGuestReply)
+	}
+	e.kept.attach(src)
 	e.src.Store(&replySourceBox{src})
 	e.poke()
+}
+
+// replyChecker is an outbox that can refuse a reply before storing it
+// (guest.Plane.CheckReplies).
+type replyChecker interface {
+	CheckReplies(check func(text string) string)
+}
+
+// guestReactionRefused is what a guest hears when its reply is an agent
+// reaction: fixed broker words, never the error's own text.
+const guestReactionRefused = "agent reactions are refused; reply in text"
+
+// refuseGuestReply refuses, at the guest's POST, a reply Converse would
+// refuse after the 204, when only the log would hear it (CH-11, #2196).
+func refuseGuestReply(text string) string {
+	if owner.RefuseAgentText(text) != nil {
+		return guestReactionRefused
+	}
+	return ""
 }
 
 // poke tells the worker the outbox has a new reply (guest.Config.Replies).
@@ -195,11 +219,22 @@ func (e *evidence) run(ctx context.Context) {
 		if b == nil {
 			continue
 		}
-		for _, p := range b.s.PendingReplies() {
-			if ctx.Err() != nil {
-				return
+		// The outbox is read again before each reply, so none a deletion
+		// dropped meanwhile goes out (DEL-1-f1c).
+		var last guest.PendingReply
+		for ctx.Err() == nil {
+			gen, l := e.kept.pending(b.s)
+			if len(l) == 0 {
+				break
 			}
+			p := l[0]
+			if p.Machine == last.Machine && p.ID == last.ID {
+				e.logf("evidence: reply %s stays in the outbox", p.ID)
+				break
+			}
+			last = p
 			e.reply(p.Machine, p.Private, p.Text, p.Summary)
+			e.kept.settle(gen)
 			if err := b.s.ReplyDone(p.Machine, p.ID); err != nil {
 				e.logf("evidence: reply %s left in the outbox store: %v", p.ID, err)
 			}
@@ -216,12 +251,7 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		addr, acct = g.Evidence()
 	}
 	if !private || addr == "" {
-		if len(owner.AgentPrefix)+len(text) <= maxText {
-			e.send(machine, text)
-			return
-		}
-		e.kept.keep(text)
-		e.send(machine, clip(text, maxText-len(owner.AgentPrefix)-1-len(keptLong))+" "+keptLong)
+		e.sendSplit(machine, text)
 		return
 	}
 	tail := "Full reply sent to " + maskAddress(addr) + "."
@@ -246,6 +276,37 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		tail = failNote
 	}
 	e.send(machine, join(summarize(text, summary, smsSegment-len(owner.AgentPrefix)-1-len(tail)), tail))
+}
+
+// sendSplit texts a reply as up to maxReplyTexts consecutive texts
+// (CH-12, D-127); one longer than that is kept whole and the third text
+// ends with keptLong. CH-19's check runs on the whole reply first: a
+// secret-shaped reply goes as one text, which the owner channel replaces
+// with its local-UI pointer, so no code is split past the check. A text
+// that does not go stops the rest, so none arrives out of order, and the
+// reply is kept.
+func (e *evidence) sendSplit(machine, text string) {
+	room := maxText - len(owner.AgentPrefix)
+	if owner.SecretShaped(text) {
+		if len(text) > room {
+			e.kept.keep(text)
+		}
+		e.send(machine, text)
+		return
+	}
+	parts, cut := splitReply(text, room)
+	if cut {
+		e.kept.keep(text)
+	}
+	for i, p := range parts {
+		if err := e.notify(p); err != nil {
+			e.logf("reply from %s not sent (text %d of %d): %v", machine, i+1, len(parts), err)
+			if len(parts) > 1 && !cut {
+				e.kept.keep(text)
+			}
+			return
+		}
+	}
 }
 
 func (e *evidence) send(machine, text string) {
@@ -354,6 +415,74 @@ func opening(text string) string {
 		}
 	}
 	return t
+}
+
+// maxReplyTexts is how many texts one agent reply may take (CH-12).
+const maxReplyTexts = 3
+
+// splitReply cuts text into at most maxReplyTexts parts of at most room
+// bytes. cut says the reply did not fit: the last part then ends with
+// keptLong. Each cut is at the strongest boundary in the second half of
+// the part (a paragraph, then a line, then a sentence end, then a word),
+// so a part is never a stub; failing all of these, the last word
+// boundary, else a rune boundary outside any joined emoji.
+func splitReply(text string, room int) (parts []string, cut bool) {
+	rest := strings.TrimSpace(text)
+	for len(parts) < maxReplyTexts-1 && len(rest) > room {
+		i := cutAt(rest, room)
+		parts = append(parts, strings.TrimSpace(rest[:i]))
+		rest = strings.TrimSpace(rest[i:])
+	}
+	if len(rest) <= room {
+		return append(parts, rest), false
+	}
+	i := cutAt(rest, room-1-len(keptLong))
+	return append(parts, strings.TrimSpace(rest[:i])+" "+keptLong), true
+}
+
+// cutAt is where to end a part of s (longer than max) at most max bytes
+// long: s[:i] is the part.
+func cutAt(s string, max int) int {
+	paragraph := func(p int) bool { return strings.HasPrefix(s[p:], "\n\n") }
+	line := func(p int) bool { return s[p] == '\n' }
+	word := func(p int) bool { return s[p] == ' ' || s[p] == '\n' || s[p] == '\t' }
+	sentence := func(p int) bool {
+		t := strings.TrimRight(s[:p], `"')`)
+		return word(p) && t != "" && strings.ContainsRune(".!?", rune(t[len(t)-1]))
+	}
+	for _, at := range []func(int) bool{paragraph, line, sentence, word} {
+		for p := max; p > max/2; p-- {
+			if at(p) {
+				return p
+			}
+		}
+	}
+	for p := max / 2; p > 0; p-- {
+		if word(p) {
+			return p
+		}
+	}
+	p := max
+	for p > 0 && !joinable(s, p) {
+		p--
+	}
+	if p == 0 {
+		return max
+	}
+	return p
+}
+
+// joinable says s may be cut at byte p: on a rune boundary, not before a
+// joiner, variation selector or mark, and not after a joiner, so an emoji
+// built from several characters (👩‍💻) stays in one text.
+func joinable(s string, p int) bool {
+	if !utf8.RuneStart(s[p]) {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(s[p:])
+	prev, _ := utf8.DecodeLastRuneInString(s[:p])
+	return prev != '\u200d' && next != '\u200d' && !unicode.Is(unicode.Mn, next) && !unicode.Is(unicode.Me, next) &&
+		!unicode.Is(unicode.Variation_Selector, next) && !(next >= 0x1F3FB && next <= 0x1F3FF)
 }
 
 // clip cuts s to max bytes on a rune boundary, marking the cut.
@@ -560,17 +689,30 @@ func (e *evidence) wire(cfg *daemon.Config) {
 // attach starts routing through the running daemon's gate and owner
 // channel.
 func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
-	e.notify = func(text string) error {
-		ch := d.Owner()
-		if ch == nil {
-			return errors.New("no owner channel")
-		}
-		return ch.Notify(text)
-	}
+	e.wireOwner(d.Owner)
 	e.gate.Store(&evidenceGateBox{d.Gate()})
 	e.shown, _ = d.Gate().Evidence()
 	go e.run(ctx)
 	e.poke()
+}
+
+// wireOwner routes outbox replies to the owner channel as conversation.
+// attach calls it; it is the only place e.notify is set outside tests.
+func (e *evidence) wireOwner(channel func() *owner.Channel) {
+	e.notify = converse(channel)
+}
+
+// converse sends an agent reply to the owner as conversation (CH-15):
+// every reply in the outbox answers one owner message (guest
+// POST /owner/reply), so it is never held or paced.
+func converse(channel func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		ch := channel()
+		if ch == nil {
+			return errors.New("no owner channel")
+		}
+		return ch.Converse(text)
+	}
 }
 
 // Kept replies: a reply that could not be emailed, or was too long for a
@@ -593,6 +735,42 @@ type keptReplies struct {
 	logf  func(string, ...any)
 
 	mu sync.Mutex
+
+	// fmu orders a deletion (forget) against the worker's reads of the
+	// outbox: src is the outbox a deletion also drops (DEL-1-f1), and gen
+	// counts deletions, so a reply routed across one is not kept.
+	fmu sync.Mutex
+	src replySource
+	gen uint64
+}
+
+// attach makes src, the guest plane's outbox, part of what forget drops.
+func (k *keptReplies) attach(src replySource) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	k.src = src
+}
+
+// pending reads the outbox for the worker, with the deletion count it
+// read it under.
+func (k *keptReplies) pending(src replySource) (uint64, []guest.PendingReply) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	return k.gen, src.PendingReplies()
+}
+
+// settle runs after a reply read under gen was routed. A reply in flight
+// when a deletion ran cannot be recalled, but any copy it kept after the
+// deletion dropped the kept replies is dropped now (DEL-1-f1c).
+func (k *keptReplies) settle(gen uint64) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	if k.gen == gen {
+		return
+	}
+	if err := k.drop(); err != nil && k.logf != nil {
+		k.logf("kept replies not dropped after a deletion: %v", err)
+	}
 }
 
 func (k *keptReplies) keep(text string) {
@@ -612,8 +790,26 @@ func (k *keptReplies) saveLocked(l []keptReply) {
 	}
 }
 
-// forget drops every kept reply.
+// forget drops every kept reply and every reply waiting in the guest
+// plane's outbox, once it is attached: no waiting reply names the task it
+// is about, so a deletion drops them all, as it does the kept ones
+// (DEL-1-f1b).
 func (k *keptReplies) forget() error {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	k.gen++
+	err := k.drop()
+	if k.src == nil {
+		return err
+	}
+	o, ok := k.src.(interface{ ForgetReplies() error })
+	if !ok {
+		return errors.Join(err, errors.New("the reply outbox cannot drop replies"))
+	}
+	return errors.Join(err, o.ForgetReplies())
+}
+
+func (k *keptReplies) drop() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.store.Save([]byte("[]"))
@@ -641,8 +837,9 @@ func (k *keptReplies) loadLocked() []keptReply {
 }
 
 // forgetFan is what a deletion reaches beyond the journal (recalltool
-// Cases): the learning plane's cases, if it runs, and every kept reply,
-// since a kept reply may quote the deleted record (security C6 on #148).
+// Cases): the learning plane's cases, if it runs, and every kept reply
+// and reply waiting in the guest outbox, since either may quote the
+// deleted record (security C6 on #148, DEL-1-f1).
 type forgetFan struct {
 	cases recallCases
 	kept  *keptReplies

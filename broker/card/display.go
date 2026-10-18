@@ -551,7 +551,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
 {{if not .Rotate}}<p><b>When you confirm, my Wi-Fi becomes the one on your card.</b> If this page stops loading, join that Wi-Fi with your card's Wi-Fi QR code, or its name and password, then reload this page.</p>
-{{end}}{{if .RotateWiFi}}<p><b>When you confirm, my Wi-Fi switches to the new password on this card.</b> Your phone drops off it: rejoin with this card's Wi-Fi QR code, then open my box page again.</p>
+{{end}}{{if .RotateWiFi}}<p><b>When you confirm, my Wi-Fi switches to the new password on this card.</b> Your phone drops off it: rejoin with this card's Wi-Fi QR code, or its name and password, then reload this page.</p>
 {{end}}<form method="post">
 <p>{{.Prompt}}</p>
 {{if .Problem}}<p role="alert"><b>{{.Problem}}</b></p>{{end}}

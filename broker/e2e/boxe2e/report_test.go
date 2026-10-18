@@ -67,7 +67,7 @@ func TestReportExpectedFailureMatchesItsText(t *testing.T) {
 		step, msg string
 		xfail     bool
 	}{
-		{"guest-task", notDriven + " needs a stub", true},
+		{"guest-task", notDriven + " needs a stub", false},    // off the list since #1701
 		{"phone-control", notDriven + " needs a text", false}, // off the list since #1714
 		// host is no longer listed (#1221 serves it): the old not-served
 		// error, and every other way to be stuck at "6. This PC", is FAIL.
@@ -107,7 +107,7 @@ func TestXfailWantsAreSpecific(t *testing.T) {
 			t.Errorf("%s: want %q issue %d is too loose", name, ef.want, ef.issue)
 		}
 	}
-	if xfail["guest-task"].want != notDriven || len(xfail) != 1 || notDriven != "not driven yet:" {
+	if len(xfail) != 0 || notDriven != "not driven yet:" {
 		t.Fatal("not-driven wants changed")
 	}
 }
@@ -141,5 +141,20 @@ func TestRedactLog(t *testing.T) {
 	}
 	if got := redactLog("a\nb\nc\nd", 2); got != "c | d" {
 		t.Fatalf("last lines: %q", got)
+	}
+}
+
+// REQ: CH-1. A note is one line under the running step's name that ci_boot.sh
+// passes over: it neither counts as a step nor changes the verdict (#2170).
+func TestReportNoteIsNotAStep(t *testing.T) {
+	var out bytes.Buffer
+	r := newReport(&out, nil)
+	r.step("a", func() error { r.note("passed-over recovery notices=1 texts=1 requests=0"); return nil })
+	r.done()
+	want := "agentos-e2e: NOTE a passed-over recovery notices=1 texts=1 requests=0\n" +
+		"agentos-e2e: PASS a\n" +
+		"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"
+	if out.String() != want || r.failed() {
+		t.Fatalf("got:\n%s", out.String())
 	}
 }

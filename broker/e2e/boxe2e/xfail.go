@@ -9,10 +9,9 @@ import "strings"
 // "this PC" step; if its hook fails, localui journals the error
 // (hostHookLog) and the driver's host step quotes it (hostCause), since the
 // page itself cannot tell the causes apart: every hook error reads "Could
-// not save" and setup stays at "6. This PC" whatever went wrong.
-var xfail = map[string]expectedFailure{
-	"guest-task": {1701, notDriven},
-}
+// not save" and setup stays at "6. This PC" whatever went wrong. guest-task
+// left it when #1701's image build passed it.
+var xfail = map[string]expectedFailure{}
 
 // notDriven starts the error of a step the driver does not run yet.
 const notDriven = "not driven yet:"

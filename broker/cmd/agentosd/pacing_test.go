@@ -99,6 +99,14 @@ func quiet22to7(urgent ...ownerch.Class) ownerch.Pacing {
 	return ownerch.Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: urgent}
 }
 
+// quiet22to7Held is quiet22to7 with URGENT APPROVAL OFF: approval is
+// urgent by default (D-129).
+func quiet22to7Held(urgent ...ownerch.Class) ownerch.Pacing {
+	p := quiet22to7(urgent...)
+	p.ApprovalHeld = true
+	return p
+}
+
 // REQ: CH-15 (W5-Dc-r1b QH-8)
 
 // TestGrantsWiringReadsTheOwner: the grants Config agentosd builds reads
@@ -111,6 +119,12 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if cfg.Quiet == nil || cfg.Urgent == nil || cfg.Allowance == nil {
 		t.Fatal("grants hooks not wired")
 	}
+	if cfg.Spend == nil || cfg.Refund == nil {
+		t.Fatal("grants spend hooks not wired")
+	}
+	if _, ok := cfg.Spend(true); ok {
+		t.Fatal("before attach: a paced request spent")
+	}
 	if cfg.Allowance(at23) != 0 || cfg.Urgent(ownerch.Item{}) {
 		t.Fatal("before attach: paced texts may go")
 	}
@@ -119,8 +133,8 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if !cfg.Quiet(at23) || cfg.Quiet(at23.Add(8*time.Hour)) {
 		t.Fatal("Quiet does not read the owner's quiet hours")
 	}
-	if cfg.Urgent(ownerch.Item{}) {
-		t.Fatal("approval urgent by default")
+	if !cfg.Urgent(ownerch.Item{}) {
+		t.Fatal("approval not urgent by default (D-129)")
 	}
 	day := at23.Add(10 * time.Hour)
 	r.set(day)
@@ -133,10 +147,19 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if got := cfg.Allowance(day); got != 2 {
 		t.Fatalf("allowance after an update %d, want 2: one budget", got)
 	}
-	u := pacedOwner(t, quiet22to7(ownerch.ClassApproval), at23)
+	// REQ: CH-15 (#1685)
+	at, ok := cfg.Spend(true)
+	if !ok || cfg.Allowance(day) != 1 {
+		t.Fatal("Spend does not count on the owner's hour")
+	}
+	cfg.Refund(at)
+	if got := cfg.Allowance(day); got != 2 {
+		t.Fatalf("allowance after a refund %d, want 2", got)
+	}
+	u := pacedOwner(t, quiet22to7Held(), at23)
 	p.ch.Store(u.ch)
-	if !cfg.Urgent(ownerch.Item{}) {
-		t.Fatal("URGENT approval ON not read")
+	if cfg.Urgent(ownerch.Item{}) {
+		t.Fatal("URGENT approval OFF not read")
 	}
 }
 
@@ -145,9 +168,9 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 // TestCallersUseTheirClass: in quiet hours, a loops urgent security text
 // and a fork-switch alert go at once; a loops report, a forget done text,
 // an agent reply and a recall take-back notice are held, the last two
-// unless the owner made their class urgent.
+// unless their class is urgent (approval is by default, D-129).
 func TestCallersUseTheirClass(t *testing.T) {
-	r := pacedOwner(t, quiet22to7(), at23)
+	r := pacedOwner(t, quiet22to7Held(), at23)
 	var ln loop2Notify
 	ln.ch.Store(r.ch)
 	ln.send("Security checks: a machine is contained.", true)
@@ -176,9 +199,21 @@ func TestCallersUseTheirClass(t *testing.T) {
 		t.Fatalf("paced texts sent in quiet hours: %q", got)
 	}
 
+	// By default the recall notice, approval class, goes at once with
+	// the agent prefix; the agent reply is still held.
+	d := pacedOwner(t, quiet22to7(), at23)
+	ev = &evidence{notify: d.ch.Notify, logf: t.Logf}
+	ev.send("agent", "Your invoice is drafted.")
+	if err := recallNotify(func() *ownerch.Channel { return d.ch })("Taken back."); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.sent(); len(got) != 1 || got[0] != ownerch.AgentPrefix+"Taken back." {
+		t.Fatalf("default: recall notice not sent alone: %q", got)
+	}
+
 	// The owner's urgent classes let agent replies and recall notices
 	// through, with the agent prefix.
-	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent, ownerch.ClassApproval), at23)
+	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
 	ev = &evidence{notify: u.ch.Notify, logf: t.Logf}
 	ev.send("agent", "Your invoice is drafted.")
 	if err := recallNotify(func() *ownerch.Channel { return u.ch })("Taken back: the agent's work since Monday."); err != nil {
@@ -190,7 +225,7 @@ func TestCallersUseTheirClass(t *testing.T) {
 	}
 	// Without approval urgent, the recall notice is held even with agent
 	// urgent: it is approval class, not agent.
-	a := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
+	a := pacedOwner(t, quiet22to7Held(ownerch.ClassAgent), at23)
 	if err := recallNotify(func() *ownerch.Channel { return a.ch })("Taken back."); err != nil {
 		t.Fatal(err)
 	}

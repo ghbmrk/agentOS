@@ -592,6 +592,19 @@ func TestSilentForgedReplayedAndStrayTextsAreNotDelivered(t *testing.T) {
 		t.Fatalf("delivered %+v", got)
 	case <-time.After(60 * time.Millisecond):
 	}
+	// The same words sent again later are a new text: the network stamps
+	// each delivery (TP-SCTS), so its PDU differs (#1714: the box e2e's
+	// second HELP read as a replay while the simulator stamped one time).
+	at0 := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	for i := range 2 {
+		r.carrier.SetClock(func() time.Time { return at0.Add(time.Duration(i) * time.Second) })
+		if err := r.phone.Send(boxNum, "HELP"); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.text(); got.Text != "HELP" {
+			t.Fatalf("HELP %d: got %q", i+1, got.Text)
+		}
+	}
 	// A stored line that is not a PDU of the announced length stays put.
 	r.dev.StorePDU("RDY")
 	time.Sleep(60 * time.Millisecond)

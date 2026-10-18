@@ -120,8 +120,9 @@ func station(netClass, iface string) func() bool {
 }
 
 // withFirstBoot runs firstboot.Begin and gives the page its steps: the
-// claim screen (nil on the download route), the card step, and the
-// report of its confirm before agentosd's finish.
+// claim screen (nil on the download route), the card step, its confirm
+// reported in agentosd's finish, and the card step's rerun when that
+// finish finds the vault holds no card (#1330).
 func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.CodesVoid) (localui.Config, firstboot.Route, error) {
 	fb, err := firstboot.Begin(withCardNet(cfg.Hooks, box))
 	if err != nil {
@@ -132,7 +133,7 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 	}
 	cfg.Card, cfg.CodesVoid = fb.Card, void
 	if h, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
-		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card}
+		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card, Again: fb.Again}
 	}
 	return cfg, fb.Route, nil
 }

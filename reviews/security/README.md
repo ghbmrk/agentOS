@@ -10,7 +10,7 @@ It is one of three lenses (security, potency, UX). An arbitrator loop weighs the
 
 ## In the lens screen
 
-Tier A PRs get a Security section in its own fresh session on the strongest model; tier B PRs get Security as part of the combined pass. Each run applies the method below to the PR's diff, not to all of `main`. Verdicts go to `reviews/security/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4. A later delta on a signed tier-A PR needs a re-sign by the mechanical rule in OPERATING §3.
+Tier A PRs get a Security section in its own fresh session on the strongest model; tier B PRs get Security as part of the combined pass. Each run applies the method below to the PR's diff, not to all of `main`. Verdicts go in a PR comment marked `<!-- record: security -->` (combined passes marked `combined`), in the L3 format and verdict comment shape of docs/OPERATING.md §4. A later delta on a signed tier-A PR needs a re-sign by the mechanical rule in OPERATING §3.
 
 ## Checks that replaced findings
 
@@ -32,7 +32,7 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 
 ## Records
 
-Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each has a `Record:` line giving PR, package and head SHA directly under the title (bot records open with a `Verdict:` line, then the title, then `Record:`); `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
+Per-PR and per-bundle records up to cut 4 are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each has a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. Since cut 4 (#2172) no new files are written: each verdict is a PR comment carrying `Record:` and `<!-- record: security -->` (docs/OPERATING.md §4 "Verdict comment shape"), and these files are the history before it. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
 
 **Requested reviews** (indexed by this list, not by a PR): [2026-10-08-architecture-review.md](2026-10-08-architecture-review.md) (SR3 intake, requested by Mark).
 

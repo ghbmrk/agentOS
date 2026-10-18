@@ -109,7 +109,7 @@ func (o *gateOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	return o.last, nil
 }
 
-func (o *gateOwner) RequestEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+func (o *gateOwner) RequestEach(items []owner.Item, _ []time.Time) ([]string, error) {
 	var ids []string
 	for _, it := range items {
 		id, _ := o.Request([]owner.Item{it}, 0)
@@ -118,8 +118,8 @@ func (o *gateOwner) RequestEach(items []owner.Item, _ []time.Duration) ([]string
 	return ids, nil
 }
 
-func (o *gateOwner) RequestLocalEach(items []owner.Item, ttls []time.Duration) ([]string, error) {
-	return o.RequestEach(items, ttls)
+func (o *gateOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) ([]string, error) {
+	return o.RequestEach(items, deadlines)
 }
 
 // hostMachines is guest.Machines for a guest run on the host.
