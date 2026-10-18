@@ -2,7 +2,6 @@
   {"pkg": "attest", "name": "FuzzParse", "binary": "attest.test"},
   {"pkg": "browser", "name": "FuzzParse", "binary": "browser.test"},
   {"pkg": "control", "name": "FuzzParse", "binary": "control.test"},
-  {"pkg": "digestqueue", "name": "FuzzLoadState", "binary": "digestqueue.test"},
   {"pkg": "grants", "name": "FuzzApprovals", "binary": "grants.test"},
   {"pkg": "localsrv", "name": "FuzzSessions", "binary": "localsrv.test"},
   {"pkg": "netguard", "name": "FuzzCheck", "binary": "netguard.test"},

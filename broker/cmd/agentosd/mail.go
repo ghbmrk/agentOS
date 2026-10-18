@@ -14,9 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
@@ -60,7 +58,7 @@ type lateMail struct {
 	mu   sync.Mutex
 	gens map[string]genStamp
 	// undoable: the journal keeps organize evidence readable, so the
-	// digest's UNDO can restore it (ADP-2). Without that every organize
+	// owner's UNDO can restore it (ADP-2). Without that every organize
 	// effect is asked (wire).
 	undoable bool
 	// tune adjusts each adapter's Config before mail.New: tests only.
@@ -94,7 +92,7 @@ func (l *lateMail) wire(cfg *daemon.Config) {
 }
 
 // evidenceReadable reports whether organize evidence journaled through red
-// still parses, so a digest can count it and UNDO restore it. Nil is the
+// still parses, so STATUS can count it and UNDO restore it. Nil is the
 // daemon's default, which journals no free text (daemon.Redacted).
 func evidenceReadable(red journal.Redactor) bool {
 	if red == nil {
@@ -297,15 +295,13 @@ func (l *lateMail) poll(ctx context.Context, eng *journal.Engine, src mailAddres
 	}
 }
 
-// The digest's organize line and its UNDO (ADP-2, CH-16). A day's changes
+// The mail STATUS note and its UNDO (ADP-2, CH-16). A day's changes
 // are the account's organize intents that Succeeded that day (local
 // time), read back from the journal; the day's UNDO ID is a keyed hash of
 // the account and the day, so it is the same after a restart, names
 // neither, and cannot be worked out for another account or day without
-// the key.
-
-// mailDigestSource is the mail line's digest source name.
-const mailDigestSource = "mail"
+// the key. No daily text carries them (DRB-1): STATUS shows the newest
+// complete day still undoable, and the owner asks for it.
 
 // undoLookback bounds the days an UNDO ID is looked for: past the window.
 const undoLookback = 8
@@ -420,107 +416,51 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 	return "", false
 }
 
-// mailSource is the digest's mail source: the oldest complete day in the
-// undo window, not yet acknowledged, with organize changes. Its
-// generation is the day's number since 1970, so each day is offered once.
-type mailSource struct {
-	d     *mailDays
-	store change.Store
+// mailNote is the mail STATUS note: the newest complete day in the undo
+// window with organize changes, its count and its UNDO. It names no
+// sender (CH-12) and is "" until wireMail stores the days.
+type mailNote struct{ days atomic.Pointer[mailDays] }
 
-	mu    sync.Mutex
-	acked uint64
-}
-
-func newMailSource(d *mailDays, store change.Store) (*mailSource, error) {
-	s := &mailSource{d: d, store: store}
-	raw, err := store.Load()
-	if err != nil {
-		return nil, err
+func (n *mailNote) line() string {
+	d := n.days.Load()
+	if d == nil {
+		return ""
 	}
-	if raw != nil {
-		var st struct{ Acked uint64 }
-		if err := json.Unmarshal(raw, &st); err != nil {
-			return nil, err
-		}
-		s.acked = st.Acked
-	}
-	return s, nil
-}
-
-func dayNumber(t time.Time) uint64 {
-	y, m, dd := t.Date()
-	return uint64(time.Date(y, m, dd, 0, 0, 0, 0, time.UTC).Unix() / 86400)
-}
-
-func (s *mailSource) Peek(context.Context) (*digestqueue.Snapshot, error) {
-	s.mu.Lock()
-	acked := s.acked
-	s.mu.Unlock()
-	d := s.d
 	now := d.now().In(d.loc)
-	today := now.Format(dayFormat)
 	all := d.changes()
-	for i := undoLookback; i >= 1; i-- {
+	for i := 1; i <= undoLookback; i++ {
 		day := now.AddDate(0, 0, -i).Format(dayFormat)
 		start := d.dayStart(day)
-		gen := dayNumber(start)
-		if day == today || gen <= acked || len(all[day]) == 0 || !now.Before(start.Add(mail.UndoWindow)) {
+		if !now.Before(start.Add(mail.UndoWindow)) {
+			break
+		}
+		total := mail.Summarize(all[day]).Total
+		if total == 0 {
 			continue
 		}
 		until := start.Add(mail.UndoWindow - time.Nanosecond)
-		line := mail.Summarize(all[day]).Line(undoID(d.key, d.account, day), until)
-		if line == "" {
-			continue
-		}
-		snap, err := digestqueue.NewSnapshot(mailDigestSource, gen, []string{line}, nil)
-		return &snap, err
+		return fmt.Sprintf("Mail organized %d on %s. UNDO %s until %s.", total, start.Format("Mon Jan 2"), undoID(d.key, d.account, day), until.Format("Mon Jan 2"))
 	}
-	return nil, nil
-}
-
-func (s *mailSource) Ack(_ context.Context, snap digestqueue.Snapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if snap.Generation <= s.acked {
-		return nil
-	}
-	b, err := json.Marshal(struct{ Acked uint64 }{snap.Generation})
-	if err != nil {
-		return err
-	}
-	if err := s.store.Save(b); err != nil {
-		return err
-	}
-	s.acked = snap.Generation
-	return nil
+	return ""
 }
 
 // wireMail starts l's binder on the vault process's mail socket and, once
-// the values key is read, the owner channel's UNDO hook and the digest's
-// mail line. Without the key neither runs: organize still runs, and its
+// the values key is read, the owner channel's UNDO hook and the mail
+// STATUS note. Without the key neither runs: organize still runs, and its
 // changes stay in the journal.
-func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnDir string, dg *digestBox, digestDir string, now func() time.Time) {
+func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnDir string, note *mailNote, now func() time.Time) {
 	c := mailsock.NewClient(socket)
 	go l.run(ctx, d.Engine(), c, now, mailPoll, log.Printf)
 	key, err := readValuesKey(filepath.Join(learnDir, "values.key"))
 	if err != nil {
-		log.Printf("mail: no UNDO or digest line for mail changes: %v", err)
+		log.Printf("mail: no UNDO for mail changes: %v", err)
 		return
 	}
 	days := &mailDays{account: l.account, key: undoSubkey(key), loc: time.Local, now: now, trail: d.Engine().Trail, m: l}
 	if o := d.Owner(); o != nil {
 		o.SetUndo(days.undo)
 	}
-	if dg == nil {
-		return
+	if note != nil {
+		note.days.Store(days)
 	}
-	src, err := newMailSource(days, change.FileStore{Path: filepath.Join(digestDir, "mail-digest.json")})
-	if err != nil {
-		log.Printf("mail: no digest line for mail changes: %v", err)
-		return
-	}
-	if dg.cfg.Sources == nil {
-		dg.cfg.Sources = map[string]digestqueue.Source{}
-	}
-	dg.cfg.Sources[mailDigestSource] = src
 }

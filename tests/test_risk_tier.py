@@ -40,8 +40,6 @@ class RiskTierTest(unittest.TestCase):
             "broker/corpus/checks.go": "B",
             "broker/machprobe/machprobe.go": "B",
             "broker/loop7/loop7.go": "A",
-            # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
-            "broker/digestqueue/queue.go": "A",
             # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
             "broker/sim/world.go": "A",
             # REQ: HW-10 (CTRL-claim-tier, #1067 R1: the lockout and one-claim rule)

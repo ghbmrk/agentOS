@@ -508,7 +508,6 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		if e.Done {
 			continue
 		}
-		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
 		}
@@ -1329,7 +1328,7 @@ func (s *syncedRouting) tell() {
 		}
 	}
 	if err := note("routing-refused:"+ruleText(owe), text); err != nil {
-		s.logf("routing: the owner's digest line was not queued: %v", err)
+		s.logf("routing: the owner's notice was not queued: %v", err)
 		return
 	}
 	s.mu.Lock()

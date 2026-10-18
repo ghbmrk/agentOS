@@ -92,7 +92,7 @@ TIER_A_BROKER = {
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
     "recovery",
     # (b) gates an effect or approval
-    "apply", "card", "claim", "cleanroom", "clock", "digestqueue", "firstboot",
+    "apply", "card", "claim", "cleanroom", "clock", "firstboot",
     "follow",                     # switches the update root of trust
     "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders

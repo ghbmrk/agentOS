@@ -112,7 +112,6 @@ allow broker/claim/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/
-allow broker/digestqueue/
 allow broker/durable/
 allow broker/egress/
 allow broker/events/

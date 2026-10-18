@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -664,12 +663,13 @@ func TestMailUndoIDs(t *testing.T) {
 	}
 }
 
-// TestMailDigestAndUndo (W2-d, ADP-2, CH-16): a day's organize changes
-// give the next day's digest line with its UNDO ID, offered once; after
+// TestMailNoteAndUndo (W2-d, ADP-2, CH-16, DRB-1): a day's organize
+// changes give, once the day is over, a STATUS note with its UNDO ID and
+// no daily text; after
 // agentosd restarts on the same journal and values key, the owner's
 // UNDO of that ID through the owner channel restores what is unchanged
 // and skips what changed; past the window nothing is restored.
-func TestMailDigestAndUndo(t *testing.T) {
+func TestMailNoteAndUndo(t *testing.T) {
 	r := newMailRig(t, identity)
 	r.bind()
 	ctx := context.Background()
@@ -689,34 +689,25 @@ func TestMailDigestAndUndo(t *testing.T) {
 	days := &mailDays{account: mailAccount, key: undoSubkey(key), loc: time.Local, now: r.now, trail: r.eng.Trail, m: r.l}
 	undo := undoID(days.key, mailAccount, mailDay.In(time.Local).Format(dayFormat))
 
-	// The day is offered only once it is over, and once acknowledged
-	// it is not offered again, also after a restart.
-	store := change.FileStore{Path: filepath.Join(t.TempDir(), "mail-digest.json")}
-	src, err := newMailSource(days, store)
-	if err != nil {
-		t.Fatal(err)
+	// The note shows the day only once it is over, names no sender, and
+	// fits STATUS whole (control.Handler cuts notes at 100).
+	note := &mailNote{}
+	if l := note.line(); l != "" {
+		t.Fatalf("note before wiring: %q", l)
 	}
-	if snap, _ := src.Peek(ctx); snap != nil {
-		t.Fatalf("offered during the day: %q", snap.Lines)
+	note.days.Store(days)
+	if l := note.line(); l != "" {
+		t.Fatalf("shown during the day: %q", l)
 	}
 	r.advance(24 * time.Hour)
-	snap, err := src.Peek(ctx)
-	if err != nil || snap == nil || len(snap.Lines) != 1 || !strings.Contains(snap.Lines[0], "Mail organized: 3") ||
-		!strings.Contains(snap.Lines[0], "UNDO "+undo+" until") {
-		t.Fatalf("digest: %v %+v", err, snap)
+	l := note.line()
+	if !strings.HasPrefix(l, "Mail organized 3 on ") || !strings.Contains(l, " UNDO "+undo+" until ") || len(l) > 100 {
+		t.Fatalf("note: %q", l)
 	}
-	for _, leak := range []string{"Autumn", "boots", mailtest.User} {
-		if strings.Contains(snap.Lines[0], leak) {
-			t.Errorf("line names %q: %s", leak, snap.Lines[0])
+	for _, leak := range []string{"Autumn", "boots", mailtest.User, "MORE"} {
+		if strings.Contains(l, leak) {
+			t.Errorf("note names %q: %s", leak, l)
 		}
-	}
-	if err := src.Ack(ctx, *snap); err != nil {
-		t.Fatal(err)
-	}
-	if again, _ := newMailSource(days, store); again == nil {
-		t.Fatal("reload")
-	} else if s, _ := again.Peek(ctx); s != nil {
-		t.Fatalf("offered after ack: %q", s.Lines)
 	}
 
 	// Unbound, nothing is restored and the owner is told why.
@@ -749,7 +740,7 @@ func TestMailDigestAndUndo(t *testing.T) {
 	}
 	defer d.Wait()
 	defer cancel()
-	wireMail(dctx, l2, d, r.sock, learn, nil, "", r.now)
+	wireMail(dctx, l2, d, r.sock, learn, nil, r.now)
 	for i := 0; l2.adapter() == nil; i++ {
 		if i > 200 {
 			t.Fatal("not bound after restart")
@@ -768,6 +759,9 @@ func TestMailDigestAndUndo(t *testing.T) {
 	r.advance(7*24*time.Hour + time.Minute)
 	if got := strings.Join(d.Owner().Handle(ctx, ownerNum, "UNDO "+undo), "\n"); !strings.Contains(got, "past its undo window") {
 		t.Fatalf("UNDO past the window: %q", got)
+	}
+	if l := note.line(); l != "" {
+		t.Fatalf("note past the window: %q", l)
 	}
 }
 
