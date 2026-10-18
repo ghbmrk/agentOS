@@ -1342,7 +1342,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 // runs first thing at start. The directory is shared: agentos-ap's one write
 // there, the setup network's burn, can lose its temp to this sweep, and then
 // its rename fails, the setup file is unchanged, and the unit restarts and
-// burns again (ASSUMPTIONS.md IT1). A failed sweep is logged, not fatal.
+// burns again (ASSUMPTIONS.md IT-2373). A failed sweep is logged, not fatal.
 func sweepInboxTemps(inboxPath string) {
 	if inboxPath == "" {
 		return
