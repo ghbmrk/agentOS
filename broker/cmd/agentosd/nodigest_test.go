@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
@@ -306,59 +307,58 @@ func statusMailDays(cs []mailChange) *mailDays {
 		now: func() time.Time { return statusNow }, trail: func() []journal.Record { return trail }, m: newLateMail()}
 }
 
-// Every complete day mailDays.undo still accepts has its own STATUS line,
-// newest first, with its count, its security alerts and its UNDO; today
-// and lapsed days have none.
+// Every complete day mailDays.undo still accepts has its UNDO on STATUS's
+// mail line, newest first, and the alerts line sums those days' security
+// alerts; today and lapsed days have neither.
 func TestMailNoteEveryUndoableDay(t *testing.T) {
-	days := statusMailDays([]mailChange{{0, false}, {1, false}, {1, true}, {3, false}, {6, false}, {7, false}})
+	days := statusMailDays([]mailChange{{0, true}, {1, false}, {1, true}, {3, false}, {6, true}, {7, true}})
 	note := &mailNote{}
 	note.days.Store(days)
-	lines := note.lines()
-	want := []struct {
-		ago   int
-		count string
-	}{{1, "Mail organized 2 on Sun Oct 11. 1 security alerts left in inbox. UNDO "}, {3, "Mail organized 1 on Fri Oct 9. UNDO "}, {6, "Mail organized 1 on Tue Oct 6. UNDO "}}
-	if len(lines) != len(want) {
-		t.Fatalf("lines %q", lines)
+	id := func(ago int) string { return undoID(days.key, "acct", statusNow.AddDate(0, 0, -ago).Format(dayFormat)) }
+	want := "Mail UNDO codes, 7 days each: Sun " + id(1) + ", Fri " + id(3) + ", Tue " + id(6) + "."
+	if got := note.codes(); got != want {
+		t.Fatalf("codes %q, want %q", got, want)
 	}
-	for i, w := range want {
-		day := statusNow.AddDate(0, 0, -w.ago).Format(dayFormat)
-		id := undoID(days.key, "acct", day)
-		if !strings.HasPrefix(lines[i], w.count+id+" until ") {
-			t.Errorf("line %d: %q", i, lines[i])
-		}
-		checkNote(t, lines[i])
-		if got := note.slot(i)(); got != lines[i] {
-			t.Errorf("slot %d: %q", i, got)
-		}
-		if s, ok := days.undo(context.Background(), id); !ok || !strings.Contains(s, "not connected") {
-			t.Errorf("UNDO %s for a shown day: %v %q", id, ok, s)
+	if got := note.alerts(); got != "2 security alerts labelled but left in the inbox." {
+		t.Fatalf("alerts %q", got)
+	}
+	for _, ago := range []int{1, 3, 6} {
+		if s, ok := days.undo(context.Background(), id(ago)); !ok || !strings.Contains(s, "not connected") {
+			t.Errorf("UNDO %s for a shown day: %v %q", id(ago), ok, s)
 		}
 	}
-	if s := note.slot(len(want))(); s != "" {
-		t.Errorf("slot past the days: %q", s)
-	}
-	lapsed := undoID(days.key, "acct", statusNow.AddDate(0, 0, -7).Format(dayFormat))
-	if s, ok := days.undo(context.Background(), lapsed); !ok || !strings.Contains(s, "past its undo window") {
+	if s, ok := days.undo(context.Background(), id(7)); !ok || !strings.Contains(s, "past its undo window") {
 		t.Errorf("lapsed day: %v %q", ok, s)
 	}
-	// The longest line still fits STATUS whole.
-	many := make([]mailChange, 0, 2000)
-	for i := 0; i < 1000; i++ {
-		many = append(many, mailChange{1, false}, mailChange{1, true})
+	note.days.Store(statusMailDays([]mailChange{{2, true}}))
+	if got := note.alerts(); got != "1 security alert labelled but left in the inbox." {
+		t.Errorf("one alert: %q", got)
 	}
-	note.days.Store(statusMailDays(many))
-	if l := note.lines(); len(l) != 1 || len(l[0]) > 100 || !strings.Contains(l[0], " 1000 security alerts left in inbox.") {
-		t.Errorf("long line: %q", l)
+	note.days.Store(statusMailDays([]mailChange{{2, false}}))
+	if got := note.alerts(); got != "" {
+		t.Errorf("no alerts: %q", got)
 	}
 }
 
-// wireStatusNotes adds the unclear note and one note per undoable mail
-// day, all empty until the daemon's state is set.
+// statusEngine is an idle engine for control.Handler.
+type statusEngine struct{}
+
+func (statusEngine) Stop(context.Context) (journal.StopReport, error) {
+	return journal.StopReport{}, nil
+}
+func (statusEngine) Resume() error          { return nil }
+func (statusEngine) Stopped() bool          { return false }
+func (statusEngine) List() []journal.Status { return nil }
+
+// wireStatusNotes adds the unclear note and the two mail notes, all empty
+// until the daemon's state is set. With every undoable day organized and
+// alerting, and the unclear and machines lines at their longest, STATUS
+// still fits one reply whole: every UNDO and the line after the notes
+// (the owner channel's Wi-Fi page line) survive control.Fit.
 func TestWireStatusNotes(t *testing.T) {
 	cfg := daemon.Config{Notes: []func() string{func() string { return "clock" }}}
 	unclear, mailStatus := wireStatusNotes(&cfg)
-	if len(cfg.Notes) != 2+undoLookback {
+	if len(cfg.Notes) != 4 {
 		t.Fatalf("%d notes", len(cfg.Notes))
 	}
 	for i, n := range cfg.Notes[1:] {
@@ -366,18 +366,46 @@ func TestWireStatusNotes(t *testing.T) {
 			t.Fatalf("note %d before the daemon runs: %q", i, l)
 		}
 	}
-	waiting := []journal.ParkedIntent{{Intent: journal.Intent{Executor: "sms"}}}
+	waiting := []journal.ParkedIntent{{Intent: journal.Intent{Executor: "sms"}}, {Intent: journal.Intent{Executor: "sms"}}}
 	unclear.set(func() []journal.ParkedIntent { return waiting })
-	mailStatus.days.Store(statusMailDays([]mailChange{{1, false}, {2, false}}))
+	var cs []mailChange
+	for ago := 0; ago <= undoLookback; ago++ {
+		for i := 0; i < 1000; i++ {
+			cs = append(cs, mailChange{ago, false}, mailChange{ago, true})
+		}
+	}
+	days := statusMailDays(cs)
+	mailStatus.days.Store(days)
 	var got []string
 	for _, n := range cfg.Notes {
 		if l := n(); l != "" {
+			checkNote(t, l)
 			got = append(got, l)
 		}
 	}
 	if len(got) != 4 || got[0] != "clock" || !strings.Contains(got[1], "not retried") ||
-		!strings.Contains(got[2], " on Sun Oct 11.") || !strings.Contains(got[3], " on Sat Oct 10.") {
+		!strings.HasPrefix(got[2], "Mail UNDO codes, ") || got[3] != "6000 security alerts labelled but left in the inbox." {
 		t.Fatalf("STATUS %q", got)
+	}
+	last := "999 waiting for you on my Wi-Fi page."
+	h := &control.Handler{Engine: statusEngine{}, Machines: func() string { return strings.Repeat("m", 80) },
+		Notes: append(cfg.Notes, func() string { return last })}
+	s := h.Status()
+	if control.Fit(s) != s || !strings.HasSuffix(s, " "+last) {
+		t.Fatalf("STATUS cut (%d bytes): %q", len(s), s)
+	}
+	shown := 0
+	for ago := 1; ago <= undoLookback; ago++ {
+		id := undoID(days.key, "acct", statusNow.AddDate(0, 0, -ago).Format(dayFormat))
+		r, _ := days.undo(context.Background(), id)
+		if undoable := strings.Contains(r, "not connected"); undoable != strings.Contains(s, " "+id) {
+			t.Errorf("day %d: undoable %v, shown %v", ago, undoable, !undoable)
+		} else if undoable {
+			shown++
+		}
+	}
+	if shown != 6 {
+		t.Fatalf("%d undoable days shown", shown)
 	}
 }
 
@@ -439,6 +467,12 @@ func TestRemoveOldDigest(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "b", "c.json"), []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if removed, err := removeOldDigest(dir); !removed || err != nil {
 		t.Fatalf("dir: %v %v", removed, err)
 	}
@@ -464,5 +498,15 @@ func TestRemoveOldDigest(t *testing.T) {
 
 	if removed, err := removeOldDigest(dir); removed || err != nil {
 		t.Fatalf("absent: %v %v", removed, err)
+	}
+
+	if err := os.WriteFile(dir, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := removeOldDigest(dir); !removed || err != nil {
+		t.Fatalf("file: %v %v", removed, err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("file left: %v", err)
 	}
 }

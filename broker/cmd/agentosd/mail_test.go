@@ -692,16 +692,16 @@ func TestMailNoteAndUndo(t *testing.T) {
 	// The note shows the day only once it is over, names no sender, and
 	// fits STATUS whole (control.Handler cuts notes at 100).
 	note := &mailNote{}
-	if l := note.slot(0)(); l != "" {
+	if l := note.codes(); l != "" {
 		t.Fatalf("note before wiring: %q", l)
 	}
 	note.days.Store(days)
-	if l := note.slot(0)(); l != "" {
+	if l := note.codes(); l != "" {
 		t.Fatalf("shown during the day: %q", l)
 	}
 	r.advance(24 * time.Hour)
-	l := note.slot(0)()
-	if !strings.HasPrefix(l, "Mail organized 3 on ") || !strings.Contains(l, " UNDO "+undo+" until ") || len(l) > 100 {
+	l := note.codes()
+	if l != "Mail UNDO codes, 7 days each: "+mailDay.In(time.Local).Format("Mon")+" "+undo+"." || len(l) > 100 {
 		t.Fatalf("note: %q", l)
 	}
 	for _, leak := range []string{"Autumn", "boots", mailtest.User, "MORE"} {
@@ -760,7 +760,7 @@ func TestMailNoteAndUndo(t *testing.T) {
 	if got := strings.Join(d.Owner().Handle(ctx, ownerNum, "UNDO "+undo), "\n"); !strings.Contains(got, "past its undo window") {
 		t.Fatalf("UNDO past the window: %q", got)
 	}
-	if l := note.slot(0)(); l != "" {
+	if l := note.codes(); l != "" {
 		t.Fatalf("note past the window: %q", l)
 	}
 }

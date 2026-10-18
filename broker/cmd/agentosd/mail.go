@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -416,21 +417,24 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 	return "", false
 }
 
-// mailNote is the mail STATUS notes: one line per complete day still in
-// its undo window with organize changes, newest first, each with its
-// count, the security alerts labelled but left in the inbox, and its
-// UNDO. Every day mailDays.undo accepts is shown while it is undoable.
-// It names no sender (CH-12) and is empty until wireMail stores the days.
+// mailNote is the mail STATUS notes, two lines whatever the number of
+// days so STATUS keeps its other lines (control.Fit cuts the reply): the
+// UNDO of every complete day still in its undo window with organize
+// changes, newest first by weekday, and the security alerts those days
+// labelled but left in the inbox. Every day mailDays.undo accepts is
+// shown while it is undoable. It names no sender (CH-12) and is empty
+// until wireMail stores the days.
 type mailNote struct{ days atomic.Pointer[mailDays] }
 
-func (n *mailNote) lines() []string {
+func (n *mailNote) read() (codes, alerts string) {
 	d := n.days.Load()
 	if d == nil {
-		return nil
+		return "", ""
 	}
 	now := d.now().In(d.loc)
 	all := d.changes()
-	var out []string
+	var ids []string
+	hits := 0
 	for i := 1; i <= undoLookback; i++ {
 		day := now.AddDate(0, 0, -i).Format(dayFormat)
 		start := d.dayStart(day)
@@ -441,26 +445,24 @@ func (n *mailNote) lines() []string {
 		if sum.Total == 0 {
 			continue
 		}
-		alerts := ""
-		if sum.GuardHits > 0 {
-			alerts = fmt.Sprintf(" %d security alerts left in inbox.", sum.GuardHits)
-		}
-		until := start.Add(mail.UndoWindow - time.Nanosecond)
-		out = append(out, fmt.Sprintf("Mail organized %d on %s.%s UNDO %s until %s.", sum.Total, start.Format("Mon Jan 2"), alerts, undoID(d.key, d.account, day), until.Format("Mon Jan 2")))
+		hits += sum.GuardHits
+		// At most six days are undoable, so each weekday names one.
+		ids = append(ids, start.Format("Mon")+" "+undoID(d.key, d.account, day))
 	}
-	return out
+	if len(ids) > 0 {
+		codes = "Mail UNDO codes, 7 days each: " + strings.Join(ids, ", ") + "."
+	}
+	if hits == 1 {
+		alerts = "1 security alert labelled but left in the inbox."
+	} else if hits > 1 {
+		alerts = fmt.Sprintf("%d security alerts labelled but left in the inbox.", hits)
+	}
+	return codes, alerts
 }
 
-// slot is the STATUS note for the k-th newest undoable day, "" when there
-// are fewer: STATUS takes one line per note.
-func (n *mailNote) slot(k int) func() string {
-	return func() string {
-		if l := n.lines(); k < len(l) {
-			return l[k]
-		}
-		return ""
-	}
-}
+// codes and alerts are the two STATUS notes.
+func (n *mailNote) codes() string  { c, _ := n.read(); return c }
+func (n *mailNote) alerts() string { _, a := n.read(); return a }
 
 // wireMail starts l's binder on the vault process's mail socket and, once
 // the values key is read, the owner channel's UNDO hook and the mail

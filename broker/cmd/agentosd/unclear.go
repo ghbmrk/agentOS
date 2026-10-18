@@ -70,16 +70,14 @@ func (n *unclearNote) line() string {
 
 // wireStatusNotes adds STATUS's lines for what waits on the owner, read
 // when asked rather than texted (DRB-1): effects left unclear and parked
-// rather than retried, or proved not done (OP-2, DRA-3), then each mail
-// day still undoable (ADP-2), at most undoLookback. Both read the daemon
+// rather than retried, or proved not done (OP-2, DRA-3), then the UNDO of
+// each mail day still undoable and its alerts (ADP-2). Both read the daemon
 // once it runs: the caller sets unclear after daemon.Run and passes mail
 // to wireMail.
 func wireStatusNotes(cfg *daemon.Config) (*unclearNote, *mailNote) {
 	unclear := &unclearNote{loc: time.Local}
 	mail := &mailNote{}
 	cfg.Notes = append(cfg.Notes, unclear.line)
-	for k := 0; k < undoLookback; k++ {
-		cfg.Notes = append(cfg.Notes, mail.slot(k))
-	}
+	cfg.Notes = append(cfg.Notes, mail.codes, mail.alerts)
 	return unclear, mail
 }
