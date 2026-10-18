@@ -120,3 +120,16 @@ func TestCH12StripLeavesASpaceInAGap(t *testing.T) {
 		}
 	}
 }
+
+// TestCH12PrefixCutsALongJoinedRun: a single joined run longer than the
+// room is cut on a rune boundary, never to nothing (CH-12).
+func TestCH12PrefixCutsALongJoinedRun(t *testing.T) {
+	run := strings.Repeat("👩‍", 40) + "💻"
+	n := Prefix(run, SegUCS2)
+	if n <= 0 || !utf8.ValidString(run[:n]) {
+		t.Fatalf("Prefix = %d", n)
+	}
+	if u, _ := Units(run[:n]); u > SegUCS2 {
+		t.Fatalf("cut is %d units", u)
+	}
+}

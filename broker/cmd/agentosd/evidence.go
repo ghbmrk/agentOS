@@ -133,6 +133,8 @@ const (
 const (
 	// smsSegment is one GSM-7 text: a redirected reply's text fits it.
 	smsSegment = 160
+	// smsSegmentUCS2 is one UCS-2 text, in UTF-16 units.
+	smsSegmentUCS2 = 70
 	// minSummary is the shortest summary worth sending; with less room
 	// the text carries only the pointer.
 	minSummary = 20
@@ -282,26 +284,26 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 // the whole of it: a secret-shaped reply goes as one text, which the
 // owner channel replaces with its local-UI pointer, so no code is split
 // past the check. A text that does not go stops the rest, so none arrives
-// out of order, and the reply is kept.
+// out of order, and the reply is kept. What is kept for the local UI is
+// the stripped reply too.
 func (e *evidence) sendSplit(machine, text string) {
-	full := text
 	text = control.StripControls(text)
 	if owner.SecretShaped(text) {
 		if n, gsm7 := control.Units(text); n > textRoom(gsm7) {
-			e.kept.keep(full)
+			e.kept.keep(text)
 		}
 		e.send(machine, text)
 		return
 	}
 	parts, cut := splitReply(text)
 	if cut {
-		e.kept.keep(full)
+		e.kept.keep(text)
 	}
 	for i, p := range parts {
 		if err := e.notify(p); err != nil {
 			e.logf("reply from %s not sent (text %d of %d): %v", machine, i+1, len(parts), err)
 			if len(parts) > 1 && !cut {
-				e.kept.keep(full)
+				e.kept.keep(text)
 			}
 			return
 		}
@@ -383,16 +385,21 @@ func join(summary, tail string) string {
 	return summary + " " + tail
 }
 
-// summarize is the text's one-line summary of at most max bytes: the
-// agent's own (guest.Reply.Summary) if it gave one, else the reply's
-// opening sentences, enough that a filler opening ("Sure!") is never the
-// whole of it (UX U4). It is "" when there is too little room or it looks
-// like a code or key (CH-19, security C6): the text then carries only the
-// pointer.
+// summarize is the text's one-line summary: the agent's own
+// (guest.Reply.Summary) if it gave one, else the reply's opening
+// sentences, enough that a filler opening ("Sure!") is never the whole of
+// it (UX U4). max is its room in one GSM-7 text; a summary that needs
+// UCS-2 gets the room one UCS-2 text leaves, and either is cut in its
+// encoding, never inside a character or a joined emoji (CH-12). It is ""
+// when there is too little room or it looks like a code or key (CH-19,
+// security C6): the text then carries only the pointer.
 func summarize(text, own string, max int) string {
 	s := strings.Join(strings.Fields(own), " ")
 	if s == "" {
 		s = opening(text)
+	}
+	if _, gsm7 := control.Units(s); !gsm7 {
+		max -= smsSegment - smsSegmentUCS2
 	}
 	if max < minSummary {
 		return ""
@@ -484,15 +491,13 @@ func cutAt(s string, max int) int {
 	return max
 }
 
-// clip cuts s to max bytes on a rune boundary, marking the cut.
+// clip cuts s to max units in the encoding it needs (control.Units),
+// where control.Prefix allows, marking the cut.
 func clip(s string, max int) string {
-	if len(s) <= max {
+	if n, _ := control.Units(s); n <= max {
 		return s
 	}
-	cut := max - len("...")
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
+	cut := control.Prefix(s, max-len("..."))
 	if cut <= 0 {
 		return ""
 	}

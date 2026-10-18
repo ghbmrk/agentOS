@@ -819,3 +819,50 @@ func TestCH12ControlGapStillWithholdsReply(t *testing.T) {
 		}
 	}
 }
+
+// TestCH12SummaryFitsOneTextInItsEncoding: the summary texted when a
+// private reply's email fails is cut in the encoding it needs, so an emoji
+// summary is one UCS-2 text, never cut inside a joined emoji (CH-12).
+func TestCH12SummaryFitsOneTextInItsEncoding(t *testing.T) {
+	for pad := 0; pad < 12; pad++ {
+		r := newEvRig(t, destAddr)
+		r.ev.reply("agent", true, longReply, strings.Repeat("x", pad)+strings.Repeat(" 👩‍💻", 40))
+		got := r.texts()
+		if len(got) != 1 || !strings.Contains(got[0], "👩‍💻") || !strings.Contains(got[0], "...") {
+			t.Fatalf("pad %d: texted %q", pad, got)
+		}
+		if n, _ := modem.Segments(owner.AgentPrefix + got[0]); n != 1 {
+			t.Fatalf("pad %d: summary text is %d segments: %q", pad, n, got[0])
+		}
+		if strings.Count(got[0], "👩") != strings.Count(got[0], "💻") || strings.Count(got[0], "👩") != strings.Count(got[0], "\u200d") {
+			t.Fatalf("pad %d: summary cut inside a joined emoji: %q", pad, got[0])
+		}
+	}
+
+	// A code split by isolates is still a code: no summary goes.
+	if s := summarize(longReply, control.StripControls("Your login code 48\u20662\u2069913"), 100); s != "" {
+		t.Fatalf("summarize kept a split code: %q", s)
+	}
+}
+
+// TestCH12GuestRefusesWrappedReaction: a reaction wrapped in bidi
+// controls is refused at the guest's POST like a bare one (CH-11, CH-12).
+func TestCH12GuestRefusesWrappedReaction(t *testing.T) {
+	if got := refuseGuestReply("\u202ELiked \u201cYour invoice is drafted.\u201d\u2069"); got != guestReactionRefused {
+		t.Fatalf("refuseGuestReply = %q", got)
+	}
+	if got := refuseGuestReply("Booked 👍"); got != "" {
+		t.Fatalf("refuseGuestReply refused text: %q", got)
+	}
+}
+
+// TestCH12KeptReplyIsStripped: a reply too long for three texts is kept
+// for the local UI without its bidi controls (CH-12).
+func TestCH12KeptReplyIsStripped(t *testing.T) {
+	r := newEvRig(t, "")
+	r.ev.reply("agent", true, "\u202E"+strings.Repeat("We meet Thursday at nine. ", 80)+"\u2066", "")
+	k := r.ev.kept.list()
+	if len(k) != 1 || strings.ContainsAny(k[0].Text, "\u202E\u2066") {
+		t.Fatalf("kept %+v", k)
+	}
+}
