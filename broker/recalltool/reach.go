@@ -964,7 +964,7 @@ func (r *Reach) what(ids []string) string {
 
 func noun(kind string) string {
 	switch kind {
-	case "mail", "file", "contact":
+	case "mail", "file", "contact", "photo":
 		return kind
 	case "calendar":
 		return "event"
