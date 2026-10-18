@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 )
 
 // strangerNum is a number the box was never paired with, from the same
@@ -213,6 +214,61 @@ func (r phoneRun) noticeNote() string {
 		n += fmt.Sprintf(" unread=%d", r.unread)
 	}
 	return n
+}
+
+// lostSendMax bounds the lost sends phone-control notes: the last ones.
+const lostSendMax = 5
+
+// lostSendVia bounds the calls a lost-send note names, as modemlink does.
+const lostSendVia = 3
+
+// lostSendWord bounds each word of a lost-send note.
+const lostSendWord = 40
+
+// missedLine is agentosd's log line for a text the down owner line did not
+// carry (modemlink.MissedLog), after the log's own date and time.
+var missedLine = regexp.MustCompile(`^(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?` +
+	regexp.QuoteMeta(modemlink.MissedLog) + ` kind=(\S*)(.*)$`)
+
+// notWord is what a lost-send note's word may not carry: ci_boot.sh takes
+// a NOTE of lower-case words and counts only.
+var notWord = regexp.MustCompile(`[^a-z0-9]+`)
+
+// lostSendNotes names, from agentosd's journal, the last lostSendMax texts
+// the down line did not carry: one note each with its kind and the calls
+// that sent it, as words (#2170, E16). modemlink logs no text and no
+// time; the journal's time is dropped.
+func lostSendNotes(journal string) []string {
+	var notes []string
+	for _, l := range strings.Split(journal, "\n") {
+		m := missedLine.FindStringSubmatch(strings.TrimSpace(l))
+		if m == nil {
+			continue
+		}
+		kind := m[1]
+		if kind != "text" && kind != "request" {
+			kind = "other"
+		}
+		n := "lost-send kind=" + kind
+		for i, via := range strings.Split(m[2], " via ")[1:] {
+			if i == lostSendVia {
+				break
+			}
+			via = via[strings.LastIndexByte(via, '/')+1:]
+			w := strings.Trim(notWord.ReplaceAllString(strings.ToLower(via), "-"), "-")
+			if len(w) > lostSendWord {
+				w = w[:lostSendWord]
+			}
+			if w != "" {
+				n += " via=" + w
+			}
+		}
+		notes = append(notes, n)
+	}
+	if len(notes) > lostSendMax {
+		notes = notes[len(notes)-lostSendMax:]
+	}
+	return notes
 }
 
 // failed is the verdict so far: an error once the run cannot pass.
