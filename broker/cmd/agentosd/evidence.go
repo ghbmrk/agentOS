@@ -274,25 +274,27 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		e.setFailing(true, false)
 		tail = failNote
 	}
-	e.send(machine, join(summarize(control.StripControls(text), control.StripControls(summary), smsSegment-len(owner.AgentPrefix)-1-len(tail)), tail))
+	e.send(machine, join(summarize(text, summary, tail), tail))
 }
 
 // sendSplit texts a reply as up to maxReplyTexts consecutive texts
 // (CH-12, D-127); one longer than that is kept whole and the third text
 // ends with keptLong. The reply is stripped of control and bidi
 // characters first (control.StripControls), then CH-19's check runs on
-// the whole of it: a secret-shaped reply goes as one text, which the
+// the whole of it as written and stripped (owner.AgentSecret): a
+// secret-shaped reply goes as one text, as written, which the
 // owner channel replaces with its local-UI pointer, so no code is split
 // past the check. A text that does not go stops the rest, so none arrives
 // out of order, and the reply is kept. What is kept for the local UI is
 // the stripped reply too.
 func (e *evidence) sendSplit(machine, text string) {
+	raw := text
 	text = control.StripControls(text)
-	if owner.SecretShaped(text) {
+	if owner.AgentSecret(raw) {
 		if n, gsm7 := control.Units(text); n > textRoom(gsm7) {
 			e.kept.keep(text)
 		}
-		e.send(machine, text)
+		e.send(machine, raw)
 		return
 	}
 	parts, cut := splitReply(text)
@@ -388,24 +390,31 @@ func join(summary, tail string) string {
 // summarize is the text's one-line summary: the agent's own
 // (guest.Reply.Summary) if it gave one, else the reply's opening
 // sentences, enough that a filler opening ("Sure!") is never the whole of
-// it (UX U4). max is its room in one GSM-7 text; a summary that needs
-// UCS-2 gets the room one UCS-2 text leaves, and either is cut in its
-// encoding, never inside a character or a joined emoji (CH-12). It is ""
-// when there is too little room or it looks like a code or key (CH-19,
-// security C6): the text then carries only the pointer.
-func summarize(text, own string, max int) string {
-	s := strings.Join(strings.Fields(own), " ")
+// it (UX U4), both stripped (control.StripControls). Its room is what one
+// text leaves after AgentPrefix, a space and tail, in the encoding the
+// whole text needs: one GSM-7 text when the summary and tail both fit
+// GSM-7, else one UCS-2 text. It is cut in its own encoding, never inside
+// a character or a joined emoji (CH-12). It is "" when there is too
+// little room or its source, as written or stripped, looks like a code or
+// key (owner.AgentSecret, CH-19, security C6): the text then carries only
+// the pointer.
+func summarize(text, own, tail string) string {
+	src := own
+	s := strings.Join(strings.Fields(control.StripControls(own)), " ")
 	if s == "" {
-		s = opening(text)
+		src, s = text, opening(control.StripControls(text))
 	}
-	if _, gsm7 := control.Units(s); !gsm7 {
-		max -= smsSegment - smsSegmentUCS2
+	n, gsm7 := control.Units(owner.AgentPrefix + " " + tail)
+	max := smsSegment - n
+	if _, g := control.Units(s); !g || !gsm7 {
+		// A GSM-7 part counted in septets is never fewer UTF-16 units.
+		max = smsSegmentUCS2 - n
 	}
 	if max < minSummary {
 		return ""
 	}
 	s = clip(s, max)
-	if owner.SecretShaped(s) {
+	if owner.SecretShaped(s) || owner.AgentSecret(src) {
 		return ""
 	}
 	return s

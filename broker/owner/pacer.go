@@ -298,20 +298,38 @@ func (c *Channel) NotifyNow(text string) error {
 }
 
 // checkAgent strips agent-derived text of control and bidi characters
-// (control.StripControls) and refuses a reaction form, so the reaction
-// check and CH-19's Disclose read the text the owner's phone shows
-// (CH-12). Callers send the stripped text it returns.
+// (control.StripControls), refuses a reaction form, and discloses it
+// (AgentSecret), so the reaction check and CH-19 read the text the
+// owner's phone shows (CH-12). Callers send the text it returns.
 func checkAgent(text string) (string, error) {
-	text = control.StripControls(text)
-	return text, refuseReaction(text)
+	s := control.StripControls(text)
+	if err := refuseReaction(s); err != nil {
+		return s, err
+	}
+	if AgentSecret(text) {
+		return Hidden, nil
+	}
+	return s, nil
+}
+
+// AgentSecret reports whether agent text is secret-shaped (SecretShaped)
+// as written or once stripped (control.StripControls): stripping cannot
+// then join a code word to its code, nor a removed control split a key,
+// past CH-19 (#2346).
+func AgentSecret(text string) bool {
+	return SecretShaped(text) || SecretShaped(control.StripControls(text))
 }
 
 // agentText strips and discloses agent-derived text, prefixes it with
 // AgentPrefix unless it was withheld, and fits it to one text in the
 // encoding it needs, emoji and line breaks kept (CH-12).
 func agentText(text string) string {
-	if text = Disclose(control.StripControls(text)); text != Hidden {
-		text = AgentPrefix + text
+	if text != Hidden {
+		if AgentSecret(text) {
+			text = Hidden
+		} else {
+			text = AgentPrefix + control.StripControls(text)
+		}
 	}
 	return control.FitAgent(text)
 }

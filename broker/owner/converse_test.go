@@ -103,14 +103,44 @@ func TestCH12ConverseSendsEmojiWhole(t *testing.T) {
 // its code; stripped, each must still leave the two apart (#2346).
 var gapControls = []string{"\r", "\v", "\f", "\u0085", "\x01", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200F"}
 
+// bidiControls are the bidi controls StripControls removes with no gap.
+var bidiControls = []string{"\u202A", "\u202B", "\u202C", "\u202D", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200E", "\u200F", "\u061C"}
+
+// TestCH12BidiInsideATokenStillWithholds: a bidi control inside a key or a
+// short code does not split it past CH-19 on any agent path (CH-19,
+// CH-12, #2346).
+func TestCH12BidiInsideATokenStillWithholds(t *testing.T) {
+	for _, bidi := range bidiControls {
+		for _, text := range []string{
+			"sk-abcdefghij" + bidi + "klmnopqrstuvwx",
+			"AKIAABCDEFGH" + bidi + "IJKLMNOP",
+			"code AB" + bidi + "C1",
+		} {
+			for name, send := range map[string]func(*Channel) error{
+				"Converse":  func(c *Channel) error { return c.Converse(text) },
+				"NotifyAs":  func(c *Channel) error { return c.NotifyAs(ClassAgent, text) },
+				"NotifyNow": func(c *Channel) error { return c.NotifyNow(text) },
+			} {
+				r := pacedRig(t, quiet22to7(), 12, 0)
+				if err := send(r.ch); err != nil {
+					t.Fatalf("%s %q: %v", name, text, err)
+				}
+				if got := r.sentTexts(); len(got) != 1 || got[0] != Hidden {
+					t.Errorf("%s %q sent %q", name, text, got)
+				}
+			}
+		}
+	}
+}
+
 // TestCH12ControlGapStillWithholdsCode: a code word and a code joined only
 // by a stripped control are still withheld on every agent path (CH-19,
 // CH-12, #2346).
 func TestCH12ControlGapStillWithholdsCode(t *testing.T) {
 	for _, gap := range gapControls {
 		text := "Your code" + gap + "482913"
-		if !SecretShaped(control.StripControls(text)) {
-			t.Errorf("%q: stripped text not secret-shaped", text)
+		if !AgentSecret(text) {
+			t.Errorf("%q: not secret-shaped", text)
 		}
 		for name, send := range map[string]func(*Channel) error{
 			"Converse":  func(c *Channel) error { return c.Converse(text) },

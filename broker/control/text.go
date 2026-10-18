@@ -97,15 +97,19 @@ func Room(isGSM7 bool) int {
 // feed and the bidirectional controls (embeddings and overrides U+202A-E,
 // isolates U+2066-9, marks U+200E, U+200F and U+061C) from agent text, so
 // the order a phone shows is the order the CH-19 and CH-21 checks read
-// (CH-12). A run of them between two characters that are not white space
-// becomes one space, so "code\r482913" still reads as a code word and a
-// code to CH-19 (#2346). Every other character, joiners included, is kept.
+// (CH-12). A run of Cc between two characters that are not white space
+// becomes one space, as it splits words where the text came from, so
+// "code\r482913" still reads as a code word and a code; a bidi control is
+// invisible and goes with no gap, so it cannot split a key (#2346). Every
+// other character, joiners included, is kept.
 func StripControls(s string) string {
 	var b strings.Builder
 	gap := false
 	for _, r := range s {
-		if r != '\n' && (unicode.Is(unicode.Cc, r) || r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069 ||
-			r == 0x200E || r == 0x200F || r == 0x061C) {
+		if r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069 || r == 0x200E || r == 0x200F || r == 0x061C {
+			continue
+		}
+		if r != '\n' && unicode.Is(unicode.Cc, r) {
 			gap = true
 			continue
 		}

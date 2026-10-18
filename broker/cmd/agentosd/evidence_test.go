@@ -840,7 +840,7 @@ func TestCH12SummaryFitsOneTextInItsEncoding(t *testing.T) {
 	}
 
 	// A code split by isolates is still a code: no summary goes.
-	if s := summarize(longReply, control.StripControls("Your login code 48\u20662\u2069913"), 100); s != "" {
+	if s := summarize(longReply, "Your login code 48\u20662\u2069913", "Full reply sent to m***@example.com."); s != "" {
 		t.Fatalf("summarize kept a split code: %q", s)
 	}
 }
@@ -864,5 +864,22 @@ func TestCH12KeptReplyIsStripped(t *testing.T) {
 	k := r.ev.kept.list()
 	if len(k) != 1 || strings.ContainsAny(k[0].Text, "\u202E\u2066") {
 		t.Fatalf("kept %+v", k)
+	}
+}
+
+// TestCH12SummaryRoomCountsTheTail: the summary's room follows the encoding
+// of the whole text, tail included, so an address whose masked initial is
+// not GSM-7 still leaves a summary text of one segment (CH-12, #2346).
+func TestCH12SummaryRoomCountsTheTail(t *testing.T) {
+	for _, addr := range []string{"łukasz@example.com", "li@例子.中国"} {
+		r := newEvRig(t, addr)
+		r.ev.reply("agent", true, longReply, "")
+		got := r.texts()
+		if len(got) != 1 {
+			t.Fatalf("%s: texted %q", addr, got)
+		}
+		if n, _ := modem.Segments(owner.AgentPrefix + got[0]); n != 1 {
+			t.Fatalf("%s: summary text is %d segments: %q", addr, n, got[0])
+		}
 	}
 }

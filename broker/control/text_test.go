@@ -93,7 +93,7 @@ func TestCH12AgentTextEncodingChooser(t *testing.T) {
 // are removed before any check reads the text; joiners stay.
 func TestCH12StripsCcAndBidi(t *testing.T) {
 	in := "a‮b⁦c\u0007d\ne‎f‏g؜h‪i⁩j\x00k\x7f\u0085l‍"
-	if got := StripControls(in); got != "a b c d\ne f g h i j k l‍" {
+	if got := StripControls(in); got != "abc d\nefghij k l‍" {
 		t.Fatalf("StripControls = %q", got)
 	}
 	if got := FitAgent("Done‮ 👍\u0007\nok"); got != "Done 👍\nok" {
@@ -101,19 +101,21 @@ func TestCH12StripsCcAndBidi(t *testing.T) {
 	}
 }
 
-// TestCH12StripLeavesASpaceInAGap: a run of stripped controls between two
+// TestCH12StripLeavesASpaceInAGap: a run of stripped Cc between two
 // characters that are not white space becomes one space, so a control
 // cannot join a code word to its code into one token (#2346); next to
-// white space or at either end it leaves nothing.
+// white space or at either end it leaves nothing. A bidi control leaves
+// nothing, so it cannot split a key.
 func TestCH12StripLeavesASpaceInAGap(t *testing.T) {
 	for in, want := range map[string]string{
 		"Your code\r482913":        "Your code 482913",
 		"code\v\f\u0085\x01482913": "code 482913",
-		"code\u202E\u2066482913":   "code 482913",
+		"code\u202E\u2066482913":   "code482913",
+		"sk-abc\u2066def\u200Eghi": "sk-abcdefghi",
 		"code \u200F482913":        "code 482913",
 		"code\x01\n482913":         "code\n482913",
 		"\u202Eok\u0007":           "ok",
-		"Sure 👩‍💻\u2069!":          "Sure 👩‍💻 !",
+		"Sure 👩‍💻\u2069!":          "Sure 👩‍💻!",
 	} {
 		if got := StripControls(in); got != want {
 			t.Errorf("StripControls(%q) = %q, want %q", in, got, want)
