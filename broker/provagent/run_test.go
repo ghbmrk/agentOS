@@ -817,7 +817,8 @@ func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
 var builtinCanaries = map[string]string{
 	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:              "sk-proj-CANARYcanary0000000000000000",
 	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`: "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
-	`\b[A-Za-z0-9_]{2}\.[A-Za-z0-9_]\.[A-Za-z0-9_]{191,}`:            canaryRefresh,
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:           canaryRefresh,
+	`\brt_[A-Za-z0-9_-]{40,}`:                                        "rt_CANARYcanary-0123456789_CANARYcanary-0123456789",
 	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:      "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 

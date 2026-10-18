@@ -84,9 +84,40 @@ func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
 		`{"tokens":{"refresh_token":"` + canaryRefresh + `"}}`,
 		"token " + canaryRefresh + ". Done",
 		"refresh=" + canaryRefresh + "\n",
+		// Escaped, percent-encoded or joined prefixes leave no word
+		// boundary before the token, so the format must not need one.
+		`line1\n` + canaryRefresh,
+		`a:\t` + canaryRefresh,
+		`\u0022` + canaryRefresh,
+		"%22" + canaryRefresh,
+		"refresh_token%3D" + canaryRefresh,
+		"_" + canaryRefresh,
+		"x" + canaryRefresh,
 	} {
 		if m := match(s); m != canaryRefresh {
 			t.Errorf("refresh canary in %.40q...: matched %q", s, m)
+		}
+	}
+	// The tail looks like base64url, and one sample fixes neither its
+	// alphabet nor its length: a '-' anywhere, or a shorter tail, is still
+	// matched whole.
+	dash := func(i int) string {
+		b := []byte(canaryRefresh)
+		b[5+i] = '-'
+		return string(b)
+	}
+	for _, tok := range []string{
+		dash(0), dash(100), dash(190),
+		"Z-.-." + canaryRefresh[5:],
+		canaryRefresh[:5+160],
+		"ab.c." + strings.Repeat("a-", 100),
+		// The public rt_ shape stays declared (case-sensitive).
+		"rt_" + strings.Repeat("CANARYcanary-0123456789_", 3),
+	} {
+		for _, s := range []string{tok, `{"refresh_token":"` + tok + `"}`, "x " + tok + "\n"} {
+			if m := match(s); m != tok {
+				t.Errorf("token %.12q... in %.40q...: matched %q", tok, s, m)
+			}
 		}
 	}
 	tail := strings.Repeat("a", 191)
@@ -95,11 +126,11 @@ func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
 		"version":          "codex-cli 0.162.1 (rustc 1.90.0) build ab.c.d",
 		"sha256 hex":       "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 		"uuid":             "account 3f2c1a9e-4b7d-4c1e-9a2f-0d6b8e5c7a31",
-		"short tail":       "ab.c." + tail[:190],
+		"short tail":       "ab.c." + tail[:159],
 		"no segments":      "abc" + tail,
 		"long segment one": "abc.d." + tail[:150],
-		"dash tail":        "ab.c." + strings.Repeat("a-", 100),
 		"code identifier":  "rt_sigprocmask_handler_wrapper(); rt_tables_lookup_function",
+		"short rt_":        "rt_" + strings.Repeat("a", 39),
 		"spaced":           "ab . c . " + tail,
 	} {
 		if m := match(s); m != "" {
