@@ -253,7 +253,7 @@ func keys(n int, wrap string) []byte {
 }
 
 // RES-5: what each route reserves covers all it allocates for the
-// costliest body shapes measured (ASSUMPTIONS I2), at every size. The
+// costliest body shapes measured (ASSUMPTIONS RES-5-membudget-I2), at every size. The
 // model route's meter is WrapBound's, which also scans the body.
 func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
 	mtr := bigMeter(t)
@@ -336,7 +336,7 @@ func TestParallelCallsKeepMachineCap(t *testing.T) {
 	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
 	r.f.wg.Wait()
 	// A call with none of the machine's others in flight is charged at
-	// the estimate, so the cap is soft by that one call (inflight I8).
+	// the estimate, so the cap is soft by that one call (inflight RES-5-membudget-I8).
 	if got, most := mtr.Usage(machine).Tokens, int64(tokens+len(body)+10); got > most {
 		t.Errorf("machine used %d tokens; its cap is %d, soft by one call (%d)", got, tokens, most)
 	}

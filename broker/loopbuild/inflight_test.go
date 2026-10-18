@@ -221,7 +221,7 @@ func keys(n int, wrap string) []byte {
 }
 
 // RES-5: what each route reserves covers all it allocates for the
-// costliest body shapes measured (inflight ASSUMPTIONS I2), at every size.
+// costliest body shapes measured (inflight ASSUMPTIONS RES-5-membudget-I2), at every size.
 func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
 	s := &session{id: "m", ns: "procedures", b: &Builder{cfg: Config{Meter: bigMeter(t), JobTokens: 1 << 50,
 		Model: func(string) http.Handler {

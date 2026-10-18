@@ -58,16 +58,16 @@ const (
 
 // Model is meter.Wrap's cost: every byte of the request is read, decoded
 // top level into a map and re-encoded, which allocates up to 96 times the
-// body for one of many short top-level keys (measured; ASSUMPTIONS I2),
+// body for one of many short top-level keys (measured; ASSUMPTIONS RES-5-membudget-I2),
 // plus one copy a caller may buffer first. The floor holds the provider's
 // answer as the meter examines it (at most the call's output limit,
-// I3) and a small body's fixed overhead.
+// RES-5-membudget-I3) and a small body's fixed overhead.
 var Model = Cost{Floor: 4<<20 + 64<<10, PerByte: 104}
 
 // Decode is a handler that reads its body once and decodes it into a
 // struct holding a map of strings (a clean-room result, a builder's
 // candidate): up to 30 times the body for many short entries (measured;
-// ASSUMPTIONS I2).
+// ASSUMPTIONS RES-5-membudget-I2).
 var Decode = Cost{Floor: 64 << 10, PerByte: 32}
 
 // Budget is one process's in-flight memory, in bytes.
