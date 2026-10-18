@@ -234,8 +234,9 @@ type Loop3 struct {
 	// changes counts AttestorsChanged calls, bumped under policy, so a
 	// check clears State.Recheck only when none came after its read.
 	changes atomic.Uint64
-	// held is, per version with a TestedBy claim, the release as proposed
-	// (in memory only): the claim stands while its Security() does.
+	// held is, per proposed version, the release as proposed (in memory
+	// only): a TestedBy claim stands while its Security() does, any other
+	// while it is Bound() (SR3-6-f6).
 	held map[int64]*update.Verified
 }
 
@@ -394,26 +395,55 @@ func (l *Loop3) tryLocked(v int64) {
 	l.st.Tries[v]++
 }
 
+// claimsLocked is the proposed versions whose claim may rest on the
+// attestor policy: each with a TestedBy claim, each proposed on a listed
+// independent pass (Evidence), and each whose proposed release is held.
+// A request the pipeline rejected makes no claim.
+func (l *Loop3) claimsLocked() map[int64]bool {
+	c := map[int64]bool{}
+	for v := range l.st.TestedBy {
+		c[v] = true
+	}
+	for v, ev := range l.st.Evidence {
+		if ev[0] > 0 && l.st.Proposed[v] != change.StateRejected {
+			c[v] = true
+		}
+	}
+	for v := range l.held {
+		if _, ok := l.st.Proposed[v]; ok && l.st.Proposed[v] != change.StateRejected {
+			c[v] = true
+		}
+	}
+	return c
+}
+
 // retireClaims, after an attestor change, forgets each proposed version
-// whose TestedBy claim no longer holds: its release's Security() is false
-// (the policy moved, as Store.Stage then refuses it), or it is not held
-// (Loop 3 restarted since). A check then decides it again under the
-// current list. It only retires, and evaluates outside mu, since the
-// policy read may reach the store's anchor.
+// whose claim no longer holds. A TestedBy claim holds while its release's
+// Security() does; any other claim, while its release is Bound(): an
+// ordinary release proposed on a listed attestor's pass loses it when the
+// policy moves (SR3-6-f6), and one proposed on no pass keeps it. Either
+// fails once the policy moved (as Store.Stage then refuses the release),
+// or when the release is not held (Loop 3 restarted since). A check then
+// decides it again under the current list. It only retires, and evaluates
+// outside mu, since the policy read may reach the store's anchor.
 func (l *Loop3) retireClaims() error {
 	l.mu.Lock()
 	if !l.st.Recheck {
 		l.mu.Unlock()
 		return nil
 	}
-	held := make(map[int64]*update.Verified, len(l.st.TestedBy))
-	for v := range l.st.TestedBy {
+	held := map[int64]*update.Verified{}
+	for v := range l.claimsLocked() {
 		held[v] = l.held[v]
+	}
+	tested := make(map[int64]bool, len(l.st.TestedBy))
+	for v := range l.st.TestedBy {
+		tested[v] = true
 	}
 	l.mu.Unlock()
 	var gone []int64
 	for v, h := range held {
-		if !h.Security() {
+		if (tested[v] && !h.Security()) || (!tested[v] && !h.Bound()) {
 			gone = append(gone, v)
 		}
 	}
@@ -422,8 +452,9 @@ func (l *Loop3) retireClaims() error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	claims := l.claimsLocked()
 	for _, v := range gone {
-		if _, ok := l.st.TestedBy[v]; ok && l.held[v] == held[v] {
+		if claims[v] && l.held[v] == held[v] {
 			l.unproposeLocked(v)
 		}
 	}
@@ -544,6 +575,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.Source = src.RootSHA256
 		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence, l.st.ProposalID = nil, nil, nil, nil, nil
 		l.st.Ended, l.st.Tries = nil, nil
+		l.held = nil
 	}
 	l.st.FreshFailed = res.FreshnessFailed
 	if res.RootRotatedTo > 0 {
@@ -645,15 +677,15 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.Evidence = map[int64][2]int{}
 		}
 		l.st.Evidence[v] = o.evidence
+		if l.held == nil {
+			l.held = map[int64]*update.Verified{}
+		}
+		l.held[v] = o.held
 		if o.tested != "" {
 			if l.st.TestedBy == nil {
 				l.st.TestedBy = map[int64]string{}
 			}
 			l.st.TestedBy[v] = o.tested
-			if l.held == nil {
-				l.held = map[int64]*update.Verified{}
-			}
-			l.held[v] = o.held
 		}
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
@@ -750,7 +782,7 @@ type outcome struct {
 	proposed change.State
 	id       string // the pipeline's proposal ID
 	tested   string
-	held     *update.Verified // what was proposed, when tested is set
+	held     *update.Verified // what was proposed
 	evidence [2]int           // listed independent and maintainer-operated passes
 	wait     *pending
 	value    float64
@@ -805,8 +837,9 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	}
 	ev := rel.Evidence(atts, l.cfg.OwnKey)
 	o := outcome{proposed: rep.State, id: rep.ID, evidence: [2]int{ev.Independent, ev.Maintainer}}
+	o.held = held
 	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
-		o.tested, o.held = testedIndependent, held
+		o.tested = testedIndependent
 		if rel.InterimAttestation() {
 			o.tested = testedProject
 		}

@@ -34,6 +34,11 @@ var ErrFull = errors.New("owner: too many open requests")
 // because its recipients do not render in full (SMSApprovable).
 var ErrLocalOnly = errors.New("owner: approvable only on the local page")
 
+// ErrExpired is returned for a re-issued item whose deadline has passed
+// before its request could be opened (GR10, #1317): it is never given a
+// fresh expiry.
+var ErrExpired = errors.New("owner: the approval request expired")
+
 type request struct {
 	id      string
 	n       uint64 // opening order, for the local page
@@ -55,14 +60,14 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	now := c.cfg.Now()
 	c.mu.Lock()
-	r, err := c.openLocked(items, ttl, now, false)
+	r, err := c.openLocked(items, ttlDeadline(ttl, now), now, false)
 	if err != nil {
 		c.mu.Unlock()
 		return "", err
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.sendRequest(text); err != nil {
+	if err := c.sendRequest(text, []string{r.id}, r.local); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}
@@ -72,24 +77,26 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 // RequestEach opens one single-item request per item, each with its own
 // ID and code, and texts them together: as one text when they fit, else
 // as few as fit (GR10 re-issue after a restart: one approval per intent,
-// one text per batch). ttls[i] bounds item i's request as Request's ttl
-// does. ids[i] is "" for an item that was not asked; err is the first
-// failure.
-func (c *Channel) RequestEach(items []Item, ttls []time.Duration) (ids []string, err error) {
-	return c.requestEach(items, ttls, false)
+// one text per batch). deadlines[i] is item i's absolute expiry, kept
+// exactly however late the call comes (a re-issued item's original one,
+// #1317); zero gives Request's default. An item whose deadline has passed
+// is not asked (ErrExpired). ids[i] is "" for an item that was not asked;
+// err is the first failure.
+func (c *Channel) RequestEach(items []Item, deadlines []time.Time) (ids []string, err error) {
+	return c.requestEach(items, deadlines, false)
 }
 
 // RequestLocalEach opens one local request per item, as RequestLocal
 // does, and texts their notices together as RequestEach does (Potency R2
 // on P2-2a: one flush, as few texts as fit).
-func (c *Channel) RequestLocalEach(items []Item, ttls []time.Duration) (ids []string, err error) {
-	return c.requestEach(items, ttls, true)
+func (c *Channel) RequestLocalEach(items []Item, deadlines []time.Time) (ids []string, err error) {
+	return c.requestEach(items, deadlines, true)
 }
 
-func (c *Channel) requestEach(items []Item, ttls []time.Duration, local bool) (ids []string, err error) {
+func (c *Channel) requestEach(items []Item, deadlines []time.Time, local bool) (ids []string, err error) {
 	ids = make([]string, len(items))
-	if len(ttls) != len(items) {
-		return ids, errors.New("owner: one ttl per item")
+	if len(deadlines) != len(items) {
+		return ids, errors.New("owner: one deadline per item")
 	}
 	if c.cfg.Modem == nil {
 		return ids, errors.New("owner: no modem")
@@ -102,7 +109,7 @@ func (c *Channel) requestEach(items []Item, ttls []time.Duration, local bool) (i
 	var parts []part
 	c.mu.Lock()
 	for i, it := range items {
-		r, e := c.openLocked([]Item{it}, ttls[i], now, local)
+		r, e := c.openLocked([]Item{it}, deadlines[i], now, local)
 		if e != nil {
 			if err == nil {
 				err = e
@@ -120,7 +127,11 @@ func (c *Channel) requestEach(items []Item, ttls []time.Duration, local bool) (i
 	}
 	c.mu.Unlock()
 	for _, p := range parts {
-		if e := c.sendRequest(p.text); e != nil {
+		var pids []string
+		for _, i := range p.idx {
+			pids = append(pids, ids[i])
+		}
+		if e := c.sendRequest(p.text, pids, local); e != nil {
 			var drop []string
 			for _, i := range p.idx {
 				drop = append(drop, ids[i])
@@ -147,26 +158,40 @@ func (c *Channel) RequestLocal(it Item, ttl time.Duration) (string, error) {
 	}
 	now := c.cfg.Now()
 	c.mu.Lock()
-	r, err := c.openLocked([]Item{it}, ttl, now, true)
+	r, err := c.openLocked([]Item{it}, ttlDeadline(ttl, now), now, true)
 	if err != nil {
 		c.mu.Unlock()
 		return "", err
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.sendRequest(text); err != nil {
+	if err := c.sendRequest(text, []string{r.id}, r.local); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}
 	return r.id, nil
 }
 
+// ttlDeadline is the absolute expiry a ttl gives from now; zero for the
+// default.
+func ttlDeadline(ttl time.Duration, now time.Time) time.Time {
+	if ttl <= 0 {
+		return time.Time{}
+	}
+	return now.Add(ttl)
+}
+
 // openLocked validates items and opens a request for them, recorded for a
 // restart, without texting it. A local request skips the text check and
-// is always high tier.
-func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, local bool) (*request, error) {
+// is always high tier. It expires at deadline (zero: the default from
+// now), capped at MaxTTL from now, and CodeTTL for a low-tier one; a
+// deadline already passed is refused (ErrExpired), never renewed.
+func (c *Channel) openLocked(items []Item, deadline time.Time, now time.Time, local bool) (*request, error) {
 	if len(items) == 0 || len(items) > 20 {
 		return nil, errors.New("owner: a request has 1 to 20 items")
+	}
+	if !deadline.IsZero() && !now.Before(deadline) {
+		return nil, ErrExpired
 	}
 	for _, it := range items {
 		if !local && !SMSApprovable(it) {
@@ -185,7 +210,8 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	if c.codes.st.LowLocked || local {
 		tier = High // texted codes are off (CH-18), or the page asks it
 	}
-	if ttl <= 0 {
+	ttl := deadline.Sub(now)
+	if deadline.IsZero() {
 		ttl = c.cfg.CodeTTL
 		if local {
 			ttl = LocalTTL

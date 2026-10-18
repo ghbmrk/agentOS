@@ -268,7 +268,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
 {{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
 
-{{define "private"}}<label><input type="checkbox" name="private" value="1"{{if .Checked}} checked{{end}}> Let {{.Name}} see your private content: mail, documents, chats, and anything made from them. Your passwords and keys are never shown to it.</label><br>
+{{define "private"}}{{if .Fixed}}<label><input type="checkbox" checked disabled> Let {{.Name}} see your private content: mail, documents, chats, and anything made from them. Your passwords and keys are never shown to it.</label><br><p>My configuration allows it, so it can't be withdrawn here.</p>{{else}}<label><input type="checkbox" name="private" value="1"{{if .Checked}} checked{{end}}> Let {{.Name}} see your private content: mail, documents, chats, and anything made from them. Your passwords and keys are never shown to it.</label><br>{{end}}
 <span class="muted">Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.</span><br>{{end}}
 
 {{define "providers"}}{{template "head" .Refresh}}

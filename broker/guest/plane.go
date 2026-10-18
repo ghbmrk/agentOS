@@ -139,6 +139,9 @@ type Plane struct {
 	ms    map[string]*machine
 	store *store
 	folds *fold.Store
+	// replyCheck, if set, refuses a guest reply before it is stored
+	// (CheckReplies, CH-11).
+	replyCheck atomic.Pointer[func(text string) string]
 }
 
 type machine struct {

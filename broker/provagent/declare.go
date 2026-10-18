@@ -133,6 +133,12 @@ type Declaration struct {
 	SignInPage  string
 	SignInFrom  string
 
+	// CredFormats are regular expressions for this provider's credential
+	// shapes (access token, refresh token, API key), in Go syntax with any
+	// flags inline, such as (?i). A result is scanned for them as well as
+	// LooksLikeCredential, and the vault redactor scrubs them (CRED-7).
+	CredFormats []string
+
 	Q Qualification
 }
 
@@ -145,6 +151,27 @@ var credRE = regexp.MustCompile(`(?i)(\bsk-[a-z0-9_-]{16,}|eyJ[a-z0-9_-]{8,}\.[a
 
 // LooksLikeCredential reports whether s carries a credential format.
 func LooksLikeCredential(s string) bool { return credRE.MatchString(s) }
+
+// Formats compiles the declaration's credential formats. It refuses none,
+// one that does not compile, and one that matches the empty string, which
+// would match every result (FMT-1).
+func (d Declaration) Formats() ([]*regexp.Regexp, error) {
+	if len(d.CredFormats) == 0 {
+		return nil, fmt.Errorf("declaration %s: no credential format", d.ID)
+	}
+	out := make([]*regexp.Regexp, 0, len(d.CredFormats))
+	for i, f := range d.CredFormats {
+		re, err := regexp.Compile(f)
+		if err != nil {
+			return nil, fmt.Errorf("declaration %s: credential format %d does not compile", d.ID, i)
+		}
+		if re.MatchString("") {
+			return nil, fmt.Errorf("declaration %s: credential format %d matches the empty string", d.ID, i)
+		}
+		out = append(out, re)
+	}
+	return out, nil
+}
 
 // Validate refuses a malformed declaration at load.
 func (d Declaration) Validate() error {
@@ -187,6 +214,9 @@ func (d Declaration) Validate() error {
 		if d.Custody != BrokerHeld || len(d.SignInLinks) == 0 || !strings.HasPrefix(d.SignInPage, "https://") || !contains(d.SignInLinks, d.SignInPage) || d.SignInFrom == "" {
 			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links, its https page and its issuer", d.ID)
 		}
+	}
+	if _, err := d.Formats(); err != nil {
+		return err
 	}
 	var all []string
 	all = append(append(append(all, d.Wrap...), d.Argv...), d.Env...)
@@ -249,6 +279,14 @@ func Builtins() map[string]Declaration {
 			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
 			SignInPage:  "https://auth.openai.com/codex/device",
 			SignInFrom:  "OpenAI",
+			// API keys, the ChatGPT access and id tokens (JWTs; the id
+			// token may be unsigned) and the refresh token. The shapes are
+			// the public ones, not measured (ASSUMPTIONS.md).
+			CredFormats: []string{
+				`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`,
+				`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
+				`(?i)\brt_[a-z0-9._-]{20,}`,
+			},
 			// The record is #809's: CLIVersion equals Version and
 			// guest/codex/build-rootfs.sh CODEX_VERSION, and Evidence must
 			// exist (both test-checked). The evidence is a supervised live run
@@ -274,6 +312,9 @@ func Builtins() map[string]Declaration {
 			TaskClasses: []string{"code", "research"},
 			ErrorEvents: []string{"error"},
 			UsedUp:      []string{"rate_limit"},
+			// Setup (OAuth) tokens, refresh tokens and API keys, scanned
+			// for before a result leaves the worker (S8, mode W).
+			CredFormats: []string{`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`},
 			Q:           Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)
 		},
 	}

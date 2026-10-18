@@ -44,7 +44,7 @@ func TestARepeatSaysItWasAlreadySentAndAsks(t *testing.T) {
 	// On the page, the notice says so too.
 	loc := localItem("i3")
 	loc.Sent = sent
-	if _, err := r.ch.RequestLocalEach([]Item{loc}, []time.Duration{0}); err != nil {
+	if _, err := r.ch.RequestLocalEach([]Item{loc}, []time.Time{{}}); err != nil {
 		t.Fatal(err)
 	}
 	text = r.inbox()
@@ -79,7 +79,7 @@ func TestAnErasedOnlyRepeatSaysItMayRepeat(t *testing.T) {
 
 	loc := localItem("i2")
 	loc.Sent, loc.SentErased = sent, true
-	if _, err := r.ch.RequestLocalEach([]Item{loc}, []time.Duration{0}); err != nil {
+	if _, err := r.ch.RequestLocalEach([]Item{loc}, []time.Time{{}}); err != nil {
 		t.Fatal(err)
 	}
 	text = r.inbox()

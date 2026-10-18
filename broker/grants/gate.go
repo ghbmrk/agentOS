@@ -49,11 +49,15 @@ const (
 // Owner is the owner channel (owner.Channel) as the gate uses it.
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
-	RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error)
+	// RequestEach asks items by text, one request each, each under its
+	// absolute deadline (zero: a fresh request's default); one whose
+	// deadline has passed is not asked (owner.ErrExpired).
+	RequestEach(items []owner.Item, deadlines []time.Time) ([]string, error)
 	// RequestLocalEach asks items on the local page, one request each,
 	// when their recipients cannot be shown in a text
-	// (owner.SMSApprovable; P2-2a), their notices texted together.
-	RequestLocalEach(items []owner.Item, ttls []time.Duration) ([]string, error)
+	// (owner.SMSApprovable; P2-2a), their notices texted together, under
+	// deadlines as RequestEach.
+	RequestLocalEach(items []owner.Item, deadlines []time.Time) ([]string, error)
 	Tier(owner.Facts) owner.Tier
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
@@ -706,6 +710,14 @@ func (g *Gate) closeIntent(id string, why guesterr.Literal) {
 	g.mu.Lock()
 	delete(g.decided, id)
 	g.mu.Unlock()
+}
+
+// closeExpired closes re-issued intents whose original expiry passed
+// before they could be asked again (GR10).
+func (g *Gate) closeExpired(ids []string) {
+	for _, id := range ids {
+		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
+	}
 }
 
 // Route names the executor for a guest's effects on account: the live
@@ -1997,10 +2009,9 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		own := g.own
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
-			// Arbitrator Q1 on #48: one fixed line, no code.
-			// Approval class, like the request it announces, so quiet
-			// hours never hold it past that request (W5-Dc-r23, CH-15).
-			_ = own.Post(owner.ClassApproval, "Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
+			// Arbitrator Q1 on #48: one fixed line, no code. It asks
+			// nothing, so it is an update (W5-Dc-r23 f1, #2066).
+			_ = own.Post(owner.ClassUpdate, HeldInstallNotice)
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -2021,6 +2032,13 @@ func (g *Gate) reissuing(id string) bool {
 
 // annotate explains a pending intent to the guest. It never names the
 // request or its code.
+// HeldInstallNotice is the one text the gate sends when it holds an install
+// (a release adoption) for want of a local page. The gate holds one only
+// when no page exists, and no build has a recovery-key flow, so it names
+// neither and asks nothing: CH-12 allows a text to name only steps that work
+// (W5-Dc-r23 f1, #2066). The request stays pending, never denied (GR17).
+const HeldInstallNotice = "A software update is waiting. I can install it once my Wi-Fi page is set up; nothing to do now."
+
 func (g *Gate) annotate(st *journal.Status) {
 	if st.State != journal.Pending {
 		return
@@ -2281,7 +2299,10 @@ func (g *Gate) flush(paced bool) {
 	stopped := g.eng != nil && g.eng.Stopped()
 	g.batch = nil
 	var low, high, again, page []owner.Item
-	var ttls, pageTTLs []time.Duration
+	// Each re-issued item goes under its original expiry as an absolute
+	// deadline, so a slow send before it (the texted ones go first)
+	// cannot move it later (#1317).
+	var deadlines, pageDeadlines []time.Time
 	var lapsed []string
 	for _, id := range ids {
 		w := g.waiting[id]
@@ -2298,10 +2319,10 @@ func (g *Gate) flush(paced bool) {
 				g.batch = append(g.batch, id)
 			case g.onPage(w):
 				page = append(page, w.item)
-				pageTTLs = append(pageTTLs, w.expires.Sub(now))
+				pageDeadlines = append(pageDeadlines, w.expires)
 			default:
 				again = append(again, w.item)
-				ttls = append(ttls, w.expires.Sub(now))
+				deadlines = append(deadlines, w.expires)
 			}
 			continue
 		}
@@ -2310,7 +2331,7 @@ func (g *Gate) flush(paced bool) {
 			// confirmation: asked alone on the local page (P2-2a), never
 			// in a texted batch, and never YES by text (Security Q1).
 			page = append(page, w.item)
-			pageTTLs = append(pageTTLs, 0)
+			pageDeadlines = append(pageDeadlines, time.Time{})
 			continue
 		}
 		if own != nil && own.Tier(w.item.Facts) == owner.Low {
@@ -2320,9 +2341,10 @@ func (g *Gate) flush(paced bool) {
 		}
 	}
 	g.mu.Unlock()
-	for _, id := range lapsed {
-		g.closeIntent(id, "the approval request expired; ask again with a new request_id")
-	}
+	g.closeExpired(lapsed)
+	// One that lapses while the sends before it run is closed after them,
+	// never asked under a fresh expiry (#1317).
+	lapsed = nil
 	// Each re-issued intent is its own request text: counted, but never
 	// paced, so none lapses unseen behind a spent budget (security R3).
 	var spent []time.Time
@@ -2331,9 +2353,10 @@ func (g *Gate) flush(paced bool) {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
 		if own != nil {
-			reqs, err = own.RequestEach(again, ttls)
+			reqs, err = own.RequestEach(again, deadlines)
 		}
 		g.refund(&spent)
+		late := g.cfg.Now()
 		g.mu.Lock()
 		for i, it := range again {
 			w := g.waiting[it.Ref]
@@ -2341,6 +2364,9 @@ func (g *Gate) flush(paced bool) {
 			case w == nil:
 			case i < len(reqs) && reqs[i] != "":
 				w.request = reqs[i]
+			case !late.Before(w.expires):
+				delete(g.waiting, it.Ref)
+				lapsed = append(lapsed, it.Ref)
 			default:
 				delete(g.waiting, it.Ref)
 				if err == nil {
@@ -2352,43 +2378,49 @@ func (g *Gate) flush(paced bool) {
 		g.mu.Unlock()
 	}
 	var ask []owner.Item
-	var askTTLs []time.Duration
+	var askDeadlines []time.Time
 	for i, it := range page {
 		// Each counts like a request; re-issued ones always go, as above.
 		// Their notices share texts (Potency R2).
-		if pageTTLs[i] == 0 && g.take(paced, 1, &spent) == 0 {
+		if pageDeadlines[i].IsZero() && g.take(paced, 1, &spent) == 0 {
 			g.requeue([]owner.Item{it})
 			continue
 		}
-		if pageTTLs[i] != 0 {
+		if !pageDeadlines[i].IsZero() {
 			g.take(false, 1, &spent)
 		}
-		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
+		ask, askDeadlines = append(ask, it), append(askDeadlines, pageDeadlines[i])
 	}
 	if len(ask) > 0 {
 		reqs := make([]string, len(ask))
 		err := errors.New("no owner channel")
 		if own != nil {
-			reqs, err = own.RequestLocalEach(ask, askTTLs)
+			reqs, err = own.RequestLocalEach(ask, askDeadlines)
 		}
 		g.refund(&spent)
+		late := g.cfg.Now()
 		g.mu.Lock()
 		for i, it := range ask {
-			if w := g.waiting[it.Ref]; w != nil {
-				if i >= len(reqs) || reqs[i] == "" {
-					delete(g.waiting, it.Ref)
-					why := "owner: not asked"
-					if err != nil {
-						why = failReason(err)
-					}
-					g.failed[it.Ref] = why
-				} else {
-					w.request = reqs[i]
+			w := g.waiting[it.Ref]
+			switch {
+			case w == nil:
+			case i < len(reqs) && reqs[i] != "":
+				w.request = reqs[i]
+			case !w.expires.IsZero() && !late.Before(w.expires):
+				delete(g.waiting, it.Ref)
+				lapsed = append(lapsed, it.Ref)
+			default:
+				delete(g.waiting, it.Ref)
+				why := "owner: not asked"
+				if err != nil {
+					why = failReason(err)
 				}
+				g.failed[it.Ref] = why
 			}
 		}
 		g.mu.Unlock()
 	}
+	g.closeExpired(lapsed)
 	for _, items := range [][]owner.Item{low, high} {
 		// An item that cannot be texted (one carried over a restart from
 		// an earlier build's rules) fails alone, not with its batch

@@ -25,7 +25,8 @@ type Class string
 const (
 	// ClassSecurity is always urgent: a security text is never held.
 	ClassSecurity Class = "security"
-	// ClassApproval and ClassAgent are urgent only if the owner says so.
+	// ClassApproval is urgent unless the owner switches it off (D-129);
+	// ClassAgent is urgent only if the owner switches it on.
 	ClassApproval Class = "approval"
 	ClassAgent    Class = "agent"
 	// ClassUpdate is never urgent.
@@ -42,7 +43,7 @@ const (
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings.
 const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF."
@@ -50,7 +51,7 @@ const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
 // Pacing is the owner's pacing setting. The zero value is the default:
-// no quiet hours, DefaultTextsPerHour, and only security urgent.
+// no quiet hours, DefaultTextsPerHour, and security and approval urgent.
 type Pacing struct {
 	// QuietFrom and QuietTo are minutes of the box-local day
 	// (Config.Location); equal means no quiet hours. The window may wrap
@@ -63,6 +64,10 @@ type Pacing struct {
 	// Urgent lists the classes beyond security that go at once
 	// (approval, agent).
 	Urgent []Class `json:"urgent,omitempty"`
+	// ApprovalHeld is set when the owner switched URGENT APPROVAL OFF:
+	// approval is urgent by default (D-129), so the zero value must be
+	// urgent and the off switch has to be stored.
+	ApprovalHeld bool `json:"approval_held,omitempty"`
 }
 
 // valid reports whether p is a setting the owner could have made.
@@ -93,7 +98,9 @@ func (p Pacing) urgent(class Class) bool {
 	switch class {
 	case ClassSecurity:
 		return true
-	case ClassApproval, ClassAgent:
+	case ClassApproval:
+		return !p.ApprovalHeld
+	case ClassAgent:
 		for _, u := range p.Urgent {
 			if u == class {
 				return true
@@ -244,6 +251,9 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
+	if err := refuseReaction(text); err != nil {
+		return err
+	}
 	return c.post(class, agentText(text), true)
 }
 
@@ -262,6 +272,9 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
+	}
+	if err := refuseReaction(text); err != nil {
+		return err
 	}
 	text = agentText(text)
 	if c.Urgent(ClassAgent) {
@@ -682,7 +695,9 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 					u = append(u, x)
 				}
 			}
-			if on {
+			if class == ClassApproval {
+				p.ApprovalHeld = !on
+			} else if on {
 				u = append(u, class)
 			}
 			p.Urgent = u
