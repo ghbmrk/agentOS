@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// REQ: A14, CRED-5, RES-5
+// REQ: A14, CRED-5, RES-5, CAP-9
 
 // authFile stands in for egress.CodexAuthFile, the one path a Codex seed
 // carries.
@@ -69,7 +69,7 @@ func TestA14RouteControlOpensAndClosesOverTheSocket(t *testing.T) {
 	} else if strings.Contains(err.Error(), "\n") {
 		t.Fatalf("a locked open's error spans lines: %q", err)
 	}
-	if _, err := c.Seed("pw-a"); !errors.Is(err, ErrVaultLocked) {
+	if _, err := c.Seed("pw-a", false); !errors.Is(err, ErrVaultLocked) {
 		t.Fatalf("a locked seed returned %v, want ErrVaultLocked", err)
 	}
 	if _, err := NewRouteControl(filepath.Join(dir, "none.sock")).Open("pw-a"); err == nil {
@@ -117,7 +117,7 @@ func TestCRED5RouteControlSeedsTheWorker(t *testing.T) {
 		path = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
 		json.NewEncoder(w).Encode(map[string][]byte{authFile: []byte(`{"tokens":{}}`)})
 	})
-	got, err := c.Seed("pw-a")
+	got, err := c.Seed("pw-a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +126,10 @@ func TestCRED5RouteControlSeedsTheWorker(t *testing.T) {
 	}
 	if len(got) != 1 || string(got[authFile]) != `{"tokens":{}}` {
 		t.Fatalf("seed %q", got)
+	}
+	// A Private run's seed binds its label to the route (CAP-9, #2359).
+	if _, err := c.Seed("pw-a", true); err != nil || path != "POST /seed?machine=pw-a&private=1" {
+		t.Fatalf("private seed called %q (%v)", path, err)
 	}
 }
 
