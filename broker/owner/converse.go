@@ -1,6 +1,9 @@
 package owner
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 // Converse texts the owner the agent's reply to a message the owner sent:
 // conversation, not a push (CH-15). It goes at once, in quiet hours too
@@ -12,6 +15,9 @@ import "time"
 // bound how many go, or an agent question while the owner's task chat
 // is open, which the question book bounds itself (#2363); other agent
 // text the owner did not ask for goes through Notify.
+//
+// A reply that goes out stops the acknowledgement due for the owner's
+// task chat (OWN-4); one that fails to send does not.
 func (c *Channel) Converse(text string) error {
 	if c.cfg.Modem == nil {
 		return ErrNoModem
@@ -20,7 +26,64 @@ func (c *Channel) Converse(text string) error {
 	if err != nil {
 		return err
 	}
-	return c.cfg.Modem.Send(c.cfg.Owner, agentText(text))
+	c.ackSend.Lock()
+	defer c.ackSend.Unlock()
+	if err := c.cfg.Modem.Send(c.cfg.Owner, agentText(text)); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.stopAckLocked()
+	c.mu.Unlock()
+	return nil
+}
+
+// AckText is the acknowledgement (OWN-4): the broker's own fixed words,
+// with nothing of the agent's.
+const AckText = "On it."
+
+// armAckLocked notes owner task chat that reached the agent at at. If no
+// acknowledgement is due, one falls due the owner's ACK seconds after at;
+// one already due covers this message too, so the owner gets at most one
+// for the messages of one wait (OWN-4). c.mu is held.
+func (c *Channel) armAckLocked(at time.Time) {
+	if c.ackStop != nil || c.cfg.Modem == nil {
+		return
+	}
+	c.ackGen++
+	gen := c.ackGen
+	c.ackStop = c.cfg.AfterFunc(c.codes.st.Pacing.ackAfter()-c.cfg.Now().Sub(at), func() { c.ack(gen) })
+}
+
+// stopAckLocked stops the acknowledgement due, if any. c.mu is held.
+func (c *Channel) stopAckLocked() {
+	if c.ackStop != nil {
+		c.ackStop()
+		c.ackStop = nil
+	}
+	c.ackGen++
+}
+
+// ack sends the acknowledgement armed as gen unless a reply went out or a
+// later one replaced it. It is conversation (CH-15): it goes at once, in
+// quiet hours too, uncounted, with no agent prefix. ackSend orders it
+// against Converse, so it never follows the reply that stopped it.
+func (c *Channel) ack(gen uint64) {
+	c.ackSend.Lock()
+	defer c.ackSend.Unlock()
+	c.mu.Lock()
+	if gen != c.ackGen || c.ackStop == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.ackStop = nil
+	m := c.cfg.Modem
+	c.mu.Unlock()
+	if m == nil {
+		return
+	}
+	if err := m.Send(c.cfg.Owner, AckText); err != nil {
+		log.Printf("owner channel: acknowledgement not sent: %v", err)
+	}
 }
 
 // ChatOpen reports whether a task chat is open: owner task chat reached

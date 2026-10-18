@@ -47,16 +47,22 @@ const (
 	// MinChatMinutes and MaxChatMinutes bound CHAT.
 	MinChatMinutes = 5
 	MaxChatMinutes = 240
+	// DefaultAckSeconds is how long after a task message reached the box
+	// AckText goes if no reply has, when the owner set none (OWN-4).
+	DefaultAckSeconds = 20
+	// MinAckSeconds and MaxAckSeconds bound ACK.
+	MinAckSeconds = 5
+	MaxAckSeconds = 120
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open), ACK 5 to 120 (seconds before I text \"On it.\"). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings. It is terse because
 // agentosd's whole HELP must fit one owner text uncut (control.MaxText,
 // #2390 F1); a mistyped setting gets pacingForms, which says what each
 // value means.
-const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30."
+const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30, ACK 20."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
@@ -82,6 +88,9 @@ type Pacing struct {
 	// last message reached the agent (CH-15); 0 means
 	// DefaultChatMinutes.
 	ChatMinutes int `json:"chat_minutes,omitempty"`
+	// AckSeconds is how long after a task message reached the box
+	// AckText goes if no reply has (OWN-4); 0 means DefaultAckSeconds.
+	AckSeconds int `json:"ack_seconds,omitempty"`
 }
 
 // valid reports whether p is a setting the owner could have made.
@@ -94,6 +103,9 @@ func (p Pacing) valid() bool {
 		return false
 	}
 	if p.ChatMinutes != 0 && (p.ChatMinutes < MinChatMinutes || p.ChatMinutes > MaxChatMinutes) {
+		return false
+	}
+	if p.AckSeconds != 0 && (p.AckSeconds < MinAckSeconds || p.AckSeconds > MaxAckSeconds) {
 		return false
 	}
 	for _, u := range p.Urgent {
@@ -117,6 +129,15 @@ func (p Pacing) chatWindow() time.Duration {
 		return DefaultChatMinutes * time.Minute
 	}
 	return time.Duration(p.ChatMinutes) * time.Minute
+}
+
+// ackAfter is how long an unanswered task message waits for AckText
+// (OWN-4).
+func (p Pacing) ackAfter() time.Duration {
+	if p.AckSeconds == 0 {
+		return DefaultAckSeconds * time.Second
+	}
+	return time.Duration(p.AckSeconds) * time.Second
 }
 
 func (p Pacing) urgent(class Class) bool {
@@ -717,7 +738,7 @@ func (c *Channel) allowanceLocked(now time.Time) int {
 
 // pacingSetting answers the owner's pacing settings (QH-6, SG-r1-5):
 // QUIET a-b, QUIET OFF, TEXTS n, URGENT APPROVAL|AGENT ON|OFF, CHAT n
-// (CH-15). A message
+// (CH-15), ACK n (OWN-4). A message
 // of another shape returns ok false. Locked, a pacing setting also
 // returns ok false, so it gets the unlock prompt and changes nothing.
 func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
@@ -764,6 +785,15 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 		change = func(p *Pacing) { p.ChatMinutes = n }
 		reply = func(Pacing) string {
 			return fmt.Sprintf("Chat set: %d minutes. My questions go at once until %d minutes after your last message.", n, n)
+		}
+	case "ACK":
+		n, err := strconv.Atoi(f[1])
+		if err != nil || n < MinAckSeconds || n > MaxAckSeconds {
+			return pacingForms, true
+		}
+		change = func(p *Pacing) { p.AckSeconds = n }
+		reply = func(Pacing) string {
+			return fmt.Sprintf("Acknowledgement set: %d seconds. If no reply has gone by then, I text %q", n, AckText)
 		}
 	case "URGENT":
 		class := Class(strings.ToLower(f[1]))
@@ -818,7 +848,7 @@ func pacingShape(f []string) bool {
 	switch f[0] {
 	case "QUIET":
 		return (len(f) == 2 && f[1] == "OFF") || (len(f) == 3 && isDigits(f[1]) && isDigits(f[2]))
-	case "TEXTS", "CHAT":
+	case "TEXTS", "CHAT", "ACK":
 		return len(f) == 2 && isDigits(f[1])
 	case "URGENT":
 		if len(f) != 3 {

@@ -290,7 +290,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	if err == nil {
 		now := time.Now
 		if s := l.sleep.Load(); s != nil {
-			now = s.cfg.Now // the clock the sleeper measures the hold on
+			now = s.cfg.Now // the clock the sleeper reads the owner's quiet on
 		}
 		l.delivered(now())
 	}
@@ -307,7 +307,7 @@ type ownerAgent interface {
 func (l *lateAgent) delivered(t time.Time) {
 	l.last.Store(t.UnixNano())
 	if s := l.sleep.Load(); s != nil && s.Asleep() {
-		go s.OwnerMessage(t)
+		go s.OwnerMessage()
 	}
 }
 

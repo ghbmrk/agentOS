@@ -114,6 +114,10 @@ type Config struct {
 	// OwnerName is the owner's own name, "" when unknown; the box's name
 	// may not be it (CH-21).
 	OwnerName string
+	// AfterFunc runs f once d has passed on the clock Now reads, and
+	// returns what stops it; the acknowledgement (OWN-4) waits on it. Nil
+	// is time.AfterFunc.
+	AfterFunc func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -191,6 +195,13 @@ type Channel struct {
 	// set it (security B1 on #2372).
 	chat    time.Time
 	alertAt time.Time
+	// ackStop stops the acknowledgement due for task chat, nil when none
+	// is (OWN-4); ackGen tells a timer that fired late from the one now
+	// due. ackSend orders an acknowledgement against Converse's replies;
+	// it is taken before mu.
+	ackStop func() bool
+	ackGen  uint64
+	ackSend sync.Mutex
 	// floodAlertAt is the last flood alert; floods counts the events for
 	// the digest by kind.
 	floodAlertAt time.Time
@@ -282,6 +293,9 @@ func New(cfg Config) (*Channel, error) {
 		return nil, err
 	}
 	checkPacing(&st)
+	if cfg.AfterFunc == nil {
+		cfg.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
 	c := &Channel{
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
@@ -983,17 +997,21 @@ func (c *Channel) Chatting(d time.Duration) bool {
 }
 
 // chatAgent records when the control handler delivers owner task chat
-// to the agent, which it does only in an unlocked session.
+// to the agent, which it does only in an unlocked session, and arms the
+// acknowledgement from when the message reached the box (OWN-4): a
+// sleeping agent's inbox takes it too, so the wait covers a wake.
 type chatAgent struct {
 	control.Agent
 	c *Channel
 }
 
 func (a chatAgent) Deliver(ctx context.Context, text string, public bool) error {
+	at := a.c.cfg.Now()
 	err := a.Agent.Deliver(ctx, text, public)
 	if err == nil {
 		a.c.mu.Lock()
 		a.c.chat = a.c.cfg.Now()
+		a.c.armAckLocked(at)
 		a.c.mu.Unlock()
 	}
 	return err
