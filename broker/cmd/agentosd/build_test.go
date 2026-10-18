@@ -17,7 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: LOOP-2, OP-8, REV-5
+// REQ: LOOP-0, LOOP-2, OP-8, REV-5
 
 // W3-builder (C-3c-2): a builder machine reaches only the builder's
 // socket, never the live plane where managed_tree and executors are; with
@@ -66,7 +66,8 @@ func TestLoop1sModelBuilderWaitsForTheBox(t *testing.T) {
 	if lp.builder.Private(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}) {
 		t.Fatal("the in-process compiler's skills are marked private by the builder")
 	}
-	if sh := builderShare(); sh.Prefix != loopbuild.BuildPrefix || sh.Reserve != 0 || sh.Max < 0.3 || sh.Max > 0.4 {
+	// LOOP-0 (#2291): no fixed split between loops or building and fixing.
+	if sh := builderShare(); sh.Prefix != loopbuild.BuildPrefix || sh.Reserve != 0 || sh.Max != 0 {
 		t.Fatalf("builder share %+v", sh)
 	}
 }

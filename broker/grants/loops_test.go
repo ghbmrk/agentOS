@@ -26,7 +26,7 @@ var _ Loops = (*loops.Scheduler)(nil)
 func loopsRig(t *testing.T) (*rig, *loops.Scheduler) {
 	t.Helper()
 	spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.DefaultSpareCalls)})
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.NoSpareBudget)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +102,9 @@ func TestLoopSettingsDeniedWithoutScheduler(t *testing.T) {
 // An unanswered raise closes as lapsed, not declined (arbitrator Q3 on #48).
 func TestAnUnansweredRaiseLapses(t *testing.T) {
 	r, s := loopsRig(t)
+	if _, ok := s.Text(context.Background(), "SPARE BUDGET 100", true); !ok || s.Settings().SpareCalls != 100 {
+		t.Fatal("setting a budget from none")
+	}
 	if _, ok := s.Text(context.Background(), "SPARE BUDGET 400", true); !ok {
 		t.Fatal("not a setting")
 	}
@@ -111,7 +114,7 @@ func TestAnUnansweredRaiseLapses(t *testing.T) {
 	if st := r.state(items[0].Ref); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "lapsed, not declined") {
 		t.Fatalf("%s %q", st.State, st.Permission.Reason)
 	}
-	if s.Settings().SpareCalls != loops.DefaultSpareCalls {
+	if s.Settings().SpareCalls != 100 {
 		t.Fatal("a lapsed raise was applied")
 	}
 }
@@ -152,7 +155,7 @@ func (r *recordingChanges) Decided(context.Context, journal.Intent, string) { r.
 // the change pipeline's Decided.
 func TestALapsedRaiseIsNotAChangeDecision(t *testing.T) {
 	spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.DefaultSpareCalls)})
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.NoSpareBudget)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +166,9 @@ func TestALapsedRaiseIsNotAChangeDecision(t *testing.T) {
 	ch := &recordingChanges{}
 	r := newRigExecs(t, func(c *Config) { c.Loops, c.Changes = s, ch }, map[string]journal.Executor{loops.Executor: s})
 	s.Attach(r.g)
+	if _, ok := s.Text(context.Background(), "SPARE BUDGET 100", true); !ok || s.Settings().SpareCalls != 100 {
+		t.Fatal("setting a budget from none")
+	}
 	if _, ok := s.Text(context.Background(), "SPARE BUDGET 150", true); !ok {
 		t.Fatal("not a setting")
 	}

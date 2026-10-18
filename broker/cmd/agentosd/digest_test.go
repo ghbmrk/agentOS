@@ -113,6 +113,7 @@ type digestRig struct {
 	reg     *capLines
 	// quiet, if set, is the owner's quiet hours (W5-Dc-r1b QH-7).
 	quiet func(time.Time) bool
+	down  func() bool
 }
 
 // day0 is a Monday; the digest time is 08:00 UTC in these tests.
@@ -138,7 +139,8 @@ func (r *digestRig) make(sources map[string]digestqueue.Source) {
 		Queue: r.queue, State: r.state, Sources: sources, Transport: r.tr,
 		Inform: func(s string) error { r.informs = append(r.informs, s); return nil },
 		Now:    func() time.Time { return r.now }, Loc: time.UTC, Logf: r.t.Logf,
-		Quiet: func(t time.Time) bool { return r.quiet != nil && r.quiet(t) },
+		Quiet:    func(t time.Time) bool { return r.quiet != nil && r.quiet(t) },
+		LineDown: func() bool { return r.down != nil && r.down() },
 	})
 	r.reg = &capLines{}
 	r.d.register(r.reg)

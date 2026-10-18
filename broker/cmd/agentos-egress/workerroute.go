@@ -108,6 +108,11 @@ type workerRoutes struct {
 
 	mu   sync.Mutex
 	open map[string]*routeServer
+	// private is the workers whose run carries the Private label
+	// (/seed?private=1): their routes ask plan before each content
+	// request (CAP-9, CH-3; #2359). Kept across a reopen, dropped on
+	// /close, as the placeholders are.
+	private map[string]bool
 }
 
 type routeServer struct {
@@ -125,7 +130,7 @@ func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, 
 		dir: dir, config: config, forget: forget, seed: seed,
 		conns: routeConns, calls: make(chan struct{}, routeCalls),
 		share: routeShare, writeTimeout: routeWriteTimeout,
-		open: map[string]*routeServer{},
+		open: map[string]*routeServer{}, private: map[string]bool{},
 	}
 }
 
@@ -197,6 +202,13 @@ func (p *workerRoutes) handler() http.Handler {
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if r.URL.Query().Get("private") == "1" {
+				// Only ever set: a later seed without the label is the
+				// same run, still bound until /close.
+				p.mu.Lock()
+				p.private[id] = true
+				p.mu.Unlock()
 			}
 			json.NewEncoder(w).Encode(files)
 		default:
@@ -294,11 +306,71 @@ func (p *workerRoutes) openRoute(id string, signIn bool) (string, error) {
 	}
 	// The share is the route's own: a reopen's srv.Close cuts the old
 	// route's connections, which cancels their calls and frees their slots.
-	srv := newServer(p.bounded(make(chan struct{}, p.share), h))
+	// The private check sits outside the share, so a refused call holds
+	// no slot.
+	srv := newServer(p.privateGate(id, cfg, p.bounded(make(chan struct{}, p.share), h)))
 	srv.ReadTimeout = routeReadTimeout
 	go srv.Serve(newLimitListener(ln, p.conns))
 	p.open[id] = &routeServer{dir: dir, srv: srv}
 	return dir, nil
+}
+
+// privateGate refuses a content request (a run endpoint of kind
+// responses) on a private-bound worker's route with 403 unless the plan's
+// private-data answer still allows it, read afresh per request: the
+// owner's withdrawal reaches a run admitted before it (CAP-9, CH-3;
+// #2359). An answer it cannot read (locked vault, no plan) refuses.
+// Requests the provider already has are not recalled. Sign-in, refresh
+// and model-list calls carry no owner data and pass, as do public runs.
+func (p *workerRoutes) privateGate(id string, cfg egress.WorkerRouteConfig, h http.Handler) http.Handler {
+	if cfg.SignIn {
+		return h
+	}
+	var content []egress.PlanEndpoint
+	for _, e := range cfg.Route.Endpoints {
+		if e.Kind == egress.KindResponses && !e.SignIn {
+			content = append(content, e)
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ep, ok := matchEndpoint(content, r)
+		if !ok {
+			h.ServeHTTP(w, r)
+			return
+		}
+		p.mu.Lock()
+		bound, plan := p.private[id], p.plan
+		p.mu.Unlock()
+		if !bound {
+			h.ServeHTTP(w, r)
+			return
+		}
+		if plan != nil {
+			if s, err := plan(planProvider); err == nil && s.PrivateOK {
+				h.ServeHTTP(w, r)
+				return
+			}
+		}
+		const reason = "private data withdrawn for this plan"
+		if cfg.Audit != nil {
+			cfg.Audit.Egress(egress.Event{
+				At: time.Now(), Machine: id, Adapter: cfg.Route.Provider, Method: r.Method,
+				Operation: ep.Name, Path: ep.Host + ep.Path, Status: http.StatusForbidden, Reason: reason,
+			})
+		}
+		w.Header().Set(egress.DeniedHeader, "1")
+		http.Error(w, "egress denied: "+reason, http.StatusForbidden)
+	})
+}
+
+// matchEndpoint is the route's own match (method and exact path) over eps.
+func matchEndpoint(eps []egress.PlanEndpoint, r *http.Request) (egress.PlanEndpoint, bool) {
+	for _, e := range eps {
+		if r.Method == e.Method && r.URL.Path == e.Path {
+			return e, true
+		}
+	}
+	return egress.PlanEndpoint{}, false
 }
 
 // bounded refuses a call with 503, before the call's body is read, while
@@ -365,6 +437,7 @@ func (p *workerRoutes) close(id string) {
 	defer p.mu.Unlock()
 	p.stopLocked(id)
 	p.forgetLocked(id)
+	delete(p.private, id)
 }
 
 // stopLocked stops serving id's route and removes its directory; the
@@ -393,6 +466,7 @@ func (p *workerRoutes) closeAll() {
 		p.stopLocked(id)
 		p.forgetLocked(id)
 	}
+	clear(p.private)
 }
 
 // limitListener accepts at most n connections at once; more wait in the
