@@ -178,8 +178,10 @@ func chatCode(t time.Time) string {
 // REQ: CH-15
 // HELP as agentosd sends it, with the learning line (on or off) and RENEW
 // wired as main wires them, fits one owner text uncut and names CHAT
-// (combined F1 on #2390): Fit cuts past control.MaxText, so a check on the
-// pacing constant alone missed that CHAT never reached the owner.
+// (combined F1 on #2390): a check on the pacing constant alone missed that
+// CHAT never reached the owner. Fit cuts every reply to control.MaxText, so
+// a length check cannot fail; the reply is whole only if it still ends with
+// the pacing line's last item, which is HELP's last piece.
 func TestCH15HelpNamesChatUncut(t *testing.T) {
 	for _, learning := range []bool{true, false} {
 		var dc daemon.Config
@@ -200,12 +202,12 @@ func TestCH15HelpNamesChatUncut(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := ch.Handle(context.Background(), ownerNum, "HELP")
-		if len(got) != 1 || len(got[0]) > control.MaxText {
-			t.Fatalf("learning %v: HELP is %d texts: %q", learning, len(got), got)
+		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "CHAT 30.") {
+			t.Fatalf("learning %v: HELP is not one whole text (cut at %d bytes): %q", learning, control.MaxText, got)
 		}
-		for _, word := range []string{"STOP", "RESUME", "STATUS", "UNDO", "MORE", "NAME", "PUBLIC",
-			"LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30"} {
-			if word == "LOOPS" && !learning {
+		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
+			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30"} {
+			if !learning && (word == "LOOPS" || word == "HELP LOOPS") {
 				word = "Spare-time"
 			}
 			if !strings.Contains(got[0], word) {
