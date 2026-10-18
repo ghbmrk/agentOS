@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -228,5 +229,45 @@ func TestPassedOverNoticesAreCounted(t *testing.T) {
 	// Nothing of the text but its counts: no digit outside a count, no letters of the notice.
 	if got := readPhoneRun(log, 0).noticeNote(); strings.ContainsAny(got, ":.;'") || strings.Contains(got, "12") {
 		t.Errorf("note quotes the notice: %q", got)
+	}
+}
+
+// The sends modemlink logged as missed are noted by kind and caller, in
+// lower-case words only, the last lostSendMax of them (#2170). The line
+// starts the journal's text, after the log's date and time if any.
+func TestLostSendsAreNamed(t *testing.T) {
+	journal := strings.Join([]string{
+		"setup: done",
+		modemlink.MissedLog + " kind=text via owner.watchedLine.Send via owner.(*Channel).sendCounted via main.(*forgetter).tell",
+		"owner: something else +15550000999",
+		modemlink.MissedLog + " kind=request via owner.(*Channel).sendRequest",
+		modemlink.MissedLog + " kind=Text via ../../evil;rm -rf",
+		modemlink.MissedLog + " kind=text",
+		"2026/10/18 12:00:00 " + modemlink.MissedLog + " kind=text via owner.x",
+		"owner: quoting " + modemlink.MissedLog + " kind=text via owner.y",
+	}, "\n")
+	got := strings.Join(lostSendNotes(journal), "|")
+	want := "lost-send kind=text via=owner-watchedline-send via=owner-channel-sendcounted via=main-forgetter-tell|" +
+		"lost-send kind=request via=owner-channel-sendrequest|" +
+		"lost-send kind=other via=evil-rm-rf|" +
+		"lost-send kind=text|" +
+		"lost-send kind=text via=owner-x"
+	if got != want {
+		t.Fatalf("notes %q\nwant %q", got, want)
+	}
+	var many []string
+	for i := 0; i < lostSendMax+2; i++ {
+		many = append(many, modemlink.MissedLog+fmt.Sprintf(" kind=text via main.f%d", i))
+	}
+	n := lostSendNotes(strings.Join(many, "\n"))
+	if len(n) != lostSendMax || n[len(n)-1] != fmt.Sprintf("lost-send kind=text via=main-f%d", lostSendMax+1) {
+		t.Fatalf("notes %q, want the last %d", n, lostSendMax)
+	}
+	long := lostSendNotes(modemlink.MissedLog + " kind=text via " + strings.Repeat("a", 200))
+	if len(long) != 1 || len(long[0]) > 100 {
+		t.Fatalf("a long caller noted %q", long)
+	}
+	if lostSendNotes("") != nil {
+		t.Fatal("an empty journal noted a send")
 	}
 }

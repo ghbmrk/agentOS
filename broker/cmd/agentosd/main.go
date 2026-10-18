@@ -551,6 +551,9 @@ func main() {
 			// (P2-2w c4c), and records the SIM it finds as that line's.
 			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
 			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+			// Once setup is finished the bridge learns the owner's number
+			// from its environment file (P2-2w c4c r1).
+			m.ModemEnv = modemEnvFile
 		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
@@ -708,8 +711,9 @@ func main() {
 	if modemBridge {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
 		// recorded where the bridge reads it at its next open. A picture
-		// texted to the box is journaled and counted in STATUS (CH-12).
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell})
+		// texted to the box is journaled and counted in STATUS (CH-12). A text
+		// the down line drops is logged by kind and caller (#2170).
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell, Logf: log.Printf})
 		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {

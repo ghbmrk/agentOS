@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,6 +49,14 @@ type setupMode struct {
 	Line     *modemlink.SetupLine
 	ModemUID *int
 	ModemGID *int
+	// ModemEnv is agentos-modem's environment file (P2-2w c4c r1): once
+	// setup is finished, on this start and every later one, it is made to
+	// name the owner (OWNER_NUMBER), so the bridge, restarted by the image
+	// when the file changes, knows whose texts are the owner's. Set only
+	// with a modem line; empty writes nothing.
+	ModemEnv string
+	// Logf logs ModemEnv's outcome, never the number; nil is log.Printf.
+	Logf func(string, ...any)
 
 	// Card starts the first-boot Owner Card step (HW-1) and returns its
 	// hold: setup does not finish while Hold reports the card unconfirmed.
@@ -129,6 +139,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("setup record: %w", err)
 	}
 	if rec.Finished {
+		m.toBridge(rec.Owner)
 		return rec.Owner, nil
 	}
 	if _, err := os.Lstat(m.OwnerState); !errors.Is(err, os.ErrNotExist) {
@@ -144,6 +155,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	m.bridgeDir()
 	finished := make(chan string, 1)
 	cfg := localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
 		Join:      joiner(m.NetJoin, m.Seen),
@@ -213,7 +225,38 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	}
 	stop()
 	srv.Wait()
+	if err == nil {
+		m.toBridge(owner)
+	}
 	return owner, err
+}
+
+// bridgeDir makes ModemEnv's directory while setup runs, well before
+// finish writes the file: agentos-modem-env.path watches the file, and a
+// directory made just before the file could be missed while systemd moves
+// its watch into it.
+func (m setupMode) bridgeDir() {
+	if m.ModemEnv == "" {
+		return
+	}
+	if err := ensureDir(filepath.Dir(m.ModemEnv)); err != nil {
+		m.logf()("setup: %v", err)
+	}
+}
+
+func (m setupMode) logf() func(string, ...any) {
+	if m.Logf == nil {
+		return log.Printf
+	}
+	return m.Logf
+}
+
+// toBridge gives the owner's number to the modem bridge through ModemEnv.
+func (m setupMode) toBridge(owner string) {
+	if m.ModemEnv == "" {
+		return
+	}
+	writeOwnerEnv(m.ModemEnv, owner, m.logf())
 }
 
 // cardStep starts the Owner Card step on a box with no owner.
