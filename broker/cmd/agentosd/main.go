@@ -722,6 +722,7 @@ func main() {
 		cfg.BridgeOnly = !ownerMessage
 		if dg != nil {
 			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
+			dg.cfg.LineDown = digestLineDown(link)
 		}
 	}
 
