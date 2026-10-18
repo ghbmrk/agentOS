@@ -45,7 +45,7 @@ func (g *gatedModem) Send(to, text string) error {
 func raceRig(t *testing.T, perHour int) (*rig, *gatedModem, func()) {
 	t.Helper()
 	st := &MemStore{}
-	if err := st.Save(State{Pacing: Pacing{PerHour: perHour}}); err != nil {
+	if err := st.Save(State{Pacing: Pacing{PerHour: perHour, ApprovalHeld: true}}); err != nil {
 		t.Fatal(err)
 	}
 	r := newRig(t, st)
@@ -407,7 +407,7 @@ func TestCountRunsFromTheSend(t *testing.T) {
 func asyncRaceRig(t *testing.T, perHour int) (*rig, *gatedModem, func()) {
 	t.Helper()
 	st := &MemStore{}
-	if err := st.Save(State{Pacing: Pacing{PerHour: perHour}}); err != nil {
+	if err := st.Save(State{Pacing: Pacing{PerHour: perHour, ApprovalHeld: true}}); err != nil {
 		t.Fatal(err)
 	}
 	r := newRig(t, st)

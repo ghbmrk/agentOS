@@ -29,6 +29,11 @@ type store struct {
 	outbox  []PendingReply
 	done    []doneReply
 	refused bool // a reply was refused because the outbox was full
+	// unsaved says a write that kept its change in memory failed (a
+	// forget's or a retire's), so the file may still hold replies memory
+	// dropped; the next forget writes even with an empty outbox, and any
+	// successful write clears it (CAP-3, #2361).
+	unsaved bool
 }
 
 // doneReply is a reply that has left the outbox.
@@ -227,7 +232,8 @@ func (s *store) pending() []PendingReply {
 
 // retire moves machine's reply to id from the outbox to done. Memory
 // changes even if the write fails: the reply was handed on, and the worst
-// a lost write does is hand it on again after a restart.
+// a lost write does is hand it on again after a restart, unless a forget
+// writes first, which unsaved makes it do.
 func (s *store) retire(machine, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -236,6 +242,7 @@ func (s *store) retire(machine, id string) error {
 			s.outbox = append(append([]PendingReply(nil), s.outbox[:i]...), s.outbox[i+1:]...)
 			s.done = addDone(s.done, r)
 			s.refused = false
+			s.unsaved = true
 			return s.save()
 		}
 	}
@@ -246,11 +253,13 @@ func (s *store) retire(machine, id string) error {
 // no reply names the task it is about, so none can be kept). Each moves
 // to done, so the guest's retry of it is recognised and not queued
 // again; done holds no text. Memory is cleared even if the write fails,
-// and the error is returned so the deletion reports it.
+// and the error is returned so the deletion reports it; a retry writes
+// again until a write succeeds, so the deletion is not done while the
+// file still holds a dropped reply.
 func (s *store) forget() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.outbox) == 0 {
+	if len(s.outbox) == 0 && !s.unsaved {
 		return nil
 	}
 	for _, r := range s.outbox {
@@ -258,6 +267,7 @@ func (s *store) forget() error {
 	}
 	s.outbox = nil
 	s.refused = false
+	s.unsaved = true
 	return s.save()
 }
 
@@ -275,5 +285,9 @@ func (s *store) save() error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(s.path, b, 0o600)
+	if err := durable.WriteFile(s.path, b, 0o600); err != nil {
+		return err
+	}
+	s.unsaved = false
+	return nil
 }

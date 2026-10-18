@@ -7,22 +7,22 @@ Board row: issue #1876. Source: PR #1864 delta review R4 (Security #9, L3 #9). C
 ## Requirements
 
 - **OP-8** (SPEC.md:396) model spend is metered by originating agent machine and charged to that machine's task reservation or rolling cap. The `Event` (`Provider, TaskClass, Outcome, ResultBytes, Elapsed`) carries metadata only, never the brief or result.
-- **PJ-1** agentosd's provider runner always has a non-nil `Journal`. Each finished run (any outcome, refusals after admission included; a refusal before admission is not journaled or charged) writes one journal entry through the engine's journal, with the fields of `Event` and no brief, result or CLI output.
-- **PJ-2** Each run is charged to the originating machine's meter through the OP-8 path that `modelroute` uses for calls (`broker/meter`), as one call and zero tokens: `meter.Start(machine, 0, 0)` before the run, `Call.Done(0)` after it (`meter.Limits` holds only `Calls` and `Tokens`, so there is no wall-time unit). In broker-held plan mode the charge is the run, not tokens (RES-5: plan quota is a pool, not OP-8 token spend). A machine at its call cap is refused before the run starts: `Start` returns `ErrExhausted` (OP-8, SPEC.md:396, "egress refuses further calls"), the runner returns `Refused` and never reaches admission or the VM. A request refused before the charge costs nothing: the validation, label, custody, stopped-route and brief-size refusals in `Run` (run.go:240-252) and a `r.admit` refusal all return before `meter.Start` is called. The builder adds `Runner.Charge func(machine string) (done func(), err error)` (named so it is not confused with `r.admit`), called in `Run` immediately after `r.admit` succeeds; the adapter sets it to wrap `Start`/`Done`. If `Charge` returns `ErrExhausted`, `Run` frees the slot `admit` took (`r.release(d.ID, probe)`), returns `Refused` and never reaches the VM; `done` runs after the run ends. and records the choice in ASSUMPTIONS.
+- **PJ-1** agentosd's provider runner always has a non-nil `Journal`. Each finished run (any outcome, refusals after admission included; a refusal before admission is not journaled) writes one journal entry through the engine's journal, with the fields of `Event`, the caller's machine (or `unattributed`), and no brief, result or CLI output.
+- **PJ-2** (amended after #2291 rewrote OP-8) The journal entry is the plan run's metering: one entry per admitted run, under the originating machine, with its outcome and wall time. A plan run is never charged to or refused by the spend meter (`broker/meter`): OP-8 meters a plan run as runs, wall time and plan quota with zero spend, bounded by the run's wall clock and machine limits (RES-2) and the pool's reserve (RES-5), so a charge against the meter's call and money caps would refuse runs, block the machine's API calls and prompt the owner for a spend limit though nothing was spent. A run with no caller machine is journaled as `unattributed`, not refused.
 - **PJ-3** A runner built with a nil `Journal` is visible: `Run` logs once through `Logf` that provider runs are unmetered. It is not silent.
 
 **Acceptance tests:**
-- PJ-1: `TestProviderRunnerHasJournal` and `TestProviderRunWritesOneEntryWithNoBrief` (`broker/cmd/agentosd/providerjournal_test.go`; canary brief and result text must not appear in the entry).
-- PJ-2: `TestProviderRunChargesTheCallerMachine` `TestProviderRunRefusedAtMachineCap` (same file; asserts the VM is never started and the provider slot is freed) and `TestRefusalBeforeChargeCostsNothing` (`broker/provagent/run_test.go`; an unknown-provider, over-brief and `admit`-refused request each leave the meter's call count unchanged).
+- PJ-1: `TestProviderRunnerHasJournal`, `TestProviderRunWritesOneEntryWithNoBrief` and `TestProviderRunIsJournaledUnderTheCallerMachine` (`broker/cmd/agentosd/providerjournal_test.go`; canary brief and result text must not appear in the entry), and `TestRefusalBeforeAdmissionIsNotJournaled` and `TestAdmittedRunIsJournaledOnceWithItsMachine` (`broker/provagent/run_test.go`).
+- PJ-2: `TestPlanRunIsNeverRefusedOrCountedBySpendMeter` (same file; many runs from one machine all run, each journaled once, and the journal wiring takes no meter).
 - PJ-3: `TestNilJournalRunLogsUnmetered` (`broker/provagent/run_test.go`).
 
 ## Design (recommendation)
 
-A small `providerJournal` adapter in `broker/cmd/agentosd/providerjournal.go` taking the engine journal and the meter, set as `r.Journal` in `providerRunner`. Request carries no machine ID today: add `Machine string` to `provagent.Request` and `workers.ProviderRequest` (filled from `caller.machine`, `broker/workers/workers.go:232`; lineage is #1878's field) so the charge has an owner; the adapter refuses to charge an empty machine and journals it as `unattributed`.
+A small `providerJournal` adapter in `broker/cmd/agentosd/providerjournal.go` taking the engine journal, set as `r.Journal` in `providerRunner`. Request carries no machine ID today: add `Machine string` to `provagent.Request` and `workers.ProviderRequest` (filled from `caller.machine`, `broker/workers/workers.go:232`; lineage is #1878's field) so the entry has an owner; the adapter journals an empty machine as `unattributed`.
 
 ## Assumptions
 
-The meter's charge call and unit are as in `broker/meter/meter.go`; if no per-call unit fits a plan run, the builder stops and escalates before inventing one (a decision for Mark, OP-5).
+No per-run unit is added to `broker/meter`: the journal entry is the run's record, and a plan run's spend is zero (OP-8).
 
 ## Out of scope
 

@@ -63,7 +63,7 @@ func TestCRED5SeedWithNoLoginIsErrNoPlanLogin(t *testing.T) {
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 
-	_, err = modelroute.NewRouteControl(sock).Seed("pw-a")
+	_, err = modelroute.NewRouteControl(sock).Seed("pw-a", false)
 	if !errors.Is(err, modelroute.ErrNoPlanLogin) || errors.Is(err, modelroute.ErrVaultLocked) || modelroute.FallsBack(err) {
 		t.Fatalf("no-login seed over the socket = %v, want ErrNoPlanLogin", err)
 	}

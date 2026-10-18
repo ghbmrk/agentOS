@@ -126,3 +126,63 @@ func TestFirstBootAgainOnReinstall(t *testing.T) {
 		t.Fatalf("reinstall: %v, resets %d", err, b.resets)
 	}
 }
+
+// #2362: a rerun whose vault reset failed is retried by RetryRerun, with
+// the same reset, until a new card is shown; with no failed rerun it does
+// nothing. On the claim route it reaches the claimed card's step.
+func TestRetryRerunAfterAFailedReset(t *testing.T) {
+	st := &change.MemStore{}
+	s, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried, err := RetryRerun(s); retried || err != nil {
+		t.Fatalf("no failed rerun: retried %v, %v", retried, err)
+	}
+	fails, resets := 2, 0
+	reset := func() error {
+		resets++
+		if resets <= fails {
+			return errors.New("vault busy")
+		}
+		return nil
+	}
+	if err := s.Again(reset); err == nil {
+		t.Fatal("rerun past a failed reset")
+	}
+	if retried, err := RetryRerun(s); !retried || err == nil || resets != 2 || s.Display() != nil {
+		t.Fatalf("second failure: retried %v, %v, resets %d", retried, err, resets)
+	}
+	if retried, err := RetryRerun(s); !retried || err != nil || resets != 3 || s.Display() == nil || s.Hold() == nil {
+		t.Fatalf("retry: retried %v, %v, resets %d", retried, err, resets)
+	}
+	if retried, err := RetryRerun(s); retried || err != nil || resets != 3 {
+		t.Fatalf("after the new card: retried %v, %v, resets %d", retried, err, resets)
+	}
+
+	b, code := sealedBox(t)
+	fb, err := b.begin(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried, err := RetryRerun(fb.Card); retried || err != nil {
+		t.Fatalf("before the claim: retried %v, %v", retried, err)
+	}
+	if _, err := fb.Claim.Claim(code); err != nil {
+		t.Fatal(err)
+	}
+	b.confirm(t, fb.Card.Display())
+	failed := false
+	if err := fb.Card.(*ClaimedCard).Again(func() error {
+		if !failed {
+			failed = true
+			return errors.New("vault busy")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("rerun past a failed reset")
+	}
+	if retried, err := RetryRerun(fb.Card); !retried || err != nil || fb.Card.Display() == nil || fb.Card.Hold() == nil {
+		t.Fatalf("claimed card retry: retried %v, %v", retried, err)
+	}
+}

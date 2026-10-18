@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 )
 
 // strangerNum is a number the box was never paired with, from the same
@@ -34,8 +35,21 @@ func replyKind(text string) string {
 	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
 		return "outage"
 	}
+	for _, p := range digestPrefixes {
+		if strings.HasPrefix(text, p) {
+			return "digest"
+		}
+	}
 	return "other"
 }
+
+// digestPrefixes lead every text agentosd's daily digest sends: its
+// digestHead and status lines, and digestLateHead for a batch sent late.
+// The digest waits for the owner line (#1291), so on a fresh box it can
+// land during the step; it answers no command, so the step passes over it
+// wherever it lands and counts it (G1-1688-f1-E17). They go with the digest when
+// DIG-RM-b deletes it (D-097).
+var digestPrefixes = []string{"Daily digest: ", "Digest of "}
 
 // outagePrefix and outageMark frame the owner line's recovery notice
 // (modemlink's recoveryText, UX U-B1): sent once the line is back after a
@@ -117,6 +131,8 @@ type phoneRun struct {
 	// noticeRequests what they say did not reach the owner (#2170);
 	// unread counts the notices whose counts could not be read.
 	notices, noticeTexts, noticeRequests, unread int
+	// digests counts the digest texts passed over (G1-1688-f1-E17).
+	digests int
 	// err is the first reply out of order; it ends the step.
 	err error
 }
@@ -129,7 +145,8 @@ type phoneRun struct {
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
 // comes before the barrier's (CH-1, CH-3). The owner line's recovery
-// notice is passed over wherever it lands (E16).
+// notice and the daily digest are passed over wherever they land (E16,
+// G1-1688-f1-E17).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -163,6 +180,9 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 func (r *phoneRun) reply(text string) {
 	k := replyKind(text)
 	switch {
+	case k == "digest":
+		// Not a reply: the day's digest, sent once the line is up.
+		r.digests++
 	case k == "outage":
 		// Not a reply: the box's account of a text it lost earlier.
 		r.notices++
@@ -213,6 +233,81 @@ func (r phoneRun) noticeNote() string {
 		n += fmt.Sprintf(" unread=%d", r.unread)
 	}
 	return n
+}
+
+// digestNote is the step's one line on the digest texts it passed over,
+// their count only (G1-1688-f1-E17). It is "" when there was none.
+func (r phoneRun) digestNote() string {
+	if r.digests == 0 {
+		return ""
+	}
+	return fmt.Sprintf("passed-over digests=%d", r.digests)
+}
+
+// passedOverErr fails a run that otherwise passed when it passed over a
+// recovery notice: after setup the owner line should lose no text, so a
+// notice means one was lost (#1291's acceptance, #2170 item 2; E16). The
+// notice and lost-send notes still say which.
+func passedOverErr(r phoneRun) error {
+	if r.notices == 0 {
+		return nil
+	}
+	return fmt.Errorf("passed over %d recovery notice(s): a text to the owner was lost after setup (#1291)", r.notices)
+}
+
+// lostSendMax bounds the lost sends phone-control notes: the last ones.
+const lostSendMax = 5
+
+// lostSendVia bounds the calls a lost-send note names, as modemlink does.
+const lostSendVia = 3
+
+// lostSendWord bounds each word of a lost-send note.
+const lostSendWord = 40
+
+// missedLine is agentosd's log line for a text the down owner line did not
+// carry (modemlink.MissedLog), after the log's own date and time.
+var missedLine = regexp.MustCompile(`^(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} )?` +
+	regexp.QuoteMeta(modemlink.MissedLog) + ` kind=(\S*)(.*)$`)
+
+// notWord is what a lost-send note's word may not carry: ci_boot.sh takes
+// a NOTE of lower-case words and counts only.
+var notWord = regexp.MustCompile(`[^a-z0-9]+`)
+
+// lostSendNotes names, from agentosd's journal, the last lostSendMax texts
+// the down line did not carry: one note each with its kind and the calls
+// that sent it, as words (#2170, E16). modemlink logs no text and no
+// time; the journal's time is dropped.
+func lostSendNotes(journal string) []string {
+	var notes []string
+	for _, l := range strings.Split(journal, "\n") {
+		m := missedLine.FindStringSubmatch(strings.TrimSpace(l))
+		if m == nil {
+			continue
+		}
+		kind := m[1]
+		if kind != "text" && kind != "request" {
+			kind = "other"
+		}
+		n := "lost-send kind=" + kind
+		for i, via := range strings.Split(m[2], " via ")[1:] {
+			if i == lostSendVia {
+				break
+			}
+			via = via[strings.LastIndexByte(via, '/')+1:]
+			w := strings.Trim(notWord.ReplaceAllString(strings.ToLower(via), "-"), "-")
+			if len(w) > lostSendWord {
+				w = w[:lostSendWord]
+			}
+			if w != "" {
+				n += " via=" + w
+			}
+		}
+		notes = append(notes, n)
+	}
+	if len(notes) > lostSendMax {
+		notes = notes[len(notes)-lostSendMax:]
+	}
+	return notes
 }
 
 // failed is the verdict so far: an error once the run cannot pass.

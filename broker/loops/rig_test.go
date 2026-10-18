@@ -114,7 +114,7 @@ func newRig(t *testing.T, sources ...Source) *rig {
 	r.spare, err = meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
 		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: SpareLimits(DefaultSpareCalls),
+		OverallCap: SpareLimits(NoSpareBudget),
 		Now:        r.clk.now,
 	})
 	if err != nil {

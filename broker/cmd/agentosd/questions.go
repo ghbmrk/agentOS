@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/guesterr"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -126,10 +128,16 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	}
 	b, err := question.New(question.Config{
 		// Never held: a question's wait starts at its text, so the book
-		// paces it itself, keeping quiet hours and reserving the CH-15
-		// budget before sending (#1563). An agent class the owner made
-		// urgent ignores quiet hours, as Notify did.
-		Send:       ch.NotifyNow,
+		// paces it itself (#1563), up to the owner's TEXTS an hour (#2363).
+		// Its deadline makes it approval class (D-129, #2250): while
+		// approval is urgent it ignores quiet hours and the shared
+		// reservation, not the book's limit; under URGENT APPROVAL OFF it
+		// keeps quiet hours and reserves the CH-15 budget before sending.
+		// In an open task chat it is conversation, not counted (CH-15).
+		Send:       questionSend(ch.NotifyNow),
+		Converse:   questionSend(ch.Converse),
+		PerHour:    ch.TextsPerHour,
+		Chat:       questionChatting(ch),
 		Now:        guard.Now,
 		Quiet:      questionQuiet(ch),
 		QuietHours: questionQuietHours(ch),
@@ -143,7 +151,7 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		Path:          cfg.Path,
 		Hidden:        owner.SecretShaped,
 		ApprovalsOpen: ch.ApprovalsOpen,
-		Reserve:       d.Gate().Reserve,
+		Reserve:       questionReserve(ch, d.Gate().Reserve),
 		Logf:          log.Printf,
 	})
 	if err != nil {
@@ -185,11 +193,12 @@ type quietSource interface {
 	QuietHours() bool
 }
 
-// questionQuiet holds a question in the owner's quiet hours unless the
-// owner made agent texts urgent (QH-5, #1563).
+// questionQuiet holds a question in the owner's quiet hours under URGENT
+// APPROVAL OFF: a question carries a deadline, so it is approval class,
+// urgent by default (QH-5, D-129, #2250).
 func questionQuiet(ch quietSource) func(time.Time) bool {
 	return func(t time.Time) bool {
-		return !ch.Urgent(owner.ClassAgent) && ch.Quiet(t)
+		return !ch.Urgent(owner.ClassApproval) && ch.Quiet(t)
 	}
 }
 
@@ -197,7 +206,41 @@ func questionQuiet(ch quietSource) func(time.Time) bool {
 // time: whether any quiet hours could hold a question.
 func questionQuietHours(ch quietSource) func() bool {
 	return func() bool {
-		return !ch.Urgent(owner.ClassAgent) && ch.QuietHours()
+		return !ch.Urgent(owner.ClassApproval) && ch.QuietHours()
+	}
+}
+
+// questionChatting opens the chat only on task chat the agent got, never
+// on a control word, setting or answer, which a spoofed owner number can
+// send (security B1 on #2372), and keeps it open for the owner's CHAT
+// window, 30 minutes unless set (CH-15).
+func questionChatting(ch interface{ ChatOpen() bool }) func() bool {
+	return func() bool { return ch.ChatOpen() }
+}
+
+// questionSend marks the owner channel's refusals, which provably sent
+// nothing, as question.ErrNotSent, so the book keeps those questions
+// held under the same IDs; any other error may have reached the owner
+// and is booked as sent (#2363, D-116).
+func questionSend(send func(string) error) func(string) error {
+	return func(text string) error {
+		err := send(text)
+		for _, not := range []error{modem.ErrNotSent, owner.ErrPaced, owner.ErrAgentReaction, owner.ErrNoModem} {
+			if errors.Is(err, not) {
+				return fmt.Errorf("%w: %w", question.ErrNotSent, err)
+			}
+		}
+		return err
+	}
+}
+
+// questionReserve skips the CH-15 reservation while approval is urgent,
+// as an urgent approval request skips the hourly limit; NotifyNow still
+// counts the text on the owner's hour, which is the gate's allowance.
+// Under URGENT APPROVAL OFF the gate decides (D-129, #2250).
+func questionReserve(ch quietSource, reserve func(aged bool) bool) func(aged bool) bool {
+	return func(aged bool) bool {
+		return ch.Urgent(owner.ClassApproval) || reserve(aged)
 	}
 }
 

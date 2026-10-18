@@ -349,7 +349,7 @@ func TestRunsUnderScheduler(t *testing.T) {
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
 		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
 		Now:        r.clk.now,
 	})
 	r.must(err)
@@ -532,7 +532,7 @@ func TestWakeUnparksLoop3(t *testing.T) {
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
 		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
 		Now:        r.clk.now,
 	})
 	r.must(err)
@@ -647,7 +647,7 @@ func TestFailedChecksNotParkedByScheduler(t *testing.T) {
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
 		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
 		Now:        r.clk.now,
 	})
 	r.must(err)
@@ -770,7 +770,7 @@ func TestComingBackOnlineChecksEvenWhenParked(t *testing.T) {
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
 		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.DefaultSpareCalls),
+		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
 		Now:        r.clk.now,
 	})
 	r.must(err)

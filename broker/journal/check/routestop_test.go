@@ -15,7 +15,7 @@ func TestRouteStopRecordsAreClean(t *testing.T) {
 	if err := w.eng.StopRoute("codex", "login-refused"); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.eng.ReopenRoute("codex"); err != nil {
+	if err := w.eng.ReopenRoute("codex", "login-refused"); err != nil {
 		t.Fatal(err)
 	}
 	if v := mustEngine(t, w.eng, true); len(v) != 0 {

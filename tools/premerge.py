@@ -24,7 +24,10 @@ usage error (exit 2).
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
 prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
-fix-list and a PR never reviewed all fail (PREMERGE-required, #1834).
+fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A PR that changes SPEC.md also needs
+Mark (D-130): that accept carries a `Transcribes: <message id>` line (the reviewer confirms the diff transcribes
+that Mark decision and interprets nothing), or a trusted comment `Mark-approved: <message id> · head <SHA>`
+names a head whose diff equals `head`'s; otherwise it prints `needs-mark SPEC.md` and exits 1.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -69,18 +72,34 @@ def mark_range(cwd, base, head):
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
+# D-130: a SPEC.md change merges on the accept that names the Mark decision it transcribes, else on Mark's approval.
+SPEC_PATHS = re.compile(r"SPEC\.md")
+_TRANSCRIBES = re.compile(r"^Transcribes: cmsg_\w+(?:,? cmsg_\w+)*\s*$", re.M)
+_APPROVED = re.compile(r"Mark-approved: cmsg_\w+ · head ([0-9a-f]{7,40})")
 
 
 def verdict(comments, pr):
-    """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None."""
-    found = None
+    """(verdict, reviewed-sha, transcribes) of the newest trusted L3 verdict comment for PR `pr`, or None.
+
+    `transcribes` holds only when every trusted L3 accept on the PR carries the `Transcribes:` line (D-130):
+    one reviewer withholding it is not overridden by a later accept that has it."""
+    found, tx = None, True
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
         if (c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and _L3.search(body)):
-            found = (first.split(":", 1)[1].strip().lower(), rec.group(1))
+            v = first.split(":", 1)[1].strip().lower()
+            if v == "accept":
+                tx = tx and bool(_TRANSCRIBES.search(body))
+            found = (v, rec.group(1), tx)
     return found
+
+
+def mark_approved(comments):
+    """Heads named by trusted comments whose first line is `Mark-approved: <message id> · head <SHA>`."""
+    return [m.group(1) for c in comments if c.get("author_association") in TRUSTED
+            for m in [_APPROVED.fullmatch((c.get("body") or "").split("\n", 1)[0].strip())] if m]
 
 
 def _git(cwd, *args, ok=(0,)):
@@ -137,6 +156,14 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
 
 
+def _same(approved, head, base):
+    """True when the approved head's diff equals `head`'s; an unknown SHA is never an approval."""
+    try:
+        return not compare(".", approved, head, base)
+    except subprocess.CalledProcessError:
+        return False
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -152,9 +179,17 @@ def main(argv):
         if v is None or v[0] != "accept":
             print("no-verdict" if v is None else "not-accepted")
             return 1
-        changed = compare(".", v[1], args[0] if args else "HEAD", base)
-        print("changed " + " ".join(changed) if changed else "same")
-        return 1 if changed else 0
+        head = args[0] if args else "HEAD"
+        changed = compare(".", v[1], head, base)
+        if changed:
+            print("changed " + " ".join(changed))
+            return 1
+        spec = [f for f in mark_range(".", base, head) if SPEC_PATHS.fullmatch(f)]
+        if spec and not v[2] and not any(_same(a, head, base) for a in mark_approved(comments)):
+            print("needs-mark " + " ".join(spec))
+            return 1
+        print("same")
+        return 0
     if args[:1] == ["--bot"]:
         if len(args) < 2:
             print(__doc__)

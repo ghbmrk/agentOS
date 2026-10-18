@@ -1,0 +1,25 @@
+--- a/network.c
++++ b/network.c
+@@ -84,10 +84,11 @@
+             return -1;
+           if (rheader->nlmsg_type == NLMSG_ERROR)
+             {
+-              uint32_t *err = NLMSG_DATA (rheader);
++              int32_t *err = NLMSG_DATA (rheader);
+               if (*err == 0)
+                 return 0;
+ 
++              errno = -*err;
+               return -1;
+             }
+           if (rheader->nlmsg_type == NLMSG_DONE)
+@@ -178,7 +179,8 @@
+ 
+   assert (header->nlmsg_len < sizeof (buffer));
+ 
+-  if (rtnl_do_request (rtnl_fd, header) != 0)
++  /* gVisor creates every network namespace with 127.0.0.1/8 already on lo. */
++  if (rtnl_do_request (rtnl_fd, header) != 0 && errno != EEXIST)
+     die_with_error ("loopback: Failed RTM_NEWADDR");
+ 
+   header = rtnl_setup_request (buffer, RTM_NEWLINK,
