@@ -331,15 +331,20 @@ func (d *driver) claim() error {
 // and switch. The box's setup network may restart; the phone reaches the
 // page over the uplink, so setup carries on.
 func (d *driver) claimWiFi() error {
-	st, _, b, err := d.get("/claim/wifi")
+	st, loc, b, err := d.get("/claim/wifi")
 	if err != nil {
 		return err
 	}
+	if st == http.StatusSeeOther && loc == "/setup" {
+		// No setup network to rotate: seal() writes only the claim
+		// state, so the page skips the step (ErrNoSetupWiFi).
+		return nil
+	}
 	pw, ok := wifiPassword(b)
 	if st != http.StatusOK || !ok || len(pw) < 4 {
-		return fmt.Errorf("GET /claim/wifi %d shows no new password: %s", st, heading(b))
+		return fmt.Errorf("GET /claim/wifi %d %q shows no new password: %s", st, loc, heading(b))
 	}
-	st, loc, err := d.post("/claim/wifi", url.Values{"last": {pw[len(pw)-4:]}})
+	st, loc, err = d.post("/claim/wifi", url.Values{"last": {pw[len(pw)-4:]}})
 	if err != nil {
 		return err
 	}
