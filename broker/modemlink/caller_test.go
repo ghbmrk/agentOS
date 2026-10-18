@@ -60,8 +60,8 @@ func TestSendersSkipsWrappersAndFallsBackToTheOwnerEntry(t *testing.T) {
 		want  string
 	}{
 		{[]string{mod + "modemlink.(*Link).deliver", mod + "modemlink.(*Link).Send", mod + "owner.watchedLine.Send",
-			mod + "owner.(*Channel).sendReserved", mod + "owner.(*Channel).NotifyNow", "main.(*asker).ask", "main.loop", "main.main", "runtime.main", "runtime.goexit"},
-			" via main.(*asker).ask via main.loop via main.main"},
+			mod + "owner.(*Channel).sendReserved", mod + "owner.(*Channel).NotifyNow", "main.(*ownerLink).tell", "main.loop", "main.main", "main.start", "runtime.main", "runtime.goexit"},
+			" via main.(*ownerLink).tell via main.loop via main.main"},
 		{[]string{mod + "modemlink.(*Link).Send", mod + "owner.watchedLine.Send", mod + "owner.(*Channel).alert",
 			mod + "owner.(*Channel).Run.func1", "runtime.goexit"},
 			" via owner.(*Channel).Run.func1"},
