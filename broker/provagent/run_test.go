@@ -789,6 +789,29 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 	}
 }
 
+// REQ: OP-8
+func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(g *rig, r *Request)
+	}{
+		{"unknown provider", func(_ *rig, r *Request) { r.Provider = "nope" }},
+		{"over-brief", func(_ *rig, r *Request) { r.Brief = strings.Repeat("b", 2<<10) }},
+		{"admit refused", func(g *rig, _ *Request) { g.usage.Readings = []Reading{fresh("5h", 0.05)} }},
+	}
+	for _, c := range cases {
+		g := newRig(ok("x"))
+		rq := req("b")
+		c.set(g, &rq)
+		if _, err := g.r.Run(context.Background(), rq); err == nil {
+			t.Fatalf("%s: ran", c.name)
+		}
+		if len(g.events) != 0 {
+			t.Errorf("%s: %d journal entries", c.name, len(g.events))
+		}
+	}
+}
+
 // builtinCanaries holds one synthetic canary per built-in credential
 // format. A format added to Builtins without a canary fails the test.
 var builtinCanaries = map[string]string{
@@ -829,6 +852,47 @@ func TestResultWithADeclaredFormatCanaryIsWithheld(t *testing.T) {
 				t.Errorf("%s %s: journal %+v", id, f, g.events)
 			}
 		}
+	}
+}
+
+// REQ: OP-8
+func TestAdmittedRunIsJournaledOnceWithItsMachine(t *testing.T) {
+	g := newRig(ok("x"))
+	rq := req("b")
+	rq.Machine = "wk-a"
+	if _, err := g.r.Run(context.Background(), rq); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.events) != 1 || g.events[0].Machine != "wk-a" || g.events[0].Outcome != "ok" {
+		t.Errorf("events %+v", g.events)
+	}
+	// A refusal after admission is journaled too.
+	g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 1} }
+	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != Failed {
+		t.Fatalf("failing CLI: %v", err)
+	}
+	if len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
+		t.Errorf("events %+v", g.events)
+	}
+}
+
+// REQ: OP-8
+func TestNilJournalRunLogsUnmetered(t *testing.T) {
+	g := newRig(ok("x"))
+	g.r.Journal = nil
+	for i := 0; i < 2; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, l := range g.logs {
+		if strings.Contains(l, "unmetered") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("unmetered lines %d: %q", n, g.logs)
 	}
 }
 

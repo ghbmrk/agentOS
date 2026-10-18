@@ -904,6 +904,7 @@ func main() {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
 				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
+				journalProviderRuns(pr, d.Engine())
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
@@ -1138,8 +1139,8 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
 // fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
 // wirePlanUsage (#1856); without them admission refuses (RES-5 fails
-// closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
-// its owner. Nothing calls StartSignIn until the setup page does (#1264
+// closed). Its Journal logs each run until journalProviderRuns wires it
+// to the engine journal (OP-8). Nothing calls StartSignIn until the setup page does (#1264
 // c4e2b). A nil rc or note leaves those inputs closed, as nil pins
 // leave the gate.
 func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
@@ -1155,6 +1156,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
 		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
 	}
+	r.Journal = providerJournal{}.journal // logged until journalProviderRuns (PJ-1)
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
 		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
@@ -1173,7 +1175,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 type providerTool struct{ r *provagent.Runner }
 
 func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
-	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
+	out, err := p.r.Run(ctx, provagent.Request{Machine: q.Machine, Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
 		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
 	var ref *provagent.Refusal
 	if errors.As(err, &ref) {
