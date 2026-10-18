@@ -76,6 +76,23 @@ func parseForm(text string) (reaction, bool) {
 // recent box text that holds a request or a code (#2202).
 var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]{1,40}?) ["“](.+)["”]$`)
 
+// cutForm is unlistedForm for a quote a phone cut short, which has no
+// closing quote (`Pinned “Liked “<request cut>…`). It is tried only after
+// unlistedForm and counts only as the quote of a guarded text, as that is.
+var cutForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]{1,40}?) ["“](.+)$`)
+
+// shapeForm is the quote of text if it has the shape of an unlisted form,
+// closed or cut.
+func shapeForm(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	for _, re := range []*regexp.Regexp{unlistedForm, cutForm} {
+		if m := re.FindStringSubmatch(text); m != nil {
+			return m[2], len(strings.Fields(m[1])) <= 5
+		}
+	}
+	return "", false
+}
+
 // readReaction is parseReaction, plus two cases that need the recent texts:
 // a listed form whose quote holds quote marks, when the quote marks a recent
 // box text (a request or a RUN offer quotes its own words), and an unlisted
@@ -109,13 +126,13 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		}
 		return reaction{}, false
 	}
-	m := unlistedForm.FindStringSubmatch(strings.TrimSpace(text))
-	if m == nil || len(strings.Fields(m[1])) > 5 {
+	quote, ok := shapeForm(text)
+	if !ok {
 		return reaction{}, false
 	}
 	now := c.cfg.Now()
-	unlisted := reaction{kind: "reacted to", quoted: m[2], tell: true}
-	if _, ok := c.recent.matchGuarded(m[2], now); ok {
+	unlisted := reaction{kind: "reacted to", quoted: quote, tell: true}
+	if _, ok := c.recent.matchGuarded(quote, now); ok {
 		return unlisted, true
 	}
 	// After a deletion an unlisted form quoting an agent text may quote a
@@ -123,7 +140,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	// as a reaction until the forgotten texts are past the window (CAP-3,
 	// #2360). A forgotten text no longer matches, so its event matches none.
 	if c.recent.forgotWithin(now) {
-		for _, l := range quoteLayers(m[2]) {
+		for _, l := range quoteLayers(quote) {
 			if strings.HasPrefix(normQuote(l), normQuote(AgentPrefix)) {
 				return unlisted, true
 			}
@@ -247,12 +264,17 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		if now.Sub(t.at) > recentMaxAge {
 			break
 		}
-		n, q := normQuote(t.text), q
-		if t.restored {
-			n, q = t.text, maskCodes(q)
+		if !t.restored {
+			n := normQuote(t.text)
+			if n == q || (!short && strings.Contains(n, q)) {
+				return t, true
+			}
+			continue
 		}
-		if n == q || (!short && strings.Contains(n, q)) {
-			return t, true
+		for _, mq := range maskedForms(q) {
+			if t.text == mq || (!short && strings.Contains(t.text, mq)) {
+				return t, true
+			}
 		}
 	}
 	return sentText{}, false
@@ -281,10 +303,7 @@ func peelForm(text string) (string, bool) {
 	if rx, ok := parseForm(text); ok {
 		return rx.quoted, true
 	}
-	if m := unlistedForm.FindStringSubmatch(strings.TrimSpace(text)); m != nil && len(strings.Fields(m[1])) <= 5 {
-		return m[2], true
-	}
-	return "", false
+	return shapeForm(text)
 }
 
 // matchGuarded finds a guarded text the quote marks, however it is
@@ -331,7 +350,31 @@ func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
 
 // maskCodes replaces every code and challenge token in s with "#", so a
 // text can be kept and matched without its code.
-func maskCodes(s string) string { return carriesCode.ReplaceAllString(s, "#") }
+// It is blind to case, as s is usually normalized (lowercased) already.
+func maskCodes(s string) string { return maskCode.ReplaceAllString(s, "#") }
+
+// maskCode is carriesCode in any case.
+var maskCode = regexp.MustCompile(`(?i)` + carriesCode.String())
+
+// cutCodeTail and cutCodeHead match the part of a code a quote ends or
+// starts inside: 1 to 3 digits, or part of a challenge token. The part is
+// too short for maskCodes.
+var (
+	cutCodeTail = regexp.MustCompile(`(?i)(?:[0-9]{1,3}|\b(?:unlock|resume)(?: [a-z0-9]{1,3})?)$`)
+	cutCodeHead = regexp.MustCompile(`^[0-9]{1,3}`)
+)
+
+// maskedForms is the normalized quote q with its codes masked, and, if it
+// ends or starts inside a code, with that part masked too. A text kept
+// masked (restore) is matched against these.
+func maskedForms(q string) []string {
+	m := maskCodes(q)
+	forms := []string{m}
+	if c := cutCodeHead.ReplaceAllString(cutCodeTail.ReplaceAllString(m, "#"), "#"); c != m {
+		forms = append(forms, c)
+	}
+	return forms
+}
 
 // restore puts the saved guarded texts back in the window after a restart,
 // the ones still inside its age.
