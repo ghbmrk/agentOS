@@ -171,7 +171,7 @@ func TestLearningOffIsSaid(t *testing.T) {
 	if len(cfg.Notes) != 1 || cfg.Notes[0]() != learningOffNote {
 		t.Fatalf("STATUS notes: %d", len(cfg.Notes))
 	}
-	if cfg.HelpExtra != learningOffText {
+	if cfg.HelpExtra != learningOffHelp {
 		t.Fatalf("HELP: %q", cfg.HelpExtra)
 	}
 	// One GSM-7 segment, no longer than the loops' own HELP line is allowed
