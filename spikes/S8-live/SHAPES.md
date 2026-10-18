@@ -26,10 +26,12 @@ Not the Mac Studio or the M6: runsc needs Linux.
    relays to `auth.openai.com` and swaps the `redirect_uri` (RESULTS.md, #809).
 3. Owner, at the keyboard: open `https://auth.openai.com/codex/device`, sign in to the ChatGPT
    plan and enter the code the agent relays. The code is a one-time sign-in code, not a token.
-4. Inside the machine, `shapes/` reads `/var/lib/agentos-codex/auth.json` and writes only the
-   shape fields to the work volume; the CLI then logs out and `auth.json` is removed. The login
-   lived in the machine's memory overlay and is gone when the machine exits.
-5. Agent: `run.sh` prints the forwarder log (method, path, status only) and `shapes.json`.
+4. Inside the machine, `shapes/` reads `/var/lib/agentos-codex/auth.json` and prints only the
+   shape fields to the machine's stdout, between `== shapes begin` and `== shapes end`; the CLI
+   then logs out and `auth.json` is removed. `runsc do`'s memory overlay also covers the volumes,
+   so nothing written inside reaches the host: the login is gone when the machine exits.
+5. Agent: `run.sh` prints the forwarder log (method, path, status only), cuts the lines between
+   the markers into `$W/shapes.json` and prints it.
    Then `run.sh clean`.
 
 ## What leaves the machine
