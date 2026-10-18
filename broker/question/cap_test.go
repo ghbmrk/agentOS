@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -150,24 +151,14 @@ func TestTheLimitFollowsTexts(t *testing.T) {
 	}
 }
 
-// TestATagIsNotReusedWhileKept (security B2 on #2372): however many
-// texts TEXTS allows, closed questions keep their tags for the whole of
-// Keep (4 days), so a late "Q100" answer never reaches another
-// lineage's question. Once kept questions would leave no tag for an
-// asker under the open cap, new questions are held, not texted, until
-// the oldest age out.
-func TestATagIsNotReusedWhileKept(t *testing.T) {
-	r := newRig(t, func(c *Config) {
-		c.SendsPerHour, c.PerAsker = 1000, 1
-		c.PerHour = func() int { return 20 }
-		c.MaxSendsPerHour = 1000
-	})
-	if r.b.cfg.Keep != DefaultKeep {
-		t.Fatalf("Keep %v, want %v", r.b.cfg.Keep, DefaultKeep)
-	}
+// fillTags texts n questions, one per burner lineage, 3m1s apart, and
+// answers each at once, so each keeps its tag for Keep after the answer.
+// It ticks at every step, so any pruning a shorter Keep allowed would
+// free tags inside the fill.
+func fillTags(t *testing.T, r *rig, n int) map[string]bool {
+	t.Helper()
 	seen := map[string]bool{}
-	room := numTags - r.b.cfg.MaxOpen
-	for i := range room {
+	for i := range n {
 		st := r.ask(fmt.Sprintf("burner%d", i), "q", slot())
 		if st.State != Waiting || seen[st.ID] {
 			t.Fatalf("question %d: %+v (tag reused: %v)", i, st, seen[st.ID])
@@ -177,7 +168,40 @@ func TestATagIsNotReusedWhileKept(t *testing.T) {
 			t.Fatalf("answer %s not taken", st.ID)
 		}
 		r.advance(3*time.Minute + time.Second)
+		r.b.Tick(context.Background())
 	}
+	return seen
+}
+
+// tagRig is a book that texts up to TEXTS 20 an hour, the setting that
+// fills the tag room fastest.
+func tagRig(t *testing.T) *rig {
+	return newRig(t, func(c *Config) {
+		c.SendsPerHour, c.PerAsker = 1000, 1
+		c.PerHour = func() int { return 20 }
+		c.MaxSendsPerHour = 1000
+	})
+}
+
+var textTagRE = regexp.MustCompile(`\bQ[1-9][0-9]{2}:`) // a question's lead-in in a text
+
+// TestATagIsNotReusedWhileKept (security B2 on #2372): however many
+// texts TEXTS allows, closed questions keep their tags for the whole of
+// Keep (96 h, ASSUMPTIONS Q5 and Q11), so a late "Q100" answer never
+// reaches another lineage's question. Once kept questions would leave no
+// tag for an asker under the open cap, new questions are held, not
+// texted, until the oldest age out: still held a minute before the first
+// kept question is 96 h old, texted once it is past that.
+func TestATagIsNotReusedWhileKept(t *testing.T) {
+	r := tagRig(t)
+	if r.b.cfg.Keep != 96*time.Hour {
+		t.Fatalf("Keep %v, want 96h", r.b.cfg.Keep)
+	}
+	r.mu.Lock()
+	first := r.clock // Q100 is answered, so closed, at once
+	r.mu.Unlock()
+	room := numTags - r.b.cfg.MaxOpen
+	seen := fillTags(t, r, room)
 	if reply, _ := r.answer("Q100 9:00"); !strings.Contains(reply, "already") {
 		t.Fatalf("a late Q100 answer: %q", reply)
 	}
@@ -185,9 +209,128 @@ func TestATagIsNotReusedWhileKept(t *testing.T) {
 	if st.State != Held || seen[st.ID] {
 		t.Fatalf("question past the tag room: %+v", st)
 	}
-	r.advance(DefaultKeep)
+	r.mu.Lock()
+	gap := first.Add(96*time.Hour - time.Minute).Sub(r.clock)
+	r.mu.Unlock()
+	r.advance(gap)
+	r.b.Tick(context.Background())
+	if st := r.status("late", "q"); st.State != Held {
+		t.Fatalf("a minute before the first kept question is 96 h old: %+v", st)
+	}
+	r.advance(time.Minute + time.Second)
 	r.b.Tick(context.Background())
 	if st := r.status("late", "q"); st.State != Waiting {
 		t.Fatalf("after the kept questions aged out: %+v", st)
+	}
+}
+
+// TestATextJoinsNoMoreThanTheTagRoom (potency M6 on #2372): with room
+// for fewer questions than one text carries, a text takes only that many
+// and the rest stay held.
+func TestATextJoinsNoMoreThanTheTagRoom(t *testing.T) {
+	r := tagRig(t)
+	fillTags(t, r, numTags-r.b.cfg.MaxOpen-2)
+	r.advance(time.Hour) // the hour's texts are clear again
+	r.set(func() { r.quiet = true })
+	for _, asker := range []string{"x", "y", "z"} {
+		if st := r.ask(asker, "q", slot()); st.State != Held {
+			t.Fatalf("%s in quiet hours: %+v", asker, st)
+		}
+	}
+	before := len(r.texts())
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	texts := r.texts()[before:]
+	if len(texts) != 1 || len(textTagRE.FindAllString(texts[0], -1)) != 2 {
+		t.Fatalf("with room for 2: texts %q", texts)
+	}
+	held := 0
+	for _, asker := range []string{"x", "y", "z"} {
+		if r.status(asker, "q").State == Held {
+			held++
+		}
+	}
+	if held != 1 {
+		t.Fatalf("%d questions held, want 1", held)
+	}
+}
+
+// TestAChatQuestionGoesWhenTheHoursTextsAreSpent (#2363, potency M7 on
+// #2372): the owner's pushes for the hour are spent, then the owner
+// starts task chat: the agent's next question goes at once as
+// conversation, not after the hour.
+func TestAChatQuestionGoesWhenTheHoursTextsAreSpent(t *testing.T) {
+	var conversed []string
+	chat := false
+	r := newRig(t, func(c *Config) {
+		c.PerAsker = 5
+		c.PerHour = func() int { return 1 }
+		c.Chat = func() bool { return chat }
+		c.Converse = func(text string) error { conversed = append(conversed, text); return nil }
+	})
+	if st := r.ask("lin1", "a", slot()); st.State != Waiting {
+		t.Fatalf("first question: %+v", st)
+	}
+	if st := r.ask("lin1", "b", slot()); st.State != Held {
+		t.Fatalf("second question past TEXTS 1: %+v", st)
+	}
+	chat = true
+	r.advance(time.Minute)
+	r.b.Tick(context.Background())
+	if st := r.status("lin1", "b"); st.State != Waiting || len(conversed) != 1 || len(r.texts()) != 1 {
+		t.Fatalf("in the chat: %+v, %d conversed, %d pushed", st, len(conversed), len(r.texts()))
+	}
+}
+
+// chatRig is a book whose owner chat is always open; it counts
+// conversation texts and reservations of the shared budget.
+func chatRig(t *testing.T, conversed, reserves *int) *rig {
+	return newRig(t, func(c *Config) {
+		c.PerAsker = 1
+		c.Chat = func() bool { return true }
+		c.Converse = func(string) error { *conversed++; return nil }
+		c.Reserve = func(bool) bool { *reserves++; return true }
+	})
+}
+
+// TestAChatFloodStopsAtTwentyAnHour (potency M12 on #2372): conversation
+// does not count toward TEXTS, but no more than 20 question texts go in
+// any hour, so a flooding agent stays bounded in an open chat.
+func TestAChatFloodStopsAtTwentyAnHour(t *testing.T) {
+	var conversed, reserves int
+	r := chatRig(t, &conversed, &reserves)
+	for i := range 20 {
+		st := r.ask(fmt.Sprintf("lin%d", i), "q", slot())
+		if st.State != Waiting {
+			t.Fatalf("chat question %d: %+v", i, st)
+		}
+		if _, ok := r.answer(st.ID + " 9:00"); !ok {
+			t.Fatalf("answer %s not taken", st.ID)
+		}
+		r.advance(time.Minute)
+	}
+	if st := r.ask("lin20", "q", slot()); st.State != Held || conversed != 20 {
+		t.Fatalf("21st chat question in the hour: %+v, %d conversed", st, conversed)
+	}
+	r.advance(41 * time.Minute) // the first text is past the hour
+	r.b.Tick(context.Background())
+	if st := r.status("lin20", "q"); st.State != Waiting || conversed != 21 {
+		t.Fatalf("after the hour: %+v, %d conversed", st, conversed)
+	}
+}
+
+// TestAChatQuestionReservesNothing (ASSUMPTIONS Q17, potency M14 on
+// #2372): a question in an open chat is conversation and never spends
+// the shared CH-15 budget that approval requests reserve.
+func TestAChatQuestionReservesNothing(t *testing.T) {
+	var conversed, reserves int
+	r := chatRig(t, &conversed, &reserves)
+	for _, asker := range []string{"lin1", "lin2", "lin3"} {
+		if st := r.ask(asker, "q", slot()); st.State != Waiting {
+			t.Fatalf("%s: %+v", asker, st)
+		}
+	}
+	if conversed != 3 || reserves != 0 || len(r.texts()) != 0 {
+		t.Fatalf("%d conversed, %d reserves, %d pushed", conversed, reserves, len(r.texts()))
 	}
 }

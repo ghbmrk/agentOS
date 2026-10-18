@@ -873,7 +873,7 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 	counting := e.State == Waiting && e.monoSet // the wait runs on while restricted (PQ4)
 	switch e.State {
 	case Held:
-		st.Reason = "not texted yet (pacing or quiet hours); the deadline starts when the owner is texted"
+		st.Reason = "not texted yet (pacing, quiet hours, or too many recent questions: it waits for older ones to clear); the deadline starts when the owner is texted"
 	case Waiting:
 		st.Deadline = e.Deadline
 		if st.Deadline.IsZero() && clockErr == nil {

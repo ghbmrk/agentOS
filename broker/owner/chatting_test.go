@@ -2,7 +2,10 @@ package owner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -62,5 +65,58 @@ func TestTaskChatToADownAgentDoesNotOpenTheChat(t *testing.T) {
 	r.say("book a table")
 	if r.ch.Chatting(30 * time.Minute) {
 		t.Fatal("task chat with no agent opened the chat")
+	}
+}
+
+// failAgent is an agent that is installed but whose every delivery errs.
+type failAgent struct {
+	mu    sync.Mutex
+	tries int
+}
+
+func (a *failAgent) Deliver(context.Context, string, bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.tries++
+	return errors.New("agent: delivery failed")
+}
+
+// TestTaskChatTheAgentRefusedDoesNotOpenTheChat (potency O2 on #2372):
+// with an agent installed, task chat whose delivery errs reached no
+// agent, so it is no conversation.
+func TestTaskChatTheAgentRefusedDoesNotOpenTheChat(t *testing.T) {
+	agent := &failAgent{}
+	r := newRig(t, nil)
+	r.edit = func(c *Config) { c.Agent = agent }
+	r.ch = r.open()
+	r.unlock()
+	r.say("book a table")
+	agent.mu.Lock()
+	tries := agent.tries
+	agent.mu.Unlock()
+	if tries == 0 {
+		t.Fatal("the task chat never reached the agent's Deliver")
+	}
+	if r.ch.Chatting(30 * time.Minute) {
+		t.Fatal("task chat the agent refused opened the chat")
+	}
+}
+
+// TestTextsPerHourFollowsTheTextsSetting (#2363, potency O4 on #2372):
+// the question book's hourly limit is the owner's TEXTS setting, 3 by
+// default (CH-15), and a change applies at once.
+func TestTextsPerHourFollowsTheTextsSetting(t *testing.T) {
+	r := newRig(t, nil)
+	if n := r.ch.TextsPerHour(); n != 3 {
+		t.Fatalf("default TextsPerHour %d, want 3", n)
+	}
+	r.unlock()
+	for _, n := range []int{5, 20, 1} {
+		if got := r.say(fmt.Sprintf("TEXTS %d", n)); !strings.HasPrefix(got, fmt.Sprintf("Texts set: %d an hour.", n)) {
+			t.Fatalf("TEXTS %d: %q", n, got)
+		}
+		if got := r.ch.TextsPerHour(); got != n {
+			t.Fatalf("TextsPerHour %d after TEXTS %d", got, n)
+		}
 	}
 }

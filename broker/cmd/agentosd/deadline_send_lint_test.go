@@ -54,6 +54,14 @@ var selfPacing = map[string]map[string]string{
 	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours", "Chat": "questionChatting"},
 }
 
+// ownerSettings names, per config type, the fields that must read an
+// owner setting from the channel, and the channel method each must be:
+// the question book's hourly limit is the owner's TEXTS (#2363, potency
+// A3 on #2372).
+var ownerSettings = map[string]map[string]string{
+	"question.Config": {"PerHour": "TextsPerHour"},
+}
+
 // TestDeadlineTextsNeverUseTheHoldingPath checks every deadline sender
 // in agentosd's non-test files is wired to a non-holding send and paces
 // itself through the tested quiet-hours helpers.
@@ -96,6 +104,7 @@ func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 			}
 			found++
 			checkPacing(t, fset, lit, typ)
+			checkSettings(t, fset, lit, typ)
 			for field, want := range fields {
 				set := false
 				for _, el := range lit.Elts {
@@ -120,6 +129,31 @@ func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("no deadline sender found; the lint is checking nothing")
+	}
+}
+
+// checkSettings reports each owner-setting field of lit that is unset or
+// not the channel method named in ownerSettings.
+func checkSettings(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, typ string) {
+	t.Helper()
+	for field, method := range ownerSettings[typ] {
+		set := false
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != field {
+				continue
+			}
+			set = true
+			if sel, ok := kv.Value.(*ast.SelectorExpr); !ok || sel.Sel.Name != method {
+				t.Errorf("%s: %s.%s is not the owner channel's %s", fset.Position(kv.Pos()), typ, field, method)
+			}
+		}
+		if !set {
+			t.Errorf("%s: %s.%s not set", fset.Position(lit.Pos()), typ, field)
+		}
 	}
 }
 
