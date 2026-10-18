@@ -87,3 +87,19 @@ func TestInboxSweepFailureIsNotFatal(t *testing.T) {
 	sweepInboxTemps(filepath.Join(dir, "guest-inbox.json"))
 	sweepInboxTemps("")
 }
+
+// With no inbox configured the sweep touches nothing: without the guard,
+// filepath.Dir("") is ".", and a temp in the working directory would go.
+func TestInboxSweepSkipsWithoutInbox(t *testing.T) {
+	// REQ: CAP-3
+	dir := t.TempDir()
+	t.Chdir(dir)
+	temp := filepath.Join(dir, durable.TempPrefix+"654321")
+	if err := os.WriteFile(temp, []byte("CANARY-cwd-2373"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sweepInboxTemps("")
+	if _, err := os.Stat(temp); err != nil {
+		t.Fatalf("sweep with no inbox removed a temp in the working directory: %v", err)
+	}
+}

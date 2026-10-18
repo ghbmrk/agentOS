@@ -1335,8 +1335,6 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 	return gs.Machines, nil
 }
 
-// openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
-// machine manager. Without them no agent machine can start.
 // sweepInboxTemps removes the temporary files a crash left beside the guest
 // inbox (#2373): one holds the outbox as it stood, reply text included, which
 // a forget of the guest's replies would otherwise leave on disk (CAP-3). It
@@ -1353,6 +1351,8 @@ func sweepInboxTemps(inboxPath string) {
 	}
 }
 
+// openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
+// machine manager. Without them no agent machine can start.
 func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
