@@ -17,7 +17,9 @@ Group=agentos-modem
 ExecStart=/usr/lib/agentos/agentos-modem -owner-sock /run/agentos/owner.sock -roles /var/lib/agentos/modem/roles.json
 # OWNER_NUMBER, COUNTRY_CODE and BOX_NUMBER, read from the environment so
 # no number is on the command line. The image's file sets COUNTRY_CODE
-# only (#1292); the owner's, if any, is read after it and wins.
+# only (#1292); the owner's, if any, is read after it and wins: agentosd
+# writes OWNER_NUMBER there at setup finish, and agentos-modem-env.path
+# restarts this unit when it changes (P2-2w c4c r1).
 EnvironmentFile=/usr/lib/agentos/modem.env
 EnvironmentFile=-/etc/agentos/modem.env
 Restart=always

@@ -5323,7 +5323,7 @@ class SetupServicesTest(unittest.TestCase):
         preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
         for unit in ("agentosd.service", "agentos-egress.service", "agentos-localui.service",
                      "agentos-egress-setup.path", "agentos-ap.service", "agentos-modem.service",
-                     "agentos-netjoin.service"):
+                     "agentos-modem-env.path", "agentos-netjoin.service"):
             with self.subTest(unit):
                 self.assertIn("enable " + unit, preset)
 
@@ -5575,6 +5575,38 @@ class SetupServicesTest(unittest.TestCase):
             "User": [], "DynamicUser": [],
             # Not ProcSubset=pid: the claim check reads /proc/sys/kernel/random/boot_id.
             "ProcSubset": [],
+        }.items():
+            with self.subTest(k):
+                self.assertEqual(got.get(k, []), want)
+
+    def test_a_new_owner_number_restarts_the_bridge_without_waiting(self):
+        # P2-2w c4c r1: agentosd writes the owner's number to /etc/agentos/modem.env at setup finish
+        # but may not start a process (ARC-2); the path unit restarts the bridge, which reads it at
+        # start, and try-restart leaves a stopped bridge (no modem line) stopped.
+        # REQ: P2-2w-c4c-r1-2, ARC-2
+        p = ini(UNITS / "agentos-modem-env.path")
+        self.assertEqual(p["Path"]["PathChanged"], "/etc/agentos/modem.env")
+        self.assertEqual(p["Path"]["Unit"], "agentos-modem-env.service")
+        self.assertEqual(p["Install"]["WantedBy"], "paths.target")
+        s = ini(UNITS / "agentos-modem-env.service")
+        self.assertEqual(s["Service"]["Type"], "oneshot")
+        self.assertEqual(s["Service"]["ExecStart"],
+                         "/usr/bin/systemctl --no-block try-restart agentos-modem.service")
+        modem = (ROOT / "broker/cmd/agentos-modem/agentos-modem.service").read_text()
+        self.assertIn("EnvironmentFile=-/etc/agentos/modem.env", modem)
+        # Root for PID 1's socket and nothing else; each line is pinned, so deleting one fails here.
+        got = settings(UNITS / "agentos-modem-env.service")
+        for k, want in {
+            "CapabilityBoundingSet": [""], "AmbientCapabilities": [], "NoNewPrivileges": ["yes"],
+            "ProtectSystem": ["strict"], "ReadWritePaths": [], "ProtectHome": ["yes"],
+            "PrivateTmp": ["yes"], "PrivateDevices": ["yes"], "PrivateNetwork": ["yes"],
+            "RestrictAddressFamilies": ["AF_UNIX"], "ProtectKernelTunables": ["yes"],
+            "ProtectKernelModules": ["yes"], "ProtectKernelLogs": ["yes"], "ProtectControlGroups": ["yes"],
+            "ProtectClock": ["yes"], "ProtectHostname": ["yes"], "RestrictNamespaces": ["yes"],
+            "RestrictRealtime": ["yes"], "RestrictSUIDSGID": ["yes"], "LockPersonality": ["yes"],
+            "MemoryDenyWriteExecute": ["yes"], "SystemCallArchitectures": ["native"],
+            "SystemCallFilter": ["@system-service"], "UMask": ["0077"], "ProtectProc": ["invisible"],
+            "PrivateIPC": ["yes"], "User": [], "DynamicUser": [],
         }.items():
             with self.subTest(k):
                 self.assertEqual(got.get(k, []), want)

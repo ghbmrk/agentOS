@@ -551,6 +551,9 @@ func main() {
 			// (P2-2w c4c), and records the SIM it finds as that line's.
 			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
 			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+			// Once setup is finished the bridge learns the owner's number
+			// from its environment file (P2-2w c4c r1).
+			m.ModemEnv = modemEnvFile
 		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}

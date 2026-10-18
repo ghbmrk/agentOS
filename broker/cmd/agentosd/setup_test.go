@@ -230,3 +230,78 @@ func TestSetupProvidersCarryPrivateByConfig(t *testing.T) {
 		t.Fatalf("providers: %+v", ps)
 	}
 }
+
+// P2-2w-c4c-r1-3: each start of a finished box makes modem.env hold the
+// recorded owner's number, so a finish whose write was lost (a crash or a
+// power cut) is completed; once it holds exactly that line, nothing is
+// written and the bridge is not restarted again. REQ: P2-2w-c4c-r1-3
+func TestAFinishedSetupRewritesModemEnvUntilItHoldsTheOwner(t *testing.T) {
+	m := newBareSetupMode(t)
+	m.Enroll, m.Page = nil, nil // a finished box needs neither
+	if err := m.Record.Save(localsrv.SetupRecord{Finished: true, Owner: "+15550100100"}); err != nil {
+		t.Fatal(err)
+	}
+	m.ModemEnv = filepath.Join(t.TempDir(), "agentos", "modem.env")
+	logs := &logRec{}
+	m.Logf = logs.logf
+	for _, stale := range []string{"", "COUNTRY_CODE=1\n", "OWNER_NUMBER=+15550100199\n",
+		"OWNER_NUMBER=+15550100100\nOWNER_NUMBER=+15550100100\n"} {
+		if stale != "" {
+			os.WriteFile(m.ModemEnv, []byte(stale), 0o600)
+		}
+		if o, err := m.run(context.Background()); err != nil || o != "+15550100100" {
+			t.Fatalf("run %q %v", o, err)
+		}
+		b, _ := os.ReadFile(m.ModemEnv)
+		if strings.Count(string(b), "OWNER_NUMBER=") != 1 || !strings.Contains(string(b), "OWNER_NUMBER=+15550100100\n") {
+			t.Fatalf("from %q: modem.env %q", stale, b)
+		}
+	}
+	before, _ := os.Stat(m.ModemEnv)
+	if _, err := m.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.Stat(m.ModemEnv); !os.SameFile(before, after) {
+		t.Fatal("a modem.env already holding the owner was rewritten (the bridge would restart at every boot)")
+	}
+	// A refused file does not stop agentosd: the owner channel still starts.
+	os.Remove(m.ModemEnv)
+	os.Mkdir(m.ModemEnv, 0o755)
+	if o, err := m.run(context.Background()); err != nil || o != "+15550100100" {
+		t.Fatalf("run with a refused modem.env %q %v", o, err)
+	}
+	if !strings.Contains(logs.all(), "modem.env") || strings.Contains(logs.all(), "5550100100") {
+		t.Fatalf("log %q", logs.all())
+	}
+}
+
+// P2-2w-c4c-r1-4: with no modem line, ModemEnv stays empty: main.go sets
+// it only in its modem bridge branch, and an empty ModemEnv has finish and
+// a finished start write nothing and log nothing about it.
+// REQ: P2-2w-c4c-r1-4
+func TestNoModemLineWritesNoModemEnv(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := string(src)
+	branch := strings.Index(main, "if modemBridge {\n\t\t\t// The box texts its setup")
+	set := strings.Index(main, "m.ModemEnv = ")
+	if branch < 0 || set < branch || strings.Count(main, "ModemEnv") != 1 ||
+		strings.Contains(main[branch:set], "\n\t\t}") {
+		t.Fatal("main.go must set m.ModemEnv once, inside the setup branch's modemBridge block")
+	}
+	m := newSetupMode(t)
+	logs := &logRec{}
+	m.Logf = logs.logf
+	if o, err := finishSetup(t, m, "+15550100100"); err != nil || o != "+15550100100" {
+		t.Fatalf("run %q %v", o, err)
+	}
+	m.Enroll = nil
+	if _, err := m.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.all(), "modem.env") {
+		t.Fatalf("an empty ModemEnv reached the writer: %q", logs.all())
+	}
+}
