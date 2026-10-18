@@ -15,7 +15,8 @@ func (c *Channel) Converse(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	return c.cfg.Modem.Send(c.cfg.Owner, agentText(text))

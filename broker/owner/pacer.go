@@ -251,7 +251,8 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	return c.post(class, agentText(text), true)
@@ -273,7 +274,8 @@ func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	text = agentText(text)
@@ -293,13 +295,23 @@ func (c *Channel) NotifyNow(text string) error {
 	return c.sendReserved(at, text)
 }
 
-// agentText discloses agent-derived text, prefixes it with AgentPrefix
-// unless it was withheld, and fits it to one text.
+// checkAgent strips agent-derived text of control and bidi characters
+// (control.StripControls) and refuses a reaction form, so the reaction
+// check and CH-19's Disclose read the text the owner's phone shows
+// (CH-12). Callers send the stripped text it returns.
+func checkAgent(text string) (string, error) {
+	text = control.StripControls(text)
+	return text, refuseReaction(text)
+}
+
+// agentText strips and discloses agent-derived text, prefixes it with
+// AgentPrefix unless it was withheld, and fits it to one text in the
+// encoding it needs, emoji and line breaks kept (CH-12).
 func agentText(text string) string {
-	if text = Disclose(text); text != Hidden {
+	if text = Disclose(control.StripControls(text)); text != Hidden {
 		text = AgentPrefix + text
 	}
-	return control.Fit(text)
+	return control.FitAgent(text)
 }
 
 // sendCounted counts text toward the hour, sends it to the owner, and
@@ -547,9 +559,10 @@ func (c *Channel) releasePaced() error {
 
 // packHeld joins the dropped-texts line and the oldest held texts into
 // one text of at most control.MaxText. Agent text always goes alone, so a
-// " / " inside it cannot pass for the start of a broker text (CH-19). It
-// returns the text, how many held texts it carries, and the drops it
-// reports.
+// " / " inside it cannot pass for the start of a broker text (CH-19), and
+// is fitted as agent text, so its emoji and line breaks survive the hold
+// (CH-12). It returns the text, how many held texts it carries, and the
+// drops it reports.
 func packHeld(dropped int, held []HeldText) (string, int, int) {
 	var parts []string
 	size := 0
@@ -578,7 +591,7 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 		}
 		n++
 		if h.Agent {
-			break
+			return control.FitAgent(h.Text), n, dropped
 		}
 	}
 	return control.Fit(strings.Join(parts, heldSep)), n, dropped

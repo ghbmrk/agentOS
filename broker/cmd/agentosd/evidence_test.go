@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -243,7 +244,7 @@ func noPage(t *testing.T, s string) {
 // texts is kept whole (potency C1) and the third text says where it was
 // cut and what to ask (UX ruling on #148; CH-12, D-127).
 func TestLongRepliesAreKept(t *testing.T) {
-	if maxText != control.MaxText {
+	if textRoom(true) != control.MaxText-len(owner.AgentPrefix) {
 		t.Fatal("the owner channel's text limit changed")
 	}
 	r := newEvRig(t, "")
@@ -757,5 +758,44 @@ func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
 	waitFor(t, "the text reply", func() bool { return len(r.texts()) == 1 && len(plane.PendingReplies()) == 0 })
 	if got := r.texts(); got[0] != "Booked for Tuesday at 10." {
 		t.Fatalf("texted %q", got)
+	}
+}
+
+// REQ: CH-12
+// TestCH12SplitCountsUCS2Room: a reply with emoji needs UCS-2, 3 x 67
+// UTF-16 units a text. One of about two and a half texts goes as three
+// texts in order, each within three UCS-2 segments with AgentPrefix, none
+// cut inside a joined emoji, and nothing is kept; control and bidi
+// characters are gone before the split.
+func TestCH12SplitCountsUCS2Room(t *testing.T) {
+	var b strings.Builder
+	for {
+		n, _ := control.Units(b.String())
+		if n >= textRoom(false)*5/2-20 {
+			break
+		}
+		b.WriteString("We meet Thursday 👩‍💻 at nine. ")
+	}
+	long := strings.TrimSpace(b.String())
+	r := newEvRig(t, "")
+	r.ev.reply("agent", true, "‮"+long+"\u0007", "")
+	got := r.texts()
+	if len(got) != 3 {
+		t.Fatalf("%d texts", len(got))
+	}
+	for i, s := range got {
+		n, gsm7 := modem.Segments(owner.AgentPrefix + s)
+		if gsm7 || n > control.Segments {
+			t.Fatalf("text %d: %d segments, gsm7 %v", i, n, gsm7)
+		}
+		if strings.Count(s, "👩") != strings.Count(s, "💻") || strings.ContainsAny(s, "‮\u0007") {
+			t.Fatalf("text %d cut inside an emoji or kept a control: %q", i, s)
+		}
+	}
+	if strings.Join(got, " ") != long {
+		t.Fatal("the texts do not join back to the reply")
+	}
+	if k := r.ev.kept.list(); len(k) != 0 {
+		t.Fatalf("a reply that fits three texts was kept: %d", len(k))
 	}
 }
