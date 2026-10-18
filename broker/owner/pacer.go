@@ -52,8 +52,11 @@ const (
 // pacingForms answers a pacing setting with a bad value (QH-6).
 const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
-// pacingHelp is HELP's line for the pacing settings.
-const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF. CHAT 30: minutes a chat stays open."
+// pacingHelp is HELP's line for the pacing settings. It is terse because
+// agentosd's whole HELP must fit one owner text uncut (control.MaxText,
+// #2390 F1); a mistyped setting gets pacingForms, which says what each
+// value means.
+const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
@@ -760,7 +763,7 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 		}
 		change = func(p *Pacing) { p.ChatMinutes = n }
 		reply = func(Pacing) string {
-			return fmt.Sprintf("Chat set: %d minutes. A chat stays open that long after your last message; replies in it go at once.", n)
+			return fmt.Sprintf("Chat set: %d minutes. My questions go at once until %d minutes after your last message.", n, n)
 		}
 	case "URGENT":
 		class := Class(strings.ToLower(f[1]))

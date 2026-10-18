@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/loops"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -170,4 +173,44 @@ func chatCode(t time.Time) string {
 	sum := m.Sum(nil)
 	off := sum[len(sum)-1] & 0x0f
 	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[off:off+4])&0x7fffffff)%1_000_000)
+}
+
+// REQ: CH-15
+// HELP as agentosd sends it, with the learning line (on or off) and RENEW
+// wired as main wires them, fits one owner text uncut and names CHAT
+// (combined F1 on #2390): Fit cuts past control.MaxText, so a check on the
+// pacing constant alone missed that CHAT never reached the owner.
+func TestCH15HelpNamesChatUncut(t *testing.T) {
+	for _, learning := range []bool{true, false} {
+		var dc daemon.Config
+		if learning {
+			dc.HelpExtra = loops.HelpLine
+		} else {
+			learningOff(&dc)
+		}
+		(&ownerRenew{now: time.Now}).wire(&dc)
+		r := pacedOwner(t, ownerch.Pacing{}, at23)
+		ch, err := ownerch.New(ownerch.Config{
+			Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: &ownerch.MemStore{},
+			Agent: acceptAgent{}, HelpExtra: dc.HelpExtra,
+			Secrets:  ownerch.Secrets{TOTPSeed: []byte(chatSeed), GridSeed: []byte("synthetic-grid-seed")},
+			Location: time.UTC, Now: r.clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ch.Handle(context.Background(), ownerNum, "HELP")
+		if len(got) != 1 || len(got[0]) > control.MaxText {
+			t.Fatalf("learning %v: HELP is %d texts: %q", learning, len(got), got)
+		}
+		for _, word := range []string{"STOP", "RESUME", "STATUS", "UNDO", "MORE", "NAME", "PUBLIC",
+			"LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30"} {
+			if word == "LOOPS" && !learning {
+				word = "Spare-time"
+			}
+			if !strings.Contains(got[0], word) {
+				t.Fatalf("learning %v: HELP (%d bytes) lacks %s: %q", learning, len(got[0]), word, got[0])
+			}
+		}
+	}
 }
