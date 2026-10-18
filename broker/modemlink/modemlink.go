@@ -325,24 +325,52 @@ func (l *Link) SendReceipt(to, text string) (Receipt, error) {
 func callers() string {
 	pcs := make([]uintptr, 16)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
-	var b strings.Builder
-	for n := 0; n < missedFrames; {
+	return senders(func() (string, bool) {
 		f, more := frames.Next()
-		name := f.Function
-		if name != "" && !strings.Contains(name, linkMethods) {
-			b.WriteString(" via " + name[strings.LastIndexByte(name, '/')+1:])
+		return f.Function, more
+	})
+}
+
+// senders names up to missedFrames of the functions next yields, innermost
+// first, leaving out the Link's own methods, the runtime's frames and the
+// owner channel's (its line wrapper, its send helpers and the entry points
+// they serve), so the names reach the code that asked the channel to send
+// (#2349). A send the owner channel started on its own, with no caller
+// outside it, names the outermost owner frame instead of nothing.
+func senders(next func() (string, bool)) string {
+	var b strings.Builder
+	var outer string
+	for n := 0; n < missedFrames; {
+		name, more := next()
+		switch {
+		case name == "" || strings.Contains(name, linkMethods) || strings.HasPrefix(name, "runtime."):
+		case strings.Contains(name, ownerFuncs):
+			outer = name
+		default:
+			b.WriteString(via(name))
 			n++
 		}
 		if !more {
 			break
 		}
 	}
+	if b.Len() == 0 && outer != "" {
+		b.WriteString(via(outer))
+	}
 	return b.String()
 }
 
-// linkMethods marks the Link's own methods in a stack. It leaves out the
-// module path so no literal names the project's host (DEP-2).
-const linkMethods = "/modemlink.(*Link)."
+// via is name as a MissedLog caller: " via " and the function less its
+// import path.
+func via(name string) string { return " via " + name[strings.LastIndexByte(name, '/')+1:] }
+
+// linkMethods marks the Link's own methods in a stack, and ownerFuncs the
+// owner channel's functions. They leave out the module path so no literal
+// names the project's host (DEP-2).
+const (
+	linkMethods = "/modemlink.(*Link)."
+	ownerFuncs  = "/broker/owner."
+)
 
 func receiptOf(id, code string) Receipt {
 	switch code {
