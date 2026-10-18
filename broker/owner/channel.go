@@ -285,6 +285,7 @@ func New(cfg Config) (*Channel, error) {
 		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
+	c.recent.forgotAt = st.ForgotAt
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}

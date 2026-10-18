@@ -172,7 +172,8 @@ func TestAForgetKeepsALiveRequestGuarded(t *testing.T) {
 // After a deletion, a listed form quoting a forgotten reply that holds
 // quote marks is read as a reaction that matched none for the window's 24
 // hours, so the reply does not reach the agent word for word as chat
-// (security finding on #2369). Past that, such a text is chat again.
+// (security finding on #2369), and the owner is told so. Past the 24 hours
+// the owner's own text of that shape, `Liked "a" and "b"`, is chat again.
 func TestAQuotedForgottenReplyIsNotChatAfterAForget(t *testing.T) {
 	r := newRig(t, nil)
 	r.unlock()
@@ -183,17 +184,119 @@ func TestAQuotedForgottenReplyIsNotChatAfterAForget(t *testing.T) {
 	r.inbox()
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	r.say("Liked “Agent: " + reply + "”")
+	if got := r.say("Liked “Agent: " + reply + "”"); got != readAsReaction {
+		t.Fatalf("owner got %q, want %q", got, readAsReaction)
+	}
 	got := r.agent.got()[before:]
 	if len(got) != 1 || !strings.Contains(got[0], "none of the recent texts") {
 		t.Fatalf("agent got %q, want one reaction that matched none", got)
 	}
 	noForgottenText(t, got)
+	before = len(r.agent.got())
+	if got := r.say(`Liked "a" and "b"`); got != readAsReaction {
+		t.Fatalf("within a day of the deletion the owner got %q, want %q", got, readAsReaction)
+	}
+	if got := r.agent.got()[before:]; len(got) != 1 || !strings.HasPrefix(got[0], "Owner reaction:") {
+		t.Fatalf("within a day of the deletion: %q, want a reaction", got)
+	}
 	r.advance(recentMaxAge + time.Minute)
 	before = len(r.agent.got())
-	r.say(`Liked "a" and "b" both`)
+	r.say(`Liked "a" and "b"`)
 	if got := r.agent.got()[before:]; len(got) != 1 || strings.HasPrefix(got[0], "Owner reaction:") {
 		t.Fatalf("a day after the deletion: %q, want chat", got)
+	}
+}
+
+// quotedReply is a forgotten agent reply that holds quote marks, so a
+// listed form quoting it whole is not a reaction on its form alone.
+const quotedReply = `The Acme contract renews "automatically" on the third of March at forty dollars a seat.`
+
+// The 24 h rule outlives a restart (security finding on #2369): the
+// deletion's time is saved, so after a restart a listed form quoting a
+// forgotten reply with quote marks is still a reaction that matched none.
+func TestTheForgetRuleOutlivesARestart(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if err := r.ch.Converse(quotedReply); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.ch.ForgetRecent()
+	r.advance(time.Minute)
+	r.ch = r.open()
+	before := len(r.agent.got())
+	r.say("Loved “Agent: " + quotedReply + "”")
+	got := r.agent.got()[before:]
+	if len(got) != 1 || !strings.Contains(got[0], "none of the recent texts") {
+		t.Fatalf("after a restart the agent got %q, want one reaction that matched none", got)
+	}
+	noForgottenText(t, got)
+}
+
+// In the 24 h after a deletion, an unlisted form whose quote starts with
+// "Agent:" is a reaction that matched none, not chat, with or without quote
+// marks in the quote, so a forgotten reply does not reach the agent whole
+// (security finding on #2369). The owner is told it was read as a reaction.
+func TestAnUnlistedFormOnAForgottenReplyIsNotChat(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	for _, reply := range []string{quotedReply, forgottenReply} {
+		if err := r.ch.Converse(reply); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+	}
+	r.ch.ForgetRecent()
+	before := len(r.agent.got())
+	for _, reply := range []string{quotedReply, forgottenReply} {
+		if got := r.say("Pinned “Agent: " + reply + "”"); got != readAsReaction {
+			t.Fatalf("owner got %q, want %q", got, readAsReaction)
+		}
+	}
+	got := r.agent.got()[before:]
+	if len(got) != 2 {
+		t.Fatalf("agent got %q, want two reactions", got)
+	}
+	for _, g := range got {
+		if !strings.Contains(g, "none of the recent texts") {
+			t.Fatalf("agent got %q, want a reaction that matched none", g)
+		}
+	}
+	noForgottenText(t, got)
+}
+
+// A reaction held after a deletion is worded after it, so RUN still
+// delivers it (#2360).
+func TestAReactionHeldAfterAForgetIsDeliveredOnRun(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.ForgetRecent()
+	if err := r.ch.Converse("Lunch is booked for one in the afternoon."); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	if got := r.say("Liked “Agent: Lunch is booked for one…”"); !strings.Contains(got, "reaction is held") {
+		t.Fatalf("locked reaction: %q", got)
+	}
+	r.say(r.totp())
+	r.say("RUN")
+	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], "Lunch is booked") {
+		t.Fatalf("RUN delivered %q, want the held reaction", g)
+	}
+}
+
+// A deletion drops only a held reaction: a held message survives it and
+// RUN delivers it (#2360).
+func TestAHeldMessageSurvivesAForget(t *testing.T) {
+	r := newRig(t, nil)
+	const msg = "Please book the dentist for Tuesday morning."
+	if got := r.say(msg); !strings.Contains(got, "held") {
+		t.Fatalf("locked message: %q", got)
+	}
+	r.ch.ForgetRecent()
+	r.say(r.totp())
+	r.say("RUN")
+	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], msg) {
+		t.Fatalf("RUN delivered %q, want the held message", g)
 	}
 }
 

@@ -38,13 +38,16 @@ const quoteMarks = `"“”`
 // reaction is one owner reaction: its kind in lower case, as the agent
 // reads it, and the quoted text.
 type reaction struct {
-	kind     string
-	quoted   string
-	unlisted bool // read from an unlisted form: the owner's lead-in is dropped
+	kind   string
+	quoted string
+	// tell: the owner is told the text was read as a reaction
+	// (readAsReaction): an unlisted form, whose lead-in is dropped, or a
+	// form read so only because a deletion forgot texts (CAP-3).
+	tell bool
 }
 
-// readAsReaction tells the owner that an unlisted form was read as a
-// reaction, so its lead-in never reached the agent (#2277). It is fixed and
+// readAsReaction tells the owner that a text was read as a reaction, so
+// its words never reached the agent (#2277, #2360). It is fixed and
 // never echoes the quote, which holds a request or a code (CH-3).
 const readAsReaction = "I read that as a reaction to one of my texts, so it did not go to the agent. " +
 	"To tell the agent something, send it without quoting that text."
@@ -79,7 +82,9 @@ var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]
 // form, when the quote marks a text to the owner that is a request or holds
 // a box code (CH-3). The agent's own text is never a reason: its digits
 // already passed Disclose, so an unlisted form quoting it stays chat and the
-// owner's words reach the agent whole (CH-11).
+// owner's words reach the agent whole (CH-11). The exception is the 24 h
+// after a deletion, when the agent may no longer hold the text quoted
+// (CAP-3, #2360, O44).
 func (c *Channel) readReaction(text string) (reaction, bool) {
 	if rx, ok := parseReaction(text); ok {
 		return rx, true
@@ -94,6 +99,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		// matched none until the forgotten texts are past the window
 		// (CAP-3, #2360).
 		if c.recent.forgotWithin(now) {
+			rx.tell = true
 			return rx, true
 		}
 		return reaction{}, false
@@ -102,11 +108,19 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	if m == nil || len(strings.Fields(m[1])) > 5 {
 		return reaction{}, false
 	}
-	t, ok := c.recent.match(m[2], c.cfg.Now())
-	if !ok || !t.guarded() {
-		return reaction{}, false
+	now := c.cfg.Now()
+	unlisted := reaction{kind: "reacted to", quoted: m[2], tell: true}
+	if t, ok := c.recent.match(m[2], now); ok && t.guarded() {
+		return unlisted, true
 	}
-	return reaction{kind: "reacted to", quoted: m[2], unlisted: true}, true
+	// After a deletion an unlisted form quoting an agent text may quote a
+	// forgotten reply, which as chat would reach the agent whole: read it
+	// as a reaction until the forgotten texts are past the window (CAP-3,
+	// #2360). A forgotten text no longer matches, so its event matches none.
+	if c.recent.forgotWithin(now) && strings.HasPrefix(normQuote(m[2]), normQuote(AgentPrefix)) {
+		return unlisted, true
+	}
+	return reaction{}, false
 }
 
 // ErrAgentReaction refuses agent text that is a reaction form: until
@@ -156,7 +170,8 @@ type recentWindow struct {
 	// forgets counts the deletions that cleared the window, so a reaction
 	// event worded before one is never delivered after it (CAP-3).
 	forgets uint64
-	// forgotAt is the last deletion's time.
+	// forgotAt is the last deletion's time, kept in State.ForgotAt so a
+	// restart does not end the 24 h rule early (forgotWithin).
 	forgotAt time.Time
 }
 
@@ -184,7 +199,7 @@ func (r *recentWindow) forget(now time.Time) {
 func (r *recentWindow) forgotWithin(now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.forgets > 0 && now.Sub(r.forgotAt) <= recentMaxAge
+	return !r.forgotAt.IsZero() && now.Sub(r.forgotAt) <= recentMaxAge
 }
 
 // gen is the number of deletions that cleared the window.
@@ -247,13 +262,18 @@ var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-
 // #2360): it drops the recent texts a reaction would show the agent and a
 // held reaction's event, and voids any event worded before it that has not
 // gone to the agent. An event being delivered when it runs finishes first,
-// so none quoting a forgotten text reaches the agent once it returns.
+// so none quoting a forgotten text reaches the agent once it returns. The
+// deletion's time is saved, so the 24 h rule outlives a restart.
 func (c *Channel) ForgetRecent() {
 	c.reactMu.Lock()
 	defer c.reactMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.recent.forget(c.cfg.Now())
+	now := c.cfg.Now()
+	c.recent.forget(now)
+	// A failed save still holds for this run; only a restart before the
+	// next save would lose it.
+	_ = c.saveLocked(func(s *State) { s.ForgotAt = now })
 	if c.held != nil && c.held.react != "" {
 		c.held = nil
 	}
@@ -344,7 +364,7 @@ func replyPointer(t sentText) string {
 func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlocked bool) route {
 	event, pointer := c.reactionEvent(rx)
 	var replies []string
-	if rx.unlisted {
+	if rx.tell {
 		replies = append(replies, readAsReaction)
 	}
 	if pointer != "" {
