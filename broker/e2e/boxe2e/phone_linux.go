@@ -35,8 +35,17 @@ func replyKind(text string) string {
 	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
 		return "outage"
 	}
+	if strings.HasPrefix(text, digestPrefix) {
+		return "digest"
+	}
 	return "other"
 }
+
+// digestPrefix leads every text agentosd's daily digest sends (its
+// digestHead and status lines). The digest waits for the owner line
+// (#1291), so on a fresh box it can land during the step; it answers no
+// command, so the step passes over it wherever it lands (E17).
+const digestPrefix = "Daily digest: "
 
 // outagePrefix and outageMark frame the owner line's recovery notice
 // (modemlink's recoveryText, UX U-B1): sent once the line is back after a
@@ -130,7 +139,8 @@ type phoneRun struct {
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
 // comes before the barrier's (CH-1, CH-3). The owner line's recovery
-// notice is passed over wherever it lands (E16).
+// notice and the daily digest are passed over wherever they land (E16,
+// E17).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -164,6 +174,8 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 func (r *phoneRun) reply(text string) {
 	k := replyKind(text)
 	switch {
+	case k == "digest":
+		// Not a reply: the day's digest, sent once the line is up.
 	case k == "outage":
 		// Not a reply: the box's account of a text it lost earlier.
 		r.notices++
