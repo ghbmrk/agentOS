@@ -343,3 +343,14 @@ func TestTheCardPageSaysToRejoinWithTheCardsWiFi(t *testing.T) {
 		t.Fatal("a rotation's page tells the phone to rejoin")
 	}
 }
+
+// #1526 U-1: a Wi-Fi rotation's page says to rejoin and reload this page,
+// which re-requests the done page; Home does not offer that page again.
+func TestTheWiFiRotationPageSaysToReload(t *testing.T) {
+	y := newRotRig(t, Parts{WiFi: true})
+	body := do(t, y.d.Handler(paired, "/rotate/done"), "GET", "/rotate/card", nil, true, nil).Body.String()
+	const want = "Your phone drops off it: rejoin with this card's Wi-Fi QR code, or its name and password, then reload this page."
+	if !strings.Contains(body, want) || strings.Contains(body, "open my box page again") {
+		t.Fatalf("rotation rejoin text: %s", body)
+	}
+}

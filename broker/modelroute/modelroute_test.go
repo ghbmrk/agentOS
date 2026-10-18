@@ -1,6 +1,7 @@
 package modelroute
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -370,6 +371,60 @@ func TestTrailersAreScrubbed(t *testing.T) {
 	resp.Body.Close()
 	if resp.Trailer.Get(HeaderDenial) != "" || resp.Trailer.Get("X-Other") != "kept" {
 		t.Fatalf("trailers %v", resp.Trailer)
+	}
+}
+
+// REQ: ARC-6, CRED-1
+
+// A guest's request trailers carry none of our headers to the vault
+// process (#815): a declared Agentos- or X-Agentos- trailer, sent on the
+// raw wire, arrives neither declared nor with its value; another trailer
+// stays declared.
+func TestRequestTrailersAreScrubbed(t *testing.T) {
+	got := make(chan http.Header, 1)
+	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		got <- r.Trailer.Clone()
+		io.WriteString(w, `{}`)
+	}}
+	sock := serveUnix(t, fe)
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+	srv := httptest.NewServer(fwd("m1"))
+	defer srv.Close()
+	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "POST /openai/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"+
+		"Trailer: agentos-state, "+HeaderMachine+", X-Agentos-Egress-Denied, X-Other\r\nTransfer-Encoding: chunked\r\n\r\n"+
+		"2\r\n{}\r\n0\r\nagentos-state: forged\r\n"+HeaderMachine+": other\r\nX-Agentos-Egress-Denied: 1\r\nX-Other: kept\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	tr := <-got
+	for k := range tr {
+		if c := http.CanonicalHeaderKey(k); strings.HasPrefix(c, headerPrefix) || strings.HasPrefix(c, "X-"+headerPrefix) {
+			t.Fatalf("vault process got trailer %q: %v", k, tr)
+		}
+	}
+	if _, ok := tr["X-Other"]; !ok {
+		t.Fatalf("other trailer dropped: %v", tr)
+	}
+}
+
+// dropOurs deletes the key as the map holds it: a non-canonical key is
+// ours too (#815).
+func TestDropOursDeletesNonCanonicalKeys(t *testing.T) {
+	h := http.Header{"agentos-state": {"x"}, "x-agentos-egress-denied": {"1"}, HeaderMachine: {"m"}, "x-other": {"kept"}}
+	dropOurs(h)
+	if len(h) != 1 || h["x-other"] == nil {
+		t.Fatalf("left %v", h)
 	}
 }
 

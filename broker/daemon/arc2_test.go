@@ -125,7 +125,13 @@ var machinePlane = map[string]struct {
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc", "cgroup"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	// photo re-encodes owner photos through agentos-photo in a one-shot
+	// sandbox (CH-23): no image decoder links into the broker, and the
+	// decoder package (photo/decoder) only into agentos-photo.
+	"photo":             {[]string{"vm/gvisor"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C", "image/jpeg", "image/png", "image/gif"}},
+	"photo/decoder":     {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os", "os/exec", "plugin", "unsafe", "C"}},
+	"cmd/agentos-photo": {[]string{"photo/decoder"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -192,7 +198,9 @@ var learningPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"change": {[]string{"journal", "owner", "routerule", "update"}, forbiddenStd},
+	// change reads the closed verb list to check an adapter's demo runs
+	// before adoption (ADP-8b); verb is standard library only.
+	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
 	"loops":  {[]string{"change", "journal", "meter", "owner", "skill/format", "vm"}, forbiddenStd},
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.

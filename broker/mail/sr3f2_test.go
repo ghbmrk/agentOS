@@ -11,13 +11,17 @@ import (
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
-// REQ: ADP-2, OP-2, OP-3 (SR3-5-f2a, SR3-5-f2b)
+// REQ: ADP-2, OP-2, OP-3 (SR3-5-f2a, SR3-5-f2b, SR3-5-f3)
 
-// changed fails unless out is NotApplied for a changed message.
-func changed(t *testing.T, out journal.Outcome) {
+// changed fails unless out is NotApplied with the evidence words want.
+func changed(t *testing.T, out journal.Outcome, want ...string) {
 	t.Helper()
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
-		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	w := "changed since approval"
+	if len(want) > 0 {
+		w = want[0]
+	}
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, w) {
+		t.Fatalf("execute: %s %q, want %q", out.Result, out.Evidence, w)
 	}
 }
 
@@ -47,7 +51,7 @@ func TestDeleteActsOnlyOnTheJudgedMessage(t *testing.T) {
 func TestDeleteWithoutPinDoesNothing(t *testing.T) {
 	x := newH(t, nil)
 	id := x.news(1)
-	changed(t, x.a.Execute(ctx, x.intent(mail.OpDelete, rec(id)), 1))
+	changed(t, x.a.Execute(ctx, x.intent(mail.OpDelete, rec(id)), 1), "no check ran")
 	if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
 		t.Fatalf("moved to %s", folder)
 	}
@@ -168,7 +172,7 @@ func TestNilInUseNeverExpires(t *testing.T) {
 	if e, _ := x.a.Escalate(ctx, in); e.Verb != verb.ChangeAccount {
 		t.Fatalf("recheck: %+v", e)
 	}
-	changed(t, x.a.Execute(ctx, in, 1))
+	changed(t, x.a.Execute(ctx, in, 1), "changed between checks")
 	if folder, flags, _ := x.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
 		t.Fatalf("alert in %s with %v", folder, flags)
 	}
@@ -219,7 +223,7 @@ func TestExpiryKeepsTheJudgementOfADeleteInFlight(t *testing.T) {
 			if _, err := x.a.Escalate(ctx, in); err != nil {
 				t.Fatal(err)
 			}
-			changed(t, x.a.Execute(ctx, in, 1))
+			changed(t, x.a.Execute(ctx, in, 1), "changed between checks")
 			if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
 				t.Fatalf("alert in %s", folder)
 			}
@@ -240,5 +244,44 @@ func TestDeleteTakesNoPlaceInTheBound(t *testing.T) {
 	}
 	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(x.news(1)))); err != nil || e.Ask || e.Held {
 		t.Fatalf("first organize: %+v %v", e, err)
+	}
+}
+
+// TestReconcileDoesNotReportAnAlertTheAttemptDidNotJudge (SR3-5-f3,
+// mutant M3 on #579): the attempt judged a plain newsletter and its MOVE
+// reply was lost. Before Reconcile, the owner opened an account with the
+// sender, so the same message on the same Ref now reads as an alert.
+// The pin kept for the attempt judged no alert, so Reconcile cannot say
+// the alert was archived under that judgement: the outcome is unknown.
+// Without the change it reconciles as succeeded.
+func TestReconcileDoesNotReportAnAlertTheAttemptDidNotJudge(t *testing.T) {
+	for _, becameAlert := range []bool{true, false} {
+		t.Run(map[bool]string{true: "now an alert", false: "still a newsletter"}[becameAlert], func(t *testing.T) {
+			var accts []string
+			x := newH(t, func(c *mail.Config) {
+				c.Store = &lossy{c.Store}
+				c.AccountSenders = func() []string { return accts }
+			})
+			id := "<news-f3@shop.example>"
+			x.deliver("INBOX", msg{id: id, from: "Shop <deals@shop.example>", to: me, subject: "Autumn sale", body: "Twenty percent off boots.",
+				extra: []string{"Authentication-Results: mx.example.test; spf=pass smtp.mailfrom=shop.example; dmarc=pass (p=reject) header.from=shop.example"}})
+			in := x.intent(mail.OpArchive, rec(id))
+			if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != "" {
+				t.Fatalf("recheck: %+v %v", e, err)
+			}
+			if out := x.a.Execute(ctx, in, 1); out.Result != journal.ResultUnknown {
+				t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+			}
+			if becameAlert {
+				accts = []string{"shop.example"}
+			}
+			want := journal.ResultSucceeded
+			if becameAlert {
+				want = journal.ResultUnknown
+			}
+			if out := x.a.Reconcile(ctx, in, 1); out.Result != want {
+				t.Fatalf("reconcile: %s %q, want %s", out.Result, out.Evidence, want)
+			}
+		})
 	}
 }

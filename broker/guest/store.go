@@ -242,6 +242,25 @@ func (s *store) retire(machine, id string) error {
 	return nil
 }
 
+// forget drops every reply waiting in the outbox (a deletion, CAP-3:
+// no reply names the task it is about, so none can be kept). Each moves
+// to done, so the guest's retry of it is recognised and not queued
+// again; done holds no text. Memory is cleared even if the write fails,
+// and the error is returned so the deletion reports it.
+func (s *store) forget() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.outbox) == 0 {
+		return nil
+	}
+	for _, r := range s.outbox {
+		s.done = addDone(s.done, r)
+	}
+	s.outbox = nil
+	s.refused = false
+	return s.save()
+}
+
 func (s *store) waiting() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

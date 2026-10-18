@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: ARC-1, DEV-net-h, CH-7
+// REQ: ARC-1, DEV-net-h, CH-7, CRED-1
 
 // The loader runs as root, so its unit bounds what root keeps: the
 // network, firewall and child capabilities only (no CAP_DAC_OVERRIDE), a
@@ -58,7 +58,9 @@ func TestTheUnitIsBounded(t *testing.T) {
 		}
 	}
 	hidden := strings.Fields(strings.Join(set["InaccessiblePaths"], " "))
-	for _, p := range []string{"-/var/lib/agentos-egress", "-/var/lib/agentos/vault"} {
+	// The vault's sockets check only uid == broker uid, which is root in
+	// the shipped unit, so the loader must not reach them (#1628).
+	for _, p := range []string{"-/var/lib/agentos-egress", "-/var/lib/agentos/vault", "-/run/agentos-egress"} {
 		if !slices.Contains(hidden, p) {
 			t.Errorf("InaccessiblePaths %q lacks %s", hidden, p)
 		}
@@ -81,5 +83,30 @@ func TestTheUnitIsBounded(t *testing.T) {
 		return strings.HasPrefix(l, "u "+hostapdUser+" - ")
 	}) {
 		t.Errorf("sysusers.d declares no %s user", hostapdUser)
+	}
+}
+
+// The mask on /run/agentos-egress is a mount over that directory; if egress's
+// stop removed it, the kernel would detach the mask and the recreated
+// directory, with fresh sockets, would show through until the loader
+// restarts. A compromised loader can force that restart (CAP_KILL), so
+// egress keeps the directory (#1628).
+func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
+	b, err := os.ReadFile("../../../image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-egress.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dir, keep []string
+	for _, l := range strings.Split(string(b), "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
+		switch k {
+		case "RuntimeDirectory":
+			dir = append(dir, v)
+		case "RuntimeDirectoryPreserve":
+			keep = append(keep, v)
+		}
+	}
+	if !slices.Equal(dir, []string{"agentos-egress"}) || !slices.Equal(keep, []string{"yes"}) {
+		t.Errorf("RuntimeDirectory = %q, RuntimeDirectoryPreserve = %q; want agentos-egress, yes", dir, keep)
 	}
 }

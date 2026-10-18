@@ -54,7 +54,15 @@ type watchedLine struct {
 }
 
 func (w watchedLine) Send(to, text string) error {
-	err := w.Modem.Send(to, text)
+	err := w.failed(w.Modem.Send(to, text))
+	if err == nil && to == w.c.cfg.Owner {
+		w.c.recent.add(sentText{text: text, at: w.c.cfg.Now()})
+	}
+	return err
+}
+
+// failed records a failed send.
+func (w watchedLine) failed(err error) error {
 	if err != nil {
 		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
 	}
@@ -72,23 +80,32 @@ type RequestSender interface {
 	SendRequest(to, text string) error
 }
 
+// SendRequest sends an approval request. sendRequest, which knows the
+// request IDs, records it in the recent texts (CH-11).
 func (w watchedLine) SendRequest(to, text string) error {
 	rs, ok := w.Modem.(RequestSender)
 	if !ok {
-		return w.Send(to, text)
+		return w.failed(w.Modem.Send(to, text))
 	}
-	err := rs.SendRequest(to, text)
-	if err != nil {
-		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
-	}
-	return err
+	return w.failed(rs.SendRequest(to, text))
 }
 
 // sendRequest texts the owner an approval request. Grants paces these,
 // so the owner never holds one, but each counts toward the hour (CH-15)
-// before it is sent, and is settled as a sent text is (#1638).
-func (c *Channel) sendRequest(text string) error {
-	at := c.reserve()
+// before it is sent, and is settled as a sent text is (#1638). A request
+// grants already counted with Spend goes on that count (#1685). A sent
+// request goes in the recent texts with ids, the requests it asks, so a
+// reaction's pointer names them from the broker's record, never from the
+// text, which carries agent words (CH-11).
+func (c *Channel) sendRequest(text string, ids []string, local bool) error {
+	c.mu.Lock()
+	var at time.Time
+	if len(c.spent) > 0 {
+		at, c.spent = c.spent[0], c.spent[1:]
+	} else {
+		at = c.reserveLocked(c.cfg.Now())
+	}
+	c.mu.Unlock()
 	var err error
 	if rs, ok := c.cfg.Modem.(RequestSender); ok {
 		err = rs.SendRequest(c.cfg.Owner, text)
@@ -96,6 +113,9 @@ func (c *Channel) sendRequest(text string) error {
 		err = c.cfg.Modem.Send(c.cfg.Owner, text)
 	}
 	c.settle(at, err)
+	if err == nil {
+		c.recent.add(sentText{text: text, at: c.cfg.Now(), request: true, ids: ids, local: local})
+	}
 	return err
 }
 

@@ -185,23 +185,25 @@ const recordVersion = 1
 // Record is one journal entry. The journal is the single audit trail for
 // effects and for broker-state changes alike (OP-5).
 type Record struct {
-	V        int         `json:"v"`
-	Seq      uint64      `json:"seq"`
-	At       time.Time   `json:"at"`
-	Type     RecordType  `json:"type"`
-	ID       string      `json:"id,omitempty"`
-	Intent   *Intent     `json:"intent,omitempty"`
-	Attempt  int         `json:"attempt,omitempty"`
-	Result   Result      `json:"result,omitempty"`
-	Source   string      `json:"source,omitempty"`
-	Evidence string      `json:"evidence,omitempty"`
-	Reason   string      `json:"reason,omitempty"`
-	Guest    string      `json:"guest,omitempty"`
-	Accepted bool        `json:"accepted,omitempty"`
-	Verdict  Verdict     `json:"verdict,omitempty"`
-	Egress   *EgressNote `json:"egress,omitempty"`
-	Sleep    *SleepNote  `json:"sleep,omitempty"`
-	Answer   *AnswerNote `json:"answer,omitempty"`
+	V         int            `json:"v"`
+	Seq       uint64         `json:"seq"`
+	At        time.Time      `json:"at"`
+	Type      RecordType     `json:"type"`
+	ID        string         `json:"id,omitempty"`
+	Intent    *Intent        `json:"intent,omitempty"`
+	Attempt   int            `json:"attempt,omitempty"`
+	Result    Result         `json:"result,omitempty"`
+	Source    string         `json:"source,omitempty"`
+	Evidence  string         `json:"evidence,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	Guest     string         `json:"guest,omitempty"`
+	Accepted  bool           `json:"accepted,omitempty"`
+	Verdict   Verdict        `json:"verdict,omitempty"`
+	Egress    *EgressNote    `json:"egress,omitempty"`
+	Sleep     *SleepNote     `json:"sleep,omitempty"`
+	RouteStop *RouteStopNote `json:"route_stop,omitempty"`
+	Picture   *PictureNote   `json:"picture,omitempty"`
+	Answer    *AnswerNote    `json:"answer,omitempty"`
 	// FP and EFP carry an erased intent's fingerprints, so OP-1 still
 	// recognises a resubmission once its parameters are gone.
 	FP  string `json:"fp,omitempty"`

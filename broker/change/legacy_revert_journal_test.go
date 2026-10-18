@@ -21,6 +21,7 @@ func withLegacy(body []byte, lc string) []byte {
 func TestLegacyForgetRevertIsJournaled(t *testing.T) {
 	e, rep := forgetEnv(t)
 	plain := e.body(rep.ID)
+	e.asEarlierBuild()
 	e.putBody(rep.ID, withLegacy(plain, `{"confirmed":true,"reverted":"forgotten"}`))
 	e.reopen()
 	if got := e.reverted(rep.ID); got != WhyForgotten {
@@ -30,8 +31,9 @@ func TestLegacyForgetRevertIsJournaled(t *testing.T) {
 		t.Fatalf("revert intents: %q", got)
 	}
 	e.noRevertOnDisk(rep.ID)
-	if !bytes.Contains(e.body(rep.ID), []byte(`"legacy":{"confirmed":true}`)) {
-		t.Fatalf("the rest of the legacy lifecycle went: %s", e.body(rep.ID))
+	// The rest of the legacy lifecycle moved to the state (ABT-2).
+	if l := e.savedState().Legacy[rep.ID]; l == nil || !l.Confirmed || l.Reverted != "" {
+		t.Fatalf("the rest of the legacy lifecycle went: %+v", l)
 	}
 
 	// LRJ-2: the body restored without the field, or with it, still
@@ -54,6 +56,7 @@ func TestLegacyForgetRevertIsJournaled(t *testing.T) {
 func TestLegacySettingsRevertIsJournaled(t *testing.T) {
 	e, rep, _ := settingsEnv(t)
 	plain := e.body(rep.ID)
+	e.asEarlierBuild()
 	e.putBody(rep.ID, withLegacy(plain, `{"reverted":"settings"}`))
 	e.reopen()
 	if got := e.revertsJournaled(rep.ID); len(got) != 1 || got[0] != WhySettings {
@@ -70,6 +73,7 @@ func TestLegacySettingsRevertIsJournaled(t *testing.T) {
 // LRJ-3: the debt is saved before the body loses its legacy revert.
 func TestLegacyRevertMigrationSurvivesAFailedSave(t *testing.T) {
 	e, rep := forgetEnv(t)
+	e.asEarlierBuild()
 	e.putBody(rep.ID, withLegacy(e.body(rep.ID), `{"reverted":"forgotten"}`))
 	e.p.cfg.Store = &flakyStore{MemStore: e.store, failSave: true}
 	e.reopen()
@@ -85,9 +89,10 @@ func TestLegacyRevertMigrationSurvivesAFailedSave(t *testing.T) {
 }
 
 // LRJ-3: a legacy revert the journal does not own (any why but forgotten
-// or settings) stays the legacy lifecycle's, as before.
+// or settings) stays the legacy lifecycle's, now kept in the state (ABT-2).
 func TestLegacyOtherRevertStaysInTheBody(t *testing.T) {
 	e, rep := forgetEnv(t)
+	e.asEarlierBuild()
 	e.putBody(rep.ID, withLegacy(e.body(rep.ID), `{"reverted":"`+WhyDropped+`"}`))
 	e.reopen()
 	if got := e.reverted(rep.ID); got != WhyDropped {
@@ -96,9 +101,9 @@ func TestLegacyOtherRevertStaysInTheBody(t *testing.T) {
 	if got := e.revertsJournaled(rep.ID); len(got) != 0 {
 		t.Fatalf("revert intents: %q", got)
 	}
-	// The body keeps the revert, so a later start still sees it.
-	if !bytes.Contains(e.body(rep.ID), []byte(`"reverted":"`+WhyDropped+`"`)) {
-		t.Fatalf("body lost the revert: %s", e.body(rep.ID))
+	// The state keeps the revert, so a later start still sees it.
+	if l := e.savedState().Legacy[rep.ID]; l == nil || l.Reverted != WhyDropped {
+		t.Fatalf("the state lost the revert: %+v", l)
 	}
 	e.reopen()
 	if got := e.reverted(rep.ID); got != WhyDropped {

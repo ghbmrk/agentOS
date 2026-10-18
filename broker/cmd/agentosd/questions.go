@@ -22,7 +22,10 @@ import (
 // questions is the owner-question book (P3-8) live (W9). The daemon's
 // handlers take it before it opens, since the book texts through the
 // owner channel the daemon makes; until it opens, and for good when there
-// is no owner channel, nothing is answered and no tool is offered.
+// is no owner channel, nothing is answered and no tool is offered. The box
+// clock guard is its own dependency (CLOCK-guard-own, #1246): it opens
+// before the book and stays open when the book cannot, since the sleeper
+// and STATUS read it too.
 type questions struct {
 	b atomic.Pointer[question.Book]
 	g atomic.Pointer[clock.Guard]
@@ -39,10 +42,11 @@ func (q *questions) pending() bool {
 
 // restricted reports whether the box clock check restricts time-sensitive
 // checks (TIM-1): the sleeper's hours and its longest sleep read the box
-// clock, so the agent does not sleep then (security R1 on #149).
+// clock, so the agent does not sleep then (security R1 on #149). A guard
+// that has not opened, or could not, restricts too (#1246).
 func (q *questions) restricted() bool {
 	g := q.g.Load()
-	return g != nil && g.Status().Restricted()
+	return g == nil || g.Status().Restricted()
 }
 
 // wait returns once the loops open started have stopped (cancel their
@@ -66,11 +70,12 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 
 // Clock is STATUS's time check line (a control.Handler note): the guard's
 // last check in the box's zone, so a restriction is visible while the
-// guard texts nothing (UX R3, L3 S1 on #95).
+// guard texts nothing (UX R3, L3 S1 on #95). With no guard open the
+// line says so, since restricted() then holds (#1246).
 func (q *questions) Clock() string {
 	g := q.g.Load()
 	if g == nil {
-		return ""
+		return "Time check: not running (time-sensitive checks restricted)."
 	}
 	return clockLine(g.Status(), time.Local)
 }
@@ -103,31 +108,21 @@ type questionConfig struct {
 	Path, ClockPath string
 }
 
-// open starts the box clock (P2-9) and the question book on the owner
-// channel. Deadlines run on the guard's time and hold while it is
+// open starts the box clock (P2-9), then the question book on the owner
+// channel. The guard opens first and alone, so a missing owner channel or
+// a book that fails to load leaves it running (#1246). Deadlines run on the guard's time and hold while it is
 // restricted (TIM-1). Reveal raises the reading machine to private before it
 // sees the owner's words (REV-5). Questions and approval requests share
 // the gate's CH-15 budget, approval requests first (question Q3): the
 // gate reserves each question's text under its own lock.
 func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig) error {
+	guard, err := q.openClock(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	ch := d.Owner()
 	if ch == nil {
 		return errors.New("no owner channel")
-	}
-	// No Notify yet: the guard's texts tell the owner that pre-allowances,
-	// request expiry and updates are playing safe, and those move onto the
-	// guard only with the rest of P2-9's carry-forward (clock K7).
-	// Questions keep going out through a restriction, their waits on the
-	// monotonic clock (question Q15).
-	guard, err := clock.New(clock.Config{
-		Sync:      clock.Sync,
-		RTC:       clock.RTC, // learns the hardware clock's offset (HW-8, agentos-clock-boot)
-		HostID:    clock.HostID,
-		StatePath: cfg.ClockPath,
-		Logf:      log.Printf,
-	})
-	if err != nil {
-		return err
 	}
 	b, err := question.New(question.Config{
 		// Never held: a question's wait starts at its text, so the book
@@ -155,11 +150,32 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		return err
 	}
 	q.b.Store(b)
-	q.g.Store(guard)
-	q.run.Add(2)
-	go func() { defer q.run.Done(); guard.Run(ctx) }()
+	q.run.Add(1)
 	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
 	return nil
+}
+
+// openClock opens the box clock guard and starts its loop. It needs no
+// owner channel: no Notify yet, since the guard's texts tell the owner
+// that pre-allowances, request expiry and updates are playing safe, and
+// those move onto the guard only with the rest of P2-9's carry-forward
+// (clock K7). Questions keep going out through a restriction, their waits
+// on the monotonic clock (question Q15).
+func (q *questions) openClock(ctx context.Context, cfg questionConfig) (*clock.Guard, error) {
+	guard, err := clock.New(clock.Config{
+		Sync:      clock.Sync,
+		RTC:       clock.RTC, // learns the hardware clock's offset (HW-8, agentos-clock-boot)
+		HostID:    clock.HostID,
+		StatePath: cfg.ClockPath,
+		Logf:      log.Printf,
+	})
+	if err != nil {
+		return nil, err
+	}
+	q.g.Store(guard)
+	q.run.Add(1)
+	go func() { defer q.run.Done(); guard.Run(ctx) }()
+	return guard, nil
 }
 
 // quietSource is the owner channel's view of quiet hours.

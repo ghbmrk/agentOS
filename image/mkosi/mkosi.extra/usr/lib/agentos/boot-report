@@ -35,3 +35,31 @@ failed) echo "agentos-page: down claim=failed (power-cycle; if it persists, cont
 active | inactive) echo "agentos-page: claim=ok" ;;
 *) echo "agentos-page: claim=unknown" ;;
 esac
+# Each agent machine writes under its own hard quota on root (RES-4), which needs root mounted with
+# project quotas (rootflags=prjquota, image/ASSUMPTIONS.md I15); agentosd keeps machines off
+# otherwise. Say which, from the mount itself; CI's boot test needs the on line on every boot.
+# flag=on: the command systemd loaded for agentosd, after every unit path and drop-in, is exactly the
+# shipped one (systemctl shows variables unexpanded), with ignore_errors=no and no further field that
+# a quoted word or a second command would add. Parsers that allowed variations were bypassed three
+# review rounds running, so nothing varies (Security #2110 re-sign 3). Anything else reads overridden.
+x=$(systemctl show -P ExecStart agentosd.service 2>/dev/null) || x=
+c='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui -netjoin-sock /run/agentos-netjoin/netjoin.sock -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw -image codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on'
+t=${x#"{ path=/usr/lib/agentos/with-uids ; argv[]=$c ; ignore_errors="}
+case $x in
+"$t") case $x in *"argv[]="*) f=overridden ;; *) f=unknown ;; esac ;;
+*) case $t in
+	*ignore_errors=* | *"argv[]="* | *path=*) f=overridden ;;
+	"no ; start_time="*) f=on ;;
+	*) f=overridden ;;
+	esac ;;
+esac
+fs=$(findmnt -no FSTYPE / 2>/dev/null) || fs=unknown
+case ",$(findmnt -no OPTIONS / 2>/dev/null)," in
+*,prjquota,*) [ "$fs" = ext4 ] && q=on || q=off ;;
+*) q=off ;;
+esac
+if [ "$q" = on ]; then
+	echo "agentos-quota: root=ext4 prjquota flag=$f"
+else
+	echo "agentos-quota: off root=${fs:-unknown} flag=$f (agent machines stay off)"
+fi

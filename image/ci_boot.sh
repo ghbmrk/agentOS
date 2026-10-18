@@ -125,6 +125,9 @@ NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
+# Root carries project quotas, so each agent machine writes under its own hard quota (RES-4, #1386),
+# and the agentosd command systemd loaded ends -disk-quota on (flag=on).
+has "$W/console.log" "agentos-quota: root=ext4 prjquota flag=on"
 # The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.
 # Positive: an interface and an address on the report's one line, so a damaged line is no lease.
 lease='agentos-uplink: [a-z0-9]+ [0-9.]+/[0-9]+ agentos-boot: bless=good'
@@ -174,6 +177,7 @@ done
 # The same drive boots again on its own GUIDs (the entry is already blessed) and keeps them.
 TMO=600 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
+has "$W/console-reboot.log" "agentos-quota: root=ext4 prjquota flag=on"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
 has "$W/console-reboot.log" "agentos-uplink: none"
 
@@ -209,7 +213,7 @@ g1_verdict() {
 # Every line carrying the driver's prefix is echoed with ANSI, CR and other non-printable bytes cleaned out and "console| " in front,
 # so a guest line can neither start with "ci_boot:" (the host's verdict prefix) nor with "::" (a
 # workflow command). Exits non-zero, printing why, unless every such line starts with the prefix and
-# is a PASS, FAIL, XFAIL(#N), XPASS or BLOCKED line or the DONE line, there is exactly one DONE and
+# is a PASS, FAIL, XFAIL(#N), XPASS, BLOCKED or NOTE line or the DONE line, there is exactly one DONE and
 # it is the last, and its counts equal the step lines before it. The counts are the in-guest
 # driver's own; this cross-check raises the cost of a forged console but a guest that forges the
 # whole of it still passes (tools/ASSUMPTIONS.md D27).
@@ -238,6 +242,8 @@ e2e_console() {
 	r ~ /^XFAIL\(#[0-9]+\) [A-Za-z0-9_-]+ / { c["xfail"]++; next }
 	r ~ /^XPASS [A-Za-z0-9_-]+ expected to fail \(#[0-9]+\) but passed$/ { c["xpass"]++; next }
 	r ~ /^BLOCKED [A-Za-z0-9_-]+ after [A-Za-z0-9_-]+$/ { c["blocked"]++; next }
+	# A note names its step and carries lower-case words and counts only; it is no step (#2170).
+	r ~ /^NOTE [A-Za-z0-9_-]+ [a-z0-9=-]+( [a-z0-9=-]+)*$/ { next }
 	r ~ /^DONE pass=[0-9]+ fail=[0-9]+ xfail=[0-9]+ xpass=[0-9]+ blocked=[0-9]+$/ {
 		ndone++
 		done = "agentos-e2e: " r

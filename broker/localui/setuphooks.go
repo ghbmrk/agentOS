@@ -139,8 +139,12 @@ func (a AgentosdSetup) AlreadySetUp() bool {
 // good and starts the owner channel. A vault that cannot finish setup's
 // enrollment answers ErrCodesUnavailable, and a private-content answer
 // agentosd still owes the vault answers ErrAnswerOwed.
-func (a AgentosdSetup) Finish(owner string) error {
-	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil)
+func (a AgentosdSetup) Finish(owner string) error { return a.finish(owner, false) }
+
+// finish is OpSetupFinish with card, the page's report that its Owner Card
+// is confirmed (CardFinish).
+func (a AgentosdSetup) finish(owner string, card bool) error {
+	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner, Card: card}, nil)
 	if refused(err, localapi.ErrEnrollUnavailable) {
 		return ErrCodesUnavailable
 	}
@@ -175,7 +179,7 @@ func (a AgentosdSetup) Providers() []Provider {
 	}
 	out := make([]Provider, 0, len(ps.Providers))
 	for _, p := range ps.Providers {
-		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, Owed: p.Owed})
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, PrivateByConfig: p.PrivateByConfig, Owed: p.Owed})
 	}
 	return out
 }
@@ -359,26 +363,53 @@ func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Dura
 			continue
 		}
 		if reply, _ := s.OfferText(in.From, in.Text); reply != "" {
-			a.Send(in.From, reply) // a reply that did not go: the page still shows the step
+			a.sendTwice(ctx, in.From, reply, retry)
 		}
 	}
 }
 
+// sendTwice sends a PAIR text's reply and, if it did not go, once more
+// after retry (#1293): on the no-own-number path that reply is how the
+// owner learns the box's number. A second failure leaves the page showing
+// the step, where the owner can text PAIR again.
+func (a AgentosdSetup) sendTwice(ctx context.Context, to, text string, retry time.Duration) {
+	if a.Send(to, text) == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(retry):
+		_ = a.Send(to, text)
+	}
+}
+
+// ErrCardAgain is CardFinish's answer when agentosd refused finish with
+// card pending although the page's card is confirmed: the vault holds no
+// Owner Card (egress remade it, K22), so the card step was rerun and shows
+// a new card (#1330).
+var ErrCardAgain = errors.New("localui: the vault holds no Owner Card; the card step shows a new one")
+
 // CardFinish is AgentosdSetup with the page's Owner Card step (HW-1,
-// #1115): Finish reports a confirmed card to agentosd, whose finish holds
-// until it is (card pending); a held card is not reported.
+// #1115): Finish reports a confirmed card to agentosd in the finish call,
+// whose finish holds until it is (card pending); a held card is not
+// reported. A card pending after the report reruns the card step with
+// Again and answers ErrCardAgain (#1330).
 type CardFinish struct {
 	AgentosdSetup
-	Card interface{ Hold() error }
+	Card  interface{ Hold() error }
+	Again func() error
 }
 
 func (c CardFinish) Finish(owner string) error {
-	if c.Card != nil && c.Card.Hold() == nil {
-		if err := c.call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err != nil {
-			return err
-		}
+	confirmed := c.Card != nil && c.Card.Hold() == nil
+	err := c.finish(owner, confirmed)
+	if !refused(err, localapi.ErrCardPending) || !confirmed || c.Again == nil {
+		return err
 	}
-	return c.AgentosdSetup.Finish(owner)
+	if aerr := c.Again(); aerr != nil {
+		return fmt.Errorf("localui: making the Owner Card again: %w", aerr)
+	}
+	return ErrCardAgain
 }
 
 // APNet reports the card's Wi-Fi network to agentosd, which writes it for

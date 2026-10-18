@@ -312,18 +312,16 @@ func (c *Client) execute(cmdr imap.Commander, h responses.Handler) (*imap.Status
 // State returns the current connection state.
 func (c *Client) State() imap.ConnState {
 	c.locker.Lock()
-	state := c.state
-	c.locker.Unlock()
-	return state
+	defer c.locker.Unlock()
+	return c.state
 }
 
 // Mailbox returns the selected mailbox. It returns nil if there isn't one.
 func (c *Client) Mailbox() *imap.MailboxStatus {
 	// c.Mailbox fields are not supposed to change, so we can return the pointer.
 	c.locker.Lock()
-	mbox := c.mailbox
-	c.locker.Unlock()
-	return mbox
+	defer c.locker.Unlock()
+	return c.mailbox
 }
 
 // SetState sets this connection's internal state.
@@ -332,9 +330,9 @@ func (c *Client) Mailbox() *imap.MailboxStatus {
 // libraries implementing extensions of the IMAP protocol.
 func (c *Client) SetState(state imap.ConnState, mailbox *imap.MailboxStatus) {
 	c.locker.Lock()
+	defer c.locker.Unlock()
 	c.state = state
 	c.mailbox = mailbox
-	c.locker.Unlock()
 }
 
 // Execute executes a generic command. cmdr is a value that can be converted to
@@ -362,6 +360,7 @@ func (c *Client) handleContinuationReqs() {
 
 func (c *Client) gotStatusCaps(args []interface{}) {
 	c.locker.Lock()
+	defer c.locker.Unlock()
 
 	c.caps = make(map[string]bool)
 	for _, cap := range args {
@@ -369,8 +368,6 @@ func (c *Client) gotStatusCaps(args []interface{}) {
 			c.caps[cap] = true
 		}
 	}
-
-	c.locker.Unlock()
 }
 
 // The server can send unilateral data. This function handles it.
@@ -411,40 +408,51 @@ func (c *Client) handleUnilateral() {
 			case "CAPABILITY":
 				c.gotStatusCaps(fields)
 			case "EXISTS":
-				if c.Mailbox() == nil {
+				// agentos: read the selected mailbox once and update that
+				// one. A refused SELECT sets c.mailbox back to nil on the
+				// caller's goroutine, so reading it again here could
+				// dereference nil while holding c.locker; the panic guard
+				// would then end the reader with the lock still held and
+				// every later State(), Logout's included, would block
+				// (SR3-mail-k18c).
+				mbox := c.Mailbox()
+				if mbox == nil {
 					break
 				}
 
 				if messages, err := imap.ParseNumber(fields[0]); err == nil {
 					c.locker.Lock()
-					c.mailbox.Messages = messages
+					mbox.Messages = messages
 					c.locker.Unlock()
 
-					c.mailbox.ItemsLocker.Lock()
-					c.mailbox.Items[imap.StatusMessages] = nil
-					c.mailbox.ItemsLocker.Unlock()
+					mbox.ItemsLocker.Lock()
+					mbox.Items[imap.StatusMessages] = nil
+					mbox.ItemsLocker.Unlock()
 				}
 
 				if c.Updates != nil {
-					c.Updates <- &MailboxUpdate{c.Mailbox()}
+					c.Updates <- &MailboxUpdate{mbox}
 				}
 			case "RECENT":
-				if c.Mailbox() == nil {
+				// agentos: one read of the mailbox, as for EXISTS
+				// (SR3-mail-k18c).
+				mbox := c.Mailbox()
+				if mbox == nil {
 					break
 				}
 
 				if recent, err := imap.ParseNumber(fields[0]); err == nil {
 					c.locker.Lock()
-					c.mailbox.Recent = recent
+					mbox.Recent = recent
 					c.locker.Unlock()
 
-					c.mailbox.ItemsLocker.Lock()
-					c.mailbox.Items[imap.StatusRecent] = nil
-					c.mailbox.ItemsLocker.Unlock()
+					mbox.ItemsLocker.Lock()
+					mbox.Items[imap.StatusRecent] = nil
+					mbox.ItemsLocker.Unlock()
 				}
 
 				if c.Updates != nil {
-					c.Updates <- &MailboxUpdate{c.Mailbox()}
+					c.Updates <- &MailboxUpdate{mbox}
 				}
 			case "EXPUNGE":
 				seqNum, _ := imap.ParseNumber(fields[0])

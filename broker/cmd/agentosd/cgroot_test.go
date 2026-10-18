@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/budget"
+	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
 // fakeCgroupfs is a cgroup v2 mount with the broker in /system.slice/agentos.service.
@@ -197,5 +198,54 @@ func TestRES2IOWeightNote(t *testing.T) {
 	os.WriteFile(qos, []byte("8:0 enable=0 ctrl=auto\n259:0 enable=1 ctrl=auto rpct=0.00\n"), 0o644)
 	if n := ioWeightNote(fsRoot, root); n != "" {
 		t.Errorf("iocost on: note %q, want none", n)
+	}
+}
+
+// Setup's sign-in worker opens the machines first and moves the broker
+// into broker/, below the delegate mark; the owner's plane then opens them
+// again. A second delegation check from broker/ refuses, so both share
+// the first opening (#1701: guest-task found machines disabled).
+func TestRES2MachinesOpenOnceForSetupAndTheOwner(t *testing.T) {
+	h, own := fakeCgroupfs(t, true)
+	for _, c := range []string{"broker", "machines"} {
+		os.MkdirAll(filepath.Join(own, c), 0o755)
+	}
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.controllers"), []byte("cpu io memory pids"), 0o644)
+	os.WriteFile(filepath.Join(own, "machines", "cgroup.subtree_control"), []byte("cpu io memory pids"), 0o644)
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := onceMachines(func() (*cgroup.Group, error) {
+		g, err := openMachines(h, "", false, mem)
+		// The kernel now places the broker in broker/.
+		os.WriteFile(h.ProcSelf, []byte("0::/system.slice/agentos.service/broker\n"), 0o644)
+		return g, err
+	})
+	first, err := open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := open()
+	if err != nil || second != first {
+		t.Fatalf("second open = %v, %v; want the first group %v", second, err, first)
+	}
+}
+
+// A failed opening is not kept: the next caller tries again.
+func TestRES2MachinesOpenOnceRetriesAFailure(t *testing.T) {
+	n := 0
+	open := onceMachines(func() (*cgroup.Group, error) {
+		n++
+		if n == 1 {
+			return nil, errNotDelegated
+		}
+		return &cgroup.Group{Path: "/x"}, nil
+	})
+	if _, err := open(); err == nil {
+		t.Fatal("first open succeeded")
+	}
+	if g, err := open(); err != nil || g == nil || n != 2 {
+		t.Fatalf("retry = %v, %v after %d tries", g, err, n)
 	}
 }

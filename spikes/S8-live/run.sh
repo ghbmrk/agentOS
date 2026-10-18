@@ -4,14 +4,17 @@
 # carries 127.0.0.1:18432 (where #1014's forwarder listens) to fwd.py on a unix socket, and fwd.py
 # relays to the real hosts through the session proxy.
 #
-# Usage: run.sh setup | tools | plan | clean
+# Usage: run.sh setup | tools | plan | shapes | clean
 #   setup  build the rootfs (managed config on), a copy with /etc/codex removed (managed config
-#          off) and the relay. Needs runsc (CI's pinned release) and Go.
+#          off), the relay and the shape extractor. Needs runsc (CI's pinned release) and Go.
 #   tools  hosted-tools measurement: one `codex exec` per image against the stub forwarder (no
 #          login, nothing leaves the host); prints the tool types each request carries.
 #   plan   sign-in and credits measurement with the owner's ChatGPT plan: device sign-in through
 #          the forwarder, then one `codex exec` whose model call the forwarder refuses, so nothing
 #          is spent. The login lives in the machine's memory overlay and is gone when it exits.
+#   shapes credential shapes for #2313 (SHAPES.md): device sign-in through the forwarder, then
+#          shapes/ reads auth.json inside the machine and writes only shapes to the work volume;
+#          the CLI logs out and auth.json is removed before the machine exits. No model call.
 #   clean  stop the forwarder and remove the work directory.
 # Logs never hold tokens or bodies: fwd.py writes paths, statuses, x-codex-* headers, tool types
 # and key names only.
@@ -35,7 +38,7 @@ inm() { # inm ROOT CMD...: run CMD in a machine from ROOT with the launch spec's
 	runsc --network=none --host-uds=open --ignore-cgroups do -quiet -root "$root" -cwd / \
 		-volume "$W/work:/var/lib/agentos-work" -volume "$W/sock:/run/agentos" -volume "$W/relay:/opt/relay" \
 		/bin/bash -c '/opt/relay/relay /run/agentos/egress.sock & cd /var/lib/agentos-work &&
-			mkdir -p /var/lib/agentos-codex && chmod 700 /var/lib/agentos-codex &&
+			mkdir -p -m 700 /var/lib/agentos-codex &&
 			exec /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/agentos-codex \
 			CODEX_HOME=/var/lib/agentos-codex GIT_DIR=/dev/null \
 			CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://127.0.0.1:18432/oauth/token "$@"' inm "$@"
@@ -53,6 +56,7 @@ setup)
 	fi
 	mkdir -p "$W/relay"
 	(cd "$here/relay" && CGO_ENABLED=0 go build -o "$W/relay/relay" .)
+	(cd "$here/shapes" && go test . && CGO_ENABLED=0 go build -o "$W/relay/shapes" .)
 	runsc --version | head -1
 	;;
 tools)
@@ -81,11 +85,27 @@ EOF
 	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh
 	jq -c 'del(.t, .req_headers, .body_keys, .resp_keys)' "$W/plan.jsonl"
 	;;
+shapes)
+	fwd relay "$W/shapes.jsonl"
+	mkdir -p "$W/work"
+	rm -f "$W/work/shapes.json"
+	cat >"$W/work/session.sh" <<'EOF'
+codex login --experimental_issuer http://127.0.0.1:18432 --device-auth || exit 1
+/opt/relay/shapes /var/lib/agentos-codex/auth.json >/var/lib/agentos-work/shapes.json
+codex logout >/dev/null 2>&1
+rm -f /var/lib/agentos-codex/auth.json
+echo "== session done"
+EOF
+	echo "Sign-in page for the owner: https://auth.openai.com/codex/device (the CLI prints the forwarder's address)"
+	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh
+	jq -c '{method, path, status, blocked, error}' "$W/shapes.jsonl"
+	cat "$W/work/shapes.json"
+	;;
 clean)
 	[ -f "$W/fwd.pid" ] && kill "$(cat "$W/fwd.pid")" 2>/dev/null || true
 	rm -rf "$W"
 	;;
 *)
-	sed -n '2,17p' "$0"; exit 2
+	sed -n '2,20p' "$0"; exit 2
 	;;
 esac

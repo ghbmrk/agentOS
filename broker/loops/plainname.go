@@ -19,6 +19,7 @@ var fuzzNames = map[string]string{
 	"at.FuzzTIM1ParseNetworkTime":   "the check that reads the network time",
 	"browser.FuzzParse":             "the check that reads browser replies",
 	"control.FuzzParse":             "the check that reads your commands",
+	"decoder.FuzzDecode":            "the check that reads photos you send",
 	"digestqueue.FuzzLoadState":     "the check that reads my saved digest queue",
 	"guest.FuzzMCP":                 "the check that reads agent tool calls",
 	"hint.FuzzParse":                "the check that reads bridge hints",
@@ -33,6 +34,12 @@ var fuzzNames = map[string]string{
 	"sockets.FuzzFrames":            "the check that reads agent messages",
 	"sockets.FuzzRequest":           "the check that reads agent requests",
 	"tpmseal.FuzzParse":             "the check that reads sealed-key records",
+	"netguard.FuzzSourcesRead":      "the check that reads the home router's answers",
+	"netguard.FuzzGatewayPolicy":    "the check that keeps the router's address blocked",
+	"netguard.FuzzCheck":            "the check that decides where an agent may connect",
+	"localsrv.FuzzSessions":         "the check that keeps your sign-ins and sign-outs honest",
+	"grants.FuzzApprovals":          "the check that runs an action only on your approval",
+	"vault.FuzzSlots":               "the check that opens the vault only for an enrolled key",
 	"update.FuzzParseAttestation":   "the check that reads update attestations",
 }
 

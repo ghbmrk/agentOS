@@ -70,19 +70,13 @@ const (
 	// the box and starts with PAIR, and answers it, or nothing. Each text
 	// is answered once; the page offers it to setup (§8.1 pairing).
 	OpSetupInbound = "page_setup_inbound"
-	// OpSetupCard reports the page's Owner Card step (HW-1, #1115): the
-	// page builds, shows and latches the card (agentosd links no card
-	// code, ARC-2), and reports here before finish that the card is
-	// confirmed and provisioned. agentosd's setup mode serves it beside
-	// SetupOps, and finish answers ErrCardPending until it is reported.
-	OpSetupCard = "page_setup_card"
 	// OpSetupAPNet reports the card's Wi-Fi name and password before the
 	// confirm latches (CTRL-claim-ap u1, #1185): agentosd writes them
 	// root-only (apnet.Path, ARC-1) and agentos-ap serves that network at
 	// the confirm and every later start, in place of the setup network.
 	// Only a network the card prints is taken (ErrBadArgs); a report
 	// replaces the last, as a reset card makes a new one. It is served
-	// beside OpSetupCard.
+	// in page mode.
 	OpSetupAPNet = "page_setup_ap_net"
 )
 
@@ -120,8 +114,8 @@ const (
 	// ErrNotSent: the text did not go: no usable line, the bridge
 	// reported a failure, or no result came in time.
 	ErrNotSent = "not sent"
-	// ErrCardPending: finish before the page reported the Owner Card
-	// confirmed (OpSetupCard).
+	// ErrCardPending: finish without the page's report that the Owner
+	// Card is confirmed (Finish.Card), or the vault holds no card (#1330).
 	ErrCardPending = "card pending"
 	// ErrKeyRefused: the provider did not accept the API key when the
 	// vault process checked it (ONB-3); nothing was stored.
@@ -163,7 +157,6 @@ var setupTexts = regexp.MustCompile(`^(?:` +
 	`[Aa]gentOS setup code: [0-9]{6}\. Type it on the setup page\.` +
 	`|[Aa]gentOS page code: [0-9]{6}\. Type it on the setup page\.` +
 	`|[Aa]gentOS is running on (?:this PC|[A-Za-z0-9][A-Za-z0-9 ,()+'-]{0,` + strconv.Itoa(SetupHostMax-1) + `})\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
-	`|That pairing code did not match\. Check the setup page\.` +
 	`|Could not save your number\. Try again\.` +
 	`)$`)
 
@@ -241,12 +234,6 @@ type Networks struct {
 	SSIDs []string `json:"ssids"`
 }
 
-// SetupCard is the page's report of its Owner Card step: Confirmed once
-// the card is confirmed and provisioned. Confirmed false is refused.
-type SetupCard struct {
-	Confirmed bool `json:"confirmed"`
-}
-
 // SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
 // the access point's (CRED-1): it goes only to agentos-ap's file.
 type SetupAPNet struct {
@@ -258,9 +245,14 @@ type SetupAPNet struct {
 func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
 func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
 
-// Finish carries the owner's number, E.164.
+// Finish carries the owner's number, E.164, and Card, the page's report
+// that its Owner Card step is confirmed and provisioned (HW-1, #1115).
+// agentosd's setup mode takes Card only when the card step runs in the
+// page (agentosd links no card code, ARC-2), and finish answers
+// ErrCardPending without it.
 type Finish struct {
 	Owner string `json:"owner"`
+	Card  bool   `json:"card,omitempty"`
 }
 
 // MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
@@ -295,6 +287,10 @@ type SetupProvider struct {
 	DeviceCode bool   `json:"device_code"`
 	Connected  bool   `json:"connected"`
 	PrivateOK  bool   `json:"private_ok"`
+	// PrivateByConfig: the vault process's configuration allows this
+	// provider private data whatever the owner answers, so setup shows
+	// its box as fixed (#1608, CAP-9). PrivateOK stays the owner's answer.
+	PrivateByConfig bool `json:"private_by_config,omitempty"`
 	// Owed is the owner's private-data answer agentosd recorded for this
 	// provider and the vault has not confirmed (#1544), or nil. agentosd
 	// sets it from its own setup record, never from the vault's list, and

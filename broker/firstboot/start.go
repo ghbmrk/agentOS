@@ -77,6 +77,7 @@ type FirstBoot struct {
 	Card CardHold
 
 	setup Store
+	reset func() error
 	mu    sync.Mutex
 	net   *claim.SetupNet // nil once burned, or when the box has none
 }
@@ -190,7 +191,19 @@ func Begin(cfg BoxConfig) (*FirstBoot, error) {
 		return nil, err
 	}
 	fb.setup = cfg.SetupNet
+	fb.reset = cfg.Reset
 	return fb, nil
+}
+
+// Again reruns the route's card step with BoxConfig.Reset when the vault
+// holds no card although the step is confirmed (#1330, CardStep.Again).
+// The reinstall route has no card step and answers ErrReinstall.
+func (f *FirstBoot) Again() error {
+	a, ok := f.Card.(interface{ Again(func() error) error })
+	if !ok {
+		return f.Card.Hold()
+	}
+	return a.Again(f.reset)
 }
 
 func begin(cfg BoxConfig) (*FirstBoot, error) {
