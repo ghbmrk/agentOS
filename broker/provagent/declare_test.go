@@ -55,6 +55,59 @@ func TestDeclarationNeedsCredentialFormats(t *testing.T) {
 	}
 }
 
+// canaryRefresh is a synthetic Codex refresh token in the shape measured on a
+// live sign-in (#2313, spikes/S8-live/RESULTS.md): 196 characters over
+// [A-Za-z0-9._], dot segments 2.1.191, no prefix.
+var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
+
+// The Codex declaration matches a refresh token in the measured shape whole,
+// wherever it sits, and none of its formats matches ordinary text.
+// REQ: CRED-7
+func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
+	fs, err := Builtins()["codex"].Formats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := func(s string) string {
+		for _, re := range fs {
+			if m := re.FindString(s); m != "" {
+				return m
+			}
+		}
+		return ""
+	}
+	if len(canaryRefresh) != 196 {
+		t.Fatalf("canary is %d characters, want 196", len(canaryRefresh))
+	}
+	for _, s := range []string{
+		canaryRefresh,
+		`{"tokens":{"refresh_token":"` + canaryRefresh + `"}}`,
+		"token " + canaryRefresh + ". Done",
+		"refresh=" + canaryRefresh + "\n",
+	} {
+		if m := match(s); m != canaryRefresh {
+			t.Errorf("refresh canary in %.40q...: matched %q", s, m)
+		}
+	}
+	tail := strings.Repeat("a", 191)
+	for name, s := range map[string]string{
+		"prose":            "The run finished. See v1.2.3 and https://example.com/a.b.c for details.",
+		"version":          "codex-cli 0.162.1 (rustc 1.90.0) build ab.c.d",
+		"sha256 hex":       "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+		"uuid":             "account 3f2c1a9e-4b7d-4c1e-9a2f-0d6b8e5c7a31",
+		"short tail":       "ab.c." + tail[:190],
+		"no segments":      "abc" + tail,
+		"long segment one": "abc.d." + tail[:150],
+		"dash tail":        "ab.c." + strings.Repeat("a-", 100),
+		"code identifier":  "rt_sigprocmask_handler_wrapper(); rt_tables_lookup_function",
+		"spaced":           "ab . c . " + tail,
+	} {
+		if m := match(s); m != "" {
+			t.Errorf("%s: matched %q", name, m)
+		}
+	}
+}
+
 func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 	cases := map[string]func(d *Declaration){
 		"missing id":          func(d *Declaration) { d.ID = "" },

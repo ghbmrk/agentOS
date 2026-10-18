@@ -280,12 +280,15 @@ func Builtins() map[string]Declaration {
 			SignInPage:  "https://auth.openai.com/codex/device",
 			SignInFrom:  "OpenAI",
 			// API keys, the ChatGPT access and id tokens (JWTs; the id
-			// token may be unsigned) and the refresh token. The shapes are
-			// the public ones, not measured (ASSUMPTIONS.md).
+			// token may be unsigned) and the refresh token. The JWT and
+			// refresh shapes are measured from a live sign-in (#2313,
+			// spikes/S8-live/RESULTS.md): the refresh token is dot
+			// segments 2.1.191 with no prefix. The API key is the public
+			// shape, since a plan sign-in issues none (ASSUMPTIONS.md P17).
 			CredFormats: []string{
 				`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`,
 				`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
-				`(?i)\brt_[a-z0-9._-]{20,}`,
+				`\b[A-Za-z0-9_]{2}\.[A-Za-z0-9_]\.[A-Za-z0-9_]{191,}`,
 			},
 			// The record is #809's: CLIVersion equals Version and
 			// guest/codex/build-rootfs.sh CODEX_VERSION, and Evidence must

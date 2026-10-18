@@ -98,12 +98,16 @@ func TestStreamingEmitsCleanPrefixPromptly(t *testing.T) {
 	}
 }
 
+// canaryRefresh is a synthetic Codex refresh token in the measured shape
+// (#2313): segments 2.1.191 over [A-Za-z0-9_].
+var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
+
 // declaredFormats mirror provagent's built-in credential formats, each with
 // a synthetic canary (FMT-3).
 var declaredFormats = map[string]string{
 	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:              "sk-proj-CANARYcanary0000000000000000",
 	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`: "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
-	`(?i)\brt_[a-z0-9._-]{20,}`:                                      "RT_CanaryCANARYcanary000000",
+	`\b[A-Za-z0-9_]{2}\.[A-Za-z0-9_]\.[A-Za-z0-9_]{191,}`:            canaryRefresh,
 	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:      "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 
@@ -186,7 +190,7 @@ func TestRedactorScrubsDeclaredFormatSplitAcrossWrites(t *testing.T) {
 	}
 	// A canary ending a stream far past the hold-back is still held whole
 	// until it ends.
-	long := append(bytes.Repeat([]byte("x "), FormatMaxLen), "rt_"+strings.Repeat("a", 30)...)
+	long := append(bytes.Repeat([]byte("x "), FormatMaxLen), "Zq.C."+strings.Repeat("a", 200)...)
 	var buf bytes.Buffer
 	w := r.Writer(&buf)
 	for k := 0; k < len(long); k += 7 {
@@ -238,11 +242,11 @@ func TestFormatStreamHoldBounds(t *testing.T) {
 	if emitted, _ := stream(clean); len(clean)-len(emitted) != FormatMaxLen-1 {
 		t.Errorf("clean stream held back %d bytes, want %d", len(clean)-len(emitted), FormatMaxLen-1)
 	}
-	short := "rt_" + strings.Repeat("a", FormatMaxLen-4)
+	short := "Zq.C." + strings.Repeat("a", FormatMaxLen-6)
 	if _, out := stream([]byte(short + " end")); string(out) != Placeholder+" end" {
 		t.Errorf("match of %d bytes: got %.40q...", len(short), out)
 	}
-	long := "rt_" + strings.Repeat("a", 5000)
+	long := "Zq.C." + strings.Repeat("a", 5000)
 	_, out := stream([]byte(long + " end"))
 	if !bytes.HasPrefix(out, []byte(Placeholder)) {
 		t.Fatalf("long match: no placeholder first: %.40q", out)
