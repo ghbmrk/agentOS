@@ -419,7 +419,7 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 
 // mailNote is the mail STATUS notes, two lines whatever the number of
 // days: the UNDO of every complete day still in its undo window with
-// organize changes, oldest first by weekday, the one whose window ends
+// organize changes, oldest first by weekday, each whose window ends
 // today marked, and the security alerts those days labelled but left in
 // the inbox. Every day mailDays.undo accepts is shown while it is
 // undoable. STATUS adds a note whole or not at all (control), so no ID is
@@ -443,6 +443,28 @@ type keptAlerts struct {
 // keptFor is how long a kept alerts line serves.
 const keptFor = time.Second
 
+// maxUndoDays is the most complete days the codes line lists. A day's
+// window is mail.UndoWindow (168 hours) from its local start, so the day
+// 7 calendar days back is still undoable in the first hour after midnight
+// once a spring-forward change falls inside its window; the day 8 back
+// started at least 191 hours ago and never is. read looks no further.
+const maxUndoDays = 7
+
+const (
+	codesPrefix = "Mail UNDO: "
+	endsToday   = " (ends today)"
+	// codesMax is the longest codes line: maxUndoDays "Mon ABC" entries,
+	// the separators, two ends-today markers and the full stop. Only
+	// the days 6 and 7 back can end by tomorrow's start, and both do when
+	// the clocks went forward on the day 7 back and it is still in the
+	// first hour after midnight.
+	codesMax = len(codesPrefix) + maxUndoDays*len("Mon ABC") + (maxUndoDays-1)*len(", ") + 2*len(endsToday) + len(".")
+)
+
+// The codes line fits control's 100-byte note cut whatever the days, so
+// no ID is ever cut: this fails to compile if it could not.
+var _ [100 - codesMax]struct{}
+
 func (n *mailNote) read(d *mailDays) (codes, alerts string) {
 	if d == nil {
 		return "", ""
@@ -452,7 +474,7 @@ func (n *mailNote) read(d *mailDays) (codes, alerts string) {
 	all := d.changes()
 	var ids []string
 	hits := 0
-	for i := 1; i <= undoLookback; i++ {
+	for i := 1; i <= maxUndoDays; i++ {
 		day := now.AddDate(0, 0, -i).Format(dayFormat)
 		start := d.dayStart(day)
 		if !now.Before(start.Add(mail.UndoWindow)) {
@@ -463,15 +485,16 @@ func (n *mailNote) read(d *mailDays) (codes, alerts string) {
 			continue
 		}
 		hits += sum.GuardHits
-		// At most six days are undoable, so each weekday names one.
+		// At most maxUndoDays are listed, all before today, so each
+		// weekday names one.
 		id := start.Format("Mon") + " " + undoID(d.key, d.account, day)
 		if !start.Add(mail.UndoWindow).After(tomorrow) {
-			id += " (ends today)"
+			id += endsToday
 		}
 		ids = append([]string{id}, ids...)
 	}
 	if len(ids) > 0 {
-		codes = "Mail UNDO codes, 7 days each: " + strings.Join(ids, ", ") + "."
+		codes = codesPrefix + strings.Join(ids, ", ") + "."
 	}
 	if hits == 1 {
 		alerts = "1 security alert labelled but left in the inbox."

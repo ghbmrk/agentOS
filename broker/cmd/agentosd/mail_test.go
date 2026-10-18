@@ -701,7 +701,7 @@ func TestMailNoteAndUndo(t *testing.T) {
 	}
 	r.advance(24 * time.Hour)
 	l := note.codes()
-	if l != "Mail UNDO codes, 7 days each: "+mailDay.In(time.Local).Format("Mon")+" "+undo+"." || len(l) > 100 {
+	if l != codesPrefix+mailDay.In(time.Local).Format("Mon")+" "+undo+"." || len(l) > 100 {
 		t.Fatalf("note: %q", l)
 	}
 	for _, leak := range []string{"Autumn", "boots", mailtest.User, "MORE"} {

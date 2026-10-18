@@ -227,8 +227,13 @@ func capCases() []capCase {
 		}},
 		{row: "C9_questions_failed", name: "Questions from agents:", induce: func(t *testing.T, b *capBox) {
 			// A question book whose state is a directory does not load.
+			// The clock guard opens before the book fails, and its loop
+			// writes clock.json in b.dir: stop it and wait before the
+			// temporary directory is removed.
 			qs := &questions{}
-			qs.start(b.ctx, b.d, &preempter{}, questionConfig{Path: b.dir, ClockPath: filepath.Join(b.dir, "clock.json")}, b.caps)
+			ctx, cancel := context.WithCancel(b.ctx)
+			t.Cleanup(func() { cancel(); qs.wait() })
+			qs.start(ctx, b.d, &preempter{}, questionConfig{Path: b.dir, ClockPath: filepath.Join(b.dir, "clock.json")}, b.caps)
 			if qs.b.Load() != nil {
 				t.Fatal("the questions plane opened")
 			}

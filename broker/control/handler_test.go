@@ -408,6 +408,31 @@ func TestStatusCarriesEachNote(t *testing.T) {
 	}
 }
 
+// The tail names one left-out note in the singular and two in the plural.
+func TestStatusTailWording(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, nil)
+	// Fill the room kept before the tail exactly, so any further note
+	// is left out.
+	left := MaxText - moreMax - len(h.Status())
+	var fill []string
+	for left > 101 {
+		fill = append(fill, strings.Repeat("f", 90))
+		left -= 91
+	}
+	fill = append(fill, strings.Repeat("g", left-1))
+	for _, l := range fill {
+		h.Notes = append(h.Notes, func() string { return l })
+	}
+	for i, want := range []string{" 1 more line on my Wi-Fi page.", " 2 more lines on my Wi-Fi page."} {
+		// Longer than the tail, so the notes no longer all fit.
+		h.Notes = append(h.Notes, func() string { return fmt.Sprintf("Extra %d: ", i) + strings.Repeat("e", moreMax) })
+		s := one(t, h.Handle(context.Background(), owner, "STATUS"))
+		if !strings.HasSuffix(s, " "+fill[len(fill)-1]+want) || strings.Contains(s, "Extra") || len(s) > MaxText {
+			t.Fatalf("%d left out: %q", i+1, s)
+		}
+	}
+}
+
 // The texted STATUS adds whole notes only, in order, while the reply fits
 // one text; a note that does not fit is left out, never cut, and counted.
 // The page's STATUS shows every note.

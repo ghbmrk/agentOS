@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	_ "time/tzdata"
 
 	clockpkg "github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/control"
@@ -317,7 +318,7 @@ func TestMailNoteEveryUndoableDay(t *testing.T) {
 	note := &mailNote{}
 	note.days.Store(days)
 	id := func(ago int) string { return undoID(days.key, "acct", statusNow.AddDate(0, 0, -ago).Format(dayFormat)) }
-	want := "Mail UNDO codes, 7 days each: Tue " + id(6) + " (ends today), Fri " + id(3) + ", Sun " + id(1) + "."
+	want := codesPrefix + "Tue " + id(6) + " (ends today), Fri " + id(3) + ", Sun " + id(1) + "."
 	if got := note.codes(); got != want {
 		t.Fatalf("codes %q, want %q", got, want)
 	}
@@ -339,6 +340,85 @@ func TestMailNoteEveryUndoableDay(t *testing.T) {
 	note.days.Store(statusMailDays([]mailChange{{2, false}}))
 	if got := note.alerts(); got != "" {
 		t.Errorf("no alerts: %q", got)
+	}
+}
+
+// On a spring-forward night the day 7 calendar days back is still
+// undoable for an hour after midnight, so seven days are listed, and on
+// the night the clocks went forward on that day two of them end today.
+// The codes line still fits control's 100-byte note cut and lists every
+// ID mailDays.undo accepts.
+func TestMailNoteSpringForward(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		now  time.Time
+		ends int
+	}{
+		{time.Date(2027, 3, 20, 0, 30, 0, 0, ny), 1}, // clocks went forward on Sun 14 Mar
+		{time.Date(2027, 3, 21, 0, 30, 0, 0, ny), 2}, // ... the day 7 back
+	} {
+		var trail []journal.Record
+		for ago := 0; ago <= undoLookback+1; ago++ {
+			y, m, dd := c.now.AddDate(0, 0, -ago).Date()
+			at := time.Date(y, m, dd, 12, 0, 0, 0, ny)
+			id := fmt.Sprintf("i%d", ago)
+			ev, _ := json.Marshal(mail.Change{Op: mail.OpLabel, Record: "r" + id, From: "INBOX", Alert: true})
+			trail = append(trail,
+				journal.Record{Type: journal.RecSubmitted, ID: id, At: at, Intent: &journal.Intent{ID: id, Account: "acct", Executor: mail.Tool, Action: mail.OpLabel}},
+				journal.Record{Type: journal.RecObserved, ID: id, At: at, Result: journal.ResultSucceeded, Evidence: string(ev)})
+		}
+		now := c.now
+		days := &mailDays{account: "acct", key: []byte("synthetic-undo-key"), loc: ny,
+			now: func() time.Time { return now }, trail: func() []journal.Record { return trail }, m: newLateMail()}
+		note := &mailNote{}
+		note.days.Store(days)
+		codes := note.codes()
+		if len(codes) > 100 || control.Fit(codes) != codes {
+			t.Fatalf("%s: codes %d bytes: %q", now, len(codes), codes)
+		}
+		accepted := 0
+		for ago := 1; ago <= undoLookback; ago++ {
+			id := undoID(days.key, "acct", now.AddDate(0, 0, -ago).Format(dayFormat))
+			if r, _ := days.undo(context.Background(), id); !strings.Contains(r, "not connected") {
+				continue
+			}
+			accepted++
+			if !strings.Contains(codes, " "+id) {
+				t.Fatalf("%s: undoable %s missing from %q", now, id, codes)
+			}
+		}
+		if accepted != maxUndoDays || strings.Count(codes, ", ") != maxUndoDays-1 || strings.Count(codes, endsToday) != c.ends {
+			t.Fatalf("%s: %d accepted, codes %q", now, accepted, codes)
+		}
+	}
+}
+
+// One STATUS reads the journal trail once for its two mail notes; the
+// alerts line codes kept serves only once and only for a second.
+func TestMailNoteReadsTrailOncePerStatus(t *testing.T) {
+	days := statusMailDays([]mailChange{{1, true}, {2, true}})
+	inner := days.trail
+	var reads atomic.Int32
+	days.trail = func() []journal.Record { reads.Add(1); return inner() }
+	note := &mailNote{}
+	note.days.Store(days)
+	if note.codes() == "" || note.alerts() != "2 security alerts labelled but left in the inbox." || reads.Load() != 1 {
+		t.Fatalf("one STATUS read the trail %d times", reads.Load())
+	}
+	// The kept line is spent: a second alerts reads afresh.
+	if note.alerts() == "" || reads.Load() != 2 {
+		t.Fatalf("kept line reused: %d reads", reads.Load())
+	}
+	// A kept line older than keptFor is not used.
+	note.codes()
+	note.mu.Lock()
+	note.kept.at = note.kept.at.Add(-keptFor)
+	note.mu.Unlock()
+	if note.alerts() == "" || reads.Load() != 4 {
+		t.Fatalf("stale kept line used: %d reads", reads.Load())
 	}
 }
 
