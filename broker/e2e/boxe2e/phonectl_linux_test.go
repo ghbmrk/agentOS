@@ -12,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -146,7 +147,7 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
 		{name: "recovery notice passed over and noted", st: owner.State{LastStep: step}, enrolled: true, done: true,
-			notice: true, note: "passed-over recovery notices=1 texts=2 requests=1"},
+			notice: true, note: "passed-over recovery notices=1 texts=2 requests=1|lost-send kind=request via=owner-channel-sendrequest"},
 		{name: "setup not finished", st: owner.State{LastStep: step}, enrolled: true, want: `setup not finished: GET /setup 200 "" at "7. AI"`},
 		{name: "stranger answered", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(l *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
@@ -242,7 +243,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			var notes []string
 			d := &driver{carrier: carrier, seed: seed, now: clk.now, sleep: clk.sleep,
 				phone: &http.Client{Transport: c.done, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-				note:  func(s string) { notes = append(notes, s) }}
+				note:  func(s string) { notes = append(notes, s) },
+				agentosdLog: func() string {
+					return "setup: done\n" + modemlink.MissedLog + " kind=request via owner.(*Channel).sendRequest\n"
+				}}
 			if c.enrolled {
 				d.codeStep = step
 			}
