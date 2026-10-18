@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -155,5 +156,54 @@ func TestCH12ControlGapStillWithholdsCode(t *testing.T) {
 				t.Errorf("%s %q sent %q", name, text, got)
 			}
 		}
+	}
+}
+
+// TestCH12CcInsideATokenStillWithholds: a key or a short code a Cc control
+// splits mid-token (the Cc in gapControls, NUL and a C1 control) is
+// withheld on every agent path: CH-19 also reads the text with the control
+// removed and no gap (control.JoinControls, CH-19, CH-12, #2346).
+func TestCH12CcInsideATokenStillWithholds(t *testing.T) {
+	var cc []string
+	for _, g := range gapControls {
+		if r := []rune(g)[0]; unicode.Is(unicode.Cc, r) {
+			cc = append(cc, g)
+		}
+	}
+	for _, g := range append(cc, "\x00", "\u0080", "\x7f") {
+		for _, text := range []string{
+			"key sk-abcdefghij" + g + "klmnopqrstuvwx",
+			"AKIAABCDEFGH" + g + "IJKLMNOP",
+			"token ghp_abcdefghijklmn" + g + "opqrstuvwxyz0123456789",
+			"key: eyJhbGciOi" + g + ".eyJzdWIiOi.SflKxwRJSM",
+			"code AB" + g + "C1",
+			"code A" + g + "1B2",
+		} {
+			if !AgentSecret(text) {
+				t.Errorf("%q: not secret-shaped", text)
+			}
+			for name, send := range map[string]func(*Channel) error{
+				"Converse":  func(c *Channel) error { return c.Converse(text) },
+				"NotifyAs":  func(c *Channel) error { return c.NotifyAs(ClassAgent, text) },
+				"NotifyNow": func(c *Channel) error { return c.NotifyNow(text) },
+			} {
+				r := pacedRig(t, quiet22to7(), 12, 0)
+				if err := send(r.ch); err != nil {
+					t.Fatalf("%s %q: %v", name, text, err)
+				}
+				if got := r.sentTexts(); len(got) != 1 || got[0] != Hidden {
+					t.Errorf("%s %q sent %q", name, text, got)
+				}
+			}
+		}
+	}
+
+	// Plain text with a Cc in it still goes, the gap a space.
+	r := pacedRig(t, quiet22to7(), 12, 0)
+	if err := r.ch.Converse("Booked\x01Thursday 9am"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked Thursday 9am" {
+		t.Fatalf("sent %q", got)
 	}
 }

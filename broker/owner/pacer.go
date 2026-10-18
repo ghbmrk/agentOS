@@ -313,11 +313,13 @@ func checkAgent(text string) (string, error) {
 }
 
 // AgentSecret reports whether agent text is secret-shaped (SecretShaped)
-// as written or once stripped (control.StripControls): stripping cannot
-// then join a code word to its code, nor a removed control split a key,
-// past CH-19 (#2346).
+// in any of three readings: as written, stripped with a Cc's gap as a
+// space (control.StripControls, the text that is sent, so a control cannot
+// join a code word to its code), or with every control removed and no gap
+// (control.JoinControls, so a control cannot split a key or a code in two)
+// (CH-19, #2346).
 func AgentSecret(text string) bool {
-	return SecretShaped(text) || SecretShaped(control.StripControls(text))
+	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
 }
 
 // agentText strips and discloses agent-derived text, prefixes it with

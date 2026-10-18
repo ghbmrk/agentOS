@@ -123,6 +123,26 @@ func TestCH12StripLeavesASpaceInAGap(t *testing.T) {
 	}
 }
 
+// TestCH12JoinControlsLeavesNoGap: JoinControls removes what
+// StripControls removes with nothing in the gap, so a token a control
+// splits reads as one token (#2346).
+func TestCH12JoinControlsLeavesNoGap(t *testing.T) {
+	for in, want := range map[string]string{
+		"sk-abcdefghij\x01klmnopqrstuvwx\u2069": "sk-abcdefghijklmnopqrstuvwx",
+		"eyJhbGciOi\u0080.eyJzdWIiOi":           "eyJhbGciOi.eyJzdWIiOi",
+		"code A\x001B2":                         "code A1B2",
+		"Your code\r482913":                     "Your code482913",
+		"code\x01\n482913":                      "code\n482913",
+	} {
+		if got := JoinControls(in); got != want {
+			t.Errorf("JoinControls(%q) = %q, want %q", in, got, want)
+		}
+		if got, strip := JoinControls(in), StripControls(in); strings.ReplaceAll(strip, " ", "") != strings.ReplaceAll(got, " ", "") {
+			t.Errorf("%q: readings differ beyond spaces: %q, %q", in, got, strip)
+		}
+	}
+}
+
 // TestCH12PrefixCutsALongJoinedRun: a single joined run longer than the
 // room is cut on a rune boundary, never to nothing (CH-12).
 func TestCH12PrefixCutsALongJoinedRun(t *testing.T) {

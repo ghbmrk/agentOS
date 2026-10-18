@@ -281,9 +281,9 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 // (CH-12, D-127); one longer than that is kept whole and the third text
 // ends with keptLong. The reply is stripped of control and bidi
 // characters first (control.StripControls), then CH-19's check runs on
-// the whole of it as written and stripped (owner.AgentSecret): a
-// secret-shaped reply goes as one text, as written, which the
-// owner channel replaces with its local-UI pointer, so no code is split
+// the whole of it as written, stripped and with its controls removed
+// (owner.AgentSecret): a secret-shaped reply goes as one text, as
+// written, which the owner channel replaces with its local-UI pointer, so no code is split
 // past the check. A text that does not go stops the rest, so none arrives
 // out of order, and the reply is kept. What is kept for the local UI is
 // the stripped reply too.
@@ -395,9 +395,9 @@ func join(summary, tail string) string {
 // whole text needs: one GSM-7 text when the summary and tail both fit
 // GSM-7, else one UCS-2 text. It is cut in its own encoding, never inside
 // a character or a joined emoji (CH-12). It is "" when there is too
-// little room or its source, as written or stripped, looks like a code or
-// key (owner.AgentSecret, CH-19, security C6): the text then carries only
-// the pointer.
+// little room or its source, as written, stripped or with its controls
+// removed, looks like a code or key (owner.AgentSecret, CH-19, security
+// C6): the text then carries only the pointer.
 func summarize(text, own, tail string) string {
 	src := own
 	s := strings.Join(strings.Fields(control.StripControls(own)), " ")

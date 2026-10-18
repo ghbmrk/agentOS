@@ -820,6 +820,36 @@ func TestCH12ControlGapStillWithholdsReply(t *testing.T) {
 	}
 }
 
+// TestCH12CcInsideTokenStillWithholdsReply: a reply, or the summary
+// texted when its email fails, whose key or code a Cc control splits
+// mid-token is still withheld: CH-19 also reads the gap removed
+// (owner.AgentSecret, CH-19, CH-12, #2346).
+func TestCH12CcInsideTokenStillWithholdsReply(t *testing.T) {
+	for _, g := range []string{"\r", "\x01", "\x00", "\u0080", "\x7f"} {
+		for _, tok := range [][2]string{
+			{"key sk-abcdefghij", "klmnopqrstuvwx"},
+			{"AKIAABCDEFGH", "IJKLMNOP"},
+			{"token ghp_abcdefghijklmn", "opqrstuvwxyz0123456789"},
+			{"key: eyJhbGciOi", ".eyJzdWIiOi.SflKxwRJSM"},
+			{"code AB", "C1"},
+			{"code A", "1B2"},
+		} {
+			text := tok[0] + g + tok[1]
+			r := newEvRig(t, "")
+			r.ev.reply("agent", true, text, "")
+			if got := r.texts(); len(got) != 1 || got[0] != text {
+				t.Errorf("reply %q texted %q", text, got)
+			}
+			r = newEvRig(t, destAddr)
+			r.gate.state = journal.NotApplied
+			r.ev.reply("agent", true, longReply, text)
+			if got := r.texts(); len(got) != 1 || strings.Contains(got[0], tok[1]) {
+				t.Errorf("summary %q texted %q", text, got)
+			}
+		}
+	}
+}
+
 // TestCH12SummaryFitsOneTextInItsEncoding: the summary texted when a
 // private reply's email fails is cut in the encoding it needs, so an emoji
 // summary is one UCS-2 text, never cut inside a joined emoji (CH-12).
@@ -871,11 +901,11 @@ func TestCH12KeptReplyIsStripped(t *testing.T) {
 // of the whole text, tail included, so an address whose masked initial is
 // not GSM-7 still leaves a summary text of one segment (CH-12, #2346).
 func TestCH12SummaryRoomCountsTheTail(t *testing.T) {
-	for _, addr := range []string{"łukasz@example.com", "li@例子.中国"} {
+	for _, addr := range []string{"łukasz@example.com", "li@例子.中国", "mark@example.com"} {
 		r := newEvRig(t, addr)
 		r.ev.reply("agent", true, longReply, "")
 		got := r.texts()
-		if len(got) != 1 {
+		if len(got) != 1 || !strings.HasPrefix(got[0], "Your landlord") || !strings.HasSuffix(got[0], "Full reply sent to "+maskAddress(addr)+".") {
 			t.Fatalf("%s: texted %q", addr, got)
 		}
 		if n, _ := modem.Segments(owner.AgentPrefix + got[0]); n != 1 {

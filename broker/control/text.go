@@ -93,6 +93,20 @@ func Room(isGSM7 bool) int {
 	return Segments * SegUCS2
 }
 
+// JoinControls removes what StripControls removes but leaves nothing in
+// a Cc's gap, so a key or a short code a control splits reads as one
+// token. It is the third reading CH-19 checks (owner.AgentSecret); the
+// text sent is StripControls' reading (#2346).
+func JoinControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069 || r == 0x200E || r == 0x200F || r == 0x061C ||
+			r != '\n' && unicode.Is(unicode.Cc, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // StripControls removes control characters (category Cc) other than line
 // feed and the bidirectional controls (embeddings and overrides U+202A-E,
 // isolates U+2066-9, marks U+200E, U+200F and U+061C) from agent text, so
