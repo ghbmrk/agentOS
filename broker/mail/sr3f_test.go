@@ -168,7 +168,7 @@ func TestExecuteWithoutPinDoesNothing(t *testing.T) {
 	x := newH(t, nil)
 	id := x.news(1)
 	out := x.a.Execute(ctx, x.intent(mail.OpArchive, rec(id)), 1)
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "no check ran") {
 		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
 	}
 	if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
@@ -192,7 +192,7 @@ func TestJudgementsMustAgree(t *testing.T) {
 		t.Fatalf("recheck: %+v %v", e, err)
 	}
 	out := x.a.Execute(ctx, in, 1)
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed between checks") {
 		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
 	}
 	if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
@@ -358,7 +358,7 @@ func TestJudgementsMustAgreeOnTheMessage(t *testing.T) {
 		t.Fatalf("second: %+v %v", e, err)
 	}
 	out := x.a.Execute(ctx, in, 1)
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed between checks") {
 		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
 	}
 	if folder, flags, _ := x.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
@@ -400,7 +400,7 @@ func TestJudgementsMustAgreeOnTheAlert(t *testing.T) {
 		t.Fatalf("second: %+v %v", e, err)
 	}
 	out := x.a.Execute(ctx, in, 1)
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed between checks") {
 		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
 	}
 	x.untouched(id)

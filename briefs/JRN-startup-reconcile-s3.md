@@ -30,4 +30,6 @@ Board section: Security and architecture review (2026-10-08). Source: Security d
 
 **Dependencies:** s5 (merged: `noRecall` is in `forget.go`). The s5 brief says s3 and s4 touch `main.go` and wait behind #2015; check that PR's state at start and do not build while it or any other open PR touches these files (D-111).
 
+**Build split (2026-10-17).** s4 is built alone (#1411): its test touches only `forget_resume_test.go`. s3 waits: its helper move may touch `main.go`, which open PRs #2285 and #2274 touch (D-111).
+
 **Usage estimate:** 60k tokens, checkpoint at 60k. Builder model: strongest (tier A: `main.go`, `forget.go`).

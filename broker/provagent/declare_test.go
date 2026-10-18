@@ -24,6 +24,34 @@ func good() Declaration {
 		ErrorEvents: []string{"error"},
 		UsedUp:      []string{"usage_limit_reached"},
 		TaskClasses: []string{"code"},
+		CredFormats: []string{`(?i)\bstubtok_[a-z0-9]{16,}`},
+	}
+}
+
+// REQ: CRED-7
+func TestDeclarationNeedsCredentialFormats(t *testing.T) {
+	cases := map[string][]string{
+		"missing":             nil,
+		"empty list":          {},
+		"matches empty":       {`\bstubtok_[a-z0-9]{16,}`, `x*`},
+		"empty format":        {""},
+		"does not compile":    {`(?i)\bstubtok_[a-z0-9{16,}`},
+		"one of two compiles": {`\bstubtok_[a-z0-9]{16,}`, `(unclosed`},
+	}
+	for name, f := range cases {
+		d := good()
+		d.CredFormats = f
+		if err := d.Validate(); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
+		if _, err := d.Formats(); err == nil {
+			t.Errorf("%s: formats compiled", name)
+		}
+	}
+	for id, d := range Builtins() {
+		if len(d.CredFormats) == 0 {
+			t.Errorf("builtin %s states no credential format", id)
+		}
 	}
 }
 

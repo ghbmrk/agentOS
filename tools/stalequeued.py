@@ -8,8 +8,12 @@ package (its title starts with the ID, board.py stale's rule, or its body has th
 that only add a brief, a BOARD row, spec or docs name IDs they have not built. An open PR that
 names the ID too means more is owed, so the row is not listed.
 
-  stalequeued.py --repo o/r      print "<ID> (#issue): merged PR #N (title|body)" per row; exit 0
-                                 whether or not any is found. GETs only: never relabels or comments.
+Only a merged PR whose body closes the row's own issue (`Closes|Fixes|Resolves #N`) finishes it.
+A name-only match is printed as "maybe" with its reason: prep, partial and look-alike PRs match too.
+
+  stalequeued.py --repo o/r      print "<ID> (#issue): closed by PR #N" or
+                                 "<ID> (#issue): maybe: title match, does not close #issue (PR #N)"
+                                 per row; exit 0 whether or not any is found. GETs only.
 """
 import argparse
 import pathlib
@@ -22,6 +26,12 @@ import board  # noqa: E402
 
 def _token(row_id):
     return rf"(?<![A-Za-z0-9-]){re.escape(row_id)}(?![A-Za-z0-9-])"
+
+
+def closes(pr, number):
+    """True when the PR body has a closing keyword for issue `number` (whole number)."""
+    return bool(re.search(rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#{number}(?!\d)",
+                          pr.get("body") or "", re.I))
 
 
 def names(pr, row_id):
@@ -53,13 +63,13 @@ def stale_queued(items, prs, files=lambda pr: ["tools/x"]):
         row = board.readable_row(item)
         if row is None or row["state"] != "queued":
             continue
-        hits = [(p, names(p, row["id"])) for p in prs]
+        hits = [(p, "closes" if closes(p, item["number"]) else names(p, row["id"])) for p in prs]
         hits = [(p, how) for p, how in hits if how]
         if any(p["state"] == "open" for p, _ in hits):
             continue
-        merged = [(p, how) for p, how in hits if p.get("merged_at") and builds(files(p))]
+        merged = [(p, how) for p, how in hits if p.get("merged_at") and (how == "closes" or builds(files(p)))]
         if merged:
-            pr, how = max(merged, key=lambda h: h[0]["merged_at"])
+            pr, how = max(merged, key=lambda h: (h[1] == "closes", h[0]["merged_at"]))
             out.append((item, pr, how))
     return out
 
@@ -76,7 +86,11 @@ def main(argv=None, fetch=board.github):
         print(f"stalequeued: {e}", file=sys.stderr)
         return 1
     for item, pr, how in found:
-        print(f"{board.row_of(item)['id']} (#{item['number']}): merged PR #{pr['number']} ({how})")
+        rid, n = board.row_of(item)["id"], item["number"]
+        if how == "closes":
+            print(f"{rid} (#{n}): closed by PR #{pr['number']}")
+        else:
+            print(f"{rid} (#{n}): maybe: {how} match, does not close #{n} (PR #{pr['number']})")
     return 0
 
 
