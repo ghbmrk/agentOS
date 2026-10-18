@@ -189,11 +189,11 @@ func TestWiFiPasswordMatchesThePage(t *testing.T) {
 			t.Errorf("localui's Wi-Fi step no longer has %q", frag)
 		}
 	}
-	pw, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">AgentOS-Setup-AB2C</span><br>New password: <span class="mono">ZZZZ-YYYY-XXXX-WW&amp;W</span></p>`))
+	pw, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span><br>New password: <span class="mono">ZZZZ-YYYY-XXXX-WW&amp;W</span></p>`))
 	if !ok || pw != "ZZZZ-YYYY-XXXX-WW&W" {
 		t.Fatalf("%q %v", pw, ok)
 	}
-	if _, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">AgentOS-Setup-AB2C</span></p>`)); ok {
+	if _, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span></p>`)); ok {
 		t.Fatal("password parsed from a page without one")
 	}
 }

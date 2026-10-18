@@ -18,7 +18,7 @@ import (
 )
 
 // wifiSSID is a synthetic setup network name.
-const wifiSSID = "AgentOS-setup-CANARYXX"
+const wifiSSID = "agentOS-setup-CANARYXX"
 
 // fakeSetupNet stands in for agentosd's setup Wi-Fi ops (#1692): it holds
 // the network and refuses as agentosd does. fail, when set, refuses every

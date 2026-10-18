@@ -26,7 +26,7 @@ func TestTheClaimRotatesTheSetupWiFiOnce(t *testing.T) {
 	m := newBareSetupMode(t)
 	m.Card = pageCardStep
 	m.SetupNet = filepath.Join(t.TempDir(), "setup-net.json")
-	sticker := claim.SetupNet{SSID: "AgentOS-Setup-AB2C", Password: "ABCD-EFGH-JKLM-NP23"}
+	sticker := claim.SetupNet{SSID: claim.SetupSSIDPrefix + "AB2C", Password: "ABCD-EFGH-JKLM-NP23"}
 	b, err := sticker.Marshal()
 	if err != nil {
 		t.Fatal(err)
