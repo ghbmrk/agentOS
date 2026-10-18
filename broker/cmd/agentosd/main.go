@@ -1195,14 +1195,14 @@ func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (strin
 // provider is refused before it is asked (#1378, #1379, #1380 add theirs).
 type planSeeder struct{ rc *modelroute.RouteControl }
 
-func (s planSeeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s planSeeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	if provider != "codex" {
 		return nil, fmt.Errorf("no plan seed for provider %q", provider)
 	}
 	if s.rc == nil {
 		return nil, errors.New("no plan route control")
 	}
-	seed, err := s.rc.Seed(id)
+	seed, err := s.rc.Seed(id, private)
 	switch {
 	case err == nil:
 		return seed, nil
