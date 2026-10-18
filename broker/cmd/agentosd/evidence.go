@@ -698,8 +698,12 @@ func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
 
 // wireOwner routes outbox replies to the owner channel as conversation.
 // attach calls it; it is the only place e.notify is set outside tests.
+// A deletion's reach also clears the channel's recent texts (#2360).
 func (e *evidence) wireOwner(channel func() *owner.Channel) {
 	e.notify = converse(channel)
+	if e.kept != nil {
+		e.kept.attachOwner(channel)
+	}
 }
 
 // converse sends an agent reply to the owner as conversation (CH-15):
@@ -742,6 +746,28 @@ type keptReplies struct {
 	fmu sync.Mutex
 	src replySource
 	gen uint64
+	// owner is the owner channel, whose recent texts a reaction quotes
+	// back: a deletion clears them too (CAP-3, #2360).
+	owner func() *owner.Channel
+}
+
+// attachOwner makes the owner channel's recent texts part of what forget
+// drops.
+func (k *keptReplies) attachOwner(channel func() *owner.Channel) {
+	k.fmu.Lock()
+	defer k.fmu.Unlock()
+	k.owner = channel
+}
+
+// forgetOwnerLocked clears the owner channel's recent texts and voids its
+// held or pending reaction events. k.fmu is held.
+func (k *keptReplies) forgetOwnerLocked() {
+	if k.owner == nil {
+		return
+	}
+	if ch := k.owner(); ch != nil {
+		ch.ForgetRecent()
+	}
 }
 
 // attach makes src, the guest plane's outbox, part of what forget drops.
@@ -761,13 +787,15 @@ func (k *keptReplies) pending(src replySource) (uint64, []guest.PendingReply) {
 
 // settle runs after a reply read under gen was routed. A reply in flight
 // when a deletion ran cannot be recalled, but any copy it kept after the
-// deletion dropped the kept replies is dropped now (DEL-1-f1c).
+// deletion dropped the kept replies is dropped now (DEL-1-f1c), and so is
+// its text in the owner channel's recent texts (#2360).
 func (k *keptReplies) settle(gen uint64) {
 	k.fmu.Lock()
 	defer k.fmu.Unlock()
 	if k.gen == gen {
 		return
 	}
+	k.forgetOwnerLocked()
 	if err := k.drop(); err != nil && k.logf != nil {
 		k.logf("kept replies not dropped after a deletion: %v", err)
 	}
@@ -793,11 +821,13 @@ func (k *keptReplies) saveLocked(l []keptReply) {
 // forget drops every kept reply and every reply waiting in the guest
 // plane's outbox, once it is attached: no waiting reply names the task it
 // is about, so a deletion drops them all, as it does the kept ones
-// (DEL-1-f1b).
+// (DEL-1-f1b). For the same reason it clears the owner channel's recent
+// texts, which a reaction's quote would bring back (#2360).
 func (k *keptReplies) forget() error {
 	k.fmu.Lock()
 	defer k.fmu.Unlock()
 	k.gen++
+	k.forgetOwnerLocked()
 	err := k.drop()
 	if k.src == nil {
 		return err
@@ -837,9 +867,10 @@ func (k *keptReplies) loadLocked() []keptReply {
 }
 
 // forgetFan is what a deletion reaches beyond the journal (recalltool
-// Cases): the learning plane's cases, if it runs, and every kept reply
-// and reply waiting in the guest outbox, since either may quote the
-// deleted record (security C6 on #148, DEL-1-f1).
+// Cases): the learning plane's cases, if it runs, every kept reply and
+// reply waiting in the guest outbox, and the owner channel's recent texts,
+// since any may quote the deleted record (security C6 on #148, DEL-1-f1,
+// #2360).
 type forgetFan struct {
 	cases recallCases
 	kept  *keptReplies

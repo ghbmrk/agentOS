@@ -179,10 +179,14 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	recent      recentWindow // texts to the owner a reaction may mark (CH-11)
-	rename      *renameReq   // a NAME waiting for its code (name.go)
-	limited     []time.Time
-	active      time.Time // last owner message the control handler ran
-	alertAt     time.Time
+	// reactMu orders a reaction event's delivery against ForgetRecent: an
+	// event is checked and delivered under its read lock, and a deletion
+	// clears the window under its write lock (CAP-3). It is taken before mu.
+	reactMu sync.RWMutex
+	rename  *renameReq // a NAME waiting for its code (name.go)
+	limited []time.Time
+	active  time.Time // last owner message the control handler ran
+	alertAt time.Time
 	// floodAlertAt is the last flood alert; floods counts the events for
 	// the digest by kind.
 	floodAlertAt time.Time
@@ -323,6 +327,7 @@ type route struct {
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
 	react    string // a reaction event for the agent (CH-11)
+	reactGen uint64 // recent.gen() when react was worded (CAP-3)
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
 	retry    bool   // RETRY: ask about the digest's unclear effects, outside the lock
 	undo     string // an UNDO ID the channel does not hold, for the hook
@@ -426,10 +431,7 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
 	if rt.react != "" {
-		c.mu.Lock()
-		c.active = rt.at
-		c.mu.Unlock()
-		replies = append(replies, c.ctrl.Event(ctx, from, rt.react)...)
+		replies = append(replies, c.deliverReaction(ctx, from, rt)...)
 	}
 	if rt.undo != "" {
 		replies = append(replies, c.undoElsewhere(ctx, rt.undo))
@@ -521,7 +523,7 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			if h := c.held; h != nil && h.ready && unlocked {
 				c.held = nil
 				if h.react != "" {
-					return route{react: h.react}
+					return route{react: h.react, reactGen: c.recent.gen()}
 				}
 				return route{delegate: h.text, run: true}
 			}

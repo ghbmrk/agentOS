@@ -1,6 +1,7 @@
 package owner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -136,6 +137,26 @@ type sentText struct {
 type recentWindow struct {
 	mu    sync.Mutex
 	texts []sentText
+	// forgets counts the deletions that cleared the window, so a reaction
+	// event worded before one is never delivered after it (CAP-3).
+	forgets uint64
+}
+
+// forget drops every recent text: a deletion's reach covers them, since
+// any may quote the deleted record and a reaction would quote it back
+// (CAP-3, #2360).
+func (r *recentWindow) forget() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.texts = nil
+	r.forgets++
+}
+
+// gen is the number of deletions that cleared the window.
+func (r *recentWindow) gen() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.forgets
 }
 
 func (r *recentWindow) add(t sentText) {
@@ -186,6 +207,40 @@ func normQuote(s string) string {
 // RESUME (4 letters and digits). A reaction event never shows such a text
 // to the agent.
 var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-9]{4}\b`)
+
+// ForgetRecent is a deletion's reach into the owner channel (CAP-3,
+// #2360): it drops the recent texts a reaction is matched against and a
+// held reaction's event, and voids any event worded before it that has not
+// gone to the agent. An event being delivered when it runs finishes first,
+// so none quoting a forgotten text reaches the agent once it returns.
+func (c *Channel) ForgetRecent() {
+	c.reactMu.Lock()
+	defer c.reactMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recent.forget()
+	if c.held != nil && c.held.react != "" {
+		c.held = nil
+	}
+}
+
+// deliverReaction gives rt's reaction event to the agent, unless a
+// deletion cleared the recent texts after it was worded: its quote may be
+// of a forgotten text, so it is dropped (CAP-3, #2360).
+func (c *Channel) deliverReaction(ctx context.Context, from string, rt route) []string {
+	c.reactMu.RLock()
+	defer c.reactMu.RUnlock()
+	c.mu.Lock()
+	stale := c.recent.gen() != rt.reactGen
+	if !stale {
+		c.active = rt.at
+	}
+	c.mu.Unlock()
+	if stale {
+		return nil
+	}
+	return c.ctrl.Event(ctx, from, rt.react)
+}
 
 // reactionEvent is the broker-worded text the agent gets for rx, and the
 // pointer the owner gets when the marked text expects a reply.
@@ -261,7 +316,7 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 		replies = append(replies, pointer)
 	}
 	if unlocked {
-		return route{replies: replies, react: event}
+		return route{replies: replies, react: event, reactGen: c.recent.gen()}
 	}
 	if c.held != nil {
 		c.held = nil
