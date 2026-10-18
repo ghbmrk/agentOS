@@ -64,7 +64,7 @@ func digestRefs(srcs map[string]string) []string {
 	return bad
 }
 
-// REQ: DRB-1, DRB-2
+// DIG-RM-b DRB-1, DRB-2 (brief IDs).
 
 // TestMainStartsNoDigest: no source of agentosd builds, wires or starts
 // the daily digest, imports its queue, or takes its -digest flag.
@@ -90,7 +90,7 @@ func TestMainStartsNoDigest(t *testing.T) {
 	}
 }
 
-// REQ: DRB-1
+// DIG-RM-b DRB-1 (brief ID).
 
 // TestStartsWithOldDigestDir: an upgraded box keeps the old digest
 // directory and its four files on disk. Nothing reads them, no unit passes
@@ -147,7 +147,7 @@ func waitNoText(t *testing.T, r *pacedOwnerRig) {
 	}
 }
 
-// REQ: DRB-1
+// DIG-RM-b DRB-1 (brief ID).
 
 // TestNoDailyOwnerText: with main's pacer attached and its tick running,
 // mornings come and go on the fake clock and the owner gets no text.
@@ -161,7 +161,7 @@ func TestNoDailyOwnerText(t *testing.T) {
 	waitNoText(t, r)
 }
 
-// REQ: DRB-1
+// DIG-RM-b DRB-1 (brief ID).
 
 // TestNoDigestWhileLearningIsDown: the digest used to name learning being
 // off once a day; now the line is in STATUS only, and nothing is texted.
@@ -230,7 +230,8 @@ func directSends(srcs map[string]string) []string {
 	return out
 }
 
-// REQ: DRB-3, CH-15
+// DIG-RM-b DRB-3 (brief ID).
+// REQ: CH-15
 
 // TestOwnerTextsLeaveOnlyByPushOrConversation: agentosd's texts to the
 // owner go through the owner channel (its pushes, paced by the owner's

@@ -9,7 +9,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
-// REQ: DRA-3, OP-2, CH-12
+// DIG-RM DRA-3 (brief ID).
+// REQ: OP-2, CH-12
 
 // unclearNoteOver is an unclear note over a fixed list, read in UTC.
 func unclearNoteOver(waiting *[]journal.ParkedIntent) *unclearNote {
