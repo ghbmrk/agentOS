@@ -1,5 +1,6 @@
 """Tests for tools/stalequeued.py: queued rows whose package a merged PR already names.
 
+REQ: STALEQ-1, STALEQ-2, STALEQ-3
 No SPEC requirement IDs: process tooling (CLAUDE.md, OPERATING). All data is synthetic.
 """
 import io
@@ -88,9 +89,35 @@ class StaleQueuedTest(unittest.TestCase):
             code = stalequeued.main(["--repo", "o/r"], fetch=fetch)
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue().splitlines(),
-                         ["AB-1 (#1): merged PR #10 (title)", "CD-2 (#3): merged PR #11 (title)",
-                          "GH-4 (#5): merged PR #13 (body)"])
+                         ["AB-1 (#1): maybe: title match, does not close #1 (PR #10)",
+                          "CD-2 (#3): maybe: title match, does not close #3 (PR #11)",
+                          "GH-4 (#5): maybe: body match, does not close #5 (PR #13)"])
         self.assertEqual(set(calls), {"GET"})
+
+    def test_closing_reference_finishes_the_row(self):
+        for body in ("Closes #1", "fixes: #1.", "Resolved #1 and more"):
+            found = stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "Unrelated", body)])
+            self.assertEqual([(p["number"], how) for _, p, how in found], [(2, "closes")], body)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            stalequeued.main(["--repo", "o/r"], fetch=lambda path, **k: (
+                [{"filename": "docs/x.md"}] if path.endswith("/files") else
+                [issue(1, "AB-1")] if path.startswith("/repos/o/r/issues") else [pr(2, "Unrelated", "Closes #1")]))
+        self.assertEqual(out.getvalue().strip(), "AB-1 (#1): closed by PR #2")
+
+    def test_closing_reference_is_for_this_issue_only(self):
+        for body in ("Closes #12", "Closes #2", "see #1", "Closes ghbmrk/other#1"):
+            self.assertEqual(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "Unrelated", body)]), [], body)
+
+    def test_name_only_matches_are_maybe_with_reason(self):
+        # prep PR (INFER-SVC), look-alike title (S8-W1-box-fu1), partial with follow-ups (FUZZ-broker)
+        items = [issue(2217, "INFER-SVC"), issue(1898, "S8-W1-box-fu1"), issue(1813, "FUZZ-broker")]
+        prs = [pr(2223, "INFER-SVC: G2 allow-list prep", "Refs #2217"),
+               pr(1899, "S8-W1-box-fu1: other task", "Closes #1899"),
+               pr(2149, "FUZZ-broker: first slice", "Part of #1813; follow-ups #2238")]
+        found = stalequeued.stale_queued(items, prs)
+        self.assertEqual({p["number"]: how for _, p, how in found}, {2223: "title", 1899: "title", 2149: "title"})
+        self.assertNotIn("closes", {how for _, _, how in found})
 
 
 if __name__ == "__main__":

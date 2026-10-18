@@ -343,6 +343,10 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		}
 		rep.Summary = rep.Summary[:cut]
 	}
+	if msg := p.refused(rep); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	label := ""
 	if p.cfg.Label != nil {
 		label = p.cfg.Label(m.id)
@@ -374,6 +378,35 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// CheckReplies sets check, run on a guest reply's text and on its summary
+// before the reply is stored. A non-empty answer refuses the reply: the
+// guest's POST gets 400 with that answer as its body, which the bridge
+// does not retry, and the message stays pending, so the guest can still
+// answer it (CH-11). The answer is shown to the guest, so it must be
+// fixed words the broker wrote. A nil check refuses nothing.
+func (p *Plane) CheckReplies(check func(text string) string) {
+	if check == nil {
+		p.replyCheck.Store(nil)
+		return
+	}
+	p.replyCheck.Store(&check)
+}
+
+// refused returns the reply check's answer for rep, or "".
+func (p *Plane) refused(rep Reply) string {
+	c := p.replyCheck.Load()
+	if c == nil {
+		return ""
+	}
+	if msg := (*c)(rep.Text); msg != "" {
+		return msg
+	}
+	if rep.Summary != "" {
+		return (*c)(rep.Summary)
+	}
+	return ""
 }
 
 // PendingReplies returns the replies acknowledged and not yet handed on,
