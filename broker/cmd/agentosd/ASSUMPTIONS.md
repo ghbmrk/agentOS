@@ -170,7 +170,7 @@ Built for P3-4b-4c-corpus against LOOP-7 (bullet 3) and LOOP-9. Covers the `loop
 
 ## No digest (DIG-RM-b)
 
-Built for DIG-RM-b against DRB-1 to DRB-3 (Mark, 2026-10-18: reading counts as owner effort). Covers `main.go`, `mail.go` (`mailNote`), `unclear.go` (`unclearNote`) and `nodigest_test.go`. The W5-Dc rows DF1 to DF4 (digest forget double fault) and GT1 to GT3 (digest gate checks) closed with `digest.go` and `broker/digestqueue`.
+Built for DIG-RM-b against DRB-1 to DRB-3 (Mark, 2026-10-18: reading counts as owner effort). Covers `main.go`, `mail.go` (`mailNote`), `unclear.go` (`unclearNote`) and `nodigest_test.go`. The W5-Dc rows DF1 to DF4 (digest forget double fault) and GT1 to GT3 (digest gate checks) closed with `digest.go` and `broker/digestqueue`, as did #2383's DL1 (the digest waits for the owner line) with `digestline_test.go`.
 
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|

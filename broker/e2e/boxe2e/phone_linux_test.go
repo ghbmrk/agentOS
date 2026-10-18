@@ -105,9 +105,9 @@ func TestOtherLeadQuotesNoCode(t *testing.T) {
 			t.Errorf("otherLead(%q) = %q, want %q", c.text, got, c.want)
 		}
 	}
-	log := seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: 482913 canary-e2e-7f3a"})
+	log := seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "Too many wrong codes: 482913 canary-e2e-7f3a"})
 	err := controlErr(log, 0)
-	if err == nil || err.Error() != `HELP drew other ("Daily digest")` {
+	if err == nil || err.Error() != `HELP drew other ("Too many wrong")` {
 		t.Fatalf("controlErr = %v", err)
 	}
 }
