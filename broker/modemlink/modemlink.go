@@ -329,7 +329,7 @@ func callers() string {
 	for n := 0; n < missedFrames; {
 		f, more := frames.Next()
 		name := f.Function
-		if name != "" && !strings.HasPrefix(name, linkMethods) {
+		if name != "" && !strings.Contains(name, linkMethods) {
 			b.WriteString(" via " + name[strings.LastIndexByte(name, '/')+1:])
 			n++
 		}
@@ -340,8 +340,9 @@ func callers() string {
 	return b.String()
 }
 
-// linkMethods prefixes the Link's own methods in a stack.
-const linkMethods = "github.com/ghbmrk/agentos/broker/modemlink.(*Link)."
+// linkMethods marks the Link's own methods in a stack. It leaves out the
+// module path so no literal names the project's host (DEP-2).
+const linkMethods = "/modemlink.(*Link)."
 
 func receiptOf(id, code string) Receipt {
 	switch code {
