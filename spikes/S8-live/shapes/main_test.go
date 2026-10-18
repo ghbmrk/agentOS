@@ -1,3 +1,5 @@
+// REQ: CRED-7 (SHP-2, SHP-3 in briefs/CAP-11-plan-fu4-shapes.md)
+
 package main
 
 import (
