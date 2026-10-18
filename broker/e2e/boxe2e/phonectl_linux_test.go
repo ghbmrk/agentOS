@@ -129,7 +129,7 @@ var codeRe = regexp.MustCompile(`^STATUS ([0-9]{6})$`)
 // fails when the box answers the unpaired number, takes its text as the
 // owner's, runs STATUS without a fresh code's unlock (E9), or sent a
 // recovery notice after setup, which it still notes (#1291, #2170 item 2).
-// A digest it passes over it counts in a note and still passes (E17).
+// A digest it passes over it counts in a note and still passes (G1-1688-f1-E17).
 func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 	seed := []byte("12345678901234567890")
 	base := time.Date(2026, 10, 15, 12, 0, 5, 0, time.UTC)

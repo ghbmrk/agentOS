@@ -1,6 +1,6 @@
 # CAP-11-plan-fu4-shapes: procedure to measure the Codex credential shapes
 
-Board row: issue #2313. Source: CAP-11-plan-fu4 (ASSUMPTIONS P17: the Codex `CredFormats` are the public shapes, not measured). Class: release. Tier: C (`spikes/`, `briefs/`). Usage estimate: 60k tokens, checkpoint at 45k.
+Board row: issue #2313. Source: CAP-11-plan-fu4 (ASSUMPTIONS CAP-11-plan-fu4-P17: the Codex `CredFormats` are the public shapes, not measured). Class: release. Tier: C (`spikes/`, `briefs/`). Usage estimate: 60k tokens, checkpoint at 45k.
 
 **Why.** The Codex declaration's `CredFormats` (`broker/provagent/declare.go`) back the result scan and the vault redactor (FMT-2, FMT-3). They were written from public token shapes. If a real sign-in issues tokens in another shape, a fresh token echoed by the CLI escapes both. Failure path: an access token whose shape no declared format matches reaches the guest in a result file.
 
@@ -18,7 +18,7 @@ Board row: issue #2313. Source: CAP-11-plan-fu4 (ASSUMPTIONS P17: the Codex `Cre
 
 ## Out of scope
 
-Changing `CredFormats` or P17 (a tier-A follow-up once the shapes are recorded); exercising a token refresh; the API-key route.
+Changing `CredFormats` or CAP-11-plan-fu4-P17 (a tier-A follow-up once the shapes are recorded); exercising a token refresh; the API-key route.
 
 ## Scope
 
