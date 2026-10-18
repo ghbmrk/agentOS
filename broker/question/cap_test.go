@@ -319,7 +319,7 @@ func TestAChatFloodStopsAtTwentyAnHour(t *testing.T) {
 	}
 }
 
-// TestAChatQuestionReservesNothing (ASSUMPTIONS Q17, potency M14 on
+// TestAChatQuestionReservesNothing (ASSUMPTIONS P3-8-Q17, potency M14 on
 // #2372): a question in an open chat is conversation and never spends
 // the shared CH-15 budget that approval requests reserve.
 func TestAChatQuestionReservesNothing(t *testing.T) {
