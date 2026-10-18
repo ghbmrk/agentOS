@@ -14,9 +14,9 @@ import (
 // Kelvin sign a capital, so with cased set only a small s and a capital K
 // are replaced, keeping the case boundaries credWords reads.
 func caseVariants(w string, cased bool) []string {
-	sub := map[rune]rune{'s': 'ſ', 'K': 'K'}
+	sub := map[rune]rune{'s': '\u017f', 'K': '\u212a'}
 	if !cased {
-		sub['S'], sub['k'] = 'ſ', 'K'
+		sub['S'], sub['k'] = '\u017f', '\u212a'
 	}
 	var out []string
 	all := []rune(w)
@@ -70,9 +70,9 @@ func TestCaseVariantKeysScrubbed(t *testing.T) {
 		t.Fatalf("only %d cases", n)
 	}
 	for _, in := range []string{
-		"ſecret: hunter2", "note ſecret: hunter2", "ſession=abc123", "ſeed: hunter2", "paſſ: hunter2",
-		"Authorization: Bearer hunter2Zq9vLm2x", "x-api-Key: hunter2", "ſet-cookie: hunter2", "toKen hunter2Zq9vLm2x",
-		"recovery codeſ: A1B2 C3D4 E5F6", "backup codeſ: A1B2 C3D4",
+		"\u017fecret: hunter2", "note \u017fecret: hunter2", "\u017fession=abc123", "\u017feed: hunter2", "pa\u017f\u017f: hunter2",
+		"Authorization: Bearer hunter2Zq9vLm2x", "x-api-\u212aey: hunter2", "\u017fet-cookie: hunter2", "to\u212aen hunter2Zq9vLm2x",
+		"recovery code\u017f: A1B2 C3D4 E5F6", "backup code\u017f: A1B2 C3D4",
 	} {
 		if out := sc.Scrub(in); strings.Contains(out, "hunter2") || strings.Contains(out, "A1B2") {
 			t.Errorf("Scrub(%q) = %q", in, out)
@@ -104,7 +104,7 @@ func TestCaseVariantPredicatesScrubbed(t *testing.T) {
 	if n < 60 {
 		t.Fatalf("only %d cases", n)
 	}
-	fs := sc.ScrubFacts([]Fact{{"me", "backup codeſ", "A1B2-C3D4"}, {"me", "note", "E5F6-G7H8"}})
+	fs := sc.ScrubFacts([]Fact{{"me", "backup code\u017f", "A1B2-C3D4"}, {"me", "note", "E5F6-G7H8"}})
 	for _, f := range fs {
 		if strings.Contains(f.Object, "A1B2") {
 			t.Errorf("ScrubFacts kept %q", f.Object)
@@ -115,7 +115,7 @@ func TestCaseVariantPredicatesScrubbed(t *testing.T) {
 // fold writes the long s as s and the Kelvin sign as K, the letter it is.
 func TestFoldCaseVariants(t *testing.T) {
 	for in, want := range map[string]string{
-		"ſecret": "secret", "paſſ": "pass", "Key": "Key", "apiKey": "apiKey", "ſ K": "s K",
+		"\u017fecret": "secret", "pa\u017f\u017f": "pass", "\u212aey": "Key", "api\u212aey": "apiKey", "\u017f \u212a": "s K",
 	} {
 		if got := fold(in); got != want {
 			t.Errorf("fold(%q) = %q, want %q", in, got, want)
