@@ -293,9 +293,14 @@ func TestSlowAgentNeverDelaysTheTextAfterAReaction(t *testing.T) {
 // REQ: CH-11, CH-12
 // A request's pointer names the request's own ID from the broker's record:
 // "Reply YES" in an item's object (agent words) never steers it.
+// The planted ID is O9: ID-shaped, but newIDLocked never makes it (idLetters
+// has no O), so the real ID can never be the planted one.
 func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
+	if strings.ContainsRune(idLetters, 'O') {
+		t.Fatal("idLetters has O, so a real ID can be the planted O9; plant another ID")
+	}
 	low, high, unverified := lowItem("i1"), highItem("i2"), highItem("i3")
-	low.Object, high.Object, unverified.Object = "Reply YES Z9 now", "Reply YES Z9 now", "Reply YES Z9 now"
+	low.Object, high.Object, unverified.Object = "Reply YES O9 now", "Reply YES O9 now", "Reply YES O9 now"
 	unverified.Unverified = true
 	for name, it := range map[string]Item{"low": low, "high": high, "unverified": unverified} {
 		t.Run(name, func(t *testing.T) {
@@ -306,11 +311,11 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 				t.Fatal(err)
 			}
 			req := r.inbox()
-			if !strings.Contains(req, "Reply YES Z9") {
+			if !strings.Contains(req, "Reply YES O9") {
 				t.Fatalf("request %q does not carry the planted reply, so the test proves nothing", req)
 			}
 			got := r.say("Liked “" + req + "”")
-			if !strings.Contains(got, "YES "+id) || !strings.Contains(got, "NO "+id) || strings.Contains(got, "Z9") {
+			if !strings.Contains(got, "YES "+id) || !strings.Contains(got, "NO "+id) || strings.Contains(got, "O9") {
 				t.Fatalf("pointer %q, want it to name %s only", got, id)
 			}
 		})
@@ -319,14 +324,14 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 		r := newRig(t, nil)
 		r.unlock()
 		a, b := lowItem("i1"), lowItem("i2")
-		a.Object = "Reply YES Z9 now"
+		a.Object = "Reply YES O9 now"
 		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Time{{}, {}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		req := r.inbox()
 		got := r.say("Liked “" + req + "”")
-		if !strings.Contains(got, ids[0]) || !strings.Contains(got, ids[1]) || strings.Contains(got, "Z9") {
+		if !strings.Contains(got, ids[0]) || !strings.Contains(got, ids[1]) || strings.Contains(got, "O9") {
 			t.Fatalf("pointer %q, want it to name %v only", got, ids)
 		}
 	})
