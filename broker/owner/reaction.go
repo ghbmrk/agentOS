@@ -85,7 +85,15 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		return rx, true
 	}
 	if rx, ok := parseForm(text); ok {
-		if _, found := c.recent.match(rx.quoted, c.cfg.Now()); found {
+		now := c.cfg.Now()
+		if _, found := c.recent.match(rx.quoted, now); found {
+			return rx, true
+		}
+		// After a deletion the quote may mark a forgotten text, which as
+		// chat would reach the agent whole: read it as a reaction that
+		// matched none until the forgotten texts are past the window
+		// (CAP-3, #2360).
+		if c.recent.forgotWithin(now) {
 			return rx, true
 		}
 		return reaction{}, false
@@ -95,7 +103,7 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		return reaction{}, false
 	}
 	t, ok := c.recent.match(m[2], c.cfg.Now())
-	if !ok || !(t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))) {
+	if !ok || !t.guarded() {
 		return reaction{}, false
 	}
 	return reaction{kind: "reacted to", quoted: m[2], unlisted: true}, true
@@ -133,6 +141,14 @@ type sentText struct {
 	local   bool     // approvable on the local page only
 }
 
+// guarded reports whether a reaction to t is never shown to the agent with
+// its text: an approval request, or a box text that holds a code (CH-3).
+// The agent's own text is never guarded: its digits already passed
+// Disclose.
+func (t sentText) guarded() bool {
+	return t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))
+}
+
 // recentWindow is the window of texts to the owner.
 type recentWindow struct {
 	mu    sync.Mutex
@@ -140,16 +156,35 @@ type recentWindow struct {
 	// forgets counts the deletions that cleared the window, so a reaction
 	// event worded before one is never delivered after it (CAP-3).
 	forgets uint64
+	// forgotAt is the last deletion's time.
+	forgotAt time.Time
 }
 
-// forget drops every recent text: a deletion's reach covers them, since
-// any may quote the deleted record and a reaction would quote it back
-// (CAP-3, #2360).
-func (r *recentWindow) forget() {
+// forget drops every recent text that a reaction would show the agent: a
+// deletion's reach covers them, since any may quote the deleted record and
+// a reaction would quote it back (CAP-3, #2360). Guarded texts stay, so a
+// reaction to a live request or code is still read as one and never
+// reaches the agent as chat; their events never show their text.
+func (r *recentWindow) forget(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.texts = nil
+	kept := r.texts[:0:0]
+	for _, t := range r.texts {
+		if t.guarded() {
+			kept = append(kept, t)
+		}
+	}
+	r.texts = kept
 	r.forgets++
+	r.forgotAt = now
+}
+
+// forgotWithin reports whether a deletion forgot texts that would still be
+// in the window at now.
+func (r *recentWindow) forgotWithin(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.forgets > 0 && now.Sub(r.forgotAt) <= recentMaxAge
 }
 
 // gen is the number of deletions that cleared the window.
@@ -209,7 +244,7 @@ func normQuote(s string) string {
 var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-9]{4}\b`)
 
 // ForgetRecent is a deletion's reach into the owner channel (CAP-3,
-// #2360): it drops the recent texts a reaction is matched against and a
+// #2360): it drops the recent texts a reaction would show the agent and a
 // held reaction's event, and voids any event worded before it that has not
 // gone to the agent. An event being delivered when it runs finishes first,
 // so none quoting a forgotten text reaches the agent once it returns.
@@ -218,7 +253,7 @@ func (c *Channel) ForgetRecent() {
 	defer c.reactMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.recent.forget()
+	c.recent.forget(c.cfg.Now())
 	if c.held != nil && c.held.react != "" {
 		c.held = nil
 	}

@@ -139,3 +139,86 @@ func (g gatedAgent) Deliver(ctx context.Context, _ string, _ bool) error {
 	}
 	return nil
 }
+
+// A deletion keeps a live request in the window (security finding on
+// #2369): a reaction quoting it whole, code and all, in an unlisted form or
+// a listed form whose quote holds quote marks, is still read as a reaction,
+// so neither the request nor its code reaches the agent as chat.
+func TestAForgetKeepsALiveRequestGuarded(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if _, err := r.ch.Request([]Item{lowItem("i1")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	code := lowCodeRe.FindStringSubmatch(req)[2]
+	r.ch.ForgetRecent()
+	before := len(r.agent.got())
+	if got := r.say("Pinned “" + req + "”"); !strings.Contains(got, readAsReaction) {
+		t.Fatalf("unlisted form on a live request after a deletion replied %q, want it read as a reaction", got)
+	}
+	r.say("Liked “" + req + " \"x\"”")
+	got := r.agent.got()[before:]
+	if len(got) != 2 {
+		t.Fatalf("agent got %q, want two reaction events", got)
+	}
+	for _, g := range got {
+		if strings.Contains(g, code) || strings.Contains(g, "Reply YES") || !strings.HasPrefix(g, "Owner reaction:") {
+			t.Fatalf("agent got %q, want an event that shows neither the request nor its code", g)
+		}
+	}
+}
+
+// After a deletion, a listed form quoting a forgotten reply that holds
+// quote marks is read as a reaction that matched none for the window's 24
+// hours, so the reply does not reach the agent word for word as chat
+// (security finding on #2369). Past that, such a text is chat again.
+func TestAQuotedForgottenReplyIsNotChatAfterAForget(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	reply := `The client wrote "pay by Friday" about the Acme contract renews notice.`
+	if err := r.ch.Converse(reply); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.ch.ForgetRecent()
+	before := len(r.agent.got())
+	r.say("Liked “Agent: " + reply + "”")
+	got := r.agent.got()[before:]
+	if len(got) != 1 || !strings.Contains(got[0], "none of the recent texts") {
+		t.Fatalf("agent got %q, want one reaction that matched none", got)
+	}
+	noForgottenText(t, got)
+	r.advance(recentMaxAge + time.Minute)
+	before = len(r.agent.got())
+	r.say(`Liked "a" and "b" both`)
+	if got := r.agent.got()[before:]; len(got) != 1 || strings.HasPrefix(got[0], "Owner reaction:") {
+		t.Fatalf("a day after the deletion: %q, want chat", got)
+	}
+}
+
+// #2202 after a deletion: a forget keeps the request and coded box texts,
+// so an unlisted form quoting one is still read as a reaction, the owner
+// hears so, and the agent gets no code.
+func TestUnlistedReactionStaysGuardedAfterAForget(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if _, err := r.ch.Request([]Item{lowItem("i1")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	code := lowCodeRe.FindStringSubmatch(req)[2]
+	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
+	r.ch.ForgetRecent()
+	if got := r.say("Cancel “" + req + "”"); !strings.Contains(got, readAsReaction) || strings.Contains(got, code) {
+		t.Fatalf("unlisted form on a request after a forget replied %q, want %q", got, readAsReaction)
+	}
+	if got := r.say("Cancel “Your sign-in code is 482913.”"); got != readAsReaction {
+		t.Fatalf("unlisted form on a coded text after a forget replied %q, want only %q", got, readAsReaction)
+	}
+	for _, m := range r.agent.got() {
+		if strings.Contains(m, "482913") || strings.Contains(m, code) {
+			t.Fatalf("agent got a code: %q", m)
+		}
+	}
+}
