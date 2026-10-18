@@ -401,7 +401,14 @@ func TestProxyCheckStackFreedAfterRelease(t *testing.T) {
 	if held, _ := (&inFlightRig{p: r.proxy}).slots(); held != 0 {
 		t.Fatalf("%d bytes still reserved", held)
 	}
-	runtime.ReadMemStats(&after) // no GC: a forced one would halve what is kept
+	// One GC first: StackInuse also counts the stacks of exited goroutines
+	// until a collection returns their spans, so without it the figure
+	// depends on when the runtime last collected (-race stacks are several
+	// times larger, and a run reached 23 MiB). A GC shrinks the stacks of
+	// live goroutines by at most half, so a leak (144 MiB before checkApart)
+	// stays over the limit by 5x.
+	runtime.GC()
+	runtime.ReadMemStats(&after)
 	grown := int64(after.StackInuse) - int64(before.StackInuse)
 	t.Logf("stack grew %d KiB over %d idle connections", grown>>10, clients)
 	if limit := int64(clients) * 64 << 10; grown > limit {

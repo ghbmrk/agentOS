@@ -36,6 +36,10 @@ var thirdPartyHosts = map[string]bool{
 	// (provagent P1, D-117).
 	"openai.com": true,
 	"nodejs.org": true, "registry.npmjs.org": true,
+	// The bubblewrap release tarball the Codex rootfs builds its bwrap from,
+	// pinned by hash (#1720; Mark's "Patch bwrap" decision). The project's own
+	// repository there is still a project host: projectHost flags github.com/ghbmrk.
+	"github.com": true,
 }
 
 // projectHost names a domain the project could run: anything carrying

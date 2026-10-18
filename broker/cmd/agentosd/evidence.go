@@ -10,10 +10,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
@@ -131,11 +131,10 @@ const (
 
 // Sizes.
 const (
-	// maxText is the longest text the owner channel sends (control.MaxText;
-	// agentosd does not link control).
-	maxText = 3 * 153
 	// smsSegment is one GSM-7 text: a redirected reply's text fits it.
 	smsSegment = 160
+	// smsSegmentUCS2 is one UCS-2 text, in UTF-16 units.
+	smsSegmentUCS2 = 70
 	// minSummary is the shortest summary worth sending; with less room
 	// the text carries only the pointer.
 	minSummary = 20
@@ -189,7 +188,7 @@ const guestReactionRefused = "agent reactions are refused; reply in text"
 // refuseGuestReply refuses, at the guest's POST, a reply Converse would
 // refuse after the 204, when only the log would hear it (CH-11, #2196).
 func refuseGuestReply(text string) string {
-	if owner.RefuseAgentText(text) != nil {
+	if owner.RefuseAgentText(control.StripControls(text)) != nil {
 		return guestReactionRefused
 	}
 	return ""
@@ -275,26 +274,30 @@ func (e *evidence) reply(machine string, private bool, text, summary string) {
 		e.setFailing(true, false)
 		tail = failNote
 	}
-	e.send(machine, join(summarize(text, summary, smsSegment-len(owner.AgentPrefix)-1-len(tail)), tail))
+	e.send(machine, join(summarize(text, summary, tail), tail))
 }
 
 // sendSplit texts a reply as up to maxReplyTexts consecutive texts
 // (CH-12, D-127); one longer than that is kept whole and the third text
-// ends with keptLong. CH-19's check runs on the whole reply first: a
-// secret-shaped reply goes as one text, which the owner channel replaces
-// with its local-UI pointer, so no code is split past the check. A text
-// that does not go stops the rest, so none arrives out of order, and the
-// reply is kept.
+// ends with keptLong. The reply is stripped of control and bidi
+// characters first (control.StripControls), then CH-19's check runs on
+// the whole of it as written, stripped and with its controls removed
+// (owner.AgentSecret): a secret-shaped reply goes as one text, as
+// written, which the owner channel replaces with its local-UI pointer, so no code is split
+// past the check. A text that does not go stops the rest, so none arrives
+// out of order, and the reply is kept. What is kept for the local UI is
+// the stripped reply too.
 func (e *evidence) sendSplit(machine, text string) {
-	room := maxText - len(owner.AgentPrefix)
-	if owner.SecretShaped(text) {
-		if len(text) > room {
+	raw := text
+	text = control.StripControls(text)
+	if owner.AgentSecret(raw) {
+		if n, gsm7 := control.Units(text); n > textRoom(gsm7) {
 			e.kept.keep(text)
 		}
-		e.send(machine, text)
+		e.send(machine, raw)
 		return
 	}
-	parts, cut := splitReply(text, room)
+	parts, cut := splitReply(text)
 	if cut {
 		e.kept.keep(text)
 	}
@@ -384,22 +387,34 @@ func join(summary, tail string) string {
 	return summary + " " + tail
 }
 
-// summarize is the text's one-line summary of at most max bytes: the
-// agent's own (guest.Reply.Summary) if it gave one, else the reply's
-// opening sentences, enough that a filler opening ("Sure!") is never the
-// whole of it (UX U4). It is "" when there is too little room or it looks
-// like a code or key (CH-19, security C6): the text then carries only the
-// pointer.
-func summarize(text, own string, max int) string {
-	s := strings.Join(strings.Fields(own), " ")
+// summarize is the text's one-line summary: the agent's own
+// (guest.Reply.Summary) if it gave one, else the reply's opening
+// sentences, enough that a filler opening ("Sure!") is never the whole of
+// it (UX U4), both stripped (control.StripControls). Its room is what one
+// text leaves after AgentPrefix, a space and tail, in the encoding the
+// whole text needs: one GSM-7 text when the summary and tail both fit
+// GSM-7, else one UCS-2 text. It is cut in its own encoding, never inside
+// a character or a joined emoji (CH-12). It is "" when there is too
+// little room or its source, as written, stripped or with its controls
+// removed, looks like a code or key (owner.AgentSecret, CH-19, security
+// C6): the text then carries only the pointer.
+func summarize(text, own, tail string) string {
+	src := own
+	s := strings.Join(strings.Fields(control.StripControls(own)), " ")
 	if s == "" {
-		s = opening(text)
+		src, s = text, opening(control.StripControls(text))
+	}
+	n, gsm7 := control.Units(owner.AgentPrefix + " " + tail)
+	max := smsSegment - n
+	if _, g := control.Units(s); !g || !gsm7 {
+		// A GSM-7 part counted in septets is never fewer UTF-16 units.
+		max = smsSegmentUCS2 - n
 	}
 	if max < minSummary {
 		return ""
 	}
 	s = clip(s, max)
-	if owner.SecretShaped(s) {
+	if owner.SecretShaped(s) || owner.AgentSecret(src) {
 		return ""
 	}
 	return s
@@ -420,28 +435,48 @@ func opening(text string) string {
 // maxReplyTexts is how many texts one agent reply may take (CH-12).
 const maxReplyTexts = 3
 
-// splitReply cuts text into at most maxReplyTexts parts of at most room
-// bytes. cut says the reply did not fit: the last part then ends with
-// keptLong. Each cut is at the strongest boundary in the second half of
-// the part (a paragraph, then a line, then a sentence end, then a word),
-// so a part is never a stub; failing all of these, the last word
-// boundary, else a rune boundary outside any joined emoji.
-func splitReply(text string, room int) (parts []string, cut bool) {
+// textRoom is what one text leaves for agent text after AgentPrefix, in
+// units of its encoding (control.Units): 3 x 153 septets for GSM-7, 3 x 67
+// UTF-16 units for UCS-2 (CH-12).
+func textRoom(gsm7 bool) int { return control.Room(gsm7) - len(owner.AgentPrefix) }
+
+// splitReply cuts text into at most maxReplyTexts parts, each within one
+// text in the encoding the rest of the reply needs from where it starts
+// (control.Units, textRoom), so a reply with an emoji gets UCS-2 room. cut
+// says the reply did not fit: the last part then ends with keptLong. Each
+// cut is at the strongest boundary in the second half of the part (a
+// paragraph, then a line, then a sentence end, then a word), so a part is
+// never a stub; failing all of these, the last word boundary, else a rune
+// boundary outside any joined emoji (control.Prefix).
+func splitReply(text string) (parts []string, cut bool) {
 	rest := strings.TrimSpace(text)
-	for len(parts) < maxReplyTexts-1 && len(rest) > room {
-		i := cutAt(rest, room)
+	for len(parts) < maxReplyTexts-1 && !fits(rest) {
+		i := cutAt(rest, control.Prefix(rest, roomOf(rest)))
 		parts = append(parts, strings.TrimSpace(rest[:i]))
 		rest = strings.TrimSpace(rest[i:])
 	}
-	if len(rest) <= room {
+	if fits(rest) {
 		return append(parts, rest), false
 	}
-	i := cutAt(rest, room-1-len(keptLong))
+	i := cutAt(rest, control.Prefix(rest, roomOf(rest)-1-len(keptLong)))
 	return append(parts, strings.TrimSpace(rest[:i])+" "+keptLong), true
 }
 
+// fits says s fits one text after AgentPrefix.
+func fits(s string) bool {
+	n, gsm7 := control.Units(s)
+	return n <= textRoom(gsm7)
+}
+
+// roomOf is textRoom in the encoding s needs.
+func roomOf(s string) int {
+	_, gsm7 := control.Units(s)
+	return textRoom(gsm7)
+}
+
 // cutAt is where to end a part of s (longer than max) at most max bytes
-// long: s[:i] is the part.
+// long, max already within one text and at a Joinable point: s[:i] is
+// the part.
 func cutAt(s string, max int) int {
 	paragraph := func(p int) bool { return strings.HasPrefix(s[p:], "\n\n") }
 	line := func(p int) bool { return s[p] == '\n' }
@@ -462,38 +497,16 @@ func cutAt(s string, max int) int {
 			return p
 		}
 	}
-	p := max
-	for p > 0 && !joinable(s, p) {
-		p--
-	}
-	if p == 0 {
-		return max
-	}
-	return p
+	return max
 }
 
-// joinable says s may be cut at byte p: on a rune boundary, not before a
-// joiner, variation selector or mark, and not after a joiner, so an emoji
-// built from several characters (👩‍💻) stays in one text.
-func joinable(s string, p int) bool {
-	if !utf8.RuneStart(s[p]) {
-		return false
-	}
-	next, _ := utf8.DecodeRuneInString(s[p:])
-	prev, _ := utf8.DecodeLastRuneInString(s[:p])
-	return prev != '\u200d' && next != '\u200d' && !unicode.Is(unicode.Mn, next) && !unicode.Is(unicode.Me, next) &&
-		!unicode.Is(unicode.Variation_Selector, next) && !(next >= 0x1F3FB && next <= 0x1F3FF)
-}
-
-// clip cuts s to max bytes on a rune boundary, marking the cut.
+// clip cuts s to max units in the encoding it needs (control.Units),
+// where control.Prefix allows, marking the cut.
 func clip(s string, max int) string {
-	if len(s) <= max {
+	if n, _ := control.Units(s); n <= max {
 		return s
 	}
-	cut := max - len("...")
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
+	cut := control.Prefix(s, max-len("..."))
 	if cut <= 0 {
 		return ""
 	}

@@ -1,6 +1,6 @@
 package main
 
-// REQ: CAP-11, CRED-5, RES-5
+// REQ: CAP-11, CRED-5, RES-5, CAP-9, CH-3
 
 import (
 	"context"
@@ -184,7 +184,7 @@ func TestPlanSeederMapsTheRouteControlsErrors(t *testing.T) {
 		{http.StatusServiceUnavailable, "egress busy: too many provider calls", provagent.ErrRouteBusy},
 	} {
 		var closed []string
-		_, err := planSeeder{controlServer(t, c.status, c.body, &closed)}.Seed("codex", "pw-a")
+		_, err := planSeeder{controlServer(t, c.status, c.body, &closed)}.Seed("codex", "pw-a", false)
 		if !errors.Is(err, c.want) {
 			t.Errorf("%d %q = %v, want %v", c.status, c.body, err, c.want)
 		}
@@ -196,7 +196,7 @@ func TestPlanSeederMapsTheRouteControlsErrors(t *testing.T) {
 	}
 	var closed []string
 	s := planSeeder{controlServer(t, http.StatusOK, `{"auth.json":"e30="}`, &closed)}
-	if seed, err := s.Seed("codex", "pw-a"); err != nil || string(seed["auth.json"]) != "{}" {
+	if seed, err := s.Seed("codex", "pw-a", false); err != nil || string(seed["auth.json"]) != "{}" {
 		t.Fatalf("seed %v %v", seed, err)
 	}
 	s.Close("pw-a")
@@ -211,8 +211,39 @@ func TestPlanSeederSeedsCodexOnly(t *testing.T) {
 	var closed []string
 	s := planSeeder{controlServer(t, http.StatusOK, `{"auth.json":"e30="}`, &closed)}
 	for _, p := range []string{"claude", "grok", ""} {
-		if _, err := s.Seed(p, "pw-a"); err == nil || !strings.Contains(err.Error(), "no plan seed") {
+		if _, err := s.Seed(p, "pw-a", false); err == nil || !strings.Contains(err.Error(), "no plan seed") {
 			t.Errorf("%q: %v", p, err)
 		}
+	}
+}
+
+// planSeeder passes the run's label to the vault process, which binds it
+// to the worker's route (CAP-9, CH-3; #2359).
+func TestCAP9PlanSeederPassesThePrivateLabel(t *testing.T) {
+	dir, err := os.MkdirTemp("", "pc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "c.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query().Get("private"))
+		w.Write([]byte(`{"auth.json":"e30="}`))
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	s := planSeeder{modelroute.NewRouteControl(sock)}
+	for _, private := range []bool{true, false} {
+		if _, err := s.Seed("codex", "pw-a", private); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 2 || got[0] != "1" || got[1] != "" {
+		t.Fatalf("seed private params %q, want [1 \"\"]", got)
 	}
 }

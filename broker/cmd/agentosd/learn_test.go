@@ -59,7 +59,7 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	if _, err := lp.eval.Run(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
 		t.Fatalf("evaluation with no evaluator: %v", err)
 	}
-	if _, limit := lp.spare.Overall(); limit != loops.SpareLimits(loops.DefaultSpareCalls) {
+	if _, limit := lp.spare.Overall(); limit != loops.SpareLimits(loops.NoSpareBudget) {
 		t.Fatalf("spare cap %+v", limit)
 	}
 
@@ -102,6 +102,11 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	}
 	if !lp.sched.Settings().Off {
 		t.Fatalf("settings after LOOPS OFF: %+v", lp.sched.Settings())
+	}
+	// Setting a budget from none (LOOP-0) narrows, so it works locked; a
+	// raise from it does not.
+	if got := d.Owner().Handle(ctx, ownerNum, "SPARE BUDGET 100"); len(got) != 1 || lp.sched.Settings().SpareCalls != 100 {
+		t.Fatalf("locked budget from none: %q", got)
 	}
 	if got := d.Owner().Handle(ctx, ownerNum, "SPARE BUDGET 900"); len(got) != 1 || !strings.HasPrefix(got[0], "Locked.") {
 		t.Fatalf("locked raise: %q", got)
@@ -171,7 +176,7 @@ func TestLearningOffIsSaid(t *testing.T) {
 	if len(cfg.Notes) != 1 || cfg.Notes[0]() != learningOffNote {
 		t.Fatalf("STATUS notes: %d", len(cfg.Notes))
 	}
-	if cfg.HelpExtra != learningOffText {
+	if cfg.HelpExtra != learningOffHelp {
 		t.Fatalf("HELP: %q", cfg.HelpExtra)
 	}
 	// One GSM-7 segment, no longer than the loops' own HELP line is allowed

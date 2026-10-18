@@ -95,9 +95,16 @@ type digestConfig struct {
 	// Ready, for the first step after they end (W5-Dc-r1b QH-7). The
 	// digest never reads the hourly allowance (SG-r1-6). Nil: never quiet.
 	Quiet func(time.Time) bool
-	Now   func() time.Time
-	Loc   *time.Location
-	Logf  func(string, ...any)
+	// LineDown reports the owner line cannot carry a text now: ready
+	// batches then wait, Ready and costing no attempt, for the first step
+	// after it is back, so a digest due at boot, before the bridge's first
+	// state report, is not one the link counts missed and owns up to in a
+	// recovery notice (#1291, #2170). A temporary sender change: it lasts
+	// only until DIG-RM-b deletes the digest (D-097). Nil: never down.
+	LineDown func() bool
+	Now      func() time.Time
+	Loc      *time.Location
+	Logf     func(string, ...any)
 	// Forgotten lists the tombstoned goals; every open asks the queue to
 	// forget each before any send (W5-Dc-r12).
 	Forgotten func() []string
@@ -138,6 +145,9 @@ type digestBox struct {
 	// quietWait: the last sendReady found quiet hours, so the first step
 	// after they end sends (W5-Dc-r1b QH-7).
 	quietWait bool
+	// lineWait: the last sendReady found the owner line down, so the first
+	// step after it is back sends.
+	lineWait bool
 	// forgets are the references whose forget the queue has not done
 	// (not open, or refused in flight): open purges them before anything
 	// is sent, and no batch holding one is sent (CAP-3, security B2 on
@@ -339,7 +349,7 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
 		d.lastTry = now
 		d.daily(ctx, now, today)
-	case now.Sub(d.lastTry) >= digestRetry || d.quietWait && !d.quiet(now):
+	case now.Sub(d.lastTry) >= digestRetry || d.quietWait && !d.quiet(now) || d.lineWait && !d.lineDown():
 		d.lastTry = now
 		if d.q == nil {
 			if err := d.openLocked(ctx); err != nil {
@@ -448,11 +458,16 @@ func (d *digestBox) quiet(now time.Time) bool {
 	return d.cfg.Quiet != nil && d.cfg.Quiet(now)
 }
 
+// lineDown reports whether the owner line cannot carry a text now.
+func (d *digestBox) lineDown() bool {
+	return d.cfg.LineDown != nil && d.cfg.LineDown()
+}
+
 // sendReady sends each batch the queue would begin, oldest first. In
-// quiet hours it sends none; they stay Ready and the first step after
-// quiet hours sends them.
+// quiet hours or with the owner line down it sends none; they stay Ready
+// and the first step after either ends sends them.
 func (d *digestBox) sendReady(ctx context.Context, now time.Time) {
-	if d.quietWait = d.quiet(now); d.quietWait {
+	if d.quietWait, d.lineWait = d.quiet(now), d.lineDown(); d.quietWait || d.lineWait {
 		return
 	}
 	bs, err := d.q.List()
@@ -759,6 +774,14 @@ func (s statusSource) Ack(_ context.Context, snap digestqueue.Snapshot) error {
 type digestTransport struct {
 	to   string
 	send func(to, text string) (modemlink.Receipt, error)
+}
+
+// digestLineDown is the digest's LineDown over the modem link: the line
+// is down whenever the local page would say so (OwnerLineNote names every
+// state but a reporting, usable line), as before the bridge's first state
+// report (#1291).
+func digestLineDown(link *modemlink.Link) func() bool {
+	return func() bool { return link.OwnerLineNote() != "" }
 }
 
 // newDigestTransport is the only use of SendReceipt (digestgate_test).
