@@ -47,9 +47,11 @@ func nonHoldingSend(v ast.Expr, want string) bool {
 
 // selfPacing names, per config type, the fields through which the sender
 // paces itself and the agentosd helper each must call: without them a
-// non-holding send would text in the owner's quiet hours (M9-M11).
+// non-holding send would text in the owner's quiet hours (M9-M11), and
+// an uncounted question would follow any owner text, not task chat
+// (#2372).
 var selfPacing = map[string]map[string]string{
-	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours"},
+	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours", "Chat": "questionChatting"},
 }
 
 // TestDeadlineTextsNeverUseTheHoldingPath checks every deadline sender

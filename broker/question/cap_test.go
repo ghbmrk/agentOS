@@ -149,3 +149,45 @@ func TestTheLimitFollowsTexts(t *testing.T) {
 		t.Fatalf("after the hour: %+v", st)
 	}
 }
+
+// TestATagIsNotReusedWhileKept (security B2 on #2372): however many
+// texts TEXTS allows, closed questions keep their tags for the whole of
+// Keep (4 days), so a late "Q100" answer never reaches another
+// lineage's question. Once kept questions would leave no tag for an
+// asker under the open cap, new questions are held, not texted, until
+// the oldest age out.
+func TestATagIsNotReusedWhileKept(t *testing.T) {
+	r := newRig(t, func(c *Config) {
+		c.SendsPerHour, c.PerAsker = 1000, 1
+		c.PerHour = func() int { return 20 }
+		c.MaxSendsPerHour = 1000
+	})
+	if r.b.cfg.Keep != DefaultKeep {
+		t.Fatalf("Keep %v, want %v", r.b.cfg.Keep, DefaultKeep)
+	}
+	seen := map[string]bool{}
+	room := numTags - r.b.cfg.MaxOpen
+	for i := range room {
+		st := r.ask(fmt.Sprintf("burner%d", i), "q", slot())
+		if st.State != Waiting || seen[st.ID] {
+			t.Fatalf("question %d: %+v (tag reused: %v)", i, st, seen[st.ID])
+		}
+		seen[st.ID] = true
+		if _, ok := r.answer(st.ID + " 9:00"); !ok {
+			t.Fatalf("answer %s not taken", st.ID)
+		}
+		r.advance(3*time.Minute + time.Second)
+	}
+	if reply, _ := r.answer("Q100 9:00"); !strings.Contains(reply, "already") {
+		t.Fatalf("a late Q100 answer: %q", reply)
+	}
+	st := r.ask("late", "q", slot())
+	if st.State != Held || seen[st.ID] {
+		t.Fatalf("question past the tag room: %+v", st)
+	}
+	r.advance(DefaultKeep)
+	r.b.Tick(context.Background())
+	if st := r.status("late", "q"); st.State != Waiting {
+		t.Fatalf("after the kept questions aged out: %+v", st)
+	}
+}

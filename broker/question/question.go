@@ -36,7 +36,7 @@ const (
 	DefaultSendsPerHour = 3 // CH-15's default for unsolicited texts
 	// DefaultMaxSendsPerHour is the ceiling on question texts in any hour,
 	// open chat included, once PerHour or Chat is wired: CH-15's highest
-	// TEXTS setting. It bounds how fast tags are used (P3-8 Q5).
+	// TEXTS setting.
 	DefaultMaxSendsPerHour = 20
 	DefaultRestartGrace    = 2 * time.Minute
 	DefaultKeep            = 4 * 24 * time.Hour
@@ -207,8 +207,7 @@ type Config struct {
 	PerAsker, MaxOpen int
 	SendsPerHour      int
 	// MaxSendsPerHour bounds every question text in an hour, counted or
-	// not, so a flooding agent stays bounded in an open chat too, and Keep
-	// is cut so tags never run out. Zero: SendsPerHour when PerHour and
+	// not, so a flooding agent stays bounded in an open chat too. Zero: SendsPerHour when PerHour and
 	// Chat are nil, else DefaultMaxSendsPerHour; never below SendsPerHour.
 	MaxSendsPerHour   int
 	WaitersPerMachine int
@@ -397,17 +396,6 @@ func New(cfg Config) (*Book, error) {
 	if cfg.Mono == nil {
 		origin := time.Now()
 		cfg.Mono = func() time.Duration { return time.Since(origin) }
-	}
-	// Tags are held while their question is kept and was texted (a
-	// question closed unsent frees its tag at once). At most MaxSendsPerHour
-	// texts an hour carry at most MaxPerText questions each, so keeping
-	// them for less than tags/(MaxSendsPerHour*MaxPerText) hours means a tag
-	// is always free for an asker under its open cap (P3-8 Q5).
-	// Open questions hold tags too, and a question texted in the hour
-	// before the oldest kept one closes inside the window, hence the
-	// margins (S1 on #117).
-	if maxKeep := time.Duration((numTags-2*cfg.MaxOpen)/(cfg.MaxSendsPerHour*MaxPerText)-1) * time.Hour; cfg.Keep > maxKeep {
-		cfg.Keep = maxKeep
 	}
 	b := &Book{cfg: cfg}
 	if cfg.Path == "" {
@@ -815,6 +803,23 @@ const (
 	numTags  = 900
 )
 
+// tagRoomLocked is how many more questions may be texted now. A texted
+// question holds its tag until Keep after it closes, and an untexted one
+// only while it is open, so at most numTags-MaxOpen texted questions are
+// kept at once: an asker under the open cap always finds a tag, whatever
+// TEXTS and Keep are, and a tag is never reused while the owner may still
+// answer its question (P3-8 Q5, security B2 on #2372). Past it, questions
+// are held until kept ones age out.
+func (b *Book) tagRoomLocked() int {
+	room := numTags - b.cfg.MaxOpen
+	for _, e := range b.qs {
+		if e.texted() {
+			room--
+		}
+	}
+	return room
+}
+
 // allocLocked returns the next free tag, skipping any still known (open,
 // or closed within Keep), or "" when none is free.
 func (b *Book) allocLocked() string {
@@ -956,7 +961,8 @@ func (b *Book) sendDue(ctx context.Context) {
 		// one that was not, so one lineage cannot take the whole budget;
 		// a question held AgedAfter goes first (PQ5).
 		var batch []*entry
-		if len(b.sends) < b.cfg.MaxSendsPerHour && (chat || counted < b.perHour()) {
+		room := b.tagRoomLocked()
+		if room > 0 && len(b.sends) < b.cfg.MaxSendsPerHour && (chat || counted < b.perHour()) {
 			for tier := range 3 {
 				for _, q := range b.qs {
 					if !b.dueLocked(q, now, trusted, m) {
@@ -991,7 +997,7 @@ func (b *Book) sendDue(ctx context.Context) {
 		text := b.renderBy(batch[0], by(batch[0]))
 		n := 1
 		for _, q := range batch[1:] {
-			if n == MaxPerText {
+			if n == MaxPerText || n == room {
 				break
 			}
 			t := text + " " + b.renderBy(q, by(q))

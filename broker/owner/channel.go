@@ -182,7 +182,11 @@ type Channel struct {
 	rename      *renameReq   // a NAME waiting for its code (name.go)
 	limited     []time.Time
 	active      time.Time // last owner message the control handler ran
-	alertAt     time.Time
+	// chat is when owner task chat last reached the agent, which only an
+	// unlocked session does; control words, settings and answers never
+	// set it (security B1 on #2372).
+	chat    time.Time
+	alertAt time.Time
 	// floodAlertAt is the last flood alert; floods counts the events for
 	// the digest by kind.
 	floodAlertAt time.Time
@@ -284,7 +288,11 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
+	var agent control.Agent
+	if cfg.Agent != nil {
+		agent = chatAgent{Agent: cfg.Agent, c: c}
+	}
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
 		Settings: c.settings, HelpExtra: strings.TrimSpace(cfg.HelpExtra + " " + pacingHelp), Answer: cfg.Answer}
 	return c, nil
 }
@@ -958,6 +966,34 @@ func (c *Channel) Active(d time.Duration) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return !c.active.IsZero() && c.cfg.Now().Sub(c.active) < d
+}
+
+// Chatting reports whether owner task chat reached the agent within the
+// last d: the owner is talking with the agent, so its questions are
+// conversation (CH-15, #2363). Unlike Active, a control word, a setting
+// or a question's answer does not count, since none reaches the agent
+// and each needs only the owner's number, which can be spoofed.
+func (c *Channel) Chatting(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.chat.IsZero() && c.cfg.Now().Sub(c.chat) < d
+}
+
+// chatAgent records when the control handler delivers owner task chat
+// to the agent, which it does only in an unlocked session.
+type chatAgent struct {
+	control.Agent
+	c *Channel
+}
+
+func (a chatAgent) Deliver(ctx context.Context, text string, public bool) error {
+	err := a.Agent.Deliver(ctx, text, public)
+	if err == nil {
+		a.c.mu.Lock()
+		a.c.chat = a.c.cfg.Now()
+		a.c.mu.Unlock()
+	}
+	return err
 }
 
 // LastActive is when the owner last sent a message the control handler

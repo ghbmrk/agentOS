@@ -137,7 +137,7 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		Send:       questionSend(ch.NotifyNow),
 		Converse:   questionSend(ch.Converse),
 		PerHour:    ch.TextsPerHour,
-		Chat:       func() bool { return ch.Active(questionChat) },
+		Chat:       questionChatting(ch),
 		Now:        guard.Now,
 		Quiet:      questionQuiet(ch),
 		QuietHours: questionQuietHours(ch),
@@ -210,9 +210,17 @@ func questionQuietHours(ch quietSource) func() bool {
 	}
 }
 
-// questionChat is how long after the owner's last message their task
-// chat counts as open, so an agent question is conversation (CH-15).
+// questionChat is how long after the owner's last task chat reached the
+// agent their chat counts as open, so an agent question is conversation
+// (CH-15).
 const questionChat = 30 * time.Minute
+
+// questionChatting opens the chat only on task chat the agent got, never
+// on a control word, setting or answer, which a spoofed owner number can
+// send (security B1 on #2372).
+func questionChatting(ch interface{ Chatting(time.Duration) bool }) func() bool {
+	return func() bool { return ch.Chatting(questionChat) }
+}
 
 // questionSend marks the owner channel's refusals, which provably sent
 // nothing, as question.ErrNotSent, so the book keeps those questions
