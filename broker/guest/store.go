@@ -29,9 +29,10 @@ type store struct {
 	outbox  []PendingReply
 	done    []doneReply
 	refused bool // a reply was refused because the outbox was full
-	// unsaved says a forget's write failed, so the file may still hold
-	// replies memory dropped; the next forget writes even with an empty
-	// outbox, and any successful write clears it (CAP-3, #2361).
+	// unsaved says a write that kept its change in memory failed (a
+	// forget's or a retire's), so the file may still hold replies memory
+	// dropped; the next forget writes even with an empty outbox, and any
+	// successful write clears it (CAP-3, #2361).
 	unsaved bool
 }
 
@@ -231,7 +232,8 @@ func (s *store) pending() []PendingReply {
 
 // retire moves machine's reply to id from the outbox to done. Memory
 // changes even if the write fails: the reply was handed on, and the worst
-// a lost write does is hand it on again after a restart.
+// a lost write does is hand it on again after a restart, unless a forget
+// writes first, which unsaved makes it do.
 func (s *store) retire(machine, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -240,6 +242,7 @@ func (s *store) retire(machine, id string) error {
 			s.outbox = append(append([]PendingReply(nil), s.outbox[:i]...), s.outbox[i+1:]...)
 			s.done = addDone(s.done, r)
 			s.refused = false
+			s.unsaved = true
 			return s.save()
 		}
 	}

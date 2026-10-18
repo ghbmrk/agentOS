@@ -367,6 +367,45 @@ func TestDEL1f1ForgetRetryAfterFailedWrite(t *testing.T) {
 	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), "canary-2361") {
 		t.Fatalf("store still holds a dropped reply: %v %s", err, raw)
 	}
+	// The successful write cleared the mark: with nothing waiting, a
+	// forget does not write, so an unwritable store is not an error.
+	r.p.store.path = filepath.Join(path, "not-a-dir", "inbox.json")
+	if err := r.p.ForgetReplies(); err != nil {
+		t.Fatalf("a forget with nothing to drop wrote again: %v", err)
+	}
+	r.p.store.path = good
+	r.p.Shutdown()
+	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
+	if got := r2.p.PendingReplies(); len(got) != 0 {
+		t.Fatalf("after reopen: %+v", got)
+	}
+}
+
+// REQ: CAP-3 (DEL-1-f1a)
+// DEL-1-f1a (#2361): a ReplyDone whose write failed leaves the reply in
+// the file though not in memory; a later forget still writes, so a
+// reopen holds no reply the deletion dropped.
+func TestDEL1f1ForgetAfterFailedReplyDone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	a := r.hand("m1", "book the dentist")
+	if code, _ := r.do("m1", "POST", "/owner/reply", reply(a, "canary-2361-retire booked")); code != 204 {
+		t.Fatalf("reply: %d", code)
+	}
+	good := r.p.store.path
+	r.p.store.path = filepath.Join(path, "not-a-dir", "inbox.json")
+	if err := r.p.ReplyDone("m1", a); err == nil {
+		t.Fatal("a failed write was not reported")
+	}
+	r.p.store.path = good
+	if err := r.p.ForgetReplies(); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), "canary-2361-retire") {
+		t.Fatalf("store still holds a dropped reply: %v %s", err, raw)
+	}
 	r.p.Shutdown()
 	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
 	if got := r2.p.PendingReplies(); len(got) != 0 {
