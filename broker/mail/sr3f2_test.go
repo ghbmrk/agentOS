@@ -13,11 +13,15 @@ import (
 
 // REQ: ADP-2, OP-2, OP-3 (SR3-5-f2a, SR3-5-f2b, SR3-5-f3)
 
-// changed fails unless out is NotApplied for a changed message.
-func changed(t *testing.T, out journal.Outcome) {
+// changed fails unless out is NotApplied with the evidence words want.
+func changed(t *testing.T, out journal.Outcome, want ...string) {
 	t.Helper()
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
-		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	w := "changed since approval"
+	if len(want) > 0 {
+		w = want[0]
+	}
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, w) {
+		t.Fatalf("execute: %s %q, want %q", out.Result, out.Evidence, w)
 	}
 }
 
@@ -47,7 +51,7 @@ func TestDeleteActsOnlyOnTheJudgedMessage(t *testing.T) {
 func TestDeleteWithoutPinDoesNothing(t *testing.T) {
 	x := newH(t, nil)
 	id := x.news(1)
-	changed(t, x.a.Execute(ctx, x.intent(mail.OpDelete, rec(id)), 1))
+	changed(t, x.a.Execute(ctx, x.intent(mail.OpDelete, rec(id)), 1), "no check ran")
 	if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
 		t.Fatalf("moved to %s", folder)
 	}
@@ -168,7 +172,7 @@ func TestNilInUseNeverExpires(t *testing.T) {
 	if e, _ := x.a.Escalate(ctx, in); e.Verb != verb.ChangeAccount {
 		t.Fatalf("recheck: %+v", e)
 	}
-	changed(t, x.a.Execute(ctx, in, 1))
+	changed(t, x.a.Execute(ctx, in, 1), "changed between checks")
 	if folder, flags, _ := x.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
 		t.Fatalf("alert in %s with %v", folder, flags)
 	}
@@ -219,7 +223,7 @@ func TestExpiryKeepsTheJudgementOfADeleteInFlight(t *testing.T) {
 			if _, err := x.a.Escalate(ctx, in); err != nil {
 				t.Fatal(err)
 			}
-			changed(t, x.a.Execute(ctx, in, 1))
+			changed(t, x.a.Execute(ctx, in, 1), "changed between checks")
 			if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
 				t.Fatalf("alert in %s", folder)
 			}

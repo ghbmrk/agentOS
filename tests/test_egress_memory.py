@@ -20,10 +20,11 @@ KiB, MiB, GiB = 1 << 10, 1 << 20, 1 << 30
 RESPONSE_PEAK = 64 * MiB
 # A Fetch asks for at most 100 messages (agentosd's batches; Security l1 on #1658).
 FETCH_BATCH = 100
-# Model calls through the proxy at once; each holds at most one request body in memory. Provider
-# worker routes (#1014 part c, egress K28) add their own process-wide cap, routeCalls in
-# cmd/agentos-egress/workerroute.go, read below and counted on top of this.
-PROXY_CALLS = 16
+# What the proxy's requests in flight may hold at once is DefaultInFlightBytes in egress/proxy.go
+# (egress K18, SR3-mail-k18f), read below: each request reserves what its body costs to read and
+# check before it holds it, a cost egress TestBodyCostBoundsApply measures. Provider worker routes
+# (#1014 part c, egress K28) add their own process-wide cap, routeCalls in
+# cmd/agentos-egress/workerroute.go, also read below; each holds at most one body, counted on top.
 # HW-4's floor has 8 GB; the vault may take at most a quarter of it.
 FLOOR_RAM = 8 * GiB
 
@@ -76,12 +77,11 @@ def gomem(v):
 def legitimate_peak():
     """What the bounded paths can hold live at once: every mail call at its worst (one response
     at the field bound, plus a full Fetch's read budget of kept bodies), one unlock's Argon2id,
-    and the proxy's and the provider worker routes' request bodies."""
+    the proxy's in-flight budget and the provider worker routes' request bodies."""
     fetch_budget = 16 * MiB + FETCH_BATCH * (go_int("mail/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
     mail = go_int("cmd/agentos-egress/mailaccount.go", "mailConns") * (RESPONSE_PEAK + fetch_budget)
-    calls = PROXY_CALLS + go_int("cmd/agentos-egress/workerroute.go", "routeCalls")
-    proxy = calls * go_int("egress/proxy.go", "DefaultMaxBody")
-    return mail + kdf_memory() + proxy
+    routes = go_int("cmd/agentos-egress/workerroute.go", "routeCalls") * go_int("egress/proxy.go", "DefaultMaxBody")
+    return mail + kdf_memory() + go_int("egress/proxy.go", "DefaultInFlightBytes") + routes
 
 
 class VaultMemoryCeiling(unittest.TestCase):
@@ -124,6 +124,16 @@ class VaultMemoryCeiling(unittest.TestCase):
         self.assertEqual(kdf_memory(), 256 * MiB)
         self.assertEqual(go_int("egress/proxy.go", "DefaultMaxBody"), 8 * MiB)
         self.assertEqual(go_int("cmd/agentos-egress/workerroute.go", "routeCalls"), 8)
+        self.assertEqual(go_int("egress/proxy.go", "DefaultInFlightBytes"), 320 * MiB)
+
+    def test_the_proxy_budget_is_global(self):
+        # The figure above bounds the whole process only if admit counts it across machines: a
+        # per-machine cap alone lets every machine hold DefaultMaxConcurrent bodies (#1771).
+        src = (BROKER / "egress/proxy.go").read_text()
+        admit = re.search(r"func \(p \*Proxy\) admit\(.*?\n}\n", src, re.S)
+        self.assertIsNotNone(admit, "Proxy.admit not found")
+        self.assertRegex(admit.group(0), r"p\.reserved\s*\+\s*n\s*>\s*p\.budget")
+        self.assertRegex(src, r"p\.budget\s*=\s*DefaultInFlightBytes")
 
 
 if __name__ == "__main__":

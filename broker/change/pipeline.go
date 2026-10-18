@@ -317,8 +317,12 @@ type Adoption struct {
 	// ConcernStarts: a security Concern on an unprotected adoption whose
 	// image may start before it is undone (SR3-4f-3 B5).
 	ConcernStarts bool `json:"concern_starts,omitempty"`
-	Listed        bool `json:"listed,omitempty"`
-	RevertSeen    bool `json:"revert_seen,omitempty"`
+	// ConcernAt is when that Concern was raised, and ConcernFollowedUp
+	// that its one follow-up line, a day later, was said (SR3-4f-3-f1).
+	ConcernAt         time.Time `json:"concern_at,omitzero"`
+	ConcernFollowedUp bool      `json:"concern_followed_up,omitempty"`
+	Listed            bool      `json:"listed,omitempty"`
+	RevertSeen        bool      `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
 	// GoalVerdicts are the verdicts its goals carried when it was last
@@ -1522,3 +1526,8 @@ func parseID(id string) []string {
 	}
 	return parts
 }
+
+// ConcernFollowUpAfter is how long a security Concern on an unprotected
+// adoption stays not undone before the digest follows it up, once
+// (SR3-4f-3-f1).
+const ConcernFollowUpAfter = 24 * time.Hour

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -155,7 +156,8 @@ type Runner struct {
 // Only a refused login's stop is the owner's to lift: a route stopped for
 // another cause (an unswappable exchange, CRED-5t, which only a release
 // requalifies) stays stopped and SignedIn reports false, as it does when
-// Stops cannot record the reopening.
+// Stops cannot record the reopening. The reopening names the cause, so a
+// stop egress raises after the read below stays (CRED-RS-5).
 func (r *Runner) SignedIn(provider, worker string) bool {
 	if r.SignInStored == nil || !r.SignInStored(worker) { // asked outside mu: it is a vault round trip
 		return false
@@ -167,8 +169,8 @@ func (r *Runner) SignedIn(provider, worker string) bool {
 		if cause != StopLoginRefused {
 			return false
 		}
-		if err := st.ReopenRoute(provider); err != nil {
-			r.logf("provagent: %s route stays stopped: its reopening was not recorded: %v", provider, err)
+		if err := st.ReopenRoute(provider, StopLoginRefused); err != nil {
+			r.logf("provagent: %s route stays stopped: %v", provider, err)
 			return false
 		}
 	}
@@ -188,23 +190,35 @@ const (
 
 // RouteStops is the durable record of stopped routes (the journal's
 // StopRoute, ReopenRoute and RouteStopped). A route stopped twice keeps
-// its first cause.
+// its cause, unless the second outranks it: every cause outranks
+// StopLoginRefused (CRED-RS-4). ReopenRoute lifts a stop only while it has
+// the cause named, and fails otherwise (CRED-RS-5).
 type RouteStops interface {
 	StopRoute(route, cause string) error
-	ReopenRoute(route string) error
+	ReopenRoute(route, cause string) error
 	RouteStopped(route string) (cause string, stopped bool)
 }
+
+var errRouteCause = errors.New("provagent: the route is stopped for another cause")
 
 // memStops keeps route stops for a Runner with no Stops.
 type memStops map[string]string
 
 func (m memStops) StopRoute(route, cause string) error {
-	if _, ok := m[route]; !ok {
+	if cur, ok := m[route]; !ok || cur == StopLoginRefused {
 		m[route] = cause
 	}
 	return nil
 }
-func (m memStops) ReopenRoute(route string) error { delete(m, route); return nil }
+
+func (m memStops) ReopenRoute(route, cause string) error {
+	if cur, ok := m[route]; ok && cur != cause {
+		return errRouteCause
+	}
+	delete(m, route)
+	return nil
+}
+
 func (m memStops) RouteStopped(route string) (string, bool) {
 	c, ok := m[route]
 	return c, ok
@@ -296,6 +310,11 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	fail := func(re Reason) (string, int, string, error) { return "", 0, string(re), refuse(re) }
 	d, ok := r.Decls[q.Provider]
 	if !ok || !contains(d.TaskClasses, q.TaskClass) {
+		return fail(Unqualified)
+	}
+	// No provider runs with the default scan alone (FMT-4).
+	formats, ferr := d.Formats()
+	if ferr != nil {
 		return fail(Unqualified)
 	}
 	g := Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}
@@ -412,10 +431,19 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if scan == nil {
 		scan = LooksLikeCredential
 	}
-	if scan(body) {
+	if scan(body) || matchesAny(formats, body) {
 		return fail(Withheld)
 	}
 	return body, len(body), "ok", nil
+}
+
+func matchesAny(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(l []string, s string) bool {

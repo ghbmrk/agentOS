@@ -3,63 +3,64 @@ package provagent
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/journal"
 )
 
-// REQ: CRED-5, OP-11, CRED-RS-2
+// REQ: CRED-5, OP-11, CRED-RS-2, CRED-RS-5, CRED-RS-6
 
-// stops is a RouteStops whose map outlives the Runner, as the journal does
-// across a restart.
-type stops struct {
-	mu   sync.Mutex
-	m    map[string]string
-	fail bool // every write fails
+// stopStore is a journal store that refuses every write once fail is set,
+// as a full or failing disk does.
+type stopStore struct {
+	journal.MemStore
+	fail bool
 }
 
 var errWrite = errors.New("journal refused the record")
 
-func (s *stops) StopRoute(route, cause string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *stopStore) Append(line []byte) error {
 	if s.fail {
 		return errWrite
 	}
-	if _, ok := s.m[route]; !ok {
-		s.m[route] = cause
-	}
-	return nil
+	return s.MemStore.Append(line)
 }
 
-func (s *stops) ReopenRoute(route string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fail {
-		return errWrite
+// journalStops opens a journal engine over st: the RouteStops agentosd
+// wires, and a restart when opened again over the same store (CRED-RS-6).
+func journalStops(t *testing.T, st journal.Store) *journal.Engine {
+	t.Helper()
+	e, err := journal.Open(st, nil, nil, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
 	}
-	delete(s.m, route)
-	return nil
+	return e
 }
 
-func (s *stops) RouteStopped(route string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.m[route]
+// raising is a RouteStops on which an unswappable exchange raises the stop
+// right after the Runner reads it, as egress may between SignedIn's read
+// and its reopening.
+type raising struct{ *journal.Engine }
+
+func (r raising) RouteStopped(route string) (string, bool) {
+	c, ok := r.Engine.RouteStopped(route)
+	r.Engine.StopRoute(route, StopUnswappable)
 	return c, ok
 }
 
-// CRED-RS-2: a refused login's stop is in the store, so a new Runner over it
+// CRED-RS-2, CRED-RS-6: a refused login's stop is in the journal, so a new Runner over it
 // (the broker restarted, and egress's in-memory refusal is gone) refuses
 // the route, starts nothing and tells the owner once more. Only the owner's
 // sign-in reopens it.
 func TestStoppedRouteSurvivesARestart(t *testing.T) {
-	st := &stops{m: map[string]string{}}
+	store := &journal.MemStore{}
 	g := newRig(nil)
-	g.r.Stops = st
+	g.r.Stops = journalStops(t, store)
 	g.h.cli = g.refuseLogin
 	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != LoginRefused {
 		t.Fatalf("%v", err)
 	}
+	st := journalStops(t, store)
 	if c, ok := st.RouteStopped("stub"); !ok || c != StopLoginRefused {
 		t.Fatalf("store after a refusal: %q %v", c, ok)
 	}
@@ -83,7 +84,7 @@ func TestStoppedRouteSurvivesARestart(t *testing.T) {
 	if !g2.r.SignedIn("stub", "pw-ok") {
 		t.Fatal("a stored sign-in did not reopen the route")
 	}
-	if _, ok := st.RouteStopped("stub"); ok {
+	if _, ok := journalStops(t, store).RouteStopped("stub"); ok {
 		t.Fatal("the reopening is not in the store")
 	}
 	if out, err := g2.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
@@ -91,12 +92,19 @@ func TestStoppedRouteSurvivesARestart(t *testing.T) {
 	}
 }
 
-// CRED-RS-2, CRED-5t: on the store egress shares, a route stopped by an
-// unswappable exchange stays stopped through a sign-in (only a release
-// requalifies it), falls back, and shows no sign-in line, since signing in
-// would not help.
+// CRED-RS-2, CRED-RS-5, CRED-5t: on the journal egress shares, a route
+// stopped by an unswappable exchange stays stopped through a sign-in (only
+// a release requalifies it), falls back, and shows no sign-in line, since
+// signing in would not help. A stop raised between SignedIn's read and its
+// reopening stays too.
 func TestSignedInLeavesAnUnswappableStop(t *testing.T) {
-	st := &stops{m: map[string]string{"stub": "unswappable"}}
+	st := journalStops(t, &journal.MemStore{})
+	if err := st.StopRoute("stub", StopLoginRefused); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StopRoute("stub", StopUnswappable); err != nil {
+		t.Fatal(err)
+	}
 	g := newRig(ok("fine"))
 	g.r.Stops = st
 	g.r.SignInStored = func(string) bool { return true }
@@ -110,17 +118,30 @@ func TestSignedInLeavesAnUnswappableStop(t *testing.T) {
 	if len(g.h.runs) != 0 || len(g.signins) != 0 {
 		t.Fatalf("%d CLI runs, sign-in line %v", len(g.h.runs), g.signins)
 	}
-	if c, _ := st.RouteStopped("stub"); c != "unswappable" {
+	if c, _ := st.RouteStopped("stub"); c != StopUnswappable {
 		t.Fatalf("store: %q", c)
+	}
+
+	st = journalStops(t, &journal.MemStore{})
+	if err := st.StopRoute("stub", StopLoginRefused); err != nil {
+		t.Fatal(err)
+	}
+	g = newRig(ok("fine"))
+	g.r.Stops = raising{st}
+	g.r.SignInStored = func(string) bool { return true }
+	if g.r.SignedIn("stub", "pw-ok") {
+		t.Fatal("a sign-in reopened a stop raised after it read the cause")
+	}
+	if c, ok := st.RouteStopped("stub"); !ok || c != StopUnswappable {
+		t.Fatalf("store after the raced sign-in: %q %v", c, ok)
 	}
 }
 
-// CRED-RS-2: a stop the store cannot record still stops the route in this
+// CRED-RS-2, CRED-RS-6: a stop the journal cannot record still stops the route in this
 // process, and a reopening it cannot record leaves the route stopped.
 func TestRouteStopWriteFailureFailsClosed(t *testing.T) {
-	st := &stops{m: map[string]string{}, fail: true}
 	g := newRig(nil)
-	g.r.Stops = st
+	g.r.Stops = journalStops(t, &stopStore{fail: true})
 	g.h.cli = g.refuseLogin
 	g.r.Run(context.Background(), req("b"))
 	g.advance(1)
@@ -129,7 +150,12 @@ func TestRouteStopWriteFailureFailsClosed(t *testing.T) {
 		t.Fatalf("unrecorded stop: %v, %d runs", err, len(g.h.runs))
 	}
 
-	st = &stops{m: map[string]string{"stub": StopLoginRefused}, fail: true}
+	store := &stopStore{}
+	st := journalStops(t, store)
+	if err := st.StopRoute("stub", StopLoginRefused); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
 	g = newRig(ok("fine"))
 	g.r.Stops = st
 	g.r.SignInStored = func(string) bool { return true }
