@@ -13,8 +13,8 @@
 #          the forwarder, then one `codex exec` whose model call the forwarder refuses, so nothing
 #          is spent. The login lives in the machine's memory overlay and is gone when it exits.
 #   shapes credential shapes for #2313 (SHAPES.md): device sign-in through the forwarder, then
-#          shapes/ reads auth.json inside the machine and writes only shapes to the work volume;
-#          the CLI logs out and auth.json is removed before the machine exits. No model call.
+#          shapes/ reads auth.json inside the machine and prints only shapes to its stdout, which
+#          run.sh cuts into shapes.json; the CLI logs out and auth.json is removed. No model call.
 #   clean  stop the forwarder and remove the work directory.
 # Logs never hold tokens or bodies: fwd.py writes paths, statuses, x-codex-* headers, tool types
 # and key names only.
@@ -86,20 +86,26 @@ EOF
 	jq -c 'del(.t, .req_headers, .body_keys, .resp_keys)' "$W/plan.jsonl"
 	;;
 shapes)
+	# runsc do's in-memory overlay also covers volumes, so nothing the machine writes reaches
+	# $W. The shapes come out on the machine's stdout between markers; auth.json never does.
 	fwd relay "$W/shapes.jsonl"
 	mkdir -p "$W/work"
-	rm -f "$W/work/shapes.json"
+	rm -f "$W/shapes.json" "$W/session.out"
 	cat >"$W/work/session.sh" <<'EOF'
 codex login --experimental_issuer http://127.0.0.1:18432 --device-auth || exit 1
-/opt/relay/shapes /var/lib/agentos-codex/auth.json >/var/lib/agentos-work/shapes.json
+echo "== shapes begin"
+/opt/relay/shapes /var/lib/agentos-codex/auth.json
+echo "== shapes end"
 codex logout >/dev/null 2>&1
 rm -f /var/lib/agentos-codex/auth.json
 echo "== session done"
 EOF
 	echo "Sign-in page for the owner: https://auth.openai.com/codex/device (the CLI prints the forwarder's address)"
-	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh
+	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh | tee "$W/session.out"
 	jq -c '{method, path, status, blocked, error}' "$W/shapes.jsonl"
-	cat "$W/work/shapes.json"
+	sed -n '/^== shapes begin$/,/^== shapes end$/{//!p}' "$W/session.out" >"$W/shapes.json"
+	echo "== shapes.json"
+	cat "$W/shapes.json"
 	;;
 clean)
 	[ -f "$W/fwd.pid" ] && kill "$(cat "$W/fwd.pid")" 2>/dev/null || true
