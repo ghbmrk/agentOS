@@ -5,7 +5,10 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"os"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -79,15 +82,59 @@ func TestShapes(t *testing.T) {
 	}
 }
 
-// The formats checked are the Codex declaration's, verbatim.
+// The formats checked are the Codex declaration's, verbatim and complete: the
+// CredFormats of the declaration whose SignInFrom is "OpenAI" equal formats.
 func TestFormatsMatchDeclaration(t *testing.T) {
-	b, err := os.ReadFile("../../../broker/provagent/declare.go")
+	f, err := parser.ParseFile(token.NewFileSet(), "../../../broker/provagent/declare.go", nil, 0)
 	if err != nil {
-		t.Skip("declare.go not found")
+		t.Fatal(err)
 	}
-	for _, f := range formats {
-		if !strings.Contains(string(b), "`"+f+"`") {
-			t.Errorf("declare.go has no format %s", f)
+	var got [][]string
+	ast.Inspect(f, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
 		}
+		var openai bool
+		var list []string
+		for _, e := range cl.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			switch k, _ := kv.Key.(*ast.Ident); {
+			case k == nil:
+			case k.Name == "SignInFrom":
+				if b, ok := kv.Value.(*ast.BasicLit); ok && b.Value == `"OpenAI"` {
+					openai = true
+				}
+			case k.Name == "CredFormats":
+				fl, ok := kv.Value.(*ast.CompositeLit)
+				if !ok {
+					t.Fatalf("CredFormats is not a literal list")
+				}
+				for _, x := range fl.Elts {
+					b, ok := x.(*ast.BasicLit)
+					if !ok {
+						t.Fatalf("CredFormats holds a non-literal")
+					}
+					v, err := strconv.Unquote(b.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					list = append(list, v)
+				}
+			}
+		}
+		if openai {
+			got = append(got, list)
+		}
+		return true
+	})
+	if len(got) != 1 {
+		t.Fatalf("found %d OpenAI declarations, want 1", len(got))
+	}
+	if strings.Join(got[0], "\n") != strings.Join(formats, "\n") {
+		t.Errorf("declare.go Codex CredFormats %q, extractor %q", got[0], formats)
 	}
 }

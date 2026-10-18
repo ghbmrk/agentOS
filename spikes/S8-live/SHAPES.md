@@ -20,7 +20,7 @@ Not the Mac Studio or the M6: runsc needs Linux.
 ## Run
 
 1. Agent: `GOTOOLCHAIN=go1.26.8 spikes/S8-live/run.sh setup` (builds the pinned Codex rootfs, the
-   relay and `shapes/`).
+   relay and `shapes/`, after its tests pass).
 2. Agent: `spikes/S8-live/run.sh shapes`. Inside a gVisor machine with no network but loopback,
    the CLI runs `codex login --device-auth` against the forwarder (`fwd.py`, relay mode), which
    relays to `auth.openai.com` and swaps the `redirect_uri` (RESULTS.md, #809).

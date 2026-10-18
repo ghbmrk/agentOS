@@ -56,7 +56,7 @@ setup)
 	fi
 	mkdir -p "$W/relay"
 	(cd "$here/relay" && CGO_ENABLED=0 go build -o "$W/relay/relay" .)
-	(cd "$here/shapes" && CGO_ENABLED=0 go build -o "$W/relay/shapes" .)
+	(cd "$here/shapes" && go test . && CGO_ENABLED=0 go build -o "$W/relay/shapes" .)
 	runsc --version | head -1
 	;;
 tools)
