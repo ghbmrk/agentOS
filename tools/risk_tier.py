@@ -267,17 +267,18 @@ def changed_paths(base, head):
     # --no-renames lists a moved file under its old path too, so moving
     # image/build.sh to docs/ is still tier A. -z keeps git from quoting
     # names with non-ASCII bytes, quotes or newlines, which would match
-    # no prefix.
-    paths = _git_paths("diff", "--name-only", "-z", "--no-renames", f"{base}...{head}")
+    # no prefix. --no-relative keeps paths root-relative and whole-repo
+    # under a user's diff.relative=true, wherever the tool runs (RT-3b).
+    paths = _git_paths("diff", "--name-only", "-z", "--no-renames", "--no-relative", f"{base}...{head}")
     if head == "HEAD":
         # A run before commit (#2272): staged, unstaged and untracked paths
         # count too, against the same merge base the committed diff uses.
         mb = subprocess.run(["git", "merge-base", base, head], check=True,
                             capture_output=True, text=True).stdout.strip()
-        paths += _git_paths("diff", "--name-only", "-z", "--no-renames", mb)
+        paths += _git_paths("diff", "--name-only", "-z", "--no-renames", "--no-relative", mb)
         # The index too: a staged file since removed from the worktree still
         # goes into the next commit.
-        paths += _git_paths("diff", "--cached", "--name-only", "-z", "--no-renames", mb)
+        paths += _git_paths("diff", "--cached", "--name-only", "-z", "--no-renames", "--no-relative", mb)
         # --full-name :/ lists the whole repo root-relative, as diff does,
         # whatever the cwd.
         paths += _git_paths("ls-files", "-z", "--others", "--exclude-standard", "--full-name", ":/")
