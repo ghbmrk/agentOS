@@ -247,8 +247,9 @@ func (r *recentWindow) add(t sentText) { r.put(t, nil) }
 // put adds t and prunes the window. Guarded texts are kept apart from the
 // cap on the others, so later box texts never push a live request out
 // (#2392): each kind keeps its latest recentTexts within recentMaxAge, and
-// a request that open reports still open stays until it ages out, so the
-// guarded texts are bounded by MaxOpen too. open is called with the
+// a request that open reports still open stays, uncounted, until it ages
+// out, so there are at most recentTexts plus MaxOpen guarded texts and
+// requests the agent opens never push a box code out. open is called with the
 // channel's mu held. Only a guarded text, put with open, prunes guarded
 // texts; add (open nil) leaves them to age out, since it cannot tell
 // which requests are open.
@@ -268,7 +269,10 @@ func (r *recentWindow) put(t sentText, open func(id string) bool) {
 			if plain++; plain > recentTexts {
 				continue
 			}
-		case open == nil || guarded < recentTexts || slices.ContainsFunc(s.ids, open):
+		case open != nil && slices.ContainsFunc(s.ids, open):
+			// An open request is not counted, so requests the agent opens
+			// never push a box code out.
+		case open == nil || guarded < recentTexts:
 			guarded++
 		default:
 			continue

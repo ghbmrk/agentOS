@@ -660,13 +660,19 @@ func TestShortCutQuoteOfARequestIsAReaction(t *testing.T) {
 		}
 	}
 	reactionsHide(r, "live", quotes, code[:2], code[4:], "YES")
-	if err := r.ch.Converse("Your table is booked for 4829 guests"); err != nil {
+	// A short cut that holds digits of the agent's own text stays chat:
+	// only a guarded text makes such a cut a reaction.
+	if err := r.ch.Converse(`Say "ok" for 4829 guests`); err != nil {
 		t.Fatal(err)
 	}
 	r.inbox()
 	before := len(r.agent.got())
-	r.say("Liked “Agent: Your t")
-	if got := r.agent.got()[before:]; len(got) != 1 || !strings.Contains(got[0], "Liked") {
+	q := `Liked “"ok" for 48”`
+	if n := utf8.RuneCountInString(normQuote(strings.TrimSuffix(strings.TrimPrefix(q, "Liked “"), "”"))); n >= minQuote {
+		t.Fatalf("quote %q is %d runes, want it under minQuote", q, n)
+	}
+	r.say(q)
+	if got := r.agent.got()[before:]; len(got) != 1 || !strings.Contains(got[0], q) {
 		t.Fatalf("agent got %q, want a short cut of its own text as chat", got)
 	}
 	r.advance(time.Minute)
@@ -774,4 +780,45 @@ func TestGuardedTextsAreBoundedByAgeAndOpenRequests(t *testing.T) {
 	if _, ok := w.match("reply yes a1 482913 or no a1.", later); ok || len(w.texts) != 1 {
 		t.Fatalf("window holds %d texts past the age, want only the new one", len(w.texts))
 	}
+}
+
+// CH11-G4: open requests do not count toward the guarded cap, so the agent
+// opening 20 requests cannot push a live box code out of the window.
+func TestOpenRequestsDoNotPushABoxCodeOut(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if err := r.ch.sendTemplate("Your bank sign-in code is 739104, from mail."); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	for i := 0; i < recentTexts; i++ {
+		lowRequest(r)
+	}
+	reactionsHide(r, "live", []string{"Liked “…bank sign-in code is 739104"}, "739104")
+}
+
+// CH11-G4: the channel prunes its guarded texts: past the cap only open
+// requests stay beyond the latest 20.
+func TestChannelBoundsItsGuardedTexts(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, code := lowRequest(r)
+	for i := 0; i < recentTexts+5; i++ {
+		if err := r.ch.sendTemplate("Your code is 5" + strings.Repeat("1", 4+i) + "."); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+	}
+	r.ch.recent.mu.Lock()
+	guarded := 0
+	for _, s := range r.ch.recent.texts {
+		if s.guarded() {
+			guarded++
+		}
+	}
+	r.ch.recent.mu.Unlock()
+	if guarded != recentTexts+1 {
+		t.Fatalf("window holds %d guarded texts, want %d (the latest %d and the open request)", guarded, recentTexts+1, recentTexts)
+	}
+	reactionsHide(r, "live", []string{"Liked “…" + code + " or NO " + id}, code, "YES")
 }
