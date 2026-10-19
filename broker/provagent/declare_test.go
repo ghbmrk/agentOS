@@ -212,22 +212,24 @@ func TestCodexRtFormatRedactsNestedJSONToValidJSON(t *testing.T) {
 
 func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 	cases := map[string]func(d *Declaration){
-		"missing id":          func(d *Declaration) { d.ID = "" },
-		"missing cli":         func(d *Declaration) { d.CLI = "" },
-		"missing version":     func(d *Declaration) { d.Version = "" },
-		"missing argv":        func(d *Declaration) { d.Argv = nil },
-		"no idle argv":        func(d *Declaration) { d.Idle = nil },
-		"relative cwd":        func(d *Declaration) { d.Cwd = "work" },
-		"relative result":     func(d *Declaration) { d.ResultPath = "result" },
-		"no task class":       func(d *Declaration) { d.TaskClasses = nil },
-		"no used-up signal":   func(d *Declaration) { d.UsedUp = nil },
-		"no error events":     func(d *Declaration) { d.ErrorEvents = nil },
-		"no pool":             func(d *Declaration) { d.Pools = nil },
-		"unknown custody":     func(d *Declaration) { d.Custody = "guest-held" },
-		"broker-held no host": func(d *Declaration) { d.Endpoints = nil },
-		"credential in env":   func(d *Declaration) { d.Env = append(d.Env, "X="+canaryToken) },
-		"credential in argv":  func(d *Declaration) { d.Argv = append(d.Argv, canaryToken) },
-		"token-named env":     func(d *Declaration) { d.Env = append(d.Env, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://x") },
+		"missing id":             func(d *Declaration) { d.ID = "" },
+		"missing cli":            func(d *Declaration) { d.CLI = "" },
+		"missing version":        func(d *Declaration) { d.Version = "" },
+		"missing argv":           func(d *Declaration) { d.Argv = nil },
+		"no idle argv":           func(d *Declaration) { d.Idle = nil },
+		"relative cwd":           func(d *Declaration) { d.Cwd = "work" },
+		"relative result":        func(d *Declaration) { d.ResultPath = "result" },
+		"no task class":          func(d *Declaration) { d.TaskClasses = nil },
+		"no used-up signal":      func(d *Declaration) { d.UsedUp = nil },
+		"no error events":        func(d *Declaration) { d.ErrorEvents = nil },
+		"half-filled pool":       func(d *Declaration) { d.Pools = []Pool{{Name: "5h"}} },
+		"no pool, not unmetered": func(d *Declaration) { d.Pools = nil },
+		"unmetered with a pool":  func(d *Declaration) { d.Unmetered = true },
+		"unknown custody":        func(d *Declaration) { d.Custody = "guest-held" },
+		"broker-held no host":    func(d *Declaration) { d.Endpoints = nil },
+		"credential in env":      func(d *Declaration) { d.Env = append(d.Env, "X="+canaryToken) },
+		"credential in argv":     func(d *Declaration) { d.Argv = append(d.Argv, canaryToken) },
+		"token-named env":        func(d *Declaration) { d.Env = append(d.Env, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://x") },
 		"bad verdict": func(d *Declaration) {
 			d.Q = Qualification{CLIVersion: "1.0.0", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: "maybe"}
 		},
@@ -257,7 +259,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 
 func TestBuiltinsLoad(t *testing.T) {
 	bs := Builtins()
-	if len(bs) != 2 {
+	if len(bs) != 3 {
 		t.Fatalf("builtins: %d", len(bs))
 	}
 	for _, d := range bs {
@@ -272,6 +274,10 @@ func TestBuiltinsLoad(t *testing.T) {
 	cl, ok := bs["claude"]
 	if !ok || cl.Custody != WorkerHeld || cl.Q.Verdict != Unclear {
 		t.Errorf("claude: %+v", cl)
+	}
+	g, ok := bs["grok"]
+	if !ok || g.Custody != BrokerHeld || g.Q.Verdict != Allowed || g.Q.Complete() {
+		t.Errorf("grok: %+v", g)
 	}
 }
 
