@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,118 @@ func TestCheckerGetsAReplacedSeed(t *testing.T) {
 	r.clk.add(30 * time.Second)
 	if _, ok, _ := broker.VerifyTOTP(r.code(), 0, true); ok {
 		t.Fatal("the old seed's code still verifies")
+	}
+}
+
+// A checker that is down or fails refuses the unlock and every tier-4
+// approval: no code passes without the checker's match.
+func TestACheckerErrorRefuses(t *testing.T) {
+	failing := func(t *testing.T) string {
+		dir, err := os.MkdirTemp("", "ck")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		l, err := net.Listen("unix", filepath.Join(dir, checker.HandSocket))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"held":false}`)) })
+		mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		mux.HandleFunc("POST /verify", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "broken", http.StatusInternalServerError) })
+		go http.Serve(l, mux)
+		t.Cleanup(func() { l.Close() })
+		return dir
+	}
+	for name, dir := range map[string]func(*testing.T) string{
+		"down":    func(t *testing.T) string { return t.TempDir() },
+		"failing": failing,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFastRig(t, true)
+			r.c.checker = dir(t)
+			if err := r.c.confirm(r.unlock(t), r.code()); err != errInternal {
+				t.Fatalf("unlock with the checker %s: %v", name, err)
+			}
+			if r.phase() == open {
+				t.Fatal("the vault opened")
+			}
+
+			r = newFastRig(t, true)
+			checkerAt(t, r)
+			if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+				t.Fatal(err)
+			}
+			r.c.checker = dir(t)
+			r.clk.add(30 * time.Second)
+			r.c.mu.Lock()
+			err := r.c.approvedLocked(r.code(), "a test change")
+			r.c.mu.Unlock()
+			if err != errInternal {
+				t.Fatalf("approval with the checker %s: %v", name, err)
+			}
+		})
+	}
+}
+
+// Steps the vault spent stay spent on a checker that starts with fresh
+// state (a lost state file, a box newly switched to -checker).
+func TestAFreshCheckerKeepsTheVaultsLastStep(t *testing.T) {
+	r := newFastRig(t, true)
+	code := r.code()
+	if err := r.c.confirm(r.unlock(t), code); err != nil {
+		t.Fatal(err)
+	}
+	r.c.lock()
+	checkerAt(t, r)
+	if err := r.c.confirm(r.unlock(t), code); err == nil || !strings.HasPrefix(err.Error(), "wrong code") {
+		t.Fatalf("a code the vault spent unlocked on a fresh checker: %v", err)
+	}
+}
+
+// The code that confirms a new seed spends its step on the checker too, so
+// the broker cannot spend it again; a confirmation the checker refuses
+// leaves the channel's seed in the checker.
+func TestEnrollCodeSpentOnTheChecker(t *testing.T) {
+	r := newSetupRig(t)
+	ck, broker := checkerAt(t, r)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the checker's seed", ck.Held)
+	uri, err := r.c.enroll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := enrolledSeed(t, uri)
+
+	// The broker spends this step on the checker first: the vault's own
+	// match passes, the checker's refuses, and the channel seed stays.
+	r.clk.add(30 * time.Second)
+	if _, ok, err := broker.VerifyTOTP(r.code(), 0, true); !ok || err != nil {
+		t.Fatalf("broker's code: %t %v", ok, err)
+	}
+	if ok, err := r.c.confirmEnroll(totp(fresh, r.clk.now())); ok || err != nil {
+		t.Fatalf("a step the broker spent confirmed: %t %v", ok, err)
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, err := broker.VerifyTOTP(r.code(), 0, true); !ok || err != nil {
+		t.Fatalf("the checker lost the channel's seed: %t %v", ok, err)
+	}
+
+	r.clk.add(30 * time.Second)
+	code := totp(fresh, r.clk.now())
+	if ok, err := r.c.confirmEnroll(code); !ok || err != nil {
+		t.Fatalf("confirm: %t %v", ok, err)
+	}
+	if _, ok, _ := broker.VerifyTOTP(code, 0, true); ok {
+		t.Fatal("the broker spent the code the confirmation spent")
+	}
+	r.clk.add(30 * time.Second)
+	if _, ok, err := broker.VerifyTOTP(totp(fresh, r.clk.now()), 0, true); !ok || err != nil {
+		t.Fatalf("the new seed on the checker: %t %v", ok, err)
 	}
 }
 

@@ -81,6 +81,34 @@ func (c *custody) matchOnChecker(seed []byte, code string) (int64, bool, error) 
 	return checker.VerifyClient(k.Socket).VerifyTOTP(code, c.st.LastStep, true)
 }
 
+// handChannelSeed puts the vault's channel seed back in the checker, for
+// a confirmEnroll that handed it a pending seed it then did not make the
+// channel's; with no channel seed it takes the checker's back. Caller
+// holds mu and has c.v.
+func (c *custody) handChannelSeed() {
+	k := &holder.Keeper{
+		Socket:  filepath.Join(c.checker, checker.HandSocket),
+		Version: func() uint64 { return 1 }, // a new keeper always hands
+		Secret: func() ([]byte, error) {
+			s, ok := c.v.Secret(SeedName)
+			if !ok {
+				return nil, errNoKey
+			}
+			return []byte(s.Reveal()), nil
+		},
+	}
+	if _, ok := c.v.Secret(SeedName); !ok {
+		c.dropSeed(k)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
+	defer cancel()
+	if _, err := k.Check(ctx); err != nil {
+		// Never leave the pending seed checking the broker's codes.
+		c.dropSeed(k)
+	}
+}
+
 // dropSeed takes the checker's seed back through k and tells the owner if
 // a running checker refused.
 func (c *custody) dropSeed(k *holder.Keeper) {
