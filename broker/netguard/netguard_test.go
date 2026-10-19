@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -473,5 +474,50 @@ func TestLearnUnmapsGatewayExternalResolver(t *testing.T) {
 		if err := p.Check(context.Background(), netip.MustParseAddr(tc.addr), 443, "tcp"); !errors.Is(err, ErrDenied) {
 			t.Errorf("%s: %s must be refused, got %v", tc.name, tc.addr, err)
 		}
+	}
+}
+
+// normalise keeps every mapped prefix length: /96 and longer become the
+// IPv4 prefix they carry, a shorter one stays IPv6 (capped at /56), and an
+// IPv6 prefix that then holds the mapped range adds 0.0.0.0/0 (#2468).
+func TestNormaliseMappedPrefixFailsClosed(t *testing.T) {
+	for in, want := range map[string][]string{
+		"::ffff:192.168.1.1/2":   {"::/2", "0.0.0.0/0"},
+		"::ffff:192.168.1.1/80":  {"::/56", "0.0.0.0/0"},
+		"::ffff:10.0.0.0/95":     {"::/56", "0.0.0.0/0"},
+		"::ffff:0.0.0.0/96":      {"0.0.0.0/0"},
+		"::ffff:192.168.1.0/120": {"192.168.1.0/24"},
+		"0:0:0:1::/64":           {"::/56", "0.0.0.0/0"},
+		"::/0":                   {"::/0", "0.0.0.0/0"},
+		"2001:db8::/32":          {"2001:db8::/32"},
+		"192.168.1.0/24":         {"192.168.1.0/24"},
+	} {
+		got := normalise(Network{Prefixes: []netip.Prefix{netip.MustParsePrefix(in)}}).Prefixes
+		var ws []netip.Prefix
+		for _, w := range want {
+			ws = append(ws, netip.MustParsePrefix(w))
+		}
+		if !slices.Equal(got, ws) {
+			t.Errorf("%s: %v, want %v", in, got, ws)
+		}
+	}
+}
+
+// A learned mapped prefix shorter than /96 refuses the IPv6 addresses it
+// covers and every IPv4 address, mapped or not.
+func TestMappedPrefixShorterThan96IsRefused(t *testing.T) {
+	p := New(Config{})
+	p.Learn(Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("::ffff:192.168.1.1/2")}})
+	for _, a := range []string{"3030::", "8.8.8.8", "::ffff:8.8.8.8"} {
+		if err := p.Check(context.Background(), netip.MustParseAddr(a), 443, "tcp"); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s: %v, want refused", a, err)
+		}
+	}
+	p.Learn(Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("::ffff:192.168.1.1/80")}})
+	if err := p.Check(context.Background(), netip.MustParseAddr("8.8.8.8"), 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Errorf("8.8.8.8 under ::ffff:192.168.1.1/80: %v, want refused", err)
+	}
+	if err := p.Check(context.Background(), netip.MustParseAddr("2606:4700::1111"), 443, "tcp"); err != nil {
+		t.Errorf("2606:4700::1111 is outside ::/56: %v", err)
 	}
 }

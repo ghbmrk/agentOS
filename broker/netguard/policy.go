@@ -226,7 +226,14 @@ func (p *Policy) learnLocked(out Network) {
 	p.gen++
 }
 
-// normalise drops zones, unmaps, and caps IPv6 prefixes at /56.
+// mappedBase is ::ffff:0.0.0.0, the start of the IPv4-mapped range.
+var mappedBase = netip.AddrFrom16([16]byte{10: 0xff, 11: 0xff})
+
+// normalise drops zones, unmaps, and caps IPv6 prefixes at /56. A mapped
+// prefix of /96 or longer is the IPv4 prefix it carries; a shorter one stays
+// an IPv6 prefix, and any IPv6 prefix that then holds the whole mapped range
+// adds 0.0.0.0/0, so no prefix length is dropped or allows less than it
+// covers.
 func normalise(n Network) Network {
 	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), GatewayDev: n.GatewayDev, GatewayMAC: n.GatewayMAC, External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
@@ -238,16 +245,19 @@ func normalise(n Network) Network {
 		}
 		a := pf.Addr().WithZone("")
 		bits := pf.Bits()
-		if a.Is4In6() {
+		if a.Is4In6() && bits >= 96 {
 			a, bits = a.Unmap(), bits-96
-			if bits < 0 {
-				continue
-			}
 		}
 		if a.Is6() && bits > 56 {
 			bits = 56
 		}
-		out.Prefixes = append(out.Prefixes, netip.PrefixFrom(a, bits).Masked())
+		pf = netip.PrefixFrom(a, bits).Masked()
+		out.Prefixes = append(out.Prefixes, pf)
+		// Check unmaps a mapped destination, so an IPv6 prefix that holds
+		// the mapped range holds every IPv4 address.
+		if pf.Contains(mappedBase) {
+			out.Prefixes = append(out.Prefixes, netip.PrefixFrom(netip.IPv4Unspecified(), 0))
+		}
 	}
 	return out
 }
