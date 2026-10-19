@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"io"
 	"net"
@@ -35,14 +36,28 @@ func agentKeyed(r *fastRig, tr http.RoundTripper) *custody {
 // completion and records the key it received.
 func reflector(t *testing.T) (http.RoundTripper, func() []string) {
 	t.Helper()
+	return reflecting(t, false)
+}
+
+// reflecting is reflector; with echo, its answer's content also echoes
+// the key it received and the request body, as a hostile or careless
+// provider might, so a test sees whether redaction takes them out.
+func reflecting(t *testing.T, echo bool) (http.RoundTripper, func() []string) {
+	t.Helper()
 	var mu sync.Mutex
 	var keys []string
 	prov := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		mu.Lock()
-		keys = append(keys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		keys = append(keys, key)
 		mu.Unlock()
+		content := []byte(`"hello"`)
+		if echo {
+			body, _ := io.ReadAll(r.Body)
+			content, _ = json.Marshal("hello " + key + " " + string(body))
+		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":`+string(content)+`},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	}))
 	t.Cleanup(prov.Close)
 	tr := prov.Client().Transport.(*http.Transport).Clone()

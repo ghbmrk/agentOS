@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -280,6 +281,17 @@ type custody struct {
 	// keyCheck sends setup's key checks (setupKey); nil outside tests,
 	// where each check gets the proxy's default transport over guard.
 	keyCheck http.RoundTripper
+	// holders are the -holder socket directories by adapter; empty keeps
+	// every key in this process. keepEvery is the keepers' round, zero
+	// their default; only tests set it (SIM-split-wire).
+	holders   holderDirs
+	keepEvery time.Duration
+	// keys is the open vault as the keepers read it, nil while locked;
+	// keyVer counts key stores, so a keeper hands a replaced key again.
+	keys   atomic.Pointer[vault.Vault]
+	keyVer atomic.Uint64
+	// keep are the keepers running while the vault is open. Guarded by mu.
+	keep *keepers
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing
@@ -664,6 +676,7 @@ func (c *custody) serve(v *vault.Vault) error {
 	c.applyPins(v)
 	c.syncMarksLocked(v)
 	c.syncKeyedLocked(v)
+	c.startKeepersLocked(v)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -1131,6 +1144,7 @@ func (c *custody) discard() {
 		c.timer = nil
 	}
 	c.clearPins()
+	c.stopKeepersLocked()
 	if c.v != nil {
 		c.v.Close()
 	}
@@ -1172,6 +1186,7 @@ func (c *custody) putKeyLocked(name string, value []byte) error {
 		}
 		return errBadCredential
 	}
+	c.keyVer.Add(1)
 	c.syncKeyedLocked(c.v)
 	return nil
 }
