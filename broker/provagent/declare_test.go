@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: CAP-11, CRED-5
@@ -170,6 +172,44 @@ func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
 	} {
 		if m := match(s); m != "" {
 			t.Errorf("%s: matched %q", name, m)
+		}
+	}
+}
+
+// An rt_ token after an escape whose backslash is itself escaped (JSON nested
+// in JSON, such as a log line carrying a JSON-encoded message) is redacted
+// with the whole backslash run, so no lone backslash is left before the
+// placeholder and the output stays valid JSON (#2375).
+// REQ: CRED-7
+func TestCodexRtFormatRedactsNestedJSONToValidJSON(t *testing.T) {
+	r, err := vault.NewRedactor(nil).WithFormats(Builtins()["codex"].CredFormats...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nest := func(s string) string {
+		b, err := json.Marshal(map[string]string{"log": s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tok := range []string{rt40, rtDotted} {
+		body := tok[3:]
+		for _, esc := range []string{`\n`, `\\n`, `"`, `\\u0022`, "\n", `"`} {
+			doc := "pre " + esc + tok + " post"
+			for level := 1; level <= 3; level++ {
+				doc = nest(doc)
+				got := r.Redact([]byte(doc))
+				if !json.Valid(got) {
+					t.Errorf("escape %q level %d: invalid JSON %q", esc, level, got)
+				}
+				for i := 0; i+6 <= len(body); i++ {
+					if strings.Contains(string(got), body[i:i+6]) {
+						t.Errorf("escape %q level %d: leaked %q", esc, level, got)
+						break
+					}
+				}
+			}
 		}
 	}
 }
