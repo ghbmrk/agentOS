@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +187,13 @@ func waitIdle(f *ownerForget) {
 //   - Q3c: recall's OnOpen handed over outside the recall guard, so
 //     recall off is wired as on (JRN-s3-3).
 //   - Q3d: the same, through an unguarded var declaration (JRN-s3-3).
+//   - Q3b: the OnOpen value overwritten before wireResume (JRN-s3-3).
+//   - Q3e..Q3j: recall's OnOpen reached outside the guard through an alias,
+//     a parenthesised receiver or a method expression, or inside it only
+//     through a shadowed recallExec, a dead branch or an uncalled closure
+//     (JRN-s3-3, #2507). JRN-s3-3 checks by go/types object, not spelling.
+//   - R2: lp.attach run in its own goroutine, so the boot's resume can
+//     run before the owner channel is attached (JRN-s3-2).
 //
 // Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
@@ -192,6 +205,8 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		}
 	})
 	runBoot := "if resumeBoot != nil {\n\t\t\tresumeBoot()\n\t\t}\n"
+	wire := "\t\tresumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)\n"
+	guarded := "\t\t\tonOpen = recallExec.OnOpen\n"
 	for _, m := range []struct {
 		name, old, new, req string
 	}{
@@ -204,6 +219,14 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 			"\t\tonOpen = recallExec.OnOpen\n", "JRN-s3-3"},
 		{"Q3d OnOpen in an unguarded var declaration", "\t\tvar onOpen func(func())\n\t\tif recallDir != \"\" && verifier != nil {\n\t\t\tonOpen = recallExec.OnOpen\n\t\t}\n",
 			"\t\tvar onOpen func(func()) = recallExec.OnOpen\n", "JRN-s3-3"},
+		{"Q3b OnOpen overwritten before wireResume", wire, "\t\tonOpen = nil\n" + wire, "JRN-s3-3"},
+		{"Q3e OnOpen through a receiver alias outside the guard", wire, "\t\tre := recallExec\n\t\tonOpen = re.OnOpen\n" + wire, "JRN-s3-3"},
+		{"Q3f OnOpen through a parenthesised receiver outside the guard", wire, "\t\tonOpen = (recallExec).OnOpen\n" + wire, "JRN-s3-3"},
+		{"Q3g OnOpen as a method expression outside the guard", wire, "\t\t(*recalltool.LateExecutor).OnOpen(recallExec, func() {})\n" + wire, "JRN-s3-3"},
+		{"Q3h OnOpen of a shadowed recallExec", guarded, "\t\t\trecallExec := &recalltool.LateExecutor{}\n" + guarded, "JRN-s3-3"},
+		{"Q3i OnOpen in a dead branch", guarded, "\t\t\tif false {\n\t" + guarded + "\t\t\t}\n", "JRN-s3-3"},
+		{"Q3j OnOpen in an uncalled closure", guarded, "\t\t\t_ = func() { onOpen = recallExec.OnOpen }\n", "JRN-s3-3"},
+		{"R2 lp.attach in its own goroutine", "\t\tlp.attach(ctx, d)\n", "\t\tgo lp.attach(ctx, d)\n", "JRN-s3-2"},
 	} {
 		t.Run(m.req+" "+m.name+" fails", func(t *testing.T) {
 			src := srcs["main.go"]
@@ -232,15 +255,17 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	}
 }
 
-// forgetResumeWiring parses agentosd's sources and lists each way the
-// forget resume is wired wrong, each prefixed with the requirement it
-// breaks.
+// forgetResumeWiring parses agentosd's sources, type-checks the ones this
+// build compiles, and lists each way the forget resume is wired wrong,
+// each prefixed with the requirement it breaks.
 func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
+	tc := agentosdTypes(t)
 	var bad []string
 	fset := token.NewFileSet()
-	calls, onOpen, boots := 0, 0, 0
+	calls, boots := 0, 0
 	var main *ast.File
+	var files []*ast.File
 	for name, src := range srcs {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
@@ -248,6 +273,9 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 		if name == "main.go" {
 			main = f
+		}
+		if tc.goFiles[name] {
+			files = append(files, f)
 		}
 		for _, d := range f.Decls {
 			fn, _ := d.(*ast.FuncDecl)
@@ -268,10 +296,6 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 							}
 						}
 					}
-				case *ast.SelectorExpr:
-					if name == "main.go" && isSel(n, "recallExec", "OnOpen") {
-						onOpen++
-					}
 				case *ast.CallExpr:
 					if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "resumeBoot" && name == "main.go" {
 						boots++
@@ -281,29 +305,56 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 			})
 		}
 	}
-	if calls != 1 || onOpen != 1 || boots == 0 {
-		bad = append(bad, fmt.Sprintf("wiring: main wires the forget resume %d times (want 1), passes recall's OnOpen %d times (want 1), runs the boot's resume %d times (want some)", calls, onOpen, boots))
+	if calls != 1 || boots == 0 {
+		bad = append(bad, fmt.Sprintf("wiring: main wires the forget resume %d times (want 1), runs the boot's resume %d times (want some)", calls, boots))
 	}
 	if main == nil {
 		return append(bad, "wiring: no main.go")
 	}
+	if len(files) != len(tc.goFiles) {
+		t.Fatalf("type-check: %d of the build's %d files given", len(files), len(tc.goFiles))
+	}
+	info := &types.Info{
+		Defs:       map[*ast.Ident]types.Object{},
+		Uses:       map[*ast.Ident]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+	}
+	// Soft errors (a variable declared and not used, as in Q3) still
+	// leave info whole; anything else is a mutant that does not parse as Go.
+	conf := types.Config{Importer: tc.imp, Error: func(err error) {
+		if te, ok := err.(types.Error); !ok || !te.Soft {
+			t.Fatalf("type-check: %v", err)
+		}
+	}}
+	pkg, _ := conf.Check(tc.path, fset, files, info)
+	inMain := func(n ast.Node) bool { return n.Pos() >= main.Pos() && n.End() <= main.End() }
 
-	// Positions in main.go of the calls the order rests on.
+	// Positions in main.go of the calls the order rests on, and the
+	// block each statement sits in directly.
 	var resumes, attaches, agents []token.Pos
 	var wires []*ast.CallExpr
-	fromOnOpen := map[string]bool{}
-	var arms, guards []*ast.IfStmt
-	var onOpens []*ast.SelectorExpr
+	async := map[*ast.CallExpr]bool{}
+	assigns := map[ast.Expr]*ast.AssignStmt{}
+	block := map[ast.Stmt]*ast.BlockStmt{}
+	var arms []*ast.IfStmt
 	ast.Inspect(main, func(n ast.Node) bool {
 		switch n := n.(type) {
+		case *ast.GoStmt:
+			async[n.Call] = true
+		case *ast.DeferStmt:
+			async[n.Call] = true
+		case *ast.BlockStmt:
+			for _, s := range n.List {
+				block[s] = n
+			}
 		case *ast.CallExpr:
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "resumeBoot" {
 				resumes = append(resumes, n.Pos())
 			}
-			if isSel(n.Fun, "lp", "attach") {
+			if isSel(n.Fun, "lp", "attach") && !async[n] {
 				attaches = append(attaches, n.Pos())
 			}
-			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Store" {
+			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Store" && !async[n] {
 				if a, ok := s.X.(*ast.SelectorExpr); ok && a.Sel.Name == "agent" {
 					if o, ok := a.X.(*ast.SelectorExpr); ok && o.Sel.Name == "forgetOwner" {
 						agents = append(agents, n.Pos())
@@ -314,27 +365,12 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 				wires = append(wires, n)
 			}
 		case *ast.AssignStmt:
-			for i, l := range n.Lhs {
-				if id, ok := l.(*ast.Ident); ok && i < len(n.Rhs) && isSel(n.Rhs[i], "recallExec", "OnOpen") {
-					fromOnOpen[id.Name] = true
-				}
-			}
-		case *ast.ValueSpec:
-			for i, id := range n.Names {
-				if i < len(n.Values) && isSel(n.Values[i], "recallExec", "OnOpen") {
-					fromOnOpen[id.Name] = true
-				}
-			}
-		case *ast.SelectorExpr:
-			if isSel(n, "recallExec", "OnOpen") {
-				onOpens = append(onOpens, n)
+			if n.Tok == token.ASSIGN && len(n.Lhs) == 1 && len(n.Rhs) == 1 {
+				assigns[n.Rhs[0]] = n
 			}
 		case *ast.IfStmt:
-			if types.ExprString(n.Cond) == `recallDir != "" && verifier != nil` {
-				if n.Else != nil {
-					arms = append(arms, n)
-				}
-				guards = append(guards, n)
+			if types.ExprString(n.Cond) == `recallDir != "" && verifier != nil` && n.Else != nil {
+				arms = append(arms, n)
 			}
 		}
 		return true
@@ -356,9 +392,10 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 	}
 
 	// JRN-s3-2: every resumeBoot() comes after lp.attach( and
-	// forgetOwner.agent.Store( in source order.
+	// forgetOwner.agent.Store( in source order, each run in place (not in
+	// a go or defer statement).
 	if len(attaches) == 0 || len(agents) == 0 {
-		bad = append(bad, fmt.Sprintf("JRN-s3-2: main.go calls lp.attach %d times and forgetOwner.agent.Store %d times (want some of each)", len(attaches), len(agents)))
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: main.go calls lp.attach %d times and forgetOwner.agent.Store %d times in place (want some of each)", len(attaches), len(agents)))
 	}
 	for _, r := range resumes {
 		for _, p := range append(append([]token.Pos(nil), attaches...), agents...) {
@@ -368,34 +405,180 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 	}
 
-	// JRN-s3-3: wireResume's second argument is assigned from
-	// recallExec.OnOpen.
+	// JRN-s3-3: wireResume's second argument is a variable declared
+	// without a value, set only from recallExec.OnOpen as a statement
+	// directly in the recall guard's body, which sits in the same block as
+	// the wireResume call and before it; nothing else in main.go reaches
+	// recall's OnOpen or that variable. Checked by go/types object, so
+	// aliases, parentheses, method expressions and shadowing count.
 	if len(wires) != 1 {
 		bad = append(bad, fmt.Sprintf("JRN-s3-3: main.go calls wireResume %d times (want 1)", len(wires)))
 	}
 	for _, w := range wires {
-		var id *ast.Ident
-		if len(w.Args) == 2 {
-			id, _ = w.Args[1].(*ast.Ident)
-		}
-		if id == nil || !fromOnOpen[id.Name] {
-			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume's second argument is not assigned from recallExec.OnOpen", fset.Position(w.Pos())))
-		}
-	}
-	// Recall's OnOpen appears only inside the recall guard's body, in any
-	// statement: unguarded, recall off would be wired as on.
-	for _, a := range onOpens {
-		guarded := false
-		for _, g := range guards {
-			if a.Pos() >= g.Body.Pos() && a.End() <= g.Body.End() {
-				guarded = true
-			}
-		}
-		if !guarded {
-			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: recallExec.OnOpen outside the body of `if recallDir != \"\" && verifier != nil`", fset.Position(a.Pos())))
+		if p := onOpenWiring(pkg, info, main, inMain, w, assigns, block); p != "" {
+			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: %s", fset.Position(w.Pos()), p))
 		}
 	}
 	return bad
+}
+
+// onOpenWiring says how the wireResume call w is not handed recall's
+// OnOpen as JRN-s3-3 requires, or "" when it is.
+func onOpenWiring(pkg *types.Package, info *types.Info, main *ast.File, inMain func(ast.Node) bool, w *ast.CallExpr, assigns map[ast.Expr]*ast.AssignStmt, block map[ast.Stmt]*ast.BlockStmt) string {
+	var onOpenFn types.Object
+	for _, p := range pkg.Imports() {
+		if p.Path() == "github.com/ghbmrk/agentos/broker/recalltool" {
+			if le := p.Scope().Lookup("LateExecutor"); le != nil {
+				onOpenFn, _, _ = types.LookupFieldOrMethod(types.NewPointer(le.Type()), false, p, "OnOpen")
+			}
+		}
+	}
+	if onOpenFn == nil {
+		return "no recalltool.LateExecutor.OnOpen"
+	}
+	var recallExec []types.Object
+	for id, obj := range info.Defs {
+		if id.Name == "recallExec" && obj != nil && inMain(id) {
+			recallExec = append(recallExec, obj)
+		}
+	}
+	if len(recallExec) != 1 {
+		return fmt.Sprintf("main.go declares recallExec %d times (want 1)", len(recallExec))
+	}
+	var uses []*ast.SelectorExpr
+	for sel, s := range info.Selections {
+		if s.Obj() == onOpenFn && inMain(sel) {
+			uses = append(uses, sel)
+		}
+	}
+	if len(uses) != 1 {
+		return fmt.Sprintf("main.go reaches recall's OnOpen %d times (want 1)", len(uses))
+	}
+	use := uses[0]
+	if id, ok := use.X.(*ast.Ident); !ok || info.Uses[id] != recallExec[0] {
+		return "recall's OnOpen is not taken from recallExec"
+	}
+	set := assigns[use]
+	if set == nil {
+		return "recallExec.OnOpen is not the whole right side of an assignment"
+	}
+	guard := (*ast.IfStmt)(nil)
+	if b := block[set]; b != nil {
+		ast.Inspect(main, func(n ast.Node) bool {
+			if g, ok := n.(*ast.IfStmt); ok && g.Body == b {
+				guard = g
+			}
+			return guard == nil
+		})
+	}
+	if guard == nil || types.ExprString(guard.Cond) != `recallDir != "" && verifier != nil` {
+		return "recallExec.OnOpen is not set directly in the body of `if recallDir != \"\" && verifier != nil`"
+	}
+	if len(w.Args) != 2 {
+		return "wireResume does not take two arguments"
+	}
+	arg, _ := w.Args[1].(*ast.Ident)
+	v, _ := info.Uses[arg].(*types.Var)
+	lhs, _ := set.Lhs[0].(*ast.Ident)
+	if arg == nil || v == nil || lhs == nil || info.Uses[lhs] != v {
+		return "wireResume's second argument is not the variable set from recallExec.OnOpen"
+	}
+	n := 0
+	for _, obj := range info.Uses {
+		if obj == v {
+			n++
+		}
+	}
+	if n != 2 {
+		return fmt.Sprintf("the variable set from recallExec.OnOpen is used %d times (want 2: set, then passed)", n)
+	}
+	var spec *ast.ValueSpec
+	ast.Inspect(main, func(n ast.Node) bool {
+		if s, ok := n.(*ast.ValueSpec); ok {
+			for _, id := range s.Names {
+				if info.Defs[id] == v {
+					spec = s
+				}
+			}
+		}
+		return true
+	})
+	if spec == nil || len(spec.Values) != 0 {
+		return "the variable set from recallExec.OnOpen is not declared without a value"
+	}
+	var call ast.Stmt
+	for s := range block {
+		if a, ok := s.(*ast.AssignStmt); ok && len(a.Rhs) == 1 && a.Rhs[0] == ast.Expr(w) {
+			call = s
+		}
+	}
+	if call == nil || block[call] != block[guard] || guard.Pos() > call.Pos() {
+		return "the recall guard is not in the wireResume call's block, before it"
+	}
+	return ""
+}
+
+// agentosdTyping is what type-checking agentosd needs: its import path,
+// the files this build compiles and an importer over the export data go
+// list builds for its imports.
+type agentosdTyping struct {
+	path    string
+	goFiles map[string]bool
+	imp     types.Importer
+}
+
+var agentosdTyped *agentosdTyping
+
+func agentosdTypes(t *testing.T) *agentosdTyping {
+	t.Helper()
+	if agentosdTyped != nil {
+		return agentosdTyped
+	}
+	cmd := exec.Command("go", "list", "-export", "-deps", "-json=ImportPath,Export,GoFiles,DepOnly,Error", ".")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, stderr.String())
+	}
+	tc := &agentosdTyping{goFiles: map[string]bool{}}
+	export := map[string]string{}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var p struct {
+			ImportPath, Export string
+			GoFiles            []string
+			DepOnly            bool
+			Error              *struct{ Err string }
+		}
+		if err := dec.Decode(&p); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if p.Error != nil {
+			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
+		}
+		export[p.ImportPath] = p.Export
+		if !p.DepOnly {
+			tc.path = p.ImportPath
+			for _, f := range p.GoFiles {
+				tc.goFiles[f] = true
+			}
+		}
+	}
+	if tc.path == "" {
+		t.Fatal("go list did not list agentosd")
+	}
+	tc.imp = importer.ForCompiler(token.NewFileSet(), "gc", func(path string) (io.ReadCloser, error) {
+		e, ok := export[path]
+		if !ok || e == "" {
+			return nil, fmt.Errorf("no export data for %s", path)
+		}
+		return os.Open(e)
+	})
+	agentosdTyped = tc
+	return tc
 }
 
 // isSel reports whether e is x.sel.
