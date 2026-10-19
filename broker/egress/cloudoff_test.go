@@ -1,7 +1,9 @@
 package egress
 
 import (
+	"fmt"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -41,13 +43,25 @@ func TestCLIGuestCloudEndpointRefusedNoCredential(t *testing.T) {
 	if r.up.count() != 0 {
 		t.Fatalf("a cloud request reached the provider: %v", r.up.urls)
 	}
-	// The run host carries only the model call and the model list: any
-	// other path there is a cloud or remote feature the route must not
-	// declare (ARC-3).
+	// The route declares exactly the model call, the model list, the
+	// refresh and the sign-in exchanges, on every host: any other endpoint
+	// is a cloud, sync or telemetry feature the route must not declare
+	// (ARC-3), and the credential would be injected there.
+	want := []string{
+		"code POST auth.openai.com/oauth/token code signin=true",
+		"devicetoken POST auth.openai.com/api/accounts/deviceauth/token device signin=true",
+		"models GET chatgpt.com/backend-api/codex/models read signin=false",
+		"refresh POST auth.openai.com/oauth/token refresh signin=false",
+		"responses POST chatgpt.com/backend-api/codex/responses responses signin=false",
+		"usercode POST auth.openai.com/api/accounts/deviceauth/usercode device signin=true",
+	}
+	var got []string
 	for _, e := range Codex().Endpoints {
-		if e.Host == "chatgpt.com" && e.Path != "/backend-api/codex/responses" && e.Path != "/backend-api/codex/models" {
-			t.Errorf("codex route declares %s %s", e.Method, e.Path)
-		}
+		got = append(got, fmt.Sprintf("%s %s %s%s %s signin=%t", e.Name, e.Method, e.Host, e.Path, e.Kind, e.SignIn))
+	}
+	sort.Strings(got)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("codex route endpoints:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

@@ -5,9 +5,11 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -537,5 +539,29 @@ func TestCodexCloudOffIsPinnedInManagedConfig(t *testing.T) {
 		if !pinned[e] {
 			t.Errorf("codex cloud-off %q is not pinned in managed_config.toml", e)
 		}
+	}
+}
+
+// REQ: ARC3-C2
+// The codex declaration's hosts are exactly the egress route's, so an
+// endpoint on a host the declaration does not name (or the reverse) fails.
+func TestCodexEndpointsMatchTheEgressRoute(t *testing.T) {
+	route := egress.Codex()
+	if route.Provider != "codex" {
+		t.Fatalf("route provider %q", route.Provider)
+	}
+	hosts := map[string]bool{}
+	for _, e := range route.Endpoints {
+		hosts[e.Host] = true
+	}
+	var got []string
+	for h := range hosts {
+		got = append(got, h)
+	}
+	want := append([]string(nil), Builtins()["codex"].Endpoints...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("route hosts %v, declared %v", got, want)
 	}
 }
