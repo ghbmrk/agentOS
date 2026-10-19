@@ -9,8 +9,9 @@
 // Three sockets, each with its own closed set and its own peer uid:
 // the hand socket (the unlock step: GET /state, PUT and DELETE /secret, as
 // holders, and POST /verify for the unlock's own code, which approves no
-// acts), the verify socket (the broker: POST /verify, and POST /revoke,
-// which only withdraws approvals, as an UNDO does) and the redeem
+// acts), the verify socket (the broker: POST /verify; POST /revoke,
+// which only withdraws approvals, as an UNDO does; and POST /release,
+// which lets a held approval a code already made be spent) and the redeem
 // socket (the key holders: POST /redeem). None reads the seed back.
 package checker
 
@@ -57,11 +58,12 @@ const (
 // of a CH-10 code.
 const ApprovalTTL = 15 * time.Minute
 
-// MaxActs bounds the acts one code approves, MaxWait an act's wait (the
-// longest undo window a held act may have) and maxSeed the seed's size.
+// MaxActs bounds the acts one code approves, MaxHold how long a held
+// approval waits for its release before it lapses, and maxSeed the
+// seed's size.
 const (
 	MaxActs = 64
-	MaxWait = 7 * 24 * time.Hour
+	MaxHold = 7 * 24 * time.Hour
 	maxSeed = 4 << 10
 )
 
@@ -126,9 +128,12 @@ type Checker struct {
 	approvals    map[string]window // memory only
 }
 
-// window is when an approval may be spent: from its wait's end until
-// ApprovalTTL later.
-type window struct{ from, until time.Time }
+// window is when an approval lapses, and held while it waits for its
+// release and cannot be spent.
+type window struct {
+	until time.Time
+	held  bool
+}
 
 // New loads the state file, if there is one, and returns a checker that
 // holds no seed.
@@ -198,8 +203,8 @@ func since(ts []time.Time, cut time.Time) []time.Time {
 // Verify checks an owner code-generator code (CH-4): the current step or
 // the one before, after both after and the durable last step. A match
 // spends the step (on disk before the answer) and records one approval
-// per act, each redeemable once within ApprovalTTL after its wait (CH-10,
-// REV-3). counted picks the bucket a wrong code is charged to.
+// per act, each redeemable once within ApprovalTTL, a held act's only
+// after its release (CH-10, REV-3). counted picks the bucket a wrong code is charged to.
 func (c *Checker) Verify(code string, after int64, counted bool, acts []checkersock.Act) (int64, bool, error) {
 	if counted {
 		return c.verify(code, after, &c.wrongCounted, MaxWrongCounted, acts)
@@ -223,7 +228,7 @@ func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit in
 		return 0, false, fmt.Errorf("checker: more than %d acts", MaxActs)
 	}
 	for _, a := range acts {
-		if !validAct(a.Act) || a.Wait < 0 || a.Wait > int64(MaxWait/time.Second) {
+		if !validAct(a.Act) {
 			return 0, false, errors.New("checker: malformed act")
 		}
 	}
@@ -258,8 +263,11 @@ func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit in
 	c.st = next
 	c.sweepLocked(now)
 	for _, a := range acts {
-		from := now.Add(time.Duration(a.Wait) * time.Second)
-		c.approvals[a.Act] = window{from: from, until: from.Add(ApprovalTTL)}
+		if a.Held {
+			c.approvals[a.Act] = window{until: now.Add(MaxHold), held: true}
+		} else {
+			c.approvals[a.Act] = window{until: now.Add(ApprovalTTL)}
+		}
 	}
 	return step, true, nil
 }
@@ -273,13 +281,13 @@ func (c *Checker) sweepLocked(now time.Time) {
 }
 
 // Redeem spends act's approval: true at most once per approval, and only
-// within its window. A try before the wait ends spends nothing.
+// before it lapses. A try on a held approval spends nothing.
 func (c *Checker) Redeem(act string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w, ok := c.approvals[act]
 	now := c.now()
-	if !ok || now.Before(w.from) {
+	if !ok || w.held {
 		return false
 	}
 	delete(c.approvals, act)
@@ -293,6 +301,22 @@ func (c *Checker) Revoke(acts []string) {
 	defer c.mu.Unlock()
 	for _, a := range acts {
 		delete(c.approvals, a)
+	}
+}
+
+// Release lets held approvals be spent, each within ApprovalTTL from now.
+// It opens only an approval an owner's code made, so the broker gains
+// nothing it could not have asked for unheld; it asks once the item's
+// UNDO is closed.
+func (c *Checker) Release(acts []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	c.sweepLocked(now)
+	for _, a := range acts {
+		if w, ok := c.approvals[a]; ok && w.held {
+			c.approvals[a] = window{until: now.Add(ApprovalTTL)}
+		}
 	}
 }
 
@@ -345,8 +369,15 @@ func decode(r *http.Request, v any) error {
 func (c *Checker) verifyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /verify", c.serveVerify(true))
-	mux.HandleFunc("POST /revoke", func(w http.ResponseWriter, r *http.Request) {
-		var req checkersock.RevokeRequest
+	mux.HandleFunc("POST /revoke", c.serveActs(c.Revoke))
+	mux.HandleFunc("POST /release", c.serveActs(c.Release))
+	return mux
+}
+
+// serveActs answers POST /revoke or /release with do.
+func (c *Checker) serveActs(do func([]string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req checkersock.ActsRequest
 		if err := decode(r, &req); err != nil || len(req.Acts) > MaxActs {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
@@ -357,10 +388,9 @@ func (c *Checker) verifyHandler() http.Handler {
 				return
 			}
 		}
-		c.Revoke(req.Acts)
+		do(req.Acts)
 		w.WriteHeader(http.StatusNoContent)
-	})
-	return mux
+	}
 }
 
 // serveVerify answers POST /verify; withActs false (the hand socket)

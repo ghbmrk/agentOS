@@ -459,13 +459,13 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	}
 	// The approved items' acts go with the code, so the checker approves
 	// exactly the bytes the owner approved and no others (CH-4, CH-10).
-	// A held item's approval opens only when its undo window has passed
-	// (less a second of clock slack, so it is open when the item is
-	// released), so the act cannot be spent while UNDO can still stop it.
+	// A held item's approval opens only when the channel releases the
+	// item (DueAutoReplies), after UNDO can no longer reach it, so the act
+	// cannot be spent while UNDO can still stop it.
 	var acts []CheckerAct
 	for i, it := range r.items {
 		if !r.done[i] && (all || chosen[i]) && it.Act != "" {
-			acts = append(acts, CheckerAct{Act: it.Act, Wait: heldWait(it.UndoWindow)})
+			acts = append(acts, CheckerAct{Act: it.Act, Held: it.UndoWindow > 0})
 		}
 	}
 	ok, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
@@ -583,20 +583,21 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix st
 	return s + fail
 }
 
-// heldWait is how long the checker keeps a held act's approval shut: the
-// item's undo window less a second of clock slack, in whole seconds, as
-// the checker counts them (REV-3).
-func heldWait(undo time.Duration) time.Duration {
-	if undo <= time.Second {
-		return 0
-	}
-	return (undo - time.Second).Truncate(time.Second)
-}
-
 // revoke withdraws the approvals of acts the channel will not run (REV-3).
 // A Verifier that cannot revoke has nothing withdrawn, which is an error
 // when there is something to withdraw.
 func (c *Channel) revoke(acts ...string) error {
+	return c.actsDo(acts, Revoker.RevokeActs)
+}
+
+// release opens the approvals of held acts whose items have left the
+// queue UNDO reads (REV-3). A Verifier that cannot release opens nothing,
+// which is an error when there is something to open.
+func (c *Channel) release(acts ...string) error {
+	return c.actsDo(acts, Revoker.ReleaseActs)
+}
+
+func (c *Channel) actsDo(acts []string, do func(Revoker, ...string) error) error {
 	var some []string
 	for _, a := range acts {
 		if a != "" {
@@ -609,9 +610,9 @@ func (c *Channel) revoke(acts ...string) error {
 	acts = some
 	rv, ok := c.codes.verify.(Revoker)
 	if !ok {
-		return errors.New("owner: verifier cannot revoke")
+		return errors.New("owner: verifier cannot revoke or release")
 	}
-	return rv.RevokeActs(acts...)
+	return do(rv, acts...)
 }
 
 // findLocked resolves which request a reply answers.
@@ -679,7 +680,7 @@ func (c *Channel) closeLocked(r *request, pick func(int) (settle, approve bool),
 // request while the record cannot be saved, and the first save that
 // works writes the retirement with it. A restart before then carries the
 // request to Reissue; the gate skips an intent whose answer it journaled.
-func (c *Channel) retireLocked(id string, now time.Time) {
+func (c *Channel) retireLocked(id string, now time.Time) error {
 	retire := func(s *State) {
 		var p []PendingRef
 		for _, x := range s.Pending {
@@ -707,9 +708,10 @@ func (c *Channel) retireLocked(id string, now time.Time) {
 		retire(&next)
 		c.codes.st = next
 		c.retireErr = fmt.Errorf("owner: retiring request %s was not saved: %w", id, err)
-		return
+		return c.retireErr
 	}
 	c.retireErr = nil
+	return nil
 }
 
 // RetireErr reports a retirement whose save failed, or nil once a later

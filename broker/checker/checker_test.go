@@ -124,36 +124,51 @@ func TestVerifiedCodeApprovesEachActOnce(t *testing.T) {
 }
 
 // REQ: CH-10
-// A held act's approval waits out its undo window: a holder's try before
-// the wait ends is refused and spends nothing, and the approval then
-// lives ApprovalTTL from the wait's end, however long the wait (REV-3).
-func TestAHeldActWaitsOutItsUndoWindow(t *testing.T) {
+// A held act's approval cannot be spent until the broker releases it, as
+// it does once the item's UNDO is closed (REV-3): a try before that is
+// refused and spends nothing, a release opens it for ApprovalTTL, an
+// unreleased one lapses after MaxHold, and a release opens no unheld act
+// again.
+func TestAHeldActWaitsForItsRelease(t *testing.T) {
 	clk := &clock{t: time.Unix(1_800_000_000, 0)}
 	c, _ := newChecker(t, clk)
 	seed := syntheticSeed(t)
 	c.Hand(seed)
-	a := act(t, `{"held":1}`)
-	wait := 2 * ApprovalTTL
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []checkersock.Act{{Act: a, Wait: int64(wait / time.Second)}}); !ok || err != nil {
+	a, lapsed, now := act(t, `{"held":1}`), act(t, `{"held":2}`), act(t, `{"now":1}`)
+	held := []checkersock.Act{{Act: a, Held: true}, {Act: lapsed, Held: true}, {Act: now}}
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, held); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
-	clk.add(wait - time.Second)
+	clk.add(ApprovalTTL - 2*time.Second)
+	c.Release([]string{now})
+	clk.add(3 * time.Second)
+	if c.Redeem(now) {
+		t.Fatal("a release extended an unheld act past ApprovalTTL")
+	}
+	clk.add(2 * ApprovalTTL)
 	if c.Redeem(a) {
-		t.Fatal("a held act was spent before its undo window ended")
+		t.Fatal("a held act was spent before its release")
 	}
-	clk.add(time.Second)
+	c.Release([]string{a})
+	clk.add(ApprovalTTL - time.Second)
 	if !c.Redeem(a) {
-		t.Fatal("an early try spent the approval, or it expired inside its wait")
+		t.Fatal("an early try spent the approval, or its release did not open it")
 	}
-	if _, _, err := c.Verify(totp(seed, clk.now()), 0, true, []checkersock.Act{{Act: a, Wait: int64(MaxWait/time.Second) + 1}}); err == nil {
-		t.Fatal("a wait past MaxWait was accepted")
+	if c.Redeem(a) {
+		t.Fatal("a released act was spent twice")
+	}
+	clk.add(MaxHold)
+	c.Release([]string{lapsed})
+	if c.Redeem(lapsed) {
+		t.Fatal("a held approval outlived MaxHold")
 	}
 }
 
 // REQ: CH-10
-// UNDO withdraws a held act at the checker: once revoked over the verify
-// socket, no holder can spend it, before or after its wait ends.
-func TestRevokeWithdrawsAnApproval(t *testing.T) {
+// The verify socket's /revoke and /release: UNDO withdraws a held act so
+// no release opens it again, a release opens only the acts it names, and
+// each refuses a malformed act or more than MaxActs.
+func TestRevokeAndReleaseOverTheSocket(t *testing.T) {
 	clk := &clock{t: time.Unix(1_800_000_000, 0)}
 	c, _ := newChecker(t, clk)
 	seed := syntheticSeed(t)
@@ -173,23 +188,38 @@ func TestRevokeWithdrawsAnApproval(t *testing.T) {
 	}
 	go c.Serve(lns[0], lns[1], lns[2])
 	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
-	held, now := act(t, `{"held":1}`), act(t, `{"now":1}`)
-	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, checkersock.Act{Act: held, Wait: 600}, checkersock.Act{Act: now}); !ok || err != nil {
+	undone, kept, other := act(t, `{"held":1}`), act(t, `{"held":2}`), act(t, `{"held":3}`)
+	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true,
+		checkersock.Act{Act: undone, Held: true}, checkersock.Act{Act: kept, Held: true}, checkersock.Act{Act: other, Held: true}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
-	if err := vc.Revoke(held); err != nil {
+	if err := vc.Revoke(undone); err != nil {
 		t.Fatal(err)
 	}
-	if err := vc.Revoke("not-an-act"); err == nil {
-		t.Fatal("a malformed revoke was accepted")
+	if err := vc.Release(undone, kept); err != nil {
+		t.Fatal(err)
 	}
-	clk.add(10 * time.Minute)
+	many := make([]string, MaxActs+1)
+	for i := range many {
+		many[i] = act(t, fmt.Sprintf(`{"n":%d}`, i))
+	}
+	for name, op := range map[string]func(...string) error{"revoke": vc.Revoke, "release": vc.Release} {
+		if err := op("not-an-act"); err == nil {
+			t.Fatalf("a malformed %s was accepted", name)
+		}
+		if err := op(many...); err == nil {
+			t.Fatalf("a %s of more than MaxActs was accepted", name)
+		}
+	}
 	red := Redeemer(filepath.Join(dir, RedeemSocket))
-	if ok, err := red(context.Background(), held); ok || err != nil {
+	if ok, err := red(context.Background(), undone); ok || err != nil {
 		t.Fatalf("a revoked act was spent: %v %v", ok, err)
 	}
-	if ok, err := red(context.Background(), now); !ok || err != nil {
-		t.Fatalf("revoking one act withdrew another: %v %v", ok, err)
+	if ok, err := red(context.Background(), kept); !ok || err != nil {
+		t.Fatalf("a released act was refused: %v %v", ok, err)
+	}
+	if ok, err := red(context.Background(), other); ok || err != nil {
+		t.Fatalf("a release opened an act it did not name: %v %v", ok, err)
 	}
 }
 

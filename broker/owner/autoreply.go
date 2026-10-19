@@ -190,7 +190,12 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 
 // DueAutoReplies returns and removes replies and held effects whose undo
 // window has passed; the caller runs them through the account's adapter. Nothing is released
-// while the broker is stopped (ADP-11: STOP applies).
+// while the broker is stopped (ADP-11: STOP applies). A held effect's act
+// is released at the checker only here, once the item has left the queue
+// UNDO reads and its retirement is saved, so the act can never be spent
+// while UNDO could still cancel it, and a restart, which revokes every
+// held act still saved as queued, never meets a released one (REV-3). If
+// either step fails the act stays shut, and the holder refuses it.
 func (c *Channel) DueAutoReplies() []Queued {
 	if c.cfg.Engine.Stopped() {
 		return nil
@@ -199,6 +204,7 @@ func (c *Channel) DueAutoReplies() []Queued {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []Queued
+	var open []string
 	for id, q := range c.queued {
 		if !now.Before(q.SendAt) {
 			if !q.Held {
@@ -207,10 +213,13 @@ func (c *Channel) DueAutoReplies() []Queued {
 			}
 			out = append(out, *q)
 			delete(c.queued, id)
-			c.retireLocked(id, now)
+			if c.retireLocked(id, now) == nil && q.Held {
+				open = append(open, q.Act)
+			}
 			c.released[id] = now
 		}
 	}
+	c.release(open...)
 	for id, t := range c.released {
 		if now.Sub(t) >= RetireFor {
 			delete(c.released, id)

@@ -29,13 +29,13 @@ type PausedError struct{ Until time.Time }
 
 func (e *PausedError) Error() string { return "checker: too many wrong codes; checks are paused" }
 
-// Act is one act a code approves: its digest (checker.Act) and how many
-// seconds after the code its approval waits before a holder may spend
-// it, the item's undo window (REV-3), so a held act cannot run before
-// the owner's UNDO can stop it.
+// Act is one act a code approves: its digest (checker.Act), and Held when
+// its item waits out an undo window (REV-3): a held approval cannot be
+// spent until the broker releases it (POST /release), which it does only
+// once the owner's UNDO can no longer reach the item.
 type Act struct {
 	Act  string `json:"act"`
-	Wait int64  `json:"wait,omitempty"`
+	Held bool   `json:"held,omitempty"`
 }
 
 // VerifyRequest and VerifyResponse are POST /verify's bodies.
@@ -46,9 +46,10 @@ type VerifyRequest struct {
 	Acts    []Act  `json:"acts"`
 }
 
-// RevokeRequest is POST /revoke's body: the acts whose approvals are
-// withdrawn, as an UNDO does.
-type RevokeRequest struct {
+// ActsRequest is POST /revoke's body, the acts whose approvals are
+// withdrawn, as an UNDO does, and POST /release's, the held acts whose
+// approvals may now be spent.
+type ActsRequest struct {
 	Acts []string `json:"acts"`
 }
 
@@ -123,16 +124,22 @@ func (c *Client) VerifyTOTP(code string, after int64, counted bool, acts ...Act)
 
 // Revoke withdraws acts' approvals, spent or not: only 204 means the
 // checker holds none of them now.
-func (c *Client) Revoke(acts ...string) error {
-	b, _ := json.Marshal(RevokeRequest{Acts: acts})
-	resp, err := c.hc.Post("http://localhost/revoke", "application/json", bytes.NewReader(b))
+func (c *Client) Revoke(acts ...string) error { return c.acts("revoke", acts) }
+
+// Release lets held acts' approvals be spent, each within ApprovalTTL:
+// only 204 means the checker released them.
+func (c *Client) Release(acts ...string) error { return c.acts("release", acts) }
+
+func (c *Client) acts(op string, acts []string) error {
+	b, _ := json.Marshal(ActsRequest{Acts: acts})
+	resp, err := c.hc.Post("http://localhost/"+op, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("checker: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, MaxBody))
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("checker: revoke: %s", resp.Status)
+		return fmt.Errorf("checker: %s: %s", op, resp.Status)
 	}
 	return nil
 }

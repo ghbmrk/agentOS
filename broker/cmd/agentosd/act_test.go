@@ -160,8 +160,9 @@ func TestApprovedActPassesOnlyForItsExactBytes(t *testing.T) {
 }
 
 // A held act cannot be spent while its UNDO can still stop it: the checker
-// opens its approval only as the undo window ends, and UNDO withdraws it,
-// so a cancelled effect never reaches the provider (REV-3, CH-4).
+// opens its approval only when the channel releases the item, after UNDO
+// can no longer reach it, and UNDO withdraws it, so a cancelled effect
+// never reaches the provider (REV-3, CH-4).
 func TestAHeldActRunsOnlyAfterItsWindowAndNotAfterUndo(t *testing.T) {
 	a := newActRig(t)
 	kept, undone := `{"to":"acct-4821","amount":25000}`, `{"to":"acct-4821","amount":25001}`
@@ -185,15 +186,23 @@ func TestAHeldActRunsOnlyAfterItsWindowAndNotAfterUndo(t *testing.T) {
 	if r := a.send(kept); r.StatusCode != http.StatusForbidden {
 		t.Fatalf("held act spent inside its window: %d", r.StatusCode)
 	}
+	// Past the window but before the channel releases the items, UNDO is
+	// still accepted, so the acts are still shut (security S1 on #2501).
+	time.Sleep(2100 * time.Millisecond)
+	if r := a.send(kept); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("held act spent before its release: %d", r.StatusCode)
+	}
 	if got := strings.Join(a.ch.Handle(context.Background(), ownerNum, "UNDO "+m[1]), " | "); got != "Cancelled "+m[1]+". It did not run." {
 		t.Fatalf("undo: %q", got)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	if due := a.ch.DueAutoReplies(); len(due) != 1 || due[0].Reply.Ref != "keep" {
+		t.Fatalf("due: %+v", due)
+	}
 	if r := a.send(undone); r.StatusCode != http.StatusForbidden || r.Header.Get(holder.ErrorHeader) != holder.ErrUnapproved {
 		t.Fatalf("undone act: %d %q", r.StatusCode, r.Header.Get(holder.ErrorHeader))
 	}
 	if r := a.send(kept); r.StatusCode != http.StatusOK {
-		t.Fatalf("held act after its window: %d %q", r.StatusCode, r.Header.Get(holder.ErrorHeader))
+		t.Fatalf("held act after its release: %d %q", r.StatusCode, r.Header.Get(holder.ErrorHeader))
 	}
 	if n := a.up.n.Load(); n != 1 {
 		t.Fatalf("%d requests reached the provider, want 1", n)
@@ -201,7 +210,7 @@ func TestAHeldActRunsOnlyAfterItsWindowAndNotAfterUndo(t *testing.T) {
 }
 
 // Without a checker nothing can record an act, so a code that carries one
-// is not checked at all, and there is nothing to withdraw (CH-4).
+// is not checked at all, and there is nothing to withdraw or release (CH-4).
 func TestNoCheckerChecksNoActs(t *testing.T) {
 	_, ok, err := ownerVerifier{}.VerifyTOTP("123456", 0, true, owner.CheckerAct{Act: "act-a"})
 	var ve *owner.VerifyError
@@ -209,6 +218,9 @@ func TestNoCheckerChecksNoActs(t *testing.T) {
 		t.Fatalf("no checker: ok %v, err %v", ok, err)
 	}
 	if err := (ownerVerifier{}).RevokeActs("act-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ownerVerifier{}).ReleaseActs("act-a"); err != nil {
 		t.Fatal(err)
 	}
 }

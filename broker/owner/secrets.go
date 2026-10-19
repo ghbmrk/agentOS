@@ -38,23 +38,26 @@ type Verifier interface {
 	VerifyTOTP(code string, after int64, counted bool, acts ...CheckerAct) (step int64, ok bool, err error)
 }
 
-// CheckerAct is one act a code approves (Item.Act) and how long its
-// approval waits before a holder may spend it: a held item's undo window,
-// so the checker, not only the channel, keeps it from running before the
-// owner's UNDO can stop it (REV-3).
+// CheckerAct is one act a code approves (Item.Act), and Held when its item
+// waits out an undo window: the checker keeps a held act's approval shut
+// until the channel releases it, which it does only once the item has
+// left the queue UNDO reads, so the checker, not only the channel, keeps
+// it from running while UNDO can still stop it (REV-3).
 type CheckerAct struct {
 	Act  string
-	Wait time.Duration
+	Held bool
 }
 
-// Revoker is a Verifier that can withdraw the approvals it recorded. The
-// channel withdraws a held act on UNDO, at a restart, which cancels every
-// held effect, and when it cannot hold the act, so an effect the owner
-// is told did not run cannot run later (REV-3). A Verifier that records
-// acts must be one; without it those three report the act as not
-// withdrawn.
+// Revoker is a Verifier that can withdraw the approvals it recorded and
+// release held ones. The channel withdraws a held act on UNDO, at a
+// restart, which cancels every held effect, and when it cannot hold the
+// act, so an effect the owner is told did not run cannot run later; it
+// releases a held act when the item leaves its undo window (REV-3). A
+// Verifier that records acts must be one; without it nothing is withdrawn
+// or released.
 type Revoker interface {
 	RevokeActs(acts ...string) error
+	ReleaseActs(acts ...string) error
 }
 
 // UnlockProofPrefix marks a "code" that is the proof of an unknown-host

@@ -1413,7 +1413,7 @@ func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts .
 	if o.checker != nil && !proof {
 		cas := make([]checkersock.Act, len(acts))
 		for i, a := range acts {
-			cas[i] = checkersock.Act{Act: a.Act, Wait: int64(a.Wait / time.Second)}
+			cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
 		}
 		step, ok, err := o.checker.VerifyTOTP(code, after, counted, cas...)
 		return step, ok, checkerVerifyErr(err)
@@ -1433,6 +1433,16 @@ func (o ownerVerifier) RevokeActs(acts ...string) error {
 		return nil
 	}
 	return o.checker.Revoke(acts...)
+}
+
+// ReleaseActs opens the checker's held approvals for acts whose items left
+// their undo window (REV-3). Without a checker no act was approved, so
+// there is nothing to open.
+func (o ownerVerifier) ReleaseActs(acts ...string) error {
+	if o.checker == nil {
+		return nil
+	}
+	return o.checker.Release(acts...)
 }
 
 // checkerVerifyErr is ownerVerifyErr for the checker: no seed means the

@@ -3,6 +3,7 @@ package owner
 import (
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -39,10 +40,9 @@ func verifierRigWith(t *testing.T, store Store) (*rig, *fakeVerifier) {
 	return r, f
 }
 
-// A held act's approval opens at the checker only when its undo window has
-// passed, less a second of slack; UNDO withdraws it, so an effect the owner
-// cancelled cannot run later. A withdrawal that fails is said, not hidden
-// (REV-3, CH-4).
+// A held act goes to the checker held, an unheld one not; UNDO withdraws
+// a held act, so an effect the owner cancelled cannot run later. A
+// withdrawal that fails is said, not hidden (REV-3, CH-4).
 func TestUndoWithdrawsAHeldActsApproval(t *testing.T) {
 	r, f := newVerifierRig(t)
 	id, _ := r.ch.Request([]Item{heldActItem("a", "act-a"), actItem("b", "act-b")}, 0)
@@ -51,8 +51,8 @@ func TestUndoWithdrawsAHeldActsApproval(t *testing.T) {
 	if u == nil {
 		t.Fatal("no hold")
 	}
-	if got := f.waits[len(f.waits)-1]; !reflect.DeepEqual(got, []time.Duration{10*time.Minute - time.Second, 0}) {
-		t.Fatalf("waits sent with the code: %v", got)
+	if got := f.held[len(f.held)-1]; !reflect.DeepEqual(got, []bool{true, false}) {
+		t.Fatalf("held flags sent with the code: %v", got)
 	}
 	r.decisions()
 	if got := r.say("UNDO " + u[1]); got != "Cancelled "+u[1]+". It did not run." {
@@ -69,6 +69,93 @@ func TestUndoWithdrawsAHeldActsApproval(t *testing.T) {
 	if got := r.say("UNDO " + u[1]); got != "Cancelled "+u[1]+", but the box could not withdraw its approval, so it may still run." {
 		t.Fatalf("undo with a failed withdrawal: %q", got)
 	}
+
+	// A verifier that cannot revoke cannot withdraw either.
+	r = newRig(t, &MemStore{})
+	f = &fakeVerifier{seed: testSecrets.TOTPSeed, now: r.clock}
+	r.verifier = plainVerifier{f}
+	r.ch = r.open()
+	id, _ = r.ch.Request([]Item{heldActItem("d", "act-d")}, 0)
+	r.inbox()
+	u = holdRe.FindStringSubmatch(r.say("YES " + id + " " + r.totp()))
+	if got := r.say("UNDO " + u[1]); got != "Cancelled "+u[1]+", but the box could not withdraw its approval, so it may still run." {
+		t.Fatalf("undo with a verifier that cannot revoke: %q", got)
+	}
+}
+
+// plainVerifier checks codes but cannot revoke or release.
+type plainVerifier struct{ f *fakeVerifier }
+
+func (p plainVerifier) VerifyTOTP(code string, after int64, counted bool, cas ...CheckerAct) (int64, bool, error) {
+	return p.f.VerifyTOTP(code, after, counted, cas...)
+}
+
+// toggleStore fails every save while fail is set.
+type toggleStore struct {
+	MemStore
+	fail bool
+}
+
+func (s *toggleStore) Save(st State) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	return s.MemStore.Save(st)
+}
+
+// A held act is released at the checker only once its item has left the
+// queue UNDO reads, never while UNDO can still cancel it (security S1 on
+// #2501): an UNDO in the window's last second finds the act still shut and
+// it never opens; a release names only the items due, and only once their
+// retirement is saved (REV-3, CH-10).
+func TestAHeldActIsReleasedOnlyAfterUndoCloses(t *testing.T) {
+	store := &toggleStore{}
+	r, f := verifierRigWith(t, store)
+	yes := func(ref, act string) string {
+		id, _ := r.ch.Request([]Item{heldActItem(ref, act)}, 0)
+		r.inbox()
+		u := holdRe.FindStringSubmatch(r.say("YES " + id + " " + r.totp()))
+		if u == nil {
+			t.Fatal("no hold")
+		}
+		return u[1]
+	}
+	a := yes("a", "act-a")
+	r.advance(10*time.Minute - time.Second)
+	if due := r.ch.DueAutoReplies(); len(due) != 0 || len(f.released) != 0 {
+		t.Fatalf("released inside the window: %v %q", due, f.released)
+	}
+	if got := r.say("UNDO " + a); got != "Cancelled "+a+". It did not run." {
+		t.Fatalf("undo: %q", got)
+	}
+	r.advance(time.Hour)
+	if due := r.ch.DueAutoReplies(); len(due) != 0 || len(f.released) != 0 {
+		t.Fatalf("an undone act was released: %v %q", due, f.released)
+	}
+
+	b := yes("b", "act-b")
+	yes("c", "act-c")
+	r.advance(10 * time.Minute)
+	if due := r.ch.DueAutoReplies(); len(due) != 2 || !reflect.DeepEqual(sorted(f.released), []string{"act-b", "act-c"}) {
+		t.Fatalf("due %v, released %q", due, f.released)
+	}
+	if got := r.say("UNDO " + b); !strings.Contains(got, "past its undo window") {
+		t.Fatalf("undo after release: %q", got)
+	}
+
+	f.released = nil
+	yes("d", "act-d")
+	r.advance(10 * time.Minute)
+	store.fail = true
+	if due := r.ch.DueAutoReplies(); len(due) != 1 || len(f.released) != 0 {
+		t.Fatalf("released with its retirement unsaved: %v %q", due, f.released)
+	}
+}
+
+func sorted(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
 }
 
 // A restart cancels every held effect, and withdraws its act (REV-3).
