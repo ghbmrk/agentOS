@@ -297,7 +297,7 @@ func listDeps(t *testing.T, dir string, pkgs []string) []listed {
 	return ps
 }
 
-// REQ: INF-5
+// REQ: ARC-2
 func TestAgentosdLinksNoInference(t *testing.T) {
 	ps := linkedDeps(t)
 	if len(ps) == 0 {

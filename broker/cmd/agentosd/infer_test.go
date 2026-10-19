@@ -1,6 +1,6 @@
 package main
 
-// REQ: INF-1, INF-2, INF-4
+// REQ: RES-2, ARC-2, DEP-1
 
 import (
 	"bytes"

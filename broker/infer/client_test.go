@@ -1,6 +1,6 @@
 package infer
 
-// REQ: INF-2, INF-4
+// REQ: ARC-2, DEP-1
 
 import (
 	"bufio"

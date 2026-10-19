@@ -1,6 +1,6 @@
 package main
 
-// REQ: INF-2, INF-3, INF-4, INF-8
+// REQ: ARC-2, DEP-1
 
 import (
 	"bufio"
@@ -417,7 +417,7 @@ func TestServiceCapsConcurrentCalls(t *testing.T) {
 	}
 }
 
-// REQ: INF-8
+// REQ: ARC-2
 func TestLogsCarryNoText(t *testing.T) {
 	const canary = "synthetic-infer-text-canary-5d2e"
 	rt := newFake(8)
@@ -450,7 +450,7 @@ func TestLogsCarryNoText(t *testing.T) {
 	}
 }
 
-// REQ: INF-2
+// REQ: ARC-2
 //
 // main serves the listener it is handed as fd 3 and names no socket of its
 // own; with no runtime in this build it answers, Unavailable.

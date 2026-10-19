@@ -1,6 +1,6 @@
 package supervise
 
-// REQ: INF-1, INF-4, INF-6, INF-8
+// REQ: RES-2, DEP-1, REV-6
 
 import (
 	"bufio"
