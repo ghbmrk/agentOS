@@ -280,6 +280,30 @@ class WiringTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=expr):
                 evaluate(expr, "push", "true")
 
+    def machines_step(self):
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        start = ci.index("      - name: Machine tests as root\n")
+        return ci[start:ci.index("\n      - name: ", start + 1)]
+
+    def test_machines_job_lists_infer(self):
+        # REQ: INFER-CI-1
+        step = self.machines_step()
+        self.assertIn("go test -count=1 -json ./infer/... > /tmp/infer-test.json ", step)
+        self.assertIn("AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\\n"
+                      "            go test -count=1 -json ./infer/...", step)
+
+    def test_machines_step_uses_require_ran(self):
+        # REQ: INFER-CI-2
+        step = self.machines_step()
+        self.assertIn("python3 ../tools/require_ran.py TestServiceRunsInInferenceLeaf "
+                      "TestServiceOOMStaysInLeaf < /tmp/infer-test.json\n", step)
+        # go test's own exit code still fails the step.
+        self.assertIn("-json ./infer/... > /tmp/infer-test.json || rc=$?\n", step)
+        self.assertIn('          [ "$rc" -eq 0 ]\n', step)
+        sup = (ROOT / "broker" / "infer" / "supervise" / "supervise_test.go").read_text()
+        for name in ("TestServiceRunsInInferenceLeaf", "TestServiceOOMStaysInLeaf"):
+            self.assertRegex(sup, rf"(?m)^func {name}\(t \*testing\.T\)", name)
+
 
 class FuzzStepTest(unittest.TestCase):
     """The short fuzz step in broker-checks names every broker target, and each one exists."""

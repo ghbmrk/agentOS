@@ -382,12 +382,14 @@ jobs:
             go test -count=1 -v ./loop7
           # The inference service's jail, leaf and OOM (INFER-SVC INF-1, INF-6),
           # with no_new_privs as agentosd.service runs it. Its tests skip off
-          # root or without the cgroup, so any skip here fails the step.
+          # root or without the cgroup, so the step fails on any skip and
+          # unless the leaf and OOM tests passed (INFER-CI-2).
+          rc=0
           sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v ./infer/... > /tmp/infer-test.log 2>&1 || { cat /tmp/infer-test.log; exit 1; }
-          cat /tmp/infer-test.log
-          if grep -- '--- SKIP' /tmp/infer-test.log; then echo "::error::infer tests skipped in the machines job" >&2; exit 1; fi
+            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?
+          python3 ../tools/require_ran.py TestServiceRunsInInferenceLeaf TestServiceOOMStaysInLeaf < /tmp/infer-test.json
+          [ "$rc" -eq 0 ]
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd
