@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/control"
@@ -387,12 +388,12 @@ func (c *Channel) Handle(ctx context.Context, from, text string) []string {
 
 // stopNow applies STOP from the owner at once, without mu, so it never
 // waits behind a code check in progress or queued (CH-2). A RESUME code
-// issued before it is void (stops). A STOP sent with a code (CH-14) is
-// STOP too: the code is never checked, counted or passed on, since STOP
-// needs none and a wrong one must not keep it from stopping (#2459).
+// issued before it is void (stops). A STOP sent with codes in any form
+// (stopForm) is STOP too: no code is checked, counted or passed on, since
+// STOP needs none and a wrong one must not keep it from stopping (#2459,
+// #2475). The handler gets bare STOP, never the text.
 func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, bool) {
-	stop, _ := splitCode(text)
-	if !c.IsOwner(from) || control.Parse(stop).Word != control.WordStop {
+	if !c.IsOwner(from) || !stopForm(text) {
 		return nil, false
 	}
 	if _, ok := parseReaction(text); ok {
@@ -400,7 +401,7 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 	}
 	c.stopMu.Lock()
 	c.stops.Add(1)
-	replies := c.ctrl.Handle(ctx, from, stop)
+	replies := c.ctrl.Handle(ctx, from, string(control.WordStop))
 	c.stopMu.Unlock()
 	var out []string
 	for _, r := range replies {
@@ -409,6 +410,73 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 		}
 	}
 	return out, true
+}
+
+// stopForm reports whether text is STOP alone or with only codes
+// (SEC-stop-forms, #2475). Word boundaries come first: every rune but a
+// letter, a digit, a combining mark or a format character separates
+// words, before folding, so a symbol that folds to letters ("£" to GBP)
+// stays a separator as it was for control.Parse. Each word is then
+// folded (fold, the package's NFKC stand-in) and upper-cased. Text is a
+// STOP form when one word is STOP and every word is STOP, code-like (a
+// digit run of any length or a grid cell label), or STOP glued to
+// code-like parts ("STOP123456", "123456STOP"). So "STOP,123456",
+// "123456 STOP", "STOP 1234567", "STOP c c2", "STOP H3" and full-width
+// forms all stop. Any other word keeps CH-11's rule that a control word
+// counts only as the whole message, so "stop the newsletter" is chat.
+func stopForm(text string) bool {
+	stop := false
+	for _, w := range stopWords(text) {
+		switch {
+		case stopCode(w):
+		case gluedStop(w):
+			stop = true
+		default:
+			return false
+		}
+	}
+	return stop
+}
+
+// stopWords splits text into folded, upper-cased words, deciding word
+// boundaries before folding (stopForm).
+func stopWords(text string) []string {
+	raw := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return ' '
+	}, text)
+	var out []string
+	for _, w := range strings.Fields(raw) {
+		out = append(out, fields(fold(w))...)
+	}
+	return out
+}
+
+// gluedStop reports whether w is STOP with nothing or a code-like part
+// on each side of it.
+func gluedStop(w string) bool {
+	i := strings.Index(w, string(control.WordStop))
+	if i < 0 {
+		return false
+	}
+	pre, post := w[:i], w[i+len(control.WordStop):]
+	return (pre == "" || stopCode(pre)) && (post == "" || stopCode(post))
+}
+
+// stopCode reports whether w is a digit run or a grid cell label.
+func stopCode(w string) bool { return allDigits(w) || gridLabel(w) }
+
+// gridLabel reports whether w (upper-cased) is a cell label of the grid,
+// "A1" to "J10" (GridLabels).
+func gridLabel(w string) bool {
+	for _, l := range GridLabels() {
+		if w == l {
+			return true
+		}
+	}
+	return false
 }
 
 // errStoppedMeanwhile reports a RESUME overtaken by a STOP sent while its
