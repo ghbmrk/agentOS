@@ -271,7 +271,7 @@ func (r *Reach) Retry(ctx context.Context) error {
 	}
 	for _, l := range r.Prov.ResetLineages() {
 		for _, rs := range r.Prov.Resets(l) {
-			if _, err := r.finish(l, rs); err != nil {
+			if err := r.finishTold(l, rs); err != nil {
 				errs = append(errs, fmt.Errorf("deletion reach into %s: %w", l, err))
 			}
 		}
@@ -613,7 +613,7 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	// A reset already done (an approval run, or before a restart) is
 	// finished, never repeated.
 	for _, rs := range r.Prov.Resets(lineage) {
-		if _, err := r.finish(lineage, rs); err != nil {
+		if err := r.finishTold(lineage, rs); err != nil {
 			return err
 		}
 	}
@@ -905,18 +905,20 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 	}
 	// The confirmation is worded before finish erases the actions it
 	// counts, and sent after, with the held agent texts the forget
-	// dropped (CAP3-F1); a failed finish still sends it.
-	var text string
+	// dropped (CAP3-F1); a failed finish still sends it. Unapproved, the
+	// count is told alone.
+	var err error
 	if approved {
 		to := plan.To
 		if perr != nil {
 			to = since
 		}
-		text = r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until))
-	}
-	held, err := r.finish(lineage, rs)
-	if approved {
+		text := r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until))
+		var held int
+		held, err = r.finish(lineage, rs)
 		r.tell(lineage, text+heldDropped(held))
+	} else {
+		err = r.finishTold(lineage, rs)
 	}
 	if err != nil {
 		return err
@@ -981,6 +983,21 @@ func (r *Reach) finish(lineage string, rs Reset) (int, error) {
 		}
 	}
 	return dropped, r.Prov.Finish(lineage, rs)
+}
+
+// finishTold finishes rs and tells the owner how many held agent texts
+// its forget dropped, a count and never their text, on every path with no
+// confirmation of its own to carry it (CAP3-F1). A replayed finish counts
+// only what it drops itself, so nothing is told twice. Called with run held.
+func (r *Reach) finishTold(lineage string, rs Reset) error {
+	held, err := r.finish(lineage, rs)
+	switch {
+	case held == 1:
+		r.tell(lineage, "A deletion dropped 1 held agent text.")
+	case held > 1:
+		r.tell(lineage, fmt.Sprintf("A deletion dropped %d held agent texts.", held))
+	}
+	return err
 }
 
 // heldDropped words the held agent texts a forget dropped, a count and

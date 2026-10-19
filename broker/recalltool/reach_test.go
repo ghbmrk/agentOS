@@ -1040,3 +1040,32 @@ func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CAP3-F1
+// A reset with no confirmation of its own (the unasked rollback, and a
+// take-back from FORGET or Renew) still tells the count of held agent
+// texts its forget dropped, alone and never their text; none tells
+// nothing (Security fix-list on #2510).
+func TestUnaskedResetCountsDroppedHeldTexts(t *testing.T) {
+	x, _ := newReachRig(t)
+	x.cs.held = 1
+	x.del(t, x.mail)
+	if len(x.vm.calls) != 1 || len(x.told) != 1 || x.told[0] != "A deletion dropped 2 held agent texts." {
+		t.Fatalf("resets %v, told %q", x.vm.calls, x.told)
+	}
+
+	y, read := newReachRig(t)
+	y.cs.held = 1
+	if err := y.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(y.vm.calls) != 1 || len(y.told) != 1 || y.told[0] != "A deletion dropped 2 held agent texts." {
+		t.Fatalf("take-back: resets %v, told %q", y.vm.calls, y.told)
+	}
+
+	z, _ := newReachRig(t)
+	z.del(t, z.mail)
+	if len(z.vm.calls) != 1 || len(z.told) != 0 {
+		t.Fatalf("none dropped: resets %v, told %q", z.vm.calls, z.told)
+	}
+}
