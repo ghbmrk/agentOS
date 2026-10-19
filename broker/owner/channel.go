@@ -387,12 +387,12 @@ func (c *Channel) Handle(ctx context.Context, from, text string) []string {
 
 // stopNow applies STOP from the owner at once, without mu, so it never
 // waits behind a code check in progress or queued (CH-2). A RESUME code
-// issued before it is void (stops). A STOP sent with a code (CH-14) is
-// STOP too: the code is never checked, counted or passed on, since STOP
-// needs none and a wrong one must not keep it from stopping (#2459).
+// issued before it is void (stops). A STOP sent with codes in any form
+// (stopForm) is STOP too: no code is checked, counted or passed on, since
+// STOP needs none and a wrong one must not keep it from stopping (#2459,
+// #2475). The handler gets bare STOP, never the text.
 func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, bool) {
-	stop, _ := splitCode(text)
-	if !c.IsOwner(from) || control.Parse(stop).Word != control.WordStop {
+	if !c.IsOwner(from) || !stopForm(text) {
 		return nil, false
 	}
 	if _, ok := parseReaction(text); ok {
@@ -400,7 +400,7 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 	}
 	c.stopMu.Lock()
 	c.stops.Add(1)
-	replies := c.ctrl.Handle(ctx, from, stop)
+	replies := c.ctrl.Handle(ctx, from, string(control.WordStop))
 	c.stopMu.Unlock()
 	var out []string
 	for _, r := range replies {
@@ -409,6 +409,39 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 		}
 	}
 	return out, true
+}
+
+// stopForm reports whether text is STOP alone or with only codes
+// (SEC-stop-forms, #2475). Folded (fold, the package's NFKC stand-in) and
+// upper-cased, with every rune but letters and digits a separator, it
+// holds the word STOP, and every other word is code-like: a digit run of
+// any length or a grid cell label. So "STOP,123456", "123456 STOP",
+// "STOP 1234567", "STOP c c2", "STOP H3" and full-width forms all stop.
+// Any other word keeps CH-11's rule that a control word counts only as
+// the whole message, so "stop the newsletter" is chat.
+func stopForm(text string) bool {
+	stop := false
+	for _, w := range fields(fold(text)) {
+		switch {
+		case w == string(control.WordStop):
+			stop = true
+		case allDigits(w) || gridLabel(w):
+		default:
+			return false
+		}
+	}
+	return stop
+}
+
+// gridLabel reports whether w (upper-cased) is a cell label of the grid,
+// "A1" to "J10" (GridLabels).
+func gridLabel(w string) bool {
+	for _, l := range GridLabels() {
+		if w == l {
+			return true
+		}
+	}
+	return false
 }
 
 // errStoppedMeanwhile reports a RESUME overtaken by a STOP sent while its
