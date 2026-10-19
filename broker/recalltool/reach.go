@@ -991,13 +991,19 @@ func (r *Reach) finish(lineage string, rs Reset) (int, error) {
 // only what it drops itself, so nothing is told twice. Called with run held.
 func (r *Reach) finishTold(lineage string, rs Reset) error {
 	held, err := r.finish(lineage, rs)
-	switch {
-	case held == 1:
-		r.tell(lineage, "A deletion dropped 1 held agent text.")
-	case held > 1:
-		r.tell(lineage, fmt.Sprintf("A deletion dropped %d held agent texts.", held))
+	if held > 0 {
+		r.tell(lineage, HeldDroppedText(held))
 	}
 	return err
+}
+
+// HeldDroppedText tells the owner, alone, how many held agent texts a
+// deletion dropped (n > 0): a count, never their text (CAP3-F1).
+func HeldDroppedText(n int) string {
+	if n == 1 {
+		return "A deletion dropped 1 held agent text."
+	}
+	return fmt.Sprintf("A deletion dropped %d held agent texts.", n)
 }
 
 // heldDropped words the held agent texts a forget dropped, a count and

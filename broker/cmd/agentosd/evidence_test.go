@@ -534,6 +534,35 @@ func TestADeletionCountsHeldAgentTexts(t *testing.T) {
 	}
 }
 
+// REQ: CAP3-F1
+// A reply routed across a deletion drops the held agent texts again in
+// settle; the owner is told that count alone, never the text, and a
+// settle with no deletion between tells nothing.
+func TestSettleAcrossADeletionCountsHeldAgentTexts(t *testing.T) {
+	r := newEvRig(t, "")
+	o := pacedOwner(t, quiet22to7(), at23)
+	r.ev.wireOwner(func() *owner.Channel { return o.ch })
+	gen, _ := r.ev.kept.pending(&fakeOutbox{})
+	r.ev.kept.settle(gen)
+	if err := o.ch.Notify("Held agent text."); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.sent(); len(got) != 0 {
+		t.Fatalf("no deletion: sent %q", got)
+	}
+	if _, err := r.ev.kept.forget(); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.ch.Notify("Held agent text, again."); err != nil {
+		t.Fatal(err)
+	}
+	r.ev.kept.settle(gen)
+	got := o.sent()
+	if len(got) != 1 || got[0] != "A deletion dropped 1 held agent text." {
+		t.Fatalf("sent %q", got)
+	}
+}
+
 // fencedEvidenceGate is a real journal engine as the evidence setting
 // uses it, its destination fixed: the reply under a fence comes from the
 // engine's own error, not a fake's.

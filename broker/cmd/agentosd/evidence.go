@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
 // Evidence delivery (CH-20). With a destination set and a mail account
@@ -803,16 +804,28 @@ func (k *keptReplies) pending(src replySource) (uint64, []guest.PendingReply) {
 // settle runs after a reply read under gen was routed. A reply in flight
 // when a deletion ran cannot be recalled, but any copy it kept after the
 // deletion dropped the kept replies is dropped now (DEL-1-f1c), and so is
-// its text in the owner channel's recent texts (#2360).
+// its text in the owner channel's recent texts (#2360). The owner is
+// told how many held agent texts that dropped (CAP3-F1), in the broker's
+// own words and as urgent as the rollback texts, after fmu is released.
 func (k *keptReplies) settle(gen uint64) {
 	k.fmu.Lock()
-	defer k.fmu.Unlock()
 	if k.gen == gen {
+		k.fmu.Unlock()
 		return
 	}
-	k.forgetOwnerLocked()
+	held := k.forgetOwnerLocked()
+	var ch *owner.Channel
+	if k.owner != nil {
+		ch = k.owner()
+	}
 	if err := k.drop(); err != nil && k.logf != nil {
 		k.logf("kept replies not dropped after a deletion: %v", err)
+	}
+	k.fmu.Unlock()
+	if held > 0 && ch != nil {
+		if err := ch.Post(owner.ClassApproval, recalltool.HeldDroppedText(held)); err != nil && k.logf != nil {
+			k.logf("held agent texts dropped; owner not told: %v", err)
+		}
 	}
 }
 
