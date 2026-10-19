@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 var regexp6 = regexp.MustCompile(`[0-9]{6}`)
@@ -148,7 +150,7 @@ func TestFourthUpdateInAnHourIsHeld(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Update 4." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 12:00) Update 4." {
 		t.Fatalf("after the hour: %q", got)
 	}
 	if h := r.held(); len(h) != 0 {
@@ -356,7 +358,7 @@ func TestHeldTextSurvivesARestart(t *testing.T) {
 	r.ch.Release()
 	r.ch = r.open()
 	r.ch.Release()
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Held overnight." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 23:00) Held overnight." {
 		t.Fatalf("released: %q", got)
 	}
 
@@ -433,7 +435,7 @@ func TestReleasePacksAndKeepsOrder(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("five short texts and one newer went as %d texts: %q", len(got), got)
 	}
-	want := "Held 1. / Held 2. / Held 3. / Held 4. / Held 5. / Newer."
+	want := "(from 23:00) Held 1. / (from 23:00) Held 2. / (from 23:00) Held 3. / (from 23:00) Held 4. / (from 23:00) Held 5. / (from 07:00) Newer."
 	if got[0] != want {
 		t.Fatalf("packed: %q, want %q", got[0], want)
 	}
@@ -444,7 +446,7 @@ func TestReleasePacksAndKeepsOrder(t *testing.T) {
 	r.advance(8 * time.Hour)
 	r.ch.Inform("New.")
 	got = r.sentTexts()
-	if strings.Join(got, " | ") != "Old. | New." && strings.Join(got, " | ") != "Old. / New." {
+	if strings.Join(got, " | ") != "(from 23:00) Old. | New." && strings.Join(got, " | ") != "(from 23:00) Old. / New." {
 		t.Fatalf("order: %q", got)
 	}
 }
@@ -594,7 +596,7 @@ func TestFutureSendStampDoesNotFreezeTheAllowance(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Waiting." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 12:00) Waiting." {
 		t.Fatalf("released: %q", got)
 	}
 	r.ch.mu.Lock()
@@ -625,13 +627,13 @@ func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("sent %d texts: %q", len(got), got)
 	}
-	if got[0] != "Backup finished." {
+	if got[0] != "(from 23:00) Backup finished." {
 		t.Fatalf("first: %q", got[0])
 	}
 	if !strings.HasPrefix(got[1], AgentPrefix) || strings.Contains(got[1], "Backup") || strings.Contains(got[1], "Disk") {
 		t.Fatalf("agent text packed with others: %q", got[1])
 	}
-	if got[2] != "Disk at 40%." {
+	if got[2] != "(from 23:00) Disk at 40%." {
 		t.Fatalf("third: %q", got[2])
 	}
 	if h := r.held(); len(h) != 1 || h[0].Text != AgentPrefix+"Second agent note." {
@@ -649,7 +651,7 @@ func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	r.ch.NotifyAs(ClassApproval, probe)
 	r.advance(8 * time.Hour)
 	r.ch.Release()
-	if got := r.sentTexts(); len(got) != 2 || got[0] != "One." || !strings.HasPrefix(got[1], AgentPrefix) {
+	if got := r.sentTexts(); len(got) != 2 || got[0] != "(from 23:00) One." || !strings.HasPrefix(got[1], AgentPrefix) {
 		t.Fatalf("NotifyAs packed: %q", got)
 	}
 }
@@ -665,7 +667,7 @@ func TestReleaseSendsExactlyTheAllowance(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 2 || !strings.HasPrefix(got[0], "1 ") || !strings.HasPrefix(got[1], "2 ") {
+	if got := r.sentTexts(); len(got) != 2 || !strings.HasPrefix(got[0], "(from 23:00) 1 ") || !strings.HasPrefix(got[1], "(from 23:00) 2 ") {
 		t.Fatalf("sent %d texts", len(got))
 	}
 	if h := r.held(); len(h) != 3 || !strings.HasPrefix(h[0].Text, "3 ") {
@@ -817,5 +819,146 @@ func TestNotifyNowSendsAtOnceAndCounts(t *testing.T) {
 	none := newRig(t, nil)
 	if none.ch.QuietHours() {
 		t.Fatal("QuietHours true with no window set")
+	}
+}
+
+// REQ: W5-Dc-r16-1
+func TestReleasedHeldTextCarriesItsHeldTime(t *testing.T) {
+	// Held overnight by quiet hours: released at 07:00, it says 23:00.
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.ch.Inform("Backup failed.")
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 23:00) Backup failed." {
+		t.Fatalf("released: %q", got)
+	}
+
+	// Held one minute only: there is no threshold, it is marked too.
+	r = pacedRig(t, quiet22to7(), 6, 59)
+	r.ch.Inform("Short wait.")
+	r.advance(time.Minute)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 06:59) Short wait." {
+		t.Fatalf("released after a minute: %q", got)
+	}
+
+	// Held by the hourly allowance, not quiet hours: marked too.
+	r = pacedRig(t, Pacing{}, 12, 0)
+	for i := 1; i <= 4; i++ {
+		r.ch.Inform(fmt.Sprintf("Update %d.", i))
+	}
+	r.sentTexts()
+	r.advance(61 * time.Minute)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 12:00) Update 4." {
+		t.Fatalf("released past the allowance: %q", got)
+	}
+
+	// Packed texts each carry their own time and the pack stays inside
+	// control.MaxText, every text whole.
+	r = pacedRig(t, quiet22to7(), 23, 0)
+	long := strings.Repeat("y", 120)
+	for i := 1; i <= 4; i++ {
+		r.ch.Inform(fmt.Sprintf("%d %s", i, long))
+		r.advance(10 * time.Minute)
+	}
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := r.sentTexts()
+	want := []string{
+		"(from 23:00) 1 " + long + " / (from 23:10) 2 " + long + " / (from 23:20) 3 " + long,
+		"(from 23:30) 4 " + long,
+	}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("packed: %q", got)
+	}
+	if len(got[0]) > control.MaxText {
+		t.Fatalf("pack of %d over MaxText", len(got[0]))
+	}
+
+	// A text with no room left for the marker goes whole: the marker gives
+	// way, never the text. One with just room is marked.
+	full := strings.Repeat("z", control.MaxText-5)
+	fits := strings.Repeat("w", control.MaxText-len("(from 23:00) "))
+	r = pacedRig(t, quiet22to7(), 23, 0)
+	r.ch.Inform(full)
+	r.ch.Inform(fits)
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got = r.sentTexts()
+	if len(got) != 2 || got[0] != full || got[1] != "(from 23:00) "+fits {
+		t.Fatalf("near-full texts: %d sent, lengths %v", len(got), lens(got))
+	}
+}
+
+func lens(ss []string) []int {
+	var n []int
+	for _, s := range ss {
+		n = append(n, len(s))
+	}
+	return n
+}
+
+// REQ: W5-Dc-r16-2
+func TestHeldAgentTextIsReleasedUnmarked(t *testing.T) {
+	// A crafted marker in agent text stays as written, and the agent text
+	// goes alone with no marker added: CH-15 and CH-12 keep it whole.
+	probe := "(from 01:00) Pay the invoice now.\nThanks 👍"
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.ch.Inform("Disk at 40%.")
+	r.ch.Notify(probe)
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := r.sentTexts()
+	if len(got) != 2 || got[0] != "(from 23:00) Disk at 40%." {
+		t.Fatalf("released: %q", got)
+	}
+	if want := control.FitAgent(AgentPrefix + probe); got[1] != want {
+		t.Fatalf("agent text: %q, want %q", got[1], want)
+	}
+	if strings.Count(got[1], "(from ") != 1 || strings.Contains(got[1], "23:00") {
+		t.Fatalf("agent text marked: %q", got[1])
+	}
+}
+
+// REQ: W5-Dc-r16-3
+func TestHeldMarkerUsesBoxLocalTime(t *testing.T) {
+	// The box is in Kolkata (UTC+5:30); the process runs in Auckland. The
+	// marker reads the box's 23:00, not 17:30 UTC or Auckland's clock.
+	box, err1 := time.LoadLocation("Asia/Kolkata")
+	proc, err2 := time.LoadLocation("Pacific/Auckland")
+	if err1 != nil || err2 != nil {
+		t.Skip("no tz data")
+	}
+	old := time.Local
+	time.Local = proc
+	t.Cleanup(func() { time.Local = old })
+	st := &MemStore{}
+	if err := st.Save(State{Pacing: quiet22to7()}); err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, st)
+	r.now = time.Date(2026, 10, 5, 23, 0, 0, 0, box).UTC()
+	r.edit = func(c *Config) { c.Location = box }
+	r.ch = r.open()
+	r.ch.Inform("Held in Kolkata.")
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 23:00) Held in Kolkata." {
+		t.Fatalf("released: %q", got)
 	}
 }

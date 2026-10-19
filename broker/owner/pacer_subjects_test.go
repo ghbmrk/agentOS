@@ -40,7 +40,7 @@ func TestHeldTextIsRevalidatedAtRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.sentTexts()
-	if len(got) != 1 || got[0] != "Cleared: B. / Plain update." {
+	if len(got) != 1 || got[0] != "(from 23:00) Cleared: B. / (from 23:00) Plain update." {
 		t.Fatalf("released: %q", got)
 	}
 	if h := r.held(); len(h) != 0 {
@@ -75,7 +75,7 @@ func TestTextWithSubjectsFailsClosed(t *testing.T) {
 	if err := r.ch.PostAbout(ClassSecurity, "Cleared: S.", []string{"s"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Plain update." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 23:00) Plain update." {
 		t.Fatalf("sent with no hook: %q", got)
 	}
 	if h := r.held(); len(h) != 2 || h[0].Text != "Cleared: A." || h[1].Text != "Cleared: B." {
@@ -87,7 +87,7 @@ func TestTextWithSubjectsFailsClosed(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Cleared: B." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 07:01) Cleared: B." {
 		t.Fatalf("sent once hooked: %q", got)
 	}
 	if h := r.held(); len(h) != 0 {
