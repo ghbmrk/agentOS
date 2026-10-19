@@ -55,6 +55,9 @@ type Options struct {
 
 	// started, if set, is told each start's time (tests).
 	started func(time.Time)
+	// timer, if set, makes each restart's timer in place of
+	// time.NewTimer (tests).
+	timer func(time.Duration) *time.Timer
 }
 
 // States the supervisor reports.
@@ -107,6 +110,9 @@ func newSupervisor(o Options) *Supervisor {
 	if s.log == nil {
 		s.log = io.Discard
 	}
+	if s.o.timer == nil {
+		s.o.timer = time.NewTimer
+	}
 	return s
 }
 
@@ -149,7 +155,7 @@ func (s *Supervisor) loop(ctx context.Context, run func(context.Context) string)
 			n = st.Restarts
 		})
 		fmt.Fprintf(s.log, "infer: service stopped (%s); restart %d in %s\n", cause, n, delay)
-		t := time.NewTimer(delay)
+		t := s.o.timer(delay)
 		select {
 		case <-ctx.Done():
 			t.Stop()
