@@ -51,8 +51,15 @@ func (n Network) Validate() error {
 	if sym == n.SSID || len(sym) != nameSymbols || strings.Trim(sym, alphabet) != "" {
 		return errors.New("apnet: not a card network name")
 	}
-	p := strings.ReplaceAll(n.Password, "-", "")
-	if len(p) != passwordSymbols || strings.Trim(p, alphabet) != "" || group(p) != n.Password {
+	return ValidPassword(n.Password)
+}
+
+// ValidPassword refuses anything but sixteen card symbols in groups of
+// four (XXXX-XXXX-XXXX-XXXX): the card's network password, and the shape
+// the claim gives the setup network's (claim.NewSetupPassword, HW-10).
+func ValidPassword(pw string) error {
+	p := strings.ReplaceAll(pw, "-", "")
+	if len(p) != passwordSymbols || strings.Trim(p, alphabet) != "" || group(p) != pw {
 		return errors.New("apnet: not a card network password")
 	}
 	return nil

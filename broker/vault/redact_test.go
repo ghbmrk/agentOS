@@ -236,7 +236,7 @@ func TestRedactorScrubsDeclaredFormatSplitAcrossWrites(t *testing.T) {
 // The stream hold-back is bounded as FormatMaxLen says: every write holds
 // back its last FormatMaxLen-1 bytes, a shorter match running to the end is
 // held whole, and of a longer one at least the first FormatMaxLen bytes are
-// redacted (P17).
+// redacted (CAP-11-plan-fu4-P17).
 // REQ: CRED-7
 func TestFormatStreamHoldBounds(t *testing.T) {
 	r := formatRedactor(t)

@@ -1063,7 +1063,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
     # REQ: CRED-5, A14
     def test_a_stale_login_refreshes_at_startup_through_the_forwarder(self):
         """#2085: a plan login due for refresh is refreshed through the forwarder before the turn
-        starts, and the turn completes. This is the refresh path that works on 0.162.1 (C20)."""
+        starts, and the turn completes. This is the refresh path that works on 0.162.1 (S8-W1-s8-C20)."""
         new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
         login, tool, written, got = self.refresh_turn(200, new, last_refresh="2020-01-01T00:00:00Z")
         self.assertEqual(written["tokens"], dict(login["tokens"], **new))
@@ -1078,15 +1078,15 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
     def test_a_mid_turn_refresh_loses_that_turn_and_the_next_completes(self):
         """#2085: on 0.162.1 the request the CLI retries after a mid-turn refresh goes through
         its route-aware client, which needs an [application.network] policy; without one it fails
-        closed, and a policy that allows a plain-http loopback forwarder does not exist (C20). The
+        closed, and a policy that allows a plain-http loopback forwarder does not exist (S8-W1-s8-C20). The
         bound: that one turn fails, auth.json already holds the refreshed placeholders, and the
         next turn on it completes without refreshing again. If the first turn now completes,
-        the CLI changed: update C20 and drop the bound."""
+        the CLI changed: update S8-W1-s8-C20 and drop the bound."""
         new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
         login, _, written, got = self.refresh_turn(200, new)
         kinds = [e.get("type") for e in self.events(got)]
         self.assertNotIn("turn.completed", kinds,
-                         "the turn survived a mid-turn refresh: the CLI changed, update C20")
+                         "the turn survived a mid-turn refresh: the CLI changed, update S8-W1-s8-C20")
         self.assertIn("application network policy is unavailable", got["stdout"],
                       "the mid-turn refresh failed some other way: " + got["stdout"][-2000:])
         self.assertEqual(written["tokens"], dict(login["tokens"], **new))

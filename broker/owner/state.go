@@ -68,7 +68,7 @@ type State struct {
 	// Sent are the unsolicited texts sent in the last hour.
 	Sent []time.Time `json:"sent,omitempty"`
 	// ForgotAt is the last deletion that cleared the reaction window, so
-	// its 24 h rule outlives a restart (CAP-3, #2360, O44).
+	// its 24 h rule outlives a restart (CAP-3, #2360, CAP3-reaction-recent-forget-O44).
 	ForgotAt time.Time `json:"forgot_at"`
 }
 

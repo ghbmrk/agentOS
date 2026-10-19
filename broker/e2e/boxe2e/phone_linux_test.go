@@ -151,7 +151,7 @@ func outageNoticeOf(t *testing.T, texts, requests int) string {
 
 // REQ: CH-1, CH-11, CH-14. The daily digest answers no command: phone-control
 // passes over it wherever it lands and counts it in a note, and a text
-// that only mentions it is still other (E17).
+// that only mentions it is still other (G1-1688-f1-E17).
 func TestDigestIsNotAReply(t *testing.T) {
 	n := modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: Sun 18 Oct; reply STATUS for more."}
 	if k := replyKind(n.Text); k != "digest" {

@@ -288,7 +288,7 @@ func Builtins() map[string]Declaration {
 			// word boundary, so an escaped or percent-encoded prefix
 			// cannot hide it. The public rt_ refresh shape and the API key
 			// stay declared, since the issuer is server-side and a plan
-			// sign-in issues no API key (ASSUMPTIONS.md P17). The rt_
+			// sign-in issues no API key (ASSUMPTIONS.md CAP-11-plan-fu4-P17). The rt_
 			// shape is case-sensitive and consumes a JSON escape or a
 			// percent-encoded byte in place of a word boundary, so an
 			// escaped token is caught but rt_ inside a word is not.

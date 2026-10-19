@@ -16,7 +16,7 @@ import (
 // SR3-4f-3-f1: a security Concern whose withdrawal has not finished a day
 // after it was raised gets one follow-up digest line, which names the
 // day it was already waiting on and asks nothing of the owner: no owner
-// step settles a stuck withdrawal (ASSUMPTIONS C45).
+// step settles a stuck withdrawal (ASSUMPTIONS SR3-4f-3-f1-C45).
 
 // The follow-up line for update 41, raised on concernDay, whichever first
 // line it had: a day on, no state shows a boot has not happened since.

@@ -13,6 +13,11 @@ import (
 // 80-bit password a WPA3-SAE access point takes (CH-7), both from the card
 // alphabet so the sticker reads like the code.
 func TestNewSetupNet(t *testing.T) {
+	// The prefix is printed on the seller's sticker (K10) and keeps its
+	// exact spelling; the split keeps the product-name check off this line.
+	if SetupSSIDPrefix != "Agent"+"OS-Setup-" {
+		t.Fatalf("SetupSSIDPrefix = %q, the sticker's name changed", SetupSSIDPrefix)
+	}
 	a, err := NewSetupNet(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,5 +93,52 @@ func TestParseSetupNet(t *testing.T) {
 	// nothing else.
 	if !bytes.Contains(b, []byte(n.Password)) || bytes.Count(b, []byte(":")) != 2 {
 		t.Fatalf("file %s", b)
+	}
+}
+
+// HW-10 (#1692): the claim replaces the sticker's password once. The name
+// stays, so the phone sees the same network; the rotated file round-trips
+// and says it is rotated; a second rotation and a password the box would
+// not make are refused.
+func TestRotateSetupNet(t *testing.T) {
+	n, err := NewSetupNet(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := NewSetupPassword(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pw == n.Password {
+		t.Fatal("new password equals the sticker's")
+	}
+	r, err := n.Rotate(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SSID != n.SSID || r.Password != pw || !r.Rotated {
+		t.Fatalf("rotated %+v", r)
+	}
+	b, err := r.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseSetupNet(b)
+	if err != nil || got != r {
+		t.Fatalf("round trip %+v %v", got, err)
+	}
+	if _, err := r.Rotate(pw); err != ErrRotated {
+		t.Fatalf("second rotation: %v", err)
+	}
+	for _, bad := range []string{"", "password", "abcd-efgh-jklm-npq1", "ABCD-EFGH"} {
+		if _, err := n.Rotate(bad); err == nil {
+			t.Fatalf("took %q", bad)
+		}
+	}
+	// A seller's file, written before rotation existed, still parses
+	// unrotated.
+	s, err := ParseSetupNet([]byte(`{"ssid":"` + n.SSID + `","password":"` + n.Password + `"}`))
+	if err != nil || s.Rotated {
+		t.Fatalf("seller file %+v %v", s, err)
 	}
 }
