@@ -10,13 +10,12 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
@@ -60,7 +59,7 @@ type lateMail struct {
 	mu   sync.Mutex
 	gens map[string]genStamp
 	// undoable: the journal keeps organize evidence readable, so the
-	// digest's UNDO can restore it (ADP-2). Without that every organize
+	// owner's UNDO can restore it (ADP-2). Without that every organize
 	// effect is asked (wire).
 	undoable bool
 	// tune adjusts each adapter's Config before mail.New: tests only.
@@ -94,7 +93,7 @@ func (l *lateMail) wire(cfg *daemon.Config) {
 }
 
 // evidenceReadable reports whether organize evidence journaled through red
-// still parses, so a digest can count it and UNDO restore it. Nil is the
+// still parses, so STATUS can count it and UNDO restore it. Nil is the
 // daemon's default, which journals no free text (daemon.Redacted).
 func evidenceReadable(red journal.Redactor) bool {
 	if red == nil {
@@ -297,15 +296,13 @@ func (l *lateMail) poll(ctx context.Context, eng *journal.Engine, src mailAddres
 	}
 }
 
-// The digest's organize line and its UNDO (ADP-2, CH-16). A day's changes
+// The mail STATUS note and its UNDO (ADP-2, CH-16). A day's changes
 // are the account's organize intents that Succeeded that day (local
 // time), read back from the journal; the day's UNDO ID is a keyed hash of
 // the account and the day, so it is the same after a restart, names
 // neither, and cannot be worked out for another account or day without
-// the key.
-
-// mailDigestSource is the mail line's digest source name.
-const mailDigestSource = "mail"
+// the key. No daily text carries them (DRB-1): STATUS shows each complete
+// day still undoable, and the owner asks for it.
 
 // undoLookback bounds the days an UNDO ID is looked for: past the window.
 const undoLookback = 8
@@ -420,107 +417,134 @@ func (d *mailDays) undo(ctx context.Context, id string) (string, bool) {
 	return "", false
 }
 
-// mailSource is the digest's mail source: the oldest complete day in the
-// undo window, not yet acknowledged, with organize changes. Its
-// generation is the day's number since 1970, so each day is offered once.
-type mailSource struct {
-	d     *mailDays
-	store change.Store
-
-	mu    sync.Mutex
-	acked uint64
+// mailNote is the mail STATUS notes, two lines whatever the number of
+// days: the UNDO of every complete day still in its undo window with
+// organize changes, oldest first by weekday, each whose window ends
+// today marked, and the security alerts those days labelled but left in
+// the inbox. Every day mailDays.undo accepts is shown while it is
+// undoable. STATUS adds a note whole or not at all (control), so no ID is
+// cut. It names no sender (CH-12) and is empty until wireMail stores the
+// days.
+type mailNote struct {
+	days atomic.Pointer[mailDays]
+	// kept is the alerts line of the last codes read, for the alerts
+	// note that STATUS asks for right after: one STATUS reads the trail
+	// once, and its two lines describe the same days.
+	mu   sync.Mutex
+	kept keptAlerts
 }
 
-func newMailSource(d *mailDays, store change.Store) (*mailSource, error) {
-	s := &mailSource{d: d, store: store}
-	raw, err := store.Load()
-	if err != nil {
-		return nil, err
+type keptAlerts struct {
+	d      *mailDays
+	at     time.Time // wall clock, for keptFor
+	alerts string
+}
+
+// keptFor is how long a kept alerts line serves.
+const keptFor = time.Second
+
+// maxUndoDays is the most complete days the codes line lists. A day's
+// window is mail.UndoWindow (168 hours) from its local start, so the day
+// 7 calendar days back is still undoable in the first hour after midnight
+// once a spring-forward change falls inside its window; the day 8 back
+// started at least 191 hours ago and never is. read looks no further.
+const maxUndoDays = 7
+
+const (
+	codesPrefix = "Mail UNDO: "
+	endsToday   = " (ends today)"
+	// codesMax is the longest codes line: maxUndoDays "Mon ABC" entries,
+	// the separators, two ends-today markers and the full stop. Only
+	// the days 6 and 7 back can end by tomorrow's start, and both do when
+	// the clocks went forward on the day 7 back and it is still in the
+	// first hour after midnight.
+	codesMax = len(codesPrefix) + maxUndoDays*len("Mon ABC") + (maxUndoDays-1)*len(", ") + 2*len(endsToday) + len(".")
+)
+
+// The codes line fits control's 100-byte note cut whatever the days, so
+// no ID is ever cut: this fails to compile if it could not.
+var _ [100 - codesMax]struct{}
+
+func (n *mailNote) read(d *mailDays) (codes, alerts string) {
+	if d == nil {
+		return "", ""
 	}
-	if raw != nil {
-		var st struct{ Acked uint64 }
-		if err := json.Unmarshal(raw, &st); err != nil {
-			return nil, err
-		}
-		s.acked = st.Acked
-	}
-	return s, nil
-}
-
-func dayNumber(t time.Time) uint64 {
-	y, m, dd := t.Date()
-	return uint64(time.Date(y, m, dd, 0, 0, 0, 0, time.UTC).Unix() / 86400)
-}
-
-func (s *mailSource) Peek(context.Context) (*digestqueue.Snapshot, error) {
-	s.mu.Lock()
-	acked := s.acked
-	s.mu.Unlock()
-	d := s.d
 	now := d.now().In(d.loc)
-	today := now.Format(dayFormat)
+	tomorrow := d.dayStart(now.AddDate(0, 0, 1).Format(dayFormat))
 	all := d.changes()
-	for i := undoLookback; i >= 1; i-- {
+	var ids []string
+	hits := 0
+	for i := 1; i <= maxUndoDays; i++ {
 		day := now.AddDate(0, 0, -i).Format(dayFormat)
 		start := d.dayStart(day)
-		gen := dayNumber(start)
-		if day == today || gen <= acked || len(all[day]) == 0 || !now.Before(start.Add(mail.UndoWindow)) {
+		if !now.Before(start.Add(mail.UndoWindow)) {
+			break
+		}
+		sum := mail.Summarize(all[day])
+		if sum.Total == 0 {
 			continue
 		}
-		until := start.Add(mail.UndoWindow - time.Nanosecond)
-		line := mail.Summarize(all[day]).Line(undoID(d.key, d.account, day), until)
-		if line == "" {
-			continue
+		hits += sum.GuardHits
+		// At most maxUndoDays are listed, all before today, so each
+		// weekday names one.
+		id := start.Format("Mon") + " " + undoID(d.key, d.account, day)
+		if !start.Add(mail.UndoWindow).After(tomorrow) {
+			id += endsToday
 		}
-		snap, err := digestqueue.NewSnapshot(mailDigestSource, gen, []string{line}, nil)
-		return &snap, err
+		ids = append([]string{id}, ids...)
 	}
-	return nil, nil
+	if len(ids) > 0 {
+		codes = codesPrefix + strings.Join(ids, ", ") + "."
+	}
+	if hits == 1 {
+		alerts = "1 security alert labelled but left in the inbox."
+	} else if hits > 1 {
+		alerts = fmt.Sprintf("%d security alerts labelled but left in the inbox.", hits)
+	}
+	return codes, alerts
 }
 
-func (s *mailSource) Ack(_ context.Context, snap digestqueue.Snapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if snap.Generation <= s.acked {
-		return nil
+// codes is the first mail STATUS note; it keeps the alerts line.
+func (n *mailNote) codes() string {
+	d := n.days.Load()
+	c, a := n.read(d)
+	n.mu.Lock()
+	n.kept = keptAlerts{d: d, at: time.Now(), alerts: a}
+	n.mu.Unlock()
+	return c
+}
+
+// alerts is the second: the line codes kept, once, or a fresh read.
+func (n *mailNote) alerts() string {
+	n.mu.Lock()
+	k := n.kept
+	n.kept = keptAlerts{}
+	n.mu.Unlock()
+	d := n.days.Load()
+	if k.d != nil && k.d == d && time.Since(k.at) < keptFor {
+		return k.alerts
 	}
-	b, err := json.Marshal(struct{ Acked uint64 }{snap.Generation})
-	if err != nil {
-		return err
-	}
-	if err := s.store.Save(b); err != nil {
-		return err
-	}
-	s.acked = snap.Generation
-	return nil
+	_, a := n.read(d)
+	return a
 }
 
 // wireMail starts l's binder on the vault process's mail socket and, once
-// the values key is read, the owner channel's UNDO hook and the digest's
-// mail line. Without the key neither runs: organize still runs, and its
+// the values key is read, the owner channel's UNDO hook and the mail
+// STATUS note. Without the key neither runs: organize still runs, and its
 // changes stay in the journal.
-func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnDir string, dg *digestBox, digestDir string, now func() time.Time) {
+func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnDir string, note *mailNote, now func() time.Time) {
 	c := mailsock.NewClient(socket)
 	go l.run(ctx, d.Engine(), c, now, mailPoll, log.Printf)
 	key, err := readValuesKey(filepath.Join(learnDir, "values.key"))
 	if err != nil {
-		log.Printf("mail: no UNDO or digest line for mail changes: %v", err)
+		log.Printf("mail: no UNDO for mail changes: %v", err)
 		return
 	}
 	days := &mailDays{account: l.account, key: undoSubkey(key), loc: time.Local, now: now, trail: d.Engine().Trail, m: l}
 	if o := d.Owner(); o != nil {
 		o.SetUndo(days.undo)
 	}
-	if dg == nil {
-		return
+	if note != nil {
+		note.days.Store(days)
 	}
-	src, err := newMailSource(days, change.FileStore{Path: filepath.Join(digestDir, "mail-digest.json")})
-	if err != nil {
-		log.Printf("mail: no digest line for mail changes: %v", err)
-		return
-	}
-	if dg.cfg.Sources == nil {
-		dg.cfg.Sources = map[string]digestqueue.Source{}
-	}
-	dg.cfg.Sources[mailDigestSource] = src
 }

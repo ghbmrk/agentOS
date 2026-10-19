@@ -487,32 +487,6 @@ func TestCapabilityLinesAreOwnerWorded(t *testing.T) {
 	}
 }
 
-// OP-9 (digest sources): DIG-1's one list holds the registry, the loop
-// scheduler's digest when learning opened, and the second line's when it
-// is configured.
-func TestDigestSourcesHoldTheRegistry(t *testing.T) {
-	b := newCapBox(t)
-	lp := openCapLearning(t, b)
-	line := &secondLine{}
-	names := func(ds digestSources) (out []string) {
-		for _, s := range ds {
-			out = append(out, s.name)
-		}
-		return out
-	}
-	if got := names(newDigestSources(b.reg, nil, nil)); strings.Join(got, ",") != "capabilities" {
-		t.Fatalf("no learning, no second line: %q", got)
-	}
-	ds := newDigestSources(b.reg, lp, line)
-	if got := names(ds); strings.Join(got, ",") != "capabilities,loops,second line" {
-		t.Fatalf("all: %q", got)
-	}
-	b.caps.updateChecks(nil)
-	if d := ds[0].digest(); !slices.Contains(d, updateChecksOff) || !slices.Equal(d, b.reg.Digest()) {
-		t.Fatalf("registry digest: %q", d)
-	}
-}
-
 // OP-9: the clock note stays first, the registry follows it, and notes
 // wired after it keep their place.
 func TestCapabilityLinesFollowTheClockNote(t *testing.T) {

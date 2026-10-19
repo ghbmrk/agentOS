@@ -13,10 +13,10 @@ import (
 // REQ: ADP-12, CH-12
 
 // Potency R1 on #139: while the second line waits on the owner, STATUS
-// and the digest say so with the fix, in owner wording; otherwise they say
+// says so with the fix, in owner wording; otherwise it says
 // nothing. A locked vault clears the line (the unlock has its own), and a
 // vault process that does not answer keeps the last state.
-func TestStatusAndDigestSayWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
+func TestStatusSaysWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
 	var mu sync.Mutex
 	st, fail := modelroute.SecondLineOK, error(nil)
 	set := func(s modelroute.SecondLineState, err error) { mu.Lock(); st, fail = s, err; mu.Unlock() }
@@ -31,10 +31,6 @@ func TestStatusAndDigestSayWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
 		sl.refresh(ctx)
 		if got := sl.Note(); got != want {
 			t.Fatalf("%s: STATUS %q, want %q", step, got, want)
-		}
-		d := sl.Digest()
-		if want == "" && len(d) != 0 || want != "" && (len(d) != 1 || d[0] != want) {
-			t.Fatalf("%s: digest %q", step, d)
 		}
 		if strings.Contains(want, "vault") || strings.Contains(want, "realm") {
 			t.Fatalf("%s: internal wording %q", step, want)
@@ -56,10 +52,10 @@ func TestStatusAndDigestSayWhenTheSecondLineWaitsOnTheOwner(t *testing.T) {
 	check("confirmed", "")
 }
 
-// UX-159-1: when the texting account's polls keep failing, STATUS and the
-// digest say whether to check the account or to wait, beside the calling
+// UX-159-1: when the texting account's polls keep failing, STATUS says
+// whether to check the account or to wait, beside the calling
 // account's line; the next good poll clears it.
-func TestStatusAndDigestSayWhenTextsStopArriving(t *testing.T) {
+func TestStatusSaysWhenTextsStopArriving(t *testing.T) {
 	var mu sync.Mutex
 	tx, fail := modelroute.TextsOK, error(nil)
 	set := func(s modelroute.TextsState, err error) { mu.Lock(); tx, fail = s, err; mu.Unlock() }
@@ -79,9 +75,8 @@ func TestStatusAndDigestSayWhenTextsStopArriving(t *testing.T) {
 		if got := sl.TextsNote(); got != want {
 			t.Fatalf("%s: STATUS %q, want %q", step, got, want)
 		}
-		d := sl.Digest()
-		if want == "" && len(d) != 1 || want != "" && (len(d) != 2 || d[0] != secondLineConfirmLine || d[1] != want) {
-			t.Fatalf("%s: digest %q", step, d)
+		if got := sl.Note(); got != secondLineConfirmLine {
+			t.Fatalf("%s: calling account's line %q", step, got)
 		}
 	}
 	check("texts arriving", "")

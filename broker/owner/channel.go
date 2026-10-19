@@ -308,6 +308,7 @@ func New(cfg Config) (*Channel, error) {
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	c.recent.forgotAt = st.ForgotAt
+	c.recent.restore(st.Guarded, cfg.Now())
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
@@ -315,7 +316,9 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Agent != nil {
 		agent = chatAgent{Agent: cfg.Agent, c: c}
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
+	// The page-only requests' line is STATUS's first note, so the texted
+	// reply, which leaves out notes that do not fit, always keeps it.
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append([]func() string{c.LocalWaiting}, cfg.Notes...), Now: cfg.Now,
 		Settings: c.settings, HelpExtra: strings.TrimSpace(cfg.HelpExtra + " " + pacingHelp), Answer: cfg.Answer}
 	return c, nil
 }
