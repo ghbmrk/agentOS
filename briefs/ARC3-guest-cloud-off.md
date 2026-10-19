@@ -4,7 +4,7 @@ Board section: Harness and operating model. Work item: #2417. Follow-up of ARC-3
 
 **Why.** A broker-held CLI guest (Codex, Grok, Muse) holds a placeholder and the broker injects the credential into declared endpoints only. Nothing makes the guest's config turn off the provider's cloud tasks, remote or hosted execution, telemetry, history or sync, as CRED-5 W4 does for worker-held mode. Failure path: the guest starts a cloud task or syncs a session; data leaves outside ARC-6's interface and the injected credential serves more than model calls.
 
-**Prerequisite (not this package).** The ARC-3 / ARC-6(a) sentence ("a CLI guest's declaration switches off provider cloud and remote features; a feature with no known off switch is `[Open]` and its endpoints are refused at egress") is a SPEC.md change, so it goes through an L1 spec-diff PR first (CLAUDE.md). The builder starts after it merges, or cites the Mark message it transcribes.
+**Prerequisite (not this package).** The ARC-3 / ARC-6(a) sentence ("a CLI guest's declaration switches off provider cloud and remote features; a feature with no known off switch is `[Open]` and its endpoints are refused at egress") is a SPEC.md change, so it goes through an L1 spec-diff PR first (CLAUDE.md). The builder starts after that spec-diff PR merges on its accepts (D-137).
 
 **Requirements:**
 - ARC3-C1: each CLI guest's managed config switches off every cloud, remote and telemetry feature it has a known switch for; the switches are listed per CLI in that guest's `ASSUMPTIONS.md`.

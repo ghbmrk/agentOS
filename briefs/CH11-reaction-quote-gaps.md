@@ -1,6 +1,6 @@
 # CH11-reaction-quote-gaps: close four reaction-quote leaks of request codes
 
-Board section: Human-native texting. Work item: #2392. Follow-up of O45 (PR #2385); Security review comment 6253028757. **Tier A** (`broker/owner`). Run in one session with CAP3-held-forget-scope only if the first leaves room; both edit `reaction.go`, so do not run them in parallel (D-111).
+Board section: Human-native texting. Work item: #2392. Follow-up of O45 (PR #2385); Security review comment 6253028757. **Tier A** (`broker/owner`). Run in one session with CAP3-held-forget-scope only if the first leaves room; both edit `reaction.go`, so do not run them in parallel (D-111). Open #2355 also touches `reaction.go`: start after it lands or closes.
 
 **Why / failure path.** The owner taps back on a live request, or the phone cuts the quote short. The text goes to the agent as chat with part or all of the request's code (CH-3, CH-11).
 
