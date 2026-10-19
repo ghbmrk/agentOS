@@ -222,7 +222,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 		"no task class":       func(d *Declaration) { d.TaskClasses = nil },
 		"no used-up signal":   func(d *Declaration) { d.UsedUp = nil },
 		"no error events":     func(d *Declaration) { d.ErrorEvents = nil },
-		"no pool":             func(d *Declaration) { d.Pools = nil },
+		"half-filled pool":    func(d *Declaration) { d.Pools = []Pool{{Name: "5h"}} },
 		"unknown custody":     func(d *Declaration) { d.Custody = "guest-held" },
 		"broker-held no host": func(d *Declaration) { d.Endpoints = nil },
 		"credential in env":   func(d *Declaration) { d.Env = append(d.Env, "X="+canaryToken) },
@@ -257,7 +257,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 
 func TestBuiltinsLoad(t *testing.T) {
 	bs := Builtins()
-	if len(bs) != 2 {
+	if len(bs) != 3 {
 		t.Fatalf("builtins: %d", len(bs))
 	}
 	for _, d := range bs {
@@ -272,6 +272,10 @@ func TestBuiltinsLoad(t *testing.T) {
 	cl, ok := bs["claude"]
 	if !ok || cl.Custody != WorkerHeld || cl.Q.Verdict != Unclear {
 		t.Errorf("claude: %+v", cl)
+	}
+	g, ok := bs["grok"]
+	if !ok || g.Custody != BrokerHeld || g.Q.Verdict != Allowed || g.Q.Complete() {
+		t.Errorf("grok: %+v", g)
 	}
 }
 

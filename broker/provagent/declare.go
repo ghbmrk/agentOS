@@ -202,8 +202,11 @@ func (d Declaration) Validate() error {
 	default:
 		return fmt.Errorf("declaration %s: custody %q", d.ID, d.Custody)
 	}
-	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 || len(d.Pools) == 0 {
-		return fmt.Errorf("declaration %s: task classes, used-up signal, error events and pools are needed", d.ID)
+	// A route may declare no pool when its CLI's endpoints report none
+	// (grok, #1378): admission then reads it as unmetered by header, and
+	// only the CLI's used-up signals and the run caps bound it (RES-5).
+	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 {
+		return fmt.Errorf("declaration %s: task classes, used-up signal and error events are needed", d.ID)
 	}
 	for _, p := range d.Pools {
 		if p.Name == "" || p.ReadFrom == "" {
@@ -215,7 +218,8 @@ func (d Declaration) Validate() error {
 			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links, its https page and its issuer", d.ID)
 		}
 	}
-	if _, err := d.Formats(); err != nil {
+	formats, err := d.Formats()
+	if err != nil {
 		return err
 	}
 	var all []string
@@ -224,8 +228,10 @@ func (d Declaration) Validate() error {
 	all = append(append(all, d.SignInArgv...), d.SignInLinks...)
 	all = append(all, d.Endpoints...)
 	all = append(all, d.Placeholder, d.Cwd, d.ResultPath, d.Q.Evidence, d.Q.TermsURL)
+	// A value in the declaration's own credential formats is refused as
+	// well as the default shapes: an xai- key is not one of those.
 	for _, s := range all {
-		if LooksLikeCredential(s) {
+		if LooksLikeCredential(s) || matchesAny(formats, s) {
 			return fmt.Errorf("declaration %s carries a credential format", d.ID)
 		}
 	}
@@ -247,9 +253,9 @@ func (d Declaration) Validate() error {
 	return d.Q.validate()
 }
 
-// Builtins are the declarations the broker ships, by ID. Both ship with an
-// incomplete record: Codex is off until #809 fills it; Claude stays off behind
-// the owner's opt-in (#1380).
+// Builtins are the declarations the broker ships, by ID. Codex is qualified
+// by #809; Claude stays off behind the owner's opt-in (#1380); Grok ships
+// with an incomplete record and is off until #809 fills it (#1378).
 func Builtins() map[string]Declaration {
 	return map[string]Declaration{
 		"codex": {
@@ -329,6 +335,39 @@ func Builtins() map[string]Declaration {
 			// for before a result leaves the worker (S8, mode W).
 			CredFormats: []string{`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`},
 			Q:           Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)
+		},
+		// Grok Build, xAI's official CLI (#1378), read from the pinned
+		// CLI's own strings and not yet measured (ASSUMPTIONS.md): headless
+		// with the brief on stdin, its login in GROK_HOME's auth.json, and
+		// egress.Grok() the route its endpoints name.
+		"grok": {
+			ID: "grok", CLI: "grok", Version: "1.0.62", Image: "grok",
+			Argv:        []string{"grok", "-p", "-", "--output-format", "streaming-json", "--no-auto-update"},
+			Cwd:         "/var/lib/agentos-work",
+			Env:         []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/var/lib/agentos-grok", "GROK_HOME=/var/lib/agentos-grok"},
+			Idle:        []string{"/bin/sleep", "infinity"},
+			ResultPath:  "/var/lib/agentos-work/.agentos-result",
+			Custody:     BrokerHeld,
+			Endpoints:   []string{"cli-chat-proxy.grok.com", "auth.x.ai"},
+			Placeholder: "auth.json",
+			// No quota header is known for these endpoints: no pool (RES-5).
+			TaskClasses: []string{"code", "research"},
+			ErrorEvents: []string{"error"},
+			UsedUp:      []string{"usage_limit_reached", "usage_pool_exhausted"},
+			// xAI's login is OIDC JWTs at auth.x.ai, and its API keys are
+			// xai- keys; both are scanned for before a result leaves.
+			CredFormats: []string{
+				`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
+				`\bxai-[A-Za-z0-9_-]{20,}`,
+			},
+			// Verdict and the terms read are #1377's (Mark, 2026-10-14). The
+			// CLI version and evidence stay empty until #809 runs this CLI,
+			// so the gate refuses it unqualified.
+			Q: Qualification{
+				TermsURL:  "https://x.ai/legal/terms-of-service",
+				TermsRead: "2026-10-13",
+				Verdict:   Allowed,
+			},
 		},
 	}
 }
