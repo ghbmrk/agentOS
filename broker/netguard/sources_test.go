@@ -557,3 +557,17 @@ func TestUnknownStartMACThenRouterSwapKeepsTheEndRoutersAddress(t *testing.T) {
 		t.Fatalf("router B's quick read got %v, want %v", n.External, eB)
 	}
 }
+
+// A mapped interface prefix wider than the mapped range is kept as the IPv6
+// prefix it is, not dropped; /96 and longer are the IPv4 prefix they carry.
+func TestPrefixesKeepMappedPrefixShorterThan96(t *testing.T) {
+	mapped := func(ones int) net.Addr {
+		return &net.IPNet{IP: net.ParseIP("::ffff:192.168.1.50"), Mask: net.CIDRMask(ones, 128)}
+	}
+	for ones, want := range map[int]string{80: "::/80", 95: "::fffe:0:0/95", 2: "::/2", 96: "0.0.0.0/0", 120: "192.168.1.0/24"} {
+		got := Prefixes([]net.Addr{mapped(ones)})
+		if len(got) != 1 || got[0] != netip.MustParsePrefix(want) {
+			t.Errorf("/%d: %v, want %s", ones, got, want)
+		}
+	}
+}

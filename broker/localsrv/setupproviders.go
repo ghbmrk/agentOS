@@ -48,12 +48,26 @@ func (s *Setup) providers(_ context.Context, _ sockets.Peer, args json.RawMessag
 	if err != nil {
 		return nil, s.providerErr(err)
 	}
+	// A sign-in's wait ends only after its login is stored, so SigningIn
+	// is read before the list Connected comes from: a sign-in that ends
+	// between the two reads shows connected, never as ended (UX3-F1).
+	var signing map[string]bool
+	if s.cfg.SignIn != nil {
+		signing = map[string]bool{}
+		for _, p := range ps {
+			signing[p.ID] = s.cfg.SignIn.SigningIn(p.ID)
+		}
+		if ps, err = s.cfg.Providers.Providers(); err != nil {
+			return nil, s.providerErr(err)
+		}
+	}
 	if ps == nil {
 		ps = []localapi.SetupProvider{}
 	}
 	s.mu.Lock()
 	for i := range ps {
 		ps[i].Owed = nil // only the record says what is owed
+		ps[i].SigningIn = signing[ps[i].ID]
 		// Device code only where setup can start the sign-in now.
 		ps[i].DeviceCode = ps[i].DeviceCode && s.cfg.SignIn != nil && s.cfg.SignIn.Ready(ps[i].ID)
 		if ok, owed := s.rec.Owed[ps[i].ID]; owed {

@@ -35,6 +35,9 @@ var thirdPartyHosts = map[string]bool{
 	// OpenAI's terms page, the codex qualification record's TermsURL
 	// (provagent P1, D-117).
 	"openai.com": true,
+	// xAI's terms page, the grok qualification record's TermsURL
+	// (provagent PLAN-grok-P1, #1377).
+	"x.ai":       true,
 	"nodejs.org": true, "registry.npmjs.org": true,
 	// The bubblewrap release tarball the Codex rootfs builds its bwrap from,
 	// pinned by hash (#1720; Mark's "Patch bwrap" decision). The project's own

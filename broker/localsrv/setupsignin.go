@@ -22,6 +22,9 @@ type SignIn interface {
 	// page, the one-time code the owner enters there, and who issued the
 	// code. SignInBusy: that provider's last sign-in still waits.
 	Start(ctx context.Context, provider string) (link, code, from string, err error)
+	// SigningIn reports whether provider's sign-in still waits for the
+	// owner (provagent.Runner.SigningIn).
+	SigningIn(provider string) bool
 }
 
 // SignInBusy: the provider's last sign-in still waits for the owner.

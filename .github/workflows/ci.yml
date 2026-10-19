@@ -30,6 +30,9 @@ env:
 # ruleset counts as passing. The code is main's, which main's own run tested.
 # checks always runs (!cancelled()), and the other jobs run unless scope says exactly
 # 'true', so a failed scope job means full CI, never a skipped required check.
+# A push to main runs every job and every step whatever scope says (CI-mainguard, #2323):
+# main's green run then means main builds, even after a records-only merge that follows a
+# skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
   scope:
     uses: ./.github/workflows/scope.yml
@@ -39,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      RECORDS: ${{ needs.scope.outputs.records }}
+      RECORDS: ${{ github.event_name != 'push' && needs.scope.outputs.records || 'false' }}
     permissions:
       contents: read
       issues: read # board.py check --repo reads the work-item issues
@@ -164,7 +167,7 @@ jobs:
     # The required check (CI-SHARD, #1868): passes only when every race shard and the checks
     # job passed. Skipped with them on a records-only change, as before the split.
     needs: [scope, broker-race, broker-checks]
-    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -177,7 +180,7 @@ jobs:
           [ "$RACE" = success ] && [ "$CHECKS" = success ]
   broker-race:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}
     # The broker's race tests, split by package across the shards (tools/ci_split.py). Each
     # shard first checks the split covers `go list ./...` with no gap and no duplicate.
     runs-on: ubuntu-latest
@@ -248,7 +251,7 @@ jobs:
           key: go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
   broker-checks:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}
     # Format, vet, the OP-2 model at its full bounds and the decoder fuzz rounds, beside the
     # race shards.
     runs-on: ubuntu-latest
@@ -289,7 +292,7 @@ jobs:
         # five configurations to two searches at once: four (GOMAXPROCS) exhausted runner memory
         # and the step was killed with exit 143.
         run: go test -count=1 -timeout 20m -parallel 2 -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
-      - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
+      - name: Fuzz the broker decoders and policy targets, 20s per target (LOOP-7, P3-4b-3, FUZZ-broker-ci)
         # Each target already ran its seeds and planted-decoder control in the race shards;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
         # runs each target for the time budget as count-bound chunks sized from the
@@ -297,9 +300,13 @@ jobs:
         # -fuzztime: a time-bounded run can fail at its deadline with a bare "context
         # deadline exceeded" and no input (P1-4-flake), and a count has no deadline. A
         # chunk that hangs is killed at a cap proportional to its expected time.
+        # Each entry is pkg:Target[:calibrate]; tests/test_ci_scope.py checks each names a Fuzz
+        # func in that package. FuzzSlots writes sealed files per input (~100 execs/s), so its
+        # first chunk is 2000 execs: fuzzrun's default 20000 overran the chunk's cap.
         run: |
-          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP; do
-            python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
+          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000; do
+            IFS=: read -r pkg target cal <<< "$t"
+            python3 ../tools/fuzzrun.py --pkg "./$pkg" --target "$target" ${cal:+--calibrate "$cal"} --budget 20s || exit 1
           done
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -313,7 +320,7 @@ jobs:
 
   machines:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
     # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
     runs-on: ubuntu-latest
@@ -373,6 +380,14 @@ jobs:
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v ./loop7
+          # The inference service's jail, leaf and OOM (INFER-SVC INF-1, INF-6),
+          # with no_new_privs as agentosd.service runs it. Its tests skip off
+          # root or without the cgroup, so any skip here fails the step.
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v ./infer/... > /tmp/infer-test.log 2>&1 || { cat /tmp/infer-test.log; exit 1; }
+          cat /tmp/infer-test.log
+          if grep -- '--- SKIP' /tmp/infer-test.log; then echo "::error::infer tests skipped in the machines job" >&2; exit 1; fi
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd
@@ -479,7 +494,7 @@ jobs:
 
   hostcheck:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}
     # The host-untouched check (HOST-1e; A1, HW-8) on a QEMU/OVMF/swtpm host
     # with a Windows-like second disk, booting the stand-in guest until P2-1's
     # image boots here. Each QEMU process also has the harness's own timeout.

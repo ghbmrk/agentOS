@@ -109,7 +109,7 @@ var controlPath = map[string][]string{
 	// verify owner codes through checker/checkersock, a dial-only client
 	// of the checker's verify socket, so agentosd links none of the
 	// checker that holds the seed (SIM-split-wire, CH-4).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "checker/checkersock"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -160,6 +160,12 @@ var guestPlane = map[string]struct {
 	// The router's rule types, without the router (W3): what the change
 	// pipeline and Loop 1 read and change.
 	"routerule": {nil, forbiddenStd},
+	// The local inference service's protocol and client (INFER-SVC INF-5):
+	// the standard library only, dialing the service's unix socket. Its
+	// supervisor (infer/supervise) has no plane entry: it sets no_new_privs
+	// through golang.org/x/sys/unix, as loop7 does, and
+	// TestAgentosdLinksNoInference holds its imports.
+	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},

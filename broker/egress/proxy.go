@@ -26,14 +26,20 @@ package egress
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -57,29 +63,35 @@ const DefaultMaxConcurrent = 4
 const DefaultInFlightBytes = 320 << 20
 
 // The terms of bodyCost, bytes per unit, each an upper bound that
-// TestBodyCostBoundsApply measures against BodyRule.apply's allocations
-// for the costliest body shapes.
+// TestBodyCostBoundsApply and TestBodyCheckMemoryPerByte measure against
+// BodyRule.apply's allocations for the costliest body shapes.
 const (
-	// costPerByte covers the body, the decoder's copy of it, the decoded
-	// strings and the re-encoded output, with the buffers' growth.
-	costPerByte = 16
-	// costPerInvalid covers an invalid UTF-8 byte, which decodes and
-	// re-encodes as the three bytes of U+FFFD, and each byte of U+2028 and
-	// U+2029, which re-encode escaped. Other valid UTF-8 does not grow.
-	costPerInvalid = 28
-	// costPerObject is one decoded map[string]any with its first entries.
-	costPerObject = 640
-	// costPerToken is one value or key: its interface, slice or map slot
-	// and the slice and map growth that holds it.
-	costPerToken = 160
-	// costPerDepth is one level of the deepest nesting: the stack frames
-	// that decoding, checking and re-encoding recurse through, doubled
-	// because a goroutine's stack grows by doubling and copying.
-	costPerDepth = 4 << 10
+	// costPerByte covers the body, the walk's record of each object member
+	// (four bytes per member, and a member takes at least four bytes) and
+	// the output, which is never longer than the body but for the terms
+	// below.
+	costPerByte = 3
+	// costPerInvalid covers an invalid UTF-8 byte, which is forwarded as
+	// the three bytes of U+FFFD. Valid UTF-8 is forwarded as it came.
+	costPerInvalid = 2
+	// costPerDepth is one level of the deepest nesting: the walk's frame.
+	// The walk is iterative, so nesting grows no stack.
+	costPerDepth = 32
 	// callFloor is what any request holds besides its body: buffers,
 	// headers and the response copy.
 	callFloor = 64 << 10
 )
+
+// maxDepth is the deepest nesting a body may have: encoding/json's limit,
+// which the decoder this check replaced applied.
+const maxDepth = 10000
+
+// DefaultWriteTimeout is how long one write of a response to a guest may
+// wait for the guest to read (egress K18, SR3-mail-k18g). A guest that stops
+// reading a streamed reply loses the connection, and its slots return to
+// the budget, once a write waits this long; a reply that keeps flowing may
+// take as long as it needs.
+const DefaultWriteTimeout = 30 * time.Second
 
 // Event is one proxy decision. It carries no header or body content, so it
 // cannot carry a credential.
@@ -157,8 +169,12 @@ type Config struct {
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
 	// InFlightBytes caps the memory requests in flight may reserve across
-	// every machine; zero means DefaultInFlightBytes.
+	// every machine; zero means DefaultInFlightBytes. One machine may
+	// reserve at most half of it.
 	InFlightBytes int64
+	// WriteTimeout bounds each write of a response to the guest; zero
+	// means DefaultWriteTimeout.
+	WriteTimeout time.Duration
 	// Cap is applied to each machine separately.
 	Cap Cap
 	// Label returns a machine's REV-5 data label. Nil, or any answer other
@@ -204,9 +220,12 @@ type Proxy struct {
 	maxBody  int64
 	maxConc  int
 	budget   int64
+	share    int64 // what one machine may reserve of budget
 	cap      Cap
-	now      func() time.Time
-	xch      exchangeHooks
+	// writeTimeout bounds each write of a response to the guest.
+	writeTimeout time.Duration
+	now          func() time.Time
+	xch          exchangeHooks
 
 	mu       sync.Mutex
 	reserved int64 // bytes reserved by requests in flight, every machine
@@ -217,6 +236,7 @@ type Proxy struct {
 
 type machineUsage struct {
 	inFlight int
+	reserved int64
 	requests int64
 	bytes    int64
 }
@@ -233,24 +253,25 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, errors.New("egress: auditor required")
 	}
 	p := &Proxy{
-		adapters: map[string]Adapter{},
-		grants:   map[string]map[string]bool{},
-		granted:  cfg.Granted,
-		vault:    cfg.Vault,
-		holders:  cfg.Holders,
-		redact:   cfg.Redaction,
-		rt:       cfg.Transport,
-		audit:    cfg.Audit,
-		maxBody:  cfg.MaxBody,
-		maxConc:  cfg.MaxConcurrent,
-		budget:   cfg.InFlightBytes,
-		cap:      cfg.Cap,
-		now:      cfg.Now,
-		usage:    map[string]*machineUsage{},
-		labelOf:  cfg.Label,
-		xch:      exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
-		stops:    cfg.Stops,
-		held:     map[string]string{},
+		adapters:     map[string]Adapter{},
+		grants:       map[string]map[string]bool{},
+		granted:      cfg.Granted,
+		vault:        cfg.Vault,
+		holders:      cfg.Holders,
+		redact:       cfg.Redaction,
+		rt:           cfg.Transport,
+		audit:        cfg.Audit,
+		maxBody:      cfg.MaxBody,
+		maxConc:      cfg.MaxConcurrent,
+		budget:       cfg.InFlightBytes,
+		cap:          cfg.Cap,
+		now:          cfg.Now,
+		writeTimeout: cfg.WriteTimeout,
+		usage:        map[string]*machineUsage{},
+		labelOf:      cfg.Label,
+		xch:          exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
+		stops:        cfg.Stops,
+		held:         map[string]string{},
 	}
 	if p.stops == nil {
 		p.stops = memStops{}
@@ -315,6 +336,12 @@ func New(cfg Config) (*Proxy, error) {
 	if p.budget <= 0 {
 		p.budget = DefaultInFlightBytes
 	}
+	// No machine above half the budget: one machine at its share leaves half
+	// the budget to the others; two at their share fill it (K18g-4).
+	p.share = p.budget / 2
+	if p.writeTimeout <= 0 {
+		p.writeTimeout = DefaultWriteTimeout
+	}
 	if p.now == nil {
 		p.now = time.Now
 	}
@@ -365,8 +392,9 @@ func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Audit
 	})
 }
 
-// admit reserves n bytes of the in-flight budget and a per-machine
-// concurrency slot and checks the cap; release returns both.
+// admit reserves n bytes of the in-flight budget, within the machine's
+// share of it, and a per-machine concurrency slot and checks the cap;
+// release returns both.
 func (p *Proxy) admit(machine string, n int64) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -379,7 +407,7 @@ func (p *Proxy) admit(machine string, n int64) (string, bool) {
 		p.usage[machine] = u
 	}
 	switch {
-	case u.inFlight >= p.maxConc:
+	case u.inFlight >= p.maxConc, u.reserved+n > p.share:
 		return "too many requests in flight", false
 	case p.cap.Requests > 0 && u.requests >= p.cap.Requests:
 		return "request cap reached", false
@@ -387,19 +415,22 @@ func (p *Proxy) admit(machine string, n int64) (string, bool) {
 		return "byte cap reached", false
 	}
 	u.inFlight++
+	u.reserved += n
 	p.reserved += n
 	return "", true
 }
 
 // resize changes an admitted request's reservation by d bytes. A shrink
-// always succeeds; a growth fails, changing nothing, when the budget lacks
-// the room.
-func (p *Proxy) resize(d int64) bool {
+// always succeeds; a growth fails, changing nothing, when the budget or the
+// machine's share lacks the room.
+func (p *Proxy) resize(machine string, d int64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if d > 0 && p.reserved+d > p.budget {
+	u := p.usage[machine]
+	if d > 0 && (p.reserved+d > p.budget || u.reserved+d > p.share) {
 		return false
 	}
+	u.reserved += d
 	p.reserved += d
 	return true
 }
@@ -414,7 +445,9 @@ func (p *Proxy) charge(machine string, requests, bytes int64) {
 
 func (p *Proxy) release(machine string, n int64) {
 	p.mu.Lock()
-	p.usage[machine].inFlight--
+	u := p.usage[machine]
+	u.inFlight--
+	u.reserved -= n
 	p.reserved -= n
 	p.mu.Unlock()
 }
@@ -424,23 +457,29 @@ func (p *Proxy) release(machine string, n int64) {
 // together.
 func readCost(n int64) int64 { return callFloor + 3*n }
 
-// bodyCost is what BodyRule.apply can hold for body at its peak, from one
-// pass over the body that counts what decoding it allocates per unit.
+// bodyCost is what BodyRule.apply can hold for body at its peak.
 func bodyCost(body []byte) int64 {
-	var invalid, objects, tokens, depth, deepest int64
+	_, invalid, deepest := bodyShape(body)
+	return callFloor + costPerByte*int64(len(body)) + costPerInvalid*int64(invalid) +
+		costPerDepth*int64(min(deepest, maxDepth+1))
+}
+
+// bodyShape counts, in one pass that skips strings, what apply sizes its
+// buffers by: the colons outside strings (an upper bound on object
+// members), the invalid UTF-8 bytes and the deepest nesting.
+func bodyShape(body []byte) (colons, invalid, deepest int) {
+	depth := 0
 	in, esc := false, false
 	for i := 0; i < len(body); i++ {
 		c := body[i]
 		if c >= 0x80 {
-			r, n := utf8.DecodeRune(body[i:])
-			if r == '\u2028' || r == '\u2029' {
-				invalid += int64(n) // re-encoded as a six-byte escape
-			}
-			if r != utf8.RuneError || n != 1 {
+			if r, n := utf8.DecodeRune(body[i:]); r != utf8.RuneError || n != 1 {
 				i += n - 1
-				continue
+			} else {
+				invalid++
 			}
-			invalid++
+			esc = false
+			continue
 		}
 		switch {
 		case esc:
@@ -452,21 +491,17 @@ func bodyCost(body []byte) int64 {
 		case c == '{' || c == '[':
 			depth++
 			deepest = max(deepest, depth)
-			tokens++
-			if c == '{' {
-				objects++
-			}
 		case c == '}' || c == ']':
 			depth--
-		case c == ',' || c == ':':
-			tokens++
+		case c == ':':
+			colons++
 		}
 	}
-	return callFloor + costPerByte*int64(len(body)) + costPerInvalid*invalid +
-		costPerObject*objects + costPerToken*tokens + costPerDepth*deepest
+	return colons, invalid, deepest
 }
 
 func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Auditor, w http.ResponseWriter, r *http.Request) {
+	w = newDeadlineWriter(w, p.writeTimeout)
 	ev := Event{At: p.now(), Machine: machine, Method: r.Method}
 	deny := func(status int, reason string) {
 		ev.Reason, ev.Status = reason, status
@@ -556,11 +591,11 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	if op.Body != nil {
 		need = bodyCost(body)
 	}
-	if need > p.budget {
+	if need > p.share {
 		deny(http.StatusRequestEntityTooLarge, "body too costly to check")
 		return
 	}
-	if !p.resize(need - held) {
+	if !p.resize(machine, need-held) {
 		deny(http.StatusTooManyRequests, "too many requests in flight")
 		return
 	}
@@ -767,8 +802,6 @@ func heldExchange(resp *http.Response) ([]byte, error) {
 	return out, nil
 }
 
-// apply checks a JSON object body against the rule and returns the body to
-// forward: the proxy's own encoding of what it checked.
 // checkApart runs a body check on a goroutine of its own. Checking a deeply
 // nested body grows the stack it runs on by megabytes; a goroutine that
 // exits frees its stack, while a keep-alive connection's goroutine would
@@ -800,65 +833,746 @@ func checkApart(b *BodyRule, body []byte, public bool) ([]byte, error) {
 	return r.out, r.err
 }
 
+var (
+	errNotObject = errors.New("body is not a JSON object")
+	errTrailing  = errors.New("trailing data after JSON body")
+)
+
+// apply checks a JSON object body against the rule and returns the body to
+// forward: the proxy's own encoding of what it checked. It walks the body
+// in place rather than decoding it (K18g-1): it keeps four bytes per object
+// member and one frame per level of nesting, and writes the output in one
+// buffer the size of the body. It accepts and refuses what decoding into a
+// map[string]any did (K18g-2): duplicate keys compare decoded and the last
+// wins, invalid UTF-8 reads as U+FFFD, and a check reads only the members
+// that win. The output carries every member that wins, as the body spelled
+// it, with the rule's Set in place of the body's own.
 func (b *BodyRule) apply(body []byte, public bool) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var obj map[string]any
-	if err := dec.Decode(&obj); err != nil || obj == nil {
-		return nil, errors.New("body is not a JSON object")
+	if len(body) >= 1<<30 {
+		// A member's position must fit its record.
+		return nil, errors.New("body too large to check")
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("trailing data after JSON body")
+	colons, invalid, deepest := bodyShape(body)
+	w := &walk{
+		b:       body,
+		members: make([]uint32, 0, colons),
+		frames:  make([]frame, 0, min(deepest, maxDepth)+1),
+	}
+	w.order = func(x, y uint32) int {
+		if c := w.cmpStr(int(x>>2), int(y>>2)); c != 0 {
+			return c
+		}
+		return cmp.Compare(x, y)
+	}
+	i := skipWS(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return nil, errNotObject
+	}
+	end := w.parse(i)
+	if end < 0 {
+		return nil, errNotObject
+	}
+	if skipWS(body, end) != len(body) {
+		return nil, errTrailing
 	}
 	for _, k := range b.DenyKeys {
-		if _, ok := obj[k]; ok {
+		if w.find(k) >= 0 {
 			return nil, fmt.Errorf("body key %q not allowed", k)
 		}
 	}
 	strict := !(public && b.PublicMayFetch)
 	if strict {
 		for _, k := range b.ServerToolKeys {
-			if _, ok := obj[k]; ok {
+			if w.find(k) >= 0 {
 				return nil, fmt.Errorf("body key %q needs a public machine", k)
 			}
 		}
-		if err := remoteSource(obj, ""); err != nil {
-			return nil, err
+		if w.topCand {
+			return nil, errors.New("remote content sources need a public machine; send content inline")
 		}
 	}
-	if t, ok := obj["tools"]; ok {
-		tools, ok := t.([]any)
-		if !ok {
+	if t := w.find("tools"); t >= 0 {
+		j := w.valueAt(int(w.top[t] >> 2))
+		if body[j] != '[' {
 			return nil, errors.New("tools is not a list")
 		}
-		for _, e := range tools {
-			m, ok := e.(map[string]any)
-			if !ok {
+		for j = skipWS(body, j+1); body[j] != ']'; {
+			if body[j] != '{' {
 				return nil, errors.New("tool entry is not an object")
 			}
-			if typ, has := m["type"]; has && typ != "function" && typ != "custom" && strict {
+			if strict && w.providerTool(j) {
 				return nil, errors.New("provider-side tools need a public machine")
+			}
+			if j = skipWS(body, w.skipValue(j)); body[j] == ',' {
+				j = skipWS(body, j+1)
 			}
 		}
 	}
-	for k, v := range b.Set {
-		obj[k] = v
-	}
-	if b.StreamUsage && obj["stream"] == true {
-		so, _ := obj["stream_options"].(map[string]any)
-		if so == nil {
-			so = map[string]any{}
+
+	// The members the rule sets, and with StreamUsage on a streamed call
+	// stream_options with include_usage, replace the body's own.
+	streamOn := false
+	if b.StreamUsage {
+		if v, ok := b.Set["stream"]; ok {
+			streamOn = v == true
+		} else if s := w.find("stream"); s >= 0 {
+			streamOn = bytes.HasPrefix(body[w.valueAt(int(w.top[s]>>2)):], []byte("true"))
 		}
-		so["include_usage"] = true
-		obj["stream_options"] = so
 	}
-	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(obj); err != nil {
-		return nil, err
+	extra, liveSO := b.Set, -1
+	if streamOn {
+		extra = maps.Clone(b.Set)
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		if v, ok := b.Set["stream_options"]; ok {
+			// A copy: the rule is shared by every request.
+			m, _ := v.(map[string]any)
+			so := maps.Clone(m)
+			if so == nil {
+				so = map[string]any{}
+			}
+			so["include_usage"] = true
+			extra["stream_options"] = so
+		} else if s := w.find("stream_options"); s >= 0 && body[w.valueAt(int(w.top[s]>>2))] == '{' {
+			liveSO = w.valueAt(int(w.top[s] >> 2))
+		} else {
+			extra["stream_options"] = map[string]any{"include_usage": true}
+		}
 	}
-	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
+	var inner []byte
+	if len(extra) > 0 {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(extra); err != nil {
+			return nil, err
+		}
+		inner = bytes.TrimSuffix(buf.Bytes(), []byte("}\n"))[1:]
+	}
+
+	out := make([]byte, 0, len(body)+2*invalid+len(inner)+64)
+	out = append(out, '{')
+	comma := func() {
+		if out[len(out)-1] != '{' {
+			out = append(out, ',')
+		}
+	}
+	for _, m := range w.top {
+		k := int(m >> 2)
+		if w.keyIn(k, b.Set) || (streamOn && w.keyIs(k, "stream_options")) {
+			continue
+		}
+		comma()
+		out, _ = w.appendString(out, k)
+		out = append(out, ':')
+		out = w.emit(out, w.valueAt(k), "")
+	}
+	if len(inner) > 0 {
+		comma()
+		out = append(out, inner...)
+	}
+	if liveSO >= 0 {
+		comma()
+		out = append(out, `"stream_options":`...)
+		out = w.emit(out, liveSO, "include_usage")
+		out = out[:len(out)-1]
+		comma()
+		out = append(out, `"include_usage":true}`...)
+	}
+	return append(out, '}'), nil
+}
+
+// A member record is the position of its key's opening quote, shifted left
+// two, with these flags.
+const (
+	mCand = 1 << iota // its value holds a remote content source
+	mURL              // its key is in urlKeys
+)
+
+// frame is one open object or array of the walk.
+type frame struct {
+	base int  // an object's first member in walk.members
+	obj  bool // an object, not an array
+	url  bool // an array whose strings are content sources (under a urlKeys key)
+	cand bool // an array holding a remote content source; in emit, no member written yet
+}
+
+// walk is one pass over a body that is checked in place.
+type walk struct {
+	b       []byte
+	members []uint32 // the members of the open objects
+	frames  []frame
+	// dead marks the keys of nested members a later duplicate replaced, by
+	// position/4: keys lie at least four bytes apart.
+	dead    []uint64
+	top     []uint32 // the top object's members that win, sorted by key
+	topCand bool     // whether they hold a remote content source
+	order   func(x, y uint32) int
+}
+
+// parse reads the value at i, which opens the top object, and returns
+// where it ends, or -1 if the JSON is not well formed or nests too deep.
+// It records each object's members, and as each object closes, which win
+// and whether they hold a remote content source (remoteSource's rule).
+func (w *walk) parse(i int) int {
+	b := w.b
+	for {
+		// A value starts at i.
+		if i >= len(b) {
+			return -1
+		}
+		cand := false
+		switch c := b[i]; c {
+		case '{', '[':
+			if len(w.frames) >= maxDepth {
+				return -1
+			}
+			w.frames = append(w.frames, frame{base: len(w.members), obj: c == '{', url: c == '[' && w.ctx()})
+			if i = skipWS(b, i+1); i < len(b) && b[i] == c+2 { // '}' and ']' follow '{' and '[' by two
+				i++
+				cand = w.close()
+			} else if c == '[' {
+				continue
+			} else if i = w.member(i); i < 0 {
+				return -1
+			} else {
+				continue
+			}
+		case '"':
+			end := scanString(b, i)
+			if end < 0 {
+				return -1
+			}
+			cand = w.ctx() && !w.isData(i)
+			i = end
+		default:
+			if i = scalarEnd(b, i); i < 0 {
+				return -1
+			}
+		}
+		// A value ended at i.
+		for {
+			if len(w.frames) == 0 {
+				return i
+			}
+			f := &w.frames[len(w.frames)-1]
+			if f.obj {
+				if cand {
+					w.members[len(w.members)-1] |= mCand
+				}
+			} else {
+				f.cand = f.cand || cand
+			}
+			if i = skipWS(b, i); i >= len(b) {
+				return -1
+			}
+			if b[i] == ',' {
+				i = skipWS(b, i+1)
+				if f.obj {
+					if i = w.member(i); i < 0 {
+						return -1
+					}
+				}
+				break
+			}
+			if f.obj && b[i] != '}' || !f.obj && b[i] != ']' {
+				return -1
+			}
+			i++
+			cand = w.close()
+		}
+	}
+}
+
+// member records the member whose key is at i and returns where its value
+// starts, or -1.
+func (w *walk) member(i int) int {
+	b := w.b
+	if i >= len(b) || b[i] != '"' {
+		return -1
+	}
+	j := scanString(b, i)
+	if j < 0 {
+		return -1
+	}
+	if j = skipWS(b, j); j >= len(b) || b[j] != ':' {
+		return -1
+	}
+	m := uint32(i) << 2
+	if w.urlKey(i) {
+		m |= mURL
+	}
+	w.members = append(w.members, m)
+	return skipWS(b, j+1)
+}
+
+// ctx reports whether a string value here is a content source.
+func (w *walk) ctx() bool {
+	if len(w.frames) == 0 {
+		return false
+	}
+	if f := w.frames[len(w.frames)-1]; !f.obj {
+		return f.url
+	}
+	return w.members[len(w.members)-1]&mURL != 0
+}
+
+// close ends the innermost open value and reports whether it holds a
+// remote content source.
+func (w *walk) close() bool {
+	f := w.frames[len(w.frames)-1]
+	w.frames = w.frames[:len(w.frames)-1]
+	if !f.obj {
+		return f.cand
+	}
+	ms := w.members[f.base:]
+	if len(ms) > 1 {
+		slices.SortFunc(ms, w.order)
+	}
+	toolUse := false
+	if t := w.findIn(ms, "type"); t >= 0 {
+		toolUse = w.strIs(w.valueAt(int(ms[t]>>2)), "tool_use")
+	}
+	top := len(w.frames) == 0
+	cand, n := false, 0
+	for k, m := range ms {
+		pos := int(m >> 2)
+		if k+1 < len(ms) && w.cmpStr(pos, int(ms[k+1]>>2)) == 0 {
+			if !top {
+				w.setDead(pos)
+			}
+			continue
+		}
+		if m&mCand != 0 && !w.keyIs(pos, "input_schema") && !w.keyIs(pos, "parameters") &&
+			!(toolUse && w.keyIs(pos, "input")) {
+			cand = true
+		}
+		ms[n] = m
+		n++
+	}
+	if top {
+		w.top, w.topCand = ms[:n], cand
+	} else {
+		w.members = w.members[:f.base]
+	}
+	return cand
+}
+
+func (w *walk) setDead(pos int) {
+	if w.dead == nil {
+		w.dead = make([]uint64, len(w.b)/256+1)
+	}
+	w.dead[pos>>8] |= 1 << (pos >> 2 & 63)
+}
+
+func (w *walk) isDead(pos int) bool {
+	return w.dead != nil && w.dead[pos>>8]&(1<<(pos>>2&63)) != 0
+}
+
+// find returns the index in top of the member whose key is name, or -1.
+func (w *walk) find(name string) int { return w.findIn(w.top, name) }
+
+// findIn returns the index of the last member of ms, sorted by key, whose
+// key is name, or -1.
+func (w *walk) findIn(ms []uint32, name string) int {
+	if !utf8.ValidString(name) {
+		return -1 // a decoded key is valid UTF-8
+	}
+	k := sort.Search(len(ms), func(k int) bool { return w.cmpName(int(ms[k]>>2), name) > 0 }) - 1
+	if k < 0 || w.cmpName(int(ms[k]>>2), name) != 0 {
+		return -1
+	}
+	return k
+}
+
+func (w *walk) keyIs(pos int, name string) bool { return w.cmpName(pos, name) == 0 }
+
+func (w *walk) keyIn(pos int, set map[string]any) bool {
+	for k := range set {
+		if w.keyIs(pos, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// strIs reports whether a value at i is the string s.
+func (w *walk) strIs(i int, s string) bool { return w.b[i] == '"' && w.cmpName(i, s) == 0 }
+
+// cmpStr compares the decoded strings whose opening quotes are at i and j.
+func (w *walk) cmpStr(i, j int) int {
+	b := w.b
+	i, j = i+1, j+1
+	for {
+		if x, y := b[i], b[j]; x < utf8.RuneSelf && y < utf8.RuneSelf && x != '\\' && y != '\\' && x != '"' && y != '"' {
+			if x != y {
+				return cmp.Compare(x, y)
+			}
+			i, j = i+1, j+1
+			continue
+		}
+		x, ni := w.strRune(i)
+		y, nj := w.strRune(j)
+		if x != y || x < 0 {
+			return cmp.Compare(x, y)
+		}
+		i, j = ni, nj
+	}
+}
+
+// cmpName compares the decoded string whose opening quote is at i with
+// name, which is valid UTF-8.
+func (w *walk) cmpName(i int, name string) int {
+	i++
+	for _, y := range name {
+		x, ni := w.strRune(i)
+		if x != y {
+			return cmp.Compare(x, y)
+		}
+		i = ni
+	}
+	if x, _ := w.strRune(i); x >= 0 {
+		return 1
+	}
+	return 0
+}
+
+// strRune decodes the rune of a well-formed string at i as encoding/json
+// does, returning it and where the next starts, or -1 at the closing quote.
+func (w *walk) strRune(i int) (rune, int) {
+	b := w.b
+	switch c := b[i]; {
+	case c == '"':
+		return -1, i
+	case c < utf8.RuneSelf && c != '\\':
+		return rune(c), i + 1
+	case c >= utf8.RuneSelf:
+		r, n := utf8.DecodeRune(b[i:])
+		return r, i + n
+	}
+	switch e := b[i+1]; e {
+	case 'b':
+		return '\b', i + 2
+	case 'f':
+		return '\f', i + 2
+	case 'n':
+		return '\n', i + 2
+	case 'r':
+		return '\r', i + 2
+	case 't':
+		return '\t', i + 2
+	case 'u':
+	default:
+		return rune(e), i + 2 // " \ /
+	}
+	r := hex4(b[i+2:])
+	if !utf16.IsSurrogate(r) {
+		return r, i + 6
+	}
+	if i+12 <= len(b) && b[i+6] == '\\' && b[i+7] == 'u' && isHex4(b[i+8:]) {
+		if d := utf16.DecodeRune(r, hex4(b[i+8:])); d != unicode.ReplacementChar {
+			return d, i + 12
+		}
+	}
+	return unicode.ReplacementChar, i + 6
+}
+
+func isHex4(b []byte) bool {
+	if len(b) < 4 {
+		return false
+	}
+	for _, c := range b[:4] {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func hex4(b []byte) rune {
+	var r rune
+	for _, c := range b[:4] {
+		switch {
+		case c <= '9':
+			c -= '0'
+		case c >= 'a':
+			c -= 'a' - 10
+		default:
+			c -= 'A' - 10
+		}
+		r = r<<4 | rune(c)
+	}
+	return r
+}
+
+// isData reports whether the string at i, past leading white space, starts
+// with data: in any case: an inline source.
+func (w *walk) isData(i int) bool {
+	i++
+	r, n := w.strRune(i)
+	for r >= 0 && unicode.IsSpace(r) {
+		r, n = w.strRune(n)
+	}
+	for _, want := range "data:" {
+		if r < 0 || unicode.ToLower(r) != want {
+			return false
+		}
+		r, n = w.strRune(n)
+	}
+	return true
+}
+
+// urlKey reports whether the key at i is in urlKeys.
+func (w *walk) urlKey(i int) bool {
+	var buf [16]byte
+	n := 0
+	for r, j := w.strRune(i + 1); r >= 0; r, j = w.strRune(j) {
+		if r >= utf8.RuneSelf || n == len(buf) {
+			return false
+		}
+		buf[n] = byte(r)
+		n++
+	}
+	return urlKeys[string(buf[:n])]
+}
+
+// providerTool reports whether the tool entry object at i has a type other
+// than function or custom.
+func (w *walk) providerTool(i int) bool {
+	b := w.b
+	if i = skipWS(b, i+1); b[i] == '}' {
+		return false
+	}
+	for {
+		v := w.valueAt(i)
+		if !w.isDead(i) && w.keyIs(i, "type") {
+			return !w.strIs(v, "function") && !w.strIs(v, "custom")
+		}
+		if i = skipWS(b, w.skipValue(v)); b[i] != ',' {
+			return false
+		}
+		i = skipWS(b, i+1)
+	}
+}
+
+// valueAt returns where the value of the member whose key is at i starts.
+func (w *walk) valueAt(i int) int {
+	return skipWS(w.b, skipWS(w.b, strEnd(w.b, i))+1)
+}
+
+// skipValue returns where the well-formed value at i ends.
+func (w *walk) skipValue(i int) int {
+	b := w.b
+	switch b[i] {
+	case '"':
+		return strEnd(b, i)
+	case '{', '[':
+	default:
+		return scalarEnd(b, i)
+	}
+	depth := 0
+	for ; ; i++ {
+		switch b[i] {
+		case '"':
+			i = strEnd(b, i) - 1
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth--; depth == 0 {
+				return i + 1
+			}
+		}
+	}
+}
+
+// emit appends the well-formed value at i without white space, leaving out
+// members a duplicate replaced and, of its own members, any keyed skip.
+func (w *walk) emit(out []byte, i int, skip string) []byte {
+	b, st := w.b, w.frames[:0]
+	const (
+		value = iota
+		key
+		after
+	)
+	for mode := value; ; {
+		switch mode {
+		case value:
+			switch c := b[i]; c {
+			case '"':
+				out, i = w.appendString(out, i)
+				mode = after
+			case '{', '[':
+				out = append(out, c)
+				st = append(st, frame{obj: c == '{', cand: true})
+				if i = skipWS(b, i+1); c == '{' {
+					mode = key
+				} else if b[i] == ']' {
+					mode = after
+				}
+			default:
+				j := scalarEnd(b, i)
+				out, i = append(out, b[i:j]...), j
+				mode = after
+			}
+		case key:
+			if b[i] == '}' {
+				out = append(out, '}')
+				st, i, mode = st[:len(st)-1], i+1, after
+				break
+			}
+			v := w.valueAt(i)
+			if w.isDead(i) || skip != "" && len(st) == 1 && w.keyIs(i, skip) {
+				if i = skipWS(b, w.skipValue(v)); b[i] == ',' {
+					i = skipWS(b, i+1)
+				}
+				break
+			}
+			if f := &st[len(st)-1]; !f.cand {
+				out = append(out, ',')
+			} else {
+				f.cand = false
+			}
+			out, _ = w.appendString(out, i)
+			out = append(out, ':')
+			i, mode = v, value
+		case after:
+			if len(st) == 0 {
+				return out
+			}
+			i = skipWS(b, i)
+			if b[i] != ',' {
+				out = append(out, b[i])
+				st, i = st[:len(st)-1], i+1
+			} else if i = skipWS(b, i+1); st[len(st)-1].obj {
+				mode = key
+			} else {
+				out = append(out, ',')
+				mode = value
+			}
+		}
+	}
+}
+
+// appendString appends the well-formed string at i as it came, but for
+// each invalid UTF-8 byte, which becomes U+FFFD as the decoder read it, and
+// returns where the string ends.
+func (w *walk) appendString(out []byte, i int) ([]byte, int) {
+	b := w.b
+	s := i
+	for j := i + 1; ; {
+		switch c := b[j]; {
+		case c == '"':
+			return append(out, b[s:j+1]...), j + 1
+		case c == '\\' && b[j+1] == 'u':
+			j += 6
+		case c == '\\':
+			j += 2
+		case c < utf8.RuneSelf:
+			j++
+		default:
+			r, n := utf8.DecodeRune(b[j:])
+			if r == utf8.RuneError && n == 1 {
+				out = append(append(out, b[s:j]...), "�"...)
+				s = j + 1
+			}
+			j += n
+		}
+	}
+}
+
+// scanString returns where the string at i ends, or -1 if it is not well
+// formed: unescaped control bytes or a bad escape.
+func scanString(b []byte, i int) int {
+	for j := i + 1; j < len(b); {
+		switch c := b[j]; {
+		case c == '"':
+			return j + 1
+		case c < 0x20:
+			return -1
+		case c != '\\':
+			j++
+		case j+1 >= len(b):
+			return -1
+		case strings.IndexByte(`"\/bfnrt`, b[j+1]) >= 0:
+			j += 2
+		case b[j+1] == 'u' && isHex4(b[j+2:]):
+			j += 6
+		default:
+			return -1
+		}
+	}
+	return -1
+}
+
+// strEnd returns where the well-formed string at i ends.
+func strEnd(b []byte, i int) int {
+	for j := i + 1; ; j++ {
+		switch b[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+}
+
+// scalarEnd returns where the number or literal at i ends, or -1.
+func scalarEnd(b []byte, i int) int {
+	for _, lit := range []string{"true", "false", "null"} {
+		if b[i] == lit[0] {
+			if !bytes.HasPrefix(b[i:], []byte(lit)) {
+				return -1
+			}
+			return i + len(lit)
+		}
+	}
+	digits := func(j int) int {
+		for j < len(b) && '0' <= b[j] && b[j] <= '9' {
+			j++
+		}
+		return j
+	}
+	j := i
+	if b[j] == '-' {
+		j++
+	}
+	switch {
+	case j >= len(b):
+		return -1
+	case b[j] == '0':
+		j++
+	case '1' <= b[j] && b[j] <= '9':
+		j = digits(j)
+	default:
+		return -1
+	}
+	if j < len(b) && b[j] == '.' {
+		if k := digits(j + 1); k == j+1 {
+			return -1
+		} else {
+			j = k
+		}
+	}
+	if j < len(b) && (b[j] == 'e' || b[j] == 'E') {
+		j++
+		if j < len(b) && (b[j] == '+' || b[j] == '-') {
+			j++
+		}
+		if k := digits(j); k == j {
+			return -1
+		} else {
+			j = k
+		}
+	}
+	return j
+}
+
+func skipWS(b []byte, i int) int {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
+	}
+	return i
 }
 
 // encoded reports whether any Content-Encoding value, in any header line or
@@ -910,4 +1624,71 @@ func remoteSource(v any, key string) error {
 		}
 	}
 	return nil
+}
+
+// deadlineWriter renews the connection's write deadline before every write, so a client that
+// stops reading a streamed reply fails the next write within d instead of holding its slot and
+// reserved bytes for as long as it likes (CRED-8, K18). A deadline a handler inside sets through
+// http.ResponseController (a nested deadlineWriter, a worker route's own) holds when it is the
+// earlier one, so wrapping never loosens it.
+type deadlineWriter struct {
+	http.ResponseWriter
+	rc  *http.ResponseController
+	d   time.Duration
+	set time.Time // the deadline a handler inside last set; zero for none
+}
+
+func newDeadlineWriter(w http.ResponseWriter, d time.Duration) http.ResponseWriter {
+	if d <= 0 {
+		return w
+	}
+	if dw, ok := w.(*deadlineWriter); ok && dw.d <= d {
+		return w
+	}
+	return &deadlineWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: d}
+}
+
+// renew moves the deadline d past now, or to the handler's own if that is earlier; a writer
+// without deadlines (a test recorder) ignores it.
+func (w *deadlineWriter) renew() { _ = w.rc.SetWriteDeadline(w.until()) }
+
+func (w *deadlineWriter) until() time.Time {
+	t := time.Now().Add(w.d)
+	if !w.set.IsZero() && w.set.Before(t) {
+		return w.set
+	}
+	return t
+}
+
+// SetWriteDeadline is what http.ResponseController calls on this writer: it records the
+// handler's deadline and applies the earlier of it and d from now.
+func (w *deadlineWriter) SetWriteDeadline(t time.Time) error {
+	w.set = t
+	return w.rc.SetWriteDeadline(w.until())
+}
+
+func (w *deadlineWriter) WriteHeader(code int) { w.renew(); w.ResponseWriter.WriteHeader(code) }
+
+func (w *deadlineWriter) Write(b []byte) (int, error) { w.renew(); return w.ResponseWriter.Write(b) }
+
+func (w *deadlineWriter) Flush() {
+	w.renew()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *deadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// WithWriteDeadline wraps h so each write of its reply must finish within d of starting (see
+// deadlineWriter). Servers that serve the proxy set it in place of a whole-reply WriteTimeout,
+// which would cut long streamed replies that the client is reading.
+func WithWriteDeadline(h http.Handler, d time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dw := newDeadlineWriter(w, d)
+		h.ServeHTTP(dw, r)
+		if x, ok := dw.(*deadlineWriter); ok {
+			x.renew()
+		}
+	})
 }

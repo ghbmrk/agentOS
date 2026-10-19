@@ -28,6 +28,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
@@ -409,6 +410,8 @@ func main() {
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
 	flag.Int64Var(&floor.InferenceMB, "inference-mb", floor.InferenceMB, "budget: local inference, MB (RES-2)")
+	var inf inferFlags
+	inf.register(flag.CommandLine)
 	flag.Int64Var(&floor.BrowserMB, "browser-mb", floor.BrowserMB, "budget: one credentialed browser, MB (RES-2)")
 	flag.StringVar(&cgroupRoot, "cgroup-root", "", "cgroup v2 group for the broker's components (RES-2): its own group or below; empty is the broker's own group")
 	flag.BoolVar(&cgroupVouched, "cgroup-delegated", false, "-cgroup-root is delegated to the broker (without it, systemd's delegate mark is required)")
@@ -599,8 +602,9 @@ func main() {
 		cfg.OwnerNumber = owner
 	}
 
-	// RES-3: nothing below depends on what is found here. No local
-	// inference service exists yet to take leases (budget R8).
+	// RES-3: nothing below depends on what is found here. The local
+	// inference service runs on CPU and takes no lease (INF-1); leases are a
+	// later row (budget R8).
 	var devs []accel.Device
 	if accelMode != "off" {
 		var err error
@@ -784,6 +788,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The local inference service runs beside the broker, never in its
+	// control path: it is started here and never waited on (INF-1, DEP-1).
+	startInference(ctx, inf, inferenceLeaf(boxMachines, mem.Budget.InferenceMB), log.Writer())
 	// The model routes hold only the attempts the owner's rule can spend,
 	// read from the routing socket off the request path (SR3-7-f2); with
 	// no routing socket they hold MaxRetries.
@@ -888,7 +895,7 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
@@ -902,7 +909,7 @@ func main() {
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
-				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
+				startReaper(ctx, wt, m, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
@@ -1212,10 +1219,12 @@ type workerGates struct {
 	avail   func() (int64, error)
 }
 
-// boxGates reads the worker gates from the running daemon: its STOP,
-// its admission's room, and meminfo less admission's headroom.
-func boxGates(d *daemon.Daemon, meminfo string, headroomMB int64) workerGates {
-	return workerGates{stopped: d.Engine().Stopped, room: d.Admission().RoomFor, avail: measuredFree(meminfo, headroomMB)}
+// boxGates reads the worker gates from the running daemon's engine and
+// admission: the engine's halt (a recorded STOP, or a STOP or other write
+// that failed and broke the engine, SEC-failed-stop-latch), admission's
+// room, and meminfo less admission's headroom.
+func boxGates(e *journal.Engine, adm *admission.Controller, meminfo string, headroomMB int64) workerGates {
+	return workerGates{stopped: e.Halted, room: adm.RoomFor, avail: measuredFree(meminfo, headroomMB)}
 }
 
 // measuredFree is MemAvailable in meminfo less the headroom admission
@@ -1265,6 +1274,13 @@ func reapWorkers(ctx context.Context, wt reaper, m commandEnder, stopped func() 
 			}
 		}
 	}
+}
+
+// startReaper runs reapWorkers on the worker tools' own gate, so the
+// reaper ends commands exactly when the tools refuse them
+// (SEC-failed-stop-latch).
+func startReaper(ctx context.Context, wt *workers.Tools, m commandEnder, tick time.Duration) {
+	go reapWorkers(ctx, wt, m, wt.Stopped, tick)
 }
 
 // reaper and commandEnder are what reapWorkers uses of the worker tools

@@ -17,6 +17,62 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
+def ci_jobs():
+    """ci.yml's jobs as {id: (job-level `if`, header lines, checks-job RECORDS env or None)}."""
+    ci = (WORKFLOWS / "ci.yml").read_text()
+    body = ci[ci.index("\njobs:\n") + len("\njobs:\n"):]
+    jobs = {}
+    for m in re.finditer(r"^  ([a-z][a-z-]*):\n((?:(?!  [a-z][a-z-]*:\n).*\n)*)", body, re.M):
+        text = m.group(2)
+        cond = re.search(r"^    if: \$\{\{ (.*) \}\}$", text, re.M)
+        rec = re.search(r"^      RECORDS: \$\{\{ (.*) \}\}$", text, re.M)
+        header = [l for l in text.splitlines() if re.match(r"^    [a-z-]+:", l)]
+        jobs[m.group(1)] = (cond.group(1) if cond else None, header, rec.group(1) if rec else None)
+    return jobs
+
+
+def evaluate(expr, event, records):
+    """Evaluate the small Actions expression subset ci.yml uses: !, &&, ||, ==, !=, parentheses,
+    'strings', cancelled() and the two contexts github.event_name and needs.scope.outputs.records.
+    && and || return an operand, as in Actions. Anything else raises."""
+    ctx = {"github.event_name": event, "needs.scope.outputs.records": records}
+    tokens = re.findall(r"\s*(&&|\|\||==|!=|!|\(|\)|'[^']*'|cancelled\(\)|[a-z_][a-z_.-]*)", expr)
+    if "".join(tokens).replace(" ", "") != expr.replace(" ", ""):
+        raise ValueError(f"unsupported expression: {expr}")
+    py = []
+    for i, t in enumerate(tokens):
+        if t == "!" and tokens[i + 1:i + 2] != ["cancelled()"]:
+            raise ValueError(f"! binds tighter in Actions than not in Python: {expr}")
+        if t in ctx:
+            py.append(repr(ctx[t]))
+        elif t == "cancelled()":
+            py.append("False")
+        elif t in ("&&", "||", "!"):
+            py.append({"&&": " and ", "||": " or ", "!": " not "}[t])
+        elif t in ("==", "!=", "(", ")") or t.startswith("'"):
+            py.append(t)
+        else:
+            raise ValueError(f"unknown name {t} in {expr}")
+    return eval("".join(py), {"__builtins__": {}})  # noqa: S307 - tokens are whitelisted above
+
+
+# The jobs a records-only pull request skips (CI-docs); a push to main runs them (CI-mainguard).
+FILTERED = ("broker", "broker-race", "broker-checks", "machines", "hostcheck")
+
+
+def ci_top_level(key):
+    """The lines of ci.yml's top-level `key:` block, without the key line."""
+    lines = (WORKFLOWS / "ci.yml").read_text().splitlines()
+    start = lines.index(f"{key}:") + 1
+    end = next(i for i in range(start, len(lines)) if lines[i] and not lines[i].startswith((" ", "#")))
+    return [l for l in lines[start:end] if l.strip() and not l.lstrip().startswith("#")]
+
+
+def ci_triggers():
+    """The events ci.yml's `on:` block names."""
+    return [l.strip().rstrip(":") for l in ci_top_level("on") if re.match(r"^  [a-z_]+:$", l)]
+
+
 class ScopeTest(unittest.TestCase):
     def test_record_documents_are_records(self):
         for p in ("BOARD.md", "LATER.md", "LEDGER.md", "DECISIONS.md", "METRICS.md", "TRACE.md",
@@ -103,6 +159,25 @@ class ScopeTest(unittest.TestCase):
                                  cwd=d, capture_output=True, text=True, check=True)
             self.assertEqual(out.stdout, "full\n")
 
+    def test_pull_request_scope_unchanged(self):
+        # CIMG-b: on a pull request a records-only change still skips the code jobs and runs
+        # the checks job's document steps; anything else, or a failed scope, runs them all.
+        jobs = ci_jobs()
+        # Every trigger but push is scoped, and a pull request is one of them.
+        events = [e for e in ci_triggers() if e != "push"]
+        self.assertIn("pull_request", events)
+        for event in events:
+            for job in FILTERED:
+                cond = jobs[job][0]
+                self.assertFalse(evaluate(cond, event, "true"), (job, event))
+                self.assertTrue(evaluate(cond, event, ""), (job, event))
+            self.assertTrue(evaluate(jobs["checks"][0], event, "true"))
+            self.assertEqual(evaluate(jobs["checks"][2], event, "true"), "true", event)
+            self.assertNotEqual(evaluate(jobs["checks"][2], event, ""), "true", event)
+        # scope.yml still decides records-only from the PR's own diff.
+        wf = (WORKFLOWS / "scope.yml").read_text()
+        self.assertIn("pull_request) base=HEAD^1 head=HEAD^2 ;;", wf)
+
 
 class WiringTest(unittest.TestCase):
     """The workflows fail safe: only an exact 'true' from scope skips anything."""
@@ -116,12 +191,11 @@ class WiringTest(unittest.TestCase):
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("uses: ./.github/workflows/scope.yml", ci)
+        cond = "    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}\n"
         for job in ("broker-race", "broker-checks", "machines", "hostcheck"):
-            self.assertIn(f"  {job}:\n    needs: scope\n"
-                          "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci, job)
+            self.assertIn(f"  {job}:\n    needs: scope\n" + cond, ci, job)
         # The required `broker` check gathers the split jobs (CI-SHARD) and skips with them.
-        self.assertIn("    needs: [scope, broker-race, broker-checks]\n"
-                      "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci)
+        self.assertIn("    needs: [scope, broker-race, broker-checks]\n" + cond, ci)
         self.assertIn("  checks:\n    needs: scope\n    if: ${{ !cancelled() }}\n", ci)
         # The document checks never depend on scope.
         for step in ("python tools/trace.py && python tools/trace.py --check", "python tools/doclint.py",
@@ -161,6 +235,87 @@ class WiringTest(unittest.TestCase):
         wf = (WORKFLOWS / "assurance.yml").read_text()
         self.assertIn("uses: ./.github/workflows/scope.yml", wf)
         self.assertEqual(wf.count("needs.scope.outputs.records != 'true'"), wf.count("\n    runs-on:"))
+
+    def test_push_to_main_runs_every_job(self):
+        # CIMG-a: whatever scope says (records-only, empty or full), a push runs every job,
+        # and the checks job runs its full steps (RECORDS is not 'true').
+        jobs = ci_jobs()
+        self.assertEqual(set(jobs), {"scope", "checks", *FILTERED})
+        for job, (cond, _, _) in jobs.items():
+            if job == "scope":
+                self.assertIsNone(cond)
+                continue
+            for records in ("true", "", "false"):
+                self.assertTrue(evaluate(cond, "push", records), (job, records))
+        rec = jobs["checks"][2]
+        for records in ("true", "", "false"):
+            self.assertNotEqual(evaluate(rec, "push", records), "true", records)
+
+    def test_push_runs_only_on_main(self):
+        # CIMG-a holds because push fires only for main: an unscoped push from any other
+        # branch would run full CI where the scoped pull_request run is meant to.
+        self.assertIn("push", ci_triggers())
+        on = ci_top_level("on")
+        i = on.index("  push:")
+        self.assertEqual(on[i + 1], "    branches: [main]")
+        self.assertFalse(on[i + 2:i + 3] and on[i + 2].startswith("    "), on[i + 2:i + 3])
+
+    def test_default_token_is_read_only(self):
+        # Every job inherits a read-only token unless it narrows its own grant.
+        self.assertEqual(ci_top_level("permissions"), ["  contents: read"])
+
+    def test_required_check_names_unchanged(self):
+        # CIMG-c: branch protection matches checks by job id (no job sets `name:`) and the
+        # race shards by their matrix values, so neither may change.
+        jobs = ci_jobs()
+        for job, (_, header, _) in jobs.items():
+            self.assertFalse([l for l in header if l.startswith("    name:")], job)
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        self.assertIn("        shard: [0, 1, 2]", ci)
+        self.assertEqual(sorted(jobs), sorted(["scope", "checks", "broker", "broker-race",
+                                               "broker-checks", "machines", "hostcheck"]))
+
+    def test_evaluator_rejects_what_it_does_not_know(self):
+        for expr in ("github.ref == 'refs/heads/main'", "always()", "1 == 1", "!github.event_name == 'push'"):
+            with self.assertRaises(ValueError, msg=expr):
+                evaluate(expr, "push", "true")
+
+
+class FuzzStepTest(unittest.TestCase):
+    """The short fuzz step in broker-checks names every broker target, and each one exists."""
+
+    BROKER_TARGETS = ("grants:FuzzApprovals", "localsrv:FuzzSessions", "netguard:FuzzSourcesRead",
+                      "netguard:FuzzGatewayPolicy", "netguard:FuzzCheck", "vault:FuzzSlots")
+
+    def fuzz_targets(self):
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        loops = re.findall(r"^\s*for t in (.+); do\n.*\n\s*python3 \.\./tools/fuzzrun\.py ", ci, re.M)
+        self.assertEqual(len(loops), 1, loops)
+        # pkg:Target[:calibrate]; the calibrate field is the first chunk's exec count.
+        entries = [e.split(":") for e in loops[0].split()]
+        for e in entries:
+            self.assertIn(len(e), (2, 3), e)
+            if len(e) == 3:
+                self.assertRegex(e[2], r"^[1-9][0-9]*$", e)
+        return [f"{e[0]}:{e[1]}" for e in entries]
+
+    def test_fuzz_step_lists_broker_targets(self):
+        # REQ: FUZZ-broker-ci-1
+        targets = self.fuzz_targets()
+        for t in self.BROKER_TARGETS:
+            self.assertIn(t, targets)
+        self.assertEqual(len(targets), len(set(targets)), targets)
+
+    def test_fuzz_step_targets_exist(self):
+        # REQ: FUZZ-broker-ci-2
+        for t in self.fuzz_targets():
+            pkg, _, name = t.partition(":")
+            self.assertRegex(name, r"^Fuzz\w+$", t)
+            pkgdir = ROOT / "broker" / pkg
+            self.assertTrue(pkgdir.is_dir(), t)
+            found = any(re.search(rf"^func {name}\(f \*testing\.F\)", f.read_text(), re.M)
+                        for f in pkgdir.glob("*_test.go"))
+            self.assertTrue(found, f"{t}: no func {name}( in broker/{pkg}/*_test.go")
 
 
 if __name__ == "__main__":

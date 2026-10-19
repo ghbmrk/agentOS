@@ -851,9 +851,13 @@ func listen(dir, name string, uid int) (net.Listener, error) {
 	return peerListener{ln, uid}, nil
 }
 
+// newServer serves h with a per-write deadline (egress.WithWriteDeadline):
+// a guest that stops reading a streamed reply fails its next write and frees
+// its slot (CRED-8, egress K18), while one that keeps reading may stream for
+// as long as the reply runs.
 func newServer(h http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           h,
+		Handler:           egress.WithWriteDeadline(h, egress.DefaultWriteTimeout),
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 		IdleTimeout:       2 * time.Minute,

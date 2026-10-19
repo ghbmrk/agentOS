@@ -110,7 +110,21 @@ type Declaration struct {
 	Endpoints   []string // hosts the vault process injects at (feeds #1014)
 	Placeholder string   // the placeholder file the worker is seeded with (feeds #1015)
 	Pools       []Pool
+	// Unmetered marks a route whose endpoints report no pool (grok,
+	// #1378). It must be set for a declaration with no pools and only
+	// then, so pool-less is never a silent default (RES-5).
+	Unmetered   bool
 	TaskClasses []string
+	// CloudOff lists the switches that turn the provider's cloud and remote
+	// features off in a CLI guest (ARC-3): cloud tasks, remote runs, session
+	// sync, telemetry, update checks, notifications and provider-hosted
+	// tools. An entry is a managed-config pin, `table.key = value`, or a
+	// flag starting with "-", which must be in Argv. A feature with no known
+	// switch is [Open] in ASSUMPTIONS.md and its endpoints are left out of
+	// Endpoints and the egress route, so egress refuses them. A broker-held
+	// declaration needs the list; a worker-held agent turns its features off
+	// under CRED-5 W4 instead.
+	CloudOff []string
 
 	// ErrorEvents are the "type" values of the CLI's own JSON error events
 	// in the result stream. The signals below are substrings matched only
@@ -198,12 +212,26 @@ func (d Declaration) Validate() error {
 		if len(d.Endpoints) == 0 {
 			return fmt.Errorf("declaration %s: broker-held names no endpoint", d.ID)
 		}
+		if len(d.CloudOff) == 0 {
+			return fmt.Errorf("declaration %s: a CLI guest lists no cloud-off switches (ARC-3)", d.ID)
+		}
+		for _, c := range d.CloudOff {
+			if strings.TrimSpace(c) == "" || (strings.HasPrefix(c, "-") && !contains(d.Argv, c)) {
+				return fmt.Errorf("declaration %s: cloud-off switch %q is empty or not in argv", d.ID, c)
+			}
+		}
 	case WorkerHeld:
 	default:
 		return fmt.Errorf("declaration %s: custody %q", d.ID, d.Custody)
 	}
-	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 || len(d.Pools) == 0 {
-		return fmt.Errorf("declaration %s: task classes, used-up signal, error events and pools are needed", d.ID)
+	// A route declares no pool only when marked Unmetered (grok, #1378):
+	// admission then reads it as unmetered by header, and only the CLI's
+	// used-up signals and the run caps bound it (RES-5).
+	if (len(d.Pools) == 0) != d.Unmetered {
+		return fmt.Errorf("declaration %s: pools %d, unmetered %v", d.ID, len(d.Pools), d.Unmetered)
+	}
+	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 {
+		return fmt.Errorf("declaration %s: task classes, used-up signal and error events are needed", d.ID)
 	}
 	for _, p := range d.Pools {
 		if p.Name == "" || p.ReadFrom == "" {
@@ -215,17 +243,20 @@ func (d Declaration) Validate() error {
 			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links, its https page and its issuer", d.ID)
 		}
 	}
-	if _, err := d.Formats(); err != nil {
+	formats, err := d.Formats()
+	if err != nil {
 		return err
 	}
 	var all []string
 	all = append(append(append(all, d.Wrap...), d.Argv...), d.Env...)
 	all = append(all, d.Idle...)
 	all = append(append(all, d.SignInArgv...), d.SignInLinks...)
-	all = append(all, d.Endpoints...)
+	all = append(append(all, d.Endpoints...), d.CloudOff...)
 	all = append(all, d.Placeholder, d.Cwd, d.ResultPath, d.Q.Evidence, d.Q.TermsURL)
+	// A value in the declaration's own credential formats is refused as
+	// well as the default shapes: an xai- key is not one of those.
 	for _, s := range all {
-		if LooksLikeCredential(s) {
+		if LooksLikeCredential(s) || matchesAny(formats, s) {
 			return fmt.Errorf("declaration %s carries a credential format", d.ID)
 		}
 	}
@@ -247,9 +278,9 @@ func (d Declaration) Validate() error {
 	return d.Q.validate()
 }
 
-// Builtins are the declarations the broker ships, by ID. Both ship with an
-// incomplete record: Codex is off until #809 fills it; Claude stays off behind
-// the owner's opt-in (#1380).
+// Builtins are the declarations the broker ships, by ID. Codex is qualified
+// by #809; Claude stays off behind the owner's opt-in (#1380); Grok ships
+// with an incomplete record and is off until #809 fills it (#1378).
 func Builtins() map[string]Declaration {
 	return map[string]Declaration{
 		"codex": {
@@ -268,6 +299,23 @@ func Builtins() map[string]Declaration {
 				{Name: "secondary", ReadFrom: "x-codex-secondary-used-percent"},
 			},
 			TaskClasses: []string{"code", "research"},
+			// The managed_config.toml pins that turn cloud and remote
+			// features off (guest/codex/ASSUMPTIONS.md ARC3-guest-cloud-off-1; the test reads
+			// the file). Cloud tasks, remote runs and session sync have no
+			// known switch: [Open], their endpoints absent from egress.Codex().
+			CloudOff: []string{
+				`web_search = "disabled"`, "tools.web_search = false",
+				"features.web_search_request = false", "features.web_search_cached = false",
+				"features.image_generation = false", "features.browser_use = false",
+				"features.browser_use_external = false", "features.computer_use = false",
+				"features.remote_plugin = false", "features.plugin_sharing = false",
+				"features.apps = false", "features.plugins = false",
+				"features.daemon_auto_start = false",
+				"check_for_update_on_startup = false", "features.in_app_updates = false",
+				"notify = []",
+				"analytics.enabled = false", "feedback.enabled = false", `otel.exporter = "none"`,
+				`history.persistence = "none"`,
+			},
 			// codex exec --json reports failures as these events; the
 			// agent's messages are item events and are never matched.
 			ErrorEvents: []string{"error", "turn.failed"},
@@ -329,6 +377,44 @@ func Builtins() map[string]Declaration {
 			// for before a result leaves the worker (S8, mode W).
 			CredFormats: []string{`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`},
 			Q:           Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)
+		},
+		// Grok Build, xAI's official CLI (#1378), read from the pinned
+		// CLI's own strings and not yet measured (ASSUMPTIONS.md): headless
+		// with the brief on stdin, its login in GROK_HOME's auth.json, and
+		// egress.Grok() the route its endpoints name.
+		"grok": {
+			ID: "grok", CLI: "grok", Version: "1.0.62", Image: "grok",
+			Argv:        []string{"grok", "-p", "-", "--output-format", "streaming-json", "--no-auto-update"},
+			Cwd:         "/var/lib/agentos-work",
+			Env:         []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/var/lib/agentos-grok", "GROK_HOME=/var/lib/agentos-grok"},
+			Idle:        []string{"/bin/sleep", "infinity"},
+			ResultPath:  "/var/lib/agentos-work/.agentos-result",
+			Custody:     BrokerHeld,
+			Endpoints:   []string{"cli-chat-proxy.grok.com", "auth.x.ai"},
+			Placeholder: "auth.json",
+			// No quota header is known for these endpoints: no pool (RES-5).
+			Unmetered:   true,
+			TaskClasses: []string{"code", "research"},
+			// The one known switch, read from the CLI's strings; the rest
+			// of its cloud features are [Open] (ASSUMPTIONS.md), their
+			// endpoints absent from egress.Grok().
+			CloudOff:    []string{"--no-auto-update"},
+			ErrorEvents: []string{"error"},
+			UsedUp:      []string{"usage_limit_reached", "usage_pool_exhausted"},
+			// xAI's login is OIDC JWTs at auth.x.ai, and its API keys are
+			// xai- keys; both are scanned for before a result leaves.
+			CredFormats: []string{
+				`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
+				`\bxai-[A-Za-z0-9_-]{20,}`,
+			},
+			// Verdict and the terms read are #1377's (Mark, 2026-10-14). The
+			// CLI version and evidence stay empty until #809 runs this CLI,
+			// so the gate refuses it unqualified.
+			Q: Qualification{
+				TermsURL:  "https://x.ai/legal/terms-of-service",
+				TermsRead: "2026-10-13",
+				Verdict:   Allowed,
+			},
 		},
 	}
 }
