@@ -818,3 +818,63 @@ func TestRetryWithoutAHookTellsOnlyApprovedTakeBacks(t *testing.T) {
 		t.Fatalf("machines %v told %v", x.vm.calls, x.told)
 	}
 }
+
+// failWrites is a store whose appends all fail.
+type failWrites struct{ recall.Store }
+
+func (failWrites) Append([]byte) error { return errors.New("disk full") }
+
+// W3-forget-reach-r2-2, as the broker wires it: OpenService gives the
+// provenance record its back-marks file under Dir, so a back mark the
+// record did not take reads as done after a restart.
+func TestServiceKeepsABackMarkTheRecordLostAcrossARestart(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenService(ServiceConfig{Dir: dir, Key: key()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC()
+	if err := s.Prov.MarkTakeBack("root", since, false); err != nil {
+		t.Fatal(err)
+	}
+	s.Prov.store = failWrites{s.Prov.store}
+	rs := Reset{Since: since, At: since.Add(time.Second), Until: since.Add(2 * time.Second)}
+	if err := s.Prov.MarkBack("root", rs); err == nil {
+		t.Fatal("MarkBack with the record failing reported nothing")
+	}
+	if m := s.Prov.BacksInMemoryOnly(); len(m) != 0 {
+		t.Fatalf("back mark not in backs.jsonl: %v", m)
+	}
+	s.Close()
+	s2, err := OpenService(ServiceConfig{Dir: dir, Key: key()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if recorded, done := s2.Prov.TakeBack("root", since); !recorded || !done {
+		t.Fatalf("after restart: recorded %v done %v", recorded, done)
+	}
+}
+
+// W3-forget-reach-r4-1 after a restart: an owed take-back read back from
+// the record was approved (only an approved take-back is marked owed), so
+// with no OnTakenBack hook Retry tells TakenBack once it is done.
+func TestRetryTellsAnOwedTakeBackReadBackAtRestart(t *testing.T) {
+	x, read := newReachRig(t)
+	if err := x.r.prov.MarkTakeBack("root", read, false); err != nil {
+		t.Fatal(err)
+	}
+	p, err := OpenProvenance(x.r.prst) // the restart
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach = &Reach{Prov: p, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: x.r.ix.Deleted,
+		Now: func() time.Time { return x.clock }, Location: time.UTC,
+		Notify: func(s string) error { x.told = append(x.told, s); return nil }}
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone || len(x.vm.calls) != 1 || len(x.told) != 1 || x.told[0] != TakenBack {
+		t.Fatalf("state %v machines %v told %v", st, x.vm.calls, x.told)
+	}
+}

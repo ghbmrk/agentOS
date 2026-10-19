@@ -25,7 +25,7 @@ const TombstoneAge = 30 * 24 * time.Hour
 type ServiceConfig struct {
 	// Dir is the broker-held state directory (created 0700): the index in
 	// recall/, the bus in bus.jsonl and seen.jsonl, the provenance record
-	// in provenance.jsonl.
+	// in provenance.jsonl, the back marks it did not take in backs.jsonl.
 	Dir string
 	// Key is the vault-held identity key (K5); at least 16 bytes.
 	Key []byte
