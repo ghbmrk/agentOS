@@ -174,10 +174,13 @@ func (h *Holder) holds(b []byte) bool {
 	return len(h.secret) > 0 && subtle.ConstantTimeCompare(h.secret, b) == 1
 }
 
+// current is a copy of the secret for one request, so a hand or drop that
+// zeroes the held buffer never zeroes one a request is still using. The
+// caller zeroes the copy when done.
 func (h *Holder) current() []byte {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.secret
+	return append([]byte(nil), h.secret...)
 }
 
 func refuse(w http.ResponseWriter, status int, why string) {
@@ -207,6 +210,7 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := h.current()
+	defer clear(secret)
 	if len(secret) == 0 {
 		refuse(w, http.StatusServiceUnavailable, ErrNoSecret)
 		return
