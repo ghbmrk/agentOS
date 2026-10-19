@@ -49,7 +49,7 @@ const (
 	MaxChatMinutes = 240
 	// DefaultAckSeconds is how long after a task message reached the box
 	// AckText goes if no reply has, when the owner set none (OWN-4).
-	DefaultAckSeconds = 20
+	DefaultAckSeconds = 5
 	// MinAckSeconds and MaxAckSeconds bound ACK.
 	MinAckSeconds = 5
 	MaxAckSeconds = 120
@@ -62,7 +62,7 @@ const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 
 // agentosd's whole HELP must fit one owner text uncut (control.MaxText,
 // #2390 F1); a mistyped setting gets pacingForms, which says what each
 // value means.
-const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30, ACK 20."
+const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30, ACK 5."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
