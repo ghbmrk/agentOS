@@ -32,6 +32,8 @@ type stub struct {
 	hang       bool
 	createErr  error
 	destroyErr error
+	execErr    error // returned by the CLI's Exec
+	readErr    error // returned by the result read
 }
 
 func newStub(cli func(c vm.Command, s *stub) vm.ExecResult) *stub {
@@ -65,8 +67,11 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		return vm.ExecResult{}, errors.New("no such machine")
 	}
 	if len(c.Argv) > 0 && c.Argv[0] == "cat" { // the result read
-		out := s.drive[c.Argv[1]]
+		out, rerr := s.drive[c.Argv[1]], s.readErr
 		s.mu.Unlock()
+		if rerr != nil {
+			return vm.ExecResult{}, rerr
+		}
 		r := vm.ExecResult{Stdout: []byte(out)}
 		if c.MaxOutput > 0 && len(r.Stdout) > c.MaxOutput {
 			r.Stdout, r.Truncated = r.Stdout[:c.MaxOutput], true
@@ -74,7 +79,7 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		return r, nil
 	}
 	s.runs = append(s.runs, c)
-	hang := s.hang
+	hang, eerr := s.hang, s.execErr
 	s.mu.Unlock()
 	if hang {
 		select {
@@ -83,7 +88,7 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return s.cli(c, s), nil
+	return s.cli(c, s), eerr
 }
 
 func (s *stub) write(path, text string) { s.mu.Lock(); s.drive[path] = text; s.mu.Unlock() }
@@ -929,5 +934,102 @@ func TestADeclarationWithMalformedFormatsDoesNotRun(t *testing.T) {
 		if reasonOf(err) != Unqualified || len(g.h.created) != 0 {
 			t.Errorf("%s: %q %v, created %v", name, out, err, g.h.created)
 		}
+	}
+}
+
+// REQ: CRED-5
+// FU9-1: a run that fails before its signals are read (a timeout, an Exec
+// error, a result-read error) still stops the route on a refused login
+// egress saw during it. The run keeps its own outcome and output; the next
+// run is login-refused without seeding or starting a worker (#1891 item 2).
+func failedAfterRefusal(t *testing.T, want Reason, setup func(g *rig)) {
+	t.Helper()
+	g := newRig(nil)
+	g.h.cli = g.refuseLogin
+	setup(g)
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != want || out != "" {
+		t.Fatalf("failed run: %q %v, want %s", out, err, want)
+	}
+	if len(g.events) != 1 || g.events[0].Outcome != string(want) {
+		t.Errorf("journal: %+v", g.events)
+	}
+	if len(g.signins) != 1 || g.signins[0] != "stub" {
+		t.Errorf("sign-in line: %v", g.signins)
+	}
+	g.advance(time.Second)
+	g.h.execErr, g.h.readErr = nil, nil
+	g.h.cli = ok("fine")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != LoginRefused {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(g.h.created) != 1 || len(g.sd.calls) != 1 || len(g.h.runs) != 1 {
+		t.Errorf("second run started: %d workers, %d seeds, %d CLI runs", len(g.h.created), len(g.sd.calls), len(g.h.runs))
+	}
+}
+
+func TestTimedOutRunAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, TimedOut, func(g *rig) {
+		g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+			g.refuseLogin(c, s)
+			return vm.ExecResult{TimedOut: true, ExitCode: -1}
+		}
+	})
+}
+
+func TestExecErrorAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, Failed, func(g *rig) { g.h.execErr = errors.New("exec lost") })
+}
+
+func TestResultReadErrorAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, Failed, func(g *rig) { g.h.readErr = errors.New("read lost") })
+}
+
+// REQ: CRED-5
+// FU9-2: a failed run with no refusal leaves the route running, and an
+// unreadable Usage on that check is logged and keeps the run's outcome.
+func TestFailedRunWithoutRefusalDoesNotStopTheRoute(t *testing.T) {
+	g := newRig(ok("partial"))
+	g.h.execErr = errors.New("exec lost")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Failed {
+		t.Fatalf("failed run: %v", err)
+	}
+	if _, stopped := g.r.stopCause("stub"); stopped || len(g.signins) != 0 {
+		t.Fatalf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+	g.h.execErr = nil
+	g.h.cli = ok("fine")
+	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
+		t.Fatalf("next run: %q %v", out, err)
+	}
+}
+
+func TestUsageErrorOnFailedRunKeepsOutcome(t *testing.T) {
+	g := newRig(nil)
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		g.mu.Lock()
+		g.usage.LoginRefused = g.now
+		g.usageErr = errors.New("usage view down")
+		g.mu.Unlock()
+		return vm.ExecResult{TimedOut: true, ExitCode: -1}
+	}
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != TimedOut || out != "" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if len(g.events) != 1 || g.events[0].Outcome != string(TimedOut) {
+		t.Errorf("journal: %+v", g.events)
+	}
+	if _, stopped := g.r.stopCause("stub"); stopped || len(g.signins) != 0 {
+		t.Errorf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+	found := false
+	for _, l := range g.logs {
+		if strings.Contains(l, "after a failed run") && strings.Contains(l, "usage view down") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("usage error not logged: %v", g.logs)
 	}
 }
