@@ -60,6 +60,8 @@ func TestOnlyKnownCodesAndShapedNamesRender(t *testing.T) {
 		{Code: PrivateAllowed},
 		{Code: PrivateAllowed, Name: "Open\nAI"},
 		{Code: PrivateAllowed, Name: "https://evil.example/x"},
+		{Code: PrivateAllowed, Name: "evil.example.com"},
+		{Code: PrivateWithdrawn, Name: "a.b"},
 		{Code: PrivateAllowed, Name: strings.Repeat("a", 33)},
 		{Code: PrivateWithdrawn, Name: " OpenAI"},
 		{Code: MailReplaced, Name: "OpenAI"},
