@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -162,10 +165,35 @@ func TestOP6FailedStopStartsNoLoopWork(t *testing.T) {
 	if lp.busy() || lp.stopped() {
 		t.Fatal("an idle box reads busy or stopped")
 	}
+	// A source that always has model-free work, behind the same gates: on a
+	// running box it gets its turn.
+	spare, err := meter.Open(meter.Config{
+		Path:       filepath.Join(dir, "probe-spare.json"),
+		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
+		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
+	})
+	must(t, err)
+	src := &readySource{}
+	probe, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{src},
+		Busy: lp.busy, Stopped: lp.stopped})
+	must(t, err)
+	if ran, _ := probe.Tick(ctx); !ran || src.asked.Load() != 1 || src.ran.Load() != 1 {
+		t.Fatalf("a ready source on a running box: ran %v, asked %d, run %d", ran, src.asked.Load(), src.ran.Load())
+	}
 
-	store.fail.Store(true)
-	if _, err := eng.Stop(ctx); !errors.Is(err, journal.ErrBroken) {
-		t.Fatalf("STOP on a failing disk: %v, want ErrBroken", err)
+	// The STOP fails while the source is looking: the job it offered does
+	// not run.
+	var stopErr error
+	src.onNext = func() {
+		store.fail.Store(true)
+		_, stopErr = eng.Stop(ctx)
+	}
+	if ran, wait := probe.Tick(ctx); ran || wait != time.Minute || src.ran.Load() != 1 {
+		t.Fatalf("work offered as STOP failed: ran %v, wait %v, run %d", ran, wait, src.ran.Load())
+	}
+	src.onNext = nil
+	if !errors.Is(stopErr, journal.ErrBroken) {
+		t.Fatalf("STOP on a failing disk: %v, want ErrBroken", stopErr)
 	}
 	if lp.busy() || !lp.stopped() {
 		t.Fatal("a STOP that failed to record does not hold loop work")
@@ -174,4 +202,30 @@ func TestOP6FailedStopStartsNoLoopWork(t *testing.T) {
 	if ran, wait := lp.sched.Tick(ctx); ran || wait != time.Minute {
 		t.Fatalf("loop tick after a failed STOP: ran %v, wait %v", ran, wait)
 	}
+	// The ready source is not even asked for work, so nothing it would look
+	// at or start happens either.
+	if ran, wait := probe.Tick(ctx); ran || wait != time.Minute || src.asked.Load() != 2 || src.ran.Load() != 1 {
+		t.Fatalf("ready source after a failed STOP: ran %v, wait %v, asked %d, run %d", ran, wait, src.asked.Load(), src.ran.Load())
+	}
+}
+
+// readySource always offers one unit of model-free work and counts how
+// often it is asked and how often its work runs. onNext, if set, runs while
+// it is asked.
+type readySource struct {
+	asked, ran atomic.Int32
+	onNext     func()
+}
+
+func (s *readySource) Loop() loops.Loop { return loops.Maintain }
+
+func (s *readySource) Next(context.Context, bool) (loops.Job, bool) {
+	s.asked.Add(1)
+	if s.onNext != nil {
+		s.onNext()
+	}
+	return loops.Job{Name: "probe", Run: func(context.Context) loops.Result {
+		s.ran.Add(1)
+		return loops.Result{}
+	}}, true
 }
