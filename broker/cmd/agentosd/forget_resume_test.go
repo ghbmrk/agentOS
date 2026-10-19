@@ -178,12 +178,14 @@ func waitIdle(f *ownerForget) {
 //     forgetAgentNotOpen (JRN-s3-1).
 //   - Q3: wireResume given nil with recall configured: recall wired as
 //     off (JRN-s3-3).
+//   - Q3c: recall's OnOpen handed over outside the recall guard, so
+//     recall off is wired as on (JRN-s3-3).
 //
 // Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
 func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	srcs := agentosdSources(t)
-	t.Run("JRN-s3-4 production wiring", func(t *testing.T) {
+	t.Run("JRN-s3-4 production wiring passes", func(t *testing.T) {
 		for _, bad := range forgetResumeWiring(t, srcs) {
 			t.Error(bad)
 		}
@@ -197,8 +199,10 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		{"Q1 recall-on arm drops it", "\t\t" + runBoot + "\t\tgo openRecall(", "\t\tgo openRecall(", "JRN-s3-1"},
 		{"Q2 recall-off arm drops it", "caps.recallWired(false)\n\t\t" + runBoot, "caps.recallWired(false)\n", "JRN-s3-1"},
 		{"Q3 recall wired as off", "wireResume(ctx, onOpen)", "wireResume(ctx, nil)", "JRN-s3-3"},
+		{"Q3c OnOpen outside the recall guard", "\t\tif recallDir != \"\" && verifier != nil {\n\t\t\tonOpen = recallExec.OnOpen\n\t\t}\n",
+			"\t\tonOpen = recallExec.OnOpen\n", "JRN-s3-3"},
 	} {
-		t.Run(m.name, func(t *testing.T) {
+		t.Run(m.req+" "+m.name+" fails", func(t *testing.T) {
 			src := srcs["main.go"]
 			if n := strings.Count(src, m.old); n != 1 {
 				t.Fatalf("main.go holds the mutated text %d times (want 1): %q", n, m.old)
@@ -208,13 +212,19 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 				mut[k] = v
 			}
 			mut["main.go"] = strings.Replace(src, m.old, m.new, 1)
+			// The mutant breaks its own requirement and nothing else.
 			bad := forgetResumeWiring(t, mut)
+			own := 0
 			for _, b := range bad {
 				if strings.HasPrefix(b, m.req+":") {
-					return
+					own++
+				} else {
+					t.Errorf("mutant broke more than %s: %s", m.req, b)
 				}
 			}
-			t.Errorf("mutant passed %s; violations: %q", m.req, bad)
+			if own == 0 {
+				t.Errorf("mutant passed %s", m.req)
+			}
 		})
 	}
 }
@@ -278,7 +288,8 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 	var resumes, attaches, agents []token.Pos
 	var wires []*ast.CallExpr
 	fromOnOpen := map[string]bool{}
-	var arms []*ast.IfStmt
+	var arms, guards []*ast.IfStmt
+	var onOpens []*ast.AssignStmt
 	ast.Inspect(main, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
@@ -302,11 +313,15 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 			for i, l := range n.Lhs {
 				if id, ok := l.(*ast.Ident); ok && i < len(n.Rhs) && isSel(n.Rhs[i], "recallExec", "OnOpen") {
 					fromOnOpen[id.Name] = true
+					onOpens = append(onOpens, n)
 				}
 			}
 		case *ast.IfStmt:
-			if n.Else != nil && types.ExprString(n.Cond) == `recallDir != "" && verifier != nil` {
-				arms = append(arms, n)
+			if types.ExprString(n.Cond) == `recallDir != "" && verifier != nil` {
+				if n.Else != nil {
+					arms = append(arms, n)
+				}
+				guards = append(guards, n)
 			}
 		}
 		return true
@@ -352,6 +367,19 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 		if id == nil || !fromOnOpen[id.Name] {
 			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume's second argument is not assigned from recallExec.OnOpen", fset.Position(w.Pos())))
+		}
+	}
+	// Recall's OnOpen is handed over only inside the recall guard's body:
+	// unguarded, recall off would be wired as on.
+	for _, a := range onOpens {
+		guarded := false
+		for _, g := range guards {
+			if a.Pos() >= g.Body.Pos() && a.End() <= g.Body.End() {
+				guarded = true
+			}
+		}
+		if !guarded {
+			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: recallExec.OnOpen assigned outside the body of `if recallDir != \"\" && verifier != nil`", fset.Position(a.Pos())))
 		}
 	}
 	return bad
