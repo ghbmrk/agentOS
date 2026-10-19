@@ -162,7 +162,7 @@ func TestAKeyHeldAtUnlockGrants(t *testing.T) {
 	r := newFastRig(t, true) // its vault holds an OpenAI key
 	agentKeyed(r, tr)
 	var hook privateHook
-	hook.c.Store(r.c)
+	hook.bind(r.c)
 	_, rt, err := modelRouting(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}},
 		grants{}, map[string]bool{"openai": true}, nil, hook.granted, "", "")
 	if err != nil {
@@ -277,8 +277,8 @@ func TestServeCustodyFollowsTheFlags(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.granted != tc.want || c.build == nil || c.agent != "agent" || hook.c.Load() != c {
-			t.Errorf("%v: granted %v, build set %v, agent %q, hook bound %v", tc.g, c.granted, c.build != nil, c.agent, hook.c.Load() == c)
+		if c.granted != tc.want || c.build == nil || c.agent != "agent" || hook.load() != modelSource(c) {
+			t.Errorf("%v: granted %v, build set %v, agent %q, hook bound %v", tc.g, c.granted, c.build != nil, c.agent, hook.load() == modelSource(c))
 		}
 	}
 }

@@ -372,28 +372,40 @@ func (h *Holder) headersDeclared(a egress.Adapter, hdr http.Header) bool {
 	return true
 }
 
-// hand serves the hand socket: GET /state says whether a secret is held,
-// PUT /secret hands one, DELETE /secret drops it. None reads it back.
-func (h *Holder) hand() http.Handler {
+// Slot is what a hand socket fills: a holder's secret, or the keyless
+// proxy's redaction state (SIM-split-wire).
+type Slot interface {
+	Hand(b []byte)
+	Drop()
+	Held() bool
+}
+
+// hand serves the holder's hand socket.
+func (h *Holder) hand() http.Handler { return HandHandler(h, maxSecret) }
+
+// HandHandler serves a hand socket for s: GET /state says whether s holds
+// anything, PUT /secret hands it at most max bytes, DELETE /secret drops
+// it. None reads it back.
+func HandHandler(s Slot, max int64) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(state{Held: h.Held()})
+		json.NewEncoder(w).Encode(state{Held: s.Held()})
 	})
 	mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxSecret+1))
-		if err != nil || len(b) == 0 || len(b) > maxSecret {
+		b, err := io.ReadAll(io.LimitReader(r.Body, max+1))
+		if err != nil || len(b) == 0 || int64(len(b)) > max {
 			http.Error(w, "holder: bad secret", http.StatusBadRequest)
 			return
 		}
-		h.Hand(b)
+		s.Hand(b)
 		for i := range b {
 			b[i] = 0
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) {
-		h.Drop()
+		s.Drop()
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return mux

@@ -143,6 +143,31 @@ func TestHashRedactorHoldsNoPlaintext(t *testing.T) {
 	}
 }
 
+// A value with an encoding exactly a window long, such as the base64 of
+// a 16-byte private-data marker, round-trips: the decoded redactor is not
+// refused, so the proxy process does not lock on it (SIM-split, CRED-7).
+func TestHashRedactorRoundTripsAWindowLongForm(t *testing.T) {
+	for n := HashWindow - 9; n <= HashWindow+1; n++ {
+		v := bytes.Repeat([]byte{0xa5}, n)
+		r, err := NewHashRedactor([][]byte{v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc, err := r.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got HashRedactor
+		if err := got.UnmarshalBinary(enc); err != nil {
+			t.Fatalf("%d-byte value: %v", n, err)
+		}
+		in := []byte("x " + base64.StdEncoding.EncodeToString(v) + " y")
+		if out := got.Redact(in); bytes.Contains(out, []byte(base64.StdEncoding.EncodeToString(v))) {
+			t.Fatalf("%d-byte value: decoded redactor missed its base64: %s", n, out)
+		}
+	}
+}
+
 // The vault builds the hashed redactor over every entry.
 func TestVaultHashRedactor(t *testing.T) {
 	v, a, b := twoEntryVault(t)

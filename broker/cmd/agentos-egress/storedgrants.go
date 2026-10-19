@@ -33,8 +33,8 @@ func (c *custody) storedGrant(machine, provider string) bool {
 // granted is the router's stored-key grant once custody exists; until
 // then it grants nothing.
 func (h *privateHook) granted(machine, provider string) bool {
-	c := h.c.Load()
-	return c != nil && c.storedGrant(machine, provider)
+	s := h.load()
+	return s != nil && s.storedGrant(machine, provider)
 }
 
 // heldKey reports whether v holds a model provider's API key.
@@ -77,6 +77,7 @@ func (c *custody) syncKeyedLocked(v *vault.Vault) {
 	}
 	if c.statePath == "" {
 		c.st.Keyed = keyed
+		c.keyed.Store(keyed)
 		return
 	}
 	next := c.st

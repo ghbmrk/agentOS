@@ -296,7 +296,7 @@ func TestTheRouterFollowsSetupsPrivateAnswer(t *testing.T) {
 		t.Fatalf("no custody: %d hits=%d", code, hits.Load())
 	}
 	r := providerRig(t)
-	hook.c.Store(r.c)
+	hook.bind(r.c)
 	r.c.confirm(r.unlock(t), r.code())
 	if code := call(); code != http.StatusForbidden || hits.Load() != 0 {
 		t.Fatalf("no mark: %d hits=%d", code, hits.Load())

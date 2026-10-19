@@ -202,13 +202,24 @@ func builtinAdapter(name string) (egress.Adapter, bool) {
 	return egress.Adapter{}, false
 }
 
-// privateHook binds the router, built before custody, to custody's
-// privateAllowed once it exists; until then it allows nothing.
-type privateHook struct{ c atomic.Pointer[custody] }
+// privateHook binds the router, built before custody, to its model
+// source's privateAllowed once it exists (custody, or the proxy process's
+// view); until then it allows nothing.
+type privateHook struct{ src atomic.Pointer[sourceBox] }
+
+func (h *privateHook) bind(s modelSource) { h.src.Store(&sourceBox{s}) }
+
+// load is the bound source, nil before binding.
+func (h *privateHook) load() modelSource {
+	if b := h.src.Load(); b != nil {
+		return b.modelSource
+	}
+	return nil
+}
 
 func (h *privateHook) allowed(provider string) bool {
-	c := h.c.Load()
-	return c != nil && c.privateAllowed(provider)
+	s := h.load()
+	return s != nil && s.privateAllowed(provider)
 }
 
 // setupProvidersHandler serves the provider ops on the verify socket.
