@@ -595,6 +595,36 @@ func TestHeldDroppedCountHasOneSender(t *testing.T) {
 	}
 }
 
+// REQ: CAP3-F1
+// The count of held agent texts a deletion dropped is a broker text: held
+// in quiet hours under URGENT APPROVAL OFF beside recall's agent-text
+// confirmation, it survives a second forget that drops the confirmation,
+// and goes at the next release.
+func TestHeldDroppedCountSurvivesNextForget(t *testing.T) {
+	o := pacedOwner(t, quiet22to7Held(), at23)
+	own := func() *owner.Channel { return o.ch }
+	if err := recallNotify(own)("Done: root forgot a mail you deleted."); err != nil {
+		t.Fatal(err)
+	}
+	if err := recallHeldDropped(own)(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.sent(); len(got) != 0 {
+		t.Fatalf("quiet hours: sent %q", got)
+	}
+	if n := o.ch.ForgetRecent(); n != 1 {
+		t.Fatalf("second forget dropped %d, want only the confirmation", n)
+	}
+	o.set(at23.Add(8*time.Hour + time.Minute)) // 07:01
+	if err := o.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := o.sent()
+	if len(got) != 1 || !strings.Contains(got[0], "A deletion dropped 2 held agent texts.") || strings.Contains(got[0], "Done:") {
+		t.Fatalf("released %q, want only the count", got)
+	}
+}
+
 // fencedEvidenceGate is a real journal engine as the evidence setting
 // uses it, its destination fixed: the reply under a fence comes from the
 // engine's own error, not a fake's.
