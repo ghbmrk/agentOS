@@ -277,6 +277,10 @@ MACHINES_LINES = [
 
 def machines_problems(ci):
     """Why ci.yml's machines job could pass with the infer tests skipped or unrun; empty when pinned."""
+    # YAML also breaks lines at CR, NEL, LS and PS; this check splits on LF only.
+    breaks = sorted({c for c in ci if c in "\r\x85\u2028\u2029"})
+    if breaks:
+        return ["a line break other than LF: %r" % "".join(breaks)]
     if ci.count("\n  machines:\n") != 1:
         return ["no single machines job"]
     preamble = ci[:ci.index("\njobs:\n") + 1]
@@ -455,6 +459,9 @@ class WiringTest(unittest.TestCase):
             "a carriage return": ("          rc=0\n", "          rc=0\r          true\n"),
             "trailing top-level defaults": (ci, ci + "defaults:\n  run:\n    shell: bash {0}\n"),
             "trailing top-level env": (ci, ci + "env:\n  BASH_ENV: /tmp/x\n"),
+            "top-level defaults after NEL": (ci, ci.rstrip("\n") + "\x85" + "defaults:\n  run:\n    shell: bash {0}\n"),
+            "top-level defaults after LS": (ci, ci.rstrip("\n") + "\u2028" + "defaults:\n  run:\n    shell: bash {0}\n"),
+            "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-latest\n  hostcheck:"),
             "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
