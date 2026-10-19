@@ -768,10 +768,14 @@ func (d *denyDeletes) Check(_ context.Context, ph journal.Phase, in journal.Inte
 }
 
 // withPolicy restarts the rig's engine on its journal under pol.
-func (r *rig) withPolicy(pol journal.Policy) {
+func (r *rig) withPolicy(pol journal.Policy) { r.withExecutor(pol, r.s) }
+
+// withExecutor restarts the rig's engine on its journal under pol, with ex
+// in the store's place as the executor. Nothing is reconciled.
+func (r *rig) withExecutor(pol journal.Policy, ex journal.Executor) {
 	r.t.Helper()
 	var err error
-	r.eng, err = journal.Open(r.mem, pol, map[string]journal.Executor{Executor: r.s},
+	r.eng, err = journal.Open(r.mem, pol, map[string]journal.Executor{Executor: ex},
 		func(s string) string { return s }, journal.WithClock(func() time.Time { return r.now }))
 	if err != nil {
 		r.t.Fatal(err)
@@ -885,6 +889,118 @@ func TestDeniedOwnerDeleteIsRetriedBySweep(t *testing.T) {
 	}
 	if n, err := r.s.Sweep(ctx); n != 0 || err != nil {
 		t.Fatalf("sweep with nothing denied = %d, %v", n, err)
+	}
+}
+
+// whyLog allows everything and records the reason each delete attempt is
+// authorized with.
+type whyLog map[string]string
+
+func (w whyLog) Check(_ context.Context, ph journal.Phase, in journal.Intent) error {
+	if in.Action == ActionDelete && ph == journal.PhaseAuthorize {
+		w[in.ID] = str(in.Params["why"])
+	}
+	return nil
+}
+
+// A sweep retrying a denied owner delete asks again for the owner, not
+// for expiry (CH26-R1).
+func TestRetriedOwnerDeleteKeepsTheOwnersReason(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.keep(photoN(1))
+	r.withPolicy(&denyDeletes{n: 1})
+	if _, err := r.s.Delete(ctx, "P1"); !errors.Is(err, ErrNotDone) {
+		t.Fatalf("denied delete = %v", err)
+	}
+	why := whyLog{}
+	r.withPolicy(why)
+	r.now = t0.AddDate(0, 0, DefaultDays+1)
+	if n, err := r.s.Sweep(ctx); n != 1 || err != nil {
+		t.Fatalf("sweep retrying P1 = %d, %v", n, err)
+	}
+	if got := why[deleteID("P1", 1)]; got != "owner" {
+		t.Fatalf("retry's reason = %q, want owner (all: %v)", got, why)
+	}
+	r.assertGone("P1", photoN(1))
+}
+
+// stallDeletes executes photo deletes as the store would not: the first
+// n leave their outcome unknown, after calling crash if it is set.
+type stallDeletes struct {
+	*Store
+	n     int
+	crash func()
+}
+
+func (x *stallDeletes) Execute(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
+	if in.Action == ActionDelete && x.n > 0 {
+		x.n--
+		if x.crash != nil {
+			x.crash()
+		}
+		return journal.Outcome{Result: journal.ResultUnknown}
+	}
+	return x.Store.Execute(ctx, in, attempt)
+}
+
+// An attempt with its outcome unknown, including one in flight when the
+// broker stopped (the journal reopens it as unknown), is settled and
+// carried on, not duplicated (CH26-R4).
+func TestUnsettledDeleteIsResumedNotDuplicated(t *testing.T) {
+	ctx := context.Background()
+	for _, crash := range []bool{false, true} {
+		t.Run(map[bool]string{false: "outcome unknown", true: "in flight at a crash"}[crash], func(t *testing.T) {
+			r := newRig(t)
+			r.keep(photoN(1))
+			x := &stallDeletes{Store: r.s, n: 1}
+			var cut []byte
+			if crash {
+				// The boot dies after the dispatch is journaled, before its
+				// outcome is.
+				x.crash = func() { cut, _ = r.mem.ReadAll() }
+			}
+			r.withExecutor(allowAll{}, x)
+			if _, err := r.s.Delete(ctx, "P1"); !errors.Is(err, ErrNotDone) {
+				t.Fatalf("stalled delete = %v", err)
+			}
+			if crash {
+				if err := r.mem.Rewrite(cut); err != nil {
+					t.Fatal(err)
+				}
+				r.withExecutor(allowAll{}, x)
+			}
+			st, err := r.eng.Get(deleteID("P1", 0))
+			if err != nil || st.State != journal.OutcomeUnknown || len(st.Attempts) != 1 ||
+				(st.Attempts[0].Source == "restart") != crash {
+				t.Fatalf("first attempt = %+v, %v", st, err)
+			}
+			// Unsettled, a delete waits on the attempt rather than adding one.
+			if _, err := r.s.Delete(ctx, "P1"); !errors.Is(err, ErrNotDone) {
+				t.Fatalf("delete while unsettled = %v", err)
+			}
+			if got := deleteIntents(t, r.eng, "P1"); len(got) != 1 {
+				t.Fatalf("delete attempts while unsettled %v, want one", got)
+			}
+			// Nothing is taken down while the outcome is unknown: the photo
+			// stays listed and its keep record is not erased.
+			if es := r.list(); len(es) != 1 || es[0].ID != "P1" {
+				t.Fatalf("listed while unsettled: %+v", es)
+			}
+			for _, e := range r.eng.Erased() {
+				if e == keepID("P1") {
+					t.Fatal("keep record erased while the delete is unsettled")
+				}
+			}
+			r.eng.Reconcile(ctx)
+			if _, err := r.s.Delete(ctx, "P1"); err != nil {
+				t.Fatalf("delete after reconcile = %v", err)
+			}
+			r.assertGone("P1", photoN(1))
+			if got := deleteIntents(t, r.eng, "P1"); len(got) != 1 {
+				t.Fatalf("delete attempts %v, want one", got)
+			}
+		})
 	}
 }
 

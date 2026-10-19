@@ -35,8 +35,8 @@ func TestOtherLeadInLeavesTheStopHintWindowUnspent(t *testing.T) {
 	r := newRig(t, nil)
 	r.unlock()
 	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
-	if got := r.say("Cancel “Your sign-in code is 482913.”"); strings.Contains(got, stopHintText) {
-		t.Fatalf("Cancel-led reaction replied %q, want no hint", got)
+	if got := r.say("Cancel “Your sign-in code is 482913.”"); got != readAsReaction {
+		t.Fatalf("Cancel-led reaction replied %q, want only %q", got, readAsReaction)
 	}
 	if got := r.say("stop the newsletter"); !strings.Contains(got, stopHintText) {
 		t.Fatalf("near-miss chat after a Cancel-led reaction replied %q, want the hint", got)
@@ -96,4 +96,38 @@ func TestListedFormAfterADeletionLeavesTheStopHintWindowUnspent(t *testing.T) {
 	if got := r.say("stop the newsletter"); !strings.Contains(got, stopHintText) {
 		t.Fatalf("near-miss chat after the listed form replied %q, want the hint", got)
 	}
+}
+
+// Locked, the cut form still gets the hint ahead of the read-as-reaction line.
+func TestLockedStopLedCutFormGetsTheStopHintFirst(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
+	got := r.say("STOP “Your sign-in code is 4829")
+	if !strings.Contains(got, "held for") {
+		t.Fatalf("locked reaction replied %q, want it held", got)
+	}
+	hintFirst(t, "locked STOP-led cut form", got)
+	if strings.Contains(got, "4829") {
+		t.Fatalf("reply echoed the code: %q", got)
+	}
+}
+
+// Locked, a STOP-led form on a forgotten agent reply still gets the hint first.
+func TestLockedStopLedFormOnAForgottenReplyGetsTheStopHintFirst(t *testing.T) {
+	r := newRig(t, nil)
+	if err := r.ch.Converse(forgottenReply); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.ch.ForgetRecent()
+	before := len(r.agent.got())
+	got := r.say("STOP “Agent: " + forgottenReply + "”")
+	if !strings.Contains(got, "held for") {
+		t.Fatalf("locked reaction replied %q, want it held", got)
+	}
+	hintFirst(t, "locked STOP-led form on a forgotten reply", got)
+	if strings.Contains(got, forgottenWords) {
+		t.Fatalf("reply echoed the forgotten reply: %q", got)
+	}
+	noForgottenText(t, r.agent.got()[before:])
 }
