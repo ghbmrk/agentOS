@@ -262,9 +262,11 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		mu.Lock()
-		n := len(starts)
+		n, e := len(starts), len(ends)
 		mu.Unlock()
-		if n > quick+1 {
+		// Run quick+1 has checked its state and recorded its end, so it
+		// needs mu no more and returns once ctx ends.
+		if n > quick+1 && e > quick+1 {
 			break
 		}
 		if n < quick && n > 0 {
@@ -277,8 +279,12 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// Copy under mu, then release it: a run still holding or awaiting mu
+	// would otherwise keep <-s.Done() below from ever returning.
 	mu.Lock()
-	defer mu.Unlock()
+	starts, ends = append([]time.Time(nil), starts...), append([]time.Time(nil), ends...)
+	bad = append([]string(nil), bad...)
+	mu.Unlock()
 	if len(bad) > 0 {
 		t.Fatal(bad)
 	}
