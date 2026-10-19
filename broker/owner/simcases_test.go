@@ -39,7 +39,7 @@ func TestSpentAllowanceSurvivesARestart(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != "Update 4." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "(from 12:00) Update 4." {
 		t.Fatalf("after the hour: %q", got)
 	}
 }
