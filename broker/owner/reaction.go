@@ -45,6 +45,7 @@ type reaction struct {
 	// (readAsReaction): an unlisted form, whose lead-in is dropped, or a
 	// form read so only because a deletion forgot texts (CAP-3).
 	tell bool
+	lead string // an unlisted form's lead-in, for the STOP hint (#2264)
 }
 
 // readAsReaction tells the owner that a text was read as a reaction, so
@@ -82,16 +83,16 @@ var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]
 // unlistedForm and counts only as the quote of a guarded text, as that is.
 var cutForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]{1,40}?) ["“](.+)$`)
 
-// shapeForm is the quote of text if it has the shape of an unlisted form,
-// closed or cut.
-func shapeForm(text string) (string, bool) {
+// shapeForm is the lead-in and quote of text if it has the shape of an
+// unlisted form, closed or cut.
+func shapeForm(text string) (lead, quote string, ok bool) {
 	text = strings.TrimSpace(text)
 	for _, re := range []*regexp.Regexp{unlistedForm, cutForm} {
 		if m := re.FindStringSubmatch(text); m != nil {
-			return m[2], len(strings.Fields(m[1])) <= 5
+			return m[1], m[2], len(strings.Fields(m[1])) <= 5
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // readReaction is parseReaction, plus two cases that need the recent texts:
@@ -127,12 +128,12 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		}
 		return reaction{}, false
 	}
-	quote, ok := shapeForm(text)
+	lead, quote, ok := shapeForm(text)
 	if !ok {
 		return reaction{}, false
 	}
 	now := c.cfg.Now()
-	unlisted := reaction{kind: "reacted to", quoted: quote, tell: true}
+	unlisted := reaction{kind: "reacted to", quoted: quote, tell: true, lead: lead}
 	if _, ok := c.recent.matchGuarded(quote, now); ok {
 		return unlisted, true
 	}
@@ -304,7 +305,8 @@ func peelForm(text string) (string, bool) {
 	if rx, ok := parseForm(text); ok {
 		return rx.quoted, true
 	}
-	return shapeForm(text)
+	_, quote, ok := shapeForm(text)
+	return quote, ok
 }
 
 // matchGuarded finds a guarded text the quote marks, however it is
@@ -573,6 +575,9 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	event, pointer := c.reactionEvent(rx)
 	var replies []string
 	if rx.tell {
+		if hint, ok := c.ctrl.StopHint(rx.lead); ok {
+			replies = append(replies, hint)
+		}
 		replies = append(replies, readAsReaction)
 	}
 	if pointer != "" {

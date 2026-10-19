@@ -136,6 +136,10 @@ type Reach struct {
 	// unreported: take-backs seen not done where a reset can finish, by
 	// since, until Retry reports them done (#569 B1).
 	unreported map[int64]OwedTakeBack
+	// approved: take-backs the owner approved, by since, so that with
+	// OnTakenBack unset Retry tells TakenBack only for them, never for an
+	// unasked one (W3-forget-reach-r4-1).
+	approved map[int64]bool
 }
 
 // Contained reports a lineage being asked about, or left unanswered: no
@@ -160,15 +164,39 @@ func (r *Reach) Status() string {
 			names = append(names, agentName(l))
 		}
 	}
-	if len(names) == 0 {
-		return ""
+	var held string
+	if len(names) > 0 {
+		sort.Strings(names)
+		verb := " still holds"
+		if len(names) > 1 {
+			verb = " still hold"
+		}
+		held = strings.Join(names, ", ") + verb + " a record you deleted"
 	}
-	sort.Strings(names)
-	verb := " still holds"
-	if len(names) > 1 {
-		verb = " still hold"
+	// A take-back whose machines went back but whose record is held only
+	// in memory (W3-forget-reach-r2-1) shows until a write succeeds.
+	var mem []string
+	seen := map[string]bool{}
+	for _, b := range r.Prov.BacksInMemoryOnly() {
+		if n := agentName(b.Lineage); !seen[n] {
+			seen[n] = true
+			mem = append(mem, n)
+		}
 	}
-	return strings.Join(names, ", ") + verb + " a record you deleted"
+	if len(mem) == 0 {
+		return held
+	}
+	sort.Strings(mem)
+	if held == "" {
+		return BackNotSaved(mem...)
+	}
+	return held + "; " + BackNotSaved(mem...)
+}
+
+// BackNotSaved is the STATUS line for agents taken back whose record is
+// not yet written: the existing renewCarried text (CH-12), no new wording.
+func BackNotSaved(names ...string) string {
+	return fmt.Sprintf(renewCarried, strings.Join(names, ", "))
 }
 
 func (r *Reach) set(m *map[string]bool, lineage string, on bool) {
@@ -247,6 +275,13 @@ func (r *Reach) Retry(ctx context.Context) error {
 	}
 	var done []OwedTakeBack
 	r.mu.Lock()
+	// An approved take-back not watched was finished by TakeBack itself,
+	// whose caller saw the result: nothing to tell.
+	for at := range r.approved {
+		if _, ok := r.unreported[at]; !ok {
+			delete(r.approved, at)
+		}
+	}
 	for at, tb := range r.unreported {
 		if r.Prov.TakeBackOf(tb.Since) == TakeBackDone {
 			done = append(done, tb)
@@ -259,7 +294,7 @@ func (r *Reach) Retry(ctx context.Context) error {
 	for _, tb := range done {
 		if r.OnTakenBack != nil {
 			r.OnTakenBack(tb.Lineage, tb.Since)
-		} else {
+		} else if r.wasApproved(tb.Since) {
 			r.tell(tb.Lineage, TakenBack)
 		}
 	}
@@ -352,6 +387,9 @@ func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, a
 	recorded, done := r.Prov.TakeBack(lineage, since)
 	if done {
 		return nil
+	}
+	if approved {
+		r.markApproved(since)
 	}
 	if r.resetFrom(lineage, since) {
 		// A reset from the same time is under way and Retry finishes it:
@@ -462,6 +500,11 @@ func (r *Reach) Owed() bool {
 // held, before a reset can finish.
 func (r *Reach) watch() {
 	nd := r.Prov.TakeBacksNotDone()
+	// An owed take-back is recorded only on approval, so one read back
+	// after a restart is known approved too.
+	for _, tb := range r.Prov.TakeBacksOwed() {
+		r.markApproved(tb.Since)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, tb := range nd {
@@ -472,6 +515,24 @@ func (r *Reach) watch() {
 			r.unreported[tb.Since.UnixNano()] = tb
 		}
 	}
+}
+
+func (r *Reach) markApproved(since time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.approved == nil {
+		r.approved = map[int64]bool{}
+	}
+	r.approved[since.UnixNano()] = true
+}
+
+// wasApproved reports and forgets an approved take-back, once reported.
+func (r *Reach) wasApproved(since time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ok := r.approved[since.UnixNano()]
+	delete(r.approved, since.UnixNano())
+	return ok
 }
 
 // Pending reports how many deletions are not yet fully reached.
