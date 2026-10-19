@@ -822,11 +822,23 @@ func (k *keptReplies) settle(gen uint64) {
 		k.logf("kept replies not dropped after a deletion: %v", err)
 	}
 	k.fmu.Unlock()
-	if held > 0 && ch != nil {
-		if err := ch.Post(owner.ClassApproval, recalltool.HeldDroppedText(held)); err != nil && k.logf != nil {
-			k.logf("held agent texts dropped; owner not told: %v", err)
-		}
+	if err := tellHeldDropped(ch, held); err != nil && k.logf != nil {
+		k.logf("held agent texts dropped; owner not told: %v", err)
 	}
+}
+
+// tellHeldDropped is the one sender of the count of held agent texts a
+// deletion dropped, told alone (CAP3-F1): broker text, never agent text,
+// so no later forget drops it, and as urgent as the rollback texts. None
+// tells nothing.
+func tellHeldDropped(ch *owner.Channel, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	if ch == nil {
+		return errors.New("no owner channel")
+	}
+	return ch.Post(owner.ClassApproval, recalltool.HeldDroppedText(n))
 }
 
 func (k *keptReplies) keep(text string) {

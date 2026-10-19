@@ -115,6 +115,10 @@ type Reach struct {
 	// Notify tells the owner an approved rollback is done (the owner
 	// channel). Nil: not told.
 	Notify func(text string) error
+	// HeldDropped tells the owner, in the broker's own words and never as
+	// agent text, how many held agent texts a deletion with no
+	// confirmation of its own dropped (n > 0, CAP3-F1). Nil: not told.
+	HeldDropped func(n int) error
 	// OnTakenBack, when set, is told by Retry of each take-back seen not
 	// done where a reset can finish and done since (TakeBackOf reports it
 	// done), whatever finished it, instead of the owner being told
@@ -991,8 +995,10 @@ func (r *Reach) finish(lineage string, rs Reset) (int, error) {
 // only what it drops itself, so nothing is told twice. Called with run held.
 func (r *Reach) finishTold(lineage string, rs Reset) error {
 	held, err := r.finish(lineage, rs)
-	if held > 0 {
-		r.tell(lineage, HeldDroppedText(held))
+	if held > 0 && r.HeldDropped != nil {
+		if terr := r.HeldDropped(held); terr != nil && r.Logf != nil {
+			r.Logf("recall: rollback of %s; owner not told %d held agent texts dropped: %v", lineage, held, terr)
+		}
 	}
 	return err
 }
