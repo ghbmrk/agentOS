@@ -73,9 +73,6 @@ func TestHandRacingARequestInFlight(t *testing.T) {
 	h.Hand([]byte(rotated))
 	close(release)
 	w := <-done
-	if w.Code != 200 || strings.Contains(w.Body.String(), old) || !strings.Contains(w.Body.String(), "REDACTED") && !strings.Contains(w.Body.String(), "█") {
-		// The placeholder is checked loosely here; the key's absence is the point.
-	}
 	if w.Code != 200 || strings.Contains(w.Body.String(), old) || !strings.Contains(w.Body.String(), vault.Placeholder) {
 		t.Fatalf("in-flight request: status %d body %s", w.Code, w.Body)
 	}

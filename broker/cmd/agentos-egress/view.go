@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -149,16 +148,20 @@ func (vk *viewKeeper) poke() {
 	}
 }
 
-// tellLockedLocked hands the proxy the locked view before the lock
-// returns. A proxy that is not running holds no view. Caller holds mu.
-func (c *custody) tellLockedLocked() {
+// handView hands the proxy the view now, before the change that called
+// it returns: a lock, and every value stored or deleted while open (the
+// vault's OnChange), so a narrowing such as a withdrawn private-data
+// answer, and the keyed hash of a new value, reach the proxy before the
+// next call does (CRED-1, CRED-7). A proxy that is not running holds no
+// view. It never takes mu, so callers may hold it.
+func (c *custody) handView() {
 	if c.view == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 	defer cancel()
 	if err := c.view.check(ctx); err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
-		c.notify(fmt.Sprintf("proxy at %s: not told of the lock: %v", filepath.Dir(c.view.k.Socket), err))
+		c.notify(fmt.Sprintf("proxy at %s: not handed the vault's change: %v", filepath.Dir(c.view.k.Socket), err))
 	}
 }
 
@@ -193,16 +196,12 @@ func newProxyView(g grants, agent string, pok map[string]bool, dirs holderDirs, 
 		return nil, err
 	}
 	pv := &proxyView{agent: agent, granted: modelGranted(g), flagGrants: flagGrantsOf(g), privateFlags: pok}
-	rts := map[string]http.RoundTripper{}
-	for _, a := range adapters() {
-		rts[a.Credential] = holder.Client(filepath.Join(dirs[a.Name], holder.RequestSocket))
-	}
 	p, err := egress.New(egress.Config{
 		Granted:   pv.storedGrant,
 		Guard:     guard,
 		Adapters:  adapters(),
 		Grants:    g,
-		Holders:   rts,
+		Holders:   holderTransports(dirs),
 		Redaction: pv.redactor,
 		Audit:     noAudit{},
 	})

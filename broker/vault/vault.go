@@ -94,6 +94,8 @@ type Vault struct {
 	closed  bool
 	// gen counts the changes to entries (Gen).
 	gen uint64
+	// changed runs after each stored or deleted value (OnChange).
+	changed func()
 	// keysPath and key are set when the vault was opened through its key
 	// slots (keyslot.go), for AddSlot; Close wipes key.
 	keysPath string
@@ -192,23 +194,31 @@ func (v *Vault) Put(name, kind string, value []byte) error {
 // so no failure or crash between writes leaves one of them unredacted
 // (CRED-7).
 func (v *Vault) PutMany(items []Item) error {
+	f, err := v.putMany(items)
+	if err == nil && f != nil {
+		f()
+	}
+	return err
+}
+
+func (v *Vault) putMany(items []Item) (func(), error) {
 	seen := map[string]bool{}
 	for _, it := range items {
 		if it.Name == "" || it.Kind == "" {
-			return errors.New("vault: name and kind are required")
+			return nil, errors.New("vault: name and kind are required")
 		}
 		if len(it.Value) < MinValueLen {
-			return fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
+			return nil, fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
 		}
 		if seen[it.Name] {
-			return fmt.Errorf("vault: %q given twice", it.Name)
+			return nil, fmt.Errorf("vault: %q given twice", it.Name)
 		}
 		seen[it.Name] = true
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	v.gen++
 	old := map[string]record{}
@@ -227,33 +237,51 @@ func (v *Vault) PutMany(items []Item) error {
 				delete(v.entries, it.Name)
 			}
 		}
-		return err
+		return nil, err
 	}
 	for _, r := range old {
 		wipe(r.Value)
 	}
-	return nil
+	return v.changed, nil
 }
 
 // Delete removes a secret. Deleting a missing name is not an error.
 func (v *Vault) Delete(name string) error {
+	f, err := v.delete(name)
+	if err == nil && f != nil {
+		f()
+	}
+	return err
+}
+
+func (v *Vault) delete(name string) (func(), error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	old, had := v.entries[name]
 	if !had {
-		return nil
+		return nil, nil
 	}
 	v.gen++
 	delete(v.entries, name)
 	if err := v.save(); err != nil {
 		v.entries[name] = old
-		return err
+		return nil, err
 	}
 	wipe(old.Value)
-	return nil
+	return v.changed, nil
+}
+
+// OnChange sets f to run after each value stored or deleted, outside the
+// vault's lock, so f may read the vault: a copy derived from the values,
+// such as a redactor handed to another process, can follow at once. Nil
+// clears it.
+func (v *Vault) OnChange(f func()) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.changed = f
 }
 
 // Gen names the vault's values as they stand: it moves on every stored or

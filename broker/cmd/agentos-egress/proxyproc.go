@@ -13,6 +13,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/holder"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/route"
 )
 
 // modelFlags are the model path's flags, which serve and proxy both take:
@@ -86,6 +87,26 @@ func (f *modelFlags) wire() (*modelWiring, *evalRoute, *routing, error) {
 // defaultProxyRun is the proxy process's socket directory.
 const defaultProxyRun = "/run/agentos-proxy"
 
+// proxyUIDs checks the proxy process's peers: agentosd on the model and
+// routing sockets, the vault process on the hand socket, each its own uid,
+// so neither can stand in for the other.
+func proxyUIDs(self, brokerUID, vaultUID int) error {
+	if brokerUID < 0 || brokerUID == self {
+		return errors.New("-broker-uid must name agentosd's own uid, distinct from this process's")
+	}
+	if vaultUID < 0 || vaultUID == self || vaultUID == brokerUID {
+		return errors.New("-vault-uid must name the vault process's own uid, distinct from this process's and agentosd's: the proxy holds no key")
+	}
+	return nil
+}
+
+// proxySockets are the proxy process's sockets: the model and routing
+// sockets for agentosd, and the hand socket for the vault process alone.
+func proxySockets(pv *proxyView, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, vaultUID int) []socket {
+	return append(modelSockets(pv, rt, ev, ro, brokerUID),
+		socket{holder.HandSocket, vaultUID, holder.HandHandler(pv, maxView)})
+}
+
 // proxyCmd is `agentos-egress proxy`: the keyless proxy process (ARC-1,
 // CRED-1). It serves the model and routing sockets to the broker, sends
 // each call to its adapter's holder, and takes the vault's view from the
@@ -98,12 +119,8 @@ func proxyCmd(args []string) error {
 	vaultUID := fs.Int("vault-uid", -1, "uid of the vault process (agentos-egress serve), the only peer on the hand socket")
 	mf := declareModelFlags(fs, "empty keeps none")
 	fs.Parse(args)
-	self := os.Getuid()
-	if *brokerUID < 0 || *brokerUID == self {
-		return errors.New("-broker-uid must name agentosd's own uid, distinct from this process's")
-	}
-	if *vaultUID < 0 || *vaultUID == self || *vaultUID == *brokerUID {
-		return errors.New("-vault-uid must name the vault process's own uid, distinct from this process's and agentosd's: the proxy holds no key")
+	if err := proxyUIDs(os.Getuid(), *brokerUID, *vaultUID); err != nil {
+		return err
 	}
 	mw, ev, ro, err := mf.wire()
 	if err != nil {
@@ -120,9 +137,7 @@ func proxyCmd(args []string) error {
 		return err
 	}
 	mw.hook.bind(pv)
-	socks := append(modelSockets(pv, mw.rt, ev, ro, *brokerUID),
-		socket{holder.HandSocket, *vaultUID, holder.HandHandler(pv, maxView)})
-	srvs, err := serveSockets(*run, socks)
+	srvs, err := serveSockets(*run, proxySockets(pv, mw.rt, ev, ro, *brokerUID, *vaultUID))
 	if err != nil {
 		return err
 	}

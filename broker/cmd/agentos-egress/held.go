@@ -63,16 +63,12 @@ func adapterName(name string) bool {
 // inject; each adapter's calls go to its holder's request socket, and the
 // responses are redacted by keyed hashes of every vault value (CRED-7).
 func newHeldProxy(v *vault.Vault, g map[string][]string, dirs holderDirs, guard *netguard.Policy, stored func(machine, adapter string) bool) (*egress.Proxy, error) {
-	rts := map[string]http.RoundTripper{}
-	for _, a := range adapters() {
-		rts[a.Credential] = holder.Client(filepath.Join(dirs[a.Name], holder.RequestSocket))
-	}
 	return egress.New(egress.Config{
 		Granted:  stored,
 		Guard:    guard,
 		Adapters: adapters(),
 		Grants:   g,
-		Holders:  rts,
+		Holders:  holderTransports(dirs),
 		Redaction: func() (egress.Redactor, error) {
 			r, err := v.HashRedactor()
 			if err != nil {
@@ -82,6 +78,16 @@ func newHeldProxy(v *vault.Vault, g map[string][]string, dirs holderDirs, guard 
 		},
 		Audit: noAudit{},
 	})
+}
+
+// holderTransports sends each adapter's calls, keyed by its credential
+// name as egress asks, to the request socket of that adapter's holder.
+func holderTransports(dirs holderDirs) map[string]http.RoundTripper {
+	rts := map[string]http.RoundTripper{}
+	for _, a := range adapters() {
+		rts[a.Credential] = holder.Client(filepath.Join(dirs[a.Name], holder.RequestSocket))
+	}
+	return rts
 }
 
 // keepers are the unlock step's holder keepers, one per adapter, running
@@ -103,6 +109,7 @@ func (c *custody) startKeepersLocked(v *vault.Vault) {
 	c.keys.Store(v)
 	c.epoch.Add(1)
 	if c.view != nil {
+		v.OnChange(c.handView)
 		c.view.poke()
 	}
 	ctx, stop := context.WithCancel(context.Background())
@@ -141,7 +148,8 @@ const dropTimeout = 2 * time.Second
 // takes each holder's key back, so a locked vault leaves none in a holder
 // (CRED-1). A holder that is down holds none. Caller holds mu.
 func (c *custody) stopKeepersLocked() {
-	if c.keys.Swap(nil) != nil {
+	if v := c.keys.Swap(nil); v != nil {
+		v.OnChange(nil)
 		c.epoch.Add(1)
 	}
 	ks := c.keep

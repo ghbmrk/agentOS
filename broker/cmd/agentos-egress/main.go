@@ -426,8 +426,8 @@ func serveCmd(args []string) error {
 	if err := held.check(); err != nil {
 		return err
 	}
-	if *proxyDir != "" && (len(held) == 0 || !filepath.IsAbs(*proxyDir)) {
-		return errors.New("-proxy needs an absolute directory and -holder for every adapter: the proxy process holds no key")
+	if err := proxyFlagOK(*proxyDir, held); err != nil {
+		return err
 	}
 	if *mf.routingPath == "" {
 		*mf.routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
@@ -485,14 +485,7 @@ func serveCmd(args []string) error {
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
 	}
-	if *proxyDir != "" {
-		// The proxy process serves the model path; this one hands it
-		// the view, for as long as it runs (view.go).
-		c.view = newViewKeeper(c, *proxyDir)
-		go c.view.run(ctx)
-		rt = nil
-	}
-	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
+	srvs, err := serve(*run, c, c.handTo(ctx, *proxyDir, rt), ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
@@ -547,6 +540,28 @@ func serveCmd(args []string) error {
 		s.Close()
 	}
 	c.lock()
+	return nil
+}
+
+// proxyFlagOK checks serve's -proxy: an absolute directory, and a holder
+// for every adapter, since the proxy process holds no key.
+func proxyFlagOK(proxyDir string, held holderDirs) error {
+	if proxyDir != "" && (len(held) == 0 || !filepath.IsAbs(proxyDir)) {
+		return errors.New("-proxy needs an absolute directory and -holder for every adapter: the proxy process holds no key")
+	}
+	return nil
+}
+
+// handTo is serve's -proxy: with proxyDir set, the proxy process serves
+// the model path and this one hands it the view for as long as ctx runs
+// (view.go), so the model and routing sockets are not this process's and
+// the router it returns is nil. Without it, rt serves here.
+func (c *custody) handTo(ctx context.Context, proxyDir string, rt *route.Router) *route.Router {
+	if proxyDir == "" {
+		return rt
+	}
+	c.view = newViewKeeper(c, proxyDir)
+	go c.view.run(ctx)
 	return nil
 }
 

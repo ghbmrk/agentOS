@@ -1155,7 +1155,7 @@ func (c *custody) discard() {
 	}
 	c.clearPins()
 	c.stopKeepersLocked()
-	c.tellLockedLocked()
+	c.handView()
 	if c.v != nil {
 		c.v.Close()
 	}

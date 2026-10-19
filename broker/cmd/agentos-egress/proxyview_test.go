@@ -44,7 +44,7 @@ type splitRig struct {
 	got    func() []string
 }
 
-func newSplitRig(t *testing.T, g grants, agent string, pok map[string]bool) *splitRig {
+func newSplitRig(t *testing.T, g grants, agent string, pok map[string]bool, every time.Duration) *splitRig {
 	t.Helper()
 	tr, got := reflecting(t, true)
 	openaiDir, oh := heldAt(t, egress.OpenAI("openai"), tr)
@@ -52,7 +52,7 @@ func newSplitRig(t *testing.T, g grants, agent string, pok map[string]bool) *spl
 	dirs := holderDirs{"openai": openaiDir, "anthropic": anthDir}
 	r := newFastRig(t, true) // its vault holds an OpenAI key
 	r.c.holders = dirs
-	r.c.keepEvery = 5 * time.Millisecond
+	r.c.keepEvery = every
 	r.c.modelTransport = noDial{t}
 	r.c.privateFlags = pok
 	withGrants(r.c, g, agent)
@@ -90,7 +90,7 @@ func answers(s modelSource) string {
 // redacts every vault value by keyed hash (CRED-7), and reports locked
 // the moment the lock returns (CRED-1).
 func TestProxyViewFollowsCustody(t *testing.T) {
-	r := newSplitRig(t, grants{}, "agent", nil)
+	r := newSplitRig(t, grants{}, "agent", nil, 5*time.Millisecond)
 	if r.pv.model() != nil || r.pv.storedGrant("agent", "openai") {
 		t.Fatal("the proxy reports open before the unlock")
 	}
@@ -142,7 +142,7 @@ func TestProxyViewAnswersAsCustodyDoes(t *testing.T) {
 		{"flags", grants{"agent": {"anthropic"}}, "", map[string]bool{"anthropic": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newSplitRig(t, tc.g, tc.agent, tc.pok)
+			r := newSplitRig(t, tc.g, tc.agent, tc.pok, 5*time.Millisecond)
 			same := func(state string) {
 				t.Helper()
 				want := answers(r.c)
