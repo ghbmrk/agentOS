@@ -2,6 +2,8 @@ package egress
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
@@ -29,12 +31,20 @@ func TestCLIGuestCloudEndpointRefusedNoCredential(t *testing.T) {
 		{"POST", "/backend-api/codex/analytics-events/events"},
 	}
 	for _, c := range cloud {
-		req := httptest.NewRequest(c.method, "http://127.0.0.1:18432"+c.path, strings.NewReader(codexBody(clientTools)))
+		// A read goes bodiless, so it is refused for its path, not for
+		// carrying a body.
+		var body io.Reader = http.NoBody
+		if c.method != "GET" {
+			body = strings.NewReader(codexBody(clientTools))
+		}
+		req := httptest.NewRequest(c.method, "http://127.0.0.1:18432"+c.path, body)
 		req.Header.Set("Authorization", "Bearer ph-access-w1")
-		req.Header.Set("Content-Type", "application/json")
+		if c.method != "GET" {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		w := r.do(req)
-		if w.Code != 403 {
-			t.Errorf("%s %s: %d, want 403", c.method, c.path, w.Code)
+		if w.Code != 403 || !strings.Contains(w.Body.String(), "no declared endpoint matches") {
+			t.Errorf("%s %s: %d %q, want 403 for no declared endpoint", c.method, c.path, w.Code, w.Body)
 		}
 		if strings.Contains(w.Body.String(), r.logins.real["access_token"]) {
 			t.Errorf("%s %s: the real login reached the worker", c.method, c.path)
