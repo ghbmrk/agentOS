@@ -16,7 +16,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure.
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them.
 - **D-128** G1 proven (run 39042850372); the G1 freeze (D-118) is off and the G2 freeze is on: until A4, A5, A9 and A14 pass on a VM, PRs touch only `tools/g1_scope_g2.txt` paths (the `g1-freeze` check runs every gate list). D-098 rows stay frozen.
-- The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` merge only on Mark's own approval of that PR at its head, cited on the PR (D-125). Asks to Mark are cards, never typed phrases.
+- The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` also need a separate Security accept at an equal head, and no PR waits for Mark's line (D-137). Asks to Mark are cards, never typed phrases.
 - **D-121** Speed rules (OPERATING §5): run CI's exact commands (and a `-count=N` stress run on new concurrency tests) before a PR or verdict; briefs pre-approve their guard files (`tools/risk_tier.py` class, `broker/daemon/arc2_test.go` allowlist, `tools/g1_scope.txt`); readiness reads the code; one push per round; on the G1 critical path stack on a review-accepted interface and run disjoint packages in parallel; tier-A builders on Opus, B/C on Sonnet, no model switch mid-session; fix a flake the second time. Tier A keeps two reviews (Security; Potency/UX/L3).
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
@@ -73,7 +73,7 @@ Merge-queue route: Mergify (recommended) / Move to org / Home-built / Up to date
 - Models: tier A builds and reviews claude-opus-5-5; tier B/C builds claude-sonnet-5-5.
 
 ### Decision-card rules (for whoever runs Decisions)
-Never merge or approve; cards only, never ask Mark to type. A Merge card only when CI is green on the head, `python3 tools/premerge.py --base origin/main <accepted_sha> <head>` prints `same`, and every required review accepted that head; check `--needs-mark --base origin/main <head>` yourself. No duplicate cards (check earlier cards and taps; approvals carry forward except D-125 per-head Merge taps). Relay every Merge tap to the merging thread and the coordinator.
+Never merge or approve; cards only, never ask Mark to type. A Merge card only when CI is green on the head, `python3 tools/premerge.py --base origin/main <accepted_sha> <head>` prints `same`, and every required review accepted that head; check `--needs-mark --base origin/main <head>` yourself. No duplicate cards (check earlier cards and taps; approvals carry forward). Relay every Merge tap to the merging thread and the coordinator.
 
 ### Owed first on the new subscription
 1. #2329 provider sign-in "Get a new code" (UX3-1, tier A, premerge `agent`): the combined L3 and Security reviews were held; start them first. Release finding #2328 filed.

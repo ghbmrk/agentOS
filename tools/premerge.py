@@ -16,7 +16,8 @@ neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved else
 those files need a delta review. Git 2.38 or later, no network; fetch first.
 
 `--needs-mark` lists the files of merge-base..head, plus those the merge changes on base (a criss-cross merge,
-#2138), that make the PR one that merges only on Mark's own approval of it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
+#2138), that make the PR a gate-file PR (it changes how Claude is permitted or reviewed): prints `mark <files>` and
+exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
 (the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
 usage error (exit 2).
 
@@ -24,10 +25,10 @@ usage error (exit 2).
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
 prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
-fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A PR that changes SPEC.md also needs
-Mark (D-130): that accept carries a `Transcribes: <message id>` line (the reviewer confirms the diff transcribes
-that Mark decision and interprets nothing), or a trusted comment `Mark-approved: <message id> · head <SHA>`
-names a head whose diff equals `head`'s; otherwise it prints `needs-mark SPEC.md` and exits 1.
+fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A gate-file PR (the `--needs-mark` list)
+also needs a separate Security accept (D-137): the newest trusted verdict comment marked `security` and not
+`l3` or `combined` is `accept` and its reviewed diff equals `head`'s; otherwise it prints `needs-security <files>`
+and exits 1. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -43,7 +44,7 @@ import sys
 DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"]
 
 
-# A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
+# Gate files: a PR touching any of these also needs a separate Security accept (D-137, OPERATING §7).
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
 # broker/core/core.txt sets risk tiers (risk_tier.py); the tests that pin the merge gates count too
 # (PREMERGE-paths, #1835). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
@@ -72,34 +73,23 @@ def mark_range(cwd, base, head):
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
-# D-130: a SPEC.md change merges on the accept that names the Mark decision it transcribes, else on Mark's approval.
-SPEC_PATHS = re.compile(r"SPEC\.md")
-_TRANSCRIBES = re.compile(r"^Transcribes: cmsg_\w+(?:,? cmsg_\w+)*\s*$", re.M)
-_APPROVED = re.compile(r"Mark-approved: cmsg_\w+ · head ([0-9a-f]{7,40})")
+# D-137: a gate-file PR also needs a Security accept in a comment of its own, so one review cannot count twice.
+_SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 
 
-def verdict(comments, pr):
-    """(verdict, reviewed-sha, transcribes) of the newest trusted L3 verdict comment for PR `pr`, or None.
+def verdict(comments, pr, security=False):
+    """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None.
 
-    `transcribes` holds only when every trusted L3 accept on the PR carries the `Transcribes:` line (D-130):
-    one reviewer withholding it is not overridden by a later accept that has it."""
-    found, tx = None, True
+    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead."""
+    found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
-        if (c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and _L3.search(body)):
-            v = first.split(":", 1)[1].strip().lower()
-            if v == "accept":
-                tx = tx and bool(_TRANSCRIBES.search(body))
-            found = (v, rec.group(1), tx)
+        lens = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
+        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and lens:
+            found = (first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
-
-
-def mark_approved(comments):
-    """Heads named by trusted comments whose first line is `Mark-approved: <message id> · head <SHA>`."""
-    return [m.group(1) for c in comments if c.get("author_association") in TRUSTED
-            for m in [_APPROVED.fullmatch((c.get("body") or "").split("\n", 1)[0].strip())] if m]
 
 
 def _git(cwd, *args, ok=(0,)):
@@ -156,10 +146,10 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
 
 
-def _same(approved, head, base):
-    """True when the approved head's diff equals `head`'s; an unknown SHA is never an approval."""
+def _same(reviewed, head, base):
+    """True when the reviewed head's diff equals `head`'s; an unknown SHA never matches."""
     try:
-        return not compare(".", approved, head, base)
+        return not compare(".", reviewed, head, base)
     except subprocess.CalledProcessError:
         return False
 
@@ -184,9 +174,10 @@ def main(argv):
         if changed:
             print("changed " + " ".join(changed))
             return 1
-        spec = [f for f in mark_range(".", base, head) if SPEC_PATHS.fullmatch(f)]
-        if spec and not v[2] and not any(_same(a, head, base) for a in mark_approved(comments)):
-            print("needs-mark " + " ".join(spec))
+        gate = mark_paths(mark_range(".", base, head))
+        sec = verdict(comments, pr, security=True)
+        if gate and not (sec and sec[0] == "accept" and _same(sec[1], head, base)):
+            print("needs-security " + " ".join(gate))
             return 1
         print("same")
         return 0
