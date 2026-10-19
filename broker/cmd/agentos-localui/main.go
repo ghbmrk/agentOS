@@ -133,6 +133,11 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 	}
 	cfg.Card, cfg.CodesVoid = fb.Card, void
 	if h, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
+		if fb.Route == firstboot.RouteClaim {
+			// The claim replaces the sticker's Wi-Fi password (HW-10,
+			// #1692); agentosd answers no setup network when it has none.
+			cfg.SetupWiFi = h
+		}
 		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card, Again: fb.Again}
 	}
 	return cfg, fb.Route, nil

@@ -265,7 +265,7 @@ func (p *Pipeline) Digest() []string {
 			// Still staged and not undone: one follow-up a day after it was
 			// raised, never a second. A confirmed image is Recheck's to
 			// revert, and its Installed line says so. No owner step settles
-			// it (C45), so it names the day it was already waiting on, and
+			// it (SR3-4f-3-f1-C45), so it names the day it was already waiting on, and
 			// says it may start: no state shows a boot has not happened
 			// since. A Concern saved before ConcernAt starts its day now.
 			if now := p.cfg.Now(); a.ConcernAt.IsZero() {
