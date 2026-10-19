@@ -17,14 +17,19 @@ import (
 
 // Security recurring kind (#210, #212; check owed by #697's "fixed sentence
 // per class" finding): raw error text formatted into a fixed-class Logf lets
-// a host path, or anything else an error wraps, reach the log. Every Logf
-// call in this package's non-test code passes only fixed classes: no
-// argument holds an error value, or a call on one (Error, fmt.Sprint and the
-// like), except as an argument of a classifier. A classifier is a package
-// function returning string whose every return is a string literal
-// (errClass, exemptClass, cutClass); one that returns anything else is not a
-// classifier, so its call fails too. Procedural, held by review: error text
-// copied into a string variable first and that variable logged.
+// a host path, or anything else an error wraps, reach the log. Every call of
+// a func(string, ...any), the type of Config.Logf, under any name, in this
+// package's non-test code passes only fixed classes: no argument is a value
+// that can hold an error (an error, a struct, slice or map holding one, an
+// any), and no argument contains an error value, or a call on one (Error,
+// fmt.Sprint and the like), except as an argument of a classifier or under a
+// bool or number (err != nil, errors.Is). A forwarding wrapper's a... is an
+// []any, so it fails too. A classifier is a package function with one
+// unnamed string result whose every return is a string literal, and with no
+// defer, go or closure (errClass, exemptClass, cutClass); any other call
+// fails. Procedural, held by review: error text copied into a string first
+// (a variable, or the string parameter of a helper that logs it), and Logf
+// outside broker/change.
 func TestLogfArgumentsCarryNoErrorText(t *testing.T) {
 	fset := logfFset
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
@@ -86,6 +91,17 @@ func leaky(err error) string { return "class: " + err.Error() }
 		{"field of an error", `func f(pe *fs.PathError) { c.Logf("x (%s)", pe.Path) }`, 1},
 		{"classifier that leaks", `func f(err error) { c.Logf("x (%s)", leaky(err)) }`, 1},
 		{"error in the format", `func f(err error) { c.Logf(err.Error()) }`, 1},
+		{"Logf under another name", `func f(err error) { log := c.Logf; log("x (%v)", err) }`, 1},
+		{"forwarding wrapper", "func warn(f string, a ...any) { c.Logf(f, a...) }\nfunc f(err error) { warn(\"x (%v)\", err) }", 2},
+		{"struct holding an error", "type box struct{ e error }\nfunc f(b box) { c.Logf(\"x (%v)\", b) }", 1},
+		{"error by value", `func f(pe fs.PathError) { c.Logf("x (%v)", pe) }`, 1},
+		{"slice of errors", `func f(es []error) { c.Logf("x (%v)", es) }`, 1},
+		{"error in an any", `func f(err error) { var v any = err; c.Logf("x (%v)", v) }`, 1},
+		{"deferred classifier", "func dc(err error) (s string) { defer func() { s = err.Error() }(); return \"fixed\" }\nfunc f(err error) { c.Logf(\"x (%s)\", dc(err)) }", 1},
+		{"named-result classifier", "func nc(err error) (s string) { return \"fixed\" }\nfunc f(err error) { c.Logf(\"x (%s)\", nc(err)) }", 1},
+		{"nil test", `func f(err error) { c.Logf("x (%t)", err != nil) }`, 0},
+		{"errors.Is", `func f(err error) { c.Logf("x (%t)", errors.Is(err, fs.ErrNotExist)) }`, 0},
+		{"other format func", `func f(err error) { _ = fmt.Sprintf("x (%v)", err) }`, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, err := parser.ParseFile(logfFset, "synthetic.go", head+tc.body+"\n", 0)
@@ -93,6 +109,12 @@ func leaky(err error) string { return "class: " + err.Error() }
 				t.Fatal(err)
 			}
 			calls, bad := logfErrorArgs(t, logfFset, []*ast.File{f})
+			if tc.bad < 0 {
+				if calls != 0 {
+					t.Errorf("counted %d Logf calls, want 0", calls)
+				}
+				return
+			}
 			if calls == 0 {
 				t.Fatal("no Logf calls found")
 			}
@@ -134,12 +156,24 @@ func logfErrorArgs(t *testing.T, fset *token.FileSet, files []*ast.File) (int, [
 	for _, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !isLogf(call.Fun) {
+			if !ok {
+				return true
+			}
+			if fun, ok := info.Types[call.Fun]; !ok || fun.IsType() || !types.Identical(fun.Type.Underlying(), logfSig) {
 				return true
 			}
 			calls++
 			for _, arg := range call.Args {
+				// The formatted value itself: anything that can hold an
+				// error, such as a struct with an error field, a []error or
+				// an any.
 				leak := false
+				if tv, ok := info.Types[arg]; ok && tv.Type != nil && !tv.IsType() && tv.Value == nil {
+					leak = mayCarryError(tv.Type, errIface, map[types.Type]bool{})
+				}
+				// Inside it: an error value anywhere, except under a
+				// classifier call or a bool or number (err != nil,
+				// errors.Is), which carry no text.
 				ast.Inspect(arg, func(n ast.Node) bool {
 					if leak {
 						return false
@@ -149,7 +183,16 @@ func logfErrorArgs(t *testing.T, fset *token.FileSet, files []*ast.File) (int, [
 							return false
 						}
 					}
-					if e, ok := n.(ast.Expr); ok && carriesError(e) {
+					e, ok := n.(ast.Expr)
+					if !ok {
+						return true
+					}
+					if tv, ok := info.Types[e]; ok && tv.Type != nil {
+						if b, ok := tv.Type.Underlying().(*types.Basic); ok && b.Info()&(types.IsBoolean|types.IsNumeric) != 0 {
+							return false
+						}
+					}
+					if carriesError(e) {
 						leak = true
 						return false
 					}
@@ -166,18 +209,51 @@ func logfErrorArgs(t *testing.T, fset *token.FileSet, files []*ast.File) (int, [
 	return calls, bad
 }
 
-func isLogf(fun ast.Expr) bool {
-	switch f := fun.(type) {
-	case *ast.SelectorExpr:
-		return f.Sel.Name == "Logf"
-	case *ast.Ident:
-		return f.Name == "Logf" || f.Name == "logf"
+// logfSig is Config.Logf's type, func(string, ...any).
+var logfSig = types.NewSignatureType(nil, nil, nil,
+	types.NewTuple(
+		types.NewParam(token.NoPos, nil, "", types.Typ[types.String]),
+		types.NewParam(token.NoPos, nil, "", types.NewSlice(types.Universe.Lookup("any").Type()))),
+	nil, true)
+
+// mayCarryError reports whether a value of type t can hold an error: t
+// implements error, an error can be stored in t (any, or an interface error
+// satisfies), or t is a struct, pointer, array, slice, map or channel that
+// holds such a type.
+func mayCarryError(t types.Type, errIface *types.Interface, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if types.Implements(t, errIface) {
+		return true
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Interface:
+		return types.Implements(errIface, u)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if mayCarryError(u.Field(i).Type(), errIface, seen) {
+				return true
+			}
+		}
+	case *types.Pointer:
+		return mayCarryError(u.Elem(), errIface, seen)
+	case *types.Array:
+		return mayCarryError(u.Elem(), errIface, seen)
+	case *types.Slice:
+		return mayCarryError(u.Elem(), errIface, seen)
+	case *types.Map:
+		return mayCarryError(u.Key(), errIface, seen) || mayCarryError(u.Elem(), errIface, seen)
+	case *types.Chan:
+		return mayCarryError(u.Elem(), errIface, seen)
 	}
 	return false
 }
 
-// classifierFuncs returns the package functions with one string result
-// whose every return statement returns a string literal.
+// classifierFuncs returns the package functions with one unnamed string
+// result whose every return statement returns a string literal, and with no
+// defer, go or closure that could change what they return.
 func classifierFuncs(files []*ast.File, info *types.Info) map[types.Object]bool {
 	out := map[types.Object]bool{}
 	for _, f := range files {
@@ -188,12 +264,14 @@ func classifierFuncs(files []*ast.File, info *types.Info) map[types.Object]bool 
 			}
 			obj := info.Defs[fd.Name]
 			sig, ok := obj.Type().(*types.Signature)
-			if !ok || sig.Results().Len() != 1 || !types.Identical(sig.Results().At(0).Type(), types.Typ[types.String]) {
+			if !ok || sig.Results().Len() != 1 || sig.Results().At(0).Name() != "" || !types.Identical(sig.Results().At(0).Type(), types.Typ[types.String]) {
 				continue
 			}
 			literal := true
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if _, ok := n.(*ast.FuncLit); ok {
+				switch n.(type) {
+				case *ast.FuncLit, *ast.DeferStmt, *ast.GoStmt:
+					literal = false
 					return false
 				}
 				r, ok := n.(*ast.ReturnStmt)
