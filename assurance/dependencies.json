@@ -25,6 +25,11 @@
       "file": "broker/provagent/declare.go",
       "host": "openai.com",
       "why": "TermsURL of the codex qualification record: the terms page the owner read, recorded as data and never contacted (#809, D-117)."
+    },
+    {
+      "file": "broker/provagent/declare.go",
+      "host": "x.ai",
+      "why": "TermsURL of the grok qualification record: the terms page read for #1377, recorded as data and never contacted (#1378)."
     }
   ],
   "inert_literals": [

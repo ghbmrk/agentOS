@@ -398,6 +398,18 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 		r.Seeder.Close(id)
 		return fail(Failed)
 	}
+	// A run that fails before the signals below (a timeout, an Exec or
+	// result-read error) still reads a refused login egress saw during it,
+	// so the route stops with no retry (CRED-5, #1891 item 2). Its own
+	// outcome is unchanged. Registered before the Destroy below, so it runs
+	// after the worker is gone and sees a refusal the CLI's last calls made;
+	// egress keeps the refusal per provider, not per worker.
+	checked := false
+	defer func() {
+		if ran && !checked && r.refusedSince(d, start) {
+			r.signIn(d.ID, true)
+		}
+	}()
 	defer func() {
 		// Destroying the worker takes its route, logs and transcripts with it.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -410,16 +422,6 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	wctx, wcancel := context.WithTimeout(ctx, r.Caps.Wall)
 	defer wcancel()
 	ran = true
-	// A run that fails before the signals below (a timeout, an Exec or
-	// result-read error) still reads a refused login egress saw during it,
-	// so the route stops with no retry (CRED-5, #1891 item 2). Its own
-	// outcome is unchanged.
-	checked := false
-	defer func() {
-		if !checked && r.refusedSince(d, start) {
-			r.signIn(d.ID, true)
-		}
-	}()
 	res, err := r.Host.Exec(wctx, id, Command(d, q.Brief), r.Caps.Wall)
 	if res.TimedOut || wctx.Err() != nil {
 		return fail(TimedOut)

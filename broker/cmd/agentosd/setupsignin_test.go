@@ -278,7 +278,8 @@ func TestONB3SetupEndStopsTheSignInWait(t *testing.T) {
 // fixedSignIn is a setup sign-in ready for codex alone.
 type fixedSignIn struct{ starts atomic.Int32 }
 
-func (f *fixedSignIn) Ready(p string) bool { return p == "codex" }
+func (f *fixedSignIn) Ready(p string) bool     { return p == "codex" }
+func (f *fixedSignIn) SigningIn(p string) bool { return p == "codex" && f.starts.Load() > 0 }
 func (f *fixedSignIn) Start(context.Context, string) (string, string, string, error) {
 	f.starts.Add(1)
 	return "https://auth.openai.com/codex/device", "ABCD-EF23", "OpenAI", nil

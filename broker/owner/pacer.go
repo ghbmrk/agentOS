@@ -593,7 +593,7 @@ func (c *Channel) releasePaced() error {
 		if len(send) == 0 && st.HeldDropped == 0 {
 			return nil
 		}
-		text, n, dropped := packHeld(st.HeldDropped, send)
+		text, n, dropped := packHeld(c.cfg.Location, st.HeldDropped, send)
 		// The Current hook ran without c.mu, so a send beside this
 		// release may have spent the hour since the check above: check
 		// again and count the text in one step before it goes (#1638).
@@ -633,9 +633,12 @@ func (c *Channel) releasePaced() error {
 // one text of at most control.MaxText. Agent text always goes alone, so a
 // " / " inside it cannot pass for the start of a broker text (CH-19), and
 // is fitted as agent text, so its emoji and line breaks survive the hold
-// (CH-12). It returns the text, how many held texts it carries, and the
-// drops it reports.
-func packHeld(dropped int, held []HeldText) (string, int, int) {
+// (CH-12). Each broker text starts with its held time, box-local in loc,
+// so news held overnight does not read as current (W5-Dc-r16); agent
+// text goes unmarked, since CH-15 and CH-12 keep it alone and unchanged.
+// It returns the text, how many held texts it carries, and the drops it
+// reports.
+func packHeld(loc *time.Location, dropped int, held []HeldText) (string, int, int) {
 	var parts []string
 	size := 0
 	add := func(s string) bool {
@@ -658,7 +661,11 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 		if h.Agent && len(parts) > 0 {
 			break
 		}
-		if !add(h.Text) {
+		text := h.Text
+		if !h.Agent {
+			text = heldMarked(loc, h)
+		}
+		if !add(text) {
 			break
 		}
 		n++
@@ -667,6 +674,20 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 		}
 	}
 	return control.Fit(strings.Join(parts, heldSep)), n, dropped
+}
+
+// heldMarked is broker text h with its held time in front, "(from
+// 23:00) ...". The marker gives way, never the text: a text with no room
+// left under control.MaxText, or with no held time, goes unmarked.
+func heldMarked(loc *time.Location, h HeldText) string {
+	if h.At.IsZero() {
+		return h.Text
+	}
+	m := "(from " + h.At.In(loc).Format("15:04") + ") " + h.Text
+	if len(m) > control.MaxText {
+		return h.Text
+	}
+	return m
 }
 
 // heldSep joins packed texts; GSM-7 has no line break.
