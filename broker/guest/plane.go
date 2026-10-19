@@ -244,8 +244,13 @@ func (p *Plane) Open(id string) (string, error) {
 		Handler:           p.handler(m),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       time.Minute,
-		IdleTimeout:       15 * time.Second,
-		BaseContext:       func(net.Listener) context.Context { return context.Background() },
+		// A guest that stops reading a reply fails its write and frees its
+		// slot (CRED-8, egress K18). Replies here are not streamed, so one
+		// deadline for the whole reply suffices; it covers the owner poll's
+		// wait (pollWait) plus the write.
+		WriteTimeout: time.Minute,
+		IdleTimeout:  15 * time.Second,
+		BaseContext:  func(net.Listener) context.Context { return context.Background() },
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			switch st {
 			case http.StateNew:
