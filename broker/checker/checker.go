@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -62,16 +63,14 @@ const (
 )
 
 // ErrNoSeed means the unlock step has not handed the seed yet.
-var ErrNoSeed = errors.New("checker: no seed held")
+var ErrNoSeed = checkersock.ErrNoSeed
 
 // errInternal hides a state-file failure from the caller.
 var errInternal = errors.New("checker: internal error")
 
 // PausedError refuses a verify until the oldest wrong code in its bucket
 // leaves the window.
-type PausedError struct{ Until time.Time }
-
-func (e *PausedError) Error() string { return "checker: too many wrong codes; checks are paused" }
+type PausedError = checkersock.PausedError
 
 // Act names one request a holder sends upstream: the digest of the account
 // whose login sends it (its credential name), and the request's host,
@@ -264,26 +263,11 @@ type state struct {
 	Held bool `json:"held"`
 }
 
-type verifyReq struct {
-	Code    string   `json:"code"`
-	After   int64    `json:"after"`
-	Counted bool     `json:"counted"`
-	Acts    []string `json:"acts"`
-}
-
-type verifyResp struct {
-	Step int64 `json:"step"`
-	OK   bool  `json:"ok"`
-}
-
 type redeemReq struct {
 	Act string `json:"act"`
 }
 
-const maxReq = 16 << 10
-
-// pausedHeader carries a paused bucket's end, in Unix seconds.
-const pausedHeader = "Agentos-Paused-Until"
+const maxReq = checkersock.MaxBody
 
 // handHandler serves the hand socket, in the holders' protocol so the
 // unlock step's holder.Keeper hands the seed unchanged.
@@ -329,7 +313,7 @@ func (c *Checker) verifyHandler() http.Handler {
 // serveVerify answers POST /verify; withActs false refuses any act.
 func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req verifyReq
+		var req checkersock.VerifyRequest
 		if err := decode(r, &req); err != nil || (!withActs && len(req.Acts) > 0) {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
@@ -338,7 +322,7 @@ func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
 		var p *PausedError
 		switch {
 		case errors.As(err, &p):
-			w.Header().Set(pausedHeader, strconv.FormatInt(p.Until.Unix(), 10))
+			w.Header().Set(checkersock.PausedHeader, strconv.FormatInt(p.Until.Unix(), 10))
 			http.Error(w, p.Error(), http.StatusTooManyRequests)
 			return
 		case errors.Is(err, ErrNoSeed):
@@ -352,7 +336,7 @@ func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(verifyResp{Step: step, OK: ok})
+		json.NewEncoder(w).Encode(checkersock.VerifyResponse{Step: step, OK: ok})
 	}
 }
 
@@ -403,25 +387,11 @@ func Listen(path string, uids ...int) (net.Listener, error) {
 	return sockets.ListenPeers(path, uids...)
 }
 
-func unixClient(socket string) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", socket)
-			},
-			DisableCompression: true,
-			IdleConnTimeout:    90 * time.Second,
-		},
-		Timeout: 10 * time.Second,
-	}
-}
-
 // Redeemer returns a key holder's client for the redeem socket: true means
 // the act's approval was spent for this request. Only 204 is a yes and
 // only 403 a no; any other answer is an error, which the holder refuses.
 func Redeemer(socket string) func(ctx context.Context, act string) (bool, error) {
-	hc := unixClient(socket)
+	hc := checkersock.UnixClient(socket)
 	return func(ctx context.Context, act string) (bool, error) {
 		b, _ := json.Marshal(redeemReq{Act: act})
 		req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost/redeem", bytes.NewReader(b))
@@ -442,44 +412,5 @@ func Redeemer(socket string) func(ctx context.Context, act string) (bool, error)
 		default:
 			return false, fmt.Errorf("checker: redeem: %s", resp.Status)
 		}
-	}
-}
-
-// Client is the broker's client for the verify socket, and the unlock
-// step's for the hand socket's POST /verify.
-type Client struct{ hc *http.Client }
-
-// VerifyClient returns a client for POST /verify at socket. Its callers
-// wait on it holding a lock (the owner channel's, the unlock step's), so
-// a hung checker delays them by at most 2 s.
-func VerifyClient(socket string) *Client {
-	hc := unixClient(socket)
-	hc.Timeout = 2 * time.Second
-	return &Client{hc: hc}
-}
-
-// VerifyTOTP asks the checker to verify code after step after and, on a
-// match, approve acts. Errors are ErrNoSeed, *PausedError or transport.
-func (c *Client) VerifyTOTP(code string, after int64, counted bool, acts ...string) (int64, bool, error) {
-	b, _ := json.Marshal(verifyReq{Code: code, After: after, Counted: counted, Acts: acts})
-	resp, err := c.hc.Post("http://localhost/verify", "application/json", bytes.NewReader(b))
-	if err != nil {
-		return 0, false, fmt.Errorf("checker: %w", err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var vr verifyResp
-		if err := json.NewDecoder(io.LimitReader(resp.Body, maxReq)).Decode(&vr); err != nil {
-			return 0, false, fmt.Errorf("checker: %w", err)
-		}
-		return vr.Step, vr.OK, nil
-	case http.StatusTooManyRequests:
-		until, _ := strconv.ParseInt(resp.Header.Get(pausedHeader), 10, 64)
-		return 0, false, &PausedError{Until: time.Unix(until, 0)}
-	case http.StatusServiceUnavailable:
-		return 0, false, ErrNoSeed
-	default:
-		return 0, false, fmt.Errorf("checker: verify: %s", resp.Status)
 	}
 }

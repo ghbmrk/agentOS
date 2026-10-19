@@ -65,6 +65,7 @@ var httpOK = map[string]string{
 	"replay":                  "serves replay machines' plane like guest; never dials",
 	"loopbuild":               "serves Loop 1's builder machines their own socket (W3-builder); never dials",
 	"owner/notice/noticesock": "the second client, as modelroute: reads the vault process's notice socket (a unix-socket HTTP long poll), every dial on unix (P2-2w c4e4 s2b); by review",
+	"checker/checkersock":     "the third client, as modelroute: asks the checker's verify socket to check an owner code, every dial on unix (SIM-split-wire); by review",
 	"inflight":                "admits loopbuild's model calls under its memory budget (RES-5); serves, never dials",
 }
 
@@ -89,6 +90,8 @@ var netOK = map[string]allowance{
 	"mail/mailsock": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer"}},
 	// The owner-notice puller's client (P2-2w c4e4 s2b, #1421), as modelroute.
 	"owner/notice/noticesock": {"dials only the vault process's notice unix socket", []string{"net.Conn", "net.Dialer"}},
+	// The checker's verify-socket client (SIM-split-wire), as modelroute.
+	"checker/checkersock": {"dials only the checker's verify unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
 	"netjoin":   {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
 	"loopbuild": {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
@@ -190,7 +193,7 @@ var socketPkgs = map[string]bool{
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process,
 // and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "checker/checkersock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set

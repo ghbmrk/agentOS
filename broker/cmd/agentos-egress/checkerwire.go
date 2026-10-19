@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/holder"
 )
 
@@ -78,7 +79,7 @@ func (c *custody) matchOnChecker(seed []byte, code string) (int64, bool, error) 
 	if _, err := k.Check(ctx); err != nil {
 		return 0, false, err
 	}
-	return checker.VerifyClient(k.Socket).VerifyTOTP(code, c.st.LastStep, true)
+	return checkersock.VerifyClient(k.Socket).VerifyTOTP(code, c.st.LastStep, true)
 }
 
 // handChannelSeed puts the vault's channel seed back in the checker, for
