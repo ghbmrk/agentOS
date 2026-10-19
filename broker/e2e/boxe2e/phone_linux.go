@@ -47,7 +47,7 @@ func replyKind(text string) string {
 // digestHead and status lines, and digestLateHead for a batch sent late.
 // The digest waits for the owner line (#1291), so on a fresh box it can
 // land during the step; it answers no command, so the step passes over it
-// wherever it lands and counts it (E17). They go with the digest when
+// wherever it lands and counts it (G1-1688-f1-E17). They go with the digest when
 // DIG-RM-b deletes it (D-097).
 var digestPrefixes = []string{"Daily digest: ", "Digest of "}
 
@@ -131,7 +131,7 @@ type phoneRun struct {
 	// noticeRequests what they say did not reach the owner (#2170);
 	// unread counts the notices whose counts could not be read.
 	notices, noticeTexts, noticeRequests, unread int
-	// digests counts the digest texts passed over (E17).
+	// digests counts the digest texts passed over (G1-1688-f1-E17).
 	digests int
 	// err is the first reply out of order; it ends the step.
 	err error
@@ -146,7 +146,7 @@ type phoneRun struct {
 // box reads in arrival order, so a reply drawn by the stranger's text
 // comes before the barrier's (CH-1, CH-3). The owner line's recovery
 // notice and the daily digest are passed over wherever they land (E16,
-// E17).
+// G1-1688-f1-E17).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -236,7 +236,7 @@ func (r phoneRun) noticeNote() string {
 }
 
 // digestNote is the step's one line on the digest texts it passed over,
-// their count only (E17). It is "" when there was none.
+// their count only (G1-1688-f1-E17). It is "" when there was none.
 func (r phoneRun) digestNote() string {
 	if r.digests == 0 {
 		return ""
