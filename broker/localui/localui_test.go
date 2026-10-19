@@ -171,7 +171,7 @@ func (f *fakeHooks) TrustHost(t bool) error {
 func (f *fakeHooks) Providers() []Provider {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	ps := []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"]},
+	ps := []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"], SigningIn: !f.connected},
 		{ID: "openai", Name: "OpenAI", APIKey: true}}
 	for i := range ps {
 		ps[i].PrivateByConfig = f.byConfig[ps[i].ID]

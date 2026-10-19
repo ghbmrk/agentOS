@@ -31,6 +31,18 @@ type Provenance struct {
 	// recording failed (errUnrecorded), by since: Retry records and
 	// finishes it without resetting the machines again (RCH-2).
 	backs map[string]map[int64]Reset
+	// side is the back-marks file (backMarksFile under ServiceConfig.Dir):
+	// a back whose mark the store did not take is appended there, and read
+	// on open, so a restart does not reset its machines again
+	// (W3-forget-reach-r2-2). Nil: there is no second place.
+	side recall.Store
+	// unsaved: backs whose mark the store did not take, by lineage and
+	// since; true once side holds it, false while it is in memory only
+	// (Status, W3-forget-reach-r2-1). One goes once its reset is recorded
+	// or a rewrite of the store holds it. sideStale: side holds marks no
+	// longer unsaved, to drop at the next rewrite of it.
+	unsaved   map[string]map[int64]bool
+	sideStale bool
 	// Anchors (W3): a lineage's reads are summed into a chain of anchor
 	// items, each derived from the one before and from what was read since,
 	// so a note derives from one item whatever the lineage has read.
@@ -81,11 +93,41 @@ type provRecord struct {
 	Note string `json:"n,omitempty"`
 }
 
+// backMarksFile is the back-marks file under ServiceConfig.Dir
+// (Provenance.side).
+const backMarksFile = "backs.jsonl"
+
 // OpenProvenance loads the record from store (a recall.FileStore in the
-// broker's state directory; unreadable lines are skipped).
+// broker's state directory; unreadable lines are skipped), with no
+// back-marks file.
 func OpenProvenance(store recall.Store) (*Provenance, error) {
+	return OpenProvenanceWithBacks(store, nil)
+}
+
+// OpenProvenanceWithBacks is OpenProvenance with backs as the back-marks
+// file (nil for none). Its marks are applied before the record's, so a
+// reset the record holds from the same time supersedes one.
+func OpenProvenanceWithBacks(store, backs recall.Store) (*Provenance, error) {
 	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}, takeBacks: map[string]map[int64]bool{}, backs: map[string]map[int64]Reset{},
-		anchor: map[string]string{}, covered: map[string]map[string]bool{}, anchors: map[string]int{}, gen: map[string]int{}, notes: map[string]map[string]bool{}}
+		anchor: map[string]string{}, covered: map[string]map[string]bool{}, anchors: map[string]int{}, gen: map[string]int{}, notes: map[string]map[string]bool{},
+		side: backs, unsaved: map[string]map[int64]bool{}}
+	var marks []provRecord
+	if backs != nil {
+		data, err := backs.ReadAll()
+		if err != nil {
+			return nil, err
+		}
+		lines, torn := recall.Lines(data)
+		p.sideStale = torn
+		for _, l := range lines {
+			var r provRecord
+			if json.Unmarshal(l, &r) == nil && r.Lineage != "" && r.TakeBack && r.Forget && !r.Reset.IsZero() {
+				p.apply(r)
+				marks = append(marks, r)
+			}
+		}
+		p.sideStale = p.sideStale || len(marks) != len(lines)
+	}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -98,11 +140,15 @@ func OpenProvenance(store recall.Store) (*Provenance, error) {
 		}
 	}
 	p.lines, p.base = len(lines), len(lines)
+	for _, r := range marks {
+		p.markUnsaved(r.Lineage, r.At.UnixNano(), true)
+	}
 	if torn {
 		if err := p.compact(); err != nil {
 			return nil, err
 		}
 	}
+	p.tidy()
 	return p, nil
 }
 
@@ -250,7 +296,68 @@ func (p *Provenance) write(r provRecord) error {
 	p.lines++
 	p.apply(r)
 	p.maybeCompact()
+	p.tidy()
 	return nil
+}
+
+// markUnsaved notes a back of lineage from since whose mark the store
+// did not take; onSide when the back-marks file holds it. One no longer
+// in backs (its reset recorded) is not noted. Called with mu held, or
+// while loading.
+func (p *Provenance) markUnsaved(lineage string, since int64, onSide bool) {
+	if _, ok := p.backs[lineage][since]; !ok {
+		p.sideStale = p.sideStale || onSide
+		return
+	}
+	if p.unsaved[lineage] == nil {
+		p.unsaved[lineage] = map[int64]bool{}
+	}
+	p.unsaved[lineage][since] = p.unsaved[lineage][since] || onSide
+}
+
+// tidy drops the unsaved backs whose reset is now recorded, and rewrites
+// the back-marks file to the backs still unsaved when it holds others;
+// best effort, tried again after the next write. Called with mu held.
+func (p *Provenance) tidy() {
+	for l, m := range p.unsaved {
+		for since, onSide := range m {
+			if _, ok := p.backs[l][since]; !ok {
+				delete(m, since)
+				p.sideStale = p.sideStale || onSide
+			}
+		}
+		if len(m) == 0 {
+			delete(p.unsaved, l)
+		}
+	}
+	if !p.sideStale || p.side == nil {
+		return
+	}
+	var buf []byte
+	for _, l := range sortedKeys(p.unsaved) {
+		for since := range p.unsaved[l] {
+			rs := p.backs[l][since]
+			b, err := json.Marshal(backRecord(l, rs))
+			if err != nil {
+				return
+			}
+			buf = append(append(buf, b...), '\n')
+		}
+	}
+	if p.side.Rewrite(buf) != nil {
+		return
+	}
+	p.sideStale = false
+	for _, m := range p.unsaved {
+		for since := range m {
+			m[since] = true
+		}
+	}
+}
+
+// backRecord is the back mark of lineage by rs (MarkBack).
+func backRecord(lineage string, rs Reset) provRecord {
+	return provRecord{Lineage: lineage, At: rs.Since.UTC(), Reset: rs.At.UTC(), Until: rs.Until.UTC(), TakeBack: true, Forget: true}
 }
 
 // maybeCompact rewrites the record when it holds twice the lines the last
@@ -391,7 +498,7 @@ func (p *Provenance) compact() error {
 	}
 	for _, l := range sortedKeys(p.backs) {
 		for _, rs := range p.backs[l] {
-			b, err := json.Marshal(provRecord{Lineage: l, At: rs.Since, Reset: rs.At, Until: rs.Until, TakeBack: true, Forget: true})
+			b, err := json.Marshal(backRecord(l, rs))
 			if err != nil {
 				return err
 			}
@@ -403,6 +510,13 @@ func (p *Provenance) compact() error {
 		return err
 	}
 	p.lines, p.base = n, n
+	// The store now holds every back: none is unsaved.
+	for l, m := range p.unsaved {
+		for _, onSide := range m {
+			p.sideStale = p.sideStale || onSide
+		}
+		delete(p.unsaved, l)
+	}
 	return nil
 }
 
@@ -478,17 +592,50 @@ func (p *Provenance) TakeBack(lineage string, since time.Time) (recorded, done b
 // MarkBack records, durably, that an approved or unasked take-back of
 // lineage went back by rs but MarkReset did not record it (RCH-2): the
 // take-back is done, so its machines never go back again, and its reach
-// is owed until Retry records the reset (MarkReset) and finishes it. Kept
-// in memory even when it cannot be written, as MarkTakeBack's done.
+// is owed until Retry records the reset (MarkReset) and finishes it. One
+// the store does not take is appended to the back-marks file, if any, so
+// a restart does not reset the machines again (W3-forget-reach-r2-2);
+// either way it is kept in memory, as MarkTakeBack's done, and listed by
+// BacksInMemoryOnly while no file holds it (r2-1). The error is the
+// store's.
 func (p *Provenance) MarkBack(lineage string, rs Reset) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	r := provRecord{Lineage: lineage, At: rs.Since.UTC(), Reset: rs.At.UTC(), Until: rs.Until.UTC(), TakeBack: true, Forget: true}
+	r := backRecord(lineage, rs)
 	err := p.write(r)
-	if err != nil {
-		p.apply(r)
+	if err == nil {
+		return nil
 	}
+	p.apply(r)
+	onSide := false
+	if b, merr := json.Marshal(r); merr == nil && p.side != nil {
+		onSide = p.side.Append(append(b, '\n')) == nil
+	}
+	p.markUnsaved(lineage, r.At.UnixNano(), onSide)
 	return err
+}
+
+// BacksInMemoryOnly lists the backs (Backs) whose mark neither the store
+// nor the back-marks file took: a restart before a write of one works
+// resets its machines again (W3-forget-reach-r2-1).
+func (p *Provenance) BacksInMemoryOnly() []Back {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []Back
+	for _, l := range sortedKeys(p.unsaved) {
+		for since, onSide := range p.unsaved[l] {
+			if !onSide {
+				out = append(out, Back{Lineage: l, Reset: p.backs[l][since]})
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Lineage != out[j].Lineage {
+			return out[i].Lineage < out[j].Lineage
+		}
+		return out[i].Since.Before(out[j].Since)
+	})
+	return out
 }
 
 // Back is a lineage whose machines went back by Reset, not yet recorded.

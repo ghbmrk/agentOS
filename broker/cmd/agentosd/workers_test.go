@@ -126,7 +126,7 @@ func TestCAP1BoxGatesReadTheRunningDaemon(t *testing.T) {
 	if err := os.WriteFile(p, []byte("MemAvailable: 2097152 kB\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g := boxGates(d, p, cfg.Admission.HeadroomMB)
+	g := boxGates(d.Engine(), d.Admission(), p, cfg.Admission.HeadroomMB)
 	if _, err := d.Admission().Admit(admission.Request{ID: "x", Class: admission.Experiment, MemMB: 1000}); err != nil {
 		t.Fatal(err)
 	}

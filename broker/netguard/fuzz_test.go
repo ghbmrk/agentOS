@@ -508,13 +508,10 @@ func homeOrSpecial(f netip.Addr, raw Network) string {
 		return "not global unicast"
 	}
 	for _, pf := range raw.Prefixes {
-		// A mapped prefix is the IPv4 prefix it carries; a native IPv6
-		// prefix holds no IPv4 address.
-		in := pf.Contains(f)
-		if a := pf.Addr(); a.Is4In6() && pf.Bits() >= 96 {
-			in = netip.PrefixFrom(a.Unmap(), pf.Bits()-96).Contains(f)
-		}
-		if in {
+		// An IPv4 address is in an IPv6 prefix that holds its mapped form,
+		// whatever the prefix's length, since Check unmaps a mapped
+		// destination.
+		if pf.Contains(f) || f.Is4() && pf.Contains(netip.AddrFrom16(f.As16())) {
 			return "prefix " + pf.String()
 		}
 	}
@@ -531,6 +528,8 @@ var fuzzCheckSeeds = [][]byte{
 	{0, 1, 3, 1, 1, 24, 2, 3, 10, 2, 4, 1, 12, 0, 2, 3, 2, 3, 1, 1, 2},
 	{0, 2, 18, 96, 2, 1, 1, 3, 17, 1, 0, 1, 0, 2, 11, 0, 0, 2, 13, 0, 0, 2, 15, 0, 0, 2, 16, 0, 0},
 	{1, 3, 2, 2, 3, 3, 1, 2, 4, 1, 0, 2, 9, 0, 0, 2, 3, 4, 1, 0, 2, 3, 1, 2},
+	// a mapped /80 is learned, then a public IPv4 address is checked (#2468)
+	{0, 1, 10, 80, 0, 0, 0, 2, 0, 0, 3, 0, 1, 0},
 }
 
 // FuzzCheck (extra, not in the brief): for any learned network, pins, destination, port,
@@ -707,12 +706,27 @@ func TestFuzzCheckReportsAPlantedDefect(t *testing.T) {
 		}
 		return nil
 	}
+	// unwidened learns as if a mapped prefix shorter than /96 did not
+	// widen to 0.0.0.0/0 (#2468).
+	unwidened := func(p *Policy, ctx context.Context, a netip.Addr, port uint16, proto string) error {
+		p.mu.Lock()
+		var keep []netip.Prefix
+		for _, pf := range p.net.Prefixes {
+			if pf != netip.PrefixFrom(netip.IPv4Unspecified(), 0) {
+				keep = append(keep, pf)
+			}
+		}
+		p.net.Prefixes = keep
+		p.mu.Unlock()
+		return p.Check(ctx, a, port, proto)
+	}
 	for name, c := range map[string]struct {
 		pl   fuzzPlant
 		want string
 	}{
-		"allows every destination": {fuzzPlant{check: allowAll}, "allowed"},
-		"denies without ErrDenied": {fuzzPlant{check: wrongError}, "is not ErrDenied"},
+		"allows every destination":  {fuzzPlant{check: allowAll}, "allowed"},
+		"denies without ErrDenied":  {fuzzPlant{check: wrongError}, "is not ErrDenied"},
+		"mapped prefix not widened": {fuzzPlant{check: unwidened}, "is prefix ::ffff:192.168.1.1/80"},
 	} {
 		reported := false
 		for _, in := range fuzzCheckSeeds {
