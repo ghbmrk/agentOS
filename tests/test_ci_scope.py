@@ -263,9 +263,9 @@ MACHINES_LINES = [
     '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
     '            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?',
-    '          python3 ../tools/require_ran.py < /tmp/infer-test.json \\',
+    '          python3 -I ../tools/require_ran.py < /tmp/infer-test.json \\',
     '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \\',
-    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf',
+    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf || exit 1',
     '          [ "$rc" -eq 0 ]',
     '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \\',
@@ -428,7 +428,7 @@ class WiringTest(unittest.TestCase):
         step = "      - name: Machine tests as root\n        working-directory: broker\n        run: |\n"
         rc0 = "          rc=0\n"
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
-        run = "          python3 ../tools/require_ran.py"
+        run = "          python3 -I ../tools/require_ran.py"
         rc = '          [ "$rc" -eq 0 ]\n'
         hostapd = "      - name: hostapd runs as its own user"
         job = "\n  machines:\n"
@@ -464,6 +464,8 @@ class WiringTest(unittest.TestCase):
             "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-latest\n  hostcheck:"),
             "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
+            "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
+            "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
         }
         for what, (old, new) in edits.items():

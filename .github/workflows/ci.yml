@@ -388,9 +388,9 @@ jobs:
           sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?
-          python3 ../tools/require_ran.py < /tmp/infer-test.json \
+          python3 -I ../tools/require_ran.py < /tmp/infer-test.json \
             github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \
-            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf
+            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf || exit 1
           [ "$rc" -eq 0 ]
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
