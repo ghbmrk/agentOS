@@ -4,7 +4,6 @@ package supervise
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -232,9 +231,14 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 	// Reset is far above a quick run, so a busy machine cannot make one
 	// count as long.
 	b := Backoff{Min: 25 * time.Millisecond, Max: 200 * time.Millisecond, Reset: time.Second}
-	var logMu sync.Mutex
-	var out bytes.Buffer
-	s := newSupervisor(Options{Backoff: b, Log: lockedWriter{&logMu, &out}})
+	var tmu sync.Mutex
+	var slept []time.Duration // what each restart's timer was set to
+	s := newSupervisor(Options{Backoff: b, timer: func(d time.Duration) *time.Timer {
+		tmu.Lock()
+		slept = append(slept, d)
+		tmu.Unlock()
+		return time.NewTimer(d)
+	}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var mu sync.Mutex
@@ -296,28 +300,22 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 	if len(failed) > 0 {
 		t.Fatal(failed)
 	}
-	// The delays the loop chose, from its log; wall-clock gaps only bound
-	// them from below, since a busy machine can stretch any gap.
-	logMu.Lock()
-	lines := strings.Split(out.String(), "\n")
-	logMu.Unlock()
+	// The delays the loop handed its timer must be exact; wall-clock gaps
+	// are bounded loosely, since a busy machine can stretch any gap.
+	tmu.Lock()
+	got := append([]time.Duration(nil), slept...)
+	tmu.Unlock()
 	want := []time.Duration{25, 50, 100, 200, 200, 200, 200, 25} // the last after the long run
-	if len(lines) < len(want) {
-		t.Fatalf("log %q, want %d restart lines", lines, len(want))
+	if len(got) != len(want) {
+		t.Fatalf("timers %v, want %d", got, len(want))
 	}
 	for i, w := range want {
 		w *= time.Millisecond
-		var n int
-		var got string
-		_, tail, _ := strings.Cut(lines[i], "; restart ")
-		if _, err := fmt.Sscanf(tail, "%d in %s", &n, &got); err != nil || n != i+1 {
-			t.Fatalf("log line %q: restart %d, %v", lines[i], n, err)
+		if got[i] != w {
+			t.Errorf("restart %d timer %v, want %v", i+1, got[i], w)
 		}
-		if d, err := time.ParseDuration(got); err != nil || d != w {
-			t.Errorf("restart %d in %s, want %v", i+1, got, w)
-		}
-		if gaps[i] < w {
-			t.Errorf("restart %d after %v, want at least %v", i+1, gaps[i], w)
+		if gaps[i] < w || gaps[i] >= w+time.Second {
+			t.Errorf("restart %d after %v, want %v to %v", i+1, gaps[i], w, w+time.Second)
 		}
 	}
 	if st := s.State(); st.Restarts != quick+1 {
