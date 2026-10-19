@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base32"
+	"errors"
+	"log"
 	"net/http"
 	"net/url"
 
+	"github.com/ghbmrk/agentos/broker/checker"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -139,6 +142,30 @@ func (c *custody) confirmEnroll(code string) (bool, error) {
 		c.wrongCounted = append(c.wrongCounted, now)
 		return false, nil
 	}
+	// With -checker the checker's last step is the broker's too (CH-4):
+	// the step is spent there as well, so the broker's verify socket cannot
+	// take the code again. Until the pending seed is the channel's, the
+	// checker gets the channel's seed back on any way out.
+	rehand := c.checker != ""
+	defer func() {
+		if rehand {
+			c.handChannelSeed()
+		}
+	}()
+	if c.checker != "" {
+		var err error
+		if step, ok, err = c.matchOnChecker(seed, code); err != nil {
+			if pe := (*checker.PausedError)(nil); errors.As(err, &pe) {
+				return false, &pausedError{until: pe.Until}
+			}
+			log.Printf("checker: %v", err)
+			return false, errInternal
+		}
+		if !ok {
+			c.wrongCounted = append(c.wrongCounted, now)
+			return false, nil
+		}
+	}
 	next := c.st
 	next.LastStep = step
 	if err := c.persist(next); err != nil {
@@ -153,6 +180,7 @@ func (c *custody) confirmEnroll(code string) (bool, error) {
 	if err := c.v.Put(SeedName, vault.KindTOTPSeed, seed); err != nil {
 		return false, c.putErr(err)
 	}
+	rehand = false
 	if err := c.putMark(ConfirmedName, KindConfirmed); err != nil {
 		return false, err
 	}

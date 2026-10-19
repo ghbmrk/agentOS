@@ -23,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
@@ -390,7 +391,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var mailSocket string
+	var mailSocket, checkerVerify string
 	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
@@ -437,6 +438,7 @@ func main() {
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&checkerVerify, "checker-verify", "", "agentos-checker's verify socket, which checks the owner's code-generator codes while the vault process holds only the unlock proof (CH-4); empty keeps every check on -owner-verify")
 	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
@@ -678,7 +680,11 @@ func main() {
 	var line *secondLine
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
-		cfg.OwnerVerifier = ownerVerifier{verifier}
+		ov := ownerVerifier{v: verifier}
+		if checkerVerify != "" {
+			ov.checker = checkersock.VerifyClient(checkerVerify)
+		}
+		cfg.OwnerVerifier = ov
 		// The second line's STATUS line (potency R1 on #139).
 		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
@@ -1407,11 +1413,39 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 
 // ownerVerifier gives the owner channel the vault process's verify
 // operation, translating why a check did not run into the channel's terms.
-type ownerVerifier struct{ v *modelroute.Verifier }
+// With a checker, codes go to the checker, which holds the seed while the
+// vault is open and spends the same last step the unlock does (CH-4); the
+// vault process then checks only the unlock's proof.
+type ownerVerifier struct {
+	v       *modelroute.Verifier
+	checker *checkersock.Client
+}
 
 func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+	if o.checker != nil && !strings.HasPrefix(code, owner.UnlockProofPrefix) {
+		step, ok, err := o.checker.VerifyTOTP(code, after, counted)
+		return step, ok, checkerVerifyErr(err)
+	}
 	step, ok, err := o.v.VerifyTOTP(code, after, counted)
 	return step, ok, ownerVerifyErr(err)
+}
+
+// checkerVerifyErr is ownerVerifyErr for the checker: no seed means the
+// vault is locked, a checker that is not running is down, and any other
+// failure leaves the check's outcome unknown.
+func checkerVerifyErr(err error) error {
+	var pe *checkersock.PausedError
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, checkersock.ErrNoSeed):
+		return &owner.VerifyError{Kind: owner.VaultLocked}
+	case errors.As(err, &pe):
+		return &owner.VerifyError{Kind: owner.VerifyPaused, Until: pe.Until}
+	case errors.Is(err, checkersock.ErrDown):
+		return &owner.VerifyError{Kind: owner.VaultDown}
+	}
+	return &owner.VerifyError{Kind: owner.VerifyLost}
 }
 
 func ownerVerifyErr(err error) error {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,5 +280,70 @@ func TestHolderTransportsMapEachAdapter(t *testing.T) {
 		if string(b) != a.Name {
 			t.Fatalf("%s's calls reached %q's holder", a.Name, b)
 		}
+	}
+}
+
+// A withdraw whose hand to the proxy fails is told as not yet in effect,
+// since the proxy keeps its last view until a later round reaches it
+// (W-2); a withdraw the proxy took is told plainly.
+func TestAWithdrawTheProxyMissedIsToldAsPending(t *testing.T) {
+	r := newFastRig(t, true)
+	pv, err := newProxyView(grants{}, "agent", nil, holderDirs{"openai": "/run/h/openai", "anthropic": "/run/h/anthropic"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refuse atomic.Bool
+	hand := holder.HandHandler(pv, maxView)
+	dir, err := os.MkdirTemp("", "px")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	l, err := holder.Listen(filepath.Join(dir, holder.HandSocket), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if q.Method == "PUT" && refuse.Load() {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		hand.ServeHTTP(w, q)
+	})}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	r.c.keepEvery = time.Hour
+	r.c.holders = holderDirs{"openai": filepath.Join(dir, "down"), "anthropic": filepath.Join(dir, "down")}
+	r.c.view = newViewKeeper(r.c, dir)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+
+	withdraw := func() string {
+		t.Helper()
+		if err := r.c.putPrivate("openai", true, r.next()); err != nil {
+			t.Fatal(err)
+		}
+		r.notes = nil
+		if err := r.c.putPrivate("openai", false, ""); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range r.notes {
+			if strings.HasPrefix(n, "private data withdrawn") {
+				return n
+			}
+		}
+		t.Fatalf("no withdraw notice in %q", r.notes)
+		return ""
+	}
+	if n := withdraw(); strings.Contains(n, "not yet") {
+		t.Fatalf("a withdraw the proxy took was told as pending: %q", n)
+	}
+	if pv.privateAllowed("openai") {
+		t.Fatal("the proxy allows after a withdraw it took")
+	}
+	refuse.Store(true)
+	if n := withdraw(); !strings.Contains(n, "not yet in effect") {
+		t.Fatalf("a withdraw the proxy missed was told as done: %q", n)
 	}
 }

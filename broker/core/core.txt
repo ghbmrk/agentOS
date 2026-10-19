@@ -74,6 +74,10 @@ open grants.Gate.Get
 open grants.Gate.List
 open vault.Redactor.Redact
 open vault.HashRedactor.Redact
+# checker.Act is a pure helper: the act a code approves, named the same
+# way by the broker that asks for the approval and the holder that redeems
+# it (SIM-split-wire).
+open checker.Act
 
 # Sanctioned interfaces: the only way to start a child process, to build
 # guest-visible error text, to name a verb, and to meter a model call.

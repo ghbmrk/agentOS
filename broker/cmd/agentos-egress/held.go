@@ -94,16 +94,18 @@ func holderTransports(dirs holderDirs) map[string]http.RoundTripper {
 // while the vault is open.
 type keepers struct {
 	list []*holder.Keeper
+	what []string // what each keeper hands, for the owner's notice
 	stop context.CancelFunc
 	wg   sync.WaitGroup
 }
 
 var errNoKey = errors.New("no key to hand")
 
-// startKeepersLocked starts a keeper per holder over v. Caller holds mu.
+// startKeepersLocked starts a keeper per holder over v, and one for the
+// checker's seed with -checker. Caller holds mu.
 func (c *custody) startKeepersLocked(v *vault.Vault) {
 	c.stopKeepersLocked()
-	if len(c.holders) == 0 {
+	if len(c.holders) == 0 && c.checker == "" {
 		return
 	}
 	c.keys.Store(v)
@@ -114,7 +116,19 @@ func (c *custody) startKeepersLocked(v *vault.Vault) {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	ks := &keepers{stop: stop}
+	run := func(k *holder.Keeper, what string) {
+		ks.list = append(ks.list, k)
+		ks.what = append(ks.what, what)
+		ks.wg.Add(1)
+		go func() { defer ks.wg.Done(); k.Run(ctx) }()
+	}
+	if c.checker != "" {
+		run(c.seedKeeper(), "checker at "+c.checker+": seed")
+	}
 	for _, a := range adapters() {
+		if len(c.holders) == 0 {
+			break
+		}
 		cred := a.Credential
 		k := &holder.Keeper{
 			Socket:  filepath.Join(c.holders[a.Name], holder.HandSocket),
@@ -134,9 +148,7 @@ func (c *custody) startKeepersLocked(v *vault.Vault) {
 				return []byte(s.Reveal()), nil
 			},
 		}
-		ks.list = append(ks.list, k)
-		ks.wg.Add(1)
-		go func() { defer ks.wg.Done(); k.Run(ctx) }()
+		run(k, "holder at "+c.holders[a.Name]+": key")
 	}
 	c.keep = ks
 }
@@ -173,7 +185,7 @@ func (c *custody) stopKeepersLocked() {
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
-			c.notify(fmt.Sprintf("holder at %s: key not taken back at lock: %v", filepath.Dir(ks.list[i].Socket), err))
+			c.notify(fmt.Sprintf("%s not taken back at lock: %v", ks.what[i], err))
 		}
 	}
 }
