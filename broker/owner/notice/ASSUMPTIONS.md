@@ -1,6 +1,6 @@
 # notice: assumptions
 
-Built for P2-2w c4e4 s2a and s2b (#1421) against OP-9, CH-3 and CAP-9. `broker/owner/notice` is the vault process's owner notices as data: codes, the owner texts rendered from them, and the map from the vault process's notice lines to codes. The vault process (agentos-egress) queues them and serves them on `notice.sock`; agentosd's `noticePuller` (cmd/agentosd/noticepull.go, s2b) pulls them and sends each through `owner.Channel.Inform`. Each row is a reading a later change could overturn.
+Built for P2-2w c4e4 s2a and s2b (#1421) against OP-9, CH-3 and CAP-9. The subpackage `owner/notice/noticesock` is agentosd's unix-socket client for `notice.sock` (the second HTTP client after modelroute; allowed in `httpOK` and `netOK` by review, every dial on unix). `broker/owner/notice` is the vault process's owner notices as data: codes, the owner texts rendered from them, and the map from the vault process's notice lines to codes. The vault process (agentos-egress) queues them and serves them on `notice.sock`; agentosd's `noticePuller` (cmd/agentosd/noticepull.go, s2b) pulls them and sends each through `owner.Channel.Inform`. Each row is a reading a later change could overturn.
 
 | # | Assumption | Basis | If it changes |
 |---|---|---|---|

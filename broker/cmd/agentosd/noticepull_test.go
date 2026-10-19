@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/owner/notice"
+	"github.com/ghbmrk/agentos/broker/owner/notice/noticesock"
 )
 
 // fakeNoticeSock serves notice.sock with whatever batch the test sets, and
@@ -68,7 +69,7 @@ func item(seq uint64, c notice.Code, name string) notice.Item {
 func TestNoticePullTextsEachNoticeOnceInOrder(t *testing.T) {
 	p, fv, _, texts := pullRig(t)
 	fv.set(notice.Batch{Boot: "b1", Notices: []notice.Item{item(1, notice.MailReplaced, ""), item(2, notice.PrivateAllowed, "Acme")}})
-	c := p.client()
+	c := noticesock.New(p.socket)
 	for i := 0; i < 2; i++ {
 		if err := p.poll(context.Background(), c); err != nil {
 			t.Fatal(err)
@@ -103,7 +104,7 @@ func TestNoticePullRetriesAFailedTextWithoutSkipping(t *testing.T) {
 		calls = append(calls, s)
 		return nil
 	})
-	c := p.client()
+	c := noticesock.New(p.socket)
 	if err := p.poll(context.Background(), c); err == nil {
 		t.Fatal("a failed text must fail the poll")
 	}
@@ -118,7 +119,7 @@ func TestNoticePullRetriesAFailedTextWithoutSkipping(t *testing.T) {
 
 func TestNoticePullNewBootStartsOver(t *testing.T) {
 	p, fv, _, texts := pullRig(t)
-	c := p.client()
+	c := noticesock.New(p.socket)
 	fv.set(notice.Batch{Boot: "b1", Notices: []notice.Item{item(5, notice.MailRemoved, "")}})
 	p.poll(context.Background(), c)
 	fv.set(notice.Batch{Boot: "b2", Notices: []notice.Item{item(1, notice.MailReplaced, "")}})
@@ -130,7 +131,7 @@ func TestNoticePullNewBootStartsOver(t *testing.T) {
 
 func TestNoticePullDropsWhatHasNoTextAndSaysWhenNoticesWereMissed(t *testing.T) {
 	p, fv, _, texts := pullRig(t)
-	c := p.client()
+	c := noticesock.New(p.socket)
 	fv.set(notice.Batch{Boot: "b", Missed: 3, Notices: []notice.Item{item(1, notice.Code("free_text"), ""), item(2, notice.PrivateAllowed, "evil.example.com")}})
 	for i := 0; i < 2; i++ {
 		if err := p.poll(context.Background(), c); err != nil {

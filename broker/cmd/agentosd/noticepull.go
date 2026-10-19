@@ -2,15 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log"
-	"net"
-	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/owner/notice"
+	"github.com/ghbmrk/agentos/broker/owner/notice/noticesock"
 )
 
 // noticeMissedText is what the owner reads when the vault process's queue
@@ -24,7 +20,6 @@ type noticePuller struct {
 	socket string
 	inform func(string) error
 	retry  time.Duration // pause after a failed poll or a failed text
-	maxGet time.Duration // longest one poll may take; the vault's wait is 25s
 
 	boot   string
 	after  uint64
@@ -32,38 +27,14 @@ type noticePuller struct {
 }
 
 func newNoticePuller(socket string, inform func(string) error) *noticePuller {
-	return &noticePuller{socket: socket, inform: inform, retry: 5 * time.Second, maxGet: 40 * time.Second}
-}
-
-func (p *noticePuller) client() *http.Client {
-	return &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", p.socket)
-		},
-		DisableKeepAlives: true,
-	}}
+	return &noticePuller{socket: socket, inform: inform, retry: 5 * time.Second}
 }
 
 // poll asks once and texts what came back. A notice whose text fails to
 // send is not passed over: the next poll asks for it again.
-func (p *noticePuller) poll(ctx context.Context, c *http.Client) error {
-	ctx, cancel := context.WithTimeout(ctx, p.maxGet)
-	defer cancel()
-	q := url.Values{"boot": {p.boot}, "after": {fmt.Sprint(p.after)}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/notices?"+q.Encode(), nil)
+func (p *noticePuller) poll(ctx context.Context, c *noticesock.Client) error {
+	b, err := c.Get(ctx, p.boot, p.after)
 	if err != nil {
-		return err
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("notice socket: %s", resp.Status)
-	}
-	var b notice.Batch
-	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 1<<16)).Decode(&b); err != nil {
 		return err
 	}
 	if b.Boot != p.boot {
@@ -96,7 +67,7 @@ func (p *noticePuller) poll(ctx context.Context, c *http.Client) error {
 
 // run polls until ctx ends.
 func (p *noticePuller) run(ctx context.Context) {
-	c := p.client()
+	c := noticesock.New(p.socket)
 	for ctx.Err() == nil {
 		if err := p.poll(ctx, c); err != nil && ctx.Err() == nil {
 			select {
