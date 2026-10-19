@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/inflight"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -21,8 +22,9 @@ import (
 // agent machine (guest G1).
 const Socket = "broker.sock"
 
-// maxInFlight bounds one clean room's concurrent requests.
-const maxInFlight = 4
+// admitWait is the longest a request waits for room in the broker's
+// in-flight memory before it gets 503 (RES-5).
+const admitWait = 10 * time.Minute
 
 // session is one job's clean room as the broker serves it.
 type session struct {
@@ -35,7 +37,7 @@ type session struct {
 	mu       sync.Mutex
 	dir      string
 	srv      *http.Server
-	slot     chan struct{}
+	gate     *inflight.Gate
 	done     chan struct{}
 	finished bool
 	storing  bool
@@ -124,15 +126,16 @@ func (b *Builder) open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.dir, s.slot = dir, make(chan struct{}, maxInFlight)
+	s.dir, s.gate = dir, b.budget.Gate(admitWait)
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       time.Minute,
+		ReadTimeout:       readTimeout,
 		IdleTimeout:       15 * time.Second,
+		MaxHeaderBytes:    inflight.MaxHeaderBytes,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
-	go s.srv.Serve(l)
+	go s.srv.Serve(s.gate.Limit(l))
 	return dir, nil
 }
 
@@ -165,25 +168,23 @@ func (b *Builder) endSession(id string) {
 	b.mu.Unlock()
 }
 
+// readTimeout bounds reading one request's body once it is admitted. A
+// variable so a test can shorten it.
+var readTimeout = time.Minute
+
 // handler is a clean room's whole surface: the hint, the result, and the
 // metered model route. Anything else is 404; in particular there is no
-// /mcp (executors) and no /owner (the owner channel).
+// /mcp (executors) and no /owner (the owner channel). Each route reserves
+// its worst-case memory before reading and waits while the broker has no
+// room (RES-5); there is no fixed count of requests.
 func (s *session) handler() http.Handler {
+	g := s.gate
 	mux := http.NewServeMux()
-	mux.HandleFunc("/cleanroom/hint", s.hint)
-	mux.HandleFunc("/cleanroom/result", s.result)
-	mux.HandleFunc("/cleanroom/unable", s.unable)
-	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case s.slot <- struct{}{}:
-			defer func() { <-s.slot }()
-		default:
-			http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	mux.Handle("/cleanroom/hint", g.Route(0, inflight.Decode, readTimeout, http.HandlerFunc(s.hint)))
+	mux.Handle("/cleanroom/result", g.Route(MaxResultBytes, inflight.Decode, readTimeout, http.HandlerFunc(s.result)))
+	mux.Handle("/cleanroom/unable", g.Route(maxUnable, inflight.Decode, readTimeout, http.HandlerFunc(s.unable)))
+	mux.Handle("/model/", g.Route(inflight.ModelBody, inflight.Model, readTimeout, http.StripPrefix("/model", s.model())))
+	return mux
 }
 
 func (s *session) model() http.Handler {
@@ -192,7 +193,7 @@ func (s *session) model() http.Handler {
 			http.Error(w, "no model egress is configured", http.StatusServiceUnavailable)
 		})
 	}
-	return s.b.cfg.Meter.Wrap(s.id, s.b.cfg.Model(s.id))
+	return s.b.cfg.Meter.WrapBound(s.id, s.b.cfg.Model(s.id))
 }
 
 func (s *session) hint(w http.ResponseWriter, r *http.Request) {
@@ -314,13 +315,15 @@ type Unable struct {
 // reach (no read-only internet yet, C5). Such jobs are parked for Requeue.
 const NeedsPublicMaterial = "needs_public_material"
 
+const maxUnable = 1024
+
 func (s *session) unable(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
 	var u Unable
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1024))
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxUnable))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&u); err != nil || u.Reason != NeedsPublicMaterial {
 		http.Error(w, `body must be {"reason": "needs_public_material"}`, http.StatusBadRequest)

@@ -134,6 +134,7 @@ allow broker/guesterr/
 allow broker/holder/
 allow broker/hostdisk/
 allow broker/infer/
+allow broker/inflight/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
