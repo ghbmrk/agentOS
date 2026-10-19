@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -165,14 +168,72 @@ func waitIdle(f *ownerForget) {
 // ownerForget's resume, whenOpen or noRecall but wireResume, and main wires through
 // it once, with recall's OnOpen, and runs the boot's resume it returns
 // (PT1 and S3 on #1382: dropping the wiring passed every other test).
+// JRN-startup-reconcile s3 (Security R1 and Potency PT1 on #1382) pins
+// where: counting call sites passed each mutant below, which breaks the
+// FORGET take-back. Each must fail and the real source must pass.
+//   - R1: the boot's resume run before daemon.Run, ahead of the gate, the
+//     owner channel and the agent machine (JRN-s3-2).
+//   - Q1, Q2: the recall-on or recall-off arm runs no boot resume, so an
+//     interrupted item 2 is never taken back, or the owner never told
+//     forgetAgentNotOpen (JRN-s3-1).
+//   - Q3: wireResume given nil with recall configured: recall wired as
+//     off (JRN-s3-3).
+// Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
 func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
+	srcs := agentosdSources(t)
+	t.Run("JRN-s3-4 production wiring", func(t *testing.T) {
+		for _, bad := range forgetResumeWiring(t, srcs) {
+			t.Error(bad)
+		}
+	})
+	runBoot := "if resumeBoot != nil {\n\t\t\tresumeBoot()\n\t\t}\n"
+	for _, m := range []struct {
+		name, old, new, req string
+	}{
+		{"R1 boot resume before daemon.Run", "\td, err := daemon.Run(ctx, cfg)\n",
+			"\tif resumeBoot != nil {\n\t\tresumeBoot()\n\t}\n\td, err := daemon.Run(ctx, cfg)\n", "JRN-s3-2"},
+		{"Q1 recall-on arm drops it", "\t\t" + runBoot + "\t\tgo openRecall(", "\t\tgo openRecall(", "JRN-s3-1"},
+		{"Q2 recall-off arm drops it", "caps.recallWired(false)\n\t\t" + runBoot, "caps.recallWired(false)\n", "JRN-s3-1"},
+		{"Q3 recall wired as off", "wireResume(ctx, onOpen)", "wireResume(ctx, nil)", "JRN-s3-3"},
+	} {
+		t.Run(m.name, func(t *testing.T) {
+			src := srcs["main.go"]
+			if n := strings.Count(src, m.old); n != 1 {
+				t.Fatalf("main.go holds the mutated text %d times (want 1): %q", n, m.old)
+			}
+			mut := make(map[string]string, len(srcs))
+			for k, v := range srcs {
+				mut[k] = v
+			}
+			mut["main.go"] = strings.Replace(src, m.old, m.new, 1)
+			bad := forgetResumeWiring(t, mut)
+			for _, b := range bad {
+				if strings.HasPrefix(b, m.req+":") {
+					return
+				}
+			}
+			t.Errorf("mutant passed %s; violations: %q", m.req, bad)
+		})
+	}
+}
+
+// forgetResumeWiring parses agentosd's sources and lists each way the
+// forget resume is wired wrong, each prefixed with the requirement it
+// breaks.
+func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
+	t.Helper()
+	var bad []string
 	fset := token.NewFileSet()
 	calls, onOpen, boots := 0, 0, 0
-	for name, src := range agentosdSources(t) {
+	var main *ast.File
+	for name, src := range srcs {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if name == "main.go" {
+			main = f
 		}
 		for _, d := range f.Decls {
 			fn, _ := d.(*ast.FuncDecl)
@@ -182,15 +243,13 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 				case *ast.AssignStmt:
 					for i, l := range n.Lhs {
 						if s, ok := l.(*ast.SelectorExpr); ok && (s.Sel.Name == "resume" || s.Sel.Name == "whenOpen" || s.Sel.Name == "noRecall") && !inWire {
-							t.Errorf("%s: %s assigned outside wireResume", fset.Position(l.Pos()), s.Sel.Name)
+							bad = append(bad, fmt.Sprintf("wiring: %s: %s assigned outside wireResume", fset.Position(l.Pos()), s.Sel.Name))
 						}
 						if name != "main.go" || i >= len(n.Rhs) {
 							continue
 						}
-						if s, ok := n.Rhs[i].(*ast.SelectorExpr); ok && s.Sel.Name == "OnOpen" {
-							if x, ok := s.X.(*ast.Ident); ok && x.Name == "recallExec" {
-								onOpen++
-							}
+						if isSel(n.Rhs[i], "recallExec", "OnOpen") {
+							onOpen++
 						}
 						if c, ok := n.Rhs[i].(*ast.CallExpr); ok {
 							if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "wireResume" {
@@ -208,8 +267,117 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		}
 	}
 	if calls != 1 || onOpen != 1 || boots == 0 {
-		t.Errorf("main wires the forget resume %d times (want 1), passes recall's OnOpen %d times (want 1), runs the boot's resume %d times (want some)", calls, onOpen, boots)
+		bad = append(bad, fmt.Sprintf("wiring: main wires the forget resume %d times (want 1), passes recall's OnOpen %d times (want 1), runs the boot's resume %d times (want some)", calls, onOpen, boots))
 	}
+	if main == nil {
+		return append(bad, "wiring: no main.go")
+	}
+
+	// Positions in main.go of the calls the order rests on.
+	var resumes, attaches, agents []token.Pos
+	var wires []*ast.CallExpr
+	fromOnOpen := map[string]bool{}
+	var arms []*ast.IfStmt
+	ast.Inspect(main, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "resumeBoot" {
+				resumes = append(resumes, n.Pos())
+			}
+			if isSel(n.Fun, "lp", "attach") {
+				attaches = append(attaches, n.Pos())
+			}
+			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Store" {
+				if a, ok := s.X.(*ast.SelectorExpr); ok && a.Sel.Name == "agent" {
+					if o, ok := a.X.(*ast.SelectorExpr); ok && o.Sel.Name == "forgetOwner" {
+						agents = append(agents, n.Pos())
+					}
+				}
+			}
+			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "wireResume" {
+				wires = append(wires, n)
+			}
+		case *ast.AssignStmt:
+			for i, l := range n.Lhs {
+				if id, ok := l.(*ast.Ident); ok && i < len(n.Rhs) && isSel(n.Rhs[i], "recallExec", "OnOpen") {
+					fromOnOpen[id.Name] = true
+				}
+			}
+		case *ast.IfStmt:
+			if n.Else != nil && types.ExprString(n.Cond) == `recallDir != "" && verifier != nil` {
+				arms = append(arms, n)
+			}
+		}
+		return true
+	})
+
+	// JRN-s3-1: each arm of the recall if/else runs the boot's resume.
+	if len(arms) != 1 {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: main.go has %d recall if/else (want 1)", len(arms)))
+	}
+	for _, a := range arms {
+		for _, arm := range []struct {
+			name string
+			node ast.Node
+		}{{"recall-on", a.Body}, {"recall-off", a.Else}} {
+			if !callsResumeBoot(arm.node) {
+				bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: the %s arm runs no resumeBoot()", fset.Position(arm.node.Pos()), arm.name))
+			}
+		}
+	}
+
+	// JRN-s3-2: every resumeBoot() comes after lp.attach( and
+	// forgetOwner.agent.Store( in source order.
+	if len(attaches) == 0 || len(agents) == 0 {
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: main.go calls lp.attach %d times and forgetOwner.agent.Store %d times (want some of each)", len(attaches), len(agents)))
+	}
+	for _, r := range resumes {
+		for _, p := range append(append([]token.Pos(nil), attaches...), agents...) {
+			if r < p {
+				bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: resumeBoot() runs before %s", fset.Position(r), fset.Position(p)))
+			}
+		}
+	}
+
+	// JRN-s3-3: wireResume's second argument is assigned from
+	// recallExec.OnOpen.
+	if len(wires) != 1 {
+		bad = append(bad, fmt.Sprintf("JRN-s3-3: main.go calls wireResume %d times (want 1)", len(wires)))
+	}
+	for _, w := range wires {
+		var id *ast.Ident
+		if len(w.Args) == 2 {
+			id, _ = w.Args[1].(*ast.Ident)
+		}
+		if id == nil || !fromOnOpen[id.Name] {
+			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume's second argument is not assigned from recallExec.OnOpen", fset.Position(w.Pos())))
+		}
+	}
+	return bad
+}
+
+// isSel reports whether e is x.sel.
+func isSel(e ast.Expr, x, sel string) bool {
+	s, ok := e.(*ast.SelectorExpr)
+	if !ok || s.Sel.Name != sel {
+		return false
+	}
+	id, ok := s.X.(*ast.Ident)
+	return ok && id.Name == x
+}
+
+// callsResumeBoot reports whether n holds a resumeBoot() call.
+func callsResumeBoot(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "resumeBoot" {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // REQ: CAP-3
