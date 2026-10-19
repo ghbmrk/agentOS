@@ -194,6 +194,24 @@ func since(ts []time.Time, cut time.Time) []time.Time {
 // per act, each redeemable once within ApprovalTTL (CH-10). counted picks
 // the bucket a wrong code is charged to.
 func (c *Checker) Verify(code string, after int64, counted bool, acts []string) (int64, bool, error) {
+	if counted {
+		return c.verify(code, after, &c.wrongCounted, MaxWrongCounted, acts)
+	}
+	return c.verify(code, after, &c.wrongSilent, MaxWrongSilent, acts)
+}
+
+// verifyHand is the hand socket's check: the unlock's and the enrolment's
+// own code. It spends the step as Verify does but charges no bucket here,
+// so the broker's wrong codes never pause the owner's unlock; the vault
+// process limits these codes itself (its durable cap, CH-18, and its
+// enrolment bucket), and it holds the seed it handed, so a bucket here
+// would bound nothing.
+func (c *Checker) verifyHand(code string, after int64) (int64, bool, error) {
+	return c.verify(code, after, nil, 0, nil)
+}
+
+// verify checks code; a nil bucket charges and pauses nothing.
+func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit int, acts []string) (int64, bool, error) {
 	if len(acts) > MaxActs {
 		return 0, false, fmt.Errorf("checker: more than %d acts", MaxActs)
 	}
@@ -208,17 +226,17 @@ func (c *Checker) Verify(code string, after int64, counted bool, acts []string) 
 		return 0, false, ErrNoSeed
 	}
 	now := c.now()
-	bucket, limit := &c.wrongSilent, MaxWrongSilent
-	if counted {
-		bucket, limit = &c.wrongCounted, MaxWrongCounted
-	}
-	*bucket = since(*bucket, now.Add(-VerifyWindow))
-	if len(*bucket) >= limit {
-		return 0, false, &PausedError{Until: (*bucket)[0].Add(VerifyWindow)}
+	if bucket != nil {
+		*bucket = since(*bucket, now.Add(-VerifyWindow))
+		if len(*bucket) >= limit {
+			return 0, false, &PausedError{Until: (*bucket)[0].Add(VerifyWindow)}
+		}
 	}
 	step, ok := owner.MatchTOTP(c.seed, code, now, max(after, c.st.LastStep))
 	if !ok {
-		*bucket = append(*bucket, now)
+		if bucket != nil {
+			*bucket = append(*bucket, now)
+		}
 		return 0, false, nil
 	}
 	next := c.st
@@ -294,7 +312,8 @@ func (c *Checker) handHandler() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	// The unlock step's own code check: the step it spends is the one the
-	// broker's checks spend after (CH-4), and it approves nothing.
+	// broker's checks spend after (CH-4), it approves nothing, and it is
+	// charged to no bucket of the broker's (verifyHand).
 	mux.HandleFunc("POST /verify", c.serveVerify(false))
 	return mux
 }
@@ -310,7 +329,8 @@ func (c *Checker) verifyHandler() http.Handler {
 	return mux
 }
 
-// serveVerify answers POST /verify; withActs false refuses any act.
+// serveVerify answers POST /verify; withActs false (the hand socket)
+// refuses any act and charges no bucket.
 func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req checkersock.VerifyRequest
@@ -318,7 +338,14 @@ func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
 		}
-		step, ok, err := c.Verify(req.Code, req.After, req.Counted, req.Acts)
+		var step int64
+		var ok bool
+		var err error
+		if withActs {
+			step, ok, err = c.Verify(req.Code, req.After, req.Counted, req.Acts)
+		} else {
+			step, ok, err = c.verifyHand(req.Code, req.After)
+		}
 		var p *PausedError
 		switch {
 		case errors.As(err, &p):
