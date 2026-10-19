@@ -211,16 +211,19 @@ func syncFile(name string) error {
 
 // SweepTemp removes temporary files a crash left in dir. Call it only when
 // no WriteFile into dir can be in flight, such as when the one process that
-// owns dir opens it at start.
+// owns dir opens it at start. It returns every remove error joined, after
+// trying all names.
 func SweepTemp(dir string) error {
 	names, err := filepath.Glob(filepath.Join(dir, TempPrefix+"*"))
 	if err != nil {
 		return err
 	}
+	// Try every name: one stuck entry must not shield the temps after it.
+	var errs []error
 	for _, n := range names {
 		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
