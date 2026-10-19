@@ -308,6 +308,7 @@ func New(cfg Config) (*Channel, error) {
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
 	c.recent.forgotAt = st.ForgotAt
+	c.recent.restore(st.Guarded, cfg.Now())
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
