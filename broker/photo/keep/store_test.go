@@ -982,6 +982,16 @@ func TestUnsettledDeleteIsResumedNotDuplicated(t *testing.T) {
 			if got := deleteIntents(t, r.eng, "P1"); len(got) != 1 {
 				t.Fatalf("delete attempts while unsettled %v, want one", got)
 			}
+			// Nothing is taken down while the outcome is unknown: the photo
+			// stays listed and its keep record is not erased.
+			if es := r.list(); len(es) != 1 || es[0].ID != "P1" {
+				t.Fatalf("listed while unsettled: %+v", es)
+			}
+			for _, e := range r.eng.Erased() {
+				if e == keepID("P1") {
+					t.Fatal("keep record erased while the delete is unsettled")
+				}
+			}
 			r.eng.Reconcile(ctx)
 			if _, err := r.s.Delete(ctx, "P1"); err != nil {
 				t.Fatalf("delete after reconcile = %v", err)
