@@ -175,7 +175,7 @@ func chatCode(t time.Time) string {
 	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[off:off+4])&0x7fffffff)%1_000_000)
 }
 
-// REQ: CH-15
+// REQ: CH-15, OWN-4
 // HELP as agentosd sends it, with the learning line (on or off) and RENEW
 // wired as main wires them, fits one owner text uncut and names CHAT
 // (combined F1 on #2390): a check on the pacing constant alone missed that
@@ -202,11 +202,11 @@ func TestCH15HelpNamesChatUncut(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := ch.Handle(context.Background(), ownerNum, "HELP")
-		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "CHAT 30.") {
+		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "ACK 20.") {
 			t.Fatalf("learning %v: HELP is not one whole text (cut at %d bytes): %q", learning, control.MaxText, got)
 		}
 		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
-			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30"} {
+			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 20"} {
 			if !learning && (word == "LOOPS" || word == "HELP LOOPS") {
 				word = "Spare-time"
 			}

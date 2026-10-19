@@ -48,7 +48,7 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CRED-5 no longer names consent's CH-10 tier")
         self.assertRegex(t, r"never by \*\*Use the defaults\*\*",
                          f"SPEC.md:{n} CRED-5 no longer keeps consent out of Use the defaults")
-        self.assertIn("it takes the code-generator code (CH-3)", t,
+        self.assertIn("it takes the code-generator code on the owner page (CH-3, CH-10)", t,
                       f"SPEC.md:{n} CRED-5 later consent no longer takes the code-generator code")
         self.assertIn("Consent and its withdrawal are journal records (OP-11)", t,
                       f"SPEC.md:{n} CRED-5 consent is no longer journaled")
