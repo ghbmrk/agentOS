@@ -330,8 +330,9 @@ func same(seps []byte) bool {
 }
 
 // codeLike reports whether groups joined by sep are a generated code:
-//   - two groups: dash-joined, of 5 or more, each with a digit, with a letter
-//     somewhere (GitHub's xxxxx-xxxxx);
+//   - two groups: dash-joined, even, of 5 or more, mixing letters and
+//     digits, each group with a digit or the whole run hex in one case or
+//     upper-case base32 (GitHub's xxxxx-xxxxx; abcde-12345);
 //   - three or more groups, each mixing letters and digits;
 //   - even groups of 3: four or more, mixed, or digits joined by dashes;
 //   - even groups of 4 to 16: dash-joined, or holding a digit, or 16 or more
@@ -362,7 +363,7 @@ func codeLike(gs []string, sep byte) bool {
 		}
 	}
 	if n == 2 {
-		return dash && even && l >= 5 && hasDigit(gs[0]) && hasDigit(gs[1]) && hasLetter(joined)
+		return dash && even && l >= 5 && mixed && (hasDigit(gs[0]) && hasDigit(gs[1]) || codeAlphabet(joined))
 	}
 	allMixed := true
 	for _, g := range gs {
@@ -383,6 +384,31 @@ func codeLike(gs []string, sep byte) bool {
 		return mixed || dash && n >= 4 && !hasLetter(joined)
 	}
 	return dash && mixed && sized
+}
+
+// codeAlphabet reports whether t is wholly hex (0-9, a-f) in one case or
+// base32 (RFC 4648: A-Z and 2-7) in capitals. Hyphenated words, title-case,
+// platform and product names (`Model-23456`, `linux-amd64`, `MODEL-10019`)
+// fall outside both.
+func codeAlphabet(t string) bool {
+	if !oneCase(t) {
+		return false
+	}
+	hex, b32 := true, t == strings.ToUpper(t)
+	for i := 0; i < len(t); i++ {
+		c := t[i] | 0x20
+		switch {
+		case c >= '2' && c <= '7':
+		case c >= '0' && c <= '9':
+			b32 = false
+		case c >= 'a' && c <= 'f':
+		case c >= 'g' && c <= 'z':
+			hex = false
+		default:
+			return false
+		}
+	}
+	return hex || b32
 }
 
 // ScrubFacts scrubs each fact as ScrubFact does, and removes both parts of a
