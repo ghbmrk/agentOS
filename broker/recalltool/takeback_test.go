@@ -774,7 +774,7 @@ func TestRestartAfterFailedBackMarkDoesNotRunForgetSinceAgain(t *testing.T) {
 	}
 }
 
-// W3-forget-reach-r2-2, the nil case (ASSUMPTIONS T6): with no
+// W3-forget-reach-r2-2, the nil case (ASSUMPTIONS W3-forget-reach-r2-A1): with no
 // back-marks file the back mark is in memory only, so a restart before a
 // write works resets the machines a second time.
 func TestRestartAfterFailedBackMarkWithoutADirRunsForgetSinceAgain(t *testing.T) {
