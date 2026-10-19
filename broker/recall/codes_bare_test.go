@@ -39,6 +39,8 @@ func TestHyphenatedWordsAndNumbersAreKept(t *testing.T) {
 		"MODEL-10019", "SERIES-900100", "Model-23456", "Suite-23456", "Route-80801", "trace-10019", "Apple-19098",
 		// postal numbers: digits only
 		"12345-6789", "02139-4307", "90210-1234", "10115-80331",
+		// pins: title case (oneCase), uneven groups, digits 8 and 9 outside base32
+		"Faced-12345", "Decaf-12345", "ABCDE-2345", "QWERT-23489",
 	} {
 		if out := sc.Scrub(in); out != in {
 			t.Errorf("%q -> %q", in, out)
