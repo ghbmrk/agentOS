@@ -8,7 +8,7 @@ Board section: Human-native texting. Work item: #2394. Follow-up of D-129 (#2250
 
 **Change.** `broker/owner/pacer.go`: say "approval requests and questions" in `pacingForms` (line 46), the ON/OFF replies (753-761) and `urgentNames` (800-813); a short mention in `pacingHelp` (line 49). HELP stays within 459 characters with the longest `HelpExtra` (444 now); update O24 if the count changes.
 
-**Acceptance tests (REQ: CH-3, OWN-18):**
+**Acceptance tests:** (REQ: CH-3, OWN-18)
 - `broker/owner/settings_test.go::TestUrgentApprovalWordingNamesQuestions` pins the four strings (mutant: revert one).
 - `broker/owner/settings_test.go::TestHelpWithLongestExtraFitsBudget` (existing check, kept; mutant: lengthen `pacingHelp` past the budget).
 

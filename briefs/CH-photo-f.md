@@ -10,7 +10,7 @@ Board section: Human-native texting (photos). Work item: #2320. Follow-up of CH-
 - CH26-R3: `Erase` and `DeleteAll` (:433) cover every attempt's intent, so no attempt leaves a record behind.
 - CH26-R4: an attempt that is in progress or done is resumed, not duplicated (existing behaviour kept).
 
-**Acceptance tests in `broker/photo/keep/store_test.go` (REQ: CH26-R1..R4):**
+**Acceptance tests:** in `broker/photo/keep/store_test.go` (REQ: CH26-R1..R4)
 - `TestDeniedDeleteIsRetriedByOwnerDelete` and `TestDeniedDeleteIsRetriedBySweep` (R1; mutant: reuse the Denied intent).
 - `TestViewFoldsDeleteAttempts` (R2).
 - `TestEraseCoversEveryDeleteAttempt` (R3; mutant: erase only `<k>`=0).

@@ -9,7 +9,7 @@ Board section: Human-native texting. Work item: #2391. Follow-up of O44, O45 (PR
 - CAP3-F2: `HeldText` records its task, and a forget drops only the deleted task's held texts; the reaction window keys by task too (O44). Another task's held text is released after quiet hours.
 - CAP3-F3: O44 says "starts with `Agent:` (after a leading ellipsis)" (`normQuote` trims it; the 24 h check uses `normQuote`, `reaction.go:145`).
 
-**Acceptance tests (REQ: CAP3-F1..F3):**
+**Acceptance tests:** (REQ: CAP3-F1..F3)
 - `broker/owner/reaction_forget_test.go::TestForgetDropsOnlyTheDeletedTasksHeldTexts` (F2; mutant: drop all).
 - `::TestForgetReplyCountsDroppedHeldTexts` (F1; reply shows N and none of the text; mutant: omit the count).
 - `::TestForgetDropIsNotInHeldDropped` (F1; mutant: add to `HeldDropped`).

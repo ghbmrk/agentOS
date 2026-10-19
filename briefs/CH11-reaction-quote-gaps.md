@@ -10,7 +10,7 @@ Board section: Human-native texting. Work item: #2392. Follow-up of O45 (PR #238
 - CH11-G3: a quote cut inside a code at both ends matches only through the `both` form of `maskedForms` (`reaction.go:373-385`).
 - CH11-G4: guarded texts (live requests, box texts with a code) live apart from the 20-text cap (`recentWindow.add`, `reaction.go:243-249`), bounded by age and open requests; 25 more box texts do not push a live request out.
 
-**Acceptance tests in `broker/owner/reaction_followups_test.go` (REQ: CH11-G1..G4):**
+**Acceptance tests:** in `broker/owner/reaction_followups_test.go` (REQ: CH11-G1..G4)
 - `TestShortCutQuoteOfARequestIsAReaction` (G1; live and after restart).
 - `TestDoubledEllipsisQuoteIsAReaction` (G2).
 - `TestQuoteCutAtBothEndsIsAReactionAfterARestart` (G3; fails with mutant `both := m`).

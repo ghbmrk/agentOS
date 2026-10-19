@@ -14,7 +14,7 @@ Board section: Harness and operating model. Work item: #2417. Follow-up of ARC-3
 
 **Change.** `broker/provagent/declare.go`: a `CloudOff` list in `Declaration` (config keys or flags), checked by `Validate` for CLI guests; `Builtins()` codex sets it from `guest/codex/managed_config.toml` (web_search, update check, notify already pinned; add the remaining keys the review names). Grok and Muse declarations get the same field when their rows land (ARC-3 order, #2423). Egress allow-list: only declared model endpoints.
 
-**Acceptance tests (REQ: ARC3-C1..C4):**
+**Acceptance tests:** (REQ: ARC3-C1..C4)
 - `broker/provagent/declare_test.go::TestCLIGuestDeclarationNeedsCloudOff` (C3; mutant: skip the check).
 - `tests/test_codex_worker.py::test_managed_config_turns_off_cloud_features` (C1; pins every listed key; mutant: drop one key).
 - `broker/egress/...::TestCLIGuestCloudEndpointRefusedNoCredential` with a stub provider (C2; mutant: add a cloud endpoint to `Endpoints`).

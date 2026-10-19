@@ -11,7 +11,7 @@ Board section: CI. Work item: #2323. Evidence: 24 failed `ci` runs of main's las
 - MG-2: `tools/ci_scope.py` and `scope.yml` give the same filtered result on `pull_request` as today (no PR run changes).
 - MG-3: the required checks and their names are unchanged, so branch protection keeps working.
 
-**Acceptance tests (REQ: MG-1..MG-3):**
+**Acceptance tests:** (REQ: MG-1..MG-3)
 - `tests/test_ci_scope.py::WiringTest::test_push_to_main_runs_every_job` parses `ci.yml` and asserts each filtered job's condition is true on `push` (mutant: remove the push clause from one job).
 - `tests/test_ci_scope.py::ScopeTest::test_pull_request_scope_unchanged` (MG-2; existing cases kept).
 - `tests/test_ci_scope.py::WiringTest::test_required_check_names_unchanged` (MG-3).
