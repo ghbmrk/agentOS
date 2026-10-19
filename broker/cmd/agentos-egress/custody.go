@@ -298,10 +298,12 @@ type custody struct {
 	// viewKeeper); nil when this process serves the model socket itself.
 	// epoch moves at every unlock and lock, naming the view with the
 	// vault's change count (viewVersion). keyed mirrors st.Keyed for the
-	// view, which never takes mu.
-	view  *viewKeeper
-	epoch atomic.Uint64
-	keyed atomic.Bool
+	// view, which never takes mu. handFails counts the changes handView
+	// could not hand, so a change made under mu can tell its own failed.
+	view      *viewKeeper
+	epoch     atomic.Uint64
+	keyed     atomic.Bool
+	handFails atomic.Uint64
 	// keep are the keepers running while the vault is open. Guarded by mu.
 	keep *keepers
 

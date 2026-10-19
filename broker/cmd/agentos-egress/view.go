@@ -161,6 +161,7 @@ func (c *custody) handView() {
 	ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 	defer cancel()
 	if err := c.view.check(ctx); err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
+		c.handFails.Add(1)
 		c.notify(fmt.Sprintf("proxy at %s: not handed the vault's change: %v", filepath.Dir(c.view.k.Socket), err))
 	}
 }

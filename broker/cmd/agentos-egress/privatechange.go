@@ -51,15 +51,21 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 			return err
 		}
 	}
+	fails := c.handFails.Load()
 	if err := c.setPrivateLocked(provider, ok); err != nil {
 		return err
 	}
 	if !ok && c.privateFlags[provider] {
 		return errPrivateByConfig
 	}
-	if ok {
+	switch {
+	case ok:
 		c.notify("private data allowed for " + providerName(provider))
-	} else {
+	case c.handFails.Load() != fails:
+		// The write's hand to the proxy failed (handView told why): the
+		// proxy keeps allowing until a later round reaches it (W-2).
+		c.notify("private data withdrawn for " + providerName(provider) + ", but not yet in effect: the proxy still allows it until it takes the change")
+	default:
 		c.notify("private data withdrawn for " + providerName(provider))
 	}
 	return nil
