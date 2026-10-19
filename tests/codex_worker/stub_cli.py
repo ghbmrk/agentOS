@@ -7,7 +7,8 @@
 # workspace, kills the wrapper and reports whether the tool outlived it. It marks each phase on
 # stderr, so a test that stalls can say where (#1542).
 # argv: forwarder port, synthetic canary, and optionally --skip-outlives, which skips the last
-# phase and leaves the outlives verdict out, for a run that asks only about descriptors.
+# phase and leaves the outlives verdict out, for a run that asks only about descriptors, and
+# --beat-wait=N, the seconds the last phase waits for its tool to start (default BEAT_WAIT).
 import json
 import os
 import pathlib
@@ -22,6 +23,9 @@ AUTH = "/var/lib/agentos-codex/auth.json"
 TOOLSH = "/usr/local/bin/agentos-toolsh"
 HIGH_FDS = (200, 1000)  # auth.json at n, the socket at n+1; above 9, where dash cannot reach
 STUB_TOOL = "/var/lib/agentos-stub-tool.py"  # mounted there by the test
+# A new network namespace can wait many seconds on the kernel tearing down old ones (CI runs
+# this right after the netns tests), so the wait is long; a worker's deadline still bounds it.
+BEAT_WAIT = 45
 
 
 T0 = time.monotonic()
@@ -42,33 +46,47 @@ def reaches(family, addr):
         return False
 
 
-def outlives_wrapper():
+def outlives_wrapper(wait):
+    """Whether the beat tool outlived its killed wrapper; None, no verdict, if it never started."""
     beat = pathlib.Path("beat")
     beat.unlink(missing_ok=True)
     # No pipe of the worker's rides along: a tool that lingers must not hold its output open.
+    # Its own process group, so a wrapper killed mid-setup leaves nothing behind (below).
     p = subprocess.Popen([TOOLSH, sys.executable, "-I", STUB_TOOL, "beat"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 10
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + wait
     while not beat.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
-    phase("beat started" if beat.exists() else "beat never started")
+    started = beat.exists()
+    phase("beat started" if started else "beat never started; no verdict")
     p.kill()  # toolsh exec'd bwrap, so this is the wrapper's bwrap
     p.wait()
-    time.sleep(0.5)
-    before = beat.stat().st_size if beat.exists() else 0
-    time.sleep(1.5)
-    after = beat.stat().st_size if beat.exists() else 0
-    phase("beat checked")
-    return after > before
+    if started:
+        time.sleep(0.5)
+        before = beat.stat().st_size
+        time.sleep(1.5)
+        after = beat.stat().st_size
+        phase("beat checked")
+    # A wrapper killed before its tool started can leave its sandbox's first process stuck in
+    # setup; in a pid namespace that holds the whole worker open (#1542). It has not yet left
+    # the group for the tool's own session, so the group reaches it, and never the tool.
+    try:
+        os.killpg(p.pid, 9)
+    except ProcessLookupError:
+        pass
+    return after > before if started else None
 
 
 def main():
     port, canary, *flags = sys.argv[1:]
     port = int(port)
-    if flags not in ([], ["--skip-outlives"]):
+    skip = "--skip-outlives" in flags
+    waits = [f for f in flags if f.startswith("--beat-wait=")]
+    if len(flags) != skip + len(waits) or len(waits) > 1:
         print(f"stub_cli: unknown flags {flags}", file=sys.stderr)
         sys.exit(2)
+    beat_wait = float(waits[0].partition("=")[2]) if waits else BEAT_WAIT
     phase("started")
     try:
         auth = canary in pathlib.Path(AUTH).read_text()
@@ -110,10 +128,10 @@ def main():
     tool["canary_anywhere"] = canary in r.stdout or canary in r.stderr
     tool.pop("environ", None)
     tool.pop("auth_text", None)
-    if flags:
+    if skip:
         phase("outlives skipped")
     else:
-        tool["outlives"] = outlives_wrapper()
+        tool["outlives"] = outlives_wrapper(beat_wait)
     print(json.dumps({"cli": cli, "tool": tool}))
 
 
