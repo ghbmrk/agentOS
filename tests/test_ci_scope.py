@@ -9,6 +9,9 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import ci_scope  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from test_workflows import lane_gate_problems  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 
@@ -179,6 +182,125 @@ class ScopeTest(unittest.TestCase):
         self.assertIn("pull_request) base=HEAD^1 head=HEAD^2 ;;", wf)
 
 
+# ci.yml's settings above its jobs, pinned so no top-level env or defaults reaches the machines job.
+CI_PREAMBLE_LINES = [
+    'name: ci',
+    'on:',
+    '  push:',
+    '    branches: [main]',
+    '  pull_request:',
+    '  merge_group:',
+    '  workflow_dispatch:',
+    'permissions:',
+    '  contents: read',
+    'concurrency:',
+    '  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}',
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+    'env:',
+    '  GOTOOLCHAIN: local',
+]
+
+# The machines job from its header through "Machine tests as root" (INFER-CI-2), pinned line by
+# line as lane-gate.yml is: the job's keys (no continue-on-error, defaults or container), every
+# step before the infer run (none writes GITHUB_ENV or GITHUB_PATH or edits the tools), and the
+# step's own keys (no shell, if or continue-on-error) and run block. Any edit here is a reviewed
+# change to this list.
+MACHINES_LINES = [
+    '  machines:',
+    '    needs: scope',
+    "    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}",
+    '    runs-on: ubuntu-latest',
+    '    timeout-minutes: 60',
+    '    steps:',
+    '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
+    '        with:',
+    "          fetch-depth: 2 # a PR's test merge and its base, for the fuzz peaks decision",
+    '          persist-credentials: false',
+    '      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0',
+    '        with:',
+    '          go-version: "1.26.8" # = broker/go.mod\'s toolchain line; checked below',
+    '          cache: false',
+    '      - name: Go is the toolchain go.mod names',
+    '        run: |',
+    '          want=$(awk \'$1 == "toolchain" {print $2}\' "$GITHUB_WORKSPACE/broker/go.mod")',
+    "          got=$(go version | awk '{print $3}')",
+    '          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }',
+    '      - name: Go build cache (CI-PATHS)',
+    '        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2',
+    '        with:',
+    '          path: /tmp/gocache',
+    "          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}",
+    "          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-",
+    '      - name: Install gVisor release-20260928.0 (checksum pinned)',
+    '        run: |',
+    '          B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64',
+    '          curl -fsSLo /tmp/gvisor.tar.bz2 "$B/gvisor.tar.bz2"',
+    '          echo "c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a9725a602a846c81a8ed19c057a996515d31c081eba343ed4613a89951ba32ed59  /tmp/gvisor.tar.bz2" | sha512sum -c',
+    '          mkdir /tmp/gv && tar -xjf /tmp/gvisor.tar.bz2 -C /tmp/gv',
+    '          sudo install -m 0755 /tmp/gv/runsc /usr/local/bin/runsc',
+    '          sudo mkdir -p /usr/local/bin/gvisor-bin',
+    '          sudo install -m 0755 /tmp/gv/gvisor-bin/* /usr/local/bin/gvisor-bin/',
+    '          runsc --version',
+    '      - name: Project quotas (SR2-3)',
+    '        run: |',
+    '          sudo apt-get update -q',
+    '          sudo apt-get install -yq xfsprogs acl',
+    '          sudo modprobe quota_v2 2>/dev/null || {',
+    '            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',
+    '          } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"',
+    '      - name: Machine tests as root',
+    '        working-directory: broker',
+    '        run: |',
+    '          sudo mkdir /sys/fs/cgroup/agentos-ci',
+    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
+    '            AGENTOS_REQUIRE_QUOTA=1 \\',
+    '            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom',
+    '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
+    '            go test -count=1 -v ./loop7',
+    '          rc=0',
+    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
+    '            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?',
+    '          python3 ../tools/require_ran.py < /tmp/infer-test.json \\',
+    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \\',
+    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf',
+    '          [ "$rc" -eq 0 ]',
+    '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \\',
+    "            go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd",
+    '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \\',
+    "            go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd",
+]
+
+
+def machines_problems(ci):
+    """Why ci.yml's machines job could pass with the infer tests skipped or unrun; empty when pinned."""
+    if ci.count("\n  machines:\n") != 1:
+        return ["no single machines job"]
+    preamble = ci[:ci.index("\njobs:\n") + 1]
+    start = ci.index("\n  machines:\n") + 1
+    nxt = re.compile(r"^  \S", re.M).search(ci, start + 1)
+    job = ci[start:nxt.start() if nxt else len(ci)]
+    lines = job.split("\n")
+    code = [i for i, l in enumerate(lines) if l.strip() and not l.lstrip().startswith("#")]
+    cut = code[len(MACHINES_LINES)] if len(code) > len(MACHINES_LINES) else len(lines)
+    pinned = "\n".join(lines[:cut])
+    problems = lane_gate_problems(preamble, CI_PREAMBLE_LINES) + lane_gate_problems(pinned, MACHINES_LINES)
+    # The first line after the pinned step starts the next step: nothing more is added to this
+    # step, and every later line sits inside a later step.
+    rest = [lines[i] for i in code[len(MACHINES_LINES):]]
+    if rest and not rest[0].startswith("      - "):
+        problems.append("line after the infer step is %r, not the next step" % rest[0])
+    problems += ["job-level line after the steps: %r" % l for l in rest if not l.startswith("      ")]
+    # A comment or blank line after a trailing backslash ends the command there.
+    for a, b in zip(MACHINES_LINES, MACHINES_LINES[1:]):
+        if a.endswith("\\") and a + "\n" + b not in pinned:
+            problems.append("%r is not followed directly by %r" % (a, b))
+    return problems
+
+
 class WiringTest(unittest.TestCase):
     """The workflows fail safe: only an exact 'true' from scope skips anything."""
 
@@ -280,58 +402,59 @@ class WiringTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=expr):
                 evaluate(expr, "push", "true")
 
-    def machines_step(self):
-        ci = (WORKFLOWS / "ci.yml").read_text()
-        start = ci.index("      - name: Machine tests as root\n")
-        return ci[start:ci.index("\n      - name: ", start + 1)]
-
-    # The infer run, as whole lines of the run block in this order: commenting one out, re-indenting
-    # it or wrapping it in a branch breaks the match.
-    INFER_RUN = (
-        "          rc=0\n"
-        '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n'
-        "            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\\n"
-        "            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?\n"
-        "          python3 ../tools/require_ran.py < /tmp/infer-test.json \\\n"
-        "            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \\\n"
-        "            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf\n"
-        '          [ "$rc" -eq 0 ]\n')
-
-    def infer_wired(self, step):
-        """True when the step runs the infer tests through require_ran.py with no branch around them."""
-        if step.count("\n" + self.INFER_RUN) != 1:
-            return False
-        branch = re.compile(r"^\s*(if|then|else|elif|fi|case|esac|while|until|for|do|done|exit)\b")
-        return not [l for l in step.splitlines() if branch.match(l)]
-
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1
-        self.assertTrue(self.infer_wired(self.machines_step()))
-        self.assertFalse(self.infer_wired(self.machines_step().replace(" ./infer/... ", " ./cleanroom ")))
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        self.assertEqual(machines_problems(ci), [])
+        self.assertTrue(machines_problems(ci.replace(" -json ./infer/... ", " -json ./cleanroom ")))
 
     def test_machines_step_uses_require_ran(self):
         # REQ: INFER-CI-2
-        step = self.machines_step()
-        self.assertTrue(self.infer_wired(step))
-        run_line = "          python3 ../tools/require_ran.py"
-        rc_line = '          [ "$rc" -eq 0 ]\n'
-        mutants = {
-            "commented out": step.replace(run_line, "          # python3 ../tools/require_ran.py"),
-            "branch around it": step.replace(run_line, "          if false; then\n" + run_line)
-                                    .replace(rc_line, "          fi\n" + rc_line),
-            "branch at column 0": step.replace(run_line, "if false; then\n" + run_line)
-                                      .replace(rc_line, rc_line + "fi\n"),
-            "branch around the whole run": step.replace("          rc=0\n", "          if false; then\n          rc=0\n")
-                                               .replace(rc_line, rc_line + "          fi\n"),
-            "dropped": step.replace(run_line, "          true #"),
-            "exit code ignored": step.replace(rc_line, ""),
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        self.assertEqual(machines_problems(ci), [])
+        step = "      - name: Machine tests as root\n        working-directory: broker\n        run: |\n"
+        rc0 = "          rc=0\n"
+        go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
+        run = "          python3 ../tools/require_ran.py"
+        rc = '          [ "$rc" -eq 0 ]\n'
+        hostapd = "      - name: hostapd runs as its own user"
+        job = "\n  machines:\n"
+        # Each edit, as (old, new) applied once, stops the step failing on a skipped or missing test.
+        edits = {
+            "commented out": (run, "          # python3 ../tools/require_ran.py"),
+            "branch around it": (run, "          if false; then\n" + run),
+            "dropped": (run, "          true #"),
+            "exit code ignored": (rc, ""),
+            "set +e": (rc0, "          set +e\n" + rc0),
+            "python3 overridden": (rc0, "          python3() { :; }\n" + rc0),
+            "trap on exit": (rc0, "          trap 'exit 0' EXIT\n" + rc0),
+            "here-doc swallows it": (rc0, "          cat >/dev/null <<'X'\n" + rc0 + "X\n"),
+            "multi-line quote": (rc0, "          : '\n" + rc0),
+            "uncalled function": (rc0, "          f() {\n" + rc0),
+            "or-true group": (rc0, "          { true || {\n" + rc0),
+            "comment after a continuation": (go, go.replace(" \\\n", " \\\n          #\n")),
+            "step continue-on-error": (step, step.replace("        run: |", "        continue-on-error: true\n        run: |")),
+            "step continue-on-error last": ("\n" + hostapd, "\n        continue-on-error: true\n" + hostapd),
+            "step shell without -e": (step, step.replace("        run: |", "        shell: bash {0}\n        run: |")),
+            "step if": (step, step.replace("        working", "        if: false\n        working")),
+            "job continue-on-error": (job, job + "    continue-on-error: true\n"),
+            "job defaults shell": (job, job + "    defaults:\n      run:\n        shell: bash {0}\n"),
+            "job key after the steps": ("\n  hostcheck:", "\n    continue-on-error: true\n  hostcheck:"),
+            "top-level defaults": ("\njobs:\n", "\ndefaults:\n  run:\n    shell: bash {0}\njobs:\n"),
+            "top-level BASH_ENV": ("  GOTOOLCHAIN: local\n", "  GOTOOLCHAIN: local\n  BASH_ENV: /tmp/x\n"),
+            "an earlier step writes GITHUB_ENV": ("          runsc --version\n", "          runsc --version\n          echo BASH_ENV=/tmp/x >> \"$GITHUB_ENV\"\n"),
+            "a carriage return": ("          rc=0\n", "          rc=0\r          true\n"),
+            "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
+            "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
         }
-        for what, mutant in mutants.items():
-            self.assertNotEqual(mutant, step, what)
-            self.assertFalse(self.infer_wired(mutant), what)
+        for what, (old, new) in edits.items():
+            with self.subTest(what):
+                self.assertIn(old, ci)
+                self.assertTrue(machines_problems(ci.replace(old, new, 1)))
         sup = (ROOT / "broker" / "infer" / "supervise" / "supervise_test.go").read_text()
         for name in ("TestServiceRunsInInferenceLeaf", "TestServiceOOMStaysInLeaf"):
             self.assertRegex(sup, rf"(?m)^func {name}\(t \*testing\.T\)", name)
+
 
 class FuzzStepTest(unittest.TestCase):
     """The short fuzz step in broker-checks names every broker target, and each one exists."""
