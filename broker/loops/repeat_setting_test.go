@@ -38,7 +38,7 @@ func TestP6RepeatedOwnerSettingAfterAFailedOne(t *testing.T) {
 			ctx := context.Background()
 			clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
 			spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
-				MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: SpareLimits(DefaultSpareCalls), Now: clk.now})
+				MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: SpareLimits(NoSpareBudget), Now: clk.now})
 			if err != nil {
 				t.Fatal(err)
 			}

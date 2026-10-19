@@ -268,7 +268,7 @@ func New(cfg Config) (*Scheduler, error) {
 		return nil, err
 	}
 	if b == nil {
-		s.st = state{Settings: Settings{SpareCalls: DefaultSpareCalls}}
+		s.st = state{Settings: Settings{SpareCalls: NoSpareBudget}}
 	} else if err := json.Unmarshal(b, &s.st); err != nil {
 		return nil, fmt.Errorf("loops: saved state: %v", err)
 	}
@@ -396,7 +396,7 @@ func (s *Scheduler) tick(ctx context.Context, idle bool) (bool, time.Duration) {
 		return false, s.cfg.Idle
 	}
 	used, limit := s.cfg.Spare.Overall()
-	modelOK := set.SpareCalls > 0 && used.Calls < limit.Calls && used.Tokens < limit.Tokens
+	modelOK := set.SpareCalls != 0 && used.Calls < limit.Calls && used.Tokens < limit.Tokens
 	parkedSeen := false
 	for _, src := range s.order(set) {
 		job, ok := src.Next(ctx, modelOK)
@@ -668,7 +668,7 @@ func (s *Scheduler) Digest() []string {
 	}
 	used, _ := s.cfg.Spare.Overall()
 	if used.Calls > 0 {
-		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, set.SpareCalls))
+		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, budgetCalls(set.SpareCalls)))
 	}
 	for _, src := range s.cfg.Sources {
 		if d, ok := src.(Digester); ok && set.On(src.Loop()) {

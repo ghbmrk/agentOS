@@ -466,11 +466,7 @@ func (ix *Index) prepare(id string, it Item, now time.Time) (pendingPut, error) 
 	}
 	it.Source.Ref = ix.scrub.Scrub(it.Source.Ref)
 	it.Text = ix.scrub.Scrub(it.Text)
-	facts := make([]Fact, 0, len(it.Facts))
-	for _, f := range it.Facts {
-		facts = append(facts, ix.scrub.ScrubFact(f))
-	}
-	it.Facts = facts
+	it.Facts = ix.scrub.ScrubFacts(it.Facts)
 	it.Source.DerivedFrom = append([]string(nil), it.Source.DerivedFrom...)
 	it.Vector, it.VecID = nil, ""
 	if ix.emb != nil {

@@ -67,6 +67,12 @@ func TestGroupedCodesRemoved(t *testing.T) {
 		t.Fatalf("alone: %q -> %q", v, out)
 	}
 	checkCodeInText(t, sc, v)
+	// Seed of #1268: a later group ("xoxp") starts a Slack token shape.
+	v = "uhoc-xoxp-mphy-djyb-ufam-wkba-znry"
+	if out := sc.Scrub(v); out != Removed {
+		t.Fatalf("alone: %q -> %q", v, out)
+	}
+	checkCodeInText(t, sc, v)
 }
 
 // A known token shape that starts inside a dash- or underscore-joined run is

@@ -214,8 +214,7 @@ func (f fakeOwnerAgent) Deliver(context.Context, string, bool) error { return f.
 
 // PE7 (condition 14, L3 on #149): owner chat delivered to a sleeping
 // agent is noted at its delivery time and wakes the agent as an owner
-// message, with the holding line on a slow wake; a failed delivery wakes
-// nothing.
+// message, even on a slow wake; a failed delivery wakes nothing.
 func TestOwnerChatToASleepingAgent(t *testing.T) {
 	r := newSleepRig(t)
 	var a lateAgent
@@ -243,8 +242,8 @@ func TestOwnerChatToASleepingAgent(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if r.holdCount() != 1 || r.last().Cause != wakeOwner {
-		t.Fatalf("holding lines %d, journal %+v", r.holdCount(), r.last())
+	if r.last().Cause != wakeOwner {
+		t.Fatalf("journal %+v", r.last())
 	}
 }
 

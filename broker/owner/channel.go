@@ -114,6 +114,10 @@ type Config struct {
 	// OwnerName is the owner's own name, "" when unknown; the box's name
 	// may not be it (CH-21).
 	OwnerName string
+	// AfterFunc runs f once d has passed on the clock Now reads, and
+	// returns what stops it; the acknowledgement (OWN-4) waits on it. Nil
+	// is time.AfterFunc.
+	AfterFunc func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -179,10 +183,29 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	recent      recentWindow // texts to the owner a reaction may mark (CH-11)
-	rename      *renameReq   // a NAME waiting for its code (name.go)
-	limited     []time.Time
-	active      time.Time // last owner message the control handler ran
-	alertAt     time.Time
+	// reactMu orders a reaction event's delivery against ForgetRecent: an
+	// event is checked and delivered under its read lock, and a deletion
+	// clears the window under its write lock (CAP-3). It is taken before mu.
+	reactMu sync.RWMutex
+	rename  *renameReq // a NAME waiting for its code (name.go)
+	limited []time.Time
+	active  time.Time // last owner message the control handler ran
+	// chat is when owner task chat last reached the agent, which only an
+	// unlocked session does; control words, settings and answers never
+	// set it (security B1 on #2372).
+	chat    time.Time
+	alertAt time.Time
+	// ackStop stops the acknowledgement due for task chat, nil when none
+	// is (OWN-4); ackGen tells a timer that fired late from the one now
+	// due. ackSend orders an acknowledgement against Converse's replies;
+	// it is taken before mu.
+	// replies counts replies sent, so a delivery arms nothing when one
+	// went out meanwhile; ackStops is the STOP count when it was armed.
+	ackStop  func() bool
+	ackGen   uint64
+	ackSend  sync.Mutex
+	replies  uint64
+	ackStops int64
 	// floodAlertAt is the last flood alert; floods counts the events for
 	// the digest by kind.
 	floodAlertAt time.Time
@@ -274,6 +297,9 @@ func New(cfg Config) (*Channel, error) {
 		return nil, err
 	}
 	checkPacing(&st)
+	if cfg.AfterFunc == nil {
+		cfg.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
 	c := &Channel{
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
@@ -281,10 +307,18 @@ func New(cfg Config) (*Channel, error) {
 		queued: map[string]*Queued{}, released: map[string]time.Time{}, lateUndo: map[string]bool{},
 		boot: &bootReport{pending: st.Pending, queued: st.Queued},
 	}
+	c.recent.forgotAt = st.ForgotAt
+	c.recent.restore(st.Guarded, cfg.Now())
 	if cfg.Modem != nil {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
+	var agent control.Agent
+	if cfg.Agent != nil {
+		agent = chatAgent{Agent: cfg.Agent, c: c}
+	}
+	// The page-only requests' line is STATUS's first note, so the texted
+	// reply, which leaves out notes that do not fit, always keeps it.
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append([]func() string{c.LocalWaiting}, cfg.Notes...), Now: cfg.Now,
 		Settings: c.settings, HelpExtra: strings.TrimSpace(cfg.HelpExtra + " " + pacingHelp), Answer: cfg.Answer}
 	return c, nil
 }
@@ -323,6 +357,7 @@ type route struct {
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
 	react    string // a reaction event for the agent (CH-11)
+	reactGen uint64 // recent.gen() when react was worded (CAP-3)
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
 	retry    bool   // RETRY: ask about the digest's unclear effects, outside the lock
 	undo     string // an UNDO ID the channel does not hold, for the hook
@@ -426,10 +461,7 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
 	if rt.react != "" {
-		c.mu.Lock()
-		c.active = rt.at
-		c.mu.Unlock()
-		replies = append(replies, c.ctrl.Event(ctx, from, rt.react)...)
+		replies = append(replies, c.deliverReaction(ctx, from, rt)...)
 	}
 	if rt.undo != "" {
 		replies = append(replies, c.undoElsewhere(ctx, rt.undo))
@@ -486,7 +518,7 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
 	// A reaction is read first: never a control word, a code, RUN or an
 	// approval, whatever it quotes (CH-11).
-	if rx, ok := parseReaction(text); ok {
+	if rx, ok := c.readReaction(text); ok {
 		return c.reactionLocked(text, rx, now, c.codes.unlocked(now))
 	}
 	if c.codes.st.Challenged {
@@ -521,7 +553,7 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			if h := c.held; h != nil && h.ready && unlocked {
 				c.held = nil
 				if h.react != "" {
-					return route{react: h.react}
+					return route{react: h.react, reactGen: c.recent.gen()}
 				}
 				return route{delegate: h.text, run: true}
 			}
@@ -960,6 +992,45 @@ func (c *Channel) Active(d time.Duration) bool {
 	return !c.active.IsZero() && c.cfg.Now().Sub(c.active) < d
 }
 
+// Chatting reports whether owner task chat reached the agent within the
+// last d: the owner is talking with the agent, so its questions are
+// conversation (CH-15, #2363). Unlike Active, a control word, a setting
+// or a question's answer does not count, since none reaches the agent
+// and each needs only the owner's number, which can be spoofed.
+func (c *Channel) Chatting(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.chat.IsZero() && c.cfg.Now().Sub(c.chat) < d
+}
+
+// chatAgent records when the control handler delivers owner task chat
+// to the agent, which it does only in an unlocked session, and arms the
+// acknowledgement from when the message reached the box (OWN-4): a
+// sleeping agent's inbox takes it too, so the wait covers a wake. A
+// reaction event (eventDelivery) arms none, nor does a delivery the agent
+// replied to before it returned.
+type chatAgent struct {
+	control.Agent
+	c *Channel
+}
+
+func (a chatAgent) Deliver(ctx context.Context, text string, public bool) error {
+	at := a.c.cfg.Now()
+	a.c.mu.Lock()
+	replies := a.c.replies
+	a.c.mu.Unlock()
+	err := a.Agent.Deliver(ctx, text, public)
+	if err == nil {
+		a.c.mu.Lock()
+		a.c.chat = a.c.cfg.Now()
+		if ctx.Value(eventDelivery{}) == nil && a.c.replies == replies {
+			a.c.armAckLocked(at)
+		}
+		a.c.mu.Unlock()
+	}
+	return err
+}
+
 // LastActive is when the owner last sent a message the control handler
 // ran (task chat, STATUS, a setting); zero if never. The sleeper reads it
 // for the agent's idle time (PE7).
@@ -1012,7 +1083,12 @@ func (c *Channel) Run(ctx context.Context) error {
 	}
 	c.Boot()
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	defer func() {
+		wg.Wait()
+		c.mu.Lock()
+		c.stopAckLocked() // no acknowledgement outlives the channel
+		c.mu.Unlock()
+	}()
 	send := func(to string, rs []string) {
 		for _, r := range rs {
 			if c.cfg.Modem.Send(to, r) != nil {

@@ -13,7 +13,9 @@ import (
 // withdrawing narrows what leaves the box, as STOP, NO and revoke do, so
 // it needs none. The answer is setup's own marker (setupPrivate), which
 // the router asks per call (privateAllowed), so a change applies to the
-// next call without a restart.
+// next call without a restart. A Private plan run already admitted asks
+// it too, before each content request on its worker route
+// (workerRoutes.privateGate, #2359).
 
 // providerList is the providers with whether a key is held and whether
 // private data is allowed, by the flag or the marker as the router asks,

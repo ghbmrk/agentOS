@@ -75,12 +75,15 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	// escalated it (SR3-5-f1a). The judgements are consumed whatever
 	// happens, so another attempt is judged again by its own recheck.
 	// Trash and spam are checked the same way (SR3-5-f2a).
-	pn, agreed := a.takePin(in.ID)
+	pn, perr := a.takePin(in.ID)
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
 		return notApplied(err)
 	}
-	if !agreed || pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert {
+	if perr != nil {
+		return notApplied(perr)
+	}
+	if pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert {
 		return notApplied(errChanged)
 	}
 	out := a.organize(ctx, o, pl)
@@ -90,9 +93,29 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	return out
 }
 
-// errChanged: the message an organize would act on is not the one its
-// approval judged, or now hides an alert the approval did not escalate.
-var errChanged = errors.New("mail: changed since approval")
+// The organize refusals and unknowns, one fixed wording per cause, so
+// the journal and the digest name the true one (CH-19, SR3-5-f4).
+var (
+	// errChanged: the message an organize would act on is not the one
+	// its approval judged, or now hides an alert the approval did not
+	// escalate.
+	errChanged = errors.New("mail: changed since approval")
+	// errNoCheck: Execute found no judgement of the intent to act under.
+	errNoCheck = errors.New("mail: no check ran for this message; ask again")
+	// errChecksDiffer: the judgements since the last Execute disagree on
+	// the message or on whether hiding it escalated.
+	errChecksDiffer = errors.New("mail: the message changed between checks; ask again")
+	// errCheckGone: Reconcile has no judgement for the attempt (a restart,
+	// or an earlier Reconcile consumed it), so a hidden alert cannot be
+	// confirmed as approved.
+	errCheckGone = errors.New("mail: the earlier check is gone, so this cannot be confirmed")
+	// errNotMoved: the message found is not in the folder the pinned move
+	// put it in.
+	errNotMoved = errors.New("mail: the message is not where the move put it")
+	// errStillThere: the pinned place still holds a message, so the one
+	// found elsewhere is not the moved one.
+	errStillThere = errors.New("mail: the message is still where it was")
+)
 
 // organize performs a planned organize, trash or spam effect.
 func (a *Adapter) organize(ctx context.Context, o Op, pl plan) journal.Outcome {
@@ -181,7 +204,10 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 				return unknown(err)
 			}
 		}
-		if o.Hides && pl.alert && !(pinned && pn.alert) {
+		if o.Hides && pl.alert && !pinned {
+			return unknown(errCheckGone)
+		}
+		if o.Hides && pl.alert && !pn.alert {
 			return unknown(errChanged)
 		}
 	}
@@ -204,14 +230,14 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 // no longer holds a message.
 func (a *Adapter) movedFrom(ctx context.Context, pn pin, m Message) error {
 	if pn.to == "" || m.Folder != pn.to {
-		return errChanged
+		return errNotMoved
 	}
 	ms, err := a.cfg.Store.Fetch(ctx, pn.ref.Folder, pn.ref.Validity, []uint32{pn.ref.UID})
 	if err != nil {
 		return err
 	}
 	if len(ms) > 0 {
-		return errChanged
+		return errStillThere
 	}
 	return nil
 }

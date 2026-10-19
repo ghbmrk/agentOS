@@ -97,3 +97,213 @@ func TestStreamingEmitsCleanPrefixPromptly(t *testing.T) {
 		t.Fatalf("held back %d bytes, want < %d", len(clean)-buf.Len(), r.MaxLen())
 	}
 }
+
+// canaryRefresh is a synthetic Codex refresh token in the measured shape
+// (#2313): segments 2.1.191 over [A-Za-z0-9_].
+var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
+
+// declaredFormats mirror provagent's built-in credential formats, each with
+// a synthetic canary (FMT-3).
+var declaredFormats = map[string]string{
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                                  "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:                     "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                               canaryRefresh,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                          "sk-ant-oat01-CANARYcanary0000000000000000",
+}
+
+func formatRedactor(t *testing.T, values ...[]byte) *Redactor {
+	t.Helper()
+	var fs []string
+	for f := range declaredFormats {
+		fs = append(fs, f)
+	}
+	r, err := NewRedactor(values).WithFormats(fs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// leaks reports whether out carries any 6-byte run of canary.
+func leaks(out []byte, canary string) bool {
+	for i := 0; i+6 <= len(canary); i++ {
+		if bytes.Contains(out, []byte(canary[i:i+6])) {
+			return true
+		}
+	}
+	return false
+}
+
+// REQ: CRED-7
+func TestRedactorScrubsDeclaredFormats(t *testing.T) {
+	val := canary(t)
+	base := NewRedactor([][]byte{val})
+	r := formatRedactor(t, val)
+	for f, c := range declaredFormats {
+		got := r.Redact([]byte(`{"text":"a ` + c + ` b"}`))
+		if want := `{"text":"a ` + Placeholder + ` b"}`; string(got) != want {
+			t.Errorf("%s: got %q want %q", f, got, want)
+		}
+		if !bytes.Contains(base.Redact([]byte(c)), []byte(c)) {
+			t.Errorf("%s: WithFormats changed the redactor it was called on", f)
+		}
+	}
+	if got := r.Redact(append([]byte("v="), val...)); string(got) != "v="+Placeholder {
+		t.Errorf("value patterns lost: %q", got)
+	}
+	for _, bad := range [][]string{{`(`}, {`x*`}, {""}, {`\bsk-[a-z]{4,}`, `[`}} {
+		if _, err := base.WithFormats(bad...); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
+	}
+}
+
+// An rt_ token after a JSON escape or a percent-encoded byte, or with a dot
+// in it, is redacted whole.
+// REQ: CRED-7
+func TestRedactorScrubsEscapedAndDottedRtTokens(t *testing.T) {
+	r := formatRedactor(t)
+	for _, tok := range []string{
+		"rt_" + strings.Repeat("a", 40),
+		"rt_" + strings.Repeat("SYNTHqz_0", 5) + "." + strings.Repeat("SYNTHqz-0", 5),
+	} {
+		for _, esc := range []string{`\n`, `\t`, `\u0022`, `\"`, `"`, "%22", "refresh_token%3D", " "} {
+			msg := []byte(`{"text":"line1` + esc + tok + `"}`)
+			got := r.Redact(msg)
+			if leaks(got, tok[3:]) || !bytes.Contains(got, []byte(Placeholder)) {
+				t.Errorf("%q: got %q", msg, got)
+			}
+		}
+	}
+}
+
+// REQ: CRED-7
+func TestRedactorScrubsDeclaredFormatSplitAcrossWrites(t *testing.T) {
+	r := formatRedactor(t)
+	for f, c := range declaredFormats {
+		msg := []byte("data: {\"t\":\"" + c + "\"}\n\ndata: x " + c + "\n")
+		want := r.Redact(msg)
+		if leaks(want, c) {
+			t.Fatalf("%s: whole-message redaction leaks: %q", f, want)
+		}
+		for i := 0; i <= len(msg); i++ {
+			for j := i; j <= len(msg); j += 5 {
+				var buf bytes.Buffer
+				w := r.Writer(&buf)
+				for _, part := range [][]byte{msg[:i], msg[i:j], msg[j:]} {
+					if _, err := w.Write(part); err != nil {
+						t.Fatal(err)
+					}
+					if leaks(buf.Bytes(), c) {
+						t.Fatalf("%s split %d/%d: emitted part of the canary: %q", f, i, j, buf.Bytes())
+					}
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(buf.Bytes(), want) {
+					t.Fatalf("%s split %d/%d: got %q want %q", f, i, j, buf.Bytes(), want)
+				}
+			}
+		}
+	}
+	// A canary ending a stream far past the hold-back is still held whole
+	// until it ends.
+	long := append(bytes.Repeat([]byte("x "), FormatMaxLen), "Zq.C."+strings.Repeat("a", 200)...)
+	var buf bytes.Buffer
+	w := r.Writer(&buf)
+	for k := 0; k < len(long); k += 7 {
+		e := k + 7
+		if e > len(long) {
+			e = len(long)
+		}
+		if _, err := w.Write(long[k:e]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.Write([]byte("aaaa end")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("aaaa")) {
+		t.Errorf("tail of a streamed match emitted")
+	}
+}
+
+// The stream hold-back is bounded as FormatMaxLen says: every write holds
+// back its last FormatMaxLen-1 bytes, a shorter match running to the end is
+// held whole, and of a longer one at least the first FormatMaxLen bytes are
+// redacted (CAP-11-plan-fu4-P17).
+// REQ: CRED-7
+func TestFormatStreamHoldBounds(t *testing.T) {
+	r := formatRedactor(t)
+	stream := func(in []byte) (emitted, out []byte) {
+		var buf bytes.Buffer
+		w := r.Writer(&buf)
+		for k := 0; k < len(in); k += 100 {
+			e := k + 100
+			if e > len(in) {
+				e = len(in)
+			}
+			if _, err := w.Write(in[k:e]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		emitted = append([]byte(nil), buf.Bytes()...)
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return emitted, buf.Bytes()
+	}
+	clean := bytes.Repeat([]byte("x"), 6000)
+	if emitted, _ := stream(clean); len(clean)-len(emitted) != FormatMaxLen-1 {
+		t.Errorf("clean stream held back %d bytes, want %d", len(clean)-len(emitted), FormatMaxLen-1)
+	}
+	short := "Zq.C." + strings.Repeat("a", FormatMaxLen-6)
+	if _, out := stream([]byte(short + " end")); string(out) != Placeholder+" end" {
+		t.Errorf("match of %d bytes: got %.40q...", len(short), out)
+	}
+	long := "Zq.C." + strings.Repeat("a", 5000)
+	_, out := stream([]byte(long + " end"))
+	if !bytes.HasPrefix(out, []byte(Placeholder)) {
+		t.Fatalf("long match: no placeholder first: %.40q", out)
+	}
+	if leaked := len(out) - len(Placeholder) - len(" end"); leaked > len(long)-FormatMaxLen {
+		t.Errorf("long match: %d bytes of it emitted, want at most %d", leaked, len(long)-FormatMaxLen)
+	}
+}
+
+// A backslash run longer than FormatMaxLen before an rt_ token, fed in small
+// writes, leaves none of the token in what the stream emits: the format takes
+// a bounded run, so the match never outgrows the hold-back (#2375).
+// REQ: CRED-7
+func TestRtFormatBackslashRunPastHoldBackDoesNotLeak(t *testing.T) {
+	r := formatRedactor(t)
+	tok := "rt_" + strings.Repeat("a", 300)
+	for _, run := range []int{1, 16, 17, FormatMaxLen - 40, FormatMaxLen, FormatMaxLen + 100} {
+		in := []byte("x" + strings.Repeat(`\`, run) + "n" + tok + " end")
+		var buf bytes.Buffer
+		w := r.Writer(&buf)
+		for k := 0; k < len(in); k += 100 {
+			e := k + 100
+			if e > len(in) {
+				e = len(in)
+			}
+			if _, err := w.Write(in[k:e]); err != nil {
+				t.Fatal(err)
+			}
+			if leaks(buf.Bytes(), tok[3:]) {
+				t.Fatalf("run %d: emitted part of the token", run)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if leaks(buf.Bytes(), tok[3:]) {
+			t.Errorf("run %d: output holds part of the token", run)
+		}
+	}
+}

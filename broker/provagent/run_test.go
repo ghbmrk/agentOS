@@ -101,15 +101,16 @@ type seeder struct {
 	err       error
 	calls     []string
 	providers []string
+	private   []bool
 	closed    []string
 }
 
 func (s *seeder) Close(id string) { s.mu.Lock(); s.closed = append(s.closed, id); s.mu.Unlock() }
 
-func (s *seeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s *seeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls, s.providers = append(s.calls, id), append(s.providers, provider)
+	s.calls, s.providers, s.private = append(s.calls, id), append(s.providers, provider), append(s.private, private)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -208,6 +209,24 @@ func TestRunsAStubEndToEnd(t *testing.T) {
 	}
 	if len(g.sd.calls) != 1 || g.sd.calls[0] != g.h.created[0] || g.sd.providers[0] != "stub" {
 		t.Errorf("seed for %v: %v %v", g.h.created, g.sd.calls, g.sd.providers)
+	}
+}
+
+// The run's label is bound to its route at the seed, so the vault process
+// rechecks a Private run's permission per content request and a withdrawal
+// reaches a run already admitted (CAP-9, CH-3; #2359). A Public run is
+// not bound.
+func TestCAP9SeedBindsTheRunsLabelToItsRoute(t *testing.T) {
+	g := newRig(ok("x"))
+	for _, l := range []vm.Label{vm.Private, vm.Public} {
+		rq := req("b")
+		rq.Label = l
+		if _, err := g.r.Run(context.Background(), rq); err != nil {
+			t.Fatalf("%v run: %v", l, err)
+		}
+	}
+	if !reflect.DeepEqual(g.sd.private, []bool{true, false}) {
+		t.Fatalf("seeded private = %v, want [true false] for a Private then a Public run", g.sd.private)
 	}
 }
 
@@ -786,5 +805,129 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 	}
 	if g.events[0].Provider != "stub" || g.events[0].Outcome != "ok" {
 		t.Errorf("event %+v", g.events[0])
+	}
+}
+
+// REQ: OP-8
+func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(g *rig, r *Request)
+	}{
+		{"unknown provider", func(_ *rig, r *Request) { r.Provider = "nope" }},
+		{"over-brief", func(_ *rig, r *Request) { r.Brief = strings.Repeat("b", 2<<10) }},
+		{"admit refused", func(g *rig, _ *Request) { g.usage.Readings = []Reading{fresh("5h", 0.05)} }},
+	}
+	for _, c := range cases {
+		g := newRig(ok("x"))
+		rq := req("b")
+		c.set(g, &rq)
+		if _, err := g.r.Run(context.Background(), rq); err == nil {
+			t.Fatalf("%s: ran", c.name)
+		}
+		if len(g.events) != 0 {
+			t.Errorf("%s: %d journal entries", c.name, len(g.events))
+		}
+	}
+}
+
+// builtinCanaries holds one synthetic canary per built-in credential
+// format. A format added to Builtins without a canary fails the test.
+var builtinCanaries = map[string]string{
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                                  "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:                     "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                               canaryRefresh,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                          "sk-ant-oat01-CANARYcanary0000000000000000",
+}
+
+// REQ: CRED-7
+func TestResultWithADeclaredFormatCanaryIsWithheld(t *testing.T) {
+	for id, b := range Builtins() {
+		for _, f := range b.CredFormats {
+			canary, found := builtinCanaries[f]
+			if !found {
+				t.Errorf("%s: no canary for format %s", id, f)
+				continue
+			}
+			g := newRig(ok("here you go " + canary + " done"))
+			d := g.r.Decls["stub"]
+			d.CredFormats = b.CredFormats
+			g.r.Decls["stub"] = d
+			// The default shapes see nothing, so only the declared
+			// formats can withhold the result.
+			g.r.Scan = func(string) bool { return false }
+			out, err := g.r.Run(context.Background(), req("b"))
+			if reasonOf(err) != Withheld {
+				t.Errorf("%s %s: %q %v", id, f, out, err)
+				continue
+			}
+			all := fmt.Sprintf("%q %v %+v %q", out, err, g.events, g.logs)
+			for _, part := range []string{canary, canary[:len(canary)/2], canary[len(canary)/2:]} {
+				if strings.Contains(all, part) {
+					t.Errorf("%s %s: canary leaked: %s", id, f, all)
+				}
+			}
+			if len(g.events) != 1 || g.events[0].Outcome != string(Withheld) {
+				t.Errorf("%s %s: journal %+v", id, f, g.events)
+			}
+		}
+	}
+}
+
+// REQ: OP-8
+func TestAdmittedRunIsJournaledOnceWithItsMachine(t *testing.T) {
+	g := newRig(ok("x"))
+	rq := req("b")
+	rq.Machine = "wk-a"
+	if _, err := g.r.Run(context.Background(), rq); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.events) != 1 || g.events[0].Machine != "wk-a" || g.events[0].Outcome != "ok" {
+		t.Errorf("events %+v", g.events)
+	}
+	// A refusal after admission is journaled too.
+	g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 1} }
+	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != Failed {
+		t.Fatalf("failing CLI: %v", err)
+	}
+	if len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
+		t.Errorf("events %+v", g.events)
+	}
+}
+
+// REQ: OP-8
+func TestNilJournalRunLogsUnmetered(t *testing.T) {
+	g := newRig(ok("x"))
+	g.r.Journal = nil
+	for i := 0; i < 2; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, l := range g.logs {
+		if strings.Contains(l, "unmetered") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("unmetered lines %d: %q", n, g.logs)
+	}
+}
+
+// A declaration whose formats are malformed does not run (FMT-4).
+//
+// REQ: CRED-7
+func TestADeclarationWithMalformedFormatsDoesNotRun(t *testing.T) {
+	for name, f := range map[string][]string{"missing": nil, "matches empty": {`x*`}, "does not compile": {`(`}} {
+		g := newRig(ok("fine"))
+		d := g.r.Decls["stub"]
+		d.CredFormats = f
+		g.r.Decls["stub"] = d
+		out, err := g.r.Run(context.Background(), req("b"))
+		if reasonOf(err) != Unqualified || len(g.h.created) != 0 {
+			t.Errorf("%s: %q %v, created %v", name, out, err, g.h.created)
+		}
 	}
 }

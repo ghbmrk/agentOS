@@ -324,6 +324,9 @@ type Verified struct {
 	// attested: WithAttestations counted an independent pass, so the
 	// release's admission rested on the attestor policy (SR3-6f-4).
 	attested bool
+	// judged: made by WithAttestations. A raw Check result was not, so
+	// Stage binds it when its check listed any attestor (SR3-6-f6).
+	judged bool
 	// The store that checked it, and the root and targets versions it
 	// trusted then: Stage refuses it once either moved (L3 on #133).
 	storeDir       string
@@ -406,6 +409,25 @@ func (v *Verified) policyCurrent() error {
 	return nil
 }
 
+// Bound reports whether v's admission still holds under the box's
+// attestor policy: true for a release that never rested on the policy (a
+// copy judged with no independent pass, or a raw result checked with no
+// attestor listed), and otherwise only while the policy is the one v was
+// checked under. It is false for a nil or unsealed v and
+// when the store cannot be read (SR3-6-f6).
+func (v *Verified) Bound() bool {
+	return v.ok() && (!v.restsOnPolicy() || v.policyCurrent() == nil)
+}
+
+// restsOnPolicy: v's admission may rest on the attestor policy, so Stage
+// binds it. A release WithAttestations did not judge (the raw Check
+// result) rests on it when its check listed any attestor, since a caller
+// may have admitted it on passes: staging it cannot step around the
+// binding of the copy that was judged (SR3-6-f6).
+func (v *Verified) restsOnPolicy() bool {
+	return v.security || v.attested || (!v.judged && (len(v.allowed) > 0 || len(v.pinned) > 0))
+}
+
 // WithAttestations returns a copy whose Security reflects
 // SecurityAutoStage(atts, own), and which Stage binds to the attestor
 // policy when any independent pass counted. An unsealed v gives nil.
@@ -416,6 +438,7 @@ func (v *Verified) WithAttestations(atts [][]byte, own ed25519.PublicKey) *Verif
 	c := *v
 	c.security = v.SecurityAutoStage(atts, own) == nil
 	c.attested = v.IndependentPasses(atts, own) > 0
+	c.judged = true
 	return &c
 }
 
@@ -1149,8 +1172,9 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	// The commit point for attestation authority: under the lock that
 	// NoteAttestors takes, so a narrowing it returned from is seen here.
-	// An ordinary release admitted on passes is bound too (SR3-6f-4).
-	if v.security || v.attested {
+	// An ordinary release admitted on passes is bound too (SR3-6f-4), and
+	// so is one WithAttestations never judged (SR3-6-f6).
+	if v.restsOnPolicy() {
 		if err := v.policyCurrent(); err != nil {
 			return err
 		}

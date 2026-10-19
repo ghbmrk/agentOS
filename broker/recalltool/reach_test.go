@@ -1006,3 +1006,13 @@ func TestCAP3SendThatMayHaveGoneIsWork(t *testing.T) {
 		t.Fatalf("asked %v, reset %v, erased %v", x.ask.asked, x.vm.calls, x.j.erased)
 	}
 }
+
+// A photo's deletion names it as a photo, never by content (CH-photo-b).
+func TestCAP3PhotoDeletionIsNamedAPhoto(t *testing.T) {
+	r := &Reach{kinds: map[string]string{"p1": "photo", "p2": "photo", "m": "mail"}}
+	for ids, want := range map[string]string{"p1": "a photo", "p1 p2": "2 photos", "p1 m": "2 records"} {
+		if got := r.what(strings.Fields(ids)); got != want {
+			t.Errorf("what(%s) = %q, want %q", ids, got, want)
+		}
+	}
+}

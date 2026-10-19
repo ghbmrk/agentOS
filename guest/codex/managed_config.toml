@@ -8,8 +8,13 @@
 # TOML puts every key after a [table] header into that table, so top-level keys come first.
 
 # The only route out: the in-worker forwarder (#1014), which relays to the egress socket, where
-# the proxy swaps the placeholder login for the owner's. The refresh URL override is in launch.json.
+# the proxy swaps the placeholder login for the owner's. The forwarder sets the refresh URL
+# override when it starts the CLI (ASSUMPTIONS C18).
 model_provider = "agentos"
+
+# Plan-login traffic goes to the forwarder too; unset, a plan login calls chatgpt.com directly
+# (#2085). A refresh in the middle of a turn still loses that turn on 0.162.1 (ASSUMPTIONS S8-W1-s8-C20).
+chatgpt_base_url = "http://127.0.0.1:18432/backend-api/"
 
 # The model is pinned, not left to the CLI: unset, 0.162.1 takes the default of its model catalog,
 # which it refreshes from the provider at every start, so the provider could change the model
@@ -75,6 +80,10 @@ in_app_browser = false
 browser_use_full_cdp_access = false
 tool_suggest = false
 guardian_approval = false
+# The shell snapshot (stable and on by default in 0.162.1) is written under CODEX_HOME, which tools
+# cannot read, and every tool command first sources it: dash exits 2 on that failed `.`, so no
+# tool command runs at all (#1720, broker/e2e/ASSUMPTIONS.md E6).
+shell_snapshot = false
 
 # No telemetry, feedback upload or saved history.
 [analytics]

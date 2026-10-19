@@ -3,11 +3,13 @@ package loops
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // REQ: LOOP-0, LOOP-2, LOOP-6, OP-5
@@ -23,15 +25,63 @@ func TestLoopsAreOnByDefaultAndSaidInOneLine(t *testing.T) {
 			t.Fatalf("loop %s is off by default", l)
 		}
 	}
-	if set.SpareCalls != DefaultSpareCalls {
-		t.Fatalf("default spare budget %d", set.SpareCalls)
+	if set.SpareCalls != NoSpareBudget {
+		t.Fatalf("default spare budget %d, want no fixed budget", set.SpareCalls)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(DefaultSpareCalls) {
-		t.Fatalf("spare meter cap %+v, want the default budget", limit)
+	if _, limit := r.spare.Overall(); limit != SpareLimits(NoSpareBudget) {
+		t.Fatalf("spare meter cap %+v, want no fixed budget", limit)
 	}
 	line := DefaultsLine(set.SpareCalls)
-	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "100 AI calls a day") || !strings.Contains(line, "and check for updates") {
+	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "spare plan quota") || !strings.Contains(line, "at most 1500 AI calls a day while a pay-per-token key") || !strings.Contains(line, "and check for updates") {
 		t.Fatalf("defaults line %q", line)
+	}
+}
+
+// LOOP-0 (#2291) and OP-8: the default has no fixed call budget, but loop
+// calls can reach pay-per-token routes, which keep a money cap, so the
+// spare meter holds the OP-8 default cap. Security's repro on #2319: 2000
+// replay calls of 10 000 tokens (20M) were all admitted; past the cap they
+// are refused. A budget at or under the cap applies on text; above it is a
+// raise.
+func TestNoFixedBudgetKeepsThePaidRouteMoneyCap(t *testing.T) {
+	if SpareLimits(NoSpareBudget) != meter.DefaultOverallCap {
+		t.Fatalf("no-budget cap %+v, want the OP-8 default %+v", SpareLimits(NoSpareBudget), meter.DefaultOverallCap)
+	}
+	if SpareLimits(0) != (meter.Limits{Calls: 1, Tokens: 1}) {
+		t.Fatalf("a zero budget must fit no call: %+v", SpareLimits(0))
+	}
+	r := newRig(t)
+	admitted := 0
+	for i := 0; i < 2000; i++ {
+		c, err := r.spare.Start("eval-"+strconv.Itoa(i), 9000, 1000)
+		if err != nil {
+			break
+		}
+		c.Done(10000)
+		admitted++
+	}
+	if admitted != int(meter.DefaultOverallCap.Calls) {
+		t.Fatalf("%d loop calls admitted with no fixed budget, want the paid-route cap %d", admitted, meter.DefaultOverallCap.Calls)
+	}
+	used, _ := r.spare.Overall()
+	if used.Tokens > meter.DefaultOverallCap.Tokens {
+		t.Fatalf("%d tokens spent, over the paid-route cap", used.Tokens)
+	}
+	ctx := context.Background()
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 2000", true); ok && r.s.Settings().SpareCalls == 2000 {
+		t.Fatalf("a budget above the paid-route cap applied on text: %q", got)
+	}
+	if asked := r.pol.wasAsked(); len(asked) != 1 || asked[0] != "loops:n1:budget:2000" {
+		t.Fatalf("a budget above the paid-route cap is a raise to ask: %v", asked)
+	}
+	if got, ok := r.s.Text(ctx, "SPARE BUDGET 1500", true); !ok || r.s.Settings().SpareCalls != 1500 {
+		t.Fatalf("a budget at the cap is narrowing and applies on text: %q %v", got, ok)
+	}
+	if asked := r.pol.wasAsked(); len(asked) != 1 {
+		t.Fatalf("a budget at the cap asked the owner: %v", asked)
+	}
+	if _, limit := r.spare.Overall(); limit != SpareLimits(1500) {
+		t.Fatalf("set budget not applied to the spare meter: %+v", limit)
 	}
 }
 
@@ -173,7 +223,7 @@ func TestOnlyTheOwnerChangesLoopSettings(t *testing.T) {
 	if err != nil || rep.State != change.StateRejected {
 		t.Fatalf("budget candidate: %+v, %v", rep, err)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(DefaultSpareCalls) {
+	if _, limit := r.spare.Overall(); limit != SpareLimits(NoSpareBudget) {
 		t.Fatalf("spare cap changed: %+v", limit)
 	}
 }
@@ -243,6 +293,9 @@ func TestRepliesSayWhatChanged(t *testing.T) {
 
 func TestBudgetRaiseAskComesFromBrokerState(t *testing.T) {
 	r := newRig(t)
+	if got, ok := r.s.Text(context.Background(), "SPARE BUDGET 100", true); !ok || r.s.Settings().SpareCalls != 100 {
+		t.Fatalf("setting a budget from none: %q %v", got, ok)
+	}
 	got, err := r.s.BudgetAsk(journal.Intent{ID: "loops:n7:budget:400"})
 	if err != nil || got != "Raise spare-time AI use from 100 to 400 calls a day?" {
 		t.Fatalf("%q, %v", got, err)

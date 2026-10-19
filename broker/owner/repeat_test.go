@@ -83,7 +83,7 @@ func TestAnErasedOnlyRepeatSaysItMayRepeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = r.inbox()
-	if !strings.Contains(text, "your agent wants to ") || !strings.Contains(text, ". It may repeat a send whose record was erased ("+at+"). Approve or deny") ||
+	if strings.Contains(text, "your agent wants") || !strings.Contains(text, "Can I ") || !strings.Contains(text, "\"? It may repeat a send whose record was erased ("+at+"). Approve or deny") ||
 		strings.Contains(text, "already sent") {
 		t.Fatalf("page erased repeat notice %q", text)
 	}

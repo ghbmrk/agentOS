@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // REQ: LOOP-0, CH-11, CH-14
@@ -84,5 +85,52 @@ func TestASettingWithNoTextSendsNothing(t *testing.T) {
 	}
 	if len(got) != 1 || len(r.agent.got()) != 0 {
 		t.Fatalf("hook got %q, agent got %d", got, len(r.agent.got()))
+	}
+}
+
+// REQ: OWN-4
+
+// TestOWN4AckDelaySetting: ACK n sets the acknowledgement's wait to n
+// seconds, 5 to 120, 5 unless set; another value gets the settings'
+// forms and changes nothing; locked, it changes nothing; HELP names it.
+func TestOWN4AckDelaySetting(t *testing.T) {
+	r, a := ackRig(t)
+	if got := r.ch.codes.st.Pacing.ackAfter(); got != DefaultAckSeconds*time.Second || DefaultAckSeconds != 5 {
+		t.Fatalf("default wait %v", got)
+	}
+	for _, bad := range []string{"ACK 4", "ACK 121", "ACK 0"} {
+		if got := r.say(bad); got != pacingForms {
+			t.Fatalf("%q: %q", bad, got)
+		}
+	}
+	if got := r.say("ACK 45"); got != "Acknowledgement set: 45 seconds. If no reply has gone by then, I text \"On it.\"" {
+		t.Fatalf("ACK 45: %q", got)
+	}
+	if n := len(r.agent.got()); n != 0 {
+		t.Fatalf("a setting reached the agent: %d", n)
+	}
+	r.say("book a table")
+	a.fire(44 * time.Second)
+	if n := r.acks(); n != 0 {
+		t.Fatalf("%d acknowledgements before 45 s", n)
+	}
+	a.fire(time.Second)
+	if n := r.acks(); n != 1 {
+		t.Fatalf("%d acknowledgements at 45 s, want 1", n)
+	}
+	if got := r.say("HELP"); !strings.Contains(got, "ACK 5") {
+		t.Fatalf("HELP: %q", got)
+	}
+	if !strings.Contains(pacingForms, "ACK 5 to 120") {
+		t.Fatalf("forms: %q", pacingForms)
+	}
+	if (Pacing{AckSeconds: 4}).valid() || (Pacing{AckSeconds: 121}).valid() || !(Pacing{AckSeconds: 5}).valid() {
+		t.Fatal("valid accepts an ACK out of range")
+	}
+
+	r = newRig(t, nil)
+	r.say("ACK 45")
+	if got := r.ch.codes.st.Pacing.AckSeconds; got != 0 {
+		t.Fatalf("locked ACK 45 set %d", got)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
+	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -299,6 +301,11 @@ func TestTheLongestListFitsTheClient(t *testing.T) {
 // #1281: the box's own networks, the setup network and the card's (both
 // apnet.Prefix), are never offered as the home Wi-Fi, however strong.
 func TestTheScanLeavesOutTheBoxsOwnNetworks(t *testing.T) {
+	// The scan filters on apnet.Prefix, so the setup network's name must
+	// start with it or the box offers its own setup network as home Wi-Fi.
+	if !strings.HasPrefix(claim.SetupSSIDPrefix, apnet.Prefix) {
+		t.Fatalf("setup prefix %q does not start with %q", claim.SetupSSIDPrefix, apnet.Prefix)
+	}
 	f := newScan()
 	f.wifi("/d/1",
 		"AgentOS-Setup-K7Q2", 99,

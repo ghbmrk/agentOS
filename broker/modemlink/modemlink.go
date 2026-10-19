@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -91,7 +92,20 @@ type Config struct {
 	// others' at most OtherPicturesPerHour an hour, each apart, past which
 	// pictures are only counted. nil: counted only.
 	Picture func(owner bool)
+	// Logf logs each text the down line could not carry: MissedLog, its
+	// kind and the calls that sent it, never its words (#2170). nil logs
+	// nothing.
+	Logf func(format string, args ...any)
 }
+
+// MissedLog starts the line Logf gets for a text counted as missed:
+// "kind=text" or "kind=request", then up to missedFrames " via <func>"
+// naming the calls outside the Link that sent it, innermost first. The box
+// e2e driver reads it to name the send a recovery text counts (#2170).
+const MissedLog = "modemlink: owner text not sent, line down:"
+
+// missedFrames is how many callers a MissedLog line names.
+const missedFrames = 3
 
 // Outage is a stretch when the owner line could not be used, and how many
 // texts to the owner could not go in it.
@@ -306,6 +320,58 @@ func (l *Link) SendReceipt(to, text string) (Receipt, error) {
 	return r, r.err()
 }
 
+// callers names up to missedFrames calls outside the Link's own methods,
+// innermost first, each as " via " and its function less its import path.
+func callers() string {
+	pcs := make([]uintptr, 16)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	return senders(func() (string, bool) {
+		f, more := frames.Next()
+		return f.Function, more
+	})
+}
+
+// senders names up to missedFrames of the functions next yields, innermost
+// first, leaving out the Link's own methods, the runtime's frames and the
+// owner channel's (its line wrapper, its send helpers and the entry points
+// they serve), so the names reach the code that asked the channel to send
+// (#2349). A send the owner channel started on its own, with no caller
+// outside it, names the outermost owner frame instead of nothing.
+func senders(next func() (string, bool)) string {
+	var b strings.Builder
+	var outer string
+	for n := 0; n < missedFrames; {
+		name, more := next()
+		switch {
+		case name == "" || strings.Contains(name, linkMethods) || strings.HasPrefix(name, "runtime."):
+		case strings.Contains(name, ownerFuncs):
+			outer = name
+		default:
+			b.WriteString(via(name))
+			n++
+		}
+		if !more {
+			break
+		}
+	}
+	if b.Len() == 0 && outer != "" {
+		b.WriteString(via(outer))
+	}
+	return b.String()
+}
+
+// via is name as a MissedLog caller: " via " and the function less its
+// import path.
+func via(name string) string { return " via " + name[strings.LastIndexByte(name, '/')+1:] }
+
+// linkMethods marks the Link's own methods in a stack, and ownerFuncs the
+// owner channel's functions. They leave out the module path so no literal
+// names the project's host (DEP-2).
+const (
+	linkMethods = "/modemlink.(*Link)."
+	ownerFuncs  = "/broker/owner."
+)
+
 func receiptOf(id, code string) Receipt {
 	switch code {
 	case bridgeproto.CodeOK:
@@ -320,13 +386,21 @@ func (l *Link) deliver(text string, request bool) Receipt {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
-		if l.outage != nil {
+		counted := l.outage != nil
+		if counted {
 			l.outage.Missed++
 			if request {
 				l.outage.Requests++
 			}
 		}
 		l.mu.Unlock()
+		if counted && l.cfg.Logf != nil {
+			kind := "text"
+			if request {
+				kind = "request"
+			}
+			l.cfg.Logf("%s kind=%s%s", MissedLog, kind, callers())
+		}
 		return Receipt{Outcome: ReceiptNotSent, Evidence: "not-queued"}
 	}
 	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text},

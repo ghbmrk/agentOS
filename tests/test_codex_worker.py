@@ -62,6 +62,9 @@ MODEL_LINE = f'model = "{MODEL}"\n'
 # and a lower config layer can add any key the managed file leaves out.
 REQUIRED = {
     ("model_provider",): "agentos",
+    # Plan-login traffic, the token refresh included, goes to the forwarder too; unset, a plan
+    # login calls chatgpt.com directly (#2085).
+    ("chatgpt_base_url",): FORWARDER + "/backend-api/",
     ("model",): MODEL,
     ("model_providers", "agentos", "base_url"): FORWARDER + "/backend-api/codex",
     ("model_providers", "agentos", "wire_api"): "responses",
@@ -277,6 +280,8 @@ class ManagedConfigTest(unittest.TestCase):
         self.assertEqual(cfg["model_provider"], "agentos")
         base = cfg["model_providers"]["agentos"]["base_url"]
         self.assertTrue(base.startswith("http://" + opts["-listen"] + "/"), base)
+        plan = cfg["chatgpt_base_url"]
+        self.assertTrue(plan.startswith("http://" + opts["-listen"] + "/"), plan)
         # The forwarder sets the refresh override from the port it bound, so it names that port by
         # construction; launch env carrying one would be refused by childproc at the start (C18).
         env = dict(e.split("=", 1) for e in launch["env"])
@@ -979,24 +984,25 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 "marks": {m for m in ("notify-ran", "mcp-ran", "preload-ran")
                           if (work / m).exists()}}
 
-    def refresh_turn(self, status, body):
+    def refresh_turn(self, status, body, last_refresh=None):
         """A turn on a plan login whose token the CLI refreshes while the tool watches auth.json.
 
         The login is a placeholder shaped like the broker's (codexlogin.go AuthJSON). The fake
         answers the refresh as the egress route would (#1749): placeholders only, the id_token
-        added to a dict body, or a 502 whose body is dropped. The managed config does not set
-        chatgpt_base_url, so a plan-login CLI calls chatgpt.com directly and the turn fails
-        before any tool runs; the edit points it at the fake (finding in the PR for #1504).
-        Returns the login, the tool's last attempt (stub_tool.py reread) and the auth.json left
-        on the host."""
+        added to a dict body, or a 502 whose body is dropped. Every request, the refresh
+        included, reaches the fake only because managed config points chatgpt_base_url at the
+        forwarder's port (#2085). By default last_refresh is now, so the refresh comes from the
+        fake refusing the tool's output with a 401; a stale last_refresh makes the CLI refresh at
+        startup, before any tool runs. Returns the login, the tool's last attempt
+        (stub_tool.py reread), the auth.json left on the host and the turn."""
         def jwt_part(o):
             return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
         id_token = (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
             {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
             + ".unsigned")
-        # last_refresh is now: a login about 8 days old is refreshed at startup, before any tool runs.
+        # A login about 8 days old is refreshed at startup, before any tool runs.
         login = {"OPENAI_API_KEY": None,
-                 "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 "last_refresh": last_refresh or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "tokens": {"id_token": id_token, "access_token": "agentos-ph-access-old",
                             "refresh_token": "agentos-ph-refresh-old", "account_id": "acct-syn"}}
         if isinstance(body, dict):
@@ -1004,8 +1010,6 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         answer = self.tmp / "refresh.json"
         answer.write_text(json.dumps({"status": status, "body": body}))
         got = self.turn(
-            config_edits=(('model_provider = "agentos"\n', 'model_provider = "agentos"\n'
-                           f'chatgpt_base_url = "{FORWARDER}/backend-api/"\n'),),
             auth=json.dumps(login), cmd="python3 -I /var/lib/agentos-stub-tool.py reread",
             endpoint_env={"FAKE_REFRESH": str(answer), "FAKE_YIELD_MS": "1000"})
         refreshes = [q for q in got["requests"] if q.get("path", "").endswith("/oauth/token")]
@@ -1016,7 +1020,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         self.assertTrue(state.exists(), "the tool never ran: " + got["stdout"][-2000:])
         tool = json.loads(state.read_text())
         self.assertFalse(tool["readable_at_start"], "control: deny_read must hide auth.json")
-        return login, tool, json.loads((got["home"] / "auth.json").read_text())
+        return login, tool, json.loads((got["home"] / "auth.json").read_text()), got
 
     # REQ: CRED-5, A14
     def test_a_tool_cannot_read_auth_json_after_the_cli_rewrites_it(self):
@@ -1024,7 +1028,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         close-write events, no create or rename), so the deny_read mask set when the tool started
         still covers the new contents, and those contents are only the route's placeholders."""
         new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
-        login, tool, written = self.refresh_turn(200, new)
+        login, tool, written, _ = self.refresh_turn(200, new)
         auth_events = [mask for name, mask in tool["events"] if name == "auth.json"]
         self.assertIn(0x8, auth_events,  # IN_CLOSE_WRITE
                       "control: the CLI must rewrite auth.json while the tool watches: "
@@ -1040,11 +1044,56 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
     def test_a_dropped_refresh_leaves_auth_json_as_it_was(self):
         """#1504: when the route drops a refresh answer (502), the CLI keeps the placeholder login
         and writes nothing to auth.json, so nothing new reaches CODEX_HOME."""
-        login, tool, written = self.refresh_turn(
+        login, tool, written, _ = self.refresh_turn(
             502, "egress denied: credential exchange answered with an error; dropped")
         self.assertEqual(written, login)
         self.assertNotIn("auth.json", [name for name, _ in tool["events"]])
         self.assertIsNone(tool["reread"])
+
+    @staticmethod
+    def events(got):
+        out = []
+        for line in got["stdout"].splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return out
+
+    # REQ: CRED-5, A14
+    def test_a_stale_login_refreshes_at_startup_through_the_forwarder(self):
+        """#2085: a plan login due for refresh is refreshed through the forwarder before the turn
+        starts, and the turn completes. This is the refresh path that works on 0.162.1 (S8-W1-s8-C20)."""
+        new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
+        login, tool, written, got = self.refresh_turn(200, new, last_refresh="2020-01-01T00:00:00Z")
+        self.assertEqual(written["tokens"], dict(login["tokens"], **new))
+        self.assertNotIn("auth.json", [name for name, _ in tool["events"]],
+                         "control: the refresh must land before the tool starts")
+        self.assertIn("turn.completed", [e.get("type") for e in self.events(got)],
+                      got["stdout"][-2000:])
+        paths = {q["path"] for q in got["requests"]}
+        self.assertIn("/backend-api/codex/responses", paths)
+
+    # REQ: CRED-5, A14
+    def test_a_mid_turn_refresh_loses_that_turn_and_the_next_completes(self):
+        """#2085: on 0.162.1 the request the CLI retries after a mid-turn refresh goes through
+        its route-aware client, which needs an [application.network] policy; without one it fails
+        closed, and a policy that allows a plain-http loopback forwarder does not exist (S8-W1-s8-C20). The
+        bound: that one turn fails, auth.json already holds the refreshed placeholders, and the
+        next turn on it completes without refreshing again. If the first turn now completes,
+        the CLI changed: update S8-W1-s8-C20 and drop the bound."""
+        new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
+        login, _, written, got = self.refresh_turn(200, new)
+        kinds = [e.get("type") for e in self.events(got)]
+        self.assertNotIn("turn.completed", kinds,
+                         "the turn survived a mid-turn refresh: the CLI changed, update S8-W1-s8-C20")
+        self.assertIn("application network policy is unavailable", got["stdout"],
+                      "the mid-turn refresh failed some other way: " + got["stdout"][-2000:])
+        self.assertEqual(written["tokens"], dict(login["tokens"], **new))
+        nxt = self.turn(auth=json.dumps(written), cmd="true")
+        self.assertIn("turn.completed", [e.get("type") for e in self.events(nxt)],
+                      nxt["stdout"][-2000:])
+        self.assertFalse([q for q in nxt["requests"] if q.get("path", "").endswith("/oauth/token")])
 
     # REQ: CRED-5, CRED-1, A14, CAP-11
     def test_hostile_lower_layers_do_not_reach_the_tool(self):
