@@ -106,6 +106,55 @@ func TestBrokerAndUnlockSpendOneStep(t *testing.T) {
 	}
 }
 
+// The broker's wrong codes never pause the owner's unlock, and a wrong
+// unlock code is charged to no bucket of the broker's: the hand socket's
+// check counts against the vault's own cap only.
+func TestBrokerWrongCodesLeaveTheUnlockOpen(t *testing.T) {
+	r := newFastRig(t, true)
+	ck, broker := checkerAt(t, r)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the checker's seed", ck.Held)
+	for range checker.MaxWrongCounted - 1 {
+		if _, ok, err := broker.VerifyTOTP(wrongOf(r.code()), 0, true); ok || err != nil {
+			t.Fatalf("broker's wrong code: %t %v", ok, err)
+		}
+	}
+	r.c.lock()
+	r.clk.add(30 * time.Second)
+	tk := r.unlock(t)
+	if err := r.c.confirm(tk, wrongOf(r.code())); err == nil || !strings.HasPrefix(err.Error(), "wrong code") {
+		t.Fatalf("a wrong unlock code: %v", err)
+	}
+	if err := r.c.confirm(tk, r.code()); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the checker's seed", ck.Held)
+	r.clk.add(30 * time.Second)
+	if _, ok, err := broker.VerifyTOTP(r.code(), 0, true); !ok || err != nil {
+		t.Fatalf("the wrong unlock code filled the broker's bucket: %t %v", ok, err)
+	}
+	if _, _, err := broker.VerifyTOTP(wrongOf(r.code()), 0, true); err != nil {
+		t.Fatal(err)
+	}
+	r.clk.add(30 * time.Second)
+	if _, _, err := broker.VerifyTOTP(r.code(), 0, true); err == nil {
+		t.Fatal("the broker's bucket did not fill")
+	}
+	r.c.lock()
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatalf("the broker's wrong codes paused the unlock: %v", err)
+	}
+}
+
+// wrongOf is a code that is not code: its last digit moved on by one.
+func wrongOf(code string) string {
+	b := []byte(code)
+	b[len(b)-1] = '0' + (b[len(b)-1]-'0'+1)%10
+	return string(b)
+}
+
 // With -checker this process's verify socket refuses code-generator codes
 // and still redeems the unlock proof once.
 func TestVaultVerifyKeepsOnlyTheProof(t *testing.T) {
@@ -224,6 +273,9 @@ func TestAFreshCheckerKeepsTheVaultsLastStep(t *testing.T) {
 func TestEnrollCodeSpentOnTheChecker(t *testing.T) {
 	r := newSetupRig(t)
 	ck, broker := checkerAt(t, r)
+	// The keeper hands once, at the unlock, and no later round can put the
+	// channel seed back: only confirmEnroll's own hand-back can.
+	r.c.keepEvery = time.Hour
 	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
 		t.Fatal(err)
 	}
