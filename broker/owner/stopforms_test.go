@@ -1,9 +1,12 @@
 package owner
 
 import (
+	"math/rand"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 // REQ: CH-2, CH-11, CH-14
@@ -48,6 +51,17 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 		{"grid cell", func(c, c2 string) string { return "STOP H3" }},
 		{"grid cell lower case", func(c, c2 string) string { return "stop j10" }},
 		{"grid cell and code", func(c, c2 string) string { return "STOP H3 " + c }},
+		{"pound sign", func(c, c2 string) string { return "STOP £ " + c }},
+		{"euro sign", func(c, c2 string) string { return "STOP €" + c }},
+		{"yen sign", func(c, c2 string) string { return "¥STOP " + c }},
+		{"glued code", func(c, c2 string) string { return "STOP" + c }},
+		{"glued code first", func(c, c2 string) string { return c + "STOP" }},
+		{"glued both sides", func(c, c2 string) string { return c + "stop" + c2 }},
+		{"glued and spaced", func(c, c2 string) string { return "STOP" + c + " " + c2 }},
+		{"glued full-width", func(c, c2 string) string { return fullWidth("STOP" + c) }},
+		{"glued grid cell", func(c, c2 string) string { return "STOPH3" }},
+		{"zero-width inside", func(c, c2 string) string { return "ST\u200bOP " + c }},
+		{"combining mark", func(c, c2 string) string { return "STO\u0301P," + c }},
 	}
 	for _, mode := range []string{"locked", "unlocked", "challenged"} {
 		for _, f := range forms {
@@ -108,28 +122,36 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 // and a reaction quoting a code is never STOP (SEC-stop-forms).
 func TestStopFormKeepsWholeMessageRule(t *testing.T) {
 	for text, want := range map[string]bool{
-		"STOP":                      true,
-		"  stop!  ":                 true,
-		"STOP STOP":                 true,
-		"12 STOP 34":                true,
-		"STOP A1":                   true,
-		"STOP J10":                  true,
-		"stop the newsletter":       false,
-		"please stop 123456":        false,
-		"STOP 12 now":               false,
-		"STOP K3":                   false,
-		"STOP A11":                  false,
-		"STOP A0":                   false,
-		"STOP H03":                  false,
-		"STOPS 123456":              false,
-		"STOP1 123456":              false,
-		"123456":                    false,
-		"":                          false,
-		"stop the 3 jobs":           false,
-		`Liked "STOP 123456"`:       false,
-		"STOP flight AB482913":      false,
-		fullWidth("STOP now"):       false,
-		fullWidth("STOP") + " ＨＯＭＥ": false,
+		"STOP":                       true,
+		"  stop!  ":                  true,
+		"STOP STOP":                  true,
+		"12 STOP 34":                 true,
+		"STOP A1":                    true,
+		"STOP J10":                   true,
+		"stop the newsletter":        false,
+		"please stop 123456":         false,
+		"STOP 12 now":                false,
+		"STOP K3":                    false,
+		"STOP A11":                   false,
+		"STOP A0":                    false,
+		"STOP H03":                   false,
+		"STOPS 123456":               false,
+		"STOP1 123456":               true,
+		"123456STOP":                 true,
+		"STOP £":                     true,
+		"STOPS1":                     false,
+		"XSTOP 123456":               false,
+		"STOPK3":                     false,
+		"STOP GBP 123456":            false,
+		"STOP £ now":                 false,
+		"stop" + "\u00a3" + "50 now": false,
+		"123456":                     false,
+		"":                           false,
+		"stop the 3 jobs":            false,
+		`Liked "STOP 123456"`:        false,
+		"STOP flight AB482913":       false,
+		fullWidth("STOP now"):        false,
+		fullWidth("STOP") + " ＨＯＭＥ":  false,
 	} {
 		if got := stopForm(text); got != want {
 			t.Errorf("stopForm(%q) = %v, want %v", text, got, want)
@@ -164,5 +186,43 @@ func TestStopFormFromAStrangerIsNothing(t *testing.T) {
 		if got := r.sayFrom(stranger, text); got != "" || r.eng.Stopped() || r.ch.stops.Load() != gen {
 			t.Fatalf("%q from a stranger: reply %q, stopped %v, counted %v", text, got, r.eng.Stopped(), r.ch.stops.Load() != gen)
 		}
+	}
+}
+
+// TestStopFormKeepsEveryOldStop: every message the reader before
+// SEC-stop-forms took as STOP (control.Parse of the text with a trailing
+// 6-digit code split off) is still a STOP form, so widening the forms
+// drops none, including symbols fold expands to letters ("STOP £ 123456").
+// Random messages are drawn from STOP's pieces, digits, grid cells,
+// separators, currency signs, full-width forms and format characters.
+func TestStopFormKeepsEveryOldStop(t *testing.T) {
+	old := func(text string) bool {
+		rest, _ := splitCode(text)
+		return control.Parse(rest).Word == control.WordStop
+	}
+	parts := []string{"STOP", "stop", "St", "OP", "123456", "1234567", "12", "H3", "j10", "K3",
+		" ", ",", "-", ".", "!", "£", "€", "¥", "$", "\u200b", "\u0301", "ＳＴＯＰ", "１２３", "，", "\t", "x"}
+	for _, text := range []string{"STOP £ 123456", "STOP €", "£STOP", "STOP ¥¥ 123456", "STOP\u200b", " STOP 123456 "} {
+		if !old(text) || !stopForm(text) {
+			t.Errorf("%q: old reader %v, stopForm %v", text, old(text), stopForm(text))
+		}
+	}
+	rng := rand.New(rand.NewSource(2475))
+	found := 0
+	for i := 0; i < 200000; i++ {
+		var b strings.Builder
+		for n := 1 + rng.Intn(6); n > 0; n-- {
+			b.WriteString(parts[rng.Intn(len(parts))])
+		}
+		text := b.String()
+		if old(text) {
+			found++
+			if !stopForm(text) {
+				t.Fatalf("%q was STOP before SEC-stop-forms and is not now", text)
+			}
+		}
+	}
+	if found < 1000 {
+		t.Fatalf("only %d old STOP messages drawn; the generator is too narrow", found)
 	}
 }
