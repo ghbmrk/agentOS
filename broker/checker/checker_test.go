@@ -271,12 +271,12 @@ func TestWrongSilentCodesPause(t *testing.T) {
 		wrong = "000001"
 	}
 	for i := 0; i < MaxWrongSilent; i++ {
-		if _, ok, err := c.Verify(wrong, 0, false, []string{a}); ok || err != nil {
+		if _, ok, err := c.Verify(wrong, 0, false, acts(a)); ok || err != nil {
 			t.Fatalf("try %d: ok %v err %v", i, ok, err)
 		}
 	}
 	var p *PausedError
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, []string{a}); ok || !errors.As(err, &p) {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, acts(a)); ok || !errors.As(err, &p) {
 		t.Fatalf("silent check not paused: ok %v err %v", ok, err)
 	}
 	if c.Redeem(a) {
