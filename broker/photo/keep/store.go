@@ -517,8 +517,8 @@ func (s *Store) delete(ctx context.Context, id, why string) (Confirmation, error
 }
 
 // Sweep deletes the photos past their time, by the trusted clock's earliest
-// reading so none goes early. It deletes nothing while the clock is not
-// trusted (CH-26).
+// reading so none goes early, and retries denied deletes. It deletes
+// nothing while the clock is not trusted (CH-26).
 func (s *Store) Sweep(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -537,18 +537,30 @@ func (s *Store) sweep(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// A photo that fails does not hold the others: each is tried, and one
-	// left part way (bytes gone, recall or erase not done) is finished.
-	ids := v.unfinished()
+	// A photo that fails does not hold the others: each is tried, one left
+	// part way (bytes gone, recall or erase not done) is finished, and a
+	// live one whose latest delete was denied is asked again for the same
+	// reason (CH26-R1).
+	why := map[string]string{}
+	var ids []string
+	add := func(id, reason string) {
+		if _, ok := why[id]; !ok {
+			why[id] = reason
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range v.unfinished() {
+		add(id, v.photos[id].why)
+	}
 	for _, e := range v.entries() {
 		if !e.Expires.After(t) {
-			ids = append(ids, e.ID)
+			add(e.ID, "expired")
 		}
 	}
 	n := 0
 	var errs []error
 	for _, id := range ids {
-		if _, err := s.delete(ctx, id, "expired"); err != nil {
+		if _, err := s.delete(ctx, id, why[id]); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -680,9 +692,11 @@ type view struct {
 
 type photoFacts struct {
 	// deletes are the delete attempts' intent IDs, oldest first; denied
-	// is whether the latest was denied, and nextDelete numbers the next.
+	// is whether the latest was denied, why is its reason, and nextDelete
+	// numbers the next.
 	deletes    []string
 	denied     bool
+	why        string
 	nextDelete int
 	content    bool // the receipt's params are not erased yet
 	delivers   []string
@@ -806,7 +820,7 @@ func (s *Store) view() (*view, error) {
 			}
 			p.deletes = append(p.deletes, id)
 			if k >= p.nextDelete {
-				p.nextDelete, p.denied = k+1, f.denied
+				p.nextDelete, p.denied, p.why = k+1, f.denied, str(f.in.Params["why"])
 			}
 			if f.succeeded {
 				delete(v.live, pid)
@@ -861,11 +875,12 @@ func (v *view) held(hash, except string) bool {
 }
 
 // unfinished lists the photos deleted whose recall entries or journal
-// content may remain, a deletion that stopped part way.
+// content may remain, a deletion that stopped part way, and the live ones
+// whose latest delete was denied, a deletion still to ask again.
 func (v *view) unfinished() []string {
 	var out []string
 	for id, p := range v.photos {
-		if len(p.deletes) > 0 && p.content && v.live[id] == nil {
+		if len(p.deletes) > 0 && (p.content && v.live[id] == nil || p.denied && v.live[id] != nil) {
 			out = append(out, id)
 		}
 	}

@@ -752,11 +752,15 @@ func TestSweepContinuesPastFailure(t *testing.T) {
 	})
 }
 
-// denyDeletes denies the first n photo delete checks it is asked for.
-type denyDeletes struct{ n int }
+// denyDeletes denies the first n photo delete checks it is asked for, in
+// phase only when phase is set.
+type denyDeletes struct {
+	n     int
+	phase journal.Phase
+}
 
-func (d *denyDeletes) Check(_ context.Context, _ journal.Phase, in journal.Intent) error {
-	if in.Action == ActionDelete && d.n > 0 {
+func (d *denyDeletes) Check(_ context.Context, ph journal.Phase, in journal.Intent) error {
+	if in.Action == ActionDelete && d.n > 0 && (d.phase == "" || d.phase == ph) {
 		d.n--
 		return errors.New("synthetic denial")
 	}
@@ -860,6 +864,54 @@ func TestDeniedDeleteIsRetriedBySweep(t *testing.T) {
 	}
 	r.assertGone("P1", photoN(1))
 	r.assertGone("P2", photoN(2))
+}
+
+// A denied owner delete of a photo not yet expired is retried by the next
+// sweep, for the owner's reason (CH26-R1).
+func TestDeniedOwnerDeleteIsRetriedBySweep(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.keep(photoN(1), photoN(2))
+	r.withPolicy(&denyDeletes{n: 1})
+	if _, err := r.s.Delete(ctx, "P1"); !errors.Is(err, ErrNotDone) {
+		t.Fatalf("denied delete = %v", err)
+	}
+	if n, err := r.s.Sweep(ctx); n != 1 || err != nil {
+		t.Fatalf("sweep retrying P1 = %d, %v", n, err)
+	}
+	r.assertGone("P1", photoN(1))
+	if es := r.list(); len(es) != 1 || es[0].ID != "P2" {
+		t.Fatalf("live after the sweep: %+v", es)
+	}
+	if n, err := r.s.Sweep(ctx); n != 0 || err != nil {
+		t.Fatalf("sweep with nothing denied = %d, %v", n, err)
+	}
+}
+
+// A delete denied at the dispatch recheck, not at authorization, is
+// retried as a new attempt too (CH26-R1, CH26-R2).
+func TestRecheckDeniedDeleteIsRetried(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.keep(photoN(1))
+	r.withPolicy(&denyDeletes{n: 1, phase: journal.PhaseDispatch})
+	if _, err := r.s.Delete(ctx, "P1"); err == nil {
+		t.Fatal("recheck-denied delete succeeded")
+	}
+	if es := r.list(); len(es) != 1 {
+		t.Fatalf("listed after a recheck denial: %+v", es)
+	}
+	st, err := r.eng.Get(deleteID("P1", 0))
+	if err != nil || st.Permission.Phase != journal.PhaseDispatch {
+		t.Fatalf("first attempt = %+v, %v; want denied at dispatch", st, err)
+	}
+	if _, err := r.s.Delete(ctx, "P1"); err != nil {
+		t.Fatalf("retried delete = %v", err)
+	}
+	r.assertGone("P1", photoN(1))
+	if got := deleteIntents(t, r.eng, "P1"); len(got) != 2 {
+		t.Fatalf("delete attempts %v, want two", got)
+	}
 }
 
 // The view folds every delete attempt into its photo: a denied latest
