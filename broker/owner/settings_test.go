@@ -91,11 +91,11 @@ func TestASettingWithNoTextSendsNothing(t *testing.T) {
 // REQ: OWN-4
 
 // TestOWN4AckDelaySetting: ACK n sets the acknowledgement's wait to n
-// seconds, 5 to 120, 20 unless set; another value gets the settings'
+// seconds, 5 to 120, 5 unless set; another value gets the settings'
 // forms and changes nothing; locked, it changes nothing; HELP names it.
 func TestOWN4AckDelaySetting(t *testing.T) {
 	r, a := ackRig(t)
-	if got := r.ch.codes.st.Pacing.ackAfter(); got != DefaultAckSeconds*time.Second || DefaultAckSeconds != 20 {
+	if got := r.ch.codes.st.Pacing.ackAfter(); got != DefaultAckSeconds*time.Second || DefaultAckSeconds != 5 {
 		t.Fatalf("default wait %v", got)
 	}
 	for _, bad := range []string{"ACK 4", "ACK 121", "ACK 0"} {
@@ -118,7 +118,7 @@ func TestOWN4AckDelaySetting(t *testing.T) {
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements at 45 s, want 1", n)
 	}
-	if got := r.say("HELP"); !strings.Contains(got, "ACK 20") {
+	if got := r.say("HELP"); !strings.Contains(got, "ACK 5") {
 		t.Fatalf("HELP: %q", got)
 	}
 	if !strings.Contains(pacingForms, "ACK 5 to 120") {
