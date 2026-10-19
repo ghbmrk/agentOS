@@ -290,6 +290,14 @@ type custody struct {
 	// keyVer counts key stores, so a keeper hands a replaced key again.
 	keys   atomic.Pointer[vault.Vault]
 	keyVer atomic.Uint64
+	// view hands the keyless proxy process its view of the vault (-proxy,
+	// viewKeeper); nil when this process serves the model socket itself.
+	// epoch moves at every unlock and lock, naming the view with the
+	// vault's change count (viewVersion). keyed mirrors st.Keyed for the
+	// view, which never takes mu.
+	view  *viewKeeper
+	epoch atomic.Uint64
+	keyed atomic.Bool
 	// keep are the keepers running while the vault is open. Guarded by mu.
 	keep *keepers
 
@@ -366,6 +374,7 @@ func newCustody(c *custody) (*custody, error) {
 		return nil, err
 	}
 	c.st = st
+	c.keyed.Store(st.Keyed)
 	return c, nil
 }
 
@@ -720,6 +729,7 @@ func (c *custody) persist(next unlockState) error {
 		return err
 	}
 	c.st = next
+	c.keyed.Store(next.Keyed)
 	return nil
 }
 
@@ -1145,6 +1155,7 @@ func (c *custody) discard() {
 	}
 	c.clearPins()
 	c.stopKeepersLocked()
+	c.tellLockedLocked()
 	if c.v != nil {
 		c.v.Close()
 	}

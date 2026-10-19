@@ -18,8 +18,8 @@ import (
 )
 
 // REQ: ARC-1, CRED-1, CRED-7
-// ARC-1 and CRED-1 in part: the proxy still runs in the vault process
-// (SIM-split-wire's process split is still to come).
+// With -proxy the proxy runs keyless in its own process (proxyview_test.go,
+// a5_test.go); here it runs in the vault process, over the same holders.
 
 // heldAt serves a holder for adapter a in a fresh socket directory, its
 // provider reached over tr, and returns the directory and the holder.

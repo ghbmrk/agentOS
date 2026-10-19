@@ -92,6 +92,8 @@ type Vault struct {
 	mu      sync.RWMutex
 	entries map[string]record
 	closed  bool
+	// gen counts the changes to entries (Gen).
+	gen uint64
 	// keysPath and key are set when the vault was opened through its key
 	// slots (keyslot.go), for AddSlot; Close wipes key.
 	keysPath string
@@ -208,6 +210,7 @@ func (v *Vault) PutMany(items []Item) error {
 	if v.closed {
 		return ErrClosed
 	}
+	v.gen++
 	old := map[string]record{}
 	for _, it := range items {
 		if r, had := v.entries[it.Name]; had {
@@ -243,6 +246,7 @@ func (v *Vault) Delete(name string) error {
 	if !had {
 		return nil
 	}
+	v.gen++
 	delete(v.entries, name)
 	if err := v.save(); err != nil {
 		v.entries[name] = old
@@ -250,6 +254,16 @@ func (v *Vault) Delete(name string) error {
 	}
 	wipe(old.Value)
 	return nil
+}
+
+// Gen names the vault's values as they stand: it moves on every stored or
+// deleted value (and may move on a write that failed), so a copy derived
+// from the values, such as a redactor handed to another process, can tell
+// it is stale.
+func (v *Vault) Gen() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.gen
 }
 
 // List names every secret, sorted, without values. After Close it is empty.

@@ -69,7 +69,7 @@ const (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts|pin|unpin|pins [flags]")
+		log.Fatal("usage: agentos-egress init|serve|proxy|unlock|put|trust|untrust|hosts|pin|unpin|pins [flags]")
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
@@ -78,6 +78,8 @@ func main() {
 		err = initCmd(args, os.Stdout)
 	case "serve":
 		err = serveCmd(args)
+	case "proxy":
+		err = proxyCmd(args)
 	case "unlock":
 		err = unlockCmd(args, os.Stdin, os.Stdout)
 	case "put":
@@ -202,7 +204,7 @@ func serveCustody(c *custody, g grants, agent string, hook *privateHook) (*custo
 	if err != nil {
 		return nil, err
 	}
-	hook.c.Store(c)
+	hook.bind(c)
 	return c, nil
 }
 
@@ -410,17 +412,9 @@ func serveCmd(args []string) error {
 	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign and sms sockets (the second line); -1 serves neither")
 	ownerNumber := fs.String("owner-number", "", "the owner's number (E.164), which the second line never texts or calls; required with -modem-uid")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
-	g := grants{}
-	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
-	held := holderDirs{}
-	fs.Var(held, "holder", "adapter=dir: the socket directory of the holder that keeps the adapter's API key (repeatable; every adapter or none); the proxy then adds no key itself (ARC-1)")
-	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
-	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
-	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
-	builderFrom := fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
-	evalFrom := fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
-	agent := agentFlag(fs)
-	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
+	mf := declareModelFlags(fs, "default routing.json beside the keys")
+	held := mf.held
+	proxyDir := fs.String("proxy", "", "socket directory of `agentos-egress proxy`, which then serves the model and routing sockets and is handed a view of the vault, never a value (ARC-1); needs -holder")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
 	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
@@ -432,36 +426,17 @@ func serveCmd(args []string) error {
 	if err := held.check(); err != nil {
 		return err
 	}
-	rule, err := readRule(*rulePath)
-	if err != nil {
-		return err
+	if *proxyDir != "" && (len(held) == 0 || !filepath.IsAbs(*proxyDir)) {
+		return errors.New("-proxy needs an absolute directory and -holder for every adapter: the proxy process holds no key")
 	}
-	pok := map[string]bool{}
-	for _, p := range strings.Split(*privateOK, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			pok[p] = true
-		}
+	if *mf.routingPath == "" {
+		*mf.routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
 	}
-	if *routingPath == "" {
-		*routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
-	}
-	base := rule
-	if rule, err = startRule(base, *routingPath); err != nil {
-		log.Printf("routing: starting from -rule: %v", err)
-	}
-	mw, err := wireModel(rule, g, pok, *agent, *builderFrom, *evalFrom)
+	mw, ev, ro, err := mf.wire()
 	if err != nil {
 		return err
 	}
 	g, rt := mw.g, mw.rt
-	var ev *evalRoute
-	if *evalFrom != "" {
-		ps, err := readPrices(*pricesPath)
-		if err != nil {
-			return err
-		}
-		ev = &evalRoute{From: *evalFrom, Grants: g[*evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
-	}
 	self := os.Getuid()
 	if *brokerUID < 0 || *brokerUID == self {
 		return errors.New("-broker-uid must name agentosd's own uid, distinct from this process's")
@@ -510,7 +485,13 @@ func serveCmd(args []string) error {
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
 	}
-	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
+	if *proxyDir != "" {
+		// The proxy process serves the model path; this one hands it
+		// the view, for as long as it runs (view.go).
+		c.view = newViewKeeper(c, *proxyDir)
+		go c.view.run(ctx)
+		rt = nil
+	}
 	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
@@ -576,22 +557,44 @@ func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor
 
 // serve opens the model, verify and unlock sockets in dir and serves them
 // until closed. The model and verify sockets admit the broker's uid only.
+// With rt nil the model and routing sockets are the proxy process's
+// (-proxy), and the vault process serves neither.
 func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
+	var socks []socket
+	if rt != nil {
+		socks = modelSockets(c, rt, ev, ro, brokerUID)
+	}
+	socks = append(socks,
+		socket{VerifySocket, brokerUID, verifyHandler(c)},
+		socket{UnlockSocket, unlockUID, unlockHandler(c)},
+	)
+	return serveSockets(dir, socks)
+}
+
+// socket is a socket to serve: its name in the run directory, the one uid
+// it admits, and its handler.
+type socket struct {
+	name string
+	uid  int
+	h    http.Handler
+}
+
+// modelSockets are the model and routing sockets over src: the vault's
+// custody, or the proxy process's view.
+func modelSockets(src modelSource, rt *route.Router, ev *evalRoute, ro *routing, brokerUID int) []socket {
 	if ro == nil {
 		ro = &routing{base: rt.Rule(), rt: rt, ev: ev}
 	}
+	return []socket{
+		{ModelSocket, brokerUID, modelHandler(src, rt, ev)},
+		{RoutingSocket, brokerUID, ro.handler()},
+	}
+}
+
+// serveSockets opens socks in dir and serves them until closed.
+func serveSockets(dir string, socks []socket) ([]*http.Server, error) {
 	if err := runDir(dir); err != nil {
 		return nil, err
-	}
-	socks := []struct {
-		name string
-		uid  int
-		h    http.Handler
-	}{
-		{ModelSocket, brokerUID, modelHandler(c, rt, ev)},
-		{RoutingSocket, brokerUID, ro.handler()},
-		{VerifySocket, brokerUID, verifyHandler(c)},
-		{UnlockSocket, unlockUID, unlockHandler(c)},
 	}
 	var lns []net.Listener
 	for _, s := range socks {

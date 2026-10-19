@@ -45,7 +45,7 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 //
 // A request with modelroute.HeaderState is the broker's state probe (OP-9
 // C2), answered whatever the vault's phase; see modelState.
-func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
+func modelHandler(c modelSource, rt *route.Router, ev *evalRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(modelroute.HeaderState) != "" {
 			modelState(c, w, r)
@@ -89,7 +89,7 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 // granted and whether the vault is open, and nothing else (never a grant's
 // machine or provider, a key, or any vault content). Only the broker sends
 // HeaderState: modelroute.Forward drops a guest's copy.
-func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
+func modelState(c modelSource, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
@@ -183,7 +183,7 @@ func (ps prices) within(rule, active route.Rule, granted []string, privateOK map
 	return true
 }
 
-func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r *http.Request) {
+func (ev *evalRoute) serve(c modelSource, machine string, w http.ResponseWriter, r *http.Request) {
 	if ev == nil {
 		http.Error(w, "evaluation has no model access", http.StatusServiceUnavailable)
 		return

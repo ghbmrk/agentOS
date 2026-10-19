@@ -101,6 +101,10 @@ func (c *custody) startKeepersLocked(v *vault.Vault) {
 		return
 	}
 	c.keys.Store(v)
+	c.epoch.Add(1)
+	if c.view != nil {
+		c.view.poke()
+	}
 	ctx, stop := context.WithCancel(context.Background())
 	ks := &keepers{stop: stop}
 	for _, a := range adapters() {
@@ -137,7 +141,9 @@ const dropTimeout = 2 * time.Second
 // takes each holder's key back, so a locked vault leaves none in a holder
 // (CRED-1). A holder that is down holds none. Caller holds mu.
 func (c *custody) stopKeepersLocked() {
-	c.keys.Store(nil)
+	if c.keys.Swap(nil) != nil {
+		c.epoch.Add(1)
+	}
 	ks := c.keep
 	if ks == nil {
 		return
