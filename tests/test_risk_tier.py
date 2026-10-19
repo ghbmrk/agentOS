@@ -555,6 +555,44 @@ class RiskTierTest(unittest.TestCase):
             self.assertEqual(r.returncode, 2)
             self.assertEqual(r.stdout, "")
 
+    # RT-3b-1, RT-3b-2 (briefs/RT-3b.md; local IDs with no SPEC row, so no REQ marker)
+    def test_diff_relative_config_does_not_drop_paths(self):
+        # diff.relative=true lists only paths under the cwd: from docs/ the
+        # image/ change fell out and the docs file set the tier.
+        with tempfile.TemporaryDirectory() as d:
+            git = self._uncommitted_repo(d)
+            git("config", "diff.relative", "true")
+            git("tag", "base")
+            for p in ("image/build.sh", "docs/x.md"):
+                open(os.path.join(d, p), "a").write("y\n")
+            git("commit", "-qam", "change")
+            git("tag", "change")
+            r = self._run(os.path.join(d, "docs"), "--git", "base", "HEAD")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+            # A named head skips the working-tree calls, so only the
+            # committed call can see image/.
+            r = self._run(os.path.join(d, "docs"), "--git", "base", "change")
+            self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+
+    def test_diff_relative_config_keeps_uncommitted_paths(self):
+        cases = {
+            # Staged then removed: only the index (--cached) still has it.
+            "staged": lambda d, git: (open(os.path.join(d, "image", "new.sh"), "w").write("y\n"),
+                                      git("add", "image/new.sh"),
+                                      os.remove(os.path.join(d, "image", "new.sh"))),
+            "unstaged": lambda d, git: open(os.path.join(d, "image", "build.sh"), "a").write("y\n"),
+        }
+        for name, change in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = self._uncommitted_repo(d)
+                git("config", "diff.relative", "true")
+                change(d, git)
+                open(os.path.join(d, "docs", "x.md"), "a").write("y\n")
+                r = self._run(os.path.join(d, "docs"), "--git", "main", "HEAD")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+
     def test_markdown_output(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

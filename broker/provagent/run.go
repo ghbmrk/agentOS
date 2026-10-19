@@ -398,6 +398,18 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 		r.Seeder.Close(id)
 		return fail(Failed)
 	}
+	// A run that fails before the signals below (a timeout, an Exec or
+	// result-read error) still reads a refused login egress saw during it,
+	// so the route stops with no retry (CRED-5, #1891 item 2). Its own
+	// outcome is unchanged. Registered before the Destroy below, so it runs
+	// after the worker is gone and sees a refusal the CLI's last calls made;
+	// egress keeps the refusal per provider, not per worker.
+	checked := false
+	defer func() {
+		if ran && !checked && r.refusedSince(d, start) {
+			r.signIn(d.ID, true)
+		}
+	}()
 	defer func() {
 		// Destroying the worker takes its route, logs and transcripts with it.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -431,6 +443,7 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	// agent can write the result file, so it can only ever claim used-up
 	// (a fallback), read from the CLI's own error events, never from text
 	// the model wrote, which the brief steers.
+	checked = true
 	switch r.after(d, start) {
 	case LoginRefused:
 		r.signIn(d.ID, true)
@@ -579,7 +592,7 @@ func (r *Runner) after(d Declaration, start time.Time) Reason {
 		r.logf("provagent: usage for %s after a run: %v", d.ID, err)
 		return RouteBusy
 	}
-	if !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start) {
+	if refused(u, start) {
 		return LoginRefused
 	}
 	for _, p := range u.Readings {
@@ -588,6 +601,23 @@ func (r *Runner) after(d Declaration, start time.Time) Reason {
 		}
 	}
 	return ""
+}
+
+// refused reports whether u records a refused login at or after start.
+func refused(u Usage, start time.Time) bool {
+	return !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start)
+}
+
+// refusedSince reads Usage after a failed run for a refused login since
+// start. An unreadable Usage is logged and reads as none: the run has
+// already failed, so only the route stop is at stake.
+func (r *Runner) refusedSince(d Declaration, start time.Time) bool {
+	u, err := r.Usage(d.ID)
+	if err != nil {
+		r.logf("provagent: usage for %s after a failed run: %v", d.ID, err)
+		return false
+	}
+	return refused(u, start)
 }
 
 // signalled reports whether a JSON event line of the result whose "type" is

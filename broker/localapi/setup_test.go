@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,5 +56,25 @@ func TestSetupTextTypesKeepNumbersAndTextsOutOfLogs(t *testing.T) {
 				t.Errorf("%s of %T shows its contents: %q", f, v, s)
 			}
 		}
+	}
+}
+
+// REQ: UX3-F1
+// UX3-F1 (#2328): a provider as setup lists it carries whether its
+// sign-in still waits for the owner, and nothing of the challenge itself.
+func TestSetupProviderCarriesSigningIn(t *testing.T) {
+	b, err := json.Marshal(SetupProvider{ID: "codex", DeviceCode: true, SigningIn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"signing_in":true`) {
+		t.Fatalf("no signing_in in %s", b)
+	}
+	var p SetupProvider
+	if err := json.Unmarshal(b, &p); err != nil || !p.SigningIn {
+		t.Fatalf("decoded %+v, %v", p, err)
+	}
+	if b, _ := json.Marshal(SetupProvider{ID: "codex"}); strings.Contains(string(b), "signing_in") {
+		t.Fatalf("an idle provider carries signing_in: %s", b)
 	}
 }

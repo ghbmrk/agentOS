@@ -163,5 +163,42 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(wf.count("needs.scope.outputs.records != 'true'"), wf.count("\n    runs-on:"))
 
 
+class FuzzStepTest(unittest.TestCase):
+    """The short fuzz step in broker-checks names every broker target, and each one exists."""
+
+    BROKER_TARGETS = ("grants:FuzzApprovals", "localsrv:FuzzSessions", "netguard:FuzzSourcesRead",
+                      "netguard:FuzzGatewayPolicy", "netguard:FuzzCheck", "vault:FuzzSlots")
+
+    def fuzz_targets(self):
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        loops = re.findall(r"^\s*for t in (.+); do\n.*\n\s*python3 \.\./tools/fuzzrun\.py ", ci, re.M)
+        self.assertEqual(len(loops), 1, loops)
+        # pkg:Target[:calibrate]; the calibrate field is the first chunk's exec count.
+        entries = [e.split(":") for e in loops[0].split()]
+        for e in entries:
+            self.assertIn(len(e), (2, 3), e)
+            if len(e) == 3:
+                self.assertRegex(e[2], r"^[1-9][0-9]*$", e)
+        return [f"{e[0]}:{e[1]}" for e in entries]
+
+    def test_fuzz_step_lists_broker_targets(self):
+        # REQ: FUZZ-broker-ci-1
+        targets = self.fuzz_targets()
+        for t in self.BROKER_TARGETS:
+            self.assertIn(t, targets)
+        self.assertEqual(len(targets), len(set(targets)), targets)
+
+    def test_fuzz_step_targets_exist(self):
+        # REQ: FUZZ-broker-ci-2
+        for t in self.fuzz_targets():
+            pkg, _, name = t.partition(":")
+            self.assertRegex(name, r"^Fuzz\w+$", t)
+            pkgdir = ROOT / "broker" / pkg
+            self.assertTrue(pkgdir.is_dir(), t)
+            found = any(re.search(rf"^func {name}\(f \*testing\.F\)", f.read_text(), re.M)
+                        for f in pkgdir.glob("*_test.go"))
+            self.assertTrue(found, f"{t}: no func {name}( in broker/{pkg}/*_test.go")
+
+
 if __name__ == "__main__":
     unittest.main()
