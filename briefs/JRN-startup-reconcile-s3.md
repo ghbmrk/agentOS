@@ -1,35 +1,24 @@
-# JRN-startup-reconcile-s3: pin where the FORGET boot resume runs, and that it runs (with s4)
+# JRN-startup-reconcile-s3: pin where agentosd runs the FORGET boot resume
 
-Board section: Security and architecture review (2026-10-08). Source: Security delta R1 with Potency PT1, and R2, on PR #1382 (https://github.com/ghbmrk/agentOS/pull/1382#issuecomment-6156722954). Rows s3 (#1410) and s4 (#1411), class release, tier A. One brief for both: they test the same `wireResume` and `resumeBoot` pair. s5 and r3 have their own brief (`JRN-startup-reconcile-s5.md`).
+Board section: Security and architecture review (2026-10-08). Work item: #1410. Source: Security R1 and Potency PT1 on PR #1382. **Tier A** (`broker/cmd/agentosd`). Serves CAP-3, RCH-4. Edits `forget_resume_test.go` only, so it can run beside other work on `forget.go`; open #2285 (INFER-SVC) edits `broker/cmd/agentosd/main.go`, which this test reads, so a build that must change `main.go` waits for it (D-111). Moving the call sites into a helper was considered and dropped on purpose: the test pins the existing wiring instead.
 
-**Why it matters.** Recurring kind: a defence can be reverted and the suite still passes. `TestForgetResumeIsWiredOnlyThroughWireResume` counts call sites but not their position or value flow, and nothing exercises the boot resume `wireResume` returns when recall is on. Each of these mutants passes `./cmd/agentosd/` today:
-- R1: main calls `resumeBoot()` right after `wireResume`, before `daemon.Run`. That closes `booted` before the gate, the owner channel and the agent are attached (Security S1 on #1382).
-- Q1: `resumeBoot()` dropped in the recall-on branch. The boot's own OnOpen resume is gone.
-- Q2: `resumeBoot()` dropped in the recall-off branch. The owner is never told `forgetAgentNotOpen`, and a resume reconcile started waits forever.
-- Q3: `wireResume(ctx, nil)` with recall configured. Recall is wired as if off, so the owner is told "cannot" before recall opens.
-- R2: with recall on, the returned boot resume is a no-op. Restored-log take-backs (`resumeRestored`), owed done-texts (`judgeAgent`) and journal-held item 2s from an earlier boot run only through it when startup reconcile queues nothing, so the agent keeps work the owner asked to forget.
+**Why / failure path.** `TestForgetResumeIsWiredOnlyThroughWireResume` (`forget_resume_test.go:169`) counts call sites only (`calls != 1 || onOpen != 1 || boots == 0`), so each of these passes the whole suite while breaking the FORGET take-back:
+- R1: `resumeBoot()` right after `wireResume`, before `daemon.Run`, which closes `booted` before the gate, owner channel and agent attach.
+- Q1: `resumeBoot()` dropped from the recall-on arm (`main.go:~969`).
+- Q2: dropped from the recall-off arm (`main.go:~976`): the owner is never told `forgetAgentNotOpen`.
+- Q3: `wireResume(ctx, nil)` with recall configured: recall wired as off.
 
-**Requirements:** CAP-3, RCH-4.
+**Requirements:**
+- JRN-s3-1: each arm of the `recallDir != "" && verifier != nil` if/else calls `resumeBoot()` (kills Q1, Q2).
+- JRN-s3-2: every `resumeBoot()` call comes after `lp.attach(` and after `forgetOwner.agent.Store(` in source order (kills R1).
+- JRN-s3-3: `wireResume`'s second argument is the identifier assigned from `recallExec.OnOpen` (kills Q3).
+- JRN-s3-4: the existing production wiring passes all three (no `main.go` change expected; if one is needed, say why in the PR).
 
-**Fix (tests only; no production change expected).**
-- S3: strengthen the AST test in `forget_resume_test.go`: each arm of the recall if/else in main calls `resumeBoot()`; every `resumeBoot()` call comes after `lp.attach(` and after `forgetOwner.agent.Store(`; `wireResume`'s second argument is the identifier assigned from `recallExec.OnOpen`. If that cannot be expressed cleanly, move the if/else (with `recallExec.Off()`) into one helper that the behaviour test calls and orders. A helper move touches `main.go`; keep it a pure move.
-- S4: a behaviour test of the recall-on boot resume with no Reconcile call.
+**Acceptance tests:** (REQ: JRN-s3-1..4)
+- `broker/cmd/agentosd/forget_resume_test.go::TestForgetResumeIsWiredOnlyThroughWireResume`, extended: one subtest per requirement, each run against a mutated copy of the parsed `main.go` source (the four mutants above) that must fail, plus the real source that must pass.
 
-**Acceptance tests:** CAP-3, RCH-4: `TestForgetResumeIsWiredOnlyThroughWireResume` (extended, `broker/cmd/agentosd/forget_resume_test.go`) and `TestForgetBootResumeRecallOnWithoutReconcile` (new, same package).
+**Out of scope.** s4, s5 and r3 of #1382 (their issues are closed).
 
-**Tests first.**
-- T1 mutation check per Q1, Q2, Q3, R1: apply each by hand to a copy of main.go (or by the AST test's own source) and see the extended test fail. Record the five in the PR as a table; do not commit the mutants.
-- T2 `TestForgetBootResumeRecallOnWithoutReconcile`: recall on, no Reconcile call, a journal-held item 2 and a restored take-back present. After `boot()` and the recall open, both are taken back and the owner's done-text is judged. A no-op boot resume fails it.
-- Control: existing `./cmd/agentosd/` tests stay green.
+**Scope:** `broker/cmd/agentosd/forget_resume_test.go`, this brief; `main.go` only if JRN-s3-4 fails.
 
-**Out of scope.** Changing `wireResume` behaviour, s5/r3 (fence replies), recall's open path.
-
-**Guard files:** none.
-
-**Scope:** `broker/cmd/agentosd/forget_resume_test.go`, `broker/cmd/agentosd/forget.go` and `main.go` only for the helper move above, this brief.
-
-**Dependencies:** s5 (merged: `noRecall` is in `forget.go`). The s5 brief says s3 and s4 touch `main.go` and wait behind #2015; check that PR's state at start and do not build while it or any other open PR touches these files (D-111).
-
-**Build split (2026-10-17).** s4 is built alone (#1411): its test touches only `forget_resume_test.go`. s3 waits: its helper move may touch `main.go`, which open PRs #2285 and #2274 touch (D-111).
-
-**Usage estimate:** 60k tokens, checkpoint at 60k. Builder model: strongest (tier A: `main.go`, `forget.go`).
+**Usage estimate:** 40k tokens; checkpoint at 30k.
