@@ -504,12 +504,33 @@ func TestADeletionForgetsKeptReplies(t *testing.T) {
 	r.ev.kept.keep("quotes the record")
 	c := &fakeCases{}
 	n, err := forgetFan{cases: c, kept: r.ev.kept}.ForgetTasks("agent/1")
-	if n != 1 || err == nil || !slices.Equal(c.ids, []string{"agent/1"}) || len(r.ev.kept.list()) != 0 {
+	if n != 0 || err == nil || !slices.Equal(c.ids, []string{"agent/1"}) || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("forgot %d %v %v %d", n, err, c.ids, len(r.ev.kept.list()))
 	}
 	r.ev.kept.keep("again")
 	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("without learning: %v", err)
+	}
+}
+
+// REQ: CAP3-F1
+// TestADeletionCountsHeldAgentTexts: a deletion's reach returns how many
+// held agent texts the owner channel dropped, not the learning plane's
+// count, so the forget reply can tell the owner (CAP3-F1).
+func TestADeletionCountsHeldAgentTexts(t *testing.T) {
+	r := newEvRig(t, "")
+	o := pacedOwner(t, quiet22to7(), at23)
+	r.ev.wireOwner(func() *owner.Channel { return o.ch })
+	if err := o.ch.Notify("Held agent text."); err != nil {
+		t.Fatal(err)
+	}
+	c := &fakeCases{}
+	n, err := forgetFan{cases: c, kept: r.ev.kept}.ForgetTasks("agent/1")
+	if n != 1 || err == nil || !slices.Equal(c.ids, []string{"agent/1"}) {
+		t.Fatalf("forgot %d %v %v", n, err, c.ids)
+	}
+	if n, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); n != 0 || err != nil {
+		t.Fatalf("again: %d %v", n, err)
 	}
 }
 

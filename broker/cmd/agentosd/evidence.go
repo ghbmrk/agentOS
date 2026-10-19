@@ -773,14 +773,16 @@ func (k *keptReplies) attachOwner(channel func() *owner.Channel) {
 }
 
 // forgetOwnerLocked clears the owner channel's recent texts and voids its
-// held or pending reaction events. k.fmu is held.
-func (k *keptReplies) forgetOwnerLocked() {
+// held or pending reaction events. It returns how many held agent texts
+// the channel dropped (CAP3-F1). k.fmu is held.
+func (k *keptReplies) forgetOwnerLocked() int {
 	if k.owner == nil {
-		return
+		return 0
 	}
 	if ch := k.owner(); ch != nil {
-		ch.ForgetRecent()
+		return ch.ForgetRecent()
 	}
+	return 0
 }
 
 // attach makes src, the guest plane's outbox, part of what forget drops.
@@ -835,21 +837,22 @@ func (k *keptReplies) saveLocked(l []keptReply) {
 // plane's outbox, once it is attached: no waiting reply names the task it
 // is about, so a deletion drops them all, as it does the kept ones
 // (DEL-1-f1b). For the same reason it clears the owner channel's recent
-// texts, which a reaction's quote would bring back (#2360).
-func (k *keptReplies) forget() error {
+// texts, which a reaction's quote would bring back (#2360). It returns
+// how many held agent texts the owner channel dropped (CAP3-F1).
+func (k *keptReplies) forget() (int, error) {
 	k.fmu.Lock()
 	defer k.fmu.Unlock()
 	k.gen++
-	k.forgetOwnerLocked()
+	held := k.forgetOwnerLocked()
 	err := k.drop()
 	if k.src == nil {
-		return err
+		return held, err
 	}
 	o, ok := k.src.(interface{ ForgetReplies() error })
 	if !ok {
-		return errors.Join(err, errors.New("the reply outbox cannot drop replies"))
+		return held, errors.Join(err, errors.New("the reply outbox cannot drop replies"))
 	}
-	return errors.Join(err, o.ForgetReplies())
+	return held, errors.Join(err, o.ForgetReplies())
 }
 
 func (k *keptReplies) drop() error {
@@ -893,11 +896,14 @@ type recallCases interface {
 	ForgetTasks(ids ...string) (int, error)
 }
 
+// ForgetTasks returns what recall's forget reply counts (recalltool
+// Cases): the held agent texts the owner channel dropped (CAP3-F1), not
+// the learning plane's case count, which no reply words.
 func (f forgetFan) ForgetTasks(ids ...string) (int, error) {
-	kerr := f.kept.forget()
+	held, kerr := f.kept.forget()
 	if f.cases == nil {
-		return 0, kerr
+		return held, kerr
 	}
-	n, err := f.cases.ForgetTasks(ids...)
-	return n, errors.Join(err, kerr)
+	_, err := f.cases.ForgetTasks(ids...)
+	return held, errors.Join(err, kerr)
 }

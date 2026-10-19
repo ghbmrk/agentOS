@@ -38,8 +38,11 @@ type Plan struct {
 	Changes int
 }
 
-// Cases is the part of the change pipeline deletion reaches
-// (change.Pipeline).
+// Cases is what deletion reaches beyond the journal: the change
+// pipeline's cases and, in agentosd, the kept replies and the owner
+// channel's recent and held texts (forgetFan). ForgetTasks returns how
+// many held agent texts to the owner it dropped, which the forget reply
+// counts (CAP3-F1); an implementation that drops none returns 0.
 type Cases interface {
 	ForgetTasks(tasks ...string) (int, error)
 }
@@ -268,7 +271,7 @@ func (r *Reach) Retry(ctx context.Context) error {
 	}
 	for _, l := range r.Prov.ResetLineages() {
 		for _, rs := range r.Prov.Resets(l) {
-			if err := r.finish(l, rs); err != nil {
+			if _, err := r.finish(l, rs); err != nil {
 				errs = append(errs, fmt.Errorf("deletion reach into %s: %w", l, err))
 			}
 		}
@@ -610,7 +613,7 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	// A reset already done (an approval run, or before a restart) is
 	// finished, never repeated.
 	for _, rs := range r.Prov.Resets(lineage) {
-		if err := r.finish(lineage, rs); err != nil {
+		if _, err := r.finish(lineage, rs); err != nil {
 			return err
 		}
 	}
@@ -900,14 +903,22 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 	if err := r.Prov.MarkReset(lineage, rs); err != nil {
 		return &unrecordedErr{rs: rs, err: err}
 	}
+	// The confirmation is worded before finish erases the actions it
+	// counts, and sent after, with the held agent texts the forget
+	// dropped (CAP3-F1); a failed finish still sends it.
+	var text string
 	if approved {
 		to := plan.To
 		if perr != nil {
 			to = since
 		}
-		r.tell(lineage, r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until)))
+		text = r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until))
 	}
-	if err := r.finish(lineage, rs); err != nil {
+	held, err := r.finish(lineage, rs)
+	if approved {
+		r.tell(lineage, text+heldDropped(held))
+	}
+	if err != nil {
 		return err
 	}
 	// A deleted record it still holds (read after the reset) keeps it
@@ -932,8 +943,10 @@ func (r *Reach) forgotten(lineage string, rs Reset) []string {
 }
 
 // finish erases what lineage did between a reset's since and its time,
-// and forgets what it was given then. Called with run held.
-func (r *Reach) finish(lineage string, rs Reset) error {
+// and forgets what it was given then. It returns how many held agent
+// texts the forget dropped (Cases, CAP3-F1). Called with run held.
+func (r *Reach) finish(lineage string, rs Reset) (int, error) {
+	dropped := 0
 	if r.Journal != nil {
 		until := rs.Until
 		if until.IsZero() {
@@ -946,24 +959,40 @@ func (r *Reach) finish(lineage string, rs Reset) error {
 		// F1 on #59), and again after the erase, for anything kept from
 		// an intent that settled in between.
 		if r.Cases != nil {
-			if _, err := r.Cases.ForgetTasks(ids...); err != nil {
-				return err
+			n, err := r.Cases.ForgetTasks(ids...)
+			dropped += n
+			if err != nil {
+				return dropped, err
 			}
 		}
 		_, held, err := r.Journal.Erase(ids)
 		if err != nil {
-			return err
+			return dropped, err
 		}
 		if r.Cases != nil {
-			if _, err := r.Cases.ForgetTasks(ids...); err != nil {
-				return err
+			n, err := r.Cases.ForgetTasks(ids...)
+			dropped += n
+			if err != nil {
+				return dropped, err
 			}
 		}
 		if len(held) > 0 {
-			return fmt.Errorf("%d intents in flight; erased once they settle", len(held))
+			return dropped, fmt.Errorf("%d intents in flight; erased once they settle", len(held))
 		}
 	}
-	return r.Prov.Finish(lineage, rs)
+	return dropped, r.Prov.Finish(lineage, rs)
+}
+
+// heldDropped words the held agent texts a forget dropped, a count and
+// never their text (CAP3-F1); none adds nothing.
+func heldDropped(n int) string {
+	switch n {
+	case 0:
+		return ""
+	case 1:
+		return " 1 held agent text was dropped too."
+	}
+	return fmt.Sprintf(" %d held agent texts were dropped too.", n)
 }
 
 func (r *Reach) now() time.Time {

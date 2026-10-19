@@ -491,8 +491,10 @@ var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-
 // held reaction's event, and voids any event worded before it that has not
 // gone to the agent. An event being delivered when it runs finishes first,
 // so none quoting a forgotten text reaches the agent once it returns. The
-// deletion's time is saved, so the 24 h rule outlives a restart.
-func (c *Channel) ForgetRecent() {
+// deletion's time is saved, so the 24 h rule outlives a restart. It
+// returns how many held agent texts it dropped, for the forget reply
+// (CAP3-F1): a count, never their text.
+func (c *Channel) ForgetRecent() int {
 	c.reactMu.Lock()
 	defer c.reactMu.Unlock()
 	// pmu first, as every pacing path takes it: a release in flight
@@ -508,7 +510,9 @@ func (c *Channel) ForgetRecent() {
 	// next save would lose it. The held agent texts go in the same save:
 	// each may quote a forgotten reply, and a release would send it after
 	// the deletion and put it back in the window (#2374). They are not
-	// counted as dropped, which would tell the owner of them.
+	// counted in HeldDropped, so no released notice speaks of them; the
+	// forget reply counts them instead (CAP3-F1).
+	dropped := 0
 	_ = c.saveLocked(func(s *State) {
 		s.ForgotAt = now
 		keep := s.Held[:0:0]
@@ -517,11 +521,13 @@ func (c *Channel) ForgetRecent() {
 				keep = append(keep, h)
 			}
 		}
+		dropped = len(s.Held) - len(keep)
 		s.Held = keep
 	})
 	if c.held != nil && c.held.react != "" {
 		c.held = nil
 	}
+	return dropped
 }
 
 // deliverReaction gives rt's reaction event to the agent, unless a

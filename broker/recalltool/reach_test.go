@@ -108,6 +108,8 @@ type fakeCases struct {
 	// early: tasks forgotten while their intent was not yet erased.
 	early map[string]bool
 	j     *fakeJournal
+	// held is the held agent texts each call reports dropped (CAP3-F1).
+	held int
 }
 
 func (c *fakeCases) ForgetTasks(tasks ...string) (int, error) {
@@ -117,7 +119,7 @@ func (c *fakeCases) ForgetTasks(tasks ...string) (int, error) {
 			c.early[t] = true
 		}
 	}
-	return len(tasks), nil
+	return c.held, nil
 }
 
 // fakeAsk stands in for the grants gate: it records rollback intents and
@@ -1013,6 +1015,28 @@ func TestCAP3PhotoDeletionIsNamedAPhoto(t *testing.T) {
 	for ids, want := range map[string]string{"p1": "a photo", "p1 p2": "2 photos", "p1 m": "2 records"} {
 		if got := r.what(strings.Fields(ids)); got != want {
 			t.Errorf("what(%s) = %q, want %q", ids, got, want)
+		}
+	}
+}
+
+// REQ: CAP3-F1
+// The forget reply after an approved rollback counts the held agent texts
+// the forget dropped (both Cases calls), and words none of them; with
+// none dropped it says nothing of them.
+func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.cs.held = 1
+	x.del(t, x.mail)
+	x.ask.answer("yes")
+	want := "Done: root forgot a mail you deleted and is back to " + x.before.Format("15:04 Jan 2") +
+		". Its 1 action since stays done; its details are erased. 2 held agent texts were dropped too."
+	if len(x.told) != 1 || x.told[0] != want {
+		t.Fatalf("told %q, want %q", x.told, want)
+	}
+	for n, w := range map[int]string{0: "", 1: " 1 held agent text was dropped too."} {
+		if got := heldDropped(n); got != w {
+			t.Fatalf("heldDropped(%d) = %q, want %q", n, got, w)
 		}
 	}
 }

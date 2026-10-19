@@ -325,3 +325,55 @@ func TestUnlistedReactionStaysGuardedAfterAForget(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CAP3-F1
+// ForgetRecent returns how many held agent texts it dropped, for the
+// forget reply: a count, which carries none of their text. Box texts held
+// beside them are not counted.
+func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	for _, s := range []string{forgottenReply, "Another task's agent text."} {
+		if err := r.ch.Notify(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.ch.Inform("Backup finished."); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.ch.ForgetRecent(); n != 2 {
+		t.Fatalf("ForgetRecent dropped %d, want 2 held agent texts", n)
+	}
+	if n := r.ch.ForgetRecent(); n != 0 {
+		t.Fatalf("a second forget dropped %d, want 0", n)
+	}
+}
+
+// REQ: CAP3-F1
+// The forget's drop is not counted in HeldDropped, so the release after
+// quiet hours sends the box text alone, with no "dropped while paced"
+// notice speaking of the forgotten texts.
+func TestForgetDropIsNotInHeldDropped(t *testing.T) {
+	r := pacedRig(t, quiet22to7(), 23, 0)
+	if err := r.ch.Notify(forgottenReply); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ch.Inform("Backup finished."); err != nil {
+		t.Fatal(err)
+	}
+	r.ch.ForgetRecent()
+	r.ch.mu.Lock()
+	dropped := r.ch.codes.st.HeldDropped
+	r.ch.mu.Unlock()
+	if dropped != 0 {
+		t.Fatalf("HeldDropped %d after a forget, want 0", dropped)
+	}
+	r.advance(8 * time.Hour)
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.sentTexts(), " | ")
+	if !strings.Contains(got, "Backup finished.") || strings.Contains(got, "dropped") {
+		t.Fatalf("release after a forget sent %q, want the box text and no dropped notice", got)
+	}
+	noForgottenText(t, []string{got})
+}
