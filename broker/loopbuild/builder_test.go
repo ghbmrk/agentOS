@@ -22,6 +22,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/inflight"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
@@ -426,8 +427,10 @@ func TestAnImplicitTasksValuesNeverReachTheBrief(t *testing.T) {
 	}
 }
 
-// Security R3 on #126: one model call in flight per job, so concurrent
-// calls cannot overshoot the job's token cap.
+// Security R3 on #126: concurrent calls cannot pass the job's token cap
+// together. Calls run at once (RES-5), but each is checked against every
+// earlier call's charge, its whole output reservation included, so once
+// one call in flight reserves the cap the rest are refused.
 func TestConcurrentModelCallsKeepTheJobCap(t *testing.T) {
 	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
 	if err != nil {
@@ -441,7 +444,7 @@ func TestConcurrentModelCallsKeepTheJobCap(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 10})
+				call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 60})
 			}()
 		}
 		wg.Wait()
@@ -470,16 +473,18 @@ func TestConcurrentModelCallsKeepTheJobCap(t *testing.T) {
 	}
 }
 
-// L3 MUST 2 on #126: a builder holds at most maxConns connections to its
-// socket; one past that is not served until another closes, so a
+// L3 MUST 2 on #126, RES-5: each open connection holds its share of the
+// in-flight budget, so a builder's open connections are bounded by its
+// share; one past that is not served until another closes, so a
 // compromised builder cannot use up agentosd's file descriptors.
 func TestABuilderHoldsFewConnections(t *testing.T) {
+	const conns = 4
 	f := &machines{}
 	served := make(chan bool, 1)
 	f.guest = func(id, dir string) {
 		sock := filepath.Join(dir, Socket)
 		var held []net.Conn
-		for i := 0; i < maxConns; i++ {
+		for i := 0; i < conns; i++ {
 			c, err := net.Dial("unix", sock)
 			if err != nil {
 				t.Error(err)
@@ -492,7 +497,7 @@ func TestABuilderHoldsFewConnections(t *testing.T) {
 			io.WriteString(c, "GET /brief HTTP/1.1\r\nHost: b\r\n\r\n")
 			c.SetReadDeadline(time.Now().Add(2 * time.Second))
 			if _, err := c.Read(make([]byte, 1)); err != nil {
-				t.Errorf("a connection within the cap was not served: %v", err)
+				t.Errorf("a connection within the share was not served: %v", err)
 			}
 		}
 		extra, err := net.Dial("unix", sock)
@@ -510,12 +515,13 @@ func TestABuilderHoldsFewConnections(t *testing.T) {
 		}
 		call(guestClient(dir), "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "v"}})
 	}
-	b := newBuilder(t, f, nil)
+	// A share of conns connections and one small request at a time.
+	b := newBuilder(t, f, func(c *Config) { c.InFlightBytes = 2 * (conns*inflight.ConnCost + inflight.Decode.Floor) })
 	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); err != nil {
 		t.Fatal(err)
 	}
 	if <-served {
-		t.Fatalf("connection %d was served", maxConns+1)
+		t.Fatalf("connection %d was served", conns+1)
 	}
 }
 

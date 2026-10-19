@@ -114,7 +114,7 @@ TIER_B_BROKER = {
     # cgroup is B, but core vm kills machines and loop7 freezes its jail
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
-    "compile", "corpus", "floor", "fold", "hostchange",
+    "compile", "corpus", "floor", "fold", "hostchange", "inflight",
     "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }

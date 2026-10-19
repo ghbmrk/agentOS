@@ -125,6 +125,7 @@ allow broker/grants/
 allow broker/guest/
 allow broker/guesterr/
 allow broker/hostdisk/
+allow broker/inflight/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/

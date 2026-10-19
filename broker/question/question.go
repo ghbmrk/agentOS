@@ -34,8 +34,12 @@ const (
 	DefaultPerAsker     = 3
 	DefaultMaxOpen      = 8
 	DefaultSendsPerHour = 3 // CH-15's default for unsolicited texts
-	DefaultRestartGrace = 2 * time.Minute
-	DefaultKeep         = 4 * 24 * time.Hour
+	// DefaultMaxSendsPerHour is the ceiling on question texts in any hour,
+	// open chat included, once PerHour or Chat is wired: CH-15's highest
+	// TEXTS setting.
+	DefaultMaxSendsPerHour = 20
+	DefaultRestartGrace    = 2 * time.Minute
+	DefaultKeep            = 4 * 24 * time.Hour
 	// DefaultWaitersPerMachine is how many owner_question_status calls
 	// one machine may hold open at once (PQ3): the guest plane serves a
 	// machine 8 requests at a time (guest G1), and its bridge holds one
@@ -68,6 +72,10 @@ var ErrTooMany error = guesterr.New("question: too many open questions; wait for
 
 // ErrNotFound: no question by that request ID for this asker.
 var ErrNotFound error = guesterr.New("question: no such question")
+
+// ErrNotSent, wrapped by a Send or Converse error, means the text
+// provably did not go (the modem refused it, or the channel held it).
+var ErrNotSent = errors.New("question: text not sent")
 
 // ErrConflict: the request ID was already used for another question.
 var ErrConflict error = guesterr.New("question: request ID already used for a different question")
@@ -128,7 +136,11 @@ type Config struct {
 	// out behind the agent prefix, with secret-shaped text replaced
 	// (CH-19), and it is never held, since its deadline starts when Send
 	// returns nil (#989, #1563). The Book paces it itself: Quiet and
-	// Reserve. Required.
+	// Reserve. An error wrapping ErrNotSent means the text provably did
+	// not go: its questions stay held for a retry under the same IDs. Any
+	// other error may have sent it, so the send is booked as if it went:
+	// counted toward the hour, its questions waiting, never texted twice
+	// (#2363, D-116). Required.
 	Send func(text string) error
 	// Now is the time for deadlines: clock.Guard.Now once P2-9 lands. An
 	// error (the guard's ErrRestricted) holds every question: nothing is
@@ -170,6 +182,19 @@ type Config struct {
 	// ahead of a waiting batch, at most once an hour (PQ5). Nil:
 	// questions are paced alone, by SendsPerHour.
 	Reserve func(aged bool) bool
+	// PerHour is the owner's hourly limit on texts (TEXTS n, CH-15), read
+	// at each send so a change takes effect at once. It bounds questions
+	// on the urgent path too, which skips Reserve (D-129). Nil, or a value
+	// below 1: SendsPerHour.
+	PerHour func() int
+	// Chat reports whether the owner's task chat is open (CH-15). A
+	// question then is conversation: it goes by Converse, in quiet hours
+	// too, without Reserve, and does not count toward the hour. Nil:
+	// never open.
+	Chat func() bool
+	// Converse texts the owner as conversation (owner.Channel.Converse),
+	// not counted toward the hour. Nil: Send.
+	Converse func(text string) error
 	// Mono reads a monotonic clock (any origin). While Now is restricted,
 	// a texted question's wait is counted on it, so a restriction never
 	// stretches a deadline the owner was given (PQ4). Nil: the process's
@@ -181,6 +206,10 @@ type Config struct {
 	MinWait, MaxWait  time.Duration
 	PerAsker, MaxOpen int
 	SendsPerHour      int
+	// MaxSendsPerHour bounds every question text in an hour, counted or
+	// not, so a flooding agent stays bounded in an open chat too. Zero: SendsPerHour when PerHour and
+	// Chat are nil, else DefaultMaxSendsPerHour; never below SendsPerHour.
+	MaxSendsPerHour   int
 	WaitersPerMachine int
 	RestartGrace      time.Duration
 	Keep              time.Duration
@@ -294,6 +323,9 @@ type send struct {
 	At     time.Time `json:"at"` // zero for a text sent while restricted
 	Asker  string    `json:"asker"`
 	Others []string  `json:"others,omitempty"`
+	// Chat marks a text sent in an open task chat: conversation, so it
+	// counts only toward MaxSendsPerHour (CH-15, #2363).
+	Chat bool `json:"chat,omitempty"`
 	// mono is Mono at the text, or at loading (monoSet), so pacing holds
 	// while the clock is restricted (PQ4).
 	mono    time.Duration
@@ -351,6 +383,10 @@ func New(cfg Config) (*Book, error) {
 	defi(&cfg.MaxOpen, DefaultMaxOpen)
 	defi(&cfg.SendsPerHour, DefaultSendsPerHour)
 	defi(&cfg.WaitersPerMachine, DefaultWaitersPerMachine)
+	if cfg.MaxSendsPerHour <= 0 && (cfg.PerHour != nil || cfg.Chat != nil) {
+		cfg.MaxSendsPerHour = DefaultMaxSendsPerHour
+	}
+	cfg.MaxSendsPerHour = max(cfg.MaxSendsPerHour, cfg.SendsPerHour)
 	if cfg.Location == nil {
 		cfg.Location = time.Local
 	}
@@ -360,17 +396,6 @@ func New(cfg Config) (*Book, error) {
 	if cfg.Mono == nil {
 		origin := time.Now()
 		cfg.Mono = func() time.Duration { return time.Since(origin) }
-	}
-	// Tags are held while their question is kept and was texted (a
-	// question closed unsent frees its tag at once). At most SendsPerHour
-	// texts an hour carry at most MaxPerText questions each, so keeping
-	// them for less than tags/(SendsPerHour*MaxPerText) hours means a tag
-	// is always free for an asker under its open cap (P3-8 Q5).
-	// Open questions hold tags too, and a question texted in the hour
-	// before the oldest kept one closes inside the window, hence the
-	// margins (S1 on #117).
-	if maxKeep := time.Duration((numTags-2*cfg.MaxOpen)/(cfg.SendsPerHour*MaxPerText)-1) * time.Hour; cfg.Keep > maxKeep {
-		cfg.Keep = maxKeep
 	}
 	b := &Book{cfg: cfg}
 	if cfg.Path == "" {
@@ -778,6 +803,23 @@ const (
 	numTags  = 900
 )
 
+// tagRoomLocked is how many more questions may be texted now. A texted
+// question holds its tag until Keep after it closes, and an untexted one
+// only while it is open, so at most numTags-MaxOpen texted questions are
+// kept at once: an asker under the open cap always finds a tag, whatever
+// TEXTS and Keep are, and a tag is never reused while the owner may still
+// answer its question (P3-8 Q5, security B2 on #2372). Past it, questions
+// are held until kept ones age out.
+func (b *Book) tagRoomLocked() int {
+	room := numTags - b.cfg.MaxOpen
+	for _, e := range b.qs {
+		if e.texted() {
+			room--
+		}
+	}
+	return room
+}
+
 // allocLocked returns the next free tag, skipping any still known (open,
 // or closed within Keep), or "" when none is free.
 func (b *Book) allocLocked() string {
@@ -831,7 +873,7 @@ func (b *Book) Status(ctx context.Context, asker, req, machine string) (Status, 
 	counting := e.State == Waiting && e.monoSet // the wait runs on while restricted (PQ4)
 	switch e.State {
 	case Held:
-		st.Reason = "not texted yet (pacing or quiet hours); the deadline starts when the owner is texted"
+		st.Reason = "not texted yet (pacing, quiet hours, or too many recent questions: it waits for older ones to clear); the deadline starts when the owner is texted"
 	case Waiting:
 		st.Deadline = e.Deadline
 		if st.Deadline.IsZero() && clockErr == nil {
@@ -891,16 +933,23 @@ func (b *Book) sendDue(ctx context.Context) {
 			return
 		}
 		trusted := err == nil
-		if b.waitsQuiet(now, trusted) {
+		// In an open task chat a question is conversation: neither quiet
+		// hours nor the hour's limit hold it (CH-15, #2363).
+		chat := b.cfg.Chat != nil && b.cfg.Chat()
+		if !chat && b.waitsQuiet(now, trusted) {
 			return
 		}
 		m := b.cfg.Mono()
 		b.mu.Lock()
 		keep := b.sends[:0]
 		recent := map[string]bool{}
+		counted := 0
 		for _, t := range b.sends {
 			if b.withinHour(t, now, trusted, m) {
 				keep = append(keep, t)
+				if !t.Chat {
+					counted++
+				}
 				recent[t.Asker] = true
 				for _, a := range t.Others {
 					recent[a] = true
@@ -912,7 +961,8 @@ func (b *Book) sendDue(ctx context.Context) {
 		// one that was not, so one lineage cannot take the whole budget;
 		// a question held AgedAfter goes first (PQ5).
 		var batch []*entry
-		if len(b.sends) < b.cfg.SendsPerHour {
+		room := b.tagRoomLocked()
+		if room > 0 && len(b.sends) < b.cfg.MaxSendsPerHour && (chat || counted < b.perHour()) {
 			for tier := range 3 {
 				for _, q := range b.qs {
 					if !b.dueLocked(q, now, trusted, m) {
@@ -947,7 +997,7 @@ func (b *Book) sendDue(ctx context.Context) {
 		text := b.renderBy(batch[0], by(batch[0]))
 		n := 1
 		for _, q := range batch[1:] {
-			if n == MaxPerText {
+			if n == MaxPerText || n == room {
 				break
 			}
 			t := text + " " + b.renderBy(q, by(q))
@@ -961,14 +1011,21 @@ func (b *Book) sendDue(ctx context.Context) {
 		b.mu.Unlock()
 		// The shared budget is reserved outside b.mu, and sendMu keeps it
 		// to one text at a time.
-		if b.cfg.Reserve != nil && !b.cfg.Reserve(aged) {
+		deliver := b.cfg.Send
+		if chat && b.cfg.Converse != nil {
+			deliver = b.cfg.Converse
+		} else if b.cfg.Reserve != nil && !b.cfg.Reserve(aged) {
 			return
 		}
-		if err := b.cfg.Send(text); err != nil {
+		if err := deliver(text); errors.Is(err, ErrNotSent) {
 			return
+		} else if err != nil {
+			// It may have gone: booked as sent, so the hour counts it and
+			// the owner never gets it twice (#2363).
+			b.cfg.Logf("question text outcome unknown, counted as sent: %v", err)
 		}
 		b.mu.Lock()
-		s := send{Asker: batch[0].Asker, mono: m, monoSet: true}
+		s := send{Asker: batch[0].Asker, Chat: chat, mono: m, monoSet: true}
 		if trusted {
 			s.At = now
 		}
@@ -994,6 +1051,17 @@ func (b *Book) sendDue(ctx context.Context) {
 		b.save("send")
 		b.mu.Unlock()
 	}
+}
+
+// perHour is the hour's limit on question texts: the owner's TEXTS
+// setting when the wiring passes it, else SendsPerHour.
+func (b *Book) perHour() int {
+	if b.cfg.PerHour != nil {
+		if n := b.cfg.PerHour(); n >= 1 {
+			return n
+		}
+	}
+	return b.cfg.SendsPerHour
 }
 
 // waitsQuiet reports whether questions wait for quiet hours to end

@@ -102,7 +102,7 @@ func shapeForm(text string) (string, bool) {
 // already passed Disclose, so an unlisted form quoting it stays chat and the
 // owner's words reach the agent whole (CH-11). The exception is the 24 h
 // after a deletion, when the agent may no longer hold the text quoted
-// (CAP-3, #2360, O44).
+// (CAP-3, #2360, CAP3-reaction-recent-forget-O44).
 func (c *Channel) readReaction(text string) (reaction, bool) {
 	if rx, ok := parseReaction(text); ok {
 		return rx, true
@@ -494,8 +494,12 @@ func (c *Channel) deliverReaction(ctx context.Context, from string, rt route) []
 	if stale {
 		return nil
 	}
-	return c.ctrl.Event(ctx, from, rt.react)
+	return c.ctrl.Event(context.WithValue(ctx, eventDelivery{}, true), from, rt.react)
 }
+
+// eventDelivery marks a delivery as an event, not task chat, so it arms
+// no acknowledgement (OWN-4).
+type eventDelivery struct{}
 
 // reactionEvent is the broker-worded text the agent gets for rx, and the
 // pointer the owner gets when the marked text expects a reply.

@@ -153,14 +153,7 @@ func openSleeper(ctx context.Context, deps sleepDeps) *sleeper {
 		}.checks(),
 		Stopped: d.Engine().Stopped,
 		Journal: d.Engine().RecordSleep,
-		Hold: func() {
-			if ch := d.Owner(); ch != nil {
-				if err := ch.Inform(holdLine); err != nil {
-					log.Printf("agent machine %s: holding line not sent: %v", deps.id, err)
-				}
-			}
-		},
-		Logf: log.Printf,
+		Logf:    log.Printf,
 	})
 	s.recover(ctx)
 	go s.watch(ctx, 30*time.Second)

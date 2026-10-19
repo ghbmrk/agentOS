@@ -229,6 +229,9 @@ func capCases() []capCase {
 			// A question book whose state is a directory does not load.
 			qs := &questions{}
 			qs.start(b.ctx, b.d, &preempter{}, questionConfig{Path: b.dir, ClockPath: filepath.Join(b.dir, "clock.json")}, b.caps)
+			// The clock keeps saving into b.dir until it stops; stop it
+			// before TempDir removes the directory.
+			t.Cleanup(func() { b.cancel(); qs.run.Wait() })
 			if qs.b.Load() != nil {
 				t.Fatal("the questions plane opened")
 			}
