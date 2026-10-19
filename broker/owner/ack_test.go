@@ -81,19 +81,19 @@ func (r *rig) acks() int {
 	return n
 }
 
-// TestOWN4AckWarmAgentAt20s: task chat a warm agent got and has not
-// answered gets AckText 20 s after it reached the box, not before; chat
+// TestOWN4AckWarmAgentAt5s: task chat a warm agent got and has not
+// answered gets AckText 5 s after it reached the box, not before; chat
 // no agent got gets none.
-func TestOWN4AckWarmAgentAt20s(t *testing.T) {
+func TestOWN4AckWarmAgentAt5s(t *testing.T) {
 	r, a := ackRig(t)
 	r.say("book a table")
-	a.fire(19 * time.Second)
+	a.fire(4 * time.Second)
 	if n := r.acks(); n != 0 {
-		t.Fatalf("%d acknowledgements at 19 s", n)
+		t.Fatalf("%d acknowledgements at 4 s", n)
 	}
 	a.fire(time.Second)
 	if n := r.acks(); n != 1 {
-		t.Fatalf("%d acknowledgements at 20 s, want 1", n)
+		t.Fatalf("%d acknowledgements at 5 s, want 1", n)
 	}
 
 	r = newRig(t, nil)
@@ -116,14 +116,14 @@ func TestOWN4AckWarmAgentAt20s(t *testing.T) {
 func TestOWN4AckOncePerMessage(t *testing.T) {
 	r, a := ackRig(t)
 	r.say("book a table")
-	a.fire(5 * time.Second)
+	a.fire(2 * time.Second)
 	r.say("for four")
 	a.fire(time.Hour)
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements for two messages in one wait, want 1", n)
 	}
 	r.say("at eight")
-	a.fire(20 * time.Second)
+	a.fire(5 * time.Second)
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements for a later message, want 1", n)
 	}
@@ -133,12 +133,12 @@ func TestOWN4AckOncePerMessage(t *testing.T) {
 	}
 }
 
-// TestOWN4NoAckAfterReply: a reply that went out before 20 s stops the
+// TestOWN4NoAckAfterReply: a reply that went out before 5 s stops the
 // acknowledgement; a reply that was refused, so never went, does not.
 func TestOWN4NoAckAfterReply(t *testing.T) {
 	r, a := ackRig(t)
 	r.say("book a table")
-	a.fire(10 * time.Second)
+	a.fire(2 * time.Second)
 	if err := r.ch.Converse("Booked for eight."); err != nil {
 		t.Fatal(err)
 	}
@@ -150,11 +150,11 @@ func TestOWN4NoAckAfterReply(t *testing.T) {
 
 	r, a = ackRig(t)
 	r.say("book a table")
-	a.fire(10 * time.Second)
+	a.fire(2 * time.Second)
 	if err := r.ch.Converse(`Liked “book a table”`); !errors.Is(err, ErrAgentReaction) {
 		t.Fatalf("a reaction-shaped reply: %v, want ErrAgentReaction", err)
 	}
-	a.fire(10 * time.Second)
+	a.fire(3 * time.Second)
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements after a failed reply, want 1", n)
 	}
@@ -179,7 +179,7 @@ func TestOWN4AckCarriesNoAgentContent(t *testing.T) {
 	sent := len(r.ch.codes.st.Sent)
 	r.ch.mu.Unlock()
 	r.say("book a table")
-	a.fire(20 * time.Second)
+	a.fire(5 * time.Second)
 	got := r.sentTexts()
 	if len(got) != 1 || got[0] != AckText || strings.HasPrefix(got[0], AgentPrefix) {
 		t.Fatalf("acknowledgement in quiet hours: %q", got)
@@ -226,7 +226,7 @@ func TestOWN4NoAckForReactions(t *testing.T) {
 
 	r, a = ackRig(t)
 	r.say("book a table")
-	a.fire(20 * time.Second)
+	a.fire(5 * time.Second)
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements, want 1", n)
 	}
@@ -265,7 +265,7 @@ func TestOWN4NoAckAfterReplyDuringDelivery(t *testing.T) {
 func TestOWN4NoAckAfterStop(t *testing.T) {
 	r, a := ackRig(t)
 	r.say("book a table")
-	a.fire(5 * time.Second)
+	a.fire(2 * time.Second)
 	if got := r.say("STOP"); !strings.Contains(got, "Stopped") {
 		t.Fatalf("STOP: %q", got)
 	}
@@ -274,7 +274,7 @@ func TestOWN4NoAckAfterStop(t *testing.T) {
 		t.Fatalf("%d acknowledgements after STOP", n)
 	}
 	r.say("book a table")
-	a.fire(20 * time.Second)
+	a.fire(5 * time.Second)
 	if n := r.acks(); n != 1 {
 		t.Fatalf("%d acknowledgements for task chat after STOP, want 1", n)
 	}
