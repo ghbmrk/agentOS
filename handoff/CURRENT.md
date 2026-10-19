@@ -16,7 +16,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure.
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them.
 - **D-128** G1 proven (run 39042850372); the G1 freeze (D-118) is off and the G2 freeze is on: until A4, A5, A9 and A14 pass on a VM, PRs touch only `tools/g1_scope_g2.txt` paths (the `g1-freeze` check runs every gate list). D-098 rows stay frozen.
-- The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` merge only on Mark's own approval of that PR at its head, cited on the PR (D-125). Asks to Mark are cards, never typed phrases.
+- The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` also need a separate Security accept at an equal head, and no PR waits for Mark's line (D-137). Asks to Mark are cards, never typed phrases.
 - **D-121** Speed rules (OPERATING §5): run CI's exact commands (and a `-count=N` stress run on new concurrency tests) before a PR or verdict; briefs pre-approve their guard files (`tools/risk_tier.py` class, `broker/daemon/arc2_test.go` allowlist, `tools/g1_scope.txt`); readiness reads the code; one push per round; on the G1 critical path stack on a review-accepted interface and run disjoint packages in parallel; tier-A builders on Opus, B/C on Sonnet, no model switch mid-session; fix a flake the second time. Tier A keeps two reviews (Security; Potency/UX/L3).
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
@@ -25,14 +25,14 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 GitHub overrides this wherever they differ (§1 step 6). Reason: Mark's subscription was at 98%, so the project moves to another one. A fresh coordinator reads this, the project instructions, docs/OPERATING.md, and the newest `dispatch/` file (2026-10-17-2200.md, which lives in the old project's shared folder and may not be visible here; rebuild from GitHub).
 
 ### Standing threads (chat-project ids do not carry over; recreate by role)
-Decisions (every multiple-choice question for Mark becomes a card here), Decisions-merge (merges Mark-tapped Mark-only PRs), Questions, Alerts, PR updates, plus anchor posts for Builds and reviews, Cap code, Spec, Reviews. A new coordinator arms its own 60-minute backstop with the prompt "Hourly work-flow check" (the old one was tied to the old coordinator session).
+Decisions (every multiple-choice question for Mark becomes a card here), Questions, Alerts, PR updates, plus anchor posts for Builds and reviews, Cap code, Spec, Reviews. A new coordinator arms its own 60-minute backstop with the prompt "Hourly work-flow check" (the old one was tied to the old coordinator session).
 
 ### Open card
 Merge-queue route: Mergify (recommended) / Move to org / Home-built / Up to date. #2292 is paused until Mark taps. Mark asked whether Mergify is a dependency (yes: an outside app with write access) and how big the two-green-PR issue is. Answer: real but not urgent. 29 of main's last 100 CI runs failed, mostly alternating, so likely flakes; the confirmed case is the vet break #2263 fixes. Suggested measuring first with auto-revert plus logging.
 
 ### Blocked on a typed line from Mark (card taps are refused by the permission check)
-- **#2307** photo store: add three `allow photo/keep` lines to `broker/core/core.txt` (journal.Engine Authorize, Dispatch, Erase) per https://github.com/ghbmrk/agentOS/pull/2307#issuecomment-6241987879. Tap approved 22:12:03Z; head 27a797e. Then combined and Security deltas, then a Merge card.
-- **#2319** G2 freeze exemption: add `exempt-pr 2319` to `tools/g1_scope_g2.txt` (refused as "CI Bypass"). Tap approved 22:18:51Z. That PR is Mark-only: Merge card, then edit #2319's body to re-run `g1-freeze`; #2319 then arms with no new review.
+- **#2307** photo store: add three `allow photo/keep` lines to `broker/core/core.txt` (journal.Engine Authorize, Dispatch, Erase) per https://github.com/ghbmrk/agentOS/pull/2307#issuecomment-6241987879. Tap approved 22:12:03Z; head 27a797e. Then combined and Security deltas; it then arms at the last accept (D-137).
+- **#2319** G2 freeze exemption: add `exempt-pr 2319` to `tools/g1_scope_g2.txt` (refused as "CI Bypass"). Tap approved 22:18:51Z. That PR is a gate-file PR: L3 and Security accepts, then it arms (D-137); then edit #2319's body to re-run `g1-freeze`; #2319 then arms with no new review.
 - The Alerts thread was asked to request one typed line covering both; relay Mark's typed message to both builders.
 
 ### Reviews running
@@ -43,13 +43,13 @@ Merge-queue route: Mergify (recommended) / Move to org / Home-built / Up to date
 
 ### Builds running
 - UX3-1 provider sign-in (#991, tier A) and its PR #2329.
-- SPEC-residue #2325 (tier B, Mark-only spec): delta accepted at f4fd185; Merge card when CI is green. Follow-up owed: retire or re-home HW-8a markers in tier-A broker/hostdisk tests (trace.py flags it), Mark's call.
-- #2266: conflict resolved, head 42a2a12, premerge `same`, no delta; green, Merge card.
+- SPEC-residue #2325 (tier B, spec): delta accepted at f4fd185; arms when CI is green (D-137). Follow-up owed: retire or re-home HW-8a markers in tier-A broker/hostdisk tests (trace.py flags it), Mark's call.
+- #2266: conflict resolved, head 42a2a12, premerge `same`, no delta; green, arms (D-137).
 
 ### Accepted, awaiting CI or arming
 #2293, #2295, #2298, #2301, #2302, #2305, #2316, #2230. #2294 accepted by both at a228a90 (Security arms). #2308 at 3ba2b29 (Security arms). The post-hotfix sweep armed #2255 #2258 #2262 #2265 #2267 #2273 #2228 #2304; #2276 merged.
 
-### Mark-only, Merge card when green
+### Gate-file or spec, arm when green (D-137: gate files also need a Security accept)
 #2309 (accepts at e79ff92; waits on #2263 fixing main's reaction_test.go:314, the builder merges main and reports the head), #2289 (risk_tier fix, accepted d24fb26, waits on the main fix), #2285 (INFER-SVC part 1, delta combined review running), #2257 (head 1b57e95b, CI parallelism), #2266, #2307, #2325, and the #2319 exemption PR. Still open from an earlier Decisions thread: Merge #2234 at feeab4c, and the D-098 freeze exemption for the two frozen cap changes.
 
 ### Gated
@@ -67,13 +67,13 @@ Merge-queue route: Mergify (recommended) / Move to org / Home-built / Up to date
 ### Decided tonight (Mark's taps)
 - No arbitrary caps ("No cap", "All three"): concurrency bounded only by real capacity; API routes keep a money cap.
 - D-098 Exempt (21:11Z) and Widen (21:39Z): clean-room 4-call limit widened via memory-budget admission in broker/cleanroom with tier A reviews.
-- #2307 photo store: approve the three `allow photo/keep` core.txt lines (22:12Z); lines only, a Merge card is still owed after delta reviews.
-- #2319: exempt from the G2 freeze (22:18Z); the one-line exemption PR needs Mark's Merge card, then #2319 merges unchanged.
+- #2307 photo store: approve the three `allow photo/keep` core.txt lines (22:12Z); lines only; it arms after the delta reviews (D-137).
+- #2319: exempt from the G2 freeze (22:18Z); the one-line exemption PR merges on its L3 and Security accepts (D-137), then #2319 merges unchanged.
 - #2291 spec merged (c5682b3). #2263 hotfix merged (aab406b). #2274, #2314, #1878 closed.
 - Models: tier A builds and reviews claude-opus-5-5; tier B/C builds claude-sonnet-5-5.
 
 ### Decision-card rules (for whoever runs Decisions)
-Never merge or approve; cards only, never ask Mark to type. A Merge card only when CI is green on the head, `python3 tools/premerge.py --base origin/main <accepted_sha> <head>` prints `same`, and every required review accepted that head; check `--needs-mark --base origin/main <head>` yourself. No duplicate cards (check earlier cards and taps; approvals carry forward except D-125 per-head Merge taps). Relay every Merge tap to the merging thread and the coordinator.
+Cards only, never ask Mark to type. There are no Merge cards (D-137): a PR arms at its last required accept when CI is green on the head and `python3 tools/premerge.py --base origin/main <accepted_sha> <head>` prints `same`; if `--needs-mark --base origin/main <head>` prints `mark`, a separate Security accept at an equal head is also required. No duplicate cards (check earlier cards and taps; approvals carry forward).
 
 ### Owed first on the new subscription
 1. #2329 provider sign-in "Get a new code" (UX3-1, tier A, premerge `agent`): the combined L3 and Security reviews were held; start them first. Release finding #2328 filed.
