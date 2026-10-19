@@ -157,6 +157,9 @@ func (h *Holder) Hand(b []byte) {
 	}
 }
 
+// Drop zeroes and forgets the holder's secret.
+func (h *Holder) Drop() { h.Hand(nil) }
+
 // Held reports whether the holder has a secret.
 func (h *Holder) Held() bool {
 	h.mu.RLock()
@@ -171,10 +174,13 @@ func (h *Holder) holds(b []byte) bool {
 	return len(h.secret) > 0 && subtle.ConstantTimeCompare(h.secret, b) == 1
 }
 
+// current is a copy of the secret for one request, so a hand or drop that
+// zeroes the held buffer never zeroes one a request is still using. The
+// caller zeroes the copy when done.
 func (h *Holder) current() []byte {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.secret
+	return append([]byte(nil), h.secret...)
 }
 
 func refuse(w http.ResponseWriter, status int, why string) {
@@ -204,6 +210,7 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := h.current()
+	defer clear(secret)
 	if len(secret) == 0 {
 		refuse(w, http.StatusServiceUnavailable, ErrNoSecret)
 		return
@@ -365,24 +372,40 @@ func (h *Holder) headersDeclared(a egress.Adapter, hdr http.Header) bool {
 	return true
 }
 
-// hand serves the hand socket: GET /state says whether a secret is held,
-// PUT /secret hands one. Neither reads the secret back.
-func (h *Holder) hand() http.Handler {
+// Slot is what a hand socket fills: a holder's secret, or the keyless
+// proxy's redaction state (SIM-split-wire).
+type Slot interface {
+	Hand(b []byte)
+	Drop()
+	Held() bool
+}
+
+// hand serves the holder's hand socket.
+func (h *Holder) hand() http.Handler { return HandHandler(h, maxSecret) }
+
+// HandHandler serves a hand socket for s: GET /state says whether s holds
+// anything, PUT /secret hands it at most max bytes, DELETE /secret drops
+// it. None reads it back.
+func HandHandler(s Slot, max int64) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(state{Held: h.Held()})
+		json.NewEncoder(w).Encode(state{Held: s.Held()})
 	})
 	mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxSecret+1))
-		if err != nil || len(b) == 0 || len(b) > maxSecret {
+		b, err := io.ReadAll(io.LimitReader(r.Body, max+1))
+		if err != nil || len(b) == 0 || int64(len(b)) > max {
 			http.Error(w, "holder: bad secret", http.StatusBadRequest)
 			return
 		}
-		h.Hand(b)
+		s.Hand(b)
 		for i := range b {
 			b[i] = 0
 		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) {
+		s.Drop()
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return mux
@@ -461,18 +484,27 @@ func (c *client) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // Keeper runs in the unlock step: it hands a holder its secret, and hands
-// it again whenever the holder says it holds none (a restart).
+// it again whenever the holder says it holds none (a restart) or the
+// secret's version has moved since its last hand (a rotated key).
 type Keeper struct {
 	// Socket is the holder's hand socket.
 	Socket string
 	// Secret returns the secret to hand; it is called only when the
-	// holder is empty. The keeper zeroes what it returns after the hand.
+	// holder is empty or the version moved. The keeper zeroes what it
+	// returns after the hand.
 	Secret func() ([]byte, error)
+	// Version, when set, names the secret Secret returns now; the keeper
+	// hands again when it differs from the one it last handed.
+	Version func() uint64
 	// Every is how often Run checks; zero means every 2 seconds.
 	Every time.Duration
 
 	once sync.Once
 	c    *http.Client
+
+	mu     sync.Mutex
+	handed bool
+	ver    uint64
 }
 
 func (k *Keeper) client() *http.Client {
@@ -499,7 +531,14 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("holder: state: status %d: %v", resp.StatusCode, err)
 	}
-	if st.Held {
+	var ver uint64
+	if k.Version != nil {
+		ver = k.Version()
+	}
+	k.mu.Lock()
+	current := k.handed && k.ver == ver
+	k.mu.Unlock()
+	if st.Held && (k.Version == nil || current) {
 		return false, nil
 	}
 	s, err := k.Secret()
@@ -520,11 +559,33 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 	if resp.StatusCode != http.StatusNoContent {
 		return false, fmt.Errorf("holder: hand: status %d", resp.StatusCode)
 	}
+	k.mu.Lock()
+	k.handed, k.ver = true, ver
+	k.mu.Unlock()
 	return true, nil
 }
 
+// Drop takes the holder's secret back, as the unlock step does when it
+// locks. The keeper hands again on its next round.
+func (k *Keeper) Drop(ctx context.Context) error {
+	k.mu.Lock()
+	k.handed = false
+	k.mu.Unlock()
+	req, _ := http.NewRequestWithContext(ctx, "DELETE", "http://localhost/secret", nil)
+	resp, err := k.client().Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("holder: drop: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Run checks every k.Every until ctx ends. A failed round (the holder is
-// down) is retried on the next tick.
+// down) is retried on the next tick. A round in flight when ctx ends runs
+// to its answer, so once Run returns no hand of its is still on the way.
 func (k *Keeper) Run(ctx context.Context) {
 	every := k.Every
 	if every <= 0 {
@@ -533,7 +594,7 @@ func (k *Keeper) Run(ctx context.Context) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		k.Check(ctx)
+		k.Check(context.WithoutCancel(ctx))
 		select {
 		case <-ctx.Done():
 			return

@@ -115,6 +115,16 @@ type Declaration struct {
 	// then, so pool-less is never a silent default (RES-5).
 	Unmetered   bool
 	TaskClasses []string
+	// CloudOff lists the switches that turn the provider's cloud and remote
+	// features off in a CLI guest (ARC-3): cloud tasks, remote runs, session
+	// sync, telemetry, update checks, notifications and provider-hosted
+	// tools. An entry is a managed-config pin, `table.key = value`, or a
+	// flag starting with "-", which must be in Argv. A feature with no known
+	// switch is [Open] in ASSUMPTIONS.md and its endpoints are left out of
+	// Endpoints and the egress route, so egress refuses them. A broker-held
+	// declaration needs the list; a worker-held agent turns its features off
+	// under CRED-5 W4 instead.
+	CloudOff []string
 
 	// ErrorEvents are the "type" values of the CLI's own JSON error events
 	// in the result stream. The signals below are substrings matched only
@@ -202,6 +212,14 @@ func (d Declaration) Validate() error {
 		if len(d.Endpoints) == 0 {
 			return fmt.Errorf("declaration %s: broker-held names no endpoint", d.ID)
 		}
+		if len(d.CloudOff) == 0 {
+			return fmt.Errorf("declaration %s: a CLI guest lists no cloud-off switches (ARC-3)", d.ID)
+		}
+		for _, c := range d.CloudOff {
+			if strings.TrimSpace(c) == "" || (strings.HasPrefix(c, "-") && !contains(d.Argv, c)) {
+				return fmt.Errorf("declaration %s: cloud-off switch %q is empty or not in argv", d.ID, c)
+			}
+		}
 	case WorkerHeld:
 	default:
 		return fmt.Errorf("declaration %s: custody %q", d.ID, d.Custody)
@@ -233,7 +251,7 @@ func (d Declaration) Validate() error {
 	all = append(append(append(all, d.Wrap...), d.Argv...), d.Env...)
 	all = append(all, d.Idle...)
 	all = append(append(all, d.SignInArgv...), d.SignInLinks...)
-	all = append(all, d.Endpoints...)
+	all = append(append(all, d.Endpoints...), d.CloudOff...)
 	all = append(all, d.Placeholder, d.Cwd, d.ResultPath, d.Q.Evidence, d.Q.TermsURL)
 	// A value in the declaration's own credential formats is refused as
 	// well as the default shapes: an xai- key is not one of those.
@@ -281,6 +299,23 @@ func Builtins() map[string]Declaration {
 				{Name: "secondary", ReadFrom: "x-codex-secondary-used-percent"},
 			},
 			TaskClasses: []string{"code", "research"},
+			// The managed_config.toml pins that turn cloud and remote
+			// features off (guest/codex/ASSUMPTIONS.md ARC3-guest-cloud-off-1; the test reads
+			// the file). Cloud tasks, remote runs and session sync have no
+			// known switch: [Open], their endpoints absent from egress.Codex().
+			CloudOff: []string{
+				`web_search = "disabled"`, "tools.web_search = false",
+				"features.web_search_request = false", "features.web_search_cached = false",
+				"features.image_generation = false", "features.browser_use = false",
+				"features.browser_use_external = false", "features.computer_use = false",
+				"features.remote_plugin = false", "features.plugin_sharing = false",
+				"features.apps = false", "features.plugins = false",
+				"features.daemon_auto_start = false",
+				"check_for_update_on_startup = false", "features.in_app_updates = false",
+				"notify = []",
+				"analytics.enabled = false", "feedback.enabled = false", `otel.exporter = "none"`,
+				`history.persistence = "none"`,
+			},
 			// codex exec --json reports failures as these events; the
 			// agent's messages are item events and are never matched.
 			ErrorEvents: []string{"error", "turn.failed"},
@@ -360,6 +395,10 @@ func Builtins() map[string]Declaration {
 			// No quota header is known for these endpoints: no pool (RES-5).
 			Unmetered:   true,
 			TaskClasses: []string{"code", "research"},
+			// The one known switch, read from the CLI's strings; the rest
+			// of its cloud features are [Open] (ASSUMPTIONS.md), their
+			// endpoints absent from egress.Grok().
+			CloudOff:    []string{"--no-auto-update"},
 			ErrorEvents: []string{"error"},
 			UsedUp:      []string{"usage_limit_reached", "usage_pool_exhausted"},
 			// xAI's login is OIDC JWTs at auth.x.ai, and its API keys are

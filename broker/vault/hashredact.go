@@ -62,7 +62,7 @@ func NewHashRedactor(values [][]byte) (*HashRedactor, error) {
 	r := &HashRedactor{key: key, base: binary.LittleEndian.Uint64(b[:]) | 1}
 	for _, p := range encodings(values) {
 		form := p.b
-		if len(form) < HashWindow {
+		if len(form) <= HashWindow {
 			r.add(hashEntry{N: len(form), Fold: p.fold, Pre: r.print(form), Sum: r.mac(form)})
 			continue
 		}

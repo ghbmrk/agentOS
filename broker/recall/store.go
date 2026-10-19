@@ -31,12 +31,23 @@ var ErrLocked = errors.New("recall: store is locked by another process")
 type FileStore struct {
 	mu   sync.Mutex
 	path string
-	f    *os.File
+	f    storeFile
 	lock *os.File
 	// broken is set when a rewrite renamed the new file into place but
-	// could not reopen it; appends then fail rather than go to the old,
-	// unlinked file.
+	// could not reopen it, so appends fail rather than go to the old,
+	// unlinked file; and when a failed append could not be cut back off
+	// the file, so the next line is not joined onto its remains. A
+	// Rewrite that works, or a reopen, clears it.
 	broken error
+}
+
+// storeFile is the part of *os.File the store uses (tests fault it).
+type storeFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Truncate(int64) error
+	Stat() (os.FileInfo, error)
+	Close() error
 }
 
 // OpenFile opens or creates the store at path. A lock file next to it keeps
@@ -75,10 +86,29 @@ func (s *FileStore) Append(line []byte) error {
 	if s.broken != nil {
 		return s.broken
 	}
-	if _, err := s.f.Write(line); err != nil {
+	fi, err := s.f.Stat()
+	if err != nil {
 		return err
 	}
-	return s.f.Sync()
+	_, err = s.f.Write(line)
+	if err == nil {
+		err = s.f.Sync()
+	}
+	if err == nil {
+		return nil
+	}
+	// A failed append can leave part of the line, or all of it unsynced.
+	// Cut the file back to where the append began, so the caller's "not
+	// written" holds and the next line does not join the remains into one
+	// line a reader skips (SEC-backs-append-latch). If the cut fails,
+	// refuse appends until Rewrite or a reopen, which reads the remains as
+	// a torn tail.
+	if terr := s.f.Truncate(fi.Size()); terr != nil {
+		s.broken = fmt.Errorf("recall: store append failed and could not be cut back: %w", terr)
+	} else if serr := s.f.Sync(); serr != nil {
+		s.broken = fmt.Errorf("recall: store append failed and its cut could not be synced: %w", serr)
+	}
+	return err
 }
 
 func (s *FileStore) ReadAll() ([]byte, error) {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -221,7 +222,10 @@ func TestEgressHoldsNoLoginAcrossProcesses(t *testing.T) {
 	}
 	start(t, "holder", dir)
 	waitFor(t, "the restarted holder", func() bool { return ask().Code == 200 })
-	_ = control[0]
+	// The control must stay reachable until its scan is done: `_ =
+	// control[0]` needs only the length, so the collector could free and
+	// reuse its bytes first, and the control then missed (the old flake).
+	runtime.KeepAlive(control)
 }
 
 func loadRedactor(t *testing.T, dir, name string) *vault.HashRedactor {
