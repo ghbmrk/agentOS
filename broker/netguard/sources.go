@@ -219,10 +219,11 @@ func Prefixes(as []net.Addr) []netip.Prefix {
 			continue
 		}
 		if bits == 128 && ip.Is4() { // an IPv4-in-IPv6 length for an IPv4 address
+			if ones < 96 { // wider than the mapped range: kept as IPv6, which Learn widens to all of IPv4
+				out = append(out, netip.PrefixFrom(netip.AddrFrom16(ip.As16()), ones).Masked())
+				continue
+			}
 			ones -= 96
-		}
-		if ones < 0 {
-			continue
 		}
 		out = append(out, netip.PrefixFrom(ip, ones).Masked())
 	}

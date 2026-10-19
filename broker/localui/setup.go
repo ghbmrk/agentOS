@@ -67,6 +67,9 @@ type Provider struct {
 	// Owed: the answer agentosd recorded as owed to the vault and the
 	// vault has not confirmed (#1544), or nil.
 	Owed *bool
+	// SigningIn: the provider's sign-in still waits for the owner
+	// (UX3-F1). A code this page showed is shown only while it holds.
+	SigningIn bool
 }
 
 // privateBox is one form's private-content question as the page shows it.
@@ -587,6 +590,10 @@ type setupView struct {
 	Defaults    string
 	Providers   []Provider
 	Device      map[string][3]string
+	// Ended names each provider whose shown code's sign-in no longer
+	// waits and did not connect: its code is off the page and it shows
+	// as ended, with a new-code control (UX3-F2).
+	Ended map[string]bool
 	// Plan and Key are each provider's private-content box on its plan
 	// sign-in and API key forms.
 	Plan, Key map[string]privateBox
@@ -723,9 +730,14 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		}
 	case "ai":
 		v.Providers = u.s.cfg.Hooks.Providers()
-		v.Plan, v.Key, v.Unsaved = map[string]privateBox{}, map[string]privateBox{}, map[string]*privateBox{}
+		v.Plan, v.Key, v.Unsaved, v.Ended = map[string]privateBox{}, map[string]privateBox{}, map[string]*privateBox{}, map[string]bool{}
 		u.mu.Lock()
 		for _, pr := range v.Providers {
+			// u.device keeps the code so the new-code control still works.
+			if _, shown := v.Device[pr.ID]; shown && !pr.SigningIn && !pr.Connected {
+				delete(v.Device, pr.ID)
+				v.Ended[pr.ID] = true
+			}
 			v.Plan[pr.ID] = u.boxLocked("ai-device", pr)
 			v.Key[pr.ID] = u.boxLocked("ai-key", pr)
 			if ok, held := u.st.Unsaved[pr.ID]; held {

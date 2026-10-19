@@ -25,7 +25,7 @@ const TombstoneAge = 30 * 24 * time.Hour
 type ServiceConfig struct {
 	// Dir is the broker-held state directory (created 0700): the index in
 	// recall/, the bus in bus.jsonl and seen.jsonl, the provenance record
-	// in provenance.jsonl.
+	// in provenance.jsonl, the back marks it did not take in backs.jsonl.
 	Dir string
 	// Key is the vault-held identity key (K5); at least 16 bytes.
 	Key []byte
@@ -96,7 +96,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 		return fail(err)
 	}
 	var stores []*recall.FileStore
-	for _, name := range []string{"bus.jsonl", "seen.jsonl", "provenance.jsonl"} {
+	for _, name := range []string{"bus.jsonl", "seen.jsonl", "provenance.jsonl", backMarksFile} {
 		st, err := recall.OpenFile(filepath.Join(cfg.Dir, name))
 		if err != nil {
 			return fail(err)
@@ -111,7 +111,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	if err := s.Index.OnDelete(s.Bus.ForgetSource); err != nil {
 		cfg.Logf("recall: replaying deletions to the bus: %v", err)
 	}
-	if s.Prov, err = OpenProvenance(stores[2]); err != nil {
+	if s.Prov, err = OpenProvenanceWithBacks(stores[2], stores[3]); err != nil {
 		return fail(err)
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,

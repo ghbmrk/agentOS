@@ -11,7 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
-// REQ: ONB-3, CRED-5, CRED-1
+// REQ: ONB-3, CRED-5, CRED-1, UX3-F1
 
 // fakeSignIn stands in for agentosd's setup-mode provider worker.
 type fakeSignIn struct {
@@ -19,9 +19,12 @@ type fakeSignIn struct {
 	link, code, from string
 	err              error
 	starts           []string
+	signing          map[string]bool
 }
 
 func (f *fakeSignIn) Ready(p string) bool { return f.ready[p] }
+
+func (f *fakeSignIn) SigningIn(p string) bool { return f.signing[p] }
 
 func (f *fakeSignIn) Start(_ context.Context, p string) (string, string, string, error) {
 	f.starts = append(f.starts, p)
@@ -140,5 +143,41 @@ func TestSetupSignInsAreBoundedAndCloseAtFinish(t *testing.T) {
 	}
 	if len(si.starts) != n {
 		t.Fatal("a closed setup started a sign-in")
+	}
+}
+
+// endingProviders is the vault's list while a sign-in ends: the login is
+// stored, and SigningIn cleared, right after the first list is read.
+type endingProviders struct {
+	*fakeProviders
+	si *fakeSignIn
+}
+
+func (e endingProviders) Providers() ([]localapi.SetupProvider, error) {
+	ps, err := e.fakeProviders.Providers()
+	if e.si.signing["codex"] {
+		e.keys["codex"], e.si.signing["codex"] = "stored", false
+	}
+	return ps, err
+}
+
+// UX3-F1 (#2328): setup lists whether each provider's sign-in still
+// waits, and a sign-in that ends with its login stored between the reads
+// lists as connected, never as an unconnected provider no longer signing
+// in (which the page would show as ended).
+func TestSetupProvidersCarrySigningIn(t *testing.T) {
+	r, f, si := signInRig(t)
+	si.signing = map[string]bool{"codex": true}
+	var l localapi.SetupProviders
+	if err := r.call(localapi.OpSetupProviders, nil, &l); err != nil || len(l.Providers) != 3 {
+		t.Fatalf("list %v %+v", err, l)
+	}
+	if c := l.Providers[2]; c.ID != "codex" || !c.SigningIn || c.Connected || l.Providers[0].SigningIn {
+		t.Fatalf("a waiting sign-in: %+v", l.Providers)
+	}
+	r.s.cfg.Providers = endingProviders{f, si}
+	l = localapi.SetupProviders{}
+	if err := r.call(localapi.OpSetupProviders, nil, &l); err != nil || l.Providers[2].SigningIn || !l.Providers[2].Connected {
+		t.Fatalf("a sign-in ending as it is listed: %v %+v", err, l.Providers[2])
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
@@ -888,7 +889,7 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
-			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
@@ -902,7 +903,7 @@ func main() {
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
-				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
+				startReaper(ctx, wt, m, 5*time.Second)
 			}
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
@@ -1212,10 +1213,12 @@ type workerGates struct {
 	avail   func() (int64, error)
 }
 
-// boxGates reads the worker gates from the running daemon: its STOP,
-// its admission's room, and meminfo less admission's headroom.
-func boxGates(d *daemon.Daemon, meminfo string, headroomMB int64) workerGates {
-	return workerGates{stopped: d.Engine().Stopped, room: d.Admission().RoomFor, avail: measuredFree(meminfo, headroomMB)}
+// boxGates reads the worker gates from the running daemon's engine and
+// admission: the engine's halt (a recorded STOP, or a STOP or other write
+// that failed and broke the engine, SEC-failed-stop-latch), admission's
+// room, and meminfo less admission's headroom.
+func boxGates(e *journal.Engine, adm *admission.Controller, meminfo string, headroomMB int64) workerGates {
+	return workerGates{stopped: e.Halted, room: adm.RoomFor, avail: measuredFree(meminfo, headroomMB)}
 }
 
 // measuredFree is MemAvailable in meminfo less the headroom admission
@@ -1265,6 +1268,13 @@ func reapWorkers(ctx context.Context, wt reaper, m commandEnder, stopped func() 
 			}
 		}
 	}
+}
+
+// startReaper runs reapWorkers on the worker tools' own gate, so the
+// reaper ends commands exactly when the tools refuse them
+// (SEC-failed-stop-latch).
+func startReaper(ctx context.Context, wt *workers.Tools, m commandEnder, tick time.Duration) {
+	go reapWorkers(ctx, wt, m, wt.Stopped, tick)
 }
 
 // reaper and commandEnder are what reapWorkers uses of the worker tools

@@ -297,9 +297,13 @@ jobs:
         # -fuzztime: a time-bounded run can fail at its deadline with a bare "context
         # deadline exceeded" and no input (P1-4-flake), and a count has no deadline. A
         # chunk that hangs is killed at a cap proportional to its expected time.
+        # Each entry is pkg:Target[:calibrate]; tests/test_ci_scope.py checks each names a Fuzz
+        # func in that package. FuzzSlots writes sealed files per input (~100 execs/s), so its
+        # first chunk is 2000 execs: fuzzrun's default 20000 overran the chunk's cap.
         run: |
-          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP; do
-            python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
+          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000; do
+            IFS=: read -r pkg target cal <<< "$t"
+            python3 ../tools/fuzzrun.py --pkg "./$pkg" --target "$target" ${cal:+--calibrate "$cal"} --budget 20s || exit 1
           done
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

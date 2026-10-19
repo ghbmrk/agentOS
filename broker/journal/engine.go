@@ -1373,6 +1373,17 @@ func (e *Engine) Stopped() bool {
 	return e.stopped
 }
 
+// Halted reports whether nothing new may start: STOP is in force, or a
+// failed write broke the engine (a STOP that failed to record included),
+// which holds until the engine is reopened. Stopped stays the record of a
+// STOP that was written, so the owner's handler can tell the two apart
+// (SEC-failed-stop-latch, #2458).
+func (e *Engine) Halted() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stopped || e.broken != nil
+}
+
 // RecordQuality records whether an intent served its goal. It never changes
 // permission or execution (OP-7).
 func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
