@@ -202,11 +202,11 @@ func TestCH15HelpNamesChatUncut(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := ch.Handle(context.Background(), ownerNum, "HELP")
-		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "ACK 20.") {
+		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "ACK 5.") {
 			t.Fatalf("learning %v: HELP is not one whole text (cut at %d bytes): %q", learning, control.MaxText, got)
 		}
 		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
-			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 20"} {
+			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
 			if !learning && (word == "LOOPS" || word == "HELP LOOPS") {
 				word = "Spare-time"
 			}
