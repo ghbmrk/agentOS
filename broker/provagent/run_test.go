@@ -32,8 +32,9 @@ type stub struct {
 	hang       bool
 	createErr  error
 	destroyErr error
-	execErr    error // returned by the CLI's Exec
-	readErr    error // returned by the result read
+	execErr    error  // returned by the CLI's Exec
+	readErr    error  // returned by the result read
+	onDestroy  func() // runs as the worker is destroyed
 }
 
 func newStub(cli func(c vm.Command, s *stub) vm.ExecResult) *stub {
@@ -57,6 +58,9 @@ func (s *stub) Destroy(_ context.Context, id string) error {
 	s.destroyed = append(s.destroyed, id)
 	delete(s.live, id)
 	s.drive = map[string]string{}
+	if s.onDestroy != nil {
+		s.onDestroy()
+	}
 	return s.destroyErr
 }
 
@@ -138,6 +142,7 @@ type rig struct {
 	mu       sync.Mutex
 	usage    Usage
 	usageErr error
+	usageN   int // Usage calls
 	now      time.Time
 	ids      int
 }
@@ -176,6 +181,7 @@ func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
 		Usage: func(string) (Usage, error) {
 			g.mu.Lock()
 			defer g.mu.Unlock()
+			g.usageN++
 			u := g.usage
 			u.Readings = append([]Reading(nil), u.Readings...)
 			return u, g.usageErr
@@ -1031,5 +1037,54 @@ func TestUsageErrorOnFailedRunKeepsOutcome(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("usage error not logged: %v", g.logs)
+	}
+}
+
+// REQ: CRED-5
+// A refusal egress records while the timed-out worker is destroyed (the
+// CLI's last calls) still stops the route: the check runs after Destroy.
+func TestRefusalRecordedAtDestroyStopsTheRoute(t *testing.T) {
+	g := newRig(func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{TimedOut: true, ExitCode: -1} })
+	g.h.onDestroy = func() { g.mu.Lock(); g.usage.LoginRefused = g.now; g.mu.Unlock() }
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != TimedOut {
+		t.Fatalf("run: %v", err)
+	}
+	if _, stopped := g.r.stopCause("stub"); !stopped || len(g.signins) != 1 {
+		t.Fatalf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+}
+
+// A refusal from before the run's start does not stop the route on a
+// failed run: the check reads only refusals at or after the start.
+func TestRefusalBeforeStartOnFailedRunDoesNotStopTheRoute(t *testing.T) {
+	g := newRig(ok("partial"))
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9)}, LoginRefused: t0.Add(-time.Second)})
+	g.h.execErr = errors.New("exec lost")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Failed {
+		t.Fatalf("run: %v", err)
+	}
+	if _, stopped := g.r.stopCause("stub"); stopped || len(g.signins) != 0 {
+		t.Fatalf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+	// The same refusal at the start is this run's.
+	g.advance(time.Second)
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9)}, LoginRefused: g.clock()})
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Failed {
+		t.Fatalf("run at start: %v", err)
+	}
+	if _, stopped := g.r.stopCause("stub"); !stopped {
+		t.Fatal("refusal at the run's start did not stop the route")
+	}
+}
+
+// A run that reaches the signals reads Usage once after the run (and once
+// at admission), not again on the way out.
+func TestOkRunReadsUsageOnceAfterTheRun(t *testing.T) {
+	g := newRig(ok("fine"))
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Fatal(err)
+	}
+	if g.usageN != 2 {
+		t.Fatalf("usage calls: %d, want 2 (admission, after the run)", g.usageN)
 	}
 }
