@@ -137,3 +137,41 @@ func TestOP6FailedStopAdmitsNoWorkerCommand(t *testing.T) {
 		t.Fatalf("%d commands ran; want only the one in flight before STOP", n)
 	}
 }
+
+// A STOP that failed to record holds loop work as a recorded one does:
+// the scheduler starts no job, since loop machines call the model through
+// the vault's socket, which is not journaled (SEC-failed-stop-latch, #2458).
+func TestOP6FailedStopStartsNoLoopWork(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	must(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := daemon.Run(ctx, cfg)
+	must(t, err)
+	store := &faultStore{MemStore: &journal.MemStore{}}
+	eng, err := journal.Open(store, allowAll{}, map[string]journal.Executor{}, func(string) string { return daemon.Redacted })
+	must(t, err)
+	lp.adm.Store(d.Admission())
+	lp.eng.Store(eng)
+	if lp.busy() || lp.stopped() {
+		t.Fatal("an idle box reads busy or stopped")
+	}
+
+	store.fail.Store(true)
+	if _, err := eng.Stop(ctx); !errors.Is(err, journal.ErrBroken) {
+		t.Fatalf("STOP on a failing disk: %v, want ErrBroken", err)
+	}
+	if lp.busy() || !lp.stopped() {
+		t.Fatal("a STOP that failed to record does not hold loop work")
+	}
+	// Halted, the scheduler offers no source a turn and looks again later.
+	if ran, wait := lp.sched.Tick(ctx); ran || wait != time.Minute {
+		t.Fatalf("loop tick after a failed STOP: ran %v, wait %v", ran, wait)
+	}
+}

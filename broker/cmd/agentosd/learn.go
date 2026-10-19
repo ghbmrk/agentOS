@@ -915,9 +915,12 @@ func (l *learning) revokedForOwner(id string) bool {
 	return a != nil && a.RevokedForOwner(id)
 }
 
+// stopped is the loop scheduler's STOP gate: a STOP that failed to record
+// holds loop work too, since its model calls are not journaled
+// (SEC-failed-stop-latch, #2458).
 func (l *learning) stopped() bool {
 	e := l.eng.Load()
-	return e == nil || e.Stopped()
+	return e == nil || e.Halted()
 }
 
 // evalConfig is the replay machine and its model route.

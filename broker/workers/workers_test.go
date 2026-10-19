@@ -712,6 +712,11 @@ func TestCAP8StopHoldsWorkerCommands(t *testing.T) {
 			t.Errorf("%s under STOP: %v", c.tool, err)
 		}
 	}
+	// STOP is checked before the worker is looked up, so the answer under
+	// STOP is STOP whatever the name (SEC-failed-stop-latch, #2458).
+	if err := r.call("agent", toolExec, m{"name": "nobody", "argv": []string{"echo"}}, nil); err == nil || !strings.Contains(err.Error(), "STOP") {
+		t.Errorf("exec on an unknown worker under STOP: %v", err)
+	}
 	stopped = false
 	r.must("agent", toolExec, m{"name": "w", "argv": []string{"echo"}}, nil)
 }
