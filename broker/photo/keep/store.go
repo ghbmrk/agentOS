@@ -179,9 +179,19 @@ func RecallSource(id string) (kind, account, ref string) {
 	return RecallKind, journal.BrokerAccount, id
 }
 
-func keepID(id string) string                 { return "photo:keep:" + id }
-func deliverID(id, machine string) string     { return "photo:deliver:" + id + ":" + machine }
-func deleteID(id string) string               { return "photo:delete:" + id }
+func keepID(id string) string             { return "photo:keep:" + id }
+func deliverID(id, machine string) string { return "photo:deliver:" + id + ":" + machine }
+
+// deleteID names a photo's k-th delete attempt. The first keeps the ID a
+// delete had before attempts (CH26-R2), so journals written then fold the
+// same.
+func deleteID(id string, k int) string {
+	if k == 0 {
+		return "photo:delete:" + id
+	}
+	return "photo:delete:" + id + ":" + strconv.Itoa(k)
+}
+
 func (s *Store) imagePath(hash string) string { return filepath.Join(s.Dir, hash) }
 func (s *Store) thumbPath(hash string) string { return filepath.Join(s.Dir, hash+thumbSuffix) }
 func (s *Store) stagePath(id string) string   { return filepath.Join(s.Dir, durable.TempPrefix+id) }
@@ -472,13 +482,20 @@ func (s *Store) delete(ctx context.Context, id, why string) (Confirmation, error
 		if s.Backups != nil {
 			c.Backups = s.Backups(e.Received)
 		}
-		if !p.deleteSubmitted {
-			in := s.intent(deleteID(id), ActionDelete, map[string]any{"photo": id, "hash": e.Hash, "why": why})
+		// The latest attempt is carried on unless it was denied: a denial
+		// is final for its intent, so a new attempt asks again (CH26-R1).
+		attempt := ""
+		if n := len(p.deletes); n > 0 && !p.denied {
+			attempt = p.deletes[n-1]
+		} else {
+			attempt = deleteID(id, p.nextDelete)
+			in := s.intent(attempt, ActionDelete, map[string]any{"photo": id, "hash": e.Hash, "why": why})
 			if _, err := s.Journal.Submit(in); err != nil {
 				return Confirmation{}, err
 			}
+			p.deletes = append(p.deletes, attempt)
 		}
-		if err := s.run(ctx, journal.Intent{ID: deleteID(id)}); err != nil {
+		if err := s.run(ctx, journal.Intent{ID: attempt}); err != nil {
 			return Confirmation{}, err
 		}
 	}
@@ -488,10 +505,7 @@ func (s *Store) delete(ctx context.Context, id, why string) (Confirmation, error
 			return Confirmation{}, err
 		}
 	}
-	ids := append([]string{keepID(id)}, p.delivers...)
-	if p.deleteSubmitted || v.live[id] != nil {
-		ids = append(ids, deleteID(id))
-	}
+	ids := append(append([]string{keepID(id)}, p.delivers...), p.deletes...)
 	_, held, err := s.Journal.Erase(ids)
 	if err != nil {
 		return Confirmation{}, err
@@ -665,9 +679,13 @@ type view struct {
 }
 
 type photoFacts struct {
-	deleteSubmitted bool
-	content         bool // the receipt's params are not erased yet
-	delivers        []string
+	// deletes are the delete attempts' intent IDs, oldest first; denied
+	// is whether the latest was denied, and nextDelete numbers the next.
+	deletes    []string
+	denied     bool
+	nextDelete int
+	content    bool // the receipt's params are not erased yet
+	delivers   []string
 }
 
 type intentFacts struct {
@@ -675,6 +693,7 @@ type intentFacts struct {
 	dispatch  bool
 	result    journal.Result
 	succeeded bool
+	denied    bool
 	firstSent time.Time
 	sent      map[int]journal.Result // latest observation per dispatched attempt
 }
@@ -692,6 +711,10 @@ func (s *Store) view() (*view, error) {
 			if r.Intent != nil && r.Intent.Executor == Executor && facts[r.ID] == nil {
 				facts[r.ID] = &intentFacts{in: *r.Intent, sent: map[int]journal.Result{}}
 				order = append(order, r.ID)
+			}
+		case journal.RecDenied, journal.RecRecheckFailed:
+			if f := facts[r.ID]; f != nil {
+				f.denied = true
 			}
 		case journal.RecDispatched:
 			if f := facts[r.ID]; f != nil {
@@ -767,11 +790,24 @@ func (s *Store) view() (*view, error) {
 				e.Machines = append(e.Machines, machine)
 			}
 		case ActionDelete:
-			pid := strings.TrimPrefix(id, "photo:delete:")
-			if v.photos[pid] == nil {
+			// photo:delete:P<n> is attempt 0, photo:delete:P<n>:<k> attempt k.
+			pid, ks, hasK := strings.Cut(strings.TrimPrefix(id, "photo:delete:"), ":")
+			p := v.photos[pid]
+			if p == nil {
 				continue
 			}
-			v.photos[pid].deleteSubmitted = true
+			k := 0
+			if hasK {
+				n, err := strconv.Atoi(ks)
+				if err != nil || n < 1 || deleteID(pid, n) != id {
+					continue
+				}
+				k = n
+			}
+			p.deletes = append(p.deletes, id)
+			if k >= p.nextDelete {
+				p.nextDelete, p.denied = k+1, f.denied
+			}
 			if f.succeeded {
 				delete(v.live, pid)
 			}
@@ -829,7 +865,7 @@ func (v *view) held(hash, except string) bool {
 func (v *view) unfinished() []string {
 	var out []string
 	for id, p := range v.photos {
-		if p.deleteSubmitted && p.content && v.live[id] == nil {
+		if len(p.deletes) > 0 && p.content && v.live[id] == nil {
 			out = append(out, id)
 		}
 	}
