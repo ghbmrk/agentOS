@@ -178,6 +178,7 @@ func waitIdle(f *ownerForget) {
 //     forgetAgentNotOpen (JRN-s3-1).
 //   - Q3: wireResume given nil with recall configured: recall wired as
 //     off (JRN-s3-3).
+//
 // Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
 func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
