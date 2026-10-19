@@ -82,6 +82,7 @@ open childproc.*
 open guesterr.*
 open verb.*
 open meter.Meter.Wrap
+open meter.Meter.WrapBound
 open meter.Report
 open meter.Another
 
