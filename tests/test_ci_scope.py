@@ -285,25 +285,53 @@ class WiringTest(unittest.TestCase):
         start = ci.index("      - name: Machine tests as root\n")
         return ci[start:ci.index("\n      - name: ", start + 1)]
 
+    # The infer run, as whole lines of the run block in this order: commenting one out, re-indenting
+    # it or wrapping it in a branch breaks the match.
+    INFER_RUN = (
+        "          rc=0\n"
+        '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n'
+        "            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\\n"
+        "            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?\n"
+        "          python3 ../tools/require_ran.py < /tmp/infer-test.json \\\n"
+        "            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \\\n"
+        "            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf\n"
+        '          [ "$rc" -eq 0 ]\n')
+
+    def infer_wired(self, step):
+        """True when the step runs the infer tests through require_ran.py with no branch around them."""
+        if step.count("\n" + self.INFER_RUN) != 1:
+            return False
+        branch = re.compile(r"^\s*(if|then|else|elif|fi|case|esac|while|until|for|do|done|exit)\b")
+        return not [l for l in step.splitlines() if branch.match(l)]
+
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1
-        step = self.machines_step()
-        self.assertIn("go test -count=1 -json ./infer/... > /tmp/infer-test.json ", step)
-        self.assertIn("AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\\n"
-                      "            go test -count=1 -json ./infer/...", step)
+        self.assertTrue(self.infer_wired(self.machines_step()))
+        self.assertFalse(self.infer_wired(self.machines_step().replace(" ./infer/... ", " ./cleanroom ")))
 
     def test_machines_step_uses_require_ran(self):
         # REQ: INFER-CI-2
         step = self.machines_step()
-        self.assertIn("python3 ../tools/require_ran.py TestServiceRunsInInferenceLeaf "
-                      "TestServiceOOMStaysInLeaf < /tmp/infer-test.json\n", step)
-        # go test's own exit code still fails the step.
-        self.assertIn("-json ./infer/... > /tmp/infer-test.json || rc=$?\n", step)
-        self.assertIn('          [ "$rc" -eq 0 ]\n', step)
+        self.assertTrue(self.infer_wired(step))
+        run_line = "          python3 ../tools/require_ran.py"
+        rc_line = '          [ "$rc" -eq 0 ]\n'
+        mutants = {
+            "commented out": step.replace(run_line, "          # python3 ../tools/require_ran.py"),
+            "branch around it": step.replace(run_line, "          if false; then\n" + run_line)
+                                    .replace(rc_line, "          fi\n" + rc_line),
+            "branch at column 0": step.replace(run_line, "if false; then\n" + run_line)
+                                      .replace(rc_line, rc_line + "fi\n"),
+            "branch around the whole run": step.replace("          rc=0\n", "          if false; then\n          rc=0\n")
+                                               .replace(rc_line, rc_line + "          fi\n"),
+            "dropped": step.replace(run_line, "          true #"),
+            "exit code ignored": step.replace(rc_line, ""),
+        }
+        for what, mutant in mutants.items():
+            self.assertNotEqual(mutant, step, what)
+            self.assertFalse(self.infer_wired(mutant), what)
         sup = (ROOT / "broker" / "infer" / "supervise" / "supervise_test.go").read_text()
         for name in ("TestServiceRunsInInferenceLeaf", "TestServiceOOMStaysInLeaf"):
             self.assertRegex(sup, rf"(?m)^func {name}\(t \*testing\.T\)", name)
-
 
 class FuzzStepTest(unittest.TestCase):
     """The short fuzz step in broker-checks names every broker target, and each one exists."""

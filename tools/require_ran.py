@@ -4,10 +4,13 @@
 A test that needs root or a delegated cgroup skips without it, so a job that loses either
 goes green with the test unrun; a renamed or deleted test goes green the same way. This reads
 the stream on stdin, echoes its output so the job log reads like `go test -v`, then exits 1
-when a named test has no top-level `pass` event, or when any test in the stream skipped.
+when a named test has no top-level `pass` event, or when any test in the stream skipped. A name
+is the package import path and the test, so a same-named test in another package does not count.
+A package-level skip (a package with no test files) is not a test skip.
 
   go test -json ./infer/... > run.json
-  require_ran.py TestA TestB < run.json   exit 0, or 1 with each problem on stderr
+  require_ran.py example.com/m/pkg.TestA example.com/m/pkg.TestB < run.json
+                                          exit 0, or 1 with each problem on stderr
 """
 import json
 import sys
@@ -34,10 +37,11 @@ def check(lines, names):
         test, action = ev.get("Test"), ev.get("Action")
         if not isinstance(test, str):
             continue
-        if action == "pass" and "/" not in test:
-            passed.add(test)
+        key = f"{ev.get('Package', '?')}.{test}"
+        if action == "pass":
+            passed.add(key)  # a subtest's key carries "/" and so never equals a name
         elif action == "skip":
-            skipped.append(f"{ev.get('Package', '?')}.{test}")
+            skipped.append(key)
     for name in names:
         if name not in passed:
             problems.append(f"{name}: no pass (skipped, failed or missing)")
@@ -47,8 +51,8 @@ def check(lines, names):
 
 def main(argv=None):
     names = sys.argv[1:] if argv is None else argv
-    if not names:
-        print("usage: require_ran.py TestName... < go-test.json", file=sys.stderr)
+    if not names or any("." not in n for n in names):
+        print("usage: require_ran.py import/path.TestName... < go-test.json", file=sys.stderr)
         return 2
     problems = check(sys.stdin, names)
     for p in problems:
