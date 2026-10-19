@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -600,4 +601,177 @@ func TestAQuoteWithALeadingEllipsisIsAReaction(t *testing.T) {
 	r.advance(time.Minute)
 	r.ch = r.open()
 	check("after a restart")
+}
+
+// REQ: CH11-G1, CH11-G2, CH11-G3, CH11-G4
+
+// Four reaction-quote gaps from the O45 Security review (#2392): a short
+// cut, a doubled ellipsis, a cut inside a code at both ends, and a request
+// pushed out of the window by later box texts.
+
+// lowRequest sends a one-item request and returns its ID and code.
+func lowRequest(r *rig) (id, code string) {
+	r.t.Helper()
+	if _, err := r.ch.Request([]Item{lowItem("i1")}, 0); err != nil {
+		r.t.Fatal(err)
+	}
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	return m[1], m[2]
+}
+
+// reactionsHide says each quote and checks it was read as a reaction whose
+// event holds none of the hidden strings.
+func reactionsHide(r *rig, when string, quotes []string, hidden ...string) {
+	r.t.Helper()
+	before := len(r.agent.got())
+	for _, q := range quotes {
+		if got := r.say(q); !strings.Contains(got, "reaction") {
+			r.t.Fatalf("%s %q replied %q, want it read as a reaction", when, q, got)
+		}
+	}
+	got := r.agent.got()[before:]
+	if len(got) != len(quotes) {
+		r.t.Fatalf("%s agent got %q, want %d reaction events", when, got, len(quotes))
+	}
+	for _, g := range got {
+		for _, h := range hidden {
+			if strings.Contains(g, h) {
+				r.t.Fatalf("%s agent got %q, want an event without %q", when, g, h)
+			}
+		}
+	}
+}
+
+// CH11-G1: a quote shorter than minQuote that is a cut of a guarded text
+// is a reaction, live and after a restart; a short cut of the agent's own
+// text stays chat.
+func TestShortCutQuoteOfARequestIsAReaction(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, code := lowRequest(r)
+	quotes := []string{
+		"Liked “YES " + id + " " + code[:2],
+		"Liked “...YES " + id + " " + code[:2],
+		"Liked “" + code[4:] + " or NO",
+	}
+	for _, q := range quotes[:2] {
+		if n := utf8.RuneCountInString(normQuote(strings.TrimPrefix(q, "Liked “"))); n >= minQuote {
+			t.Fatalf("quote %q is %d runes, want it under minQuote", q, n)
+		}
+	}
+	reactionsHide(r, "live", quotes, code[:2], code[4:], "YES")
+	if err := r.ch.Converse("Your table is booked for 4829 guests"); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	before := len(r.agent.got())
+	r.say("Liked “Agent: Your t")
+	if got := r.agent.got()[before:]; len(got) != 1 || !strings.Contains(got[0], "Liked") {
+		t.Fatalf("agent got %q, want a short cut of its own text as chat", got)
+	}
+	r.advance(time.Minute)
+	r.ch = r.open()
+	reactionsHide(r, "after a restart", quotes, code[:2], code[4:], "YES")
+}
+
+// CH11-G2: repeated ellipses at either end are all dropped, so a quote cut
+// with two of them still marks the request.
+func TestDoubledEllipsisQuoteIsAReaction(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, code := lowRequest(r)
+	quotes := []string{
+		"Liked “… …" + code[3:] + " or NO " + id + "… …",
+		"Liked “......YES " + id + " " + code[:3] + "……",
+	}
+	if got := normQuote("… ... …x… ..."); got != "x" {
+		t.Fatalf("normQuote kept ellipses: %q", got)
+	}
+	reactionsHide(r, "live", quotes, code[:3], code[3:], "YES")
+	r.advance(time.Minute)
+	r.ch = r.open()
+	reactionsHide(r, "after a restart", quotes, code[:3], code[3:], "YES")
+}
+
+// CH11-G3: a quote cut inside a code at each end (a request that holds its
+// code twice) matches the saved text only with both cuts masked.
+func TestQuoteCutAtBothEndsIsAReactionAfterARestart(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if _, err := r.ch.Request([]Item{lowItem("i1"), lowItem("i2")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	m := regexp.MustCompile(`YES ([A-Z][0-9]{1,2}) ([0-9]{6}) for all, YES [A-Z][0-9]{1,2} 1 2 ([0-9]{6})`).FindStringSubmatch(req)
+	if m == nil {
+		t.Fatalf("request %q does not hold its code twice", req)
+	}
+	id, code := m[1], m[2]
+	q := "Liked “" + code[3:] + " for all, YES " + id + " 1 2 " + code[:3]
+	n := maskCodes(normQuote(strings.TrimPrefix(q, "Liked “")))
+	head := cutCodeHead.ReplaceAllString(n, "#")
+	tail := cutCodeTail.ReplaceAllString(n, "#")
+	saved := r.guardedMarks()
+	for _, one := range []string{head, tail} {
+		for _, g := range saved {
+			if strings.Contains(g.Text, one) {
+				t.Fatalf("one-end form %q matches %q, want only the both-ends form to", one, g.Text)
+			}
+		}
+	}
+	r.advance(time.Minute)
+	r.ch = r.open()
+	reactionsHide(r, "after a restart", []string{q}, code[:3], code[3:], "YES")
+}
+
+// CH11-G4: guarded texts live apart from the 20-text cap, so later box
+// texts never push a live request out of the window.
+func TestLiveRequestSurvivesTwentyFiveMoreBoxTexts(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, code := lowRequest(r)
+	for i := 0; i < 25; i++ {
+		if err := r.ch.sendTemplate("Box note " + strings.Repeat("x", i+1) + "."); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+	}
+	reactionsHide(r, "live", []string{"Liked “…" + code + " or NO " + id}, code, "YES")
+}
+
+// CH11-G4: the guarded texts are bounded: past the cap, a closed request
+// leaves the window, while an open one stays until it ages out.
+func TestGuardedTextsAreBoundedByAgeAndOpenRequests(t *testing.T) {
+	var w recentWindow
+	now := time.Unix(1e9, 0)
+	open := map[string]bool{"A1": true}
+	isOpen := func(id string) bool { return open[id] }
+	w.put(sentText{text: "A1: send? Reply YES A1 482913 or NO A1.", at: now, request: true, ids: []string{"A1"}}, isOpen)
+	w.put(sentText{text: "B1: send? Reply YES B1 739104 or NO B1.", at: now, request: true, ids: []string{"B1"}}, isOpen)
+	for i := 0; i < recentTexts; i++ {
+		w.put(sentText{text: "Your code is 5" + strings.Repeat("1", 4+i) + ".", at: now}, isOpen)
+		w.add(sentText{text: "Box note " + strings.Repeat("x", i+1) + ".", at: now})
+	}
+	if _, ok := w.match("reply yes a1 482913 or no a1.", now); !ok {
+		t.Fatal("an open request left the window under the cap")
+	}
+	if _, ok := w.match("reply yes b1 739104 or no b1.", now); ok {
+		t.Fatal("a closed request past the guarded cap is still in the window")
+	}
+	guarded, plain := 0, 0
+	for _, s := range w.texts {
+		if s.guarded() {
+			guarded++
+		} else {
+			plain++
+		}
+	}
+	if guarded != recentTexts+1 || plain != recentTexts {
+		t.Fatalf("window holds %d guarded and %d other texts, want %d and %d", guarded, plain, recentTexts+1, recentTexts)
+	}
+	later := now.Add(recentMaxAge + time.Minute)
+	w.add(sentText{text: "Box note late.", at: later})
+	if _, ok := w.match("reply yes a1 482913 or no a1.", later); ok || len(w.texts) != 1 {
+		t.Fatalf("window holds %d texts past the age, want only the new one", len(w.texts))
+	}
 }
