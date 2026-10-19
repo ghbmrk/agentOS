@@ -15,6 +15,6 @@ Board section: Backlog refill (2026-10-05). Work item: #2232. Follow-up of PR #2
 
 **Out of scope.** Other code shapes; the keyed-list rule.
 
-**Scope:** `broker/recall/codes.go`, tests, the R-row in `broker/recall/ASSUMPTIONS.md` that describes `codeLike`, this brief.
+**Scope:** `broker/recall/codes.go`, tests, row R12 in `broker/recall/ASSUMPTIONS.md`: remove "two-group codes with a letters-only or all-digit group" from its "Not covered" list, leaving all-digit groups uncovered, and describe the two-group rule in its grouped-code sentence, this brief.
 
-**Usage estimate:** 50k tokens. Do not run beside RECALL-longs (both edit `codes.go`, D-111).
+**Usage estimate:** 50k tokens.
