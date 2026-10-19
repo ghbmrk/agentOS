@@ -33,6 +33,9 @@ type Queued struct {
 	SendAt time.Time
 	Reply  AutoReply
 	Held   bool
+	// Act is a held item's act (Item.Act), withdrawn from the checker on
+	// UNDO so a cancelled effect cannot run later (REV-3).
+	Act string
 	// Late is set at release on a reply (not a held effect) released more
 	// than LateRelease after its window, or whose window saw the box's
 	// line fail to send: its silence is not the owner's (security B1(a)
@@ -252,6 +255,9 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) (rep
 	}
 	*decided = append(*decided, d)
 	if q.Held {
+		if c.revoke(q.Act) != nil {
+			return fmt.Sprintf("Cancelled %s, but the box could not withdraw its approval, so it may still run.", id), true
+		}
 		return fmt.Sprintf("Cancelled %s. It did not run.", id), true
 	}
 	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id), true

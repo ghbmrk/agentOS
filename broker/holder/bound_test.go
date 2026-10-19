@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/egress"
 )
 
@@ -34,7 +35,7 @@ func TestApprovalIsBoundToTheAccount(t *testing.T) {
 
 	body := `{"to":"canary@example.invalid"}`
 	actA := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
-	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []string{actA}); !ok || err != nil {
+	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []checkersock.Act{{Act: actA}}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	if w := do(hB, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {

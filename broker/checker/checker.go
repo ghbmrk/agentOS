@@ -9,7 +9,8 @@
 // Three sockets, each with its own closed set and its own peer uid:
 // the hand socket (the unlock step: GET /state, PUT and DELETE /secret, as
 // holders, and POST /verify for the unlock's own code, which approves no
-// acts), the verify socket (the broker: POST /verify) and the redeem
+// acts), the verify socket (the broker: POST /verify, and POST /revoke,
+// which only withdraws approvals, as an UNDO does) and the redeem
 // socket (the key holders: POST /redeem). None reads the seed back.
 package checker
 
@@ -56,9 +57,11 @@ const (
 // of a CH-10 code.
 const ApprovalTTL = 15 * time.Minute
 
-// MaxActs bounds the acts one code approves, and maxSeed the seed's size.
+// MaxActs bounds the acts one code approves, MaxWait an act's wait (the
+// longest undo window a held act may have) and maxSeed the seed's size.
 const (
 	MaxActs = 64
+	MaxWait = 7 * 24 * time.Hour
 	maxSeed = 4 << 10
 )
 
@@ -120,8 +123,12 @@ type Checker struct {
 	st           persisted
 	wrongCounted []time.Time
 	wrongSilent  []time.Time
-	approvals    map[string]time.Time // act -> expiry; memory only
+	approvals    map[string]window // memory only
 }
+
+// window is when an approval may be spent: from its wait's end until
+// ApprovalTTL later.
+type window struct{ from, until time.Time }
 
 // New loads the state file, if there is one, and returns a checker that
 // holds no seed.
@@ -129,7 +136,7 @@ func New(cfg Config) (*Checker, error) {
 	if cfg.StatePath == "" {
 		return nil, errors.New("checker: no state path")
 	}
-	c := &Checker{statePath: cfg.StatePath, now: cfg.Now, approvals: map[string]time.Time{}}
+	c := &Checker{statePath: cfg.StatePath, now: cfg.Now, approvals: map[string]window{}}
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -191,9 +198,9 @@ func since(ts []time.Time, cut time.Time) []time.Time {
 // Verify checks an owner code-generator code (CH-4): the current step or
 // the one before, after both after and the durable last step. A match
 // spends the step (on disk before the answer) and records one approval
-// per act, each redeemable once within ApprovalTTL (CH-10). counted picks
-// the bucket a wrong code is charged to.
-func (c *Checker) Verify(code string, after int64, counted bool, acts []string) (int64, bool, error) {
+// per act, each redeemable once within ApprovalTTL after its wait (CH-10,
+// REV-3). counted picks the bucket a wrong code is charged to.
+func (c *Checker) Verify(code string, after int64, counted bool, acts []checkersock.Act) (int64, bool, error) {
 	if counted {
 		return c.verify(code, after, &c.wrongCounted, MaxWrongCounted, acts)
 	}
@@ -211,12 +218,12 @@ func (c *Checker) verifyHand(code string, after int64) (int64, bool, error) {
 }
 
 // verify checks code; a nil bucket charges and pauses nothing.
-func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit int, acts []string) (int64, bool, error) {
+func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit int, acts []checkersock.Act) (int64, bool, error) {
 	if len(acts) > MaxActs {
 		return 0, false, fmt.Errorf("checker: more than %d acts", MaxActs)
 	}
 	for _, a := range acts {
-		if !validAct(a) {
+		if !validAct(a.Act) || a.Wait < 0 || a.Wait > int64(MaxWait/time.Second) {
 			return 0, false, errors.New("checker: malformed act")
 		}
 	}
@@ -251,30 +258,42 @@ func (c *Checker) verify(code string, after int64, bucket *[]time.Time, limit in
 	c.st = next
 	c.sweepLocked(now)
 	for _, a := range acts {
-		c.approvals[a] = now.Add(ApprovalTTL)
+		from := now.Add(time.Duration(a.Wait) * time.Second)
+		c.approvals[a.Act] = window{from: from, until: from.Add(ApprovalTTL)}
 	}
 	return step, true, nil
 }
 
 func (c *Checker) sweepLocked(now time.Time) {
-	for a, exp := range c.approvals {
-		if !now.Before(exp) {
+	for a, w := range c.approvals {
+		if !now.Before(w.until) {
 			delete(c.approvals, a)
 		}
 	}
 }
 
 // Redeem spends act's approval: true at most once per approval, and only
-// before it expires.
+// within its window. A try before the wait ends spends nothing.
 func (c *Checker) Redeem(act string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	exp, ok := c.approvals[act]
-	if !ok {
+	w, ok := c.approvals[act]
+	now := c.now()
+	if !ok || now.Before(w.from) {
 		return false
 	}
 	delete(c.approvals, act)
-	return c.now().Before(exp)
+	return now.Before(w.until)
+}
+
+// Revoke withdraws acts' approvals, as the owner's UNDO of a held act
+// does: withdrawing only ever denies, so the broker may ask it alone.
+func (c *Checker) Revoke(acts []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, a := range acts {
+		delete(c.approvals, a)
+	}
 }
 
 type state struct {
@@ -326,6 +345,21 @@ func decode(r *http.Request, v any) error {
 func (c *Checker) verifyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /verify", c.serveVerify(true))
+	mux.HandleFunc("POST /revoke", func(w http.ResponseWriter, r *http.Request) {
+		var req checkersock.RevokeRequest
+		if err := decode(r, &req); err != nil || len(req.Acts) > MaxActs {
+			http.Error(w, "checker: bad request", http.StatusBadRequest)
+			return
+		}
+		for _, a := range req.Acts {
+			if !validAct(a) {
+				http.Error(w, "checker: bad request", http.StatusBadRequest)
+				return
+			}
+		}
+		c.Revoke(req.Acts)
+		w.WriteHeader(http.StatusNoContent)
+	})
 	return mux
 }
 

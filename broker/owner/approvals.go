@@ -459,10 +459,13 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	}
 	// The approved items' acts go with the code, so the checker approves
 	// exactly the bytes the owner approved and no others (CH-4, CH-10).
-	var acts []string
+	// A held item's approval opens only when its undo window has passed
+	// (less a second of clock slack, so it is open when the item is
+	// released), so the act cannot be spent while UNDO can still stop it.
+	var acts []CheckerAct
 	for i, it := range r.items {
 		if !r.done[i] && (all || chosen[i]) && it.Act != "" {
-			acts = append(acts, it.Act)
+			acts = append(acts, CheckerAct{Act: it.Act, Wait: heldWait(it.UndoWindow)})
 		}
 	}
 	ok, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
@@ -519,22 +522,25 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix st
 	fail := ""
 	var first time.Time
 	var failed []int
+	var unheld []string
 	for k := range ds {
 		d := &ds[k]
 		if !d.Approved || r.items[d.Item-1].UndoWindow <= 0 {
 			continue
 		}
 		until := now.Add(r.items[d.Item-1].UndoWindow)
+		act := r.items[d.Item-1].Act
 		id, err := c.newIDLocked(now)
 		if err == nil {
-			err = c.codes.commit(func(s *State) { s.Queued = append(s.Queued, QueuedRef{ID: id, Ref: d.Ref, Held: true}) })
+			err = c.codes.commit(func(s *State) { s.Queued = append(s.Queued, QueuedRef{ID: id, Ref: d.Ref, Held: true, Act: act}) })
 		}
 		if err != nil {
 			d.Approved, d.Why = false, "not held"
 			failed = append(failed, d.Item)
+			unheld = append(unheld, act)
 			continue
 		}
-		c.queued[id] = &Queued{ID: id, SendAt: until, Reply: AutoReply{Ref: d.Ref}, Held: true}
+		c.queued[id] = &Queued{ID: id, SendAt: until, Reply: AutoReply{Ref: d.Ref}, Held: true, Act: act}
 		d.Hold, d.Until = id, until
 		items = append(items, d.Item)
 		ids = append(ids, id)
@@ -545,6 +551,9 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix st
 	}
 	if len(failed) > 0 {
 		fail = fmt.Sprintf(" Could not hold %s for undo, so it did not run. Ask your agent again.", list(failed))
+		if c.revoke(unheld...) != nil {
+			fail = fmt.Sprintf(" Could not hold %s for undo, and the box could not withdraw its approval, so it may still run.", list(failed))
+		}
 	}
 	s := ""
 	switch {
@@ -572,6 +581,37 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix st
 		}
 	}
 	return s + fail
+}
+
+// heldWait is how long the checker keeps a held act's approval shut: the
+// item's undo window less a second of clock slack, in whole seconds, as
+// the checker counts them (REV-3).
+func heldWait(undo time.Duration) time.Duration {
+	if undo <= time.Second {
+		return 0
+	}
+	return (undo - time.Second).Truncate(time.Second)
+}
+
+// revoke withdraws the approvals of acts the channel will not run (REV-3).
+// A Verifier that cannot revoke has nothing withdrawn, which is an error
+// when there is something to withdraw.
+func (c *Channel) revoke(acts ...string) error {
+	var some []string
+	for _, a := range acts {
+		if a != "" {
+			some = append(some, a)
+		}
+	}
+	if len(some) == 0 {
+		return nil
+	}
+	acts = some
+	rv, ok := c.codes.verify.(Revoker)
+	if !ok {
+		return errors.New("owner: verifier cannot revoke")
+	}
+	return rv.RevokeActs(acts...)
 }
 
 // findLocked resolves which request a reply answers.

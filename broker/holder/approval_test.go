@@ -82,14 +82,14 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	if wrong == totp(seed, time.Now()) {
 		wrong = "000001"
 	}
-	if _, ok, _ := c.Verify(wrong, 0, true, []string{act}); ok {
+	if _, ok, _ := c.Verify(wrong, 0, true, []checkersock.Act{{Act: act}}); ok {
 		t.Fatal("a wrong code verified")
 	}
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden {
 		t.Fatalf("wrong code: %d", w.Code)
 	}
 	other := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(`{"to":"other@example.invalid"}`))
-	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []string{other}); !ok || err != nil {
+	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []checkersock.Act{{Act: other}}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden {
@@ -102,7 +102,7 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	// next one; a second checker stands in for it rather than waiting a step.
 	c2, seed2 := seededChecker(t)
 	h2 := approvingHolder(t, up, func(_ context.Context, act string) (bool, error) { return c2.Redeem(act), nil })
-	if _, ok, err := c2.Verify(totp(seed2, time.Now()), 0, true, []string{act}); !ok || err != nil {
+	if _, ok, err := c2.Verify(totp(seed2, time.Now()), 0, true, []checkersock.Act{{Act: act}}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	if w := do(h2, req("POST", "/v1/send", body)); w.Code != http.StatusOK {
@@ -167,7 +167,7 @@ func TestHolderRedeemsOverTheCheckerSocket(t *testing.T) {
 	h := approvingHolder(t, up, checker.Redeemer(filepath.Join(dir, checker.RedeemSocket)))
 	body := `{"to":"canary@example.invalid"}`
 	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
-	if _, ok, err := checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket)).VerifyTOTP(totp(seed, time.Now()), 0, true, act); !ok || err != nil {
+	if _, ok, err := checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket)).VerifyTOTP(totp(seed, time.Now()), 0, true, checkersock.Act{Act: act}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusOK {

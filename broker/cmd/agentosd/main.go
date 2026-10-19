@@ -1408,10 +1408,14 @@ type ownerVerifier struct {
 	checker *checkersock.Client
 }
 
-func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...string) (int64, bool, error) {
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...owner.CheckerAct) (int64, bool, error) {
 	proof := strings.HasPrefix(code, owner.UnlockProofPrefix)
 	if o.checker != nil && !proof {
-		step, ok, err := o.checker.VerifyTOTP(code, after, counted, acts...)
+		cas := make([]checkersock.Act, len(acts))
+		for i, a := range acts {
+			cas[i] = checkersock.Act{Act: a.Act, Wait: int64(a.Wait / time.Second)}
+		}
+		step, ok, err := o.checker.VerifyTOTP(code, after, counted, cas...)
 		return step, ok, checkerVerifyErr(err)
 	}
 	if len(acts) > 0 {
@@ -1419,6 +1423,16 @@ func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts .
 	}
 	step, ok, err := o.v.VerifyTOTP(code, after, counted)
 	return step, ok, ownerVerifyErr(err)
+}
+
+// RevokeActs withdraws approvals the checker recorded for acts the owner
+// channel will not run (REV-3). Without a checker no act was approved, so
+// there is nothing to withdraw.
+func (o ownerVerifier) RevokeActs(acts ...string) error {
+	if o.checker == nil {
+		return nil
+	}
+	return o.checker.Revoke(acts...)
 }
 
 // checkerVerifyErr is ownerVerifyErr for the checker: no seed means the

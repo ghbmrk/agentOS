@@ -106,7 +106,7 @@ type strongOpts struct {
 	// acts are the checker acts of the items this code approves
 	// (Item.Act). Only a Verifier can record them, so with acts set
 	// neither a grid cell nor a local seed matches (CH-4, CH-10).
-	acts []string
+	acts []CheckerAct
 }
 
 // VerifyBreaker is how long the channel stops asking the vault process
@@ -121,7 +121,7 @@ const VerifyBreaker = 30 * time.Second
 // that matches. err means the Verifier could not check. With acts, only the
 // Verifier may match, since only it records the approvals the holders
 // spend; with no Verifier, nothing is checked (VaultDown).
-func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []string) (ok bool, step int64, cell string, err error) {
+func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []CheckerAct) (ok bool, step int64, cell string, err error) {
 	if len(acts) > 0 && c.verify == nil {
 		return false, 0, "", &VerifyError{Kind: VaultDown}
 	}

@@ -65,9 +65,11 @@ func (c *Channel) Boot() {
 			}
 		}
 	}
+	var heldActs []string
 	for _, q := range b.queued {
 		if q.Held {
 			holds = append(holds, q.ID)
+			heldActs = append(heldActs, q.Act)
 		} else {
 			replies = append(replies, q.ID)
 		}
@@ -105,9 +107,16 @@ func (c *Channel) Boot() {
 		// not invited to a duplicate request that could send twice.
 		text += " Approved actions cancelled, not sent: " + strings.Join(holds, ", ") + ". They will be asked again."
 	}
+	// A cancelled hold's approval is withdrawn too, so it cannot run, nor
+	// run twice once it is asked again (REV-3).
+	stuck := ""
+	if c.revoke(heldActs...) != nil {
+		stuck = " The box could not withdraw their approvals, so they may still run."
+	}
+	text += stuck
 	if !fits(text) {
 		text = fmt.Sprintf("Box restarted. %d requests re-sent with new codes, %d cancelled, %d expired, %d auto-replies not sent, and %d approved actions cancelled.",
-			len(resent), len(reqs), len(expired), len(replies), len(holds))
+			len(resent), len(reqs), len(expired), len(replies), len(holds)) + stuck
 	}
 	c.mu.Unlock()
 	if c.cfg.Modem != nil {

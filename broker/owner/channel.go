@@ -955,7 +955,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 // strong code also extends the session unlock and approves acts (Item.Act)
 // at the checker; a texted code approves none. msg is set when no check
 // could run.
-func (c *Channel) checkLocked(texted, got string, now time.Time, acts []string) (ok, locked bool, msg string) {
+func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerAct) (ok, locked bool, msg string) {
 	if texted == "" || c.codes.st.LowLocked {
 		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, acts: acts})
 		switch {
