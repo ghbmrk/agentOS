@@ -62,6 +62,13 @@ func TestGrokDeclarationValidates(t *testing.T) {
 	if d.Q.Complete() {
 		t.Fatal("the grok record is complete before #809 fills it")
 	}
+	// RES-5: grok is pool-less by an explicit marker, and is the only
+	// builtin that is.
+	for id, b := range Builtins() {
+		if b.Unmetered != (id == "grok") {
+			t.Fatalf("%s: unmetered %v", id, b.Unmetered)
+		}
+	}
 	for name, mut := range map[string]func(*Declaration){
 		"xai key in argv":   func(d *Declaration) { d.Argv = append(d.Argv, xaiCanary) },
 		"xai key in env":    func(d *Declaration) { d.Env = append(d.Env, "XAI_API_KEY="+xaiCanary) },
@@ -71,6 +78,7 @@ func TestGrokDeclarationValidates(t *testing.T) {
 		"no endpoints":      func(d *Declaration) { d.Endpoints = nil },
 		"no used-up signal": func(d *Declaration) { d.UsedUp = nil },
 		"unknown custody":   func(d *Declaration) { d.Custody = "shared" },
+		"metered, no pool":  func(d *Declaration) { d.Unmetered = false },
 	} {
 		c := Builtins()["grok"]
 		mut(&c)
@@ -90,6 +98,13 @@ func TestGrokRefusesUnqualifiedUntilRecordFilled(t *testing.T) {
 	}
 	if len(g.h.created) != 0 || len(g.sd.calls) != 0 {
 		t.Fatalf("worker %v, seeds %v", g.h.created, g.sd.calls)
+	}
+	// An image that pins no CLI version matches the record's empty one, so
+	// only the record's incompleteness refuses it.
+	g = grokRig(ok("done"), Builtins()["grok"])
+	g.r.ImageVersion = func(string) string { return "" }
+	if _, err := g.r.Run(context.Background(), grokReq("b")); reasonOf(err) != Unqualified || len(g.sd.calls) != 0 {
+		t.Fatalf("empty image version: %v, seeds %v", err, g.sd.calls)
 	}
 	// A filled record whose CLI is not the one the image built is refused
 	// the same way.

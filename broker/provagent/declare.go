@@ -110,6 +110,10 @@ type Declaration struct {
 	Endpoints   []string // hosts the vault process injects at (feeds #1014)
 	Placeholder string   // the placeholder file the worker is seeded with (feeds #1015)
 	Pools       []Pool
+	// Unmetered marks a route whose endpoints report no pool (grok,
+	// #1378). It must be set for a declaration with no pools and only
+	// then, so pool-less is never a silent default (RES-5).
+	Unmetered   bool
 	TaskClasses []string
 
 	// ErrorEvents are the "type" values of the CLI's own JSON error events
@@ -202,9 +206,12 @@ func (d Declaration) Validate() error {
 	default:
 		return fmt.Errorf("declaration %s: custody %q", d.ID, d.Custody)
 	}
-	// A route may declare no pool when its CLI's endpoints report none
-	// (grok, #1378): admission then reads it as unmetered by header, and
-	// only the CLI's used-up signals and the run caps bound it (RES-5).
+	// A route declares no pool only when marked Unmetered (grok, #1378):
+	// admission then reads it as unmetered by header, and only the CLI's
+	// used-up signals and the run caps bound it (RES-5).
+	if (len(d.Pools) == 0) != d.Unmetered {
+		return fmt.Errorf("declaration %s: pools %d, unmetered %v", d.ID, len(d.Pools), d.Unmetered)
+	}
 	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 {
 		return fmt.Errorf("declaration %s: task classes, used-up signal and error events are needed", d.ID)
 	}
@@ -351,6 +358,7 @@ func Builtins() map[string]Declaration {
 			Endpoints:   []string{"cli-chat-proxy.grok.com", "auth.x.ai"},
 			Placeholder: "auth.json",
 			// No quota header is known for these endpoints: no pool (RES-5).
+			Unmetered:   true,
 			TaskClasses: []string{"code", "research"},
 			ErrorEvents: []string{"error"},
 			UsedUp:      []string{"usage_limit_reached", "usage_pool_exhausted"},
