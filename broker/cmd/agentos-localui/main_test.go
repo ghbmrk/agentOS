@@ -260,6 +260,10 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 		if route != firstboot.RouteClaim || cfg.Claim == nil || resets != 1 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
+		// The claim's setup Wi-Fi step goes through agentosd (HW-10, #1692).
+		if _, ok := cfg.SetupWiFi.(localui.AgentosdSetup); !ok {
+			t.Fatalf("setup Wi-Fi %T", cfg.SetupWiFi)
+		}
 		if w := get(t, cfg, "/setup"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/claim" {
 			t.Fatalf("/setup before the claim: %d %q", w.Code, w.Header().Get("Location"))
 		}
@@ -281,8 +285,8 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 	t.Run("download", func(t *testing.T) {
 		var resets int
 		cfg, route := beginBox(t, t.TempDir(), &resets, true)
-		if route != firstboot.RouteDownload || cfg.Claim != nil || resets != 1 {
-			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		if route != firstboot.RouteDownload || cfg.Claim != nil || cfg.SetupWiFi != nil || resets != 1 {
+			t.Fatalf("route %q, claim %v, setup Wi-Fi %v, resets %d", route, cfg.Claim, cfg.SetupWiFi, resets)
 		}
 		if w := get(t, cfg, "/setup"); w.Code != http.StatusOK {
 			t.Fatalf("/setup on a downloaded box: %d %q", w.Code, w.Header().Get("Location"))

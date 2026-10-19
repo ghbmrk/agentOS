@@ -11,7 +11,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// room is what one text leaves for agent text once AgentPrefix is added.
+// room is what one GSM-7 text leaves for agent text once AgentPrefix is
+// added.
 const room = control.MaxText - len(owner.AgentPrefix)
 
 // sentences is n bytes or a little more of whole sentences.
@@ -84,13 +85,13 @@ func TestSplitPrefersParagraphsThenLines(t *testing.T) {
 	head := sentences(room * 2 / 3)
 	for _, sep := range []string{"\n\n", "\n"} {
 		text := head + sep + sentences(room/2)
-		parts, cut := splitReply(text, room)
+		parts, cut := splitReply(text)
 		if cut || len(parts) != 2 || parts[0] != head {
 			t.Fatalf("sep %q: cut %v, first %q", sep, cut, parts[0])
 		}
 	}
 	words := strings.Repeat("word ", room/5*2)
-	parts, _ := splitReply(words, room)
+	parts, _ := splitReply(words)
 	for _, p := range parts {
 		if len(p) > room || strings.TrimSpace(p) != p {
 			t.Fatalf("part %q", p)
@@ -102,7 +103,7 @@ func TestSplitPrefersParagraphsThenLines(t *testing.T) {
 		}
 	}
 	// A line break in the first half does not leave a stub text.
-	parts, _ = splitReply("Hi.\n"+sentences(room+100), room)
+	parts, _ = splitReply("Hi.\n" + sentences(room+100))
 	if len(parts[0]) <= room/2 {
 		t.Fatalf("stub first text %q", parts[0])
 	}
@@ -112,9 +113,9 @@ func TestSplitPrefersParagraphsThenLines(t *testing.T) {
 // boundary, never inside a joined emoji (CH-12).
 func TestSplitKeepsRunesAndEmoji(t *testing.T) {
 	text := strings.Repeat("👩‍💻", room)
-	parts, _ := splitReply(text, room)
+	parts, _ := splitReply(text)
 	for _, p := range parts {
-		if len(p) > room || strings.HasPrefix(p, "‍") || strings.HasSuffix(p, "‍") {
+		if n, _ := control.Units(p); n > textRoom(false) || strings.HasPrefix(p, "‍") || strings.HasSuffix(p, "‍") {
 			t.Fatalf("part cuts an emoji: %q", p[len(p)-8:])
 		}
 	}
@@ -127,7 +128,7 @@ func TestSplitKeepsRunesAndEmoji(t *testing.T) {
 func TestSecretIsCheckedBeforeTheSplit(t *testing.T) {
 	filler := strings.Repeat("ok ", (room-len(" your verification code"))/3)
 	long := filler + "your verification code 482913 " + strings.Repeat("ok ", room/3)
-	parts, _ := splitReply(long, room)
+	parts, _ := splitReply(long)
 	if len(parts) < 2 || owner.SecretShaped(parts[0]) || owner.SecretShaped(parts[1]) {
 		t.Fatal("the fixture no longer straddles a text boundary")
 	}

@@ -1,6 +1,7 @@
 package loopbuild
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/inflight"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -33,10 +35,13 @@ const (
 	MaxFileBytes      = 64 << 10
 	MaxCandidateBytes = 512 << 10
 	maxPath           = 160
-	maxConns          = 4 // connections a builder may hold open (L3 MUST 2 on #126)
-	maxInFlight       = 4
 	maxBriefSteps     = 256
 )
+
+// admitWait is how long a request waits for room in the broker's
+// in-flight memory before 503 (RES-5): a builder's requests and
+// connections are bounded by bytes, not by a count.
+const admitWait = 10 * time.Minute
 
 // ClassNS is where a builder for each class may write. No other class has
 // a builder: in particular none writes security, routing, update or image
@@ -147,7 +152,7 @@ type session struct {
 	mu       sync.Mutex
 	dir      string
 	srv      *http.Server
-	slot     chan struct{}
+	gate     *inflight.Gate
 	done     chan struct{}
 	finished bool
 	files    map[string][]byte
@@ -237,15 +242,19 @@ func (b *Builder) open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.dir, s.slot = dir, make(chan struct{}, maxInFlight)
+	s.dir, s.gate = dir, b.budget.Gate(admitWait)
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       readTimeout,
 		IdleTimeout:       15 * time.Second,
+		MaxHeaderBytes:    inflight.MaxHeaderBytes,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
-	go s.srv.Serve(newLimitListener(l, maxConns))
+	// Each connection holds its share of the in-flight budget while
+	// open, so past it further connections wait in the kernel's queue and
+	// cost agentosd no file descriptor (L3 MUST 2 on #126).
+	go s.srv.Serve(s.gate.Limit(l))
 	return dir, nil
 }
 
@@ -280,22 +289,16 @@ func (b *Builder) endSession(id string) {
 // handler is a builder machine's whole surface (C-3c-2): the brief, one
 // candidate, and the metered model route. Anything else is 404; in
 // particular there is no /mcp (executors, managed_tree) and no /owner.
+// Every route reserves its worst-case memory before reading a body, and
+// waits for room rather than being refused (RES-5).
 func (s *session) handler() http.Handler {
+	g := s.gate
 	mux := http.NewServeMux()
-	mux.HandleFunc("/brief", s.serveBrief)
-	mux.HandleFunc("/candidate", s.candidate)
-	mux.HandleFunc("/done", s.giveUp)
-	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case s.slot <- struct{}{}:
-			defer func() { <-s.slot }()
-		default:
-			http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	mux.Handle("/brief", g.Route(0, inflight.Decode, 0, http.HandlerFunc(s.serveBrief)))
+	mux.Handle("/candidate", g.Route(2*MaxCandidateBytes, inflight.Decode, readTimeout, http.HandlerFunc(s.candidate)))
+	mux.Handle("/done", g.Route(0, inflight.Decode, 0, http.HandlerFunc(s.giveUp)))
+	mux.Handle("/model/", g.Route(inflight.ModelBody, inflight.Model, readTimeout, http.StripPrefix("/model", s.model())))
+	return mux
 }
 
 // model is the metered model route, refused once the job has used its
@@ -307,20 +310,64 @@ func (s *session) model() http.Handler {
 			http.Error(w, "no model egress is configured", http.StatusServiceUnavailable)
 		})
 	}
-	next := b.cfg.Meter.Wrap(s.id, b.cfg.Model(s.id))
-	// One call at a time, so the cap is checked against every earlier
-	// call's metered use and concurrent calls cannot overshoot it
-	// (security R3 on #126).
-	var one sync.Mutex
+	model := b.cfg.Model(s.id)
+	// The cap check and the meter's charge for the call (StartFor, which
+	// counts the call's input and its whole output reservation at once)
+	// run under one lock, so each call is checked against every earlier
+	// call's charge, in flight or settled, and concurrent calls cannot
+	// pass the cap together (security R3 on #126). WrapBound charges each
+	// call's input at one token per byte, its upper bound, until it
+	// settles, so calls in flight together cannot pass the cap by their
+	// input estimates' shortfall either (security on #2327). The body is read before
+	// the lock and the lock is let go once the call is charged, so calls
+	// run at once and a slow upload holds no other call back (RES-5).
+	var mu sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		one.Lock()
-		defer one.Unlock()
+		body, ok := readBody(w, r, inflight.ModelBody)
+		if !ok {
+			return
+		}
+		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+		mu.Lock()
+		locked := true
+		unlock := func() {
+			if locked {
+				locked = false
+				mu.Unlock()
+			}
+		}
+		defer unlock()
 		if b.cfg.Meter.Usage(s.id).Tokens >= b.cfg.JobTokens {
 			http.Error(w, "this job's model budget is spent", http.StatusTooManyRequests)
 			return
 		}
-		next.ServeHTTP(w, r)
+		b.cfg.Meter.WrapBound(s.id, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			unlock() // charged: Wrap calls next only after StartFor
+			model.ServeHTTP(w, r)
+		})).ServeHTTP(w, r)
 	})
+}
+
+// readBody reads r's whole body of at most max bytes, into a buffer of
+// its declared length when it declares one, so the read holds one copy.
+func readBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, bool) {
+	var body []byte
+	var err error
+	if n := r.ContentLength; n >= 0 && n <= max {
+		body = make([]byte, n)
+		_, err = io.ReadFull(r.Body, body)
+	} else {
+		body, err = io.ReadAll(io.LimitReader(r.Body, max+1))
+	}
+	if err != nil {
+		http.Error(w, "unreadable body", http.StatusBadRequest)
+		return nil, false
+	}
+	if int64(len(body)) > max {
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
 }
 
 func (s *session) serveBrief(w http.ResponseWriter, r *http.Request) {
@@ -436,49 +483,3 @@ func admit(sub Submission, ns string) (map[string][]byte, error) {
 // readTimeout bounds reading one request, body included (L3 MUST 2 on
 // #126). A variable so a test can shorten it.
 var readTimeout = 30 * time.Second
-
-// limitListener accepts at most n open connections; past that, Accept
-// waits until one closes, so connections beyond the cap wait in the
-// kernel's queue and cost agentosd no file descriptor (L3 MUST 2 on #126).
-// The guest plane's own (guest.newLimitListener) is not imported: builder
-// code never links the guest plane.
-type limitListener struct {
-	net.Listener
-	sem  chan struct{}
-	done chan struct{}
-	once sync.Once
-}
-
-func newLimitListener(l net.Listener, n int) *limitListener {
-	return &limitListener{Listener: l, sem: make(chan struct{}, n), done: make(chan struct{})}
-}
-
-func (l *limitListener) Accept() (net.Conn, error) {
-	select {
-	case l.sem <- struct{}{}:
-	case <-l.done:
-		return nil, net.ErrClosed
-	}
-	c, err := l.Listener.Accept()
-	if err != nil {
-		<-l.sem
-		return nil, err
-	}
-	return &limitConn{Conn: c, release: sync.OnceFunc(func() { <-l.sem })}, nil
-}
-
-func (l *limitListener) Close() error {
-	l.once.Do(func() { close(l.done) })
-	return l.Listener.Close()
-}
-
-type limitConn struct {
-	net.Conn
-	release func()
-}
-
-func (c *limitConn) Close() error {
-	err := c.Conn.Close()
-	c.release()
-	return err
-}

@@ -65,6 +65,10 @@ type Config struct {
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
 	Claim BoxClaim
+	// SetupWiFi, when set with Claim, is the preloaded box's setup network
+	// (HW-10, #1692): after the claim, the claimant is shown a new Wi-Fi
+	// password at /claim/wifi and setup waits until it is committed.
+	SetupWiFi SetupWiFi
 	// Card, when set, is the first-boot Owner Card step (HW-1,
 	// firstboot.CardStep): after approval codes setup shows the card at
 	// /setup/card to the phone that paired, and neither the recovery
@@ -121,6 +125,8 @@ type Server struct {
 	// claimWait holds a slot for each claim post running or waiting
 	// (claimQueue + 1); claimRun admits one at a time (claimTurn).
 	claimWait, claimRun chan struct{}
+	// claimWiFi is the claim's Wi-Fi step (claimWiFiPage).
+	claimWiFi *claimWiFi
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
 	// per phone address and in all (vaultTry).
 	vaultTries map[string][]time.Time
@@ -169,7 +175,8 @@ func New(cfg Config) (*Server, error) {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
 	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1),
-		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1)}
+		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1),
+		claimWiFi: &claimWiFi{}}
 	s.formKey = make([]byte, 32)
 	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
 		return nil, err
@@ -226,6 +233,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Claim != nil {
 		s.mux.HandleFunc("/claim", s.claimPage)
+		if s.cfg.SetupWiFi != nil {
+			s.mux.HandleFunc("/claim/wifi", s.claimWiFiPage)
+		}
 	}
 	if s.cfg.Rotation != nil {
 		s.mux.Handle("/rotate/card", s.signedIn(http.HandlerFunc(s.rotationCard)))

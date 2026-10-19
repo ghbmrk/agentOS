@@ -197,7 +197,7 @@ func TestLoop2ContainsDuringStop(t *testing.T) {
 	}
 }
 
-// REQ: LOOP-2, CHG-2
+// REQ: LOOP-0, LOOP-2, CHG-2
 
 // P3-4b-5: the daemon answers Loop 2's fix requests through Loop 1's
 // builder. With no builder machines the request stays open and STATUS
@@ -229,10 +229,11 @@ func TestLoop2AsksTheBuilderForItsFixes(t *testing.T) {
 }
 
 // LOOP-2: fix jobs spend Loop 2's share of the spare meter, apart from
-// Loop 1's builder share; the wiring sets both.
+// Loop 1's builder share; the wiring sets both. LOOP-0 (#2291): neither
+// has a fixed maximum or reserve.
 func TestFixJobsHaveTheirOwnShare(t *testing.T) {
 	b, f := builderShare(), loop2FixShare()
-	if b.Prefix != loopbuild.BuildPrefix || f.Prefix != loopbuild.FixPrefix || f.Max <= 0 || f.Max > b.Max {
+	if b.Prefix != loopbuild.BuildPrefix || f.Prefix != loopbuild.FixPrefix || f.Max != 0 || b.Max != 0 || f.Reserve != 0 {
 		t.Fatalf("shares %+v %+v", b, f)
 	}
 	lp := testLearning(t)

@@ -36,14 +36,14 @@ func seedServer(t *testing.T, status int, body string) string {
 // CRED-5: a seed asked of a vault with no plan login is the no-login
 // sentinel (#1858), apart from a vault that is locked or other failures.
 func TestSeedWithNoLoginIsTheNoLoginSentinel(t *testing.T) {
-	_, err := NewRouteControl(seedServer(t, http.StatusInternalServerError, "no plan login stored")).Seed("pw-a")
+	_, err := NewRouteControl(seedServer(t, http.StatusInternalServerError, "no plan login stored")).Seed("pw-a", false)
 	if !errors.Is(err, ErrNoPlanLogin) {
 		t.Fatalf("no login stored = %v, want ErrNoPlanLogin", err)
 	}
 	if errors.Is(err, ErrVaultLocked) {
 		t.Fatal("no login read as a locked vault")
 	}
-	_, err = NewRouteControl(seedServer(t, http.StatusInternalServerError, "disk on fire")).Seed("pw-a")
+	_, err = NewRouteControl(seedServer(t, http.StatusInternalServerError, "disk on fire")).Seed("pw-a", false)
 	if err == nil || errors.Is(err, ErrNoPlanLogin) || errors.Is(err, ErrVaultLocked) {
 		t.Fatalf("another failure = %v", err)
 	}
@@ -58,7 +58,7 @@ func TestA503FromTheRouteFallsBack(t *testing.T) {
 		"egress busy: too many provider calls":            true,
 		"":                                                true,
 	} {
-		_, err := NewRouteControl(seedServer(t, http.StatusServiceUnavailable, body)).Seed("pw-a")
+		_, err := NewRouteControl(seedServer(t, http.StatusServiceUnavailable, body)).Seed("pw-a", false)
 		if !errors.Is(err, ErrVaultLocked) || !FallsBack(err) {
 			t.Fatalf("503 %q = %v, fallsBack=%v", body, err, FallsBack(err))
 		}
