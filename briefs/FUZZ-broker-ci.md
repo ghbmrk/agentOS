@@ -9,7 +9,7 @@ Board section: Harness and operating model. Work item: #2240. Follow-up of FUZZ-
 - FUZZ-broker-ci-2: every listed `pkg:Target` names a `func FuzzX(` that exists in that package's tests, so a rename cannot leave a target silently unrun.
 - FUZZ-broker-ci-3: the job stays inside its timeout (six targets at 20s add about 2 minutes to a 30-minute limit); the PR body shows the job's duration.
 
-**Acceptance tests (REQ: FUZZ-broker-ci-1, FUZZ-broker-ci-2), written first, in `tests/test_ci_scope.py`:**
+**Acceptance tests:** (REQ: FUZZ-broker-ci-1, FUZZ-broker-ci-2): written first, in `tests/test_ci_scope.py`
 - `test_fuzz_step_lists_broker_targets` parses `ci.yml` (mutant: remove one target).
 - `test_fuzz_step_targets_exist` greps each package for the `Fuzz` function (mutant: misspell one).
 - The PR body shows the CI log with all eleven targets run.

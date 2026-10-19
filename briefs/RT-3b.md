@@ -8,7 +8,7 @@ Board section: Backlog refill (2026-10-15). Work item: #2290. Follow-up of RT-3 
 - RT-3b-1: every `git diff` call in `changed_paths` passes `--no-relative`, so its paths are repo-root relative whatever `diff.relative` says and wherever the tool runs.
 - RT-3b-2: the committed, staged and unstaged forms all hold it.
 
-**Acceptance tests (REQ: RT-3b-1, RT-3b-2), in `tests/test_risk_tier.py`, written first:**
+**Acceptance tests:** (REQ: RT-3b-1, RT-3b-2): in `tests/test_risk_tier.py`, written first
 - `test_diff_relative_config_does_not_drop_paths`: a temp repo with `diff.relative=true`, a commit changing `image/b.sh` and `docs/a.md`; `--git base HEAD` run from `docs/` prints A (mutant: drop `--no-relative` from the committed call).
 - The same with an uncommitted (staged, then unstaged) tier-A edit and HEAD the literal `HEAD`, run from a subdirectory (mutant: drop it from the `--cached` call).
 - Existing cases still pass.

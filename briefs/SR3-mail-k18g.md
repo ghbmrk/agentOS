@@ -15,7 +15,7 @@ Board section: SR3 mail. Work item: #2296. Follow-up of SR3-mail-k18f (#1771, PR
 - K18g-3: a stalled reader's slot is released within the write deadline.
 - K18g-4: one machine cannot hold more than its share of the budget.
 
-**Acceptance tests (REQ: K18g-1 … K18g-4), written first:** a measured-memory test on the 8 MiB shape (mutant: revert to full decode); a differential test of old versus new decisions; a stalled-reader test with a short deadline (mutant: no deadline); an admit test where machines at their share leave one admitted (mutant: no share cap). `tests/test_egress_memory.py` still reads its figures from the code.
+**Acceptance tests:** (REQ: K18g-1 … K18g-4), written first: a measured-memory test on the 8 MiB shape (mutant: revert to full decode); a differential test of old versus new decisions; a stalled-reader test with a short deadline (mutant: no deadline); an admit test where machines at their share leave one admitted (mutant: no share cap). `tests/test_egress_memory.py` still reads its figures from the code.
 
 **Out of scope.** The mail calls' own bounds (k18b), changes to `DefaultMaxConcurrent`.
 
