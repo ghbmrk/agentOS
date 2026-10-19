@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -455,6 +456,8 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
+	// Before agentosd writes anything, so none of its own temps is in flight.
+	sweepInboxTemps(inboxPath)
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -1332,6 +1335,22 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 		return nil, err
 	}
 	return gs.Machines, nil
+}
+
+// sweepInboxTemps removes the temporary files a crash left beside the guest
+// inbox (#2373): one holds the outbox as it stood, reply text included, which
+// a forget of the guest's replies would otherwise leave on disk (CAP-3). It
+// runs first thing at start. The directory is shared: agentos-ap's one write
+// there, the setup network's burn, can lose its temp to this sweep, and then
+// its rename fails, the setup file is unchanged, and the unit restarts and
+// burns again (ASSUMPTIONS.md IT-2373). A failed sweep is logged, not fatal.
+func sweepInboxTemps(inboxPath string) {
+	if inboxPath == "" {
+		return
+	}
+	if err := durable.SweepTemp(filepath.Dir(inboxPath)); err != nil {
+		log.Printf("guest inbox: removing crash-left temporary files: %v", err)
+	}
 }
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
