@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -114,15 +118,6 @@ type sleepRig struct {
 	pending map[string]bool
 	stopped bool
 	notes   []journal.SleepNote
-	holds   int
-	timers  []*rigTimer
-}
-
-// rigTimer is an AfterFunc on the rig's clock: advance fires it.
-type rigTimer struct {
-	due           time.Time
-	f             func()
-	fired, halted bool
 }
 
 func newSleepRig(t *testing.T) *sleepRig {
@@ -138,49 +133,14 @@ func newSleepRig(t *testing.T) *sleepRig {
 			"intent": r.pend("intent"), "undo": r.pend("undo"), "gate": r.pend("gate"),
 			"question": r.pend("question"), "handed": r.pend("handed"),
 		},
-		Stopped:   func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.stopped },
-		Journal:   func(n journal.SleepNote) error { r.mu.Lock(); r.notes = append(r.notes, n); r.mu.Unlock(); return nil },
-		Hold:      func() { r.mu.Lock(); r.holds++; r.mu.Unlock() },
-		HoldAfter: 20 * time.Millisecond,
-		AfterFunc: r.afterFunc,
+		Stopped: func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.stopped },
+		Journal: func(n journal.SleepNote) error { r.mu.Lock(); r.notes = append(r.notes, n); r.mu.Unlock(); return nil },
 	})
 	return r
 }
 
-func (r *sleepRig) afterFunc(d time.Duration, f func()) func() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t := &rigTimer{due: r.now.Add(d), f: f}
-	r.timers = append(r.timers, t)
-	return func() bool {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		was := !t.fired && !t.halted
-		t.halted = true
-		return was
-	}
-}
-
-// advance moves the rig's clock on by d and fires the timers then due,
-// outside the rig's lock (the holding line takes it).
-func (r *sleepRig) advance(d time.Duration) {
-	r.mu.Lock()
-	r.now = r.now.Add(d)
-	var due []func()
-	for _, t := range r.timers {
-		if !t.fired && !t.halted && !t.due.After(r.now) {
-			t.fired = true
-			due = append(due, t.f)
-		}
-	}
-	r.mu.Unlock()
-	for _, f := range due {
-		f()
-	}
-}
-
-// armed counts the timers set so far.
-func (r *sleepRig) armed() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.timers) }
+// advance moves the rig's clock on by d.
+func (r *sleepRig) advance(d time.Duration) { r.mu.Lock(); r.now = r.now.Add(d); r.mu.Unlock() }
 
 // slowly makes the next restore wait until d has passed on the rig's
 // clock: a wake that long, whatever the machine's load.
@@ -307,7 +267,7 @@ func TestColdWakeIsJournaledWithItsReason(t *testing.T) {
 	if n := r.last(); n.Cold != "started_since" {
 		t.Fatalf("journal %+v", n)
 	}
-	for _, line := range []string{sleepStatus, holdLine} {
+	for _, line := range []string{sleepStatus, owner.AckText} {
 		for _, w := range []string{"warm", "cold"} {
 			if strings.Contains(line, w) {
 				t.Fatalf("owner text %q mentions %s", line, w)
@@ -346,23 +306,21 @@ func TestWatchWakesAtTheWindowEndAndMaxSleep(t *testing.T) {
 	}
 }
 
-// PE7 (condition 14): a wake for an owner message that takes longer than
-// HoldAfter sends the holding line, once; a quick one sends none.
-func TestHoldingLineOnASlowWake(t *testing.T) {
+// PE7 (condition 14, OWN-4): an owner message wakes the agent, quick wake
+// or slow, and the sleeper sends the owner nothing of its own: the owner
+// channel's acknowledgement covers a slow wake (owner.AckText).
+func TestOwnerMessageWakesASlowWake(t *testing.T) {
 	r := newSleepRig(t)
 	must(t, r.s.Sleep(context.Background()))
-	r.s.OwnerMessage(r.clock())
-	r.advance(time.Hour)
-	if r.holdCount() != 0 {
-		t.Fatal("a quick wake sent the holding line")
+	r.s.OwnerMessage()
+	if r.s.Asleep() || r.last().Cause != wakeOwner {
+		t.Fatalf("quick wake: asleep %v, journal %+v", r.s.Asleep(), r.last())
 	}
 	must(t, r.s.Sleep(context.Background()))
 	r.slowly(80 * time.Millisecond)
-	r.s.OwnerMessage(r.clock())
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.holds != 1 {
-		t.Fatalf("holding line sent %d times, want 1", r.holds)
+	r.s.OwnerMessage()
+	if r.s.Asleep() || r.last().Cause != wakeOwner || len(r.f.resumed) != 2 {
+		t.Fatalf("slow wake: asleep %v, resumed %v, journal %+v", r.s.Asleep(), r.f.resumed, r.last())
 	}
 }
 
@@ -398,13 +356,9 @@ func TestRecoverWakesAnAgentLeftAsleep(t *testing.T) {
 	}
 }
 
-func (r *sleepRig) holdCount() int { r.mu.Lock(); defer r.mu.Unlock(); return r.holds }
-
-// PE7 (condition 14, L3 on #149): the holding line's clock runs from the
-// owner message's delivery. A message that arrives while the checkpoint is
-// still being taken gets the line HoldAfter later, not after the
-// checkpoint and then HoldAfter.
-func TestHoldingLineClockStartsAtDelivery(t *testing.T) {
+// PE7 (condition 14, L3 on #149): an owner message that arrives while the
+// checkpoint is still being taken waits for it, then wakes the agent.
+func TestOwnerMessageDuringTheCheckpointWakes(t *testing.T) {
 	r := newSleepRig(t)
 	release := make(chan struct{})
 	in := make(chan struct{})
@@ -413,55 +367,55 @@ func TestHoldingLineClockStartsAtDelivery(t *testing.T) {
 	go func() { slept <- r.s.Sleep(context.Background()) }()
 	<-in
 	woke := make(chan struct{})
-	go func() { r.s.OwnerMessage(r.clock()); close(woke) }()
-	for r.armed() == 0 { // the message's timer, armed before it waits
-		time.Sleep(time.Millisecond)
-	}
-	r.advance(r.s.cfg.HoldAfter)
-	if r.holdCount() != 1 {
-		t.Fatal("no holding line while the checkpoint held the wake")
-	}
+	go func() { r.s.OwnerMessage(); close(woke) }()
 	close(release)
 	must(t, <-slept)
 	<-woke
-	if r.s.Asleep() || r.holdCount() != 1 {
-		t.Fatalf("asleep %v, holding lines %d", r.s.Asleep(), r.holdCount())
-	}
-
-	// A message delivered a while before its wake begins counts from the
-	// delivery too.
-	r = newSleepRig(t)
-	r.s.cfg.HoldAfter = 300 * time.Millisecond
-	must(t, r.s.Sleep(context.Background()))
-	r.slowly(60 * time.Millisecond)
-	r.s.OwnerMessage(r.clock().Add(-250 * time.Millisecond))
-	if r.holdCount() != 1 {
-		t.Fatalf("holding lines %d for a wake ending 310 ms after delivery, want 1", r.holdCount())
+	if r.s.Asleep() || r.last().Cause != wakeOwner {
+		t.Fatalf("asleep %v, journal %+v", r.s.Asleep(), r.last())
 	}
 }
 
-// PE7 (condition 14, L3 on #149): the holding line is for owner messages
-// only, never before HoldAfter, and HoldAfter is 15 s unless set.
-func TestHoldingLineThreshold(t *testing.T) {
-	if got := newSleeper(sleepConfig{}).cfg.HoldAfter; got != 15*time.Second {
-		t.Fatalf("default HoldAfter %v", got)
-	}
-	slowWake := func(r *sleepRig, d time.Duration, wake func()) {
-		must(t, r.s.Sleep(context.Background()))
-		r.slowly(d)
-		wake()
-	}
+// PE7 (condition 14, OWN-4): only an owner message wakes with the owner's
+// cause; the window's end wakes with its own, and neither sends the owner
+// a line from the sleeper.
+func TestOwnerMessageWakeCause(t *testing.T) {
 	r := newSleepRig(t)
-	slowWake(r, 80*time.Millisecond, func() { r.s.Wake(wakeWindow) })
-	if r.holdCount() != 0 {
-		t.Fatal("a wake at the window's end sent the holding line")
+	must(t, r.s.Sleep(context.Background()))
+	r.slowly(80 * time.Millisecond)
+	r.s.Wake(wakeWindow)
+	if r.s.Asleep() || r.last().Cause != wakeWindow {
+		t.Fatalf("window wake: %+v", r.last())
 	}
-	r = newSleepRig(t)
-	r.s.cfg.HoldAfter = 400 * time.Millisecond
-	slowWake(r, 399*time.Millisecond, func() { r.s.OwnerMessage(r.clock()) })
-	r.advance(time.Hour)
-	if r.holdCount() != 0 {
-		t.Fatal("the holding line went out before HoldAfter")
+	r.s.OwnerMessage() // awake: nothing to do
+	if n := len(r.f.resumed); n != 1 {
+		t.Fatalf("an owner message to a waking agent resumed it again (%d)", n)
+	}
+}
+
+// REQ: OWN-4
+
+// OWN-4: the owner channel's acknowledgement replaces the sleeper's
+// holding line. No agentosd source sends a waking-up line, and the
+// sleeper has no hold of its own to configure.
+func TestOWN4AckReplacesHoldLine(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	must(t, err)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		must(t, err)
+		if strings.Contains(strings.ToLower(string(b)), "waking up") {
+			t.Errorf("%s still has a waking-up line", f)
+		}
+	}
+	ty := reflect.TypeOf(sleepConfig{})
+	for _, name := range []string{"Hold", "HoldAfter", "AfterFunc"} {
+		if _, ok := ty.FieldByName(name); ok {
+			t.Errorf("sleepConfig still has %s", name)
+		}
 	}
 }
 
@@ -553,10 +507,10 @@ func TestRecoverLeavesOtherStatesAlone(t *testing.T) {
 	}
 }
 
-// PE7 (condition 14, L3 MUST-A on #149): one sleep's wake sends the
-// holding line at most once, however many owner messages arrive during
-// it, and never once the agent is awake.
-func TestHoldingLineOncePerWake(t *testing.T) {
+// PE7 (condition 14, L3 MUST-A on #149): owner messages that arrive
+// together during one sleep's wake restore the agent once, and the next
+// sleep wakes again.
+func TestOwnerMessagesWakeOncePerSleep(t *testing.T) {
 	r := newSleepRig(t)
 	must(t, r.s.Sleep(context.Background()))
 	slow := make(chan struct{})
@@ -566,9 +520,9 @@ func TestHoldingLineOncePerWake(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); r.s.OwnerMessage(r.clock()) }()
+		go func() { defer wg.Done(); r.s.OwnerMessage() }()
 	}
-	for { // every message is in: one restore waits, two messages queue
+	for { // one restore waits, the other messages queue or see it awake
 		r.f.mu.Lock()
 		w := r.f.waits
 		r.f.mu.Unlock()
@@ -577,30 +531,15 @@ func TestHoldingLineOncePerWake(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	r.advance(100 * time.Millisecond) // past HoldAfter for every message
 	close(slow)
 	wg.Wait()
-	r.advance(time.Hour)
-	if n := r.holdCount(); n != 1 {
-		t.Fatalf("%d holding lines for one wake, want 1", n)
+	if n := len(r.f.resumed); n != 1 || r.s.Asleep() {
+		t.Fatalf("%d restores for one wake, asleep %v", n, r.s.Asleep())
 	}
-	// The next sleep may send its own.
 	must(t, r.s.Sleep(context.Background()))
-	r.slowly(80 * time.Millisecond)
-	r.s.OwnerMessage(r.clock())
-	if n := r.holdCount(); n != 2 {
-		t.Fatalf("%d holding lines after a second slow wake, want 2", n)
-	}
-
-	// A message whose line would fall due just after the wake ends sends
-	// none.
-	r = newSleepRig(t)
-	r.s.cfg.HoldAfter = 60 * time.Millisecond
-	must(t, r.s.Sleep(context.Background()))
-	r.s.OwnerMessage(r.clock())
-	r.advance(120 * time.Millisecond)
-	if n := r.holdCount(); n != 0 {
-		t.Fatalf("a holding line after the agent woke (%d)", n)
+	r.s.OwnerMessage()
+	if n := len(r.f.resumed); n != 2 || r.s.Asleep() {
+		t.Fatalf("%d restores after a second wake, asleep %v", n, r.s.Asleep())
 	}
 }
 
