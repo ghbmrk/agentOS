@@ -24,15 +24,34 @@ type fakeVerifier struct {
 	last    int64
 	afters  []int64
 	counted []bool
+	// acts is each call's acts; approved holds the acts of codes that
+	// matched, as the checker records them (CH-4).
+	acts     [][]string
+	held     [][]bool
+	approved []string
+	// revoked is every act withdrawn and released every held act opened;
+	// revokeErr and releaseErr, when set, fail them.
+	revoked    []string
+	revokeErr  error
+	released   []string
+	releaseErr error
 	// proof, when set, is a vault unlock's ticket whose sign-in proof
 	// (UnlockProofPrefix+proof) matches once (P2-4f).
 	proof string
 }
 
-func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool, cas ...CheckerAct) (int64, bool, error) {
+	var acts []string
+	var held []bool
+	for _, a := range cas {
+		acts = append(acts, a.Act)
+		held = append(held, a.Held)
+	}
 	f.mu.Lock()
 	f.afters = append(f.afters, after)
 	f.counted = append(f.counted, counted)
+	f.acts = append(f.acts, acts)
+	f.held = append(f.held, held)
 	block := f.block
 	f.mu.Unlock()
 	if block != nil {
@@ -55,8 +74,29 @@ func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool) (int64
 	step, ok := MatchTOTP(f.seed, code, f.now(), max(after, f.last))
 	if ok {
 		f.last = step
+		f.approved = append(f.approved, acts...)
 	}
 	return step, ok, nil
+}
+
+func (f *fakeVerifier) RevokeActs(acts ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	f.revoked = append(f.revoked, acts...)
+	return nil
+}
+
+func (f *fakeVerifier) ReleaseActs(acts ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	f.released = append(f.released, acts...)
+	return nil
 }
 
 func (f *fakeVerifier) calls() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.afters) }

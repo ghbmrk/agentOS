@@ -986,7 +986,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		c.resume = nil
 		return []string{"No valid code. Reply RESUME for a new one."}, false
 	}
-	ok, locked, msg := c.checkLocked(p.code, r.code, now)
+	ok, locked, msg := c.checkLocked(p.code, r.code, now, nil)
 	if msg != "" {
 		return []string{msg}, false
 	}
@@ -1023,11 +1023,12 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 
 // checkLocked checks a reply code against a texted code, or against the
 // code generator and grid when texted is "" or the low tier is locked. A
-// strong code also extends the session unlock. msg is set when no check
+// strong code also extends the session unlock and approves acts (Item.Act)
+// at the checker; a texted code approves none. msg is set when no check
 // could run.
-func (c *Channel) checkLocked(texted, got string, now time.Time) (ok, locked bool, msg string) {
+func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerAct) (ok, locked bool, msg string) {
 	if texted == "" || c.codes.st.LowLocked {
-		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
+		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, acts: acts})
 		switch {
 		case err != nil:
 			return false, false, c.codeErr(err)

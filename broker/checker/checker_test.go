@@ -71,11 +71,20 @@ func act(t *testing.T, body string) string {
 	return Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(body))
 }
 
+// acts approves each act with no wait.
+func acts(as ...string) []checkersock.Act {
+	var out []checkersock.Act
+	for _, a := range as {
+		out = append(out, checkersock.Act{Act: a})
+	}
+	return out
+}
+
 // Nothing verifies before the seed is handed: no seed, no approval.
 func TestNoSeedVerifiesNothing(t *testing.T) {
 	clk := &clock{t: time.Unix(1_800_000_000, 0)}
 	c, _ := newChecker(t, clk)
-	_, ok, err := c.Verify("123456", 0, true, []string{act(t, "{}")})
+	_, ok, err := c.Verify("123456", 0, true, acts(act(t, "{}")))
 	if ok || !errors.Is(err, ErrNoSeed) {
 		t.Fatalf("ok %v err %v", ok, err)
 	}
@@ -93,7 +102,7 @@ func TestVerifiedCodeApprovesEachActOnce(t *testing.T) {
 	seed := syntheticSeed(t)
 	c.Hand(seed)
 	a1, a2, other := act(t, `{"n":1}`), act(t, `{"n":2}`), act(t, `{"n":3}`)
-	step, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []string{a1, a2})
+	step, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(a1, a2))
 	if err != nil || !ok || step != clk.now().Unix()/30 {
 		t.Fatalf("step %d ok %v err %v", step, ok, err)
 	}
@@ -106,11 +115,111 @@ func TestVerifiedCodeApprovesEachActOnce(t *testing.T) {
 	if c.Redeem(a1) {
 		t.Fatal("an approval was redeemed twice")
 	}
-	if _, ok, _ := c.Verify(totp(seed, clk.now()), 0, true, []string{other}); ok {
+	if _, ok, _ := c.Verify(totp(seed, clk.now()), 0, true, acts(other)); ok {
 		t.Fatal("a spent step verified again")
 	}
 	if c.Redeem(other) {
 		t.Fatal("a spent code approved an act")
+	}
+}
+
+// REQ: CH-10
+// A held act's approval cannot be spent until the broker releases it, as
+// it does once the item's UNDO is closed (REV-3): a try before that is
+// refused and spends nothing, a release opens it for ApprovalTTL, an
+// unreleased one lapses after MaxHold, and a release opens no unheld act
+// again.
+func TestAHeldActWaitsForItsRelease(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	a, lapsed, now := act(t, `{"held":1}`), act(t, `{"held":2}`), act(t, `{"now":1}`)
+	held := []checkersock.Act{{Act: a, Held: true}, {Act: lapsed, Held: true}, {Act: now}}
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, held); !ok || err != nil {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	clk.add(ApprovalTTL - 2*time.Second)
+	c.Release([]string{now})
+	clk.add(3 * time.Second)
+	if c.Redeem(now) {
+		t.Fatal("a release extended an unheld act past ApprovalTTL")
+	}
+	clk.add(2 * ApprovalTTL)
+	if c.Redeem(a) {
+		t.Fatal("a held act was spent before its release")
+	}
+	c.Release([]string{a})
+	clk.add(ApprovalTTL - time.Second)
+	if !c.Redeem(a) {
+		t.Fatal("an early try spent the approval, or its release did not open it")
+	}
+	if c.Redeem(a) {
+		t.Fatal("a released act was spent twice")
+	}
+	clk.add(MaxHold)
+	c.Release([]string{lapsed})
+	if c.Redeem(lapsed) {
+		t.Fatal("a held approval outlived MaxHold")
+	}
+}
+
+// REQ: CH-10
+// The verify socket's /revoke and /release: UNDO withdraws a held act so
+// no release opens it again, a release opens only the acts it names, and
+// each refuses a malformed act or more than MaxActs.
+func TestRevokeAndReleaseOverTheSocket(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	dir, err := os.MkdirTemp("", "chk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	var lns []net.Listener
+	for _, name := range []string{HandSocket, VerifySocket, RedeemSocket} {
+		ln, err := Listen(filepath.Join(dir, name), os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lns = append(lns, ln)
+	}
+	go c.Serve(lns[0], lns[1], lns[2])
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
+	undone, kept, other := act(t, `{"held":1}`), act(t, `{"held":2}`), act(t, `{"held":3}`)
+	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true,
+		checkersock.Act{Act: undone, Held: true}, checkersock.Act{Act: kept, Held: true}, checkersock.Act{Act: other, Held: true}); !ok || err != nil {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	if err := vc.Revoke(undone); err != nil {
+		t.Fatal(err)
+	}
+	if err := vc.Release(undone, kept); err != nil {
+		t.Fatal(err)
+	}
+	many := make([]string, MaxActs+1)
+	for i := range many {
+		many[i] = act(t, fmt.Sprintf(`{"n":%d}`, i))
+	}
+	for name, op := range map[string]func(...string) error{"revoke": vc.Revoke, "release": vc.Release} {
+		if err := op("not-an-act"); err == nil {
+			t.Fatalf("a malformed %s was accepted", name)
+		}
+		if err := op(many...); err == nil {
+			t.Fatalf("a %s of more than MaxActs was accepted", name)
+		}
+	}
+	red := Redeemer(filepath.Join(dir, RedeemSocket))
+	if ok, err := red(context.Background(), undone); ok || err != nil {
+		t.Fatalf("a revoked act was spent: %v %v", ok, err)
+	}
+	if ok, err := red(context.Background(), kept); !ok || err != nil {
+		t.Fatalf("a released act was refused: %v %v", ok, err)
+	}
+	if ok, err := red(context.Background(), other); ok || err != nil {
+		t.Fatalf("a release opened an act it did not name: %v %v", ok, err)
 	}
 }
 
@@ -127,19 +236,19 @@ func TestWrongCodesApproveNothingAndPause(t *testing.T) {
 		wrong = "000001"
 	}
 	for i := 0; i < MaxWrongCounted; i++ {
-		if _, ok, err := c.Verify(wrong, 0, true, []string{a}); ok || err != nil {
+		if _, ok, err := c.Verify(wrong, 0, true, acts(a)); ok || err != nil {
 			t.Fatalf("try %d: ok %v err %v", i, ok, err)
 		}
 	}
 	var p *PausedError
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []string{a}); ok || !errors.As(err, &p) {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(a)); ok || !errors.As(err, &p) {
 		t.Fatalf("not paused: ok %v err %v", ok, err)
 	}
 	if c.Redeem(a) {
 		t.Fatal("a paused check approved an act")
 	}
 	// The silent bucket is apart: a flood of counted codes does not stop it.
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, []string{a}); !ok || err != nil {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, acts(a)); !ok || err != nil {
 		t.Fatalf("silent check: ok %v err %v", ok, err)
 	}
 	clk.add(VerifyWindow + time.Second)
@@ -162,12 +271,12 @@ func TestWrongSilentCodesPause(t *testing.T) {
 		wrong = "000001"
 	}
 	for i := 0; i < MaxWrongSilent; i++ {
-		if _, ok, err := c.Verify(wrong, 0, false, []string{a}); ok || err != nil {
+		if _, ok, err := c.Verify(wrong, 0, false, acts(a)); ok || err != nil {
 			t.Fatalf("try %d: ok %v err %v", i, ok, err)
 		}
 	}
 	var p *PausedError
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, []string{a}); ok || !errors.As(err, &p) {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, acts(a)); ok || !errors.As(err, &p) {
 		t.Fatalf("silent check not paused: ok %v err %v", ok, err)
 	}
 	if c.Redeem(a) {
@@ -190,7 +299,7 @@ func TestApprovalExpires(t *testing.T) {
 	seed := syntheticSeed(t)
 	c.Hand(seed)
 	a := act(t, "{}")
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []string{a}); !ok || err != nil {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(a)); !ok || err != nil {
 		t.Fatalf("ok %v err %v", ok, err)
 	}
 	clk.add(ApprovalTTL + time.Second)
@@ -208,7 +317,7 @@ func TestSpentStepSurvivesRestart(t *testing.T) {
 	c.Hand(seed)
 	a := act(t, "{}")
 	code := totp(seed, clk.now())
-	if _, ok, err := c.Verify(code, 0, true, []string{a}); !ok || err != nil {
+	if _, ok, err := c.Verify(code, 0, true, acts(a)); !ok || err != nil {
 		t.Fatalf("ok %v err %v", ok, err)
 	}
 	again, err := New(Config{StatePath: state, Now: clk.now})
@@ -219,7 +328,7 @@ func TestSpentStepSurvivesRestart(t *testing.T) {
 	if again.Redeem(a) {
 		t.Fatal("an approval survived the restart")
 	}
-	if _, ok, _ := again.Verify(code, 0, true, []string{a}); ok {
+	if _, ok, _ := again.Verify(code, 0, true, acts(a)); ok {
 		t.Fatal("a spent step verified after a restart")
 	}
 	raw, err := os.ReadFile(state)
@@ -308,13 +417,13 @@ func TestHandlersServeClosedSets(t *testing.T) {
 		}
 		return resp
 	}
-	if resp := post(redeem.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}}); resp.StatusCode < 400 {
+	if resp := post(redeem.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: acts(a)}); resp.StatusCode < 400 {
 		t.Fatal("the redeem socket verified a code")
 	}
 	if resp := post(verify.URL+"/redeem", redeemReq{Act: a}); resp.StatusCode < 400 {
 		t.Fatal("the verify socket redeemed")
 	}
-	resp := post(verify.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}})
+	resp := post(verify.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: acts(a)})
 	var vr checkersock.VerifyResponse
 	json.NewDecoder(resp.Body).Decode(&vr)
 	if resp.StatusCode != http.StatusOK || !vr.OK {
@@ -356,7 +465,7 @@ func TestServeOverSockets(t *testing.T) {
 		t.Fatalf("redeemed before any code: %v %v", ok, err)
 	}
 	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
-	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, a); !ok || err != nil {
+	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, checkersock.Act{Act: a}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	if ok, err := red(context.Background(), a); !ok || err != nil {
@@ -397,14 +506,14 @@ func TestClientReportsRefusals(t *testing.T) {
 	}
 	seed := syntheticSeed(t)
 	c.Hand(seed)
-	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, "not-an-act"); ok || err == nil {
+	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, checkersock.Act{Act: "not-an-act"}); ok || err == nil {
 		t.Fatalf("malformed act: ok %v err %v", ok, err)
 	}
 	many := make([]string, MaxActs+1)
 	for i := range many {
 		many[i] = act(t, fmt.Sprint(i))
 	}
-	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, many...); ok || err == nil {
+	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, acts(many...)...); ok || err == nil {
 		t.Fatalf("oversized batch: ok %v err %v", ok, err)
 	}
 	if c.Redeem(many[0]) {
@@ -454,7 +563,7 @@ func TestHandSocketDropTakesTheSeedBack(t *testing.T) {
 	seed := syntheticSeed(t)
 	c.Hand(seed)
 	a := act(t, "{}")
-	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []string{a}); !ok || err != nil {
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(a)); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
 	hand := httptest.NewServer(c.handHandler())
@@ -499,7 +608,7 @@ func TestHandSocketVerifiesOnTheOneStore(t *testing.T) {
 		return resp, vr
 	}
 	code := totp(seed, clk.now())
-	if resp, _ := post(hand.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true, Acts: []string{act(t, "{}")}}); resp.StatusCode != http.StatusBadRequest {
+	if resp, _ := post(hand.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true, Acts: acts(act(t, "{}"))}); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("the hand socket took acts: %d", resp.StatusCode)
 	}
 	resp, vr := post(hand.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true})

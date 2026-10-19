@@ -105,6 +105,17 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	return c, nil
 }
 
+// holderConfig is the holder's declaration. Provider-side fetch for public
+// machines is the owner's per-login choice, passed as -public-fetch; with
+// no flag the login is held to the strict form (ADP-10, #1061 P1).
+func (c config) holderConfig(guard *netguard.Policy) holder.Config {
+	var redeem func(context.Context, string) (bool, error)
+	if c.checker != "" {
+		redeem = checker.Redeemer(c.checker)
+	}
+	return holder.Config{Adapters: c.adapters, Guard: guard, Redeem: redeem, PublicFetch: c.publicFetch}
+}
+
 func run(args []string, stderr io.Writer) error {
 	c, err := parse(args, stderr)
 	if err != nil {
@@ -113,15 +124,11 @@ func run(args []string, stderr io.Writer) error {
 	if err := procguard.Isolate(c.requestUID, c.handUID); err != nil {
 		return err
 	}
-	var redeem func(context.Context, string) (bool, error)
-	if c.checker != "" {
-		redeem = checker.Redeemer(c.checker)
-	}
 	guard, err := netGuard(context.Background())
 	if err != nil {
 		return err
 	}
-	h, err := holder.New(holder.Config{Adapters: c.adapters, Guard: guard, Redeem: redeem, PublicFetch: c.publicFetch})
+	h, err := holder.New(c.holderConfig(guard))
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
+	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
 // REQ: REC-4, CH-7, ARC-1
@@ -17,7 +18,7 @@ import (
 // fixed synthetic code.
 type codeVerifier struct{}
 
-func (codeVerifier) VerifyTOTP(code string, after int64, _ bool) (int64, bool, error) {
+func (codeVerifier) VerifyTOTP(code string, after int64, _ bool, _ ...ownerch.CheckerAct) (int64, bool, error) {
 	step := time.Now().Unix() / 30
 	return step, code == "246810" && step > after, nil
 }

@@ -29,12 +29,28 @@ type PausedError struct{ Until time.Time }
 
 func (e *PausedError) Error() string { return "checker: too many wrong codes; checks are paused" }
 
+// Act is one act a code approves: its digest (checker.Act), and Held when
+// its item waits out an undo window (REV-3): a held approval cannot be
+// spent until the broker releases it (POST /release), which it does only
+// once the owner's UNDO can no longer reach the item.
+type Act struct {
+	Act  string `json:"act"`
+	Held bool   `json:"held,omitempty"`
+}
+
 // VerifyRequest and VerifyResponse are POST /verify's bodies.
 type VerifyRequest struct {
-	Code    string   `json:"code"`
-	After   int64    `json:"after"`
-	Counted bool     `json:"counted"`
-	Acts    []string `json:"acts"`
+	Code    string `json:"code"`
+	After   int64  `json:"after"`
+	Counted bool   `json:"counted"`
+	Acts    []Act  `json:"acts"`
+}
+
+// ActsRequest is POST /revoke's body, the acts whose approvals are
+// withdrawn, as an UNDO does, and POST /release's, the held acts whose
+// approvals may now be spent.
+type ActsRequest struct {
+	Acts []string `json:"acts"`
 }
 
 type VerifyResponse struct {
@@ -78,7 +94,7 @@ func VerifyClient(socket string) *Client {
 // VerifyTOTP asks the checker to verify code after step after and, on a
 // match, approve acts. Errors are ErrNoSeed, *PausedError, ErrDown when
 // the socket cannot be dialled, or another transport or status error.
-func (c *Client) VerifyTOTP(code string, after int64, counted bool, acts ...string) (int64, bool, error) {
+func (c *Client) VerifyTOTP(code string, after int64, counted bool, acts ...Act) (int64, bool, error) {
 	b, _ := json.Marshal(VerifyRequest{Code: code, After: after, Counted: counted, Acts: acts})
 	resp, err := c.hc.Post("http://localhost/verify", "application/json", bytes.NewReader(b))
 	if err != nil {
@@ -104,4 +120,26 @@ func (c *Client) VerifyTOTP(code string, after int64, counted bool, acts ...stri
 	default:
 		return 0, false, fmt.Errorf("checker: verify: %s", resp.Status)
 	}
+}
+
+// Revoke withdraws acts' approvals, spent or not: only 204 means the
+// checker holds none of them now.
+func (c *Client) Revoke(acts ...string) error { return c.acts("revoke", acts) }
+
+// Release lets held acts' approvals be spent, each within ApprovalTTL:
+// only 204 means the checker released them.
+func (c *Client) Release(acts ...string) error { return c.acts("release", acts) }
+
+func (c *Client) acts(op string, acts []string) error {
+	b, _ := json.Marshal(ActsRequest{Acts: acts})
+	resp, err := c.hc.Post("http://localhost/"+op, "application/json", bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("checker: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, MaxBody))
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("checker: %s: %s", op, resp.Status)
+	}
+	return nil
 }

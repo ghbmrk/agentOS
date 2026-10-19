@@ -102,6 +102,9 @@ type QueuedRef struct {
 	ID   string `json:"id"`
 	Ref  string `json:"ref"`
 	Held bool   `json:"held,omitempty"`
+	// Act is a held item's act, withdrawn from the checker when the item
+	// is cancelled at a restart (REV-3).
+	Act string `json:"act,omitempty"`
 }
 
 // Store persists State.
