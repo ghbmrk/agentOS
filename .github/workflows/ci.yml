@@ -289,7 +289,7 @@ jobs:
         # five configurations to two searches at once: four (GOMAXPROCS) exhausted runner memory
         # and the step was killed with exit 143.
         run: go test -count=1 -timeout 20m -parallel 2 -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
-      - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
+      - name: Fuzz the broker decoders and policy targets, 20s per target (LOOP-7, P3-4b-3, FUZZ-broker-ci)
         # Each target already ran its seeds and planted-decoder control in the race shards;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
         # runs each target for the time budget as count-bound chunks sized from the
