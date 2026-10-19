@@ -4,6 +4,7 @@ package supervise
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -228,8 +229,12 @@ func TestStartRefusesRootAndRelativePaths(t *testing.T) {
 // 4, ... up to the cap; State says unavailable with the cause and count
 // meanwhile, and a run that lasted Reset puts the delay back to Min.
 func TestSupervisorRestartsWithBackoff(t *testing.T) {
-	b := Backoff{Min: 25 * time.Millisecond, Max: 200 * time.Millisecond, Reset: 150 * time.Millisecond}
-	s := newSupervisor(Options{Backoff: b})
+	// Reset is far above a quick run, so a busy machine cannot make one
+	// count as long.
+	b := Backoff{Min: 25 * time.Millisecond, Max: 200 * time.Millisecond, Reset: time.Second}
+	var logMu sync.Mutex
+	var out bytes.Buffer
+	s := newSupervisor(Options{Backoff: b, Log: lockedWriter{&logMu, &out}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var mu sync.Mutex
@@ -279,28 +284,41 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// Copy under mu, then release it: a run still holding or awaiting mu
-	// would otherwise keep <-s.Done() below from ever returning.
+	// Measure the gaps under mu, then release it: a run still holding or
+	// awaiting mu would otherwise keep <-s.Done() below from ever returning.
 	mu.Lock()
-	starts, ends = append([]time.Time(nil), starts...), append([]time.Time(nil), ends...)
-	bad = append([]string(nil), bad...)
+	gaps := make([]time.Duration, quick+1)
+	for i := range gaps {
+		gaps[i] = starts[i+1].Sub(ends[i])
+	}
+	failed := bad
 	mu.Unlock()
-	if len(bad) > 0 {
-		t.Fatal(bad)
+	if len(failed) > 0 {
+		t.Fatal(failed)
 	}
-	want := []time.Duration{25, 50, 100, 200, 200, 200, 200}
+	// The delays the loop chose, from its log; wall-clock gaps only bound
+	// them from below, since a busy machine can stretch any gap.
+	logMu.Lock()
+	lines := strings.Split(out.String(), "\n")
+	logMu.Unlock()
+	want := []time.Duration{25, 50, 100, 200, 200, 200, 200, 25} // the last after the long run
+	if len(lines) < len(want) {
+		t.Fatalf("log %q, want %d restart lines", lines, len(want))
+	}
 	for i, w := range want {
-		gap := starts[i+1].Sub(ends[i])
 		w *= time.Millisecond
-		if gap < w {
-			t.Errorf("restart %d after %v, want at least %v", i+1, gap, w)
+		var n int
+		var got string
+		_, tail, _ := strings.Cut(lines[i], "; restart ")
+		if _, err := fmt.Sscanf(tail, "%d in %s", &n, &got); err != nil || n != i+1 {
+			t.Fatalf("log line %q: restart %d, %v", lines[i], n, err)
 		}
-		if w == b.Max && gap >= 2*b.Max {
-			t.Errorf("restart %d after %v: the delay passed its cap %v", i+1, gap, b.Max)
+		if d, err := time.ParseDuration(got); err != nil || d != w {
+			t.Errorf("restart %d in %s, want %v", i+1, got, w)
 		}
-	}
-	if gap := starts[quick+1].Sub(ends[quick]); gap >= 4*b.Min {
-		t.Errorf("after a run of Reset, restart came %v later, want Min %v", gap, b.Min)
+		if gaps[i] < w {
+			t.Errorf("restart %d after %v, want at least %v", i+1, gaps[i], w)
+		}
 	}
 	if st := s.State(); st.Restarts != quick+1 {
 		t.Errorf("restarts %d, want %d", st.Restarts, quick+1)
