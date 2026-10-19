@@ -50,7 +50,7 @@ func (p *noticePuller) poll(ctx context.Context, c *http.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, p.maxGet)
 	defer cancel()
 	q := url.Values{"boot": {p.boot}, "after": {fmt.Sprint(p.after)}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://notice/notices?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/notices?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
