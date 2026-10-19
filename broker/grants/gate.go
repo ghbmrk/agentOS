@@ -614,11 +614,13 @@ func (g *Gate) Reissue(cs []owner.Carried) {
 	g.reissueDue()
 }
 
-// reissueDue asks again what Reissue took, unless STOP holds.
+// reissueDue asks again what Reissue took, unless STOP holds or a failed
+// write (a STOP that failed to record included) halted the engine, so an
+// answer could not be acted on (SEC-failed-stop-latch, #2458).
 func (g *Gate) reissueDue() {
 	g.mu.Lock()
 	eng := g.eng
-	if len(g.reissue) == 0 || eng == nil || eng.Stopped() {
+	if len(g.reissue) == 0 || eng == nil || eng.Halted() {
 		g.mu.Unlock()
 		return
 	}

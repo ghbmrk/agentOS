@@ -313,6 +313,59 @@ class ManagedConfigTest(unittest.TestCase):
         for entry in launch["env"]:
             self.assertNotRegex(entry.split("=", 1)[0], r"(?i)key|token$|secret|password")
 
+    # REQ: ARC3-C1
+    def test_managed_config_turns_off_cloud_features(self):
+        # ARC-3: every cloud and remote feature with a known switch is off, the codex declaration
+        # lists exactly these pins as its CloudOff, and ASSUMPTIONS.md ARC3-guest-cloud-off-1 lists them with the
+        # features that have none marked [Open].
+        cloud_off = {
+            # provider-hosted tools
+            'web_search = "disabled"': ((), "web_search", "disabled"),
+            "tools.web_search = false": (("tools",), "web_search", False),
+            "features.web_search_request = false": (("features",), "web_search_request", False),
+            "features.web_search_cached = false": (("features",), "web_search_cached", False),
+            "features.image_generation = false": (("features",), "image_generation", False),
+            "features.browser_use = false": (("features",), "browser_use", False),
+            "features.browser_use_external = false": (("features",), "browser_use_external", False),
+            "features.computer_use = false": (("features",), "computer_use", False),
+            # remote plugins, apps and the background daemon
+            "features.remote_plugin = false": (("features",), "remote_plugin", False),
+            "features.plugin_sharing = false": (("features",), "plugin_sharing", False),
+            "features.apps = false": (("features",), "apps", False),
+            "features.plugins = false": (("features",), "plugins", False),
+            "features.daemon_auto_start = false": (("features",), "daemon_auto_start", False),
+            # update checks
+            "check_for_update_on_startup = false": ((), "check_for_update_on_startup", False),
+            "features.in_app_updates = false": (("features",), "in_app_updates", False),
+            # notifications
+            "notify = []": ((), "notify", []),
+            # telemetry
+            "analytics.enabled = false": (("analytics",), "enabled", False),
+            "feedback.enabled = false": (("feedback",), "enabled", False),
+            'otel.exporter = "none"': (("otel",), "exporter", "none"),
+            # session history
+            'history.persistence = "none"': (("history",), "persistence", "none"),
+        }
+        cfg = tomllib.loads(CONFIG.read_text())
+        for entry, (tables, key, want) in cloud_off.items():
+            with self.subTest(entry=entry):
+                t = cfg
+                for name in tables:
+                    t = t.get(name, {})
+                self.assertIn(key, t)
+                self.assertEqual(t[key], want)
+        src = (ROOT / "broker/provagent/declare.go").read_text()
+        block = src.split('"codex": {', 1)[1].split("CloudOff: []string{", 1)[1].split("},", 1)[0]
+        declared = [m[1:-1] for m in re.findall(r'`[^`]*`|"[^"]*"', block)]
+        self.assertEqual(sorted(declared), sorted(cloud_off))
+        row = next(l for l in (CODEX / "ASSUMPTIONS.md").read_text().splitlines() if l.startswith("| ARC3-guest-cloud-off-1 |"))
+        for entry in cloud_off:
+            with self.subTest(listed=entry):
+                self.assertIn("`" + entry + "`", row)
+        for feature in ("cloud tasks", "remote runs", "session sync"):
+            self.assertIn(feature, row)
+        self.assertIn("[Open]", row)
+
 
 class RequirementsTest(unittest.TestCase):
     """The requirements layer that keeps CODEX_HOME unreadable to the CLI's tool sandbox (#1452,

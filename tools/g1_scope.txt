@@ -126,6 +126,7 @@ allow broker/guesterr/
 # agentos-egress hands each key to its account holder (SIM-split-wire, #1103).
 allow broker/holder/
 allow broker/hostdisk/
+allow broker/infer/supervise/
 allow broker/inflight/
 allow broker/journal/
 allow broker/localapi/

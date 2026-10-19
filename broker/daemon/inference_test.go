@@ -50,7 +50,7 @@ var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "c
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.
-var forbidden = []string{"route", "egress", "cmd/agentos-egress"}
+var forbidden = []string{"route", "egress", "cmd/agentos-egress", "cmd/agentos-infer"}
 
 // providerSDK matches third-party model provider clients.
 var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|mistral|cohere|ollama|bedrock)`)
@@ -93,7 +93,17 @@ var netOK = map[string]allowance{
 	// The checker's verify-socket client (SIM-split-wire), as modelroute.
 	"checker/checkersock": {"dials only the checker's verify unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
-	"netjoin":   {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
+	"netjoin": {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
+	// The local inference service's client and supervisor (INFER-SVC
+	// INF-2, INF-1): the client dials the service's unix socket; the
+	// supervisor makes that socket, hands it to the jailed service as fd 3
+	// and starts it into the inference leaf, as loop7's jail does.
+	"infer": {"dials only the inference service's unix socket", []string{"net.Conn", "net.Dialer"}},
+	"infer/supervise": {"the inference service's unix listener; its jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; its start into the inference leaf",
+		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
+			"net.Listen", "net.UnixListener",
+			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Close", "syscall.Credential",
+			"syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
 	"loopbuild": {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
 	"journal":   {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"update":    {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
@@ -193,7 +203,7 @@ var socketPkgs = map[string]bool{
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process,
 // and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "checker/checkersock": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set
@@ -290,6 +300,7 @@ func listDeps(t *testing.T, dir string, pkgs []string) []listed {
 	return ps
 }
 
+// REQ: ARC-2
 func TestAgentosdLinksNoInference(t *testing.T) {
 	ps := linkedDeps(t)
 	if len(ps) == 0 {
@@ -620,6 +631,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	}
 	if !contains(forbidden, "route") {
 		t.Fatal("route is not forbidden")
+	}
+	if !contains(forbidden, "cmd/agentos-infer") {
+		t.Fatal("the inference service is not forbidden")
 	}
 	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
 	for _, c := range []struct{ rel, src string }{

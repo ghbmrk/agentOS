@@ -143,28 +143,31 @@ func TestProxyDefaultInFlightBudget(t *testing.T) {
 		t.Fatalf("default in-flight budget %d, constant %d", ir.p.budget, DefaultInFlightBytes)
 	}
 	// A maximal body of plain or non-ASCII text, as an owner's long prompt
-	// is, must fit the default budget on its own.
+	// is, must fit one machine's share of the default budget on its own.
 	for name, text := range map[string]string{"ascii": "a", "cjk": "\u6f22"} {
 		body := bytes.Repeat([]byte(text), DefaultMaxBody/len(text))
-		if c := bodyCost(body); c > DefaultInFlightBytes {
-			t.Errorf("a maximal %s body costs %d, over the budget", name, c)
+		if c := bodyCost(body); c > ir.p.share {
+			t.Errorf("a maximal %s body costs %d, over a machine's share", name, c)
 		}
 	}
 }
 
 // T3: a request holds what its body costs, not one count: a body that is
-// costly to check is refused outright, one the remaining budget cannot hold
-// waits for room, and a long string is cheap.
+// costly to check is refused outright, and one the remaining budget cannot
+// hold waits for room. Invalid UTF-8 costs more than plain text, since the
+// check rewrites each invalid byte as U+FFFD.
 func TestProxyBudgetFollowsBodyCost(t *testing.T) {
 	str := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("a", 1<<20) + `"}]}`)
-	objs := []byte(`{"model":"m","messages":[` + strings.Repeat(`{"":0},`, 120<<10/7) + `{}]}`)
-	if len(objs) > len(str)/8 || bodyCost(objs) <= bodyCost(str) {
-		t.Fatalf("objects: %d bytes cost %d; string: %d bytes cost %d", len(objs), bodyCost(objs), len(str), bodyCost(str))
+	bad := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("\xff", 1<<20) + `"}]}`)
+	if len(bad) != len(str) || bodyCost(bad) <= bodyCost(str) {
+		t.Fatalf("invalid: %d bytes cost %d; string: %d bytes cost %d", len(bad), bodyCost(bad), len(str), bodyCost(str))
 	}
 	t.Run("too costly", func(t *testing.T) {
-		ir := newInFlightRig(t, bodyCost(objs)-1, 1, Cap{})
+		// One machine may hold half the budget, so a body is too costly
+		// when it costs more than that half.
+		ir := newInFlightRig(t, 2*bodyCost(bad)-2, 1, Cap{})
 		close(ir.block)
-		w := ir.post("m0", chatOf(objs))
+		w := ir.post("m0", chatOf(bad))
 		if w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "body too costly to check") {
 			t.Fatalf("costly body: %d %q", w.Code, w.Body)
 		}
@@ -176,26 +179,30 @@ func TestProxyBudgetFollowsBodyCost(t *testing.T) {
 		}
 	})
 	t.Run("waits for room", func(t *testing.T) {
-		// Room for the string's read but not its check while a chat is
-		// held: refused as a retry, then admitted once the chat ends.
-		ir := newInFlightRig(t, chatCost(t)+bodyCost(str)-1, 2, Cap{})
-		if readCost(int64(len(str))) > bodyCost(str)-1 {
+		// Room for two of the string bodies but not a third: the third is
+		// refused as a retry, then admitted once one ends.
+		s := bodyCost(str)
+		ir := newInFlightRig(t, 3*s-1, 3, Cap{})
+		if readCost(int64(len(str))) > s-1 {
 			t.Fatal("rig: the read alone would not fit")
 		}
-		done := make(chan int, 1)
-		go func() { done <- ir.do("m0").Code }()
-		<-ir.entered
-		w := ir.post("m1", chatOf(str))
-		if w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "too many requests in flight") {
-			t.Fatalf("string body with a chat held: %d %q", w.Code, w.Body)
+		done := make(chan int, 2)
+		for _, m := range []string{"m0", "m1"} {
+			go func() { done <- ir.post(m, chatOf(str)).Code }()
+			<-ir.entered
 		}
-		if g, per := ir.slots(); g != chatCost(t) || len(per) != 1 {
+		w := ir.post("m2", chatOf(str))
+		if w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "too many requests in flight") {
+			t.Fatalf("string body with two held: %d %q", w.Code, w.Body)
+		}
+		if g, per := ir.slots(); g != 2*s || len(per) != 2 {
 			t.Fatalf("after the refusal: reserved %d, machines %v", g, per)
 		}
 		close(ir.block)
 		<-done
-		if c := ir.post("m1", chatOf(str)).Code; c != 200 {
-			t.Fatalf("after the chat ended: %d", c)
+		<-done
+		if c := ir.post("m2", chatOf(str)).Code; c != 200 {
+			t.Fatalf("after the others ended: %d", c)
 		}
 		if g, per := ir.slots(); g != 0 || len(per) != 0 {
 			t.Fatalf("slots left: reserved %d, machines %v", g, per)
@@ -308,7 +315,7 @@ func TestProxyInFlightSlotsReturned(t *testing.T) {
 		r := newRig(t, nil)
 		p, err := New(Config{
 			Adapters: []Adapter{OpenAI("openai-key")}, Grants: map[string][]string{"m1": {"openai"}},
-			Vault: r.vault, Audit: r.audit, InFlightBytes: chatCost(t),
+			Vault: r.vault, Audit: r.audit, InFlightBytes: 2 * chatCost(t),
 			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { panic("transport") }),
 		})
 		if err != nil {
@@ -330,7 +337,7 @@ func TestProxyInFlightSlotsReturned(t *testing.T) {
 		}
 	})
 	t.Run("cancelled", func(t *testing.T) {
-		ir := newInFlightRig(t, chatCost(t), 2, Cap{})
+		ir := newInFlightRig(t, 2*chatCost(t), 2, Cap{})
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {

@@ -252,6 +252,29 @@ func TestACheckerErrorRefuses(t *testing.T) {
 	}
 }
 
+// The hand socket's check is charged to no checker bucket, so the vault's
+// durable cap alone limits tier-4 codes: once it is reached, the right code
+// is refused too.
+func TestCapRefusesTheRightTier4Code(t *testing.T) {
+	r := newFastRig(t, true)
+	ck, _ := checkerAt(t, r)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the checker's seed", ck.Held)
+	r.clk.add(30 * time.Second)
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	for i := range MaxWrongCodes {
+		if err := r.c.approvedLocked(wrongOf(r.code()), "a test change"); err == nil {
+			t.Fatalf("wrong code %d approved", i)
+		}
+	}
+	if err := r.c.approvedLocked(r.code(), "a test change"); err == nil || !strings.HasPrefix(err.Error(), "Too many wrong codes") {
+		t.Fatalf("the right code after the cap: %v", err)
+	}
+}
+
 // Steps the vault spent stay spent on a checker that starts with fresh
 // state (a lost state file, a box newly switched to -checker).
 func TestAFreshCheckerKeepsTheVaultsLastStep(t *testing.T) {

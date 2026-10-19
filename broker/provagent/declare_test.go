@@ -5,9 +5,11 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -22,6 +24,7 @@ func good() Declaration {
 		Cwd: "/work", ResultPath: "/work/.result", Env: []string{"PATH=/usr/bin"},
 		Idle:    []string{"sleep", "infinity"},
 		Custody: BrokerHeld, Endpoints: []string{"api.example.test"}, Placeholder: "auth.json",
+		CloudOff:    []string{"telemetry.enabled = false"},
 		Pools:       []Pool{{Name: "5h", ReadFrom: "x-stub-primary-used-percent"}},
 		ErrorEvents: []string{"error"},
 		UsedUp:      []string{"usage_limit_reached"},
@@ -212,22 +215,24 @@ func TestCodexRtFormatRedactsNestedJSONToValidJSON(t *testing.T) {
 
 func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 	cases := map[string]func(d *Declaration){
-		"missing id":          func(d *Declaration) { d.ID = "" },
-		"missing cli":         func(d *Declaration) { d.CLI = "" },
-		"missing version":     func(d *Declaration) { d.Version = "" },
-		"missing argv":        func(d *Declaration) { d.Argv = nil },
-		"no idle argv":        func(d *Declaration) { d.Idle = nil },
-		"relative cwd":        func(d *Declaration) { d.Cwd = "work" },
-		"relative result":     func(d *Declaration) { d.ResultPath = "result" },
-		"no task class":       func(d *Declaration) { d.TaskClasses = nil },
-		"no used-up signal":   func(d *Declaration) { d.UsedUp = nil },
-		"no error events":     func(d *Declaration) { d.ErrorEvents = nil },
-		"no pool":             func(d *Declaration) { d.Pools = nil },
-		"unknown custody":     func(d *Declaration) { d.Custody = "guest-held" },
-		"broker-held no host": func(d *Declaration) { d.Endpoints = nil },
-		"credential in env":   func(d *Declaration) { d.Env = append(d.Env, "X="+canaryToken) },
-		"credential in argv":  func(d *Declaration) { d.Argv = append(d.Argv, canaryToken) },
-		"token-named env":     func(d *Declaration) { d.Env = append(d.Env, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://x") },
+		"missing id":             func(d *Declaration) { d.ID = "" },
+		"missing cli":            func(d *Declaration) { d.CLI = "" },
+		"missing version":        func(d *Declaration) { d.Version = "" },
+		"missing argv":           func(d *Declaration) { d.Argv = nil },
+		"no idle argv":           func(d *Declaration) { d.Idle = nil },
+		"relative cwd":           func(d *Declaration) { d.Cwd = "work" },
+		"relative result":        func(d *Declaration) { d.ResultPath = "result" },
+		"no task class":          func(d *Declaration) { d.TaskClasses = nil },
+		"no used-up signal":      func(d *Declaration) { d.UsedUp = nil },
+		"no error events":        func(d *Declaration) { d.ErrorEvents = nil },
+		"half-filled pool":       func(d *Declaration) { d.Pools = []Pool{{Name: "5h"}} },
+		"no pool, not unmetered": func(d *Declaration) { d.Pools = nil },
+		"unmetered with a pool":  func(d *Declaration) { d.Unmetered = true },
+		"unknown custody":        func(d *Declaration) { d.Custody = "guest-held" },
+		"broker-held no host":    func(d *Declaration) { d.Endpoints = nil },
+		"credential in env":      func(d *Declaration) { d.Env = append(d.Env, "X="+canaryToken) },
+		"credential in argv":     func(d *Declaration) { d.Argv = append(d.Argv, canaryToken) },
+		"token-named env":        func(d *Declaration) { d.Env = append(d.Env, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://x") },
 		"bad verdict": func(d *Declaration) {
 			d.Q = Qualification{CLIVersion: "1.0.0", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: "maybe"}
 		},
@@ -257,7 +262,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 
 func TestBuiltinsLoad(t *testing.T) {
 	bs := Builtins()
-	if len(bs) != 2 {
+	if len(bs) != 3 {
 		t.Fatalf("builtins: %d", len(bs))
 	}
 	for _, d := range bs {
@@ -272,6 +277,10 @@ func TestBuiltinsLoad(t *testing.T) {
 	cl, ok := bs["claude"]
 	if !ok || cl.Custody != WorkerHeld || cl.Q.Verdict != Unclear {
 		t.Errorf("claude: %+v", cl)
+	}
+	g, ok := bs["grok"]
+	if !ok || g.Custody != BrokerHeld || g.Q.Verdict != Allowed || g.Q.Complete() {
+		t.Errorf("grok: %+v", g)
 	}
 }
 
@@ -463,5 +472,96 @@ func TestLooksLikeCredential(t *testing.T) {
 	}
 	if LooksLikeCredential("ordinary result text with sk- nothing") {
 		t.Error("flagged plain text")
+	}
+}
+
+// REQ: ARC3-C3
+// A CLI guest (a broker-held declaration) names the switches that turn its
+// provider's cloud and remote features off; without them it is refused, and
+// a flag it names must be in the argv that runs the CLI (ARC-3).
+func TestCLIGuestDeclarationNeedsCloudOff(t *testing.T) {
+	d := good()
+	d.CloudOff = nil
+	if err := d.Validate(); err == nil {
+		t.Fatal("a CLI guest with no cloud-off list validated")
+	}
+	d.CloudOff = []string{""}
+	if err := d.Validate(); err == nil {
+		t.Fatal("an empty cloud-off entry validated")
+	}
+	d.CloudOff = []string{"--no-cloud"}
+	if err := d.Validate(); err == nil {
+		t.Fatal("a cloud-off flag missing from argv validated")
+	}
+	d.Argv = append(d.Argv, "--no-cloud")
+	if err := d.Validate(); err != nil {
+		t.Fatalf("a cloud-off flag in argv: %v", err)
+	}
+	// A worker-held provider agent switches its cloud features off under
+	// CRED-5 W4, not here.
+	w := good()
+	w.Custody, w.Endpoints, w.Placeholder, w.CloudOff = WorkerHeld, nil, "", nil
+	if err := w.Validate(); err != nil {
+		t.Fatalf("worker-held without a cloud-off list: %v", err)
+	}
+	for id, b := range Builtins() {
+		if b.Custody == BrokerHeld && len(b.CloudOff) == 0 {
+			t.Errorf("%s: no cloud-off list", id)
+		}
+	}
+}
+
+// REQ: ARC3-C1
+// Each codex cloud-off entry is a `table.key = value` line the managed
+// config pins, so the declaration and the file the image ships cannot drift.
+func TestCodexCloudOffIsPinnedInManagedConfig(t *testing.T) {
+	b, err := os.ReadFile("../../guest/codex/managed_config.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := map[string]bool{}
+	table := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+		case strings.HasPrefix(line, "["):
+			table = strings.Trim(line, "[]") + "."
+		default:
+			pinned[table+line] = true
+		}
+	}
+	c := Builtins()["codex"]
+	if len(c.CloudOff) == 0 {
+		t.Fatal("codex: no cloud-off list")
+	}
+	for _, e := range c.CloudOff {
+		if !pinned[e] {
+			t.Errorf("codex cloud-off %q is not pinned in managed_config.toml", e)
+		}
+	}
+}
+
+// REQ: ARC3-C2
+// The codex declaration's hosts are exactly the egress route's, so an
+// endpoint on a host the declaration does not name (or the reverse) fails.
+func TestCodexEndpointsMatchTheEgressRoute(t *testing.T) {
+	route := egress.Codex()
+	if route.Provider != "codex" {
+		t.Fatalf("route provider %q", route.Provider)
+	}
+	hosts := map[string]bool{}
+	for _, e := range route.Endpoints {
+		hosts[e.Host] = true
+	}
+	var got []string
+	for h := range hosts {
+		got = append(got, h)
+	}
+	want := append([]string(nil), Builtins()["codex"].Endpoints...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("route hosts %v, declared %v", got, want)
 	}
 }

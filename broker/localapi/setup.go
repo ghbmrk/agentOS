@@ -329,6 +329,9 @@ type SetupProvider struct {
 	// sets it from its own setup record, never from the vault's list, and
 	// finish waits while any answer is owed.
 	Owed *bool `json:"owed,omitempty"`
+	// SigningIn: the provider's sign-in still waits for the owner
+	// (UX3-F1, #2328), from the runner. State only: no code, no link.
+	SigningIn bool `json:"signing_in,omitempty"`
 }
 
 // SetupProviders is OpSetupProviders' answer.

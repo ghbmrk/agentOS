@@ -54,6 +54,9 @@ func newSetupSignIn(host *setupHost, rc *modelroute.RouteControl, pins imagePins
 // Ready is whether provider's sign-in would start now.
 func (s setupSignIn) Ready(provider string) bool { return s.r.CanSignIn(provider) }
 
+// SigningIn is whether provider's sign-in still waits for the owner.
+func (s setupSignIn) SigningIn(provider string) bool { return s.r.SigningIn(provider) }
+
 // Start starts provider's sign-in and returns its page, code and issuer.
 // Nothing the CLI printed but those crosses.
 func (s setupSignIn) Start(ctx context.Context, provider string) (link, code, from string, err error) {

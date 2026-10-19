@@ -1,10 +1,11 @@
 package recalltool
 
-// REQ: CAP-3
+// REQ: CAP-3, CH-12, W3-forget-reach-r2-1, W3-forget-reach-r2-2, W3-forget-reach-r4-1
 
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -688,5 +689,192 @@ func TestRCH2AnUnrecordedResetSurvivesACompaction(t *testing.T) {
 	}
 	if s := p2.TakeBackOf(t0); s != TakeBackOwed {
 		t.Fatalf("state after reopen: %v", s)
+	}
+}
+
+// W3-forget-reach-r2-1 (Security 4a R1 on #569): a take-back whose
+// machines went back with neither the reset nor its back mark written is
+// held in memory only, so STATUS says so (the "Not done yet: ... I keep
+// trying." line class) until a write of it works, then the line goes.
+func TestStatusShowsABackHeldOnlyInMemory(t *testing.T) {
+	x, read := newReachRig(t)
+	// Appends: 1 the owed mark; every one after fails.
+	x.r.prov.store = &failAfter{MemStore: x.r.prst, n: 1}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("take-back: %v machines %v", err, x.vm.calls)
+	}
+	if s := x.reach.Status(); s != BackNotSaved("root") {
+		t.Fatalf("status %q", s)
+	}
+	if err := x.reach.Retry(context.Background()); !errors.Is(err, errUnrecorded) || x.reach.Status() != BackNotSaved("root") {
+		t.Fatalf("retry while writes fail: %v status %q", err, x.reach.Status())
+	}
+	x.r.prov.store = x.r.prst
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if s := x.reach.Status(); s != "" || len(x.vm.calls) != 1 {
+		t.Fatalf("after a write worked: status %q machines %v", s, x.vm.calls)
+	}
+}
+
+// failedBackMark takes root back with every provenance write failing
+// after the owed mark (so neither the reset nor its back mark reaches the
+// store), restarts provenance over the same store and back-marks file
+// (none when backs is ""), and runs Retry with the store still failing.
+func failedBackMark(t *testing.T, backs string) *reachRig {
+	t.Helper()
+	x, read := newReachRig(t)
+	open := func() *Provenance {
+		var side recall.Store
+		if backs != "" {
+			fs, err := recall.OpenFile(backs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { fs.Close() })
+			side = fs
+		}
+		p, err := OpenProvenanceWithBacks(x.r.prst, side)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.store = &failAfter{MemStore: x.r.prst}
+		return p
+	}
+	p := open()
+	p.store.(*failAfter).n = 1
+	x.reach.Prov = p
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("take-back: %v machines %v", err, x.vm.calls)
+	}
+	if backs != "" {
+		if s := x.reach.Status(); s != "" {
+			t.Fatalf("a back in the back-marks file read as memory only: %q", s)
+		}
+		if c, ok := p.side.(*recall.FileStore); ok {
+			c.Close() // the restart
+		}
+	}
+	x.reach.Prov = open()
+	if err := x.reach.Retry(context.Background()); err == nil {
+		t.Fatal("retry with the store failing reported nothing")
+	}
+	return x
+}
+
+// W3-forget-reach-r2-2: the back mark a failing store lost is in the
+// back-marks file under ServiceConfig.Dir, so a restart reads the
+// take-back as back and Retry does not reset the machines again
+// (vm.ForgetSince once), which would lose the work since (#327 L3 1).
+func TestRestartAfterFailedBackMarkDoesNotRunForgetSinceAgain(t *testing.T) {
+	x := failedBackMark(t, filepath.Join(t.TempDir(), backMarksFile))
+	if len(x.vm.calls) != 1 || !x.reach.Owed() {
+		t.Fatalf("machines %v owed %v", x.vm.calls, x.reach.Owed())
+	}
+}
+
+// W3-forget-reach-r2-2, the nil case (ASSUMPTIONS W3-forget-reach-r2-A1): with no
+// back-marks file the back mark is in memory only, so a restart before a
+// write works resets the machines a second time.
+func TestRestartAfterFailedBackMarkWithoutADirRunsForgetSinceAgain(t *testing.T) {
+	x := failedBackMark(t, "")
+	if len(x.vm.calls) != 2 {
+		t.Fatalf("machines %v", x.vm.calls)
+	}
+}
+
+// W3-forget-reach-r4-1 (Security 4a R3, L3 L1 on #569): with no
+// OnTakenBack hook, Retry tells TakenBack only for a take-back the owner
+// approved; one taken back unasked (no work to lose) tells nothing, since
+// the owner was never asked.
+func TestRetryWithoutAHookTellsOnlyApprovedTakeBacks(t *testing.T) {
+	x, read := newReachRig(t)
+	bystander := read.Add(time.Minute) // newReachRig's bystander read
+	// Appends: root 1 the owed mark, 2 the reset (fails), 3 the back
+	// mark; bystander 4 the reset (fails), 5 the back mark. Both finish
+	// in Retry.
+	x.r.prov.store = &failOnly{MemStore: x.r.prst, fail: map[int]bool{2: true, 4: true}}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.reach.TakeBack(context.Background(), "bystander", bystander, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []time.Time{read, bystander} {
+		if st, _ := x.reach.TakeBackOf(s); st != TakeBackOwed {
+			t.Fatalf("%v: %v before Retry", s, st)
+		}
+	}
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []time.Time{read, bystander} {
+		if st, _ := x.reach.TakeBackOf(s); st != TakeBackDone {
+			t.Fatalf("%v: %v after Retry", s, st)
+		}
+	}
+	if len(x.vm.calls) != 2 || len(x.told) != 1 || x.told[0] != TakenBack {
+		t.Fatalf("machines %v told %v", x.vm.calls, x.told)
+	}
+}
+
+// failWrites is a store whose appends all fail.
+type failWrites struct{ recall.Store }
+
+func (failWrites) Append([]byte) error { return errors.New("disk full") }
+
+// W3-forget-reach-r2-2, as the broker wires it: OpenService gives the
+// provenance record its back-marks file under Dir, so a back mark the
+// record did not take reads as done after a restart.
+func TestServiceKeepsABackMarkTheRecordLostAcrossARestart(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenService(ServiceConfig{Dir: dir, Key: key()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC()
+	if err := s.Prov.MarkTakeBack("root", since, false); err != nil {
+		t.Fatal(err)
+	}
+	s.Prov.store = failWrites{s.Prov.store}
+	rs := Reset{Since: since, At: since.Add(time.Second), Until: since.Add(2 * time.Second)}
+	if err := s.Prov.MarkBack("root", rs); err == nil {
+		t.Fatal("MarkBack with the record failing reported nothing")
+	}
+	if m := s.Prov.BacksInMemoryOnly(); len(m) != 0 {
+		t.Fatalf("back mark not in backs.jsonl: %v", m)
+	}
+	s.Close()
+	s2, err := OpenService(ServiceConfig{Dir: dir, Key: key()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if recorded, done := s2.Prov.TakeBack("root", since); !recorded || !done {
+		t.Fatalf("after restart: recorded %v done %v", recorded, done)
+	}
+}
+
+// W3-forget-reach-r4-1 after a restart: an owed take-back read back from
+// the record was approved (only an approved take-back is marked owed), so
+// with no OnTakenBack hook Retry tells TakenBack once it is done.
+func TestRetryTellsAnOwedTakeBackReadBackAtRestart(t *testing.T) {
+	x, read := newReachRig(t)
+	if err := x.r.prov.MarkTakeBack("root", read, false); err != nil {
+		t.Fatal(err)
+	}
+	p, err := OpenProvenance(x.r.prst) // the restart
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach = &Reach{Prov: p, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: x.r.ix.Deleted,
+		Now: func() time.Time { return x.clock }, Location: time.UTC,
+		Notify: func(s string) error { x.told = append(x.told, s); return nil }}
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone || len(x.vm.calls) != 1 || len(x.told) != 1 || x.told[0] != TakenBack {
+		t.Fatalf("state %v machines %v told %v", st, x.vm.calls, x.told)
 	}
 }

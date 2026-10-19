@@ -45,6 +45,7 @@ type reaction struct {
 	// (readAsReaction): an unlisted form, whose lead-in is dropped, or a
 	// form read so only because a deletion forgot texts (CAP-3).
 	tell bool
+	lead string // an unlisted form's lead-in, for the STOP hint (#2264)
 }
 
 // readAsReaction tells the owner that a text was read as a reaction, so
@@ -82,16 +83,16 @@ var unlistedForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]
 // unlistedForm and counts only as the quote of a guarded text, as that is.
 var cutForm = regexp.MustCompile(`(?s)^([\p{L}\p{M}\p{N}\p{P}\p{So}\p{Sk} ]{1,40}?) ["“](.+)$`)
 
-// shapeForm is the quote of text if it has the shape of an unlisted form,
-// closed or cut.
-func shapeForm(text string) (string, bool) {
+// shapeForm is the lead-in and quote of text if it has the shape of an
+// unlisted form, closed or cut.
+func shapeForm(text string) (lead, quote string, ok bool) {
 	text = strings.TrimSpace(text)
 	for _, re := range []*regexp.Regexp{unlistedForm, cutForm} {
 		if m := re.FindStringSubmatch(text); m != nil {
-			return m[2], len(strings.Fields(m[1])) <= 5
+			return m[1], m[2], len(strings.Fields(m[1])) <= 5
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // readReaction is parseReaction, plus two cases that need the recent texts:
@@ -127,12 +128,12 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 		}
 		return reaction{}, false
 	}
-	quote, ok := shapeForm(text)
+	lead, quote, ok := shapeForm(text)
 	if !ok {
 		return reaction{}, false
 	}
 	now := c.cfg.Now()
-	unlisted := reaction{kind: "reacted to", quoted: quote, tell: true}
+	unlisted := reaction{kind: "reacted to", quoted: quote, tell: true, lead: lead}
 	if _, ok := c.recent.matchGuarded(quote, now); ok {
 		return unlisted, true
 	}
@@ -165,7 +166,8 @@ func refuseReaction(text string) error {
 
 const (
 	// recentTexts bounds the window of texts to the owner a reaction is
-	// matched against, by count and by age.
+	// matched against, by count and by age; guarded texts are counted
+	// apart (put).
 	recentTexts  = 20
 	recentMaxAge = 24 * time.Hour
 	// minQuote is the shortest quote matched as part of a text, so a few
@@ -240,13 +242,45 @@ func (r *recentWindow) gen() uint64 {
 	return r.forgets
 }
 
-func (r *recentWindow) add(t sentText) {
+func (r *recentWindow) add(t sentText) { r.put(t, nil) }
+
+// put adds t and prunes the window. Guarded texts are kept apart from the
+// cap on the others, so later box texts never push a live request out
+// (#2392): each kind keeps its latest recentTexts within recentMaxAge, and
+// a request that open reports still open stays, uncounted, until it ages
+// out, so there are at most recentTexts plus MaxOpen guarded texts and
+// requests the agent opens never push a box code out. open is called with the
+// channel's mu held. Only a guarded text, put with open, prunes guarded
+// texts; add (open nil) leaves them to age out, since it cannot tell
+// which requests are open.
+func (r *recentWindow) put(t sentText, open func(id string) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.texts = append(r.texts, t)
-	if n := len(r.texts) - recentTexts; n > 0 {
-		r.texts = append(r.texts[:0:0], r.texts[n:]...)
+	var kept []sentText
+	guarded, plain := 0, 0
+	for i := len(r.texts) - 1; i >= 0; i-- {
+		s := r.texts[i]
+		if t.at.Sub(s.at) > recentMaxAge {
+			break
+		}
+		switch {
+		case !s.guarded():
+			if plain++; plain > recentTexts {
+				continue
+			}
+		case open != nil && slices.ContainsFunc(s.ids, open):
+			// An open request is not counted, so requests the agent opens
+			// never push a box code out.
+		case open == nil || guarded < recentTexts:
+			guarded++
+		default:
+			continue
+		}
+		kept = append(kept, s)
 	}
+	slices.Reverse(kept)
+	r.texts = kept
 }
 
 // match finds the latest recent text the quote marks: the same text, or,
@@ -258,6 +292,11 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		return sentText{}, false
 	}
 	short := utf8.RuneCountInString(q) < minQuote
+	forms := maskedForms(q)
+	// A short quote that holds a code or ends inside one is a cut of a
+	// guarded text when that text holds it: as chat it would carry the
+	// code's digits to the agent (#2392). Other short quotes match whole.
+	cut := short && slices.ContainsFunc(forms, func(f string) bool { return f != q })
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := len(r.texts) - 1; i >= 0; i-- {
@@ -267,13 +306,13 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		}
 		if !t.restored {
 			n := normQuote(t.text)
-			if n == q || (!short && strings.Contains(n, q)) {
+			if n == q || ((!short || cut && t.guarded()) && strings.Contains(n, q)) {
 				return t, true
 			}
 			continue
 		}
-		for _, mq := range maskedForms(q) {
-			if t.text == mq || (!short && strings.Contains(t.text, mq)) {
+		for _, mq := range forms {
+			if t.text == mq || ((!short || cut) && strings.Contains(t.text, mq)) {
 				return t, true
 			}
 		}
@@ -304,7 +343,8 @@ func peelForm(text string) (string, bool) {
 	if rx, ok := parseForm(text); ok {
 		return rx.quoted, true
 	}
-	return shapeForm(text)
+	_, quote, ok := shapeForm(text)
+	return quote, ok
 }
 
 // matchGuarded finds a guarded text the quote marks, however it is
@@ -401,13 +441,14 @@ func (r *recentWindow) restore(marks []GuardedMark, now time.Time) {
 // #2381). Nothing is saved that is not already on disk but the words of a
 // text the owner's phone holds too.
 func (c *Channel) remember(t sentText) {
-	c.recent.add(t)
 	if !t.guarded() {
+		c.recent.add(t)
 		return
 	}
 	m := GuardedMark{Text: maskCodes(normQuote(t.text)), At: t.at, Request: t.request}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.recent.put(t, func(id string) bool { return c.open[id] != nil })
 	_ = c.saveLocked(func(s *State) {
 		keep := s.Guarded[:0:0]
 		for _, g := range s.Guarded {
@@ -423,14 +464,18 @@ func (c *Channel) remember(t sentText) {
 	})
 }
 
-// normQuote folds quotes and case, collapses whitespace, and drops a
-// leading and a trailing ellipsis (a phone cuts a quote at either end).
+// normQuote folds quotes and case, collapses whitespace, and drops every
+// leading and trailing ellipsis (a phone cuts a quote at either end, and
+// a cut of a cut adds another).
 func normQuote(s string) string {
 	s = strings.NewReplacer("“", `"`, "”", `"`, "‘", "'", "’", "'").Replace(s)
 	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
-	for _, e := range []string{"…", "..."} {
-		s = strings.TrimSpace(strings.TrimSuffix(s, e))
-		s = strings.TrimSpace(strings.TrimPrefix(s, e))
+	for prev := ""; s != prev; {
+		prev = s
+		for _, e := range []string{"…", "..."} {
+			s = strings.TrimSpace(strings.TrimSuffix(s, e))
+			s = strings.TrimSpace(strings.TrimPrefix(s, e))
+		}
 	}
 	return s
 }
@@ -573,6 +618,9 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	event, pointer := c.reactionEvent(rx)
 	var replies []string
 	if rx.tell {
+		if hint, ok := c.ctrl.StopHint(rx.lead); ok {
+			replies = append(replies, hint)
+		}
 		replies = append(replies, readAsReaction)
 	}
 	if pointer != "" {

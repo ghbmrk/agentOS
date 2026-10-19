@@ -257,6 +257,40 @@ func TestWrongCodesApproveNothingAndPause(t *testing.T) {
 	}
 }
 
+// The broker's silent checks have their own bucket: MaxWrongSilent wrong
+// codes pause the next silent check, even with the right code, and leave
+// the counted bucket open.
+func TestWrongSilentCodesPause(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	a := act(t, "{}")
+	wrong := "000000"
+	if wrong == totp(seed, clk.now()) {
+		wrong = "000001"
+	}
+	for i := 0; i < MaxWrongSilent; i++ {
+		if _, ok, err := c.Verify(wrong, 0, false, []string{a}); ok || err != nil {
+			t.Fatalf("try %d: ok %v err %v", i, ok, err)
+		}
+	}
+	var p *PausedError
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, []string{a}); ok || !errors.As(err, &p) {
+		t.Fatalf("silent check not paused: ok %v err %v", ok, err)
+	}
+	if c.Redeem(a) {
+		t.Fatal("a paused silent check approved an act")
+	}
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, nil); !ok || err != nil {
+		t.Fatalf("counted check: ok %v err %v", ok, err)
+	}
+	clk.add(VerifyWindow + time.Second)
+	if _, _, err := c.Verify(wrong, 0, false, nil); err != nil {
+		t.Fatalf("still paused after the window: %v", err)
+	}
+}
+
 // An approval lasts as long as a CH-10 code: one not redeemed within
 // ApprovalTTL is gone.
 func TestApprovalExpires(t *testing.T) {
