@@ -96,7 +96,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 		return fail(err)
 	}
 	var stores []*recall.FileStore
-	for _, name := range []string{"bus.jsonl", "seen.jsonl", "provenance.jsonl"} {
+	for _, name := range []string{"bus.jsonl", "seen.jsonl", "provenance.jsonl", backMarksFile} {
 		st, err := recall.OpenFile(filepath.Join(cfg.Dir, name))
 		if err != nil {
 			return fail(err)
@@ -111,7 +111,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 	if err := s.Index.OnDelete(s.Bus.ForgetSource); err != nil {
 		cfg.Logf("recall: replaying deletions to the bus: %v", err)
 	}
-	if s.Prov, err = OpenProvenance(stores[2]); err != nil {
+	if s.Prov, err = OpenProvenanceWithBacks(stores[2], stores[3]); err != nil {
 		return fail(err)
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
