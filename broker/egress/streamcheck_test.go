@@ -290,7 +290,7 @@ var edgeBodies = []string{
 	`{"a":"\ud83d"}`, `{"a":"\ud83d\"}`, `{"a":"\ud83d\u"}`, `{"a":"\ude00\ud83d"}`, `{"a":"\uFFFD\uffff"}`,
 	"{\"a\":\"\xff\xfe\"}", "{\"\xff\":1,\"\xfe\":2}", "{\"\xff\":1,\"\\ufffd\":2}", "{\"\xed\xa0\x80\":1}", "{\"a\":\"\xc0\xaf\"}",
 	"{\"a\":\"\xe2\x80\xa8\xe2\x80\xa9\"}", `{"a":"\u2028"}`, "{\"\xe6\xbc\xa2\":\"\xe6\xbc\xa2\"}", `{"a":"<>&"}`,
-	`{"a":1,"a":2}`, `{"a":{"b":1},"a":{"c":2}}`, `{"a":{"b":1,"b":{"c":[1,{"d":1,"d":2}]}}}`, `{"\u0061":1,"a":2}`, `{"a":2,"\u0061":1}`,
+	`{"a":1,"a":2}`, `{"😀":1,"😀":2}`, `{"a":{"b":1},"a":{"c":2}}`, `{"a":{"b":1,"b":{"c":[1,{"d":1,"d":2}]}}}`, `{"\u0061":1,"a":2}`, `{"a":2,"\u0061":1}`,
 	`{"store":true}`, `{"store":true,"store":null}`, `{"background":false}`, `{"background":1,"background":2}`, `{"\u0062ackground":1}`,
 	`{"web_search_options":{}}`, `{"mcp_servers":[]}`, `{"container":null}`, `{"x":{"background":1}}`,
 	`{"url":"http://x"}`, `{"url":"data:x"}`, `{"url":" DATA:x"}`, `{"url":"\u00a0data:x"}`, `{"url":"\u2028Data:"}`, `{"url":"data"}`,
@@ -631,8 +631,8 @@ func TestDefaultWriteTimeout(t *testing.T) {
 }
 
 func TestMachineShareOfBudget(t *testing.T) {
-	// K18g-4: no machine holds more than half the budget, so machines at
-	// their share leave room for another.
+	// K18g-4: no machine holds more than half the budget, so one machine at
+	// its share leaves half the budget to the others.
 	// REQ: K18g-4
 	t.Run("admit", func(t *testing.T) {
 		ir := newInFlightRig(t, 4*chatCost(t), 3, Cap{})

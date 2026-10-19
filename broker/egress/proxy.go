@@ -336,8 +336,8 @@ func New(cfg Config) (*Proxy, error) {
 	if p.budget <= 0 {
 		p.budget = DefaultInFlightBytes
 	}
-	// No machine above half the budget, so machines at their share always
-	// leave room for another (K18g-4).
+	// No machine above half the budget: one machine at its share leaves half
+	// the budget to the others; two at their share fill it (K18g-4).
 	p.share = p.budget / 2
 	if p.writeTimeout <= 0 {
 		p.writeTimeout = DefaultWriteTimeout

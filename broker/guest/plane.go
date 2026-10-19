@@ -97,6 +97,11 @@ type Config struct {
 	Replies func()
 	// Logf reports broker-side faults (a failed snapshot). Nil is silent.
 	Logf func(format string, args ...any)
+	// WriteTimeout bounds each write of a reply to a guest, renewed before
+	// every write, so a guest that stops reading frees its slot within it
+	// (CRED-8, egress K18) while a long streamed model reply it keeps
+	// reading is not cut. Default DefaultWriteTimeout.
+	WriteTimeout time.Duration
 	// MaxConns caps one machine's concurrent requests; default 8.
 	MaxConns int
 	// MaxOpenConns caps one machine's open connections; default 16. Past
@@ -177,6 +182,9 @@ func New(cfg Config) (*Plane, error) {
 	if cfg.MaxConns <= 0 {
 		cfg.MaxConns = 8
 	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = DefaultWriteTimeout
+	}
 	if cfg.MaxOpenConns <= 0 {
 		cfg.MaxOpenConns = 16
 	}
@@ -241,16 +249,14 @@ func (p *Plane) Open(id string) (string, error) {
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
-		Handler:           p.handler(m),
+		// No WriteTimeout: net/http sets it once for the whole reply, which
+		// would cut a model reply streamed for longer. withWriteDeadline
+		// deadlines each write instead.
+		Handler:           withWriteDeadline(p.handler(m), p.cfg.WriteTimeout),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       time.Minute,
-		// A guest that stops reading a reply fails its write and frees its
-		// slot (CRED-8, egress K18). Replies here are not streamed, so one
-		// deadline for the whole reply suffices; it covers the owner poll's
-		// wait (pollWait) plus the write.
-		WriteTimeout: time.Minute,
-		IdleTimeout:  15 * time.Second,
-		BaseContext:  func(net.Listener) context.Context { return context.Background() },
+		IdleTimeout:       15 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			switch st {
 			case http.StateNew:
@@ -372,6 +378,61 @@ func (p *Plane) handler(m *machine) http.Handler {
 		default:
 			http.NotFound(w, r)
 		}
+	})
+}
+
+// DefaultWriteTimeout is the plane's per-write deadline when Config sets none.
+const DefaultWriteTimeout = 30 * time.Second
+
+// deadlineWriter renews the connection's write deadline to d from now before
+// every write, so a guest that stops reading fails the next write within d
+// and its request ends (CRED-8). A deadline a handler inside sets through
+// http.ResponseController holds when it is the earlier one. It is the egress
+// proxy's deadlineWriter (egress K18), kept here so agentosd does not link
+// the egress package.
+type deadlineWriter struct {
+	http.ResponseWriter
+	rc  *http.ResponseController
+	d   time.Duration
+	set time.Time // the deadline a handler inside last set; zero for none
+}
+
+func (w *deadlineWriter) renew() { _ = w.rc.SetWriteDeadline(w.until()) }
+
+func (w *deadlineWriter) until() time.Time {
+	t := time.Now().Add(w.d)
+	if !w.set.IsZero() && w.set.Before(t) {
+		return w.set
+	}
+	return t
+}
+
+// SetWriteDeadline is what http.ResponseController calls on this writer.
+func (w *deadlineWriter) SetWriteDeadline(t time.Time) error {
+	w.set = t
+	return w.rc.SetWriteDeadline(w.until())
+}
+
+func (w *deadlineWriter) WriteHeader(code int) { w.renew(); w.ResponseWriter.WriteHeader(code) }
+
+func (w *deadlineWriter) Write(b []byte) (int, error) { w.renew(); return w.ResponseWriter.Write(b) }
+
+func (w *deadlineWriter) Flush() {
+	w.renew()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *deadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// withWriteDeadline serves h with a deadlineWriter, renewed once more after h
+// returns for the server's final flush of the buffered reply.
+func withWriteDeadline(h http.Handler, d time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dw := &deadlineWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: d}
+		h.ServeHTTP(dw, r)
+		dw.renew()
 	})
 }
 
