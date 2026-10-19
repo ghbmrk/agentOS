@@ -409,6 +409,8 @@ func main() {
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
 	flag.Int64Var(&floor.HostMB, "host-mb", floor.HostMB, "budget: host image, broker and journal (protected), MB (RES-2)")
 	flag.Int64Var(&floor.InferenceMB, "inference-mb", floor.InferenceMB, "budget: local inference, MB (RES-2)")
+	var inf inferFlags
+	inf.register(flag.CommandLine)
 	flag.Int64Var(&floor.BrowserMB, "browser-mb", floor.BrowserMB, "budget: one credentialed browser, MB (RES-2)")
 	flag.StringVar(&cgroupRoot, "cgroup-root", "", "cgroup v2 group for the broker's components (RES-2): its own group or below; empty is the broker's own group")
 	flag.BoolVar(&cgroupVouched, "cgroup-delegated", false, "-cgroup-root is delegated to the broker (without it, systemd's delegate mark is required)")
@@ -598,8 +600,9 @@ func main() {
 		cfg.OwnerNumber = owner
 	}
 
-	// RES-3: nothing below depends on what is found here. No local
-	// inference service exists yet to take leases (budget R8).
+	// RES-3: nothing below depends on what is found here. The local
+	// inference service runs on CPU and takes no lease (INF-1); leases are a
+	// later row (budget R8).
 	var devs []accel.Device
 	if accelMode != "off" {
 		var err error
@@ -779,6 +782,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The local inference service runs beside the broker, never in its
+	// control path: it is started here and never waited on (INF-1, DEP-1).
+	startInference(ctx, inf, inferenceLeaf(boxMachines, mem.Budget.InferenceMB), log.Writer())
 	// The model routes hold only the attempts the owner's rule can spend,
 	// read from the routing socket off the request path (SR3-7-f2); with
 	// no routing socket they hold MaxRetries.
