@@ -117,7 +117,7 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		if !h.Auth.SessionUnlocked(h.now()) {
 			r = unlockText
 		} else {
-			r = h.status()
+			r = h.status(MaxText)
 		}
 	case WordHelp:
 		r = helpText
@@ -316,9 +316,16 @@ func since(ts []time.Time, cutoff time.Time) []time.Time {
 }
 
 // Status is STATUS's text, for the box's local page (P2-2w, Potency R3).
-func (h *Handler) Status() string { return h.status() }
+func (h *Handler) Status() string { return h.status(0) }
 
-func (h *Handler) status() string {
+// moreMax is the longest tail status writes after the notes it left out.
+const moreMax = len(" 99 more lines on my Wi-Fi page.")
+
+// status is STATUS's text. With max > 0 it adds whole notes only, in
+// order, while the reply stays within max bytes; a note that does not fit
+// is left out, never cut, and a tail counts what was left out. Status
+// itself (the Wi-Fi page) has no bound and shows every note.
+func (h *Handler) status(max int) string {
 	var b strings.Builder
 	if h.Engine.Stopped() {
 		b.WriteString("Stopped.")
@@ -342,11 +349,31 @@ func (h *Handler) status() string {
 	if h.Machines != nil {
 		b.WriteString(" " + plainLine(h.Machines(), 80))
 	}
+	var lines []string
+	n := b.Len()
 	for _, note := range h.Notes {
 		l, _, _ := strings.Cut(note(), "\n")
 		if l = plainLine(l, 100); l != "" {
-			b.WriteString(" " + l)
+			lines = append(lines, l)
+			n += 1 + len(l)
 		}
+	}
+	room, left := max-moreMax, 0
+	if max <= 0 || n <= max {
+		room = n
+	}
+	for _, l := range lines {
+		if b.Len()+1+len(l) > room {
+			left++
+			continue
+		}
+		b.WriteString(" " + l)
+	}
+	switch {
+	case left == 1:
+		b.WriteString(" 1 more line on my Wi-Fi page.")
+	case left > 1:
+		fmt.Fprintf(&b, " %d more lines on my Wi-Fi page.", left)
 	}
 	return b.String()
 }

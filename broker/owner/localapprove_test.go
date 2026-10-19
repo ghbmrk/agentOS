@@ -798,3 +798,40 @@ func TestPageNoticesAreQuestionsWithinTheirBudget(t *testing.T) {
 		})
 	}
 }
+
+// The page-only requests' line is the channel's first STATUS note, so a
+// texted STATUS long enough to leave notes out still keeps it, right after
+// the header, and counts what it left out.
+func TestTheTextedStatusKeepsTheWiFiLineFirst(t *testing.T) {
+	r := newRig(t, nil)
+	var long []string
+	for i := 0; i < 6; i++ {
+		long = append(long, fmt.Sprintf("Note %d: ", i)+strings.Repeat("x", 88)+".")
+	}
+	machines := "Machines: " + strings.Repeat("m", 60) + "."
+	r.edit = func(cfg *Config) {
+		cfg.Machines = func() string { return machines }
+		for _, l := range long {
+			cfg.Notes = append(cfg.Notes, func() string { return l })
+		}
+	}
+	r.ch = r.open()
+	if _, err := r.ch.RequestLocal(localItem("i1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.unlock()
+	got := r.say("STATUS")
+	if !strings.Contains(got, " "+machines+" 1 waiting for you on my Wi-Fi page. ") {
+		t.Fatalf("Wi-Fi line not first: %q", got)
+	}
+	shown := 0
+	for _, l := range long {
+		if strings.Contains(got, l) {
+			shown++
+		}
+	}
+	if shown == len(long) || !strings.HasSuffix(got, fmt.Sprintf(" %d more lines on my Wi-Fi page.", len(long)-shown)) {
+		t.Fatalf("%d of %d notes shown: %q", shown, len(long), got)
+	}
+}

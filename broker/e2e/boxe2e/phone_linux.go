@@ -35,21 +35,8 @@ func replyKind(text string) string {
 	if strings.HasPrefix(text, outagePrefix) && strings.Contains(text, outageMark) {
 		return "outage"
 	}
-	for _, p := range digestPrefixes {
-		if strings.HasPrefix(text, p) {
-			return "digest"
-		}
-	}
 	return "other"
 }
-
-// digestPrefixes lead every text agentosd's daily digest sends: its
-// digestHead and status lines, and digestLateHead for a batch sent late.
-// The digest waits for the owner line (#1291), so on a fresh box it can
-// land during the step; it answers no command, so the step passes over it
-// wherever it lands and counts it (G1-1688-f1-E17). They go with the digest when
-// DIG-RM-b deletes it (D-097).
-var digestPrefixes = []string{"Daily digest: ", "Digest of "}
 
 // outagePrefix and outageMark frame the owner line's recovery notice
 // (modemlink's recoveryText, UX U-B1): sent once the line is back after a
@@ -131,8 +118,6 @@ type phoneRun struct {
 	// noticeRequests what they say did not reach the owner (#2170);
 	// unread counts the notices whose counts could not be read.
 	notices, noticeTexts, noticeRequests, unread int
-	// digests counts the digest texts passed over (G1-1688-f1-E17).
-	digests int
 	// err is the first reply out of order; it ends the step.
 	err error
 }
@@ -145,8 +130,7 @@ type phoneRun struct {
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
 // comes before the barrier's (CH-1, CH-3). The owner line's recovery
-// notice and the daily digest are passed over wherever they land (E16,
-// G1-1688-f1-E17).
+// notice is passed over wherever it lands (E16).
 func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	var r phoneRun
 	if from > len(log) {
@@ -180,9 +164,6 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 func (r *phoneRun) reply(text string) {
 	k := replyKind(text)
 	switch {
-	case k == "digest":
-		// Not a reply: the day's digest, sent once the line is up.
-		r.digests++
 	case k == "outage":
 		// Not a reply: the box's account of a text it lost earlier.
 		r.notices++
@@ -233,15 +214,6 @@ func (r phoneRun) noticeNote() string {
 		n += fmt.Sprintf(" unread=%d", r.unread)
 	}
 	return n
-}
-
-// digestNote is the step's one line on the digest texts it passed over,
-// their count only (G1-1688-f1-E17). It is "" when there was none.
-func (r phoneRun) digestNote() string {
-	if r.digests == 0 {
-		return ""
-	}
-	return fmt.Sprintf("passed-over digests=%d", r.digests)
 }
 
 // passedOverErr fails a run that otherwise passed when it passed over a

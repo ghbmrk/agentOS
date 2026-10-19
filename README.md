@@ -1,6 +1,6 @@
 # agentOS
 
-A computer for delegated work. Frontier AI you already pay for does the reasoning; a drive you plug into any PC does the executing, remembering, and improving, under your sole control. You direct it by text or phone call.
+A computer for delegated work. Frontier AI you already pay for does the reasoning; a box you set up once does the executing, remembering, and improving, under your sole control. You direct it by text or phone call.
 
 **Status:** pre-alpha, not yet usable by an owner. What is being built now, and what is done, is on [BOARD.md](BOARD.md).
 

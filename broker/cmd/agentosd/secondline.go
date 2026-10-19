@@ -10,7 +10,7 @@ import (
 )
 
 // The second line's owner lines (potency R1 on #139): STATUS shows them
-// while they last (CH-12's exception lines), and the digest repeats them.
+// while they last (CH-12's exception lines).
 const (
 	secondLineConfirmLine   = "Second line: confirm your provider on my Wi-Fi page. Texts and calls wait until you do."
 	secondLineUnreachedLine = "Second line: I couldn't reach your provider. Check the server name and password on my Wi-Fi page, or remove it there."
@@ -24,7 +24,7 @@ const (
 const secondLineEvery = time.Minute
 
 // secondLine keeps the vault process's second-line state (egress K13) for
-// STATUS and the digest. STATUS reads the cached state, so a slow vault
+// STATUS. STATUS reads the cached state, so a slow vault
 // process never holds up the owner channel.
 type secondLine struct {
 	get func(context.Context) (modelroute.SecondLineState, error)
@@ -111,15 +111,4 @@ func (s *secondLine) TextsNote() string {
 		return textsUnreachedLine
 	}
 	return ""
-}
-
-// Digest repeats the lines in each digest while they last.
-func (s *secondLine) Digest() []string {
-	var out []string
-	for _, l := range []string{s.Note(), s.TextsNote()} {
-		if l != "" {
-			out = append(out, l)
-		}
-	}
-	return out
 }
