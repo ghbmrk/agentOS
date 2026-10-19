@@ -387,9 +387,12 @@ func (c *Channel) Handle(ctx context.Context, from, text string) []string {
 
 // stopNow applies STOP from the owner at once, without mu, so it never
 // waits behind a code check in progress or queued (CH-2). A RESUME code
-// issued before it is void (stops).
+// issued before it is void (stops). A STOP sent with a code (CH-14) is
+// STOP too: the code is never checked, counted or passed on, since STOP
+// needs none and a wrong one must not keep it from stopping (#2459).
 func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, bool) {
-	if !c.IsOwner(from) || control.Parse(text).Word != control.WordStop {
+	stop, _ := splitCode(text)
+	if !c.IsOwner(from) || control.Parse(stop).Word != control.WordStop {
 		return nil, false
 	}
 	if _, ok := parseReaction(text); ok {
@@ -397,7 +400,7 @@ func (c *Channel) stopNow(ctx context.Context, from, text string) ([]string, boo
 	}
 	c.stopMu.Lock()
 	c.stops.Add(1)
-	replies := c.ctrl.Handle(ctx, from, text)
+	replies := c.ctrl.Handle(ctx, from, stop)
 	c.stopMu.Unlock()
 	var out []string
 	for _, r := range replies {
