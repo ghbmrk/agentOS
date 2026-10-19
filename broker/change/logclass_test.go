@@ -12,7 +12,8 @@ import (
 	"testing"
 )
 
-// REQ: CONV-6-2, CONV-6-3
+// REQ CONV-6-2, CONV-6-3 (brief IDs, briefs/CONV-6.md; no colon, as test_metrics.py
+// does for CONV-0, since tools/trace.py takes only SPEC.md IDs after "REQ:")
 
 // Security recurring kind (#210, #212; check owed by #697's "fixed sentence
 // per class" finding): raw error text formatted into a fixed-class Logf lets
