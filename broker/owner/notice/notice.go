@@ -79,7 +79,8 @@ var wrongFor = map[string]string{
 }
 
 // nameRE is a provider's display name: the built-in names and plain ids.
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 .-]{0,31}$`)
+// It has no dot, so a name never reads as a web address in a text.
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{0,31}$`)
 
 // Codes lists every code, sorted.
 func Codes() []Code {

@@ -37,6 +37,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/owner/notice"
 	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -391,6 +392,7 @@ func main() {
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
+	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -435,6 +437,7 @@ func main() {
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
+	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	learn.Fuzz, learn.Loop7, learn.FuzzUser = fuzzRelease, fuzzState, fuzzUser
@@ -841,6 +844,9 @@ func main() {
 	// batches either way.
 	if mw != nil {
 		wireMail(ctx, mw, d, mailSocket, learn.Dir, dg, digestDir, cfg.Now)
+	}
+	if noticeSocket != "" {
+		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)
 	}
 	if dg != nil {
 		if o := d.Owner(); o != nil {
