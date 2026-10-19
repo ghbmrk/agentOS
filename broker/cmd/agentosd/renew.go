@@ -37,7 +37,7 @@ const (
 	renewStale   = "Send RENEW to see which agents' memory is full."
 	renewNotOpen = "I can't renew an agent's memory yet: memory is not open."
 	renewRefused = "I couldn't ask to renew that agent's memory. Try again."
-	renewHelp    = "RENEW: start a full agent memory over."
+	renewHelp    = "RENEW: start agent memory over."
 	renewUsage   = "Send RENEW to list agents whose memory is full, then RENEW and a number from that list."
 )
 

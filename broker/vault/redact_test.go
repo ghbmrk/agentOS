@@ -105,11 +105,11 @@ var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
 // declaredFormats mirror provagent's built-in credential formats, each with
 // a synthetic canary (FMT-3).
 var declaredFormats = map[string]string{
-	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                      "sk-proj-CANARYcanary0000000000000000",
-	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:         "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
-	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                   canaryRefresh,
-	`(?:\b|\\[a-z]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
-	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:              "sk-ant-oat01-CANARYcanary0000000000000000",
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                                  "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:                     "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.c2lnY2FuYXJ5",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                               canaryRefresh,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                          "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 
 func formatRedactor(t *testing.T, values ...[]byte) *Redactor {
@@ -273,5 +273,37 @@ func TestFormatStreamHoldBounds(t *testing.T) {
 	}
 	if leaked := len(out) - len(Placeholder) - len(" end"); leaked > len(long)-FormatMaxLen {
 		t.Errorf("long match: %d bytes of it emitted, want at most %d", leaked, len(long)-FormatMaxLen)
+	}
+}
+
+// A backslash run longer than FormatMaxLen before an rt_ token, fed in small
+// writes, leaves none of the token in what the stream emits: the format takes
+// a bounded run, so the match never outgrows the hold-back (#2375).
+// REQ: CRED-7
+func TestRtFormatBackslashRunPastHoldBackDoesNotLeak(t *testing.T) {
+	r := formatRedactor(t)
+	tok := "rt_" + strings.Repeat("a", 300)
+	for _, run := range []int{1, 16, 17, FormatMaxLen - 40, FormatMaxLen, FormatMaxLen + 100} {
+		in := []byte("x" + strings.Repeat(`\`, run) + "n" + tok + " end")
+		var buf bytes.Buffer
+		w := r.Writer(&buf)
+		for k := 0; k < len(in); k += 100 {
+			e := k + 100
+			if e > len(in) {
+				e = len(in)
+			}
+			if _, err := w.Write(in[k:e]); err != nil {
+				t.Fatal(err)
+			}
+			if leaks(buf.Bytes(), tok[3:]) {
+				t.Fatalf("run %d: emitted part of the token", run)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if leaks(buf.Bytes(), tok[3:]) {
+			t.Errorf("run %d: output holds part of the token", run)
+		}
 	}
 }

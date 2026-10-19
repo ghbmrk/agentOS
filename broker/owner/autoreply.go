@@ -56,7 +56,7 @@ type watchedLine struct {
 func (w watchedLine) Send(to, text string) error {
 	err := w.failed(w.Modem.Send(to, text))
 	if err == nil && to == w.c.cfg.Owner {
-		w.c.recent.add(sentText{text: text, at: w.c.cfg.Now()})
+		w.c.remember(sentText{text: text, at: w.c.cfg.Now()})
 	}
 	return err
 }
@@ -114,7 +114,7 @@ func (c *Channel) sendRequest(text string, ids []string, local bool) error {
 	}
 	c.settle(at, err)
 	if err == nil {
-		c.recent.add(sentText{text: text, at: c.cfg.Now(), request: true, ids: ids, local: local})
+		c.remember(sentText{text: text, at: c.cfg.Now(), request: true, ids: ids, local: local})
 	}
 	return err
 }

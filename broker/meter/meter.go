@@ -175,6 +175,10 @@ type Meter struct {
 	mu     sync.Mutex
 	st     state
 	shares []Share
+	// fmu guards flights, WrapBound calls in flight per machine. It is
+	// taken before mu.
+	fmu     sync.Mutex
+	flights map[string]*flight
 }
 
 // Open loads (or creates) the meter's state.
@@ -211,7 +215,7 @@ func Open(cfg Config) (*Meter, error) {
 	if cfg.SaveError == nil {
 		cfg.SaveError = func(err error) { log.Print(err) }
 	}
-	m := &Meter{cfg: cfg, slot: int64(cfg.Window/time.Second) / slots}
+	m := &Meter{cfg: cfg, slot: int64(cfg.Window/time.Second) / slots, flights: map[string]*flight{}}
 	if m.slot < 1 {
 		m.slot = 1
 	}
@@ -315,6 +319,12 @@ func (m *Meter) Start(machine string, in, reserve int64) (*Call, error) {
 // also counted against goal, for accounting only (GoalUsage); an empty
 // goal counts nowhere.
 func (m *Meter) StartFor(machine, goal string, in, reserve int64) (*Call, error) {
+	return m.start(machine, goal, in, reserve, true)
+}
+
+// start is StartFor; with tell unset, a refusal sends no owner notice
+// (a WrapBound call refused at its bound, which waits and tries again).
+func (m *Meter) start(machine, goal string, in, reserve int64, tell bool) (*Call, error) {
 	if in < 0 || reserve < 0 {
 		return nil, errors.New("meter: negative charge")
 	}
@@ -335,6 +345,9 @@ func (m *Meter) StartFor(machine, goal string, in, reserve int64) (*Call, error)
 		return nil, err
 	}
 	ex, err := m.admit(machine, tid, goal, now, in+reserve)
+	if !tell {
+		ex = nil
+	}
 	if ex != nil {
 		if m.st.Notified[ex.key()] {
 			ex = nil // told once per exhaustion
@@ -741,6 +754,20 @@ func Tokens(n int64) int64 { return (n + 3) / 4 }
 // never reaches next. The call counts against the goal the broker put on
 // the request's context (WithGoal), if any.
 func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
+	return m.wrap(machine, next, false)
+}
+
+// WrapBound is Wrap admitting each call at its input's upper bound, one
+// token per body byte (a byte-level token is at least one byte), not the
+// estimate; the call still settles at what the provider reports. Calls in
+// flight at once then cannot pass a limit together by their estimates'
+// shortfall, so a caller that runs a machine's calls concurrently uses it
+// (RES-5, OP-8).
+func (m *Meter) WrapBound(machine string, next http.Handler) http.Handler {
+	return m.wrap(machine, next, true)
+}
+
+func (m *Meter) wrap(machine string, next http.Handler, bound bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, m.cfg.MaxBody+1))
 		if err != nil {
@@ -757,22 +784,44 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 			http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		c, err := m.StartFor(machine, GoalFrom(r.Context()), in, reserve)
+		var c *Call
+		admit := in
+		if bound {
+			if err := bounded(body); err != nil {
+				http.Error(w, "model request refused: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			var land func()
+			wait, stop := context.WithTimeout(r.Context(), m.cfg.CallTimeout)
+			c, admit, land, err = m.startBound(wait, machine, GoalFrom(r.Context()), in, int64(len(body))+Overhead, reserve)
+			stop()
+			if err == nil {
+				defer land() // after Done below, so the next call sees this one settled
+			}
+		} else {
+			c, err = m.StartFor(machine, GoalFrom(r.Context()), admit, reserve)
+		}
 		if err != nil {
-			code, msg := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it"
-			if !errors.Is(err, ErrExhausted) {
+			code, msg, typ := http.StatusTooManyRequests, "model spend limit reached for this task; the owner has been told and may extend it", "insufficient_quota"
+			switch {
+			case errors.Is(err, errBusy):
+				w.Header().Set("Retry-After", "1")
+				code, msg, typ = http.StatusServiceUnavailable, "this machine's other model calls hold the rest of its spend limit; retry when they finish", "overloaded_error"
+			case !errors.Is(err, ErrExhausted):
 				code, msg = http.StatusServiceUnavailable, "model spend meter unavailable"
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(code)
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
-				"message": msg, "type": "insufficient_quota", "code": "agentos_spend_limit",
+				"message": msg, "type": typ, "code": "agentos_spend_limit",
 			}})
 			return
 		}
+		// The call's timeout starts once it is admitted, so a bound call's
+		// wait for room does not cut its provider call short.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
 		defer cancel()
-		rep := &reportSlot{call: c, in: in, reserve: reserve}
+		rep := &reportSlot{call: c, in: admit, reserve: reserve}
 		r = r.WithContext(context.WithValue(ctx, reportKey{}, rep))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))

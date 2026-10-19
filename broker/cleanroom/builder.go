@@ -31,6 +31,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/hint"
+	"github.com/ghbmrk/agentos/broker/inflight"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
@@ -75,6 +76,9 @@ type Config struct {
 	MaxQueue int           // jobs waiting; 0 means 64
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
+	// InFlightBytes is the memory clean rooms' requests may hold at once
+	// (RES-5); 0 means the process's shared budget, inflight.Default.
+	InFlightBytes int64
 
 	fault faultFn // tests only: the store's file-operation hook
 }
@@ -84,6 +88,8 @@ type Builder struct {
 	cfg   Config
 	store *Store
 	wake  chan struct{}
+	// budget is the in-flight memory every clean room's requests share.
+	budget *inflight.Budget
 
 	qmu sync.Mutex
 
@@ -148,7 +154,10 @@ func New(cfg Config) (*Builder, error) {
 		return nil, err
 	}
 	st.fault = cfg.fault
-	b := &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}}
+	b := &Builder{cfg: cfg, store: st, wake: make(chan struct{}, 1), sessions: map[string]*session{}, budget: inflight.Default()}
+	if cfg.InFlightBytes > 0 {
+		b.budget = inflight.New(cfg.InFlightBytes)
+	}
 	// The job is queued again before its artifact is quarantined, so a
 	// crash between the two leaves the job queued (SR3-8).
 	for _, m := range damaged {

@@ -131,6 +131,7 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
+<p class="muted">I text you when the account is changed or removed.</p>
 {{else}}
 <p>A second line lets me text and call businesses for you from my own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
 <p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear my message asking them to text instead.</p>
@@ -289,6 +290,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
 {{end}}{{end}}
+<p class="muted">I text you when this changes.</p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}
 

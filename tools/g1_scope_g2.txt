@@ -121,7 +121,6 @@ allow broker/claim/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/
-allow broker/digestqueue/
 allow broker/durable/
 allow broker/egress/
 allow broker/events/
@@ -134,6 +133,7 @@ allow broker/guesterr/
 allow broker/holder/
 allow broker/hostdisk/
 allow broker/infer/
+allow broker/inflight/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
