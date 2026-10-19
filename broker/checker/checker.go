@@ -7,9 +7,10 @@
 // can approve a high-risk act alone.
 //
 // Three sockets, each with its own closed set and its own peer uid:
-// the hand socket (the unlock step: GET /state, PUT /secret, as holders),
-// the verify socket (the broker: POST /verify) and the redeem socket (the
-// key holders: POST /redeem). None reads the seed back.
+// the hand socket (the unlock step: GET /state, PUT and DELETE /secret, as
+// holders, and POST /verify for the unlock's own code, which approves no
+// acts), the verify socket (the broker: POST /verify) and the redeem
+// socket (the key holders: POST /redeem). None reads the seed back.
 package checker
 
 import (
@@ -158,6 +159,19 @@ func (c *Checker) Hand(b []byte) {
 	}
 }
 
+// Drop takes the seed back, as the unlock step does at a lock, and every
+// open approval with it: an approval outlives no lock (CRED-1).
+func (c *Checker) Drop() {
+	c.mu.Lock()
+	old := c.seed
+	c.seed = nil
+	clear(c.approvals)
+	c.mu.Unlock()
+	for i := range old {
+		old[i] = 0
+	}
+}
+
 // Held reports whether the checker holds a seed.
 func (c *Checker) Held() bool {
 	c.mu.Lock()
@@ -291,6 +305,13 @@ func (c *Checker) handHandler() http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) {
+		c.Drop()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// The unlock step's own code check: the step it spends is the one the
+	// broker's checks spend after (CH-4), and it approves nothing.
+	mux.HandleFunc("POST /verify", c.serveVerify(false))
 	return mux
 }
 
@@ -301,9 +322,15 @@ func decode(r *http.Request, v any) error {
 // verifyHandler serves the broker's verify socket.
 func (c *Checker) verifyHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /verify", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /verify", c.serveVerify(true))
+	return mux
+}
+
+// serveVerify answers POST /verify; withActs false refuses any act.
+func (c *Checker) serveVerify(withActs bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		var req verifyReq
-		if err := decode(r, &req); err != nil {
+		if err := decode(r, &req); err != nil || (!withActs && len(req.Acts) > 0) {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
 		}
@@ -326,8 +353,7 @@ func (c *Checker) verifyHandler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(verifyResp{Step: step, OK: ok})
-	})
-	return mux
+	}
 }
 
 // redeemHandler serves the holders' redeem socket: 204 spends an
@@ -419,11 +445,18 @@ func Redeemer(socket string) func(ctx context.Context, act string) (bool, error)
 	}
 }
 
-// Client is the broker's client for the verify socket.
+// Client is the broker's client for the verify socket, and the unlock
+// step's for the hand socket's POST /verify.
 type Client struct{ hc *http.Client }
 
-// VerifyClient returns the broker's client for the verify socket at socket.
-func VerifyClient(socket string) *Client { return &Client{hc: unixClient(socket)} }
+// VerifyClient returns a client for POST /verify at socket. Its callers
+// wait on it holding a lock (the owner channel's, the unlock step's), so
+// a hung checker delays them by at most 2 s.
+func VerifyClient(socket string) *Client {
+	hc := unixClient(socket)
+	hc.Timeout = 2 * time.Second
+	return &Client{hc: hc}
+}
 
 // VerifyTOTP asks the checker to verify code after step after and, on a
 // match, approve acts. Errors are ErrNoSeed, *PausedError or transport.

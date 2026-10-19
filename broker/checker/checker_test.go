@@ -408,3 +408,69 @@ func TestRedeemerTrustsOnly204(t *testing.T) {
 		}
 	}
 }
+
+// The unlock step takes the seed back at a lock: the checker then holds no
+// seed, verifies nothing, and an approval it gave before the lock can no
+// longer be redeemed (CRED-1, CH-10).
+func TestHandSocketDropTakesTheSeedBack(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	a := act(t, "{}")
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, []string{a}); !ok || err != nil {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	hand := httptest.NewServer(c.handHandler())
+	defer hand.Close()
+	del, _ := http.NewRequest("DELETE", hand.URL+"/secret", nil)
+	if resp, err := http.DefaultClient.Do(del); err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("drop: %v %v", resp, err)
+	}
+	if c.Held() {
+		t.Fatal("the checker still holds the seed after a drop")
+	}
+	if c.Redeem(a) {
+		t.Fatal("an approval made before the lock was redeemed after it")
+	}
+	clk.add(30 * time.Second)
+	if _, _, err := c.Verify(totp(seed, clk.now()), 0, true, nil); !errors.Is(err, ErrNoSeed) {
+		t.Fatalf("verify after drop: %v", err)
+	}
+}
+
+// The unlock step checks its code on the hand socket, so the step it spends
+// and the broker's are one store (CH-4): a code spent there is refused on
+// the verify socket. The hand socket approves no acts.
+func TestHandSocketVerifiesOnTheOneStore(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	hand := httptest.NewServer(c.handHandler())
+	defer hand.Close()
+	verify := httptest.NewServer(c.verifyHandler())
+	defer verify.Close()
+	post := func(url string, v any) (*http.Response, verifyResp) {
+		b, _ := json.Marshal(v)
+		resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vr verifyResp
+		json.NewDecoder(resp.Body).Decode(&vr)
+		resp.Body.Close()
+		return resp, vr
+	}
+	code := totp(seed, clk.now())
+	if resp, _ := post(hand.URL+"/verify", verifyReq{Code: code, Counted: true, Acts: []string{act(t, "{}")}}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("the hand socket took acts: %d", resp.StatusCode)
+	}
+	resp, vr := post(hand.URL+"/verify", verifyReq{Code: code, Counted: true})
+	if resp.StatusCode != http.StatusOK || !vr.OK || vr.Step != clk.now().Unix()/30 {
+		t.Fatalf("hand verify: %d %+v", resp.StatusCode, vr)
+	}
+	if _, vr := post(verify.URL+"/verify", verifyReq{Code: code, Counted: true}); vr.OK {
+		t.Fatal("the verify socket took a step the unlock step spent")
+	}
+}

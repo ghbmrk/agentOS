@@ -415,6 +415,7 @@ func serveCmd(args []string) error {
 	mf := declareModelFlags(fs, "default routing.json beside the keys")
 	held := mf.held
 	proxyDir := fs.String("proxy", "", "socket directory of `agentos-egress proxy`, which then serves the model and routing sockets and is handed a view of the vault, never a value (ARC-1); needs -holder")
+	checkerDir := fs.String("checker", "", "socket directory of agentos-checker, which then holds the code-generator seed while the vault is open and checks every code; this process's verify socket keeps only the unlock proof (CH-4); empty keeps the seed here")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
 	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
@@ -427,6 +428,9 @@ func serveCmd(args []string) error {
 		return err
 	}
 	if err := proxyFlagOK(*proxyDir, held); err != nil {
+		return err
+	}
+	if err := checkerFlagOK(*checkerDir); err != nil {
 		return err
 	}
 	if *mf.routingPath == "" {
@@ -477,6 +481,7 @@ func serveCmd(args []string) error {
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
 		holders:   held,
+		checker:   *checkerDir,
 	})
 	if err != nil {
 		return err

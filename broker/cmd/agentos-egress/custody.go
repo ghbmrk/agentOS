@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/checker"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -286,6 +287,9 @@ type custody struct {
 	// their default; only tests set it (SIM-split-wire).
 	holders   holderDirs
 	keepEvery time.Duration
+	// checker is the -checker socket directory: the checker then holds the
+	// seed while the vault is open and checks every code (checkerwire.go).
+	checker string
 	// keys is the open vault as the keepers read it, nil while locked;
 	// keyVer counts key stores, so a keeper hands a replaced key again.
 	keys   atomic.Pointer[vault.Vault]
@@ -632,7 +636,8 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 
 // checkCode checks a code-generator code against the seed in the open or
 // pending vault (CH-4, O6): each 30 s step once, wrong codes counted
-// toward the durable cap (CH-18). Caller holds mu and has c.v.
+// toward the durable cap (CH-18). With -checker the checker matches it,
+// after its own last step and this one. Caller holds mu and has c.v.
 func (c *custody) checkCode(code string, now time.Time) error {
 	if until, out := c.lockedOut(now); out {
 		return errLockedOut(until)
@@ -642,7 +647,20 @@ func (c *custody) checkCode(code string, now time.Time) error {
 		return errNoCodeGenerator
 	}
 	seed := []byte(sec.Reveal())
-	step, ok := owner.MatchTOTP(seed, code, now, c.st.LastStep)
+	var step int64
+	if c.checker != "" {
+		var err error
+		if step, ok, err = c.matchOnChecker(seed, code); err != nil {
+			clear(seed)
+			if pe := (*checker.PausedError)(nil); errors.As(err, &pe) {
+				return errLockedOut(pe.Until)
+			}
+			log.Printf("checker: %v", err)
+			return errInternal
+		}
+	} else {
+		step, ok = owner.MatchTOTP(seed, code, now, c.st.LastStep)
+	}
 	var skew int64
 	near := false
 	if !ok {
@@ -762,6 +780,9 @@ func (c *custody) verify(code string, after int64, counted bool) (int64, bool, e
 		}
 		*bucket = append(*bucket, now)
 		return 0, false, nil
+	}
+	if c.checker != "" {
+		return 0, false, errOnChecker
 	}
 	seed, ok := c.v.Secret(SeedName)
 	if !ok {
