@@ -86,3 +86,7 @@ From the PR #18 review:
 - Authenticate `Resolve` callers (A7).
 - RESUME's confirmation should list the held intents. The outcome-unknown
   question to the owner should make clear that answering NO retries it.
+- `Halted()` (STOP in force, or the engine broken by a failed write) is what
+  gates work outside the journal, such as worker commands; `Stopped()` stays
+  the record of a written STOP, so the owner's handler can tell a STOP that
+  failed to record (SEC-failed-stop-latch, #2458).
