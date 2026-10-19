@@ -564,7 +564,7 @@ func TestPrefixesKeepMappedPrefixShorterThan96(t *testing.T) {
 	mapped := func(ones int) net.Addr {
 		return &net.IPNet{IP: net.ParseIP("::ffff:192.168.1.50"), Mask: net.CIDRMask(ones, 128)}
 	}
-	for ones, want := range map[int]string{80: "::/80", 2: "::/2", 96: "0.0.0.0/0", 120: "192.168.1.0/24"} {
+	for ones, want := range map[int]string{80: "::/80", 95: "::fffe:0:0/95", 2: "::/2", 96: "0.0.0.0/0", 120: "192.168.1.0/24"} {
 		got := Prefixes([]net.Addr{mapped(ones)})
 		if len(got) != 1 || got[0] != netip.MustParsePrefix(want) {
 			t.Errorf("/%d: %v, want %s", ones, got, want)
