@@ -42,7 +42,8 @@ type Owner interface {
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
-	// LocalStatusLines is STATUS's text, as the owner's phone gets it.
+	// LocalStatusLines is STATUS's text with every note, for the signed-in
+	// page; the texted STATUS leaves out notes that do not fit one reply.
 	LocalStatusLines() string
 	// UnlockPeriod is CH-14's N: how long a sign-in lasts.
 	UnlockPeriod() time.Duration

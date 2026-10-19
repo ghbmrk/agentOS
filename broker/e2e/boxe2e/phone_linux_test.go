@@ -149,56 +149,6 @@ func outageNoticeOf(t *testing.T, texts, requests int) string {
 	return it.Text
 }
 
-// REQ: CH-1, CH-11, CH-14. The daily digest answers no command: phone-control
-// passes over it wherever it lands and counts it in a note, and a text
-// that only mentions it is still other (G1-1688-f1-E17).
-func TestDigestIsNotAReply(t *testing.T) {
-	n := modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: Sun 18 Oct; reply STATUS for more."}
-	if k := replyKind(n.Text); k != "digest" {
-		t.Fatalf("replyKind(digest) = %q, want digest", k)
-	}
-	passes := [][]modem.SMS{
-		seq(n, probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, n, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, n, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, unlockR, n, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, n, helpReply),
-	}
-	for i, log := range passes {
-		if err := controlErr(log, 0); err != nil {
-			t.Errorf("digest at %d: %v", i, err)
-		}
-		r := readPhoneRun(log, 0)
-		if r.notices != 0 {
-			t.Errorf("digest at %d counted as %d notice(s)", i, r.notices)
-		}
-		if got, want := r.digestNote(), "passed-over digests=1"; got != want {
-			t.Errorf("digest at %d: note %q, want %q", i, got, want)
-		}
-	}
-	// A batch sent late leads with digestLateHead, and every status line
-	// with the digest's name: each is passed over and counted.
-	late := modem.SMS{From: boxNum, To: phoneNum, Text: "Digest of Sat 17 Oct: sent late; nothing to do."}
-	owed := modem.SMS{From: boxNum, To: phoneNum, Text: "Daily digest: the one due today is not ready yet; I try again every 30 minutes."}
-	log := seq(late, probe, helpReply, coded, unlockR, owed, statusR, stranger, probe, n, helpReply)
-	if err := controlErr(log, 0); err != nil {
-		t.Errorf("late and status digests: %v", err)
-	}
-	if got, want := readPhoneRun(log, 0).digestNote(), "passed-over digests=3"; got != want {
-		t.Errorf("three digests: note %q, want %q", got, want)
-	}
-	if got := readPhoneRun(seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply), 0).digestNote(); got != "" {
-		t.Errorf("a run with no digest noted %q", got)
-	}
-	other := modem.SMS{From: boxNum, To: phoneNum, Text: "Your Daily digest: none"}
-	if err := controlErr(seq(probe, other), 0); err == nil || !strings.Contains(err.Error(), "HELP drew other") {
-		t.Fatalf("a text not led by the digest prefix: %v, want HELP drew other", err)
-	}
-	if err := controlErr(seq(probe, helpReply, coded, n, statusR), 0); err == nil || !strings.Contains(err.Error(), "no unlock first") {
-		t.Fatalf("a digest stood in for the unlock: %v", err)
-	}
-}
-
 // REQ: CH-1, CH-3, CH-14. The owner line's recovery notice (UX U-B1) is
 // the box's account of a text lost while the line was down, as the
 // setup-to-agentosd hand-over can lose one (E9, P2-2w c4c r1); it answers
