@@ -122,6 +122,9 @@ func (g grants) Set(v string) error {
 func withGrants(c *custody, g grants, agent string) *custody {
 	c.agent = agent
 	c.build = func(v *vault.Vault) (*egress.Proxy, error) {
+		if len(c.holders) > 0 {
+			return newHeldProxy(v, g, c.holders, c.guard, c.storedGrant)
+		}
 		return newGrantedProxy(v, g, c.modelTransport, c.guard, c.storedGrant)
 	}
 	c.granted = modelGranted(g)
@@ -409,6 +412,8 @@ func serveCmd(args []string) error {
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
+	held := holderDirs{}
+	fs.Var(held, "holder", "adapter=dir: the socket directory of the holder that keeps the adapter's API key (repeatable; every adapter or none); the proxy then adds no key itself (ARC-1)")
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
@@ -422,6 +427,9 @@ func serveCmd(args []string) error {
 	fs.Parse(args)
 	pcrs, err := parsePCRs(*pcrList)
 	if err != nil {
+		return err
+	}
+	if err := held.check(); err != nil {
 		return err
 	}
 	rule, err := readRule(*rulePath)
@@ -493,6 +501,7 @@ func serveCmd(args []string) error {
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
+		holders:   held,
 	})
 	if err != nil {
 		return err
