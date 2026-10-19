@@ -26,8 +26,9 @@ var (
 // fold maps what can hide a code's characters to ASCII: zero-width and soft
 // hyphen characters are dropped, Unicode spaces become ' ', Unicode dashes
 // '-', fullwidth forms and mathematical letters and digits their ASCII
-// letters, and a token wholly of Latin look-alikes (Cyrillic, Greek) its
-// Latin spelling. It is not full NFKC (x/text is not vendored; R12).
+// letters, the long s 's' and the Kelvin sign 'K', and a token wholly of
+// Latin look-alikes (Cyrillic, Greek) its Latin spelling. It is not full NFKC
+// (x/text is not vendored; R12).
 func fold(s string) string {
 	i := 0
 	for i < len(s) && s[i] < 0x80 {
@@ -79,6 +80,13 @@ func foldRune(r rune) rune {
 		}
 	case r >= 0x1D7CE && r <= 0x1D7FF:
 		return '0' + (r-0x1D7CE)%10
+	// A (?i) pattern's s and k match these, but regexp's \b reads them as
+	// non-word runes, so "ſecret: x" held no key boundary (#2357). The long s
+	// is a small letter and the Kelvin sign a capital, as credWords reads them.
+	case r == '\u017f':
+		return 's'
+	case r == '\u212a':
+		return 'K'
 	}
 	return r
 }

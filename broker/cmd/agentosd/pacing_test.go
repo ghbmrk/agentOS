@@ -295,9 +295,9 @@ func TestTickReleasesAndStatusSaysHeld(t *testing.T) {
 
 // TestMainWiresThePacer: the two calls main makes are the whole wiring.
 // Before the daemon runs, newOwnerPacer sets the grants hooks and STATUS's
-// held line on the daemon config; once the channel exists, attach makes
-// the digest wait for quiet hours and starts the tick, which sends a held
-// text once the clock passes 07:00 (lens 1 on #652).
+// held line on the daemon config; once the channel exists, attach starts
+// the tick, which sends a held text once the clock passes 07:00 (lens 1 on
+// #652).
 func TestMainWiresThePacer(t *testing.T) {
 	var cfg daemon.Config
 	p := newOwnerPacer(&cfg)
@@ -314,12 +314,11 @@ func TestMainWiresThePacer(t *testing.T) {
 	if cfg.Grants.Allowance(at23) != 0 || cfg.Notes[0]() != "" {
 		t.Fatal("before attach: the hooks read a channel")
 	}
-	dg := newDigestBox(digestConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p.attach(ctx, r.ch, dg, time.Millisecond)
-	if !cfg.Grants.Quiet(at23) || dg.cfg.Quiet == nil || !dg.cfg.Quiet(at23) {
-		t.Fatal("grants or digest do not read the owner's quiet hours")
+	p.attach(ctx, r.ch, time.Millisecond)
+	if !cfg.Grants.Quiet(at23) {
+		t.Fatal("grants do not read the owner's quiet hours")
 	}
 	if l := cfg.Notes[0](); l != "1 text held until 07:00 (quiet hours)." {
 		t.Fatalf("STATUS held line: %q", l)
@@ -343,7 +342,7 @@ func TestMainWiresThePacer(t *testing.T) {
 
 	// Without a digest (none configured) attach still wires the rest.
 	q := newOwnerPacer(&daemon.Config{})
-	q.attach(ctx, r.ch, nil, time.Hour)
+	q.attach(ctx, r.ch, time.Hour)
 	if !q.quiet(at23) {
 		t.Fatal("attach without a digest")
 	}

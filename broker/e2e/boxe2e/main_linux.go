@@ -312,11 +312,47 @@ func (d *driver) claim() error {
 	if err != nil {
 		return err
 	}
-	if st != http.StatusSeeOther || loc != "/setup" {
+	if st != http.StatusSeeOther || (loc != "/setup" && loc != "/claim/wifi") {
 		return fmt.Errorf("POST /claim %d %q", st, loc)
+	}
+	if loc == "/claim/wifi" {
+		if err := d.claimWiFi(); err != nil {
+			return err
+		}
 	}
 	if ok, err := claim.Claimed(change.FileStore{Path: claimDst}); err != nil || !ok {
 		return fmt.Errorf("claim state after the claim: claimed=%v err=%v", ok, err)
+	}
+	return nil
+}
+
+// claimWiFi takes the claim's Wi-Fi step (HW-10) as an owner does: save
+// the new password the page shows, type its last four characters back,
+// and switch. The box's setup network may restart; the phone reaches the
+// page over the uplink, so setup carries on.
+func (d *driver) claimWiFi() error {
+	st, loc, b, err := d.get("/claim/wifi")
+	if err != nil {
+		return err
+	}
+	if st == http.StatusSeeOther && loc == "/setup" {
+		// No setup network to rotate: seal() writes only the claim
+		// state, so the page skips the step (ErrNoSetupWiFi).
+		return nil
+	}
+	pw, ok := wifiPassword(b)
+	if st != http.StatusOK || !ok || len(pw) < 4 {
+		return fmt.Errorf("GET /claim/wifi %d %q shows no new password: %s", st, loc, heading(b))
+	}
+	st, loc, err = d.post("/claim/wifi", url.Values{"last": {pw[len(pw)-4:]}})
+	if err != nil {
+		return err
+	}
+	if st != http.StatusOK && (st != http.StatusSeeOther || loc != "/setup") {
+		return fmt.Errorf("POST /claim/wifi %d %q", st, loc)
+	}
+	if st, loc, _, err := d.get("/setup"); err != nil || st == http.StatusSeeOther && loc == "/claim/wifi" {
+		return fmt.Errorf("setup still waits on the Wi-Fi step: GET /setup %d %q %v", st, loc, err)
 	}
 	return nil
 }
@@ -944,7 +980,10 @@ func (d *driver) phoneControl() error {
 	// the log is read until settle has passed (await returns early on a
 	// failure).
 	d.await(start, settle, func(phoneRun) bool { return false })
-	return controlErr(d.carrier.Log(), start)
+	if err := controlErr(d.carrier.Log(), start); err != nil {
+		return err
+	}
+	return passedOverErr(readPhoneRun(d.carrier.Log(), start))
 }
 
 // settle is how long phoneControl keeps reading the log after the

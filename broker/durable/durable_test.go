@@ -1,6 +1,6 @@
 package durable
 
-// REQ: OP-4, RES-4
+// REQ: OP-4, RES-4, CAP-3
 
 import (
 	"errors"
@@ -170,6 +170,33 @@ func TestSweepTemp(t *testing.T) {
 	assertNoTemp(t, dir)
 	if _, err := os.Stat(keep); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A stuck entry (a non-empty stage directory os.Remove cannot delete) must
+// not shield the temps that sort after it (CAP-3, #2398).
+func TestSweepTempContinuesPastAFailedRemove(t *testing.T) {
+	dir := t.TempDir()
+	stuck := filepath.Join(dir, TempPrefix+"a")
+	if err := os.Mkdir(stuck, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := filepath.Join(dir, TempPrefix+"b")
+	if err := os.WriteFile(later, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := SweepTemp(dir)
+	if err == nil || !strings.Contains(err.Error(), TempPrefix+"a") {
+		t.Fatalf("SweepTemp error = %v, want one naming %s", err, TempPrefix+"a")
+	}
+	if _, serr := os.Lstat(later); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("later temp still present after sweep: %v", serr)
+	}
+	if _, serr := os.Stat(stuck); serr != nil {
+		t.Fatalf("stuck directory should remain: %v", serr)
 	}
 }
 

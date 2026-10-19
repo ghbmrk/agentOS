@@ -92,7 +92,7 @@ TIER_A_BROKER = {
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
     "recovery",
     # (b) gates an effect or approval
-    "apply", "card", "claim", "cleanroom", "clock", "digestqueue", "firstboot",
+    "apply", "card", "claim", "cleanroom", "clock", "firstboot",
     "follow",                     # switches the update root of trust
     "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
@@ -114,7 +114,7 @@ TIER_B_BROKER = {
     # cgroup is B, but core vm kills machines and loop7 freezes its jail
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
-    "compile", "corpus", "floor", "fold", "hostchange",
+    "compile", "corpus", "floor", "fold", "hostchange", "inflight",
     "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }

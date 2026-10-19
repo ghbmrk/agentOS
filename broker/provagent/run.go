@@ -26,10 +26,13 @@ type Host interface {
 // route's control client to it and maps that client's errors onto the
 // sentinels below, so this package links no network client (ARC-2).
 type Seeder interface {
-	// Seed mints provider's placeholders for worker id. ErrNoLogin: the
-	// owner has not signed in to the plan; ErrVaultLocked: the vault is
-	// locked; ErrRouteBusy: the route is stalled or contended (a 503).
-	Seed(provider, id string) (map[string][]byte, error)
+	// Seed mints provider's placeholders for worker id. private binds the
+	// run's Private label to id's route, which then rechecks the owner's
+	// private-data answer before each content request (CAP-9, CH-3).
+	// ErrNoLogin: the owner has not signed in to the plan; ErrVaultLocked:
+	// the vault is locked; ErrRouteBusy: the route is stalled or contended
+	// (a 503).
+	Seed(provider, id string, private bool) (map[string][]byte, error)
 	// Close closes id's route and forgets its placeholders.
 	Close(id string)
 }
@@ -369,7 +372,10 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	defer func() { r.release(d.ID, probe && !ran) }()
 
 	id := r.NewID()
-	seed, serr := r.Seeder.Seed(d.ID, id)
+	// The check above holds at admission only; the label bound here
+	// carries it to each content request, so a withdrawal reaches this
+	// run (#2359).
+	seed, serr := r.Seeder.Seed(d.ID, id, q.Label == vm.Private)
 	switch {
 	case serr == nil:
 	case errors.Is(serr, ErrNoLogin):

@@ -67,6 +67,10 @@ type setupMode struct {
 	// APNet is where the page's report of the card's network is written
 	// (OpSetupAPNet, #1185) for agentos-ap; empty, the op is not served.
 	APNet string
+	// SetupNet is the preloaded box's setup network (claim.SetupNetPath),
+	// which the claim rotates (OpSetupWiFi, HW-10, #1692); empty, neither
+	// setup Wi-Fi op is served.
+	SetupNet string
 	// SignIn starts a plan route's device-code sign-in at setup (c4e2b,
 	// ONB-3); nil offers no plan sign-in.
 	SignIn localsrv.SignIn
@@ -184,6 +188,10 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		if m.APNet != "" {
 			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
 		}
+		// Served with an empty -setup-net too, answering "no setup
+		// wifi": the page reads a missing op as a fault (#1692).
+		ops[localapi.OpSetupWiFiName] = setupWiFiNameOp(m.SetupNet)
+		ops[localapi.OpSetupWiFi] = setupWiFiOp(m.SetupNet)
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()

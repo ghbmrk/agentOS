@@ -66,10 +66,54 @@ var (
 // object is removed whole, since it may look harmless on its own (CRED-1).
 func (sc *Scrubber) ScrubFact(f Fact) Fact {
 	obj := Removed
-	if !credPredicate.MatchString(credWords(fold(f.Predicate))) {
+	if !credPredicateMatch(f.Predicate) {
 		obj = sc.Scrub(f.Object)
 	}
 	return Fact{sc.Scrub(f.Subject), sc.Scrub(f.Predicate), obj}
+}
+
+// credPredicateMatch reports whether a predicate names credential material.
+// fold writes the long s small and the Kelvin sign capital, but either can
+// stand for a letter of the other case ("toKen", "ſECRET"), and the case
+// decides where credWords splits; so the predicate is also read with each
+// of them in the case of the ASCII letter beside it (#2357).
+func credPredicateMatch(p string) bool {
+	return credPredicate.MatchString(credWords(fold(p))) ||
+		strings.ContainsAny(p, "\u017f\u212a") && credPredicate.MatchString(credWords(fold(caseLikeNeighbour(p))))
+}
+
+// caseLikeNeighbour writes each long s and Kelvin sign in p as the ASCII s
+// or k, in the case of the ASCII letter before it, or else of the first
+// ASCII letter after it; with neither, small.
+func caseLikeNeighbour(p string) string {
+	rs := []rune(p)
+	upper := func(r rune) bool { return r >= 'A' && r <= 'Z' }
+	letter := func(r rune) bool { return upper(r) || r >= 'a' && r <= 'z' }
+	for i, r := range rs {
+		if r != '\u017f' && r != '\u212a' {
+			continue
+		}
+		c := 's'
+		if r == '\u212a' {
+			c = 'k'
+		}
+		switch {
+		case i > 0 && letter(rs[i-1]):
+			if upper(rs[i-1]) {
+				c -= 'a' - 'A'
+			}
+		default:
+			j := i + 1
+			for j < len(rs) && (rs[j] == '\u017f' || rs[j] == '\u212a') {
+				j++
+			}
+			if j < len(rs) && upper(rs[j]) {
+				c -= 'a' - 'A'
+			}
+		}
+		rs[i] = c
+	}
+	return string(rs)
 }
 
 // credWords spells a predicate as lower-case words joined by '_', splitting
@@ -348,24 +392,56 @@ func keyStartsAt(s string) bool {
 // scrubKnownTokens replaces each known token shape together with the
 // dash-, underscore- or alphanumeric run it starts inside: a shape such as
 // xoxs- can begin at a later group of a grouped code, and replacing only
-// from there would keep the code's leading groups (#1844).
+// from there would keep the code's leading groups (#1844). The run takes in
+// the long s and the Kelvin sign too: the shapes' ASCII classes stop at
+// them, and once folded the tail behind them reads as too short to look
+// random, so "ghp_…ſ…" kept its tail (#2357).
 func scrubKnownTokens(s string) string {
 	var b strings.Builder
 	last := 0
 	for _, m := range knownTokens.FindAllStringIndex(s, -1) {
-		start := m[0]
-		for start > last && isTokenByte(s[start-1]) {
-			start--
+		if m[0] >= last {
+			start := m[0]
+			for start > last && tokenRuneBefore(s[:start]) > 0 {
+				start -= tokenRuneBefore(s[:start])
+			}
+			b.WriteString(s[last:start])
+			b.WriteString(Removed)
 		}
-		b.WriteString(s[last:start])
-		b.WriteString(Removed)
-		last = m[1]
+		// A shape found inside the run already replaced extends it.
+		last = max(last, m[1])
+		for last < len(s) && tokenRuneAt(s[last:]) > 0 {
+			last += tokenRuneAt(s[last:])
+		}
 	}
 	if last == 0 {
 		return s
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+// tokenRuneAt and tokenRuneBefore give the length of the token byte, long s
+// or Kelvin sign at the start or the end of s, or 0.
+func tokenRuneAt(s string) int {
+	if s != "" && isTokenByte(s[0]) {
+		return 1
+	}
+	return tokenCaseRune(utf8.DecodeRuneInString(s))
+}
+
+func tokenRuneBefore(s string) int {
+	if s != "" && isTokenByte(s[len(s)-1]) {
+		return 1
+	}
+	return tokenCaseRune(utf8.DecodeLastRuneInString(s))
+}
+
+func tokenCaseRune(r rune, n int) int {
+	if r == '\u017f' || r == '\u212a' {
+		return n
+	}
+	return 0
 }
 
 func isTokenByte(c byte) bool {
