@@ -508,7 +508,6 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		if e.Done {
 			continue
 		}
-		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
 		}
@@ -605,10 +604,15 @@ func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (str
 	return noRoomOn + " Reply LEARNING OFF if this wasn't you.", true
 }
 
-// learningOffText answers loop settings and ends HELP when the learning
+// learningOffText answers loop settings when the learning
 // plane could not start (L3 S3 on #90). It names everything the loop texts
 // cover, and a restart retries opening the plane (UX-92-1).
 const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running. Restarting me may fix it."
+
+// learningOffHelp ends HELP when the learning plane could not start: the
+// learningOffText line without its restart hint, so agentosd's whole HELP
+// fits one owner text uncut (control.MaxText, #2390 F1).
+const learningOffHelp = "Spare-time work (learning, self-tests, update checks) is not running."
 
 // forgetOffText answers FORGET when the learning plane could not start.
 const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting me may fix it."
@@ -635,7 +639,7 @@ func learningOff(cfg *daemon.Config) {
 		_, ok := loops.ParseText(msg)
 		return ok
 	}
-	cfg.HelpExtra = learningOffText
+	cfg.HelpExtra = learningOffHelp
 	cfg.Notes = append(cfg.Notes, func() string { return learningOffNote })
 }
 
@@ -1329,7 +1333,7 @@ func (s *syncedRouting) tell() {
 		}
 	}
 	if err := note("routing-refused:"+ruleText(owe), text); err != nil {
-		s.logf("routing: the owner's digest line was not queued: %v", err)
+		s.logf("routing: the owner's notice was not queued: %v", err)
 		return
 	}
 	s.mu.Lock()

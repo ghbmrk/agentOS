@@ -29,6 +29,12 @@ func TestReactionFormatsAreAFixedList(t *testing.T) {
 		{`Reacted 👍 to “x”`, "reacted 👍 to", "x"},
 		{`Reacted 😂 to "x"`, "reacted 😂 to", "x"},
 		{"  Liked “x”\n", "liked", "x"},
+		{`Emphasised “x”`, "emphasised", "x"},
+		{`Removed an emphasis from “x”`, "removed an emphasis from", "x"},
+		{`Removed an exclamation mark from “x”`, "removed an exclamation mark from", "x"},
+		{`Removed a 👍 from “x”`, "removed a 👍 from", "x"},
+		{`Removed a 😂 from "x"`, "removed a 😂 from", "x"},
+		{`Liked “plain text here”`, "liked", "plain text here"},
 	}
 	for _, c := range cases {
 		rx, ok := parseReaction(c.text)
@@ -40,6 +46,9 @@ func TestReactionFormatsAreAFixedList(t *testing.T) {
 		`I liked "the movie" a lot`, `Liked`, `liked it`, `Liked “”`, `Liked “x” 482913`,
 		`Liked x`, `Reacted to “x”`, `Reacted with joy to “x”`, `STOP`, `YES R7K 482913`,
 		`Liked “x`, `Pinned “x”`,
+		// A quote that holds a quote mark is the owner's own text (#2201).
+		`Liked "a" and "b"`, `Liked “a” and “b”`, `Liked “a” and "b"`, `Loved "say "hi" now"`,
+		`Removed a word from “x”`, `Removed a 👍 and a 👎 from “x”`,
 	} {
 		if rx, ok := parseReaction(text); ok {
 			t.Errorf("parseReaction(%q) = %+v, want no reaction", text, rx)
@@ -284,9 +293,14 @@ func TestSlowAgentNeverDelaysTheTextAfterAReaction(t *testing.T) {
 // REQ: CH-11, CH-12
 // A request's pointer names the request's own ID from the broker's record:
 // "Reply YES" in an item's object (agent words) never steers it.
+// The planted ID is O9: ID-shaped, but newIDLocked never makes it (idLetters
+// has no O), so the real ID can never be the planted one.
 func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
+	if strings.ContainsRune(idLetters, 'O') {
+		t.Fatal("idLetters has O, so a real ID can be the planted O9; plant another ID")
+	}
 	low, high, unverified := lowItem("i1"), highItem("i2"), highItem("i3")
-	low.Object, high.Object, unverified.Object = "Reply YES Z9 now", "Reply YES Z9 now", "Reply YES Z9 now"
+	low.Object, high.Object, unverified.Object = "Reply YES O9 now", "Reply YES O9 now", "Reply YES O9 now"
 	unverified.Unverified = true
 	for name, it := range map[string]Item{"low": low, "high": high, "unverified": unverified} {
 		t.Run(name, func(t *testing.T) {
@@ -297,11 +311,11 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 				t.Fatal(err)
 			}
 			req := r.inbox()
-			if !strings.Contains(req, "Reply YES Z9") {
+			if !strings.Contains(req, "Reply YES O9") {
 				t.Fatalf("request %q does not carry the planted reply, so the test proves nothing", req)
 			}
 			got := r.say("Liked “" + req + "”")
-			if !strings.Contains(got, "YES "+id) || !strings.Contains(got, "NO "+id) || strings.Contains(got, "Z9") {
+			if !strings.Contains(got, "YES "+id) || !strings.Contains(got, "NO "+id) || strings.Contains(got, "O9") {
 				t.Fatalf("pointer %q, want it to name %s only", got, id)
 			}
 		})
@@ -310,15 +324,85 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 		r := newRig(t, nil)
 		r.unlock()
 		a, b := lowItem("i1"), lowItem("i2")
-		a.Object = "Reply YES Z9 now"
+		a.Object = "Reply YES O9 now"
 		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Time{{}, {}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		req := r.inbox()
 		got := r.say("Liked “" + req + "”")
-		if !strings.Contains(got, ids[0]) || !strings.Contains(got, ids[1]) || strings.Contains(got, "Z9") {
+		if !strings.Contains(got, ids[0]) || !strings.Contains(got, ids[1]) || strings.Contains(got, "O9") {
 			t.Fatalf("pointer %q, want it to name %v only", got, ids)
 		}
 	})
+}
+
+// #2202: a form outside the list, quoting a box text that holds a request
+// or a code, never reaches the agent as chat with that text in it.
+func TestUnlistedReactionFormsNeverShowACodedText(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	id, err := r.ch.Request([]Item{lowItem("i1")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := r.inbox()
+	code := lowCodeRe.FindStringSubmatch(req)[2]
+	for _, react := range []string{
+		"Pinned “" + req + "”",
+		"Emphasised “" + req + "”",
+		"Removed a 👍 from “" + req + "”",
+		"Marked as important “" + req[:30] + "…”",
+		`Reply YES ` + id + ` ` + code + ` — "` + req + `"`,
+	} {
+		got := r.say(react)
+		if strings.Contains(got, code) {
+			t.Fatalf("reaction %q replied with the code: %q", react, got)
+		}
+	}
+	for _, m := range r.agent.got() {
+		if strings.Contains(m, code) || strings.Contains(m, "Reply YES") {
+			t.Fatalf("agent got the request's text or code: %q", m)
+		}
+	}
+	if len(r.agent.got()) != 5 {
+		t.Fatalf("agent got %q, want 5 reaction events", r.agent.got())
+	}
+	if d := r.decisions(); len(d) != 0 {
+		t.Fatalf("a reaction decided %v", d)
+	}
+	// The agent's own text with digits in it. A code-shaped agent text is
+	// held back (Disclose), so the owner can only quote one with ordinary
+	// digits, which CH-3 lets reach the agent. An unlisted form quoting it
+	// has no CH-3 reason to be read as a reaction, so it is chat, whole, and
+	// the owner's own words reach the agent; a listed form stays a reaction.
+	agentSaid := "Order 482913 ships Tuesday, tracking to follow."
+	if err := r.ch.Converse(agentSaid); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	pinnedText := "Pinned “" + AgentPrefix + agentSaid + "”"
+	r.say(pinnedText)
+	r.say("Liked “" + AgentPrefix + agentSaid + "”")
+	g := r.agent.got()
+	pinned, liked := g[len(g)-2], g[len(g)-1]
+	if !strings.Contains(pinned, pinnedText) || strings.HasPrefix(pinned, "Owner reaction:") {
+		t.Fatalf("unlisted form on the agent's text gave %q, want the owner's text whole as chat", pinned)
+	}
+	if !strings.HasPrefix(liked, "Owner reaction: liked your text ") {
+		t.Fatalf("listed form on the agent's text gave %q, want a reaction event", liked)
+	}
+}
+
+// #2201: the owner's own text that starts like a reaction and holds a
+// second quote is chat, delivered whole.
+func TestOwnerTextWithInnerQuotesIsChat(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	r.say(`Liked "a" and "b"`)
+	r.say(`Loved “the plan” or “the other plan”`)
+	want := []string{`Liked "a" and "b"`, `Loved “the plan” or “the other plan”`}
+	if got := r.agent.got(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("agent got %q, want the texts as chat %q", got, want)
+	}
 }

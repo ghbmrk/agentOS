@@ -9,10 +9,11 @@
                 RECORD_FROM or later has a `Record:` line directly under its title (PR, package,
                 head or main SHA)
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
-  ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
+  ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md; a new row's ID is package-scoped and the
+                legacy list does not grow vs the PR's base side (tools/assumptions_ids.py)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
                 none keeps its own `**State:**` line (state lives on the work-item issue), and each
-                has an `**Acceptance tests:**` line unless listed in tools/brief_acceptance_baseline.txt
+                has an `**Acceptance tests:**` line (or `## Acceptance tests` heading, `**Acceptance:**`) unless listed in tools/brief_acceptance_baseline.txt
                 (FIRST-PASS, #1818)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
@@ -23,6 +24,8 @@ import pathlib
 import re
 import subprocess
 import sys
+
+import assumptions_ids
 
 
 RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "docs/OPERATING.md", "docs/LANES.md")
@@ -70,22 +73,39 @@ def operating_refs(root, files):
                         yield f"{name}:{n}: OPERATING §{num} does not exist"
 
 
-ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*(.*)$", re.M)
+ACCEPTANCE_LINE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]*)?(?:\*\*Acceptance(?: tests?)?:?\*\*(?P<bold>.*)|#{1,6}[ \t]+Acceptance tests?[ \t:]*(?P<head>))$",
+    re.M | re.I)
 LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+\S")
+FIELD = re.compile(r"^\s*(?:[-*+]\s*)?\*\*[^*]+:?\*\*:?")  # a sibling `**Label:**` field, not acceptance content
+HEADING = re.compile(r"^#{1,6}\s")
+TABLE_ROW = re.compile(r"^\s*\|")
 
 
 def acceptance_named(text, line):
-    """True when the marker line has text after it, or a list item follows it (OPERATING §5: a line or list)."""
-    if line.group(1).strip().strip(":").strip():
+    """True when the marker names its tests (OPERATING §5): text after it, a heading's body, a list, a table, or
+    text on the next line. A sibling `**Label:**` field or the next heading does not count."""
+    if (line.group("bold") or "").strip().strip(":").strip():
         return True
-    rest = [l for l in text[line.end():].splitlines() if l.strip()]
-    item = LIST_ITEM.match(rest[0]) if rest else None
-    if not item:
-        return False
-    own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
-    marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
-    # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
-    return not marker or len(item.group(1)) > len(marker.group(1))
+    lines = text[line.end() + 1:].splitlines()
+    heading = line.group("head") is not None
+    gap = False
+    for l in lines:
+        if not l.strip():
+            gap = True
+            continue
+        if HEADING.match(l) or (not heading and FIELD.match(l)):
+            return False
+        if heading or TABLE_ROW.match(l):
+            return True
+        item = LIST_ITEM.match(l)
+        if item:
+            own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
+            marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
+            # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
+            return not marker or len(item.group(1)) > len(marker.group(1))
+        return not gap  # plain text counts only directly under the marker
+    return False
 
 
 def brief_baseline(root):
@@ -197,7 +217,8 @@ def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
     return [*readme(root), *rule_files(root), *operating_refs(root, files),
-            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
+            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files),
+            *assumptions_ids.check(root, files)]
 
 
 def baseline_growth(root, base_file):
@@ -218,7 +239,9 @@ def main(argv):
         base = args[i + 1]
         del args[i:i + 2]
     root = args[0] if args else pathlib.Path(__file__).resolve().parent.parent
-    problems = [*lint(root), *(baseline_growth(root, base) if base else [])]
+    base_ids = assumptions_ids.base_legacy(root)
+    problems = [*lint(root), *(baseline_growth(root, base) if base else []),
+                *(assumptions_ids.growth(root, base_ids) if base_ids is not None else [])]
     for p in problems:
         print(p)
     return 1 if problems else 0

@@ -71,8 +71,7 @@ const (
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
-		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine,
-		digestUnknownStatus, digestFailedStatus, digestHeldStatus, digestDownStatus, digestOwedStatus}
+		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine}
 }
 
 // capClass is why a capability is off. An owner choice (LOOPS OFF, say)
@@ -115,8 +114,8 @@ func (r *capLines) add(key string, class capClass, line func() string) {
 }
 
 // wire puts every entry but owner choices into STATUS's notes. Call it
-// once, before daemon.Run (the daemon copies the notes), right after the
-// clock note so the clock stays first.
+// once, before daemon.Run (the daemon copies the notes), after the clock
+// note and the waiting lines (wireStatusNotes), so those stay first.
 func (r *capLines) wire(cfg *daemon.Config) {
 	var notes []func() string
 	for _, e := range r.entries {
@@ -327,28 +326,6 @@ func modelLine(st modelroute.ModelState) string {
 		return modelNoPrivate
 	}
 	return ""
-}
-
-// digestSources is DIG-1's one list of what the digest repeats: the
-// registry, the loop scheduler's lines when learning opened, and the
-// second line's when it is configured. Nothing sends the digest yet
-// (DIG-1); main logs the list's size.
-type digestSources []digestSource
-
-type digestSource struct {
-	name   string
-	digest func() []string
-}
-
-func newDigestSources(reg *capLines, lp *learning, line *secondLine) digestSources {
-	ds := digestSources{{"capabilities", reg.Digest}}
-	if lp != nil {
-		ds = append(ds, digestSource{"loops", lp.sched.Digest})
-	}
-	if line != nil {
-		ds = append(ds, digestSource{"second line", line.Digest})
-	}
-	return ds
 }
 
 // logCapLines logs the lines standing at start, so the box log says what

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: CAP-11, CRED-5
@@ -24,6 +26,187 @@ func good() Declaration {
 		ErrorEvents: []string{"error"},
 		UsedUp:      []string{"usage_limit_reached"},
 		TaskClasses: []string{"code"},
+		CredFormats: []string{`(?i)\bstubtok_[a-z0-9]{16,}`},
+	}
+}
+
+// REQ: CRED-7
+func TestDeclarationNeedsCredentialFormats(t *testing.T) {
+	cases := map[string][]string{
+		"missing":             nil,
+		"empty list":          {},
+		"matches empty":       {`\bstubtok_[a-z0-9]{16,}`, `x*`},
+		"empty format":        {""},
+		"does not compile":    {`(?i)\bstubtok_[a-z0-9{16,}`},
+		"one of two compiles": {`\bstubtok_[a-z0-9]{16,}`, `(unclosed`},
+	}
+	for name, f := range cases {
+		d := good()
+		d.CredFormats = f
+		if err := d.Validate(); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
+		if _, err := d.Formats(); err == nil {
+			t.Errorf("%s: formats compiled", name)
+		}
+	}
+	for id, d := range Builtins() {
+		if len(d.CredFormats) == 0 {
+			t.Errorf("builtin %s states no credential format", id)
+		}
+	}
+}
+
+// canaryRefresh is a synthetic Codex refresh token in the shape measured on a
+// live sign-in (#2313, spikes/S8-live/RESULTS.md): 196 characters over
+// [A-Za-z0-9._], dot segments 2.1.191, no prefix.
+var canaryRefresh = "Zq.C." + strings.Repeat("CANARYcanary_0123456789", 9)[:191]
+
+// rt40 and rtDotted are synthetic tokens in the public rt_ shape: the
+// shortest body it matches, and a body with a dot in it.
+var (
+	rt40     = "rt_" + strings.Repeat("a", 40)
+	rtDotted = "rt_" + strings.Repeat("SYNTHqz_0", 5) + "." + strings.Repeat("SYNTHqz-0", 5)
+)
+
+// The Codex declaration matches a refresh token in the measured shape whole,
+// wherever it sits, and none of its formats matches ordinary text.
+// REQ: CRED-7
+func TestCodexFormatsMatchMeasuredRefreshShape(t *testing.T) {
+	fs, err := Builtins()["codex"].Formats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := func(s string) string {
+		for _, re := range fs {
+			if m := re.FindString(s); m != "" {
+				return m
+			}
+		}
+		return ""
+	}
+	if len(canaryRefresh) != 196 {
+		t.Fatalf("canary is %d characters, want 196", len(canaryRefresh))
+	}
+	for _, s := range []string{
+		canaryRefresh,
+		`{"tokens":{"refresh_token":"` + canaryRefresh + `"}}`,
+		"token " + canaryRefresh + ". Done",
+		"refresh=" + canaryRefresh + "\n",
+		// Escaped, percent-encoded or joined prefixes leave no word
+		// boundary before the token, so the format must not need one.
+		`line1\n` + canaryRefresh,
+		`a:\t` + canaryRefresh,
+		`\u0022` + canaryRefresh,
+		"%22" + canaryRefresh,
+		"refresh_token%3D" + canaryRefresh,
+		"_" + canaryRefresh,
+		"x" + canaryRefresh,
+	} {
+		if m := match(s); m != canaryRefresh {
+			t.Errorf("refresh canary in %.40q...: matched %q", s, m)
+		}
+	}
+	// The tail looks like base64url, and one sample fixes neither its
+	// alphabet nor its length: a '-' anywhere, or a shorter tail, is still
+	// matched whole.
+	dash := func(i int) string {
+		b := []byte(canaryRefresh)
+		b[5+i] = '-'
+		return string(b)
+	}
+	for _, tok := range []string{
+		dash(0), dash(100), dash(190),
+		"Z-.-." + canaryRefresh[5:],
+		canaryRefresh[:5+160],
+		"ab.c." + strings.Repeat("a-", 100),
+		// The public rt_ shape stays declared (case-sensitive), from a
+		// 40-character body up, dots allowed.
+		"rt_" + strings.Repeat("CANARYcanary-0123456789_", 3),
+		rt40,
+		rtDotted,
+	} {
+		for _, s := range []string{tok, `{"refresh_token":"` + tok + `"}`, "x " + tok + "\n"} {
+			if m := match(s); m != tok {
+				t.Errorf("token %.12q... in %.40q...: matched %q", tok, s, m)
+			}
+		}
+	}
+	// An rt_ token after a JSON escape or a percent-encoded byte has no
+	// word boundary before it; the format consumes the escape instead, so
+	// the match is the escape and the whole token.
+	for _, tok := range []string{rt40, rtDotted} {
+		for _, esc := range []string{`\n`, `\t`, `\u0022`, `"`, "%22", "%3D"} {
+			for _, pre := range []string{"line1", "a:", "refresh_token", `{"t":`} {
+				s := pre + esc + tok + `"}`
+				want := tok
+				if esc != `"` {
+					want = esc + tok
+				}
+				if m := match(s); m != want {
+					t.Errorf("token %.12q... in %.40q...: matched %q, want %q", tok, s, m, want)
+				}
+			}
+		}
+	}
+	tail := strings.Repeat("a", 191)
+	// With no word boundary, a longer first segment is matched from its
+	// last two characters on.
+	if m := match("abc.d." + tail); m != "bc.d."+tail {
+		t.Errorf("long segment one: matched %q", m)
+	}
+	for name, s := range map[string]string{
+		"prose":             "The run finished. See v1.2.3 and https://example.com/a.b.c for details.",
+		"version":           "codex-cli 0.162.1 (rustc 1.90.0) build ab.c.d",
+		"sha256 hex":        "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+		"uuid":              "account 3f2c1a9e-4b7d-4c1e-9a2f-0d6b8e5c7a31",
+		"short tail":        "ab.c." + tail[:159],
+		"no segments":       "abc" + tail,
+		"short segment one": "a.b." + tail,
+		"long segment two":  "ab.cd." + tail,
+		"code identifier":   "rt_sigprocmask_handler_wrapper(); rt_tables_lookup_function",
+		"short rt_":         "rt_" + strings.Repeat("a", 39),
+		"upper-case RT_":    "RT_" + strings.Repeat("a", 40),
+		"rt_ inside word":   "start_" + strings.Repeat("a", 40),
+		"spaced":            "ab . c . " + tail,
+	} {
+		if m := match(s); m != "" {
+			t.Errorf("%s: matched %q", name, m)
+		}
+	}
+}
+
+// An rt_ token after an escape whose backslash is itself escaped (JSON nested
+// in JSON) is redacted with the whole backslash run, so the output stays valid
+// JSON and holds no 6-byte run of the token body (#2375).
+// REQ: CRED-7
+func TestCodexRtFormatRedactsNestedJSONToValidJSON(t *testing.T) {
+	r, err := vault.NewRedactor(nil).WithFormats(Builtins()["codex"].CredFormats...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{rt40, rtDotted} {
+		body := tok[3:]
+		for _, esc := range []string{`\n`, `\\n`, `\u0022`, `\\u0022`, "\n"} {
+			doc := "pre " + esc + tok + " post"
+			for level := 1; level <= 3; level++ {
+				b, err := json.Marshal(map[string]string{"log": doc})
+				if err != nil {
+					t.Fatal(err)
+				}
+				doc = string(b)
+				got := r.Redact(b)
+				if !json.Valid(got) {
+					t.Errorf("escape %q level %d: invalid JSON %q", esc, level, got)
+				}
+				for i := 0; i+6 <= len(body); i++ {
+					if strings.Contains(string(got), body[i:i+6]) {
+						t.Errorf("escape %q level %d: leaked %q", esc, level, got)
+						break
+					}
+				}
+			}
+		}
 	}
 }
 

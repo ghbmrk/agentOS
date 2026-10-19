@@ -131,6 +131,7 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
+<p class="muted">I text you when the account is changed or removed.</p>
 {{else}}
 <p>A second line lets me text and call businesses for you from my own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
 <p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear my message asking them to text instead.</p>
@@ -289,6 +290,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
 {{end}}{{end}}
+<p class="muted">I text you when this changes.</p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}
 
@@ -378,7 +380,7 @@ form { margin: .6em 0 1.2em; }
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{$id := .ID}}{{with index $.Unsaved .ID}}<p>Your answer about private content for {{.Name}} was not saved yet. Setup finishes once it is.</p><form method="post" action="/setup/ai-private"><input type="hidden" name="provider" value="{{$id}}">{{template "private" .}}<button>Save</button></form>{{end}}
 {{if not .Connected}}
-{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p>This code is from {{index $d 2}}, not from your code generator.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p>This code is from {{index $d 2}}, not from your code generator.</p><p><a href="/setup">I signed in</a></p><form method="post" action="/setup/ai-retry"><input type="hidden" name="provider" value="{{.ID}}"><span class="muted">If the code expired or you said no on the provider's page:</span> <button class="plain">Get a new code</button></form>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
 {{if not (or .DeviceCode .APIKey)}}<p>I can't sign in to your {{.Name}} yet. Use another provider for now.</p>{{end}}
 {{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Key .ID)}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}

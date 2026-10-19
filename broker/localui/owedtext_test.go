@@ -15,13 +15,17 @@ import (
 // owner a text, the file that sends it and words from the text sent. A
 // promise with no sender here fails the test below: either wire a sender
 // that reaches the owner channel and add it, or drop the line (#1421,
-// OPERATING §4). The vault process's notices are not here: until they
-// reach the owner channel (P2-3) they are only logged (egress K6, K25).
+// OPERATING §4). The vault process's notices are sent by agentosd's
+// notice puller (cmd/agentosd/noticepull.go) from notice.Text's table;
+// the second test below checks that main.go starts it.
 var promiseSenders = map[string]struct{ file, sent string }{
 	// owner.LocalSignIn's alert, sent by the owner channel.
 	"I text you that a phone signed in": {"../owner/local.go", "A phone signed in on my Wi-Fi at "},
 	// setup's code text, sent through page_setup_send's fixed texts.
 	"I will text you a code": {"../localapi/setup.go", "gentOS setup code: "},
+	// the vault process's notices, texted by agentosd's notice puller.
+	"I text you when the account is changed or removed": {"../owner/notice/notice.go", "account was replaced on my Wi-Fi page."},
+	"I text you when this changes":                      {"../owner/notice/notice.go", "may now get your private data: it was allowed on my Wi-Fi page."},
 }
 
 var promiseRe = regexp.MustCompile(`\bI (?:will )?text you\b[^.<"]*`)
@@ -60,6 +64,17 @@ func TestEveryTextPromisedOnALocalPageHasASender(t *testing.T) {
 		if !seen[m] {
 			t.Errorf("sender listed for %q, which no page promises", m)
 		}
+	}
+}
+
+// #1421: the notice sender those promises rest on is started by agentosd.
+func TestAgentosdStartsTheNoticePullerThePagesPromise(t *testing.T) {
+	src, err := os.ReadFile("../cmd/agentosd/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)") {
+		t.Fatal("agentosd's main.go does not start the notice puller, so the vault's notices are never texted")
 	}
 }
 

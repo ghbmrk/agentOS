@@ -16,8 +16,10 @@ import (
 const toolProviderRun = "provider_run"
 
 // ProviderRequest is one provider_run call: the guest's provider, brief and
-// task class, and the caller's label, class and reservation.
+// task class, and the caller's machine (journaled with the run, OP-8), label,
+// class and reservation.
 type ProviderRequest struct {
+	Machine                    string
 	Provider, Brief, TaskClass string
 	Label                      vm.Label
 	Class                      admission.Class
@@ -71,7 +73,7 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 	}
 	res, err := t.Provider.Run(ctx, ProviderRequest{
 		Provider: a.Provider, Brief: a.Brief, TaskClass: a.TaskClass,
-		Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
+		Machine: c.machine, Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
 	})
 	if err != nil {
 		var ref *ProviderRefusal

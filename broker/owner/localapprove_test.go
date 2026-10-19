@@ -174,7 +174,7 @@ func TestTheLocalNoticeNamesTheActionAndTheDeadline(t *testing.T) {
 	id, _ := r.ch.RequestLocal(it, 0)
 	text := r.inbox()
 	exp := r.clock().Add(LocalTTL)
-	want := id + `: your agent wants to send "` + field(it.Object, 40) + `" to 2 recipients I can't show in a text. Approve or deny on my Wi-Fi page before ` +
+	want := id + `: Can I send "` + field(it.Object, 40) + `" to 2 recipients? I can't show them in a text. Approve or deny on my Wi-Fi page before ` +
 		exp.Format("15:04") + ", or reply NO " + id + "."
 	if text != want {
 		t.Fatalf("notice\n got %q\nwant %q", text, want)
@@ -645,7 +645,7 @@ func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 	}
 	text := r.inbox()
 	for _, id := range ids {
-		if !strings.Contains(text, id+": your agent wants to grant \"mail.read for CANARY-agent\". Approve or deny on my Wi-Fi page before ") || !strings.Contains(text, "or reply NO "+id+".") {
+		if !strings.Contains(text, id+": Can I grant \"mail.read for CANARY-agent\"? Approve or deny on my Wi-Fi page before ") || !strings.Contains(text, "or reply NO "+id+".") {
 			t.Fatalf("notice %q", text)
 		}
 	}
@@ -752,5 +752,86 @@ func TestTheSpentLocalBoundHasAFixedReset(t *testing.T) {
 	}
 	if r.ch.LocalStatus().Unlocked {
 		t.Fatal("a code past the bound was checked")
+	}
+}
+
+// CH-12 (D-127, #2190): every page-only notice is a first-person question
+// that keeps the verified fields (ID, verb, quoted object, recipient count
+// or erased-send time, deadline, NO reply) and fits its segment budget
+// with the longest values the fields allow.
+// REQ: CH-12
+func TestPageNoticesAreQuestionsWithinTheirBudget(t *testing.T) {
+	sent := time.Date(2026, 10, 17, 9, 5, 0, 0, time.UTC)
+	for name, mod := range map[string]func(*Item){
+		"count":      func(it *Item) {},
+		"unverified": func(it *Item) { it.Unverified = true },
+		"erased":     func(it *Item) { it.Sent, it.SentErased = sent, true },
+		"confirm":    func(it *Item) { *it = confirmItem("g4") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, nil)
+			it := localItem("i1")
+			it.Facts.Verb = "abcdefghijkl"
+			it.Object = strings.Repeat("quarterly report ", 6)
+			it.Recipient = strings.Repeat("a@acme.example,", 9) + "z@acme.example"
+			mod(&it)
+			ids, err := r.ch.RequestLocalEach([]Item{it}, []time.Time{{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, text := ids[0], r.inbox()
+			exp := r.clock().Add(LocalTTL).Format("15:04")
+			if !fits(text) || strings.Contains(text, "your agent wants") {
+				t.Fatalf("budget or voice: %q", text)
+			}
+			for _, f := range []string{id + ":", "Can I " + field(it.Facts.Verb, 12) + ` "` + field(it.Object, 40) + `"`, "? ", "before " + exp, "reply NO " + id + "."} {
+				if !strings.Contains(text, f) {
+					t.Fatalf("missing %q in %q", f, text)
+				}
+			}
+			if name == "count" && !strings.Contains(text, "to 10 recipients? I can't show them") {
+				t.Fatalf("count %q", text)
+			}
+			if name == "erased" && !strings.Contains(text, "("+sent.In(time.UTC).Format("15:04 Jan 2")+")") {
+				t.Fatalf("erased time %q", text)
+			}
+		})
+	}
+}
+
+// The page-only requests' line is the channel's first STATUS note, so a
+// texted STATUS long enough to leave notes out still keeps it, right after
+// the header, and counts what it left out.
+func TestTheTextedStatusKeepsTheWiFiLineFirst(t *testing.T) {
+	r := newRig(t, nil)
+	var long []string
+	for i := 0; i < 6; i++ {
+		long = append(long, fmt.Sprintf("Note %d: ", i)+strings.Repeat("x", 88)+".")
+	}
+	machines := "Machines: " + strings.Repeat("m", 60) + "."
+	r.edit = func(cfg *Config) {
+		cfg.Machines = func() string { return machines }
+		for _, l := range long {
+			cfg.Notes = append(cfg.Notes, func() string { return l })
+		}
+	}
+	r.ch = r.open()
+	if _, err := r.ch.RequestLocal(localItem("i1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.unlock()
+	got := r.say("STATUS")
+	if !strings.Contains(got, " "+machines+" 1 waiting for you on my Wi-Fi page. ") {
+		t.Fatalf("Wi-Fi line not first: %q", got)
+	}
+	shown := 0
+	for _, l := range long {
+		if strings.Contains(got, l) {
+			shown++
+		}
+	}
+	if shown == len(long) || !strings.HasSuffix(got, fmt.Sprintf(" %d more lines on my Wi-Fi page.", len(long)-shown)) {
+		t.Fatalf("%d of %d notes shown: %q", shown, len(long), got)
 	}
 }

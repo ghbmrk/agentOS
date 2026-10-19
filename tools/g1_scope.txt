@@ -114,7 +114,6 @@ allow broker/claim/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/
-allow broker/digestqueue/
 allow broker/durable/
 allow broker/egress/
 allow broker/events/
@@ -125,6 +124,7 @@ allow broker/grants/
 allow broker/guest/
 allow broker/guesterr/
 allow broker/hostdisk/
+allow broker/inflight/
 allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/

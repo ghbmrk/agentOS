@@ -4,8 +4,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,8 +22,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -238,7 +244,7 @@ func noPage(t *testing.T, s string) {
 // texts is kept whole (potency C1) and the third text says where it was
 // cut and what to ask (UX ruling on #148; CH-12, D-127).
 func TestLongRepliesAreKept(t *testing.T) {
-	if maxText != control.MaxText {
+	if textRoom(true) != control.MaxText-len(owner.AgentPrefix) {
 		t.Fatal("the owner channel's text limit changed")
 	}
 	r := newEvRig(t, "")
@@ -687,5 +693,223 @@ func TestDEL1f1ForgetDuringARoute(t *testing.T) {
 	}
 	if k := r.ev.kept.list(); len(k) != 0 {
 		t.Fatalf("kept after the deletion: %+v", k)
+	}
+}
+
+// CH-11 (#2196): once the evidence worker serves the guest plane's
+// outbox, an agent reaction a guest posts is refused in the answer to
+// its POST, a 400 the bridge does not retry, in broker-written words; it
+// is never queued or texted, and a text reply to the same message then
+// goes out. Before, the plane answered 204 and Converse's refusal later
+// reached only the log.
+func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
+	// REQ: CH-11
+	r := newEvRig(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ev.wake = make(chan struct{}, 1)
+	plane, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: oneLineage{}, Effects: canaryEffects{}, Replies: r.ev.poke})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plane.Shutdown()
+	go r.ev.run(ctx)
+	r.ev.serve(plane)
+	mdir, err := plane.Open("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(mdir, guest.Socket)
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	do := func(method, path, body string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://broker"+path, strings.NewReader(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(b))
+	}
+	id, err := plane.DeliverOwner("m1", "can you book the dentist?", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do("GET", "/owner/next", ""); code != 200 || !strings.Contains(body, id) {
+		t.Fatalf("next: %d %s", code, body)
+	}
+	reply := func(text string) string {
+		b, _ := json.Marshal(map[string]string{"id": id, "text": text})
+		return string(b)
+	}
+	code, body := do("POST", "/owner/reply", reply(`Liked "can you book the dentist?"`))
+	if code != http.StatusBadRequest || body != guestReactionRefused {
+		t.Fatalf("reaction: %d %q", code, body)
+	}
+	if n := len(plane.PendingReplies()); n != 0 || len(r.texts()) != 0 {
+		t.Fatalf("refused reaction queued %d, texted %q", n, r.texts())
+	}
+	if code, body := do("POST", "/owner/reply", reply("Booked for Tuesday at 10.")); code != http.StatusNoContent {
+		t.Fatalf("text reply: %d %s", code, body)
+	}
+	waitFor(t, "the text reply", func() bool { return len(r.texts()) == 1 && len(plane.PendingReplies()) == 0 })
+	if got := r.texts(); got[0] != "Booked for Tuesday at 10." {
+		t.Fatalf("texted %q", got)
+	}
+}
+
+// REQ: CH-12
+// TestCH12SplitCountsUCS2Room: a reply with emoji needs UCS-2, 3 x 67
+// UTF-16 units a text. One of about two and a half texts goes as three
+// texts in order, each within three UCS-2 segments with AgentPrefix, none
+// cut inside a joined emoji, and nothing is kept; control and bidi
+// characters are gone before the split.
+func TestCH12SplitCountsUCS2Room(t *testing.T) {
+	var b strings.Builder
+	for {
+		n, _ := control.Units(b.String())
+		if n >= textRoom(false)*5/2-20 {
+			break
+		}
+		b.WriteString("We meet Thursday 👩‍💻 at nine. ")
+	}
+	long := strings.TrimSpace(b.String())
+	r := newEvRig(t, "")
+	r.ev.reply("agent", true, "‮"+long+"\u0007", "")
+	got := r.texts()
+	if len(got) != 3 {
+		t.Fatalf("%d texts", len(got))
+	}
+	for i, s := range got {
+		n, gsm7 := modem.Segments(owner.AgentPrefix + s)
+		if gsm7 || n > control.Segments {
+			t.Fatalf("text %d: %d segments, gsm7 %v", i, n, gsm7)
+		}
+		if strings.Count(s, "👩") != strings.Count(s, "💻") || strings.ContainsAny(s, "‮\u0007") {
+			t.Fatalf("text %d cut inside an emoji or kept a control: %q", i, s)
+		}
+	}
+	if strings.Join(got, " ") != long {
+		t.Fatal("the texts do not join back to the reply")
+	}
+	if k := r.ev.kept.list(); len(k) != 0 {
+		t.Fatalf("a reply that fits three texts was kept: %d", len(k))
+	}
+}
+
+// TestCH12ControlGapStillWithholdsReply: a reply, or the summary texted
+// when its email fails, whose code word and code are joined only by a
+// stripped control is still withheld (CH-19, CH-12, #2346).
+func TestCH12ControlGapStillWithholdsReply(t *testing.T) {
+	for _, gap := range []string{"\r", "\v", "\f", "\u0085", "\x01", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200F"} {
+		text := "Your code" + gap + "482913"
+		r := newEvRig(t, "")
+		r.ev.reply("agent", true, text, "")
+		if got := r.texts(); len(got) != 1 || owner.Disclose(got[0]) != owner.Hidden {
+			t.Errorf("reply %q texted %q", text, got)
+		}
+		r = newEvRig(t, destAddr)
+		r.gate.state = journal.NotApplied
+		r.ev.reply("agent", true, longReply, text)
+		if got := r.texts(); len(got) != 1 || strings.Contains(got[0], "482913") {
+			t.Errorf("summary %q texted %q", text, got)
+		}
+	}
+}
+
+// TestCH12CcInsideTokenStillWithholdsReply: a reply, or the summary
+// texted when its email fails, whose key or code a Cc control splits
+// mid-token is still withheld: CH-19 also reads the gap removed
+// (owner.AgentSecret, CH-19, CH-12, #2346).
+func TestCH12CcInsideTokenStillWithholdsReply(t *testing.T) {
+	for _, g := range []string{"\r", "\x01", "\x00", "\u0080", "\x7f"} {
+		for _, tok := range [][2]string{
+			{"key sk-abcdefghij", "klmnopqrstuvwx"},
+			{"AKIAABCDEFGH", "IJKLMNOP"},
+			{"token ghp_abcdefghijklmn", "opqrstuvwxyz0123456789"},
+			{"key: eyJhbGciOi", ".eyJzdWIiOi.SflKxwRJSM"},
+			{"code AB", "C1"},
+			{"code A", "1B2"},
+		} {
+			text := tok[0] + g + tok[1]
+			r := newEvRig(t, "")
+			r.ev.reply("agent", true, text, "")
+			if got := r.texts(); len(got) != 1 || got[0] != text {
+				t.Errorf("reply %q texted %q", text, got)
+			}
+			r = newEvRig(t, destAddr)
+			r.gate.state = journal.NotApplied
+			r.ev.reply("agent", true, longReply, text)
+			if got := r.texts(); len(got) != 1 || strings.Contains(got[0], tok[1]) {
+				t.Errorf("summary %q texted %q", text, got)
+			}
+		}
+	}
+}
+
+// TestCH12SummaryFitsOneTextInItsEncoding: the summary texted when a
+// private reply's email fails is cut in the encoding it needs, so an emoji
+// summary is one UCS-2 text, never cut inside a joined emoji (CH-12).
+func TestCH12SummaryFitsOneTextInItsEncoding(t *testing.T) {
+	for pad := 0; pad < 12; pad++ {
+		r := newEvRig(t, destAddr)
+		r.ev.reply("agent", true, longReply, strings.Repeat("x", pad)+strings.Repeat(" 👩‍💻", 40))
+		got := r.texts()
+		if len(got) != 1 || !strings.Contains(got[0], "👩‍💻") || !strings.Contains(got[0], "...") {
+			t.Fatalf("pad %d: texted %q", pad, got)
+		}
+		if n, _ := modem.Segments(owner.AgentPrefix + got[0]); n != 1 {
+			t.Fatalf("pad %d: summary text is %d segments: %q", pad, n, got[0])
+		}
+		if strings.Count(got[0], "👩") != strings.Count(got[0], "💻") || strings.Count(got[0], "👩") != strings.Count(got[0], "\u200d") {
+			t.Fatalf("pad %d: summary cut inside a joined emoji: %q", pad, got[0])
+		}
+	}
+
+	// A code split by isolates is still a code: no summary goes.
+	if s := summarize(longReply, "Your login code 48\u20662\u2069913", "Full reply sent to m***@example.com."); s != "" {
+		t.Fatalf("summarize kept a split code: %q", s)
+	}
+}
+
+// TestCH12GuestRefusesWrappedReaction: a reaction wrapped in bidi
+// controls is refused at the guest's POST like a bare one (CH-11, CH-12).
+func TestCH12GuestRefusesWrappedReaction(t *testing.T) {
+	if got := refuseGuestReply("\u202ELiked \u201cYour invoice is drafted.\u201d\u2069"); got != guestReactionRefused {
+		t.Fatalf("refuseGuestReply = %q", got)
+	}
+	if got := refuseGuestReply("Booked 👍"); got != "" {
+		t.Fatalf("refuseGuestReply refused text: %q", got)
+	}
+}
+
+// TestCH12KeptReplyIsStripped: a reply too long for three texts is kept
+// for the local UI without its bidi controls (CH-12).
+func TestCH12KeptReplyIsStripped(t *testing.T) {
+	r := newEvRig(t, "")
+	r.ev.reply("agent", true, "\u202E"+strings.Repeat("We meet Thursday at nine. ", 80)+"\u2066", "")
+	k := r.ev.kept.list()
+	if len(k) != 1 || strings.ContainsAny(k[0].Text, "\u202E\u2066") {
+		t.Fatalf("kept %+v", k)
+	}
+}
+
+// TestCH12SummaryRoomCountsTheTail: the summary's room follows the encoding
+// of the whole text, tail included, so an address whose masked initial is
+// not GSM-7 still leaves a summary text of one segment (CH-12, #2346).
+func TestCH12SummaryRoomCountsTheTail(t *testing.T) {
+	for _, addr := range []string{"łukasz@example.com", "li@例子.中国", "mark@example.com"} {
+		r := newEvRig(t, addr)
+		r.ev.reply("agent", true, longReply, "")
+		got := r.texts()
+		if len(got) != 1 || !strings.HasPrefix(got[0], "Your landlord") || !strings.HasSuffix(got[0], "Full reply sent to "+maskAddress(addr)+".") {
+			t.Fatalf("%s: texted %q", addr, got)
+		}
+		if n, _ := modem.Segments(owner.AgentPrefix + got[0]); n != 1 {
+			t.Fatalf("%s: summary text is %d segments: %q", addr, n, got[0])
+		}
 	}
 }

@@ -59,11 +59,13 @@ var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|m
 // (or anything that depends on it), and why. None may hold an HTTP client
 // except modelroute, whose every dial is to a unix socket (sourceUse).
 var httpOK = map[string]string{
-	"meter":      "wraps guest model handlers (OP-8); serves, never dials",
-	"guest":      "serves the guest plane over the machine socket; never dials",
-	"modelroute": "the one client: forwards model calls to the vault process's unix socket",
-	"replay":     "serves replay machines' plane like guest; never dials",
-	"loopbuild":  "serves Loop 1's builder machines their own socket (W3-builder); never dials",
+	"meter":                   "wraps guest model handlers (OP-8); serves, never dials",
+	"guest":                   "serves the guest plane over the machine socket; never dials",
+	"modelroute":              "the one client: forwards model calls to the vault process's unix socket",
+	"replay":                  "serves replay machines' plane like guest; never dials",
+	"loopbuild":               "serves Loop 1's builder machines their own socket (W3-builder); never dials",
+	"owner/notice/noticesock": "the second client, as modelroute: reads the vault process's notice socket (a unix-socket HTTP long poll), every dial on unix (P2-2w c4e4 s2b); by review",
+	"inflight":                "admits loopbuild's model calls under its memory budget (RES-5); serves, never dials",
 }
 
 // allowance is what one package may use of a socket-capable import: the
@@ -85,6 +87,8 @@ var netOK = map[string]allowance{
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The owner's mail account's client (SR3-mail-w2), as modelroute.
 	"mail/mailsock": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer"}},
+	// The owner-notice puller's client (P2-2w c4e4 s2b, #1421), as modelroute.
+	"owner/notice/noticesock": {"dials only the vault process's notice unix socket", []string{"net.Conn", "net.Dialer"}},
 	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
 	"netjoin":   {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
 	"loopbuild": {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
@@ -133,6 +137,8 @@ var netOK = map[string]allowance{
 		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
+	// RES-5: wraps loopbuild's listener so each open connection holds budget; never listens or dials.
+	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 }
 
 // escapeOK are the broker packages in the graph allowed an escape hatch
@@ -184,7 +190,7 @@ var socketPkgs = map[string]bool{
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process,
 // and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set

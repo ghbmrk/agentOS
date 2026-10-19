@@ -331,6 +331,67 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
+    def test_check_gate_spec_needs_nothing_extra(self):
+        # D-137 supersedes D-130: a SPEC.md change merges on its accept alone, with no Transcribes: line.
+        import json
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("SPEC.md", "spec\n")
+        sha = self.commit("spec")
+        f = pathlib.Path(self._d.name + ".comments.json")
+        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        f.write_text(json.dumps([{"author_association": "OWNER", "created_at": "1",
+            "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n"}]))
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.split()), (0, ["same"]))
+
+    def test_check_gate_files_need_a_separate_security_accept(self):
+        # D-137: a PR touching a --needs-mark path also needs the newest trusted Security verdict, in a comment
+        # without an l3/combined marker, to accept a head whose diff equals this one.
+        import json
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "docs").mkdir()
+        self.write("docs/OPERATING.md", "rules\n")
+        sha = self.commit("gate")
+        rec = lambda v, head, marks, who="OWNER", at="1", pr=7: {"author_association": who, "created_at": at,
+            "body": f"Verdict: {v}\n# t\nRecord: PR #{pr} · package X-1 · head {head[:7]}\n{marks}"}
+        l3 = rec("accept", sha, "<!-- record: combined -->\n", at="0")
+        sec = lambda v="accept", head=sha, **k: rec(v, head, "<!-- record: security -->\n", **k)
+        def run(comments):
+            f = pathlib.Path(self._d.name + ".comments.json")
+            self.addCleanup(lambda: f.unlink(missing_ok=True))
+            f.write_text(json.dumps(comments))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        need = (1, ["needs-security", "docs/OPERATING.md"])
+        self.assertEqual(run([l3]), need)
+        self.assertEqual(run([l3, sec()]), (0, ["same"]))
+        # untrusted author, other PR, fix-list, unknown head: none counts
+        self.assertEqual(run([l3, sec(who="NONE")]), need)
+        self.assertEqual(run([l3, sec(pr=8)]), need)
+        self.assertEqual(run([l3, sec("fix-list")]), need)
+        self.assertEqual(run([l3, sec(head="0" * 40)]), need)
+        # one comment carrying both markers is one review: it counts as the L3 accept, not the Security one
+        both = rec("accept", sha, "<!-- record: security -->\n<!-- record: combined -->\n")
+        self.assertEqual(run([both]), need)
+        # a later Security fix-list supersedes the accept; a later accept clears it
+        self.assertEqual(run([l3, sec(at="1"), sec("fix-list", at="2")]), need)
+        self.assertEqual(run([l3, sec("fix-list", at="1"), sec(at="2")]), (0, ["same"]))
+        # main merged in after the accept: the Security accept carries
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "main\n")
+        self.commit("main moves")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        self.assertEqual(run([l3, sec()]), (0, ["same"]))
+        # a push after the Security accept: the L3 delta accept alone is not enough
+        self.write("docs/OPERATING.md", "looser rules\n")
+        new = self.commit("later")
+        self.assertEqual(run([l3, sec(), rec("accept", new, "<!-- record: combined -->\n", at="2")]), need)
+        self.assertEqual(run([l3, sec(), rec("accept", new, "<!-- record: combined -->\n", at="2"),
+                              sec(head=new, at="3")]), (0, ["same"]))
+
     def test_bot_gate(self):
         # PREMERGE-wire (#1860): the generated-file bot PRs carry no L3 verdict, so `--bot` passes
         # them only when the branch is a known bot branch and the diff is that bot's file alone.

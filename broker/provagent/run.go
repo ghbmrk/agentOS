@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +26,13 @@ type Host interface {
 // route's control client to it and maps that client's errors onto the
 // sentinels below, so this package links no network client (ARC-2).
 type Seeder interface {
-	// Seed mints provider's placeholders for worker id. ErrNoLogin: the
-	// owner has not signed in to the plan; ErrVaultLocked: the vault is
-	// locked; ErrRouteBusy: the route is stalled or contended (a 503).
-	Seed(provider, id string) (map[string][]byte, error)
+	// Seed mints provider's placeholders for worker id. private binds the
+	// run's Private label to id's route, which then rechecks the owner's
+	// private-data answer before each content request (CAP-9, CH-3).
+	// ErrNoLogin: the owner has not signed in to the plan; ErrVaultLocked:
+	// the vault is locked; ErrRouteBusy: the route is stalled or contended
+	// (a 503).
+	Seed(provider, id string, private bool) (map[string][]byte, error)
 	// Close closes id's route and forgets its placeholders.
 	Close(id string)
 }
@@ -75,13 +79,14 @@ type Caps struct {
 // Event is one run's journal entry (OP-8). It carries metadata only: never
 // the brief, the result, or anything the CLI printed.
 type Event struct {
-	Provider, TaskClass, Outcome string
-	ResultBytes                  int
-	Elapsed                      time.Duration
+	Machine, Provider, TaskClass, Outcome string // Machine: the caller's
+	ResultBytes                           int
+	Elapsed                               time.Duration
 }
 
 // Request is one provider_run call.
 type Request struct {
+	Machine                    string // the calling agent machine, journaled with the run (OP-8)
 	Provider, Brief, TaskClass string
 	Label                      vm.Label // the caller's data label
 	Class                      admission.Class
@@ -101,7 +106,11 @@ type Runner struct {
 	Usage        func(provider string) (Usage, error)
 	Reserve      func(provider, pool string) float64 // the owner's reserve, 0..1 (OP-5)
 	Scan         func(string) bool
-	Journal      func(Event)
+	// Journal hears each run that passed admission, once it ends (OP-8);
+	// a refusal before admission is not journaled. It is the run's only
+	// metering: a plan run is never charged to the spend meter. With it
+	// nil, Run logs once that provider runs are unmetered.
+	Journal func(Event)
 	// SignIn sets the ONB-9 sign-in line and OnSignedIn clears it. Both are
 	// called with the runner's lock held, in the same hold that changes
 	// the route's stopped state, so the line always matches it; neither
@@ -144,6 +153,8 @@ type Runner struct {
 	signing map[string]bool      // provider: a sign-in is running (StartSignIn)
 	running map[string]int       // provider: runs admitted and not yet ended
 	probed  map[string]time.Time // provider: when its last probe run was admitted
+
+	unmetered sync.Once // the PJ-3 line
 }
 
 // SignedIn is the owner's sign-in for provider through sign-in worker
@@ -155,7 +166,8 @@ type Runner struct {
 // Only a refused login's stop is the owner's to lift: a route stopped for
 // another cause (an unswappable exchange, CRED-5t, which only a release
 // requalifies) stays stopped and SignedIn reports false, as it does when
-// Stops cannot record the reopening.
+// Stops cannot record the reopening. The reopening names the cause, so a
+// stop egress raises after the read below stays (CRED-RS-5).
 func (r *Runner) SignedIn(provider, worker string) bool {
 	if r.SignInStored == nil || !r.SignInStored(worker) { // asked outside mu: it is a vault round trip
 		return false
@@ -167,8 +179,8 @@ func (r *Runner) SignedIn(provider, worker string) bool {
 		if cause != StopLoginRefused {
 			return false
 		}
-		if err := st.ReopenRoute(provider); err != nil {
-			r.logf("provagent: %s route stays stopped: its reopening was not recorded: %v", provider, err)
+		if err := st.ReopenRoute(provider, StopLoginRefused); err != nil {
+			r.logf("provagent: %s route stays stopped: %v", provider, err)
 			return false
 		}
 	}
@@ -188,23 +200,35 @@ const (
 
 // RouteStops is the durable record of stopped routes (the journal's
 // StopRoute, ReopenRoute and RouteStopped). A route stopped twice keeps
-// its first cause.
+// its cause, unless the second outranks it: every cause outranks
+// StopLoginRefused (CRED-RS-4). ReopenRoute lifts a stop only while it has
+// the cause named, and fails otherwise (CRED-RS-5).
 type RouteStops interface {
 	StopRoute(route, cause string) error
-	ReopenRoute(route string) error
+	ReopenRoute(route, cause string) error
 	RouteStopped(route string) (cause string, stopped bool)
 }
+
+var errRouteCause = errors.New("provagent: the route is stopped for another cause")
 
 // memStops keeps route stops for a Runner with no Stops.
 type memStops map[string]string
 
 func (m memStops) StopRoute(route, cause string) error {
-	if _, ok := m[route]; !ok {
+	if cur, ok := m[route]; !ok || cur == StopLoginRefused {
 		m[route] = cause
 	}
 	return nil
 }
-func (m memStops) ReopenRoute(route string) error { delete(m, route); return nil }
+
+func (m memStops) ReopenRoute(route, cause string) error {
+	if cur, ok := m[route]; ok && cur != cause {
+		return errRouteCause
+	}
+	delete(m, route)
+	return nil
+}
+
 func (m memStops) RouteStopped(route string) (string, bool) {
 	c, ok := m[route]
 	return c, ok
@@ -284,18 +308,28 @@ func Command(d Declaration, brief string) vm.Command {
 // result. Every refusal is a *Refusal with a closed reason; FallsBack says
 // which the caller answers with another route.
 func (r *Runner) Run(ctx context.Context, q Request) (string, error) {
+	if r.Journal == nil {
+		r.unmetered.Do(func() { r.logf("provagent: provider runs are unmetered: no journal is wired (OP-8)") })
+	}
 	start := time.Now()
-	out, n, outcome, err := r.run(ctx, q)
-	if r.Journal != nil {
-		r.Journal(Event{Provider: q.Provider, TaskClass: q.TaskClass, Outcome: outcome, ResultBytes: n, Elapsed: time.Since(start)})
+	out, n, outcome, admitted, err := r.run(ctx, q)
+	if admitted && r.Journal != nil {
+		r.Journal(Event{Machine: q.Machine, Provider: q.Provider, TaskClass: q.TaskClass, Outcome: outcome, ResultBytes: n, Elapsed: time.Since(start)})
 	}
 	return out, err
 }
 
-func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcome string, err error) {
-	fail := func(re Reason) (string, int, string, error) { return "", 0, string(re), refuse(re) }
+// run reports admitted once r.admit has taken a slot: from there on the
+// run is journaled.
+func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcome string, admitted bool, err error) {
+	fail := func(re Reason) (string, int, string, bool, error) { return "", 0, string(re), admitted, refuse(re) }
 	d, ok := r.Decls[q.Provider]
 	if !ok || !contains(d.TaskClasses, q.TaskClass) {
+		return fail(Unqualified)
+	}
+	// No provider runs with the default scan alone (FMT-4).
+	formats, ferr := d.Formats()
+	if ferr != nil {
 		return fail(Unqualified)
 	}
 	g := Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}
@@ -331,13 +365,17 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if re != "" {
 		return fail(re)
 	}
+	admitted = true
 	// A probe that never reached the CLI read nothing: forget it, so the
 	// next run (after a sign-in, say) may probe at once.
 	ran := false
 	defer func() { r.release(d.ID, probe && !ran) }()
 
 	id := r.NewID()
-	seed, serr := r.Seeder.Seed(d.ID, id)
+	// The check above holds at admission only; the label bound here
+	// carries it to each content request, so a withdrawal reaches this
+	// run (#2359).
+	seed, serr := r.Seeder.Seed(d.ID, id, q.Label == vm.Private)
 	switch {
 	case serr == nil:
 	case errors.Is(serr, ErrNoLogin):
@@ -372,6 +410,16 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	wctx, wcancel := context.WithTimeout(ctx, r.Caps.Wall)
 	defer wcancel()
 	ran = true
+	// A run that fails before the signals below (a timeout, an Exec or
+	// result-read error) still reads a refused login egress saw during it,
+	// so the route stops with no retry (CRED-5, #1891 item 2). Its own
+	// outcome is unchanged.
+	checked := false
+	defer func() {
+		if !checked && r.refusedSince(d, start) {
+			r.signIn(d.ID, true)
+		}
+	}()
 	res, err := r.Host.Exec(wctx, id, Command(d, q.Brief), r.Caps.Wall)
 	if res.TimedOut || wctx.Err() != nil {
 		return fail(TimedOut)
@@ -393,6 +441,7 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	// agent can write the result file, so it can only ever claim used-up
 	// (a fallback), read from the CLI's own error events, never from text
 	// the model wrote, which the brief steers.
+	checked = true
 	switch r.after(d, start) {
 	case LoginRefused:
 		r.signIn(d.ID, true)
@@ -412,10 +461,19 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if scan == nil {
 		scan = LooksLikeCredential
 	}
-	if scan(body) {
+	if scan(body) || matchesAny(formats, body) {
 		return fail(Withheld)
 	}
-	return body, len(body), "ok", nil
+	return body, len(body), "ok", true, nil
+}
+
+func matchesAny(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(l []string, s string) bool {
@@ -532,7 +590,7 @@ func (r *Runner) after(d Declaration, start time.Time) Reason {
 		r.logf("provagent: usage for %s after a run: %v", d.ID, err)
 		return RouteBusy
 	}
-	if !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start) {
+	if refused(u, start) {
 		return LoginRefused
 	}
 	for _, p := range u.Readings {
@@ -541,6 +599,23 @@ func (r *Runner) after(d Declaration, start time.Time) Reason {
 		}
 	}
 	return ""
+}
+
+// refused reports whether u records a refused login at or after start.
+func refused(u Usage, start time.Time) bool {
+	return !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start)
+}
+
+// refusedSince reads Usage after a failed run for a refused login since
+// start. An unreadable Usage is logged and reads as none: the run has
+// already failed, so only the route stop is at stake.
+func (r *Runner) refusedSince(d Declaration, start time.Time) bool {
+	u, err := r.Usage(d.ID)
+	if err != nil {
+		r.logf("provagent: usage for %s after a failed run: %v", d.ID, err)
+		return false
+	}
+	return refused(u, start)
 }
 
 // signalled reports whether a JSON event line of the result whose "type" is

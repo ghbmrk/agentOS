@@ -99,6 +99,14 @@ func quiet22to7(urgent ...ownerch.Class) ownerch.Pacing {
 	return ownerch.Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: urgent}
 }
 
+// quiet22to7Held is quiet22to7 with URGENT APPROVAL OFF: approval is
+// urgent by default (D-129).
+func quiet22to7Held(urgent ...ownerch.Class) ownerch.Pacing {
+	p := quiet22to7(urgent...)
+	p.ApprovalHeld = true
+	return p
+}
+
 // REQ: CH-15 (W5-Dc-r1b QH-8)
 
 // TestGrantsWiringReadsTheOwner: the grants Config agentosd builds reads
@@ -125,8 +133,8 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if !cfg.Quiet(at23) || cfg.Quiet(at23.Add(8*time.Hour)) {
 		t.Fatal("Quiet does not read the owner's quiet hours")
 	}
-	if cfg.Urgent(ownerch.Item{}) {
-		t.Fatal("approval urgent by default")
+	if !cfg.Urgent(ownerch.Item{}) {
+		t.Fatal("approval not urgent by default (D-129)")
 	}
 	day := at23.Add(10 * time.Hour)
 	r.set(day)
@@ -148,10 +156,10 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 	if got := cfg.Allowance(day); got != 2 {
 		t.Fatalf("allowance after a refund %d, want 2", got)
 	}
-	u := pacedOwner(t, quiet22to7(ownerch.ClassApproval), at23)
+	u := pacedOwner(t, quiet22to7Held(), at23)
 	p.ch.Store(u.ch)
-	if !cfg.Urgent(ownerch.Item{}) {
-		t.Fatal("URGENT approval ON not read")
+	if cfg.Urgent(ownerch.Item{}) {
+		t.Fatal("URGENT approval OFF not read")
 	}
 }
 
@@ -160,9 +168,9 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 // TestCallersUseTheirClass: in quiet hours, a loops urgent security text
 // and a fork-switch alert go at once; a loops report, a forget done text,
 // an agent reply and a recall take-back notice are held, the last two
-// unless the owner made their class urgent.
+// unless their class is urgent (approval is by default, D-129).
 func TestCallersUseTheirClass(t *testing.T) {
-	r := pacedOwner(t, quiet22to7(), at23)
+	r := pacedOwner(t, quiet22to7Held(), at23)
 	var ln loop2Notify
 	ln.ch.Store(r.ch)
 	ln.send("Security checks: a machine is contained.", true)
@@ -191,9 +199,21 @@ func TestCallersUseTheirClass(t *testing.T) {
 		t.Fatalf("paced texts sent in quiet hours: %q", got)
 	}
 
+	// By default the recall notice, approval class, goes at once with
+	// the agent prefix; the agent reply is still held.
+	d := pacedOwner(t, quiet22to7(), at23)
+	ev = &evidence{notify: d.ch.Notify, logf: t.Logf}
+	ev.send("agent", "Your invoice is drafted.")
+	if err := recallNotify(func() *ownerch.Channel { return d.ch })("Taken back."); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.sent(); len(got) != 1 || got[0] != ownerch.AgentPrefix+"Taken back." {
+		t.Fatalf("default: recall notice not sent alone: %q", got)
+	}
+
 	// The owner's urgent classes let agent replies and recall notices
 	// through, with the agent prefix.
-	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent, ownerch.ClassApproval), at23)
+	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
 	ev = &evidence{notify: u.ch.Notify, logf: t.Logf}
 	ev.send("agent", "Your invoice is drafted.")
 	if err := recallNotify(func() *ownerch.Channel { return u.ch })("Taken back: the agent's work since Monday."); err != nil {
@@ -205,7 +225,7 @@ func TestCallersUseTheirClass(t *testing.T) {
 	}
 	// Without approval urgent, the recall notice is held even with agent
 	// urgent: it is approval class, not agent.
-	a := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
+	a := pacedOwner(t, quiet22to7Held(ownerch.ClassAgent), at23)
 	if err := recallNotify(func() *ownerch.Channel { return a.ch })("Taken back."); err != nil {
 		t.Fatal(err)
 	}
@@ -275,9 +295,9 @@ func TestTickReleasesAndStatusSaysHeld(t *testing.T) {
 
 // TestMainWiresThePacer: the two calls main makes are the whole wiring.
 // Before the daemon runs, newOwnerPacer sets the grants hooks and STATUS's
-// held line on the daemon config; once the channel exists, attach makes
-// the digest wait for quiet hours and starts the tick, which sends a held
-// text once the clock passes 07:00 (lens 1 on #652).
+// held line on the daemon config; once the channel exists, attach starts
+// the tick, which sends a held text once the clock passes 07:00 (lens 1 on
+// #652).
 func TestMainWiresThePacer(t *testing.T) {
 	var cfg daemon.Config
 	p := newOwnerPacer(&cfg)
@@ -294,12 +314,11 @@ func TestMainWiresThePacer(t *testing.T) {
 	if cfg.Grants.Allowance(at23) != 0 || cfg.Notes[0]() != "" {
 		t.Fatal("before attach: the hooks read a channel")
 	}
-	dg := newDigestBox(digestConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p.attach(ctx, r.ch, dg, time.Millisecond)
-	if !cfg.Grants.Quiet(at23) || dg.cfg.Quiet == nil || !dg.cfg.Quiet(at23) {
-		t.Fatal("grants or digest do not read the owner's quiet hours")
+	p.attach(ctx, r.ch, time.Millisecond)
+	if !cfg.Grants.Quiet(at23) {
+		t.Fatal("grants do not read the owner's quiet hours")
 	}
 	if l := cfg.Notes[0](); l != "1 text held until 07:00 (quiet hours)." {
 		t.Fatalf("STATUS held line: %q", l)
@@ -323,7 +342,7 @@ func TestMainWiresThePacer(t *testing.T) {
 
 	// Without a digest (none configured) attach still wires the rest.
 	q := newOwnerPacer(&daemon.Config{})
-	q.attach(ctx, r.ch, nil, time.Hour)
+	q.attach(ctx, r.ch, time.Hour)
 	if !q.quiet(at23) {
 		t.Fatal("attach without a digest")
 	}

@@ -32,6 +32,8 @@ type stub struct {
 	hang       bool
 	createErr  error
 	destroyErr error
+	execErr    error // returned by the CLI's Exec
+	readErr    error // returned by the result read
 }
 
 func newStub(cli func(c vm.Command, s *stub) vm.ExecResult) *stub {
@@ -65,8 +67,11 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		return vm.ExecResult{}, errors.New("no such machine")
 	}
 	if len(c.Argv) > 0 && c.Argv[0] == "cat" { // the result read
-		out := s.drive[c.Argv[1]]
+		out, rerr := s.drive[c.Argv[1]], s.readErr
 		s.mu.Unlock()
+		if rerr != nil {
+			return vm.ExecResult{}, rerr
+		}
 		r := vm.ExecResult{Stdout: []byte(out)}
 		if c.MaxOutput > 0 && len(r.Stdout) > c.MaxOutput {
 			r.Stdout, r.Truncated = r.Stdout[:c.MaxOutput], true
@@ -74,7 +79,7 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		return r, nil
 	}
 	s.runs = append(s.runs, c)
-	hang := s.hang
+	hang, eerr := s.hang, s.execErr
 	s.mu.Unlock()
 	if hang {
 		select {
@@ -83,7 +88,7 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return s.cli(c, s), nil
+	return s.cli(c, s), eerr
 }
 
 func (s *stub) write(path, text string) { s.mu.Lock(); s.drive[path] = text; s.mu.Unlock() }
@@ -101,15 +106,16 @@ type seeder struct {
 	err       error
 	calls     []string
 	providers []string
+	private   []bool
 	closed    []string
 }
 
 func (s *seeder) Close(id string) { s.mu.Lock(); s.closed = append(s.closed, id); s.mu.Unlock() }
 
-func (s *seeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s *seeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls, s.providers = append(s.calls, id), append(s.providers, provider)
+	s.calls, s.providers, s.private = append(s.calls, id), append(s.providers, provider), append(s.private, private)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -208,6 +214,24 @@ func TestRunsAStubEndToEnd(t *testing.T) {
 	}
 	if len(g.sd.calls) != 1 || g.sd.calls[0] != g.h.created[0] || g.sd.providers[0] != "stub" {
 		t.Errorf("seed for %v: %v %v", g.h.created, g.sd.calls, g.sd.providers)
+	}
+}
+
+// The run's label is bound to its route at the seed, so the vault process
+// rechecks a Private run's permission per content request and a withdrawal
+// reaches a run already admitted (CAP-9, CH-3; #2359). A Public run is
+// not bound.
+func TestCAP9SeedBindsTheRunsLabelToItsRoute(t *testing.T) {
+	g := newRig(ok("x"))
+	for _, l := range []vm.Label{vm.Private, vm.Public} {
+		rq := req("b")
+		rq.Label = l
+		if _, err := g.r.Run(context.Background(), rq); err != nil {
+			t.Fatalf("%v run: %v", l, err)
+		}
+	}
+	if !reflect.DeepEqual(g.sd.private, []bool{true, false}) {
+		t.Fatalf("seeded private = %v, want [true false] for a Private then a Public run", g.sd.private)
 	}
 }
 
@@ -786,5 +810,226 @@ func TestEveryRunIsJournaledWithoutOutput(t *testing.T) {
 	}
 	if g.events[0].Provider != "stub" || g.events[0].Outcome != "ok" {
 		t.Errorf("event %+v", g.events[0])
+	}
+}
+
+// REQ: OP-8
+func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(g *rig, r *Request)
+	}{
+		{"unknown provider", func(_ *rig, r *Request) { r.Provider = "nope" }},
+		{"over-brief", func(_ *rig, r *Request) { r.Brief = strings.Repeat("b", 2<<10) }},
+		{"admit refused", func(g *rig, _ *Request) { g.usage.Readings = []Reading{fresh("5h", 0.05)} }},
+	}
+	for _, c := range cases {
+		g := newRig(ok("x"))
+		rq := req("b")
+		c.set(g, &rq)
+		if _, err := g.r.Run(context.Background(), rq); err == nil {
+			t.Fatalf("%s: ran", c.name)
+		}
+		if len(g.events) != 0 {
+			t.Errorf("%s: %d journal entries", c.name, len(g.events))
+		}
+	}
+}
+
+// builtinCanaries holds one synthetic canary per built-in credential
+// format. A format added to Builtins without a canary fails the test.
+var builtinCanaries = map[string]string{
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                                  "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:                     "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                               canaryRefresh,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                          "sk-ant-oat01-CANARYcanary0000000000000000",
+}
+
+// REQ: CRED-7
+func TestResultWithADeclaredFormatCanaryIsWithheld(t *testing.T) {
+	for id, b := range Builtins() {
+		for _, f := range b.CredFormats {
+			canary, found := builtinCanaries[f]
+			if !found {
+				t.Errorf("%s: no canary for format %s", id, f)
+				continue
+			}
+			g := newRig(ok("here you go " + canary + " done"))
+			d := g.r.Decls["stub"]
+			d.CredFormats = b.CredFormats
+			g.r.Decls["stub"] = d
+			// The default shapes see nothing, so only the declared
+			// formats can withhold the result.
+			g.r.Scan = func(string) bool { return false }
+			out, err := g.r.Run(context.Background(), req("b"))
+			if reasonOf(err) != Withheld {
+				t.Errorf("%s %s: %q %v", id, f, out, err)
+				continue
+			}
+			all := fmt.Sprintf("%q %v %+v %q", out, err, g.events, g.logs)
+			for _, part := range []string{canary, canary[:len(canary)/2], canary[len(canary)/2:]} {
+				if strings.Contains(all, part) {
+					t.Errorf("%s %s: canary leaked: %s", id, f, all)
+				}
+			}
+			if len(g.events) != 1 || g.events[0].Outcome != string(Withheld) {
+				t.Errorf("%s %s: journal %+v", id, f, g.events)
+			}
+		}
+	}
+}
+
+// REQ: OP-8
+func TestAdmittedRunIsJournaledOnceWithItsMachine(t *testing.T) {
+	g := newRig(ok("x"))
+	rq := req("b")
+	rq.Machine = "wk-a"
+	if _, err := g.r.Run(context.Background(), rq); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.events) != 1 || g.events[0].Machine != "wk-a" || g.events[0].Outcome != "ok" {
+		t.Errorf("events %+v", g.events)
+	}
+	// A refusal after admission is journaled too.
+	g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 1} }
+	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != Failed {
+		t.Fatalf("failing CLI: %v", err)
+	}
+	if len(g.events) != 2 || g.events[1].Outcome != string(Failed) {
+		t.Errorf("events %+v", g.events)
+	}
+}
+
+// REQ: OP-8
+func TestNilJournalRunLogsUnmetered(t *testing.T) {
+	g := newRig(ok("x"))
+	g.r.Journal = nil
+	for i := 0; i < 2; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, l := range g.logs {
+		if strings.Contains(l, "unmetered") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("unmetered lines %d: %q", n, g.logs)
+	}
+}
+
+// A declaration whose formats are malformed does not run (FMT-4).
+//
+// REQ: CRED-7
+func TestADeclarationWithMalformedFormatsDoesNotRun(t *testing.T) {
+	for name, f := range map[string][]string{"missing": nil, "matches empty": {`x*`}, "does not compile": {`(`}} {
+		g := newRig(ok("fine"))
+		d := g.r.Decls["stub"]
+		d.CredFormats = f
+		g.r.Decls["stub"] = d
+		out, err := g.r.Run(context.Background(), req("b"))
+		if reasonOf(err) != Unqualified || len(g.h.created) != 0 {
+			t.Errorf("%s: %q %v, created %v", name, out, err, g.h.created)
+		}
+	}
+}
+
+// REQ: CRED-5
+// FU9-1: a run that fails before its signals are read (a timeout, an Exec
+// error, a result-read error) still stops the route on a refused login
+// egress saw during it. The run keeps its own outcome and output; the next
+// run is login-refused without seeding or starting a worker (#1891 item 2).
+func failedAfterRefusal(t *testing.T, want Reason, setup func(g *rig)) {
+	t.Helper()
+	g := newRig(nil)
+	g.h.cli = g.refuseLogin
+	setup(g)
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != want || out != "" {
+		t.Fatalf("failed run: %q %v, want %s", out, err, want)
+	}
+	if len(g.events) != 1 || g.events[0].Outcome != string(want) {
+		t.Errorf("journal: %+v", g.events)
+	}
+	if len(g.signins) != 1 || g.signins[0] != "stub" {
+		t.Errorf("sign-in line: %v", g.signins)
+	}
+	g.advance(time.Second)
+	g.h.execErr, g.h.readErr = nil, nil
+	g.h.cli = ok("fine")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != LoginRefused {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(g.h.created) != 1 || len(g.sd.calls) != 1 || len(g.h.runs) != 1 {
+		t.Errorf("second run started: %d workers, %d seeds, %d CLI runs", len(g.h.created), len(g.sd.calls), len(g.h.runs))
+	}
+}
+
+func TestTimedOutRunAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, TimedOut, func(g *rig) {
+		g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+			g.refuseLogin(c, s)
+			return vm.ExecResult{TimedOut: true, ExitCode: -1}
+		}
+	})
+}
+
+func TestExecErrorAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, Failed, func(g *rig) { g.h.execErr = errors.New("exec lost") })
+}
+
+func TestResultReadErrorAfterRefusedRefreshStopsTheRoute(t *testing.T) {
+	failedAfterRefusal(t, Failed, func(g *rig) { g.h.readErr = errors.New("read lost") })
+}
+
+// REQ: CRED-5
+// FU9-2: a failed run with no refusal leaves the route running, and an
+// unreadable Usage on that check is logged and keeps the run's outcome.
+func TestFailedRunWithoutRefusalDoesNotStopTheRoute(t *testing.T) {
+	g := newRig(ok("partial"))
+	g.h.execErr = errors.New("exec lost")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Failed {
+		t.Fatalf("failed run: %v", err)
+	}
+	if _, stopped := g.r.stopCause("stub"); stopped || len(g.signins) != 0 {
+		t.Fatalf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+	g.h.execErr = nil
+	g.h.cli = ok("fine")
+	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
+		t.Fatalf("next run: %q %v", out, err)
+	}
+}
+
+func TestUsageErrorOnFailedRunKeepsOutcome(t *testing.T) {
+	g := newRig(nil)
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		g.mu.Lock()
+		g.usage.LoginRefused = g.now
+		g.usageErr = errors.New("usage view down")
+		g.mu.Unlock()
+		return vm.ExecResult{TimedOut: true, ExitCode: -1}
+	}
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != TimedOut || out != "" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if len(g.events) != 1 || g.events[0].Outcome != string(TimedOut) {
+		t.Errorf("journal: %+v", g.events)
+	}
+	if _, stopped := g.r.stopCause("stub"); stopped || len(g.signins) != 0 {
+		t.Errorf("route stopped: %v, sign-ins %v", stopped, g.signins)
+	}
+	found := false
+	for _, l := range g.logs {
+		if strings.Contains(l, "after a failed run") && strings.Contains(l, "usage view down") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("usage error not logged: %v", g.logs)
 	}
 }

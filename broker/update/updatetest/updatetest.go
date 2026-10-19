@@ -82,7 +82,9 @@ func Box(t testing.TB, version int64, security bool, images map[string][]byte) (
 		t.Fatal("updatetest: no release")
 	}
 	if !security {
-		return res.Release, st
+		// The copy Loop 3 proposes on the owner's path: judged, with no
+		// pass, so a policy change does not bind it (SR3-6-f6).
+		return res.Release.WithAttestations(nil, nil), st
 	}
 	att, err := update.Attest(ak, res.Release, update.Statement{Result: update.ResultPass, Channel: update.ChannelFast, Hardware: attest.Hardware{Vendor: attest.Unlisted, Model: attest.Unlisted, Firmware: attest.Unlisted}})
 	must(err)

@@ -10,6 +10,7 @@ enable agentos-egress-setup.path
 enable agentos-localui.service
 enable agentos-ap.service
 enable agentos-modem.service
+enable agentos-modem-env.path
 enable agentos-netjoin.service
 enable agentos-drive-id.service
 # Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.

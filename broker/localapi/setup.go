@@ -78,6 +78,16 @@ const (
 	// replaces the last, as a reset card makes a new one. It is served
 	// in page mode.
 	OpSetupAPNet = "page_setup_ap_net"
+	// OpSetupWiFiName answers the setup network's name and whether the
+	// claim has rotated its password (SetupWiFiName, HW-10, #1692); never
+	// the password. ErrNoSetupWiFi when the box has none. Page mode only.
+	OpSetupWiFiName = "page_setup_wifi_name"
+	// OpSetupWiFi replaces the sticker's setup network password with the
+	// one the page showed the claimant (SetupWiFi, HW-10, #1692):
+	// agentosd writes it root-only for agentos-ap, which brings the
+	// network back up with it. Once only: ErrWiFiRotated after; a
+	// password the box would not make is ErrBadArgs. Page mode only.
+	OpSetupWiFi = "page_setup_wifi"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -132,6 +142,12 @@ const (
 	// for the owner (OpSetupDeviceCode); a new one can start once that one
 	// is approved or its code expires.
 	ErrSignInBusy = "sign-in busy"
+	// ErrNoSetupWiFi: the box has no setup network: it was not preloaded
+	// with one, or the network was burned at the Owner Card confirm.
+	ErrNoSetupWiFi = "no setup wifi"
+	// ErrWiFiRotated: the claim already rotated the setup network's
+	// password (OpSetupWiFi).
+	ErrWiFiRotated = "wifi rotated"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -244,6 +260,23 @@ type SetupAPNet struct {
 // String and GoString keep the password out of logs.
 func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
 func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
+
+// SetupWiFiName is OpSetupWiFiName's answer: the setup network's name and
+// whether its password is rotated. It carries no password.
+type SetupWiFiName struct {
+	SSID    string `json:"ssid"`
+	Rotated bool   `json:"rotated"`
+}
+
+// SetupWiFi is OpSetupWiFi's argument: the setup network's new password
+// (CRED-1), which goes only to agentos-ap's file.
+type SetupWiFi struct {
+	Password string `json:"password"`
+}
+
+// String and GoString keep the password out of logs.
+func (SetupWiFi) String() string   { return "[setup Wi-Fi password]" }
+func (SetupWiFi) GoString() string { return "[setup Wi-Fi password]" }
 
 // Finish carries the owner's number, E.164, and Card, the page's report
 // that its Owner Card step is confirmed and provisioned (HW-1, #1115).

@@ -229,6 +229,9 @@ func capCases() []capCase {
 			// A question book whose state is a directory does not load.
 			qs := &questions{}
 			qs.start(b.ctx, b.d, &preempter{}, questionConfig{Path: b.dir, ClockPath: filepath.Join(b.dir, "clock.json")}, b.caps)
+			// The clock keeps saving into b.dir until it stops; stop it
+			// before TempDir removes the directory.
+			t.Cleanup(func() { b.cancel(); qs.run.Wait() })
 			if qs.b.Load() != nil {
 				t.Fatal("the questions plane opened")
 			}
@@ -481,32 +484,6 @@ func TestCapabilityLinesAreOwnerWorded(t *testing.T) {
 	reg.add("planted", capConfig, func() string { return "Model: -egress is empty; restart me." })
 	if reg.check() == nil {
 		t.Error("a registry holding a flag name passed")
-	}
-}
-
-// OP-9 (digest sources): DIG-1's one list holds the registry, the loop
-// scheduler's digest when learning opened, and the second line's when it
-// is configured.
-func TestDigestSourcesHoldTheRegistry(t *testing.T) {
-	b := newCapBox(t)
-	lp := openCapLearning(t, b)
-	line := &secondLine{}
-	names := func(ds digestSources) (out []string) {
-		for _, s := range ds {
-			out = append(out, s.name)
-		}
-		return out
-	}
-	if got := names(newDigestSources(b.reg, nil, nil)); strings.Join(got, ",") != "capabilities" {
-		t.Fatalf("no learning, no second line: %q", got)
-	}
-	ds := newDigestSources(b.reg, lp, line)
-	if got := names(ds); strings.Join(got, ",") != "capabilities,loops,second line" {
-		t.Fatalf("all: %q", got)
-	}
-	b.caps.updateChecks(nil)
-	if d := ds[0].digest(); !slices.Contains(d, updateChecksOff) || !slices.Equal(d, b.reg.Digest()) {
-		t.Fatalf("registry digest: %q", d)
 	}
 }
 

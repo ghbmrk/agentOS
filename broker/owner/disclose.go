@@ -2,6 +2,7 @@ package owner
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -43,12 +44,36 @@ var signIn = regexp.MustCompile(`(?i)\bsign\s+in\b`)
 // code next to a code word (CH-19). It runs on folded text, so fullwidth
 // or other Unicode digits and look-alike letters do not slip past, and it
 // joins adjacent digit groups, so "482 913" and "4 8 2 9 1 3" read as one
-// code.
+// code. The code-word check also runs on each of CheckFolds' CH-12 folds
+// (#2181), with the code words matched by their folds.
 func SecretShaped(s string) bool {
-	s = signIn.ReplaceAllString(fold(s), "signin")
-	if tokenFormats.MatchString(s) {
+	f := signIn.ReplaceAllString(fold(s), "signin")
+	if tokenFormats.MatchString(f) || codeNearWord(f, func(w string) bool { return codeWords[strings.ToUpper(w)] }) {
 		return true
 	}
+	for _, f := range CheckFolds(s) {
+		if codeNearWord(foldSignIn.ReplaceAllString(f, "signin"), foldCodeWord.MatchString) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldCodeWord matches a whole word that is a fold of a code word, and
+// foldSignIn a fold of "sign in".
+var foldCodeWord, foldSignIn = func() (*regexp.Regexp, *regexp.Regexp) {
+	var alts []string
+	for w := range codeWords {
+		alts = append(alts, FoldPattern(w))
+	}
+	sort.Strings(alts)
+	return regexp.MustCompile(`^(?:` + strings.Join(alts, "|") + `)$`),
+		regexp.MustCompile(`\b` + FoldPattern("sign in") + `\b`)
+}()
+
+// codeNearWord reports whether a code-like token lies within codeReach
+// words of a word isCodeWord accepts.
+func codeNearWord(s string, isCodeWord func(string) bool) bool {
 	var words []string
 	for _, w := range strings.FieldsFunc(s, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-')
@@ -60,7 +85,7 @@ func SecretShaped(s string) bool {
 		words = append(words, w)
 	}
 	for i, w := range words {
-		if !codeWords[strings.ToUpper(w)] {
+		if !isCodeWord(w) {
 			continue
 		}
 		for j := i - codeReach; j <= i+codeReach; j++ {

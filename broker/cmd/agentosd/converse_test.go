@@ -1,6 +1,11 @@
 package main
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/binary"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,7 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/loops"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -93,4 +102,117 @@ func notifyWiring(t *testing.T) []string {
 		bad = append(bad, "evidence.attach does not call e.wireOwner(d.Owner)")
 	}
 	return bad
+}
+
+// REQ: CH-15
+// TestCH15AgentReplyInWindowIsConversation: the question book's chat hook,
+// wired as questions.open wires it, reads the owner channel's chat window
+// with the owner's CHAT setting: an agent question 45 minutes after task
+// chat reached the agent is conversation under CHAT 60, and a push once
+// the hour has passed. Under the 30-minute default the same 45 minutes is
+// a push.
+func TestCH15AgentReplyInWindowIsConversation(t *testing.T) {
+	for _, tc := range []struct {
+		chat int
+		open bool
+	}{{0, false}, {60, true}} {
+		start := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+		r := pacedOwner(t, ownerch.Pacing{}, start)
+		ch, err := ownerch.New(ownerch.Config{
+			Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: &ownerch.MemStore{},
+			Agent:    acceptAgent{},
+			Secrets:  ownerch.Secrets{TOTPSeed: []byte(chatSeed), GridSeed: []byte("synthetic-grid-seed")},
+			Location: time.UTC, Now: r.clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		say := func(s string) string { return strings.Join(ch.Handle(context.Background(), ownerNum, s), " | ") }
+		r.set(start.Add(30 * time.Second))
+		if got := say(chatCode(r.clock())); !strings.HasPrefix(got, "Unlocked until") {
+			t.Fatalf("unlock: %q", got)
+		}
+		if tc.chat != 0 {
+			if got := say(fmt.Sprintf("CHAT %d", tc.chat)); !strings.HasPrefix(got, "Chat set") {
+				t.Fatalf("CHAT %d: %q", tc.chat, got)
+			}
+		}
+		chatting := questionChatting(ch)
+		if chatting() {
+			t.Fatal("chat open before task chat reached the agent")
+		}
+		say("find me a dentist")
+		if !chatting() {
+			t.Fatal("chat closed right after task chat reached the agent")
+		}
+		r.set(r.clock().Add(45 * time.Minute))
+		if got := chatting(); got != tc.open {
+			t.Fatalf("CHAT %d, 45 minutes on: chat open %v, want %v", tc.chat, got, tc.open)
+		}
+		r.set(r.clock().Add(16 * time.Minute))
+		if chatting() {
+			t.Fatalf("CHAT %d: chat open 61 minutes on", tc.chat)
+		}
+	}
+}
+
+// acceptAgent is an agent that takes every delivery.
+type acceptAgent struct{}
+
+func (acceptAgent) Deliver(context.Context, string, bool) error { return nil }
+
+const chatSeed = "12345678901234567890"
+
+// chatCode is the owner's code-generator code at t (RFC 6238, 30 s, 6
+// digits), from the synthetic seed.
+func chatCode(t time.Time) string {
+	var msg [8]byte
+	binary.BigEndian.PutUint64(msg[:], uint64(t.Unix()/30))
+	m := hmac.New(sha1.New, []byte(chatSeed))
+	m.Write(msg[:])
+	sum := m.Sum(nil)
+	off := sum[len(sum)-1] & 0x0f
+	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[off:off+4])&0x7fffffff)%1_000_000)
+}
+
+// REQ: CH-15, OWN-4
+// HELP as agentosd sends it, with the learning line (on or off) and RENEW
+// wired as main wires them, fits one owner text uncut and names CHAT
+// (combined F1 on #2390): a check on the pacing constant alone missed that
+// CHAT never reached the owner. Fit cuts every reply to control.MaxText, so
+// a length check cannot fail; the reply is whole only if it still ends with
+// the pacing line's last item, which is HELP's last piece.
+func TestCH15HelpNamesChatUncut(t *testing.T) {
+	for _, learning := range []bool{true, false} {
+		var dc daemon.Config
+		if learning {
+			dc.HelpExtra = loops.HelpLine
+		} else {
+			learningOff(&dc)
+		}
+		(&ownerRenew{now: time.Now}).wire(&dc)
+		r := pacedOwner(t, ownerch.Pacing{}, at23)
+		ch, err := ownerch.New(ownerch.Config{
+			Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: &ownerch.MemStore{},
+			Agent: acceptAgent{}, HelpExtra: dc.HelpExtra,
+			Secrets:  ownerch.Secrets{TOTPSeed: []byte(chatSeed), GridSeed: []byte("synthetic-grid-seed")},
+			Location: time.UTC, Now: r.clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ch.Handle(context.Background(), ownerNum, "HELP")
+		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "ACK 5.") {
+			t.Fatalf("learning %v: HELP is not one whole text (cut at %d bytes): %q", learning, control.MaxText, got)
+		}
+		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
+			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
+			if !learning && (word == "LOOPS" || word == "HELP LOOPS") {
+				word = "Spare-time"
+			}
+			if !strings.Contains(got[0], word) {
+				t.Fatalf("learning %v: HELP (%d bytes) lacks %s: %q", learning, len(got[0]), word, got[0])
+			}
+		}
+	}
 }

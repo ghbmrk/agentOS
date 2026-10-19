@@ -23,9 +23,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -36,6 +35,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/owner/notice"
 	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -179,7 +179,7 @@ func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) er
 		line, shown := p.StepLine()
 		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
 			if err := notice(key, line); err != nil {
-				log.Printf("rollback digest line: %v", err)
+				log.Printf("rollback notice: %v", err)
 			}
 		}
 	}
@@ -290,7 +290,7 @@ func (l *lateAgent) Deliver(ctx context.Context, text string, public bool) error
 	if err == nil {
 		now := time.Now
 		if s := l.sleep.Load(); s != nil {
-			now = s.cfg.Now // the clock the sleeper measures the hold on
+			now = s.cfg.Now // the clock the sleeper reads the owner's quiet on
 		}
 		l.delivered(now())
 	}
@@ -307,7 +307,7 @@ type ownerAgent interface {
 func (l *lateAgent) delivered(t time.Time) {
 	l.last.Store(t.UnixNano())
 	if s := l.sleep.Load(); s != nil && s.Asleep() {
-		go s.OwnerMessage(t)
+		go s.OwnerMessage()
 	}
 }
 
@@ -386,10 +386,11 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var digestDir, mailSocket string
+	var mailSocket string
+	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -423,6 +424,7 @@ func main() {
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
+	flag.StringVar(&setupNetPath, "setup-net", defaultSetupNet, "a preloaded box's setup network (HW-10, #1692): the claim rotates its password here, root-only, for agentos-ap; empty, it is not rotated")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -433,8 +435,8 @@ func main() {
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
+	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
-	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	learn.Fuzz, learn.Loop7, learn.FuzzUser = fuzzRelease, fuzzState, fuzzUser
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
@@ -454,6 +456,14 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
+	// Before agentosd writes anything, so none of its own temps is in flight.
+	sweepInboxTemps(inboxPath)
+	// The removed digest's queue held private text (DRB-2).
+	if removed, err := removeOldDigest(oldDigestDir); err != nil {
+		log.Printf("old digest directory not removed: %v", err)
+	} else if removed {
+		log.Printf("old digest directory removed")
+	}
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -545,12 +555,15 @@ func main() {
 		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
 			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
-			Card: pageCardStep, APNet: apNetPath}
+			Card: pageCardStep, APNet: apNetPath, SetupNet: setupNetPath}
 		if modemBridge {
 			// The box texts its setup and pairing texts on its own line
 			// (P2-2w c4c), and records the SIM it finds as that line's.
 			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
 			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+			// Once setup is finished the bridge learns the owner's number
+			// from its environment file (P2-2w c4c r1).
+			m.ModemEnv = modemEnvFile
 		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
@@ -628,30 +641,22 @@ func main() {
 	// Agents' questions (W9): owner replies are answered before task chat
 	// reaches the agent.
 	qs := &questions{}
-	// STATUS notes read in wiring order: the time check, then the
-	// capability-off lines (OP-9, capoff.go), then spare-time work not
+	// STATUS notes read in wiring order: the time check, then what waits
+	// on the owner (unclear effects, the mail UNDO codes and alerts), then
+	// the capability-off lines (OP-9, capoff.go), then spare-time work not
 	// running (learningOff, below), then recall's (an agent holding a
-	// deleted record, or memory not open), then the second line's. Keep
-	// the clock first.
+	// deleted record, or memory not open), then the second line's. The
+	// texted STATUS leaves out whole notes that do not fit, from the
+	// end, so keep the clock first and the waiting lines before the rest.
 	qs.wire(&cfg)
+	// No daily text (DRB-1): what waits on the owner is in STATUS, read
+	// when asked.
+	unclear, mailStatus := wireStatusNotes(&cfg)
 	// Each line reads live state set as the box opens below; the daemon
 	// copies the notes, so they are wired now.
 	caps := newCapState(egressSocket)
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
-	// The daily digest (CH-15, W5-Dc) goes by the modem bridge; its STATUS
-	// lines are wired with the rest. Its queue opens when it runs.
-	var dg *digestBox
-	if modemBridge && digestDir != "" {
-		var queue, state change.Store = change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
-			change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}
-		if err := prepareDigestDir(digestDir); err != nil {
-			log.Printf("digest: %v", err)
-			queue, state = downStore{err}, downStore{err}
-		}
-		dg = newDigestBox(digestConfig{Queue: queue, State: state})
-		dg.register(capLines)
-	}
 	capLines.wire(&cfg)
 	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
 	// is never called, and STATUS says update checks are not running.
@@ -670,8 +675,7 @@ func main() {
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
 		cfg.OwnerVerifier = ownerVerifier{verifier}
-		// The second line's STATUS line (potency R1 on #139); its digest
-		// line waits for the digest's sender.
+		// The second line's STATUS line (potency R1 on #139).
 		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
 	recallTools := &recalltool.Late{}
@@ -708,17 +712,15 @@ func main() {
 	if modemBridge {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
 		// recorded where the bridge reads it at its next open. A picture
-		// texted to the box is journaled and counted in STATUS (CH-12).
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell})
+		// texted to the box is journaled and counted in STATUS (CH-12). A text
+		// the down line drops is logged by kind and caller (#2170).
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell, Logf: log.Printf})
 		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
-		if dg != nil {
-			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
-		}
 	}
 
 	// The learning plane failing must not take the owner channel down
@@ -739,9 +741,6 @@ func main() {
 		learningOff(&cfg)
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
-		if dg != nil {
-			lp.forgetOwner.wireDigest(dg, lp.forgotten.goals) // CAP-3
-		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// One clock for the journal, the gate and the mail adapter, so the
@@ -811,7 +810,7 @@ func main() {
 		log.Fatal(err)
 	}
 	pictures.open(d.Engine().RecordPicture)
-	pacer.attach(ctx, d.Owner(), dg, time.Minute)
+	pacer.attach(ctx, d.Owner(), time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
@@ -827,29 +826,13 @@ func main() {
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
-	// The digest runs once the forget owner's start-up replay has asked
-	// it again (security B2' on #592); its own saved forgets hold their
-	// batches either way.
 	if mw != nil {
-		wireMail(ctx, mw, d, mailSocket, learn.Dir, dg, digestDir, cfg.Now)
+		wireMail(ctx, mw, d, mailSocket, learn.Dir, mailStatus, cfg.Now)
 	}
-	if dg != nil {
-		if o := d.Owner(); o != nil {
-			dg.cfg.Inform = o.Inform
-		}
-		// Effects left unclear and parked rather than retried, and
-		// effects proved not done whose resend was refused (OP-2).
-		if src, err := newUnclearSource(d.RetryWaiting, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
-			log.Printf("digest: no line for unclear effects: %v", err)
-		} else {
-			if dg.cfg.Sources == nil {
-				dg.cfg.Sources = map[string]digestqueue.Source{}
-			}
-			dg.cfg.Sources[unclearDigestSource] = src
-			d.OnRetryRefused(src.Relist)
-		}
-		go dg.run(ctx)
+	if noticeSocket != "" {
+		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)
 	}
+	unclear.set(d.RetryWaiting)
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
 	qs.start(ctx, d, pre, qcfg, caps)
@@ -904,6 +887,7 @@ func main() {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx   // a sign-in's wait ends at shutdown
 				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
+				journalProviderRuns(pr, d.Engine())
 				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
@@ -947,7 +931,7 @@ func main() {
 							lp.sleep.Store(sl)
 							agent.sleep.Store(sl)
 							if nerr := lp.pipe.Notice("pe7:sleep-mode", sleepDigest); nerr != nil {
-								log.Printf("sleep mode digest line: %v", nerr)
+								log.Printf("sleep mode notice: %v", nerr)
 							}
 							err = nil
 						}
@@ -1002,10 +986,8 @@ func main() {
 		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
 		go watchCommittedWiFi(ctx, apNetPath, verifySocket) // #1696
 	}
-	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
-	// takes this list once it lands.
+	// What is off, in the box log too (OP-9).
 	logCapLines(capLines)
-	log.Printf("digest sources: %d, not sent until the digest is", len(newDigestSources(capLines, lp, line)))
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
 }
@@ -1138,8 +1120,8 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
 // fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
 // wirePlanUsage (#1856); without them admission refuses (RES-5 fails
-// closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
-// its owner. Nothing calls StartSignIn until the setup page does (#1264
+// closed). Its Journal logs each run until journalProviderRuns wires it
+// to the engine journal (OP-8). Nothing calls StartSignIn until the setup page does (#1264
 // c4e2b). A nil rc or note leaves those inputs closed, as nil pins
 // leave the gate.
 func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
@@ -1155,6 +1137,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
 		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
 	}
+	r.Journal = providerJournal{}.journal // logged until journalProviderRuns (PJ-1)
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
 		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
@@ -1173,7 +1156,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 type providerTool struct{ r *provagent.Runner }
 
 func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
-	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
+	out, err := p.r.Run(ctx, provagent.Request{Machine: q.Machine, Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
 		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
 	var ref *provagent.Refusal
 	if errors.As(err, &ref) {
@@ -1188,14 +1171,14 @@ func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (strin
 // provider is refused before it is asked (#1378, #1379, #1380 add theirs).
 type planSeeder struct{ rc *modelroute.RouteControl }
 
-func (s planSeeder) Seed(provider, id string) (map[string][]byte, error) {
+func (s planSeeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
 	if provider != "codex" {
 		return nil, fmt.Errorf("no plan seed for provider %q", provider)
 	}
 	if s.rc == nil {
 		return nil, errors.New("no plan route control")
 	}
-	seed, err := s.rc.Seed(id)
+	seed, err := s.rc.Seed(id, private)
 	switch {
 	case err == nil:
 		return seed, nil
@@ -1326,6 +1309,22 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 	return gs.Machines, nil
 }
 
+// sweepInboxTemps removes the temporary files a crash left beside the guest
+// inbox (#2373): one holds the outbox as it stood, reply text included, which
+// a forget of the guest's replies would otherwise leave on disk (CAP-3). It
+// runs first thing at start. The directory is shared: agentos-ap's one write
+// there, the setup network's burn, can lose its temp to this sweep, and then
+// its rename fails, the setup file is unchanged, and the unit restarts and
+// burns again (ASSUMPTIONS.md IT-2373). A failed sweep is logged, not fatal.
+func sweepInboxTemps(inboxPath string) {
+	if inboxPath == "" {
+		return
+	}
+	if err := durable.SweepTemp(filepath.Dir(inboxPath)); err != nil {
+		log.Printf("guest inbox: removing crash-left temporary files: %v", err)
+	}
+}
+
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
 func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
@@ -1336,8 +1335,8 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		OverallCap:     meter.DefaultOverallCap,
 		DailyExtension: meter.DefaultDailyExtension,
 		Notify: func(e meter.Exhausted) {
-			// The journal holds it; the owner sees it in STATUS and
-			// the digest once those render egress records.
+			// The journal holds it; the owner sees it in STATUS once
+			// that renders egress records.
 			if err := eng.RecordEgress(guest.SpendNote(e)); err != nil {
 				log.Printf("journal spend limit for %s: %v", e.Machine, err)
 			}
@@ -1437,7 +1436,7 @@ func recallNotify(own func() *owner.Channel) func(string) error {
 }
 
 // ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,
-// W5-Dc-r1b): the grants and digest hooks read its setting, the minute
+// W5-Dc-r1b): the grants hooks read its setting, the minute
 // tick releases what it holds, and STATUS says what waits. Until the
 // channel is attached it is never quiet and has no allowance, so nothing
 // paced goes.
@@ -1457,14 +1456,10 @@ func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
 	return p
 }
 
-// attach binds the owner channel once the daemon runs, makes the digest
-// (nil when none is configured; call before it runs) wait for quiet hours
-// (QH-7), and starts the tick that releases held texts (QH-10).
-func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, dg *digestBox, every time.Duration) {
+// attach binds the owner channel once the daemon runs and starts the tick
+// that releases held texts (QH-10).
+func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, every time.Duration) {
 	p.ch.Store(ch)
-	if dg != nil {
-		dg.cfg.Quiet = p.quiet
-	}
 	go p.run(ctx, every)
 }
 
@@ -1556,4 +1551,29 @@ func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
 			p.tick()
 		}
 	}
+}
+
+// oldDigestDir is where the daily digest kept its queue and state (the
+// -digest flag's default) before it was removed (DRB-1).
+const oldDigestDir = "/var/lib/agentos/digest"
+
+// removeOldDigest deletes the digest's old directory at dir once at start:
+// its queue held private text no part of agentosd reads any more (DRB-2).
+// It never follows a link: a link at dir is removed itself, and
+// os.RemoveAll does not descend through links inside. Nothing there is
+// not an error.
+func removeOldDigest(dir string) (removed bool, err error) {
+	fi, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if fi.IsDir() {
+		err = os.RemoveAll(dir)
+	} else {
+		err = os.Remove(dir)
+	}
+	return err == nil, err
 }

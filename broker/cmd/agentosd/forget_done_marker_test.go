@@ -118,7 +118,7 @@ func markerJSON(seq int, goal string, at time.Time) string {
 
 // R2B: R1A's case, a forget cut off while it retries and restored from a
 // backup taken before it, with a done marker after its entry: the restore
-// tells nothing, yet the goal is tombstoned and purged from the digest.
+// tells nothing, yet the goal is tombstoned.
 func TestForgetRestoredWithDoneMarkerIsNotToldAgain(t *testing.T) {
 	e := cutOffRetrying(t, "owner:a")
 	b := &restoreBox{t: t, dir: t.TempDir()}
@@ -130,15 +130,12 @@ func TestForgetRestoredWithDoneMarkerIsNotToldAgain(t *testing.T) {
 	if !lp.forgotten.has("owner:a") {
 		t.Fatal("a marked forget was not replayed")
 	}
-	texts, digests := b.attach(lp)
+	texts := b.attach(lp)
 	if len(texts) != 0 {
 		t.Fatalf("a forget told done before the restore was told %q again", texts)
 	}
-	if strings.Join(digests, ",") != "owner:a" {
-		t.Fatalf("digest asked %q, want the goal once", digests)
-	}
 	lp = b.open()
-	if texts, _ := b.attach(lp); len(texts) != 0 {
+	if texts := b.attach(lp); len(texts) != 0 {
 		t.Fatalf("the next boot told %q", texts)
 	}
 }
@@ -161,13 +158,13 @@ func TestForgetRestoredMarkerDropsTheBackupsOwe(t *testing.T) {
 		entryJSON(5, loggedForget{goal: "owner:r", at: at.Add(time.Hour)}),
 	}, ","))
 	lp = b.open()
-	texts, digests := b.attach(lp)
+	texts := b.attach(lp)
 	if len(texts) != 1 || texts[0] != restoredDone {
 		t.Fatalf("the owner got %q, want only owner:r's %q", texts, restoredDone)
 	}
 	for _, g := range []string{"owner:o", "owner:r"} {
-		if !lp.forgotten.has(g) || !contains(digests, g) {
-			t.Fatalf("%s: tombstoned %v, digest asked %q", g, lp.forgotten.has(g), digests)
+		if !lp.forgotten.has(g) {
+			t.Fatalf("%s: not tombstoned", g)
 		}
 	}
 	if _, ok := lp.forgetOwner.owed.get("owner:o"); ok {

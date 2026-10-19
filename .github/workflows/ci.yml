@@ -90,8 +90,11 @@ jobs:
         if: env.RECORDS != 'true'
         # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
         # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
-        # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that).
-        run: sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+        # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that). The
+        # build compiles the patched bwrap statically, so it needs libcap-dev (#1720).
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
+          sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
@@ -282,8 +285,10 @@ jobs:
         run: go vet ./...
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
         # The search is sequential, so the race detector finds nothing in it and
-        # the race step skips it; here it runs at the bounds A19 states.
-        run: go test -count=1 -timeout 20m -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
+        # the race step skips it; here it runs at the bounds A19 states. -parallel 2 holds the
+        # five configurations to two searches at once: four (GOMAXPROCS) exhausted runner memory
+        # and the step was killed with exit 143.
+        run: go test -count=1 -timeout 20m -parallel 2 -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
       - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
         # Each target already ran its seeds and planted-decoder control in the race shards;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
@@ -442,6 +447,19 @@ jobs:
           cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_BUILDER_ROOTFS=/tmp/lbroot \
             go test -count=1 -v -run '^TestIntegrationBuilderImage$' ./e2e
+      - name: Codex CLI containment under gVisor (S8-W1-contain, #1720)
+        # The pinned CLI runs one tool call in a pw- machine from the built image, holding only a
+        # synthetic placeholder login; the tool must not reach the forwarder, the route socket or
+        # CODEX_HOME's auth.json, and must run under the CLI's bwrap and seccomp (CRED-5, C5).
+        # Built as root, as the rootfs test builds it: inside the CLI's user namespace root keeps no override
+        # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            sh guest/codex/build-rootfs.sh /tmp/cxroot
+          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CODEX_ROOTFS=/tmp/cxroot \
+            go test -count=1 -v -run '^TestIntegrationCodexContainment$' ./e2e
       - name: Floor box admission and preemption (P2-5)
         # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
         working-directory: broker
