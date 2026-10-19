@@ -60,6 +60,19 @@ def evaluate(expr, event, records):
 FILTERED = ("broker", "broker-race", "broker-checks", "machines", "hostcheck")
 
 
+def ci_top_level(key):
+    """The lines of ci.yml's top-level `key:` block, without the key line."""
+    lines = (WORKFLOWS / "ci.yml").read_text().splitlines()
+    start = lines.index(f"{key}:") + 1
+    end = next(i for i in range(start, len(lines)) if lines[i] and not lines[i].startswith((" ", "#")))
+    return [l for l in lines[start:end] if l.strip() and not l.lstrip().startswith("#")]
+
+
+def ci_triggers():
+    """The events ci.yml's `on:` block names."""
+    return [l.strip().rstrip(":") for l in ci_top_level("on") if re.match(r"^  [a-z_]+:$", l)]
+
+
 class ScopeTest(unittest.TestCase):
     def test_record_documents_are_records(self):
         for p in ("BOARD.md", "LATER.md", "LEDGER.md", "DECISIONS.md", "METRICS.md", "TRACE.md",
@@ -150,7 +163,10 @@ class ScopeTest(unittest.TestCase):
         # CIMG-b: on a pull request a records-only change still skips the code jobs and runs
         # the checks job's document steps; anything else, or a failed scope, runs them all.
         jobs = ci_jobs()
-        for event in ("pull_request", "workflow_dispatch", "merge_group"):
+        # Every trigger but push is scoped, and a pull request is one of them.
+        events = [e for e in ci_triggers() if e != "push"]
+        self.assertIn("pull_request", events)
+        for event in events:
             for job in FILTERED:
                 cond = jobs[job][0]
                 self.assertFalse(evaluate(cond, event, "true"), (job, event))
@@ -234,6 +250,19 @@ class WiringTest(unittest.TestCase):
         rec = jobs["checks"][2]
         for records in ("true", "", "false"):
             self.assertNotEqual(evaluate(rec, "push", records), "true", records)
+
+    def test_push_runs_only_on_main(self):
+        # CIMG-a holds because push fires only for main: an unscoped push from any other
+        # branch would run full CI where the scoped pull_request run is meant to.
+        self.assertIn("push", ci_triggers())
+        on = ci_top_level("on")
+        i = on.index("  push:")
+        self.assertEqual(on[i + 1], "    branches: [main]")
+        self.assertFalse(on[i + 2:i + 3] and on[i + 2].startswith("    "), on[i + 2:i + 3])
+
+    def test_default_token_is_read_only(self):
+        # Every job inherits a read-only token unless it narrows its own grant.
+        self.assertEqual(ci_top_level("permissions"), ["  contents: read"])
 
     def test_required_check_names_unchanged(self):
         # CIMG-c: branch protection matches checks by job id (no job sets `name:`) and the

@@ -32,7 +32,7 @@ env:
 # 'true', so a failed scope job means full CI, never a skipped required check.
 # A push to main runs every job and every step whatever scope says (CI-mainguard, #2323):
 # main's green run then means main builds, even after a records-only merge that follows a
-# skewed code merge. Only pull requests (and dispatches) are scoped.
+# skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
   scope:
     uses: ./.github/workflows/scope.yml
