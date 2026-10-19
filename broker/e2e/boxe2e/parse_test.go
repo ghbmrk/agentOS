@@ -14,6 +14,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
+// REQ: HW-10
+
 // The driver reads the Owner Card the way an owner does: the saved sheet
 // for the values, the display page for which word and group to type. A
 // real display accepts what it reads, and provisions.
@@ -168,5 +170,30 @@ func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
 	}
 	if _, _, ok := deviceLink(page); ok {
 		t.Fatal("link parsed from the offer")
+	}
+}
+
+// The claim's Wi-Fi step parser matches localui's own template, so a
+// wording change there fails here rather than in the image run.
+func TestWiFiPasswordMatchesThePage(t *testing.T) {
+	src, err := os.ReadFile("../../localui/claimwifi.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frag := range []string{
+		`New password: <span class="mono">{{.Password}}</span>`,
+		`<form method="post" action="/claim/wifi">`,
+		`<input name="last"`,
+	} {
+		if !bytes.Contains(src, []byte(frag)) {
+			t.Errorf("localui's Wi-Fi step no longer has %q", frag)
+		}
+	}
+	pw, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span><br>New password: <span class="mono">ZZZZ-YYYY-XXXX-WW&amp;W</span></p>`))
+	if !ok || pw != "ZZZZ-YYYY-XXXX-WW&W" {
+		t.Fatalf("%q %v", pw, ok)
+	}
+	if _, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span></p>`)); ok {
+		t.Fatal("password parsed from a page without one")
 	}
 }

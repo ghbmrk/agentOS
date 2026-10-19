@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -386,7 +387,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
@@ -423,6 +424,7 @@ func main() {
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
+	flag.StringVar(&setupNetPath, "setup-net", defaultSetupNet, "a preloaded box's setup network (HW-10, #1692): the claim rotates its password here, root-only, for agentos-ap; empty, it is not rotated")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -454,6 +456,8 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
+	// Before agentosd writes anything, so none of its own temps is in flight.
+	sweepInboxTemps(inboxPath)
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -545,7 +549,7 @@ func main() {
 		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
 			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
-			Card: pageCardStep, APNet: apNetPath}
+			Card: pageCardStep, APNet: apNetPath, SetupNet: setupNetPath}
 		if modemBridge {
 			// The box texts its setup and pairing texts on its own line
 			// (P2-2w c4c), and records the SIM it finds as that line's.
@@ -1331,6 +1335,22 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 		return nil, err
 	}
 	return gs.Machines, nil
+}
+
+// sweepInboxTemps removes the temporary files a crash left beside the guest
+// inbox (#2373): one holds the outbox as it stood, reply text included, which
+// a forget of the guest's replies would otherwise leave on disk (CAP-3). It
+// runs first thing at start. The directory is shared: agentos-ap's one write
+// there, the setup network's burn, can lose its temp to this sweep, and then
+// its rename fails, the setup file is unchanged, and the unit restarts and
+// burns again (ASSUMPTIONS.md IT-2373). A failed sweep is logged, not fatal.
+func sweepInboxTemps(inboxPath string) {
+	if inboxPath == "" {
+		return
+	}
+	if err := durable.SweepTemp(filepath.Dir(inboxPath)); err != nil {
+		log.Printf("guest inbox: removing crash-left temporary files: %v", err)
+	}
 }
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
