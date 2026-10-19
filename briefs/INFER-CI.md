@@ -8,7 +8,7 @@ Board section: Harness and operating model. Work item: #2284. Follow-up of INFER
 - INFER-CI-1: the machines job's package list includes `./infer/...`.
 - INFER-CI-2: in that job the two tests run, not skip.
 
-**Acceptance tests (REQ: INFER-CI-1, INFER-CI-2):**
+**Acceptance tests:** (REQ: INFER-CI-1, INFER-CI-2)
 - `tests/test_ci_scope.py::WiringTest::test_machines_job_lists_infer` parses `ci.yml` (mutant: remove the entry).
 - The PR body shows the machines job log with both tests passing, not skipped.
 

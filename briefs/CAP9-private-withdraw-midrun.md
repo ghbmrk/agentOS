@@ -9,7 +9,7 @@ Board section: Mark's review findings (2026-10-18). Work item: #2359. **Tier A**
 - CAP9-W2: before forwarding each new content request, the route rechecks the provider's private-data permission and refuses the request once it is gone.
 - CAP9-W3: public runs and sign-in traffic on the route are unaffected.
 
-**Acceptance tests (REQ: CAP9-W1..W3):**
+**Acceptance tests:** (REQ: CAP9-W1..W3)
 - `broker/cmd/agentos-egress/workerroute_private_test.go::TestWithdrawBeforeFirstContentRequestRefuses` (W2; mutant: check only at open).
 - `::TestWithdrawBetweenTwoRequestsRefusesTheSecond` (W2; the first goes, the second is refused).
 - `::TestPublicRunAndSignInUnaffectedByWithdraw` (W3).

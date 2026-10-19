@@ -9,7 +9,7 @@ Board section: Mark's review findings. Work item: #2357. Found on main c1a37df. 
 - CRED-1-L2: every `secretKV` key and `credPredicate` word, with ſ/K substitutions at its first and last letter, at the start of the text and after a space, has its value or object removed.
 - CRED-1-L3: `codeKey` and `codeKeyTail` (`backup codeſ:`) get the same check.
 
-**Acceptance tests in `broker/recall/` (REQ: CRED-1-L1..L3):**
+**Acceptance tests:** in `broker/recall/` (REQ: CRED-1-L1..L3)
 - `scrub_longs_test.go::TestLongSAndKelvinKeysAreScrubbed` (L1, L2; table crosses every key and predicate word; mutant: drop the U+017F mapping, drop the U+212A mapping).
 - `::TestLongSCodeKeysAreScrubbed` (L3).
 - `::TestAsciiKeysStillScrubbed` and a benign-text check that ordinary prose with ſ is not over-scrubbed beyond the value.
