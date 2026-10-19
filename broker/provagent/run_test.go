@@ -834,11 +834,11 @@ func TestRefusalBeforeAdmissionIsNotJournaled(t *testing.T) {
 // builtinCanaries holds one synthetic canary per built-in credential
 // format. A format added to Builtins without a canary fails the test.
 var builtinCanaries = map[string]string{
-	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                        "sk-proj-CANARYcanary0000000000000000",
-	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:           "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
-	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                     canaryRefresh,
-	`(?:\b|\\+[a-z]|\\+u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
-	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                "sk-ant-oat01-CANARYcanary0000000000000000",
+	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`:                                  "sk-proj-CANARYcanary0000000000000000",
+	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`:                     "eyJjYW5hcnkiOiIxIn0.eyJjYW5hcnkiOiIyIn0.",
+	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`:                               canaryRefresh,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`: "rt_CANARYcanary-0123456789_CANARYcanary-012",
+	`\bsk-ant-(?:oat|ort|api|admin)[0-9]{2}-[A-Za-z0-9_-]{20,}`:                          "sk-ant-oat01-CANARYcanary0000000000000000",
 }
 
 // REQ: CRED-7

@@ -20,7 +20,7 @@ var formats = []string{
 	`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`,
 	`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*`,
 	`[A-Za-z0-9_-]{2}\.[A-Za-z0-9_-]\.[A-Za-z0-9_-]{160,}`,
-	`(?:\b|\\+[a-z]|\\+u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`,
+	`(?:\b|\\{1,16}[a-z]|\\{1,16}u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})rt_[A-Za-z0-9._-]{40,}`,
 }
 
 // Public prefixes, longest first. A token with none of them reports a generic prefix only when it

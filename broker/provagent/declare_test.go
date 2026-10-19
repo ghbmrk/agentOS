@@ -187,7 +187,7 @@ func TestCodexRtFormatRedactsNestedJSONToValidJSON(t *testing.T) {
 	}
 	for _, tok := range []string{rt40, rtDotted} {
 		body := tok[3:]
-		for _, esc := range []string{`\n`, `\\n`, `\u0022`, `\\u0022`} {
+		for _, esc := range []string{`\n`, `\\n`, `\u0022`, `\\u0022`, "\n"} {
 			doc := "pre " + esc + tok + " post"
 			for level := 1; level <= 3; level++ {
 				b, err := json.Marshal(map[string]string{"log": doc})
