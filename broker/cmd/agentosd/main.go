@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"os/user"
@@ -24,7 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
-	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
@@ -679,7 +678,7 @@ func main() {
 		verifier = modelroute.NewVerifier(verifySocket)
 		ov := ownerVerifier{v: verifier}
 		if checkerVerify != "" {
-			ov.checker = checker.VerifyClient(checkerVerify)
+			ov.checker = checkersock.VerifyClient(checkerVerify)
 		}
 		cfg.OwnerVerifier = ov
 		// The second line's STATUS line (potency R1 on #139).
@@ -1403,7 +1402,7 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 // vault process then checks only the unlock's proof.
 type ownerVerifier struct {
 	v       *modelroute.Verifier
-	checker *checker.Client
+	checker *checkersock.Client
 }
 
 func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
@@ -1419,16 +1418,15 @@ func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64
 // vault is locked, a checker that is not running is down, and any other
 // failure leaves the check's outcome unknown.
 func checkerVerifyErr(err error) error {
-	var pe *checker.PausedError
-	var oe *net.OpError
+	var pe *checkersock.PausedError
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, checker.ErrNoSeed):
+	case errors.Is(err, checkersock.ErrNoSeed):
 		return &owner.VerifyError{Kind: owner.VaultLocked}
 	case errors.As(err, &pe):
 		return &owner.VerifyError{Kind: owner.VerifyPaused, Until: pe.Until}
-	case errors.As(err, &oe) && oe.Op == "dial":
+	case errors.Is(err, checkersock.ErrDown):
 		return &owner.VerifyError{Kind: owner.VaultDown}
 	}
 	return &owner.VerifyError{Kind: owner.VerifyLost}

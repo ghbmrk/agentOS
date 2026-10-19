@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -21,7 +22,7 @@ import (
 
 // checkerAt serves a checker on r's clock in a fresh socket directory,
 // sets it as r's -checker, and returns the checker and its verify client.
-func checkerAt(t *testing.T, r *fastRig) (*checker.Checker, *checker.Client) {
+func checkerAt(t *testing.T, r *fastRig) (*checker.Checker, *checkersock.Client) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "ck")
 	if err != nil {
@@ -48,7 +49,7 @@ func checkerAt(t *testing.T, r *fastRig) (*checker.Checker, *checker.Client) {
 	})
 	r.c.checker = dir
 	r.c.keepEvery = 5 * time.Millisecond
-	return ck, checker.VerifyClient(filepath.Join(dir, checker.VerifySocket))
+	return ck, checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket))
 }
 
 // The unlock hands the checker the seed; the broker's code is checked

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -64,7 +65,7 @@ func TestCodesGoToTheChecker(t *testing.T) {
 	go ck.Serve(ls[0], ls[1], ls[2])
 	o := ownerVerifier{
 		v:       modelroute.NewVerifier(filepath.Join(dir, "no-egress.sock")),
-		checker: checker.VerifyClient(filepath.Join(dir, checker.VerifySocket)),
+		checker: checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket)),
 	}
 	kind := func(err error) owner.VerifyFailure {
 		t.Helper()
@@ -95,7 +96,7 @@ func TestCodesGoToTheChecker(t *testing.T) {
 		t.Fatalf("unlock proof: %v", err)
 	}
 
-	down := ownerVerifier{checker: checker.VerifyClient(filepath.Join(dir, "gone.sock"))}
+	down := ownerVerifier{checker: checkersock.VerifyClient(filepath.Join(dir, "gone.sock"))}
 	if _, _, err := down.VerifyTOTP("123456", 0, true); kind(err) != owner.VaultDown {
 		t.Fatalf("checker not running: %v", err)
 	}

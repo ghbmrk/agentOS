@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 )
 
 // REQ: CH-4, CH-10, ARC-1
@@ -272,14 +274,14 @@ func TestHandlersServeClosedSets(t *testing.T) {
 		}
 		return resp
 	}
-	if resp := post(redeem.URL+"/verify", verifyReq{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}}); resp.StatusCode < 400 {
+	if resp := post(redeem.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}}); resp.StatusCode < 400 {
 		t.Fatal("the redeem socket verified a code")
 	}
 	if resp := post(verify.URL+"/redeem", redeemReq{Act: a}); resp.StatusCode < 400 {
 		t.Fatal("the verify socket redeemed")
 	}
-	resp := post(verify.URL+"/verify", verifyReq{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}})
-	var vr verifyResp
+	resp := post(verify.URL+"/verify", checkersock.VerifyRequest{Code: totp(seed, clk.now()), Counted: true, Acts: []string{a}})
+	var vr checkersock.VerifyResponse
 	json.NewDecoder(resp.Body).Decode(&vr)
 	if resp.StatusCode != http.StatusOK || !vr.OK {
 		t.Fatalf("verify: %d %+v", resp.StatusCode, vr)
@@ -319,7 +321,7 @@ func TestServeOverSockets(t *testing.T) {
 	if ok, err := red(context.Background(), a); ok || err != nil {
 		t.Fatalf("redeemed before any code: %v %v", ok, err)
 	}
-	vc := VerifyClient(filepath.Join(dir, VerifySocket))
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
 	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, a); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
@@ -355,7 +357,7 @@ func TestClientReportsRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	go (&http.Server{Handler: c.verifyHandler()}).Serve(ln)
-	vc := VerifyClient(filepath.Join(dir, VerifySocket))
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
 	if _, ok, err := vc.VerifyTOTP("123456", 0, true); ok || !errors.Is(err, ErrNoSeed) {
 		t.Fatalf("no seed: ok %v err %v", ok, err)
 	}
@@ -451,26 +453,26 @@ func TestHandSocketVerifiesOnTheOneStore(t *testing.T) {
 	defer hand.Close()
 	verify := httptest.NewServer(c.verifyHandler())
 	defer verify.Close()
-	post := func(url string, v any) (*http.Response, verifyResp) {
+	post := func(url string, v any) (*http.Response, checkersock.VerifyResponse) {
 		b, _ := json.Marshal(v)
 		resp, err := http.Post(url, "application/json", bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var vr verifyResp
+		var vr checkersock.VerifyResponse
 		json.NewDecoder(resp.Body).Decode(&vr)
 		resp.Body.Close()
 		return resp, vr
 	}
 	code := totp(seed, clk.now())
-	if resp, _ := post(hand.URL+"/verify", verifyReq{Code: code, Counted: true, Acts: []string{act(t, "{}")}}); resp.StatusCode != http.StatusBadRequest {
+	if resp, _ := post(hand.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true, Acts: []string{act(t, "{}")}}); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("the hand socket took acts: %d", resp.StatusCode)
 	}
-	resp, vr := post(hand.URL+"/verify", verifyReq{Code: code, Counted: true})
+	resp, vr := post(hand.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true})
 	if resp.StatusCode != http.StatusOK || !vr.OK || vr.Step != clk.now().Unix()/30 {
 		t.Fatalf("hand verify: %d %+v", resp.StatusCode, vr)
 	}
-	if _, vr := post(verify.URL+"/verify", verifyReq{Code: code, Counted: true}); vr.OK {
+	if _, vr := post(verify.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true}); vr.OK {
 		t.Fatal("the verify socket took a step the unlock step spent")
 	}
 }
