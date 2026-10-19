@@ -40,13 +40,29 @@ const (
 	MaxTextsPerHour = 20
 	// MaxHeld is the most texts the hold keeps (SG-r1-3).
 	MaxHeld = 32
+	// DefaultChatMinutes is how long a task chat stays open after the
+	// owner's last message reached the agent when the owner set none
+	// (CH-15).
+	DefaultChatMinutes = 30
+	// MinChatMinutes and MaxChatMinutes bound CHAT.
+	MinChatMinutes = 5
+	MaxChatMinutes = 240
+	// DefaultAckSeconds is how long after a task message reached the box
+	// AckText goes if no reply has, when the owner set none (OWN-4).
+	DefaultAckSeconds = 5
+	// MinAckSeconds and MaxAckSeconds bound ACK.
+	MinAckSeconds = 5
+	MaxAckSeconds = 120
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF. Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open), ACK 5 to 120 (seconds before I text \"On it.\"). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
 
-// pacingHelp is HELP's line for the pacing settings.
-const pacingHelp = "QUIET 22-7 or QUIET OFF: quiet hours. TEXTS 3: texts an hour. URGENT APPROVAL or AGENT ON/OFF."
+// pacingHelp is HELP's line for the pacing settings. It is terse because
+// agentosd's whole HELP must fit one owner text uncut (control.MaxText,
+// #2390 F1); a mistyped setting gets pacingForms, which says what each
+// value means.
+const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30, ACK 5."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
@@ -68,6 +84,13 @@ type Pacing struct {
 	// approval is urgent by default (D-129), so the zero value must be
 	// urgent and the off switch has to be stored.
 	ApprovalHeld bool `json:"approval_held,omitempty"`
+	// ChatMinutes is how long a task chat stays open after the owner's
+	// last message reached the agent (CH-15); 0 means
+	// DefaultChatMinutes.
+	ChatMinutes int `json:"chat_minutes,omitempty"`
+	// AckSeconds is how long after a task message reached the box
+	// AckText goes if no reply has (OWN-4); 0 means DefaultAckSeconds.
+	AckSeconds int `json:"ack_seconds,omitempty"`
 }
 
 // valid reports whether p is a setting the owner could have made.
@@ -77,6 +100,12 @@ func (p Pacing) valid() bool {
 		return false
 	}
 	if p.PerHour < 0 || p.PerHour > MaxTextsPerHour {
+		return false
+	}
+	if p.ChatMinutes != 0 && (p.ChatMinutes < MinChatMinutes || p.ChatMinutes > MaxChatMinutes) {
+		return false
+	}
+	if p.AckSeconds != 0 && (p.AckSeconds < MinAckSeconds || p.AckSeconds > MaxAckSeconds) {
 		return false
 	}
 	for _, u := range p.Urgent {
@@ -92,6 +121,23 @@ func (p Pacing) perHour() int {
 		return DefaultTextsPerHour
 	}
 	return p.PerHour
+}
+
+// chatWindow is how long a task chat stays open (CH-15).
+func (p Pacing) chatWindow() time.Duration {
+	if p.ChatMinutes == 0 {
+		return DefaultChatMinutes * time.Minute
+	}
+	return time.Duration(p.ChatMinutes) * time.Minute
+}
+
+// ackAfter is how long an unanswered task message waits for AckText
+// (OWN-4).
+func (p Pacing) ackAfter() time.Duration {
+	if p.AckSeconds == 0 {
+		return DefaultAckSeconds * time.Second
+	}
+	return time.Duration(p.AckSeconds) * time.Second
 }
 
 func (p Pacing) urgent(class Class) bool {
@@ -251,11 +297,16 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	return c.post(class, agentText(text), true)
 }
+
+// ErrNoModem is NotifyNow's and Converse's refusal with no modem: the
+// text was not sent (#2363).
+var ErrNoModem = errors.New("owner: no modem")
 
 // ErrPaced is NotifyNow's refusal in quiet hours or past the allowance.
 var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
@@ -273,9 +324,10 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 // counts toward the hour.
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
-		return errors.New("owner: no modem")
+		return ErrNoModem
 	}
-	if err := refuseReaction(text); err != nil {
+	text, err := checkAgent(text)
+	if err != nil {
 		return err
 	}
 	text = agentText(text)
@@ -295,13 +347,43 @@ func (c *Channel) NotifyNow(text string) error {
 	return c.sendReserved(at, text)
 }
 
-// agentText discloses agent-derived text, prefixes it with AgentPrefix
-// unless it was withheld, and fits it to one text.
-func agentText(text string) string {
-	if text = Disclose(text); text != Hidden {
-		text = AgentPrefix + text
+// checkAgent strips agent-derived text of control and bidi characters
+// (control.StripControls), refuses a reaction form, and discloses it
+// (AgentSecret), so the reaction check and CH-19 read the text the
+// owner's phone shows (CH-12). Callers send the text it returns.
+func checkAgent(text string) (string, error) {
+	s := control.StripControls(text)
+	if err := refuseReaction(s); err != nil {
+		return s, err
 	}
-	return control.Fit(text)
+	if AgentSecret(text) {
+		return Hidden, nil
+	}
+	return s, nil
+}
+
+// AgentSecret reports whether agent text is secret-shaped (SecretShaped)
+// in any of three readings: as written, stripped with a Cc's gap as a
+// space (control.StripControls, the text that is sent, so a control cannot
+// join a code word to its code), or with every control removed and no gap
+// (control.JoinControls, so a control cannot split a key or a code in two)
+// (CH-19, #2346).
+func AgentSecret(text string) bool {
+	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
+}
+
+// agentText strips and discloses agent-derived text, prefixes it with
+// AgentPrefix unless it was withheld, and fits it to one text in the
+// encoding it needs, emoji and line breaks kept (CH-12).
+func agentText(text string) string {
+	if text != Hidden {
+		if AgentSecret(text) {
+			text = Hidden
+		} else {
+			text = AgentPrefix + control.StripControls(text)
+		}
+	}
+	return control.FitAgent(text)
 }
 
 // sendCounted counts text toward the hour, sends it to the owner, and
@@ -549,9 +631,10 @@ func (c *Channel) releasePaced() error {
 
 // packHeld joins the dropped-texts line and the oldest held texts into
 // one text of at most control.MaxText. Agent text always goes alone, so a
-// " / " inside it cannot pass for the start of a broker text (CH-19). It
-// returns the text, how many held texts it carries, and the drops it
-// reports.
+// " / " inside it cannot pass for the start of a broker text (CH-19), and
+// is fitted as agent text, so its emoji and line breaks survive the hold
+// (CH-12). It returns the text, how many held texts it carries, and the
+// drops it reports.
 func packHeld(dropped int, held []HeldText) (string, int, int) {
 	var parts []string
 	size := 0
@@ -580,7 +663,7 @@ func packHeld(dropped int, held []HeldText) (string, int, int) {
 		}
 		n++
 		if h.Agent {
-			break
+			return control.FitAgent(h.Text), n, dropped
 		}
 	}
 	return control.Fit(strings.Join(parts, heldSep)), n, dropped
@@ -627,6 +710,15 @@ func (c *Channel) Urgent(class Class) bool {
 	return c.codes.st.Pacing.urgent(class)
 }
 
+// TextsPerHour is the owner's TEXTS setting, the unsolicited texts an
+// hour (CH-15): the question book's hourly limit reads it at each send,
+// so a change takes effect at once (#2363).
+func (c *Channel) TextsPerHour() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.codes.st.Pacing.perHour()
+}
+
 // Allowance is the unsolicited texts left in the hour before now,
 // counting approval requests and auto-reply notices (QH-5).
 func (c *Channel) Allowance(now time.Time) int {
@@ -645,7 +737,8 @@ func (c *Channel) allowanceLocked(now time.Time) int {
 }
 
 // pacingSetting answers the owner's pacing settings (QH-6, SG-r1-5):
-// QUIET a-b, QUIET OFF, TEXTS n, URGENT APPROVAL|AGENT ON|OFF. A message
+// QUIET a-b, QUIET OFF, TEXTS n, URGENT APPROVAL|AGENT ON|OFF, CHAT n
+// (CH-15), ACK n (OWN-4). A message
 // of another shape returns ok false. Locked, a pacing setting also
 // returns ok false, so it gets the unlock prompt and changes nothing.
 func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
@@ -683,6 +776,24 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 		change = func(p *Pacing) { p.PerHour = n }
 		reply = func(p Pacing) string {
 			return fmt.Sprintf("Texts set: %d an hour. More wait for the next hour, except %s and replies to you.", n, urgentNames(p))
+		}
+	case "CHAT":
+		n, err := strconv.Atoi(f[1])
+		if err != nil || n < MinChatMinutes || n > MaxChatMinutes {
+			return pacingForms, true
+		}
+		change = func(p *Pacing) { p.ChatMinutes = n }
+		reply = func(Pacing) string {
+			return fmt.Sprintf("Chat set: %d minutes. My questions go at once until %d minutes after your last message.", n, n)
+		}
+	case "ACK":
+		n, err := strconv.Atoi(f[1])
+		if err != nil || n < MinAckSeconds || n > MaxAckSeconds {
+			return pacingForms, true
+		}
+		change = func(p *Pacing) { p.AckSeconds = n }
+		reply = func(Pacing) string {
+			return fmt.Sprintf("Acknowledgement set: %d seconds. If no reply has gone by then, I text %q", n, AckText)
 		}
 	case "URGENT":
 		class := Class(strings.ToLower(f[1]))
@@ -737,7 +848,7 @@ func pacingShape(f []string) bool {
 	switch f[0] {
 	case "QUIET":
 		return (len(f) == 2 && f[1] == "OFF") || (len(f) == 3 && isDigits(f[1]) && isDigits(f[2]))
-	case "TEXTS":
+	case "TEXTS", "CHAT", "ACK":
 		return len(f) == 2 && isDigits(f[1])
 	case "URGENT":
 		if len(f) != 3 {

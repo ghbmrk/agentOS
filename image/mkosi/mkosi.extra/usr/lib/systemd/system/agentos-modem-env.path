@@ -1,0 +1,11 @@
+# Restarts the modem bridge once agentosd names the owner in /etc/agentos/modem.env at setup finish
+# (P2-2w c4c r1), without a reboot. agentosd only writes the file: it may not start a process (ARC-2).
+[Unit]
+Description=agentOS modem bridge owner's number
+
+[Path]
+PathChanged=/etc/agentos/modem.env
+Unit=agentos-modem-env.service
+
+[Install]
+WantedBy=paths.target

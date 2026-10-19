@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -19,7 +20,7 @@ func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s
 var (
 	canaryJWT = b64(`{"alg":"RS256","typ":"JWT","kid":"CANARYKID0001"}`) + "." +
 		b64(`{"email":"canary@example.invalid","sub":"CANARYSUB0001"}`) + ".CANARYSIGNATUREabcdefghijklmnop"
-	canaryRT  = "rt_qzvwkxq0123456789zzqqvvkk.CANARYTAIL0001"
+	canaryRT  = "Zq.C." + strings.Repeat("CANARYTAIL_0123456789", 10)[:191] // the measured shape, 2.1.191
 	canaryKey = "sk-proj-CANARYAPIKEY0123456789abcdefghij"
 	canaryOdd = "CANARYOPAQUE0123456789abcdefghijklmn"
 )
@@ -64,7 +65,7 @@ func TestShapes(t *testing.T) {
 	json.Unmarshal(r.Fields["OPENAI_API_KEY"], &key)
 	json.Unmarshal(r.Fields["tokens.access_token"], &at)
 	json.Unmarshal(r.Fields["tokens.account_id"], &odd)
-	if rt.Prefix != "rt_" || rt.Formats["2"] != "full" || rt.Len != len(canaryRT) {
+	if rt.Prefix != "none" || rt.Formats["2"] != "full" || rt.Len != 196 || fmt.Sprint(rt.Segments) != "[2 1 191]" {
 		t.Errorf("refresh shape %+v", rt)
 	}
 	if key.Prefix != "sk-proj-" || key.Formats["0"] != "full" {

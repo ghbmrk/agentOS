@@ -170,9 +170,12 @@ func TestThePageApprovesOnlyWithACode(t *testing.T) {
 		t.Fatalf("decisions %+v", d)
 	}
 	// Told to the owner, coalesced with the sign-in an hour ago (UX A6).
+	// The sign-in text goes out after the page's reply; while it is out,
+	// FlushLocal sends nothing and leaves the answers to the next Tick, so
+	// wait for it first (#1801).
+	a.ch.WaitSends()
 	a.advance(owner.SignInAlertEvery)
 	a.ch.FlushLocal()
-	a.ch.WaitSends()
 	var told []string
 	for _, m := range a.carrier.Log() {
 		if m.To == ownerNum {

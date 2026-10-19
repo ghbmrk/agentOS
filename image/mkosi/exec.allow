@@ -1,5 +1,6 @@
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
-# (#1556): udev rules, system and environment generators, and modules-load.d, in etc, usr/local/lib,
+# (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
+# sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
@@ -9,17 +10,22 @@
 # old entry). With the image tree at hand:
 #   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
 etc/modules-load.d/modules.conf	sha256:c0d37c5c430cb5c978a4ea00e42ddc4551b04f76352d149d6be5d5b65346df65
+usr/lib/modprobe.d/agentos-no-bluetooth.conf	sha256:8e276ae184649030b6c135c7634444d955b4c10818050973d8e24cbfa67b3413
+usr/lib/modprobe.d/aliases.conf	sha256:0ffc97a5b69113438c1b7e162ef6871e197e24973f359bfbeef448b089bd67e5
+usr/lib/modprobe.d/fbdev-blacklist.conf	sha256:e99b6166cf309aa1cbbd296d9fbf93af567148c7316c8d5d7a057cf3e85113ea
+usr/lib/modprobe.d/systemd.conf	sha256:e5a3958cbd3684b63f3cada6604469cc56f727b106d5524daf5aefa6935a48ce
+usr/lib/sysctl.d/10-coredump-debian.conf	sha256:3d5c444546b233789f329861de2561afa8cd58340ef70aa81ca0ccbbd5a55068
+usr/lib/sysctl.d/50-pid-max.conf	sha256:a8917a1218bf2809643c2f3931f794ac6d4edfd6da28b250526f9bf11f34f1fd
+usr/lib/sysctl.d/99-agentos-nodump.conf	sha256:c10f9a86da9cb018ff13d753e95fc5220fba8450ec9f3e6b2bde0112f766e7fc
 usr/lib/systemd/system-generators/systemd-bless-boot-generator	sha256:7fa0690753b215a64306e0f45bd78823e500c345005e0564d272bcffeb9a89b5
 usr/lib/systemd/system-generators/systemd-debug-generator	sha256:0ed5110c491db1663a505b27658464d18516be2436310ab3e7074872a6b78d57
 usr/lib/systemd/system-generators/systemd-fstab-generator	sha256:48b1e471ae09e84b1077275bf3e3620c28b7aa915837bf333cef20147ef370ea
 usr/lib/systemd/system-generators/systemd-getty-generator	sha256:03b892ea431712300685687841c23ed8927317e7f52a2dcaa5d59a92a3b024c6
 usr/lib/systemd/system-generators/systemd-gpt-auto-generator	sha256:5cab1473324acfe319121786aa49cb3a34e73ad715c673c34068799827abf2ff
 usr/lib/systemd/system-generators/systemd-hibernate-resume-generator	sha256:2230099ee3150e2b5568d0a8a602d2f64a43346a1fd64f61acd9975230a625cf
-usr/lib/systemd/system-generators/systemd-rc-local-generator	sha256:4924e494016eb3fac64c7d224d570d8d6b63dfdda44e2e5f50096c47ed21b966
 usr/lib/systemd/system-generators/systemd-run-generator	sha256:ef797a9f83c1052c10f60194dd25f0cd051418b76ef89d598feeb3a25f0ffba5
 usr/lib/systemd/system-generators/systemd-ssh-generator	sha256:7dcfab738a560149936db7b11ebfa5ca9317b50902cabbd48739ba77b001c649
 usr/lib/systemd/system-generators/systemd-system-update-generator	sha256:a4530d6dc256d902786acb32372b678f196a4a760db135a0bbd68e35c4ce9824
-usr/lib/systemd/system-generators/systemd-sysv-generator	sha256:662f91830e6f76e08a47be605ba2480ae87add1eac44aa095629bc0a4484cb11
 usr/lib/systemd/system-generators/systemd-tpm2-generator	sha256:07dd5f254baa1f830c1ce97d9155b79fdde4e61a6ff84b0161439f63fc250f77
 usr/lib/udev/rules.d/50-firmware.rules	sha256:37895a6ae81ab0e8753eb97a7c11b7cf578549e06fbbf2d6b192d109bc2cd9a3
 usr/lib/udev/rules.d/50-udev-default.rules	sha256:2fc7f00aa36ea57400d14b9a765b7d26f39a004f9bf666f69283d9aa5aaa34d2

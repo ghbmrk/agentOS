@@ -187,9 +187,6 @@ type ownerForget struct {
 	learned func(goal string) int
 	// forget is learning.forgetTask: tombstone first, then every store.
 	forget func(goal string) error
-	// digest, if set, purges the goal from the digest queue (CAP-3,
-	// W5-Dc); a send in flight refuses it, so the forget stays owed.
-	digest func(ref string) error
 	// forgotten reports a goal's tombstone (forgotten.has).
 	forgotten func(goal string) bool
 	gate      atomic.Pointer[pauseGateBox]
@@ -226,10 +223,6 @@ type ownerForget struct {
 	// finishOwed texts once the start-up replay has finished them.
 	owed        *forgetOwed
 	owedAtStart []string
-	// restoredGoals are the goals a restored forget log holds, which
-	// finishOwed asks the digest queue to forget again at each boot
-	// (W3-forget-b2c-f1-r1 R1D; Security 1 on #602).
-	restoredGoals []string
 	// tell, if set, sends an owner text and reports whether it went
 	// (loop2Notify.try); a done text is owed until it does (L3 B1 on
 	// #425). Unset, inform sends and is taken as sent.
@@ -247,7 +240,7 @@ type ownerForget struct {
 	// carrying: approved item 2s not saved, by ID, that carryAgent is
 	// trying again; resumeAgent leaves them to it.
 	carrying map[string]bool
-	// retrying: item 1 forgets retry or purgeLater is still finishing, by
+	// retrying: item 1 forgets retry is still finishing, by
 	// goal, which RetryNote counts (R1C).
 	retrying map[string]bool
 	// stillTold: take-backs told forgetAgentStillHeld in this boot, by
@@ -563,7 +556,7 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	if owedErr != nil {
 		log.Printf("forget: done text not kept for a restart: %v", owedErr)
 	}
-	err := f.forgetAll(goal)
+	err := f.forget(goal)
 	switch {
 	case err == nil:
 		back := f.agentBackWithoutAsking(ctx, in.ID)
@@ -588,28 +581,6 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	logged := f.logForget(goal, time.Time{}, false)
 	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil, logged)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
-}
-
-// wireDigest makes dg the digest queue's purge and has dg replay the
-// tombstone at each open, so a stop between the tombstone and the purge
-// leaves no batch to send (W5-Dc-r12).
-func (f *ownerForget) wireDigest(dg *digestBox, tombstoned func() []string) {
-	f.digest = dg.forget
-	dg.cfg.Forgotten = tombstoned
-}
-
-// forgetAll is forget, then the digest queue's purge.
-func (f *ownerForget) forgetAll(goal string) error {
-	if err := f.forget(goal); err != nil {
-		return err
-	}
-	if f.digest == nil {
-		return nil
-	}
-	if err := f.digest(goal); err != nil {
-		return fmt.Errorf("digest: %w", err)
-	}
-	return nil
 }
 
 // retry forgets goal again with backoff until every save holds, saying
@@ -640,7 +611,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 		if !logged {
 			logged = f.logForget(goal, time.Time{}, false)
 		}
-		err := f.forgetAll(goal)
+		err := f.forget(goal)
 		if err == nil {
 			f.done(ctx, goal, forgetDone(undone, false, logged), owedForget{Since: since, Undone: undone, Logged: logged})
 			return
@@ -1493,16 +1464,6 @@ func (f *ownerForget) paid(goal string) {
 // text stays owed until it sends (done). It runs once the owner channel is
 // attached.
 func (f *ownerForget) finishOwed(ctx context.Context) {
-	// A restore may bring back a digest queue that holds a restored goal,
-	// so each is asked again; a refusal is held by the digest box's own
-	// kept forgets (R1D).
-	if f.digest != nil {
-		for _, g := range f.restoredGoals {
-			if err := f.digest(g); err != nil {
-				log.Printf("forget: restored forget not purged from the digest yet: %v", err)
-			}
-		}
-	}
 	goals := f.owedAtStart
 	f.owedAtStart = nil
 	for _, g := range goals {
@@ -1521,41 +1482,10 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 			if !e.Logged {
 				e.Logged = f.logForget(g, time.Time{}, false)
 			}
-			// A restart can come between the forget and the digest
-			// queue's purge, so the purge is asked again before the done
-			// text (security B2 on #592).
-			if f.digest != nil {
-				if err := f.digest(g); err != nil {
-					log.Printf("forget: digest not purged yet: %v", err)
-					go f.purgeLater(ctx, g, e)
-					continue
-				}
-			}
 			f.done(ctx, g, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
 		default:
 			f.paid(g)
 		}
-	}
-}
-
-// purgeLater asks the digest queue to purge an owed forget's goal again
-// with backoff, then texts its done text; until then the forget stays
-// owed, so a shutdown leaves it to the next start-up.
-func (f *ownerForget) purgeLater(ctx context.Context, goal string, e owedForget) {
-	if f.retried != nil {
-		defer f.retried()
-	}
-	defer f.markRetrying(goal)()
-	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
-		if !f.sleep(ctx, wait) {
-			return
-		}
-		if err := f.digest(goal); err != nil {
-			log.Printf("forget: digest not purged yet: %v", err)
-			continue
-		}
-		f.done(ctx, goal, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
-		return
 	}
 }
 

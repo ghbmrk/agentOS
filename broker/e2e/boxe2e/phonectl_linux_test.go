@@ -12,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -126,7 +127,8 @@ var codeRe = regexp.MustCompile(`^STATUS ([0-9]{6})$`)
 // REQ: CH-1, CH-3, CH-11, CH-14. phoneControl runs against a real owner
 // channel and control handler on the carrier simulator: it passes, and it
 // fails when the box answers the unpaired number, takes its text as the
-// owner's, or runs STATUS without a fresh code's unlock (E9).
+// owner's, runs STATUS without a fresh code's unlock (E9), or sent a
+// recovery notice after setup, which it still notes (#1291, #2170 item 2).
 func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 	seed := []byte("12345678901234567890")
 	base := time.Date(2026, 10, 15, 12, 0, 5, 0, time.UTC)
@@ -145,8 +147,8 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		note     string // the step's note, "" for none
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
-		{name: "recovery notice passed over and noted", st: owner.State{LastStep: step}, enrolled: true, done: true,
-			notice: true, note: "passed-over recovery notices=1 texts=2 requests=1"},
+		{name: "recovery notice passed over, noted and failed", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			notice: true, want: "passed over 1 recovery notice(s)", note: "passed-over recovery notices=1 texts=2 requests=1|lost-send kind=request via=owner-channel-sendrequest"},
 		{name: "setup not finished", st: owner.State{LastStep: step}, enrolled: true, want: `setup not finished: GET /setup 200 "" at "7. AI"`},
 		{name: "stranger answered", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(l *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
@@ -242,7 +244,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			var notes []string
 			d := &driver{carrier: carrier, seed: seed, now: clk.now, sleep: clk.sleep,
 				phone: &http.Client{Transport: c.done, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-				note:  func(s string) { notes = append(notes, s) }}
+				note:  func(s string) { notes = append(notes, s) },
+				agentosdLog: func() string {
+					return "setup: done\n" + modemlink.MissedLog + " kind=request via owner.(*Channel).sendRequest\n"
+				}}
 			if c.enrolled {
 				d.codeStep = step
 			}

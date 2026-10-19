@@ -66,8 +66,10 @@ func (h *runHost) Destroy(context.Context, string) error { return nil }
 
 type okSeeder struct{}
 
-func (okSeeder) Seed(string, string) (map[string][]byte, error) { return map[string][]byte{}, nil }
-func (okSeeder) Close(string)                                   {}
+func (okSeeder) Seed(string, string, bool) (map[string][]byte, error) {
+	return map[string][]byte{}, nil
+}
+func (okSeeder) Close(string) {}
 
 // journaledRunner is agentosd's runner with every gate open on Codex, a
 // host that runs, and its Journal wired to rec.

@@ -1,6 +1,6 @@
 package main
 
-// REQ: CAP-3, CH-12, R1A, R1B, R1C, R1D
+// REQ: CAP-3, CH-12, R1A, R1B, R1C
 
 import (
 	"context"
@@ -17,19 +17,18 @@ import (
 // W3-forget-b2c-f1-r1 (L3 release 2 on #559, UX U4 and Security 1 on
 // #602; UX-182-3 of the UX lens on #182): a restore that replays an item 1
 // forget still retrying owes the owner the done text forgetNotSaved
-// promised; STATUS shows item 1 forgets still retrying; and a restore asks
-// the digest queue to forget each restored goal again.
+// promised; and STATUS shows item 1 forgets still retrying. (R1D, the
+// digest queue's purge of restored goals, retired with the digest: DRB-1.)
 
 // restoreBox opens the learning plane in dir as a boot does, with the
-// owner's texts and the digest queue's forgets recorded.
+// owner's texts recorded.
 type restoreBox struct {
 	t   *testing.T
 	dir string
 	cfg *daemon.Config
 
-	mu      sync.Mutex
-	texts   []string
-	digests []string
+	mu    sync.Mutex
+	texts []string
 }
 
 func (b *restoreBox) open() *learning {
@@ -42,19 +41,18 @@ func (b *restoreBox) open() *learning {
 	f := lp.forgetOwner
 	f.tell = func(s string) error { b.mu.Lock(); b.texts = append(b.texts, s); b.mu.Unlock(); return nil }
 	f.inform = func(s string) { b.mu.Lock(); b.texts = append(b.texts, s); b.mu.Unlock() }
-	f.digest = func(g string) error { b.mu.Lock(); b.digests = append(b.digests, g); b.mu.Unlock(); return nil }
 	return lp
 }
 
 // attach is the part of learning.attach that texts what the boot owes.
-func (b *restoreBox) attach(lp *learning) (texts, digests []string) {
+func (b *restoreBox) attach(lp *learning) []string {
 	b.mu.Lock()
-	b.texts, b.digests = nil, nil
+	b.texts = nil
 	b.mu.Unlock()
 	lp.forgetOwner.finishOwed(context.Background())
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]string(nil), b.texts...), append([]string(nil), b.digests...)
+	return append([]string(nil), b.texts...)
 }
 
 // cutOffRetrying runs an item 1 forget of goal whose first save fails,
@@ -104,7 +102,7 @@ func TestForgetRestoredRetryingIsToldDone(t *testing.T) {
 	b := &restoreBox{t: t, dir: t.TempDir()}
 	lp := b.open()
 	lp.tasks.put("owner:a", restoreCanary, false, viaSMS)
-	if texts, _ := b.attach(lp); len(texts) != 0 {
+	if texts := b.attach(lp); len(texts) != 0 {
 		t.Fatalf("the backup tells %q", texts)
 	}
 	writeRestoredLog(t, b.dir, entryJSON(1, e))
@@ -112,7 +110,7 @@ func TestForgetRestoredRetryingIsToldDone(t *testing.T) {
 	if !lp.forgotten.has("owner:a") {
 		t.Fatal("the restored forget was not replayed")
 	}
-	texts, digests := b.attach(lp)
+	texts := b.attach(lp)
 	if len(texts) != 1 || texts[0] != restoredDone {
 		t.Fatalf("after the restore the owner got %q, want one %q", texts, restoredDone)
 	}
@@ -121,12 +119,9 @@ func TestForgetRestoredRetryingIsToldDone(t *testing.T) {
 			t.Fatalf("a text names the task: %q", s)
 		}
 	}
-	if !contains(digests, "owner:a") {
-		t.Fatalf("the digest queue was not asked to forget the goal: %q", digests)
-	}
 	// The next boot re-reads the same restored log.
 	lp = b.open()
-	if texts, _ := b.attach(lp); len(texts) != 0 {
+	if texts := b.attach(lp); len(texts) != 0 {
 		t.Fatalf("the boot after the restore told %q again", texts)
 	}
 }
@@ -140,7 +135,7 @@ func TestForgetRestoredRetryingCrashBeforeTextIsTold(t *testing.T) {
 	writeRestoredLog(t, b.dir, entryJSON(1, e))
 	b.open() // crash: never attached
 	lp := b.open()
-	if texts, _ := b.attach(lp); len(texts) != 1 || texts[0] != restoredDone {
+	if texts := b.attach(lp); len(texts) != 1 || texts[0] != restoredDone {
 		t.Fatalf("after the crash the owner got %q", texts)
 	}
 }
@@ -166,7 +161,7 @@ func TestForgetRestoredToldOrBackedUpIsNotToldAgain(t *testing.T) {
 	}, ","))
 	lp = b.open()
 	want := lp.forgetOwner.doneLater(2, at.Add(-2*time.Hour), false, false)
-	texts, digests := b.attach(lp)
+	texts := b.attach(lp)
 	if len(texts) != 1 || texts[0] != want {
 		t.Fatalf("the owner got %q, want only the owed one's %q once", texts, want)
 	}
@@ -174,29 +169,10 @@ func TestForgetRestoredToldOrBackedUpIsNotToldAgain(t *testing.T) {
 		if !lp.forgotten.has(g) {
 			t.Fatalf("%s not replayed", g)
 		}
-		if !contains(digests, g) {
-			t.Fatalf("the digest queue was not asked to forget %s: %q", g, digests)
-		}
 	}
 	lp = b.open()
-	if texts, _ := b.attach(lp); len(texts) != 0 {
+	if texts := b.attach(lp); len(texts) != 0 {
 		t.Fatalf("the next boot told %q", texts)
-	}
-}
-
-// R1D: every restored goal, item 2's take-backs included, is asked of the
-// digest queue at each boot, whether or not a done text is owed for it.
-func TestForgetRestoredGoalsArePurgedFromTheDigest(t *testing.T) {
-	r := newForgetRig(t)
-	var got []string
-	r.f.digest = func(g string) error { got = append(got, g); return nil }
-	r.f.restoredGoals = []string{"owner:a", "owner:b"}
-	r.f.finishOwed(context.Background())
-	if !contains(got, "owner:a") || !contains(got, "owner:b") {
-		t.Fatalf("digest asked %q", got)
-	}
-	if len(r.texts) != 0 {
-		t.Fatalf("a purge told %q", r.texts)
 	}
 }
 

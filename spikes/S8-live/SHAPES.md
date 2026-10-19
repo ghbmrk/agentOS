@@ -1,6 +1,6 @@
 # Codex credential shapes from a supervised login (#2313)
 
-The Codex declaration's `CredFormats` (broker/provagent/declare.go; ASSUMPTIONS P17) are the
+The Codex declaration's `CredFormats` (broker/provagent/declare.go; ASSUMPTIONS CAP-11-plan-fu4-P17) are the
 public token shapes, not measured. This procedure records the shapes of the tokens a real
 sign-in leaves in the pinned CLI's `auth.json`: prefix, character classes, length and dot
 segments, and whether each declared format matches. No token value is ever printed, logged,
@@ -56,7 +56,7 @@ are the declaration's verbatim.
   the date.
 - #2313: the same shapes as a comment.
 - Then a follow-up PR confirms or corrects the Codex `CredFormats` in broker/provagent/declare.go
-  and ASSUMPTIONS P17 (tier A: broker/).
+  and ASSUMPTIONS CAP-11-plan-fu4-P17 (tier A: broker/).
 
 ## Assumptions
 
