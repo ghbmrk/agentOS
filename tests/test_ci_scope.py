@@ -280,6 +280,15 @@ def machines_problems(ci):
     if ci.count("\n  machines:\n") != 1:
         return ["no single machines job"]
     preamble = ci[:ci.index("\njobs:\n") + 1]
+    # Below `jobs:` every line not indented four or more is a job's own key, plain and unique,
+    # so no top-level key (defaults, env) and no quoted or repeated job id follows the jobs.
+    keys = [l for l in ci[len(preamble) + len("jobs:\n"):].split("\n")
+            if l.strip() and not l.lstrip().startswith("#") and not l.startswith("    ")]
+    bad = [l for l in keys if not re.fullmatch(r"  [a-z][\w-]*:", l)]
+    if bad:
+        return ["not a plain job key below jobs: %r" % bad[0]]
+    if len(set(keys)) != len(keys):
+        return ["a job key repeats"]
     start = ci.index("\n  machines:\n") + 1
     nxt = re.compile(r"^  \S", re.M).search(ci, start + 1)
     job = ci[start:nxt.start() if nxt else len(ci)]
@@ -444,6 +453,9 @@ class WiringTest(unittest.TestCase):
             "top-level BASH_ENV": ("  GOTOOLCHAIN: local\n", "  GOTOOLCHAIN: local\n  BASH_ENV: /tmp/x\n"),
             "an earlier step writes GITHUB_ENV": ("          runsc --version\n", "          runsc --version\n          echo BASH_ENV=/tmp/x >> \"$GITHUB_ENV\"\n"),
             "a carriage return": ("          rc=0\n", "          rc=0\r          true\n"),
+            "trailing top-level defaults": (ci, ci + "defaults:\n  run:\n    shell: bash {0}\n"),
+            "trailing top-level env": (ci, ci + "env:\n  BASH_ENV: /tmp/x\n"),
+            "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-latest\n  hostcheck:"),
             "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
         }
