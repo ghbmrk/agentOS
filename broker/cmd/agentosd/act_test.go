@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
+	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/holder"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -78,7 +79,7 @@ func TestApprovedActPassesOnlyForItsExactBytes(t *testing.T) {
 	phone := carrier.Line(ownerNum)
 	ch, err := owner.New(owner.Config{
 		Owner: ownerNum, Modem: box, Engine: pacingEngine{}, Store: &owner.MemStore{},
-		Verifier: ownerVerifier{checker: checker.VerifyClient(filepath.Join(dir, checker.VerifySocket))},
+		Verifier: ownerVerifier{checker: checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket))},
 		Limits:   owner.Limits{Hold: time.Hour, AmountLimit: 10000},
 		Location: time.UTC,
 	})
