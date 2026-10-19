@@ -28,10 +28,14 @@ type Secrets struct {
 // channel's last accepted step) nor its own last accepted step, and spends
 // a step that matches. counted is false for the silent checks of O5, which
 // the vault process bounds apart from the rest, so a flood of them never
-// refuses a counted check. An error means no check ran, and the channel
-// counts nothing; a *VerifyError says why.
+// refuses a counted check. acts are the checker acts (Item.Act) a code
+// approves: a code that matches also records a one-time approval for each,
+// which a credential holder spends when egress forwards those exact bytes
+// (CH-4, CH-10, ADP-10). A Verifier that cannot record them must not
+// accept the code. An error means no check ran, and the channel counts
+// nothing; a *VerifyError says why.
 type Verifier interface {
-	VerifyTOTP(code string, after int64, counted bool) (step int64, ok bool, err error)
+	VerifyTOTP(code string, after int64, counted bool, acts ...string) (step int64, ok bool, err error)
 }
 
 // UnlockProofPrefix marks a "code" that is the proof of an unknown-host

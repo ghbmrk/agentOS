@@ -1400,16 +1400,23 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 // operation, translating why a check did not run into the channel's terms.
 // With a checker, codes go to the checker, which holds the seed while the
 // vault is open and spends the same last step the unlock does (CH-4); the
-// vault process then checks only the unlock's proof.
+// vault process then checks only the unlock's proof. Acts (owner.Item.Act)
+// go to the checker with the code, which approves each once for the
+// holders (CH-4, CH-10); the vault process records no acts, so a code that
+// carries acts and cannot reach a checker is not checked at all.
 type ownerVerifier struct {
 	v       *modelroute.Verifier
 	checker *checker.Client
 }
 
-func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
-	if o.checker != nil && !strings.HasPrefix(code, owner.UnlockProofPrefix) {
-		step, ok, err := o.checker.VerifyTOTP(code, after, counted)
+func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...string) (int64, bool, error) {
+	proof := strings.HasPrefix(code, owner.UnlockProofPrefix)
+	if o.checker != nil && !proof {
+		step, ok, err := o.checker.VerifyTOTP(code, after, counted, acts...)
 		return step, ok, checkerVerifyErr(err)
+	}
+	if len(acts) > 0 {
+		return 0, false, &owner.VerifyError{Kind: owner.VaultDown}
 	}
 	step, ok, err := o.v.VerifyTOTP(code, after, counted)
 	return step, ok, ownerVerifyErr(err)

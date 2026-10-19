@@ -103,6 +103,10 @@ type strongOpts struct {
 	// unlocked the box and is never an approval, RESUME or chat code
 	// (#65 security C1).
 	proof bool
+	// acts are the checker acts of the items this code approves
+	// (Item.Act). Only a Verifier can record them, so with acts set
+	// neither a grid cell nor a local seed matches (CH-4, CH-10).
+	acts []string
 }
 
 // VerifyBreaker is how long the channel stops asking the vault process
@@ -114,9 +118,14 @@ const VerifyBreaker = 30 * time.Second
 // a code-generator step (the current one or the one before, since texts
 // arrive late; never at or before the last step accepted). step is 0 for a
 // grid cell. Nothing here changes, except that a Verifier spends a step
-// that matches. err means the Verifier could not check.
-func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, step int64, cell string, err error) {
-	if c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
+// that matches. err means the Verifier could not check. With acts, only the
+// Verifier may match, since only it records the approvals the holders
+// spend; with no Verifier, nothing is checked (VaultDown).
+func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []string) (ok bool, step int64, cell string, err error) {
+	if len(acts) > 0 && c.verify == nil {
+		return false, 0, "", &VerifyError{Kind: VaultDown}
+	}
+	if len(acts) == 0 && c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
 		eq(got, GridCell(c.sec.GridSeed, c.challenge)) {
 		return true, 0, c.challenge, nil
 	}
@@ -124,7 +133,7 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool) (ok bool, st
 		if now.Before(c.verifyOffUntil) {
 			return false, 0, "", &VerifyError{Kind: VaultDown}
 		}
-		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep, !silent)
+		step, ok, err := c.verify.VerifyTOTP(got, c.st.LastStep, !silent, acts...)
 		var ve *VerifyError
 		switch {
 		case !errors.As(err, &ve):
@@ -162,7 +171,7 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 		// Refused before the vault process sees it, and not counted.
 		return strongWrong, false, nil
 	}
-	ok, step, cell, err := c.matchStrong(got, now, o.silent)
+	ok, step, cell, err := c.matchStrong(got, now, o.silent, o.acts)
 	if err != nil {
 		return strongWrong, false, err
 	}

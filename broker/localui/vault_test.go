@@ -749,7 +749,7 @@ type proofVerifier struct {
 	refuse bool
 }
 
-func (p *proofVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+func (p *proofVerifier) VerifyTOTP(code string, after int64, counted bool, _ ...string) (int64, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.proofs = append(p.proofs, code)

@@ -24,15 +24,20 @@ type fakeVerifier struct {
 	last    int64
 	afters  []int64
 	counted []bool
+	// acts is each call's acts; approved holds the acts of codes that
+	// matched, as the checker records them (CH-4).
+	acts     [][]string
+	approved []string
 	// proof, when set, is a vault unlock's ticket whose sign-in proof
 	// (UnlockProofPrefix+proof) matches once (P2-4f).
 	proof string
 }
 
-func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool) (int64, bool, error) {
+func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...string) (int64, bool, error) {
 	f.mu.Lock()
 	f.afters = append(f.afters, after)
 	f.counted = append(f.counted, counted)
+	f.acts = append(f.acts, acts)
 	block := f.block
 	f.mu.Unlock()
 	if block != nil {
@@ -55,6 +60,7 @@ func (f *fakeVerifier) VerifyTOTP(code string, after int64, counted bool) (int64
 	step, ok := MatchTOTP(f.seed, code, f.now(), max(after, f.last))
 	if ok {
 		f.last = step
+		f.approved = append(f.approved, acts...)
 	}
 	return step, ok, nil
 }

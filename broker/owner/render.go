@@ -163,6 +163,12 @@ type Item struct {
 	// term (ADP-9, SR3-3). The local page shows every term; the text
 	// keeps the one-line Object (CH-12).
 	Terms TermList `json:",omitempty"`
+	// Act, for an effect a credential holder forwards, is the checker
+	// act over the exact request bytes egress will forward
+	// (checker.Act): a strong code that approves the item records an
+	// approval for this act alone, so a body changed after approval is
+	// refused at the holder (CH-4, CH-10). It is not rendered.
+	Act   string `json:",omitempty"`
 	Facts Facts
 	// Asked, when set, marks an item re-issued after a restart: its line
 	// ends "asked 14:02, re-sent after restart" with the time it was
@@ -240,6 +246,11 @@ func ItemSum(it Item) string {
 		// Likewise; "T" cannot start a quoted field, so the two
 		// appendices never read as each other.
 		s += fmt.Sprintf("|T%q", it.Terms)
+	}
+	if it.Act != "" {
+		// Likewise: a re-issue that would approve other bytes is not
+		// the item the owner saw.
+		s += fmt.Sprintf("|A%q", it.Act)
 	}
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])

@@ -17,7 +17,7 @@ import (
 // fixed synthetic code.
 type codeVerifier struct{}
 
-func (codeVerifier) VerifyTOTP(code string, after int64, _ bool) (int64, bool, error) {
+func (codeVerifier) VerifyTOTP(code string, after int64, _ bool, _ ...string) (int64, bool, error) {
 	step := time.Now().Unix() / 30
 	return step, code == "246810" && step > after, nil
 }

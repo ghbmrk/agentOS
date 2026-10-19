@@ -457,7 +457,15 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		// asks; the texted code is only in the text (L3 M1 on #165).
 		texted = ""
 	}
-	ok, locked, emsg := c.checkLocked(texted, rp.code, now)
+	// The approved items' acts go with the code, so the checker approves
+	// exactly the bytes the owner approved and no others (CH-4, CH-10).
+	var acts []string
+	for i, it := range r.items {
+		if !r.done[i] && (all || chosen[i]) && it.Act != "" {
+			acts = append(acts, it.Act)
+		}
+	}
+	ok, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
 	if emsg != "" {
 		return []string{emsg}, false, true
 	}
