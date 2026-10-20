@@ -2302,7 +2302,9 @@ func (g *Gate) flush(paced bool) {
 	now := g.cfg.Now()
 	g.mu.Lock()
 	ids, own := g.batch, g.own
-	stopped := g.eng != nil && g.eng.Stopped()
+	// Halted, as reissueDue: after a STOP that failed to record, an
+	// answer to a re-issued ask could not be acted on (#2463).
+	stopped := g.eng != nil && g.eng.Halted()
 	g.batch = nil
 	var low, high, again, page []owner.Item
 	// Each re-issued item goes under its original expiry as an absolute

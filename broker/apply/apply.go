@@ -115,8 +115,9 @@ type Config struct {
 	// Nil: none.
 	Excluded func(time.Time) bool
 	// Stopped reports STOP in force (CH-11): nothing is handed over and no
-	// restart happens while it holds. Nil: the Journal's own Stopped, which
-	// *journal.Engine has; New refuses a journal without one.
+	// restart happens while it holds. Nil: the Journal's own Halted, which
+	// *journal.Engine has, so a STOP that failed to record holds too
+	// (#2463); else its Stopped; New refuses a journal with neither.
 	Stopped func() bool
 	// LastTalk is when the owner was last delivered a message or the
 	// agent last replied. Within Quiet of it the box is not free, so a
@@ -298,11 +299,14 @@ func New(cfg Config) (*Applier, error) {
 		cfg.Excluded = func(time.Time) bool { return false }
 	}
 	if cfg.Stopped == nil {
-		j, ok := cfg.Journal.(interface{ Stopped() bool })
-		if !ok {
+		switch j := cfg.Journal.(type) {
+		case interface{ Halted() bool }:
+			cfg.Stopped = j.Halted
+		case interface{ Stopped() bool }:
+			cfg.Stopped = j.Stopped
+		default:
 			return nil, errors.New("apply: Stopped is required")
 		}
-		cfg.Stopped = j.Stopped
 	}
 	if cfg.LastTalk == nil {
 		cfg.LastTalk = func() time.Time { return time.Time{} }
