@@ -563,6 +563,38 @@ func TestSettleAcrossADeletionCountsHeldAgentTexts(t *testing.T) {
 	}
 }
 
+// REQ: CAP3-F1
+// With learning off a deletion still counts the held agent texts it
+// dropped; a settle across a deletion that dropped none tells nothing;
+// and recall's count goes out as the same broker text (later items on
+// #2510).
+func TestHeldDroppedCountHasOneSender(t *testing.T) {
+	r := newEvRig(t, "")
+	o := pacedOwner(t, quiet22to7(), at23)
+	own := func() *owner.Channel { return o.ch }
+	r.ev.wireOwner(own)
+	if err := o.ch.Notify("Held agent text."); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); n != 1 || err != nil {
+		t.Fatalf("learning off: forgot %d %v", n, err)
+	}
+	gen, _ := r.ev.kept.pending(&fakeOutbox{})
+	if _, err := r.ev.kept.forget(); err != nil {
+		t.Fatal(err)
+	}
+	r.ev.kept.settle(gen)
+	if got := o.sent(); len(got) != 0 {
+		t.Fatalf("none held: sent %q", got)
+	}
+	if err := recallHeldDropped(own)(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.sent(); len(got) != 1 || got[0] != "A deletion dropped 2 held agent texts." {
+		t.Fatalf("recall: sent %q", got)
+	}
+}
+
 // fencedEvidenceGate is a real journal engine as the evidence setting
 // uses it, its destination fixed: the reply under a fence comes from the
 // engine's own error, not a fake's.

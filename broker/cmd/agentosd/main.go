@@ -829,7 +829,7 @@ func main() {
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
-		Notify: recallNotify(d.Owner)}
+		Notify: recallNotify(d.Owner), HeldDropped: recallHeldDropped(d.Owner)}
 	// and every reply kept on the box (CH-20).
 	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
@@ -1514,6 +1514,13 @@ func recallNotify(own func() *owner.Channel) func(string) error {
 		}
 		return errors.New("no owner channel")
 	}
+}
+
+// recallHeldDropped tells the owner how many held agent texts a recall
+// reset with no confirmation of its own dropped, through the same sender
+// as a reply routed across a deletion (CAP3-F1).
+func recallHeldDropped(own func() *owner.Channel) func(int) error {
+	return func(n int) error { return tellHeldDropped(own(), n) }
 }
 
 // ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,

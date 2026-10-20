@@ -44,6 +44,9 @@ type ServiceConfig struct {
 	// Notify tells the owner an approved rollback is done (the owner
 	// channel's Notify).
 	Notify func(text string) error
+	// HeldDropped is Reach.HeldDropped: the held agent texts a deletion
+	// dropped, told as broker text (CAP3-F1).
+	HeldDropped func(n int) error
 	// OnTakenBack is Reach.OnTakenBack: a take-back Retry finished goes
 	// to the caller instead of Notify (RCH-3).
 	OnTakenBack func(lineage string, since time.Time)
@@ -115,7 +118,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 		return fail(err)
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
-		Deleted: s.Index.Deleted, Ask: cfg.Ask, Notify: cfg.Notify, OnTakenBack: cfg.OnTakenBack, Location: cfg.Location, Logf: cfg.Logf}
+		Deleted: s.Index.Deleted, Ask: cfg.Ask, Notify: cfg.Notify, HeldDropped: cfg.HeldDropped, OnTakenBack: cfg.OnTakenBack, Location: cfg.Location, Logf: cfg.Logf}
 	s.Index.KeepTombstones(s.Reach.Needed)
 	// Registering replays every tombstone, so a reach a crash cut short
 	// runs again (CAP-3).

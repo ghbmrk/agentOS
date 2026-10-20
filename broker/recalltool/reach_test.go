@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -194,16 +195,18 @@ func (a *fakeAsk) settle(id, how string) {
 }
 
 type reachRig struct {
-	r      *rig
-	j      *fakeJournal
-	vm     *fakeMachines
-	cs     *fakeCases
-	ask    *fakeAsk
-	reach  *Reach
-	told   []string
-	clock  time.Time
-	mail   string
-	before time.Time // a restore point before the read
+	r     *rig
+	j     *fakeJournal
+	vm    *fakeMachines
+	cs    *fakeCases
+	ask   *fakeAsk
+	reach *Reach
+	told  []string
+	// dropped: the counts told through HeldDropped (CAP3-F1).
+	dropped []int
+	clock   time.Time
+	mail    string
+	before  time.Time // a restore point before the read
 }
 
 // newReachRig: lineage "root" reads public items, then the owner's mail at
@@ -220,7 +223,8 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
 		Now: func() time.Time { return x.clock }, Location: time.UTC,
-		Notify: func(s string) error { x.told = append(x.told, s); return nil }}
+		Notify:      func(s string) error { x.told = append(x.told, s); return nil },
+		HeldDropped: func(n int) error { x.dropped = append(x.dropped, n); return nil }}
 	x.ask.reach, x.ask.j = x.reach, x.j
 	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
@@ -1050,8 +1054,8 @@ func TestUnaskedResetCountsDroppedHeldTexts(t *testing.T) {
 	x, _ := newReachRig(t)
 	x.cs.held = 1
 	x.del(t, x.mail)
-	if len(x.vm.calls) != 1 || len(x.told) != 1 || x.told[0] != "A deletion dropped 2 held agent texts." {
-		t.Fatalf("resets %v, told %q", x.vm.calls, x.told)
+	if len(x.vm.calls) != 1 || len(x.told) != 0 || !slices.Equal(x.dropped, []int{2}) {
+		t.Fatalf("resets %v, told %q, dropped %v", x.vm.calls, x.told, x.dropped)
 	}
 
 	y, read := newReachRig(t)
@@ -1059,13 +1063,58 @@ func TestUnaskedResetCountsDroppedHeldTexts(t *testing.T) {
 	if err := y.reach.TakeBack(context.Background(), "root", read, true); err != nil {
 		t.Fatal(err)
 	}
-	if len(y.vm.calls) != 1 || len(y.told) != 1 || y.told[0] != "A deletion dropped 2 held agent texts." {
-		t.Fatalf("take-back: resets %v, told %q", y.vm.calls, y.told)
+	if len(y.vm.calls) != 1 || len(y.told) != 0 || !slices.Equal(y.dropped, []int{2}) {
+		t.Fatalf("take-back: resets %v, told %q, dropped %v", y.vm.calls, y.told, y.dropped)
 	}
 
 	z, _ := newReachRig(t)
 	z.del(t, z.mail)
-	if len(z.vm.calls) != 1 || len(z.told) != 0 {
-		t.Fatalf("none dropped: resets %v, told %q", z.vm.calls, z.told)
+	if len(z.vm.calls) != 1 || len(z.told) != 0 || len(z.dropped) != 0 {
+		t.Fatalf("none dropped: resets %v, told %q, dropped %v", z.vm.calls, z.told, z.dropped)
+	}
+}
+
+// REQ: CAP3-F1
+// A reset finished again once an intent in flight settles tells the count
+// its own forget drops: the replay when the deletion is reached again,
+// and Retry's sweep of a take-back's reset (later items on #2510).
+func TestFinishedAgainCountsDroppedHeldTexts(t *testing.T) {
+	ctx := context.Background()
+	x, read := newReachRig(t)
+	x.j.submitted["running"] = read.Add(time.Second)
+	x.j.inFlight["running"] = true
+	x.del(t, x.mail)
+	x.ask.answer("yes")
+	if len(x.told) != 1 || len(x.dropped) != 0 || x.reach.Pending() != 1 {
+		t.Fatalf("approved: told %q, dropped %v, pending %d", x.told, x.dropped, x.reach.Pending())
+	}
+	x.cs.held = 1
+	delete(x.j.inFlight, "running")
+	if err := x.reach.Retry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !x.j.erased["running"] || x.reach.Pending() != 0 || len(x.told) != 1 || !slices.Equal(x.dropped, []int{2}) {
+		t.Fatalf("replay: erased %v, pending %d, told %q, dropped %v", x.j.erased, x.reach.Pending(), x.told, x.dropped)
+	}
+
+	y, read := newReachRig(t)
+	y.j.submitted["running"] = read.Add(time.Second)
+	y.j.inFlight["running"] = true
+	_ = y.reach.TakeBack(ctx, "root", read, true)
+	if len(y.vm.calls) != 1 || len(y.dropped) != 0 {
+		t.Fatalf("take-back: resets %v, dropped %v", y.vm.calls, y.dropped)
+	}
+	y.cs.held = 1
+	delete(y.j.inFlight, "running")
+	if err := y.reach.Retry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !y.j.erased["running"] || len(y.vm.calls) != 1 || !slices.Equal(y.dropped, []int{2}) {
+		t.Fatalf("retry: erased %v, resets %v, dropped %v", y.j.erased, y.vm.calls, y.dropped)
+	}
+	for _, told := range y.told {
+		if strings.Contains(told, "dropped") {
+			t.Fatalf("count told as agent text: %q", told)
+		}
 	}
 }
