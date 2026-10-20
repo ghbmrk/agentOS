@@ -161,10 +161,49 @@ func TestRunCapsOrganizeAndTrashNotUnsubscribe(t *testing.T) {
 			lines = append(lines, s.Text)
 		}
 	}
-	want := "Over today's limit of 200: " + itoa(total-organized) + " to label left for tomorrow."
+	want := "Over today's limit of 200: " + strconv.Itoa(total-organized) + " to label left for tomorrow."
 	if len(lines) != 1 || lines[0] != want {
 		t.Fatalf("status lines %q, want one %q", lines, want)
 	}
 }
 
-func itoa(n int) string { return strconv.Itoa(n) }
+// REQ: MIG-3-15
+// More spam than the cap: the cap is spent on trash alone, nothing is labelled,
+// and the mails left over are said once, counted as trash.
+func TestRunCapsTrashAndSaysWhatIsLeft(t *testing.T) {
+	in := fixtureInput(t)
+	var spam inbox.Mail
+	for _, m := range in.Mails {
+		if m.Class == "spam" {
+			spam = m
+			break
+		}
+	}
+	in.Mails = nil
+	for i := 0; i < 250; i++ {
+		m := spam
+		m.ID = "S" + strconv.Itoa(i)
+		in.Mails = append(in.Mails, m)
+	}
+	out, err := Run(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trashed := 0
+	for _, e := range out.Effects {
+		if e.Verb != "trash" {
+			t.Fatalf("effect %+v besides trash", e)
+		}
+		trashed++
+	}
+	want := "Over today's limit of 200: 50 to trash and 250 to label left for tomorrow."
+	var got []string
+	for _, s := range out.StatusLines {
+		if s.Cause == "daily-cap" {
+			got = append(got, s.Text)
+		}
+	}
+	if trashed != 200 || len(got) != 1 || got[0] != want {
+		t.Fatalf("%d trashed, status %q, want 200 and %q", trashed, got, want)
+	}
+}

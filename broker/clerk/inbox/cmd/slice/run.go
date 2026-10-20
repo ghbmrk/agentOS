@@ -162,9 +162,9 @@ func Run(in Input) (Outcome, error) {
 		}
 		approved = &v
 	}
-	// The hold is a caveat on the key handed to the planner, not a property of
-	// the planner: it cannot lift it. The daily cap is the planner's own (inbox.DailyCap).
-	planner, err := key.Derive(root, holderPriv, plannerPub, key.LimitHold(baseHoldMS, noveltyMS))
+	// The hold and the daily cap are caveats on the keys handed to the planner,
+	// not properties of the planner: it cannot lift them (inbox.PlannerKeys).
+	bulk, unsub, err := inbox.PlannerKeys(root, holderPriv, plannerPub, baseHoldMS, noveltyMS)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -186,7 +186,7 @@ func Run(in Input) (Outcome, error) {
 		acct.Preload(kernel.Idem(id, 0))
 		step := kernel.Normalize(id, key.Step{Verb: key.Unsubscribe, Clerk: inbox.Name,
 			Args: map[string]key.Arg{"to": {Value: h}}})
-		if err := k.Submit(t, kernel.Plan{ID: id, Key: planner, Steps: []key.Step{step}}); err != nil {
+		if err := k.Submit(t, kernel.Plan{ID: id, Key: unsub, Steps: []key.Step{step}}); err != nil {
 			return Outcome{}, err
 		}
 		for _, at := range []int64{t, t + noveltyMS} {
@@ -202,7 +202,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	t0 := now0.UnixMilli()
 	listing := acct.Listing()
-	plans, left := inbox.Plans(listing, planner)
+	plans, left := inbox.Plans(listing, bulk, unsub)
 	for _, p := range plans {
 		if err := k.Submit(t0, p); err != nil {
 			return Outcome{}, err
@@ -228,7 +228,7 @@ func Run(in Input) (Outcome, error) {
 				}
 			}
 		case s.PlannerStep != nil:
-			rf, err := plannerStep(k, acct, planner, fmt.Sprintf("script-%d", i), *s.PlannerStep, s.Forced, t0)
+			rf, err := plannerStep(k, acct, bulk, fmt.Sprintf("script-%d", i), *s.PlannerStep, s.Forced, t0)
 			if err != nil {
 				return Outcome{}, err
 			}
@@ -241,12 +241,12 @@ func Run(in Input) (Outcome, error) {
 		}
 	}
 
-	end, err := keyView(planner, ownerPub, in.Owner)
+	end, err := keyView(root, ownerPub, in.Owner)
 	if err != nil {
 		return Outcome{}, err
 	}
 	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), kernelRefusals...),
-		StatusLines: []StatusLine{}, Holds: holds(k, acct, planner, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
+		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
 		KeysAtApproval: approved, KeysAtEnd: end, OutsideMailClerk: outside(listing)}
 	for _, r := range out.Refusals {
 		if r.Reason == statusCause {
@@ -327,8 +327,8 @@ func rejectionCode(k *kernel.Kernel, plan string) string {
 }
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.
-func holds(k *kernel.Kernel, acct *inbox.Account, planner key.Key, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
-	ver, err := key.Verify(planner, owner)
+func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
+	ver, err := key.Verify(unsub, owner)
 	if err != nil {
 		return []Hold{}
 	}

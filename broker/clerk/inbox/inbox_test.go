@@ -31,6 +31,8 @@ type rig struct {
 	acct    *Account
 	k       *kernel.Kernel
 	planner key.Key
+	bulk    key.Key
+	unsub   key.Key
 	world   *World
 }
 
@@ -75,7 +77,18 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.bulk, r.unsub, err = PlannerKeys(root, holderPriv, plannerPub, 600_000, dayMS)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return r
+}
+
+// onKey is step on a given key.
+func (r *rig) onKey(k key.Key, id string, v key.Verb, args map[string]string) kernel.Plan {
+	p := r.step(id, v, args)
+	p.Key = k
+	return p
 }
 
 func (r *rig) step(id string, v key.Verb, args map[string]string) kernel.Plan {
@@ -192,21 +205,96 @@ func TestTrashNeedsRestorableRetention(t *testing.T) {
 	}
 }
 
-// Security 3: the cap is a caveat on the planner key and holds at the clerk.
-func TestPlannerKeyCapStopsTheNextAction(t *testing.T) {
-	r := newRig(t, 30, key.LimitRate(2))
-	for i, m := range []string{"M19", "M20", "M19"} {
-		id := []string{"a", "b", "c"}[i]
-		p := r.step(id, key.Trash, map[string]string{"target": m})
-		if err := r.k.Submit(t0, p); err != nil {
+// REQ: MIG-3-15
+// The cap is the key's, counted at the clerk from the log: a hostile planner
+// pushing 250 organizes on the key Run derives gets 200, and a restart in the
+// middle of the day does not reset the count. Unsubscribe is not counted.
+func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
+	r := newRig(t, 30)
+	organize := func(i int) kernel.Plan {
+		return r.onKey(r.bulk, "hostile-"+strconv.Itoa(i), key.Organize,
+			map[string]string{"target": "M19", "label": labelPrefix + r.acct.mails["M19"].Class})
+	}
+	for i := 0; i < 150; i++ {
+		if err := r.k.Submit(t0, organize(i)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := r.k.Tick(t0); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(r.acct.Effects()); n > 2 {
-		t.Fatalf("%d trashes under a cap of 2", n)
+	// Restart: a new kernel over the same log, as after a crash.
+	ownerPub, _ := seed(1)
+	k2, err := kernel.Boot(r.k.Log(), ownerPub, map[string]kernel.Clerk{Name: r.acct}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.k = k2
+	r.acct.Bind(k2.State())
+	for i := 150; i < 250; i++ {
+		_ = r.k.Submit(t0, organize(i))
+	}
+	if err := r.k.Tick(t0); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(r.acct.Effects()); n != DailyCap {
+		t.Fatalf("%d effects from 250 organizes, want %d", n, DailyCap)
+	}
+	// A trash is the 201st action of the same key and is refused too.
+	_ = r.k.Submit(t0, r.onKey(r.bulk, "trash-201", key.Trash, map[string]string{"target": "M19"}))
+	_ = r.k.Tick(t0)
+	if n := len(r.acct.Effects()); n != DailyCap {
+		t.Fatalf("%d effects after a 201st trash", n)
+	}
+	// Unsubscribe is another key and is not counted.
+	var h string
+	for _, it := range r.acct.Listing() {
+		if it.Sender != "" {
+			h = it.Sender
+			break
+		}
+	}
+	if h == "" {
+		t.Fatal("no eligible sender in the fixture")
+	}
+	r.run(t, r.onKey(r.unsub, "unsub-after-cap", key.Unsubscribe, map[string]string{"to": h}), t0+dayMS)
+	if n := len(r.acct.Effects()); n != DailyCap+1 {
+		t.Fatalf("%d effects, want the unsubscribe on top of the cap", n)
+	}
+}
+
+// REQ: MIG-3-15
+// The bulk key cannot unsubscribe, and the unsubscribe key cannot organize.
+func TestSiblingKeysCarryOnlyTheirOwnVerbs(t *testing.T) {
+	r := newRig(t, 30)
+	_ = r.k.Submit(t0, r.onKey(r.bulk, "u", key.Unsubscribe, map[string]string{"to": "x"}))
+	_ = r.k.Submit(t0, r.onKey(r.unsub, "o", key.Organize, map[string]string{"target": "M19", "label": "agentOS/spam"}))
+	for _, id := range []string{"u", "o"} {
+		if p := r.k.State().Plans[id]; p == nil || p.Status != kernel.SRejected {
+			t.Fatalf("plan %s was not rejected", id)
+		}
+	}
+}
+
+// REQ: MIG-3-16
+// A label is exactly agentOS/ plus the class the clerk assigned to that mail,
+// whatever the key allows: an owner-namespace label is refused at the clerk.
+func TestClerkRefusesAnyLabelButItsOwnClassLabel(t *testing.T) {
+	r := newRig(t, 30)
+	class := r.acct.mails["M19"].Class
+	for i, l := range []string{"Owner/Label", "agentOS/", "agentOS/other", "agentOS/" + class + "/x", "", "agentos/" + class} {
+		id := "lbl-" + strconv.Itoa(i)
+		r.run(t, r.onKey(r.bulk, id, key.Organize, map[string]string{"target": "M19", "label": l}))
+		if rf := r.lastRefusal(t); rf.Reason != "bad-label" {
+			t.Fatalf("label %q: refusal %+v", l, rf)
+		}
+	}
+	if n := len(r.acct.Effects()); n != 0 {
+		t.Fatalf("%d effects from bad labels", n)
+	}
+	r.run(t, r.onKey(r.bulk, "lbl-ok", key.Organize, map[string]string{"target": "M19", "label": "agentOS/" + class}))
+	if n := len(r.acct.Effects()); n != 1 {
+		t.Fatalf("%d effects from the right label", n)
 	}
 }
 
@@ -287,7 +375,7 @@ func TestHandleIsKeyedAndWide(t *testing.T) {
 
 func TestLabelsLiveUnderTheAgentOSNamespace(t *testing.T) {
 	r := newRig(t, 30)
-	plans, _ := Plans(r.acct.Listing(), r.planner)
+	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub)
 	for _, p := range plans {
 		for _, s := range p.Steps {
 			if l := s.Args["label"].Value; s.Verb == key.Organize && !strings.HasPrefix(l, "agentOS/") {
@@ -304,7 +392,7 @@ func TestAlertsAreNeitherUnsubscribableNorPlannedForTrash(t *testing.T) {
 			t.Fatal("alert mail was offered for unsubscribe")
 		}
 	}
-	plans, _ := Plans(r.acct.Listing(), r.planner)
+	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub)
 	for _, p := range plans {
 		if strings.HasSuffix(p.ID, "A01") && strings.HasPrefix(p.ID, "trash") {
 			t.Fatal("alert mail was planned for trash")
@@ -318,7 +406,7 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 		l = append(l, Item{Mail: "M" + strconv.Itoa(i), Class: "newsletter"})
 	}
 	l = append(l, Item{Mail: "S1", Class: "spam"}, Item{Mail: "U1", Class: "bulk", Sender: "h1"})
-	plans, left := Plans(l, key.Key{})
+	plans, left := Plans(l, key.Key{}, key.Key{})
 	var trash, org, unsub int
 	for _, p := range plans {
 		switch p.Steps[0].Verb {

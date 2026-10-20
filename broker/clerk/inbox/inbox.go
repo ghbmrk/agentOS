@@ -115,6 +115,10 @@ func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mail
 	return a, nil
 }
 
+// labelPrefix is the namespace the clerk files mail under; the label on a
+// message is this plus the class the clerk itself assigned to it.
+const labelPrefix = "agentOS/"
+
 // eligible is the one rule for unsubscribing: the reader calls the mail bulk
 // and VRB-2 holds for it now. It returns the one-click URL to post to.
 func (a *Account) eligible(m Mail) (string, bool) {
@@ -171,6 +175,9 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 		m, ok := a.mails[target]
 		if !ok {
 			return a.refuse(string(s.Verb), target, "unknown-mail")
+		}
+		if s.Verb == key.Organize && s.Args["label"].Value != labelPrefix+m.Class {
+			return a.refuse(string(s.Verb), target, "bad-label")
 		}
 		if s.Verb == key.Trash {
 			if m.Class != "spam" && m.Class != "phishing" {
