@@ -130,8 +130,8 @@ func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), 
 		w.WriteHeader(200)
 	}))
 	t.Cleanup(f.srv.Close)
-	sec := clerk.NewSecrets(sealer(t))
-	if err := sec.Put("web", []byte(canary)); err != nil {
+	sec := clerk.NewSecrets(sealer(t), nil)
+	if err := sec.Put("web", clerk.KindStatic, []byte(canary)); err != nil {
 		t.Fatal(err)
 	}
 	opub, opriv := gen(1)
@@ -287,7 +287,7 @@ func TestExitRefusesWhatKeyForbids(t *testing.T) {
 
 func TestNewExitRejectsUnsafeDeclarations(t *testing.T) {
 	opub, _ := gen(1)
-	sec := clerk.NewSecrets(sealer(t))
+	sec := clerk.NewSecrets(sealer(t), nil)
 	bad := map[string]clerk.Op{
 		"plain http":      {Verb: key.Fetch, Method: "GET", URL: "http://h.example/{url}"},
 		"templated host":  {Verb: key.Fetch, Method: "GET", URL: "https://{url}.example/"},
@@ -351,7 +351,7 @@ func TestExitDispatchIsLoggedBeforeTheRequestLeaves(t *testing.T) {
 }
 
 func TestExitRefusesSlotsOutsideThePath(t *testing.T) {
-	sec := clerk.NewSecrets(sealer(t))
+	sec := clerk.NewSecrets(sealer(t), nil)
 	opub, _ := gen(1)
 	for name, u := range map[string]string{
 		"host":           "https://{to}.example.invalid/v1",
@@ -375,7 +375,7 @@ func TestExitRefusesSlotsOutsideThePath(t *testing.T) {
 func TestExitDeclarationRefusesDuplicateVerb(t *testing.T) {
 	opub, _ := gen(1)
 	op := clerk.Op{Verb: key.Post, Method: "POST", URL: "https://example.invalid/v1/{to}", Content: "text"}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op, op}}, opub, clerk.NewSecrets(sealer(t)), nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op, op}}, opub, clerk.NewSecrets(sealer(t), nil), nil); err == nil {
 		t.Fatal("verb declared twice was accepted")
 	}
 }
@@ -481,9 +481,9 @@ func TestExitSendsFixedHeaders(t *testing.T) {
 
 func TestNewExitRefusesUnsafeShapes(t *testing.T) {
 	opub, _ := gen(1)
-	empty := clerk.NewSecrets(sealer(t))
-	one := clerk.NewSecrets(sealer(t))
-	if err := one.Put("web", []byte(canary)); err != nil {
+	empty := clerk.NewSecrets(sealer(t), nil)
+	one := clerk.NewSecrets(sealer(t), nil)
+	if err := one.Put("web", clerk.KindStatic, []byte(canary)); err != nil {
 		t.Fatal(err)
 	}
 	get := func(o clerk.Op) clerk.Op {
@@ -557,9 +557,9 @@ func TestNewExitRefusesUnsafeShapes(t *testing.T) {
 
 func TestNewExitRefusesUnlistedHeaders(t *testing.T) {
 	opub, _ := gen(1)
-	empty := clerk.NewSecrets(sealer(t))
-	one := clerk.NewSecrets(sealer(t))
-	if err := one.Put("web", []byte(canary)); err != nil {
+	empty := clerk.NewSecrets(sealer(t), nil)
+	one := clerk.NewSecrets(sealer(t), nil)
+	if err := one.Put("web", clerk.KindStatic, []byte(canary)); err != nil {
 		t.Fatal(err)
 	}
 	get := func(op clerk.Op) clerk.Op {
@@ -610,9 +610,9 @@ func TestExitHoldsOneSecretSlot(t *testing.T) {
 	op := func(v key.Verb, slot string) clerk.Op {
 		return clerk.Op{Verb: v, Method: "POST", URL: "https://h.example/v1", Slot: slot}
 	}
-	two := clerk.NewSecrets(sealer(t))
+	two := clerk.NewSecrets(sealer(t), nil)
 	for _, s := range []string{"web", "bank"} {
-		if err := two.Put(s, []byte(canary)); err != nil {
+		if err := two.Put(s, clerk.KindStatic, []byte(canary)); err != nil {
 			t.Fatal(err)
 		}
 	}

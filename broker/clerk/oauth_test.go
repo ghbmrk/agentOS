@@ -1,8 +1,9 @@
 package clerk_test
 
-// REQ: CLK-1, CLK-4
+// REQ: CLK-1, CLK-2, CLK-4, OWN-17
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -33,15 +35,27 @@ type oauthFix struct {
 	rotate  bool         // answer with a new refresh token
 	refuse  int          // token endpoint status, 0 for 200
 	deny    int          // status the API answers every request with, 0 to check the token
-	seal    atomic.Bool  // the store's sealer fails
-	issue   string       // the access token to issue, "" for canary-access-N
-	answer  string       // a raw token endpoint answer, "" for a good one
+	seal    *testSealer  // the store's sealer
+	d       clerk.Declaration
+	diskMu  sync.Mutex
+	disk    []byte      // the store's at-rest form, as last written
+	noWrite atomic.Bool // the store's writes fail
+	issue   string      // the access token to issue, "" for canary-access-N
+	answer  string      // a raw token endpoint answer, "" for a good one
+	// While gate is set, a token request signals entered and waits for
+	// release before it is answered.
+	gate             atomic.Bool
+	entered, release chan struct{}
 }
 
 func setupOAuth(t *testing.T) *oauthFix {
 	t.Helper()
-	o := &oauthFix{expires: 100, rotate: true}
+	o := &oauthFix{expires: 100, rotate: true, entered: make(chan struct{}), release: make(chan struct{})}
 	o.exitFix = setupExitOps(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" && o.gate.Load() {
+			o.entered <- struct{}{}
+			<-o.release
+		}
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if r.URL.Path == "/token" {
@@ -81,13 +95,14 @@ func setupOAuth(t *testing.T) *oauthFix {
 			fmt.Fprintf(w, "refused %s", r.Header.Get("Authorization"))
 		}
 	}, nil)
-	sec := clerk.NewSecrets(failingSealer{sealer(t), &o.seal})
-	if err := sec.Put("web", []byte(`{"refresh_token":"canary-refresh-0","client_id":"agentos-test","client_secret":"canary-client-secret"}`)); err != nil {
+	o.seal = &testSealer{Sealer: sealer(t)}
+	sec := o.durable()
+	if err := sec.Put("web", clerk.KindGrant, []byte(`{"refresh_token":"canary-refresh-0","client_id":"agentos-test","client_secret":"canary-client-secret"}`)); err != nil {
 		t.Fatal(err)
 	}
-	d := o.decl(o.ops)
-	d.Refresh = o.base() + "/token"
-	x, err := clerk.NewExit(d, o.opub, sec, o.roots)
+	o.d = o.decl(o.ops)
+	o.d.Refresh = o.base() + "/token"
+	x, err := clerk.NewExit(o.d, o.opub, sec, o.roots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,13 +111,49 @@ func setupOAuth(t *testing.T) *oauthFix {
 	return o
 }
 
-// failingSealer fails every Seal while fail is set.
-type failingSealer struct {
-	clerk.Sealer
-	fail *atomic.Bool
+// durable is an empty durable store that writes to o.disk.
+func (o *oauthFix) durable() *clerk.Secrets {
+	return clerk.NewSecrets(o.seal, func(b []byte) error {
+		if o.noWrite.Load() {
+			return errors.New("write failed")
+		}
+		o.diskMu.Lock()
+		o.disk = bytes.Clone(b)
+		o.diskMu.Unlock()
+		return nil
+	})
 }
 
-func (s failingSealer) Seal(plain, aad []byte) ([]byte, error) {
+// restart builds the exit again from the store's at-rest form, as a reboot
+// of the core does: nothing survives in memory.
+func (o *oauthFix) restart(t *testing.T, now int64) {
+	t.Helper()
+	sec := o.durable()
+	o.diskMu.Lock()
+	err := sec.UnmarshalBinary(o.disk)
+	o.diskMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err := clerk.NewExit(o.d, o.opub, sec, o.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.x, o.sec = x, sec
+	o.reboot(t, x, now)
+}
+
+// testSealer fails every Seal while fail is set, and runs onSeal first.
+type testSealer struct {
+	clerk.Sealer
+	fail   atomic.Bool
+	onSeal func()
+}
+
+func (s *testSealer) Seal(plain, aad []byte) ([]byte, error) {
+	if s.onSeal != nil {
+		s.onSeal()
+	}
 	if s.fail.Load() {
 		return nil, errors.New("seal failed")
 	}
@@ -255,7 +306,7 @@ func TestExitRedeemsOnceForConcurrent401s(t *testing.T) {
 
 func TestExitRotationSealFailureSendsNothing(t *testing.T) {
 	o := setupOAuth(t)
-	o.seal.Store(true)
+	o.seal.fail.Store(true)
 	r := o.post("i1", 1)
 	if r.Outcome != "failed" || r.Detail != clerk.DCredential || len(o.api) != 0 {
 		t.Fatalf("a rotated grant that cannot be sealed must fail before the API is reached: %+v, API saw %q", r, o.api)
@@ -264,13 +315,144 @@ func TestExitRotationSealFailureSendsNothing(t *testing.T) {
 }
 
 func TestExitRefreshFailureSendsNothing(t *testing.T) {
+	for _, code := range []int{400, 401, 500} {
+		o := setupOAuth(t)
+		o.refuse = code
+		want := clerk.DReconnect + " web"
+		if code == 500 {
+			want = clerk.DRefresh + " http 500"
+		}
+		r := o.post("i1", 1)
+		if r.Outcome != "failed" || r.Detail != want || len(o.api) != 0 {
+			t.Fatalf("%d: a refused grant must fail as %q before the API is reached: %+v, API saw %q", code, want, r, o.api)
+		}
+		o.noCanary(t, r.Detail)
+	}
+}
+
+func TestExitAsksForReconnectOnceAndStopsRedeeming(t *testing.T) {
+	o := setupOAuth(t)
+	o.refuse = 400 // invalid_grant: the owner revoked the app
+	var details []string
+	for i := range 3 {
+		details = append(details, o.post(fmt.Sprintf("i%d", i), int64(1+i)).Detail)
+	}
+	if len(o.grants) != 1 || len(o.api) != 0 {
+		t.Fatalf("a refused grant was redeemed %d times; it must be once until the owner reconnects", len(o.grants))
+	}
+	for _, d := range details {
+		if d != clerk.DReconnect+" web" {
+			t.Fatalf("every step on the account must give the one reconnect detail: %q", details)
+		}
+	}
+	o.noCanary(t, details...)
+}
+
+func TestExitReconnectReplacesTheGrantDurably(t *testing.T) {
 	o := setupOAuth(t)
 	o.refuse = 400
-	r := o.post("i1", 1)
-	if r.Outcome != "failed" || r.Detail != clerk.DRefresh+" http 400" || len(o.api) != 0 {
-		t.Fatalf("a refused grant must fail before the API is reached: %+v, API saw %q", r, o.api)
+	o.post("i1", 1)
+	if err := o.x.Reconnect([]byte(`{"scope":"x","refresh_token":"canary-new"}`)); err == nil {
+		t.Fatal("a grant with an unknown field was accepted")
 	}
-	o.noCanary(t, r.Detail)
+	o.refuse = 0
+	if err := o.x.Reconnect([]byte(`{"refresh_token":"canary-new","client_id":"agentos-test","client_secret":"canary-client-secret"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if r := o.post("i2", 2); r.Outcome != "ok" || o.grants[len(o.grants)-1].Get("refresh_token") != "canary-new" {
+		t.Fatalf("after a reconnect the new grant must be redeemed: %+v, %v", r, o.grants)
+	}
+	o.restart(t, 3)
+	o.post("i3", 3)
+	if g := o.grants[len(o.grants)-1].Get("refresh_token"); g != "canary-refresh-1" {
+		t.Fatalf("the reconnected, rotated grant did not survive a restart: redeemed %q", g)
+	}
+	o.noCanary(t)
+}
+
+func TestReconnectNeedsARefreshClerk(t *testing.T) {
+	f := setupExit(t, nil)
+	if err := f.x.Reconnect([]byte(`{"refresh_token":"canary-r"}`)); err == nil {
+		t.Fatal("a clerk with a static secret took a refresh grant")
+	}
+}
+
+// The #2638 R1 acceptance test: rotate, restart from the at-rest form, and the
+// rotated token is the one redeemed.
+func TestExitRotatedGrantSurvivesARestart(t *testing.T) {
+	o := setupOAuth(t)
+	if r := o.post("i1", 1); r.Outcome != "ok" {
+		t.Fatalf("%+v", r)
+	}
+	o.restart(t, 2)
+	if r := o.post("i2", 2); r.Outcome != "ok" {
+		t.Fatalf("%+v", r)
+	}
+	if g := o.grants[1].Get("refresh_token"); g != "canary-refresh-1" {
+		t.Fatalf("after a restart the clerk redeemed %q, not the rotated token", g)
+	}
+	o.noCanary(t)
+	o.diskMu.Lock()
+	defer o.diskMu.Unlock()
+	if strings.Contains(string(o.disk), "canary") {
+		t.Fatal("a token is on disk unsealed")
+	}
+}
+
+func TestExitKeepsARotatedGrantItCouldNotSave(t *testing.T) {
+	o := setupOAuth(t)
+	o.noWrite.Store(true)
+	r := o.post("i1", 1)
+	if r.Outcome != "failed" || r.Detail != clerk.DCredential || len(o.api) != 0 {
+		t.Fatalf("a rotated grant that is not durable must fail the step before the API is reached: %+v, API saw %q", r, o.api)
+	}
+	o.noWrite.Store(false)
+	if r := o.post("i2", 2); r.Outcome != "ok" || o.redeems != 1 {
+		t.Fatalf("the kept grant must be saved and its token used: %+v, redeems %d", r, o.redeems)
+	}
+	o.restart(t, 3)
+	o.post("i3", 3)
+	if g := o.grants[len(o.grants)-1].Get("refresh_token"); g != "canary-refresh-1" {
+		t.Fatalf("the rotated grant was dropped when its write failed: redeemed %q", g)
+	}
+}
+
+// revokeOnSeal revokes the step's key while the clerk seals a rotated grant,
+// that is, after Check at the top of Do and before the send.
+func (o *oauthFix) revokeOnSeal(t *testing.T) {
+	v, err := key.Verify(o.root, o.opub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.seal.onSeal = func() {
+		o.seal.onSeal = nil
+		if err := o.k.Revoke(2, v.ID()); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestExitChecksAgainAfterRedeeming(t *testing.T) {
+	o := setupOAuth(t)
+	o.revokeOnSeal(t)
+	r := o.post("i1", 2)
+	if r.Outcome != "failed" || len(o.api) != 0 {
+		t.Fatalf("a key revoked during the redemption still reached the API: %+v, API saw %q", r, o.api)
+	}
+}
+
+func TestExitChecksAgainBeforeThe401Resend(t *testing.T) {
+	o := setupOAuth(t)
+	o.expires = 0
+	o.post("i0", 1)
+	o.mu.Lock()
+	o.live = "revoked"
+	o.mu.Unlock()
+	o.revokeOnSeal(t)
+	r := o.post("i1", 2)
+	if r.Outcome != "failed" || len(o.api) != 2 || o.redeems != 2 {
+		t.Fatalf("a key revoked during the 401 redemption still got its resend: %+v, API saw %q", r, o.api)
+	}
 }
 
 func TestExitRefusesAnAccessTokenThatIsNotPlain(t *testing.T) {
@@ -317,8 +499,8 @@ func TestNewExitRefusesABadRefreshDeclaration(t *testing.T) {
 	opub, _ := gen(1)
 	op := clerk.Op{Verb: key.Post, Method: "POST", URL: "https://h.example/v1", Slot: "web", Prefix: "Bearer "}
 	store := func(g string) *clerk.Secrets {
-		s := clerk.NewSecrets(sealer(t))
-		if err := s.Put("web", []byte(g)); err != nil {
+		s := clerk.NewSecrets(sealer(t), nil)
+		if err := s.Put("web", clerk.KindGrant, []byte(g)); err != nil {
 			t.Fatal(err)
 		}
 		return s
@@ -355,4 +537,135 @@ func TestExitIgnoresProxyEnvironment(t *testing.T) {
 	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State()); r.Outcome != "ok" || f.hits.Load() != 1 {
 		t.Fatalf("the exit went through a proxy from the environment: %+v", r)
 	}
+}
+
+// #2638 R2: a slot is declared static or grant, and each path opens only its
+// own kind, so a refresh grant never goes out as a bearer header.
+func TestNewExitRefusesASlotOfTheOtherKind(t *testing.T) {
+	opub, _ := gen(1)
+	op := clerk.Op{Verb: key.Post, Method: "POST", URL: "https://h.example/v1", Slot: "web", Prefix: "Bearer "}
+	grant := `{"refresh_token":"canary-r","client_id":"c","client_secret":"canary-s"}`
+	for name, c := range map[string]struct {
+		kind    clerk.Kind
+		refresh string
+	}{
+		"grant in a static clerk":   {clerk.KindGrant, ""},
+		"static in a refresh clerk": {clerk.KindStatic, "https://h.example/token"},
+	} {
+		s := clerk.NewSecrets(sealer(t), nil)
+		if err := s.Put("web", c.kind, []byte(grant)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}, Refresh: c.refresh}, opub, s, nil); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestExitStaticPathNeverSendsAGrant(t *testing.T) {
+	f := setupExit(t, nil)
+	// The slot is replaced with a grant after the clerk was built.
+	if err := f.sec.Put("web", clerk.KindGrant, []byte(`{"refresh_token":"canary-r","client_secret":"canary-s"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
+	if r.Outcome != "failed" || r.Detail != clerk.DCredential || f.hits.Load() != 0 {
+		t.Fatalf("a grant went out on the static path: %+v, auth %q", r, f.got.auth)
+	}
+}
+
+// reconnectMidRedeem calls Reconnect while a step is redeeming the old grant,
+// then lets the token endpoint answer as answer sets it up. It returns the
+// step's result.
+func (o *oauthFix) reconnectMidRedeem(t *testing.T, answer func()) kernel.Result {
+	t.Helper()
+	o.gate.Store(true)
+	res := make(chan kernel.Result)
+	go func() { res <- o.post("i1", 1) }()
+	<-o.entered
+	o.gate.Store(false)
+	o.mu.Lock()
+	answer()
+	o.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- o.x.Reconnect([]byte(`{"refresh_token":"canary-new","client_id":"agentos-test","client_secret":"canary-client-secret"}`))
+	}()
+	// Reconnect must wait for the redemption in flight; give it the chance
+	// to run ahead of it before the endpoint answers.
+	select {
+	case err := <-done:
+		done <- err
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(o.release)
+	r := <-res
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestReconnectDuringARefusedRedemptionIsNotLatched(t *testing.T) {
+	o := setupOAuth(t)
+	o.reconnectMidRedeem(t, func() { o.refuse = 400 })
+	o.refuse = 0
+	if r := o.post("i2", 2); r.Outcome != "ok" || o.grants[len(o.grants)-1].Get("refresh_token") != "canary-new" {
+		t.Fatalf("an old grant's refusal undid the owner's reconnect: %+v", r)
+	}
+}
+
+func TestReconnectDuringARotationKeepsTheNewGrant(t *testing.T) {
+	o := setupOAuth(t)
+	o.reconnectMidRedeem(t, func() {})
+	n := len(o.grants)
+	if r := o.post("i2", 2); r.Outcome != "ok" || len(o.grants) != n+1 || o.grants[n].Get("refresh_token") != "canary-new" {
+		t.Fatalf("the old grant's rotation, or its access token, outlived the owner's reconnect: %+v, grants %v", r, o.grants)
+	}
+}
+
+func TestReconnectOnALiveClerkSendsTheNewGrantsToken(t *testing.T) {
+	o := setupOAuth(t)
+	o.post("i1", 1) // canary-access-1 is cached for 90 s
+	if err := o.x.Reconnect([]byte(`{"refresh_token":"canary-new","client_id":"agentos-test"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r := o.post("i2", 2)
+	if r.Outcome != "ok" || len(o.grants) != 2 || o.grants[1].Get("refresh_token") != "canary-new" || o.api[1] != "Bearer canary-access-2" {
+		t.Fatalf("the old access token outlived a reconnect: %+v, grants %v, API saw %q", r, o.grants, o.api)
+	}
+}
+
+func TestReconnectThatCannotWriteChangesNothing(t *testing.T) {
+	grant := []byte(`{"refresh_token":"canary-new","client_id":"agentos-test"}`)
+	t.Run("latched", func(t *testing.T) {
+		o := setupOAuth(t)
+		o.refuse = 400
+		o.post("i1", 1)
+		o.noWrite.Store(true)
+		if err := o.x.Reconnect(grant); err == nil {
+			t.Fatal("a reconnect whose grant was not written reported success")
+		}
+		o.refuse = 0
+		if r := o.post("i2", 2); r.Detail != clerk.DReconnect+" web" || len(o.grants) != 1 {
+			t.Fatalf("a failed reconnect cleared the latch: %+v, %d token requests", r, len(o.grants))
+		}
+	})
+	t.Run("unsaved", func(t *testing.T) {
+		o := setupOAuth(t)
+		o.noWrite.Store(true)
+		o.post("i1", 1) // rotated to canary-refresh-1, not saved
+		if err := o.x.Reconnect(grant); err == nil {
+			t.Fatal("a reconnect whose grant was not written reported success")
+		}
+		o.noWrite.Store(false)
+		if r := o.post("i2", 2); r.Outcome != "ok" {
+			t.Fatalf("%+v", r)
+		}
+		o.restart(t, 3)
+		o.post("i3", 3)
+		if g := o.grants[len(o.grants)-1].Get("refresh_token"); g != "canary-refresh-1" {
+			t.Fatalf("a failed reconnect dropped the kept rotated grant: redeemed %q", g)
+		}
+	})
 }
