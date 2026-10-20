@@ -27,8 +27,8 @@ What the slice rests on. Each line is a choice made to keep the slice small; non
 
 | ID | Item | Failure path |
 |---|---|---|
-| MIG-3-R1 (#2600) | Public Suffix List for `org()`. | A domain under a multi-label public suffix aligns with every site under that suffix. |
-| MIG-3-R2 (#2601) | The real POSTer's egress rules: parse with `net/url`, deny private addresses after resolution, port 443 only, no redirects, reject userinfo, whitespace and control characters. | An unsubscribe URL steers the POST at a host inside the home network. |
-| MIG-3-R3 (#2602) | DKIM `x=` and `t=` tags, and IDN domains. | An expired or replayed signature passes VRB-2. |
-| MIG-3-R4 (#2603) | A wider lookalike check than the confusable pairs in `skeleton`. | A lookalike sender outside the pair list is unsubscribed from. |
-| MIG-3-R5 (#2604) | Alert eval case and a real-reader alert guard. | A real alert the reader misclasses as spam or phishing is trashed. |
+| MIG-3-R1 | #2600: Public Suffix List for `org()`. | A domain under a multi-label public suffix aligns with every site under that suffix. |
+| MIG-3-R2 | #2601: The real POSTer's egress rules: parse with `net/url`, deny private addresses after resolution, port 443 only, no redirects, reject userinfo, whitespace and control characters. | An unsubscribe URL steers the POST at a host inside the home network. |
+| MIG-3-R3 | #2602: DKIM `x=` and `t=` tags, and IDN domains. | An expired or replayed signature passes VRB-2. |
+| MIG-3-R4 | #2603: A wider lookalike check than the confusable pairs in `skeleton`. | A lookalike sender outside the pair list is unsubscribed from. |
+| MIG-3-R5 | #2604: Alert eval case and a real-reader alert guard. | A real alert the reader misclasses as spam or phishing is trashed. |
