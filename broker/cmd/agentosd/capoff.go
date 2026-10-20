@@ -48,7 +48,7 @@ const (
 	// and no key stored at setup (egress K24). No add-key step is served
 	// past setup yet, so the line names none
 	// (TestModelNoGrantNamesAServedStep).
-	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
+	modelNoGrant = "Model: no AI plan or key, so no agent can think or learn; add a key on my Wi-Fi page."
 	// C2: the vault is not open, so the model route serves nothing.
 	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on my Wi-Fi page."
 	// C2: the vault is open and a provider granted, but none may receive

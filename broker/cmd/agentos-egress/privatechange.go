@@ -17,6 +17,9 @@ import (
 // it too, before each content request on its worker route
 // (workerRoutes.privateGate, #2359).
 
+// errCodeRequired: a key add or replace is a tier-4 change (CH-10).
+var errCodeRequired = uerr(http.StatusForbidden, "adding an AI key needs a code from your code generator")
+
 // providerList is the providers with whether a key is held and whether
 // private data is allowed, by the flag or the marker as the router asks,
 // never a key (CRED-1). It needs an open vault.
@@ -68,6 +71,49 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 	default:
 		c.notify("private data withdrawn for " + providerName(provider))
 	}
+	return nil
+}
+
+// addKey stores key as provider's API key after setup (CRED-5f-mr-addkey;
+// ONB-3, CH-10, CRED-1). Any add or replace needs the one-time code: under
+// K24 a key for a provider that had none is a new grant, and a replaced
+// key can point at another account. The provider is asked first, without
+// mu and before the code is spent, so a refused key burns no code; a
+// request with no code never reaches the provider. The code is checked
+// under mu just before the store, after the vault and the key are checked
+// again. It needs an open vault, and never reads a key's value.
+func (c *custody) addKey(provider string, key []byte, code string) error {
+	if code == "" {
+		return errCodeRequired
+	}
+	c.mu.Lock()
+	if c.ph != open {
+		c.mu.Unlock()
+		return errLocked
+	}
+	a, err := c.keyAdapterLocked(provider, key)
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := c.checkKeyWithProvider(a, key); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return errLocked
+	}
+	if _, err := c.keyAdapterLocked(provider, key); err != nil {
+		return err
+	}
+	if err := c.approvedLocked(code, "adding an AI key"); err != nil {
+		return err
+	}
+	if err := c.putKeyLocked(a.Credential, key); err != nil {
+		return err
+	}
+	c.notify("AI key added for " + providerName(provider))
 	return nil
 }
 
@@ -145,6 +191,21 @@ func providerRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWrite
 			return
 		}
 		reply(w, http.StatusOK, modelroute.SetupProviderList{Providers: ps})
+	})
+	mux.HandleFunc("/providers/key", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Provider string `json:"provider"`
+			Key      string `json:"key"`
+			Code     string `json:"code"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.addKey(req.Provider, []byte(req.Key), req.Code); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/providers/private", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

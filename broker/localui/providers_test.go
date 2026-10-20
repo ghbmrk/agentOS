@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
-// REQ: CAP-9, CH-3, CH-7, CRED-1, OWN-7
+// REQ: CAP-9, CH-3, CH-7, CRED-1, CRED-5, ONB-3, OWN-7
 
 // fakeProviders stands in for the vault process's provider routes
 // (#1266): allowing needs the right code, which works once; withdrawing
@@ -27,6 +27,34 @@ type fakeProviders struct {
 	calls int
 	// failList, when set, is what ProviderList returns instead.
 	failList error
+	// keys is what AddProviderKey stored (id to key); refuseKey, when set,
+	// is what it returns instead of storing, as the vault process does
+	// when its provider refuses a key or cannot be asked (ONB-3).
+	keys      map[string]string
+	refuseKey error
+}
+
+func (f *fakeProviders) AddProviderKey(ctx context.Context, id, key, code string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if code != f.code || f.used {
+		return &VaultError{403, "wrong code: check your code generator and try again"}
+	}
+	if f.refuseKey != nil {
+		return f.refuseKey
+	}
+	f.used = true
+	if f.keys == nil {
+		f.keys = map[string]string{}
+	}
+	f.keys[id] = key
+	for i := range f.ps {
+		if f.ps[i].ID == id {
+			f.ps[i].Connected = true
+		}
+	}
+	return nil
 }
 
 func (f *fakeProviders) ProviderList(ctx context.Context) ([]ProviderStatus, error) {
@@ -237,5 +265,75 @@ func TestTheProvidersPageShowsAProviderTheBoxsConfigurationAllows(t *testing.T) 
 	w := r.post("/providers/", url.Values{"step": {"withdraw"}, "provider": {"openai"}})
 	if strings.Contains(html.UnescapeString(w.Body.String()), "Stop OpenAI seeing your private data?") {
 		t.Fatalf("withdraw confirmation for a flag-allowed provider:\n%s", w.Body.String())
+	}
+}
+
+// CRED-5f-mr-addkey-1: past setup the owner adds a provider's key on the
+// providers page. It goes to the vault process with the code, which asks
+// the provider before it stores anything (ONB-3); the page never keeps
+// the key, shows it back or puts it in the address (CRED-1).
+func TestAddKeyPastSetupStoresThroughTheVault(t *testing.T) {
+	r, _, fp := providerRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.get("/providers/"))
+	for _, want := range []string{`name="step" value="addkey"`, `name="key"`, `type="password"`, `autocomplete="off"`} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("page lacks %q:\n%s", want, p)
+		}
+	}
+	form := func(code string) url.Values {
+		return url.Values{"step": {"addkey"}, "provider": {"anthropic"}, "key": {apiCanary}, "code": {code}}
+	}
+	// A refused key or no answer from the provider stores nothing, and
+	// says so in the owner's words, never the vault's internals.
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&VaultError{403, "the provider did not accept the key"}, "the provider did not accept the key"},
+		{&VaultError{502, "internal detail"}, "couldn't be checked"},
+	} {
+		fp.refuseKey = c.err
+		w := r.post("/providers/", form(fp.code))
+		b := html.UnescapeString(w.Body.String())
+		if w.Code != http.StatusOK || !strings.Contains(b, c.want) || strings.Contains(b, "internal detail") || strings.Contains(b, apiCanary) || len(fp.keys) != 0 {
+			t.Fatalf("refusal %v: %d %s", c.err, w.Code, b)
+		}
+	}
+	fp.refuseKey = nil
+	if w := r.post("/providers/", form("000000")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "wrong code") || len(fp.keys) != 0 || strings.Contains(w.Body.String(), apiCanary) {
+		t.Fatalf("wrong code: %d %s", w.Code, w.Body.String())
+	}
+	w := r.post("/providers/", form(fp.code))
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/providers/" || strings.Contains(w.Header().Get("Location"), apiCanary) {
+		t.Fatalf("add: %d %s", w.Code, w.Body.String())
+	}
+	if fp.keys["anthropic"] != apiCanary {
+		t.Fatalf("the vault process got %v", fp.keys)
+	}
+	if p := html.UnescapeString(r.get("/providers/")); !strings.Contains(p, "Anthropic: connected") || strings.Contains(p, apiCanary) {
+		t.Fatalf("after the add:\n%s", p)
+	}
+	if strings.Contains(r.get("/home"), apiCanary) || strings.Contains(r.get("/status"), apiCanary) {
+		t.Fatal("the key shows on another page")
+	}
+}
+
+// CRED-5f-mr-addkey-3: only the signed-in owner reaches the step; a post
+// without sign-in never reaches the vault process, and setup's own key
+// route stays closed once setup is finished.
+func TestAddKeyPastSetupNeedsTheOwner(t *testing.T) {
+	r, _, fp := providerRig(t)
+	w := r.post("/providers/", url.Values{"step": {"addkey"}, "provider": {"anthropic"}, "key": {apiCanary}, "code": {fp.code}})
+	if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/unlock?next=") || fp.calls != 0 || len(fp.keys) != 0 {
+		t.Fatalf("a post without sign-in: %d %s, %d calls", w.Code, w.Header().Get("Location"), fp.calls)
+	}
+	if strings.Contains(w.Body.String(), apiCanary) {
+		t.Fatal("the refusal showed the key back")
+	}
+	r.signIn()
+	was := len(r.hooks.keys)
+	if w := r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary + "2"}}); len(r.hooks.keys) != was || r.hooks.keys["openai"] != "" || fp.calls != 0 {
+		t.Fatalf("setup's key route took a key after finish: %d", w.Code)
 	}
 }

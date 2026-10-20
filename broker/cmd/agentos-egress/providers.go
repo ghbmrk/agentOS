@@ -113,6 +113,21 @@ func (c *custody) setupKey(provider string, key []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := c.checkKeyWithProvider(a, key); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.setupOpen(); err != nil {
+		return err
+	}
+	return c.putKeyLocked(a.Credential, key)
+}
+
+// checkKeyWithProvider asks a's provider about key with the adapter's key
+// check (#1265, ONB-3), through the keyCheck seam or the proxy's default
+// transport and netguard, within SetupKeyCheckWait. Caller holds no lock.
+func (c *custody) checkKeyWithProvider(a egress.Adapter, key []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), modelroute.SetupKeyCheckWait)
 	defer cancel()
 	rt := c.keyCheck
@@ -127,17 +142,12 @@ func (c *custody) setupKey(provider string, key []byte) error {
 	}
 	switch a.CheckKey(ctx, rt, key) {
 	case nil:
+		return nil
 	case egress.ErrKeyRefused:
 		return errKeyRefused
 	default:
 		return errKeyUnchecked
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.setupOpen(); err != nil {
-		return err
-	}
-	return c.putKeyLocked(a.Credential, key)
 }
 
 // setupKeyAdapter checks, under mu, that setup is open, provider is a
@@ -148,6 +158,13 @@ func (c *custody) setupKeyAdapter(provider string, key []byte) (egress.Adapter, 
 	if err := c.setupOpen(); err != nil {
 		return egress.Adapter{}, err
 	}
+	return c.keyAdapterLocked(provider, key)
+}
+
+// keyAdapterLocked checks that provider is a built-in adapter, key is one
+// the vault would store and the credential's name holds no entry of
+// another kind. Caller holds mu with the vault open.
+func (c *custody) keyAdapterLocked(provider string, key []byte) (egress.Adapter, error) {
 	a, ok := builtinAdapter(provider)
 	if !ok || len(key) == 0 || len(key) > MaxAPIKey || !adapterCredential(a.Credential) || hasOtherKind(c.v, a.Credential, vault.KindAPIKey) {
 		return egress.Adapter{}, errBadCredential

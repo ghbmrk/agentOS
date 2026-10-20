@@ -16,8 +16,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/localsrv"
-	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
@@ -635,22 +633,17 @@ func TestModelNoPrivateNamesTheWiFiPage(t *testing.T) {
 	}
 }
 
-// REQ: OP-9, A11
-// OP-9 (UX blocker on #566, a CH-12 repeat): the no-grant line's fix
-// names only a step the box serves. Since P2-2w c4e the page's API-key
-// step is served during setup only; the line shows on a box past setup,
-// whose agentosd serves no setup op, so the line names no page and says a
-// later box version adds it. When agentosd serves the step past setup
-// this fails, and the line must name where the owner adds one.
+// REQ: OP-9, A11, CRED-5
+// The no-grant line sends the owner to where a key is added: the providers
+// page past setup (CRED-5f-mr-addkey-1), named as the owner's page (CH-21),
+// and no longer to "a later box version".
 func TestModelNoGrantNamesAServedStep(t *testing.T) {
-	pastSetup := localui.AgentosdSetup{Owner: localui.InProcess(localsrv.New(localsrv.Config{}).Ops())}
-	served := pastSetup.ConnectAPIKey("openai", "sk-synthetic-not-a-key") == nil
 	_, fix, _ := strings.Cut(modelNoGrant, "; ")
-	switch {
-	case !served && (strings.Contains(fix, "page") || !strings.Contains(fix, "later box version")):
-		t.Fatalf("adding a key is not served, but the fix reads %q", fix)
-	case served && !strings.Contains(fix, "page"):
-		t.Fatalf("adding a key is served now; name where in %q", fix)
+	if !strings.Contains(fix, "my Wi-Fi page") {
+		t.Fatalf("the fix does not name the served page: %q", fix)
+	}
+	if strings.Contains(modelNoGrant, "later box version") {
+		t.Fatalf("the line still defers adding a key: %q", modelNoGrant)
 	}
 }
 

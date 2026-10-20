@@ -16,6 +16,10 @@ type Providers interface {
 	// SetProviderPrivate allows (ok, approved with code) or withdraws
 	// (no code needed) private data for the provider.
 	SetProviderPrivate(ctx context.Context, id string, ok bool, code string) error
+	// AddProviderKey stores the provider's API key after setup, approved
+	// with code (CH-10). The vault process asks the provider about the key
+	// first (ONB-3), so a refused key is stored nowhere.
+	AddProviderKey(ctx context.Context, id, key, code string) error
 }
 
 // ProviderStatus is one built-in provider as the vault process reports
@@ -46,6 +50,15 @@ func (u *UnlockClient) SetProviderPrivate(ctx context.Context, id string, ok boo
 		OK       bool   `json:"ok"`
 		Code     string `json:"code"`
 	}{id, ok, code}, nil)
+}
+
+// AddProviderKey implements Providers.
+func (u *UnlockClient) AddProviderKey(ctx context.Context, id, key, code string) error {
+	return u.do(ctx, http.MethodPost, "/providers/key", struct {
+		Provider string `json:"provider"`
+		Key      string `json:"key"`
+		Code     string `json:"code"`
+	}{id, key, code}, nil)
 }
 
 // providersView is the AI providers page.
@@ -97,6 +110,8 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		switch r.PostForm.Get("step") {
 		case "allow":
 			err = s.cfg.Providers.SetProviderPrivate(ctx, id, true, r.PostForm.Get("code"))
+		case "addkey":
+			err = s.cfg.Providers.AddProviderKey(ctx, id, r.PostForm.Get("key"), r.PostForm.Get("code"))
 		case "withdraw":
 			if r.PostForm.Get("confirm") != "1" {
 				withdraw = id
@@ -113,11 +128,15 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			v.Err = "That didn't go through. Try again."
-			// Only a code's refusal carries owner wording (egress
-			// errWrongCode, errLockedOut, errNoCodeGenerator); other
-			// reasons are internal.
+			// Only a code's or a key's refusal carries owner wording
+			// (egress errWrongCode, errLockedOut, errNoCodeGenerator,
+			// errCodeRequired, errKeyRefused); other reasons are
+			// internal. A key the provider could not be asked about
+			// (502) is told as that.
 			var ve *VaultError
-			if errors.As(err, &ve) && (ve.Status == http.StatusForbidden || ve.Status == http.StatusTooManyRequests) && ve.Msg != "" {
+			if errors.As(err, &ve) && ve.Status == http.StatusBadGateway {
+				v.Err = "The key couldn't be checked with the provider, so nothing was saved. Try again."
+			} else if errors.As(err, &ve) && (ve.Status == http.StatusForbidden || ve.Status == http.StatusTooManyRequests) && ve.Msg != "" {
 				v.Err = ve.Msg
 			}
 		}
