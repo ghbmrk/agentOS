@@ -38,13 +38,18 @@ const (
 	TStepProbed   = "step.probed"
 	TStepUndone   = "step.undone"
 	TModelUsed    = "model.used"
+	TSpendHeld    = "spend.held"
+	TSpendExtend  = "spend.extended"
+	TPoolRead     = "pool.read"
+	TReserveUp    = "pool.reserve.raised"
+	TReserveDown  = "pool.reserve.lowered"
 )
 
 var schema = map[string]int{
 	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1,
-	TModelUsed: 1,
+	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -52,7 +57,9 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 
 // Widening entries grant power back. Only one that an anchor covers counts
 // after a restart (KRN-7).
-func Widening(typ string) bool { return typ == TResume || typ == TKeyIssued || typ == TKeyResumed }
+func Widening(typ string) bool {
+	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TReserveDown
+}
 
 // Plan is a typed list of steps run in order under one key (KRN-5).
 type Plan struct {
@@ -73,6 +80,28 @@ type (
 		Route  string   `json:"route"`
 		Amount int64    `json:"amount"`
 		Source string   `json:"source"` // "provider" or "clerk": whose count this is
+	}
+	// spendHeld stops a task whose spend cap is used up until the owner extends it (LOG-7).
+	spendHeld struct {
+		Task   string `json:"task"`
+		Clerk  string `json:"clerk"`
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	}
+	spendExtended struct {
+		Task   string   `json:"task"`
+		Root   key.ID   `json:"root"`
+		Scopes []key.ID `json:"scopes"`
+	}
+	// poolRead is the provider's own figure for a pool (RES-5), in per mille.
+	poolRead struct {
+		Pool    string `json:"pool"`
+		Used    int64  `json:"used"`
+		ResetAt int64  `json:"reset_at"`
+	}
+	poolReserve struct {
+		Pool    string `json:"pool"`
+		Reserve int64  `json:"reserve"` // per mille of the pool kept for the owner
 	}
 	planAccepted struct {
 		Plan   string   `json:"plan"`
@@ -171,6 +200,22 @@ type HeldInfo struct {
 	Novel bool
 }
 
+// SpendHold is why a task is stopped.
+type SpendHold struct{ Clerk, Code, Detail string }
+
+// Pool is what the log knows of one usage pool (RES-5).
+type Pool struct{ Used, ResetAt, Reserve int64 }
+
+// PoolOpen reports whether work may draw on a pool at now: below the owner's
+// reserve, or past the reset time the provider gave, which is the cooldown.
+func (s *State) PoolOpen(now int64, name string) bool {
+	p, ok := s.Pools[name]
+	return !ok || now >= p.ResetAt && p.ResetAt > 0 || p.Used+p.Reserve < PoolFull
+}
+
+// PoolFull is a whole pool, in per mille.
+const PoolFull = 1000
+
 type usedRec struct {
 	Seq uint64
 	key.Use
@@ -184,11 +229,14 @@ type State struct {
 	Changes key.Changes
 	Roots   map[key.ID]bool
 	Plans   map[string]*PlanState
-	Order   []string
-	uses    map[key.ID][]usedRec
-	held    map[uint64]HeldInfo
-	seen    map[key.ID]map[string]int   // root -> shape -> completed, not undone
-	recent  map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
+	// SpendHeld lists the tasks stopped on a used-up spend cap; Pools the usage pools.
+	SpendHeld map[string]SpendHold
+	Pools     map[string]Pool
+	Order     []string
+	uses      map[key.ID][]usedRec
+	held      map[uint64]HeldInfo
+	seen      map[key.ID]map[string]int   // root -> shape -> completed, not undone
+	recent    map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
 }
 
 func NewState(owner ed25519.PublicKey) *State {
@@ -196,6 +244,7 @@ func NewState(owner ed25519.PublicKey) *State {
 		Owner:   owner,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Roots:   map[key.ID]bool{}, Plans: map[string]*PlanState{},
+		SpendHeld: map[string]SpendHold{}, Pools: map[string]Pool{},
 		uses: map[key.ID][]usedRec{}, held: map[uint64]HeldInfo{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
@@ -342,6 +391,34 @@ func (s *State) Apply(e Entry) error {
 		for _, id := range b.Scopes {
 			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task, Meter: true}})
 		}
+	case TSpendHeld:
+		b, err := body[spendHeld](e)
+		if err != nil {
+			return err
+		}
+		s.SpendHeld[b.Task] = SpendHold{b.Clerk, b.Code, b.Detail}
+	case TSpendExtend:
+		b, err := body[spendExtended](e)
+		if err != nil {
+			return err
+		}
+		delete(s.SpendHeld, b.Task)
+	case TPoolRead:
+		b, err := body[poolRead](e)
+		if err != nil {
+			return err
+		}
+		p := s.Pools[b.Pool]
+		p.Used, p.ResetAt = b.Used, b.ResetAt
+		s.Pools[b.Pool] = p
+	case TReserveUp, TReserveDown:
+		b, err := body[poolReserve](e)
+		if err != nil {
+			return err
+		}
+		p := s.Pools[b.Pool]
+		p.Reserve = b.Reserve
+		s.Pools[b.Pool] = p
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
 	case TResume:

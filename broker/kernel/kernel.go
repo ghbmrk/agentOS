@@ -15,6 +15,10 @@ const (
 	CPlan        = "plan"         // the plan is malformed
 	CDuplicate   = "duplicate"    // the same effect within 24 hours needs a fresh owner key (KRN-8)
 	CClerk       = "no-clerk"
+	CPool        = "pool"      // the pool is at the owner's reserve until it resets (RES-5)
+	CNotHeld     = "not-held"  // no hold on that task
+	CExtension   = "extension" // the key cannot extend this hold
+	CHeld        = "held"      // the task is held until the owner extends it (LOG-7)
 )
 
 // Admit decides a submitted plan against the state. It is pure: the same state
@@ -280,8 +284,11 @@ func (k *Kernel) owned(ky key.Key) (*key.Verified, *key.Refusal) {
 }
 
 // AdmitSpend checks that ky may spend amount more on task under its spend
-// caps: the check a clerk makes before a metered call (LOG-7).
+// caps and the task is not held: the check a clerk makes before a metered call (LOG-7).
 func (k *Kernel) AdmitSpend(now int64, ky key.Key, clerk, task string, amount int64) *key.Refusal {
+	if h, held := k.s.SpendHeld[task]; held {
+		return &key.Refusal{Code: CHeld, Detail: h.Code}
+	}
 	v, r := k.owned(ky)
 	if r != nil {
 		return r
@@ -300,6 +307,78 @@ func (k *Kernel) Meter(now int64, ky key.Key, task, route string, amount int64, 
 	}
 	_, err := k.emit(now, TModelUsed, modelUsed{v.Root(), v.IDs, task, route, amount, source})
 	return err
+}
+
+// Hold stops task after rf, the spend refusal that used up its cap. It stays
+// held until the owner extends it (LOG-7).
+func (k *Kernel) Hold(now int64, ky key.Key, task string, rf *key.Refusal) error {
+	if rf == nil || (rf.Code != key.RSpendTask && rf.Code != key.RSpendDay) {
+		return errors.New("kernel: only an exhausted spend cap holds a task")
+	}
+	v, r := k.owned(ky)
+	if r != nil {
+		return r
+	}
+	_, err := k.emit(now, TSpendHeld, spendHeld{task, v.Limits.Clerk, rf.Code, rf.Detail})
+	return err
+}
+
+// Extend releases a held task under ext, a narrowing derivation of the owner's
+// spend envelope (KEY-4). ext must be for the held clerk, carry its own
+// per-task cap, and have room left; the envelope's ceilings, charged through
+// the shared chain prefix, bound all extensions together (LOG-7).
+func (k *Kernel) Extend(now int64, ext key.Key, task string) error {
+	h, ok := k.s.SpendHeld[task]
+	if !ok {
+		return &key.Refusal{Code: CNotHeld, Detail: task}
+	}
+	v, r := k.owned(ext)
+	if r != nil {
+		return r
+	}
+	bounded := false
+	for _, c := range v.Limits.Caps {
+		bounded = bounded || c.Kind == key.KSpendTask
+	}
+	if !bounded {
+		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
+	}
+	if r := v.Spend(h.Clerk, task, 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+		return r
+	}
+	_, err := k.emit(now, TSpendExtend, spendExtended{task, v.Root(), v.IDs})
+	return err
+}
+
+// ReadPool records the provider's figure for a pool: used and the reset time (RES-5).
+func (k *Kernel) ReadPool(now int64, pool string, used, resetAt int64) error {
+	if used < 0 || used > PoolFull {
+		return errors.New("kernel: utilization is a share of the pool")
+	}
+	_, err := k.emit(now, TPoolRead, poolRead{pool, used, resetAt})
+	return err
+}
+
+// Reserve sets the share of a pool kept for the owner. Raising narrows, so a
+// text is enough; lowering widens, so it is a widening entry (KEY-4, KEY-6).
+func (k *Kernel) Reserve(now int64, pool string, reserve int64) error {
+	if reserve < 0 || reserve > PoolFull {
+		return errors.New("kernel: a reserve is a share of the pool")
+	}
+	typ := TReserveUp
+	if reserve < k.s.Pools[pool].Reserve {
+		typ = TReserveDown
+	}
+	_, err := k.emit(now, typ, poolReserve{pool, reserve})
+	return err
+}
+
+// AdmitPool refuses work on a pool at the owner's reserve until it resets.
+func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
+	if k.s.PoolOpen(now, pool) {
+		return nil
+	}
+	return &key.Refusal{Code: CPool, Detail: pool}
 }
 
 func (k *Kernel) Revoke(now int64, id key.ID) error {

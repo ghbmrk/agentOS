@@ -1,6 +1,6 @@
 package model_test
 
-// REQ: LOG-7, KEY-2, CLK-7
+// REQ: LOG-7, RES-5, KEY-2, KEY-4, CLK-7
 
 import (
 	"crypto/ed25519"
@@ -68,15 +68,77 @@ func TestProviderFigureIsMeteredAndCapsHold(t *testing.T) {
 	if _, err := c.Call(2, ky, "t", "api", "hi", 50); err == nil || f.calls != 1 {
 		t.Fatalf("over-cap call reached the provider: %v calls=%d", err, f.calls)
 	}
-	if _, err := c.Call(2, ky, "t", "api", "hi", 20); err != nil {
-		t.Fatalf("fits the remainder: %v", err)
+}
+
+func TestExhaustedTaskIsHeldAndOwnerExtends(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, k, ky := rig(t, f)
+	if _, err := c.Call(1, ky, "t", "api", "hi", 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(2, ky, "t", "api", "hi", 50); err == nil {
+		t.Fatal("over-cap call must be refused")
+	}
+	if h, ok := k.State().SpendHeld["t"]; !ok || h.Code != key.RSpendTask {
+		t.Fatalf("task not held: %+v", h)
+	}
+	if _, err := c.Call(3, ky, "t", "api", "hi", 1); err == nil || f.calls != 1 {
+		t.Fatalf("a held task makes no call, however small: %v calls=%d", err, f.calls)
+	}
+	// the owner's envelope, and an extension derived from it
+	opub, opriv := seed(1)
+	hpub, hpriv := seed(2)
+	_ = opub
+	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: model.Name, Verbs: []key.Verb{key.Read}, Serial: "env"})
+	if err := k.Issue(3, root); err != nil {
+		t.Fatal(err)
+	}
+	env, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(500), key.LimitSpendDay(500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := key.Derive(env, hpriv, hpub, key.LimitSpendTask(200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Extend(4, ext, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(5, ext, "t", "api", "hi", 50); err != nil {
+		t.Fatalf("extended task runs: %v", err)
+	}
+}
+
+func poolRig(t *testing.T, f *fake) (*model.Clerk, *kernel.Kernel, key.Key) {
+	c, k, ky := rig(t, f)
+	c.Routes["plan"] = model.Price{Pool: "codex-5h"}
+	return c, k, ky
+}
+
+func TestPoolRouteReadsUtilizationAndStopsAtTheReserve(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}}
+	c, k, ky := poolRig(t, f)
+	if err := k.Reserve(0, "codex-5h", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(1, ky, "t", "plan", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(2, ky, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
+		t.Fatalf("a pool at the reserve admits nothing: %v calls=%d", err, f.calls)
+	}
+	if _, err := c.Call(2, ky, "t", "api", "hi", 10); err != nil {
+		t.Fatalf("other routes are unaffected: %v", err)
+	}
+	if _, err := c.Call(10_000, ky, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("the reset time is the cooldown: %v", err)
 	}
 }
 
 func TestClerkCountsWhenProviderReportsNone(t *testing.T) {
 	f := &fake{}
 	c, k, ky := rig(t, f)
-	if _, err := c.Call(1, ky, "t", "api", strings.Repeat("p", 40), 100); err == nil {
+	if _, err := c.Call(1, ky, "big", "api", strings.Repeat("p", 40), 100); err == nil {
 		t.Fatal("worst case 110 must not fit 100")
 	}
 	if _, err := c.Call(1, ky, "t", "api", strings.Repeat("p", 40), 90); err != nil {
