@@ -88,6 +88,21 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
 # class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
+# #936 (r4a): NetworkManager manages only the station r4b creates. Everything it reads at start is
+# pinned here: the sections and keys the image ships (NM_KEYS, each set once, to exactly this value),
+# the keyfile path (under /run only, STO-2), no connection file and no executable dispatcher script.
+NM_PRESENT = ("usr/sbin/NetworkManager", "usr/lib/NetworkManager/conf.d")
+NM_MAINS = ("etc/NetworkManager/NetworkManager.conf", "usr/lib/NetworkManager/NetworkManager.conf")
+NM_CONF_DIRS = ("etc/NetworkManager/conf.d", "usr/lib/NetworkManager/conf.d")
+NM_CONNECTIONS = ("etc/NetworkManager/system-connections", "run/NetworkManager/system-connections",
+                  "usr/lib/NetworkManager/system-connections")
+NM_DISPATCH = ("etc/NetworkManager/dispatcher.d", "usr/lib/NetworkManager/dispatcher.d")
+NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
+           ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
+           ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
+           ("connectivity", "enabled"): "false"}
+NM_PATH = ("keyfile", "path")
+
 FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
 GLOB = re.compile(r"[*?\[]")
 # In a glob key (one holding *, ? or [), systemd-sysctl's glob() also takes a backslash as an escape
@@ -263,7 +278,7 @@ def _violations(root):
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
-            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root))
 
@@ -1916,6 +1931,62 @@ def uplink_violations(up):
         v = seen.get((s, k), [None])[0]
         if v != want:
             out.append("%s: [%s] %s is %s; must be %s" % (UPLINK, s, k, v, want))
+    return out
+
+
+def networkmanager_violations(root):
+    """#936: what NetworkManager reads at start is NM_KEYS and a keyfile path under /run, and nothing
+    else: its main file and conf.d files (the ones that exist, as it lists them), no connection file
+    anywhere and no executable dispatcher script. Skipped where the tree has no NetworkManager. A file
+    the check cannot read, or that byte_violations refuses, is refused and never skipped."""
+    if not any(entry_mode(root, rel) for rel in NM_PRESENT):
+        return []
+    out, files = [], []
+    for rel in NM_MAINS:
+        f = Conf(str(root), rel)
+        try:
+            conf_chase(str(root), rel)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass  # Conf.content refuses it below
+        files.append(f)
+    files += conf_files(root, NM_CONF_DIRS)
+    seen = {}
+    for f in files:
+        bad = byte_violations(f)
+        out += bad
+        if bad:
+            continue
+        try:
+            lines = config_lines(f.content())
+        except Unparsable as e:
+            out.append("%s: %s; the tree check never passes a file it cannot parse" % (f.rel, e))
+            continue
+        for s, k, v in lines:
+            seen.setdefault((s, k), []).append((f.rel, v))
+    for (s, k), vals in sorted(seen.items()):
+        if (s, k) not in NM_KEYS and (s, k) != NM_PATH:
+            out.append("%s: [%s] %s is %s; not a key the image ships" % (vals[-1][0], s, k, vals[-1][1]))
+        elif len(vals) > 1:
+            out.append("%s: [%s] %s is set %d times; must be set once" % (vals[-1][0], s, k, len(vals)))
+    for (s, k), want in sorted(NM_KEYS.items()):
+        v = seen.get((s, k), [(None, None)])[0][1]
+        if v != want:
+            out.append("NetworkManager: [%s] %s is %s; must be %s" % (s, k, v, want))
+    path = seen.get(NM_PATH, [(None, None)])[0][1]
+    if path is None or not path.startswith("/run/") or ".." in path.split("/"):
+        out.append("NetworkManager: [keyfile] path is %s; must be under /run, never the drive (STO-2)" % path)
+    for d in NM_CONNECTIONS:
+        if entry_mode(root, d):
+            out.append("%s: a NetworkManager connection location; it must not exist (no join before STO-2)" % d)
+    for d in NM_DISPATCH:
+        if stat.S_ISLNK(entry_mode(root, d)):
+            out.append("%s: a link; the tree check reads only a directory" % d)
+        elif tree_dir(root, d):
+            for rel, st in tree_walk(root, tree_dir(root, d)):
+                if stat.S_ISLNK(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_mode & 0o111):
+                    out.append("%s: a dispatcher script or link; none may ship" % rel)
     return out
 
 
