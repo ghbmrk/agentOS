@@ -75,9 +75,8 @@ jobs:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
         run: python -m unittest discover -s tests -v
       - name: Document tool tests (records-only change; CI-docs)
-        # The tests of the tools the steps below run, and every test that reads a record file
-        # (test_board reads BOARD.md, test_krn2_trusted_base SPEC.md); tests/test_ci_scope.py
-        # fails when a test that reads one is missing here.
+        # The tests of the tools the steps below run, and every test that reads a record file;
+        # tests/test_ci_scope.py fails when a test that reads one is missing here.
         if: env.RECORDS == 'true'
         run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows.WorkflowTest -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
