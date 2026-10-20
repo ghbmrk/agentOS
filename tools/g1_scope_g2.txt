@@ -79,6 +79,9 @@ allow broker/core/
 allow broker/e2e/
 allow broker/hostchange/
 allow broker/sim/
+# Capability kernel (D-139, migration step 2, #2525): kernel and clerk replace broker/core/.
+allow broker/kernel/
+allow broker/clerk/
 allow broker/test/
 allow broker/third_party/
 allow broker/vendor/
