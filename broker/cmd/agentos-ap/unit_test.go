@@ -120,7 +120,9 @@ func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
 var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
 
 // maskedDirs are agentosd's state directories under /var/lib/agentos. A
-// mask on a directory holds while agentosd renames files inside it.
+// mask on a directory survives agentosd's renames inside it, but only if
+// the directory existed at loader start: the "-" skips a missing one, and
+// agentosd makes most of them later (#2626).
 var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7"}
 
 // lapsingFiles are agentosd's state files at the top of /var/lib/agentos.
@@ -138,10 +140,11 @@ var joinedState = []string{"questions.json", "clock.json"}
 var statePath = regexp.MustCompile(`/var/lib/agentos/([A-Za-z0-9._-]+)`)
 
 // Every state path under /var/lib/agentos that the broker's code or the
-// image names is either one of the three the loader needs, a masked
-// directory (hidden for good), or a file in lapsingFiles, whose mask
-// holds only until agentosd first rewrites it (#2626). This test does not
-// show a file is hidden; it keeps a new path from going unclassed, and
+// image names is either one of the three the loader needs, a directory in
+// maskedDirs (masked only if it existed at loader start), or a file in
+// lapsingFiles, whose mask holds only until agentosd first rewrites it
+// (#2626). This test does not show anything is hidden; it keeps a new
+// path from going unclassed, and
 // keeps the unit's masks and these lists the same.
 func TestAgentosdStateIsHidden(t *testing.T) {
 	b, err := os.ReadFile("agentos-ap.service")
