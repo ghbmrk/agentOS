@@ -78,10 +78,23 @@ func (s *Secrets) Put(slot string, secret []byte) error {
 }
 
 func (s *Secrets) Has(slot string) bool {
+	if s == nil {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.m[slot]
 	return ok
+}
+
+// Len is how many slots the store holds; a nil store holds none.
+func (s *Secrets) Len() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
 }
 
 // with opens slot for fn and wipes the plaintext after it returns.
