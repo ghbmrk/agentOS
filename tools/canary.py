@@ -96,6 +96,8 @@ _SHAPES = {
     "private_key": (B64, None, "base64", 48,
                     lambda c: "-----BEGIN PRIVATE KEY-----\n" + c + "\n-----END PRIVATE KEY-----"),
     "recovery_code": (B32, 30, None, None, lambda c: "-".join(c[i:i + 5] for i in range(0, len(c), 5))),
+    # A WPA passphrase as NetworkManager takes it (#935, broker/netjoin N9).
+    "wifi_psk": (PASSWORD, 32, None, None, lambda c: c),
 }
 KINDS = tuple(_SHAPES)
 DECODABLE = tuple(k for k, s in _SHAPES.items() if s[2])

@@ -50,6 +50,17 @@ class MintTest(unittest.TestCase):
     def test_mint_set_covers_all_kinds(self):
         self.assertEqual(sorted(c.kind for c in canary.mint_set()), sorted(canary.KINDS))
 
+    # REQ: CLK-1
+    def test_wifi_psk_kind_is_a_valid_wpa_passphrase(self):
+        # #935: a home Wi-Fi password canary, shaped as NetworkManager accepts
+        # it (broker/netjoin N9: 8-63 printable ASCII), so a product target can
+        # plant it on the join path and the A5 scan fails if it surfaces.
+        self.assertIn("wifi_psk", canary.KINDS)
+        c = canary.mint("wifi_psk")
+        self.assertTrue(8 <= len(c.value) <= 63, len(c.value))
+        self.assertTrue(all(0x20 <= ord(ch) <= 0x7E for ch in c.value))
+        self.assertEqual(c.core, c.value)
+
     def test_fingerprint_does_not_reveal_value(self):
         c = canary.mint("api_key")
         self.assertNotIn(c.fingerprint, c.value)
