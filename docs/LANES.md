@@ -11,22 +11,41 @@ One owner per directory at a time (PLAN.md §3). A change another owner's direct
 - **Steps 1 to 3 (D-139):** sub A runs the freeze, this spec, the kernel and the slice; `broker/kernel` (with `key` and `sim`) and `broker/clerk` belong to its step-2 kernel builder, then to its step-3 slice builders. Sub B runs only the hardware track and the eval set, and owns `evals/slice-inbox/`, which no kernel PR touches. Nobody else writes these.
 - **Step 4:** sub A owns the trusted side, sub B the untrusted side, and the Codex lane only what its tier limit allows. Each port PR names the directories it owns and the old ones it deletes.
   Port map (2026-10-20; `broker/` directories, one owner each, every directory named). Two rules decide it:
-  - **Ownership follows trust.** A directory that holds keys or secrets, scrubs credentials, writes the event or log store, holds verdict or claim code, or scores reviewers belongs to sub A. Sub B gets only the untrusted side. The Codex lane gets only directories its tier limit C allows (below).
-  - **Deleting waits on importers.** A row that deletes a directory waits until no other owner's directory imports it.
+  - **Ownership follows trust.** A directory that holds keys or secrets, scrubs credentials, writes the event or log store, holds verdict or claim code, or scores reviewers belongs to sub A. Sub B gets only the untrusted side. The Codex lane gets only what its tier limit C allows (below).
+  - **Deleting waits on importers.** A row that deletes a directory waits until no other owner's directory imports it. The importer table below is generated, not hand-kept; regenerate it with the command under it before changing a row.
   - **Sub A, trusted core:** `kernel`, `clerk`, `core`, `vendor`, `third_party`, `cmd/agentos-a8scan`, `cmd/agentos-builder`.
-  - **Sub A, ported onto the kernel (each deleted by its row):**
-    - `grants` (keys, `broker/kernel/key`). Waits on sub B's `attention`, `localui` and `daemon`, and on `vm`, `follow`, `recalltool` and `mail`.
-    - `vault`, `egress`, `holder` and `checker` (the clerk exit and its sealed secrets, `broker/clerk`; one row). Waits on the ports of their importers `browser`, `route`, `e2e`, `provagent`, `recovery`, `firstboot`, `smsapi` and the `cmd/` mains that import them.
-    - `verb` and `meter` (spend and verb caveats). Waits on sub B's `attention`, `change`, `localui`, `guest`, `loopbuild`, `loops` and `cleanroom`, and on `grants`, `egress`, `holder`, `mail`, `reversible`, `maintain`, `modelroute`, `replay` and `route`.
-    - `mail` (clerk; waits on the inbox slice #2566 and on sub B's `corpus` and `localui`) and `browser` (a vault importer with no importers of its own, so it waits on nothing and ports before the `vault` row deletes `vault`).
-    - `recall` and `recalltool` (the private-data read side; their importers `events`, `photo`, `mail`, `vault` and `cmd/` are all sub A, so the row waits only on those ports).
-    - `replay` (sim and replay are one path in `broker/kernel/sim`; only `cmd/agentosd` imports it, so the row waits on sub B's unhooking of `loops`).
-    - `journal` and `durable` (the log and its stores; deleted last, once every other row that imports them has merged).
-    - `projection` (deleted by #2568; nothing imported it).
-  - **Sub A, trusted-side directories moved off the other lanes:** `events`, `e2e`, `route`, `routerule`, `modelroute`, `infer`, `photo`, `test`, `pubid`, `maintain`, `provagent`, `cmd/agentos-photo`, `cmd/agentos-infer`, and `evals/review/` (it scores reviewers). Each is rewired onto `kernel.Submit` and the clerk interfaces in its own row (see the issue rows); `provagent` is deleted with step 5.
-  - **Sub A, trusted host and hardware (kept, D-139 keep list; each only rewires its `journal`, `durable` and `grants` imports onto the kernel log and keys in its own row):** `modem`, `modemlink`, `tpmseal`, `hostdisk`, `firstboot`, `claim`, `card`, `recovery`, `update`, `apply`, `follow`, `netguard`, `netjoin`, `apnet`, `sipsign`, `smsapi`, `sendrules`, `sockets`, `procguard`, `childproc`, `cgroup`, `clock`, `attest`, `boxname`, `bridgeclient`, `bridgeproto`, `vm`, `quota`, `admission`, `accel`, `budget`, `inflight`, `floor`, `hostchange`, `reversible`, and the host-side `cmd/` binaries (`agentos-modem`, `-holder`, `-egress`, `-checker`, `-hostdisk`, `-release`, `-ap`, `-netjoin`, `-clock-boot`, `-seller`).
+  - **Sub A, ported onto the kernel (each deleted by its row):** `grants` (keys, `broker/kernel/key`), `vault`, `egress`, `holder` and `checker` (the clerk exit and its sealed secrets, `broker/clerk`; one row, #2571), `verb` and `meter` (spend and verb caveats, #2572), `mail` (clerk, waits on the inbox slice #2566, #2574), `browser` (clerk, #2573), `recall` and `recalltool` (the private-data read side, #2579), `replay` (sim and replay are one path in `broker/kernel/sim`, #2575), `provagent` (#2579 ports and deletes it), `journal` and `durable` (the log and its stores; deleted last, once every other row that imports them has merged), `projection` (deleted by #2568; nothing imported it).
+  - **Sub A, trusted-side directories moved off the other lanes (rewired onto `Kernel.Submit` and the clerk interfaces in #2579):** `events`, `e2e`, `route`, `routerule`, `modelroute`, `infer`, `photo`, `test`, `pubid`, `maintain`, `cmd/agentos-photo`, `cmd/agentos-infer`, and `evals/review/` (it scores reviewers).
+  - **Sub A, trusted host and hardware (each rewires its old-core imports in its own row; the imports are in the table below):** `modem`, `modemlink`, `firstboot`, `recovery`, `update`, `apply`, `follow`, `apnet`, `clock`, `vm`, `reversible`, and the `cmd/` mains `agentos-holder`, `-egress`, `-checker`, `-ap`. These need no rewiring: `tpmseal`, `hostdisk`, `claim`, `card`, `netguard`, `netjoin`, `sipsign`, `smsapi`, `sendrules`, `sockets`, `procguard`, `childproc`, `cgroup`, `attest`, `boxname`, `bridgeclient`, `bridgeproto`, `quota`, `admission`, `accel`, `budget`, `inflight`, `floor`, `hostchange`, and the `cmd/` mains `agentos-modem`, `-hostdisk`, `-release`, `-netjoin`, `-clock-boot`, `-seller`.
   - **Sub B, untrusted side:** `owner`, `localui`, `localsrv`, `localapi`, `control`, `question`, `attention`, `guest`, `guesterr`, `cmd/agentos-guest-bridge`, `workers`, `change`, `compile`, `corpus`, `skill`, `loops`, `loop7`, `loopbuild`, `machprobe`, `probecmd`, `sockprobe`, `fold`, `hint`, `cleanroom`, `pubsend`, `voice`, `daemon` and `cmd/agentosd` (the wiring; sub B's ports unhook it, step 5 deletes it), `cmd/agentos-localui`, and `evals/slice-inbox/` until it is handed over.
-  - **Codex lane, tier C only:** the lane gate fails a Codex PR whose tier is above C (`tools/risk_tier.py`), and every `broker/` directory and `evals/` directory is tier B or A. The lane therefore owns no `broker/` directory; its rows touch only tier C paths (`docs/`, `tools/`, `tests/`) and are claimed by issue. A Codex row that needs a tier B path is built by the peers, unless a gate-file PR with a Security accept raises the limit in `tools/risk_tier.py`. It writes through `Kernel.Submit` (`broker/kernel/kernel.go`, which runs `Admit`), never raw `Log.Append`, and imports no old-core directory.
+  - **Codex lane, tier C only:** the lane gate fails a Codex PR whose tier is above C (`tools/risk_tier.py`), and every `broker/` and `evals/` directory is tier B or A, so the lane owns no `broker/` directory. Its rows touch only tier C paths in `docs/`, `tools/` and `tests/`, claimed by issue, and never a gate file or a file that builds, scores or gates reviews: `tools/revieweval.py`, `tools/reviewpacket.py`, `tools/require_ran.py`, `tools/premerge.py`, `tools/risk_tier.py`, `tools/board.py`, `tools/doclint.py`, `tools/trace.py`, `tools/ci_scope*`, `tools/g1_scope*`, `tools/old_core.txt` and `.github/` (sub A owns them). It writes through `Kernel.Submit` (`broker/kernel/kernel.go`, which runs `Admit`), never raw `Log.Append`, and imports no old-core directory.
+  - **Importers of each directory a row deletes** (direct and test imports; sub B importers are the cross-owner waits, sub A importers port first or in the same row; `cmd/agentosd` is sub B everywhere):
+
+    | Deleted | Importers |
+    |---|---|
+    | `grants` | sub B: `attention`, `daemon`, `localui`, `cmd/agentosd`; sub A: `follow`, `mail`, `recalltool`, `vm` |
+    | `vault` | sub B: `cmd/agentosd`; sub A: `browser`, `e2e`, `egress`, `firstboot`, `holder`, `provagent`, `recovery`, `route`, `cmd/agentos-a8scan`, `cmd/agentos-egress` |
+    | `egress` | sub B: `cmd/agentosd`; sub A: `e2e`, `holder`, `provagent`, `route`, `cmd/agentos-egress`, `cmd/agentos-holder` |
+    | `holder` | sub B: `cmd/agentosd`; sub A: `cmd/agentos-egress`, `cmd/agentos-holder` |
+    | `checker` | sub B: `cmd/agentosd`; sub A: `holder`, `cmd/agentos-checker`, `cmd/agentos-egress`, `cmd/agentos-holder` |
+    | `verb` | sub B: `attention`, `change`, `localui`, `cmd/agentosd`; sub A: `egress`, `grants`, `holder`, `mail`, `reversible` |
+    | `meter` | sub B: `cleanroom`, `guest`, `loopbuild`, `loops`, `cmd/agentosd`; sub A: `e2e`, `grants`, `maintain`, `modelroute`, `replay`, `route`, `cmd/agentos-egress` |
+    | `mail` | sub B: `corpus`, `cmd/agentosd`; sub A: `vm`, `cmd/agentos-egress` |
+    | `browser` | none |
+    | `recall` | sub B: `cmd/agentosd`; sub A: `events`, `mail`, `photo`, `recalltool`, `vault` |
+    | `recalltool` | sub B: `cmd/agentosd`; sub A: `recall` |
+    | `replay` | sub B: `cmd/agentosd` |
+    | `provagent` | sub B: `cmd/agentosd`; sub A: `e2e` |
+    | `journal` | sub B: `change`, `compile`, `control`, `daemon`, `guest`, `localsrv`, `localui`, `loop7`, `loopbuild`, `loops`, `owner`, `cmd/agentosd`, `cmd/agentos-guest-bridge`; sub A: the rest, listed by the command |
+    | `durable` | sub B: `change`, `cleanroom`, `guest`, `localsrv`, `localui`, `loops`, `owner`, `pubsend`, `question`, `cmd/agentosd`; sub A: the rest, listed by the command |
+
+    `browser` imports `vault`, so it ports before the `vault` row deletes `vault`, and waits on nothing itself. Of the kept host directories only these import an old-core directory: `firstboot` (`vault`), `recovery` (`durable`, `journal`, `vault`), `update` and `apnet` and `clock` (`durable`), `apply` and `modem` and `modemlink` (`journal`), `follow` (`durable`, `grants`, `journal`), `vm` (`durable`, `grants`, `journal`, `mail`), `reversible` (`journal`, `verb`), `cmd/agentos-ap` (`durable`), and the `cmd/` mains `-holder`, `-egress`, `-checker` (the exit and `mail`, `meter`, `durable`, `journal`).
+
+    Regenerate from `broker/` (Go 1.26.8; the rows above are this output reduced to top-level directories):
+
+    ```
+    go list -e -f '{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}' ./... | awk '{p=$1; sub(".*/broker/","",p); for(i=2;i<=NF;i++) if($i ~ /agentos\/broker\//){d=$i; sub(".*/broker/","",d); if(d!=p) print d" "p}}' | sort -u
+    ```
 - **Everything else** (docs, tools, tests, image, CI) has no fixed owner: the conflict guard (OPERATING §5) keeps two builds off one file.
 
 ## Lanes
