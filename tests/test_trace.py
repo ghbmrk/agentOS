@@ -1,5 +1,6 @@
 # Marker strings are split so this file makes no coverage claims itself.
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -75,6 +76,78 @@ class TraceTest(unittest.TestCase):
         d = make_repo(self.RETIRING, {"tests/t.py": M + "KEY-1\n"})
         self.assertEqual(tr.main(["--root", str(d)]), 0)
         self.assertIn("Old-core markers: 0 in 0 retired IDs", (d / "TRACE.md").read_text())
+
+
+def git(d, *a):
+    subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+
+def commit(d, files, remove=()):
+    for rel, text in files.items():
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    for rel in remove:
+        (d / rel).unlink()
+    git(d, "add", "-A")
+    git(d, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "c")
+    out = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True, capture_output=True)
+    return out.stdout.decode().strip()
+
+
+class RatchetTest(unittest.TestCase):
+    """The old core (tools/old_core.txt) never grows between a base and a head (D-139)."""
+
+    IMP = 'import "github.com/ghbmrk/agentos/broker/journal"\n'
+
+    def setUp(self):
+        self.d = make_repo(TraceTest.RETIRING, {})
+        git(self.d, "init", "-q")
+        self.base = commit(self.d, {
+            "tools/old_core.txt": "# old\nbroker/journal\nbroker/sim\n",
+            "broker/journal/j.go": "package journal\n",
+            "broker/sim/s.go": "package sim\n",
+            "broker/daemon/d.go": "package daemon\n" + self.IMP,
+            "tests/t.py": M + "OP-1\n",
+        })
+
+    def problems(self, head):
+        return tr.ratchet(self.d, self.base, head, tr.retired_ids(TraceTest.RETIRING))
+
+    def test_unchanged_and_shrinking_pass(self):
+        self.assertEqual(self.problems(self.base), [])
+        head = commit(self.d, {"broker/daemon/d.go": "package daemon\n"},
+                      remove=["broker/journal/j.go", "tests/t.py"])
+        self.assertEqual(self.problems(head), [])
+        self.assertEqual(tr.main(["--root", str(self.d), "--ratchet", self.base]), 0)
+
+    def test_new_marker_fails(self):
+        head = commit(self.d, {"tests/u.py": M + "OP-2\n"})
+        self.assertEqual(self.problems(head), ["old-core markers grew from 1 to 2"])
+        self.assertEqual(tr.main(["--root", str(self.d), "--ratchet", self.base]), 1)
+
+    def test_unmarked_old_core_code_fails(self):
+        head = commit(self.d, {"broker/journal/new.go": "package journal\n\nfunc F() {}\n"})
+        self.assertEqual(self.problems(head), ["lines in broker/journal grew from 1 to 4"])
+
+    def test_new_wiring_fails(self):
+        head = commit(self.d, {"broker/cmd/agentosd/m.go": "package main\n" + self.IMP})
+        self.assertEqual(self.problems(head), ["imports of broker/journal grew from 1 to 2"])
+
+    def test_imports_inside_old_core_are_not_wiring(self):
+        head = commit(self.d, {"broker/sim/s.go": "package sim\n" + self.IMP})
+        self.assertEqual(self.problems(head), ["lines in broker/sim grew from 1 to 2"])
+
+    def test_port_retires_a_directory_by_deleting_its_old_files(self):
+        head = commit(self.d, {"tools/old_core.txt": "broker/journal\n",
+                               "broker/sim/kernel_sim.go": "package sim\n\nfunc Run() {}\n"},
+                      remove=["broker/sim/s.go"])
+        self.assertEqual(self.problems(head), [])
+
+    def test_retiring_a_directory_without_deleting_fails(self):
+        head = commit(self.d, {"tools/old_core.txt": "broker/journal\n"})
+        self.assertEqual(self.problems(head),
+                         ["broker/sim left tools/old_core.txt but its old files remain: broker/sim/s.go"])
 
 
 if __name__ == "__main__":

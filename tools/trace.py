@@ -5,14 +5,19 @@ Requirement IDs are bold tokens like **KEY-1** in SPEC.md.
 Tests claim coverage with a marker comment anywhere in a file:  REQ: KEY-1, CLK-2
 A marker naming an ID retired in SPEC.md Appendix A is an old-core marker: it is
 accepted and counted, and the count falls to zero by the end of PLAN step 5.
+The old-core ratchet compares a base commit with the head: no measure of the old
+core (tools/old_core.txt) may grow, and a directory leaves that list only in the
+PR that deletes its old files.
 Usage:
   tools/trace.py            write TRACE.md (PRs don't commit it; .github/workflows/trace.yml does, on main)
   tools/trace.py --check    fail if TRACE.md is stale or a marker cites an unknown ID
   tools/trace.py --gate A,B fail unless every listed ID has at least one covering file
+  tools/trace.py --ratchet BASE  fail if the old core grew between BASE and HEAD
 """
 import argparse
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -21,6 +26,8 @@ MARKER = re.compile(r"REQ:\s*([A-Z]{2,4}-\d+[a-z]?(?:\s*,\s*[A-Z]{2,4}-\d+[a-z]?
 ID_ANY = re.compile(r"[A-Z]{2,4}-\d+[a-z]?")
 SCAN_DIRS = ("tests", "spikes", "src", "broker")
 SKIP_SUFFIXES = {".png", ".jpg", ".img", ".iso", ".bin", ".pyc"}
+OLD_CORE = "tools/old_core.txt"
+MODULE = "github.com/ghbmrk/agentos/"
 
 
 def spec_ids(spec_text):
@@ -47,6 +54,12 @@ def retired_ids(spec_text):
     return seen
 
 
+def markers(cov, path, text):
+    for m in MARKER.finditer(text):
+        for rid in re.split(r"\s*,\s*", m.group(1)):
+            cov.setdefault(rid, set()).add(path)
+
+
 def coverage(root):
     cov = {}
     for d in SCAN_DIRS:
@@ -60,10 +73,68 @@ def coverage(root):
                 text = f.read_text(errors="ignore")
             except OSError:
                 continue
-            for m in MARKER.finditer(text):
-                for rid in re.split(r"\s*,\s*", m.group(1)):
-                    cov.setdefault(rid, set()).add(str(f.relative_to(root)))
+            markers(cov, str(f.relative_to(root)), text)
     return cov
+
+
+def git_tree(root, ref):
+    """{path: text} for every file at ref, read through git."""
+    rows = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-z", ref],
+                          check=True, capture_output=True).stdout.decode().split("\0")
+    names = [r.split("\t", 1)[1] for r in rows if r and r.split()[1] == "blob"]
+    blobs = "".join(f"{ref}:{n}\n" for n in names).encode()
+    out = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], input=blobs,
+                         check=True, capture_output=True).stdout
+    tree, i = {}, 0
+    for n in names:
+        header_end = out.index(b"\n", i)
+        size = int(out[i:header_end].split()[2])
+        body = out[header_end + 1:header_end + 1 + size]
+        i = header_end + 2 + size
+        tree[n] = body.decode(errors="ignore")
+    return tree
+
+
+def old_core_dirs(tree):
+    return [l.strip() for l in tree.get(OLD_CORE, "").splitlines()
+            if l.strip() and not l.startswith("#")]
+
+
+def under(path, d):
+    return path.startswith(d + "/")
+
+
+def old_core_measures(tree, dirs, retired):
+    """Markers citing retired IDs, lines in each old-core directory, and imports
+    of an old-core package from a Go file outside the old core (its wiring)."""
+    cov = {}
+    for path, text in tree.items():
+        if path.split("/")[0] in SCAN_DIRS and pathlib.PurePath(path).suffix not in SKIP_SUFFIXES:
+            markers(cov, path, text)
+    m = {"old-core markers": sum(len(cov.get(r, ())) for r in retired)}
+    for d in dirs:
+        m[f"lines in {d}"] = sum(t.count("\n") for p, t in tree.items() if under(p, d))
+        imp = re.compile(r'"' + re.escape(MODULE + d) + r'(?:/[^"]*)?"')
+        m[f"imports of {d}"] = sum(len(imp.findall(t)) for p, t in tree.items()
+                                   if p.endswith(".go") and not any(under(p, o) for o in dirs))
+    return m
+
+
+def ratchet(root, base, head, retired):
+    """Problems with the old core between base and head; empty when it did not grow."""
+    bt, ht = git_tree(root, base), git_tree(root, head)
+    dirs = old_core_dirs(ht)
+    problems = []
+    for d in old_core_dirs(bt):
+        if d not in dirs:
+            kept = sorted(p for p in bt if under(p, d) and p in ht)
+            if kept:
+                problems.append(f"{d} left {OLD_CORE} but its old files remain: " + ", ".join(kept))
+    bm, hm = old_core_measures(bt, dirs, retired), old_core_measures(ht, dirs, retired)
+    for k in hm:
+        if hm[k] > bm[k]:
+            problems.append(f"{k} grew from {bm[k]} to {hm[k]}")
+    return problems
 
 
 def render(ids, cov, retired=()):
@@ -99,6 +170,8 @@ def main(argv=None):
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--gate", default="")
     ap.add_argument("--root", default=str(ROOT))
+    ap.add_argument("--ratchet", default="", metavar="BASE")
+    ap.add_argument("--head", default="HEAD")
     args = ap.parse_args(argv)
     root = pathlib.Path(args.root)
 
@@ -108,6 +181,12 @@ def main(argv=None):
     cov = coverage(root)
     out = render(ids, cov, retired)
     trace = root / "TRACE.md"
+
+    if args.ratchet:
+        problems = ratchet(root, args.ratchet, args.head, retired)
+        for p in problems:
+            print("Old core grew: " + p, file=sys.stderr)
+        return 1 if problems else 0
 
     unknown = sorted(set(cov) - set(ids) - set(retired))
     if unknown:
