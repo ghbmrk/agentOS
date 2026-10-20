@@ -2,7 +2,7 @@
 
 Board section: Release rows carried from LATER.md (2026-10-10). Source: work item #1314; the plan-login chain (Mark chose "Plan login" for the first box, 2026-10-13); CRED-5b's "CAP-11 plan-route code (S8)" dependency. Tier A (modelroute, vm, egress wiring). Fifth in the chain #808 → #807 → #1015 → #1014 → this → #1264. The route this package builds stays disabled until S8-live (#809) fills its qualification record.
 
-**Re-scoped 2026-10-13 (D-114).** Mark's verdict on Claude's terms is `unclear`, so Codex (ChatGPT plan) is the first and default plan route. It is broker-held, unconfirmed (D-061): the CLI holds placeholders, the vault process injects the login (#1015, #1014), and the route needs the owner's recorded consent (CRED-5c) and CRED-5b's failure handling before it ships. The Claude declaration ships disabled, as an owner opt-in built in #1380. This removes the worker-held requirements (W1-W9) from this package for Codex; they apply to the Claude opt-in. Three of their aims carry over to Codex in other forms: W4's hosted tools off (#807's config, #1014's request-body check), W5's clean sign-in and auth-host check (#1014), and W8's money risk (the credits measurement below and on #809).
+**Re-scoped 2026-10-13 (D-114).** Codex (ChatGPT plan) is the first and default plan route. It is broker-held, unconfirmed (D-061): the CLI holds placeholders, the vault process injects the login (#1015, #1014), and the route needs the owner's recorded consent (CRED-5c) and CRED-5b's failure handling before it ships. This removes the worker-held requirements (W1-W9) from this package; worker-held custody is dropped for every provider (D-140). Three of their aims carry over to Codex in other forms: W4's hosted tools off (#807's config, #1014's request-body check), W5's clean sign-in and auth-host check (#1014), and W8's money risk (the credits measurement below and on #809).
 
 **Why.** A guest can route single model calls over an API key (CAP-9) but cannot hand a whole subtask to the owner's plan. CAP-11 makes a provider's official agent CLI a route type, added by declaration, run headless inside a worker. Nothing at current main declares, starts or returns from a provider agent. The 2026-10-07 draft branch `pkg/cap-11-12-resources-draft` (commit fc2e31b, `broker/provagent/declare.go`; 5d2a29d, `broker/planquota/admit.go`) has a declaration schema and a pool gate with no merge base on main: reuse the schema where it still fits, credit the branch, and leave the resources tool to CAP-12a.
 
@@ -26,18 +26,18 @@ Board section: Release rows carried from LATER.md (2026-10-10). Source: work ite
 **Revert mutants (each must turn a test red).** Skip the qualification check. Pass the brief as argv. Skip the CRED-7 result scan. Journal the CLI's stderr raw. Let `worker_exec` accept a provider worker's name. Let `worker_checkpoint` accept it. Let `worker_fork` accept it. Let `worker_rollback` accept it. Retry after a refused login. Admit a run while a pool is at the owner's reserve. Ignore the credit-draw signal. Accept `unconfirmed` without consent. Let the Claude declaration run without opt-in.
 
 **Threats Security must check.**
-- Provider terms: settled for this package by D-114. Claude's verdict is `unclear` (Mark, 2026-10-13), so its declaration ships disabled behind the opt-in (#1380). Codex is `allowed` (#1377; D-117); the `unconfirmed` consent path stays in the gate for other broker-held routes, so check it still refuses without consent.
+- Provider terms: settled for this package by D-114 and D-140: Claude has no plan route. Codex is `allowed` (#1377; D-117); the `unconfirmed` consent path stays in the gate for other broker-held routes, so check it still refuses without consent.
 - Brief injection into the CLI's command surface (argv, stdin framing, slash and bang, `--` handling).
 - Result channel carrying the login in an encoding the scan misses (scan is a tripwire; the worker holds only placeholders).
 - A guest choosing the provider ID or declaration path to reach another provider's login.
 - Label laundering: private content reaching a plan account later used by a public caller.
 - A guest guessing a provider worker's ID and calling a worker tool on it.
 
-**Spec dependency.** Settled by the D-114 SPEC diff (CRED-5, CAP-9, §8.1 step 6). This package builds no consent or opt-in flow: CRED-5c records Codex consent, and #1380 builds the Claude opt-in.
+**Spec dependency.** Settled by the D-114 SPEC diff (CRED-5, CAP-9, §8.1 step 6). This package builds no consent flow: CRED-5c records Codex consent.
 
 **Needs:** #807, #1015, #1014 to build; #809 S8-live and #1377 to enable (they fill the qualification record); CRED-5c (consent) and CRED-5b (failure, fallback and pause) before the Codex route ships. #1264 c4e2 (page sign-in) comes after this and is what puts a real login in the vault; until then tests seed a synthetic canary login.
 
-**Out of scope.** CAP-12a resources tool, the page's "Use my plan" sign-in (#1264), the consent record (CRED-5c), failure and pause handling (CRED-5b), the Claude opt-in (#1380), Grok and Muse declarations (#1378, #1379), live qualification and A14's adversarial clause (S8-live, #809).
+**Out of scope.** CAP-12a resources tool, the page's "Use my plan" sign-in (#1264), the consent record (CRED-5c), failure and pause handling (CRED-5b), Grok and Muse declarations (#1378, #1379), live qualification and A14's adversarial clause (S8-live, #809).
 
 **Scope:** `broker/provagent/*` (new), `broker/modelroute/*` (route kind and fallback only), `broker/workers/*` (provider run path and tool ID refusal), `broker/workers/*_test.go`, `broker/vm/worker.go` (spec only), `broker/cmd/agentosd/main.go` (wiring) and its tests, `broker/guest/mcp.go` (tool registration only), `broker/guest/tools_test.go`, `broker/daemon/arc2_test.go` (classing `provagent` only; amended 2026-10-15 on the #1864 reviews), `tools/risk_tier.py` (classing `provagent` tier A only; same amendment), the ASSUMPTIONS.md of each touched package, this brief.
 

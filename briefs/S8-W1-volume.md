@@ -50,7 +50,6 @@ Board section: Release rows carried from LATER.md (2026-10-10). Source: work ite
 - Sign-in on the page (#1264).
 - Consent for an unconfirmed route (CRED-5c).
 - Route failure and fallback (CRED-5b).
-- The Claude opt-in volume (#1380).
 - Live qualification (S8-live, #809).
 
 **Scope:** `broker/vm/worker.go`, `broker/vm/vm.go` (Spec field only), `broker/vm/*_test.go`, `broker/vm/ASSUMPTIONS.md`, `broker/vault/*_test.go` (canary at rest only), `broker/egress/*` (placeholder set and vault entry write only), `broker/cmd/agentos-egress/*`, `broker/egress/ASSUMPTIONS.md`, `broker/cmd/agentosd/main.go` (wiring), `broker/journal/*_test.go`, `broker/recall/*_test.go` (canary absence only), this brief.
