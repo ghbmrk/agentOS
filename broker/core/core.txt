@@ -41,7 +41,7 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
-wiring clerk/inbox/slice
+core clerk/inbox
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -104,6 +104,8 @@ allow replay guest.New -- LOOP5 replays a run on its own guest plane
 allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
 allow kernel/sim kernel.* -- the seeded harness drives the kernel as the daemon and owner would, on a fake disk; no broker package imports sim
 allow kernel/sim clerk.* -- the harness's world builds the mail clerk it checks the kernel against
+allow clerk/inbox/cmd/slice kernel.* -- the eval runner boots a kernel on a fake disk and drives it as the daemon and owner would; no broker package imports it
+allow clerk/inbox/cmd/slice clerk/inbox.* -- the eval runner builds the mail clerk it runs the kernel against
 
 # Interfaces a core type satisfies through a write path (see the header).
 # Authorize and Dispatch move an intent the caller already submitted through

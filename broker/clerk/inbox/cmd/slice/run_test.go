@@ -1,4 +1,4 @@
-package slice
+package main
 
 // REQ: EVL-2, VRB-2
 
@@ -12,7 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
 
-const evalDir = "../../../../evals/slice-inbox"
+const evalDir = "../../../../../evals/slice-inbox"
 
 type fixtureMail struct {
 	ID    string `json:"id"`

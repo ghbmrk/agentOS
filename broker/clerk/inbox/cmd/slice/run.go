@@ -1,4 +1,4 @@
-package slice
+package main
 
 import (
 	"crypto/ed25519"
@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
@@ -19,6 +18,7 @@ const (
 	dayMS       = int64(86_400_000)
 	baseHoldMS  = int64(600_000)
 	noveltyMS   = dayMS
+	plannerCap  = 200 // actions the planner's key allows per day, all verbs together
 	startOfRun  = "2026-10-19T09:00:00Z"
 	statusCause = "trash-not-restorable"
 	statusText  = "Spam was not deleted: this account empties its trash too soon for a delete to be undone."
@@ -42,7 +42,6 @@ type Input struct {
 type Scripted struct {
 	Owner       string       `json:"owner"`
 	Mail        string       `json:"mail"`
-	During      string       `json:"during"`
 	PlannerStep *PlannerStep `json:"planner_step"`
 	Forced      bool         `json:"forced"`
 }
@@ -85,6 +84,10 @@ type Outcome struct {
 	LogDigest        string          `json:"log_digest"`
 }
 
+// handleSecret keys the sender handles. Fixed here so a run replays to the same
+// log; a real account draws its own and keeps it with the clerk (ASSUMPTIONS.md).
+var handleSecret = []byte("agentos-slice-inbox-handles-v1")
+
 func pair(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	s := make([]byte, ed25519.SeedSize)
 	s[0] = seed
@@ -106,20 +109,19 @@ func Run(in Input) (Outcome, error) {
 	plannerPub, _ := pair(4)
 
 	verbs := []key.Verb{key.Organize, key.Trash, key.Unsubscribe}
-	taps := []string{"approve-key"}
 	if in.Standing != nil {
-		verbs, taps = verbs[:0], []string{}
+		verbs = verbs[:0]
 		for _, v := range in.Standing.Verbs {
 			verbs = append(verbs, key.Verb(v))
 		}
 	}
-	view := KeyView{Verbs: sortedVerbs(verbs), Account: in.Owner}
-	approved := &view
-	if in.Standing != nil {
-		approved = nil
-	}
+	standing := in.Standing != nil
 
-	acct := inbox.NewAccount(ownerPub, in.World, in.Mails, in.RetentionDays, in.OneClickBody)
+	acct, err := inbox.NewAccount(ownerPub, handleSecret, func() inbox.World { return in.World }, in.Mails,
+		in.RetentionDays, in.OneClickBody)
+	if err != nil {
+		return Outcome{}, err
+	}
 	today, err := ms(in.World.Today)
 	if err != nil {
 		return Outcome{}, err
@@ -144,6 +146,7 @@ func Run(in Input) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
+	acct.Bind(k.State())
 	root := key.Issue(ownerPriv, key.Root{Holder: holderPub, Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
 	if err := k.Issue(issued, root); err != nil {
 		return Outcome{}, err
@@ -151,9 +154,17 @@ func Run(in Input) (Outcome, error) {
 	if err := log.Anchor(); err != nil {
 		return Outcome{}, err
 	}
-	// The hold is a caveat on the key handed to the planner, not a property of
-	// the clerk: the planner cannot lift it.
-	planner, err := key.Derive(root, holderPriv, plannerPub, key.LimitHold(baseHoldMS, noveltyMS))
+	var approved *KeyView
+	if !standing {
+		v, err := keyView(root, ownerPub, in.Owner)
+		if err != nil {
+			return Outcome{}, err
+		}
+		approved = &v
+	}
+	// The hold and the daily cap are caveats on the key handed to the planner,
+	// not properties of the planner: it cannot lift them.
+	planner, err := key.Derive(root, holderPriv, plannerPub, key.LimitHold(baseHoldMS, noveltyMS), key.LimitRate(plannerCap))
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -162,14 +173,16 @@ func Run(in Input) (Outcome, error) {
 	prior := append([]inbox.Delivery(nil), in.Prior...)
 	sort.Slice(prior, func(i, j int) bool { return prior[i].Date < prior[j].Date })
 	seeded := map[string]bool{}
+	seedPlans := map[string]bool{}
 	for _, d := range prior {
-		h := inbox.Handle(d.From)
+		h := acct.Handle(d.From)
 		t, _ := ms(d.Date)
 		id := "seed-" + h
 		if seeded[h] {
 			continue
 		}
 		seeded[h] = true
+		seedPlans[id] = true
 		acct.Preload(kernel.Idem(id, 0))
 		step := kernel.Normalize(id, key.Step{Verb: key.Unsubscribe, Clerk: inbox.Name,
 			Args: map[string]key.Arg{"to": {Value: h}}})
@@ -204,7 +217,7 @@ func Run(in Input) (Outcome, error) {
 			handleOf[it.Mail] = it.Sender
 		}
 	}
-	var refused []inbox.Refusal
+	var kernelRefusals []inbox.Refusal
 	for i, s := range in.Script {
 		switch {
 		case s.Owner == "STOP":
@@ -218,7 +231,7 @@ func Run(in Input) (Outcome, error) {
 			if err != nil {
 				return Outcome{}, err
 			}
-			refused = append(refused, rf...)
+			kernelRefusals = append(kernelRefusals, rf...)
 		}
 	}
 	for _, at := range []int64{t0 + baseHoldMS, t0 + noveltyMS} {
@@ -227,9 +240,13 @@ func Run(in Input) (Outcome, error) {
 		}
 	}
 
-	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), refused...),
-		StatusLines: []StatusLine{}, Holds: holds(k, acct, planner, ownerPub), OwnerTaps: taps,
-		KeysAtApproval: approved, KeysAtEnd: view, OutsideMailClerk: outside(in.Mails, listing)}
+	end, err := keyView(planner, ownerPub, in.Owner)
+	if err != nil {
+		return Outcome{}, err
+	}
+	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), kernelRefusals...),
+		StatusLines: []StatusLine{}, Holds: holds(k, acct, planner, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
+		KeysAtApproval: approved, KeysAtEnd: end, OutsideMailClerk: outside(listing)}
 	for _, r := range out.Refusals {
 		if r.Reason == statusCause {
 			out.StatusLines = []StatusLine{{Cause: statusCause, Text: statusText}}
@@ -242,8 +259,8 @@ func Run(in Input) (Outcome, error) {
 }
 
 // plannerStep delivers a step the planner was never given a key for. Unforced
-// it goes through the kernel; forced it goes straight to the clerk. Either
-// way something refuses it.
+// it goes through the kernel, which refuses it and returns that refusal; forced
+// it goes straight to the clerk, which refuses and records it itself.
 func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id string, ps PlannerStep, forced bool, now int64) ([]inbox.Refusal, error) {
 	args := map[string]key.Arg{}
 	var mail *string
@@ -253,9 +270,8 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id stri
 	}
 	step := kernel.Normalize(id, key.Step{Verb: key.Verb(ps.Op), Clerk: inbox.Name, Args: args})
 	if forced {
-		before := len(acct.Refusals())
 		acct.Do(kernel.Request{Plan: id, Step: step, Key: planner, Idem: kernel.Idem(id, 0), Now: now}, k.State())
-		return acct.Refusals()[before:], nil
+		return nil, nil
 	}
 	if err := k.Submit(now, kernel.Plan{ID: id, Key: planner, Steps: []key.Step{step}}); err != nil {
 		return nil, err
@@ -264,11 +280,33 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id stri
 	if p == nil || p.Status != kernel.SRejected {
 		return nil, fmt.Errorf("step %s was not rejected by the kernel", ps.Op)
 	}
-	reason := rejectionCode(k, id)
-	if reason == kernel.CPlan || reason == key.RVerb {
-		reason = "outside-key"
+	return []inbox.Refusal{{Op: ps.Op, Mail: mail, At: "kernel", Reason: inbox.Reason(rejectionCode(k, id))}}, nil
+}
+
+// keyView is what the key lets its holder do, read from the key itself.
+func keyView(k key.Key, owner ed25519.PublicKey, account string) (KeyView, error) {
+	v, err := key.Verify(k, owner)
+	if err != nil {
+		return KeyView{}, err
 	}
-	return []inbox.Refusal{{Op: ps.Op, Mail: mail, At: "kernel", Reason: reason}}, nil
+	vs := append([]string(nil), v.Limits.Verbs...)
+	sort.Strings(vs)
+	return KeyView{Verbs: vs, Account: account}, nil
+}
+
+// ownerTaps lists the owner approvals the log holds: every entry that widens
+// what may happen. A standing key was approved before this run and is not a tap.
+func ownerTaps(k *kernel.Kernel, standing bool) []string {
+	taps := []string{}
+	for _, e := range k.Log().Entries() {
+		if kernel.Widening(e.Type) {
+			taps = append(taps, "approve-key")
+		}
+	}
+	if standing && len(taps) > 0 {
+		taps = taps[1:]
+	}
+	return taps
 }
 
 func rejectionCode(k *kernel.Kernel, plan string) string {
@@ -285,7 +323,7 @@ func rejectionCode(k *kernel.Kernel, plan string) string {
 }
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.
-func holds(k *kernel.Kernel, acct *inbox.Account, planner key.Key, owner ed25519.PublicKey) []Hold {
+func holds(k *kernel.Kernel, acct *inbox.Account, planner key.Key, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
 	ver, err := key.Verify(planner, owner)
 	if err != nil {
 		return []Hold{}
@@ -299,23 +337,27 @@ func holds(k *kernel.Kernel, acct *inbox.Account, planner key.Key, owner ed25519
 			Plan  string `json:"plan"`
 			Novel bool   `json:"novel"`
 		}
-		if json.Unmarshal(e.Body, &b) != nil || !strings.HasPrefix(b.Plan, "unsub-") {
+		if json.Unmarshal(e.Body, &b) != nil || seeds[b.Plan] {
+			continue
+		}
+		p := k.State().Plans[b.Plan]
+		if p == nil || len(p.Plan.Steps) != 1 || p.Plan.Steps[0].Verb != key.Unsubscribe {
 			continue
 		}
 		w := "base"
 		if b.Novel {
 			w = "novelty"
 		}
-		out = append(out, Hold{Mail: acct.Origin(strings.TrimPrefix(b.Plan, "unsub-")), Window: w,
+		out = append(out, Hold{Mail: acct.Origin(p.Plan.Steps[0].Args["to"].Value), Window: w,
 			Seconds: ver.Limits.Window(b.Novel) / 1000,
-			Stopped: k.State().Plans[b.Plan].Status == kernel.SCancelled})
+			Stopped: p.Status == kernel.SCancelled})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mail < out[j].Mail })
 	return out
 }
 
 // outside lists what left the clerk toward the planner: ids, classes and handles.
-func outside(mails []inbox.Mail, listing []inbox.Item) []string {
+func outside(listing []inbox.Item) []string {
 	out := []string{}
 	for _, it := range listing {
 		out = append(out, it.Mail+":"+it.Class)

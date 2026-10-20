@@ -2,8 +2,10 @@ package inbox
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -62,41 +64,70 @@ type Refusal struct {
 // It is the only place a mail is read, an effect applied or a request made.
 type Account struct {
 	owner     ed25519.PublicKey
+	secret    []byte
+	world     func() World
 	body      string
 	retention int
 	items     []Item
+	mails     map[string]Mail   // by id: the clerk's own copy, never given out
+	mailOf    map[string]string // sender handle to the mail it was found in
 
 	mu       sync.Mutex
-	url      map[string]string // sender handle to its List-Unsubscribe URL
-	mailOf   map[string]string // sender handle to the mail it was found in
+	state    *kernel.State
 	done     map[string]bool
 	effects  []Effect
 	posts    []Post
 	refusals []Refusal
 }
 
-// Handle names a sender without revealing the address.
-func Handle(addr string) string {
-	h := sha256.Sum256([]byte(addr))
-	return "sender-" + hex.EncodeToString(h[:4])
+// minSecret is the shortest handle secret: 128 bits.
+const minSecret = 16
+
+// Handle names a sender without revealing the address or letting anyone
+// without the account's secret compute it from one.
+func (a *Account) Handle(addr string) string {
+	m := hmac.New(sha256.New, a.secret)
+	m.Write([]byte(addr))
+	return "sender-" + hex.EncodeToString(m.Sum(nil)[:minSecret])
 }
 
 // NewAccount reads every mail once. A mail is unsubscribable when the reader
-// calls it bulk and VRB-2 holds; only then does the planner get a handle.
-func NewAccount(owner ed25519.PublicKey, w World, mails []Mail, retentionDays int, oneClickBody string) *Account {
-	a := &Account{owner: owner, body: oneClickBody, retention: retentionDays,
-		url: map[string]string{}, mailOf: map[string]string{}, done: map[string]bool{}}
+// calls it bulk and VRB-2 holds; only then does the planner get a handle. The
+// world is read again when a step runs, so a verdict that has aged out is not
+// acted on. secret keys the handles and must hold at least 128 bits.
+func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mails []Mail, retentionDays int, oneClickBody string) (*Account, error) {
+	if len(secret) < minSecret {
+		return nil, errors.New("inbox: handle secret shorter than 128 bits")
+	}
+	a := &Account{owner: owner, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
+		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}}
 	for _, m := range mails {
 		it := Item{Mail: m.ID, Class: m.Class}
-		if reason, u := Evaluate(m.Raw, w); reason == ROK && m.Class == "bulk" {
-			it.Sender = Handle(FromAddress(m.Raw))
-			if _, ok := a.url[it.Sender]; !ok {
-				a.url[it.Sender], a.mailOf[it.Sender] = u, m.ID
+		a.mails[m.ID] = m
+		if a.eligible(m) {
+			it.Sender = a.Handle(FromAddress(m.Raw))
+			if _, ok := a.mailOf[it.Sender]; !ok {
+				a.mailOf[it.Sender] = m.ID
 			}
 		}
 		a.items = append(a.items, it)
 	}
-	return a
+	return a, nil
+}
+
+// eligible is the one rule for unsubscribing: the reader calls the mail bulk
+// and VRB-2 holds for it now.
+func (a *Account) eligible(m Mail) bool {
+	reason, _ := Evaluate(m.Raw, a.world())
+	return m.Class == "bulk" && reason == ROK
+}
+
+// Bind ties the account to the kernel whose log it serves. Do runs only a step
+// that log shows the kernel dispatched.
+func (a *Account) Bind(s *kernel.State) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state = s
 }
 
 // Listing is the planner's whole view of the mailbox.
@@ -109,39 +140,61 @@ func (a *Account) Preload(idem string) {
 	a.done[idem] = true
 }
 
-func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
+// Reason is the refusal reason for a rejection code the planner could cause by
+// asking for what its key does not allow.
+func Reason(code string) string {
+	if code == key.RVerb || code == kernel.CPlan {
+		return "outside-key"
+	}
+	return code
+}
+
+// Do runs one step. Whatever the request and view say, it acts only on a step
+// the bound kernel's log shows it dispatched, and judges the mail from its own
+// copy: class, VRB-2 and retention are the clerk's, not the caller's.
+func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	s := r.Step
+	if a.state == nil || !a.state.Dispatched(r) {
+		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
+	}
 	if a.done[r.Idem] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	s := r.Step
-	if rf := clerk.Check(a.owner, Name, nil, r, v); rf != nil {
-		reason := rf.Code
-		if reason == key.RVerb {
-			reason = "outside-key"
-		}
-		return a.refuse(string(s.Verb), s.Args["target"].Value, reason)
+	if rf := clerk.Check(a.owner, Name, nil, r, a.state); rf != nil {
+		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {
 	case key.Organize, key.Trash:
 		target := s.Args["target"].Value
-		if !a.has(target) {
+		m, ok := a.mails[target]
+		if !ok {
 			return a.refuse(string(s.Verb), target, "unknown-mail")
 		}
-		if s.Verb == key.Trash && a.retention < minRetentionDays {
-			return a.refuse(string(key.DeleteRemote), target, "trash-not-restorable")
+		if s.Verb == key.Trash {
+			if m.Class != "spam" && m.Class != "phishing" {
+				return a.refuse(string(s.Verb), target, "not-trashable")
+			}
+			if a.retention < minRetentionDays {
+				return a.refuse(string(key.DeleteRemote), target, "trash-not-restorable")
+			}
 		}
 		a.effects = append(a.effects, Effect{Verb: string(s.Verb), Mail: target, Label: s.Args["label"].Value})
 	case key.Unsubscribe:
 		h := s.Args["to"].Value
-		u, ok := a.url[h]
+		id, ok := a.mailOf[h]
 		if !ok {
 			return a.refuse(string(s.Verb), "", "unknown-sender")
 		}
+		m := a.mails[id]
+		reason, u := Evaluate(m.Raw, a.world())
+		if m.Class != "bulk" || reason != ROK {
+			return a.refuse(string(s.Verb), id, "no-longer-eligible")
+		}
 		a.posts = append(a.posts, Post{Method: "POST", URL: u, Body: a.body,
 			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}})
-		a.effects = append(a.effects, Effect{Verb: string(s.Verb), Mail: a.mailOf[h]})
+		a.effects = append(a.effects, Effect{Verb: string(s.Verb), Mail: id})
 	default:
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "outside-key")
 	}
@@ -156,15 +209,6 @@ func (a *Account) Probe(r kernel.Request, _ kernel.View) string {
 		return "done"
 	}
 	return "notdone"
-}
-
-func (a *Account) has(id string) bool {
-	for _, it := range a.items {
-		if it.Mail == id {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *Account) refuse(op, mail, reason string) kernel.Result {

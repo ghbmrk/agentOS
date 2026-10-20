@@ -21,7 +21,7 @@ func Plans(listing []Item, k key.Key) []kernel.Plan {
 		out = append(out, kernel.Plan{ID: id, Key: k, Steps: []key.Step{step}})
 	}
 	for _, it := range listing {
-		add("organize-"+it.Mail, key.Organize, map[string]string{"target": it.Mail, "label": it.Class})
+		add("organize-"+it.Mail, key.Organize, map[string]string{"target": it.Mail, "label": "agentOS/" + it.Class})
 	}
 	for _, it := range listing {
 		if it.Class == "spam" || it.Class == "phishing" {

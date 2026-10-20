@@ -518,3 +518,49 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 		t.Fatalf("effects = %d, want 1", len(r.mail.Effects()))
 	}
 }
+
+// probeClerk records, inside Do, what State.Dispatched says of the request it
+// was given and of three copies a caller could forge.
+type probeClerk struct {
+	st                                      func() *kernel.State
+	real, otherStep, otherKey, otherAttempt bool
+	req                                     kernel.Request
+}
+
+func (c *probeClerk) Do(r kernel.Request, _ kernel.View) kernel.Result {
+	s := c.st()
+	c.req, c.real = r, s.Dispatched(r)
+	f := r
+	f.Step.Verb = key.Trash
+	c.otherStep = s.Dispatched(f)
+	f = r
+	f.Key = key.Key{}
+	c.otherKey = s.Dispatched(f)
+	f = r
+	f.Attempt++
+	c.otherAttempt = s.Dispatched(f)
+	return kernel.Result{Outcome: "ok"}
+}
+func (c *probeClerk) Probe(kernel.Request, kernel.View) string { return "done" }
+
+// REQ: CLK-2
+func TestDispatchedHoldsOnlyForTheRequestTheKernelMade(t *testing.T) {
+	r := newRig(t)
+	c := &probeClerk{}
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: r.head.pub,
+		Sign: r.head.priv, Rand: rand.NewChaCha8([32]byte{1})})
+	must(t, err)
+	r.k, err = kernel.Boot(l, r.owner.pub, map[string]kernel.Clerk{"mail": c}, 0)
+	must(t, err)
+	c.st = r.k.State
+	must(t, r.k.Issue(0, r.root))
+	must(t, l.Anchor())
+	r.plan("p1", r.root, st(key.Organize, "m1"))
+	must(t, r.k.Tick(10))
+	if !c.real || c.otherStep || c.otherKey || c.otherAttempt {
+		t.Fatalf("real %v, forged step %v key %v attempt %v", c.real, c.otherStep, c.otherKey, c.otherAttempt)
+	}
+	if r.k.State().Dispatched(c.req) {
+		t.Fatal("a settled step still counts as dispatched")
+	}
+}

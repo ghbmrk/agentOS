@@ -17,8 +17,12 @@ type World struct {
 	KnownSenders  []string          `json:"known_senders"`
 	Today         string            `json:"today"`
 	LastOpened    map[string]string `json:"last_opened"`
-	UnopenedDays  int               `json:"unsubscribe_unopened_days"`
 }
+
+// unopenedDays is how long a sender's mail must have gone unopened, and how old
+// its first mail must be, before the clerk may unsubscribe (D-141). It is a
+// constant of the clerk: no world, planner or fixture sets it.
+const unopenedDays = 90
 
 // Delivery is one earlier message: who sent it, to which folder, and when.
 type Delivery struct {
@@ -43,6 +47,7 @@ const (
 	RLookalike         = "lookalike"
 	RFirstMailRecent   = "first-mail-recent"
 	RRecentlyOpened    = "recently-opened"
+	RBadDate           = "bad-date"
 )
 
 var listed = []string{"from", "list-unsubscribe", "list-unsubscribe-post"}
@@ -111,7 +116,11 @@ func urlHost(u string) string {
 	return strings.ToLower(h)
 }
 
-func day(s string) time.Time { t, _ := time.Parse("2006-01-02", s); return t }
+// day parses a date; ok is false for anything else, and the caller refuses.
+func day(s string) (t time.Time, ok bool) {
+	t, err := time.Parse("2006-01-02", s)
+	return t, err == nil
+}
 
 // Evaluate is VRB-2: whether raw may be unsubscribed from, as a reason (ROK when
 // it may) and the List-Unsubscribe https URL when one exists. The clerk alone runs
@@ -202,8 +211,8 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	}
 	var first time.Time
 	for _, h := range w.History {
-		if h.From == sender && h.Folder != "junk" {
-			if d := day(h.Date); first.IsZero() || d.Before(first) {
+		if d, ok := day(h.Date); ok && h.From == sender && h.Folder != "junk" {
+			if first.IsZero() || d.Before(first) {
 				first = d
 			}
 		}
@@ -217,12 +226,23 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 			return RLookalike, url
 		}
 	}
-	today := day(w.Today)
-	if int(today.Sub(first).Hours()/24) < w.UnopenedDays {
+	today, ok := day(w.Today)
+	if !ok {
+		return RBadDate, url
+	}
+	if int(today.Sub(first).Hours()/24) < unopenedDays {
 		return RFirstMailRecent, url
 	}
-	if o := w.LastOpened[sender]; o != "" && int(today.Sub(day(o)).Hours()/24) < w.UnopenedDays {
-		return RRecentlyOpened, url
+	// No entry means the owner has never opened the sender's mail; an entry
+	// that is not a date is not evidence of that.
+	if o, seen := w.LastOpened[sender]; seen {
+		opened, ok := day(o)
+		if !ok {
+			return RBadDate, url
+		}
+		if int(today.Sub(opened).Hours()/24) < unopenedDays {
+			return RRecentlyOpened, url
+		}
 	}
 	return ROK, url
 }
