@@ -46,6 +46,10 @@ type Verifier interface {
 type CheckerAct struct {
 	Act  string
 	Held bool
+	// Secret marks an act that releases a secret (SecretReveal). It stays
+	// in the channel: only a code-generator code approves such an act, so
+	// a grid cell or texted code for it is refused before any allow.
+	Secret bool
 }
 
 // Revoker is a Verifier that can withdraw the approvals it recorded and
@@ -55,9 +59,17 @@ type CheckerAct struct {
 // releases a held act when the item leaves its undo window (REV-3). A
 // Verifier that records acts must be one; without it nothing is withdrawn
 // or released.
+//
+// AllowActs records approvals with no code-generator code: for the acts
+// of a low-tier texted YES or a grid cell, which the channel checks itself
+// (ADP-9). An allowed approval serves an irreversible act but never a
+// secret one, so a broker taken over can allow an irreversible act but
+// reveals no secret. Only a nil error means every act was recorded;
+// otherwise the channel approves nothing.
 type Revoker interface {
 	RevokeActs(acts ...string) error
 	ReleaseActs(acts ...string) error
+	AllowActs(acts ...CheckerAct) error
 }
 
 // UnlockProofPrefix marks a "code" that is the proof of an unknown-host

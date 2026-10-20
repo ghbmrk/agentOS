@@ -128,7 +128,7 @@ class VaultMemoryCeiling(unittest.TestCase):
 
     def test_the_proxy_budget_is_global(self):
         # The figure above bounds the whole process only if admit counts it across machines: a
-        # per-machine cap alone lets every machine hold DefaultMaxConcurrent bodies (#1771).
+        # per-machine bound alone lets every machine hold its own bodies (#1771).
         src = (BROKER / "egress/proxy.go").read_text()
         admit = re.search(r"func \(p \*Proxy\) admit\(.*?\n}\n", src, re.S)
         self.assertIsNotNone(admit, "Proxy.admit not found")

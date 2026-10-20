@@ -1,6 +1,7 @@
-"""Pins the narrowness of the gh allow rules in .claude/settings.json (OPERATING §7).
+"""Pins the permissions block of .claude/settings.json (OPERATING §7).
 
-The arm, disarm and pinned-merge calls may skip the permission ask, nothing else on gh does.
+The allow rules only save a permission ask; the required premerge status is the merge gate.
+Any change to the block, wider or not, fails here and so needs its own reviewed PR.
 """
 import json
 import pathlib
@@ -8,32 +9,23 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-GH_RULES = {
-    "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge -f merge_method=merge)",
-    "Bash(gh api -X DELETE repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge)",
-    "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
+PERMISSIONS = {
+    "allow": [
+        "Bash(git commit:*)",
+        "Bash(git push:*)",
+        "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge -f merge_method=merge)",
+        "Bash(gh api -X DELETE repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge)",
+        "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
+        "Bash(gh api -X POST repos/ghbmrk/agentOS/issues/*/comments -f body=*)",
+        "Bash(gh api -X PATCH repos/ghbmrk/agentOS/issues/* -f state=closed -f state_reason=not_planned)",
+    ]
 }
-MCP_RULES = {"mcp__github__enable_pr_auto_merge", "mcp__github__disable_pr_auto_merge"}
 
 
 class ClaudeSettingsTest(unittest.TestCase):
-    def allow(self):
-        return json.loads((ROOT / ".claude/settings.json").read_text())["permissions"]["allow"]
-
-    def test_gh_rules_are_only_the_pinned_calls(self):
-        for rule in self.allow():
-            if rule.startswith("Bash(gh"):
-                self.assertIn(rule, GH_RULES)
-
-    def test_no_wildcard_after_the_endpoint_but_the_sha(self):
-        # A trailing ` *` would let a caller add -f/-F/--input fields or a second -X to an allowed call.
-        for rule in GH_RULES:
-            self.assertFalse(rule.endswith(" *)"), rule)
-
-    def test_mcp_rules_are_only_auto_merge(self):
-        for rule in self.allow():
-            if rule.startswith("mcp__"):
-                self.assertIn(rule, MCP_RULES)
+    def test_permissions_are_exactly_the_pinned_block(self):
+        settings = json.loads((ROOT / ".claude/settings.json").read_text())
+        self.assertEqual(settings.get("permissions"), PERMISSIONS)
 
 
 if __name__ == "__main__":

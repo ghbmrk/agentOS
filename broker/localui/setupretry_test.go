@@ -264,3 +264,29 @@ func TestOnlyThePairedPhoneGetsANewCode(t *testing.T) {
 		t.Fatal("a new code started for a provider with none shown")
 	}
 }
+
+// #2336: a Sign in posted from a stale tab while a code shows, which the
+// page refuses, ends that code's sign-in, so the ended code is no longer
+// shown as current and Sign in is offered again.
+func TestARefusedSignInFromAStaleTabDropsTheShownCode(t *testing.T) {
+	r, s := newSeqRig(t)
+	stale := r.get("/setup")
+	submit(r, stale, "ai-device anthropic")
+	if page := r.get("/setup"); shownCode(page) != "CODE-0001" {
+		t.Fatalf("no code shown:\n%s", page)
+	}
+	s.mu.Lock()
+	s.link = "http://example.invalid/device"
+	s.mu.Unlock()
+	submit(r, stale, "ai-device anthropic")
+	if e := r.setupErr(); !strings.Contains(e, "Could not start sign-in") {
+		t.Fatalf("status not shown: %q", e)
+	}
+	page := r.get("/setup")
+	if strings.Contains(page, "CODE-0001") || shownCode(page) != "" {
+		t.Fatalf("an ended code still shown after a refused Sign in:\n%s", page)
+	}
+	if _, ok := setupForms(t, page)["ai-device anthropic"]; !ok {
+		t.Fatalf("no Sign in offered:\n%s", page)
+	}
+}

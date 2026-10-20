@@ -204,9 +204,11 @@ type reachRig struct {
 	told  []string
 	// dropped: the counts told through HeldDropped (CAP3-F1).
 	dropped []int
-	clock   time.Time
-	mail    string
-	before  time.Time // a restore point before the read
+	// sent: "notify" or "dropped" per owner text, in send order.
+	sent   []string
+	clock  time.Time
+	mail   string
+	before time.Time // a restore point before the read
 }
 
 // newReachRig: lineage "root" reads public items, then the owner's mail at
@@ -223,8 +225,8 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
 		Now: func() time.Time { return x.clock }, Location: time.UTC,
-		Notify:      func(s string) error { x.told = append(x.told, s); return nil },
-		HeldDropped: func(n int) error { x.dropped = append(x.dropped, n); return nil }}
+		Notify:      func(s string) error { x.told, x.sent = append(x.told, s), append(x.sent, "notify"); return nil },
+		HeldDropped: func(n int) error { x.dropped, x.sent = append(x.dropped, n), append(x.sent, "dropped"); return nil }}
 	x.ask.reach, x.ask.j = x.reach, x.j
 	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
@@ -1024,9 +1026,10 @@ func TestCAP3PhotoDeletionIsNamedAPhoto(t *testing.T) {
 }
 
 // REQ: CAP3-F1
-// The forget reply after an approved rollback counts the held agent texts
-// the forget dropped (both Cases calls), and words none of them; with
-// none dropped it says nothing of them.
+// After an approved rollback the confirmation words none of the held
+// agent texts the forget dropped (both Cases calls); their count goes
+// apart, through HeldDropped, so a later forget cannot drop it with a held
+// confirmation. With none dropped nothing is counted.
 func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
@@ -1034,14 +1037,20 @@ func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 	x.del(t, x.mail)
 	x.ask.answer("yes")
 	want := "Done: root forgot a mail you deleted and is back to " + x.before.Format("15:04 Jan 2") +
-		". Its 1 action since stays done; its details are erased. 2 held agent texts were dropped too."
+		". Its 1 action since stays done; its details are erased."
 	if len(x.told) != 1 || x.told[0] != want {
 		t.Fatalf("told %q, want %q", x.told, want)
 	}
-	for n, w := range map[int]string{0: "", 1: " 1 held agent text was dropped too."} {
-		if got := heldDropped(n); got != w {
-			t.Fatalf("heldDropped(%d) = %q, want %q", n, got, w)
-		}
+	if !slices.Equal(x.dropped, []int{2}) {
+		t.Fatalf("dropped %v, want [2]", x.dropped)
+	}
+	if !slices.Equal(x.sent, []string{"notify", "dropped"}) {
+		t.Fatalf("sent %v: the confirmation goes before the count", x.sent)
+	}
+	x.dropped = nil
+	x.reach.tellDropped("root", 0)
+	if len(x.dropped) != 0 {
+		t.Fatalf("none dropped: told %v", x.dropped)
 	}
 }
 

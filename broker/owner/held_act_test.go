@@ -3,13 +3,14 @@ package owner
 import (
 	"errors"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 )
 
-// REQ: REV-3, CH-4, CH-10
+// REQ: REV-3, CH-4, CH-10, ADP-9
 
 // heldActItem is a high-risk item with an act and an undo window.
 func heldActItem(ref, act string) Item {
@@ -227,27 +228,150 @@ func TestADecidedItemsActIsNotSent(t *testing.T) {
 	}
 }
 
-// With a checker, a correct grid cell still approves no act: only the
-// checker records the approvals holders spend (CH-4, CH-10).
-func TestAGridCellApprovesNoActEvenWithAChecker(t *testing.T) {
+// With a checker, a correct grid cell allows its items' acts: the
+// checker records allowed approvals, which serve irreversible acts but
+// no secret one (CH-4, CH-10, ADP-9). If the checker records nothing,
+// nothing is approved and the item stays open.
+func TestAGridCellAllowsItsActs(t *testing.T) {
 	r, f := newVerifierRig(t)
 	id, _ := r.ch.Request([]Item{actItem("a", "act-a")}, 0)
-	r.inbox()
+	cell := toldCell(t, r.inbox())
+
+	// A failed allow spends nothing: the owner resends the cell they were
+	// told, and it approves (#2514 L3 blocker 1).
+	f.allowErr = errors.New("checker down")
+	if got := r.say("YES " + id + " " + cell); got != allowErr {
+		t.Fatalf("grid cell with a failed allow: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("a failed allow was not withdrawn: %q", f.revoked)
+	}
+
+	f.allowErr = nil
+	if got := r.say("YES " + id + " " + cell); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("the same grid cell again: %q", got)
+	}
+	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) {
+		t.Fatalf("allowed %+v", f.allowed)
+	}
+	if len(f.approved) != 0 || len(f.acts) != 0 {
+		t.Fatalf("the Verifier saw a grid cell: approved %q, calls %q", f.approved, f.acts)
+	}
 	r.ch.mu.Lock()
-	cell := r.ch.codes.gridChallenge()
+	wrong := len(r.ch.codes.st.Wrong)
 	r.ch.mu.Unlock()
-	if cell == "" {
-		t.Fatal("no grid")
+	if wrong != 0 {
+		t.Fatalf("%d wrong codes counted", wrong)
 	}
-	if got := r.say("YES " + id + " " + GridCell(testSecrets.GridSeed, cell)); strings.HasPrefix(got, "Approved") {
-		t.Fatalf("grid cell approved an act: %q", got)
+	ds := r.decisions()
+	if len(ds) != 1 || !ds[0].Approved || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
 	}
-	for _, d := range r.decisions() {
-		if d.Approved {
-			t.Fatalf("decided %+v", d)
-		}
+}
+
+// Every step after a grid cell's allow that fails withdraws the allow
+// before the owner is told it did not count; the only fallible one is the
+// spend's save, since closing the request cannot fail and a failed hold
+// withdraws its own act (holdLocked). A withdrawal that fails too says the
+// act may still run (#2514 L3 Security delta blocker 1).
+func TestAGridCellWhoseSpendFailsWithdrawsItsAllow(t *testing.T) {
+	store := &toggleStore{}
+	r, f := verifierRigWith(t, store)
+	id, _ := r.ch.Request([]Item{actItem("a", "act-a")}, 0)
+	cell := toldCell(t, r.inbox())
+
+	store.fail = true
+	if got := r.say("YES " + id + " " + cell); got != stateErr {
+		t.Fatalf("grid cell with a failed spend: %q", got)
 	}
-	if len(f.approved) != 0 {
-		t.Fatalf("approved %q", f.approved)
+	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) || !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("allowed %+v, withdrew %q", f.allowed, f.revoked)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	f.revokeErr = errors.New("checker timed out")
+	if got := r.say("YES " + id + " " + cell); got != allowUnknownErr+" Reply NO "+id+" to withdraw it." {
+		t.Fatalf("grid cell whose withdrawal failed: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	// Once saves work, the same cell approves and nothing is withdrawn.
+	store.fail, f.revokeErr, f.revoked = false, nil, nil
+	if got := r.say("YES " + id + " " + cell); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("the same cell once saves work: %q", got)
+	}
+	if len(f.revoked) != 0 {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// toldCell returns the answer to the grid cell named in text, the one the
+// owner was told to send.
+func toldCell(t *testing.T, text string) string {
+	t.Helper()
+	m := regexp.MustCompile(`grid cell ([A-Z][0-9]+)`).FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("no grid cell offered in %q", text)
+	}
+	return GridCell(testSecrets.GridSeed, m[1])
+}
+
+// An allowed approval never serves an act that releases a secret, so a
+// grid cell for one is refused before any allow, says why, and counts
+// nothing; a code-generator code still approves it (CH-4, CH-10).
+func TestAGridCellCannotApproveASecretAct(t *testing.T) {
+	r, f := newVerifierRig(t)
+	it := actItem("a", "act-a")
+	it.Facts.Kind = SecretReveal
+	id, _ := r.ch.Request([]Item{it}, 0)
+	cell := toldCell(t, r.inbox())
+
+	if got := r.say("YES " + id + " " + cell); got != secretActErr {
+		t.Fatalf("grid cell for a secret act: %q", got)
+	}
+	if len(f.allowed) != 0 || len(f.acts) != 0 {
+		t.Fatalf("allowed %+v, Verifier calls %q", f.allowed, f.acts)
+	}
+	r.ch.mu.Lock()
+	wrong, used := len(r.ch.codes.st.Wrong), len(r.ch.codes.st.GridUsed)
+	r.ch.mu.Unlock()
+	if wrong != 0 || used != 0 {
+		t.Fatalf("wrong %d, grid cells used %d", wrong, used)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	if got := r.say("YES " + id + " " + r.totp()); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("code-generator code: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Approved || ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// A texted code never allows a secret act either. No request texts a code
+// for one, since revealing a secret is never low tier, so the guard is
+// checked where the texted code is compared (#2514 combined delta).
+func TestATextedCodeCannotAllowASecretAct(t *testing.T) {
+	r, f := newVerifierRig(t)
+	r.ch.mu.Lock()
+	ok, allowed, _, msg := r.ch.checkLocked("123456", "123456", r.ch.cfg.Now(), []CheckerAct{{Act: "act-a", Secret: true}})
+	r.ch.mu.Unlock()
+	if ok || allowed || msg != secretActErr {
+		t.Fatalf("texted code for a secret act: ok %v allowed %v %q", ok, allowed, msg)
+	}
+	if len(f.allowed) != 0 {
+		t.Fatalf("allowed %+v", f.allowed)
 	}
 }

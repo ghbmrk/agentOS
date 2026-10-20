@@ -610,8 +610,11 @@ class ToolSandboxTest(unittest.TestCase):
 
     def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=(), skip_outlives=False):
         flag = ("--skip-outlives",) if skip_outlives else ()
+        # The outlives probe may wait stub_cli's BEAT_WAIT for its tool on top of the earlier
+        # phases, so the deadline leaves room for both.
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
-                        *flag, toolsh=toolsh, codex_home=codex_home, extra=extra)
+                        *flag, toolsh=toolsh, codex_home=codex_home, extra=extra,
+                        deadline=120)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -848,10 +851,27 @@ echo "func=$?"
                           ("[ -d /proc/self/fd ]", '[ -d "/proc/$$/fd" ]'),
                           ("for fd in /proc/self/fd/*", 'for fd in "/proc/$$"/fd/*'))
         # The mutant run asks only about descriptors; its refused wrapper never starts the
-        # beat, so the outlives probe would just wait out its 10s (A4).
+        # beat, so the outlives probe would just wait out its BEAT_WAIT (A4).
         tool = self.run_worker(toolsh=bad, extra=pidns, skip_outlives=True)["tool"]
         self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
                          "the $$ mutant must leak descriptors or refuse")
+
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-3)
+    def test_a_wrapper_killed_before_its_tool_starts_neither_holds_the_worker_nor_passes(self):
+        # A wrapper slow to set up its sandbox (a new network namespace can wait on the kernel)
+        # is killed before its beat starts. What it left behind must not hold a pid-namespace
+        # worker open past its deadline, and the probe gives no verdict, never a pass.
+        stuck = self.mutant("toolsh-stuck",
+                            ('exec "$BWRAP" \\', 'case "$*" in *" beat") sleep 600 ;; esac\n'
+                                                   'exec "$BWRAP" \\'))
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        "--beat-wait=2", toolsh=stuck, extra=("--unshare-pid",))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool = json.loads(r.stdout)["tool"]
+        self.assertIsNone(tool["outlives"], tool)
+        self.assertIn("beat never started; no verdict", r.stderr)
+        with self.assertRaisesRegex(AssertionError, "was not checked"):
+            self.assert_contained(tool)
 
     # REQ: CRED-5, A14 (CODEX-sandbox-root-2)
     def test_skipping_the_outlives_probe_keeps_the_descriptor_probe_and_fails_containment(self):

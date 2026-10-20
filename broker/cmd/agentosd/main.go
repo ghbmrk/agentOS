@@ -1461,6 +1461,21 @@ func (o ownerVerifier) ReleaseActs(acts ...string) error {
 	return o.checker.Release(acts...)
 }
 
+// AllowActs records the acts of a low-tier texted YES or a grid cell as
+// allowed approvals at the checker, which serve irreversible acts but no
+// secret one (CH-4, ADP-9). Without a checker nothing can record them, so
+// the channel approves nothing.
+func (o ownerVerifier) AllowActs(acts ...owner.CheckerAct) error {
+	if o.checker == nil {
+		return &owner.VerifyError{Kind: owner.VaultDown}
+	}
+	cas := make([]checkersock.Act, len(acts))
+	for i, a := range acts {
+		cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
+	}
+	return o.checker.Allow(cas...)
+}
+
 // checkerVerifyErr is ownerVerifyErr for the checker: no seed means the
 // vault is locked, a checker that is not running is down, and any other
 // failure leaves the check's outcome unknown.

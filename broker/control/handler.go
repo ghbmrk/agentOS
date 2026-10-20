@@ -240,12 +240,20 @@ const helpText = "Commands: STOP pauses all actions. RESUME restarts them (needs
 
 const unlockText = "This needs an unlocked session. Send a code from your code generator. STOP works without one."
 
-func (h *Handler) stop(ctx context.Context) string {
+// Stop records a STOP and voids any issued RESUME code. Every channel's
+// STOP goes through it and reports done only when it returns nil, never on
+// an earlier STOP's record: a failed write since then (a RESUME whose fsync
+// failed) can replay on restart and lift it (CH-2).
+func (h *Handler) Stop(ctx context.Context) (journal.StopReport, error) {
 	h.mu.Lock()
 	h.resume = nil // a code issued before STOP must not lift it
 	h.mu.Unlock()
-	rep, err := h.Engine.Stop(ctx)
-	if err != nil && !h.Engine.Stopped() {
+	return h.Engine.Stop(ctx)
+}
+
+func (h *Handler) stop(ctx context.Context) string {
+	rep, err := h.Stop(ctx)
+	if err != nil {
 		return "STOP failed to record. Nothing new starts now; reply STOP again."
 	}
 	return fmt.Sprintf("Stopped. %d held, %d may have happened, %d cancel requests sent. Nothing was undone. Reply RESUME to restart.",

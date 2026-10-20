@@ -77,9 +77,10 @@ type Config struct {
 	MaxBody int64
 	// Redeem spends the CH-4 checker's approval for an act
 	// (checker.Redeemer). An irreversible or secret operation is served
-	// only when it returns true for the exact request; with no Redeem the
-	// holder serves reads only.
-	Redeem func(ctx context.Context, act string) (bool, error)
+	// only when it returns true for the exact request; secret is true for
+	// a secret operation, which no allowed approval serves (checker.Allow).
+	// With no Redeem the holder serves reads only.
+	Redeem func(ctx context.Context, act string, secret bool) (bool, error)
 	// PublicFetch says the owner lets machines labelled public use
 	// provider-side fetch with this login (REV-5). Without it the holder
 	// holds every body to the strict form, whatever label egress claims;
@@ -95,7 +96,7 @@ type Holder struct {
 	rtModel http.RoundTripper
 	swapper egress.Swapper
 	maxBody int64
-	redeem  func(ctx context.Context, act string) (bool, error)
+	redeem  func(ctx context.Context, act string, secret bool) (bool, error)
 	account string
 	public  bool
 
@@ -120,6 +121,9 @@ func New(cfg Config) (*Holder, error) {
 		}
 		if _, dup := h.byHost[a.Host]; dup {
 			return nil, fmt.Errorf("holder: two adapters on host %s", a.Host)
+		}
+		if err := secretShadowed(a); err != nil {
+			return nil, fmt.Errorf("holder: adapter %s: %v", a.Name, err)
 		}
 		for _, op := range a.Operations {
 			if op.Response != nil && cfg.Swapper == nil {
@@ -183,6 +187,44 @@ func (h *Holder) current() []byte {
 	return append([]byte(nil), h.secret...)
 }
 
+// secretShadowed refuses an adapter in which an operation that reveals a
+// secret could match the same request as another operation. The holder
+// classes a request by the first operation that matches (Adapter.Match),
+// and an allowed approval serves an irreversible act but never a secret
+// one, so a secret request matched as another verb would be served on an
+// approval the checker did not verify (CRED-6, CH-10). Two templates
+// overlap when they have the same method and segment count and each pair
+// of segments is equal or either is a {parameter}.
+func secretShadowed(a egress.Adapter) error {
+	for i, x := range a.Operations {
+		for _, y := range a.Operations[i+1:] {
+			cx, _ := verb.ClassOf(x.Verb)
+			cy, _ := verb.ClassOf(y.Verb)
+			if (cx == verb.Secret || cy == verb.Secret) && overlaps(x, y) {
+				return fmt.Errorf("operations %s and %s can match the same request, and one reveals a secret", x.Name, y.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func overlaps(x, y egress.Operation) bool {
+	if x.Method != y.Method {
+		return false
+	}
+	sx, sy := strings.Split(x.Path, "/"), strings.Split(y.Path, "/")
+	if len(sx) != len(sy) {
+		return false
+	}
+	param := func(s string) bool { return strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") }
+	for i := range sx {
+		if sx[i] != sy[i] && !param(sx[i]) && !param(sy[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func refuse(w http.ResponseWriter, status int, why string) {
 	w.Header().Set(ErrorHeader, why)
 	http.Error(w, "holder: "+why, status)
@@ -234,7 +276,7 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// host, method, the path on the wire and the body, so a code approves
 	// this request through this login and no other (CH-4, CH-10).
 	if highRisk {
-		approved, err := h.redeem(r.Context(), checker.Act(h.account, a.Host, op.Method, r.URL.EscapedPath(), body))
+		approved, err := h.redeem(r.Context(), checker.Act(h.account, a.Host, op.Method, r.URL.EscapedPath(), body), class == verb.Secret)
 		if err != nil {
 			refuse(w, http.StatusServiceUnavailable, ErrUnapproved)
 			return

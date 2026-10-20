@@ -90,7 +90,7 @@ func chatOf(body []byte) *http.Request {
 
 func TestProxyGlobalInFlightBudget(t *testing.T) {
 	// T1: a budget of 6 chats held open across three machines, two each,
-	// so no machine is at its own cap of 4.
+	// so no machine is at its share of 3.
 	const n = 6
 	ir := newInFlightRig(t, n*chatCost(t), 4, Cap{})
 	done := make(chan int, n)

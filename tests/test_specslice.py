@@ -183,9 +183,9 @@ class RealSpecTest(unittest.TestCase):
     def test_blocks_continue_across_blank_lines(self):
         tails = {
             "HW-8": "the box MUST NOT mention",
-            "CRED-5": "non-interactive mode takes the brief",
-            "CRED-8": "The owner MAY replace the passphrase",
-            "CHG-6": "Each adoption is journaled",
+            "CLK-7": "non-interactive mode takes the brief",
+            "STO-2": "The owner MAY replace the passphrase",
+            "HLD-4": "Each adoption is logged",
         }
         for rid, tail in tails.items():
             with self.subTest(rid):

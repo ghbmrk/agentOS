@@ -153,6 +153,11 @@ type Decision struct {
 	// answer (Security Q1 and P1 on P2-2a part 2).
 	Page bool
 	Sum  string
+	// Allowed, on an approval of an item with an Act, says the checker
+	// holds an allowed approval for it (a low-tier texted YES or a grid
+	// cell, AllowActs) rather than a code-generator code's: it serves an
+	// irreversible act but no secret one (ADP-9).
+	Allowed bool
 }
 
 // Channel is the owner channel. It implements control.Auth.
@@ -908,10 +913,31 @@ func (c *Channel) TakeDigestNotes() []string {
 
 const stateErr = "Could not save the code check, so it did not count. Try again."
 
+// allowErr: the checker did not record the approval, so nothing ran.
+const allowErr = "The box could not record this approval, so nothing was approved and the code did not count. Try again."
+
+// allowUnknownErr: the checker may have recorded the approval and could
+// not withdraw it, so the act may still run; the reply says so (SW-5).
+// A reply to a request adds how to withdraw it: NO revokes its acts.
+const allowUnknownErr = "The box could not confirm or withdraw this approval, so the action may still run. The code did not count."
+
+// secretActErr: an allowed approval never serves an act that releases a
+// secret, so a grid cell or texted code cannot approve it (CH-4, CH-10).
+const secretActErr = "This approval releases a secret, so only a code from your code generator approves it. That code did not count."
+
 // codeErr is the reply when a code could not be checked or saved. Each
 // vault-process failure gets its own fixed wording, since retrying helps
 // only in some of them (CH-18).
 func (c *Channel) codeErr(err error) string {
+	if errors.Is(err, errAllowUnknown) {
+		return allowUnknownErr
+	}
+	if errors.Is(err, errAllow) {
+		return allowErr
+	}
+	if errors.Is(err, errSecretAct) {
+		return secretActErr
+	}
 	var ve *VerifyError
 	if !errors.As(err, &ve) {
 		return stateErr
@@ -986,7 +1012,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		c.resume = nil
 		return []string{"No valid code. Reply RESUME for a new one."}, false
 	}
-	ok, locked, msg := c.checkLocked(p.code, r.code, now, nil)
+	ok, _, locked, msg := c.checkLocked(p.code, r.code, now, nil)
 	if msg != "" {
 		return []string{msg}, false
 	}
@@ -1024,25 +1050,36 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 // checkLocked checks a reply code against a texted code, or against the
 // code generator and grid when texted is "" or the low tier is locked. A
 // strong code also extends the session unlock and approves acts (Item.Act)
-// at the checker; a texted code approves none. msg is set when no check
-// could run.
-func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerAct) (ok, locked bool, msg string) {
+// at the checker: a code-generator code through the Verifier, a grid cell
+// or a texted code as allowed approvals (AllowActs), and allowed reports
+// those. msg is set when no check could run or the checker did not record
+// an allow; the reply then approved nothing and counted as no try.
+func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerAct) (ok, allowed, locked bool, msg string) {
 	if texted == "" || c.codes.st.LowLocked {
 		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, acts: acts})
 		switch {
 		case err != nil:
-			return false, false, c.codeErr(err)
+			return false, false, false, c.codeErr(err)
 		}
-		return res == strongOK, locked, ""
+		return res == strongOK || res == strongAllowed, res == strongAllowed, locked, ""
 	}
 	if eq(got, texted) {
-		return true, false, ""
+		if len(acts) == 0 {
+			return true, false, false, ""
+		}
+		if secretAct(acts) {
+			return false, false, false, secretActErr
+		}
+		if err := c.codes.allowThen(acts, nil); err != nil {
+			return false, false, false, c.codeErr(err)
+		}
+		return true, true, false, ""
 	}
 	locked, err := c.codes.wrong(now)
 	if err != nil {
-		return false, locked, stateErr
+		return false, false, locked, stateErr
 	}
-	return false, locked, ""
+	return false, false, locked, ""
 }
 
 func since(ts []time.Time, cut time.Time) []time.Time {

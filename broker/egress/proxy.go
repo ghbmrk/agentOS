@@ -49,9 +49,6 @@ import (
 // DefaultMaxBody caps a request body, in bytes.
 const DefaultMaxBody = 8 << 20
 
-// DefaultMaxConcurrent caps one machine's requests in flight.
-const DefaultMaxConcurrent = 4
-
 // DefaultInFlightBytes is the memory the requests in flight across every
 // machine may hold at once (egress K18, #1771). A request reserves what it
 // can hold before it holds it: readCost while its body is read, then
@@ -165,9 +162,6 @@ type Config struct {
 	Guard *netguard.Policy
 	// MaxBody caps request bodies; zero means DefaultMaxBody.
 	MaxBody int64
-	// MaxConcurrent caps one machine's requests in flight; zero means
-	// DefaultMaxConcurrent.
-	MaxConcurrent int
 	// InFlightBytes caps the memory requests in flight may reserve across
 	// every machine; zero means DefaultInFlightBytes. One machine may
 	// reserve at most half of it.
@@ -218,7 +212,6 @@ type Proxy struct {
 	rtModel  http.RoundTripper // the default transport's second pool, for inference operations
 	audit    Auditor
 	maxBody  int64
-	maxConc  int
 	budget   int64
 	share    int64 // what one machine may reserve of budget
 	cap      Cap
@@ -262,7 +255,6 @@ func New(cfg Config) (*Proxy, error) {
 		rt:           cfg.Transport,
 		audit:        cfg.Audit,
 		maxBody:      cfg.MaxBody,
-		maxConc:      cfg.MaxConcurrent,
 		budget:       cfg.InFlightBytes,
 		cap:          cfg.Cap,
 		now:          cfg.Now,
@@ -330,9 +322,6 @@ func New(cfg Config) (*Proxy, error) {
 	if p.maxBody <= 0 {
 		p.maxBody = DefaultMaxBody
 	}
-	if p.maxConc <= 0 {
-		p.maxConc = DefaultMaxConcurrent
-	}
 	if p.budget <= 0 {
 		p.budget = DefaultInFlightBytes
 	}
@@ -381,7 +370,7 @@ func (p *Proxy) HandlerFor(machine, label string, audit Auditor) http.Handler {
 // HandlerWithGrantsOf is HandlerFor for a replay machine (LOOP-5): the
 // request may use only the adapters granted to grantsOf, the agent machine
 // whose calls it replays, but is audited as machine and admitted against
-// machine's own concurrency and caps, never grantsOf's.
+// machine's own share and caps, never grantsOf's.
 func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Auditor) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if audit == nil {
@@ -393,8 +382,9 @@ func (p *Proxy) HandlerWithGrantsOf(machine, grantsOf, label string, audit Audit
 }
 
 // admit reserves n bytes of the in-flight budget, within the machine's
-// share of it, and a per-machine concurrency slot and checks the cap;
-// release returns both.
+// share of it, and checks the cap; release returns the reservation. No
+// fixed count bounds a machine's requests in flight (RES-5, OP-8): the
+// memory they reserve does, so small requests leave room for many.
 func (p *Proxy) admit(machine string, n int64) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -407,7 +397,7 @@ func (p *Proxy) admit(machine string, n int64) (string, bool) {
 		p.usage[machine] = u
 	}
 	switch {
-	case u.inFlight >= p.maxConc, u.reserved+n > p.share:
+	case u.reserved+n > p.share:
 		return "too many requests in flight", false
 	case p.cap.Requests > 0 && u.requests >= p.cap.Requests:
 		return "request cap reached", false

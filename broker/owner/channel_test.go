@@ -29,11 +29,15 @@ type fakeEngine struct {
 	stopped bool
 	resumes int
 	list    []journal.Status
+	stopErr error // set: Stop fails to record, as a broken journal does
 }
 
 func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.stopErr != nil {
+		return journal.StopReport{}, f.stopErr
+	}
 	f.stopped = true
 	return journal.StopReport{}, nil
 }

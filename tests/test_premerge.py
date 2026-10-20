@@ -180,7 +180,7 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
-                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md"):
+                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt"):
             self.assertEqual(premerge.mark_paths([f]), [f], f)
         # Narrowed on Mark's "Narrow only" (2026-10-16): lens READMEs and the gate tests are agent-mergeable.
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",

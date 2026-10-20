@@ -100,6 +100,10 @@ jobs:
           sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
+      - name: Old core only shrinks (D-139 ratchet; markers, lines and imports against the base)
+        if: github.event_name == 'pull_request'
+        # HEAD^1 is the base side of the PR's test merge.
+        run: python tools/trace.py --ratchet HEAD^1
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
       - name: Brief acceptance baseline only shrinks (FIRST-PASS)
