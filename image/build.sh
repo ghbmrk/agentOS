@@ -98,5 +98,18 @@ chmod -R u+w,go-w "$STAGE"
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
 python3 "$HERE/finish_image.py" "$OUT" "$VERSION"
 rm -rf "$STAGE"
+# The initrds the release's entry boots, copied out of the ESP to OUT/initrd/ under their ESP paths:
+# image.yml's reproduce job compares two runners' copies member by member (IMG-2).
+rm -rf "$OUT/initrd"
+python3 -I -c 'import json, pathlib, subprocess, sys
+sys.path.insert(0, sys.argv[1]); import finish_image
+out, version = pathlib.Path(sys.argv[2]), sys.argv[3]
+img = out / ("agentos_%s.raw" % version)
+fs = "%s@@%d" % (img, finish_image.esp_offset(str(img)))
+for p in json.loads((out / ("agentos_%s.release.json" % version)).read_text())["boot"]:
+    if p.endswith("initrd"):
+        dst = out / "initrd" / p
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(subprocess.check_output(["mtype", "-i", fs, "::/" + p]))' "$HERE" "$OUT" "$VERSION"
 ( cd "$OUT" && sha256sum "agentos_$VERSION.raw" "agentos_$VERSION.usr.raw" "agentos_$VERSION.usr-verity.raw" \
 	"agentos_$VERSION+3.conf" "agentos_$VERSION.release.json" > SHA256SUMS && cat SHA256SUMS )

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Pin the default initrd's /etc/shadow last-change day to the commit's (IMG-2).
+
+systemd-firstboot sets root's locked password (mkosi.conf's RootPassword=) and stamps the entry's
+last-change field with today's date, ignoring SOURCE_DATE_EPOCH (systemd v255 firstboot.c), so a
+build on another UTC day, or a pair of runners either side of midnight, gives a different initrd.
+mkosi runs this with the initrd's tree in $BUILDROOT after firstboot and before it writes the cpio.
+Every entry's third field becomes SOURCE_DATE_EPOCH's day; the other fields are kept byte for byte.
+"""
+import os
+import pathlib
+import sys
+
+
+def pin(text, day):
+    """TEXT, a shadow(5) file, with every entry's last-change field set to DAY. Raises ValueError
+    on a line that is not an entry, so a file this cannot read fails the build."""
+    out = []
+    for ln in text.splitlines(keepends=True):
+        body, nl = (ln[:-1], "\n") if ln.endswith("\n") else (ln, "")
+        f = body.split(":")
+        if len(f) != 9 or not f[0]:
+            raise ValueError("not a shadow entry: %r" % body.split(":", 1)[0])
+        if f[2] != "":
+            f[2] = str(day)
+        out.append(":".join(f) + nl)
+    return "".join(out)
+
+
+def main(root, epoch):
+    day = int(epoch) // 86400
+    for name in ("shadow", "shadow-"):
+        p = pathlib.Path(root) / "etc" / name
+        if p.is_file() and not p.is_symlink():
+            p.write_text(pin(p.read_text(), day))
+
+
+if __name__ == "__main__":
+    if not os.environ.get("SOURCE_DATE_EPOCH", "").isdigit():
+        sys.exit("SOURCE_DATE_EPOCH is unset: build.sh sets it to the commit time")
+    try:
+        main(os.environ["BUILDROOT"], os.environ["SOURCE_DATE_EPOCH"])
+    except ValueError as e:
+        sys.exit("initrd /etc/shadow: %s" % e)
