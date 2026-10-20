@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"maps"
 	"sync"
 )
 
@@ -49,31 +50,75 @@ func (s aesSealer) Open(blob, aad []byte) ([]byte, error) {
 	return s.g.Open(nil, blob[:s.g.NonceSize()], blob[s.g.NonceSize():], aad)
 }
 
+// Kind is what a slot holds. A clerk path opens only its own kind, and the
+// kind is bound into the seal, so a slot of one kind never opens as the other
+// (CLK-1, default deny).
+type Kind string
+
+// The closed list of slot kinds.
+const (
+	KindStatic Kind = "static" // a secret sent as is, e.g. an API key
+	KindGrant  Kind = "grant"  // an OAuth refresh grant, never sent to the API
+)
+
+func (k Kind) valid() bool { return k == KindStatic || k == KindGrant }
+
 // Secrets holds the clerks' credentials as sealed slots (CLK-1, STO-2). A
 // secret is opened only inside this package, for one request, and no method
 // returns it: the planner, the log and the caller of a clerk never see it.
 type Secrets struct {
-	s  Sealer
-	mu sync.Mutex
-	m  map[string][]byte
+	s     Sealer
+	write func(atRest []byte) error
+	mu    sync.Mutex // also serializes writes, so the last one written is the last one put
+	m     map[string]sealed
 }
 
-func NewSecrets(s Sealer) *Secrets { return &Secrets{s: s, m: map[string][]byte{}} }
+// sealed is one slot at rest: its kind in the clear, bound to the blob by the
+// seal's AAD.
+type sealed struct {
+	Kind Kind   `json:"kind"`
+	Blob []byte `json:"blob"`
+}
 
-// slotAAD binds a blob to its slot name, so slots cannot be swapped.
-func slotAAD(slot string) []byte { return []byte("agentos/clerk/slot/" + slot) }
+// NewSecrets makes an empty store. write, if not nil, makes the store durable:
+// every Put hands it the whole at-rest form and returns only once it returns,
+// so it must return only when the bytes are on disk. nil keeps the store in
+// memory only, for tests and the sim.
+func NewSecrets(s Sealer, write func(atRest []byte) error) *Secrets {
+	return &Secrets{s: s, write: write, m: map[string]sealed{}}
+}
 
-func (s *Secrets) Put(slot string, secret []byte) error {
-	if slot == "" || len(secret) == 0 {
-		return errors.New("clerk: a slot needs a name and a secret")
+// slotAAD binds a blob to its slot name and kind, so slots cannot be swapped
+// and a kind cannot be relabelled. A kind holds no "/", so the two never blur.
+func slotAAD(slot string, k Kind) []byte {
+	return []byte("agentos/clerk/slot/" + string(k) + "/" + slot)
+}
+
+// Put seals secret into slot as kind. With a durable store it returns only
+// after the at-rest form holding it is written; if sealing or writing fails,
+// the store is unchanged.
+func (s *Secrets) Put(slot string, k Kind, secret []byte) error {
+	if slot == "" || len(secret) == 0 || !k.valid() {
+		return errors.New("clerk: a slot needs a name, a kind and a secret")
 	}
-	blob, err := s.s.Seal(secret, slotAAD(slot))
+	blob, err := s.s.Seal(secret, slotAAD(slot, k))
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.m[slot] = blob
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	next := maps.Clone(s.m)
+	next[slot] = sealed{k, blob}
+	if s.write != nil {
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if err := s.write(b); err != nil {
+			return err
+		}
+	}
+	s.m = next
 	return nil
 }
 
@@ -97,15 +142,16 @@ func (s *Secrets) Len() int {
 	return len(s.m)
 }
 
-// with opens slot for fn and wipes the plaintext after it returns.
-func (s *Secrets) with(slot string, fn func(secret []byte) error) error {
+// with opens slot as kind for fn and wipes the plaintext after it returns. A
+// slot of another kind does not open: its AAD differs.
+func (s *Secrets) with(slot string, k Kind, fn func(secret []byte) error) error {
 	s.mu.Lock()
-	blob, ok := s.m[slot]
+	b, ok := s.m[slot]
 	s.mu.Unlock()
 	if !ok {
 		return errors.New("clerk: no such secret slot")
 	}
-	plain, err := s.s.Open(blob, slotAAD(slot))
+	plain, err := s.s.Open(b.Blob, slotAAD(slot, k))
 	if err != nil {
 		return err
 	}
@@ -113,22 +159,22 @@ func (s *Secrets) with(slot string, fn func(secret []byte) error) error {
 	return fn(plain)
 }
 
-// MarshalBinary is the store's at-rest form: sealed blobs only.
+// MarshalBinary is the store's at-rest form: sealed blobs and their kinds only.
 func (s *Secrets) MarshalBinary() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return json.Marshal(s.m)
 }
 
-// UnmarshalBinary loads a store and opens every slot once, so a wrong key or
-// a swapped slot fails here, not at the first request.
+// UnmarshalBinary loads a store and opens every slot once, so a wrong key, a
+// swapped slot or a relabelled kind fails here, not at the first request.
 func (s *Secrets) UnmarshalBinary(b []byte) error {
-	m := map[string][]byte{}
+	m := map[string]sealed{}
 	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
-	for slot, blob := range m {
-		plain, err := s.s.Open(blob, slotAAD(slot))
+	for slot, v := range m {
+		plain, err := s.s.Open(v.Blob, slotAAD(slot, v.Kind))
 		if err != nil {
 			return errors.New("clerk: secret slot does not open: " + slot)
 		}

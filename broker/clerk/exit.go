@@ -69,9 +69,10 @@ type Declaration struct {
 	Ops   []Op
 	Guard *netguard.Policy
 	// Refresh is an OAuth 2.0 token endpoint (https), or "" for none. With it,
-	// the clerk's slot holds the sealed refresh grant, a JSON object of the
-	// form fields refresh_token, client_id and client_secret, and the clerk
-	// sends an access token it redeems from that grant (RFC 6749 section 6).
+	// the clerk's slot is of KindGrant and holds the sealed refresh grant, a
+	// JSON object of the form fields refresh_token, client_id and
+	// client_secret, and the clerk sends an access token it redeems from that
+	// grant (RFC 6749 section 6). Without it, the slot is of KindStatic.
 	Refresh string
 }
 
@@ -98,6 +99,7 @@ const (
 	DRedirect   = "redirect"   // 3xx: the action may have been applied
 	DServer     = "server"     // 5xx
 	DRefresh    = "refresh"    // the token endpoint gave no access token; nothing sent. Then "http N", if it answered
+	DReconnect  = "reconnect"  // the token endpoint refused the grant (400, 401): the owner signs in again; then the clerk's name
 )
 
 // Exit is a clerk whose steps leave the box as HTTPS requests. It re-checks
@@ -119,10 +121,17 @@ type Exit struct {
 	// a new one. tmu serializes redemptions and is held across the token
 	// request, so concurrent steps redeem once.
 	refresh  string
-	slot     string
+	slot     string // the clerk's one slot, "" for none
 	tmu      sync.Mutex
 	token    string
 	tokenExp int64 // when to redeem again, ms; 0 waits for a 401
+	// unsaved is a rotated grant the store could not write. It is the only
+	// copy of the live refresh token, so it is kept here and every step fails
+	// until it is saved; the token it came with is not used before then.
+	unsaved map[string]string
+	// refused is set once the token endpoint refuses the grant: no step
+	// redeems again until the owner reconnects the account (Reconnect).
+	refused bool
 }
 
 type decl struct {
@@ -196,16 +205,23 @@ func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x5
 	if n := secrets.Len(); n > 1 || n == 1 && (slot == "" || !secrets.Has(slot)) {
 		return nil, errors.New("clerk: the secret store holds another account's secret (CLK-1)")
 	}
-	if d.Refresh != "" {
+	// Each path opens only its own kind of slot, so a grant never goes out
+	// as a bearer header and a static secret is never posted as a grant.
+	if d.Refresh == "" {
+		if slot != "" && secrets.with(slot, KindStatic, func([]byte) error { return nil }) != nil {
+			return nil, errors.New("clerk: a clerk without a token endpoint needs a static secret in its slot")
+		}
+	} else {
 		u, err := url.Parse(d.Refresh)
 		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || strings.Contains(d.Refresh, "#") {
 			return nil, errors.New("clerk: a token endpoint needs a plain https URL")
 		}
-		if slot == "" || secrets.with(slot, func(g []byte) error { _, err := readGrant(g); return err }) != nil {
+		if slot == "" || secrets.with(slot, KindGrant, func(g []byte) error { _, err := readGrant(g); return err }) != nil {
 			return nil, errors.New("clerk: refresh needs a sealed refresh grant in the clerk's slot")
 		}
-		x.refresh, x.slot = d.Refresh, slot
+		x.refresh = d.Refresh
 	}
+	x.slot = slot
 	x.client = &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
@@ -349,8 +365,8 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if !ok {
 		return kernel.Result{Outcome: "failed", Detail: DUndeclared}
 	}
-	if rf := Check(x.owner, x.name, x.Facts, r, v); rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+	if res, ok := x.check(r, v); !ok {
+		return res
 	}
 	req, bad := x.build(op, r)
 	if bad != "" {
@@ -360,13 +376,13 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return x.send(req, r)
 	}
 	if x.refresh != "" {
-		return x.sendOAuth(op, req, r)
+		return x.sendOAuth(op, req, r, v)
 	}
 	var res kernel.Result
 	// with wipes its plaintext buffer on return, but the header value is a
 	// string copy that buffer cannot reach; it lives until the request is
 	// collected.
-	if err := x.secrets.with(op.Slot, func(s []byte) error {
+	if err := x.secrets.with(op.Slot, KindStatic, func(s []byte) error {
 		req.Header.Set(op.header, op.Prefix+string(s))
 		res = x.send(req, r)
 		return nil
@@ -376,13 +392,25 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 	return res
 }
 
+// check is the clerk's own authorization, run before every send.
+func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
+	if rf := Check(x.owner, x.name, x.Facts, r, v); rf != nil {
+		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
+	}
+	return kernel.Result{}, true
+}
+
 // sendOAuth sends with a live access token. A 401 acted on nothing (phase
 // notsent), so the clerk redeems a new token once and sends again under the
-// same idempotency key.
-func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request) kernel.Result {
+// same idempotency key. A redemption can wait on the token endpoint and on
+// tmu, so the step is checked again before each send (CLK-2).
+func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.View) kernel.Result {
 	tok, bad := x.access(r.Now, "")
 	if bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
+	}
+	if res, ok := x.check(r, v); !ok {
+		return res
 	}
 	req.Header.Set(op.header, op.Prefix+tok)
 	res := x.send(req, r)
@@ -395,6 +423,9 @@ func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request) kernel.Re
 	if req, bad = x.build(op, r); bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
 	}
+	if res, ok := x.check(r, v); !ok {
+		return res
+	}
 	req.Header.Set(op.header, op.Prefix+tok)
 	return x.send(req, r)
 }
@@ -405,37 +436,83 @@ func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request) kernel.Re
 func (x *Exit) access(now int64, stale string) (string, string) {
 	x.tmu.Lock()
 	defer x.tmu.Unlock()
+	if x.refused {
+		return "", DReconnect + " " + x.name
+	}
+	if x.unsaved != nil {
+		if bad := x.save(); bad != "" {
+			return "", bad
+		}
+	}
 	if x.token != "" && x.token != stale && (x.tokenExp == 0 || now < x.tokenExp) {
 		return x.token, ""
 	}
 	x.token = ""
 	var grant map[string]string
-	if err := x.secrets.with(x.slot, func(g []byte) (err error) {
+	if err := x.secrets.with(x.slot, KindGrant, func(g []byte) (err error) {
 		grant, err = readGrant(g)
 		return err
 	}); err != nil {
 		return "", DCredential
 	}
-	t, bad := x.redeem(grant)
-	if bad != "" {
-		return "", bad
-	}
-	// The endpoint rotated the refresh token: the old one is spent, so the
-	// new one is sealed back before the access token is used.
-	if t.Refresh != "" {
-		grant["refresh_token"] = t.Refresh
-		g, _ := json.Marshal(grant)
-		err := x.secrets.Put(x.slot, g)
-		clear(g)
-		if err != nil {
-			return "", DCredential
-		}
+	t, status := x.redeem(grant)
+	switch {
+	case status == 400 || status == 401:
+		// invalid_grant or invalid_client (RFC 6749 section 5.2): only a
+		// new sign-in fixes it, so the clerk stops redeeming the grant.
+		x.refused = true
+		return "", DReconnect + " " + x.name
+	case status == 0:
+		return "", DRefresh
+	case t.Access == "":
+		return "", DRefresh + " http " + strconv.Itoa(status)
 	}
 	x.token, x.tokenExp = t.Access, 0
 	if secs := min(t.Expires, maxRetryAfter); secs > 0 {
 		x.tokenExp = now + (secs-secs/10)*1000
 	}
+	// The endpoint rotated the refresh token: the old one is spent, so the
+	// new one is saved before the access token is used.
+	if t.Refresh != "" {
+		grant["refresh_token"] = t.Refresh
+		x.unsaved = grant
+		if bad := x.save(); bad != "" {
+			return "", bad
+		}
+	}
 	return x.token, ""
+}
+
+// save seals the unsaved grant into the durable store. On failure the grant
+// stays in memory, and the next step tries again.
+func (x *Exit) save() string {
+	g, _ := json.Marshal(x.unsaved)
+	defer clear(g)
+	if x.secrets.Put(x.slot, KindGrant, g) != nil {
+		return DCredential
+	}
+	x.unsaved = nil
+	return ""
+}
+
+// Reconnect replaces the clerk's refresh grant with the one the owner's new
+// sign-in gave, without enrolling the clerk again. It is the owner's answer
+// to DReconnect; the caller has already proved the owner (CH-3). It returns
+// once the new grant is durable, and the next step redeems it.
+func (x *Exit) Reconnect(grant []byte) error {
+	if x.refresh == "" {
+		return errors.New("clerk: this clerk has no refresh grant")
+	}
+	if _, err := readGrant(grant); err != nil {
+		return err
+	}
+	x.tmu.Lock()
+	defer x.tmu.Unlock()
+	if err := x.secrets.Put(x.slot, KindGrant, grant); err != nil {
+		return err
+	}
+	x.refused, x.unsaved, x.token, x.tokenExp = false, nil, "", 0
+	return nil
 }
 
 type tokenAnswer struct {
@@ -444,9 +521,12 @@ type tokenAnswer struct {
 	Refresh string `json:"refresh_token"`
 }
 
-// redeem posts the grant to the token endpoint. Only the endpoint's status
-// reaches a detail; its body, the grant and the tokens never do (CLK-4).
-func (x *Exit) redeem(grant map[string]string) (tokenAnswer, string) {
+// redeem posts the grant to the token endpoint and returns its answer and
+// status, 0 for no answer. An answer that is not 2xx, does not decode or holds
+// no plain access token comes back with no access token. Only the status
+// reaches a detail; the endpoint's body, the grant and the tokens never do
+// (CLK-4).
+func (x *Exit) redeem(grant map[string]string) (tokenAnswer, int) {
 	var t tokenAnswer
 	form := url.Values{"grant_type": {"refresh_token"}}
 	for k, v := range grant {
@@ -454,7 +534,7 @@ func (x *Exit) redeem(grant map[string]string) (tokenAnswer, string) {
 	}
 	req, err := http.NewRequest("POST", x.refresh, strings.NewReader(form.Encode()))
 	if err != nil {
-		return t, DRefresh
+		return t, 0
 	}
 	req.Header.Set("Content-Type", TypeForm)
 	req.Header.Set("Accept", "application/json")
@@ -462,14 +542,14 @@ func (x *Exit) redeem(grant map[string]string) (tokenAnswer, string) {
 	defer cancel()
 	resp, err := x.client.Do(req.WithContext(ctx))
 	if err != nil {
-		return t, DRefresh
+		return t, 0
 	}
 	defer resp.Body.Close()
 	err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&t)
-	if resp.StatusCode/100 != 2 || err != nil || t.Access == "" || !plain(t.Access) {
-		return tokenAnswer{}, DRefresh + " http " + strconv.Itoa(resp.StatusCode)
+	if resp.StatusCode/100 != 2 || err != nil || !plain(t.Access) {
+		return tokenAnswer{}, resp.StatusCode
 	}
-	return t, ""
+	return t, resp.StatusCode
 }
 
 // readGrant reads a sealed refresh grant. Only grantFields are allowed, and
