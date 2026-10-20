@@ -104,7 +104,7 @@ func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mail
 	for _, m := range mails {
 		it := Item{Mail: m.ID, Class: m.Class}
 		a.mails[m.ID] = m
-		if a.eligible(m) {
+		if _, ok := a.eligible(m); ok {
 			it.Sender = a.Handle(FromAddress(m.Raw))
 			if _, ok := a.mailOf[it.Sender]; !ok {
 				a.mailOf[it.Sender] = m.ID
@@ -116,10 +116,10 @@ func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mail
 }
 
 // eligible is the one rule for unsubscribing: the reader calls the mail bulk
-// and VRB-2 holds for it now.
-func (a *Account) eligible(m Mail) bool {
-	reason, _ := Evaluate(m.Raw, a.world())
-	return m.Class == "bulk" && reason == ROK
+// and VRB-2 holds for it now. It returns the one-click URL to post to.
+func (a *Account) eligible(m Mail) (string, bool) {
+	reason, u := Evaluate(m.Raw, a.world())
+	return u, m.Class == "bulk" && reason == ROK
 }
 
 // Bind ties the account to the kernel whose log it serves. Do runs only a step
@@ -188,8 +188,8 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 			return a.refuse(string(s.Verb), "", "unknown-sender")
 		}
 		m := a.mails[id]
-		reason, u := Evaluate(m.Raw, a.world())
-		if m.Class != "bulk" || reason != ROK {
+		u, ok := a.eligible(m)
+		if !ok {
 			return a.refuse(string(s.Verb), id, "no-longer-eligible")
 		}
 		a.posts = append(a.posts, Post{Method: "POST", URL: u, Body: a.body,

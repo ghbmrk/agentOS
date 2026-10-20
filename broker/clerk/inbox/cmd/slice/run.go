@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
@@ -18,7 +19,6 @@ const (
 	dayMS       = int64(86_400_000)
 	baseHoldMS  = int64(600_000)
 	noveltyMS   = dayMS
-	plannerCap  = 200 // actions the planner's key allows per day, all verbs together
 	startOfRun  = "2026-10-19T09:00:00Z"
 	statusCause = "trash-not-restorable"
 	statusText  = "Spam was not deleted: this account empties its trash too soon for a delete to be undone."
@@ -162,9 +162,9 @@ func Run(in Input) (Outcome, error) {
 		}
 		approved = &v
 	}
-	// The hold and the daily cap are caveats on the key handed to the planner,
-	// not properties of the planner: it cannot lift them.
-	planner, err := key.Derive(root, holderPriv, plannerPub, key.LimitHold(baseHoldMS, noveltyMS), key.LimitRate(plannerCap))
+	// The hold is a caveat on the key handed to the planner, not a property of
+	// the planner: it cannot lift it. The daily cap is the planner's own (inbox.DailyCap).
+	planner, err := key.Derive(root, holderPriv, plannerPub, key.LimitHold(baseHoldMS, noveltyMS))
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -202,7 +202,8 @@ func Run(in Input) (Outcome, error) {
 	}
 	t0 := now0.UnixMilli()
 	listing := acct.Listing()
-	for _, p := range inbox.Plans(listing, planner) {
+	plans, left := inbox.Plans(listing, planner)
+	for _, p := range plans {
 		if err := k.Submit(t0, p); err != nil {
 			return Outcome{}, err
 		}
@@ -252,6 +253,9 @@ func Run(in Input) (Outcome, error) {
 			out.StatusLines = []StatusLine{{Cause: statusCause, Text: statusText}}
 			break
 		}
+	}
+	if line, ok := capLine(left); ok {
+		out.StatusLines = append(out.StatusLines, line)
 	}
 	h := log.Entries()[len(log.Entries())-1].Hash()
 	out.LogDigest = hex.EncodeToString(h[:])
@@ -368,11 +372,19 @@ func outside(listing []inbox.Item) []string {
 	return out
 }
 
-func sortedVerbs(vs []key.Verb) []string {
-	out := []string{}
-	for _, v := range vs {
-		out = append(out, string(v))
+// capLine is the one STATUS line for work the daily cap put off, counted by
+// action (VRB-2: asked once, as one batch).
+func capLine(l inbox.Left) (StatusLine, bool) {
+	var parts []string
+	if l.Trash > 0 {
+		parts = append(parts, fmt.Sprintf("%d to trash", l.Trash))
 	}
-	sort.Strings(out)
-	return out
+	if l.Organize > 0 {
+		parts = append(parts, fmt.Sprintf("%d to label", l.Organize))
+	}
+	if len(parts) == 0 {
+		return StatusLine{}, false
+	}
+	return StatusLine{Cause: "daily-cap", Text: fmt.Sprintf("Over today's limit of %d: %s left for tomorrow.",
+		inbox.DailyCap, strings.Join(parts, " and "))}, true
 }

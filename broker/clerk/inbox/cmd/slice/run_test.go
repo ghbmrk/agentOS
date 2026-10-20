@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -109,3 +110,61 @@ func TestRunKeepsMailTextInsideTheClerk(t *testing.T) {
 		}
 	}
 }
+
+// A mailbox past the daily cap: the cap counts organize and trash only, trash is
+// spent first, unsubscribes still go out, and the work left over is said once.
+func TestRunCapsOrganizeAndTrashNotUnsubscribe(t *testing.T) {
+	small := fixtureInput(t)
+	base, err := Run(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := small
+	big.Mails = nil
+	trash, total := 0, 0
+	for i := 0; i < 40; i++ {
+		for _, m := range small.Mails {
+			m.ID = m.ID + "-x" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			big.Mails = append(big.Mails, m)
+			total++
+			if m.Class == "spam" || m.Class == "phishing" {
+				trash++
+			}
+		}
+	}
+	if total <= 200 || trash == 0 || trash > 200 {
+		t.Fatalf("fixture does not exercise the cap: %d mails, %d to trash", total, trash)
+	}
+	out, err := Run(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	organized, trashed := 0, 0
+	for _, e := range out.Effects {
+		switch e.Verb {
+		case "organize":
+			organized++
+		case "trash":
+			trashed++
+		}
+	}
+	if trashed != trash || organized+trashed != 200 {
+		t.Fatalf("effects: %d organized, %d trashed, want %d trashed and 200 in all", organized, trashed, trash)
+	}
+	if len(out.Requests) != len(base.Requests) || len(out.Holds) != len(base.Holds) {
+		t.Fatalf("unsubscribes were cut by the cap: %d requests, %d holds, want %d and %d",
+			len(out.Requests), len(out.Holds), len(base.Requests), len(base.Holds))
+	}
+	var lines []string
+	for _, s := range out.StatusLines {
+		if s.Cause == "daily-cap" {
+			lines = append(lines, s.Text)
+		}
+	}
+	want := "Over today's limit of 200: " + itoa(total-organized) + " to label left for tomorrow."
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("status lines %q, want one %q", lines, want)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

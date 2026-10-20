@@ -5,6 +5,7 @@ package inbox
 import (
 	"crypto/ed25519"
 	"math/rand/v2"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -286,7 +287,8 @@ func TestHandleIsKeyedAndWide(t *testing.T) {
 
 func TestLabelsLiveUnderTheAgentOSNamespace(t *testing.T) {
 	r := newRig(t, 30)
-	for _, p := range Plans(r.acct.Listing(), r.planner) {
+	plans, _ := Plans(r.acct.Listing(), r.planner)
+	for _, p := range plans {
 		for _, s := range p.Steps {
 			if l := s.Args["label"].Value; s.Verb == key.Organize && !strings.HasPrefix(l, "agentOS/") {
 				t.Fatalf("label %q outside agentOS/", l)
@@ -302,9 +304,33 @@ func TestAlertsAreNeitherUnsubscribableNorPlannedForTrash(t *testing.T) {
 			t.Fatal("alert mail was offered for unsubscribe")
 		}
 	}
-	for _, p := range Plans(r.acct.Listing(), r.planner) {
+	plans, _ := Plans(r.acct.Listing(), r.planner)
+	for _, p := range plans {
 		if strings.HasSuffix(p.ID, "A01") && strings.HasPrefix(p.ID, "trash") {
 			t.Fatal("alert mail was planned for trash")
 		}
+	}
+}
+
+func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
+	var l []Item
+	for i := 0; i < DailyCap; i++ {
+		l = append(l, Item{Mail: "M" + strconv.Itoa(i), Class: "newsletter"})
+	}
+	l = append(l, Item{Mail: "S1", Class: "spam"}, Item{Mail: "U1", Class: "bulk", Sender: "h1"})
+	plans, left := Plans(l, key.Key{})
+	var trash, org, unsub int
+	for _, p := range plans {
+		switch p.Steps[0].Verb {
+		case key.Trash:
+			trash++
+		case key.Organize:
+			org++
+		case key.Unsubscribe:
+			unsub++
+		}
+	}
+	if trash != 1 || org != DailyCap-1 || unsub != 1 || left != (Left{Organize: 3}) {
+		t.Fatalf("trash %d organize %d unsub %d left %+v", trash, org, unsub, left)
 	}
 }
