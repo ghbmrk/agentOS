@@ -11,7 +11,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ID | Package | Needs | State |
 |---|---|---|---|
 | MIG-board | BOARD cleanup for the capability kernel: triage open issues, rewrite BOARD for migration steps 2–5 | #2522, #2523 | queued (sub A; before step 2) |
-| MIG-2 | Capability kernel in the simulator (migration step 2) | MIG-board | queued (sub A; tier A; serial) |
 | MIG-3 | Inbox slice: sort my inbox and unsubscribe from and delete the spam (migration step 3) | MIG-2 | queued (sub A; QEMU, no hardware) |
 | MIG-4 | Ports by directory: trusted side (sub A), untrusted side (sub B), adapters and evals (Codex lane) (migration step 4) | MIG-3 | queued (sub A, sub B, Codex lane; tier A on the trusted side) |
 | MIG-5 | Delete the old core (migration step 5) | MIG-4 | queued (either sub; tier A) |
