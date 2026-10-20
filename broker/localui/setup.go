@@ -1430,6 +1430,7 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 	if err != nil {
 		if errors.Is(err, errRefused) { // a new sign-in started, so no older one waits
 			u.mu.Lock()
+			delete(u.device, id) // a stale tab's Sign in while a code shows (#2336)
 			delete(u.parked, id)
 			delete(u.lapsed, id)
 			u.mu.Unlock()
