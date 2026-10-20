@@ -144,14 +144,52 @@ H=$W/host.raw
 host_disk "$H"
 host_before=$(sha256sum <"$H")
 before=$(stat -c %s "$IMG")
+# NetworkManager runs and manages nothing, and polkit answers for the join helper only (#936, I17,
+# I21). The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
+# boot report so its lines are on the console by then; the image itself is unchanged. The script
+# rides inside the unit as base64, which holds no character systemd or the shell would expand.
+nm_check() {
+	cat <<'EOS'
+say() { echo "agentos-nm: $*"; }
+n=0
+until nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -q . || [ $n -ge 30 ]; do n=$((n + 1)); sleep 1; done
+systemctl is-active --quiet NetworkManager.service && say "NetworkManager.service active" || say "FAIL NetworkManager.service not active"
+dev=$(nmcli -t -f DEVICE,STATE device 2>/dev/null)
+if [ -n "$dev" ] && [ -z "$(echo "$dev" | grep -v ':unmanaged$')" ]; then say "every device unmanaged"; else say "FAIL a device is managed: $dev"; fi
+if [ -z "$(systemctl --failed --no-legend)" ]; then say "no failed units"; else say "FAIL failed units: $(systemctl --failed --no-legend | cut -d' ' -f1-2)"; fi
+if [ -z "$(ls -A /etc/NetworkManager/system-connections 2>/dev/null)" ]; then say "no connection file on the drive"; else say "FAIL a connection file is on the drive"; fi
+act=org.freedesktop.NetworkManager.settings.modify.system
+runuser -u agentos-netjoin -- sh -c "exec pkcheck --action-id $act --process \$\$" && say "pkcheck yes for agentos-netjoin" || say "FAIL pkcheck no for agentos-netjoin"
+runuser -u nobody -- sh -c "exec pkcheck --action-id $act --process \$\$" && say "FAIL pkcheck yes for nobody" || say "pkcheck no for nobody"
+say done
+EOS
+}
+nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
+NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
+NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service\n')"
+
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
-NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+EXTRA="$NM_EXTRA" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
+# NetworkManager is up and manages no device; polkit lets the join helper write system connections
+# and no other user; nothing is on the drive. The health line above still reads forward=off
+# inbound=drop, and the probes below find every port dropped (DEV-2).
+for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every device unmanaged" "agentos-nm: no failed units" \
+	"agentos-nm: no connection file on the drive" "agentos-nm: pkcheck yes for agentos-netjoin" "agentos-nm: pkcheck no for nobody" "agentos-nm: done"; do
+	has "$W/console.log" "$want"
+done
+hasnt "$W/console.log" "agentos-nm: FAIL"
+# polkitd is 0.106 or later (JS rules), read from the package manifest mkosi wrote beside the image.
+if python3 "$HERE/compare_manifests.py" --polkitd "$(dirname "$IMG")"; then
+	echo "ok   polkitd 0.106 or later"
+else
+	echo "MISS polkitd 0.106 or later in the manifest beside $IMG"; fail=1
+fi
 # The host disk is not the boot drive (drive-id saw one boot partition) and nothing wrote to it.
 [ "$(sha256sum <"$H")" = "$host_before" ] && echo "ok   host disk unchanged" || { echo "MISS host disk unchanged"; fail=1; }
 rm -f "$H"

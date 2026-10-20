@@ -6,9 +6,12 @@ least one package, each with a name and a version; otherwise this exits non-zero
 empty or truncated manifest can never read as "same packages" (#1474). It prints each side's
 package count, then whether the package lists match. A difference is reported, not fatal: the /usr
 root hash comparison already fails on any content difference.
-Usage: compare_manifests.py DIR_A DIR_B"""
+Usage: compare_manifests.py DIR_A DIR_B
+       compare_manifests.py --polkitd DIR   (exit 0 when DIR's manifest has polkitd 0.106 or later:
+                                             the JavaScript rules the join permission needs, ONB-3)"""
 import json
 import pathlib
+import re
 import sys
 
 
@@ -32,6 +35,15 @@ def packages(d):
     return sorted(out)
 
 
+def polkitd_ok(d, want=(0, 106)):
+    """True when D's manifest lists polkitd at WANT or later. Debian numbers it 0.105-x, then 12x-x."""
+    for name, version, _ in packages(d):
+        if name == "polkitd":
+            m = re.match(r"(\d+)(?:\.(\d+))?", version)
+            return bool(m) and (int(m[1]), int(m[2] or 0)) >= want
+    return False
+
+
 def main(a, b):
     try:
         pa, pb = packages(a), packages(b)
@@ -48,6 +60,11 @@ def main(a, b):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--polkitd":
+        try:
+            sys.exit(0 if polkitd_ok(sys.argv[2]) else 1)
+        except ValueError as e:
+            sys.exit("MISMATCH package manifest: %s" % e)
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     sys.exit(main(sys.argv[1], sys.argv[2]))
