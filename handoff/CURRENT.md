@@ -21,18 +21,16 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
 
-## 3. Snapshot, 2026-10-20 03:30Z (migration step 0)
-GitHub overrides this wherever they differ (§1 step 6).
-
-### Freeze and ownership (D-139)
-- Old-core PRs #2513, #2519 and #2499 and the harvested issues listed in docs/migration/cases.md close as superseded once the freeze PR merges. Nothing on the old core is built or hardened again; ports in step 4 delete it.
-- The spec session (its own thread) owns SPEC.md, PLAN.md, BOARD.md, docs/LANES.md and docs/OPERATING.md and rewrites them in the step 1 spec PR. No other PR touches them until that merges.
-- During the migration (D-139), steps 1 to 3: subscription A runs the freeze, the spec PR, the kernel and the first slice; subscription B runs only the hardware track and the eval set (the slice's acceptance cases as runnable tests under evals/slice-inbox/, drawn from docs/migration/cases.md). In step 4 ports split by directory: A the trusted side, B the untrusted side, the Codex lane the adapters and evals; the spec PR sets the detail in LANES.
-- Kept and continuing: #2518 permission allow rules; the STOP and RESUME defects; hardware, image, modem and Wi-Fi work (#935, #936, the M6 chain); CI flake fixes; the Codex lane. The merge-queue PR #2292 stays parked.
+## 3. Snapshot, 2026-10-20 11:40Z (migration step 1 done)
+- Merged: freeze #2522 (docs/migration/cases.md) and spec #2523 (SPEC v1.0, merge d49cffd80eff). Old-core PRs #2513, #2519, #2499 closed.
+- In progress: BOARD cleanup #2524 (its thread owns BOARD.md; it closes the issues the design supersedes and re-sections the rest), then kernel #2525 (step 2).
+- The 165 harvested issues stay open until #2518 merges with its issue-close lines; then the freeze thread closes them.
+- Until step 4: sub A runs BOARD cleanup, kernel, first slice. Sub B runs only eval set #2527 (evals/slice-inbox/) and hardware (#935, #936, M6 chain); off limits: old-core broker/, the kernel, SPEC/PLAN/BOARD/LANES/OPERATING.
+- Kept: STOP/RESUME fixes (#2521, #2535 merged), CI flake fixes, Codex lane; #2292 parked.
 
 ### Owed first
-1. Review and merge the freeze PR (MIG-0-freeze); then close the harvested PRs and issues with the comment the PR names.
-2. Step 1: the spec PR.
-3. #2518 stays a draft until Mark commits its `.claude/settings.json` lines (the builder's edit of that file was refused); then it merges on its Security and combined accepts like any other gate-file PR (D-137), with no separate arm line from Mark.
+1. Merge #2518, then close the 165.
+2. Finish #2524, then build #2525.
+3. Sub B: #2527 and hardware.
 
 Edit sections 1 and 2 only when a standing decision changes; replace the snapshot whole, never per batch. Where DECISIONS.md and this list differ, DECISIONS.md wins.
