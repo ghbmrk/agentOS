@@ -353,11 +353,13 @@ func TestNL80211CombinationsRefusesMalformed(t *testing.T) {
 }
 
 // NewStation asks for a managed wlsta0 on phy with the station's address,
-// acknowledged.
+// without NLM_F_ACK: the kernel answers with the interface, and an
+// acknowledgement on top stayed unread and put every later request out of
+// sequence on the hwsim boot (#936 r4b-2).
 func TestNL80211NewStation(t *testing.T) {
 	mac := net.HardwareAddr{2, 0x11, 0x22, 0x33, 0x44, 0x55}
 	var got localui.RadioIface
-	n, _ := dialFake(t, genltest.CheckRequest(nlFamily.ID, unix.NL80211_CMD_NEW_INTERFACE, netlink.Request|netlink.Acknowledge,
+	n, _ := dialFake(t, genltest.CheckRequest(nlFamily.ID, unix.NL80211_CMD_NEW_INTERFACE, netlink.Request,
 		func(greq genetlink.Message, _ netlink.Message) ([]genetlink.Message, error) {
 			i, err := parseIface(greq.Data)
 			got = i

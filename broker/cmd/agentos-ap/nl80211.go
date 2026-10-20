@@ -282,13 +282,18 @@ func decodeLimit(ad *netlink.AttributeDecoder) (localui.IfaceLimit, error) {
 	return l, nil
 }
 
+// NewStation asks without NLM_F_ACK: nl80211 answers NEW_INTERFACE with
+// the new interface, and an acknowledgement as well would sit unread on
+// the socket and answer the next request out of sequence, failing every
+// later one (the hwsim boot, #936 r4b-2). A failure still comes back as an
+// error message.
 func (n *nl80211) NewStation(ctx context.Context, phy uint32, name string, mac net.HardwareAddr) error {
 	_, err := n.do(ctx, unix.NL80211_CMD_NEW_INTERFACE, func(ae *netlink.AttributeEncoder) {
 		ae.Uint32(unix.NL80211_ATTR_WIPHY, phy)
 		ae.String(unix.NL80211_ATTR_IFNAME, name)
 		ae.Uint32(unix.NL80211_ATTR_IFTYPE, uint32(localui.IfaceStation))
 		ae.Bytes(unix.NL80211_ATTR_MAC, mac)
-	}, netlink.Request|netlink.Acknowledge)
+	}, netlink.Request)
 	if err != nil {
 		return fmt.Errorf("nl80211: creating %s on phy%d: %w", name, phy, err)
 	}
