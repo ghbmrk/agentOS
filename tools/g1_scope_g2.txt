@@ -36,6 +36,9 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
+# #2550 (KERNEL, migration step 2, D-139): adds broker/kernel/ and broker/clerk/, which the
+# allow list cannot name before they exist on main; #2550 replaces this line with those allows.
+exempt-pr 2550
 # #2545 (the inbox eval set, #2527): evals/slice-inbox/ is sub B's directory until migration
 # step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per directory";
 # Mark's lane message 2026-10-20 11:34Z, cmsg_01R91wiieBzMSvPKFsAJVvuKLX2vZYRDWFPWAdtdzhU8Fv).
