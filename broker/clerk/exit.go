@@ -36,11 +36,11 @@ type Op struct {
 	URL string
 	// Query maps a query parameter to the argument that fills it.
 	Query map[string]string
-	// Headers are sent as declared. They never name the secret's header or
-	// one the clerk sets itself.
+	// Headers are sent as declared, each named in fixedHeaders, so they never
+	// carry a credential or name a header the clerk sets itself.
 	Headers map[string]string
 	Slot    string // the clerk's secret slot, sent with this request; "" sends none
-	Header  string // header that carries the secret; Authorization if empty
+	Header  string // header that carries the secret, from secretHeaders; Authorization if empty
 	Prefix  string // text before the secret in that header, e.g. "Bearer "
 	// Type is the body's encoding, TypeJSON or TypeForm, and Body maps each
 	// body field to the argument that fills it. Both empty send no body.
@@ -133,19 +133,21 @@ const (
 const maxRetryAfter = 24 * 60 * 60
 
 var (
-	slotRE  = regexp.MustCompile(`\{([a-z][a-z-]*)\}`)
-	tokenRE = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-	methRE  = regexp.MustCompile(`^[A-Z]+$`)
+	slotRE = regexp.MustCompile(`\{([a-z][a-z-]*)\}`)
+	methRE = regexp.MustCompile(`^[A-Z]+$`)
 )
 
-// declarable reports whether an op may name a header (canonical form): a few
-// content-negotiation headers, X- headers and API version headers. Anything
-// else is refused by structure, so the headers the clerk sets (Host, framing,
-// Idempotency-Key), hop-by-hop headers and credential headers never pass.
-func declarable(c string) bool {
-	return c == "Accept" || c == "Accept-Language" || c == "User-Agent" ||
-		strings.HasPrefix(c, "X-") || strings.HasSuffix(c, "-Version")
-}
+// The headers an op may name, spelled exactly as listed. Everything else is
+// refused, so the clerk's own headers (Host, framing, Idempotency-Key),
+// hop-by-hop headers, credentials and request-reshaping headers never pass.
+// A ported op that needs a header adds its name here, with a test.
+var (
+	// fixedHeaders may carry declared plaintext constants.
+	fixedHeaders = map[string]bool{"Accept": true, "Accept-Language": true, "User-Agent": true}
+	// secretHeaders may carry the sealed secret. None is a fixed header, and
+	// none is a header remotes commonly log.
+	secretHeaders = map[string]bool{"Authorization": true, "X-Api-Key": true}
+)
 
 // NewExit validates the declaration; a bad one is an error, never a runtime
 // surprise. The exit owns its transport: no proxy from the environment, no
@@ -262,14 +264,13 @@ func (x *Exit) declare(op Op) (decl, error) {
 		if !x.secrets.Has(op.Slot) {
 			return o, fmt.Errorf("clerk: no secret slot %q", op.Slot)
 		}
-		o.header = http.CanonicalHeaderKey(cmp(op.Header, "Authorization"))
-		if !tokenRE.MatchString(o.header) || o.header != "Authorization" && !declarable(o.header) || !plain(op.Prefix) {
+		o.header = cmp(op.Header, "Authorization")
+		if !secretHeaders[o.header] || !plain(op.Prefix) {
 			return o, errors.New("clerk: bad secret header")
 		}
 	}
 	for h, v := range op.Headers {
-		c := http.CanonicalHeaderKey(h)
-		if !tokenRE.MatchString(h) || !plain(v) || c == o.header || !declarable(c) {
+		if !fixedHeaders[h] || !plain(v) {
 			return o, fmt.Errorf("clerk: header %q cannot be declared", h)
 		}
 	}

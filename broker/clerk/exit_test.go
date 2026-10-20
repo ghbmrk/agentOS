@@ -48,11 +48,11 @@ type exitFix struct {
 	inLog int // log length the request handler saw
 }
 
-// resolver answers every name with one address.
 // pub is a policy that has learned no home network: it refuses only the IANA
 // special ranges. Shape tests never dial.
 var pub = netguard.New(netguard.Config{})
 
+// resolver answers every name with one address.
 type resolver netip.Addr
 
 func (r resolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
@@ -464,12 +464,12 @@ func TestExitSendsDeclaredQueryAndKeepsConstantQuery(t *testing.T) {
 
 func TestExitSendsFixedHeaders(t *testing.T) {
 	f := setupExitOps(t, nil, func(_ string, ops []clerk.Op) {
-		ops[1].Headers = map[string]string{"Accept": "application/json", "X-Api-Version": "2"}
+		ops[1].Headers = map[string]string{"Accept": "application/json", "User-Agent": "agentos"}
 	})
 	if r := f.x.Do(f.req(key.Fetch, "i1", map[string]string{"url": "a"}), f.k.State()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
-	if f.got.header.Get("Accept") != "application/json" || f.got.header.Get("X-Api-Version") != "2" || f.got.auth != "" {
+	if f.got.header.Get("Accept") != "application/json" || f.got.header.Get("User-Agent") != "agentos" || f.got.auth != "" {
 		t.Fatalf("headers not as declared: %v", f.got.header)
 	}
 }
@@ -508,9 +508,9 @@ func TestNewExitRefusesUnsafeShapes(t *testing.T) {
 		"fixed host":             {get(clerk.Op{Headers: map[string]string{"Host": "evil.example"}}), empty},
 		"fixed content-type":     {get(clerk.Op{Headers: map[string]string{"Content-Type": "text/plain"}}), empty},
 		"fixed idempotency key":  {get(clerk.Op{Headers: map[string]string{"Idempotency-Key": "k"}}), empty},
-		"header CRLF":            {get(clerk.Op{Headers: map[string]string{"X-A": "1\r\nX-B: 2"}}), empty},
+		"header CRLF":            {get(clerk.Op{Headers: map[string]string{"Accept": "1\r\nX-B: 2"}}), empty},
 		"header bad name":        {get(clerk.Op{Headers: map[string]string{"X A": "1"}}), empty},
-		"fixed is secret header": {get(clerk.Op{Slot: "web", Header: "X-Key", Headers: map[string]string{"x-key": "v"}}), one},
+		"fixed is secret header": {get(clerk.Op{Slot: "web", Header: "X-Api-Key", Headers: map[string]string{"X-Api-Key": "v"}}), one},
 		"secret in host header":  {get(clerk.Op{Slot: "web", Header: "Host"}), one},
 		"secret prefix CRLF":     {get(clerk.Op{Slot: "web", Prefix: "B\r\nX: "}), one},
 		"secret in idempotency":  {get(clerk.Op{Slot: "web", Header: "Idempotency-Key"}), one},
@@ -538,14 +538,56 @@ func TestNewExitRefusesUnsafeShapes(t *testing.T) {
 	if _, err := clerk.NewExit(clerk.Declaration{Guard: pub, Ops: []clerk.Op{ok}}, opub, empty, nil); err == nil {
 		t.Fatal("a nameless clerk was accepted")
 	}
-	// Declarable headers are an allowlist: version, X- and negotiation headers,
-	// and a secret in Authorization or an X- header.
-	versioned := get(clerk.Op{Headers: map[string]string{"Notion-Version": "2022-06-28", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agentos"}})
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{versioned}}, opub, empty, nil); err != nil {
-		t.Fatalf("a declarable header was refused: %v", err)
+	// Declarable headers are two closed lists of exact names.
+	fixed := get(clerk.Op{Headers: map[string]string{"Accept": "application/json", "Accept-Language": "en", "User-Agent": "agentos"}})
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{fixed}}, opub, empty, nil); err != nil {
+		t.Fatalf("a listed fixed header was refused: %v", err)
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{get(clerk.Op{Slot: "web", Header: "X-Api-Key"})}}, opub, one, nil); err != nil {
-		t.Fatalf("a secret in an X- header was refused: %v", err)
+	for _, h := range []string{"", "Authorization", "X-Api-Key"} {
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{get(clerk.Op{Slot: "web", Header: h})}}, opub, one, nil); err != nil {
+			t.Fatalf("a secret in listed header %q was refused: %v", h, err)
+		}
+	}
+}
+
+func TestNewExitRefusesUnlistedHeaders(t *testing.T) {
+	opub, _ := gen(1)
+	empty := clerk.NewSecrets(sealer(t))
+	one := clerk.NewSecrets(sealer(t))
+	if err := one.Put("web", []byte(canary)); err != nil {
+		t.Fatal(err)
+	}
+	get := func(op clerk.Op) clerk.Op {
+		op.Verb, op.Method, op.URL = key.Fetch, "GET", "https://h.example/v1/{url}"
+		return op
+	}
+	// Credential, request-reshaping and pattern-shaped names, mixed case
+	// included. Each must be refused as a fixed plaintext constant.
+	unfixed := []string{
+		"X-Api-Key", "x-API-key", "X-Auth-Token", "X-Auth-User", "X-Amz-Security-Token",
+		"X-Access-Token", "X-Session-Token", "X-Csrf-Token", "X-Xsrf-Token",
+		"X-Http-Method-Override", "X-Method-Override", "X-Forwarded-For", "X-Forwarded-Host",
+		"X-Forwarded-Proto", "X-Original-Url", "X-Rewrite-Url", "X-Real-Ip", "X-Host",
+		"Sec-Websocket-Version", "Proxy-Version", "Authorization-Version", "Notion-Version",
+		"X-GitHub-Api-Version", "accept", "user-agent", "Authorization",
+	}
+	for _, h := range unfixed {
+		op := get(clerk.Op{Headers: map[string]string{h: "v"}})
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}}, opub, empty, nil); err == nil {
+			t.Errorf("fixed header %q accepted", h)
+		}
+	}
+	// The secret goes only in Authorization or a listed credential name, never
+	// a header remotes log or one that reshapes the request.
+	unsecret := []string{
+		"authorization", "x-api-key", "X-API-KEY", "X-Auth-Token", "User-Agent", "Accept",
+		"Accept-Language", "Notion-Version", "X-Forwarded-For", "X-Http-Method-Override",
+	}
+	for _, h := range unsecret {
+		op := get(clerk.Op{Slot: "web", Header: h})
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}}, opub, one, nil); err == nil {
+			t.Errorf("secret header %q accepted", h)
+		}
 	}
 }
 
