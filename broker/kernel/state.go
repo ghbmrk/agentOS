@@ -212,8 +212,9 @@ func Shape(s key.Step) string {
 // Normalize is the one place a submitted step becomes the step the key is
 // checked against. The planner writes only arguments, and none of them counts
 // as owner or clerk sourced; the task is the plan, the recipient is the verb's object
-// argument and the amount is the "amount" argument, an unreadable one
-// negative so Authorize refuses it. The kernel, the clerk and a replay all see
+// argument and the amount is the "amount" argument in its one canonical
+// spelling, any other (010, +10) unreadable and so negative, which Authorize
+// refuses; one spelling per number keeps the duplicate fingerprint exact. The kernel, the clerk and a replay all see
 // this step (KEY-2, KRN-3). Content and labels stay the planner's claims; a
 // clerk with facts checks them (CLK-2).
 func Normalize(plan string, s key.Step) key.Step {
@@ -224,7 +225,7 @@ func Normalize(plan string, s key.Step) key.Step {
 	s.Args, s.Task, s.Recipient, s.Amount = args, plan, args[key.RecipientArg(s.Verb)].Value, 0
 	if a, ok := args[key.ArgAmount]; ok {
 		n, err := strconv.ParseInt(a.Value, 10, 64)
-		if err != nil || n < 0 {
+		if err != nil || n < 0 || strconv.FormatInt(n, 10) != a.Value {
 			n = -1
 		}
 		s.Amount = n

@@ -316,6 +316,9 @@ func (s *sim) step() key.Step {
 	for _, a := range key.ArgNames(st.Verb) {
 		st.Args[a] = key.Arg{Value: n}
 	}
+	if _, ok := st.Args[key.ArgAmount]; ok { // equivalent spellings of one amount
+		st.Args[key.ArgAmount] = key.Arg{Value: []string{"1", "01", "+1"}[s.pick(3)]}
+	}
 	return st
 }
 

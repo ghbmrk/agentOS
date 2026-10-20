@@ -494,3 +494,27 @@ func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
 		t.Fatal("a rejected plan must have no effect")
 	}
 }
+
+// REQ: KRN-8
+func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
+	r := newRig(t)
+	buy := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"})
+	must(t, r.k.Issue(0, buy))
+	step := func(amount string) key.Step {
+		s := st(key.Buy, "shop")
+		s.Args["amount"] = key.Arg{Value: amount}
+		return s
+	}
+	r.plan("p1", buy, step("10"))
+	must(t, r.k.Tick(0))
+	for i, a := range []string{"10", "010", "+10", "-0"} {
+		id := "q" + string(rune('a'+i))
+		r.plan(id, buy, step(a))
+		if r.status(id) != kernel.SRejected {
+			t.Fatalf("amount %q repeated within 24h must be refused", a)
+		}
+	}
+	if len(r.mail.Effects()) != 1 {
+		t.Fatalf("effects = %d, want 1", len(r.mail.Effects()))
+	}
+}
