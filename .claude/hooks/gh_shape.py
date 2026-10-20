@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """PreToolUse hook: a Bash call that a gh allow rule in .claude/settings.json would let skip
-the permission ask runs only in its exact shape (OPERATING §7).
+the permission ask skips it only in its exact shape (OPERATING §7).
 
 An allow rule's `*` also matches spaces, so without this hook a call could carry another
 method, field, `--input` or `@file` on the same endpoint. Any command in which one of RULES
-matches anywhere (a compound command included) must be, as a whole, one of SHAPES; anything
-else is denied. Commands no rule matches pass through to the normal permission flow.
-tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to its rule.
+matches anywhere (a compound command included), as written or with quotes and backslashes
+removed, whitespace collapsed and case ignored, must be, as a whole, one of SHAPES; anything
+else goes to the permission ask. Commands no rule matches pass through to the normal
+permission flow. tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to
+its rule.
 """
 import json
 import re
@@ -37,14 +39,20 @@ SHAPES = [
 ]
 
 # A space in a rule matches any run of whitespace, in case the matcher normalizes it.
-_RULE_RES = [re.compile(".*".join(r"\s+".join(map(re.escape, p.split(" "))) for p in r.split("*")), re.S)
+_RULE_RES = [re.compile(".*".join(r"\s+".join(map(re.escape, p.split(" "))) for p in r.split("*")),
+                        re.S | re.I)
              for r in RULES]
 # Characters a shell gives meaning to; none appears in any shape.
 _SHELL = set(";&|<>()$`\\\"'{}*?!#~\n\r\t")
 
 
+def normalized(command):
+    """The command with line continuations, quotes and backslashes removed and whitespace collapsed."""
+    return " ".join(re.sub(r"['\"\\]", "", command.replace("\\\n", "")).split())
+
+
 def guarded(command):
-    return any(r.search(command) for r in _RULE_RES)
+    return any(r.search(c) for c in (command, normalized(command)) for r in _RULE_RES)
 
 
 def exact(command):
@@ -56,11 +64,11 @@ def exact(command):
 
 
 def decide(command):
-    """None lets the call go on; a string is the reason it is denied."""
+    """None lets the call go on; a string is the reason it goes to the permission ask."""
     if guarded(command) and not exact(command):
         return ("gh allow rule matched but the call is not one of the exact shapes in "
                 ".claude/hooks/gh_shape.py (arm, disarm, pinned merge, label add or remove: "
-                "numeric number, 40-hex sha, plain label, no other flags or shell syntax)")
+                "numeric number, 40-hex sha, plain lowercase label, no other flags or shell syntax)")
     return None
 
 
@@ -69,13 +77,14 @@ def main():
         event = json.load(sys.stdin)
         command = event.get("tool_input", {}).get("command", "") if event.get("tool_name") == "Bash" else ""
         reason = decide(command) if isinstance(command, str) else "command is not a string"
-    except Exception as e:  # fail closed: a hook error must not let a call skip its shape check
+    except Exception as e:  # a hook error must not let a call skip its shape check
         reason = f"gh_shape hook error: {type(e).__name__}"
     if reason:
         json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                          "permissionDecision": "deny",
+                                          "permissionDecision": "ask",
                                           "permissionDecisionReason": reason}}, sys.stdout)
 
 
 if __name__ == "__main__":
     main()
+
