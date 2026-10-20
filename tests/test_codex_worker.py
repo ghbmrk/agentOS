@@ -856,6 +856,7 @@ echo "func=$?"
         self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
                          "the $$ mutant must leak descriptors or refuse")
 
+    # REQ: CRED-5, A14 (CODEX-sandbox-root-3)
     def test_a_wrapper_killed_before_its_tool_starts_neither_holds_the_worker_nor_passes(self):
         # A wrapper slow to set up its sandbox (a new network namespace can wait on the kernel)
         # is killed before its beat starts. What it left behind must not hold a pid-namespace
@@ -869,7 +870,7 @@ echo "func=$?"
         tool = json.loads(r.stdout)["tool"]
         self.assertIsNone(tool["outlives"], tool)
         self.assertIn("beat never started; no verdict", r.stderr)
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, "was not checked"):
             self.assert_contained(tool)
 
     # REQ: CRED-5, A14 (CODEX-sandbox-root-2)

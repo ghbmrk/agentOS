@@ -86,7 +86,11 @@ def main():
     if len(flags) != skip + len(waits) or len(waits) > 1:
         print(f"stub_cli: unknown flags {flags}", file=sys.stderr)
         sys.exit(2)
-    beat_wait = float(waits[0].partition("=")[2]) if waits else BEAT_WAIT
+    try:
+        beat_wait = float(waits[0].partition("=")[2]) if waits else BEAT_WAIT
+    except ValueError:
+        print(f"stub_cli: bad flag {waits[0]}", file=sys.stderr)
+        sys.exit(2)
     phase("started")
     try:
         auth = canary in pathlib.Path(AUTH).read_text()
