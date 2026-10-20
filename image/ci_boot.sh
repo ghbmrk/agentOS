@@ -336,8 +336,9 @@ MSG="wlsta0 exists"; check until_ok 180 sta
 MSG="the box's access point serves"; check until_ok 120 ap_up
 # Why not, when it does not: the loader logs no network name or password (I16), nor does iw's info.
 if ! ap_up; then
-	journalctl -b -u agentos-ap -o cat 2>/dev/null | grep -v "mismatched sequence" | tail -30 | while read -r l; do say "NOTE loader| $l"; done
-	say "NOTE loader out-of-sequence replies=$(logged "mismatched sequence")"
+	journalctl -b -u agentos-ap -o cat 2>/dev/null | grep -v "agentos-ap: station: " | tail -30 | while read -r l; do say "NOTE loader| $l"; done
+	say "NOTE loader station errors=$(logged "agentos-ap: station: ")"
+	journalctl -b -u agentos-ap -o cat 2>/dev/null | grep "agentos-ap: station: " | sort | uniq -c | while read -r l; do say "NOTE loader| $l"; done
 	$IW dev 2>/dev/null | while read -r l; do say "NOTE iw| $l"; done
 	say "NOTE agentos-ap $(systemctl is-active agentos-ap.service) restarts=$(systemctl show -p NRestarts --value agentos-ap.service)"
 fi

@@ -114,6 +114,12 @@ func TestNL80211Interfaces(t *testing.T) {
 					ae.Uint32(unix.NL80211_ATTR_WIPHY_FREQ, 2437)
 					ae.Bytes(unix.NL80211_ATTR_MAC, mac)
 				})),
+				// A P2P device has no netdev and no name (wpa_supplicant's
+				// on hwsim, #936 r4b-2): skipped, not refused.
+				msg(enc(t, func(ae *netlink.AttributeEncoder) {
+					ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
+					ae.Uint32(unix.NL80211_ATTR_IFTYPE, unix.NL80211_IFTYPE_P2P_DEVICE)
+				})),
 				msg(enc(t, func(ae *netlink.AttributeEncoder) {
 					ae.String(unix.NL80211_ATTR_IFNAME, localui.StationIface)
 					ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
@@ -137,6 +143,10 @@ func TestNL80211Interfaces(t *testing.T) {
 func TestNL80211InterfacesRefusesMalformed(t *testing.T) {
 	for name, data := range map[string][]byte{
 		"no name": enc(t, func(ae *netlink.AttributeEncoder) { ae.Uint32(unix.NL80211_ATTR_WIPHY, 0) }),
+		"no name, managed": enc(t, func(ae *netlink.AttributeEncoder) {
+			ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
+			ae.Uint32(unix.NL80211_ATTR_IFTYPE, sta)
+		}),
 		"short phy": enc(t, func(ae *netlink.AttributeEncoder) {
 			ae.String(unix.NL80211_ATTR_IFNAME, "wlan0")
 			ae.Uint16(unix.NL80211_ATTR_WIPHY, 0)

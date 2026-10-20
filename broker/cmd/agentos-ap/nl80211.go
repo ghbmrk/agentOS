@@ -86,6 +86,9 @@ func (n *nl80211) Interfaces(ctx context.Context) ([]localui.RadioIface, error) 
 	out := make([]localui.RadioIface, 0, len(msgs))
 	for _, m := range msgs {
 		i, err := parseIface(m.Data)
+		if errors.Is(err, errNoNetdev) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +97,14 @@ func (n *nl80211) Interfaces(ctx context.Context) ([]localui.RadioIface, error) 
 	return out, nil
 }
 
-// parseIface reads one interface. One without a name is malformed.
+// errNoNetdev marks an interface with no network device, which nl80211
+// lists without a name: a P2P device or a NAN interface. A radio that
+// supports P2P has one beside every netdev (hwsim, and the M6 Ultra's
+// MT7922 as wpa_supplicant brings it up), so it is skipped, not refused.
+var errNoNetdev = errors.New("nl80211: an interface with no network device")
+
+// parseIface reads one interface. One without a name is malformed, unless
+// its type has no network device (errNoNetdev).
 func parseIface(b []byte) (localui.RadioIface, error) {
 	var i localui.RadioIface
 	ad, err := netlink.NewAttributeDecoder(b)
@@ -119,6 +129,9 @@ func parseIface(b []byte) (localui.RadioIface, error) {
 		return i, fmt.Errorf("nl80211: interface: %w", err)
 	}
 	if i.Name == "" {
+		if i.Type == unix.NL80211_IFTYPE_P2P_DEVICE || i.Type == unix.NL80211_IFTYPE_NAN {
+			return i, errNoNetdev
+		}
 		return i, errors.New("nl80211: an interface with no name")
 	}
 	return i, nil
