@@ -69,9 +69,9 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := key.Step{Verb: key.Read, Clerk: "model", Args: map[string]key.Arg{"query": {Value: "q"}}}
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
 	for _, id := range []string{"t", "big"} {
-		if err := k.Submit(0, kernel.Plan{ID: id, Key: ky, Steps: []key.Step{step}}); err != nil {
+		if err := k.Submit(0, kernel.Plan{ID: id, Key: ky, Steps: []kernel.PlanStep{step}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -342,8 +342,8 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := key.Step{Verb: key.Trash, Clerk: "mail", Args: map[string]key.Arg{"target": {Value: "m1", Source: key.SrcOwner}}}
-	if err := k.Submit(0, kernel.Plan{ID: "mailplan", Key: ky, Steps: []key.Step{step}}); err != nil {
+	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
+	if err := k.Submit(0, kernel.Plan{ID: "mailplan", Key: ky, Steps: []kernel.PlanStep{step}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Call(1, "mailplan", "api", "hi", 50); err != nil {

@@ -114,17 +114,47 @@ for i in range(n):
 EOF
 }
 
+# A host PC's own disk (ONB-2, HW-8): a GPT with its own ESP, a data partition, Linux swap and an
+# ext4 filesystem, each holding a synthetic canary, built without loop devices or mounts. It sits
+# beside the drive on the first boot, the one that grows root and writes the drive's GUIDs, and the
+# box may read its partition table and nothing else, so it must come out byte-identical.
+host_disk() {
+	h=$1 t=$(mktemp -d "$W/host.XXXXXX")
+	rm -f "$h"; truncate -s 256M "$h"
+	printf '%s\n' 'label: gpt' 'size=64M, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B' \
+		'size=64M, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7' 'size=32M, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F' \
+		'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4' | sfdisk -q "$h"
+	echo agentos-ci-canary-host-disk >"$t/canary"
+	for fs in esp data; do
+		mkfs.vfat -C "$t/$fs" 65536 >/dev/null; mcopy -i "$t/$fs" "$t/canary" ::/canary
+	done
+	truncate -s 32M "$t/swap"; truncate -s 64M "$t/ext4"; mkswap -q "$t/swap"
+	mkdir "$t/root"; cp "$t/canary" "$t/root/"; mkfs.ext4 -q -F -d "$t/root" "$t/ext4"
+	n=0
+	sfdisk -d "$h" | sed -n 's/.*start= *\([0-9]*\).*/\1/p' | while read -r start; do
+		n=$((n + 1)); f=$(echo esp data swap ext4 | cut -d' ' -f$n)
+		dd if="$t/$f" of="$h" bs=512 seek="$start" conv=notrunc,sparse status=none
+	done
+	rm -rf "$t"
+}
+
 D=$W/disk.raw
 copy "$D"
+H=$W/host.raw
+host_disk "$H"
+host_before=$(sha256sum <"$H")
 before=$(stat -c %s "$IMG")
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
 NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
-	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D"
+	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
+# The host disk is not the boot drive (drive-id saw one boot partition) and nothing wrote to it.
+[ "$(sha256sum <"$H")" = "$host_before" ] && echo "ok   host disk unchanged" || { echo "MISS host disk unchanged"; fail=1; }
+rm -f "$H"
 # Root carries project quotas, so each agent machine writes under its own hard quota (RES-4, #1386),
 # and the agentosd command systemd loaded ends -disk-quota on (flag=on).
 has "$W/console.log" "agentos-quota: root=ext4 prjquota flag=on"

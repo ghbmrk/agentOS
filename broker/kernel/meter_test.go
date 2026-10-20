@@ -22,8 +22,8 @@ func modelKey(r *rig, serial string, c ...key.Caveat) key.Key {
 // with the plan as the task (LOG-7).
 func modelPlan(r *rig, id string, k key.Key) {
 	r.t.Helper()
-	step := key.Step{Verb: key.Read, Clerk: "model", Args: map[string]key.Arg{"query": {Value: "q"}}}
-	must(r.t, r.k.Submit(0, kernel.Plan{ID: id, Key: k, Steps: []key.Step{step}}))
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
+	must(r.t, r.k.Submit(0, kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{step}}))
 	if r.status(id) != kernel.SActive {
 		r.t.Fatalf("plan %s is %s", id, r.status(id))
 	}
@@ -109,8 +109,8 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 		t.Fatalf("an ended plan spends nothing: %v", rf)
 	}
 	foreign := key.Issue(gen(9).priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
-	step := key.Step{Verb: key.Read, Clerk: "model", Args: map[string]key.Arg{"query": {Value: "q"}}}
-	must(t, r.k.Submit(4, kernel.Plan{ID: "t2", Key: foreign, Steps: []key.Step{step}}))
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
+	must(t, r.k.Submit(4, kernel.Plan{ID: "t2", Key: foreign, Steps: []kernel.PlanStep{step}}))
 	if rf := r.k.AdmitSpend(5, "t2", 1); rf == nil {
 		t.Fatal("a plan on a foreign root must not spend")
 	}
@@ -136,9 +136,9 @@ func TestMeteredUsageSurvivesReplay(t *testing.T) {
 // key with no spend cap funds nothing.
 func TestSpendFollowsTheFundingKeysCaveatWhateverItsClerk(t *testing.T) {
 	r := newRig(t)
-	step := key.Step{Verb: key.Trash, Clerk: "mail", Args: map[string]key.Arg{"target": {Value: "m1", Source: key.SrcOwner}}}
-	must(t, r.k.Submit(0, kernel.Plan{ID: "capped", Key: r.derive(key.LimitSpendTask(100)), Steps: []key.Step{step}}))
-	must(t, r.k.Submit(0, kernel.Plan{ID: "bare", Key: r.derive(key.LimitUses(5)), Steps: []key.Step{step}}))
+	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
+	must(t, r.k.Submit(0, kernel.Plan{ID: "capped", Key: r.derive(key.LimitSpendTask(100)), Steps: []kernel.PlanStep{step}}))
+	must(t, r.k.Submit(0, kernel.Plan{ID: "bare", Key: r.derive(key.LimitUses(5)), Steps: []kernel.PlanStep{step}}))
 	if r.status("capped") != kernel.SActive || r.status("bare") != kernel.SActive {
 		t.Fatalf("plans: %s %s", r.status("capped"), r.status("bare"))
 	}
