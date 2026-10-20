@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=spoofed.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=q1+I5OI9QzaxaBL+jelmbXKCb9F7chUQtVYbserfXfLnk88HPS5xu4vbBdzYQDFIGMoxfjiwoZ9VcXudENQD+QPQMm0CAhZ+Rrc2e3tT8naMytrpies5Z1GPO8lcXTNap2PWCxuNip87ChOYe1+bQx1a2UuWog88mDy+ByedOwzX876rQ4zeju9P2dsoPrzF5ToId62tAYvnWCelQ7N6ums3upI6RfHAUrQqhE+1W+E48a14F/Z9fDTe7khxMdXvhrVAiIEXHUt9koHKdETzdnVZVPy+Mh/YtunwDZrHaMNABJYUFZ4bYtgmiYusjDwT3klZ14VJWKz7r0gfzwmy2Q==
+From: Promo <promo@spoofed.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:07:00 +0000
+Message-ID: <m08.slice@spoofed.test>
+List-Unsubscribe: <https://collector.attacker.test/unsubscribe?m=m08>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.

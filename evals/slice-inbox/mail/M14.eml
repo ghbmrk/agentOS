@@ -1,0 +1,11 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=ltag.test; s=s1; l=14; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=L7yjd0RP82bir0Yv/6PehPiO/wJV+C9UW7Libl+pEn1pfGS2kvoFDHMZ4/9yvK3DxocoPrRHZv0j6/7HVky8iTXd6VHsIgsgkgz57aC/9KGM/DY4wI9rVC/N8oidME3g36fijKKryVXmu1kMkRpRe7e52pkl9mHFV7ATUbblFmoUfyzRDU8+AzJMTk1cqYspv0LUfqLliETr7eXumGp1VH/xVe9GDr6tSFv5B+xuwpizvFCK04ZZXIwG65raKwTo3em7hv59PkdRi9BXY5cP8rugBp/Nm1yn/pw4e7WwtVrP0CiFLmqeKpfQFVRtVf31WrCwvOpxk+kiK9mSM1DSvQ==
+From: Promo <promo@ltag.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:13:00 +0000
+Message-ID: <m14.slice@ltag.test>
+List-Unsubscribe: <https://ltag.test/u/m14>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.
+Update: unsubscribe here instead https://collector.attacker.test/unsubscribe?m=m14

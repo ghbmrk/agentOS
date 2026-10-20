@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=othersigner.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=QnKUuzA+AdVJgngU/cIEPn+bJfeiFgr/5rtis7V7iPo7rqHRQXaNZ4OPMn0UHXziiJiMxTyS4jN0KBSy6oksmCEcD2Ale01ocLkpQCrOyXJGdZuuZvvN6tHBXrgue/mwA2QYoA8Perh+iPw2GO/yc5GfA+izA4u7fsJudyqivCTDI9nH3VZz3hnxWbhXiwBFsoqg1bH4/ju7vn9cwegy5nlxc2r25Z7yWnInAiwhUQcvPZff+fDXu4jOHeWnfhD5P9Ij/R7u2RRvutVtcGzkNY7F9j7GpW7Q62wbY0J2p7Pfcne1SedaIfgfxPLsEFYnu4RO2e13d3+v2IZy+aBM0g==
+From: Promo <promo@brand.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:12:00 +0000
+Message-ID: <m13.slice@brand.test>
+List-Unsubscribe: <https://brand.test/u/m13>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.

@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=newcomer.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=MBSza/gyB0smYMoPctHhMZ6BWaUkU2g9eSTB6von/BM=; b=D4la36dqSatRxViIZvQTzPuAr0sSPbEHKdhrWSn4u7oAhum6HtfjW5aTtkC63QtHy2EIsheIrKsBpVutxnT9zc124DItkg2/VGfwM82dOcwNpj5XJgajH+g9w7M7DFn+R7jxUF1C1lugjyYYcxNjz6NS+bj9Go5Q/lJe5LQy5hEVtcX78vf4cW73F5xCmcueGeqxg4ZMkZMXns2WpBl8344jBp59slQbnSFBwQrLbZh2qG7arcno059BJZ9Texu6zkUecftZ+UI2FZOqRrBKARQ3VVB+af0ASYoITG7/GiG7NaLf1TlQWj7oTa/JV8r5YPxQ0C5EFNfKrFGupFN8ew==
+From: Hello <hello@newcomer.test>
+To: owner@home.test
+Subject: Welcome
+Date: Mon, 19 Oct 2026 08:15:00 +0000
+Message-ID: <m16.slice@newcomer.test>
+List-Unsubscribe: <https://newcomer.test/u/m16>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Thanks for joining.

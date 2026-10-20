@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=rnapleclinic.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=QjeB59EaDrghZYOzyoeibGshHdPPAuE/BOrzOuY/7M4=; b=VbXVDbIW+jLkNCdASNcT9UMafHORzbpi2Ihw++FcbUlsAtAkedtx16foWaEUmJMp0XLYbjXA65mGNzXOOztax7uCP0n6A4g2OG5sVBr5PyUvhmhCvE0gqMk45bUYnEpe47YJxF71IEhnYZ3GY7loD7Q35UQjdxw4HDkPwT9yZw9A4HoCssYHK2kJrxTa0mR5VWZnlAfR0ChqBHRwleDjyCo6K3+vNzJjuAq8/CVt9XqfZT0HwsEqqthU4SqBV+xAgLU+qGjMyTO6PxWPEH+h8pAiiPMNy12vHJYYFjvF2DSEDp7DhYMVyd6FFMt5t05r3705eCnF3WJgzoqr2kc0UA==
+From: Clinic <care@rnapleclinic.test>
+To: owner@home.test
+Subject: Appointment reminder
+Date: Mon, 19 Oct 2026 08:17:00 +0000
+Message-ID: <m18.slice@rnapleclinic.test>
+List-Unsubscribe: <https://rnapleclinic.test/u/m18>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Your appointment is next week.

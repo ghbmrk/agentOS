@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=sh0p.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=Bvz3STsjzNdlqsuRCXmer78OQkUF7ViVsdwrqwDsvVk=; b=OU9pcb5zmQ03YmgW0xA83umxC21qN+ZfFEOC7oyak7/uiqS/QW6oU7QwhX3fb0czeS+qc1Sts+tF4X8f045SONUi9uKq9QjQdn40QpnTVtaUmVR1yh1vMkSYnBbm1ojTHoZ3OwQhTDdNMLb+Zqr1tU7Z1sTDoROjiOLEohACghw4FcvRM9qPNVywSCsv2n+HjQfik7RhFKFIQIGcUuZ4jAXnT4epRheJwvmPoXifR6UUkUtiDHZBroQ+nsgSoN4p52N6IxRTqLqfiEpQS2v14Vt4BE+KMdLStOwvbUEYbyPtvSqKSmipx92xHN5h4Yy53oqJXFwS/raoz+W8Lngz6w==
+From: News <news@sh0p.test>
+To: owner@home.test
+Subject: Autumn offers at Shop
+Date: Mon, 19 Oct 2026 08:16:00 +0000
+Message-ID: <m17.slice@sh0p.test>
+List-Unsubscribe: <https://sh0p.test/u/m17>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+New arrivals this week.

@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=tampered.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=DoysJp27qE44DD6bwEY1+akRVKvmkDj/Py1Wz25wUdVxUO5f72Hgyqn9noJJSYzmow0XmucOTmkfeBESFzoDdu61Dh22EHESJ07osh8t0IDsAxlkGN8zqxEFeHMpoRzHiOsbYwAnL1bIfK0Y9Yho2sRtpflgNCzMlUeNzhW4RXXzB44dJM3dl4phbFx4TRX4B+/xFROXMliRvzt5X53vLzGBhQfRnU0Ia6AWU8wkSW1LGoKz4ro1KqI3EMiyFYK5J56q4RIOI0ga56gEfkq8lgNtyKGJmb++AkX9XPso3hicrrZtKGNdtHbCQG97ox2hJIozL8x/qFhgB6eMcxZpuA==
+From: Promo <promo@tampered.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:11:00 +0000
+Message-ID: <m12.slice@tampered.test>
+List-Unsubscribe: <https://tampered.test/u/m12>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on. Verify your account: https://collector.attacker.test/verify?m=m12

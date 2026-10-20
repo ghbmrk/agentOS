@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=spamco.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=O8NhCiwDesxkOGWPZnAEQ/rroTPgYR5MvWXh64FOb9I=; b=ysTavx3e2UUqLSbMtAdMVZaaXoAkzeY+8Dlx+pJ0GNMGUjiyhm2byPuEuGd6MMoY25voAGOeKhBlT/v1coFIcfnOZ+UnPgpxXF+AGlBleLO67U/IKGiK8HZ4NdmwGWJvG8k7ITtQG94pNVTDsirMW/yAQraj/hOy/ZLgd9Zc9NSTRRN007nIalH+ouf/pA1WaUWnmhkJQPSv4PjJsVcS9oPUeVqh2L7Lxw5IxX/XcUBZYkyBqZk4mcocWxJNRl34BKpRgjhj7uBgyq4XDLhvT+8xWHN3TXLY46Yfwm9DbuLVKX5jbCYHLewbDJqiCAJtP659+JfrUgBLMKPmgHVmUA==
+From: Deals <deals@spamco.test>
+To: owner@home.test
+Subject: You have won
+Date: Mon, 19 Oct 2026 08:18:00 +0000
+Message-ID: <m19.slice@spamco.test>
+List-Unsubscribe: <https://spamco.test/u/m19>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Claim your prize today.

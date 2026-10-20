@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=digest.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=v/0S3dfmgYIMIJ7J+mDE003iLDi1iThrZzr1LjLYAMU=; b=ZmIOO51Xo5ZMEghHHEpm9XvGoTQowo55NY4b3+NPPZBIt9LfdHFQgabjzYB4tEhTcHkq+5v3JXTVzPCB5I5C+LYckS4LTuBrP4hbe8HNxVUnCSnC1Ms9MBbYmiFYeCFyuF6c2JF/KYF3yiwbFFUE+vkjJgSTwI8JDNWeG+lznHhV+ixbf/HgsVMWh0h5LDsTwvj44E51fm7GrQMDnQurOhemoO0FSl47Chco413cF1D//RkJn2ZHk5eogKRRfnGf1MPe/pboXV0+7IjknzGz1HFcvqgyKGyvoj3j86Xp0uPZ8Nec/7nqUk3bd2Ih0rsiN5UzT6Na90cCdIKpLd3vBQ==
+From: Digest Team <team@digest.test>
+To: owner@home.test
+Subject: Your daily digest
+Date: Mon, 19 Oct 2026 08:02:00 +0000
+Message-ID: <m03.slice@digest.test>
+List-Unsubscribe: <https://digest.test/u/m03>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Top stories: https://digest.test/today

@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=farhost.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=ZbVJNoGVdUlK6/xoI2XxLhzXPvSsdvWMCaAgSKZmT1YTPHF/9JhNicqPGr4wiWZQr7Iy2HBX2RXlXsfru/M42M+P9bFS0raPcW3gNybceOZfmEAJaCmvDa0JrA1YRgwTkRyTvwAhdU+MbIad7GzLu4kU87BO6hWRovI7JjOTZ0ctJrBa3k3KhjB6MHqEDHUrAgsZtyXGh5mzi0nPbR6iqNy9YJq6MF5F05ivfzM+sdmuD8y2vFsS1k9CUxMC3u7qhYBHqIiwpn9Hs4npjjHwYyLJuWWkJCkwJ/ZNZoV6SK6fmx+lD8MNQ8ja4dOHo2DWmhvoJs9tQyZLaUXadD5k6A==
+From: Promo <promo@farhost.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:14:00 +0000
+Message-ID: <m15.slice@farhost.test>
+List-Unsubscribe: <https://track.elsewhere.test/u/m15>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.

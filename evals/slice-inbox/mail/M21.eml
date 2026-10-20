@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=mailtoonly.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=81XXIVdcgtMqLzdLVfYodq741N5RjKXM8Tdd1WqUmug=; b=bSFL52FNUhGmu1qsfCIz60wCGj2kJHYDIzifzdI2kT2o8qKwFNId/vtn5dhAVQ+2aQIs8lyWOEam+/9nfFncX7NEeeHo+FIlhXRDNXhJwvAIt4C57kd9JZEA/L7svsCy8PAV6+XDshZHZ00CUCVyEpmlw/kSPnDNLAZLRNGXamjhxH7BlWi5C33A6V0+JrqRgHKhunghGeOMkocYm9j3Jy0rYbbmK6V7bEHBVmTKSywuxs6llJo3TNA9BaiQPd/sq030BBNl/9afELP1L7omXXPkapv8uFJr1VEBpbNrGKQjs7RrXV07pgZget7JcPh1KGVRqvye+sySN6/YTEd/Sw==
+From: List <list@mailtoonly.test>
+To: owner@home.test
+Subject: Monthly list
+Date: Mon, 19 Oct 2026 08:20:00 +0000
+Message-ID: <m21.slice@mailtoonly.test>
+List-Unsubscribe: <mailto:leave@mailtoonly.test?subject=m21>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+This month's notes.
