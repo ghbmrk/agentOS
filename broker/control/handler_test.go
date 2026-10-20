@@ -24,11 +24,15 @@ type fakeEngine struct {
 	resumes int
 	list    []journal.Status
 	report  journal.StopReport
+	stopErr error // Stop fails to record, as a broken engine's does
 }
 
 func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.stopErr != nil {
+		return journal.StopReport{}, f.stopErr
+	}
 	f.stopped = true
 	f.stops++
 	return f.report, nil
@@ -471,5 +475,18 @@ func TestStatusAddsWholeNotesOnly(t *testing.T) {
 	h.Notes = h.Notes[:1]
 	if s := one(t, h.Handle(context.Background(), owner, "STATUS")); !strings.HasSuffix(s, " "+notes[0]) {
 		t.Fatalf("fits: %q", s)
+	}
+}
+
+// A STOP the journal did not record is not reported as done, even when an
+// earlier STOP is in force: a failed write after that STOP (a RESUME whose
+// fsync failed) may replay on restart, so only this STOP's own record makes
+// "Stopped." true across a restart. Found by the SIM-sim fault sweep.
+func TestSTOPThatFailsToRecordIsNotReportedDoneWhenAlreadyStopped(t *testing.T) {
+	eng := &fakeEngine{stopped: true, stopErr: errors.New("journal: a journal write failed")}
+	h, _ := newHandler(t, eng, fakeAuth{}, forbiddenAgent{t})
+	r := one(t, h.Handle(context.Background(), owner, "STOP"))
+	if !strings.HasPrefix(r, "STOP failed to record.") {
+		t.Fatalf("STOP on an engine that could not record it: %q", r)
 	}
 }
