@@ -180,7 +180,7 @@ def quota_violations(img, table, entry):
 # outside /usr slot A (the partition table, the ESP, root and the empty slot B) holds no private key
 # and no Owner Card. Slot A is package content, verified against the entry's usrhash, and the
 # reproduce job builds the same usrhash on another runner, which a key or card made during the build
-# would break (image/ASSUMPTIONS.md I29). A hit names its kind and offset, never its bytes.
+# would break (image/ASSUMPTIONS.md IMG-1-1). A hit names its kind and offset, never its bytes.
 SECRET_PATTERNS = (
     # A PEM or PGP private key with its body: libcrypto and gpg carry the header alone.
     ("private key", re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----\r?\n"
