@@ -1,6 +1,6 @@
 package vm
 
-// REQ: CRED-1, CRED-5, A14, CAP-8
+// REQ: CRED-1, CRED-5, A14, CAP-8, OP-6
 
 import (
 	"bytes"
@@ -127,5 +127,39 @@ func TestProviderWorkerTakesNoSnapshotForkRollbackOrMerge(t *testing.T) {
 	}
 	if m, err := e.m.Get("pw-a1"); err != nil || m.State != Running {
 		t.Fatalf("provider worker = %+v, %v after refusals", m, err)
+	}
+}
+
+// OP-6 (#2481): STOP ends a provider run in flight. The reaper calls
+// EndCommands while STOP holds; it reaches pw- commands as well as wk-
+// ones, and the worker stays up for the runner to destroy.
+func TestEndCommandsEndsAProviderRunInFlight(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.open()
+	e.providerWorker("pw-a1")
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.m.Exec(bg, "pw-a1", Command{As: Private, Argv: []string{"sleep"}}, 10*time.Minute)
+		done <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for e.m.EndCommands() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("EndCommands found no provider command in flight")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an ended provider command reported success")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EndCommands did not end the provider command")
+	}
+	w, err := e.m.Get("pw-a1")
+	must(t, err)
+	if w.State != Running {
+		t.Fatalf("provider worker is %s after its command ended", w.State)
 	}
 }
