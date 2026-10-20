@@ -81,7 +81,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/reads"; rc=0
           for f in tests/test*.py; do
             m=$(basename "$f" .py)
-            strace -f --seccomp-bpf -qq -y -e trace=open,openat,openat2 -e signal=none -o "$RUNNER_TEMP/reads/$m.trace" \
+            strace -f --seccomp-bpf -q -y -e trace=open,openat,openat2 -e signal=none -o "$RUNNER_TEMP/reads/$m.trace" \
               python -m unittest discover -s tests -p "$m.py" -v || rc=1
           done
           exit $rc

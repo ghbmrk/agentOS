@@ -378,7 +378,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
         self.assertIn('          for f in tests/test*.py; do\n'
                       '            m=$(basename "$f" .py)\n'
-                      '            strace -f --seccomp-bpf -qq -y -e trace=open,openat,openat2 -e signal=none '
+                      '            strace -f --seccomp-bpf -q -y -e trace=open,openat,openat2 -e signal=none '
                       '-o "$RUNNER_TEMP/reads/$m.trace" \\\n'
                       '              python -m unittest discover -s tests -p "$m.py" -v || rc=1\n'
                       '          done\n          exit $rc', unit)
@@ -404,29 +404,42 @@ class WiringTest(unittest.TestCase):
 
     def test_record_audit_fails_on_an_unlisted_reader(self):
         # REQ: CI-PATHS
-        # The audit's controls, over strace -f -y lines: any process's open of a record, by
-        # absolute or directory-relative path, a listing of a record directory and a relative
-        # open it cannot resolve each need the module listed whole; a listed class is not enough.
-        own = '1 openat(AT_FDCWD<{r}>, "{r}/tests/__pycache__/test_m.cpython-312.pyc", O_RDONLY) = 3\n'.format(r=ROOT)
+        # The audit's controls, over strace -f -y lines: any process's open that reached a record
+        # (by its name, a directory-relative path, a symlink or a resumed call), a failed or
+        # unresolvable open of one, a listing of a record directory and any git object-store read
+        # each need the module listed whole; a listed class is not enough.
+        own = '1 openat(AT_FDCWD<{r}>, "{r}/tests/__pycache__/test_m.cpython-312.pyc", O_RDONLY) = 3<{r}/tests/__pycache__/test_m.cpython-312.pyc>\n'
+        end = "1 +++ exited with 0 +++\n"
         reads = {
-            'SPEC.md': '2 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3\n',
-            'docs/OPERATING.md': '3 openat(AT_FDCWD</>, "{r}/docs/OPERATING.md", O_RDONLY) = 3\n',
-            'reviews/l3': '4 openat(5<{r}/reviews>, "l3", O_RDONLY|O_DIRECTORY) = 6\n',
-            'BOARD.md': '5 open("BOARD.md", O_RDONLY <unfinished ...>\n',
-            'docs/LANES.md': '6 openat(AT_FDCWD<{r}/tools>, "../docs/LANES.md", O_RDONLY) = -1 ENOENT\n',
+            "SPEC.md": '2 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3<{r}/SPEC.md>\n',
+            "docs/OPERATING.md": '3 openat(AT_FDCWD</>, "{r}/docs/OPERATING.md", O_RDONLY) = -1 EACCES (Permission denied)\n',
+            "reviews/l3": '4 openat(5<{r}/reviews>, "l3", O_RDONLY|O_DIRECTORY) = 6<{r}/reviews/l3>\n',
+            "BOARD.md": '5 open("BOARD.md", O_RDONLY <unfinished ...>\n',
+            "docs/LANES.md": '6 openat(AT_FDCWD<{r}/tools>, "../docs/LANES.md", O_RDONLY) = -1 ENOENT (No such file)\n',
+            "PLAN.md": '7 openat(AT_FDCWD</tmp/l>, "/tmp/l/link.md", O_RDONLY|O_CLOEXEC) = 3<{r}/PLAN.md>\n',
+            "LEDGER.md": '8 openat(AT_FDCWD</tmp/l>, "d/../x.md", O_RDONLY <unfinished ...>\n'
+                         '9 openat(AT_FDCWD</tmp>, "y", O_RDONLY) = 4</tmp/y>\n'
+                         '8 <... openat resumed>) = 3<{r}/LEDGER.md>\n',
+            ".git/objects/ab/cdef": '10 openat(AT_FDCWD<{r}>, ".git/objects/ab/cdef", O_RDONLY) = 3<{r}/.git/objects/ab/cdef>\n',
         }
-        quiet = ('7 openat(AT_FDCWD</tmp/x>, "SPEC.md", O_WRONLY|O_CREAT, 0644) = 3\n'
-                 '8 openat(AT_FDCWD<{r}>, "docs/owners-guide.md", O_RDONLY) = 3\n'
-                 '9 openat(AT_FDCWD<{r}>, "docs", O_RDONLY|O_DIRECTORY) = 3\n'
-                 '10 execve("/usr/bin/cat", ["cat", "SPEC.md"], 0x1 /* 3 vars */) = 0\n').format(r=ROOT)
+        quiet = ('11 openat(AT_FDCWD</tmp/x>, "SPEC.md", O_WRONLY|O_CREAT, 0644) = 3</tmp/x/SPEC.md>\n'
+                 '12 openat(AT_FDCWD<{r}>, "docs/owners-guide.md", O_RDONLY) = 3<{r}/docs/owners-guide.md>\n'
+                 '13 openat(AT_FDCWD<{r}>, "docs", O_RDONLY|O_DIRECTORY) = 3<{r}/docs>\n'
+                 '14 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3</tmp/copy.md>\n'
+                 '15 execve("/usr/bin/cat", ["cat", "SPEC.md"], 0x1 /* 3 vars */) = 0\n')
         problems = records_audit.problems
-        self.assertEqual(problems({"test_m": own + quiet}, ["tests.test_m.A"]), [])
+
+        def trace(*parts):
+            return {"test_m": "".join(parts).format(r=ROOT)}
+        self.assertEqual(problems(trace(own, quiet, end), ["tests.test_m.A"]), [])
         for rel, line in reads.items():
-            trace = {"test_m": own + quiet + line.format(r=ROOT)}
-            self.assertEqual(problems(trace, ["tests.test_m.A", "tests.test_m.A.test_a"]), [f"tests.test_m\t{rel}"], rel)
-            self.assertEqual(problems(trace, ["tests.test_m"]), [], rel)
-        self.assertEqual(problems({"test_m": reads["SPEC.md"].format(r=ROOT)}, ["tests.test_m"]),
+            self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m.A", "tests.test_m.A.test_a"]),
+                             [f"tests.test_m\t{rel}"], rel)
+            self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m"]), [], rel)
+        self.assertEqual(problems(trace(reads["SPEC.md"], end), ["tests.test_m"]),
                          ["tests.test_m\tno open of the module's own file: tracing did not run"])
+        self.assertEqual(problems(trace(own, quiet, "16 +++ exited with 0 +++\n"), ["tests.test_m"]),
+                         ["tests.test_m\tthe trace ends before the module's run exits: it was cut short"])
         self.assertEqual(len(problems({"test_m": ""}, [])), 1)
 
     def test_no_privileged_workflow_uses_a_cache(self):

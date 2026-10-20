@@ -3,13 +3,17 @@
 
 A records-only change can edit any record file (tools/ci_scope.is_record), and the records step
 runs a fixed test list, so every test whose outcome rests on a record must be on that list. Full
-CI's unit tests run each tests/test*.py module in its own process tree under `strace -f`, which
-records every file opened anywhere in that tree, whatever the program (Python and its children,
-sh, git, Go). `records_audit.py DIR` then fails unless the records step lists whole each module
-whose tree opened a record file or a directory of records. The module is the unit: a read at
-import, in a fixture, or cached by one test and used by another is covered alike. A module with
-no trace, or whose trace does not show its own file opened (tracing did not work), fails too.
-Not seen: a stat or existence check that opens nothing.
+CI's unit tests run each tests/test*.py module in its own process tree under `strace -f -y`,
+which records every file opened anywhere in that tree, whatever the program (Python and its
+children, sh, git, Go), and the file each open reached. `records_audit.py DIR` then fails unless
+the records step lists whole each module whose tree opened a record file (by any name: a symlink
+counts as its target), a directory of records, or anything in the git object store (`git diff`,
+`show` and `cat-file` read records from there). The module is the unit: a read at import, in a
+fixture, or cached by one test and used by another is covered alike. A module with no trace, or
+whose trace does not show its own file opened and the top process exiting (tracing did not run
+or was cut short), fails too.
+Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
+open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """
 import os
 import re
@@ -19,8 +23,12 @@ import importlib.util
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 TESTS = os.path.join(ROOT, "tests")
-# One strace line for open/openat/openat2 under -y: pid, call, the directory fd's path, the path.
+# An strace -f -y line for open/openat/openat2: pid, the directory fd's path, the path argument,
+# the rest; a successful open ends `= N</file it reached>`, and a call split by another
+# process's ends in `<unfinished ...>`, its result on a later `<... openat resumed>` line.
 _OPEN = re.compile(r'^\d+\s+open(?:at2?)?\((?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)"(.*)$')
+_RESUMED = re.compile(r'^\d+\s+<\.\.\. open(?:at2?)? resumed>')
+_REACHED = re.compile(r'\) = \d+<([^>]*)>$')
 
 
 def records_run_tests(text=None):
@@ -61,32 +69,51 @@ def _is_record():
     record_dirs = tuple(d.rstrip("/") for d in module.RECORD_DIRS)
 
     def read(rel, directory):
-        if directory:
-            return any(rel == d or rel.startswith(d + "/") for d in record_dirs)
+        if rel == ".git" or rel.startswith(".git/"):
+            return True
+        if directory and any(rel == d or rel.startswith(d + "/") for d in record_dirs):
+            return True
         return module.is_record(rel)
     return read
 
 
 def opened(trace, root=ROOT):
-    """(repo-relative path, opened as a directory) for each open in a strace -f -y log. A
-    relative path with no directory to resolve it against is returned as is."""
+    """(repo-relative path, opened as a directory) for each open in a strace -f -y log: the file
+    the open reached, else (failed or unfinished) the path it asked for. A relative path with no
+    directory to resolve it against is returned as is."""
     out = set()
+
+    def add(path, directory):
+        rel = os.path.relpath(os.path.normpath(path), root).replace(os.sep, "/")
+        if rel != ".." and not rel.startswith("../"):
+            out.add((rel, directory))
     for line in trace.splitlines():
         if root not in line and 'open("' not in line:
             continue
+        reached = _REACHED.search(line)
         m = _OPEN.match(line)
-        if not m:
-            continue
-        base, path = m.group(1), m.group(2).replace('\\"', '"').replace("\\\\", "\\")
-        if not os.path.isabs(path):
-            if base is None:
-                out.add((path, "O_DIRECTORY" in m.group(3)))
+        if m:
+            directory = "O_DIRECTORY" in m.group(3)
+            if reached:
+                add(reached.group(1), directory)
                 continue
-            path = os.path.join(base, path)
-        rel = os.path.relpath(os.path.normpath(path), root).replace(os.sep, "/")
-        if rel != ".." and not rel.startswith("../"):
-            out.add((rel, "O_DIRECTORY" in m.group(3)))
+            base, path = m.group(1), m.group(2).replace('\\"', '"').replace("\\\\", "\\")
+            if os.path.isabs(path):
+                add(path, directory)
+            elif base is None:
+                out.add((path, directory))
+            else:
+                add(os.path.join(base, path), directory)
+        elif reached and _RESUMED.match(line):
+            add(reached.group(1), True)  # its flags were on the unfinished line
     return out
+
+
+def finished(trace):
+    """Whether the trace's first process, the module's test run, exited: a trace cut short (strace
+    killed, a failed write) ends without it."""
+    first = re.match(r"(\d+)\s", trace)
+    return bool(first) and re.search(rf"(?m)^{first.group(1)}\s+\+\+\+ exited with \d+ \+\+\+$", trace) is not None
 
 
 def problems(traces, listed, is_record=None):
@@ -98,6 +125,9 @@ def problems(traces, listed, is_record=None):
         if not any(rel == f"tests/{stem}.py" or re.fullmatch(rf"tests/__pycache__/{stem}\.[\w.-]+\.pyc", rel)
                    for rel, _ in paths):
             out.append(f"tests.{stem}\tno open of the module's own file: tracing did not run")
+            continue
+        if not finished(trace):
+            out.append(f"tests.{stem}\tthe trace ends before the module's run exits: it was cut short")
             continue
         if f"tests.{stem}" in listed:
             continue
