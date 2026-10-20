@@ -12,8 +12,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// Name is the clerk name a key must be issued for.
-const Name = "model"
+// ErrNotSent is what a Provider returns when the request provably never left
+// (it failed before sending), so the call cost nothing.
+var ErrNotSent = errors.New("model: request not sent")
 
 // Usage is a call's token count. Reported is true when the provider's
 // connection carried the figure; otherwise the clerk counts its own. Pool is
@@ -28,7 +29,9 @@ type Usage struct {
 // when it resets (unix ms).
 type PoolReading struct{ Used, ResetAt int64 }
 
-// Provider makes the call. It holds the credential; nothing else does.
+// Provider makes the call. It holds the credential; nothing else does. On an
+// error it still returns any usage it knows; ErrNotSent means the request never
+// left.
 type Provider interface {
 	Call(route, prompt string, maxOut int64) (reply string, u Usage, err error)
 }
@@ -45,7 +48,7 @@ type Price struct {
 // Ledger is the part of the kernel the clerk needs: the check and the record.
 // Calls name the plan; the kernel finds its key and task (LOG-7).
 type Ledger interface {
-	AdmitSpend(now int64, plan, clerk string, amount int64) *key.Refusal
+	AdmitSpend(now int64, plan string, amount int64) *key.Refusal
 	Meter(now int64, plan, route string, amount int64, source string) error
 	Hold(now int64, plan string, rf *key.Refusal) error
 	AdmitPool(now int64, pool string) *key.Refusal
@@ -125,8 +128,9 @@ func (c *Clerk) flush(now int64) error {
 // the plan, never from the caller. A pool route must be open (below the
 // owner's reserve) and the worst case (the prompt plus maxOut tokens) must fit
 // the caps before the provider is called; a spend cap that is used up holds
-// the plan until the owner extends it. A provider error costs the admitted
-// worst case. The reply is withheld if the usage cannot be recorded.
+// the plan until the owner extends it. A provider error costs the usage it
+// reported, nothing if the request never left, else the admitted worst case.
+// The reply is withheld if the usage cannot be recorded.
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -150,7 +154,7 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 			return "", r
 		}
 	}
-	if r := c.Ledger.AdmitSpend(now, plan, Name, worst); r != nil {
+	if r := c.Ledger.AdmitSpend(now, plan, worst); r != nil {
 		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
 			if err := c.Ledger.Hold(now, plan, r); err != nil {
 				return "", err
@@ -158,30 +162,32 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 		}
 		return "", r
 	}
-	reply, u, err := c.Provider.Call(route, prompt, maxOut)
-	if err != nil {
-		if merr := c.record(now, unmetered{plan, route, "admitted", worst}); merr != nil {
-			return "", errors.Join(err, merr)
+	reply, u, callErr := c.Provider.Call(route, prompt, maxOut)
+	if !errors.Is(callErr, ErrNotSent) {
+		amount, src := worst, "admitted"
+		var cerr error
+		switch {
+		case u.Reported:
+			amount, cerr = p.cost(u.In, u.Out)
+			src = "provider"
+		case callErr == nil:
+			amount, cerr = p.cost(in, tokens(reply))
+			src = "clerk"
 		}
-		return "", err
-	}
-	amount, src := int64(0), "provider"
-	if u.Reported {
-		amount, err = p.cost(u.In, u.Out)
-	} else {
-		amount, err = p.cost(in, tokens(reply))
-		src = "clerk"
-	}
-	if err != nil {
-		amount, src = worst, "admitted"
-	}
-	if err := c.record(now, unmetered{plan, route, src, amount}); err != nil {
-		return "", err
+		if cerr != nil {
+			amount, src = worst, "admitted"
+		}
+		if err := c.record(now, unmetered{plan, route, src, amount}); err != nil {
+			return "", errors.Join(callErr, err)
+		}
 	}
 	if p.Pool != "" && u.Pool != nil {
 		if err := c.Ledger.ReadPool(now, p.Pool, u.Pool.Used, u.Pool.ResetAt); err != nil {
-			return "", err
+			return "", errors.Join(callErr, err)
 		}
+	}
+	if callErr != nil {
+		return "", callErr
 	}
 	return reply, nil
 }

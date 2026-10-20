@@ -85,11 +85,11 @@ type (
 	}
 	// spendHeld stops a task whose spend cap is used up until the owner extends it (LOG-7).
 	spendHeld struct {
-		Plan   string `json:"plan"`
-		Clerk  string `json:"clerk"`
-		Code   string `json:"code"`
-		Detail string `json:"detail"`
-		Root   key.ID `json:"root"` // the root of the key the plan cites: it cannot release itself
+		Plan    string `json:"plan"`
+		Code    string `json:"code"`
+		Detail  string `json:"detail"`
+		Root    key.ID `json:"root"`    // the root of the key the plan cites: it cannot release itself
+		Funding key.ID `json:"funding"` // the key funding the plan when held: nor can anything under it
 	}
 	// spendExtended releases a held plan and names the owner-envelope key its
 	// later calls are charged to. It widens: it needs an anchor (KRN-7).
@@ -209,11 +209,12 @@ type HeldInfo struct {
 	Novel bool
 }
 
-// SpendHold is why a plan's spend is stopped; Root is the root of the key the
-// plan cites, which cannot release the hold.
+// SpendHold is why a plan's spend is stopped. Root is the root of the key the
+// plan cites and Funding the key that was funding it; neither, nor anything
+// under them, can release the hold.
 type SpendHold struct {
-	Clerk, Code, Detail string
-	Root                key.ID
+	Code, Detail  string
+	Root, Funding key.ID
 }
 
 // Pool is what the log knows of one usage pool (RES-5).
@@ -231,6 +232,10 @@ func (s *State) PoolDue(now int64, name string) bool {
 	p := s.Pools[name]
 	return !s.PoolOpen(name) && p.ResetAt > 0 && now >= p.ResetAt
 }
+
+// PoolWindowMS is the window a pool is declared to reset over (RES-5): the
+// cooldown of a full pool whose reading gave no usable reset time.
+const PoolWindowMS = 5 * 3600 * 1000
 
 // PoolFull is a whole pool, in per mille.
 const PoolFull = 1000
@@ -417,7 +422,7 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		s.SpendHeld[b.Plan] = SpendHold{b.Clerk, b.Code, b.Detail, b.Root}
+		s.SpendHeld[b.Plan] = SpendHold{b.Code, b.Detail, b.Root, b.Funding}
 	case TSpendExtend:
 		b, err := body[spendExtended](e)
 		if err != nil {

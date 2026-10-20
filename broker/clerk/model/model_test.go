@@ -61,7 +61,7 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: model.Name, Verbs: []key.Verb{key.Read}, Serial: "m"})
+	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
 	if err := k.Issue(0, root); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := key.Step{Verb: key.Read, Clerk: model.Name, Args: map[string]key.Arg{"query": {Value: "q"}}}
+	step := key.Step{Verb: key.Read, Clerk: "model", Args: map[string]key.Arg{"query": {Value: "q"}}}
 	for _, id := range []string{"t", "big"} {
 		if err := k.Submit(0, kernel.Plan{ID: id, Key: ky, Steps: []key.Step{step}}); err != nil {
 			t.Fatal(err)
@@ -119,7 +119,7 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	// the owner's envelope (another root), and an extension derived from it
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: model.Name, Verbs: []key.Verb{key.Read}, Serial: "env"})
+	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
 	if err := k.Issue(3, root); err != nil {
 		t.Fatal(err)
 	}
@@ -262,5 +262,94 @@ func TestUnrecordedSpendShutsTheClerkUntilTheLogRecords(t *testing.T) {
 	}
 	if len(used) != 2 || !strings.Contains(used[0], `"amount":70`) {
 		t.Fatalf("the owed usage is recorded first: %v", used)
+	}
+}
+
+func TestRequestThatNeverLeftMetersNothing(t *testing.T) {
+	f := &fake{err: model.ErrNotSent}
+	c, k, _ := rig(t, f)
+	n := len(k.Log().Entries())
+	if _, err := c.Call(1, "t", "api", "hi", 10); !errors.Is(err, model.ErrNotSent) {
+		t.Fatalf("the error surfaces: %v", err)
+	}
+	if len(k.Log().Entries()) != n {
+		t.Fatal("a request that never left costs nothing and leaves no entry")
+	}
+}
+
+func TestUsageReturnedWithAnErrorIsMetered(t *testing.T) {
+	f := &fake{u: model.Usage{In: 3, Out: 4, Reported: true}, err: errors.New("cut off")}
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 10); err == nil {
+		t.Fatal("provider error must surface")
+	}
+	last := lastEntry(k)
+	if !strings.Contains(string(last.Body), `"amount":7`) || !strings.Contains(string(last.Body), `"source":"provider"`) {
+		t.Fatalf("reported usage is what it cost: %s", last.Body)
+	}
+}
+
+func TestPoolReadingIsAppliedOnAProviderError(t *testing.T) {
+	f := &fake{u: model.Usage{Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}, err: errors.New("cut off")}
+	c, k, _ := rig(t, f)
+	if err := k.Reserve(0, "codex-5h", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(1, "t", "plan", "hi", 10); err == nil {
+		t.Fatal("provider error must surface")
+	}
+	if r := k.AdmitPool(2, "codex-5h"); r == nil {
+		t.Fatal("the reading that came with the error closes the pool")
+	}
+}
+
+// Prices and sizes that wrap or go negative are refused before the provider.
+func TestCostArithmeticIsRefusedBeforeTheProvider(t *testing.T) {
+	for name, tc := range map[string]struct {
+		p      model.Price
+		maxOut int64
+	}{
+		"negative price":   {model.Price{InPerM: 1, OutPerM: -1}, 10},
+		"product wraps":    {model.Price{OutPerM: 2}, math.MaxInt64/2 + 1},
+		"sum wraps":        {model.Price{InPerM: math.MaxInt64, OutPerM: 1}, 2},
+		"no round-up room": {model.Price{InPerM: math.MaxInt64 - 500_000}, 1},
+	} {
+		f := &fake{}
+		c, k, _ := rig(t, f)
+		c.Routes["bad"] = tc.p
+		n := len(k.Log().Entries())
+		if _, err := c.Call(1, "t", "bad", "hi", tc.maxOut); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+		if f.calls != 0 || len(k.Log().Entries()) != n {
+			t.Fatalf("%s reached the provider or the log", name)
+		}
+	}
+}
+
+// A plan under a mail key with a spend cap makes a capped model call: the
+// funding key's caveat authorizes, not the clerk it was issued for.
+func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, k, _ := rig(t, f)
+	_, opriv := seed(1)
+	hpub, hpriv := seed(2)
+	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
+	if err := k.Issue(0, root); err != nil {
+		t.Fatal(err)
+	}
+	ky, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := key.Step{Verb: key.Trash, Clerk: "mail", Args: map[string]key.Arg{"target": {Value: "m1", Source: key.SrcOwner}}}
+	if err := k.Submit(0, kernel.Plan{ID: "mailplan", Key: ky, Steps: []key.Step{step}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(1, "mailplan", "api", "hi", 50); err != nil {
+		t.Fatalf("a mail key's spend cap funds a model call: %v", err)
+	}
+	if _, err := c.Call(2, "mailplan", "api", "hi", 50); err == nil || f.calls != 1 {
+		t.Fatalf("its cap holds: %v calls=%d", err, f.calls)
 	}
 }

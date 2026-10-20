@@ -303,7 +303,7 @@ func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) 
 // AdmitSpend checks that the plan's key may spend amount more under its spend
 // caps, that the plan is active and that it is not held: the check a clerk
 // makes before a metered call (LOG-7).
-func (k *Kernel) AdmitSpend(now int64, plan, clerk string, amount int64) *key.Refusal {
+func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) *key.Refusal {
 	ps, v, r := k.funding(plan)
 	if r != nil {
 		return r
@@ -314,7 +314,7 @@ func (k *Kernel) AdmitSpend(now int64, plan, clerk string, amount int64) *key.Re
 	if h, held := k.s.SpendHeld[plan]; held {
 		return &key.Refusal{Code: CHeld, Detail: h.Code}
 	}
-	return v.Spend(clerk, plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+	return v.Spend(plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
 }
 
 // Meter records usage a clerk metered itself against the plan's key. Usage
@@ -348,14 +348,15 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 	if r != nil {
 		return r
 	}
-	_, err := k.emit(now, TSpendHeld, spendHeld{plan, v.Limits.Clerk, rf.Code, rf.Detail, cited.Root()})
+	_, err := k.emit(now, TSpendHeld, spendHeld{plan, rf.Code, rf.Detail, cited.Root(), v.ID()})
 	return err
 }
 
 // Extend releases a held plan under ext, a narrowing derivation of the owner's
 // spend envelope (KEY-4). ext must not sit under the root of the key the plan
-// cites, so a held key cannot release itself; it must be for the held clerk,
-// carry its own per-task cap, and have room left. The envelope's ceilings,
+// cites, nor under the key that was funding it when it was held, so a held key
+// cannot release itself, directly or through an earlier extension; it must
+// carry its own per-task cap and have room left. The envelope's ceilings,
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
 func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
@@ -370,6 +371,11 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if v.Root() == h.Root {
 		return &key.Refusal{Code: CExtension, Detail: "a held key cannot release itself"}
 	}
+	for _, id := range v.IDs {
+		if id == h.Funding {
+			return &key.Refusal{Code: CExtension, Detail: "a held key cannot release itself"}
+		}
+	}
 	bounded := false
 	for _, c := range v.Limits.Caps {
 		bounded = bounded || c.Kind == key.KSpendTask
@@ -377,7 +383,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if !bounded {
 		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
 	}
-	if r := v.Spend(h.Clerk, plan, 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+	if r := v.Spend(plan, 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
 		return r
 	}
 	_, err := k.emit(now, TSpendExtend, spendExtended{plan, ext})
@@ -397,10 +403,15 @@ func (k *Kernel) resetIfDue(now int64, pool string) error {
 
 // ReadPool records the provider's figure for a pool: used and the reset time
 // (RES-5). A pool at the owner's reserve reopens only at its reset time, never
-// on a reading, so a reading can only narrow.
+// on a reading, so a reading can only narrow. A reset time that is missing or
+// already past is replaced by the pool's declared window from now, so a full
+// pool always has a way back.
 func (k *Kernel) ReadPool(now int64, pool string, used, resetAt int64) error {
 	if used < 0 || used > PoolFull {
 		return errors.New("kernel: utilization is a share of the pool")
+	}
+	if resetAt <= now {
+		resetAt = now + PoolWindowMS
 	}
 	if err := k.resetIfDue(now, pool); err != nil {
 		return err

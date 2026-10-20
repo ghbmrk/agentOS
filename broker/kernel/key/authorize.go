@@ -226,18 +226,24 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 }
 
 // Spend is the check a metered call (a model call, a paid API call) makes
-// before it runs: the key is live, belongs to this clerk, and its spend caps
-// hold for amount more under task (LOG-7). The same function runs in the clerk
-// and in the kernel that records the usage.
-func (v *Verified) Spend(clerk, task string, amount int64, c Context) *Refusal {
+// before it runs: the key is live and its spend caps hold for amount more
+// under task (LOG-7). Spend is authorized by the funding key's spend caveat,
+// whatever clerk the key was issued for, and a key with no spend cap funds
+// nothing. The same function runs in the clerk and in the kernel that records
+// the usage.
+func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 	if r := v.live(c); r != nil {
 		return r
 	}
-	if clerk != v.Limits.Clerk {
-		return refuse(RClerk, "key is for %s", v.Limits.Clerk)
-	}
 	if amount < 0 {
 		return refuse(RMalformed, "negative amount")
+	}
+	capped := false
+	for _, cp := range v.Limits.Caps {
+		capped = capped || cp.Kind == KSpendTask || cp.Kind == KSpendDay
+	}
+	if !capped {
+		return refuse(RMalformed, "no spend cap")
 	}
 	return v.caps(Step{Task: task, Amount: amount}, c, true)
 }

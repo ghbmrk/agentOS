@@ -44,8 +44,6 @@ wiring cmd/agentos-a8scan
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
-open kernel.Kernel.AdmitSpend
-open kernel.Kernel.AdmitPool
 open journal.Engine.Submit
 open grants.Gate.Submit
 
@@ -98,6 +96,8 @@ allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key 
 allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
 allow replay guest.New -- LOOP5 replays a run on its own guest plane
 allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
+allow clerk/model kernel.Kernel.AdmitSpend -- the model clerk asks the kernel's own check before a call; it is a read of the log and records nothing
+allow clerk/model kernel.Kernel.AdmitPool -- the model clerk asks whether a pool is open; a past reset time logs the widening pool.reset, which the kernel alone decides
 allow clerk/model kernel.Kernel.Meter -- the model clerk records the spend of its own call, charged to the plan's key; the kernel refuses a negative amount and a plan it does not know
 allow clerk/model kernel.Kernel.Hold -- the model clerk stops a plan whose spend cap the kernel's own check just refused; the kernel takes only that refusal
 allow clerk/model kernel.Kernel.ReadPool -- the model clerk passes on the provider's figure for a usage pool; it can only narrow, a reopening is the kernel's logged widening

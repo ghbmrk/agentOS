@@ -35,23 +35,20 @@ func TestMeteredUsageCountsAgainstTaskAndDayCaps(t *testing.T) {
 	for _, id := range []string{"t1", "t2", "t3"} {
 		modelPlan(r, id, k)
 	}
-	if rf := r.k.AdmitSpend(1, "t1", "model", 60); rf != nil {
+	if rf := r.k.AdmitSpend(1, "t1", 60); rf != nil {
 		t.Fatal(rf)
 	}
 	must(t, r.k.Meter(1, "t1", "api", 60, "provider"))
-	if rf := r.k.AdmitSpend(2, "t1", "model", 41); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.k.AdmitSpend(2, "t1", 41); rf == nil || rf.Code != key.RSpendTask {
 		t.Fatalf("task cap: %v", rf)
 	}
-	if rf := r.k.AdmitSpend(2, "t2", "model", 91); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.k.AdmitSpend(2, "t2", 91); rf == nil || rf.Code != key.RSpendDay {
 		t.Fatalf("day cap: %v", rf)
 	}
-	if rf := r.k.AdmitSpend(2, "t2", "model", 90); rf != nil {
+	if rf := r.k.AdmitSpend(2, "t2", 90); rf != nil {
 		t.Fatal(rf)
 	}
-	if rf := r.k.AdmitSpend(2, "t2", "mail", 1); rf == nil || rf.Code != key.RClerk {
-		t.Fatalf("another clerk's call: %v", rf)
-	}
-	if rf := r.k.AdmitSpend(1+key.DayMS, "t3", "model", 100); rf != nil {
+	if rf := r.k.AdmitSpend(1+key.DayMS, "t3", 100); rf != nil {
 		t.Fatalf("rolling cap must free after a day: %v", rf)
 	}
 }
@@ -60,7 +57,7 @@ func TestUsageOverAnAdmissionIsStillRecorded(t *testing.T) {
 	r := newRig(t)
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	must(t, r.k.Meter(1, "t1", "api", 25, "clerk"))
-	if rf := r.k.AdmitSpend(2, "t1", "model", 1); rf == nil {
+	if rf := r.k.AdmitSpend(2, "t1", 1); rf == nil {
 		t.Fatal("recorded overrun must close the cap")
 	}
 	must(t, r.k.Cancel(3, "t1"))
@@ -79,10 +76,10 @@ func TestNegativeAmountsAreRefused(t *testing.T) {
 	if len(r.k.Log().Entries()) != n {
 		t.Fatal("a refused meter must leave no entry")
 	}
-	if rf := r.k.AdmitSpend(2, "t1", "model", -1); rf == nil || rf.Code != key.RMalformed {
+	if rf := r.k.AdmitSpend(2, "t1", -1); rf == nil || rf.Code != key.RMalformed {
 		t.Fatalf("a negative admission: %v", rf)
 	}
-	if rf := r.k.AdmitSpend(2, "t1", "model", 11); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.k.AdmitSpend(2, "t1", 11); rf == nil || rf.Code != key.RSpendTask {
 		t.Fatalf("the 90 stays spent: %v", rf)
 	}
 }
@@ -92,7 +89,7 @@ func TestMeteredUsageDoesNotTripStepCaps(t *testing.T) {
 	r := newRig(t)
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitUses(1), key.LimitRate(1), key.LimitSpendDay(100)))
 	must(t, r.k.Meter(1, "t1", "api", 5, "provider"))
-	if rf := r.k.AdmitSpend(2, "t1", "model", 5); rf != nil {
+	if rf := r.k.AdmitSpend(2, "t1", 5); rf != nil {
 		t.Fatalf("a model call is not a use: %v", rf)
 	}
 }
@@ -101,25 +98,25 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 	r := newRig(t)
 	k := modelKey(r, "m1", key.LimitSpendDay(100))
 	modelPlan(r, "t1", k)
-	if rf := r.k.AdmitSpend(1, "nope", "model", 1); rf == nil || rf.Code != kernel.CPlan {
+	if rf := r.k.AdmitSpend(1, "nope", 1); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("unknown plan: %v", rf)
 	}
 	if r.k.Meter(1, "nope", "api", 1, "clerk") == nil {
 		t.Fatal("an unknown plan must not be metered")
 	}
 	must(t, r.k.Cancel(2, "t1"))
-	if rf := r.k.AdmitSpend(3, "t1", "model", 1); rf == nil || rf.Code != kernel.CPlan {
+	if rf := r.k.AdmitSpend(3, "t1", 1); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("an ended plan spends nothing: %v", rf)
 	}
 	foreign := key.Issue(gen(9).priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
 	step := key.Step{Verb: key.Read, Clerk: "model", Args: map[string]key.Arg{"query": {Value: "q"}}}
 	must(t, r.k.Submit(4, kernel.Plan{ID: "t2", Key: foreign, Steps: []key.Step{step}}))
-	if rf := r.k.AdmitSpend(5, "t2", "model", 1); rf == nil {
+	if rf := r.k.AdmitSpend(5, "t2", 1); rf == nil {
 		t.Fatal("a plan on a foreign root must not spend")
 	}
 	modelPlan(r, "t3", k)
 	must(t, r.k.Stop(6))
-	if rf := r.k.AdmitSpend(7, "t3", "model", 1); rf == nil || rf.Code != key.RStopped {
+	if rf := r.k.AdmitSpend(7, "t3", 1); rf == nil || rf.Code != key.RStopped {
 		t.Fatalf("stop: %v", rf)
 	}
 }
@@ -129,7 +126,29 @@ func TestMeteredUsageSurvivesReplay(t *testing.T) {
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	must(t, r.k.Meter(1, "t1", "api", 70, "provider"))
 	r.boot(2)
-	if rf := r.k.AdmitSpend(3, "t1", "model", 31); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.k.AdmitSpend(3, "t1", 31); rf == nil || rf.Code != key.RSpendTask {
 		t.Fatalf("replayed ledger lost the usage: %v", rf)
+	}
+}
+
+// Spend is authorized by the funding key's spend caveat, not by the clerk the
+// key was issued for: a plan under a mail key makes a capped model call, and a
+// key with no spend cap funds nothing.
+func TestSpendFollowsTheFundingKeysCaveatWhateverItsClerk(t *testing.T) {
+	r := newRig(t)
+	step := key.Step{Verb: key.Trash, Clerk: "mail", Args: map[string]key.Arg{"target": {Value: "m1", Source: key.SrcOwner}}}
+	must(t, r.k.Submit(0, kernel.Plan{ID: "capped", Key: r.derive(key.LimitSpendTask(100)), Steps: []key.Step{step}}))
+	must(t, r.k.Submit(0, kernel.Plan{ID: "bare", Key: r.derive(key.LimitUses(5)), Steps: []key.Step{step}}))
+	if r.status("capped") != kernel.SActive || r.status("bare") != kernel.SActive {
+		t.Fatalf("plans: %s %s", r.status("capped"), r.status("bare"))
+	}
+	if rf := r.k.AdmitSpend(1, "capped", 100); rf != nil {
+		t.Fatalf("a mail key's spend cap funds a model call: %v", rf)
+	}
+	if rf := r.k.AdmitSpend(1, "capped", 101); rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("its cap holds: %v", rf)
+	}
+	if rf := r.k.AdmitSpend(1, "bare", 1); rf == nil || rf.Code != key.RMalformed {
+		t.Fatalf("a key with no spend cap funds nothing: %v", rf)
 	}
 }
