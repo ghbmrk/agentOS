@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,12 +30,13 @@ import (
 const canary = "canary-token-7731"
 
 type exitFix struct {
-	k    *kernel.Kernel
-	x    *clerk.Exit
-	srv  *httptest.Server
-	root key.Key
-	hits atomic.Int32
-	got  struct {
+	k     *kernel.Kernel
+	x     *clerk.Exit
+	srv   *httptest.Server
+	root  key.Key
+	hits  atomic.Int32
+	gotMu sync.Mutex // the server records concurrent requests
+	got   struct {
 		auth, idem, body, path, query, ctype string
 		header                               http.Header
 	}
@@ -114,10 +116,13 @@ func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), 
 	f := &exitFix{}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
-		f.inLog = f.k.Log().Len()
 		b, _ := io.ReadAll(r.Body)
+		f.gotMu.Lock()
+		f.inLog = f.k.Log().Len()
 		f.got.auth, f.got.idem, f.got.body, f.got.path = r.Header.Get("Authorization"), r.Header.Get("Idempotency-Key"), string(b), r.URL.EscapedPath()
 		f.got.query, f.got.ctype, f.got.header = r.URL.RawQuery, r.Header.Get("Content-Type"), r.Header.Clone()
+		f.gotMu.Unlock()
+		r.Body = io.NopCloser(strings.NewReader(string(b)))
 		if h != nil {
 			h(w, r)
 			return
