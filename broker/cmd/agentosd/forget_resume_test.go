@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,17 +125,16 @@ func TestForgetItem2ResumeWaitsForBootSetup(t *testing.T) {
 		r.f.agent.Store(nil)
 		ctx, cancel := context.WithCancel(context.Background())
 		rec := &fakeRecallOpen{}
-		dir := ""
-		if c.recall {
-			dir = "recall"
+		boot := newBootRecall(ctx, &learning{forgetOwner: r.f}, c.recall, rec, func(bool) {})
+		boot.open = func(context.Context, *modelroute.Verifier, recalltool.ServiceConfig, *recalltool.Late, *recalltool.LateExecutor) {
+			rec.Open()
 		}
-		boot := wireBootRecall(ctx, &learning{forgetOwner: r.f}, dir, modelroute.NewVerifier(t.TempDir()+"/verify.sock"), rec)
 		setup := func() {
 			r.f.gate.Store(gate)
 			if !c.noAgent {
 				r.withAgent(w)
 			}
-			boot.finish(rec.Open, func() {})
+			boot.finish(recalltool.ServiceConfig{}, nil)
 		}
 		if c.early {
 			r.f.Reconcile(ctx, item2, 1)
@@ -178,37 +178,31 @@ type fakeSwitch struct{ note func(string) }
 func (s *fakeSwitch) OnOpen(func()) { s.note("OnOpen") }
 func (s *fakeSwitch) Off()          { s.note("Off") }
 
-// JRN-startup-reconcile s3 (Security R1 and Potency PT1 on #1382, #2507):
-// bootRecall, driven with fakes, runs the boot's resume on both arms of
-// boot setup's end (JRN-s3-1): recall on, before recall opens, so the
-// boot's resume waits for the open; recall off, after the executor is
-// marked off and the capability marked unwired, so the owner is told
-// recall is off. Recall is on, and wireResume handed recall's own OnOpen,
-// exactly when recall has a directory and a verifier (JRN-s3-3). Wiring
-// runs none of them.
+// JRN-startup-reconcile s3 (Security R1 and Potency PT1 on #1382, #2507,
+// S1 S2 on #2513): bootRecall, driven with fakes, runs the boot's resume on
+// both arms of boot setup's end (JRN-s3-1): recall on, before recall opens
+// with finish's ServiceConfig and Late, so the boot's resume waits for the
+// open; recall off, after the executor is marked off and STATUS told
+// recall is not wired, so the owner is told recall is off. Wiring runs
+// none of them, and with recall on wireResume is handed recall's OnOpen.
 //
-// Brief JRN-startup-reconcile-s3: JRN-s3-1, JRN-s3-3 (subtest names).
+// Brief JRN-startup-reconcile-s3: JRN-s3-1 (subtest names).
 // REQ: CAP-3, OP-4
 func TestBootRecallFinishOrder(t *testing.T) {
-	v := modelroute.NewVerifier(t.TempDir() + "/verify.sock") // never dialled
 	on := []string{"boot", "OnOpen", "open"}
-	off := []string{"Off", "off", "boot"}
+	off := []string{"Off", "wired false", "boot"}
 	for _, c := range []struct {
 		name     string
-		dir      string
-		v        *modelroute.Verifier
 		learning bool
 		on       bool
 		want     []string
 	}{
-		{"recall on", "recall", v, true, true, on},
-		{"recall off with no directory", "", v, true, false, off},
-		{"recall off with no verifier", "recall", nil, true, false, off},
-		{"recall off with neither", "", nil, true, false, off},
-		{"recall on with no learning", "recall", v, false, true, []string{"open"}},
-		{"recall off with no learning", "", v, false, false, []string{"Off", "off"}},
+		{"recall on", true, true, on},
+		{"recall off", true, false, off},
+		{"recall on with no learning", false, true, []string{"open"}},
+		{"recall off with no learning", false, false, []string{"Off", "wired false"}},
 	} {
-		t.Run("JRN-s3-1 JRN-s3-3 "+c.name, func(t *testing.T) {
+		t.Run("JRN-s3-1 "+c.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var got []string
 			note := func(s string) {
@@ -223,10 +217,11 @@ func TestBootRecallFinishOrder(t *testing.T) {
 			if c.learning {
 				f = newForgetRig(t).f
 				lp = &learning{forgetOwner: f}
+				t.Cleanup(func() { waitIdle(f) }) // after cancel, before the rig's dirs go
 			}
-			b := wireBootRecall(ctx, lp, c.dir, c.v, &fakeSwitch{note: note})
-			if b.on != c.on {
-				t.Fatalf("recall on = %v, want %v", b.on, c.on)
+			b := newBootRecall(ctx, lp, c.on, &fakeSwitch{note: note}, func(on bool) { note(fmt.Sprintf("wired %v", on)) })
+			if b.on != c.on || b.ctx != ctx {
+				t.Fatalf("recall on = %v, ctx kept %v; want %v and true", b.on, b.ctx == ctx, c.on)
 			}
 			if f != nil && (f.noRecall == c.on || (f.whenOpen != nil) != c.on) {
 				t.Fatalf("wired noRecall %v, whenOpen set %v; want recall on = %v", f.noRecall, f.whenOpen != nil, c.on)
@@ -237,13 +232,32 @@ func TestBootRecallFinishOrder(t *testing.T) {
 			if boot := b.boot; boot != nil {
 				b.boot = func() { note("boot"); boot() }
 			}
+			v, exec := modelroute.NewVerifier(t.TempDir()+"/verify.sock"), &recalltool.LateExecutor{}
+			sc, late := recalltool.ServiceConfig{Dir: "recall"}, &recalltool.Late{}
+			b.v, b.exec = v, exec
+			opened := make(chan struct{})
+			b.open = func(octx context.Context, ov *modelroute.Verifier, osc recalltool.ServiceConfig, olate *recalltool.Late, oexec *recalltool.LateExecutor) {
+				if octx != ctx || ov != v || osc.Dir != sc.Dir || olate != late || oexec != exec {
+					t.Errorf("recall opened with ctx %v, verifier %v, dir %q, Late %v, executor %v; want finish's and the wire's",
+						octx == ctx, ov == v, osc.Dir, olate == late, oexec == exec)
+				}
+				note("open")
+				close(opened)
+			}
 			mu.Lock()
 			wired := len(got)
 			mu.Unlock()
 			if wired != 0 {
 				t.Fatalf("wiring ran %q", got)
 			}
-			b.finish(func() { note("open") }, func() { note("off") })
+			b.finish(sc, late)
+			if c.on {
+				select {
+				case <-opened:
+				case <-time.After(5 * time.Second):
+					t.Fatal("recall never opened")
+				}
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if strings.Join(got, " ") != strings.Join(c.want, " ") {
@@ -251,7 +265,53 @@ func TestBootRecallFinishOrder(t *testing.T) {
 			}
 		})
 	}
-	waitIdle(newForgetRig(t).f)
+}
+
+// wireBootRecall hands bootRecall recall's own pieces (S1 S2 on #2513):
+// recall is on exactly when it has a directory and a verifier
+// (JRN-s3-3); it opens through openRecall on that verifier and the
+// executor given, which is also the switch finish marks off; and with
+// recall off, finish's wired(false) puts recall's off line in STATUS.
+//
+// Brief JRN-startup-reconcile-s3: JRN-s3-3 (subtest names).
+// REQ: CAP-3, OP-4
+func TestWireBootRecallHandsRecallsOwn(t *testing.T) {
+	v := modelroute.NewVerifier(t.TempDir() + "/verify.sock") // never dialled
+	for _, c := range []struct {
+		name, dir string
+		v         *modelroute.Verifier
+		on        bool
+	}{
+		{"recall on", "recall", v, true},
+		{"recall off with no directory", "", v, false},
+		{"recall off with no verifier", "recall", nil, false},
+		{"recall off with neither", "", nil, false},
+	} {
+		t.Run("JRN-s3-3 "+c.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			exec, caps := &recalltool.LateExecutor{}, newCapState("")
+			f := newForgetRig(t).f
+			t.Cleanup(func() { waitIdle(f) })
+			b := wireBootRecall(ctx, &learning{forgetOwner: f}, c.dir, c.v, exec, caps)
+			if b.on != c.on || f.noRecall == c.on || (f.whenOpen != nil) != c.on {
+				t.Errorf("recall on = %v, wired noRecall %v, whenOpen set %v; want recall on = %v", b.on, f.noRecall, f.whenOpen != nil, c.on)
+			}
+			if b.ex != recallSwitch(exec) || b.exec != exec || b.v != c.v || b.ctx != ctx || b.boot == nil {
+				t.Errorf("switch %v, executor %v, verifier %v, ctx %v, boot's resume %v kept; want all", b.ex == recallSwitch(exec), b.exec == exec, b.v == c.v, b.ctx == ctx, b.boot != nil)
+			}
+			if b.open == nil || reflect.ValueOf(b.open).Pointer() != reflect.ValueOf(openRecall).Pointer() {
+				t.Error("recall does not open through openRecall")
+			}
+			if caps.recallLine() != "" {
+				t.Fatalf("STATUS says %q before boot setup's end", caps.recallLine())
+			}
+			b.wired(false)
+			if caps.recallLine() != recallOffLine {
+				t.Errorf("wired(false): STATUS says %q, want %q", caps.recallLine(), recallOffLine)
+			}
+		})
+	}
 }
 
 // main wires FORGET's boot resume through bootRecall alone: one
@@ -262,14 +322,26 @@ func TestBootRecallFinishOrder(t *testing.T) {
 // listed requirements, and the real source must pass. TestBootRecallFinishOrder
 // checks what bootRecall does; this checks only where main calls it.
 //   - JRN-s3-1: finish dropped, run twice, in a goroutine, a dead branch,
-//     or through a copy; wireBootRecall called twice (Q1..Q5, W2).
+//     a branch on runsc, or through a copy; wireBootRecall called twice
+//     (Q1..Q5, S14, W2).
 //   - JRN-s3-2: finish before daemon.Run or before lp.attach, or the wire
 //     after daemon.Run (R1, R1b, W1); lp.attach or the agent Store not run
 //     in place, on another receiver, or through a copy (R2..R7, X1..X4);
-//     lp reassigned or lp.forgetOwner replaced (P4, M).
+//     lp reassigned or lp.forgetOwner replaced (P4, M); the resume reached
+//     by another path: resumeAgent or whenOpen called from main (S3, S3b).
 //   - JRN-s3-3: recall's inputs not main's own: a constant, a fresh
-//     executor, recallDir or verifier rewritten, or wireResume called
-//     outside wireBootRecall (A1..A4, P3, W3).
+//     executor or capState, recallDir or verifier rewritten, finish given
+//     another ServiceConfig or Late, or wireResume called outside
+//     wireBootRecall (A1..A8, P3, W3); recall opened, switched off or told
+//     STATUS by another path: openRecall, recallWired, recallOff, or the
+//     executor's Off or OnOpen reached from main (S1, S2, S2b, S13..S13c).
+//     R1 (an early finish) also breaks JRN-s3-3: its config is not main's.
+//
+// The reach check: openRecall, recallWired and newBootRecall are reached
+// only from wireBootRecall; Off and OnOpen only from newBootRecall and
+// finish; recallOff only from capState's methods; resumeAgent and the
+// resume and whenOpen fields only from ownerForget's methods; and
+// bootRecall's fields are set only by newBootRecall and wireBootRecall.
 //   - F1, F2: a goto, or a return between the wire and a call it vouches
 //     for. main may hold neither.
 //
@@ -287,9 +359,9 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 			t.Error(bad)
 		}
 	})
-	wire := "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec)\n"
+	wire := "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec, caps)\n"
 	run := "\td, err := daemon.Run(ctx, cfg)\n"
-	finish := "\tforgetBoot.finish(func() { go openRecall(ctx, verifier, recallCfg, recallTools, recallExec) },\n\t\tfunc() { caps.recallWired(false) })\n"
+	finish := "\tforgetBoot.finish(recallCfg, recallTools)\n"
 	attach := "\t\tlp.attach(ctx, d)\n"
 	store := "\t\t\t\tlp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,\n\t\t\t\t\tlineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})\n"
 	attachIf := "\tif lp != nil {\n" + attach
@@ -297,7 +369,8 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		name, req string
 		edits     []string // old, new pairs
 	}{
-		{"R1 finish before daemon.Run", "JRN-s3-2", []string{finish, "", run, "\tforgetBoot.finish(func() {}, func() { caps.recallWired(false) })\n" + run}},
+		// recallCfg is set after daemon.Run, so the early finish cannot be given it.
+		{"R1 finish before daemon.Run", "JRN-s3-2 JRN-s3-3", []string{finish, "", run, "\tforgetBoot.finish(recalltool.ServiceConfig{}, recallTools)\n" + run}},
 		{"R1b finish before lp.attach", "JRN-s3-2", []string{finish, "", attachIf, finish + attachIf}},
 		{"W1 wired after daemon.Run", "JRN-s3-2", []string{wire + run, run + wire}},
 		{"R2 lp.attach in its own goroutine", "JRN-s3-2", []string{attach, "\t\tgo lp.attach(ctx, d)\n"}},
@@ -317,13 +390,26 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		{"Q3 finish in a dead branch", "JRN-s3-1", []string{finish, "\tif false {\n" + finish + "\t}\n"}},
 		{"Q4 finish through a copy", "JRN-s3-1", []string{finish, "\tfb := forgetBoot\n\tfb." + finish[len("\tforgetBoot."):]}},
 		{"Q5 finish twice", "JRN-s3-1", []string{finish, finish + finish}},
-		{"W2 wired twice", "JRN-s3-1", []string{wire, "\t_ = wireBootRecall(ctx, lp, recallDir, verifier, recallExec)\n" + wire}},
+		{"W2 wired twice", "JRN-s3-1", []string{wire, "\t_ = wireBootRecall(ctx, lp, recallDir, verifier, recallExec, caps)\n" + wire}},
+		{"S14 finish in a branch", "JRN-s3-1", []string{finish, "\tif runsc != \"\" {\n\t" + finish + "\t}\n"}},
 		{"W3 wireResume called in main", "JRN-s3-3", []string{wire, wire + "\tif lp != nil {\n\t\t_ = lp.forgetOwner.wireResume(ctx, nil)\n\t}\n"}},
-		{"A1 recall's directory a constant", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, \"\", verifier, recallExec)\n"}},
-		{"A2 recall's verifier nil", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, nil, recallExec)\n"}},
-		{"A3 a fresh executor", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, &recalltool.LateExecutor{})\n"}},
+		{"A1 recall's directory a constant", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, \"\", verifier, recallExec, caps)\n"}},
+		{"A2 recall's verifier nil", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, nil, recallExec, caps)\n"}},
+		{"A3 a fresh executor", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, &recalltool.LateExecutor{}, caps)\n"}},
 		{"A4 recallDir set before the wire", "JRN-s3-3", []string{wire, "\trecallDir = \"on\"\n" + wire}},
 		{"P3 verifier reassigned", "JRN-s3-3", []string{wire, "\tverifier = nil\n" + wire}},
+		{"A5 recall's STATUS on fresh caps", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec, newCapState(\"\"))\n"}},
+		{"A6 finish given an empty ServiceConfig", "JRN-s3-3", []string{finish, "\tforgetBoot.finish(recalltool.ServiceConfig{}, recallTools)\n"}},
+		{"A7 finish given a fresh Late", "JRN-s3-3", []string{finish, "\tforgetBoot.finish(recallCfg, &recalltool.Late{})\n"}},
+		{"A8 recallCfg reassigned", "JRN-s3-3", []string{finish, "\trecallCfg = recalltool.ServiceConfig{}\n" + finish}},
+		{"S1 openRecall called in main", "JRN-s3-3", []string{finish, "\tgo openRecall(ctx, verifier, recallCfg, recallTools, recallExec)\n" + finish}},
+		{"S2 recall's STATUS switched in main", "JRN-s3-3", []string{finish, "\tcaps.recallWired(false)\n" + finish}},
+		{"S2b recall's STATUS field set in main", "JRN-s3-3", []string{finish, "\tcaps.recallOff.Store(true)\n" + finish}},
+		{"S13 executor marked off in main", "JRN-s3-3", []string{run, "\trecallExec.Off()\n" + run}},
+		{"S13b executor marked off through recallSwitch", "JRN-s3-3", []string{run, "\trecallSwitch(recallExec).Off()\n" + run}},
+		{"S13c OnOpen registered in main", "JRN-s3-3", []string{run, "\trecallExec.OnOpen(func() {})\n" + run}},
+		{"S3 resumeAgent started in main", "JRN-s3-2", []string{run, "\tif lp != nil {\n\t\tgo lp.forgetOwner.resumeAgent(ctx)\n\t}\n" + run}},
+		{"S3b whenOpen run in main", "JRN-s3-2", []string{run, "\tif lp != nil && lp.forgetOwner.whenOpen != nil {\n\t\tlp.forgetOwner.whenOpen()\n\t}\n" + run}},
 		{"F1 goto past lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tgoto attached\n" + attach + "\tattached:\n"}},
 		{"F2 return before lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tif ctx.Err() != nil {\n\t\t\treturn\n\t\t}\n" + attach}},
 	} {
@@ -415,35 +501,80 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 		m, _, _ := types.LookupFieldOrMethod(types.NewPointer(o.Type()), false, pkg, name)
 		return m
 	}
-	wireBoot := pkg.Scope().Lookup("wireBootRecall")
+	wireBoot, newBoot := pkg.Scope().Lookup("wireBootRecall"), pkg.Scope().Lookup("newBootRecall")
 	finishFn, wireFn := member("bootRecall", "finish"), member("ownerForget", "wireResume")
 	ownerField, attachFn, agentField := member("learning", "forgetOwner"), member("learning", "attach"), member("ownerForget", "agent")
 	// Each field the wiring sets, and the one function that may set it.
 	setter := map[types.Object]string{}
 	for _, f := range []struct{ typ, field, fn string }{
 		{"ownerForget", "resume", "wireResume"}, {"ownerForget", "whenOpen", "wireResume"}, {"ownerForget", "noRecall", "wireResume"},
-		{"bootRecall", "on", "wireBootRecall"}, {"bootRecall", "ex", "wireBootRecall"}, {"bootRecall", "boot", "wireBootRecall"},
+		{"bootRecall", "on", "newBootRecall"}, {"bootRecall", "ex", "newBootRecall"}, {"bootRecall", "boot", "newBootRecall"},
+		{"bootRecall", "ctx", "newBootRecall"}, {"bootRecall", "wired", "newBootRecall"},
+		{"bootRecall", "open", "wireBootRecall"}, {"bootRecall", "v", "wireBootRecall"}, {"bootRecall", "exec", "wireBootRecall"},
 	} {
 		if o := member(f.typ, f.field); o != nil {
 			setter[o] = f.fn
 		}
 	}
-	if wireBoot == nil || finishFn == nil || wireFn == nil || ownerField == nil || attachFn == nil || agentField == nil || len(setter) != 6 {
-		return append(bad, "wiring: no wireBootRecall, bootRecall.finish or its fields, ownerForget.wireResume, .agent or its resume fields, or learning.forgetOwner or .attach")
+	bootType := pkg.Scope().Lookup("bootRecall")
+	// What starts or opens recall, marks it off or says so in STATUS, or
+	// runs the FORGET resume, and the functions (by name) or receiver
+	// types (by "*" and name) that alone may reach it (S1 S2 S3 S13 on
+	// #2513). Off and OnOpen go by name: an interface of main's own may
+	// carry them.
+	reach := map[types.Object]string{}
+	for _, r := range []struct{ typ, name, req, from string }{
+		{"", "openRecall", "JRN-s3-3", "wireBootRecall"},
+		{"capState", "recallWired", "JRN-s3-3", "wireBootRecall"},
+		{"capState", "recallOff", "JRN-s3-3", "*capState"},
+		{"ownerForget", "resumeAgent", "JRN-s3-2", "*ownerForget"},
+		{"ownerForget", "resume", "JRN-s3-2", "*ownerForget"},
+		{"ownerForget", "whenOpen", "JRN-s3-2", "*ownerForget"},
+		{"", "newBootRecall", "JRN-s3-3", "wireBootRecall"},
+	} {
+		o := pkg.Scope().Lookup(r.name)
+		if r.typ != "" {
+			o = member(r.typ, r.name)
+		}
+		if o != nil {
+			reach[o] = r.req + " " + r.from
+		}
+	}
+	if wireBoot == nil || newBoot == nil || finishFn == nil || wireFn == nil || ownerField == nil || attachFn == nil || agentField == nil ||
+		bootType == nil || len(setter) != 11 || len(reach) != 7 {
+		return append(bad, "wiring: no wireBootRecall, newBootRecall, bootRecall.finish or its fields, ownerForget.wireResume, .agent or its resume fields, learning.forgetOwner or .attach, or what recall opens and switches through")
 	}
 
-	// Package-wide: those fields are set only by their setter, wireResume
-	// is reached only from wireBootRecall, and wireBootRecall is reached
-	// once.
+	// Package-wide: those fields are set only by their setter, bootRecall
+	// built only by newBootRecall, wireResume reached only from
+	// newBootRecall, each reach entry only from its own, Off and OnOpen
+	// only from newBootRecall and finish, and wireBootRecall reached once.
 	wireBoots := 0
 	for _, f := range files {
 		for _, d := range f.Decls {
-			in := ""
+			in, recv := "", ""
 			if fn, ok := d.(*ast.FuncDecl); ok {
 				in = fn.Name.Name
+				if fn.Recv != nil && len(fn.Recv.List) == 1 {
+					t := fn.Recv.List[0].Type
+					if st, ok := t.(*ast.StarExpr); ok {
+						t = st.X
+					}
+					if id, ok := t.(*ast.Ident); ok {
+						recv = "*" + id.Name
+					}
+				}
 			}
 			ast.Inspect(d, func(n ast.Node) bool {
 				switch n := n.(type) {
+				case *ast.CompositeLit:
+					if tv, ok := info.Types[n]; ok && types.Identical(tv.Type, bootType.Type()) && in != "newBootRecall" {
+						bad = append(bad, fmt.Sprintf("wiring: %s: bootRecall built outside newBootRecall", fset.Position(n.Pos())))
+					}
+				case *ast.SelectorExpr:
+					if (n.Sel.Name == "Off" || n.Sel.Name == "OnOpen") && in != "newBootRecall" && in != "finish" {
+						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: %s reached outside newBootRecall and bootRecall.finish", fset.Position(n.Pos()), n.Sel.Name))
+					}
 				case *ast.AssignStmt:
 					for _, l := range n.Lhs {
 						if s, ok := ast.Unparen(l).(*ast.SelectorExpr); ok && info.Selections[s] != nil {
@@ -453,8 +584,13 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 						}
 					}
 				case *ast.Ident:
-					if info.Uses[n] == wireFn && in != "wireBootRecall" {
-						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume reached outside wireBootRecall", fset.Position(n.Pos())))
+					if info.Uses[n] == wireFn && in != "newBootRecall" {
+						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume reached outside newBootRecall", fset.Position(n.Pos())))
+					}
+					if r, ok := reach[info.Uses[n]]; ok {
+						if req, from, _ := strings.Cut(r, " "); from != in && from != recv {
+							bad = append(bad, fmt.Sprintf("%s: %s: %s reached outside %s", req, fset.Position(n.Pos()), n.Name, from))
+						}
 					}
 					if info.Uses[n] == wireBoot {
 						wireBoots++
@@ -520,6 +656,22 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 		{"lp", "JRN-s3-2", "openLearning", func(e ast.Expr) bool {
 			o := pkg.Scope().Lookup("openLearning")
 			return o != nil && callee(info, e) == o
+		}},
+		{"caps", "JRN-s3-3", "newCapState", func(e ast.Expr) bool {
+			o := pkg.Scope().Lookup("newCapState")
+			return o != nil && callee(info, e) == o
+		}},
+		{"recallCfg", "JRN-s3-3", "recalltool.ServiceConfig{...}", func(e ast.Expr) bool {
+			c, ok := e.(*ast.CompositeLit)
+			return ok && isRecallType(info.TypeOf(c), "ServiceConfig")
+		}},
+		{"recallTools", "JRN-s3-3", "&recalltool.Late{}", func(e ast.Expr) bool {
+			u, ok := e.(*ast.UnaryExpr)
+			if !ok || u.Op != token.AND {
+				return false
+			}
+			c, ok := u.X.(*ast.CompositeLit)
+			return ok && len(c.Elts) == 0 && isRecallType(info.TypeOf(c), "Late")
 		}},
 		{"forgetBoot", "JRN-s3-1", "wireBootRecall", func(e ast.Expr) bool { return callee(info, e) == wireBoot }},
 	} {
@@ -650,6 +802,10 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 	if why := placed(fin); why != "" {
 		bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: finish does not run in place: %s", fset.Position(fin.Pos()), why))
 	}
+	// Under no condition at all (S14 on #2513): a statement of main's body.
+	if st, ok := parent[fin].(*ast.ExprStmt); !ok || parent[st] != mainFn.Body {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: finish is not a statement of main's body", fset.Position(fin.Pos())))
+	}
 
 	// JRN-s3-2: lp.attach and lp.forgetOwner.agent.Store each run in place
 	// in a statement of main's body before finish's.
@@ -672,15 +828,25 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 	}
 
 	// JRN-s3-3: the wire hands bootRecall main's own lp, recallDir,
-	// verifier and recallExec.
+	// verifier, recallExec and caps, and finish main's recallCfg and
+	// recallTools.
 	if a, ok := wire.(*ast.AssignStmt); ok && len(a.Rhs) == 1 {
 		c, _ := ast.Unparen(a.Rhs[0]).(*ast.CallExpr)
-		if c == nil || len(c.Args) != 5 || !isObj(info, c.Args[1], lp) || !isObj(info, c.Args[2], obj["recallDir"]) ||
-			!isObj(info, c.Args[3], obj["verifier"]) || !isObj(info, c.Args[4], obj["recallExec"]) {
-			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: the wire is not given main's lp, recallDir, verifier and recallExec", fset.Position(wire.Pos())))
+		if c == nil || len(c.Args) != 6 || !isObj(info, c.Args[1], lp) || !isObj(info, c.Args[2], obj["recallDir"]) ||
+			!isObj(info, c.Args[3], obj["verifier"]) || !isObj(info, c.Args[4], obj["recallExec"]) || !isObj(info, c.Args[5], obj["caps"]) {
+			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: the wire is not given main's lp, recallDir, verifier, recallExec and caps", fset.Position(wire.Pos())))
 		}
 	}
+	if len(fin.Args) != 2 || !isObj(info, fin.Args[0], obj["recallCfg"]) || !isObj(info, fin.Args[1], obj["recallTools"]) {
+		bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: finish is not given main's recallCfg and recallTools", fset.Position(fin.Pos())))
+	}
 	return bad
+}
+
+// isRecallType reports whether t is recalltool's type of that name.
+func isRecallType(t types.Type, name string) bool {
+	n, ok := t.(*types.Named)
+	return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "github.com/ghbmrk/agentos/broker/recalltool" && n.Obj().Name() == name
 }
 
 // isDef reports whether e, unparenthesised, is the identifier defining obj.

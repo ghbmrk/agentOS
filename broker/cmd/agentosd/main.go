@@ -355,6 +355,13 @@ type bootRecall struct {
 	on   bool
 	ex   recallSwitch
 	boot func()
+	// Recall opens as open(ctx, v, sc, late, exec), sc and late given to
+	// finish; with recall off, wired(false) tells STATUS (capState).
+	open  func(context.Context, *modelroute.Verifier, recalltool.ServiceConfig, *recalltool.Late, *recalltool.LateExecutor)
+	ctx   context.Context
+	v     *modelroute.Verifier
+	exec  *recalltool.LateExecutor
+	wired func(bool)
 }
 
 // recallSwitch is what boot setup uses of recall's LateExecutor.
@@ -364,9 +371,18 @@ type recallSwitch interface {
 }
 
 // wireBootRecall wires lp's FORGET resume (none when lp is nil) to recall's
-// open when recall is on, else to the end of boot setup.
-func wireBootRecall(ctx context.Context, lp *learning, dir string, v *modelroute.Verifier, ex recallSwitch) bootRecall {
-	b := bootRecall{on: dir != "" && v != nil, ex: ex}
+// open when recall is on, else to the end of boot setup. Recall opens
+// through openRecall on ex; with recall off, caps says so.
+func wireBootRecall(ctx context.Context, lp *learning, dir string, v *modelroute.Verifier, ex *recalltool.LateExecutor, caps *capState) bootRecall {
+	b := newBootRecall(ctx, lp, dir != "" && v != nil, ex, caps.recallWired)
+	b.open, b.v, b.exec = openRecall, v, ex
+	return b
+}
+
+// newBootRecall is wireBootRecall with recall's executor and its STATUS
+// switch given, and no open, so a test drives finish with fakes.
+func newBootRecall(ctx context.Context, lp *learning, on bool, ex recallSwitch, wired func(bool)) bootRecall {
+	b := bootRecall{on: on, ex: ex, ctx: ctx, wired: wired}
 	if lp != nil {
 		var onOpen func(func())
 		if b.on {
@@ -377,18 +393,19 @@ func wireBootRecall(ctx context.Context, lp *learning, dir string, v *modelroute
 	return b
 }
 
-// finish ends boot setup: recall on, the boot's resume then open; recall
-// off, the executor marked off, then off, then the boot's resume.
-func (b bootRecall) finish(open, off func()) {
+// finish ends boot setup: recall on, the boot's resume then recall opens
+// with sc and late; recall off, the executor marked off, then STATUS told,
+// then the boot's resume.
+func (b bootRecall) finish(sc recalltool.ServiceConfig, late *recalltool.Late) {
 	if !b.on {
 		b.ex.Off()
-		off()
+		b.wired(false)
 	}
 	if b.boot != nil {
 		b.boot()
 	}
 	if b.on {
-		open()
+		go b.open(b.ctx, b.v, sc, late, b.exec)
 	}
 }
 
@@ -856,7 +873,7 @@ func main() {
 	steps := newStepNotes(&cfg.Notes)
 	// Wired before the daemon serves the owner and starts reconcile;
 	// finished at the end of boot setup (bootRecall).
-	forgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec)
+	forgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec, caps)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -1015,8 +1032,7 @@ func main() {
 	}
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
-	forgetBoot.finish(func() { go openRecall(ctx, verifier, recallCfg, recallTools, recallExec) },
-		func() { caps.recallWired(false) })
+	forgetBoot.finish(recallCfg, recallTools)
 	if line != nil {
 		go line.run(ctx)
 	}

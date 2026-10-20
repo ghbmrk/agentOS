@@ -11,11 +11,12 @@ Board section: Security and architecture review (2026-10-08). Work item: #1410. 
 **Requirements:**
 - JRN-s3-1: `bootRecall.finish` runs the boot resume whether recall is on or off, and main calls `wireBootRecall` and `finish` exactly once each (kills Q1, Q2).
 - JRN-s3-2: main wires before `daemon.Run` and calls `finish` after `daemon.Run`, `lp.attach` and `lp.forgetOwner.agent.Store`, on those exact receivers (kills R1).
-- JRN-s3-3: recall counts as on only when both `recallDir` and the verifier are set; then `wireResume` gets `recallExec.OnOpen`, and otherwise nil plus `recallExec.Off()` (kills Q3).
+- JRN-s3-3: recall counts as on only when both `recallDir` and the verifier are set; then `wireResume` gets `recallExec.OnOpen` and `finish` opens recall through `openRecall` with main's config and tools, and otherwise nil plus `recallExec.Off()` and `recallWired(false)` (kills Q3). Main reaches recall's open, off, STATUS line and FORGET's resume only through `wireBootRecall` and `finish`.
 - JRN-s3-4: the production wiring in `main.go` passes all three.
 
 **Acceptance tests:** (REQ: JRN-s3-1..4)
-- `broker/cmd/agentosd/forget_resume_test.go::TestBootRecallFinishOrder`: drives `wireBootRecall` and `finish` with fakes, recall on and off, with and without learning, and asserts the call sequence (JRN-s3-1, JRN-s3-3).
+- `broker/cmd/agentosd/forget_resume_test.go::TestBootRecallFinishOrder`: drives `newBootRecall` and `finish` with fakes, recall on and off, with and without learning, and asserts the call sequence (JRN-s3-1).
+- `broker/cmd/agentosd/forget_resume_test.go::TestWireBootRecallHandsRecallsOwn`: `wireBootRecall` hands bootRecall main's executor, verifier, `openRecall` and `capState.recallWired` (JRN-s3-3).
 - `broker/cmd/agentosd/forget_resume_test.go::TestForgetResumeIsWiredOnlyThroughWireResume`: the real `main.go` passes, and each mutated copy fails only its listed requirement (JRN-s3-1..4).
 
 **Out of scope.** s4, s5 and r3 of #1382 (their issues are closed).
