@@ -248,13 +248,13 @@ class ListTest(unittest.TestCase):
                   "broker/sendrules/x.go", "broker/attention/x.go", "broker/floor/x.go",
                   "broker/probecmd/x.go", "broker/cmd/agentos-builder/main.go",
                   "broker/cmd/agentos-a8scan/main.go", "guest/builder/x", "spikes/S10-pact/x",
-                  "evals/review/x", "broker/newpkg/x.go", "newdir/x"):
+                  "evals/review/x", "broker/newpkg/x.go", "broker/projection/x.go", "newdir/x"):
             self.assertFalse(g.check([p], G2_LIST, gate=G2)[0], p)
         for p in ("broker/localui/x.go", "broker/cmd/agentosd/main.go", "image/build.sh",
                   "guest/openclaw/x", "guest/codex/x", "spikes/CTRL-spike/x", "spikes/S8-live/x",
                   "tools/g1_scope_g2.txt", "SPEC.md", "broker/provagent/x.go",
                   "broker/route/route.go", "broker/route/anthropic.go", "broker/voice/v.go",
-                  "broker/browser/x.go", "broker/recall/x.go", "broker/projection/x.go",
+                  "broker/browser/x.go", "broker/recall/x.go",
                   "broker/holder/x.go", "broker/cmd/agentos-holder/main.go",
                   "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh",
                   "broker/photo/x.go", "broker/cmd/agentos-photo/main.go"):

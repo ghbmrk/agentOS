@@ -104,6 +104,15 @@ func setupExit(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) *ex
 	return f
 }
 
+// planStep is s as a plan carries it; the kernel derives the rest.
+func planStep(s key.Step) kernel.PlanStep {
+	args := map[string]string{}
+	for n, a := range s.Args {
+		args[n] = a.Value
+	}
+	return kernel.PlanStep{Verb: s.Verb, Clerk: s.Clerk, Args: args, Content: s.Content, Labels: s.Labels}
+}
+
 func (f *exitFix) req(verb key.Verb, idem string, args map[string]string) kernel.Request {
 	s := key.Step{Verb: verb, Clerk: "web", Task: "t", Args: map[string]key.Arg{}}
 	for n, v := range args {
@@ -250,7 +259,7 @@ func TestNewExitRejectsUnsafeDeclarations(t *testing.T) {
 func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 	f := setupExit(t, nil)
 	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []key.Step{step}}); err != nil {
+	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.k.Tick(0); err != nil {
@@ -281,7 +290,7 @@ func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 func TestExitDispatchIsLoggedBeforeTheRequestLeaves(t *testing.T) {
 	f := setupExit(t, nil)
 	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []key.Step{step}}); err != nil {
+	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
 		t.Fatal(err)
 	}
 	before := f.k.Log().Len()
