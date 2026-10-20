@@ -1,6 +1,7 @@
 """Pins the permissions block of .claude/settings.json (OPERATING §7).
 
 The allow rules only save a permission ask; the required premerge status is the merge gate.
+.claude/hooks/gh_shape.py holds each gh rule to its exact shape (tests/test_gh_shape_hook.py).
 Any change to the block, wider or not, fails here and so needs its own reviewed PR.
 """
 import json
@@ -16,6 +17,8 @@ PERMISSIONS = {
         "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge -f merge_method=merge)",
         "Bash(gh api -X DELETE repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge)",
         "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
+        "Bash(gh api -X POST repos/ghbmrk/agentOS/issues/*/labels -f labels[]=*)",
+        "Bash(gh api -X DELETE repos/ghbmrk/agentOS/issues/*/labels/*)",
     ]
 }
 
