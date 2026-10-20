@@ -24,7 +24,8 @@ func sealer(t *testing.T) clerk.Sealer {
 }
 
 func TestSecretsSealedAtRestAndRoundTrip(t *testing.T) {
-	s := clerk.NewSecrets(sealer(t))
+	sl := sealer(t)
+	s := clerk.NewSecrets(sl)
 	canary := []byte("canary-secret-0001")
 	if err := s.Put("mail", canary); err != nil {
 		t.Fatal(err)
@@ -36,7 +37,7 @@ func TestSecretsSealedAtRestAndRoundTrip(t *testing.T) {
 	if bytes.Contains(blob, canary) {
 		t.Fatal("secret is in the stored bytes in the clear")
 	}
-	s2 := clerk.NewSecrets(s.Sealer())
+	s2 := clerk.NewSecrets(sl)
 	if err := s2.UnmarshalBinary(blob); err != nil {
 		t.Fatal(err)
 	}

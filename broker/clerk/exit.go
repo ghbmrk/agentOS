@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,23 +76,23 @@ func (x *Exit) declare(op Op) error {
 	if op.Method == "" || strings.ContainsAny(op.Method, " \t\r\n") {
 		return errors.New("clerk: bad method")
 	}
-	u, err := url.Parse(slotRE.ReplaceAllString(op.URL, "x"))
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	u, err := url.Parse(op.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Opaque != "" {
 		return errors.New("clerk: an op needs a plain https URL")
 	}
-	if strings.ContainsAny(strings.SplitN(strings.TrimPrefix(op.URL, "https://"), "/", 2)[0], "{}") {
-		return errors.New("clerk: the host cannot be templated")
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(u.Host, "{}") {
+		return errors.New("clerk: slots belong in the path only")
 	}
 	names := key.ArgNames(op.Verb)
-	have := func(n string) bool {
-		for _, a := range names {
-			if a == n {
-				return true
-			}
+	have := func(n string) bool { return slices.Contains(names, n) }
+	for _, seg := range strings.Split(u.Path, "/") {
+		if !strings.ContainsAny(seg, "{}") {
+			continue
 		}
-		return false
-	}
-	for _, m := range slotRE.FindAllStringSubmatch(op.URL, -1) {
+		m := slotRE.FindStringSubmatch(seg)
+		if m == nil || m[0] != seg {
+			return errors.New("clerk: a slot must be a whole path segment")
+		}
 		if !have(m[1]) {
 			return fmt.Errorf("clerk: %s has no argument %q", op.Verb, m[1])
 		}
@@ -161,20 +162,18 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 }
 
 func (x *Exit) build(op Op, r kernel.Request) (*http.Request, error) {
+	// Check has already matched the arguments to the declaration exactly.
 	args := r.Step.Args
-	if len(args) != len(key.ArgNames(op.Verb)) {
-		return nil, errors.New("arguments differ from the declaration")
-	}
-	var bad string
+	var bad bool
 	target := slotRE.ReplaceAllStringFunc(op.URL, func(m string) string {
-		a, ok := args[m[1:len(m)-1]]
-		if !ok {
-			bad = m
+		v := args[m[1:len(m)-1]].Value
+		if v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
+			bad = true
 		}
-		return url.PathEscape(a.Value)
+		return url.PathEscape(v)
 	})
-	if bad != "" {
-		return nil, errors.New("missing argument " + bad)
+	if bad {
+		return nil, errors.New("argument cannot fill a path segment")
 	}
 	var body io.Reader
 	if op.Body != "" {
@@ -216,13 +215,13 @@ func (x *Exit) send(req *http.Request, idem string, secret []byte) kernel.Result
 func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	switch x.state[r.Idem] {
-	case "done":
+	// Never "notdone": after a restart this memory is empty, and the kernel
+	// marks every in-flight step unknown, so a clerk that cannot say the step
+	// was never sent must not invite a resend (KRN-8).
+	if x.state[r.Idem] == "done" {
 		return "done"
-	case "unknown":
-		return "unknown"
 	}
-	return "notdone"
+	return "unknown"
 }
 
 // redact removes the secret, raw and URL-escaped, from text that may be

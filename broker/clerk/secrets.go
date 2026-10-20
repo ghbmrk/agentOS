@@ -60,9 +60,6 @@ type Secrets struct {
 
 func NewSecrets(s Sealer) *Secrets { return &Secrets{s: s, m: map[string][]byte{}} }
 
-// Sealer returns the sealer, so a store can be reopened from its bytes.
-func (s *Secrets) Sealer() Sealer { return s.s }
-
 // slotAAD binds a blob to its slot name, so slots cannot be swapped.
 func slotAAD(slot string) []byte { return []byte("agentos/clerk/slot/" + slot) }
 
