@@ -34,8 +34,10 @@ func root(t *testing.T) (kp, kp, Key) {
 	return owner, holder, k
 }
 
-func verified(t *testing.T, k Key, owner kp) *Verified {
-	v, err := Verify(k, owner.pub)
+// verified is a use of k by its holder: the only way to a Verified.
+func verified(t *testing.T, k Key, owner, holder kp) *Verified {
+	use := []byte("use")
+	v, err := Verify(k, owner.pub, use, Sign(k, holder.priv, use))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +54,7 @@ func step(v Verb) Step {
 
 func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 	o, _, k := root(t)
-	v := verified(t, k, o)
+	v := verified(t, k, o, gen(2))
 	if r := v.Authorize(step(Trash), ctx(1, nil)); r != nil {
 		t.Fatal(r)
 	}
@@ -68,12 +70,12 @@ func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 
 func TestWrongOwnerAndBadSig(t *testing.T) {
 	o, h, k := root(t)
-	if _, err := Verify(k, gen(9).pub); !errors.Is(err, ErrWrongOwner) {
+	if err := CheckChain(k, gen(9).pub); !errors.Is(err, ErrWrongOwner) {
 		t.Fatal(err)
 	}
 	bad := k
 	bad.Root.Clerk = "bank"
-	if _, err := Verify(bad, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(bad, o.pub); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered root: %v", err)
 	}
 	d, err := Derive(k, h.priv, gen(3).pub, LimitVerbs(Trash))
@@ -81,7 +83,7 @@ func TestWrongOwnerAndBadSig(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Links[0].Caveats[0] = LimitVerbs(Trash, Organize)
-	if _, err := Verify(d, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(d, o.pub); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered link: %v", err)
 	}
 }
@@ -94,7 +96,7 @@ func TestDomainsDoNotCross(t *testing.T) {
 	}
 	sig := ed25519.Sign(o.priv, append([]byte(DomainLink), rootBody(k.Root)...))
 	k.Root.Sig = sig
-	if _, err := Verify(k, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(k, o.pub); !errors.Is(err, ErrBadSig) {
 		t.Fatal(err)
 	}
 }
@@ -106,7 +108,7 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := verified(t, d, o).Authorize(step(Unsubscribe), ctx(1, nil)); r == nil || r.Code != RVerb {
+	if r := verified(t, d, o, gen(3)).Authorize(step(Unsubscribe), ctx(1, nil)); r == nil || r.Code != RVerb {
 		t.Fatalf("narrowed verb: %v", r)
 	}
 	if _, err := Derive(d, h2.priv, gen(4).pub, LimitVerbs(Trash, Send)); !errors.Is(err, ErrLoosens) {
@@ -117,14 +119,14 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 	}
 	// A hostile holder signs a loosening link directly; Verify rejects it.
 	e := Extend(d, h2.priv, Link{Caveats: []Caveat{LimitVerbs(Trash, Organize, Unsubscribe)}, Holder: gen(4).pub})
-	if _, err := Verify(e, o.pub); !errors.Is(err, ErrLoosens) {
+	if err := CheckChain(e, o.pub); !errors.Is(err, ErrLoosens) {
 		t.Fatalf("hostile widen: %v", err)
 	}
 	// Dropping a limit by omission is not a loosening, but a later larger cap is.
 	c1, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(100), LimitExpires(1000), LimitHold(10, 20))
 	for _, bad := range []Caveat{LimitSpendDay(101), LimitExpires(1001), LimitHold(5, 20), LimitHold(10, 19)} {
 		e := Extend(c1, h2.priv, Link{Caveats: []Caveat{bad}, Holder: gen(4).pub})
-		if _, err := Verify(e, o.pub); !errors.Is(err, ErrLoosens) {
+		if err := CheckChain(e, o.pub); !errors.Is(err, ErrLoosens) {
 			t.Fatalf("%v: %v", bad.Kind, err)
 		}
 	}
@@ -133,11 +135,11 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 func TestUnknownKindAndNonCanonicalRejected(t *testing.T) {
 	o, h, k := root(t)
 	e := Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: "anything"}}, Holder: gen(4).pub})
-	if _, err := Verify(e, o.pub); !errors.Is(err, ErrUnknownKind) {
+	if err := CheckChain(e, o.pub); !errors.Is(err, ErrUnknownKind) {
 		t.Fatal(err)
 	}
 	e = Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: KVerbs, Set: []string{"trash", "organize"}}}, Holder: gen(4).pub})
-	if _, err := Verify(e, o.pub); !errors.Is(err, ErrMalformed) {
+	if err := CheckChain(e, o.pub); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("unsorted: %v", err)
 	}
 }
@@ -145,7 +147,7 @@ func TestUnknownKindAndNonCanonicalRejected(t *testing.T) {
 func TestExpiryRevokePauseStop(t *testing.T) {
 	o, h, k := root(t)
 	d, _ := Derive(k, h.priv, gen(3).pub, LimitExpires(100))
-	v := verified(t, d, o)
+	v := verified(t, d, o, gen(3))
 	if r := v.Authorize(step(Trash), ctx(99, nil)); r != nil {
 		t.Fatal(r)
 	}
@@ -178,7 +180,7 @@ func TestArgBoundsNeedNonPlannerSource(t *testing.T) {
 	d, _ := Derive(k, h.priv, gen(3).pub,
 		LimitArg(ArgBound{Name: "target", OneOf: []string{"b", "a"}}),
 		LimitArg(ArgBound{Name: "label", Min: &lo, Max: &hi}))
-	v := verified(t, d, o)
+	v := verified(t, d, o, gen(3))
 	mk := func(to, n string, src Source) Step {
 		s := step(Organize)
 		s.Args = map[string]Arg{"target": {to, src}, "label": {n, src}}
@@ -200,7 +202,7 @@ func TestArgBoundsNeedNonPlannerSource(t *testing.T) {
 func TestContentAndLabels(t *testing.T) {
 	o, h, k := root(t)
 	d, _ := Derive(k, h.priv, gen(3).pub, LimitContent("text"), LimitLabels("public"))
-	v := verified(t, d, o)
+	v := verified(t, d, o, gen(3))
 	s := step(Trash)
 	s.Content, s.Labels = "text", []string{"public"}
 	if r := v.Authorize(s, ctx(1, nil)); r != nil {
@@ -221,7 +223,7 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	h2 := gen(3)
 	parent, _ := Derive(k, h.priv, h2.pub, LimitUses(2), LimitSpendDay(50), LimitRate(5), LimitRateRecipient(1))
 	child, _ := Derive(parent, h2.priv, gen(4).pub, LimitSpendTask(10))
-	v := verified(t, child, o)
+	v := verified(t, child, o, gen(4))
 	pid := v.IDs[1]
 	s := step(Trash)
 	s.Amount, s.Task, s.Recipient = 10, "t1", "r"
@@ -266,7 +268,7 @@ func TestHoldIsLongestAndNoveltyLonger(t *testing.T) {
 	h2 := gen(3)
 	a, _ := Derive(k, h.priv, h2.pub, LimitHold(10, 30))
 	b, _ := Derive(a, h2.priv, gen(4).pub, LimitHold(20, 30))
-	l := verified(t, b, o).Limits
+	l := verified(t, b, o, gen(4)).Limits
 	if l.Window(false) != 20 || l.Window(true) != 30 {
 		t.Fatalf("%d %d", l.Window(false), l.Window(true))
 	}
@@ -281,5 +283,54 @@ func TestVerbClasses(t *testing.T) {
 	}
 	if _, ok := ClassOf("nuke"); ok {
 		t.Fatal("unknown verb")
+	}
+}
+
+// A key is not a bearer token: holding its bytes confers nothing without the
+// last holder's signature over the use. Dropping links leaves a key whose
+// holder is someone the submitter cannot sign for, and a link forged or
+// re-derived off a key the forger does not hold breaks the chain (KEY-1, KEY-3).
+func TestUseNeedsTheLastHolder(t *testing.T) {
+	o, h, k := root(t)
+	planner := gen(3)
+	d, err := Derive(k, h.priv, planner.pub, LimitRate(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	use := []byte("plan")
+	if _, err := Verify(d, o.pub, use, Sign(d, planner.priv, use)); err != nil {
+		t.Fatalf("holder's own use: %v", err)
+	}
+	stripped := Key{Root: d.Root}
+	if _, err := Verify(stripped, o.pub, use, Sign(stripped, planner.priv, use)); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("stripped key: %v", err)
+	}
+	if _, err := Verify(d, o.pub, use, nil); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("unsigned use: %v", err)
+	}
+	sig := Sign(d, planner.priv, use)
+	if _, err := Verify(d, o.pub, []byte("other plan"), sig); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("signature moved to another use: %v", err)
+	}
+	// The signature binds the tip: the same use under a sibling key fails.
+	sib, _ := Derive(k, h.priv, planner.pub, LimitRate(3))
+	if _, err := Verify(sib, o.pub, use, sig); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("signature moved to another key: %v", err)
+	}
+	// Re-derived off the root, or a wider link forged in place, by the planner.
+	for name, f := range map[string]Key{
+		"re-derived": Extend(k, planner.priv, Link{Caveats: []Caveat{LimitRate(1000)}, Holder: planner.pub}),
+		"rewritten":  Extend(stripped, planner.priv, Link{Holder: planner.pub}),
+	} {
+		if _, err := Verify(f, o.pub, use, Sign(f, planner.priv, use)); !errors.Is(err, ErrBadSig) {
+			t.Fatalf("%s link: %v", name, err)
+		}
+	}
+	if _, err := Derive(stripped, planner.priv, planner.pub); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("derive from a stripped key: %v", err)
+	}
+	// Domains: a use signature is not a link signature, nor the reverse.
+	if DomainUse == DomainLink || DomainUse == DomainRoot {
+		t.Fatal("domains equal")
 	}
 }

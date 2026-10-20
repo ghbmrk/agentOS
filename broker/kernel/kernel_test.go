@@ -1,11 +1,12 @@
 package kernel_test
 
-// REQ: KRN-1, KRN-4, KRN-5, KRN-6, KRN-7, KRN-8, LOG-2, LOG-5, CLK-2, KEY-8
+// REQ: KRN-1, KRN-4, KRN-5, KRN-6, KRN-7, KRN-8, LOG-2, LOG-5, CLK-2, KEY-1, KEY-3, KEY-8
 
 import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -97,9 +98,12 @@ func st(v key.Verb, to string) kernel.PlanStep {
 	return s
 }
 
+// sign signs p as the rig's holder, who holds the root and every key the rig derives.
+func (r *rig) sign(p kernel.Plan) kernel.Plan { return kernel.SignPlan(p, r.holder.priv) }
+
 func (r *rig) plan(id string, k key.Key, steps ...kernel.PlanStep) {
 	r.t.Helper()
-	must(r.t, r.k.Submit(0, kernel.Plan{ID: id, Key: k, Steps: steps}))
+	must(r.t, r.k.Submit(0, r.sign(kernel.Plan{ID: id, Key: k, Steps: steps})))
 }
 
 func (r *rig) status(id string) string { return r.k.State().Plans[id].Status }
@@ -153,14 +157,14 @@ func TestHoldWindowThenNoveltyWindow(t *testing.T) {
 		t.Fatal("step did not run after its window")
 	}
 	// the same shape to the same recipient, a day on, is known: the base window applies
-	must(t, r.k.Submit(30*hour, kernel.Plan{ID: "p2", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}}))
+	must(t, r.k.Submit(30*hour, r.sign(kernel.Plan{ID: "p2", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
 	must(t, r.k.Tick(30*hour))
 	must(t, r.k.Tick(31*hour))
 	if len(r.mail.Effects()) != 2 {
 		t.Fatalf("known shape should wait only the base window, effects %d", len(r.mail.Effects()))
 	}
 	// a new recipient is a new shape: the novelty window applies (KEY-8)
-	must(t, r.k.Submit(32*hour, kernel.Plan{ID: "p3", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-b")}}))
+	must(t, r.k.Submit(32*hour, r.sign(kernel.Plan{ID: "p3", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-b")}})))
 	must(t, r.k.Tick(32*hour))
 	must(t, r.k.Tick(35*hour))
 	if len(r.mail.Effects()) != 2 {
@@ -177,9 +181,7 @@ func TestRevokeDuringHoldCancelsWithNoEffect(t *testing.T) {
 	k := r.derive(key.LimitHold(hour, hour))
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
 	must(t, r.k.Tick(0))
-	v, err := key.Verify(k, r.owner.pub)
-	must(t, err)
-	must(t, r.k.Revoke(10, v.IDs[len(v.IDs)-1]))
+	must(t, r.k.Revoke(10, k.Tip()))
 	must(t, r.k.Tick(2*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
@@ -189,15 +191,14 @@ func TestRevokeDuringHoldCancelsWithNoEffect(t *testing.T) {
 func TestPauseWaitsStopCancels(t *testing.T) {
 	r := newRig(t)
 	k := r.derive(key.LimitHold(hour, hour))
-	v, _ := key.Verify(k, r.owner.pub)
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
 	must(t, r.k.Tick(0))
-	must(t, r.k.Pause(1, v.ID()))
+	must(t, r.k.Pause(1, k.Tip()))
 	must(t, r.k.Tick(2*hour))
 	if r.status("p1") != kernel.SActive || len(r.mail.Effects()) != 0 {
 		t.Fatal("a paused key must wait")
 	}
-	must(t, r.k.Unpause(2*hour+1, v.ID()))
+	must(t, r.k.Unpause(2*hour+1, k.Tip()))
 	must(t, r.k.Stop(2*hour+2))
 	must(t, r.k.Tick(3*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
@@ -339,7 +340,7 @@ func TestFingerprintDoesNotCollideAcrossArgumentBoundaries(t *testing.T) {
 // A declared argument with no value names nothing to act on (KEY-2).
 func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
 	r := newRig(t)
-	err := r.k.Submit(0, kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "")}})
+	err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "")}}))
 	must(t, err)
 	if r.status("p1") != kernel.SRejected {
 		t.Fatal("an empty argument must reject the plan")
@@ -349,7 +350,7 @@ func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
 func TestDuplicatePlanIDRefused(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	if err := r.k.Submit(0, kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "m2")}}); !errors.Is(err, kernel.ErrDuplicatePlan) {
+	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "m2")}})); !errors.Is(err, kernel.ErrDuplicatePlan) {
 		t.Fatal(err)
 	}
 }
@@ -506,7 +507,7 @@ func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	if err := r.k.Issue(1, other); err == nil {
 		t.Fatal("an unconfirmed issue must report it")
 	}
-	if err := r.k.Submit(2, kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}}); err == nil {
+	if err := r.k.Submit(2, r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})); err == nil {
 		t.Fatal("nothing may build on an unconfirmed issue")
 	}
 	r.anchor.down = false
@@ -688,5 +689,47 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	}
 	if len(r.mail.Effects()) != 1 {
 		t.Fatalf("effects = %d, want 1", len(r.mail.Effects()))
+	}
+}
+
+// The strip probe from #2566's Security review: a planner holding a narrowed
+// key drops its links and submits the bare root. Holding a narrowed key must
+// never confer more than it allows (KEY-3).
+func TestStrippedKeyIsRefused(t *testing.T) {
+	r := newRig(t)
+	planner := gen(4)
+	k, err := key.Derive(r.root, r.holder.priv, planner.pub, key.LimitRate(2))
+	must(t, err)
+	organize := func(n int) []kernel.PlanStep {
+		var s []kernel.PlanStep
+		for i := 0; i < n; i++ {
+			s = append(s, st(key.Organize, fmt.Sprintf("m%d", i)))
+		}
+		return s
+	}
+	// The planner's own use of its key runs, within the key.
+	must(t, r.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p0", Key: k, Steps: organize(2)}, planner.priv)))
+	must(t, r.k.Tick(10))
+	if r.status("p0") != kernel.SDone || len(r.mail.Effects()) != 2 {
+		t.Fatalf("holder's own plan: status %s, %d effects", r.status("p0"), len(r.mail.Effects()))
+	}
+	// Stripped to the root, re-derived off it, or signed by no holder: refused.
+	stripped := key.Key{Root: k.Root}
+	for id, p := range map[string]kernel.Plan{
+		"p1": kernel.SignPlan(kernel.Plan{ID: "p1", Key: stripped, Steps: organize(3)}, planner.priv),
+		"p2": kernel.SignPlan(kernel.Plan{ID: "p2", Key: key.Extend(r.root, planner.priv,
+			key.Link{Caveats: []key.Caveat{key.LimitRate(1000)}, Holder: planner.pub}), Steps: organize(3)}, planner.priv),
+		"p3": {ID: "p3", Key: k, Steps: organize(1)},
+	} {
+		must(t, r.k.Submit(20, p))
+		must(t, r.k.Tick(30))
+		if r.status(id) != kernel.SRejected || len(r.mail.Effects()) != 2 {
+			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
+		}
+		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
+		req := kernel.Request{Plan: p, Idem: kernel.Idem(id, 0), Now: 30}
+		if rf := clerk.Check(r.owner.pub, "mail", nil, req, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+			t.Fatalf("%s: clerk check %v", id, rf)
+		}
 	}
 }

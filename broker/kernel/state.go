@@ -64,11 +64,36 @@ type PlanStep struct {
 	Labels  []string          `json:"labels,omitempty"`
 }
 
-// Plan is a typed list of steps run in order under one key (KRN-5).
+// Plan is a typed list of steps run in order under one key (KRN-5). Sig is
+// the key's last holder signing the plan, so holding a key's bytes is not
+// using it: a key stripped back toward its root names a holder the submitter
+// cannot sign for (KEY-1, KEY-3).
 type Plan struct {
 	ID    string     `json:"id"`
 	Key   key.Key    `json:"key"`
 	Steps []PlanStep `json:"steps"`
+	Sig   []byte     `json:"sig"`
+}
+
+// use is what the holder signs: the id and steps. The key's tip is in the
+// signed message already (key.Sign).
+func (p Plan) use() []byte {
+	b, _ := json.Marshal(struct {
+		ID    string     `json:"id"`
+		Steps []PlanStep `json:"steps"`
+	}{p.ID, p.Steps})
+	return b
+}
+
+// SignPlan signs p as the holder of p.Key.
+func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
+	p.Sig = key.Sign(p.Key, holder, p.use())
+	return p
+}
+
+// VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
+func VerifyPlan(p Plan, owner ed25519.PublicKey) (*key.Verified, error) {
+	return key.Verify(p.Key, owner, p.use(), p.Sig)
 }
 
 // Step is step i as the key is checked against it and the clerk sees it.
@@ -323,7 +348,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if len(b.Key.Links) == 0 {
-			if _, err := key.Verify(b.Key, s.Owner); err == nil {
+			if key.CheckChain(b.Key, s.Owner) == nil {
 				s.Roots[b.Key.Tip()] = true
 			}
 		}

@@ -21,19 +21,21 @@ type Facts func(key.Step) (content string, labels []string, amount int64)
 const RClaim = "claim"
 
 // Check is the clerk's own authorization of a request. It trusts nothing the
-// kernel decided: the chain, the root's presence in the log, the key's limits
+// kernel decided: the chain and its last holder's signature on the plan, the
+// step taken from that signed plan, the root's presence in the log, the key's limits
 // as of the first dispatch, and for an irreversible verb the hold window.
 func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, v kernel.View) *key.Refusal {
-	if r.Step.Clerk != name {
-		return &key.Refusal{Code: key.RClerk, Detail: r.Step.Clerk}
+	st := r.Step()
+	if st.Clerk != name {
+		return &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
 	}
 	if facts != nil {
-		content, labels, amount := facts(r.Step)
-		if content != r.Step.Content || amount != r.Step.Amount || !sameSet(labels, r.Step.Labels) {
+		content, labels, amount := facts(st)
+		if content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
 			return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
 		}
 	}
-	ver, err := key.Verify(r.Key, owner)
+	ver, err := kernel.VerifyPlan(r.Plan, owner)
 	if err != nil {
 		return &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
 	}
@@ -41,12 +43,12 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, 
 		return &key.Refusal{Code: kernel.CUnknownRoot, Detail: ver.Root().String()}
 	}
 	ctx := key.Context{Now: r.Now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(r.DispatchSeq)}
-	if rf := ver.Authorize(r.Step, ctx); rf != nil {
+	if rf := ver.Authorize(st, ctx); rf != nil {
 		return rf
 	}
-	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
 		h, held := v.Held(r.HeldSeq)
-		if !held || h.Plan != r.Plan || h.Index != r.Index {
+		if !held || h.Plan != r.Plan.ID || h.Index != r.Index {
 			return &key.Refusal{Code: "hold", Detail: "step was not held"}
 		}
 		if r.Now < h.At+ver.Limits.Window(h.Novel) {
@@ -139,7 +141,7 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 func (m *Mail) apply(r kernel.Request) {
 	m.done[r.Idem] = true
-	m.effects = append(m.effects, Effect{r.Idem, r.Step})
+	m.effects = append(m.effects, Effect{r.Idem, r.Step()})
 }
 
 func (m *Mail) Probe(r kernel.Request, _ kernel.View) string {

@@ -135,7 +135,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if x.state[r.Idem] == "done" {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	op, ok := x.ops[r.Step.Verb]
+	op, ok := x.ops[r.Step().Verb]
 	if !ok {
 		return kernel.Result{Outcome: "failed", Detail: "undeclared"}
 	}
@@ -168,7 +168,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 func (x *Exit) build(op Op, r kernel.Request) (*http.Request, error) {
 	// Check has already matched the arguments to the declaration exactly.
-	args := r.Step.Args
+	args := r.Step().Args
 	var bad bool
 	target := slotRE.ReplaceAllStringFunc(op.URL, func(m string) string {
 		v := args[m[1:len(m)-1]].Value
