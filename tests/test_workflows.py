@@ -135,7 +135,7 @@ PREMERGE_LINES = [
     '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"',
     '            fi',
     '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \\',
-    '              --jq \'.[] | {author_association, created_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
+    '              --jq \'.[] | {author_association, created_at, updated_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
     '            jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1',
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
