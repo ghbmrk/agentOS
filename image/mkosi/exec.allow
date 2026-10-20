@@ -68,9 +68,7 @@ usr/lib/udev/rules.d/80-debian-compat.rules	sha256:a76997a57ec03550753cc9adb362e
 usr/lib/udev/rules.d/80-drivers.rules	sha256:0941cea0be8d3564556b5787a87cf55971fd3e46e19c56ad68a4205e8ad3a560
 usr/lib/udev/rules.d/80-net-setup-link.rules	sha256:7056ebc8ef611d0f61b2ac01e20fa8cca035f957e58fd60600e3eec9bab927c2
 usr/lib/udev/rules.d/81-net-dhcp.rules	sha256:3438299d7e6254472600168b557a467a497d537353511ec07657b494d1b13fec
-usr/lib/udev/rules.d/84-nm-drivers.rules	sha256:123dac1d3cc01d7eae08870b434c1afd9d76c1a15d4579427885e6ed46fcf171
 usr/lib/udev/rules.d/85-nm-unmanaged.rules	sha256:afce2a870bf2cefb2b52214ed959d0e0025ed2efef5c05871895f6edbedec24a
 usr/lib/udev/rules.d/90-iocost.rules	sha256:39b1d6239c29d1a42fd4d8563ce55916958590021b947c534a630c80b7952815
-usr/lib/udev/rules.d/90-nm-thunderbolt.rules	sha256:a5d7612f4e5de1cfa7459be7c01b09835099ea70097375bdf7572458ccd0c88c
 usr/lib/udev/rules.d/95-dm-notify.rules	sha256:d24e725fc78306ff2355eb91e4eebcc7dc9388d54dc27d20d6fe6f695054d536
 usr/lib/udev/rules.d/99-systemd.rules	sha256:d63ba2ea309aadf7794a5f84b0f394c2e48fe630640aa37e9963cd9d1b769d89

@@ -89,14 +89,20 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
 # class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
 # #936 (r4a): NetworkManager manages only the station r4b creates. Everything it reads at start is
-# pinned here: the sections and keys the image ships (NM_KEYS, each set once, to exactly this value),
-# the keyfile path (under /run only, STO-2), no connection file and no executable dispatcher script.
+# pinned here: NM_ROOTS are the places it reads configuration from (main file, conf.d, the state
+# directory's intern file), and the only file that may exist in them is NM_FILES, whose keys are
+# NM_KEYS (each set once, to exactly this value) and a keyfile path under /run only (STO-2). A closed
+# list (dispatcher scripts too), so a file NetworkManager reads under another name (nm-system-settings.conf, NetworkManager-
+# intern.conf) is refused too. No connection location, and the unit passes no --config flag.
 NM_PRESENT = ("usr/sbin/NetworkManager", "usr/lib/NetworkManager/conf.d")
-NM_MAINS = ("etc/NetworkManager/NetworkManager.conf", "usr/lib/NetworkManager/NetworkManager.conf")
-NM_CONF_DIRS = ("etc/NetworkManager/conf.d", "usr/lib/NetworkManager/conf.d")
+NM_ROOTS = ("etc/NetworkManager", "usr/lib/NetworkManager/conf.d", "usr/lib/NetworkManager/dispatcher.d",
+            "run/NetworkManager/conf.d", "var/lib/NetworkManager")
+NM_FILES = ("usr/lib/NetworkManager/conf.d/50-agentos.conf",)
 NM_CONNECTIONS = ("etc/NetworkManager/system-connections", "run/NetworkManager/system-connections",
                   "usr/lib/NetworkManager/system-connections")
-NM_DISPATCH = ("etc/NetworkManager/dispatcher.d", "usr/lib/NetworkManager/dispatcher.d")
+NM_UNIT = "NetworkManager.service"
+NM_UNIT_DIRS = ("etc/systemd/system", "run/systemd/system", "usr/lib/systemd/system")
+NM_FLAGS = ("--config", "--intern-config")
 NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
            ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
            ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
@@ -1935,25 +1941,24 @@ def uplink_violations(up):
 
 
 def networkmanager_violations(root):
-    """#936: what NetworkManager reads at start is NM_KEYS and a keyfile path under /run, and nothing
-    else: its main file and conf.d files (the ones that exist, as it lists them), no connection file
-    anywhere and no executable dispatcher script. Skipped where the tree has no NetworkManager. A file
-    the check cannot read, or that byte_violations refuses, is refused and never skipped."""
+    """#936: what NetworkManager reads at start is NM_FILES and nothing else: any other entry under
+    NM_ROOTS is refused (a closed list), the shipped file holds NM_KEYS and a keyfile path under /run,
+    no connection location exists, and the unit and its drop-ins pass no NM_FLAGS. Skipped where the
+    tree has no NetworkManager. A file the check cannot read, or that byte_violations refuses, is
+    refused and never skipped."""
     if not any(entry_mode(root, rel) for rel in NM_PRESENT):
         return []
-    out, files = [], []
-    for rel in NM_MAINS:
-        f = Conf(str(root), rel)
-        try:
-            conf_chase(str(root), rel)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            pass  # Conf.content refuses it below
-        files.append(f)
-    files += conf_files(root, NM_CONF_DIRS)
+    out = []
+    for d in NM_ROOTS:
+        mode = entry_mode(root, d)
+        if mode and not stat.S_ISDIR(mode):
+            out.append("%s: not a directory; the tree check reads only a directory" % d)
+        for rel, st in tree_walk(root, d) if stat.S_ISDIR(mode) else ():
+            if not stat.S_ISDIR(st.st_mode) and rel not in NM_FILES:
+                out.append("%s: not a file the image ships; NetworkManager would read it" % rel)
     seen = {}
-    for f in files:
+    for rel in NM_FILES:
+        f = Conf(str(root), rel)
         bad = byte_violations(f)
         out += bad
         if bad:
@@ -1980,13 +1985,21 @@ def networkmanager_violations(root):
     for d in NM_CONNECTIONS:
         if entry_mode(root, d):
             out.append("%s: a NetworkManager connection location; it must not exist (no join before STO-2)" % d)
-    for d in NM_DISPATCH:
-        if stat.S_ISLNK(entry_mode(root, d)):
-            out.append("%s: a link; the tree check reads only a directory" % d)
-        elif tree_dir(root, d):
-            for rel, st in tree_walk(root, tree_dir(root, d)):
-                if stat.S_ISLNK(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_mode & 0o111):
-                    out.append("%s: a dispatcher script or link; none may ship" % rel)
+    for d in NM_UNIT_DIRS:
+        unit = d + "/" + NM_UNIT
+        units = [unit] if entry_mode(root, unit) else []
+        if tree_dir(root, unit + ".d"):
+            units += [r for r, st in tree_walk(root, unit + ".d") if not stat.S_ISDIR(st.st_mode)]
+        for rel in units:
+            try:
+                text = Conf(str(root), rel).content().decode("ascii", "replace")
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a file it cannot read"
+                           % (rel, e.strerror))
+                continue
+            for ln in text.splitlines():
+                if ln.lstrip().startswith("ExecStart") and any(x in ln for x in NM_FLAGS):
+                    out.append("%s: ExecStart passes a configuration flag; NetworkManager reads only NM_FILES" % rel)
     return out
 
 

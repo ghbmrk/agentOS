@@ -149,16 +149,46 @@ class FinalizeCheckTest(unittest.TestCase):
         self.assertIn("set 2 times", " ".join(refused(self.root)))
 
     # REQ: DEV-2
-    def test_other_conf_files_are_read_too(self):
-        # NetworkManager reads /etc, /run and /usr/lib conf.d and the main file; a later file can
-        # reset a value, so each is held to the same keys.
-        for rel in ("etc/NetworkManager/conf.d/99-x.conf", 
+    def test_any_other_file_in_a_place_networkmanager_reads_is_refused(self):
+        # A closed list: NetworkManager reads these files (nm-system-settings.conf in place of the main
+        # file, the intern file over the user's, /run conf.d, and the main file itself), and none may
+        # exist, whatever it holds. The first two repro Security's false pass on #2607 (a file that
+        # turns Wi-Fi MAC randomisation off).
+        body = "[connection]\nwifi.cloned-mac-address=permanent\n"
+        for rel in ("etc/NetworkManager/nm-system-settings.conf",
+                    "var/lib/NetworkManager/NetworkManager-intern.conf",
+                    "run/NetworkManager/conf.d/99-x.conf", "etc/NetworkManager/conf.d/99-x.conf",
                     "usr/lib/NetworkManager/conf.d/99-x.conf", "etc/NetworkManager/NetworkManager.conf",
-                    "usr/lib/NetworkManager/NetworkManager.conf"):
+                    "var/lib/NetworkManager/seen-bssids", "usr/lib/NetworkManager/conf.d/50-agentos.conf.orig"):
             with self.subTest(rel=rel):
-                f = write(self.root, rel, "[keyfile]\nunmanaged-devices=interface-name:nothing\n")
-                self.assertTrue(refused(self.root))
+                f = write(self.root, rel, body)
+                self.assertIn(rel, " ".join(refused(self.root)))
                 f.unlink()
+        self.assertEqual(refused(self.root), [])
+
+    # REQ: DEV-2
+    def test_a_root_that_is_a_link_or_a_file_is_refused(self):
+        for d in ("etc/NetworkManager", "var/lib/NetworkManager"):
+            with self.subTest(d=d):
+                (self.root / d).parent.mkdir(parents=True, exist_ok=True)
+                os.symlink("/tmp", self.root / d)
+                self.assertIn(d, " ".join(refused(self.root)))
+                (self.root / d).unlink()
+        self.assertEqual(refused(self.root), [])
+
+    # REQ: DEV-2
+    def test_a_unit_flag_that_names_other_configuration_is_refused(self):
+        unit = "usr/lib/systemd/system/NetworkManager.service"
+        for line in ("ExecStart=/usr/sbin/NetworkManager --no-daemon --config=/x.conf",
+                     "ExecStart=/usr/sbin/NetworkManager --config-dir=/x", "ExecStart=/x --intern-config=/y"):
+            for rel in (unit, unit + ".d/10-x.conf", "etc/systemd/system/NetworkManager.service",
+                        "run/systemd/system/NetworkManager.service.d/10-x.conf"):
+                with self.subTest(line=line, rel=rel):
+                    f = write(self.root, rel, "[Service]\n%s\n" % line)
+                    self.assertIn(rel, " ".join(refused(self.root)))
+                    f.unlink()
+        write(self.root, unit, "[Service]\nExecStart=/usr/sbin/NetworkManager --no-daemon\n")
+        self.assertEqual(refused(self.root), [])
 
     # REQ: DEV-2
     def test_a_non_ascii_or_control_byte_is_refused(self):
@@ -168,34 +198,15 @@ class FinalizeCheckTest(unittest.TestCase):
                 self.assertTrue(refused(self.root))
 
     # REQ: DEV-2, CH-9
-    def test_an_unreadable_file_is_refused(self):
-        # A link in conf.d is one the check cannot read (#1543); it is refused, never skipped.
-        os.symlink("/etc/hostname", self.root / "etc/NetworkManager/conf.d/99-x.conf") \
-            if (self.root / "etc/NetworkManager/conf.d").mkdir(parents=True) is None else None
-        self.assertIn("99-x.conf: unreadable", " ".join(refused(self.root)))
-
-    # REQ: DEV-2, CH-9
-    def test_a_check_that_skips_an_unreadable_file_would_fail_this_suite(self):
-        # The mutant: the byte check's refusals are dropped, so the unreadable file is passed over.
-        # It must be able to pass the unreadable fixture (so the test above is what catches it).
-        src = (MK / "mkosi.finalize").read_text()
-        old = "        bad = byte_violations(f)\n        out += bad\n"
-        self.assertEqual(src.count(old), 1)
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as t:
-            t.write(src.replace(old, "        bad = byte_violations(f)\n"))
-        try:
-            mutant = load("image_check_mutant", t.name)
-        finally:
-            os.unlink(t.name)
-        mutant.TREE_OWNER, mutant.TREE_GROUP = check.TREE_OWNER, check.TREE_GROUP
-        (self.root / "etc/NetworkManager/conf.d").mkdir(parents=True)
-        os.symlink("/etc/hostname", self.root / "etc/NetworkManager/conf.d/99-x.conf")
-        self.assertEqual(mutant.networkmanager_violations(self.root), [])
-        self.assertTrue(check.networkmanager_violations(self.root))
+    def test_an_unreadable_shipped_file_is_refused(self):
+        # A link in place of the file is one the check cannot read (#1543); refused, never skipped.
+        (self.root / CONF).unlink()
+        os.symlink("/etc/hostname", self.root / CONF)
+        self.assertIn("50-agentos.conf", " ".join(refused(self.root)))
 
     # REQ: DEV-2, CH-9
     def test_an_executable_dispatcher_script_is_refused(self):
-        for d in check.NM_DISPATCH:
+        for d in ("etc/NetworkManager/dispatcher.d", "usr/lib/NetworkManager/dispatcher.d"):
             with self.subTest(d=d):
                 f = write(self.root, d + "/10-x", "#!/bin/sh\n", 0o755)
                 self.assertIn("10-x", " ".join(refused(self.root)))
@@ -245,6 +256,18 @@ class ImageFilesTest(unittest.TestCase):
         for p in ("/etc/NetworkManager/system-connections", "/etc/NetworkManager/dispatcher.d",
                   "/usr/lib/NetworkManager/dispatcher.d", "/etc/NetworkManager/NetworkManager.conf"):
             self.assertIn(p, rm)
+
+    # REQ: DEV-2
+    def test_the_driver_and_thunderbolt_udev_rules_are_removed_and_not_allowlisted(self):
+        # They do nothing for wlsta0; dropping them leaves less root-run udev code to pin. The
+        # unmanaged-devices rule (85) stays: it is the one that keeps the wired port off NetworkManager.
+        rm = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        allow = (MK / "exec.allow").read_text()
+        for n in ("84-nm-drivers.rules", "90-nm-thunderbolt.rules"):
+            self.assertIn("/usr/lib/udev/rules.d/" + n, rm)
+            self.assertNotIn(n, allow)
+        self.assertIn("85-nm-unmanaged.rules", allow)
+        self.assertNotIn("/usr/lib/udev/rules.d/85-nm-unmanaged.rules", rm)
 
     # REQ: ONB-3, DEV-2
     def test_only_the_netjoin_rule_answers_yes(self):
