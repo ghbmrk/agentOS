@@ -11,7 +11,7 @@ Board section: Phase 0: harness and risk spikes. Source: work item #814 (release
 - The model router's grant check also asks the same stored-key callback, so routing and the proxy agree. The private-data rule is unchanged: a private call still needs the owner's setup answer (CAP-9).
 - The model state's `granted` follows stored keys: a non-secret `keyed` mark in the unlock state answers while the vault is locked, after a restart too.
 - `serveCustody` factors serveCmd's custody construction so a test sees `granted` follow `-grant` and the hook bound.
-- Claude plan logins stay worker-held: only `KindAPIKey` entries grant; nothing else changes for plan logins.
+- Only `KindAPIKey` entries grant; nothing else changes for plan logins.
 
 **Tests first.** Stored key grants the agent machine end to end (router + proxy, locked/unlocked, other provider, other machine, builder machine); key held at unlock grants; storedGrant only for the agent's open API keys; model state follows stored keys and the state file never holds the key; serveCustody follows the flags; `-agent-machine` rejects builder/replay prefixes.
 

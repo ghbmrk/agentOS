@@ -10,7 +10,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MEMBERS = ["the kernel", "the clerks", "the enforcer (STO-4)", "the firmware and TPM", "host kernel",
-           "hypervisor", "the sandboxes it runs", "processes in them that read credentials", "the CLI process"]
+           "hypervisor", "the sandboxes it runs", "processes in them that read credentials"]
 
 
 def krn2():

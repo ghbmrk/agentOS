@@ -2,7 +2,7 @@
 
 What the Codex provider worker's managed config and tool sandbox rest on. The rootfs build (`build-rootfs.sh`, C16-C17) pins the CLI and installs the managed layers; nothing is
 wired into agentosd yet. Rows marked measured were measured on Codex CLI 0.162.1 on a Linux host as root, without runsc; #809 repeats them on the
-pinned CLI under runsc. The supervised containment run with the real CLI, forwarder and egress socket is #1720 (D-064's worker-held Claude version is #1380).
+pinned CLI under runsc. The supervised containment run with the real CLI, forwarder and egress socket is #1720.
 
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
