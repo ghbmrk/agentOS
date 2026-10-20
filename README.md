@@ -10,17 +10,17 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 
 | File | Kind | What it is | Changed by |
 |---|---|---|---|
-| [SPEC.md](SPEC.md) | what to build | The system specification. Requirement IDs like `CRED-1` are normative. | L1 spec-diff PR, Mark approves |
-| [PLAN.md](PLAN.md) | how it is phased | Phases, the nested build loops (L0–L4), budget calibration history. | L1 |
+| [SPEC.md](SPEC.md) | what to build | The system specification. v1.0: keys, clerks and one log. Requirement IDs like `KEY-1` are normative; Appendix A maps every retired v0.12 ID. | L1 spec-diff PR |
+| [PLAN.md](PLAN.md) | how it is built | Premises, the nested build loops (L0–L4), migration steps 0–5, routing and tiers. | L1 |
 | [CLAUDE.md](CLAUDE.md) | rules | The working contract for builder and reviewer agents, one line per rule. | L4 proposes, L1 adopts |
 | [AGENTS.md](AGENTS.md) | rules | Entry point for agents other than Claude Code; points to CLAUDE.md. | L1 |
-| [docs/OPERATING.md](docs/OPERATING.md) | procedures | The reasons and procedures behind the rules: triage, risk tiers, review pipeline, sessions, parallel teams. | L1, Mark decides |
+| [docs/OPERATING.md](docs/OPERATING.md) | procedures | The reasons and procedures behind the rules: triage, risk tiers, review pipeline, sessions and migration rules, parallel teams. | L1, Mark decides |
 | [BOARD.md](BOARD.md) | generated | Index of live work packages, rendered from the `work-item` issues by tools/board.py; change an issue, not a row. | board.yml |
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
-| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | either peer subscription |
-| [docs/conv-3-triage.md](docs/conv-3-triage.md) | state | Class of every open PR (merge-ready, finish, parts bin, superseded, stale) and the close list (Q3, D-090). | CONV-3, then L1 |
-| [docs/conv-2-reaudit.md](docs/conv-2-reaudit.md) | state | First-pass re-audit of queued and building rows already done on main, with the proposed issue changes. | CONV-2, then L1 |
-| [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | state | What blocks each requirement ID TRACE.md lists as uncovered, and the BOARD rows that close them. | CONV-5 builder, L1 |
+| [docs/LANES.md](docs/LANES.md) | state | Which subscription owns which directories during the migration, and any other team's lane. | either peer subscription |
+| [docs/conv-3-triage.md](docs/conv-3-triage.md) | record | Frozen record of the pre-MIG-1 convergence push: the open-PR classes and close list (D-090). Removed in PLAN step 5. | nobody |
+| [docs/conv-2-reaudit.md](docs/conv-2-reaudit.md) | record | Frozen record of the pre-MIG-1 convergence push: the re-audit of queued and building rows. Removed in PLAN step 5. | nobody |
+| [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | record | Frozen record of the pre-MIG-1 convergence push: what blocked each then-uncovered v0.12 ID. Removed in PLAN step 5. | nobody |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |
 | [docs/BOARD-HISTORY.md](docs/BOARD-HISTORY.md) | record | BOARD.md's merged and dropped rows up to the 2026-10-10 cutover to issues; frozen. | nobody |
 | [docs/LATER-HISTORY.md](docs/LATER-HISTORY.md) | record | LATER.md's release path and backlog at the 2026-10-10 cutover; frozen. Classes now live on issue labels. | nobody |
@@ -28,7 +28,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | `<package>/ASSUMPTIONS.md` | record | What each package's code rests on. | its builder |
 | [LEDGER.md](LEDGER.md) | input | Manual usage readings from Mark's usage screen; METRICS reads them. | L1 |
 | [METRICS.md](METRICS.md) | generated | Weekly L4 inputs: first-pass accept, review rounds and causes, usage, defects. | `metrics` workflow |
-| [TRACE.md](TRACE.md) | generated | Which tests cover which requirement IDs. Never edited by hand. | `trace` workflow |
+| [TRACE.md](TRACE.md) | generated | Which tests cover which requirement IDs, and the count of old-core markers (tests citing retired IDs). Never edited by hand. | `trace` workflow |
 | [docs/owners-guide.md](docs/owners-guide.md) | product | The guide for the box's owner. | builders, with the features it describes |
 
 ## Reading order by role
@@ -37,7 +37,7 @@ Read in this order and stop when you have what you need. Token counts are approx
 
 | Role | Read | About |
 |---|---|---|
-| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites (`python3 tools/specslice.py --ids A-1,B-2`); the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
+| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites (`python3 tools/specslice.py --ids KEY-1,CLK-2`); the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
 | Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff, the cited SPEC IDs and the brief (an optional aid: `python3 tools/reviewpacket.py <PR>` bundles them with the tier, and its claims are checked against the source) | 5k + diff |
 | Lens screen | OPERATING §4 checklist; active DECISIONS rows; the lens READMEs; the bundle's diffs | 10k + diffs |
 | Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` (not `frozen`) and `decision` issues; recent DECISIONS rows | 15k |
