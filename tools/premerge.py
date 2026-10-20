@@ -28,7 +28,8 @@ prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push 
 fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A gate-file PR (the `--needs-mark` list)
 also needs a separate Security accept (D-137): the newest trusted verdict comment marked `security` and not
 `l3` or `combined` is `accept` and its reviewed diff equals `head`'s; otherwise it prints `needs-security <files>`
-and exits 1. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+and exits 1. A verdict comment edited after posting never accepts (it reads as `not-accepted`
+until a newer comment supersedes it); never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -80,7 +81,9 @@ _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 def verdict(comments, pr, security=False):
     """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None.
 
-    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead."""
+    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead.
+    A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
+    `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
@@ -88,7 +91,8 @@ def verdict(comments, pr, security=False):
         first = body.split("\n", 1)[0].strip()
         lens = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
         if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and lens:
-            found = (first.split(":", 1)[1].strip().lower(), rec.group(1))
+            edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
+            found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
 
 
