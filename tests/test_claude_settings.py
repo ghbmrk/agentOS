@@ -16,8 +16,6 @@ PERMISSIONS = {
         "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge -f merge_method=merge)",
         "Bash(gh api -X DELETE repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge)",
         "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
-        "Bash(gh api -X POST repos/ghbmrk/agentOS/issues/*/comments -f body=*)",
-        "Bash(gh api -X PATCH repos/ghbmrk/agentOS/issues/* -f state=closed -f state_reason=not_planned)",
     ]
 }
 
