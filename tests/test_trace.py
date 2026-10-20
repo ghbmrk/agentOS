@@ -147,7 +147,31 @@ class RatchetTest(unittest.TestCase):
     def test_retiring_a_directory_without_deleting_fails(self):
         head = commit(self.d, {"tools/old_core.txt": "broker/journal\n"})
         self.assertEqual(self.problems(head),
-                         ["broker/sim left tools/old_core.txt but its old files remain: broker/sim/s.go"])
+                         ["old-core file broker/sim/s.go persists outside tools/old_core.txt at broker/sim/s.go"])
+
+    J = "package journal\n\n" + "".join(f"func F{i}() {{}}\n" for i in range(20))
+
+    def moved_base(self):
+        self.base = commit(self.d, {"broker/journal/j.go": self.J})
+
+    def test_moving_old_core_out_fails(self):
+        self.moved_base()
+        head = commit(self.d, {"tools/old_core.txt": "broker/sim\n", "broker/kernel/j.go": self.J + "func G() {}\n"},
+                      remove=["broker/journal/j.go"])
+        self.assertEqual(self.problems(head),
+                         ["old-core file broker/journal/j.go persists outside tools/old_core.txt at broker/kernel/j.go"])
+
+    def test_copying_old_core_out_fails(self):
+        self.moved_base()
+        head = commit(self.d, {"broker/kernel/j.go": self.J})
+        self.assertEqual(self.problems(head),
+                         ["old-core file broker/journal/j.go persists outside tools/old_core.txt at broker/kernel/j.go"])
+
+    def test_moving_into_a_newly_listed_directory_fails(self):
+        self.moved_base()
+        head = commit(self.d, {"tools/old_core.txt": "broker/sim\nbroker/kernel\n", "broker/kernel/j.go": self.J},
+                      remove=["broker/journal/j.go"])
+        self.assertEqual(self.problems(head), ["lines in broker/kernel grew from 0 to 22"])
 
 
 if __name__ == "__main__":

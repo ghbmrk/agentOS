@@ -6,8 +6,9 @@ Tests claim coverage with a marker comment anywhere in a file:  REQ: KEY-1, CLK-
 A marker naming an ID retired in SPEC.md Appendix A is an old-core marker: it is
 accepted and counted, and the count falls to zero by the end of PLAN step 5.
 The old-core ratchet compares a base commit with the head: no measure of the old
-core (tools/old_core.txt) may grow, and a directory leaves that list only in the
-PR that deletes its old files.
+core (tools/old_core.txt) may grow, a directory leaves that list only in the
+PR that deletes its old files, and no old-core file survives, at its path or
+renamed or copied (git's rename detection), outside the listed directories.
 Usage:
   tools/trace.py            write TRACE.md (PRs don't commit it; .github/workflows/trace.yml does, on main)
   tools/trace.py --check    fail if TRACE.md is stale or a marker cites an unknown ID
@@ -120,16 +121,30 @@ def old_core_measures(tree, dirs, retired):
     return m
 
 
+def moves(root, base, head):
+    """{base path: [head paths]} for files git sees renamed or copied (D-139)."""
+    out = subprocess.run(["git", "-C", str(root), "diff", "-M", "-C", "--find-copies-harder",
+                          "--name-status", "-z", base, head],
+                         check=True, capture_output=True).stdout.decode().split("\0")
+    m, i = {}, 0
+    while i < len(out) and out[i]:
+        if out[i][0] in "RC":
+            m.setdefault(out[i + 1], []).append(out[i + 2])
+            i += 3
+        else:
+            i += 2
+    return m
+
+
 def ratchet(root, base, head, retired):
     """Problems with the old core between base and head; empty when it did not grow."""
     bt, ht = git_tree(root, base), git_tree(root, head)
-    dirs = old_core_dirs(ht)
-    problems = []
-    for d in old_core_dirs(bt):
-        if d not in dirs:
-            kept = sorted(p for p in bt if under(p, d) and p in ht)
-            if kept:
-                problems.append(f"{d} left {OLD_CORE} but its old files remain: " + ", ".join(kept))
+    bdirs, dirs = old_core_dirs(bt), old_core_dirs(ht)
+    problems, moved = [], moves(root, base, head)
+    for bp in sorted(p for p in bt if any(under(p, d) for d in bdirs)):
+        for hp in ([bp] if bp in ht else []) + moved.get(bp, []):
+            if not any(under(hp, d) for d in dirs):
+                problems.append(f"old-core file {bp} persists outside {OLD_CORE} at {hp}")
     bm, hm = old_core_measures(bt, dirs, retired), old_core_measures(ht, dirs, retired)
     for k in hm:
         if hm[k] > bm[k]:

@@ -1,6 +1,7 @@
 # The old core (D-139): broker directories the capability kernel replaces.
 # tools/trace.py --ratchet fails a PR that grows any of them, adds an import of
-# one from outside them, or raises the old-core marker count. A port removes its
+# one from outside them, raises the old-core marker count, or keeps an old-core
+# file (at its path, renamed or copied) outside them. A port removes its
 # directory from this list in the PR that deletes the directory's old files.
 broker/journal
 broker/grants
