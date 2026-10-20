@@ -49,6 +49,10 @@ type exitFix struct {
 }
 
 // resolver answers every name with one address.
+// pub is a policy that has learned no home network: it refuses only the IANA
+// special ranges. Shape tests never dial.
+var pub = netguard.New(netguard.Config{})
+
 type resolver netip.Addr
 
 func (r resolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
@@ -289,7 +293,7 @@ func TestNewExitRejectsUnsafeDeclarations(t *testing.T) {
 		"body arg absent": {Verb: key.Fetch, Method: "POST", URL: "https://h.example/{url}", Type: clerk.TypeJSON, Body: map[string]string{"m": "msg"}},
 	}
 	for name, op := range bad {
-		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op}}, opub, sec, nil); err == nil {
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}}, opub, sec, nil); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -356,7 +360,7 @@ func TestExitRefusesSlotsOutsideThePath(t *testing.T) {
 		"escape":         "https://example.invalid/v1/%2e%2e/{to}",
 		"userinfo-fixed": "https://u:p@example.invalid/v1/{to}",
 	} {
-		_, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{{Verb: key.Post, Method: "POST", URL: u, Content: "text"}}}, opub, sec, nil)
+		_, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{{Verb: key.Post, Method: "POST", URL: u, Content: "text"}}}, opub, sec, nil)
 		if err == nil {
 			t.Errorf("%s: declaration accepted", name)
 		}
@@ -366,7 +370,7 @@ func TestExitRefusesSlotsOutsideThePath(t *testing.T) {
 func TestExitDeclarationRefusesDuplicateVerb(t *testing.T) {
 	opub, _ := gen(1)
 	op := clerk.Op{Verb: key.Post, Method: "POST", URL: "https://example.invalid/v1/{to}", Content: "text"}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op, op}}, opub, clerk.NewSecrets(sealer(t)), nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op, op}}, opub, clerk.NewSecrets(sealer(t)), nil); err == nil {
 		t.Fatal("verb declared twice was accepted")
 	}
 }
@@ -509,19 +513,48 @@ func TestNewExitRefusesUnsafeShapes(t *testing.T) {
 		"fixed is secret header": {get(clerk.Op{Slot: "web", Header: "X-Key", Headers: map[string]string{"x-key": "v"}}), one},
 		"secret in host header":  {get(clerk.Op{Slot: "web", Header: "Host"}), one},
 		"secret prefix CRLF":     {get(clerk.Op{Slot: "web", Prefix: "B\r\nX: "}), one},
+		"secret in idempotency":  {get(clerk.Op{Slot: "web", Header: "Idempotency-Key"}), one},
+		"secret in cookie":       {get(clerk.Op{Slot: "web", Header: "Cookie"}), one},
+		"fixed proxy auth":       {get(clerk.Op{Headers: map[string]string{"Proxy-Authorization": "x"}}), empty},
+		"fixed connection":       {get(clerk.Op{Headers: map[string]string{"Connection": "close"}}), empty},
+		"fixed keep-alive":       {get(clerk.Op{Headers: map[string]string{"Keep-Alive": "timeout=5"}}), empty},
+		"fixed upgrade":          {get(clerk.Op{Headers: map[string]string{"Upgrade": "h2c"}}), empty},
+		"fixed te":               {get(clerk.Op{Headers: map[string]string{"TE": "trailers"}}), empty},
+		"fixed trailer":          {get(clerk.Op{Headers: map[string]string{"Trailer": "X-A"}}), empty},
+		"fixed proxy-connection": {get(clerk.Op{Headers: map[string]string{"Proxy-Connection": "keep-alive"}}), empty},
+		"fixed transfer-enc":     {get(clerk.Op{Headers: map[string]string{"Transfer-Encoding": "chunked"}}), empty},
+		"fixed content-length":   {get(clerk.Op{Headers: map[string]string{"Content-Length": "0"}}), empty},
 	}
 	for name, c := range cases {
-		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{c.op}}, opub, c.sec, nil); err == nil {
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{c.op}}, opub, c.sec, nil); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	// A constant query may hold escapes; only the path may not.
 	ok := get(clerk.Op{URL: "https://h.example/v1/{url}?a=%20b", Query: map[string]string{"q": "url"}, Headers: map[string]string{"Accept": "*/*"}})
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{ok}}, opub, empty, nil); err != nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{ok}}, opub, empty, nil); err != nil {
 		t.Fatalf("a safe shape was refused: %v", err)
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Ops: []clerk.Op{ok}}, opub, empty, nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Guard: pub, Ops: []clerk.Op{ok}}, opub, empty, nil); err == nil {
 		t.Fatal("a nameless clerk was accepted")
+	}
+	// Declarable headers are an allowlist: version, X- and negotiation headers,
+	// and a secret in Authorization or an X- header.
+	versioned := get(clerk.Op{Headers: map[string]string{"Notion-Version": "2022-06-28", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agentos"}})
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{versioned}}, opub, empty, nil); err != nil {
+		t.Fatalf("a declarable header was refused: %v", err)
+	}
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{get(clerk.Op{Slot: "web", Header: "X-Api-Key"})}}, opub, one, nil); err != nil {
+		t.Fatalf("a secret in an X- header was refused: %v", err)
+	}
+}
+
+// REQ: DEV-2
+func TestNewExitRefusesAMissingGuard(t *testing.T) {
+	opub, _ := gen(1)
+	op := clerk.Op{Verb: key.Fetch, Method: "GET", URL: "https://h.example/v1/{url}"}
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op}}, opub, nil, nil); err == nil {
+		t.Fatal("a clerk without the home-network policy was accepted (DEV-2)")
 	}
 }
 
@@ -536,16 +569,16 @@ func TestExitHoldsOneSecretSlot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op(key.Post, "web"), op(key.Fetch, "bank")}}, opub, two, nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op(key.Post, "web"), op(key.Fetch, "bank")}}, opub, two, nil); err == nil {
 		t.Fatal("a clerk declared two secret slots (CLK-1)")
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op(key.Post, "web")}}, opub, two, nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op(key.Post, "web")}}, opub, two, nil); err == nil {
 		t.Fatal("a clerk was handed a store holding another account's secret (CLK-1)")
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op(key.Post, "")}}, opub, two, nil); err == nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op(key.Post, "")}}, opub, two, nil); err == nil {
 		t.Fatal("a clerk with no slot was handed secrets (CLK-1)")
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: []clerk.Op{op(key.Post, "")}}, opub, nil, nil); err != nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op(key.Post, "")}}, opub, nil, nil); err != nil {
 		t.Fatalf("a clerk with no secret needs no store: %v", err)
 	}
 }
@@ -618,6 +651,22 @@ func TestExitBusyWaitsForRetryAfter(t *testing.T) {
 	q.Now += 120_000
 	if f.x.Probe(q, f.k.State()) != "notdone" {
 		t.Fatal("a 429 is safe to send again after Retry-After")
+	}
+}
+
+func TestExitBusyWaitIsCapped(t *testing.T) {
+	f := setupExit(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "9223372036854775807")
+		w.WriteHeader(429)
+	})
+	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
+	f.x.Do(q, f.k.State())
+	if f.x.Probe(q, f.k.State()) != "unknown" {
+		t.Fatal("a huge Retry-After must not overflow into an immediate resend")
+	}
+	q.Now += 24 * 60 * 60 * 1000
+	if f.x.Probe(q, f.k.State()) != "notdone" {
+		t.Fatal("a Retry-After wait is capped at one day")
 	}
 }
 

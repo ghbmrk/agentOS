@@ -61,8 +61,9 @@ const (
 
 // Declaration describes one clerk (CLK-3): its name, the only requests it may
 // make, and the home-network address policy every dial goes through (DEV-2).
-// A nil Guard is netguard's IANA-only policy; a home device is reached only
-// through a pin on the policy the caller passes.
+// The Guard is required: the broker passes its one shared policy, which has
+// learned the home network. The clerk dials with no purpose, so no pin admits
+// it and every non-public address is refused.
 type Declaration struct {
 	Name  string
 	Ops   []Op
@@ -128,25 +129,34 @@ const (
 	pNotSent = "notsent" // the remote refused it before acting
 )
 
+// maxRetryAfter bounds a 429's wait, in seconds: one day.
+const maxRetryAfter = 24 * 60 * 60
+
 var (
 	slotRE  = regexp.MustCompile(`\{([a-z][a-z-]*)\}`)
 	tokenRE = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 	methRE  = regexp.MustCompile(`^[A-Z]+$`)
 )
 
-// clerkHeaders are set by the clerk itself; no declaration may name them.
-var clerkHeaders = []string{"Host", "Content-Type", "Content-Length", "Transfer-Encoding", "Connection", "Idempotency-Key"}
-
-// credHeaders carry credentials; only the secret's own header may.
-var credHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie"}
+// declarable reports whether an op may name a header (canonical form): a few
+// content-negotiation headers, X- headers and API version headers. Anything
+// else is refused by structure, so the headers the clerk sets (Host, framing,
+// Idempotency-Key), hop-by-hop headers and credential headers never pass.
+func declarable(c string) bool {
+	return c == "Accept" || c == "Accept-Language" || c == "User-Agent" ||
+		strings.HasPrefix(c, "X-") || strings.HasSuffix(c, "-Version")
+}
 
 // NewExit validates the declaration; a bad one is an error, never a runtime
 // surprise. The exit owns its transport: no proxy from the environment, no
-// cookie jar, no redirects, and every dial through the guard. roots nil trusts the system's
-// certificate authorities.
+// cookie jar, no redirects, and every dial through the guard, which is
+// required. roots nil trusts the system's certificate authorities.
 func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
 	if d.Name == "" {
 		return nil, errors.New("clerk: a declaration needs a name")
+	}
+	if d.Guard == nil {
+		return nil, errors.New("clerk: a declaration needs the home-network policy (DEV-2)")
 	}
 	x := &Exit{name: d.Name, owner: owner, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}}
 	slot := ""
@@ -156,9 +166,6 @@ func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x5
 			return nil, err
 		}
 		if op.Slot != "" {
-			if slot != "" && slot != op.Slot {
-				return nil, errors.New("clerk: one secret slot per clerk (CLK-1)")
-			}
 			slot = op.Slot
 		}
 		x.ops[op.Verb] = o
@@ -167,14 +174,10 @@ func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x5
 	if n := secrets.Len(); n > 1 || n == 1 && (slot == "" || !secrets.Has(slot)) {
 		return nil, errors.New("clerk: the secret store holds another account's secret (CLK-1)")
 	}
-	g := d.Guard
-	if g == nil {
-		g = netguard.New(netguard.Config{Timeout: 10 * time.Second})
-	}
 	x.client = &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
-			DialContext:         g.DialContext,
+			DialContext:         d.Guard.DialContext,
 			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout: 10 * time.Second,
 			ForceAttemptHTTP2:   true,
@@ -260,13 +263,13 @@ func (x *Exit) declare(op Op) (decl, error) {
 			return o, fmt.Errorf("clerk: no secret slot %q", op.Slot)
 		}
 		o.header = http.CanonicalHeaderKey(cmp(op.Header, "Authorization"))
-		if !tokenRE.MatchString(o.header) || slices.Contains(clerkHeaders, o.header) || !plain(op.Prefix) {
+		if !tokenRE.MatchString(o.header) || o.header != "Authorization" && !declarable(o.header) || !plain(op.Prefix) {
 			return o, errors.New("clerk: bad secret header")
 		}
 	}
 	for h, v := range op.Headers {
 		c := http.CanonicalHeaderKey(h)
-		if !tokenRE.MatchString(h) || !plain(v) || c == o.header || slices.Contains(clerkHeaders, c) || slices.Contains(credHeaders, c) {
+		if !tokenRE.MatchString(h) || !plain(v) || c == o.header || !declarable(c) {
 			return o, fmt.Errorf("clerk: header %q cannot be declared", h)
 		}
 	}
@@ -326,8 +329,9 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return x.send(req, r)
 	}
 	var res kernel.Result
-	// The header value is a string copy the wipe in with cannot reach; it
-	// lives until the request is collected.
+	// with wipes its plaintext buffer on return, but the header value is a
+	// string copy that buffer cannot reach; it lives until the request is
+	// collected.
 	if err := x.secrets.with(op.Slot, func(s []byte) error {
 		req.Header.Set(op.header, op.Prefix+string(s))
 		res = x.send(req, r)
@@ -452,8 +456,9 @@ func classify(resp *http.Response, err error) (kernel.Result, string, int64) {
 	case c >= 200 && c < 300:
 		return res("ok", DSent), pDone, 0
 	case c == 429:
+		// Capped before the multiply, so no value overflows the wait.
 		secs, _ := strconv.ParseInt(resp.Header.Get("Retry-After"), 10, 64)
-		return res("unknown", DBusy), pNotSent, max(secs, 0) * 1000
+		return res("unknown", DBusy), pNotSent, min(max(secs, 0), maxRetryAfter) * 1000
 	case c >= 300 && c < 400:
 		return res("unknown", DRedirect), pUnknown, 0
 	case c == 408:
