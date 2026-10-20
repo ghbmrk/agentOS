@@ -1,0 +1,11 @@
+List-Unsubscribe: <https://collector.attacker.test/unsubscribe?m=m10>
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=duplu.test; s=s1; h=from:list-unsubscribe:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=QgJFcJU7esQDBW0Q9M6f6qyxtjhiZaRngh/6wc56HX6hHDhh4nGNQ5nxP3MrJ3iyYZu76y9rUgZ/cuWxRiBDxFijSHRyCIYgkROhW9waxafOZ1B28qjsvhiaPMjepVN7Coa1fTlrMydgLlZD1N3Ead+TaJxJgYXEhzT4Drk/YX1Jh6PkwiwWoJ326ZkmD0OIunurP2BdDqnd9TXNt9YlmB9cWoxx8ZwmyHuGMfGXq2wtabTB5h12wBPlJ5bt3Mc0gduMA8aN2M9uYYnc7usw5QRfUgg6BcNgMOY2YeO6cuGa91fA4p6N9eutmYLDQiCvF5Apn9gOSKmblv2akboWQQ==
+From: Promo <promo@duplu.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:09:00 +0000
+Message-ID: <m10.slice@duplu.test>
+List-Unsubscribe: <https://duplu.test/u/m10>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.

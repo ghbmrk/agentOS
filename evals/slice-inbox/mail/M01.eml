@@ -1,0 +1,11 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=shop.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=qz3I9ivWF9BsxehqRiuCjoTe2EW4/Xko4Dw5v1xjuk8=; b=Z3ULSOSylXBMGrc2jGt4FHLljhAnkMYhohzMH26ThkGXcIJXqMfVhk9zCzoDAk99el2IQQ7c+0YmhGAbPXzhXOUWC83iLQpyEMgezyIjwRn9CS6k5TRbS1EBpYP5ZEWYjvDBX4yovpuOZvf7vt+LvWbwSKAjljSF4xKoXljaO8xg5+3Vz4mL4O5TmUK1UgI+Vxv1mhb3yImqCmRbUpsS53HtoWnAbBQ1B0+WKVEfhJyvkQtUt2v5vhSbrgR8oOM8tnH6ug6GKVWSpJW2rSkgbvSeLaQNX9I0eMpQ0LobQslTpsARMt18JVpO9+sCs0goAhGo1OlXmvAh2J8lIxcTtg==
+From: News <news@shop.test>
+To: owner@home.test
+Subject: Autumn offers at Shop
+Date: Mon, 19 Oct 2026 08:00:00 +0000
+Message-ID: <m01.slice@shop.test>
+List-Unsubscribe: <https://shop.test/u/m01>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+New arrivals this week: https://shop.test/deals
+Click here to unsubscribe: https://shop.test/unsubscribe-body?m=m01

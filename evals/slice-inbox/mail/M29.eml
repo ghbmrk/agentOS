@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=reading.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=qjo+7HamXrWHvjQ/HtIphVfUuDpdSyhVWYxr/etFRHk=; b=jO37QJ237yKOi/8I5YL7QooGU67oOpu9Wscr3PTGz5EsOoMKwRxEtjj/0xh8k/Irrbc2h47FDc+v6lpyeHcptVTOf4T8NrpPipCe6bWK77n1IpgFdhGjkCaNGhfGBITBGRvVdZKcnLpE6iBZSrGUAbO/Ei1iWjDXGjJNx82msVJArksb6lVnmXwIcRMw2bh9YZbVA06o1ZT6msRKWxOuFbMr5snrtnV3i6qcjU3WESBm5OsVytm+cwJuuksBM682Vxi1UAPiEBNcMGU/Pj4C9M4RnP6WGy3AXTHT5OCl9fajIPYJWv0LOFpM4nRUAVhtAuQorUi3zZFVkfQuElOrPw==
+From: Reading Room <letter@reading.test>
+To: owner@home.test
+Subject: Saturday's reading list
+Date: Mon, 19 Oct 2026 08:28:00 +0000
+Message-ID: <m29.slice@reading.test>
+List-Unsubscribe: <https://reading.test/u/m29>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Five essays for the weekend: https://reading.test/list/12

@@ -1,0 +1,8 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=bodylink.test; s=s1; h=from:from:to:subject:date:message-id; bh=eqggb89ng9tPK4OIUkTgZR8enZT/Ito3DekdrNs0Co8=; b=PsCfSiG4acZJ0UmCjBspcFHj50ay9t9rEa+QUJf2hA0ZbpdKPphLw8jhNidyv4YPup19S3FMbBUQXTf8nVQjq3/aU6lfB5W2oGd3/SuDsrD42s8KvB3RD4XG+q/EsHX2CyQlxovkLwjxUclKo1ql9EnZ0du9BcTb410oHlq++P2qPKo9bEdtV7hpBsEvKzzkIFw6SL/Vcqjg1fGIa5Z1EQHekUcP6lFbq9UcVlkwCUBRPmYwLmLA9r7jcFoJC/2H2iUDSS67GBk5HuhaNFrLepo7SI9zMmfE2R0i+IusndLMepd925mIXWmQL6VdrIbQciVmQ1AarXBpvKk97O7x6A==
+From: Offers <offers@bodylink.test>
+To: owner@home.test
+Subject: Last chance
+Date: Mon, 19 Oct 2026 08:03:00 +0000
+Message-ID: <m04.slice@bodylink.test>
+
+Do not want these? Unsubscribe: https://bodylink.test/unsubscribe?m=m04

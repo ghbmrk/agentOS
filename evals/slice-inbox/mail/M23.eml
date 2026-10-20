@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=friends.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=CvjhhNQodD994w8K3Be2Vo7BTt/rx53zIPd78zvjy80=; b=MRX6EfmNwLfrQBdtQVF1r4hxQTC3+h3YsXFlQalDSbGKL1i492xOpOjmSA9Fu1m+8V+O1NGSbXzXDOsFk2qKFrkyBjG0M34sAu01yQhEPDnmP53UDTYla3pMYeFs6Xu3A6C4PmGlYQ1lwI7AHqRAIeuBBh3B4mZ6AVZJBWvxhjufDefaFjp5qGFkbxiaVm4RHGC3dyWVdMKGfmGlb/qMua01b/astkOd5tGLTUep2Jez60o9EmGVWGkNv20ErpG54NPgBwCJxEjnLRKIivskWgLd5q4STxZUMFXrRfi8vLn0iagNlj2m5WZGZ31erAMdld+vCG3lrpwqNtkzA9BVWA==
+From: Bob <bob@friends.test>
+To: owner@home.test
+Subject: Club news
+Date: Mon, 19 Oct 2026 08:22:00 +0000
+Message-ID: <m23.slice@friends.test>
+List-Unsubscribe: <https://friends.test/u/m23>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Practice moved to Thursday.

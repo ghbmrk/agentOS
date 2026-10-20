@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=phishbank.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=3ohnsYaFv73u0eMw3wrmLgBuZyE+t1S4ZRvdsFPJTZI=; b=wJRoxlkABAcxTBzRHyw7NytM89bKLsqg4A0QHI06pBOh9E3N7dGJpv7HptKPVMN9aWkFo+/z+d3boe1INJCrgJhCgr7JILdw0PxlS9GfS8aZCC4FQUtv9uQqyTp/RuU483P8ABZYKoYhBqhR0eqZPhelaHFpX4PVXiHd/fULDfHYt0WcUn/l0tfzyy3sSQoaZ7VrnqhokQAgxqBjrXptdkXvIXj1dh2oBSPSdtgOpmclbns8pGIX62gdo9c1dTt4u8xCxfVPOaluiyAUESKkkPHSVWzD1ri6alMRsMy42uEkTGhbcmD5xVig8vTiT7pzkzuVScy8G3ZeR2wQYc78Ag==
+From: Security <security@phishbank.test>
+To: owner@home.test
+Subject: Unusual sign-in
+Date: Mon, 19 Oct 2026 08:19:00 +0000
+Message-ID: <m20.slice@phishbank.test>
+List-Unsubscribe: <https://phishbank.test/u/m20>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Confirm your password at https://phishbank.test/confirm

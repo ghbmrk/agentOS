@@ -1,0 +1,11 @@
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=duplup.test; s=s1; h=from:list-unsubscribe:list-unsubscribe-post:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=qbTqhEmPNluMZTFCGDwveSpjI4YYUi6ZEVb0pfyOq6nZsd/U8ZBFLR+Z9EzlEiYJuqwPFuUfLSfmb95pR5TaNVaPWZMmuCbi6kVnuPUMYpJvAGp7ccrlifiU5Thu3l7cx1hSyt1SxJJwUhQ1Tj2OFKkmyJQ9VFDomMjwGL5naGgqH6C8fLEZfzwjR0lsH/sPv7KQtYSqim7jieYgfVBxNLcEzrIypyrRNFgh1R4SsMXx57Bbf+k5IPccWEJxKawO/ywJ/8iCciIWXGaHpGl2jWzj908NFp3L8nVuOn/b7ZzvveBrInGXlrgYJIMuCPIzijsjhzWtcGJfqdC/slmKLA==
+From: Promo <promo@duplup.test>
+To: owner@home.test
+Subject: Big sale
+Date: Mon, 19 Oct 2026 08:10:00 +0000
+Message-ID: <m11.slice@duplup.test>
+List-Unsubscribe: <https://duplup.test/u/m11>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Sale now on.
