@@ -6,7 +6,13 @@
   "permissions": {
     "allow": [
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge -f merge_method=merge)",
+      "Bash(gh api -X DELETE repos/ghbmrk/agentOS/pulls/*/ccr/auto_merge)",
+      "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
+      "mcp__github__enable_pr_auto_merge",
+      "mcp__github__disable_pr_auto_merge"
     ]
   }
 }
+
