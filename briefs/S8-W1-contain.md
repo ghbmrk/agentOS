@@ -1,6 +1,6 @@
 # S8-W1-contain: the pinned Codex CLI's tools under gVisor, holding only a placeholder
 
-Board section: Release rows. Source: work item #1720. Tier A (vm, credentials, the provider worker's tool sandbox). Needs #807 (image), #1015 (placeholder login), #1014 (forwarder), #809 (the runsc measurement this narrows). Distinct from #1380's D-064 test, which is the Claude opt-in volume.
+Board section: Release rows. Source: work item #1720. Tier A (vm, credentials, the provider worker's tool sandbox). Needs #807 (image), #1015 (placeholder login), #1014 (forwarder), #809 (the runsc measurement this narrows).
 
 **Why.** CRED-5's broker-held mode rests on the Codex CLI's tool subprocesses being unable to reach what the CLI itself holds: the in-worker forwarder on 127.0.0.1:18432, the route socket `/run/agentos/route.sock`, and `CODEX_HOME` with its placeholder `auth.json`. `tests/test_codex_worker.py` checks this with bwrap on a plain Linux host. Nothing checked it in a gVisor machine from the built image, where bwrap runs nested inside runsc (guest/codex/ASSUMPTIONS.md C5, folded in here).
 
@@ -28,7 +28,7 @@ Board section: Release rows. Source: work item #1720. Tier A (vm, credentials, t
 - A tool reading or rewriting the placeholder `auth.json`.
 - Failing closed being mistaken for containment: a tool that never runs proves nothing, so the test requires the probe line from a real tool run.
 
-**Out of scope.** The forwarder itself (#1014), the vault entry (#1015), live qualification (#809), the Claude opt-in volume (#1380), `guest/codex/ASSUMPTIONS.md` (#1504).
+**Out of scope.** The forwarder itself (#1014), the vault entry (#1015), live qualification (#809), `guest/codex/ASSUMPTIONS.md` (#1504).
 
 **Scope:** `broker/e2e/codex_contain_test.go`, `broker/e2e/testdata/codexprobe/*`, `broker/e2e/ASSUMPTIONS.md`, `guest/codex/build-rootfs.sh` (header comment and any fix the test needs), `guest/codex/bwrap-loopback.patch` (new: bwrap under runsc, ASSUMPTIONS E4), `guest/codex/managed_config.toml` (`shell_snapshot = false`, E6), `broker/e2e/dep2_test.go` (one `thirdPartyHosts` entry, `github.com`, for the hash-pinned bubblewrap tarball under Mark's "Patch bwrap" decision; excluded only while #1951 was open, which has merged), `.github/workflows/ci.yml` (one machines step, and libcap-dev for the steps that build the rootfs), this brief.
 

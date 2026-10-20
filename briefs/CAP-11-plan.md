@@ -33,11 +33,11 @@ Board section: Release rows carried from LATER.md (2026-10-10). Source: work ite
 - Label laundering: private content reaching a plan account later used by a public caller.
 - A guest guessing a provider worker's ID and calling a worker tool on it.
 
-**Spec dependency.** Settled by the D-114 SPEC diff (CRED-5, CAP-9, §8.1 step 6). This package builds no consent or opt-in flow: CRED-5c records Codex consent, and #1380 builds the Claude opt-in.
+**Spec dependency.** Settled by the D-114 SPEC diff (CRED-5, CAP-9, §8.1 step 6). This package builds no consent flow: CRED-5c records Codex consent.
 
 **Needs:** #807, #1015, #1014 to build; #809 S8-live and #1377 to enable (they fill the qualification record); CRED-5c (consent) and CRED-5b (failure, fallback and pause) before the Codex route ships. #1264 c4e2 (page sign-in) comes after this and is what puts a real login in the vault; until then tests seed a synthetic canary login.
 
-**Out of scope.** CAP-12a resources tool, the page's "Use my plan" sign-in (#1264), the consent record (CRED-5c), failure and pause handling (CRED-5b), the Claude opt-in (#1380), Grok and Muse declarations (#1378, #1379), live qualification and A14's adversarial clause (S8-live, #809).
+**Out of scope.** CAP-12a resources tool, the page's "Use my plan" sign-in (#1264), the consent record (CRED-5c), failure and pause handling (CRED-5b), Grok and Muse declarations (#1378, #1379), live qualification and A14's adversarial clause (S8-live, #809).
 
 **Scope:** `broker/provagent/*` (new), `broker/modelroute/*` (route kind and fallback only), `broker/workers/*` (provider run path and tool ID refusal), `broker/workers/*_test.go`, `broker/vm/worker.go` (spec only), `broker/cmd/agentosd/main.go` (wiring) and its tests, `broker/guest/mcp.go` (tool registration only), `broker/guest/tools_test.go`, `broker/daemon/arc2_test.go` (classing `provagent` only; amended 2026-10-15 on the #1864 reviews), `tools/risk_tier.py` (classing `provagent` tier A only; same amendment), the ASSUMPTIONS.md of each touched package, this brief.
 

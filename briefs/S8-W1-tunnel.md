@@ -41,7 +41,7 @@ Board section: Release rows carried from LATER.md (2026-10-10). Source: work ite
 
 **Needs:** #807 (image, managed config, tool sandbox; the path must not ship before tools are cut off from loopback). #1015 (vault entry, placeholders, the worker spec field naming the provider). Can build against stubs in parallel with #1015 if the spec field is agreed first.
 
-**Out of scope.** The vault entry and placeholders (#1015), the image and CLI config (#807), the route and its guest tool (CAP-11-plan), the page's sign-in screen and consent (#1264; this package owns the sign-in endpoints, swap and auth-host check it calls), the Claude opt-in tunnel (#1380), live checks against real provider edges (S8-live, #809).
+**Out of scope.** The vault entry and placeholders (#1015), the image and CLI config (#807), the route and its guest tool (CAP-11-plan), the page's sign-in screen and consent (#1264; this package owns the sign-in endpoints, swap and auth-host check it calls), live checks against real provider edges (S8-live, #809).
 
 **Scope:** `broker/egress/worker.go` (new), `broker/egress/*_test.go`, `broker/egress/ASSUMPTIONS.md`, `broker/cmd/agentos-egress/main.go`, `broker/cmd/agentos-egress/server.go`, `broker/cmd/agentos-egress/*_test.go`, `broker/vm/gvisor/gvisor.go` (socket mount), `broker/vm/gvisor/*_test.go`, `broker/vm/worker.go`, `broker/vm/*_test.go`, `broker/cmd/agentosd/main.go` (wiring), `image/mkosi/*` (forwarder only), `image/ASSUMPTIONS.md`, `tests/test_image.py`, this brief.
 
