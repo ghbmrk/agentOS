@@ -201,7 +201,7 @@ func TestTrashNeedsRestorableRetention(t *testing.T) {
 	}
 }
 
-// REQ: MIG-3-15
+// REQ: VRB-2 (assumption MIG-3-15)
 // The cap is the key's, counted at the clerk from the log: a hostile planner
 // pushing 250 organizes on the key Run derives gets 200, and a restart in the
 // middle of the day does not reset the count. Unsubscribe is not counted.
@@ -259,7 +259,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 	}
 }
 
-// REQ: MIG-3-15
+// REQ: VRB-2 (assumption MIG-3-15)
 // The bulk key cannot unsubscribe, and the unsubscribe key cannot organize.
 func TestSiblingKeysCarryOnlyTheirOwnVerbs(t *testing.T) {
 	r := newRig(t, 30)
@@ -272,7 +272,7 @@ func TestSiblingKeysCarryOnlyTheirOwnVerbs(t *testing.T) {
 	}
 }
 
-// REQ: MIG-3-16
+// REQ: CLK-2, VRB-2 (assumption MIG-3-16)
 // A label is exactly agentOS/ plus the class the clerk assigned to that mail,
 // whatever the key allows: an owner-namespace label is refused at the clerk.
 func TestClerkRefusesAnyLabelButItsOwnClassLabel(t *testing.T) {

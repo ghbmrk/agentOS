@@ -167,7 +167,7 @@ func TestRunCapsOrganizeAndTrashNotUnsubscribe(t *testing.T) {
 	}
 }
 
-// REQ: MIG-3-15
+// REQ: VRB-2 (assumption MIG-3-15)
 // More spam than the cap: the cap is spent on trash alone, nothing is labelled,
 // and the mails left over are said once, counted as trash.
 func TestRunCapsTrashAndSaysWhatIsLeft(t *testing.T) {
