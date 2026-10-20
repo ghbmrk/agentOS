@@ -116,8 +116,8 @@ type Reach struct {
 	// channel). Nil: not told.
 	Notify func(text string) error
 	// HeldDropped tells the owner, in the broker's own words and never as
-	// agent text, how many held agent texts a deletion with no
-	// confirmation of its own dropped (n > 0, CAP3-F1). Nil: not told.
+	// agent text, how many held agent texts a reset's forget dropped
+	// (n > 0, CAP3-F1), apart from any confirmation. Nil: not told.
 	HeldDropped func(n int) error
 	// OnTakenBack, when set, is told by Retry of each take-back seen not
 	// done where a reset can finish and done since (TakeBackOf reports it
@@ -908,9 +908,10 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 		return &unrecordedErr{rs: rs, err: err}
 	}
 	// The confirmation is worded before finish erases the actions it
-	// counts, and sent after, with the held agent texts the forget
-	// dropped (CAP3-F1); a failed finish still sends it. Unapproved, the
-	// count is told alone.
+	// counts, and sent after; a failed finish still sends it. The held
+	// agent texts the forget dropped are counted apart from it, in the
+	// broker's own words, so a later forget cannot drop the count with a
+	// held confirmation (CAP3-F1).
 	var err error
 	if approved {
 		to := plan.To
@@ -920,7 +921,8 @@ func (r *Reach) reset(ctx context.Context, lineage string, since time.Time, appr
 		text := r.done(lineage, r.forgotten(lineage, rs), to, perr == nil, r.actions(lineage, since, rs.Until))
 		var held int
 		held, err = r.finish(lineage, rs)
-		r.tell(lineage, text+heldDropped(held))
+		r.tell(lineage, text)
+		r.tellDropped(lineage, held)
 	} else {
 		err = r.finishTold(lineage, rs)
 	}
@@ -990,17 +992,24 @@ func (r *Reach) finish(lineage string, rs Reset) (int, error) {
 }
 
 // finishTold finishes rs and tells the owner how many held agent texts
-// its forget dropped, a count and never their text, on every path with no
-// confirmation of its own to carry it (CAP3-F1). A replayed finish counts
-// only what it drops itself, so nothing is told twice. Called with run held.
+// its forget dropped, a count and never their text (CAP3-F1). A replayed
+// finish counts only what it drops itself, so nothing is told twice.
+// Called with run held.
 func (r *Reach) finishTold(lineage string, rs Reset) error {
 	held, err := r.finish(lineage, rs)
-	if held > 0 && r.HeldDropped != nil {
-		if terr := r.HeldDropped(held); terr != nil && r.Logf != nil {
-			r.Logf("recall: rollback of %s; owner not told %d held agent texts dropped: %v", lineage, held, terr)
-		}
-	}
+	r.tellDropped(lineage, held)
 	return err
+}
+
+// tellDropped tells the owner, through HeldDropped, that a reset of
+// lineage dropped n held agent texts (n > 0, CAP3-F1).
+func (r *Reach) tellDropped(lineage string, n int) {
+	if n <= 0 || r.HeldDropped == nil {
+		return
+	}
+	if err := r.HeldDropped(n); err != nil && r.Logf != nil {
+		r.Logf("recall: rollback of %s; owner not told %d held agent texts dropped: %v", lineage, n, err)
+	}
 }
 
 // HeldDroppedText tells the owner, alone, how many held agent texts a
@@ -1010,18 +1019,6 @@ func HeldDroppedText(n int) string {
 		return "A deletion dropped 1 held agent text."
 	}
 	return fmt.Sprintf("A deletion dropped %d held agent texts.", n)
-}
-
-// heldDropped words the held agent texts a forget dropped, a count and
-// never their text (CAP3-F1); none adds nothing.
-func heldDropped(n int) string {
-	switch n {
-	case 0:
-		return ""
-	case 1:
-		return " 1 held agent text was dropped too."
-	}
-	return fmt.Sprintf(" %d held agent texts were dropped too.", n)
 }
 
 func (r *Reach) now() time.Time {
