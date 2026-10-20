@@ -1,32 +1,26 @@
 #!/usr/bin/env python3
-"""Every test that reads a record file is on ci.yml's records-only step (CI-docs, CI-PATHS).
+"""Every test module that reads a record file is on ci.yml's records-only step (CI-docs, CI-PATHS).
 
 A records-only change can edit any record file (tools/ci_scope.is_record), and the records step
 runs a fixed test list, so every test whose outcome rests on a record must be on that list. Full
-CI's unit tests run with records_site/ on PYTHONPATH and AGENTOS_RECORD_LOG set. Its
-sitecustomize installs install()'s audit hook in every Python process, including subprocesses,
-and the hook logs each open of a record file under the test it ran in. `records_audit.py LOG`
-then fails unless the records step runs each logged test. The read is caught where it happens,
-whatever code built the name. A read with no test to own it, a hook that failed to install, a
-Python child that cannot load the hook (-I, -E) and an empty log all fail. Not seen: reads by
-programs that are not Python (git, sh), and a record one test of a module read and cached in
-memory, reused by a later test of the same module process.
+CI's unit tests run each tests/test*.py module in its own process tree under `strace -f`, which
+records every file opened anywhere in that tree, whatever the program (Python and its children,
+sh, git, Go). `records_audit.py DIR` then fails unless the records step lists whole each module
+whose tree opened a record file or a directory of records. The module is the unit: a read at
+import, in a fixture, or cached by one test and used by another is covered alike. A module with
+no trace, or whose trace does not show its own file opened (tracing did not work), fails too.
+Not seen: a stat or existence check that opens nothing.
 """
-import importlib.util
 import os
 import re
 import sys
 
+import importlib.util
+
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 TESTS = os.path.join(ROOT, "tests")
-SITE = os.path.join(TESTS, "records_site")
-LOG, OWNER = "AGENTOS_RECORD_LOG", "AGENTOS_RECORD_OWNER"
-UNKNOWN = "unknown"
-# Process-start audit events: the index of their argv and of their environment (None: none).
-_SPAWNS = {"subprocess.Popen": (1, 3), "os.posix_spawn": (1, 2), "os.exec": (1, 2), "os.spawn": (2, 3),
-           "os.system": (0, None)}
-_inherited = None
-_seen = set()
+# One strace line for open/openat/openat2 under -y: pid, call, the directory fd's path, the path.
+_OPEN = re.compile(r'^\d+\s+open(?:at2?)?\((?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)"(.*)$')
 
 
 def records_run_tests(text=None):
@@ -60,130 +54,75 @@ def records_run_tests(text=None):
     return names
 
 
-def _ci_scope():
+def _is_record():
     spec = importlib.util.spec_from_file_location("_records_ci_scope", os.path.join(ROOT, "tools", "ci_scope.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    record_dirs = tuple(d.rstrip("/") for d in module.RECORD_DIRS)
+
+    def read(rel, directory):
+        if directory:
+            return any(rel == d or rel.startswith(d + "/") for d in record_dirs)
+        return module.is_record(rel)
+    return read
 
 
-def _test_module(filename):
-    """`tests.test_x` for a frame in tests/test_x.py (`test_x` elsewhere), else None."""
-    head, base = os.path.split(filename or "")
-    if not (base.startswith("test_") and base.endswith(".py")):
-        return None
-    return ("tests." if os.path.realpath(head) == TESTS else "") + base[:-3]
-
-
-def _named(cls):
-    module = sys.modules.get(cls.__module__)
-    return f"{_test_module(getattr(module, '__file__', None)) or cls.__module__}.{cls.__qualname__}"
-
-
-def owner(frame):
-    """The test a frame runs under: the innermost TestCase method (`tests.m.Class.test_x`) or
-    class fixture (`tests.m.Class`), else the innermost tests/test_*.py frame (`tests.m`, an
-    import), else the test that started this process, else UNKNOWN."""
-    case = sys.modules.get("unittest.case")
-    f = frame
-    while case and f:
-        for name in ("self", "cls"):
-            v = f.f_locals.get(name)
-            if isinstance(v, case.TestCase):
-                return f"{_named(type(v))}.{v._testMethodName}"
-            if isinstance(v, type) and issubclass(v, case.TestCase):
-                return _named(v)
-        f = f.f_back
-    f = frame
-    while f:
-        module = _test_module(f.f_code.co_filename)
-        if module:
-            return module
-        f = f.f_back
-    return _inherited or UNKNOWN
-
-
-def _write(line):
-    if line in _seen:
-        return
-    _seen.add(line)
-    fd = os.open(os.environ[LOG], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    try:
-        os.write(fd, (line + "\n").encode("utf-8", "surrogateescape"))
-    finally:
-        os.close(fd)
-
-
-def _isolated(argv):
-    """A Python command line that ignores PYTHONPATH, so its process runs without the hook."""
-    words = [os.fsdecode(w) for w in argv] if isinstance(argv, (list, tuple)) else str(argv).split()
-    if not words or not re.fullmatch(r"python[\d.]*", os.path.basename(words[0])):
-        return False
-    return any(re.fullmatch(r"-[A-Za-z]*[IE][A-Za-z]*", w) for w in words[1:] if not w.startswith("--"))
-
-
-def install():
-    """Log every record open in this process, and carry the hook and the current test into the
-    processes it starts."""
-    global _inherited
-    is_record = _ci_scope().is_record
-    _inherited = os.environ.get(OWNER)
-    paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
-    if SITE not in paths:
-        os.environ["PYTHONPATH"] = os.pathsep.join([SITE] + [p for p in paths if p])
-
-    def hook(event, args):
-        if event == "open":
-            path = args[0]
-            if isinstance(path, bytes):
-                path = os.fsdecode(path)
-            if not isinstance(path, str):
-                return
-            rel = os.path.relpath(os.path.realpath(path), ROOT).replace(os.sep, "/")
-            if not rel.startswith("../") and is_record(rel):
-                _write(f"{owner(sys._getframe(1))}\t{rel}")
-        elif event in _SPAWNS:
-            who = owner(sys._getframe(1))
-            os.environ[OWNER] = who
-            argv, env = _SPAWNS[event]
-            argv, env = args[argv], (args[env] if env is not None else None)
-            if isinstance(env, dict):
-                env[OWNER] = who
-                env.setdefault(LOG, os.environ[LOG])
-                paths = env.get("PYTHONPATH", "").split(os.pathsep)
-                if SITE not in paths:
-                    env["PYTHONPATH"] = os.pathsep.join([SITE] + [p for p in paths if p])
-            if _isolated(argv):
-                _write(f"{who}\tisolated python: {argv!r}")
-
-    sys.addaudithook(hook)
-
-
-def related(a, b):
-    """One dotted test name runs the other: a module or class runs its methods, and running a
-    method imports its module and runs its class fixtures."""
-    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
-
-
-def problems(log_text, listed):
-    entries = [l.split("\t", 1) for l in log_text.splitlines() if l]
-    if not entries:
-        return ["no record reads logged: the audit hook did not run"]
+def opened(trace, root=ROOT):
+    """(repo-relative path, opened as a directory) for each open in a strace -f -y log. A
+    relative path with no directory to resolve it against is returned as is."""
     out = set()
-    for e in entries:
-        if len(e) != 2 or e[0] in (UNKNOWN, "error") or not any(related(e[0], n) for n in listed):
-            out.add("\t".join(e))
-    return sorted(out)
+    for line in trace.splitlines():
+        if root not in line and 'open("' not in line:
+            continue
+        m = _OPEN.match(line)
+        if not m:
+            continue
+        base, path = m.group(1), m.group(2).replace('\\"', '"').replace("\\\\", "\\")
+        if not os.path.isabs(path):
+            if base is None:
+                out.add((path, "O_DIRECTORY" in m.group(3)))
+                continue
+            path = os.path.join(base, path)
+        rel = os.path.relpath(os.path.normpath(path), root).replace(os.sep, "/")
+        if rel != ".." and not rel.startswith("../"):
+            out.add((rel, "O_DIRECTORY" in m.group(3)))
+    return out
+
+
+def problems(traces, listed, is_record=None):
+    """traces: {module stem: strace text}, one per tests/test*.py module."""
+    is_record = is_record or _is_record()
+    out = []
+    for stem, trace in sorted(traces.items()):
+        paths = opened(trace)
+        if not any(rel == f"tests/{stem}.py" or re.fullmatch(rf"tests/__pycache__/{stem}\.[\w.-]+\.pyc", rel)
+                   for rel, _ in paths):
+            out.append(f"tests.{stem}\tno open of the module's own file: tracing did not run")
+            continue
+        if f"tests.{stem}" in listed:
+            continue
+        for rel, directory in sorted(paths):
+            if is_record(rel, directory):
+                out.append(f"tests.{stem}\t{rel}")
+    return out
 
 
 def main(argv):
-    with open(argv[1], encoding="utf-8", errors="surrogateescape") as f:
-        found = problems(f.read(), records_run_tests())
+    traces = {}
+    for name in sorted(os.listdir(TESTS)):
+        if name.startswith("test") and name.endswith(".py"):
+            stem = name[:-3]
+            try:
+                with open(os.path.join(argv[1], stem + ".trace"), errors="surrogateescape") as f:
+                    traces[stem] = f.read()
+            except FileNotFoundError:
+                traces[stem] = ""
+    found = problems(traces, records_run_tests())
     for p in found:
         print(p)
     if found:
-        print("Add these tests to ci.yml's records-only step (a test that reads a record must run there).",
-              file=sys.stderr)
+        print("Add these modules, whole, to ci.yml's records-only step (a test that reads a record "
+              "must run there).", file=sys.stderr)
     return 1 if found else 0
 
 

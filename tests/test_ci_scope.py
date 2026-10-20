@@ -1,5 +1,4 @@
 """Tests for tools/ci_scope.py and its wiring into the workflows (CI-docs)."""
-import os
 import pathlib
 import re
 import subprocess
@@ -370,54 +369,21 @@ class WiringTest(unittest.TestCase):
 
     def test_full_unit_tests_audit_record_reads_against_the_records_step(self):
         # REQ: CI-PATHS
-        # The records step skips discovery, so full CI's unit tests log every record read and
-        # the next step fails on a reader the records step leaves out.
+        # The records step skips discovery, so full CI's unit tests run each module under strace
+        # and the next step fails on a module that opened a record and is not listed whole.
         ci = (WORKFLOWS / "ci.yml").read_text()
         unit = ci[ci.index("      - name: Unit tests\n"):]
         unit, check = unit.split("\n      - ", 2)[:2]
         self.assertIn("        if: env.RECORDS != 'true'\n", unit)
-        self.assertIn('          export PYTHONPATH="$PWD/tests/records_site" '
-                      'AGENTOS_RECORD_LOG="$RUNNER_TEMP/record-reads.log"\n'
-                      '          rc=0; for f in tests/test_*.py; do python -m unittest discover -s tests '
-                      '-p "${f#tests/}" -v || rc=1; done; exit $rc\n', unit + "\n")
+        self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
+        self.assertIn('          for f in tests/test*.py; do\n'
+                      '            m=$(basename "$f" .py)\n'
+                      '            strace -f --seccomp-bpf -qq -y -e trace=open,openat,openat2 -e signal=none '
+                      '-o "$RUNNER_TEMP/reads/$m.trace" \\\n'
+                      '              python -m unittest discover -s tests -p "$m.py" -v || rc=1\n'
+                      '          done\n          exit $rc', unit)
         self.assertEqual(check.splitlines()[1:], ["        if: env.RECORDS != 'true'",
-                         '        run: python tests/records_audit.py "$RUNNER_TEMP/record-reads.log"'])
-
-    def test_record_audit_logs_each_read_under_its_test(self):
-        # REQ: CI-PATHS
-        # The audit's control: reads however the name is built, at import, in a class fixture,
-        # in a test and in a Python child are each logged under their owner; temp writes,
-        # non-records and an isolated child (logged as such) are not record reads.
-        with tempfile.TemporaryDirectory() as d:
-            mod = pathlib.Path(d) / "test_probe.py"
-            mod.write_text(f"""import os, pathlib, subprocess, sys, unittest
-ROOT = pathlib.Path({str(ROOT)!r})
-(ROOT / "SPEC.md").read_text()
-class A(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        open("{{}}/{{}}".format(ROOT, "PLAN.md")).close()
-    def test_join(self):
-        pathlib.Path(ROOT, "docs", "OPERATING.md").read_text()
-    def test_child(self):
-        subprocess.run([sys.executable, "-c", "open('README.md').close()"], cwd=ROOT, check=True, env={{}})
-    def test_isolated(self):
-        subprocess.run([sys.executable, "-I", "-c", "pass"], check=True)
-    def test_not_records(self):
-        (pathlib.Path({d!r}) / "SPEC.md").write_text("x")
-        (ROOT / "docs" / "owners-guide.md").read_text()
-""")
-            log = pathlib.Path(d) / "log"
-            env = {**os.environ, "PYTHONPATH": str(ROOT / "tests" / "records_site"), "AGENTOS_RECORD_LOG": str(log)}
-            env.pop("AGENTOS_RECORD_OWNER", None)
-            run = subprocess.run([sys.executable, "-m", "unittest", "test_probe"], cwd=d, env=env,
-                                 capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            lines = set(log.read_text().splitlines())
-        self.assertEqual({l for l in lines if "isolated" not in l}, {
-            "test_probe\tSPEC.md", "test_probe.A\tPLAN.md",
-            "test_probe.A.test_join\tdocs/OPERATING.md", "test_probe.A.test_child\tREADME.md"})
-        self.assertEqual([l.split("\t")[0] for l in lines if "isolated" in l], ["test_probe.A.test_isolated"])
+                         '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 
     def test_records_run_tests_reads_the_step_or_fails(self):
         # The list parse takes the run line in any YAML shape and fails rather than guess; -v is
@@ -438,13 +404,30 @@ class A(unittest.TestCase):
 
     def test_record_audit_fails_on_an_unlisted_reader(self):
         # REQ: CI-PATHS
-        listed = ["tests.a", "tests.b.C", "tests.d.E.test_f"]
-        ok = "tests.a.X.test_y\tSPEC.md\ntests.b\tPLAN.md\ntests.b.C.test_z\tREADME.md\ntests.d.E\tBOARD.md\n"
-        self.assertEqual(records_audit.problems(ok, listed), [])
-        for bad in ("tests.b.D.test_z\tSPEC.md", "tests.d.E.test_g\tSPEC.md", "tests.ab\tSPEC.md",
-                    "unknown\tSPEC.md", "error\tsitecustomize: x", "tests.x\tisolated python: ['python', '-I']"):
-            self.assertEqual(records_audit.problems(ok + bad + "\n", listed), [bad], bad)
-        self.assertTrue(records_audit.problems("", listed))
+        # The audit's controls, over strace -f -y lines: any process's open of a record, by
+        # absolute or directory-relative path, a listing of a record directory and a relative
+        # open it cannot resolve each need the module listed whole; a listed class is not enough.
+        own = '1 openat(AT_FDCWD<{r}>, "{r}/tests/__pycache__/test_m.cpython-312.pyc", O_RDONLY) = 3\n'.format(r=ROOT)
+        reads = {
+            'SPEC.md': '2 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3\n',
+            'docs/OPERATING.md': '3 openat(AT_FDCWD</>, "{r}/docs/OPERATING.md", O_RDONLY) = 3\n',
+            'reviews/l3': '4 openat(5<{r}/reviews>, "l3", O_RDONLY|O_DIRECTORY) = 6\n',
+            'BOARD.md': '5 open("BOARD.md", O_RDONLY <unfinished ...>\n',
+            'docs/LANES.md': '6 openat(AT_FDCWD<{r}/tools>, "../docs/LANES.md", O_RDONLY) = -1 ENOENT\n',
+        }
+        quiet = ('7 openat(AT_FDCWD</tmp/x>, "SPEC.md", O_WRONLY|O_CREAT, 0644) = 3\n'
+                 '8 openat(AT_FDCWD<{r}>, "docs/owners-guide.md", O_RDONLY) = 3\n'
+                 '9 openat(AT_FDCWD<{r}>, "docs", O_RDONLY|O_DIRECTORY) = 3\n'
+                 '10 execve("/usr/bin/cat", ["cat", "SPEC.md"], 0x1 /* 3 vars */) = 0\n').format(r=ROOT)
+        problems = records_audit.problems
+        self.assertEqual(problems({"test_m": own + quiet}, ["tests.test_m.A"]), [])
+        for rel, line in reads.items():
+            trace = {"test_m": own + quiet + line.format(r=ROOT)}
+            self.assertEqual(problems(trace, ["tests.test_m.A", "tests.test_m.A.test_a"]), [f"tests.test_m\t{rel}"], rel)
+            self.assertEqual(problems(trace, ["tests.test_m"]), [], rel)
+        self.assertEqual(problems({"test_m": reads["SPEC.md"].format(r=ROOT)}, ["tests.test_m"]),
+                         ["tests.test_m\tno open of the module's own file: tracing did not run"])
+        self.assertEqual(len(problems({"test_m": ""}, [])), 1)
 
     def test_no_privileged_workflow_uses_a_cache(self):
         # REQ: CI-PATHS
