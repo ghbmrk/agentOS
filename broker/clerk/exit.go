@@ -24,7 +24,7 @@ import (
 type Op struct {
 	Verb    key.Verb
 	Method  string
-	URL     string   // https://host/path/{arg}, no slot in the scheme or host
+	URL     string   // https, fixed host, path may hold {arg} slots; none in scheme or host
 	Slot    string   // secret slot sent with the request; "" sends none
 	Header  string   // header that carries the secret; Authorization if empty
 	Prefix  string   // text before the secret in that header, e.g. "Bearer "
