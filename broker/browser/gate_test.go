@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 // The test binary doubles as a scripted driver: with BROWSER_FAKE_DRIVER set it

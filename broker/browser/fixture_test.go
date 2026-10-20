@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 // The S5 driver behind the gate, against S5's local fixture site. Needs
