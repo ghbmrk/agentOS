@@ -15,14 +15,16 @@ import (
 // it to the page, DHCP and DNS (DEV-2, A14, DEV-net-h):
 //
 //   - Start brings down each interface the loader may run the access point
-//     on, before any bring-up or station join (a): a loader that died with
+//     on, before any bring-up (a): a loader that died with
 //     the access point up left it exempt and agentos_ap loaded. It first
 //     brings down the interface agentos_ap holds, if Start does not name
 //     it, so a dead loader's radio is not left exempt with no table
 //     (DEV-net-i).
-//   - Station refuses an interface whose BringDown last failed, or that runs
-//     the access point (b): on a single radio it would join the home Wi-Fi
-//     still exempt.
+//   - Start refuses StationIface, the station EnsureStation creates beside
+//     the access point (#936): it is never the access point's, so the
+//     loader never brings it down. NetworkManager joins the home Wi-Fi on
+//     it, never on an interface the access point may run on (b; netjoin
+//     ASSUMPTIONS N13).
 //   - Up refuses while another interface is up, any BringDown last failed,
 //     or agentos_ap holds it (c): BringUp(wl1) replaces agentos_ap, so wl0
 //     would stay exempt with no table and every box port open to its
@@ -31,16 +33,21 @@ import (
 //   - Rekey restarts a running access point with a rotated Wi-Fi password
 //     (REC-4), under the same rules.
 //
-// Its methods are serialised; Station holds the lock for the join.
+// Its methods are serialised.
 type APLoader struct {
 	AP   AccessPoint
 	Host APHost
+	// Radio, if set, is how EnsureStation creates StationIface.
+	Radio Radio
 
 	mu     sync.Mutex
 	named  map[string]bool  // interfaces a Start brought down, or tried to
 	up     string           // the interface running the access point
 	cfg    APConfig         // what the access point on up runs with
 	failed map[string]error // interfaces whose BringDown last failed
+
+	station  bool   // the last EnsureStation left StationIface there
+	channels uint32 // its combination's channels; 0 with no station
 }
 
 // Start runs BringDown for each interface, idempotent whether or not it was
@@ -48,10 +55,9 @@ type APLoader struct {
 // any, without naming it: a loader that died with the access point up on a
 // radio this list leaves out left that radio exempt (DEV-net-i). If that
 // BringDown fails, the radio blocks Up on any other interface until a Down
-// succeeds for it. Up and Station refuse an interface no Start named, since
-// its exemption state is unknown. BringDown must succeed for an interface
-// before Station takes it; one whose BringDown fails stays refused until a
-// Down succeeds for it.
+// succeeds for it. Up refuses an interface no Start named, since its
+// exemption state is unknown. Start refuses StationIface without touching
+// it.
 func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 	if len(ifaces) == 0 {
 		return errors.New("localui: the loader's Start names no access point interface")
@@ -71,6 +77,10 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 		errs = append(errs, l.bringDown(ctx, held))
 	}
 	for _, iface := range ifaces {
+		if iface == StationIface {
+			errs = append(errs, fmt.Errorf("localui: %s is the station, never the access point's", iface))
+			continue
+		}
 		if _, err := ExemptUnit(iface); err != nil {
 			errs = append(errs, err)
 			continue
@@ -85,8 +95,7 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 // Start named, while an access point is up, while any interface's BringDown
 // last failed (its own included: hostapd may still run there), and while agentos_ap holds another interface or cannot be
 // read. If BringUp fails, the loader runs BringDown again, and an
-// interface it cannot bring down stays refused for Station and blocks Up
-// on any other.
+// interface it cannot bring down blocks Up on any other.
 func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -188,26 +197,6 @@ func (l *APLoader) Down(ctx context.Context) error {
 	}
 	l.up, l.cfg = "", APConfig{}
 	return errors.Join(errs...)
-}
-
-// Station runs join, which puts iface into station mode, only after a
-// Start named iface, while iface is not running the access point and its last BringDown
-// succeeded. The home Wi-Fi join (agentosd through agentos-netjoin) does
-// not pass through here: netjoin refuses any station that agentos-ap may
-// run the access point on and pins its connection to its own station
-// interface instead (S-R4, #1428, netjoin ASSUMPTIONS N13).
-func (l *APLoader) Station(ctx context.Context, iface string, join func(context.Context) error) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	switch {
-	case !l.named[iface]:
-		return notNamed(iface)
-	case iface == l.up:
-		return fmt.Errorf("localui: %s runs the access point", iface)
-	case l.failed[iface] != nil:
-		return fmt.Errorf("localui: %s may still be exempt, so it does not join a network: %w", iface, l.failed[iface])
-	}
-	return join(ctx)
 }
 
 // stuck reports the interfaces whose BringDown last failed, in order, as
