@@ -39,9 +39,6 @@ type Use struct {
 	Amount    int64
 	Recipient string
 	Task      string
-	// Meter marks usage a clerk metered itself (a model call). It counts
-	// toward the spend caps only, never toward rate or use counts (LOG-7).
-	Meter bool
 }
 
 // Ledger lists the uses charged to a chain prefix. The kernel builds it from
@@ -195,17 +192,15 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 					sum += u.Amount
 				}
 			case KRateDay:
-				if !u.Meter && u.At > c.Now-DayMS {
+				if u.At > c.Now-DayMS {
 					n++
 				}
 			case KRateRecipient:
-				if !u.Meter && u.At > c.Now-DayMS && u.Recipient == s.Recipient {
+				if u.At > c.Now-DayMS && u.Recipient == s.Recipient {
 					n++
 				}
 			case KUses:
-				if !u.Meter {
-					n++
-				}
+				n++
 			}
 		}
 		switch cp.Kind {

@@ -5,6 +5,7 @@ package model_test
 import (
 	"crypto/ed25519"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -32,8 +33,22 @@ func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return p.Public().(ed25519.PublicKey), p
 }
 
-// rig boots a kernel and a model key capped at 100 per task.
-func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, key.Key) {
+// flaky is a ledger whose log can stop recording usage.
+type flaky struct {
+	model.Ledger
+	fail bool
+}
+
+func (f *flaky) Meter(now int64, plan, route string, amount int64, source string) error {
+	if f.fail {
+		return errors.New("log down")
+	}
+	return f.Ledger.Meter(now, plan, route, amount, source)
+}
+
+// rig boots a kernel and submits active plans "t" and "big" citing a model key
+// capped at 100 per task.
+func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	t.Helper()
 	opub, opriv := seed(1)
 	hpub, hpriv := seed(2)
@@ -54,41 +69,56 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, key.Key) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1_000_000, OutPerM: 1_000_000}}, Provider: p, Ledger: k}
-	return c, k, ky
+	step := key.Step{Verb: key.Read, Clerk: model.Name, Args: map[string]key.Arg{"query": {Value: "q"}}}
+	for _, id := range []string{"t", "big"} {
+		if err := k.Submit(0, kernel.Plan{ID: id, Key: ky, Steps: []key.Step{step}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lg := &flaky{Ledger: k}
+	routes := map[string]model.Price{
+		"api":  {InPerM: 1_000_000, OutPerM: 1_000_000},
+		"plan": {Pool: "codex-5h"},
+		"tiny": {InPerM: 1, OutPerM: 1},
+	}
+	return &model.Clerk{Routes: routes, Provider: p, Ledger: lg}, k, lg
+}
+
+func lastEntry(k *kernel.Kernel) kernel.Entry {
+	es := k.Log().Entries()
+	return es[len(es)-1]
 }
 
 func TestProviderFigureIsMeteredAndCapsHold(t *testing.T) {
 	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
-	c, _, ky := rig(t, f)
-	if _, err := c.Call(1, ky, "t", "api", "hi", 50); err != nil {
+	c, _, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 50); err != nil {
 		t.Fatal(err)
 	}
 	// 70 used; worst case of the next call is 1+50 = 51 > 30 left.
-	if _, err := c.Call(2, ky, "t", "api", "hi", 50); err == nil || f.calls != 1 {
+	if _, err := c.Call(2, "t", "api", "hi", 50); err == nil || f.calls != 1 {
 		t.Fatalf("over-cap call reached the provider: %v calls=%d", err, f.calls)
 	}
 }
 
-func TestExhaustedTaskIsHeldAndOwnerExtends(t *testing.T) {
+func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
-	c, k, ky := rig(t, f)
-	if _, err := c.Call(1, ky, "t", "api", "hi", 50); err != nil {
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 50); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(2, ky, "t", "api", "hi", 50); err == nil {
+	if _, err := c.Call(2, "t", "api", "hi", 50); err == nil {
 		t.Fatal("over-cap call must be refused")
 	}
 	if h, ok := k.State().SpendHeld["t"]; !ok || h.Code != key.RSpendTask {
-		t.Fatalf("task not held: %+v", h)
+		t.Fatalf("plan not held: %+v", h)
 	}
-	if _, err := c.Call(3, ky, "t", "api", "hi", 1); err == nil || f.calls != 1 {
-		t.Fatalf("a held task makes no call, however small: %v calls=%d", err, f.calls)
+	if _, err := c.Call(3, "t", "api", "hi", 1); err == nil || f.calls != 1 {
+		t.Fatalf("a held plan makes no call, however small: %v calls=%d", err, f.calls)
 	}
-	// the owner's envelope, and an extension derived from it
-	opub, opriv := seed(1)
+	// the owner's envelope (another root), and an extension derived from it
+	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	_ = opub
 	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: model.Name, Verbs: []key.Verb{key.Read}, Serial: "env"})
 	if err := k.Issue(3, root); err != nil {
 		t.Fatal(err)
@@ -104,64 +134,133 @@ func TestExhaustedTaskIsHeldAndOwnerExtends(t *testing.T) {
 	if err := k.Extend(4, ext, "t"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(5, ext, "t", "api", "hi", 50); err != nil {
-		t.Fatalf("extended task runs: %v", err)
+	if _, err := c.Call(5, "t", "api", "hi", 50); err != nil {
+		t.Fatalf("extended plan runs: %v", err)
 	}
-}
-
-func poolRig(t *testing.T, f *fake) (*model.Clerk, *kernel.Kernel, key.Key) {
-	c, k, ky := rig(t, f)
-	c.Routes["plan"] = model.Price{Pool: "codex-5h"}
-	return c, k, ky
 }
 
 func TestPoolRouteReadsUtilizationAndStopsAtTheReserve(t *testing.T) {
 	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}}
-	c, k, ky := poolRig(t, f)
+	c, k, _ := rig(t, f)
 	if err := k.Reserve(0, "codex-5h", 100); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(1, ky, "t", "plan", "hi", 10); err != nil {
+	if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(2, ky, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
+	if _, err := c.Call(2, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
 		t.Fatalf("a pool at the reserve admits nothing: %v calls=%d", err, f.calls)
 	}
-	if _, err := c.Call(2, ky, "t", "api", "hi", 10); err != nil {
+	if _, err := c.Call(2, "t", "api", "hi", 10); err != nil {
 		t.Fatalf("other routes are unaffected: %v", err)
 	}
-	if _, err := c.Call(10_000, ky, "t", "plan", "hi", 10); err != nil {
+	if _, err := c.Call(10_000, "t", "plan", "hi", 10); err != nil {
 		t.Fatalf("the reset time is the cooldown: %v", err)
 	}
 }
 
 func TestClerkCountsWhenProviderReportsNone(t *testing.T) {
 	f := &fake{}
-	c, k, ky := rig(t, f)
-	if _, err := c.Call(1, ky, "big", "api", strings.Repeat("p", 40), 100); err == nil {
+	c, k, _ := rig(t, f)
+	// worst case 10+100 = 110 does not fit 100; the refusal holds only "big"
+	if _, err := c.Call(1, "big", "api", strings.Repeat("p", 40), 100); err == nil {
 		t.Fatal("worst case 110 must not fit 100")
 	}
-	if _, err := c.Call(1, ky, "t", "api", strings.Repeat("p", 40), 90); err != nil {
+	if _, err := c.Call(1, "t", "api", strings.Repeat("p", 40), 90); err != nil {
 		t.Fatal(err)
 	}
 	// 40 bytes in = 10 tokens, 400 bytes out = 100 tokens, source "clerk".
-	last := k.Log().Entries()[len(k.Log().Entries())-1]
+	last := lastEntry(k)
 	if last.Type != kernel.TModelUsed || !strings.Contains(string(last.Body), `"amount":110`) || !strings.Contains(string(last.Body), `"source":"clerk"`) {
 		t.Fatalf("entry: %s %s", last.Type, last.Body)
 	}
 }
 
-func TestFailedCallAndUnknownRouteMeterNothing(t *testing.T) {
+func TestProviderErrorMetersTheAdmittedWorstCase(t *testing.T) {
 	f := &fake{err: errors.New("down")}
-	c, k, ky := rig(t, f)
-	n := len(k.Log().Entries())
-	if _, err := c.Call(1, ky, "t", "api", "hi", 10); err == nil {
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 10); err == nil {
 		t.Fatal("provider error must surface")
 	}
-	if _, err := c.Call(1, ky, "t", "nope", "hi", 10); err == nil {
-		t.Fatal("unknown route")
+	// 1 token in + 10 out: a failed call may still have spent, so it costs 11
+	last := lastEntry(k)
+	if last.Type != kernel.TModelUsed || !strings.Contains(string(last.Body), `"amount":11`) || !strings.Contains(string(last.Body), `"source":"admitted"`) {
+		t.Fatalf("entry: %s %s", last.Type, last.Body)
 	}
-	if len(k.Log().Entries()) != n {
-		t.Fatal("nothing happened, nothing metered")
+}
+
+func TestRefusedCallsMakeNoCallAndMeterNothing(t *testing.T) {
+	f := &fake{}
+	c, k, _ := rig(t, f)
+	n := len(k.Log().Entries())
+	for name, call := range map[string]func() error{
+		"unknown route": func() error { _, e := c.Call(1, "t", "nope", "hi", 10); return e },
+		"zero maxOut":   func() error { _, e := c.Call(1, "t", "api", "hi", 0); return e },
+		"negative":      func() error { _, e := c.Call(1, "t", "api", "hi", -5); return e },
+		"overflow":      func() error { _, e := c.Call(1, "t", "api", "hi", math.MaxInt64); return e },
+		"unknown plan":  func() error { _, e := c.Call(1, "nope", "api", "hi", 10); return e },
+	} {
+		if call() == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+	}
+	if err := k.Cancel(1, "t"); err != nil {
+		t.Fatal(err)
+	}
+	n = len(k.Log().Entries())
+	if _, err := c.Call(2, "t", "api", "hi", 10); err == nil {
+		t.Fatal("a cancelled plan makes no call")
+	}
+	if f.calls != 0 || len(k.Log().Entries()) != n {
+		t.Fatalf("refusals reached the provider or the log: calls=%d", f.calls)
+	}
+}
+
+func TestCostRoundsUpAndNeverBelowThePrice(t *testing.T) {
+	f := &fake{u: model.Usage{In: 1, Reported: true}}
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "tiny", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	if last := lastEntry(k); !strings.Contains(string(last.Body), `"amount":1`) {
+		t.Fatalf("one token at a positive price costs at least 1: %s", last.Body)
+	}
+}
+
+func TestNegativeReportedUsageMetersTheWorstCase(t *testing.T) {
+	f := &fake{u: model.Usage{In: -50, Out: 10, Reported: true}}
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	last := lastEntry(k)
+	if !strings.Contains(string(last.Body), `"amount":11`) || !strings.Contains(string(last.Body), `"source":"admitted"`) {
+		t.Fatalf("a negative figure is not a refund: %s", last.Body)
+	}
+}
+
+func TestUnrecordedSpendShutsTheClerkUntilTheLogRecords(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, k, lg := rig(t, f)
+	lg.fail = true
+	if reply, err := c.Call(1, "t", "api", "hi", 50); err == nil || reply != "" {
+		t.Fatalf("the reply is withheld when its usage cannot be recorded: %q %v", reply, err)
+	}
+	if _, err := c.Call(2, "big", "api", "hi", 1); err == nil || f.calls != 1 {
+		t.Fatalf("no call while spend is unrecorded: %v calls=%d", err, f.calls)
+	}
+	lg.fail = false
+	if _, err := c.Call(3, "big", "api", "hi", 1); err != nil {
+		t.Fatalf("calls resume once the log records: %v", err)
+	}
+	es := k.Log().Entries()
+	var used []string
+	for _, e := range es {
+		if e.Type == kernel.TModelUsed {
+			used = append(used, string(e.Body))
+		}
+	}
+	if len(used) != 2 || !strings.Contains(used[0], `"amount":70`) {
+		t.Fatalf("the owed usage is recorded first: %v", used)
 	}
 }
