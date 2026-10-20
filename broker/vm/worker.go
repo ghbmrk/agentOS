@@ -355,14 +355,16 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	return s, err
 }
 
-// EndCommands ends every worker command in flight (STOP, security R2 on
-// #146). The workers keep running; their commands report an error.
+// EndCommands ends every command in flight in a worker or provider
+// worker, the machines Exec runs commands in (STOP, security R2 on #146;
+// a provider run too, OP-6, #2481). The machines keep running; their
+// commands report an error.
 func (m *Manager) EndCommands() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for id, mc := range m.machines {
-		if !strings.HasPrefix(id, WorkerPrefix) {
+		if !strings.HasPrefix(id, WorkerPrefix) && !strings.HasPrefix(id, ProviderPrefix) {
 			continue
 		}
 		if c := mc.execCancel.Load(); c != nil {
