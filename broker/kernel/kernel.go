@@ -34,7 +34,8 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
 	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
 	fresh := map[string]bool{}
-	for _, st := range p.Steps {
+	for i := range p.Steps {
+		st := p.Step(i)
 		if !key.Valid(st.Verb) {
 			return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}
 		}
@@ -81,7 +82,7 @@ func repeats(s *State, root key.ID, st key.Step, self string, now int64) bool {
 		for i, ss := range p.Steps {
 			switch ss.Phase {
 			case PInflight, PUnknown, PParked, PRedo:
-				if Fingerprint(p.Plan.Steps[i]) == fp {
+				if Fingerprint(p.Plan.Step(i)) == fp {
 					return true
 				}
 			}
@@ -119,7 +120,7 @@ func Next(s *State, id string, now int64) Act {
 		return Act{}
 	}
 	i := p.Next
-	st, sp := p.Steps[i], p.Plan.Steps[i]
+	st, sp := p.Steps[i], p.Plan.Step(i)
 	a := Act{Plan: id, Index: i}
 	if p.Status != SActive && st.Phase != PUnknown {
 		return Act{} // a plan that ended still reconciles an unknown result, and nothing else
@@ -275,13 +276,20 @@ func (k *Kernel) Stop(now int64) error   { return k.owner(now, TStop, struct{}{}
 func (k *Kernel) Resume(now int64) error { return k.owner(now, TResume, struct{}{}) }
 
 // owner records an owner action and anchors the head at once, so a widening
-// the owner confirmed survives a restart; a failed anchor leaves the entry
-// unconfirmed and Open drops it (KRN-7, LOG-2).
+// the owner confirmed survives a restart (KRN-7, LOG-2). When the anchor
+// fails after a widening, the entry is already folded into live state, so the
+// log is marked broken: nothing builds on it until Open drops it. A narrowing
+// (Revoke, Pause, Stop) stays in force and the log stays usable, since Open
+// keeps it either way.
 func (k *Kernel) owner(now int64, typ string, body any) error {
 	if _, err := k.emit(now, typ, body); err != nil {
 		return err
 	}
-	return k.log.Anchor()
+	err := k.log.Anchor()
+	if err != nil && Widening(typ) {
+		k.log.broken = true
+	}
+	return err
 }
 
 // Cancel ends an active plan at the owner's word.
@@ -352,7 +360,7 @@ func (k *Kernel) act(now int64, a Act) error {
 		_, err := k.emit(now, TStepHeld, stepHeld{ref, 0, a.Novel})
 		return err
 	}
-	sp, st := p.Plan.Steps[a.Index], p.Steps[a.Index]
+	sp, st := p.Plan.Step(a.Index), p.Steps[a.Index]
 	c := k.clerks[sp.Clerk]
 	if c == nil {
 		if a.Kind == ActDispatch {

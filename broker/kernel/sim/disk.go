@@ -23,6 +23,7 @@ type Disk struct {
 	crashIn int
 	crashed bool
 	full    bool
+	refused int // appends refused for want of space, over the disk's life
 }
 
 // Fill makes every append fail, writing nothing, until the next Reboot.
@@ -39,6 +40,7 @@ func (d *Disk) Append(b []byte) error {
 		return errCrash
 	}
 	if d.full {
+		d.refused++
 		return errFull
 	}
 	if d.crashIn > 0 {

@@ -52,12 +52,27 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 // after a restart (KRN-7).
 func Widening(typ string) bool { return typ == TResume || typ == TKeyIssued || typ == TKeyResumed }
 
+// PlanStep is all a planner writes of a step: the verb, the clerk, the
+// arguments, and its claims about content and labels. Source, task, recipient
+// and amount are the kernel's to derive, so the format has no place for a value
+// that looks authoritative and is not (KEY-2, KRN-3).
+type PlanStep struct {
+	Verb    key.Verb          `json:"verb"`
+	Clerk   string            `json:"clerk"`
+	Args    map[string]string `json:"args"`
+	Content string            `json:"content,omitempty"`
+	Labels  []string          `json:"labels,omitempty"`
+}
+
 // Plan is a typed list of steps run in order under one key (KRN-5).
 type Plan struct {
 	ID    string     `json:"id"`
 	Key   key.Key    `json:"key"`
-	Steps []key.Step `json:"steps"`
+	Steps []PlanStep `json:"steps"`
 }
+
+// Step is step i as the key is checked against it and the clerk sees it.
+func (p Plan) Step(i int) key.Step { return Normalize(p.ID, p.Steps[i]) }
 
 // Entry bodies.
 type (
@@ -217,21 +232,21 @@ func Shape(s key.Step) string {
 // refuses; one spelling per number keeps the duplicate fingerprint exact. The kernel, the clerk and a replay all see
 // this step (KEY-2, KRN-3). Content and labels stay the planner's claims; a
 // clerk with facts checks them (CLK-2).
-func Normalize(plan string, s key.Step) key.Step {
+func Normalize(plan string, s PlanStep) key.Step {
 	args := make(map[string]key.Arg, len(s.Args))
-	for n, a := range s.Args {
-		args[n] = key.Arg{Value: a.Value, Source: key.SrcPlanner}
+	for n, v := range s.Args {
+		args[n] = key.Arg{Value: v, Source: key.SrcPlanner}
 	}
-	s.Args, s.Task, s.Recipient, s.Amount = args, plan, args[key.RecipientArg(s.Verb)].Value, 0
-	if a, ok := args[key.ArgAmount]; ok {
-		n, err := strconv.ParseInt(a.Value, 10, 64)
-		if err != nil || n < 0 || strconv.FormatInt(n, 10) != a.Value {
+	out := key.Step{Verb: s.Verb, Clerk: s.Clerk, Args: args, Content: s.Content,
+		Labels: append([]string(nil), s.Labels...), Task: plan, Recipient: s.Args[key.RecipientArg(s.Verb)]}
+	if v, ok := s.Args[key.ArgAmount]; ok {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 || strconv.FormatInt(n, 10) != v {
 			n = -1
 		}
-		s.Amount = n
+		out.Amount = n
 	}
-	s.Labels = append([]string(nil), s.Labels...)
-	return s
+	return out
 }
 
 // Fingerprint names an exact effect: the same one within 24 hours needs a
@@ -335,11 +350,6 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if s.Plans[b.ID] == nil {
-			steps := make([]key.Step, len(b.Steps))
-			for i, st := range b.Steps {
-				steps[i] = Normalize(b.ID, st)
-			}
-			b.Steps = steps
 			s.Plans[b.ID] = &PlanState{Plan: b, Seq: e.Seq, Status: SPending}
 			s.Order = append(s.Order, b.ID)
 		}
@@ -392,7 +402,7 @@ func (s *State) Apply(e Entry) error {
 			st.Phase, st.Attempt = PInflight, b.Attempt
 			if b.Attempt == 1 {
 				st.DispatchSeq = e.Seq
-				sp := p.Plan.Steps[b.Index]
+				sp := p.Plan.Step(b.Index)
 				for _, id := range p.Scopes {
 					s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: sp.Amount, Recipient: sp.Recipient, Task: sp.Task}})
 				}
@@ -445,7 +455,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		if p, st := s.step(b); st != nil && st.Phase == PDone && !st.Undone {
 			st.Undone = true
-			sp := p.Plan.Steps[b.Index]
+			sp := p.Plan.Step(b.Index)
 			s.seen[p.Root][Shape(sp)]--
 			if c, _ := key.ClassOf(sp.Verb); !c.Irreversible() {
 				delete(s.recent[p.Root], Fingerprint(sp)) // an irreversible effect stays done
@@ -461,7 +471,7 @@ func (s *State) Apply(e Entry) error {
 // toward the key's history.
 func (s *State) complete(p *PlanState, i int, at int64) {
 	p.Steps[i].Phase = PDone
-	sp := p.Plan.Steps[i]
+	sp := p.Plan.Step(i)
 	if s.seen[p.Root] == nil {
 		s.seen[p.Root], s.recent[p.Root] = map[string]int{}, map[string]int64{}
 	}

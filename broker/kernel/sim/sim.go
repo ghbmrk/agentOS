@@ -38,7 +38,31 @@ type Result struct {
 	Trace   []string
 	Entries []kernel.Entry
 	Effects int
-	Stale   int // old requests the world was sent again
+
+	// What the faults did, counted where they took effect, not where they were
+	// chosen: a fault that changed nothing leaves its counter at zero.
+	Refused       int // appends the full disk refused
+	ClockBack     int // times the clock really moved back
+	StaleRefused  int // old requests redelivered to the world that it did not act on
+	AnchorFailed  int // anchor writes that failed
+	WidenUnproven int // widenings whose anchor failed, left live until the log is reopened
+}
+
+var errAnchor = errors.New("sim: anchor down")
+
+// anchor is a MemAnchor the owner's phone can drop off from: while down, no head is confirmed.
+type anchor struct {
+	kernel.MemAnchor
+	down   bool
+	failed int
+}
+
+func (a *anchor) Put(h kernel.Head) error {
+	if a.down {
+		a.failed++
+		return errAnchor
+	}
+	return a.MemAnchor.Put(h)
 }
 
 const hour = int64(3_600_000)
@@ -61,7 +85,10 @@ type world struct {
 	bad     []string
 	race    func() // an owner action landing between the kernel's decision and the clerk
 	seen    []kernel.Request
-	stale   int // requests redelivered long after they were first sent
+	stale   int // old requests redelivered to the world and not acted on
+	// unconfirmed is set while a widening whose anchor failed is live in the
+	// kernel's state: nothing may act on it until the log is reopened.
+	unconfirmed bool
 }
 
 func (w *world) fault(op string) string {
@@ -82,8 +109,10 @@ func (w *world) Do(r kernel.Request, v kernel.View) kernel.Result {
 		w.do(r, v) // the transport delivers the request twice
 	}
 	if len(w.seen) > 0 && w.rng.IntN(10) == 0 {
-		w.stale++
-		w.do(w.seen[w.rng.IntN(len(w.seen))], v) // an old request arrives out of order
+		old := w.do(w.seen[w.rng.IntN(len(w.seen))], v) // an old request arrives out of order
+		if old.Detail == "already done" || old.Outcome == "failed" && old.Detail != "fault" {
+			w.stale++ // the clerk itself turned it away
+		}
 	}
 	if len(w.seen) < 16 {
 		w.seen = append(w.seen, r)
@@ -133,6 +162,9 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 		w.bad = append(w.bad, "effect twice for "+r.Idem[:8])
 	}
 	w.done[r.Idem] = true
+	if w.unconfirmed {
+		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
+	}
 	ver, err := key.Verify(r.Key, w.owner)
 	if err != nil {
 		w.effects = append(w.effects, effect{r.Idem, r.Now, ""})
@@ -196,7 +228,7 @@ type sim struct {
 	cfg    Config
 	rng    *rand.Rand
 	disk   *Disk
-	anchor *kernel.MemAnchor
+	anchor *anchor
 	w      *world
 	k      *kernel.Kernel
 	owner  keyPair
@@ -208,6 +240,8 @@ type sim struct {
 	now    int64
 	trace  []string
 	nonce  *rand.ChaCha8
+
+	clockBack, widenUnproven int
 }
 
 func (s *sim) logf(f string, a ...any) {
@@ -223,6 +257,7 @@ func (s *sim) kcfg() kernel.Config {
 func (s *sim) boot() error {
 	for try := 0; try < 8; try++ {
 		s.disk.Reboot()
+		s.anchor.down, s.w.unconfirmed = false, false
 		l, err := kernel.Open(s.kcfg())
 		if err == nil {
 			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.now)
@@ -316,18 +351,18 @@ func (s *sim) anyKey() key.Key {
 	return s.pool[s.pick(len(s.pool))]
 }
 
-func (s *sim) step() key.Step {
+func (s *sim) step() kernel.PlanStep {
 	n := names[s.pick(len(names))]
 	clerkName := "mail"
 	if s.pick(10) == 0 {
 		clerkName = "bank"
 	}
-	st := key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Args: map[string]key.Arg{}}
+	st := kernel.PlanStep{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Args: map[string]string{}}
 	for _, a := range key.ArgNames(st.Verb) {
-		st.Args[a] = key.Arg{Value: n}
+		st.Args[a] = n
 	}
 	if _, ok := st.Args[key.ArgAmount]; ok { // equivalent spellings of one amount
-		st.Args[key.ArgAmount] = key.Arg{Value: []string{"1", "01", "+1"}[s.pick(3)]}
+		st.Args[key.ArgAmount] = []string{"1", "01", "+1"}[s.pick(3)]
 	}
 	return st
 }
@@ -337,9 +372,9 @@ func (s *sim) submit() error {
 	if len(s.plans) > 0 && s.pick(12) == 0 {
 		id = s.plans[s.pick(len(s.plans))] // a replayed plan id
 	}
-	steps := make([]key.Step, 1+s.pick(3))
+	steps := make([]kernel.PlanStep, 1+s.pick(3))
 	if s.pick(40) == 0 {
-		steps = make([]key.Step, kernel.MaxSteps+1)
+		steps = make([]kernel.PlanStep, kernel.MaxSteps+1)
 	}
 	for i := range steps {
 		steps[i] = s.step()
@@ -371,13 +406,13 @@ func (s *sim) op() error {
 		id := s.ids[s.pick(len(s.ids))]
 		s.logf("pause")
 		if s.pick(2) == 0 {
-			return s.k.Unpause(s.now, id)
+			return s.widened(s.k.Unpause(s.now, id))
 		}
 		return s.k.Pause(s.now, id)
 	case c == 11:
 		s.logf("stop/resume")
 		if s.pick(2) == 0 {
-			return s.k.Resume(s.now)
+			return s.widened(s.k.Resume(s.now))
 		}
 		return s.k.Stop(s.now)
 	case c == 12 && len(s.plans) > 0:
@@ -391,14 +426,20 @@ func (s *sim) op() error {
 		s.logf("anchor")
 		return s.k.Log().Anchor()
 	case c == 14:
-		switch s.pick(4) {
+		switch s.pick(5) {
 		case 0:
 			s.logf("disk full")
 			s.disk.Fill()
 		case 1:
 			d := int64(1+s.pick(48)) * hour
 			s.now = max(0, s.now-d)
+			if es := s.k.Log().Entries(); len(es) > 0 && s.now < es[len(es)-1].At {
+				s.clockBack++ // behind the log's own last entry
+			}
 			s.logf("clock jumps back %dh", d/hour)
+		case 2:
+			s.logf("anchor down")
+			s.anchor.down = true
 		default:
 			n := 1 + s.pick(8)
 			s.logf("arm crash in %d appends", n)
@@ -407,12 +448,23 @@ func (s *sim) op() error {
 	case c == 15:
 		r := s.newRoot()
 		s.logf("issue root")
-		if err := s.k.Issue(s.now, r); err != nil {
+		if err := s.widened(s.k.Issue(s.now, r)); err != nil {
 			return err
 		}
 		s.remember(r)
 	}
 	return nil
+}
+
+// widened passes on the result of a widening owner action. One that failed to
+// anchor is live in the kernel's state but unconfirmed; the kernel must refuse
+// to act on it, and the world judges any effect that follows as a violation.
+func (s *sim) widened(err error) error {
+	if errors.Is(err, errAnchor) {
+		s.w.unconfirmed = true
+		s.widenUnproven++
+	}
+	return err
 }
 
 func crashed(err error) bool {
@@ -456,7 +508,7 @@ func Run(c Config) (*Result, error) {
 	for i := range nseed {
 		nseed[i] = byte(rng.IntN(256))
 	}
-	s := &sim{cfg: c, rng: rng, anchor: &kernel.MemAnchor{}, nonce: rand.NewChaCha8(nseed)}
+	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
 	s.disk = &Disk{rng: rng}
 	s.owner, s.holder, s.head = gen(rng), gen(rng), gen(rng)
 	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, done: map[string]bool{}}
@@ -479,14 +531,14 @@ func Run(c Config) (*Result, error) {
 		}
 		s.remember(r)
 	}
-	if err := s.k.Log().Anchor(); err != nil {
-		return nil, err
-	}
 	fail := func(err error) (*Result, error) {
 		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))
 	}
 	for i := 0; i < c.Ops; i++ {
 		err := s.op()
+		if errors.Is(err, errAnchor) {
+			err = nil // the owner's phone is out of reach; the machine keeps running
+		}
 		if err != nil {
 			if !crashed(err) {
 				return fail(err)
@@ -506,7 +558,9 @@ func Run(c Config) (*Result, error) {
 	if err := s.check(); err != nil {
 		return fail(err)
 	}
-	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects), Stale: s.w.stale}, nil
+	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
+		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
+		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven}, nil
 }
 
 func tail(t []string) []string {
