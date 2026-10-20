@@ -334,6 +334,12 @@ nopsk() {
 
 MSG="wlsta0 exists"; check until_ok 180 sta
 MSG="the box's access point serves"; check until_ok 120 ap_up
+# Why not, when it does not: the loader logs no network name or password (I16), nor does iw's info.
+if ! ap_up; then
+	journalctl -b -u agentos-ap -o cat 2>/dev/null | tail -25 | while read -r l; do say "NOTE loader| $l"; done
+	$IW dev 2>/dev/null | while read -r l; do say "NOTE iw| $l"; done
+	say "NOTE agentos-ap $(systemctl is-active agentos-ap.service) restarts=$(systemctl show -p NRestarts --value agentos-ap.service)"
+fi
 MSG="wlsta0 on the box's radio"; check [ "$(cat /sys/class/net/wlsta0/phy80211/name 2>/dev/null)" = "$(cat /sys/class/net/wlan0/phy80211/name)" ]
 MSG="one station on the radio"; check [ "$(radio_ifs)" = 2 ]
 MSG="NetworkManager manages only wlsta0"; check until_ok 30 only_sta
