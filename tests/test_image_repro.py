@@ -3,7 +3,7 @@
 The image is built on two runners and compared by .github/workflows/image.yml's reproduce job;
 these tests hold the pieces that job and the build rely on.
 """
-# REQ: UPD-1a, OSS-8
+# REQ: UPD-1a
 import gzip
 import hashlib
 import importlib.machinery
