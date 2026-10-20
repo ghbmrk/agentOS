@@ -446,14 +446,13 @@ func (c *Channel) LocalStop(ctx context.Context) error {
 	// count voids an issued RESUME code, so c.resume needs no clearing.
 	// One STOP generation for both channels (CH-2): counted with the
 	// stop under stopMu, so a RESUME that began earlier cannot undo it.
+	// The texted STOP's own path, so neither reports done on an earlier
+	// STOP's record.
 	c.stopMu.Lock()
 	c.stops.Add(1)
-	_, err := c.cfg.Engine.Stop(ctx)
+	_, err := c.ctrl.Stop(ctx)
 	c.stopMu.Unlock()
-	if err != nil && !c.cfg.Engine.Stopped() {
-		return err
-	}
-	return nil
+	return err
 }
 
 // ErrLocked: the session was locked since the sign-in a local op rests on.

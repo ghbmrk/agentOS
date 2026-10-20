@@ -2,12 +2,13 @@ package owner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
 
-// REQ: CH-7, CH-11, CH-18
+// REQ: CH-2, CH-7, CH-11, CH-18
 
 // The local UI (P2-2) signs in with a code-generator code. Per O4's
 // carry-forward, that sign-in is also a local unlock: it clears challenge
@@ -124,6 +125,20 @@ func TestLocalStopAndResume(t *testing.T) {
 	}
 	if r.ch.resume != nil {
 		t.Fatal("texted RESUME code still live")
+	}
+}
+
+// A local STOP that fails to record is an error even when an earlier STOP
+// stands: a failed write since then (a RESUME whose fsync failed) can replay
+// on restart and lift it, so the local page must not answer "Stopped." (CH-2).
+func TestLocalStopThatFailsToRecordIsAnErrorWhenAlreadyStopped(t *testing.T) {
+	r := newRig(t, nil)
+	if err := r.ch.LocalStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.eng.stopErr = errors.New("journal: append failed")
+	if err := r.ch.LocalStop(context.Background()); err == nil {
+		t.Fatal("a STOP that failed to record was reported done")
 	}
 }
 
