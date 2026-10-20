@@ -93,6 +93,16 @@ Copied from briefs/SIM-cases.md at commit 0b3d474, which mapped the 67 W5-D draf
 | D-078 | A signing key never leaves the clerk's custody; the clerk is the one point that mints per-request tokens, so any agent protocol plugs in there and nothing else holds a key | CRED-1, CRED-5 |
 | D-103, #1106 (H-4) | A short owner-chosen secret (a mail or SIP password) can be guessed offline from any hash of it, so only the clerk holds it and no hash of it leaves custody | CRED-1 |
 
+## 6a. Egress follow-ups from #2530 (merged; not built, per D-139)
+
+Raised as release and later findings in the #2530 reviews ([L3](https://github.com/ghbmrk/agentOS/pull/2530#issuecomment-6288922028), [Security](https://github.com/ghbmrk/agentOS/pull/2530#issuecomment-6288999907)). They are cases, not BOARD rows, because broker/egress is old core. Whether to ship any of them before the port is a Mark decision; the cases stand either way.
+
+| Source | Behaviour to keep or failure to prevent | Requirements |
+|---|---|---|
+| #2530 Security 1, L3 1 | Every held call is charged its real memory cost, header bytes included. With the fixed per-machine count of 4 gone, the 64 KiB `callFloor` is the only per-call bound, and a request with a near-limit header (about 60 KB) costs about 100 KiB in the proxy while only 64 KiB is reserved, so the 320 MiB budget can be exceeded by about 180 MiB. Parse cost goes into the admission charge (header bytes, or a measured per-connection cost), and a separate-process test pins the per-call cost so the budget derivation stays true | RES-5, OP-8 |
+| #2530 L3 2, Security 2, Potency, UX | One machine cannot drain a shared provider key's rate limit and leave the others with raw 429s. The key has per-key back-off on provider 429s, not a per-machine count (a fixed share would bring the removed cap back). When the key is rate-limited, the owner-facing result names the cause (the key's rate limit) and does not read as a task failure of the starved machine | RES-5, OP-8, CH-12 |
+| #2530 L3 3 (later) | A test comment must not describe a cap that no longer exists: `inflight_test.go:383` still says "the per-machine cap" on the 4-worker loop | none |
+
 ## 7. Harvested issues
 
 Each issue below is closed as superseded once this file merges. Its text stays readable on GitHub through the link. Issues merged into a row in sections 1 and 5 (#2507, #1278, #2461, #2500, #1321) close with it.
