@@ -45,6 +45,7 @@ const hour = int64(3_600_000)
 type effect struct {
 	idem string
 	at   int64
+	fp   string // root and fingerprint of an irreversible effect, else ""
 }
 
 // world is the fake mail service. It applies a step only if the clerk check
@@ -122,12 +123,22 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 		w.bad = append(w.bad, "effect twice for "+r.Idem[:8])
 	}
 	w.done[r.Idem] = true
-	w.effects = append(w.effects, effect{r.Idem, r.Now})
 	ver, err := key.Verify(r.Key, w.owner)
 	if err != nil {
+		w.effects = append(w.effects, effect{r.Idem, r.Now, ""})
 		w.bad = append(w.bad, "effect under an invalid key")
 		return
 	}
+	fp := ""
+	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
+		fp = ver.Root().String() + "|" + kernel.Fingerprint(r.Step)
+		for _, e := range w.effects {
+			if e.fp == fp && e.at > r.Now-key.DayMS {
+				w.bad = append(w.bad, "the same irreversible effect twice within a day, across plans")
+			}
+		}
+	}
+	w.effects = append(w.effects, effect{r.Idem, r.Now, fp})
 	ch := v.ChangesView()
 	if ch.Stopped {
 		w.bad = append(w.bad, "effect during STOP")
@@ -301,8 +312,11 @@ func (s *sim) step() key.Step {
 	if s.pick(10) == 0 {
 		clerkName = "bank"
 	}
-	return key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName,
-		Args: map[string]key.Arg{"to": {Value: n}, "msg": {Value: n}}}
+	st := key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Args: map[string]key.Arg{}}
+	for _, a := range key.ArgNames(st.Verb) {
+		st.Args[a] = key.Arg{Value: n}
+	}
+	return st
 }
 
 func (s *sim) submit() error {

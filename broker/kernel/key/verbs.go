@@ -61,3 +61,44 @@ func ClassOf(v Verb) (Class, bool) {
 
 // Valid reports whether v is on the list.
 func Valid(v Verb) bool { _, ok := classes[v]; return ok }
+
+// argNames is each verb's fixed argument list (KEY-2). The first name is the
+// object the step acts on: the kernel reads the recipient from it. A step
+// carries exactly these arguments, so what the duplicate guard, the novelty
+// shape and the spend caps read cannot be moved by renaming or adding one.
+var argNames = map[Verb][]string{
+	Read: {"query"}, Fetch: {"url"}, Draft: {"to", "msg"}, Organize: {"target", "label"},
+	Trash: {"target"}, Present: {"msg"},
+	Unsubscribe: {"to"}, Send: {"to", "msg"}, Post: {"to", "msg"}, Actuate: {"target", "value"},
+	Buy: {"to", "amount", "item"}, Share: {"to", "item"}, DeleteRemote: {"target"},
+	ChangeAccount: {"target", "value"}, RevealOrCreateSecret: {"target"},
+	ActuatePhysical: {"target", "value"},
+}
+
+// ArgAmount names the one argument that is a step's spend.
+const ArgAmount = "amount"
+
+// ArgNames returns v's declared arguments; the first is its object.
+func ArgNames(v Verb) []string { return append([]string(nil), argNames[v]...) }
+
+// RecipientArg names the argument holding v's object, "" for an unknown verb.
+func RecipientArg(v Verb) string {
+	if n := argNames[v]; len(n) > 0 {
+		return n[0]
+	}
+	return ""
+}
+
+// ArgsDeclared reports whether s carries exactly its verb's declared arguments.
+func ArgsDeclared(s Step) bool {
+	want := argNames[s.Verb]
+	if len(s.Args) != len(want) {
+		return false
+	}
+	for _, n := range want {
+		if _, ok := s.Args[n]; !ok {
+			return false
+		}
+	}
+	return true
+}

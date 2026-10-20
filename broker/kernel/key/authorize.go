@@ -127,6 +127,9 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)
 	}
+	if !ArgsDeclared(s) {
+		return refuse(RArg, "%s takes exactly %v", s.Verb, argNames[s.Verb])
+	}
 	if l.Content != nil && !in(l.Content, s.Content) {
 		return refuse(RContent, "%q", s.Content)
 	}

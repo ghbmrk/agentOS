@@ -78,8 +78,11 @@ func (r *rig) derive(c ...key.Caveat) key.Key {
 }
 
 func st(v key.Verb, to string) key.Step {
-	return key.Step{Verb: v, Clerk: "mail",
-		Args: map[string]key.Arg{"to": {Value: to}, "msg": {Value: to}}}
+	s := key.Step{Verb: v, Clerk: "mail", Args: map[string]key.Arg{}}
+	for _, n := range key.ArgNames(v) {
+		s.Args[n] = key.Arg{Value: to}
+	}
+	return s
 }
 
 func (r *rig) plan(id string, k key.Key, steps ...key.Step) {
@@ -108,7 +111,7 @@ func TestPlannerArgIsRefusedWholePlanRejected(t *testing.T) {
 	r := newRig(t)
 	one := int64(1)
 	k := r.derive(key.LimitArg(key.ArgBound{Name: "msg", Min: &one}))
-	bad := st(key.Trash, "5")
+	bad := st(key.Draft, "5")
 	bad.Args["msg"] = key.Arg{Value: "5", Source: key.SrcPlanner}
 	r.plan("p1", k, st(key.Organize, "9"), bad)
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
@@ -437,21 +440,21 @@ func TestPlannerCannotAttestArgSourceTaskRecipientOrAmount(t *testing.T) {
 	r := newRig(t)
 	one := int64(1)
 	k := r.derive(key.LimitArg(key.ArgBound{Name: "msg", Min: &one}))
-	s := st(key.Trash, "5")
+	s := st(key.Draft, "5")
 	s.Args["msg"] = key.Arg{Value: "5", Source: key.SrcClerk}
 	r.plan("p1", k, s)
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatal("a planner-written source must not satisfy an argument bound (KEY-2)")
 	}
 	spend := r.derive(key.LimitSpendTask(100))
-	big := st(key.Trash, "7")
+	big := st(key.Buy, "7")
 	big.Args["amount"] = key.Arg{Value: "500"}
 	big.Amount, big.Task, big.Recipient = 0, "other", "elsewhere"
 	r.plan("p2", spend, big)
 	if r.status("p2") != kernel.SRejected {
 		t.Fatal("a planner-set amount field must not hide the amount argument (KRN-3)")
 	}
-	odd := st(key.Trash, "8")
+	odd := st(key.Buy, "8")
 	odd.Args["amount"] = key.Arg{Value: "lots"}
 	r.plan("p3", spend, odd)
 	if r.status("p3") != kernel.SRejected {
@@ -461,5 +464,33 @@ func TestPlannerCannotAttestArgSourceTaskRecipientOrAmount(t *testing.T) {
 	got := r.k.State().Plans["p4"].Plan.Steps[0]
 	if got.Task != "p4" || got.Recipient != "9" {
 		t.Fatalf("task and recipient are derived, got %q %q", got.Task, got.Recipient)
+	}
+}
+
+// The guards read only a verb's declared arguments, so none of them moves by
+// adding, renaming or dropping one (KRN-8, KEY-8, KEY-2).
+func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
+	r := newRig(t)
+	spend := r.derive(key.LimitSpendTask(10))
+	extra := st(key.Unsubscribe, "list-a")
+	extra.Args["note"] = key.Arg{Value: "again"}
+	renamed := key.Step{Verb: key.Send, Clerk: "mail", Args: map[string]key.Arg{"list": {Value: "x"}, "msg": {Value: "x"}}}
+	price := st(key.Buy, "shop")
+	delete(price.Args, "amount")
+	price.Args["price"] = key.Arg{Value: "100000"}
+	missing := st(key.Send, "x")
+	delete(missing.Args, "to")
+	for name, s := range map[string]key.Step{"extra": extra, "renamed": renamed, "price": price, "missing": missing} {
+		k := r.root
+		if name == "price" {
+			k = spend
+		}
+		r.plan("p-"+name, k, s)
+		if r.status("p-"+name) != kernel.SRejected {
+			t.Fatalf("%s: a step off its verb's argument list must reject the plan", name)
+		}
+	}
+	if len(r.mail.Effects()) != 0 {
+		t.Fatal("a rejected plan must have no effect")
 	}
 }

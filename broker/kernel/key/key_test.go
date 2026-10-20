@@ -42,7 +42,13 @@ func verified(t *testing.T, k Key, owner kp) *Verified {
 	return v
 }
 
-func step(v Verb) Step { return Step{Verb: v, Clerk: "mail"} }
+func step(v Verb) Step {
+	s := Step{Verb: v, Clerk: "mail", Args: map[string]Arg{}}
+	for _, n := range ArgNames(v) {
+		s.Args[n] = Arg{Value: "x"}
+	}
+	return s
+}
 
 func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 	o, _, k := root(t)
@@ -170,12 +176,12 @@ func TestArgBoundsNeedNonPlannerSource(t *testing.T) {
 	o, h, k := root(t)
 	lo, hi := int64(1), int64(5)
 	d, _ := Derive(k, h.priv, gen(3).pub,
-		LimitArg(ArgBound{Name: "to", OneOf: []string{"b", "a"}}),
-		LimitArg(ArgBound{Name: "n", Min: &lo, Max: &hi}))
+		LimitArg(ArgBound{Name: "target", OneOf: []string{"b", "a"}}),
+		LimitArg(ArgBound{Name: "label", Min: &lo, Max: &hi}))
 	v := verified(t, d, o)
 	mk := func(to, n string, src Source) Step {
-		s := step(Trash)
-		s.Args = map[string]Arg{"to": {to, src}, "n": {n, src}}
+		s := step(Organize)
+		s.Args = map[string]Arg{"target": {to, src}, "label": {n, src}}
 		return s
 	}
 	if r := v.Authorize(mk("a", "3", SrcClerk), ctx(1, nil)); r != nil {
@@ -183,7 +189,7 @@ func TestArgBoundsNeedNonPlannerSource(t *testing.T) {
 	}
 	for name, s := range map[string]Step{
 		"planner": mk("a", "3", SrcPlanner), "set": mk("c", "3", SrcOwner), "low": mk("a", "0", SrcOwner),
-		"high": mk("a", "6", SrcOwner), "nan": mk("a", "x", SrcOwner), "missing": step(Trash),
+		"high": mk("a", "6", SrcOwner), "nan": mk("a", "x", SrcOwner), "missing": step(Organize),
 	} {
 		if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RArg {
 			t.Fatalf("%s: %v", name, r)

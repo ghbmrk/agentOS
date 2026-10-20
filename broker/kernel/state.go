@@ -204,20 +204,14 @@ func Replay(owner ed25519.PublicKey, es []Entry) (*State, error) {
 // Shape is a step's novelty class: a step whose shape has not completed under
 // the key's root is novel and gets the longer hold (KEY-8).
 func Shape(s key.Step) string {
-	var names, labels []string
-	for n := range s.Args {
-		names = append(names, n)
-	}
-	labels = append(labels, s.Labels...)
-	sort.Strings(names)
+	labels := append([]string(nil), s.Labels...)
 	sort.Strings(labels)
-	return strings.Join([]string{string(s.Verb), s.Clerk, s.Recipient, s.Content,
-		strings.Join(names, ","), strings.Join(labels, ",")}, "|")
+	return strings.Join([]string{string(s.Verb), s.Clerk, s.Recipient, s.Content, strings.Join(labels, ",")}, "|")
 }
 
 // Normalize is the one place a submitted step becomes the step the key is
 // checked against. The planner writes only arguments, and none of them counts
-// as owner or clerk sourced; the task is the plan, the recipient is the "to"
+// as owner or clerk sourced; the task is the plan, the recipient is the verb's object
 // argument and the amount is the "amount" argument, an unreadable one
 // negative so Authorize refuses it. The kernel, the clerk and a replay all see
 // this step (KEY-2, KRN-3). Content and labels stay the planner's claims; a
@@ -227,8 +221,8 @@ func Normalize(plan string, s key.Step) key.Step {
 	for n, a := range s.Args {
 		args[n] = key.Arg{Value: a.Value, Source: key.SrcPlanner}
 	}
-	s.Args, s.Task, s.Recipient, s.Amount = args, plan, args["to"].Value, 0
-	if a, ok := args["amount"]; ok {
+	s.Args, s.Task, s.Recipient, s.Amount = args, plan, args[key.RecipientArg(s.Verb)].Value, 0
+	if a, ok := args[key.ArgAmount]; ok {
 		n, err := strconv.ParseInt(a.Value, 10, 64)
 		if err != nil || n < 0 {
 			n = -1

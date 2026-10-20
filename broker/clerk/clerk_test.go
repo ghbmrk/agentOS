@@ -45,8 +45,10 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	if err := k.Issue(0, root); err != nil {
 		t.Fatal(err)
 	}
-	step := key.Step{Verb: verb, Clerk: "mail", Recipient: "x", Task: "t",
-		Args: map[string]key.Arg{"msg": {Value: "x", Source: key.SrcClerk}}}
+	step := key.Step{Verb: verb, Clerk: "mail", Recipient: "x", Task: "t", Args: map[string]key.Arg{}}
+	for _, n := range key.ArgNames(verb) {
+		step.Args[n] = key.Arg{Value: "x", Source: key.SrcClerk}
+	}
 	return &fix{k, mail, root, kernel.Request{Plan: "p", Step: step, Key: root, Idem: "i1", Now: 1}}
 }
 
