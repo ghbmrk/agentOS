@@ -10,9 +10,12 @@
 // the hand socket (the unlock step: GET /state, PUT and DELETE /secret, as
 // holders, and POST /verify for the unlock's own code, which approves no
 // acts), the verify socket (the broker: POST /verify; POST /revoke,
-// which only withdraws approvals, as an UNDO does; and POST /release,
-// which lets a held approval a code already made be spent) and the redeem
-// socket (the key holders: POST /redeem). None reads the seed back.
+// which only withdraws approvals, as an UNDO does; POST /release, which
+// lets a held approval be spent; and POST /allow, which records an
+// allowed approval for an act the broker's own tier or a grid answer let
+// through, one that serves an irreversible act but never a secret one)
+// and the redeem socket (the key holders: POST /redeem). None reads the
+// seed back.
 package checker
 
 import (
@@ -58,13 +61,15 @@ const (
 // of a CH-10 code.
 const ApprovalTTL = 15 * time.Minute
 
-// MaxActs bounds the acts one code approves, MaxHold how long a held
-// approval waits for its release before it lapses, and maxSeed the
+// MaxActs bounds the acts one code approves or one allow records,
+// MaxAllowed the allowed approvals outstanding at once, MaxHold how long a
+// held approval waits for its release before it lapses, and maxSeed the
 // seed's size.
 const (
-	MaxActs = 64
-	MaxHold = 7 * 24 * time.Hour
-	maxSeed = 4 << 10
+	MaxActs    = 64
+	MaxAllowed = 16 * MaxActs
+	MaxHold    = 7 * 24 * time.Hour
+	maxSeed    = 4 << 10
 )
 
 // ErrNoSeed means the unlock step has not handed the seed yet.
@@ -128,11 +133,13 @@ type Checker struct {
 	approvals    map[string]window // memory only
 }
 
-// window is when an approval lapses, and held while it waits for its
-// release and cannot be spent.
+// window is when an approval lapses, held while it waits for its
+// release and cannot be spent, and allowed when the broker recorded it
+// (Allow) rather than an owner's code: it then serves no secret act.
 type window struct {
-	until time.Time
-	held  bool
+	until   time.Time
+	held    bool
+	allowed bool
 }
 
 // New loads the state file, if there is one, and returns a checker that
@@ -280,14 +287,69 @@ func (c *Checker) sweepLocked(now time.Time) {
 	}
 }
 
+// Allow records an allowed approval per act, as a verified code would but
+// with no code: the broker's record that its own tier, or an owner's grid
+// answer, let a high-risk act through (ADP-9). It needs the seed held, so
+// it outlives no lock; it never replaces an approval already open, a
+// code's or another allow's; and an allowed approval serves an
+// irreversible act but never a secret one (Redeem), so a broker taken over
+// can let an irreversible act through but reveals no secret.
+func (c *Checker) Allow(acts []checkersock.Act) error {
+	if len(acts) > MaxActs {
+		return fmt.Errorf("checker: more than %d acts", MaxActs)
+	}
+	for _, a := range acts {
+		if !validAct(a.Act) {
+			return errors.New("checker: malformed act")
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.seed) == 0 {
+		return ErrNoSeed
+	}
+	now := c.now()
+	c.sweepLocked(now)
+	n := 0
+	for _, w := range c.approvals {
+		if w.allowed {
+			n++
+		}
+	}
+	fresh := map[string]bool{}
+	for _, a := range acts {
+		if _, ok := c.approvals[a.Act]; !ok {
+			fresh[a.Act] = true
+		}
+	}
+	if n+len(fresh) > MaxAllowed {
+		return errTooMany
+	}
+	for _, a := range acts {
+		if !fresh[a.Act] {
+			continue
+		}
+		if a.Held {
+			c.approvals[a.Act] = window{until: now.Add(MaxHold), held: true, allowed: true}
+		} else {
+			c.approvals[a.Act] = window{until: now.Add(ApprovalTTL), allowed: true}
+		}
+	}
+	return nil
+}
+
+// errTooMany refuses an allow past MaxAllowed.
+var errTooMany = fmt.Errorf("checker: more than %d allowed approvals open", MaxAllowed)
+
 // Redeem spends act's approval: true at most once per approval, and only
-// before it lapses. A try on a held approval spends nothing.
-func (c *Checker) Redeem(act string) bool {
+// before it lapses. A try on a held approval spends nothing, and neither
+// does a secret act's try on an allowed one, which it never serves.
+func (c *Checker) Redeem(act string, secret bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w, ok := c.approvals[act]
 	now := c.now()
-	if !ok || w.held {
+	if !ok || w.held || (secret && w.allowed) {
 		return false
 	}
 	delete(c.approvals, act)
@@ -305,9 +367,9 @@ func (c *Checker) Revoke(acts []string) {
 }
 
 // Release lets held approvals be spent, each within ApprovalTTL from now.
-// It opens only an approval an owner's code made, so the broker gains
-// nothing it could not have asked for unheld; it asks once the item's
-// UNDO is closed.
+// It opens only an approval already recorded, a code's or an allow's, and
+// keeps its kind, so the broker gains nothing it could not have asked for
+// unheld; it asks once the item's UNDO is closed.
 func (c *Checker) Release(acts []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -315,7 +377,7 @@ func (c *Checker) Release(acts []string) {
 	c.sweepLocked(now)
 	for _, a := range acts {
 		if w, ok := c.approvals[a]; ok && w.held {
-			c.approvals[a] = window{until: now.Add(ApprovalTTL)}
+			c.approvals[a] = window{until: now.Add(ApprovalTTL), allowed: w.allowed}
 		}
 	}
 }
@@ -325,7 +387,8 @@ type state struct {
 }
 
 type redeemReq struct {
-	Act string `json:"act"`
+	Act    string `json:"act"`
+	Secret bool   `json:"secret,omitempty"`
 }
 
 const maxReq = checkersock.MaxBody
@@ -371,6 +434,23 @@ func (c *Checker) verifyHandler() http.Handler {
 	mux.HandleFunc("POST /verify", c.serveVerify(true))
 	mux.HandleFunc("POST /revoke", c.serveActs(c.Revoke))
 	mux.HandleFunc("POST /release", c.serveActs(c.Release))
+	mux.HandleFunc("POST /allow", func(w http.ResponseWriter, r *http.Request) {
+		var req checkersock.AllowRequest
+		if err := decode(r, &req); err != nil {
+			http.Error(w, "checker: bad request", http.StatusBadRequest)
+			return
+		}
+		switch err := c.Allow(req.Acts); {
+		case errors.Is(err, ErrNoSeed):
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		case errors.Is(err, errTooMany):
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		case err != nil:
+			http.Error(w, "checker: bad request", http.StatusBadRequest)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
 	return mux
 }
 
@@ -441,7 +521,7 @@ func (c *Checker) redeemHandler() http.Handler {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
 		}
-		if !c.Redeem(req.Act) {
+		if !c.Redeem(req.Act, req.Secret) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -479,12 +559,14 @@ func Listen(path string, uids ...int) (net.Listener, error) {
 }
 
 // Redeemer returns a key holder's client for the redeem socket: true means
-// the act's approval was spent for this request. Only 204 is a yes and
-// only 403 a no; any other answer is an error, which the holder refuses.
-func Redeemer(socket string) func(ctx context.Context, act string) (bool, error) {
+// the act's approval was spent for this request; secret marks a request
+// that reveals a secret, which no allowed approval serves. Only 204 is a
+// yes and only 403 a no; any other answer is an error, which the holder
+// refuses.
+func Redeemer(socket string) func(ctx context.Context, act string, secret bool) (bool, error) {
 	hc := checkersock.UnixClient(socket)
-	return func(ctx context.Context, act string) (bool, error) {
-		b, _ := json.Marshal(redeemReq{Act: act})
+	return func(ctx context.Context, act string, secret bool) (bool, error) {
+		b, _ := json.Marshal(redeemReq{Act: act, Secret: secret})
 		req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost/redeem", bytes.NewReader(b))
 		if err != nil {
 			return false, err

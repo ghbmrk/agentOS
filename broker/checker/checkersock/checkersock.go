@@ -53,6 +53,12 @@ type ActsRequest struct {
 	Acts []string `json:"acts"`
 }
 
+// AllowRequest is POST /allow's body, the acts the broker lets through
+// with no code (checker.Allow).
+type AllowRequest struct {
+	Acts []Act `json:"acts"`
+}
+
 type VerifyResponse struct {
 	Step int64 `json:"step"`
 	OK   bool  `json:"ok"`
@@ -130,8 +136,16 @@ func (c *Client) Revoke(acts ...string) error { return c.acts("revoke", acts) }
 // only 204 means the checker released them.
 func (c *Client) Release(acts ...string) error { return c.acts("release", acts) }
 
+// Allow records allowed approvals for acts, which serve an irreversible
+// act but never a secret one: only 204 means the checker recorded them.
+func (c *Client) Allow(acts ...Act) error { return c.post("allow", AllowRequest{Acts: acts}) }
+
 func (c *Client) acts(op string, acts []string) error {
-	b, _ := json.Marshal(ActsRequest{Acts: acts})
+	return c.post(op, ActsRequest{Acts: acts})
+}
+
+func (c *Client) post(op string, body any) error {
+	b, _ := json.Marshal(body)
 	resp, err := c.hc.Post("http://localhost/"+op, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("checker: %w", err)

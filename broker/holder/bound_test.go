@@ -23,7 +23,7 @@ import (
 func TestApprovalIsBoundToTheAccount(t *testing.T) {
 	c, seed := seededChecker(t)
 	up := &upstream{reply: answer(200, nil, "{}")}
-	redeem := func(_ context.Context, act string) (bool, error) { return c.Redeem(act), nil }
+	redeem := func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil }
 	hA := approvingHolder(t, up, redeem)
 	b := planAdapter()
 	b.Credential = "plan-login-b"
@@ -53,7 +53,7 @@ func TestApprovalIsBoundToTheAccount(t *testing.T) {
 // two words, sends nothing upstream (CH-10).
 func TestRedeemErrorSendsNothing(t *testing.T) {
 	up := &upstream{reply: answer(200, nil, "{}")}
-	h := approvingHolder(t, up, func(context.Context, string) (bool, error) {
+	h := approvingHolder(t, up, func(context.Context, string, bool) (bool, error) {
 		return true, errors.New("checker: redeem: 500 Internal Server Error")
 	})
 	if w := do(h, req("POST", "/v1/send", `{"to":"canary@example.invalid"}`)); w.Code != http.StatusServiceUnavailable || w.Header().Get(ErrorHeader) != ErrUnapproved {

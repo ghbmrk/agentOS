@@ -468,7 +468,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 			acts = append(acts, CheckerAct{Act: it.Act, Held: it.UndoWindow > 0})
 		}
 	}
-	ok, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
+	ok, allowed, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
 	if emsg != "" {
 		return []string{emsg}, false, true
 	}
@@ -491,12 +491,15 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	n := len(*decided)
 	before := len(*decided)
 	c.closeLocked(r, func(i int) (bool, bool) { return true, all || chosen[i] }, "", now, decided)
-	if page {
-		for i := before; i < len(*decided); i++ {
-			if d := &(*decided)[i]; d.Approved {
-				d.Page, d.Sum = true, ItemSum(r.items[d.Item-1])
-			}
+	for i := before; i < len(*decided); i++ {
+		d := &(*decided)[i]
+		if !d.Approved {
+			continue
 		}
+		if page {
+			d.Page, d.Sum = true, ItemSum(r.items[d.Item-1])
+		}
+		d.Allowed = allowed && r.items[d.Item-1].Act != ""
 	}
 	s := "Approved " + r.id + "."
 	if !all {

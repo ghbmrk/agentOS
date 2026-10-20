@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// REQ: REV-3, CH-4, CH-10
+// REQ: REV-3, CH-4, CH-10, ADP-9
 
 // heldActItem is a high-risk item with an act and an undo window.
 func heldActItem(ref, act string) Item {
@@ -227,27 +227,44 @@ func TestADecidedItemsActIsNotSent(t *testing.T) {
 	}
 }
 
-// With a checker, a correct grid cell still approves no act: only the
-// checker records the approvals holders spend (CH-4, CH-10).
-func TestAGridCellApprovesNoActEvenWithAChecker(t *testing.T) {
+// With a checker, a correct grid cell allows its items' acts: the
+// checker records allowed approvals, which serve irreversible acts but
+// no secret one (CH-4, CH-10, ADP-9). If the checker records nothing,
+// nothing is approved and the item stays open.
+func TestAGridCellAllowsItsActs(t *testing.T) {
 	r, f := newVerifierRig(t)
 	id, _ := r.ch.Request([]Item{actItem("a", "act-a")}, 0)
 	r.inbox()
-	r.ch.mu.Lock()
-	cell := r.ch.codes.gridChallenge()
-	r.ch.mu.Unlock()
-	if cell == "" {
-		t.Fatal("no grid")
-	}
-	if got := r.say("YES " + id + " " + GridCell(testSecrets.GridSeed, cell)); strings.HasPrefix(got, "Approved") {
-		t.Fatalf("grid cell approved an act: %q", got)
-	}
-	for _, d := range r.decisions() {
-		if d.Approved {
-			t.Fatalf("decided %+v", d)
+	grid := func() string {
+		r.ch.mu.Lock()
+		defer r.ch.mu.Unlock()
+		cell := r.ch.codes.gridChallenge()
+		if cell == "" {
+			t.Fatal("no grid")
 		}
+		return GridCell(testSecrets.GridSeed, cell)
+	}
+
+	f.allowErr = errors.New("checker down")
+	if got := r.say("YES " + id + " " + grid()); got != allowErr {
+		t.Fatalf("grid cell with a failed allow: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	f.allowErr = nil
+	if got := r.say("YES " + id + " " + grid()); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("grid cell: %q", got)
+	}
+	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) {
+		t.Fatalf("allowed %+v", f.allowed)
 	}
 	if len(f.approved) != 0 {
 		t.Fatalf("approved %q", f.approved)
+	}
+	ds := r.decisions()
+	if len(ds) != 1 || !ds[0].Approved || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
 	}
 }

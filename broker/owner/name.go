@@ -132,7 +132,7 @@ func (c *Channel) confirmRenameLocked(code string, now time.Time, unlocked bool)
 	if !unlocked {
 		texted = ""
 	}
-	ok, locked, msg := c.checkLocked(texted, code, now, nil)
+	ok, _, locked, msg := c.checkLocked(texted, code, now, nil)
 	switch {
 	case msg != "":
 		return msg

@@ -24,7 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: CH-4, CH-10, ADP-10
+// REQ: CH-4, CH-10, ADP-9, ADP-10
 
 // countingUpstream is the provider: it counts the requests that reach it.
 type countingUpstream struct{ n atomic.Int32 }
@@ -222,5 +222,10 @@ func TestNoCheckerChecksNoActs(t *testing.T) {
 	}
 	if err := (ownerVerifier{}).ReleaseActs("act-a"); err != nil {
 		t.Fatal(err)
+	}
+	// Nothing can record an allowed approval either, so the channel
+	// approves nothing (ADP-9).
+	if err := (ownerVerifier{}).AllowActs(owner.CheckerAct{Act: "act-a"}); !errors.As(err, &ve) || ve.Kind != owner.VaultDown {
+		t.Fatalf("allow with no checker: %v", err)
 	}
 }

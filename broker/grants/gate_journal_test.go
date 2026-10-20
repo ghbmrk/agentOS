@@ -1,6 +1,6 @@
 package grants
 
-// REQ: OP-11, OP-12, CH-10, SM-AJ-1, SM-AJ-2, SM-AJ-3
+// REQ: OP-11, OP-12, CH-10, SM-AJ-1, SM-AJ-2, SM-AJ-3, ADP-9
 //
 // The owner's answer is journaled before the gate acts on it, and the
 // gate's decided, confirmed and waiting state is rebuilt from the journal
@@ -134,6 +134,27 @@ func TestAnswerIsJournaledBeforeAuthorize(t *testing.T) {
 	}
 	if st := r.state("agent/c"); st.State != journal.Pending {
 		t.Fatalf("agent/c: %s, want still pending", st.State)
+	}
+}
+
+// TestAllowedApprovalIsJournaled (ADP-9): an approval the checker holds
+// as allowed (a texted YES or a grid cell) is journaled as allowed, so the
+// audit shows it could serve no secret act; a code-generator approval is
+// not.
+func TestAllowedApprovalIsJournaled(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.invoice("agent/a", "inv-a")
+	req, items := r.own.last(t)
+	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: items[0].Ref, Approved: true, Why: "owner", Allowed: true})
+	r.g.Wait()
+	if as := answers(r.eng, "agent/a"); len(as) != 1 || as[0].Answer == nil || !as[0].Answer.Allowed {
+		t.Fatalf("allowed approval journaled as %+v", as)
+	}
+	r.invoice("agent/b", "inv-b")
+	r.decide(true, "owner")
+	if as := answers(r.eng, "agent/b"); len(as) != 1 || as[0].Answer.Allowed {
+		t.Fatalf("code approval journaled as %+v", as)
 	}
 }
 

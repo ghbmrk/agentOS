@@ -46,10 +46,12 @@ func seededChecker(t *testing.T) (*checker.Checker, []byte) {
 	return c, seed
 }
 
-func approvingHolder(t *testing.T, up *upstream, redeem func(context.Context, string) (bool, error)) *Holder {
+func approvingHolder(t *testing.T, up *upstream, redeem func(context.Context, string, bool) (bool, error)) *Holder {
 	t.Helper()
 	a := planAdapter()
-	a.Operations = append(a.Operations, egress.Operation{Name: "draft", Verb: egress.VerbDraft, Method: "POST", Path: "/v1/draft"})
+	a.Operations = append(a.Operations,
+		egress.Operation{Name: "draft", Verb: egress.VerbDraft, Method: "POST", Path: "/v1/draft"},
+		egress.Operation{Name: "reveal", Verb: egress.VerbRevealSecret, Method: "POST", Path: "/v1/keys"})
 	h, err := New(Config{Adapters: []egress.Adapter{a}, Transport: up, Swapper: &swapper{}, Redeem: redeem})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +73,7 @@ func do(h *Holder, r *http.Request) *httptest.ResponseRecorder {
 func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	c, seed := seededChecker(t)
 	up := &upstream{reply: answer(200, nil, "{}")}
-	h := approvingHolder(t, up, func(_ context.Context, act string) (bool, error) { return c.Redeem(act), nil })
+	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil })
 	body := `{"to":"canary@example.invalid"}`
 	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
 
@@ -101,7 +103,7 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	// That code's step is spent, so the owner's code for this act is the
 	// next one; a second checker stands in for it rather than waiting a step.
 	c2, seed2 := seededChecker(t)
-	h2 := approvingHolder(t, up, func(_ context.Context, act string) (bool, error) { return c2.Redeem(act), nil })
+	h2 := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c2.Redeem(act, secret), nil })
 	if _, ok, err := c2.Verify(totp(seed2, time.Now()), 0, true, []checkersock.Act{{Act: act}}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
@@ -120,13 +122,40 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	}
 }
 
+// REQ: CH-4, ADP-9
+// An allowed approval (the broker's record of a low-tier or grid answer)
+// serves an irreversible act but never a secret one: a broker taken over
+// can let a send through but cannot reveal a secret.
+func TestAllowedApprovalServesNoSecretAct(t *testing.T) {
+	c, _ := seededChecker(t)
+	up := &upstream{reply: answer(200, nil, "{}")}
+	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil })
+	send := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte("{}"))
+	reveal := checker.Act("plan-login", "plan.example", "POST", "/v1/keys", []byte("{}"))
+	if err := c.Allow([]checkersock.Act{{Act: send}, {Act: reveal}}); err != nil {
+		t.Fatal(err)
+	}
+	if w := do(h, req("POST", "/v1/keys", "{}")); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
+		t.Fatalf("allowed secret act: %d %q", w.Code, w.Header().Get(ErrorHeader))
+	}
+	if w := do(h, req("POST", "/v1/send", "{}")); w.Code != http.StatusOK {
+		t.Fatalf("allowed irreversible act: %d %q", w.Code, w.Header().Get(ErrorHeader))
+	}
+	if up.calls() != 1 || up.seen[0].URL.Path != "/v1/send" {
+		t.Fatalf("provider reached %d times", up.calls())
+	}
+}
+
 // Reads need no approval; draft and organize are still not the holder's to
 // serve, approval or not.
 func TestApprovalCoversHighRiskVerbsOnly(t *testing.T) {
 	c, _ := seededChecker(t)
 	up := &upstream{reply: answer(200, nil, "{}")}
 	asked := 0
-	h := approvingHolder(t, up, func(_ context.Context, act string) (bool, error) { asked++; return c.Redeem(act), nil })
+	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) {
+		asked++
+		return c.Redeem(act, secret), nil
+	})
 	if w := do(h, req("POST", "/v1/messages", "{}")); w.Code != http.StatusOK {
 		t.Fatalf("read: %d", w.Code)
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"strings"
@@ -87,6 +88,9 @@ type strongResult int
 const (
 	strongWrong strongResult = iota
 	strongOK
+	// strongAllowed: a grid cell matched for acts, which the checker
+	// recorded as allowed approvals (codes.allow), not code-made ones.
+	strongAllowed
 )
 
 // strongOpts says what a successful strong code does besides being spent.
@@ -104,8 +108,10 @@ type strongOpts struct {
 	// (#65 security C1).
 	proof bool
 	// acts are the checker acts of the items this code approves
-	// (Item.Act). Only a Verifier can record them, so with acts set
-	// neither a grid cell nor a local seed matches (CH-4, CH-10).
+	// (Item.Act). Only the checker can record them: a code-generator code
+	// through the Verifier, a grid cell as allowed approvals (AllowActs),
+	// so with acts set a local seed never matches and a grid cell
+	// approves nothing unless the allow is recorded (CH-4, CH-10, ADP-9).
 	acts []CheckerAct
 }
 
@@ -119,13 +125,14 @@ const VerifyBreaker = 30 * time.Second
 // arrive late; never at or before the last step accepted). step is 0 for a
 // grid cell. Nothing here changes, except that a Verifier spends a step
 // that matches. err means the Verifier could not check. With acts, only the
-// Verifier may match, since only it records the approvals the holders
-// spend; with no Verifier, nothing is checked (VaultDown).
+// Verifier or the grid may match, since only the checker records the
+// approvals the holders spend (a grid cell's through checkStrong's allow);
+// with no Verifier, nothing is checked (VaultDown).
 func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []CheckerAct) (ok bool, step int64, cell string, err error) {
 	if len(acts) > 0 && c.verify == nil {
 		return false, 0, "", &VerifyError{Kind: VaultDown}
 	}
-	if len(acts) == 0 && c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
+	if c.challenge != "" && !c.gridUsed(c.challenge) && len(c.sec.GridSeed) > 0 &&
 		eq(got, GridCell(c.sec.GridSeed, c.challenge)) {
 		return true, 0, c.challenge, nil
 	}
@@ -165,7 +172,9 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []Check
 // o.unlock is set; wrong codes are not forgiven, they age out (CH-18). A
 // save failure is a failure, and so is a Verifier that could not check;
 // neither is counted. locked reports that this wrong code crossed
-// WrongToLock.
+// WrongToLock. A grid cell for o.acts is spent and then allowed at the
+// checker (strongAllowed); an allow that fails is errAllow, and approves
+// nothing.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
 	if !o.proof && strings.HasPrefix(got, UnlockProofPrefix) {
 		// Refused before the vault process sees it, and not counted.
@@ -202,8 +211,30 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 	}
 	if cell != "" {
 		c.challenge = ""
+		if len(o.acts) > 0 {
+			if err := c.allow(o.acts); err != nil {
+				return strongWrong, false, err
+			}
+			return strongAllowed, false, nil
+		}
 	}
 	return strongOK, false, nil
+}
+
+// errAllow means the checker did not record an allowed approval, so the
+// answer approved nothing.
+var errAllow = errors.New("owner: the checker did not record the approval")
+
+// allow records acts as allowed approvals at the checker (Revoker.AllowActs).
+func (c *codes) allow(acts []CheckerAct) error {
+	rv, ok := c.verify.(Revoker)
+	if !ok {
+		return errAllow
+	}
+	if err := rv.AllowActs(acts...); err != nil {
+		return fmt.Errorf("%w: %v", errAllow, err)
+	}
+	return nil
 }
 
 // wrong records one wrong code of any kind. locked is true when this one

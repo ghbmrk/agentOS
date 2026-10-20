@@ -77,9 +77,10 @@ type Config struct {
 	MaxBody int64
 	// Redeem spends the CH-4 checker's approval for an act
 	// (checker.Redeemer). An irreversible or secret operation is served
-	// only when it returns true for the exact request; with no Redeem the
-	// holder serves reads only.
-	Redeem func(ctx context.Context, act string) (bool, error)
+	// only when it returns true for the exact request; secret is true for
+	// a secret operation, which no allowed approval serves (checker.Allow).
+	// With no Redeem the holder serves reads only.
+	Redeem func(ctx context.Context, act string, secret bool) (bool, error)
 	// PublicFetch says the owner lets machines labelled public use
 	// provider-side fetch with this login (REV-5). Without it the holder
 	// holds every body to the strict form, whatever label egress claims;
@@ -95,7 +96,7 @@ type Holder struct {
 	rtModel http.RoundTripper
 	swapper egress.Swapper
 	maxBody int64
-	redeem  func(ctx context.Context, act string) (bool, error)
+	redeem  func(ctx context.Context, act string, secret bool) (bool, error)
 	account string
 	public  bool
 
@@ -234,7 +235,7 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// host, method, the path on the wire and the body, so a code approves
 	// this request through this login and no other (CH-4, CH-10).
 	if highRisk {
-		approved, err := h.redeem(r.Context(), checker.Act(h.account, a.Host, op.Method, r.URL.EscapedPath(), body))
+		approved, err := h.redeem(r.Context(), checker.Act(h.account, a.Host, op.Method, r.URL.EscapedPath(), body), class == verb.Secret)
 		if err != nil {
 			refuse(w, http.StatusServiceUnavailable, ErrUnapproved)
 			return

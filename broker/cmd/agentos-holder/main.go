@@ -109,7 +109,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 // machines is the owner's per-login choice, passed as -public-fetch; with
 // no flag the login is held to the strict form (ADP-10, #1061 P1).
 func (c config) holderConfig(guard *netguard.Policy) holder.Config {
-	var redeem func(context.Context, string) (bool, error)
+	var redeem func(context.Context, string, bool) (bool, error)
 	if c.checker != "" {
 		redeem = checker.Redeemer(c.checker)
 	}
