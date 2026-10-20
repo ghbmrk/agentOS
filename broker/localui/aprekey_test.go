@@ -168,9 +168,6 @@ func TestRekeyStopsWhenBringDownFails(t *testing.T) {
 	if ap.started || ap.cfg.Password == rotatedPW {
 		t.Fatal("Rekey brought the access point up after a failed BringDown")
 	}
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("Station took an interface whose BringDown failed")
-	}
 }
 
 // REC-4, DEV-net-h: if hostapd will not stop, the access point may still

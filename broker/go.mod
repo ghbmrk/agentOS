@@ -14,6 +14,8 @@ require (
 	github.com/google/go-tpm v0.9.8
 	github.com/icholy/digest v1.1.0
 	github.com/makiuchi-d/gozxing v0.1.1
+	github.com/mdlayher/genetlink v1.4.0
+	github.com/mdlayher/netlink v1.9.0
 	github.com/pion/rtp v1.10.5
 	github.com/pion/sdp/v3 v3.0.20
 	github.com/pion/srtp/v3 v3.1.3
@@ -30,8 +32,10 @@ require (
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-containerregistry v0.20.7 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
@@ -39,6 +43,7 @@ require (
 	github.com/pion/transport/v5 v5.1.1 // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.11.0 // indirect
 	github.com/sigstore/protobuf-specs v0.5.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250825161204-c5933d9347a5 // indirect
