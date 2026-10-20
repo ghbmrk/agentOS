@@ -119,27 +119,50 @@ func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
 // state whose presence ends setup.
 var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
 
+// maskedDirs are agentosd's state directories under /var/lib/agentos. A
+// mask on a directory holds while agentosd renames files inside it.
+var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7"}
+
+// lapsingFiles are agentosd's state files at the top of /var/lib/agentos.
+// The unit masks them, but a mask on a file lapses at agentosd's first
+// rewrite (temp file and rename detaches the mount on the old dentry), so
+// the loader reaches each one from then on. They stay exposed until
+// #2626 moves the loader's files into their own directory.
+var lapsingFiles = []string{"journal.log", "claim.json", "drive-id", "meter.json", "spare-meter.json", "kept-replies.json", "guest-inbox.json", "clock.json", "questions.json", "setup.json", "card-latch.json"}
+
 // joinedState is agentosd state under /var/lib/agentos whose name is
-// joined to the directory at run time, so no literal path names it.
-var joinedState = []string{"questions.json"}
+// joined to the directory at run time (cmd/agentosd/questions.go), so a
+// literal path may not name it.
+var joinedState = []string{"questions.json", "clock.json"}
 
 var statePath = regexp.MustCompile(`/var/lib/agentos/([A-Za-z0-9._-]+)`)
 
 // Every state path under /var/lib/agentos that the broker's code or the
-// image names is hidden from the loader but the three it needs (#2626):
-// owner and guest content would leak to it, and meter and clock state
-// agentosd trusts could be rewritten by it. A new path fails here until
-// the unit hides it or loaderState says why the loader needs it.
+// image names is either one of the three the loader needs, a masked
+// directory (hidden for good), or a file in lapsingFiles, whose mask
+// holds only until agentosd first rewrites it (#2626). This test does not
+// show a file is hidden; it keeps a new path from going unclassed, and
+// keeps the unit's masks and these lists the same.
 func TestAgentosdStateIsHidden(t *testing.T) {
 	b, err := os.ReadFile("agentos-ap.service")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var hidden []string
+	var masked []string
 	for _, l := range strings.Split(string(b), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "InaccessiblePaths="); ok {
-			hidden = append(hidden, strings.Fields(v)...)
+			for _, p := range strings.Fields(v) {
+				if n, ok := strings.CutPrefix(p, "-/var/lib/agentos/"); ok {
+					masked = append(masked, n)
+				}
+			}
 		}
+	}
+	slices.Sort(masked)
+	want := slices.Concat(maskedDirs, lapsingFiles)
+	slices.Sort(want)
+	if !slices.Equal(masked, want) {
+		t.Errorf("the unit masks %q under /var/lib/agentos; maskedDirs and lapsingFiles list %q", masked, want)
 	}
 	named := map[string]string{}
 	for _, n := range joinedState {
@@ -176,11 +199,8 @@ func TestAgentosdStateIsHidden(t *testing.T) {
 		t.Fatalf("found only %d state paths; the walk is broken", len(named))
 	}
 	for n, where := range named {
-		if slices.Contains(loaderState, n) {
-			continue
-		}
-		if !slices.Contains(hidden, "-/var/lib/agentos/"+n) {
-			t.Errorf("/var/lib/agentos/%s (named in %s) is not in InaccessiblePaths", n, where)
+		if !slices.Contains(loaderState, n) && !slices.Contains(want, n) {
+			t.Errorf("/var/lib/agentos/%s (named in %s) is in none of loaderState, maskedDirs or lapsingFiles", n, where)
 		}
 	}
 	for _, n := range loaderState {

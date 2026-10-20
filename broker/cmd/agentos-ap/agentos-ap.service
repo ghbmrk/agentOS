@@ -63,11 +63,16 @@ NoNewPrivileges=yes
 # skipped), and so are the vault's sockets: their only peer check is the
 # broker uid, which is root, and the access point never calls them (#1628).
 # Owner and guest content and the meter and clock state agentosd trusts
-# are hidden too (#2626); TestAgentosdStateIsHidden fails on any state
-# path under /var/lib/agentos named in the source and missing here. This
-# is still a deny-list: a file agentosd makes after the loader starts
-# shows until a restart. The allowlist #2626 asks for needs the three
-# files the loader shares with agentosd in their own directory.
+# are masked too (#2626), but only the directory masks hold. A mask on a
+# file is a bind mount on its dentry, and agentosd rewrites state by temp
+# file and rename (broker/durable), which detaches that mount in every
+# namespace: each file mask (claim.json, drive-id, meter.json and the
+# rest) lapses at agentosd's first rewrite of that file, and the loader
+# can then read and write it. They slow an attacker down; they hide
+# nothing. Hiding the files needs a directory-level mask, which needs the
+# three files the loader shares with agentosd moved into their own
+# directory; that is #2626, open. TestAgentosdStateIsHidden keeps the
+# two kinds apart.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/agentos
 InaccessiblePaths=-/var/lib/agentos-egress -/run/agentos-egress -/var/lib/agentos/vault -/var/lib/agentos/machines -/var/lib/agentos/slots -/var/lib/agentos/journal -/var/lib/agentos/journal.log -/var/lib/agentos/change -/var/lib/agentos/recall -/var/lib/agentos/learn -/var/lib/agentos/skills -/var/lib/agentos/modem -/var/lib/agentos/claim.json -/var/lib/agentos/drive-id
