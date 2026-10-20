@@ -148,6 +148,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rec"
           cp "$RUNNER_TEMP"/out/*.release.json "$RUNNER_TEMP"/out/SHA256SUMS "$RUNNER_TEMP"/out/*.manifest "$RUNNER_TEMP/rec/" || true
+          cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
@@ -170,8 +171,8 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
   reproduce:
-    # Two runners, one commit: the release must match: the /usr root hash, the boot entry and the
-    # kernel. The initrd is compared but only reported until it is reproducible (BOARD IMG-2).
+    # Two runners, one commit: the release must match: the /usr root hash, the boot entry, the
+    # kernel and both initrds (IMG-2). A differing initrd is listed member by member.
     # The whole-disk hash is reported too. Both package manifests must list packages.
     needs: build
     if: ${{ !cancelled() }}
@@ -197,9 +198,10 @@ jobs:
             && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }
           for f in $(jq -r '.boot | keys[]' "$A"); do
             ha=$(jq -r --arg f "$f" '.boot[$f]' "$A"); hb=$(jq -r --arg f "$f" '.boot[$f] // ""' "$B")
-            if [ "$ha" = "$hb" ]; then echo "same $f"
-            elif [ "${f##*/}" = initrd ]; then echo "::warning::initrd differs between runners ($f); report-only until IMG-2"
-            else echo "MISMATCH $f"; ok=0; fi
+            if [ -n "$ha" ] && [ "$ha" = "$hb" ]; then echo "same $f"
+            else echo "MISMATCH $f"; ok=0
+              case "$f" in *initrd) python3 image/compare_manifests.py --initrd "rec/release-a/initrd/$f" "rec/release-b/initrd/$f" || true;; esac
+            fi
           done
           [ "$(jq '.boot | length' "$A")" -ge 2 ] || { echo "MISMATCH release.json lists no kernel and initrd"; ok=0; }
           [ $ok = 1 ]
