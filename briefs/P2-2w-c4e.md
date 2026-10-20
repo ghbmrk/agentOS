@@ -16,7 +16,7 @@ Board section: Backlog refill (2026-10-05); work item #1222. Split from P2-2w c4
 
 #1222 also names device-code sign-in. That flow needs the provider's official CLI in a worker (CAP-11, CRED-5). Codex is the default plan route and is broker-held (D-114, D-061); Claude has no plan route (D-140). It is a different mechanism from a vault-held key, so it is split into a release row:
 
-- **c4e2, plan sign-in at setup.** The page's "Use my plan" starts the provider CLI's device-code login in a worker, shows "This code is from <provider>", and records the login in the custody mode the adapter declares. For Codex that is broker-held: sign-in runs in a fresh provider worker through #1014's declared sign-in endpoints and auth-host check, the first token response is swapped to placeholders and written to the vault entry (#1015), and the page records the owner's consent for the unconfirmed route first (CRED-5c). Claude appears only after the opt-in warning, with the user-driven flow #1380 builds. Until c4e2, providers report `device_code: false`, so the page never offers it.
+- **c4e2, plan sign-in at setup.** The page's "Use my plan" starts the provider CLI's device-code login in a worker, shows "This code is from <provider>", and records the login in the custody mode the adapter declares. For Codex that is broker-held: sign-in runs in a fresh provider worker through #1014's declared sign-in endpoints and auth-host check, the first token response is swapped to placeholders and written to the vault entry (#1015), and the page records the owner's consent for the unconfirmed route first (CRED-5c). Until c4e2, providers report `device_code: false`, so the page never offers it.
 
 ## Scope (files)
 
