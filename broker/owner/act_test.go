@@ -146,11 +146,35 @@ func TestTextedCodeFailsClosedWhenTheAllowFails(t *testing.T) {
 	if len(r.ch.codes.st.Wrong) != 0 {
 		t.Fatalf("counted as wrong: %v", r.ch.codes.st.Wrong)
 	}
+	// The failed allow may have been recorded, so it is withdrawn before
+	// the owner is told nothing was approved (#2514 L3 blocker 2).
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
 	f.allowErr = nil
 	if got := r.say("YES " + m[1] + " " + m[2]); got != "Approved "+m[1]+"." {
 		t.Fatalf("retry: %q", got)
 	}
 	if ds := r.decisions(); len(ds) != 1 || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// An allow that fails and cannot be withdrawn may have been recorded, so
+// the owner is told the act may still run, never that nothing was
+// approved (#2514 L3 blocker 2, SW-5's rule).
+func TestAnAllowThatCannotBeWithdrawnSaysItMayRun(t *testing.T) {
+	r, f := newVerifierRig(t)
+	it := lowItem("a")
+	it.Act = "act-a"
+	r.ch.Request([]Item{it}, 0)
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	f.allowErr = errors.New("checker timed out")
+	f.revokeErr = errors.New("checker timed out")
+	if got := r.say("YES " + m[1] + " " + m[2]); got != allowUnknownErr {
+		t.Fatalf("YES with a lost allow: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
 		t.Fatalf("decided %+v", ds)
 	}
 }

@@ -54,10 +54,17 @@ type ActsRequest struct {
 }
 
 // AllowRequest is POST /allow's body, the acts the broker lets through
-// with no code (checker.Allow).
+// with no code (checker.Allow), and Before, the Unix millisecond after
+// which the checker records none of them (AllowWithin).
 type AllowRequest struct {
-	Acts []Act `json:"acts"`
+	Acts   []Act `json:"acts"`
+	Before int64 `json:"before"`
 }
+
+// AllowWithin is how long after it is sent an allow may still be
+// recorded: under the verify client's 2 s timeout, so an allow whose
+// answer was lost is settled once Allow returns (Client.Allow).
+const AllowWithin = time.Second
 
 type VerifyResponse struct {
 	Step int64 `json:"step"`
@@ -138,7 +145,26 @@ func (c *Client) Release(acts ...string) error { return c.acts("release", acts) 
 
 // Allow records allowed approvals for acts, which serve an irreversible
 // act but never a secret one: only 204 means the checker recorded them.
-func (c *Client) Allow(acts ...Act) error { return c.post("allow", AllowRequest{Acts: acts}) }
+// The checker records none after AllowWithin, and an Allow that got no
+// answer returns no sooner, so the checker has settled it by then: a
+// Revoke sent after the error withdraws whatever it recorded.
+func (c *Client) Allow(acts ...Act) error {
+	before := time.Now().Add(AllowWithin)
+	err := c.post("allow", AllowRequest{Acts: acts, Before: before.UnixMilli()})
+	var se statusError
+	if err != nil && !errors.As(err, &se) {
+		time.Sleep(time.Until(before))
+	}
+	return err
+}
+
+// statusError is a checker answer other than 204: the request was settled.
+type statusError struct {
+	op     string
+	status string
+}
+
+func (e statusError) Error() string { return "checker: " + e.op + ": " + e.status }
 
 func (c *Client) acts(op string, acts []string) error {
 	return c.post(op, ActsRequest{Acts: acts})
@@ -153,7 +179,7 @@ func (c *Client) post(op string, body any) error {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, MaxBody))
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("checker: %s: %s", op, resp.Status)
+		return statusError{op, resp.Status}
 	}
 	return nil
 }

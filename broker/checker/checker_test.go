@@ -744,3 +744,58 @@ func TestAllowOverTheSocket(t *testing.T) {
 		t.Fatal("allowed with the seed dropped")
 	}
 }
+
+// REQ: CH-4, ADP-9
+// An allow the broker stopped waiting for is settled when Allow returns:
+// one held up past AllowWithin records nothing, so a revoke sent after the
+// error leaves no approval for the holder to spend (#2514 L3 blocker 2).
+func TestALateAllowRecordsNothing(t *testing.T) {
+	c, _ := newChecker(t, &clock{t: time.Unix(1_800_000_000, 0)})
+	c.Hand(syntheticSeed(t))
+	dir, err := os.MkdirTemp("", "chk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	var lns []net.Listener
+	for _, name := range []string{HandSocket, VerifySocket, RedeemSocket} {
+		ln, err := Listen(filepath.Join(dir, name), os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lns = append(lns, ln)
+	}
+	go c.Serve(lns[0], lns[1], lns[2])
+	a := act(t, `{"late":1}`)
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
+
+	c.mu.Lock()
+	start := time.Now()
+	err = vc.Allow(checkersock.Act{Act: a})
+	waited := time.Since(start)
+	time.AfterFunc(500*time.Millisecond, c.mu.Unlock)
+	if err == nil {
+		t.Fatal("an allow held past its deadline was answered")
+	}
+	if waited < checkersock.AllowWithin {
+		t.Fatalf("Allow returned after %v, before its deadline", waited)
+	}
+	if err := vc.Revoke(a); err != nil {
+		t.Fatal(err)
+	}
+	// Whenever the held-up handler runs, it is past its deadline and
+	// records nothing; look a few times while it gets the lock.
+	red := Redeemer(filepath.Join(dir, RedeemSocket))
+	for i := 0; i < 5; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if ok, err := red(context.Background(), a, false); ok || err != nil {
+			t.Fatalf("a late allow was spent: %v %v", ok, err)
+		}
+	}
+	if err := c.allowBefore(acts(a), time.Now().Add(-time.Millisecond)); !errors.Is(err, errLate) {
+		t.Fatalf("a late allow: %v", err)
+	}
+	if ok, _ := red(context.Background(), a, false); ok {
+		t.Fatal("a late allow was recorded")
+	}
+}

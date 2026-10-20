@@ -46,6 +46,10 @@ type Verifier interface {
 type CheckerAct struct {
 	Act  string
 	Held bool
+	// Secret marks an act that releases a secret (SecretReveal). It stays
+	// in the channel: only a code-generator code approves such an act, so
+	// a grid cell or texted code for it is refused before any allow.
+	Secret bool
 }
 
 // Revoker is a Verifier that can withdraw the approvals it recorded and

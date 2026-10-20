@@ -3,6 +3,7 @@ package owner
 import (
 	"errors"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -234,37 +235,84 @@ func TestADecidedItemsActIsNotSent(t *testing.T) {
 func TestAGridCellAllowsItsActs(t *testing.T) {
 	r, f := newVerifierRig(t)
 	id, _ := r.ch.Request([]Item{actItem("a", "act-a")}, 0)
-	r.inbox()
-	grid := func() string {
-		r.ch.mu.Lock()
-		defer r.ch.mu.Unlock()
-		cell := r.ch.codes.gridChallenge()
-		if cell == "" {
-			t.Fatal("no grid")
-		}
-		return GridCell(testSecrets.GridSeed, cell)
-	}
+	cell := toldCell(t, r.inbox())
 
+	// A failed allow spends nothing: the owner resends the cell they were
+	// told, and it approves (#2514 L3 blocker 1).
 	f.allowErr = errors.New("checker down")
-	if got := r.say("YES " + id + " " + grid()); got != allowErr {
+	if got := r.say("YES " + id + " " + cell); got != allowErr {
 		t.Fatalf("grid cell with a failed allow: %q", got)
 	}
 	if ds := r.decisions(); len(ds) != 0 {
 		t.Fatalf("decided %+v", ds)
 	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("a failed allow was not withdrawn: %q", f.revoked)
+	}
 
 	f.allowErr = nil
-	if got := r.say("YES " + id + " " + grid()); !strings.HasPrefix(got, "Approved "+id) {
-		t.Fatalf("grid cell: %q", got)
+	if got := r.say("YES " + id + " " + cell); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("the same grid cell again: %q", got)
 	}
 	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) {
 		t.Fatalf("allowed %+v", f.allowed)
 	}
-	if len(f.approved) != 0 {
-		t.Fatalf("approved %q", f.approved)
+	if len(f.approved) != 0 || len(f.acts) != 0 {
+		t.Fatalf("the Verifier saw a grid cell: approved %q, calls %q", f.approved, f.acts)
+	}
+	r.ch.mu.Lock()
+	wrong := len(r.ch.codes.st.Wrong)
+	r.ch.mu.Unlock()
+	if wrong != 0 {
+		t.Fatalf("%d wrong codes counted", wrong)
 	}
 	ds := r.decisions()
 	if len(ds) != 1 || !ds[0].Approved || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// toldCell returns the answer to the grid cell named in text, the one the
+// owner was told to send.
+func toldCell(t *testing.T, text string) string {
+	t.Helper()
+	m := regexp.MustCompile(`grid cell ([A-Z][0-9]+)`).FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("no grid cell offered in %q", text)
+	}
+	return GridCell(testSecrets.GridSeed, m[1])
+}
+
+// An allowed approval never serves an act that releases a secret, so a
+// grid cell for one is refused before any allow, says why, and counts
+// nothing; a code-generator code still approves it (CH-4, CH-10).
+func TestAGridCellCannotApproveASecretAct(t *testing.T) {
+	r, f := newVerifierRig(t)
+	it := actItem("a", "act-a")
+	it.Facts.Kind = SecretReveal
+	id, _ := r.ch.Request([]Item{it}, 0)
+	cell := toldCell(t, r.inbox())
+
+	if got := r.say("YES " + id + " " + cell); got != secretActErr {
+		t.Fatalf("grid cell for a secret act: %q", got)
+	}
+	if len(f.allowed) != 0 || len(f.acts) != 0 {
+		t.Fatalf("allowed %+v, Verifier calls %q", f.allowed, f.acts)
+	}
+	r.ch.mu.Lock()
+	wrong, used := len(r.ch.codes.st.Wrong), len(r.ch.codes.st.GridUsed)
+	r.ch.mu.Unlock()
+	if wrong != 0 || used != 0 {
+		t.Fatalf("wrong %d, grid cells used %d", wrong, used)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	if got := r.say("YES " + id + " " + r.totp()); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("code-generator code: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Approved || ds[0].Allowed {
 		t.Fatalf("decided %+v", ds)
 	}
 }

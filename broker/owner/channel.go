@@ -916,12 +916,26 @@ const stateErr = "Could not save the code check, so it did not count. Try again.
 // allowErr: the checker did not record the approval, so nothing ran.
 const allowErr = "The box could not record this approval, so nothing was approved and the code did not count. Try again."
 
+// allowUnknownErr: the checker may have recorded the approval and could
+// not withdraw it, so the act may still run; the reply says so (SW-5).
+const allowUnknownErr = "The box could not confirm this approval, and could not withdraw it, so the action may still run. The code did not count."
+
+// secretActErr: an allowed approval never serves an act that releases a
+// secret, so a grid cell or texted code cannot approve it (CH-4, CH-10).
+const secretActErr = "This approval releases a secret, so only a code from your code generator approves it. That code did not count."
+
 // codeErr is the reply when a code could not be checked or saved. Each
 // vault-process failure gets its own fixed wording, since retrying helps
 // only in some of them (CH-18).
 func (c *Channel) codeErr(err error) string {
+	if errors.Is(err, errAllowUnknown) {
+		return allowUnknownErr
+	}
 	if errors.Is(err, errAllow) {
 		return allowErr
+	}
+	if errors.Is(err, errSecretAct) {
+		return secretActErr
 	}
 	var ve *VerifyError
 	if !errors.As(err, &ve) {
@@ -1052,8 +1066,11 @@ func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerA
 		if len(acts) == 0 {
 			return true, false, false, ""
 		}
+		if secretAct(acts) {
+			return false, false, false, secretActErr
+		}
 		if err := c.codes.allow(acts); err != nil {
-			return false, false, false, allowErr
+			return false, false, false, c.codeErr(err)
 		}
 		return true, true, false, ""
 	}

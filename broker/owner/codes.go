@@ -172,9 +172,11 @@ func (c *codes) matchStrong(got string, now time.Time, silent bool, acts []Check
 // o.unlock is set; wrong codes are not forgiven, they age out (CH-18). A
 // save failure is a failure, and so is a Verifier that could not check;
 // neither is counted. locked reports that this wrong code crossed
-// WrongToLock. A grid cell for o.acts is spent and then allowed at the
-// checker (strongAllowed); an allow that fails is errAllow, and approves
-// nothing.
+// WrongToLock. A grid cell for o.acts is allowed at the checker and then
+// spent (strongAllowed); an allow that fails is errAllow, approves nothing
+// and spends nothing. A grid cell for an act that releases a secret is
+// errSecretAct, since an allowed approval never serves one; it spends
+// nothing either.
 func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strongResult, locked bool, err error) {
 	if !o.proof && strings.HasPrefix(got, UnlockProofPrefix) {
 		// Refused before the vault process sees it, and not counted.
@@ -190,6 +192,18 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 		}
 		locked, err = c.wrong(now)
 		return strongWrong, locked, err
+	}
+	if cell != "" && len(o.acts) > 0 {
+		// The allow goes first, so a failed one spends nothing: the cell
+		// stays the challenge and the owner may send it again. A commit
+		// that then fails leaves allowed approvals no decision spends;
+		// they lapse after ApprovalTTL.
+		if secretAct(o.acts) {
+			return strongWrong, false, errSecretAct
+		}
+		if err := c.allow(o.acts); err != nil {
+			return strongWrong, false, err
+		}
 	}
 	err = c.commit(func(s *State) {
 		if cell != "" {
@@ -212,9 +226,6 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 	if cell != "" {
 		c.challenge = ""
 		if len(o.acts) > 0 {
-			if err := c.allow(o.acts); err != nil {
-				return strongWrong, false, err
-			}
 			return strongAllowed, false, nil
 		}
 	}
@@ -225,17 +236,47 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 // answer approved nothing.
 var errAllow = errors.New("owner: the checker did not record the approval")
 
+// errSecretAct means the answer was a grid cell or texted code for an act
+// that releases a secret, which only a code-generator code approves
+// (Checker.Redeem refuses an allowed approval for it). Nothing counted.
+var errSecretAct = errors.New("owner: only a code-generator code approves a secret act")
+
+func secretAct(acts []CheckerAct) bool {
+	for _, a := range acts {
+		if a.Secret {
+			return true
+		}
+	}
+	return false
+}
+
 // allow records acts as allowed approvals at the checker (Revoker.AllowActs).
+// An allow that fails may still have been recorded (its answer lost), so
+// it is withdrawn before the owner is told nothing was approved; the
+// checker has settled it by the time AllowActs returns (checkersock
+// AllowWithin). A withdrawal that fails too is errAllowUnknown: the acts
+// may still run, and the owner is told so (SW-5's rule).
 func (c *codes) allow(acts []CheckerAct) error {
 	rv, ok := c.verify.(Revoker)
 	if !ok {
 		return errAllow
 	}
 	if err := rv.AllowActs(acts...); err != nil {
+		names := make([]string, len(acts))
+		for i, a := range acts {
+			names[i] = a.Act
+		}
+		if rerr := rv.RevokeActs(names...); rerr != nil {
+			return fmt.Errorf("%w: %v; withdraw: %v", errAllowUnknown, err, rerr)
+		}
 		return fmt.Errorf("%w: %v", errAllow, err)
 	}
 	return nil
 }
+
+// errAllowUnknown means an allow failed and its withdrawal failed too, so
+// the checker may hold the approval: the acts may still run.
+var errAllowUnknown = errors.New("owner: the checker may have recorded the approval")
 
 // wrong records one wrong code of any kind. locked is true when this one
 // crossed WrongToLock: the low tier is off and the session is locked. The

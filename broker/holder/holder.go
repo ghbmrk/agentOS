@@ -122,6 +122,9 @@ func New(cfg Config) (*Holder, error) {
 		if _, dup := h.byHost[a.Host]; dup {
 			return nil, fmt.Errorf("holder: two adapters on host %s", a.Host)
 		}
+		if err := secretShadowed(a); err != nil {
+			return nil, fmt.Errorf("holder: adapter %s: %v", a.Name, err)
+		}
 		for _, op := range a.Operations {
 			if op.Response != nil && cfg.Swapper == nil {
 				return nil, fmt.Errorf("holder: adapter %s: operation %s exchanges credentials and no swapper is set", a.Name, op.Name)
@@ -182,6 +185,44 @@ func (h *Holder) current() []byte {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return append([]byte(nil), h.secret...)
+}
+
+// secretShadowed refuses an adapter in which an operation that reveals a
+// secret could match the same request as another operation. The holder
+// classes a request by the first operation that matches (Adapter.Match),
+// and an allowed approval serves an irreversible act but never a secret
+// one, so a secret request matched as another verb would be served on an
+// approval the checker did not verify (CRED-6, CH-10). Two templates
+// overlap when they have the same method and segment count and each pair
+// of segments is equal or either is a {parameter}.
+func secretShadowed(a egress.Adapter) error {
+	for i, x := range a.Operations {
+		for _, y := range a.Operations[i+1:] {
+			cx, _ := verb.ClassOf(x.Verb)
+			cy, _ := verb.ClassOf(y.Verb)
+			if (cx == verb.Secret || cy == verb.Secret) && overlaps(x, y) {
+				return fmt.Errorf("operations %s and %s can match the same request, and one reveals a secret", x.Name, y.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func overlaps(x, y egress.Operation) bool {
+	if x.Method != y.Method {
+		return false
+	}
+	sx, sy := strings.Split(x.Path, "/"), strings.Split(y.Path, "/")
+	if len(sx) != len(sy) {
+		return false
+	}
+	param := func(s string) bool { return strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") }
+	for i := range sx {
+		if sx[i] != sy[i] && !param(sx[i]) && !param(sy[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func refuse(w http.ResponseWriter, status int, why string) {

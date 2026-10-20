@@ -465,7 +465,7 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	var acts []CheckerAct
 	for i, it := range r.items {
 		if !r.done[i] && (all || chosen[i]) && it.Act != "" {
-			acts = append(acts, CheckerAct{Act: it.Act, Held: it.UndoWindow > 0})
+			acts = append(acts, CheckerAct{Act: it.Act, Held: it.UndoWindow > 0, Secret: it.Facts.Kind == SecretReveal})
 		}
 	}
 	ok, allowed, locked, emsg := c.checkLocked(texted, rp.code, now, acts)

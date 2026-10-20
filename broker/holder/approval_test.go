@@ -211,3 +211,41 @@ func TestHolderRedeemsOverTheCheckerSocket(t *testing.T) {
 		t.Fatalf("provider reached %d times, want 1", up.calls())
 	}
 }
+
+// REQ: CH-4, ADP-9
+// The holder classes a request by the first operation that matches, so a
+// broader operation declared before a secret one could carry a secret
+// request as irreversible, which an allowed approval serves. An adapter
+// whose secret operation can match the same request as another one is
+// refused at load (#2514 L3 blocker 1).
+func TestASecretOperationCannotBeShadowed(t *testing.T) {
+	for name, ops := range map[string][]egress.Operation{
+		"broader first": {
+			{Name: "send", Verb: egress.VerbSend, Method: "POST", Path: "/v1/{thing}"},
+			{Name: "reveal", Verb: egress.VerbRevealSecret, Method: "POST", Path: "/v1/keys"},
+		},
+		"broader after": {
+			{Name: "reveal", Verb: egress.VerbRevealSecret, Method: "POST", Path: "/v1/keys"},
+			{Name: "send", Verb: egress.VerbSend, Method: "POST", Path: "/v1/{thing}"},
+		},
+		"same path": {
+			{Name: "send", Verb: egress.VerbSend, Method: "POST", Path: "/v1/keys"},
+			{Name: "reveal", Verb: egress.VerbRevealSecret, Method: "POST", Path: "/v1/keys"},
+		},
+	} {
+		a := planAdapter()
+		a.Operations = append(a.Operations, ops...)
+		if _, err := New(Config{Adapters: []egress.Adapter{a}, Transport: &upstream{}, Swapper: &swapper{}}); err == nil {
+			t.Errorf("%s: an adapter with a shadowable secret operation loaded", name)
+		}
+	}
+	// Another method, or another path length, cannot match the same request.
+	a := planAdapter()
+	a.Operations = append(a.Operations,
+		egress.Operation{Name: "send", Verb: egress.VerbSend, Method: "PUT", Path: "/v1/{thing}"},
+		egress.Operation{Name: "list", Verb: egress.VerbRead, Method: "POST", Path: "/v1/keys/{id}"},
+		egress.Operation{Name: "reveal", Verb: egress.VerbRevealSecret, Method: "POST", Path: "/v1/keys"})
+	if _, err := New(Config{Adapters: []egress.Adapter{a}, Transport: &upstream{}, Swapper: &swapper{}}); err != nil {
+		t.Fatalf("disjoint operations: %v", err)
+	}
+}
