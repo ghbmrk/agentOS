@@ -78,7 +78,6 @@ allow broker/go.sum
 allow broker/core/
 allow broker/e2e/
 allow broker/hostchange/
-allow broker/sim/
 allow broker/kernel/
 allow broker/clerk/
 allow broker/test/
