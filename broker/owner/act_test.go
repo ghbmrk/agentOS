@@ -171,11 +171,42 @@ func TestAnAllowThatCannotBeWithdrawnSaysItMayRun(t *testing.T) {
 	m := lowCodeRe.FindStringSubmatch(r.inbox())
 	f.allowErr = errors.New("checker timed out")
 	f.revokeErr = errors.New("checker timed out")
-	if got := r.say("YES " + m[1] + " " + m[2]); got != allowUnknownErr {
+	if got := r.say("YES " + m[1] + " " + m[2]); got != allowUnknownErr+" Reply NO "+m[1]+" to withdraw it." {
 		t.Fatalf("YES with a lost allow: %q", got)
 	}
 	if ds := r.decisions(); len(ds) != 0 {
 		t.Fatalf("decided %+v", ds)
+	}
+	// While withdrawing still fails, NO denies and still says the act may
+	// run (TestNoWithdrawsTheDeniedActs shows NO withdrawing).
+	if got := r.say("NO " + m[1]); got != "Denied "+m[1]+". The box could not withdraw an approval it may have recorded, so it may still run." {
+		t.Fatalf("NO while withdrawing fails: %q", got)
+	}
+}
+
+// NO withdraws any approval the checker holds for the denied items' acts,
+// so an allow the box could not confirm cannot run after the owner said
+// no; a void request withdraws its acts the same way (#2514 combined delta).
+func TestNoWithdrawsTheDeniedActs(t *testing.T) {
+	r, f := newVerifierRig(t)
+	a, b := lowItem("a"), lowItem("b")
+	a.Act, b.Act = "act-a", "act-b"
+	id, err := r.ch.Request([]Item{a, b}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.say("NO " + id + " 2"); got != "Denied "+id+" item 2." {
+		t.Fatalf("NO item 2: %q", got)
+	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-b"}) {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
+	f.revoked = nil
+	for i := 0; i < WrongPerRequest; i++ {
+		r.say("YES " + id + " 000000")
+	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("void withdrew %q", f.revoked)
 	}
 }
 

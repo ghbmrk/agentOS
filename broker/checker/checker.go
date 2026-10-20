@@ -295,17 +295,20 @@ func (c *Checker) sweepLocked(now time.Time) {
 // irreversible act but never a secret one (Redeem), so a broker taken over
 // can let an irreversible act through but reveals no secret.
 func (c *Checker) Allow(acts []checkersock.Act) error {
-	return c.allowBefore(acts, time.Time{})
+	return c.allowBefore(acts, time.Time{}, time.Time{})
 }
 
 // errLate refuses an allow that reached the checker after its Before.
 var errLate = errors.New("checker: allow arrived too late")
 
 // allowBefore is Allow for POST /allow: it records nothing once the wall
-// clock passes before, checked under the lock, so a broker that stopped
-// waiting for the answer can withdraw what it asked for and know nothing
-// is recorded after (checkersock.AllowWithin).
-func (c *Checker) allowBefore(acts []checkersock.Act, before time.Time) error {
+// clock passes before, or once checkersock.AllowWithin has passed on the
+// monotonic clock since the request arrived, both checked under the lock,
+// so a broker that stopped waiting for the answer can withdraw what it
+// asked for and know nothing is recorded after. The second check holds
+// when the wall clock steps back; what neither bounds is a request that
+// took longer than AllowWithin to arrive under a clock stepped back.
+func (c *Checker) allowBefore(acts []checkersock.Act, before, arrived time.Time) error {
 	if len(acts) > MaxActs {
 		return fmt.Errorf("checker: more than %d acts", MaxActs)
 	}
@@ -317,6 +320,9 @@ func (c *Checker) allowBefore(acts []checkersock.Act, before time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !before.IsZero() && time.Now().After(before) {
+		return errLate
+	}
+	if !arrived.IsZero() && time.Since(arrived) >= checkersock.AllowWithin {
 		return errLate
 	}
 	if len(c.seed) == 0 {
@@ -449,6 +455,7 @@ func (c *Checker) verifyHandler() http.Handler {
 	mux.HandleFunc("POST /revoke", c.serveActs(c.Revoke))
 	mux.HandleFunc("POST /release", c.serveActs(c.Release))
 	mux.HandleFunc("POST /allow", func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
 		var req checkersock.AllowRequest
 		if err := decode(r, &req); err != nil {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
@@ -458,7 +465,7 @@ func (c *Checker) verifyHandler() http.Handler {
 			http.Error(w, "checker: bad request", http.StatusBadRequest)
 			return
 		}
-		switch err := c.allowBefore(req.Acts, time.UnixMilli(req.Before)); {
+		switch err := c.allowBefore(req.Acts, time.UnixMilli(req.Before), arrived); {
 		case errors.Is(err, ErrNoSeed):
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		case errors.Is(err, errTooMany):

@@ -193,33 +193,34 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 		locked, err = c.wrong(now)
 		return strongWrong, locked, err
 	}
+	spend := func() error {
+		return c.commit(func(s *State) {
+			if cell != "" {
+				s.GridUsed = append(s.GridUsed, cell)
+			} else {
+				s.LastStep = step
+			}
+			if o.unlock > 0 {
+				if t := now.Add(o.unlock); t.After(s.UnlockedUntil) {
+					s.UnlockedUntil = t
+				}
+				s.LowLocked = false
+				s.Challenged = false
+				s.ClearedAt = now
+			}
+		})
+	}
 	if cell != "" && len(o.acts) > 0 {
 		// The allow goes first, so a failed one spends nothing: the cell
-		// stays the challenge and the owner may send it again. A commit
-		// that then fails leaves allowed approvals no decision spends;
-		// they lapse after ApprovalTTL.
+		// stays the challenge and the owner may send it again. A spend
+		// that then fails withdraws the allow (allowThen).
 		if secretAct(o.acts) {
 			return strongWrong, false, errSecretAct
 		}
-		if err := c.allow(o.acts); err != nil {
-			return strongWrong, false, err
-		}
+		err = c.allowThen(o.acts, spend)
+	} else {
+		err = spend()
 	}
-	err = c.commit(func(s *State) {
-		if cell != "" {
-			s.GridUsed = append(s.GridUsed, cell)
-		} else {
-			s.LastStep = step
-		}
-		if o.unlock > 0 {
-			if t := now.Add(o.unlock); t.After(s.UnlockedUntil) {
-				s.UnlockedUntil = t
-			}
-			s.LowLocked = false
-			s.Challenged = false
-			s.ClearedAt = now
-		}
-	})
 	if err != nil {
 		return strongWrong, false, err
 	}
@@ -250,28 +251,38 @@ func secretAct(acts []CheckerAct) bool {
 	return false
 }
 
-// allow records acts as allowed approvals at the checker (Revoker.AllowActs).
-// An allow that fails may still have been recorded (its answer lost), so
-// it is withdrawn before the owner is told nothing was approved; the
-// checker has settled it by the time AllowActs returns (checkersock
-// AllowWithin). A withdrawal that fails too is errAllowUnknown: the acts
-// may still run, and the owner is told so (SW-5's rule).
-func (c *codes) allow(acts []CheckerAct) error {
+// allowThen records acts as allowed approvals at the checker
+// (Revoker.AllowActs), then runs rest, the steps that complete the
+// approval. Every failure after the allow is sent withdraws it before the
+// owner is told nothing was approved: an allow that failed may still have
+// been recorded (its answer lost; the checker has settled it by the time
+// AllowActs returns, checkersock AllowWithin), and one that worked is
+// redeemable by bytes whether or not a decision follows. A withdrawal
+// that fails too is errAllowUnknown: the acts may still run, and the
+// owner is told so (SW-5's rule). Nothing that can fail may follow rest
+// on an approve path, so rest is the whole remainder of the approval.
+func (c *codes) allowThen(acts []CheckerAct, rest func() error) error {
 	rv, ok := c.verify.(Revoker)
 	if !ok {
 		return errAllow
 	}
-	if err := rv.AllowActs(acts...); err != nil {
-		names := make([]string, len(acts))
-		for i, a := range acts {
-			names[i] = a.Act
-		}
-		if rerr := rv.RevokeActs(names...); rerr != nil {
-			return fmt.Errorf("%w: %v; withdraw: %v", errAllowUnknown, err, rerr)
-		}
-		return fmt.Errorf("%w: %v", errAllow, err)
+	err := rv.AllowActs(acts...)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", errAllow, err)
+	} else if rest != nil {
+		err = rest()
 	}
-	return nil
+	if err == nil {
+		return nil
+	}
+	names := make([]string, len(acts))
+	for i, a := range acts {
+		names[i] = a.Act
+	}
+	if rerr := rv.RevokeActs(names...); rerr != nil {
+		return fmt.Errorf("%w: %v; withdraw: %v", errAllowUnknown, err, rerr)
+	}
+	return err
 }
 
 // errAllowUnknown means an allow failed and its withdrawal failed too, so

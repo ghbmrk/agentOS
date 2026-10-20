@@ -918,7 +918,8 @@ const allowErr = "The box could not record this approval, so nothing was approve
 
 // allowUnknownErr: the checker may have recorded the approval and could
 // not withdraw it, so the act may still run; the reply says so (SW-5).
-const allowUnknownErr = "The box could not confirm this approval, and could not withdraw it, so the action may still run. The code did not count."
+// A reply to a request adds how to withdraw it: NO revokes its acts.
+const allowUnknownErr = "The box could not confirm or withdraw this approval, so the action may still run. The code did not count."
 
 // secretActErr: an allowed approval never serves an act that releases a
 // secret, so a grid cell or texted code cannot approve it (CH-4, CH-10).
@@ -1069,7 +1070,7 @@ func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerA
 		if secretAct(acts) {
 			return false, false, false, secretActErr
 		}
-		if err := c.codes.allow(acts); err != nil {
+		if err := c.codes.allowThen(acts, nil); err != nil {
 			return false, false, false, c.codeErr(err)
 		}
 		return true, true, false, ""

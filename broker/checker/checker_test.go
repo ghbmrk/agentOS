@@ -792,10 +792,18 @@ func TestALateAllowRecordsNothing(t *testing.T) {
 			t.Fatalf("a late allow was spent: %v %v", ok, err)
 		}
 	}
-	if err := c.allowBefore(acts(a), time.Now().Add(-time.Millisecond)); !errors.Is(err, errLate) {
+	if err := c.allowBefore(acts(a), time.Now().Add(-time.Millisecond), time.Time{}); !errors.Is(err, errLate) {
 		t.Fatalf("a late allow: %v", err)
 	}
 	if ok, _ := red(context.Background(), a, false); ok {
 		t.Fatal("a late allow was recorded")
+	}
+	// The wall-clock deadline can be stepped forward; the handler's own
+	// monotonic start still refuses once AllowWithin has passed.
+	if err := c.allowBefore(acts(a), time.Now().Add(time.Hour), time.Now().Add(-checkersock.AllowWithin)); !errors.Is(err, errLate) {
+		t.Fatalf("an allow held past AllowWithin: %v", err)
+	}
+	if ok, _ := red(context.Background(), a, false); ok {
+		t.Fatal("an allow held past AllowWithin was recorded")
 	}
 }

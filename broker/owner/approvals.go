@@ -439,11 +439,14 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 	}
 	all := len(rp.items) == 0
 	if rp.word == "NO" {
-		c.closeLocked(r, func(i int) (bool, bool) { return all || chosen[i], false }, "owner", now, decided)
-		if all {
-			return []string{"Denied " + r.id + "."}, false, false
+		msg := "Denied " + r.id + "."
+		if !all {
+			msg = fmt.Sprintf("Denied %s item %s.", r.id, list(rp.items))
 		}
-		return []string{fmt.Sprintf("Denied %s item %s.", r.id, list(rp.items))}, false, false
+		if !c.denyLocked(r, func(i int) bool { return all || chosen[i] }, "owner", now, decided) {
+			msg += " The box could not withdraw an approval it may have recorded, so it may still run."
+		}
+		return []string{msg}, false, false
 	}
 	strong := r.tier == High || c.codes.st.LowLocked
 	if rp.code == "" || (strong && rp.id == "") {
@@ -469,14 +472,21 @@ func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, pag
 		}
 	}
 	ok, allowed, locked, emsg := c.checkLocked(texted, rp.code, now, acts)
+	if emsg == allowUnknownErr {
+		// NO withdraws whatever the checker may have recorded (denyLocked).
+		emsg += fmt.Sprintf(" Reply NO %s to withdraw it.", r.id)
+	}
 	if emsg != "" {
 		return []string{emsg}, false, true
 	}
 	if !ok {
 		r.wrong++
 		if r.wrong >= WrongPerRequest {
-			c.closeLocked(r, func(int) (bool, bool) { return true, false }, "void", now, decided)
-			return []string{fmt.Sprintf("Wrong code 3 times; %s is void and denied.", r.id) + lockNote(locked)}, false, true
+			msg := fmt.Sprintf("Wrong code 3 times; %s is void and denied.", r.id)
+			if !c.denyLocked(r, func(int) bool { return true }, "void", now, decided) {
+				msg += " The box could not withdraw an approval it may have recorded, so it may still run."
+			}
+			return []string{msg + lockNote(locked)}, false, true
 		}
 		return []string{fmt.Sprintf("Wrong code for %s. %d tries left.", r.id, WrongPerRequest-r.wrong) + lockNote(locked)}, false, true
 	}
@@ -584,6 +594,23 @@ func (c *Channel) holdLocked(r *request, ds []Decision, now time.Time, prefix st
 		}
 	}
 	return s + fail
+}
+
+// denyLocked closes r's open items that pick chooses as denied and
+// withdraws any approval the checker holds for their acts: an allow whose
+// outcome the box could not confirm may have been recorded (errAllowUnknown),
+// and a denied item's act must not run. Withdrawing an act the checker
+// never recorded does nothing. ok is false when the withdrawal failed, so
+// the reply must say the act may still run.
+func (c *Channel) denyLocked(r *request, pick func(int) bool, why string, now time.Time, decided *[]Decision) (ok bool) {
+	var acts []string
+	for i, it := range r.items {
+		if !r.done[i] && pick(i) {
+			acts = append(acts, it.Act)
+		}
+	}
+	c.closeLocked(r, func(i int) (bool, bool) { return pick(i), false }, why, now, decided)
+	return c.revoke(acts...) == nil
 }
 
 // revoke withdraws the approvals of acts the channel will not run (REV-3).

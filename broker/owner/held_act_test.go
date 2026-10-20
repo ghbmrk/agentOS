@@ -272,6 +272,49 @@ func TestAGridCellAllowsItsActs(t *testing.T) {
 	}
 }
 
+// Every step after a grid cell's allow that fails withdraws the allow
+// before the owner is told it did not count; the only fallible one is the
+// spend's save, since closing the request cannot fail and a failed hold
+// withdraws its own act (holdLocked). A withdrawal that fails too says the
+// act may still run (#2514 L3 Security delta blocker 1).
+func TestAGridCellWhoseSpendFailsWithdrawsItsAllow(t *testing.T) {
+	store := &toggleStore{}
+	r, f := verifierRigWith(t, store)
+	id, _ := r.ch.Request([]Item{actItem("a", "act-a")}, 0)
+	cell := toldCell(t, r.inbox())
+
+	store.fail = true
+	if got := r.say("YES " + id + " " + cell); got != stateErr {
+		t.Fatalf("grid cell with a failed spend: %q", got)
+	}
+	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) || !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("allowed %+v, withdrew %q", f.allowed, f.revoked)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	f.revokeErr = errors.New("checker timed out")
+	if got := r.say("YES " + id + " " + cell); got != allowUnknownErr+" Reply NO "+id+" to withdraw it." {
+		t.Fatalf("grid cell whose withdrawal failed: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+
+	// Once saves work, the same cell approves and nothing is withdrawn.
+	store.fail, f.revokeErr, f.revoked = false, nil, nil
+	if got := r.say("YES " + id + " " + cell); !strings.HasPrefix(got, "Approved "+id) {
+		t.Fatalf("the same cell once saves work: %q", got)
+	}
+	if len(f.revoked) != 0 {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
 // toldCell returns the answer to the grid cell named in text, the one the
 // owner was told to send.
 func toldCell(t *testing.T, text string) string {
@@ -314,5 +357,21 @@ func TestAGridCellCannotApproveASecretAct(t *testing.T) {
 	}
 	if ds := r.decisions(); len(ds) != 1 || !ds[0].Approved || ds[0].Allowed {
 		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// A texted code never allows a secret act either. No request texts a code
+// for one, since revealing a secret is never low tier, so the guard is
+// checked where the texted code is compared (#2514 combined delta).
+func TestATextedCodeCannotAllowASecretAct(t *testing.T) {
+	r, f := newVerifierRig(t)
+	r.ch.mu.Lock()
+	ok, allowed, _, msg := r.ch.checkLocked("123456", "123456", r.ch.cfg.Now(), []CheckerAct{{Act: "act-a", Secret: true}})
+	r.ch.mu.Unlock()
+	if ok || allowed || msg != secretActErr {
+		t.Fatalf("texted code for a secret act: ok %v allowed %v %q", ok, allowed, msg)
+	}
+	if len(f.allowed) != 0 {
+		t.Fatalf("allowed %+v", f.allowed)
 	}
 }
