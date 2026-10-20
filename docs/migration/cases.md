@@ -306,7 +306,7 @@ Each issue below is closed as superseded once this file merges. Its text stays r
 | #850 P3-4b-4e-composer | No production code sets grants.Config.Isolated, so on a box no machine is an ADP-11 reply composer and reply rules never match; the composer machine (fresh, thread messages only, no recall, no egress) and its wiring in agentosd are unbui | ADP-11 |
 | #851 P3-4b-3b | Owner decision: does a probe failure pause grants on the probed machine? DECISIONS says a fuzz crash is "noticed, not contained"; the probe case is open (#523 Potency 2) (brief to be written) | none named |
 | #852 P3-4b-3f | Socket probe wired on a machine whose journal is the probe's own, so Journaled raises no false High on a busy machine; takes row 3g. Open question for Mark: dedicated probe machine (recommended), idle live machines, or per-effect attribution (#52 | none named |
-| #957 OSS-10w2 r1 | Follow names: the reserved-name check (grants.followName, localui askFollow) also refuses look-alikes of "the AgentOS project" (folded as owner.fold does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (re | CH-10 |
+| #957 OSS-10w2 r1 | Follow names: the reserved-name check (grants.followName, localui askFollow) also refuses look-alikes of "the agentOS project" (folded as owner.fold does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (re | CH-10 |
 | #1680 OP2-later-d9 | Pin covers for implicit and late approvals, say why a re-ask comes, drop D-116's unreachable erased clause, fix the PR body's erased scope | OP-2 |
 | #2185 OP2 | SendID fallback compares recipient lists with duplicates | OP-2 |
 | #959 PE3 | Replay machine admission refusal interrupts, not fails | none named |
