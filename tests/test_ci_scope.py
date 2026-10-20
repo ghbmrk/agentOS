@@ -1,7 +1,7 @@
 """Tests for tools/ci_scope.py and its wiring into the workflows (CI-docs)."""
-import ast
-import re
+import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +12,7 @@ import ci_scope  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_workflows import lane_gate_problems  # noqa: E402
+import records_audit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -75,295 +76,6 @@ def ci_top_level(key):
 def ci_triggers():
     """The events ci.yml's `on:` block names."""
     return [l.strip().rstrip(":") for l in ci_top_level("on") if re.match(r"^  [a-z_]+:$", l)]
-
-
-def records_run_tests(text=None):
-    """The test names ci.yml's records-only step runs (CI-docs). Fails, rather than returning a
-    partial list, unless exactly one records-only step runs `python -m unittest` on names."""
-    lines = (text if text is not None else (WORKFLOWS / "ci.yml").read_text()).splitlines()
-    steps = [i for i, l in enumerate(lines) if l.strip() == "if: env.RECORDS == 'true'"]
-    runs = []
-    for i in steps:
-        indent = len(lines[i]) - len(lines[i].lstrip())
-        end = next((j for j in range(i + 1, len(lines))
-                    if lines[j].strip() and len(lines[j]) - len(lines[j].lstrip()) < indent), len(lines))
-        key = next((j for j in range(i + 1, end) if lines[j].startswith(" " * indent + "run:")), None)
-        if key is None:
-            continue
-        # The run value: inline, a block scalar, or a plain scalar continued on deeper lines.
-        value = [lines[key].split(":", 1)[1]] + [l for l in lines[key + 1:end]
-                                                 if len(l) - len(l.lstrip()) > indent or not l.strip()]
-        words = " ".join(value).replace("\\", " ").split()
-        if words[:1] in (["|"], [">"], ["|-"], [">-"]):
-            words = words[1:]
-        if words[:3] == ["python", "-m", "unittest"]:
-            runs.append(words[3:])
-    assert len(runs) == 1, f"want one records-only unittest step in ci.yml, found {len(runs)}"
-    names = [w for w in runs[0] if not w.startswith("-")]
-    assert names and all(re.fullmatch(r"tests(\.\w+)+", n) for n in names), runs[0]
-    return names
-
-
-# Path evaluation for the record-reader guard (CI-docs). A value is a list of the repo-relative
-# paths an expression may name, each a list of components; _ANY in a component stands for any
-# text, slashes included. Over-approximating is the fail-closed direction: a read the
-# evaluator cannot pin down is assumed to reach any file below its known prefix.
-_ANY = "\0"
-_SAME = {"resolve", "absolute", "expanduser", "as_posix"}
-_THROUGH = {"str", "sorted", "list", "set", "tuple", "reversed", "iter", "enumerate", "Path",
-            "PurePath", "PosixPath", "PurePosixPath", "fspath", "abspath", "realpath",
-            "normpath", "expanduser", "open", "glob", "iglob"}
-_PATH_TYPES = {"Path", "PurePath", "PosixPath", "PurePosixPath", "open", "glob", "iglob"}
-
-
-def _split(text, glob=False):
-    """The components of a path string; a glob's wildcards become _ANY."""
-    if glob:
-        text = re.sub(r"\*+|\?|\[[^]]*\]", _ANY, text)
-    return [c for c in text.split("/") if c not in ("", ".")]
-
-
-def _join(base, parts):
-    out = list(base)
-    for c in parts:
-        if c == "..":
-            if not out:
-                return None  # above the repo root
-            if out[-1] != _ANY:
-                out.pop()
-        else:
-            out.append(c)
-    return out
-
-
-def _parent(paths, n=1):
-    out = []
-    for p in paths:
-        p = list(p)
-        for _ in range(n):
-            if not p:
-                break
-            if p[-1] != _ANY:
-                p.pop()
-        else:
-            out.append(p)
-    return out
-
-
-class _Paths:
-    """The paths each expression in one test module may name, with its bindings: names,
-    attributes (self.x, cls.x) and function returns, gathered in every scope."""
-
-    def __init__(self, tree):
-        self.env = {}
-        self.scope = {}
-        self._scopes(tree, "", "")
-        binds = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for t in targets:
-                    if isinstance(t, ast.Tuple) and isinstance(node.value, ast.Tuple):
-                        binds += list(zip(t.elts, node.value.elts))
-                    else:
-                        binds.append((t, node.value))
-            elif isinstance(node, (ast.For, ast.comprehension)):
-                binds.append((node.target, node.iter))
-            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-                binds.append((node.optional_vars, node.context_expr))
-            elif isinstance(node, (ast.FunctionDef, ast.Lambda)):
-                rets = [node.body] if isinstance(node, ast.Lambda) else \
-                    [r.value for r in ast.walk(node) if isinstance(r, ast.Return) and r.value]
-                binds += [("()" + getattr(node, "name", "<lambda>"), r) for r in rets]
-        for _ in range(8):
-            self.memo = {}
-            before = {k: list(v) for k, v in self.env.items()}
-            for target, value in binds:
-                keys = [target] if isinstance(target, str) else self._keys(target)
-                paths = self.eval(value) if keys else []
-                for key in keys:
-                    old = self.env.setdefault(key, [])
-                    old += [p for p in paths if p not in old]
-                    if len(old) > 64:
-                        self.env[key] = [[_ANY]]
-            if self.env == before:
-                break
-        self.memo = {}
-
-    def _scopes(self, node, scope, cls):
-        # Each node's scope, as a path of function and class scopes, and its class (whose
-        # self.x and cls.x attributes it sees).
-        self.scope[id(node)] = (scope, cls)
-        for child in ast.iter_child_nodes(node):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                self._scopes(child, f"{scope}/{id(node)}", cls)
-            elif isinstance(node, ast.ClassDef):
-                self._scopes(child, f"{scope}/class:{node.name}", node.name)
-            else:
-                self._scopes(child, scope, cls)
-
-    def _keys(self, node):
-        """Where an assignment to `node` binds: a name in its scope (a class-body name is also
-        the class's attribute), or self.x or cls.x on its class."""
-        scope, cls = self.scope.get(id(node), ("", ""))
-        if isinstance(node, ast.Name):
-            in_body = scope.rsplit("/", 1)[-1].startswith("class:")
-            return [(scope, node.id)] + ([(cls, "." + node.id)] if in_body else [])
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
-                and node.value.id in ("self", "cls"):
-            return [(cls, "." + node.attr)]
-        return []
-
-    def _lookup(self, node):
-        """A name's bindings in the innermost scope that binds it, as Python resolves it: its
-        own scope, then enclosing functions (not classes), then the module."""
-        scope, cls = self.scope.get(id(node), ("", ""))
-        if isinstance(node, ast.Attribute):
-            return self.env.get((cls, "." + node.attr), []) if isinstance(node.value, ast.Name) \
-                and node.value.id in ("self", "cls") else []
-        own = True
-        while True:
-            if (own or not scope.rsplit("/", 1)[-1].startswith("class:")) and (scope, node.id) in self.env:
-                return self.env[(scope, node.id)]
-            if not scope:
-                return []
-            scope, own = scope.rsplit("/", 1)[0], False
-
-    def text(self, node, glob=False):
-        """Components of a string-valued part (a join argument, a glob pattern)."""
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return _split(node.value, glob)
-        if isinstance(node, ast.JoinedStr):
-            s = "".join(v.value if isinstance(v, ast.Constant) else _ANY for v in node.values)
-            return _split(s, glob)
-        return [_ANY]
-
-    def relative(self, node):
-        """A path string read relative to the working directory, which in CI is the repo root:
-        a literal, an f-string or an os.path.join whose text starts with a relative literal."""
-        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "join" and node.args:
-            first, parts = node.args[0], [c for a in node.args for c in self.text(a)]
-        else:
-            first, parts = node, self.text(node)
-        if isinstance(first, ast.JoinedStr) and first.values:
-            first = first.values[0]
-        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)) \
-                or first.value.startswith(("/", "~")):
-            return []
-        return self._joined([[]], parts)
-
-    def eval(self, node):
-        key = id(node)
-        if key not in self.memo:
-            self.memo[key] = []
-            self.memo[key] = self._eval(node)
-        return self.memo[key]
-
-    def _eval(self, node):
-        if isinstance(node, ast.Name):
-            return [["tests", "test_x.py"]] if node.id == "__file__" else self._lookup(node)
-        if isinstance(node, ast.Attribute):
-            if node.attr == "parent":
-                return _parent(self.eval(node.value))
-            if node.attr in ("parents", "stem", "name", "suffix"):
-                return []
-            return self._lookup(node)
-        if isinstance(node, ast.Subscript):
-            if isinstance(node.value, ast.Attribute) and node.value.attr == "parents":
-                n = node.slice.value + 1 if isinstance(node.slice, ast.Constant) \
-                    and isinstance(node.slice.value, int) else 0
-                base = self.eval(node.value.value)
-                return _parent(base, n) if n else [[_ANY]] if base else []
-            return []
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            # Lists of paths concatenate; a path string takes on text.
-            paths = self.eval(node.right)
-            if paths:
-                return self.eval(node.left) + paths
-            right = node.right.value if isinstance(node.right, ast.Constant) \
-                and isinstance(node.right.value, str) else _ANY
-            return [q for p in self.eval(node.left) for q in [_join([], _split("/".join(p) + right))]
-                    if q is not None]
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            return self._joined(self.eval(node.left), self.text(node.right))
-        if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.FormattedValue):
-            rest = ast.JoinedStr(values=node.values[1:])
-            return [q for p in self.eval(node.values[0].value)
-                    for q in [_join(p, self.text(rest))] if q is not None]
-        if isinstance(node, ast.Call):
-            return self._call(node)
-        return []
-
-    def _joined(self, base, parts):
-        return [q for p in base for q in [_join(p, parts)] if q is not None]
-
-    def _call(self, node):
-        f, args = node.func, node.args
-        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-        base = self.eval(f.value) if isinstance(f, ast.Attribute) else []
-        if base:  # a method of a path
-            if name in ("joinpath", "glob", "rglob"):
-                parts = [c for a in args for c in self.text(a, glob=name != "joinpath")]
-                return self._joined(base, ([_ANY] if name == "rglob" else []) + parts)
-            if name in ("with_name", "with_suffix", "with_stem", "iterdir"):
-                return [(p if name == "iterdir" else p[:-1]) + [_ANY] for p in base]
-            return base if name in _SAME else []
-        if name in ("cwd", "getcwd") and not args:
-            return [[]]
-        if isinstance(f, ast.Name) or isinstance(f.value, ast.Name) and f.value.id in ("self", "cls"):
-            if "()" + str(name) in self.env:  # a function of this module
-                return self.env["()" + name]
-        if not args:
-            return []
-        first = self.eval(args[0])
-        if name == "join":
-            return self._joined(first, [c for a in args[1:] for c in self.text(a)])
-        if name == "dirname":
-            return _parent(first)
-        if name in ("listdir", "scandir", "walk"):
-            return [p + [_ANY] for p in first]
-        if name not in _THROUGH:
-            return []
-        if not first and name in _PATH_TYPES:
-            first = self.relative(args[0])
-        if name in ("glob", "iglob"):
-            first = [[x for c in p for x in (_split(c, glob=True) or [c])] for p in first]
-        return first
-
-
-def _may_be_record(path):
-    """Whether a path with _ANY parts may name a record file."""
-    s = "/".join(path)
-    if _ANY not in s:
-        return ci_scope.is_record(s)
-    rx = re.compile(".*".join(re.escape(x) for x in s.split(_ANY)), re.S)
-    if any(rx.fullmatch(f) for f in ci_scope.RECORD_FILES):
-        return True
-    head, tail = s.split(_ANY)[0], s.split(_ANY)[-1]
-    return any((head.startswith(d) or d.startswith(head)) and (tail.endswith(".md") or ".md".endswith(tail))
-               for d in ci_scope.RECORD_DIRS)
-
-
-def record_readers(source):
-    """The unittest names a test module's source needs in the records run: each TestCase
-    class, or the module itself for a read outside a class, whose code may name a record
-    document's path below the repo root (from __file__ or the working directory). A path
-    joined onto anything else, such as a temporary directory, is not a read."""
-    tree = ast.parse(source)
-    paths = _Paths(tree)
-    found = set()
-
-    def visit(node, owner):
-        if isinstance(node, ast.ClassDef) and owner is None:
-            owner = node.name
-        if isinstance(node, ast.expr) and any(_may_be_record(p) for p in paths.eval(node)):
-            found.add(owner)
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, owner)
-
-    visit(tree, None)
-    return found
 
 
 class ScopeTest(unittest.TestCase):
@@ -648,112 +360,91 @@ class WiringTest(unittest.TestCase):
             self.assertIn("go-build", save)
         for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice",
                      "tests.test_g1_scope.CheckTest", "tests.test_g1_scope.ListTest"):
-            self.assertIn(name, records_run_tests())
-
-    def test_records_run_includes_every_test_that_reads_a_record(self):
-        # REQ: CI-PATHS
-        # A records-only change can edit any record file, so every test whose outcome rests on
-        # one must run on it; the records step skips discovery, so this is its only guard.
-        listed = set(records_run_tests())
-        missing = []
-        for f in sorted((ROOT / "tests").glob("test_*.py")):
-            for owner in record_readers(f.read_text()):
-                name = f"tests.{f.stem}" + (f".{owner}" if owner else "")
-                if name not in listed and f"tests.{f.stem}" not in listed:
-                    missing.append(name)
-        self.assertEqual(missing, [], "add these to ci.yml's records-only step")
+            self.assertIn(name, records_audit.records_run_tests())
 
     def test_a_spec_only_change_runs_the_spec_readers(self):
         # REQ: CI-PATHS
-        # SPEC.md is a record, so a SPEC-only PR takes the records run, whose list the test
-        # above holds to every reader.
+        # SPEC.md is a record, so a SPEC-only PR takes the records run, whose list full CI's
+        # record-read audit (tests/records_audit.py) holds to every reader.
         self.assertEqual(ci_scope.scope_of(["SPEC.md"]), ("records", None))
 
-    def test_record_readers_tells_a_repo_read_from_a_temp_write(self):
-        # The guard's controls: each shape of repo read is caught, at the right owner, and a
-        # path it cannot pin down (J) counts as a read; temp-directory joins, non-records,
-        # absolute paths and shadowed or unbound names (C) are not reads.
-        src = """import glob, os, pathlib
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-DOCS = ROOT / "docs"
-TOP = (ROOT / "SPEC.md").read_text()
-class A:
-    def t(self):
-        (DOCS / "OPERATING.md").read_text()
-class B:
-    def t(self):
-        open(os.path.join(ROOT, "reviews", "l3", "x.md"))
-class D:
-    def t(self):
-        ROOT.joinpath("handoff", "CURRENT.md").read_text()
-class E:
-    def t(self):
-        for p in sorted((ROOT / "briefs").glob("*.md")):
-            p.read_text()
-class F:
-    def t(self):
-        (pathlib.Path(__file__).parents[1] / "PLAN.md").read_text()
-class G:
-    def t(self):
-        r = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        open(os.path.join(r, "LEDGER.md"))
-class H:
-    def t(self, n):
-        open(f"{ROOT}/decisions/D-{n}.md")
-class I:
-    def t(self):
-        open("SPEC.md")
-class J:
-    def t(self, name):
-        (ROOT / name).read_text()
-class K:
-    def setUp(self):
-        self.base = ROOT / "docs" / "security"
-    def t(self):
-        (self.base / "x.md").read_text()
-class L:
-    DIR = ROOT / "decisions"
-    def t(self):
-        (self.DIR / "D-1.md").read_text()
-class M:
-    def t(self):
-        top = ROOT
-        def inner():
-            return (top / "BOARD.md").read_text()
-        inner()
-class C:
-    def t(self, d):
-        (pathlib.Path(d) / "SPEC.md").write_text("x")
-        open(os.path.join(d, "SPEC.md"), "w")
-        open(f"{d}/SPEC.md", "w")
-        open("/etc/SPEC.md")
-        (self.r / "CLAUDE.md").write_text("x")
+    def test_full_unit_tests_audit_record_reads_against_the_records_step(self):
+        # REQ: CI-PATHS
+        # The records step skips discovery, so full CI's unit tests log every record read and
+        # the next step fails on a reader the records step leaves out.
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        unit = ci[ci.index("      - name: Unit tests\n"):]
+        unit, check = unit.split("\n      - ", 2)[:2]
+        self.assertIn("        if: env.RECORDS != 'true'\n", unit)
+        self.assertIn('          export PYTHONPATH="$PWD/tests/records_site" '
+                      'AGENTOS_RECORD_LOG="$RUNNER_TEMP/record-reads.log"\n'
+                      '          rc=0; for f in tests/test_*.py; do python -m unittest discover -s tests '
+                      '-p "${f#tests/}" -v || rc=1; done; exit $rc\n', unit + "\n")
+        self.assertEqual(check.splitlines()[1:], ["        if: env.RECORDS != 'true'",
+                         '        run: python tests/records_audit.py "$RUNNER_TEMP/record-reads.log"'])
+
+    def test_record_audit_logs_each_read_under_its_test(self):
+        # REQ: CI-PATHS
+        # The audit's control: reads however the name is built, at import, in a class fixture,
+        # in a test and in a Python child are each logged under their owner; temp writes,
+        # non-records and an isolated child (logged as such) are not record reads.
+        with tempfile.TemporaryDirectory() as d:
+            mod = pathlib.Path(d) / "test_probe.py"
+            mod.write_text(f"""import os, pathlib, subprocess, sys, unittest
+ROOT = pathlib.Path({str(ROOT)!r})
+(ROOT / "SPEC.md").read_text()
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        open("{{}}/{{}}".format(ROOT, "PLAN.md")).close()
+    def test_join(self):
+        pathlib.Path(ROOT, "docs", "OPERATING.md").read_text()
+    def test_child(self):
+        subprocess.run([sys.executable, "-c", "open('README.md').close()"], cwd=ROOT, check=True, env={{}})
+    def test_isolated(self):
+        subprocess.run([sys.executable, "-I", "-c", "pass"], check=True)
+    def test_not_records(self):
+        (pathlib.Path({d!r}) / "SPEC.md").write_text("x")
         (ROOT / "docs" / "owners-guide.md").read_text()
-        units = list((ROOT / "image").glob("*.service")) + list(ROOT.glob("tools/*.py"))
-        text = (ROOT / "tools" / "x.py").read_text() + "x"
-        glob.glob(os.path.join(d, "*.md"))
-    def u(self, d):
-        ROOT = pathlib.Path(d)
-        (ROOT / "SPEC.md").write_text("x")
-"""
-        self.assertEqual(record_readers(src), {None, "A", "B", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"})
-        self.assertNotIn(None, record_readers(src.replace('TOP = (ROOT / "SPEC.md").read_text()\n', "")))
+""")
+            log = pathlib.Path(d) / "log"
+            env = {**os.environ, "PYTHONPATH": str(ROOT / "tests" / "records_site"), "AGENTOS_RECORD_LOG": str(log)}
+            env.pop("AGENTOS_RECORD_OWNER", None)
+            run = subprocess.run([sys.executable, "-m", "unittest", "test_probe"], cwd=d, env=env,
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            lines = set(log.read_text().splitlines())
+        self.assertEqual({l for l in lines if "isolated" not in l}, {
+            "test_probe\tSPEC.md", "test_probe.A\tPLAN.md",
+            "test_probe.A.test_join\tdocs/OPERATING.md", "test_probe.A.test_child\tREADME.md"})
+        self.assertEqual([l.split("\t")[0] for l in lines if "isolated" in l], ["test_probe.A.test_isolated"])
 
     def test_records_run_tests_reads_the_step_or_fails(self):
-        # The list parse takes the run line in any YAML shape and fails rather than guess.
+        # The list parse takes the run line in any YAML shape and fails rather than guess; -v is
+        # the only option, since another (-k, -p) could keep a listed test from running.
         step = "      - name: Docs\n        if: env.RECORDS == 'true'\n        run: {}\n"
-        self.assertEqual(records_run_tests(step.format("python -m unittest tests.a tests.b -v")),
+        parse = records_audit.records_run_tests
+        self.assertEqual(parse(step.format("python -m unittest tests.a tests.b -v")), ["tests.a", "tests.b"])
+        self.assertEqual(parse(step.format("|\n          python -m unittest tests.a \\\n            tests.b")),
                          ["tests.a", "tests.b"])
-        self.assertEqual(records_run_tests(step.format("|\n          python -m unittest tests.a \\\n"
-                                                       "            tests.b")), ["tests.a", "tests.b"])
-        self.assertEqual(records_run_tests(step.format("python -m unittest tests.a\n          tests.b")),
-                         ["tests.a", "tests.b"])
+        self.assertEqual(parse(step.format("python -m unittest tests.a\n          tests.b")), ["tests.a", "tests.b"])
         for bad in ("python -m unittest discover -s tests", "python -m unittest tests.a && rm x",
-                    "make test", "python -m unittest -v"):
+                    "make test", "python -m unittest -v", "python -m unittest -k tests.a tests.a tests.b",
+                    "python -m unittest -p x tests.a", "python -m unittest --locals tests.a"):
             with self.assertRaises(AssertionError, msg=bad):
-                records_run_tests(step.format(bad))
+                parse(step.format(bad))
         with self.assertRaises(AssertionError):
-            records_run_tests(step.format("python -m unittest tests.a") * 2)
+            parse(step.format("python -m unittest tests.a") * 2)
+
+    def test_record_audit_fails_on_an_unlisted_reader(self):
+        # REQ: CI-PATHS
+        listed = ["tests.a", "tests.b.C", "tests.d.E.test_f"]
+        ok = "tests.a.X.test_y\tSPEC.md\ntests.b\tPLAN.md\ntests.b.C.test_z\tREADME.md\ntests.d.E\tBOARD.md\n"
+        self.assertEqual(records_audit.problems(ok, listed), [])
+        for bad in ("tests.b.D.test_z\tSPEC.md", "tests.d.E.test_g\tSPEC.md", "tests.ab\tSPEC.md",
+                    "unknown\tSPEC.md", "error\tsitecustomize: x", "tests.x\tisolated python: ['python', '-I']"):
+            self.assertEqual(records_audit.problems(ok + bad + "\n", listed), [bad], bad)
+        self.assertTrue(records_audit.problems("", listed))
 
     def test_no_privileged_workflow_uses_a_cache(self):
         # REQ: CI-PATHS

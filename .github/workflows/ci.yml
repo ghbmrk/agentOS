@@ -71,14 +71,21 @@ jobs:
         if: env.RECORDS != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
         # without them (#1531), and fail on any skip among them (#1543).
+        # Each module runs in its own process under tests/records_audit.py's hook, which logs every
+        # record file a test opens (CI-PATHS); a module reads what an earlier one cached otherwise.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
-        run: python -m unittest discover -s tests -v
+        run: |
+          export PYTHONPATH="$PWD/tests/records_site" AGENTOS_RECORD_LOG="$RUNNER_TEMP/record-reads.log"
+          rc=0; for f in tests/test_*.py; do python -m unittest discover -s tests -p "${f#tests/}" -v || rc=1; done; exit $rc
+      - name: The records-only step runs every test that reads a record (CI-PATHS)
+        if: env.RECORDS != 'true'
+        run: python tests/records_audit.py "$RUNNER_TEMP/record-reads.log"
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
-        # tests/test_ci_scope.py fails when a test that reads one is missing here.
+        # full CI's record-read audit fails when a test that reads one is missing here.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows.WorkflowTest -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_stalequeued tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows.WorkflowTest -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
