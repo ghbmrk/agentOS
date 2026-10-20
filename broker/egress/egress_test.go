@@ -553,20 +553,15 @@ func TestEncodedResponsesAreRefused(t *testing.T) {
 	}
 }
 
-// One machine cannot hold more than MaxConcurrent requests in flight, nor
-// exceed its hard request cap.
+// One machine cannot exceed its hard request cap; another machine's cap is
+// its own. No fixed count bounds requests in flight
+// (TestProxyNoPerMachineConcurrencyCap).
 func TestPerMachineLimits(t *testing.T) {
 	r := newRig(t, nil)
-	block := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	r.provider.reply = func(w http.ResponseWriter, req *http.Request) {
-		entered <- struct{}{}
-		<-block
-		io.WriteString(w, "{}")
-	}
+	r.provider.reply = func(w http.ResponseWriter, req *http.Request) { io.WriteString(w, "{}") }
 	p, err := New(Config{
 		Adapters: []Adapter{OpenAI("openai-key")}, Grants: map[string][]string{"m1": {"openai"}, "m2": {"openai"}},
-		Vault: r.vault, Audit: r.audit, Transport: r.transport, MaxConcurrent: 1, Cap: Cap{Requests: 2},
+		Vault: r.vault, Audit: r.audit, Transport: r.transport, Cap: Cap{Requests: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -576,24 +571,14 @@ func TestPerMachineLimits(t *testing.T) {
 		p.Handler(m).ServeHTTP(w, chat("/openai/v1/chat/completions"))
 		return w.Code
 	}
-	done := make(chan int)
-	go func() { done <- do("m1") }()
-	<-entered
-	if c := do("m1"); c != http.StatusTooManyRequests {
-		t.Fatalf("second concurrent request: %d", c)
-	}
-	close(block)
-	if c := <-done; c != 200 {
-		t.Fatalf("first request: %d", c)
-	}
-	go func() { <-entered }()
-	if c := do("m1"); c != 200 {
-		t.Fatalf("second request: %d", c)
+	for i := 0; i < 2; i++ {
+		if c := do("m1"); c != 200 {
+			t.Fatalf("request %d: %d", i+1, c)
+		}
 	}
 	if c := do("m1"); c != http.StatusTooManyRequests {
 		t.Fatalf("over the cap: %d", c)
 	}
-	go func() { <-entered }()
 	if c := do("m2"); c != 200 {
 		t.Fatalf("other machine: %d", c)
 	}
