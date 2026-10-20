@@ -28,13 +28,12 @@ type exitFix struct {
 	hits atomic.Int32
 	got  struct{ auth, idem, body, path string }
 
-	store  *kernel.MemStore
-	anchor *kernel.MemAnchor
-	cfg    kernel.Config
-	opub   ed25519.PublicKey
-	ops    []clerk.Op
-	sec    *clerk.Secrets
-	inLog  int // log length the request handler saw
+	store *kernel.MemStore
+	cfg   kernel.Config
+	opub  ed25519.PublicKey
+	ops   []clerk.Op
+	sec   *clerk.Secrets
+	inLog int // log length the request handler saw
 }
 
 // reboot reopens the same log with the given clerk, as a restart does.
@@ -95,8 +94,8 @@ func setupExit(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) *ex
 		t.Fatal(err)
 	}
 	f.x = x
-	f.store, f.anchor, f.opub = &kernel.MemStore{}, &kernel.MemAnchor{}, opub
-	f.cfg = kernel.Config{Store: f.store, Anchor: f.anchor, Pub: kpub, Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})}
+	f.store, f.opub = &kernel.MemStore{}, opub
+	f.cfg = kernel.Config{Store: f.store, Anchor: &kernel.MemAnchor{}, Pub: kpub, Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})}
 	f.reboot(t, x, 0)
 	f.root = key.Issue(opriv, key.Root{Holder: hpub, Clerk: "web", Verbs: []key.Verb{key.Post, key.Fetch}, Serial: "r1"})
 	if err := f.k.Issue(0, f.root); err != nil {
@@ -298,19 +297,39 @@ func TestExitRefusesSlotsOutsideThePath(t *testing.T) {
 	sec := clerk.NewSecrets(sealer(t))
 	opub, _ := gen(1)
 	for name, u := range map[string]string{
-		"host":       "https://{to}.example.invalid/v1",
-		"port":       "https://example.invalid:{to}/v1",
-		"userinfo":   "https://{to}@example.invalid/v1",
-		"query":      "https://example.invalid/v1?q={to}",
-		"fragment":   "https://example.invalid/v1#{to}",
-		"upper":      "HTTPS://{to}.example.invalid/v1",
-		"partial":    "https://example.invalid/v1/a{to}",
-		"plain-http": "http://example.invalid/v1/{to}",
+		"host":           "https://{to}.example.invalid/v1",
+		"port":           "https://example.invalid:{to}/v1",
+		"userinfo":       "https://{to}@example.invalid/v1",
+		"query":          "https://example.invalid/v1?q={to}",
+		"fragment":       "https://example.invalid/v1#{to}",
+		"upper":          "HTTPS://{to}.example.invalid/v1",
+		"partial":        "https://example.invalid/v1/a{to}",
+		"plain-http":     "http://example.invalid/v1/{to}",
+		"escape":         "https://example.invalid/v1/%2e%2e/{to}",
+		"userinfo-fixed": "https://u:p@example.invalid/v1/{to}",
 	} {
 		_, err := clerk.NewExit("web", opub, []clerk.Op{{Verb: key.Post, Method: "POST", URL: u, Body: "msg", Content: "text"}}, sec, http.DefaultClient)
 		if err == nil {
 			t.Errorf("%s: declaration accepted", name)
 		}
+	}
+}
+
+func TestExitDeclarationRefusesDuplicateVerb(t *testing.T) {
+	opub, _ := gen(1)
+	op := clerk.Op{Verb: key.Post, Method: "POST", URL: "https://example.invalid/v1/{to}", Body: "msg", Content: "text"}
+	if _, err := clerk.NewExit("web", opub, []clerk.Op{op, op}, clerk.NewSecrets(sealer(t)), http.DefaultClient); err == nil {
+		t.Fatal("verb declared twice was accepted")
+	}
+}
+
+func TestExitEscapesValuesAsOnePathSegment(t *testing.T) {
+	f := setupExit(t, nil)
+	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "a?x=1#f", "msg": "hi"}), f.k.State()); r.Outcome != "ok" {
+		t.Fatalf("%+v", r)
+	}
+	if f.got.path != "/v1/msg/a%3Fx=1%23f" {
+		t.Fatalf("value not escaped as one segment: %s", f.got.path)
 	}
 }
 

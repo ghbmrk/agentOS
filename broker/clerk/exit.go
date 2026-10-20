@@ -76,11 +76,16 @@ func (x *Exit) declare(op Op) error {
 	if op.Method == "" || strings.ContainsAny(op.Method, " \t\r\n") {
 		return errors.New("clerk: bad method")
 	}
+	// No escapes in a template: the path checked below is then the path sent,
+	// so the decoded and raw forms cannot disagree.
+	if strings.Contains(op.URL, "%") {
+		return errors.New("clerk: an op URL holds no escapes")
+	}
 	u, err := url.Parse(op.URL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Opaque != "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return errors.New("clerk: an op needs a plain https URL")
 	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(u.Host, "{}") {
+	if u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("clerk: slots belong in the path only")
 	}
 	names := key.ArgNames(op.Verb)
