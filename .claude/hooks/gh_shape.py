@@ -36,7 +36,9 @@ SHAPES = [
     ["gh", "api", "-X", "DELETE", f"{REPO}/issues/{NUM}/labels/{LABEL}"],
 ]
 
-_RULE_RES = [re.compile(".*".join(re.escape(p) for p in r.split("*")), re.S) for r in RULES]
+# A space in a rule matches any run of whitespace, in case the matcher normalizes it.
+_RULE_RES = [re.compile(".*".join(r"\s+".join(map(re.escape, p.split(" "))) for p in r.split("*")), re.S)
+             for r in RULES]
 # Characters a shell gives meaning to; none appears in any shape.
 _SHELL = set(";&|<>()$`\\\"'{}*?!#~\n\r\t")
 
