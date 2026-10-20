@@ -89,14 +89,15 @@ func RecipientArg(v Verb) string {
 	return ""
 }
 
-// ArgsDeclared reports whether s carries exactly its verb's declared arguments.
+// ArgsDeclared reports whether s carries exactly its verb's declared arguments,
+// each with a value: an empty one names nothing to act on (KEY-2).
 func ArgsDeclared(s Step) bool {
 	want := argNames[s.Verb]
 	if len(s.Args) != len(want) {
 		return false
 	}
 	for _, n := range want {
-		if _, ok := s.Args[n]; !ok {
+		if a, ok := s.Args[n]; !ok || a.Value == "" {
 			return false
 		}
 	}
