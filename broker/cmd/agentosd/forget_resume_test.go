@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -328,27 +329,38 @@ func TestWireBootRecallHandsRecallsOwn(t *testing.T) {
 //     after daemon.Run (R1, R1b, W1); lp.attach or the agent Store not run
 //     in place, on another receiver, or through a copy (R2..R7, X1..X4);
 //     lp reassigned or lp.forgetOwner replaced (P4, M); the resume reached
-//     by another path: resumeAgent or whenOpen called from main (S3, S3b).
+//     by another path: resumeAgent or whenOpen called from main, or
+//     resumeAgent through an interface from a function of its own (S3,
+//     S3b, N1).
 //   - JRN-s3-3: recall's inputs not main's own: a constant, a fresh
 //     executor or capState, recallDir or verifier rewritten, finish given
 //     another ServiceConfig or Late, or wireResume called outside
 //     wireBootRecall (A1..A8, P3, W3); recall opened, switched off or told
 //     STATUS by another path: openRecall, recallWired, recallOff, or the
-//     executor's Off or OnOpen reached from main (S1, S2, S2b, S13..S13c).
+//     executor's Off, OnOpen, Set or Failed reached from main, directly,
+//     through an interface or from a look-alike finish (S1, S2, S2b,
+//     S13..S13c, N2..N5).
 //     R1 (an early finish) also breaks JRN-s3-3: its config is not main's.
 //
 // The reach check: openRecall, recallWired and newBootRecall are reached
-// only from wireBootRecall; Off and OnOpen only from newBootRecall and
-// finish; recallOff only from capState's methods; resumeAgent and the
-// resume and whenOpen fields only from ownerForget's methods; and
-// bootRecall's fields are set only by newBootRecall and wireBootRecall.
+// only from wireBootRecall; wireResume only from newBootRecall; the
+// executor's Off and OnOpen only from newBootRecall and finish, its Set
+// and Failed only from openRecall; recallOff only from capState's
+// methods; resumeAgent and the resume and whenOpen fields only from
+// ownerForget's methods; and bootRecall's fields are set only by
+// newBootRecall and wireBootRecall. Callers and setters go by type-checked
+// object, not name, and a method called through an interface counts as
+// the entry with its name and signature.
 //   - F1, F2: a goto, or a return between the wire and a call it vouches
 //     for. main may hold neither.
 //
 // Out of reach without data-flow analysis: a condition false only at run
 // time, and leaving main (log.Fatal, os.Exit, panic) or blocking before
-// finish. Later: flag.Set("recall", ...) writes recallDir with no
-// assignment or address.
+// finish. Reflection (reflect.ValueOf(recallExec).MethodByName("Off"))
+// reaches a method with no identifier to check; agentosd imports no
+// reflect outside its tests.
+// Later: flag.Set("recall", ...) writes recallDir with no assignment or
+// address.
 //
 // Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
@@ -365,6 +377,7 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	attach := "\t\tlp.attach(ctx, d)\n"
 	store := "\t\t\t\tlp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,\n\t\t\t\t\tlineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})\n"
 	attachIf := "\tif lp != nil {\n" + attach
+	fn := "func main() {\n"
 	for _, m := range []struct {
 		name, req string
 		edits     []string // old, new pairs
@@ -410,6 +423,11 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 		{"S13c OnOpen registered in main", "JRN-s3-3", []string{run, "\trecallExec.OnOpen(func() {})\n" + run}},
 		{"S3 resumeAgent started in main", "JRN-s3-2", []string{run, "\tif lp != nil {\n\t\tgo lp.forgetOwner.resumeAgent(ctx)\n\t}\n" + run}},
 		{"S3b whenOpen run in main", "JRN-s3-2", []string{run, "\tif lp != nil && lp.forgetOwner.whenOpen != nil {\n\t\tlp.forgetOwner.whenOpen()\n\t}\n" + run}},
+		{"N1 resumeAgent through an interface, from a look-alike", "JRN-s3-2", []string{fn, "func kick(ctx context.Context, l *learning) {\n\tvar i interface{ resumeAgent(context.Context) } = l.forgetOwner\n\tgo i.resumeAgent(ctx)\n}\n\n" + fn, run, "\tif lp != nil {\n\t\tkick(ctx, lp)\n\t}\n" + run}},
+		{"N2 recall's STATUS switched through an interface", "JRN-s3-3", []string{finish, "\tvar cw interface{ recallWired(bool) } = caps\n\tcw.recallWired(false)\n" + finish}},
+		{"N3 executor set in main", "JRN-s3-3", []string{run, "\trecallExec.Set(&recalltool.Reach{})\n" + run}},
+		{"N4 executor marked off by a look-alike finish", "JRN-s3-3", []string{fn, "type early struct{}\n\nfunc (early) finish(x *recalltool.LateExecutor) { x.Off() }\n\n" + fn, run, "\tearly{}.finish(recallExec)\n" + run}},
+		{"N5 executor marked failed in main", "JRN-s3-3", []string{run, "\trecallExec.Failed()\n" + run}},
 		{"F1 goto past lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tgoto attached\n" + attach + "\tattached:\n"}},
 		{"F2 return before lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tif ctx.Err() != nil {\n\t\t\treturn\n\t\t}\n" + attach}},
 	} {
@@ -493,104 +511,135 @@ func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 		}
 	}}
 	pkg, _ := conf.Check(tc.path, fset, files, info)
-	member := func(typ, name string) types.Object {
-		o := pkg.Scope().Lookup(typ)
+	method := func(o types.Object, name string) types.Object {
 		if o == nil {
 			return nil
 		}
-		m, _, _ := types.LookupFieldOrMethod(types.NewPointer(o.Type()), false, pkg, name)
+		m, _, _ := types.LookupFieldOrMethod(types.NewPointer(o.Type()), false, o.Pkg(), name)
 		return m
 	}
-	wireBoot, newBoot := pkg.Scope().Lookup("wireBootRecall"), pkg.Scope().Lookup("newBootRecall")
+	member := func(typ, name string) types.Object { return method(pkg.Scope().Lookup(typ), name) }
+	var lateExec types.Object
+	for _, p := range pkg.Imports() {
+		if strings.HasSuffix(p.Path(), "/recalltool") {
+			lateExec = p.Scope().Lookup("LateExecutor")
+		}
+	}
+	wireBoot, newBoot, openFn := pkg.Scope().Lookup("wireBootRecall"), pkg.Scope().Lookup("newBootRecall"), pkg.Scope().Lookup("openRecall")
 	finishFn, wireFn := member("bootRecall", "finish"), member("ownerForget", "wireResume")
 	ownerField, attachFn, agentField := member("learning", "forgetOwner"), member("learning", "attach"), member("ownerForget", "agent")
 	// Each field the wiring sets, and the one function that may set it.
-	setter := map[types.Object]string{}
-	for _, f := range []struct{ typ, field, fn string }{
-		{"ownerForget", "resume", "wireResume"}, {"ownerForget", "whenOpen", "wireResume"}, {"ownerForget", "noRecall", "wireResume"},
-		{"bootRecall", "on", "newBootRecall"}, {"bootRecall", "ex", "newBootRecall"}, {"bootRecall", "boot", "newBootRecall"},
-		{"bootRecall", "ctx", "newBootRecall"}, {"bootRecall", "wired", "newBootRecall"},
-		{"bootRecall", "open", "wireBootRecall"}, {"bootRecall", "v", "wireBootRecall"}, {"bootRecall", "exec", "wireBootRecall"},
+	setter := map[types.Object]types.Object{}
+	for _, f := range []struct {
+		typ, field string
+		fn         types.Object
+	}{
+		{"ownerForget", "resume", wireFn}, {"ownerForget", "whenOpen", wireFn}, {"ownerForget", "noRecall", wireFn},
+		{"bootRecall", "on", newBoot}, {"bootRecall", "ex", newBoot}, {"bootRecall", "boot", newBoot},
+		{"bootRecall", "ctx", newBoot}, {"bootRecall", "wired", newBoot},
+		{"bootRecall", "open", wireBoot}, {"bootRecall", "v", wireBoot}, {"bootRecall", "exec", wireBoot},
 	} {
 		if o := member(f.typ, f.field); o != nil {
 			setter[o] = f.fn
 		}
 	}
 	bootType := pkg.Scope().Lookup("bootRecall")
-	// What starts or opens recall, marks it off or says so in STATUS, or
-	// runs the FORGET resume, and the functions (by name) or receiver
-	// types (by "*" and name) that alone may reach it (S1 S2 S3 S13 on
-	// #2513). Off and OnOpen go by name: an interface of main's own may
-	// carry them.
-	reach := map[types.Object]string{}
-	for _, r := range []struct{ typ, name, req, from string }{
-		{"", "openRecall", "JRN-s3-3", "wireBootRecall"},
-		{"capState", "recallWired", "JRN-s3-3", "wireBootRecall"},
-		{"capState", "recallOff", "JRN-s3-3", "*capState"},
-		{"ownerForget", "resumeAgent", "JRN-s3-2", "*ownerForget"},
-		{"ownerForget", "resume", "JRN-s3-2", "*ownerForget"},
-		{"ownerForget", "whenOpen", "JRN-s3-2", "*ownerForget"},
-		{"", "newBootRecall", "JRN-s3-3", "wireBootRecall"},
+	// What starts or opens recall, marks it off, failed or open, says so in
+	// STATUS, or runs the FORGET resume, and the functions or the receiver
+	// type that alone may reach it (S1 S2 S3 S13 N1..N4 on #2513). Callers
+	// go by object, not name, so a look-alike function or method of another
+	// type is not one of them.
+	type rule struct {
+		req, from string
+		fns       []types.Object // the functions that may reach it
+		owner     types.Object   // or the type whose methods may
+	}
+	capType, ownerType := pkg.Scope().Lookup("capState"), pkg.Scope().Lookup("ownerForget")
+	fromWire := rule{req: "JRN-s3-3", from: "wireBootRecall", fns: []types.Object{wireBoot}}
+	reach := map[types.Object]rule{}
+	for _, r := range []struct {
+		o types.Object
+		rule
+	}{
+		{openFn, fromWire},
+		{member("capState", "recallWired"), fromWire},
+		{newBoot, fromWire},
+		{member("capState", "recallOff"), rule{req: "JRN-s3-3", from: "capState's methods", owner: capType}},
+		{member("ownerForget", "resumeAgent"), rule{req: "JRN-s3-2", from: "ownerForget's methods", owner: ownerType}},
+		{member("ownerForget", "resume"), rule{req: "JRN-s3-2", from: "ownerForget's methods", owner: ownerType}},
+		{member("ownerForget", "whenOpen"), rule{req: "JRN-s3-2", from: "ownerForget's methods", owner: ownerType}},
+		{wireFn, rule{req: "JRN-s3-3", from: "newBootRecall", fns: []types.Object{newBoot}}},
+		{method(lateExec, "Off"), rule{req: "JRN-s3-3", from: "newBootRecall and bootRecall.finish", fns: []types.Object{newBoot, finishFn}}},
+		{method(lateExec, "OnOpen"), rule{req: "JRN-s3-3", from: "newBootRecall and bootRecall.finish", fns: []types.Object{newBoot, finishFn}}},
+		{method(lateExec, "Set"), rule{req: "JRN-s3-3", from: "openRecall", fns: []types.Object{openFn}}},
+		{method(lateExec, "Failed"), rule{req: "JRN-s3-3", from: "openRecall", fns: []types.Object{openFn}}},
 	} {
-		o := pkg.Scope().Lookup(r.name)
-		if r.typ != "" {
-			o = member(r.typ, r.name)
-		}
-		if o != nil {
-			reach[o] = r.req + " " + r.from
+		if r.o != nil {
+			reach[r.o] = r.rule
 		}
 	}
-	if wireBoot == nil || newBoot == nil || finishFn == nil || wireFn == nil || ownerField == nil || attachFn == nil || agentField == nil ||
-		bootType == nil || len(setter) != 11 || len(reach) != 7 {
-		return append(bad, "wiring: no wireBootRecall, newBootRecall, bootRecall.finish or its fields, ownerForget.wireResume, .agent or its resume fields, learning.forgetOwner or .attach, or what recall opens and switches through")
+	if wireBoot == nil || newBoot == nil || openFn == nil || finishFn == nil || wireFn == nil || ownerField == nil || attachFn == nil || agentField == nil ||
+		bootType == nil || capType == nil || ownerType == nil || len(setter) != 11 || len(reach) != 12 {
+		return append(bad, "wiring: no wireBootRecall, newBootRecall, openRecall, bootRecall.finish or its fields, ownerForget.wireResume, .agent or its resume fields, learning.forgetOwner or .attach, or what recall opens and switches through")
+	}
+	// A method called through an interface is the entry's own when it
+	// has the entry's name and signature: an interface of main's own may
+	// carry recallWired, resumeAgent, Off or OnOpen (N1, N2, S13b).
+	lookup := func(o types.Object) (rule, bool) {
+		if r, ok := reach[o]; ok {
+			return r, true
+		}
+		f, ok := o.(*types.Func)
+		if !ok {
+			return rule{}, false
+		}
+		if sig := f.Type().(*types.Signature); sig.Recv() == nil || !types.IsInterface(sig.Recv().Type()) {
+			return rule{}, false
+		}
+		for c, r := range reach {
+			if _, ok := c.(*types.Func); ok && c.Name() == f.Name() && types.Identical(c.Type(), f.Type()) {
+				return r, true
+			}
+		}
+		return rule{}, false
 	}
 
 	// Package-wide: those fields are set only by their setter, bootRecall
-	// built only by newBootRecall, wireResume reached only from
-	// newBootRecall, each reach entry only from its own, Off and OnOpen
-	// only from newBootRecall and finish, and wireBootRecall reached once.
+	// built only by newBootRecall, each reach entry reached only from its
+	// own, and wireBootRecall reached once.
 	wireBoots := 0
 	for _, f := range files {
 		for _, d := range f.Decls {
-			in, recv := "", ""
-			if fn, ok := d.(*ast.FuncDecl); ok {
-				in = fn.Name.Name
-				if fn.Recv != nil && len(fn.Recv.List) == 1 {
-					t := fn.Recv.List[0].Type
-					if st, ok := t.(*ast.StarExpr); ok {
-						t = st.X
+			var caller, recv types.Object
+			if fn, ok := d.(*ast.FuncDecl); ok && info.Defs[fn.Name] != nil {
+				caller = info.Defs[fn.Name]
+				if r := caller.Type().(*types.Signature).Recv(); r != nil {
+					rt := r.Type()
+					if p, ok := rt.(*types.Pointer); ok {
+						rt = p.Elem()
 					}
-					if id, ok := t.(*ast.Ident); ok {
-						recv = "*" + id.Name
+					if nt, ok := rt.(*types.Named); ok {
+						recv = nt.Obj()
 					}
 				}
 			}
 			ast.Inspect(d, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.CompositeLit:
-					if tv, ok := info.Types[n]; ok && types.Identical(tv.Type, bootType.Type()) && in != "newBootRecall" {
+					if tv, ok := info.Types[n]; ok && types.Identical(tv.Type, bootType.Type()) && caller != newBoot {
 						bad = append(bad, fmt.Sprintf("wiring: %s: bootRecall built outside newBootRecall", fset.Position(n.Pos())))
-					}
-				case *ast.SelectorExpr:
-					if (n.Sel.Name == "Off" || n.Sel.Name == "OnOpen") && in != "newBootRecall" && in != "finish" {
-						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: %s reached outside newBootRecall and bootRecall.finish", fset.Position(n.Pos()), n.Sel.Name))
 					}
 				case *ast.AssignStmt:
 					for _, l := range n.Lhs {
 						if s, ok := ast.Unparen(l).(*ast.SelectorExpr); ok && info.Selections[s] != nil {
-							if fn, ok := setter[info.Selections[s].Obj()]; ok && fn != in {
-								bad = append(bad, fmt.Sprintf("wiring: %s: %s set outside %s", fset.Position(l.Pos()), s.Sel.Name, fn))
+							if fn, ok := setter[info.Selections[s].Obj()]; ok && fn != caller {
+								bad = append(bad, fmt.Sprintf("wiring: %s: %s set outside %s", fset.Position(l.Pos()), s.Sel.Name, fn.Name()))
 							}
 						}
 					}
 				case *ast.Ident:
-					if info.Uses[n] == wireFn && in != "newBootRecall" {
-						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume reached outside newBootRecall", fset.Position(n.Pos())))
-					}
-					if r, ok := reach[info.Uses[n]]; ok {
-						if req, from, _ := strings.Cut(r, " "); from != in && from != recv {
-							bad = append(bad, fmt.Sprintf("%s: %s: %s reached outside %s", req, fset.Position(n.Pos()), n.Name, from))
-						}
+					if r, ok := lookup(info.Uses[n]); ok && !slices.Contains(r.fns, caller) && (r.owner == nil || r.owner != recv) {
+						bad = append(bad, fmt.Sprintf("%s: %s: %s reached outside %s", r.req, fset.Position(n.Pos()), n.Name, r.from))
 					}
 					if info.Uses[n] == wireBoot {
 						wireBoots++

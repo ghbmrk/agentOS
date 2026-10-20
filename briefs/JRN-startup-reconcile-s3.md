@@ -11,7 +11,7 @@ Board section: Security and architecture review (2026-10-08). Work item: #1410. 
 **Requirements:**
 - JRN-s3-1: `bootRecall.finish` runs the boot resume whether recall is on or off, and main calls `wireBootRecall` and `finish` exactly once each (kills Q1, Q2).
 - JRN-s3-2: main wires before `daemon.Run` and calls `finish` after `daemon.Run`, `lp.attach` and `lp.forgetOwner.agent.Store`, on those exact receivers (kills R1).
-- JRN-s3-3: recall counts as on only when both `recallDir` and the verifier are set; then `wireResume` gets `recallExec.OnOpen` and `finish` opens recall through `openRecall` with main's config and tools, and otherwise nil plus `recallExec.Off()` and `recallWired(false)` (kills Q3). Main reaches recall's open, off, STATUS line and FORGET's resume only through `wireBootRecall` and `finish`.
+- JRN-s3-3: recall counts as on only when both `recallDir` and the verifier are set; then `wireResume` gets `recallExec.OnOpen` and `finish` opens recall through `openRecall` with main's config and tools, and otherwise nil plus `recallExec.Off()` and `recallWired(false)` (kills Q3). Main reaches recall's open, off, STATUS line and FORGET's resume only through `wireBootRecall` and `finish`, and the executor's Set and Failed only through `openRecall`; the check matches callers by type-checked object and counts interface calls by method name and signature.
 - JRN-s3-4: the production wiring in `main.go` passes all three.
 
 **Acceptance tests:** (REQ: JRN-s3-1..4)
