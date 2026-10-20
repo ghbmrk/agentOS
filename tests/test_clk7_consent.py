@@ -57,7 +57,7 @@ class Consent(unittest.TestCase):
         self.assertIn("It applies to a route the owner paused, whose consent they withdrew or have not yet given, "
                       "or whose login was refused", t,
                       f"SPEC.md:{n} CLK-7 PLAN ON no longer applies to a route awaiting first consent")
-        self.assertIn("A route paused by a terms re-read, a security notice or a changed warning refuses "
+        self.assertIn("A route paused by a terms re-read or a security notice refuses "
                       "`PLAN <plan> ON` until an update brings it back", t,
                       f"SPEC.md:{n} CLK-7 lets a notice-paused route be resumed")
         self.assertIn("Pause, consent and withdrawal take effect before the next run, are log entries", t,
@@ -69,7 +69,7 @@ class Consent(unittest.TestCase):
         self.assertIn('("Not stopped. To turn your ChatGPT plan back on, reply PLAN ChatGPT ON.")', t,
                       f"SPEC.md:{n} CH-11 bare RESUME no longer names the route command")
         self.assertIn("when the owner paused that route, withdrew or has not yet given its consent, or had its login "
-                      "refused; for a route a security notice paused it replies with that route's STATUS line instead;", t,
+                      "refused; for a route a security notice paused it replies with that route's STATUS line instead (CLK-7).", t,
                       f"SPEC.md:{n} CH-11 bare RESUME names PLAN ON for a notice-paused route")
 
     def check_step6(self, t, n):
