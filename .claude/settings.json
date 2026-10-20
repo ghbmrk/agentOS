@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gh_shape.py\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/gh_shape.py\" || { echo \"gh_shape hook failed\" >&2; exit 2; }"
           }
         ]
       }
