@@ -16,6 +16,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-eval | Inbox-slice eval set in evals/slice-inbox/ | — | building (sub B; parallel with MIG-2) |
 | MIG-4 | Ports by directory: trusted side (sub A), untrusted side (sub B), adapters and evals (Codex lane) (migration step 4) | MIG-3 | queued (sub A, sub B, Codex lane; tier A on the trusted side) |
 | MIG-5 | Delete the old core (migration step 5) | MIG-4 | queued (either sub; tier A) |
+| MIG-oss-scanner | Enroll agentOS in Anthropic's OSS Scanner (a PR to anthropics/oss-scanner adding a small YAML file with the repo and a contact email) as a step-3 exit item, after the kernel, clerks and inbox path are real | MIG-3 | queued |
 
 ## Harness and operating model
 
@@ -37,7 +38,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| OWN-gaps | Owner principles with no realizing requirement (#653 L3): a check of the resulting state after each effect (OWN-13), detail served without rerunning the task (OWN-6), correction available while no route works (OWN-18), on-track obligations retrievable by text (OWN-16). Spec-diff or brief to write (release) | #653 merged | queued |
+| OWN-gaps | Owner principles with no realizing requirement (SPEC OWN-*): a check of the resulting state after each effect for clerks other than mail (OWN-13; mail is closed by VRB-2), correction available while no route works (OWN-18), on-track obligations other than goals with a check retrievable by text (OWN-16). OWN-6 (detail without rerunning the task) is closed by LOG-1. Spec-diff or brief to write (release) | #653 merged | queued |
 | CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
@@ -305,3 +306,5 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-SHARD-fu | CI-SHARD-fu: CI-speed follow-ups from the #1870 reviews. (queued; class later; from PR #1870 review) | — | queued (queued; class later; from PR #1870 review) |
 | ASSUMPTIONS-MERGE | [ASSUMPTIONS-MERGE](briefs/ASSUMPTIONS-MERGE.md) | — | in review (C) |
 | UPD-antirollback-anchor | UPD-antirollback-anchor: anchor anti-rollback to a monotonic hardware counter (TPM NV) and add a release revocation list. May need a spec decision. (later, recheck; tier A; from state-machine audit R7) | — | queued (later, recheck; tier A; from state-machine audit R7) |
+| MIG-2-rel | Release findings from PR #2550 (MIG-2, #2525), one follow-up brief; each serves KRN-8, LOG-2 or EVL-1: clerk keeps its own clock (hold window), clerk confirms the dispatch entry in the log, Undo on an irreversible step keeps the fingerprint, anchor after grant/resume/revoke/stop, sim shares the Mail clerk code, sim clock-jump/reorder/full-disk faults, fork test asserts ErrFork exactly, owner/clerk sourcing for bounded-arg keys (issue body has the failure paths) | MIG-2 | queued |
+| MIG-2-later | Later findings from PR #2550 (MIG-2): the `verifyChain` comment is stale; the KRN-6 and KRN-7 refusal messages swap wording | MIG-2 | queued |
