@@ -106,7 +106,7 @@ allow broker/cmd/agentos-seller/
 allow broker/cmd/agentosd/
 
 # Packages the G2 binaries import, plus the packages A4, A5 and A14 test directly:
-# browser (A5 canary sessions, CRED-12), projection (A4 rebuild), voice (CH-19, CH-21).
+# browser (A5 canary sessions, CRED-12), voice (CH-19, CH-21).
 allow broker/accel/
 allow broker/admission/
 allow broker/apnet/
@@ -154,7 +154,6 @@ allow broker/netjoin/
 allow broker/owner/
 allow broker/photo/
 allow broker/procguard/
-allow broker/projection/
 allow broker/provagent/
 allow broker/question/
 allow broker/quota/
