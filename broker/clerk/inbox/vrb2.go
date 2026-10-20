@@ -69,7 +69,6 @@ var (
 	angleAddr = regexp.MustCompile(`<([^<>@\s]+@[^<>@\s]+)>`)
 	bareAddr  = regexp.MustCompile(`([^\s<>@]+@[^\s<>@]+)`)
 	angleURL  = regexp.MustCompile(`<([^<>]+)>`)
-	urlHost   = regexp.MustCompile(`^https://([^/:?#]+)`)
 )
 
 func addr(value []byte) string {
@@ -101,6 +100,15 @@ func httpsURL(value []byte) string {
 		}
 	}
 	return ""
+}
+
+// urlHost is the host of an https URL that httpsURL returned.
+func urlHost(u string) string {
+	h := u[len("https://"):]
+	if i := strings.IndexAny(h, "/:?#"); i >= 0 {
+		h = h[:i]
+	}
+	return strings.ToLower(h)
 }
 
 func day(s string) time.Time { t, _ := time.Parse("2006-01-02", s); return t }
@@ -184,7 +192,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	if len(noL) == 0 {
 		return RDKIML, url
 	}
-	host := strings.ToLower(urlHost.FindStringSubmatch(url)[1])
+	host := urlHost(url)
 	hostOK := contains(w.ProviderTable, org(host))
 	for _, s := range noL {
 		hostOK = hostOK || aligned(host, s.D)
