@@ -82,8 +82,10 @@ type sealed struct {
 
 // NewSecrets makes an empty store. write, if not nil, makes the store durable:
 // every Put hands it the whole at-rest form and returns only once it returns,
-// so it must return only when the bytes are on disk. nil keeps the store in
-// memory only, for tests and the sim.
+// so it must return only when the bytes are on disk, and must replace the
+// old form atomically (write a temporary file, fsync, rename), so a crash
+// leaves one whole form or the other. nil keeps the store in memory
+// only, for tests and the sim.
 func NewSecrets(s Sealer, write func(atRest []byte) error) *Secrets {
 	return &Secrets{s: s, write: write, m: map[string]sealed{}}
 }

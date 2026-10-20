@@ -623,3 +623,49 @@ func TestReconnectDuringARotationKeepsTheNewGrant(t *testing.T) {
 		t.Fatalf("the old grant's rotation, or its access token, outlived the owner's reconnect: %+v, grants %v", r, o.grants)
 	}
 }
+
+func TestReconnectOnALiveClerkSendsTheNewGrantsToken(t *testing.T) {
+	o := setupOAuth(t)
+	o.post("i1", 1) // canary-access-1 is cached for 90 s
+	if err := o.x.Reconnect([]byte(`{"refresh_token":"canary-new","client_id":"agentos-test"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r := o.post("i2", 2)
+	if r.Outcome != "ok" || len(o.grants) != 2 || o.grants[1].Get("refresh_token") != "canary-new" || o.api[1] != "Bearer canary-access-2" {
+		t.Fatalf("the old access token outlived a reconnect: %+v, grants %v, API saw %q", r, o.grants, o.api)
+	}
+}
+
+func TestReconnectThatCannotWriteChangesNothing(t *testing.T) {
+	grant := []byte(`{"refresh_token":"canary-new","client_id":"agentos-test"}`)
+	t.Run("latched", func(t *testing.T) {
+		o := setupOAuth(t)
+		o.refuse = 400
+		o.post("i1", 1)
+		o.noWrite.Store(true)
+		if err := o.x.Reconnect(grant); err == nil {
+			t.Fatal("a reconnect whose grant was not written reported success")
+		}
+		o.refuse = 0
+		if r := o.post("i2", 2); r.Detail != clerk.DReconnect+" web" || len(o.grants) != 1 {
+			t.Fatalf("a failed reconnect cleared the latch: %+v, %d token requests", r, len(o.grants))
+		}
+	})
+	t.Run("unsaved", func(t *testing.T) {
+		o := setupOAuth(t)
+		o.noWrite.Store(true)
+		o.post("i1", 1) // rotated to canary-refresh-1, not saved
+		if err := o.x.Reconnect(grant); err == nil {
+			t.Fatal("a reconnect whose grant was not written reported success")
+		}
+		o.noWrite.Store(false)
+		if r := o.post("i2", 2); r.Outcome != "ok" {
+			t.Fatalf("%+v", r)
+		}
+		o.restart(t, 3)
+		o.post("i3", 3)
+		if g := o.grants[len(o.grants)-1].Get("refresh_token"); g != "canary-refresh-1" {
+			t.Fatalf("a failed reconnect dropped the kept rotated grant: redeemed %q", g)
+		}
+	})
+}
