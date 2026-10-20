@@ -3,7 +3,7 @@
 
 Until a gate passes, work goes to that gate's path. Each gate in GATES has its own list:
 G1 (`tools/g1_scope.txt`: controller boot, phone control and one model-backed task; A1,
-SPEC.md:653, D-104; off since G1-e2e #1688 passed in QEMU) and G2 (`tools/g1_scope_g2.txt`:
+SPEC.md, Gates, D-104; off since G1-e2e #1688 passed in QEMU) and G2 (`tools/g1_scope_g2.txt`:
 A4, A5, A9 and A14 on a VM; D-128). A PR must pass every gate's list; a list whose diff
 check fails names the paths outside it.
 

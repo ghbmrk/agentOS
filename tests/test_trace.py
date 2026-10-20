@@ -55,5 +55,27 @@ class TraceTest(unittest.TestCase):
         self.assertEqual(tr.main(["--root", str(d), "--gate", "OP-1,OP-2"]), 1)
 
 
+    RETIRING = ("- **KEY-1** a\n\n## Appendix A. Retired requirement IDs\n\n"
+                "| Retired | Now | What moved |\n|---|---|---|\n"
+                "| OP-1, OP-2 | KEY-1 | x |\n| CAP-9 | dropped | y |\n")
+
+    def test_retired_ids_from_appendix(self):
+        self.assertEqual(tr.retired_ids(self.RETIRING), ["OP-1", "OP-2", "CAP-9"])
+        self.assertEqual(tr.retired_ids(self.SPEC), [])
+
+    def test_retired_marker_accepted_and_counted(self):
+        d = make_repo(self.RETIRING, {"tests/t.py": M + "OP-1, KEY-1\n",
+                                      "tests/u.py": M + "OP-1\n"})
+        self.assertEqual(tr.main(["--root", str(d)]), 0)
+        out = (d / "TRACE.md").read_text()
+        self.assertIn("Covered: 1 / 1", out)
+        self.assertIn("Old-core markers: 2 in 1 retired IDs", out)
+
+    def test_no_old_core_markers(self):
+        d = make_repo(self.RETIRING, {"tests/t.py": M + "KEY-1\n"})
+        self.assertEqual(tr.main(["--root", str(d)]), 0)
+        self.assertIn("Old-core markers: 0 in 0 retired IDs", (d / "TRACE.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
