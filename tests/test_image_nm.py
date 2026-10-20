@@ -28,9 +28,15 @@ SHIPPED = {
 }
 
 
+UNIT = "usr/lib/systemd/system/NetworkManager.service"
+DROPIN_SRC = MK / "mkosi.extra" / check.NM_DROPIN
+
+
 def nm_tree(root, conf=None):
-    """A tree holding NetworkManager and the image's own file (or CONF in its place)."""
+    """A tree holding NetworkManager, its unit and drop-in, and the image's own file (or CONF in its place)."""
     write(root, "usr/sbin/NetworkManager", "\x7fELF", 0o755)
+    write(root, UNIT, "[Service]\nExecStart=%s\n" % check.NM_EXEC)
+    write(root, check.NM_DROPIN, DROPIN_SRC.read_text())
     write(root, CONF, CONF_SRC.read_text() if conf is None else conf)
 
 
@@ -177,18 +183,82 @@ class FinalizeCheckTest(unittest.TestCase):
         self.assertEqual(refused(self.root), [])
 
     # REQ: DEV-2
-    def test_a_unit_flag_that_names_other_configuration_is_refused(self):
-        unit = "usr/lib/systemd/system/NetworkManager.service"
-        for line in ("ExecStart=/usr/sbin/NetworkManager --no-daemon --config=/x.conf",
-                     "ExecStart=/usr/sbin/NetworkManager --config-dir=/x", "ExecStart=/x --intern-config=/y"):
-            for rel in (unit, unit + ".d/10-x.conf", "etc/systemd/system/NetworkManager.service",
-                        "run/systemd/system/NetworkManager.service.d/10-x.conf"):
-                with self.subTest(line=line, rel=rel):
-                    f = write(self.root, rel, "[Service]\n%s\n" % line)
-                    self.assertIn(rel, " ".join(refused(self.root)))
-                    f.unlink()
-        write(self.root, unit, "[Service]\nExecStart=/usr/sbin/NetworkManager --no-daemon\n")
+    def test_the_unit_is_closed_to_the_shipped_exec_and_drop_in(self):
+        # Each repro from Security and the combined review on #2607 round 2: a unit that reaches
+        # configuration the closed list does not cover, by a flag, a plugin, a variable or a drop-in
+        # systemd finds under another name or directory.
+        bad = "[Service]\n%s\n"
+        cases = {
+            "system-config-dir": (UNIT, bad % "ExecStart=/usr/sbin/NetworkManager --no-daemon --system-config-dir=/x"),
+            "ifupdown": (UNIT, bad % "ExecStart=/usr/sbin/NetworkManager --no-daemon --plugins=ifupdown"),
+            "env-expansion": (UNIT, "[Service]\nEnvironment=A=--config=/x\n"
+                                    "ExecStart=/usr/sbin/NetworkManager --no-daemon $A\n"),
+            "env-file": (UNIT + ".d/10-x.conf", "[Service]\nEnvironmentFile=/x\n"),
+            "continuation": (UNIT + ".d/10-x.conf", "[Service]\nExecStart=\nExecStart=/usr/sbin/NetworkManager "
+                                                    "--no-daemon \\\n  --system-config-dir=/x\n"),
+            "alias-dropin": ("etc/systemd/system/dbus-org.freedesktop.NetworkManager.service.d/10-x.conf",
+                             bad % "ExecStart=\nExecStart=/usr/sbin/NetworkManager --plugins=ifupdown"),
+            "usr-local-lib-dropin": ("usr/local/lib/systemd/system/NetworkManager.service.d/10-x.conf",
+                                     bad % "ExecStart=\nExecStart=/x --no-daemon --config=/x"),
+            "service.d-dropin": ("etc/systemd/system/service.d/10-x.conf", bad % "ExecStart=\nExecStart=/x"),
+            "second-exec": (UNIT + ".d/10-x.conf", bad % "ExecStart=/usr/sbin/NetworkManager --no-daemon"),
+            "masking-dropin": ("etc/systemd/system/NetworkManager.service.d/agentos-inbound.conf", "[Unit]\n"),
+            "altered-dropin": (check.NM_DROPIN, DROPIN_SRC.read_text() + "[Service]\nExecStart=\n"),
+        }
+        for label, (rel, body) in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as d:
+                    root = pathlib.Path(d)
+                    nm_tree(root)
+                    if label == "alias-dropin":
+                        (root / "etc/systemd/system").mkdir(parents=True, exist_ok=True)
+                        os.symlink("/usr/lib/systemd/system/NetworkManager.service",
+                                   root / "etc/systemd/system/dbus-org.freedesktop.NetworkManager.service")
+                    write(root, rel, body)
+                    self.assertTrue(refused(root))
+
+    # REQ: DEV-2
+    def test_the_unit_as_debian_ships_it_and_its_alias_pass(self):
+        nm_tree(self.root)
         self.assertEqual(refused(self.root), [])
+        (self.root / "etc/systemd/system").mkdir(parents=True)
+        os.symlink("/usr/lib/systemd/system/NetworkManager.service",
+                   self.root / "etc/systemd/system/dbus-org.freedesktop.NetworkManager.service")
+        self.assertEqual(refused(self.root), [])
+
+    # REQ: DEV-2
+    def test_the_unit_or_the_inbound_drop_in_missing_is_refused(self):
+        (self.root / UNIT).unlink()
+        self.assertIn("missing", " ".join(refused(self.root)))
+        write(self.root, UNIT, "[Service]\nExecStart=%s\n" % check.NM_EXEC)
+        (self.root / check.NM_DROPIN).unlink()
+        self.assertIn("missing", " ".join(refused(self.root)))
+
+    # REQ: DEV-2
+    def test_the_shipped_drop_in_is_the_text_the_check_allows(self):
+        self.assertEqual(DROPIN_SRC.read_bytes(), check.NM_DROPIN_TEXT)
+
+    # REQ: DEV-2
+    def test_a_file_behind_a_linked_parent_is_refused(self):
+        # var/lib is a link to state: NetworkManager reads var/state/NetworkManager through it.
+        shutil.rmtree(self.root / "var", ignore_errors=True)
+        write(self.root, "var/state/NetworkManager/NetworkManager-intern.conf", "[connection]\n")
+        os.symlink("state", self.root / "var/lib")
+        self.assertIn("NetworkManager-intern.conf", " ".join(refused(self.root)))
+
+    # REQ: DEV-2
+    def test_a_directory_that_cannot_be_listed_is_refused(self):
+        d = self.root / "var/lib/NetworkManager"
+        d.mkdir(parents=True)
+        real = check.tree_listdir
+
+        def deny(root, rel):
+            if rel.endswith("var/lib/NetworkManager"):
+                raise PermissionError(13, "Permission denied")
+            return real(root, rel)
+
+        with unittest.mock.patch.object(check, "tree_listdir", deny):
+            self.assertIn("var/lib/NetworkManager", " ".join(refused(self.root)))
 
     # REQ: DEV-2
     def test_a_non_ascii_or_control_byte_is_refused(self):
@@ -260,7 +330,8 @@ class ImageFilesTest(unittest.TestCase):
     # REQ: DEV-2
     def test_the_driver_and_thunderbolt_udev_rules_are_removed_and_not_allowlisted(self):
         # They do nothing for wlsta0; dropping them leaves less root-run udev code to pin. The
-        # unmanaged-devices rule (85) stays: it is the one that keeps the wired port off NetworkManager.
+        # unmanaged-devices rule (85) stays pinned as Debian ships it; the wired port is kept off NetworkManager
+        # by [keyfile] unmanaged-devices in 50-agentos.conf, not by this rule.
         rm = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         allow = (MK / "exec.allow").read_text()
         for n in ("84-nm-drivers.rules", "90-nm-thunderbolt.rules"):
