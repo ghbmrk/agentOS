@@ -36,6 +36,9 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
+# #2550 (KERNEL, migration step 2, D-139): adds broker/kernel/ and broker/clerk/, which the
+# allow list cannot name before they exist on main; #2550 replaces this line with those allows.
+exempt-pr 2550
 
 # Project machinery and records.
 allow .claude/
@@ -79,9 +82,6 @@ allow broker/core/
 allow broker/e2e/
 allow broker/hostchange/
 allow broker/sim/
-# Capability kernel (D-139, migration step 2, #2525): kernel and clerk replace broker/core/.
-allow broker/kernel/
-allow broker/clerk/
 allow broker/test/
 allow broker/third_party/
 allow broker/vendor/
