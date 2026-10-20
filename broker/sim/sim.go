@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Mutant reintroduces a known class of bug, so tests can show the sweep
@@ -30,14 +32,28 @@ const (
 	// holding the renamed file is synced, so a power cut can bring the
 	// erased content back (CAP-3).
 	MutantTornErase Mutant = "torn-erase"
+	// MutantAckShortWrite reports a short write done: the torn prefix is
+	// synced and acknowledged, and the next append glues a whole line to
+	// it, which the journal can no longer read back (OP-4).
+	MutantAckShortWrite Mutant = "ack-short-write"
+	// MutantStopSkipsGen applies STOP to the engine without the owner
+	// channel counting it, so a RESUME code texted before the STOP still
+	// lifts it (CH-2, the bug d728b2b fixed).
+	MutantStopSkipsGen Mutant = "stop-skips-gen"
 )
+
+// simOwner is the owner's number in every run: a synthetic number from the
+// fictional 555-01xx range.
+const simOwner = "+15555550100"
 
 // Config is one simulation run.
 type Config struct {
 	Seed  int64
 	Steps int // scheduled operations; 0 means 200
-	// Judge is run on the durable journal after every boot and at the end
-	// of the run. SIM-check's predicates plug in here.
+	// Judge is run on the journal the engine opened, after every boot and
+	// at the end of the run. SIM-check's predicates plug in here. It is the
+	// durable journal unless a sync failed during Open, when the page cache
+	// may hold the cut tail the disk does not yet.
 	Judge  func(journal []byte) error
 	Mutant Mutant
 }
@@ -78,6 +94,22 @@ type sim struct {
 	depth int
 	trace []string
 	err   error
+
+	// ch is the owner's text channel, built anew at every boot as the
+	// daemon does; chStore is its durable state, kept across boots.
+	ch      *owner.Channel
+	chStore *owner.MemStore
+	// acked is the highest journal seq the disk acknowledged (OP-4).
+	acked uint64
+	// ev counts owner texts and boots. issued is the event at which each
+	// RESUME code was first texted, codes the same in order; lastStop and
+	// lastBoot are the events of the latest STOP text and boot (CH-2).
+	ev                 int
+	issued             map[string]int
+	codes              []string
+	lastStop, lastBoot int
+	// stopAcked: a STOP was recorded and no RESUME has lifted it since.
+	stopAcked bool
 }
 
 // Run drives the real journal engine through Config.Steps operations chosen
@@ -89,6 +121,11 @@ func Run(cfg Config) Result {
 	}
 	s := &sim{cfg: cfg, rng: rand.New(rand.NewSource(cfg.Seed)), clock: &Clock{t: epoch}, ctx: context.Background()}
 	s.disk = newDisk(s.rng, cfg.Mutant, s.log)
+	s.disk.written = s.ack
+	s.disk.wrote = func(call string) {
+		s.violate("OP-4", "%s after a failed write, before the journal was reopened", call)
+	}
+	s.chStore, s.issued = &owner.MemStore{}, map[string]int{}
 	s.pol = &policy{s: s, grants: map[string]bool{}, stale: map[string]error{}}
 	s.svc = &service{s: s, applied: map[string]int{}, keys: map[string]bool{}, took: map[string]bool{}}
 	s.boot()
@@ -97,6 +134,7 @@ func Run(cfg Config) Result {
 	}
 	for s.step = 1; s.step <= cfg.Steps && s.err == nil; s.step++ {
 		s.op()
+		s.checkHalted()
 		if s.disk.Crashed() && s.err == nil {
 			s.reboot()
 		}
@@ -138,7 +176,12 @@ func (s *sim) boot() {
 	for try := 0; ; try++ {
 		s.disk.open()
 		if try < 3 && s.rng.Intn(4) == 0 {
-			s.disk.Arm(s.rng.Intn(3) + 1) // cut the records Open writes
+			// Cut or fail the records Open writes.
+			if n := s.rng.Intn(3) + 1; s.rng.Intn(2) == 0 {
+				s.disk.Fail(n)
+			} else {
+				s.disk.Arm(n)
+			}
 		}
 		eng, err := journal.Open(s.disk, s.pol, map[string]journal.Executor{"svc": s.svc, "broker": brokerExec{s.pol}},
 			func(t string) string { return t }, journal.WithClock(s.clock.Now))
@@ -147,14 +190,35 @@ func (s *sim) boot() {
 			s.disk.PowerCut()
 			continue
 		}
+		if err != nil && s.disk.Failed() {
+			// The daemon exits and is restarted on the same page cache.
+			s.log("fail during open" + errText(err))
+			s.disk.Kill()
+			continue
+		}
 		if err != nil {
 			s.violate("OP-4", "the journal does not reopen: %v", err)
 			return
 		}
-		s.disk.Arm(0)
+		s.disk.Disarm()
 		s.eng = eng
 		break
 	}
+	s.checkAcked()
+	s.ev++
+	s.lastBoot = s.ev
+	ch, err := owner.New(owner.Config{Owner: simOwner, Engine: s.eng, Store: s.chStore, Rand: rngReader{s.rng},
+		Now: s.clock.Now, Location: time.UTC,
+		AfterFunc: func(time.Duration, func()) func() bool { return func() bool { return false } }})
+	if err != nil {
+		s.violate("CH-2", "the owner channel does not start: %v", err)
+		return
+	}
+	s.ch = ch
+	if s.stopAcked && !s.eng.Stopped() {
+		s.violate("CH-2", "a recorded STOP did not survive the reboot")
+	}
+	s.checkHalted()
 	intents := map[string]journal.Intent{}
 	for _, st := range s.eng.List() {
 		intents[st.Intent.ID] = st.Intent
@@ -162,7 +226,7 @@ func (s *sim) boot() {
 	s.pol.rebuild(s.eng.Trail(), intents)
 	s.checkErased()
 	if s.cfg.Judge != nil && s.err == nil {
-		if err := s.cfg.Judge(s.disk.Durable()); err != nil {
+		if err := s.cfg.Judge(bytes.Clone(s.disk.live)); err != nil {
 			s.violate("judge", "%v", err)
 		}
 	}
@@ -194,11 +258,8 @@ func (s *sim) op() {
 		s.log(fmt.Sprintf("reconcile %+v", rep))
 	case r < 61:
 		s.resolve()
-	case r < 63:
-		_, err := s.eng.Stop(s.ctx)
-		s.log("stop" + errText(err))
 	case r < 66:
-		s.log("resume" + errText(s.eng.Resume()))
+		s.text()
 	case r < 70:
 		s.erase()
 	case r < 72:
@@ -208,8 +269,13 @@ func (s *sim) op() {
 		}
 	case r < 92:
 		n := s.rng.Intn(8) + 1
-		s.log(fmt.Sprintf("arm crash in %d points", n))
-		s.disk.Arm(n)
+		if s.rng.Intn(3) == 0 {
+			s.log(fmt.Sprintf("arm fail in %d points", n))
+			s.disk.Fail(n)
+		} else {
+			s.log(fmt.Sprintf("arm crash in %d points", n))
+			s.disk.Arm(n)
+		}
 	case r < 96:
 		s.log("reboot kill")
 		s.disk.Kill()
@@ -284,12 +350,16 @@ func (s *sim) interleave(where string) {
 		s.log("nested revoke in " + where)
 		s.runGrant(journal.ActionGrantRevoke, accounts[s.rng.Intn(len(accounts))])
 	case 2:
-		_, err := s.eng.Stop(s.ctx)
-		s.log("nested stop in " + where + errText(err))
+		s.stop("nested stop in " + where)
 	default:
 		n := s.rng.Intn(3) + 1
-		s.log(fmt.Sprintf("nested arm crash in %d points in %s", n, where))
-		s.disk.Arm(n)
+		if s.rng.Intn(3) == 0 {
+			s.log(fmt.Sprintf("nested arm fail in %d points in %s", n, where))
+			s.disk.Fail(n)
+		} else {
+			s.log(fmt.Sprintf("nested arm crash in %d points in %s", n, where))
+			s.disk.Arm(n)
+		}
 	}
 }
 
@@ -378,6 +448,129 @@ func (s *sim) durablyDispatched(id string, n int) bool {
 	}
 	return false
 }
+
+// ack records the seq of an append the disk acknowledged.
+func (s *sim) ack(line []byte) {
+	var r journal.Record
+	if len(line) > 9 && json.Unmarshal(line[9:], &r) == nil && r.Seq > s.acked {
+		s.acked = r.Seq
+	}
+}
+
+// checkAcked: OP-4. Every append the disk acknowledged is still in the
+// journal the engine reopened, and readable.
+func (s *sim) checkAcked() {
+	recs, err := s.eng.ReadTrail()
+	if err != nil {
+		s.violate("OP-4", "the reopened journal does not read back: %v", err)
+		return
+	}
+	var last uint64
+	if len(recs) > 0 {
+		last = recs[len(recs)-1].Seq
+	}
+	if last < s.acked {
+		s.violate("OP-4", "acknowledged record seq %d lost; the journal ends at seq %d", s.acked, last)
+	}
+}
+
+// checkHalted: OP-4. Once a journal write has failed, the engine is halted
+// until it is reopened: broken or stopped, never running on.
+func (s *sim) checkHalted() {
+	if s.err == nil && s.disk.Failed() && !s.eng.Halted() {
+		s.violate("OP-4", "the engine is not halted after a failed write")
+	}
+}
+
+// codeText finds the code in the channel's RESUME challenge.
+var codeText = regexp.MustCompile(`RESUME ([0-9]{6})`)
+
+// text sends the owner a short burst of STOP and RESUME texts, as a person
+// does, sometimes minutes after the last burst, so codes expire and the
+// hourly limits refill. A burst can hold STOP, RESUME, STOP, RESUME <code>
+// with no reboot between: the order a stale challenge needs.
+func (s *sim) text() {
+	if s.rng.Intn(2) == 0 {
+		s.clock.Advance(time.Duration(s.rng.Intn(20)) * time.Minute)
+	}
+	for n := 1 + s.rng.Intn(4); n > 0 && s.err == nil && !s.disk.Crashed(); n-- {
+		switch r := s.rng.Intn(10); {
+		case r < 3:
+			s.stop("")
+		case r < 6 || len(s.codes) == 0:
+			s.send("RESUME")
+		default:
+			// A code from any challenge so far: the latest is the one that
+			// should work, the rest must not.
+			c := s.codes[len(s.codes)-1]
+			if s.rng.Intn(2) == 0 {
+				c = s.codes[s.rng.Intn(len(s.codes))]
+			}
+			s.send("RESUME " + c)
+		}
+	}
+}
+
+// stop sends STOP in one of the forms the channel accepts.
+func (s *sim) stop(note string) {
+	text := []string{"STOP", "stop", fmt.Sprintf("STOP %06d", s.rng.Intn(1_000_000))}[s.rng.Intn(3)]
+	if note != "" {
+		s.log(note)
+	}
+	acked := false
+	if s.cfg.Mutant == MutantStopSkipsGen {
+		s.ev++
+		s.lastStop = s.ev
+		_, err := s.eng.Stop(s.ctx)
+		s.log(fmt.Sprintf("text %q -> engine stop%s", text, errText(err)))
+		acked = err == nil
+	} else {
+		out := s.send(text)
+		s.lastStop = s.ev
+		acked = len(out) > 0 && strings.HasPrefix(out[0], "Stopped.")
+	}
+	if acked {
+		// The owner was told "Stopped.": that must hold across a restart.
+		s.stopAcked = true
+	}
+}
+
+// send hands the channel one owner text and checks CH-2: a RESUME lifts
+// STOP only with a code texted after the latest STOP and the latest boot.
+func (s *sim) send(text string) []string {
+	s.ev++
+	was := s.eng.Stopped()
+	out := s.ch.Handle(s.ctx, simOwner, text)
+	s.log(fmt.Sprintf("text %q -> %q", text, strings.Join(out, " | ")))
+	for _, o := range out {
+		if m := codeText.FindStringSubmatch(o); m != nil {
+			if _, ok := s.issued[m[1]]; !ok {
+				s.issued[m[1]] = s.ev
+				s.codes = append(s.codes, m[1])
+			}
+		}
+	}
+	if len(out) > 0 && strings.HasPrefix(out[0], "RESUME failed to record") {
+		// The RESUME record may have reached the page cache, so a restart
+		// can bring it back (see ASSUMPTIONS A9).
+		s.stopAcked = false
+	}
+	if !was || s.eng.Stopped() {
+		return out
+	}
+	s.stopAcked = false
+	code := strings.TrimSpace(strings.TrimPrefix(text, "RESUME"))
+	at, ok := s.issued[code]
+	if !ok || at <= s.lastStop || at <= s.lastBoot {
+		s.violate("CH-2", "%q lifted STOP with a code not texted since the latest STOP and boot", text)
+	}
+	return out
+}
+
+// rngReader feeds the channel's codes from the seed.
+type rngReader struct{ r *rand.Rand }
+
+func (r rngReader) Read(p []byte) (int, error) { return r.r.Read(p) }
 
 func errText(err error) string {
 	if err == nil {

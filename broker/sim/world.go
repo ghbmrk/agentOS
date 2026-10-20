@@ -83,6 +83,9 @@ func (p *policy) apply(in journal.Intent) {
 type brokerExec struct{ p *policy }
 
 func (b brokerExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	if b.p.s.disk.Failed() {
+		b.p.s.violate("OP-4", "grant change %s ran after a failed write", in.ID)
+	}
 	b.p.apply(in)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "applied"}
 }
@@ -108,6 +111,10 @@ func (v *service) Execute(_ context.Context, in journal.Intent, n int) journal.O
 	// the journal can over-report but never under-report an effect.
 	if !s.durablyDispatched(in.ID, n) {
 		s.violate("OP-4", "%s ran before its dispatched record was durable", key)
+	}
+	// OP-4: nothing runs after a failed journal write until a reopen.
+	if s.disk.Failed() {
+		s.violate("OP-4", "%s ran after a failed write", key)
 	}
 	// OP-3: authority is rechecked at dispatch, so nothing runs on a grant
 	// that is no longer held.

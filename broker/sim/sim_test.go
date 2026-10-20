@@ -4,7 +4,7 @@ package sim
 // fake disk, clock and services. Judging each run by the SIM-check
 // predicates is the second half; Config.Judge is where they plug in.
 //
-// REQ: OP-3, OP-4, OP-5, CAP-3
+// REQ: OP-3, OP-4, OP-5, CAP-3, CH-2
 
 import (
 	"bytes"
@@ -50,13 +50,15 @@ func TestDifferentSeedsGiveDifferentRuns(t *testing.T) {
 }
 
 // The bounded sweep CI runs finds no violation, and exercises what it
-// claims to: crashes at every kind of write point, power cuts, OP-3 races,
-// STOP, erasure and reconciliation.
+// claims to: crashes and failures at every kind of write point, power cuts,
+// OP-3 races, STOP and RESUME by text, erasure and reconciliation.
 func TestSeedSweepFindsNoViolation(t *testing.T) {
 	want := []string{
 		"crash write", "crash fsync", "crash rename", "crash dirsync", "crash during open",
 		"reboot power", "reboot kill", "nested revoke", "nested stop",
 		"recheck_failed", "erase ok", "reconcile", "resolve ok", "outcome_unknown",
+		"fail write", "fail fsync", "fail rename", "fail during open", "nested arm fail",
+		"reply RESUME", "Resumed.", "No valid code", "RESUME failed to record",
 	}
 	seen := map[string]bool{}
 	for seed := int64(1); seed <= int64(sweep()); seed++ {
@@ -97,10 +99,12 @@ func TestMutantsAreFoundWithinTheSeedBudget(t *testing.T) {
 		m    Mutant
 		rule string
 	}{
-		{MutantNoRecheck, "OP-3"},    // dispatch skips the recheck
-		{MutantStaleRecheck, "OP-3"}, // the recheck after a change during the check is stale
-		{MutantSkipFsync, "OP-4"},    // Append returns before the line is durable
-		{MutantTornErase, "CAP-3"},   // the erase rewrite is acknowledged before the directory is synced
+		{MutantNoRecheck, "OP-3"},     // dispatch skips the recheck
+		{MutantStaleRecheck, "OP-3"},  // the recheck after a change during the check is stale
+		{MutantSkipFsync, "OP-4"},     // Append returns before the line is durable
+		{MutantTornErase, "CAP-3"},    // the erase rewrite is acknowledged before the directory is synced
+		{MutantAckShortWrite, "OP-4"}, // a short write is acknowledged, leaving a torn record behind
+		{MutantStopSkipsGen, "CH-2"},  // STOP leaves a RESUME code texted before it valid
 	}
 	for _, c := range cases {
 		_, r := firstFailure(t, c.m, 50)

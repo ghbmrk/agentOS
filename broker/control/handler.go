@@ -245,7 +245,9 @@ func (h *Handler) stop(ctx context.Context) string {
 	h.resume = nil // a code issued before STOP must not lift it
 	h.mu.Unlock()
 	rep, err := h.Engine.Stop(ctx)
-	if err != nil && !h.Engine.Stopped() {
+	// Not "Stopped." on an earlier STOP's record: a failed write since then
+	// (a RESUME whose fsync failed) can replay on restart and lift it.
+	if err != nil {
 		return "STOP failed to record. Nothing new starts now; reply STOP again."
 	}
 	return fmt.Sprintf("Stopped. %d held, %d may have happened, %d cancel requests sent. Nothing was undone. Reply RESUME to restart.",
