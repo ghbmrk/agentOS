@@ -24,6 +24,7 @@ type ProviderRequest struct {
 	Label                      vm.Label
 	Class                      admission.Class
 	MemMB                      int64
+	Hold                       func() bool // the owner's STOP, held on each command the run execs (OP-6)
 }
 
 // ProviderReason is a closed reason a run was refused or failed. The wiring
@@ -54,7 +55,7 @@ var errProviderName = said{"name: provider workers are the broker's; pick anothe
 
 func providerTool() map[string]any {
 	return map[string]any{"name": toolProviderRun,
-		"description": "Hand a subtask to a provider's agent on the owner's plan and wait for its result. The brief is plain text, never a command: a leading / or ! is just text. You get the result file only, or a closed reason it was refused or failed (unqualified, opt-in-required, ungranted, unsigned, private-unmarked, pool-at-reserve, used-up, login-refused, vault-locked, route-busy, failed, timed-out, result-withheld), with one line on what to do; on used-up, login-refused, vault-locked, route-busy, failed, timed-out or pool-at-reserve use another route. The run is on your data label and reservation.",
+		"description": "Hand a subtask to a provider's agent on the owner's plan and wait for its result. The brief is plain text, never a command: a leading / or ! is just text. You get the result file only, or a closed reason it was refused or failed (unqualified, opt-in-required, ungranted, unsigned, private-unmarked, pool-at-reserve, used-up, login-refused, vault-locked, route-busy, failed, timed-out, result-withheld, stopped), with one line on what to do; on used-up, login-refused, vault-locked, route-busy, failed, timed-out or pool-at-reserve use another route; on stopped wait for the owner's RESUME. The run is on your data label and reservation.",
 		"inputSchema": obj(map[string]any{
 			"provider":   map[string]any{"type": "string", "description": "A provider ID, e.g. codex."},
 			"brief":      map[string]any{"type": "string", "description": "The subtask, as text."},
@@ -73,7 +74,7 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 	}
 	res, err := t.Provider.Run(ctx, ProviderRequest{
 		Provider: a.Provider, Brief: a.Brief, TaskClass: a.TaskClass,
-		Machine: c.machine, Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
+		Machine: c.machine, Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB, Hold: t.Stopped,
 	})
 	if err != nil {
 		var ref *ProviderRefusal
@@ -105,4 +106,5 @@ var providerReasons = map[ProviderReason]said{
 	"failed":           {"provider_run: failed: the run failed, or its brief or result was over the size cap; shorten the brief, or use another route"},
 	"timed-out":        {"provider_run: timed-out: the run hit its time limit; split the task, or use another route"},
 	"result-withheld":  {"provider_run: result-withheld: the result carried a credential format and was withheld; do not retry the same brief"},
+	"stopped":          {"provider_run: stopped: the owner sent STOP and no route runs until RESUME; wait for the owner"},
 }

@@ -91,7 +91,14 @@ type Request struct {
 	Label                      vm.Label // the caller's data label
 	Class                      admission.Class
 	MemMB                      int64 // the caller's reservation
+	// Hold is the owner's STOP, set on each command the run execs as
+	// vm.Command.Hold: a command reaching Exec after STOP is refused at
+	// once (OP-6). Nil holds nothing.
+	Hold func() bool
 }
+
+// held reports whether the owner's STOP is on for q.
+func (q Request) held() bool { return q.Hold != nil && q.Hold() }
 
 // Runner runs provider agents.
 type Runner struct {
@@ -360,6 +367,10 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if len(q.Brief) > r.Caps.Brief {
 		return fail(Failed)
 	}
+	// Nothing new starts under STOP (OP-6): no slot, seed or worker.
+	if q.held() {
+		return fail(Stopped)
+	}
 	start := r.now()
 	probe, re := r.admit(d, start)
 	if re != "" {
@@ -422,7 +433,14 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	wctx, wcancel := context.WithTimeout(ctx, r.Caps.Wall)
 	defer wcancel()
 	ran = true
-	res, err := r.Host.Exec(wctx, id, Command(d, q.Brief), r.Caps.Wall)
+	cli := Command(d, q.Brief)
+	cli.Hold = q.Hold
+	res, err := r.Host.Exec(wctx, id, cli, r.Caps.Wall)
+	// A command STOP held or ended answers stopped: no other route runs
+	// under STOP, so failed's advice would mislead the guest.
+	if err != nil && q.held() {
+		return fail(Stopped)
+	}
 	if res.TimedOut || wctx.Err() != nil {
 		return fail(TimedOut)
 	}
@@ -431,7 +449,10 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	}
 	// The CLI's stdout and stderr (res.Stdout, res.Stderr) are dropped here:
 	// only the declared result file leaves the worker.
-	rr, err := r.Host.Exec(wctx, id, vm.Command{Argv: []string{"cat", d.ResultPath}, MaxOutput: r.Caps.Result + 1, As: vm.Private}, r.Caps.Wall)
+	rr, err := r.Host.Exec(wctx, id, vm.Command{Argv: []string{"cat", d.ResultPath}, MaxOutput: r.Caps.Result + 1, As: vm.Private, Hold: q.Hold}, r.Caps.Wall)
+	if err != nil && q.held() {
+		return fail(Stopped)
+	}
 	if err != nil || rr.Truncated || len(rr.Stdout) > r.Caps.Result {
 		return fail(Failed)
 	}

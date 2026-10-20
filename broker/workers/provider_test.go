@@ -1,6 +1,6 @@
 package workers
 
-// REQ: CAP-11, CAP-9, CRED-5, A3, A14
+// REQ: CAP-11, CAP-9, CRED-5, A3, A14, OP-6
 
 import (
 	"context"
@@ -205,7 +205,7 @@ func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 // fixed line on what to do, nothing else; a fallback outcome the same, so
 // the guest can route on it.
 func TestProviderRunAnswersAClosedReason(t *testing.T) {
-	if len(providerReasons) != 13 {
+	if len(providerReasons) != 14 {
 		t.Fatalf("%d reasons", len(providerReasons))
 	}
 	for reason, text := range providerReasons {
@@ -288,5 +288,33 @@ func TestProviderRunNeedsTheRunnerTheOwnerStopAndAnAgentCaller(t *testing.T) {
 	}
 	if len(f.got) != 0 {
 		t.Fatal("runner ran for a worker")
+	}
+}
+
+// OP-6: the run carries the owner's STOP to the commands it execs, so one
+// that reaches Exec after STOP is held at once.
+func TestProviderRunCarriesTheOwnersStop(t *testing.T) {
+	r := newRig(t, 4096)
+	r.agent("a1", vm.Public)
+	f := r.provider()
+	stopped := false
+	r.tools.Stopped = func() bool { return stopped }
+	r.must("a1", "provider_run", m{"provider": "codex", "brief": "b", "task_class": "code"}, nil)
+	h := f.got[0].Hold
+	if h == nil || h() {
+		t.Fatal("hold missing or set before STOP")
+	}
+	stopped = true
+	if !h() {
+		t.Fatal("the run's hold does not read the owner's STOP")
+	}
+}
+
+// A run STOP ended tells the guest to wait for the owner, not to try
+// another route: none runs under STOP.
+func TestAStoppedRunSaysWaitNotAnotherRoute(t *testing.T) {
+	msg := providerReasons["stopped"].Error()
+	if !strings.Contains(msg, "STOP") || strings.Contains(msg, "another route") {
+		t.Fatalf("stopped reads %q", msg)
 	}
 }

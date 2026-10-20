@@ -1170,7 +1170,7 @@ type providerTool struct{ r *provagent.Runner }
 
 func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
 	out, err := p.r.Run(ctx, provagent.Request{Machine: q.Machine, Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
-		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
+		Label: q.Label, Class: q.Class, MemMB: q.MemMB, Hold: q.Hold})
 	var ref *provagent.Refusal
 	if errors.As(err, &ref) {
 		return "", &workers.ProviderRefusal{Reason: workers.ProviderReason(ref.Reason)}
@@ -1263,7 +1263,7 @@ func reapWorkers(ctx context.Context, wt reaper, m commandEnder, stopped func() 
 		case <-t.C:
 			if stopped() {
 				if n := m.EndCommands(); n > 0 {
-					log.Printf("STOP: ended %d worker commands", n)
+					log.Printf("STOP: ended %d worker and provider commands", n)
 				}
 			}
 			if time.Since(last) >= time.Minute {

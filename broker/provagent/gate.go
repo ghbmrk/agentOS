@@ -22,13 +22,16 @@ const (
 	TimedOut     Reason = "timed-out"
 	// Withheld: the result carried a credential format (CRED-7).
 	Withheld Reason = "result-withheld"
+	// Stopped: the owner's STOP held or ended the run (OP-6). Final: no
+	// route runs under STOP, so CAP-9 tries none.
+	Stopped Reason = "stopped"
 )
 
 // Reasons is every closed reason, for the wiring's mapping onto the guest's
 // texts.
 func Reasons() []Reason {
 	return []Reason{Unqualified, OptInRequired, Ungranted, Unsigned, PrivateUnmarked, PoolAtReserve,
-		UsedUp, LoginRefused, VaultLocked, RouteBusy, Failed, TimedOut, Withheld}
+		UsedUp, LoginRefused, VaultLocked, RouteBusy, Failed, TimedOut, Withheld, Stopped}
 }
 
 // Refusal is a run that did not return a result.
@@ -40,8 +43,8 @@ func refuse(r Reason) error { return &Refusal{r} }
 
 // FallsBack reports whether err is an outcome CAP-9 answers by trying the
 // remaining granted routes: a used-up plan, a refused login, a busy or
-// locked route, a failed or timed-out run. Gate refusals and a withheld
-// result are final.
+// locked route, a failed or timed-out run. Gate refusals, a withheld
+// result and a stopped run are final.
 func FallsBack(err error) bool {
 	if r, ok := err.(*Refusal); ok {
 		switch r.Reason {

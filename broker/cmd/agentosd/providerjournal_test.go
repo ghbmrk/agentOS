@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -15,7 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/workers"
 )
 
-// REQ: OP-8
+// REQ: OP-8, OP-6
 
 // Synthetic canaries: neither may reach the journal.
 const (
@@ -178,5 +179,17 @@ func TestPlanRunIsNeverRefusedOrCountedBySpendMeter(t *testing.T) {
 		if !strings.HasPrefix(n.Reason, "provider run ok") {
 			t.Errorf("entry %+v", n)
 		}
+	}
+}
+
+// OP-6: the adapter carries the owner's STOP to the runner, so a run asked
+// for under STOP starts nothing and the guest reads stopped.
+func TestProviderToolCarriesTheOwnersStop(t *testing.T) {
+	r, _, _ := journaledRunner(t)
+	_, err := (providerTool{r}).Run(context.Background(), workers.ProviderRequest{Machine: "wk-c", Provider: "codex", Brief: canaryBrief, TaskClass: "code", Label: vm.Public,
+		Hold: func() bool { return true }})
+	var ref *workers.ProviderRefusal
+	if !errors.As(err, &ref) || ref.Reason != "stopped" {
+		t.Fatalf("= %v, want stopped", err)
 	}
 }

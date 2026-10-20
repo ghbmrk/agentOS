@@ -32,9 +32,10 @@ type stub struct {
 	hang       bool
 	createErr  error
 	destroyErr error
-	execErr    error  // returned by the CLI's Exec
-	readErr    error  // returned by the result read
-	onDestroy  func() // runs as the worker is destroyed
+	execErr    error              // returned by the CLI's Exec
+	readErr    error              // returned by the result read
+	onDestroy  func()             // runs as the worker is destroyed
+	onRead     func(c vm.Command) // sees each result read
 }
 
 func newStub(cli func(c vm.Command, s *stub) vm.ExecResult) *stub {
@@ -71,6 +72,9 @@ func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Durati
 		return vm.ExecResult{}, errors.New("no such machine")
 	}
 	if len(c.Argv) > 0 && c.Argv[0] == "cat" { // the result read
+		if s.onRead != nil {
+			s.onRead(c)
+		}
 		out, rerr := s.drive[c.Argv[1]], s.readErr
 		s.mu.Unlock()
 		if rerr != nil {
