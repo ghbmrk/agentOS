@@ -35,6 +35,10 @@ type fakeVerifier struct {
 	revokeErr  error
 	released   []string
 	releaseErr error
+	// allowed is every act allowed with no code (ADP-9); allowErr, when
+	// set, fails AllowActs.
+	allowed  []CheckerAct
+	allowErr error
 	// proof, when set, is a vault unlock's ticket whose sign-in proof
 	// (UnlockProofPrefix+proof) matches once (P2-4f).
 	proof string
@@ -96,6 +100,16 @@ func (f *fakeVerifier) ReleaseActs(acts ...string) error {
 		return f.releaseErr
 	}
 	f.released = append(f.released, acts...)
+	return nil
+}
+
+func (f *fakeVerifier) AllowActs(acts ...CheckerAct) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.allowErr != nil {
+		return f.allowErr
+	}
+	f.allowed = append(f.allowed, acts...)
 	return nil
 }
 

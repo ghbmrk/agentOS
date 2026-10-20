@@ -51,6 +51,7 @@ func TestAnswerNoteRefusedWhenMalformed(t *testing.T) {
 		"empty repeat":        {Approved: true, Went: []string{""}},
 		"confirm with sum":    {Confirm: true, Sum: testSum},
 		"negative tries":      {Tries: -1},
+		"allowed denial":      {Allowed: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st, svc := &MemStore{}, newService()

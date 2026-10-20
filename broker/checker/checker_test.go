@@ -88,7 +88,7 @@ func TestNoSeedVerifiesNothing(t *testing.T) {
 	if ok || !errors.Is(err, ErrNoSeed) {
 		t.Fatalf("ok %v err %v", ok, err)
 	}
-	if c.Redeem(act(t, "{}")) {
+	if c.Redeem(act(t, "{}"), false) {
 		t.Fatal("redeemed an act nothing approved")
 	}
 }
@@ -106,19 +106,19 @@ func TestVerifiedCodeApprovesEachActOnce(t *testing.T) {
 	if err != nil || !ok || step != clk.now().Unix()/30 {
 		t.Fatalf("step %d ok %v err %v", step, ok, err)
 	}
-	if c.Redeem(other) {
+	if c.Redeem(other, false) {
 		t.Fatal("an act outside the batch was approved")
 	}
-	if !c.Redeem(a1) || !c.Redeem(a2) {
+	if !c.Redeem(a1, false) || !c.Redeem(a2, false) {
 		t.Fatal("approved acts were not redeemable")
 	}
-	if c.Redeem(a1) {
+	if c.Redeem(a1, false) {
 		t.Fatal("an approval was redeemed twice")
 	}
 	if _, ok, _ := c.Verify(totp(seed, clk.now()), 0, true, acts(other)); ok {
 		t.Fatal("a spent step verified again")
 	}
-	if c.Redeem(other) {
+	if c.Redeem(other, false) {
 		t.Fatal("a spent code approved an act")
 	}
 }
@@ -142,24 +142,24 @@ func TestAHeldActWaitsForItsRelease(t *testing.T) {
 	clk.add(ApprovalTTL - 2*time.Second)
 	c.Release([]string{now})
 	clk.add(3 * time.Second)
-	if c.Redeem(now) {
+	if c.Redeem(now, false) {
 		t.Fatal("a release extended an unheld act past ApprovalTTL")
 	}
 	clk.add(2 * ApprovalTTL)
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("a held act was spent before its release")
 	}
 	c.Release([]string{a})
 	clk.add(ApprovalTTL - time.Second)
-	if !c.Redeem(a) {
+	if !c.Redeem(a, false) {
 		t.Fatal("an early try spent the approval, or its release did not open it")
 	}
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("a released act was spent twice")
 	}
 	clk.add(MaxHold)
 	c.Release([]string{lapsed})
-	if c.Redeem(lapsed) {
+	if c.Redeem(lapsed, false) {
 		t.Fatal("a held approval outlived MaxHold")
 	}
 }
@@ -212,13 +212,13 @@ func TestRevokeAndReleaseOverTheSocket(t *testing.T) {
 		}
 	}
 	red := Redeemer(filepath.Join(dir, RedeemSocket))
-	if ok, err := red(context.Background(), undone); ok || err != nil {
+	if ok, err := red(context.Background(), undone, false); ok || err != nil {
 		t.Fatalf("a revoked act was spent: %v %v", ok, err)
 	}
-	if ok, err := red(context.Background(), kept); !ok || err != nil {
+	if ok, err := red(context.Background(), kept, false); !ok || err != nil {
 		t.Fatalf("a released act was refused: %v %v", ok, err)
 	}
-	if ok, err := red(context.Background(), other); ok || err != nil {
+	if ok, err := red(context.Background(), other, false); ok || err != nil {
 		t.Fatalf("a release opened an act it did not name: %v %v", ok, err)
 	}
 }
@@ -244,7 +244,7 @@ func TestWrongCodesApproveNothingAndPause(t *testing.T) {
 	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(a)); ok || !errors.As(err, &p) {
 		t.Fatalf("not paused: ok %v err %v", ok, err)
 	}
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("a paused check approved an act")
 	}
 	// The silent bucket is apart: a flood of counted codes does not stop it.
@@ -279,7 +279,7 @@ func TestWrongSilentCodesPause(t *testing.T) {
 	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, false, acts(a)); ok || !errors.As(err, &p) {
 		t.Fatalf("silent check not paused: ok %v err %v", ok, err)
 	}
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("a paused silent check approved an act")
 	}
 	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, nil); !ok || err != nil {
@@ -303,7 +303,7 @@ func TestApprovalExpires(t *testing.T) {
 		t.Fatalf("ok %v err %v", ok, err)
 	}
 	clk.add(ApprovalTTL + time.Second)
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("an expired approval was redeemed")
 	}
 }
@@ -325,7 +325,7 @@ func TestSpentStepSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	again.Hand(seed)
-	if again.Redeem(a) {
+	if again.Redeem(a, false) {
 		t.Fatal("an approval survived the restart")
 	}
 	if _, ok, _ := again.Verify(code, 0, true, acts(a)); ok {
@@ -461,17 +461,17 @@ func TestServeOverSockets(t *testing.T) {
 	go c.Serve(lns[HandSocket], lns[VerifySocket], lns[RedeemSocket])
 	a := act(t, "{}")
 	red := Redeemer(filepath.Join(dir, RedeemSocket))
-	if ok, err := red(context.Background(), a); ok || err != nil {
+	if ok, err := red(context.Background(), a, false); ok || err != nil {
 		t.Fatalf("redeemed before any code: %v %v", ok, err)
 	}
 	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
 	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, checkersock.Act{Act: a}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
-	if ok, err := red(context.Background(), a); !ok || err != nil {
+	if ok, err := red(context.Background(), a, false); !ok || err != nil {
 		t.Fatalf("redeem: %v %v", ok, err)
 	}
-	if ok, _ := red(context.Background(), a); ok {
+	if ok, _ := red(context.Background(), a, false); ok {
 		t.Fatal("redeemed twice")
 	}
 	// A socket declared for another uid closes this caller unread.
@@ -480,7 +480,7 @@ func TestServeOverSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 	go (&http.Server{Handler: c.redeemHandler()}).Serve(other)
-	if _, err := Redeemer(filepath.Join(dir, "other.sock"))(context.Background(), a); err == nil {
+	if _, err := Redeemer(filepath.Join(dir, "other.sock"))(context.Background(), a, false); err == nil {
 		t.Fatal("a socket for another uid answered")
 	}
 }
@@ -516,7 +516,7 @@ func TestClientReportsRefusals(t *testing.T) {
 	if _, ok, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true, acts(many...)...); ok || err == nil {
 		t.Fatalf("oversized batch: ok %v err %v", ok, err)
 	}
-	if c.Redeem(many[0]) {
+	if c.Redeem(many[0], false) {
 		t.Fatal("a refused batch approved an act")
 	}
 	for i := 0; i < MaxWrongCounted; i++ {
@@ -546,7 +546,7 @@ func TestRedeemerTrustsOnly204(t *testing.T) {
 		}
 		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })}
 		go srv.Serve(ln)
-		ok, err := Redeemer(path)(context.Background(), a)
+		ok, err := Redeemer(path)(context.Background(), a, false)
 		srv.Close()
 		if ok || err == nil {
 			t.Errorf("redeem answered %d: approved %v, err %v", status, ok, err)
@@ -575,7 +575,7 @@ func TestHandSocketDropTakesTheSeedBack(t *testing.T) {
 	if c.Held() {
 		t.Fatal("the checker still holds the seed after a drop")
 	}
-	if c.Redeem(a) {
+	if c.Redeem(a, false) {
 		t.Fatal("an approval made before the lock was redeemed after it")
 	}
 	clk.add(30 * time.Second)
@@ -617,5 +617,193 @@ func TestHandSocketVerifiesOnTheOneStore(t *testing.T) {
 	}
 	if _, vr := post(verify.URL+"/verify", checkersock.VerifyRequest{Code: code, Counted: true}); vr.OK {
 		t.Fatal("the verify socket took a step the unlock step spent")
+	}
+}
+
+// REQ: CH-4, CH-10, ADP-9
+// An allowed approval (the broker's record of a low-tier or grid answer,
+// POST /allow) serves an irreversible act once but never a secret one,
+// and a secret try spends nothing; it never replaces a code's approval,
+// keeps the held and TTL rules, needs the seed held, and is bounded.
+func TestAllowedApprovalServesIrreversibleActsOnly(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	a, coded, held, lapsed := act(t, `{"a":1}`), act(t, `{"a":2}`), act(t, `{"a":3}`), act(t, `{"a":4}`)
+	if err := c.Allow(acts(a)); !errors.Is(err, ErrNoSeed) {
+		t.Fatalf("allowed with no seed held: %v", err)
+	}
+	seed := syntheticSeed(t)
+	c.Hand(seed)
+	if err := c.Allow(acts(a, lapsed)); err != nil {
+		t.Fatal(err)
+	}
+	if c.Redeem(a, true) {
+		t.Fatal("an allowed approval served a secret act")
+	}
+	if !c.Redeem(a, false) {
+		t.Fatal("a secret try spent the allowed approval, or it never served")
+	}
+	if c.Redeem(a, false) {
+		t.Fatal("an allowed approval was redeemed twice")
+	}
+	if _, ok, err := c.Verify(totp(seed, clk.now()), 0, true, acts(coded)); !ok || err != nil {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	if err := c.Allow(acts(coded)); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Redeem(coded, true) {
+		t.Fatal("an allow replaced a code's approval")
+	}
+	if err := c.Allow([]checkersock.Act{{Act: held, Held: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Redeem(held, false) {
+		t.Fatal("a held allowed approval was spent before its release")
+	}
+	c.Release([]string{held})
+	if c.Redeem(held, true) || !c.Redeem(held, false) {
+		t.Fatal("a released allowed approval did not keep its kind")
+	}
+	clk.add(ApprovalTTL)
+	if c.Redeem(lapsed, false) {
+		t.Fatal("an allowed approval outlived ApprovalTTL")
+	}
+	if err := c.Allow(acts("not-an-act")); err == nil {
+		t.Fatal("a malformed act was allowed")
+	}
+	many := make([]string, MaxActs+1)
+	for i := range many {
+		many[i] = act(t, fmt.Sprintf(`{"m":%d}`, i))
+	}
+	if err := c.Allow(acts(many...)); err == nil {
+		t.Fatal("more than MaxActs were allowed at once")
+	}
+	for i := 0; i < MaxAllowed/MaxActs; i++ {
+		batch := make([]string, MaxActs)
+		for j := range batch {
+			batch[j] = act(t, fmt.Sprintf(`{"b":%d,"j":%d}`, i, j))
+		}
+		if err := c.Allow(acts(batch...)); err != nil {
+			t.Fatalf("batch %d: %v", i, err)
+		}
+	}
+	if err := c.Allow(acts(act(t, `{"over":1}`))); err == nil {
+		t.Fatal("more than MaxAllowed allowed approvals were outstanding")
+	}
+	clk.add(ApprovalTTL)
+	if err := c.Allow(acts(act(t, `{"over":1}`))); err != nil {
+		t.Fatalf("lapsed allowed approvals still counted: %v", err)
+	}
+}
+
+// REQ: CH-4, ADP-9
+// POST /allow is on the verify socket only, and the holders' redeem
+// client carries the secret flag: an allowed act is refused to a secret
+// request and served to an irreversible one.
+func TestAllowOverTheSocket(t *testing.T) {
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	c, _ := newChecker(t, clk)
+	c.Hand(syntheticSeed(t))
+	dir, err := os.MkdirTemp("", "chk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	var lns []net.Listener
+	for _, name := range []string{HandSocket, VerifySocket, RedeemSocket} {
+		ln, err := Listen(filepath.Join(dir, name), os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lns = append(lns, ln)
+	}
+	go c.Serve(lns[0], lns[1], lns[2])
+	a := act(t, `{"allow":1}`)
+	for _, name := range []string{HandSocket, RedeemSocket} {
+		if err := checkersock.VerifyClient(filepath.Join(dir, name)).Allow(checkersock.Act{Act: a}); err == nil {
+			t.Fatalf("the %s allowed an act", name)
+		}
+	}
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
+	if err := vc.Allow(checkersock.Act{Act: "not-an-act"}); err == nil {
+		t.Fatal("a malformed allow was accepted")
+	}
+	if err := vc.Allow(checkersock.Act{Act: a}); err != nil {
+		t.Fatal(err)
+	}
+	red := Redeemer(filepath.Join(dir, RedeemSocket))
+	if ok, err := red(context.Background(), a, true); ok || err != nil {
+		t.Fatalf("an allowed act served a secret request: %v %v", ok, err)
+	}
+	if ok, err := red(context.Background(), a, false); !ok || err != nil {
+		t.Fatalf("an allowed act was refused to an irreversible request: %v %v", ok, err)
+	}
+	c.Drop()
+	if err := vc.Allow(checkersock.Act{Act: a}); err == nil {
+		t.Fatal("allowed with the seed dropped")
+	}
+}
+
+// REQ: CH-4, ADP-9
+// An allow the broker stopped waiting for is settled when Allow returns:
+// one held up past AllowWithin records nothing, so a revoke sent after the
+// error leaves no approval for the holder to spend (#2514 L3 blocker 2).
+func TestALateAllowRecordsNothing(t *testing.T) {
+	c, _ := newChecker(t, &clock{t: time.Unix(1_800_000_000, 0)})
+	c.Hand(syntheticSeed(t))
+	dir, err := os.MkdirTemp("", "chk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	var lns []net.Listener
+	for _, name := range []string{HandSocket, VerifySocket, RedeemSocket} {
+		ln, err := Listen(filepath.Join(dir, name), os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lns = append(lns, ln)
+	}
+	go c.Serve(lns[0], lns[1], lns[2])
+	a := act(t, `{"late":1}`)
+	vc := checkersock.VerifyClient(filepath.Join(dir, VerifySocket))
+
+	c.mu.Lock()
+	start := time.Now()
+	err = vc.Allow(checkersock.Act{Act: a})
+	waited := time.Since(start)
+	time.AfterFunc(500*time.Millisecond, c.mu.Unlock)
+	if err == nil {
+		t.Fatal("an allow held past its deadline was answered")
+	}
+	if waited < checkersock.AllowWithin {
+		t.Fatalf("Allow returned after %v, before its deadline", waited)
+	}
+	if err := vc.Revoke(a); err != nil {
+		t.Fatal(err)
+	}
+	// Whenever the held-up handler runs, it is past its deadline and
+	// records nothing; look a few times while it gets the lock.
+	red := Redeemer(filepath.Join(dir, RedeemSocket))
+	for i := 0; i < 5; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if ok, err := red(context.Background(), a, false); ok || err != nil {
+			t.Fatalf("a late allow was spent: %v %v", ok, err)
+		}
+	}
+	if err := c.allowBefore(acts(a), time.Now().Add(-time.Millisecond), time.Time{}); !errors.Is(err, errLate) {
+		t.Fatalf("a late allow: %v", err)
+	}
+	if ok, _ := red(context.Background(), a, false); ok {
+		t.Fatal("a late allow was recorded")
+	}
+	// The wall-clock deadline can be stepped forward; the handler's own
+	// monotonic start still refuses once AllowWithin has passed.
+	if err := c.allowBefore(acts(a), time.Now().Add(time.Hour), time.Now().Add(-checkersock.AllowWithin)); !errors.Is(err, errLate) {
+		t.Fatalf("an allow held past AllowWithin: %v", err)
+	}
+	if ok, _ := red(context.Background(), a, false); ok {
+		t.Fatal("an allow held past AllowWithin was recorded")
 	}
 }

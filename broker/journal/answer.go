@@ -42,6 +42,10 @@ type AnswerNote struct {
 	// Hold marks an answer on a held effect (REV-3), which the owner
 	// channel's boot settles; the gate does not rebuild it.
 	Hold bool `json:"hold,omitempty"`
+	// Allowed marks an approval the checker holds as allowed (a low-tier
+	// texted YES or a grid cell) rather than a code-generator code's: it
+	// serves an irreversible act but no secret one (ADP-9).
+	Allowed bool `json:"allowed,omitempty"`
 	// Tries is how many attempts the intent had when the owner answered:
 	// the approval covers the next one only (GR8).
 	Tries int `json:"tries,omitempty"`
@@ -56,6 +60,9 @@ const maxAnswerText = 256
 
 func (n AnswerNote) valid() bool {
 	if n.Confirm && (n.Approved || n.Why != "" || n.Sum != "") {
+		return false
+	}
+	if n.Allowed && !n.Approved {
 		return false
 	}
 	if !plain(n.Why) || token(n.Request) != n.Request || n.Tries < 0 {

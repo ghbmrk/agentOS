@@ -679,7 +679,8 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 			}
 		}
 	default:
-		note, msg = "Denied "+id, "Denied "+id+"." // with its ID (UX U-2A-2)
+		// With its ID (UX U-2A-2), and any failed withdrawal kept.
+		note, msg = "Denied "+id, "Denied "+id+"."+strings.TrimPrefix(msg, "Denied "+id+".")
 	}
 	var text string
 	var ns, na int
