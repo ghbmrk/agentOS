@@ -89,7 +89,7 @@ Copied from briefs/SIM-cases.md at commit 0b3d474, which mapped the 67 W5-D draf
 | Source | Behaviour to keep or failure to prevent | Requirements |
 |---|---|---|
 | D-065, D-071 | A restore never brings back forgotten data: when the forget log is missing (an older backup), rolled back to an earlier copy, or not anchored to the box's trusted counter, the restore holds until the owner says when they last forgot something, and each of those cases has its own wording | CAP-3 |
-| D-065, D-071, D-076 | That question shows the real last-forget date among same-format decoys spread far apart (at least 14 days, none after the backup), plus "later than all of these" and "never", so the question itself does not reveal the real date | CAP-3 |
+| D-065, D-071, D-076 | That question shows the real last-forget date among same-format decoys, plus "later than all of these" and "never". Decoys fall both before and after the real date, so the real date is usually not the latest shown; a picker that puts every decoy before it fails. Decoys sit at least 45 days apart, except that when room before the backup is short, decoys after the real date may sit closer, but never under 14 days apart; none falls after the backup | CAP-3 |
 | D-078 | A signing key never leaves the clerk's custody; the clerk is the one point that mints per-request tokens, so any agent protocol plugs in there and nothing else holds a key | CRED-1, CRED-5 |
 | D-103, #1106 (H-4) | A short owner-chosen secret (a mail or SIP password) can be guessed offline from any hash of it, so only the clerk holds it and no hash of it leaves custody | CRED-1 |
 
@@ -301,7 +301,7 @@ These close with no case, because each is housekeeping of old-core code with no 
 | #1559 TRUST-anchor-sync-audit | Audit the Anchor and counter-creation paths for the same landed-but-not-synced gap | HW-8 |
 | #1794 TRUST-stagefault-tests | Pin the stage fault after the .next file lands, test InjectStageFault restore and nesting, and fix the giveBack comment | HW-8 |
 | #1796 S8-W1 plan route body check | Item/part field sets and two surviving mutants | ADP-10, CRED-5 |
-| #2024  | Two provider workers together can still hold every route call | none named |
+| #2024 Provider worker route hold | Two provider workers together can still hold every route call | none named |
 | #999 W6 | Recovery into the vault process and local UI | none named |
 | #932 P2-2w c2 r1 | Setup on a vault whose enrollment is closed tells "never opened" apart from "sealed", and the page says the box cannot finish setup instead of "already set up" with a Continue that is then refused; "sealed by setup" apart from "never opened" lets finish accept a lost setup record | none named |
 
