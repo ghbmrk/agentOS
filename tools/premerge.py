@@ -80,9 +80,12 @@ _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 def verdict(comments, pr, security=False):
     """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None.
 
-    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead."""
+    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead.
+    A comment edited after posting (updated_at differs from created_at) never counts: a verdict is the text that was reviewed."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        if c.get("updated_at", c.get("created_at")) != c.get("created_at"):
+            continue
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()

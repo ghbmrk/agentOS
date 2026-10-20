@@ -323,6 +323,11 @@ class PremergeTest(unittest.TestCase):
         # untrusted author, other PR, no L3 marker: none counts
         for bad in (c("accept", sha, "1", who="NONE"), c("accept", sha, "1", pr=8), c("accept", sha, "1", mark="")):
             self.assertEqual(run([bad]), (1, ["no-verdict"]))
+        # an edited comment never counts: an edited accept is no verdict, an edited fix-list leaves the accept standing
+        edited = lambda x: {**x, "updated_at": "9"}
+        self.assertEqual(run([edited(c("accept", sha, "1"))]), (1, ["no-verdict"]))
+        self.assertEqual(run([c("accept", sha, "1"), edited(c("fix-list", sha, "2"))]), (0, ["same"]))
+        self.assertEqual(run([{**c("accept", sha, "1"), "updated_at": "1"}]), (0, ["same"]))
         # a later fix-list supersedes the accept
         self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
         # a push after the accept reads as changed; a delta accept at the new head clears it
@@ -330,6 +335,9 @@ class PremergeTest(unittest.TestCase):
         new = self.commit("later")
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
+
+    def test_workflow_feeds_updated_at(self):
+        self.assertIn("updated_at", (ROOT / ".github/workflows/premerge.yml").read_text())
 
     def test_check_gate_spec_needs_nothing_extra(self):
         # D-137 supersedes D-130: a SPEC.md change merges on its accept alone, with no Transcribes: line.
