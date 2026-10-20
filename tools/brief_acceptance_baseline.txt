@@ -191,7 +191,6 @@ PE7-bus.md
 PE7-call.md
 PE7.md
 PILOT-S.md
-PROJ-read.md
 RECALL-canary-1.md
 RECALL-prov-L1.md
 RECALL-prov-owner.md

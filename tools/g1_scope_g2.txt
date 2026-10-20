@@ -8,7 +8,7 @@
 # - every package the G2 binaries import (`go list -deps`, G2_BINARIES in
 #   tests/test_g1_scope.py): G1's binaries plus agentos-holder and agentos-release;
 # - what A4, A5 and A14 exercise directly beyond those: the credentialed browser (A5,
-#   CRED-12), the journal projections (A4), the CH-21 voice check (A14), the recall index
+#   CRED-12), the journal tail (A4), the CH-21 voice check (A14), the recall index
 #   (A14 CAP-3, so it leaves the G1 list's frozen imports), the simulators and scenario
 #   scripts, and the whole of broker/route/ (A14 CAP-9, CAP-11, CRED-5: every route the
 #   box can call is in scope, not only G1's one);
