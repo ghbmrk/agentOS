@@ -24,6 +24,11 @@ PEM = ("-----BEGIN " + "PRIVATE KEY-----\n" + "Q0FOQVJZ" * 8 + "\n-----END " + "
 AGE = ("AGE-SECRET-" + "KEY-1" + "QQQQ" * 14 + "QQ").encode()
 # The same key JSON-escaped, as a provider credential file stores it (a literal backslash-n).
 PEM_JSON = ('{"private_key": "' + PEM.decode().replace("\n", "\\n") + '"}').encode()
+# A JSON encoder that also escapes the slash (PHP's json_encode by default), with a / in the
+# first body line's first 40 characters, so that line must be read past as an escaped one.
+PEM_SLASH = ('{"private_key": "' + ("-----BEGIN " + "PRIVATE KEY-----\n" + "Q0/OQVJZ" * 8 + "\n" +
+             "Q0FOQVJZ" * 8 + "\n-----END " + "PRIVATE KEY-----\n").replace("/", "\\/").replace("\n", "\\n")
+             + '"}').encode()
 CARD = ("firstboot-" + "card.json").encode()
 
 
@@ -70,8 +75,8 @@ class SecretScanTest(unittest.TestCase):
     def test_a_key_or_card_outside_usr_slot_a_is_refused(self):
         # REQ: HW-1
         for where in ("esp", "slot b 3", "slot b 4", "root"):
-            for what, data in (("private key", PEM), ("private key", PEM_JSON), ("age secret key", AGE),
-                               ("Owner Card", CARD)):
+            for what, data in (("private key", PEM), ("private key", PEM_JSON), ("private key", PEM_SLASH),
+                               ("age secret key", AGE), ("Owner Card", CARD)):
                 with self.subTest(where=where, what=what), tempfile.TemporaryDirectory() as d:
                     off = PART[where] + 4096 + 17
                     bad = finish.secret_violations(self.disk(d, [(off, data)]), TABLE)
@@ -106,10 +111,11 @@ class SecretScanTest(unittest.TestCase):
         # header followed by many of them is rejected in linear time, not by the job timeout.
         header = ("-----BEGIN " + "PRIVATE KEY-----").encode()
         with tempfile.TemporaryDirectory() as d:
-            img = self.disk(d, [(PART["root"], header + b"\\n" * 200)])
-            start = time.monotonic()
-            self.assertEqual(finish.secret_violations(img, TABLE), [])
-            self.assertLess(time.monotonic() - start, 1.0)
+            for run in (b"\\n", b"\\/\\n"):
+                img = self.disk(d, [(PART["root"], header + run * 200)])
+                start = time.monotonic()
+                self.assertEqual(finish.secret_violations(img, TABLE), [])
+                self.assertLess(time.monotonic() - start, 1.0)
 
     def test_a_key_across_a_chunk_boundary_is_found_once(self):
         # REQ: HW-1
