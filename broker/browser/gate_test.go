@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // The test binary doubles as a scripted driver: with BROWSER_FAKE_DRIVER set it
@@ -117,7 +116,7 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 			"BROWSER_FAKE_FILE=" + file}, env...)),
 		Origins:   []string{"https://shop.example.test"},
 		Workspace: ws,
-		Scrub:     vault.NewRedactor([][]byte{[]byte("vaultCanarySessionV4lt"), []byte("pw-canary-short")}),
+		Scrub:     fakeScrubber{"vaultCanarySessionV4lt", "pw-canary-short"},
 		Timeout:   timeout,
 	})
 	if err != nil {
@@ -156,7 +155,21 @@ func wrapDriver(t *testing.T, argv, env []string) []string {
 
 func (h *harness) do(t *testing.T, raw string) Result {
 	t.Helper()
-	return h.g.Do(context.Background(), []byte(raw))
+	res, _ := h.g.do(context.Background(), []byte(raw), false, "")
+	return res
+}
+
+// post submits raw as a post to the target to.
+func (h *harness) post(t *testing.T, raw, to string) Result {
+	t.Helper()
+	res, _ := h.g.do(context.Background(), []byte(raw), true, to)
+	return res
+}
+
+// shown is s as the output filter lets the agent see it.
+func (h *harness) shown(s string) string {
+	t, _ := h.g.filter.text(s)
+	return t
 }
 
 func (h *harness) received(t *testing.T) []string {

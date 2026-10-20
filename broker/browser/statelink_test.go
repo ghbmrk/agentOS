@@ -11,6 +11,10 @@ import (
 
 const unsubURL = "https://shop.example.test/unsubscribe?token=synthCanaryTok123"
 
+// unsubShown is unsubURL as the agent sees it: the output filter redacts the
+// token, and a post's to gives the target in that form.
+const unsubShown = "https://shop.example.test/unsubscribe?token=[REDACTED]"
+
 // A page with a mail-style action link, a relative confirm link, a link
 // named like an action, an ordinary link, a button, and elements nested in
 // links: an image in an unsubscribe link and an action-named child of an
@@ -58,53 +62,43 @@ func forwarded(t *testing.T, h *harness, verb string) []string {
 	return out
 }
 
-// Acceptance 1 (A5/A13): a credentialed navigate to an unsubscribe link is
-// held for the owner like a POST and never sent unasked.
+// Acceptance 1 (A5/A13): a credentialed navigate to an unsubscribe link
+// needs a post, like a POST, and is never sent as a read.
 func TestStateChangingNavigateIsHeldNotSent(t *testing.T) {
 	h := newHarness(t, nil, "", 0)
 	r := h.do(t, `{"v":0,"verb":"navigate","url":"`+unsubURL+`"}`)
-	if r.OK || r.Error != "held" || r.Hold == "" {
+	if r.OK || r.Error != "post_required" || r.To != unsubShown {
 		t.Fatalf("got %+v", r)
 	}
 	if got := h.received(t); len(got) != 0 {
 		t.Fatalf("the driver received %q", got)
 	}
-	held, ok := h.g.Held(r.Hold)
-	if !ok || held.Method != "GET" || held.URL != unsubURL || held.Origin != "https://shop.example.test:443" || held.Verb != "navigate" {
-		t.Fatalf("held %+v %v", held, ok)
-	}
 }
 
-// Acceptance 2: the owner's release forwards exactly the held request once.
+// Acceptance 2: a post forwards exactly the request, and only when to names
+// what it reaches.
 func TestHeldLinkIsReleasedOnlyAsApproved(t *testing.T) {
 	h := newHarness(t, nil, "", 0)
-	id := h.do(t, `{"v":0,"verb":"navigate","url":"`+unsubURL+`"}`).Hold
-	ctx := context.Background()
-	for _, bad := range []struct{ id, url string }{
-		{"h-unknown", unsubURL},
-		{id, unsubURL + "&x=1"},
-		{id, ""},
-	} {
-		if r := h.g.Release(ctx, bad.id, bad.url); r.OK || len(h.received(t)) != 0 {
-			t.Fatalf("release %q %q: %+v, driver got %q", bad.id, bad.url, r, h.received(t))
+	nav := `{"v":0,"verb":"navigate","url":"` + unsubURL + `"}`
+	for _, bad := range []string{unsubURL, unsubShown + "&x=1", "", "link \"x\" " + unsubShown} {
+		if r := h.post(t, nav, bad); r.OK || r.Error != "target" || len(h.received(t)) != 0 {
+			t.Fatalf("post to %q: %+v, driver got %q", bad, r, h.received(t))
 		}
 	}
-	if r := h.g.Release(ctx, id, unsubURL); !r.OK {
-		t.Fatalf("release: %+v", r)
+	if r := h.post(t, nav, unsubShown); !r.OK {
+		t.Fatalf("post: %+v", r)
 	}
-	want := `{"v":0,"verb":"navigate","url":"` + unsubURL + `"}`
-	if got := h.received(t); len(got) != 1 || got[0] != want {
-		t.Fatalf("driver got %q, want %q", got, want)
+	if got := h.received(t); len(got) != 1 || got[0] != nav {
+		t.Fatalf("driver got %q, want %q", got, nav)
 	}
-	if r := h.g.Release(ctx, id, unsubURL); r.OK || len(h.received(t)) != 1 {
-		t.Fatalf("second release: %+v", r)
-	}
-	if _, ok := h.g.Held(id); ok {
-		t.Fatal("hold still stored after release")
+	// Only the verbs that can act on a link are posted.
+	if r := h.post(t, `{"v":0,"verb":"snapshot"}`, ""); r.Error != "verb" || len(h.received(t)) != 1 {
+		t.Fatalf("posted snapshot: %+v", r)
 	}
 }
 
-// Acceptance 3: clicking a link whose target or name is an action is held.
+// Acceptance 3: clicking a link whose target or name is an action needs a
+// post to the ref's role, name and target.
 func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 	h := newHarness(t, map[string]any{"snapshot": pageReply(actionPage)}, "", 0)
 	if r := h.do(t, `{"v":0,"verb":"snapshot"}`); !r.OK {
@@ -122,13 +116,11 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 		"e15": "",
 		"e16": "https://shop.example.test/#/unsubscribe?token=synthCanaryT4",
 	} {
+		l := h.g.refs[ref]
 		for _, verb := range []string{"click", "download"} {
 			r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"`+ref+`"}`)
-			if r.OK || r.Error != "held" || r.Hold == "" {
-				t.Fatalf("%s %s: %+v", verb, ref, r)
-			}
-			if held, _ := h.g.Held(r.Hold); held.URL != target || held.Ref != ref || held.Verb != verb {
-				t.Fatalf("%s %s held %+v, want %s", verb, ref, held, target)
+			if r.OK || r.Error != "post_required" || r.To != h.shown(l.to()) || l.target != target {
+				t.Fatalf("%s %s: %+v, link %+v, want %s", verb, ref, r, l, target)
 			}
 		}
 	}
@@ -137,35 +129,37 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 	}
 }
 
-// A held click is released only while the ref still points where it did:
-// the gate looks at the page again first.
+// A post of a click is sent only while the ref still reaches what to names:
+// the gate reads the page again first (CLK-2).
 func TestHeldClickReleaseRechecksThePage(t *testing.T) {
-	moved := strings.Replace(actionPage, "/unsubscribe?token=synthCanaryTok123", "/unsubscribe?token=otherSynthTok", 1)
+	// The filter redacts the token, so to binds the rest of the target.
+	moved := strings.Replace(actionPage, "/unsubscribe?token=synthCanaryTok123", "/unsubscribe/all?token=otherSynthTok", 1)
 	moved = strings.Replace(moved, `button "Unsubscribe" [ref=e14]`, `button "Unsubscribe from all" [ref=e14]`, 1)
 	h := newHarness(t, map[string]any{"snapshot": []any{pageReply(actionPage), pageReply(moved)}}, "", 0)
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	id := h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).Hold
-	button := h.do(t, `{"v":0,"verb":"click","ref":"e14"}`).Hold
-	ctx := context.Background()
-	if r := h.g.Release(ctx, id, unsubURL); r.OK || len(forwarded(t, h, "click")) != 0 {
-		t.Fatalf("released a click whose link changed: %+v", r)
+	link := h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).To
+	button := h.do(t, `{"v":0,"verb":"click","ref":"e14"}`).To
+	if link != `link "Stop these emails" `+unsubShown || button != `button "Unsubscribe"` {
+		t.Fatalf("to %q, %q", link, button)
 	}
-	if _, ok := h.g.Held(id); ok {
-		t.Fatal("a hold whose link changed is still stored")
+	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, link); r.OK || r.Error != "target" || len(forwarded(t, h, "click")) != 0 {
+		t.Fatalf("posted a click whose link changed: %+v", r)
 	}
-	// A held button shows no target; it is bound to its role and name.
-	if r := h.g.Release(ctx, button, ""); r.OK || len(forwarded(t, h, "click")) != 0 {
-		t.Fatalf("released a button whose name changed: %+v", r)
+	// A button shows no target; it is bound to its role and name.
+	if r := h.post(t, `{"v":0,"verb":"click","ref":"e14"}`, button); r.OK || r.Error != "target" || len(forwarded(t, h, "click")) != 0 {
+		t.Fatalf("posted a button whose name changed: %+v", r)
 	}
-	id = h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).Hold
-	if id == "" {
-		t.Fatal("the changed link was not held")
-	}
-	if r := h.g.Release(ctx, id, "https://shop.example.test/unsubscribe?token=otherSynthTok"); !r.OK {
-		t.Fatalf("release: %+v", r)
+	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, `link "Stop these emails" https://shop.example.test/unsubscribe/all?token=[REDACTED]`); !r.OK {
+		t.Fatalf("post: %+v", r)
 	}
 	if got := forwarded(t, h, "click"); len(got) != 1 || got[0] != `{"v":0,"verb":"click","ref":"e2"}` {
 		t.Fatalf("driver got %q", got)
+	}
+	// A page that cannot be read again sends nothing.
+	h = newHarness(t, map[string]any{"snapshot": []any{pageReply(actionPage), map[string]any{"ok": false, "error": "nav"}}}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, link); r.OK || len(forwarded(t, h, "click")) != 0 {
+		t.Fatalf("posted on an unread page: %+v", r)
 	}
 }
 
@@ -208,15 +202,15 @@ func TestOrdinaryLinksStillPass(t *testing.T) {
 	if got := forwarded(t, h, "click"); len(got) != 5 {
 		t.Fatalf("driver got %q", got)
 	}
-	// Over-matching fails closed (AS2): a search for an action word is held.
-	if r := h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/search?q=cancel+culture"}`); r.Error != "held" {
+	// Over-matching fails closed (AS2): a search for an action word needs a post.
+	if r := h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/search?q=cancel+culture"}`); r.Error != "post_required" {
 		t.Fatalf("got %+v", r)
 	}
 }
 
 // Acceptance 3 and 5 on a snapshot Chromium gave for testdata/clicks.html
 // (testdata/snapshot.py): a target is judged by the text of its whole
-// clickable subtree, so an icon-plus-text button or link is held, while
+// clickable subtree, so an icon-plus-text button or link needs a post, while
 // ordinary links, dialog dismissals and form fields pass.
 func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	raw, err := os.ReadFile("testdata/clicks.snapshot.txt")
@@ -229,32 +223,28 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 		t.Fatalf("snapshot %+v", r)
 	}
 	x := "https://shop.example.test/x"
-	for ref, want := range map[string]Hold{
-		"e3":  {Role: "button", Name: "mail icon Unsubscribe"}, // role="button" anchor, icon and text child
-		"e4":  {Role: "img", Name: "mail icon Unsubscribe"},    // the icon inside it
-		"e6":  {Role: "button", Name: "trash Delete"},          // a GET form's icon button
-		"e7":  {Role: "img", Name: "trash Delete"},
-		"e8":  {Role: "link", Name: "logo Unsubscribe", URL: x}, // the link's text is a child line
-		"e9":  {Role: "img", Name: "logo Unsubscribe", URL: x},
-		"e10": {Role: "button", Name: "Cancel subscription"},
-		"e11": {Role: "generic", Name: "Unsubscribe"}, // a div with cursor:pointer
-		"e14": {Role: "button", Name: "Remove"},       // a dialog's action is not a dismissal
-		"e19": {Role: "checkbox", Name: "Unsubscribe from news"},
-		"e33": {Role: "listitem", Name: "Kettle Remove from wishlist"}, // a pointer card is judged by its text
-		"e35": {Role: "button", Name: "Remove from wishlist"},
-		"e38": {Role: "row", Name: "Order 42 Cancel order"},
-		"e39": {Role: "cell", Name: "Order 42 Cancel order"}, // no click role between it and the row
-		"e42": {Role: "button", Name: "Cancel order"},
-		"e43": {Role: "link", Name: "Manage", URL: "/unsubscribe%zz?token=synthCanaryT6"}, // an href Go cannot parse
-		"e44": {Role: "button", Name: `Unsubscribe\ud800 x`},                              // a name Go cannot unquote
+	for ref, want := range map[string]link{
+		"e3":  {role: "button", name: "mail icon Unsubscribe"}, // role="button" anchor, icon and text child
+		"e4":  {role: "img", name: "mail icon Unsubscribe"},    // the icon inside it
+		"e6":  {role: "button", name: "trash Delete"},          // a GET form's icon button
+		"e7":  {role: "img", name: "trash Delete"},
+		"e8":  {role: "link", name: "logo Unsubscribe", target: x}, // the link's text is a child line
+		"e9":  {role: "img", name: "logo Unsubscribe", target: x},
+		"e10": {role: "button", name: "Cancel subscription"},
+		"e11": {role: "generic", name: "Unsubscribe"}, // a div with cursor:pointer
+		"e14": {role: "button", name: "Remove"},       // a dialog's action is not a dismissal
+		"e19": {role: "checkbox", name: "Unsubscribe from news"},
+		"e33": {role: "listitem", name: "Kettle Remove from wishlist"}, // a pointer card is judged by its text
+		"e35": {role: "button", name: "Remove from wishlist"},
+		"e38": {role: "row", name: "Order 42 Cancel order"},
+		"e39": {role: "cell", name: "Order 42 Cancel order"}, // no click role between it and the row
+		"e42": {role: "button", name: "Cancel order"},
+		"e43": {role: "link", name: "Manage", target: "/unsubscribe%zz?token=synthCanaryT6"}, // an href Go cannot parse
+		"e44": {role: "button", name: `Unsubscribe\ud800 x`},                              // a name Go cannot unquote
 	} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
-		if r.Error != "held" {
-			t.Fatalf("click %s: %+v", ref, r)
-		}
-		held, _ := h.g.Held(r.Hold)
-		if held.Role != want.Role || held.Name != want.Name || held.URL != want.URL {
-			t.Fatalf("click %s held %+v, want %+v", ref, held, want)
+		if r.Error != "post_required" || r.To != want.to() {
+			t.Fatalf("click %s: %+v, want to %q", ref, r, want.to())
 		}
 	}
 	if got := forwarded(t, h, "click"); len(got) != 0 {
@@ -275,7 +265,7 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	}
 
 	// body{cursor:pointer} (click delegation): only "Log out" and the body
-	// itself are held; the other link and the search box pass.
+	// itself need a post; the other link and the search box pass.
 	raw, err = os.ReadFile("testdata/pointer.snapshot.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +276,7 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	}
 	for ref, want := range map[string]string{"e1": "", "e2": "ok", "e3": "ok", "e4": ""} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
-		if (want == "ok") != r.OK || (want == "" && r.Error != "held") {
+		if (want == "ok") != r.OK || (want == "" && r.Error != "post_required") {
 			t.Fatalf("body-pointer click %s: %+v", ref, r)
 		}
 	}

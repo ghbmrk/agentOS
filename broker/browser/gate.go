@@ -67,8 +67,9 @@ type Result struct {
 	Path               string   `json:"path,omitempty"`
 	Bytes              int64    `json:"bytes,omitempty"`
 	RefusedNavigations []string `json:"refused_navigations,omitempty"`
-	// Hold names a request held for the owner's approval (error "held").
-	Hold string `json:"hold,omitempty"`
+	// To is what a post must name to take this action (error
+	// "post_required"): the link the action reaches as the gate sees it.
+	To string `json:"to,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -95,9 +96,10 @@ type Gate struct {
 	// lost is set once typed or said overflows maxTyped. From then on
 	// every snapshot with an omitted field is withheld: forgetting agent
 	// text would let its echo answer a guess (PR #2273 security delta).
-	lost      bool
-	holds     map[string]Hold
-	holdOrder []string
+	lost bool
+	// writes counts the request lines written to the driver, so the clerk
+	// can tell an action never sent from one whose answer was lost.
+	writes int
 }
 
 // Start launches the driver for one account.
@@ -140,7 +142,7 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
-		holds: map[string]Hold{}, cmd: cmd, stdin: stdin, lines: make(chan []byte)}
+		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
 }
@@ -200,37 +202,75 @@ func (g *Gate) stop() {
 
 var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is not running"}
 
-// Do runs one request line from an agent and returns what the agent may see.
-func (g *Gate) Do(ctx context.Context, raw []byte) Result {
+// reach is how far an action got: never written to the driver, answered,
+// or written with its answer lost (the executor stopped after the write).
+type reach int
+
+const (
+	unsent reach = iota
+	answered
+	lost
+)
+
+// do runs one request line, as a read or as a post to the target to, and
+// returns what the agent may see. Only the clerk calls it: an action that
+// may change state at the site is sent only as a post (ADP-14), and only
+// while what it reaches is still to (CLK-2).
+func (g *Gate) do(ctx context.Context, raw []byte, post bool, to string) (Result, reach) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.stopped {
-		return stoppedResult
+		return stoppedResult, unsent
 	}
 	req, err := Parse(raw)
 	if err != nil {
 		d, _ := g.filter.text(err.Error())
-		return Result{Error: "protocol", Detail: d}
+		return Result{Error: "protocol", Detail: d}, unsent
 	}
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
-		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
+		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}, unsent
 	}
+	var l link
+	need := false
 	switch req.Verb {
 	case "navigate":
-		if g.links.match(req.URL) {
-			return g.hold(req, link{target: req.URL})
-		}
+		l, need = link{target: req.URL}, g.links.match(req.URL)
 	case "click", "download":
+		if post {
+			// The page is read again just before a post, so what the ref
+			// reaches is judged as it is now, not as it was planned. A
+			// page with no snapshot leaves no refs to act on.
+			g.refs = nil
+			snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
+			if !ok {
+				return snap, unsent
+			}
+			if !snap.OK {
+				return Result{Error: "target", Detail: "the page could not be read again; nothing was sent"}, unsent
+			}
+		}
 		// The gate must know what a link points at before it is followed. A
-		// clickable element named as an action is held too: an anchor with
-		// role="button" or a GET form's button shows no target.
-		l, ok := g.refs[req.Ref]
-		if !ok {
-			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		// clickable element named as an action needs a post too: an anchor
+		// with role="button" or a GET form's button shows no target.
+		var ok bool
+		if l, ok = g.refs[req.Ref]; !ok {
+			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}, unsent
 		}
-		if l.held(g.links) {
-			return g.hold(req, l)
+		need = l.held(g.links)
+	default:
+		if post {
+			return Result{Error: "verb", Detail: "only navigate, click and download are posted"}, unsent
 		}
+	}
+	// to is compared as the agent and owner saw it: filtered, so a target
+	// whose token the filter redacts can still be posted to.
+	t, _ := g.filter.text(l.to())
+	if need && !post {
+		return Result{Error: "post_required", To: t,
+			Detail: "this action may change state at the site; submit it as post to the target given (ADP-14)"}, unsent
+	}
+	if post && t != to {
+		return Result{Error: "target", Detail: "to does not name what this action reaches now; nothing was sent"}, unsent
 	}
 	switch req.Verb {
 	case "type":
@@ -238,11 +278,18 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 	case "navigate":
 		g.say(urlWords(req.URL)...)
 	}
+	n := g.writes
 	res := g.send(ctx, req)
 	if req.Verb == "type" && res.OK {
 		g.remember(req, res.URL)
 	}
-	return res
+	switch {
+	case g.writes == n:
+		return res, unsent
+	case g.stopped:
+		return res, lost
+	}
+	return res, answered
 }
 
 type typedField struct{ text, url string }
@@ -371,6 +418,7 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 // roundtrip sends one canonical request and filters the reply. ok is false
 // when the executor was stopped.
 func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
+	g.writes++
 	if _, err := g.stdin.Write(append(req.Encode(), '\n')); err != nil {
 		g.stop()
 		return stoppedResult, false
