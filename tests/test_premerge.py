@@ -309,7 +309,7 @@ class PremergeTest(unittest.TestCase):
         self.write("b.txt", "x\n")
         sha = self.commit("code")
         c = lambda verdict, sha, at, who="OWNER", pr=7, mark="<!-- record: l3 -->": {
-            "author_association": who, "created_at": at,
+            "author_association": who, "created_at": at, "updated_at": at,
             "body": f"Verdict: {verdict}\n# t\nRecord: PR #{pr} · package X-1 · head {sha[:7]}\n{mark}\n"}
         def run(comments, head="HEAD"):
             f = pathlib.Path(self._d.name + ".comments.json")
@@ -323,10 +323,13 @@ class PremergeTest(unittest.TestCase):
         # untrusted author, other PR, no L3 marker: none counts
         for bad in (c("accept", sha, "1", who="NONE"), c("accept", sha, "1", pr=8), c("accept", sha, "1", mark="")):
             self.assertEqual(run([bad]), (1, ["no-verdict"]))
-        # an edited comment never counts: an edited accept is no verdict, an edited fix-list leaves the accept standing
+        # an edited verdict is never an accept and still supersedes the earlier one; only a fresh comment replaces it
         edited = lambda x: {**x, "updated_at": "9"}
-        self.assertEqual(run([edited(c("accept", sha, "1"))]), (1, ["no-verdict"]))
-        self.assertEqual(run([c("accept", sha, "1"), edited(c("fix-list", sha, "2"))]), (0, ["same"]))
+        self.assertEqual(run([edited(c("accept", sha, "1"))]), (1, ["not-accepted"]))
+        self.assertEqual(run([c("accept", sha, "1"), edited(c("fix-list", sha, "2"))]), (1, ["not-accepted"]))
+        self.assertEqual(run([edited(c("accept", sha, "1")), c("accept", sha, "2")]), (0, ["same"]))
+        missing = {k: v for k, v in c("accept", sha, "1").items() if k != "updated_at"}
+        self.assertEqual(run([missing]), (1, ["not-accepted"]))
         self.assertEqual(run([{**c("accept", sha, "1"), "updated_at": "1"}]), (0, ["same"]))
         # a later fix-list supersedes the accept
         self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
@@ -336,9 +339,6 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
-    def test_workflow_feeds_updated_at(self):
-        self.assertIn("updated_at", (ROOT / ".github/workflows/premerge.yml").read_text())
-
     def test_check_gate_spec_needs_nothing_extra(self):
         # D-137 supersedes D-130: a SPEC.md change merges on its accept alone, with no Transcribes: line.
         import json
@@ -347,7 +347,7 @@ class PremergeTest(unittest.TestCase):
         sha = self.commit("spec")
         f = pathlib.Path(self._d.name + ".comments.json")
         self.addCleanup(lambda: f.unlink(missing_ok=True))
-        f.write_text(json.dumps([{"author_association": "OWNER", "created_at": "1",
+        f.write_text(json.dumps([{"author_association": "OWNER", "created_at": "1", "updated_at": "1",
             "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n"}]))
         r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
                            cwd=self.r, capture_output=True, text=True)
@@ -361,7 +361,7 @@ class PremergeTest(unittest.TestCase):
         (self.r / "docs").mkdir()
         self.write("docs/OPERATING.md", "rules\n")
         sha = self.commit("gate")
-        rec = lambda v, head, marks, who="OWNER", at="1", pr=7: {"author_association": who, "created_at": at,
+        rec = lambda v, head, marks, who="OWNER", at="1", pr=7: {"author_association": who, "created_at": at, "updated_at": at,
             "body": f"Verdict: {v}\n# t\nRecord: PR #{pr} · package X-1 · head {head[:7]}\n{marks}"}
         l3 = rec("accept", sha, "<!-- record: combined -->\n", at="0")
         sec = lambda v="accept", head=sha, **k: rec(v, head, "<!-- record: security -->\n", **k)
@@ -380,6 +380,10 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([l3, sec(pr=8)]), need)
         self.assertEqual(run([l3, sec("fix-list")]), need)
         self.assertEqual(run([l3, sec(head="0" * 40)]), need)
+        # an edited Security accept is not an accept, and an edited Security fix-list still supersedes an earlier accept
+        self.assertEqual(run([l3, {**sec(), "updated_at": "9"}]), need)
+        self.assertEqual(run([l3, sec(at="1"), {**sec("fix-list", at="2"), "updated_at": "9"}]), need)
+        self.assertEqual(run([l3, {**sec(at="1"), "updated_at": "9"}, sec(at="2")]), (0, ["same"]))
         # one comment carrying both markers is one review: it counts as the L3 accept, not the Security one
         both = rec("accept", sha, "<!-- record: security -->\n<!-- record: combined -->\n")
         self.assertEqual(run([both]), need)
