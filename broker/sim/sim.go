@@ -1,387 +1,482 @@
+// Package sim runs the real kernel and clerk check against a fake disk, clock
+// and world, driven by a seeded hostile planner, and judges every step against
+// the invariants. One seed gives one trace, byte for byte (SIM-1).
 package sim
 
 import (
-	"bytes"
-	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
+	"reflect"
 	"strings"
-	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// Mutant reintroduces a known class of bug, so tests can show the sweep
-// finds it. The empty Mutant is the real system.
+// Mutant plants one defect so a test can show the sweep catches it.
 type Mutant string
 
 const (
-	// MutantNoRecheck skips the authority recheck at dispatch (OP-3).
-	MutantNoRecheck Mutant = "no-recheck"
-	// MutantStaleRecheck answers the engine's second check, made because
-	// something was journaled during the first, with the first decision:
-	// as if the engine's e.seq guard were gone (OP-3).
-	MutantStaleRecheck Mutant = "stale-recheck"
-	// MutantSkipFsync acknowledges an append before it is durable (OP-4).
-	MutantSkipFsync Mutant = "skip-fsync"
-	// MutantTornErase acknowledges the erase rewrite before the directory
-	// holding the renamed file is synced, so a power cut can bring the
-	// erased content back (CAP-3).
-	MutantTornErase Mutant = "torn-erase"
+	MutantNone        Mutant = ""
+	MutantClerkTrusts Mutant = "clerk-trusts-kernel"  // the clerk skips its own check
+	MutantNoDedupe    Mutant = "clerk-no-idempotency" // the clerk acts again on a repeated idem
 )
 
-// Config is one simulation run.
+// Config is one run.
 type Config struct {
-	Seed  int64
-	Steps int // scheduled operations; 0 means 200
-	// Judge is run on the durable journal after every boot and at the end
-	// of the run. SIM-check's predicates plug in here.
-	Judge  func(journal []byte) error
+	Seed   uint64
+	Ops    int
 	Mutant Mutant
 }
 
-// Result is what a run leaves behind. The same Config always gives the
-// same Result, byte for byte.
+// Result is what a run leaves for a test to read.
 type Result struct {
-	Journal []byte   // the durable journal at the end of the run
-	Trace   []string // one line per scheduled operation and fault
-	Err     error    // the first violation, or nil
+	Trace   []string
+	Entries []kernel.Entry
+	Effects int
 }
 
-// Violation is a broken invariant, located by seed and step so it replays.
-type Violation struct {
-	Seed   int64
-	Step   int
-	Rule   string // a SPEC requirement ID, or "judge"
-	Detail string
+const hour = int64(3_600_000)
+
+type effect struct {
+	idem string
+	at   int64
 }
 
-func (v *Violation) Error() string {
-	return fmt.Sprintf("seed %d step %d: %s: %s", v.Seed, v.Step, v.Rule, v.Detail)
+// world is the fake mail service. It applies a step only if the clerk check
+// passes, at most once per idem, and records what it did so the invariants can
+// be judged without trusting the kernel.
+type world struct {
+	owner   ed25519.PublicKey
+	mutant  Mutant
+	rng     *rand.Rand
+	done    map[string]bool
+	effects []effect
+	bad     []string
+	race    func() // an owner action landing between the kernel's decision and the clerk
 }
 
-var accounts = []string{"mail", "bank"}
-
-type sim struct {
-	cfg   Config
-	rng   *rand.Rand
-	clock *Clock
-	disk  *Disk
-	pol   *policy
-	svc   *service
-	eng   *journal.Engine
-	ctx   context.Context
-	next  int
-	step  int
-	depth int
-	trace []string
-	err   error
-}
-
-// Run drives the real journal engine through Config.Steps operations chosen
-// by the seed, with crashes cut at write, fsync, rename and directory-sync
-// points, and checks it against the fake world after every step.
-func Run(cfg Config) Result {
-	if cfg.Steps == 0 {
-		cfg.Steps = 200
+func (w *world) fault(op string) string {
+	switch n := w.rng.IntN(20); {
+	case n == 0:
+		return clerk.FaultFail
+	case n == 1:
+		return clerk.FaultDrop
+	case n == 2:
+		return clerk.FaultLostAck
 	}
-	s := &sim{cfg: cfg, rng: rand.New(rand.NewSource(cfg.Seed)), clock: &Clock{t: epoch}, ctx: context.Background()}
-	s.disk = newDisk(s.rng, cfg.Mutant, s.log)
-	s.pol = &policy{s: s, grants: map[string]bool{}, stale: map[string]error{}}
-	s.svc = &service{s: s, applied: map[string]int{}, keys: map[string]bool{}, took: map[string]bool{}}
-	s.boot()
-	for _, a := range accounts {
-		s.runGrant(journal.ActionGrantChange, a)
+	return clerk.FaultNone
+}
+
+func (w *world) Do(r kernel.Request, v kernel.View) kernel.Result {
+	res := w.do(r, v)
+	if w.rng.IntN(10) == 0 {
+		w.do(r, v) // the transport delivers the request twice
 	}
-	for s.step = 1; s.step <= cfg.Steps && s.err == nil; s.step++ {
-		s.op()
-		if s.disk.Crashed() && s.err == nil {
-			s.reboot()
+	return res
+}
+
+func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
+	if w.race != nil && w.rng.IntN(8) == 0 {
+		w.race()
+	}
+	if w.done[r.Idem] && w.mutant != MutantNoDedupe {
+		return kernel.Result{Outcome: "ok", Detail: "already done"}
+	}
+	if w.mutant != MutantClerkTrusts {
+		if rf := clerk.Check(w.owner, "mail", r, v); rf != nil {
+			return kernel.Result{Outcome: "failed", Detail: rf.Code}
 		}
 	}
-	if s.err == nil {
-		s.step = cfg.Steps + 1
-		s.log("end: power cut and reopen")
-		s.disk.PowerCut()
-		s.boot()
+	switch w.fault("do") {
+	case clerk.FaultFail:
+		return kernel.Result{Outcome: "failed", Detail: "fault"}
+	case clerk.FaultDrop:
+		return kernel.Result{Outcome: "unknown", Detail: "no answer"}
+	case clerk.FaultLostAck:
+		w.apply(r, v)
+		return kernel.Result{Outcome: "unknown", Detail: "no answer"}
 	}
-	return Result{Journal: s.disk.Durable(), Trace: s.trace, Err: s.err}
+	w.apply(r, v)
+	return kernel.Result{Outcome: "ok"}
 }
 
-func (s *sim) log(line string) {
-	s.trace = append(s.trace, fmt.Sprintf("%03d %s", s.step, line))
+func (w *world) Probe(r kernel.Request, _ kernel.View) string {
+	if w.fault("probe") != clerk.FaultNone {
+		return "unknown"
+	}
+	if w.done[r.Idem] {
+		return "done"
+	}
+	return "notdone"
 }
 
-func (s *sim) violate(rule, format string, args ...any) {
-	if s.err == nil {
-		s.err = &Violation{Seed: s.cfg.Seed, Step: s.step, Rule: rule, Detail: fmt.Sprintf(format, args...)}
-		s.log("VIOLATION " + s.err.Error())
+// apply performs the effect and judges it on the spot against what the key
+// and the log's view said at that instant.
+func (w *world) apply(r kernel.Request, v kernel.View) {
+	if w.done[r.Idem] {
+		w.bad = append(w.bad, "effect twice for "+r.Idem[:8])
 	}
-}
-
-func (s *sim) reboot() {
-	if s.rng.Intn(2) == 0 {
-		s.log("reboot power")
-		s.disk.PowerCut()
-	} else {
-		s.log("reboot kill")
-		s.disk.Kill()
-	}
-	s.boot()
-}
-
-// boot opens the engine on the disk as the daemon does at start, rebuilds
-// the grant projection, and checks the journal.
-func (s *sim) boot() {
-	for try := 0; ; try++ {
-		s.disk.open()
-		if try < 3 && s.rng.Intn(4) == 0 {
-			s.disk.Arm(s.rng.Intn(3) + 1) // cut the records Open writes
-		}
-		eng, err := journal.Open(s.disk, s.pol, map[string]journal.Executor{"svc": s.svc, "broker": brokerExec{s.pol}},
-			func(t string) string { return t }, journal.WithClock(s.clock.Now))
-		if err != nil && s.disk.Crashed() {
-			s.log("crash during open")
-			s.disk.PowerCut()
-			continue
-		}
-		if err != nil {
-			s.violate("OP-4", "the journal does not reopen: %v", err)
-			return
-		}
-		s.disk.Arm(0)
-		s.eng = eng
-		break
-	}
-	intents := map[string]journal.Intent{}
-	for _, st := range s.eng.List() {
-		intents[st.Intent.ID] = st.Intent
-	}
-	s.pol.rebuild(s.eng.Trail(), intents)
-	s.checkErased()
-	if s.cfg.Judge != nil && s.err == nil {
-		if err := s.cfg.Judge(s.disk.Durable()); err != nil {
-			s.violate("judge", "%v", err)
-		}
-	}
-}
-
-// op runs one scheduled operation.
-func (s *sim) op() {
-	s.clock.Advance(time.Duration(s.rng.Intn(5000)) * time.Millisecond)
-	switch r := s.rng.Intn(100); {
-	case r < 14:
-		s.submitEffect()
-	case r < 18:
-		action := journal.ActionGrantChange
-		if s.rng.Intn(2) == 0 {
-			action = journal.ActionGrantRevoke
-		}
-		s.submit(grantIntent(s.newID("g"), action, accounts[s.rng.Intn(len(accounts))]))
-	case r < 32:
-		if id, ok := s.pick(journal.Pending); ok {
-			st, err := s.eng.Authorize(s.ctx, id)
-			s.log(fmt.Sprintf("authorize %s -> %s%s", id, st.State, errText(err)))
-		}
-	case r < 52:
-		if id, ok := s.pick(journal.Authorized, journal.NotApplied); ok {
-			s.dispatch(id)
-		}
-	case r < 57:
-		rep := s.eng.Reconcile(s.ctx)
-		s.log(fmt.Sprintf("reconcile %+v", rep))
-	case r < 61:
-		s.resolve()
-	case r < 63:
-		_, err := s.eng.Stop(s.ctx)
-		s.log("stop" + errText(err))
-	case r < 66:
-		s.log("resume" + errText(s.eng.Resume()))
-	case r < 70:
-		s.erase()
-	case r < 72:
-		if id, ok := s.pick(journal.Succeeded, journal.NotApplied, journal.Denied); ok {
-			_, err := s.eng.RecordQuality(id, journal.Quality{Verdict: journal.VerdictGood, Source: "owner"})
-			s.log("quality " + id + errText(err))
-		}
-	case r < 92:
-		n := s.rng.Intn(8) + 1
-		s.log(fmt.Sprintf("arm crash in %d points", n))
-		s.disk.Arm(n)
-	case r < 96:
-		s.log("reboot kill")
-		s.disk.Kill()
-		s.boot()
-	default:
-		s.log("reboot power")
-		s.disk.PowerCut()
-		s.boot()
-	}
-}
-
-func (s *sim) newID(prefix string) string {
-	s.next++
-	return fmt.Sprintf("%s%d", prefix, s.next)
-}
-
-// marker is the content an effect intent carries, so CAP-3 can look for it
-// in the bytes on disk.
-func marker(id string) string { return "body-" + id + "-z" }
-
-func (s *sim) submitEffect() {
-	id := s.newID("e")
-	origin := "owner"
-	if s.rng.Intn(2) == 0 {
-		origin = "guest:agent"
-	}
-	s.submit(journal.Intent{ID: id, Origin: origin, Account: accounts[s.rng.Intn(len(accounts))],
-		Action: "send", Params: map[string]any{"body": marker(id)}, Executor: "svc"})
-}
-
-func grantIntent(id, action, target string) journal.Intent {
-	return journal.Intent{ID: id, Origin: "owner", Account: journal.BrokerAccount, Action: action,
-		Params: map[string]any{"target": target}, Executor: "broker"}
-}
-
-func (s *sim) submit(in journal.Intent) {
-	st, err := s.eng.Submit(in)
-	s.log(fmt.Sprintf("submit %s %s %s -> %s%s", in.ID, in.Account, in.Action, st.State, errText(err)))
-}
-
-func (s *sim) dispatch(id string) {
-	delete(s.pol.stale, id)
-	st, err := s.eng.Dispatch(s.ctx, id)
-	state := string(st.State)
-	if errors.Is(err, journal.ErrRecheck) {
-		state = "recheck_failed"
-	}
-	s.log(fmt.Sprintf("dispatch %s -> %s%s", id, state, errText(err)))
-}
-
-// runGrant takes a grant change through its whole lifecycle at once, as
-// the owner's command does.
-func (s *sim) runGrant(action, target string) {
-	in := grantIntent(s.newID("g"), action, target)
-	s.submit(in)
-	st, err := s.eng.Authorize(s.ctx, in.ID)
-	s.log(fmt.Sprintf("authorize %s -> %s%s", in.ID, st.State, errText(err)))
-	s.dispatch(in.ID)
-}
-
-// interleave runs another operation where the engine has let go of its
-// lock (inside a policy check or an executor call), which is where real
-// concurrency can reach it. It nests one level deep.
-func (s *sim) interleave(where string) {
-	if s.depth > 0 || s.err != nil || s.rng.Intn(5) != 0 {
-		return
-	}
-	s.depth++
-	defer func() { s.depth-- }()
-	switch s.rng.Intn(4) {
-	case 0, 1:
-		s.log("nested revoke in " + where)
-		s.runGrant(journal.ActionGrantRevoke, accounts[s.rng.Intn(len(accounts))])
-	case 2:
-		_, err := s.eng.Stop(s.ctx)
-		s.log("nested stop in " + where + errText(err))
-	default:
-		n := s.rng.Intn(3) + 1
-		s.log(fmt.Sprintf("nested arm crash in %d points in %s", n, where))
-		s.disk.Arm(n)
-	}
-}
-
-func (s *sim) resolve() {
-	id, ok := s.pick(journal.OutcomeUnknown)
-	if !ok {
-		return
-	}
-	st, err := s.eng.Get(id)
-	// The attempt the intent waits on: the latest, or the parked one an
-	// owner's retry that did not go left behind (Status.Unclear).
-	n := st.Outstanding()
-	if err != nil || n == 0 {
-		return
-	}
-	out := journal.Outcome{Result: journal.ResultNotApplied, Evidence: "owner checked"}
-	if st.Intent.Account != journal.BrokerAccount {
-		out.Result = s.svc.truth(id, n)
-	}
-	st, err = s.eng.Resolve(id, n, out, "owner")
-	if err == nil {
-		s.log(fmt.Sprintf("resolve ok %s#%d -> %s", id, n, st.State))
-	} else {
-		s.log(fmt.Sprintf("resolve %s#%d%s", id, n, errText(err)))
-	}
-}
-
-func (s *sim) erase() {
-	var ids []string
-	for _, st := range s.eng.List() {
-		if st.Intent.Account != journal.BrokerAccount && s.rng.Intn(3) == 0 {
-			ids = append(ids, st.Intent.ID)
-		}
-	}
-	if len(ids) == 0 {
-		return
-	}
-	erased, held, err := s.eng.Erase(ids)
+	w.done[r.Idem] = true
+	w.effects = append(w.effects, effect{r.Idem, r.Now})
+	ver, err := key.Verify(r.Key, w.owner)
 	if err != nil {
-		s.log(fmt.Sprintf("erase %v%s", ids, errText(err)))
+		w.bad = append(w.bad, "effect under an invalid key")
 		return
 	}
-	s.log(fmt.Sprintf("erase ok %v held %v", erased, held))
-	s.checkErased()
-}
-
-// checkErased: CAP-3. Once an erase is acknowledged, or the engine has
-// opened, no erased intent's content is on disk, live or durable.
-func (s *sim) checkErased() {
-	for _, id := range s.eng.Erased() {
-		m := []byte(marker(id))
-		if bytes.Contains(s.disk.live, m) || bytes.Contains(s.disk.durable, m) {
-			s.violate("CAP-3", "erased %s is still on disk", id)
-			return
+	ch := v.ChangesView()
+	if ch.Stopped {
+		w.bad = append(w.bad, "effect during STOP")
+	}
+	for _, id := range ver.IDs {
+		if ch.Revoked[id] {
+			w.bad = append(w.bad, "effect under a revoked key")
 		}
 	}
-}
-
-// pick returns a random intent in one of the given states.
-func (s *sim) pick(states ...journal.State) (string, bool) {
-	var ids []string
-	for _, st := range s.eng.List() {
-		for _, want := range states {
-			if st.State == want {
-				ids = append(ids, st.Intent.ID)
+	if !v.Known(ver.Root()) {
+		w.bad = append(w.bad, "effect under a root not in the log")
+	}
+	found := false
+	for _, x := range ver.Limits.Verbs {
+		found = found || x == string(r.Step.Verb)
+	}
+	if !found {
+		w.bad = append(w.bad, "effect with a verb outside the key")
+	}
+	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
+		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
+			h, held := v.Held(r.HeldSeq)
+			if !held || r.Now < h.At+ver.Limits.Window(h.Novel) {
+				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}
 	}
-	if len(ids) == 0 {
-		return "", false
-	}
-	return ids[s.rng.Intn(len(ids))], true
 }
 
-// durablyDispatched reports whether the durable journal holds the
-// dispatched record for one attempt.
-func (s *sim) durablyDispatched(id string, n int) bool {
-	for _, line := range bytes.Split(s.disk.durable, []byte("\n")) {
-		if len(line) < 10 {
-			continue
-		}
-		var r journal.Record
-		if json.Unmarshal(line[9:], &r) == nil && r.Type == journal.RecDispatched && r.ID == id && r.Attempt == n {
-			return true
-		}
-	}
-	return false
+type keyPair struct {
+	pub  ed25519.PublicKey
+	priv ed25519.PrivateKey
 }
 
-func errText(err error) string {
+func gen(r *rand.Rand) keyPair {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(r.IntN(256))
+	}
+	p := ed25519.NewKeyFromSeed(seed)
+	return keyPair{p.Public().(ed25519.PublicKey), p}
+}
+
+type sim struct {
+	cfg    Config
+	rng    *rand.Rand
+	disk   *Disk
+	anchor *kernel.MemAnchor
+	w      *world
+	k      *kernel.Kernel
+	owner  keyPair
+	holder keyPair
+	head   keyPair
+	pool   []key.Key
+	ids    []key.ID
+	plans  []string
+	now    int64
+	trace  []string
+	nonce  *rand.ChaCha8
+}
+
+func (s *sim) logf(f string, a ...any) {
+	s.trace = append(s.trace, fmt.Sprintf("%d "+f, append([]any{s.now}, a...)...))
+}
+
+func (s *sim) kcfg() kernel.Config {
+	return kernel.Config{Store: s.disk, Anchor: s.anchor, Pub: s.head.pub, Sign: s.head.priv, Rand: s.nonce}
+}
+
+// boot reopens the log from the disk and recovers, retrying across crashes
+// that fire during recovery itself.
+func (s *sim) boot() error {
+	for try := 0; try < 8; try++ {
+		s.disk.Reboot()
+		l, err := kernel.Open(s.kcfg())
+		if err == nil {
+			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.now)
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errCrash) {
+			return fmt.Errorf("boot: %w", err)
+		}
+	}
+	return errors.New("boot never settled")
+}
+
+func (s *sim) pick(n int) int { return s.rng.IntN(n) }
+
+var (
+	verbs = []key.Verb{key.Trash, key.Organize, key.Unsubscribe, key.Send, key.Buy, key.Read}
+	names = []string{"a", "b", "c"}
+)
+
+func (s *sim) newRoot() key.Key {
+	vs := []key.Verb{}
+	for _, v := range verbs {
+		if s.pick(2) == 0 {
+			vs = append(vs, v)
+		}
+	}
+	if len(vs) == 0 {
+		vs = append(vs, key.Trash)
+	}
+	r := key.Issue(s.owner.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: vs,
+		Serial: fmt.Sprintf("r%d", len(s.pool))})
+	return r
+}
+
+func (s *sim) remember(k key.Key) {
+	s.pool = append(s.pool, k)
+	if v, err := key.Verify(k, s.owner.pub); err == nil {
+		s.ids = append(s.ids, v.ID())
+	}
+}
+
+func (s *sim) derived() (key.Key, bool) {
+	if len(s.pool) == 0 {
+		return key.Key{}, false
+	}
+	base := s.pool[s.pick(len(s.pool))]
+	var cav []key.Caveat
+	switch s.pick(5) {
+	case 0:
+		cav = append(cav, key.LimitHold(hour, 4*hour))
+	case 1:
+		cav = append(cav, key.LimitUses(int64(1+s.pick(3))))
+	case 2:
+		cav = append(cav, key.LimitExpires(s.now+int64(1+s.pick(8))*hour))
+	case 3:
+		cav = append(cav, key.LimitVerbs(verbs[s.pick(len(verbs))])) // may try to widen: Verify must refuse
+	}
+	k, err := key.Derive(base, s.holder.priv, s.holder.pub, cav...)
+	return k, err == nil
+}
+
+// anyKey is the planner's pick: good keys, narrowed keys, forged or foreign ones.
+func (s *sim) anyKey() key.Key {
+	switch s.pick(8) {
+	case 0:
+		foreign := gen(s.rng)
+		return key.Issue(foreign.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: verbs, Serial: "x"})
+	case 1:
+		return key.Issue(s.owner.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: verbs, Serial: "never-logged"})
+	case 2:
+		if len(s.pool) > 0 {
+			k := s.pool[s.pick(len(s.pool))]
+			if len(k.Links) > 0 {
+				ls := append([]key.Link(nil), k.Links...)
+				ls[0].Sig = append([]byte(nil), ls[0].Sig...)
+				ls[0].Sig[0] ^= 1
+				k.Links = ls
+			}
+			return k
+		}
+	case 3, 4:
+		if k, ok := s.derived(); ok {
+			return k
+		}
+	}
+	if len(s.pool) == 0 {
+		return key.Key{}
+	}
+	return s.pool[s.pick(len(s.pool))]
+}
+
+func (s *sim) step() key.Step {
+	n := names[s.pick(len(names))]
+	src := key.SrcClerk
+	if s.pick(6) == 0 {
+		src = key.SrcPlanner
+	}
+	clerkName := "mail"
+	if s.pick(10) == 0 {
+		clerkName = "bank"
+	}
+	return key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Recipient: n, Task: "t",
+		Args: map[string]key.Arg{"msg": {Value: n, Source: src}}}
+}
+
+func (s *sim) submit() error {
+	id := fmt.Sprintf("p%d", len(s.plans))
+	if len(s.plans) > 0 && s.pick(12) == 0 {
+		id = s.plans[s.pick(len(s.plans))] // a replayed plan id
+	}
+	steps := make([]key.Step, 1+s.pick(3))
+	if s.pick(40) == 0 {
+		steps = make([]key.Step, kernel.MaxSteps+1)
+	}
+	for i := range steps {
+		steps[i] = s.step()
+	}
+	s.logf("submit %s %d steps", id, len(steps))
+	err := s.k.Submit(s.now, kernel.Plan{ID: id, Key: s.anyKey(), Steps: steps})
 	if err == nil {
-		return ""
+		s.plans = append(s.plans, id)
 	}
-	return " (" + strings.TrimPrefix(err.Error(), "journal: ") + ")"
+	if errors.Is(err, kernel.ErrDuplicatePlan) {
+		return nil
+	}
+	return err
+}
+
+func (s *sim) op() error {
+	switch c := s.pick(16); {
+	case c < 4:
+		return s.submit()
+	case c < 9:
+		s.now += int64(s.pick(5*60)) * 60_000 / 10
+		s.logf("tick")
+		return s.k.Tick(s.now)
+	case c == 9 && len(s.ids) > 0:
+		id := s.ids[s.pick(len(s.ids))]
+		s.logf("revoke")
+		return s.k.Revoke(s.now, id)
+	case c == 10 && len(s.ids) > 0:
+		id := s.ids[s.pick(len(s.ids))]
+		s.logf("pause")
+		if s.pick(2) == 0 {
+			return s.k.Unpause(s.now, id)
+		}
+		return s.k.Pause(s.now, id)
+	case c == 11:
+		s.logf("stop/resume")
+		if s.pick(2) == 0 {
+			return s.k.Resume(s.now)
+		}
+		return s.k.Stop(s.now)
+	case c == 12 && len(s.plans) > 0:
+		p := s.plans[s.pick(len(s.plans))]
+		s.logf("cancel/undo %s", p)
+		if s.pick(2) == 0 {
+			return s.k.Cancel(s.now, p)
+		}
+		return s.k.Undo(s.now, p, 0)
+	case c == 13:
+		s.logf("anchor")
+		return s.k.Log().Anchor()
+	case c == 14:
+		n := 1 + s.pick(8)
+		s.logf("arm crash in %d appends", n)
+		s.disk.Arm(n)
+	case c == 15:
+		r := s.newRoot()
+		s.logf("issue root")
+		if err := s.k.Issue(s.now, r); err != nil {
+			return err
+		}
+		s.remember(r)
+	}
+	return nil
+}
+
+func crashed(err error) bool { return errors.Is(err, errCrash) || errors.Is(err, kernel.ErrBroken) }
+
+// check judges the run so far.
+func (s *sim) check() error {
+	if len(s.w.bad) > 0 {
+		return fmt.Errorf("invariant: %s", s.w.bad[0])
+	}
+	es := s.k.Log().Entries()
+	re, err := kernel.Replay(s.owner.pub, es)
+	if err != nil {
+		return fmt.Errorf("replay: %w", err)
+	}
+	if !reflect.DeepEqual(re, s.k.State()) {
+		return errors.New("invariant: replay differs from the live state")
+	}
+	dispatched := map[string]bool{}
+	for _, e := range es {
+		if e.Type == kernel.TStepDispatch {
+			var b struct{ Idem string }
+			if json.Unmarshal(e.Body, &b) == nil {
+				dispatched[b.Idem] = true
+			}
+		}
+	}
+	for _, f := range s.w.effects {
+		if !dispatched[f.idem] {
+			return errors.New("invariant: an effect with no dispatch record in the log")
+		}
+	}
+	return nil
+}
+
+// Run drives one seed and returns the trace, or the first violated invariant.
+func Run(c Config) (*Result, error) {
+	rng := rand.New(rand.NewPCG(c.Seed, 0xa6e57))
+	var nseed [32]byte
+	for i := range nseed {
+		nseed[i] = byte(rng.IntN(256))
+	}
+	s := &sim{cfg: c, rng: rng, anchor: &kernel.MemAnchor{}, nonce: rand.NewChaCha8(nseed)}
+	s.disk = &Disk{rng: rng}
+	s.owner, s.holder, s.head = gen(rng), gen(rng), gen(rng)
+	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, done: map[string]bool{}}
+	s.w.race = func() {
+		if len(s.ids) > 0 && s.pick(2) == 0 {
+			s.logf("race: revoke")
+			_ = s.k.Revoke(s.now, s.ids[s.pick(len(s.ids))])
+			return
+		}
+		s.logf("race: stop")
+		_ = s.k.Stop(s.now)
+	}
+	if err := s.boot(); err != nil {
+		return nil, err
+	}
+	for i := 0; i < 2; i++ {
+		r := s.newRoot()
+		if err := s.k.Issue(0, r); err != nil {
+			return nil, err
+		}
+		s.remember(r)
+	}
+	if err := s.k.Log().Anchor(); err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*Result, error) {
+		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))
+	}
+	for i := 0; i < c.Ops; i++ {
+		err := s.op()
+		if err != nil {
+			if !crashed(err) {
+				return fail(err)
+			}
+			s.logf("crash")
+			if err := s.boot(); err != nil {
+				return fail(err)
+			}
+		}
+		if err := s.check(); err != nil {
+			return fail(err)
+		}
+	}
+	if err := s.boot(); err != nil {
+		return fail(err)
+	}
+	if err := s.check(); err != nil {
+		return fail(err)
+	}
+	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects)}, nil
+}
+
+func tail(t []string) []string {
+	if len(t) > 12 {
+		return t[len(t)-12:]
+	}
+	return t
 }

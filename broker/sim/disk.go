@@ -1,74 +1,45 @@
 package sim
 
 import (
-	"bytes"
 	"errors"
-	"math/rand"
+	"math/rand/v2"
+
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
-// errCrash is what every disk call returns once a crash point has fired,
-// until the harness reboots the machine.
+// errCrash is what the disk returns once a crash point has fired, until the
+// harness reboots the machine.
 var errCrash = errors.New("sim: crashed")
 
-// Disk is a journal.Store that models one journal file the way a POSIX file
-// system keeps it. Live is what a running process reads (the page cache);
-// Durable is what survives a power cut. A crash can be armed to fire at the
-// Nth write, fsync, rename or directory sync, counting from now.
+// Disk is a kernel.Store whose Append is durable when it returns. A crash
+// armed at the nth append cuts that append short: some prefix of the frame
+// reaches the medium, which Open trims as a torn frame.
 type Disk struct {
-	live, durable []byte
-	// renamed holds a Rewrite's new content once it has been renamed over
-	// the journal but before the directory is synced: a power cut keeps
-	// either the old file or this one.
-	renamed []byte
-	pending bool
-
+	b       []byte
 	rng     *rand.Rand
-	crashIn int // points left before the armed crash; 0 means none armed
+	crashIn int
 	crashed bool
-	mutant  Mutant
-	log     func(string)
 }
 
-func newDisk(rng *rand.Rand, m Mutant, log func(string)) *Disk {
-	return &Disk{rng: rng, mutant: m, log: log}
-}
-
-// Arm makes the nth crash point from now fire.
+// Arm makes the nth append from now crash. Zero disarms.
 func (d *Disk) Arm(n int) { d.crashIn = n }
 
-// Crashed reports whether a crash point has fired since the last reboot.
-func (d *Disk) Crashed() bool { return d.crashed }
+// Reboot clears the crash; the bytes written so far stay.
+func (d *Disk) Reboot() { d.crashed, d.crashIn = false, 0 }
 
-// point counts one crash point and reports whether the crash fires here.
-func (d *Disk) point(kind string) bool {
-	if d.crashIn == 0 {
-		return false
-	}
-	d.crashIn--
-	if d.crashIn > 0 {
-		return false
-	}
-	d.crashed = true
-	d.log("crash " + kind)
-	return true
-}
-
-func (d *Disk) Append(line []byte) error {
+func (d *Disk) Append(b []byte) error {
 	if d.crashed {
 		return errCrash
 	}
-	if d.point("write") {
-		// A write cut short leaves some prefix of the line in the page cache.
-		d.live = append(d.live, line[:d.rng.Intn(len(line))]...)
-		return errCrash
+	if d.crashIn > 0 {
+		d.crashIn--
+		if d.crashIn == 0 {
+			d.crashed = true
+			d.b = append(d.b, b[:d.rng.IntN(len(b))]...)
+			return errCrash
+		}
 	}
-	d.live = append(d.live, line...)
-	if d.point("fsync") {
-		return errCrash
-	}
-	if d.mutant != MutantSkipFsync {
-		d.sync()
-	}
+	d.b = append(d.b, b...)
 	return nil
 }
 
@@ -76,87 +47,16 @@ func (d *Disk) ReadAll() ([]byte, error) {
 	if d.crashed {
 		return nil, errCrash
 	}
-	return bytes.Clone(d.live), nil
+	return append([]byte(nil), d.b...), nil
 }
 
-func (d *Disk) Truncate(n int64) error {
+func (d *Disk) Truncate(n int) error {
 	if d.crashed {
 		return errCrash
 	}
-	if d.point("write") {
-		return errCrash
+	if n < 0 || n > len(d.b) {
+		return kernel.ErrCorrupt
 	}
-	if n < int64(len(d.live)) {
-		d.live = d.live[:n]
-	}
-	if d.point("fsync") {
-		return errCrash
-	}
-	d.sync()
+	d.b = d.b[:n]
 	return nil
 }
-
-// Rewrite follows journal.FileStore: write a temp file, fsync it, rename it
-// over the journal, fsync the directory.
-func (d *Disk) Rewrite(data []byte) error {
-	if d.crashed {
-		return errCrash
-	}
-	if d.point("write") || d.point("fsync") || d.point("rename") {
-		// The temp file never replaced the journal.
-		return errCrash
-	}
-	d.live = bytes.Clone(data)
-	d.renamed, d.pending = bytes.Clone(data), true
-	if d.point("dirsync") {
-		return errCrash
-	}
-	if d.mutant != MutantTornErase {
-		d.syncDir()
-	}
-	return nil
-}
-
-func (d *Disk) sync() {
-	if !d.pending {
-		d.durable = bytes.Clone(d.live)
-	}
-}
-
-func (d *Disk) syncDir() {
-	if d.pending {
-		d.durable, d.renamed, d.pending = d.renamed, nil, false
-		d.sync()
-	}
-}
-
-// Kill models the process dying: the page cache survives, so the next
-// process reads what this one wrote, synced or not.
-func (d *Disk) Kill() {
-	d.crashed, d.crashIn = false, 0
-}
-
-// PowerCut models the machine losing power: unsynced bytes are lost, except
-// that an unsynced append may have reached the medium in part, and a rename
-// whose directory was not synced may or may not have.
-func (d *Disk) PowerCut() {
-	d.crashed, d.crashIn = false, 0
-	if d.pending {
-		if d.rng.Intn(2) == 0 {
-			d.durable = d.renamed
-		}
-		d.renamed, d.pending = nil, false
-	} else if bytes.HasPrefix(d.live, d.durable) {
-		extra := len(d.live) - len(d.durable)
-		if extra > 0 {
-			d.durable = bytes.Clone(d.live[:len(d.durable)+d.rng.Intn(extra+1)])
-		}
-	}
-	d.live = bytes.Clone(d.durable)
-}
-
-// open models journal.OpenFile, which fsyncs the directory it opens in.
-func (d *Disk) open() { d.syncDir() }
-
-// Durable returns what a power cut now would leave.
-func (d *Disk) Durable() []byte { return bytes.Clone(d.durable) }
