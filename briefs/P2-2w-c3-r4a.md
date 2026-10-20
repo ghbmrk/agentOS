@@ -1,13 +1,13 @@
 # P2-2w c3 r4a: NetworkManager and polkitd in the image
 
-Board row: #936 (P2-2w c3 r4), first half. Split 2026-10-20 on the hardware triage's recommendation: this half ships the services the home Wi-Fi helper (`agentos-netjoin`, P2-2w c3) talks to and extends the uplink tree check to them; [r4b](P2-2w-c3-r4b.md) adds the station device and the helper's `-station` flag. Netjoin, localui and agentos-ap are outside D-139's frozen list, and D-139 keeps hardware, image and Wi-Fi work going (decisions/D-139.md).
+Board row: #936 (P2-2w c3 r4), first half. Split 2026-10-20 on the hardware triage's recommendation: this half ships the services the home Wi-Fi helper (`agentos-netjoin`, P2-2w c3) talks to and extends the uplink tree check to them; [r4b](P2-2w-c3-r4b.md) adds the station device; the helper's `-station` flag waits for the sealed store (#935). Netjoin, localui and agentos-ap are outside D-139's frozen list, and D-139 keeps hardware, image and Wi-Fi work going (decisions/D-139.md).
 
 **Requirements:**
 - ONB-3: the home network is a minimum-path step. Today the helper has no NetworkManager to call and answers `failed` (broker/netjoin N2, N13).
 - ONB-4: Wi-Fi setup completes within the target time; this half only makes the services present.
 - DEV-2: the home network is untrusted. Adding a network manager must not open a port, turn forwarding on, or manage a link nobody asked it to.
 - CH-9: the access point stays WPA3-SAE and the local UI unreachable from the home network. NetworkManager must never touch `wlan0` (the access point) or the wired uplink.
-- SPEC v1.0 §6.1 custody exceptions and STO-2: the home Wi-Fi password is root-only and held on the drive only under the sealed store's encryption. Until #935 picks the store, nothing this half ships may write it to the drive.
+- SPEC v1.0 §6.1 custody exceptions and STO-2: the home Wi-Fi password is root-only and held on the drive only under the sealed store's encryption. Mark's answer on #936 (2026-10-20, cmsg_01R91wiieBzMSvPKFsAJVvuKPw7oc8gS9YCNjDbUZ4jUjF): wait, no RAM-only interim. The station join waits for the kernel's sealed store (STO-2); nothing this half ships may write the password to the drive.
 
 **Acceptance:** A1 (setup's network step on hardware, with r4b).
 **Acceptance tests:** 1-7 below.
@@ -39,7 +39,7 @@ Not in scope: anything under `broker/` (r4b and #935 own the helper), `image/bui
 Fixed points for the builder:
 
 - **Only the station is managed.** `50-agentos.conf` sets `[keyfile] unmanaged-devices=*,except:interface-name:wlsta0`, the station name r4b creates. `[main] no-auto-default=*` so NetworkManager makes no connection for the wired port (networkd keeps it, I19). `wlan0`, every Ethernet port, veth, bridge and tun stay unmanaged whatever their names.
-- **Saved networks live in memory only.** `[keyfile] path=` points under `/run` (tmpfs), so the helper's `Update2(TO_DISK)` writes to RAM and a reboot forgets the network. This is the interim answer to §6.1 until #935 builds the sealed-store version; it is the reversible default this brief picks, and the comment on #936 asks Mark to confirm it. The finalize check refuses a keyfile path that is not under `/run`. `/etc/NetworkManager/system-connections` must not exist in the image.
+- **No join before the sealed store.** This half ships the services and the property check only; it does not enable a join (no interim, per Mark). `[keyfile] path=` still points under `/run` (tmpfs), as a guard and not a feature: NetworkManager has to write somewhere, and a path off the drive means a connection written before STO-2 cannot reach it. The finalize check refuses a keyfile path that is not under `/run`. `/etc/NetworkManager/system-connections` must not exist in the image. The join is enabled by the change that puts NetworkManager's connections in the sealed store (#935).
 - **No forwarding and no sharing.** NetworkManager enables `ip_forward` only for a shared connection (`ipv4.method=shared` or `ipv6.method=shared`) or an explicit `ipv4.forwarding`/`ipv6.forwarding`. The image ships no connection file at all, the conf sets nothing that changes that, and the helper's fixed settings (broker/netjoin L8.4) use `auto`. The existing `agentos-health` `forward=off` line stays the runtime check.
 - **No outbound probe.** `[connectivity] enabled=false`.
 - **DNS through resolved.** `[main] dns=systemd-resolved`; resolved's LLMNR and mDNS stay off (`50-agentos-uplink.conf`).
@@ -55,12 +55,12 @@ Fixed points for the builder:
 4. Every udev rules file and tmpfiles line the new packages ship has its `exec.allow` or `tmpfiles.allow` entry, and the existing allowlist check still fails on an unlisted one.
 5. polkitd's version in the built image is 0.106 or later (read from the package list mkosi writes, not assumed).
 6. `ci_boot.sh`, on the first boot: `NetworkManager.service` is active; `nmcli -t -f DEVICE,STATE device` lists every device as `unmanaged`; `systemctl --failed` is empty; the health line still reads `forward=off inbound=drop`; `pkcheck` for `org.freedesktop.NetworkManager.settings.modify.system` answers yes for the `agentos-netjoin` user and no for another system user; no file exists under `/etc/NetworkManager/system-connections`. The host-forward probe of the existing boot still finds every port dropped.
-7. ASSUMPTIONS: I17 no longer says NetworkManager is absent; I21 names the NetworkManager files the check reads; a new row records the in-memory keyfile store, its reason (§6.1, STO-2) and what replaces it (#935).
+7. ASSUMPTIONS: I17 no longer says NetworkManager is absent; I21 names the NetworkManager files the check reads; a new row records the `/run` keyfile guard, its reason (§6.1, STO-2), that no join is enabled before the sealed store, and what replaces it (#935).
 
 Run `python3 tools/doclint.py` and the image tests locally; the image workflow's boot is the check for test 6.
 
 ## Out of scope
 
-- The station interface and the helper's `-station` flag (r4b).
+- The station interface (r4b) and the helper's `-station` flag (#935, with the sealed store).
 - Keeping a saved network across reboot (#935, which also amends L8.7).
 - Listing networks in range (#1282).
