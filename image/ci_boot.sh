@@ -279,8 +279,10 @@ until [ -e /sys/class/net/wlan0/phy80211 ] && [ -e /sys/class/net/wlan1/phy80211
 phy=$(cat /sys/class/net/wlan1/phy80211/name 2>/dev/null)
 # The seller seals the sticker's setup network before the box ships (agentos-seller, HW-10); CI's
 # image has none, and without it the loader serves nothing. A synthetic one, root's 0600, once.
+# The name must carry claim.SetupSSIDPrefix, the old product name: it is written as a JSON escape so
+# this file adds no product text (tests/test_product_name.py).
 f=/var/lib/agentos/setup-net.json
-[ -e $f ] || (umask 077 && printf '%s' '{"ssid":"AgentOS-Setup-CTST","password":"CANA-RYHW-SMC2-TEST"}' >$f)
+[ -e $f ] || (umask 077 && printf '%s' '{"ssid":"\u0041gentOS-Setup-CTST","password":"CANA-RYHW-SMC2-TEST"}' >$f)
 if [ -s $f ]; then say "setup network sealed"; else say "FAIL sealing the setup network"; fi
 ip netns add hwsimap
 if [ -n "$phy" ] && /run/agentos-hwsim/share/iw phy "$phy" set netns name hwsimap && [ ! -e /sys/class/net/wlan1 ]; then
