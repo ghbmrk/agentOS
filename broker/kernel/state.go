@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -210,8 +211,32 @@ func Shape(s key.Step) string {
 	labels = append(labels, s.Labels...)
 	sort.Strings(names)
 	sort.Strings(labels)
-	return strings.Join([]string{string(s.Verb), s.Clerk, s.Content,
+	return strings.Join([]string{string(s.Verb), s.Clerk, s.Recipient, s.Content,
 		strings.Join(names, ","), strings.Join(labels, ",")}, "|")
+}
+
+// Normalize is the one place a submitted step becomes the step the key is
+// checked against. The planner writes only arguments, and none of them counts
+// as owner or clerk sourced; the task is the plan, the recipient is the "to"
+// argument and the amount is the "amount" argument, an unreadable one
+// negative so Authorize refuses it. The kernel, the clerk and a replay all see
+// this step (KEY-2, KRN-3). Content and labels stay the planner's claims; a
+// clerk with facts checks them (CLK-2).
+func Normalize(plan string, s key.Step) key.Step {
+	args := make(map[string]key.Arg, len(s.Args))
+	for n, a := range s.Args {
+		args[n] = key.Arg{Value: a.Value, Source: key.SrcPlanner}
+	}
+	s.Args, s.Task, s.Recipient, s.Amount = args, plan, args["to"].Value, 0
+	if a, ok := args["amount"]; ok {
+		n, err := strconv.ParseInt(a.Value, 10, 64)
+		if err != nil || n < 0 {
+			n = -1
+		}
+		s.Amount = n
+	}
+	s.Labels = append([]string(nil), s.Labels...)
+	return s
 }
 
 // Fingerprint names an exact effect: the same one within 24 hours needs a
@@ -222,8 +247,7 @@ func Fingerprint(s key.Step) string {
 		kv = append(kv, n+"="+a.Value)
 	}
 	sort.Strings(kv)
-	return strings.Join([]string{string(s.Verb), s.Clerk, s.Recipient, s.Task,
-		fmt.Sprint(s.Amount), strings.Join(kv, ",")}, "|")
+	return strings.Join([]string{string(s.Verb), s.Clerk, strings.Join(kv, ",")}, "|")
 }
 
 // Idem is a step's idempotency key; the clerk runs it at most once (KRN-8).
@@ -314,6 +338,11 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if s.Plans[b.ID] == nil {
+			steps := make([]key.Step, len(b.Steps))
+			for i, st := range b.Steps {
+				steps[i] = Normalize(b.ID, st)
+			}
+			b.Steps = steps
 			s.Plans[b.ID] = &PlanState{Plan: b, Seq: e.Seq, Status: SPending}
 			s.Order = append(s.Order, b.ID)
 		}

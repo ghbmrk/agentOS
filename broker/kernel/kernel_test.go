@@ -78,8 +78,8 @@ func (r *rig) derive(c ...key.Caveat) key.Key {
 }
 
 func st(v key.Verb, to string) key.Step {
-	return key.Step{Verb: v, Clerk: "mail", Recipient: to, Task: "t",
-		Args: map[string]key.Arg{"msg": {Value: to, Source: key.SrcClerk}}}
+	return key.Step{Verb: v, Clerk: "mail",
+		Args: map[string]key.Arg{"to": {Value: to}, "msg": {Value: to}}}
 }
 
 func (r *rig) plan(id string, k key.Key, steps ...key.Step) {
@@ -138,12 +138,23 @@ func TestHoldWindowThenNoveltyWindow(t *testing.T) {
 	if len(r.mail.Effects()) != 1 {
 		t.Fatal("step did not run after its window")
 	}
-	// the same shape is no longer novel: the base window applies
-	r.plan("p2", k, st(key.Unsubscribe, "list-b"))
-	must(t, r.k.Tick(5*hour))
-	must(t, r.k.Tick(6*hour))
+	// the same shape to the same recipient, a day on, is known: the base window applies
+	must(t, r.k.Submit(30*hour, kernel.Plan{ID: "p2", Key: k, Steps: []key.Step{st(key.Unsubscribe, "list-a")}}))
+	must(t, r.k.Tick(30*hour))
+	must(t, r.k.Tick(31*hour))
 	if len(r.mail.Effects()) != 2 {
 		t.Fatalf("known shape should wait only the base window, effects %d", len(r.mail.Effects()))
+	}
+	// a new recipient is a new shape: the novelty window applies (KEY-8)
+	must(t, r.k.Submit(32*hour, kernel.Plan{ID: "p3", Key: k, Steps: []key.Step{st(key.Unsubscribe, "list-b")}}))
+	must(t, r.k.Tick(32*hour))
+	must(t, r.k.Tick(35*hour))
+	if len(r.mail.Effects()) != 2 {
+		t.Fatal("a new recipient ran inside the novelty window")
+	}
+	must(t, r.k.Tick(36*hour))
+	if len(r.mail.Effects()) != 3 {
+		t.Fatal("a new recipient did not run after the novelty window")
 	}
 }
 
@@ -386,5 +397,69 @@ func TestEntryTypesAreClosed(t *testing.T) {
 	}
 	if _, err := r.k.Log().Append(0, kernel.TStop, 2, struct{}{}); !errors.Is(err, kernel.ErrUnknown) {
 		t.Fatal("unknown version must be refused (LOG-5)")
+	}
+}
+
+// REQ: KRN-8
+func TestCancelledPlanStillReconcilesAndBlocksDuplicate(t *testing.T) {
+	r := newRig(t)
+	probeDown := true
+	r.mail.Fault = func(op string, _ kernel.Request) string {
+		switch {
+		case op == "do":
+			return clerk.FaultLostAck
+		case op == "probe" && probeDown:
+			return clerk.FaultFail
+		}
+		return ""
+	}
+	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	must(t, r.k.Tick(0))
+	must(t, r.k.Cancel(1, "p1"))
+	must(t, r.k.Tick(kernel.ProbeEvery))
+	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
+		t.Fatal("the unknown step must stay unknown while the probe is unanswered")
+	}
+	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	must(t, r.k.Tick(kernel.ProbeEvery+1))
+	if r.status("p2") == kernel.SDone || len(r.mail.Effects()) != 1 {
+		t.Fatalf("a cancelled plan's unreconciled effect must block the same effect (KRN-8): p2 %s effects %d", r.status("p2"), len(r.mail.Effects()))
+	}
+	probeDown = false
+	must(t, r.k.Tick(2*kernel.ProbeEvery+2))
+	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PDone {
+		t.Fatal("a cancelled plan must still settle its unknown step by probing")
+	}
+}
+
+// REQ: KEY-2, KRN-3
+func TestPlannerCannotAttestArgSourceTaskRecipientOrAmount(t *testing.T) {
+	r := newRig(t)
+	one := int64(1)
+	k := r.derive(key.LimitArg(key.ArgBound{Name: "msg", Min: &one}))
+	s := st(key.Trash, "5")
+	s.Args["msg"] = key.Arg{Value: "5", Source: key.SrcClerk}
+	r.plan("p1", k, s)
+	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
+		t.Fatal("a planner-written source must not satisfy an argument bound (KEY-2)")
+	}
+	spend := r.derive(key.LimitSpendTask(100))
+	big := st(key.Trash, "7")
+	big.Args["amount"] = key.Arg{Value: "500"}
+	big.Amount, big.Task, big.Recipient = 0, "other", "elsewhere"
+	r.plan("p2", spend, big)
+	if r.status("p2") != kernel.SRejected {
+		t.Fatal("a planner-set amount field must not hide the amount argument (KRN-3)")
+	}
+	odd := st(key.Trash, "8")
+	odd.Args["amount"] = key.Arg{Value: "lots"}
+	r.plan("p3", spend, odd)
+	if r.status("p3") != kernel.SRejected {
+		t.Fatal("an unreadable amount must be refused")
+	}
+	r.plan("p4", spend, func() key.Step { x := st(key.Trash, "9"); x.Task = "forged"; return x }())
+	got := r.k.State().Plans["p4"].Plan.Steps[0]
+	if got.Task != "p4" || got.Recipient != "9" {
+		t.Fatalf("task and recipient are derived, got %q %q", got.Task, got.Recipient)
 	}
 }

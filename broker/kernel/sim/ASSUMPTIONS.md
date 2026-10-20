@@ -1,6 +1,6 @@
 # Kernel simulator: assumptions
 
-Built for MIG-2 (#2525). `broker/sim` replaces the journal simulator (SIM-sim, 6cf8b16) and drives the kernel and the fake mail clerk from one seed. Each row is a reading a reviewer may want to change.
+Built for MIG-2 (#2525). `broker/kernel/sim` replaces the journal simulator (SIM-sim, 6cf8b16) and drives the kernel and the fake mail clerk from one seed. Each row is a reading a reviewer may want to change.
 
 | ID | Assumption | Spec basis | If it changes |
 |---|---|---|---|

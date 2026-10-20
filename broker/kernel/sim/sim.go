@@ -88,7 +88,7 @@ func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
 	if w.mutant != MutantClerkTrusts {
-		if rf := clerk.Check(w.owner, "mail", r, v); rf != nil {
+		if rf := clerk.Check(w.owner, "mail", nil, r, v); rf != nil {
 			return kernel.Result{Outcome: "failed", Detail: rf.Code}
 		}
 	}
@@ -297,16 +297,12 @@ func (s *sim) anyKey() key.Key {
 
 func (s *sim) step() key.Step {
 	n := names[s.pick(len(names))]
-	src := key.SrcClerk
-	if s.pick(6) == 0 {
-		src = key.SrcPlanner
-	}
 	clerkName := "mail"
 	if s.pick(10) == 0 {
 		clerkName = "bank"
 	}
-	return key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Recipient: n, Task: "t",
-		Args: map[string]key.Arg{"msg": {Value: n, Source: src}}}
+	return key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName,
+		Args: map[string]key.Arg{"to": {Value: n}, "msg": {Value: n}}}
 }
 
 func (s *sim) submit() error {

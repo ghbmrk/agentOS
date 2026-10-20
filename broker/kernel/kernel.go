@@ -66,7 +66,8 @@ func (o overlay) Uses(id key.ID) []key.Use {
 }
 
 // repeats reports whether the exact effect completed under this root within a
-// day, or is running in another plan.
+// day, or is unreconciled in another plan, cancelled or not: a cancel never
+// settles an effect that may have happened (KRN-8).
 func repeats(s *State, root key.ID, st key.Step, self string, now int64) bool {
 	fp := Fingerprint(st)
 	if at, ok := s.recent[root][fp]; ok && at > now-key.DayMS {
@@ -74,7 +75,7 @@ func repeats(s *State, root key.ID, st key.Step, self string, now int64) bool {
 	}
 	for _, id := range s.Order {
 		p := s.Plans[id]
-		if id == self || p.Status != SActive || p.Root != root {
+		if id == self || p.Root != root {
 			continue
 		}
 		for i, ss := range p.Steps {
@@ -114,12 +115,15 @@ type Act struct {
 // unknown result (KRN-5, KRN-8).
 func Next(s *State, id string, now int64) Act {
 	p := s.Plans[id]
-	if p == nil || p.Status != SActive {
+	if p == nil || len(p.Steps) == 0 {
 		return Act{}
 	}
 	i := p.Next
 	st, sp := p.Steps[i], p.Plan.Steps[i]
 	a := Act{Plan: id, Index: i}
+	if p.Status != SActive && st.Phase != PUnknown {
+		return Act{} // a plan that ended still reconciles an unknown result, and nothing else
+	}
 	switch st.Phase {
 	case PUnknown:
 		if now < st.NextProbe {
@@ -226,7 +230,7 @@ func Boot(l *Log, owner ed25519.PublicKey, clerks map[string]Clerk, now int64) (
 	}
 	for _, id := range append([]string(nil), s.Order...) {
 		p := s.Plans[id]
-		if p.Status == SActive && p.Steps[p.Next].Phase == PInflight {
+		if len(p.Steps) > 0 && p.Steps[p.Next].Phase == PInflight {
 			if err := k.result(now, id, p.Next, "unknown", "restart"); err != nil {
 				return nil, err
 			}

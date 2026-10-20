@@ -11,12 +11,27 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
+// Facts is a clerk's own reading of what a step carries: the content class,
+// flow labels and amount it computes from the arguments and the account it
+// guards. The planner only claims these; a clerk that has facts refuses a
+// claim that differs (KEY-2, CLK-2).
+type Facts func(key.Step) (content string, labels []string, amount int64)
+
+// RClaim is the refusal for a claim the clerk's facts contradict.
+const RClaim = "claim"
+
 // Check is the clerk's own authorization of a request. It trusts nothing the
 // kernel decided: the chain, the root's presence in the log, the key's limits
 // as of the first dispatch, and for an irreversible verb the hold window.
-func Check(owner ed25519.PublicKey, name string, r kernel.Request, v kernel.View) *key.Refusal {
+func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, v kernel.View) *key.Refusal {
 	if r.Step.Clerk != name {
 		return &key.Refusal{Code: key.RClerk, Detail: r.Step.Clerk}
+	}
+	if facts != nil {
+		content, labels, amount := facts(r.Step)
+		if content != r.Step.Content || amount != r.Step.Amount || !sameSet(labels, r.Step.Labels) {
+			return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
+		}
 	}
 	ver, err := key.Verify(r.Key, owner)
 	if err != nil {
@@ -41,6 +56,25 @@ func Check(owner ed25519.PublicKey, name string, r kernel.Request, v kernel.View
 	return nil
 }
 
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]int{}
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+	}
+	for _, n := range m {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Fault names an injected failure for tests and the sim.
 const (
 	FaultNone    = ""
@@ -61,6 +95,9 @@ type Mail struct {
 	Owner ed25519.PublicKey
 	// Fault is consulted for op "do" and "probe"; nil means no fault.
 	Fault func(op string, r kernel.Request) string
+	// Facts, when set, is the clerk's own reading of a step's claims; nil
+	// takes the step's claims as given.
+	Facts Facts
 
 	mu      sync.Mutex
 	done    map[string]bool
@@ -84,7 +121,7 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if m.done[r.Idem] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := Check(m.Owner, m.Name, r, v); rf != nil {
+	if rf := Check(m.Owner, m.Name, m.Facts, r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	switch m.fault("do", r) {
