@@ -92,11 +92,7 @@ func (r *rig) onKey(k key.Key, id string, v key.Verb, args map[string]string) ke
 }
 
 func (r *rig) step(id string, v key.Verb, args map[string]string) kernel.Plan {
-	a := map[string]key.Arg{}
-	for n, val := range args {
-		a[n] = key.Arg{Value: val}
-	}
-	return kernel.Plan{ID: id, Key: r.planner, Steps: []key.Step{kernel.Normalize(id, key.Step{Verb: v, Clerk: Name, Args: a})}}
+	return kernel.Plan{ID: id, Key: r.planner, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}}
 }
 
 func (r *rig) run(t *testing.T, p kernel.Plan, ticks ...int64) {
@@ -142,7 +138,7 @@ func handleOfMail(t *testing.T, r *rig, id string) string {
 func TestForcedTrashOfPersonalMailIsRefusedAndRecorded(t *testing.T) {
 	r := newRig(t, 30)
 	p := r.step("forced", key.Trash, map[string]string{"target": "M22"})
-	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Steps[0], Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, Now: t0}, r.k.State())
+	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Step(0), Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, Now: t0}, r.k.State())
 	if res.Outcome == "ok" || len(r.acct.Effects()) != 0 {
 		t.Fatalf("forced trash ran: %+v %v", res, r.acct.Effects())
 	}
@@ -155,7 +151,7 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 	r := newRig(t, 30)
 	h := handleOfMail(t, r, "M01")
 	p := r.step("forced", key.Unsubscribe, map[string]string{"to": h})
-	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Steps[0], Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, HeldSeq: 1, Now: t0}, staleView{})
+	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Step(0), Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, HeldSeq: 1, Now: t0}, staleView{})
 	if res.Outcome == "ok" || len(r.acct.Posts()) != 0 {
 		t.Fatalf("forced unsubscribe ran: %+v", res)
 	}
@@ -170,7 +166,7 @@ func TestChangedStepOfDispatchedRequestIsRefused(t *testing.T) {
 	p := r.step("real", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"})
 	r.run(t, p)
 	forged := r.step("real", key.Trash, map[string]string{"target": "M22"})
-	r.acct.Do(kernel.Request{Plan: "real", Step: forged.Steps[0], Key: r.planner, Idem: kernel.Idem("real", 0), Attempt: 1, Now: t0}, r.k.State())
+	r.acct.Do(kernel.Request{Plan: "real", Step: forged.Step(0), Key: r.planner, Idem: kernel.Idem("real", 0), Attempt: 1, Now: t0}, r.k.State())
 	for _, e := range r.acct.Effects() {
 		if e.Verb == string(key.Trash) {
 			t.Fatalf("trash ran: %+v", e)
@@ -378,7 +374,7 @@ func TestLabelsLiveUnderTheAgentOSNamespace(t *testing.T) {
 	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub)
 	for _, p := range plans {
 		for _, s := range p.Steps {
-			if l := s.Args["label"].Value; s.Verb == key.Organize && !strings.HasPrefix(l, "agentOS/") {
+			if l := s.Args["label"]; s.Verb == key.Organize && !strings.HasPrefix(l, "agentOS/") {
 				t.Fatalf("label %q outside agentOS/", l)
 			}
 		}

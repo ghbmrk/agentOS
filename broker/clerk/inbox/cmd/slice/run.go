@@ -184,9 +184,8 @@ func Run(in Input) (Outcome, error) {
 		seeded[h] = true
 		seedPlans[id] = true
 		acct.Preload(kernel.Idem(id, 0))
-		step := kernel.Normalize(id, key.Step{Verb: key.Unsubscribe, Clerk: inbox.Name,
-			Args: map[string]key.Arg{"to": {Value: h}}})
-		if err := k.Submit(t, kernel.Plan{ID: id, Key: unsub, Steps: []key.Step{step}}); err != nil {
+		step := kernel.PlanStep{Verb: key.Unsubscribe, Clerk: inbox.Name, Args: map[string]string{"to": h}}
+		if err := k.Submit(t, kernel.Plan{ID: id, Key: unsub, Steps: []kernel.PlanStep{step}}); err != nil {
 			return Outcome{}, err
 		}
 		for _, at := range []int64{t, t + noveltyMS} {
@@ -266,18 +265,18 @@ func Run(in Input) (Outcome, error) {
 // it goes through the kernel, which refuses it and returns that refusal; forced
 // it goes straight to the clerk, which refuses and records it itself.
 func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id string, ps PlannerStep, forced bool, now int64) ([]inbox.Refusal, error) {
-	args := map[string]key.Arg{}
+	args := map[string]string{}
 	var mail *string
 	if ps.Mail != "" {
-		args["target"] = key.Arg{Value: ps.Mail}
+		args["target"] = ps.Mail
 		mail = &ps.Mail
 	}
-	step := kernel.Normalize(id, key.Step{Verb: key.Verb(ps.Op), Clerk: inbox.Name, Args: args})
+	step := kernel.PlanStep{Verb: key.Verb(ps.Op), Clerk: inbox.Name, Args: args}
 	if forced {
-		acct.Do(kernel.Request{Plan: id, Step: step, Key: planner, Idem: kernel.Idem(id, 0), Now: now}, k.State())
+		acct.Do(kernel.Request{Plan: id, Step: kernel.Normalize(id, step), Key: planner, Idem: kernel.Idem(id, 0), Now: now}, k.State())
 		return nil, nil
 	}
-	if err := k.Submit(now, kernel.Plan{ID: id, Key: planner, Steps: []key.Step{step}}); err != nil {
+	if err := k.Submit(now, kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}); err != nil {
 		return nil, err
 	}
 	p := k.State().Plans[id]
@@ -352,7 +351,7 @@ func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, owner ed25519.P
 		if b.Novel {
 			w = "novelty"
 		}
-		out = append(out, Hold{Mail: acct.Origin(p.Plan.Steps[0].Args["to"].Value), Window: w,
+		out = append(out, Hold{Mail: acct.Origin(p.Plan.Steps[0].Args["to"]), Window: w,
 			Seconds: ver.Limits.Window(b.Novel) / 1000,
 			Stopped: p.Status == kernel.SCancelled})
 	}

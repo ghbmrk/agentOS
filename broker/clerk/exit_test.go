@@ -115,6 +115,13 @@ func (f *exitFix) req(verb key.Verb, idem string, args map[string]string) kernel
 	return kernel.Request{Plan: "p", Step: s, Key: f.root, Idem: idem, Now: 1}
 }
 
+// planStep is req's step as a plan carries it: the claims are the clerk's own
+// reading of the arguments, so the clerk's check passes.
+func (f *exitFix) planStep(verb key.Verb, args map[string]string) kernel.PlanStep {
+	s := f.req(verb, "", args).Step
+	return kernel.PlanStep{Verb: verb, Clerk: s.Clerk, Args: args, Content: s.Content, Labels: s.Labels}
+}
+
 func TestExitSendsDeclaredRequestWithSecretAndIdempotencyKey(t *testing.T) {
 	f := setupExit(t, nil)
 	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob&x=1", "msg": "hello"}), f.k.State())
@@ -249,8 +256,8 @@ func TestNewExitRejectsUnsafeDeclarations(t *testing.T) {
 
 func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 	f := setupExit(t, nil)
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []key.Step{step}}); err != nil {
+	step := f.planStep(key.Post, map[string]string{"to": "bob", "msg": "hi"})
+	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{step}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.k.Tick(0); err != nil {
@@ -280,8 +287,8 @@ func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 
 func TestExitDispatchIsLoggedBeforeTheRequestLeaves(t *testing.T) {
 	f := setupExit(t, nil)
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []key.Step{step}}); err != nil {
+	step := f.planStep(key.Post, map[string]string{"to": "bob", "msg": "hi"})
+	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{step}}); err != nil {
 		t.Fatal(err)
 	}
 	before := f.k.Log().Len()

@@ -302,7 +302,7 @@ func (s *State) Dispatched(r Request) bool {
 	p, st := s.step(stepRef{r.Plan, r.Index})
 	return st != nil && st.Phase == PInflight && r.Attempt > 0 && st.Attempt == r.Attempt &&
 		r.Idem == Idem(r.Plan, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
-		reflect.DeepEqual(r.Step, p.Plan.Steps[r.Index]) && reflect.DeepEqual(r.Key, p.Plan.Key)
+		reflect.DeepEqual(r.Step, p.Plan.Step(r.Index)) && reflect.DeepEqual(r.Key, p.Plan.Key)
 }
 
 func body[T any](e Entry) (T, error) {

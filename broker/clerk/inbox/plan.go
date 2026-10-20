@@ -43,12 +43,7 @@ func Plans(listing []Item, bulk, unsub key.Key) ([]kernel.Plan, Left) {
 		if v == key.Unsubscribe {
 			k = unsub
 		}
-		a := map[string]key.Arg{}
-		for n, val := range args {
-			a[n] = key.Arg{Value: val}
-		}
-		step := kernel.Normalize(id, key.Step{Verb: v, Clerk: Name, Args: a})
-		out = append(out, kernel.Plan{ID: id, Key: k, Steps: []key.Step{step}})
+		out = append(out, kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}})
 	}
 	for _, it := range listing {
 		if it.Class == "spam" || it.Class == "phishing" {
