@@ -9,8 +9,10 @@ entry and the /usr partitions are one release: the build verifies the split /usr
 its hash tree against that hash with veritysetup, and the manifest records both.
 Uses mtools on the raw image, so no loop devices or mounts are needed.
 Usage: finish_image.py OUTDIR VERSION"""
+import errno
 import hashlib
 import json
+import os
 import pathlib
 import re
 import struct
@@ -23,6 +25,9 @@ SWAP_GUID = "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f"
 # The x86-64 root (30-root.conf, Type=root). agentosd caps each machine's disk with project quotas
 # (RES-4, broker/quota), which need the ext4 quota and project features and the prjquota mount.
 ROOT_GUID = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+# The /usr slots (10-usr-a.conf to 13-usr-b-verity.conf): slot A is named agentos_VERSION and
+# agentos_VERSION_verity, slot B _empty.
+USR_GUID, USR_VERITY_GUID = "8484680c-9521-48c6-9c11-b0720656f69e", "77ff5f63-e7b6-4633-acf4-1565b864c0e6"
 EXT4_MAGIC, RO_COMPAT_QUOTA, RO_COMPAT_PROJECT = 0xEF53, 0x0100, 0x2000
 TRIES = 3
 # No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
@@ -168,6 +173,65 @@ def quota_violations(img, table, entry):
     flags = entry_args(entry, "rootflags")
     if not flags or "prjquota" not in flags[-1].split(","):
         out.append("boot entry does not mount root with rootflags=prjquota")
+    return out
+
+
+# HW-1 on the built disk, not only on the tree mkosi.finalize saw (IMG-1): every byte of the disk
+# outside /usr slot A (the partition table, the ESP, root and the empty slot B) holds no private key
+# and no Owner Card. Slot A is package content, verified against the entry's usrhash, and the
+# reproduce job builds the same usrhash on another runner, which a key or card made during the build
+# would break (image/ASSUMPTIONS.md I29). A hit names its kind and offset, never its bytes.
+SECRET_PATTERNS = (
+    # A PEM or PGP private key with its body: libcrypto and gpg carry the header alone.
+    ("private key", re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----\r?\n"
+                               rb"(?:[ -~]{0,128}\r?\n){0,8}[A-Za-z0-9+/]{40}")),
+    ("age secret key", re.compile(rb"AGE-SECRET-KEY-1[02-9AC-HJ-NP-Z]{58}")),
+    # The first-boot card record and the card's vault slot (broker/firstboot, broker/recovery):
+    # the box makes both on its own drive at first boot (HW-1, D-102).
+    ("Owner Card", re.compile(rb"firstboot-card\.json|owner-card")),
+)
+# Read in chunks; each read runs on by the overlap, longer than any match, so none is cut.
+SCAN_CHUNK, SCAN_OVERLAP = 1 << 22, 4096
+
+
+def data_extents(f, start, end):
+    """The (start, end) byte ranges of f between start and end that are not holes."""
+    pos = start
+    while pos < end:
+        try:
+            d = os.lseek(f.fileno(), pos, os.SEEK_DATA)
+        except OSError as e:
+            if e.errno == errno.ENXIO:
+                return
+            raise
+        if d >= end:
+            return
+        h = min(os.lseek(f.fileno(), d, os.SEEK_HOLE), end)
+        yield d, h
+        pos = h
+
+
+def secret_violations(img, table):
+    """Every private key or Owner Card on the disk IMG outside /usr slot A. table: sfdisk -J's."""
+    ss = table.get("sectorsize", 512)
+    skip = sorted((p["start"] * ss, (p["start"] + p["size"]) * ss) for p in table["partitions"]
+                  if p["type"].lower() in (USR_GUID, USR_VERITY_GUID) and p.get("name") != "_empty")
+    out = []
+    if len(skip) != 2:
+        out.append("expected /usr slot A's two partitions, found %d; scanned all of them" % len(skip))
+        skip = []
+    with open(img, "rb") as f:
+        size, pos = os.fstat(f.fileno()).st_size, 0
+        for a, b in skip + [(size, size)]:
+            for d, h in data_extents(f, pos, a):
+                for p in range(d, h, SCAN_CHUNK):
+                    f.seek(p)
+                    buf = f.read(min(SCAN_CHUNK + SCAN_OVERLAP, h - p))
+                    for what, pat in SECRET_PATTERNS:
+                        # A match starting in the overlap is the next chunk's.
+                        out += ["%s at byte %d" % (what, p + m.start())
+                                for m in pat.finditer(buf) if m.start() < SCAN_CHUNK]
+            pos = max(pos, b)
     return out
 
 
@@ -338,6 +402,9 @@ def main(out, version):
     bad = quota_violations(str(img), partition_table(str(img)), text)
     if bad:
         sys.exit("agent machines would have no disk quota (RES-4): %s" % bad)
+    bad = secret_violations(str(img), partition_table(str(img)))
+    if bad:
+        sys.exit("disk holds a private key or Owner Card outside /usr (HW-1): %s" % bad)
     boot = {}
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
