@@ -14,4 +14,3 @@ broker/checker
 broker/projection
 broker/replay
 broker/durable
-broker/sim

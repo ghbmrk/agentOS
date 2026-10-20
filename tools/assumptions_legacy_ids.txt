@@ -1067,14 +1067,6 @@ broker/route/ASSUMPTIONS.md R13
 broker/route/ASSUMPTIONS.md R14
 broker/route/ASSUMPTIONS.md R15
 broker/route/ASSUMPTIONS.md R16
-broker/sim/ASSUMPTIONS.md A1
-broker/sim/ASSUMPTIONS.md A2
-broker/sim/ASSUMPTIONS.md A3
-broker/sim/ASSUMPTIONS.md A4
-broker/sim/ASSUMPTIONS.md A5
-broker/sim/ASSUMPTIONS.md A6
-broker/sim/ASSUMPTIONS.md A7
-broker/sim/ASSUMPTIONS.md A8
 broker/sockprobe/ASSUMPTIONS.md P1
 broker/sockprobe/ASSUMPTIONS.md P2
 broker/sockprobe/ASSUMPTIONS.md P3

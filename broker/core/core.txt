@@ -32,6 +32,8 @@ core verb
 core guest
 core meter
 core guesterr
+core kernel
+core clerk
 
 wiring daemon
 wiring cmd/agentosd
@@ -94,7 +96,8 @@ allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key 
 allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
 allow replay guest.New -- LOOP5 replays a run on its own guest plane
 allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
-allow sim journal.* -- SIM-sim's seeded harness opens its own journal on a fake disk and drives its public API as the daemon and owner would; no broker package imports sim
+allow kernel/sim kernel.* -- the seeded harness drives the kernel as the daemon and owner would, on a fake disk; no broker package imports sim
+allow kernel/sim clerk.* -- the harness's world builds the mail clerk it checks the kernel against
 
 # Interfaces a core type satisfies through a write path (see the header).
 # Authorize and Dispatch move an intent the caller already submitted through
