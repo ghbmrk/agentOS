@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import trace as tr  # noqa: E402
@@ -166,6 +167,22 @@ class RatchetTest(unittest.TestCase):
         head = commit(self.d, {"broker/kernel/j.go": self.J})
         self.assertEqual(self.problems(head),
                          ["old-core file broker/journal/j.go persists outside tools/old_core.txt at broker/kernel/j.go"])
+
+    def test_copy_among_many_new_files_fails(self):
+        # A rename limit of 1 stands in for a large repository: past the limit git
+        # skips inexact copy detection, so moves() lifts it (-l0).
+        git(self.d, "config", "diff.renameLimit", "1")
+        self.moved_base()
+        many = {f"misc/f{i}.txt": f"note {i}\n" * 3 for i in range(300)}
+        head = commit(self.d, {"broker/kernel/j.go": self.J + "func G() {}\n", **many})
+        self.assertEqual(self.problems(head),
+                         ["old-core file broker/journal/j.go persists outside tools/old_core.txt at broker/kernel/j.go"])
+
+    def test_skipped_rename_detection_fails_closed(self):
+        skipped = subprocess.CompletedProcess([], 0, b"", b"warning: ... due to too many files.\n")
+        with unittest.mock.patch.object(tr.subprocess, "run", return_value=skipped):
+            with self.assertRaises(SystemExit):
+                tr.moves(self.d, self.base, self.base)
 
     def test_moving_into_a_newly_listed_directory_fails(self):
         self.moved_base()

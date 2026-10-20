@@ -122,10 +122,13 @@ def old_core_measures(tree, dirs, retired):
 
 
 def moves(root, base, head):
-    """{base path: [head paths]} for files git sees renamed or copied (D-139)."""
-    out = subprocess.run(["git", "-C", str(root), "diff", "-M", "-C", "--find-copies-harder",
-                          "--name-status", "-z", base, head],
-                         check=True, capture_output=True).stdout.decode().split("\0")
+    """{base path: [head paths]} for files git sees renamed or copied (D-139).
+    -l0 lifts git's rename limit; if git still skips detection, fail closed."""
+    r = subprocess.run(["git", "-C", str(root), "diff", "-M", "-C", "--find-copies-harder", "-l0",
+                        "--name-status", "-z", base, head], check=True, capture_output=True)
+    if b"too many files" in r.stderr:
+        raise SystemExit("Old core grew: rename detection was skipped (too many files)")
+    out = r.stdout.decode().split("\0")
     m, i = {}, 0
     while i < len(out) and out[i]:
         if out[i][0] in "RC":
