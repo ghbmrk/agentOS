@@ -22,11 +22,13 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
-// fakeRecallOpen stands in for recall's LateExecutor.OnOpen: callbacks
-// wait for open, and one registered after it runs at once.
+// fakeRecallOpen stands in for recall's LateExecutor in bootRecall:
+// OnOpen's callbacks wait for open, and one registered after it runs at
+// once.
 type fakeRecallOpen struct {
 	mu      sync.Mutex
 	open    bool
@@ -43,6 +45,8 @@ func (o *fakeRecallOpen) OnOpen(f func()) {
 	o.mu.Unlock()
 	f()
 }
+
+func (o *fakeRecallOpen) Off() {}
 
 func (o *fakeRecallOpen) Open() {
 	o.mu.Lock()
@@ -119,21 +123,18 @@ func TestForgetItem2ResumeWaitsForBootSetup(t *testing.T) {
 		r.f.gate.Store(nil)
 		r.f.agent.Store(nil)
 		ctx, cancel := context.WithCancel(context.Background())
-		var onOpen func(func())
 		rec := &fakeRecallOpen{}
+		dir := ""
 		if c.recall {
-			onOpen = rec.OnOpen
+			dir = "recall"
 		}
-		boot := r.f.wireResume(ctx, onOpen)
+		boot := wireBootRecall(ctx, &learning{forgetOwner: r.f}, dir, modelroute.NewVerifier(t.TempDir()+"/verify.sock"), rec)
 		setup := func() {
 			r.f.gate.Store(gate)
 			if !c.noAgent {
 				r.withAgent(w)
 			}
-			boot()
-			if c.recall {
-				rec.Open()
-			}
+			boot.finish(rec.Open, func() {})
 		}
 		if c.early {
 			r.f.Reconcile(ctx, item2, 1)
@@ -170,151 +171,180 @@ func waitIdle(f *ownerForget) {
 	f.resuming.Unlock() //nolint:staticcheck // a barrier, not a section
 }
 
-// The resume is wired in one place: nothing in agentosd assigns an
-// ownerForget's resume, whenOpen or noRecall but wireResume, and main wires through
-// it once, with recall's OnOpen, and runs the boot's resume it returns
-// (PT1 and S3 on #1382: dropping the wiring passed every other test).
-// JRN-startup-reconcile s3 (Security R1 and Potency PT1 on #1382) pins
-// where: counting call sites passed each mutant below, which breaks the
-// FORGET take-back. Each must fail and the real source must pass.
-//   - R1: the boot's resume run before daemon.Run, ahead of the gate, the
-//     owner channel and the agent machine (JRN-s3-2).
-//   - Q1, Q2: the recall-on or recall-off arm runs no boot resume, so an
-//     interrupted item 2 is never taken back, or the owner never told
-//     forgetAgentNotOpen (JRN-s3-1).
-//   - Q3: wireResume given nil with recall configured: recall wired as
-//     off (JRN-s3-3).
-//   - Q3c: recall's OnOpen handed over outside the recall guard, so
-//     recall off is wired as on (JRN-s3-3).
-//   - Q3d: the same, through an unguarded var declaration (JRN-s3-3).
-//   - Q3b: the OnOpen value overwritten before wireResume (JRN-s3-3).
-//   - Q3e..Q3j: recall's OnOpen reached outside the guard through an alias,
-//     a parenthesised receiver or a method expression, or inside it only
-//     through a shadowed recallExec, a dead branch or an uncalled closure
-//     (JRN-s3-3, #2507). JRN-s3-3 checks by go/types object, not spelling.
-//   - Q3k: recallExec reassigned in the guard, so OnOpen is a fresh
-//     executor's, not recall's (JRN-s3-3).
-//   - Q3l..Q3n: the guard's recallDir or verifier shadowed, so recall off
-//     is wired as on (JRN-s3-3). The guard is matched by go/types object.
-//   - R2..R7: lp.attach or forgetOwner.agent.Store run in a goroutine, a
-//     deferred or uncalled closure or a dead branch, so the boot's resume
-//     can run before the owner channel or the agent is attached
-//     (JRN-s3-2); R8: the recall-on arm's resumeBoot() in an uncalled
-//     closure (JRN-s3-1). Each call must be a statement reached from
-//     main's body only through blocks and if arms with no constant in
-//     their condition.
-//   - P1..P6: recallDir set before the guard, directly or through its
-//     address, verifier or lp reassigned, resumeBoot reset before
-//     daemon.Run or shadowed in the recall-on arm (JRN-s3-1..3). One rule
-//     covers them: each object the checks rest on (recallDir, verifier,
-//     recallExec, onOpen, lp, resumeBoot) is declared once in main and
-//     written once, from its source; its address is taken only as that
-//     write (flag.StringVar(&recallDir, ...)).
-//   - K: resumeBoot run through a copy before daemon.Run (JRN-s3-2); J..J4,
-//     M: wireResume called on another owner, through a copy of lp, of
-//     lp.forgetOwner or of the method, or lp.forgetOwner replaced first,
-//     so the daemon's own owner is never wired (JRN-s3-1). A value the
-//     checks follow by object is never copied: resumeBoot is only called
-//     or compared with nil, lp.forgetOwner only selected from, wireResume
-//     only called, and resumeBoot's one write is a call of wireResume on
-//     exactly lp.forgetOwner, lp being the pinned object. lp.attach and
-//     forgetOwner.agent.Store are matched by method and field object, so a
-//     copy of lp cannot hide one.
-//   - F1, F2: a goto past lp.attach, or a return between the wireResume
-//     call and lp.attach (each JRN-s3 it skips). main may hold no goto or
-//     label, and no return between the wireResume call and a call it
-//     vouches for.
+// fakeSwitch stands in for recall's LateExecutor in bootRecall: it notes
+// each call and runs nothing.
+type fakeSwitch struct{ note func(string) }
+
+func (s *fakeSwitch) OnOpen(func()) { s.note("OnOpen") }
+func (s *fakeSwitch) Off()          { s.note("Off") }
+
+// JRN-startup-reconcile s3 (Security R1 and Potency PT1 on #1382, #2507):
+// bootRecall, driven with fakes, runs the boot's resume on both arms of
+// boot setup's end (JRN-s3-1): recall on, before recall opens, so the
+// boot's resume waits for the open; recall off, after the executor is
+// marked off and the capability marked unwired, so the owner is told
+// recall is off. Recall is on, and wireResume handed recall's own OnOpen,
+// exactly when recall has a directory and a verifier (JRN-s3-3). Wiring
+// runs none of them.
 //
-// Out of reach, since ruling it out needs data-flow analysis: a condition
-// false only at run time (x := false; if x { ... }), and leaving main
-// through log.Fatal, os.Exit or panic, or blocking forever (select {}),
-// before a call it vouches for. Later: flag.Set("recall", ...) writes
-// recallDir with no assignment or address, consistently for the guard,
-// the arms and the recall config.
+// Brief JRN-startup-reconcile-s3: JRN-s3-1, JRN-s3-3 (subtest names).
+// REQ: CAP-3, OP-4
+func TestBootRecallFinishOrder(t *testing.T) {
+	v := modelroute.NewVerifier(t.TempDir() + "/verify.sock") // never dialled
+	on := []string{"boot", "OnOpen", "open"}
+	off := []string{"Off", "off", "boot"}
+	for _, c := range []struct {
+		name     string
+		dir      string
+		v        *modelroute.Verifier
+		learning bool
+		on       bool
+		want     []string
+	}{
+		{"recall on", "recall", v, true, true, on},
+		{"recall off with no directory", "", v, true, false, off},
+		{"recall off with no verifier", "recall", nil, true, false, off},
+		{"recall off with neither", "", nil, true, false, off},
+		{"recall on with no learning", "recall", v, false, true, []string{"open"}},
+		{"recall off with no learning", "", v, false, false, []string{"Off", "off"}},
+	} {
+		t.Run("JRN-s3-1 JRN-s3-3 "+c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var got []string
+			note := func(s string) {
+				mu.Lock()
+				got = append(got, s)
+				mu.Unlock()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var lp *learning
+			var f *ownerForget
+			if c.learning {
+				f = newForgetRig(t).f
+				lp = &learning{forgetOwner: f}
+			}
+			b := wireBootRecall(ctx, lp, c.dir, c.v, &fakeSwitch{note: note})
+			if b.on != c.on {
+				t.Fatalf("recall on = %v, want %v", b.on, c.on)
+			}
+			if f != nil && (f.noRecall == c.on || (f.whenOpen != nil) != c.on) {
+				t.Fatalf("wired noRecall %v, whenOpen set %v; want recall on = %v", f.noRecall, f.whenOpen != nil, c.on)
+			}
+			if (b.boot != nil) != c.learning {
+				t.Fatalf("boot's resume set = %v, want %v", b.boot != nil, c.learning)
+			}
+			if boot := b.boot; boot != nil {
+				b.boot = func() { note("boot"); boot() }
+			}
+			mu.Lock()
+			wired := len(got)
+			mu.Unlock()
+			if wired != 0 {
+				t.Fatalf("wiring ran %q", got)
+			}
+			b.finish(func() { note("open") }, func() { note("off") })
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.Join(got, " ") != strings.Join(c.want, " ") {
+				t.Errorf("finish ran %q, want %q", got, c.want)
+			}
+		})
+	}
+	waitIdle(newForgetRig(t).f)
+}
+
+// main wires FORGET's boot resume through bootRecall alone: one
+// wireBootRecall call, given main's own lp, recallDir, verifier and
+// recallExec, before daemon.Run, and one finish of what it returns after
+// lp.attach and lp.forgetOwner.agent.Store (PT1 and S3 on #1382: dropping
+// the wiring passed every other test). Each mutant must break only its
+// listed requirements, and the real source must pass. TestBootRecallFinishOrder
+// checks what bootRecall does; this checks only where main calls it.
+//   - JRN-s3-1: finish dropped, run twice, in a goroutine, a dead branch,
+//     or through a copy; wireBootRecall called twice (Q1..Q5, W2).
+//   - JRN-s3-2: finish before daemon.Run or before lp.attach, or the wire
+//     after daemon.Run (R1, R1b, W1); lp.attach or the agent Store not run
+//     in place, on another receiver, or through a copy (R2..R7, X1..X4);
+//     lp reassigned or lp.forgetOwner replaced (P4, M).
+//   - JRN-s3-3: recall's inputs not main's own: a constant, a fresh
+//     executor, recallDir or verifier rewritten, or wireResume called
+//     outside wireBootRecall (A1..A4, P3, W3).
+//   - F1, F2: a goto, or a return between the wire and a call it vouches
+//     for. main may hold neither.
+//
+// Out of reach without data-flow analysis: a condition false only at run
+// time, and leaving main (log.Fatal, os.Exit, panic) or blocking before
+// finish. Later: flag.Set("recall", ...) writes recallDir with no
+// assignment or address.
 //
 // Brief JRN-startup-reconcile-s3: JRN-s3-1..4 (subtest names).
 // REQ: CAP-3, OP-4
 func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	srcs := agentosdSources(t)
 	t.Run("JRN-s3-4 production wiring passes", func(t *testing.T) {
-		for _, bad := range forgetResumeWiring(t, srcs) {
+		for _, bad := range forgetBootWiring(t, srcs) {
 			t.Error(bad)
 		}
 	})
-	runBoot := "if resumeBoot != nil {\n\t\t\tresumeBoot()\n\t\t}\n"
-	wire := "\t\tresumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)\n"
-	guarded := "\t\t\tonOpen = recallExec.OnOpen\n"
+	wire := "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec)\n"
+	run := "\td, err := daemon.Run(ctx, cfg)\n"
+	finish := "\tforgetBoot.finish(func() { go openRecall(ctx, verifier, recallCfg, recallTools, recallExec) },\n\t\tfunc() { caps.recallWired(false) })\n"
 	attach := "\t\tlp.attach(ctx, d)\n"
 	store := "\t\t\t\tlp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,\n\t\t\t\t\tlineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})\n"
+	attachIf := "\tif lp != nil {\n" + attach
 	for _, m := range []struct {
-		name, old, new, req string
+		name, req string
+		edits     []string // old, new pairs
 	}{
-		{"R1 boot resume before daemon.Run", "\td, err := daemon.Run(ctx, cfg)\n",
-			"\tif resumeBoot != nil {\n\t\tresumeBoot()\n\t}\n\td, err := daemon.Run(ctx, cfg)\n", "JRN-s3-2"},
-		{"Q1 recall-on arm drops it", "\t\t" + runBoot + "\t\tgo openRecall(", "\t\tgo openRecall(", "JRN-s3-1"},
-		{"Q2 recall-off arm drops it", "caps.recallWired(false)\n\t\t" + runBoot, "caps.recallWired(false)\n", "JRN-s3-1"},
-		{"Q3 recall wired as off", "wireResume(ctx, onOpen)", "wireResume(ctx, nil)", "JRN-s3-3"},
-		{"Q3c OnOpen outside the recall guard", "\t\tif recallDir != \"\" && verifier != nil {\n\t\t\tonOpen = recallExec.OnOpen\n\t\t}\n",
-			"\t\tonOpen = recallExec.OnOpen\n", "JRN-s3-3"},
-		{"Q3d OnOpen in an unguarded var declaration", "\t\tvar onOpen func(func())\n\t\tif recallDir != \"\" && verifier != nil {\n\t\t\tonOpen = recallExec.OnOpen\n\t\t}\n",
-			"\t\tvar onOpen func(func()) = recallExec.OnOpen\n", "JRN-s3-3"},
-		{"Q3b OnOpen overwritten before wireResume", wire, "\t\tonOpen = nil\n" + wire, "JRN-s3-3"},
-		{"Q3e OnOpen through a receiver alias outside the guard", wire, "\t\tre := recallExec\n\t\tonOpen = re.OnOpen\n" + wire, "JRN-s3-3"},
-		{"Q3f OnOpen through a parenthesised receiver outside the guard", wire, "\t\tonOpen = (recallExec).OnOpen\n" + wire, "JRN-s3-3"},
-		{"Q3g OnOpen as a method expression outside the guard", wire, "\t\t(*recalltool.LateExecutor).OnOpen(recallExec, func() {})\n" + wire, "JRN-s3-3"},
-		{"Q3h OnOpen of a shadowed recallExec", guarded, "\t\t\trecallExec := &recalltool.LateExecutor{}\n" + guarded, "JRN-s3-3"},
-		{"Q3i OnOpen in a dead branch", guarded, "\t\t\tif false {\n\t" + guarded + "\t\t\t}\n", "JRN-s3-3"},
-		{"Q3j OnOpen in an uncalled closure", guarded, "\t\t\t_ = func() { onOpen = recallExec.OnOpen }\n", "JRN-s3-3"},
-		{"Q3k recallExec reassigned in the guard", guarded, "\t\t\trecallExec = &recalltool.LateExecutor{}\n" + guarded, "JRN-s3-3"},
-		{"Q3l recallDir shadowed in the guard's init", "\t\tif recallDir != \"\" && verifier != nil {\n" + guarded,
-			"\t\tif recallDir := \"on\"; recallDir != \"\" && verifier != nil {\n" + guarded, "JRN-s3-3"},
-		{"Q3m recallDir shadowed before the guard", "\t\tif recallDir != \"\" && verifier != nil {\n" + guarded,
-			"\t\trecallDir := \"on\"\n\t\tif recallDir != \"\" && verifier != nil {\n" + guarded, "JRN-s3-3"},
-		{"Q3n verifier shadowed before the guard", "\t\tif recallDir != \"\" && verifier != nil {\n" + guarded,
-			"\t\tverifier := verifier\n\t\tif recallDir != \"\" && verifier != nil {\n" + guarded, "JRN-s3-3"},
-		{"R2 lp.attach in its own goroutine", attach, "\t\tgo lp.attach(ctx, d)\n", "JRN-s3-2"},
-		{"R3 lp.attach in a goroutine's closure", attach, "\t\tgo func() { lp.attach(ctx, d) }()\n", "JRN-s3-2"},
-		{"R4 lp.attach in a deferred closure", attach, "\t\tdefer func() { lp.attach(ctx, d) }()\n", "JRN-s3-2"},
-		{"R5 lp.attach in an uncalled closure", attach, "\t\t_ = func() { lp.attach(ctx, d) }\n", "JRN-s3-2"},
-		{"R6 lp.attach in a dead branch", attach, "\t\tif false {\n\t" + attach + "\t\t}\n", "JRN-s3-2"},
-		{"R7 forgetOwner.agent.Store in a goroutine's closure", store, "\t\t\t\tgo func() {\n" + store + "\t\t\t\t}()\n", "JRN-s3-2"},
-		{"R8 recall-on resumeBoot in an uncalled closure", "\t\t" + runBoot + "\t\tgo openRecall(",
-			"\t\t_ = func() { resumeBoot() }\n\t\tgo openRecall(", "JRN-s3-1"},
-		{"P1 recallDir set before the guard", "\t\tif recallDir != \"\" && verifier != nil {\n" + guarded,
-			"\t\trecallDir = \"on\"\n\t\tif recallDir != \"\" && verifier != nil {\n" + guarded, "JRN-s3-3"},
-		{"P2 recallDir set through its address", "\t\tif recallDir != \"\" && verifier != nil {\n" + guarded,
-			"\t\tp := &recallDir\n\t\t*p = \"on\"\n\t\tif recallDir != \"\" && verifier != nil {\n" + guarded, "JRN-s3-3"},
-		{"P3 verifier reassigned", wire, "\t\tverifier = nil\n" + wire, "JRN-s3-3"},
-		{"P4 lp reassigned", attach, "\t\tlp = nil\n" + attach, "JRN-s3-2"},
-		{"P5 resumeBoot reset before daemon.Run", "\td, err := daemon.Run(ctx, cfg)\n",
-			"\tresumeBoot = nil\n\td, err := daemon.Run(ctx, cfg)\n", "JRN-s3-1"},
-		{"P6 resumeBoot shadowed in the recall-on arm", "\t\t" + runBoot + "\t\tgo openRecall(",
-			"\t\tresumeBoot := func() {}\n\t\t" + runBoot + "\t\tgo openRecall(", "JRN-s3-1"},
-		{"F1 goto past lp.attach", attach, "\t\tgoto attached\n" + attach + "\tattached:\n", "JRN-s3-1 JRN-s3-2 JRN-s3-3"},
-		{"F2 return before lp.attach", attach, "\t\tif ctx.Err() != nil {\n\t\t\treturn\n\t\t}\n" + attach, "JRN-s3-1 JRN-s3-2"},
-		{"K resumeBoot run through a copy before daemon.Run", "\td, err := daemon.Run(ctx, cfg)\n",
-			"\trb := resumeBoot\n\trb()\n\td, err := daemon.Run(ctx, cfg)\n", "JRN-s3-2"},
-		{"J wireResume on another owner", wire, "\t\tresumeBoot = new(ownerForget).wireResume(ctx, onOpen)\n", "JRN-s3-1"},
-		{"J2 wireResume through a copy of lp", wire, "\t\tl := lp\n\t\tresumeBoot = l.forgetOwner.wireResume(ctx, onOpen)\n", "JRN-s3-1"},
-		{"J3 wireResume through a copy of lp.forgetOwner", wire, "\t\tfo := lp.forgetOwner\n\t\tresumeBoot = fo.wireResume(ctx, onOpen)\n", "JRN-s3-1"},
-		{"J4 wireResume taken as a method value", wire, "\t\t_ = lp.forgetOwner.wireResume\n" + wire, "JRN-s3-1"},
-		{"M lp.forgetOwner replaced before the wire", wire, "\t\tlp.forgetOwner = new(ownerForget)\n" + wire, "JRN-s3-1"},
+		{"R1 finish before daemon.Run", "JRN-s3-2", []string{finish, "", run, "\tforgetBoot.finish(func() {}, func() { caps.recallWired(false) })\n" + run}},
+		{"R1b finish before lp.attach", "JRN-s3-2", []string{finish, "", attachIf, finish + attachIf}},
+		{"W1 wired after daemon.Run", "JRN-s3-2", []string{wire + run, run + wire}},
+		{"R2 lp.attach in its own goroutine", "JRN-s3-2", []string{attach, "\t\tgo lp.attach(ctx, d)\n"}},
+		{"R3 lp.attach in a goroutine's closure", "JRN-s3-2", []string{attach, "\t\tgo func() { lp.attach(ctx, d) }()\n"}},
+		{"R4 lp.attach in a deferred closure", "JRN-s3-2", []string{attach, "\t\tdefer func() { lp.attach(ctx, d) }()\n"}},
+		{"R5 lp.attach in an uncalled closure", "JRN-s3-2", []string{attach, "\t\t_ = func() { lp.attach(ctx, d) }\n"}},
+		{"R6 lp.attach in a dead branch", "JRN-s3-2", []string{attach, "\t\tif false {\n\t" + attach + "\t\t}\n"}},
+		{"R7 agent Store in a goroutine's closure", "JRN-s3-2", []string{store, "\t\t\t\tgo func() {\n" + store + "\t\t\t\t}()\n"}},
+		{"X1 attach on another learning", "JRN-s3-2", []string{attach, "\t\tnew(learning).attach(ctx, d)\n"}},
+		{"X2 agent Store on another owner", "JRN-s3-2", []string{"lp.forgetOwner.agent.Store(", "new(ownerForget).agent.Store("}},
+		{"X3 agent Store through a copy of lp.forgetOwner", "JRN-s3-2", []string{"\t\t\t\tlp.forgetOwner.agent.Store(", "\t\t\t\tfo := lp.forgetOwner\n\t\t\t\tfo.agent.Store("}},
+		{"X4 attach through a copy of lp", "JRN-s3-2", []string{attach, "\t\tl := lp\n\t\tl.attach(ctx, d)\n"}},
+		{"P4 lp reassigned", "JRN-s3-2", []string{attach, "\t\tlp = nil\n" + attach}},
+		{"M lp.forgetOwner replaced", "JRN-s3-2", []string{wire, "\tif lp != nil {\n\t\tlp.forgetOwner = new(ownerForget)\n\t}\n" + wire}},
+		{"Q1 finish dropped", "JRN-s3-1", []string{finish, ""}},
+		{"Q2 finish in a goroutine", "JRN-s3-1", []string{finish, "\tgo " + finish[1:]}},
+		{"Q3 finish in a dead branch", "JRN-s3-1", []string{finish, "\tif false {\n" + finish + "\t}\n"}},
+		{"Q4 finish through a copy", "JRN-s3-1", []string{finish, "\tfb := forgetBoot\n\tfb." + finish[len("\tforgetBoot."):]}},
+		{"Q5 finish twice", "JRN-s3-1", []string{finish, finish + finish}},
+		{"W2 wired twice", "JRN-s3-1", []string{wire, "\t_ = wireBootRecall(ctx, lp, recallDir, verifier, recallExec)\n" + wire}},
+		{"W3 wireResume called in main", "JRN-s3-3", []string{wire, wire + "\tif lp != nil {\n\t\t_ = lp.forgetOwner.wireResume(ctx, nil)\n\t}\n"}},
+		{"A1 recall's directory a constant", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, \"\", verifier, recallExec)\n"}},
+		{"A2 recall's verifier nil", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, nil, recallExec)\n"}},
+		{"A3 a fresh executor", "JRN-s3-3", []string{wire, "\tforgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, &recalltool.LateExecutor{})\n"}},
+		{"A4 recallDir set before the wire", "JRN-s3-3", []string{wire, "\trecallDir = \"on\"\n" + wire}},
+		{"P3 verifier reassigned", "JRN-s3-3", []string{wire, "\tverifier = nil\n" + wire}},
+		{"F1 goto past lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tgoto attached\n" + attach + "\tattached:\n"}},
+		{"F2 return before lp.attach", "JRN-s3-1 JRN-s3-2", []string{attach, "\t\tif ctx.Err() != nil {\n\t\t\treturn\n\t\t}\n" + attach}},
 	} {
 		t.Run(m.req+" "+m.name+" fails", func(t *testing.T) {
 			src := srcs["main.go"]
-			if n := strings.Count(src, m.old); n != 1 {
-				t.Fatalf("main.go holds the mutated text %d times (want 1): %q", n, m.old)
+			for i := 0; i < len(m.edits); i += 2 {
+				if n := strings.Count(src, m.edits[i]); n != 1 {
+					t.Fatalf("main.go holds the mutated text %d times (want 1): %q", n, m.edits[i])
+				}
+				src = strings.Replace(src, m.edits[i], m.edits[i+1], 1)
 			}
 			mut := make(map[string]string, len(srcs))
 			for k, v := range srcs {
 				mut[k] = v
 			}
-			mut["main.go"] = strings.Replace(src, m.old, m.new, 1)
+			mut["main.go"] = src
 			// The mutant breaks each of its own requirements and
 			// nothing else.
 			reqs := strings.Fields(m.req)
 			broke := map[string]bool{}
-			for _, b := range forgetResumeWiring(t, mut) {
+			for _, b := range forgetBootWiring(t, mut) {
 				own := false
 				for _, r := range reqs {
 					if strings.HasPrefix(b, r+":") {
@@ -334,15 +364,14 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	}
 }
 
-// forgetResumeWiring parses agentosd's sources, type-checks the ones this
-// build compiles, and lists each way the forget resume is wired wrong,
-// each prefixed with the requirement it breaks.
-func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
+// forgetBootWiring parses agentosd's sources, type-checks the ones this
+// build compiles, and lists each way main calls bootRecall wrong, each
+// prefixed with the requirement it breaks.
+func forgetBootWiring(t *testing.T, srcs map[string]string) []string {
 	t.Helper()
 	tc := agentosdTypes(t)
 	var bad []string
 	fset := token.NewFileSet()
-	calls, boots := 0, 0
 	var main *ast.File
 	var files []*ast.File
 	for name, src := range srcs {
@@ -356,36 +385,6 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		if tc.goFiles[name] {
 			files = append(files, f)
 		}
-		for _, d := range f.Decls {
-			fn, _ := d.(*ast.FuncDecl)
-			inWire := fn != nil && fn.Name.Name == "wireResume"
-			ast.Inspect(d, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.AssignStmt:
-					for i, l := range n.Lhs {
-						if s, ok := l.(*ast.SelectorExpr); ok && (s.Sel.Name == "resume" || s.Sel.Name == "whenOpen" || s.Sel.Name == "noRecall") && !inWire {
-							bad = append(bad, fmt.Sprintf("wiring: %s: %s assigned outside wireResume", fset.Position(l.Pos()), s.Sel.Name))
-						}
-						if name != "main.go" || i >= len(n.Rhs) {
-							continue
-						}
-						if c, ok := n.Rhs[i].(*ast.CallExpr); ok {
-							if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "wireResume" {
-								calls++
-							}
-						}
-					}
-				case *ast.CallExpr:
-					if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "resumeBoot" && name == "main.go" {
-						boots++
-					}
-				}
-				return true
-			})
-		}
-	}
-	if calls != 1 || boots == 0 {
-		bad = append(bad, fmt.Sprintf("wiring: main wires the forget resume %d times (want 1), runs the boot's resume %d times (want some)", calls, boots))
 	}
 	if main == nil {
 		return append(bad, "wiring: no main.go")
@@ -400,7 +399,7 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		Types:      map[ast.Expr]types.TypeAndValue{},
 		Scopes:     map[ast.Node]*types.Scope{},
 	}
-	// Soft errors (a variable declared and not used, as in Q3) still
+	// Soft errors (a variable declared and not used, as in Q1) still
 	// leave info whole; anything else is a mutant that does not parse as Go.
 	conf := types.Config{Importer: tc.imp, Error: func(err error) {
 		if te, ok := err.(types.Error); !ok || !te.Soft {
@@ -408,7 +407,67 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 	}}
 	pkg, _ := conf.Check(tc.path, fset, files, info)
-	inMain := func(n ast.Node) bool { return n.Pos() >= main.Pos() && n.End() <= main.End() }
+	member := func(typ, name string) types.Object {
+		o := pkg.Scope().Lookup(typ)
+		if o == nil {
+			return nil
+		}
+		m, _, _ := types.LookupFieldOrMethod(types.NewPointer(o.Type()), false, pkg, name)
+		return m
+	}
+	wireBoot := pkg.Scope().Lookup("wireBootRecall")
+	finishFn, wireFn := member("bootRecall", "finish"), member("ownerForget", "wireResume")
+	ownerField, attachFn, agentField := member("learning", "forgetOwner"), member("learning", "attach"), member("ownerForget", "agent")
+	// Each field the wiring sets, and the one function that may set it.
+	setter := map[types.Object]string{}
+	for _, f := range []struct{ typ, field, fn string }{
+		{"ownerForget", "resume", "wireResume"}, {"ownerForget", "whenOpen", "wireResume"}, {"ownerForget", "noRecall", "wireResume"},
+		{"bootRecall", "on", "wireBootRecall"}, {"bootRecall", "ex", "wireBootRecall"}, {"bootRecall", "boot", "wireBootRecall"},
+	} {
+		if o := member(f.typ, f.field); o != nil {
+			setter[o] = f.fn
+		}
+	}
+	if wireBoot == nil || finishFn == nil || wireFn == nil || ownerField == nil || attachFn == nil || agentField == nil || len(setter) != 6 {
+		return append(bad, "wiring: no wireBootRecall, bootRecall.finish or its fields, ownerForget.wireResume, .agent or its resume fields, or learning.forgetOwner or .attach")
+	}
+
+	// Package-wide: those fields are set only by their setter, wireResume
+	// is reached only from wireBootRecall, and wireBootRecall is reached
+	// once.
+	wireBoots := 0
+	for _, f := range files {
+		for _, d := range f.Decls {
+			in := ""
+			if fn, ok := d.(*ast.FuncDecl); ok {
+				in = fn.Name.Name
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.AssignStmt:
+					for _, l := range n.Lhs {
+						if s, ok := ast.Unparen(l).(*ast.SelectorExpr); ok && info.Selections[s] != nil {
+							if fn, ok := setter[info.Selections[s].Obj()]; ok && fn != in {
+								bad = append(bad, fmt.Sprintf("wiring: %s: %s set outside %s", fset.Position(l.Pos()), s.Sel.Name, fn))
+							}
+						}
+					}
+				case *ast.Ident:
+					if info.Uses[n] == wireFn && in != "wireBootRecall" {
+						bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: wireResume reached outside wireBootRecall", fset.Position(n.Pos())))
+					}
+					if info.Uses[n] == wireBoot {
+						wireBoots++
+					}
+				}
+				return true
+			})
+		}
+	}
+	if wireBoots != 1 {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: wireBootRecall is reached %d times (want 1)", wireBoots))
+	}
+
 	var mainFn *ast.FuncDecl
 	for _, d := range main.Decls {
 		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "main" {
@@ -431,32 +490,12 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		stack = append(stack, n)
 		return true
 	})
-	// Each object the checks below rest on is pinned, and they match it
-	// by object, not by name.
-	var lateExec, onOpenFn, wireFn types.Object
-	for _, p := range pkg.Imports() {
-		if p.Path() == "github.com/ghbmrk/agentos/broker/recalltool" {
-			if lateExec = p.Scope().Lookup("LateExecutor"); lateExec != nil {
-				onOpenFn, _, _ = types.LookupFieldOrMethod(types.NewPointer(lateExec.Type()), false, p, "OnOpen")
-			}
-		}
-	}
-	var ownerField, attachFn, agentField types.Object
-	if of := pkg.Scope().Lookup("ownerForget"); of != nil {
-		wireFn, _, _ = types.LookupFieldOrMethod(types.NewPointer(of.Type()), false, pkg, "wireResume")
-		agentField, _, _ = types.LookupFieldOrMethod(types.NewPointer(of.Type()), false, pkg, "agent")
-	}
-	if l := pkg.Scope().Lookup("learning"); l != nil {
-		ownerField, _, _ = types.LookupFieldOrMethod(types.NewPointer(l.Type()), false, pkg, "forgetOwner")
-		attachFn, _, _ = types.LookupFieldOrMethod(types.NewPointer(l.Type()), false, pkg, "attach")
-	}
-	if onOpenFn == nil || wireFn == nil || agentField == nil || ownerField == nil || attachFn == nil {
-		return append(bad, "wiring: no recalltool.LateExecutor.OnOpen, ownerForget.wireResume or .agent, or learning.forgetOwner or .attach")
-	}
 	callsTo := func(e ast.Expr, pkgPath, name string) bool {
 		f, _ := callee(info, e).(*types.Func)
 		return f != nil && f.Pkg() != nil && f.Pkg().Path() == pkgPath && f.Name() == name
 	}
+	// The objects main hands bootRecall, pinned to one write each from
+	// their source, so they are main's own.
 	obj := map[string]types.Object{}
 	for _, p := range []struct {
 		name, req, src string
@@ -472,32 +511,17 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 				return false
 			}
 			c, ok := u.X.(*ast.CompositeLit)
-			return ok && len(c.Elts) == 0 && types.Identical(info.TypeOf(c), lateExec.Type())
-		}},
-		{"onOpen", "JRN-s3-3", "recallExec.OnOpen", func(e ast.Expr) bool {
-			s, ok := e.(*ast.SelectorExpr)
-			if !ok || info.Selections[s] == nil || info.Selections[s].Obj() != onOpenFn {
+			if !ok || len(c.Elts) != 0 {
 				return false
 			}
-			id, ok := s.X.(*ast.Ident)
-			return ok && obj["recallExec"] != nil && info.Uses[id] == obj["recallExec"]
+			n, ok := info.TypeOf(c).(*types.Named)
+			return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == "github.com/ghbmrk/agentos/broker/recalltool" && n.Obj().Name() == "LateExecutor"
 		}},
 		{"lp", "JRN-s3-2", "openLearning", func(e ast.Expr) bool {
 			o := pkg.Scope().Lookup("openLearning")
 			return o != nil && callee(info, e) == o
 		}},
-		{"resumeBoot", "JRN-s3-1", "lp.forgetOwner.wireResume", func(e ast.Expr) bool {
-			c, ok := e.(*ast.CallExpr)
-			if !ok || callee(info, c) != wireFn {
-				return false
-			}
-			m, ok := c.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return false
-			}
-			r, ok := m.X.(*ast.SelectorExpr)
-			return ok && info.Selections[r] != nil && info.Selections[r].Obj() == ownerField && isObj(info, r.X, obj["lp"])
-		}},
+		{"forgetBoot", "JRN-s3-1", "wireBootRecall", func(e ast.Expr) bool { return callee(info, e) == wireBoot }},
 	} {
 		o, why := pinned(p.name, p.src, mainFn, parent, info, p.from)
 		if why != "" {
@@ -505,52 +529,26 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 		obj[p.name] = o
 	}
-	// Values the checks follow by object may not be copied, so no alias
-	// stands in for them: resumeBoot is only called or compared with nil,
-	// lp.forgetOwner only selected from (never written, copied or
-	// dereferenced), and wireResume only called. Copies of recallDir,
-	// verifier, recallExec and lp are harmless: the checks match the calls
-	// they vouch for by method or field object, whatever the receiver.
-	isNil := func(e ast.Expr) bool {
-		id, ok := e.(*ast.Ident)
-		_, n := info.Uses[id].(*types.Nil)
-		return ok && n
+	lp, boot := obj["lp"], obj["forgetBoot"]
+	// forgetBoot is only finish's receiver, and lp.forgetOwner only
+	// selected from (never written or copied), so no alias stands in for
+	// either.
+	if n := usedOnly(mainFn, parent, info, boot, func(use, p ast.Node) bool {
+		s, ok := p.(*ast.SelectorExpr)
+		return ok && s.X == use && info.Uses[s.Sel] == finishFn
+	}); n != nil {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: forgetBoot is used other than to finish", fset.Position(n.Pos())))
 	}
-	called := func(use, p ast.Node) bool { c, ok := p.(*ast.CallExpr); return ok && c.Fun == use }
-	for _, u := range []struct {
-		name, req, how string
-		obj            types.Object
-		ok             func(use, p ast.Node) bool
-	}{
-		{"resumeBoot", "JRN-s3-2", "only called or compared with nil", obj["resumeBoot"], func(use, p ast.Node) bool {
-			switch p := p.(type) {
-			case *ast.BinaryExpr:
-				return (p.Op == token.EQL || p.Op == token.NEQ) && (p.X == use && isNil(p.Y) || p.Y == use && isNil(p.X))
-			case *ast.AssignStmt: // its one write, which pinned checks
-				return p.Tok == token.ASSIGN && len(p.Lhs) == 1 && p.Lhs[0] == use
-			}
-			return called(use, p)
-		}},
-		{"lp.forgetOwner", "JRN-s3-1", "only selected from, never written or copied", ownerField, func(use, p ast.Node) bool {
-			s, ok := p.(*ast.SelectorExpr)
-			return ok && s.X == use
-		}},
-		{"wireResume", "JRN-s3-1", "only called", wireFn, called},
-	} {
-		if u.obj == nil {
-			continue
-		}
-		if n := usedOnly(mainFn, parent, info, u.obj, u.ok); n != nil {
-			bad = append(bad, fmt.Sprintf("%s: %s: %s is used other than %s", u.req, fset.Position(n.Pos()), u.name, u.how))
-		}
+	if n := usedOnly(mainFn, parent, info, ownerField, func(use, p ast.Node) bool {
+		s, ok := p.(*ast.SelectorExpr)
+		return ok && s.X == use
+	}); n != nil {
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: lp.forgetOwner is used other than selected from", fset.Position(n.Pos())))
 	}
-	dirObj, verObj := obj["recallDir"], obj["verifier"]
-	if dirObj == nil || verObj == nil || obj["recallExec"] == nil {
-		return bad
-	}
-	// inPlace follows blocks and if arms only, so main may hold no jump,
-	// and no return between the wireResume call and a call it vouches for
-	// (main returns early, before it, in held mode and after sign-in).
+
+	// main may hold no jump, and no return between the wire and a call it
+	// vouches for (it returns early, before it, in held mode and after
+	// sign-in).
 	var jumps, returns []ast.Node
 	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -579,184 +577,116 @@ func forgetResumeWiring(t *testing.T, srcs map[string]string) []string {
 		}
 		return inPlace(n, parent, mainFn.Body, info)
 	}
-	recallCond := func(e ast.Expr) bool {
-		b, ok := e.(*ast.BinaryExpr)
-		if !ok || b.Op != token.LAND {
-			return false
-		}
-		l, ok1 := b.X.(*ast.BinaryExpr)
-		r, ok2 := b.Y.(*ast.BinaryExpr)
-		if !ok1 || !ok2 || l.Op != token.NEQ || r.Op != token.NEQ {
-			return false
-		}
-		ld, _ := l.X.(*ast.Ident)
-		lit, _ := l.Y.(*ast.BasicLit)
-		rv, _ := r.X.(*ast.Ident)
-		rn, _ := r.Y.(*ast.Ident)
-		if ld == nil || lit == nil || rv == nil || rn == nil {
-			return false
-		}
-		_, isNil := info.Uses[rn].(*types.Nil)
-		return info.Uses[ld] == dirObj && lit.Kind == token.STRING && lit.Value == `""` && info.Uses[rv] == verObj && isNil
-	}
-
-	// The calls in main.go the order rests on, and the block each
-	// statement sits in directly.
-	var resumes, attaches, agents []*ast.CallExpr
-	var wires []*ast.CallExpr
-	assigns := map[ast.Expr]*ast.AssignStmt{}
-	block := map[ast.Stmt]*ast.BlockStmt{}
-	var arms []*ast.IfStmt
-	ast.Inspect(main, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.BlockStmt:
-			for _, s := range n.List {
-				block[s] = n
-			}
-		case *ast.CallExpr:
-			if isObj(info, n.Fun, obj["resumeBoot"]) {
-				resumes = append(resumes, n)
-			}
-			if callee(info, n) == attachFn {
-				attaches = append(attaches, n)
-			}
-			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Store" {
-				if a, ok := s.X.(*ast.SelectorExpr); ok && info.Selections[a] != nil && info.Selections[a].Obj() == agentField {
-					agents = append(agents, n)
+	// top is the index in main's body of the statement holding n.
+	top := func(n ast.Node) int {
+		for ; n != nil; n = parent[n] {
+			if parent[n] == mainFn.Body {
+				for i, s := range mainFn.Body.List {
+					if s == n {
+						return i
+					}
 				}
 			}
-			if callee(info, n) == wireFn {
-				wires = append(wires, n)
-			}
+		}
+		return -1
+	}
+
+	// The calls the order rests on: the wire (forgetBoot's one write),
+	// daemon.Run, finish on forgetBoot, lp.attach on lp, and Store on
+	// lp.forgetOwner.agent, each matched by object and receiver.
+	var wire ast.Node
+	var runs, finishes, attaches, stores []*ast.CallExpr
+	onLp := func(e ast.Expr, field types.Object) (ast.Expr, bool) {
+		s, ok := ast.Unparen(e).(*ast.SelectorExpr)
+		if !ok || info.Selections[s] == nil || info.Selections[s].Obj() != field {
+			return nil, false
+		}
+		return s.X, true
+	}
+	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
 		case *ast.AssignStmt:
-			if n.Tok == token.ASSIGN && len(n.Lhs) == 1 && len(n.Rhs) == 1 {
-				assigns[n.Rhs[0]] = n
+			if len(n.Lhs) == 1 && isDef(info, n.Lhs[0], boot) {
+				wire = n
 			}
-		case *ast.IfStmt:
-			if n.Init == nil && recallCond(n.Cond) && n.Else != nil {
-				arms = append(arms, n)
+		case *ast.CallExpr:
+			s, _ := ast.Unparen(n.Fun).(*ast.SelectorExpr)
+			switch {
+			case callsTo(n, "github.com/ghbmrk/agentos/broker/daemon", "Run"):
+				runs = append(runs, n)
+			case s != nil && info.Uses[s.Sel] == finishFn:
+				finishes = append(finishes, n)
+			case s != nil && info.Uses[s.Sel] == attachFn && isObj(info, s.X, lp):
+				attaches = append(attaches, n)
+			case s != nil && s.Sel.Name == "Store":
+				if a, ok := onLp(s.X, agentField); ok {
+					if o, ok := onLp(a, ownerField); ok && isObj(info, o, lp) {
+						stores = append(stores, n)
+					}
+				}
 			}
 		}
 		return true
 	})
-	if len(wires) == 1 {
-		wired = wires[0].Pos()
+	if wire == nil || len(runs) != 1 {
+		return append(bad, fmt.Sprintf("JRN-s3-2: main wires forgetBoot %v and calls daemon.Run %d times (want once)", wire != nil, len(runs)))
+	}
+	wired = wire.Pos()
+	if why := placed(wire); why != "" {
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: the wire does not run in place: %s", fset.Position(wire.Pos()), why))
+	}
+	if top(wire) >= top(runs[0]) {
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: wired after daemon.Run", fset.Position(wire.Pos())))
 	}
 
-	// JRN-s3-1: each arm of the recall if/else runs the boot's resume in
-	// place.
-	if len(arms) != 1 {
-		bad = append(bad, fmt.Sprintf("JRN-s3-1: main.go has %d recall if/else (want 1)", len(arms)))
+	// JRN-s3-1: main finishes forgetBoot once, in place.
+	if len(finishes) != 1 {
+		return append(bad, fmt.Sprintf("JRN-s3-1: main finishes boot setup %d times (want 1)", len(finishes)))
 	}
-	for _, a := range arms {
-		for _, arm := range []struct {
-			name string
-			node ast.Node
-		}{{"recall-on", a.Body}, {"recall-off", a.Else}} {
-			if !callsResumeBoot(arm.node, info, obj["resumeBoot"], placed) {
-				bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: the %s arm runs no resumeBoot() in place", fset.Position(arm.node.Pos()), arm.name))
+	fin := finishes[0]
+	if s := ast.Unparen(fin.Fun).(*ast.SelectorExpr); !isObj(info, s.X, boot) {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: finish is not forgetBoot's", fset.Position(fin.Pos())))
+	}
+	if why := placed(fin); why != "" {
+		bad = append(bad, fmt.Sprintf("JRN-s3-1: %s: finish does not run in place: %s", fset.Position(fin.Pos()), why))
+	}
+
+	// JRN-s3-2: lp.attach and lp.forgetOwner.agent.Store each run in place
+	// in a statement of main's body before finish's.
+	for _, k := range []struct {
+		name  string
+		calls []*ast.CallExpr
+	}{{"lp.attach", attaches}, {"lp.forgetOwner.agent.Store", stores}} {
+		ok := false
+		for _, c := range k.calls {
+			if placed(c) == "" && top(c) < top(fin) {
+				ok = true
 			}
 		}
-	}
-
-	// JRN-s3-2: lp.attach( and forgetOwner.agent.Store( each run in place
-	// in main() (not in a go or defer statement, a closure or a dead
-	// branch), and every resumeBoot() comes after all of them in source
-	// order.
-	if len(attaches) == 0 || len(agents) == 0 {
-		bad = append(bad, fmt.Sprintf("JRN-s3-2: main.go calls lp.attach %d times and forgetOwner.agent.Store %d times (want some of each)", len(attaches), len(agents)))
-	}
-	for _, c := range append(append([]*ast.CallExpr(nil), attaches...), agents...) {
-		if why := placed(c); why != "" {
-			bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: %s does not run in place: %s", fset.Position(c.Pos()), types.ExprString(c.Fun), why))
-		}
-		for _, r := range resumes {
-			if r.Pos() < c.Pos() {
-				bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: resumeBoot() runs before %s", fset.Position(r.Pos()), fset.Position(c.Pos())))
-			}
+		if !ok {
+			bad = append(bad, fmt.Sprintf("JRN-s3-2: no %s runs in place before finish (%d found)", k.name, len(k.calls)))
 		}
 	}
-
-	// JRN-s3-3: wireResume's second argument is onOpen, pinned to one
-	// write from recallExec.OnOpen, made as a statement directly in the
-	// recall guard's body, which sits in the same block as the wireResume
-	// call, in place, and before it; nothing else in main.go reaches
-	// recall's OnOpen. Checked by go/types object, so aliases,
-	// parentheses and method expressions count.
-	if len(wires) != 1 {
-		bad = append(bad, fmt.Sprintf("JRN-s3-3: main.go calls wireResume %d times (want 1)", len(wires)))
+	if top(fin) <= top(runs[0]) {
+		bad = append(bad, fmt.Sprintf("JRN-s3-2: %s: finish runs before daemon.Run", fset.Position(fin.Pos())))
 	}
-	for _, w := range wires {
-		if p := onOpenWiring(info, main, inMain, w, onOpenFn, obj["recallExec"], assigns, block, recallCond, placed); p != "" {
-			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: %s", fset.Position(w.Pos()), p))
+
+	// JRN-s3-3: the wire hands bootRecall main's own lp, recallDir,
+	// verifier and recallExec.
+	if a, ok := wire.(*ast.AssignStmt); ok && len(a.Rhs) == 1 {
+		c, _ := ast.Unparen(a.Rhs[0]).(*ast.CallExpr)
+		if c == nil || len(c.Args) != 5 || !isObj(info, c.Args[1], lp) || !isObj(info, c.Args[2], obj["recallDir"]) ||
+			!isObj(info, c.Args[3], obj["verifier"]) || !isObj(info, c.Args[4], obj["recallExec"]) {
+			bad = append(bad, fmt.Sprintf("JRN-s3-3: %s: the wire is not given main's lp, recallDir, verifier and recallExec", fset.Position(wire.Pos())))
 		}
 	}
 	return bad
 }
 
-// onOpenWiring says how the wireResume call w is not handed recall's
-// OnOpen as JRN-s3-3 requires, or "" when it is.
-func onOpenWiring(info *types.Info, main *ast.File, inMain func(ast.Node) bool, w *ast.CallExpr, onOpenFn, recallExec types.Object, assigns map[ast.Expr]*ast.AssignStmt, block map[ast.Stmt]*ast.BlockStmt, recallCond func(ast.Expr) bool, placed func(ast.Node) string) string {
-	var uses []*ast.SelectorExpr
-	for sel, s := range info.Selections {
-		if s.Obj() == onOpenFn && inMain(sel) {
-			uses = append(uses, sel)
-		}
-	}
-	if len(uses) != 1 {
-		return fmt.Sprintf("main.go reaches recall's OnOpen %d times (want 1)", len(uses))
-	}
-	use := uses[0]
-	if !isObj(info, use.X, recallExec) {
-		return "recall's OnOpen is not taken from recallExec"
-	}
-	set := assigns[use]
-	if set == nil {
-		return "recallExec.OnOpen is not the whole right side of an assignment"
-	}
-	guard := (*ast.IfStmt)(nil)
-	if b := block[set]; b != nil {
-		ast.Inspect(main, func(n ast.Node) bool {
-			if g, ok := n.(*ast.IfStmt); ok && g.Body == b {
-				guard = g
-			}
-			return guard == nil
-		})
-	}
-	if guard == nil || guard.Init != nil || !recallCond(guard.Cond) {
-		return "recallExec.OnOpen is not set directly in the body of `if recallDir != \"\" && verifier != nil`"
-	}
-	if len(w.Args) != 2 {
-		return "wireResume does not take two arguments"
-	}
-	arg, _ := w.Args[1].(*ast.Ident)
-	v, _ := info.Uses[arg].(*types.Var)
-	lhs, _ := set.Lhs[0].(*ast.Ident)
-	if arg == nil || v == nil || lhs == nil || info.Uses[lhs] != v {
-		return "wireResume's second argument is not the variable set from recallExec.OnOpen"
-	}
-	n := 0
-	for _, obj := range info.Uses {
-		if obj == v {
-			n++
-		}
-	}
-	if n != 2 {
-		return fmt.Sprintf("the variable set from recallExec.OnOpen is used %d times (want 2: set, then passed)", n)
-	}
-	var call ast.Stmt
-	for s := range block {
-		if a, ok := s.(*ast.AssignStmt); ok && len(a.Rhs) == 1 && a.Rhs[0] == ast.Expr(w) {
-			call = s
-		}
-	}
-	if call == nil || block[call] != block[guard] || guard.Pos() > call.Pos() {
-		return "the recall guard is not in the wireResume call's block, before it"
-	}
-	if why := placed(call); why != "" {
-		return "the wireResume call does not run in place: " + why
-	}
-	return ""
+// isDef reports whether e, unparenthesised, is the identifier defining obj.
+func isDef(info *types.Info, e ast.Expr, obj types.Object) bool {
+	id, ok := ast.Unparen(e).(*ast.Ident)
+	return ok && obj != nil && info.Defs[id] == obj
 }
 
 // agentosdTyping is what type-checking agentosd needs: its import path,
@@ -951,21 +881,6 @@ func pinned(name, src string, fn *ast.FuncDecl, parent map[ast.Node]ast.Node, in
 		return obj, fmt.Sprintf("%s is written once, but not from %s", name, src)
 	}
 	return obj, ""
-}
-
-// callsResumeBoot reports whether n holds a call of main's resumeBoot,
-// the object boot, that placed finds in place.
-func callsResumeBoot(n ast.Node, info *types.Info, boot types.Object, placed func(ast.Node) string) bool {
-	found := false
-	ast.Inspect(n, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CallExpr); ok {
-			if isObj(info, c.Fun, boot) && placed(c) == "" {
-				found = true
-			}
-		}
-		return !found
-	})
-	return found
 }
 
 // inPlace says why n, a call or a statement, does not run in place as

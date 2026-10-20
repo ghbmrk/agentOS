@@ -343,6 +343,55 @@ func (r recallMachines) Plan(lineage string, since time.Time) (recalltool.Plan, 
 	return recalltool.Plan{To: p.To, Changes: p.Changes}, err
 }
 
+// bootRecall is boot setup's end for recall and for FORGET's item 2s a
+// restart interrupted, which resume once recall opens (#327 L3 B-3),
+// including one startup reconcile finds late (#1370); with recall off the
+// owner is told they cannot, once boot setup is done (Security S1 on
+// #1382, wireResume). Recall is on when it has a directory and a
+// verifier. main wires it before daemon.Run, so startup reconcile finds
+// the resume wired, and finishes it once the gate, the owner channel and
+// the agent machine are attached (lp.attach, forgetOwner.agent.Store).
+type bootRecall struct {
+	on   bool
+	ex   recallSwitch
+	boot func()
+}
+
+// recallSwitch is what boot setup uses of recall's LateExecutor.
+type recallSwitch interface {
+	OnOpen(func())
+	Off()
+}
+
+// wireBootRecall wires lp's FORGET resume (none when lp is nil) to recall's
+// open when recall is on, else to the end of boot setup.
+func wireBootRecall(ctx context.Context, lp *learning, dir string, v *modelroute.Verifier, ex recallSwitch) bootRecall {
+	b := bootRecall{on: dir != "" && v != nil, ex: ex}
+	if lp != nil {
+		var onOpen func(func())
+		if b.on {
+			onOpen = ex.OnOpen
+		}
+		b.boot = lp.forgetOwner.wireResume(ctx, onOpen)
+	}
+	return b
+}
+
+// finish ends boot setup: recall on, the boot's resume then open; recall
+// off, the executor marked off, then off, then the boot's resume.
+func (b bootRecall) finish(open, off func()) {
+	if !b.on {
+		b.ex.Off()
+		off()
+	}
+	if b.boot != nil {
+		b.boot()
+	}
+	if b.on {
+		open()
+	}
+}
+
 // openRecall waits for the owner to unlock the vault, takes the recall
 // identity key from the vault process (recall K5), and opens recall, its
 // event bus and provenance record, then serves the recall tools. Until then
@@ -805,19 +854,9 @@ func main() {
 		planLine.others = func() bool { return spare.Retries() >= 1 }
 	}
 	steps := newStepNotes(&cfg.Notes)
-	// FORGET's item 2s a restart interrupted resume once recall opens
-	// (#327 L3 B-3), including one startup reconcile finds late (#1370);
-	// with recall off the owner is told they cannot, once boot setup is
-	// done (Security S1 on #1382). Wired before the daemon serves the
-	// owner and starts reconcile; resumeBoot runs at the end of setup.
-	var resumeBoot func()
-	if lp != nil {
-		var onOpen func(func())
-		if recallDir != "" && verifier != nil {
-			onOpen = recallExec.OnOpen
-		}
-		resumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)
-	}
+	// Wired before the daemon serves the owner and starts reconcile;
+	// finished at the end of boot setup (bootRecall).
+	forgetBoot := wireBootRecall(ctx, lp, recallDir, verifier, recallExec)
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -976,20 +1015,8 @@ func main() {
 	}
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
-	// FORGET's item 2s a restart interrupted resume once recall opens;
-	// with recall off they cannot, and the owner is told so (wireResume).
-	if recallDir != "" && verifier != nil {
-		if resumeBoot != nil {
-			resumeBoot()
-		}
-		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
-	} else {
-		recallExec.Off()
-		caps.recallWired(false)
-		if resumeBoot != nil {
-			resumeBoot()
-		}
-	}
+	forgetBoot.finish(func() { go openRecall(ctx, verifier, recallCfg, recallTools, recallExec) },
+		func() { caps.recallWired(false) })
 	if line != nil {
 		go line.run(ctx)
 	}
