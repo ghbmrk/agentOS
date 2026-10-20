@@ -62,9 +62,16 @@ NoNewPrivileges=yes
 # and the vault's, are hidden instead (a path that does not exist yet is
 # skipped), and so are the vault's sockets: their only peer check is the
 # broker uid, which is root, and the access point never calls them (#1628).
+# Owner and guest content and the meter and clock state agentosd trusts
+# are hidden too (#2626); TestAgentosdStateIsHidden fails on any state
+# path under /var/lib/agentos named in the source and missing here. This
+# is still a deny-list: a file agentosd makes after the loader starts
+# shows until a restart. The allowlist #2626 asks for needs the three
+# files the loader shares with agentosd in their own directory.
 ProtectSystem=strict
 ReadWritePaths=/var/lib/agentos
 InaccessiblePaths=-/var/lib/agentos-egress -/run/agentos-egress -/var/lib/agentos/vault -/var/lib/agentos/machines -/var/lib/agentos/slots -/var/lib/agentos/journal -/var/lib/agentos/journal.log -/var/lib/agentos/change -/var/lib/agentos/recall -/var/lib/agentos/learn -/var/lib/agentos/skills -/var/lib/agentos/modem -/var/lib/agentos/claim.json -/var/lib/agentos/drive-id
+InaccessiblePaths=-/var/lib/agentos/digest -/var/lib/agentos/meter.json -/var/lib/agentos/spare-meter.json -/var/lib/agentos/kept-replies.json -/var/lib/agentos/guest-inbox.json -/var/lib/agentos/clock.json -/var/lib/agentos/questions.json -/var/lib/agentos/loop7 -/var/lib/agentos/setup.json -/var/lib/agentos/card-latch.json
 ProtectHome=yes
 PrivateTmp=yes
 PrivateIPC=yes

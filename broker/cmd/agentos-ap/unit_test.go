@@ -1,7 +1,10 @@
 package main
 
 import (
+	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -108,5 +111,81 @@ func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
 	}
 	if !slices.Equal(dir, []string{"agentos-egress"}) || !slices.Equal(keep, []string{"yes"}) {
 		t.Errorf("RuntimeDirectory = %q, RuntimeDirectoryPreserve = %q; want agentos-egress, yes", dir, keep)
+	}
+}
+
+// loaderState is what the loader reaches under /var/lib/agentos: the setup
+// network it reads and burns, the card's network it serves, and the owner
+// state whose presence ends setup.
+var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
+
+// joinedState is agentosd state under /var/lib/agentos whose name is
+// joined to the directory at run time, so no literal path names it.
+var joinedState = []string{"questions.json"}
+
+var statePath = regexp.MustCompile(`/var/lib/agentos/([A-Za-z0-9._-]+)`)
+
+// Every state path under /var/lib/agentos that the broker's code or the
+// image names is hidden from the loader but the three it needs (#2626):
+// owner and guest content would leak to it, and meter and clock state
+// agentosd trusts could be rewritten by it. A new path fails here until
+// the unit hides it or loaderState says why the loader needs it.
+func TestAgentosdStateIsHidden(t *testing.T) {
+	b, err := os.ReadFile("agentos-ap.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hidden []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "InaccessiblePaths="); ok {
+			hidden = append(hidden, strings.Fields(v)...)
+		}
+	}
+	named := map[string]string{}
+	for _, n := range joinedState {
+		named[n] = "joinedState"
+	}
+	for _, root := range []string{"../..", "../../../image/mkosi/mkosi.extra"} {
+		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == "vendor" || d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(p, "_test.go") || (root == "../.." && !strings.HasSuffix(p, ".go")) {
+				return nil
+			}
+			src, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			for _, m := range statePath.FindAllSubmatch(src, -1) {
+				named[string(m[1])] = p
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(named) < len(joinedState)+len(loaderState) {
+		t.Fatalf("found only %d state paths; the walk is broken", len(named))
+	}
+	for n, where := range named {
+		if slices.Contains(loaderState, n) {
+			continue
+		}
+		if !slices.Contains(hidden, "-/var/lib/agentos/"+n) {
+			t.Errorf("/var/lib/agentos/%s (named in %s) is not in InaccessiblePaths", n, where)
+		}
+	}
+	for _, n := range loaderState {
+		if _, ok := named[n]; !ok {
+			t.Errorf("loaderState lists %s, which nothing names", n)
+		}
 	}
 }
