@@ -235,14 +235,16 @@ func Normalize(plan string, s key.Step) key.Step {
 }
 
 // Fingerprint names an exact effect: the same one within 24 hours needs a
-// fresh owner key (KRN-8).
+// fresh owner key (KRN-8). Every field is length-prefixed, so no two different
+// argument sets share one.
 func Fingerprint(s key.Step) string {
+	field := func(x string) string { return strconv.Itoa(len(x)) + ":" + x }
 	var kv []string
 	for n, a := range s.Args {
-		kv = append(kv, n+"="+a.Value)
+		kv = append(kv, field(n)+field(a.Value))
 	}
 	sort.Strings(kv)
-	return strings.Join([]string{string(s.Verb), s.Clerk, strings.Join(kv, ",")}, "|")
+	return field(string(s.Verb)) + field(s.Clerk) + strings.Join(kv, "")
 }
 
 // Idem is a step's idempotency key; the clerk runs it at most once (KRN-8).
@@ -445,7 +447,9 @@ func (s *State) Apply(e Entry) error {
 			st.Undone = true
 			sp := p.Plan.Steps[b.Index]
 			s.seen[p.Root][Shape(sp)]--
-			delete(s.recent[p.Root], Fingerprint(sp))
+			if c, _ := key.ClassOf(sp.Verb); !c.Irreversible() {
+				delete(s.recent[p.Root], Fingerprint(sp)) // an irreversible effect stays done
+			}
 		}
 	default:
 		return ErrUnknown

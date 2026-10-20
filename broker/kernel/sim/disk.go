@@ -11,6 +11,9 @@ import (
 // harness reboots the machine.
 var errCrash = errors.New("sim: crashed")
 
+// errFull is a write refused for want of space; nothing reaches the medium.
+var errFull = errors.New("sim: disk full")
+
 // Disk is a kernel.Store whose Append is durable when it returns. A crash
 // armed at the nth append cuts that append short: some prefix of the frame
 // reaches the medium, which Open trims as a torn frame.
@@ -19,17 +22,24 @@ type Disk struct {
 	rng     *rand.Rand
 	crashIn int
 	crashed bool
+	full    bool
 }
+
+// Fill makes every append fail, writing nothing, until the next Reboot.
+func (d *Disk) Fill() { d.full = true }
 
 // Arm makes the nth append from now crash. Zero disarms.
 func (d *Disk) Arm(n int) { d.crashIn = n }
 
 // Reboot clears the crash; the bytes written so far stay.
-func (d *Disk) Reboot() { d.crashed, d.crashIn = false, 0 }
+func (d *Disk) Reboot() { d.crashed, d.crashIn, d.full = false, 0, false }
 
 func (d *Disk) Append(b []byte) error {
 	if d.crashed {
 		return errCrash
+	}
+	if d.full {
+		return errFull
 	}
 	if d.crashIn > 0 {
 		d.crashIn--

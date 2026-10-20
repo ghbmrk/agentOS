@@ -29,13 +29,26 @@ func gen(seed byte) pair {
 	return pair{p.Public().(ed25519.PublicKey), p}
 }
 
+// flakyAnchor is an anchor that can be taken away: nothing new is confirmed while down.
+type flakyAnchor struct {
+	*kernel.MemAnchor
+	down bool
+}
+
+func (a *flakyAnchor) Put(h kernel.Head) error {
+	if a.down {
+		return errors.New("anchor down")
+	}
+	return a.MemAnchor.Put(h)
+}
+
 type rig struct {
 	t      *testing.T
 	owner  pair
 	holder pair
 	head   pair
 	store  *kernel.MemStore
-	anchor *kernel.MemAnchor
+	anchor *flakyAnchor
 	mail   *clerk.Mail
 	k      *kernel.Kernel
 	root   key.Key
@@ -47,7 +60,7 @@ func cfg(r *rig) kernel.Config {
 }
 
 func newRig(t *testing.T) *rig {
-	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &kernel.MemAnchor{}}
+	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
 	r.mail = clerk.NewMail("mail", r.owner.pub)
 	r.boot(0)
 	r.root = key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail",
@@ -297,6 +310,36 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 	}
 }
 
+// Undoing an irreversible step does not unsend it: the duplicate guard stays (KRN-8).
+func TestUndoKeepsTheDuplicateGuardOfAnIrreversibleStep(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	must(t, r.k.Tick(0))
+	must(t, r.k.Undo(1, "p1", 0))
+	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	if r.status("p2") != kernel.SRejected {
+		t.Fatal("undo must not reopen an irreversible effect")
+	}
+}
+
+// Argument boundaries are part of the fingerprint: ("ab","c") is not ("a","bc") (KRN-8).
+func TestFingerprintDoesNotCollideAcrossArgumentBoundaries(t *testing.T) {
+	a := key.Step{Verb: key.Unsubscribe, Clerk: "mail", Args: map[string]key.Arg{"x": {Value: "ab"}, "y": {Value: "c"}}}
+	b := key.Step{Verb: key.Unsubscribe, Clerk: "mail", Args: map[string]key.Arg{"x": {Value: "a"}, "y": {Value: "bc"}}}
+	if kernel.Fingerprint(a) == kernel.Fingerprint(b) {
+		t.Fatal("different arguments must fingerprint differently")
+	}
+}
+
+// A declared argument with no value names nothing to act on (KEY-2).
+func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
+	r := newRig(t)
+	err := r.k.Submit(0, kernel.Plan{ID: "p1", Key: r.root, Steps: []key.Step{st(key.Trash, "")}})
+	if err == nil && r.status("p1") != kernel.SRejected {
+		t.Fatal("an empty argument must reject the plan")
+	}
+}
+
 func TestDuplicatePlanIDRefused(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
@@ -353,8 +396,8 @@ func TestLogTamperTruncationForkTorn(t *testing.T) {
 	must(t, f.k.Tick(1))
 	c := cfg(r)
 	c.Store = f.store
-	if l, err := kernel.Open(c); err == nil && l.Len() >= int(r.anchor.H.Seq) {
-		t.Fatal("a forked history must not open against the anchor (LOG-2)")
+	if _, err := kernel.Open(c); !errors.Is(err, kernel.ErrFork) {
+		t.Fatalf("a forked history must not open against the anchor (LOG-2): %v", err)
 	}
 
 	torn := &kernel.MemStore{B: append(append([]byte(nil), good...), 0, 0, 1, 0, 9, 9)}
@@ -377,19 +420,39 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 	must(t, r.k.Tick(1))
 	must(t, r.k.Stop(2))
 	n := r.k.Log().Len()
-	must(t, r.k.Resume(3)) // widening, no anchor after it
+	r.anchor.down = true
+	if err := r.k.Resume(3); err == nil { // widening the anchor cannot confirm
+		t.Fatal("a resume the anchor cannot confirm must report it")
+	}
 	r.boot(4)
 	if !r.k.State().Stopped || r.k.Log().Len() != n {
 		t.Fatal("an unconfirmed resume must not count after restart (KRN-7)")
 	}
+	r.anchor.down = false
 	must(t, r.k.Resume(5))
-	must(t, r.k.Log().Anchor())
 	r.boot(6)
 	if r.k.State().Stopped {
 		t.Fatal("an anchored resume must stand")
 	}
 	if r.status("p1") != kernel.SDone {
 		t.Fatal("dispatch and result entries must never be dropped (KRN-8)")
+	}
+}
+
+// Every owner action anchors itself: a widening that returned nil survives a reboot.
+func TestOwnerActionsAnchorThemselves(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Stop(1))
+	must(t, r.k.Resume(2))
+	r.boot(3)
+	if r.k.State().Stopped {
+		t.Fatal("a resume that returned nil must survive restart (KRN-7)")
+	}
+	must(t, r.k.Pause(4, r.root.Tip()))
+	must(t, r.k.Unpause(5, r.root.Tip()))
+	r.boot(6)
+	if r.k.State().Changes.Paused[r.root.Tip()] {
+		t.Fatal("an unpause that returned nil must survive restart (KRN-7)")
 	}
 }
 

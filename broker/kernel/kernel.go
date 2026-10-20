@@ -263,24 +263,26 @@ func (k *Kernel) Issue(now int64, root key.Key) error {
 	if _, err := key.Verify(root, k.s.Owner); err != nil {
 		return err
 	}
-	_, err := k.emit(now, TKeyIssued, keyIssued{root})
-	return err
+	return k.owner(now, TKeyIssued, keyIssued{root})
 }
 
-func (k *Kernel) Revoke(now int64, id key.ID) error {
-	_, err := k.emit(now, TKeyRevoked, keyID{id})
-	return err
-}
-func (k *Kernel) Pause(now int64, id key.ID) error {
-	_, err := k.emit(now, TKeyPaused, keyID{id})
-	return err
-}
+func (k *Kernel) Revoke(now int64, id key.ID) error { return k.owner(now, TKeyRevoked, keyID{id}) }
+func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPaused, keyID{id}) }
 func (k *Kernel) Unpause(now int64, id key.ID) error {
-	_, err := k.emit(now, TKeyResumed, keyID{id})
-	return err
+	return k.owner(now, TKeyResumed, keyID{id})
 }
-func (k *Kernel) Stop(now int64) error   { _, err := k.emit(now, TStop, struct{}{}); return err }
-func (k *Kernel) Resume(now int64) error { _, err := k.emit(now, TResume, struct{}{}); return err }
+func (k *Kernel) Stop(now int64) error   { return k.owner(now, TStop, struct{}{}) }
+func (k *Kernel) Resume(now int64) error { return k.owner(now, TResume, struct{}{}) }
+
+// owner records an owner action and anchors the head at once, so a widening
+// the owner confirmed survives a restart; a failed anchor leaves the entry
+// unconfirmed and Open drops it (KRN-7, LOG-2).
+func (k *Kernel) owner(now int64, typ string, body any) error {
+	if _, err := k.emit(now, typ, body); err != nil {
+		return err
+	}
+	return k.log.Anchor()
+}
 
 // Cancel ends an active plan at the owner's word.
 func (k *Kernel) Cancel(now int64, plan string) error {

@@ -38,6 +38,7 @@ type Result struct {
 	Trace   []string
 	Entries []kernel.Entry
 	Effects int
+	Stale   int // old requests the world was sent again
 }
 
 const hour = int64(3_600_000)
@@ -59,6 +60,8 @@ type world struct {
 	effects []effect
 	bad     []string
 	race    func() // an owner action landing between the kernel's decision and the clerk
+	seen    []kernel.Request
+	stale   int // requests redelivered long after they were first sent
 }
 
 func (w *world) fault(op string) string {
@@ -77,6 +80,13 @@ func (w *world) Do(r kernel.Request, v kernel.View) kernel.Result {
 	res := w.do(r, v)
 	if w.rng.IntN(10) == 0 {
 		w.do(r, v) // the transport delivers the request twice
+	}
+	if len(w.seen) > 0 && w.rng.IntN(10) == 0 {
+		w.stale++
+		w.do(w.seen[w.rng.IntN(len(w.seen))], v) // an old request arrives out of order
+	}
+	if len(w.seen) < 16 {
+		w.seen = append(w.seen, r)
 	}
 	return res
 }
@@ -381,9 +391,19 @@ func (s *sim) op() error {
 		s.logf("anchor")
 		return s.k.Log().Anchor()
 	case c == 14:
-		n := 1 + s.pick(8)
-		s.logf("arm crash in %d appends", n)
-		s.disk.Arm(n)
+		switch s.pick(4) {
+		case 0:
+			s.logf("disk full")
+			s.disk.Fill()
+		case 1:
+			d := int64(1+s.pick(48)) * hour
+			s.now = max(0, s.now-d)
+			s.logf("clock jumps back %dh", d/hour)
+		default:
+			n := 1 + s.pick(8)
+			s.logf("arm crash in %d appends", n)
+			s.disk.Arm(n)
+		}
 	case c == 15:
 		r := s.newRoot()
 		s.logf("issue root")
@@ -395,7 +415,9 @@ func (s *sim) op() error {
 	return nil
 }
 
-func crashed(err error) bool { return errors.Is(err, errCrash) || errors.Is(err, kernel.ErrBroken) }
+func crashed(err error) bool {
+	return errors.Is(err, errCrash) || errors.Is(err, errFull) || errors.Is(err, kernel.ErrBroken)
+}
 
 // check judges the run so far.
 func (s *sim) check() error {
@@ -484,7 +506,7 @@ func Run(c Config) (*Result, error) {
 	if err := s.check(); err != nil {
 		return fail(err)
 	}
-	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects)}, nil
+	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects), Stale: s.w.stale}, nil
 }
 
 func tail(t []string) []string {

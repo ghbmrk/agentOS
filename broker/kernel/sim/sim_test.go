@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,33 @@ func TestMutantsAreCaught(t *testing.T) {
 		if !caught {
 			t.Errorf("mutant %q survived 100 seeds", m)
 		}
+	}
+}
+
+// The sweep reaches the faults that real machines have, not only crashes and lost acks.
+func TestSweepInjectsClockJumpsFullDisksAndStaleRedelivery(t *testing.T) {
+	seen := map[string]bool{}
+	stale := 0
+	for seed := 0; seed < seeds(); seed++ {
+		r, err := Run(Config{Seed: uint64(seed), Ops: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stale += r.Stale
+		for _, l := range r.Trace {
+			for _, f := range []string{"clock jumps back", "disk full"} {
+				if strings.Contains(l, f) {
+					seen[f] = true
+				}
+			}
+		}
+	}
+	for _, f := range []string{"clock jumps back", "disk full"} {
+		if !seen[f] {
+			t.Errorf("the sweep never injected %q", f)
+		}
+	}
+	if stale == 0 {
+		t.Error("the sweep never redelivered a stale request")
 	}
 }
