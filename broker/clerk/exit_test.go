@@ -3,12 +3,14 @@ package clerk_test
 // REQ: CLK-1, CLK-2, CLK-3, CLK-4, KRN-8
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -21,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 const canary = "canary-token-7731"
@@ -45,12 +48,29 @@ type exitFix struct {
 	inLog int // log length the request handler saw
 }
 
-// loopback lets the test clerks reach the local test server, which the dial
-// guard refuses to any clerk that does not declare it.
-var loopback = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+// resolver answers every name with one address.
+type resolver netip.Addr
+
+func (r resolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return []netip.Addr{netip.Addr(r)}, nil
+}
+
+// guard is the home-network policy with the test server standing in for a
+// host the name resolves to: the policy checks address a, then its connect
+// seam reaches the server.
+func (f *exitFix) guard(a netip.Addr) *netguard.Policy {
+	return netguard.New(netguard.Config{Resolver: resolver(a), Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, f.srv.Listener.Addr().String())
+	}})
+}
+
+// base is the test server under a name its certificate holds.
+func (f *exitFix) base() string {
+	return "https://example.com:" + f.srv.URL[strings.LastIndex(f.srv.URL, ":")+1:]
+}
 
 func (f *exitFix) decl(ops []clerk.Op) clerk.Declaration {
-	return clerk.Declaration{Name: "web", Ops: ops, Private: loopback}
+	return clerk.Declaration{Name: "web", Ops: ops, Guard: f.guard(netip.MustParseAddr("8.8.8.8"))}
 }
 
 // reboot reopens the same log with the given clerk, as a restart does.
@@ -109,11 +129,11 @@ func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), 
 	hpub, _ := gen(2)
 	kpub, kpriv := gen(3)
 	ops := []clerk.Op{
-		{Verb: key.Post, Method: "POST", URL: f.srv.URL + "/v1/msg/{to}", Slot: "web", Prefix: "Bearer ", Type: clerk.TypeForm, Body: map[string]string{"msg": "msg"}, Content: "text", Labels: []string{"public"}},
-		{Verb: key.Fetch, Method: "GET", URL: f.srv.URL + "/v1/doc/{url}", Content: "text", Labels: []string{"public"}},
+		{Verb: key.Post, Method: "POST", URL: f.base() + "/v1/msg/{to}", Slot: "web", Prefix: "Bearer ", Type: clerk.TypeForm, Body: map[string]string{"msg": "msg"}, Content: "text", Labels: []string{"public"}},
+		{Verb: key.Fetch, Method: "GET", URL: f.base() + "/v1/doc/{url}", Content: "text", Labels: []string{"public"}},
 	}
 	if mod != nil {
-		mod(f.srv.URL, ops)
+		mod(f.base(), ops)
 	}
 	f.roots = x509.NewCertPool()
 	f.roots.AddCert(f.srv.Certificate())
@@ -668,7 +688,8 @@ func TestExitDoesNotHoldItsLockAcrossARequest(t *testing.T) {
 
 func TestExitRefusesNonPublicAddressesNotDeclared(t *testing.T) {
 	f := setupExit(t, nil)
-	x, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: f.ops}, f.opub, f.sec, f.roots)
+	// The name rebinds to loopback: the home-network policy refuses it at dial.
+	x, err := clerk.NewExit(clerk.Declaration{Name: "web", Ops: f.ops, Guard: f.guard(netip.MustParseAddr("127.0.0.1"))}, f.opub, f.sec, f.roots)
 	if err != nil {
 		t.Fatal(err)
 	}

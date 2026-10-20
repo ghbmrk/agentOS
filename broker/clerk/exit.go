@@ -10,20 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Op is one declared request shape (CLK-3): the only HTTPS request a verb may
@@ -62,12 +60,13 @@ const (
 )
 
 // Declaration describes one clerk (CLK-3): its name, the only requests it may
-// make, and any non-public addresses it may reach, such as a home device's
-// LAN. Every other non-public address is refused when the clerk dials.
+// make, and the home-network address policy every dial goes through (DEV-2).
+// A nil Guard is netguard's IANA-only policy; a home device is reached only
+// through a pin on the policy the caller passes.
 type Declaration struct {
-	Name    string
-	Ops     []Op
-	Private []netip.Prefix
+	Name  string
+	Ops   []Op
+	Guard *netguard.Policy
 }
 
 // Detail codes: the typed reasons an exit answers with (CLK-2, OWN-17). A
@@ -141,11 +140,9 @@ var clerkHeaders = []string{"Host", "Content-Type", "Content-Length", "Transfer-
 // credHeaders carry credentials; only the secret's own header may.
 var credHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie"}
 
-var errBlocked = errors.New("clerk: address not allowed")
-
 // NewExit validates the declaration; a bad one is an error, never a runtime
 // surprise. The exit owns its transport: no proxy from the environment, no
-// cookie jar, no redirects, and a dial guard. roots nil trusts the system's
+// cookie jar, no redirects, and every dial through the guard. roots nil trusts the system's
 // certificate authorities.
 func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
 	if d.Name == "" {
@@ -170,11 +167,14 @@ func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x5
 	if n := secrets.Len(); n > 1 || n == 1 && (slot == "" || !secrets.Has(slot)) {
 		return nil, errors.New("clerk: the secret store holds another account's secret (CLK-1)")
 	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: guard(d.Private)}
+	g := d.Guard
+	if g == nil {
+		g = netguard.New(netguard.Config{Timeout: 10 * time.Second})
+	}
 	x.client = &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
-			DialContext:         dialer.DialContext,
+			DialContext:         g.DialContext,
 			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout: 10 * time.Second,
 			ForceAttemptHTTP2:   true,
@@ -437,7 +437,7 @@ func (x *Exit) send(req *http.Request, r kernel.Request) kernel.Result {
 // probe answers notdone once Retry-After has passed and the kernel sends again.
 func classify(resp *http.Response, err error) (kernel.Result, string, int64) {
 	if err != nil {
-		if errors.Is(err, errBlocked) {
+		if errors.Is(err, netguard.ErrDenied) {
 			return kernel.Result{Outcome: "failed", Detail: DBlocked}, pNotSent, 0
 		}
 		return kernel.Result{Outcome: "unknown", Detail: DNoAnswer}, pUnknown, 0
@@ -501,38 +501,4 @@ func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 		return "notdone"
 	}
 	return "unknown"
-}
-
-// guard refuses, at dial time and so after DNS, any address that is not
-// public unless the declaration names its range. A name that resolves to a
-// private address (rebinding) is refused the same way.
-func guard(allow []netip.Prefix) func(string, string, syscall.RawConn) error {
-	return func(_, address string, _ syscall.RawConn) error {
-		ap, err := netip.ParseAddrPort(address)
-		if err != nil {
-			return errBlocked
-		}
-		a := ap.Addr().Unmap()
-		if slices.ContainsFunc(allow, func(p netip.Prefix) bool { return p.Contains(a) }) || public(a) {
-			return nil
-		}
-		return errBlocked
-	}
-}
-
-// special are ranges that are global unicast to Go but not the public
-// internet: shared, benchmarking, documentation, reserved, and the IPv6 forms
-// that embed an IPv4 address (NAT64, 6to4).
-var special = func() []netip.Prefix {
-	var ps []netip.Prefix
-	for _, s := range []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15",
-		"198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "64:ff9b::/96", "64:ff9b:1::/48", "2001:db8::/32",
-		"2002::/16", "fec0::/10"} {
-		ps = append(ps, netip.MustParsePrefix(s))
-	}
-	return ps
-}()
-
-func public(a netip.Addr) bool {
-	return a.IsGlobalUnicast() && !a.IsPrivate() && !slices.ContainsFunc(special, func(p netip.Prefix) bool { return p.Contains(a) })
 }
