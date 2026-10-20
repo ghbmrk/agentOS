@@ -1,7 +1,6 @@
 """Tests for tools/ci_scope.py and its wiring into the workflows (CI-docs)."""
-import ast
-import re
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +11,7 @@ import ci_scope  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_workflows import lane_gate_problems  # noqa: E402
+import records_audit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -75,70 +75,6 @@ def ci_top_level(key):
 def ci_triggers():
     """The events ci.yml's `on:` block names."""
     return [l.strip().rstrip(":") for l in ci_top_level("on") if re.match(r"^  [a-z_]+:$", l)]
-
-
-def records_run_tests():
-    """The test names ci.yml's records-only step runs (CI-docs)."""
-    ci = (WORKFLOWS / "ci.yml").read_text()
-    step = ci[ci.index("if: env.RECORDS == 'true'\n        run: python -m unittest "):]
-    line = step.splitlines()[1]
-    return [w for w in line.split()[4:] if w != "-v"]
-
-
-def _root_names(tree):
-    """Module-level names bound to an expression that uses __file__: the repo-root anchors."""
-    names = set()
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(n, ast.Name) and n.id == "__file__"
-                                                for n in ast.walk(node.value)):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return names
-
-
-def _repo_path(node, roots):
-    """The repo-relative path `node` names when it joins string parts onto a root anchor
-    (ROOT / "docs" / "OPERATING.md", WORKFLOWS.parent.parent / "SPEC.md",
-    os.path.join(ROOT, "SPEC.md")), else None. A root's own subdirectory prefix is unknown,
-    so the joined parts are matched as a path suffix."""
-    parts = []
-    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        if not (isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)):
-            return None
-        parts.insert(0, node.right.value)
-        node = node.left
-    if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "join" and node.args:
-        rest = node.args[1:]
-        if not all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in rest):
-            return None
-        parts = [a.value for a in rest] + parts
-        node = node.args[0]
-    while isinstance(node, ast.Attribute) and node.attr in ("parent", "parents"):
-        node = node.value
-    if not (parts and isinstance(node, ast.Name) and node.id in roots):
-        return None
-    return "/".join(parts)
-
-
-def record_readers(source):
-    """The unittest names a test module's source needs in the records run: each TestCase
-    class, or the module itself for a module-level read, that joins a record document's
-    path onto the repo root. A path joined onto a temporary directory is not a read."""
-    tree = ast.parse(source)
-    roots = _root_names(tree)
-    found = set()
-
-    def visit(node, owner):
-        if isinstance(node, ast.ClassDef) and owner is None:
-            owner = node.name
-        path = _repo_path(node, roots)
-        if path and ci_scope.is_record(path):
-            found.add(owner)
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, owner)
-
-    visit(tree, None)
-    return found
 
 
 class ScopeTest(unittest.TestCase):
@@ -423,51 +359,88 @@ class WiringTest(unittest.TestCase):
             self.assertIn("go-build", save)
         for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice",
                      "tests.test_g1_scope.CheckTest", "tests.test_g1_scope.ListTest"):
-            self.assertIn(name, records_run_tests())
-
-    def test_records_run_includes_every_test_that_reads_a_record(self):
-        # REQ: CI-PATHS
-        # A records-only change can edit any record file, so every test whose outcome rests on
-        # one must run on it; the records step skips discovery, so this is its only guard.
-        listed = set(records_run_tests())
-        missing = []
-        for f in sorted((ROOT / "tests").glob("test_*.py")):
-            for owner in record_readers(f.read_text()):
-                name = f"tests.{f.stem}" + (f".{owner}" if owner else "")
-                if name not in listed and f"tests.{f.stem}" not in listed:
-                    missing.append(name)
-        self.assertEqual(missing, [], "add these to ci.yml's records-only step")
+            self.assertIn(name, records_audit.records_run_tests())
 
     def test_a_spec_only_change_runs_the_spec_readers(self):
         # REQ: CI-PATHS
-        # SPEC.md is a record, so a SPEC-only PR takes the records run; the tests that hold
-        # SPEC.md's text (KRN-2t, CLK-7c) must be in it.
+        # SPEC.md is a record, so a SPEC-only PR takes the records run, whose list full CI's
+        # record-read audit (tests/records_audit.py) holds to every reader.
         self.assertEqual(ci_scope.scope_of(["SPEC.md"]), ("records", None))
-        for name in ("tests.test_krn2_trusted_base", "tests.test_clk7_consent"):
-            self.assertIn(name, records_run_tests())
 
-    def test_record_readers_tells_a_repo_read_from_a_temp_write(self):
-        # The guard's controls: each shape of repo-root read is caught, at the right owner;
-        # temp-directory joins, non-records and unanchored names are not.
-        src = """import os, pathlib
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-WF = pathlib.Path(__file__).resolve().parent.parent / ".github"
-TOP = (ROOT / "SPEC.md").read_text()
-class A:
-    def t(self):
-        (WF.parent / "docs" / "OPERATING.md").read_text()
-class B:
-    def t(self):
-        open(os.path.join(ROOT, "reviews", "l3", "x.md"))
-class C:
-    def t(self, d):
-        (pathlib.Path(d) / "SPEC.md").write_text("x")
-        (self.r / "CLAUDE.md").write_text("x")
-        (ROOT / "docs" / "owners-guide.md").read_text()
-        (ROOT / name).read_text()
-"""
-        self.assertEqual(record_readers(src), {None, "A", "B"})
-        self.assertEqual(record_readers(src.replace('TOP = (ROOT / "SPEC.md").read_text()\n', "")), {"A", "B"})
+    def test_full_unit_tests_audit_record_reads_against_the_records_step(self):
+        # REQ: CI-PATHS
+        # The records step skips discovery, so full CI's unit tests run each module under strace
+        # and the next step fails on a module that opened a record and is not listed whole.
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        unit = ci[ci.index("      - name: Unit tests\n"):]
+        unit, check = unit.split("\n      - ", 2)[:2]
+        self.assertIn("        if: env.RECORDS != 'true'\n", unit)
+        self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
+        self.assertIn('          for f in tests/test*.py; do\n'
+                      '            m=$(basename "$f" .py)\n'
+                      '            strace -f --seccomp-bpf -q -y -e trace=open,openat,openat2 -e signal=none '
+                      '-o "$RUNNER_TEMP/reads/$m.trace" \\\n'
+                      '              python -m unittest discover -s tests -p "$m.py" -v || rc=1\n'
+                      '          done\n          exit $rc', unit)
+        self.assertEqual(check.splitlines()[1:], ["        if: env.RECORDS != 'true'",
+                         '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
+
+    def test_records_run_tests_reads_the_step_or_fails(self):
+        # The list parse takes the run line in any YAML shape and fails rather than guess; -v is
+        # the only option, since another (-k, -p) could keep a listed test from running.
+        step = "      - name: Docs\n        if: env.RECORDS == 'true'\n        run: {}\n"
+        parse = records_audit.records_run_tests
+        self.assertEqual(parse(step.format("python -m unittest tests.a tests.b -v")), ["tests.a", "tests.b"])
+        self.assertEqual(parse(step.format("|\n          python -m unittest tests.a \\\n            tests.b")),
+                         ["tests.a", "tests.b"])
+        self.assertEqual(parse(step.format("python -m unittest tests.a\n          tests.b")), ["tests.a", "tests.b"])
+        for bad in ("python -m unittest discover -s tests", "python -m unittest tests.a && rm x",
+                    "make test", "python -m unittest -v", "python -m unittest -k tests.a tests.a tests.b",
+                    "python -m unittest -p x tests.a", "python -m unittest --locals tests.a"):
+            with self.assertRaises(AssertionError, msg=bad):
+                parse(step.format(bad))
+        with self.assertRaises(AssertionError):
+            parse(step.format("python -m unittest tests.a") * 2)
+
+    def test_record_audit_fails_on_an_unlisted_reader(self):
+        # REQ: CI-PATHS
+        # The audit's controls, over strace -f -y lines: any process's open that reached a record
+        # (by its name, a directory-relative path, a symlink or a resumed call), a failed or
+        # unresolvable open of one, a listing of a record directory and any git object-store read
+        # each need the module listed whole; a listed class is not enough.
+        own = '1 openat(AT_FDCWD<{r}>, "{r}/tests/__pycache__/test_m.cpython-312.pyc", O_RDONLY) = 3<{r}/tests/__pycache__/test_m.cpython-312.pyc>\n'
+        end = "1 +++ exited with 0 +++\n"
+        reads = {
+            "SPEC.md": '2 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3<{r}/SPEC.md>\n',
+            "docs/OPERATING.md": '3 openat(AT_FDCWD</>, "{r}/docs/OPERATING.md", O_RDONLY) = -1 EACCES (Permission denied)\n',
+            "reviews/l3": '4 openat(5<{r}/reviews>, "l3", O_RDONLY|O_DIRECTORY) = 6<{r}/reviews/l3>\n',
+            "BOARD.md": '5 open("BOARD.md", O_RDONLY <unfinished ...>\n',
+            "docs/LANES.md": '6 openat(AT_FDCWD<{r}/tools>, "../docs/LANES.md", O_RDONLY) = -1 ENOENT (No such file)\n',
+            "PLAN.md": '7 openat(AT_FDCWD</tmp/l>, "/tmp/l/link.md", O_RDONLY|O_CLOEXEC) = 3<{r}/PLAN.md>\n',
+            "LEDGER.md": '8 openat(AT_FDCWD</tmp/l>, "d/../x.md", O_RDONLY <unfinished ...>\n'
+                         '9 openat(AT_FDCWD</tmp>, "y", O_RDONLY) = 4</tmp/y>\n'
+                         '8 <... openat resumed>) = 3<{r}/LEDGER.md>\n',
+            ".git/objects/ab/cdef": '10 openat(AT_FDCWD<{r}>, ".git/objects/ab/cdef", O_RDONLY) = 3<{r}/.git/objects/ab/cdef>\n',
+        }
+        quiet = ('11 openat(AT_FDCWD</tmp/x>, "SPEC.md", O_WRONLY|O_CREAT, 0644) = 3</tmp/x/SPEC.md>\n'
+                 '12 openat(AT_FDCWD<{r}>, "docs/owners-guide.md", O_RDONLY) = 3<{r}/docs/owners-guide.md>\n'
+                 '13 openat(AT_FDCWD<{r}>, "docs", O_RDONLY|O_DIRECTORY) = 3<{r}/docs>\n'
+                 '14 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3</tmp/copy.md>\n'
+                 '15 execve("/usr/bin/cat", ["cat", "SPEC.md"], 0x1 /* 3 vars */) = 0\n')
+        problems = records_audit.problems
+
+        def trace(*parts):
+            return {"test_m": "".join(parts).format(r=ROOT)}
+        self.assertEqual(problems(trace(own, quiet, end), ["tests.test_m.A"]), [])
+        for rel, line in reads.items():
+            self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m.A", "tests.test_m.A.test_a"]),
+                             [f"tests.test_m\t{rel}"], rel)
+            self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m"]), [], rel)
+        self.assertEqual(problems(trace(reads["SPEC.md"], end), ["tests.test_m"]),
+                         ["tests.test_m\tno open of the module's own file: tracing did not run"])
+        self.assertEqual(problems(trace(own, quiet, "16 +++ exited with 0 +++\n"), ["tests.test_m"]),
+                         ["tests.test_m\tthe trace ends before the module's run exits: it was cut short"])
+        self.assertEqual(len(problems({"test_m": ""}, [])), 1)
 
     def test_no_privileged_workflow_uses_a_cache(self):
         # REQ: CI-PATHS
