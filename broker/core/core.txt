@@ -41,6 +41,12 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+wiring clerk/inbox/slice
+
+# Pure functions of the key chain and the request. They write nothing; a clerk
+# calls them to put a step in canonical form and to check a request itself.
+open kernel.Normalize
+open clerk.Check
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.

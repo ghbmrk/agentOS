@@ -7,16 +7,16 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/slice"
 )
 
 func main() {
-	var in inbox.Input
+	var in slice.Input
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
 		fmt.Fprintln(os.Stderr, "slice:", err)
 		os.Exit(2)
 	}
-	out, err := inbox.Run(in)
+	out, err := slice.Run(in)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "slice:", err)
 		os.Exit(1)

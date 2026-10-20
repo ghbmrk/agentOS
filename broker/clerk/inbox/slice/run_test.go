@@ -1,20 +1,62 @@
-package inbox
+package slice
 
 // REQ: EVL-2, VRB-2
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
+
+const evalDir = "../../../../evals/slice-inbox"
+
+type fixtureMail struct {
+	ID    string `json:"id"`
+	File  string `json:"file"`
+	Class string `json:"class"`
+}
+
+// loadFixture reads the eval set's world, key records and mail (read only).
+func loadFixture(t testing.TB) (inbox.World, []fixtureMail, map[string][]byte) {
+	t.Helper()
+	var w inbox.World
+	var meta struct {
+		Mails []fixtureMail `json:"mails"`
+	}
+	read := func(name string, v any) {
+		b, err := os.ReadFile(filepath.Join(evalDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read("world.json", &w)
+	read("world.json", &meta)
+	read("keys.json", &w.DKIMKeys)
+	raw := map[string][]byte{}
+	for _, m := range meta.Mails {
+		b, err := os.ReadFile(filepath.Join(evalDir, m.File))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[m.ID] = b
+	}
+	return w, meta.Mails, raw
+}
 
 func fixtureInput(t *testing.T) Input {
 	t.Helper()
 	w, mails, raw := loadFixture(t)
 	in := Input{World: w, Owner: "owner@home.test", OneClickBody: "List-Unsubscribe=One-Click", RetentionDays: 30,
-		Prior: []Delivery{{From: "team@digest.test", Date: "2026-08-02"}}}
+		Prior: []inbox.Delivery{{From: "team@digest.test", Date: "2026-08-02"}}}
 	for _, m := range mails {
-		in.Mails = append(in.Mails, Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
+		in.Mails = append(in.Mails, inbox.Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
 	}
 	return in
 }
@@ -59,7 +101,7 @@ func TestRunKeepsMailTextInsideTheClerk(t *testing.T) {
 	}
 	b, _ := json.Marshal(struct {
 		O []string
-		R []Post
+		R []inbox.Post
 	}{out.OutsideMailClerk, out.Requests})
 	for _, s := range []string{"agentos-canary-slice-inbox", "555 0142"} {
 		if strings.Contains(string(b), s) {
