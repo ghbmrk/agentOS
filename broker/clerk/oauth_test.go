@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -41,12 +42,20 @@ type oauthFix struct {
 	noWrite atomic.Bool // the store's writes fail
 	issue   string      // the access token to issue, "" for canary-access-N
 	answer  string      // a raw token endpoint answer, "" for a good one
+	// While gate is set, a token request signals entered and waits for
+	// release before it is answered.
+	gate             atomic.Bool
+	entered, release chan struct{}
 }
 
 func setupOAuth(t *testing.T) *oauthFix {
 	t.Helper()
-	o := &oauthFix{expires: 100, rotate: true}
+	o := &oauthFix{expires: 100, rotate: true, entered: make(chan struct{}), release: make(chan struct{})}
 	o.exitFix = setupExitOps(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" && o.gate.Load() {
+			o.entered <- struct{}{}
+			<-o.release
+		}
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if r.URL.Path == "/token" {
@@ -562,5 +571,55 @@ func TestExitStaticPathNeverSendsAGrant(t *testing.T) {
 	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
 	if r.Outcome != "failed" || r.Detail != clerk.DCredential || f.hits.Load() != 0 {
 		t.Fatalf("a grant went out on the static path: %+v, auth %q", r, f.got.auth)
+	}
+}
+
+// reconnectMidRedeem calls Reconnect while a step is redeeming the old grant,
+// then lets the token endpoint answer as answer sets it up. It returns the
+// step's result.
+func (o *oauthFix) reconnectMidRedeem(t *testing.T, answer func()) kernel.Result {
+	t.Helper()
+	o.gate.Store(true)
+	res := make(chan kernel.Result)
+	go func() { res <- o.post("i1", 1) }()
+	<-o.entered
+	o.gate.Store(false)
+	o.mu.Lock()
+	answer()
+	o.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		done <- o.x.Reconnect([]byte(`{"refresh_token":"canary-new","client_id":"agentos-test","client_secret":"canary-client-secret"}`))
+	}()
+	// Reconnect must wait for the redemption in flight; give it the chance
+	// to run ahead of it before the endpoint answers.
+	select {
+	case err := <-done:
+		done <- err
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(o.release)
+	r := <-res
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestReconnectDuringARefusedRedemptionIsNotLatched(t *testing.T) {
+	o := setupOAuth(t)
+	o.reconnectMidRedeem(t, func() { o.refuse = 400 })
+	o.refuse = 0
+	if r := o.post("i2", 2); r.Outcome != "ok" || o.grants[len(o.grants)-1].Get("refresh_token") != "canary-new" {
+		t.Fatalf("an old grant's refusal undid the owner's reconnect: %+v", r)
+	}
+}
+
+func TestReconnectDuringARotationKeepsTheNewGrant(t *testing.T) {
+	o := setupOAuth(t)
+	o.reconnectMidRedeem(t, func() {})
+	n := len(o.grants)
+	if r := o.post("i2", 2); r.Outcome != "ok" || len(o.grants) != n+1 || o.grants[n].Get("refresh_token") != "canary-new" {
+		t.Fatalf("the old grant's rotation, or its access token, outlived the owner's reconnect: %+v, grants %v", r, o.grants)
 	}
 }

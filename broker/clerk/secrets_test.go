@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 )
@@ -114,5 +117,35 @@ func TestSecretsWriteBeforePutReturns(t *testing.T) {
 	}
 	if err := clerk.NewSecrets(sl, nil).UnmarshalBinary(disk); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Put holds the store's lock across its write, so the at-rest form written
+// last is the store's state: concurrent Puts lose nothing.
+func TestSecretsConcurrentPutsLoseNothing(t *testing.T) {
+	sl := sealer(t)
+	var mu sync.Mutex
+	var disk []byte
+	s := clerk.NewSecrets(sl, func(b []byte) error {
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		disk = bytes.Clone(b)
+		mu.Unlock()
+		return nil
+	})
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.Put(fmt.Sprintf("s%d", i), clerk.KindStatic, []byte("canary")); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	mem, _ := s.MarshalBinary()
+	if s.Len() != 16 || !bytes.Equal(mem, disk) {
+		t.Fatalf("concurrent Puts left %d slots, at rest equal to memory: %v", s.Len(), bytes.Equal(mem, disk))
 	}
 }
