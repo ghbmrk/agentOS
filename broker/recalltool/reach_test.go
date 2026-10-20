@@ -204,9 +204,11 @@ type reachRig struct {
 	told  []string
 	// dropped: the counts told through HeldDropped (CAP3-F1).
 	dropped []int
-	clock   time.Time
-	mail    string
-	before  time.Time // a restore point before the read
+	// sent: "notify" or "dropped" per owner text, in send order.
+	sent   []string
+	clock  time.Time
+	mail   string
+	before time.Time // a restore point before the read
 }
 
 // newReachRig: lineage "root" reads public items, then the owner's mail at
@@ -223,8 +225,8 @@ func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	x.ask = &fakeAsk{st: map[string]journal.Status{}}
 	x.reach = &Reach{Prov: r.prov, Journal: x.j, Machines: x.vm, Cases: x.cs, Ask: x.ask, Deleted: r.ix.Deleted,
 		Now: func() time.Time { return x.clock }, Location: time.UTC,
-		Notify:      func(s string) error { x.told = append(x.told, s); return nil },
-		HeldDropped: func(n int) error { x.dropped = append(x.dropped, n); return nil }}
+		Notify:      func(s string) error { x.told, x.sent = append(x.told, s), append(x.sent, "notify"); return nil },
+		HeldDropped: func(n int) error { x.dropped, x.sent = append(x.dropped, n), append(x.sent, "dropped"); return nil }}
 	x.ask.reach, x.ask.j = x.reach, x.j
 	r.ix.KeepTombstones(x.reach.Needed)
 	if err := r.ix.OnDelete(x.reach.OnDelete); err != nil {
@@ -1041,6 +1043,9 @@ func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 	}
 	if !slices.Equal(x.dropped, []int{2}) {
 		t.Fatalf("dropped %v, want [2]", x.dropped)
+	}
+	if !slices.Equal(x.sent, []string{"notify", "dropped"}) {
+		t.Fatalf("sent %v: the confirmation goes before the count", x.sent)
 	}
 	x.dropped = nil
 	x.reach.tellDropped("root", 0)
