@@ -21,6 +21,8 @@ USR, USR_VERITY = "8484680c-9521-48c6-9c11-b0720656f69e", "77ff5f63-e7b6-4633-ac
 # Synthetic canaries, assembled here so no scanner sees a key in this file. Neither is a real key.
 PEM = ("-----BEGIN " + "PRIVATE KEY-----\n" + "Q0FOQVJZ" * 8 + "\n-----END " + "PRIVATE KEY-----\n").encode()
 AGE = ("AGE-SECRET-" + "KEY-1" + "QQQQ" * 14 + "QQ").encode()
+# The same key JSON-escaped, as a provider credential file stores it (a literal backslash-n).
+PEM_JSON = ('{"private_key": "' + PEM.decode().replace("\n", "\\n") + '"}').encode()
 CARD = ("firstboot-" + "card.json").encode()
 
 
@@ -67,11 +69,13 @@ class SecretScanTest(unittest.TestCase):
     def test_a_key_or_card_outside_usr_slot_a_is_refused(self):
         # REQ: HW-1
         for where in ("esp", "slot b 3", "slot b 4", "root"):
-            for what, data in (("private key", PEM), ("age secret key", AGE), ("Owner Card", CARD)):
+            for what, data in (("private key", PEM), ("private key", PEM_JSON), ("age secret key", AGE),
+                               ("Owner Card", CARD)):
                 with self.subTest(where=where, what=what), tempfile.TemporaryDirectory() as d:
                     off = PART[where] + 4096 + 17
                     bad = finish.secret_violations(self.disk(d, [(off, data)]), TABLE)
-                    self.assertEqual(bad, ["%s at byte %d" % (what, off)])
+                    # The offset is where the key starts, past any JSON around it.
+                    self.assertEqual(bad, ["%s at byte %d" % (what, off + max(data.find(b"-----"), 0))])
                     # The report names the kind and place, never the bytes.
                     self.assertNotIn(data.decode()[:20], " ".join(bad))
         with tempfile.TemporaryDirectory() as d:
@@ -91,7 +95,8 @@ class SecretScanTest(unittest.TestCase):
         # libcrypto and gpg carry the header strings alone; only a header with a key body counts.
         header = ("-----BEGIN " + "PRIVATE KEY-----").encode()
         with tempfile.TemporaryDirectory() as d:
-            img = self.disk(d, [(PART["root"], header + b"\0" * 64), (PART["esp"], header + b"\n%s\n")])
+            img = self.disk(d, [(PART["root"], header + b"\0" * 64), (PART["esp"], header + b"\n%s\n"),
+                                (PART["root"] + 4096, header + b"\\n%s\\n")])
             self.assertEqual(finish.secret_violations(img, TABLE), [])
 
     def test_a_key_across_a_chunk_boundary_is_found_once(self):
