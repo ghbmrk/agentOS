@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -32,6 +33,9 @@ type ProviderStatus struct {
 	Connected       bool   `json:"connected"`
 	PrivateOK       bool   `json:"private_ok"`
 	PrivateByConfig bool   `json:"private_by_config"`
+	// Plan: the ChatGPT plan row, signed in with a login, not a key, so
+	// the page draws no add-key form for it.
+	Plan bool `json:"plan"`
 }
 
 // ProviderList implements Providers.
@@ -111,7 +115,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		case "allow":
 			err = s.cfg.Providers.SetProviderPrivate(ctx, id, true, r.PostForm.Get("code"))
 		case "addkey":
-			err = s.cfg.Providers.AddProviderKey(ctx, id, r.PostForm.Get("key"), r.PostForm.Get("code"))
+			err = s.cfg.Providers.AddProviderKey(ctx, id, strings.TrimSpace(r.PostForm.Get("key")), r.PostForm.Get("code"))
 		case "withdraw":
 			if r.PostForm.Get("confirm") != "1" {
 				withdraw = id

@@ -163,7 +163,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		t.Fatalf("missing key: %d %+v", w.Code, denied)
 	}
 	key := synthetic(t, "sk-canary-")
-	if err := putCmd([]string{"-run", run, "-name", "openai"}, strings.NewReader(key+"\n")); err != nil {
+	if err := c.put("openai", []byte(key)); err != nil {
 		t.Fatal(err)
 	}
 	before := mtr.Usage("agent").Tokens

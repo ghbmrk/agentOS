@@ -337,3 +337,23 @@ func TestAddKeyPastSetupNeedsTheOwner(t *testing.T) {
 		t.Fatalf("setup's key route took a key after finish: %d", w.Code)
 	}
 }
+
+// CRED-5f-mr-addkey-1: the ChatGPT plan row signs in with a login, so it
+// gets no add-key form; a key row does. Stray spaces around a pasted key
+// are dropped before it goes to the vault.
+func TestAddKeyFormSkipsThePlanRowAndTrimsTheKey(t *testing.T) {
+	r, _, fp := providerRig(t)
+	fp.ps = append(fp.ps, ProviderStatus{ID: "codex", Name: "ChatGPT plan", Plan: true})
+	r.signIn()
+	p := html.UnescapeString(r.get("/providers/"))
+	if n := strings.Count(p, `name="step" value="addkey"`); n != 2 {
+		t.Fatalf("want an add-key form on the two key rows only, got %d:\n%s", n, p)
+	}
+	if strings.Contains(p, `value="addkey"><input type="hidden" name="provider" value="codex"`) {
+		t.Fatalf("the plan row has an add-key form:\n%s", p)
+	}
+	w := r.post("/providers/", url.Values{"step": {"addkey"}, "provider": {"anthropic"}, "key": {" " + apiCanary + "\n"}, "code": {fp.code}})
+	if w.Code != http.StatusSeeOther || fp.keys["anthropic"] != apiCanary {
+		t.Fatalf("add: %d keys %v", w.Code, fp.keys)
+	}
+}

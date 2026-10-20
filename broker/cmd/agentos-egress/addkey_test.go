@@ -53,11 +53,6 @@ func TestAddKeyRouteStoresThroughTheVault(t *testing.T) {
 		if st != c.want || stored() || strings.Contains(out["error"].(string), key) {
 			t.Fatalf("want %d: got %d %v, stored %v", c.want, st, out, stored())
 		}
-		// The refused key did not spend the code.
-		r.c.keyCheck = providerAnswers(http.StatusOK)
-		if st, out := call("POST", "/providers/key", keyReq("anthropic", "bad key", code)); st != http.StatusBadRequest || stored() {
-			t.Fatalf("bad key: %d %v", st, out)
-		}
 	}
 
 	var asked int
@@ -138,9 +133,69 @@ func TestAddKeyNeedsTheOneTimeCode(t *testing.T) {
 	}
 }
 
+// Security on #2519: past setup addKey is the one path that writes an
+// adapter's key. /credential (put) is sealed once setup is done, so it
+// neither adds nor replaces a key without the code; a malformed code, or
+// any code during a lockout, never reaches the provider.
+func TestAddKeyIsTheOnlyPathPastSetup(t *testing.T) {
+	r := newFastRig(t, true)
+	call := handlerCall(t, r.c)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	old := keyValue(r, "openai")
+	for _, p := range []string{"anthropic", "openai"} {
+		v := synthetic(t, "sk-canary-")
+		if st, _ := call("POST", "/credential", map[string]any{"name": p, "value": v}); st != http.StatusGone {
+			t.Fatalf("/credential %s past setup: %d", p, st)
+		}
+	}
+	if hasKind(r.c.v, "anthropic", vault.KindAPIKey) || keyValue(r, "openai") != old {
+		t.Fatal("/credential wrote a key past setup")
+	}
+
+	var asked int
+	r.c.keyCheck = keyCheckRT(func(req *http.Request) (*http.Response, error) {
+		asked++
+		return providerAnswers(http.StatusOK)(req)
+	})
+	key := synthetic(t, "sk-canary-")
+	for _, bad := range []string{"x", "12345", "1234567", "12345a", "１２３４５６"} {
+		if st, _ := call("POST", "/providers/key", keyReq("anthropic", key, bad)); st != http.StatusForbidden || asked != 0 {
+			t.Fatalf("code %q: %d, asked %d", bad, st, asked)
+		}
+	}
+	for i := 0; i < MaxWrongCodes; i++ {
+		call("POST", "/providers/key", keyReq("anthropic", key, "000000"))
+	}
+	asked = 0
+	if st, _ := call("POST", "/providers/key", keyReq("anthropic", key, r.next())); st != http.StatusTooManyRequests || asked != 0 {
+		t.Fatalf("locked out: %d, asked %d", st, asked)
+	}
+}
+
 func listedProviders(t *testing.T, r *fastRig) map[string]modelroute.SetupProvider {
 	t.Helper()
 	w := httptest.NewRecorder()
 	unlockHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", "/providers", nil))
 	return listed(t, w)
+}
+
+// A key the provider refuses burns no code: the same code then adds a good key.
+func TestAddKeyRefusedByProviderBurnsNoCode(t *testing.T) {
+	r := newFastRig(t, true)
+	call := handlerCall(t, r.c)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() bool { return hasKind(r.c.v, "anthropic", vault.KindAPIKey) }
+	code := r.next()
+	r.c.keyCheck = providerAnswers(http.StatusUnauthorized)
+	if st, out := call("POST", "/providers/key", keyReq("anthropic", "sk-canary-refused-0001", code)); st != http.StatusForbidden || stored() {
+		t.Fatalf("refused key: %d %v", st, out)
+	}
+	r.c.keyCheck = providerAnswers(http.StatusOK)
+	if st, out := call("POST", "/providers/key", keyReq("anthropic", "sk-canary-good-0002", code)); st != http.StatusNoContent || !stored() {
+		t.Fatalf("same code, good key: %d %v", st, out)
+	}
 }

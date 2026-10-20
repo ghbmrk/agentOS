@@ -583,7 +583,7 @@ func unlockHandler(c *custody) http.Handler {
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.put(req.Name, []byte(req.Value)); err != nil {
+		if err := c.putWhileSetupOpen(req.Name, []byte(req.Value)); err != nil {
 			fail(w, err)
 			return
 		}

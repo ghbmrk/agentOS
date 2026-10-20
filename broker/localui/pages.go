@@ -290,7 +290,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
 {{end}}
-<form method="post" action="/providers/" autocomplete="off"><input type="hidden" name="step" value="addkey"><input type="hidden" name="provider" value="{{.ID}}"><label>{{if .Connected}}New{{else}}{{.Name}}{{end}} API key<input type="password" name="key" autocomplete="off" autocapitalize="off" spellcheck="false" required></label><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>{{if .Connected}}Replace{{else}}Add{{end}} {{.Name}} key</button></form>
+{{if not .Plan}}<form method="post" action="/providers/" autocomplete="off"><input type="hidden" name="step" value="addkey"><input type="hidden" name="provider" value="{{.ID}}"><label>{{if .Connected}}New{{else}}{{.Name}}{{end}} API key<input type="password" name="key" autocomplete="off" autocapitalize="off" spellcheck="false" required></label><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>{{if .Connected}}Replace{{else}}Add{{end}} {{.Name}} key</button></form>{{end}}
 {{end}}
 <p class="muted">I text you when this changes. I check a key with its provider before I keep it, and I never show it again.</p>
 {{end}}{{end}}

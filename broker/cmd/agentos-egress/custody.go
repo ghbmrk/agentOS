@@ -1197,12 +1197,34 @@ func (c *custody) model() *egress.Proxy {
 // put stores a provider API key while the vault is open. Only a built-in
 // adapter's credential name is writable, and never over an entry of
 // another kind, so the seed and the recovery entries (backup key, restore
-// state, Owner Card) cannot be replaced from the local UI.
+// state, Owner Card) cannot be replaced from the local UI. It has no
+// owner gate of its own: the unlock socket reaches it only through
+// putWhileSetupOpen, and past setup only addKey writes an adapter key.
 func (c *custody) put(name string, value []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != open {
 		return errLocked
+	}
+	return c.putKeyLocked(name, value)
+}
+
+// errCredentialSealed: past setup, /credential no longer writes a key.
+var errCredentialSealed = uerr(http.StatusGone, "keys are added from my Wi-Fi page now, with a code from your code generator")
+
+// putWhileSetupOpen is the /credential route's put: it writes only while
+// setup's enrollment is open, as setup's own key route does (K23). Once
+// setup is finished, or on a box that never had it open, addKey is the one
+// path that writes an adapter's key: it asks the provider, needs the
+// one-time code and tells the owner (K24, CH-10).
+func (c *custody) putWhileSetupOpen(name string, value []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return errLocked
+	}
+	if c.closedLocked() != nil {
+		return errCredentialSealed
 	}
 	return c.putKeyLocked(name, value)
 }

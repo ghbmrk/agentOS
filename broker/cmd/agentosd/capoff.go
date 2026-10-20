@@ -45,8 +45,8 @@ const (
 	// C2: the model route does not answer.
 	modelUnreachable = "Model: not reachable, so your agent cannot think and learning cannot test changes; " + fixRestart + "."
 	// C2: no model provider is granted (A11's no-grant cause): no -grant
-	// and no key stored at setup (egress K24). No add-key step is served
-	// past setup yet, so the line names none
+	// and no key stored at setup (egress K24). The providers page serves
+	// an add-key step past setup, and the line names it
 	// (TestModelNoGrantNamesAServedStep).
 	modelNoGrant = "Model: no AI plan or key, so no agent can think or learn; add a key on my Wi-Fi page."
 	// C2: the vault is not open, so the model route serves nothing.

@@ -79,17 +79,22 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 // K24 a key for a provider that had none is a new grant, and a replaced
 // key can point at another account. The provider is asked first, without
 // mu and before the code is spent, so a refused key burns no code; a
-// request with no code never reaches the provider. The code is checked
-// under mu just before the store, after the vault and the key are checked
-// again. It needs an open vault, and never reads a key's value.
+// request that cannot be a code, or that comes during a lockout, never
+// reaches the provider, so the route is no key-validity oracle. The code is
+// checked under mu just before the store, after the vault and the key are
+// checked again. It needs an open vault, and never reads a key's value.
 func (c *custody) addKey(provider string, key []byte, code string) error {
-	if code == "" {
+	if !codeShaped(code) {
 		return errCodeRequired
 	}
 	c.mu.Lock()
 	if c.ph != open {
 		c.mu.Unlock()
 		return errLocked
+	}
+	if until, out := c.lockedOut(c.now()); out {
+		c.mu.Unlock()
+		return errLockedOut(until)
 	}
 	a, err := c.keyAdapterLocked(provider, key)
 	c.mu.Unlock()
@@ -115,6 +120,19 @@ func (c *custody) addKey(provider string, key []byte, code string) error {
 	}
 	c.notify("AI key added for " + providerName(provider))
 	return nil
+}
+
+// codeShaped reports whether code can be a one-time code: six ASCII digits.
+func codeShaped(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // privateMarkOK refuses a provider that is neither built in nor the plan
