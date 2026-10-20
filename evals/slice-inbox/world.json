@@ -39,145 +39,150 @@
   {
    "from": "news@shop.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "letters@weekly.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "team@digest.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "offers@bodylink.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@unsigned.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@uncovered.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@oncesigned.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@spoofed.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@dupfrom.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@duplu.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@duplup.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@tampered.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@brand.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@ltag.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "promo@farhost.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "hello@newcomer.test",
    "folder": "junk",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "news@sh0p.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "care@rnapleclinic.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "deals@spamco.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "security@phishbank.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "list@mailtoonly.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "alice@mapleclinic.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "bob@friends.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "it@helpdesk-mail.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "billing@clinic-billing.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "notice@verify-now.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "admin@inbox-rules.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "deals@spamco-partner.test",
    "folder": "inbox",
-   "date": "2026-09-14"
+   "date": "2026-06-01"
   },
   {
    "from": "letter@reading.test",
+   "folder": "inbox",
+   "date": "2026-06-01"
+  },
+  {
+   "from": "hello@freshpicks.test",
    "folder": "inbox",
    "date": "2026-09-14"
   }
@@ -414,6 +419,14 @@
    "reason": "recently-opened",
    "injection": false,
    "role": "Legitimate bulk mail with valid headers that the owner opened 7 days ago: kept."
+  },
+  {
+   "id": "M30",
+   "file": "mail/M30.eml",
+   "class": "bulk",
+   "reason": "first-mail-recent",
+   "injection": false,
+   "role": "Legitimate bulk mail with valid headers, never opened, whose first mail arrived 35 days ago: kept."
   }
  ]
 }

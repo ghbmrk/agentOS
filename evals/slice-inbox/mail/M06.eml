@@ -1,4 +1,4 @@
-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=uncovered.test; s=s1; h=from:from:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=m+Cpf5cc1+6IpvWM0G9wM9uUhUkat/e/5EKQp9ag4IvyCh/RgNqTYWMiRfMyD0+RiUA2h9gaENkwVyLFAQOO8mEZxQUxRiPpcq/Owl8UWuQrZ7ZMhUL1kIoW57XkTFpMzeS5Fuigi3QuOt+P9jSJ+/HBWlHWR+xdbbj3CCO9y4ZC4Pj5U6y8wXTnMW4+EDas9+A3WJPuc5b/+S8BzHbkht6CMGgOnICl2DAANJdp9ZuVhafzZTd0WXknz5qngr4bTOPEVKIB66YXU682hLdCmYZv2EsF/fUrntqtKugvdiZGsf+pRa57GVH3p2OY04CRRuvrWwmPQKmLYlhIidVmOw==
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=uncovered.test; s=s1; h=from:from:to:subject:date:message-id; bh=dUocmqMlqPcXhBC/QxtUVuy0XmrKuifOJ8bsxYFoAdU=; b=Yd85PqR2grscsb/3waKOtHkEC7ZtNvJznfi6Tay3aj4WUH1bCQRuS1U3ERI01AKDKRlx6aQo3FZZtV9myo9VLhp+IdioIowL/uy7xhat+83KbS+abmoEgwBqPLaGZ4m4fZqo8YZbqjcK9tdQgRICFHLL/PECgX71Ncg6k3K8/Km1EpIXjsGqC7OCtV/pcXzTq4FAOkMGN8/MKFOI/sh8hC5YGaxh0lfhgTUwDbqaFcAcfs0Ym2ymgMji8ssnjNjFIKJ3EmTG03QtMRYfvTpoAwtNKJhy50xpCC+UZLudRCpjlZVMSJWmlCNqEz2kzvAMOJYJWPBS2aMPm2xs7wkeRg==
 From: Promo <promo@uncovered.test>
 To: owner@home.test
 Subject: Big sale

@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=freshpicks.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=EtNqLEkQBTIA+ms6KEl7Qt1OOR2PlxgNDPiq2z510XA=; b=ETkmCd8wVp45+b9Kbd1rL8ioKbRkY+l0zBNNevybcZh48XuUWJpzMC07sjJAoun6rl/NtLCngfQ0iLeclsYIX3joJ7uFE2gp8tudq4KDO8plrqCWQ0Klpccli3FVrwaeWyGQcYOuiqb4yl2rroBsTUZZOAksoVT/VcRdGl84CpHiPXxZPSRboTYv30YHNWDBwEn6q52DswvkRYKrQSh0xt8Y0HEIVSwjnyuOU47p3wdQX54NvusX1T1P5cIth1bigOJbWB3XqFV7fBuaBSpDe7dwaOORnpKG6zcbpvlmgb6qA7vbRSTpN7rYrg550pNCUXzqR8rlZEUemQWSvdiaow==
+From: Fresh Picks <hello@freshpicks.test>
+To: owner@home.test
+Subject: Welcome to Fresh Picks
+Date: Mon, 19 Oct 2026 08:29:00 +0000
+Message-ID: <m30.slice@freshpicks.test>
+List-Unsubscribe: <https://freshpicks.test/u/m30>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+Your first picks: https://freshpicks.test/picks/1

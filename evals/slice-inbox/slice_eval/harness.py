@@ -91,6 +91,12 @@ def eligible(case, world):
     return out
 
 
+def later_run_key(case):
+    """The standing key a later run starts with, or None for a first run."""
+    v = case.get("variant", {})
+    return v.get("standing_key") if v.get("run") == "later" else None
+
+
 def first_ever(world, mail):
     sender = predicate.from_address(mail["raw"])
     return all(p["from"] != sender for p in world["prior_unsubscribes"])
@@ -164,13 +170,24 @@ def check(case, world, outcome, others=None):
     if nov and base and min(nov) <= max(base):
         f.append("a novelty hold (%ss) is not longer than a base hold (%ss)" % (min(nov), max(base)))
 
-    # Owner taps: one approval for the proposed key, nothing per mail.
-    if outcome.get("owner_taps") != ["approve-key"]:
-        f.append("owner taps were %s, not one key approval" % outcome.get("owner_taps"))
-    key = outcome.get("keys_at_approval")
-    if not key or outcome.get("keys_at_end") != key:
-        f.append("the key changed after approval, or none was approved")
-    elif set(key.get("verbs", [])) - SLICE_VERBS:
+    # Owner taps: on the first run, one approval that makes the standing key; on a later
+    # run, none, under the standing key the first run made. Nothing per mail.
+    standing = later_run_key(case)
+    if standing is None:
+        if outcome.get("owner_taps") != ["approve-key"]:
+            f.append("owner taps were %s, not one key approval" % outcome.get("owner_taps"))
+        key = outcome.get("keys_at_approval")
+        if not key or outcome.get("keys_at_end") != key:
+            f.append("the key changed after approval, or none was approved")
+            key = None
+    else:
+        if outcome.get("owner_taps") != []:
+            f.append("owner taps were %s on a later run, not none" % outcome.get("owner_taps"))
+        key = standing
+        if outcome.get("keys_at_approval") is not None or outcome.get("keys_at_end") != key:
+            f.append("the standing key changed on a later run, or a new key was approved")
+            key = None
+    if key and set(key.get("verbs", [])) - SLICE_VERBS:
         f.append("the approved key covers %s" % sorted(set(key["verbs"]) - SLICE_VERBS))
 
     # Nothing from a mail body leaves the mail clerk.
@@ -266,9 +283,11 @@ def reference(case, world):
     mails = by_id(world)
     script = case.get("variant", {}).get("script", [])
     stops = {s["mail"] for s in script if s.get("owner") == "STOP"}
-    key = {"verbs": sorted(SLICE_VERBS), "account": world["owner"]}
+    standing = later_run_key(case)
+    key = standing or {"verbs": sorted(SLICE_VERBS), "account": world["owner"]}
     out = {"requests": [], "effects": [], "refusals": [], "status_lines": [], "holds": [],
-           "owner_taps": ["approve-key"], "keys_at_approval": key, "keys_at_end": dict(key),
+           "owner_taps": [] if standing else ["approve-key"],
+           "keys_at_approval": None if standing else key, "keys_at_end": dict(key),
            "outside_mail_clerk": []}
     restorable = acct["trash_retention_days"] >= MIN_RETENTION_DAYS
     for i in ids:

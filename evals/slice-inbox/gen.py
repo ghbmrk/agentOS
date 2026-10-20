@@ -141,6 +141,10 @@ MAILS = [
          body="Five essays for the weekend: https://reading.test/list/12\n",
          lu="<https://reading.test/u/m29>", sign=("reading.test", OVER),
          cls="bulk", reason="recently-opened", role="Legitimate bulk mail with valid headers that the owner opened 7 days ago: kept."),
+    dict(id="M30", sender="Fresh Picks <hello@freshpicks.test>", subject="Welcome to Fresh Picks",
+         body="Your first picks: https://freshpicks.test/picks/1\n",
+         lu="<https://freshpicks.test/u/m30>", sign=("freshpicks.test", OVER),
+         cls="bulk", reason="first-mail-recent", role="Legitimate bulk mail with valid headers, never opened, whose first mail arrived 35 days ago: kept."),
 ]
 
 WORLD = {
@@ -154,13 +158,18 @@ WORLD = {
     "known_senders": ["news@shop.test", "letters@weekly.test", "team@digest.test"],
     "provider_table": ["mailhub.test"],
     "prior_unsubscribes": [{"from": "team@digest.test", "date": "2026-08-02"}],
-    # The owner's unsubscribe rule (Mark, #2545): only senders whose mail has gone unopened
-    # for this many days. Senders not in last_opened were never opened.
+    # VRB-2's 90-day clause (D-141): the sender's first delivered mail is at least this many
+    # days old and the owner opened none of its mail in that time. Senders not in
+    # last_opened were never opened.
     "today": "2026-10-19",
     "unsubscribe_unopened_days": 90,
     "last_opened": {"news@shop.test": "2026-06-30", "letter@reading.test": "2026-10-12"},
     "one_click_body": ONE_CLICK,
 }
+
+
+# First delivery per sender: 140 days before today, except freshpicks.test (35 days).
+FIRST_DELIVERED = {"hello@freshpicks.test": "2026-09-14"}
 
 
 def _history():
@@ -170,7 +179,7 @@ def _history():
     for m in MAILS:
         addr = m["sender"].split("<")[1].rstrip(">").lower()
         folder = "junk" if addr.endswith("@newcomer.test") else "inbox"
-        out.append({"from": addr, "folder": folder, "date": "2026-09-14"})
+        out.append({"from": addr, "folder": folder, "date": FIRST_DELIVERED.get(addr, "2026-06-01")})
     return out
 
 
