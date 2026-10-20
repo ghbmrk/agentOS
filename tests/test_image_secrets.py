@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -98,6 +99,17 @@ class SecretScanTest(unittest.TestCase):
             img = self.disk(d, [(PART["root"], header + b"\0" * 64), (PART["esp"], header + b"\n%s\n"),
                                 (PART["root"] + 4096, header + b"\\n%s\\n")])
             self.assertEqual(finish.secret_violations(img, TABLE), [])
+
+    def test_a_run_of_escaped_breaks_without_a_body_fails_fast(self):
+        # REQ: HW-1
+        # A body line holds no backslash, so each escaped break ends a line in one place only and a
+        # header followed by many of them is rejected in linear time, not by the job timeout.
+        header = ("-----BEGIN " + "PRIVATE KEY-----").encode()
+        with tempfile.TemporaryDirectory() as d:
+            img = self.disk(d, [(PART["root"], header + b"\\n" * 200)])
+            start = time.monotonic()
+            self.assertEqual(finish.secret_violations(img, TABLE), [])
+            self.assertLess(time.monotonic() - start, 1.0)
 
     def test_a_key_across_a_chunk_boundary_is_found_once(self):
         # REQ: HW-1

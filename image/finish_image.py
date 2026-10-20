@@ -184,8 +184,9 @@ def quota_violations(img, table, entry):
 SECRET_PATTERNS = (
     # A PEM or PGP private key with its body: libcrypto and gpg carry the header alone. Its line
     # breaks may be real or JSON-escaped (a literal backslash-n, as provider credential files hold).
+    # A line holds no backslash, so an escaped break ends it in one place and a match stays linear.
     ("private key", re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:\\r)?(?:\\n|\r?\n)"
-                               rb"(?:[ -~]{0,128}?(?:\\r)?(?:\\n|\r?\n)){0,8}[A-Za-z0-9+/]{40}")),
+                               rb"(?:[ -\[\]-~]{0,128}(?:\\r)?(?:\\n|\r?\n)){0,8}[A-Za-z0-9+/]{40}")),
     ("age secret key", re.compile(rb"AGE-SECRET-KEY-1[02-9AC-HJ-NP-Z]{58}")),
     # The first-boot card record and the card's vault slot (broker/firstboot, broker/recovery):
     # the box makes both on its own drive at first boot (HW-1, D-102).
