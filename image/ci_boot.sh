@@ -277,6 +277,11 @@ modprobe mac80211_hwsim radios=2 || say "FAIL modprobe mac80211_hwsim"
 n=0
 until [ -e /sys/class/net/wlan0/phy80211 ] && [ -e /sys/class/net/wlan1/phy80211 ] || [ $n -ge 30 ]; do n=$((n + 1)); sleep 1; done
 phy=$(cat /sys/class/net/wlan1/phy80211/name 2>/dev/null)
+# The seller seals the sticker's setup network before the box ships (agentos-seller, HW-10); CI's
+# image has none, and without it the loader serves nothing. A synthetic one, root's 0600, once.
+f=/var/lib/agentos/setup-net.json
+[ -e $f ] || (umask 077 && printf '%s' '{"ssid":"AgentOS-Setup-CTST","password":"CANA-RYHW-SMC2-TEST"}' >$f)
+if [ -s $f ]; then say "setup network sealed"; else say "FAIL sealing the setup network"; fi
 ip netns add hwsimap
 if [ -n "$phy" ] && /run/agentos-hwsim/share/iw phy "$phy" set netns name hwsimap && [ ! -e /sys/class/net/wlan1 ]; then
 	say "test radio in its own namespace"
@@ -422,7 +427,7 @@ HWSIM_EXTRA="-virtfs local,path=$HS,mount_tag=hwsim,security_model=none,readonly
 copy "$W/hwsim.raw"
 EXTRA="$HWSIM_EXTRA" boot "$W/console-hwsim.log" "$W/hwsim.raw"
 grep -a "agentos-hwsim: NOTE" "$W/console-hwsim.log" | guest_echo || true
-for want in "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
+for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
 	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
 	"the loader logged the station allowed" "station joined" "station has a lease" "DNS resolves over the station" \
 	"the box's access point stays up" "station reaches the test network" "probe 22 dropped" "probe 80 dropped" \
@@ -438,7 +443,7 @@ has "$W/console-hwsim.log" "agentos-health: PASS secure_boot=on usr=verity inbou
 # The reboot: wlsta0 comes back, and with no sealed store there is no saved network.
 echo reboot >"$HS/mode"
 TMO=600 EXTRA="$HWSIM_EXTRA" boot "$W/console-hwsim-reboot.log" "$W/hwsim.raw"
-for want in "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
+for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
 	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
 	"no saved network after the reboot" "wlsta0 not joined after the reboot" "the PSK is in no file on the drive" "done"; do
 	has "$W/console-hwsim-reboot.log" "agentos-hwsim: $want"
