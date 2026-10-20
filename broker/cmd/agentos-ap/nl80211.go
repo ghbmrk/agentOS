@@ -86,6 +86,9 @@ func (n *nl80211) Interfaces(ctx context.Context) ([]localui.RadioIface, error) 
 	out := make([]localui.RadioIface, 0, len(msgs))
 	for _, m := range msgs {
 		i, err := parseIface(m.Data)
+		if errors.Is(err, errNoNetdev) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +97,14 @@ func (n *nl80211) Interfaces(ctx context.Context) ([]localui.RadioIface, error) 
 	return out, nil
 }
 
-// parseIface reads one interface. One without a name is malformed.
+// errNoNetdev marks an interface with no network device, which nl80211
+// lists without a name: a P2P device or a NAN interface. A radio that
+// supports P2P has one beside every netdev (hwsim, and the M6 Ultra's
+// MT7922 as wpa_supplicant brings it up), so it is skipped, not refused.
+var errNoNetdev = errors.New("nl80211: an interface with no network device")
+
+// parseIface reads one interface. One without a name is malformed, unless
+// its type has no network device (errNoNetdev).
 func parseIface(b []byte) (localui.RadioIface, error) {
 	var i localui.RadioIface
 	ad, err := netlink.NewAttributeDecoder(b)
@@ -119,6 +129,9 @@ func parseIface(b []byte) (localui.RadioIface, error) {
 		return i, fmt.Errorf("nl80211: interface: %w", err)
 	}
 	if i.Name == "" {
+		if i.Type == unix.NL80211_IFTYPE_P2P_DEVICE || i.Type == unix.NL80211_IFTYPE_NAN {
+			return i, errNoNetdev
+		}
 		return i, errors.New("nl80211: an interface with no name")
 	}
 	return i, nil
@@ -282,13 +295,18 @@ func decodeLimit(ad *netlink.AttributeDecoder) (localui.IfaceLimit, error) {
 	return l, nil
 }
 
+// NewStation asks without NLM_F_ACK: nl80211 answers NEW_INTERFACE with
+// the new interface, and an acknowledgement as well would sit unread on
+// the socket and answer the next request out of sequence, failing every
+// later one (the hwsim boot, #936 r4b-2). A failure still comes back as an
+// error message.
 func (n *nl80211) NewStation(ctx context.Context, phy uint32, name string, mac net.HardwareAddr) error {
 	_, err := n.do(ctx, unix.NL80211_CMD_NEW_INTERFACE, func(ae *netlink.AttributeEncoder) {
 		ae.Uint32(unix.NL80211_ATTR_WIPHY, phy)
 		ae.String(unix.NL80211_ATTR_IFNAME, name)
 		ae.Uint32(unix.NL80211_ATTR_IFTYPE, uint32(localui.IfaceStation))
 		ae.Bytes(unix.NL80211_ATTR_MAC, mac)
-	}, netlink.Request|netlink.Acknowledge)
+	}, netlink.Request)
 	if err != nil {
 		return fmt.Errorf("nl80211: creating %s on phy%d: %w", name, phy, err)
 	}

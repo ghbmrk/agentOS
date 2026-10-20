@@ -114,6 +114,12 @@ func TestNL80211Interfaces(t *testing.T) {
 					ae.Uint32(unix.NL80211_ATTR_WIPHY_FREQ, 2437)
 					ae.Bytes(unix.NL80211_ATTR_MAC, mac)
 				})),
+				// A P2P device has no netdev and no name (wpa_supplicant's
+				// on hwsim, #936 r4b-2): skipped, not refused.
+				msg(enc(t, func(ae *netlink.AttributeEncoder) {
+					ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
+					ae.Uint32(unix.NL80211_ATTR_IFTYPE, unix.NL80211_IFTYPE_P2P_DEVICE)
+				})),
 				msg(enc(t, func(ae *netlink.AttributeEncoder) {
 					ae.String(unix.NL80211_ATTR_IFNAME, localui.StationIface)
 					ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
@@ -137,6 +143,10 @@ func TestNL80211Interfaces(t *testing.T) {
 func TestNL80211InterfacesRefusesMalformed(t *testing.T) {
 	for name, data := range map[string][]byte{
 		"no name": enc(t, func(ae *netlink.AttributeEncoder) { ae.Uint32(unix.NL80211_ATTR_WIPHY, 0) }),
+		"no name, managed": enc(t, func(ae *netlink.AttributeEncoder) {
+			ae.Uint32(unix.NL80211_ATTR_WIPHY, 0)
+			ae.Uint32(unix.NL80211_ATTR_IFTYPE, sta)
+		}),
 		"short phy": enc(t, func(ae *netlink.AttributeEncoder) {
 			ae.String(unix.NL80211_ATTR_IFNAME, "wlan0")
 			ae.Uint16(unix.NL80211_ATTR_WIPHY, 0)
@@ -353,11 +363,13 @@ func TestNL80211CombinationsRefusesMalformed(t *testing.T) {
 }
 
 // NewStation asks for a managed wlsta0 on phy with the station's address,
-// acknowledged.
+// without NLM_F_ACK: the kernel answers with the interface, and an
+// acknowledgement on top stayed unread and put every later request out of
+// sequence on the hwsim boot (#936 r4b-2).
 func TestNL80211NewStation(t *testing.T) {
 	mac := net.HardwareAddr{2, 0x11, 0x22, 0x33, 0x44, 0x55}
 	var got localui.RadioIface
-	n, _ := dialFake(t, genltest.CheckRequest(nlFamily.ID, unix.NL80211_CMD_NEW_INTERFACE, netlink.Request|netlink.Acknowledge,
+	n, _ := dialFake(t, genltest.CheckRequest(nlFamily.ID, unix.NL80211_CMD_NEW_INTERFACE, netlink.Request,
 		func(greq genetlink.Message, _ netlink.Message) ([]genetlink.Message, error) {
 			i, err := parseIface(greq.Data)
 			got = i
