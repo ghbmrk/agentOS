@@ -733,3 +733,22 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// JSON encodes invalid UTF-8 as U+FFFD, so a signature over one such plan
+// would also cover another: a plan whose text is not UTF-8 is refused.
+func TestPlanTextMustBeUTF8(t *testing.T) {
+	r := newRig(t)
+	a := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m\xff")}})
+	b := a
+	b.Steps = []kernel.PlanStep{st(key.Organize, "m\xfe")}
+	for _, p := range []kernel.Plan{a, b} {
+		if _, err := kernel.VerifyPlan(p, r.owner.pub); !errors.Is(err, kernel.ErrNotText) {
+			t.Fatalf("verify %q: %v, want ErrNotText", p.Steps[0].Args, err)
+		}
+	}
+	must(t, r.k.Submit(0, b))
+	must(t, r.k.Tick(10))
+	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
+		t.Fatalf("non-UTF-8 plan: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+}

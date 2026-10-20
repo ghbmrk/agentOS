@@ -416,6 +416,8 @@ func (s *sim) submit() error {
 		s.plans = append(s.plans, id)
 		if ps := s.k.State().Plans[id]; unheld && ps != nil && ps.Status == kernel.SRejected {
 			s.unheld++
+		} else if unheld {
+			s.w.bad = append(s.w.bad, "a plan under a key its signer does not hold was admitted")
 		}
 	}
 	if errors.Is(err, kernel.ErrDuplicatePlan) {

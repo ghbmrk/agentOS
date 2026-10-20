@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -91,9 +93,31 @@ func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	return p
 }
 
+// ErrNotText refuses a plan with a string that is not valid UTF-8: JSON
+// would encode it as U+FFFD, so two different plans could share a signature.
+var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
+
 // VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
 func VerifyPlan(p Plan, owner ed25519.PublicKey) (*key.Verified, error) {
+	if !p.text() {
+		return nil, ErrNotText
+	}
 	return key.Verify(p.Key, owner, p.use(), p.Sig)
+}
+
+// text reports whether every string the holder signs is valid UTF-8.
+func (p Plan) text() bool {
+	ok := utf8.ValidString(p.ID)
+	for _, st := range p.Steps {
+		ok = ok && utf8.ValidString(string(st.Verb)) && utf8.ValidString(st.Clerk) && utf8.ValidString(st.Content)
+		for n, v := range st.Args {
+			ok = ok && utf8.ValidString(n) && utf8.ValidString(v)
+		}
+		for _, l := range st.Labels {
+			ok = ok && utf8.ValidString(l)
+		}
+	}
+	return ok
 }
 
 // Step is step i as the key is checked against it and the clerk sees it.
