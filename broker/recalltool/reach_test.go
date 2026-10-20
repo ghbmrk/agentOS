@@ -1024,9 +1024,10 @@ func TestCAP3PhotoDeletionIsNamedAPhoto(t *testing.T) {
 }
 
 // REQ: CAP3-F1
-// The forget reply after an approved rollback counts the held agent texts
-// the forget dropped (both Cases calls), and words none of them; with
-// none dropped it says nothing of them.
+// After an approved rollback the confirmation words none of the held
+// agent texts the forget dropped (both Cases calls); their count goes
+// apart, through HeldDropped, so a later forget cannot drop it with a held
+// confirmation. With none dropped nothing is counted.
 func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 	x, read := newReachRig(t)
 	x.j.submitted["late"] = read.Add(time.Second)
@@ -1034,14 +1035,17 @@ func TestForgetReplyCountsDroppedHeldTexts(t *testing.T) {
 	x.del(t, x.mail)
 	x.ask.answer("yes")
 	want := "Done: root forgot a mail you deleted and is back to " + x.before.Format("15:04 Jan 2") +
-		". Its 1 action since stays done; its details are erased. 2 held agent texts were dropped too."
+		". Its 1 action since stays done; its details are erased."
 	if len(x.told) != 1 || x.told[0] != want {
 		t.Fatalf("told %q, want %q", x.told, want)
 	}
-	for n, w := range map[int]string{0: "", 1: " 1 held agent text was dropped too."} {
-		if got := heldDropped(n); got != w {
-			t.Fatalf("heldDropped(%d) = %q, want %q", n, got, w)
-		}
+	if !slices.Equal(x.dropped, []int{2}) {
+		t.Fatalf("dropped %v, want [2]", x.dropped)
+	}
+	x.dropped = nil
+	x.reach.tellDropped("root", 0)
+	if len(x.dropped) != 0 {
+		t.Fatalf("none dropped: told %v", x.dropped)
 	}
 }
 

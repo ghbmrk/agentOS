@@ -53,6 +53,19 @@ type ActsRequest struct {
 	Acts []string `json:"acts"`
 }
 
+// AllowRequest is POST /allow's body, the acts the broker lets through
+// with no code (checker.Allow), and Before, the Unix millisecond after
+// which the checker records none of them (AllowWithin).
+type AllowRequest struct {
+	Acts   []Act `json:"acts"`
+	Before int64 `json:"before"`
+}
+
+// AllowWithin is how long after it is sent an allow may still be
+// recorded: under the verify client's 2 s timeout, so an allow whose
+// answer was lost is settled once Allow returns (Client.Allow).
+const AllowWithin = time.Second
+
 type VerifyResponse struct {
 	Step int64 `json:"step"`
 	OK   bool  `json:"ok"`
@@ -130,8 +143,35 @@ func (c *Client) Revoke(acts ...string) error { return c.acts("revoke", acts) }
 // only 204 means the checker released them.
 func (c *Client) Release(acts ...string) error { return c.acts("release", acts) }
 
+// Allow records allowed approvals for acts, which serve an irreversible
+// act but never a secret one: only 204 means the checker recorded them.
+// The checker records none after AllowWithin, and an Allow that got no
+// answer returns no sooner, so the checker has settled it by then: a
+// Revoke sent after the error withdraws whatever it recorded.
+func (c *Client) Allow(acts ...Act) error {
+	before := time.Now().Add(AllowWithin)
+	err := c.post("allow", AllowRequest{Acts: acts, Before: before.UnixMilli()})
+	var se statusError
+	if err != nil && !errors.As(err, &se) {
+		time.Sleep(time.Until(before))
+	}
+	return err
+}
+
+// statusError is a checker answer other than 204: the request was settled.
+type statusError struct {
+	op     string
+	status string
+}
+
+func (e statusError) Error() string { return "checker: " + e.op + ": " + e.status }
+
 func (c *Client) acts(op string, acts []string) error {
-	b, _ := json.Marshal(ActsRequest{Acts: acts})
+	return c.post(op, ActsRequest{Acts: acts})
+}
+
+func (c *Client) post(op string, body any) error {
+	b, _ := json.Marshal(body)
 	resp, err := c.hc.Post("http://localhost/"+op, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("checker: %w", err)
@@ -139,7 +179,7 @@ func (c *Client) acts(op string, acts []string) error {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, MaxBody))
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("checker: %s: %s", op, resp.Status)
+		return statusError{op, resp.Status}
 	}
 	return nil
 }

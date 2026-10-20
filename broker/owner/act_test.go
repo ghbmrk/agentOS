@@ -1,12 +1,13 @@
 package owner
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// REQ: CH-4, CH-10, ADP-10
+// REQ: CH-4, CH-10, ADP-9, ADP-10
 
 func actItem(ref, act string) Item {
 	it := highItem(ref)
@@ -84,8 +85,10 @@ func TestActsNeedTheChecker(t *testing.T) {
 	}
 }
 
-// A texted low-tier code approves no act at the checker.
-func TestTextedCodeCarriesNoActs(t *testing.T) {
+// A texted low-tier code is checked by the channel, not the checker, so
+// its acts reach the checker as allowed approvals, which serve no secret
+// act (CH-4, ADP-9).
+func TestTextedCodeAllowsItsActs(t *testing.T) {
 	r, f := newVerifierRig(t)
 	it := lowItem("a")
 	it.Act = "act-a"
@@ -97,6 +100,113 @@ func TestTextedCodeCarriesNoActs(t *testing.T) {
 	}
 	if f.calls() != calls || len(f.approved) != 0 {
 		t.Fatalf("texted code reached the checker: %d calls, approved %q", f.calls()-calls, f.approved)
+	}
+	if !reflect.DeepEqual(f.allowed, []CheckerAct{{Act: "act-a"}}) {
+		t.Fatalf("allowed %+v", f.allowed)
+	}
+	ds := r.decisions()
+	if len(ds) != 1 || !ds[0].Approved || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// A texted YES on an item with no act allows nothing and is not marked
+// allowed.
+func TestTextedCodeWithoutAnActAllowsNothing(t *testing.T) {
+	r, f := newVerifierRig(t)
+	r.ch.Request([]Item{lowItem("a")}, 0)
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	if got := r.say("YES " + m[1] + " " + m[2]); got != "Approved "+m[1]+"." {
+		t.Fatalf("texted YES: %q", got)
+	}
+	if len(f.allowed) != 0 {
+		t.Fatalf("allowed %+v", f.allowed)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Approved || ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// When the checker does not record the allowed approval, the texted YES
+// approves nothing, does not count as wrong, and the same code still
+// works once the checker does (CH-4, ADP-9).
+func TestTextedCodeFailsClosedWhenTheAllowFails(t *testing.T) {
+	r, f := newVerifierRig(t)
+	it := lowItem("a")
+	it.Act = "act-a"
+	r.ch.Request([]Item{it}, 0)
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	f.allowErr = errors.New("checker down")
+	if got := r.say("YES " + m[1] + " " + m[2]); got != allowErr {
+		t.Fatalf("YES with a failed allow: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+	if len(r.ch.codes.st.Wrong) != 0 {
+		t.Fatalf("counted as wrong: %v", r.ch.codes.st.Wrong)
+	}
+	// The failed allow may have been recorded, so it is withdrawn before
+	// the owner is told nothing was approved (#2514 L3 blocker 2).
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
+	f.allowErr = nil
+	if got := r.say("YES " + m[1] + " " + m[2]); got != "Approved "+m[1]+"." {
+		t.Fatalf("retry: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 1 || !ds[0].Allowed {
+		t.Fatalf("decided %+v", ds)
+	}
+}
+
+// An allow that fails and cannot be withdrawn may have been recorded, so
+// the owner is told the act may still run, never that nothing was
+// approved (#2514 L3 blocker 2, SW-5's rule).
+func TestAnAllowThatCannotBeWithdrawnSaysItMayRun(t *testing.T) {
+	r, f := newVerifierRig(t)
+	it := lowItem("a")
+	it.Act = "act-a"
+	r.ch.Request([]Item{it}, 0)
+	m := lowCodeRe.FindStringSubmatch(r.inbox())
+	f.allowErr = errors.New("checker timed out")
+	f.revokeErr = errors.New("checker timed out")
+	if got := r.say("YES " + m[1] + " " + m[2]); got != allowUnknownErr+" Reply NO "+m[1]+" to withdraw it." {
+		t.Fatalf("YES with a lost allow: %q", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("decided %+v", ds)
+	}
+	// While withdrawing still fails, NO denies and still says the act may
+	// run (TestNoWithdrawsTheDeniedActs shows NO withdrawing).
+	if got := r.say("NO " + m[1]); got != "Denied "+m[1]+". The box could not withdraw an approval it may have recorded, so it may still run." {
+		t.Fatalf("NO while withdrawing fails: %q", got)
+	}
+}
+
+// NO withdraws any approval the checker holds for the denied items' acts,
+// so an allow the box could not confirm cannot run after the owner said
+// no; a void request withdraws its acts the same way (#2514 combined delta).
+func TestNoWithdrawsTheDeniedActs(t *testing.T) {
+	r, f := newVerifierRig(t)
+	a, b := lowItem("a"), lowItem("b")
+	a.Act, b.Act = "act-a", "act-b"
+	id, err := r.ch.Request([]Item{a, b}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.say("NO " + id + " 2"); got != "Denied "+id+" item 2." {
+		t.Fatalf("NO item 2: %q", got)
+	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-b"}) {
+		t.Fatalf("withdrew %q", f.revoked)
+	}
+	f.revoked = nil
+	for i := 0; i < WrongPerRequest; i++ {
+		r.say("YES " + id + " 000000")
+	}
+	if !reflect.DeepEqual(f.revoked, []string{"act-a"}) {
+		t.Fatalf("void withdrew %q", f.revoked)
 	}
 }
 

@@ -406,6 +406,9 @@ type decision struct {
 	// rebuilt from the journal, which keeps no item (Invariant C); the
 	// recheck then matches the item by it. Empty for a live decision.
 	sum string
+	// allowed: the checker holds an allowed approval for the item's act
+	// (owner.Decision.Allowed), which the journal records.
+	allowed bool
 }
 
 // sameAs reports whether it is the item d answered.
@@ -421,7 +424,8 @@ func (d decision) sameAs(it owner.Item) bool {
 func (d decision) note(confirmed bool) journal.AnswerNote {
 	n := journal.AnswerNote{Approved: d.approved, Why: d.why, Request: d.req, Local: d.local,
 		Confirmed: d.local && confirmed, Asked: d.asked, Implicit: d.implicit, Late: d.late,
-		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear}
+		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear,
+		Allowed: d.approved && d.allowed}
 	if d.asked {
 		n.Sum = owner.ItemSum(d.item)
 	}
@@ -563,7 +567,7 @@ func (g *Gate) rebuildLocked(eng *journal.Engine) {
 		}
 		g.decided[id] = decision{approved: n.Approved, why: n.Why, guest: denialGuest(n.Why), asked: n.Asked,
 			implicit: n.Implicit, late: n.Late, req: n.Request, at: r.At, sum: n.Sum,
-			rep: repeat{went: n.Went, unclear: n.Unclear}, local: n.Local, tries: n.Tries}
+			rep: repeat{went: n.Went, unclear: n.Unclear}, local: n.Local, tries: n.Tries, allowed: n.Allowed}
 		if n.Confirmed || confirmed[id] {
 			g.confirmed[id] = true
 		}
@@ -2549,7 +2553,8 @@ func (g *Gate) Decide(d owner.Decision) {
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
 	dec := decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
-		req: d.Request, at: g.cfg.Now(), item: item, rep: rp, local: local, hold: hold, attempt: attempt, tries: tries}
+		req: d.Request, at: g.cfg.Now(), item: item, rep: rp, local: local, hold: hold, attempt: attempt, tries: tries,
+		allowed: d.Allowed}
 	confirmed := g.confirmed[d.Ref]
 	own, eng := g.own, g.eng
 	g.mu.Unlock()
