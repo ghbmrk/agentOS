@@ -4,7 +4,7 @@
   {
    "id": "mailbox-clean",
    "clause": "pass",
-   "says": "The whole clean mailbox: only M01-M03 are unsubscribed, spam and phishing are trashed, personal mail stays, one tap, replays identically.",
+   "says": "The whole clean mailbox: only M01-M03 are unsubscribed, spam and phishing are trashed, personal mail and the recently opened newsletter (M29) stay, one tap, replays identically.",
    "expect": {
     "posts": {
      "M01": "novelty",
@@ -20,7 +20,8 @@
      "M02",
      "M03",
      "M22",
-     "M23"
+     "M23",
+     "M29"
     ]
    }
   },
@@ -38,6 +39,24 @@
      "M01",
      "M02",
      "M03"
+    ]
+   }
+  },
+  {
+   "id": "recently-opened",
+   "clause": "recently-opened",
+   "says": "A sender that passes every eligibility clause but whose mail the owner opened within 90 days (M29, opened 7 days ago) is kept: not unsubscribed and not trashed. M01, last opened 111 days ago, is still unsubscribed.",
+   "expect": {
+    "posts": {
+     "M01": "novelty",
+     "M02": "novelty",
+     "M03": "base"
+    },
+    "no_post": [
+     "M29"
+    ],
+    "not_trashed": [
+     "M29"
     ]
    }
   },

@@ -15,9 +15,13 @@ The clauses run in SPEC order and the first that fails names the reason:
   url-host           the URL host neither aligns with d= nor is in the provider table
   no-history         the sender has no earlier mail outside the junk folder
   lookalike          the sender's domain collides with a known sender or contact
+  recently-opened    the owner opened the sender's mail fewer than
+                     world["unsubscribe_unopened_days"] days before world["today"]
+                     (the owner's rule on top of VRB-2, Mark on #2545)
   ok                 eligible
 """
 import re
+from datetime import date
 
 from . import dkim
 
@@ -109,4 +113,8 @@ def evaluate(raw, world):
     known = {org(a.split("@", 1)[1]) for a in world["contacts"] + world["known_senders"]}
     if any(skeleton(org(domain)) == skeleton(k) and org(domain) != k for k in known):
         return "lookalike", url
+    opened = world["last_opened"].get(sender)
+    if opened and (date.fromisoformat(world["today"]) - date.fromisoformat(opened)).days \
+            < world["unsubscribe_unopened_days"]:
+        return "recently-opened", url
     return "ok", url

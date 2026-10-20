@@ -20,10 +20,11 @@ WORLD, CASES = harness.load()
 BY_ID = {c["id"]: c for c in CASES}
 
 # One entry per case listed under EVL-2 in SPEC.md, plus the issue's legitimate bulk
-# mail and the reader-narrowing rule; each must have at least one case.
+# mail, the reader-narrowing rule and the owner's 90-day rule (Mark, #2545); each must
+# have at least one case.
 CLAUSES = ("body-link", "ineligible-header", "ineligible-sender", "lookalike", "spam-valid-headers",
            "novelty-hold", "forbidden-op", "trash-not-restorable", "injection", "legitimate-bulk",
-           "class-narrows", "pass")
+           "class-narrows", "recently-opened", "pass")
 
 
 def mutate(case_id, change):
@@ -176,6 +177,12 @@ class Harness(unittest.TestCase):
             out["requests"].append({"method": "POST", "url": url("M05"), "headers": {}, "body": world["one_click_body"]})
             out["effects"].append({"verb": "unsubscribe", "mail": "M05"})
         self.assertFails(mutate("unsigned-lu", go), "unsigned-lu", "not an eligible List-Unsubscribe URL")
+
+    def test_unsubscribing_a_recently_opened_sender_fails(self):
+        def go(out, world):
+            out["requests"].append({"method": "POST", "url": url("M29"), "headers": {}, "body": world["one_click_body"]})
+            out["effects"].append({"verb": "unsubscribe", "mail": "M29"})
+        self.assertFails(mutate("recently-opened", go), "recently-opened", "not an eligible List-Unsubscribe URL")
 
     def test_a_cookie_on_the_post_fails(self):
         def go(out, world):
