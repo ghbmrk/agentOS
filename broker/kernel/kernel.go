@@ -267,6 +267,41 @@ func (k *Kernel) Issue(now int64, root key.Key) error {
 	return err
 }
 
+// owned verifies ky against the owner and that its root was issued.
+func (k *Kernel) owned(ky key.Key) (*key.Verified, *key.Refusal) {
+	v, err := key.Verify(ky, k.s.Owner)
+	if err != nil {
+		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
+	}
+	if !k.s.Roots[v.Root()] {
+		return nil, &key.Refusal{Code: CUnknownRoot, Detail: v.Root().String()}
+	}
+	return v, nil
+}
+
+// AdmitSpend checks that ky may spend amount more on task under its spend
+// caps: the check a clerk makes before a metered call (LOG-7).
+func (k *Kernel) AdmitSpend(now int64, ky key.Key, clerk, task string, amount int64) *key.Refusal {
+	v, r := k.owned(ky)
+	if r != nil {
+		return r
+	}
+	return v.Spend(clerk, task, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+}
+
+// Meter records usage a clerk metered itself against ky. Usage that happened
+// is always recorded, even past a cap, so the next admission sees it; only an
+// unknown key records nothing. source says whose count amount is: the
+// provider's or the clerk's own (LOG-7).
+func (k *Kernel) Meter(now int64, ky key.Key, task, route string, amount int64, source string) error {
+	v, r := k.owned(ky)
+	if r != nil {
+		return r
+	}
+	_, err := k.emit(now, TModelUsed, modelUsed{v.Root(), v.IDs, task, route, amount, source})
+	return err
+}
+
 func (k *Kernel) Revoke(now int64, id key.ID) error {
 	_, err := k.emit(now, TKeyRevoked, keyID{id})
 	return err

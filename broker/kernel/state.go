@@ -37,12 +37,14 @@ const (
 	TStepResult   = "step.result"
 	TStepProbed   = "step.probed"
 	TStepUndone   = "step.undone"
+	TModelUsed    = "model.used"
 )
 
 var schema = map[string]int{
 	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1,
+	TModelUsed: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -61,8 +63,17 @@ type Plan struct {
 
 // Entry bodies.
 type (
-	keyIssued    struct{ Key key.Key }
-	keyID        struct{ ID key.ID }
+	keyIssued struct{ Key key.Key }
+	keyID     struct{ ID key.ID }
+	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
+	modelUsed struct {
+		Root   key.ID   `json:"root"`
+		Scopes []key.ID `json:"scopes"`
+		Task   string   `json:"task"`
+		Route  string   `json:"route"`
+		Amount int64    `json:"amount"`
+		Source string   `json:"source"` // "provider" or "clerk": whose count this is
+	}
 	planAccepted struct {
 		Plan   string   `json:"plan"`
 		Cause  uint64   `json:"cause"`
@@ -322,6 +333,14 @@ func (s *State) Apply(e Entry) error {
 			s.Changes.Paused[b.ID] = true
 		default:
 			delete(s.Changes.Paused, b.ID)
+		}
+	case TModelUsed:
+		b, err := body[modelUsed](e)
+		if err != nil {
+			return err
+		}
+		for _, id := range b.Scopes {
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task, Meter: true}})
 		}
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true

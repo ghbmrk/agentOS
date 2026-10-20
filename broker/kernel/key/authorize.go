@@ -39,6 +39,9 @@ type Use struct {
 	Amount    int64
 	Recipient string
 	Task      string
+	// Meter marks usage a clerk metered itself (a model call). It counts
+	// toward the spend caps only, never toward rate or use counts (LOG-7).
+	Meter bool
 }
 
 // Ledger lists the uses charged to a chain prefix. The kernel builds it from
@@ -100,9 +103,9 @@ func in(s []string, v string) bool {
 	return false
 }
 
-// Authorize is the whole key check: one pure function, shared by the kernel
-// and every clerk (KEY-2). It fails closed on a missing view.
-func (v *Verified) Authorize(s Step, c Context) *Refusal {
+// live checks the parts of a key's state that no step changes: the stop, the
+// chain's revocation and pause, and expiry.
+func (v *Verified) live(c Context) *Refusal {
 	if c.Changes == nil {
 		return refuse(RMalformed, "no revocation view")
 	}
@@ -117,10 +120,19 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 			return refuse(RPaused, "%s", id)
 		}
 	}
-	l := v.Limits
-	if l.NotAfter != nil && c.Now >= *l.NotAfter {
+	if l := v.Limits; l.NotAfter != nil && c.Now >= *l.NotAfter {
 		return refuse(RExpired, "expired at %d", *l.NotAfter)
 	}
+	return nil
+}
+
+// Authorize is the whole key check: one pure function, shared by the kernel
+// and every clerk (KEY-2). It fails closed on a missing view.
+func (v *Verified) Authorize(s Step, c Context) *Refusal {
+	if r := v.live(c); r != nil {
+		return r
+	}
+	l := v.Limits
 	if s.Clerk != l.Clerk {
 		return refuse(RClerk, "key is for %s", l.Clerk)
 	}
@@ -155,13 +167,22 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 			}
 		}
 	}
-	if len(l.Caps) > 0 && c.Ledger == nil {
-		return refuse(RMalformed, "no ledger")
-	}
 	if s.Amount < 0 {
 		return refuse(RMalformed, "negative amount")
 	}
-	for _, cp := range l.Caps {
+	return v.caps(s, c, false)
+}
+
+// caps checks every cap against the ledger as if s were charged now;
+// spendOnly skips the rate and use caps, which count steps, not metered usage.
+func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
+	if len(v.Limits.Caps) > 0 && c.Ledger == nil {
+		return refuse(RMalformed, "no ledger")
+	}
+	for _, cp := range v.Limits.Caps {
+		if spendOnly && cp.Kind != KSpendTask && cp.Kind != KSpendDay {
+			continue
+		}
 		var n, sum int64
 		for _, u := range c.Ledger.Uses(cp.Scope) {
 			switch cp.Kind {
@@ -174,15 +195,17 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 					sum += u.Amount
 				}
 			case KRateDay:
-				if u.At > c.Now-DayMS {
+				if !u.Meter && u.At > c.Now-DayMS {
 					n++
 				}
 			case KRateRecipient:
-				if u.At > c.Now-DayMS && u.Recipient == s.Recipient {
+				if !u.Meter && u.At > c.Now-DayMS && u.Recipient == s.Recipient {
 					n++
 				}
 			case KUses:
-				n++
+				if !u.Meter {
+					n++
+				}
 			}
 		}
 		switch cp.Kind {
@@ -205,4 +228,21 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 		}
 	}
 	return nil
+}
+
+// Spend is the check a metered call (a model call, a paid API call) makes
+// before it runs: the key is live, belongs to this clerk, and its spend caps
+// hold for amount more under task (LOG-7). The same function runs in the clerk
+// and in the kernel that records the usage.
+func (v *Verified) Spend(clerk, task string, amount int64, c Context) *Refusal {
+	if r := v.live(c); r != nil {
+		return r
+	}
+	if clerk != v.Limits.Clerk {
+		return refuse(RClerk, "key is for %s", v.Limits.Clerk)
+	}
+	if amount < 0 {
+		return refuse(RMalformed, "negative amount")
+	}
+	return v.caps(Step{Task: task, Amount: amount}, c, true)
 }
