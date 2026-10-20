@@ -4,11 +4,14 @@ package clerk_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -29,8 +32,10 @@ type oauthFix struct {
 	expires int64        // expires_in the endpoint answers with
 	rotate  bool         // answer with a new refresh token
 	refuse  int          // token endpoint status, 0 for 200
-	deny    bool         // the API refuses every token
+	deny    int          // status the API answers every request with, 0 to check the token
+	seal    atomic.Bool  // the store's sealer fails
 	issue   string       // the access token to issue, "" for canary-access-N
+	answer  string       // a raw token endpoint answer, "" for a good one
 }
 
 func setupOAuth(t *testing.T) *oauthFix {
@@ -40,10 +45,20 @@ func setupOAuth(t *testing.T) *oauthFix {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if r.URL.Path == "/token" {
-			o.grants = append(o.grants, mustForm(t, o.got.body))
+			b, _ := io.ReadAll(r.Body)
+			o.grants = append(o.grants, mustForm(t, string(b)))
+			if r.Header.Get("Content-Type") != clerk.TypeForm {
+				w.WriteHeader(415)
+				return
+			}
+			if o.answer != "" {
+				fmt.Fprint(w, o.answer)
+				return
+			}
 			if o.refuse != 0 {
+				// An error answer that also carries a token must still fail.
 				w.WriteHeader(o.refuse)
-				fmt.Fprintf(w, `{"error":"invalid_grant","echo":%q}`, o.got.body)
+				fmt.Fprintf(w, `{"error":"invalid_grant","access_token":"canary-access-x","echo":%q}`, b)
 				return
 			}
 			o.redeems++
@@ -59,12 +74,14 @@ func setupOAuth(t *testing.T) *oauthFix {
 			return
 		}
 		o.api = append(o.api, r.Header.Get("Authorization"))
-		if o.deny || r.Header.Get("Authorization") != "Bearer "+o.live {
+		if o.deny != 0 {
+			w.WriteHeader(o.deny)
+		} else if r.Header.Get("Authorization") != "Bearer "+o.live {
 			w.WriteHeader(401)
 			fmt.Fprintf(w, "refused %s", r.Header.Get("Authorization"))
 		}
 	}, nil)
-	sec := clerk.NewSecrets(sealer(t))
+	sec := clerk.NewSecrets(failingSealer{sealer(t), &o.seal})
 	if err := sec.Put("web", []byte(`{"refresh_token":"canary-refresh-0","client_id":"agentos-test","client_secret":"canary-client-secret"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +94,19 @@ func setupOAuth(t *testing.T) *oauthFix {
 	o.x, o.sec = x, sec
 	o.reboot(t, x, 0)
 	return o
+}
+
+// failingSealer fails every Seal while fail is set.
+type failingSealer struct {
+	clerk.Sealer
+	fail *atomic.Bool
+}
+
+func (s failingSealer) Seal(plain, aad []byte) ([]byte, error) {
+	if s.fail.Load() {
+		return nil, errors.New("seal failed")
+	}
+	return s.Sealer.Seal(plain, aad)
 }
 
 func mustForm(t *testing.T, s string) url.Values {
@@ -159,12 +189,76 @@ func TestExitDoesNotLoopOnA401AfterRefresh(t *testing.T) {
 	o := setupOAuth(t)
 	o.post("i0", 1)
 	o.mu.Lock()
-	o.deny = true // every token the endpoint issues is now refused
+	o.deny = 401 // every token the endpoint issues is now refused
 	o.mu.Unlock()
 	before := len(o.api)
 	r := o.post("i1", 2)
 	if r.Outcome != "failed" || r.Detail != clerk.DAuth+" http 401" || len(o.api)-before != 2 || o.redeems != 2 {
 		t.Fatalf("one resend after a 401, then the 401 stands: %+v, %d requests", r, len(o.api)-before)
+	}
+	o.noCanary(t, r.Detail)
+}
+
+func TestExitDoesNotRefreshOn403(t *testing.T) {
+	o := setupOAuth(t)
+	o.deny = 403 // forbidden is about the account, not the token
+	r := o.post("i1", 1)
+	if r.Outcome != "failed" || r.Detail != clerk.DAuth+" http 403" || len(o.api) != 1 || o.redeems != 1 {
+		t.Fatalf("a 403 must stand without a refresh: %+v, redeems %d, API saw %q", r, o.redeems, o.api)
+	}
+}
+
+// posts runs n steps at once, each under its own key, and returns their results.
+func (o *oauthFix) posts(t *testing.T, n int, now int64) []kernel.Result {
+	t.Helper()
+	res := make([]kernel.Result, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res[i] = o.post(fmt.Sprintf("c%d", i), now)
+		}()
+	}
+	wg.Wait()
+	return res
+}
+
+func TestExitRedeemsOnceForConcurrentSteps(t *testing.T) {
+	o := setupOAuth(t)
+	for _, r := range o.posts(t, 16, 1) {
+		if r.Outcome != "ok" {
+			t.Fatalf("%+v", r)
+		}
+	}
+	if o.redeems != 1 || len(o.grants) != 1 {
+		t.Fatalf("concurrent steps spent the refresh token %d times", len(o.grants))
+	}
+}
+
+func TestExitRedeemsOnceForConcurrent401s(t *testing.T) {
+	o := setupOAuth(t)
+	o.expires = 0 // only a 401 triggers a redemption
+	o.post("i0", 1)
+	o.mu.Lock()
+	o.live = "revoked"
+	o.mu.Unlock()
+	for _, r := range o.posts(t, 16, 2) {
+		if r.Outcome != "ok" {
+			t.Fatalf("%+v", r)
+		}
+	}
+	if o.redeems != 2 {
+		t.Fatalf("steps refused on the same stale token redeemed %d times, want once more", o.redeems-1)
+	}
+}
+
+func TestExitRotationSealFailureSendsNothing(t *testing.T) {
+	o := setupOAuth(t)
+	o.seal.Store(true)
+	r := o.post("i1", 1)
+	if r.Outcome != "failed" || r.Detail != clerk.DCredential || len(o.api) != 0 {
+		t.Fatalf("a rotated grant that cannot be sealed must fail before the API is reached: %+v, API saw %q", r, o.api)
 	}
 	o.noCanary(t, r.Detail)
 }
@@ -187,6 +281,26 @@ func TestExitRefusesAnAccessTokenThatIsNotPlain(t *testing.T) {
 		t.Fatalf("a token that is not plain must fail before the API is reached: %+v, API saw %q", r, o.api)
 	}
 	o.noCanary(t, r.Detail)
+}
+
+func TestExitRefusesAMalformedTokenAnswer(t *testing.T) {
+	o := setupOAuth(t)
+	o.answer = `{"access_token":"canary-access-x","expires_in":true}`
+	r := o.post("i1", 1)
+	if r.Outcome != "failed" || r.Detail != clerk.DRefresh+" http 200" || len(o.api) != 0 {
+		t.Fatalf("a token answer that does not decode must fail before the API is reached: %+v, API saw %q", r, o.api)
+	}
+	o.noCanary(t, r.Detail)
+}
+
+func TestExitCapsAccessTokenLifeAtADay(t *testing.T) {
+	o := setupOAuth(t)
+	o.expires = 30 * 24 * 60 * 60
+	o.post("i1", 1)
+	o.post("i2", 1+24*60*60*1000)
+	if o.redeems != 2 {
+		t.Fatalf("a token declared to live 30 days was kept past a day: redeems %d", o.redeems)
+	}
 }
 
 func TestExitRefreshKeepsTheGrantWhenNotRotated(t *testing.T) {
