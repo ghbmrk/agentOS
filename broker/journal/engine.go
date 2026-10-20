@@ -1556,10 +1556,10 @@ func (e *Engine) ReadTrail() ([]Record, error) { return e.readJournal() }
 
 // RecordsAfter returns the journal records with a sequence number greater
 // than seq, oldest first. Records are numbered from 1 with no gaps, so a
-// projection that has applied through seq reads its tail here (SIM-proj).
+// reader that has applied through seq reads its tail here (SIM-proj).
 // Like Trail it decodes the journal afresh, so the records share nothing
 // with the intents the engine dispatches. Unlike Trail it returns the read
-// error, so a projection never mistakes an unreadable journal for an empty
+// error, so a reader never mistakes an unreadable journal for an empty
 // tail.
 func (e *Engine) RecordsAfter(seq uint64) ([]Record, error) {
 	recs, err := e.readJournal()

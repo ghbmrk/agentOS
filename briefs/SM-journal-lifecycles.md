@@ -13,7 +13,7 @@ Board section: State-machine audit follow-ups (2026-10-16). Source: `audits/2026
 
 ## Design rule (the part later briefs copy)
 
-A domain lifecycle (device actuation, credential hand-off) is a set of **intent kinds** submitted to `journal.Engine`, never a store of its own. Mapping: the effect is an intent (`Account` = device or executor, `Action` = `actuate.<op>` or `handoff.<verb>`); the **inverse** is a second intent named in the first's declaration (UNDO submits it); the **prior state** and **bounds** ride in `Params` as non-secret scalars (the journal scrubs params, `journal/redact.go`, so the builder checks what survives scrubbing and puts any larger value in a content store named by hash, OP-11); the **daily count** is counted from records, not kept in a counter; state such as "stopped" is a record, rebuilt by replay as a projection (`broker/projection`). Nothing here writes a file.
+A domain lifecycle (device actuation, credential hand-off) is a set of **intent kinds** submitted to `journal.Engine`, never a store of its own. Mapping: the effect is an intent (`Account` = device or executor, `Action` = `actuate.<op>` or `handoff.<verb>`); the **inverse** is a second intent named in the first's declaration (UNDO submits it); the **prior state** and **bounds** ride in `Params` as non-secret scalars (the journal scrubs params, `journal/redact.go`, so the builder checks what survives scrubbing and puts any larger value in a content store named by hash, OP-11); the **daily count** is counted from records, not kept in a counter; state such as "stopped" is a record, rebuilt by replay. Nothing here writes a file.
 
 ## Scope of this package
 

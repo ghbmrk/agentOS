@@ -902,14 +902,6 @@ broker/owner/ASSUMPTIONS.md O40
 broker/owner/notice/ASSUMPTIONS.md N1
 broker/owner/notice/ASSUMPTIONS.md N2
 broker/owner/notice/ASSUMPTIONS.md N3
-broker/projection/ASSUMPTIONS.md P1
-broker/projection/ASSUMPTIONS.md P2
-broker/projection/ASSUMPTIONS.md P3
-broker/projection/ASSUMPTIONS.md P4
-broker/projection/ASSUMPTIONS.md P5
-broker/projection/ASSUMPTIONS.md P6
-broker/projection/ASSUMPTIONS.md P7
-broker/projection/ASSUMPTIONS.md P8
 broker/provagent/ASSUMPTIONS.md P1
 broker/provagent/ASSUMPTIONS.md P2
 broker/provagent/ASSUMPTIONS.md P3
