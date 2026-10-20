@@ -1,6 +1,6 @@
 # P2-2w c3 r4a: NetworkManager and polkitd in the image
 
-Board row: #936 (P2-2w c3 r4), first half. Split 2026-10-20 on the hardware triage's recommendation: this half ships the services the home Wi-Fi helper (`agentos-netjoin`, P2-2w c3) talks to and extends the uplink tree check to them; [r4b](P2-2w-c3-r4b.md) adds the station device and the helper's `-station` flag. Netjoin, localui and agentos-ap are outside D-139's frozen list, and D-139 keeps hardware, image and Wi-Fi work going (decisions/D-139.md).
+Board row: #936 (P2-2w c3 r4), first half. Split 2026-10-20 on the hardware triage's recommendation: this half ships the services the home Wi-Fi helper (`agentos-netjoin`, P2-2w c3) talks to and extends the uplink tree check to them; [r4b](P2-2w-c3-r4b.md) adds the station device; the helper's `-station` flag waits for the sealed store (#935). Netjoin, localui and agentos-ap are outside D-139's frozen list, and D-139 keeps hardware, image and Wi-Fi work going (decisions/D-139.md).
 
 **Requirements:**
 - ONB-3: the home network is a minimum-path step. Today the helper has no NetworkManager to call and answers `failed` (broker/netjoin N2, N13).
@@ -61,6 +61,6 @@ Run `python3 tools/doclint.py` and the image tests locally; the image workflow's
 
 ## Out of scope
 
-- The station interface and the helper's `-station` flag (r4b).
+- The station interface (r4b) and the helper's `-station` flag (#935, with the sealed store).
 - Keeping a saved network across reboot (#935, which also amends L8.7).
 - Listing networks in range (#1282).
