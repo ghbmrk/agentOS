@@ -342,11 +342,11 @@ func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	if s := r.k.State().Plans["p2"].Status; s == kernel.SRejected {
 		t.Fatal("a plan under the phone's renewal is rejected")
 	}
-	must(t, r.k.Meter(at, "p1", "api", 10, "provider"))
-	if rf := r.k.AdmitSpend(at, "p2", 5); rf != nil {
+	must(t, r.meter(at, "p1", "api", 10, "provider"))
+	if rf := r.admit(at, "p2", 5); rf != nil {
 		t.Fatalf("within the day cap: %v", rf)
 	}
-	if rf := r.k.AdmitSpend(at, "p2", 6); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(at, "p2", 6); rf == nil || rf.Code != key.RSpendDay {
 		t.Fatalf("the renewal's cap stacked on the old key's: %v", rf)
 	}
 }

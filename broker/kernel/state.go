@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,32 +47,33 @@ const (
 
 // Entry types, all version 1. The set is closed (LOG-5).
 const (
-	TKeyIssued    = "key.issued"
-	TKeyRevoked   = "key.revoked"
-	TKeyPaused    = "key.paused"
-	TKeyResumed   = "key.resumed"
-	TEnrolled     = "passkey.enrolled"
-	TUnenrolled   = "passkey.revoked"
-	TLine         = "line.set"
-	TStop         = "stop"
-	TResume       = "resume"
-	TPlanSubmit   = "plan.submitted"
-	TPlanAccepted = "plan.accepted"
-	TPlanRejected = "plan.rejected"
-	TPlanCancel   = "plan.cancelled"
-	TStepHeld     = "step.held"
-	TStepDispatch = "step.dispatched"
-	TStepResult   = "step.result"
-	TStepProbed   = "step.probed"
-	TStepUndone   = "step.undone"
-	TStepRetried  = "step.retried"
-	TModelUsed    = "model.used"
-	TSpendHeld    = "spend.held"
-	TSpendExtend  = "spend.extended"
-	TPoolRead     = "pool.read"
-	TReserveUp    = "pool.reserve.raised"
-	TReserveDown  = "pool.reserve.lowered"
-	TPoolReset    = "pool.reset"
+	TKeyIssued     = "key.issued"
+	TKeyRevoked    = "key.revoked"
+	TKeyPaused     = "key.paused"
+	TKeyResumed    = "key.resumed"
+	TEnrolled      = "passkey.enrolled"
+	TUnenrolled    = "passkey.revoked"
+	TLine          = "line.set"
+	TStop          = "stop"
+	TResume        = "resume"
+	TPlanSubmit    = "plan.submitted"
+	TPlanAccepted  = "plan.accepted"
+	TPlanRejected  = "plan.rejected"
+	TPlanCancel    = "plan.cancelled"
+	TStepHeld      = "step.held"
+	TStepDispatch  = "step.dispatched"
+	TStepResult    = "step.result"
+	TStepProbed    = "step.probed"
+	TStepUndone    = "step.undone"
+	TStepRetried   = "step.retried"
+	TModelUsed     = "model.used"
+	TSpendReserved = "model.reserved"
+	TSpendHeld     = "spend.held"
+	TSpendExtend   = "spend.extended"
+	TPoolRead      = "pool.read"
+	TReserveUp     = "pool.reserve.raised"
+	TReserveDown   = "pool.reserve.lowered"
+	TPoolReset     = "pool.reset"
 	// Task entries are in task.go.
 )
 
@@ -79,7 +81,7 @@ var schema = map[string]int{
 	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TLine: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
-	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
+	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1,
 }
 
@@ -190,6 +192,16 @@ type (
 		Route  string   `json:"route"`
 		Amount int64    `json:"amount"`
 		Source string   `json:"source"` // "provider", "clerk" or "admitted" (the worst case): whose count this is
+		// Settles is the reservation entry this usage replaces (AdmitSpend).
+		Settles uint64 `json:"settles"`
+	}
+	// spendReserved is a metered call's worst case, charged from its
+	// admission until its usage settles it (#2613 item 1).
+	spendReserved struct {
+		Root   key.ID   `json:"root"`
+		Scopes []key.ID `json:"scopes"`
+		Task   string   `json:"task"` // the plan admitted
+		Amount int64    `json:"amount"`
 	}
 	// spendHeld stops a task whose spend cap is used up until the owner extends it (LOG-7).
 	spendHeld struct {
@@ -375,6 +387,7 @@ type State struct {
 	tasks    map[string]*taskState
 	Order    []string
 	uses     map[key.ID][]usedRec
+	reserved map[uint64]*spendReserved   // open reservations by entry
 	seen     map[key.ID]map[string]int   // root -> shape -> completed, not undone
 	recent   map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
 }
@@ -391,7 +404,7 @@ func NewState(anchors []ed25519.PublicKey) *State {
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Grants:  map[key.ID]Grant{}, Plans: map[string]*PlanState{},
 		SpendHeld: map[string]SpendHold{}, Extended: map[string]key.Key{}, Pools: map[string]Pool{},
-		tasks: map[string]*taskState{}, uses: map[key.ID][]usedRec{},
+		tasks: map[string]*taskState{}, uses: map[key.ID][]usedRec{}, reserved: map[uint64]*spendReserved{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
 }
@@ -460,14 +473,15 @@ func Idem(plan string, index int) string {
 }
 
 type ledger struct {
-	s      *State
-	before uint64 // 0: every use
+	s       *State
+	before  uint64 // 0: every use
+	settled bool   // leave out reservations still open
 }
 
 func (l ledger) Uses(id key.ID) []key.Use {
 	var out []key.Use
 	for _, u := range l.s.uses[id] {
-		if l.before == 0 || u.Seq < l.before {
+		if (l.before == 0 || u.Seq < l.before) && (!l.settled || l.s.reserved[u.Seq] == nil) {
 			out = append(out, u.Use)
 		}
 	}
@@ -795,10 +809,25 @@ func (s *State) Apply(e Entry) error {
 		default:
 			delete(s.Changes.Paused, b.ID)
 		}
+	case TSpendReserved:
+		b, err := body[spendReserved](e)
+		if err != nil {
+			return err
+		}
+		s.reserved[e.Seq] = &b
+		for _, id := range b.Scopes {
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task}})
+		}
 	case TModelUsed:
 		b, err := body[modelUsed](e)
 		if err != nil {
 			return err
+		}
+		if rs := s.reserved[b.Settles]; rs != nil && rs.Task == b.Task {
+			delete(s.reserved, b.Settles)
+			for _, id := range rs.Scopes {
+				s.uses[id] = slices.DeleteFunc(s.uses[id], func(u usedRec) bool { return u.Seq == b.Settles })
+			}
 		}
 		for _, id := range b.Scopes {
 			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task}})

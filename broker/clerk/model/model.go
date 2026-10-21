@@ -53,8 +53,8 @@ type Price struct {
 // Ledger is the part of the kernel the clerk needs: the check and the record.
 // Calls name the plan; the kernel finds its key and task (LOG-7).
 type Ledger interface {
-	AdmitSpend(now int64, plan string, amount int64) *key.Refusal
-	Meter(now int64, plan, route string, amount int64, source string) error
+	AdmitSpend(now int64, plan string, amount int64) (kernel.Admitted, *key.Refusal)
+	Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error
 	Hold(now int64, plan string, rf *key.Refusal) error
 	AdmitPool(now int64, pool string) *key.Refusal
 	ReadPool(now int64, pool string, used, resetAt int64) error
@@ -135,54 +135,31 @@ func (c *Clerk) flush(now int64) error {
 // full pool instead, since a reading can only narrow, and one the log cannot
 // write is owed until its reset time.
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.flush(now); err != nil {
-		return "", err
-	}
-	p, ok := c.Routes[route]
-	if !ok {
-		return "", fmt.Errorf("model: no route %q", route)
-	}
-	if maxOut <= 0 {
-		return "", errors.New("model: maxOut must be positive")
-	}
-	in := tokens(prompt)
-	worst, err := p.cost(in, maxOut)
+	p, in, worst, a, err := c.admit(now, plan, route, prompt, maxOut)
 	if err != nil {
 		return "", err
 	}
-	if p.Pool != "" {
-		if r := c.Ledger.AdmitPool(now, p.Pool); r != nil {
-			return "", r
-		}
-	}
-	if r := c.Ledger.AdmitSpend(now, plan, worst); r != nil {
-		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
-			if err := c.Ledger.Hold(now, plan, r); err != nil {
-				return "", err
-			}
-		}
-		return "", r
-	}
+	// The provider is called without the lock: the kernel's reservation, not
+	// the clerk, keeps calls admitted at once inside the caps.
 	reply, u, callErr := c.Provider.Call(route, prompt, maxOut)
-	var merr error
-	if u.Reported || !errors.Is(callErr, ErrNotSent) {
-		amount, src := worst, "admitted"
-		var cerr error
-		switch {
-		case u.Reported:
-			amount, cerr = p.cost(u.In, u.Out)
-			src = "provider"
-		case callErr == nil:
-			amount, cerr = p.cost(in, tokens(reply))
-			src = "clerk"
-		}
-		if cerr != nil {
-			amount, src = worst, "admitted"
-		}
-		merr = c.owe(now, func(now int64) error { return c.Ledger.Meter(now, plan, route, amount, src) })
+	amount, src := worst, "admitted"
+	var cerr error
+	switch {
+	case u.Reported:
+		amount, cerr = p.cost(u.In, u.Out)
+		src = "provider"
+	case errors.Is(callErr, ErrNotSent):
+		amount, src = 0, "clerk" // the request never left
+	case callErr == nil:
+		amount, cerr = p.cost(in, tokens(reply))
+		src = "clerk"
 	}
+	if cerr != nil {
+		amount, src = worst, "admitted"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	merr := c.owe(now, func(now int64) error { return c.Ledger.Meter(now, a, route, amount, src) })
 	if p.Pool != "" && u.Pool != nil {
 		used, reset := u.Pool.Used, u.Pool.ResetAt
 		if reset <= now {
@@ -205,4 +182,41 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 		return "", callErr
 	}
 	return reply, nil
+}
+
+// admit checks the route and admits the call's worst case, under the lock.
+func (c *Clerk) admit(now int64, plan, route, prompt string, maxOut int64) (Price, int64, int64, kernel.Admitted, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var none kernel.Admitted
+	if err := c.flush(now); err != nil {
+		return Price{}, 0, 0, none, err
+	}
+	p, ok := c.Routes[route]
+	if !ok {
+		return Price{}, 0, 0, none, fmt.Errorf("model: no route %q", route)
+	}
+	if maxOut <= 0 {
+		return Price{}, 0, 0, none, errors.New("model: maxOut must be positive")
+	}
+	in := tokens(prompt)
+	worst, err := p.cost(in, maxOut)
+	if err != nil {
+		return Price{}, 0, 0, none, err
+	}
+	if p.Pool != "" {
+		if r := c.Ledger.AdmitPool(now, p.Pool); r != nil {
+			return Price{}, 0, 0, none, r
+		}
+	}
+	a, r := c.Ledger.AdmitSpend(now, plan, worst)
+	if r != nil {
+		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
+			if err := c.Ledger.Hold(now, plan, r); err != nil {
+				return Price{}, 0, 0, none, err
+			}
+		}
+		return Price{}, 0, 0, none, r
+	}
+	return p, in, worst, a, nil
 }

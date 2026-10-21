@@ -11,6 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/clerk/model"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -123,14 +124,14 @@ type ledger struct {
 	metered int64
 }
 
-func (l *ledger) AdmitSpend(int64, string, int64) *key.Refusal {
+func (l *ledger) AdmitSpend(int64, string, int64) (kernel.Admitted, *key.Refusal) {
 	if l.admits == 0 {
-		return &key.Refusal{Code: key.RSpendTask}
+		return kernel.Admitted{}, &key.Refusal{Code: key.RSpendTask}
 	}
 	l.admits--
-	return nil
+	return kernel.Admitted{}, nil
 }
-func (l *ledger) Meter(_ int64, _, _ string, amount int64, _ string) error {
+func (l *ledger) Meter(_ int64, _ kernel.Admitted, _ string, amount int64, _ string) error {
 	l.metered += amount
 	return nil
 }

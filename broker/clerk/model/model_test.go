@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk/model"
@@ -59,16 +60,16 @@ func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
 	return f.Ledger.ReadPool(now, pool, used, resetAt)
 }
 
-func (f *flaky) Meter(now int64, plan, route string, amount int64, source string) error {
+func (f *flaky) Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error {
 	if f.fail {
 		return errors.New("log down")
 	}
-	return f.Ledger.Meter(now, plan, route, amount, source)
+	return f.Ledger.Meter(now, a, route, amount, source)
 }
 
 // rig boots a kernel and submits active plans "t" and "big" citing a model key
 // capped at 100 per task.
-func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
+func rig(t *testing.T, p model.Provider) (*model.Clerk, *kernel.Kernel, *flaky) {
 	t.Helper()
 	opub, opriv := seed(1)
 	hpub, hpriv := seed(2)
@@ -289,13 +290,50 @@ func TestUnrecordedSpendShutsTheClerkUntilTheLogRecords(t *testing.T) {
 func TestRequestThatNeverLeftMetersNothing(t *testing.T) {
 	f := &fake{err: model.ErrNotSent}
 	c, k, _ := rig(t, f)
-	n := len(k.Log().Entries())
 	if _, err := c.Call(1, "t", "api", "hi", 10); !errors.Is(err, model.ErrNotSent) {
 		t.Fatalf("the error surfaces: %v", err)
 	}
-	if len(k.Log().Entries()) != n {
-		t.Fatal("a request that never left costs nothing and leaves no entry")
+	if e := lastEntry(k); e.Type != kernel.TModelUsed || !strings.Contains(string(e.Body), `"amount":0`) {
+		t.Fatalf("its admission is settled at nothing: %s %s", e.Type, e.Body)
 	}
+	f.err = nil
+	if _, err := c.Call(2, "t", "api", "hi", 99); err != nil {
+		t.Fatalf("the whole budget is left: %v", err)
+	}
+}
+
+// Calls run at once: the provider is called without the clerk's lock, and
+// the kernel's reservations keep them inside the caps together (#2613 item 1).
+func TestConcurrentCallsShareNoBudget(t *testing.T) {
+	f := &gate{in: make(chan struct{}), release: make(chan struct{})}
+	c, _, _ := rig(t, f)
+	done := make(chan error, 1)
+	go func() { _, err := c.Call(1, "t", "api", "hi", 59); done <- err }() // worst case 60
+	<-f.in
+	if _, err := c.Call(1, "t", "api", "hi", 40); err == nil {
+		t.Fatal("a second call shared the first one's budget")
+	}
+	if _, err := c.Call(1, "t", "api", "hi", 39); err != nil {
+		t.Fatalf("the rest of the budget: %v", err)
+	}
+	close(f.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gate is a provider whose first call waits to be released.
+type gate struct {
+	in, release chan struct{}
+	n           atomic.Int32
+}
+
+func (g *gate) Call(route, prompt string, maxOut int64) (string, model.Usage, error) {
+	if g.n.Add(1) == 1 {
+		g.in <- struct{}{}
+		<-g.release
+	}
+	return "ok", model.Usage{In: 1, Out: 1, Reported: true}, nil
 }
 
 func TestUsageReturnedWithAnErrorIsMetered(t *testing.T) {
