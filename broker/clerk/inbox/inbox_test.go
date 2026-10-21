@@ -86,7 +86,7 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	r.acct.Clock = func() int64 { return r.now }
 	// The passkey granted the root and the home clerk's key at setup (D-146).
 	root, err := key.ClerkKey(key.Issue(ownerPriv, key.Root{Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey}),
-		ownerPriv, holderPub, t0, 0)
+		ownerPriv, holderPub, t0-dayMS-kernel.GrantHold, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

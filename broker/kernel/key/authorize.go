@@ -100,8 +100,6 @@ func in(s []string, v string) bool {
 	return false
 }
 
-// live checks the parts of a key's state that no step changes: the stop, the
-// chain's revocation and pause, and expiry.
 // Live is the part of a check every use shares: no stop, no revocation or
 // pause anywhere in the chain, not expired.
 func (v *Verified) Live(c Context) *Refusal {

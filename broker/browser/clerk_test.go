@@ -42,17 +42,21 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	bpub, bpriv := seedKey(12) // the second hardware key co-signs new power (D-146)
 	anchors := []ed25519.PublicKey{opub, bpub}
 	c := NewClerk("web", anchors, h.g)
+	var k *kernel.Kernel
+	// The clerk's clock keeps the test's time: the time of the step the
+	// kernel just dispatched.
+	c.Clock = func() int64 { es := k.Log().Entries(); return es[len(es)-1].At }
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
 		Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, anchors, map[string]kernel.Clerk{"web": c}, 0)
+	k, err = kernel.Boot(l, anchors, map[string]kernel.Clerk{"web": c}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The passkey's grant to the home clerk, a hold before the test (D-146).
-	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"}), opriv, hpub, time.Now().UnixMilli(), 1<<40) // a clerk with no Clock reads the wall clock
+	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"}), opriv, hpub, -kernel.GrantHold, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
