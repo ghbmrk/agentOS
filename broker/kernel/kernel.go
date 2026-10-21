@@ -41,6 +41,11 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if r := OneOff(s, s.owners(p.Key), s.Anchors, p, now); r != nil {
 		return key.ID{}, nil, r
 	}
+	if t := v.Limits.Task; t != "" {
+		if _, ok := s.Task(t, now); !ok {
+			return key.ID{}, nil, &key.Refusal{Code: CTask, Detail: "the key's task is not live"}
+		}
+	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
 	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
 	fresh := map[string]bool{}
@@ -91,7 +96,7 @@ func repeats(s *State, root key.ID, st key.Step, self string, now int64) bool {
 		}
 		for i, ss := range p.Steps {
 			switch ss.Phase {
-			case PInflight, PUnknown, PParked, PRedo:
+			case PInflight, PUnknown, PParked, PRedo, PUnsent:
 				if Fingerprint(p.Plan.Step(i)) == fp {
 					return true
 				}
@@ -143,6 +148,11 @@ func Next(s *State, id string, now int64) Act {
 		}
 		a.Kind = ActProbe
 		return a
+	case PUnsent:
+		if now < st.NextProbe {
+			a.WakeAt = st.NextProbe
+			return a
+		}
 	case PQueued, PHeld, PRedo:
 	default:
 		return a
@@ -226,6 +236,8 @@ type View interface {
 	Dispatched(r Request) (Dispatch, bool)
 	// OneOffLine is the most a one-off under root may spend alone (OneOff).
 	OneOffLine(root key.ID, now int64) int64
+	// Task answers only while the task is live at now.
+	Task(id string, now int64) (Task, bool)
 }
 
 // Live refuses a key unless its grants, its root and its first link, are in
@@ -265,6 +277,11 @@ type Kernel struct {
 	log    *Log
 	s      *State
 	clerks map[string]Clerk
+	// asked is the steps whose clerk call Calls handed out and Answer has
+	// not had back, so a second Calls does not hand them out again. It is
+	// not state: a restart marks the dispatches unknown (Boot) and probes
+	// them again.
+	asked map[stepRef]bool
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")
@@ -277,7 +294,7 @@ func Boot(l *Log, anchors []ed25519.PublicKey, clerks map[string]Clerk, now int6
 	if err != nil {
 		return nil, err
 	}
-	k := &Kernel{log: l, s: s, clerks: clerks}
+	k := &Kernel{log: l, s: s, clerks: clerks, asked: map[stepRef]bool{}}
 	for _, id := range append([]string(nil), s.Order...) {
 		if s.Plans[id].Status == SPending {
 			if err := k.decide(now, id); err != nil {
@@ -632,16 +649,70 @@ func (k *Kernel) result(now int64, id string, i int, outcome, detail string) err
 	return err
 }
 
-// Tick runs every active plan as far as the clock allows. A step that cannot
-// move yet is left for a later Tick.
-func (k *Kernel) Tick(now int64) error {
+// Call is one clerk call the kernel wants made: a step it logged as
+// dispatched, or an unknown result to probe. The kernel's state is not held
+// while it runs, so STOP, a revoke or STATUS never waits on a clerk (KRN-7).
+type Call struct {
+	Kind  string // ActDispatch or ActProbe
+	Clerk string
+	Req   Request
+}
+
+// Calls runs every active plan as far as now allows without calling a clerk:
+// it logs holds, cancels and dispatches, and returns the calls now due, each
+// once until Answer has its answer. A step whose clerk the kernel does not
+// have fails here.
+func (k *Kernel) Calls(now int64) ([]Call, error) {
+	var out []Call
 	for _, id := range append([]string(nil), k.s.Order...) {
 		for n := 0; n < 4*MaxSteps; n++ {
 			a := Next(k.s, id, now)
-			if a.Kind == ActNone {
+			if a.Kind == ActNone || k.asked[stepRef{a.Plan, a.Index}] {
 				break
 			}
-			if err := k.act(now, a); err != nil {
+			c, err := k.act(now, a)
+			if err != nil {
+				return out, err
+			}
+			if c != nil {
+				k.asked[stepRef{a.Plan, a.Index}] = true
+				out = append(out, *c)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// Answer logs a clerk's answer to c: for a dispatch its Result, for a probe
+// its finding in Outcome (done, notdone, unknown or OUnreached).
+func (k *Kernel) Answer(now int64, c Call, res Result) error {
+	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
+	if c.Kind == ActProbe {
+		_, err := k.emit(now, TStepProbed, stepProbed{stepRef{c.Req.Plan.ID, c.Req.Index}, res.Outcome})
+		return err
+	}
+	return k.result(now, c.Req.Plan.ID, c.Req.Index, res.Outcome, res.Detail)
+}
+
+// Tick runs every active plan as far as the clock allows, calling the
+// in-process clerks it was booted with as it goes. A step that cannot move
+// yet is left for a later Tick.
+func (k *Kernel) Tick(now int64) error {
+	for n := 0; n < 4*MaxSteps; n++ {
+		cs, err := k.Calls(now)
+		if err != nil || len(cs) == 0 {
+			return err
+		}
+		for _, c := range cs {
+			cl := k.clerks[c.Clerk]
+			res := Result{}
+			if c.Kind == ActProbe {
+				res.Outcome = cl.Probe(c.Req, k.s)
+			} else {
+				res = cl.Do(c.Req, k.s)
+			}
+			if err := k.Answer(now, c, res); err != nil {
 				return err
 			}
 		}
@@ -649,39 +720,34 @@ func (k *Kernel) Tick(now int64) error {
 	return nil
 }
 
-func (k *Kernel) act(now int64, a Act) error {
+// act logs what a returns from Next, and returns the clerk call it needs, if any.
+func (k *Kernel) act(now int64, a Act) (*Call, error) {
 	ref := stepRef{a.Plan, a.Index}
 	p := k.s.Plans[a.Plan]
 	switch a.Kind {
 	case ActCancel:
 		_, err := k.emit(now, TPlanCancel, planCancel{Plan: a.Plan, Code: a.Refusal.Code, Detail: a.Refusal.Detail})
-		return err
+		return nil, err
 	case ActHold:
 		_, err := k.emit(now, TStepHeld, stepHeld{ref, 0, a.Novel})
-		return err
+		return nil, err
 	}
 	sp, st := p.Plan.Step(a.Index), p.Steps[a.Index]
-	c := k.clerks[sp.Clerk]
-	if c == nil {
-		if a.Kind == ActDispatch {
-			if _, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, Idem(a.Plan, a.Index), st.HeldSeq}); err != nil {
-				return err
-			}
-			return k.result(now, a.Plan, a.Index, "failed", CClerk)
-		}
-		return nil
-	}
 	req := Request{Plan: p.Plan, Index: a.Index}
+	_, known := k.clerks[sp.Clerk]
 	switch a.Kind {
 	case ActDispatch:
 		if _, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, req.Idem(), st.HeldSeq}); err != nil {
-			return err
+			return nil, err
 		}
-		res := c.Do(req, k.s)
-		return k.result(now, a.Plan, a.Index, res.Outcome, res.Detail)
+		if !known {
+			return nil, k.result(now, a.Plan, a.Index, "failed", CClerk)
+		}
+		return &Call{ActDispatch, sp.Clerk, req}, nil
 	case ActProbe:
-		_, err := k.emit(now, TStepProbed, stepProbed{ref, c.Probe(req, k.s)})
-		return err
+		if known {
+			return &Call{ActProbe, sp.Clerk, req}, nil
+		}
 	}
-	return nil
+	return nil, nil
 }

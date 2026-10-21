@@ -25,6 +25,14 @@ const (
 	MaxSteps   = 64
 	MaxChecks  = 10     // KRN-8: parked after ten checks
 	ProbeEvery = 60_000 // ms between reconciliation checks
+	UnsentWait = 30_000 // ms before a step whose clerk was not reached is sent again
+)
+
+// Clerk answers that say no byte reached the clerk (KRN-7): a dispatch that
+// sent nothing, and a probe that could not ask.
+const (
+	OUnsent    = "unsent"
+	OUnreached = "unreached"
 )
 
 // Entry types, all version 1. The set is closed (LOG-5).
@@ -55,6 +63,7 @@ const (
 	TReserveUp    = "pool.reserve.raised"
 	TReserveDown  = "pool.reserve.lowered"
 	TPoolReset    = "pool.reset"
+	// Task entries are in task.go.
 )
 
 var schema = map[string]int{
@@ -62,6 +71,7 @@ var schema = map[string]int{
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
+	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -73,7 +83,7 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
-		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset
+		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -252,6 +262,7 @@ const (
 	PInflight  = "inflight"
 	PUnknown   = "unknown"
 	PRedo      = "redo"
+	PUnsent    = "unsent" // the clerk was not reached: nothing was sent, so it is sent again after UnsentWait
 	PParked    = "parked"
 	PDone      = "done"
 	PFailed    = "failed"
@@ -349,6 +360,7 @@ type State struct {
 	// Extended maps a plan to the extension key its later calls are charged to.
 	Extended map[string]key.Key
 	Pools    map[string]Pool
+	tasks    map[string]*taskState
 	Order    []string
 	uses     map[key.ID][]usedRec
 	seen     map[key.ID]map[string]int   // root -> shape -> completed, not undone
@@ -367,7 +379,7 @@ func NewState(anchors []ed25519.PublicKey) *State {
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Grants:  map[key.ID]Grant{}, Plans: map[string]*PlanState{},
 		SpendHeld: map[string]SpendHold{}, Extended: map[string]key.Key{}, Pools: map[string]Pool{},
-		uses: map[key.ID][]usedRec{},
+		tasks: map[string]*taskState{}, uses: map[key.ID][]usedRec{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
 }
@@ -631,7 +643,7 @@ type Unsettled struct {
 	Index  int
 	Verb   key.Verb
 	Clerk  string
-	Phase  string // PUnknown or PParked
+	Phase  string // PUnknown, PParked, or PUnsent: its clerk was not reached
 	Checks int
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
@@ -644,7 +656,7 @@ func (s *State) Status() []Unsettled {
 		p := s.Plans[id]
 		for i := range p.Steps {
 			st := &p.Steps[i]
-			if st.Phase != PUnknown && st.Phase != PParked {
+			if st.Phase != PUnknown && st.Phase != PParked && st.Phase != PUnsent {
 				continue
 			}
 			ps := p.Plan.Steps[i]
@@ -658,6 +670,12 @@ func (s *State) Status() []Unsettled {
 // retryable: only a parked step of a live plan. The owner's cancel stands,
 // and a step still being reconciled may yet prove done.
 func retryable(p *PlanState, st *StepState) bool { return st.Phase == PParked && p.Status == SActive }
+
+// sendable reports whether a step in phase may be dispatched: nothing of it
+// has reached a clerk yet, or what did is known not to have taken effect.
+func sendable(phase string) bool {
+	return phase == PQueued || phase == PHeld || phase == PRedo || phase == PUnsent
+}
 
 func body[T any](e Entry) (T, error) {
 	var b T
@@ -712,6 +730,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		s.Unenrolled = append(s.Unenrolled, b.Passkey)
+		s.dropApprovals(b.Passkey)
 		// Its grants still in their hold are cancelled with it: a lost
 		// phone's last taps never go live (D-146).
 		for id, g := range s.Grants {
@@ -779,6 +798,9 @@ func (s *State) Apply(e Entry) error {
 		s.Pools[b.Pool] = p
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
+		for _, t := range s.tasks {
+			t.ended = true // an ended task never comes back
+		}
 	case TResume:
 		s.Stopped, s.Changes.Stopped = false, false
 	case TPlanSubmit:
@@ -817,7 +839,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
 			p.Status = SCancelled
-			if st := &p.Steps[p.Next]; st.Phase == PQueued || st.Phase == PHeld || st.Phase == PRedo {
+			if st := &p.Steps[p.Next]; sendable(st.Phase) {
 				st.Phase = PCancelled
 			}
 		}
@@ -834,7 +856,7 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if p, st := s.step(b.stepRef); st != nil && (st.Phase == PQueued || st.Phase == PHeld || st.Phase == PRedo) {
+		if p, st := s.step(b.stepRef); st != nil && sendable(st.Phase) {
 			st.Phase, st.Attempt = PInflight, b.Attempt
 			if b.Attempt == 1 {
 				st.DispatchSeq = e.Seq
@@ -854,6 +876,8 @@ func (s *State) Apply(e Entry) error {
 			switch b.Outcome {
 			case "ok":
 				s.complete(p, b.Index, e.At)
+			case OUnsent:
+				st.Phase, st.NextProbe = PUnsent, e.At+UnsentWait
 			case "failed":
 				st.Phase = PFailed
 				if p.Status == SActive {
@@ -877,6 +901,8 @@ func (s *State) Apply(e Entry) error {
 				if p.Status != SActive {
 					st.Phase = PCancelled
 				}
+			case OUnreached:
+				st.NextProbe = e.At + ProbeEvery // no check was made, so none counts
 			default:
 				st.Checks++
 				st.NextProbe = e.At + ProbeEvery
@@ -908,6 +934,8 @@ func (s *State) Apply(e Entry) error {
 		if p, st := s.step(b); st != nil && retryable(p, st) {
 			st.Phase, st.Checks = PRedo, 0
 		}
+	case TTaskOpened, TTaskApproved, TTaskEnded:
+		return s.applyTask(e)
 	default:
 		return ErrUnknown
 	}
