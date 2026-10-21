@@ -28,16 +28,25 @@ func ctx(now int64, l ledger) Context {
 	return Context{Now: now, Changes: &Changes{Revoked: map[ID]bool{}, Paused: map[ID]bool{}}, Ledger: l}
 }
 
+// root is the passkey (owner), the home clerk (holder) and the passkey's
+// clerk key to it, which no step's spend or time here reaches (D-146).
 func root(t *testing.T) (kp, kp, Key) {
 	owner, holder := gen(1), gen(2)
-	k := Issue(owner.priv, Root{Holder: holder.pub, Clerk: "mail", Verbs: []Verb{Organize, Trash, Unsubscribe}, Serial: "r1"})
+	k, err := ClerkKey(bare(owner), owner.priv, holder.pub, 0, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return owner, holder, k
+}
+
+func bare(owner kp) Key {
+	return Issue(owner.priv, Root{Clerk: "mail", Verbs: []Verb{Organize, Trash, Unsubscribe}, Serial: "r1"})
 }
 
 // verified is a use of k by its holder: the only way to a Verified.
 func verified(t *testing.T, k Key, owner, holder kp) *Verified {
 	use := []byte("use")
-	v, err := Verify(k, owner.pub, use, Sign(k, holder.priv, use))
+	v, err := Verify(k, []ed25519.PublicKey{owner.pub}, use, Sign(k, holder.priv, use))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +79,12 @@ func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 
 func TestWrongOwnerAndBadSig(t *testing.T) {
 	o, h, k := root(t)
-	if err := CheckChain(k, gen(9).pub); !errors.Is(err, ErrWrongOwner) {
+	if err := CheckChain(k, []ed25519.PublicKey{gen(9).pub}); !errors.Is(err, ErrWrongOwner) {
 		t.Fatal(err)
 	}
 	bad := k
 	bad.Root.Clerk = "bank"
-	if err := CheckChain(bad, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(bad, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered root: %v", err)
 	}
 	d, err := Derive(k, h.priv, gen(3).pub, LimitVerbs(Trash))
@@ -83,7 +92,7 @@ func TestWrongOwnerAndBadSig(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Links[0].Caveats[0] = LimitVerbs(Trash, Organize)
-	if err := CheckChain(d, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(d, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered link: %v", err)
 	}
 }
@@ -96,7 +105,7 @@ func TestDomainsDoNotCross(t *testing.T) {
 	}
 	sig := ed25519.Sign(o.priv, append([]byte(DomainLink), rootBody(k.Root)...))
 	k.Root.Sig = sig
-	if err := CheckChain(k, o.pub); !errors.Is(err, ErrBadSig) {
+	if err := CheckChain(k, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatal(err)
 	}
 }
@@ -119,14 +128,14 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 	}
 	// A hostile holder signs a loosening link directly; Verify rejects it.
 	e := Extend(d, h2.priv, Link{Caveats: []Caveat{LimitVerbs(Trash, Organize, Unsubscribe)}, Holder: gen(4).pub})
-	if err := CheckChain(e, o.pub); !errors.Is(err, ErrLoosens) {
+	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
 		t.Fatalf("hostile widen: %v", err)
 	}
 	// Dropping a limit by omission is not a loosening, but a later larger cap is.
 	c1, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(100), LimitExpires(1000), LimitHold(10, 20))
 	for _, bad := range []Caveat{LimitSpendDay(101), LimitExpires(1001), LimitHold(5, 20), LimitHold(10, 19)} {
 		e := Extend(c1, h2.priv, Link{Caveats: []Caveat{bad}, Holder: gen(4).pub})
-		if err := CheckChain(e, o.pub); !errors.Is(err, ErrLoosens) {
+		if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
 			t.Fatalf("%v: %v", bad.Kind, err)
 		}
 	}
@@ -135,11 +144,11 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 func TestUnknownKindAndNonCanonicalRejected(t *testing.T) {
 	o, h, k := root(t)
 	e := Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: "anything"}}, Holder: gen(4).pub})
-	if err := CheckChain(e, o.pub); !errors.Is(err, ErrUnknownKind) {
+	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrUnknownKind) {
 		t.Fatal(err)
 	}
 	e = Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: KVerbs, Set: []string{"trash", "organize"}}}, Holder: gen(4).pub})
-	if err := CheckChain(e, o.pub); !errors.Is(err, ErrMalformed) {
+	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("unsorted: %v", err)
 	}
 }
@@ -224,7 +233,7 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	parent, _ := Derive(k, h.priv, h2.pub, LimitUses(2), LimitSpendDay(50), LimitRate(5), LimitRateRecipient(1))
 	child, _ := Derive(parent, h2.priv, gen(4).pub, LimitSpendTask(10))
 	v := verified(t, child, o, gen(4))
-	pid := v.IDs[1]
+	pid := v.IDs[2]
 	s := step(Trash)
 	s.Amount, s.Task, s.Recipient = 10, "t1", "r"
 	if r := v.Authorize(s, ctx(1000, ledger{})); r != nil {
@@ -298,23 +307,23 @@ func TestUseNeedsTheLastHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	use := []byte("plan")
-	if _, err := Verify(d, o.pub, use, Sign(d, planner.priv, use)); err != nil {
+	if _, err := Verify(d, []ed25519.PublicKey{o.pub}, use, Sign(d, planner.priv, use)); err != nil {
 		t.Fatalf("holder's own use: %v", err)
 	}
 	stripped := Key{Root: d.Root}
-	if _, err := Verify(stripped, o.pub, use, Sign(stripped, planner.priv, use)); !errors.Is(err, ErrNotHolder) {
+	if _, err := Verify(stripped, []ed25519.PublicKey{o.pub}, use, Sign(stripped, planner.priv, use)); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("stripped key: %v", err)
 	}
-	if _, err := Verify(d, o.pub, use, nil); !errors.Is(err, ErrNotHolder) {
+	if _, err := Verify(d, []ed25519.PublicKey{o.pub}, use, nil); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("unsigned use: %v", err)
 	}
 	sig := Sign(d, planner.priv, use)
-	if _, err := Verify(d, o.pub, []byte("other plan"), sig); !errors.Is(err, ErrNotHolder) {
+	if _, err := Verify(d, []ed25519.PublicKey{o.pub}, []byte("other plan"), sig); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("signature moved to another use: %v", err)
 	}
 	// The signature binds the tip: the same use under a sibling key fails.
 	sib, _ := Derive(k, h.priv, planner.pub, LimitRate(3))
-	if _, err := Verify(sib, o.pub, use, sig); !errors.Is(err, ErrNotHolder) {
+	if _, err := Verify(sib, []ed25519.PublicKey{o.pub}, use, sig); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("signature moved to another key: %v", err)
 	}
 	// Re-derived off the root, or a wider link forged in place, by the planner.
@@ -322,12 +331,15 @@ func TestUseNeedsTheLastHolder(t *testing.T) {
 		"re-derived": Extend(k, planner.priv, Link{Caveats: []Caveat{LimitRate(1000)}, Holder: planner.pub}),
 		"rewritten":  Extend(stripped, planner.priv, Link{Holder: planner.pub}),
 	} {
-		if _, err := Verify(f, o.pub, use, Sign(f, planner.priv, use)); !errors.Is(err, ErrBadSig) {
+		if _, err := Verify(f, []ed25519.PublicKey{o.pub}, use, Sign(f, planner.priv, use)); !errors.Is(err, ErrBadSig) {
 			t.Fatalf("%s link: %v", name, err)
 		}
 	}
-	if _, err := Derive(stripped, planner.priv, planner.pub); !errors.Is(err, ErrNotHolder) {
+	// A link the planner derives off the bare root is not a passkey's.
+	if d, err := Derive(stripped, planner.priv, planner.pub, LimitExpires(1000), LimitSpendDay(1)); err != nil {
 		t.Fatalf("derive from a stripped key: %v", err)
+	} else if _, err := Chain(d, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("a link off a stripped key: %v", err)
 	}
 	// Domains: a use signature is not a link signature, nor the reverse.
 	if DomainUse == DomainLink || DomainUse == DomainRoot {
@@ -343,7 +355,7 @@ func TestChainAloneNeverAuthorizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := Chain(d, o.pub)
+	v, err := Chain(d, []ed25519.PublicKey{o.pub})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +365,106 @@ func TestChainAloneNeverAuthorizes(t *testing.T) {
 	if r := v.Authorize(step(Trash), ctx(1, ledger{})); r == nil || r.Code != RMalformed {
 		t.Fatalf("a chained key authorizes a step: %v", r)
 	}
-	if _, err := Chain(d, gen(9).pub); !errors.Is(err, ErrWrongOwner) {
+	if _, err := Chain(d, []ed25519.PublicKey{gen(9).pub}); !errors.Is(err, ErrWrongOwner) {
 		t.Fatalf("wrong owner: %v", err)
+	}
+}
+
+// Full power stays with the owner's root: a key derived from it carries at
+// least one caveat, so a leaked child is always capped (D-145). Derive refuses
+// one without, and a link the root's holder signs by hand is refused by
+// Verify and Chain alike; a key below a caveated one need add none.
+func TestKeyOffTheRootLapsesAndIsCapped(t *testing.T) {
+	o, h := gen(1), gen(2)
+	r := bare(o)
+	cases := map[string][]Caveat{
+		"no caveat":    nil,
+		"verbs only":   {LimitVerbs(Trash)},
+		"no spend cap": {LimitExpires(1000), LimitSpendTask(5)},
+		"no expiry":    {LimitSpendDay(5), LimitUses(3)},
+	}
+	use := []byte("plan")
+	for name, cav := range cases {
+		if _, err := Derive(r, o.priv, h.pub, cav...); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: derive: %v", name, err)
+		}
+		k := Extend(r, o.priv, Link{Caveats: cav, Holder: h.pub})
+		if _, err := Verify(k, []ed25519.PublicKey{o.pub}, use, Sign(k, h.priv, use)); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: verify: %v", name, err)
+		}
+		if _, err := Chain(k, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: chain: %v", name, err)
+		}
+	}
+	d, err := ClerkKey(r, o.priv, h.pub, 500, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := verified(t, d, o, h)
+	if *v.Limits.NotAfter != 500+ClerkLife {
+		t.Fatalf("clerk key lives %d", *v.Limits.NotAfter-500)
+	}
+	if rf := v.Authorize(step(Trash), ctx(500+ClerkLife+1, nil)); rf == nil || rf.Code != RExpired {
+		t.Fatalf("a lapsed clerk key: %v", rf)
+	}
+	g, err := Derive(d, h.priv, gen(4).pub)
+	if err != nil {
+		t.Fatalf("a key below the clerk key inherits its limits: %v", err)
+	}
+	if _, err := Verify(g, []ed25519.PublicKey{o.pub}, use, Sign(g, gen(4).priv, use)); err != nil {
+		t.Fatalf("verify the grandchild: %v", err)
+	}
+}
+
+// The bare root is the passkey's: the home clerk, or anyone but the passkey,
+// can neither use it nor sign a link off it (D-146).
+func TestBareRootIsThePasskeysAlone(t *testing.T) {
+	o, h := gen(1), gen(2)
+	r := bare(o)
+	use := []byte("plan")
+	if _, err := Verify(r, []ed25519.PublicKey{o.pub}, use, Sign(r, h.priv, use)); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("the home clerk signs under the bare root: %v", err)
+	}
+	if _, err := Verify(r, []ed25519.PublicKey{o.pub}, use, Sign(r, o.priv, use)); err != nil {
+		t.Fatalf("the passkey signs under the bare root: %v", err)
+	}
+	k := Extend(r, h.priv, Link{Caveats: []Caveat{LimitExpires(1000), LimitSpendDay(1)}, Holder: h.pub})
+	if _, err := Chain(k, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("a link off the root not signed by the passkey: %v", err)
+	}
+}
+
+func TestPasskeysAreTheAnchorsAndWhatTheyEnroll(t *testing.T) {
+	hw1, hw2, phone, old, stranger := gen(1), gen(5), gen(6), gen(8), gen(7)
+	anchors := []ed25519.PublicKey{hw1.pub, hw2.pub}
+	es := []Enrollment{
+		Enroll(stranger.priv, stranger.pub), // signed by no anchor
+		Enroll(hw1.priv, old.pub),
+		Enroll(hw2.priv, phone.pub),
+		Enroll(phone.priv, gen(9).pub), // a phone enrolls nothing
+		{Passkey: stranger.pub, By: hw1.pub, Sig: Enroll(stranger.priv, stranger.pub).Sig}, // forged
+	}
+	set := Passkeys(anchors, es, nil)
+	if len(set) != 4 || !In(set, phone.pub) || !In(set, old.pub) || In(set, stranger.pub) || In(set, gen(9).pub) {
+		t.Fatalf("set: %d keys", len(set))
+	}
+	// The lost phone is revoked; its enrollment, replayed, does not bring it back.
+	set = Passkeys(anchors, append(es, Enroll(hw1.priv, old.pub)), []ed25519.PublicKey{old.pub})
+	if In(set, old.pub) || !In(set, phone.pub) {
+		t.Fatal("a revoked passkey stays out")
+	}
+	// A cut-off anchor's enrollments count no more.
+	if set := Passkeys(anchors, es, []ed25519.PublicKey{hw2.pub}); In(set, phone.pub) || In(set, hw2.pub) {
+		t.Fatal("a revoked anchor and what it enrolled stay out")
+	}
+	r := Issue(phone.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "b"})
+	if err := CheckChain(r, set); err != nil {
+		t.Fatalf("a root the enrolled phone issued: %v", err)
+	}
+	for _, by := range []kp{old, stranger} {
+		s := Issue(by.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "s"})
+		if err := CheckChain(s, set); !errors.Is(err, ErrWrongOwner) {
+			t.Fatalf("a root no passkey in the set issued: %v", err)
+		}
 	}
 }

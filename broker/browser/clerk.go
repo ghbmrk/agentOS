@@ -21,8 +21,10 @@ import (
 // may hold the owner's identity (CLK-3, D-147). A post step is refused for
 // the same reason.
 type Clerk struct {
-	Name  string
-	Owner ed25519.PublicKey
+	Name string
+	// Anchors are the owner's hardware keys, which every key is checked
+	// against (D-146).
+	Anchors []ed25519.PublicKey
 	// Clock, when set, is the clerk's own time in unix ms; nil reads the
 	// wall clock.
 	Clock func() int64
@@ -33,8 +35,8 @@ type Clerk struct {
 }
 
 // NewClerk returns the clerk for one gate.
-func NewClerk(name string, owner ed25519.PublicKey, g *Gate) *Clerk {
-	return &Clerk{Name: name, Owner: owner, g: g, done: map[string]bool{}}
+func NewClerk(name string, anchors []ed25519.PublicKey, g *Gate) *Clerk {
+	return &Clerk{Name: name, Anchors: anchors, g: g, done: map[string]bool{}}
 }
 
 // Do runs a step. A read that cannot change state is safe to run again. One
@@ -46,7 +48,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if c.Clock != nil {
 		now = c.Clock()
 	}
-	if rf := clerk.Check(c.Owner, c.Name, facts, now, r, v); rf != nil {
+	if rf := clerk.Check(c.Anchors, c.Name, facts, now, r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	st := step(r)
