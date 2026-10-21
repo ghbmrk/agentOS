@@ -128,7 +128,7 @@ func writeAtomic(dir string, b []byte, stop func(i int) bool) error {
 		func() error { _, err := f.Write(b); return err },
 		func() error { return f.Sync() },
 		func() error { return f.Close() },
-		func() error { return os.Rename(tmp, dst) },
+		func() error { return os.Rename(tmp, dst) }, // durable:exempt broker/durable is old core (tools/old_core.txt); the next step syncs the directory
 		func() error { return syncDir(dir) },
 	}
 	for i, step := range steps {
