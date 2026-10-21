@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -173,16 +174,29 @@ func TestAReusedMessageIDIsANewRead(t *testing.T) {
 	}
 }
 
+// A read mail whose headers are too long fails the answer, and the error
+// names its folder and arrival so the owner can find and remove it.
+func TestOpenedNamesAMailWhoseHeadersAreTooLong(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("Archive", arrived, rawMail("<a@shop.test>", "news@shop.test ("+strings.Repeat("x", 9<<10)+")", "Sale"), `\Seen`)
+	_, _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-06-01", SeenLog{})
+	if !errors.Is(err, imapsmtp.ErrLongHeader) || !strings.Contains(err.Error(), "Archive") || !strings.Contains(err.Error(), "2026-01-02 09:00") {
+		t.Fatalf("err %v; want ErrLongHeader naming Archive and 2026-01-02 09:00", err)
+	}
+}
+
 // The log fails closed: a log with no valid start, or one in the future,
 // begins today, so nothing is watched yet; an entry whose day is not a date,
 // or is outside the log's start to today, counts as today, so a reset log
-// trusts none of its old days; an entry the clerk did not write opens the
-// sender it names today and is dropped; and a Message-ID another sender used
-// does not stand in for this sender's read.
+// trusts none of its old days; an entry the clerk did not write is logged
+// again and keeps its sender opened on the next read too; and a
+// Message-ID another sender used does not stand in for this sender's read.
 func TestTheSeenLogFailsClosed(t *testing.T) {
 	srv := imaptest.Start(t)
 	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	hexID := func(from, mid string) string { id := seenID(from, mid, arrived); return hex.EncodeToString(id[:]) }
+	relogged := seenID("forged@x.test", "<a@shop.test>", time.Time{})
+	relog := hex.EncodeToString(relogged[:])
 	l := NewLive(liveStore(t, srv))
 	for _, since := range []string{"someday", "2027-01-01"} {
 		log := SeenLog{Since: since, Seen: []Seen{
@@ -196,6 +210,7 @@ func TestTheSeenLogFailsClosed(t *testing.T) {
 		got, kept, err := l.Opened(context.Background(), "2026-06-01", log)
 		want := map[string]string{"gone@list.test": "2026-06-01", "other@evil.test": "2026-06-01", "news@shop.test": "2026-06-01", "later@list.test": "2026-06-01", "forged@x.test": "2026-06-01"}
 		wantLog := SeenLog{Since: "2026-06-01", Seen: []Seen{
+			{From: "forged@x.test", ID: relog, Date: "2026-06-01"},
 			{From: "gone@list.test", ID: hexID("gone@list.test", "<g@list.test>"), Date: "2026-06-01"},
 			{From: "later@list.test", ID: hexID("later@list.test", "<l@list.test>"), Date: "2026-06-01"},
 			{From: "news@shop.test", ID: hexID("news@shop.test", "<a@shop.test>"), Date: "2026-06-01"},
@@ -203,6 +218,9 @@ func TestTheSeenLogFailsClosed(t *testing.T) {
 		}}
 		if err != nil || !maps.Equal(got, want) || !reflect.DeepEqual(kept, wantLog) {
 			t.Fatalf("since %s: opened %v, log %+v, err %v; want %v, %+v", since, got, kept, err, want, wantLog)
+		}
+		if got, _, err := l.Opened(context.Background(), "2026-06-02", kept); err != nil || got["forged@x.test"] != "2026-06-01" {
+			t.Fatalf("since %s, read again: opened %v, err %v; want forged@x.test still opened", since, got, err)
 		}
 	}
 }

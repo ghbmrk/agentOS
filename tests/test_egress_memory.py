@@ -87,7 +87,7 @@ def legitimate_peak():
 
 def seen_peak():
     """What one Store.Seen call can hold (#2685): the search's UIDs at the field bound (M21, about a
-    million, 4 bytes each) and one batch session's fixed read budget. What Live.Opened keeps is the
+    million, 4 bytes each) and one batch's fixed read budget. What Live.Opened keeps is the
     mail clerk's own memory (openedMax, #2684), never the vault's: see
     test_the_vault_never_reads_who_was_opened."""
     imap = "clerk/inbox/imapsmtp/imapsmtp.go"

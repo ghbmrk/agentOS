@@ -19,7 +19,9 @@ import (
 	"io"
 	"net"
 	"net/smtp"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -236,21 +238,30 @@ func (s *Store) replyBudget(fetches int) int64 {
 	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
 }
 
-// budgetConn fails reads once left bytes have been read.
+// budgetConn fails reads once left bytes have been read. left is atomic
+// because the client's reader reads while renew, between a session's steps,
+// sets it again.
 type budgetConn struct {
 	net.Conn
-	left int64
+	left atomic.Int64
+}
+
+func newBudgetConn(c net.Conn, budget int64) *budgetConn {
+	b := &budgetConn{Conn: c}
+	b.left.Store(budget)
+	return b
 }
 
 func (b *budgetConn) Read(p []byte) (int, error) {
-	if b.left <= 0 {
+	left := b.left.Load()
+	if left <= 0 {
 		return 0, errReplyTooLarge
 	}
-	if int64(len(p)) > b.left {
-		p = p[:b.left]
+	if int64(len(p)) > left {
+		p = p[:left]
 	}
 	n, err := b.Conn.Read(p)
-	b.left -= int64(n)
+	b.left.Add(-int64(n))
 	return n, err
 }
 
@@ -263,13 +274,27 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Client) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-	conn, err := s.dial(ctx, s.cfg.IMAP, s.cfg.IMAPSec)
+	return s.sessionR(ctx, budget, func(c *client.Client, _ func()) error { return f(c) })
+}
+
+// sessionR is sessionB for a session of steps, signed in once: renew, called
+// before a step, gives it a fresh reply budget of budget bytes and a fresh
+// timeout, so no step can read more or wait longer than one session.
+func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func()) error) error {
+	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
+	defer cancel()
+	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
 		return err
 	}
-	if dl, ok := ctx.Deadline(); ok {
+	deadline := func() {
+		dl := time.Now().Add(s.cfg.Timeout)
+		if c, ok := ctx.Deadline(); ok && c.Before(dl) {
+			dl = c
+		}
 		conn.SetDeadline(dl)
 	}
+	deadline()
 	switch s.cfg.IMAPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
@@ -281,7 +306,8 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
-	c, err := client.New(&budgetConn{conn, budget})
+	bc := newBudgetConn(conn, budget)
+	c, err := client.New(bc)
 	if err != nil {
 		return err
 	}
@@ -289,7 +315,7 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 	defer c.Logout()
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	l, err := s.cfg.Credential(ctx)
+	l, err := s.cfg.Credential(dctx)
 	if err != nil {
 		return errors.New("imapsmtp: no credential")
 	}
@@ -301,7 +327,7 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 	if err != nil {
 		return errors.New("imapsmtp: the server refused the login")
 	}
-	return f(c)
+	return f(c, func() { bc.left.Store(budget); deadline() })
 }
 
 type quiet struct{}
@@ -436,7 +462,7 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 }
 
 // headMax bounds the From and Message-ID headers Seen reads of each message,
-// and seenBatch the UIDs one of its sessions fetches. A session's read budget is
+// and seenBatch the UIDs one of its batches fetches. A batch's read budget is
 // fixed by them, whatever the search found: replyBase, plus headMax and
 // fetchFrame for each UID, which stays under one Fetch call's budget (M21,
 // tests/test_egress_memory.py).
@@ -445,9 +471,9 @@ const (
 	seenBatch = 400
 )
 
-// ErrUnanswered is a FETCH that left a searched message without its header,
-// and ErrLongHeader headers longer than headMax: either would leave a mail
-// out of what Seen found.
+// ErrUnanswered is a FETCH that left a searched message, still there and
+// still read, without its header, and ErrLongHeader headers longer than
+// headMax: either would leave a mail out of what Seen found.
 var (
 	ErrUnanswered = errors.New("imapsmtp: the server did not answer for every message")
 	ErrLongHeader = errors.New("imapsmtp: a mail's headers are too long to read")
@@ -457,40 +483,30 @@ var (
 // that carries \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM MESSAGE-ID)] so
 // nothing is marked read, and its INTERNALDATE: the time the server took the
 // mail in, which the sender does not set and COPY and MOVE keep (RFC 3501
-// 6.4.7, RFC 6851), zero if the server sent none. It keeps none of them. The UIDs are searched in one session
-// and fetched seenBatch at a time, each batch in its own session under the
-// same UID validity (ErrValidity otherwise). Each searched message must
-// answer with its headers, at most headMax bytes; anything else, or an error
-// from each, fails the call, so no partial answer passes for a full one.
+// 6.4.7, RFC 6851), zero if the server sent none. It keeps none of them.
+// The UIDs are searched and then fetched seenBatch at a time in one session,
+// signed in once, each batch under a fresh read budget and timeout. Each
+// searched message must answer with its headers, at most headMax bytes; one
+// that did not answer is searched for again, and only one the owner deleted
+// or marked unread since is let go. Anything else, or an error from each,
+// fails the call, so no partial answer passes for a full one; a header too
+// long names its folder and arrival, so the owner can find the mail.
 func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte, arrived time.Time) error) error {
-	var validity uint32
-	var uids []uint32
-	err := s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
-		if err != nil {
-			return err
-		}
-		validity = st.UidValidity
-		if st.Messages == 0 {
-			return nil
-		}
-		crit := imap.NewSearchCriteria()
-		crit.WithFlags = []string{imap.SeenFlag}
-		uids, err = c.UidSearch(crit)
-		return err
-	})
-	if err != nil {
-		return err
-	}
 	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, headMax + 1},
 		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Message-Id"}}}
 	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
-	for i := 0; i < len(uids); i += seenBatch {
-		batch := uids[i:min(i+seenBatch, len(uids))]
-		err := s.sessionB(ctx, s.replyBase+seenBatch*(headMax+fetchFrame), func(c *client.Client) error {
-			if err := selectAt(c, folder, true, validity); err != nil {
-				return err
-			}
+	return s.sessionR(ctx, s.replyBase+seenBatch*(headMax+fetchFrame), func(c *client.Client, renew func()) error {
+		st, err := c.Select(folder, true)
+		if err != nil || st.Messages == 0 {
+			return err
+		}
+		uids, err := readUIDs(c, nil)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < len(uids); i += seenBatch {
+			renew()
+			batch := uids[i:min(i+seenBatch, len(uids))]
 			want := make(map[uint32]bool, len(batch))
 			for _, u := range batch {
 				want[u] = true
@@ -514,7 +530,7 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 					delete(want, m.Uid)
 					h, _ := io.ReadAll(io.LimitReader(l, headMax+1))
 					if len(h) > headMax {
-						bad = fmt.Errorf("%w: %s UID %d", ErrLongHeader, folder, m.Uid)
+						bad = fmt.Errorf("%w: the mail in %s that arrived %s (UID %d)", ErrLongHeader, folder, m.InternalDate.Format("2006-01-02 15:04 -0700"), m.Uid)
 					} else {
 						bad = each(h, m.InternalDate)
 					}
@@ -528,15 +544,35 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 				return bad
 			}
 			if len(want) > 0 {
-				return ErrUnanswered
+				left, err := readUIDs(c, want)
+				if err != nil {
+					return err
+				}
+				if len(left) > 0 {
+					return ErrUnanswered
+				}
 			}
-			return nil
-		})
-		if err != nil {
-			return err
+		}
+		return nil
+	})
+}
+
+// readUIDs searches the selected folder for its read mail: all of it, or,
+// given only, those of its UIDs still there and still read.
+func readUIDs(c *client.Client, only map[uint32]bool) ([]uint32, error) {
+	crit := imap.NewSearchCriteria()
+	crit.WithFlags = []string{imap.SeenFlag}
+	if only != nil {
+		crit.Uid = new(imap.SeqSet)
+		for u := range only {
+			crit.Uid.AddNum(u)
 		}
 	}
-	return nil
+	uids, err := c.UidSearch(crit)
+	if only == nil || err != nil {
+		return uids, err
+	}
+	return slices.DeleteFunc(uids, func(u uint32) bool { return !only[u] }), nil
 }
 
 // Find returns the messages in folder whose Message-ID header holds id and
@@ -675,7 +711,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	// The budget sits under TLS, so in implicit-TLS mode net/smtp still
 	// sees a *tls.Conn and lets PLAIN and XOAUTH2 authenticate; it then
 	// counts ciphertext, which is just as bounded.
-	conn = &budgetConn{conn, smtpReplyBudget}
+	conn = newBudgetConn(conn, smtpReplyBudget)
 	switch s.cfg.SMTPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.SMTP))

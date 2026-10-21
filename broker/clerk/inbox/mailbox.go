@@ -206,7 +206,7 @@ func (o *opened) charge(n int) error {
 // for a read mail with no Message-ID or INTERNALDATE, a read mail counts as
 // opened today. A log with no valid Since, or one after today, begins today;
 // an entry dated outside Since to today counts as today; and an entry the
-// clerk did not write opens the sender it names today.
+// clerk did not write is logged again as one it did.
 func newOpened(today string, log SeenLog) (*opened, error) {
 	o := &opened{today: today, since: log.Since, senders: map[string]string{}, log: map[[16]byte]logged{}}
 	now, ok := day(today)
@@ -221,12 +221,12 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 		}
 		b, err := hex.DecodeString(e.ID)
 		if err != nil || len(b) != 16 {
-			// Not an entry the clerk wrote: its sender is opened on this read,
-			// and the log handed back drops it.
-			if err := o.open(e.From, today); err != nil {
-				return nil, err
-			}
-			continue
+			// Not an entry the clerk wrote: it is logged again under a digest
+			// no read mail has (a logged mail has an arrival), so it keeps its
+			// sender opened as long as any other entry, its day held to the
+			// same bounds.
+			id := seenID(e.From, e.ID, time.Time{})
+			b = id[:]
 		}
 		if d, ok := day(e.Date); !ok || d.Before(since) || d.After(now) {
 			e.Date = today
