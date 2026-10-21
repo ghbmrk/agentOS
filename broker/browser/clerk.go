@@ -76,7 +76,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
-		if !approval(ver) {
+		if !approval(ver, now) {
 			c.record(id, ran{})
 			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 		}
@@ -158,12 +158,12 @@ func (c *Clerk) facts(s key.Step) (string, []string, int64) {
 // the owner's approval of exact submits (CLK-3, OWN-9). Its tip is a link a
 // passkey signed for the home clerk itself (key.Narrow), so a compromised
 // clerk cannot mint one. That link names the prints and caps the uses
-// itself: the key's content set is approval prints only, and the link caps
-// its uses at their number. The set holds each print once, so a print
+// itself: the key's content set is approval prints only, the link caps its
+// uses at their number, and it expires within MaxApproval of now. The set holds each print once, so a print
 // listed twice gives no spare use. A passkey cut off since is refused by
 // Verify (kernel.Live), and the log's use count keeps each print to one
 // send across a restart (KRN-8).
-func approval(ver *key.Verified) bool {
+func approval(ver *key.Verified, now int64) bool {
 	if ver == nil || !ver.ByOwner {
 		return false
 	}
@@ -172,13 +172,18 @@ func approval(ver *key.Verified) bool {
 			return false
 		}
 	}
-	var named, capped bool
+	var named, capped, brief bool
 	for _, c := range ver.Key.Links[len(ver.Key.Links)-1].Caveats {
 		named = named || c.Kind == key.KContent
 		capped = capped || c.Kind == key.KUses && c.N <= int64(len(ver.Limits.Content))
+		brief = brief || c.Kind == key.KExpires && c.N <= now+MaxApproval
 	}
-	return named && capped
+	return named && capped && brief
 }
+
+// MaxApproval bounds how long an approval may live, in ms: one task's
+// submits, not a standing permission (D-147).
+const MaxApproval = 15 * 60 * 1000
 
 // MaxDetail bounds a step's logged result. The snapshot and the approval
 // are bounded where the gate makes them (post, approval), and logged bounds

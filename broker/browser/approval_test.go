@@ -56,7 +56,7 @@ func (r *clerkRig) stepApproval(t *testing.T, id string) Approval {
 func (r *clerkRig) approve(t *testing.T, prints ...string) key.Key {
 	t.Helper()
 	k, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(prints...),
-		key.LimitUses(int64(len(prints))))
+		key.LimitUses(int64(len(prints))), key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestUncappedPrintKeyReleasesNothing(t *testing.T) {
 		"not print": {key.LimitVerbs(key.Post), key.LimitContent(a.Print, "plain"), key.LimitUses(1)},
 		"over cap":  {key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(2)},
 	} {
-		k, err := key.Narrow(r.root, r.phone, cav...)
+		k, err := key.Narrow(r.root, r.phone, append(cav, key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -701,7 +701,8 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	if err := r.k.Issue(3-kernel.GrantHold, cosign, batch...); err != nil {
 		t.Fatal(err)
 	}
-	k2, err := key.Narrow(root2, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1))
+	k2, err := key.Narrow(root2, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
+		key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,18 +717,20 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, err := key.Chain(twice, r.k.State().Passkeys()); err != nil || approval(v) {
+	if v, err := key.Chain(twice, r.k.State().Passkeys()); err != nil || approval(v, time.Now().UnixMilli()) {
 		t.Fatal("a key listing one print twice is an approval")
 	}
 }
 
 // Only the owner's passkey makes an approval: a key the home clerk derives
 // itself with the right prints and use cap releases nothing, and neither
-// does an owner's link over it that names no prints or caps no uses.
+// does an owner's link over it that names no prints, caps no uses, or
+// lives longer than MaxApproval.
 // The same caveats on the phone's own link send once (OWN-9, #2675).
 func TestOnlyThePasskeyApproves(t *testing.T) {
 	hpub, hpriv := seedKey(2)
-	for _, id := range []string{"minted", "bare", "uncapped", "tap"} {
+	soon := key.LimitExpires(time.Now().UnixMilli() + MaxApproval/2)
+	for _, id := range []string{"minted", "bare", "uncapped", "standing", "long", "tap"} {
 		r := newCart(t, nil, 0)
 		r.run(t, 1, "ask", r.root, read(pressOrder))
 		a := r.stepApproval(t, "ask")
@@ -737,11 +740,20 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 		}
 		switch id {
 		case "bare":
-			if k, err = key.Narrow(k, r.phone, key.LimitUses(1)); err != nil {
+			if k, err = key.Narrow(k, r.phone, key.LimitUses(1), soon); err != nil {
 				t.Fatal(err)
 			}
 		case "uncapped":
-			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print)); err != nil {
+			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), soon); err != nil {
+				t.Fatal(err)
+			}
+		case "standing":
+			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1)); err != nil {
+				t.Fatal(err)
+			}
+		case "long":
+			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1),
+				key.LimitExpires(time.Now().UnixMilli()+2*MaxApproval)); err != nil {
 				t.Fatal(err)
 			}
 		case "tap":
