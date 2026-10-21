@@ -46,49 +46,66 @@ func (c Clock) Now() int64 {
 // step is in flight, the key's limits as of that step's first dispatch, and
 // for an irreversible verb the hold the log recorded (CLK-2).
 func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
+	_, rf := Verify(anchors, name, facts, now, r, v)
+	return rf
+}
+
+// Verify is Check that also returns the plan key's verified chain when the
+// request passes, for a clerk that asks more of the key, such as an owner's
+// approval (Verified.ByOwner). A refused request returns no chain, whichever
+// check refused it: this is the one place that holds.
+func Verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
+	ver, rf := verify(anchors, name, facts, now, r, v)
+	if rf != nil {
+		return nil, rf
+	}
+	return ver, nil
+}
+
+func verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
 	st := r.Step()
 	if st.Clerk != name {
-		return &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
+		return nil, &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
 	}
 	// The recipient a key's caveats judge is the verb's first argument, the
 	// object the request acts on; a step claiming another is refused here.
 	if a := st.Args[key.RecipientArg(st.Verb)]; st.Recipient != a.Value {
-		return &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
+		return nil, &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
 	}
 	if facts == nil {
-		return &key.Refusal{Code: RClaim, Detail: "clerk has no facts to judge the step's claims"}
+		return nil, &key.Refusal{Code: RClaim, Detail: "clerk has no facts to judge the step's claims"}
 	}
 	if content, labels, amount := facts(st); content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
-		return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
+		return nil, &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
 	}
 	owners := kernel.PlanOwners(v, anchors, r.Plan.Key)
 	ver, err := kernel.VerifyPlan(r.Plan, owners)
 	if err != nil {
-		return &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
+		return nil, &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
 	}
 	if rf := kernel.Live(v, ver, now); rf != nil {
-		return rf
+		return ver, rf
 	}
 	if rf := kernel.OneOff(v, owners, anchors, r.Plan, now); rf != nil {
-		return rf
+		return ver, rf
 	}
 	d, ok := v.Dispatched(r)
 	if !ok {
-		return &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
+		return ver, &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
 	}
 	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
 	if rf := ver.Authorize(st, ctx); rf != nil {
-		return rf
+		return ver, rf
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
 		if !d.Held {
-			return &key.Refusal{Code: RHold, Detail: "step was not held"}
+			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
 		if now < d.HeldAt+ver.Limits.Window(d.Novel) {
-			return &key.Refusal{Code: RHold, Detail: "window not over"}
+			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}
-	return nil
+	return ver, nil
 }
 
 // Amount is a clerk's own reading of the amount argument: its one canonical

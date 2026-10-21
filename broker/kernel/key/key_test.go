@@ -1,6 +1,7 @@
 package key
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"testing"
@@ -466,5 +467,30 @@ func TestPasskeysAreTheAnchorsAndWhatTheyEnroll(t *testing.T) {
 		if err := CheckChain(s, set); !errors.Is(err, ErrWrongOwner) {
 			t.Fatalf("a root no passkey in the set issued: %v", err)
 		}
+	}
+}
+
+func TestNarrowKeepsTheHolderAndNeverLoosens(t *testing.T) {
+	o, h, k := root(t)
+	if _, err := Narrow(bare(o), o.priv, LimitUses(1)); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("a passkey's link off a bare root is a grant: %v", err)
+	}
+	if _, err := Narrow(k, o.priv, LimitVerbs(Trash, Send)); !errors.Is(err, ErrLoosens) {
+		t.Fatalf("widen verbs: %v", err)
+	}
+	n, err := Narrow(k, o.priv, LimitVerbs(Trash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := Verify(n, []ed25519.PublicKey{o.pub}, []byte("use"), Sign(n, h.priv, []byte("use")))
+	if err != nil || !v.ByOwner || !bytes.Equal(v.Narrowers[0], o.pub) || !bytes.Equal(n.Links[1].Holder, h.pub) {
+		t.Fatalf("the holder uses the owner's narrowing: %v", err)
+	}
+	d, err := Derive(n, h.priv, gen(4).pub, LimitUses(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := Chain(d, []ed25519.PublicKey{o.pub}); err != nil || v.ByOwner || len(v.Narrowers) != 1 {
+		t.Fatalf("a narrowing below it is the holder's, and the passkey still counts: %v", err)
 	}
 }
