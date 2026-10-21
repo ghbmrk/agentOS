@@ -19,7 +19,9 @@ func approval(id string, by pair) kernel.TaskApproval {
 }
 
 // serve is a key for task id, narrowed from the clerk's key.
-func (r *rig) serve(id string, c ...key.Caveat) key.Key { return r.derive(append(c, key.LimitTask(id))...) }
+func (r *rig) serve(id string, c ...key.Caveat) key.Key {
+	return r.derive(append(c, key.LimitTask(id))...)
+}
 
 func (r *rig) replays() {
 	r.t.Helper()
@@ -78,8 +80,8 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 		t.Fatalf("a key with no task: %v", rf)
 	}
 	for name, err := range map[string]error{
-		"a second open":          r.k.OpenTask(0, "t1"),
-		"an empty id":            r.k.OpenTask(0, ""),
+		"a second open": r.k.OpenTask(0, "t1"),
+		"an empty id":   r.k.OpenTask(0, ""),
 	} {
 		if err != kernel.ErrTaskOpen {
 			t.Errorf("%s: %v", name, err)
