@@ -61,7 +61,11 @@ EVASIONS = [
     "gh api -X PUT re\\pos/ghbmrk/agentOS/pulls/1/ccr/auto_merge -f merge_method=merge --input f",
     "gh api -X PUT repos/ghbmrk/agentOS/pulls/1/ccr/auto_\\\nmerge -f merge_method=merge --input f",
     "gh api -X put REPOS/GHBMRK/AGENTOS/pulls/1/ccr/auto_merge -f merge_method=merge --input f",
+    "gh api -X PUT $'repos/ghbmrk/agentOS/pulls/1/ccr/auto_merge' -f merge_method=merge --input f",
+    "gh api -X PUT repos/ghbmrk/agent$'OS'/pulls/1/ccr/auto_merge -f merge_method=merge --input f",
 ]
+# Longer than the hook scans: a gh call this long goes to the ask, anything else passes (#2562).
+LONG = 8 * 1024 + 1
 PASS = ["ls -la", f"gh api {R}/pulls/1", "git push -u origin pkg/x", f"gh api {R}/issues/1/labels"]
 
 
@@ -113,6 +117,20 @@ class GhShapeHookTest(unittest.TestCase):
         for c in PASS:
             self.assertIsNone(run_hook({"tool_name": "Bash", "tool_input": {"command": c}}), c)
         self.assertIsNone(run_hook({"tool_name": "Read", "tool_input": {"file_path": "/x"}}))
+
+    def test_long_gh_commands_go_to_the_ask(self):
+        pad = "x" * LONG
+        for c in (f"gh api {R}/pulls/1 # {pad}", f"echo {pad}; g''h api {R}/pulls/1"):
+            self.assertIsNotNone(gh_shape.decide(c), c[:40])
+            self.assertEqual(run_hook({"tool_name": "Bash", "tool_input": {"command": c}}), "ask")
+        self.assertIsNone(run_hook({"tool_name": "Bash", "tool_input": {"command": f"echo {pad}"}}))
+
+    def test_a_huge_command_is_decided_fast(self):
+        import time
+        c = "gh api -X PUT " + f"{R}/pulls/1/ccr/auto_merge " * 50000
+        start = time.monotonic()
+        self.assertIsNotNone(gh_shape.decide(c))
+        self.assertLess(time.monotonic() - start, 5)
 
     def test_hook_asks_on_bad_input(self):
         out = subprocess.run([sys.executable, str(HOOK)], input="not json",
