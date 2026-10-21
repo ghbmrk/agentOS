@@ -4,22 +4,24 @@ Work item: #2692, the kernel half of #2676(b) (CLK-3 "One approval per task", D-
 
 ## Goal
 
-1. **Tasks in the log.** `Kernel.OpenTask(now, id, until)` logs `task.opened`, with `TaskTimeout` (24 hours) as the default timeout. `EndTask` logs the end at the final result, or when the planner's run ends without one. STOP and the timeout also end a task. An ended task never comes back. Failure path: a planner keeps a task, and what it holds, alive forever.
+1. **Tasks in the log.** `Kernel.OpenTask(now, id)` logs `task.opened`. The fold sets the task's time and its timeout, `TaskTimeout` (24 hours, KRN-5's default) later. `EndTask` logs the end at the final result, or when the planner's run ends without one. STOP and the timeout also end a task. An ended task never comes back. Failure path: a planner keeps a task, and what it holds, alive forever.
 2. **A key serves one task.** `key.LimitTask(id)` is a caveat like any other, and a second task caveat loosens. `Admit` refuses a plan whose key's task is not live. A rejected plan, a failed step or a cancel leaves the task open for re-plans, and an admitted plan's steps and their reconciliation outlive it. Failure path: a plan moves to another task, or runs in an ended one.
 3. **The task approval lives inside the task.**
    - `ApproveTask` logs one enrolled passkey's co-signature over `TaskHash(task, site, held request)`. It anchors, as a widening.
    - It ends with the task, and cutting off its passkey ends it at once.
-   - A clerk reads it through `TaskApproved`, on its own clock and against its own anchors.
+   - Its `At` is the fold's time of the entry, so the clerk can order its own fills against the tap (CLK-3).
+   - A clerk reads it through `TaskApproved`, on its own clock and against its own anchors. The clerk process's view (`broker/clerk/run/wire.go`) carries the chain's task as of the call.
    - Failure path: a lost phone's approval, or another task's, covers a request.
 
 Out of scope:
 - The browser clerk's use of the approval (#2675, #2676(b)).
 - The kernel's narrow-only sub-key that adds the task caveat (KEY-3); the ASSUMPTIONS row KRN-task covers the interim.
+- The owner's setting of the task timeout (#2696: lowering by text, raising as a KEY-4 widening).
 - Moving the per-task spend cap and hand-off items onto tasks.
 
 ## Scope
 
-`broker/kernel/`, `broker/clerk/` (a test), `briefs/KRN-task.md`.
+`broker/kernel/`, `broker/clerk/` (a test), `broker/clerk/run/wire.go` (the view carries the task), `briefs/KRN-task.md`.
 
 **Guard files:** none (no new package).
 
@@ -27,7 +29,7 @@ Out of scope:
 
 - KRN-5: `broker/kernel/task_test.go::TestATaskRunsItsPlansAndRePlans`, `::TestATaskKeyServesOnlyALiveTask`, `::TestEachEndEndsTheTask`, `::TestAnAdmittedPlanOutlivesItsTask`
 - CLK-3, KEY-4: `broker/kernel/task_test.go::TestCuttingOffTheSignerEndsTheApproval`
-- CLK-2, CLK-3: `broker/clerk/clerk_test.go::TestClerkReadsATaskApprovalOnItsOwnClock`
+- CLK-2, CLK-3: `broker/clerk/clerk_test.go::TestClerkReadsATaskApprovalOnItsOwnClock`, `broker/clerk/run/run_test.go::TestViewCarriesTheChainsTask`
 
 ## Estimate
 

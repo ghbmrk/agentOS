@@ -61,6 +61,9 @@ type snapshot struct {
 	// alone, as of the call on the kernel's clock (kernel.OneOff). A root it
 	// does not name has line 0: any spend needs a second passkey.
 	OneOffLines map[key.ID]int64 `json:"one_off_lines"`
+	// Served is the task the chain serves, live as of the call (nil: none or
+	// ended); the clerk judges its timeout on its own clock (KRN-5).
+	Served *kernel.Task `json:"task"`
 }
 
 // view is the kernel's side: what v says of r. A plan that does not verify
@@ -79,6 +82,9 @@ func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int6
 		}
 	}
 	s.OneOffLines[ver.Root()] = v.OneOffLine(ver.Root(), now)
+	if t, ok := v.Task(ver.Limits.Task, now); ok {
+		s.Served = &t
+	}
 	d, ok := v.Dispatched(r)
 	if !ok {
 		return s
@@ -101,6 +107,14 @@ func (s *snapshot) ChangesView() *key.Changes { return &s.Changes }
 
 // OneOffLine answers as of the call, whatever now the clerk asks at.
 func (s *snapshot) OneOffLine(root key.ID, _ int64) int64 { return s.OneOffLines[root] }
+
+// Task answers for the chain's task only, while now is before its timeout.
+func (s *snapshot) Task(id string, now int64) (kernel.Task, bool) {
+	if s.Served == nil || s.Served.ID != id || now >= s.Served.Until {
+		return kernel.Task{}, false
+	}
+	return *s.Served, true
+}
 
 // LedgerBefore answers only for the dispatch the snapshot was taken at.
 func (s *snapshot) LedgerBefore(seq uint64) key.Ledger {

@@ -491,3 +491,50 @@ func TestViewCarriesTheOneOffLine(t *testing.T) {
 		return nil
 	})
 }
+
+// The view carries the chain's task as the kernel's log has it, and the
+// clerk judges its timeout and approval itself (KRN-5, CLK-3).
+func TestViewCarriesTheChainsTask(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "unused.sock"))
+	served, err := key.Derive(b.key, holderPriv, holderPub, key.LimitTask("t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
+	a.By = key.Approve(ownerPriv, kernel.TaskHash("t1", a.Site, a.First))
+	ps := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "erin", "msg": "hello"}, Content: "text", Labels: []string{"public"}}
+	in := kernel.SignPlan(kernel.Plan{ID: "in", Key: served, Steps: []kernel.PlanStep{ps}}, holderPriv)
+	out := kernel.SignPlan(kernel.Plan{ID: "out", Key: b.key, Steps: []kernel.PlanStep{ps}}, holderPriv)
+	b.h.With(func(k *kernel.Kernel) error {
+		if err := k.OpenTask(b.now, "t1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.ApproveTask(b.now, "t1", a); err != nil {
+			t.Fatal(err)
+		}
+		s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now)
+		ver, err := kernel.VerifyPlan(in, kernel.PlanOwners(&s, anchors, in.Key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := kernel.TaskApproved(&s, anchors, ver, b.now); !ok || got.Site != a.Site || got.At != b.now {
+			t.Fatalf("the view's task approval: %+v %v", got, ok)
+		}
+		if _, ok := s.Task("t1", b.now+kernel.TaskTimeout); ok {
+			t.Fatal("the view's task past its timeout on the clerk's clock")
+		}
+		if _, ok := s.Task("t2", b.now); ok {
+			t.Fatal("the view answered for a task the chain does not serve")
+		}
+		if s := view(k.State(), anchors, kernel.Request{Plan: out}, b.now); s.Served != nil {
+			t.Fatalf("a chain with no task carried one: %+v", s.Served)
+		}
+		if err := k.EndTask(b.now, "t1"); err != nil {
+			t.Fatal(err)
+		}
+		if s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now); s.Served != nil {
+			t.Fatal("the view carried an ended task")
+		}
+		return nil
+	})
+}
