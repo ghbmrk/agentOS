@@ -4,19 +4,27 @@ package kernel_test
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-func approve(by pair, keys ...key.Key) []key.Cosign {
-	return []key.Cosign{key.Approve(by.priv, kernel.BatchHash(keys...))}
+// approve is each passkey's co-signature over the batch keys.
+func approve(keys []key.Key, by ...pair) []key.Cosign {
+	var cos []key.Cosign
+	for _, p := range by {
+		cos = append(cos, key.Approve(p.priv, kernel.BatchHash(keys...)))
+	}
+	return cos
 }
 
-// A grant of new power needs two passkeys, one an anchor: the one that signs
-// it and a co-signer. The same passkey twice, a key that is no passkey, or
-// two phones with no hardware key count as one or none (D-146).
+// A grant of new power needs two passkeys, one an anchor, each co-signing the
+// whole batch. Signing the keys counts for nothing: a batch may carry a key
+// a hardware key signed long ago. The same passkey twice, a key that is no
+// passkey, or two phones with no hardware key count as one or none (D-146).
 func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 	r := newRig(t)
 	phone, phone2 := gen(8), gen(9)
@@ -28,18 +36,32 @@ func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 		must(t, err)
 		return []key.Key{root, ck}
 	}
+	// A phone's key to a new holder, beside the root or the clerk key a
+	// hardware key granted.
+	replayed := func(old key.Key) func(string, pair) []key.Key {
+		return func(string, pair) []key.Key {
+			ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.priv, gen(7).pub, 0, 1<<50)
+			must(t, err)
+			return []key.Key{old, ck}
+		}
+	}
 	refused := map[string]struct {
-		by  pair
-		cos func([]key.Key) []key.Cosign
+		by   pair
+		keys func(string, pair) []key.Key
+		cos  func([]key.Key) []key.Cosign
 	}{
-		"none":                {r.owner, func([]key.Key) []key.Cosign { return nil }},
-		"the signer itself":   {r.owner, func(ks []key.Key) []key.Cosign { return approve(r.owner, ks...) }},
-		"the home clerk":      {r.owner, func(ks []key.Key) []key.Cosign { return approve(r.holder, ks...) }},
-		"two phones":          {phone, func(ks []key.Key) []key.Cosign { return approve(phone2, ks...) }},
-		"another batch's sig": {r.owner, func(ks []key.Key) []key.Cosign { return approve(r.spare, ks[0]) }},
+		"none":              {r.owner, batch, func([]key.Key) []key.Cosign { return nil }},
+		"the signer alone":  {r.owner, batch, func(ks []key.Key) []key.Cosign { return approve(ks, r.owner) }},
+		"one passkey twice": {r.owner, batch, func(ks []key.Key) []key.Cosign { return approve(ks, r.owner, r.owner) }},
+		"the hardware key signed, a phone co-signed alone": {r.owner, batch, func(ks []key.Key) []key.Cosign { return approve(ks, phone) }},
+		"the home clerk":            {r.owner, batch, func(ks []key.Key) []key.Cosign { return approve(ks, r.owner, r.holder) }},
+		"two phones":                {phone, batch, func(ks []key.Key) []key.Cosign { return approve(ks, phone, phone2) }},
+		"another batch's sig":       {r.owner, batch, func(ks []key.Key) []key.Cosign { return append(approve(ks, r.owner), approve(ks[:1], r.spare)...) }},
+		"an old root replayed":      {phone, replayed(key.Key{Root: r.ck.Root}), func(ks []key.Key) []key.Cosign { return approve(ks, phone) }},
+		"an old clerk key replayed": {phone, replayed(r.ck), func(ks []key.Key) []key.Cosign { return approve(ks, phone) }},
 	}
 	for name, c := range refused {
-		ks := batch("x-"+name, c.by)
+		ks := c.keys("x-"+name, c.by)
 		if err := r.k.Issue(0, c.cos(ks), ks...); !errors.Is(err, kernel.ErrNeedsCosign) {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -49,7 +71,7 @@ func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 		"hardware key and phone": {r.owner, phone},
 	} {
 		ks := batch("ok-"+name, c.by)
-		if err := r.k.Issue(0, approve(c.co, ks...), ks...); err != nil {
+		if err := r.k.Issue(0, approve(ks, c.by, c.co), ks...); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -62,13 +84,19 @@ func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 }
 
 // Big is past the line: by default more than double the clerk's daily cap,
-// or a verb it lacked. Grants still in their hold count, so two raises in
-// one hold cannot each pass as small.
+// or a verb it lacked, against the live grants only: a grant still in its
+// hold is not power yet, so two raises in one hold are each judged against
+// the live cap, and power that lapsed, was revoked or is paused is none.
 func TestTheLineDecidesWhatIsBig(t *testing.T) {
 	r := newRig(t)
 	at := 10 * hour
 	ck := func(spendDay int64, c ...key.Caveat) key.Key {
 		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, spendDay, c...)
+		must(t, err)
+		return k
+	}
+	ck2 := func(under key.Key, spendDay int64) key.Key {
+		k, err := key.ClerkKey(key.Key{Root: under.Root}, r.owner.priv, r.holder.pub, at, spendDay)
 		must(t, err)
 		return k
 	}
@@ -90,15 +118,22 @@ func TestTheLineDecidesWhatIsBig(t *testing.T) {
 	if err := r.k.Issue(at, nil, narrow); err != nil {
 		t.Fatalf("a root with verbs already granted: %v", err)
 	}
+	// A key narrowed to some of its root's verbs reaches only those.
+	both := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "shop", Verbs: []key.Verb{key.Buy, key.Read}, Serial: "s"}), 10, key.LimitVerbs(key.Read))
+	if err := r.k.Issue(at, nil, ck2(both, 10)); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a verb the narrowed key lacked: %v", err)
+	}
 	nk, err := key.ClerkKey(narrow, r.owner.priv, gen(7).pub, at, 1)
 	must(t, err)
 	if err := r.k.Issue(at, nil, nk); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a first key to a new holder: %v", err)
 	}
-	// Power that lapsed or was revoked is none: the same cap again is new.
+	// Power that lapsed, was revoked or is paused is none: the same cap
+	// again is new.
 	for name, f := range map[string]func(r *rig) int64{
 		"lapsed":  func(*rig) int64 { return key.ClerkLife + hour },
 		"revoked": func(r *rig) int64 { must(t, r.k.Revoke(at, r.ck.Tip())); return at },
+		"paused":  func(r *rig) int64 { must(t, r.k.Pause(at, r.ck.Tip())); return at },
 	} {
 		r := newRig(t)
 		now := f(r)
@@ -155,9 +190,13 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 	buy := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "b"}), 100)
 	bare := key.Key{Root: buy.Root}
 	plan := func(id, amount string, cos ...pair) kernel.Plan {
-		s := st(key.Buy, "shop-"+id)
-		s.Args[key.ArgAmount] = amount
-		p := kernel.SignPlan(kernel.Plan{ID: id, Key: bare, Steps: []kernel.PlanStep{s}}, r.owner.priv)
+		var steps []kernel.PlanStep
+		for i, a := range strings.Split(amount, ",") {
+			s := st(key.Buy, fmt.Sprintf("shop-%s-%d", id, i))
+			s.Args[key.ArgAmount] = a
+			steps = append(steps, s)
+		}
+		p := kernel.SignPlan(kernel.Plan{ID: id, Key: bare, Steps: steps}, r.owner.priv)
 		for _, c := range cos {
 			p.Cosigns = append(p.Cosigns, key.Approve(c.priv, kernel.PlanHash(p)))
 		}
@@ -175,6 +214,7 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 		{plan("p3", "201", r.owner), kernel.CCosign},
 		{plan("p4", "201", r.holder), kernel.CCosign},
 		{plan("p5", "201", r.spare), ""},
+		{plan("p9", "4611686018427387903,4611686018427387905,1000"), kernel.CCosign}, // no wrap
 	}
 	for _, c := range cases {
 		if got := admits(r, c.p, 0); got != c.want {
@@ -195,5 +235,38 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 	must(t, r.k.Revoke(1, buy.Tip()))
 	if got := admits(r, plan("p7", "1"), 2); got != kernel.CCosign {
 		t.Fatalf("a one-off with no clerk key under its root: %q", got)
+	}
+}
+
+// Each root's budget is its own, so a new root adds its cap to the holder's
+// budget at the clerk, and grants still in their hold count toward what it
+// would have: two new roots in one hold cannot each pass as small (D-146).
+func TestNewRootsAddToTheBudgetTheLineMeasures(t *testing.T) {
+	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
+	at := 10 * hour
+	root := func(serial string) []key.Key {
+		root := key.Issue(phone.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial})
+		k, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, 100)
+		must(t, err)
+		return []key.Key{root, k}
+	}
+	two := root("m2")
+	if err := r.k.Issue(at, approve(two, phone), two...); err != nil {
+		t.Fatalf("a second root doubles the budget, up to the line: %v", err)
+	}
+	renewal, err := key.ClerkKey(key.Key{Root: two[0].Root}, phone.priv, r.holder.pub, at+1, 100)
+	must(t, err)
+	if err := r.k.Issue(at+1, approve([]key.Key{renewal}, phone), renewal); err != nil {
+		t.Fatalf("a renewal replaces its root's cap: %v", err)
+	}
+	three := root("m3")
+	if err := r.k.Issue(at+2, approve(three, phone), three...); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a third root in the same hold passes the line: %v", err)
+	}
+	if err := r.issue(at+2, three...); err != nil {
+		t.Fatalf("with the hardware key: %v", err)
 	}
 }

@@ -577,17 +577,29 @@ func (s *sim) op() error {
 	return nil
 }
 
-// grant issues a batch with the second hardware key's co-signature most of
-// the time, and otherwise none or the home clerk's, which counts for nothing:
-// a big batch is then refused whole (D-146).
+// approve is each passkey's co-signature over the batch keys.
+func approve(keys []key.Key, by ...keyPair) []key.Cosign {
+	var cos []key.Cosign
+	for _, p := range by {
+		cos = append(cos, key.Approve(p.priv, kernel.BatchHash(keys...)))
+	}
+	return cos
+}
+
+// grant issues a batch the owner's two hardware keys co-sign most of the
+// time, and otherwise the owner's alone, the owner's and the home clerk's,
+// which counts for nothing, or none: a big batch is then refused whole
+// (D-146).
 func (s *sim) grant(keys ...key.Key) error {
 	var cos []key.Cosign
 	switch s.pick(8) {
 	case 0:
 	case 1:
-		cos = []key.Cosign{key.Approve(s.holder.priv, kernel.BatchHash(keys...))}
+		cos = approve(keys, s.owner, s.holder)
+	case 2:
+		cos = approve(keys, s.owner)
 	default:
-		cos = []key.Cosign{key.Approve(s.spare.priv, kernel.BatchHash(keys...))}
+		cos = approve(keys, s.owner, s.spare)
 	}
 	err := s.widened(s.k.Issue(s.kt(), cos, keys...))
 	if errors.Is(err, kernel.ErrNeedsCosign) {
@@ -704,7 +716,7 @@ func Run(c Config) (*Result, error) {
 	for i := 0; i < 4; i++ { // set up a day ago, so past the hold
 		r := s.newRoot()
 		k := s.clerkKey(s.owner.priv, r)
-		if err := s.k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(s.spare.priv, kernel.BatchHash(r, k))}, r, k); err != nil {
+		if err := s.k.Issue(-kernel.GrantHold, approve([]key.Key{r, k}, s.owner, s.spare), r, k); err != nil {
 			return nil, err
 		}
 		s.remember(r, k)

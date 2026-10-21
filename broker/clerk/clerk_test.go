@@ -17,10 +17,12 @@ import (
 // co-signs the setup grants, which are new power (D-146).
 func backup() (ed25519.PublicKey, ed25519.PrivateKey) { return gen(12) }
 
-// cosigned is the backup key's co-signature over a grant batch.
+// cosigned is the owner's and the backup key's co-signatures over a grant
+// batch.
 func cosigned(keys ...key.Key) []key.Cosign {
+	_, o := gen(1)
 	_, b := backup()
-	return []key.Cosign{key.Approve(b, kernel.BatchHash(keys...))}
+	return []key.Cosign{key.Approve(o, kernel.BatchHash(keys...)), key.Approve(b, kernel.BatchHash(keys...))}
 }
 
 func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {

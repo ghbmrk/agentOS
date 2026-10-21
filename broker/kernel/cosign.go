@@ -49,18 +49,28 @@ func LineHash(n int, percent int64) [32]byte {
 }
 
 // power is what one holder can do at one clerk: the verbs its grants reach
-// and its largest daily spend cap. The passkeys' one-offs are holder "".
+// and, under each root, its largest daily spend cap. The passkeys' one-offs
+// are holder "".
 type power struct {
 	verbs map[key.Verb]bool
-	day   int64
+	days  map[key.ID]int64
+}
+
+// day is the holder's daily budget at the clerk: each root's is its own
+// account (key.account), so they add up.
+func (p *power) day() int64 {
+	var n int64
+	for _, d := range p.days {
+		n = min(n+d, math.MaxInt64/2)
+	}
+	return n
 }
 
 type holderAt struct{ clerk, holder string }
 
-// powers folds the grants live at at, and keys, into each holder's power.
-// A grant still in its hold is not power yet, so two raises in one hold are
-// each judged against the live grants, never against each other.
-func (s *State) powers(at int64, keys []key.Key) map[holderAt]*power {
+// powers folds the grants live at at, those still in their hold too when
+// pending, and keys, into each holder's power. A paused grant is none.
+func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*power {
 	out := map[holderAt]*power{}
 	add := func(k key.Key) {
 		w := holderAt{k.Root.Clerk, ""}
@@ -75,16 +85,16 @@ func (s *State) powers(at int64, keys []key.Key) map[holderAt]*power {
 		}
 		p := out[w]
 		if p == nil {
-			p = &power{verbs: map[key.Verb]bool{}}
+			p = &power{verbs: map[key.Verb]bool{}, days: map[key.ID]int64{}}
 			out[w] = p
 		}
-		for _, v := range k.Root.Verbs {
-			p.verbs[v] = true
+		for _, v := range key.Reach(k) {
+			p.verbs[key.Verb(v)] = true
 		}
-		p.day = max(p.day, day)
+		p.days[rootOf(k)] = max(p.days[rootOf(k)], day)
 	}
 	for id, g := range s.Grants {
-		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || g.From > at {
+		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || s.Changes.Paused[id] || g.From > at && !pending {
 			continue
 		}
 		add(g.Key)
@@ -112,10 +122,13 @@ func spendDay(cs []key.Caveat) int64 {
 }
 
 // big reports whether granting keys at at gives any holder a verb it lacks
-// or a daily cap past the line.
+// or a daily budget past the line. What it has is the live grants; what it
+// would have adds the grants still in their hold, so raises in one hold
+// cannot each pass as small: a renewal's cap replaces its root's, and a new
+// root's adds to the budget.
 func (s *State) big(keys []key.Key, at int64) bool {
-	before := s.powers(at, nil)
-	for w, a := range s.powers(at, keys) {
+	before := s.powers(at, false, nil)
+	for w, a := range s.powers(at, true, keys) {
 		b := before[w]
 		if b == nil {
 			b = &power{}
@@ -125,22 +138,18 @@ func (s *State) big(keys []key.Key, at int64) bool {
 				return true
 			}
 		}
-		if over(a.day, b.day, s.line()) {
+		if over(a.day(), b.day(), s.line()) {
 			return true
 		}
 	}
 	return false
 }
 
-// cosigned reports whether a big batch has its second passkey: its signers
-// and co-signers are two passkeys, one an anchor.
+// cosigned reports whether a big batch has its two passkeys, one an anchor:
+// co-signers over the whole batch. The keys' own signatures count for
+// nothing, since a batch may carry a key a passkey signed long ago.
 func (s *State) cosigned(keys []key.Key, cos []key.Cosign) bool {
-	owners := s.Passkeys()
-	var signers []ed25519.PublicKey
-	for _, k := range keys {
-		signers = append(signers, key.GrantSigner(k, owners))
-	}
-	return key.Approved(owners, s.Anchors, BatchHash(keys...), signers, cos)
+	return key.Approved(s.Passkeys(), s.Anchors, BatchHash(keys...), nil, cos)
 }
 
 // LineChanges is how many times the line has changed: a raise's co-signers
@@ -192,7 +201,7 @@ func OneOff(v View, owners, anchors []ed25519.PublicKey, p Plan, now int64) *key
 	}
 	total := int64(0)
 	for i := range p.Steps {
-		total = min(total+max(p.Step(i).Amount, 0), math.MaxInt64/2) // no wrap past the line
+		total = min(total+min(max(p.Step(i).Amount, 0), math.MaxInt64/2), math.MaxInt64/2) // both halves, so no wrap
 	}
 	if total <= v.OneOffLine(p.Key.Tip(), now) {
 		return nil

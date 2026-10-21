@@ -154,7 +154,7 @@ func Run(in Input) (Outcome, error) {
 	acct.Clock = func() int64 { return clock }
 	tick := func(at int64) error { clock = at; return k.Tick(at) }
 	// The owner's passkey granted the root and the home clerk's key to it at
-	// setup, a hold before the run, and the second hardware key co-signed the
+	// setup, a hold before the run, and it and the second hardware key co-signed the
 	// batch, since it is new power (D-146). The clerk key outlives the run and
 	// spends nothing.
 	root := key.Issue(ownerPriv, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
@@ -162,7 +162,7 @@ func Run(in Input) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := k.Issue(issued-kernel.GrantHold, []key.Cosign{key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
+	if err := k.Issue(issued-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
 		return Outcome{}, err
 	}
 	if err := log.Anchor(); err != nil {

@@ -56,7 +56,7 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 		t.Fatal(err)
 	}
 	batch := []key.Key{{Root: root.Root}, root}
-	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
+	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	return &clerkRig{h, c, k, anchors, root}

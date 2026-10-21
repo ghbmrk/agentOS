@@ -425,6 +425,16 @@ func ClerkKey(root Key, passkey ed25519.PrivateKey, clerk ed25519.PublicKey, now
 	return Derive(root, passkey, clerk, append([]Caveat{LimitExpires(now + ClerkLife), LimitSpendDay(spendDay)}, cav...)...)
 }
 
+// Reach is the verbs k reaches: its root's, narrowed by its links; none when
+// k is malformed. It checks no signature.
+func Reach(k Key) []string {
+	v, err := verifyChain(k, nil)
+	if err != nil {
+		return nil
+	}
+	return v.Limits.Verbs
+}
+
 // Verified is a key whose chain has checked out.
 type Verified struct {
 	Key     Key

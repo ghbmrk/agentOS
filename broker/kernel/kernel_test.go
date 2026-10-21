@@ -83,9 +83,9 @@ func newRig(t *testing.T) *rig {
 // hardware key, both anchors.
 func (r *rig) anchors() []ed25519.PublicKey { return []ed25519.PublicKey{r.owner.pub, r.spare.pub} }
 
-// issue grants keys at at, co-signed by the second hardware key.
+// issue grants keys at at, co-signed by the owner's two hardware keys.
 func (r *rig) issue(at int64, keys ...key.Key) error {
-	return r.k.Issue(at, []key.Cosign{key.Approve(r.spare.priv, kernel.BatchHash(keys...))}, keys...)
+	return r.k.Issue(at, approve(keys, r.owner, r.spare), keys...)
 }
 
 // grant has the passkey grant root and the home clerk's key to it, a hold

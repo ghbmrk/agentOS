@@ -83,7 +83,7 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	}
 	_, backup := seed(12) // the second hardware key co-signs the setup grants (D-146)
 	batch := []key.Key{{Root: root.Root}, root}
-	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(backup, kernel.BatchHash(batch...))}, batch...); err != nil {
+	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(batch...)), key.Approve(backup, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.Anchor(); err != nil {

@@ -31,10 +31,12 @@ func (f *fake) Call(route, prompt string, maxOut int64) (string, model.Usage, er
 	return strings.Repeat("x", 400), f.u, f.err
 }
 
-// cosigned is the second hardware key's co-signature over a grant batch.
+// cosigned is the owner's and the second hardware key's co-signatures over a
+// grant batch.
 func cosigned(keys ...key.Key) []key.Cosign {
+	_, o := seed(1)
 	_, b := seed(12)
-	return []key.Cosign{key.Approve(b, kernel.BatchHash(keys...))}
+	return []key.Cosign{key.Approve(o, kernel.BatchHash(keys...)), key.Approve(b, kernel.BatchHash(keys...))}
 }
 
 func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {

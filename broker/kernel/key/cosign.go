@@ -22,8 +22,9 @@ func Approve(passkey ed25519.PrivateKey, what [32]byte) Cosign {
 }
 
 // Approved reports whether two distinct passkeys of owners, one of them an
-// anchor, stand behind the change named what: the passkeys that already
-// signed it (signers) and each co-signature that verifies.
+// anchor, stand behind the change named what: each co-signature over what
+// that verifies, and signers, passkeys whose own signature already binds that
+// exact change, such as a one-off's use.
 func Approved(owners, anchors []ed25519.PublicKey, what [32]byte, signers []ed25519.PublicKey, cos []Cosign) bool {
 	var by []ed25519.PublicKey
 	add := func(pk ed25519.PublicKey) {
@@ -53,18 +54,6 @@ func UseSigner(k Key, owners []ed25519.PublicKey, use, sig []byte) ed25519.Publi
 		return nil
 	}
 	return whoSigned(owners, useMsg(k.Tip(), use), sig)
-}
-
-// GrantSigner is the passkey of owners that signed grant k: a root's owner,
-// or the signer of its first link; nil if none.
-func GrantSigner(k Key, owners []ed25519.PublicKey) ed25519.PublicKey {
-	if len(k.Links) == 0 {
-		if In(owners, k.Root.Owner) {
-			return k.Root.Owner
-		}
-		return nil
-	}
-	return whoSigned(owners, linkMsg(rootID(k.Root), k.Links[0]), k.Links[0].Sig)
 }
 
 func whoSigned(owners []ed25519.PublicKey, msg, sig []byte) ed25519.PublicKey {
