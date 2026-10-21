@@ -357,3 +357,34 @@ func TestChainAloneNeverAuthorizes(t *testing.T) {
 		t.Fatalf("wrong owner: %v", err)
 	}
 }
+
+// Full power stays with the owner's root: a key derived from it carries at
+// least one caveat, so a leaked child is always capped (D-145). Derive refuses
+// one without, and a link the root's holder signs by hand is refused by
+// Verify and Chain alike; a key below a caveated one need add none.
+func TestKeyOffTheRootCarriesALimit(t *testing.T) {
+	o, h, k := root(t)
+	next := gen(3)
+	if _, err := Derive(k, h.priv, next.pub); !errors.Is(err, ErrUncaveated) {
+		t.Fatalf("derive with no caveat: %v", err)
+	}
+	bare := Extend(k, h.priv, Link{Holder: next.pub})
+	use := []byte("plan")
+	if _, err := Verify(bare, o.pub, use, Sign(bare, next.priv, use)); !errors.Is(err, ErrUncaveated) {
+		t.Fatalf("verify an uncaveated child: %v", err)
+	}
+	if _, err := Chain(bare, o.pub); !errors.Is(err, ErrUncaveated) {
+		t.Fatalf("chain of an uncaveated child: %v", err)
+	}
+	d, err := Derive(k, h.priv, next.pub, LimitExpires(1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Derive(d, next.priv, gen(4).pub)
+	if err != nil {
+		t.Fatalf("a key below a caveated one inherits its limit: %v", err)
+	}
+	if _, err := Verify(g, o.pub, use, Sign(g, gen(4).priv, use)); err != nil {
+		t.Fatalf("verify the grandchild: %v", err)
+	}
+}

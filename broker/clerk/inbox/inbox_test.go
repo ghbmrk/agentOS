@@ -82,6 +82,9 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	if err := log.Anchor(); err != nil {
 		t.Fatal(err)
 	}
+	if len(caveats) == 0 { // a key off the root carries a limit: here, the root's own verbs
+		caveats = []key.Caveat{key.LimitVerbs(key.Organize, key.Trash, key.Unsubscribe)}
+	}
 	r.planner, err = key.Derive(root, holderPriv, plannerPub, caveats...)
 	if err != nil {
 		t.Fatal(err)

@@ -33,6 +33,7 @@ var (
 	ErrLoosens     = errors.New("key: link removes or loosens a limit")
 	ErrNotHolder   = errors.New("key: signer does not hold the key")
 	ErrUnknownKind = errors.New("key: unknown caveat kind")
+	ErrUncaveated  = errors.New("key: a key derived from the root carries no limit")
 )
 
 // ID names a key or any prefix of its chain. Revoking an ID revokes every key
@@ -376,23 +377,17 @@ func Extend(k Key, holder ed25519.PrivateKey, l Link) Key {
 }
 
 // Derive narrows k by caveats and hands it to next (KEY-3). It needs no owner
-// step. It refuses a caveat that would loosen k.
+// step. It refuses a caveat that would loosen k, and a key off the root with
+// no caveat at all: the chain check below is the one place both rules live.
 func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Caveat) (Key, error) {
 	if !bytes.Equal(holder.Public().(ed25519.PublicKey), k.holder()) {
 		return Key{}, ErrNotHolder
 	}
-	v, err := verifyChain(k, nil)
-	if err != nil {
+	out := Extend(k, holder, Link{Caveats: cav, Holder: next})
+	if _, err := verifyChain(out, nil); err != nil {
 		return Key{}, err
 	}
-	scope := v.IDs[len(v.IDs)-1]
-	l := v.Limits
-	for _, c := range cav {
-		if err := l.apply(c, scope); err != nil {
-			return Key{}, err
-		}
-	}
-	return Extend(k, holder, Link{Caveats: cav, Holder: next}), nil
+	return out, nil
 }
 
 // Verified is a key whose chain has checked out.
@@ -480,6 +475,11 @@ func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 		}
 		if owner != nil && !ed25519.Verify(holder, linkMsg(prev, l), l.Sig) {
 			return nil, ErrBadSig
+		}
+		// Full power stays with the owner's root: every key derived from
+		// it carries at least one limit (D-145, #2631).
+		if len(v.IDs) == 1 && len(l.Caveats) == 0 {
+			return nil, ErrUncaveated
 		}
 		id := linkID(prev, l)
 		for _, c := range l.Caveats {
