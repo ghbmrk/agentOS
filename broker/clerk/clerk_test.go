@@ -13,6 +13,16 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
+// backup is the owner's second hardware key, an anchor in the kernel: it
+// co-signs the setup grants, which are new power (D-146).
+func backup() (ed25519.PublicKey, ed25519.PrivateKey) { return gen(12) }
+
+// cosigned is the backup key's co-signature over a grant batch.
+func cosigned(keys ...key.Key) []key.Cosign {
+	_, b := backup()
+	return []key.Cosign{key.Approve(b, kernel.BatchHash(keys...))}
+}
+
 func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	s := make([]byte, ed25519.SeedSize)
 	s[0] = seed
@@ -65,7 +75,8 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, []ed25519.PublicKey{opub}, map[string]kernel.Clerk{"mail": mail}, 0)
+	bpub, _ := backup()
+	k, err := kernel.Boot(l, []ed25519.PublicKey{opub, bpub}, map[string]kernel.Clerk{"mail": mail}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +85,7 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+	if err := k.Issue(-kernel.GrantHold, cosigned(key.Key{Root: root.Root}, root), key.Key{Root: root.Root}, root); err != nil {
 		t.Fatal(err)
 	}
 	f.k, f.root = k, root
@@ -274,5 +285,38 @@ func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
 	}
 	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
 		t.Fatalf("the mail clerk ran it: %+v", res)
+	}
+}
+
+// strict is a view under which any one-off spend needs a second passkey.
+type strict struct{ kernel.View }
+
+func (strict) OneOffLine(key.ID, int64) int64 { return 0 }
+
+// The clerk checks a one-off past the line for its second passkey itself,
+// with its own anchors (D-146).
+func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
+	f := setup(t, key.Buy)
+	opub, opriv := gen(1)
+	bpub, bpriv := backup()
+	anchors := []ed25519.PublicKey{opub, bpub}
+	oneOff := func(id string, cos ...ed25519.PrivateKey) kernel.Request {
+		ps := stepOf(key.Buy)
+		ps.Args[key.ArgAmount] = "5"
+		p := kernel.SignPlan(kernel.Plan{ID: id, Key: key.Key{Root: f.root.Root}, Steps: []kernel.PlanStep{ps}}, opriv)
+		for _, c := range cos {
+			p.Cosigns = append(p.Cosigns, key.Approve(c, kernel.PlanHash(p)))
+		}
+		f.plans[id] = p
+		return kernel.Request{Plan: p}
+	}
+	if rf := clerk.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o1"), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+		t.Fatalf("a one-off past the line, alone: %v", rf)
+	}
+	if rf := clerk.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o2", bpriv), strict{f.view()}); rf != nil {
+		t.Fatalf("a one-off the second hardware key co-signed: %v", rf)
+	}
+	if rf := clerk.Check(anchors[:1], "mail", f.mail.Facts, f.now, oneOff("o3", bpriv), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+		t.Fatalf("a co-signer the clerk's anchors do not know: %v", rf)
 	}
 }

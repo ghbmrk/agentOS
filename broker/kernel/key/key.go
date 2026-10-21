@@ -377,12 +377,7 @@ func signedBy(signer ed25519.PublicKey, owners []ed25519.PublicKey, msg, sig []b
 	if signer != nil {
 		return ed25519.Verify(signer, msg, sig)
 	}
-	for _, p := range owners {
-		if len(p) == ed25519.PublicKeySize && ed25519.Verify(p, msg, sig) {
-			return true
-		}
-	}
-	return false
+	return whoSigned(owners, msg, sig) != nil
 }
 
 // SignedBy reports whether pk signed grant k: a root it issued, or a first

@@ -46,6 +46,7 @@ func (a *flakyAnchor) Put(h kernel.Head) error {
 type rig struct {
 	t      *testing.T
 	owner  pair
+	spare  pair // the second hardware key: co-signs new power (D-146)
 	holder pair
 	head   pair
 	store  *kernel.MemStore
@@ -68,7 +69,7 @@ func cfg(r *rig) kernel.Config {
 }
 
 func newRig(t *testing.T) *rig {
-	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
+	r := &rig{t: t, owner: gen(1), spare: gen(12), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
 	r.mail = clerk.NewMail("mail", r.anchors())
 	r.mail.Clock = func() int64 { return r.now }
 	r.boot(0)
@@ -78,8 +79,14 @@ func newRig(t *testing.T) *rig {
 	return r
 }
 
-// anchors is the rig's passkey set: the owner's one passkey as its anchor.
-func (r *rig) anchors() []ed25519.PublicKey { return []ed25519.PublicKey{r.owner.pub} }
+// anchors is the rig's passkey set: the owner's passkey and the second
+// hardware key, both anchors.
+func (r *rig) anchors() []ed25519.PublicKey { return []ed25519.PublicKey{r.owner.pub, r.spare.pub} }
+
+// issue grants keys at at, co-signed by the second hardware key.
+func (r *rig) issue(at int64, keys ...key.Key) error {
+	return r.k.Issue(at, []key.Cosign{key.Approve(r.spare.priv, kernel.BatchHash(keys...))}, keys...)
+}
 
 // grant has the passkey grant root and the home clerk's key to it, a hold
 // before the test, so both are live (D-146). It returns the clerk key.
@@ -87,7 +94,7 @@ func (r *rig) grant(root key.Key, spendDay int64, c ...key.Caveat) key.Key {
 	r.t.Helper()
 	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, spendDay, c...)
 	must(r.t, err)
-	must(r.t, r.k.Issue(-kernel.GrantHold, root, ck))
+	must(r.t, r.issue(-kernel.GrantHold, root, ck))
 	return ck
 }
 
@@ -512,7 +519,7 @@ func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 		t.Fatal("an unconfirmed unpause must report it")
 	}
 	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
-	if err := r.k.Issue(3, other); !errors.Is(err, kernel.ErrBroken) {
+	if err := r.issue(3, other); !errors.Is(err, kernel.ErrBroken) {
 		t.Fatalf("nothing may build on an unconfirmed widening: %v", err)
 	}
 	r.anchor.down = false
@@ -531,7 +538,7 @@ func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
 	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
 	r.anchor.down = true
-	if err := r.k.Issue(1, other); err == nil {
+	if err := r.issue(1, other); err == nil {
 		t.Fatal("an unconfirmed issue must report it")
 	}
 	if err := r.k.Submit(2, r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})); err == nil {

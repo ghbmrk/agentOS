@@ -35,6 +35,7 @@ const (
 	TKeyResumed   = "key.resumed"
 	TEnrolled     = "passkey.enrolled"
 	TUnenrolled   = "passkey.revoked"
+	TLine         = "line.set"
 	TStop         = "stop"
 	TResume       = "resume"
 	TPlanSubmit   = "plan.submitted"
@@ -57,7 +58,7 @@ const (
 )
 
 var schema = map[string]int{
-	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TStop: 1, TResume: 1,
+	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TLine: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
@@ -71,7 +72,7 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 // pool entries that reopen budget. Only one that an anchor covers counts
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
-	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TStepRetried ||
+	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset
 }
 
@@ -96,6 +97,8 @@ type Plan struct {
 	Key   key.Key    `json:"key"`
 	Steps []PlanStep `json:"steps"`
 	Sig   []byte     `json:"sig"`
+	// Cosigns are a very large one-off's second passkey (OneOff).
+	Cosigns []key.Cosign `json:"cosigns,omitempty"`
 }
 
 // use is what the holder signs: the id and steps. The key's tip is in the
@@ -148,7 +151,15 @@ func (p Plan) Step(i int) key.Step { return Normalize(p.ID, p.Steps[i]) }
 type (
 	// grants is one batch of passkey grants: roots and the first links off
 	// them, under one hold (D-146).
-	grantBatch struct{ Keys []key.Key }
+	grantBatch struct {
+		Keys    []key.Key
+		Cosigns []key.Cosign `json:",omitempty"` // a big batch's second passkey
+	}
+	// lineSet is the owner's line for a big change, in percent (D-146).
+	lineSet struct {
+		Percent int64
+		Cosigns []key.Cosign `json:",omitempty"`
+	}
 	enrolled   struct{ Enrollment key.Enrollment }
 	unenrolled struct{ Passkey ed25519.PublicKey }
 	keyID      struct{ ID key.ID }
@@ -329,7 +340,10 @@ type State struct {
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
 	Grants map[key.ID]Grant
-	Plans  map[string]*PlanState
+	// Line is the owner's line for a big change, in percent; 0 is DefaultLine.
+	Line  int64
+	lines int // line changes so far, named in each one's co-signature
+	Plans map[string]*PlanState
 	// SpendHeld lists the tasks stopped on a used-up spend cap; Pools the usage pools.
 	SpendHeld map[string]SpendHold
 	// Extended maps a plan to the extension key its later calls are charged to.
@@ -475,10 +489,13 @@ func (s *State) Pending(now int64) []key.ID {
 var ErrNotAGrant = errors.New("kernel: only a root or a first link off a granted root is granted")
 
 // grants decides one batch logged at at, in order: the grants it adds, or
-// the first refusal. The fold and Issue share it, so Issue logs only what
-// the fold grants.
-func (s *State) grants(keys []key.Key, at int64) (map[key.ID]Grant, error) {
+// the first refusal. A big batch needs its second passkey, as a whole. The
+// fold and Issue share it, so Issue logs only what the fold grants.
+func (s *State) grants(keys []key.Key, cos []key.Cosign, at int64) (map[key.ID]Grant, error) {
 	out := map[key.ID]Grant{}
+	if s.big(keys, at) && !s.cosigned(keys, cos) {
+		return out, ErrNeedsCosign
+	}
 	for _, k := range keys {
 		from, err := s.decide(k, at, out)
 		if err != nil {
@@ -651,7 +668,7 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		add, _ := s.grants(b.Keys, e.At) // a refused key adds nothing, nor any after it
+		add, _ := s.grants(b.Keys, b.Cosigns, e.At) // a refused key adds nothing, nor any after it
 		for id, g := range add {
 			s.Grants[id] = g
 		}
@@ -661,6 +678,14 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		s.Enrolled = append(s.Enrolled, b.Enrollment)
+	case TLine:
+		b, err := body[lineSet](e)
+		if err != nil {
+			return err
+		}
+		if s.lineOK(b) == nil {
+			s.Line, s.lines = b.Percent, s.lines+1
+		}
 	case TUnenrolled:
 		b, err := body[unenrolled](e)
 		if err != nil {

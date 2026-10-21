@@ -38,7 +38,8 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	opub, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
 	kpub, kpriv := seedKey(3)
-	anchors := []ed25519.PublicKey{opub}
+	bpub, bpriv := seedKey(12) // the second hardware key co-signs new power (D-146)
+	anchors := []ed25519.PublicKey{opub, bpub}
 	c := NewClerk("web", anchors, h.g)
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
 		Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})})
@@ -54,7 +55,8 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+	batch := []key.Key{{Root: root.Root}, root}
+	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	return &clerkRig{h, c, k, anchors, root}
