@@ -466,8 +466,9 @@ func TestPaidReplyIsKeptWhenItsPoolReadingIsRefused(t *testing.T) {
 	}
 }
 
-// When the log cannot record the pool at all, the reply is still kept, and the
-// closing is owed before any further call.
+// When the log cannot write the pool reading at all, the reply is still kept,
+// and the reading is owed before any further call. Once written it is the
+// provider's own figure, not a full pool.
 func TestUnrecordedPoolReadingShutsTheClerkUntilTheLogRecords(t *testing.T) {
 	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 300, ResetAt: 10_000}}}
 	c, k, lg := rig(t, f)
@@ -482,11 +483,42 @@ func TestUnrecordedPoolReadingShutsTheClerkUntilTheLogRecords(t *testing.T) {
 	if _, err := c.Call(3, "t", "api", "hi", 10); err != nil {
 		t.Fatalf("calls resume once the log records: %v", err)
 	}
-	if b := poolRead(t, k); !strings.Contains(b, `"used":1000`) {
-		t.Fatalf("the owed reading closes the pool: %s", b)
+	if b := poolRead(t, k); !strings.Contains(b, `"used":300`) || !strings.Contains(b, `"reset_at":10000`) {
+		t.Fatalf("the owed reading is the provider's figure: %s", b)
 	}
-	if _, err := c.Call(4, "t", "plan", "hi", 10); err == nil || f.calls != 2 {
-		t.Fatalf("the pool stays closed until its reset: %v calls=%d", err, f.calls)
+	if _, err := c.Call(4, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("a pool at 300 stays open: %v", err)
+	}
+}
+
+// An owed reading whose reset time has passed by the time the log recovers is
+// dropped: the provider's reset time is the cooldown, so the pool does not
+// close for a fresh window after it has already reset.
+func TestOwedReadingPastItsResetIsDropped(t *testing.T) {
+	for name, tc := range map[string]struct{ resetAt, recover int64 }{
+		"provider reset": {resetAt: 10_000, recover: 20_000},
+		// no reset time: the declared window from the call is the cooldown
+		"no reset time": {resetAt: 0, recover: 1 + kernel.PoolWindowMS},
+	} {
+		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000, ResetAt: tc.resetAt}}}
+		c, k, lg := rig(t, f)
+		lg.failPool = true
+		if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := c.Call(2, "t", "api", "hi", 10); err == nil {
+			t.Fatalf("%s: the reading is owed until its reset time", name)
+		}
+		lg.failPool = false
+		f.u.Pool = nil // the next call carries no reading of its own
+		if _, err := c.Call(tc.recover, "t", "plan", "hi", 10); err != nil {
+			t.Fatalf("%s: the pool reset before the log recovered, so it is open: %v", name, err)
+		}
+		for _, e := range k.Log().Entries() {
+			if e.Type == kernel.TPoolRead {
+				t.Fatalf("%s: a stale reading was recorded: %s", name, e.Body)
+			}
+		}
 	}
 }
 

@@ -131,8 +131,9 @@ func (c *Clerk) flush(now int64) error {
 // the plan until the owner extends it. A provider error costs the usage it
 // reported, nothing if the request never left, else the admitted worst case.
 // The reply is withheld if the spend cannot be recorded. A paid reply is kept
-// when only its pool reading fails: the log refusing a reading records the
-// pool as full instead, since a reading can only narrow.
+// when only its pool reading fails: a reading the log refuses is recorded as a
+// full pool instead, since a reading can only narrow, and one the log cannot
+// write is owed until its reset time.
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -183,10 +184,19 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 		merr = c.owe(now, func(now int64) error { return c.Ledger.Meter(now, plan, route, amount, src) })
 	}
 	if p.Pool != "" && u.Pool != nil {
-		if c.Ledger.ReadPool(now, p.Pool, u.Pool.Used, u.Pool.ResetAt) != nil {
-			reset := u.Pool.ResetAt
-			_ = c.owe(now, func(now int64) error { return c.Ledger.ReadPool(now, p.Pool, kernel.PoolFull, reset) })
+		used, reset := u.Pool.Used, u.Pool.ResetAt
+		if reset <= now {
+			reset = now + kernel.PoolWindowMS
 		}
+		_ = c.owe(now, func(now int64) error {
+			if now >= reset {
+				return nil // the pool has reset since the reading
+			}
+			if c.Ledger.ReadPool(now, p.Pool, used, reset) == nil {
+				return nil
+			}
+			return c.Ledger.ReadPool(now, p.Pool, kernel.PoolFull, reset)
+		})
 	}
 	if merr != nil {
 		return "", errors.Join(callErr, merr)
