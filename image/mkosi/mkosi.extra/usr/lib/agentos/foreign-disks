@@ -9,22 +9,26 @@
 # this on every boot and CI reads it with a host disk attached (ci_boot.sh); the end-to-end run
 # prints it again when it is done.
 proc=${AGENTOS_PROC:-/proc}
+# unknown WHY: the answer when something cannot be read; WHY says what, for the console reader.
+unknown() { echo "foreign=unknown ($1)"; exit 0; }
 # chain DEV: lsblk's lines "NAME TYPE" for DEV and what it sits on; roots is the disks among them.
 chain() { lsblk -snrpo NAME,TYPE "$1" 2>/dev/null; }
 roots() { chain "$1" | while read -r name type; do
 	case $type in disk | loop | rom) echo "$name" ;; esac
 done | sort -u; }
-rootmm=$(findmnt -no MAJ:MIN / 2>/dev/null)
+# findmnt right-aligns the number in a padded column; -r and tr leave the bare MAJ:MIN.
+rootmm=$(findmnt -rno MAJ:MIN / 2>/dev/null | tr -d ' ')
 boot=$(roots "/dev/block/$rootmm")
-[ -n "$boot" ] && [ "$(echo "$boot" | wc -l)" = 1 ] || { echo "foreign=unknown"; exit 0; }
+[ -n "$boot" ] && [ "$(echo "$boot" | wc -l)" = 1 ] || unknown "boot disk of $rootmm"
 # The device number is the third field of a mountinfo line. A process can exit while its file is read,
 # so errors are ignored; the listing must still name the root's number, or it is not the listing.
 mms=$(cat "$proc"/[0-9]*/mountinfo 2>/dev/null | awk '$3 !~ /^0:/ { print $3 }' | sort -u)
-echo "$mms" | grep -qxF "$rootmm" && [ -r "$proc/swaps" ] || { echo "foreign=unknown"; exit 0; }
+echo "$mms" | grep -qxF "$rootmm" || unknown "no mount listing for $rootmm"
+[ -r "$proc/swaps" ] || unknown "no swap list"
 bad=
 for m in $mms; do
 	r=$(roots "/dev/block/$m")
-	[ -n "$r" ] || { echo "foreign=unknown"; exit 0; }
+	[ -n "$r" ] || unknown "device $m"
 	[ "$r" = "$boot" ] || bad="$bad,$(chain "/dev/block/$m" | head -n 1 | cut -d' ' -f1)"
 done
 # Swap is named by path, and so is a mount whose file system keeps its own anonymous device number
@@ -36,7 +40,7 @@ for s in $( { tail -n +2 "$proc/swaps" | cut -d' ' -f1
 	d=$(readlink -f "$s")
 	[ -b "$d" ] || { bad="$bad,$s"; continue; }
 	r=$(roots "$d")
-	[ -n "$r" ] || { echo "foreign=unknown"; exit 0; }
+	[ -n "$r" ] || unknown "device $s"
 	[ "$r" = "$boot" ] || bad="$bad,$s"
 done
 echo "foreign=${bad#,}" | sed 's/^foreign=$/foreign=none/'

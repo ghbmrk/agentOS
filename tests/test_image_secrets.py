@@ -330,7 +330,8 @@ class ForeignDisksTest(unittest.TestCase):
                     for i, m in enumerate(ms.split(), 1)))
             (proc / "swaps").write_text("Filename Type Size Used Priority\n" +
                                         "".join("%s partition 1 0 -2\n" % w for w in swaps.split()))
-            stub(t, "findmnt", "echo %s\n" % mm(root))
+            # The real findmnt pads the number to a column unless -r is given.
+            stub(t, "findmnt", 'case "$*" in *-r*) echo %s ;; *) echo "   %s" ;; esac\n' % (mm(root), mm(root)))
             stub(t, "readlink", 'echo "$2"\n')
             keyed = dict(chains)
             keyed.update({"/dev/block/" + nums[d]: out for d, out in chains.items() if d in nums})
@@ -375,7 +376,7 @@ class ForeignDisksTest(unittest.TestCase):
     def test_a_listing_without_the_root_source_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2
         # A mount listing that cannot be read leaves no root source in it; that must not read as none.
-        self.assertEqual(self.run_script("", chains=self.BOOT), "foreign=unknown")
+        self.assertTrue(self.run_script("", chains=self.BOOT).startswith("foreign=unknown ("))
 
     def test_a_block_mount_whose_source_is_not_under_dev_is_listed(self):
         # REQ: HW-8, ONB-2
@@ -400,8 +401,8 @@ class ForeignDisksTest(unittest.TestCase):
 
     def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2
-        self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT), "foreign=unknown")
-        self.assertEqual(self.run_script("/dev/vda3", chains={}), "foreign=unknown")
+        self.assertTrue(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT).startswith("foreign=unknown ("))
+        self.assertTrue(self.run_script("/dev/vda3", chains={}).startswith("foreign=unknown ("))
 
     def test_boot_report_prints_the_line_and_ci_reads_it_on_both_boots(self):
         # REQ: HW-8, ONB-2
