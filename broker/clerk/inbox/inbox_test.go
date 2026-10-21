@@ -66,7 +66,7 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	plannerPub, plannerPriv := seed(4)
 	r := &rig{world: &w, plannerPriv: plannerPriv, now: t0}
 	var err error
-	r.acct, err = NewAccount(ownerPub, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
+	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,14 +75,19 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.k, err = kernel.Boot(log, ownerPub, map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
+	r.k, err = kernel.Boot(log, []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.acct.Bind(r.k.State())
 	r.acct.Clock = func() int64 { return r.now }
-	root := key.Issue(ownerPriv, key.Root{Holder: holderPub, Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey})
-	if err := r.k.Issue(t0-dayMS, root); err != nil {
+	// The passkey granted the root and the home clerk's key at setup (D-146).
+	root, err := key.ClerkKey(key.Issue(ownerPriv, key.Root{Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey}),
+		ownerPriv, holderPub, t0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.Anchor(); err != nil {
@@ -134,7 +139,7 @@ func (r *rig) lastRefusal(t *testing.T) Refusal {
 // staleView is the caller's own account of the world: everything held, known.
 type staleView struct{ kernel.View }
 
-func (staleView) Known(key.ID) bool { return true }
+func (staleView) Granted(key.ID) (int64, bool) { return 0, true }
 func (staleView) Dispatched(kernel.Request) (kernel.Dispatch, bool) {
 	return kernel.Dispatch{Held: true}, true
 }
@@ -257,7 +262,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 	}
 	// Restart: a new kernel over the same log, as after a crash.
 	ownerPub, _ := seed(1)
-	k2, err := kernel.Boot(r.k.Log(), ownerPub, map[string]kernel.Clerk{Name: r.acct}, t0)
+	k2, err := kernel.Boot(r.k.Log(), []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}

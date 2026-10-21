@@ -52,8 +52,8 @@ type rig struct {
 	anchor *flakyAnchor
 	mail   *clerk.Mail
 	k      *kernel.Kernel
-	root   key.Key
-	now    int64 // the mail clerk's own clock
+	ck     key.Key // the home clerk's key: the passkey's grant to the holder
+	now    int64   // the mail clerk's own clock
 }
 
 // tick runs the kernel at now, with the clerk's own clock at now too.
@@ -69,19 +69,32 @@ func cfg(r *rig) kernel.Config {
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
-	r.mail = clerk.NewMail("mail", r.owner.pub)
+	r.mail = clerk.NewMail("mail", r.anchors())
 	r.mail.Clock = func() int64 { return r.now }
 	r.boot(0)
-	r.root = key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail",
-		Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: "r1"})
-	must(t, r.k.Issue(0, r.root)) // anchors itself: the rig adds no anchor of its own
+	// The grant anchors itself: the rig adds no anchor of its own.
+	r.ck = r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail",
+		Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: "r1"}), 1<<40)
 	return r
+}
+
+// anchors is the rig's passkey set: the owner's one passkey as its anchor.
+func (r *rig) anchors() []ed25519.PublicKey { return []ed25519.PublicKey{r.owner.pub} }
+
+// grant has the passkey grant root and the home clerk's key to it, a hold
+// before the test, so both are live (D-146). It returns the clerk key.
+func (r *rig) grant(root key.Key, spendDay int64, c ...key.Caveat) key.Key {
+	r.t.Helper()
+	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, spendDay, c...)
+	must(r.t, err)
+	must(r.t, r.k.Issue(-kernel.GrantHold, root, ck))
+	return ck
 }
 
 func (r *rig) boot(now int64) {
 	l, err := kernel.Open(cfg(r))
 	must(r.t, err)
-	r.k, err = kernel.Boot(l, r.owner.pub, map[string]kernel.Clerk{"mail": r.mail}, now)
+	r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{"mail": r.mail}, now)
 	must(r.t, err)
 }
 
@@ -93,7 +106,7 @@ func must(t *testing.T, err error) {
 }
 
 func (r *rig) derive(c ...key.Caveat) key.Key {
-	k, err := key.Derive(r.root, r.holder.priv, r.holder.pub, c...)
+	k, err := key.Derive(r.ck, r.holder.priv, r.holder.pub, c...)
 	must(r.t, err)
 	return k
 }
@@ -106,7 +119,7 @@ func st(v key.Verb, to string) kernel.PlanStep {
 	return s
 }
 
-// sign signs p as the rig's holder, who holds the root and every key the rig derives.
+// sign signs p as the rig's holder, who holds the clerk key and every key the rig derives.
 func (r *rig) sign(p kernel.Plan) kernel.Plan { return kernel.SignPlan(p, r.holder.priv) }
 
 func (r *rig) plan(id string, k key.Key, steps ...kernel.PlanStep) {
@@ -118,13 +131,13 @@ func (r *rig) status(id string) string { return r.k.State().Plans[id].Status }
 
 func TestReversibleStepRunsOnceAndReplayMatches(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"), st(key.Organize, "m2"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"), st(key.Organize, "m2"))
 	must(t, r.tick(10))
 	must(t, r.tick(20))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 2 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
 	}
-	re, err := kernel.Replay(r.owner.pub, r.k.Log().Entries())
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
 	must(t, err)
 	if !reflect.DeepEqual(re, r.k.State()) {
 		t.Fatal("replay differs from the live state (KRN-1)")
@@ -144,10 +157,16 @@ func TestPlannerArgIsRefusedWholePlanRejected(t *testing.T) {
 
 func TestUnknownRootRejected(t *testing.T) {
 	r := newRig(t)
-	other := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "never-logged"})
-	r.plan("p1", other, st(key.Trash, "m1"))
+	other, err := key.ClerkKey(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "never-logged"}),
+		r.owner.priv, r.holder.pub, 0, 1)
+	must(t, err)
+	p := r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
+	if _, _, rf := kernel.Admit(r.k.State(), p, 0); rf == nil || rf.Code != kernel.CUngranted {
+		t.Fatalf("a root not in the log must not authorize (KEY-1): %v", rf)
+	}
+	must(t, r.k.Submit(0, p))
 	if r.status("p1") != kernel.SRejected {
-		t.Fatal("a root not in the log must not authorize (KEY-1)")
+		t.Fatal("rejected")
 	}
 }
 
@@ -222,7 +241,7 @@ func TestLostAckIsProbedAndDoneOnce(t *testing.T) {
 		}
 		return ""
 	}
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0))
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
 		t.Fatal("a lost answer must leave the step unknown")
@@ -257,7 +276,7 @@ func TestDroppedStepIsRedoneWithoutSecondCharge(t *testing.T) {
 func TestParkedAfterTenUnknownChecks(t *testing.T) {
 	r := newRig(t)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	for i := int64(0); i <= kernel.MaxChecks+1; i++ {
 		must(t, r.tick(i*kernel.ProbeEvery))
 	}
@@ -268,9 +287,9 @@ func TestParkedAfterTenUnknownChecks(t *testing.T) {
 
 func TestSameEffectWithinADayNeedsFreshKey(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p1", r.ck, st(key.Unsubscribe, "list-a"))
 	must(t, r.tick(0))
-	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p2", r.ck, st(key.Unsubscribe, "list-a"))
 	if r.status("p2") != kernel.SRejected {
 		t.Fatal("the same irreversible effect within 24h must be refused (KRN-8)")
 	}
@@ -278,7 +297,7 @@ func TestSameEffectWithinADayNeedsFreshKey(t *testing.T) {
 
 func TestRestartAfterDispatchBeforeResultProbes(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0))
 	cutLast(t, r.store, 1) // the result never reached disk; the effect did
 	r.boot(1)
@@ -293,7 +312,7 @@ func TestRestartAfterDispatchBeforeResultProbes(t *testing.T) {
 
 func TestPendingPlanIsDecidedAtBoot(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	cutLast(t, r.store, 1) // decision lost
 	r.boot(1)
 	if r.status("p1") != kernel.SActive {
@@ -309,7 +328,7 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 	if r.status("p1") != kernel.SCancelled {
 		t.Fatal("cancel")
 	}
-	r.plan("p2", r.root, st(key.Trash, "m1"))
+	r.plan("p2", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(2))
 	must(t, r.k.Undo(3, "p2", 0))
 	if !r.k.State().Plans["p2"].Steps[0].Undone {
@@ -320,10 +339,10 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 // Undoing an irreversible step does not unsend it: the duplicate guard stays (KRN-8).
 func TestUndoKeepsTheDuplicateGuardOfAnIrreversibleStep(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p1", r.ck, st(key.Unsubscribe, "list-a"))
 	must(t, r.tick(0))
 	must(t, r.k.Undo(1, "p1", 0))
-	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p2", r.ck, st(key.Unsubscribe, "list-a"))
 	if r.status("p2") != kernel.SRejected {
 		t.Fatal("undo must not reopen an irreversible effect")
 	}
@@ -348,7 +367,7 @@ func TestFingerprintDoesNotCollideAcrossArgumentBoundaries(t *testing.T) {
 // A declared argument with no value names nothing to act on (KEY-2).
 func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
 	r := newRig(t)
-	err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "")}}))
+	err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Trash, "")}}))
 	must(t, err)
 	if r.status("p1") != kernel.SRejected {
 		t.Fatal("an empty argument must reject the plan")
@@ -357,8 +376,8 @@ func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
 
 func TestDuplicatePlanIDRefused(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
-	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "m2")}})); !errors.Is(err, kernel.ErrDuplicatePlan) {
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Trash, "m2")}})); !errors.Is(err, kernel.ErrDuplicatePlan) {
 		t.Fatal(err)
 	}
 }
@@ -378,7 +397,7 @@ func cutLast(t *testing.T, s *kernel.MemStore, n int) {
 
 func TestLogReopensIdentical(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(1))
 	before := r.k.Log().Entries()
 	r.boot(2)
@@ -389,7 +408,7 @@ func TestLogReopensIdentical(t *testing.T) {
 
 func TestLogTamperTruncationForkTorn(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(1))
 	must(t, r.k.Log().Anchor())
 	good := append([]byte(nil), r.store.B...)
@@ -407,7 +426,7 @@ func TestLogTamperTruncationForkTorn(t *testing.T) {
 
 	// a different history of the same length
 	f := newRig(t)
-	f.plan("other", f.root, st(key.Organize, "zzz"))
+	f.plan("other", f.ck, st(key.Organize, "zzz"))
 	must(t, f.k.Tick(1))
 	c := cfg(r)
 	c.Store = f.store
@@ -431,7 +450,7 @@ func withStore(r *rig, s kernel.Store) kernel.Config {
 
 func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 	r := newRig(t) // root issue is anchored
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(1))
 	must(t, r.k.Stop(2))
 	n := r.k.Log().Len()
@@ -458,7 +477,7 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 // to build on it, so no later entry can make a restart keep it (KRN-7).
 func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.k.Stop(1))
 	r.anchor.down = true
 	if err := r.k.Resume(2); err == nil {
@@ -487,18 +506,18 @@ func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 // A failed Unpause is the same: the key stays paused after a reboot.
 func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.Pause(1, r.root.Tip()))
+	must(t, r.k.Pause(1, r.ck.Tip()))
 	r.anchor.down = true
-	if err := r.k.Unpause(2, r.root.Tip()); err == nil {
+	if err := r.k.Unpause(2, r.ck.Tip()); err == nil {
 		t.Fatal("an unconfirmed unpause must report it")
 	}
-	other := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
 	if err := r.k.Issue(3, other); !errors.Is(err, kernel.ErrBroken) {
 		t.Fatalf("nothing may build on an unconfirmed widening: %v", err)
 	}
 	r.anchor.down = false
 	r.boot(4)
-	if !r.k.State().Changes.Paused[r.root.Tip()] {
+	if !r.k.State().Changes.Paused[r.ck.Tip()] {
 		t.Fatal("an unpause the anchor never confirmed must not survive a reboot")
 	}
 	r.plan("p1", other, st(key.Trash, "m1"))
@@ -510,7 +529,7 @@ func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 // A failed Issue itself: no plan runs under it, and a reboot forgets it.
 func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
-	other := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
 	r.anchor.down = true
 	if err := r.k.Issue(1, other); err == nil {
 		t.Fatal("an unconfirmed issue must report it")
@@ -538,10 +557,10 @@ func TestFailedAnchorAfterNarrowingKeepsItAndTheLog(t *testing.T) {
 	if !r.k.State().Stopped {
 		t.Fatal("a stop stays in force")
 	}
-	if err := r.k.Pause(2, r.root.Tip()); err == nil || errors.Is(err, kernel.ErrBroken) {
+	if err := r.k.Pause(2, r.ck.Tip()); err == nil || errors.Is(err, kernel.ErrBroken) {
 		t.Fatalf("the log stays usable: the pause is recorded and only its anchor fails: %v", err)
 	}
-	if !r.k.State().Changes.Paused[r.root.Tip()] {
+	if !r.k.State().Changes.Paused[r.ck.Tip()] {
 		t.Fatal("a pause stays in force")
 	}
 	r.anchor.down = false
@@ -556,7 +575,7 @@ func TestFailedAnchorAfterNarrowingKeepsItAndTheLog(t *testing.T) {
 func TestOwnerActionsAnchorThemselves(t *testing.T) {
 	r := newRig(t)
 	r.boot(1) // the rig's own Issue is the only thing anchoring the root
-	r.plan("p0", r.root, st(key.Trash, "m0"))
+	r.plan("p0", r.ck, st(key.Trash, "m0"))
 	if r.status("p0") != kernel.SActive {
 		t.Fatal("an issued root must survive restart with no explicit anchor (KEY-1)")
 	}
@@ -566,10 +585,10 @@ func TestOwnerActionsAnchorThemselves(t *testing.T) {
 	if r.k.State().Stopped {
 		t.Fatal("a resume that returned nil must survive restart (KRN-7)")
 	}
-	must(t, r.k.Pause(5, r.root.Tip()))
-	must(t, r.k.Unpause(6, r.root.Tip()))
+	must(t, r.k.Pause(5, r.ck.Tip()))
+	must(t, r.k.Unpause(6, r.ck.Tip()))
 	r.boot(7)
-	if r.k.State().Changes.Paused[r.root.Tip()] {
+	if r.k.State().Changes.Paused[r.ck.Tip()] {
 		t.Fatal("an unpause that returned nil must survive restart (KRN-7)")
 	}
 }
@@ -597,14 +616,14 @@ func TestCancelledPlanStillReconcilesAndBlocksDuplicate(t *testing.T) {
 		}
 		return ""
 	}
-	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p1", r.ck, st(key.Unsubscribe, "list-a"))
 	must(t, r.tick(0))
 	must(t, r.k.Cancel(1, "p1"))
 	must(t, r.tick(kernel.ProbeEvery))
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
 		t.Fatal("the unknown step must stay unknown while the probe is unanswered")
 	}
-	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	r.plan("p2", r.ck, st(key.Unsubscribe, "list-a"))
 	must(t, r.tick(kernel.ProbeEvery+1))
 	if r.status("p2") == kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("a cancelled plan's unreconciled effect must block the same effect (KRN-8): p2 %s effects %d", r.status("p2"), len(r.mail.Effects()))
@@ -662,7 +681,7 @@ func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
 	missing := st(key.Send, "x")
 	delete(missing.Args, "to")
 	for name, s := range map[string]kernel.PlanStep{"extra": extra, "renamed": renamed, "price": price, "missing": missing} {
-		k := r.root
+		k := r.ck
 		if name == "price" {
 			k = spend
 		}
@@ -679,8 +698,7 @@ func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
 // REQ: KRN-8
 func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	r := newRig(t)
-	buy := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"})
-	must(t, r.k.Issue(0, buy))
+	buy := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
 	step := func(amount string) kernel.PlanStep {
 		s := st(key.Buy, "shop")
 		s.Args["amount"] = amount
@@ -706,7 +724,7 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 func TestStrippedKeyIsRefused(t *testing.T) {
 	r := newRig(t)
 	planner := gen(4)
-	k, err := key.Derive(r.root, r.holder.priv, planner.pub, key.LimitRate(2))
+	k, err := key.Derive(r.ck, r.holder.priv, planner.pub, key.LimitRate(2))
 	must(t, err)
 	organize := func(n int) []kernel.PlanStep {
 		var s []kernel.PlanStep
@@ -725,7 +743,7 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 	stripped := key.Key{Root: k.Root}
 	for id, p := range map[string]kernel.Plan{
 		"p1": kernel.SignPlan(kernel.Plan{ID: "p1", Key: stripped, Steps: organize(3)}, planner.priv),
-		"p2": kernel.SignPlan(kernel.Plan{ID: "p2", Key: key.Extend(r.root, planner.priv,
+		"p2": kernel.SignPlan(kernel.Plan{ID: "p2", Key: key.Extend(r.ck, planner.priv,
 			key.Link{Caveats: []key.Caveat{key.LimitRate(1000)}, Holder: planner.pub}), Steps: organize(3)}, planner.priv),
 		"p3": {ID: "p3", Key: k, Steps: organize(1)},
 	} {
@@ -735,7 +753,7 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
 		}
 		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
-		if rf := clerk.Check(r.owner.pub, "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+		if rf := clerk.Check(r.anchors(), "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
 			t.Fatalf("%s: clerk check %v", id, rf)
 		}
 	}
@@ -745,11 +763,11 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 // would also cover another: a plan whose text is not UTF-8 is refused.
 func TestPlanTextMustBeUTF8(t *testing.T) {
 	r := newRig(t)
-	a := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m\xff")}})
+	a := r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Organize, "m\xff")}})
 	b := a
 	b.Steps = []kernel.PlanStep{st(key.Organize, "m\xfe")}
 	for _, p := range []kernel.Plan{a, b} {
-		if _, err := kernel.VerifyPlan(p, r.owner.pub); !errors.Is(err, kernel.ErrNotText) {
+		if _, err := kernel.VerifyPlan(p, []ed25519.PublicKey{r.owner.pub}); !errors.Is(err, kernel.ErrNotText) {
 			t.Fatalf("verify %q: %v, want ErrNotText", p.Steps[0].Args, err)
 		}
 	}
@@ -783,7 +801,7 @@ func (r *rig) park(k key.Key) int64 {
 func TestStatusListsUnsettledSteps(t *testing.T) {
 	r := newRig(t)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0))
 	want := kernel.Unsettled{Plan: "p1", Verb: key.Trash, Clerk: "mail", Phase: kernel.PUnknown, Detail: "no answer"}
 	if got := r.k.State().Status(); len(got) != 1 || got[0] != want {
@@ -806,7 +824,7 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 // log replays to the same state (KRN-8, KRN-1).
 func TestRetryRedispatchesAParkedStep(t *testing.T) {
 	r := newRig(t)
-	at := r.park(r.root)
+	at := r.park(r.ck)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
 	must(t, r.k.Retry(at+1, "p1", 0))
 	must(t, r.tick(at+2))
@@ -823,7 +841,7 @@ func TestRetryRedispatchesAParkedStep(t *testing.T) {
 	if got := r.k.State().Status(); len(got) != 0 {
 		t.Fatalf("a settled step is still listed: %+v", got)
 	}
-	re, err := kernel.Replay(r.owner.pub, r.k.Log().Entries())
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
 	must(t, err)
 	if !reflect.DeepEqual(re, r.k.State()) {
 		t.Fatal("replay differs after a retry")
@@ -834,11 +852,11 @@ func TestRetryRedispatchesAParkedStep(t *testing.T) {
 // so a key revoked, or a STOP, while the step was parked still refuses it.
 func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	for name, narrow := range map[string]func(*rig, int64) error{
-		"revoked": func(r *rig, at int64) error { return r.k.Revoke(at, r.root.Tip()) },
+		"revoked": func(r *rig, at int64) error { return r.k.Revoke(at, r.ck.Tip()) },
 		"stopped": func(r *rig, at int64) error { return r.k.Stop(at) },
 	} {
 		r := newRig(t)
-		at := r.park(r.root)
+		at := r.park(r.ck)
 		must(t, narrow(r, at+1))
 		must(t, r.k.Retry(at+2, "p1", 0))
 		must(t, r.tick(at+3))
@@ -853,13 +871,13 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 func TestRetryRefusesAStepThatIsNotParked(t *testing.T) {
 	r := newRig(t)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
-	r.plan("p1", r.root, st(key.Trash, "m1"))
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0)) // unknown, still being reconciled
 	r.mail.Fault = nil
-	r.plan("p2", r.root, st(key.Organize, "m2"))
+	r.plan("p2", r.ck, st(key.Organize, "m2"))
 	must(t, r.tick(1)) // done
 	c := newRig(t)
-	at := c.park(c.root)
+	at := c.park(c.ck)
 	must(t, c.k.Cancel(at+1, "p1")) // parked, but the owner cancelled the plan
 	for _, x := range []struct {
 		r     *rig
@@ -877,7 +895,7 @@ func TestRetryRefusesAStepThatIsNotParked(t *testing.T) {
 // and the step stays parked with no effect (KRN-7).
 func TestUnanchoredRetryDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
-	at := r.park(r.root)
+	at := r.park(r.ck)
 	r.anchor.down = true
 	if err := r.k.Retry(at+1, "p1", 0); err == nil {
 		t.Fatal("an unconfirmed retry must report it")
@@ -917,8 +935,8 @@ func TestClerkKeepsTheHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 // which the holder could sign as validly (CLK-2, KRN-8).
 func TestDispatchedAnswersOnlyForTheLoggedPlanInFlight(t *testing.T) {
 	r := newRig(t)
-	p := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m1")}})
-	twin := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m2")}})
+	p := r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Organize, "m1")}})
+	twin := r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Organize, "m2")}})
 	rekeyed := r.sign(kernel.Plan{ID: "p1", Key: r.derive(key.LimitUses(5)), Steps: p.Steps})
 	answers := func() map[string]bool {
 		got := map[string]bool{}

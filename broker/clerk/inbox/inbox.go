@@ -65,7 +65,7 @@ type Refusal struct {
 // synthetic one of the eval, or the owner's (Live). It is the only place a
 // mail is read, an effect applied or a request made.
 type Account struct {
-	owner     ed25519.PublicKey
+	anchors   []ed25519.PublicKey
 	box       Mailbox
 	secret    []byte
 	world     func() World
@@ -108,14 +108,14 @@ func (a *Account) Handle(addr string) string {
 // world is read again when a step runs, so a verdict that has aged out is not
 // acted on. secret keys the handles and must hold at least 128 bits. box is
 // where the effects land, and must be the mailbox the mails were read from.
-func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mails []Mail, box Mailbox, retentionDays int, oneClickBody string) (*Account, error) {
+func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, mails []Mail, box Mailbox, retentionDays int, oneClickBody string) (*Account, error) {
 	if len(secret) < minSecret {
 		return nil, errors.New("inbox: handle secret shorter than 128 bits")
 	}
 	if box == nil {
 		return nil, errors.New("inbox: no mailbox")
 	}
-	a := &Account{owner: owner, box: box, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
+	a := &Account{anchors: anchors, box: box, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
 		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}, sends: map[string]int{}}
 	for _, m := range mails {
 		if !classes[m.Class] {
@@ -188,7 +188,7 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	if a.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := clerk.Check(a.owner, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
+	if rf := clerk.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {

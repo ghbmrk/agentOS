@@ -145,6 +145,41 @@ PREMERGE_LINES = [
 ]
 
 
+# BOARD-INTAKE-wf (#2668): intake.yml holds `issues: write` on an event any collaborator
+# triggers by editing an issue, so it is pinned line by line too: the trigger set, the
+# collaborator and work-item condition, the permissions, a credential-free checkout of main and
+# a run line whose only event value is the issue number, passed through env (INTAKE-3).
+INTAKE_LINES = [
+    "name: intake",
+    "on:",
+    "  issues:",
+    "    types: [opened, edited, labeled, unlabeled]",
+    "permissions:",
+    "  contents: read",
+    "concurrency:",
+    "  group: intake-${{ github.event.issue.number }}",
+    "  cancel-in-progress: false",
+    "jobs:",
+    "  intake:",
+    "    if: >-",
+    "      contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)",
+    "      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 5",
+    "    permissions:",
+    "      contents: read",
+    "      issues: write # the intake comment on this issue",
+    "    steps:",
+    "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
+    "        with:",
+    "          persist-credentials: false",
+    "      - name: Comment on the issue while it cannot render (tools/board.py intake)",
+    "        env:",
+    "          GITHUB_TOKEN: ${{ github.token }}",
+    "          ISSUE: ${{ github.event.issue.number }}",
+    '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"',
+]
+
 def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     """Return why lane-gate.yml (or another `pinned` gate) differs from its pin; empty when it matches."""
     problems = []
@@ -336,6 +371,45 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(old, text)
                 self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
+
+    def test_intake_is_pinned(self):
+        # BOARD-INTAKE-wf (#2668, INTAKE-3): the shipped workflow equals its pin, and no other
+        # workflow runs the intake command.
+        self.assertEqual(lane_gate_problems((WORKFLOWS / "intake.yml").read_text(), INTAKE_LINES), [])
+        for f in self.files():
+            if f.name != "intake.yml":
+                self.assertNotIn("board.py intake", f.read_text(), f.name)
+
+    def test_intake_check_catches_each_reported_edit(self):
+        # BOARD-INTAKE-wf (#2668, INTAKE-3): each widening or issue-text path fails the pin.
+        text = (WORKFLOWS / "intake.yml").read_text()
+        run = INTAKE_LINES[-1][len("        run: "):]
+        step = "      - name: Comment on the issue while it cannot render (tools/board.py intake)\n"
+        edits = {
+            "comment trigger": ("on:\n  issues:", "on:\n  issue_comment:\n  issues:"),
+            "closed type": ("labeled, unlabeled]", "labeled, unlabeled, closed]"),
+            "target trigger": ("on:\n", "on:\n  pull_request_target:\n"),
+            "outsider": ("\"COLLABORATOR\"]", "\"COLLABORATOR\", \"NONE\"]"),
+            "any label": ("contains(github.event.issue.labels.*.name, 'work-item')", "true"),
+            "pull-requests write": ("      issues: write", "      issues: write\n      pull-requests: write"),
+            "contents write": ("      contents: read\n      issues", "      contents: write\n      issues"),
+            "write-all": ("permissions:\n  contents: read\n#", "permissions: write-all\n#"),
+            "title in env": ("          ISSUE: ${{ github.event.issue.number }}",
+                             "          ISSUE: ${{ github.event.issue.title }}"),
+            "body in run": (run, run + ' --note "${{ github.event.issue.body }}"'),
+            "persist credentials": ("persist-credentials: false", "persist-credentials: true"),
+            "secret env": ("          GITHUB_TOKEN: ${{ github.token }}", "          GITHUB_TOKEN: ${{ secrets.BOT_PR_TOKEN }}"),
+            "step continue-on-error": (step, step + "        continue-on-error: true\n"),
+            "shell override": (step, step + "        shell: python {0}\n"),
+            "not isolated": ("python3 -I tools", "python3 tools"),
+            "no concurrency": ("  cancel-in-progress: false", "  cancel-in-progress: true"),
+            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "carriage return in comment": ("# One run at a time", "# One\r    if: false\r# run at a time"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertIn(old, text)
+                self.assertTrue(lane_gate_problems(text.replace(old, new, 1), INTAKE_LINES), name)
 
     def test_lane_gate_runs_only_the_base_copy(self):
         # CTRL-lane-gate (#1300, security review B1/B2): the gate is its own workflow on

@@ -5,6 +5,7 @@ package model_test
 import (
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"strings"
@@ -16,13 +17,17 @@ import (
 )
 
 type fake struct {
-	calls int
-	u     model.Usage
-	err   error
+	calls  int
+	u      model.Usage
+	err    error
+	during func() // runs while the request is out
 }
 
 func (f *fake) Call(route, prompt string, maxOut int64) (string, model.Usage, error) {
 	f.calls++
+	if f.during != nil {
+		f.during()
+	}
 	return strings.Repeat("x", 400), f.u, f.err
 }
 
@@ -33,10 +38,17 @@ func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return p.Public().(ed25519.PublicKey), p
 }
 
-// flaky is a ledger whose log can stop recording usage.
+// flaky is a ledger whose log can stop recording usage or pool readings.
 type flaky struct {
 	model.Ledger
-	fail bool
+	fail, failPool bool
+}
+
+func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
+	if f.failPool {
+		return errors.New("log down")
+	}
+	return f.Ledger.ReadPool(now, pool, used, resetAt)
 }
 
 func (f *flaky) Meter(now int64, plan, route string, amount int64, source string) error {
@@ -57,16 +69,16 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, opub, nil, 0)
+	k, err := kernel.Boot(l, []ed25519.PublicKey{opub}, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
-	if err := k.Issue(0, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
+	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	if err != nil {
 		t.Fatal(err)
 	}
-	ky, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(100))
-	if err != nil {
+	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
@@ -119,12 +131,12 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	// the owner's envelope (another root), and an extension derived from it
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
-	if err := k.Issue(3, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
+	env, err := key.ClerkKey(root, opriv, hpub, 0, 500, key.LimitSpendTask(500))
+	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(500), key.LimitSpendDay(500))
-	if err != nil {
+	if err := k.Issue(3-kernel.GrantHold, root, env); err != nil { // granted at setup
 		t.Fatal(err)
 	}
 	ext, err := key.Derive(env, hpriv, hpub, key.LimitSpendTask(200))
@@ -371,12 +383,12 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	c, k, _ := rig(t, f)
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
-	if err := k.Issue(0, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
+	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	if err != nil {
 		t.Fatal(err)
 	}
-	ky, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(100))
-	if err != nil {
+	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
@@ -388,5 +400,165 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	}
 	if _, err := c.Call(2, "mailplan", "api", "hi", 50); err == nil || f.calls != 1 {
 		t.Fatalf("its cap holds: %v calls=%d", err, f.calls)
+	}
+}
+
+// A provider that sends a figure is metered by it even when it says the request
+// never left: ErrNotSent alone is not a reason to drop reported usage.
+func TestReportedUsageIsMeteredEvenWithErrNotSent(t *testing.T) {
+	f := &fake{u: model.Usage{In: 3, Out: 4, Reported: true}, err: model.ErrNotSent}
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "api", "hi", 10); !errors.Is(err, model.ErrNotSent) {
+		t.Fatalf("the error surfaces: %v", err)
+	}
+	last := lastEntry(k)
+	if last.Type != kernel.TModelUsed || !strings.Contains(string(last.Body), `"amount":7`) || !strings.Contains(string(last.Body), `"source":"provider"`) {
+		t.Fatalf("the reported figure is metered: %s %s", last.Type, last.Body)
+	}
+}
+
+// poolRead returns the last pool.read entry's body.
+func poolRead(t *testing.T, k *kernel.Kernel) string {
+	t.Helper()
+	es := k.Log().Entries()
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].Type == kernel.TPoolRead {
+			return string(es[i].Body)
+		}
+	}
+	t.Fatal("no pool reading recorded")
+	return ""
+}
+
+// A paid, metered reply is kept when the log refuses its pool reading, and the
+// pool is recorded as full, since a reading can only narrow.
+func TestPaidReplyIsKeptWhenItsPoolReadingIsRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		before, used int64
+		during       func(k *kernel.Kernel) error
+	}{
+		// a figure outside 0..1000
+		"bad figure": {used: 1500},
+		// at 900 used, the owner raises the reserve mid-call, so the closed pool refuses a lower reading
+		"reserve raised": {before: 900, used: 500, during: func(k *kernel.Kernel) error { return k.Reserve(1, "codex-5h", 200) }},
+	} {
+		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: tc.used, ResetAt: 10_000}}}
+		c, k, _ := rig(t, f)
+		if err := k.ReadPool(0, "codex-5h", tc.before, 10_000); err != nil {
+			t.Fatal(err)
+		}
+		if tc.during != nil {
+			f.during = func() {
+				if err := tc.during(k); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		reply, err := c.Call(1, "t", "plan", "hi", 10)
+		if err != nil || reply == "" {
+			t.Fatalf("%s: the paid reply is kept: %q %v", name, reply, err)
+		}
+		if b := poolRead(t, k); !strings.Contains(b, `"used":1000`) || !strings.Contains(b, `"reset_at":10000`) {
+			t.Fatalf("%s: the refused reading is recorded as a full pool: %s", name, b)
+		}
+		if r := k.AdmitPool(2, "codex-5h"); r == nil {
+			t.Fatalf("%s: the pool is closed", name)
+		}
+	}
+}
+
+// When the log cannot write the pool reading at all, the reply is still kept,
+// and the reading is owed before any further call. Once written it is the
+// provider's own figure, not a full pool.
+func TestUnrecordedPoolReadingShutsTheClerkUntilTheLogRecords(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 300, ResetAt: 10_000}}}
+	c, k, lg := rig(t, f)
+	lg.failPool = true
+	if reply, err := c.Call(1, "t", "plan", "hi", 10); err != nil || reply == "" {
+		t.Fatalf("the paid reply is kept: %q %v", reply, err)
+	}
+	if _, err := c.Call(2, "t", "api", "hi", 10); err == nil || f.calls != 1 {
+		t.Fatalf("no call while a pool reading is unrecorded: %v calls=%d", err, f.calls)
+	}
+	lg.failPool = false
+	if _, err := c.Call(3, "t", "api", "hi", 10); err != nil {
+		t.Fatalf("calls resume once the log records: %v", err)
+	}
+	if b := poolRead(t, k); !strings.Contains(b, `"used":300`) || !strings.Contains(b, `"reset_at":10000`) {
+		t.Fatalf("the owed reading is the provider's figure: %s", b)
+	}
+	if _, err := c.Call(4, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("a pool at 300 stays open: %v", err)
+	}
+}
+
+// An owed reading whose reset time has passed by the time the log recovers is
+// dropped: the provider's reset time is the cooldown, so the pool does not
+// close for a fresh window after it has already reset.
+func TestOwedReadingPastItsResetIsDropped(t *testing.T) {
+	for name, tc := range map[string]struct{ resetAt, recover int64 }{
+		"provider reset": {resetAt: 10_000, recover: 20_000},
+		// no reset time: the declared window from the call is the cooldown
+		"no reset time": {resetAt: 0, recover: 1 + kernel.PoolWindowMS},
+	} {
+		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000, ResetAt: tc.resetAt}}}
+		c, k, lg := rig(t, f)
+		lg.failPool = true
+		if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := c.Call(2, "t", "api", "hi", 10); err == nil {
+			t.Fatalf("%s: the reading is owed until its reset time", name)
+		}
+		lg.failPool = false
+		f.u.Pool = nil // the next call carries no reading of its own
+		if _, err := c.Call(tc.recover, "t", "plan", "hi", 10); err != nil {
+			t.Fatalf("%s: the pool reset before the log recovered, so it is open: %v", name, err)
+		}
+		for _, e := range k.Log().Entries() {
+			if e.Type == kernel.TPoolRead {
+				t.Fatalf("%s: a stale reading was recorded: %s", name, e.Body)
+			}
+		}
+	}
+}
+
+// A failed meter still applies the call's pool reading, so the pool is not
+// left open once the log records the owed spend.
+func TestPoolReadingIsAppliedWhenTheMeterFails(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}}
+	c, k, lg := rig(t, f)
+	if err := k.Reserve(0, "codex-5h", 100); err != nil {
+		t.Fatal(err)
+	}
+	lg.fail = true
+	if reply, err := c.Call(1, "t", "plan", "hi", 10); err == nil || reply != "" {
+		t.Fatalf("the reply is withheld when its spend cannot be recorded: %q %v", reply, err)
+	}
+	lg.fail = false
+	if _, err := c.Call(2, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
+		t.Fatalf("the reading closed the pool: %v calls=%d", err, f.calls)
+	}
+}
+
+// A reading with no reset time is owed with the declared window from the call,
+// not from when the log recovers, so an outage never lengthens the cooldown.
+func TestOwedReadingKeepsTheWindowFromTheCall(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000}}}
+	c, k, lg := rig(t, f)
+	lg.failPool = true
+	if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	lg.failPool = false
+	f.u.Pool = nil // the next calls carry no reading of their own
+	if _, err := c.Call(100, "t", "api", "hi", 10); err != nil {
+		t.Fatalf("calls resume once the log records: %v", err)
+	}
+	if b := poolRead(t, k); !strings.Contains(b, fmt.Sprintf(`"reset_at":%d`, 1+kernel.PoolWindowMS)) {
+		t.Fatalf("the cooldown runs from the call: %s", b)
+	}
+	if _, err := c.Call(1+kernel.PoolWindowMS, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("the pool reopens one window after the call: %v", err)
 	}
 }
