@@ -25,6 +25,14 @@ const (
 	MaxSteps   = 64
 	MaxChecks  = 10     // KRN-8: parked after ten checks
 	ProbeEvery = 60_000 // ms between reconciliation checks
+	UnsentWait = 30_000 // ms before a step whose clerk was not reached is sent again
+)
+
+// Clerk answers that say no byte reached the clerk (KRN-7): a dispatch that
+// sent nothing, and a probe that could not ask.
+const (
+	OUnsent    = "unsent"
+	OUnreached = "unreached"
 )
 
 // Entry types, all version 1. The set is closed (LOG-5).
@@ -254,6 +262,7 @@ const (
 	PInflight  = "inflight"
 	PUnknown   = "unknown"
 	PRedo      = "redo"
+	PUnsent    = "unsent" // the clerk was not reached: nothing was sent, so it is sent again after UnsentWait
 	PParked    = "parked"
 	PDone      = "done"
 	PFailed    = "failed"
@@ -634,7 +643,7 @@ type Unsettled struct {
 	Index  int
 	Verb   key.Verb
 	Clerk  string
-	Phase  string // PUnknown or PParked
+	Phase  string // PUnknown, PParked, or PUnsent: its clerk was not reached
 	Checks int
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
@@ -647,7 +656,7 @@ func (s *State) Status() []Unsettled {
 		p := s.Plans[id]
 		for i := range p.Steps {
 			st := &p.Steps[i]
-			if st.Phase != PUnknown && st.Phase != PParked {
+			if st.Phase != PUnknown && st.Phase != PParked && st.Phase != PUnsent {
 				continue
 			}
 			ps := p.Plan.Steps[i]
@@ -661,6 +670,12 @@ func (s *State) Status() []Unsettled {
 // retryable: only a parked step of a live plan. The owner's cancel stands,
 // and a step still being reconciled may yet prove done.
 func retryable(p *PlanState, st *StepState) bool { return st.Phase == PParked && p.Status == SActive }
+
+// sendable reports whether a step in phase may be dispatched: nothing of it
+// has reached a clerk yet, or what did is known not to have taken effect.
+func sendable(phase string) bool {
+	return phase == PQueued || phase == PHeld || phase == PRedo || phase == PUnsent
+}
 
 func body[T any](e Entry) (T, error) {
 	var b T
@@ -824,7 +839,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
 			p.Status = SCancelled
-			if st := &p.Steps[p.Next]; st.Phase == PQueued || st.Phase == PHeld || st.Phase == PRedo {
+			if st := &p.Steps[p.Next]; sendable(st.Phase) {
 				st.Phase = PCancelled
 			}
 		}
@@ -841,7 +856,7 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if p, st := s.step(b.stepRef); st != nil && (st.Phase == PQueued || st.Phase == PHeld || st.Phase == PRedo) {
+		if p, st := s.step(b.stepRef); st != nil && sendable(st.Phase) {
 			st.Phase, st.Attempt = PInflight, b.Attempt
 			if b.Attempt == 1 {
 				st.DispatchSeq = e.Seq
@@ -861,6 +876,8 @@ func (s *State) Apply(e Entry) error {
 			switch b.Outcome {
 			case "ok":
 				s.complete(p, b.Index, e.At)
+			case OUnsent:
+				st.Phase, st.NextProbe = PUnsent, e.At+UnsentWait
 			case "failed":
 				st.Phase = PFailed
 				if p.Status == SActive {
@@ -884,6 +901,8 @@ func (s *State) Apply(e Entry) error {
 				if p.Status != SActive {
 					st.Phase = PCancelled
 				}
+			case OUnreached:
+				st.NextProbe = e.At + ProbeEvery // no check was made, so none counts
 			default:
 				st.Checks++
 				st.NextProbe = e.At + ProbeEvery

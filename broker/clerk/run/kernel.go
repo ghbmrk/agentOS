@@ -29,12 +29,15 @@ type KernelConfig struct {
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
-// one lock, the clerk calls inside Tick included, so the owner side, the
-// planner side and the clock never interleave inside the kernel.
+// one lock, so the owner side, the planner side and the clock never
+// interleave inside the kernel. Clerk calls run outside it (Tick), so STOP,
+// a revoke or STATUS never waits on a clerk (KRN-7, OWN-18).
 type Kernel struct {
-	mu    sync.Mutex
-	k     *kernel.Kernel
-	store *FileStore
+	mu      sync.Mutex
+	k       *kernel.Kernel
+	store   *FileStore
+	clerks  map[string]remote
+	anchors []ed25519.PublicKey
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -53,21 +56,56 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	clerks := map[string]kernel.Clerk{}
+	clerks, kc := map[string]remote{}, map[string]kernel.Clerk{}
 	for name, r := range cfg.Clerks {
 		clerks[name] = remote{r, cfg.Anchors}
+		kc[name] = clerks[name]
 	}
-	k, err := kernel.Boot(l, cfg.Anchors, clerks, now)
+	k, err := kernel.Boot(l, cfg.Anchors, kc, now)
 	if err != nil {
 		st.Close()
 		return nil, err
 	}
-	return &Kernel{k: k, store: st}, nil
+	return &Kernel{k: k, store: st, clerks: clerks, anchors: cfg.Anchors}, nil
 }
 
-// Tick runs every plan as far as now allows, calling clerks as it goes.
+// asked is one call kernel.Calls handed out, with the view taken under the
+// lock.
+type asked struct {
+	c kernel.Call
+	s snapshot
+}
+
+// Tick runs every plan as far as now allows. It takes the due calls and
+// their views under the lock, makes the calls without it, and logs each
+// answer under it again, until no call is due.
 func (h *Kernel) Tick(now int64) error {
-	return h.With(func(k *kernel.Kernel) error { return k.Tick(now) })
+	for n := 0; n < 4*kernel.MaxSteps; n++ {
+		var due []asked
+		err := h.With(func(k *kernel.Kernel) error {
+			cs, err := k.Calls(now)
+			for _, c := range cs {
+				due = append(due, asked{c, view(k.State(), h.anchors, c.Req, now)})
+			}
+			return err
+		})
+		if err != nil || len(due) == 0 {
+			return err
+		}
+		for _, a := range due {
+			c := h.clerks[a.c.Clerk]
+			res := kernel.Result{}
+			if a.c.Kind == kernel.ActProbe {
+				res.Outcome = c.probe(a.c.Req, a.s)
+			} else {
+				res = c.do(a.c.Req, a.s)
+			}
+			if err := h.With(func(k *kernel.Kernel) error { return k.Answer(now, a.c, res) }); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // With runs fn on the kernel under the lock. The owner and planner sides

@@ -272,7 +272,7 @@ func scanMemory(hash []byte) (found bool, scanned int64, err error) {
 }
 
 // Each side admits only the other's uid. A kernel that finds another uid on
-// the clerk's socket sends nothing and fails the step; a clerk socket that
+// the clerk's socket sends nothing, so the step is sent again later; a clerk socket that
 // admits another uid answers the kernel nothing, so the step is unknown and
 // the provider sees nothing.
 func TestPeersAreCheckedByUID(t *testing.T) {
@@ -283,8 +283,8 @@ func TestPeersAreCheckedByUID(t *testing.T) {
 	b.open()
 	id := b.submit("carol")
 	b.tick(b.now)
-	if st := b.step(id); st.Phase != kernel.PFailed || st.Detail != DUnreachable {
-		t.Fatalf("step %+v, want failed %s", st, DUnreachable)
+	if st := b.step(id); st.Phase != kernel.PUnsent || st.Detail != DUnreachable {
+		t.Fatalf("step %+v, want unsent %s", st, DUnreachable)
 	}
 
 	// A clerk socket that admits some other uid, not the kernel's.
@@ -356,10 +356,14 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 			t.Errorf("clerk probed %q: kernel took %q, want %q", c.probe, p, c.wantPr)
 		}
 	}
-	// No clerk listening: nothing was sent, so the step fails.
+	// No clerk listening: nothing was sent, so the step is sent again later,
+	// and a probe made no check.
 	r := remote{Remote{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}, nil}
-	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != "failed" || got.Detail != DUnreachable {
-		t.Fatalf("no clerk: %+v, want failed %s", got, DUnreachable)
+	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != kernel.OUnsent || got.Detail != DUnreachable {
+		t.Fatalf("no clerk: %+v, want unsent %s", got, DUnreachable)
+	}
+	if got := r.Probe(kernel.Request{}, kernel.NewState(nil)); got != kernel.OUnreached {
+		t.Fatalf("no clerk, probed: %q, want %s", got, kernel.OUnreached)
 	}
 }
 
@@ -537,4 +541,52 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// hung is a clerk whose Do waits until released.
+type hung struct {
+	in, release chan struct{}
+}
+
+func (h hung) Do(kernel.Request, kernel.View) kernel.Result {
+	h.in <- struct{}{}
+	<-h.release
+	return kernel.Result{Outcome: "ok"}
+}
+func (hung) Probe(kernel.Request, kernel.View) string { return "notdone" }
+
+// STOP, and every other owner call, returns while a clerk call hangs: Tick
+// makes clerk calls outside the kernel's lock (KRN-7, OWN-18). The answer is
+// logged once the clerk returns.
+func TestStopReturnsWhileAClerkCallHangs(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "hung.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := hung{make(chan struct{}), make(chan struct{})}
+	go ServeClerk(ln, c, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	id := b.submit("dave")
+	ticked := make(chan error, 1)
+	go func() { ticked <- b.h.Tick(b.now) }()
+	<-c.in
+	stopped := make(chan error, 1)
+	go func() { stopped <- b.h.With(func(k *kernel.Kernel) error { return k.Stop(b.now) }) }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("STOP waited on a hung clerk call")
+	}
+	close(c.release)
+	if err := <-ticked; err != nil {
+		t.Fatal(err)
+	}
+	if st := b.step(id); st.Phase != kernel.PDone {
+		t.Fatalf("the hung call's answer was not logged: %+v", st)
+	}
 }

@@ -169,29 +169,43 @@ type remote struct {
 }
 
 func (c remote) Do(r kernel.Request, v kernel.View) kernel.Result {
-	a, sent := c.call(opDo, r, v)
+	return c.do(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+}
+
+func (c remote) Probe(r kernel.Request, v kernel.View) string {
+	return c.probe(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+}
+
+// do and probe make a call with a view taken under the kernel's lock, so the
+// call itself runs without it (KRN-7).
+func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
+	a, sent := c.call(opDo, r, s)
 	switch {
 	case !sent:
-		// Nothing reached a clerk, so nothing happened: the step fails as it
-		// does at a clerk the kernel does not have.
-		return kernel.Result{Outcome: "failed", Detail: DUnreachable}
+		// Nothing reached the clerk, so nothing happened: the kernel sends
+		// it again after a wait (kernel.OUnsent).
+		return kernel.Result{Outcome: kernel.OUnsent, Detail: DUnreachable}
 	case a == nil:
 		return kernel.Result{Outcome: "unknown", Detail: DLost}
 	}
 	return kernel.Result{Outcome: one(a.Outcome, "ok", "failed"), Detail: detail(a.Detail)}
 }
 
-func (c remote) Probe(r kernel.Request, v kernel.View) string {
-	if a, _ := c.call(opProbe, r, v); a != nil {
-		return one(a.Outcome, "done", "notdone")
+func (c remote) probe(r kernel.Request, s snapshot) string {
+	a, sent := c.call(opProbe, r, s)
+	switch {
+	case !sent:
+		return kernel.OUnreached // no check was made, so none counts
+	case a == nil:
+		return "unknown"
 	}
-	return "unknown"
+	return one(a.Outcome, "done", "notdone")
 }
 
 // call sends one call and reads its answer. sent is false only when no byte
 // of the call can have reached the clerk.
-func (c remote) call(op string, r kernel.Request, v kernel.View) (a *answer, sent bool) {
-	b, err := json.Marshal(call{op, r, view(v, c.anchors, r, time.Now().UnixMilli())})
+func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent bool) {
+	b, err := json.Marshal(call{op, r, s})
 	if err != nil {
 		return nil, false
 	}
