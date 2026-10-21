@@ -1,6 +1,7 @@
 {"targets": [
   {"pkg": "attest", "name": "FuzzParse", "binary": "attest.test"},
   {"pkg": "browser", "name": "FuzzParse", "binary": "browser.test"},
+  {"pkg": "clerk/inbox/imap", "name": "FuzzIMAPReplies", "binary": "clerk_inbox_imap.test"},
   {"pkg": "control", "name": "FuzzParse", "binary": "control.test"},
   {"pkg": "grants", "name": "FuzzApprovals", "binary": "grants.test"},
   {"pkg": "localsrv", "name": "FuzzSessions", "binary": "localsrv.test"},
@@ -14,7 +15,6 @@
   {"pkg": "localui", "name": "FuzzScanPassphrase", "binary": "localui.test"},
   {"pkg": "loops", "name": "FuzzParseText", "binary": "loops.test"},
   {"pkg": "mail", "name": "FuzzParse", "binary": "mail.test"},
-  {"pkg": "mail/imapsmtp", "name": "FuzzIMAPReplies", "binary": "mail_imapsmtp.test"},
   {"pkg": "modem/at", "name": "FuzzDecodeDeliver", "binary": "modem_at.test"},
   {"pkg": "modem/at", "name": "FuzzTIM1ParseNetworkTime", "binary": "modem_at.test"},
   {"pkg": "modemlink", "name": "FuzzInbound", "binary": "modemlink.test"},
