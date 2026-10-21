@@ -18,7 +18,7 @@ Out of scope: #2631 (class:later). The "require a limit on root derivations" dec
 
 ## Scope
 
-`broker/kernel/` (not `key/`), `broker/clerk/`, `briefs/MIG-2-rel.md`, `docs/migration/cases.md`.
+`broker/kernel/` (not `key/`), `broker/clerk/` (the inbox clerk included, which #2566 added during the build), `briefs/MIG-2-rel.md`, `docs/migration/cases.md`.
 
 **Guard files:** none (no new package).
 
