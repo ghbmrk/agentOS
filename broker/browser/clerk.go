@@ -20,7 +20,9 @@ import (
 // the Approval the owner would give (CLK-3, D-147). A post is that approved
 // action: its content claims the approval's print, the clerk's facts rebuild
 // the print from the page, so only a key for that print covers it, and the
-// gate sends it once, only if the page is unchanged.
+// gate sends it once, only if the page is unchanged. Or the owner approved
+// the task the key serves, on one site, and the gate sends the task's later
+// submits there unless one asks again (CLK-3 one approval per task).
 type Clerk struct {
 	Name string
 	// Anchors are the owner's hardware keys, which every key is checked
@@ -76,9 +78,16 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
+		// The owner approves this exact print, or the task the key serves
+		// on one site (CLK-3, D-147).
+		var tc *cover
 		if !approval(ver, now) {
-			c.record(id, ran{})
-			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+			a, ok := kernel.TaskApproved(v, c.Anchors, ver, now)
+			if !ok {
+				c.record(id, ran{})
+				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+			}
+			tc = &cover{site: a.Site, first: a.First}
 		}
 		// A redo of a submit this clerk wrote and did not see succeed is
 		// the owner's RETRY: Probe answers unknown for it, so the kernel
@@ -87,7 +96,10 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		c.mu.Lock()
 		prev := c.ran[id]
 		c.mu.Unlock()
-		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok)
+		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok, tc)
+		if tc != nil && res.OK && res.Approval != nil {
+			res.Covered = coveredLine(*res.Approval, now)
+		}
 	default:
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
@@ -179,6 +191,17 @@ func approval(ver *key.Verified, now int64) bool {
 		brief = brief || c.Kind == key.KExpires && c.N <= now+MaxApproval
 	}
 	return named && capped && brief
+}
+
+// coveredLine is the fixed-wording STATUS line for a submit a task's
+// approval covered: the site, the control's visible label and the time
+// sent (CLK-3). Its full fields are the approval beside it in the log.
+func coveredLine(a Approval, now int64) string {
+	label := a.Label
+	if label == "" {
+		label = a.Role
+	}
+	return "Sent on " + a.Site + ": " + label + ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
 }
 
 // MaxApproval bounds how long an approval may live, in ms: one task's

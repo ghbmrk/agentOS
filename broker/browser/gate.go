@@ -90,6 +90,9 @@ type Result struct {
 	To string `json:"to,omitempty"`
 	// Approval is what the owner would approve for it (CLK-3).
 	Approval *Approval `json:"approval,omitempty"`
+	// Covered is the STATUS line for a submit a task's approval covered,
+	// once sent: the site, the control's label and the time (CLK-3).
+	Covered string `json:"covered,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -128,6 +131,10 @@ type Gate struct {
 	// sent is every approval print this gate has sent: each at most once.
 	sent map[string]bool
 }
+
+// cover is a task approval as the clerk read it from the log: the site it
+// covers and the held request the owner gave it over (CLK-3).
+type cover struct{ site, first string }
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {
@@ -264,9 +271,12 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 
 // submit sends raw, an action the owner approved as print reaching to,
 // only if the gate would still ask for that very approval now (CLK-3,
-// CLK-2), and at most once per print. written reports that it reached the
-// driver; lost that the executor stopped after it was written (KRN-8).
-func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool) (res Result, written, lost bool) {
+// CLK-2), and at most once per print. With tc, the owner approved the task
+// rather than this print: the gate sends it only where asksAgain finds no
+// reason to ask, and the result carries its approval for the log. written
+// reports that it reached the driver; lost that the executor stopped after
+// it was written (KRN-8).
+func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tc *cover) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	req, l, _, need, refused := g.judge(raw)
@@ -276,15 +286,74 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 	case !need:
 		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}, false, false
 	}
-	if a := g.approval(req, l); a.Print != print || a.To != to {
+	a := g.approval(req, l)
+	if a.Print != print || a.To != to {
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
+	}
+	if tc != nil {
+		if why := g.asksAgain(req, l, a, *tc); why != "" {
+			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
+				Detail: why + "; it needs the owner's approval of this exact request; nothing was sent"}, false, false
+		}
 	}
 	if g.sent[print] && !retry {
 		return Result{Error: "already_sent", Detail: "this approved request was sent already; nothing was sent"}, false, false
 	}
 	g.sent[print] = true
 	out := g.forward(ctx, req)
+	if tc != nil {
+		out.Approval = &a
+	}
 	return out, true, g.stopped
+}
+
+// asksAgain is why a task's approval tc does not cover req, which reaches
+// l and the gate would approve as a, or "" if it does (CLK-3 "What asks
+// again"). The held request the owner approved is covered on its site.
+// Another task's approval never reaches here: the clerk reads only the
+// approval of the task its key serves (kernel.TaskApproved). A readable
+// value over a limit is the key's to refuse (clerk.Verify). The clerk
+// fills no credential or card and refuses any step claiming a flow label
+// (C4), so no fill or private entry can follow the approval yet.
+func (g *Gate) asksAgain(req Request, l link, a Approval, tc cover) string {
+	switch {
+	case a.Site != tc.site:
+		return "it is on another site than the task's approval"
+	case a.Print == tc.first:
+		return ""
+	case g.secretScreen(req, l):
+		return "it is on a screen that may reveal or create a secret (VRB-1)"
+	case !boxCardBacksPrice():
+		return "its price cannot be read here, and no box card the clerk filled before the approval backs it"
+	}
+	return ""
+}
+
+// boxCardBacksPrice reports whether a price the clerk cannot read is
+// backed: the task pays with the box's card, with a limit outside the box,
+// filled by the clerk in this task before the approval (CLK-3, interim).
+// No page has a recipe that reads its price, so every price is unreadable,
+// and the clerk fills no card, so none is backed: every covered request
+// after the held one asks again. D-148 drops this condition (#2690); that
+// change deletes this check and its case in asksAgain. It is a variable
+// only so the tests can reach the checks after it.
+var boxCardBacksPrice = func() bool { return false }
+
+// secretScreen reports whether req, reaching l, is on a screen that may
+// reveal or create a secret (VRB-1), read from what the gate itself saw: a
+// secret word in the page's URL, the control's name or target, or the name
+// of any field on the page ("Password", "Backup codes"). Pages have no
+// recipe that says otherwise, so a match asks again. A field's value is
+// not a sign: the gate counts every untyped value as a possible password
+// (G10), and a prefilled address would make every checkout one.
+func (g *Gate) secretScreen(req Request, l link) bool {
+	texts := []string{g.page, l.name, l.target, req.URL}
+	for _, r := range g.refs {
+		if fieldRoles[r.role] {
+			texts = append(texts, r.name)
+		}
+	}
+	return secretText(texts...)
 }
 
 // reask answers a post whose print the page no longer yields: the
