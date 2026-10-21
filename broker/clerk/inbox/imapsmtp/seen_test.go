@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// seenServer is a raw IMAP server for SeenFrom: each connection logs in and
+// seenServer is a raw IMAP server for Seen: each connection logs in and
 // selects with the next UID validity of validities, a UID SEARCH answers
 // UIDs 1 and 2, and a UID FETCH answers fetch ("NO" fails it).
 func seenServer(t *testing.T, validities []int, fetch string) string {
@@ -70,10 +70,10 @@ func seenSearch(t *testing.T, validities []int, search, fetch string) string {
 	return l.Addr().String()
 }
 
-// seenFrom collects what SeenFrom hands over.
+// seenFrom collects what Seen hands over.
 func seenFrom(s *Store, folder string) ([][]byte, error) {
 	var out [][]byte
-	err := s.SeenFrom(context.Background(), folder, func(h []byte) error {
+	err := s.Seen(context.Background(), folder, func(h []byte, _ time.Time) error {
 		out = append(out, h)
 		return nil
 	})
@@ -82,12 +82,12 @@ func seenFrom(s *Store, folder string) ([][]byte, error) {
 
 func header(uid int, from string) string {
 	h := "From: " + from + "\r\n\r\n"
-	return "* " + strconv.Itoa(uid) + " FETCH (UID " + strconv.Itoa(uid) + " BODY[HEADER.FIELDS (FROM)]<0> {" + strconv.Itoa(len(h)) + "}\r\n" + h + ")\r\n"
+	return "* " + strconv.Itoa(uid) + " FETCH (UID " + strconv.Itoa(uid) + " BODY[HEADER.FIELDS (FROM MESSAGE-ID)]<0> {" + strconv.Itoa(len(h)) + "}\r\n" + h + ")\r\n"
 }
 
 // One header per UID the search found: a repeated or invented response adds
 // nothing.
-func TestSeenFromKeepsOneHeaderPerSearchedUID(t *testing.T) {
+func TestSeenKeepsOneHeaderPerSearchedUID(t *testing.T) {
 	addr := seenServer(t, []int{7, 7}, header(1, "a@x.test")+header(1, "b@x.test")+header(9, "c@x.test")+header(2, "d@x.test"))
 	got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX")
 	if err != nil {
@@ -100,7 +100,7 @@ func TestSeenFromKeepsOneHeaderPerSearchedUID(t *testing.T) {
 
 // A folder renumbered between the search and the fetch is refused: its UIDs
 // may name other messages.
-func TestSeenFromRefusesAFolderRenumberedBetweenSessions(t *testing.T) {
+func TestSeenRefusesAFolderRenumberedBetweenSessions(t *testing.T) {
 	addr := seenServer(t, []int{7, 8}, header(1, "a@x.test"))
 	if _, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); !errors.Is(err, ErrValidity) {
 		t.Fatalf("err %v, want ErrValidity", err)
@@ -109,7 +109,7 @@ func TestSeenFromRefusesAFolderRenumberedBetweenSessions(t *testing.T) {
 
 // A fetch the server fails fails the call: the headers it did not send would
 // make their senders look never opened.
-func TestSeenFromFailsWhenTheFetchFails(t *testing.T) {
+func TestSeenFailsWhenTheFetchFails(t *testing.T) {
 	addr := seenServer(t, []int{7, 7}, "NO")
 	if got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); err == nil {
 		t.Fatalf("headers %q with no error", got)
@@ -118,7 +118,7 @@ func TestSeenFromFailsWhenTheFetchFails(t *testing.T) {
 
 // A search the server fails fails the call: it is not a folder with no read
 // mail.
-func TestSeenFromFailsWhenTheSearchFails(t *testing.T) {
+func TestSeenFailsWhenTheSearchFails(t *testing.T) {
 	addr := seenSearch(t, []int{7}, "NO", "")
 	if got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); err == nil {
 		t.Fatalf("headers %q with no error", got)
@@ -126,10 +126,10 @@ func TestSeenFromFailsWhenTheSearchFails(t *testing.T) {
 }
 
 // A FETCH that answers OK without a header for every searched message fails
-// the call, and so does a From header longer than fromMax, which the server
+// the call, and so does a From header longer than headMax, which the server
 // cut or would have to: either leaves a sender out.
-func TestSeenFromFailsWhenAHeaderIsMissingOrCut(t *testing.T) {
-	long := "a@x.test (" + strings.Repeat("x", fromMax) + ")"
+func TestSeenFailsWhenAHeaderIsMissingOrCut(t *testing.T) {
+	long := "a@x.test (" + strings.Repeat("x", headMax) + ")"
 	for name, c := range map[string]struct {
 		fetch string
 		want  error
@@ -146,7 +146,7 @@ func TestSeenFromFailsWhenAHeaderIsMissingOrCut(t *testing.T) {
 
 // Each batch of seenBatch UIDs is fetched in its own session, under the same
 // UID validity: a folder renumbered before a later batch is refused.
-func TestSeenFromFetchesEachBatchInItsOwnSession(t *testing.T) {
+func TestSeenFetchesEachBatchInItsOwnSession(t *testing.T) {
 	search, fetch := seenUIDs(seenBatch + 1)
 	addr := seenSearch(t, []int{7, 7, 7}, search, fetch)
 	got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX")
@@ -162,12 +162,12 @@ func TestSeenFromFetchesEachBatchInItsOwnSession(t *testing.T) {
 // The batch, not the search, sizes a session's read budget (M21): with more
 // UIDs found than one batch fetches, a reply just past one batch's budget,
 // padded with invented messages, still fails the call.
-func TestSeenFromBudgetsTheBatchNotTheSearch(t *testing.T) {
+func TestSeenBudgetsTheBatchNotTheSearch(t *testing.T) {
 	const base = 64 << 10
 	search, fetch := seenUIDs(4 * seenBatch)
 	var b strings.Builder
 	b.WriteString(fetch)
-	for pad := header(1<<30, strings.Repeat("x", fromMax-64)+"@x.test"); b.Len() < base+seenBatch*(fromMax+fetchFrame); {
+	for pad := header(1<<30, strings.Repeat("x", headMax-64)+"@x.test"); b.Len() < base+seenBatch*(headMax+fetchFrame); {
 		b.WriteString(pad)
 	}
 	s := hostileStore(t, seenSearch(t, []int{7, 7, 7, 7, 7}, search, b.String()), 5*time.Second)
@@ -189,11 +189,11 @@ func seenUIDs(n int) (search, fetch string) {
 }
 
 // An error from each stops the call with that error.
-func TestSeenFromStopsOnTheCallersError(t *testing.T) {
+func TestSeenStopsOnTheCallersError(t *testing.T) {
 	stop := errors.New("stop")
 	addr := seenServer(t, []int{7, 7}, header(1, "a@x.test")+header(2, "d@x.test"))
 	n := 0
-	err := hostileStore(t, addr, 5*time.Second).SeenFrom(context.Background(), "INBOX", func([]byte) error { n++; return stop })
+	err := hostileStore(t, addr, 5*time.Second).Seen(context.Background(), "INBOX", func([]byte, time.Time) error { n++; return stop })
 	if !errors.Is(err, stop) || n != 1 {
 		t.Fatalf("err %v after %d headers, want stop after 1", err, n)
 	}

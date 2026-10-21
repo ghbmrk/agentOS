@@ -7,6 +7,7 @@
 # REQ: CRED-8
 import pathlib
 import re
+import subprocess
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -85,12 +86,13 @@ def legitimate_peak():
 
 
 def seen_peak():
-    """What one Live.Opened call can hold (#2685): the search's UIDs at the field bound (M21, about a
-    million, 4 bytes each), one SeenFrom batch session's fixed read budget, and the senders it keeps (openedMax charges each
-    its map entry's cost, which TestOpenedHoldsNoMoreThanItCharges measures)."""
+    """What one Store.Seen call can hold (#2685): the search's UIDs at the field bound (M21, about a
+    million, 4 bytes each) and one batch session's fixed read budget. What Live.Opened keeps is the
+    mail clerk's own memory (openedMax, #2684), never the vault's: see
+    test_the_vault_never_reads_who_was_opened."""
     imap = "clerk/inbox/imapsmtp/imapsmtp.go"
-    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "fromMax") + 8 * KiB)
-    return 4 * MiB + batch + go_int("clerk/inbox/mailbox.go", "openedMax")
+    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "headMax") + 8 * KiB)
+    return 4 * MiB + batch
 
 
 class VaultMemoryCeiling(unittest.TestCase):
@@ -104,6 +106,19 @@ class VaultMemoryCeiling(unittest.TestCase):
     def test_reading_who_was_opened_costs_no_more_than_a_fetch(self):
         fetch = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
         self.assertLessEqual(seen_peak(), fetch)
+
+    def test_the_clerks_read_log_bound_is_one_search(self):
+        # Live.Opened keeps as many read mails as one UID SEARCH can name (clerk/inbox MIG-3-R10b).
+        self.assertEqual(go_int("clerk/inbox/mailbox.go", "searchMax"), go_int("third_party/go-imap/read.go", "maxRespFields"))
+
+    def test_the_vault_never_reads_who_was_opened(self):
+        # The vault's mail store wraps the transport without Seen, and the vault does not link the
+        # mail clerk's package, so neither Seen nor openedMax counts in the vault's ceiling.
+        self.assertNotIn(".Seen(", (BROKER / "mail/imapsmtp/imapsmtp.go").read_text())
+        deps = subprocess.run(["go", "list", "-deps", "./cmd/agentos-egress"], cwd=BROKER,
+                              capture_output=True, text=True, check=True).stdout.split()
+        self.assertIn("github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp", deps)
+        self.assertNotIn("github.com/ghbmrk/agentos/broker/clerk/inbox", deps)
 
     def test_memory_max_is_set_within_the_derived_range(self):
         cap = size(self.one("MemoryMax"))

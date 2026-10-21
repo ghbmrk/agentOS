@@ -154,10 +154,15 @@ func (s *Server) SetAttr(name, attr string) {
 
 // Deliver puts a raw message in folder, as arriving mail would.
 func (s *Server) Deliver(folder string, raw string, flags ...string) {
+	s.DeliverAt(folder, time.Now(), raw, flags...)
+}
+
+// DeliverAt is Deliver with the message's INTERNALDATE set to at.
+func (s *Server) DeliverAt(folder string, at time.Time, raw string, flags ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b := s.boxes[folder]
-	b.msgs = append(b.msgs, &msg{uid: b.next, date: time.Now(), flags: flags, body: []byte(strings.ReplaceAll(raw, "\n", "\r\n"))})
+	b.msgs = append(b.msgs, &msg{uid: b.next, date: at, flags: flags, body: []byte(strings.ReplaceAll(raw, "\n", "\r\n"))})
 	b.next++
 }
 

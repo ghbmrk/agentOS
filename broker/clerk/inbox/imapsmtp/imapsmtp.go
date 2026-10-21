@@ -435,32 +435,34 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 	return out, <-done
 }
 
-// fromMax bounds the From header SeenFrom reads of each message, and
-// seenBatch the UIDs one of its sessions fetches. A session's read budget is
-// fixed by them, whatever the search found: replyBase, plus fromMax and
+// headMax bounds the From and Message-ID headers Seen reads of each message,
+// and seenBatch the UIDs one of its sessions fetches. A session's read budget is
+// fixed by them, whatever the search found: replyBase, plus headMax and
 // fetchFrame for each UID, which stays under one Fetch call's budget (M21,
 // tests/test_egress_memory.py).
 const (
-	fromMax   = 8 << 10
+	headMax   = 8 << 10
 	seenBatch = 400
 )
 
 // ErrUnanswered is a FETCH that left a searched message without its header,
-// and ErrLongHeader a From header longer than fromMax: either would leave a
-// sender out of what SeenFrom found.
+// and ErrLongHeader headers longer than headMax: either would leave a mail
+// out of what Seen found.
 var (
 	ErrUnanswered = errors.New("imapsmtp: the server did not answer for every message")
-	ErrLongHeader = errors.New("imapsmtp: a From header is too long to read")
+	ErrLongHeader = errors.New("imapsmtp: a mail's headers are too long to read")
 )
 
-// SeenFrom hands each to the From header of every message in folder that
-// carries \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM)] so nothing is
-// marked read; it keeps none of them. The UIDs are searched in one session
+// Seen hands each the From and Message-ID headers of every message in folder
+// that carries \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM MESSAGE-ID)] so
+// nothing is marked read, and its INTERNALDATE: the time the server took the
+// mail in, which the sender does not set and COPY and MOVE keep (RFC 3501
+// 6.4.7, RFC 6851), zero if the server sent none. It keeps none of them. The UIDs are searched in one session
 // and fetched seenBatch at a time, each batch in its own session under the
 // same UID validity (ErrValidity otherwise). Each searched message must
-// answer with one header of at most fromMax bytes; anything else, or an error
+// answer with its headers, at most headMax bytes; anything else, or an error
 // from each, fails the call, so no partial answer passes for a full one.
-func (s *Store) SeenFrom(ctx context.Context, folder string, each func(header []byte) error) error {
+func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte, arrived time.Time) error) error {
 	var validity uint32
 	var uids []uint32
 	err := s.session(ctx, func(c *client.Client) error {
@@ -480,12 +482,12 @@ func (s *Store) SeenFrom(ctx context.Context, folder string, each func(header []
 	if err != nil {
 		return err
 	}
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, fromMax + 1},
-		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From"}}}
-	items := []imap.FetchItem{imap.FetchUid, sec.FetchItem()}
+	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, headMax + 1},
+		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Message-Id"}}}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
 	for i := 0; i < len(uids); i += seenBatch {
 		batch := uids[i:min(i+seenBatch, len(uids))]
-		err := s.sessionB(ctx, s.replyBase+seenBatch*(fromMax+fetchFrame), func(c *client.Client) error {
+		err := s.sessionB(ctx, s.replyBase+seenBatch*(headMax+fetchFrame), func(c *client.Client) error {
 			if err := selectAt(c, folder, true, validity); err != nil {
 				return err
 			}
@@ -510,11 +512,11 @@ func (s *Store) SeenFrom(ctx context.Context, folder string, each func(header []
 						continue
 					}
 					delete(want, m.Uid)
-					h, _ := io.ReadAll(io.LimitReader(l, fromMax+1))
-					if len(h) > fromMax {
+					h, _ := io.ReadAll(io.LimitReader(l, headMax+1))
+					if len(h) > headMax {
 						bad = fmt.Errorf("%w: %s UID %d", ErrLongHeader, folder, m.Uid)
 					} else {
-						bad = each(h)
+						bad = each(h, m.InternalDate)
 					}
 					break
 				}
