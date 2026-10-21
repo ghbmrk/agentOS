@@ -1,0 +1,4 @@
+# Private keys known to ship in /usr slot A (finish_image.py slot_a_violations, HW-1, IMG-1-1).
+# One per line: the kind, a space, the SHA-256 of the matched bytes (the key header and the start
+# of its body), then "# why". A key not listed here fails the build, which prints its SHA-256;
+# review the file it sits in, then add it. An empty list means no key ships in /usr.
