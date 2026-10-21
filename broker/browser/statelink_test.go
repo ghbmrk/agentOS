@@ -179,6 +179,37 @@ func TestActionsTheGateCannotJudgeWaitForApproval(t *testing.T) {
 	}
 }
 
+// D-145: a session holding none of the owner's identity can harm the owner
+// only through a URL that acts or carries a token, so logged out a button,
+// a select and a submit are free while such a URL still waits for approval.
+func TestLoggedOutActionsAreFreeButActingURLsAreNot(t *testing.T) {
+	h := newHarness(t, map[string]any{"snapshot": pageReply(actionPage)}, "", 0)
+	h.g.cfg.LoggedOut = true
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for _, raw := range []string{
+		`{"v":0,"verb":"click","ref":"e6"}`,
+		`{"v":0,"verb":"click","ref":"e14"}`,
+		`{"v":0,"verb":"select","ref":"e6","option":"a"}`,
+		`{"v":0,"verb":"type","ref":"e5","text":"kettle","submit":true}`,
+	} {
+		if r := h.do(t, raw); !r.OK {
+			t.Fatalf("%s: %+v", raw, r)
+		}
+	}
+	for _, raw := range []string{
+		`{"v":0,"verb":"click","ref":"e2"}`,
+		`{"v":0,"verb":"download","ref":"e10"}`,
+		`{"v":0,"verb":"navigate","url":"` + unsubURL + `"}`,
+	} {
+		if r := h.do(t, raw); r.Error != "approval_required" {
+			t.Fatalf("%s: %+v", raw, r)
+		}
+	}
+	if got := len(h.received(t)); got != 5 {
+		t.Fatalf("driver received %d requests, want the snapshot and the 4 free actions", got)
+	}
+}
+
 // Acceptance 3 and 5 on a snapshot Chromium gave for testdata/clicks.html
 // (testdata/snapshot.py): a target is judged by the text of its whole
 // clickable subtree, so an icon-plus-text link needs approval; only links to

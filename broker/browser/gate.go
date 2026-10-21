@@ -50,6 +50,11 @@ type Config struct {
 	// path prefixes on the declared origins. They add to the defaults
 	// (ADP-14-get).
 	StateLinks []string
+	// LoggedOut declares that the clerk supplies this account's sessions
+	// no identity: no cookies, password or card. Only then are clicks,
+	// typing and selects free (G9, D-145). Left false, identity is unknown
+	// and the gate fails closed.
+	LoggedOut bool
 }
 
 // Result is everything an agent can see from one request. Fields the driver
@@ -241,13 +246,18 @@ func (g *Gate) do(ctx context.Context, raw []byte) Result {
 	return out
 }
 
-// judge reports what req reaches and whether it may change state at the
-// site. It fails closed: only a snapshot, a screenshot, typing without
-// submit, a click that focuses a text field, and a navigate or a link
-// followed to a GET target G9 does not match can not. A button, a select
-// or a submit shows the gate no request, so it may change state whatever
-// its name.
+// judge reports what req reaches and whether it needs the owner's approval.
+// Logged out, an action can harm the owner only through a URL that itself
+// acts or carries a token, so only a navigate or a link to a target G9
+// matches does (D-145). Otherwise it fails closed: only a snapshot, a
+// screenshot, typing without submit, a click that focuses a text field,
+// and a navigate or a link followed to a target G9 does not match are
+// free. A button, a select or a submit shows the gate no request, so on an
+// account the owner may be signed in to it may act whatever its name.
 func (g *Gate) judge(req Request) (link, bool, *Result) {
+	if g.cfg.LoggedOut {
+		return g.judgeLoggedOut(req)
+	}
 	switch req.Verb {
 	case "snapshot", "screenshot":
 		return link{}, false, nil
@@ -266,6 +276,21 @@ func (g *Gate) judge(req Request) (link, bool, *Result) {
 		return l, l.role != "link" || l.target == "" || l.acts(g.links), nil
 	}
 	return g.refs[req.Ref], true, nil
+}
+
+// judgeLoggedOut is judge for a session holding no identity of the owner's.
+func (g *Gate) judgeLoggedOut(req Request) (link, bool, *Result) {
+	switch req.Verb {
+	case "navigate":
+		return link{target: req.URL}, g.links.match(req.URL), nil
+	case "click", "download":
+		l, ok := g.refs[req.Ref]
+		if !ok {
+			return link{}, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		}
+		return l, l.target != "" && g.links.match(l.target), nil
+	}
+	return g.refs[req.Ref], false, nil
 }
 
 type typedField struct{ text, url string }

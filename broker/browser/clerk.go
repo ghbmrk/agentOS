@@ -15,8 +15,8 @@ import (
 // key by clerk.Check, then its query line goes to the gate as a read. The
 // gate, not the step, decides whether a line may change state at the site,
 // and refuses one that may unsent (approval_required): until the owner can
-// approve an exact request, no key covers a submit (CLK-3). A post step is
-// refused for the same reason.
+// approve an exact request, no key covers a submit (CLK-3, D-145). A post
+// step is refused for the same reason.
 type Clerk struct {
 	Name  string
 	Owner ed25519.PublicKey
