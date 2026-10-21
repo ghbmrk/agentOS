@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -154,40 +155,39 @@ func TestEveryStepProbesNotDone(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	fresh := NewClerk("web", r.owner, r.h.g)
 	for _, s := range []kernel.PlanStep{read(navUnsub), post(unsubShown, navUnsub)} {
-		req := kernel.Request{Plan: plan("p", r.root, s), Idem: kernel.Idem("p", 0)}
+		req := kernel.Request{Plan: plan("p", r.root, s)}
 		if p := fresh.Probe(req, r.k.State()); p != "notdone" {
 			t.Fatalf("%s probe %s", s.Verb, p)
 		}
 	}
 }
 
-// The clerk re-checks what the kernel decided: another clerk's step, a
-// revoked key, and a root absent from the log (CLK-2).
+// The clerk re-checks what the kernel decided: another clerk's step, a root
+// absent from the log, a step the log has not dispatched, and a claim the
+// clerk's own facts contradict (CLK-2, KEY-2).
 func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
-	req := func(idem string, k key.Key, s kernel.PlanStep) kernel.Request {
-		return kernel.Request{Plan: plan("p", k, s), Idem: idem, Now: 1}
+	safe := read(`{"v":0,"verb":"navigate","url":"https://shop.example.test/products/kettle"}`)
+	r.run(t, 0, "p0", r.root, safe)
+	if s := r.step("p0"); s.Phase != kernel.PDone {
+		t.Fatalf("valid read: phase %s", s.Phase)
 	}
-	safe := `{"v":0,"verb":"navigate","url":"https://shop.example.test/products/kettle"}`
-	if res := r.c.Do(req("i0", r.root, read(safe)), r.k.State()); res.Outcome != "ok" {
-		t.Fatalf("valid read refused: %+v", res)
-	}
-	other := read(safe)
+	other := safe
 	other.Clerk = "bank"
-	if res := r.c.Do(req("i1", r.root, other), r.k.State()); res.Outcome != "failed" {
-		t.Fatalf("another clerk's step: %+v", res)
-	}
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
 	ghost := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "web", Verbs: []key.Verb{key.Read}, Serial: "unlogged"})
-	if res := r.c.Do(req("i2", ghost, read(safe)), r.k.State()); res.Outcome != "failed" {
-		t.Fatalf("unknown root: %+v", res)
-	}
-	if err := r.k.Revoke(1, r.root.Tip()); err != nil {
-		t.Fatal(err)
-	}
-	if res := r.c.Do(req("i4", r.root, read(safe)), r.k.State()); res.Outcome != "failed" {
-		t.Fatalf("revoked key: %+v", res)
+	labelled := safe
+	labelled.Labels = []string{"private"}
+	for want, req := range map[string]kernel.Request{
+		key.RClerk:          {Plan: plan("p1", r.root, other)},
+		kernel.CUnknownRoot: {Plan: plan("p2", ghost, safe)},
+		clerk.RDispatch:     {Plan: plan("p3", r.root, safe)},
+		clerk.RClaim:        {Plan: plan("p4", r.root, labelled)},
+	} {
+		if res := r.c.Do(req, r.k.State()); res.Outcome != "failed" || res.Detail != want {
+			t.Fatalf("want %s: %+v", want, res)
+		}
 	}
 	if got := r.h.received(t); len(got) != 1 {
 		t.Fatalf("the driver received %q, want only the valid read", got)

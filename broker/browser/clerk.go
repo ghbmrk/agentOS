@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -19,8 +20,9 @@ import (
 type Clerk struct {
 	Name  string
 	Owner ed25519.PublicKey
-	// Facts, when set, is the clerk's own reading of a step's claims.
-	Facts clerk.Facts
+	// Clock, when set, is the clerk's own time in unix ms; nil reads the
+	// wall clock.
+	Clock func() int64
 
 	g *Gate
 }
@@ -33,7 +35,11 @@ func NewClerk(name string, owner ed25519.PublicKey, g *Gate) *Clerk {
 // Do runs a step. Only reads reach the site, and a read is safe to run
 // again, so the clerk keeps no memory of what it ran (KRN-8).
 func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
-	if rf := clerk.Check(c.Owner, c.Name, c.Facts, r, v); rf != nil {
+	now := time.Now().UnixMilli()
+	if c.Clock != nil {
+		now = c.Clock()
+	}
+	if rf := clerk.Check(c.Owner, c.Name, facts, now, r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	st := step(r)
@@ -53,6 +59,11 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 // Probe reports that a step is not done: every step the clerk sends is a
 // read, safe to run again, and a refused one was never sent.
 func (c *Clerk) Probe(kernel.Request, kernel.View) string { return "notdone" }
+
+// facts is the clerk's own reading of a step's claims. A read of a page
+// moves no money and carries no content class or flow label the clerk can
+// vouch for, so a step claiming one is refused (KEY-2).
+func facts(key.Step) (string, []string, int64) { return "", nil, 0 }
 
 // step is the step r names, in canonical form; out of range it is the zero
 // step, which Check refuses. It is kernel.Request.Step through the opened
