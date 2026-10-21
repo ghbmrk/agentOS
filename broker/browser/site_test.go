@@ -93,7 +93,7 @@ func TestSecretListsAreTheSpecs(t *testing.T) {
 		}
 		return out
 	}
-	marks := append(between("**Alone** (every entry in every list below also matches its plural): ", "."),
+	marks := append(between("exact form listed): ", "."),
 		between("**Alone** also: ", ".")...)
 	marks = append(marks, between("**Only as a pair:** ", ".")...)
 	want := map[string]bool{}
