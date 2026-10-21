@@ -9,6 +9,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -30,8 +31,12 @@ type Usage struct {
 type PoolReading struct{ Used, ResetAt int64 }
 
 // Provider makes the call. It holds the credential; nothing else does. On an
-// error it still returns any usage it knows; ErrNotSent means the request never
-// left.
+// error it still returns any usage it knows, and the clerk meters a Reported
+// figure whatever the error. It returns ErrNotSent only when no byte of the
+// request was written (a refused connection, a failed lookup), and an error
+// the provider does not bill (an overload or server error it reports as
+// unbilled) with a Reported zero. Any other error is charged the admitted worst
+// case.
 type Provider interface {
 	Call(route, prompt string, maxOut int64) (reply string, u Usage, err error)
 }
@@ -55,21 +60,17 @@ type Ledger interface {
 	ReadPool(now int64, pool string, used, resetAt int64) error
 }
 
-// unmetered is spend that happened but the log has not recorded.
-type unmetered struct {
-	plan, route, source string
-	amount              int64
-}
-
-// Clerk is the model clerk. Once a Meter fails it makes no further call until
-// the log has recorded what it owes, so no spend goes unmetered.
+// Clerk is the model clerk. Once a log write it owes fails (spend that
+// happened, or a pool reading) it makes no further call until the log has
+// recorded it, so no spend goes unmetered and no pool stays open on a reading
+// the log missed.
 type Clerk struct {
 	Routes   map[string]Price
 	Provider Provider
 	Ledger   Ledger
 
-	mu      sync.Mutex
-	pending []unmetered
+	mu   sync.Mutex
+	owed []func(now int64) error
 }
 
 // tokens is the clerk's own count: four bytes a token, rounded up.
@@ -103,23 +104,22 @@ func (p Price) cost(in, out int64) (int64, error) {
 	return (a + b + 999_999) / 1_000_000, nil
 }
 
-// record meters what a call used. A failure is kept and retried before the
-// next call (flush), so the call that failed to record is the last.
-func (c *Clerk) record(now int64, u unmetered) error {
-	if err := c.Ledger.Meter(now, u.plan, u.route, u.amount, u.source); err != nil {
-		c.pending = append(c.pending, u)
+// owe makes a log write. A failure is kept and retried before the next call
+// (flush), so the call whose write failed is the last.
+func (c *Clerk) owe(now int64, write func(now int64) error) error {
+	if err := write(now); err != nil {
+		c.owed = append(c.owed, write)
 		return err
 	}
 	return nil
 }
 
 func (c *Clerk) flush(now int64) error {
-	for len(c.pending) > 0 {
-		u := c.pending[0]
-		if err := c.Ledger.Meter(now, u.plan, u.route, u.amount, u.source); err != nil {
-			return fmt.Errorf("model: unmetered spend, no calls until the log records it: %w", err)
+	for len(c.owed) > 0 {
+		if err := c.owed[0](now); err != nil {
+			return fmt.Errorf("model: unrecorded usage, no calls until the log records it: %w", err)
 		}
-		c.pending = c.pending[1:]
+		c.owed = c.owed[1:]
 	}
 	return nil
 }
@@ -130,7 +130,10 @@ func (c *Clerk) flush(now int64) error {
 // the caps before the provider is called; a spend cap that is used up holds
 // the plan until the owner extends it. A provider error costs the usage it
 // reported, nothing if the request never left, else the admitted worst case.
-// The reply is withheld if the usage cannot be recorded.
+// The reply is withheld if the spend cannot be recorded. A paid reply is kept
+// when only its pool reading fails: a reading the log refuses is recorded as a
+// full pool instead, since a reading can only narrow, and one the log cannot
+// write is owed until its reset time.
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -163,7 +166,8 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 		return "", r
 	}
 	reply, u, callErr := c.Provider.Call(route, prompt, maxOut)
-	if !errors.Is(callErr, ErrNotSent) {
+	var merr error
+	if u.Reported || !errors.Is(callErr, ErrNotSent) {
 		amount, src := worst, "admitted"
 		var cerr error
 		switch {
@@ -177,14 +181,25 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 		if cerr != nil {
 			amount, src = worst, "admitted"
 		}
-		if err := c.record(now, unmetered{plan, route, src, amount}); err != nil {
-			return "", errors.Join(callErr, err)
-		}
+		merr = c.owe(now, func(now int64) error { return c.Ledger.Meter(now, plan, route, amount, src) })
 	}
 	if p.Pool != "" && u.Pool != nil {
-		if err := c.Ledger.ReadPool(now, p.Pool, u.Pool.Used, u.Pool.ResetAt); err != nil {
-			return "", errors.Join(callErr, err)
+		used, reset := u.Pool.Used, u.Pool.ResetAt
+		if reset <= now {
+			reset = now + kernel.PoolWindowMS
 		}
+		_ = c.owe(now, func(now int64) error {
+			if now >= reset {
+				return nil // the pool has reset since the reading
+			}
+			if c.Ledger.ReadPool(now, p.Pool, used, reset) == nil {
+				return nil
+			}
+			return c.Ledger.ReadPool(now, p.Pool, kernel.PoolFull, reset)
+		})
+	}
+	if merr != nil {
+		return "", errors.Join(callErr, merr)
 	}
 	if callErr != nil {
 		return "", callErr
