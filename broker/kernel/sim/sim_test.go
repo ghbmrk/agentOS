@@ -76,13 +76,15 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		sum.StaleRefused += r.StaleRefused
 		sum.AnchorFailed += r.AnchorFailed
 		sum.WidenUnproven += r.WidenUnproven
+		sum.UnheldRefused += r.UnheldRefused
 	}
 	for name, n := range map[string]int{
-		"appends refused by a full disk":             sum.Refused,
-		"clock moves back":                           sum.ClockBack,
-		"stale requests refused":                     sum.StaleRefused,
-		"anchor writes failed":                       sum.AnchorFailed,
-		"widenings left unproven by a failed anchor": sum.WidenUnproven,
+		"appends refused by a full disk":               sum.Refused,
+		"clock moves back":                             sum.ClockBack,
+		"stale requests refused":                       sum.StaleRefused,
+		"anchor writes failed":                         sum.AnchorFailed,
+		"widenings left unproven by a failed anchor":   sum.WidenUnproven,
+		"plans under a stripped, forged or unheld key": sum.UnheldRefused,
 	} {
 		if n == 0 {
 			t.Errorf("the sweep never reached: %s", name)

@@ -361,7 +361,7 @@ func (x *Exit) Facts(s key.Step) (string, []string, int64) {
 // Do checks the step first, every time, then sends it once per idempotency
 // key; a known key answers from memory without a request.
 func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
-	op, ok := x.ops[r.Step.Verb]
+	op, ok := x.ops[r.Step().Verb]
 	if !ok {
 		return kernel.Result{Outcome: "failed", Detail: DUndeclared}
 	}
@@ -569,7 +569,7 @@ func readGrant(g []byte) (map[string]string, error) {
 
 func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	// Check has already matched the arguments to the declaration exactly.
-	args := r.Step.Args
+	args := r.Step().Args
 	bad := ""
 	target := slotRE.ReplaceAllStringFunc(op.URL, func(m string) string {
 		n := m[1 : len(m)-1]
@@ -727,7 +727,7 @@ func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 			return "notdone"
 		}
 		return "unknown"
-	case x.ops[r.Step.Verb].Idempotent:
+	case x.ops[r.Step().Verb].Idempotent:
 		return "notdone"
 	}
 	return "unknown"

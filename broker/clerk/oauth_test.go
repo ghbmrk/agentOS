@@ -420,13 +420,9 @@ func TestExitKeepsARotatedGrantItCouldNotSave(t *testing.T) {
 // revokeOnSeal revokes the step's key while the clerk seals a rotated grant,
 // that is, after Check at the top of Do and before the send.
 func (o *oauthFix) revokeOnSeal(t *testing.T) {
-	v, err := key.Verify(o.root, o.opub)
-	if err != nil {
-		t.Fatal(err)
-	}
 	o.seal.onSeal = func() {
 		o.seal.onSeal = nil
-		if err := o.k.Revoke(2, v.ID()); err != nil {
+		if err := o.k.Revoke(2, o.root.Tip()); err != nil {
 			t.Error(err)
 		}
 	}

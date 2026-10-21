@@ -162,15 +162,23 @@ func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), 
 	return f
 }
 
+// step is a plan step as an honest planner writes it: its claims are the
+// clerk's own facts about it.
+func (f *exitFix) step(verb key.Verb, args map[string]string) kernel.PlanStep {
+	ps := kernel.PlanStep{Verb: verb, Clerk: "web", Args: args}
+	ps.Content, ps.Labels, _ = f.x.Facts(kernel.Normalize("p", ps))
+	return ps
+}
+
+// request is ps as the kernel hands it to the clerk: one step of a plan the
+// root's holder signed.
+func (f *exitFix) request(ps kernel.PlanStep, idem string) kernel.Request {
+	p := kernel.SignPlan(kernel.Plan{ID: "p", Key: f.root, Steps: []kernel.PlanStep{ps}}, hpubPriv())
+	return kernel.Request{Plan: p, Idem: idem, Now: 1}
+}
+
 func (f *exitFix) req(verb key.Verb, idem string, args map[string]string) kernel.Request {
-	s := key.Step{Verb: verb, Clerk: "web", Task: "t", Args: map[string]key.Arg{}}
-	for n, v := range args {
-		s.Args[n] = key.Arg{Value: v, Source: key.SrcClerk}
-	}
-	content, labels, amount := f.x.Facts(s)
-	s.Content, s.Labels, s.Amount = content, labels, amount
-	s.Recipient = s.Args[key.RecipientArg(verb)].Value
-	return kernel.Request{Plan: "p", Step: s, Key: f.root, Idem: idem, Now: 1}
+	return f.request(f.step(verb, args), idem)
 }
 
 func TestExitSendsDeclaredRequestWithSecretAndIdempotencyKey(t *testing.T) {
@@ -240,21 +248,20 @@ func TestExitTransportErrorsCarryNoValues(t *testing.T) {
 func TestExitRefusesUndeclaredAndOverclaimed(t *testing.T) {
 	f := setupExit(t, nil)
 	// A verb with no declared shape.
-	u := f.req(key.Fetch, "i1", map[string]string{"url": "a"})
-	u.Step.Verb = key.Send
-	if r := f.x.Do(u, f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	u := f.step(key.Fetch, map[string]string{"url": "a"})
+	u.Verb = key.Send
+	if r := f.x.Do(f.request(u, "i1"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("undeclared verb must be refused without a request")
 	}
 	// A claim the clerk's own facts contradict.
-	c := f.req(key.Post, "i2", map[string]string{"to": "bob", "msg": "hi"})
-	c.Step.Labels = []string{"private"}
-	if r := f.x.Do(c, f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	c := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi"})
+	c.Labels = []string{"private"}
+	if r := f.x.Do(f.request(c, "i2"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("contradicted claim must be refused")
 	}
 	// A request with an extra argument.
-	e := f.req(key.Post, "i3", map[string]string{"to": "bob", "msg": "hi"})
-	e.Step.Args["extra"] = key.Arg{Value: "x", Source: key.SrcClerk}
-	if r := f.x.Do(e, f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	e := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi", "extra": "x"})
+	if r := f.x.Do(f.request(e, "i3"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("an undeclared argument must be refused")
 	}
 }
@@ -275,8 +282,7 @@ func TestExitDoesNotFollowRedirectsWithCredentials(t *testing.T) {
 func TestExitRefusesWhatKeyForbids(t *testing.T) {
 	f := setupExit(t, nil)
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	v, _ := key.Verify(f.root, opubOf())
-	if err := f.k.Revoke(2, v.ID()); err != nil {
+	if err := f.k.Revoke(2, f.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
 	q.Now = 3
@@ -306,8 +312,8 @@ func TestNewExitRejectsUnsafeDeclarations(t *testing.T) {
 
 func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 	f := setupExit(t, nil)
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
+	step := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi"})
+	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{step}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.k.Tick(0); err != nil {
@@ -337,8 +343,8 @@ func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 
 func TestExitDispatchIsLoggedBeforeTheRequestLeaves(t *testing.T) {
 	f := setupExit(t, nil)
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
+	step := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi"})
+	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{step}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
 	before := f.k.Log().Len()
@@ -415,7 +421,7 @@ func planStep(s key.Step) kernel.PlanStep {
 // run submits one step as plan p1 and ticks the kernel once per probe period.
 func (f *exitFix) run(t *testing.T, step key.Step, ticks int) kernel.StepState {
 	t.Helper()
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
+	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < ticks; i++ {
@@ -678,7 +684,7 @@ func TestExitBusyIsSentAgainAfterRetryAfter(t *testing.T) {
 			w.WriteHeader(429)
 		}
 	})
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
+	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step()
 	st := f.run(t, step, 6)
 	if st.Phase != kernel.PDone || f.hits.Load() != 2 {
 		t.Fatalf("a 429 must be sent again once Retry-After passes: phase %s, %d requests", st.Phase, f.hits.Load())
@@ -720,8 +726,8 @@ func TestExitBusyWaitIsCapped(t *testing.T) {
 func TestExitIdempotentOpIsSentAgainAfterRestart(t *testing.T) {
 	var idems []string
 	f := setupExitOps(t, nil, func(_ string, ops []clerk.Op) { ops[0].Idempotent = true })
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
-	if err := f.k.Submit(0, kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}); err != nil {
+	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step()
+	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.k.Tick(0); err != nil {
@@ -748,7 +754,7 @@ func TestExitIdempotentOpIsSentAgainAfterRestart(t *testing.T) {
 func TestExitRedoIsBounded(t *testing.T) {
 	f := setupExitOps(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) },
 		func(_ string, ops []clerk.Op) { ops[0].Idempotent = true })
-	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step
+	step := f.req(key.Post, "", map[string]string{"to": "bob", "msg": "hi"}).Step()
 	st := f.run(t, step, 6*kernel.MaxChecks)
 	if st.Phase != kernel.PParked || f.hits.Load() > kernel.MaxChecks {
 		t.Fatalf("a failing idempotent op must stop: phase %s after %d requests", st.Phase, f.hits.Load())
@@ -801,8 +807,7 @@ func TestExitChecksTheKeyBeforeAnsweringDone(t *testing.T) {
 	if r := f.x.Do(q, f.k.State()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
-	v, _ := key.Verify(f.root, opubOf())
-	if err := f.k.Revoke(2, v.ID()); err != nil {
+	if err := f.k.Revoke(2, f.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
 	q.Now = 3
@@ -813,9 +818,14 @@ func TestExitChecksTheKeyBeforeAnsweringDone(t *testing.T) {
 
 func TestExitRefusesARecipientClaimOtherThanTheObject(t *testing.T) {
 	f := setupExit(t, nil)
+	// A signed plan carries no recipient claim: the step's recipient is its
+	// object argument, and moving that object voids the holder's signature.
 	q := f.req(key.Post, "i1", map[string]string{"to": "mallory", "msg": "hi"})
-	q.Step.Recipient = "bob"
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" || r.Detail != clerk.RClaim || f.hits.Load() != 0 {
-		t.Fatalf("a step claiming another recipient was sent: %+v", r)
+	if got := q.Step().Recipient; got != "mallory" {
+		t.Fatalf("recipient %q is not the object argument", got)
+	}
+	q.Plan.Steps[0].Args["to"] = "bob"
+	if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" || r.Detail != kernel.CKey || f.hits.Load() != 0 {
+		t.Fatalf("a plan signed for one object reached another recipient: %+v", r)
 	}
 }
