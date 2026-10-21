@@ -268,8 +268,8 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 		"e38": {role: "row", name: "Order 42 Cancel order"},
 		"e39": {role: "cell", name: "Order 42 Cancel order"}, // no click role between it and the row
 		"e42": {role: "button", name: "Cancel order"},
-		"e43": {role: "link", name: "Manage", target: "/unsubscribe%zz?token=synthCanaryT6"}, // an href Go cannot parse
-		"e44": {role: "button", name: `Unsubscribe\ud800 x`},                                 // a name Go cannot unquote
+		"e43": {role: "link", name: "Manage", target: "/unsubscribe%zz?token=[REDACTED]"}, // an href Go cannot parse, shown as the agent saw it
+		"e44": {role: "button", name: `Unsubscribe\ud800 x`},                              // a name Go cannot unquote
 	} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
 		if r.Error != "approval_required" || r.To != want.to() {
