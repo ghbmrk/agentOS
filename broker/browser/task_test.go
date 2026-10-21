@@ -77,18 +77,10 @@ func (r *clerkRig) result(t *testing.T, id string) Result {
 	return res
 }
 
-// backPrices lets the checks after the interim box-card condition run, as
-// they will once D-148 drops it (#2690).
-func backPrices(t *testing.T) {
-	old := boxCardBacksPrice
-	boxCardBacksPrice = func() bool { return true }
-	t.Cleanup(func() { boxCardBacksPrice = old })
-}
-
 // One tap covers the task's later submit on the same site: Continue, then
-// Place order, each sent once, each with its STATUS line.
+// Place order, each sent once, each with its STATUS line. Neither price can
+// be read, and neither asks again for it (D-148).
 func TestOneTapCoversTheTasksSubmits(t *testing.T) {
-	backPrices(t)
 	r, k := newCheckout(t, "t1")
 	r.run(t, 2, "ask", k, read(pressCont))
 	a1 := r.stepApproval(t, "ask")
@@ -122,35 +114,9 @@ func TestOneTapCoversTheTasksSubmits(t *testing.T) {
 	}
 }
 
-// Until D-148 lands, a price the clerk cannot read asks again: the held
-// request is sent on the tap, the next submit is held for its own.
-func TestUnreadablePriceAsksAgain(t *testing.T) {
-	r, k := newCheckout(t, "t1")
-	r.run(t, 2, "ask", k, read(pressCont))
-	a1 := r.stepApproval(t, "ask")
-	r.tapTask(t, 3, "t1", a1)
-	r.run(t, 4, "cont", k, submitStep(a1, pressCont))
-	r.run(t, 5, "ask2", k, read(pressBuy))
-	a2 := r.stepApproval(t, "ask2")
-	r.run(t, 6, "buy", k, submitStep(a2, pressBuy))
-	res := r.result(t, "buy")
-	if r.step("cont").Phase != kernel.PDone || r.step("buy").Phase != kernel.PFailed ||
-		res.Error != "approval_required" || res.Approval == nil || res.Approval.Print != a2.Print ||
-		!strings.Contains(res.Detail, "price") || len(forwarded(t, r.h, "click")) != 1 {
-		t.Fatalf("buy: %s %+v", r.step("buy").Phase, res)
-	}
-	// A new tap over the held request replaces the site's approval.
-	r.tapTask(t, 7, "t1", *res.Approval)
-	r.run(t, 8, "buy2", k, submitStep(a2, pressBuy))
-	if s := r.step("buy2"); s.Phase != kernel.PDone || len(forwarded(t, r.h, "click")) != 2 {
-		t.Fatalf("buy after a new tap: phase %s (%s)", s.Phase, s.Detail)
-	}
-}
-
 // The tap covers only the task it was given in: the same flow in another
 // task, or after the task ends, sends nothing.
 func TestTaskApprovalStaysInItsTask(t *testing.T) {
-	backPrices(t)
 	r, k := newCheckout(t, "t1")
 	r.run(t, 2, "ask", k, read(pressCont))
 	a1 := r.stepApproval(t, "ask")
@@ -193,7 +159,6 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 // What asks again, at the gate: another site, and a screen that may
 // reveal or create a secret (VRB-1). The held request itself is covered.
 func TestCoveredSubmitAsksAgain(t *testing.T) {
-	backPrices(t)
 	ctx := context.Background()
 	for name, c := range map[string]struct {
 		page, line string
@@ -204,6 +169,7 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 		"later":       {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, ""},
 		"other site":  {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com", a.Print} }, "another site"},
 		"no site":     {orderPage, pressBuy, func(a Approval) cover { return cover{"", "ap1:other"} }, "another site"},
+		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
 		"secret name": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 		"secret field": {orderPage + "\n  - textbox \"Backup codes\" [ref=e4]", pressBuy,
 			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},

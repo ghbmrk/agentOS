@@ -323,21 +323,9 @@ func (g *Gate) asksAgain(req Request, l link, a Approval, tc cover) string {
 		return ""
 	case g.secretScreen(req, l):
 		return "it is on a screen that may reveal or create a secret (VRB-1)"
-	case !boxCardBacksPrice():
-		return "its price cannot be read here, and no box card the clerk filled before the approval backs it"
 	}
 	return ""
 }
-
-// boxCardBacksPrice reports whether a price the clerk cannot read is
-// backed: the task pays with the box's card, with a limit outside the box,
-// filled by the clerk in this task before the approval (CLK-3, interim).
-// No page has a recipe that reads its price, so every price is unreadable,
-// and the clerk fills no card, so none is backed: every covered request
-// after the held one asks again. D-148 drops this condition (#2690); that
-// change deletes this check and its case in asksAgain. It is a variable
-// only so the tests can reach the checks after it.
-var boxCardBacksPrice = func() bool { return false }
 
 // secretScreen reports whether req, reaching l, is on a screen that may
 // reveal or create a secret (VRB-1), read from what the gate itself saw: a
