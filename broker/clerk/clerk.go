@@ -4,8 +4,11 @@
 package clerk
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -13,18 +16,35 @@ import (
 
 // Facts is a clerk's own reading of what a step carries: the content class,
 // flow labels and amount it computes from the arguments and the account it
-// guards. The planner only claims these; a clerk that has facts refuses a
-// claim that differs (KEY-2, CLK-2).
+// guards. The planner only claims these, and every clerk has facts: a claim
+// that differs is refused, and so is every step at a clerk without them
+// (KEY-2, CLK-2).
 type Facts func(key.Step) (content string, labels []string, amount int64)
 
-// RClaim is the refusal for a claim the clerk's facts contradict.
-const RClaim = "claim"
+// Clerk refusal codes, beside the key package's and the kernel's.
+const (
+	RClaim    = "claim"    // a claim the clerk's facts contradict, or no facts to judge it
+	RDispatch = "dispatch" // the log has no such step in flight
+	RHold     = "hold"
+)
 
-// Check is the clerk's own authorization of a request. It trusts nothing the
-// kernel decided: the chain and its last holder's signature on the plan, the
-// step taken from that signed plan, the root's presence in the log, the key's limits
-// as of the first dispatch, and for an irreversible verb the hold window.
-func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, v kernel.View) *key.Refusal {
+// Clock is a clerk's own time in unix ms. A nil Clock reads the wall clock.
+type Clock func() int64
+
+func (c Clock) now() int64 {
+	if c == nil {
+		return time.Now().UnixMilli()
+	}
+	return c()
+}
+
+// Check is the clerk's own authorization of a request at now, on the clerk's
+// own clock. It trusts nothing the kernel or the transport says: the chain
+// and its last holder's signature on the plan, the step taken from that signed
+// plan, the root's presence in the log, the log's record that this very plan's
+// step is in flight, the key's limits as of that step's first dispatch, and
+// for an irreversible verb the hold the log recorded (CLK-2).
+func Check(owner ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
 	st := r.Step()
 	if st.Clerk != name {
 		return &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
@@ -34,11 +54,11 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, 
 	if a := st.Args[key.RecipientArg(st.Verb)]; st.Recipient != a.Value {
 		return &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
 	}
-	if facts != nil {
-		content, labels, amount := facts(st)
-		if content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
-			return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
-		}
+	if facts == nil {
+		return &key.Refusal{Code: RClaim, Detail: "clerk has no facts to judge the step's claims"}
+	}
+	if content, labels, amount := facts(st); content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
+		return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
 	}
 	ver, err := kernel.VerifyPlan(r.Plan, owner)
 	if err != nil {
@@ -47,20 +67,39 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, 
 	if !v.Known(ver.Root()) {
 		return &key.Refusal{Code: kernel.CUnknownRoot, Detail: ver.Root().String()}
 	}
-	ctx := key.Context{Now: r.Now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(r.DispatchSeq)}
+	// Equal signatures over a verified plan are one plan: the signature
+	// covers the key's tip, the id and every step (key.Sign).
+	d, ok := v.Dispatched(r.Plan.ID, r.Index)
+	if !ok || !bytes.Equal(d.Sig, r.Plan.Sig) {
+		return &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
+	}
+	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
 	if rf := ver.Authorize(st, ctx); rf != nil {
 		return rf
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
-		h, held := v.Held(r.HeldSeq)
-		if !held || h.Plan != r.Plan.ID || h.Index != r.Index {
-			return &key.Refusal{Code: "hold", Detail: "step was not held"}
+		if !d.Held {
+			return &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
-		if r.Now < h.At+ver.Limits.Window(h.Novel) {
-			return &key.Refusal{Code: "hold", Detail: "window not over"}
+		if now < d.HeldAt+ver.Limits.Window(d.Novel) {
+			return &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}
 	return nil
+}
+
+// amountOf is a clerk's own reading of the amount argument: its one canonical
+// spelling, any other unreadable and so -1; 0 when the verb has none.
+func amountOf(s key.Step) int64 {
+	a, ok := s.Args[key.ArgAmount]
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(a.Value, 10, 64)
+	if err != nil || n < 0 || strconv.FormatInt(n, 10) != a.Value {
+		return -1
+	}
+	return n
 }
 
 func sameSet(a, b []string) bool {
@@ -96,15 +135,18 @@ type Effect struct {
 	Step key.Step
 }
 
-// Mail is a fake mail clerk over an in-memory mailbox.
+// Mail is a fake mail clerk over an in-memory mailbox. The sim runs this
+// same code, so what the sim proves of a clerk it proves of this one.
 type Mail struct {
 	Name  string
 	Owner ed25519.PublicKey
 	// Fault is consulted for op "do" and "probe"; nil means no fault.
 	Fault func(op string, r kernel.Request) string
-	// Facts, when set, is the clerk's own reading of a step's claims; nil
-	// takes the step's claims as given.
-	Facts Facts
+	Clock Clock
+	// Content and Labels are how the mailbox reads every step's data: its
+	// facts, with the amount argument (KEY-2).
+	Content string
+	Labels  []string
 
 	mu      sync.Mutex
 	done    map[string]bool
@@ -122,13 +164,16 @@ func (m *Mail) fault(op string, r kernel.Request) string {
 	return m.Fault(op, r)
 }
 
+// Facts is the mailbox's own reading of a step.
+func (m *Mail) Facts(s key.Step) (string, []string, int64) { return m.Content, m.Labels, amountOf(s) }
+
 func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.done[r.Idem] {
+	if m.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := Check(m.Owner, m.Name, m.Facts, r, v); rf != nil {
+	if rf := Check(m.Owner, m.Name, m.Facts, m.Clock.now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	switch m.fault("do", r) {
@@ -145,8 +190,8 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 }
 
 func (m *Mail) apply(r kernel.Request) {
-	m.done[r.Idem] = true
-	m.effects = append(m.effects, Effect{r.Idem, r.Step()})
+	m.done[r.Idem()] = true
+	m.effects = append(m.effects, Effect{r.Idem(), r.Step()})
 }
 
 func (m *Mail) Probe(r kernel.Request, _ kernel.View) string {
@@ -155,7 +200,7 @@ func (m *Mail) Probe(r kernel.Request, _ kernel.View) string {
 	if m.fault("probe", r) != FaultNone {
 		return "unknown"
 	}
-	if m.done[r.Idem] {
+	if m.done[r.Idem()] {
 		return "done"
 	}
 	return "notdone"

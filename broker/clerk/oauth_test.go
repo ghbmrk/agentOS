@@ -171,8 +171,8 @@ func mustForm(t *testing.T, s string) url.Values {
 
 func (o *oauthFix) post(idem string, now int64) kernel.Result {
 	q := o.req(key.Post, idem, map[string]string{"to": "bob", "msg": "hi"})
-	q.Now = now
-	return o.x.Do(q, o.k.State())
+	o.clock.Store(now)
+	return o.x.Do(q, o.view())
 }
 
 // noCanary fails if any token or grant value reached a result detail, the
@@ -226,11 +226,11 @@ func TestExitRefreshesOnceOn401UnderTheSameKey(t *testing.T) {
 	o.live = "revoked" // the remote drops the access token early
 	o.mu.Unlock()
 	q := o.req(key.Post, "i2", map[string]string{"to": "bob", "msg": "hi"})
-	r := o.x.Do(q, o.k.State())
+	r := o.x.Do(q, o.view())
 	if r.Outcome != "ok" || o.redeems != 2 || len(o.api) != 3 || o.api[2] != "Bearer canary-access-2" {
 		t.Fatalf("%+v, redeems %d, API saw %q", r, o.redeems, o.api)
 	}
-	if o.x.Probe(q, o.k.State()) != "done" {
+	if o.x.Probe(q, o.view()) != "done" {
 		t.Fatal("the resent step must probe done")
 	}
 	o.noCanary(t, r.Detail)
@@ -530,7 +530,7 @@ func TestExitIgnoresProxyEnvironment(t *testing.T) {
 	}
 	t.Setenv("NO_PROXY", "")
 	f := setupExit(t, nil)
-	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State()); r.Outcome != "ok" || f.hits.Load() != 1 {
+	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.view()); r.Outcome != "ok" || f.hits.Load() != 1 {
 		t.Fatalf("the exit went through a proxy from the environment: %+v", r)
 	}
 }
@@ -564,7 +564,7 @@ func TestExitStaticPathNeverSendsAGrant(t *testing.T) {
 	if err := f.sec.Put("web", clerk.KindGrant, []byte(`{"refresh_token":"canary-r","client_secret":"canary-s"}`)); err != nil {
 		t.Fatal(err)
 	}
-	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.view())
 	if r.Outcome != "failed" || r.Detail != clerk.DCredential || f.hits.Load() != 0 {
 		t.Fatalf("a grant went out on the static path: %+v, auth %q", r, f.got.auth)
 	}

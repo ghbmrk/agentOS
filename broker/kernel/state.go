@@ -39,20 +39,24 @@ const (
 	TStepResult   = "step.result"
 	TStepProbed   = "step.probed"
 	TStepUndone   = "step.undone"
+	TStepRetried  = "step.retried"
 )
 
 var schema = map[string]int{
 	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
-	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1,
+	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
 func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got == v }
 
-// Widening entries grant power back. Only one that an anchor covers counts
-// after a restart (KRN-7).
-func Widening(typ string) bool { return typ == TResume || typ == TKeyIssued || typ == TKeyResumed }
+// Widening entries grant power back: a resume, a key, or the owner's RETRY,
+// which lets an effect that may have happened run again. Only one that an
+// anchor covers counts after a restart (KRN-7, KRN-8).
+func Widening(typ string) bool {
+	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TStepRetried
+}
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
 // arguments, and its claims about content and labels. Source, task, recipient
@@ -204,6 +208,7 @@ type StepState struct {
 	Checks      int
 	NextProbe   int64
 	Undone      bool
+	Detail      string // the clerk's last answer, for STATUS
 }
 
 type PlanState struct {
@@ -214,14 +219,6 @@ type PlanState struct {
 	Scopes []key.ID
 	Next   int
 	Steps  []StepState
-}
-
-// HeldInfo is what a clerk reads to check a step's hold.
-type HeldInfo struct {
-	Plan  string
-	Index int
-	At    int64
-	Novel bool
 }
 
 type usedRec struct {
@@ -239,7 +236,6 @@ type State struct {
 	Plans   map[string]*PlanState
 	Order   []string
 	uses    map[key.ID][]usedRec
-	held    map[uint64]HeldInfo
 	seen    map[key.ID]map[string]int   // root -> shape -> completed, not undone
 	recent  map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
 }
@@ -249,7 +245,7 @@ func NewState(owner ed25519.PublicKey) *State {
 		Owner:   owner,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Roots:   map[key.ID]bool{}, Plans: map[string]*PlanState{},
-		uses: map[key.ID][]usedRec{}, held: map[uint64]HeldInfo{},
+		uses: map[key.ID][]usedRec{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
 }
@@ -338,9 +334,54 @@ func (s *State) Ledger() key.Ledger                 { return ledger{s: s} }
 func (s *State) LedgerBefore(seq uint64) key.Ledger { return ledger{s: s, before: seq} }
 
 // View for a clerk.
-func (s *State) Known(root key.ID) bool           { return s.Roots[root] }
-func (s *State) ChangesView() *key.Changes        { return &s.Changes }
-func (s *State) Held(seq uint64) (HeldInfo, bool) { h, ok := s.held[seq]; return h, ok }
+func (s *State) Known(root key.ID) bool    { return s.Roots[root] }
+func (s *State) ChangesView() *key.Changes { return &s.Changes }
+
+// Dispatched is the log's record of a step in flight; a step in any other
+// phase answers nothing, so a request for a step the kernel is not running
+// now, stale or forged, is refused at the clerk (CLK-2, KRN-8).
+func (s *State) Dispatched(plan string, index int) (Dispatch, bool) {
+	p, st := s.step(stepRef{plan, index})
+	if st == nil || st.Phase != PInflight || st.DispatchSeq == 0 {
+		return Dispatch{}, false
+	}
+	return Dispatch{Sig: p.Plan.Sig, Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel}, true
+}
+
+// Unsettled is a step whose effect is uncertain: still being reconciled, or
+// parked after MaxChecks. STATUS lists every one (KRN-8, OWN-16).
+type Unsettled struct {
+	Plan   string
+	Index  int
+	Verb   key.Verb
+	Clerk  string
+	Phase  string // PUnknown or PParked
+	Checks int
+	Detail string // the clerk's last answer
+	Retry  bool   // the owner may RETRY it
+}
+
+// Status lists the unsettled steps in submission order.
+func (s *State) Status() []Unsettled {
+	var out []Unsettled
+	for _, id := range s.Order {
+		p := s.Plans[id]
+		for i := range p.Steps {
+			st := &p.Steps[i]
+			if st.Phase != PUnknown && st.Phase != PParked {
+				continue
+			}
+			ps := p.Plan.Steps[i]
+			out = append(out, Unsettled{Plan: id, Index: i, Verb: ps.Verb, Clerk: ps.Clerk,
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st)})
+		}
+	}
+	return out
+}
+
+// retryable: only a parked step of a live plan. The owner's cancel stands,
+// and a step still being reconciled may yet prove done.
+func retryable(p *PlanState, st *StepState) bool { return st.Phase == PParked && p.Status == SActive }
 
 func body[T any](e Entry) (T, error) {
 	var b T
@@ -440,7 +481,6 @@ func (s *State) Apply(e Entry) error {
 		}
 		if _, st := s.step(b.stepRef); st != nil && st.Phase == PQueued {
 			st.Phase, st.HeldSeq, st.HeldAt, st.Novel = PHeld, e.Seq, e.At, b.Novel
-			s.held[e.Seq] = HeldInfo{Plan: b.Plan, Index: b.Index, At: e.At, Novel: b.Novel}
 		}
 	case TStepDispatch:
 		b, err := body[stepDispatch](e)
@@ -463,6 +503,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p, st := s.step(b.stepRef); st != nil && st.Phase == PInflight && b.Idem == Idem(b.Plan, b.Index) {
+			st.Detail = b.Detail
 			switch b.Outcome {
 			case "ok":
 				s.complete(p, b.Index, e.At)
@@ -509,6 +550,16 @@ func (s *State) Apply(e Entry) error {
 			if c, _ := key.ClassOf(sp.Verb); !c.Irreversible() {
 				delete(s.recent[p.Root], Fingerprint(sp)) // an irreversible effect stays done
 			}
+		}
+	case TStepRetried:
+		b, err := body[stepRef](e)
+		if err != nil {
+			return err
+		}
+		// The redo runs Next's checks again: key, revocation, pause, STOP,
+		// limits as of the first dispatch, under the same idempotency key.
+		if p, st := s.step(b); st != nil && retryable(p, st) {
+			st.Phase, st.Checks = PRedo, 0
 		}
 	default:
 		return ErrUnknown

@@ -48,6 +48,7 @@ type Result struct {
 	AnchorFailed  int // anchor writes that failed
 	WidenUnproven int // widenings whose anchor failed, left live until the log is reopened
 	UnheldRefused int // plans under a key their signer does not hold, rejected
+	HeldByClerk   int // irreversible steps the clerk held back on its own clock
 }
 
 var errAnchor = errors.New("sim: anchor down")
@@ -75,22 +76,33 @@ type effect struct {
 	fp   string // root and fingerprint of an irreversible effect, else ""
 }
 
-// world is the fake mail service. It applies a step only if the clerk check
-// passes, at most once per idem, and records what it did so the invariants can
-// be judged without trusting the kernel.
+// world is the fake mail service: the real clerk.Mail, with its faults drawn
+// from the seed and its clock the true time, which the kernel's may run ahead
+// of. Every effect the clerk applies is judged on the spot, without trusting
+// the kernel or the clerk.
 type world struct {
 	owner   ed25519.PublicKey
 	mutant  Mutant
 	rng     *rand.Rand
+	now     *int64 // the true time: the clerk's own clock
+	mail    *clerk.Mail
 	done    map[string]bool
 	effects []effect
 	bad     []string
 	race    func() // an owner action landing between the kernel's decision and the clerk
 	seen    []kernel.Request
 	stale   int // old requests redelivered to the world and not acted on
+	held    int // irreversible steps the clerk held back on its own clock
 	// unconfirmed is set while a widening whose anchor failed is live in the
 	// kernel's state: nothing may act on it until the log is reopened.
 	unconfirmed bool
+}
+
+func (w *world) newMail() *clerk.Mail {
+	m := clerk.NewMail("mail", w.owner)
+	m.Fault = func(op string, _ kernel.Request) string { return w.fault(op) }
+	m.Clock = func() int64 { return *w.now }
+	return m
 }
 
 func (w *world) fault(op string) string {
@@ -126,50 +138,44 @@ func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
 	if w.race != nil && w.rng.IntN(8) == 0 {
 		w.race()
 	}
-	if w.done[r.Idem] && w.mutant != MutantNoDedupe {
-		return kernel.Result{Outcome: "ok", Detail: "already done"}
-	}
-	if w.mutant != MutantClerkTrusts {
-		if rf := clerk.Check(w.owner, "mail", nil, r, v); rf != nil {
-			return kernel.Result{Outcome: "failed", Detail: rf.Code}
+	if w.mutant == MutantClerkTrusts {
+		// The mutant clerk acts on the kernel's word, with no check of its own.
+		if !w.done[r.Idem()] {
+			w.judge(r, v)
 		}
+		return kernel.Result{Outcome: "ok"}
 	}
-	switch w.fault("do") {
-	case clerk.FaultFail:
-		return kernel.Result{Outcome: "failed", Detail: "fault"}
-	case clerk.FaultDrop:
-		return kernel.Result{Outcome: "unknown", Detail: "no answer"}
-	case clerk.FaultLostAck:
-		w.apply(r, v)
-		return kernel.Result{Outcome: "unknown", Detail: "no answer"}
+	m := w.mail
+	if w.mutant == MutantNoDedupe {
+		m = w.newMail() // the mutant clerk forgets every key it ran
 	}
-	w.apply(r, v)
-	return kernel.Result{Outcome: "ok"}
+	n := len(m.Effects())
+	res := m.Do(r, v)
+	if len(m.Effects()) > n {
+		w.judge(r, v)
+	}
+	if res.Outcome == "failed" && res.Detail == clerk.RHold {
+		w.held++
+	}
+	return res
 }
 
-func (w *world) Probe(r kernel.Request, _ kernel.View) string {
-	if w.fault("probe") != clerk.FaultNone {
-		return "unknown"
-	}
-	if w.done[r.Idem] {
-		return "done"
-	}
-	return "notdone"
-}
+func (w *world) Probe(r kernel.Request, v kernel.View) string { return w.mail.Probe(r, v) }
 
-// apply performs the effect and judges it on the spot against what the key
-// and the log's view said at that instant.
-func (w *world) apply(r kernel.Request, v kernel.View) {
-	if w.done[r.Idem] {
-		w.bad = append(w.bad, "effect twice for "+r.Idem[:8])
+// judge records an effect the clerk just applied and judges it against what
+// the key and the log's view said at that instant, on the true clock.
+func (w *world) judge(r kernel.Request, v kernel.View) {
+	now := *w.now
+	if w.done[r.Idem()] {
+		w.bad = append(w.bad, "effect twice for "+r.Idem()[:8])
 	}
-	w.done[r.Idem] = true
+	w.done[r.Idem()] = true
 	if w.unconfirmed {
 		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
 	}
 	ver, err := kernel.VerifyPlan(r.Plan, w.owner)
 	if err != nil {
-		w.effects = append(w.effects, effect{r.Idem, r.Now, ""})
+		w.effects = append(w.effects, effect{r.Idem(), now, ""})
 		w.bad = append(w.bad, "effect under an invalid key or one its submitter does not hold")
 		return
 	}
@@ -178,12 +184,12 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		fp = ver.Root().String() + "|" + kernel.Fingerprint(st)
 		for _, e := range w.effects {
-			if e.fp == fp && e.at > r.Now-key.DayMS {
+			if e.fp == fp && e.at > now-key.DayMS {
 				w.bad = append(w.bad, "the same irreversible effect twice within a day, across plans")
 			}
 		}
 	}
-	w.effects = append(w.effects, effect{r.Idem, r.Now, fp})
+	w.effects = append(w.effects, effect{r.Idem(), now, fp})
 	ch := v.ChangesView()
 	if ch.Stopped {
 		w.bad = append(w.bad, "effect during STOP")
@@ -203,10 +209,13 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 	if !found {
 		w.bad = append(w.bad, "effect with a verb outside the key")
 	}
+	d, inFlight := v.Dispatched(r.Plan.ID, r.Index)
+	if !inFlight {
+		w.bad = append(w.bad, "effect for a step the log does not have in flight")
+	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
-			h, held := v.Held(r.HeldSeq)
-			if !held || r.Now < h.At+ver.Limits.Window(h.Novel) {
+			if !d.Held || now < d.HeldAt+ver.Limits.Window(d.Novel) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}
@@ -241,12 +250,19 @@ type sim struct {
 	pool   []key.Key
 	ids    []key.ID
 	plans  []string
-	now    int64
-	trace  []string
-	nonce  *rand.ChaCha8
+	now    int64 // the true time, which the clerk reads
+	ahead  int64 // how far the kernel's clock runs ahead of it
+	// hostile: at each tick the kernel's clock jumps past every held step's
+	// window, or a few hours ahead when nothing is held.
+	trace []string
+	nonce *rand.ChaCha8
 
+	hostile                          bool
 	clockBack, widenUnproven, unheld int
 }
+
+// kt is the kernel's clock.
+func (s *sim) kt() int64 { return s.now + s.ahead }
 
 func (s *sim) logf(f string, a ...any) {
 	s.trace = append(s.trace, fmt.Sprintf("%d "+f, append([]any{s.now}, a...)...))
@@ -264,7 +280,7 @@ func (s *sim) boot() error {
 		s.anchor.down, s.w.unconfirmed = false, false
 		l, err := kernel.Open(s.kcfg())
 		if err == nil {
-			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.now)
+			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.kt())
 		}
 		if err == nil {
 			return nil
@@ -311,9 +327,10 @@ func (s *sim) derived() (key.Key, bool) {
 	}
 	base := s.pool[s.pick(len(s.pool))]
 	var cav []key.Caveat
+	if s.pick(2) == 0 { // half the derived keys hold irreversible steps
+		cav = append(cav, key.LimitHold(hour/6, hour/2))
+	}
 	switch s.pick(5) {
-	case 0:
-		cav = append(cav, key.LimitHold(hour, 4*hour))
 	case 1:
 		cav = append(cav, key.LimitUses(int64(1+s.pick(3))))
 	case 2:
@@ -370,7 +387,7 @@ func (s *sim) anyKey() key.Key {
 			}
 			return k
 		}
-	case 3, 4:
+	case 3, 4, 5:
 		if k, ok := s.derived(); ok {
 			return k
 		}
@@ -411,7 +428,7 @@ func (s *sim) submit() error {
 	}
 	s.logf("submit %s %d steps", id, len(steps))
 	p, unheld := s.signed(kernel.Plan{ID: id, Steps: steps})
-	err := s.k.Submit(s.now, p)
+	err := s.k.Submit(s.kt(), p)
 	if err == nil {
 		s.plans = append(s.plans, id)
 		if ps := s.k.State().Plans[id]; unheld && ps != nil && ps.Status == kernel.SRejected {
@@ -432,50 +449,61 @@ func (s *sim) op() error {
 		return s.submit()
 	case c < 9:
 		s.now += int64(s.pick(5*60)) * 60_000 / 10
+		if s.hostile {
+			s.ahead = s.pastHolds()
+		}
 		s.logf("tick")
-		return s.k.Tick(s.now)
+		return s.k.Tick(s.kt())
 	case c == 9 && len(s.ids) > 0:
 		id := s.ids[s.pick(len(s.ids))]
 		s.logf("revoke")
-		return s.k.Revoke(s.now, id)
+		return s.k.Revoke(s.kt(), id)
 	case c == 10 && len(s.ids) > 0:
 		id := s.ids[s.pick(len(s.ids))]
 		s.logf("pause")
 		if s.pick(2) == 0 {
-			return s.widened(s.k.Unpause(s.now, id))
+			return s.widened(s.k.Unpause(s.kt(), id))
 		}
-		return s.k.Pause(s.now, id)
+		return s.k.Pause(s.kt(), id)
 	case c == 11:
-		s.logf("stop/resume")
-		if s.pick(2) == 0 {
-			return s.widened(s.k.Resume(s.now))
+		if s.k.State().Stopped { // the owner resumes what a STOP held
+			s.logf("resume")
+			return s.widened(s.k.Resume(s.kt()))
 		}
-		return s.k.Stop(s.now)
+		if s.pick(3) == 0 {
+			s.logf("stop")
+			return s.k.Stop(s.kt())
+		}
 	case c == 12 && len(s.plans) > 0:
 		p := s.plans[s.pick(len(s.plans))]
 		s.logf("cancel/undo %s", p)
 		if s.pick(2) == 0 {
-			return s.k.Cancel(s.now, p)
+			return s.k.Cancel(s.kt(), p)
 		}
-		return s.k.Undo(s.now, p, 0)
+		return s.k.Undo(s.kt(), p, 0)
 	case c == 13:
 		s.logf("anchor")
 		return s.k.Log().Anchor()
 	case c == 14:
-		switch s.pick(5) {
+		switch s.pick(6) {
 		case 0:
 			s.logf("disk full")
 			s.disk.Fill()
 		case 1:
 			d := int64(1+s.pick(48)) * hour
 			s.now = max(0, s.now-d)
-			if es := s.k.Log().Entries(); len(es) > 0 && s.now < es[len(es)-1].At {
+			if es := s.k.Log().Entries(); len(es) > 0 && s.kt() < es[len(es)-1].At {
 				s.clockBack++ // behind the log's own last entry
 			}
 			s.logf("clock jumps back %dh", d/hour)
 		case 2:
 			s.logf("anchor down")
 			s.anchor.down = true
+		case 3:
+			// The kernel's clock jumps ahead, or is set right again. The
+			// clerk keeps the true time, so a hold still runs its window.
+			s.hostile, s.ahead = s.pick(2) == 0, 0
+			s.logf("kernel clock hostile %v", s.hostile)
 		default:
 			n := 1 + s.pick(8)
 			s.logf("arm crash in %d appends", n)
@@ -484,12 +512,32 @@ func (s *sim) op() error {
 	case c == 15:
 		r := s.newRoot()
 		s.logf("issue root")
-		if err := s.widened(s.k.Issue(s.now, r)); err != nil {
+		if err := s.widened(s.k.Issue(s.kt(), r)); err != nil {
 			return err
 		}
 		s.remember(r)
 	}
 	return nil
+}
+
+// pastHolds is a jump that puts the kernel's clock just past every held
+// step's window, or a few hours when nothing is held: a hostile clock.
+func (s *sim) pastHolds() int64 {
+	ahead := int64(1+s.pick(6)) * hour
+	st := s.k.State()
+	for _, id := range st.Order {
+		p := st.Plans[id]
+		for i := range p.Steps {
+			if p.Steps[i].Phase != kernel.PHeld {
+				continue
+			}
+			if v, err := kernel.VerifyPlan(p.Plan, s.owner.pub); err == nil {
+				due := p.Steps[i].HeldAt + v.Limits.Window(p.Steps[i].Novel)
+				ahead = max(ahead, due-s.now+60_000)
+			}
+		}
+	}
+	return ahead
 }
 
 // widened passes on the result of a widening owner action. One that failed to
@@ -546,16 +594,18 @@ func Run(c Config) (*Result, error) {
 	}
 	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
 	s.disk = &Disk{rng: rng}
+	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
-	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, done: map[string]bool{}}
+	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
+	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
 			s.logf("race: revoke")
-			_ = s.k.Revoke(s.now, s.ids[s.pick(len(s.ids))])
+			_ = s.k.Revoke(s.kt(), s.ids[s.pick(len(s.ids))])
 			return
 		}
 		s.logf("race: stop")
-		_ = s.k.Stop(s.now)
+		_ = s.k.Stop(s.kt())
 	}
 	if err := s.boot(); err != nil {
 		return nil, err
@@ -596,7 +646,8 @@ func Run(c Config) (*Result, error) {
 	}
 	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
-		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld}, nil
+		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld,
+		HeldByClerk: s.w.held}, nil
 }
 
 func tail(t []string) []string {

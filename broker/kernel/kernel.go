@@ -172,16 +172,14 @@ func Next(s *State, id string, now int64) Act {
 	return a
 }
 
-// Request is what a clerk runs and re-checks: the signed plan and which step
-// of it, so the clerk checks the holder's signature itself (CLK-2).
+// Request names the step a clerk runs: the signed plan and which step of it,
+// so the clerk checks the holder's signature itself (CLK-2). It carries
+// nothing else. The clerk reads the time from its own clock and the dispatch
+// and hold from the log (View.Dispatched), so no field of a request can claim
+// a dispatch, a hold or an hour the log and the clerk do not see.
 type Request struct {
-	Plan        Plan
-	Index       int
-	Idem        string
-	Attempt     int
-	DispatchSeq uint64 // the first dispatch: the clerk counts uses before it
-	HeldSeq     uint64 // 0 when the step was not held
-	Now         int64
+	Plan  Plan
+	Index int
 }
 
 // Step is the step the clerk runs, derived from the signed plan. Out of range
@@ -193,19 +191,34 @@ func (r Request) Step() key.Step {
 	return r.Plan.Step(r.Index)
 }
 
+// Idem is the step's idempotency key (KRN-8).
+func (r Request) Idem() string { return Idem(r.Plan.ID, r.Index) }
+
 // Result is a clerk's answer. Outcome is ok, failed or unknown.
 type Result struct{ Outcome, Detail string }
+
+// Dispatch is what the log says of a step in flight: the signature of the
+// plan it admitted, the step's first dispatch entry, and its hold, if any.
+type Dispatch struct {
+	Sig    []byte // the logged plan's signature; a request must carry that plan
+	Seq    uint64 // the first dispatch: the key's uses before it are its budget
+	Held   bool
+	HeldAt int64
+	Novel  bool
+}
 
 // View is the read-only part of the state a clerk checks against (CLK-2).
 type View interface {
 	Known(root key.ID) bool
 	ChangesView() *key.Changes
 	LedgerBefore(seq uint64) key.Ledger
-	Held(seq uint64) (HeldInfo, bool)
+	// Dispatched answers only for a step the log has in flight now.
+	Dispatched(plan string, index int) (Dispatch, bool)
 }
 
-// Clerk is the only exit. Do runs a step at most once per Idem after its own
-// check of the key. Probe reports done, notdone or unknown without acting.
+// Clerk is the only exit. Do runs a step at most once per idempotency key
+// after its own check of the key. Probe reports done, notdone or unknown
+// without acting.
 type Clerk interface {
 	Do(r Request, v View) Result
 	Probe(r Request, v View) string
@@ -313,6 +326,20 @@ func (k *Kernel) Undo(now int64, plan string, index int) error {
 	return err
 }
 
+// ErrNotParked refuses a RETRY of a step that is not parked in a live plan.
+var ErrNotParked = errors.New("kernel: no parked step there to retry")
+
+// Retry is the owner's RETRY of a parked step (KRN-8, CH-11): the owner
+// accepts that its effect may happen twice. The step is sent again under its
+// own idempotency key and only after the same checks as any dispatch. Like
+// every widening it anchors before it counts.
+func (k *Kernel) Retry(now int64, plan string, index int) error {
+	if p, st := k.s.step(stepRef{plan, index}); st == nil || !retryable(p, st) {
+		return ErrNotParked
+	}
+	return k.owner(now, TStepRetried, stepRef{plan, index})
+}
+
 // Submit logs a plan and decides it at once.
 func (k *Kernel) Submit(now int64, p Plan) error {
 	if k.s.Plans[p.ID] != nil {
@@ -379,16 +406,11 @@ func (k *Kernel) act(now int64, a Act) error {
 		}
 		return nil
 	}
-	req := Request{Plan: p.Plan, Index: a.Index, Idem: Idem(a.Plan, a.Index),
-		Attempt: a.Attempt, DispatchSeq: st.DispatchSeq, HeldSeq: st.HeldSeq, Now: now}
+	req := Request{Plan: p.Plan, Index: a.Index}
 	switch a.Kind {
 	case ActDispatch:
-		e, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, req.Idem, st.HeldSeq})
-		if err != nil {
+		if _, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, req.Idem(), st.HeldSeq}); err != nil {
 			return err
-		}
-		if a.Attempt == 1 {
-			req.DispatchSeq = e.Seq
 		}
 		res := c.Do(req, k.s)
 		return k.result(now, a.Plan, a.Index, res.Outcome, res.Detail)
