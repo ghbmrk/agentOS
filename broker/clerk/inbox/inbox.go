@@ -103,8 +103,11 @@ func (a *Account) Handle(addr string) string {
 	return "sender-" + hex.EncodeToString(m.Sum(nil)[:minSecret])
 }
 
-// NewAccount reads every mail once. A mail is unsubscribable when the reader
-// calls it bulk and VRB-2 holds; only then does the planner get a handle. The
+// NewAccount reads every mail once. A mail with no class from the closed list
+// is left alone and recorded as an unclassified read, so a reader that fails
+// is seen, not mistaken for an inbox with nothing to tidy. A mail is
+// unsubscribable when the reader calls it bulk, it is not an alert and VRB-2
+// holds; only then does the planner get a handle. The
 // world is read again when a step runs, so a verdict that has aged out is not
 // acted on. secret keys the handles and must hold at least 128 bits. box is
 // where the effects land, and must be the mailbox the mails were read from.
@@ -120,6 +123,9 @@ func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, 
 	for _, m := range mails {
 		if !classes[m.Class] {
 			m.Class = ""
+		}
+		if m.Class == "" {
+			a.refuse("read", m.ID, "unclassified")
 		}
 		it := Item{Mail: m.ID, Class: m.Class}
 		a.mails[m.ID] = m
@@ -138,11 +144,13 @@ func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, 
 // message is this plus the class the clerk itself assigned to it.
 const labelPrefix = "agentOS/"
 
-// eligible is the one rule for unsubscribing: the reader calls the mail bulk
-// and VRB-2 holds for it now. It returns the one-click URL to post to.
+// eligible is the one rule for unsubscribing: the reader calls the mail bulk,
+// it is not an alert and VRB-2 holds for it now. It returns the one-click URL
+// to post to.
 func (a *Account) eligible(m Mail) (string, bool) {
-	reason, u := Evaluate(m.Raw, a.world())
-	return u, m.Class == "bulk" && reason == ROK
+	w := a.world()
+	reason, u := Evaluate(m.Raw, w)
+	return u, m.Class == "bulk" && reason == ROK && !isAlert(m.Raw, w)
 }
 
 // Bind ties the account to the kernel whose log it serves. Do runs only a step
@@ -207,6 +215,9 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 		if s.Verb == key.Trash {
 			if m.Class != "spam" && m.Class != "phishing" {
 				return a.refuse(string(s.Verb), target, "not-trashable")
+			}
+			if isAlert(m.Raw, a.world()) {
+				return a.refuse(string(s.Verb), target, "alert")
 			}
 			if a.retention < minRetentionDays {
 				return a.refuse(string(key.DeleteRemote), target, "trash-not-restorable")
