@@ -154,6 +154,34 @@ func (s *Secrets) Remove(slot string) error {
 	return nil
 }
 
+// RemovePrefix deletes every slot under prefix but keep, in one write as
+// Remove does; if writing fails, the store is unchanged, and when no slot
+// matches nothing is written. An empty prefix is refused: it would name every
+// clerk's slots.
+func (s *Secrets) RemovePrefix(prefix, keep string) error {
+	if prefix == "" {
+		return errors.New("clerk: RemovePrefix needs a prefix")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := maps.Clone(s.m)
+	maps.DeleteFunc(next, func(slot string, _ sealed) bool { return slot != keep && strings.HasPrefix(slot, prefix) })
+	if len(next) == len(s.m) {
+		return nil
+	}
+	if s.write != nil {
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if err := s.write(b); err != nil {
+			return err
+		}
+	}
+	s.m = next
+	return nil
+}
+
 // MailSlots prefixes the only slots Login opens: a mailbox password.
 const MailSlots = "mail/"
 

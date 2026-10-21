@@ -5,6 +5,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -185,8 +186,90 @@ func TestMailSetupStoppedBetweenItsWritesSendsTheOldPassword(t *testing.T) {
 	if err := SetMail(r.dir, r.sec, b, "canary-account-B-pass"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := readMail(r.dir); err != nil || got.MailSettings != b || r.sec.Len() != 1 {
+	if got, err := readMail(r.dir); err != nil || got != b || r.sec.Len() != 1 {
 		t.Fatalf("setup run again: %+v, %v, %d slots", got, err, r.sec.Len())
+	}
+}
+
+// SetMail stopped after each of its steps, as a crash would, leaves settings
+// whose own slot opens to their own password, so a clerk opened on them sends
+// it only to their servers; RemoveMail then leaves no mail password sealed,
+// a crash-left one included (#2704).
+func TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword(t *testing.T) {
+	a := MailSettings{Address: "you@example.com", IMAP: "imap.a.test:993", SMTP: "smtp.a.test:465"}
+	b := MailSettings{Address: "you@example.com", IMAP: "imap.b.test:993", SMTP: "smtp.b.test:465"}
+	pass := map[MailSettings]string{a: "canary-account-A-pass", b: "canary-account-B-pass"}
+	for i := 0; i < 3; i++ {
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetMail(dir, sec, a, pass[a]); err != nil {
+			t.Fatal(err)
+		}
+		if err := setMail(dir, sec, b, pass[b], func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
+			t.Fatalf("stop after step %d: %v", i, err)
+		}
+		sec, err = OpenSecrets(dir, testSealer()) // the restarted clerk process
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := readMail(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := sec.Login(slotOf(s), s.login())(context.Background())
+		if err != nil || l.Secret != pass[s] {
+			t.Fatalf("stopped after step %d: settings for %s sign in with %q, %v; want their own password", i, s.IMAP, l.Secret, err)
+		}
+		if err := RemoveMail(dir, sec); err != nil {
+			t.Fatal(err)
+		}
+		if re, err := OpenSecrets(dir, testSealer()); err != nil || re.Len() != 0 {
+			t.Fatalf("stopped after step %d, then removed: %d slots still sealed", i, re.Len())
+		}
+	}
+}
+
+// A setup that crashed mid-write leaves temporaries holding the sealed
+// password and the settings; RemoveMail leaves neither (#2706 UX 1), whether
+// or not the store still holds a mail slot. With none, RemoveMail writes no
+// store, so only its own removal clears the torn Secrets temporary.
+func TestMailRemovalLeavesNoCrashedTemporary(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := MailSettings{Address: "you@example.com", IMAP: "imap.a.test:993", SMTP: "smtp.a.test:465"}
+		if err := SetMail(dir, sec, a, "canary-account-A-pass"); err != nil {
+			t.Fatal(err)
+		}
+		atRest, _ := sec.MarshalBinary()
+		if !held {
+			if err := sec.RemovePrefix(clerk.MailSlots, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b, _ := json.Marshal(a)
+		for _, name := range []string{secretsName, mailSettings} {
+			body := map[string][]byte{secretsName: atRest, mailSettings: b}[name]
+			if err := writeAtomic(dir, name, body, func(i int) bool { return i == 2 }); !errors.Is(err, errStopped) {
+				t.Fatal(err)
+			}
+		}
+		if err := RemoveMail(dir, sec); err != nil {
+			t.Fatal(err)
+		}
+		if es, _ := os.ReadDir(dir); len(es) != 1 || es[0].Name() != secretsName {
+			var names []string
+			for _, e := range es {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("slot held %v: after removal the clerk's directory holds %v, want only the emptied Secrets file", held, names)
+		}
 	}
 }
 

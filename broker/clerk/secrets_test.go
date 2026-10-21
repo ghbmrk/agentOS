@@ -213,3 +213,42 @@ func TestSecretsLoginOpensPerConnection(t *testing.T) {
 		t.Fatal("Login opened a slot outside MailSlots")
 	}
 }
+
+// RemovePrefix drops every slot under the prefix but the one kept, in one
+// write, leaves the store as it was when the write fails, and writes nothing
+// when nothing matches.
+func TestSecretsRemovePrefix(t *testing.T) {
+	sl := sealer(t)
+	writes, fail := 0, false
+	var disk []byte
+	s := clerk.NewSecrets(sl, func(b []byte) error {
+		if fail {
+			return errors.New("disk full")
+		}
+		writes++
+		disk = bytes.Clone(b)
+		return nil
+	})
+	for _, slot := range []string{"mail/a", "mail/b", "mail/c", "exit-key"} {
+		_ = s.Put(slot, clerk.KindStatic, []byte("canary-"+slot))
+	}
+	fail = true
+	if err := s.RemovePrefix("mail/", "mail/b"); err == nil || s.Len() != 4 {
+		t.Fatal("a RemovePrefix whose write failed changed the store")
+	}
+	fail = false
+	n := writes
+	if err := s.RemovePrefix("mail/", "mail/b"); err != nil || writes != n+1 {
+		t.Fatalf("RemovePrefix: %v, %d writes", err, writes-n)
+	}
+	re := clerk.NewSecrets(sl, nil)
+	if err := re.UnmarshalBinary(disk); err != nil || re.Len() != 2 || !re.Has("mail/b") || !re.Has("exit-key") {
+		t.Fatalf("at rest after RemovePrefix: %v, %d slots", err, re.Len())
+	}
+	if err := s.RemovePrefix("mail/", "mail/b"); err != nil || writes != n+1 {
+		t.Fatal("a RemovePrefix matching nothing wrote")
+	}
+	if err := s.RemovePrefix("", "mail/b"); err == nil || s.Len() != 2 {
+		t.Fatal("an empty prefix was taken as every slot")
+	}
+}

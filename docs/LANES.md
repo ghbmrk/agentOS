@@ -51,13 +51,19 @@ One owner per directory at a time (PLAN.md §3). A change another owner's direct
   - `State().Status()`: STATUS;
   - `Retry`: RETRY of a parked step;
   - `Enroll` and `Unenroll`: passkeys;
-  - `Hold` and `Extend`: spend;
+  - `Extend`: a held plan's spend;
+  - `SetLine`: the owner's line for a big change;
+  - `Reserve`: the owner's share of a usage pool;
   - `Issue`: a grant;
+  - `ApproveTask`: the one approval for a task (CLK-3), a widening that anchors;
   - `Revoke`, `Pause` and `Unpause`: keys;
   - `Stop` and `Resume`;
-  - `Cancel` and `Undo`.
+  - `Cancel` and `Undo`;
+  - and reads of `State()`, which change nothing: the owner side reads what an action needs from it (`LineChanges` for `SetLine`, `SpendHeld` for `Extend`, `Pools` for `Reserve`, the enrollments, the tasks).
 
-  Their meaning is frozen. A signature changes only in a kernel-lane PR that edits this list in the same change; #2674 adds co-signatures to `Issue`. Neither side writes the other's directories, and `cmd/agentosd` changes only at its call sites, in sub B's rows.
+  The metering side is not the owner's: the model clerk (`clerk/model`, #2572) calls `AdmitSpend`, `Meter`, `Hold`, `ReadPool` and `AdmitPool`. Its provider holds a credential, so it runs in its own process (MIG-4-run-a) and reaches them through the kernel process's socket from #2682's third slice; `run.Kernel.With` is for code inside the kernel's process. The kernel's host (`broker/clerk/run`, sub A) alone calls `OpenTask` and `EndTask` for the planner's run. Their meaning is frozen the same way.
+
+  A signature changes only in a kernel-lane PR that edits these lists in the same change. Neither side writes the other's directories, and `cmd/agentosd` changes only at its call sites, in sub B's rows.
 - **Everything else** has a fixed owner: sub A owns all of `tools/`, `.github/` and every gate file. The Codex lane may change only `docs/` and `tests/` files that are not gate files. The conflict guard (OPERATING §5) still keeps two builds off one file.
 
 ## Lanes
