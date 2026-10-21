@@ -53,8 +53,8 @@ func isSecret(w string) bool {
 // card's PIN, a "remember this device" box, a home security product. Only
 // a text that is exactly one of them is passed over, so "Enter security
 // code" or "Change PIN code" beside it still marks the screen.
-var notSecret = wordSet(`securitycode cardsecuritycode giftcardpin rememberthisdevice
-	homesecurity smarthomesecurity enamelpin`)
+var notSecret = wordSet(`securitycode cardsecuritycode cvvsecuritycode securitycodecvv
+	giftcardpin enamelpin rememberthisdevice homesecurity smarthomesecurity backupbattery`)
 
 // secretText is the first of texts' words, or joined word pairs, that
 // reads as a secret screen, "" if none. A URL's query parameter named
@@ -77,7 +77,8 @@ func secretText(texts ...string) string {
 	return ""
 }
 
-// dropTokenKey is t with the key of a "token=" query parameter removed,
+// dropTokenKey is t with the key of a query parameter named exactly
+// "token" removed (not "access_token" or "TOKEN"),
 // its value kept ("?token=abc" reads "?=abc").
 func dropTokenKey(t string) string {
 	q := strings.IndexByte(t, '?')
@@ -86,7 +87,7 @@ func dropTokenKey(t string) string {
 	}
 	pairs := strings.Split(t[q+1:], "&")
 	for i, p := range pairs {
-		if k, v, ok := strings.Cut(p, "="); ok && strings.EqualFold(k, "token") {
+		if k, v, ok := strings.Cut(p, "="); ok && k == "token" {
 			pairs[i] = "=" + v
 		}
 	}
