@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -183,6 +184,41 @@ type Limits struct {
 	HoldBase    int64
 	HoldNovelty int64
 	Task        string // the one task the key serves; "" for none (KRN-5)
+}
+
+// Fold is the limits of caveats cs alone, as one link sets them.
+func Fold(cs []Caveat) (Limits, error) {
+	var l Limits
+	for _, c := range cs {
+		if err := l.apply(c, ID{}); err != nil {
+			return Limits{}, err
+		}
+	}
+	return l, nil
+}
+
+// Within reports whether l allows nothing b does not, its expiry aside: every
+// limit b sets, l sets at least as tightly.
+func (l Limits) Within(b Limits) bool {
+	sets := [][2][]string{{l.Verbs, b.Verbs}, {l.Content, b.Content}, {l.Labels, b.Labels}}
+	for _, s := range sets {
+		if s[1] != nil && (s[0] == nil || !subset(s[0], s[1])) {
+			return false
+		}
+	}
+	for name, o := range b.Args {
+		a := l.Args[name]
+		if (o.OneOf != nil && (a.OneOf == nil || !subset(a.OneOf, o.OneOf))) ||
+			(o.Min != nil && (a.Min == nil || *a.Min < *o.Min)) || (o.Max != nil && (a.Max == nil || *a.Max > *o.Max)) {
+			return false
+		}
+	}
+	for _, o := range b.Caps {
+		if !slices.ContainsFunc(l.Caps, func(c Cap) bool { return c.Kind == o.Kind && c.N <= o.N }) {
+			return false
+		}
+	}
+	return (b.Task == "" || l.Task == b.Task) && l.HoldBase >= b.HoldBase && l.HoldNovelty >= b.HoldNovelty
 }
 
 func subset(a, b []string) bool {

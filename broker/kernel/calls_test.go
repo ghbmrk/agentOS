@@ -3,6 +3,7 @@ package kernel_test
 // REQ: KRN-7, KRN-8, OWN-17, OWN-18
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -114,6 +115,10 @@ func TestADispatchStoppedSinceCallsIsNotSent(t *testing.T) {
 			if ok || r.phase("p1").Phase != tc.phase || r.status("p1") != tc.status || len(r.mail.Effects()) != 0 {
 				t.Fatalf("sent %v, phase %s, status %s", ok, r.phase("p1").Phase, r.status("p1"))
 			}
+			n := len(r.k.Log().Entries())
+			if ok, err := r.k.Send(1, c); ok || err != nil || len(r.k.Log().Entries()) != n {
+				t.Fatalf("a call sent again after its refusal: %v %v", ok, err)
+			}
 			r.calls(1+kernel.UnsentWait, 0)
 			r.replays()
 		})
@@ -152,6 +157,38 @@ func TestTheUnsentWaitBacksOff(t *testing.T) {
 	}
 	if wait != kernel.MaxUnsentWait {
 		t.Fatalf("the wait never reached its cap: %d", wait)
+	}
+	r.replays()
+}
+
+// STATUS lists each covered submit once sent, in the clerk's fixed wording,
+// for as long as a task approval lives; a line the owner could not be shown
+// as one line is not listed (CLK-3, #2705).
+func TestStatusListsCoveredSubmits(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"), st(key.Trash, "m2"))
+	r.plan("p2", r.ck, st(key.Trash, "m3"))
+	r.plan("p3", r.ck, st(key.Trash, "m4"))
+	r.plan("p4", r.ck, st(key.Trash, "m5"))
+	lines := map[string]string{"m1": "Sent on shop.example: Continue, 00:00 UTC", "m2": "Sent on shop.example: Place order, 00:01 UTC",
+		"m3": "Sent on other.example: Pay, 00:00 UTC", "m4": "bad\nline", "m5": strings.Repeat("x", kernel.MaxShown+1)}
+	for at := int64(1); at <= 3; at++ {
+		cs, err := r.k.Calls(at)
+		must(t, err)
+		for _, c := range cs {
+			var id string
+			for _, v := range c.Req.Step().Args {
+				id = v.Value
+			}
+			must(t, r.k.Answer(at, c, kernel.Result{Outcome: "ok", Covered: lines[id]}))
+		}
+	}
+	got := r.k.State().Covered(3)
+	if len(got) != 3 || got[0].Line != lines["m1"] || got[1].Line != lines["m3"] || got[2].Line != lines["m2"] || got[0].Clerk != "mail" {
+		t.Fatalf("covered %+v", got)
+	}
+	if n := len(r.k.State().Covered(got[2].At + kernel.TaskTimeout)); n != 0 {
+		t.Fatalf("%d lines listed past a task approval's life", n)
 	}
 	r.replays()
 }

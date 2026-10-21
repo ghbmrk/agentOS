@@ -494,3 +494,55 @@ func TestNarrowKeepsTheHolderAndNeverLoosens(t *testing.T) {
 		t.Fatalf("a narrowing below it is the holder's, and the passkey still counts: %v", err)
 	}
 }
+
+// Within holds when every limit the old link sets, the new one sets at least
+// as tightly (#2670 item 5).
+func TestWithin(t *testing.T) {
+	lo, hi := int64(2), int64(9)
+	old := []Caveat{LimitVerbs(Send, Trash), LimitContent("text"), LimitUses(3), LimitHold(10, 20), LimitTask("t1"),
+		{Kind: KArg, Arg: &ArgBound{Name: "to", OneOf: []string{"a", "b"}, Min: &lo, Max: &hi}}}
+	arg := func(oneOf []string, min, max *int64) Caveat {
+		return Caveat{Kind: KArg, Arg: &ArgBound{Name: "to", OneOf: oneOf, Min: min, Max: max}}
+	}
+	three, ten := int64(3), int64(10)
+	b, err := Fold(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		cs     []Caveat
+		within bool
+	}{
+		"same":            {old, true},
+		"fewer verbs":     {replace(old, 0, LimitVerbs(Trash)), true},
+		"another verb":    {replace(old, 0, LimitVerbs(Buy)), false},
+		"no verbs":        {old[1:], false},
+		"no content":      {append([]Caveat{old[0]}, old[2:]...), false},
+		"fewer uses":      {replace(old, 2, LimitUses(1)), true},
+		"more uses":       {replace(old, 2, LimitUses(4)), false},
+		"shorter hold":    {replace(old, 3, LimitHold(5, 20)), false},
+		"shorter novelty": {replace(old, 3, LimitHold(10, 15)), false},
+		"no arg max":      {replace(old, 5, arg([]string{"a", "b"}, &lo, nil)), false},
+		"another task":    {replace(old, 4, LimitTask("t2")), false},
+		"narrower arg":    {replace(old, 5, arg([]string{"a"}, &three, &hi)), true},
+		"no arg":          {old[:5], false},
+		"wider arg set":   {replace(old, 5, arg([]string{"a", "b", "c"}, &lo, &hi)), false},
+		"lower arg min":   {replace(old, 5, arg([]string{"a", "b"}, nil, &hi)), false},
+		"higher arg max":  {replace(old, 5, arg([]string{"a", "b"}, &lo, &ten)), false},
+		"open arg values": {replace(old, 5, arg(nil, &lo, &hi)), false},
+	} {
+		l, err := Fold(c.cs)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if l.Within(b) != c.within {
+			t.Errorf("%s: within %v, want %v", name, !c.within, c.within)
+		}
+	}
+}
+
+func replace(cs []Caveat, i int, c Caveat) []Caveat {
+	out := append([]Caveat(nil), cs...)
+	out[i] = c
+	return out
+}

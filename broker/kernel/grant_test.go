@@ -3,6 +3,7 @@ package kernel_test
 // REQ: KEY-1, KEY-4, KEY-6, KRN-7, CLK-2
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -59,9 +60,10 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 	}
 }
 
-// Only a renewal of a live clerk key, same root, holder and limits, with a
-// later expiry within ClerkLife, skips the hold (D-146).
-func TestOnlyASameLimitRenewalIsLiveAtOnce(t *testing.T) {
+// Only a renewal of a live clerk key, same root and holder, limits within the
+// old key's, with a later expiry within ClerkLife, skips the hold (D-146,
+// #2670 item 5).
+func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 	r := newRig(t)
 	at := 10 * hour
 	renew := func(name string, holder pair, spendDay, life int64, c ...key.Caveat) key.Key {
@@ -79,8 +81,8 @@ func TestOnlyASameLimitRenewalIsLiveAtOnce(t *testing.T) {
 	}{
 		{"same limits", renew("same", r.holder, 1<<40, key.ClerkLife), true},
 		{"a wider cap", renew("wider", r.holder, 1<<41, key.ClerkLife), false},
-		{"a narrower cap", renew("narrower", r.holder, 5, key.ClerkLife), false},
-		{"an added limit", renew("added", r.holder, 1<<40, key.ClerkLife, key.LimitUses(3)), false},
+		{"a narrower cap", renew("narrower", r.holder, 5, key.ClerkLife), true},
+		{"an added limit", renew("added", r.holder, 1<<40, key.ClerkLife, key.LimitUses(3)), true},
 		{"past ClerkLife", renew("long", r.holder, 1<<40, key.ClerkLife+1), false},
 		{"another holder", renew("other", gen(7), 1<<40, key.ClerkLife), false},
 	}
@@ -88,6 +90,24 @@ func TestOnlyASameLimitRenewalIsLiveAtOnce(t *testing.T) {
 		from, ok := r.k.State().Granted(c.k.Tip())
 		if !ok || (from == at) != c.live {
 			t.Fatalf("%s: live from %d (granted %v), want live at once %v", c.name, from, ok, c.live)
+		}
+	}
+	// A renewal that drops or loosens a limit of the old key waits the hold.
+	limited := r.grant(trashRoot(r, "r3", r.owner), 10, key.LimitUses(3), key.LimitHold(hour, hour))
+	for name, c := range map[string]struct {
+		cs   []key.Caveat
+		live bool
+	}{
+		"dropped":  {[]key.Caveat{key.LimitHold(hour, hour)}, false},
+		"loosened": {[]key.Caveat{key.LimitUses(4), key.LimitHold(hour, hour)}, false},
+		"shorter":  {[]key.Caveat{key.LimitUses(3), key.LimitHold(0, 0)}, false},
+		"narrowed": {[]key.Caveat{key.LimitUses(2), key.LimitHold(2*hour, 2*hour)}, true},
+	} {
+		k, err := key.ClerkKey(key.Key{Root: limited.Root}, r.owner.priv, r.holder.pub, at, 10, c.cs...)
+		must(t, err)
+		must(t, r.issue(at, k))
+		if from, _ := r.k.State().Granted(k.Tip()); (from == at) != c.live {
+			t.Errorf("%s: live from %d, want live at once %v", name, from, c.live)
 		}
 	}
 	// A renewal of a grant still in its hold is not live at once either.
@@ -397,5 +417,21 @@ func TestAClerkKeyLivesAtMostClerkLifeOnceLive(t *testing.T) {
 	}
 	if err := life(at + kernel.GrantHold + key.ClerkLife); err != nil {
 		t.Fatalf("a key of exactly ClerkLife once live: %v", err)
+	}
+}
+
+// An anchor is cut off only by recovery (REC-3): Unenroll refuses one, and a
+// log entry that cuts one off changes nothing (#2670 item 3).
+func TestAnAnchorIsNotCutOff(t *testing.T) {
+	r := newRig(t)
+	if err := r.k.Unenroll(1, r.spare.pub); !errors.Is(err, kernel.ErrAnchor) {
+		t.Fatalf("Unenroll of an anchor: %v", err)
+	}
+	_, err := r.k.Log().Append(1, kernel.TUnenrolled, 1, struct{ Passkey ed25519.PublicKey }{r.spare.pub})
+	must(t, err)
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if !key.In(re.Passkeys(), r.spare.pub) {
+		t.Fatal("a logged cut-off of an anchor took effect")
 	}
 }

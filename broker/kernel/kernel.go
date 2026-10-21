@@ -215,7 +215,12 @@ func (r Request) Step() key.Step {
 func (r Request) Idem() string { return Idem(r.Plan.ID, r.Index) }
 
 // Result is a clerk's answer. Outcome is ok, failed or unknown.
-type Result struct{ Outcome, Detail string }
+type Result struct {
+	Outcome, Detail string
+	// Covered is the STATUS line of a submit a task approval covered, in
+	// the clerk's fixed wording (CLK-3): "Sent on <site>: <label>, <time>".
+	Covered string
+}
 
 // Dispatch is what the log says of a step in flight: its first dispatch entry
 // and its hold, if any.
@@ -364,8 +369,16 @@ func (k *Kernel) Enroll(now int64, e key.Enrollment) error {
 // from its grants in the log stand until they lapse; it signs no new grant
 // and no plan under a bare root.
 func (k *Kernel) Unenroll(now int64, pk ed25519.PublicKey) error {
+	if key.In(k.s.Anchors, pk) {
+		return ErrAnchor
+	}
 	return k.owner(now, TUnenrolled, unenrolled{pk})
 }
+
+// ErrAnchor refuses cutting off a hardware key: an anchor is replaced only
+// by recovery (REC-3), never by an owner action one forged message could
+// make (#2670 item 3).
+var ErrAnchor = errors.New("kernel: an anchor is cut off only by recovery")
 
 // owned verifies ky as a chain from the owner and that its grants are live.
 // It is for keys the log already vouches for: a plan's key was held when the
@@ -561,6 +574,11 @@ func (k *Kernel) Reserve(now int64, pool string, reserve int64) error {
 // AdmitPool refuses work on a pool at the owner's reserve until it resets.
 // Past the reset time the provider gave, the reopening is logged as a widening.
 func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
+	if k.log.broken {
+		// The pool may have been reopened by a widening whose anchor failed
+		// (KRN-5, #2613 item 13).
+		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
+	}
 	if err := k.resetIfDue(now, pool); err != nil {
 		return &key.Refusal{Code: CPool, Detail: pool + ": " + err.Error()}
 	}
@@ -645,7 +663,11 @@ func (k *Kernel) decide(now int64, id string) error {
 }
 
 func (k *Kernel) result(now int64, id string, i int, outcome, detail string) error {
-	_, err := k.emit(now, TStepResult, stepResult{stepRef{id, i}, Idem(id, i), outcome, detail})
+	return k.answer(now, id, i, Result{Outcome: outcome, Detail: detail})
+}
+
+func (k *Kernel) answer(now int64, id string, i int, res Result) error {
+	_, err := k.emit(now, TStepResult, stepResult{stepRef{id, i}, Idem(id, i), res.Outcome, res.Detail, res.Covered})
 	return err
 }
 
@@ -692,7 +714,7 @@ func (k *Kernel) Answer(now int64, c Call, res Result) error {
 		_, err := k.emit(now, TStepProbed, stepProbed{stepRef{c.Req.Plan.ID, c.Req.Index}, res.Outcome})
 		return err
 	}
-	return k.result(now, c.Req.Plan.ID, c.Req.Index, res.Outcome, res.Detail)
+	return k.answer(now, c.Req.Plan.ID, c.Req.Index, res)
 }
 
 // Send is the last check before c goes to its clerk, made under the same

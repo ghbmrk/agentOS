@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -27,7 +28,8 @@ const (
 	ProbeEvery = 60_000 // ms between reconciliation checks
 	UnsentWait = 30_000 // ms before a step whose clerk was not reached is first sent again
 	// MaxUnsentWait caps the wait, which doubles at each unsent attempt, so
-	// a clerk down for a day costs a step about 60 entries, not thousands.
+	// a clerk down for a day costs a step about 95 resends (190 entries),
+	// not thousands.
 	MaxUnsentWait = UnsentWait << 5
 )
 
@@ -255,6 +257,7 @@ type (
 		Idem    string `json:"idem"`
 		Outcome string `json:"outcome"` // ok, failed, unknown
 		Detail  string `json:"detail"`
+		Covered string `json:"covered,omitempty"`
 	}
 	stepProbed struct {
 		stepRef
@@ -297,6 +300,8 @@ type StepState struct {
 	NextProbe   int64
 	Undone      bool
 	Detail      string // the clerk's last answer, for STATUS
+	Covered     string // a covered submit's STATUS line (CLK-3)
+	SentAt      int64  // when the log recorded it sent
 }
 
 type PlanState struct {
@@ -560,12 +565,13 @@ func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, erro
 	return max(from, r.From), nil
 }
 
-// renews reports whether k renews a live clerk key: same root and holder, the
-// same caveats but a later expiry, and neither lapsed, paused nor revoked
-// (D-146).
+// renews reports whether k renews a live clerk key: same root and holder,
+// limits within the old key's (a renewal may narrow, never widen) and a later
+// expiry, and neither lapsed, paused nor revoked (D-146, #2670 item 5).
 func (s *State) renews(k key.Key, at int64) bool {
-	exp, rest := expiry(k.Links[0].Caveats)
-	if exp == nil || *exp > at+key.ClerkLife {
+	exp := lapse(k.Links[0].Caveats)
+	lim, err := key.Fold(k.Links[0].Caveats)
+	if exp == nil || *exp > at+key.ClerkLife || err != nil {
 		return false
 	}
 	for id, g := range s.Grants {
@@ -573,8 +579,9 @@ func (s *State) renews(k key.Key, at int64) bool {
 			rootOf(g.Key) != rootOf(k) || !bytes.Equal(g.Key.Links[0].Holder, k.Links[0].Holder) {
 			continue
 		}
-		old, oldRest := expiry(g.Key.Links[0].Caveats)
-		if old != nil && *old > at && *exp >= *old && reflect.DeepEqual(rest, oldRest) {
+		old := lapse(g.Key.Links[0].Caveats)
+		was, err := key.Fold(g.Key.Links[0].Caveats)
+		if old != nil && *old > at && *exp >= *old && err == nil && lim.Within(was) {
 			return true
 		}
 	}
@@ -597,21 +604,6 @@ func lapse(cs []key.Caveat) *int64 {
 }
 
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
-
-// expiry splits out a link's expiry caveat.
-func expiry(cs []key.Caveat) (*int64, []key.Caveat) {
-	var exp *int64
-	rest := []key.Caveat{}
-	for _, c := range cs {
-		if c.Kind == key.KExpires && exp == nil {
-			n := c.N
-			exp = &n
-			continue
-		}
-		rest = append(rest, c)
-	}
-	return exp, rest
-}
 
 // owners is the passkey set a plan's key is verified against (PlanOwners).
 func (s *State) owners(k key.Key) []ed25519.PublicKey { return PlanOwners(s, s.Anchors, k) }
@@ -671,6 +663,41 @@ func (s *State) Status() []Unsettled {
 				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st)})
 		}
 	}
+	return out
+}
+
+// MaxShown bounds a clerk's line in STATUS.
+const MaxShown = 256
+
+// shown reports whether a clerk's text may go to the owner as one STATUS
+// line: bounded, valid UTF-8, no control characters.
+func shown(s string) bool {
+	return len(s) <= MaxShown && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl)
+}
+
+// CoveredLine is a submit a task approval covered, listed in STATUS once sent
+// (CLK-3).
+type CoveredLine struct {
+	Plan  string
+	Index int
+	Clerk string
+	Line  string
+	At    int64
+}
+
+// Covered lists the covered submits sent within TaskTimeout before now, the
+// longest a task approval lives, oldest first (CLK-3, #2705).
+func (s *State) Covered(now int64) []CoveredLine {
+	var out []CoveredLine
+	for _, id := range s.Order {
+		p := s.Plans[id]
+		for i, st := range p.Steps {
+			if st.Covered != "" && now-st.SentAt < TaskTimeout {
+				out = append(out, CoveredLine{id, i, p.Plan.Step(i).Clerk, st.Covered, st.SentAt})
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At < out[j].At })
 	return out
 }
 
@@ -735,6 +762,9 @@ func (s *State) Apply(e Entry) error {
 		b, err := body[unenrolled](e)
 		if err != nil {
 			return err
+		}
+		if key.In(s.Anchors, b.Passkey) {
+			break // ErrAnchor
 		}
 		s.Unenrolled = append(s.Unenrolled, b.Passkey)
 		s.dropApprovals(b.Passkey)
@@ -883,6 +913,9 @@ func (s *State) Apply(e Entry) error {
 			switch b.Outcome {
 			case "ok":
 				s.complete(p, b.Index, e.At)
+				if b.Covered != "" && shown(b.Covered) {
+					st.Covered, st.SentAt = b.Covered, e.At
+				}
 			case OUnsent:
 				st.Phase, st.NextProbe = PUnsent, e.At+unsentWait(st.Attempt)
 				if p.Status != SActive {
