@@ -298,10 +298,22 @@ class ForeignDisksTest(unittest.TestCase):
     SCRIPT = IMG / "mkosi/mkosi.extra/usr/lib/agentos/foreign-disks"
 
     def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3", namespaces=None, real_b=False):
-        """Runs the script on a stand-in /proc. mounts and swaps are space-separated sources;
-        namespaces is a list of further mount lists, each its own process's mountinfo; chains maps a
-        device to its lsblk -s lines ("NAME TYPE"). Unless real_b, every /dev name counts as a block device."""
+        """Runs the script on a stand-in /proc. mounts and swaps are space-separated sources; a mount
+        word NAME@MAJ:MIN names its device number, any other /dev name gets one of 252:N and any other
+        word (tmpfs, a 9p share) major 0. namespaces is a list of further mount lists, each its own
+        process's mountinfo; chains maps a /dev name to its lsblk -s lines ("NAME TYPE"). Unless real_b,
+        every /dev swap name counts as a block device."""
         chains = chains or {}
+        nums = {}
+
+        def mm(word):
+            name, _, num = word.partition("@")
+            if num:
+                nums[name] = num
+            elif name not in nums:
+                nums[name] = ("252:%d" if name.startswith("/dev/") else "0:%d") % (len(nums) + 1)
+            return nums[name]
+
         lines = lambda words: "".join("echo '%s'\n" % w for w in words.split())
 
         def stub(t, name, body):
@@ -314,14 +326,17 @@ class ForeignDisksTest(unittest.TestCase):
             for pid, ms in enumerate([mounts] + list(namespaces or []), 1):
                 (proc / str(pid)).mkdir(parents=True)
                 (proc / str(pid) / "mountinfo").write_text("".join(
-                    "%d 1 0:%d / /m%d rw - ext4 %s rw\n" % (i, i, i, m) for i, m in enumerate(ms.split(), 1)))
+                    "%d 1 %s / /m%d rw - ext4 %s rw\n" % (i, mm(m), i, m.partition("@")[0])
+                    for i, m in enumerate(ms.split(), 1)))
             (proc / "swaps").write_text("Filename Type Size Used Priority\n" +
                                         "".join("%s partition 1 0 -2\n" % w for w in swaps.split()))
-            stub(t, "findmnt", "echo %s\n" % root)
+            stub(t, "findmnt", "echo %s\n" % mm(root))
             stub(t, "readlink", 'echo "$2"\n')
+            keyed = dict(chains)
+            keyed.update({"/dev/block/" + nums[d]: out for d, out in chains.items() if d in nums})
             stub(t, "lsblk", 'case "$3" in\n%s*) exit 1 ;; esac\n' % "".join(
                 "%s) %s;;\n" % (dev, lines("\n".join(ln.replace(" ", "_") for ln in out)).replace("_", " "))
-                for dev, out in chains.items()))
+                for dev, out in keyed.items()))
             script = self.SCRIPT.read_text()
             if not real_b:
                 script = script.replace('[ -b "$d" ]', "true")
@@ -362,12 +377,26 @@ class ForeignDisksTest(unittest.TestCase):
         # A mount listing that cannot be read leaves no root source in it; that must not read as none.
         self.assertEqual(self.run_script("", chains=self.BOOT), "foreign=unknown")
 
-    def test_a_dev_source_that_is_not_a_block_device_is_listed(self):
+    def test_a_block_mount_whose_source_is_not_under_dev_is_listed(self):
+        # REQ: HW-8, ONB-2
+        # mount(2) takes any path as the source; the device number says what is mounted.
+        chains = dict(self.BOOT, **{"/run/hostdisk": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3 /run/hostdisk@252:90", chains=chains), "foreign=/dev/vdb1")
+        self.assertEqual(self.run_script("/dev/vda3 dev/vdb1@252:90", chains={
+            "dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"], **self.BOOT}), "foreign=/dev/vdb1")
+
+    def test_a_mount_with_an_anonymous_device_number_is_listed_by_its_source(self):
+        # REQ: HW-8, ONB-2
+        # btrfs reports major 0 and names the real device only as its source.
+        chains = dict(self.BOOT, **{"/dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1@0:50", chains=chains), "foreign=/dev/vdb1")
+
+    def test_a_swap_source_that_is_not_a_block_device_is_listed(self):
         # REQ: HW-8, ONB-2
         # Neither name is a block device here (/dev/null is a character device), so both are foreign.
         chains = dict(self.BOOT, **{"/dev/null": ["/dev/null disk"]})
-        self.assertEqual(self.run_script("/dev/vda3 /dev/null", chains=chains, real_b=True),
-                         "foreign=/dev/null,/dev/vda3")
+        self.assertEqual(self.run_script("/dev/vda3", swaps="/dev/null", chains=chains, real_b=True),
+                         "foreign=/dev/null")
 
     def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2

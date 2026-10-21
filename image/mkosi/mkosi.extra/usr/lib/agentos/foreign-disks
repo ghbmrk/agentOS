@@ -2,26 +2,36 @@
 # Prints "foreign=none", or "foreign=" and the block devices, comma-separated, that are mounted or
 # swapped on and do not sit on the disk the box booted from: a host PC's disk, a loop device, a
 # USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). The mounts are
-# read from every process's mountinfo, so a mount in a private namespace counts. Sources that are
-# not block devices (tmpfs, proc, a 9p share) are not disks and are not listed. Prints
-# "foreign=unknown" when the boot disk, the mount listing or a device cannot be read, so a damaged
-# answer is no "none". boot-report prints this on every boot and CI reads it with a host disk
-# attached (ci_boot.sh); the end-to-end run prints it again when it is done.
+# read from every process's mountinfo, so a mount in a private namespace counts, and a mount is a
+# block device by its major:minor number (major 0 is a virtual file system), not by the source
+# string, which a mount(2) call can write as any path. Prints "foreign=unknown" when the boot disk,
+# the mount listing or a device cannot be read, so a damaged answer is no "none". boot-report prints
+# this on every boot and CI reads it with a host disk attached (ci_boot.sh); the end-to-end run
+# prints it again when it is done.
 proc=${AGENTOS_PROC:-/proc}
-roots() { lsblk -snrpo NAME,TYPE "$1" 2>/dev/null | while read -r name type; do
+# chain DEV: lsblk's lines "NAME TYPE" for DEV and what it sits on; roots is the disks among them.
+chain() { lsblk -snrpo NAME,TYPE "$1" 2>/dev/null; }
+roots() { chain "$1" | while read -r name type; do
 	case $type in disk | loop | rom) echo "$name" ;; esac
 done | sort -u; }
-root=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')
-boot=$(roots "$root")
+rootmm=$(findmnt -no MAJ:MIN / 2>/dev/null)
+boot=$(roots "/dev/block/$rootmm")
 [ -n "$boot" ] && [ "$(echo "$boot" | wc -l)" = 1 ] || { echo "foreign=unknown"; exit 0; }
-# A source is the word two after the lone "-" in a mountinfo line. A process can exit while its file is
-# read, so errors are ignored; the listing must still name the root source, or it is not the listing.
-srcs=$( { cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
-	awk '{ for (i = 1; i < NF; i++) if ($i == "-") { print $(i + 2); break } }'
-	tail -n +2 "$proc/swaps" 2>/dev/null | cut -d' ' -f1; } | sed 's/\[.*//' | sort -u)
-echo "$srcs" | grep -qxF "$root" && [ -r "$proc/swaps" ] || { echo "foreign=unknown"; exit 0; }
+# The device number is the third field of a mountinfo line. A process can exit while its file is read,
+# so errors are ignored; the listing must still name the root's number, or it is not the listing.
+mms=$(cat "$proc"/[0-9]*/mountinfo 2>/dev/null | awk '$3 !~ /^0:/ { print $3 }' | sort -u)
+echo "$mms" | grep -qxF "$rootmm" && [ -r "$proc/swaps" ] || { echo "foreign=unknown"; exit 0; }
 bad=
-for s in $srcs; do
+for m in $mms; do
+	r=$(roots "/dev/block/$m")
+	[ -n "$r" ] || { echo "foreign=unknown"; exit 0; }
+	[ "$r" = "$boot" ] || bad="$bad,$(chain "/dev/block/$m" | head -n 1 | cut -d' ' -f1)"
+done
+# Swap is named by path, and so is a mount whose file system keeps its own anonymous device number
+# (major 0, as btrfs does) and names the real device only as its source.
+for s in $( { tail -n +2 "$proc/swaps" | cut -d' ' -f1
+	cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
+		awk '$3 ~ /^0:/ { for (i = 4; i < NF; i++) if ($i == "-") { print $(i + 2); break } }'; } | sort -u); do
 	case $s in /dev/*) ;; *) continue ;; esac
 	d=$(readlink -f "$s")
 	[ -b "$d" ] || { bad="$bad,$s"; continue; }
