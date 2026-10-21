@@ -3,6 +3,7 @@ package kernel_test
 // REQ: LOG-7, RES-5, KEY-3, KEY-4, KEY-6, KRN-7, LOG-1
 
 import (
+	"crypto/ed25519"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -219,7 +220,7 @@ func TestPausingTheCitedKeyStopsAnExtendedPlan(t *testing.T) {
 	if rf := r.k.AdmitSpend(4, "t1", 1); rf != nil {
 		t.Fatalf("the extended plan spends: %v", rf)
 	}
-	v, err := key.Chain(cited, r.owner.pub)
+	v, err := key.Chain(cited, []ed25519.PublicKey{r.owner.pub})
 	if err != nil {
 		t.Fatal(err)
 	}

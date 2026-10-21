@@ -250,3 +250,29 @@ func TestClerkWithoutFactsRefuses(t *testing.T) {
 		t.Fatalf("a claim the mailbox does not read was taken as given: %+v", r)
 	}
 }
+
+// lying is a view that vouches for every grant.
+type lying struct{ kernel.View }
+
+func (lying) Granted(key.ID) (int64, bool) { return 0, true }
+
+// The clerk checks a granted root's passkey against its own anchors: a view
+// that vouches for a root no passkey of the owner signed confers nothing
+// (D-146, CLK-2).
+func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
+	f := setup(t, key.Trash)
+	spub, spriv := gen(9)
+	_ = spub
+	hpub, _ := gen(2)
+	forged, err := key.ClerkKey(key.Issue(spriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "forged"}), spriv, hpub, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.request("i9", forged, stepOf(key.Trash))
+	if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
+		t.Fatalf("a forged root a lying view vouches for: %v", rf)
+	}
+	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
+		t.Fatalf("the mail clerk ran it: %+v", res)
+	}
+}

@@ -115,8 +115,9 @@ func TestBareRootIsUsedOnlyByThePasskey(t *testing.T) {
 	if c := admits(r, kernel.SignPlan(kernel.Plan{ID: "p1", Key: bare, Steps: steps}, r.owner.priv), 0); c != "" {
 		t.Fatalf("the passkey's one-off under the bare root: %q", c)
 	}
-	if _, err := key.Derive(bare, r.holder.priv, r.holder.pub, key.LimitExpires(1), key.LimitSpendDay(1)); !errors.Is(err, key.ErrNotHolder) {
-		t.Fatalf("the home clerk derives off the root: %v", err)
+	forged := key.Extend(bare, r.holder.priv, key.Link{Caveats: []key.Caveat{key.LimitExpires(1 << 40), key.LimitSpendDay(1)}, Holder: r.holder.pub})
+	if err := r.k.Issue(0, forged); !errors.Is(err, key.ErrBadSig) {
+		t.Fatalf("the home clerk grants itself a link off the root: %v", err)
 	}
 }
 
@@ -248,5 +249,102 @@ func TestReplayGrantsNothingFromACutOffPasskey(t *testing.T) {
 	}
 	if _, ok := s.Granted(ck.Tip()); !ok {
 		t.Fatal("its earlier grant stands")
+	}
+}
+
+// A renewal of a paused, lapsed or still-held clerk key is not live at once:
+// it is a new grant and waits its hold (D-146).
+func TestARenewalOfAPausedLapsedOrPendingKeyWaits(t *testing.T) {
+	r := newRig(t)
+	at := 10 * hour
+	renew := func(at int64) key.Key {
+		t.Helper()
+		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
+		must(t, err)
+		must(t, r.k.Issue(at, k))
+		return k
+	}
+	live := func(k key.Key, at int64) bool { from, _ := r.k.State().Granted(k.Tip()); return from <= at }
+	must(t, r.k.Pause(at, r.ck.Tip()))
+	if k := renew(at); live(k, at) {
+		t.Fatal("a renewal lifted a pause")
+	}
+	r = newRig(t)
+	late := key.ClerkLife + hour // the rig's clerk key lapsed an hour ago
+	if k := renew(late); live(k, late) {
+		t.Fatal("a renewal revived a lapsed key")
+	}
+	// A grant still in its hold, under a live root, renews nothing.
+	held, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at, 5)
+	must(t, err)
+	must(t, r.k.Issue(at, held))
+	again, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at+1, 5)
+	must(t, err)
+	must(t, r.k.Issue(at+1, again))
+	if live(again, at+1) {
+		t.Fatal("a renewal of a grant still in its hold is live")
+	}
+}
+
+// A renewal of a revoked clerk key waits the hold like a new grant (D-146).
+func TestARenewalOfARevokedKeyWaits(t *testing.T) {
+	r := newRig(t)
+	at := 10 * hour
+	must(t, r.k.Revoke(at, r.ck.Tip()))
+	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
+	must(t, err)
+	must(t, r.k.Issue(at, k))
+	if from, _ := r.k.State().Granted(k.Tip()); from == at {
+		t.Fatal("a renewal lifted a revoke")
+	}
+}
+
+// Any enrolled passkey renews the clerk key of a root an anchor granted, and
+// the renewal is the same budget: its daily cap does not stack on the old
+// key's (D-146).
+func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
+	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	old := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 15)
+	at := 10 * hour
+	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.priv, r.holder.pub, at, 15)
+	must(t, err)
+	must(t, r.k.Issue(at, k))
+	if from, _ := r.k.State().Granted(k.Tip()); from != at {
+		t.Fatalf("the phone's renewal is live from %d", from)
+	}
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
+	must(t, r.k.Submit(at, r.sign(kernel.Plan{ID: "p1", Key: old, Steps: []kernel.PlanStep{step}})))
+	must(t, r.k.Submit(at, r.sign(kernel.Plan{ID: "p2", Key: k, Steps: []kernel.PlanStep{step}})))
+	if s := r.k.State().Plans["p2"].Status; s == kernel.SRejected {
+		t.Fatal("a plan under the phone's renewal is rejected")
+	}
+	must(t, r.k.Meter(at, "p1", "api", 10, "provider"))
+	if rf := r.k.AdmitSpend(at, "p2", 5); rf != nil {
+		t.Fatalf("within the day cap: %v", rf)
+	}
+	if rf := r.k.AdmitSpend(at, "p2", 6); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("the renewal's cap stacked on the old key's: %v", rf)
+	}
+}
+
+// Revoking a passkey cancels the grants it signed that are still in their
+// hold; neither they nor a clerk key under them is listed or comes live.
+func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
+	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	root := trashRoot(r, "ph", phone)
+	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 1, 10)
+	must(t, err)
+	must(t, r.k.Issue(1, root, ck))
+	must(t, r.k.Unenroll(2, phone.pub))
+	if got := r.k.State().Pending(3); len(got) != 0 {
+		t.Fatalf("a cut-off passkey's grants still pending: %d", len(got))
+	}
+	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
+	if c := admits(r, p, 3*kernel.GrantHold); c == "" {
+		t.Fatal("a cut-off passkey's pending grant came live")
 	}
 }

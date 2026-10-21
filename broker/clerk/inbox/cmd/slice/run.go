@@ -301,7 +301,7 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, holder 
 // keyView is what the key lets its holder do, read from the key itself; the
 // holder signs, as any use of a key must.
 func keyView(k key.Key, holder ed25519.PrivateKey, owner ed25519.PublicKey, account string) (KeyView, error) {
-	v, err := key.Verify(k, owner, nil, key.Sign(k, holder, nil))
+	v, err := key.Verify(k, []ed25519.PublicKey{owner}, nil, key.Sign(k, holder, nil))
 	if err != nil {
 		return KeyView{}, err
 	}
@@ -340,7 +340,7 @@ func rejectionCode(k *kernel.Kernel, plan string) string {
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.
 func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, planner ed25519.PrivateKey, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
-	ver, err := key.Verify(unsub, owner, nil, key.Sign(unsub, planner, nil))
+	ver, err := key.Verify(unsub, []ed25519.PublicKey{owner}, nil, key.Sign(unsub, planner, nil))
 	if err != nil {
 		return []Hold{}
 	}

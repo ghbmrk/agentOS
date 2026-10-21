@@ -29,7 +29,7 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
 	}
-	v, err := VerifyPlan(p, s.owner(p.Key))
+	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err != nil {
 		return key.ID{}, nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
@@ -54,11 +54,11 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 			}
 			fresh[fp] = true
 		}
-		for _, id := range v.IDs {
+		for _, id := range v.Scopes() {
 			ov.extra[id] = append(ov.extra[id], key.Use{At: now, Amount: st.Amount, Recipient: st.Recipient, Task: st.Task})
 		}
 	}
-	return v.Root(), v.IDs, nil
+	return v.Root(), v.Scopes(), nil
 }
 
 type overlay struct {
@@ -142,7 +142,7 @@ func Next(s *State, id string, now int64) Act {
 	default:
 		return a
 	}
-	v, err := VerifyPlan(p.Plan, s.owner(p.Plan.Key))
+	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
 		return a
@@ -300,27 +300,11 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
 func (k *Kernel) Issue(now int64, keys ...key.Key) error {
-	in := map[key.ID]bool{}
-	for _, ky := range keys {
-		if len(ky.Links) > 1 {
-			return ErrNotAGrant
-		}
-		if err := key.CheckChain(ky, k.s.passkey(ky)); err != nil {
-			return err
-		}
-		if r := rootOf(ky); len(ky.Links) == 1 && !in[r] {
-			if _, ok := k.s.Grants[r]; !ok {
-				return ErrNotAGrant
-			}
-		}
-		in[ky.Tip()] = true
+	if _, err := k.s.grants(keys, now); err != nil {
+		return err
 	}
-	return k.owner(now, TKeyIssued, grants{keys})
+	return k.owner(now, TKeyIssued, grantBatch{keys})
 }
-
-// ErrNotAGrant refuses a key that is neither a root nor a first link off a
-// root in the log or the same batch.
-var ErrNotAGrant = errors.New("kernel: only a root or a first link off a granted root is granted")
 
 // ErrNotEnrolled refuses an enrollment no anchor signed.
 var ErrNotEnrolled = errors.New("kernel: enrollment not signed by an anchor")
@@ -346,7 +330,7 @@ func (k *Kernel) Unenroll(now int64, pk ed25519.PublicKey) error {
 // plan was admitted (VerifyPlan), and an extension comes over the owner
 // channel. The result can be charged but never authorizes a step.
 func (k *Kernel) owned(now int64, ky key.Key) (*key.Verified, *key.Refusal) {
-	v, err := key.Chain(ky, k.s.owner(ky))
+	v, err := key.Chain(ky, k.s.owners(ky))
 	if err != nil {
 		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
@@ -420,7 +404,7 @@ func (k *Kernel) Meter(now int64, plan, route string, amount int64, source strin
 	if r != nil {
 		return r
 	}
-	_, err := k.emit(now, TModelUsed, modelUsed{v.Root(), v.IDs, plan, route, amount, source})
+	_, err := k.emit(now, TModelUsed, modelUsed{v.Root(), v.Scopes(), plan, route, amount, source})
 	return err
 }
 

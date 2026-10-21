@@ -173,7 +173,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	if w.unconfirmed {
 		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
 	}
-	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwner(v, w.anchors, r.Plan.Key))
+	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, w.anchors, r.Plan.Key))
 	if err != nil {
 		w.effects = append(w.effects, effect{r.Idem(), now, ""})
 		w.bad = append(w.bad, "effect under an invalid key or one its submitter does not hold")
@@ -465,6 +465,9 @@ func (s *sim) op() error {
 		return s.submit()
 	case c < 9:
 		s.now += int64(s.pick(5*60)) * 60_000 / 10
+		if s.pick(25) == 0 { // a day passes, so a new grant's hold runs out
+			s.now += kernel.GrantHold
+		}
 		if s.hostile {
 			s.ahead = s.pastHolds()
 		}
@@ -557,7 +560,7 @@ func (s *sim) pastHolds() int64 {
 			if p.Steps[i].Phase != kernel.PHeld {
 				continue
 			}
-			if v, err := kernel.VerifyPlan(p.Plan, s.owner.pub); err == nil {
+			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
 				due := p.Steps[i].HeldAt + v.Limits.Window(p.Steps[i].Novel)
 				ahead = max(ahead, due-s.now+60_000)
 			}
@@ -636,7 +639,7 @@ func Run(c Config) (*Result, error) {
 	if err := s.boot(); err != nil {
 		return nil, err
 	}
-	for i := 0; i < 2; i++ { // set up a day ago, so past the hold
+	for i := 0; i < 4; i++ { // set up a day ago, so past the hold
 		r := s.newRoot()
 		k := s.clerkKey(s.owner.priv, r)
 		if err := s.k.Issue(-kernel.GrantHold, r, k); err != nil {

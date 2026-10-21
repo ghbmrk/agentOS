@@ -767,7 +767,7 @@ func TestPlanTextMustBeUTF8(t *testing.T) {
 	b := a
 	b.Steps = []kernel.PlanStep{st(key.Organize, "m\xfe")}
 	for _, p := range []kernel.Plan{a, b} {
-		if _, err := kernel.VerifyPlan(p, r.owner.pub); !errors.Is(err, kernel.ErrNotText) {
+		if _, err := kernel.VerifyPlan(p, []ed25519.PublicKey{r.owner.pub}); !errors.Is(err, kernel.ErrNotText) {
 			t.Fatalf("verify %q: %v, want ErrNotText", p.Steps[0].Args, err)
 		}
 	}

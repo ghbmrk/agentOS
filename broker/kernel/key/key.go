@@ -362,11 +362,39 @@ func (k Key) Tip() ID {
 	return id
 }
 
+// holder is who signs a use of k or the next link: the last link's holder,
+// or for a bare root any passkey in the owner's set (nil here).
 func (k Key) holder() ed25519.PublicKey {
 	if n := len(k.Links); n > 0 {
 		return k.Links[n-1].Holder
 	}
-	return k.Root.Owner
+	return nil
+}
+
+// signedBy reports whether pk signed msg, as one named signer or, when
+// signer is nil, as any passkey in owners.
+func signedBy(signer ed25519.PublicKey, owners []ed25519.PublicKey, msg, sig []byte) bool {
+	if signer != nil {
+		return ed25519.Verify(signer, msg, sig)
+	}
+	for _, p := range owners {
+		if len(p) == ed25519.PublicKeySize && ed25519.Verify(p, msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// SignedBy reports whether pk signed grant k: a root it issued, or a first
+// link it signed.
+func SignedBy(k Key, pk ed25519.PublicKey) bool {
+	if len(pk) != ed25519.PublicKeySize {
+		return false
+	}
+	if len(k.Links) == 0 {
+		return bytes.Equal(k.Root.Owner, pk)
+	}
+	return ed25519.Verify(pk, linkMsg(rootID(k.Root), k.Links[0]), k.Links[0].Sig)
 }
 
 // Extend signs and appends l without checking narrowness. Verify rejects a
@@ -385,7 +413,7 @@ func Extend(k Key, holder ed25519.PrivateKey, l Link) Key {
 // the root without an expiry and a daily spend cap: the chain check below is
 // the one place both rules live.
 func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Caveat) (Key, error) {
-	if !bytes.Equal(holder.Public().(ed25519.PublicKey), k.holder()) {
+	if h := k.holder(); h != nil && !bytes.Equal(holder.Public().(ed25519.PublicKey), h) {
 		return Key{}, ErrNotHolder
 	}
 	out := Extend(k, holder, Link{Caveats: cav, Holder: next})
@@ -404,10 +432,11 @@ func ClerkKey(root Key, passkey ed25519.PrivateKey, clerk ed25519.PublicKey, now
 
 // Verified is a key whose chain has checked out.
 type Verified struct {
-	Key    Key
-	IDs    []ID // the root's ID, then each link's: every prefix
-	Limits Limits
-	held   bool // set by Verify only: the submitter signed as the tip's holder
+	Key     Key
+	IDs     []ID // the root's ID, then each link's: every prefix
+	Limits  Limits
+	held    bool // set by Verify only: the submitter signed as the tip's holder
+	account ID   // the first link's budget (account)
 }
 
 // Sign is the tip holder's proof of possession: its signature over the key's
@@ -420,19 +449,18 @@ func useMsg(tip ID, use []byte) []byte {
 	return append(append([]byte(DomainUse), tip[:]...), use...)
 }
 
-// Verify checks the chain from the owner's public key, every signature and
+// Verify checks the chain from the owner's passkeys, every signature and
 // every link narrowing and canonical, and that sig is the tip holder's
 // signature over use. It is the only way to a Verified, so nothing is
-// authorized for a submitter who cannot sign as the key's last holder.
-func Verify(k Key, owner ed25519.PublicKey, use, sig []byte) (*Verified, error) {
-	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
-		return nil, ErrWrongOwner
-	}
-	v, err := verifyChain(k, owner)
+// authorized for a submitter who cannot sign as the key's last holder. The
+// root is signed by its owner, which must be in owners; a first link, and a
+// use of a bare root, by any passkey in owners (D-146).
+func Verify(k Key, owners []ed25519.PublicKey, use, sig []byte) (*Verified, error) {
+	v, err := Chain(k, owners)
 	if err != nil {
 		return nil, err
 	}
-	if !ed25519.Verify(k.holder(), useMsg(v.ID(), use), sig) {
+	if !signedBy(k.holder(), owners, useMsg(v.ID(), use), sig) {
 		return nil, ErrNotHolder
 	}
 	v.held = true
@@ -443,23 +471,23 @@ func Verify(k Key, owner ed25519.PublicKey, use, sig []byte) (*Verified, error) 
 // vouches for, a plan's key (held when its plan was admitted) or an
 // extension the owner granted. Its Verified can be charged (Spend) but never
 // authorizes a step, since nobody has signed as its holder.
-func Chain(k Key, owner ed25519.PublicKey) (*Verified, error) {
-	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
+func Chain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
+	if !In(owners, k.Root.Owner) {
 		return nil, ErrWrongOwner
 	}
-	return verifyChain(k, owner)
+	return verifyChain(k, owners)
 }
 
-// CheckChain checks a key as data, without a use: for an owner issuing a
-// root into the log. It confers nothing.
-func CheckChain(k Key, owner ed25519.PublicKey) error {
-	_, err := Chain(k, owner)
+// CheckChain checks a key as data, without a use: for an owner granting a
+// root or a first link into the log. It confers nothing.
+func CheckChain(k Key, owners []ed25519.PublicKey) error {
+	_, err := Chain(k, owners)
 	return err
 }
 
-// verifyChain verifies k. With owner nil it skips only the root signature
-// check, for Derive, which has already been handed a key the caller holds.
-func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
+// verifyChain verifies k. With owners nil it skips the signature checks, for
+// Derive, which has already been handed a key the caller holds.
+func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 	r := k.Root
 	if len(r.Owner) != ed25519.PublicKeySize || r.Clerk == "" || len(r.Verbs) == 0 || len(k.Links) > MaxLinks {
 		return nil, ErrMalformed
@@ -474,27 +502,34 @@ func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 	if !canonical(vs) {
 		return nil, fmt.Errorf("%w: root verbs not canonical", ErrMalformed)
 	}
-	if owner != nil && !ed25519.Verify(r.Owner, append([]byte(DomainRoot), rootBody(r)...), r.Sig) {
+	if owners != nil && !ed25519.Verify(r.Owner, append([]byte(DomainRoot), rootBody(r)...), r.Sig) {
 		return nil, ErrBadSig
 	}
 	v := &Verified{Key: k, IDs: []ID{rootID(r)}, Limits: Limits{Clerk: r.Clerk, Verbs: vs}}
-	holder := r.Owner
+	var holder ed25519.PublicKey // a first link: any passkey in owners
 	for _, l := range k.Links {
 		prev := v.IDs[len(v.IDs)-1]
 		if len(l.Holder) != ed25519.PublicKeySize {
 			return nil, ErrMalformed
 		}
-		if owner != nil && !ed25519.Verify(holder, linkMsg(prev, l), l.Sig) {
+		if owners != nil && !signedBy(holder, owners, linkMsg(prev, l), l.Sig) {
 			return nil, ErrBadSig
 		}
-		// Full power stays with the passkey: every key derived from the
-		// root lapses and is capped (D-145, D-146).
-		if len(v.IDs) == 1 && !bounded(l.Caveats) {
-			return nil, ErrUncaveated
-		}
 		id := linkID(prev, l)
+		scope := id
+		if len(v.IDs) == 1 {
+			// Full power stays with the passkeys: every key derived from
+			// the root lapses and is capped (D-145, D-146), and its caps
+			// count against the clerk's account under the root, so a
+			// renewal starts no fresh budget.
+			if !bounded(l.Caveats) {
+				return nil, ErrUncaveated
+			}
+			scope = account(prev, l.Holder)
+			v.account = scope
+		}
 		for _, c := range l.Caveats {
-			if err := v.Limits.apply(c, id); err != nil {
+			if err := v.Limits.apply(c, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -502,6 +537,28 @@ func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 		holder = l.Holder
 	}
 	return v, nil
+}
+
+// account names a clerk's budget under a root: every first link to that
+// holder, a renewal or a wider grant, is charged to it.
+func account(root ID, holder ed25519.PublicKey) ID {
+	h := sha256.New()
+	h.Write([]byte(domainID))
+	h.Write([]byte("account\x00"))
+	h.Write(root[:])
+	h.Write(holder)
+	var id ID
+	h.Sum(id[:0])
+	return id
+}
+
+// Scopes are what a use of v is charged to: every prefix of its chain and
+// the clerk's account under the root.
+func (v *Verified) Scopes() []ID {
+	if len(v.IDs) < 2 {
+		return v.IDs
+	}
+	return append(append([]ID{}, v.IDs...), v.account)
 }
 
 // ID is the key's own ID: its tip.
@@ -567,13 +624,4 @@ func In(set []ed25519.PublicKey, pk ed25519.PublicKey) bool {
 		}
 	}
 	return false
-}
-
-// Owner is the passkey to verify k against: its root's owner when that is in
-// set, else nil, which Verify and Chain refuse (ErrWrongOwner).
-func Owner(set []ed25519.PublicKey, k Key) ed25519.PublicKey {
-	if In(set, k.Root.Owner) {
-		return k.Root.Owner
-	}
-	return nil
 }

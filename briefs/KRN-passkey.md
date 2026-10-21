@@ -23,7 +23,7 @@ Out of scope: co-signing big widenings (next PR), the owner notice and the passk
 ## Acceptance tests
 
 - KEY-3, KEY-4, D-145, D-146: `broker/kernel/key/key_test.go::TestKeyOffTheRootLapsesAndIsCapped`, `::TestBareRootIsThePasskeysAlone`, `::TestPasskeysAreTheAnchorsAndWhatTheyEnroll`
-- KEY-1, KEY-4, KEY-6, CLK-2, KRN-7: `broker/kernel/grant_test.go`, all ten tests
+- KEY-1, KEY-4, KEY-6, CLK-2, KRN-7: `broker/kernel/grant_test.go`, every test
 - EVL-1: `broker/kernel/sim/sim_test.go::TestSweepHoldsInvariants` and `::TestMutantsAreCaught`, with grants, renewals and a home clerk signing under a bare root
 
 ## Estimate
