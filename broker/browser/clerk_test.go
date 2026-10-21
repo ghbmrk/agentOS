@@ -1,6 +1,6 @@
 package browser
 
-// REQ: CLK-2, CLK-3, CLK-5, KRN-8, ADP-14
+// REQ: CLK-2, CLK-3, CLK-5, KRN-8
 
 import (
 	"crypto/ed25519"
@@ -95,7 +95,7 @@ func (r *clerkRig) step(id string) kernel.StepState {
 const navUnsub = `{"v":0,"verb":"navigate","url":"` + unsubURL + `"}`
 
 // A step that claims read for an action that may change state is refused
-// before anything reaches the driver (CLK-3, ADP-14).
+// before anything reaches the driver (CLK-3).
 func TestReadThatChangesStateIsRefusedUnsent(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	r.run(t, 0, "p1", r.root, read(navUnsub))
