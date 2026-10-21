@@ -89,3 +89,69 @@ func TestAnUnreachedProbeCountsNoCheck(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A dispatch is checked again just before it goes to its clerk: a STOP,
+// revoke or cancel logged since Calls cancels it unsent, and a pause leaves
+// it unsent until the key resumes. Nothing reaches the clerk (KRN-7).
+func TestADispatchStoppedSinceCallsIsNotSent(t *testing.T) {
+	for name, tc := range map[string]struct {
+		change func(*rig) error
+		phase  string
+		status string
+	}{
+		"stop":   {func(r *rig) error { return r.k.Stop(1) }, kernel.PCancelled, kernel.SCancelled},
+		"revoke": {func(r *rig) error { return r.k.Revoke(1, r.ck.Tip()) }, kernel.PCancelled, kernel.SCancelled},
+		"cancel": {func(r *rig) error { return r.k.Cancel(1, "p1") }, kernel.PCancelled, kernel.SCancelled},
+		"pause":  {func(r *rig) error { return r.k.Pause(1, r.ck.Tip()) }, kernel.PUnsent, kernel.SActive},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.plan("p1", r.ck, st(key.Trash, "m1"))
+			c := r.calls(1, 1)[0]
+			must(t, tc.change(r))
+			ok, err := r.k.Send(1, c)
+			must(t, err)
+			if ok || r.phase("p1").Phase != tc.phase || r.status("p1") != tc.status || len(r.mail.Effects()) != 0 {
+				t.Fatalf("sent %v, phase %s, status %s", ok, r.phase("p1").Phase, r.status("p1"))
+			}
+			r.calls(1+kernel.UnsentWait, 0)
+			r.replays()
+		})
+	}
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	ok, err := r.k.Send(1, r.calls(1, 1)[0])
+	if err != nil || !ok {
+		t.Fatalf("an unchanged dispatch: %v %v", ok, err)
+	}
+}
+
+// While a step is unsent its effect may still happen once its clerk is back,
+// so a second plan with the same irreversible effect is refused (KRN-8).
+func TestAnUnsentStepBlocksTheSameEffect(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Unsubscribe, "list-a"))
+	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+	r.plan("p2", r.ck, st(key.Unsubscribe, "list-a"))
+	if r.status("p2") != kernel.SRejected {
+		t.Fatalf("a second plan for an unsent effect: %s", r.status("p2"))
+	}
+}
+
+// The wait before an unsent step is sent again doubles at each attempt, up
+// to MaxUnsentWait, so a clerk that stays down does not fill the log.
+func TestTheUnsentWaitBacksOff(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	at, wait := int64(1), int64(kernel.UnsentWait)
+	for i := 0; i < 8; i++ {
+		must(t, r.k.Answer(at, r.calls(at, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+		r.calls(at+wait-1, 0)
+		at += wait
+		wait = min(2*wait, kernel.MaxUnsentWait)
+	}
+	if wait != kernel.MaxUnsentWait {
+		t.Fatalf("the wait never reached its cap: %d", wait)
+	}
+	r.replays()
+}
