@@ -134,8 +134,9 @@ type Gate struct {
 }
 
 // cover is a task approval as the clerk read it from the log: the site it
-// covers and the held request the owner gave it over (CLK-3).
-type cover struct{ site, first string }
+// covers (CLK-3). The held request it was given over is covered like any
+// other request on that site, so the gate needs nothing more of it.
+type cover struct{ site string }
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {

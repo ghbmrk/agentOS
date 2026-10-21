@@ -38,13 +38,17 @@ func TestSecretScreenWords(t *testing.T) {
 		"/account/tokens", "/settings/security", "/account/security", "Sign-in & security", "Account security", "Security", "Set PIN",
 		"Change your PIN", "Download backup", "Seed phrase", "/vault?token=abc&view=export",
 		// Plurals (CLK-5 "Secret screens").
-		"Access tokens", "API tokens", "Security questions", "Passphrases", "Passcodes", "Authenticators", "OTPs", "Secrets", "SSH keys"} {
+		"Access tokens", "API tokens", "Security questions", "Passphrases", "Passcodes", "Authenticators", "OTPs", "Secrets", "SSH keys",
+		// A checkout's own phrase beside a secret verb still marks the screen.
+		"Change PIN code", "Reset your PIN code", "Enter security code", "Enter the security code we sent to your phone",
+		"Send security code", "Security code sent", "Gift card PIN reset", "New PIN code", "/cards/pin-code",
+		"Set a new PIN code", "Reset PIN code", "Home security settings", "/vault?export=1", "/account?view=recovery"} {
 		if secretText(s) == "" {
 			t.Errorf("%q not read as a secret screen", s)
 		}
 	}
 	for _, s := range []string{"Place order", "Continue", "/checkout/shipping", "Promo code", "Sign in", "Keyboard", "Security code", "Card security code", "Gift card PIN",
-		"PIN code", "Remember this device", "/products/backup-battery", "/checkout?token=abc", "Smart home security", "Enamel pin"} {
+		"Remember this device", "/checkout?token=abc", "Smart home security", "Enamel pin"} {
 		if w := secretText(s); w != "" {
 			t.Errorf("%q read as a secret screen (%q)", s, w)
 		}

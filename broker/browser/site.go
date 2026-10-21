@@ -35,8 +35,8 @@ func site(rawURL string) string {
 // back up, change account recovery or security. Pairs are matched joined
 // ("two factor" as "twofactor"), and each word also matches its plural
 // ("Passphrases"). The list fails closed: a word counts on
-// its own, and only the checkout phrases in notSecret, which use the same
-// words for something else, are passed over. A false match costs one more
+// its own, and only the whole checkout texts in notSecret, which use the
+// same words for something else, are passed over. A false match costs one more
 // tap; a miss would let a task's tap cover a secret (#2689 item 3).
 var secretWords = wordSet(`password passcode passkey passphrase recovery
 	mfa 2fa 2sv twofactor twostep onetime otp totp authenticator authentication
@@ -48,13 +48,13 @@ func isSecret(w string) bool {
 	return secretWords[w] || strings.HasSuffix(w, "s") && secretWords[w[:len(w)-1]]
 }
 
-// notSecret are the phrases a checkout or a product page shows that use a
-// secret word for something else: a card's security code, a gift card's
-// PIN, a "remember this device" box, a home security product.
-var notSecret = [][]string{
-	{"security", "code"}, {"gift", "card", "pin"}, {"pin", "code"}, {"enamel", "pin"},
-	{"remember", "this", "device"}, {"home", "security"}, {"backup", "battery"},
-}
+// notSecret are the whole texts a checkout or a product page shows that
+// use a secret word for something else: a card's security code, a gift
+// card's PIN, a "remember this device" box, a home security product. Only
+// a text that is exactly one of them is passed over, so "Enter security
+// code" or "Change PIN code" beside it still marks the screen.
+var notSecret = wordSet(`securitycode cardsecuritycode giftcardpin rememberthisdevice
+	homesecurity smarthomesecurity enamelpin`)
 
 // secretText is the first of texts' words, or joined word pairs, that
 // reads as a secret screen, "" if none. A URL's query parameter named
@@ -62,14 +62,10 @@ var notSecret = [][]string{
 func secretText(texts ...string) string {
 	for _, t := range texts {
 		w := words(dropTokenKey(t))
-	next:
-		for i := 0; i < len(w); i++ {
-			for _, p := range notSecret {
-				if hasPrefix(w[i:], p) {
-					i += len(p) - 1
-					continue next
-				}
-			}
+		if notSecret[strings.Join(w, "")] {
+			continue
+		}
+		for i := range w {
 			if isSecret(w[i]) {
 				return w[i]
 			}
@@ -79,18 +75,6 @@ func secretText(texts ...string) string {
 		}
 	}
 	return ""
-}
-
-func hasPrefix(w, p []string) bool {
-	if len(w) < len(p) {
-		return false
-	}
-	for i := range p {
-		if w[i] != p[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // dropTokenKey is t with the key of a "token=" query parameter removed,

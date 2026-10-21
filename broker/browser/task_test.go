@@ -165,39 +165,48 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 		tc         func(Approval) cover
 		want       string
 	}{
-		"held":       {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
-		"later":      {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, ""},
-		"other site": {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com", a.Print} }, "another site"},
-		"no site":    {orderPage, pressBuy, func(a Approval) cover { return cover{"", "ap1:other"} }, "another site"},
+		"held":       {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site} }, ""},
+		"other site": {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com"} }, "another site"},
+		"no site":    {orderPage, pressBuy, func(a Approval) cover { return cover{""} }, "another site"},
 		// A request on a secret screen never rides a task approval, even
 		// the held one: it is approved per step (VRB-1).
-		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, `(VRB-1: "password")`},
+		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "password")`},
 		"secret checkbox": {"- main [ref=e1]:\n  - checkbox \"I saved my recovery codes\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "recovery")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "recovery")`},
 		"secret radio": {"- main [ref=e1]:\n  - radio \"Text me a passcode\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "passcode")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "passcode")`},
+		"secret option": {"- main [ref=e1]:\n  - option \"Export all data\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "export")`},
+		"secret listbox": {"- main [ref=e1]:\n  - listbox \"Recovery options\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "recovery")`},
+		"secret menuitemcheckbox": {"- main [ref=e1]:\n  - menuitemcheckbox \"Show passwords\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "passwords")`},
+		"secret menuitemradio": {"- main [ref=e1]:\n  - menuitemradio \"Use an authenticator\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "authenticator")`},
+		"secret slider": {"- main [ref=e1]:\n  - slider \"PIN length\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "pin")`},
 		"secret switch": {"- main [ref=e1]:\n  - switch \"Two-step sign-in\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "two step")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "two step")`},
 		"script link": {"- main [ref=e1]:\n  - link \"Place order\" [ref=e9]:\n    - /url: javascript:void(0)", pressBuy,
-			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, ""},
+			func(a Approval) cover { return cover{"example.test"} }, ""},
 		"cross-site link": {"- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test/confirm?step=2", pressBuy,
-			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, "another site"},
+			func(a Approval) cover { return cover{"example.test"} }, "another site"},
 		"unparsed target": {"- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test\\confirm?go=1", pressBuy,
-			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, "another site"},
-		"secret url": {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+			func(a Approval) cover { return cover{"example.test"} }, "another site"},
+		"secret url": {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site} }, "secret"},
 		"secret target": {"- main [ref=e1]:\n  - link \"Continue\" [ref=e9]:\n    - /url: /confirm/recovery-codes?step=2", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+			func(a Approval) cover { return cover{a.Site} }, "secret"},
 		"secret heading": {"- main [ref=e1]:\n  - heading \"Recovery codes\" [ref=e2]\n  - button \"Generate\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
-		"secret name": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+			func(a Approval) cover { return cover{a.Site} }, "secret"},
+		"secret name": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site} }, "secret"},
 		"secret field": {orderPage + "\n  - textbox \"Backup codes\" [ref=e4]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "backup")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "backup")`},
 		"add a device": {"- main [ref=e1]:\n  - heading \"Trusted devices\" [ref=e2]\n  - button \"Add a device\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "device")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "device")`},
 		"export": {"- main [ref=e1]:\n  - button \"Export\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "export")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "export")`},
 		"create token": {"- main [ref=e1]:\n  - textbox \"Token name\" [ref=e4]\n  - button \"Create\" [ref=e9]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "token")`},
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "token")`},
 	} {
 		path := "/checkout"
 		if name == "secret url" {
@@ -228,7 +237,7 @@ func TestSitelessPageIsNeverCovered(t *testing.T) {
 	h := newHarness(t, map[string]any{"snapshot": blank}, "", 0)
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	a := approvalOf(t, h.do(t, pressBuy))
-	tc := cover{"", "ap1:other"}
+	tc := cover{""}
 	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, &tc); a.Site != "" || written || !strings.Contains(res.Detail, "another site") {
 		t.Fatalf("site %q: %+v", a.Site, res)
 	}

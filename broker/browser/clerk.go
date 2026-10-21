@@ -88,7 +88,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 				c.record(id, ran{})
 				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 			}
-			tc = &cover{site: a.Site, first: a.First}
+			tc = &cover{site: a.Site}
 		}
 		// A redo of a submit this clerk wrote and did not see succeed is
 		// the owner's RETRY: Probe answers unknown for it, so the kernel
