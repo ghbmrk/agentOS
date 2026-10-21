@@ -39,7 +39,7 @@ type Approval struct {
 	FieldsOmitted int `json:"fields_omitted,omitempty"`
 	// Unknown names what the gate cannot read and the prompt must say is
 	// unknown: the accessibility snapshot shows no method, hidden fields
-	// or fields the agent did not type (K15).
+	// or untyped fields, those the agent did not type (K15).
 	Unknown []string `json:"unknown"`
 	// Request is the canonical request the gate would send, capped.
 	Request string `json:"request"`
@@ -66,7 +66,7 @@ type Field struct {
 const withheld = "[withheld]"
 
 // unknown is what no approval can show yet (K15).
-var unknown = []string{"method", "hidden fields", "fields the agent did not type"}
+var unknown = []string{"method", "hidden fields", "untyped fields"}
 
 // printPrefix marks an approval print, versioned.
 const printPrefix = "ap1:"
@@ -157,13 +157,13 @@ func (g *Gate) untoken(raw string) string {
 	if len(g.tokens) == 0 {
 		return raw
 	}
-	q := strings.IndexByte(raw, '?')
+	end := len(raw)
+	if h := strings.IndexByte(raw, '#'); h >= 0 {
+		end = h
+	}
+	q := strings.IndexByte(raw[:end], '?')
 	if q < 0 {
 		return raw
-	}
-	end := len(raw)
-	if h := strings.IndexByte(raw[q:], '#'); h >= 0 {
-		end = q + h
 	}
 	pairs := strings.Split(raw[q+1:end], "&")
 	for i, p := range pairs {

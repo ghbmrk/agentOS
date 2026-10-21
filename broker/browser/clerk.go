@@ -62,10 +62,10 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	st := step(r)
 	if rf := clerk.Check(c.Anchors, c.Name, c.facts, now, r, v); rf != nil {
 		c.record(id, ran{})
-		if rf.Code == clerk.RClaim && st.Verb == key.Post && st.Content != "" {
+		if msg := []byte(st.Args["msg"].Value); rf.Code == clerk.RClaim && st.Verb == key.Post && st.Content != "" && c.g.print(msg) != st.Content {
 			// The post claims a print the page no longer yields: say so,
 			// with what approval would cover now (CLK-3).
-			return kernel.Result{Outcome: "failed", Detail: logged(c.g.reask([]byte(st.Args["msg"].Value)))}
+			return kernel.Result{Outcome: "failed", Detail: logged(c.g.reask(msg))}
 		}
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
@@ -79,7 +79,14 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 			c.record(id, ran{})
 			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 		}
-		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content)
+		// A redo of a submit this clerk wrote and did not see succeed is
+		// the owner's RETRY: Probe answers unknown for it, so the kernel
+		// never redoes it alone, and the owner accepts it may happen twice
+		// (KRN-8, CH-11). It sends the print once more.
+		c.mu.Lock()
+		prev := c.ran[id]
+		c.mu.Unlock()
+		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok)
 	default:
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
@@ -168,13 +175,19 @@ func approval(k key.Key, anchors []ed25519.PublicKey) bool {
 	return false
 }
 
-// MaxDetail bounds a step's logged result. Every field is bounded where
-// the gate makes it (post, approval), so the whole result, JSON-escaped,
-// fits.
+// MaxDetail bounds a step's logged result. The snapshot and the approval
+// are bounded where the gate makes them (post, approval), and logged bounds
+// every other field, so the whole result, JSON-escaped, fits. If it still
+// did not, the snapshot and the approval are dropped and the result says so.
 const MaxDetail = 1 << 20
 
 func logged(res Result) string {
+	res = small(res)
 	d, _ := json.Marshal(res)
+	if len(d) > MaxDetail {
+		res.Snapshot, res.Approval, res.Truncated = "[result too large]", nil, true
+		d, _ = json.Marshal(small(res))
+	}
 	return string(d)
 }
 

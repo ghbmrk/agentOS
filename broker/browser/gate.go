@@ -266,7 +266,7 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 // only if the gate would still ask for that very approval now (CLK-3,
 // CLK-2), and at most once per print. written reports that it reached the
 // driver; lost that the executor stopped after it was written (KRN-8).
-func (g *Gate) submit(ctx context.Context, raw []byte, to, print string) (res Result, written, lost bool) {
+func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	req, l, _, need, refused := g.judge(raw)
@@ -279,7 +279,7 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string) (res Re
 	if a := g.approval(req, l); a.Print != print || a.To != to {
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
 	}
-	if g.sent[print] {
+	if g.sent[print] && !retry {
 		return Result{Error: "already_sent", Detail: "this approved request was sent already; nothing was sent"}, false, false
 	}
 	g.sent[print] = true
@@ -318,6 +318,20 @@ func (g *Gate) print(raw []byte) string {
 	return g.approval(req, l).Print
 }
 
+// small bounds every field of res but the snapshot and the approval,
+// which their makers bound, so a logged result is bounded (MaxDetail).
+func small(res Result) Result {
+	res.Title, res.Detail, res.URL = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail), capText(res.URL, MaxURL)
+	res.Error, res.To, res.Path = capText(res.Error, maxTitle), capText(res.To, MaxURL+maxLabel), capText(res.Path, maxTitle)
+	if len(res.RefusedNavigations) > maxRefused {
+		res.RefusedNavigations = res.RefusedNavigations[:maxRefused]
+	}
+	for i := range res.RefusedNavigations {
+		res.RefusedNavigations[i] = capText(res.RefusedNavigations[i], maxTitle)
+	}
+	return res
+}
+
 // judge parses raw and judges it: what it reaches, whether it may change
 // state at the site (effect, judgeClosed) and whether it needs the owner's
 // approval here (need: effect, or under D-147 judgeLoggedOut's answer). A
@@ -330,7 +344,7 @@ func (g *Gate) judge(raw []byte) (req Request, l link, effect, need bool, refuse
 	req, err := Parse(raw)
 	if err != nil {
 		d, _ := g.filter.text(err.Error())
-		return req, l, false, false, &Result{Error: "protocol", Detail: d}
+		return req, l, false, false, &Result{Error: "protocol", Detail: capText(d, maxErrDetail)}
 	}
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
 		return req, l, false, false, &Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
@@ -633,15 +647,7 @@ func (g *Gate) post(verb string, res Result) (Result, bool) {
 		n += k
 	}
 	res.Redactions += n
-	// Everything but the snapshot is bounded small, so a logged result is
-	// bounded (MaxDetail).
-	res.Title, res.Detail, res.URL = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail), capText(res.URL, MaxURL)
-	if len(res.RefusedNavigations) > maxRefused {
-		res.RefusedNavigations = res.RefusedNavigations[:maxRefused]
-	}
-	for i := range res.RefusedNavigations {
-		res.RefusedNavigations[i] = capText(res.RefusedNavigations[i], maxTitle)
-	}
+	res = small(res)
 	// The snapshot is bounded as the log holds it, JSON-escaped.
 	for n := len(js(res.Snapshot)); len(res.Snapshot) > MaxSnapshot || n > MaxSnapshot; n = len(js(res.Snapshot)) {
 		cut := min(MaxSnapshot, len(res.Snapshot)*MaxSnapshot/n)

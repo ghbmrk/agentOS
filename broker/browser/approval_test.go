@@ -125,7 +125,7 @@ func TestApprovedButtonIsSentOnce(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	// Within one process the gate refuses a print it has sent, under any key.
-	res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print)
+	res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false)
 	if written || res.Error != "already_sent" {
 		t.Fatalf("resend: %+v", res)
 	}
@@ -142,13 +142,13 @@ func TestReorderedRequestIsTheSameSubmit(t *testing.T) {
 		t.Fatalf("print %q, want %q", p, a.Print)
 	}
 	ctx := context.Background()
-	if res, _, _ := h.g.submit(ctx, []byte(reordered), a.To, a.Print); !res.OK {
+	if res, _, _ := h.g.submit(ctx, []byte(reordered), a.To, a.Print, false); !res.OK {
 		t.Fatalf("first: %+v", res)
 	}
-	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print); written || res.Error != "already_sent" {
+	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false); written || res.Error != "already_sent" {
 		t.Fatalf("second: %+v", res)
 	}
-	if res, written, _ := h.g.submit(ctx, []byte(`{"v":0,"verb":"click","ref":"e8"}`), a.To, a.Print); written || res.Error != "not_a_submit" {
+	if res, written, _ := h.g.submit(ctx, []byte(`{"v":0,"verb":"click","ref":"e8"}`), a.To, a.Print, false); written || res.Error != "not_a_submit" {
 		t.Fatalf("a plain link: %+v", res)
 	}
 	if got := forwarded(t, h, "click"); len(got) != 1 {
@@ -169,7 +169,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
 		a := approvalOf(t, h.do(t, c.line))
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
-		if res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print); written || res.Error != "changed" {
+		if res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print, false); written || res.Error != "changed" {
 			t.Fatalf("%s: %+v", name, res)
 		}
 		if got := h.received(t); len(got) != 2 {
@@ -185,7 +185,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 		t.Fatalf("fields %+v", a.Fields)
 	}
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Ring twice"}`)
-	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print); written || res.Error != "changed" {
+	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false); written || res.Error != "changed" {
 		t.Fatalf("retyped: %+v", res)
 	}
 
@@ -196,7 +196,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 	confirm := `{"v":0,"verb":"click","ref":"e7"}`
 	a = approvalOf(t, h.do(t, confirm))
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	if res, _, _ := h.g.submit(ctx, []byte(confirm), a.To, a.Print); !res.OK {
+	if res, _, _ := h.g.submit(ctx, []byte(confirm), a.To, a.Print, false); !res.OK {
 		t.Fatalf("rotated token: %+v", res)
 	}
 }
@@ -320,6 +320,7 @@ func TestLoggedOutProbeUsesWhatDoJudged(t *testing.T) {
 		`{"v":0,"verb":"select","ref":"e1","option":"Blue"}`:                          "unknown",
 		`{"v":0,"verb":"snapshot"}`:                                                   "notdone",
 		`{"v":0,"verb":"type","ref":"e1","text":"kettle"}`:                            "notdone",
+		`{"v":0,"verb":"type","ref":"e1","text":"kettle","submit":true}`:              "unknown",
 		`{"v":0,"verb":"navigate","url":"https://shop.example.test/products/kettle"}`: "notdone",
 		navUnsub: "unknown",
 	} {
@@ -342,17 +343,36 @@ func TestLoggedDetailIsBounded(t *testing.T) {
 	}
 	var res Result
 	if err := json.Unmarshal([]byte(s.Detail), &res); err != nil || !res.Truncated || res.Snapshot == "" ||
-		len(res.Title) > maxTitle+3 || len(res.Detail) > maxErrDetail+3 || len(res.RefusedNavigations) > maxRefused {
-		t.Fatalf("logged result: %v, truncated %v, title %d, detail %d, %d navigations", err, res.Truncated,
-			len(res.Title), len(res.Detail), len(res.RefusedNavigations))
+		len(res.Title) > maxTitle+3 || len(res.Detail) > maxErrDetail+3 || len(res.URL) > MaxURL+3 ||
+		len(res.RefusedNavigations) > maxRefused {
+		t.Fatalf("logged result: %v, truncated %v, title %d, detail %d, url %d, %d navigations", err, res.Truncated,
+			len(res.Title), len(res.Detail), len(res.URL), len(res.RefusedNavigations))
+	}
+	// A protocol error quotes the planner's verb: it is bounded too
+	// (Security delta 1).
+	r.run(t, 1, "p0", r.root, read(`{"v":0,"verb":"`+strings.Repeat("<", 1200<<10)+`"}`))
+	if d := r.step("p0").Detail; len(d) > MaxDetail || json.Unmarshal([]byte(d), &res) != nil || len(res.Detail) > maxErrDetail+3 {
+		t.Fatalf("protocol error logged %d bytes", len(d))
+	}
+	if d := logged(Result{Detail: strings.Repeat("<", 2<<20), Snapshot: strings.Repeat("<", 2<<20)}); len(d) > MaxDetail {
+		t.Fatalf("logged backstop: %d bytes", len(d))
 	}
 	// An approval for a page with a huge URL is bounded too, and the cap
 	// ends even when the fields alone pass it.
 	r.h.g.page = "https://shop.example.test/cart?x=" + strings.Repeat("y", 400<<10)
 	r.h.g.refs["e6"] = link{role: "button", name: "Place order"}
-	r.run(t, 1, "p2", r.root, read(pressOrder))
+	r.run(t, 2, "p2", r.root, read(pressOrder))
 	if d := r.step("p2").Detail; len(d) > MaxDetail {
 		t.Fatalf("approval logged %d bytes", len(d))
+	}
+	if a := r.stepApproval(t, "p2"); len(a.Page) > MaxURL+3 {
+		t.Fatalf("approval page %d bytes", len(a.Page))
+	}
+	r.h.g.page = "https://shop.example.test/cart"
+	r.h.g.refs["e3"] = link{role: "textbox", name: "Delivery note"}
+	r.run(t, 3, "p3", r.root, read(`{"v":0,"verb":"type","ref":"e3","submit":true,"text":"`+strings.Repeat("<", MaxText)+`"}`))
+	if a := r.stepApproval(t, "p3"); len(a.Request) > maxRequest+3 || len(a.Text) > maxLabel+5 {
+		t.Fatalf("approval request %d bytes, text %d", len(a.Request), len(a.Text))
 	}
 
 }
@@ -488,14 +508,23 @@ func TestTokenBlankingKeepsTheRestOfTheQuery(t *testing.T) {
 	h.g.tokens = map[string]bool{"csrf": true}
 	h.g.page = "https://shop.example.test/"
 	a := approvalOf(t, h.do(t, nav(base)))
-	for _, u := range []string{base + "&to=synthMallory;x", base + "&to=synthMallory%zz",
+	for _, u := range []string{"https://shop.example.test/transfer?csrf=synthT1&to=synthBob", base + "&to=synthMallory;x", base + "&to=synthMallory%zz",
 		"https://shop.example.test/transfer?csrf=synthT2;to=synthMallory&to=synthAlice"} {
-		if res, written, _ := h.g.submit(context.Background(), []byte(nav(u)), a.To, a.Print); written || res.Error != "changed" {
+		if res, written, _ := h.g.submit(context.Background(), []byte(nav(u)), a.To, a.Print, false); written || res.Error != "changed" {
 			t.Fatalf("%s: %+v", u, res)
 		}
 	}
+	for in, want := range map[string]string{
+		"https://shop.example.test/a?csrf=synthT1#top":   "https://shop.example.test/a?csrf=#top",
+		"https://shop.example.test/a#x?csrf=synthT1":     "https://shop.example.test/a#x?csrf=synthT1",
+		"https://shop.example.test/a?b=1#x?csrf=synthT1": "https://shop.example.test/a?b=1#x?csrf=synthT1",
+	} {
+		if got := h.g.untoken(in); got != want {
+			t.Fatalf("untoken %s = %s", in, got)
+		}
+	}
 	rotated := "https://shop.example.test/transfer?csrf=synthT2&to=synthAlice"
-	if res, _, _ := h.g.submit(context.Background(), []byte(nav(rotated)), a.To, a.Print); !res.OK {
+	if res, _, _ := h.g.submit(context.Background(), []byte(nav(rotated)), a.To, a.Print, false); !res.OK {
 		t.Fatalf("rotated: %+v", res)
 	}
 }
@@ -527,7 +556,7 @@ func TestSameControlOnAnotherPageIsAnotherPrint(t *testing.T) {
 	if b := approvalOf(t, h.do(t, pressOrder)); a.Print == b.Print {
 		t.Fatal("one print on two pages")
 	}
-	if res, written, _ := h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print); written || res.Error != "changed" {
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false); written || res.Error != "changed" {
 		t.Fatalf("other page: %+v", res)
 	}
 }
@@ -547,5 +576,58 @@ func TestRefusedRedoKeepsTheWrittenRecord(t *testing.T) {
 	}
 	if p := r.c.Probe(req, r.k.State()); p != "unknown" {
 		t.Fatalf("probe after a refused redo %s", p)
+	}
+}
+
+// A submit the driver answered with an error may have acted, so it parks.
+// The owner's RETRY is the one way on: it sends the print once more, for
+// that step only, and a fresh plan with the same print still sends nothing
+// (KRN-8, CH-11; UX and Potency delta 1).
+func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
+	r := newCart(t, map[string]any{"click": []any{
+		map[string]any{"ok": false, "error": "timeout_in_page", "url": "https://shop.example.test/cart"},
+		map[string]any{"ok": true, "url": "https://shop.example.test/cart"}}}, 0)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	k := r.approve(t, a.Print)
+	r.run(t, 2, "buy", k, submitStep(a, pressOrder))
+	for i := int64(1); i <= kernel.MaxChecks+1; i++ {
+		if err := r.k.Tick(2 + i*kernel.ProbeEvery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := r.step("buy"); s.Phase != kernel.PParked {
+		t.Fatalf("phase %s", s.Phase)
+	}
+	now := 3 + int64(kernel.MaxChecks+2)*kernel.ProbeEvery
+	if err := r.k.Retry(now, "buy", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.k.Tick(now); err != nil {
+		t.Fatal(err)
+	}
+	if s := r.step("buy"); s.Phase != kernel.PDone {
+		t.Fatalf("after RETRY: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 2 {
+		t.Fatalf("driver got %q", got)
+	}
+	// Any other step with that print is still refused.
+	if res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false); written || res.Error != "already_sent" {
+		t.Fatalf("resend: %+v", res)
+	}
+}
+
+// A post refused for a claim other than its print (labels, an amount) says
+// claim, not that the page changed: approving again would not help.
+func TestOtherClaimIsNotAChangedPage(t *testing.T) {
+	r := newCart(t, nil, 0)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	s := submitStep(a, pressOrder)
+	s.Labels = []string{"synth"}
+	res := r.c.Do(kernel.Request{Plan: plan("x", r.approve(t, a.Print), s)}, r.k.State())
+	if res.Detail != clerk.RClaim {
+		t.Fatalf("got %+v", res)
 	}
 }
