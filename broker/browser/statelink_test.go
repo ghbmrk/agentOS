@@ -1,6 +1,6 @@
 package browser
 
-// REQ: ADP-14, CRED-4
+// REQ: CLK-3, CRED-4
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 const unsubURL = "https://shop.example.test/unsubscribe?token=synthCanaryTok123"
 
 // unsubShown is unsubURL as the agent sees it: the output filter redacts the
-// token, and a post's to gives the target in that form.
+// token, and an approval's to gives the target in that form.
 const unsubShown = "https://shop.example.test/unsubscribe?token=[REDACTED]"
 
 // A page with a mail-style action link, a relative confirm link, a link
@@ -63,11 +63,11 @@ func forwarded(t *testing.T, h *harness, verb string) []string {
 }
 
 // Acceptance 1 (A5/A13): a credentialed navigate to an unsubscribe link
-// needs a post, like a POST, and is never sent as a read.
-func TestStateChangingNavigateIsHeldNotSent(t *testing.T) {
+// waits for the owner's approval, like a POST, and is never sent.
+func TestStateChangingNavigateWaitsForApproval(t *testing.T) {
 	h := newHarness(t, nil, "", 0)
 	r := h.do(t, `{"v":0,"verb":"navigate","url":"`+unsubURL+`"}`)
-	if r.OK || r.Error != "post_required" || r.To != unsubShown {
+	if r.OK || r.Error != "approval_required" || r.To != unsubShown {
 		t.Fatalf("got %+v", r)
 	}
 	if got := h.received(t); len(got) != 0 {
@@ -75,31 +75,9 @@ func TestStateChangingNavigateIsHeldNotSent(t *testing.T) {
 	}
 }
 
-// Acceptance 2: a post forwards exactly the request, and only when to names
-// what it reaches.
-func TestHeldLinkIsReleasedOnlyAsApproved(t *testing.T) {
-	h := newHarness(t, nil, "", 0)
-	nav := `{"v":0,"verb":"navigate","url":"` + unsubURL + `"}`
-	for _, bad := range []string{unsubURL, unsubShown + "&x=1", "", "link \"x\" " + unsubShown} {
-		if r := h.post(t, nav, bad); r.OK || r.Error != "target" || len(h.received(t)) != 0 {
-			t.Fatalf("post to %q: %+v, driver got %q", bad, r, h.received(t))
-		}
-	}
-	if r := h.post(t, nav, unsubShown); !r.OK {
-		t.Fatalf("post: %+v", r)
-	}
-	if got := h.received(t); len(got) != 1 || got[0] != nav {
-		t.Fatalf("driver got %q, want %q", got, nav)
-	}
-	// Only the verbs that can act on a link are posted.
-	if r := h.post(t, `{"v":0,"verb":"snapshot"}`, ""); r.Error != "verb" || len(h.received(t)) != 1 {
-		t.Fatalf("posted snapshot: %+v", r)
-	}
-}
-
-// Acceptance 3: clicking a link whose target or name is an action needs a
-// post to the ref's role, name and target.
-func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
+// Acceptance 3: clicking a link whose target or name is an action waits for
+// the owner's approval of the ref's role, name and target.
+func TestClickOnAStateChangingLinkWaitsForApproval(t *testing.T) {
 	h := newHarness(t, map[string]any{"snapshot": pageReply(actionPage)}, "", 0)
 	if r := h.do(t, `{"v":0,"verb":"snapshot"}`); !r.OK {
 		t.Fatalf("snapshot %+v", r)
@@ -119,47 +97,13 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 		l := h.g.refs[ref]
 		for _, verb := range []string{"click", "download"} {
 			r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"`+ref+`"}`)
-			if r.OK || r.Error != "post_required" || r.To != h.shown(l.to()) || l.target != target {
+			if r.OK || r.Error != "approval_required" || r.To != h.shown(l.to()) || l.target != target {
 				t.Fatalf("%s %s: %+v, link %+v, want %s", verb, ref, r, l, target)
 			}
 		}
 	}
 	if got := len(h.received(t)); got != 1 {
 		t.Fatalf("driver received %d requests, want only the snapshot", got)
-	}
-}
-
-// A post of a click is sent only while the ref still reaches what to names:
-// the gate reads the page again first (CLK-2).
-func TestHeldClickReleaseRechecksThePage(t *testing.T) {
-	// The filter redacts the token, so to binds the rest of the target.
-	moved := strings.Replace(actionPage, "/unsubscribe?token=synthCanaryTok123", "/unsubscribe/all?token=otherSynthTok", 1)
-	moved = strings.Replace(moved, `button "Unsubscribe" [ref=e14]`, `button "Unsubscribe from all" [ref=e14]`, 1)
-	h := newHarness(t, map[string]any{"snapshot": []any{pageReply(actionPage), pageReply(moved)}}, "", 0)
-	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	link := h.do(t, `{"v":0,"verb":"click","ref":"e2"}`).To
-	button := h.do(t, `{"v":0,"verb":"click","ref":"e14"}`).To
-	if link != `link "Stop these emails" `+unsubShown || button != `button "Unsubscribe"` {
-		t.Fatalf("to %q, %q", link, button)
-	}
-	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, link); r.OK || r.Error != "target" || len(forwarded(t, h, "click")) != 0 {
-		t.Fatalf("posted a click whose link changed: %+v", r)
-	}
-	// A button shows no target; it is bound to its role and name.
-	if r := h.post(t, `{"v":0,"verb":"click","ref":"e14"}`, button); r.OK || r.Error != "target" || len(forwarded(t, h, "click")) != 0 {
-		t.Fatalf("posted a button whose name changed: %+v", r)
-	}
-	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, `link "Stop these emails" https://shop.example.test/unsubscribe/all?token=[REDACTED]`); !r.OK {
-		t.Fatalf("post: %+v", r)
-	}
-	if got := forwarded(t, h, "click"); len(got) != 1 || got[0] != `{"v":0,"verb":"click","ref":"e2"}` {
-		t.Fatalf("driver got %q", got)
-	}
-	// A page that cannot be read again sends nothing.
-	h = newHarness(t, map[string]any{"snapshot": []any{pageReply(actionPage), map[string]any{"ok": false, "error": "nav"}}}, "", 0)
-	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	if r := h.post(t, `{"v":0,"verb":"click","ref":"e2"}`, link); r.OK || len(forwarded(t, h, "click")) != 0 {
-		t.Fatalf("posted on an unread page: %+v", r)
 	}
 }
 
@@ -192,26 +136,53 @@ func TestOrdinaryLinksStillPass(t *testing.T) {
 		}
 	}
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	// e8's own target is /gifts; the /url under its child is not its own,
-	// and that child e9 follows /gifts too.
-	for _, ref := range []string{"e5", "e6", "e1", "e8", "e9"} {
+	// e8's own target is /gifts; the /url under its child is not its own.
+	for _, ref := range []string{"e5", "e8"} {
 		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); !r.OK {
 			t.Fatalf("click %s: %+v", ref, r)
 		}
 	}
-	if got := forwarded(t, h, "click"); len(got) != 5 {
+	if got := forwarded(t, h, "click"); len(got) != 2 {
 		t.Fatalf("driver got %q", got)
 	}
-	// Over-matching fails closed (AS2): a search for an action word needs a post.
-	if r := h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/search?q=cancel+culture"}`); r.Error != "post_required" {
+	// Over-matching fails closed (AS2): a search for an action word needs approval.
+	if r := h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/search?q=cancel+culture"}`); r.Error != "approval_required" {
 		t.Fatalf("got %+v", r)
+	}
+}
+
+// CLK-3, fail closed: an action that shows the gate no GET target may
+// submit something whatever its name, so it waits for the owner's approval
+// of the exact request and is never sent: a neutrally named button, an
+// element inside a link, a container, a select, and typing with submit.
+func TestActionsTheGateCannotJudgeWaitForApproval(t *testing.T) {
+	h := newHarness(t, map[string]any{"snapshot": pageReply(actionPage)}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for raw, to := range map[string]string{
+		`{"v":0,"verb":"click","ref":"e6"}`:                              `button "Add to basket"`,
+		`{"v":0,"verb":"download","ref":"e6"}`:                           `button "Add to basket"`,
+		`{"v":0,"verb":"click","ref":"e9"}`:                              h.shown(h.g.refs["e9"].to()),
+		`{"v":0,"verb":"click","ref":"e1"}`:                              h.shown(h.g.refs["e1"].to()),
+		`{"v":0,"verb":"select","ref":"e6","option":"a"}`:                `button "Add to basket"`,
+		`{"v":0,"verb":"type","ref":"e5","text":"kettle","submit":true}`: `link "Electric kettle" https://shop.example.test/products/kettle`,
+	} {
+		if r := h.do(t, raw); r.OK || r.Error != "approval_required" || r.To != to {
+			t.Fatalf("%s: %+v, want to %q", raw, r, to)
+		}
+	}
+	if got := h.received(t); len(got) != 1 {
+		t.Fatalf("driver received %q, want only the snapshot", got)
+	}
+	// Typing without submit only fills a field.
+	if r := h.do(t, `{"v":0,"verb":"type","ref":"e5","text":"kettle"}`); r.Error == "approval_required" {
+		t.Fatalf("type: %+v", r)
 	}
 }
 
 // Acceptance 3 and 5 on a snapshot Chromium gave for testdata/clicks.html
 // (testdata/snapshot.py): a target is judged by the text of its whole
-// clickable subtree, so an icon-plus-text button or link needs a post, while
-// ordinary links, dialog dismissals and form fields pass.
+// clickable subtree, so an icon-plus-text link needs approval; only links to
+// plain targets and clicks into text fields pass.
 func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	raw, err := os.ReadFile("testdata/clicks.snapshot.txt")
 	if err != nil {
@@ -243,20 +214,24 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 		"e44": {role: "button", name: `Unsubscribe\ud800 x`},                                 // a name Go cannot unquote
 	} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
-		if r.Error != "post_required" || r.To != want.to() {
+		if r.Error != "approval_required" || r.To != want.to() {
 			t.Fatalf("click %s: %+v, want to %q", ref, r, want.to())
 		}
 	}
 	if got := forwarded(t, h, "click"); len(got) != 0 {
 		t.Fatalf("driver got %q", got)
 	}
-	// Dialog "Cancel" and "Not now", "Confirm password", "Explore movies",
-	// "Falcon firmware", "Encode letters", the containers, the text box
-	// after a "[ref=e14]" text decoy, and the ordinary links inside a
-	// pointer card and row that also hold an action button.
-	pass := strings.Fields("e1 e2 e13 e15 e16 e17 e18 e20 e21 e22 e23 e24 e26 e27 e28 e29 e30 e31 e32 e34 e36 e37 e40")
+	// Only a link to a plain target and a click into a text field are
+	// reads. A dialog's "Cancel" or "Close", a button with a neutral name
+	// and every container need the owner's approval too (fail closed).
+	pass := strings.Fields("e17 e20 e21 e22 e29 e31 e34 e40")
 	for _, ref := range pass {
 		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); !r.OK {
+			t.Fatalf("click %s: %+v", ref, r)
+		}
+	}
+	for _, ref := range strings.Fields("e1 e2 e13 e15 e16 e18 e23 e24 e26 e27 e28 e30 e32 e36 e37") {
+		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); r.Error != "approval_required" {
 			t.Fatalf("click %s: %+v", ref, r)
 		}
 	}
@@ -265,7 +240,7 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	}
 
 	// body{cursor:pointer} (click delegation): only "Log out" and the body
-	// itself need a post; the other link and the search box pass.
+	// itself need approval; the other link and the search box pass.
 	raw, err = os.ReadFile("testdata/pointer.snapshot.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +251,7 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	}
 	for ref, want := range map[string]string{"e1": "", "e2": "ok", "e3": "ok", "e4": ""} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
-		if (want == "ok") != r.OK || (want == "" && r.Error != "post_required") {
+		if (want == "ok") != r.OK || (want == "" && r.Error != "approval_required") {
 			t.Fatalf("body-pointer click %s: %+v", ref, r)
 		}
 	}

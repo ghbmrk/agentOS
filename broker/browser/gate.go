@@ -67,8 +67,9 @@ type Result struct {
 	Path               string   `json:"path,omitempty"`
 	Bytes              int64    `json:"bytes,omitempty"`
 	RefusedNavigations []string `json:"refused_navigations,omitempty"`
-	// To is what a post must name to take this action (error
-	// "post_required"): the link the action reaches as the gate sees it.
+	// To names what an action waiting for approval reaches (error
+	// "approval_required"): the role, quoted name and target of the ref, or
+	// the URL of a navigate, after the output filter.
 	To string `json:"to,omitempty"`
 }
 
@@ -97,9 +98,6 @@ type Gate struct {
 	// every snapshot with an omitted field is withheld: forgetting agent
 	// text would let its echo answer a guess (PR #2273 security delta).
 	lost bool
-	// writes counts the request lines written to the driver, so the clerk
-	// can tell an action never sent from one whose answer was lost.
-	writes int
 }
 
 // Start launches the driver for one account.
@@ -202,75 +200,33 @@ func (g *Gate) stop() {
 
 var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is not running"}
 
-// reach is how far an action got: never written to the driver, answered,
-// or written with its answer lost (the executor stopped after the write).
-type reach int
-
-const (
-	unsent reach = iota
-	answered
-	lost
-)
-
-// do runs one request line, as a read or as a post to the target to, and
-// returns what the agent may see. Only the clerk calls it: an action that
-// may change state at the site is sent only as a post (ADP-14), and only
-// while what it reaches is still to (CLK-2).
-func (g *Gate) do(ctx context.Context, raw []byte, post bool, to string) (Result, reach) {
+// do runs one request line and returns what the agent may see. Only the
+// clerk calls it. An action that may change state at the site is refused
+// unsent (approval_required): no recipe covers any page yet, so each such
+// action waits for the owner's approval of the exact request (CLK-3), and
+// To names what it reaches for that approval.
+func (g *Gate) do(ctx context.Context, raw []byte) Result {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.stopped {
-		return stoppedResult, unsent
+		return stoppedResult
 	}
 	req, err := Parse(raw)
 	if err != nil {
 		d, _ := g.filter.text(err.Error())
-		return Result{Error: "protocol", Detail: d}, unsent
+		return Result{Error: "protocol", Detail: d}
 	}
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
-		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}, unsent
+		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
 	}
-	var l link
-	need := false
-	switch req.Verb {
-	case "navigate":
-		l, need = link{target: req.URL}, g.links.match(req.URL)
-	case "click", "download":
-		if post {
-			// The page is read again just before a post, so what the ref
-			// reaches is judged as it is now, not as it was planned. A
-			// page with no snapshot leaves no refs to act on.
-			g.refs = nil
-			snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
-			if !ok {
-				return snap, unsent
-			}
-			if !snap.OK {
-				return Result{Error: "target", Detail: "the page could not be read again; nothing was sent"}, unsent
-			}
-		}
-		// The gate must know what a link points at before it is followed. A
-		// clickable element named as an action needs a post too: an anchor
-		// with role="button" or a GET form's button shows no target.
-		var ok bool
-		if l, ok = g.refs[req.Ref]; !ok {
-			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}, unsent
-		}
-		need = l.held(g.links)
-	default:
-		if post {
-			return Result{Error: "verb", Detail: "only navigate, click and download are posted"}, unsent
-		}
+	l, need, res := g.judge(req)
+	if res != nil {
+		return *res
 	}
-	// to is compared as the agent and owner saw it: filtered, so a target
-	// whose token the filter redacts can still be posted to.
-	t, _ := g.filter.text(l.to())
-	if need && !post {
-		return Result{Error: "post_required", To: t,
-			Detail: "this action may change state at the site; submit it as post to the target given (ADP-14)"}, unsent
-	}
-	if post && t != to {
-		return Result{Error: "target", Detail: "to does not name what this action reaches now; nothing was sent"}, unsent
+	if need {
+		t, _ := g.filter.text(l.to())
+		return Result{Error: "approval_required", To: t,
+			Detail: "this action may change state at the site; it waits for the owner's approval of this exact request (CLK-3)"}
 	}
 	switch req.Verb {
 	case "type":
@@ -278,18 +234,38 @@ func (g *Gate) do(ctx context.Context, raw []byte, post bool, to string) (Result
 	case "navigate":
 		g.say(urlWords(req.URL)...)
 	}
-	n := g.writes
-	res := g.send(ctx, req)
-	if req.Verb == "type" && res.OK {
-		g.remember(req, res.URL)
+	out := g.send(ctx, req)
+	if req.Verb == "type" && out.OK {
+		g.remember(req, out.URL)
 	}
-	switch {
-	case g.writes == n:
-		return res, unsent
-	case g.stopped:
-		return res, lost
+	return out
+}
+
+// judge reports what req reaches and whether it may change state at the
+// site. It fails closed: only a snapshot, a screenshot, typing without
+// submit, a click that focuses a text field, and a navigate or a link
+// followed to a GET target G9 does not match can not. A button, a select
+// or a submit shows the gate no request, so it may change state whatever
+// its name.
+func (g *Gate) judge(req Request) (link, bool, *Result) {
+	switch req.Verb {
+	case "snapshot", "screenshot":
+		return link{}, false, nil
+	case "type":
+		return g.refs[req.Ref], req.Submit, nil
+	case "navigate":
+		return link{target: req.URL}, g.links.match(req.URL), nil
+	case "click", "download":
+		l, ok := g.refs[req.Ref]
+		if !ok {
+			return link{}, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		}
+		if req.Verb == "click" && fieldRoles[l.role] {
+			return l, false, nil
+		}
+		return l, l.role != "link" || l.target == "" || l.acts(g.links), nil
 	}
-	return res, answered
+	return g.refs[req.Ref], true, nil
 }
 
 type typedField struct{ text, url string }
@@ -418,7 +394,6 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 // roundtrip sends one canonical request and filters the reply. ok is false
 // when the executor was stopped.
 func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
-	g.writes++
 	if _, err := g.stdin.Write(append(req.Encode(), '\n')); err != nil {
 		g.stop()
 		return stoppedResult, false

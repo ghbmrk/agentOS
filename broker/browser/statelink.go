@@ -8,11 +8,11 @@ import (
 	"unicode"
 )
 
-// ADP-14 holds a submit by method, but a site can change state on a GET:
-// an unsubscribe or confirm link, a one-click cancel. The gate holds a
-// credentialed GET to a URL that reads as such an action for the owner's
-// approval, like a POST (ADP-14-get). The patterns are a heuristic that
-// fails closed; part 2's network egress gate is the boundary (AS1).
+// A site can change state on a GET as well as by a submit: an unsubscribe
+// or confirm link, a one-click cancel. The gate refuses a credentialed GET
+// to a URL that reads as such an action, which then waits for the owner's
+// approval like a submit (CLK-3, ADP-14-get). The patterns are a heuristic
+// that fails closed; part 2's network egress gate is the boundary (AS1).
 
 // actionWords are path or query words that name a state change.
 var actionWords = wordSet(`unsubscribe unsub subscribe resubscribe optout optin confirm confirmation
@@ -179,16 +179,16 @@ type link struct {
 	dismiss bool
 }
 
-// held reports whether a click on l may change state at the site.
-func (l link) held(s stateLinks) bool {
+// acts reports whether following l reads as a state change at the site.
+func (l link) acts(s stateLinks) bool {
 	if l.target != "" && s.match(l.target) {
 		return true
 	}
 	return l.clickable && !l.dismiss && hasAction(words(l.name))
 }
 
-// to names what an action on l reaches, as a post's `to` must give it: the
-// URL for a navigate, else the role, quoted name and target of the ref.
+// to names what an action on l reaches, for the owner's approval: the URL
+// for a navigate, else the role, quoted name and target of the ref.
 func (l link) to() string {
 	if l.role == "" && l.name == "" {
 		return l.target

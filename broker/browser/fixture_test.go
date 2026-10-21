@@ -71,7 +71,7 @@ sys.stdin.read()`)
 	t.Cleanup(func() { g.Close() })
 	var transcript []string
 	do := func(req string) Result {
-		r, _ := g.do(context.Background(), []byte(req), false, "")
+		r := g.do(context.Background(), []byte(req))
 		b, _ := json.Marshal(r)
 		transcript = append(transcript, string(b))
 		return r
