@@ -155,8 +155,9 @@ func (c *Clerk) facts(s key.Step) (string, []string, int64) {
 
 // approval reports whether k is an owner's approval of exact submits: its
 // content set lists approval prints only, and its uses are capped at their
-// number. No standing key covers a submit (CLK-3), and the log's use count
-// keeps each print to one send across a restart (KRN-8).
+// number. The set holds each print once, so a print listed twice gives no
+// spare use. No standing key covers a submit (CLK-3), and the log's use
+// count keeps each print to one send across a restart (KRN-8).
 func approval(k key.Key, anchors []ed25519.PublicKey) bool {
 	v, err := key.Chain(k, anchors)
 	if err != nil || len(v.Limits.Content) == 0 {

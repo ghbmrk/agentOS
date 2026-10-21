@@ -5,6 +5,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -629,5 +630,95 @@ func TestOtherClaimIsNotAChangedPage(t *testing.T) {
 	res := r.c.Do(kernel.Request{Plan: plan("x", r.approve(t, a.Print), s)}, r.k.State())
 	if res.Detail != clerk.RClaim {
 		t.Fatalf("got %+v", res)
+	}
+}
+
+// The print covers the control's role and every field the agent typed on
+// the approval's page, past the ones it shows, and no field typed on
+// another page (CLK-3, #2678).
+func TestPrintCoversRoleAndThisPagesFields(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	look(h.g, cartPage, "https://shop.example.test/cart")
+	p := func() string { return h.g.print([]byte(pressOrder)) }
+	base := p()
+	see(h.g, "e6", link{role: "link", name: "Place order"})
+	if p() == base {
+		t.Fatal("a role change kept the print")
+	}
+	see(h.g, "e6", link{role: "button", name: "Place order"})
+	h.g.typed = map[string]typedField{"e90": {text: "synthElsewhere", url: "https://shop.example.test/other"}}
+	if p() != base {
+		t.Fatal("a field typed on another page changed the print")
+	}
+	for i := range maxFields + 8 {
+		h.g.typed["f"+strconv.Itoa(100+i)] = typedField{text: "synthNote", url: h.g.page}
+	}
+	a := approvalOf(t, h.do(t, pressOrder))
+	if len(a.Fields) != maxFields || a.FieldsOmitted != 8 {
+		t.Fatalf("%d fields shown, %d omitted", len(a.Fields), a.FieldsOmitted)
+	}
+	last := "f" + strconv.Itoa(100+maxFields+7)
+	h.g.typed[last] = typedField{text: "synthChanged", url: h.g.page}
+	if p() == a.Print {
+		t.Fatal("an omitted field's change kept the print")
+	}
+}
+
+// A snapshot under MaxSnapshot raw but past it JSON-escaped is cut, so the
+// log holds at most MaxSnapshot of it (BRS-7, #2678).
+func TestEscapedSnapshotIsCut(t *testing.T) {
+	r := newClerkRig(t, newHarness(t, map[string]any{"snapshot": "escapes"}, "", 0))
+	r.run(t, 0, "p1", r.root, read(`{"v":0,"verb":"snapshot"}`))
+	var res Result
+	if err := json.Unmarshal([]byte(r.step("p1").Detail), &res); err != nil || !res.Truncated {
+		t.Fatalf("truncated %v: %v", res.Truncated, err)
+	}
+	if n := len(js(strings.TrimSuffix(res.Snapshot, "\n[snapshot truncated]"))); n > MaxSnapshot {
+		t.Fatalf("escaped snapshot %d bytes", n)
+	}
+}
+
+// A print is sent once per gate through the clerk too: a second task's
+// approval of a spent print, under another root the kernel's duplicate
+// guard does not join, gets already_sent, and a key listing one print
+// twice approves nothing, since the content set holds it once (KRN-8,
+// #2678).
+func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
+	r := newCart(t, nil, 0)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	r.run(t, 2, "buy", r.approve(t, a.Print), submitStep(a, pressOrder))
+	if s := r.step("buy"); s.Phase != kernel.PDone {
+		t.Fatalf("first: phase %s", s.Phase)
+	}
+	_, opriv := seedKey(1)
+	hpub, hpriv := seedKey(2)
+	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, time.Now().UnixMilli(), 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bpriv := seedKey(12)
+	batch := []key.Key{{Root: root2.Root}, root2}
+	cosign := []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}
+	if err := r.k.Issue(3-kernel.GrantHold, cosign, batch...); err != nil {
+		t.Fatal(err)
+	}
+	k2, err := key.Derive(root2, hpriv, hpub, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.run(t, 4, "again", k2, submitStep(a, pressOrder))
+	if s := r.step("again"); s.Phase == kernel.PDone || !strings.Contains(s.Detail, "already_sent") {
+		t.Fatalf("second task: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 1 {
+		t.Fatalf("driver got %q", got)
+	}
+	twice, err := key.Derive(r.root, hpriv, hpub, key.LimitVerbs(key.Post), key.LimitContent(a.Print, a.Print), key.LimitUses(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approval(twice, r.owner) {
+		t.Fatal("a key listing one print twice is an approval")
 	}
 }
