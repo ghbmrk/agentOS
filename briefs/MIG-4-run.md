@@ -40,3 +40,11 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 **Ownership.** The "Kernel and clerk hardening" lane owns `broker/kernel`, `broker/kernel/key`, `broker/clerk/clerk.go` and `exit*.go`. This row consumes them through their existing APIs only. A change it needs there goes to that lane as an exact request. `View.OneOffLine` (from #2674) travels in the view (ASSUMPTIONS MIG-4-run-b).
 
 **Usage estimate:** 250k tokens for slice 1, including reviews.
+
+**Follow-ups MIG-4-run-r (#2700 items 3 to 6, #2704).** Items 1 and 2 are the kernel lane's (#2703); this change stacks on it.
+- Item 3: `wire.go::needed` bounds the view's ledger per scope to what that scope's caps can count. Test: `view_test.go::TestViewLedgerIsBoundedByTheCaps` (each cap counts the same on the bounded list as on a year's ledger, at the kernel's time and on a clerk clock behind by `viewSkew`).
+- Item 4: `docs/LANES.md` lists `SetLine` and `Reserve` with the owner actions, and the model clerk's metering seam (`AdmitSpend`, `Meter`, `Hold`, `ReadPool`, `AdmitPool`) apart from them.
+- Item 5: `view_test.go::TestViewCarriesWhatTheCheckReads`. The view after JSON answers every `kernel.View` method as the log does, for a held and an unheld dispatch.
+- Item 6: `view_test.go::TestAFailedWriteIsUnknown`. A call cut off mid-write is `unknown lost`, and a probe is `unknown`.
+- #2704: `clerk.Secrets.RemovePrefix` (`broker/clerk/secrets.go`, by the kernel lane's waiver). `SetMail` drops every other mail slot, `RemoveMail` drops every one, and one lock serializes them. Tests: `mail_test.go::TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword` and `broker/clerk/secrets_test.go::TestSecretsRemovePrefix`.
+- Declared scope: `broker/clerk/run/`, `broker/clerk/secrets.go` and its test, `docs/LANES.md` (a gate file, so a separate Security accept is needed), and this brief.
