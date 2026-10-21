@@ -179,6 +179,33 @@ func TestActionsTheGateCannotJudgeWaitForApproval(t *testing.T) {
 	}
 }
 
+// Security delta 6318840566: a link that loads no other page (a
+// javascript: href, the page's own "#" or "#fragment") runs the site's
+// script, so it waits for approval like a button.
+func TestScriptLinksWaitForApproval(t *testing.T) {
+	page := `- link "Place order" [ref=e1]:
+  - /url: javascript:void(0)
+- link "Pay now" [ref=e2]:
+  - /url: "#"
+- link "Checkout" [ref=e3]:
+  - /url: "#pay"
+- link "Kettle" [ref=e4]:
+  - /url: /products/kettle`
+	h := newHarness(t, map[string]any{"snapshot": pageReply(page)}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for _, ref := range []string{"e1", "e2", "e3"} {
+		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); r.Error != "approval_required" {
+			t.Fatalf("click %s: %+v", ref, r)
+		}
+	}
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e4"}`); !r.OK {
+		t.Fatalf("click e4: %+v", r)
+	}
+	if got := forwarded(t, h, "click"); len(got) != 1 {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
 // D-147: a session holding none of the owner's identity can harm the owner
 // only through a URL that acts or carries a token, so logged out a button,
 // a select and a submit are free while such a URL still waits for approval.

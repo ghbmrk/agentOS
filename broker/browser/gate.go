@@ -93,6 +93,8 @@ type Gate struct {
 	stopped bool
 	// refs is what the last snapshot the driver returned showed, per ref.
 	refs map[string]link
+	// page is the URL of the page the refs were read from.
+	page string
 	// typed is what the agent typed, per ref, on the page the driver
 	// named in its reply (G10).
 	typed map[string]typedField
@@ -273,9 +275,25 @@ func (g *Gate) judge(req Request) (link, bool, *Result) {
 		if req.Verb == "click" && fieldRoles[l.role] {
 			return l, false, nil
 		}
-		return l, l.role != "link" || l.target == "" || l.acts(g.links), nil
+		return l, l.role != "link" || !leaves(l.target, g.page) || l.acts(g.links), nil
 	}
 	return g.refs[req.Ref], true, nil
+}
+
+// leaves reports whether following target loads another http(s) page. A
+// javascript: href, or a fragment of the page itself ("#", "#pay"), loads
+// nothing: the click runs the site's own script, which may submit.
+func leaves(target, page string) bool {
+	u, err := url.Parse(target)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return false
+	}
+	p, err := url.Parse(page)
+	if err != nil {
+		return true
+	}
+	u.Fragment, u.RawFragment, p.Fragment, p.RawFragment = "", "", "", ""
+	return u.String() != p.String()
 }
 
 // judgeLoggedOut is judge for a session holding no identity of the owner's.
@@ -447,7 +465,7 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	}
 	if res.Snapshot != "" {
 		// Read before filtering: a redaction must not hide a link's target.
-		g.refs = parseRefs(res.Snapshot, res.URL)
+		g.refs, g.page = parseRefs(res.Snapshot, res.URL), res.URL
 	}
 	// The driver's count is not trusted: the gate reports its own.
 	res.Snapshot, res.PasswordFields = g.omit(res.Snapshot, res.URL)
