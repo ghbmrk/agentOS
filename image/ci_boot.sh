@@ -97,6 +97,12 @@ guest_echo() {
 fail=0
 has() { grep -aqF "$2" "$1" && echo "ok   $2" || { echo "MISS $2"; fail=1; }; }
 hasnt() { grep -aqF "$2" "$1" && { echo "UNEXPECTED $2"; fail=1; } || echo "ok   no \"$2\""; }
+# disks_none LOG PREFIX: exactly one PREFIX line on the console, and it reads foreign=none, so a
+# "none" line cannot hide a line that lists a host partition (IMG-1-1).
+disks_none() {
+	[ "$(grep -ac "$2" "$1")" = 1 ] && grep -aqE "$2 foreign=none[[:space:]]*\$" "$1" && echo "ok   $2 foreign=none" ||
+		{ echo "MISS exactly one $2 line, foreign=none"; fail=1; }
+}
 
 # GUIDs: the disk GUID and each partition's GUID, one per line, from the primary GPT.
 guids() {
@@ -193,7 +199,7 @@ fi
 # The host disk is not the boot drive (drive-id saw one boot partition), nothing wrote to it, and
 # the guest reports no mount or swap on it (a read-only mount leaves the bytes unchanged, IMG-1-1).
 [ "$(sha256sum <"$H")" = "$host_before" ] && echo "ok   host disk unchanged" || { echo "MISS host disk unchanged"; fail=1; }
-has "$W/console.log" "agentos-disks: foreign=none"
+disks_none "$W/console.log" "agentos-disks:"
 rm -f "$H"
 # Root carries project quotas, so each agent machine writes under its own hard quota (RES-4, #1386),
 # and the agentosd command systemd loaded ends -disk-quota on (flag=on).
@@ -542,7 +548,8 @@ if [ -n "${E2E:-}" ]; then
 	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw" "$H2"
 	[ "$(sha256sum <"$H2")" = "$host2_before" ] && echo "ok   host disk unchanged (e2e boot)" || { echo "MISS host disk unchanged (e2e boot)"; fail=1; }
-	has "$W/console-e2e.log" "agentos-disks: foreign=none"
+	disks_none "$W/console-e2e.log" "agentos-disks:"
+	disks_none "$W/console-e2e.log" "agentos-disks-end:"
 	rm -f "$H2"
 	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
 	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly

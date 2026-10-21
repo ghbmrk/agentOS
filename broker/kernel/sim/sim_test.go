@@ -77,6 +77,7 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		sum.AnchorFailed += r.AnchorFailed
 		sum.WidenUnproven += r.WidenUnproven
 		sum.UnheldRefused += r.UnheldRefused
+		sum.HeldByClerk += r.HeldByClerk
 	}
 	for name, n := range map[string]int{
 		"appends refused by a full disk":               sum.Refused,
@@ -85,6 +86,7 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"anchor writes failed":                         sum.AnchorFailed,
 		"widenings left unproven by a failed anchor":   sum.WidenUnproven,
 		"plans under a stripped, forged or unheld key": sum.UnheldRefused,
+		"holds the clerk kept on its own clock":        sum.HeldByClerk,
 	} {
 		if n == 0 {
 			t.Errorf("the sweep never reached: %s", name)

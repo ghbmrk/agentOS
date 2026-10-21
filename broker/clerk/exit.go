@@ -74,6 +74,9 @@ type Declaration struct {
 	// client_secret, and the clerk sends an access token it redeems from that
 	// grant (RFC 6749 section 6). Without it, the slot is of KindStatic.
 	Refresh string
+	// Clock is the clerk's own time: holds, token lives and Retry-After are
+	// judged on it, never on a time a request carries (CLK-2).
+	Clock Clock
 }
 
 // Detail codes: the typed reasons an exit answers with (CLK-2, OWN-17). A
@@ -112,6 +115,7 @@ type Exit struct {
 	ops     map[key.Verb]decl
 	secrets *Secrets
 	client  *http.Client
+	clock   Clock
 
 	mu    sync.Mutex // guards state only, never held across a request
 	state map[string]*sent
@@ -189,7 +193,7 @@ func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x5
 	if d.Guard == nil {
 		return nil, errors.New("clerk: a declaration needs the home-network policy (DEV-2)")
 	}
-	x := &Exit{name: d.Name, owner: owner, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}}
+	x := &Exit{name: d.Name, owner: owner, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}, clock: d.Clock}
 	slot := ""
 	for _, op := range d.Ops {
 		o, err := x.declare(op)
@@ -347,15 +351,7 @@ func (x *Exit) Facts(s key.Step) (string, []string, int64) {
 	if !ok {
 		return "", nil, 0
 	}
-	var amount int64
-	if a, ok := s.Args[key.ArgAmount]; ok {
-		n, err := strconv.ParseInt(a.Value, 10, 64)
-		if err != nil {
-			n = -1
-		}
-		amount = n
-	}
-	return op.Content, op.Labels, amount
+	return op.Content, op.Labels, Amount(s)
 }
 
 // Do checks the step first, every time, then sends it once per idempotency
@@ -394,7 +390,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 // check is the clerk's own authorization, run before every send.
 func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
-	if rf := Check(x.owner, x.name, x.Facts, r, v); rf != nil {
+	if rf := Check(x.owner, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
 	}
 	return kernel.Result{}, true
@@ -405,7 +401,7 @@ func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
 // same idempotency key. A redemption can wait on the token endpoint and on
 // tmu, so the step is checked again before each send (CLK-2).
 func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.View) kernel.Result {
-	tok, bad := x.access(r.Now, "")
+	tok, bad := x.access(x.clock.Now(), "")
 	if bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
 	}
@@ -417,7 +413,7 @@ func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.
 	if res.Detail != DAuth+" http 401" {
 		return res
 	}
-	if tok, bad = x.access(r.Now, tok); bad != "" {
+	if tok, bad = x.access(x.clock.Now(), tok); bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
 	}
 	if req, bad = x.build(op, r); bad != "" {
@@ -621,7 +617,7 @@ func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	if op.Type != "" {
 		req.Header.Set("Content-Type", op.Type)
 	}
-	req.Header.Set("Idempotency-Key", r.Idem)
+	req.Header.Set("Idempotency-Key", r.Idem())
 	return req, ""
 }
 
@@ -629,10 +625,10 @@ func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 // covers only the state table, so one slow remote holds up nothing else.
 func (x *Exit) send(req *http.Request, r kernel.Request) kernel.Result {
 	x.mu.Lock()
-	s := x.state[r.Idem]
+	s := x.state[r.Idem()]
 	if s == nil {
 		s = &sent{}
-		x.state[r.Idem] = s
+		x.state[r.Idem()] = s
 	}
 	switch s.phase {
 	case pDone:
@@ -653,7 +649,7 @@ func (x *Exit) send(req *http.Request, r kernel.Request) kernel.Result {
 		res.Detail += " " + req.URL.Hostname()
 	}
 	x.mu.Lock()
-	s.phase, s.retryAt = phase, r.Now+retry
+	s.phase, s.retryAt = phase, x.clock.Now()+retry
 	x.mu.Unlock()
 	return res
 }
@@ -713,7 +709,7 @@ func classify(resp *http.Response, err error) (kernel.Result, string, int64) {
 func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	s := x.state[r.Idem]
+	s := x.state[r.Idem()]
 	if s == nil {
 		s = &sent{phase: pUnknown}
 	}
@@ -723,7 +719,7 @@ func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 	case s.phase == pSending || s.sends >= kernel.MaxChecks:
 		return "unknown"
 	case s.phase == pNotSent:
-		if r.Now >= s.retryAt {
+		if x.clock.Now() >= s.retryAt {
 			return "notdone"
 		}
 		return "unknown"

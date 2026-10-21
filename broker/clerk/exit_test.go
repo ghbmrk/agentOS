@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -47,7 +48,24 @@ type exitFix struct {
 	ops   []clerk.Op
 	sec   *clerk.Secrets
 	roots *x509.CertPool
-	inLog int // log length the request handler saw
+	inLog int          // log length the request handler saw
+	clock atomic.Int64 // the exit's own clock
+
+	planMu sync.Mutex
+	plans  map[string]kernel.Plan // requests the test built, reported in flight by view
+}
+
+// tick runs the kernel at now, with the exit's own clock at now too.
+func (f *exitFix) tick(now int64) error {
+	f.clock.Store(now)
+	return f.k.Tick(now)
+}
+
+// view is the log's view with every request the test built in flight.
+func (f *exitFix) view() kernel.View {
+	f.planMu.Lock()
+	defer f.planMu.Unlock()
+	return inFlight{f.k.State(), maps.Clone(f.plans)}
 }
 
 // pub is a policy that has learned no home network: it refuses only the IANA
@@ -76,7 +94,7 @@ func (f *exitFix) base() string {
 }
 
 func (f *exitFix) decl(ops []clerk.Op) clerk.Declaration {
-	return clerk.Declaration{Name: "web", Ops: ops, Guard: f.guard(netip.MustParseAddr("8.8.8.8"))}
+	return clerk.Declaration{Name: "web", Ops: ops, Guard: f.guard(netip.MustParseAddr("8.8.8.8")), Clock: f.clock.Load}
 }
 
 // reboot reopens the same log with the given clerk, as a restart does.
@@ -113,7 +131,8 @@ func setupExit(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) *ex
 // setupExitOps lets a test change the declared ops before the exit is built.
 func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), mod func(base string, ops []clerk.Op)) *exitFix {
 	t.Helper()
-	f := &exitFix{}
+	f := &exitFix{plans: map[string]kernel.Plan{}}
+	f.clock.Store(1)
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
 		b, _ := io.ReadAll(r.Body)
@@ -170,11 +189,14 @@ func (f *exitFix) step(verb key.Verb, args map[string]string) kernel.PlanStep {
 	return ps
 }
 
-// request is ps as the kernel hands it to the clerk: one step of a plan the
-// root's holder signed.
-func (f *exitFix) request(ps kernel.PlanStep, idem string) kernel.Request {
-	p := kernel.SignPlan(kernel.Plan{ID: "p", Key: f.root, Steps: []kernel.PlanStep{ps}}, hpubPriv())
-	return kernel.Request{Plan: p, Idem: idem, Now: 1}
+// request is ps as the kernel hands it to the clerk: the one step of plan
+// id, which the root's holder signed and the view has in flight.
+func (f *exitFix) request(ps kernel.PlanStep, id string) kernel.Request {
+	p := kernel.SignPlan(kernel.Plan{ID: id, Key: f.root, Steps: []kernel.PlanStep{ps}}, hpubPriv())
+	f.planMu.Lock()
+	f.plans[id] = p
+	f.planMu.Unlock()
+	return kernel.Request{Plan: p}
 }
 
 func (f *exitFix) req(verb key.Verb, idem string, args map[string]string) kernel.Request {
@@ -183,11 +205,11 @@ func (f *exitFix) req(verb key.Verb, idem string, args map[string]string) kernel
 
 func TestExitSendsDeclaredRequestWithSecretAndIdempotencyKey(t *testing.T) {
 	f := setupExit(t, nil)
-	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob&x=1", "msg": "hello"}), f.k.State())
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob&x=1", "msg": "hello"}), f.view())
 	if r.Outcome != "ok" {
 		t.Fatalf("declared post failed: %+v", r)
 	}
-	if f.got.auth != "Bearer "+canary || f.got.idem != "i1" || f.got.body != "msg=hello" || f.got.ctype != clerk.TypeForm {
+	if f.got.auth != "Bearer "+canary || f.got.idem != kernel.Idem("i1", 0) || f.got.body != "msg=hello" || f.got.ctype != clerk.TypeForm {
 		t.Fatalf("request not as declared: %+v", f.got)
 	}
 	if f.got.path != "/v1/msg/bob&x=1" {
@@ -198,15 +220,15 @@ func TestExitSendsDeclaredRequestWithSecretAndIdempotencyKey(t *testing.T) {
 func TestExitIsIdempotentAndProbes(t *testing.T) {
 	f := setupExit(t, nil)
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	if f.x.Probe(q, f.k.State()) != "unknown" {
+	if f.x.Probe(q, f.view()) != "unknown" {
 		t.Fatal("a clerk with no memory of a step must not claim it was never sent (KRN-8)")
 	}
-	f.x.Do(q, f.k.State())
-	f.x.Do(q, f.k.State())
+	f.x.Do(q, f.view())
+	f.x.Do(q, f.view())
 	if f.hits.Load() != 1 {
 		t.Fatalf("same idempotency key reached the remote %d times", f.hits.Load())
 	}
-	if f.x.Probe(q, f.k.State()) != "done" {
+	if f.x.Probe(q, f.view()) != "done" {
 		t.Fatal("completed step must probe done")
 	}
 }
@@ -214,10 +236,10 @@ func TestExitIsIdempotentAndProbes(t *testing.T) {
 func TestExitUnknownOnServerErrorThenProbeUnknown(t *testing.T) {
 	f := setupExit(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(502) })
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "unknown" {
+	if r := f.x.Do(q, f.view()); r.Outcome != "unknown" {
 		t.Fatalf("a 5xx may have acted: %+v", r)
 	}
-	if f.x.Probe(q, f.k.State()) != "unknown" {
+	if f.x.Probe(q, f.view()) != "unknown" {
 		t.Fatal("an attempted step with no answer must probe unknown")
 	}
 }
@@ -227,7 +249,7 @@ func TestExitFailedOnClientErrorAndNeverLeaksSecret(t *testing.T) {
 		w.WriteHeader(403)
 		io.WriteString(w, "bad token "+canary)
 	})
-	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.view())
 	if r.Outcome != "failed" {
 		t.Fatalf("4xx must fail: %+v", r)
 	}
@@ -239,7 +261,7 @@ func TestExitFailedOnClientErrorAndNeverLeaksSecret(t *testing.T) {
 func TestExitTransportErrorsCarryNoValues(t *testing.T) {
 	f := setupExit(t, nil)
 	f.srv.Close()
-	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": canary, "msg": "hi"}), f.k.State())
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": canary, "msg": "hi"}), f.view())
 	if r.Outcome != "unknown" || !strings.HasPrefix(r.Detail, clerk.DNoAnswer+" ") || strings.Contains(r.Detail, canary) {
 		t.Fatalf("transport error must be unknown, typed and value-free: %+v", r)
 	}
@@ -250,18 +272,18 @@ func TestExitRefusesUndeclaredAndOverclaimed(t *testing.T) {
 	// A verb with no declared shape.
 	u := f.step(key.Fetch, map[string]string{"url": "a"})
 	u.Verb = key.Send
-	if r := f.x.Do(f.request(u, "i1"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	if r := f.x.Do(f.request(u, "i1"), f.view()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("undeclared verb must be refused without a request")
 	}
 	// A claim the clerk's own facts contradict.
 	c := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi"})
 	c.Labels = []string{"private"}
-	if r := f.x.Do(f.request(c, "i2"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	if r := f.x.Do(f.request(c, "i2"), f.view()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("contradicted claim must be refused")
 	}
 	// A request with an extra argument.
 	e := f.step(key.Post, map[string]string{"to": "bob", "msg": "hi", "extra": "x"})
-	if r := f.x.Do(f.request(e, "i3"), f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	if r := f.x.Do(f.request(e, "i3"), f.view()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("an undeclared argument must be refused")
 	}
 }
@@ -273,7 +295,7 @@ func TestExitDoesNotFollowRedirectsWithCredentials(t *testing.T) {
 	f := setupExit(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, elsewhere.URL, http.StatusFound)
 	})
-	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
+	r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.view())
 	if r.Outcome != "unknown" || !strings.HasPrefix(r.Detail, clerk.DRedirect) || other.Load() != 0 {
 		t.Fatalf("a redirect must be unknown and never followed: %+v", r)
 	}
@@ -285,8 +307,8 @@ func TestExitRefusesWhatKeyForbids(t *testing.T) {
 	if err := f.k.Revoke(2, f.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
-	q.Now = 3
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" || f.hits.Load() != 0 {
+	f.clock.Store(3)
+	if r := f.x.Do(q, f.view()); r.Outcome != "failed" || f.hits.Load() != 0 {
 		t.Fatal("a revoked key must stop the exit before any request")
 	}
 }
@@ -316,7 +338,7 @@ func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{step}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.k.Tick(0); err != nil {
+	if err := f.tick(0); err != nil {
 		t.Fatal(err)
 	}
 	if f.hits.Load() != 1 {
@@ -332,7 +354,7 @@ func TestExitRestartThenProbeDoesNotResend(t *testing.T) {
 		t.Fatal("an in-flight step must come back unknown")
 	}
 	for i := int64(1); i < 4; i++ {
-		if err := f.k.Tick(i * kernel.ProbeEvery); err != nil {
+		if err := f.tick(i * kernel.ProbeEvery); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -348,7 +370,7 @@ func TestExitDispatchIsLoggedBeforeTheRequestLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.k.Log().Len()
-	if err := f.k.Tick(0); err != nil {
+	if err := f.tick(0); err != nil {
 		t.Fatal(err)
 	}
 	if f.hits.Load() != 1 || f.inLog <= before {
@@ -388,7 +410,7 @@ func TestExitDeclarationRefusesDuplicateVerb(t *testing.T) {
 
 func TestExitEscapesValuesAsOnePathSegment(t *testing.T) {
 	f := setupExit(t, nil)
-	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "a?x=1#f", "msg": "hi"}), f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "a?x=1#f", "msg": "hi"}), f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	if f.got.path != "/v1/msg/a%3Fx=1%23f" {
@@ -400,7 +422,7 @@ func TestExitRefusesValuesThatWouldReshapeThePath(t *testing.T) {
 	f := setupExit(t, nil)
 	for _, to := range []string{"", ".", "..", "a/b", "a/../b"} {
 		q := f.req(key.Post, "i-"+to, map[string]string{"to": to, "msg": "hi"})
-		if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" {
+		if r := f.x.Do(q, f.view()); r.Outcome != "failed" {
 			t.Errorf("%q: %+v", to, r)
 		}
 	}
@@ -425,7 +447,7 @@ func (f *exitFix) run(t *testing.T, step key.Step, ticks int) kernel.StepState {
 		t.Fatal(err)
 	}
 	for i := 0; i < ticks; i++ {
-		if err := f.k.Tick(int64(i) * kernel.ProbeEvery); err != nil {
+		if err := f.tick(int64(i) * kernel.ProbeEvery); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -437,7 +459,7 @@ func TestExitEncodesDeclaredBodyFieldsAsJSON(t *testing.T) {
 		ops[0].Type, ops[0].Body = clerk.TypeJSON, map[string]string{"text": "msg", "to": "to"}
 	})
 	v := `hi", "admin": true, "x": "`
-	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": v}), f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": v}), f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	var got map[string]any
@@ -451,7 +473,7 @@ func TestExitEncodesDeclaredBodyFieldsAsJSON(t *testing.T) {
 
 func TestExitFormBodyValueStaysOneField(t *testing.T) {
 	f := setupExit(t, nil)
-	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "a&admin=1"}), f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "a&admin=1"}), f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	q, err := url.ParseQuery(f.got.body)
@@ -464,7 +486,7 @@ func TestExitSendsDeclaredQueryAndKeepsConstantQuery(t *testing.T) {
 	f := setupExitOps(t, nil, func(base string, ops []clerk.Op) {
 		ops[1].URL, ops[1].Query = base+"/v1/search?fixed=1&sp=%20x", map[string]string{"q": "url"}
 	})
-	if r := f.x.Do(f.req(key.Fetch, "i1", map[string]string{"url": "a&admin=1#f"}), f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(f.req(key.Fetch, "i1", map[string]string{"url": "a&admin=1#f"}), f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	q, err := url.ParseQuery(f.got.query)
@@ -477,7 +499,7 @@ func TestExitSendsFixedHeaders(t *testing.T) {
 	f := setupExitOps(t, nil, func(_ string, ops []clerk.Op) {
 		ops[1].Headers = map[string]string{"Accept": "application/json", "User-Agent": "agentos"}
 	})
-	if r := f.x.Do(f.req(key.Fetch, "i1", map[string]string{"url": "a"}), f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(f.req(key.Fetch, "i1", map[string]string{"url": "a"}), f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	if f.got.header.Get("Accept") != "application/json" || f.got.header.Get("User-Agent") != "agentos" || f.got.auth != "" {
@@ -665,12 +687,12 @@ func TestExitDetailsAreTypedAndValueFree(t *testing.T) {
 		{503, "unknown", "server http 503"},
 	} {
 		status.Store(int32(c.code))
-		r := f.x.Do(f.req(key.Post, "i"+string(rune('a'+i)), map[string]string{"to": "bob-" + canary, "msg": "msg-" + canary}), f.k.State())
+		r := f.x.Do(f.req(key.Post, "i"+string(rune('a'+i)), map[string]string{"to": "bob-" + canary, "msg": "msg-" + canary}), f.view())
 		if r.Outcome != c.outcome || r.Detail != c.detail {
 			t.Errorf("%d: got %+v, want %s %q", c.code, r, c.outcome, c.detail)
 		}
 	}
-	bad := f.x.Do(f.req(key.Post, "j", map[string]string{"to": "a/" + canary, "msg": "hi"}), f.k.State())
+	bad := f.x.Do(f.req(key.Post, "j", map[string]string{"to": "a/" + canary, "msg": "hi"}), f.view())
 	if bad.Outcome != "failed" || bad.Detail != clerk.DArg+" to" {
 		t.Fatalf("a bad value must name its argument only: %+v", bad)
 	}
@@ -697,12 +719,12 @@ func TestExitBusyWaitsForRetryAfter(t *testing.T) {
 		w.WriteHeader(429)
 	})
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	f.x.Do(q, f.k.State())
-	if f.x.Probe(q, f.k.State()) != "unknown" {
+	f.x.Do(q, f.view())
+	if f.x.Probe(q, f.view()) != "unknown" {
 		t.Fatal("a 429 must not be sent again before Retry-After")
 	}
-	q.Now += 120_000
-	if f.x.Probe(q, f.k.State()) != "notdone" {
+	f.clock.Add(120_000)
+	if f.x.Probe(q, f.view()) != "notdone" {
 		t.Fatal("a 429 is safe to send again after Retry-After")
 	}
 }
@@ -713,12 +735,12 @@ func TestExitBusyWaitIsCapped(t *testing.T) {
 		w.WriteHeader(429)
 	})
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	f.x.Do(q, f.k.State())
-	if f.x.Probe(q, f.k.State()) != "unknown" {
+	f.x.Do(q, f.view())
+	if f.x.Probe(q, f.view()) != "unknown" {
 		t.Fatal("a huge Retry-After must not overflow into an immediate resend")
 	}
-	q.Now += 24 * 60 * 60 * 1000
-	if f.x.Probe(q, f.k.State()) != "notdone" {
+	f.clock.Add(24 * 60 * 60 * 1000)
+	if f.x.Probe(q, f.view()) != "notdone" {
 		t.Fatal("a Retry-After wait is capped at one day")
 	}
 }
@@ -730,7 +752,7 @@ func TestExitIdempotentOpIsSentAgainAfterRestart(t *testing.T) {
 	if err := f.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{planStep(step)}}, hpubPriv())); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.k.Tick(0); err != nil {
+	if err := f.tick(0); err != nil {
 		t.Fatal(err)
 	}
 	idems = append(idems, f.got.idem)
@@ -741,7 +763,7 @@ func TestExitIdempotentOpIsSentAgainAfterRestart(t *testing.T) {
 	}
 	f.reboot(t, x2, 1)
 	for i := int64(1); i < 4; i++ {
-		if err := f.k.Tick(i * kernel.ProbeEvery); err != nil {
+		if err := f.tick(i * kernel.ProbeEvery); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -769,13 +791,13 @@ func TestExitDoesNotHoldItsLockAcrossARequest(t *testing.T) {
 			<-out
 		}
 	})
-	go f.x.Do(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.k.State())
+	go f.x.Do(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.view())
 	<-in
 	done := make(chan string)
 	go func() {
 		q := f.req(key.Post, "other", map[string]string{"to": "bob", "msg": "hi"})
-		f.x.Do(q, f.k.State())
-		done <- f.x.Probe(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.k.State())
+		f.x.Do(q, f.view())
+		done <- f.x.Probe(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.view())
 	}()
 	select {
 	case p := <-done:
@@ -795,7 +817,7 @@ func TestExitRefusesNonPublicAddressesNotDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.k.State())
+	r := x.Do(f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"}), f.view())
 	if r.Outcome != "failed" || r.Detail != clerk.DBlocked || f.hits.Load() != 0 {
 		t.Fatalf("a loopback address was reached without being declared: %+v, %d requests", r, f.hits.Load())
 	}
@@ -804,14 +826,14 @@ func TestExitRefusesNonPublicAddressesNotDeclared(t *testing.T) {
 func TestExitChecksTheKeyBeforeAnsweringDone(t *testing.T) {
 	f := setupExit(t, nil)
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "ok" {
+	if r := f.x.Do(q, f.view()); r.Outcome != "ok" {
 		t.Fatalf("%+v", r)
 	}
 	if err := f.k.Revoke(2, f.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
-	q.Now = 3
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" {
+	f.clock.Store(3)
+	if r := f.x.Do(q, f.view()); r.Outcome != "failed" {
 		t.Fatalf("a revoked key got an answer from memory: %+v", r)
 	}
 }
@@ -825,7 +847,7 @@ func TestExitRefusesARecipientClaimOtherThanTheObject(t *testing.T) {
 		t.Fatalf("recipient %q is not the object argument", got)
 	}
 	q.Plan.Steps[0].Args["to"] = "bob"
-	if r := f.x.Do(q, f.k.State()); r.Outcome != "failed" || r.Detail != kernel.CKey || f.hits.Load() != 0 {
+	if r := f.x.Do(q, f.view()); r.Outcome != "failed" || r.Detail != kernel.CKey || f.hits.Load() != 0 {
 		t.Fatalf("a plan signed for one object reached another recipient: %+v", r)
 	}
 }

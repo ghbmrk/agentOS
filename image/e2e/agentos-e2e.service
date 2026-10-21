@@ -16,3 +16,6 @@ Type=oneshot
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/run/agentos-e2e/share/box-e2e
+# The host disk beside the drive must still be unmounted when the run is done, in every mount
+# namespace (IMG-1-1): boot-report's line is read once, early in the boot.
+ExecStartPost=/bin/sh -c 'echo "agentos-disks-end: $(/usr/lib/agentos/foreign-disks)"'
