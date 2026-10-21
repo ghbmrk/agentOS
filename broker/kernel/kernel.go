@@ -303,6 +303,9 @@ func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) 
 	if ps == nil {
 		return nil, nil, &key.Refusal{Code: CPlan, Detail: "unknown plan"}
 	}
+	if ps.Status == SRejected {
+		return nil, nil, &key.Refusal{Code: CPlan, Detail: "plan is rejected"}
+	}
 	ky := ps.Plan.Key
 	if e, ok := k.s.Extended[plan]; ok {
 		ky = e
@@ -311,12 +314,26 @@ func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) 
 	return ps, v, r
 }
 
+// citedLive refuses once the key the plan cites is paused, revoked or expired,
+// or a stop is in force, whatever extension now funds the plan: an owner who
+// pauses a key stops its plan's spend (KEY-6).
+func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
+	cited, r := k.owned(ps.Plan.Key)
+	if r != nil {
+		return r
+	}
+	return cited.Live(key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+}
+
 // AdmitSpend checks that the plan's key may spend amount more under its spend
 // caps, that the plan is active and that it is not held: the check a clerk
 // makes before a metered call (LOG-7).
 func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) *key.Refusal {
 	ps, v, r := k.funding(plan)
 	if r != nil {
+		return r
+	}
+	if r := k.citedLive(now, ps); r != nil {
 		return r
 	}
 	if ps.Status != SActive {
@@ -367,13 +384,16 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 // spend envelope (KEY-4). ext must not sit under the root of the key the plan
 // cites, nor under the key that was funding it when it was held, so a held key
 // cannot release itself, directly or through an earlier extension; it must
-// carry its own per-task cap and have room left. The envelope's ceilings,
+// carry a per-task cap in its chain and have room left. The envelope's ceilings,
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
 func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	h, ok := k.s.SpendHeld[plan]
 	if !ok {
 		return &key.Refusal{Code: CNotHeld, Detail: plan}
+	}
+	if r := k.citedLive(now, k.s.Plans[plan]); r != nil {
+		return r
 	}
 	v, r := k.owned(ext)
 	if r != nil {
@@ -397,8 +417,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if r := v.Spend(plan, 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
 		return r
 	}
-	_, err := k.emit(now, TSpendExtend, spendExtended{plan, ext})
-	return err
+	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
 }
 
 // resetIfDue logs the reopening of a pool at its reserve once the reset time
@@ -444,8 +463,7 @@ func (k *Kernel) Reserve(now int64, pool string, reserve int64) error {
 	if reserve < k.s.Pools[pool].Reserve {
 		typ = TReserveDown
 	}
-	_, err := k.emit(now, typ, poolReserve{pool, reserve})
-	return err
+	return k.owner(now, typ, poolReserve{pool, reserve})
 }
 
 // AdmitPool refuses work on a pool at the owner's reserve until it resets.

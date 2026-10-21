@@ -136,6 +136,12 @@ func TestExtendRefusals(t *testing.T) {
 	if err := r.k.Extend(3, other, "t1"); err == nil {
 		t.Fatal("a foreign envelope cannot extend")
 	}
+	unissued := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "never"})
+	envNever, err := key.Derive(unissued, r.holder.priv, r.holder.pub, key.LimitSpendTask(500))
+	must(t, err)
+	if err := r.k.Extend(3, envNever, "t1"); err == nil {
+		t.Fatal("an extension under a root the log never issued cannot fund a plan")
+	}
 	if _, ok := r.k.State().SpendHeld["t1"]; !ok {
 		t.Fatal("refused extensions must leave the hold")
 	}
@@ -175,18 +181,22 @@ func TestHoldAndExtensionSurviveReplay(t *testing.T) {
 	}
 }
 
-// An extension widens: after a restart one the head never anchored is gone and
-// the hold is back (KRN-7).
+// An extension widens, so it is anchored at once: one whose anchor failed is
+// refused and gone after a restart, and the hold is back (KRN-7).
 func TestUnanchoredExtensionIsDroppedAndTheHoldReturns(t *testing.T) {
 	r := newRig(t)
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	must(t, r.k.Log().Anchor())
-	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(5)), "t1"))
 	if !kernel.Widening(kernel.TSpendExtend) {
 		t.Fatal("an extension is a widening")
 	}
+	r.anchor.down = true
+	if err := r.k.Extend(3, extension(r, env, key.LimitSpendTask(5)), "t1"); err == nil {
+		t.Fatal("an extension whose anchor failed must be refused")
+	}
+	r.anchor.down = false
 	r.boot(4)
 	if _, ok := r.k.State().SpendHeld["t1"]; !ok {
 		t.Fatal("an unconfirmed extension must not count after restart")
@@ -195,10 +205,45 @@ func TestUnanchoredExtensionIsDroppedAndTheHoldReturns(t *testing.T) {
 		t.Fatal("the plan must still be held")
 	}
 	must(t, r.k.Extend(6, extension(r, env, key.LimitSpendTask(5)), "t1"))
-	must(t, r.k.Log().Anchor())
 	r.boot(7)
 	if _, ok := r.k.State().SpendHeld["t1"]; ok {
 		t.Fatal("an anchored extension must stand")
+	}
+}
+
+// Pausing the key a plan cites stops its spend, extended or not (KEY-6).
+func TestPausingTheCitedKeyStopsAnExtendedPlan(t *testing.T) {
+	r := newRig(t)
+	cited := modelKey(r, "m1", key.LimitSpendTask(10))
+	modelPlan(r, "t1", cited)
+	env := envelope(r, 500, 800)
+	exhaust(r, "t1", 10)
+	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(50)), "t1"))
+	if rf := r.k.AdmitSpend(4, "t1", 1); rf != nil {
+		t.Fatalf("the extended plan spends: %v", rf)
+	}
+	v, err := key.Chain(cited, r.owner.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, r.k.Pause(5, v.ID()))
+	if rf := r.k.AdmitSpend(6, "t1", 1); rf == nil || rf.Code != key.RPaused {
+		t.Fatalf("a paused cited key stops its plan's spend: %v", rf)
+	}
+}
+
+// A rejected plan never ran: nothing is metered or held under a key its
+// submitter did not hold, though the key's root was issued.
+func TestRejectedPlanMetersNothing(t *testing.T) {
+	r := newRig(t)
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
+	p := kernel.SignPlan(kernel.Plan{ID: "t2", Key: modelKey(r, "m1", key.LimitSpendTask(10)), Steps: []kernel.PlanStep{step}}, gen(9).priv)
+	must(t, r.k.Submit(0, p))
+	if r.status("t2") != kernel.SRejected {
+		t.Fatalf("a stranger's plan is %s", r.status("t2"))
+	}
+	if err := r.k.Meter(1, "t2", "api", 5, "provider"); err == nil {
+		t.Fatal("a rejected plan is metered")
 	}
 }
 
@@ -273,6 +318,56 @@ func TestAnExtensionCannotReleaseItsOwnHold(t *testing.T) {
 		t.Fatal("nor can anything derived from it")
 	}
 	must(t, r.k.Extend(6, extension(r, env, key.LimitSpendTask(20), key.LimitSpendDay(700)), "t1"))
+}
+
+// The guards against self-release must hold for keys that still have room:
+// a refused cap holds the plan, but the key behind it may be only part used.
+func TestHeldKeysWithRoomLeftStillCannotReleaseThePlan(t *testing.T) {
+	r := newRig(t)
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	modelPlan(r, "t1", k)
+	env := envelope(r, 500, 800)
+	exhaust(r, "t1", 10)
+	e1 := extension(r, env, key.LimitSpendTask(100))
+	must(t, r.k.Extend(3, e1, "t1"))
+	must(t, r.k.Meter(4, "t1", "api", 70, "provider"))
+	rf := r.k.AdmitSpend(5, "t1", 51)
+	if rf == nil {
+		t.Fatal("51 more does not fit e1's cap")
+	}
+	must(t, r.k.Hold(5, "t1", rf))
+	if err := r.k.Extend(6, e1, "t1"); err == nil {
+		t.Fatal("the key that funded the plan cannot release it, room left or not")
+	}
+	under, err := key.Derive(e1, r.holder.priv, r.holder.pub, key.LimitSpendTask(90))
+	must(t, err)
+	if err := r.k.Extend(6, under, "t1"); err == nil {
+		t.Fatal("nor can a key derived from it")
+	}
+	sibling, err := key.Derive(key.Key{Root: k.Root}, r.holder.priv, r.holder.pub, key.LimitSpendTask(50))
+	must(t, err)
+	if err := r.k.Extend(6, sibling, "t1"); err == nil {
+		t.Fatal("nor can a sibling under the cited key's root")
+	}
+	if _, ok := r.k.State().SpendHeld["t1"]; !ok {
+		t.Fatal("refused extensions must leave the hold")
+	}
+}
+
+// A pool the reserve alone closed has no reset time to wait for: refusing a
+// call on it logs nothing.
+func TestPoolClosedByTheReserveAloneLogsNothingWhenRefusing(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Reserve(1, "p", 1000))
+	n := len(r.k.Log().Entries())
+	for i := int64(2); i < 5; i++ {
+		if rf := r.k.AdmitPool(i, "p"); rf == nil {
+			t.Fatal("a pool whose whole share is the reserve is closed")
+		}
+	}
+	if len(r.k.Log().Entries()) != n {
+		t.Fatal("a refusal with no reset time to pass must not log a reset")
+	}
 }
 
 // An extension needs room for one more under the envelope's ceilings.

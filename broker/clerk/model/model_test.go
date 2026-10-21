@@ -327,6 +327,43 @@ func TestCostArithmeticIsRefusedBeforeTheProvider(t *testing.T) {
 	}
 }
 
+// Each guard in the cost arithmetic is pinned by a price it alone refuses, or,
+// for the add guard, by a provider figure it alone keeps from wrapping.
+func TestEachCostGuardIsPinnedByItsOwnCase(t *testing.T) {
+	prompt := strings.Repeat("x", 400)
+	for name, tc := range map[string]struct {
+		p      model.Price
+		maxOut int64
+	}{
+		// 100 in at -1M/M plus 150 out at 1M/M sums to a positive 50: only the sign check refuses it
+		"negative in-price": {model.Price{InPerM: -1_000_000, OutPerM: 1_000_000}, 150},
+		// (2^44+1) * 2^20 wraps to 2^20: only the multiply check refuses it
+		"product wraps": {model.Price{OutPerM: 1 << 20}, 1<<44 + 1},
+	} {
+		f := &fake{}
+		c, k, _ := rig(t, f)
+		c.Routes["bad"] = tc.p
+		n := len(k.Log().Entries())
+		if _, err := c.Call(1, "t", "bad", prompt, tc.maxOut); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+		if f.calls != 0 || len(k.Log().Entries()) != n {
+			t.Fatalf("%s reached the provider or the log", name)
+		}
+	}
+	// a reported sum that wraps is metered at the admitted worst case, never at 0 or less
+	f := &fake{u: model.Usage{In: math.MaxInt64 / 1_000_000, Out: math.MaxInt64 / 1_000_000, Reported: true}}
+	c, k, _ := rig(t, f)
+	c.Routes["big"] = model.Price{InPerM: 1_000_000, OutPerM: 1_000_000}
+	if _, err := c.Call(1, "t", "big", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	last := lastEntry(k)
+	if !strings.Contains(string(last.Body), `"amount":11`) || !strings.Contains(string(last.Body), `"source":"admitted"`) {
+		t.Fatalf("a wrapping figure is metered at the admitted cost: %s", last.Body)
+	}
+}
+
 // A plan under a mail key with a spend cap makes a capped model call: the
 // funding key's caveat authorizes, not the clerk it was issued for.
 func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
