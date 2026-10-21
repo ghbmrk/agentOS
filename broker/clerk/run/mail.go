@@ -166,7 +166,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 
 // RemoveMail removes the account from dir: every mail password first, so the
 // next connection has nothing to sign in with and no crash-left slot stays
-// sealed, then the settings.
+// sealed, then the settings and any temporary a crashed write left.
 func RemoveMail(dir string, sec *clerk.Secrets) error {
 	if err := private(dir, true); err != nil {
 		return err
@@ -176,8 +176,12 @@ func RemoveMail(dir string, sec *clerk.Secrets) error {
 	if err := sec.RemovePrefix(clerk.MailSlots, ""); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(dir, mailSettings)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	// A temporary a crashed write left may hold a sealed password or the
+	// settings; it is never read, and it goes too.
+	for _, name := range []string{secretsName + ".tmp", mailSettings + ".tmp", mailSettings} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return syncDir(dir)
 }

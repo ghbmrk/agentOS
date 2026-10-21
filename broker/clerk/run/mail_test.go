@@ -5,6 +5,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -228,6 +229,38 @@ func TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword(t *testing.T) {
 		if re, err := OpenSecrets(dir, testSealer()); err != nil || re.Len() != 0 {
 			t.Fatalf("stopped after step %d, then removed: %d slots still sealed", i, re.Len())
 		}
+	}
+}
+
+// A setup that crashed mid-write leaves temporaries holding the sealed
+// password and the settings; RemoveMail leaves neither (#2706 UX 1).
+func TestMailRemovalLeavesNoCrashedTemporary(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := MailSettings{Address: "you@example.com", IMAP: "imap.a.test:993", SMTP: "smtp.a.test:465"}
+	if err := SetMail(dir, sec, a, "canary-account-A-pass"); err != nil {
+		t.Fatal(err)
+	}
+	atRest, _ := sec.MarshalBinary()
+	b, _ := json.Marshal(a)
+	for _, name := range []string{secretsName, mailSettings} {
+		body := map[string][]byte{secretsName: atRest, mailSettings: b}[name]
+		if err := writeAtomic(dir, name, body, func(i int) bool { return i == 2 }); !errors.Is(err, errStopped) {
+			t.Fatal(err)
+		}
+	}
+	if err := RemoveMail(dir, sec); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 1 || es[0].Name() != secretsName {
+		var names []string
+		for _, e := range es {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("after removal the clerk's directory holds %v, want only the emptied Secrets file", names)
 	}
 }
 
