@@ -31,6 +31,14 @@ func (f *fake) Call(route, prompt string, maxOut int64) (string, model.Usage, er
 	return strings.Repeat("x", 400), f.u, f.err
 }
 
+// cosigned is the owner's and the second hardware key's co-signatures over a
+// grant batch.
+func cosigned(keys ...key.Key) []key.Cosign {
+	_, o := seed(1)
+	_, b := seed(12)
+	return []key.Cosign{key.Approve(o, kernel.BatchHash(keys...)), key.Approve(b, kernel.BatchHash(keys...))}
+}
+
 func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	s := make([]byte, ed25519.SeedSize)
 	s[0] = b
@@ -69,7 +77,8 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, []ed25519.PublicKey{opub}, nil, 0)
+	bpub, _ := seed(12) // the second hardware key, which co-signs new power (D-146)
+	k, err := kernel.Boot(l, []ed25519.PublicKey{opub, bpub}, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +87,7 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
+	if err := k.Issue(-kernel.GrantHold, cosigned(root, ky), root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
@@ -136,7 +145,7 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(3-kernel.GrantHold, root, env); err != nil { // granted at setup
+	if err := k.Issue(3-kernel.GrantHold, cosigned(root, env), root, env); err != nil { // granted at setup
 		t.Fatal(err)
 	}
 	ext, err := key.Derive(env, hpriv, hpub, key.LimitSpendTask(200))
@@ -388,7 +397,7 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
+	if err := k.Issue(-kernel.GrantHold, cosigned(root, ky), root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
