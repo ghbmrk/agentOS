@@ -11,9 +11,11 @@ import (
 
 // modelKey issues a root for the model clerk and derives a capped child.
 func modelKey(r *rig, serial string, c ...key.Caveat) key.Key {
-	root := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial})
-	must(r.t, r.k.Issue(0, root))
-	k, err := key.Derive(root, r.holder.priv, r.holder.pub, c...)
+	ck := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial}), 1<<40)
+	if len(c) == 0 {
+		return ck
+	}
+	k, err := key.Derive(ck, r.holder.priv, r.holder.pub, c...)
 	must(r.t, err)
 	return k
 }
@@ -108,7 +110,7 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 	if rf := r.k.AdmitSpend(3, "t1", 1); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("an ended plan spends nothing: %v", rf)
 	}
-	foreign := key.Issue(gen(9).priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
+	foreign := key.Issue(gen(9).priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
 	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
 	must(t, r.k.Submit(4, r.sign(kernel.Plan{ID: "t2", Key: foreign, Steps: []kernel.PlanStep{step}})))
 	if rf := r.k.AdmitSpend(5, "t2", 1); rf == nil {
@@ -138,7 +140,9 @@ func TestSpendFollowsTheFundingKeysCaveatWhateverItsClerk(t *testing.T) {
 	r := newRig(t)
 	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
 	must(t, r.k.Submit(0, r.sign(kernel.Plan{ID: "capped", Key: r.derive(key.LimitSpendTask(100)), Steps: []kernel.PlanStep{step}})))
-	must(t, r.k.Submit(0, r.sign(kernel.Plan{ID: "bare", Key: r.derive(key.LimitUses(5)), Steps: []kernel.PlanStep{step}})))
+	// Every key off the root has a daily cap (D-146); only the passkey's own
+	// one-off under the bare root has none.
+	must(t, r.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "bare", Key: key.Key{Root: r.ck.Root}, Steps: []kernel.PlanStep{step}}, r.owner.priv)))
 	if r.status("capped") != kernel.SActive || r.status("bare") != kernel.SActive {
 		t.Fatalf("plans: %s %s", r.status("capped"), r.status("bare"))
 	}

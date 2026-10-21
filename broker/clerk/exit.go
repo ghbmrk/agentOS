@@ -111,7 +111,7 @@ const (
 // details (CLK-1..4, KRN-8).
 type Exit struct {
 	name    string
-	owner   ed25519.PublicKey
+	anchors []ed25519.PublicKey
 	ops     map[key.Verb]decl
 	secrets *Secrets
 	client  *http.Client
@@ -186,14 +186,14 @@ var (
 // surprise. The exit owns its transport: no proxy from the environment, no
 // cookie jar, no redirects, and every dial through the guard, which is
 // required. roots nil trusts the system's certificate authorities.
-func NewExit(d Declaration, owner ed25519.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
+func NewExit(d Declaration, anchors []ed25519.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
 	if d.Name == "" {
 		return nil, errors.New("clerk: a declaration needs a name")
 	}
 	if d.Guard == nil {
 		return nil, errors.New("clerk: a declaration needs the home-network policy (DEV-2)")
 	}
-	x := &Exit{name: d.Name, owner: owner, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}, clock: d.Clock}
+	x := &Exit{name: d.Name, anchors: anchors, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}, clock: d.Clock}
 	slot := ""
 	for _, op := range d.Ops {
 		o, err := x.declare(op)
@@ -390,7 +390,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 // check is the clerk's own authorization, run before every send.
 func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
-	if rf := Check(x.owner, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
+	if rf := Check(x.anchors, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
 	}
 	return kernel.Result{}, true

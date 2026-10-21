@@ -28,10 +28,19 @@ func ctx(now int64, l ledger) Context {
 	return Context{Now: now, Changes: &Changes{Revoked: map[ID]bool{}, Paused: map[ID]bool{}}, Ledger: l}
 }
 
+// root is the passkey (owner), the home clerk (holder) and the passkey's
+// clerk key to it, which no step's spend or time here reaches (D-146).
 func root(t *testing.T) (kp, kp, Key) {
 	owner, holder := gen(1), gen(2)
-	k := Issue(owner.priv, Root{Holder: holder.pub, Clerk: "mail", Verbs: []Verb{Organize, Trash, Unsubscribe}, Serial: "r1"})
+	k, err := ClerkKey(bare(owner), owner.priv, holder.pub, 0, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return owner, holder, k
+}
+
+func bare(owner kp) Key {
+	return Issue(owner.priv, Root{Clerk: "mail", Verbs: []Verb{Organize, Trash, Unsubscribe}, Serial: "r1"})
 }
 
 // verified is a use of k by its holder: the only way to a Verified.
@@ -224,7 +233,7 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	parent, _ := Derive(k, h.priv, h2.pub, LimitUses(2), LimitSpendDay(50), LimitRate(5), LimitRateRecipient(1))
 	child, _ := Derive(parent, h2.priv, gen(4).pub, LimitSpendTask(10))
 	v := verified(t, child, o, gen(4))
-	pid := v.IDs[1]
+	pid := v.IDs[2]
 	s := step(Trash)
 	s.Amount, s.Task, s.Recipient = 10, "t1", "r"
 	if r := v.Authorize(s, ctx(1000, ledger{})); r != nil {
@@ -362,29 +371,96 @@ func TestChainAloneNeverAuthorizes(t *testing.T) {
 // least one caveat, so a leaked child is always capped (D-145). Derive refuses
 // one without, and a link the root's holder signs by hand is refused by
 // Verify and Chain alike; a key below a caveated one need add none.
-func TestKeyOffTheRootCarriesALimit(t *testing.T) {
-	o, h, k := root(t)
-	next := gen(3)
-	if _, err := Derive(k, h.priv, next.pub); !errors.Is(err, ErrUncaveated) {
-		t.Fatalf("derive with no caveat: %v", err)
+func TestKeyOffTheRootLapsesAndIsCapped(t *testing.T) {
+	o, h := gen(1), gen(2)
+	r := bare(o)
+	cases := map[string][]Caveat{
+		"no caveat":    nil,
+		"verbs only":   {LimitVerbs(Trash)},
+		"no spend cap": {LimitExpires(1000), LimitSpendTask(5)},
+		"no expiry":    {LimitSpendDay(5), LimitUses(3)},
 	}
-	bare := Extend(k, h.priv, Link{Holder: next.pub})
 	use := []byte("plan")
-	if _, err := Verify(bare, o.pub, use, Sign(bare, next.priv, use)); !errors.Is(err, ErrUncaveated) {
-		t.Fatalf("verify an uncaveated child: %v", err)
+	for name, cav := range cases {
+		if _, err := Derive(r, o.priv, h.pub, cav...); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: derive: %v", name, err)
+		}
+		k := Extend(r, o.priv, Link{Caveats: cav, Holder: h.pub})
+		if _, err := Verify(k, o.pub, use, Sign(k, h.priv, use)); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: verify: %v", name, err)
+		}
+		if _, err := Chain(k, o.pub); !errors.Is(err, ErrUncaveated) {
+			t.Fatalf("%s: chain: %v", name, err)
+		}
 	}
-	if _, err := Chain(bare, o.pub); !errors.Is(err, ErrUncaveated) {
-		t.Fatalf("chain of an uncaveated child: %v", err)
-	}
-	d, err := Derive(k, h.priv, next.pub, LimitExpires(1000))
+	d, err := ClerkKey(r, o.priv, h.pub, 500, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := Derive(d, next.priv, gen(4).pub)
+	v := verified(t, d, o, h)
+	if *v.Limits.NotAfter != 500+ClerkLife {
+		t.Fatalf("clerk key lives %d", *v.Limits.NotAfter-500)
+	}
+	if rf := v.Authorize(step(Trash), ctx(500+ClerkLife+1, nil)); rf == nil || rf.Code != RExpired {
+		t.Fatalf("a lapsed clerk key: %v", rf)
+	}
+	g, err := Derive(d, h.priv, gen(4).pub)
 	if err != nil {
-		t.Fatalf("a key below a caveated one inherits its limit: %v", err)
+		t.Fatalf("a key below the clerk key inherits its limits: %v", err)
 	}
 	if _, err := Verify(g, o.pub, use, Sign(g, gen(4).priv, use)); err != nil {
 		t.Fatalf("verify the grandchild: %v", err)
+	}
+}
+
+// The bare root is the passkey's: the home clerk, or anyone but the passkey,
+// can neither use it nor derive from it (D-146).
+func TestBareRootIsThePasskeysAlone(t *testing.T) {
+	o, h := gen(1), gen(2)
+	r := bare(o)
+	use := []byte("plan")
+	if _, err := Verify(r, o.pub, use, Sign(r, h.priv, use)); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("the home clerk signs under the bare root: %v", err)
+	}
+	if _, err := Verify(r, o.pub, use, Sign(r, o.priv, use)); err != nil {
+		t.Fatalf("the passkey signs under the bare root: %v", err)
+	}
+	if _, err := Derive(r, h.priv, h.pub, LimitExpires(1000), LimitSpendDay(1)); !errors.Is(err, ErrNotHolder) {
+		t.Fatalf("the home clerk derives off the root: %v", err)
+	}
+	k := Extend(r, h.priv, Link{Caveats: []Caveat{LimitExpires(1000), LimitSpendDay(1)}, Holder: h.pub})
+	if _, err := Chain(k, o.pub); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("a link off the root not signed by the passkey: %v", err)
+	}
+}
+
+func TestPasskeysAreTheAnchorsAndWhatTheyEnroll(t *testing.T) {
+	hw1, hw2, phone, old, stranger := gen(1), gen(5), gen(6), gen(8), gen(7)
+	anchors := []ed25519.PublicKey{hw1.pub, hw2.pub}
+	es := []Enrollment{
+		Enroll(stranger.priv, stranger.pub), // signed by no anchor
+		Enroll(hw1.priv, old.pub),
+		Enroll(hw2.priv, phone.pub),
+		Enroll(phone.priv, gen(9).pub), // a phone enrolls nothing
+		{Passkey: stranger.pub, By: hw1.pub, Sig: Enroll(stranger.priv, stranger.pub).Sig}, // forged
+	}
+	set := Passkeys(anchors, es, nil)
+	if len(set) != 4 || !In(set, phone.pub) || !In(set, old.pub) || In(set, stranger.pub) || In(set, gen(9).pub) {
+		t.Fatalf("set: %d keys", len(set))
+	}
+	// The lost phone is revoked; its enrollment, replayed, does not bring it back.
+	set = Passkeys(anchors, append(es, Enroll(hw1.priv, old.pub)), []ed25519.PublicKey{old.pub})
+	if In(set, old.pub) || !In(set, phone.pub) {
+		t.Fatal("a revoked passkey stays out")
+	}
+	r := Issue(phone.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "b"})
+	if err := CheckChain(r, Owner(set, r)); err != nil {
+		t.Fatalf("a root the enrolled phone issued: %v", err)
+	}
+	for _, by := range []kp{old, stranger} {
+		s := Issue(by.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "s"})
+		if err := CheckChain(s, Owner(set, s)); !errors.Is(err, ErrWrongOwner) {
+			t.Fatalf("a root no passkey in the set issued: %v", err)
+		}
 	}
 }

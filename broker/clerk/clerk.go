@@ -40,11 +40,12 @@ func (c Clock) Now() int64 {
 
 // Check is the clerk's own authorization of a request at now, on the clerk's
 // own clock. It trusts nothing the kernel or the transport says: the chain
-// and its last holder's signature on the plan, the step taken from that signed
-// plan, the root's presence in the log, the log's record that this very plan's
+// and its last holder's signature on the plan, verified against the clerk's own
+// anchors (D-146), the step taken from that signed plan, the key's grants live
+// in the log on the clerk's clock, the log's record that this very plan's
 // step is in flight, the key's limits as of that step's first dispatch, and
 // for an irreversible verb the hold the log recorded (CLK-2).
-func Check(owner ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
+func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
 	st := r.Step()
 	if st.Clerk != name {
 		return &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
@@ -60,12 +61,12 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, now int64, r kerne
 	if content, labels, amount := facts(st); content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
 		return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
 	}
-	ver, err := kernel.VerifyPlan(r.Plan, owner)
+	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwner(v, anchors, r.Plan.Key))
 	if err != nil {
 		return &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
 	}
-	if !v.Known(ver.Root()) {
-		return &key.Refusal{Code: kernel.CUnknownRoot, Detail: ver.Root().String()}
+	if rf := kernel.Live(v, ver, now); rf != nil {
+		return rf
 	}
 	d, ok := v.Dispatched(r)
 	if !ok {
@@ -137,7 +138,8 @@ type Effect struct {
 // same code, so what the sim proves of a clerk it proves of this one.
 type Mail struct {
 	Name  string
-	Owner ed25519.PublicKey
+	// Anchors are the owner's hardware keys, the clerk's own trust root.
+	Anchors []ed25519.PublicKey
 	// Fault is consulted for op "do" and "probe"; nil means no fault.
 	Fault func(op string, r kernel.Request) string
 	Clock Clock
@@ -151,8 +153,8 @@ type Mail struct {
 	effects []Effect
 }
 
-func NewMail(name string, owner ed25519.PublicKey) *Mail {
-	return &Mail{Name: name, Owner: owner, done: map[string]bool{}}
+func NewMail(name string, anchors []ed25519.PublicKey) *Mail {
+	return &Mail{Name: name, Anchors: anchors, done: map[string]bool{}}
 }
 
 func (m *Mail) fault(op string, r kernel.Request) string {
@@ -171,7 +173,7 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if m.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := Check(m.Owner, m.Name, m.Facts, m.Clock.Now(), r, v); rf != nil {
+	if rf := Check(m.Anchors, m.Name, m.Facts, m.Clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	switch m.fault("do", r) {

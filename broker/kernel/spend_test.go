@@ -12,11 +12,8 @@ import (
 // envelope issues the owner's spend envelope: a model-clerk root whose first
 // link sets the per-task and per-day extension ceilings (LOG-7, KEY-4).
 func envelope(r *rig, task, day int64) key.Key {
-	root := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
-	must(r.t, r.k.Issue(0, root))
-	env, err := key.Derive(root, r.holder.priv, r.holder.pub, key.LimitSpendTask(task), key.LimitSpendDay(day))
-	must(r.t, err)
-	return env
+	return r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"}), day,
+		key.LimitSpendTask(task))
 }
 
 func extension(r *rig, env key.Key, c ...key.Caveat) key.Key {
@@ -132,12 +129,12 @@ func TestExtendRefusals(t *testing.T) {
 	if err := r.k.Extend(3, modelKey(r, "m2", key.LimitSpendDay(5)), "t1"); err == nil {
 		t.Fatal("an extension with no per-task cap anywhere in its chain is unbounded")
 	}
-	other := key.Issue(gen(9).priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
+	other := key.Issue(gen(9).priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
 	if err := r.k.Extend(3, other, "t1"); err == nil {
 		t.Fatal("a foreign envelope cannot extend")
 	}
-	unissued := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "never"})
-	envNever, err := key.Derive(unissued, r.holder.priv, r.holder.pub, key.LimitSpendTask(500))
+	unissued := key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "never"})
+	envNever, err := key.ClerkKey(unissued, r.owner.priv, r.holder.pub, 0, 1000, key.LimitSpendTask(500))
 	must(t, err)
 	if err := r.k.Extend(3, envNever, "t1"); err == nil {
 		t.Fatal("an extension under a root the log never issued cannot fund a plan")
@@ -344,8 +341,9 @@ func TestHeldKeysWithRoomLeftStillCannotReleaseThePlan(t *testing.T) {
 	if err := r.k.Extend(6, under, "t1"); err == nil {
 		t.Fatal("nor can a key derived from it")
 	}
-	sibling, err := key.Derive(key.Key{Root: k.Root}, r.holder.priv, r.holder.pub, key.LimitSpendTask(50))
+	sibling, err := key.ClerkKey(key.Key{Root: k.Root}, r.owner.priv, r.holder.pub, 0, 1000, key.LimitSpendTask(50))
 	must(t, err)
+	must(t, r.k.Issue(-kernel.GrantHold, sibling)) // granted, so only its root refuses it
 	if err := r.k.Extend(6, sibling, "t1"); err == nil {
 		t.Fatal("nor can a sibling under the cited key's root")
 	}

@@ -81,7 +81,7 @@ type effect struct {
 // of. Every effect the clerk applies is judged on the spot, without trusting
 // the kernel or the clerk.
 type world struct {
-	owner   ed25519.PublicKey
+	anchors []ed25519.PublicKey
 	mutant  Mutant
 	rng     *rand.Rand
 	now     *int64 // the true time: the clerk's own clock
@@ -99,7 +99,7 @@ type world struct {
 }
 
 func (w *world) newMail() *clerk.Mail {
-	m := clerk.NewMail("mail", w.owner)
+	m := clerk.NewMail("mail", w.anchors)
 	m.Fault = func(op string, _ kernel.Request) string { return w.fault(op) }
 	m.Clock = func() int64 { return *w.now }
 	return m
@@ -173,7 +173,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	if w.unconfirmed {
 		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
 	}
-	ver, err := kernel.VerifyPlan(r.Plan, w.owner)
+	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwner(v, w.anchors, r.Plan.Key))
 	if err != nil {
 		w.effects = append(w.effects, effect{r.Idem(), now, ""})
 		w.bad = append(w.bad, "effect under an invalid key or one its submitter does not hold")
@@ -199,8 +199,8 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 			w.bad = append(w.bad, "effect under a revoked key")
 		}
 	}
-	if !v.Known(ver.Root()) {
-		w.bad = append(w.bad, "effect under a root not in the log")
+	if kernel.Live(v, ver, now) != nil { // on the true clock
+		w.bad = append(w.bad, "effect under a grant not in the log or still in its hold")
 	}
 	found := false
 	for _, x := range ver.Limits.Verbs {
@@ -243,10 +243,11 @@ type sim struct {
 	anchor *anchor
 	w      *world
 	k      *kernel.Kernel
-	owner  keyPair
-	holder keyPair // holds every root: the trusted side
+	owner  keyPair // the passkey: holds every root
+	holder keyPair // the home clerk: holds the passkey's clerk key of each root
 	planr  keyPair // holds only the keys derived to it
 	head   keyPair
+	roots  []key.Key
 	pool   []key.Key
 	ids    []key.ID
 	plans  []string
@@ -280,7 +281,7 @@ func (s *sim) boot() error {
 		s.anchor.down, s.w.unconfirmed = false, false
 		l, err := kernel.Open(s.kcfg())
 		if err == nil {
-			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.kt())
+			s.k, err = kernel.Boot(l, s.w.anchors, map[string]kernel.Clerk{"mail": s.w}, s.kt())
 		}
 		if err == nil {
 			return nil
@@ -309,16 +310,26 @@ func (s *sim) newRoot() key.Key {
 	if len(vs) == 0 {
 		vs = append(vs, key.Trash)
 	}
-	r := key.Issue(s.owner.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: vs,
-		Serial: fmt.Sprintf("r%d", len(s.pool))})
+	r := key.Issue(s.owner.priv, key.Root{Clerk: "mail", Verbs: vs,
+		Serial: fmt.Sprintf("r%d", len(s.roots))})
 	return r
 }
 
-func (s *sim) remember(k key.Key) {
-	s.pool = append(s.pool, k)
-	if key.CheckChain(k, s.owner.pub) == nil {
-		s.ids = append(s.ids, k.Tip())
+// clerkKey is the passkey's grant of root to the home clerk (D-146), with a
+// spend cap no sim step reaches.
+func (s *sim) clerkKey(passkey ed25519.PrivateKey, root key.Key) key.Key {
+	k, err := key.ClerkKey(root, passkey, s.holder.pub, s.now, 1<<40)
+	if err != nil {
+		panic(err)
 	}
+	return k
+}
+
+// remember keeps a granted root and hands its clerk key to the home clerk.
+func (s *sim) remember(r, k key.Key) {
+	s.roots = append(s.roots, r)
+	s.pool = append(s.pool, k)
+	s.ids = append(s.ids, r.Tip(), k.Tip())
 }
 
 func (s *sim) derived() (key.Key, bool) {
@@ -343,8 +354,9 @@ func (s *sim) derived() (key.Key, bool) {
 }
 
 // signed is a plan under the planner's pick of key, signed by whoever submits
-// it: the holder for a root, the planner for a key derived to it, and the
-// planner again for a key it does not hold, which must confer nothing.
+// it: the home clerk for its clerk key, the planner for a key derived to it,
+// and either for a key it does not hold, which must confer nothing. A bare
+// root is the passkey's alone (D-146).
 func (s *sim) signed(p kernel.Plan) (kernel.Plan, bool) {
 	p.Key = s.anyKey()
 	signer, unheld := s.holder.priv, false
@@ -364,6 +376,10 @@ func (s *sim) signed(p kernel.Plan) (kernel.Plan, bool) {
 		}
 	case 2: // a stranger signs
 		signer, unheld = gen(s.rng).priv, true
+	case 3: // the home clerk signs under a bare root
+		if len(s.roots) > 0 {
+			p.Key, signer, unheld = s.roots[s.pick(len(s.roots))], s.holder.priv, true
+		}
 	}
 	return kernel.SignPlan(p, signer), unheld
 }
@@ -373,9 +389,9 @@ func (s *sim) anyKey() key.Key {
 	switch s.pick(8) {
 	case 0:
 		foreign := gen(s.rng)
-		return key.Issue(foreign.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: verbs, Serial: "x"})
+		return s.clerkKey(foreign.priv, key.Issue(foreign.priv, key.Root{Clerk: "mail", Verbs: verbs, Serial: "x"}))
 	case 1:
-		return key.Issue(s.owner.priv, key.Root{Holder: s.holder.pub, Clerk: "mail", Verbs: verbs, Serial: "never-logged"})
+		return s.clerkKey(s.owner.priv, key.Issue(s.owner.priv, key.Root{Clerk: "mail", Verbs: verbs, Serial: "never-logged"}))
 	case 2:
 		if len(s.pool) > 0 {
 			k := s.pool[s.pick(len(s.pool))]
@@ -509,13 +525,23 @@ func (s *sim) op() error {
 			s.logf("arm crash in %d appends", n)
 			s.disk.Arm(n)
 		}
-	case c == 15:
-		r := s.newRoot()
-		s.logf("issue root")
-		if err := s.widened(s.k.Issue(s.kt(), r)); err != nil {
+	case c == 15 && len(s.roots) > 0 && s.pick(2) == 0:
+		i := s.pick(len(s.roots))
+		k := s.clerkKey(s.owner.priv, s.roots[i])
+		s.logf("renew clerk key of root %d", i)
+		if err := s.widened(s.k.Issue(s.kt(), k)); err != nil {
 			return err
 		}
-		s.remember(r)
+		s.pool = append(s.pool, k)
+		s.ids = append(s.ids, k.Tip())
+	case c == 15:
+		r := s.newRoot()
+		k := s.clerkKey(s.owner.priv, r)
+		s.logf("grant root")
+		if err := s.widened(s.k.Issue(s.kt(), r, k)); err != nil {
+			return err
+		}
+		s.remember(r, k)
 	}
 	return nil
 }
@@ -561,7 +587,7 @@ func (s *sim) check() error {
 		return fmt.Errorf("invariant: %s", s.w.bad[0])
 	}
 	es := s.k.Log().Entries()
-	re, err := kernel.Replay(s.owner.pub, es)
+	re, err := kernel.Replay(s.w.anchors, es)
 	if err != nil {
 		return fmt.Errorf("replay: %w", err)
 	}
@@ -596,7 +622,7 @@ func Run(c Config) (*Result, error) {
 	s.disk = &Disk{rng: rng}
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
-	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
+	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -610,12 +636,13 @@ func Run(c Config) (*Result, error) {
 	if err := s.boot(); err != nil {
 		return nil, err
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 2; i++ { // set up a day ago, so past the hold
 		r := s.newRoot()
-		if err := s.k.Issue(0, r); err != nil {
+		k := s.clerkKey(s.owner.priv, r)
+		if err := s.k.Issue(-kernel.GrantHold, r, k); err != nil {
 			return nil, err
 		}
-		s.remember(r)
+		s.remember(r, k)
 	}
 	fail := func(err error) (*Result, error) {
 		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))

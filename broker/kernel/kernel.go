@@ -10,15 +10,16 @@ import (
 
 // Kernel refusal codes, beside the key package's.
 const (
-	CKey         = "key"          // the chain does not verify
-	CUnknownRoot = "unknown-root" // the root was never issued into the log
-	CPlan        = "plan"         // the plan is malformed
-	CDuplicate   = "duplicate"    // the same effect within 24 hours needs a fresh owner key (KRN-8)
-	CClerk       = "no-clerk"
-	CPool        = "pool"      // the pool is at the owner's reserve until it resets (RES-5)
-	CNotHeld     = "not-held"  // no hold on that task
-	CExtension   = "extension" // the key cannot extend this hold
-	CHeld        = "held"      // the task is held until the owner extends it (LOG-7)
+	CKey       = "key"         // the chain does not verify
+	CUngranted = "not-granted" // the passkey never granted the key's root or first link into the log
+	CGrantHeld = "grant-held"  // the grant is still in its hold (D-146)
+	CPlan      = "plan"        // the plan is malformed
+	CDuplicate = "duplicate"   // the same effect within 24 hours needs a fresh owner key (KRN-8)
+	CClerk     = "no-clerk"
+	CPool      = "pool"      // the pool is at the owner's reserve until it resets (RES-5)
+	CNotHeld   = "not-held"  // no hold on that task
+	CExtension = "extension" // the key cannot extend this hold
+	CHeld      = "held"      // the task is held until the owner extends it (LOG-7)
 )
 
 // Admit decides a submitted plan against the state. It is pure: the same state
@@ -28,12 +29,12 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
 	}
-	v, err := VerifyPlan(p, s.Owner)
+	v, err := VerifyPlan(p, s.owner(p.Key))
 	if err != nil {
 		return key.ID{}, nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	if !s.Roots[v.Root()] {
-		return key.ID{}, nil, &key.Refusal{Code: CUnknownRoot, Detail: v.Root().String()}
+	if r := Live(s, v, now); r != nil {
+		return key.ID{}, nil, r
 	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
 	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
@@ -141,7 +142,7 @@ func Next(s *State, id string, now int64) Act {
 	default:
 		return a
 	}
-	v, err := VerifyPlan(p.Plan, s.Owner)
+	v, err := VerifyPlan(p.Plan, s.owner(p.Plan.Key))
 	if err != nil {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
 		return a
@@ -212,11 +213,28 @@ type Dispatch struct {
 
 // View is the read-only part of the state a clerk checks against (CLK-2).
 type View interface {
-	Known(root key.ID) bool
+	Granted(id key.ID) (from int64, ok bool)
+	Enrollments() ([]key.Enrollment, []ed25519.PublicKey)
 	ChangesView() *key.Changes
 	LedgerBefore(seq uint64) key.Ledger
 	// Dispatched answers only for a request the log has in flight now.
 	Dispatched(r Request) (Dispatch, bool)
+}
+
+// Live refuses a key unless its grants, its root and its first link, are in
+// the log and past their hold at now (D-146). Keys below the first link are
+// the clerk's own narrowings and need no grant.
+func Live(v View, ver *key.Verified, now int64) *key.Refusal {
+	for _, id := range ver.IDs[:min(2, len(ver.IDs))] {
+		from, ok := v.Granted(id)
+		if !ok {
+			return &key.Refusal{Code: CUngranted, Detail: id.String()}
+		}
+		if now < from {
+			return &key.Refusal{Code: CGrantHeld, Detail: fmt.Sprintf("live at %d", from)}
+		}
+	}
+	return nil
 }
 
 // Clerk is the only exit. Do runs a step at most once per idempotency key
@@ -240,8 +258,8 @@ var ErrDuplicatePlan = errors.New("kernel: plan id already used")
 // Boot opens a kernel over a log: replay it, decide any plan that was
 // submitted but not decided, and mark every step that was in flight unknown,
 // to be probed (KRN-8).
-func Boot(l *Log, owner ed25519.PublicKey, clerks map[string]Clerk, now int64) (*Kernel, error) {
-	s, err := Replay(owner, l.Entries())
+func Boot(l *Log, anchors []ed25519.PublicKey, clerks map[string]Clerk, now int64) (*Kernel, error) {
+	s, err := Replay(anchors, l.Entries())
 	if err != nil {
 		return nil, err
 	}
@@ -281,27 +299,59 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
-func (k *Kernel) Issue(now int64, root key.Key) error {
-	if len(root.Links) != 0 {
-		return errors.New("kernel: only a root is issued")
+func (k *Kernel) Issue(now int64, keys ...key.Key) error {
+	in := map[key.ID]bool{}
+	for _, ky := range keys {
+		if len(ky.Links) > 1 {
+			return ErrNotAGrant
+		}
+		if err := key.CheckChain(ky, k.s.passkey(ky)); err != nil {
+			return err
+		}
+		if r := rootOf(ky); len(ky.Links) == 1 && !in[r] {
+			if _, ok := k.s.Grants[r]; !ok {
+				return ErrNotAGrant
+			}
+		}
+		in[ky.Tip()] = true
 	}
-	if err := key.CheckChain(root, k.s.Owner); err != nil {
-		return err
-	}
-	return k.owner(now, TKeyIssued, keyIssued{root})
+	return k.owner(now, TKeyIssued, grants{keys})
 }
 
-// owned verifies ky as a chain from the owner and that its root was issued.
+// ErrNotAGrant refuses a key that is neither a root nor a first link off a
+// root in the log or the same batch.
+var ErrNotAGrant = errors.New("kernel: only a root or a first link off a granted root is granted")
+
+// ErrNotEnrolled refuses an enrollment no anchor signed.
+var ErrNotEnrolled = errors.New("kernel: enrollment not signed by an anchor")
+
+// Enroll adds a passkey, such as a new phone, to the owner's set (D-146). An
+// anchor signs it, so it is live at once; it is a widening, so it anchors.
+func (k *Kernel) Enroll(now int64, e key.Enrollment) error {
+	if !key.In(key.Passkeys(k.s.Anchors, []key.Enrollment{e}, k.s.Unenrolled), e.Passkey) {
+		return ErrNotEnrolled
+	}
+	return k.owner(now, TEnrolled, enrolled{e})
+}
+
+// Unenroll cuts a passkey off for good, such as a lost phone's. Keys derived
+// from its grants in the log stand until they lapse; it signs no new grant
+// and no plan under a bare root.
+func (k *Kernel) Unenroll(now int64, pk ed25519.PublicKey) error {
+	return k.owner(now, TUnenrolled, unenrolled{pk})
+}
+
+// owned verifies ky as a chain from the owner and that its grants are live.
 // It is for keys the log already vouches for: a plan's key was held when the
 // plan was admitted (VerifyPlan), and an extension comes over the owner
 // channel. The result can be charged but never authorizes a step.
-func (k *Kernel) owned(ky key.Key) (*key.Verified, *key.Refusal) {
-	v, err := key.Chain(ky, k.s.Owner)
+func (k *Kernel) owned(now int64, ky key.Key) (*key.Verified, *key.Refusal) {
+	v, err := key.Chain(ky, k.s.owner(ky))
 	if err != nil {
 		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	if !k.s.Roots[v.Root()] {
-		return nil, &key.Refusal{Code: CUnknownRoot, Detail: v.Root().String()}
+	if r := Live(k.s, v, now); r != nil {
+		return nil, r
 	}
 	return v, nil
 }
@@ -310,7 +360,7 @@ func (k *Kernel) owned(ky key.Key) (*key.Verified, *key.Refusal) {
 // extension the owner's envelope gave it, else the key it cites. Callers name
 // the plan, never a key or a task, so renaming cannot escape a cap or a hold
 // (LOG-7). The task is the plan, as it is for a plan's own steps.
-func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) {
+func (k *Kernel) funding(now int64, plan string) (*PlanState, *key.Verified, *key.Refusal) {
 	ps := k.s.Plans[plan]
 	if ps == nil {
 		return nil, nil, &key.Refusal{Code: CPlan, Detail: "unknown plan"}
@@ -322,7 +372,7 @@ func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) 
 	if e, ok := k.s.Extended[plan]; ok {
 		ky = e
 	}
-	v, r := k.owned(ky)
+	v, r := k.owned(now, ky)
 	return ps, v, r
 }
 
@@ -330,7 +380,7 @@ func (k *Kernel) funding(plan string) (*PlanState, *key.Verified, *key.Refusal) 
 // or a stop is in force, whatever extension now funds the plan: an owner who
 // pauses a key stops its plan's spend (KEY-6).
 func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
-	cited, r := k.owned(ps.Plan.Key)
+	cited, r := k.owned(now, ps.Plan.Key)
 	if r != nil {
 		return r
 	}
@@ -341,7 +391,7 @@ func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
 // caps, that the plan is active and that it is not held: the check a clerk
 // makes before a metered call (LOG-7).
 func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) *key.Refusal {
-	ps, v, r := k.funding(plan)
+	ps, v, r := k.funding(now, plan)
 	if r != nil {
 		return r
 	}
@@ -366,7 +416,7 @@ func (k *Kernel) Meter(now int64, plan, route string, amount int64, source strin
 	if amount < 0 {
 		return errors.New("kernel: metered usage is never negative")
 	}
-	_, v, r := k.funding(plan)
+	_, v, r := k.funding(now, plan)
 	if r != nil {
 		return r
 	}
@@ -380,11 +430,11 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 	if rf == nil || (rf.Code != key.RSpendTask && rf.Code != key.RSpendDay) {
 		return errors.New("kernel: only an exhausted spend cap holds a plan")
 	}
-	ps, v, r := k.funding(plan)
+	ps, v, r := k.funding(now, plan)
 	if r != nil {
 		return r
 	}
-	cited, r := k.owned(ps.Plan.Key)
+	cited, r := k.owned(now, ps.Plan.Key)
 	if r != nil {
 		return r
 	}
@@ -407,7 +457,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if r := k.citedLive(now, k.s.Plans[plan]); r != nil {
 		return r
 	}
-	v, r := k.owned(ext)
+	v, r := k.owned(now, ext)
 	if r != nil {
 		return r
 	}

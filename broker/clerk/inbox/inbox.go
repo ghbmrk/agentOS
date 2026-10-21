@@ -63,7 +63,7 @@ type Refusal struct {
 // Account is the mail clerk over a synthetic mailbox (CLK-2, VRB-2, VRB-3).
 // It is the only place a mail is read, an effect applied or a request made.
 type Account struct {
-	owner     ed25519.PublicKey
+	anchors   []ed25519.PublicKey
 	secret    []byte
 	world     func() World
 	body      string
@@ -98,11 +98,11 @@ func (a *Account) Handle(addr string) string {
 // calls it bulk and VRB-2 holds; only then does the planner get a handle. The
 // world is read again when a step runs, so a verdict that has aged out is not
 // acted on. secret keys the handles and must hold at least 128 bits.
-func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mails []Mail, retentionDays int, oneClickBody string) (*Account, error) {
+func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, mails []Mail, retentionDays int, oneClickBody string) (*Account, error) {
 	if len(secret) < minSecret {
 		return nil, errors.New("inbox: handle secret shorter than 128 bits")
 	}
-	a := &Account{owner: owner, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
+	a := &Account{anchors: anchors, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
 		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}}
 	for _, m := range mails {
 		it := Item{Mail: m.ID, Class: m.Class}
@@ -172,7 +172,7 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	if a.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := clerk.Check(a.owner, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
+	if rf := clerk.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {

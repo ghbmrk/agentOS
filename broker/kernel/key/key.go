@@ -17,7 +17,9 @@ const (
 	DomainRoot = "agentos.key.root.v1\x00"
 	DomainLink = "agentos.key.link.v1\x00"
 	DomainUse  = "agentos.key.use.v1\x00"
-	domainID   = "agentos.key.id.v1\x00"
+	// DomainEnroll signs a passkey into the owner's set (D-146).
+	DomainEnroll = "agentos.key.enroll.v1\x00"
+	domainID     = "agentos.key.id.v1\x00"
 )
 
 // MaxLinks bounds a chain, so verification cost is bounded.
@@ -26,6 +28,10 @@ const MaxLinks = 32
 // DayMS is the window of the per-day caveats, in milliseconds.
 const DayMS int64 = 24 * 60 * 60 * 1000
 
+// ClerkLife is how long a clerk key lives (D-146). Every passkey tap renews
+// it, so it lapses only after this long with no tap at all.
+const ClerkLife = 30 * DayMS
+
 var (
 	ErrMalformed   = errors.New("key: malformed")
 	ErrWrongOwner  = errors.New("key: root not signed by the owner")
@@ -33,7 +39,7 @@ var (
 	ErrLoosens     = errors.New("key: link removes or loosens a limit")
 	ErrNotHolder   = errors.New("key: signer does not hold the key")
 	ErrUnknownKind = errors.New("key: unknown caveat kind")
-	ErrUncaveated  = errors.New("key: a key derived from the root carries no limit")
+	ErrUncaveated  = errors.New("key: a key derived from the root carries no expiry or no daily spend cap")
 )
 
 // ID names a key or any prefix of its chain. Revoking an ID revokes every key
@@ -53,12 +59,11 @@ func (i *ID) UnmarshalText(b []byte) error {
 	return nil
 }
 
-// Root is the owner-signed grant: one clerk, a set of verbs, and the first
-// holder (KEY-1). Widening is issuing a new root, which only the owner's
-// passkey can sign (KEY-4).
+// Root is the owner-signed grant: one clerk and a set of verbs (KEY-1). Its
+// holder is its owner, the passkey, so only a passkey tap uses a bare root or
+// derives from it (D-146). Widening is issuing a new root (KEY-4).
 type Root struct {
 	Owner  ed25519.PublicKey `json:"owner"`
-	Holder ed25519.PublicKey `json:"holder"`
 	Clerk  string            `json:"clerk"`
 	Verbs  []Verb            `json:"verbs"`
 	Serial string            `json:"serial"`
@@ -292,11 +297,10 @@ func (l Limits) Window(novel bool) int64 {
 func rootBody(r Root) []byte {
 	b, _ := json.Marshal(struct {
 		Owner  ed25519.PublicKey `json:"owner"`
-		Holder ed25519.PublicKey `json:"holder"`
 		Clerk  string            `json:"clerk"`
 		Verbs  []Verb            `json:"verbs"`
 		Serial string            `json:"serial"`
-	}{r.Owner, r.Holder, r.Clerk, r.Verbs, r.Serial})
+	}{r.Owner, r.Clerk, r.Verbs, r.Serial})
 	return b
 }
 
@@ -362,7 +366,7 @@ func (k Key) holder() ed25519.PublicKey {
 	if n := len(k.Links); n > 0 {
 		return k.Links[n-1].Holder
 	}
-	return k.Root.Holder
+	return k.Root.Owner
 }
 
 // Extend signs and appends l without checking narrowness. Verify rejects a
@@ -377,8 +381,9 @@ func Extend(k Key, holder ed25519.PrivateKey, l Link) Key {
 }
 
 // Derive narrows k by caveats and hands it to next (KEY-3). It needs no owner
-// step. It refuses a caveat that would loosen k, and a key off the root with
-// no caveat at all: the chain check below is the one place both rules live.
+// step below the root. It refuses a caveat that would loosen k, and a key off
+// the root without an expiry and a daily spend cap: the chain check below is
+// the one place both rules live.
 func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Caveat) (Key, error) {
 	if !bytes.Equal(holder.Public().(ed25519.PublicKey), k.holder()) {
 		return Key{}, ErrNotHolder
@@ -388,6 +393,13 @@ func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Cav
 		return Key{}, err
 	}
 	return out, nil
+}
+
+// ClerkKey is the passkey's grant to a clerk: the root narrowed by caveats,
+// living ClerkLife from now under a daily spend cap (D-146). A renewal is a
+// new ClerkKey; plans already admitted keep the key they cite.
+func ClerkKey(root Key, passkey ed25519.PrivateKey, clerk ed25519.PublicKey, now, spendDay int64, cav ...Caveat) (Key, error) {
+	return Derive(root, passkey, clerk, append([]Caveat{LimitExpires(now + ClerkLife), LimitSpendDay(spendDay)}, cav...)...)
 }
 
 // Verified is a key whose chain has checked out.
@@ -449,8 +461,7 @@ func CheckChain(k Key, owner ed25519.PublicKey) error {
 // check, for Derive, which has already been handed a key the caller holds.
 func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 	r := k.Root
-	if len(r.Owner) != ed25519.PublicKeySize || len(r.Holder) != ed25519.PublicKeySize ||
-		r.Clerk == "" || len(r.Verbs) == 0 || len(k.Links) > MaxLinks {
+	if len(r.Owner) != ed25519.PublicKeySize || r.Clerk == "" || len(r.Verbs) == 0 || len(k.Links) > MaxLinks {
 		return nil, ErrMalformed
 	}
 	vs := make([]string, len(r.Verbs))
@@ -467,7 +478,7 @@ func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 		return nil, ErrBadSig
 	}
 	v := &Verified{Key: k, IDs: []ID{rootID(r)}, Limits: Limits{Clerk: r.Clerk, Verbs: vs}}
-	holder := r.Holder
+	holder := r.Owner
 	for _, l := range k.Links {
 		prev := v.IDs[len(v.IDs)-1]
 		if len(l.Holder) != ed25519.PublicKeySize {
@@ -476,9 +487,9 @@ func verifyChain(k Key, owner ed25519.PublicKey) (*Verified, error) {
 		if owner != nil && !ed25519.Verify(holder, linkMsg(prev, l), l.Sig) {
 			return nil, ErrBadSig
 		}
-		// Full power stays with the owner's root: every key derived from
-		// it carries at least one limit (D-145, #2631).
-		if len(v.IDs) == 1 && len(l.Caveats) == 0 {
+		// Full power stays with the passkey: every key derived from the
+		// root lapses and is capped (D-145, D-146).
+		if len(v.IDs) == 1 && !bounded(l.Caveats) {
 			return nil, ErrUncaveated
 		}
 		id := linkID(prev, l)
@@ -498,3 +509,71 @@ func (v *Verified) ID() ID { return v.IDs[len(v.IDs)-1] }
 
 // Root is the ID of the root, shared by every key derived from it.
 func (v *Verified) Root() ID { return v.IDs[0] }
+
+// bounded reports whether a first link sets an expiry and a daily spend cap.
+func bounded(cs []Caveat) bool {
+	var exp, spend bool
+	for _, c := range cs {
+		exp = exp || c.Kind == KExpires
+		spend = spend || c.Kind == KSpendDay
+	}
+	return exp && spend
+}
+
+// Enrollment is an anchor's signature adding a passkey, such as a new phone,
+// to the owner's set (D-146). The anchors are the device-bound hardware keys;
+// a synced phone passkey is enrolled under them, so no cloud account is the
+// root.
+type Enrollment struct {
+	Passkey ed25519.PublicKey `json:"passkey"`
+	By      ed25519.PublicKey `json:"by"`
+	Sig     []byte            `json:"sig"`
+}
+
+func enrollMsg(pk ed25519.PublicKey) []byte { return append([]byte(DomainEnroll), pk...) }
+
+// Enroll is anchor's signature enrolling pk.
+func Enroll(anchor ed25519.PrivateKey, pk ed25519.PublicKey) Enrollment {
+	return Enrollment{Passkey: pk, By: anchor.Public().(ed25519.PublicKey), Sig: ed25519.Sign(anchor, enrollMsg(pk))}
+}
+
+// Passkeys is the owner's set: the anchors, then each passkey an anchor
+// enrolled, less every revoked one. A revoked passkey never comes back, so an
+// old enrollment replayed adds nothing, and an enrollment no anchor signed
+// adds nothing, so the set needs no trust in whoever keeps the list.
+func Passkeys(anchors []ed25519.PublicKey, es []Enrollment, revoked []ed25519.PublicKey) []ed25519.PublicKey {
+	var set []ed25519.PublicKey
+	add := func(pk ed25519.PublicKey) {
+		if len(pk) == ed25519.PublicKeySize && !In(revoked, pk) && !In(set, pk) {
+			set = append(set, pk)
+		}
+	}
+	for _, a := range anchors {
+		add(a)
+	}
+	for _, e := range es {
+		if In(anchors, e.By) && !In(revoked, e.By) && ed25519.Verify(e.By, enrollMsg(e.Passkey), e.Sig) {
+			add(e.Passkey)
+		}
+	}
+	return set
+}
+
+// In reports whether pk is in set.
+func In(set []ed25519.PublicKey, pk ed25519.PublicKey) bool {
+	for _, p := range set {
+		if len(p) == ed25519.PublicKeySize && bytes.Equal(p, pk) {
+			return true
+		}
+	}
+	return false
+}
+
+// Owner is the passkey to verify k against: its root's owner when that is in
+// set, else nil, which Verify and Chain refuse (ErrWrongOwner).
+func Owner(set []ed25519.PublicKey, k Key) ed25519.PublicKey {
+	if In(set, k.Root.Owner) {
+		return k.Root.Owner
+	}
+	return nil
+}

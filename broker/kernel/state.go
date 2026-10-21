@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,9 @@ import (
 
 // Limits on a plan and on reconciliation.
 const (
+	// GrantHold is how long a passkey grant waits before it is live, with
+	// the owner told and able to cancel it by revoking it (D-146).
+	GrantHold  = key.DayMS
 	MaxSteps   = 64
 	MaxChecks  = 10     // KRN-8: parked after ten checks
 	ProbeEvery = 60_000 // ms between reconciliation checks
@@ -29,6 +33,8 @@ const (
 	TKeyRevoked   = "key.revoked"
 	TKeyPaused    = "key.paused"
 	TKeyResumed   = "key.resumed"
+	TEnrolled     = "passkey.enrolled"
+	TUnenrolled   = "passkey.revoked"
 	TStop         = "stop"
 	TResume       = "resume"
 	TPlanSubmit   = "plan.submitted"
@@ -51,7 +57,7 @@ const (
 )
 
 var schema = map[string]int{
-	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TStop: 1, TResume: 1,
+	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
@@ -60,12 +66,12 @@ var schema = map[string]int{
 // Known reports whether the log may hold this type at this version.
 func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got == v }
 
-// Widening entries grant power back: a resume, a key, the owner's RETRY,
+// Widening entries grant power back: a resume, a key, a passkey, the owner's RETRY,
 // which lets an effect that may have happened run again, and the spend and
 // pool entries that reopen budget. Only one that an anchor covers counts
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
-	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TStepRetried ||
+	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset
 }
 
@@ -140,8 +146,12 @@ func (p Plan) Step(i int) key.Step { return Normalize(p.ID, p.Steps[i]) }
 
 // Entry bodies.
 type (
-	keyIssued struct{ Key key.Key }
-	keyID     struct{ ID key.ID }
+	// grants is one batch of passkey grants: roots and the first links off
+	// them, under one hold (D-146).
+	grants     struct{ Keys []key.Key }
+	enrolled   struct{ Enrollment key.Enrollment }
+	unenrolled struct{ Passkey ed25519.PublicKey }
+	keyID      struct{ ID key.ID }
 	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
 	modelUsed struct {
 		Root   key.ID   `json:"root"`
@@ -308,12 +318,18 @@ type usedRec struct {
 
 // State is the log folded: the only input to Decide besides the event.
 type State struct {
-	Owner   ed25519.PublicKey
-	Seq     uint64
-	Stopped bool
-	Changes key.Changes
-	Roots   map[key.ID]bool
-	Plans   map[string]*PlanState
+	// The owner's passkeys (D-146): the anchors, the hardware keys; each
+	// passkey an anchor enrolled; less those revoked.
+	Anchors    []ed25519.PublicKey
+	Enrolled   []key.Enrollment
+	Unenrolled []ed25519.PublicKey
+	Seq        uint64
+	Stopped    bool
+	Changes    key.Changes
+	// Grants are the passkey's grants in the log, roots and first links,
+	// each live from its time (D-146).
+	Grants map[key.ID]Grant
+	Plans  map[string]*PlanState
 	// SpendHeld lists the tasks stopped on a used-up spend cap; Pools the usage pools.
 	SpendHeld map[string]SpendHold
 	// Extended maps a plan to the extension key its later calls are charged to.
@@ -325,11 +341,17 @@ type State struct {
 	recent   map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
 }
 
-func NewState(owner ed25519.PublicKey) *State {
+// Grant is a passkey grant and when it is live.
+type Grant struct {
+	Key  key.Key
+	From int64
+}
+
+func NewState(anchors []ed25519.PublicKey) *State {
 	return &State{
-		Owner:   owner,
+		Anchors: anchors,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
-		Roots:   map[key.ID]bool{}, Plans: map[string]*PlanState{},
+		Grants:  map[key.ID]Grant{}, Plans: map[string]*PlanState{},
 		SpendHeld: map[string]SpendHold{}, Extended: map[string]key.Key{}, Pools: map[string]Pool{},
 		uses: map[key.ID][]usedRec{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
@@ -337,8 +359,8 @@ func NewState(owner ed25519.PublicKey) *State {
 }
 
 // Replay folds a whole log.
-func Replay(owner ed25519.PublicKey, es []Entry) (*State, error) {
-	s := NewState(owner)
+func Replay(anchors []ed25519.PublicKey, es []Entry) (*State, error) {
+	s := NewState(anchors)
 	for _, e := range es {
 		if err := s.Apply(e); err != nil {
 			return nil, err
@@ -420,8 +442,111 @@ func (s *State) Ledger() key.Ledger                 { return ledger{s: s} }
 func (s *State) LedgerBefore(seq uint64) key.Ledger { return ledger{s: s, before: seq} }
 
 // View for a clerk.
-func (s *State) Known(root key.ID) bool    { return s.Roots[root] }
 func (s *State) ChangesView() *key.Changes { return &s.Changes }
+
+// Granted is when the grant id is live, if the log holds it.
+func (s *State) Granted(id key.ID) (int64, bool) { g, ok := s.Grants[id]; return g.From, ok }
+
+// Enrollments is what Passkeys reads, for a clerk to check with its own anchors.
+func (s *State) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
+	return s.Enrolled, s.Unenrolled
+}
+
+// Passkeys is the owner's set (D-146).
+func (s *State) Passkeys() []ed25519.PublicKey {
+	return key.Passkeys(s.Anchors, s.Enrolled, s.Unenrolled)
+}
+
+// Pending lists the grants still in their hold and not cancelled, for the
+// owner's notice.
+func (s *State) Pending(now int64) []key.ID {
+	var out []key.ID
+	for id, g := range s.Grants {
+		if now < g.From && !s.Changes.Revoked[id] {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	return out
+}
+
+// grant folds one passkey grant logged at at. A root waits GrantHold. So does
+// a first link, and never less than its root, unless it renews a live grant
+// of the same root to the same holder with the same limits and a later expiry
+// within ClerkLife: a renewal is live at once (D-146).
+func (s *State) grant(k key.Key, at int64) {
+	if len(k.Links) > 1 || key.CheckChain(k, s.passkey(k)) != nil {
+		return
+	}
+	from := at + GrantHold
+	if len(k.Links) == 1 {
+		r, ok := s.Grants[rootOf(k)]
+		if !ok {
+			return
+		}
+		from = max(from, r.From)
+		if s.renews(k, at) {
+			from = max(at, r.From)
+		}
+	}
+	if _, ok := s.Grants[k.Tip()]; !ok {
+		s.Grants[k.Tip()] = Grant{Key: k, From: from}
+	}
+}
+
+func (s *State) renews(k key.Key, at int64) bool {
+	exp, rest := expiry(k.Links[0].Caveats)
+	if exp == nil || *exp > at+key.ClerkLife {
+		return false
+	}
+	for id, g := range s.Grants {
+		if len(g.Key.Links) != 1 || g.From > at || s.Changes.Revoked[id] ||
+			rootOf(g.Key) != rootOf(k) || !bytes.Equal(g.Key.Links[0].Holder, k.Links[0].Holder) {
+			continue
+		}
+		old, oldRest := expiry(g.Key.Links[0].Caveats)
+		if old != nil && *exp >= *old && reflect.DeepEqual(rest, oldRest) {
+			return true
+		}
+	}
+	return false
+}
+
+func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
+
+// expiry splits out a link's expiry caveat.
+func expiry(cs []key.Caveat) (*int64, []key.Caveat) {
+	var exp *int64
+	rest := []key.Caveat{}
+	for _, c := range cs {
+		if c.Kind == key.KExpires && exp == nil {
+			n := c.N
+			exp = &n
+			continue
+		}
+		rest = append(rest, c)
+	}
+	return exp, rest
+}
+
+// owner is the passkey a plan's key is verified against (PlanOwner).
+func (s *State) owner(k key.Key) ed25519.PublicKey { return PlanOwner(s, s.Anchors, k) }
+
+// passkey is the passkey a new grant is verified against: one in the set now.
+func (s *State) passkey(k key.Key) ed25519.PublicKey { return key.Owner(s.Passkeys(), k) }
+
+// PlanOwner is the passkey a plan's key is verified against, in the kernel and
+// the clerk alike. For a key derived from a granted root it is that root's
+// own passkey, so grants stand after their passkey is cut off. For a bare
+// root it must be in the set now: only the passkey's own tap uses a bare
+// root, and a cut-off phone taps nothing (D-146).
+func PlanOwner(v View, anchors []ed25519.PublicKey, k key.Key) ed25519.PublicKey {
+	if _, ok := v.Granted(rootOf(k)); ok && len(k.Links) > 0 {
+		return k.Root.Owner
+	}
+	es, un := v.Enrollments()
+	return key.Owner(key.Passkeys(anchors, es, un), k)
+}
 
 // Dispatched is the log's record of r: it answers only when r's step is in
 // flight and r carries exactly the plan the log admitted. A request for a step
@@ -495,15 +620,25 @@ func (s *State) Apply(e Entry) error {
 	s.Seq = e.Seq
 	switch e.Type {
 	case TKeyIssued:
-		b, err := body[keyIssued](e)
+		b, err := body[grants](e)
 		if err != nil {
 			return err
 		}
-		if len(b.Key.Links) == 0 {
-			if key.CheckChain(b.Key, s.Owner) == nil {
-				s.Roots[b.Key.Tip()] = true
-			}
+		for _, k := range b.Keys {
+			s.grant(k, e.At)
 		}
+	case TEnrolled:
+		b, err := body[enrolled](e)
+		if err != nil {
+			return err
+		}
+		s.Enrolled = append(s.Enrolled, b.Enrollment)
+	case TUnenrolled:
+		b, err := body[unenrolled](e)
+		if err != nil {
+			return err
+		}
+		s.Unenrolled = append(s.Unenrolled, b.Passkey)
 	case TKeyRevoked, TKeyPaused, TKeyResumed:
 		b, err := body[keyID](e)
 		if err != nil {

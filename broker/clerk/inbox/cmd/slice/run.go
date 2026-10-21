@@ -117,7 +117,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	standing := in.Standing != nil
 
-	acct, err := inbox.NewAccount(ownerPub, handleSecret, func() inbox.World { return in.World }, in.Mails,
+	acct, err := inbox.NewAccount([]ed25519.PublicKey{ownerPub}, handleSecret, func() inbox.World { return in.World }, in.Mails,
 		in.RetentionDays, in.OneClickBody)
 	if err != nil {
 		return Outcome{}, err
@@ -142,7 +142,7 @@ func Run(in Input) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
-	k, err := kernel.Boot(log, ownerPub, map[string]kernel.Clerk{inbox.Name: acct}, issued)
+	k, err := kernel.Boot(log, []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{inbox.Name: acct}, issued)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -151,8 +151,15 @@ func Run(in Input) (Outcome, error) {
 	clock := issued
 	acct.Clock = func() int64 { return clock }
 	tick := func(at int64) error { clock = at; return k.Tick(at) }
-	root := key.Issue(ownerPriv, key.Root{Holder: holderPub, Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
-	if err := k.Issue(issued, root); err != nil {
+	// The owner's passkey granted the root and the home clerk's key to it at
+	// setup, a hold before the run (D-146). The clerk key outlives the run and
+	// spends nothing.
+	root := key.Issue(ownerPriv, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
+	ck, err := key.ClerkKey(root, ownerPriv, holderPub, today, 0)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if err := k.Issue(issued-kernel.GrantHold, root, ck); err != nil {
 		return Outcome{}, err
 	}
 	if err := log.Anchor(); err != nil {
@@ -160,7 +167,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	var approved *KeyView
 	if !standing {
-		v, err := keyView(root, holderPriv, ownerPub, in.Owner)
+		v, err := keyView(ck, holderPriv, ownerPub, in.Owner)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -168,7 +175,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	// The hold and the daily cap are caveats on the keys handed to the planner,
 	// not properties of the planner: it cannot lift them (inbox.PlannerKeys).
-	bulk, unsub, err := inbox.PlannerKeys(root, holderPriv, plannerPub, baseHoldMS, noveltyMS)
+	bulk, unsub, err := inbox.PlannerKeys(ck, holderPriv, plannerPub, baseHoldMS, noveltyMS)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -244,7 +251,7 @@ func Run(in Input) (Outcome, error) {
 		}
 	}
 
-	end, err := keyView(root, holderPriv, ownerPub, in.Owner)
+	end, err := keyView(ck, holderPriv, ownerPub, in.Owner)
 	if err != nil {
 		return Outcome{}, err
 	}
