@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -425,14 +426,26 @@ func TestAClerkKeyLivesAtMostClerkLifeOnceLive(t *testing.T) {
 // log entry that cuts one off changes nothing (#2670 item 3).
 func TestAnAnchorIsNotCutOff(t *testing.T) {
 	r := newRig(t)
-	if err := r.k.Unenroll(1, r.spare.pub); !errors.Is(err, kernel.ErrAnchor) {
+	if err := r.k.Unenroll(1, r.owner.pub); !errors.Is(err, kernel.ErrAnchor) {
 		t.Fatalf("Unenroll of an anchor: %v", err)
 	}
-	_, err := r.k.Log().Append(1, kernel.TUnenrolled, 1, struct{ Passkey ed25519.PublicKey }{r.spare.pub})
+	// What the anchor signed outlives a logged cut-off of it: its task
+	// approval and its grant still in the hold.
+	must(t, r.k.OpenTask(1, "t1"))
+	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
+	held := trashRoot(r, "r2", r.owner)
+	must(t, r.issue(1, held))
+	_, err := r.k.Log().Append(2, kernel.TUnenrolled, 1, struct{ Passkey ed25519.PublicKey }{r.owner.pub})
 	must(t, err)
 	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
 	must(t, err)
-	if !key.In(re.Passkeys(), r.spare.pub) {
+	if !key.In(re.Passkeys(), r.owner.pub) {
 		t.Fatal("a logged cut-off of an anchor took effect")
+	}
+	if tk, ok := re.Task("t1", 2); !ok || len(tk.Approvals) != 1 {
+		t.Fatalf("the anchor's task approval was dropped: %+v", tk.Approvals)
+	}
+	if !slices.Contains(re.Pending(2), held.Tip()) {
+		t.Fatal("the anchor's grant in its hold was cancelled")
 	}
 }

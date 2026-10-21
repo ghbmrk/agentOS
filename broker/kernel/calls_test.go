@@ -164,6 +164,22 @@ func TestTheUnsentWaitBacksOff(t *testing.T) {
 // STATUS lists each covered submit once sent, in the clerk's fixed wording,
 // for as long as a task approval lives; a line the owner could not be shown
 // as one line is not listed (CLK-3, #2705).
+// The fold refuses a covered line not shown, whatever the log holds
+// (CLK-3): Answer drops one first, so only a raw entry reaches the fold.
+func TestTheFoldListsNoLineNotShown(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	c := r.calls(1, 1)[0]
+	_, err := r.k.Log().Append(1, kernel.TStepResult, 1, map[string]any{"plan": c.Req.Plan.ID, "index": c.Req.Index,
+		"idem": kernel.Idem(c.Req.Plan.ID, c.Req.Index), "outcome": "ok", "covered": "bad\nline"})
+	must(t, err)
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if p := re.Plans["p1"]; p.Steps[0].Phase != kernel.PDone || len(re.Covered(1)) != 0 {
+		t.Fatalf("a logged line not shown was listed: %+v", re.Covered(1))
+	}
+}
+
 func TestStatusListsCoveredSubmits(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.ck, st(key.Trash, "m1"), st(key.Trash, "m2"))
