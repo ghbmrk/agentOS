@@ -3,6 +3,7 @@ package kernel_test
 // REQ: KRN-5, CLK-3, KEY-3, D-147
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"testing"
@@ -101,11 +102,8 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 	forged := approval("t1", r.owner)
 	forged.At = -5
 	must(t, r.k.ApproveTask(7, "t1", forged))
-	if tk, _ := r.k.State().Task("t1", 8); tk.Approval.At != 7 {
-		t.Errorf("the approval's time is the log's, not the caller's: %d", tk.Approval.At)
-	}
-	if err := r.k.ApproveTask(0, "t1", approval("t1", r.spare)); err != kernel.ErrTaskApproval {
-		t.Errorf("a second approval: %v", err)
+	if tk, _ := r.k.State().Task("t1", 8); tk.Approvals[site].At != 7 {
+		t.Errorf("the approval's time is the log's, not the caller's: %d", tk.Approvals[site].At)
 	}
 	if err := r.k.ApproveTask(0, "t5", approval("t5", r.owner)); err != kernel.ErrTask {
 		t.Errorf("an approval of a task never opened: %v", err)
@@ -160,13 +158,13 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	must(t, r.k.OpenTask(0, "t1"))
 	must(t, r.k.ApproveTask(0, "t1", approval("t1", phone)))
 	must(t, r.k.Unenroll(1, gen(21).pub))
-	if tk, _ := r.k.State().Task("t1", 1); tk.Approval == nil {
+	if tk, _ := r.k.State().Task("t1", 1); len(tk.Approvals) != 1 {
 		t.Fatal("cutting off another passkey ended the approval")
 	}
 	must(t, r.k.Unenroll(2, phone.pub))
 	tk, ok := r.k.State().Task("t1", 2)
-	if !ok || tk.Approval != nil {
-		t.Fatalf("after the cut-off: live %v, approval %v", ok, tk.Approval)
+	if !ok || len(tk.Approvals) != 0 {
+		t.Fatalf("after the cut-off: live %v, approvals %v", ok, tk.Approvals)
 	}
 	if err := r.k.ApproveTask(3, "t1", approval("t1", phone)); err != kernel.ErrTaskApproval {
 		t.Fatalf("the cut-off passkey approved again: %v", err)
@@ -187,4 +185,44 @@ func TestAnAdmittedPlanOutlivesItsTask(t *testing.T) {
 	if r.status("p1") != kernel.SDone {
 		t.Fatalf("the admitted plan: %s", r.status("p1"))
 	}
+}
+
+// A task approval widens, so it anchors at once: one whose anchor failed
+// breaks the log and does not come back after a restart (KRN-7).
+func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.Log().Anchor())
+	r.anchor.down = true
+	if err := r.k.ApproveTask(1, "t1", approval("t1", r.owner)); err == nil {
+		t.Fatal("an approval whose anchor failed must be refused")
+	}
+	r.anchor.down = false
+	r.boot(2)
+	if tk, ok := r.k.State().Task("t1", 3); !ok || len(tk.Approvals) != 0 {
+		t.Fatalf("after restart: live %v, approvals %v", ok, tk.Approvals)
+	}
+}
+
+// A task holds one approval per site: an approval on another site adds to
+// it, and a new one on the same site, as the clerk asks for after a card
+// fill, replaces the earlier one (CLK-3).
+func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.ApproveTask(1, "t1", approval("t1", r.owner)))
+	other := kernel.TaskApproval{Site: "other.example", First: "https://other.example/"}
+	other.By = key.Approve(r.owner.priv, kernel.TaskHash("t1", other.Site, other.First))
+	must(t, r.k.ApproveTask(2, "t1", other))
+	must(t, r.k.ApproveTask(3, "t1", approval("t1", r.spare)))
+	tk, _ := r.k.State().Task("t1", 4)
+	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || !bytes.Equal(tk.Approvals[site].By.By, r.spare.pub) || tk.Approvals[other.Site].At != 2 {
+		t.Fatalf("approvals %+v", tk.Approvals)
+	}
+	delete(tk.Approvals, other.Site) // the answer is a copy
+	must(t, r.k.Unenroll(5, r.spare.pub))
+	if tk, _ := r.k.State().Task("t1", 6); len(tk.Approvals) != 1 || tk.Approvals[other.Site].At != 2 {
+		t.Fatalf("after the cut-off: %+v", tk.Approvals)
+	}
+	r.replays()
 }

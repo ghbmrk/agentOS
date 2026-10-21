@@ -532,7 +532,7 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, ok := kernel.TaskApproved(&s, anchors, ver, b.now); !ok || got.Site != a.Site || got.At != b.now {
+		if got, ok := kernel.TaskApproved(&s, anchors, ver, a.Site, b.now); !ok || got.Site != a.Site || got.At != b.now {
 			t.Fatalf("the view's task approval: %+v %v", got, ok)
 		}
 		if _, ok := s.Task("t1", b.now+kernel.TaskTimeout); ok {
@@ -599,5 +599,89 @@ func TestStopReturnsWhileAClerkCallHangs(t *testing.T) {
 	}
 	if st := b.step(id); st.Phase != kernel.PDone {
 		t.Fatalf("the hung call's answer was not logged: %+v", st)
+	}
+}
+
+// first is a clerk whose first call hangs until released; it counts the
+// calls that reach it.
+type first struct {
+	in, release chan struct{}
+	mu          sync.Mutex
+	n           int
+}
+
+func (f *first) Do(kernel.Request, kernel.View) kernel.Result {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 {
+		f.in <- struct{}{}
+		<-f.release
+	}
+	return kernel.Result{Outcome: "ok"}
+}
+func (*first) Probe(kernel.Request, kernel.View) string { return "notdone" }
+
+// A STOP logged while one clerk call hangs stops every call after it in the
+// same Tick: the kernel checks each dispatch again, under the lock, just
+// before it is sent, and the stopped one is cancelled unsent (KRN-7).
+func TestAStopWhileACallHangsSendsNothingAfterIt(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "first.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &first{in: make(chan struct{}), release: make(chan struct{})}
+	go ServeClerk(ln, c, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	a, z := b.submit("dave"), b.submit("erin")
+	ticked := make(chan error, 1)
+	go func() { ticked <- b.h.Tick(b.now) }()
+	<-c.in
+	if err := b.h.With(func(k *kernel.Kernel) error { return k.Stop(b.now) }); err != nil {
+		t.Fatal(err)
+	}
+	close(c.release)
+	if err := <-ticked; err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n != 1 || b.step(a).Phase != kernel.PDone || b.step(z).Phase != kernel.PCancelled {
+		t.Fatalf("after STOP: %d calls reached the clerk, steps %s and %s", c.n, b.step(a).Phase, b.step(z).Phase)
+	}
+}
+
+// A view shares nothing with the kernel's state: Tick sends it outside the
+// lock while revokes and pauses change that state (KRN-7). Run under -race.
+func TestTickRacesNoOwnerChange(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "race.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ServeClerk(ln, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "ok"} }}, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	for i := 0; i < 20; i++ {
+		b.submit(fmt.Sprintf("r%d", i))
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.h.Tick(b.now) }()
+	for i := 0; ; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+		id := key.ID{byte(i), byte(i >> 8), 1}
+		if err := b.h.With(func(k *kernel.Kernel) error { return k.Revoke(b.now, id) }); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

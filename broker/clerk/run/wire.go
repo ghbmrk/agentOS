@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -68,10 +70,14 @@ type snapshot struct {
 
 // view is the kernel's side: what v says of r. A plan that does not verify
 // gets no grants, and a step not in flight no dispatch or uses; the clerk
-// refuses either.
+// refuses either. It shares nothing with v, since Tick sends it outside the
+// kernel's lock while STOP, a revoke or a pause changes v.
 func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int64) snapshot {
-	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{}, Changes: *v.ChangesView()}
-	s.Enrolled, s.Unenrolled = v.Enrollments()
+	c := v.ChangesView()
+	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{},
+		Changes: key.Changes{Revoked: maps.Clone(c.Revoked), Paused: maps.Clone(c.Paused), Stopped: c.Stopped}}
+	es, un := v.Enrollments()
+	s.Enrolled, s.Unenrolled = slices.Clone(es), slices.Clone(un)
 	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, anchors, r.Plan.Key))
 	if err != nil {
 		return s

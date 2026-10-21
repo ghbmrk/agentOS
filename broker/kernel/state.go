@@ -25,8 +25,15 @@ const (
 	MaxSteps   = 64
 	MaxChecks  = 10     // KRN-8: parked after ten checks
 	ProbeEvery = 60_000 // ms between reconciliation checks
-	UnsentWait = 30_000 // ms before a step whose clerk was not reached is sent again
+	UnsentWait = 30_000 // ms before a step whose clerk was not reached is first sent again
+	// MaxUnsentWait caps the wait, which doubles at each unsent attempt, so
+	// a clerk down for a day costs a step about 60 entries, not thousands.
+	MaxUnsentWait = UnsentWait << 5
 )
+
+// unsentWait is the wait after the attempt-th dispatch of a step reached no
+// clerk.
+func unsentWait(attempt int) int64 { return int64(UnsentWait) << min(max(attempt-1, 0), 5) }
 
 // Clerk answers that say no byte reached the clerk (KRN-7): a dispatch that
 // sent nothing, and a probe that could not ask.
@@ -877,7 +884,10 @@ func (s *State) Apply(e Entry) error {
 			case "ok":
 				s.complete(p, b.Index, e.At)
 			case OUnsent:
-				st.Phase, st.NextProbe = PUnsent, e.At+UnsentWait
+				st.Phase, st.NextProbe = PUnsent, e.At+unsentWait(st.Attempt)
+				if p.Status != SActive {
+					st.Phase = PCancelled // nothing was sent, and nothing will be
+				}
 			case "failed":
 				st.Phase = PFailed
 				if p.Status == SActive {
