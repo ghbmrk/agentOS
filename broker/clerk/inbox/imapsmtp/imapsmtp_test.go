@@ -114,7 +114,7 @@ func TestFlagsThatAreNotAtomsAreRefusedBeforeActing(t *testing.T) {
 			t.Errorf("Append %q = %v, want ErrBadFlag", f, err)
 		}
 	}
-	for _, f := range []string{`\Seen`, `\deleted`, `\Draft`, "agentOS/bulk", "AgentOS", "$Junk"} {
+	for _, f := range []string{`\Seen`, `\deleted`, `\Draft`, "agentOS/bulk", "NonJunk", "$Junk"} {
 		if !flagsValid([]string{f}) {
 			t.Errorf("%q refused, want accepted", f)
 		}
