@@ -205,6 +205,8 @@ func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
 		"senders": func(n int) []byte { return []byte(fmt.Sprintf("From: %x@b\r\n\r\n", n)) },
 		"mails":   func(n int) []byte { return []byte(fmt.Sprintf("From: s%x@b\r\nMessage-Id: <%x>\r\n\r\n", n%64, n)) },
 	} {
+		defer func(n int) { openedMax = n }(openedMax)
+		openedMax = 32 << 20 // the charge per entry, not the bound's size, is under test
 		var ms runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&ms)

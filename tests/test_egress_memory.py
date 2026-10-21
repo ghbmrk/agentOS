@@ -106,6 +106,10 @@ class VaultMemoryCeiling(unittest.TestCase):
         fetch = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
         self.assertLessEqual(seen_peak(), fetch)
 
+    def test_the_clerks_read_log_bound_is_one_search(self):
+        # Live.Opened keeps as many read mails as one UID SEARCH can name (clerk/inbox MIG-3-R10b).
+        self.assertEqual(go_int("clerk/inbox/mailbox.go", "searchMax"), go_int("third_party/go-imap/read.go", "maxRespFields"))
+
     def test_the_vault_never_reads_who_was_opened(self):
         # The vault's mail store wraps the transport without Seen, and nothing outside the mail
         # clerk's package links Live, so neither Seen nor openedMax counts in the vault's ceiling.

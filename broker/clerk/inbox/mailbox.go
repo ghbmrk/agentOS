@@ -153,10 +153,17 @@ func seenID(from, messageID string) [16]byte {
 // openedMax bounds what one Opened call holds, in bytes, so a server that
 // reports millions of read mails or senders costs a refusal, not the clerk's
 // memory; an account past it fails closed. A sender is charged its address
-// and senderCost, a log entry its sender and entryCost: the most each costs in the maps, the
-// log read in and the log handed back (TestOpenedHoldsNoMoreThanItCharges
-// measures it). 128 MiB holds about 320,000 read mails.
-var openedMax = 128 << 20
+// and senderCost, a log entry its sender and entryCost: the most each costs in
+// the maps, the log read in and the log handed back, measured at about 300
+// bytes an entry (TestOpenedHoldsNoMoreThanItCharges). The bound is as many
+// read mails as one UID SEARCH can name, searchMax, at entryCost each, about
+// 384 MiB: a mailbox the transport can read at all is, up to the length of
+// its senders' addresses, not refused for its size.
+var openedMax = searchMax * entryCost
+
+// searchMax is how many UIDs one search reply can carry: the IMAP client's
+// field bound (mail M21; tests/test_egress_memory.py checks the two agree).
+const searchMax = 1 << 20
 
 const (
 	senderCost = 128
