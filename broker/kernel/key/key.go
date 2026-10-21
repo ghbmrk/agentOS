@@ -418,6 +418,24 @@ func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Cav
 	return out, nil
 }
 
+// Narrow is a passkey narrowing k for k's own holder: the new link keeps the
+// holder and is signed by the passkey, not by the holder, so it proves the
+// owner approved exactly these caveats (OWN-9). It hands out no power the
+// holder lacked, so it is no grant and waits no hold (D-146), and its caps
+// count against the link alone. It refuses a bare root, where a new link
+// would be a grant.
+func Narrow(k Key, passkey ed25519.PrivateKey, cav ...Caveat) (Key, error) {
+	h := k.holder()
+	if h == nil {
+		return Key{}, ErrNotHolder
+	}
+	out := Extend(k, passkey, Link{Caveats: cav, Holder: h})
+	if _, err := verifyChain(out, nil); err != nil {
+		return Key{}, err
+	}
+	return out, nil
+}
+
 // ClerkKey is the passkey's grant to a clerk: the root narrowed by caveats,
 // living ClerkLife from now under a daily spend cap (D-146). A renewal is a
 // new ClerkKey; plans already admitted keep the key they cite.
@@ -437,11 +455,17 @@ func Reach(k Key) []string {
 
 // Verified is a key whose chain has checked out.
 type Verified struct {
-	Key     Key
-	IDs     []ID // the root's ID, then each link's: every prefix
-	Limits  Limits
-	held    bool // set by Verify only: the submitter signed as the tip's holder
-	account ID   // the first link's budget (account)
+	Key    Key
+	IDs    []ID // the root's ID, then each link's: every prefix
+	Limits Limits
+	held   bool // set by Verify only: the submitter signed as the tip's holder
+	// ByOwner is set when the tip is a link after the first that a passkey
+	// signed for its parent's holder (Narrow): the owner's approval of it.
+	ByOwner bool
+	// Narrowers are the passkeys that signed such links, checked against
+	// the passkeys cut off since (kernel.Live).
+	Narrowers []ed25519.PublicKey
+	account   ID // the first link's budget (account)
 }
 
 // Sign is the tip holder's proof of possession: its signature over the key's
@@ -517,8 +541,15 @@ func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 		if len(l.Holder) != ed25519.PublicKeySize {
 			return nil, ErrMalformed
 		}
+		v.ByOwner = false
 		if owners != nil && !signedBy(holder, owners, linkMsg(prev, l), l.Sig) {
-			return nil, ErrBadSig
+			// A passkey may narrow a key for its own holder (Narrow).
+			p := whoSigned(owners, linkMsg(prev, l), l.Sig)
+			if p == nil || !bytes.Equal(l.Holder, holder) {
+				return nil, ErrBadSig
+			}
+			v.ByOwner = true
+			v.Narrowers = append(v.Narrowers, p)
 		}
 		id := linkID(prev, l)
 		scope := id
