@@ -7,6 +7,7 @@
 # REQ: CRED-8
 import pathlib
 import re
+import subprocess
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -111,13 +112,13 @@ class VaultMemoryCeiling(unittest.TestCase):
         self.assertEqual(go_int("clerk/inbox/mailbox.go", "searchMax"), go_int("third_party/go-imap/read.go", "maxRespFields"))
 
     def test_the_vault_never_reads_who_was_opened(self):
-        # The vault's mail store wraps the transport without Seen, and nothing outside the mail
-        # clerk's package links Live, so neither Seen nor openedMax counts in the vault's ceiling.
+        # The vault's mail store wraps the transport without Seen, and the vault does not link the
+        # mail clerk's package, so neither Seen nor openedMax counts in the vault's ceiling.
         self.assertNotIn(".Seen(", (BROKER / "mail/imapsmtp/imapsmtp.go").read_text())
-        inbox = BROKER / "clerk/inbox"
-        for f in BROKER.rglob("*.go"):
-            if inbox not in f.parents and "/vendor/" not in str(f):
-                self.assertNotIn('broker/clerk/inbox"', f.read_text(), f)
+        deps = subprocess.run(["go", "list", "-deps", "./cmd/agentos-egress"], cwd=BROKER,
+                              capture_output=True, text=True, check=True).stdout.split()
+        self.assertIn("github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp", deps)
+        self.assertNotIn("github.com/ghbmrk/agentos/broker/clerk/inbox", deps)
 
     def test_memory_max_is_set_within_the_derived_range(self):
         cap = size(self.one("MemoryMax"))
