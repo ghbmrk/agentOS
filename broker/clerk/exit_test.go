@@ -408,6 +408,7 @@ func TestExitRefusesValuesThatWouldReshapeThePath(t *testing.T) {
 		t.Fatalf("%d requests left for refused values", f.hits.Load())
 	}
 }
+
 // planStep is s as a plan carries it; the kernel derives the rest.
 func planStep(s key.Step) kernel.PlanStep {
 	args := map[string]string{}

@@ -31,7 +31,7 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, 
 	}
 	// The recipient a key's caveats judge is the verb's first argument, the
 	// object the request acts on; a step claiming another is refused here.
-		if a := st.Args[key.RecipientArg(st.Verb)]; st.Recipient != a.Value {
+	if a := st.Args[key.RecipientArg(st.Verb)]; st.Recipient != a.Value {
 		return &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
 	}
 	if facts != nil {
