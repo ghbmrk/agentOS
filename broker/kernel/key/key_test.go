@@ -454,9 +454,9 @@ func TestPasskeysAreTheAnchorsAndWhatTheyEnroll(t *testing.T) {
 	if In(set, old.pub) || !In(set, phone.pub) {
 		t.Fatal("a revoked passkey stays out")
 	}
-	// A cut-off anchor's enrollments count no more.
-	if set := Passkeys(anchors, es, []ed25519.PublicKey{hw2.pub}); In(set, phone.pub) || In(set, hw2.pub) {
-		t.Fatal("a revoked anchor and what it enrolled stay out")
+	// A list that names an anchor cuts nothing: only recovery replaces one.
+	if set := Passkeys(anchors, es, []ed25519.PublicKey{hw2.pub}); !In(set, phone.pub) || !In(set, hw2.pub) {
+		t.Fatal("an anchor and what it enrolled stay in")
 	}
 	r := Issue(phone.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "b"})
 	if _, err := Chain(r, set); err != nil {
@@ -504,7 +504,7 @@ func TestWithin(t *testing.T) {
 	arg := func(oneOf []string, min, max *int64) Caveat {
 		return Caveat{Kind: KArg, Arg: &ArgBound{Name: "to", OneOf: oneOf, Min: min, Max: max}}
 	}
-	three, ten := int64(3), int64(10)
+	one, three, ten := int64(1), int64(3), int64(10)
 	b, err := Fold(old)
 	if err != nil {
 		t.Fatal(err)
@@ -528,6 +528,7 @@ func TestWithin(t *testing.T) {
 		"no arg":          {old[:5], false},
 		"wider arg set":   {replace(old, 5, arg([]string{"a", "b", "c"}, &lo, &hi)), false},
 		"lower arg min":   {replace(old, 5, arg([]string{"a", "b"}, nil, &hi)), false},
+		"a min below":     {replace(old, 5, arg([]string{"a", "b"}, &one, &hi)), false},
 		"higher arg max":  {replace(old, 5, arg([]string{"a", "b"}, &lo, &ten)), false},
 		"open arg values": {replace(old, 5, arg(nil, &lo, &hi)), false},
 	} {
@@ -538,6 +539,15 @@ func TestWithin(t *testing.T) {
 		if l.Within(b) != c.within {
 			t.Errorf("%s: within %v, want %v", name, !c.within, c.within)
 		}
+	}
+	// A bare bound is a limit too: the arg may not come from the planner
+	// (KEY-2), so dropping it widens.
+	bare, err := Fold([]Caveat{LimitVerbs(Trash), {Kind: KArg, Arg: &ArgBound{Name: "target"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := Fold([]Caveat{LimitVerbs(Trash)}); l.Within(bare) {
+		t.Error("dropped bare bound: within")
 	}
 }
 

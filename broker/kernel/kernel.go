@@ -667,6 +667,9 @@ func (k *Kernel) result(now int64, id string, i int, outcome, detail string) err
 }
 
 func (k *Kernel) answer(now int64, id string, i int, res Result) error {
+	if !shown(res.Covered) { // bounded before it is logged, not only when folded
+		res.Covered = ""
+	}
 	_, err := k.emit(now, TStepResult, stepResult{stepRef{id, i}, Idem(id, i), res.Outcome, res.Detail, res.Covered})
 	return err
 }

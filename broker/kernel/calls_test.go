@@ -170,8 +170,10 @@ func TestStatusListsCoveredSubmits(t *testing.T) {
 	r.plan("p2", r.ck, st(key.Trash, "m3"))
 	r.plan("p3", r.ck, st(key.Trash, "m4"))
 	r.plan("p4", r.ck, st(key.Trash, "m5"))
+	r.plan("p5", r.ck, st(key.Trash, "m6"))
 	lines := map[string]string{"m1": "Sent on shop.example: Continue, 00:00 UTC", "m2": "Sent on shop.example: Place order, 00:01 UTC",
-		"m3": "Sent on other.example: Pay, 00:00 UTC", "m4": "bad\nline", "m5": strings.Repeat("x", kernel.MaxShown+1)}
+		"m3": "Sent on other.example: Pay, 00:00 UTC", "m4": "bad\nline", "m5": strings.Repeat("x", kernel.MaxShown+1),
+		"m6": "Sent on shop.example: \u202eyaP"}
 	for at := int64(1); at <= 3; at++ {
 		cs, err := r.k.Calls(at)
 		must(t, err)
@@ -189,6 +191,11 @@ func TestStatusListsCoveredSubmits(t *testing.T) {
 	}
 	if n := len(r.k.State().Covered(got[2].At + kernel.TaskTimeout)); n != 0 {
 		t.Fatalf("%d lines listed past a task approval's life", n)
+	}
+	for _, e := range r.k.Log().Entries() { // a line not shown is not logged either
+		if strings.Contains(string(e.Body), lines["m5"]) {
+			t.Fatal("an overlong line reached the log")
+		}
 	}
 	r.replays()
 }

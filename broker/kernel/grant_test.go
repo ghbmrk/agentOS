@@ -84,6 +84,7 @@ func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 		{"a narrower cap", renew("narrower", r.holder, 5, key.ClerkLife), true},
 		{"an added limit", renew("added", r.holder, 1<<40, key.ClerkLife, key.LimitUses(3)), true},
 		{"past ClerkLife", renew("long", r.holder, 1<<40, key.ClerkLife+1), false},
+		{"an earlier expiry", renew("early", r.holder, 1<<40, hour), false},
 		{"another holder", renew("other", gen(7), 1<<40, key.ClerkLife), false},
 	}
 	for _, c := range cases {

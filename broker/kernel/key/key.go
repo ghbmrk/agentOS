@@ -207,7 +207,10 @@ func (l Limits) Within(b Limits) bool {
 		}
 	}
 	for name, o := range b.Args {
-		a := l.Args[name]
+		a, ok := l.Args[name]
+		if !ok { // a bare bound is a limit too: the arg may not come from the planner (KEY-2)
+			return false
+		}
 		if (o.OneOf != nil && (a.OneOf == nil || !subset(a.OneOf, o.OneOf))) ||
 			(o.Min != nil && (a.Min == nil || *a.Min < *o.Min)) || (o.Max != nil && (a.Max == nil || *a.Max > *o.Max)) {
 			return false
@@ -677,15 +680,15 @@ func Enroll(anchor ed25519.PrivateKey, pk ed25519.PublicKey) Enrollment {
 func Passkeys(anchors []ed25519.PublicKey, es []Enrollment, revoked []ed25519.PublicKey) []ed25519.PublicKey {
 	var set []ed25519.PublicKey
 	add := func(pk ed25519.PublicKey) {
-		if len(pk) == ed25519.PublicKeySize && !In(revoked, pk) && !In(set, pk) {
+		if len(pk) == ed25519.PublicKeySize && !In(set, pk) {
 			set = append(set, pk)
 		}
 	}
-	for _, a := range anchors {
+	for _, a := range anchors { // an anchor is never cut off: only recovery replaces one
 		add(a)
 	}
 	for _, e := range es {
-		if In(anchors, e.By) && !In(revoked, e.By) && ed25519.Verify(e.By, enrollMsg(e.Passkey), e.Sig) {
+		if In(anchors, e.By) && !In(revoked, e.Passkey) && ed25519.Verify(e.By, enrollMsg(e.Passkey), e.Sig) {
 			add(e.Passkey)
 		}
 	}

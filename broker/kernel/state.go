@@ -672,7 +672,14 @@ const MaxShown = 256
 // shown reports whether a clerk's text may go to the owner as one STATUS
 // line: bounded, valid UTF-8, no control characters.
 func shown(s string) bool {
-	return len(s) <= MaxShown && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl)
+	return len(s) <= MaxShown && utf8.ValidString(s) && !strings.ContainsFunc(s, unseen)
+}
+
+// unseen is a rune that reshapes or hides the line the owner reads: a
+// control, a format character such as a bidi override, or a line or
+// paragraph separator.
+func unseen(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
 }
 
 // CoveredLine is a submit a task approval covered, listed in STATUS once sent
