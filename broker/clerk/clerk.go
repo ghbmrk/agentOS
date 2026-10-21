@@ -61,11 +61,15 @@ func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r k
 	if content, labels, amount := facts(st); content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
 		return &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
 	}
-	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, anchors, r.Plan.Key))
+	owners := kernel.PlanOwners(v, anchors, r.Plan.Key)
+	ver, err := kernel.VerifyPlan(r.Plan, owners)
 	if err != nil {
 		return &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
 	}
 	if rf := kernel.Live(v, ver, now); rf != nil {
+		return rf
+	}
+	if rf := kernel.OneOff(v, owners, anchors, r.Plan, now); rf != nil {
 		return rf
 	}
 	d, ok := v.Dispatched(r)

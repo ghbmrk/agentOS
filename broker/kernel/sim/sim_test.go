@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -16,17 +17,35 @@ func seeds() int {
 	return 40
 }
 
-func TestSweepHoldsInvariants(t *testing.T) {
-	effects := 0
+// sweep runs every seed once, for the tests that read the sweep, and sums
+// their counters; a seed whose invariants fail stops it.
+var sweep = sync.OnceValues(func() (Result, error) {
+	var sum Result
 	for seed := 0; seed < seeds(); seed++ {
 		r, err := Run(Config{Seed: uint64(seed), Ops: 200})
 		if err != nil {
-			t.Fatal(err)
+			return sum, err
 		}
-		effects += r.Effects
+		sum.Effects += r.Effects
+		sum.Refused += r.Refused
+		sum.ClockBack += r.ClockBack
+		sum.StaleRefused += r.StaleRefused
+		sum.AnchorFailed += r.AnchorFailed
+		sum.WidenUnproven += r.WidenUnproven
+		sum.UnheldRefused += r.UnheldRefused
+		sum.BigRefused += r.BigRefused
+		sum.HeldByClerk += r.HeldByClerk
 	}
-	t.Logf("%d effects over %d seeds", effects, seeds())
-	if effects == 0 {
+	return sum, nil
+})
+
+func TestSweepHoldsInvariants(t *testing.T) {
+	sum, err := sweep()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d effects over %d seeds", sum.Effects, seeds())
+	if sum.Effects == 0 {
 		t.Fatal("the sweep never reached an effect; it proves nothing")
 	}
 }
@@ -65,19 +84,9 @@ func TestMutantsAreCaught(t *testing.T) {
 // that never moves back or a stale request that is not redelivered leaves its
 // counter at zero.
 func TestSweepFaultsTakeEffect(t *testing.T) {
-	var sum Result
-	for seed := 0; seed < seeds(); seed++ {
-		r, err := Run(Config{Seed: uint64(seed), Ops: 200})
-		if err != nil {
-			t.Fatal(err)
-		}
-		sum.Refused += r.Refused
-		sum.ClockBack += r.ClockBack
-		sum.StaleRefused += r.StaleRefused
-		sum.AnchorFailed += r.AnchorFailed
-		sum.WidenUnproven += r.WidenUnproven
-		sum.UnheldRefused += r.UnheldRefused
-		sum.HeldByClerk += r.HeldByClerk
+	sum, err := sweep()
+	if err != nil {
+		t.Fatal(err)
 	}
 	for name, n := range map[string]int{
 		"appends refused by a full disk":               sum.Refused,
@@ -86,6 +95,7 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"anchor writes failed":                         sum.AnchorFailed,
 		"widenings left unproven by a failed anchor":   sum.WidenUnproven,
 		"plans under a stripped, forged or unheld key": sum.UnheldRefused,
+		"big grants refused without a second passkey":  sum.BigRefused,
 		"holds the clerk kept on its own clock":        sum.HeldByClerk,
 	} {
 		if n == 0 {

@@ -107,6 +107,8 @@ func Run(in Input) (Outcome, error) {
 	holderPub, holderPriv := pair(2)
 	headPub, headPriv := pair(3)
 	plannerPub, plannerPriv := pair(4)
+	sparePub, sparePriv := pair(5) // the owner's second hardware key
+	anchors := []ed25519.PublicKey{ownerPub, sparePub}
 
 	verbs := []key.Verb{key.Organize, key.Trash, key.Unsubscribe}
 	if in.Standing != nil {
@@ -117,7 +119,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	standing := in.Standing != nil
 
-	acct, err := inbox.NewAccount([]ed25519.PublicKey{ownerPub}, handleSecret, func() inbox.World { return in.World }, in.Mails,
+	acct, err := inbox.NewAccount(anchors, handleSecret, func() inbox.World { return in.World }, in.Mails, inbox.Synthetic{},
 		in.RetentionDays, in.OneClickBody)
 	if err != nil {
 		return Outcome{}, err
@@ -142,7 +144,7 @@ func Run(in Input) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
-	k, err := kernel.Boot(log, []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{inbox.Name: acct}, issued)
+	k, err := kernel.Boot(log, anchors, map[string]kernel.Clerk{inbox.Name: acct}, issued)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -152,14 +154,15 @@ func Run(in Input) (Outcome, error) {
 	acct.Clock = func() int64 { return clock }
 	tick := func(at int64) error { clock = at; return k.Tick(at) }
 	// The owner's passkey granted the root and the home clerk's key to it at
-	// setup, a hold before the run (D-146). The clerk key outlives the run and
+	// setup, a hold before the run, and it and the second hardware key co-signed the
+	// batch, since it is new power (D-146). The clerk key outlives the run and
 	// spends nothing.
 	root := key.Issue(ownerPriv, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
 	ck, err := key.ClerkKey(root, ownerPriv, holderPub, today, 0)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := k.Issue(issued-kernel.GrantHold, root, ck); err != nil {
+	if err := k.Issue(issued-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
 		return Outcome{}, err
 	}
 	if err := log.Anchor(); err != nil {

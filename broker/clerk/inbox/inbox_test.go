@@ -54,13 +54,19 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 		ms = append(ms, Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
 	}
 	ms = append(ms, Mail{ID: "A01", Raw: raw["M01"], Class: "alert"})
+	return newRigOn(t, w, ms, Synthetic{}, retention, caveats...)
+}
+
+// newRigOn boots a real kernel over the given mails, read from box.
+func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, caveats ...key.Caveat) *rig {
+	t.Helper()
 	ownerPub, ownerPriv := seed(1)
 	holderPub, holderPriv := seed(2)
 	headPub, headPriv := seed(3)
 	plannerPub, plannerPriv := seed(4)
 	r := &rig{world: &w, plannerPriv: plannerPriv, now: t0}
 	var err error
-	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, retention, "List-Unsubscribe=One-Click")
+	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +75,7 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.k, err = kernel.Boot(log, []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
+	r.k, err = kernel.Boot(log, anchors(), map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +87,9 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+	_, backup := seed(12) // the second hardware key co-signs the setup grants (D-146)
+	batch := []key.Key{{Root: root.Root}, root}
+	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(batch...)), key.Approve(backup, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.Anchor(); err != nil {
@@ -255,8 +263,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Restart: a new kernel over the same log, as after a crash.
-	ownerPub, _ := seed(1)
-	k2, err := kernel.Boot(r.k.Log(), []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0)
+	k2, err := kernel.Boot(r.k.Log(), anchors(), map[string]kernel.Clerk{Name: r.acct}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,14 +399,14 @@ func TestHandleIsKeyedAndWide(t *testing.T) {
 	if h != a.Handle("news@shop.test") || h == a.Handle("letters@weekly.test") {
 		t.Fatal("handle is not a function of the address")
 	}
-	other, err := NewAccount(nil, []byte("another-secret-key-0"), func() World { return World{} }, nil, 30, "")
+	other, err := NewAccount(nil, []byte("another-secret-key-0"), func() World { return World{} }, nil, Synthetic{}, 30, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if other.Handle("news@shop.test") == h {
 		t.Fatal("handle does not depend on the secret")
 	}
-	if _, err := NewAccount(nil, []byte("short"), func() World { return World{} }, nil, 30, ""); err == nil {
+	if _, err := NewAccount(nil, []byte("short"), func() World { return World{} }, nil, Synthetic{}, 30, ""); err == nil {
 		t.Fatal("a secret under 128 bits was accepted")
 	}
 }
@@ -455,6 +462,13 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 }
 
 func seedPriv(b byte) ed25519.PrivateKey { _, p := seed(b); return p }
+
+// anchors are the kernel's: the owner's passkey and the second hardware key.
+func anchors() []ed25519.PublicKey {
+	o, _ := seed(1)
+	b, _ := seed(12)
+	return []ed25519.PublicKey{o, b}
+}
 
 // The inbox clerk judges a hold on its own clock: a kernel whose clock runs
 // past the window releases the unsubscribe, and the clerk, still inside it,

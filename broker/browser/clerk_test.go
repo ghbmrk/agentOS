@@ -38,7 +38,8 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	opub, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
 	kpub, kpriv := seedKey(3)
-	anchors := []ed25519.PublicKey{opub}
+	bpub, bpriv := seedKey(12) // the second hardware key co-signs new power (D-146)
+	anchors := []ed25519.PublicKey{opub, bpub}
 	c := NewClerk("web", anchors, h.g)
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
 		Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})})
@@ -54,7 +55,8 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+	batch := []key.Key{{Root: root.Root}, root}
+	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	return &clerkRig{h, c, k, anchors, root}
@@ -129,9 +131,10 @@ func TestReadThatChangesStateIsRefusedUnsent(t *testing.T) {
 	}
 }
 
-// No key covers a submit until the owner approves the exact request, so a
-// post is refused unsent even after its key's hold window, whatever it
-// names (CLK-3).
+// No key covers a submit until the owner approves its print: a post with
+// no print is refused by the clerk's own facts, even after its key's hold
+// window, and a standing key covers no post at all; nothing is sent. A fresh clerk, as after a restart, probes a read that
+// cannot change state notdone and a post unknown (CLK-3, KRN-8).
 func TestPostIsRefusedUnsent(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	k := r.held(t, hour, hour)
@@ -141,31 +144,28 @@ func TestPostIsRefusedUnsent(t *testing.T) {
 	if err := r.k.Tick(3 * hour); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"p1", "p2"} {
-		if s := r.step(id); s.Phase != kernel.PFailed {
-			t.Fatalf("%s: phase %s", id, s.Phase)
-		}
+	if s := r.step("p1"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
+		t.Fatalf("p1: phase %s (%s)", s.Phase, s.Detail)
 	}
-	if n := r.results("approval_required"); n != 2 {
-		t.Fatalf("%d step results name approval_required", n)
+	if s := r.step("p2"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
+		t.Fatalf("p2: phase %s (%s)", s.Phase, s.Detail)
 	}
 	if got := r.h.received(t); len(got) != 0 {
 		t.Fatalf("the driver received %q", got)
 	}
-}
-
-// A read that cannot change state, and a post (never sent), probe notdone
-// on a fresh clerk, as after a restart (KRN-8).
-func TestReadsAndPostsProbeNotDone(t *testing.T) {
-	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	fresh := NewClerk("web", r.owner, r.h.g)
-	for _, s := range []kernel.PlanStep{read(`{"v":0,"verb":"snapshot"}`), post(unsubShown, navUnsub)} {
-		req := kernel.Request{Plan: plan("p", r.root, s)}
-		if p := fresh.Probe(req, r.k.State()); p != "notdone" {
-			t.Fatalf("%s probe %s", s.Verb, p)
+	for s, want := range map[*kernel.PlanStep]string{
+		ptr(read(`{"v":0,"verb":"snapshot"}`)): "notdone",
+		ptr(post(unsubShown, navUnsub)):        "unknown",
+	} {
+		req := kernel.Request{Plan: plan("p", r.root, *s)}
+		if p := fresh.Probe(req, r.k.State()); p != want {
+			t.Fatalf("%s probe %s, want %s", s.Verb, p, want)
 		}
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
 
 // Logged out, a button press is sent but may change state: an answer lost
 // after the write is unknown, the kernel parks it and nothing is sent

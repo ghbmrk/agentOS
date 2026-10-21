@@ -30,7 +30,7 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 	root := trashRoot(r, "r2", r.owner)
 	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(0, root, ck)) // one batch: one hold, one entry
+	must(t, r.issue(0, root, ck)) // one batch: one hold, one entry
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	if c := admits(r, p, kernel.GrantHold-1); c != kernel.CGrantHeld {
 		t.Fatalf("a plan under a grant in its hold: %q", c)
@@ -42,14 +42,14 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 		t.Fatalf("a plan once the hold has run: %q", c)
 	}
 	other := trashRoot(r, "r3", r.owner)
-	must(t, r.k.Issue(0, other))
+	must(t, r.issue(0, other))
 	must(t, r.k.Revoke(1, other.Tip())) // the owner cancels it
 	if got := r.k.State().Pending(1); len(got) != 2 {
 		t.Fatalf("a cancelled grant is not pending: %d", len(got))
 	}
 	ock, err := key.ClerkKey(other, r.owner.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(1, ock))
+	must(t, r.issue(1, ock))
 	q := r.sign(kernel.Plan{ID: "p2", Key: ock, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	if c := admits(r, q, 3*kernel.GrantHold); c != key.RRevoked {
 		t.Fatalf("a cancelled grant after its hold: %q", c)
@@ -69,7 +69,7 @@ func TestOnlyASameLimitRenewalIsLiveAtOnce(t *testing.T) {
 		k, err := key.Derive(key.Key{Root: r.ck.Root}, r.owner.priv, holder.pub,
 			append([]key.Caveat{key.LimitExpires(at + life), key.LimitSpendDay(spendDay)}, c...)...)
 		must(t, err)
-		must(t, r.k.Issue(at, k))
+		must(t, r.issue(at, k))
 		return k
 	}
 	cases := []struct {
@@ -94,10 +94,10 @@ func TestOnlyASameLimitRenewalIsLiveAtOnce(t *testing.T) {
 	root := trashRoot(r, "r2", r.owner)
 	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, at, 10)
 	must(t, err)
-	must(t, r.k.Issue(at, root, ck))
+	must(t, r.issue(at, root, ck))
 	again, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, at+1, 10)
 	must(t, err)
-	must(t, r.k.Issue(at+1, again))
+	must(t, r.issue(at+1, again))
 	if from, _ := r.k.State().Granted(again.Tip()); from < at+kernel.GrantHold {
 		t.Fatalf("a renewal of a pending grant is live at %d", from)
 	}
@@ -116,7 +116,7 @@ func TestBareRootIsUsedOnlyByThePasskey(t *testing.T) {
 		t.Fatalf("the passkey's one-off under the bare root: %q", c)
 	}
 	forged := key.Extend(bare, r.holder.priv, key.Link{Caveats: []key.Caveat{key.LimitExpires(1 << 40), key.LimitSpendDay(1)}, Holder: r.holder.pub})
-	if err := r.k.Issue(0, forged); !errors.Is(err, key.ErrBadSig) {
+	if err := r.issue(0, forged); !errors.Is(err, key.ErrBadSig) {
 		t.Fatalf("the home clerk grants itself a link off the root: %v", err)
 	}
 }
@@ -130,14 +130,14 @@ func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	if err := r.k.Enroll(0, key.Enroll(stranger.priv, phone.pub)); !errors.Is(err, kernel.ErrNotEnrolled) {
 		t.Fatalf("an enrollment no anchor signed: %v", err)
 	}
-	if err := r.k.Issue(0, trashRoot(r, "early", phone)); err == nil {
+	if err := r.issue(0, trashRoot(r, "early", phone)); err == nil {
 		t.Fatal("a passkey not yet enrolled grants nothing")
 	}
 	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
 	root := trashRoot(r, "phone", phone)
 	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(0, root, ck))
+	must(t, r.issue(0, root, ck))
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	oneOff := kernel.SignPlan(kernel.Plan{ID: "p2", Key: root, Steps: p.Steps}, phone.priv)
 	at := kernel.GrantHold
@@ -153,7 +153,7 @@ func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	}
 	renewal, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, 10)
 	must(t, err)
-	if err := r.k.Issue(at, renewal); err == nil {
+	if err := r.issue(at, renewal); err == nil {
 		t.Fatal("the lost phone renews nothing")
 	}
 	if err := r.k.Enroll(at, key.Enroll(r.owner.priv, phone.pub)); !errors.Is(err, kernel.ErrNotEnrolled) ||
@@ -187,7 +187,7 @@ func TestClerkKeepsTheGrantHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	root := trashRoot(r, "r2", r.owner)
 	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(0, root, ck))
+	must(t, r.issue(0, root, ck))
 	ahead := kernel.GrantHold + 1
 	must(t, r.k.Submit(ahead, r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})))
 	r.now = hour // the clerk's clock: still in the hold
@@ -216,10 +216,10 @@ func TestAFirstLinkNotGrantedConfersNothing(t *testing.T) {
 func TestAFirstLinkIsNeverLiveBeforeItsRoot(t *testing.T) {
 	r := newRig(t)
 	root := trashRoot(r, "r2", r.owner)
-	must(t, r.k.Issue(10*hour, root))
+	must(t, r.issue(10*hour, root))
 	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(0, ck))
+	must(t, r.issue(0, ck))
 	rf, _ := r.k.State().Granted(root.Tip())
 	if from, _ := r.k.State().Granted(ck.Tip()); from < rf {
 		t.Fatalf("first link live at %d, its root at %d", from, rf)
@@ -235,7 +235,7 @@ func TestReplayGrantsNothingFromACutOffPasskey(t *testing.T) {
 	root := trashRoot(r, "phone", phone)
 	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 0, 10)
 	must(t, err)
-	must(t, r.k.Issue(0, root, ck))
+	must(t, r.issue(0, root, ck))
 	must(t, r.k.Unenroll(1, phone.pub))
 	again, err := key.ClerkKey(root, phone.priv, r.holder.pub, 2, 10)
 	must(t, err)
@@ -261,7 +261,7 @@ func TestARenewalOfAPausedLapsedOrPendingKeyWaits(t *testing.T) {
 		t.Helper()
 		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
 		must(t, err)
-		must(t, r.k.Issue(at, k))
+		must(t, r.issue(at, k))
 		return k
 	}
 	live := func(k key.Key, at int64) bool { from, _ := r.k.State().Granted(k.Tip()); return from <= at }
@@ -277,10 +277,10 @@ func TestARenewalOfAPausedLapsedOrPendingKeyWaits(t *testing.T) {
 	// A grant still in its hold, under a live root, renews nothing.
 	held, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at, 5)
 	must(t, err)
-	must(t, r.k.Issue(at, held))
+	must(t, r.issue(at, held))
 	again, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at+1, 5)
 	must(t, err)
-	must(t, r.k.Issue(at+1, again))
+	must(t, r.issue(at+1, again))
 	if live(again, at+1) {
 		t.Fatal("a renewal of a grant still in its hold is live")
 	}
@@ -293,7 +293,7 @@ func TestARenewalOfARevokedKeyWaits(t *testing.T) {
 	must(t, r.k.Revoke(at, r.ck.Tip()))
 	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
 	must(t, err)
-	must(t, r.k.Issue(at, k))
+	must(t, r.issue(at, k))
 	if from, _ := r.k.State().Granted(k.Tip()); from == at {
 		t.Fatal("a renewal lifted a revoke")
 	}
@@ -310,7 +310,7 @@ func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	at := 10 * hour
 	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.priv, r.holder.pub, at, 15)
 	must(t, err)
-	must(t, r.k.Issue(at, k))
+	must(t, r.issue(at, k))
 	if from, _ := r.k.State().Granted(k.Tip()); from != at {
 		t.Fatalf("the phone's renewal is live from %d", from)
 	}
@@ -338,7 +338,7 @@ func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 	root := trashRoot(r, "ph", phone)
 	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 1, 10)
 	must(t, err)
-	must(t, r.k.Issue(1, root, ck))
+	must(t, r.issue(1, root, ck))
 	must(t, r.k.Unenroll(2, phone.pub))
 	if got := r.k.State().Pending(3); len(got) != 0 {
 		t.Fatalf("a cut-off passkey's grants still pending: %d", len(got))
@@ -346,5 +346,34 @@ func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	if c := admits(r, p, 3*kernel.GrantHold); c == "" {
 		t.Fatal("a cut-off passkey's pending grant came live")
+	}
+}
+
+// Cutting off a phone cancels a first link it signed under a root a hardware
+// key granted, and only that link; a link under a revoked root is not listed
+// as pending (D-146).
+func TestUnenrollCancelsAPhonesLinkUnderAnAnchorsRoot(t *testing.T) {
+	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	at := 10 * hour
+	raise, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.priv, r.holder.pub, at, 2<<40)
+	must(t, err)
+	must(t, r.k.Issue(at, nil, raise))
+	must(t, r.k.Unenroll(at+1, phone.pub))
+	if got := r.k.State().Pending(at + 2); len(got) != 0 {
+		t.Fatalf("the phone's pending link still listed: %d", len(got))
+	}
+	if r.k.State().Changes.Revoked[raise.Tip()] != true || r.k.State().Changes.Revoked[r.ck.Tip()] {
+		t.Fatal("unenroll must cancel the phone's link and nothing the anchor signed")
+	}
+	r = newRig(t)
+	other := trashRoot(r, "r2", r.owner)
+	ck, err := key.ClerkKey(other, r.owner.priv, r.holder.pub, at, 1)
+	must(t, err)
+	must(t, r.issue(at, other, ck))
+	must(t, r.k.Revoke(at+1, other.Tip()))
+	if got := r.k.State().Pending(at + 2); len(got) != 0 {
+		t.Fatalf("a link under a revoked root listed as pending: %d", len(got))
 	}
 }

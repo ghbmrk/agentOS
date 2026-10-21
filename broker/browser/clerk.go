@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,12 +15,12 @@ import (
 )
 
 // Clerk is the browser's only exit (D-139). Each step is checked against its
-// key by clerk.Check, then its query line goes to the gate as a read. The
-// gate, not the step, decides whether a line may change state at the site,
-// and refuses one that needs the owner's approval unsent: until the owner
-// can approve an exact request, no key covers a submit on a session that
-// may hold the owner's identity (CLK-3, D-147). A post step is refused for
-// the same reason.
+// key by clerk.Check, then its line goes to the gate. A read is sent only if
+// the gate judges it needs no approval; one that does is refused unsent with
+// the Approval the owner would give (CLK-3, D-147). A post is that approved
+// action: its content claims the approval's print, the clerk's facts rebuild
+// the print from the page, so only a key for that print covers it, and the
+// gate sends it once, only if the page is unchanged.
 type Clerk struct {
 	Name string
 	// Anchors are the owner's hardware keys, which every key is checked
@@ -29,79 +30,170 @@ type Clerk struct {
 	// wall clock.
 	Clock func() int64
 
-	g    *Gate
-	mu   sync.Mutex
-	done map[string]bool
+	g   *Gate
+	mu  sync.Mutex
+	ran map[string]ran
+}
+
+// ran is what Do judged and saw of a step in this process.
+type ran struct {
+	// effect: the step may change state at the site and was written.
+	effect bool
+	// ok: the driver answered it ok; lost: the executor stopped after the
+	// write, so whether it acted is unknown.
+	ok, lost bool
 }
 
 // NewClerk returns the clerk for one gate.
 func NewClerk(name string, anchors []ed25519.PublicKey, g *Gate) *Clerk {
-	return &Clerk{Name: name, Anchors: anchors, g: g, done: map[string]bool{}}
+	return &Clerk{Name: name, Anchors: anchors, g: g, ran: map[string]ran{}}
 }
 
-// Do runs a step. A read that cannot change state is safe to run again. One
-// that may, sent only because the session is logged out, is an effect: an
-// answer lost after it was written is unknown, and one that succeeded is
-// remembered as done (KRN-8).
+// Do runs a step. A read that cannot change state is safe to run again. A
+// post, and a read that may change state sent only because the session is
+// logged out, are effects: an answer lost after the write is unknown, and
+// Probe answers from what Do saw (KRN-8).
 func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	now := time.Now().UnixMilli()
 	if c.Clock != nil {
 		now = c.Clock()
 	}
-	if rf := clerk.Check(c.Anchors, c.Name, facts, now, r, v); rf != nil {
+	id := stepID(r)
+	st := step(r)
+	if rf := clerk.Check(c.Anchors, c.Name, c.facts, now, r, v); rf != nil {
+		c.record(id, ran{})
+		if msg := []byte(st.Args["msg"].Value); rf.Code == clerk.RClaim && st.Verb == key.Post && st.Content != "" && c.g.print(msg) != st.Content {
+			// The post claims a print the page no longer yields: say so,
+			// with what approval would cover now (CLK-3).
+			return kernel.Result{Outcome: "failed", Detail: logged(c.g.reask(msg))}
+		}
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
-	st := step(r)
-	if st.Verb != key.Read {
-		return kernel.Result{Outcome: "failed", Detail: "approval_required"}
+	var res Result
+	var rec ran
+	switch st.Verb {
+	case key.Read:
+		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
+	case key.Post:
+		if !approval(r.Plan.Key, c.Anchors) {
+			c.record(id, ran{})
+			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+		}
+		// A redo of a submit this clerk wrote and did not see succeed is
+		// the owner's RETRY: Probe answers unknown for it, so the kernel
+		// never redoes it alone, and the owner accepts it may happen twice
+		// (KRN-8, CH-11). It sends the print once more.
+		c.mu.Lock()
+		prev := c.ran[id]
+		c.mu.Unlock()
+		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok)
+	default:
+		c.record(id, ran{})
+		return kernel.Result{Outcome: "failed", Detail: "verb"}
 	}
-	res, effect, lost := c.g.do(context.Background(), []byte(st.Args["query"].Value))
-	out := kernel.Result{Outcome: "failed"}
+	rec.ok = res.OK
+	c.record(id, rec)
+	out := kernel.Result{Outcome: "failed", Detail: logged(res)}
 	switch {
 	case res.OK:
 		out.Outcome = "ok"
-	case lost:
+	case rec.lost, st.Verb == key.Post && rec.effect:
+		// A submit written and not answered ok may have acted (KRN-8).
 		out.Outcome = "unknown"
 	}
-	if effect && res.OK {
-		c.mu.Lock()
-		c.done[stepID(r)] = true
-		c.mu.Unlock()
-	}
-	d, _ := json.Marshal(res)
-	out.Detail = string(d)
 	return out
 }
 
-// Probe reports what the clerk knows without acting. A read that cannot
-// change state, and every post (never sent), is notdone. An effect is done
-// only if this process saw it succeed; otherwise, on a logged-out session
-// where it may have been sent, it is unknown, so the kernel parks it rather
-// than sending it twice, after a restart too (KRN-8).
+// record keeps what Do saw of step id. A refusal never replaces an earlier
+// write's record: a redo refused unsent leaves the first answer standing.
+func (c *Clerk) record(id string, r ran) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.ran[id]; ok && old.effect && !r.effect {
+		return
+	}
+	c.ran[id] = r
+}
+
+// Probe reports what the clerk knows without acting, from what Do saw in
+// this process, never from the page as it is now. An effect is done if Do
+// saw it succeed and unknown otherwise; a step Do sent as a plain read, or
+// refused unsent, is notdone. With no record, as after a restart, a post
+// is unknown, and so, on a logged-out session, is any read that may have
+// acted: the kernel parks them rather than sending them twice (KRN-8).
 func (c *Clerk) Probe(r kernel.Request, _ kernel.View) string {
 	st := step(r)
-	if st.Verb != key.Read {
-		return "notdone"
-	}
 	c.mu.Lock()
-	done := c.done[stepID(r)]
+	rec, ok := c.ran[stepID(r)]
 	c.mu.Unlock()
 	switch {
-	case done:
+	case ok && rec.effect && rec.ok:
 		return "done"
-	case c.g.cfg.LoggedOut && c.g.effect([]byte(st.Args["query"].Value)):
+	case ok && rec.effect:
+		return "unknown"
+	case ok:
+		return "notdone"
+	case st.Verb == key.Post:
+		return "unknown"
+	case st.Verb == key.Read && c.g.cfg.LoggedOut && c.g.mayAct([]byte(st.Args["query"].Value)):
 		return "unknown"
 	}
 	return "notdone"
 }
 
-// stepID names a step of a signed plan.
-func stepID(r kernel.Request) string { return r.Plan.ID + "\x00" + strconv.Itoa(r.Index) }
-
 // facts is the clerk's own reading of a step's claims. A read of a page
 // moves no money and carries no content class or flow label the clerk can
-// vouch for, so a step claiming one is refused (KEY-2).
-func facts(key.Step) (string, []string, int64) { return "", nil, 0 }
+// vouch for. A post's content is the print of the approval the gate would
+// ask for its action now, so only a key for that print covers it (KEY-2,
+// CLK-3).
+func (c *Clerk) facts(s key.Step) (string, []string, int64) {
+	if s.Verb != key.Post {
+		return "", nil, 0
+	}
+	return c.g.print([]byte(s.Args["msg"].Value)), nil, 0
+}
+
+// approval reports whether k is an owner's approval of exact submits: its
+// content set lists approval prints only, and its uses are capped at their
+// number. The set holds each print once, so a print listed twice gives no
+// spare use. No standing key covers a submit (CLK-3), and the log's use
+// count keeps each print to one send across a restart (KRN-8).
+func approval(k key.Key, anchors []ed25519.PublicKey) bool {
+	v, err := key.Chain(k, anchors)
+	if err != nil || len(v.Limits.Content) == 0 {
+		return false
+	}
+	for _, p := range v.Limits.Content {
+		if !strings.HasPrefix(p, printPrefix) {
+			return false
+		}
+	}
+	for _, c := range v.Limits.Caps {
+		if c.Kind == key.KUses && c.N <= int64(len(v.Limits.Content)) {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxDetail bounds a step's logged result. The snapshot and the approval
+// are bounded where the gate makes them (post, approval), and logged bounds
+// every other field, so the whole result, JSON-escaped, fits. If it still
+// did not, the snapshot and the approval are dropped and the result says so.
+const MaxDetail = 1 << 20
+
+func logged(res Result) string {
+	res = small(res)
+	d, _ := json.Marshal(res)
+	if len(d) > MaxDetail {
+		res.Snapshot, res.Approval, res.Truncated = "[result too large]", nil, true
+		d, _ = json.Marshal(small(res))
+	}
+	return string(d)
+}
+
+// stepID names a step of a signed plan.
+func stepID(r kernel.Request) string { return r.Plan.ID + "\x00" + strconv.Itoa(r.Index) }
 
 // step is the step r names, in canonical form; out of range it is the zero
 // step, which Check refuses. It is kernel.Request.Step through the opened
