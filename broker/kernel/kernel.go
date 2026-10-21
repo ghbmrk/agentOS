@@ -28,7 +28,7 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
 	}
-	v, err := key.Verify(p.Key, s.Owner)
+	v, err := VerifyPlan(p, s.Owner)
 	if err != nil {
 		return key.ID{}, nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
@@ -141,7 +141,7 @@ func Next(s *State, id string, now int64) Act {
 	default:
 		return a
 	}
-	v, err := key.Verify(p.Plan.Key, s.Owner)
+	v, err := VerifyPlan(p.Plan, s.Owner)
 	if err != nil {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
 		return a
@@ -176,17 +176,25 @@ func Next(s *State, id string, now int64) Act {
 	return a
 }
 
-// Request is what a clerk runs and re-checks.
+// Request is what a clerk runs and re-checks: the signed plan and which step
+// of it, so the clerk checks the holder's signature itself (CLK-2).
 type Request struct {
-	Plan        string
+	Plan        Plan
 	Index       int
-	Step        key.Step
-	Key         key.Key
 	Idem        string
 	Attempt     int
 	DispatchSeq uint64 // the first dispatch: the clerk counts uses before it
 	HeldSeq     uint64 // 0 when the step was not held
 	Now         int64
+}
+
+// Step is the step the clerk runs, derived from the signed plan. Out of range
+// it is the zero step, which names no clerk and so is refused.
+func (r Request) Step() key.Step {
+	if r.Index < 0 || r.Index >= len(r.Plan.Steps) {
+		return key.Step{}
+	}
+	return r.Plan.Step(r.Index)
 }
 
 // Result is a clerk's answer. Outcome is ok, failed or unknown.
@@ -265,7 +273,7 @@ func (k *Kernel) Issue(now int64, root key.Key) error {
 	if len(root.Links) != 0 {
 		return errors.New("kernel: only a root is issued")
 	}
-	if _, err := key.Verify(root, k.s.Owner); err != nil {
+	if err := key.CheckChain(root, k.s.Owner); err != nil {
 		return err
 	}
 	return k.owner(now, TKeyIssued, keyIssued{root})
@@ -553,7 +561,7 @@ func (k *Kernel) act(now int64, a Act) error {
 		}
 		return nil
 	}
-	req := Request{Plan: a.Plan, Index: a.Index, Step: sp, Key: p.Plan.Key, Idem: Idem(a.Plan, a.Index),
+	req := Request{Plan: p.Plan, Index: a.Index, Idem: Idem(a.Plan, a.Index),
 		Attempt: a.Attempt, DispatchSeq: st.DispatchSeq, HeldSeq: st.HeldSeq, Now: now}
 	switch a.Kind {
 	case ActDispatch:

@@ -18,6 +18,13 @@
 // nothing until it has one. At shutdown, or when hostapd or dnsmasq dies,
 // it brings the access point down; the unit restarts it after a death.
 //
+// It also creates the station (localui.StationIface) on the radio, beside
+// the access point, when the radio's interface combinations allow both
+// (#936), so NetworkManager can join the home Wi-Fi while the phone stays
+// on the access point (ONB-3). It never brings the station down. On a
+// radio that allows only one channel it follows the station's 2.4 GHz
+// channel: Down, then Up on that channel.
+//
 // It runs as root: it loads nftables, starts the exempt unit and gives the
 // radio its address. hostapd runs as its own user, agentos-hostapd, with
 // NET_ADMIN and NET_RAW only (#1426): as root it would pass egress's uid-0
@@ -98,6 +105,12 @@ func main() {
 		log.Fatalf("agentos-ap: %v", err)
 	}
 	l := &localui.APLoader{AP: ap, Host: localui.ExecHost{}}
+	if r, err := dialNL80211(); err != nil {
+		log.Printf("agentos-ap: no station beside the access point: %v", err)
+	} else {
+		defer r.Close()
+		l.Radio = r
+	}
 	if err := run(ctx, c, l, ap.Exited); err != nil {
 		log.Fatalf("agentos-ap: %v", err)
 	}
@@ -149,6 +162,23 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 		return nil
 	}
 	var up *served // what the access point serves; nil while it is down
+	channel := 0   // the access point's channel; 0 is APConfig's default
+	allowed := ""  // the station decision last logged
+	station := func() {
+		s, err := l.EnsureStation(ctx, c.Iface)
+		if err != nil {
+			log.Printf("agentos-ap: station: %v", err)
+		}
+		d := "not allowed"
+		if l.Station() {
+			d = "allowed"
+		}
+		if d != allowed || s == localui.StationMade {
+			log.Printf("agentos-ap: station %s beside %s on %s (%s)", localui.StationIface, c.Iface, d, s)
+			allowed = d
+		}
+	}
+	station()
 	down := func() error {
 		up = nil
 		return l.Down(context.Background())
@@ -180,7 +210,7 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 				}
 			}
 			if w != nil {
-				if err := l.Up(ctx, localui.APConfig{Iface: c.Iface, Addr: c.Addr, SSID: w.SSID, Password: w.Password}); err != nil {
+				if err := l.Up(ctx, localui.APConfig{Iface: c.Iface, Addr: c.Addr, SSID: w.SSID, Password: w.Password, Channel: channel}); err != nil {
 					failed(w)
 					return errors.Join(err, l.Down(context.Background()))
 				}
@@ -189,6 +219,7 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 				log.Printf("agentos-ap: serving the %s on %s", w.name, c.Iface)
 			}
 			logged = false
+			station()
 		}
 		if up == nil && !logged {
 			log.Print("agentos-ap: no network to serve yet")
@@ -210,6 +241,14 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 			}
 			return errors.Join(errors.New("an access point child exited"), down())
 		case <-tick.C:
+			if ch := follow(ctx, l, channel); up != nil && ch != 0 {
+				log.Printf("agentos-ap: moving the access point to channel %d, the station's", ch)
+				if err := down(); err != nil {
+					return err
+				}
+				channel = ch
+				continue
+			}
 			if up != nil && up.name == cardNetwork && settled < settlePolls {
 				if settled++; settled == settlePolls {
 					if err := apnet.ClearUpFailures(c.APNet); err != nil {
@@ -219,6 +258,30 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 			}
 		}
 	}
+}
+
+// follow is the station's 2.4 GHz channel when the radio allows the
+// access point and the station only one channel between them and the
+// station is on another than the access point's (current, 0 for the
+// default), else 0. A station on 5 GHz cannot be followed: the access
+// point serves 2.4 GHz only (localui.APConfig.Channel).
+func follow(ctx context.Context, l *localui.APLoader, current int) int {
+	if !l.Station() || l.StationChannels() > 1 {
+		return 0
+	}
+	f, err := l.StationFreq(ctx)
+	if err != nil {
+		log.Printf("agentos-ap: station: %v", err)
+		return 0
+	}
+	ch := localui.Channel24(f)
+	if current == 0 {
+		current = 6
+	}
+	if ch == 0 || ch == current {
+		return 0
+	}
+	return ch
 }
 
 // cardNetwork names the card's network in served; settlePolls is how
@@ -344,7 +407,8 @@ func (d downFirst) Save(b []byte) error {
 	return d.FileStore.Save(b)
 }
 
-// wireless lists the interfaces in sysClassNet that have a radio, sorted.
+// wireless lists the interfaces in sysClassNet that have a radio, sorted,
+// but the station: the loader never brings it down.
 func wireless(sysClassNet string) ([]string, error) {
 	ents, err := os.ReadDir(sysClassNet)
 	if err != nil {
@@ -352,6 +416,9 @@ func wireless(sysClassNet string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range ents {
+		if e.Name() == localui.StationIface {
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(sysClassNet, e.Name(), "phy80211")); err == nil {
 			out = append(out, e.Name())
 		}

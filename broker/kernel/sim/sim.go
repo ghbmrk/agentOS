@@ -4,6 +4,7 @@
 package sim
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,7 @@ type Result struct {
 	StaleRefused  int // old requests redelivered to the world that it did not act on
 	AnchorFailed  int // anchor writes that failed
 	WidenUnproven int // widenings whose anchor failed, left live until the log is reopened
+	UnheldRefused int // plans under a key their signer does not hold, rejected
 }
 
 var errAnchor = errors.New("sim: anchor down")
@@ -165,15 +167,16 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 	if w.unconfirmed {
 		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
 	}
-	ver, err := key.Verify(r.Key, w.owner)
+	ver, err := kernel.VerifyPlan(r.Plan, w.owner)
 	if err != nil {
 		w.effects = append(w.effects, effect{r.Idem, r.Now, ""})
-		w.bad = append(w.bad, "effect under an invalid key")
+		w.bad = append(w.bad, "effect under an invalid key or one its submitter does not hold")
 		return
 	}
+	st := r.Step()
 	fp := ""
-	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
-		fp = ver.Root().String() + "|" + kernel.Fingerprint(r.Step)
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
+		fp = ver.Root().String() + "|" + kernel.Fingerprint(st)
 		for _, e := range w.effects {
 			if e.fp == fp && e.at > r.Now-key.DayMS {
 				w.bad = append(w.bad, "the same irreversible effect twice within a day, across plans")
@@ -195,12 +198,12 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 	}
 	found := false
 	for _, x := range ver.Limits.Verbs {
-		found = found || x == string(r.Step.Verb)
+		found = found || x == string(st.Verb)
 	}
 	if !found {
 		w.bad = append(w.bad, "effect with a verb outside the key")
 	}
-	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
 			h, held := v.Held(r.HeldSeq)
 			if !held || r.Now < h.At+ver.Limits.Window(h.Novel) {
@@ -232,7 +235,8 @@ type sim struct {
 	w      *world
 	k      *kernel.Kernel
 	owner  keyPair
-	holder keyPair
+	holder keyPair // holds every root: the trusted side
+	planr  keyPair // holds only the keys derived to it
 	head   keyPair
 	pool   []key.Key
 	ids    []key.ID
@@ -241,7 +245,7 @@ type sim struct {
 	trace  []string
 	nonce  *rand.ChaCha8
 
-	clockBack, widenUnproven int
+	clockBack, widenUnproven, unheld int
 }
 
 func (s *sim) logf(f string, a ...any) {
@@ -296,8 +300,8 @@ func (s *sim) newRoot() key.Key {
 
 func (s *sim) remember(k key.Key) {
 	s.pool = append(s.pool, k)
-	if v, err := key.Verify(k, s.owner.pub); err == nil {
-		s.ids = append(s.ids, v.ID())
+	if key.CheckChain(k, s.owner.pub) == nil {
+		s.ids = append(s.ids, k.Tip())
 	}
 }
 
@@ -317,8 +321,34 @@ func (s *sim) derived() (key.Key, bool) {
 	case 3:
 		cav = append(cav, key.LimitVerbs(verbs[s.pick(len(verbs))])) // may try to widen: Verify must refuse
 	}
-	k, err := key.Derive(base, s.holder.priv, s.holder.pub, cav...)
+	k, err := key.Derive(base, s.holder.priv, s.planr.pub, cav...)
 	return k, err == nil
+}
+
+// signed is a plan under the planner's pick of key, signed by whoever submits
+// it: the holder for a root, the planner for a key derived to it, and the
+// planner again for a key it does not hold, which must confer nothing.
+func (s *sim) signed(p kernel.Plan) (kernel.Plan, bool) {
+	p.Key = s.anyKey()
+	signer, unheld := s.holder.priv, false
+	if n := len(p.Key.Links); n > 0 && bytes.Equal(p.Key.Links[n-1].Holder, s.planr.pub) {
+		signer = s.planr.priv
+	}
+	switch s.pick(20) {
+	case 0: // strips its key back to the root
+		if k, ok := s.derived(); ok {
+			p.Key, signer, unheld = key.Key{Root: k.Root}, s.planr.priv, true
+		}
+	case 1: // forges a link of its own off a root, or re-derives one
+		if len(s.pool) > 0 {
+			k := s.pool[s.pick(len(s.pool))]
+			p.Key = key.Extend(k, s.planr.priv, key.Link{Caveats: []key.Caveat{key.LimitUses(1000)}, Holder: s.planr.pub})
+			signer, unheld = s.planr.priv, true
+		}
+	case 2: // a stranger signs
+		signer, unheld = gen(s.rng).priv, true
+	}
+	return kernel.SignPlan(p, signer), unheld
 }
 
 // anyKey is the planner's pick: good keys, narrowed keys, forged or foreign ones.
@@ -380,9 +410,15 @@ func (s *sim) submit() error {
 		steps[i] = s.step()
 	}
 	s.logf("submit %s %d steps", id, len(steps))
-	err := s.k.Submit(s.now, kernel.Plan{ID: id, Key: s.anyKey(), Steps: steps})
+	p, unheld := s.signed(kernel.Plan{ID: id, Steps: steps})
+	err := s.k.Submit(s.now, p)
 	if err == nil {
 		s.plans = append(s.plans, id)
+		if ps := s.k.State().Plans[id]; unheld && ps != nil && ps.Status == kernel.SRejected {
+			s.unheld++
+		} else if unheld {
+			s.w.bad = append(s.w.bad, "a plan under a key its signer does not hold was admitted")
+		}
 	}
 	if errors.Is(err, kernel.ErrDuplicatePlan) {
 		return nil
@@ -510,7 +546,7 @@ func Run(c Config) (*Result, error) {
 	}
 	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
 	s.disk = &Disk{rng: rng}
-	s.owner, s.holder, s.head = gen(rng), gen(rng), gen(rng)
+	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, done: map[string]bool{}}
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -560,7 +596,7 @@ func Run(c Config) (*Result, error) {
 	}
 	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
-		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven}, nil
+		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld}, nil
 }
 
 func tail(t []string) []string {

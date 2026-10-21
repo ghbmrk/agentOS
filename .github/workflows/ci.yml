@@ -71,14 +71,28 @@ jobs:
         if: env.RECORDS != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
         # without them (#1531), and fail on any skip among them (#1543).
+        # Each module runs in its own process tree under strace, which logs every file opened in it
+        # for tests/records_audit.py (CI-PATHS). -buildvcs=false: go's VCS stamp reads the worktree.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
-        run: python -m unittest discover -s tests -v
+          GOFLAGS: -buildvcs=false
+        run: |
+          command -v strace >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q strace; }
+          mkdir -p "$RUNNER_TEMP/reads"; rc=0
+          for f in tests/test*.py; do
+            m=$(basename "$f" .py)
+            strace -f --seccomp-bpf -q -y -e trace=open,openat,openat2 -e signal=none -o "$RUNNER_TEMP/reads/$m.trace" \
+              python -m unittest discover -s tests -p "$m.py" -v || rc=1
+          done
+          exit $rc
+      - name: The records-only step runs every test that reads a record (CI-PATHS)
+        if: env.RECORDS != 'true'
+        run: python tests/records_audit.py "$RUNNER_TEMP/reads"
       - name: Document tool tests (records-only change; CI-docs)
-        # The tests that read record files (test_board reads BOARD.md) and test the tools
-        # the steps below run.
+        # The tests of the tools the steps below run, and every test that reads a record file;
+        # full CI's record-read audit fails when a test that reads one is missing here.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_stalequeued tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
@@ -240,10 +254,12 @@ jobs:
           python3 -I ../tools/ci_split.py shard --shards 3 --index "$SHARD" < "$RUNNER_TEMP/packages" > "$RUNNER_TEMP/shard"
           cat "$RUNNER_TEMP/shard"
       - name: Tests (race detector)
-        # The TPM tests fail rather than skip if swtpm is missing.
+        # The TPM tests fail rather than skip if swtpm is missing. kernel/sim takes minutes
+        # under -race, so go test's default 10-minute timeout flaked a slow runner (#2623);
+        # the job's own timeout-minutes still bounds the step.
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
-        run: go test -race -count=1 $(cat "$RUNNER_TEMP/shard")
+        run: go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
