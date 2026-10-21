@@ -59,6 +59,9 @@ func Plans(listing []Item, bulk, unsub key.Key, planner ed25519.PrivateKey) ([]k
 		}
 	}
 	for _, it := range listing {
+		if it.Class == "" {
+			continue // unclassified: nothing to file it under
+		}
 		if room == 0 {
 			left.Organize++
 			continue
