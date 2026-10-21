@@ -178,16 +178,17 @@ def quota_violations(img, table, entry):
 
 # HW-1 on the built disk, not only on the tree mkosi.finalize saw (IMG-1): every byte of the disk
 # outside /usr slot A (the partition table, the ESP, root and the empty slot B) holds no private key
-# and no Owner Card. Slot A is package content, verified against the entry's usrhash, and the
-# reproduce job builds the same usrhash on another runner, which a key or card made during the build
-# would break (image/ASSUMPTIONS.md IMG-1-1). A hit names its kind and offset, never its bytes.
+# and no Owner Card. Slot A is checked apart (slot_a_violations): its ranges equal the verified split
+# files, and the data holds no key but the allowlisted ones (image/ASSUMPTIONS.md IMG-1-1). A hit
+# names its kind and offset, never its bytes.
 SECRET_PATTERNS = (
     # A PEM or PGP private key with its body: libcrypto and gpg carry the header alone. Its line
     # breaks may be real or JSON-escaped (a literal backslash-n, as provider credential files hold).
     # A line holds no backslash but an escaped slash (\/, which some encoders write), so an escaped
-    # break ends it in one place and a match stays linear.
+    # break ends it in one place and a match stays linear. The body may be indented by up to 16
+    # spaces or tabs (a YAML block scalar, or a JSON value pretty-printed inside a nested object).
     ("private key", re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:\\r)?(?:\\n|\r?\n)"
-                               rb"(?:(?:[ -\[\]-~]|\\/){0,128}(?:\\r)?(?:\\n|\r?\n)){0,8}[A-Za-z0-9+/]{40}")),
+                               rb"(?:(?:[ -\[\]-~]|\\/){0,128}(?:\\r)?(?:\\n|\r?\n)){0,8}[ \t]{0,16}[A-Za-z0-9+/]{40}")),
     ("age secret key", re.compile(rb"AGE-SECRET-KEY-1[02-9AC-HJ-NP-Z]{58}")),
     # The first-boot card record and the card's vault slot (broker/firstboot, broker/recovery):
     # the box makes both on its own drive at first boot (HW-1, D-102).
@@ -214,27 +215,103 @@ def data_extents(f, start, end):
         pos = h
 
 
+def scan_hits(f, start, end, patterns=SECRET_PATTERNS):
+    """(kind, offset, matched bytes) for every secret pattern in the data extents of f between
+    start and end, read in SCAN_CHUNK pieces that run on by SCAN_OVERLAP."""
+    for d, h in data_extents(f, start, end):
+        for p in range(d, h, SCAN_CHUNK):
+            f.seek(p)
+            buf = f.read(min(SCAN_CHUNK + SCAN_OVERLAP, h - p))
+            for what, pat in patterns:
+                # A match starting in the overlap is the next chunk's.
+                for m in pat.finditer(buf):
+                    if m.start() < SCAN_CHUNK:
+                        yield what, p + m.start(), m.group()
+
+
+def slot_a_parts(table):
+    """The (data, verity) partitions of /usr slot A, or None unless there are exactly those two."""
+    a = [p for p in table["partitions"] if p["type"].lower() == USR_GUID and p.get("name") != "_empty"]
+    v = [p for p in table["partitions"] if p["type"].lower() == USR_VERITY_GUID and p.get("name") != "_empty"]
+    return (a[0], v[0]) if len(a) == 1 and len(v) == 1 else None
+
+
 def secret_violations(img, table):
     """Every private key or Owner Card on the disk IMG outside /usr slot A. table: sfdisk -J's."""
     ss = table.get("sectorsize", 512)
-    skip = sorted((p["start"] * ss, (p["start"] + p["size"]) * ss) for p in table["partitions"]
-                  if p["type"].lower() in (USR_GUID, USR_VERITY_GUID) and p.get("name") != "_empty")
+    parts = slot_a_parts(table)
+    skip = sorted((p["start"] * ss, (p["start"] + p["size"]) * ss) for p in parts) if parts else []
     out = []
-    if len(skip) != 2:
-        out.append("expected /usr slot A's two partitions, found %d; scanned all of them" % len(skip))
-        skip = []
+    if not parts:
+        out.append("expected /usr slot A's two partitions; scanned all of them")
     with open(img, "rb") as f:
         size, pos = os.fstat(f.fileno()).st_size, 0
         for a, b in skip + [(size, size)]:
-            for d, h in data_extents(f, pos, a):
-                for p in range(d, h, SCAN_CHUNK):
-                    f.seek(p)
-                    buf = f.read(min(SCAN_CHUNK + SCAN_OVERLAP, h - p))
-                    for what, pat in SECRET_PATTERNS:
-                        # A match starting in the overlap is the next chunk's.
-                        out += ["%s at byte %d" % (what, p + m.start())
-                                for m in pat.finditer(buf) if m.start() < SCAN_CHUNK]
+            out += ["%s at byte %d" % (what, off) for what, off, _ in scan_hits(f, pos, a)]
             pos = max(pos, b)
+    return out
+
+
+SLOT_A_ALLOW = pathlib.Path(__file__).resolve().parent / "slot_a_scan.allow"
+# Slot A is the box's own packages, so agentosd's binary holds the card's names; only key material
+# is looked for there.
+SLOT_A_PATTERNS = tuple(p for p in SECRET_PATTERNS if p[0] != "Owner Card")
+
+
+def slot_a_allowed(path=SLOT_A_ALLOW):
+    """The keys known to ship in /usr: lines of 'KIND SHA256 [# why]', the SHA-256 of the matched
+    bytes (the header and the start of the body, never the whole key)."""
+    out = set()
+    for ln in pathlib.Path(path).read_text().splitlines():
+        ln = ln.split("#", 1)[0].split()
+        if ln:
+            out.add((" ".join(ln[:-1]), ln[-1]))
+    return out
+
+
+def slot_a_violations(img, table, data, tree, allowed=None):
+    """HW-1 for /usr slot A on the built disk. The disk's slot A ranges must equal the split
+    files veritysetup verified (so the usrhash covers every byte the box boots, and the verity
+    partition's slack after the hash tree is zero), and the data holds no private key outside the
+    allowlist (a key a builder's token copied into /usr/lib/agentos/ would otherwise pass every check:
+    the reproduce job builds the same bytes on both runners). A hit names its kind, offset and the
+    SHA-256 to allow, never its bytes."""
+    allowed = slot_a_allowed() if allowed is None else allowed
+    parts = slot_a_parts(table)
+    if not parts:
+        return ["expected /usr slot A's two partitions"]
+    ss, out = table.get("sectorsize", 512), []
+    for part, path, scan in ((parts[0], data, True), (parts[1], tree, False)):
+        start, size = part["start"] * ss, part["size"] * ss
+        n = os.path.getsize(path)
+        if n > size:
+            out.append("%s (%d bytes) does not fit its %d byte partition" % (os.path.basename(str(path)), n, size))
+            continue
+        name = os.path.basename(str(path))
+        with open(img, "rb", buffering=0) as di, open(path, "rb") as fi:
+            same = True
+            for p in range(0, n, SCAN_CHUNK):
+                fi.seek(p)
+                want = fi.read(min(SCAN_CHUNK + SCAN_OVERLAP, n - p))
+                di.seek(start + p)
+                got = di.read(min(SCAN_CHUNK, n - p))
+                if got != want[:len(got)] or len(got) != min(SCAN_CHUNK, n - p):
+                    i = next((i for i in range(len(got)) if got[i] != want[i]), len(got))
+                    out.append("disk differs from %s at byte %d" % (name, p + i))
+                    same = False
+                    break
+                for what, pat in SLOT_A_PATTERNS if scan else ():
+                    for m in pat.finditer(want):
+                        digest = hashlib.sha256(m.group()).hexdigest()
+                        if m.start() < SCAN_CHUNK and (what, digest) not in allowed:
+                            out.append("%s in %s at byte %d, sha256 %s" % (what, name, p + m.start(), digest))
+            # The partition past the split file (the slack after a hash tree) holds nothing.
+            for d, h in data_extents(di, start + n, start + size) if same else ():
+                for p in range(d, h, SCAN_CHUNK):
+                    di.seek(p)
+                    if di.read(min(SCAN_CHUNK, h - p)).strip(b"\0"):
+                        out.append("disk holds data after %s in its partition, from byte %d" % (name, p - start))
+                        break
     return out
 
 
@@ -417,6 +494,10 @@ def main(out, version):
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     verify_usr(data, tree, roothash)
+    bad = slot_a_violations(str(img), partition_table(str(img)), data, tree)
+    if bad:
+        sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s; a key that ships in "
+                 "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files, boot)

@@ -134,6 +134,22 @@ func TestStationChannelsSharedLimit(t *testing.T) {
 	}
 }
 
+// A limit that allows none of its types is not a seat (L61, each at
+// least 1): the other limit's seat alone cannot hold both.
+func TestStationChannelsZeroMaxLimit(t *testing.T) {
+	ap := IfaceLimit{Max: 1, Types: []IfaceType{IfaceAP}}
+	sta := IfaceLimit{Max: 1, Types: []IfaceType{IfaceStation}}
+	for name, limits := range map[string][]IfaceLimit{
+		"access point Max 0": {{Max: 0, Types: []IfaceType{IfaceAP}}, sta},
+		"station Max 0":      {ap, {Max: 0, Types: []IfaceType{IfaceStation}}},
+	} {
+		c := IfaceCombination{Limits: limits, Total: 2, Channels: 1}
+		if got := StationChannels([]IfaceCombination{c}); got != 0 {
+			t.Fatalf("%s: StationChannels = %d, want 0", name, got)
+		}
+	}
+}
+
 // Fail closed: an answer that cannot be read creates nothing, says so,
 // and clears what an earlier ensure found.
 func TestEnsureStationFailsClosed(t *testing.T) {
