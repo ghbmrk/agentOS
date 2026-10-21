@@ -27,8 +27,8 @@ type clerkRig struct {
 	h     *harness
 	c     *Clerk
 	k     *kernel.Kernel
-	owner ed25519.PublicKey
-	root  key.Key
+	owner []ed25519.PublicKey // the anchors
+	root  key.Key             // the home clerk's key
 }
 
 // newClerkRig boots a kernel whose only clerk is a browser clerk over h, and
@@ -38,21 +38,26 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	opub, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
 	kpub, kpriv := seedKey(3)
-	c := NewClerk("web", opub, h.g)
+	anchors := []ed25519.PublicKey{opub}
+	c := NewClerk("web", anchors, h.g)
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
 		Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, opub, map[string]kernel.Clerk{"web": c}, 0)
+	k, err := kernel.Boot(l, anchors, map[string]kernel.Clerk{"web": c}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"})
-	if err := k.Issue(0, root); err != nil {
+	// The passkey's grant to the home clerk, a hold before the test (D-146).
+	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"}), opriv, hpub, time.Now().UnixMilli(), 1<<40) // a clerk with no Clock reads the wall clock
+	if err != nil {
 		t.Fatal(err)
 	}
-	return &clerkRig{h, c, k, opub, root}
+	if err := k.Issue(-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+		t.Fatal(err)
+	}
+	return &clerkRig{h, c, k, anchors, root}
 }
 
 func (r *clerkRig) held(t *testing.T, base, novel int64) key.Key {
@@ -215,14 +220,17 @@ func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	other.Clerk = "bank"
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
-	ghost := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "web", Verbs: []key.Verb{key.Read}, Serial: "unlogged"})
+	ghost, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read}, Serial: "unlogged"}), opriv, hpub, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	labelled := safe
 	labelled.Labels = []string{"private"}
 	for want, req := range map[string]kernel.Request{
-		key.RClerk:          {Plan: plan("p1", r.root, other)},
-		kernel.CUnknownRoot: {Plan: plan("p2", ghost, safe)},
-		clerk.RDispatch:     {Plan: plan("p3", r.root, safe)},
-		clerk.RClaim:        {Plan: plan("p4", r.root, labelled)},
+		key.RClerk:        {Plan: plan("p1", r.root, other)},
+		kernel.CUngranted: {Plan: plan("p2", ghost, safe)},
+		clerk.RDispatch:   {Plan: plan("p3", r.root, safe)},
+		clerk.RClaim:      {Plan: plan("p4", r.root, labelled)},
 	} {
 		if res := r.c.Do(req, r.k.State()); res.Outcome != "failed" || res.Detail != want {
 			t.Fatalf("want %s: %+v", want, res)

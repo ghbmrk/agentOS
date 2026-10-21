@@ -22,8 +22,10 @@ import (
 // the print from the page, so only a key for that print covers it, and the
 // gate sends it once, only if the page is unchanged.
 type Clerk struct {
-	Name  string
-	Owner ed25519.PublicKey
+	Name string
+	// Anchors are the owner's hardware keys, which every key is checked
+	// against (D-146).
+	Anchors []ed25519.PublicKey
 	// Clock, when set, is the clerk's own time in unix ms; nil reads the
 	// wall clock.
 	Clock func() int64
@@ -43,8 +45,8 @@ type ran struct {
 }
 
 // NewClerk returns the clerk for one gate.
-func NewClerk(name string, owner ed25519.PublicKey, g *Gate) *Clerk {
-	return &Clerk{Name: name, Owner: owner, g: g, ran: map[string]ran{}}
+func NewClerk(name string, anchors []ed25519.PublicKey, g *Gate) *Clerk {
+	return &Clerk{Name: name, Anchors: anchors, g: g, ran: map[string]ran{}}
 }
 
 // Do runs a step. A read that cannot change state is safe to run again. A
@@ -57,7 +59,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		now = c.Clock()
 	}
 	id := stepID(r)
-	if rf := clerk.Check(c.Owner, c.Name, c.facts, now, r, v); rf != nil {
+	if rf := clerk.Check(c.Anchors, c.Name, c.facts, now, r, v); rf != nil {
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
@@ -68,7 +70,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
-		if !approval(r.Plan.Key, c.Owner) {
+		if !approval(r.Plan.Key, c.Anchors) {
 			c.record(id, ran{})
 			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 		}
@@ -142,8 +144,8 @@ func (c *Clerk) facts(s key.Step) (string, []string, int64) {
 // content set lists approval prints only, and its uses are capped at their
 // number. No standing key covers a submit (CLK-3), and the log's use count
 // keeps each print to one send across a restart (KRN-8).
-func approval(k key.Key, owner ed25519.PublicKey) bool {
-	v, err := key.Chain(k, owner)
+func approval(k key.Key, anchors []ed25519.PublicKey) bool {
+	v, err := key.Chain(k, anchors)
 	if err != nil || len(v.Limits.Content) == 0 {
 		return false
 	}

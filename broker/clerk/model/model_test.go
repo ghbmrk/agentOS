@@ -69,16 +69,16 @@ func rig(t *testing.T, p *fake) (*model.Clerk, *kernel.Kernel, *flaky) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, opub, nil, 0)
+	k, err := kernel.Boot(l, []ed25519.PublicKey{opub}, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
-	if err := k.Issue(0, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
+	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	if err != nil {
 		t.Fatal(err)
 	}
-	ky, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(100))
-	if err != nil {
+	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
@@ -131,12 +131,12 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	// the owner's envelope (another root), and an extension derived from it
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
-	if err := k.Issue(3, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
+	env, err := key.ClerkKey(root, opriv, hpub, 0, 500, key.LimitSpendTask(500))
+	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(500), key.LimitSpendDay(500))
-	if err != nil {
+	if err := k.Issue(3-kernel.GrantHold, root, env); err != nil { // granted at setup
 		t.Fatal(err)
 	}
 	ext, err := key.Derive(env, hpriv, hpub, key.LimitSpendTask(200))
@@ -383,12 +383,12 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	c, k, _ := rig(t, f)
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
-	if err := k.Issue(0, root); err != nil {
+	root := key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
+	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	if err != nil {
 		t.Fatal(err)
 	}
-	ky, err := key.Derive(root, hpriv, hpub, key.LimitSpendTask(100))
-	if err != nil {
+	if err := k.Issue(-kernel.GrantHold, root, ky); err != nil {
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}

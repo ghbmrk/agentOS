@@ -57,7 +57,7 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	opub, opriv := gen(1)
 	hpub, _ := gen(2)
 	kpub, kpriv := gen(3)
-	mail := clerk.NewMail("mail", opub)
+	mail := clerk.NewMail("mail", []ed25519.PublicKey{opub})
 	f := &fix{mail: mail, now: 1, plans: map[string]kernel.Plan{}}
 	mail.Clock = func() int64 { return f.now }
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
@@ -65,12 +65,16 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, err := kernel.Boot(l, opub, map[string]kernel.Clerk{"mail": mail}, 0)
+	k, err := kernel.Boot(l, []ed25519.PublicKey{opub}, map[string]kernel.Clerk{"mail": mail}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{verb}, Serial: "r1"})
-	if err := k.Issue(0, root); err != nil {
+	// The passkey's grant to the home clerk, a hold before the test (D-146).
+	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{verb}, Serial: "r1"}), opriv, hpub, 0, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Issue(-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
 		t.Fatal(err)
 	}
 	f.k, f.root = k, root
@@ -138,7 +142,10 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 	opub, opriv := gen(1)
 	hpub, _ := gen(2)
 	_ = opub
-	ghost := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "unlogged"})
+	ghost, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "unlogged"}), opriv, hpub, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r := f.request("i5", ghost, stepOf(key.Trash))
 	if res := f.mail.Do(r, f.view()); res.Outcome != "failed" {
 		t.Fatal("a root absent from the log must be refused")
@@ -175,7 +182,7 @@ func TestClerkRunsOnlyWhatTheHolderSigned(t *testing.T) {
 	outside := f.req
 	outside.Index = 1
 	for name, r := range map[string]kernel.Request{"swapped step": swapped, "stranger": stranger, "unsigned": unsigned, "index outside the plan": outside} {
-		if rf := clerk.Check(opubOf(), "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
+		if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		if res := f.mail.Do(r, f.view()); res.Outcome != "failed" {
@@ -198,7 +205,7 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	other.Args["target"] = "y"
 	twin := kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{other}}, hpubPriv())
 	check := func(r kernel.Request) *key.Refusal {
-		return clerk.Check(opubOf(), "mail", f.mail.Facts, f.now, r, f.k.State())
+		return clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, f.now, r, f.k.State())
 	}
 	var during [2]*key.Refusal
 	f.mail.Fault = func(op string, _ kernel.Request) string {
@@ -234,12 +241,38 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 // every step rather than take the planner's word (KEY-2, CLK-2).
 func TestClerkWithoutFactsRefuses(t *testing.T) {
 	f := setup(t, key.Trash)
-	if rf := clerk.Check(opubOf(), "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != clerk.RClaim {
+	if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != clerk.RClaim {
 		t.Fatalf("a clerk with no facts passed a step: %v", rf)
 	}
 	claim := stepOf(key.Trash)
 	claim.Content = "invoice"
 	if r := f.mail.Do(f.request("i2", f.root, claim), f.view()); r.Outcome != "failed" || r.Detail != clerk.RClaim || len(f.mail.Effects()) != 0 {
 		t.Fatalf("a claim the mailbox does not read was taken as given: %+v", r)
+	}
+}
+
+// lying is a view that vouches for every grant.
+type lying struct{ kernel.View }
+
+func (lying) Granted(key.ID) (int64, bool) { return 0, true }
+
+// The clerk checks a granted root's passkey against its own anchors: a view
+// that vouches for a root no passkey of the owner signed confers nothing
+// (D-146, CLK-2).
+func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
+	f := setup(t, key.Trash)
+	spub, spriv := gen(9)
+	_ = spub
+	hpub, _ := gen(2)
+	forged, err := key.ClerkKey(key.Issue(spriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "forged"}), spriv, hpub, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.request("i9", forged, stepOf(key.Trash))
+	if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
+		t.Fatalf("a forged root a lying view vouches for: %v", rf)
+	}
+	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
+		t.Fatalf("the mail clerk ran it: %+v", res)
 	}
 }
