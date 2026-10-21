@@ -3,7 +3,6 @@ package run
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"errors"
 	"io"
 	"maps"
 	"net"
@@ -302,16 +301,7 @@ func ListenClerk(path string, kernelUID int) (net.Listener, error) {
 // ServeClerk answers the kernel's calls to c on ln, one at a time, until ln
 // closes. anchors are the clerk's own (D-146).
 func ServeClerk(ln net.Listener, c kernel.Clerk, anchors []ed25519.PublicKey) error {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return err
-		}
-		serve(conn, c, anchors)
-	}
+	return serveConns(ln, 1, func(conn net.Conn) { serve(conn, c, anchors) })
 }
 
 func serve(conn net.Conn, c kernel.Clerk, anchors []ed25519.PublicKey) {

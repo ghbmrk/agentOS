@@ -44,7 +44,14 @@ func newBox(t *testing.T, sock string) *box {
 // newBoxFor is a box whose clerk name, at sock, the owner granted verbs.
 func newBoxFor(t *testing.T, sock, name string, verbs ...key.Verb) *box {
 	t.Helper()
-	b := &box{t: t, now: time.Now().UnixMilli(), remote: Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
+	return newBoxAt(t, sock, name, time.Now().UnixMilli(), verbs...)
+}
+
+// newBoxAt is newBoxFor with its clock at now, so two boxes made at one now
+// hold the same keys.
+func newBoxAt(t *testing.T, sock, name string, now int64, verbs ...key.Verb) *box {
+	t.Helper()
+	b := &box{t: t, now: now, remote: Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
 	b.cfg = KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
 		Pub: headPub, Sign: headPriv, Anchors: anchors,

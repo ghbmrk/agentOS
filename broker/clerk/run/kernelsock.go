@@ -118,6 +118,14 @@ type (
 	taskRead struct {
 		Task *kernel.Task `json:"task"` // nil: not live
 	}
+	planRead struct {
+		Status string   `json:"status"` // "": no such plan
+		Phases []string `json:"phases"`
+	}
+	grantRead struct {
+		From int64 `json:"from"`
+		OK   bool  `json:"ok"`
+	}
 	none struct{}
 )
 
@@ -153,6 +161,22 @@ var OwnerSide = Side{"owner", map[string]op{
 		es, un := s.Enrollments()
 		return enrolled{es, un}
 	}),
+	"changes": read(func(s *kernel.State, _ int64, _ none) key.Changes { return *s.ChangesView() }),
+	"plan": read(func(s *kernel.State, _ int64, id string) planRead {
+		p := s.Plans[id]
+		if p == nil {
+			return planRead{}
+		}
+		r := planRead{Status: p.Status}
+		for _, st := range p.Steps {
+			r.Phases = append(r.Phases, st.Phase)
+		}
+		return r
+	}),
+	"granted": read(func(s *kernel.State, _ int64, id key.ID) grantRead {
+		from, ok := s.Granted(id)
+		return grantRead{from, ok}
+	}),
 	"task": read(func(s *kernel.State, now int64, id string) taskRead {
 		if t, ok := s.Task(id, now); ok {
 			return taskRead{&t}
@@ -187,15 +211,38 @@ func ListenKernel(path string, uid int) (net.Listener, error) {
 // own connection, so a slow caller never delays STOP; the kernel's lock
 // orders them. clock is the kernel process's.
 func ServeKernel(ln net.Listener, h *Kernel, side Side, clock func() int64) error {
+	return serveConns(ln, maxConns, func(conn net.Conn) { serveKernel(conn, h, side, clock) })
+}
+
+// maxConns bounds the calls one socket serves at once. More wait in the
+// listener's backlog, holding none of the process's descriptors, so a side
+// that floods its own socket cannot starve another side's (KRN-7).
+const maxConns = 16
+
+// serveConns runs handle on each connection ln accepts, at most n at once,
+// until ln closes. Any other accept error (no descriptor free, a connection
+// aborted) is waited out, never the end of the socket, so the owner's STOP
+// still lands once a flood ends.
+func serveConns(ln net.Listener, n int, handle func(net.Conn)) error {
+	slots := make(chan struct{}, n)
+	wait := 5 * time.Millisecond
 	for {
+		slots <- struct{}{}
 		conn, err := ln.Accept()
 		if err != nil {
+			<-slots
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			return err
+			time.Sleep(wait)
+			wait = min(2*wait, time.Second)
+			continue
 		}
-		go serveKernel(conn, h, side, clock)
+		wait = 5 * time.Millisecond
+		go func() {
+			defer func() { <-slots }()
+			handle(conn)
+		}()
 	}
 }
 
@@ -230,12 +277,18 @@ func serveOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 	res, err := handle(in.Op, in.Args)
 	var rf *key.Refusal
 	switch {
+	case err == nil:
+		out.Result = res
 	case errors.As(err, &rf):
 		out.Refusal = rf
-	case err != nil:
+		if rf == nil || rf.Code == "" {
+			out.Refusal, out.Error = nil, "run: a refusal with no code"
+		}
+	case err.Error() != "":
 		out.Error = err.Error()
 	default:
-		out.Result = res
+		// Never an empty answer, which would read as success.
+		out.Error = "run: an error with no text"
 	}
 	b, _ := json.Marshal(out)
 	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
@@ -243,8 +296,31 @@ func serveOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 }
 
 // ErrLost is a call whose answer never came: it may or may not have taken
-// effect, so the caller reads the state before it acts again.
-var ErrLost = errors.New("run: the answer was lost; read the state before acting again")
+// effect. The owner side reads the state the call would change (Changes,
+// Plan, Granted, SpendHeld, LineChanges, Pools, Enrollments, Task) before
+// acting again; a read can simply be made again.
+var ErrLost = errors.New("run: the answer was lost; it may or may not have taken effect")
+
+// ErrUnreachable is a call that was never sent: no process listens on the
+// socket, or another uid holds it.
+var ErrUnreachable = errors.New("run: the socket could not be reached; nothing was sent")
+
+// wireErrors are the errors a socket's answer names by their text, so the
+// caller gets the same value back and errors.Is works across the socket.
+// Any other error crosses as its text alone.
+var wireErrors = map[string]error{}
+
+func init() {
+	for _, e := range []error{
+		kernel.ErrDuplicatePlan, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
+		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
+		kernel.ErrBroken, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
+		key.ErrUnknownKind, key.ErrUncaveated, errArgs, ErrModelCall, ErrNoMailAccount,
+		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword,
+	} {
+		wireErrors[e.Error()] = e
+	}
+}
 
 // Conn is how a process reaches a socket of the kernel's process or of the
 // model clerk's.
@@ -266,11 +342,11 @@ func (c Conn) call(op string, args, out any) error {
 	}
 	conn, err := net.DialTimeout("unix", c.Socket, 10*time.Second)
 	if err != nil {
-		return err
+		return ErrUnreachable
 	}
 	defer conn.Close()
 	if uid, ok := sockets.PeerUID(conn); !ok || uid != c.UID {
-		return errors.New("run: another uid holds the socket")
+		return ErrUnreachable
 	}
 	conn.SetDeadline(time.Now().Add(d))
 	if _, err := conn.Write(append(b, '\n')); err != nil {
@@ -284,6 +360,9 @@ func (c Conn) call(op string, args, out any) error {
 	case a.Refusal != nil:
 		return a.Refusal
 	case a.Error != "":
+		if e, ok := wireErrors[a.Error]; ok {
+			return e
+		}
 		return errors.New(a.Error)
 	case out != nil:
 		return json.Unmarshal(a.Result, out)
@@ -358,6 +437,24 @@ func (o Owner) Enrollments() ([]key.Enrollment, []ed25519.PublicKey, error) {
 	var e enrolled
 	err := o.call("enrollments", nil, &e)
 	return e.Enrolled, e.Unenrolled, err
+}
+
+// Changes is the revocations, pauses and STOP in force.
+func (o Owner) Changes() (c key.Changes, err error) { err = o.call("changes", nil, &c); return }
+
+// Plan is plan id's status and its steps' phases; ok is false when the log
+// has no such plan.
+func (o Owner) Plan(id string) (status string, phases []string, ok bool, err error) {
+	var r planRead
+	err = o.call("plan", id, &r)
+	return r.Status, r.Phases, r.Status != "", err
+}
+
+// Granted is when key id's grant is live from, if it is granted.
+func (o Owner) Granted(id key.ID) (from int64, ok bool, err error) {
+	var r grantRead
+	err = o.call("granted", id, &r)
+	return r.From, r.OK, err
 }
 
 // Task is task id while it is live on the kernel's clock.

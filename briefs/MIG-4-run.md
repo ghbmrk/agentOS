@@ -50,9 +50,12 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - Declared scope: `broker/clerk/run/`, `broker/clerk/secrets.go` and its test, `docs/LANES.md` (a gate file, so a separate Security accept is needed), and this brief.
 
 **Slice 3a acceptance tests (MIG-4-run-m to o):**
-- `kernelsock_test.go::TestOwnerSocketServesTheSeam`. Each owner action over the socket lands in the log as the direct call does, a refusal keeps its code, an error keeps its text, and each read answers as `State()` does.
+- `kernelsock_test.go::TestEverySocketCallIsTheDirectCall`. Every call on both tables, made through its socket on one kernel and directly on a twin, gives the same answer and logs the same entries; each read gives the same result on a state where it is not empty.
+- `::TestOwnerSocketServesTheSeam`. A refusal keeps its code, a named error is the same value (`errors.Is`), and the reads after a lost answer show what the owner's calls changed.
 - `::TestEachSocketServesOnlyItsSide`. No call is on both tables; owner calls on the meter socket and metering calls on the owner socket are refused and log nothing.
 - `::TestKernelSocketsCheckPeerUID`. A socket for another uid takes no call, and a caller sends nothing to a socket another uid holds.
 - `::TestModelClerkMetersThroughTheKernelSocket`. A model call through the model clerk's socket is metered through the meter socket at the kernel's clock, not the clerk's; a call past the plan's cap is refused with `spend-task`, holds the plan, and never reaches the provider.
-- `::TestModelClerkWithoutTheKernelCallsNothing` and `::TestAKernelCallCutOffIsLost`. An unreachable meter socket refuses admission with `log-broken`; a call cut off mid-answer is `ErrLost`.
+- `::TestModelClerkWithoutTheKernelCallsNothing` and `::TestAKernelCallCutOffIsLost`. An unreachable meter socket refuses admission with `log-broken`; a call cut off mid-answer is `ErrLost`, and one never sent `ErrUnreachable`.
+- `::TestAProviderErrorStaysInTheModelClerk`. A provider error carrying a canary key reaches the planner as `ErrModelCall`, without the canary.
+- `::TestAKernelSocketOutlivesAFailedAccept`, `::TestASocketServesABoundedNumberAtOnce` and `::TestNoErrorCrossesAsSuccess`.
 - Declared scope: `broker/clerk/run/` and this brief.
