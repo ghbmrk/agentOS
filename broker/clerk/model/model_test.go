@@ -5,6 +5,7 @@ package model_test
 import (
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"strings"
@@ -537,5 +538,27 @@ func TestPoolReadingIsAppliedWhenTheMeterFails(t *testing.T) {
 	lg.fail = false
 	if _, err := c.Call(2, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
 		t.Fatalf("the reading closed the pool: %v calls=%d", err, f.calls)
+	}
+}
+
+// A reading with no reset time is owed with the declared window from the call,
+// not from when the log recovers, so an outage never lengthens the cooldown.
+func TestOwedReadingKeepsTheWindowFromTheCall(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000}}}
+	c, k, lg := rig(t, f)
+	lg.failPool = true
+	if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	lg.failPool = false
+	f.u.Pool = nil // the next calls carry no reading of their own
+	if _, err := c.Call(100, "t", "api", "hi", 10); err != nil {
+		t.Fatalf("calls resume once the log records: %v", err)
+	}
+	if b := poolRead(t, k); !strings.Contains(b, fmt.Sprintf(`"reset_at":%d`, 1+kernel.PoolWindowMS)) {
+		t.Fatalf("the cooldown runs from the call: %s", b)
+	}
+	if _, err := c.Call(1+kernel.PoolWindowMS, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("the pool reopens one window after the call: %v", err)
 	}
 }
