@@ -377,12 +377,7 @@ func signedBy(signer ed25519.PublicKey, owners []ed25519.PublicKey, msg, sig []b
 	if signer != nil {
 		return ed25519.Verify(signer, msg, sig)
 	}
-	for _, p := range owners {
-		if len(p) == ed25519.PublicKeySize && ed25519.Verify(p, msg, sig) {
-			return true
-		}
-	}
-	return false
+	return whoSigned(owners, msg, sig) != nil
 }
 
 // SignedBy reports whether pk signed grant k: a root it issued, or a first
@@ -428,6 +423,16 @@ func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Cav
 // new ClerkKey; plans already admitted keep the key they cite.
 func ClerkKey(root Key, passkey ed25519.PrivateKey, clerk ed25519.PublicKey, now, spendDay int64, cav ...Caveat) (Key, error) {
 	return Derive(root, passkey, clerk, append([]Caveat{LimitExpires(now + ClerkLife), LimitSpendDay(spendDay)}, cav...)...)
+}
+
+// Reach is the verbs k reaches: its root's, narrowed by its links; none when
+// k is malformed. It checks no signature.
+func Reach(k Key) []string {
+	v, err := verifyChain(k, nil)
+	if err != nil {
+		return nil
+	}
+	return v.Limits.Verbs
 }
 
 // Verified is a key whose chain has checked out.

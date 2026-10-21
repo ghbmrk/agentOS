@@ -36,6 +36,9 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if r := Live(s, v, now); r != nil {
 		return key.ID{}, nil, r
 	}
+	if r := OneOff(s, s.owners(p.Key), s.Anchors, p, now); r != nil {
+		return key.ID{}, nil, r
+	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
 	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
 	fresh := map[string]bool{}
@@ -219,6 +222,8 @@ type View interface {
 	LedgerBefore(seq uint64) key.Ledger
 	// Dispatched answers only for a request the log has in flight now.
 	Dispatched(r Request) (Dispatch, bool)
+	// OneOffLine is the most a one-off under root may spend alone (OneOff).
+	OneOffLine(root key.ID, now int64) int64
 }
 
 // Live refuses a key unless its grants, its root and its first link, are in
@@ -299,11 +304,22 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
-func (k *Kernel) Issue(now int64, keys ...key.Key) error {
-	if _, err := k.s.grants(keys, now); err != nil {
+func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
+	if _, err := k.s.grants(keys, cos, now); err != nil {
 		return err
 	}
-	return k.owner(now, TKeyIssued, grantBatch{keys})
+	return k.owner(now, TKeyIssued, grantBatch{keys, cos})
+}
+
+// SetLine sets the owner's line for a big change. Lowering it narrows; a raise
+// is itself big, so it needs two passkeys, one an anchor, over
+// LineHash(State.LineChanges(), percent).
+func (k *Kernel) SetLine(now, percent int64, cos ...key.Cosign) error {
+	b := lineSet{percent, cos}
+	if err := k.s.lineOK(b); err != nil {
+		return err
+	}
+	return k.owner(now, TLine, b)
 }
 
 // ErrNotEnrolled refuses an enrollment no anchor signed.
