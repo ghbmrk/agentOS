@@ -29,6 +29,7 @@ type clerkRig struct {
 	k     *kernel.Kernel
 	owner []ed25519.PublicKey // the anchors
 	root  key.Key             // the home clerk's key
+	phone ed25519.PrivateKey  // the owner's enrolled phone passkey, which taps approvals
 }
 
 // newClerkRig boots a kernel whose only clerk is a browser clerk over h, and
@@ -59,7 +60,11 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
-	return &clerkRig{h, c, k, anchors, root}
+	phonePub, phone := seedKey(8)
+	if err := k.Enroll(-kernel.GrantHold, key.Enroll(opriv, phonePub)); err != nil {
+		t.Fatal(err)
+	}
+	return &clerkRig{h, c, k, anchors, root, phone}
 }
 
 func (r *clerkRig) held(t *testing.T, base, novel int64) key.Key {

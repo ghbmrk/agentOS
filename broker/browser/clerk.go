@@ -60,7 +60,8 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	id := stepID(r)
 	st := step(r)
-	if rf := clerk.Check(c.Anchors, c.Name, c.facts, now, r, v); rf != nil {
+	ver, rf := clerk.Verify(c.Anchors, c.Name, c.facts, now, r, v)
+	if rf != nil {
 		c.record(id, ran{})
 		if msg := []byte(st.Args["msg"].Value); rf.Code == clerk.RClaim && st.Verb == key.Post && st.Content != "" && c.g.print(msg) != st.Content {
 			// The post claims a print the page no longer yields: say so,
@@ -75,7 +76,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
-		if !approval(r.Plan.Key, c.Anchors) {
+		if !approval(ver) {
 			c.record(id, ran{})
 			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 		}
@@ -153,27 +154,30 @@ func (c *Clerk) facts(s key.Step) (string, []string, int64) {
 	return c.g.print([]byte(s.Args["msg"].Value)), nil, 0
 }
 
-// approval reports whether k is an owner's approval of exact submits: its
-// content set lists approval prints only, and its uses are capped at their
-// number. The set holds each print once, so a print listed twice gives no
-// spare use. No standing key covers a submit (CLK-3), and the log's use
-// count keeps each print to one send across a restart (KRN-8).
-func approval(k key.Key, anchors []ed25519.PublicKey) bool {
-	v, err := key.Chain(k, anchors)
-	if err != nil || len(v.Limits.Content) == 0 {
+// approval reports whether ver, the plan key as clerk.Verify checked it, is
+// the owner's approval of exact submits (CLK-3, OWN-9). Its tip is a link a
+// passkey signed for the home clerk itself (key.Narrow), so a compromised
+// clerk cannot mint one. That link names the prints and caps the uses
+// itself: the key's content set is approval prints only, and the link caps
+// its uses at their number. The set holds each print once, so a print
+// listed twice gives no spare use. A passkey cut off since is refused by
+// Verify (kernel.Live), and the log's use count keeps each print to one
+// send across a restart (KRN-8).
+func approval(ver *key.Verified) bool {
+	if ver == nil || !ver.ByOwner {
 		return false
 	}
-	for _, p := range v.Limits.Content {
+	for _, p := range ver.Limits.Content {
 		if !strings.HasPrefix(p, printPrefix) {
 			return false
 		}
 	}
-	for _, c := range v.Limits.Caps {
-		if c.Kind == key.KUses && c.N <= int64(len(v.Limits.Content)) {
-			return true
-		}
+	var named, capped bool
+	for _, c := range ver.Key.Links[len(ver.Key.Links)-1].Caveats {
+		named = named || c.Kind == key.KContent
+		capped = capped || c.Kind == key.KUses && c.N <= int64(len(ver.Limits.Content))
 	}
-	return false
+	return named && capped
 }
 
 // MaxDetail bounds a step's logged result. The snapshot and the approval
