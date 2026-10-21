@@ -1,584 +1,120 @@
-// Package imapsmtp is the mail adapter's Store over IMAP and SMTP. It
-// takes the account's credential from the vault on each connection and
-// keeps none, so it is linked only into the process that holds the
-// unlocked vault (CRED-1), which serves it to the broker over a socket.
-// Nothing here logs or returns the credential or a server's own words.
-//
-// It reuses github.com/emersion/go-imap (v1, MIT) as the IMAP client; SMTP
-// is the standard library's net/smtp.
+// Package imapsmtp is the old mail adapter's Store over the mail clerk's
+// IMAP and SMTP transport (broker/clerk/inbox/imap). It only converts
+// between the transport's raw messages and mail.Store's parsed ones, so the
+// transport has one copy. It is transitional: MIG-4-mail's delete (2574b,
+// #2574) removes it with broker/mail.
 package imapsmtp
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
-	"io"
-	"net"
-	"net/smtp"
-	"strings"
 	"time"
 
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-imap/commands"
-	"github.com/emersion/go-sasl"
-
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imap"
 	"github.com/ghbmrk/agentos/broker/mail"
-	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
-// Login is an account credential as the vault hands it over: a password
-// (or app password), or an OAuth access token (XOAUTH2).
-type Login struct {
-	User   string
-	Secret string
-	OAuth  bool
-}
-
-// Security is how a connection is protected.
-type Security int
+// The transport's configuration, as the adapter's callers name it.
+type (
+	Login    = imap.Login
+	Security = imap.Security
+	Config   = imap.Config
+)
 
 const (
-	// TLS is implicit TLS (IMAP 993, SMTP submission 465).
-	TLS Security = iota
-	// StartTLS upgrades a plain connection before authenticating (SMTP
-	// 587); refused if the server does not offer it.
-	StartTLS
-	// Plain is for the loopback test server only: a credential never
-	// crosses a network in the clear, so Plain to any non-loopback
-	// address is refused.
-	Plain
+	TLS      = imap.TLS
+	StartTLS = imap.StartTLS
+	Plain    = imap.Plain
 )
 
-// Config configures a Store.
-type Config struct {
-	IMAP, SMTP       string // host:port
-	IMAPSec, SMTPSec Security
-	TLS              *tls.Config // nil: system roots, the host's name
-	Credential       func(ctx context.Context) (Login, error)
-	From             string        // the envelope sender, the owner's address
-	Timeout          time.Duration // per operation (default 60 s)
-	MaxFetch         int           // bytes read per message (default 256 KiB)
-	// Guard is the home-network address policy every dial goes through
-	// (DEV-2). Nil means netguard.New with only the IANA registries.
-	Guard *netguard.Policy
-}
+// ErrInsecure is returned for a Plain connection to a non-loopback host.
+var ErrInsecure = imap.ErrInsecure
 
-// Store is a mail.Store over IMAP and SMTP.
-type Store struct {
-	cfg       Config
-	replyBase int64 // see replyBudget; a field so tests can lower it
-}
+// Store is a mail.Store over the transport.
+type Store struct{ t *imap.Store }
 
 var _ mail.Store = (*Store)(nil)
 
-// ErrInsecure is returned for a Plain connection to a non-loopback host.
-var ErrInsecure = errors.New("imapsmtp: a plain connection is allowed only to loopback")
-
 // New checks cfg.
 func New(cfg Config) (*Store, error) {
-	if cfg.IMAP == "" || cfg.SMTP == "" || cfg.Credential == nil || cfg.From == "" {
-		return nil, errors.New("imapsmtp: Config needs IMAP, SMTP, Credential and From")
-	}
-	for _, x := range []struct {
-		addr string
-		sec  Security
-	}{{cfg.IMAP, cfg.IMAPSec}, {cfg.SMTP, cfg.SMTPSec}} {
-		switch {
-		case x.sec != TLS && x.sec != StartTLS && x.sec != Plain:
-			return nil, fmt.Errorf("imapsmtp: unknown connection security %d", x.sec)
-		case x.sec == Plain && !loopback(x.addr):
-			return nil, ErrInsecure
-		}
-	}
-	if cfg.IMAPSec == StartTLS {
-		return nil, errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 60 * time.Second
-	}
-	if cfg.MaxFetch == 0 {
-		cfg.MaxFetch = 256 << 10
-	}
-	if cfg.Guard == nil {
-		cfg.Guard = netguard.New(netguard.Config{})
-	}
-	return &Store{cfg: cfg, replyBase: 16 << 20}, nil
-}
-
-// dial connects to addr. A Plain connection is a literal loopback address
-// (New refused any other), which is the box itself, not the home network;
-// it dials without a name lookup. Every other connection goes through the
-// address policy, which resolves, checks every answer and checks the
-// address connected (DEV-2).
-func (s *Store) dial(ctx context.Context, addr string, sec Security) (net.Conn, error) {
-	if sec == Plain {
-		if !loopback(addr) {
-			return nil, ErrInsecure
-		}
-		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
-	}
-	return s.cfg.Guard.DialContext(ctx, "tcp", addr)
-}
-
-func loopback(addr string) bool {
-	h, _, err := net.SplitHostPort(addr)
+	t, err := imap.New(cfg)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
+	return &Store{t}, nil
 }
 
-func (s *Store) tlsConfig(addr string) *tls.Config {
-	c := &tls.Config{MinVersion: tls.VersionTLS12}
-	if s.cfg.TLS != nil {
-		c = s.cfg.TLS.Clone()
-	}
-	if c.ServerName == "" {
-		c.ServerName, _, _ = net.SplitHostPort(addr)
-	}
-	return c
-}
-
-// session runs f on an authenticated IMAP connection.
-func (s *Store) session(ctx context.Context, f func(c *client.Client) error) error {
-	return s.sessionN(ctx, 0, f)
-}
-
-// A session may read 16 MiB from the server, plus MaxFetch and
-// fetchFrame for each message it fetches (SR3-mail-k18b). go-imap holds a
-// whole reply in memory, so without a bound a server that never ends one
-// (an endless atom, literal or stream of FETCH responses) grows the
-// vault's memory until the timeout. The 16 MiB covers a session's other
-// replies: a folder list, a search's UIDs, and a Find's fetch of the
-// few messages carrying one Message-ID.
-const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
-
-// errReplyTooLarge ends a session whose replies passed their budget.
-var errReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
-
-func (s *Store) replyBudget(fetches int) int64 {
-	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
-}
-
-// budgetConn fails reads once left bytes have been read.
-type budgetConn struct {
-	net.Conn
-	left int64
-}
-
-func (b *budgetConn) Read(p []byte) (int, error) {
-	if b.left <= 0 {
-		return 0, errReplyTooLarge
-	}
-	if int64(len(p)) > b.left {
-		p = p[:b.left]
-	}
-	n, err := b.Conn.Read(p)
-	b.left -= int64(n)
-	return n, err
-}
-
-// sessionN is session for a call that fetches up to n messages.
-func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) error) error {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-	defer cancel()
-	conn, err := s.dial(ctx, s.cfg.IMAP, s.cfg.IMAPSec)
-	if err != nil {
-		return err
-	}
-	if dl, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
-	switch s.cfg.IMAPSec {
-	case TLS:
-		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
-	case Plain:
-	default:
-		conn.Close()
-		return errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
-	}
-	// The connection is closed however the session ends: Logout does not
-	// close it once the client's reader has stopped on a bad reply.
-	defer conn.Close()
-	c, err := client.New(&budgetConn{conn, s.replyBudget(n)})
-	if err != nil {
-		return err
-	}
-	c.ErrorLog = quiet{}
-	defer c.Logout()
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
-	l, err := s.cfg.Credential(ctx)
-	if err != nil {
-		return errors.New("imapsmtp: no credential from the vault")
-	}
-	if l.OAuth {
-		err = c.Authenticate(xoauth2{l.User, l.Secret})
-	} else {
-		err = c.Login(l.User, l.Secret)
-	}
-	if err != nil {
-		return errors.New("imapsmtp: the server refused the login")
-	}
-	return f(c)
-}
-
-type quiet struct{}
-
-func (quiet) Printf(string, ...interface{}) {}
-func (quiet) Println(...interface{})        {}
-
-// Folders lists the account's folders with their special-use roles.
-func (s *Store) Folders(ctx context.Context) ([]mail.Folder, error) {
-	var out []mail.Folder
-	err := s.session(ctx, func(c *client.Client) error {
-		ch := make(chan *imap.MailboxInfo, 32)
-		done := make(chan error, 1)
-		go func() { done <- c.List("", "*", ch) }()
-		for m := range ch {
-			if has(m.Attributes, imap.NoSelectAttr) {
-				continue
-			}
-			out = append(out, mail.Folder{Name: m.Name, Role: role(m)})
-		}
-		return <-done
-	})
-	return out, err
-}
-
-func role(m *imap.MailboxInfo) mail.Role {
-	if strings.EqualFold(m.Name, "INBOX") {
-		return mail.Inbox
-	}
-	for a, r := range map[string]mail.Role{imap.ArchiveAttr: mail.Archive, imap.DraftsAttr: mail.Drafts,
-		imap.SentAttr: mail.Sent, imap.TrashAttr: mail.Trash, imap.JunkAttr: mail.Junk, imap.AllAttr: mail.All} {
-		if has(m.Attributes, a) {
-			return r
-		}
-	}
-	return ""
-}
-
-func has(l []string, s string) bool {
-	for _, x := range l {
-		if strings.EqualFold(x, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// UIDs lists every message in folder.
-func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, error) {
-	var validity uint32
-	var uids []uint32
-	err := s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
-		if err != nil {
-			return err
-		}
-		validity = st.UidValidity
-		if st.Messages == 0 {
-			return nil
-		}
-		uids, err = c.UidSearch(imap.NewSearchCriteria())
-		return err
-	})
-	return validity, uids, err
-}
-
-// Fetch reads messages with BODY.PEEK, so none is marked read, only
-// while folder still has the UID validity the UIDs were listed under.
-func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
-	if len(uids) == 0 {
-		return nil, nil
-	}
-	var out []mail.Message
-	err := s.sessionN(ctx, len(uids), func(c *client.Client) error {
-		if err := selectAt(c, folder, true, validity); err != nil {
-			return err
-		}
-		var err error
-		out, err = s.fetch(c, folder, validity, uids)
-		return err
-	})
-	return out, err
-}
-
-// selectAt selects folder and refuses (mail.ErrValidity) unless its UID
-// validity is the expected one: under another validity the UIDs the
-// caller holds may name other messages. The check and what follows run
-// in this one selected session.
-func selectAt(c *client.Client, folder string, readOnly bool, validity uint32) error {
-	st, err := c.Select(folder, readOnly)
-	if err != nil {
-		return err
-	}
-	if validity == 0 || st.UidValidity != validity {
+// validityErr gives mail.ErrValidity for the transport's, which mailsock and
+// the adapter match.
+func validityErr(err error) error {
+	if errors.Is(err, imap.ErrValidity) {
 		return mail.ErrValidity
 	}
-	return nil
+	return err
 }
 
-func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
-	set := new(imap.SeqSet)
-	set.AddNum(uids...)
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, s.cfg.MaxFetch}}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchFlags, sec.FetchItem()}
-	ch := make(chan *imap.Message, 16)
-	done := make(chan error, 1)
-	go func() { done <- c.UidFetch(set, items, ch) }()
-	// Only the first response with a body for each requested UID is kept,
-	// so a server that repeats or invents messages cannot grow out, and an
-	// unsolicited FLAGS-only response does not take the slot (SR3-mail-k18b).
-	want := make(map[uint32]bool, len(uids))
-	for _, u := range uids {
-		want[u] = true
+func (s *Store) Folders(ctx context.Context) ([]mail.Folder, error) {
+	fs, err := s.t.Folders(ctx)
+	var out []mail.Folder
+	for _, f := range fs {
+		out = append(out, mail.Folder{Name: f.Name, Role: mail.Role(f.Role)})
 	}
-	var out []mail.Message
-	for m := range ch {
-		if !want[m.Uid] || len(m.Body) == 0 {
-			continue
-		}
-		delete(want, m.Uid)
-		var raw []byte
-		for _, l := range m.Body {
-			if l != nil {
-				raw, _ = io.ReadAll(l)
-				break
-			}
-		}
-		msg, err := mail.Parse(raw)
-		if err != nil {
-			msg = mail.Message{}
-		}
-		msg.Folder, msg.Validity, msg.UID, msg.Flags = folder, validity, m.Uid, append([]string(nil), m.Flags...)
-		out = append(out, msg)
+	return out, err
+}
+
+func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, error) {
+	return s.t.UIDs(ctx, folder)
+}
+
+// parse is the adapter's reading of one fetched message; one that does
+// not parse keeps only its place and flags.
+func parse(m imap.Message) mail.Message {
+	msg, err := mail.Parse(m.Raw)
+	if err != nil {
+		msg = mail.Message{}
 	}
-	return out, <-done
+	msg.Folder, msg.Validity, msg.UID, msg.Flags = m.Folder, m.Validity, m.UID, m.Flags
+	return msg
+}
+
+func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
+	ms, err := s.t.Fetch(ctx, folder, validity, uids)
+	out := make([]mail.Message, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, parse(m))
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return out, validityErr(err)
 }
 
 // Find returns the messages in folder whose Message-ID is exactly id.
-// Servers match a header search by substring, so the result is checked.
 func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, error) {
+	ms, err := s.t.Find(ctx, folder, id, func(m imap.Message) bool { return parse(m).MessageID == id })
 	var out []mail.Message
-	err := s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
-		if err != nil {
-			return err
-		}
-		crit := imap.NewSearchCriteria()
-		crit.Header.Add("Message-Id", id)
-		uids, err := c.UidSearch(crit)
-		if err != nil || len(uids) == 0 {
-			return err
-		}
-		ms, err := s.fetch(c, folder, st.UidValidity, uids)
-		for _, m := range ms {
-			if m.MessageID == id {
-				out = append(out, m)
-			}
-		}
-		return err
-	})
+	for _, m := range ms {
+		out = append(out, parse(m))
+	}
 	return out, err
 }
 
-// SetFlags adds and removes flags on one message, only while its folder
-// has the UID validity m was read under.
+func ref(m mail.Ref) imap.Ref { return imap.Ref{Folder: m.Folder, Validity: m.Validity, UID: m.UID} }
+
 func (s *Store) SetFlags(ctx context.Context, m mail.Ref, add, remove []string) error {
-	return s.session(ctx, func(c *client.Client) error {
-		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
-			return err
-		}
-		set := new(imap.SeqSet)
-		set.AddNum(m.UID)
-		for _, x := range []struct {
-			op    imap.FlagsOp
-			flags []string
-		}{{imap.AddFlags, add}, {imap.RemoveFlags, remove}} {
-			if len(x.flags) == 0 {
-				continue
-			}
-			v := make([]interface{}, len(x.flags))
-			for i, f := range x.flags {
-				v[i] = f
-			}
-			if err := c.UidStore(set, imap.FormatFlagsOp(x.op, true), v, nil); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return validityErr(s.t.SetFlags(ctx, ref(m), add, remove))
 }
 
-// Move moves one message. Servers without MOVE are refused rather than
-// emulated with COPY, flag and EXPUNGE: an EXPUNGE would also remove
-// anything else the owner had marked deleted in that folder. Like
-// SetFlags it acts only under the UID validity m was read under.
 func (s *Store) Move(ctx context.Context, m mail.Ref, to string) error {
-	return s.session(ctx, func(c *client.Client) error {
-		if ok, _ := c.Support("MOVE"); !ok {
-			return errors.New("imapsmtp: the server does not support MOVE")
-		}
-		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
-			return err
-		}
-		set := new(imap.SeqSet)
-		set.AddNum(m.UID)
-		// UID MOVE itself, never go-imap's COPY, STORE and EXPUNGE
-		// fallback.
-		st, err := c.Execute(&commands.Uid{Cmd: &commands.Move{SeqSet: set, Mailbox: to}}, nil)
-		if err != nil {
-			return err
-		}
-		return st.Err()
-	})
+	return validityErr(s.t.Move(ctx, ref(m), to))
 }
 
-// Ensure creates folder if it does not exist.
-func (s *Store) Ensure(ctx context.Context, folder string) error {
-	return s.session(ctx, func(c *client.Client) error {
-		ch := make(chan *imap.MailboxInfo, 4)
-		done := make(chan error, 1)
-		go func() { done <- c.List("", folder, ch) }()
-		found := false
-		for m := range ch {
-			found = found || m.Name == folder
-		}
-		if err := <-done; err != nil {
-			return err
-		}
-		if found {
-			return nil
-		}
-		return c.Create(folder)
-	})
-}
+func (s *Store) Ensure(ctx context.Context, folder string) error { return s.t.Ensure(ctx, folder) }
 
-// Append stores raw in folder.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) error {
-	return s.session(ctx, func(c *client.Client) error {
-		return c.Append(folder, flags, date, bytes.NewBuffer(raw))
-	})
+	return s.t.Append(ctx, folder, flags, date, raw)
 }
 
-// An SMTP session may read 1 MiB from the server (SR3-mail-k18d-smtp).
-// net/smtp reads each reply through textproto, which bounds neither a
-// line nor the continuation lines of one reply, so without a budget a
-// server that never ends a reply grows the vault's memory until the
-// timeout. A submission's replies and its TLS handshake, implicit or
-// STARTTLS, are read through the same budget and take a few kilobytes.
-const smtpReplyBudget = 1 << 20
-
-// Submit sends raw over SMTP submission from the configured address.
 func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-	defer cancel()
-	conn, err := s.dial(ctx, s.cfg.SMTP, s.cfg.SMTPSec)
-	if err != nil {
-		return err
-	}
-	if dl, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
-	// The budget sits under TLS, so in implicit-TLS mode net/smtp still
-	// sees a *tls.Conn and lets PLAIN and XOAUTH2 authenticate; it then
-	// counts ciphertext, which is just as bounded.
-	conn = &budgetConn{conn, smtpReplyBudget}
-	switch s.cfg.SMTPSec {
-	case TLS:
-		conn = tls.Client(conn, s.tlsConfig(s.cfg.SMTP))
-	case StartTLS, Plain:
-	default:
-		conn.Close()
-		return errors.New("imapsmtp: unknown connection security")
-	}
-	host, _, _ := net.SplitHostPort(s.cfg.SMTP)
-	c, err := smtp.NewClient(conn, host)
-	if err != nil {
-		conn.Close()
-		return err
-	}
-	defer c.Close()
-	if err := c.Hello("localhost"); err != nil {
-		return err
-	}
-	if s.cfg.SMTPSec == StartTLS {
-		if ok, _ := c.Extension("STARTTLS"); !ok {
-			return errors.New("imapsmtp: the SMTP server does not offer STARTTLS")
-		}
-		if err := c.StartTLS(s.tlsConfig(s.cfg.SMTP)); err != nil {
-			return err
-		}
-	}
-	l, err := s.cfg.Credential(ctx)
-	if err != nil {
-		return errors.New("imapsmtp: no credential from the vault")
-	}
-	var auth smtp.Auth = smtp.PlainAuth("", l.User, l.Secret, host)
-	if l.OAuth {
-		auth = smtpXOAuth2{xoauth2{l.User, l.Secret}}
-	}
-	if err := c.Auth(auth); err != nil {
-		return errors.New("imapsmtp: the server refused the login")
-	}
-	if err := c.Mail(s.cfg.From); err != nil {
-		return err
-	}
-	for _, r := range rcpt {
-		if err := c.Rcpt(r); err != nil {
-			return fmt.Errorf("imapsmtp: a recipient was refused")
-		}
-	}
-	w, err := c.Data()
-	if err != nil {
-		return err
-	}
-	if _, err := w.Write(raw); err != nil {
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-	return c.Quit()
-}
-
-// xoauth2 is the XOAUTH2 mechanism for IMAP (sasl.Client); smtpXOAuth2
-// is the same for SMTP (smtp.Auth).
-type xoauth2 struct{ user, token string }
-
-var _ sasl.Client = xoauth2{}
-
-func (x xoauth2) ir() []byte {
-	return []byte("user=" + x.user + "\x01auth=Bearer " + x.token + "\x01\x01")
-}
-
-func (x xoauth2) Start() (string, []byte, error) { return "XOAUTH2", x.ir(), nil }
-func (x xoauth2) Next([]byte) ([]byte, error)    { return nil, errors.New("imapsmtp: XOAUTH2 refused") }
-
-type smtpXOAuth2 struct{ xoauth2 }
-
-var _ smtp.Auth = smtpXOAuth2{}
-
-// Start refuses to send the token without TLS except to loopback, as
-// smtp.PlainAuth does for a password.
-func (x smtpXOAuth2) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	if !server.TLS && !loopback(net.JoinHostPort(server.Name, "0")) {
-		return "", nil, errors.New("imapsmtp: unencrypted connection")
-	}
-	return "XOAUTH2", x.ir(), nil
-}
-
-func (x smtpXOAuth2) Next(_ []byte, more bool) ([]byte, error) {
-	if more {
-		return nil, errors.New("imapsmtp: XOAUTH2 refused")
-	}
-	return nil, nil
+	return s.t.Submit(ctx, rcpt, raw)
 }

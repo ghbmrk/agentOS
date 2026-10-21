@@ -1,4 +1,4 @@
-package imapsmtp
+package imap
 
 // REQ: CRED-1, CRED-8
 
@@ -295,7 +295,7 @@ func TestFlagsUpdateKeepsTheBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Subject != "canary" {
+	if len(got) != 1 || string(got[0].Raw) != body {
 		t.Fatalf("got %+v, want the one message with its body", got)
 	}
 }
