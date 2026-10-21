@@ -359,6 +359,15 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertIn("a second issue for A-3", board.intake_problems(BOARD, items, 301)[0])
         # The first A-3 issue is well formed; the duplicate's problem is the duplicate's.
         self.assertEqual(board.intake_problems(BOARD, items, items[1]["number"]), [])
+        # Issue #30's problems are not issue #300's.
+        self.assertEqual(board.intake_problems(BOARD, [dict(items[-2], number=30)], 3), [])
+
+    def test_a_duplicate_blames_the_newer_issue_in_githubs_order(self):
+        # GitHub lists issues newest first; the older issue is the first for its ID.
+        calls = self.run_intake(301, items=list(reversed(self.items())))
+        self.assertEqual([c[:2] for c in calls], [("POST", "/repos/o/r/issues/301/comments")])
+        self.assertIn("a second issue for A-3 (first is #", calls[0][2])
+        self.assertEqual(self.run_intake(self.items()[1]["number"], items=list(reversed(self.items()))), [])
 
     def test_a_malformed_issue_gets_one_comment_naming_every_problem(self):
         wide = dict(opened(issues())[0], number=302, title="A-9: wide")
@@ -369,6 +378,7 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertTrue(body.startswith(board.INTAKE_MARK))
         self.assertIn("issue #302: 3 middle cells, its table has 2", body)
         self.assertIn("```text\nissue #302: ", body)
+        self.assertIn("its table has 2\n```\n", body)  # the fence closes after the last problem
 
     def test_the_comment_is_edited_in_place_then_removed_when_fixed(self):
         first = self.run_intake(300)[0][2]
@@ -397,6 +407,15 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertEqual([c[:2] for c in calls], [("POST", "/repos/o/r/issues/300/comments")])
         fixed = opened(issues())[0]["number"]
         self.assertEqual(self.run_intake(fixed, comments=[human, {"id": 6, "body": board.INTAKE_MARK}]), [])
+        # The same bot posts STALE-1's notices; without the marker they are not the intake comment.
+        stale = self.bot(board.stale_comment("A-1", "building", {"number": 22}), id=9)
+        self.assertEqual(self.run_intake(fixed, comments=[stale]), [])
+        self.assertEqual([c[:2] for c in self.run_intake(300, comments=[stale])],
+                         [("POST", "/repos/o/r/issues/300/comments")])
+
+    def test_the_bot_is_the_actions_login(self):
+        # The login GITHUB_TOKEN comments as; the fixtures above build on board.BOT, so pin it here.
+        self.assertEqual(board.BOT, "github-actions[bot]")
 
     def test_a_delete_with_no_body_returns_none(self):
         class Response(io.BytesIO):
@@ -635,8 +654,10 @@ class RateLimitTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "canary-not-a-token"}), \
                 mock.patch.object(board, "call", lambda req: sent.append(req) or {}):
             board.github("/repos/o/r/labels", "POST", {"name": "decision"})
+            board.github("/repos/o/r/issues/comments/7", "DELETE")
         self.assertEqual(sent[0].get_header("Content-type"), "application/json")
         self.assertEqual(json.loads(sent[0].data), {"name": "decision"})
+        self.assertIsNone(sent[1].data)  # a DELETE sends no body
 
 
 if __name__ == "__main__":

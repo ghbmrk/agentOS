@@ -374,7 +374,9 @@ def intake_comment(problems):
     # No problem line starts with ```, so none can close the fence.
     return (f"{INTAKE_MARK}\nThis work item cannot render on BOARD.md (tools/board.py):\n\n```text\n"
             + "".join(f"{p}\n" for p in problems)
-            + "```\nEdit the issue to fix these; this comment follows each edit and is deleted once the issue is well formed.")
+            + "```\nEdit the issue to fix these (the title and `board-row` block format is at the top of tools/board.py); "
+            "a fix can reveal the next problem, since each issue's checks stop at its first. This comment "
+            "follows each edit and is deleted once the issue is well formed.")
 
 
 def report_intake(fetch, repo, number, skeleton):
@@ -430,7 +432,7 @@ def github(path, method="GET", payload=None):
     if method != "GET":
         return call(urllib.request.Request("https://api.github.com" + path, method=method,
                                            headers={**headers, "Content-Type": "application/json"},
-                                           data=json.dumps(payload).encode()))
+                                           data=None if payload is None else json.dumps(payload).encode()))
     out, page = [], 1
     while True:
         sep = "&" if "?" in path else "?"
@@ -443,7 +445,9 @@ def github(path, method="GET", payload=None):
 
 
 def work_items(fetch, repo):
-    """The repository's open work-item issues opened by a collaborator; others are named on stderr."""
+    """The repository's open work-item issues opened by a collaborator, oldest first (GitHub lists
+    newest first, so render would call the newer of two issues for one ID the first); others are
+    named on stderr."""
     items = []
     for i in fetch(f"/repos/{repo}/issues?state=open&labels={MARKER}"):
         if "pull_request" in i:
@@ -452,7 +456,7 @@ def work_items(fetch, repo):
             items.append(i)
         else:
             print(f"board: issue #{i.get('number')}: ignored, not opened by a collaborator", file=sys.stderr)
-    return items
+    return sorted(items, key=lambda i: i["number"])
 
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
