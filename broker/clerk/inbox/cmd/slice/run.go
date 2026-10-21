@@ -182,6 +182,10 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	lapse, last := setup+key.ClerkLife, setup
+	// renewals are the log entries of those renewals. Each rides a tap the
+	// owner already makes (D-146: every passkey tap renews), so none is a tap
+	// the run asked for.
+	renewals := map[uint64]bool{}
 	renewThrough := func(t int64) error {
 		for lapse <= t {
 			at := max(last, clock, lapse-dayMS)
@@ -191,6 +195,7 @@ func Run(in Input) (Outcome, error) {
 			if err := k.Issue(at, nil, ck); err != nil {
 				return err
 			}
+			renewals[k.State().Seq] = true
 			lapse, last = at+key.ClerkLife, at
 			if err := derive(); err != nil {
 				return err
@@ -288,7 +293,7 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), kernelRefusals...),
-		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, plannerPriv, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
+		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, plannerPriv, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing, renewals),
 		KeysAtApproval: approved, KeysAtEnd: end, OutsideMailClerk: outside(listing)}
 	for _, r := range out.Refusals {
 		if r.Reason == statusCause {
@@ -343,11 +348,12 @@ func keyView(k key.Key, holder ed25519.PrivateKey, owner ed25519.PublicKey, acco
 }
 
 // ownerTaps lists the owner approvals the log holds: every entry that widens
-// what may happen. A standing key was approved before this run and is not a tap.
-func ownerTaps(k *kernel.Kernel, standing bool) []string {
+// what may happen, less same-limit renewals. A standing key was approved
+// before this run and is not a tap.
+func ownerTaps(k *kernel.Kernel, standing bool, renewals map[uint64]bool) []string {
 	taps := []string{}
 	for _, e := range k.Log().Entries() {
-		if kernel.Widening(e.Type) {
+		if kernel.Widening(e.Type) && !renewals[e.Seq] {
 			taps = append(taps, "approve-key")
 		}
 	}
