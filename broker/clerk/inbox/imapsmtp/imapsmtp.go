@@ -274,27 +274,24 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Client) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-	return s.sessionR(ctx, budget, func(c *client.Client, _ func()) error { return f(c) })
+	return s.sessionR(ctx, budget, func(c *client.Client, _ func(int64)) error { return f(c) })
 }
 
-// sessionR is sessionB for a session of steps, signed in once: renew, called
-// before a step, gives it a fresh reply budget of budget bytes and a fresh
-// timeout, so no step can read more or wait longer than one session.
-func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func()) error) error {
+// sessionR is sessionB for a session of steps, signed in once: renew(n),
+// called before a step, gives it a fresh reply budget of n bytes and a fresh
+// timeout. The client's reader reads ahead, so one reply can be charged to
+// two adjacent windows, never more: what a step holds is bounded by its own
+// window and the one before.
+func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) error {
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
 		return err
 	}
-	deadline := func() {
-		dl := time.Now().Add(s.cfg.Timeout)
-		if c, ok := ctx.Deadline(); ok && c.Before(dl) {
-			dl = c
-		}
+	if dl, ok := dctx.Deadline(); ok {
 		conn.SetDeadline(dl)
 	}
-	deadline()
 	switch s.cfg.IMAPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
@@ -306,6 +303,10 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
+	// go-imap clears the connection's deadline at each command, so a timer
+	// closes it once a step has run for the timeout; renew restarts it.
+	step := time.AfterFunc(s.cfg.Timeout, func() { conn.Close() })
+	defer step.Stop()
 	bc := newBudgetConn(conn, budget)
 	c, err := client.New(bc)
 	if err != nil {
@@ -327,7 +328,7 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	if err != nil {
 		return errors.New("imapsmtp: the server refused the login")
 	}
-	return f(c, func() { bc.left.Store(budget); deadline() })
+	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
 }
 
 type quiet struct{}
@@ -462,13 +463,16 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 }
 
 // headMax bounds the From and Message-ID headers Seen reads of each message,
-// and seenBatch the UIDs one of its batches fetches. A batch's read budget is
-// fixed by them, whatever the search found: replyBase, plus headMax and
-// fetchFrame for each UID, which stays under one Fetch call's budget (M21,
+// and seenBatch the UIDs one of its batches fetches. Sign-in and the search
+// read under replyBase; each batch's window is fixed by them, whatever the
+// search found: seenBase for its tagged reply, its second search and the
+// server's notices, plus headMax and fetchFrame for each UID. Two adjacent
+// windows stay under one Fetch call's budget (M21,
 // tests/test_egress_memory.py).
 const (
 	headMax   = 8 << 10
 	seenBatch = 400
+	seenBase  = 64 << 10
 )
 
 // ErrUnanswered is a FETCH that left a searched message, still there and
@@ -495,7 +499,7 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, headMax + 1},
 		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Message-Id"}}}
 	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
-	return s.sessionR(ctx, s.replyBase+seenBatch*(headMax+fetchFrame), func(c *client.Client, renew func()) error {
+	return s.sessionR(ctx, s.replyBase, func(c *client.Client, renew func(int64)) error {
 		st, err := c.Select(folder, true)
 		if err != nil || st.Messages == 0 {
 			return err
@@ -505,7 +509,7 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 			return err
 		}
 		for i := 0; i < len(uids); i += seenBatch {
-			renew()
+			renew(seenBase + seenBatch*(headMax+fetchFrame))
 			batch := uids[i:min(i+seenBatch, len(uids))]
 			want := make(map[uint32]bool, len(batch))
 			for _, u := range batch {
@@ -530,7 +534,11 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 					delete(want, m.Uid)
 					h, _ := io.ReadAll(io.LimitReader(l, headMax+1))
 					if len(h) > headMax {
-						bad = fmt.Errorf("%w: the mail in %s that arrived %s (UID %d)", ErrLongHeader, folder, m.InternalDate.Format("2006-01-02 15:04 -0700"), m.Uid)
+						at := "at an unknown time"
+						if !m.InternalDate.IsZero() {
+							at = m.InternalDate.Format("2006-01-02 15:04 -0700")
+						}
+						bad = fmt.Errorf("%w: the mail in %s that arrived %s (UID %d)", ErrLongHeader, folder, at, m.Uid)
 					} else {
 						bad = each(h, m.InternalDate)
 					}

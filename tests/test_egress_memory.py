@@ -87,12 +87,13 @@ def legitimate_peak():
 
 def seen_peak():
     """What one Store.Seen call can hold (#2685): the search's UIDs at the field bound (M21, about a
-    million, 4 bytes each) and one batch's fixed read budget. What Live.Opened keeps is the
-    mail clerk's own memory (openedMax, #2684), never the vault's: see
-    test_the_vault_never_reads_who_was_opened."""
+    million, 4 bytes each) and two adjacent read windows, since the client's reader reads ahead and
+    one reply can be charged to both: the sign-in and search window and a batch's, which is the
+    larger pair. What Live.Opened keeps is the mail clerk's own memory (openedMax, #2684), never the
+    vault's: see test_the_vault_never_reads_who_was_opened."""
     imap = "clerk/inbox/imapsmtp/imapsmtp.go"
-    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "headMax") + 8 * KiB)
-    return 4 * MiB + batch
+    batch = go_int(imap, "seenBase") + go_int(imap, "seenBatch") * (go_int(imap, "headMax") + 8 * KiB)
+    return 4 * MiB + 16 * MiB + batch
 
 
 class VaultMemoryCeiling(unittest.TestCase):

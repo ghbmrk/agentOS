@@ -185,11 +185,26 @@ func TestOpenedNamesAMailWhoseHeadersAreTooLong(t *testing.T) {
 	}
 }
 
+// An entry the clerk did not write is dated today even in a log whose start
+// is valid and old: its day is not trusted, so it cannot leave its sender
+// eligible.
+func TestAnEntryTheClerkDidNotWriteIsDatedToday(t *testing.T) {
+	o, err := newOpened("2026-06-01", SeenLog{Since: "2026-01-01", Seen: []Seen{{From: "forged@x.test", ID: "not-hex", Date: "2026-02-01"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := seenID("forged@x.test", "not-hex", time.Time{})
+	want := SeenLog{Since: "2026-01-01", Seen: []Seen{{From: "forged@x.test", ID: hex.EncodeToString(id[:]), Date: "2026-06-01"}}}
+	if got, kept := o.result(); got["forged@x.test"] != "2026-06-01" || !reflect.DeepEqual(kept, want) {
+		t.Fatalf("opened %v, log %+v; want opened and logged today", got, kept)
+	}
+}
+
 // The log fails closed: a log with no valid start, or one in the future,
 // begins today, so nothing is watched yet; an entry whose day is not a date,
 // or is outside the log's start to today, counts as today, so a reset log
 // trusts none of its old days; an entry the clerk did not write is logged
-// again and keeps its sender opened on the next read too; and a
+// again, dated today, and keeps its sender opened on the next read too; and a
 // Message-ID another sender used does not stand in for this sender's read.
 func TestTheSeenLogFailsClosed(t *testing.T) {
 	srv := imaptest.Start(t)
