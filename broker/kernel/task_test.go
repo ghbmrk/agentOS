@@ -15,8 +15,8 @@ import (
 
 const site, first = "shop.example", "https://shop.example/cart"
 
-func approval(id string, by pair) kernel.TaskApproval {
-	return kernel.TaskApproval{Site: site, First: first, By: key.Approve(by.priv, kernel.TaskHash(id, site, first))}
+func approval(id string, n int, by pair) kernel.TaskApproval {
+	return kernel.TaskApproval{Site: site, First: first, N: n, By: key.Approve(by.priv, kernel.TaskHash(id, n, site, first))}
 }
 
 // serve is a key for task id, narrowed from the clerk's key.
@@ -88,24 +88,24 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	wrong := approval("t1", r.owner)
+	wrong := approval("t1", 0, r.owner)
 	wrong.Site = "other.example"
 	for name, a := range map[string]kernel.TaskApproval{
-		"a passkey not enrolled": approval("t1", gen(20)),
+		"a passkey not enrolled": approval("t1", 0, gen(20)),
 		"another site":           wrong,
-		"another task's":         approval("t9", r.owner),
+		"another task's":         approval("t9", 0, r.owner),
 	} {
 		if err := r.k.ApproveTask(0, "t1", a); err != kernel.ErrTaskApproval {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	forged := approval("t1", r.owner)
+	forged := approval("t1", 0, r.owner)
 	forged.At = -5
 	must(t, r.k.ApproveTask(7, "t1", forged))
 	if tk, _ := r.k.State().Task("t1", 8); tk.Approvals[site].At != 7 {
 		t.Errorf("the approval's time is the log's, not the caller's: %d", tk.Approvals[site].At)
 	}
-	if err := r.k.ApproveTask(0, "t5", approval("t5", r.owner)); err != kernel.ErrTask {
+	if err := r.k.ApproveTask(0, "t5", approval("t5", 0, r.owner)); err != kernel.ErrTask {
 		t.Errorf("an approval of a task never opened: %v", err)
 	}
 	must(t, r.k.Stop(1))
@@ -130,7 +130,7 @@ func TestEachEndEndsTheTask(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
 			must(t, r.k.OpenTask(0, "t1"))
-			must(t, r.k.ApproveTask(0, "t1", approval("t1", r.owner)))
+			must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, r.owner)))
 			// A revoke of a key the task's plans used ends nothing.
 			must(t, r.k.Revoke(0, r.serve("t1", key.LimitUses(1)).Tip()))
 			at := end(r)
@@ -156,7 +156,7 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	phone := gen(8)
 	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
 	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.ApproveTask(0, "t1", approval("t1", phone)))
+	must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, phone)))
 	must(t, r.k.Unenroll(1, gen(21).pub))
 	if tk, _ := r.k.State().Task("t1", 1); len(tk.Approvals) != 1 {
 		t.Fatal("cutting off another passkey ended the approval")
@@ -166,10 +166,10 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	if !ok || len(tk.Approvals) != 0 {
 		t.Fatalf("after the cut-off: live %v, approvals %v", ok, tk.Approvals)
 	}
-	if err := r.k.ApproveTask(3, "t1", approval("t1", phone)); err != kernel.ErrTaskApproval {
+	if err := r.k.ApproveTask(3, "t1", approval("t1", 1, phone)); err != kernel.ErrTaskApproval {
 		t.Fatalf("the cut-off passkey approved again: %v", err)
 	}
-	must(t, r.k.ApproveTask(3, "t1", approval("t1", r.owner)))
+	must(t, r.k.ApproveTask(3, "t1", approval("t1", 1, r.owner)))
 	r.replays()
 }
 
@@ -194,7 +194,7 @@ func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
 	must(t, r.k.OpenTask(0, "t1"))
 	must(t, r.k.Log().Anchor())
 	r.anchor.down = true
-	if err := r.k.ApproveTask(1, "t1", approval("t1", r.owner)); err == nil {
+	if err := r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)); err == nil {
 		t.Fatal("an approval whose anchor failed must be refused")
 	}
 	r.anchor.down = false
@@ -210,11 +210,11 @@ func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
 func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 	r := newRig(t)
 	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.ApproveTask(1, "t1", approval("t1", r.owner)))
+	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	other := kernel.TaskApproval{Site: "other.example", First: "https://other.example/"}
-	other.By = key.Approve(r.owner.priv, kernel.TaskHash("t1", other.Site, other.First))
+	other.N, other.By = 1, key.Approve(r.owner.priv, kernel.TaskHash("t1", 1, other.Site, other.First))
 	must(t, r.k.ApproveTask(2, "t1", other))
-	must(t, r.k.ApproveTask(3, "t1", approval("t1", r.spare)))
+	must(t, r.k.ApproveTask(3, "t1", approval("t1", 2, r.spare)))
 	tk, _ := r.k.State().Task("t1", 4)
 	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || !bytes.Equal(tk.Approvals[site].By.By, r.spare.pub) || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("approvals %+v", tk.Approvals)
@@ -223,6 +223,29 @@ func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 	must(t, r.k.Unenroll(5, r.spare.pub))
 	if tk, _ := r.k.State().Task("t1", 6); len(tk.Approvals) != 1 || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("after the cut-off: %+v", tk.Approvals)
+	}
+	r.replays()
+}
+
+// Each approval signs its place in the task, so a co-signature seen once
+// cannot be logged again: a replay neither revives a replaced approval nor
+// moves its time (CLK-3).
+func TestATaskApprovalCannotBeReplayed(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	a := approval("t1", 0, r.owner)
+	must(t, r.k.ApproveTask(1, "t1", a))
+	must(t, r.k.ApproveTask(10, "t1", approval("t1", 1, r.spare)))
+	again := a
+	again.N = 2
+	for name, b := range map[string]kernel.TaskApproval{"as logged": a, "renumbered": again} {
+		if err := r.k.ApproveTask(20, "t1", b); err != kernel.ErrTaskApproval {
+			t.Errorf("a replay %s: %v", name, err)
+		}
+	}
+	tk, _ := r.k.State().Task("t1", 21)
+	if got := tk.Approvals[site]; got.At != 10 || got.N != 1 || tk.Taps != 2 {
+		t.Fatalf("after the replays: %+v, %d taps", got, tk.Taps)
 	}
 	r.replays()
 }

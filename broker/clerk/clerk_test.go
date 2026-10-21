@@ -376,7 +376,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
-	a.By = key.Approve(opriv, kernel.TaskHash("t1", a.Site, a.First))
+	a.By = key.Approve(opriv, kernel.TaskHash("t1", 0, a.Site, a.First))
 	if err := f.k.ApproveTask(1, "t1", a); err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +391,14 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, f.now); !ok || got.Site != a.Site {
 		t.Fatalf("the live approval: %+v %v", got, ok)
 	}
+	renewed := kernel.TaskApproval{Site: a.Site, First: "https://shop.example/pay", N: 1}
+	renewed.By = key.Approve(opriv, kernel.TaskHash("t1", 1, renewed.Site, renewed.First))
+	if err := f.k.ApproveTask(2, "t1", renewed); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, f.now); !ok || got.First != renewed.First || got.At != 2 {
+		t.Fatalf("the renewed approval: %+v %v", got, ok)
+	}
 	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, 1+kernel.TaskTimeout); ok {
 		t.Fatal("an approval past its task's timeout on the clerk's clock")
 	}
@@ -400,12 +408,12 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	}
 	_, mpriv := gen(40)
 	forged := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
-		By: key.Approve(mpriv, kernel.TaskHash("t1", a.Site, a.First))}}}
+		By: key.Approve(mpriv, kernel.TaskHash("t1", 0, a.Site, a.First))}}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("an approval no passkey the clerk knows signed")
 	}
 	other := kernel.Task{ID: "t2", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
-		By: key.Approve(opriv, kernel.TaskHash("t2", a.Site, a.First))}}}
+		By: key.Approve(opriv, kernel.TaskHash("t2", 0, a.Site, a.First))}}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("another task's approval")
 	}

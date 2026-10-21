@@ -7,7 +7,7 @@ Work item: #2692, the kernel half of #2676(b) (CLK-3 "One approval per task", D-
 1. **Tasks in the log.** `Kernel.OpenTask(now, id)` logs `task.opened`. The fold sets the task's time and its timeout, `TaskTimeout` (24 hours, KRN-5's default) later. `EndTask` logs the end at the final result, or when the planner's run ends without one. STOP and the timeout also end a task. An ended task never comes back. Failure path: a planner keeps a task, and what it holds, alive forever.
 2. **A key serves one task.** `key.LimitTask(id)` is a caveat like any other, and a second task caveat loosens. `Admit` refuses a plan whose key's task is not live. A rejected plan, a failed step or a cancel leaves the task open for re-plans, and an admitted plan's steps and their reconciliation outlive it. Failure path: a plan moves to another task, or runs in an ended one.
 3. **Task approvals live inside the task, one per site.**
-   - `ApproveTask` logs one enrolled passkey's co-signature over `TaskHash(task, site, held request)`. It anchors, as a widening.
+   - `ApproveTask` logs one enrolled passkey's co-signature over `TaskHash(task, n, site, held request)`. It anchors, as a widening. `n` is the approval's place in the task (`Task.Taps`), so a seen co-signature cannot be replayed to revive a replaced approval or move its time.
    - A later approval for the same site replaces the earlier one, since CLK-3 asks again after a card fill; another site's is held beside it.
    - Each ends with the task, and cutting off its passkey ends it at once.
    - Its `At` is the fold's time of the entry, so the clerk can order its own fills against the tap (CLK-3).
@@ -29,7 +29,7 @@ Out of scope:
 ## Acceptance tests
 
 - KRN-5: `broker/kernel/task_test.go::TestATaskRunsItsPlansAndRePlans`, `::TestATaskKeyServesOnlyALiveTask`, `::TestEachEndEndsTheTask`, `::TestAnAdmittedPlanOutlivesItsTask`
-- CLK-3, KEY-4: `broker/kernel/task_test.go::TestCuttingOffTheSignerEndsTheApproval`, `::TestATaskHoldsOneApprovalPerSite`
+- CLK-3, KEY-4: `broker/kernel/task_test.go::TestCuttingOffTheSignerEndsTheApproval`, `::TestATaskHoldsOneApprovalPerSite`, `::TestATaskApprovalCannotBeReplayed`
 - KRN-7: `broker/kernel/task_test.go::TestAnUnanchoredTaskApprovalDoesNotSurvive`
 - CLK-2, CLK-3: `broker/clerk/clerk_test.go::TestClerkReadsATaskApprovalOnItsOwnClock`, `broker/clerk/run/run_test.go::TestViewCarriesTheChainsTask`
 

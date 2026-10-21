@@ -44,11 +44,13 @@ const TaskTimeout = key.DayMS
 const CTask = "task"
 
 // TaskApproval is the owner's approval of a task's requests on one site: the
-// site, the held request it was given over, and the passkey's co-signature
-// over TaskHash.
+// site, the held request it was given over, its place N among the task's
+// approvals, and the passkey's co-signature over TaskHash. N makes each tap
+// sign anew, so a seen co-signature cannot be logged again.
 type TaskApproval struct {
 	Site  string     `json:"site"`
 	First string     `json:"first"`
+	N     int        `json:"n"`
 	By    key.Cosign `json:"by"`
 	// At is when the log recorded the approval, set by the fold: the clerk
 	// orders its own fills against it (CLK-3).
@@ -57,12 +59,14 @@ type TaskApproval struct {
 
 // Task is a live task as View.Task answers it. At and Until are the fold's:
 // when the log opened it, and when it times out. Approvals holds its live
-// approvals by site.
+// approvals by site; Taps counts every approval it logged, and is the next
+// one's N.
 type Task struct {
 	ID        string                  `json:"id"`
 	At        int64                   `json:"at"`
 	Until     int64                   `json:"until"`
 	Approvals map[string]TaskApproval `json:"approvals,omitempty"`
+	Taps      int                     `json:"taps"`
 }
 
 type (
@@ -79,9 +83,10 @@ type (
 	}
 )
 
-// TaskHash names a task's approval for its co-signature.
-func TaskHash(task, site, first string) [32]byte {
-	b, _ := json.Marshal([]string{task, site, first})
+// TaskHash names a task's n-th approval, on site over the held request
+// first, for its co-signature.
+func TaskHash(task string, n int, site, first string) [32]byte {
+	b, _ := json.Marshal([]any{task, n, site, first})
 	return sha256.Sum256(append([]byte("agentos.task.v1\x00"), b...))
 }
 
@@ -145,7 +150,7 @@ func TaskApproved(v View, anchors []ed25519.PublicKey, ver *key.Verified, site s
 		return TaskApproval{}, false
 	}
 	es, un := v.Enrollments()
-	if !key.In(key.Passkeys(anchors, es, un), a.By.By) || !a.By.Over(TaskHash(t.ID, site, a.First)) {
+	if !key.In(key.Passkeys(anchors, es, un), a.By.By) || !a.By.Over(TaskHash(t.ID, a.N, site, a.First)) {
 		return TaskApproval{}, false
 	}
 	return a, true
@@ -165,7 +170,7 @@ func (s *State) approveOK(b taskApproved, at int64) error {
 	}
 	a := b.Approval
 	if !utf8.ValidString(a.Site) || !utf8.ValidString(a.First) ||
-		!key.In(s.Passkeys(), a.By.By) || !a.By.Over(TaskHash(t.ID, a.Site, a.First)) {
+		!key.In(s.Passkeys(), a.By.By) || a.N != t.Taps || !a.By.Over(TaskHash(t.ID, a.N, a.Site, a.First)) {
 		return ErrTaskApproval
 	}
 	return nil
@@ -185,7 +190,7 @@ func (s *State) applyTask(e Entry) error {
 		if err != nil {
 			return err
 		}
-		b.At, b.Until, b.Approvals = e.At, e.At+TaskTimeout, nil
+		b.At, b.Until, b.Approvals, b.Taps = e.At, e.At+TaskTimeout, nil, 0
 		if s.openOK(b) == nil {
 			s.tasks[b.ID] = &taskState{Task: b}
 		}
@@ -198,6 +203,7 @@ func (s *State) applyTask(e Entry) error {
 			a := b.Approval
 			a.At = e.At
 			t := s.tasks[b.Task]
+			t.Taps++
 			if t.Approvals == nil {
 				t.Approvals = map[string]TaskApproval{}
 			}
