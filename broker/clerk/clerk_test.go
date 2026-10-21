@@ -322,3 +322,33 @@ func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
 		t.Fatalf("a co-signer the clerk's anchors do not know: %v", rf)
 	}
 }
+
+// Verify hands a clerk that asks more of the key the chain Check verified:
+// an owner's narrowing reads as the owner's, the clerk's own does not, and a
+// refused request returns none (KRN-ownerlink).
+func TestClerkVerifyReturnsTheChainItChecked(t *testing.T) {
+	f := setup(t, key.Trash)
+	opub, opriv := gen(1)
+	anchors := []ed25519.PublicKey{opub}
+	approved, err := key.Narrow(f.root, opriv, key.LimitUses(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := key.Derive(f.root, hpubPriv(), f.root.Links[0].Holder, key.LimitUses(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		id      string
+		k       key.Key
+		byOwner bool
+	}{{"v1", approved, true}, {"v2", own, false}} {
+		ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request(c.id, c.k, stepOf(key.Trash)), f.view())
+		if rf != nil || ver.ByOwner != c.byOwner {
+			t.Fatalf("%s: %v, by owner %v", c.id, rf, ver != nil && ver.ByOwner)
+		}
+	}
+	if ver, rf := clerk.Verify(anchors, "web", f.mail.Facts, f.now, f.req, f.view()); rf == nil || ver != nil {
+		t.Fatal("a refused request returns no chain")
+	}
+}

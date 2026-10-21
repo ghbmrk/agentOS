@@ -47,6 +47,7 @@ core clerk/inbox
 # calls them to put a step in canonical form and to check a request itself.
 open kernel.Normalize
 open clerk.Check
+open clerk.Verify
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
