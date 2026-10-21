@@ -63,3 +63,7 @@ if [ "$q" = on ]; then
 else
 	echo "agentos-quota: off root=${fs:-unknown} flag=$f (agent machines stay off)"
 fi
+# HW-8, ONB-2: no mount or swap on a disk other than the one the box booted from, so a host PC's disk
+# that sits beside the drive is never opened, even read-only. CI's boot test attaches one on the first
+# and the end-to-end boot and needs foreign=none (image/ASSUMPTIONS.md IMG-1-1).
+echo "agentos-disks: $(/usr/lib/agentos/foreign-disks 2>/dev/null || echo foreign=unknown)"
