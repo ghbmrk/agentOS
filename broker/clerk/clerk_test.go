@@ -5,6 +5,7 @@ package clerk_test
 import (
 	"crypto/ed25519"
 	"math/rand/v2"
+	"reflect"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -38,15 +39,15 @@ type inFlight struct {
 	plans map[string]kernel.Plan
 }
 
-func (v inFlight) Dispatched(plan string, i int) (kernel.Dispatch, bool) {
-	if d, ok := v.State.Dispatched(plan, i); ok {
+func (v inFlight) Dispatched(r kernel.Request) (kernel.Dispatch, bool) {
+	if d, ok := v.State.Dispatched(r); ok {
 		return d, true
 	}
-	p, ok := v.plans[plan]
-	if !ok || i < 0 || i >= len(p.Steps) {
+	p, ok := v.plans[r.Plan.ID]
+	if !ok || r.Index < 0 || r.Index >= len(p.Steps) || !reflect.DeepEqual(r.Plan, p) {
 		return kernel.Dispatch{}, false
 	}
-	return kernel.Dispatch{Sig: p.Sig, Seq: v.State.Seq + 1}, true
+	return kernel.Dispatch{Seq: v.State.Seq + 1}, true
 }
 
 func (f *fix) view() kernel.View { return inFlight{f.k.State(), f.plans} }

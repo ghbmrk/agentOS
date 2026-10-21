@@ -209,7 +209,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	if !found {
 		w.bad = append(w.bad, "effect with a verb outside the key")
 	}
-	d, inFlight := v.Dispatched(r.Plan.ID, r.Index)
+	d, inFlight := v.Dispatched(r)
 	if !inFlight {
 		w.bad = append(w.bad, "effect for a step the log does not have in flight")
 	}

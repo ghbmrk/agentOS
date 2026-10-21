@@ -351,7 +351,7 @@ func (x *Exit) Facts(s key.Step) (string, []string, int64) {
 	if !ok {
 		return "", nil, 0
 	}
-	return op.Content, op.Labels, amountOf(s)
+	return op.Content, op.Labels, Amount(s)
 }
 
 // Do checks the step first, every time, then sends it once per idempotency
@@ -390,7 +390,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 // check is the clerk's own authorization, run before every send.
 func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
-	if rf := Check(x.owner, x.name, x.Facts, x.clock.now(), r, v); rf != nil {
+	if rf := Check(x.owner, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
 	}
 	return kernel.Result{}, true
@@ -401,7 +401,7 @@ func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
 // same idempotency key. A redemption can wait on the token endpoint and on
 // tmu, so the step is checked again before each send (CLK-2).
 func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.View) kernel.Result {
-	tok, bad := x.access(x.clock.now(), "")
+	tok, bad := x.access(x.clock.Now(), "")
 	if bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
 	}
@@ -413,7 +413,7 @@ func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.
 	if res.Detail != DAuth+" http 401" {
 		return res
 	}
-	if tok, bad = x.access(x.clock.now(), tok); bad != "" {
+	if tok, bad = x.access(x.clock.Now(), tok); bad != "" {
 		return kernel.Result{Outcome: "failed", Detail: bad}
 	}
 	if req, bad = x.build(op, r); bad != "" {
@@ -649,7 +649,7 @@ func (x *Exit) send(req *http.Request, r kernel.Request) kernel.Result {
 		res.Detail += " " + req.URL.Hostname()
 	}
 	x.mu.Lock()
-	s.phase, s.retryAt = phase, x.clock.now()+retry
+	s.phase, s.retryAt = phase, x.clock.Now()+retry
 	x.mu.Unlock()
 	return res
 }
@@ -719,7 +719,7 @@ func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 	case s.phase == pSending || s.sends >= kernel.MaxChecks:
 		return "unknown"
 	case s.phase == pNotSent:
-		if x.clock.now() >= s.retryAt {
+		if x.clock.Now() >= s.retryAt {
 			return "notdone"
 		}
 		return "unknown"

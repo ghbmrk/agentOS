@@ -338,15 +338,16 @@ func (s *State) LedgerBefore(seq uint64) key.Ledger { return ledger{s: s, before
 func (s *State) Known(root key.ID) bool    { return s.Roots[root] }
 func (s *State) ChangesView() *key.Changes { return &s.Changes }
 
-// Dispatched is the log's record of a step in flight; a step in any other
-// phase answers nothing, so a request for a step the kernel is not running
-// now, stale or forged, is refused at the clerk (CLK-2, KRN-8).
-func (s *State) Dispatched(plan string, index int) (Dispatch, bool) {
-	p, st := s.step(stepRef{plan, index})
-	if st == nil || st.Phase != PInflight || st.DispatchSeq == 0 {
+// Dispatched is the log's record of r: it answers only when r's step is in
+// flight and r carries exactly the plan the log admitted. A request for a step
+// the kernel is not running now, stale or forged, or another plan signed under
+// a logged id, gets nothing, and the clerk refuses it (CLK-2, KRN-8).
+func (s *State) Dispatched(r Request) (Dispatch, bool) {
+	p, st := s.step(stepRef{r.Plan.ID, r.Index})
+	if st == nil || st.Phase != PInflight || st.DispatchSeq == 0 || !reflect.DeepEqual(r.Plan, p.Plan) {
 		return Dispatch{}, false
 	}
-	return Dispatch{Sig: p.Plan.Sig, Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel}, true
+	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel}, true
 }
 
 // Unsettled is a step whose effect is uncertain: still being reconciled, or
@@ -383,17 +384,6 @@ func (s *State) Status() []Unsettled {
 // retryable: only a parked step of a live plan. The owner's cancel stands,
 // and a step still being reconciled may yet prove done.
 func retryable(p *PlanState, st *StepState) bool { return st.Phase == PParked && p.Status == SActive }
-
-// Dispatched reports whether the log holds this exact request: the signed plan
-// as the log carries it, in flight, with the attempt and the entries the
-// kernel recorded. A clerk that runs only such a request cannot be driven by a
-// caller's own request or view. Now is not recorded and is not checked.
-func (s *State) Dispatched(r Request) bool {
-	p, st := s.step(stepRef{r.Plan.ID, r.Index})
-	return st != nil && st.Phase == PInflight && r.Attempt > 0 && st.Attempt == r.Attempt &&
-		r.Idem == Idem(r.Plan.ID, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
-		reflect.DeepEqual(r.Plan, p.Plan)
-}
 
 func body[T any](e Entry) (T, error) {
 	var b T

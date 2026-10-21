@@ -910,3 +910,41 @@ func TestClerkKeepsTheHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 		t.Fatalf("detail %q, want %q", d, clerk.RHold)
 	}
 }
+
+// Dispatched answers only for the exact plan the log admitted, with its step
+// in flight: not before the dispatch, not after the result, not for another
+// step, and not for a plan under the same id with other steps or another key,
+// which the holder could sign as validly (CLK-2, KRN-8).
+func TestDispatchedAnswersOnlyForTheLoggedPlanInFlight(t *testing.T) {
+	r := newRig(t)
+	p := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m1")}})
+	twin := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m2")}})
+	rekeyed := r.sign(kernel.Plan{ID: "p1", Key: r.derive(key.LimitUses(5)), Steps: p.Steps})
+	answers := func() map[string]bool {
+		got := map[string]bool{}
+		for name, q := range map[string]kernel.Request{"admitted": {Plan: p}, "twin": {Plan: twin},
+			"rekeyed": {Plan: rekeyed}, "other step": {Plan: p, Index: 1}} {
+			_, got[name] = r.k.State().Dispatched(q)
+		}
+		return got
+	}
+	var during map[string]bool
+	r.mail.Fault = func(op string, _ kernel.Request) string {
+		if op == "do" {
+			during = answers()
+		}
+		return ""
+	}
+	must(t, r.k.Submit(0, p))
+	none := map[string]bool{"admitted": false, "twin": false, "rekeyed": false, "other step": false}
+	if got := answers(); !reflect.DeepEqual(got, none) {
+		t.Fatalf("before the dispatch: %v", got)
+	}
+	must(t, r.tick(1))
+	if want := map[string]bool{"admitted": true, "twin": false, "rekeyed": false, "other step": false}; !reflect.DeepEqual(during, want) {
+		t.Fatalf("in flight: %v, want %v", during, want)
+	}
+	if got := answers(); !reflect.DeepEqual(got, none) {
+		t.Fatalf("after the result: %v", got)
+	}
+}

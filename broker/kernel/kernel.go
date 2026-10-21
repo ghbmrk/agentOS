@@ -197,10 +197,9 @@ func (r Request) Idem() string { return Idem(r.Plan.ID, r.Index) }
 // Result is a clerk's answer. Outcome is ok, failed or unknown.
 type Result struct{ Outcome, Detail string }
 
-// Dispatch is what the log says of a step in flight: the signature of the
-// plan it admitted, the step's first dispatch entry, and its hold, if any.
+// Dispatch is what the log says of a step in flight: its first dispatch entry
+// and its hold, if any.
 type Dispatch struct {
-	Sig    []byte // the logged plan's signature; a request must carry that plan
 	Seq    uint64 // the first dispatch: the key's uses before it are its budget
 	Held   bool
 	HeldAt int64
@@ -212,8 +211,8 @@ type View interface {
 	Known(root key.ID) bool
 	ChangesView() *key.Changes
 	LedgerBefore(seq uint64) key.Ledger
-	// Dispatched answers only for a step the log has in flight now.
-	Dispatched(plan string, index int) (Dispatch, bool)
+	// Dispatched answers only for a request the log has in flight now.
+	Dispatched(r Request) (Dispatch, bool)
 }
 
 // Clerk is the only exit. Do runs a step at most once per idempotency key

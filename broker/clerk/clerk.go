@@ -4,7 +4,6 @@
 package clerk
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"strconv"
 	"sync"
@@ -31,7 +30,8 @@ const (
 // Clock is a clerk's own time in unix ms. A nil Clock reads the wall clock.
 type Clock func() int64
 
-func (c Clock) now() int64 {
+// Now is the clock's time.
+func (c Clock) Now() int64 {
 	if c == nil {
 		return time.Now().UnixMilli()
 	}
@@ -67,10 +67,8 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, now int64, r kerne
 	if !v.Known(ver.Root()) {
 		return &key.Refusal{Code: kernel.CUnknownRoot, Detail: ver.Root().String()}
 	}
-	// Equal signatures over a verified plan are one plan: the signature
-	// covers the key's tip, the id and every step (key.Sign).
-	d, ok := v.Dispatched(r.Plan.ID, r.Index)
-	if !ok || !bytes.Equal(d.Sig, r.Plan.Sig) {
+	d, ok := v.Dispatched(r)
+	if !ok {
 		return &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
 	}
 	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
@@ -88,9 +86,9 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, now int64, r kerne
 	return nil
 }
 
-// amountOf is a clerk's own reading of the amount argument: its one canonical
+// Amount is a clerk's own reading of the amount argument: its one canonical
 // spelling, any other unreadable and so -1; 0 when the verb has none.
-func amountOf(s key.Step) int64 {
+func Amount(s key.Step) int64 {
 	a, ok := s.Args[key.ArgAmount]
 	if !ok {
 		return 0
@@ -165,7 +163,7 @@ func (m *Mail) fault(op string, r kernel.Request) string {
 }
 
 // Facts is the mailbox's own reading of a step.
-func (m *Mail) Facts(s key.Step) (string, []string, int64) { return m.Content, m.Labels, amountOf(s) }
+func (m *Mail) Facts(s key.Step) (string, []string, int64) { return m.Content, m.Labels, Amount(s) }
 
 func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 	m.mu.Lock()
@@ -173,7 +171,7 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if m.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := Check(m.Owner, m.Name, m.Facts, m.Clock.now(), r, v); rf != nil {
+	if rf := Check(m.Owner, m.Name, m.Facts, m.Clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	switch m.fault("do", r) {

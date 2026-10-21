@@ -35,6 +35,13 @@ type rig struct {
 	bulk        key.Key
 	unsub       key.Key
 	world       *World
+	now         int64 // the clerk's own clock
+}
+
+// tick runs the kernel at now, with the clerk's own clock at now too.
+func (r *rig) tick(now int64) error {
+	r.now = now
+	return r.k.Tick(now)
 }
 
 // newRig boots a real kernel over the fixture mailbox, with an extra mail of
@@ -51,7 +58,7 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	holderPub, holderPriv := seed(2)
 	headPub, headPriv := seed(3)
 	plannerPub, plannerPriv := seed(4)
-	r := &rig{world: &w, plannerPriv: plannerPriv}
+	r := &rig{world: &w, plannerPriv: plannerPriv, now: t0}
 	var err error
 	r.acct, err = NewAccount(ownerPub, []byte(secret), func() World { return *r.world }, ms, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
@@ -67,6 +74,7 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 		t.Fatal(err)
 	}
 	r.acct.Bind(r.k.State())
+	r.acct.Clock = func() int64 { return r.now }
 	root := key.Issue(ownerPriv, key.Root{Holder: holderPub, Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey})
 	if err := r.k.Issue(t0-dayMS, root); err != nil {
 		t.Fatal(err)
@@ -102,7 +110,7 @@ func (r *rig) run(t *testing.T, p kernel.Plan, ticks ...int64) {
 		t.Fatal(err)
 	}
 	for _, at := range append([]int64{t0}, ticks...) {
-		if err := r.k.Tick(at); err != nil {
+		if err := r.tick(at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -120,8 +128,10 @@ func (r *rig) lastRefusal(t *testing.T) Refusal {
 // staleView is the caller's own account of the world: everything held, known.
 type staleView struct{ kernel.View }
 
-func (staleView) Known(key.ID) bool                   { return true }
-func (staleView) Held(uint64) (kernel.HeldInfo, bool) { return kernel.HeldInfo{}, true }
+func (staleView) Known(key.ID) bool { return true }
+func (staleView) Dispatched(kernel.Request) (kernel.Dispatch, bool) {
+	return kernel.Dispatch{Held: true}, true
+}
 
 func handleOfMail(t *testing.T, r *rig, id string) string {
 	t.Helper()
@@ -139,7 +149,7 @@ func handleOfMail(t *testing.T, r *rig, id string) string {
 func TestForcedTrashOfPersonalMailIsRefusedAndRecorded(t *testing.T) {
 	r := newRig(t, 30)
 	p := r.step("forced", key.Trash, map[string]string{"target": "M22"})
-	res := r.acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem("forced", 0), Attempt: 1, Now: t0}, r.k.State())
+	res := r.acct.Do(kernel.Request{Plan: p}, r.k.State())
 	if res.Outcome == "ok" || len(r.acct.Effects()) != 0 {
 		t.Fatalf("forced trash ran: %+v %v", res, r.acct.Effects())
 	}
@@ -152,7 +162,7 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 	r := newRig(t, 30)
 	h := handleOfMail(t, r, "M01")
 	p := r.step("forced", key.Unsubscribe, map[string]string{"to": h})
-	res := r.acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem("forced", 0), Attempt: 1, HeldSeq: 1, Now: t0}, staleView{})
+	res := r.acct.Do(kernel.Request{Plan: p}, staleView{})
 	if res.Outcome == "ok" || len(r.acct.Posts()) != 0 {
 		t.Fatalf("forced unsubscribe ran: %+v", res)
 	}
@@ -167,7 +177,7 @@ func TestChangedStepOfDispatchedRequestIsRefused(t *testing.T) {
 	p := r.step("real", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"})
 	r.run(t, p)
 	forged := r.step("real", key.Trash, map[string]string{"target": "M22"})
-	r.acct.Do(kernel.Request{Plan: forged, Idem: kernel.Idem("real", 0), Attempt: 1, Now: t0}, r.k.State())
+	r.acct.Do(kernel.Request{Plan: forged}, r.k.State())
 	for _, e := range r.acct.Effects() {
 		if e.Verb == string(key.Trash) {
 			t.Fatalf("trash ran: %+v", e)
@@ -215,7 +225,7 @@ func TestStrippedPlannerKeyDoesNothing(t *testing.T) {
 			t.Fatalf("plan %s on a stripped key was admitted", id)
 		}
 	}
-	_ = r.k.Tick(t0)
+	_ = r.tick(t0)
 	if n := len(r.acct.Effects()); n != 0 {
 		t.Fatalf("%d effects from stripped keys", n)
 	}
@@ -236,7 +246,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.k.Tick(t0); err != nil {
+	if err := r.tick(t0); err != nil {
 		t.Fatal(err)
 	}
 	// Restart: a new kernel over the same log, as after a crash.
@@ -250,7 +260,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 	for i := 150; i < 250; i++ {
 		_ = r.k.Submit(t0, organize(i))
 	}
-	if err := r.k.Tick(t0); err != nil {
+	if err := r.tick(t0); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(r.acct.Effects()); n != DailyCap {
@@ -258,7 +268,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 	}
 	// A trash is the 201st action of the same key and is refused too.
 	_ = r.k.Submit(t0, r.onKey(r.bulk, "trash-201", key.Trash, map[string]string{"target": "M19"}))
-	_ = r.k.Tick(t0)
+	_ = r.tick(t0)
 	if n := len(r.acct.Effects()); n != DailyCap {
 		t.Fatalf("%d effects after a 201st trash", n)
 	}
@@ -348,7 +358,7 @@ func TestUnsubscribeIsReEvaluatedWhenTheHoldEnds(t *testing.T) {
 	if err := r.k.Submit(t0, r.step("u", key.Unsubscribe, map[string]string{"to": h})); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.k.Tick(t0); err != nil {
+	if err := r.tick(t0); err != nil {
 		t.Fatal(err)
 	}
 	// While the step is held the owner opens the sender's mail.
@@ -356,7 +366,7 @@ func TestUnsubscribeIsReEvaluatedWhenTheHoldEnds(t *testing.T) {
 	opened.LastOpened = map[string]string{"news@shop.test": opened.Today}
 	*r.world = opened
 	for _, at := range []int64{t0 + 600_000, t0 + dayMS} {
-		if err := r.k.Tick(at); err != nil {
+		if err := r.tick(at); err != nil {
 			t.Fatal(err)
 		}
 	}
