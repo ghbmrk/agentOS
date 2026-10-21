@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -185,6 +186,8 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "authenticator")`},
 		"secret slider": {"- main [ref=e1]:\n  - slider \"PIN length\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
 			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "pin")`},
+		"exempt beside secret": {"- main [ref=e1]:\n  - textbox \"Security code\" [ref=e4]\n  - heading \"Backup codes\" [ref=e2]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "backup")`},
 		"secret switch": {"- main [ref=e1]:\n  - switch \"Two-step sign-in\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
 			func(a Approval) cover { return cover{a.Site} }, `(VRB-1: "two step")`},
 		"script link": {"- main [ref=e1]:\n  - link \"Place order\" [ref=e9]:\n    - /url: javascript:void(0)", pressBuy,
@@ -286,5 +289,24 @@ func TestCoveredLineOnlyWhenSent(t *testing.T) {
 	}
 	if res := r.result(t, "cont"); res.OK || res.Covered != "" {
 		t.Fatalf("%+v", res)
+	}
+}
+
+// A card fill after the tap is refused and sends nothing: typing private
+// data claims its flow label, which the clerk cannot vouch for (C4), so no
+// fill can follow a task's tap until fills are ordered against it (T4).
+func TestCardFillAfterTheTapIsRefused(t *testing.T) {
+	r, k := newCheckout(t, "t1")
+	r.run(t, 2, "ask", k, read(pressCont))
+	a := r.stepApproval(t, "ask")
+	r.tapTask(t, 3, "t1", a)
+	fill := read(`{"v":0,"verb":"type","ref":"e4","text":"synth-card-0000"}`)
+	fill.Labels = []string{"card"}
+	r.run(t, 4, "fill", k, fill)
+	if s := r.step("fill"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
+		t.Fatalf("fill: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "type"); len(got) != 0 {
+		t.Fatalf("typed %q", got)
 	}
 }

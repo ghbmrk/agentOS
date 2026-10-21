@@ -42,13 +42,15 @@ func TestSecretScreenWords(t *testing.T) {
 		// A checkout's own phrase beside a secret verb still marks the screen.
 		"Change PIN code", "Reset your PIN code", "Enter security code", "Enter the security code we sent to your phone",
 		"Send security code", "Security code sent", "Gift card PIN reset", "New PIN code", "/cards/pin-code",
-		"Set a new PIN code", "Reset PIN code", "Home security settings", "/vault?export=1", "/account?view=recovery"} {
+		"Set a new PIN code", "Reset PIN code", "Home security settings", "/vault?export=1", "/account?view=recovery",
+		"/x?access_token=1", "/x?TOKEN=1", "Enter CVV / Security code", "PIN", "Change gift card PIN"} {
 		if secretText(s) == "" {
 			t.Errorf("%q not read as a secret screen", s)
 		}
 	}
 	for _, s := range []string{"Place order", "Continue", "/checkout/shipping", "Promo code", "Sign in", "Keyboard", "Security code", "Card security code", "Gift card PIN",
-		"Remember this device", "/checkout?token=abc", "Smart home security", "Enamel pin"} {
+		"Remember this device", "/checkout?token=abc", "Smart home security", "Enamel pin", "Backup battery",
+		"CVV / Security code", "Security code (CVV)", "SECURITY-CODE:"} {
 		if w := secretText(s); w != "" {
 			t.Errorf("%q read as a secret screen (%q)", s, w)
 		}
