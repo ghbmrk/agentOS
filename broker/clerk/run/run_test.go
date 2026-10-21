@@ -505,7 +505,7 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
-	a.By = key.Approve(ownerPriv, kernel.TaskHash("t1", a.Site, a.First))
+	a.By = key.Approve(ownerPriv, kernel.TaskHash("t1", 0, a.Site, a.First))
 	ps := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "erin", "msg": "hello"}, Content: "text", Labels: []string{"public"}}
 	in := kernel.SignPlan(kernel.Plan{ID: "in", Key: served, Steps: []kernel.PlanStep{ps}}, holderPriv)
 	out := kernel.SignPlan(kernel.Plan{ID: "out", Key: b.key, Steps: []kernel.PlanStep{ps}}, holderPriv)
