@@ -186,24 +186,30 @@ func TestSecretsRemovePersists(t *testing.T) {
 }
 
 // Login opens its static slot at each call: it gives the password, and after a
-// Remove, or once the name holds a grant, it gives nothing.
+// Remove, once the name holds a grant, or for a slot outside MailSlots, it
+// gives nothing.
 func TestSecretsLoginOpensPerConnection(t *testing.T) {
 	s := clerk.NewSecrets(sealer(t), nil)
-	cred := s.Login("mail", "you@example.com")
+	cred := s.Login("mail/a", "you@example.com")
 	if _, err := cred(context.Background()); err == nil {
 		t.Fatal("Login gave a credential for a missing slot")
 	}
-	_ = s.Put("mail", clerk.KindStatic, []byte("canary-pass-0001"))
+	_ = s.Put("mail/a", clerk.KindStatic, []byte("canary-pass-0001"))
 	l, err := cred(context.Background())
 	if err != nil || l.User != "you@example.com" || l.Secret != "canary-pass-0001" || l.OAuth {
 		t.Fatalf("Login = %+v, %v", l, err)
 	}
-	_ = s.Remove("mail")
+	_ = s.Remove("mail/a")
 	if _, err := cred(context.Background()); err == nil {
 		t.Fatal("Login still gave the password after Remove")
 	}
-	_ = s.Put("mail", clerk.KindGrant, []byte("canary-grant-0001"))
+	_ = s.Put("mail/a", clerk.KindGrant, []byte("canary-grant-0001"))
 	if l, err := cred(context.Background()); err == nil || l.Secret != "" {
 		t.Fatal("Login opened a grant slot")
+	}
+	// Another clerk's static slot is not a mail password: Login is no getter.
+	_ = s.Put("exit-key", clerk.KindStatic, []byte("canary-api-key-0001"))
+	if l, err := s.Login("exit-key", "x")(context.Background()); err == nil || l.Secret != "" {
+		t.Fatal("Login opened a slot outside MailSlots")
 	}
 }

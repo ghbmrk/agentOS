@@ -3,7 +3,9 @@ package run
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,13 +26,14 @@ import (
 )
 
 // The mail clerk's process (MIG-4-mail-run, #2655). Its directory holds the
-// account's settings, which are not secret, and its Secrets file, whose one
-// static slot holds the mailbox password. The password is opened inside
-// broker/clerk at each connection (clerk.Secrets.Login), so a removal or a
-// replacement takes effect at the next one, and no file or answer of this
-// process carries it.
+// account's settings, which are not secret, and its Secrets file, where the
+// mailbox password sits in a static slot named for those settings (slotOf).
+// The password is opened inside broker/clerk at each connection
+// (clerk.Secrets.Login), so a removal or a replacement takes effect at the
+// next one, and no file or answer of this process carries it. A clerk opened
+// on one account asks for that account's slot only, so once the account is
+// replaced or removed it has no password to send anywhere.
 const (
-	mailSlot     = "mail-password"
 	mailSettings = "mail.json"
 	maxSettings  = 4 << 10
 )
@@ -72,6 +75,23 @@ func (s MailSettings) check() error {
 	return nil
 }
 
+// slotOf names the password's slot for these settings. It covers every field,
+// so a replacement that keeps the address but changes a server or the
+// sign-in name is another slot, and the old account's clerk cannot open it
+// (the old setup's MAIL-gen).
+func slotOf(s MailSettings) string {
+	b, _ := json.Marshal(s)
+	h := sha256.Sum256(b)
+	return clerk.MailSlots + hex.EncodeToString(h[:16])
+}
+
+// mailRecord is the settings file: the account, and the slot of the account
+// it replaced while that slot may still be in the Secrets file.
+type mailRecord struct {
+	MailSettings
+	Prev string `json:"prev,omitempty"`
+}
+
 func (s MailSettings) login() string {
 	if s.User != "" {
 		return s.User
@@ -101,11 +121,14 @@ func mailPassword(p string) bool {
 }
 
 // SetMail sets up or replaces the account in dir, the mail clerk's own
-// directory: the password goes to sec's static slot, sealed, and the settings
-// beside it. A refusal writes nothing. The password is written first, so a
-// crash between the two leaves the old settings, whose next connection signs
-// in with the new password and is refused, not a new server given the old
-// password.
+// directory: the password goes, sealed, to the slot named for the settings,
+// and the settings beside it. A refusal writes nothing. The steps are: drop a
+// slot an earlier crash left, put the new slot, write the settings naming the
+// replaced slot, drop the replaced slot. A crash at any point leaves the
+// settings file naming an account whose own slot holds its own password, so
+// no password is sent to another account's servers; a crash after the put
+// can leave the new slot sealed and unnamed until the next SetMail of that
+// account replaces it (ASSUMPTIONS MIG-4-run-j).
 func SetMail(dir string, sec *clerk.Secrets, s MailSettings, password string) error {
 	if err := s.check(); err != nil {
 		return err
@@ -113,26 +136,58 @@ func SetMail(dir string, sec *clerk.Secrets, s MailSettings, password string) er
 	if !mailPassword(password) {
 		return ErrWeakMailPassword
 	}
-	if err := private(dir, true); err != nil {
+	old, err := readMail(dir)
+	switch {
+	case errors.Is(err, ErrNoMailAccount):
+	case err != nil:
 		return err
 	}
-	b, err := json.Marshal(s)
+	cur := slotOf(s)
+	rec := mailRecord{MailSettings: s}
+	if err == nil {
+		if old.Prev != "" && old.Prev != cur {
+			if err := sec.Remove(old.Prev); err != nil {
+				return err
+			}
+		}
+		if p := slotOf(old.MailSettings); p != cur {
+			rec.Prev = p
+		}
+	}
+	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	if err := sec.Put(mailSlot, clerk.KindStatic, []byte(password)); err != nil {
+	if err := sec.Put(cur, clerk.KindStatic, []byte(password)); err != nil {
 		return err
 	}
-	return writeAtomic(dir, mailSettings, b, nil)
+	if err := writeAtomic(dir, mailSettings, b, nil); err != nil {
+		return err
+	}
+	if rec.Prev != "" {
+		return sec.Remove(rec.Prev)
+	}
+	return nil
 }
 
-// RemoveMail removes the account from dir: the password first, so the next
-// connection has nothing to sign in with, then the settings.
+// RemoveMail removes the account from dir: its password and any replaced
+// one first, so the next connection has nothing to sign in with, then the
+// settings. Settings that do not load are removed all the same.
 func RemoveMail(dir string, sec *clerk.Secrets) error {
-	if err := private(dir, true); err != nil {
-		return err
-	}
-	if err := sec.Remove(mailSlot); err != nil {
+	rec, err := readMail(dir)
+	switch {
+	case errors.Is(err, ErrNoMailAccount):
+		return nil
+	case err == nil:
+		for _, slot := range []string{slotOf(rec.MailSettings), rec.Prev} {
+			if slot == "" {
+				continue
+			}
+			if err := sec.Remove(slot); err != nil {
+				return err
+			}
+		}
+	case private(dir, true) != nil:
 		return err
 	}
 	if err := os.Remove(filepath.Join(dir, mailSettings)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -141,32 +196,32 @@ func RemoveMail(dir string, sec *clerk.Secrets) error {
 	return syncDir(dir)
 }
 
-// readMail loads dir's settings under the same custody checks as the Secrets
-// file.
-func readMail(dir string) (MailSettings, error) {
-	var s MailSettings
+// readMail loads dir's settings file under the same custody checks as the
+// Secrets file.
+func readMail(dir string) (mailRecord, error) {
+	var r mailRecord
 	if err := private(dir, true); err != nil {
-		return s, err
+		return r, err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, mailSettings), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return s, ErrNoMailAccount
+		return r, ErrNoMailAccount
 	}
 	if err != nil {
-		return s, err
+		return r, err
 	}
 	defer f.Close()
 	if err := privateFile(f); err != nil {
-		return s, err
+		return r, err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxSettings+1))
 	if err != nil {
-		return s, err
+		return r, err
 	}
-	if len(b) > maxSettings || json.Unmarshal(b, &s) != nil || s.check() != nil {
-		return s, fmt.Errorf("run: %s does not load", mailSettings)
+	if len(b) > maxSettings || json.Unmarshal(b, &r) != nil || r.check() != nil {
+		return r, fmt.Errorf("run: %s does not load", mailSettings)
 	}
-	return s, nil
+	return r, nil
 }
 
 // MailConfig is what the mail clerk's process is given besides its directory.
@@ -190,12 +245,13 @@ type MailConfig struct {
 // returns the clerk to serve with ServeClerk. Every connection signs in with
 // the password sealed in sec, opened at that connection.
 func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Account, error) {
-	s, err := readMail(dir)
+	r, err := readMail(dir)
 	if err != nil {
 		return nil, err
 	}
+	s := r.MailSettings
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
-		Credential: sec.Login(mailSlot, s.login()), From: s.Address, Guard: c.Guard}
+		Credential: sec.Login(slotOf(s), s.login()), From: s.Address, Guard: c.Guard}
 	if s.StartTLS {
 		cfg.SMTPSec = imapsmtp.StartTLS
 	}

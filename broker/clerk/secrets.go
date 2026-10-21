@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
@@ -153,15 +154,22 @@ func (s *Secrets) Remove(slot string) error {
 	return nil
 }
 
+// MailSlots prefixes the only slots Login opens: a mailbox password.
+const MailSlots = "mail/"
+
 // Login is the mail transport's credential (imapsmtp.Config.Credential) from
-// a static slot (MIG-4-mail-a-8). Each call opens the slot afresh, so a
-// removed or replaced password takes effect at the next connection, and a
-// slot of another kind does not open. The Secret string is a copy that clear
-// cannot wipe; it lives for one connection in the clerk's own process, as
-// the exit's header does.
+// a static slot under MailSlots (MIG-4-mail-a-8); any other slot does not
+// open, so Login is no getter for another clerk's secret. Each call opens
+// the slot afresh, so a removed or replaced password takes effect at the
+// next connection, and a slot of another kind does not open. The Secret
+// string is a copy that clear cannot wipe; it lives for one connection in
+// the clerk's own process, as the exit's header does.
 func (s *Secrets) Login(slot, user string) func(context.Context) (imapsmtp.Login, error) {
 	return func(context.Context) (imapsmtp.Login, error) {
 		var l imapsmtp.Login
+		if !strings.HasPrefix(slot, MailSlots) {
+			return l, errors.New("clerk: Login opens only a mail slot")
+		}
 		err := s.with(slot, KindStatic, func(p []byte) error {
 			l = imapsmtp.Login{User: user, Secret: string(p)}
 			return nil
