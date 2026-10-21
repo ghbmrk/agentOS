@@ -41,6 +41,9 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The kernel's process and each clerk's process (MIG-4-run, #2682): it opens
+# the log, boots the kernel, and carries each call to a clerk's socket.
+wiring clerk/run
 core clerk/inbox
 
 # Pure functions of the key chain and the request. They write nothing; a clerk

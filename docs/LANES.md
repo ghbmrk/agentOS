@@ -46,6 +46,18 @@ One owner per directory at a time (PLAN.md §3). A change another owner's direct
     ```
     go list -e -f '{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}' ./... | awk '{p=$1; sub(".*/broker/","",p); for(i=2;i<=NF;i++) if($i ~ /agentos\/broker\//){d=$i; sub(".*/broker/","",d); if(d!=p) print d" "p}}' | sort -u
     ```
+- **The owner seam (frozen interface, MIG-4-run #2682, D-111).** Sub A's kernel process hosts the kernel. Sub B's owner side (`owner`, `localui`, `localsrv`, `control`, `question`, `cmd/agentosd`) reaches it only through these methods of `kernel.Kernel` (`broker/kernel/kernel.go`), called through `run.Kernel.With` (`broker/clerk/run`) and, from #2682's third slice, through the kernel process's socket:
+  - `Submit`: a plan;
+  - `State().Status()`: STATUS;
+  - `Retry`: RETRY of a parked step;
+  - `Enroll` and `Unenroll`: passkeys;
+  - `Hold` and `Extend`: spend;
+  - `Issue`: a grant;
+  - `Revoke`, `Pause` and `Unpause`: keys;
+  - `Stop` and `Resume`;
+  - `Cancel` and `Undo`.
+
+  Their meaning is frozen. A signature changes only in a kernel-lane PR that edits this list in the same change; #2674 adds co-signatures to `Issue`. Neither side writes the other's directories, and `cmd/agentosd` changes only at its call sites, in sub B's rows.
 - **Everything else** has a fixed owner: sub A owns all of `tools/`, `.github/` and every gate file. The Codex lane may change only `docs/` and `tests/` files that are not gate files. The conflict guard (OPERATING §5) still keeps two builds off one file.
 
 ## Lanes

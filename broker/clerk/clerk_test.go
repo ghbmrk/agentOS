@@ -372,7 +372,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	f := setup(t, key.Trash)
 	opub, opriv := gen(1)
 	anchors := []ed25519.PublicKey{opub}
-	if err := f.k.OpenTask(1, "t1", 100); err != nil {
+	if err := f.k.OpenTask(1, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
@@ -391,7 +391,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, f.now); !ok || got.Site != a.Site {
 		t.Fatalf("the live approval: %+v %v", got, ok)
 	}
-	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, 100); ok {
+	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, 1+kernel.TaskTimeout); ok {
 		t.Fatal("an approval past its task's timeout on the clerk's clock")
 	}
 	plain, _ := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.req, f.view())
@@ -399,12 +399,12 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 		t.Fatal("a key with no task is covered")
 	}
 	_, mpriv := gen(40)
-	forged := kernel.Task{ID: "t1", Until: 100, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
+	forged := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
 		By: key.Approve(mpriv, kernel.TaskHash("t1", a.Site, a.First))}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, f.now); ok {
 		t.Fatal("an approval no passkey the clerk knows signed")
 	}
-	other := kernel.Task{ID: "t2", Until: 100, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
+	other := kernel.Task{ID: "t2", Until: 1 + kernel.TaskTimeout, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
 		By: key.Approve(opriv, kernel.TaskHash("t2", a.Site, a.First))}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, f.now); ok {
 		t.Fatal("another task's approval")

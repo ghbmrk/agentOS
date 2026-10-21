@@ -33,7 +33,8 @@ const (
 	TTaskEnded    = "task.ended"
 )
 
-// TaskTimeout is a task's default timeout, which the owner may set.
+// TaskTimeout is how long a task lives after the log opens it (KRN-5's
+// default; the owner's setting of it is a later row).
 const TaskTimeout = key.DayMS
 
 // CTask refuses a plan whose key's task is not live.
@@ -50,9 +51,11 @@ type TaskApproval struct {
 	At int64 `json:"at"`
 }
 
-// Task is a live task as View.Task answers it.
+// Task is a live task as View.Task answers it. At and Until are the fold's:
+// when the log opened it, and when it times out.
 type Task struct {
 	ID       string        `json:"id"`
+	At       int64         `json:"at"`
 	Until    int64         `json:"until"`
 	Approval *TaskApproval `json:"approval,omitempty"`
 }
@@ -79,13 +82,13 @@ func TaskHash(task, site, first string) [32]byte {
 
 var (
 	ErrTask         = errors.New("kernel: no live task by that id")
-	ErrTaskOpen     = errors.New("kernel: a task opens once, outside STOP, before its timeout")
+	ErrTaskOpen     = errors.New("kernel: a task opens once, outside STOP")
 	ErrTaskApproval = errors.New("kernel: a task's approval is one enrolled passkey's, over TaskHash, one at a time")
 )
 
-// OpenTask opens task id until until.
-func (k *Kernel) OpenTask(now int64, id string, until int64) error {
-	t := Task{ID: id, Until: until}
+// OpenTask opens task id, for TaskTimeout.
+func (k *Kernel) OpenTask(now int64, id string) error {
+	t := Task{ID: id}
 	if err := k.s.openOK(t, now); err != nil {
 		return err
 	}
@@ -145,7 +148,7 @@ func TaskApproved(v View, anchors []ed25519.PublicKey, ver *key.Verified, now in
 }
 
 func (s *State) openOK(t Task, at int64) error {
-	if t.ID == "" || !utf8.ValidString(t.ID) || s.tasks[t.ID] != nil || s.Stopped || at >= t.Until {
+	if t.ID == "" || !utf8.ValidString(t.ID) || s.tasks[t.ID] != nil || s.Stopped {
 		return ErrTaskOpen
 	}
 	return nil
@@ -180,7 +183,7 @@ func (s *State) applyTask(e Entry) error {
 		if err != nil {
 			return err
 		}
-		b.Approval = nil
+		b.At, b.Until, b.Approval = e.At, e.At+TaskTimeout, nil
 		if s.openOK(b, e.At) == nil {
 			s.tasks[b.ID] = &taskState{Task: b}
 		}
