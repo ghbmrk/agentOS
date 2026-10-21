@@ -32,7 +32,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - CLK-1: `secrets_test.go::TestSecretsFileIsTheClerksOwn`. A directory or file open to other uids, a symlink, or another uid's directory or file is refused. As root, another uid cannot read the file.
 - CLK-1, CLK-2: `run_test.go::TestPeersAreCheckedByUID` and `::TestClerkRefusesAViewWithoutTheLedger`. A wrong peer uid on either end sends nothing. A view missing a charged scope's ledger is refused before the clerk runs.
 
-**Declared scope:** `broker/clerk/run/` (new), `broker/core/core.txt` (one `wiring clerk/run` line), `docs/LANES.md` (the frozen seam), this brief.
+**Declared scope:** `broker/clerk/run/` (new), `broker/core/core.txt` (one `wiring clerk/run` line), `broker/durable/stores.txt` (one `clerk/run content` line: the sealed Secrets file), `docs/LANES.md` (the frozen seam), this brief.
 
 **Guard files:** `broker/core/core.txt` (the wiring line, so the core test lets the host call the kernel's write paths). `tools/risk_tier.py` needs nothing: a new `broker/` path is tier A by default. `tools/g1_scope_g2.txt` needs nothing: `allow broker/clerk/` already covers the directory. `broker/daemon/arc2_test.go` needs nothing: the daemon imports nothing new.
 
