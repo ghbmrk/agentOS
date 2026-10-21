@@ -344,7 +344,7 @@ func TestHeldKeysWithRoomLeftStillCannotReleaseThePlan(t *testing.T) {
 	}
 	sibling, err := key.ClerkKey(key.Key{Root: k.Root}, r.owner.priv, r.holder.pub, 0, 1000, key.LimitSpendTask(50))
 	must(t, err)
-	must(t, r.k.Issue(-kernel.GrantHold, sibling)) // granted, so only its root refuses it
+	must(t, r.issue(-kernel.GrantHold, sibling)) // granted, so only its root refuses it
 	if err := r.k.Extend(6, sibling, "t1"); err == nil {
 		t.Fatal("nor can a sibling under the cited key's root")
 	}

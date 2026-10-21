@@ -99,6 +99,12 @@ func fakeDriver() {
 				"refused_navigations": navs, "snapshot": strings.Repeat("- text: \x01<\n", MaxSnapshot/4)})
 			r = huge
 		}
+		if string(r) == `"escapes"` {
+			// Under MaxSnapshot raw, past it once JSON-escaped.
+			esc, _ := json.Marshal(map[string]any{"ok": true, "url": "https://shop.example.test/",
+				"snapshot": strings.Repeat("- text: <<<<<<<<\n", MaxSnapshot/20)})
+			r = esc
+		}
 		if string(r) == `"exit"` {
 			os.Exit(3)
 		}

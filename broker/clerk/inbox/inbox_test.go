@@ -75,7 +75,7 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.k, err = kernel.Boot(log, []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
+	r.k, err = kernel.Boot(log, anchors(), map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,9 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, key.Key{Root: root.Root}, root); err != nil {
+	_, backup := seed(12) // the second hardware key co-signs the setup grants (D-146)
+	batch := []key.Key{{Root: root.Root}, root}
+	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(batch...)), key.Approve(backup, kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.Anchor(); err != nil {
@@ -261,8 +263,7 @@ func TestBulkKeyCapsOrganizeAndTrashAtTheClerkAcrossARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Restart: a new kernel over the same log, as after a crash.
-	ownerPub, _ := seed(1)
-	k2, err := kernel.Boot(r.k.Log(), []ed25519.PublicKey{ownerPub}, map[string]kernel.Clerk{Name: r.acct}, t0)
+	k2, err := kernel.Boot(r.k.Log(), anchors(), map[string]kernel.Clerk{Name: r.acct}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +462,13 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 }
 
 func seedPriv(b byte) ed25519.PrivateKey { _, p := seed(b); return p }
+
+// anchors are the kernel's: the owner's passkey and the second hardware key.
+func anchors() []ed25519.PublicKey {
+	o, _ := seed(1)
+	b, _ := seed(12)
+	return []ed25519.PublicKey{o, b}
+}
 
 // The inbox clerk judges a hold on its own clock: a kernel whose clock runs
 // past the window releases the unsubscribe, and the clerk, still inside it,
