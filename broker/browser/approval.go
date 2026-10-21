@@ -55,6 +55,9 @@ type Field struct {
 	Value string `json:"value"`
 }
 
+// printPrefix marks an approval print, versioned.
+const printPrefix = "ap1:"
+
 // Bounds on what an approval shows.
 const (
 	maxLabel  = 200
@@ -102,7 +105,7 @@ func (g *Gate) approval(req Request, l link) Approval {
 		a.Fields = append(a.Fields, Field{Ref: ref, Label: show(strconv.Quote(capText(name, maxLabel))),
 			Value: show(capText(text, maxLabel))})
 	}
-	a.Print = "ap1:" + hex.EncodeToString(h.Sum(nil))
+	a.Print = printPrefix + hex.EncodeToString(h.Sum(nil))
 	return a
 }
 

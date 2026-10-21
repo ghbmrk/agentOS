@@ -126,8 +126,7 @@ func TestReadThatChangesStateIsRefusedUnsent(t *testing.T) {
 
 // No key covers a submit until the owner approves its print: a post with
 // no print is refused by the clerk's own facts, even after its key's hold
-// window, and a post of an action that needs no approval is refused too;
-// nothing is sent. A fresh clerk, as after a restart, probes a read that
+// window, and a standing key covers no post at all; nothing is sent. A fresh clerk, as after a restart, probes a read that
 // cannot change state notdone and a post unknown (CLK-3, KRN-8).
 func TestPostIsRefusedUnsent(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
@@ -141,7 +140,7 @@ func TestPostIsRefusedUnsent(t *testing.T) {
 	if s := r.step("p1"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
 		t.Fatalf("p1: phase %s (%s)", s.Phase, s.Detail)
 	}
-	if s := r.step("p2"); s.Phase != kernel.PFailed || !strings.Contains(s.Detail, "not_a_submit") {
+	if s := r.step("p2"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
 		t.Fatalf("p2: phase %s (%s)", s.Phase, s.Detail)
 	}
 	if got := r.h.received(t); len(got) != 0 {

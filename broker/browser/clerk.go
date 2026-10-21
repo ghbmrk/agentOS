@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,10 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
+		if !approval(r.Plan.Key, c.Owner) {
+			c.record(id, ran{})
+			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+		}
 		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content)
 	default:
 		c.record(id, ran{})
@@ -131,6 +136,28 @@ func (c *Clerk) facts(s key.Step) (string, []string, int64) {
 		return "", nil, 0
 	}
 	return c.g.print([]byte(s.Args["msg"].Value)), nil, 0
+}
+
+// approval reports whether k is an owner's approval of exact submits: its
+// content set lists approval prints only, and its uses are capped at their
+// number. No standing key covers a submit (CLK-3), and the log's use count
+// keeps each print to one send across a restart (KRN-8).
+func approval(k key.Key, owner ed25519.PublicKey) bool {
+	v, err := key.Chain(k, owner)
+	if err != nil || len(v.Limits.Content) == 0 {
+		return false
+	}
+	for _, p := range v.Limits.Content {
+		if !strings.HasPrefix(p, printPrefix) {
+			return false
+		}
+	}
+	for _, c := range v.Limits.Caps {
+		if c.Kind == key.KUses && c.N <= int64(len(v.Limits.Content)) {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxDetail bounds a step's logged result. The snapshot is the only large

@@ -131,6 +131,9 @@ func TestReorderedRequestIsTheSameSubmit(t *testing.T) {
 	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print); written || res.Error != "already_sent" {
 		t.Fatalf("second: %+v", res)
 	}
+	if res, written, _ := h.g.submit(ctx, []byte(`{"v":0,"verb":"click","ref":"e8"}`), a.To, a.Print); written || res.Error != "not_a_submit" {
+		t.Fatalf("a plain link: %+v", res)
+	}
 	if got := forwarded(t, h, "click"); len(got) != 1 {
 		t.Fatalf("driver got %q", got)
 	}
@@ -182,8 +185,9 @@ func TestChangedPageSendsNothing(t *testing.T) {
 }
 
 // A planner-sourced to releases nothing: without the owner's print the
-// clerk's own facts refuse the claim, and with it a to that differs from
-// what the gate read is refused unsent (CLK-3).
+// clerk's own facts refuse the claim, a standing key covers no submit, and
+// under the owner's key a to that differs from what the gate read is
+// refused unsent (CLK-3).
 func TestToAloneReleasesNothing(t *testing.T) {
 	r := newCart(t, nil, 0)
 	r.run(t, 1, "ask", r.root, read(pressOrder))
@@ -191,6 +195,11 @@ func TestToAloneReleasesNothing(t *testing.T) {
 	r.run(t, 2, "bare", r.root, post(a.To, pressOrder))
 	if s := r.step("bare"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
 		t.Fatalf("no print: phase %s (%s)", s.Phase, s.Detail)
+	}
+	// A standing key, here the root, covers no submit, print or not.
+	r.run(t, 3, "standing", r.root, submitStep(a, pressOrder))
+	if s := r.step("standing"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
+		t.Fatalf("standing key: phase %s (%s)", s.Phase, s.Detail)
 	}
 	k := r.approve(t, a.Print)
 	wrong := submitStep(a, pressOrder)
