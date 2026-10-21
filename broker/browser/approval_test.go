@@ -693,7 +693,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	}
 	_, opriv := seedKey(1)
 	hpub, hpriv := seedKey(2)
-	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, time.Now().UnixMilli(), 1<<40)
+	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, 3-kernel.GrantHold, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
