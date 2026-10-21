@@ -4,7 +4,7 @@ Work items: #2670 item 1 (the first link's life cap) and #2613 items 8, 9, 11 an
 
 ## Goal
 
-1. **A first link lives at most `ClerkLife` once live.** A grant of a key whose earliest expiry is more than `ClerkLife` after it comes live (at + GrantHold), or that has no expiry, is refused (`ErrLife`). Failure path: a phone tap grants a clerk key that outlives D-146's 30-day renewal by Face ID.
+1. **A first link lives at most `ClerkLife` once live.** A grant of a key whose earliest expiry is more than `ClerkLife` after it comes live (at + GrantHold) is refused (`ErrLife`); one with no expiry never gets that far, since `key.Chain` refuses it (`ErrUncaveated`). Failure path: a phone tap grants a clerk key that outlives D-146's 30-day renewal by Face ID.
 2. **No spend while the log is broken (KRN-5, #2613 item 8).** `AdmitSpend` refuses with `log-broken` once a widening's anchor has failed. Failure path: a provider call goes out after a widening that nothing proved.
 3. **Tests pin what reverts silently (#2613 items 9 and 12).** These cover a `Reserve` drop without its anchor, the cited-key check in `Extend`, and the liveness check in `Spend`.
 4. **Simplicity (#2613 item 11).** `key.CheckChain`, a wrapper of `Chain`, is dropped. `Hold` reads the root instead of re-verifying the key. The stale `live` comment in `authorize.go` goes.
