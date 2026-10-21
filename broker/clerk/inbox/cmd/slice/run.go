@@ -147,6 +147,10 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	acct.Bind(k.State())
+	// The clerk's own clock runs on the run's time, which each tick sets.
+	clock := issued
+	acct.Clock = func() int64 { return clock }
+	tick := func(at int64) error { clock = at; return k.Tick(at) }
 	root := key.Issue(ownerPriv, key.Root{Holder: holderPub, Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
 	if err := k.Issue(issued, root); err != nil {
 		return Outcome{}, err
@@ -189,7 +193,7 @@ func Run(in Input) (Outcome, error) {
 			return Outcome{}, err
 		}
 		for _, at := range []int64{t, t + noveltyMS} {
-			if err := k.Tick(at); err != nil {
+			if err := tick(at); err != nil {
 				return Outcome{}, err
 			}
 		}
@@ -207,7 +211,7 @@ func Run(in Input) (Outcome, error) {
 			return Outcome{}, err
 		}
 	}
-	if err := k.Tick(t0); err != nil {
+	if err := tick(t0); err != nil {
 		return Outcome{}, err
 	}
 
@@ -235,7 +239,7 @@ func Run(in Input) (Outcome, error) {
 		}
 	}
 	for _, at := range []int64{t0 + baseHoldMS, t0 + noveltyMS} {
-		if err := k.Tick(at); err != nil {
+		if err := tick(at); err != nil {
 			return Outcome{}, err
 		}
 	}
@@ -274,7 +278,7 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, holder 
 	step := kernel.PlanStep{Verb: key.Verb(ps.Op), Clerk: inbox.Name, Args: args}
 	if forced {
 		p := kernel.SignPlan(kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}, holder)
-		acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem(id, 0), Now: now}, k.State())
+		acct.Do(kernel.Request{Plan: p}, k.State())
 		return nil, nil
 	}
 	if err := k.Submit(now, kernel.SignPlan(kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}, holder)); err != nil {

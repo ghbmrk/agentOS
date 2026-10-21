@@ -53,6 +53,13 @@ type rig struct {
 	mail   *clerk.Mail
 	k      *kernel.Kernel
 	root   key.Key
+	now    int64 // the mail clerk's own clock
+}
+
+// tick runs the kernel at now, with the clerk's own clock at now too.
+func (r *rig) tick(now int64) error {
+	r.now = now
+	return r.k.Tick(now)
 }
 
 func cfg(r *rig) kernel.Config {
@@ -63,6 +70,7 @@ func cfg(r *rig) kernel.Config {
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
 	r.mail = clerk.NewMail("mail", r.owner.pub)
+	r.mail.Clock = func() int64 { return r.now }
 	r.boot(0)
 	r.root = key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail",
 		Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: "r1"})
@@ -111,8 +119,8 @@ func (r *rig) status(id string) string { return r.k.State().Plans[id].Status }
 func TestReversibleStepRunsOnceAndReplayMatches(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"), st(key.Organize, "m2"))
-	must(t, r.k.Tick(10))
-	must(t, r.k.Tick(20))
+	must(t, r.tick(10))
+	must(t, r.tick(20))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 2 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
 	}
@@ -147,30 +155,30 @@ func TestHoldWindowThenNoveltyWindow(t *testing.T) {
 	r := newRig(t)
 	k := r.derive(key.LimitHold(hour, 4*hour))
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
-	must(t, r.k.Tick(4*hour-1))
+	must(t, r.tick(0))
+	must(t, r.tick(4*hour-1))
 	if len(r.mail.Effects()) != 0 {
 		t.Fatal("a novel irreversible step ran inside its window (KEY-8)")
 	}
-	must(t, r.k.Tick(4*hour))
+	must(t, r.tick(4*hour))
 	if len(r.mail.Effects()) != 1 {
 		t.Fatal("step did not run after its window")
 	}
 	// the same shape to the same recipient, a day on, is known: the base window applies
 	must(t, r.k.Submit(30*hour, r.sign(kernel.Plan{ID: "p2", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
-	must(t, r.k.Tick(30*hour))
-	must(t, r.k.Tick(31*hour))
+	must(t, r.tick(30*hour))
+	must(t, r.tick(31*hour))
 	if len(r.mail.Effects()) != 2 {
 		t.Fatalf("known shape should wait only the base window, effects %d", len(r.mail.Effects()))
 	}
 	// a new recipient is a new shape: the novelty window applies (KEY-8)
 	must(t, r.k.Submit(32*hour, r.sign(kernel.Plan{ID: "p3", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-b")}})))
-	must(t, r.k.Tick(32*hour))
-	must(t, r.k.Tick(35*hour))
+	must(t, r.tick(32*hour))
+	must(t, r.tick(35*hour))
 	if len(r.mail.Effects()) != 2 {
 		t.Fatal("a new recipient ran inside the novelty window")
 	}
-	must(t, r.k.Tick(36*hour))
+	must(t, r.tick(36*hour))
 	if len(r.mail.Effects()) != 3 {
 		t.Fatal("a new recipient did not run after the novelty window")
 	}
@@ -180,9 +188,9 @@ func TestRevokeDuringHoldCancelsWithNoEffect(t *testing.T) {
 	r := newRig(t)
 	k := r.derive(key.LimitHold(hour, hour))
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	must(t, r.k.Revoke(10, k.Tip()))
-	must(t, r.k.Tick(2*hour))
+	must(t, r.tick(2*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
 	}
@@ -192,15 +200,15 @@ func TestPauseWaitsStopCancels(t *testing.T) {
 	r := newRig(t)
 	k := r.derive(key.LimitHold(hour, hour))
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	must(t, r.k.Pause(1, k.Tip()))
-	must(t, r.k.Tick(2*hour))
+	must(t, r.tick(2*hour))
 	if r.status("p1") != kernel.SActive || len(r.mail.Effects()) != 0 {
 		t.Fatal("a paused key must wait")
 	}
 	must(t, r.k.Unpause(2*hour+1, k.Tip()))
 	must(t, r.k.Stop(2*hour+2))
-	must(t, r.k.Tick(3*hour))
+	must(t, r.tick(3*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
 		t.Fatal("stop must cancel the plan with no effect (KRN-6)")
 	}
@@ -215,12 +223,12 @@ func TestLostAckIsProbedAndDoneOnce(t *testing.T) {
 		return ""
 	}
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
 		t.Fatal("a lost answer must leave the step unknown")
 	}
-	must(t, r.k.Tick(kernel.ProbeEvery-1))
-	must(t, r.k.Tick(kernel.ProbeEvery))
+	must(t, r.tick(kernel.ProbeEvery-1))
+	must(t, r.tick(kernel.ProbeEvery))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("status %s effects %d (KRN-8)", r.status("p1"), len(r.mail.Effects()))
 	}
@@ -238,9 +246,9 @@ func TestDroppedStepIsRedoneWithoutSecondCharge(t *testing.T) {
 	}
 	k := r.derive(key.LimitUses(1))
 	r.plan("p1", k, st(key.Trash, "m1"))
-	must(t, r.k.Tick(0))
-	must(t, r.k.Tick(kernel.ProbeEvery))
-	must(t, r.k.Tick(kernel.ProbeEvery+1))
+	must(t, r.tick(0))
+	must(t, r.tick(kernel.ProbeEvery))
+	must(t, r.tick(kernel.ProbeEvery+1))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("status %s effects %d: a redo must not be refused by its own charge", r.status("p1"), len(r.mail.Effects()))
 	}
@@ -251,7 +259,7 @@ func TestParkedAfterTenUnknownChecks(t *testing.T) {
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
 	r.plan("p1", r.root, st(key.Trash, "m1"))
 	for i := int64(0); i <= kernel.MaxChecks+1; i++ {
-		must(t, r.k.Tick(i*kernel.ProbeEvery))
+		must(t, r.tick(i*kernel.ProbeEvery))
 	}
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PParked || len(r.mail.Effects()) != 0 {
 		t.Fatal("ten unknown checks must park the step (KRN-8)")
@@ -261,7 +269,7 @@ func TestParkedAfterTenUnknownChecks(t *testing.T) {
 func TestSameEffectWithinADayNeedsFreshKey(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
 	if r.status("p2") != kernel.SRejected {
 		t.Fatal("the same irreversible effect within 24h must be refused (KRN-8)")
@@ -271,13 +279,13 @@ func TestSameEffectWithinADayNeedsFreshKey(t *testing.T) {
 func TestRestartAfterDispatchBeforeResultProbes(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	cutLast(t, r.store, 1) // the result never reached disk; the effect did
 	r.boot(1)
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
 		t.Fatal("an in-flight step must come back unknown")
 	}
-	must(t, r.k.Tick(1+kernel.ProbeEvery))
+	must(t, r.tick(1+kernel.ProbeEvery))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
 	}
@@ -302,7 +310,7 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 		t.Fatal("cancel")
 	}
 	r.plan("p2", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(2))
+	must(t, r.tick(2))
 	must(t, r.k.Undo(3, "p2", 0))
 	if !r.k.State().Plans["p2"].Steps[0].Undone {
 		t.Fatal("undo")
@@ -313,7 +321,7 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 func TestUndoKeepsTheDuplicateGuardOfAnIrreversibleStep(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	must(t, r.k.Undo(1, "p1", 0))
 	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
 	if r.status("p2") != kernel.SRejected {
@@ -371,7 +379,7 @@ func cutLast(t *testing.T, s *kernel.MemStore, n int) {
 func TestLogReopensIdentical(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(1))
+	must(t, r.tick(1))
 	before := r.k.Log().Entries()
 	r.boot(2)
 	if !kernel.Same(before, r.k.Log().Entries()[:len(before)]) {
@@ -382,7 +390,7 @@ func TestLogReopensIdentical(t *testing.T) {
 func TestLogTamperTruncationForkTorn(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(1))
+	must(t, r.tick(1))
 	must(t, r.k.Log().Anchor())
 	good := append([]byte(nil), r.store.B...)
 
@@ -424,7 +432,7 @@ func withStore(r *rig, s kernel.Store) kernel.Config {
 func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 	r := newRig(t) // root issue is anchored
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	must(t, r.k.Tick(1))
+	must(t, r.tick(1))
 	must(t, r.k.Stop(2))
 	n := r.k.Log().Len()
 	r.anchor.down = true
@@ -456,7 +464,7 @@ func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	if err := r.k.Resume(2); err == nil {
 		t.Fatal("an unconfirmed resume must report it")
 	}
-	if err := r.k.Tick(3); err == nil { // the broken log refuses the dispatch entry, so the clerk is never called
+	if err := r.tick(3); err == nil { // the broken log refuses the dispatch entry, so the clerk is never called
 		t.Fatal("nothing may be appended after an unconfirmed widening")
 	}
 	if len(r.mail.Effects()) != 0 {
@@ -470,7 +478,7 @@ func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	if !r.k.State().Stopped {
 		t.Fatal("a resume the anchor never confirmed must not survive a reboot")
 	}
-	must(t, r.k.Tick(6))
+	must(t, r.tick(6))
 	if len(r.mail.Effects()) != 0 {
 		t.Fatal("the plan must stay stopped")
 	}
@@ -513,7 +521,7 @@ func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r.anchor.down = false
 	r.boot(3)
 	r.plan("p2", other, st(key.Trash, "m1"))
-	must(t, r.k.Tick(4))
+	must(t, r.tick(4))
 	if r.status("p2") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatal("an issue the anchor never confirmed must not survive a reboot (KEY-1)")
 	}
@@ -590,19 +598,19 @@ func TestCancelledPlanStillReconcilesAndBlocksDuplicate(t *testing.T) {
 		return ""
 	}
 	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	must(t, r.k.Cancel(1, "p1"))
-	must(t, r.k.Tick(kernel.ProbeEvery))
+	must(t, r.tick(kernel.ProbeEvery))
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PUnknown {
 		t.Fatal("the unknown step must stay unknown while the probe is unanswered")
 	}
 	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
-	must(t, r.k.Tick(kernel.ProbeEvery+1))
+	must(t, r.tick(kernel.ProbeEvery+1))
 	if r.status("p2") == kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("a cancelled plan's unreconciled effect must block the same effect (KRN-8): p2 %s effects %d", r.status("p2"), len(r.mail.Effects()))
 	}
 	probeDown = false
-	must(t, r.k.Tick(2*kernel.ProbeEvery+2))
+	must(t, r.tick(2*kernel.ProbeEvery+2))
 	if r.k.State().Plans["p1"].Steps[0].Phase != kernel.PDone {
 		t.Fatal("a cancelled plan must still settle its unknown step by probing")
 	}
@@ -679,7 +687,7 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 		return s
 	}
 	r.plan("p1", buy, step("10"))
-	must(t, r.k.Tick(0))
+	must(t, r.tick(0))
 	for i, a := range []string{"10", "010", "+10", "-0"} {
 		id := "q" + string(rune('a'+i))
 		r.plan(id, buy, step(a))
@@ -709,7 +717,7 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 	}
 	// The planner's own use of its key runs, within the key.
 	must(t, r.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p0", Key: k, Steps: organize(2)}, planner.priv)))
-	must(t, r.k.Tick(10))
+	must(t, r.tick(10))
 	if r.status("p0") != kernel.SDone || len(r.mail.Effects()) != 2 {
 		t.Fatalf("holder's own plan: status %s, %d effects", r.status("p0"), len(r.mail.Effects()))
 	}
@@ -722,13 +730,12 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 		"p3": {ID: "p3", Key: k, Steps: organize(1)},
 	} {
 		must(t, r.k.Submit(20, p))
-		must(t, r.k.Tick(30))
+		must(t, r.tick(30))
 		if r.status(id) != kernel.SRejected || len(r.mail.Effects()) != 2 {
 			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
 		}
 		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
-		req := kernel.Request{Plan: p, Idem: kernel.Idem(id, 0), Now: 30}
-		if rf := clerk.Check(r.owner.pub, "mail", nil, req, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+		if rf := clerk.Check(r.owner.pub, "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
 			t.Fatalf("%s: clerk check %v", id, rf)
 		}
 	}
@@ -747,8 +754,197 @@ func TestPlanTextMustBeUTF8(t *testing.T) {
 		}
 	}
 	must(t, r.k.Submit(0, b))
-	must(t, r.k.Tick(10))
+	must(t, r.tick(10))
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatalf("non-UTF-8 plan: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+}
+
+// park runs plan p1 (one trash step) with every answer lost until the step
+// parks after MaxChecks, and returns the time of the last check.
+func (r *rig) park(k key.Key) int64 {
+	r.t.Helper()
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	r.plan("p1", k, st(key.Trash, "m1"))
+	at := int64(0)
+	for i := int64(0); i <= kernel.MaxChecks+1; i++ {
+		at = i * kernel.ProbeEvery
+		must(r.t, r.tick(at))
+	}
+	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PParked {
+		r.t.Fatalf("phase %s, want parked", ph)
+	}
+	r.mail.Fault = nil
+	return at
+}
+
+// A parked step is not a dead end: STATUS lists it with the clerk's last
+// answer and whether it may be retried (KRN-8, CH-11, OWN-16).
+func TestStatusListsUnsettledSteps(t *testing.T) {
+	r := newRig(t)
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	r.plan("p1", r.root, st(key.Trash, "m1"))
+	must(t, r.tick(0))
+	want := kernel.Unsettled{Plan: "p1", Verb: key.Trash, Clerk: "mail", Phase: kernel.PUnknown, Detail: "no answer"}
+	if got := r.k.State().Status(); len(got) != 1 || got[0] != want {
+		t.Fatalf("status %+v, want %+v", got, want)
+	}
+	for i := int64(1); i <= kernel.MaxChecks+1; i++ {
+		must(t, r.tick(i*kernel.ProbeEvery))
+	}
+	want.Phase, want.Checks, want.Retry = kernel.PParked, kernel.MaxChecks, true
+	if got := r.k.State().Status(); len(got) != 1 || got[0] != want {
+		t.Fatalf("status %+v, want %+v", got, want)
+	}
+	must(t, r.k.Cancel(kernel.MaxChecks*kernel.ProbeEvery*2, "p1"))
+	if got := r.k.State().Status(); len(got) != 1 || got[0].Retry {
+		t.Fatalf("a cancelled plan's parked step is still listed, and is not retried: %+v", got)
+	}
+}
+
+// RETRY sends a parked step again under its own idempotency key, once, and the
+// log replays to the same state (KRN-8, KRN-1).
+func TestRetryRedispatchesAParkedStep(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.root)
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.tick(at+2))
+	must(t, r.tick(at+2+kernel.ProbeEvery)) // one check: the retry starts the count again
+	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PUnknown {
+		t.Fatalf("phase %s after a retry and one check, want unknown", ph)
+	}
+	r.mail.Fault = nil
+	must(t, r.tick(at+2+2*kernel.ProbeEvery))
+	must(t, r.tick(at+3+2*kernel.ProbeEvery))
+	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 || r.mail.Effects()[0].Idem != kernel.Idem("p1", 0) {
+		t.Fatalf("status %s, effects %+v", r.status("p1"), r.mail.Effects())
+	}
+	if got := r.k.State().Status(); len(got) != 0 {
+		t.Fatalf("a settled step is still listed: %+v", got)
+	}
+	re, err := kernel.Replay(r.owner.pub, r.k.Log().Entries())
+	must(t, err)
+	if !reflect.DeepEqual(re, r.k.State()) {
+		t.Fatal("replay differs after a retry")
+	}
+}
+
+// RETRY widens nothing else: the redo meets the same checks as any dispatch,
+// so a key revoked, or a STOP, while the step was parked still refuses it.
+func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
+	for name, narrow := range map[string]func(*rig, int64) error{
+		"revoked": func(r *rig, at int64) error { return r.k.Revoke(at, r.root.Tip()) },
+		"stopped": func(r *rig, at int64) error { return r.k.Stop(at) },
+	} {
+		r := newRig(t)
+		at := r.park(r.root)
+		must(t, narrow(r, at+1))
+		must(t, r.k.Retry(at+2, "p1", 0))
+		must(t, r.tick(at+3))
+		if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
+			t.Fatalf("%s: status %s, %d effects", name, r.status("p1"), len(r.mail.Effects()))
+		}
+	}
+}
+
+// Only a parked step of a live plan can be retried; anything else is refused
+// and leaves no entry.
+func TestRetryRefusesAStepThatIsNotParked(t *testing.T) {
+	r := newRig(t)
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	r.plan("p1", r.root, st(key.Trash, "m1"))
+	must(t, r.tick(0)) // unknown, still being reconciled
+	r.mail.Fault = nil
+	r.plan("p2", r.root, st(key.Organize, "m2"))
+	must(t, r.tick(1)) // done
+	c := newRig(t)
+	at := c.park(c.root)
+	must(t, c.k.Cancel(at+1, "p1")) // parked, but the owner cancelled the plan
+	for _, x := range []struct {
+		r     *rig
+		plan  string
+		index int
+	}{{r, "p1", 0}, {r, "p2", 0}, {r, "p2", 1}, {r, "nope", 0}, {c, "p1", 0}} {
+		n := x.r.k.Log().Len()
+		if err := x.r.k.Retry(at+2, x.plan, x.index); !errors.Is(err, kernel.ErrNotParked) || x.r.k.Log().Len() != n {
+			t.Fatalf("retry %s/%d: %v, log %d -> %d", x.plan, x.index, err, n, x.r.k.Log().Len())
+		}
+	}
+}
+
+// RETRY is a widening: one whose anchor failed does not survive a restart,
+// and the step stays parked with no effect (KRN-7).
+func TestUnanchoredRetryDoesNotSurviveReboot(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.root)
+	r.anchor.down = true
+	if err := r.k.Retry(at+1, "p1", 0); err == nil {
+		t.Fatal("an unconfirmed retry must report it")
+	}
+	if err := r.tick(at + 2); err == nil {
+		t.Fatal("nothing may be appended after an unconfirmed retry")
+	}
+	r.anchor.down = false
+	r.boot(at + 3)
+	must(t, r.tick(at+4))
+	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PParked || len(r.mail.Effects()) != 0 {
+		t.Fatalf("phase %s, %d effects after an unconfirmed retry", ph, len(r.mail.Effects()))
+	}
+}
+
+// The clerk judges the hold on its own clock: a kernel whose clock runs ahead
+// releases a held step, and the clerk still refuses it inside the window
+// (CLK-2, KEY-8).
+func TestClerkKeepsTheHoldWhenTheKernelClockRunsAhead(t *testing.T) {
+	r := newRig(t)
+	k := r.derive(key.LimitHold(hour, hour))
+	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
+	must(t, r.tick(0)) // held at 0
+	r.now = hour / 2   // the clerk's clock: half the window
+	must(t, r.k.Tick(2*hour))
+	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
+		t.Fatalf("status %s, %d effects: the clerk released a hold on the kernel's clock", r.status("p1"), len(r.mail.Effects()))
+	}
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != clerk.RHold {
+		t.Fatalf("detail %q, want %q", d, clerk.RHold)
+	}
+}
+
+// Dispatched answers only for the exact plan the log admitted, with its step
+// in flight: not before the dispatch, not after the result, not for another
+// step, and not for a plan under the same id with other steps or another key,
+// which the holder could sign as validly (CLK-2, KRN-8).
+func TestDispatchedAnswersOnlyForTheLoggedPlanInFlight(t *testing.T) {
+	r := newRig(t)
+	p := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m1")}})
+	twin := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m2")}})
+	rekeyed := r.sign(kernel.Plan{ID: "p1", Key: r.derive(key.LimitUses(5)), Steps: p.Steps})
+	answers := func() map[string]bool {
+		got := map[string]bool{}
+		for name, q := range map[string]kernel.Request{"admitted": {Plan: p}, "twin": {Plan: twin},
+			"rekeyed": {Plan: rekeyed}, "other step": {Plan: p, Index: 1}} {
+			_, got[name] = r.k.State().Dispatched(q)
+		}
+		return got
+	}
+	var during map[string]bool
+	r.mail.Fault = func(op string, _ kernel.Request) string {
+		if op == "do" {
+			during = answers()
+		}
+		return ""
+	}
+	must(t, r.k.Submit(0, p))
+	none := map[string]bool{"admitted": false, "twin": false, "rekeyed": false, "other step": false}
+	if got := answers(); !reflect.DeepEqual(got, none) {
+		t.Fatalf("before the dispatch: %v", got)
+	}
+	must(t, r.tick(1))
+	if want := map[string]bool{"admitted": true, "twin": false, "rekeyed": false, "other step": false}; !reflect.DeepEqual(during, want) {
+		t.Fatalf("in flight: %v, want %v", during, want)
+	}
+	if got := answers(); !reflect.DeepEqual(got, none) {
+		t.Fatalf("after the result: %v", got)
 	}
 }

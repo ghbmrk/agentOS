@@ -71,6 +71,9 @@ type Account struct {
 	items     []Item
 	mails     map[string]Mail   // by id: the clerk's own copy, never given out
 	mailOf    map[string]string // sender handle to the mail it was found in
+	// Clock is the clerk's own time, which holds are judged on (CLK-2); nil
+	// reads the wall clock.
+	Clock clerk.Clock
 
 	mu       sync.Mutex
 	state    *kernel.State
@@ -160,13 +163,16 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := r.Step()
-	if a.state == nil || !a.state.Dispatched(r) {
+	if a.state == nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
 	}
-	if a.done[r.Idem] {
+	if _, ok := a.state.Dispatched(r); !ok {
+		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
+	}
+	if a.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := clerk.Check(a.owner, Name, nil, r, a.state); rf != nil {
+	if rf := clerk.Check(a.owner, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {
@@ -205,14 +211,19 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	default:
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "outside-key")
 	}
-	a.done[r.Idem] = true
+	a.done[r.Idem()] = true
 	return kernel.Result{Outcome: "ok"}
 }
+
+// Facts is the clerk's reading of a step's claims: slice 1 keys set no
+// content or label caveats, so a mail step claims none, and no inbox verb
+// has an amount. Class, VRB-2 and retention are judged in Do (KEY-2).
+func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, clerk.Amount(s) }
 
 func (a *Account) Probe(r kernel.Request, _ kernel.View) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.done[r.Idem] {
+	if a.done[r.Idem()] {
 		return "done"
 	}
 	return "notdone"
