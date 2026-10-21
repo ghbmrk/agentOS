@@ -50,6 +50,11 @@ type Config struct {
 	// path prefixes on the declared origins. They add to the defaults
 	// (ADP-14-get).
 	StateLinks []string
+	// LoggedOut declares that the clerk supplies this account's sessions
+	// no identity: no cookies, password or card. Only then are clicks,
+	// typing and selects free (G9, D-147). Left false, identity is unknown
+	// and the gate fails closed.
+	LoggedOut bool
 }
 
 // Result is everything an agent can see from one request. Fields the driver
@@ -67,8 +72,10 @@ type Result struct {
 	Path               string   `json:"path,omitempty"`
 	Bytes              int64    `json:"bytes,omitempty"`
 	RefusedNavigations []string `json:"refused_navigations,omitempty"`
-	// Hold names a request held for the owner's approval (error "held").
-	Hold string `json:"hold,omitempty"`
+	// To names what an action waiting for approval reaches (error
+	// "approval_required"): the role, quoted name and target of the ref, or
+	// the URL of a navigate, after the output filter.
+	To string `json:"to,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -86,6 +93,8 @@ type Gate struct {
 	stopped bool
 	// refs is what the last snapshot the driver returned showed, per ref.
 	refs map[string]link
+	// page is the URL of the page the refs were read from.
+	page string
 	// typed is what the agent typed, per ref, on the page the driver
 	// named in its reply (G10).
 	typed map[string]typedField
@@ -95,9 +104,7 @@ type Gate struct {
 	// lost is set once typed or said overflows maxTyped. From then on
 	// every snapshot with an omitted field is withheld: forgetting agent
 	// text would let its echo answer a guess (PR #2273 security delta).
-	lost      bool
-	holds     map[string]Hold
-	holdOrder []string
+	lost bool
 }
 
 // Start launches the driver for one account.
@@ -140,7 +147,7 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
-		holds: map[string]Hold{}, cmd: cmd, stdin: stdin, lines: make(chan []byte)}
+		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
 }
@@ -200,37 +207,40 @@ func (g *Gate) stop() {
 
 var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is not running"}
 
-// Do runs one request line from an agent and returns what the agent may see.
-func (g *Gate) Do(ctx context.Context, raw []byte) Result {
+// do runs one request line and returns what the agent may see. Only the
+// clerk calls it. An action that needs the owner's approval is refused
+// unsent (approval_required): no recipe covers any page yet, so it needs
+// the owner's approval of the exact request (CLK-3), and To names what it
+// reaches. effect reports an action that may change state at the site
+// (judgeClosed), sent only because the session is logged out; lost reports
+// that the executor stopped after it was written, so whether it acted is
+// unknown (KRN-8).
+func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.stopped {
-		return stoppedResult
+		return stoppedResult, false, false
 	}
 	req, err := Parse(raw)
 	if err != nil {
 		d, _ := g.filter.text(err.Error())
-		return Result{Error: "protocol", Detail: d}
+		return Result{Error: "protocol", Detail: d}, false, false
 	}
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
-		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
+		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}, false, false
 	}
-	switch req.Verb {
-	case "navigate":
-		if g.links.match(req.URL) {
-			return g.hold(req, link{target: req.URL})
-		}
-	case "click", "download":
-		// The gate must know what a link points at before it is followed. A
-		// clickable element named as an action is held too: an anchor with
-		// role="button" or a GET form's button shows no target.
-		l, ok := g.refs[req.Ref]
-		if !ok {
-			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
-		}
-		if l.held(g.links) {
-			return g.hold(req, l)
-		}
+	l, effect, refused := g.judgeClosed(req)
+	need := effect
+	if refused == nil && g.cfg.LoggedOut {
+		l, need, refused = g.judgeLoggedOut(req)
+	}
+	if refused != nil {
+		return *refused, false, false
+	}
+	if need {
+		t, _ := g.filter.text(l.to())
+		return Result{Error: "approval_required", To: t,
+			Detail: "this action may change state at the site and needs the owner's approval of this exact request, which this browser cannot ask for yet (CLK-3); nothing was sent"}, false, false
 	}
 	switch req.Verb {
 	case "type":
@@ -238,11 +248,85 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 	case "navigate":
 		g.say(urlWords(req.URL)...)
 	}
-	res := g.send(ctx, req)
-	if req.Verb == "type" && res.OK {
-		g.remember(req, res.URL)
+	out := g.send(ctx, req)
+	if req.Verb == "type" && out.OK {
+		g.remember(req, out.URL)
 	}
-	return res
+	return out, effect, effect && g.stopped
+}
+
+// effect reports whether the request line raw may change state at the site
+// as judgeClosed sees it now. A line the gate cannot judge, its ref unseen,
+// counts as one (fail closed); a line the protocol refuses was never sent.
+func (g *Gate) effect(raw []byte) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, err := Parse(raw)
+	if err != nil {
+		return false
+	}
+	_, effect, refused := g.judgeClosed(req)
+	return effect || refused != nil
+}
+
+// judgeClosed reports what req reaches and whether it may change state at
+// the site, failing closed: only a snapshot, a screenshot, typing without
+// submit, a click that focuses a text field, and a navigate or a link
+// followed to another http(s) page G9 does not match can not. A button, a
+// select or a submit shows the gate no request, so on an account the owner
+// may be signed in to it may act whatever its name. Logged out it can harm
+// the owner only through a URL that acts or carries a token
+// (judgeLoggedOut, D-147).
+func (g *Gate) judgeClosed(req Request) (link, bool, *Result) {
+	switch req.Verb {
+	case "snapshot", "screenshot":
+		return link{}, false, nil
+	case "type":
+		return g.refs[req.Ref], req.Submit, nil
+	case "navigate":
+		return link{target: req.URL}, g.links.match(req.URL), nil
+	case "click", "download":
+		l, ok := g.refs[req.Ref]
+		if !ok {
+			return link{}, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		}
+		if req.Verb == "click" && fieldRoles[l.role] {
+			return l, false, nil
+		}
+		return l, l.role != "link" || !leaves(l.target, g.page) || l.acts(g.links), nil
+	}
+	return g.refs[req.Ref], true, nil
+}
+
+// leaves reports whether following target loads another http(s) page. A
+// javascript: href, or a fragment of the page itself ("#", "#pay"), loads
+// nothing: the click runs the site's own script, which may submit.
+func leaves(target, page string) bool {
+	u, err := url.Parse(target)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return false
+	}
+	p, err := url.Parse(page)
+	if err != nil {
+		return true
+	}
+	u.Fragment, u.RawFragment, p.Fragment, p.RawFragment = "", "", "", ""
+	return u.String() != p.String()
+}
+
+// judgeLoggedOut is judge for a session holding no identity of the owner's.
+func (g *Gate) judgeLoggedOut(req Request) (link, bool, *Result) {
+	switch req.Verb {
+	case "navigate":
+		return link{target: req.URL}, g.links.match(req.URL), nil
+	case "click", "download":
+		l, ok := g.refs[req.Ref]
+		if !ok {
+			return link{}, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		}
+		return l, l.target != "" && g.links.match(l.target), nil
+	}
+	return g.refs[req.Ref], false, nil
 }
 
 type typedField struct{ text, url string }
@@ -399,7 +483,7 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	}
 	if res.Snapshot != "" {
 		// Read before filtering: a redaction must not hide a link's target.
-		g.refs = parseRefs(res.Snapshot, res.URL)
+		g.refs, g.page = parseRefs(res.Snapshot, res.URL), res.URL
 	}
 	// The driver's count is not trusted: the gate reports its own.
 	res.Snapshot, res.PasswordFields = g.omit(res.Snapshot, res.URL)
