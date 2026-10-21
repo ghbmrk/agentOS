@@ -81,10 +81,16 @@ type Account struct {
 	mu       sync.Mutex
 	state    *kernel.State
 	done     map[string]bool
+	sends    map[string]int // mailbox calls per step, for Probe's bound
 	effects  []Effect
 	posts    []Post
 	refusals []Refusal
 }
+
+// classes is the closed list of classes a reader may give a mail. Any other
+// class, the empty one included, leaves the mail unclassified, so a class
+// never carries text into a label or a mailbox command.
+var classes = map[string]bool{"bulk": true, "spam": true, "phishing": true, "personal": true, "alert": true}
 
 // minSecret is the shortest handle secret: 128 bits.
 const minSecret = 16
@@ -110,8 +116,11 @@ func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mail
 		return nil, errors.New("inbox: no mailbox")
 	}
 	a := &Account{owner: owner, box: box, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
-		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}}
+		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}, sends: map[string]int{}}
 	for _, m := range mails {
+		if !classes[m.Class] {
+			m.Class = ""
+		}
 		it := Item{Mail: m.ID, Class: m.Class}
 		a.mails[m.ID] = m
 		if _, ok := a.eligible(m); ok {
@@ -203,6 +212,7 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 				return a.refuse(string(key.DeleteRemote), target, "trash-not-restorable")
 			}
 		}
+		a.sends[r.Idem()]++
 		var err error
 		if s.Verb == key.Trash {
 			err = a.box.Trash(context.Background(), target)
@@ -224,6 +234,7 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 		if !ok {
 			return a.refuse(string(s.Verb), id, "no-longer-eligible")
 		}
+		a.sends[r.Idem()]++
 		p := Post{Method: "POST", URL: u, Body: a.body,
 			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}}
 		if res, ok := a.landed(string(s.Verb), id, a.box.Post(context.Background(), p)); !ok {
@@ -243,20 +254,29 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 // has an amount. Class, VRB-2 and retention are judged in Do (KEY-2).
 func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, clerk.Amount(s) }
 
+// Probe answers from the clerk's memory, never by acting (KRN-8). It says
+// notdone, inviting a resend, only for organize and trash, whose mailbox
+// effects are idempotent (a keyword set again; a moved mail is confirmed by
+// the same read-back), and for at most MaxChecks mailbox calls per step;
+// then unknown, so the kernel parks the step. An unconfirmed unsubscribe is
+// never sent again: a one-click POST is not idempotent.
 func (a *Account) Probe(r kernel.Request, _ kernel.View) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.done[r.Idem()] {
+	switch {
+	case a.done[r.Idem()]:
 		return "done"
+	case a.sends[r.Idem()] >= kernel.MaxChecks:
+		return "unknown"
+	case r.Step().Verb == key.Organize || r.Step().Verb == key.Trash:
+		return "notdone"
 	}
-	return "notdone"
+	return "unknown"
 }
 
 // landed reads a mailbox's answer: nil is done; NotDone is a refusal before
 // acting, recorded like the clerk's own; anything else may have acted and was
-// not confirmed, so the kernel probes and parks it (KRN-8). Every mailbox
-// effect is idempotent (a keyword set again, a move of a mail already moved
-// is confirmed by the same read-back), so a resend after unknown is safe.
+// not confirmed, so it is unknown and Probe decides whether it is sent again.
 func (a *Account) landed(op, mail string, err error) (kernel.Result, bool) {
 	var nd NotDone
 	switch {

@@ -73,7 +73,18 @@ type Server struct {
 	hidden    map[string]bool
 	logins    []string
 	smtpFail  bool
+	keywords  bool // drop keywords a STORE sets, as a server without \* does
+	move      Move
 }
+
+// Move is how the server answers a MOVE.
+type Move int
+
+const (
+	MoveOK    Move = iota // moves the message
+	MoveKeeps             // answers OK and leaves the message where it was
+	MoveLoses             // answers OK and puts the message nowhere
+)
 
 // Submission is one message the SMTP sink accepted.
 type Submission struct {
@@ -199,6 +210,21 @@ func (s *Server) Hide(folder string, hide bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hidden[folder] = hide
+}
+
+// DropKeywords makes STORE answer OK but keep no keyword, only system
+// flags (or not).
+func (s *Server) DropKeywords(drop bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keywords = drop
+}
+
+// SetMove sets how the server answers a MOVE.
+func (s *Server) SetMove(m Move) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.move = m
 }
 
 // FailSMTP makes the SMTP sink refuse DATA (or not).
@@ -492,7 +518,16 @@ func (m *mbox) UpdateMessagesFlags(uid bool, set *imap.SeqSet, op imap.FlagsOp, 
 			id = x.uid
 		}
 		if set.Contains(id) {
-			x.flags = updateFlags(x.flags, op, flags)
+			kept := flags
+			if m.s.keywords {
+				kept = nil
+				for _, f := range flags {
+					if strings.HasPrefix(f, `\`) {
+						kept = append(kept, f)
+					}
+				}
+			}
+			x.flags = updateFlags(x.flags, op, kept)
 		}
 	}
 	return nil
@@ -514,6 +549,9 @@ func (m *mbox) transfer(uid bool, set *imap.SeqSet, dest string, move bool) erro
 		return backend.ErrNoSuchMailbox
 	}
 	src := m.b()
+	if move && m.s.move == MoveKeeps {
+		return nil
+	}
 	var keep []*msg
 	for i, x := range src.msgs {
 		id := uint32(i + 1)
@@ -528,7 +566,9 @@ func (m *mbox) transfer(uid bool, set *imap.SeqSet, dest string, move bool) erro
 		c.flags = append([]string(nil), x.flags...)
 		c.uid = d.next
 		d.next++
-		d.msgs = append(d.msgs, &c)
+		if !move || m.s.move != MoveLoses {
+			d.msgs = append(d.msgs, &c)
+		}
 		if !move {
 			keep = append(keep, x)
 		}

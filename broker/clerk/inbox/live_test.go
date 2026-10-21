@@ -236,3 +236,134 @@ func TestLiveReadsTheNewestReadMax(t *testing.T) {
 		t.Fatal("the oldest mail was read")
 	}
 }
+
+// Each read-back is what makes an effect count: a server that answers OK
+// but keeps no keyword, leaves the mail in place, or puts it nowhere gives an
+// unknown step and no recorded effect (OWN-13, SPEC "Read back").
+func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
+	const bulk, spam = "<b1@shop.test>", "<s1@spam.test>"
+	for _, c := range []struct {
+		name    string
+		breakIt func(*imaptest.Server)
+		verb    key.Verb
+	}{
+		{"keyword dropped", func(s *imaptest.Server) { s.DropKeywords(true) }, key.Organize},
+		{"move keeps the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveKeeps) }, key.Trash},
+		{"move loses the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveLoses) }, key.Trash},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			lr := newLiveRig(t, 30, map[string]string{bulk: "bulk", spam: "spam"},
+				rawMail(bulk, "news@shop.test", "Sale"), rawMail(spam, "x@spam.test", "Win"))
+			c.breakIt(lr.srv)
+			args := map[string]string{"target": lr.mail[spam]}
+			if c.verb == key.Organize {
+				args = map[string]string{"target": lr.mail[bulk], "label": "agentOS/bulk"}
+			}
+			p := lr.step("s", c.verb, args)
+			lr.run(t, p)
+			if n := len(lr.acct.Effects()); n != 0 {
+				t.Fatalf("an effect the server did not keep was recorded: %+v", lr.acct.Effects())
+			}
+			if len(lr.acct.Refusals()) != 0 {
+				t.Fatalf("an unconfirmed effect was recorded as a refusal: %+v", lr.acct.Refusals())
+			}
+			if got := lr.acct.Probe(kernel.Request{Plan: p}, lr.k.State()); got != "notdone" {
+				t.Fatalf("probe %q, want notdone (an idempotent effect may be sent again)", got)
+			}
+		})
+	}
+}
+
+// A transport refusal before acting is the clerk's NotDone, by its reason.
+func TestLiveRefusalsBeforeActingKeepTheirReason(t *testing.T) {
+	for err, want := range map[error]NotDone{imapsmtp.ErrValidity: nRenumbered, imapsmtp.ErrNoMove: nNoMove} {
+		if got := before(err); got != want {
+			t.Fatalf("before(%v) = %v, want %v", err, got, want)
+		}
+	}
+	if got := before(errors.New("connection reset")); errors.As(got, new(NotDone)) {
+		t.Fatalf("a transport failure became a refusal before acting: %v", got)
+	}
+}
+
+// failingBox never confirms anything and counts its calls.
+type failingBox struct{ calls int }
+
+func (f *failingBox) Label(context.Context, string, string) error { f.calls++; return errUnconfirmed }
+func (f *failingBox) Trash(context.Context, string) error         { f.calls++; return errUnconfirmed }
+func (f *failingBox) Post(context.Context, Post) error            { f.calls++; return errUnconfirmed }
+
+// An effect that is never confirmed is sent at most MaxChecks times and then
+// parked, not resent forever (KRN-8).
+func TestAnUnconfirmedOrganizeIsParkedAfterMaxChecks(t *testing.T) {
+	w, mails, raw := loadFixture(t)
+	var ms []Mail
+	for _, m := range mails {
+		ms = append(ms, Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
+	}
+	box := &failingBox{}
+	r := newRigOn(t, w, ms, box, 30)
+	ticks := []int64{}
+	for i := int64(1); i <= 3*kernel.MaxChecks; i++ {
+		ticks = append(ticks, t0+i*kernel.ProbeEvery)
+	}
+	r.run(t, r.step("o", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"}), ticks...)
+	if box.calls > kernel.MaxChecks {
+		t.Fatalf("%d mailbox calls, want at most %d", box.calls, kernel.MaxChecks)
+	}
+	st := r.k.State().Status()
+	if len(st) != 1 || st[0].Phase != kernel.PParked {
+		t.Fatalf("step is %+v, want parked", st)
+	}
+}
+
+// An unconfirmed unsubscribe is never sent again: a one-click POST is not
+// idempotent, so Probe says unknown at once.
+func TestAnUnconfirmedUnsubscribeIsNeverResent(t *testing.T) {
+	w, mails, raw := loadFixture(t)
+	var ms []Mail
+	for _, m := range mails {
+		ms = append(ms, Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
+	}
+	box := &failingBox{}
+	r := newRigOn(t, w, ms, box, 30)
+	p := r.step("u", key.Unsubscribe, map[string]string{"to": handleOfMail(t, r, "M01")})
+	r.run(t, p, t0+kernel.ProbeEvery, t0+2*kernel.ProbeEvery, t0+3*kernel.ProbeEvery)
+	if box.calls != 1 {
+		t.Fatalf("%d POSTs, want exactly 1", box.calls)
+	}
+	if got := r.acct.Probe(kernel.Request{Plan: p}, r.k.State()); got != "unknown" {
+		t.Fatalf("probe %q, want unknown", got)
+	}
+}
+
+// A class outside the reader's closed list leaves the mail unclassified, so a
+// class can never carry a space or a line break into a label (Security 1).
+func TestAClassOutsideTheListCannotReachTheMailbox(t *testing.T) {
+	const m = "<b1@shop.test>"
+	lr := newLiveRig(t, 30, map[string]string{m: "bulk \\Deleted"}, rawMail(m, "news@shop.test", "Sale"))
+	lr.run(t, lr.step("o", key.Organize, map[string]string{"target": lr.mail[m], "label": "agentOS/bulk \\Deleted"}))
+	if got := lr.lastRefusal(t).Reason; got != "unclassified" {
+		t.Fatalf("refusal %q, want unclassified", got)
+	}
+	if _, flags := lr.flagsOf(t, m); len(flags) != 0 {
+		t.Fatalf("mail got flags %v", flags)
+	}
+}
+
+// The mailbox refuses a label that is not an IMAP keyword before acting,
+// whoever asks: a line break cannot end the command and start another.
+func TestLiveRefusesALabelThatIsNotAKeyword(t *testing.T) {
+	const m, other = "<b1@shop.test>", "<p1@example.test>"
+	lr := newLiveRig(t, 30, nil, rawMail(m, "news@shop.test", "Sale"), rawMail(other, "pat@example.test", "Hi"))
+	err := lr.box.Label(context.Background(), lr.mail[m], "agentOS/bulk\r\nA1 UID STORE 1:* +FLAGS (\\Deleted)")
+	var nd NotDone
+	if !errors.As(err, &nd) || nd != nBadFlag {
+		t.Fatalf("Label = %v, want %v", err, nBadFlag)
+	}
+	for _, id := range []string{m, other} {
+		if _, flags := lr.flagsOf(t, id); len(flags) != 0 {
+			t.Fatalf("%s got flags %v", id, flags)
+		}
+	}
+}

@@ -35,6 +35,7 @@ const (
 	nNoMove     NotDone = "no-move"         // the server cannot MOVE without EXPUNGE
 	nNoTrash    NotDone = "no-trash-folder" // the account has no folder with the trash role
 	nNoPoster   NotDone = "no-poster"       // no one-click POSTer is wired (#2601)
+	nBadFlag    NotDone = "bad-flag"        // a label that is not an IMAP keyword
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -148,6 +149,8 @@ func before(err error) error {
 		return nRenumbered
 	case errors.Is(err, imapsmtp.ErrNoMove):
 		return nNoMove
+	case errors.Is(err, imapsmtp.ErrBadFlag):
+		return nBadFlag
 	}
 	return err
 }

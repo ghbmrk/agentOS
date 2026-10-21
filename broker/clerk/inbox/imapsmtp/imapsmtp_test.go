@@ -5,6 +5,7 @@ package imapsmtp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -89,6 +90,33 @@ func TestFailedSelectThenExistsAnswers(t *testing.T) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatalf("call %d hung after a refused SELECT and unilateral EXISTS: the client's state lock was left held", i)
+		}
+	}
+}
+
+// A flag that is not a system flag or a keyword atom is refused before
+// any connection: go-imap writes flags unquoted, so a space or a line
+// break would add a flag or a whole command (CRED-8).
+func TestFlagsThatAreNotAtomsAreRefusedBeforeActing(t *testing.T) {
+	s, err := New(Config{IMAP: "127.0.0.1:1", SMTP: "127.0.0.1:1", IMAPSec: Plain, SMTPSec: Plain, From: "o@example.test",
+		Credential: func(context.Context) (Login, error) { t.Fatal("a refused flag reached the login"); return Login{}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"", "a b", "agentOS/bulk \\Deleted", "x\r\nA1 UID EXPUNGE", "(x", "x)", "x{3}", "x%", "x*", `x"`, `x\`, "x]", "café", `\Recent`, `\Other`} {
+		if err := s.SetFlags(context.Background(), Ref{Folder: "INBOX", Validity: 1, UID: 1}, []string{f}, nil); !errors.Is(err, ErrBadFlag) {
+			t.Errorf("SetFlags add %q = %v, want ErrBadFlag", f, err)
+		}
+		if err := s.SetFlags(context.Background(), Ref{Folder: "INBOX", Validity: 1, UID: 1}, nil, []string{f}); !errors.Is(err, ErrBadFlag) {
+			t.Errorf("SetFlags remove %q = %v, want ErrBadFlag", f, err)
+		}
+		if err := s.Append(context.Background(), "INBOX", []string{f}, time.Now(), []byte("x")); !errors.Is(err, ErrBadFlag) {
+			t.Errorf("Append %q = %v, want ErrBadFlag", f, err)
+		}
+	}
+	for _, f := range []string{`\Seen`, `\deleted`, `\Draft`, "agentOS/bulk", "AgentOS", "$Junk"} {
+		if !flagsValid([]string{f}) {
+			t.Errorf("%q refused, want accepted", f)
 		}
 	}
 }

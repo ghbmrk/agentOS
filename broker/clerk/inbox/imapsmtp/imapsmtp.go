@@ -110,6 +110,35 @@ type Message struct {
 	Raw   []byte
 }
 
+// ErrBadFlag is returned before acting for a flag that is neither a system
+// flag nor an RFC 3501 keyword atom. go-imap writes flags into the command
+// unquoted, so a space or a line break in one would add flags or commands.
+var ErrBadFlag = errors.New("imapsmtp: a flag is not a system flag or a keyword atom")
+
+// systemFlags are the RFC 3501 flags a client may set.
+var systemFlags = map[string]bool{`\seen`: true, `\answered`: true, `\flagged`: true, `\deleted`: true, `\draft`: true}
+
+// flagsValid says whether every flag is a system flag or a keyword: one or
+// more ATOM-CHARs (printable ASCII but SP, "(", ")", "{", "%", "*", the
+// double quote, the backslash and "]").
+func flagsValid(flags []string) bool {
+	for _, f := range flags {
+		if systemFlags[strings.ToLower(f)] {
+			continue
+		}
+		if f == "" {
+			return false
+		}
+		for i := 0; i < len(f); i++ {
+			c := f[i]
+			if c <= 0x20 || c >= 0x7f || strings.IndexByte(`(){%*"\]`, c) >= 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ErrNoMove is returned before acting by a server without MOVE.
 var ErrNoMove = errors.New("imapsmtp: the server does not support MOVE")
 
@@ -431,6 +460,9 @@ func (s *Store) Find(ctx context.Context, folder, id string, match func(Message)
 // SetFlags adds and removes flags on one message, only while its folder
 // has the UID validity m was read under.
 func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error {
+	if !flagsValid(add) || !flagsValid(remove) {
+		return ErrBadFlag
+	}
 	return s.session(ctx, func(c *client.Client) error {
 		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
 			return err
@@ -502,6 +534,9 @@ func (s *Store) Ensure(ctx context.Context, folder string) error {
 
 // Append stores raw in folder.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) error {
+	if !flagsValid(flags) {
+		return ErrBadFlag
+	}
 	return s.session(ctx, func(c *client.Client) error {
 		return c.Append(folder, flags, date, bytes.NewBuffer(raw))
 	})
