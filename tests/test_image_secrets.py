@@ -297,11 +297,25 @@ class ForeignDisksTest(unittest.TestCase):
 
     SCRIPT = IMG / "mkosi/mkosi.extra/usr/lib/agentos/foreign-disks"
 
-    def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3", namespaces=None, real_b=False):
-        """Runs the script on a stand-in /proc. mounts and swaps are space-separated sources;
-        namespaces is a list of further mount lists, each its own process's mountinfo; chains maps a
-        device to its lsblk -s lines ("NAME TYPE"). Unless real_b, every /dev name counts as a block device."""
+    def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3", namespaces=None, real_b=False, btrfs=""):
+        """Runs the script on a stand-in /proc. mounts and swaps are space-separated sources; a mount
+        word NAME@MAJ:MIN names its device number, any other /dev name gets one of 252:N and any other
+        word (tmpfs, a 9p share) major 0. namespaces is a list of further mount lists, each its own
+        process's mountinfo; chains maps a /dev name to its lsblk -s lines ("NAME TYPE"). Unless real_b,
+        every swap name counts as a block device. A swap word NAME@file is a swap file. A mount word
+        starting with / and of major 0 is a btrfs mount; btrfs lists the /dev names whose numbers sysfs
+        shows for it."""
         chains = chains or {}
+        nums = {}
+
+        def mm(word):
+            name, _, num = word.partition("@")
+            if num:
+                nums[name] = num
+            elif name not in nums:
+                nums[name] = ("252:%d" if name.startswith("/dev/") else "0:%d") % (len(nums) + 1)
+            return nums[name]
+
         lines = lambda words: "".join("echo '%s'\n" % w for w in words.split())
 
         def stub(t, name, body):
@@ -314,18 +328,28 @@ class ForeignDisksTest(unittest.TestCase):
             for pid, ms in enumerate([mounts] + list(namespaces or []), 1):
                 (proc / str(pid)).mkdir(parents=True)
                 (proc / str(pid) / "mountinfo").write_text("".join(
-                    "%d 1 0:%d / /m%d rw - ext4 %s rw\n" % (i, i, i, m) for i, m in enumerate(ms.split(), 1)))
+                    "%d 1 %s / /m%d rw - %s %s rw\n" % (i, mm(m), i, "btrfs" if m.startswith("/") and mm(m).startswith("0:") else "ext4",
+                                                m.partition("@")[0])
+                    for i, m in enumerate(ms.split(), 1)))
             (proc / "swaps").write_text("Filename Type Size Used Priority\n" +
-                                        "".join("%s partition 1 0 -2\n" % w for w in swaps.split()))
-            stub(t, "findmnt", "echo %s\n" % root)
+                                        "".join("%s %s 1 0 -2\n" % (w.partition("@")[0], "file" if w.endswith("@file") else "partition")
+                                                for w in swaps.split()))
+            sysfs = t / "sys/fs/btrfs/uuid/devices"
+            for n, w in enumerate(btrfs.split()):
+                (sysfs / ("d%d" % n)).mkdir(parents=True)
+                (sysfs / ("d%d" % n) / "dev").write_text(mm(w) + "\n")
+            # The real findmnt pads the number to a column unless -r is given.
+            stub(t, "findmnt", 'case "$*" in *-r*) echo %s ;; *) echo "   %s" ;; esac\n' % (mm(root), mm(root)))
             stub(t, "readlink", 'echo "$2"\n')
+            keyed = dict(chains)
+            keyed.update({"/dev/block/" + nums[d]: out for d, out in chains.items() if d in nums})
             stub(t, "lsblk", 'case "$3" in\n%s*) exit 1 ;; esac\n' % "".join(
                 "%s) %s;;\n" % (dev, lines("\n".join(ln.replace(" ", "_") for ln in out)).replace("_", " "))
-                for dev, out in chains.items()))
+                for dev, out in keyed.items()))
             script = self.SCRIPT.read_text()
             if not real_b:
-                script = script.replace('[ -b "$d" ]', "true")
-            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_PROC=str(proc))
+                script = script.replace('[ -b "$d" ] ||', "true ||")
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_PROC=str(proc), AGENTOS_SYS=str(t / "sys"))
             return subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True).stdout.strip()
 
     BOOT = {"/dev/vda3": ["/dev/vda3 part", "/dev/vda disk"], "/dev/vda1": ["/dev/vda1 part", "/dev/vda disk"],
@@ -360,19 +384,54 @@ class ForeignDisksTest(unittest.TestCase):
     def test_a_listing_without_the_root_source_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2
         # A mount listing that cannot be read leaves no root source in it; that must not read as none.
-        self.assertEqual(self.run_script("", chains=self.BOOT), "foreign=unknown")
+        self.assertTrue(self.run_script("", chains=self.BOOT).startswith("foreign=unknown ("))
 
-    def test_a_dev_source_that_is_not_a_block_device_is_listed(self):
+    def test_a_block_mount_whose_source_is_not_under_dev_is_listed(self):
         # REQ: HW-8, ONB-2
-        # Neither name is a block device here (/dev/null is a character device), so both are foreign.
-        chains = dict(self.BOOT, **{"/dev/null": ["/dev/null disk"]})
-        self.assertEqual(self.run_script("/dev/vda3 /dev/null", chains=chains, real_b=True),
-                         "foreign=/dev/null,/dev/vda3")
+        # mount(2) takes any path as the source; the device number says what is mounted.
+        chains = dict(self.BOOT, **{"/run/hostdisk": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3 /run/hostdisk@252:90", chains=chains), "foreign=/dev/vdb1")
+        self.assertEqual(self.run_script("/dev/vda3 dev/vdb1@252:90", chains={
+            "dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"], **self.BOOT}), "foreign=/dev/vdb1")
+
+    def test_a_btrfs_mount_is_listed_by_the_devices_sysfs_shows(self):
+        # REQ: HW-8, ONB-2
+        # btrfs reports major 0 and any source string; its device numbers come from sysfs, so a
+        # relative or made-up source name changes nothing.
+        chains = dict(self.BOOT, **{"/dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        for src in ("/dev/vdb1", "/run/hostbtrfs", "run/hostbtrfs"):
+            self.assertEqual(self.run_script("/dev/vda3 %s@0:50" % src, chains=chains, btrfs="/dev/vdb1"),
+                             "foreign=/dev/vdb1")
+        self.assertEqual(self.run_script("/dev/vda3 /dev/vda1@0:50", chains=self.BOOT, btrfs="/dev/vda1"),
+                         "foreign=none")
+
+    def test_a_btrfs_mount_sysfs_cannot_show_is_unknown_not_none(self):
+        # REQ: HW-8, ONB-2
+        self.assertTrue(self.run_script("/dev/vda3 /run/x@0:50", chains=self.BOOT).startswith("foreign=unknown ("))
+        self.assertTrue(self.run_script("/dev/vda3 /run/x@0:50", chains=self.BOOT, btrfs="/dev/vdz9"
+                                        ).startswith("foreign=unknown ("))
+
+    def test_a_swap_partition_that_is_no_block_node_now_is_unknown_not_none(self):
+        # REQ: HW-8, ONB-2
+        # A node made anywhere and unlinked after swapon leaves a path that opens nothing.
+        for name in ("/dev/null", "/run/x\\040(deleted)", "/tmp/x"):
+            self.assertTrue(self.run_script("/dev/vda3", swaps=name, chains=self.BOOT, real_b=True
+                                            ).startswith("foreign=unknown ("), name)
+
+    def test_a_block_node_made_outside_dev_is_listed_as_swap(self):
+        # REQ: HW-8, ONB-2
+        chains = dict(self.BOOT, **{"/run/hostswap": ["/dev/vdb2 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3", swaps="/run/hostswap", chains=chains), "foreign=/run/hostswap")
+
+    def test_a_swap_file_is_judged_by_its_mount(self):
+        # REQ: HW-8, ONB-2
+        out = self.run_script("/dev/vda3", swaps="/var/swapfile@file", chains=self.BOOT, real_b=True)
+        self.assertEqual(out, "foreign=none")
 
     def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2
-        self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT), "foreign=unknown")
-        self.assertEqual(self.run_script("/dev/vda3", chains={}), "foreign=unknown")
+        self.assertTrue(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT).startswith("foreign=unknown ("))
+        self.assertTrue(self.run_script("/dev/vda3", chains={}).startswith("foreign=unknown ("))
 
     def test_boot_report_prints_the_line_and_ci_reads_it_on_both_boots(self):
         # REQ: HW-8, ONB-2
