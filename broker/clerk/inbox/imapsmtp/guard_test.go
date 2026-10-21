@@ -1,4 +1,4 @@
-package imap
+package imapsmtp
 
 // REQ: DEV-2, REV-5, ARC-6
 

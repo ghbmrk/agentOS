@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/clerk/inbox/imap"
-	"github.com/ghbmrk/agentos/broker/clerk/inbox/imap/imaptest"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -41,9 +41,9 @@ func newLiveRig(t *testing.T, retention int, classes map[string]string, raws ...
 	for _, raw := range raws {
 		srv.Deliver("INBOX", raw)
 	}
-	st, err := imap.New(imap.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imap.Plain, SMTPSec: imap.Plain, From: imaptest.User,
-		Credential: func(context.Context) (imap.Login, error) {
-			return imap.Login{User: imaptest.User, Secret: imaptest.Password}, nil
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+		Credential: func(context.Context) (imapsmtp.Login, error) {
+			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}})
 	if err != nil {
 		t.Fatal(err)

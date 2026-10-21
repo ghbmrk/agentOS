@@ -1,5 +1,5 @@
 // Package imapsmtp is the old mail adapter's Store over the mail clerk's
-// IMAP and SMTP transport (broker/clerk/inbox/imap). It only converts
+// IMAP and SMTP transport (broker/clerk/inbox/imapsmtp). It only converts
 // between the transport's raw messages and mail.Store's parsed ones, so the
 // transport has one copy. It is transitional: MIG-4-mail's delete (2574b,
 // #2574) removes it with broker/mail.
@@ -10,34 +10,34 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk/inbox/imap"
+	transport "github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/mail"
 )
 
 // The transport's configuration, as the adapter's callers name it.
 type (
-	Login    = imap.Login
-	Security = imap.Security
-	Config   = imap.Config
+	Login    = transport.Login
+	Security = transport.Security
+	Config   = transport.Config
 )
 
 const (
-	TLS      = imap.TLS
-	StartTLS = imap.StartTLS
-	Plain    = imap.Plain
+	TLS      = transport.TLS
+	StartTLS = transport.StartTLS
+	Plain    = transport.Plain
 )
 
 // ErrInsecure is returned for a Plain connection to a non-loopback host.
-var ErrInsecure = imap.ErrInsecure
+var ErrInsecure = transport.ErrInsecure
 
 // Store is a mail.Store over the transport.
-type Store struct{ t *imap.Store }
+type Store struct{ t *transport.Store }
 
 var _ mail.Store = (*Store)(nil)
 
 // New checks cfg.
 func New(cfg Config) (*Store, error) {
-	t, err := imap.New(cfg)
+	t, err := transport.New(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func New(cfg Config) (*Store, error) {
 // validityErr gives mail.ErrValidity for the transport's, which mailsock and
 // the adapter match.
 func validityErr(err error) error {
-	if errors.Is(err, imap.ErrValidity) {
+	if errors.Is(err, transport.ErrValidity) {
 		return mail.ErrValidity
 	}
 	return err
@@ -68,7 +68,7 @@ func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, erro
 
 // parse is the adapter's reading of one fetched message; one that does
 // not parse keeps only its place and flags.
-func parse(m imap.Message) mail.Message {
+func parse(m transport.Message) mail.Message {
 	msg, err := mail.Parse(m.Raw)
 	if err != nil {
 		msg = mail.Message{}
@@ -91,7 +91,7 @@ func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids 
 
 // Find returns the messages in folder whose Message-ID is exactly id.
 func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, error) {
-	ms, err := s.t.Find(ctx, folder, id, func(m imap.Message) bool { return parse(m).MessageID == id })
+	ms, err := s.t.Find(ctx, folder, id, func(m transport.Message) bool { return parse(m).MessageID == id })
 	var out []mail.Message
 	for _, m := range ms {
 		out = append(out, parse(m))
@@ -99,7 +99,9 @@ func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, er
 	return out, err
 }
 
-func ref(m mail.Ref) imap.Ref { return imap.Ref{Folder: m.Folder, Validity: m.Validity, UID: m.UID} }
+func ref(m mail.Ref) transport.Ref {
+	return transport.Ref{Folder: m.Folder, Validity: m.Validity, UID: m.UID}
+}
 
 func (s *Store) SetFlags(ctx context.Context, m mail.Ref, add, remove []string) error {
 	return validityErr(s.t.SetFlags(ctx, ref(m), add, remove))

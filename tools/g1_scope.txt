@@ -112,7 +112,7 @@ allow broker/checker/
 allow broker/childproc/
 allow broker/claim/
 # The mail clerk's IMAP transport, which broker/mail/imapsmtp wraps until 2574b (#2574).
-allow broker/clerk/inbox/imap/
+allow broker/clerk/inbox/imapsmtp/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/

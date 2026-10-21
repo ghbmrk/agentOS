@@ -1,7 +1,7 @@
 {"targets": [
   {"pkg": "attest", "name": "FuzzParse", "binary": "attest.test"},
   {"pkg": "browser", "name": "FuzzParse", "binary": "browser.test"},
-  {"pkg": "clerk/inbox/imap", "name": "FuzzIMAPReplies", "binary": "clerk_inbox_imap.test"},
+  {"pkg": "clerk/inbox/imapsmtp", "name": "FuzzIMAPReplies", "binary": "clerk_inbox_imapsmtp.test"},
   {"pkg": "control", "name": "FuzzParse", "binary": "control.test"},
   {"pkg": "grants", "name": "FuzzApprovals", "binary": "grants.test"},
   {"pkg": "localsrv", "name": "FuzzSessions", "binary": "localsrv.test"},

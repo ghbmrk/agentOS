@@ -25,7 +25,7 @@ What the slice rests on. Each line is a choice made to keep the slice small; non
 
 ## Live mailbox (MIG-4-mail-a, #2574)
 
-What the mail clerk's live mailbox rests on. `broker/clerk/inbox/imap` is the clerk's IMAP and SMTP transport, moved from `broker/mail/imapsmtp` with its tests; `Live` (`mailbox.go`) is the mailbox over it and `Synthetic` the eval's.
+What the mail clerk's live mailbox rests on. `broker/clerk/inbox/imapsmtp` is the clerk's IMAP and SMTP transport, moved from `broker/mail/imapsmtp` with its tests; `Live` (`mailbox.go`) is the mailbox over it and `Synthetic` the eval's.
 
 | ID | Assumption | If wrong |
 |---|---|---|

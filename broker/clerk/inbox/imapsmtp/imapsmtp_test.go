@@ -1,4 +1,4 @@
-package imap
+package imapsmtp
 
 // REQ: CRED-8
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ghbmrk/agentos/broker/clerk/inbox/imap"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 )
 
 // Mailbox is where the clerk's effects land. Do calls it only after the
@@ -60,7 +60,7 @@ const fetchBatch = 50
 // a label is an IMAP keyword, a trash is a UID MOVE to the account's trash
 // folder, never an EXPUNGE. Each effect is read back before it counts.
 type Live struct {
-	st *imap.Store
+	st *imapsmtp.Store
 
 	mu    sync.Mutex
 	refs  map[string]liveMail
@@ -68,12 +68,12 @@ type Live struct {
 }
 
 type liveMail struct {
-	ref imap.Ref
+	ref imapsmtp.Ref
 	id  string // the Message-ID header, for the trash read-back
 }
 
 // NewLive is a mailbox over st.
-func NewLive(st *imap.Store) *Live { return &Live{st: st, refs: map[string]liveMail{}} }
+func NewLive(st *imapsmtp.Store) *Live { return &Live{st: st, refs: map[string]liveMail{}} }
 
 // Read fetches the newest readMax inbox mails with BODY.PEEK, unclassified:
 // a class comes from a reader, not from the mailbox. It replaces what an
@@ -86,9 +86,9 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 	inbox, trash := "", ""
 	for _, f := range fs {
 		switch f.Role {
-		case imap.Inbox:
+		case imapsmtp.Inbox:
 			inbox = f.Name
-		case imap.Trash:
+		case imapsmtp.Trash:
 			if trash == "" {
 				trash = f.Name
 			}
@@ -144,9 +144,9 @@ func (l *Live) mail(id string) (liveMail, string, error) {
 // acting is NotDone, anything else may have acted.
 func before(err error) error {
 	switch {
-	case errors.Is(err, imap.ErrValidity):
+	case errors.Is(err, imapsmtp.ErrValidity):
 		return nRenumbered
-	case errors.Is(err, imap.ErrNoMove):
+	case errors.Is(err, imapsmtp.ErrNoMove):
 		return nNoMove
 	}
 	return err
@@ -195,7 +195,7 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if len(left) != 0 || m.id == "" {
 		return errUnconfirmed
 	}
-	there, err := l.st.Find(ctx, trash, m.id, func(x imap.Message) bool { return messageID(x.Raw) == m.id })
+	there, err := l.st.Find(ctx, trash, m.id, func(x imapsmtp.Message) bool { return messageID(x.Raw) == m.id })
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-// Package imap is the mail clerk's transport to the owner's mailbox over
+// Package imapsmtp is the mail clerk's transport to the owner's mailbox over
 // IMAP and SMTP (CLK-2, SPEC "the mail clerk supports any IMAP and SMTP
 // provider"). It takes the account's credential from its caller on each
 // connection and keeps none (CRED-1), dials only through the home-network
@@ -8,7 +8,7 @@
 //
 // It reuses github.com/emersion/go-imap (v1, MIT) as the IMAP client; SMTP
 // is the standard library's net/smtp.
-package imap
+package imapsmtp
 
 import (
 	"bytes"
@@ -111,19 +111,19 @@ type Message struct {
 }
 
 // ErrNoMove is returned before acting by a server without MOVE.
-var ErrNoMove = errors.New("imap: the server does not support MOVE")
+var ErrNoMove = errors.New("imapsmtp: the server does not support MOVE")
 
 // ErrValidity is returned before acting when a folder's UID validity is
 // not the one a reference was read under.
-var ErrValidity = errors.New("imap: the folder was renumbered since it was read")
+var ErrValidity = errors.New("imapsmtp: the folder was renumbered since it was read")
 
 // ErrInsecure is returned for a Plain connection to a non-loopback host.
-var ErrInsecure = errors.New("imap: a plain connection is allowed only to loopback")
+var ErrInsecure = errors.New("imapsmtp: a plain connection is allowed only to loopback")
 
 // New checks cfg.
 func New(cfg Config) (*Store, error) {
 	if cfg.IMAP == "" || cfg.SMTP == "" || cfg.Credential == nil || cfg.From == "" {
-		return nil, errors.New("imap: Config needs IMAP, SMTP, Credential and From")
+		return nil, errors.New("imapsmtp: Config needs IMAP, SMTP, Credential and From")
 	}
 	for _, x := range []struct {
 		addr string
@@ -131,13 +131,13 @@ func New(cfg Config) (*Store, error) {
 	}{{cfg.IMAP, cfg.IMAPSec}, {cfg.SMTP, cfg.SMTPSec}} {
 		switch {
 		case x.sec != TLS && x.sec != StartTLS && x.sec != Plain:
-			return nil, fmt.Errorf("imap: unknown connection security %d", x.sec)
+			return nil, fmt.Errorf("imapsmtp: unknown connection security %d", x.sec)
 		case x.sec == Plain && !loopback(x.addr):
 			return nil, ErrInsecure
 		}
 	}
 	if cfg.IMAPSec == StartTLS {
-		return nil, errors.New("imap: IMAP uses implicit TLS, or plain to loopback only")
+		return nil, errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
@@ -201,7 +201,7 @@ func (s *Store) session(ctx context.Context, f func(c *client.Client) error) err
 const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
 
 // errReplyTooLarge ends a session whose replies passed their budget.
-var errReplyTooLarge = errors.New("imap: the server's reply exceeded its size bound")
+var errReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
 
 func (s *Store) replyBudget(fetches int) int64 {
 	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
@@ -242,7 +242,7 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 	case Plain:
 	default:
 		conn.Close()
-		return errors.New("imap: IMAP uses implicit TLS, or plain to loopback only")
+		return errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
 	}
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
@@ -257,7 +257,7 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 	defer stop()
 	l, err := s.cfg.Credential(ctx)
 	if err != nil {
-		return errors.New("imap: no credential")
+		return errors.New("imapsmtp: no credential")
 	}
 	if l.OAuth {
 		err = c.Authenticate(xoauth2{l.User, l.Secret})
@@ -265,7 +265,7 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 		err = c.Login(l.User, l.Secret)
 	}
 	if err != nil {
-		return errors.New("imap: the server refused the login")
+		return errors.New("imapsmtp: the server refused the login")
 	}
 	return f(c)
 }
@@ -538,7 +538,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	case StartTLS, Plain:
 	default:
 		conn.Close()
-		return errors.New("imap: unknown connection security")
+		return errors.New("imapsmtp: unknown connection security")
 	}
 	host, _, _ := net.SplitHostPort(s.cfg.SMTP)
 	c, err := smtp.NewClient(conn, host)
@@ -552,7 +552,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	}
 	if s.cfg.SMTPSec == StartTLS {
 		if ok, _ := c.Extension("STARTTLS"); !ok {
-			return errors.New("imap: the SMTP server does not offer STARTTLS")
+			return errors.New("imapsmtp: the SMTP server does not offer STARTTLS")
 		}
 		if err := c.StartTLS(s.tlsConfig(s.cfg.SMTP)); err != nil {
 			return err
@@ -560,21 +560,21 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	}
 	l, err := s.cfg.Credential(ctx)
 	if err != nil {
-		return errors.New("imap: no credential")
+		return errors.New("imapsmtp: no credential")
 	}
 	var auth smtp.Auth = smtp.PlainAuth("", l.User, l.Secret, host)
 	if l.OAuth {
 		auth = smtpXOAuth2{xoauth2{l.User, l.Secret}}
 	}
 	if err := c.Auth(auth); err != nil {
-		return errors.New("imap: the server refused the login")
+		return errors.New("imapsmtp: the server refused the login")
 	}
 	if err := c.Mail(s.cfg.From); err != nil {
 		return err
 	}
 	for _, r := range rcpt {
 		if err := c.Rcpt(r); err != nil {
-			return fmt.Errorf("imap: a recipient was refused")
+			return fmt.Errorf("imapsmtp: a recipient was refused")
 		}
 	}
 	w, err := c.Data()
@@ -601,7 +601,7 @@ func (x xoauth2) ir() []byte {
 }
 
 func (x xoauth2) Start() (string, []byte, error) { return "XOAUTH2", x.ir(), nil }
-func (x xoauth2) Next([]byte) ([]byte, error)    { return nil, errors.New("imap: XOAUTH2 refused") }
+func (x xoauth2) Next([]byte) ([]byte, error)    { return nil, errors.New("imapsmtp: XOAUTH2 refused") }
 
 type smtpXOAuth2 struct{ xoauth2 }
 
@@ -611,14 +611,14 @@ var _ smtp.Auth = smtpXOAuth2{}
 // smtp.PlainAuth does for a password.
 func (x smtpXOAuth2) Start(server *smtp.ServerInfo) (string, []byte, error) {
 	if !server.TLS && !loopback(net.JoinHostPort(server.Name, "0")) {
-		return "", nil, errors.New("imap: unencrypted connection")
+		return "", nil, errors.New("imapsmtp: unencrypted connection")
 	}
 	return "XOAUTH2", x.ir(), nil
 }
 
 func (x smtpXOAuth2) Next(_ []byte, more bool) ([]byte, error) {
 	if more {
-		return nil, errors.New("imap: XOAUTH2 refused")
+		return nil, errors.New("imapsmtp: XOAUTH2 refused")
 	}
 	return nil, nil
 }
