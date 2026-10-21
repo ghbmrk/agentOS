@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -427,6 +428,17 @@ func (s *State) LedgerBefore(seq uint64) key.Ledger { return ledger{s: s, before
 func (s *State) Known(root key.ID) bool           { return s.Roots[root] }
 func (s *State) ChangesView() *key.Changes        { return &s.Changes }
 func (s *State) Held(seq uint64) (HeldInfo, bool) { h, ok := s.held[seq]; return h, ok }
+
+// Dispatched reports whether the log holds this exact request: the signed plan
+// as the log carries it, in flight, with the attempt and the entries the
+// kernel recorded. A clerk that runs only such a request cannot be driven by a
+// caller's own request or view. Now is not recorded and is not checked.
+func (s *State) Dispatched(r Request) bool {
+	p, st := s.step(stepRef{r.Plan.ID, r.Index})
+	return st != nil && st.Phase == PInflight && r.Attempt > 0 && st.Attempt == r.Attempt &&
+		r.Idem == Idem(r.Plan.ID, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
+		reflect.DeepEqual(r.Plan, p.Plan)
+}
 
 func body[T any](e Entry) (T, error) {
 	var b T
