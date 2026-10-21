@@ -237,7 +237,9 @@ class WiringTest(unittest.TestCase):
         self.assertIn("fail-fast: false", race)
         # Each shard checks the whole split before running its part.
         self.assertLess(race.index("ci_split.py check"), race.index("go test -race"))
-        self.assertIn('go test -race -count=1 $(cat "$RUNNER_TEMP/shard")', race)
+        self.assertIn('go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")', race)
+        # An explicit timeout under the job's: go test's default 10 minutes flaked kernel/sim (#2623).
+        self.assertIn("timeout-minutes: 30", race)
         self.assertIn('AGENTOS_REQUIRE_SWTPM: "1"', race)
         # D29: the corpus goes before the main-only cache save, as in broker-checks and machines.
         drop = race.index('run: rm -rf "$(go env GOCACHE)/fuzz"')

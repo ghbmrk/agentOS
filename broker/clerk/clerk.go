@@ -29,6 +29,11 @@ func Check(owner ed25519.PublicKey, name string, facts Facts, r kernel.Request, 
 	if st.Clerk != name {
 		return &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
 	}
+	// The recipient a key's caveats judge is the verb's first argument, the
+	// object the request acts on; a step claiming another is refused here.
+	if a := r.Step.Args[key.RecipientArg(r.Step.Verb)]; r.Step.Recipient != a.Value {
+		return &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
+	}
 	if facts != nil {
 		content, labels, amount := facts(st)
 		if content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {

@@ -101,6 +101,8 @@ type box struct {
 	host *fakeHost
 	ap   *fakeAP
 	net  claim.SetupNet
+	// radio, if set, is the loader's nl80211 (station_test.go).
+	radio localui.Radio
 }
 
 func newBox(t *testing.T, wireless ...string) *box {
@@ -122,7 +124,7 @@ func newBox(t *testing.T, wireless ...string) *box {
 }
 
 func (b *box) run(ctx context.Context) error {
-	return run(ctx, b.cfg, &localui.APLoader{AP: b.ap, Host: b.host}, b.ap.Exited)
+	return run(ctx, b.cfg, &localui.APLoader{AP: b.ap, Host: b.host, Radio: b.radio}, b.ap.Exited)
 }
 
 func (b *box) runAsync(t *testing.T) (context.CancelFunc, chan error) {
