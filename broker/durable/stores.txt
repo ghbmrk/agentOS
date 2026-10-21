@@ -32,7 +32,6 @@ localui config
 meter debt debt:#1947
 owner debt debt:audit-2.2
 photo/keep content
-projection projection
 pubid debt debt:#1947
 pubsend debt debt:#1947
 question debt debt:#1947

@@ -1,6 +1,6 @@
 package clerk_test
 
-// REQ: CLK-2
+// REQ: CLK-2, KEY-1, KEY-3
 
 import (
 	"crypto/ed25519"
@@ -45,11 +45,23 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	if err := k.Issue(0, root); err != nil {
 		t.Fatal(err)
 	}
-	step := key.Step{Verb: verb, Clerk: "mail", Recipient: "x", Task: "t", Args: map[string]key.Arg{}}
+	f := &fix{k: k, mail: mail, root: root}
+	f.req = f.request(root, stepOf(verb))
+	return f
+}
+
+func stepOf(verb key.Verb) kernel.PlanStep {
+	ps := kernel.PlanStep{Verb: verb, Clerk: "mail", Args: map[string]string{}}
 	for _, n := range key.ArgNames(verb) {
-		step.Args[n] = key.Arg{Value: "x", Source: key.SrcClerk}
+		ps.Args[n] = "x"
 	}
-	return &fix{k, mail, root, kernel.Request{Plan: "p", Step: step, Key: root, Idem: "i1", Now: 1}}
+	return ps
+}
+
+// request is ps under k, signed by the holder of every key here.
+func (f *fix) request(k key.Key, ps kernel.PlanStep) kernel.Request {
+	p := kernel.SignPlan(kernel.Plan{ID: "p", Key: k, Steps: []kernel.PlanStep{ps}}, hpubPriv())
+	return kernel.Request{Plan: p, Idem: "i1", Now: 1}
 }
 
 func TestClerkRechecksAndIsIdempotent(t *testing.T) {
@@ -67,18 +79,20 @@ func TestClerkRechecksAndIsIdempotent(t *testing.T) {
 
 func TestClerkRefusesWhatKernelWouldNot(t *testing.T) {
 	f := setup(t, key.Trash)
-	bad := f.req
-	bad.Idem, bad.Step.Verb = "i2", key.Send
+	send := stepOf(key.Send)
+	bad := f.request(f.root, send)
+	bad.Idem = "i2"
 	if r := f.mail.Do(bad, f.k.State()); r.Outcome != "failed" {
 		t.Fatal("verb outside the key must be refused at the clerk")
 	}
-	other := f.req
-	other.Idem, other.Step.Clerk = "i3", "bank"
+	bank := stepOf(key.Trash)
+	bank.Clerk = "bank"
+	other := f.request(f.root, bank)
+	other.Idem = "i3"
 	if r := f.mail.Do(other, f.k.State()); r.Outcome != "failed" {
 		t.Fatal("step for another clerk must be refused")
 	}
-	v, _ := key.Verify(f.root, opubOf())
-	if err := f.k.Revoke(2, v.ID()); err != nil {
+	if err := f.k.Revoke(2, f.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
 	rev := f.req
@@ -97,8 +111,8 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 	hpub, _ := gen(2)
 	_ = opub
 	ghost := key.Issue(opriv, key.Root{Holder: hpub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "unlogged"})
-	r := f.req
-	r.Key, r.Idem = ghost, "i5"
+	r := f.request(ghost, stepOf(key.Trash))
+	r.Idem = "i5"
 	if res := f.mail.Do(r, f.k.State()); res.Outcome != "failed" {
 		t.Fatal("a root absent from the log must be refused")
 	}
@@ -107,8 +121,8 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := g.req
-	u.Key, u.Idem, u.Now = d, "i6", 10*3600000
+	u := g.request(d, stepOf(key.Unsubscribe))
+	u.Idem, u.Now = "i6", 10*3600000
 	if res := g.mail.Do(u, g.k.State()); res.Outcome != "failed" || len(g.mail.Effects()) != 0 {
 		t.Fatal("an irreversible step that was never held must be refused")
 	}
@@ -117,3 +131,31 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 func hpubPriv() ed25519.PrivateKey { _, p := gen(2); return p }
 
 func opubOf() ed25519.PublicKey { p, _ := gen(1); return p }
+
+// The clerk takes the step from the plan the key's holder signed, so neither a
+// kernel nor a transport can change what runs, and a key's bytes alone run
+// nothing (KEY-1, KEY-3).
+func TestClerkRunsOnlyWhatTheHolderSigned(t *testing.T) {
+	f := setup(t, key.Trash)
+	swapped := f.req
+	swapped.Plan.Steps = []kernel.PlanStep{stepOf(key.Trash)}
+	swapped.Plan.Steps[0].Args["target"] = "y"
+	stranger := f.req
+	_, spriv := gen(9)
+	stranger.Plan = kernel.SignPlan(kernel.Plan{ID: "p", Key: f.root, Steps: f.req.Plan.Steps}, spriv)
+	unsigned := f.req
+	unsigned.Plan.Sig = nil
+	outside := f.req
+	outside.Index = 1
+	for name, r := range map[string]kernel.Request{"swapped step": swapped, "stranger": stranger, "unsigned": unsigned, "index outside the plan": outside} {
+		if rf := clerk.Check(opubOf(), "mail", nil, r, f.k.State()); rf == nil {
+			t.Errorf("%s: accepted", name)
+		}
+		if res := f.mail.Do(r, f.k.State()); res.Outcome != "failed" {
+			t.Errorf("%s: %+v", name, res)
+		}
+	}
+	if len(f.mail.Effects()) != 0 {
+		t.Fatal("a refused request had an effect")
+	}
+}

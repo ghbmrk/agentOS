@@ -45,7 +45,7 @@ WEIGHTS = {
     "change": 26, "loops": 25, "maintain": 18, "guesterr": 18, "core": 17,
     "e2e": 16, "claim": 16, "vm/overlay": 14, "cmd/agentos-guest-bridge": 14, "firstboot": 14,
     "apply": 13, "journal/check": 13, "modem/bridge": 11, "vault": 11, "probecmd": 10,
-    "cmd/agentos-seller": 10, "projection": 10,
+    "cmd/agentos-seller": 10,
 }
 
 # Inputs of TestFuzzLeafPeakPerTarget besides the Go packages it builds.

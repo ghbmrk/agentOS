@@ -16,6 +16,7 @@ import (
 const (
 	DomainRoot = "agentos.key.root.v1\x00"
 	DomainLink = "agentos.key.link.v1\x00"
+	DomainUse  = "agentos.key.use.v1\x00"
 	domainID   = "agentos.key.id.v1\x00"
 )
 
@@ -64,7 +65,9 @@ type Root struct {
 }
 
 // Link adds caveats and names the next holder. It is signed by the previous
-// holder.
+// holder. A key is bearer of nothing: only its last holder can use it, by
+// signing the use (Sign), so dropping links leaves a key nobody in reach of
+// the dropped links can use (KEY-1, KEY-3).
 type Link struct {
 	Caveats []Caveat          `json:"caveats"`
 	Holder  ed25519.PublicKey `json:"holder"`
@@ -399,13 +402,42 @@ type Verified struct {
 	Limits Limits
 }
 
-// Verify checks the chain from the owner's public key: every signature, every
-// link narrowing and canonical.
-func Verify(k Key, owner ed25519.PublicKey) (*Verified, error) {
+// Sign is the tip holder's proof of possession: its signature over the key's
+// tip and one use of it, such as a plan. A key without it is inert.
+func Sign(k Key, holder ed25519.PrivateKey, use []byte) []byte {
+	return ed25519.Sign(holder, useMsg(k.Tip(), use))
+}
+
+func useMsg(tip ID, use []byte) []byte {
+	return append(append([]byte(DomainUse), tip[:]...), use...)
+}
+
+// Verify checks the chain from the owner's public key, every signature and
+// every link narrowing and canonical, and that sig is the tip holder's
+// signature over use. It is the only way to a Verified, so nothing is
+// authorized for a submitter who cannot sign as the key's last holder.
+func Verify(k Key, owner ed25519.PublicKey, use, sig []byte) (*Verified, error) {
 	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
 		return nil, ErrWrongOwner
 	}
-	return verifyChain(k, owner)
+	v, err := verifyChain(k, owner)
+	if err != nil {
+		return nil, err
+	}
+	if !ed25519.Verify(k.holder(), useMsg(v.ID(), use), sig) {
+		return nil, ErrNotHolder
+	}
+	return v, nil
+}
+
+// CheckChain checks a key as data, without a use: for an owner issuing a
+// root into the log. It confers nothing.
+func CheckChain(k Key, owner ed25519.PublicKey) error {
+	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
+		return ErrWrongOwner
+	}
+	_, err := verifyChain(k, owner)
+	return err
 }
 
 // verifyChain verifies k. With owner nil it skips only the root signature

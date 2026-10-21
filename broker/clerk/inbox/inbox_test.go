@@ -28,12 +28,13 @@ func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 }
 
 type rig struct {
-	acct    *Account
-	k       *kernel.Kernel
-	planner key.Key
-	bulk    key.Key
-	unsub   key.Key
-	world   *World
+	acct        *Account
+	k           *kernel.Kernel
+	planner     key.Key
+	plannerPriv ed25519.PrivateKey
+	bulk        key.Key
+	unsub       key.Key
+	world       *World
 }
 
 // newRig boots a real kernel over the fixture mailbox, with an extra mail of
@@ -49,8 +50,8 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	ownerPub, ownerPriv := seed(1)
 	holderPub, holderPriv := seed(2)
 	headPub, headPriv := seed(3)
-	plannerPub, _ := seed(4)
-	r := &rig{world: &w}
+	plannerPub, plannerPriv := seed(4)
+	r := &rig{world: &w, plannerPriv: plannerPriv}
 	var err error
 	r.acct, err = NewAccount(ownerPub, []byte(secret), func() World { return *r.world }, ms, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
@@ -88,11 +89,11 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 func (r *rig) onKey(k key.Key, id string, v key.Verb, args map[string]string) kernel.Plan {
 	p := r.step(id, v, args)
 	p.Key = k
-	return p
+	return kernel.SignPlan(p, r.plannerPriv)
 }
 
 func (r *rig) step(id string, v key.Verb, args map[string]string) kernel.Plan {
-	return kernel.Plan{ID: id, Key: r.planner, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}}
+	return kernel.SignPlan(kernel.Plan{ID: id, Key: r.planner, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}}, r.plannerPriv)
 }
 
 func (r *rig) run(t *testing.T, p kernel.Plan, ticks ...int64) {
@@ -138,7 +139,7 @@ func handleOfMail(t *testing.T, r *rig, id string) string {
 func TestForcedTrashOfPersonalMailIsRefusedAndRecorded(t *testing.T) {
 	r := newRig(t, 30)
 	p := r.step("forced", key.Trash, map[string]string{"target": "M22"})
-	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Step(0), Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, Now: t0}, r.k.State())
+	res := r.acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem("forced", 0), Attempt: 1, Now: t0}, r.k.State())
 	if res.Outcome == "ok" || len(r.acct.Effects()) != 0 {
 		t.Fatalf("forced trash ran: %+v %v", res, r.acct.Effects())
 	}
@@ -151,7 +152,7 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 	r := newRig(t, 30)
 	h := handleOfMail(t, r, "M01")
 	p := r.step("forced", key.Unsubscribe, map[string]string{"to": h})
-	res := r.acct.Do(kernel.Request{Plan: "forced", Step: p.Step(0), Key: r.planner, Idem: kernel.Idem("forced", 0), Attempt: 1, HeldSeq: 1, Now: t0}, staleView{})
+	res := r.acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem("forced", 0), Attempt: 1, HeldSeq: 1, Now: t0}, staleView{})
 	if res.Outcome == "ok" || len(r.acct.Posts()) != 0 {
 		t.Fatalf("forced unsubscribe ran: %+v", res)
 	}
@@ -166,7 +167,7 @@ func TestChangedStepOfDispatchedRequestIsRefused(t *testing.T) {
 	p := r.step("real", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"})
 	r.run(t, p)
 	forged := r.step("real", key.Trash, map[string]string{"target": "M22"})
-	r.acct.Do(kernel.Request{Plan: "real", Step: forged.Step(0), Key: r.planner, Idem: kernel.Idem("real", 0), Attempt: 1, Now: t0}, r.k.State())
+	r.acct.Do(kernel.Request{Plan: forged, Idem: kernel.Idem("real", 0), Attempt: 1, Now: t0}, r.k.State())
 	for _, e := range r.acct.Effects() {
 		if e.Verb == string(key.Trash) {
 			t.Fatalf("trash ran: %+v", e)
@@ -198,6 +199,25 @@ func TestTrashNeedsRestorableRetention(t *testing.T) {
 	r.run(t, r.step("t", key.Trash, map[string]string{"target": "M19"}))
 	if len(r.acct.Effects()) != 0 || r.lastRefusal(t).Reason != "trash-not-restorable" {
 		t.Fatalf("effects %v refusals %v", r.acct.Effects(), r.acct.Refusals())
+	}
+}
+
+// REQ: VRB-2, KEY-3 (assumption MIG-3-15)
+// A planner that strips its bulk key back to the root, or to the unsubscribe
+// key's root, and signs as itself is refused: the root's holder is the home
+// clerk, so the cap and the hold stay on the key it was handed.
+func TestStrippedPlannerKeyDoesNothing(t *testing.T) {
+	r := newRig(t, 30)
+	for i, k := range []key.Key{{Root: r.bulk.Root}, {Root: r.unsub.Root}} {
+		id := "strip-" + strconv.Itoa(i)
+		p := r.onKey(k, id, key.Organize, map[string]string{"target": "M19", "label": labelPrefix + r.acct.mails["M19"].Class})
+		if err := r.k.Submit(t0, p); err == nil && r.k.State().Plans[id].Status != kernel.SRejected {
+			t.Fatalf("plan %s on a stripped key was admitted", id)
+		}
+	}
+	_ = r.k.Tick(t0)
+	if n := len(r.acct.Effects()); n != 0 {
+		t.Fatalf("%d effects from stripped keys", n)
 	}
 }
 
@@ -371,7 +391,7 @@ func TestHandleIsKeyedAndWide(t *testing.T) {
 
 func TestLabelsLiveUnderTheAgentOSNamespace(t *testing.T) {
 	r := newRig(t, 30)
-	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub)
+	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub, r.plannerPriv)
 	for _, p := range plans {
 		for _, s := range p.Steps {
 			if l := s.Args["label"]; s.Verb == key.Organize && !strings.HasPrefix(l, "agentOS/") {
@@ -388,7 +408,7 @@ func TestAlertsAreNeitherUnsubscribableNorPlannedForTrash(t *testing.T) {
 			t.Fatal("alert mail was offered for unsubscribe")
 		}
 	}
-	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub)
+	plans, _ := Plans(r.acct.Listing(), r.bulk, r.unsub, r.plannerPriv)
 	for _, p := range plans {
 		if strings.HasSuffix(p.ID, "A01") && strings.HasPrefix(p.ID, "trash") {
 			t.Fatal("alert mail was planned for trash")
@@ -402,7 +422,7 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 		l = append(l, Item{Mail: "M" + strconv.Itoa(i), Class: "newsletter"})
 	}
 	l = append(l, Item{Mail: "S1", Class: "spam"}, Item{Mail: "U1", Class: "bulk", Sender: "h1"})
-	plans, left := Plans(l, key.Key{}, key.Key{})
+	plans, left := Plans(l, key.Key{}, key.Key{}, seedPriv(4))
 	var trash, org, unsub int
 	for _, p := range plans {
 		switch p.Steps[0].Verb {
@@ -418,3 +438,5 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 		t.Fatalf("trash %d organize %d unsub %d left %+v", trash, org, unsub, left)
 	}
 }
+
+func seedPriv(b byte) ed25519.PrivateKey { _, p := seed(b); return p }

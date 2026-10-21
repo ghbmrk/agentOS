@@ -106,7 +106,7 @@ func Run(in Input) (Outcome, error) {
 	ownerPub, ownerPriv := pair(1)
 	holderPub, holderPriv := pair(2)
 	headPub, headPriv := pair(3)
-	plannerPub, _ := pair(4)
+	plannerPub, plannerPriv := pair(4)
 
 	verbs := []key.Verb{key.Organize, key.Trash, key.Unsubscribe}
 	if in.Standing != nil {
@@ -156,7 +156,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	var approved *KeyView
 	if !standing {
-		v, err := keyView(root, ownerPub, in.Owner)
+		v, err := keyView(root, holderPriv, ownerPub, in.Owner)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -185,7 +185,7 @@ func Run(in Input) (Outcome, error) {
 		seedPlans[id] = true
 		acct.Preload(kernel.Idem(id, 0))
 		step := kernel.PlanStep{Verb: key.Unsubscribe, Clerk: inbox.Name, Args: map[string]string{"to": h}}
-		if err := k.Submit(t, kernel.Plan{ID: id, Key: unsub, Steps: []kernel.PlanStep{step}}); err != nil {
+		if err := k.Submit(t, kernel.SignPlan(kernel.Plan{ID: id, Key: unsub, Steps: []kernel.PlanStep{step}}, plannerPriv)); err != nil {
 			return Outcome{}, err
 		}
 		for _, at := range []int64{t, t + noveltyMS} {
@@ -201,7 +201,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	t0 := now0.UnixMilli()
 	listing := acct.Listing()
-	plans, left := inbox.Plans(listing, bulk, unsub)
+	plans, left := inbox.Plans(listing, bulk, unsub, plannerPriv)
 	for _, p := range plans {
 		if err := k.Submit(t0, p); err != nil {
 			return Outcome{}, err
@@ -227,7 +227,7 @@ func Run(in Input) (Outcome, error) {
 				}
 			}
 		case s.PlannerStep != nil:
-			rf, err := plannerStep(k, acct, bulk, fmt.Sprintf("script-%d", i), *s.PlannerStep, s.Forced, t0)
+			rf, err := plannerStep(k, acct, bulk, plannerPriv, fmt.Sprintf("script-%d", i), *s.PlannerStep, s.Forced, t0)
 			if err != nil {
 				return Outcome{}, err
 			}
@@ -240,12 +240,12 @@ func Run(in Input) (Outcome, error) {
 		}
 	}
 
-	end, err := keyView(root, ownerPub, in.Owner)
+	end, err := keyView(root, holderPriv, ownerPub, in.Owner)
 	if err != nil {
 		return Outcome{}, err
 	}
 	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), kernelRefusals...),
-		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
+		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, plannerPriv, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
 		KeysAtApproval: approved, KeysAtEnd: end, OutsideMailClerk: outside(listing)}
 	for _, r := range out.Refusals {
 		if r.Reason == statusCause {
@@ -264,7 +264,7 @@ func Run(in Input) (Outcome, error) {
 // plannerStep delivers a step the planner was never given a key for. Unforced
 // it goes through the kernel, which refuses it and returns that refusal; forced
 // it goes straight to the clerk, which refuses and records it itself.
-func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id string, ps PlannerStep, forced bool, now int64) ([]inbox.Refusal, error) {
+func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, holder ed25519.PrivateKey, id string, ps PlannerStep, forced bool, now int64) ([]inbox.Refusal, error) {
 	args := map[string]string{}
 	var mail *string
 	if ps.Mail != "" {
@@ -273,10 +273,11 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id stri
 	}
 	step := kernel.PlanStep{Verb: key.Verb(ps.Op), Clerk: inbox.Name, Args: args}
 	if forced {
-		acct.Do(kernel.Request{Plan: id, Step: kernel.Normalize(id, step), Key: planner, Idem: kernel.Idem(id, 0), Now: now}, k.State())
+		p := kernel.SignPlan(kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}, holder)
+		acct.Do(kernel.Request{Plan: p, Idem: kernel.Idem(id, 0), Now: now}, k.State())
 		return nil, nil
 	}
-	if err := k.Submit(now, kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}); err != nil {
+	if err := k.Submit(now, kernel.SignPlan(kernel.Plan{ID: id, Key: planner, Steps: []kernel.PlanStep{step}}, holder)); err != nil {
 		return nil, err
 	}
 	p := k.State().Plans[id]
@@ -286,9 +287,10 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, id stri
 	return []inbox.Refusal{{Op: ps.Op, Mail: mail, At: "kernel", Reason: inbox.Reason(rejectionCode(k, id))}}, nil
 }
 
-// keyView is what the key lets its holder do, read from the key itself.
-func keyView(k key.Key, owner ed25519.PublicKey, account string) (KeyView, error) {
-	v, err := key.Verify(k, owner)
+// keyView is what the key lets its holder do, read from the key itself; the
+// holder signs, as any use of a key must.
+func keyView(k key.Key, holder ed25519.PrivateKey, owner ed25519.PublicKey, account string) (KeyView, error) {
+	v, err := key.Verify(k, owner, nil, key.Sign(k, holder, nil))
 	if err != nil {
 		return KeyView{}, err
 	}
@@ -326,8 +328,8 @@ func rejectionCode(k *kernel.Kernel, plan string) string {
 }
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.
-func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
-	ver, err := key.Verify(unsub, owner)
+func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, planner ed25519.PrivateKey, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
+	ver, err := key.Verify(unsub, owner, nil, key.Sign(unsub, planner, nil))
 	if err != nil {
 		return []Hold{}
 	}

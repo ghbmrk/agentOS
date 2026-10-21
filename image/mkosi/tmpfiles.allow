@@ -51,6 +51,7 @@ usr/lib/tmpfiles.d/passwd.conf	r! /etc/passwd.lock
 usr/lib/tmpfiles.d/passwd.conf	r! /etc/group.lock
 usr/lib/tmpfiles.d/passwd.conf	r! /etc/subuid.lock
 usr/lib/tmpfiles.d/passwd.conf	r! /etc/subgid.lock
+usr/lib/tmpfiles.d/polkit-tmpfiles.conf	d /etc/polkit-1/rules.d 0750 root polkitd - -
 usr/lib/tmpfiles.d/provision.conf	f^ /etc/motd.d/50-provision.conf - - - - login.motd
 usr/lib/tmpfiles.d/provision.conf	f^ /etc/issue.d/50-provision.conf - - - - login.issue
 usr/lib/tmpfiles.d/provision.conf	f^ /etc/hosts - - - - network.hosts

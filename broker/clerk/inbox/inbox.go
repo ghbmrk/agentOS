@@ -159,7 +159,7 @@ func Reason(code string) string {
 func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := r.Step
+	s := r.Step()
 	if a.state == nil || !a.state.Dispatched(r) {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
 	}

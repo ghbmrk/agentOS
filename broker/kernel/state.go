@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -65,11 +67,58 @@ type PlanStep struct {
 	Labels  []string          `json:"labels,omitempty"`
 }
 
-// Plan is a typed list of steps run in order under one key (KRN-5).
+// Plan is a typed list of steps run in order under one key (KRN-5). Sig is
+// the key's last holder signing the plan, so holding a key's bytes is not
+// using it: a key stripped back toward its root names a holder the submitter
+// cannot sign for (KEY-1, KEY-3).
 type Plan struct {
 	ID    string     `json:"id"`
 	Key   key.Key    `json:"key"`
 	Steps []PlanStep `json:"steps"`
+	Sig   []byte     `json:"sig"`
+}
+
+// use is what the holder signs: the id and steps. The key's tip is in the
+// signed message already (key.Sign).
+func (p Plan) use() []byte {
+	b, _ := json.Marshal(struct {
+		ID    string     `json:"id"`
+		Steps []PlanStep `json:"steps"`
+	}{p.ID, p.Steps})
+	return b
+}
+
+// SignPlan signs p as the holder of p.Key.
+func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
+	p.Sig = key.Sign(p.Key, holder, p.use())
+	return p
+}
+
+// ErrNotText refuses a plan with a string that is not valid UTF-8: JSON
+// would encode it as U+FFFD, so two different plans could share a signature.
+var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
+
+// VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
+func VerifyPlan(p Plan, owner ed25519.PublicKey) (*key.Verified, error) {
+	if !p.text() {
+		return nil, ErrNotText
+	}
+	return key.Verify(p.Key, owner, p.use(), p.Sig)
+}
+
+// text reports whether every string the holder signs is valid UTF-8.
+func (p Plan) text() bool {
+	ok := utf8.ValidString(p.ID)
+	for _, st := range p.Steps {
+		ok = ok && utf8.ValidString(string(st.Verb)) && utf8.ValidString(st.Clerk) && utf8.ValidString(st.Content)
+		for n, v := range st.Args {
+			ok = ok && utf8.ValidString(n) && utf8.ValidString(v)
+		}
+		for _, l := range st.Labels {
+			ok = ok && utf8.ValidString(l)
+		}
+	}
+	return ok
 }
 
 // Step is step i as the key is checked against it and the clerk sees it.
@@ -294,15 +343,15 @@ func (s *State) Known(root key.ID) bool           { return s.Roots[root] }
 func (s *State) ChangesView() *key.Changes        { return &s.Changes }
 func (s *State) Held(seq uint64) (HeldInfo, bool) { h, ok := s.held[seq]; return h, ok }
 
-// Dispatched reports whether the log holds this exact request: the step and the
-// key as the plan carries them, in flight, with the attempt and the entries the
+// Dispatched reports whether the log holds this exact request: the signed plan
+// as the log carries it, in flight, with the attempt and the entries the
 // kernel recorded. A clerk that runs only such a request cannot be driven by a
 // caller's own request or view. Now is not recorded and is not checked.
 func (s *State) Dispatched(r Request) bool {
-	p, st := s.step(stepRef{r.Plan, r.Index})
+	p, st := s.step(stepRef{r.Plan.ID, r.Index})
 	return st != nil && st.Phase == PInflight && r.Attempt > 0 && st.Attempt == r.Attempt &&
-		r.Idem == Idem(r.Plan, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
-		reflect.DeepEqual(r.Step, p.Plan.Step(r.Index)) && reflect.DeepEqual(r.Key, p.Plan.Key)
+		r.Idem == Idem(r.Plan.ID, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
+		reflect.DeepEqual(r.Plan, p.Plan)
 }
 
 func body[T any](e Entry) (T, error) {
@@ -335,7 +384,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if len(b.Key.Links) == 0 {
-			if _, err := key.Verify(b.Key, s.Owner); err == nil {
+			if key.CheckChain(b.Key, s.Owner) == nil {
 				s.Roots[b.Key.Tip()] = true
 			}
 		}

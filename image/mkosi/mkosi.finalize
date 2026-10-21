@@ -88,6 +88,33 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
 # class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
+# #936 (r4a): NetworkManager manages only the station r4b creates. Everything it reads at start is
+# pinned here: NM_ROOTS are the places it reads configuration from (main file, conf.d, the state
+# directory's intern file), and the only file that may exist in them is NM_FILES, whose keys are
+# NM_KEYS (each set once, to exactly this value) and a keyfile path under /run only (STO-2). A closed
+# list (dispatcher scripts too), so a file NetworkManager reads under another name (nm-system-settings.conf, NetworkManager-
+# intern.conf) is refused too. No connection location, and the unit passes no --config flag.
+NM_PRESENT = ("usr/sbin/NetworkManager", "usr/lib/NetworkManager/conf.d")
+NM_ROOTS = ("etc/NetworkManager", "usr/lib/NetworkManager/conf.d", "usr/lib/NetworkManager/dispatcher.d",
+            "run/NetworkManager/conf.d", "var/lib/NetworkManager")
+NM_FILES = ("usr/lib/NetworkManager/conf.d/50-agentos.conf",)
+NM_CONNECTIONS = ("etc/NetworkManager/system-connections", "run/NetworkManager/system-connections",
+                  "usr/lib/NetworkManager/system-connections")
+# The unit is closed the same way: after systemd's lookup (every unit directory, every name that
+# links to it, every drop-in directory) the only drop-in is NM_DROPIN with exactly NM_DROPIN_TEXT,
+# ExecStart is NM_EXEC and nothing sets Environment or EnvironmentFile, so no flag, plugin or
+# expanded variable reaches NetworkManager. tests/test_image_nm.py holds the shipped file to the text.
+NM_UNIT = "NetworkManager.service"
+NM_EXEC = "/usr/sbin/NetworkManager --no-daemon"
+NM_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
+NM_DROPIN_TEXT = (b"# Never without the inbound drop (DEV-net-e 2a): if it failed to load, this does not start.\n"
+                  b"[Unit]\nRequires=agentos-inbound.service\nAfter=agentos-inbound.service\n")
+NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
+           ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
+           ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
+           ("connectivity", "enabled"): "false"}
+NM_PATH = ("keyfile", "path")
+
 FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
 GLOB = re.compile(r"[*?\[]")
 # In a glob key (one holding *, ? or [), systemd-sysctl's glob() also takes a backslash as an escape
@@ -263,7 +290,7 @@ def _violations(root):
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
-            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root))
 
@@ -1002,15 +1029,10 @@ def unit_dropin_names(name):
     return [name] + unit_dropin_names(prefix + "." + typ)
 
 
-def card_unit_violations(root):
-    """IMG-nodump: each secret-holding service's unit, with every drop-in systemd 257.13 applies to
-    it, sets LimitCORE=0. The unit is the first UNIT_PATHS entry of its name; its drop-ins are
-    conf_files over NAME.d and each prefix's .d in every unit directory, then service.d
-    (unit_file_find_dropin_paths in src/shared/dropin.c). A link as the unit, or a link elsewhere
-    that makes another name an alias of it (whose drop-ins then apply too), is refused rather than
-    modelled."""
-    out, root = [], str(root)
-    dirs = []
+def unit_dirs(root):
+    """(the UNIT_PATHS directories that exist, as in-image paths, in precedence order; one error per
+    directory the check cannot read, which it never passes)."""
+    dirs, out = [], []
     for d in UNIT_PATHS:
         try:
             path = conf_chase(root, d)
@@ -1022,6 +1044,18 @@ def card_unit_violations(root):
             continue
         if st is not None and stat.S_ISDIR(st.st_mode):
             dirs.append(path)
+    return dirs, out
+
+
+def card_unit_violations(root):
+    """IMG-nodump: each secret-holding service's unit, with every drop-in systemd 257.13 applies to
+    it, sets LimitCORE=0. The unit is the first UNIT_PATHS entry of its name; its drop-ins are
+    conf_files over NAME.d and each prefix's .d in every unit directory, then service.d
+    (unit_file_find_dropin_paths in src/shared/dropin.c). A link as the unit, or a link elsewhere
+    that makes another name an alias of it (whose drop-ins then apply too), is refused rather than
+    modelled."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
     for d in dirs:
         for n in sorted(tree_listdir(root, d)):
             if n in CARD_UNITS or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
@@ -1917,6 +1951,137 @@ def uplink_violations(up):
         if v != want:
             out.append("%s: [%s] %s is %s; must be %s" % (UPLINK, s, k, v, want))
     return out
+
+
+def nm_walk(root, rel, out):
+    """tree_walk over directory REL (an in-image path), but a directory that cannot be listed is
+    refused in OUT, never skipped: what NetworkManager would read there is unknown."""
+    try:
+        names = sorted(tree_listdir(root, rel))
+    except OSError as e:
+        out.append("%s: unreadable (%s); the tree check never passes a directory it cannot list" % (rel, e.strerror))
+        return
+    for n in names:
+        r = rel + "/" + n
+        try:
+            st = tree_lstat(root, r)
+        except OSError:
+            st = None
+        if st is None:
+            out.append("%s: unreadable; the tree check never passes an entry it cannot stat" % r)
+            continue
+        yield r, st
+        if stat.S_ISDIR(st.st_mode):
+            yield from nm_walk(root, r, out)
+
+
+def nm_unit_violations(root):
+    """The NetworkManager unit as systemd 257.13 resolves it (see NM_EXEC): the unit file, its
+    drop-ins under its own name, any name that links to it (dbus-org.freedesktop.NetworkManager) and
+    each name's prefixes, in every unit directory and in service.d."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    unit = next((Conf(root, d + "/" + NM_UNIT) for d in dirs if tree_lstat(root, d + "/" + NM_UNIT)), None)
+    if unit is None:
+        return out + ["%s: missing; NetworkManager must start from the shipped unit" % NM_UNIT]
+    if unit.is_link():
+        return out + ["%s: a link; the tree check reads only a regular unit file" % unit.rel]
+    names = {NM_UNIT}
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            try:
+                if stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode) and \
+                        tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1] == NM_UNIT:
+                    names.add(n)
+            except OSError:
+                continue
+    files = {}
+    for n in sorted(names):
+        for f in conf_files(root, ["%s/%s.d" % (d, m) for d in UNIT_PATHS for m in unit_dropin_names(n)]
+                            + ["%s/service.d" % d for d in UNIT_PATHS]):
+            files[f.rel] = f
+    for rel, f in sorted(files.items()):
+        if rel != NM_DROPIN:
+            out.append("%s: a drop-in for %s; the only one is %s" % (rel, NM_UNIT, NM_DROPIN))
+        else:
+            try:
+                if f.content() != NM_DROPIN_TEXT:
+                    out.append("%s: not the shipped drop-in" % rel)
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, e.strerror))
+    if NM_DROPIN not in files:
+        out.append("%s: missing; NetworkManager must not start without the inbound drop" % NM_DROPIN)
+    execs = []
+    for f in [unit] + [f for r, f in sorted(files.items())]:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e))
+            continue
+        for s, k, v in lines:
+            if k in ("Environment", "EnvironmentFile"):
+                out.append("%s: %s is set; NetworkManager reads only the shipped configuration" % (f.rel, k))
+            elif (s, k) == ("Service", "ExecStart"):
+                execs = execs + [v] if v else []
+    if execs != [NM_EXEC]:
+        out.append("%s: ExecStart is %s; must be exactly %s" % (NM_UNIT, execs, NM_EXEC))
+    return out
+
+
+def networkmanager_violations(root):
+    """#936: what NetworkManager reads at start is NM_FILES and nothing else: any other entry under
+    NM_ROOTS is refused (a closed list), the shipped file holds NM_KEYS and a keyfile path under /run,
+    no connection location exists, and the unit is held to NM_EXEC and NM_DROPIN (nm_unit_violations). Skipped where the
+    tree has no NetworkManager. A file the check cannot read, or that byte_violations refuses, is
+    refused and never skipped."""
+    if not any(entry_mode(root, rel) for rel in NM_PRESENT):
+        return []
+    out = []
+    shipped = set()
+    for rel in NM_FILES:
+        try:
+            shipped.add(tree_entry(root, rel)[0])
+        except OSError:
+            pass
+    for d in NM_ROOTS:
+        mode = entry_mode(root, d)
+        if mode and not stat.S_ISDIR(mode):
+            out.append("%s: not a directory; the tree check reads only a directory" % d)
+        if not stat.S_ISDIR(mode):
+            continue
+        for rel, st in nm_walk(root, tree_entry(root, d)[0], out):
+            if not stat.S_ISDIR(st.st_mode) and rel not in shipped:
+                out.append("%s: not a file the image ships; NetworkManager would read it" % rel)
+    seen = {}
+    for rel in NM_FILES:
+        f = Conf(str(root), rel)
+        bad = byte_violations(f)
+        out += bad
+        if bad:
+            continue
+        try:
+            lines = config_lines(f.content())
+        except Unparsable as e:
+            out.append("%s: %s; the tree check never passes a file it cannot parse" % (f.rel, e))
+            continue
+        for s, k, v in lines:
+            seen.setdefault((s, k), []).append((f.rel, v))
+    for (s, k), vals in sorted(seen.items()):
+        if (s, k) not in NM_KEYS and (s, k) != NM_PATH:
+            out.append("%s: [%s] %s is %s; not a key the image ships" % (vals[-1][0], s, k, vals[-1][1]))
+        elif len(vals) > 1:
+            out.append("%s: [%s] %s is set %d times; must be set once" % (vals[-1][0], s, k, len(vals)))
+    for (s, k), want in sorted(NM_KEYS.items()):
+        v = seen.get((s, k), [(None, None)])[0][1]
+        if v != want:
+            out.append("NetworkManager: [%s] %s is %s; must be %s" % (s, k, v, want))
+    path = seen.get(NM_PATH, [(None, None)])[0][1]
+    if path is None or not path.startswith("/run/") or ".." in path.split("/"):
+        out.append("NetworkManager: [keyfile] path is %s; must be under /run, never the drive (STO-2)" % path)
+    for d in NM_CONNECTIONS:
+        if entry_mode(root, d):
+            out.append("%s: a NetworkManager connection location; it must not exist (no join before STO-2)" % d)
+    return out + nm_unit_violations(root)
 
 
 def forward_key(k):

@@ -14,7 +14,9 @@ const DailyCap = 200
 // PlannerKeys derives the two sibling keys a planner is handed. The first
 // carries organize and trash and the daily cap, so the cap is counted at the
 // clerk from the log and survives a restart; the second carries unsubscribe and
-// the hold, which the cap does not count. Neither can be widened by the planner.
+// the hold, which the cap does not count. Neither can be widened by the
+// planner, and neither can be stripped back to the root: using a key needs the
+// signature of its last holder, which is the planner (kernel.SignPlan).
 func PlannerKeys(root key.Key, holder ed25519.PrivateKey, planner ed25519.PublicKey, holdBaseMS, holdNoveltyMS int64) (bulk, unsub key.Key, err error) {
 	bulk, err = key.Derive(root, holder, planner, key.LimitVerbs(key.Organize, key.Trash), key.LimitRate(DailyCap))
 	if err != nil {
@@ -32,9 +34,10 @@ type Left struct{ Organize, Trash int }
 // unsubscribe once from each sender the clerk offered a handle for. Trash is
 // submitted first so the cap (the bulk key's, enforced at the clerk) never spends itself on labels while spam stays;
 // what the cap puts off comes back as Left. It sees no mail text, so a mail
-// cannot steer it (INJ-1); a plan per action means one refused action never
+// cannot steer it (INJ-1); the planner signs each plan as the holder of its
+// key; a plan per action means one refused action never
 // takes the others with it.
-func Plans(listing []Item, bulk, unsub key.Key) ([]kernel.Plan, Left) {
+func Plans(listing []Item, bulk, unsub key.Key, planner ed25519.PrivateKey) ([]kernel.Plan, Left) {
 	var left Left
 	room := DailyCap
 	var out []kernel.Plan
@@ -43,7 +46,7 @@ func Plans(listing []Item, bulk, unsub key.Key) ([]kernel.Plan, Left) {
 		if v == key.Unsubscribe {
 			k = unsub
 		}
-		out = append(out, kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}})
+		out = append(out, kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: v, Clerk: Name, Args: args}}}, planner))
 	}
 	for _, it := range listing {
 		if it.Class == "spam" || it.Class == "phishing" {

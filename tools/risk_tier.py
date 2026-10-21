@@ -116,7 +116,7 @@ TIER_B_BROKER = {
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
     "compile", "corpus", "floor", "fold", "hostchange", "inflight",
-    "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
+    "loopbuild", "machprobe", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
