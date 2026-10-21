@@ -185,8 +185,49 @@ func TestMailSetupStoppedBetweenItsWritesSendsTheOldPassword(t *testing.T) {
 	if err := SetMail(r.dir, r.sec, b, "canary-account-B-pass"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := readMail(r.dir); err != nil || got.MailSettings != b || r.sec.Len() != 1 {
+	if got, err := readMail(r.dir); err != nil || got != b || r.sec.Len() != 1 {
 		t.Fatalf("setup run again: %+v, %v, %d slots", got, err, r.sec.Len())
+	}
+}
+
+// SetMail stopped after each of its steps, as a crash would, leaves settings
+// whose own slot opens to their own password, so a clerk opened on them sends
+// it only to their servers; RemoveMail then leaves no mail password sealed,
+// a crash-left one included (#2704).
+func TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword(t *testing.T) {
+	a := MailSettings{Address: "you@example.com", IMAP: "imap.a.test:993", SMTP: "smtp.a.test:465"}
+	b := MailSettings{Address: "you@example.com", IMAP: "imap.b.test:993", SMTP: "smtp.b.test:465"}
+	pass := map[MailSettings]string{a: "canary-account-A-pass", b: "canary-account-B-pass"}
+	for i := 0; i < 3; i++ {
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetMail(dir, sec, a, pass[a]); err != nil {
+			t.Fatal(err)
+		}
+		if err := setMail(dir, sec, b, pass[b], func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
+			t.Fatalf("stop after step %d: %v", i, err)
+		}
+		sec, err = OpenSecrets(dir, testSealer()) // the restarted clerk process
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := readMail(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := sec.Login(slotOf(s), s.login())(context.Background())
+		if err != nil || l.Secret != pass[s] {
+			t.Fatalf("stopped after step %d: settings for %s sign in with %q, %v; want their own password", i, s.IMAP, l.Secret, err)
+		}
+		if err := RemoveMail(dir, sec); err != nil {
+			t.Fatal(err)
+		}
+		if re, err := OpenSecrets(dir, testSealer()); err != nil || re.Len() != 0 {
+			t.Fatalf("stopped after step %d, then removed: %d slots still sealed", i, re.Len())
+		}
 	}
 }
 

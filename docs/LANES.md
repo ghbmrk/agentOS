@@ -51,13 +51,17 @@ One owner per directory at a time (PLAN.md §3). A change another owner's direct
   - `State().Status()`: STATUS;
   - `Retry`: RETRY of a parked step;
   - `Enroll` and `Unenroll`: passkeys;
-  - `Hold` and `Extend`: spend;
+  - `Extend`: a held plan's spend;
+  - `SetLine`: the owner's line for a big change;
+  - `Reserve`: the owner's share of a usage pool;
   - `Issue`: a grant;
   - `Revoke`, `Pause` and `Unpause`: keys;
   - `Stop` and `Resume`;
   - `Cancel` and `Undo`.
 
-  Their meaning is frozen. A signature changes only in a kernel-lane PR that edits this list in the same change; #2674 adds co-signatures to `Issue`. Neither side writes the other's directories, and `cmd/agentosd` changes only at its call sites, in sub B's rows.
+  The metering side is not the owner's: the model clerk (`clerk/model`, #2572) calls `AdmitSpend`, `Meter`, `Hold`, `ReadPool` and `AdmitPool`. It reaches them in the kernel's process through the same `run.Kernel.With` now, and through the kernel process's socket in #2682's third slice. Their meaning is frozen the same way.
+
+  A signature changes only in a kernel-lane PR that edits these lists in the same change. Neither side writes the other's directories, and `cmd/agentosd` changes only at its call sites, in sub B's rows.
 - **Everything else** has a fixed owner: sub A owns all of `tools/`, `.github/` and every gate file. The Codex lane may change only `docs/` and `tests/` files that are not gate files. The conflict guard (OPERATING §5) still keeps two builds off one file.
 
 ## Lanes

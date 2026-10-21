@@ -92,9 +92,46 @@ func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int6
 	s.Dispatch = &d
 	led := v.LedgerBefore(d.Seq)
 	for _, id := range ver.Scopes() {
-		s.Ledger[id] = led.Uses(id)
+		s.Ledger[id] = needed(led.Uses(id), ver.Limits.Caps, id, r.Step().Task, now)
 	}
 	return s
+}
+
+// viewSkew is how far the clerk's clock may run behind the kernel's within
+// one call and still find every use its day window counts.
+const viewSkew = 10 * 60_000
+
+// needed bounds a scope's uses to those the chain's caps on it can count at
+// now (#2700 item 3): a day cap's day, with viewSkew to spare, a task cap's
+// task, and a use cap's newest N, which is all of them while fewer than N
+// exist. Each cap filters its own uses again in the clerk's check, so the
+// check reads the same as on the whole ledger, and the view grows with the
+// caps, not with the log's age. A scope with no cap gets an empty list,
+// which still covers it.
+func needed(all []key.Use, caps []key.Cap, scope key.ID, task string, now int64) []key.Use {
+	keep := make([]bool, len(all))
+	for _, cp := range caps {
+		if cp.Scope != scope {
+			continue
+		}
+		for i, u := range all {
+			switch cp.Kind {
+			case key.KSpendDay, key.KRateDay, key.KRateRecipient:
+				keep[i] = keep[i] || u.At > now-key.DayMS-viewSkew
+			case key.KSpendTask:
+				keep[i] = keep[i] || u.Task == task
+			case key.KUses:
+				keep[i] = keep[i] || int64(len(all)-i) <= cp.N
+			}
+		}
+	}
+	out := []key.Use{}
+	for i, u := range all {
+		if keep[i] {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // The clerk's side: snapshot is a kernel.View.
