@@ -248,4 +248,7 @@ func TestSecretsRemovePrefix(t *testing.T) {
 	if err := s.RemovePrefix("mail/", "mail/b"); err != nil || writes != n+1 {
 		t.Fatal("a RemovePrefix matching nothing wrote")
 	}
+	if err := s.RemovePrefix("", "mail/b"); err == nil || s.Len() != 2 {
+		t.Fatal("an empty prefix was taken as every slot")
+	}
 }

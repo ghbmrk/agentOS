@@ -156,8 +156,12 @@ func (s *Secrets) Remove(slot string) error {
 
 // RemovePrefix deletes every slot under prefix but keep, in one write as
 // Remove does; if writing fails, the store is unchanged, and when no slot
-// matches nothing is written.
+// matches nothing is written. An empty prefix is refused: it would name every
+// clerk's slots.
 func (s *Secrets) RemovePrefix(prefix, keep string) error {
+	if prefix == "" {
+		return errors.New("clerk: RemovePrefix needs a prefix")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := maps.Clone(s.m)
