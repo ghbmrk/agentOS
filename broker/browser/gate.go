@@ -208,32 +208,39 @@ func (g *Gate) stop() {
 var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is not running"}
 
 // do runs one request line and returns what the agent may see. Only the
-// clerk calls it. An action that may change state at the site is refused
-// unsent (approval_required): no recipe covers any page yet, so each such
-// action waits for the owner's approval of the exact request (CLK-3), and
-// To names what it reaches for that approval.
-func (g *Gate) do(ctx context.Context, raw []byte) Result {
+// clerk calls it. An action that needs the owner's approval is refused
+// unsent (approval_required): no recipe covers any page yet, so it needs
+// the owner's approval of the exact request (CLK-3), and To names what it
+// reaches. effect reports an action that may change state at the site
+// (judgeClosed), sent only because the session is logged out; lost reports
+// that the executor stopped after it was written, so whether it acted is
+// unknown (KRN-8).
+func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.stopped {
-		return stoppedResult
+		return stoppedResult, false, false
 	}
 	req, err := Parse(raw)
 	if err != nil {
 		d, _ := g.filter.text(err.Error())
-		return Result{Error: "protocol", Detail: d}
+		return Result{Error: "protocol", Detail: d}, false, false
 	}
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
-		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
+		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}, false, false
 	}
-	l, need, res := g.judge(req)
-	if res != nil {
-		return *res
+	l, effect, refused := g.judgeClosed(req)
+	need := effect
+	if refused == nil && g.cfg.LoggedOut {
+		l, need, refused = g.judgeLoggedOut(req)
+	}
+	if refused != nil {
+		return *refused, false, false
 	}
 	if need {
 		t, _ := g.filter.text(l.to())
 		return Result{Error: "approval_required", To: t,
-			Detail: "this action may change state at the site; it waits for the owner's approval of this exact request (CLK-3)"}
+			Detail: "this action may change state at the site and needs the owner's approval of this exact request, which this browser cannot ask for yet (CLK-3); nothing was sent"}, false, false
 	}
 	switch req.Verb {
 	case "type":
@@ -245,21 +252,32 @@ func (g *Gate) do(ctx context.Context, raw []byte) Result {
 	if req.Verb == "type" && out.OK {
 		g.remember(req, out.URL)
 	}
-	return out
+	return out, effect, effect && g.stopped
 }
 
-// judge reports what req reaches and whether it needs the owner's approval.
-// Logged out, an action can harm the owner only through a URL that itself
-// acts or carries a token, so only a navigate or a link to a target G9
-// matches does (D-147). Otherwise it fails closed: only a snapshot, a
-// screenshot, typing without submit, a click that focuses a text field,
-// and a navigate or a link followed to a target G9 does not match are
-// free. A button, a select or a submit shows the gate no request, so on an
-// account the owner may be signed in to it may act whatever its name.
-func (g *Gate) judge(req Request) (link, bool, *Result) {
-	if g.cfg.LoggedOut {
-		return g.judgeLoggedOut(req)
+// effect reports whether the request line raw may change state at the site
+// as judgeClosed sees it now. A line the gate cannot judge, its ref unseen,
+// counts as one (fail closed); a line the protocol refuses was never sent.
+func (g *Gate) effect(raw []byte) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, err := Parse(raw)
+	if err != nil {
+		return false
 	}
+	_, effect, refused := g.judgeClosed(req)
+	return effect || refused != nil
+}
+
+// judgeClosed reports what req reaches and whether it may change state at
+// the site, failing closed: only a snapshot, a screenshot, typing without
+// submit, a click that focuses a text field, and a navigate or a link
+// followed to another http(s) page G9 does not match can not. A button, a
+// select or a submit shows the gate no request, so on an account the owner
+// may be signed in to it may act whatever its name. Logged out it can harm
+// the owner only through a URL that acts or carries a token
+// (judgeLoggedOut, D-147).
+func (g *Gate) judgeClosed(req Request) (link, bool, *Result) {
 	switch req.Verb {
 	case "snapshot", "screenshot":
 		return link{}, false, nil

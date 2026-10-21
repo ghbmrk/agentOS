@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -148,17 +149,57 @@ func TestPostIsRefusedUnsent(t *testing.T) {
 	}
 }
 
-// The clerk sends only reads, which are safe to run again, so it keeps no
-// memory: a fresh clerk, as after a restart, probes every step notdone,
-// and the kernel never parks a browser step (KRN-8).
-func TestEveryStepProbesNotDone(t *testing.T) {
+// A read that cannot change state, and a post (never sent), probe notdone
+// on a fresh clerk, as after a restart (KRN-8).
+func TestReadsAndPostsProbeNotDone(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	fresh := NewClerk("web", r.owner, r.h.g)
-	for _, s := range []kernel.PlanStep{read(navUnsub), post(unsubShown, navUnsub)} {
+	for _, s := range []kernel.PlanStep{read(`{"v":0,"verb":"snapshot"}`), post(unsubShown, navUnsub)} {
 		req := kernel.Request{Plan: plan("p", r.root, s)}
 		if p := fresh.Probe(req, r.k.State()); p != "notdone" {
 			t.Fatalf("%s probe %s", s.Verb, p)
 		}
+	}
+}
+
+// Logged out, a button press is sent but may change state: an answer lost
+// after the write is unknown, the kernel parks it and nothing is sent
+// twice, and a fresh clerk probes it unknown too; one that succeeded probes
+// done (KRN-8, D-147).
+func TestLoggedOutEffectIsParkedNotResent(t *testing.T) {
+	h := newHarness(t, map[string]any{"click": "hang"}, "", 300*time.Millisecond)
+	h.g.cfg.LoggedOut = true
+	h.g.refs["e6"] = link{role: "button", name: "Send message"}
+	r := newClerkRig(t, h)
+	press := read(`{"v":0,"verb":"click","ref":"e6"}`)
+	r.run(t, 0, "p1", r.root, press)
+	if s := r.step("p1"); s.Phase != kernel.PUnknown {
+		t.Fatalf("phase %s", s.Phase)
+	}
+	for i := int64(1); i <= kernel.MaxChecks+1; i++ {
+		if err := r.k.Tick(i * kernel.ProbeEvery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := r.step("p1"); s.Phase != kernel.PParked {
+		t.Fatalf("phase %s after %d checks", s.Phase, kernel.MaxChecks)
+	}
+	if got := forwarded(t, h, "click"); len(got) != 1 {
+		t.Fatalf("driver got %q", got)
+	}
+	req := kernel.Request{Plan: plan("p1", r.root, press)}
+	if p := NewClerk("web", r.owner, h.g).Probe(req, r.k.State()); p != "unknown" {
+		t.Fatalf("fresh clerk probe %s", p)
+	}
+
+	ok := newHarness(t, nil, "", 0)
+	ok.g.cfg.LoggedOut = true
+	ok.g.refs["e6"] = link{role: "button", name: "Send message"}
+	r = newClerkRig(t, ok)
+	r.run(t, 0, "p2", r.root, press)
+	req = kernel.Request{Plan: plan("p2", r.root, press)}
+	if s, p := r.step("p2").Phase, r.c.Probe(req, r.k.State()); s != kernel.PDone || p != "done" {
+		t.Fatalf("phase %s, probe %s", s, p)
 	}
 }
 
@@ -191,5 +232,28 @@ func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	}
 	if got := r.h.received(t); len(got) != 1 {
 		t.Fatalf("the driver received %q, want only the valid read", got)
+	}
+}
+
+// The clerk checks the key on its own clock, not the kernel's (CLK-2): a
+// key that expires at 10 runs while the clerk's clock reads 5 and is
+// refused unsent once it reads 20, though the kernel dispatched both at 0.
+func TestClerkChecksOnItsOwnClock(t *testing.T) {
+	r := newClerkRig(t, newHarness(t, nil, "", 0))
+	hpub, hpriv := seedKey(2)
+	k, err := key.Derive(r.root, hpriv, hpub, key.LimitExpires(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe := read(`{"v":0,"verb":"navigate","url":"https://shop.example.test/products/kettle"}`)
+	r.c.Clock = func() int64 { return 5 }
+	r.run(t, 0, "p1", k, safe)
+	r.c.Clock = func() int64 { return 20 }
+	r.run(t, 0, "p2", k, safe)
+	if a, b := r.step("p1").Phase, r.step("p2").Phase; a != kernel.PDone || b != kernel.PFailed {
+		t.Fatalf("phases %s, %s", a, b)
+	}
+	if got := r.h.received(t); len(got) != 1 {
+		t.Fatalf("the driver received %q", got)
 	}
 }

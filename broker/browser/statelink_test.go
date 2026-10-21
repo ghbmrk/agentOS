@@ -296,6 +296,10 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	if got := forwarded(t, h, "click"); len(got) != len(pass) {
 		t.Fatalf("driver got %q", got)
 	}
+	// A download needs a link: a text field gives it nothing to fetch.
+	if r := h.do(t, `{"v":0,"verb":"download","ref":"e17"}`); r.Error != "approval_required" {
+		t.Fatalf("download e17: %+v", r)
+	}
 
 	// body{cursor:pointer} (click delegation): only "Log out" and the body
 	// itself need approval; the other link and the search box pass.

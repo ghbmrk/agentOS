@@ -158,7 +158,8 @@ func wrapDriver(t *testing.T, argv, env []string) []string {
 
 func (h *harness) do(t *testing.T, raw string) Result {
 	t.Helper()
-	return h.g.do(context.Background(), []byte(raw))
+	res, _, _ := h.g.do(context.Background(), []byte(raw))
+	return res
 }
 
 // shown is s as the output filter lets the agent see it.
