@@ -78,7 +78,7 @@ def legitimate_peak():
     """What the bounded paths can hold live at once: every mail call at its worst (one response
     at the field bound, plus a full Fetch's read budget of kept bodies), one unlock's Argon2id,
     the proxy's in-flight budget and the provider worker routes' request bodies."""
-    fetch_budget = 16 * MiB + FETCH_BATCH * (go_int("mail/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
+    fetch_budget = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
     mail = go_int("cmd/agentos-egress/mailaccount.go", "mailConns") * (RESPONSE_PEAK + fetch_budget)
     routes = go_int("cmd/agentos-egress/workerroute.go", "routeCalls") * go_int("egress/proxy.go", "DefaultMaxBody")
     return mail + kdf_memory() + go_int("egress/proxy.go", "DefaultInFlightBytes") + routes
@@ -120,7 +120,7 @@ class VaultMemoryCeiling(unittest.TestCase):
     def test_the_derivation_reads_real_figures(self):
         # Guards the regexes: a figure that stops parsing must not pass as zero.
         self.assertEqual(go_int("cmd/agentos-egress/mailaccount.go", "mailConns"), 8)
-        self.assertEqual(go_int("mail/imapsmtp/imapsmtp.go", "cfg.MaxFetch"), 256 * KiB)
+        self.assertEqual(go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch"), 256 * KiB)
         self.assertEqual(kdf_memory(), 256 * MiB)
         self.assertEqual(go_int("egress/proxy.go", "DefaultMaxBody"), 8 * MiB)
         self.assertEqual(go_int("cmd/agentos-egress/workerroute.go", "routeCalls"), 8)
