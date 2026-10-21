@@ -4,6 +4,7 @@
 package sim
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,32 @@ type Result struct {
 	Trace   []string
 	Entries []kernel.Entry
 	Effects int
+
+	// What the faults did, counted where they took effect, not where they were
+	// chosen: a fault that changed nothing leaves its counter at zero.
+	Refused       int // appends the full disk refused
+	ClockBack     int // times the clock really moved back
+	StaleRefused  int // old requests redelivered to the world that it did not act on
+	AnchorFailed  int // anchor writes that failed
+	WidenUnproven int // widenings whose anchor failed, left live until the log is reopened
+	UnheldRefused int // plans under a key their signer does not hold, rejected
+}
+
+var errAnchor = errors.New("sim: anchor down")
+
+// anchor is a MemAnchor the owner's phone can drop off from: while down, no head is confirmed.
+type anchor struct {
+	kernel.MemAnchor
+	down   bool
+	failed int
+}
+
+func (a *anchor) Put(h kernel.Head) error {
+	if a.down {
+		a.failed++
+		return errAnchor
+	}
+	return a.MemAnchor.Put(h)
 }
 
 const hour = int64(3_600_000)
@@ -59,6 +86,11 @@ type world struct {
 	effects []effect
 	bad     []string
 	race    func() // an owner action landing between the kernel's decision and the clerk
+	seen    []kernel.Request
+	stale   int // old requests redelivered to the world and not acted on
+	// unconfirmed is set while a widening whose anchor failed is live in the
+	// kernel's state: nothing may act on it until the log is reopened.
+	unconfirmed bool
 }
 
 func (w *world) fault(op string) string {
@@ -77,6 +109,15 @@ func (w *world) Do(r kernel.Request, v kernel.View) kernel.Result {
 	res := w.do(r, v)
 	if w.rng.IntN(10) == 0 {
 		w.do(r, v) // the transport delivers the request twice
+	}
+	if len(w.seen) > 0 && w.rng.IntN(10) == 0 {
+		old := w.do(w.seen[w.rng.IntN(len(w.seen))], v) // an old request arrives out of order
+		if old.Detail == "already done" || old.Outcome == "failed" && old.Detail != "fault" {
+			w.stale++ // the clerk itself turned it away
+		}
+	}
+	if len(w.seen) < 16 {
+		w.seen = append(w.seen, r)
 	}
 	return res
 }
@@ -123,15 +164,19 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 		w.bad = append(w.bad, "effect twice for "+r.Idem[:8])
 	}
 	w.done[r.Idem] = true
-	ver, err := key.Verify(r.Key, w.owner)
+	if w.unconfirmed {
+		w.bad = append(w.bad, "effect on a widening the anchor never confirmed")
+	}
+	ver, err := kernel.VerifyPlan(r.Plan, w.owner)
 	if err != nil {
 		w.effects = append(w.effects, effect{r.Idem, r.Now, ""})
-		w.bad = append(w.bad, "effect under an invalid key")
+		w.bad = append(w.bad, "effect under an invalid key or one its submitter does not hold")
 		return
 	}
+	st := r.Step()
 	fp := ""
-	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
-		fp = ver.Root().String() + "|" + kernel.Fingerprint(r.Step)
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
+		fp = ver.Root().String() + "|" + kernel.Fingerprint(st)
 		for _, e := range w.effects {
 			if e.fp == fp && e.at > r.Now-key.DayMS {
 				w.bad = append(w.bad, "the same irreversible effect twice within a day, across plans")
@@ -153,12 +198,12 @@ func (w *world) apply(r kernel.Request, v kernel.View) {
 	}
 	found := false
 	for _, x := range ver.Limits.Verbs {
-		found = found || x == string(r.Step.Verb)
+		found = found || x == string(st.Verb)
 	}
 	if !found {
 		w.bad = append(w.bad, "effect with a verb outside the key")
 	}
-	if c, ok := key.ClassOf(r.Step.Verb); ok && c.Irreversible() {
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
 			h, held := v.Held(r.HeldSeq)
 			if !held || r.Now < h.At+ver.Limits.Window(h.Novel) {
@@ -186,11 +231,12 @@ type sim struct {
 	cfg    Config
 	rng    *rand.Rand
 	disk   *Disk
-	anchor *kernel.MemAnchor
+	anchor *anchor
 	w      *world
 	k      *kernel.Kernel
 	owner  keyPair
-	holder keyPair
+	holder keyPair // holds every root: the trusted side
+	planr  keyPair // holds only the keys derived to it
 	head   keyPair
 	pool   []key.Key
 	ids    []key.ID
@@ -198,6 +244,8 @@ type sim struct {
 	now    int64
 	trace  []string
 	nonce  *rand.ChaCha8
+
+	clockBack, widenUnproven, unheld int
 }
 
 func (s *sim) logf(f string, a ...any) {
@@ -213,6 +261,7 @@ func (s *sim) kcfg() kernel.Config {
 func (s *sim) boot() error {
 	for try := 0; try < 8; try++ {
 		s.disk.Reboot()
+		s.anchor.down, s.w.unconfirmed = false, false
 		l, err := kernel.Open(s.kcfg())
 		if err == nil {
 			s.k, err = kernel.Boot(l, s.owner.pub, map[string]kernel.Clerk{"mail": s.w}, s.now)
@@ -251,8 +300,8 @@ func (s *sim) newRoot() key.Key {
 
 func (s *sim) remember(k key.Key) {
 	s.pool = append(s.pool, k)
-	if v, err := key.Verify(k, s.owner.pub); err == nil {
-		s.ids = append(s.ids, v.ID())
+	if key.CheckChain(k, s.owner.pub) == nil {
+		s.ids = append(s.ids, k.Tip())
 	}
 }
 
@@ -272,8 +321,34 @@ func (s *sim) derived() (key.Key, bool) {
 	case 3:
 		cav = append(cav, key.LimitVerbs(verbs[s.pick(len(verbs))])) // may try to widen: Verify must refuse
 	}
-	k, err := key.Derive(base, s.holder.priv, s.holder.pub, cav...)
+	k, err := key.Derive(base, s.holder.priv, s.planr.pub, cav...)
 	return k, err == nil
+}
+
+// signed is a plan under the planner's pick of key, signed by whoever submits
+// it: the holder for a root, the planner for a key derived to it, and the
+// planner again for a key it does not hold, which must confer nothing.
+func (s *sim) signed(p kernel.Plan) (kernel.Plan, bool) {
+	p.Key = s.anyKey()
+	signer, unheld := s.holder.priv, false
+	if n := len(p.Key.Links); n > 0 && bytes.Equal(p.Key.Links[n-1].Holder, s.planr.pub) {
+		signer = s.planr.priv
+	}
+	switch s.pick(20) {
+	case 0: // strips its key back to the root
+		if k, ok := s.derived(); ok {
+			p.Key, signer, unheld = key.Key{Root: k.Root}, s.planr.priv, true
+		}
+	case 1: // forges a link of its own off a root, or re-derives one
+		if len(s.pool) > 0 {
+			k := s.pool[s.pick(len(s.pool))]
+			p.Key = key.Extend(k, s.planr.priv, key.Link{Caveats: []key.Caveat{key.LimitUses(1000)}, Holder: s.planr.pub})
+			signer, unheld = s.planr.priv, true
+		}
+	case 2: // a stranger signs
+		signer, unheld = gen(s.rng).priv, true
+	}
+	return kernel.SignPlan(p, signer), unheld
 }
 
 // anyKey is the planner's pick: good keys, narrowed keys, forged or foreign ones.
@@ -306,18 +381,18 @@ func (s *sim) anyKey() key.Key {
 	return s.pool[s.pick(len(s.pool))]
 }
 
-func (s *sim) step() key.Step {
+func (s *sim) step() kernel.PlanStep {
 	n := names[s.pick(len(names))]
 	clerkName := "mail"
 	if s.pick(10) == 0 {
 		clerkName = "bank"
 	}
-	st := key.Step{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Args: map[string]key.Arg{}}
+	st := kernel.PlanStep{Verb: verbs[s.pick(len(verbs))], Clerk: clerkName, Args: map[string]string{}}
 	for _, a := range key.ArgNames(st.Verb) {
-		st.Args[a] = key.Arg{Value: n}
+		st.Args[a] = n
 	}
 	if _, ok := st.Args[key.ArgAmount]; ok { // equivalent spellings of one amount
-		st.Args[key.ArgAmount] = key.Arg{Value: []string{"1", "01", "+1"}[s.pick(3)]}
+		st.Args[key.ArgAmount] = []string{"1", "01", "+1"}[s.pick(3)]
 	}
 	return st
 }
@@ -327,17 +402,23 @@ func (s *sim) submit() error {
 	if len(s.plans) > 0 && s.pick(12) == 0 {
 		id = s.plans[s.pick(len(s.plans))] // a replayed plan id
 	}
-	steps := make([]key.Step, 1+s.pick(3))
+	steps := make([]kernel.PlanStep, 1+s.pick(3))
 	if s.pick(40) == 0 {
-		steps = make([]key.Step, kernel.MaxSteps+1)
+		steps = make([]kernel.PlanStep, kernel.MaxSteps+1)
 	}
 	for i := range steps {
 		steps[i] = s.step()
 	}
 	s.logf("submit %s %d steps", id, len(steps))
-	err := s.k.Submit(s.now, kernel.Plan{ID: id, Key: s.anyKey(), Steps: steps})
+	p, unheld := s.signed(kernel.Plan{ID: id, Steps: steps})
+	err := s.k.Submit(s.now, p)
 	if err == nil {
 		s.plans = append(s.plans, id)
+		if ps := s.k.State().Plans[id]; unheld && ps != nil && ps.Status == kernel.SRejected {
+			s.unheld++
+		} else if unheld {
+			s.w.bad = append(s.w.bad, "a plan under a key its signer does not hold was admitted")
+		}
 	}
 	if errors.Is(err, kernel.ErrDuplicatePlan) {
 		return nil
@@ -361,13 +442,13 @@ func (s *sim) op() error {
 		id := s.ids[s.pick(len(s.ids))]
 		s.logf("pause")
 		if s.pick(2) == 0 {
-			return s.k.Unpause(s.now, id)
+			return s.widened(s.k.Unpause(s.now, id))
 		}
 		return s.k.Pause(s.now, id)
 	case c == 11:
 		s.logf("stop/resume")
 		if s.pick(2) == 0 {
-			return s.k.Resume(s.now)
+			return s.widened(s.k.Resume(s.now))
 		}
 		return s.k.Stop(s.now)
 	case c == 12 && len(s.plans) > 0:
@@ -381,13 +462,29 @@ func (s *sim) op() error {
 		s.logf("anchor")
 		return s.k.Log().Anchor()
 	case c == 14:
-		n := 1 + s.pick(8)
-		s.logf("arm crash in %d appends", n)
-		s.disk.Arm(n)
+		switch s.pick(5) {
+		case 0:
+			s.logf("disk full")
+			s.disk.Fill()
+		case 1:
+			d := int64(1+s.pick(48)) * hour
+			s.now = max(0, s.now-d)
+			if es := s.k.Log().Entries(); len(es) > 0 && s.now < es[len(es)-1].At {
+				s.clockBack++ // behind the log's own last entry
+			}
+			s.logf("clock jumps back %dh", d/hour)
+		case 2:
+			s.logf("anchor down")
+			s.anchor.down = true
+		default:
+			n := 1 + s.pick(8)
+			s.logf("arm crash in %d appends", n)
+			s.disk.Arm(n)
+		}
 	case c == 15:
 		r := s.newRoot()
 		s.logf("issue root")
-		if err := s.k.Issue(s.now, r); err != nil {
+		if err := s.widened(s.k.Issue(s.now, r)); err != nil {
 			return err
 		}
 		s.remember(r)
@@ -395,7 +492,20 @@ func (s *sim) op() error {
 	return nil
 }
 
-func crashed(err error) bool { return errors.Is(err, errCrash) || errors.Is(err, kernel.ErrBroken) }
+// widened passes on the result of a widening owner action. One that failed to
+// anchor is live in the kernel's state but unconfirmed; the kernel must refuse
+// to act on it, and the world judges any effect that follows as a violation.
+func (s *sim) widened(err error) error {
+	if errors.Is(err, errAnchor) {
+		s.w.unconfirmed = true
+		s.widenUnproven++
+	}
+	return err
+}
+
+func crashed(err error) bool {
+	return errors.Is(err, errCrash) || errors.Is(err, errFull) || errors.Is(err, kernel.ErrBroken)
+}
 
 // check judges the run so far.
 func (s *sim) check() error {
@@ -434,9 +544,9 @@ func Run(c Config) (*Result, error) {
 	for i := range nseed {
 		nseed[i] = byte(rng.IntN(256))
 	}
-	s := &sim{cfg: c, rng: rng, anchor: &kernel.MemAnchor{}, nonce: rand.NewChaCha8(nseed)}
+	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
 	s.disk = &Disk{rng: rng}
-	s.owner, s.holder, s.head = gen(rng), gen(rng), gen(rng)
+	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.w = &world{owner: s.owner.pub, mutant: c.Mutant, rng: rng, done: map[string]bool{}}
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -457,14 +567,14 @@ func Run(c Config) (*Result, error) {
 		}
 		s.remember(r)
 	}
-	if err := s.k.Log().Anchor(); err != nil {
-		return nil, err
-	}
 	fail := func(err error) (*Result, error) {
 		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))
 	}
 	for i := 0; i < c.Ops; i++ {
 		err := s.op()
+		if errors.Is(err, errAnchor) {
+			err = nil // the owner's phone is out of reach; the machine keeps running
+		}
 		if err != nil {
 			if !crashed(err) {
 				return fail(err)
@@ -484,7 +594,9 @@ func Run(c Config) (*Result, error) {
 	if err := s.check(); err != nil {
 		return fail(err)
 	}
-	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects)}, nil
+	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
+		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
+		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld}, nil
 }
 
 func tail(t []string) []string {

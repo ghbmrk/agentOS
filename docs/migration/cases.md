@@ -103,6 +103,15 @@ Raised as release and later findings in the #2530 reviews ([L3](https://github.c
 | #2530 L3 2, Security 2, Potency, UX | One machine cannot drain a shared provider key's rate limit and leave the others with raw 429s. The key has per-key back-off on provider 429s, not a per-machine count (a fixed share would bring the removed cap back). When the key is rate-limited, the owner-facing result names the cause (the key's rate limit) and does not read as a task failure of the starved machine | RES-5, OP-8, CH-12 |
 | #2530 L3 3 (later) | A test comment must not describe a cap that no longer exists: `inflight_test.go:383` still says "the per-machine cap" on the 4-worker loop | none |
 
+## 6b. Integration review findings on code the ports replace (2026-10-20; not patched, per D-139)
+
+Findings 1 and 2 of an integration review of main at 8fd240ef. The code they name is replaced by its port, so the old code is not patched; each port carries the case and its test.
+
+| Source | Behaviour to keep or failure to prevent | Requirements |
+|---|---|---|
+| Review finding 1, guest store port ([store.go](https://github.com/ghbmrk/agentOS/blob/8fd240efef24783e44241ebedd107f6c68bf761d/broker/guest/store.go#L174-L276)) | A save that fails after publication leaves write debt; FORGET succeeds only after a write that drops the reply; failure, then FORGET, then reopen shows no reply. Old cause: `accept()` rolls memory back without setting `unsaved` when `durable.WriteFile` fails after its rename (a directory-sync failure), so FORGET reports success while the reply is on disk and a restart restores it | CAP-3 |
+| Review finding 2, owner-channel port ([channel.go](https://github.com/ghbmrk/agentOS/blob/8fd240efef24783e44241ebedd107f6c68bf761d/broker/owner/channel.go#L594-L728)) | Reaction classification runs after code stripping; a quote of an approval code never reaches the agent, locked or unlocked; a code is spent once. Old cause: `readReaction` runs on the whole text before an appended unlock code is stripped, so a partial reaction quote with a valid code appended skips reclassification and its quoted approval code is delivered | CH-11 |
+
 ## 7. Harvested issues
 
 Each issue below is closed as superseded once this file merges. Its text stays readable on GitHub through the link. Issues merged into a row in sections 1 and 5 (#2507, #1278, #2461, #2500, #1321) close with it.

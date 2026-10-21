@@ -113,16 +113,9 @@ func newLoader(h *netHost) (*APLoader, *[]string) {
 	return &APLoader{AP: &fakeAP{log: &log}, Host: h}, &log
 }
 
-func noJoin(t *testing.T) func(context.Context) error {
-	return func(context.Context) error {
-		t.Fatal("a station join ran")
-		return nil
-	}
-}
-
 // DEV-net-h (a): a loader that died with the access point up left wlan0
 // exempt and agentos_ap loaded. The next loader's Start brings it down
-// before anything else, and refuses a station join or a bring-up until it
+// before anything else, and refuses a bring-up until it
 // has.
 func TestLoaderStartClearsAStaleExemption(t *testing.T) {
 	h := newNetHost()
@@ -140,9 +133,6 @@ func TestLoaderStartClearsAStaleExemption(t *testing.T) {
 	}
 
 	l, _ := newLoader(h)
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("a station join ran before the loader's Start")
-	}
 	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil {
 		t.Fatal("a bring-up ran before the loader's Start")
 	}
@@ -155,16 +145,12 @@ func TestLoaderStartClearsAStaleExemption(t *testing.T) {
 	if h.exempt["wlan0"] || h.apFor != "" {
 		t.Fatalf("after Start: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
 	}
-	joined := false
-	if err := l.Station(context.Background(), "wlan0", func(context.Context) error { joined = true; return nil }); err != nil || !joined {
-		t.Fatalf("station join after a clean Start: %v", err)
-	}
 }
 
 // DEV-net-h (a), (b): BringDown failing at Start (a fault in the removal)
-// leaves wlan0 refused for a station join; a later Down that succeeds lets
-// it join.
-func TestLoaderStartFailureBlocksTheStationJoin(t *testing.T) {
+// leaves wlan0 exempt with agentos_ap still loaded; a later Down that
+// succeeds clears it.
+func TestLoaderStartFailureKeepsTheTable(t *testing.T) {
 	h := newNetHost()
 	h.exempt["wlan0"], h.apFor = true, "wlan0" // a dead loader's leftovers
 	h.fail["nft unexempt wlan0"] = true
@@ -176,62 +162,13 @@ func TestLoaderStartFailureBlocksTheStationJoin(t *testing.T) {
 	if !h.exempt["wlan0"] || h.apFor != "wlan0" {
 		t.Fatalf("agentos_ap went while wlan0 may be exempt: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
 	}
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("wlan0 joined as a station while its BringDown had failed")
-	}
-	// The fault clears; Down retries and the join is allowed again.
+	// The fault clears; Down retries and clears the exemption.
 	h.fail = map[string]bool{}
 	if err := l.Down(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Station(context.Background(), "wlan0", func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
 	if len(h.open()) != 0 || h.exempt["wlan0"] {
 		t.Fatalf("exempt %v after Down", h.exempt)
-	}
-}
-
-// DEV-net-h (b): a BringDown that fails after the access point ran keeps
-// its interface out of station mode, and so does the interface that is
-// still up.
-func TestLoaderNeverJoinsAStationOnAnExemptInterface(t *testing.T) {
-	h := newNetHost()
-	l, _ := newLoader(h)
-	if err := l.Start(context.Background(), "wlan0", "wlan1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := l.Up(context.Background(), apCfg("wlan0")); err != nil {
-		t.Fatal(err)
-	}
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("wlan0 joined as a station while it ran the access point")
-	}
-	h.fail["nft unexempt wlan0"] = true
-	if err := l.Down(context.Background()); err == nil {
-		t.Fatal("Down hid a failed BringDown")
-	}
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("wlan0 joined as a station while its BringDown had failed")
-	}
-	// Another interface is not held back by wlan0's state.
-	if err := l.Station(context.Background(), "wlan1", func(context.Context) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	// A bring-up that fails and whose own teardown fails holds its interface
-	// back too.
-	h2 := newNetHost()
-	l2, _ := newLoader(h2)
-	if err := l2.Start(context.Background(), "wlan0"); err != nil {
-		t.Fatal(err)
-	}
-	h2.fail["start agentos-ap-exempt@wlan0.service"] = true
-	h2.fail["nft unexempt wlan0"] = true
-	if err := l2.Up(context.Background(), apCfg("wlan0")); err == nil {
-		t.Fatal("a failed bring-up returned nil")
-	}
-	if err := l2.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("wlan0 joined as a station after a bring-up whose teardown failed")
 	}
 }
 
@@ -346,8 +283,7 @@ func TestLoaderStartChecksItsInterfaces(t *testing.T) {
 // DEV-net-h (a), (b): an interface Start did not name has an unknown
 // exemption state. A loader that died with the access point up on wlan2
 // left it exempt; Start("wlan0") brings wlan2 down (DEV-net-i) but does
-// not name it, so Station and Up refuse wlan2 and touch neither the host
-// nor the join.
+// not name it, so Up refuses wlan2 and touches nothing for it.
 func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
 	h := newNetHost()
 	dead, _ := newLoader(h)
@@ -363,9 +299,6 @@ func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := len(h.log)
-	if err := l.Station(context.Background(), "wlan2", noJoin(t)); err == nil || !strings.Contains(err.Error(), "wlan2") {
-		t.Fatalf("station join on wlan2 after Start(wlan0): %v", err)
-	}
 	if err := l.Up(context.Background(), apCfg("wlan2")); err == nil || !strings.Contains(err.Error(), "wlan2") {
 		t.Fatalf("bring-up on wlan2 after Start(wlan0): %v", err)
 	}
@@ -373,19 +306,12 @@ func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
 		t.Fatalf("the host was touched for an unnamed interface: %q", h.log[n:])
 	}
 
-	// A later Start that names wlan2 brings it down, and it may then join.
+	// A later Start that names wlan2 brings it down.
 	if err := l.Start(context.Background(), "wlan2"); err != nil {
 		t.Fatal(err)
 	}
 	if h.exempt["wlan2"] {
 		t.Fatalf("after Start(wlan2): exempt %v", h.exempt)
-	}
-	joined := false
-	if err := l.Station(context.Background(), "wlan2", func(context.Context) error { joined = true; return nil }); err != nil || !joined {
-		t.Fatalf("station join on wlan2 after Start(wlan2): %v", err)
-	}
-	if err := l.Station(context.Background(), "wlan0", func(context.Context) error { return nil }); err != nil {
-		t.Fatalf("wlan0 lost its Start: %v", err)
 	}
 }
 
@@ -431,9 +357,6 @@ func TestLoaderStartLeavesNoUnnamedRadioExemptWithoutItsTable(t *testing.T) {
 	}
 	if open := h.open(); len(open) != 0 {
 		t.Fatalf("after Up(wlan0): %v exempt with no agentos_ap", open)
-	}
-	if err := l.Station(context.Background(), "wlan2", noJoin(t)); err == nil {
-		t.Fatal("wlan2 joined as a station though no Start named it")
 	}
 }
 
@@ -504,9 +427,6 @@ func TestUnreadableAPTableIsKept(t *testing.T) {
 	}
 	if h.apFor != "wlan2" || len(h.open()) != 0 {
 		t.Fatalf("agentos_ap went while unreadable: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
-	}
-	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
-		t.Fatal("wlan0 joined though its BringDown could not finish")
 	}
 	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil {
 		t.Fatal("wlan0 ran the access point though agentos_ap could not be read")

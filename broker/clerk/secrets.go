@@ -1,0 +1,189 @@
+package clerk
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"maps"
+	"sync"
+)
+
+// Sealer seals and opens one secret under a key that never leaves it. The
+// core binds the real key to the TPM (STO-4); AESSealer is the software form.
+type Sealer interface {
+	Seal(plain, aad []byte) ([]byte, error)
+	Open(blob, aad []byte) ([]byte, error)
+}
+
+type aesSealer struct{ g cipher.AEAD }
+
+// NewAESSealer seals with AES-256-GCM under a 32-byte key.
+func NewAESSealer(key []byte) (Sealer, error) {
+	if len(key) != 32 {
+		return nil, errors.New("clerk: sealing key must be 32 bytes")
+	}
+	b, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(b)
+	if err != nil {
+		return nil, err
+	}
+	return aesSealer{g}, nil
+}
+
+func (s aesSealer) Seal(plain, aad []byte) ([]byte, error) {
+	n := make([]byte, s.g.NonceSize())
+	if _, err := rand.Read(n); err != nil {
+		return nil, err
+	}
+	return s.g.Seal(n, n, plain, aad), nil
+}
+
+func (s aesSealer) Open(blob, aad []byte) ([]byte, error) {
+	if len(blob) < s.g.NonceSize() {
+		return nil, errors.New("clerk: sealed secret too short")
+	}
+	return s.g.Open(nil, blob[:s.g.NonceSize()], blob[s.g.NonceSize():], aad)
+}
+
+// Kind is what a slot holds. A clerk path opens only its own kind, and the
+// kind is bound into the seal, so a slot of one kind never opens as the other
+// (CLK-1, default deny).
+type Kind string
+
+// The closed list of slot kinds.
+const (
+	KindStatic Kind = "static" // a secret sent as is, e.g. an API key
+	KindGrant  Kind = "grant"  // an OAuth refresh grant, never sent to the API
+)
+
+func (k Kind) valid() bool { return k == KindStatic || k == KindGrant }
+
+// Secrets holds the clerks' credentials as sealed slots (CLK-1, STO-2). A
+// secret is opened only inside this package, for one request, and no method
+// returns it: the planner, the log and the caller of a clerk never see it.
+type Secrets struct {
+	s     Sealer
+	write func(atRest []byte) error
+	mu    sync.Mutex // also serializes writes, so the last one written is the last one put
+	m     map[string]sealed
+}
+
+// sealed is one slot at rest: its kind in the clear, bound to the blob by the
+// seal's AAD.
+type sealed struct {
+	Kind Kind   `json:"kind"`
+	Blob []byte `json:"blob"`
+}
+
+// NewSecrets makes an empty store. write, if not nil, makes the store durable:
+// every Put hands it the whole at-rest form and returns only once it returns,
+// so it must return only when the bytes are on disk, and must replace the
+// old form atomically (write a temporary file, fsync, rename), so a crash
+// leaves one whole form or the other. nil keeps the store in memory
+// only, for tests and the sim.
+func NewSecrets(s Sealer, write func(atRest []byte) error) *Secrets {
+	return &Secrets{s: s, write: write, m: map[string]sealed{}}
+}
+
+// slotAAD binds a blob to its slot name and kind, so slots cannot be swapped
+// and a kind cannot be relabelled. A kind holds no "/", so the two never blur.
+func slotAAD(slot string, k Kind) []byte {
+	return []byte("agentos/clerk/slot/" + string(k) + "/" + slot)
+}
+
+// Put seals secret into slot as kind. With a durable store it returns only
+// after the at-rest form holding it is written; if sealing or writing fails,
+// the store is unchanged.
+func (s *Secrets) Put(slot string, k Kind, secret []byte) error {
+	if slot == "" || len(secret) == 0 || !k.valid() {
+		return errors.New("clerk: a slot needs a name, a kind and a secret")
+	}
+	blob, err := s.s.Seal(secret, slotAAD(slot, k))
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := maps.Clone(s.m)
+	next[slot] = sealed{k, blob}
+	if s.write != nil {
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if err := s.write(b); err != nil {
+			return err
+		}
+	}
+	s.m = next
+	return nil
+}
+
+func (s *Secrets) Has(slot string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.m[slot]
+	return ok
+}
+
+// Len is how many slots the store holds; a nil store holds none.
+func (s *Secrets) Len() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
+}
+
+// with opens slot as kind for fn and wipes the plaintext after it returns. A
+// slot of another kind does not open: its AAD differs.
+func (s *Secrets) with(slot string, k Kind, fn func(secret []byte) error) error {
+	s.mu.Lock()
+	b, ok := s.m[slot]
+	s.mu.Unlock()
+	if !ok {
+		return errors.New("clerk: no such secret slot")
+	}
+	plain, err := s.s.Open(b.Blob, slotAAD(slot, k))
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	return fn(plain)
+}
+
+// MarshalBinary is the store's at-rest form: sealed blobs and their kinds only.
+func (s *Secrets) MarshalBinary() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return json.Marshal(s.m)
+}
+
+// UnmarshalBinary loads a store and opens every slot once, so a wrong key, a
+// swapped slot or a relabelled kind fails here, not at the first request.
+func (s *Secrets) UnmarshalBinary(b []byte) error {
+	m := map[string]sealed{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	for slot, v := range m {
+		plain, err := s.s.Open(v.Blob, slotAAD(slot, v.Kind))
+		if err != nil {
+			return errors.New("clerk: secret slot does not open: " + slot)
+		}
+		clear(plain)
+	}
+	s.mu.Lock()
+	s.m = m
+	s.mu.Unlock()
+	return nil
+}

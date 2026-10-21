@@ -229,6 +229,24 @@ func TestTheUnitIsHardened(t *testing.T) {
 	}
 }
 
+// #936: the helper starts after agentos-ap, which creates the station
+// before the access point comes up.
+func TestTheUnitStartsAfterTheAccessPoint(t *testing.T) {
+	b, err := os.ReadFile("agentos-netjoin.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "After="); ok {
+			after = append(after, strings.Fields(v)...)
+		}
+	}
+	if !slices.Contains(after, "agentos-ap.service") {
+		t.Fatalf("After=%v leaves out agentos-ap.service", after)
+	}
+}
+
 // execArgs is a unit's ExecStart split into its arguments, the binary
 // dropped, with backslash continuations joined.
 func execArgs(t *testing.T, unit string) []string {
@@ -247,16 +265,23 @@ func execArgs(t *testing.T, unit string) []string {
 	return nil
 }
 
-// S-R4 (#1428): the unit names every interface agentos-ap's unit may run
-// the access point on, and no station until #936 ships one, so the
-// helper as installed refuses every join before any bus call.
+// S-R4 (#1428), #936: the unit names every interface agentos-ap's unit
+// may run the access point on, and no station: agentos-ap creates wlsta0,
+// but #935 names it here with the sealed store. The helper as installed
+// refuses every join before any bus call.
 func TestTheUnitRefusesTheAccessPointInterface(t *testing.T) {
-	c, err := parseFlags(execArgs(t, "agentos-netjoin.service"))
+	args := execArgs(t, "agentos-netjoin.service")
+	for _, a := range args {
+		if strings.HasPrefix(strings.TrimLeft(a, "-"), "station") && strings.HasPrefix(a, "-") {
+			t.Errorf("the unit passes %q before #935 names the station", a)
+		}
+	}
+	c, err := parseFlags(args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.station != "" {
-		t.Errorf("the unit names station %q before #936 ships one", c.station)
+		t.Errorf("the unit names station %q before #935", c.station)
 	}
 	ap := execArgs(t, "../agentos-ap/agentos-ap.service")
 	var served []string

@@ -1,11 +1,12 @@
 package kernel_test
 
-// REQ: KRN-1, KRN-4, KRN-5, KRN-6, KRN-7, KRN-8, LOG-2, LOG-5, CLK-2, KEY-8
+// REQ: KRN-1, KRN-4, KRN-5, KRN-6, KRN-7, KRN-8, LOG-2, LOG-5, CLK-2, KEY-1, KEY-3, KEY-8
 
 import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -29,13 +30,26 @@ func gen(seed byte) pair {
 	return pair{p.Public().(ed25519.PublicKey), p}
 }
 
+// flakyAnchor is an anchor that can be taken away: nothing new is confirmed while down.
+type flakyAnchor struct {
+	*kernel.MemAnchor
+	down bool
+}
+
+func (a *flakyAnchor) Put(h kernel.Head) error {
+	if a.down {
+		return errors.New("anchor down")
+	}
+	return a.MemAnchor.Put(h)
+}
+
 type rig struct {
 	t      *testing.T
 	owner  pair
 	holder pair
 	head   pair
 	store  *kernel.MemStore
-	anchor *kernel.MemAnchor
+	anchor *flakyAnchor
 	mail   *clerk.Mail
 	k      *kernel.Kernel
 	root   key.Key
@@ -47,13 +61,12 @@ func cfg(r *rig) kernel.Config {
 }
 
 func newRig(t *testing.T) *rig {
-	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &kernel.MemAnchor{}}
+	r := &rig{t: t, owner: gen(1), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
 	r.mail = clerk.NewMail("mail", r.owner.pub)
 	r.boot(0)
 	r.root = key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail",
 		Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: "r1"})
-	must(t, r.k.Issue(0, r.root))
-	must(t, r.k.Log().Anchor())
+	must(t, r.k.Issue(0, r.root)) // anchors itself: the rig adds no anchor of its own
 	return r
 }
 
@@ -77,17 +90,20 @@ func (r *rig) derive(c ...key.Caveat) key.Key {
 	return k
 }
 
-func st(v key.Verb, to string) key.Step {
-	s := key.Step{Verb: v, Clerk: "mail", Args: map[string]key.Arg{}}
+func st(v key.Verb, to string) kernel.PlanStep {
+	s := kernel.PlanStep{Verb: v, Clerk: "mail", Args: map[string]string{}}
 	for _, n := range key.ArgNames(v) {
-		s.Args[n] = key.Arg{Value: to}
+		s.Args[n] = to
 	}
 	return s
 }
 
-func (r *rig) plan(id string, k key.Key, steps ...key.Step) {
+// sign signs p as the rig's holder, who holds the root and every key the rig derives.
+func (r *rig) sign(p kernel.Plan) kernel.Plan { return kernel.SignPlan(p, r.holder.priv) }
+
+func (r *rig) plan(id string, k key.Key, steps ...kernel.PlanStep) {
 	r.t.Helper()
-	must(r.t, r.k.Submit(0, kernel.Plan{ID: id, Key: k, Steps: steps}))
+	must(r.t, r.k.Submit(0, r.sign(kernel.Plan{ID: id, Key: k, Steps: steps})))
 }
 
 func (r *rig) status(id string) string { return r.k.State().Plans[id].Status }
@@ -112,7 +128,6 @@ func TestPlannerArgIsRefusedWholePlanRejected(t *testing.T) {
 	one := int64(1)
 	k := r.derive(key.LimitArg(key.ArgBound{Name: "msg", Min: &one}))
 	bad := st(key.Draft, "5")
-	bad.Args["msg"] = key.Arg{Value: "5", Source: key.SrcPlanner}
 	r.plan("p1", k, st(key.Organize, "9"), bad)
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatal("a refused step must reject the whole plan before any step runs (KRN-5)")
@@ -142,14 +157,14 @@ func TestHoldWindowThenNoveltyWindow(t *testing.T) {
 		t.Fatal("step did not run after its window")
 	}
 	// the same shape to the same recipient, a day on, is known: the base window applies
-	must(t, r.k.Submit(30*hour, kernel.Plan{ID: "p2", Key: k, Steps: []key.Step{st(key.Unsubscribe, "list-a")}}))
+	must(t, r.k.Submit(30*hour, r.sign(kernel.Plan{ID: "p2", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
 	must(t, r.k.Tick(30*hour))
 	must(t, r.k.Tick(31*hour))
 	if len(r.mail.Effects()) != 2 {
 		t.Fatalf("known shape should wait only the base window, effects %d", len(r.mail.Effects()))
 	}
 	// a new recipient is a new shape: the novelty window applies (KEY-8)
-	must(t, r.k.Submit(32*hour, kernel.Plan{ID: "p3", Key: k, Steps: []key.Step{st(key.Unsubscribe, "list-b")}}))
+	must(t, r.k.Submit(32*hour, r.sign(kernel.Plan{ID: "p3", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-b")}})))
 	must(t, r.k.Tick(32*hour))
 	must(t, r.k.Tick(35*hour))
 	if len(r.mail.Effects()) != 2 {
@@ -166,9 +181,7 @@ func TestRevokeDuringHoldCancelsWithNoEffect(t *testing.T) {
 	k := r.derive(key.LimitHold(hour, hour))
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
 	must(t, r.k.Tick(0))
-	v, err := key.Verify(k, r.owner.pub)
-	must(t, err)
-	must(t, r.k.Revoke(10, v.IDs[len(v.IDs)-1]))
+	must(t, r.k.Revoke(10, k.Tip()))
 	must(t, r.k.Tick(2*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
 		t.Fatalf("status %s effects %d", r.status("p1"), len(r.mail.Effects()))
@@ -178,15 +191,14 @@ func TestRevokeDuringHoldCancelsWithNoEffect(t *testing.T) {
 func TestPauseWaitsStopCancels(t *testing.T) {
 	r := newRig(t)
 	k := r.derive(key.LimitHold(hour, hour))
-	v, _ := key.Verify(k, r.owner.pub)
 	r.plan("p1", k, st(key.Unsubscribe, "list-a"))
 	must(t, r.k.Tick(0))
-	must(t, r.k.Pause(1, v.ID()))
+	must(t, r.k.Pause(1, k.Tip()))
 	must(t, r.k.Tick(2*hour))
 	if r.status("p1") != kernel.SActive || len(r.mail.Effects()) != 0 {
 		t.Fatal("a paused key must wait")
 	}
-	must(t, r.k.Unpause(2*hour+1, v.ID()))
+	must(t, r.k.Unpause(2*hour+1, k.Tip()))
 	must(t, r.k.Stop(2*hour+2))
 	must(t, r.k.Tick(3*hour))
 	if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
@@ -297,10 +309,48 @@ func TestOwnerCancelAndUndo(t *testing.T) {
 	}
 }
 
+// Undoing an irreversible step does not unsend it: the duplicate guard stays (KRN-8).
+func TestUndoKeepsTheDuplicateGuardOfAnIrreversibleStep(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.root, st(key.Unsubscribe, "list-a"))
+	must(t, r.k.Tick(0))
+	must(t, r.k.Undo(1, "p1", 0))
+	r.plan("p2", r.root, st(key.Unsubscribe, "list-a"))
+	if r.status("p2") != kernel.SRejected {
+		t.Fatal("undo must not reopen an irreversible effect")
+	}
+}
+
+// Argument boundaries are part of the fingerprint. These two sends collide
+// when fields are joined with separators ("to=bob,to=x,msg=m" against
+// "to=x,msg=m,to=bob" once sorted) and must not (KRN-8).
+func TestFingerprintDoesNotCollideAcrossArgumentBoundaries(t *testing.T) {
+	send := func(to, msg string) key.Step {
+		return kernel.Normalize("p", kernel.PlanStep{Verb: key.Send, Clerk: "mail", Args: map[string]string{"to": to, "msg": msg}})
+	}
+	a, b := send("bob,to=x", "m"), send("x", "m,to=bob")
+	if kernel.Fingerprint(a) == kernel.Fingerprint(b) {
+		t.Fatal("different arguments must fingerprint differently")
+	}
+	if kernel.Fingerprint(a) != kernel.Fingerprint(send("bob,to=x", "m")) {
+		t.Fatal("the same effect must fingerprint the same")
+	}
+}
+
+// A declared argument with no value names nothing to act on (KEY-2).
+func TestEmptyDeclaredArgumentRejectsThePlan(t *testing.T) {
+	r := newRig(t)
+	err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "")}}))
+	must(t, err)
+	if r.status("p1") != kernel.SRejected {
+		t.Fatal("an empty argument must reject the plan")
+	}
+}
+
 func TestDuplicatePlanIDRefused(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.root, st(key.Trash, "m1"))
-	if err := r.k.Submit(0, kernel.Plan{ID: "p1", Key: r.root, Steps: []key.Step{st(key.Trash, "m2")}}); !errors.Is(err, kernel.ErrDuplicatePlan) {
+	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Trash, "m2")}})); !errors.Is(err, kernel.ErrDuplicatePlan) {
 		t.Fatal(err)
 	}
 }
@@ -353,8 +403,8 @@ func TestLogTamperTruncationForkTorn(t *testing.T) {
 	must(t, f.k.Tick(1))
 	c := cfg(r)
 	c.Store = f.store
-	if l, err := kernel.Open(c); err == nil && l.Len() >= int(r.anchor.H.Seq) {
-		t.Fatal("a forked history must not open against the anchor (LOG-2)")
+	if _, err := kernel.Open(c); !errors.Is(err, kernel.ErrFork) {
+		t.Fatalf("a forked history must not open against the anchor (LOG-2): %v", err)
 	}
 
 	torn := &kernel.MemStore{B: append(append([]byte(nil), good...), 0, 0, 1, 0, 9, 9)}
@@ -377,19 +427,142 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 	must(t, r.k.Tick(1))
 	must(t, r.k.Stop(2))
 	n := r.k.Log().Len()
-	must(t, r.k.Resume(3)) // widening, no anchor after it
+	r.anchor.down = true
+	if err := r.k.Resume(3); err == nil { // widening the anchor cannot confirm
+		t.Fatal("a resume the anchor cannot confirm must report it")
+	}
 	r.boot(4)
 	if !r.k.State().Stopped || r.k.Log().Len() != n {
 		t.Fatal("an unconfirmed resume must not count after restart (KRN-7)")
 	}
+	r.anchor.down = false
 	must(t, r.k.Resume(5))
-	must(t, r.k.Log().Anchor())
 	r.boot(6)
 	if r.k.State().Stopped {
 		t.Fatal("an anchored resume must stand")
 	}
 	if r.status("p1") != kernel.SDone {
 		t.Fatal("dispatch and result entries must never be dropped (KRN-8)")
+	}
+}
+
+// A widening whose anchor failed is already in live state; the log must refuse
+// to build on it, so no later entry can make a restart keep it (KRN-7).
+func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.root, st(key.Trash, "m1"))
+	must(t, r.k.Stop(1))
+	r.anchor.down = true
+	if err := r.k.Resume(2); err == nil {
+		t.Fatal("an unconfirmed resume must report it")
+	}
+	if err := r.k.Tick(3); err == nil { // the broken log refuses the dispatch entry, so the clerk is never called
+		t.Fatal("nothing may be appended after an unconfirmed widening")
+	}
+	if len(r.mail.Effects()) != 0 {
+		t.Fatal("a failed resume must not let a step run")
+	}
+	r.anchor.down = false
+	if err := r.k.Stop(4); !errors.Is(err, kernel.ErrBroken) {
+		t.Fatalf("the log must stay broken until reopened: %v", err)
+	}
+	r.boot(5)
+	if !r.k.State().Stopped {
+		t.Fatal("a resume the anchor never confirmed must not survive a reboot")
+	}
+	must(t, r.k.Tick(6))
+	if len(r.mail.Effects()) != 0 {
+		t.Fatal("the plan must stay stopped")
+	}
+}
+
+// A failed Unpause is the same: the key stays paused after a reboot.
+func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Pause(1, r.root.Tip()))
+	r.anchor.down = true
+	if err := r.k.Unpause(2, r.root.Tip()); err == nil {
+		t.Fatal("an unconfirmed unpause must report it")
+	}
+	other := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+	if err := r.k.Issue(3, other); !errors.Is(err, kernel.ErrBroken) {
+		t.Fatalf("nothing may build on an unconfirmed widening: %v", err)
+	}
+	r.anchor.down = false
+	r.boot(4)
+	if !r.k.State().Changes.Paused[r.root.Tip()] {
+		t.Fatal("an unpause the anchor never confirmed must not survive a reboot")
+	}
+	r.plan("p1", other, st(key.Trash, "m1"))
+	if r.status("p1") != kernel.SRejected {
+		t.Fatal("a root whose anchor failed must be unknown after a reboot (KEY-1)")
+	}
+}
+
+// A failed Issue itself: no plan runs under it, and a reboot forgets it.
+func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
+	r := newRig(t)
+	other := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+	r.anchor.down = true
+	if err := r.k.Issue(1, other); err == nil {
+		t.Fatal("an unconfirmed issue must report it")
+	}
+	if err := r.k.Submit(2, r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})); err == nil {
+		t.Fatal("nothing may build on an unconfirmed issue")
+	}
+	r.anchor.down = false
+	r.boot(3)
+	r.plan("p2", other, st(key.Trash, "m1"))
+	must(t, r.k.Tick(4))
+	if r.status("p2") != kernel.SRejected || len(r.mail.Effects()) != 0 {
+		t.Fatal("an issue the anchor never confirmed must not survive a reboot (KEY-1)")
+	}
+}
+
+// A narrowing stays in force when its anchor fails, and the log stays usable:
+// Open keeps it either way, so refusing the owner's next stop would help nobody.
+func TestFailedAnchorAfterNarrowingKeepsItAndTheLog(t *testing.T) {
+	r := newRig(t)
+	r.anchor.down = true
+	if err := r.k.Stop(1); err == nil {
+		t.Fatal("an unconfirmed stop must report it")
+	}
+	if !r.k.State().Stopped {
+		t.Fatal("a stop stays in force")
+	}
+	if err := r.k.Pause(2, r.root.Tip()); err == nil || errors.Is(err, kernel.ErrBroken) {
+		t.Fatalf("the log stays usable: the pause is recorded and only its anchor fails: %v", err)
+	}
+	if !r.k.State().Changes.Paused[r.root.Tip()] {
+		t.Fatal("a pause stays in force")
+	}
+	r.anchor.down = false
+	r.boot(3)
+	if !r.k.State().Stopped {
+		t.Fatal("a stop is kept after restart whether or not it was anchored (KRN-7)")
+	}
+}
+
+// Every owner action anchors itself: a widening that returned nil survives a reboot,
+// and Issue does too, with no anchor from the caller.
+func TestOwnerActionsAnchorThemselves(t *testing.T) {
+	r := newRig(t)
+	r.boot(1) // the rig's own Issue is the only thing anchoring the root
+	r.plan("p0", r.root, st(key.Trash, "m0"))
+	if r.status("p0") != kernel.SActive {
+		t.Fatal("an issued root must survive restart with no explicit anchor (KEY-1)")
+	}
+	must(t, r.k.Stop(2))
+	must(t, r.k.Resume(3))
+	r.boot(4)
+	if r.k.State().Stopped {
+		t.Fatal("a resume that returned nil must survive restart (KRN-7)")
+	}
+	must(t, r.k.Pause(5, r.root.Tip()))
+	must(t, r.k.Unpause(6, r.root.Tip()))
+	r.boot(7)
+	if r.k.State().Changes.Paused[r.root.Tip()] {
+		t.Fatal("an unpause that returned nil must survive restart (KRN-7)")
 	}
 }
 
@@ -435,35 +608,35 @@ func TestCancelledPlanStillReconcilesAndBlocksDuplicate(t *testing.T) {
 	}
 }
 
+// The plan format has no source, task, recipient or amount for a planner to
+// write: the kernel derives all four, and a planner's argument never counts as
+// owner or clerk sourced.
 // REQ: KEY-2, KRN-3
-func TestPlannerCannotAttestArgSourceTaskRecipientOrAmount(t *testing.T) {
+func TestKernelDerivesSourceTaskRecipientAndAmount(t *testing.T) {
 	r := newRig(t)
 	one := int64(1)
 	k := r.derive(key.LimitArg(key.ArgBound{Name: "msg", Min: &one}))
-	s := st(key.Draft, "5")
-	s.Args["msg"] = key.Arg{Value: "5", Source: key.SrcClerk}
-	r.plan("p1", k, s)
+	r.plan("p1", k, st(key.Draft, "5"))
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
-		t.Fatal("a planner-written source must not satisfy an argument bound (KEY-2)")
+		t.Fatal("a planner argument must not satisfy an argument bound (KEY-2)")
 	}
 	spend := r.derive(key.LimitSpendTask(100))
 	big := st(key.Buy, "7")
-	big.Args["amount"] = key.Arg{Value: "500"}
-	big.Amount, big.Task, big.Recipient = 0, "other", "elsewhere"
+	big.Args["amount"] = "500"
 	r.plan("p2", spend, big)
 	if r.status("p2") != kernel.SRejected {
-		t.Fatal("a planner-set amount field must not hide the amount argument (KRN-3)")
+		t.Fatal("the amount argument alone must set the amount (KRN-3)")
 	}
 	odd := st(key.Buy, "8")
-	odd.Args["amount"] = key.Arg{Value: "lots"}
+	odd.Args["amount"] = "lots"
 	r.plan("p3", spend, odd)
 	if r.status("p3") != kernel.SRejected {
 		t.Fatal("an unreadable amount must be refused")
 	}
-	r.plan("p4", spend, func() key.Step { x := st(key.Trash, "9"); x.Task = "forged"; return x }())
-	got := r.k.State().Plans["p4"].Plan.Steps[0]
-	if got.Task != "p4" || got.Recipient != "9" {
-		t.Fatalf("task and recipient are derived, got %q %q", got.Task, got.Recipient)
+	r.plan("p4", spend, st(key.Trash, "9"))
+	got := r.k.State().Plans["p4"].Plan.Step(0)
+	if got.Task != "p4" || got.Recipient != "9" || got.Amount != 0 || got.Args["target"].Source != key.SrcPlanner {
+		t.Fatalf("source, task, recipient and amount are derived, got %+v", got)
 	}
 }
 
@@ -473,14 +646,14 @@ func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
 	r := newRig(t)
 	spend := r.derive(key.LimitSpendTask(10))
 	extra := st(key.Unsubscribe, "list-a")
-	extra.Args["note"] = key.Arg{Value: "again"}
-	renamed := key.Step{Verb: key.Send, Clerk: "mail", Args: map[string]key.Arg{"list": {Value: "x"}, "msg": {Value: "x"}}}
+	extra.Args["note"] = "again"
+	renamed := kernel.PlanStep{Verb: key.Send, Clerk: "mail", Args: map[string]string{"list": "x", "msg": "x"}}
 	price := st(key.Buy, "shop")
 	delete(price.Args, "amount")
-	price.Args["price"] = key.Arg{Value: "100000"}
+	price.Args["price"] = "100000"
 	missing := st(key.Send, "x")
 	delete(missing.Args, "to")
-	for name, s := range map[string]key.Step{"extra": extra, "renamed": renamed, "price": price, "missing": missing} {
+	for name, s := range map[string]kernel.PlanStep{"extra": extra, "renamed": renamed, "price": price, "missing": missing} {
 		k := r.root
 		if name == "price" {
 			k = spend
@@ -500,9 +673,9 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	r := newRig(t)
 	buy := key.Issue(r.owner.priv, key.Root{Holder: r.holder.pub, Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"})
 	must(t, r.k.Issue(0, buy))
-	step := func(amount string) key.Step {
+	step := func(amount string) kernel.PlanStep {
 		s := st(key.Buy, "shop")
-		s.Args["amount"] = key.Arg{Value: amount}
+		s.Args["amount"] = amount
 		return s
 	}
 	r.plan("p1", buy, step("10"))
@@ -516,5 +689,66 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	}
 	if len(r.mail.Effects()) != 1 {
 		t.Fatalf("effects = %d, want 1", len(r.mail.Effects()))
+	}
+}
+
+// The strip probe from #2566's Security review: a planner holding a narrowed
+// key drops its links and submits the bare root. Holding a narrowed key must
+// never confer more than it allows (KEY-3).
+func TestStrippedKeyIsRefused(t *testing.T) {
+	r := newRig(t)
+	planner := gen(4)
+	k, err := key.Derive(r.root, r.holder.priv, planner.pub, key.LimitRate(2))
+	must(t, err)
+	organize := func(n int) []kernel.PlanStep {
+		var s []kernel.PlanStep
+		for i := 0; i < n; i++ {
+			s = append(s, st(key.Organize, fmt.Sprintf("m%d", i)))
+		}
+		return s
+	}
+	// The planner's own use of its key runs, within the key.
+	must(t, r.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "p0", Key: k, Steps: organize(2)}, planner.priv)))
+	must(t, r.k.Tick(10))
+	if r.status("p0") != kernel.SDone || len(r.mail.Effects()) != 2 {
+		t.Fatalf("holder's own plan: status %s, %d effects", r.status("p0"), len(r.mail.Effects()))
+	}
+	// Stripped to the root, re-derived off it, or signed by no holder: refused.
+	stripped := key.Key{Root: k.Root}
+	for id, p := range map[string]kernel.Plan{
+		"p1": kernel.SignPlan(kernel.Plan{ID: "p1", Key: stripped, Steps: organize(3)}, planner.priv),
+		"p2": kernel.SignPlan(kernel.Plan{ID: "p2", Key: key.Extend(r.root, planner.priv,
+			key.Link{Caveats: []key.Caveat{key.LimitRate(1000)}, Holder: planner.pub}), Steps: organize(3)}, planner.priv),
+		"p3": {ID: "p3", Key: k, Steps: organize(1)},
+	} {
+		must(t, r.k.Submit(20, p))
+		must(t, r.k.Tick(30))
+		if r.status(id) != kernel.SRejected || len(r.mail.Effects()) != 2 {
+			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
+		}
+		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
+		req := kernel.Request{Plan: p, Idem: kernel.Idem(id, 0), Now: 30}
+		if rf := clerk.Check(r.owner.pub, "mail", nil, req, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+			t.Fatalf("%s: clerk check %v", id, rf)
+		}
+	}
+}
+
+// JSON encodes invalid UTF-8 as U+FFFD, so a signature over one such plan
+// would also cover another: a plan whose text is not UTF-8 is refused.
+func TestPlanTextMustBeUTF8(t *testing.T) {
+	r := newRig(t)
+	a := r.sign(kernel.Plan{ID: "p1", Key: r.root, Steps: []kernel.PlanStep{st(key.Organize, "m\xff")}})
+	b := a
+	b.Steps = []kernel.PlanStep{st(key.Organize, "m\xfe")}
+	for _, p := range []kernel.Plan{a, b} {
+		if _, err := kernel.VerifyPlan(p, r.owner.pub); !errors.Is(err, kernel.ErrNotText) {
+			t.Fatalf("verify %q: %v, want ErrNotText", p.Steps[0].Args, err)
+		}
+	}
+	must(t, r.k.Submit(0, b))
+	must(t, r.k.Tick(10))
+	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
+		t.Fatalf("non-UTF-8 plan: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
 	}
 }

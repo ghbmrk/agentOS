@@ -1,7 +1,10 @@
 package main
 
 import (
+	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -108,5 +111,104 @@ func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
 	}
 	if !slices.Equal(dir, []string{"agentos-egress"}) || !slices.Equal(keep, []string{"yes"}) {
 		t.Errorf("RuntimeDirectory = %q, RuntimeDirectoryPreserve = %q; want agentos-egress, yes", dir, keep)
+	}
+}
+
+// loaderState is what the loader reaches under /var/lib/agentos: the setup
+// network it reads and burns, the card's network it serves, and the owner
+// state whose presence ends setup.
+var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
+
+// maskedDirs are agentosd's state directories under /var/lib/agentos. A
+// mask on a directory survives agentosd's renames inside it, but only if
+// the directory existed at loader start: the "-" skips a missing one, and
+// agentosd makes most of them later (#2626).
+var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7"}
+
+// lapsingFiles are agentosd's state files at the top of /var/lib/agentos.
+// The unit masks them, but a mask on a file lapses at agentosd's first
+// rewrite (temp file and rename detaches the mount on the old dentry), so
+// the loader reaches each one from then on. They stay exposed until
+// #2626 moves the loader's files into their own directory.
+var lapsingFiles = []string{"journal.log", "claim.json", "drive-id", "meter.json", "spare-meter.json", "kept-replies.json", "guest-inbox.json", "clock.json", "questions.json", "setup.json", "card-latch.json"}
+
+// joinedState is agentosd state under /var/lib/agentos whose name is
+// joined to the directory at run time (cmd/agentosd/questions.go), so a
+// literal path may not name it.
+var joinedState = []string{"questions.json", "clock.json"}
+
+var statePath = regexp.MustCompile(`/var/lib/agentos/([A-Za-z0-9._-]+)`)
+
+// Every state path under /var/lib/agentos that the broker's code or the
+// image names is either one of the three the loader needs, a directory in
+// maskedDirs (masked only if it existed at loader start), or a file in
+// lapsingFiles, whose mask holds only until agentosd first rewrites it
+// (#2626). This test does not show anything is hidden; it keeps a new
+// path from going unclassed, and
+// keeps the unit's masks and these lists the same.
+func TestAgentosdStateIsHidden(t *testing.T) {
+	b, err := os.ReadFile("agentos-ap.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var masked []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "InaccessiblePaths="); ok {
+			for _, p := range strings.Fields(v) {
+				if n, ok := strings.CutPrefix(p, "-/var/lib/agentos/"); ok {
+					masked = append(masked, n)
+				}
+			}
+		}
+	}
+	slices.Sort(masked)
+	want := slices.Concat(maskedDirs, lapsingFiles)
+	slices.Sort(want)
+	if !slices.Equal(masked, want) {
+		t.Errorf("the unit masks %q under /var/lib/agentos; maskedDirs and lapsingFiles list %q", masked, want)
+	}
+	named := map[string]string{}
+	for _, n := range joinedState {
+		named[n] = "joinedState"
+	}
+	for _, root := range []string{"../..", "../../../image/mkosi/mkosi.extra"} {
+		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == "vendor" || d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(p, "_test.go") || (root == "../.." && !strings.HasSuffix(p, ".go")) {
+				return nil
+			}
+			src, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			for _, m := range statePath.FindAllSubmatch(src, -1) {
+				named[string(m[1])] = p
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(named) < len(joinedState)+len(loaderState) {
+		t.Fatalf("found only %d state paths; the walk is broken", len(named))
+	}
+	for n, where := range named {
+		if !slices.Contains(loaderState, n) && !slices.Contains(want, n) {
+			t.Errorf("/var/lib/agentos/%s (named in %s) is in none of loaderState, maskedDirs or lapsingFiles", n, where)
+		}
+	}
+	for _, n := range loaderState {
+		if _, ok := named[n]; !ok {
+			t.Errorf("loaderState lists %s, which nothing names", n)
+		}
 	}
 }
