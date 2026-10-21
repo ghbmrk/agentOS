@@ -36,6 +36,10 @@ the GENERATED line and its rows come from the live issues, never from hand edits
   board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
            [--comment]           queued, building, in review or escalated (STALE-1); with --comment, say so
                                  once per item and PR on the issue. Flags only: never relabels or closes.
+  board.py intake --repo o/r --issue N
+                                 judge issue N with render's checks among the live work items and
+                                 keep one comment on it naming every problem (INTAKE_MARK): posted,
+                                 edited in place, or deleted once the issue is well formed
   board.py archive --base FILE --changed PATH...
                                  once the base's BOARD.md carries the GENERATED line: fail if a
                                  changed path is an archive (ARCHIVED) or a retired file (RETIRED)
@@ -67,6 +71,8 @@ TIER = re.compile(r"\btier ([ABC])\b|\(([ABC])[;)]")
 FROZEN = re.compile(r"\bfrozen until G2\b")
 ARCHIVED = ("docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md")
 RETIRED = ("LATER.md", "docs/MARK-QUEUE.md")
+INTAKE_MARK = "<!-- board-intake -->"
+BOT = "github-actions[bot]"  # the login GITHUB_TOKEN comments as
 GATE = re.compile(r"\bMark approves\b|\bowner to confirm\b|\bwithout Mark\b|\bMark's approval\b")
 
 
@@ -353,6 +359,40 @@ def report_stale(fetch, repo, comment):
     return len(found)
 
 
+def intake_problems(skeleton, items, number):
+    """The problems render names for issue `number` among the live work items: the same checks,
+    including duplicate IDs and the section's cell count, never another issue's problem."""
+    try:
+        render(skeleton, items)
+    except Malformed as e:
+        return [p for p in e.problems if p.startswith(f"issue #{number}: ")]
+    return []
+
+
+def intake_comment(problems):
+    # Fenced, so issue text quoted in a problem renders as text: no mention, link or markup.
+    # No problem line starts with ```, so none can close the fence.
+    return (f"{INTAKE_MARK}\nThis work item cannot render on BOARD.md (tools/board.py):\n\n```text\n"
+            + "".join(f"{p}\n" for p in problems)
+            + "```\nEdit the issue to fix these; this comment follows each edit and is deleted once the issue is well formed.")
+
+
+def report_intake(fetch, repo, number, skeleton):
+    """Keep at most one intake comment on issue `number`, matching its problems; returns them.
+    Only the bot's own marked comments count, so a marker someone else writes steers nothing."""
+    problems = intake_problems(skeleton, work_items(fetch, repo), number)
+    mine = [c for c in fetch(f"/repos/{repo}/issues/{number}/comments")
+            if (c.get("user") or {}).get("login") == BOT and INTAKE_MARK in (c.get("body") or "")]
+    body = intake_comment(problems) if problems else None
+    for c in mine[1 if body else 0:]:
+        fetch(f"/repos/{repo}/issues/comments/{c['id']}", "DELETE")
+    if body and not mine:
+        fetch(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})
+    elif body and mine[0].get("body") != body:
+        fetch(f"/repos/{repo}/issues/comments/{mine[0]['id']}", "PATCH", {"body": body})
+    return problems
+
+
 def rate_limit_wait(code, headers, now):
     """Seconds to wait before retrying a refused call, or None if it was not rate limited.
     GitHub answers a primary or secondary rate limit with 403 or 429 and either retry-after or
@@ -372,7 +412,8 @@ def call(req, sleep=time.sleep, now=time.time, tries=6):
     for attempt in range(tries):
         try:
             with urllib.request.urlopen(req) as resp:
-                return json.load(resp)
+                data = resp.read()  # a DELETE answers 204 with no body
+                return json.loads(data) if data else None
         except urllib.error.HTTPError as e:
             wait = rate_limit_wait(e.code, {k.lower(): v for k, v in e.headers.items()}, now())
             if wait is None or attempt == tries - 1:
@@ -416,12 +457,19 @@ def work_items(fetch, repo):
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render", "archive", "stale"))
+    ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
     ap.add_argument("--comment", action="store_true", help="stale: comment once on each flagged issue")
+    ap.add_argument("--issue", type=int, metavar="N", help="intake: the issue to judge")
     args = ap.parse_args(argv)
+    if args.command == "intake":
+        if not (args.repo and args.issue):
+            ap.error("intake needs --repo and --issue")
+        problems = report_intake(fetch, args.repo, args.issue, read())
+        print(*(f"board: {p}" for p in problems or [f"issue #{args.issue}: well formed"]), sep="\n")
+        return 0
     if args.command == "stale":
         if not args.repo:
             ap.error("stale needs --repo")

@@ -1,0 +1,36 @@
+name: intake
+# CX-BOARD-INTAKE-wf (#2668, fix 2 of #1780): a collaborator's work-item issue that cannot
+# render on BOARD.md gets one comment naming every problem, edited in place on each event and
+# deleted once the issue is well formed (tools/board.py intake runs render's own checks). Main's
+# code runs with the issue-scoped token; the issue number is the only event value it reads, so
+# no issue text reaches the shell. tests/test_workflows.py pins every line.
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+permissions:
+  contents: read
+# One run at a time per issue, so two quick edits cannot both post a first comment.
+concurrency:
+  group: intake-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  intake:
+    # A work item, or one that just lost the label (its comment goes); an outsider's issue is
+    # never a work item (board.COLLABORATORS).
+    if: >-
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # the intake comment on this issue
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Comment on the issue while it cannot render (tools/board.py intake)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"

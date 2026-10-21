@@ -314,6 +314,104 @@ class IntakeProblemsTest(unittest.TestCase):
             self.assertEqual(len(lines), 5, err.getvalue())
 
 
+class IntakeCommentTest(unittest.TestCase):
+    """CX-BOARD-INTAKE-wf (#2668): a malformed work item hears it on its issue, once.
+    REQ: INTAKE-1, INTAKE-2"""
+
+    def items(self):
+        planned = opened(issues())
+        bad = dict(planned[0], number=300, title="untitled", body="no block")
+        bad["labels"] = [x for x in bad["labels"] if not x.startswith("state:")]
+        dup = dict(planned[1], number=301)  # a second issue for A-3
+        return [*planned, bad, dup]
+
+    def run_intake(self, number, items=None, comments=()):
+        calls, comments = [], [dict(c) for c in comments]
+
+        def fetch(path, method="GET", payload=None):
+            if method != "GET":
+                calls.append((method, path, payload and payload["body"]))
+                return {}
+            if path == f"/repos/o/r/issues/{number}/comments":
+                return comments
+            if path.startswith("/repos/o/r/issues?"):
+                return self.items() if items is None else items
+            raise AssertionError(path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["intake", "--repo", "o/r", "--issue", str(number)],
+                              read=lambda: BOARD + board.GENERATED + "\n", fetch=fetch)
+        self.assertEqual(code, 0)
+        return calls
+
+    def bot(self, body, id=7, login=board.BOT):
+        return {"id": id, "body": body, "user": {"login": login}}
+
+    def test_problems_are_the_ones_render_names_for_this_issue(self):
+        items = self.items()
+        with self.assertRaises(board.Malformed) as ctx:
+            board.render(BOARD, items)
+        for n in (300, 301):
+            got = board.intake_problems(BOARD, items, n)
+            self.assertEqual(got, [p for p in ctx.exception.problems if p.startswith(f"issue #{n}: ")])
+            self.assertTrue(got)
+        self.assertEqual(len(board.intake_problems(BOARD, items, 300)), 1)  # render stops at the state label
+        self.assertIn("a second issue for A-3", board.intake_problems(BOARD, items, 301)[0])
+        # The first A-3 issue is well formed; the duplicate's problem is the duplicate's.
+        self.assertEqual(board.intake_problems(BOARD, items, items[1]["number"]), [])
+
+    def test_a_malformed_issue_gets_one_comment_naming_every_problem(self):
+        wide = dict(opened(issues())[0], number=302, title="A-9: wide")
+        wide["body"] = wide["body"].replace('"cells": [', '"cells": ["extra", ')
+        calls = self.run_intake(302, items=[*opened(issues()), wide])
+        self.assertEqual([c[:2] for c in calls], [("POST", "/repos/o/r/issues/302/comments")])
+        body = calls[0][2]
+        self.assertTrue(body.startswith(board.INTAKE_MARK))
+        self.assertIn("issue #302: 3 middle cells, its table has 2", body)
+        self.assertIn("```text\nissue #302: ", body)
+
+    def test_the_comment_is_edited_in_place_then_removed_when_fixed(self):
+        first = self.run_intake(300)[0][2]
+        self.assertEqual(self.run_intake(300, comments=[self.bot(first)]), [])  # unchanged: no call
+        stale = self.bot(board.INTAKE_MARK + "\nold problems")
+        self.assertEqual(self.run_intake(300, comments=[stale]),
+                         [("PATCH", "/repos/o/r/issues/comments/7", first)])
+        # A race left two: the extra goes, the first is kept.
+        self.assertEqual(self.run_intake(300, comments=[self.bot(first), self.bot(first, id=8)]),
+                         [("DELETE", "/repos/o/r/issues/comments/8", None)])
+        fixed = opened(issues())[0]["number"]
+        self.assertEqual(self.run_intake(fixed, comments=[self.bot(first)]),
+                         [("DELETE", "/repos/o/r/issues/comments/7", None)])
+
+    def test_an_issue_that_is_not_a_work_item_has_no_problems(self):
+        # Unlabelled or closed issues are not in the open work-item list; outsiders are dropped.
+        outsider = [dict(i, author_association="NONE") for i in self.items()]
+        for items in ([], outsider):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(self.run_intake(300, items=items, comments=[self.bot("x " + board.INTAKE_MARK)]),
+                                 [("DELETE", "/repos/o/r/issues/comments/7", None)])
+
+    def test_a_comment_by_anyone_else_is_never_touched(self):
+        human = self.bot(board.INTAKE_MARK + " quoted by a person", id=5, login="someone")
+        calls = self.run_intake(300, comments=[human])
+        self.assertEqual([c[:2] for c in calls], [("POST", "/repos/o/r/issues/300/comments")])
+        fixed = opened(issues())[0]["number"]
+        self.assertEqual(self.run_intake(fixed, comments=[human, {"id": 6, "body": board.INTAKE_MARK}]), [])
+
+    def test_a_delete_with_no_body_returns_none(self):
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        original, board.urllib.request.urlopen = board.urllib.request.urlopen, lambda req: Response(b"")
+        try:
+            self.assertIsNone(board.call("req"))
+        finally:
+            board.urllib.request.urlopen = original
+
+
 class CliTest(unittest.TestCase):
     def run_tool(self, *args, text=BOARD):
         out, err = io.StringIO(), io.StringIO()
