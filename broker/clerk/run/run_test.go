@@ -4,7 +4,6 @@ package run
 
 import (
 	"bufio"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -42,7 +41,7 @@ func newBox(t *testing.T, sock string) *box {
 	b := &box{t: t, now: time.Now().UnixMilli(), remote: Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
 	b.cfg = KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
-		Pub: headPub, Sign: headPriv, Anchors: []ed25519.PublicKey{ownerPub},
+		Pub: headPub, Sign: headPriv, Anchors: anchors,
 		Clerks: map[string]Remote{"web": b.remote},
 	}
 	b.open()
@@ -53,7 +52,9 @@ func newBox(t *testing.T, sock string) *box {
 		t.Fatal(err)
 	}
 	b.key = ck
-	if err := b.h.With(func(k *kernel.Kernel) error { return k.Issue(b.now-kernel.GrantHold, root, ck) }); err != nil {
+	// New power: the owner's passkey and the second hardware key co-sign it (D-146).
+	cos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}
+	if err := b.h.With(func(k *kernel.Kernel) error { return k.Issue(b.now-kernel.GrantHold, cos, root, ck) }); err != nil {
 		t.Fatal(err)
 	}
 	return b
@@ -326,7 +327,7 @@ func serveFake(t *testing.T, c kernel.Clerk) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go ServeClerk(ln, c, []ed25519.PublicKey{ownerPub})
+	go ServeClerk(ln, c, anchors)
 	return sock
 }
 
@@ -346,7 +347,7 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 	} {
 		sock := serveFake(t, fakeClerk{do: func() kernel.Result { return c.res }, probe: c.probe})
 		r := remote{Remote{Socket: sock, UID: os.Getuid()}, nil}
-		v := kernel.NewState([]ed25519.PublicKey{ownerPub})
+		v := kernel.NewState(anchors)
 		got := r.Do(kernel.Request{}, v)
 		if got.Outcome != c.want || got.Detail != c.detail {
 			t.Errorf("clerk answered %+v: kernel took %+v, want %s %q", c.res, got, c.want, c.detail)
@@ -374,7 +375,7 @@ func TestClerkRefusesAViewWithoutTheLedger(t *testing.T) {
 	var req kernel.Request
 	b.h.With(func(k *kernel.Kernel) error { req = kernel.Request{Plan: k.State().Plans[id].Plan}; return nil })
 	full := snapshot{Dispatch: &kernel.Dispatch{Seq: 99}, Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}}
-	ver, err := kernel.VerifyPlan(req.Plan, []ed25519.PublicKey{ownerPub})
+	ver, err := kernel.VerifyPlan(req.Plan, anchors)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,4 +465,29 @@ func TestFileStoreAppendTruncate(t *testing.T) {
 	if b, _ := s.ReadAll(); string(b) != "abcd" {
 		t.Fatalf("read %q, want abcd", b)
 	}
+}
+
+// The view carries the kernel's one-off line for the chain's root, and a root
+// it does not name has line 0, so the clerk asks for a second passkey on any
+// spend rather than allow one (D-146, kernel.OneOff).
+func TestViewCarriesTheOneOffLine(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "unused.sock"))
+	id := b.submit("erin")
+	b.h.With(func(k *kernel.Kernel) error {
+		r := kernel.Request{Plan: k.State().Plans[id].Plan}
+		root := b.key.Root
+		rid := key.Key{Root: root}.Tip()
+		want := k.State().OneOffLine(rid, b.now)
+		if want <= 0 {
+			t.Fatalf("kernel's line %d: the test needs a live clerk key under the root", want)
+		}
+		s := view(k.State(), anchors, r, b.now)
+		if got := s.OneOffLine(rid, 0); got != want {
+			t.Fatalf("view's line %d, want the kernel's %d", got, want)
+		}
+		if got := s.OneOffLine(key.ID{1}, b.now); got != 0 {
+			t.Fatalf("line for a root the view does not name: %d, want 0", got)
+		}
+		return nil
+	})
 }

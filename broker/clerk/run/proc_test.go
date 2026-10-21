@@ -69,11 +69,14 @@ func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return p.Public().(ed25519.PublicKey), p
 }
 
-// The owner's anchor, the clerk key's holder and the log's head key.
+// The owner's two hardware keys (D-146), the clerk key's holder and the
+// log's head key.
 var (
 	ownerPub, ownerPriv   = gen(1)
 	holderPub, holderPriv = gen(2)
 	headPub, headPriv     = gen(3)
+	sparePub, sparePriv   = gen(4)
+	anchors               = []ed25519.PublicKey{ownerPub, sparePub}
 )
 
 // The one op the test clerk declares: a post to a recipient, with the secret
@@ -157,13 +160,13 @@ func clerkProc() {
 	roots.AppendCertsFromPEM(pemb)
 	port := string(addr[bytes.LastIndexByte(addr, ':')+1:])
 	d := clerk.Declaration{Name: "web", Ops: ops("https://example.com:" + port), Guard: guard(string(addr))}
-	x, err := OpenExit(dir, testSealer(), d, []ed25519.PublicKey{ownerPub}, roots)
+	x, err := OpenExit(dir, testSealer(), d, anchors, roots)
 	fail(err)
 	uid, err := strconv.Atoi(os.Getenv("RUN_KERNEL_UID"))
 	fail(err)
 	ln, err := ListenClerk(os.Getenv("RUN_SOCK"), uid)
 	fail(err)
-	fail(ServeClerk(ln, x, []ed25519.PublicKey{ownerPub}))
+	fail(ServeClerk(ln, x, anchors))
 }
 
 // writer puts a new secret into RUN_DIR's store, over and over, until killed.

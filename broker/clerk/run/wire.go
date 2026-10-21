@@ -57,13 +57,17 @@ type snapshot struct {
 	Unenrolled []ed25519.PublicKey  `json:"unenrolled"`
 	Changes    key.Changes          `json:"changes"`
 	Ledger     map[key.ID][]key.Use `json:"ledger"` // uses before the dispatch, per scope
+	// OneOffLines is the most a one-off under the chain's root may spend
+	// alone, as of the call on the kernel's clock (kernel.OneOff). A root it
+	// does not name has line 0: any spend needs a second passkey.
+	OneOffLines map[key.ID]int64 `json:"one_off_lines"`
 }
 
 // view is the kernel's side: what v says of r. A plan that does not verify
 // gets no grants, and a step not in flight no dispatch or uses; the clerk
 // refuses either.
-func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request) snapshot {
-	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, Changes: *v.ChangesView()}
+func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int64) snapshot {
+	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{}, Changes: *v.ChangesView()}
 	s.Enrolled, s.Unenrolled = v.Enrollments()
 	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, anchors, r.Plan.Key))
 	if err != nil {
@@ -74,6 +78,7 @@ func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request) snapshot
 			s.Grants[id] = from
 		}
 	}
+	s.OneOffLines[ver.Root()] = v.OneOffLine(ver.Root(), now)
 	d, ok := v.Dispatched(r)
 	if !ok {
 		return s
@@ -93,6 +98,9 @@ func (s *snapshot) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
 	return s.Enrolled, s.Unenrolled
 }
 func (s *snapshot) ChangesView() *key.Changes { return &s.Changes }
+
+// OneOffLine answers as of the call, whatever now the clerk asks at.
+func (s *snapshot) OneOffLine(root key.ID, _ int64) int64 { return s.OneOffLines[root] }
 
 // LedgerBefore answers only for the dispatch the snapshot was taken at.
 func (s *snapshot) LedgerBefore(seq uint64) key.Ledger {
@@ -169,7 +177,7 @@ func (c remote) Probe(r kernel.Request, v kernel.View) string {
 // call sends one call and reads its answer. sent is false only when no byte
 // of the call can have reached the clerk.
 func (c remote) call(op string, r kernel.Request, v kernel.View) (a *answer, sent bool) {
-	b, err := json.Marshal(call{op, r, view(v, c.anchors, r)})
+	b, err := json.Marshal(call{op, r, view(v, c.anchors, r, time.Now().UnixMilli())})
 	if err != nil {
 		return nil, false
 	}

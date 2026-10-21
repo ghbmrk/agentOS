@@ -36,6 +36,6 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 
 **Guard files:** `broker/core/core.txt` (the wiring line, so the core test lets the host call the kernel's write paths). `tools/risk_tier.py` needs nothing: a new `broker/` path is tier A by default. `tools/g1_scope_g2.txt` needs nothing: `allow broker/clerk/` already covers the directory. `broker/daemon/arc2_test.go` needs nothing: the daemon imports nothing new.
 
-**Ownership.** The "Kernel and clerk hardening" lane owns `broker/kernel`, `broker/kernel/key`, `broker/clerk/clerk.go` and `exit*.go`. This row consumes them through their existing APIs only. A change it needs there goes to that lane as an exact request. #2674 adds `View.OneOffLine`; whichever of the two merges second adds the field to the view (ASSUMPTIONS MIG-4-run-b).
+**Ownership.** The "Kernel and clerk hardening" lane owns `broker/kernel`, `broker/kernel/key`, `broker/clerk/clerk.go` and `exit*.go`. This row consumes them through their existing APIs only. A change it needs there goes to that lane as an exact request. `View.OneOffLine` (from #2674) travels in the view (ASSUMPTIONS MIG-4-run-b).
 
 **Usage estimate:** 250k tokens for slice 1, including reviews.
