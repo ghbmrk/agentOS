@@ -162,18 +162,27 @@ func TestSeenLetsGoOfAMailGoneSinceTheSearch(t *testing.T) {
 	}
 }
 
-// A search or a batch the server stalls fails the call once it has run for
-// the timeout.
+// A search or a batch the server stalls fails the call with ErrTimeout once
+// it has run for the timeout, not long after.
 func TestSeenTimesOutAStalledStep(t *testing.T) {
-	stall := func(string, int) string { time.Sleep(3 * time.Second); return "* SEARCH 1 2\r\n" }
+	stall := func(string, int) string { time.Sleep(5 * time.Second); return "* SEARCH 1 2\r\n" }
 	for name, addr := range map[string]string{
 		"search": seenServe(t, stall, header(1, "a@x.test")+header(2, "d@x.test"), 0),
-		"batch":  seenServe(t, func(string, int) string { return "* SEARCH 1 2\r\n" }, header(1, "a@x.test")+header(2, "d@x.test"), 3*time.Second),
+		"batch":  seenServe(t, func(string, int) string { return "* SEARCH 1 2\r\n" }, header(1, "a@x.test")+header(2, "d@x.test"), 5*time.Second),
 	} {
 		start := time.Now()
-		if _, err := seenFrom(hostileStore(t, addr, 300*time.Millisecond), "INBOX"); err == nil || time.Since(start) > 2*time.Second {
-			t.Fatalf("%s: err %v after %v; want a failure at the timeout", name, err, time.Since(start))
+		if _, err := seenFrom(hostileStore(t, addr, 500*time.Millisecond), "INBOX"); !errors.Is(err, ErrTimeout) || time.Since(start) > 1400*time.Millisecond {
+			t.Fatalf("%s: err %v after %v; want ErrTimeout at the timeout", name, err, time.Since(start))
 		}
+	}
+}
+
+// Every session cut off at its timeout fails with ErrTimeout, a one-step
+// session as much as Seen's.
+func TestASessionCutOffAtItsTimeoutSaysSo(t *testing.T) {
+	addr := seenServe(t, func(string, int) string { time.Sleep(5 * time.Second); return "* SEARCH 1\r\n" }, "", 0)
+	if _, _, err := hostileStore(t, addr, 500*time.Millisecond).UIDs(context.Background(), "INBOX"); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err %v, want ErrTimeout", err)
 	}
 }
 
@@ -222,6 +231,7 @@ func TestSeenRenewsTheBudgetForEachBatch(t *testing.T) {
 		b.WriteString(pad)
 	}
 	s := hostileStore(t, seenSearch(t, search, b.String()), 5*time.Second)
+	s.replyBase = 64 << 10 // a batch must not fit in what sign-in left
 	if got, err := seenFrom(s, "INBOX"); err != nil || len(got) != 3*seenBatch {
 		t.Fatalf("%d headers, err %v; want %d", len(got), err, 3*seenBatch)
 	}
