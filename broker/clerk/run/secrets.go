@@ -15,7 +15,6 @@ import (
 // The Secrets file and its temporary, inside the clerk's own directory.
 const (
 	secretsName = "secrets"
-	secretsTemp = "secrets.tmp"
 	maxSecrets  = 1 << 20
 )
 
@@ -33,7 +32,7 @@ func OpenSecrets(dir string, s clerk.Sealer) (*clerk.Secrets, error) {
 	if err := private(dir, true); err != nil {
 		return nil, err
 	}
-	sec := clerk.NewSecrets(s, func(b []byte) error { return writeAtomic(dir, b, nil) })
+	sec := clerk.NewSecrets(s, func(b []byte) error { return writeAtomic(dir, secretsName, b, nil) })
 	f, err := os.OpenFile(filepath.Join(dir, secretsName), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return sec, nil
@@ -108,13 +107,13 @@ func ownOnly(path string, fi os.FileInfo, dir bool) error {
 	return nil
 }
 
-// writeAtomic replaces dir's Secrets file with b so that a crash at any point
-// leaves one whole form, the old or the new (#2643 c): write a temporary file,
+// writeAtomic replaces the file name in dir with b so that a crash at any
+// point leaves one whole form, the old or the new (#2643 c): write name.tmp,
 // fsync it, rename it over the old one, fsync the directory. A temporary left
 // by a crash is never read and is replaced here. stop, for tests only, ends
 // the write after step i as a crash would; nil runs every step.
-func writeAtomic(dir string, b []byte, stop func(i int) bool) error {
-	tmp, dst := filepath.Join(dir, secretsTemp), filepath.Join(dir, secretsName)
+func writeAtomic(dir, name string, b []byte, stop func(i int) bool) error {
+	tmp, dst := filepath.Join(dir, name+".tmp"), filepath.Join(dir, name)
 	var f *os.File
 	steps := []func() error{
 		func() error {
