@@ -63,6 +63,23 @@ func (r *clerkRig) approve(t *testing.T, prints ...string) key.Key {
 	return k
 }
 
+// see puts l at ref as if the last snapshot showed it, to the gate and to
+// the agent alike.
+func see(g *Gate, ref string, l link) {
+	g.refs[ref] = l
+	if g.shown == nil {
+		g.shown = map[string]link{}
+	}
+	g.shown[ref] = l
+}
+
+// look reads snapshot as the gate would from a reply on page, the agent's
+// view after the output filter.
+func look(g *Gate, snapshot, page string) {
+	shown, _ := g.filter.text(snapshot)
+	g.refs, g.shown, g.page = parseRefs(snapshot, page), parseRefs(shown, page), page
+}
+
 func submitStep(a Approval, line string) kernel.PlanStep {
 	s := post(a.To, line)
 	s.Content = a.Print
@@ -89,7 +106,7 @@ func TestApprovedButtonIsSentOnce(t *testing.T) {
 	r := newCart(t, nil, 0)
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
-	if a.Verb != "click" || a.Role != "button" || a.Label != `"Place order"` || a.To != `button "Place order"` {
+	if a.Verb != "click" || a.Role != "button" || a.Label != `"Place order"` || a.To != `button "Place order" · `+a.Print {
 		t.Fatalf("approval %+v", a)
 	}
 	if got := forwarded(t, r.h, "click"); len(got) != 0 {
@@ -164,7 +181,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Leave at the door"}`)
 	a := approvalOf(t, h.do(t, pressOrder))
-	if len(a.Fields) != 1 || a.Fields[0].Label != `"Delivery note"` || a.Fields[0].Value != "Leave at the door" {
+	if len(a.Fields) != 1 || a.Fields[0].Label != `"Delivery note"` || a.Fields[0].Value != `"Leave at the door"` {
 		t.Fatalf("fields %+v", a.Fields)
 	}
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Ring twice"}`)
@@ -221,13 +238,12 @@ func TestRedactedTargetsHaveDifferentPrints(t *testing.T) {
 		return "- link \"Unsubscribe\" [ref=e2]:\n  - /url: /unsubscribe?token=" + tok
 	}
 	approve := func(h *harness, snap string) Approval {
-		h.g.refs = parseRefs(snap, "https://shop.example.test/mail/")
-		h.g.page = "https://shop.example.test/mail/"
+		look(h.g, snap, "https://shop.example.test/mail/")
 		return approvalOf(t, h.do(t, `{"v":0,"verb":"click","ref":"e2"}`))
 	}
 	h := newHarness(t, nil, "", 0)
 	a, b := approve(h, page("synthCanaryTokAAA111")), approve(h, page("synthCanaryTokBBB222"))
-	if a.To != b.To || !strings.Contains(a.To, Redacted) {
+	if strings.TrimSuffix(a.To, a.Print) != strings.TrimSuffix(b.To, b.Print) || !strings.Contains(a.To, Redacted) {
 		t.Fatalf("shown targets %q, %q", a.To, b.To)
 	}
 	if a.Print == b.Print {
@@ -325,9 +341,20 @@ func TestLoggedDetailIsBounded(t *testing.T) {
 		t.Fatalf("phase %s, %d bytes logged: %.200s", s.Phase, len(s.Detail), s.Detail)
 	}
 	var res Result
-	if err := json.Unmarshal([]byte(s.Detail), &res); err != nil || !res.Truncated || res.Snapshot == "" {
-		t.Fatalf("logged result: %v, truncated %v", err, res.Truncated)
+	if err := json.Unmarshal([]byte(s.Detail), &res); err != nil || !res.Truncated || res.Snapshot == "" ||
+		len(res.Title) > maxTitle+3 || len(res.Detail) > maxErrDetail+3 || len(res.RefusedNavigations) > maxRefused {
+		t.Fatalf("logged result: %v, truncated %v, title %d, detail %d, %d navigations", err, res.Truncated,
+			len(res.Title), len(res.Detail), len(res.RefusedNavigations))
 	}
+	// An approval for a page with a huge URL is bounded too, and the cap
+	// ends even when the fields alone pass it.
+	r.h.g.page = "https://shop.example.test/cart?x=" + strings.Repeat("y", 400<<10)
+	r.h.g.refs["e6"] = link{role: "button", name: "Place order"}
+	r.run(t, 1, "p2", r.root, read(pressOrder))
+	if d := r.step("p2").Detail; len(d) > MaxDetail {
+		t.Fatalf("approval logged %d bytes", len(d))
+	}
+
 }
 
 // An approval holds only what the gate read: the label is quoted, capped
@@ -336,13 +363,13 @@ func TestLoggedDetailIsBounded(t *testing.T) {
 func TestApprovalHoldsOnlyReadFields(t *testing.T) {
 	long := "Plаce " + strings.Repeat("order ", 200)
 	r := newCart(t, nil, 0)
-	r.h.g.refs["e6"] = link{role: "button", name: long}
+	see(r.h.g, "e6", link{role: "button", name: long})
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
 	if len(a.Label) > maxLabel+8 || !strings.HasPrefix(a.Label, `"Plаce order`) || !strings.HasPrefix(a.Folded, "place order") {
 		t.Fatalf("label %q (%d bytes), folded %q", a.Label, len(a.Label), a.Folded)
 	}
-	if a.Origin != "https://shop.example.test:443" || a.Page != "https://shop.example.test/cart" || a.FieldsComplete {
+	if a.Origin != "https://shop.example.test:443" || a.Page != "https://shop.example.test/cart" || len(a.Unknown) == 0 {
 		t.Fatalf("approval %+v", a)
 	}
 	planted := submitStep(a, pressOrder)
@@ -354,5 +381,171 @@ func TestApprovalHoldsOnlyReadFields(t *testing.T) {
 			(strings.Contains(string(e.Body), "plannerProseCanary") || strings.Contains(string(e.Body), "plannerClaimCanary")) {
 			t.Fatalf("planner text in an approval: %s", e.Body)
 		}
+	}
+}
+
+// Two different approved submits of the same button, here two orders with
+// different delivery notes, are two effects: each is sent once, and the
+// kernel's duplicate guard does not take the second for the first
+// (KRN-8, D-147).
+func TestTwoApprovedOrdersAreTwoSubmits(t *testing.T) {
+	r := newCart(t, map[string]any{"type": cartReply("")}, 0)
+	for i, note := range []string{"Leave at the door", "Ring twice"} {
+		id := string(rune('a' + i))
+		r.run(t, int64(10*i+1), id+"type", r.root, read(`{"v":0,"verb":"type","ref":"e3","text":"`+note+`"}`))
+		r.run(t, int64(10*i+2), id+"ask", r.root, read(pressOrder))
+		a := r.stepApproval(t, id+"ask")
+		r.run(t, int64(10*i+3), id+"buy", r.approve(t, a.Print), submitStep(a, pressOrder))
+		if s := r.step(id + "buy"); s.Phase != kernel.PDone {
+			t.Fatalf("order %d: phase %s (%s)", i, s.Phase, s.Detail)
+		}
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 2 {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
+// A post whose print the page no longer yields fails changed, with the
+// approval the gate would ask for now, so the owner can approve again; a
+// submit the driver answered with an error may have acted, so it is
+// unknown, not failed (CLK-3, KRN-8).
+func TestChangedSubmitSaysWhatApprovalWouldCoverNow(t *testing.T) {
+	r := newCart(t, map[string]any{"click": map[string]any{"ok": false, "error": "timeout_in_page", "url": "https://shop.example.test/cart"}}, 0)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	k := r.approve(t, a.Print)
+	see(r.h.g, "e6", link{role: "button", name: "Place order now"})
+	r.run(t, 2, "late", k, submitStep(a, pressOrder))
+	var res Result
+	if err := json.Unmarshal([]byte(r.step("late").Detail), &res); err != nil || res.Error != "changed" ||
+		res.Approval == nil || res.Approval.Label != `"Place order now"` || res.Approval.Print == a.Print {
+		t.Fatalf("changed: %v %+v", err, res)
+	}
+	b := *res.Approval
+	r.run(t, 3, "buy", r.approve(t, b.Print), submitStep(b, pressOrder))
+	if s := r.step("buy"); s.Phase != kernel.PUnknown {
+		t.Fatalf("errored submit: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 1 {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
+// A key is an approval only if its uses are capped at most at its prints'
+// number: a prints-only key with no use cap releases nothing (CLK-3).
+func TestUncappedPrintKeyReleasesNothing(t *testing.T) {
+	r := newCart(t, nil, 0)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	hpub, hpriv := seedKey(2)
+	for name, cav := range map[string][]key.Caveat{
+		"no cap":    {key.LimitVerbs(key.Post), key.LimitContent(a.Print)},
+		"not print": {key.LimitVerbs(key.Post), key.LimitContent(a.Print, "plain"), key.LimitUses(1)},
+		"over cap":  {key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(2)},
+	} {
+		k, err := key.Derive(r.root, hpriv, hpub, cav...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.run(t, 2, name, k, submitStep(a, pressOrder))
+		if s := r.step(name); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
+			t.Fatalf("%s: phase %s (%s)", name, s.Phase, s.Detail)
+		}
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 0 {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
+// Site text is filtered before it is quoted, capped or folded: a label
+// carrying a vault value shows redacted in every form, and two labels the
+// filter shows alike still have different prints (CRED-10, CLK-3).
+func TestApprovalLabelIsFilteredFirst(t *testing.T) {
+	h := newHarness(t, map[string]any{"snapshot": cartReply(cartPage)}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	var prints []string
+	for _, secret := range []string{"vaultCanarySessionV4lt", "pw-canary-short"} {
+		see(h.g, "e6", link{role: "button", name: "Pay with " + secret})
+		a := approvalOf(t, h.do(t, pressOrder))
+		raw, _ := json.Marshal(a)
+		if strings.Contains(strings.ToLower(string(raw)), strings.ToLower(secret)) || !strings.Contains(a.Label, Redacted) {
+			t.Fatalf("approval shows the secret: %s", raw)
+		}
+		prints = append(prints, a.Print)
+	}
+	if prints[0] == prints[1] {
+		t.Fatal("one print for two labels")
+	}
+}
+
+// Blanking a declared token keeps every other byte of the query: a pair
+// the URL parser would drop, or one hidden in a token value, changes the
+// print, so it is never sent under an approval of another URL (CLK-3).
+func TestTokenBlankingKeepsTheRestOfTheQuery(t *testing.T) {
+	const base = "https://shop.example.test/transfer?csrf=synthT1&to=synthAlice"
+	nav := func(u string) string { return `{"v":0,"verb":"navigate","url":"` + u + `"}` }
+	h := newHarness(t, nil, "", 0)
+	h.g.tokens = map[string]bool{"csrf": true}
+	h.g.page = "https://shop.example.test/"
+	a := approvalOf(t, h.do(t, nav(base)))
+	for _, u := range []string{base + "&to=synthMallory;x", base + "&to=synthMallory%zz",
+		"https://shop.example.test/transfer?csrf=synthT2;to=synthMallory&to=synthAlice"} {
+		if res, written, _ := h.g.submit(context.Background(), []byte(nav(u)), a.To, a.Print); written || res.Error != "changed" {
+			t.Fatalf("%s: %+v", u, res)
+		}
+	}
+	rotated := "https://shop.example.test/transfer?csrf=synthT2&to=synthAlice"
+	if res, _, _ := h.g.submit(context.Background(), []byte(nav(rotated)), a.To, a.Print); !res.OK {
+		t.Fatalf("rotated: %+v", res)
+	}
+}
+
+// An approval shows the page as the agent saw it: a control named with a
+// password value the gate omitted from the snapshot is withheld, in the
+// label, the fold and the to alike (CRED-4, CLK-3).
+func TestApprovalShowsWhatTheAgentSaw(t *testing.T) {
+	page := "- textbox \"Password\" [ref=e2]: hunter2SecretPw\n- button \"Use hunter2SecretPw\" [ref=e6]"
+	h := newHarness(t, map[string]any{"snapshot": cartReply(page)}, "", 0)
+	if r := h.do(t, `{"v":0,"verb":"snapshot"}`); r.Snapshot != withheldMark {
+		t.Fatalf("snapshot %q", r.Snapshot)
+	}
+	r := h.do(t, pressOrder)
+	a := approvalOf(t, r)
+	raw, _ := json.Marshal(r)
+	if strings.Contains(strings.ToLower(string(raw)), "hunter2") || a.Label != `"`+withheld+`"` {
+		t.Fatalf("refusal shows the password: %s", raw)
+	}
+}
+
+// The print covers the page: the same ref and label on another page is
+// another approval (CLK-3).
+func TestSameControlOnAnotherPageIsAnotherPrint(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	look(h.g, cartPage, "https://shop.example.test/cart")
+	a := approvalOf(t, h.do(t, pressOrder))
+	look(h.g, cartPage, "https://shop.example.test/cart/other")
+	if b := approvalOf(t, h.do(t, pressOrder)); a.Print == b.Print {
+		t.Fatal("one print on two pages")
+	}
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print); written || res.Error != "changed" {
+		t.Fatalf("other page: %+v", res)
+	}
+}
+
+// A refused redo of a written submit leaves its record standing: Probe
+// stays unknown, so the kernel never takes it for unsent (KRN-8).
+func TestRefusedRedoKeepsTheWrittenRecord(t *testing.T) {
+	r := newCart(t, map[string]any{"click": "hang"}, 300*time.Millisecond)
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	k := r.approve(t, a.Print)
+	step := submitStep(a, pressOrder)
+	r.run(t, 2, "buy", k, step)
+	req := kernel.Request{Plan: plan("buy", k, step)}
+	if res := r.c.Do(req, r.k.State()); res.Outcome != "failed" {
+		t.Fatalf("redo: %+v", res)
+	}
+	if p := r.c.Probe(req, r.k.State()); p != "unknown" {
+		t.Fatalf("probe after a refused redo %s", p)
 	}
 }

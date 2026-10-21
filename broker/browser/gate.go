@@ -110,6 +110,9 @@ type Gate struct {
 	stopped bool
 	// refs is what the last snapshot the driver returned showed, per ref.
 	refs map[string]link
+	// shown is the same refs as the agent saw them, read from the snapshot
+	// after omission and the output filter: what an approval shows.
+	shown map[string]link
 	// page is the URL of the page the refs were read from.
 	page string
 	// typed is what the agent typed, per ref, on the page the driver
@@ -252,7 +255,7 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 	}
 	if need {
 		a := g.approval(req, l)
-		return Result{Error: "approval_required", To: a.To, Approval: &a,
+		return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
 			Detail: "this action may change state at the site and needs the owner's approval of this exact request; nothing was sent"}, false, false
 	}
 	out := g.forward(ctx, req)
@@ -282,6 +285,25 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string) (res Re
 	g.sent[print] = true
 	out := g.forward(ctx, req)
 	return out, true, g.stopped
+}
+
+// reask answers a post whose print the page no longer yields: the
+// approval the gate would ask for now, so the owner can approve again, or
+// why it asks for none (a stopped executor, an action that needs none).
+// Nothing is sent.
+func (g *Gate) reask(raw []byte) Result {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, l, _, need, refused := g.judge(raw)
+	switch {
+	case refused != nil:
+		return *refused
+	case !need:
+		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}
+	}
+	a := g.approval(req, l)
+	return Result{Error: "changed", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
+		Detail: "the page, the request or the browser itself changed since the owner approved; this is what approval would cover now; nothing was sent"}
 }
 
 // print is the approval print the gate would ask for raw now, "" if it
@@ -572,9 +594,14 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 		// Read before filtering: a redaction must not hide a link's target.
 		g.refs, g.page = parseRefs(res.Snapshot, res.URL), res.URL
 	}
+	read := res.Snapshot != ""
 	// The driver's count is not trusted: the gate reports its own.
 	res.Snapshot, res.PasswordFields = g.omit(res.Snapshot, res.URL)
-	return g.post(req.Verb, res)
+	out, ok := g.post(req.Verb, res)
+	if read {
+		g.shown = parseRefs(out.Snapshot, res.URL)
+	}
+	return out, ok
 }
 
 var errCode = regexp.MustCompile(`^[A-Za-z_]{1,40}$`)
@@ -608,20 +635,23 @@ func (g *Gate) post(verb string, res Result) (Result, bool) {
 	res.Redactions += n
 	// Everything but the snapshot is bounded small, so a logged result is
 	// bounded (MaxDetail).
-	res.Title, res.Detail = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail)
+	res.Title, res.Detail, res.URL = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail), capText(res.URL, MaxURL)
 	if len(res.RefusedNavigations) > maxRefused {
 		res.RefusedNavigations = res.RefusedNavigations[:maxRefused]
 	}
 	for i := range res.RefusedNavigations {
 		res.RefusedNavigations[i] = capText(res.RefusedNavigations[i], maxTitle)
 	}
-	if len(res.Snapshot) > MaxSnapshot {
-		cut := MaxSnapshot
+	// The snapshot is bounded as the log holds it, JSON-escaped.
+	for n := len(js(res.Snapshot)); len(res.Snapshot) > MaxSnapshot || n > MaxSnapshot; n = len(js(res.Snapshot)) {
+		cut := min(MaxSnapshot, len(res.Snapshot)*MaxSnapshot/n)
 		for cut > 0 && !utf8.RuneStart(res.Snapshot[cut]) {
 			cut--
 		}
-		res.Snapshot = res.Snapshot[:cut] + "\n[snapshot truncated]"
-		res.Truncated = true
+		res.Snapshot, res.Truncated = res.Snapshot[:cut], true
+	}
+	if res.Truncated {
+		res.Snapshot += "\n[snapshot truncated]"
 	}
 	if res.Path != "" {
 		p := filepath.Join(g.ws, filepath.Base(res.Path))

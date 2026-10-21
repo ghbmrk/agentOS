@@ -59,11 +59,16 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		now = c.Clock()
 	}
 	id := stepID(r)
+	st := step(r)
 	if rf := clerk.Check(c.Anchors, c.Name, c.facts, now, r, v); rf != nil {
 		c.record(id, ran{})
+		if rf.Code == clerk.RClaim && st.Verb == key.Post && st.Content != "" {
+			// The post claims a print the page no longer yields: say so,
+			// with what approval would cover now (CLK-3).
+			return kernel.Result{Outcome: "failed", Detail: logged(c.g.reask([]byte(st.Args["msg"].Value)))}
+		}
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
-	st := step(r)
 	var res Result
 	var rec ran
 	switch st.Verb {
@@ -85,7 +90,8 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	switch {
 	case res.OK:
 		out.Outcome = "ok"
-	case rec.lost:
+	case rec.lost, st.Verb == key.Post && rec.effect:
+		// A submit written and not answered ok may have acted (KRN-8).
 		out.Outcome = "unknown"
 	}
 	return out
@@ -162,18 +168,14 @@ func approval(k key.Key, anchors []ed25519.PublicKey) bool {
 	return false
 }
 
-// MaxDetail bounds a step's logged result. The snapshot is the only large
-// field; one whose escaped form would pass the bound is cut further.
-const MaxDetail = MaxSnapshot + 64<<10
+// MaxDetail bounds a step's logged result. Every field is bounded where
+// the gate makes it (post, approval), so the whole result, JSON-escaped,
+// fits.
+const MaxDetail = 1 << 20
 
 func logged(res Result) string {
-	for {
-		d, _ := json.Marshal(res)
-		if len(d) <= MaxDetail || res.Snapshot == "" {
-			return string(d)
-		}
-		res.Snapshot, res.Truncated = capText(res.Snapshot, len(res.Snapshot)/2), true
-	}
+	d, _ := json.Marshal(res)
+	return string(d)
 }
 
 // stepID names a step of a signed plan.
