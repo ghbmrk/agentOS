@@ -20,7 +20,6 @@ apnet config
 change debt debt:audit-2.5
 checker debt debt:#1947
 cleanroom debt debt:#1947
-clerk/run content
 clock debt debt:#1947
 cmd/agentos-egress debt debt:#1947
 cmd/agentos-guest-bridge content
