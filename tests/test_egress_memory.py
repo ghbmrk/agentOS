@@ -84,6 +84,15 @@ def legitimate_peak():
     return mail + kdf_memory() + go_int("egress/proxy.go", "DefaultInFlightBytes") + routes
 
 
+def seen_peak():
+    """What one Live.Opened call can hold (#2685): the search's UIDs at the field bound (M21, about a
+    million, 4 bytes each), one SeenFrom batch session's fixed read budget, and the senders it keeps (openedMax charges each
+    its map entry's cost, which TestOpenedHoldsNoMoreThanItCharges measures)."""
+    imap = "clerk/inbox/imapsmtp/imapsmtp.go"
+    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "fromMax") + 8 * KiB)
+    return 4 * MiB + batch + go_int("clerk/inbox/mailbox.go", "openedMax")
+
+
 class VaultMemoryCeiling(unittest.TestCase):
     def setUp(self):
         self.s = settings(UNIT)
@@ -91,6 +100,10 @@ class VaultMemoryCeiling(unittest.TestCase):
     def one(self, key):
         self.assertEqual(len(self.s.get(key, [])), 1, "%s= set once in [Service]" % key)
         return self.s[key][0]
+
+    def test_reading_who_was_opened_costs_no_more_than_a_fetch(self):
+        fetch = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
+        self.assertLessEqual(seen_peak(), fetch)
 
     def test_memory_max_is_set_within_the_derived_range(self):
         cap = size(self.one("MemoryMax"))

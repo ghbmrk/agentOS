@@ -181,22 +181,27 @@ func Run(in Input) (Outcome, error) {
 	if err := derive(); err != nil {
 		return Outcome{}, err
 	}
-	lapse, last := setup+key.ClerkLife, setup
+	lapse := setup + key.ClerkLife
 	// renewals are the log entries of those renewals. Each rides a tap the
 	// owner already makes (D-146: every passkey tap renews), so none is a tap
 	// the run asked for.
 	renewals := map[uint64]bool{}
 	renewThrough := func(t int64) error {
 		for lapse <= t {
-			at := max(last, clock, lapse-dayMS)
+			at := max(clock, lapse-dayMS)
 			if ck, err = key.ClerkKey(root, ownerPriv, holderPub, at, 0); err != nil {
 				return err
 			}
 			if err := k.Issue(at, nil, ck); err != nil {
 				return err
 			}
+			// Only a renewal the kernel made live at once is left out of the
+			// taps: one it held is new power the owner tapped for.
+			if g, ok := k.State().Grants[ck.Tip()]; !ok || g.From != at {
+				return fmt.Errorf("slice: the renewal at %d was not live at once", at)
+			}
 			renewals[k.State().Seq] = true
-			lapse, last = at+key.ClerkLife, at
+			lapse = at + key.ClerkLife
 			if err := derive(); err != nil {
 				return err
 			}
