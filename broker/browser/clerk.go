@@ -47,7 +47,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	var line, to string
 	post := false
-	switch st := r.Step(); st.Verb {
+	switch st := step(r); st.Verb {
 	case key.Read:
 		line = st.Args["query"].Value
 	case key.Post:
@@ -84,8 +84,18 @@ func (c *Clerk) Probe(r kernel.Request, _ kernel.View) string {
 		}
 		return "unknown"
 	}
-	if r.Step().Verb == key.Read {
+	if step(r).Verb == key.Read {
 		return "notdone"
 	}
 	return "unknown"
+}
+
+// step is the step r names, in canonical form; out of range it is the zero
+// step, which Check refuses. It is kernel.Request.Step through the opened
+// Normalize, since a clerk outside the core calls no other kernel method.
+func step(r kernel.Request) key.Step {
+	if r.Index < 0 || r.Index >= len(r.Plan.Steps) {
+		return key.Step{}
+	}
+	return kernel.Normalize(r.Plan.ID, r.Plan.Steps[r.Index])
 }
