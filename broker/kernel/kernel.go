@@ -695,6 +695,51 @@ func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	return k.result(now, c.Req.Plan.ID, c.Req.Index, res.Outcome, res.Detail)
 }
 
+// Send is the last check before c goes to its clerk, made under the same
+// lock as the call's view: a dispatch is sent only while its plan is active
+// and its key still authorizes the step, so a STOP, revoke, pause or cancel
+// logged since Calls stops it (KRN-7). A dispatch that may not be sent is
+// answered unsent, since nothing was sent; a refusal other than a pause then
+// cancels its plan. A probe is always sent: reconciliation outlives a stop
+// (KRN-8).
+func (k *Kernel) Send(now int64, c Call) (bool, error) {
+	if c.Kind != ActDispatch {
+		return true, nil
+	}
+	ref := stepRef{c.Req.Plan.ID, c.Req.Index}
+	p, st := k.s.step(ref)
+	if st == nil || st.Phase != PInflight {
+		delete(k.asked, ref)
+		return false, nil
+	}
+	r := &key.Refusal{Code: CPlan, Detail: "plan is " + p.Status}
+	if p.Status == SActive {
+		r = k.sendable(now, p, st, c.Req.Index)
+	}
+	if r == nil {
+		return true, nil
+	}
+	if err := k.Answer(now, c, Result{Outcome: OUnsent}); err != nil {
+		return false, err
+	}
+	if p.Status != SActive || r.Code == key.RPaused {
+		return false, nil
+	}
+	_, err := k.emit(now, TPlanCancel, planCancel{Plan: ref.Plan, Code: r.Code, Detail: r.Detail})
+	return false, err
+}
+
+// sendable checks step i of p as Next did before its dispatch, against the
+// ledger before that dispatch, so the dispatch's own charge is not counted
+// twice.
+func (k *Kernel) sendable(now int64, p *PlanState, st *StepState, i int) *key.Refusal {
+	v, err := VerifyPlan(p.Plan, k.s.owners(p.Plan.Key))
+	if err != nil {
+		return &key.Refusal{Code: CKey, Detail: err.Error()}
+	}
+	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.LedgerBefore(st.DispatchSeq)})
+}
+
 // Tick runs every active plan as far as the clock allows, calling the
 // in-process clerks it was booted with as it goes. A step that cannot move
 // yet is left for a later Tick.
@@ -705,6 +750,13 @@ func (k *Kernel) Tick(now int64) error {
 			return err
 		}
 		for _, c := range cs {
+			ok, err := k.Send(now, c)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
 			cl := k.clerks[c.Clerk]
 			res := Result{}
 			if c.Kind == ActProbe {

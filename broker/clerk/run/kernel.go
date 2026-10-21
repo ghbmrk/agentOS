@@ -69,38 +69,44 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	return &Kernel{k: k, store: st, clerks: clerks, anchors: cfg.Anchors}, nil
 }
 
-// asked is one call kernel.Calls handed out, with the view taken under the
-// lock.
-type asked struct {
-	c kernel.Call
-	s snapshot
-}
-
-// Tick runs every plan as far as now allows. It takes the due calls and
-// their views under the lock, makes the calls without it, and logs each
-// answer under it again, until no call is due.
+// Tick runs every plan as far as now allows. It takes the due calls under the
+// lock, then for each one, under the lock again, makes the kernel's last
+// check (kernel.Send) and takes the call's view, makes the call without the
+// lock, and logs its answer under it. A STOP or revoke logged while an
+// earlier call hangs stops every later one (KRN-7).
 func (h *Kernel) Tick(now int64) error {
 	for n := 0; n < 4*kernel.MaxSteps; n++ {
-		var due []asked
-		err := h.With(func(k *kernel.Kernel) error {
-			cs, err := k.Calls(now)
-			for _, c := range cs {
-				due = append(due, asked{c, view(k.State(), h.anchors, c.Req, now)})
-			}
+		var due []kernel.Call
+		err := h.With(func(k *kernel.Kernel) (err error) {
+			due, err = k.Calls(now)
 			return err
 		})
 		if err != nil || len(due) == 0 {
 			return err
 		}
-		for _, a := range due {
-			c := h.clerks[a.c.Clerk]
-			res := kernel.Result{}
-			if a.c.Kind == kernel.ActProbe {
-				res.Outcome = c.probe(a.c.Req, a.s)
-			} else {
-				res = c.do(a.c.Req, a.s)
+		for _, c := range due {
+			var s snapshot
+			ok := false
+			err := h.With(func(k *kernel.Kernel) (err error) {
+				if ok, err = k.Send(now, c); ok {
+					s = view(k.State(), h.anchors, c.Req, now)
+				}
+				return err
+			})
+			if err != nil {
+				return err
 			}
-			if err := h.With(func(k *kernel.Kernel) error { return k.Answer(now, a.c, res) }); err != nil {
+			if !ok {
+				continue
+			}
+			r := h.clerks[c.Clerk]
+			res := kernel.Result{}
+			if c.Kind == kernel.ActProbe {
+				res.Outcome = r.probe(c.Req, s)
+			} else {
+				res = r.do(c.Req, s)
+			}
+			if err := h.With(func(k *kernel.Kernel) error { return k.Answer(now, c, res) }); err != nil {
 				return err
 			}
 		}

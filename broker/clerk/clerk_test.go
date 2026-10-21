@@ -388,31 +388,37 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if rf != nil || ver.Limits.Task != "t1" {
 		t.Fatalf("a plan in a live task: %v", rf)
 	}
-	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, f.now); !ok || got.Site != a.Site {
+	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, f.now); !ok || got.Site != a.Site {
 		t.Fatalf("the live approval: %+v %v", got, ok)
 	}
-	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, 1+kernel.TaskTimeout); ok {
+	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, 1+kernel.TaskTimeout); ok {
 		t.Fatal("an approval past its task's timeout on the clerk's clock")
 	}
 	plain, _ := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.req, f.view())
-	if _, ok := kernel.TaskApproved(f.view(), anchors, plain, f.now); ok {
+	if _, ok := kernel.TaskApproved(f.view(), anchors, plain, a.Site, f.now); ok {
 		t.Fatal("a key with no task is covered")
 	}
 	_, mpriv := gen(40)
-	forged := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
-		By: key.Approve(mpriv, kernel.TaskHash("t1", a.Site, a.First))}}
-	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, f.now); ok {
+	forged := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
+		By: key.Approve(mpriv, kernel.TaskHash("t1", a.Site, a.First))}}}
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("an approval no passkey the clerk knows signed")
 	}
-	other := kernel.Task{ID: "t2", Until: 1 + kernel.TaskTimeout, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
-		By: key.Approve(opriv, kernel.TaskHash("t2", a.Site, a.First))}}
-	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, f.now); ok {
+	other := kernel.Task{ID: "t2", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
+		By: key.Approve(opriv, kernel.TaskHash("t2", a.Site, a.First))}}}
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("another task's approval")
 	}
-	moved := a
-	moved.Site = "other.example"
-	forged.Approval = &moved
-	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, f.now); ok {
+	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, "other.example", f.now); ok {
+		t.Fatal("an approval covers another site")
+	}
+	moved := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{"other.example": a}}
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), moved}, anchors, ver, "other.example", f.now); ok {
 		t.Fatal("an approval moved to another site")
+	}
+	a.Site = "other.example"
+	moved.Approvals["other.example"] = a
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), moved}, anchors, ver, "other.example", f.now); ok {
+		t.Fatal("an approval whose site was rewritten")
 	}
 }
