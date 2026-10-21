@@ -442,7 +442,7 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 // tests/test_egress_memory.py).
 const (
 	fromMax   = 8 << 10
-	seenBatch = 500
+	seenBatch = 400
 )
 
 // ErrUnanswered is a FETCH that left a searched message without its header,
@@ -512,7 +512,7 @@ func (s *Store) SeenFrom(ctx context.Context, folder string, each func(header []
 					delete(want, m.Uid)
 					h, _ := io.ReadAll(io.LimitReader(l, fromMax+1))
 					if len(h) > fromMax {
-						bad = ErrLongHeader
+						bad = fmt.Errorf("%w: %s UID %d", ErrLongHeader, folder, m.Uid)
 					} else {
 						bad = each(h)
 					}

@@ -4,7 +4,9 @@ package inbox
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -92,7 +94,7 @@ func TestOpenedFailsPastWhatItKeeps(t *testing.T) {
 	srv.Deliver("INBOX", rawMail("<b@shop.test>", "news@shop.test", "Sale 2"), `\Seen`)
 	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
 	defer func(n int) { openedMax = n }(openedMax)
-	openedMax = len("news@shop.test") + len("pat@example.test")
+	openedMax = len("news@shop.test") + len("pat@example.test") + 2*entryCost
 	if _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19"); err != nil {
 		t.Fatalf("at the bound: %v", err)
 	}
@@ -100,4 +102,24 @@ func TestOpenedFailsPastWhatItKeeps(t *testing.T) {
 	if got, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19"); err == nil || got != nil {
 		t.Fatalf("opened %v, err %v; want an error", got, err)
 	}
+}
+
+// What Opened keeps stays within openedMax: filled with the shortest
+// distinct addresses until it refuses, the map holds no more heap than it
+// was charged, so tests/test_egress_memory.py may count openedMax.
+func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	before := ms.HeapAlloc
+	s := senders{m: map[string]string{}}
+	n := 0
+	for ; s.add(fmt.Sprintf("%x@b", n), "2026-10-19") == nil; n++ {
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	if held := int64(ms.HeapAlloc) - int64(before); held > int64(openedMax) {
+		t.Fatalf("%d senders hold %d bytes, more than openedMax %d", n, held, openedMax)
+	}
+	runtime.KeepAlive(s.m)
 }

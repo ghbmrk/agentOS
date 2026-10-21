@@ -124,12 +124,33 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 	return out, nil
 }
 
-// openedMax bounds the addresses Opened keeps, in bytes, so one call's memory
-// stays under a Fetch call's budget whatever the server sends (M21,
-// tests/test_egress_memory.py); an account past it fails closed.
-var openedMax = 8 << 20
+// openedMax bounds what Opened keeps, in bytes, so one call's memory stays
+// under a Fetch call's budget whatever the server sends (M21,
+// tests/test_egress_memory.py); an account past it fails closed. Each sender
+// is charged its address and entryCost, the most a map entry costs beside
+// its string (TestOpenedHoldsNoMoreThanItCharges measures it).
+var openedMax = 12 << 20
+
+const entryCost = 128
 
 var errTooManySenders = errors.New("inbox: more read senders than the clerk keeps")
+
+// senders is the map Opened builds, with what it has been charged.
+type senders struct {
+	m    map[string]string
+	kept int
+}
+
+func (s *senders) add(addr, day string) error {
+	if _, ok := s.m[addr]; ok || addr == "" {
+		return nil
+	}
+	if s.kept += len(addr) + entryCost; s.kept > openedMax {
+		return errTooManySenders
+	}
+	s.m[addr] = day
+	return nil
+}
 
 // Opened is World.LastOpened for the account (#2618): every sender with a
 // read (\Seen) mail in any folder, keyed by lower-cased address, as opened
@@ -145,25 +166,14 @@ func (l *Live) Opened(ctx context.Context, today string) (map[string]string, err
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
-	kept := 0
+	out := senders{m: map[string]string{}}
 	for _, f := range fs {
-		err := l.st.SeenFrom(ctx, f.Name, func(h []byte) error {
-			a := FromAddress(h)
-			if _, ok := out[a]; ok || a == "" {
-				return nil
-			}
-			if kept += len(a); kept > openedMax {
-				return errTooManySenders
-			}
-			out[a] = today
-			return nil
-		})
+		err := l.st.SeenFrom(ctx, f.Name, func(h []byte) error { return out.add(FromAddress(h), today) })
 		if err != nil {
 			return nil, err
 		}
 	}
-	return out, nil
+	return out.m, nil
 }
 
 // newest is the n highest UIDs, in ascending order.

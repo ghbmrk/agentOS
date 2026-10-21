@@ -86,7 +86,8 @@ def legitimate_peak():
 
 def seen_peak():
     """What one Live.Opened call can hold (#2685): the search's UIDs at the field bound (M21, about a
-    million, 4 bytes each), one SeenFrom batch session's fixed read budget, and the addresses it keeps."""
+    million, 4 bytes each), one SeenFrom batch session's fixed read budget, and the senders it keeps (openedMax charges each
+    its map entry's cost, which TestOpenedHoldsNoMoreThanItCharges measures)."""
     imap = "clerk/inbox/imapsmtp/imapsmtp.go"
     batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "fromMax") + 8 * KiB)
     return 4 * MiB + batch + go_int("clerk/inbox/mailbox.go", "openedMax")

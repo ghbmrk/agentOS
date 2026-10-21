@@ -145,26 +145,47 @@ func TestSeenFromFailsWhenAHeaderIsMissingOrCut(t *testing.T) {
 }
 
 // Each batch of seenBatch UIDs is fetched in its own session, under the same
-// UID validity: a folder renumbered before a later batch is refused. The
-// batch, not the search, sizes each session's read budget (M21; the bound is
-// checked in tests/test_egress_memory.py).
+// UID validity: a folder renumbered before a later batch is refused.
 func TestSeenFromFetchesEachBatchInItsOwnSession(t *testing.T) {
-	var search, fetch strings.Builder
-	search.WriteString("* SEARCH")
-	for u := 1; u <= seenBatch+1; u++ {
-		search.WriteString(" " + strconv.Itoa(u))
-		fetch.WriteString(header(u, "a@x.test"))
-	}
-	search.WriteString("\r\n")
-	addr := seenSearch(t, []int{7, 7, 7}, search.String(), fetch.String())
+	search, fetch := seenUIDs(seenBatch + 1)
+	addr := seenSearch(t, []int{7, 7, 7}, search, fetch)
 	got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX")
 	if err != nil || len(got) != seenBatch+1 {
 		t.Fatalf("%d headers, err %v; want %d", len(got), err, seenBatch+1)
 	}
-	addr = seenSearch(t, []int{7, 7, 8}, search.String(), fetch.String())
+	addr = seenSearch(t, []int{7, 7, 8}, search, fetch)
 	if _, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); !errors.Is(err, ErrValidity) {
 		t.Fatalf("a renumbered second batch: err %v, want ErrValidity", err)
 	}
+}
+
+// The batch, not the search, sizes a session's read budget (M21): with more
+// UIDs found than one batch fetches, a reply just past one batch's budget,
+// padded with invented messages, still fails the call.
+func TestSeenFromBudgetsTheBatchNotTheSearch(t *testing.T) {
+	const base = 64 << 10
+	search, fetch := seenUIDs(4 * seenBatch)
+	var b strings.Builder
+	b.WriteString(fetch)
+	for pad := header(1<<30, strings.Repeat("x", fromMax-64)+"@x.test"); b.Len() < base+seenBatch*(fromMax+fetchFrame); {
+		b.WriteString(pad)
+	}
+	s := hostileStore(t, seenSearch(t, []int{7, 7, 7, 7, 7}, search, b.String()), 5*time.Second)
+	s.replyBase = base
+	if _, err := seenFrom(s, "INBOX"); err == nil {
+		t.Fatal("a reply past one batch's budget passed")
+	}
+}
+
+// seenUIDs is a search answering UIDs 1 to n and a fetch answering each.
+func seenUIDs(n int) (search, fetch string) {
+	var sb, fb strings.Builder
+	sb.WriteString("* SEARCH")
+	for u := 1; u <= n; u++ {
+		sb.WriteString(" " + strconv.Itoa(u))
+		fb.WriteString(header(u, "a@x.test"))
+	}
+	return sb.String() + "\r\n", fb.String()
 }
 
 // An error from each stops the call with that error.
