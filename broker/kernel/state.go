@@ -524,6 +524,11 @@ func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, erro
 	if len(k.Links) == 0 {
 		return from, nil
 	}
+	// A clerk key lives at most ClerkLife once live: a tap cannot sign one
+	// that runs for years (D-146).
+	if exp := lapse(k.Links[0].Caveats); exp == nil || *exp > from+key.ClerkLife {
+		return 0, ErrLife
+	}
 	r, ok := batch[rootOf(k)]
 	if !ok {
 		if r, ok = s.Grants[rootOf(k)]; !ok {
@@ -555,6 +560,21 @@ func (s *State) renews(k key.Key, at int64) bool {
 		}
 	}
 	return false
+}
+
+// ErrLife refuses a clerk key that would live past ClerkLife once live.
+var ErrLife = errors.New("kernel: a clerk key lives at most ClerkLife once live")
+
+// lapse is when caveats cs stop a key: the earliest expiry.
+func lapse(cs []key.Caveat) *int64 {
+	var exp *int64
+	for _, c := range cs {
+		if c.Kind == key.KExpires && (exp == nil || c.N < *exp) {
+			n := c.N
+			exp = &n
+		}
+	}
+	return exp
 }
 
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
