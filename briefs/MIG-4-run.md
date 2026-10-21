@@ -16,7 +16,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
    - the software `AESSealer` under a test key;
    - tests that run the clerk and a fake provider as separate processes.
 2. The mail clerk's process with its sealed static slot (#2655): `OpenMail`, `SetMail` and `RemoveMail` in `broker/clerk/run`, with `clerk.Secrets.Login` and `Remove` in `broker/clerk/secrets.go` (the kernel lane waived ownership of these two methods) and an unbound `inbox.Account` judging the kernel's view (#2685, mail lane). `Reconnect` with an owner-signed proof (#2643 b) follows after KRN-ownerlink.
-3. The owner seam served on the kernel's socket for sub B's callers, then `clerk/model` wired in place of `broker/meter` (#2572 Step C).
+3. *3a:* the owner seam and the metering seam served on the kernel's sockets (`ListenKernel`, `ServeKernel`, `OwnerSide`, `MeterSide`, with the callers `Owner` and `Meter`), and the model clerk's process (`ListenModel`, `ServeModel`, `Model`). *3b:* the mail setup on the mail clerk's own socket with the CH-11 notices, and the mail re-read and listing for the planner. Wiring `clerk/model` in place of `broker/meter` and deleting both (#2572 Step C) wait on sub B unhooking their importers.
 4. After STO-2: the production Sealer, the boot unlock, the `cmd/` mains with `procguard.Isolate`, and the unit files under `image/`. This slice also deletes `cmd/agentos-egress`, `-holder` and `-checker` once they are covered.
 
 **Not before STO-2 (Mark's #936 answer):** no production Sealer, no boot unlock, no real credential written to disk, no shipped main or unit that loads one.
@@ -48,3 +48,11 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - Item 6: `view_test.go::TestAFailedWriteIsUnknown`. A call cut off mid-write is `unknown lost`, and a probe is `unknown`.
 - #2704: `clerk.Secrets.RemovePrefix` (`broker/clerk/secrets.go`, by the kernel lane's waiver). `SetMail` drops every other mail slot, `RemoveMail` drops every one, and one lock serializes them. Tests: `mail_test.go::TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword` and `broker/clerk/secrets_test.go::TestSecretsRemovePrefix`.
 - Declared scope: `broker/clerk/run/`, `broker/clerk/secrets.go` and its test, `docs/LANES.md` (a gate file, so a separate Security accept is needed), and this brief.
+
+**Slice 3a acceptance tests (MIG-4-run-m to o):**
+- `kernelsock_test.go::TestOwnerSocketServesTheSeam`. Each owner action over the socket lands in the log as the direct call does, a refusal keeps its code, an error keeps its text, and each read answers as `State()` does.
+- `::TestEachSocketServesOnlyItsSide`. No call is on both tables; owner calls on the meter socket and metering calls on the owner socket are refused and log nothing.
+- `::TestKernelSocketsCheckPeerUID`. A socket for another uid takes no call, and a caller sends nothing to a socket another uid holds.
+- `::TestModelClerkMetersThroughTheKernelSocket`. A model call through the model clerk's socket is metered through the meter socket at the kernel's clock, not the clerk's; a call past the plan's cap is refused with `spend-task`, holds the plan, and never reaches the provider.
+- `::TestModelClerkWithoutTheKernelCallsNothing` and `::TestAKernelCallCutOffIsLost`. An unreachable meter socket refuses admission with `log-broken`; a call cut off mid-answer is `ErrLost`.
+- Declared scope: `broker/clerk/run/` and this brief.
