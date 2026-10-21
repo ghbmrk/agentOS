@@ -35,6 +35,8 @@ var sweep = sync.OnceValues(func() (Result, error) {
 		sum.UnheldRefused += r.UnheldRefused
 		sum.BigRefused += r.BigRefused
 		sum.HeldByClerk += r.HeldByClerk
+		sum.CutRefused += r.CutRefused
+		sum.CutCancelled += r.CutCancelled
 	}
 	return sum, nil
 })
@@ -97,6 +99,8 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"plans under a stripped, forged or unheld key": sum.UnheldRefused,
 		"big grants refused without a second passkey":  sum.BigRefused,
 		"holds the clerk kept on its own clock":        sum.HeldByClerk,
+		"grants a cut-off phone signed, refused":       sum.CutRefused,
+		"held grants cancelled with their phone":       sum.CutCancelled,
 	} {
 		if n == 0 {
 			t.Errorf("the sweep never reached: %s", name)

@@ -50,6 +50,8 @@ type Result struct {
 	UnheldRefused int // plans under a key their signer does not hold, rejected
 	BigRefused    int // big grants refused for a missing second passkey
 	HeldByClerk   int // irreversible steps the clerk held back on its own clock
+	CutRefused    int // grants a cut-off phone signed, refused
+	CutCancelled  int // a cut-off phone's grants still in their hold, cancelled with it
 }
 
 var errAnchor = errors.New("sim: anchor down")
@@ -97,6 +99,11 @@ type world struct {
 	// unconfirmed is set while a widening whose anchor failed is live in the
 	// kernel's state: nothing may act on it until the log is reopened.
 	unconfirmed bool
+	// cut is the passkeys the owner cut off, and dead the grants a cut
+	// cancelled while still in their hold: the world's own record, so an
+	// effect under either is judged without the kernel's word.
+	cut  []ed25519.PublicKey
+	dead map[key.ID]bool
 }
 
 func (w *world) newMail() *clerk.Mail {
@@ -199,6 +206,14 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 		if ch.Revoked[id] {
 			w.bad = append(w.bad, "effect under a revoked key")
 		}
+		if w.dead[id] {
+			w.bad = append(w.bad, "effect under a grant cancelled with its cut-off phone")
+		}
+	}
+	for _, p := range ver.Narrowers {
+		if key.In(w.cut, p) {
+			w.bad = append(w.bad, "effect under a key a cut-off phone narrowed")
+		}
 	}
 	if kernel.Live(v, ver, now) != nil { // on the true clock
 		w.bad = append(w.bad, "effect under a grant not in the log or still in its hold")
@@ -249,6 +264,7 @@ type sim struct {
 	holder keyPair // the home clerk: holds the passkey's clerk key of each root
 	planr  keyPair // holds only the keys derived to it
 	head   keyPair
+	phone  keyPair // an enrolled passkey the owner may cut off; zero when none
 	roots  []key.Key
 	pool   []key.Key
 	ids    []key.ID
@@ -263,6 +279,10 @@ type sim struct {
 	hostile                          bool
 	clockBack, widenUnproven, unheld int
 	bigRefused, submits              int
+	cutRefused, cutCancelled         int
+	byPhone                          []key.ID  // grants the current phone signed
+	cutPhones                        []keyPair // phones the owner cut off
+	phoneKeys                        []key.Key // clerk keys a phone renewed or narrowed, cut off or not
 }
 
 // kt is the kernel's clock.
@@ -410,6 +430,10 @@ func (s *sim) anyKey() key.Key {
 		if k, ok := s.derived(); ok {
 			return k
 		}
+	case 6:
+		if len(s.phoneKeys) > 0 { // the home clerk keeps a phone's keys, even past a cut-off
+			return s.phoneKeys[s.pick(len(s.phoneKeys))]
+		}
 	}
 	if len(s.pool) == 0 {
 		return key.Key{}
@@ -528,6 +552,8 @@ func (s *sim) op() error {
 			return s.k.Cancel(s.kt(), p)
 		}
 		return s.k.Undo(s.kt(), p, 0)
+	case c == 13 && s.pick(3) != 0:
+		return s.phoneOp()
 	case c == 13:
 		s.logf("anchor")
 		return s.k.Log().Anchor()
@@ -575,6 +601,106 @@ func (s *sim) op() error {
 		s.remember(r, k)
 	}
 	return nil
+}
+
+// phoneOp enrolls a phone, has it renew or narrow a clerk key, or cuts it
+// off (D-146). A phone once cut stays cut: a grant it signs after is refused,
+// its grants still in their hold go with it, and no effect runs under a key
+// it narrowed.
+func (s *sim) phoneOp() error {
+	s.syncPhone()
+	if s.phone.pub == nil {
+		if len(s.cutPhones) > 0 && s.pick(2) == 0 {
+			s.cutSigns()
+			return nil
+		}
+		s.phone = gen(s.rng)
+		s.logf("enroll phone")
+		return s.widened(s.k.Enroll(s.kt(), key.Enroll(s.spare.priv, s.phone.pub)))
+	}
+	switch s.pick(4) {
+	case 0, 1:
+		s.logf("cut phone off")
+		if err := s.k.Unenroll(s.kt(), s.phone.pub); err != nil {
+			return err
+		}
+		s.cut()
+		if s.pick(2) == 0 { // the hold its cancelled grants were in runs out
+			s.now += kernel.GrantHold
+			s.logf("a day passes")
+			return s.k.Tick(s.kt())
+		}
+	case 2:
+		if len(s.pool) > 0 {
+			k, err := key.Narrow(s.pool[s.pick(len(s.pool))], s.phone.priv, key.LimitUses(int64(1+s.pick(4))))
+			if err == nil {
+				s.logf("phone narrows a clerk key")
+				s.pool, s.phoneKeys = append(s.pool, k), append(s.phoneKeys, k)
+			}
+		}
+	default:
+		if len(s.roots) == 0 {
+			return nil
+		}
+		i := s.pick(len(s.roots))
+		k := s.clerkKey(s.phone.priv, s.roots[i])
+		s.logf("phone renews clerk key of root %d", i)
+		if err := s.grant(k); err != nil {
+			return s.refusedBig(err)
+		}
+		s.pool, s.phoneKeys = append(s.pool, k), append(s.phoneKeys, k)
+		s.ids = append(s.ids, k.Tip())
+		s.byPhone = append(s.byPhone, k.Tip())
+	}
+	return nil
+}
+
+// syncPhone reads the phone's standing back from the log after a crash cut
+// an enrollment or a cut-off short: cut if the log has it cut, gone if the
+// log never enrolled it.
+func (s *sim) syncPhone() {
+	if s.phone.pub == nil {
+		return
+	}
+	st := s.k.State()
+	switch {
+	case key.In(st.Unenrolled, s.phone.pub):
+		s.cut()
+	case !key.In(st.Passkeys(), s.phone.pub):
+		s.phone, s.byPhone = keyPair{}, nil
+	}
+}
+
+// cut records the phone as cut off, in the world's own books: its grants
+// the log does not hold live by now never go live.
+func (s *sim) cut() {
+	st := s.k.State()
+	for _, id := range s.byPhone {
+		if g, ok := st.Grants[id]; !ok || g.From > s.kt() {
+			s.w.dead[id] = true
+			s.cutCancelled++
+		}
+	}
+	s.w.cut = append(s.w.cut, s.phone.pub)
+	s.cutPhones = append(s.cutPhones, s.phone)
+	s.phone, s.byPhone = keyPair{}, nil
+}
+
+// cutSigns has a phone the owner cut off grant again, with both hardware
+// keys' co-signatures: the kernel must still refuse it.
+func (s *sim) cutSigns() {
+	if len(s.roots) == 0 {
+		return
+	}
+	p := s.cutPhones[s.pick(len(s.cutPhones))]
+	k := s.clerkKey(p.priv, s.roots[s.pick(len(s.roots))])
+	s.logf("cut-off phone signs a grant")
+	err := s.k.Issue(s.kt(), approve([]key.Key{k}, s.owner, s.spare), k)
+	if _, taken := s.k.State().Grants[k.Tip()]; taken {
+		s.w.bad = append(s.w.bad, "a grant a cut-off phone signed was taken")
+	} else if !crashed(err) {
+		s.cutRefused++
+	}
 }
 
 // approve is each passkey's co-signature over the batch keys.
@@ -699,7 +825,7 @@ func Run(c Config) (*Result, error) {
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.spare = gen(rng)
-	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub, s.spare.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
+	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub, s.spare.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}, dead: map[key.ID]bool{}}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -756,7 +882,7 @@ func Run(c Config) (*Result, error) {
 	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
 		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld, BigRefused: s.bigRefused,
-		HeldByClerk: s.w.held}, nil
+		HeldByClerk: s.w.held, CutRefused: s.cutRefused, CutCancelled: s.cutCancelled}, nil
 }
 
 func tail(t []string) []string {
