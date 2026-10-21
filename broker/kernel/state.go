@@ -40,12 +40,20 @@ const (
 	TStepResult   = "step.result"
 	TStepProbed   = "step.probed"
 	TStepUndone   = "step.undone"
+	TModelUsed    = "model.used"
+	TSpendHeld    = "spend.held"
+	TSpendExtend  = "spend.extended"
+	TPoolRead     = "pool.read"
+	TReserveUp    = "pool.reserve.raised"
+	TReserveDown  = "pool.reserve.lowered"
+	TPoolReset    = "pool.reset"
 )
 
 var schema = map[string]int{
 	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1,
+	TModelUsed: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -53,7 +61,10 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 
 // Widening entries grant power back. Only one that an anchor covers counts
 // after a restart (KRN-7).
-func Widening(typ string) bool { return typ == TResume || typ == TKeyIssued || typ == TKeyResumed }
+func Widening(typ string) bool {
+	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed ||
+		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset
+}
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
 // arguments, and its claims about content and labels. Source, task, recipient
@@ -126,8 +137,46 @@ func (p Plan) Step(i int) key.Step { return Normalize(p.ID, p.Steps[i]) }
 
 // Entry bodies.
 type (
-	keyIssued    struct{ Key key.Key }
-	keyID        struct{ ID key.ID }
+	keyIssued struct{ Key key.Key }
+	keyID     struct{ ID key.ID }
+	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
+	modelUsed struct {
+		Root   key.ID   `json:"root"`
+		Scopes []key.ID `json:"scopes"`
+		Task   string   `json:"task"` // the plan the usage was charged to
+		Route  string   `json:"route"`
+		Amount int64    `json:"amount"`
+		Source string   `json:"source"` // "provider", "clerk" or "admitted" (the worst case): whose count this is
+	}
+	// spendHeld stops a task whose spend cap is used up until the owner extends it (LOG-7).
+	spendHeld struct {
+		Plan    string `json:"plan"`
+		Code    string `json:"code"`
+		Detail  string `json:"detail"`
+		Root    key.ID `json:"root"`    // the root of the key the plan cites: it cannot release itself
+		Funding key.ID `json:"funding"` // the key funding the plan when held: nor can anything under it
+	}
+	// spendExtended releases a held plan and names the owner-envelope key its
+	// later calls are charged to. It widens: it needs an anchor (KRN-7).
+	spendExtended struct {
+		Plan string  `json:"plan"`
+		Key  key.Key `json:"key"`
+	}
+	// poolRead is the provider's own figure for a pool (RES-5), in per mille.
+	poolRead struct {
+		Pool    string `json:"pool"`
+		Used    int64  `json:"used"`
+		ResetAt int64  `json:"reset_at"`
+	}
+	// poolReset reopens a pool at the reset time the provider gave: it clears the
+	// reading, so it widens and needs an anchor (RES-5, KRN-7).
+	poolReset struct {
+		Pool string `json:"pool"`
+	}
+	poolReserve struct {
+		Pool    string `json:"pool"`
+		Reserve int64  `json:"reserve"` // per mille of the pool kept for the owner
+	}
 	planAccepted struct {
 		Plan   string   `json:"plan"`
 		Cause  uint64   `json:"cause"`
@@ -225,6 +274,37 @@ type HeldInfo struct {
 	Novel bool
 }
 
+// SpendHold is why a plan's spend is stopped. Root is the root of the key the
+// plan cites and Funding the key that was funding it; neither, nor anything
+// under them, can release the hold.
+type SpendHold struct {
+	Code, Detail  string
+	Root, Funding key.ID
+}
+
+// Pool is what the log knows of one usage pool (RES-5).
+type Pool struct{ Used, ResetAt, Reserve int64 }
+
+// PoolOpen reports whether work may draw on a pool: below the owner's reserve.
+func (s *State) PoolOpen(name string) bool {
+	p, ok := s.Pools[name]
+	return !ok || p.Used+p.Reserve < PoolFull
+}
+
+// PoolDue reports whether a pool at its reserve has passed the reset time the
+// provider gave, which is the cooldown. The reopening is a logged widening.
+func (s *State) PoolDue(now int64, name string) bool {
+	p := s.Pools[name]
+	return !s.PoolOpen(name) && p.ResetAt > 0 && now >= p.ResetAt
+}
+
+// PoolWindowMS is the window a pool is declared to reset over (RES-5): the
+// cooldown of a full pool whose reading gave no usable reset time.
+const PoolWindowMS = 5 * 3600 * 1000
+
+// PoolFull is a whole pool, in per mille.
+const PoolFull = 1000
+
 type usedRec struct {
 	Seq uint64
 	key.Use
@@ -238,11 +318,16 @@ type State struct {
 	Changes key.Changes
 	Roots   map[key.ID]bool
 	Plans   map[string]*PlanState
-	Order   []string
-	uses    map[key.ID][]usedRec
-	held    map[uint64]HeldInfo
-	seen    map[key.ID]map[string]int   // root -> shape -> completed, not undone
-	recent  map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
+	// SpendHeld lists the tasks stopped on a used-up spend cap; Pools the usage pools.
+	SpendHeld map[string]SpendHold
+	// Extended maps a plan to the extension key its later calls are charged to.
+	Extended map[string]key.Key
+	Pools    map[string]Pool
+	Order    []string
+	uses     map[key.ID][]usedRec
+	held     map[uint64]HeldInfo
+	seen     map[key.ID]map[string]int   // root -> shape -> completed, not undone
+	recent   map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
 }
 
 func NewState(owner ed25519.PublicKey) *State {
@@ -250,6 +335,7 @@ func NewState(owner ed25519.PublicKey) *State {
 		Owner:   owner,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Roots:   map[key.ID]bool{}, Plans: map[string]*PlanState{},
+		SpendHeld: map[string]SpendHold{}, Extended: map[string]key.Key{}, Pools: map[string]Pool{},
 		uses: map[key.ID][]usedRec{}, held: map[uint64]HeldInfo{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
@@ -401,6 +487,51 @@ func (s *State) Apply(e Entry) error {
 		default:
 			delete(s.Changes.Paused, b.ID)
 		}
+	case TModelUsed:
+		b, err := body[modelUsed](e)
+		if err != nil {
+			return err
+		}
+		for _, id := range b.Scopes {
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task}})
+		}
+	case TSpendHeld:
+		b, err := body[spendHeld](e)
+		if err != nil {
+			return err
+		}
+		s.SpendHeld[b.Plan] = SpendHold{b.Code, b.Detail, b.Root, b.Funding}
+	case TSpendExtend:
+		b, err := body[spendExtended](e)
+		if err != nil {
+			return err
+		}
+		delete(s.SpendHeld, b.Plan)
+		s.Extended[b.Plan] = b.Key
+	case TPoolRead:
+		b, err := body[poolRead](e)
+		if err != nil {
+			return err
+		}
+		p := s.Pools[b.Pool]
+		p.Used, p.ResetAt = b.Used, b.ResetAt
+		s.Pools[b.Pool] = p
+	case TPoolReset:
+		b, err := body[poolReset](e)
+		if err != nil {
+			return err
+		}
+		p := s.Pools[b.Pool]
+		p.Used, p.ResetAt = 0, 0
+		s.Pools[b.Pool] = p
+	case TReserveUp, TReserveDown:
+		b, err := body[poolReserve](e)
+		if err != nil {
+			return err
+		}
+		p := s.Pools[b.Pool]
+		p.Reserve = b.Reserve
+		s.Pools[b.Pool] = p
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
 	case TResume:
