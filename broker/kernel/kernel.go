@@ -41,6 +41,11 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if r := OneOff(s, s.owners(p.Key), s.Anchors, p, now); r != nil {
 		return key.ID{}, nil, r
 	}
+	if t := v.Limits.Task; t != "" {
+		if _, ok := s.Task(t, now); !ok {
+			return key.ID{}, nil, &key.Refusal{Code: CTask, Detail: "the key's task is not live"}
+		}
+	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
 	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
 	fresh := map[string]bool{}
@@ -226,6 +231,8 @@ type View interface {
 	Dispatched(r Request) (Dispatch, bool)
 	// OneOffLine is the most a one-off under root may spend alone (OneOff).
 	OneOffLine(root key.ID, now int64) int64
+	// Task answers only while the task is live at now.
+	Task(id string, now int64) (Task, bool)
 }
 
 // Live refuses a key unless its grants, its root and its first link, are in

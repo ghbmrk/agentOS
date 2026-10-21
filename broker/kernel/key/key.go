@@ -99,6 +99,7 @@ const (
 	KExpires       = "expires"
 	KUses          = "uses"
 	KHold          = "hold"
+	KTask          = "task"
 )
 
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
@@ -155,6 +156,7 @@ func LimitRate(n int64) Caveat          { return Caveat{Kind: KRateDay, N: n} }
 func LimitRateRecipient(n int64) Caveat { return Caveat{Kind: KRateRecipient, N: n} }
 func LimitExpires(atMS int64) Caveat    { return Caveat{Kind: KExpires, N: atMS} }
 func LimitUses(n int64) Caveat          { return Caveat{Kind: KUses, N: n} }
+func LimitTask(id string) Caveat        { return Caveat{Kind: KTask, Set: []string{id}} }
 func LimitHold(baseMS, noveltyMS int64) Caveat {
 	return Caveat{Kind: KHold, N: baseMS, M: noveltyMS}
 }
@@ -180,6 +182,7 @@ type Limits struct {
 	NotAfter    *int64
 	HoldBase    int64
 	HoldNovelty int64
+	Task        string // the one task the key serves; "" for none (KRN-5)
 }
 
 func subset(a, b []string) bool {
@@ -271,6 +274,14 @@ func (l *Limits) apply(c Caveat, scope ID) error {
 		}
 		n := c.N
 		l.NotAfter = &n
+	case KTask:
+		if len(c.Set) != 1 || c.Set[0] == "" {
+			return fmt.Errorf("%w: task", ErrMalformed)
+		}
+		if l.Task != "" && l.Task != c.Set[0] {
+			return fmt.Errorf("%w: task", ErrLoosens) // a key moves to no other task
+		}
+		l.Task = c.Set[0]
 	case KHold:
 		if c.N < 0 || c.M < c.N {
 			return fmt.Errorf("%w: hold", ErrMalformed)

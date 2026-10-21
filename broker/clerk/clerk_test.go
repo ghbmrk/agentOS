@@ -356,3 +356,63 @@ func TestClerkVerifyReturnsTheChainItChecked(t *testing.T) {
 		t.Fatal("a verb the key lacks returns no chain")
 	}
 }
+
+// forgedTask is a view that vouches for a task the log never approved.
+type forgedTask struct {
+	kernel.View
+	t kernel.Task
+}
+
+func (v forgedTask) Task(string, int64) (kernel.Task, bool) { return v.t, true }
+
+// A clerk covers a request with a task approval only while the key's task is
+// live on its own clock and a passkey its own anchors know signed it
+// (KRN-task, CLK-2, CLK-3).
+func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
+	f := setup(t, key.Trash)
+	opub, opriv := gen(1)
+	anchors := []ed25519.PublicKey{opub}
+	if err := f.k.OpenTask(1, "t1", 100); err != nil {
+		t.Fatal(err)
+	}
+	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
+	a.By = key.Approve(opriv, kernel.TaskHash("t1", a.Site, a.First))
+	if err := f.k.ApproveTask(1, "t1", a); err != nil {
+		t.Fatal(err)
+	}
+	served, err := key.Derive(f.root, hpubPriv(), f.root.Links[0].Holder, key.LimitTask("t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("c1", served, stepOf(key.Trash)), f.view())
+	if rf != nil || ver.Limits.Task != "t1" {
+		t.Fatalf("a plan in a live task: %v", rf)
+	}
+	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, f.now); !ok || got.Site != a.Site {
+		t.Fatalf("the live approval: %+v %v", got, ok)
+	}
+	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, 100); ok {
+		t.Fatal("an approval past its task's timeout on the clerk's clock")
+	}
+	plain, _ := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.req, f.view())
+	if _, ok := kernel.TaskApproved(f.view(), anchors, plain, f.now); ok {
+		t.Fatal("a key with no task is covered")
+	}
+	_, mpriv := gen(40)
+	forged := kernel.Task{ID: "t1", Until: 100, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
+		By: key.Approve(mpriv, kernel.TaskHash("t1", a.Site, a.First))}}
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, f.now); ok {
+		t.Fatal("an approval no passkey the clerk knows signed")
+	}
+	other := kernel.Task{ID: "t2", Until: 100, Approval: &kernel.TaskApproval{Site: a.Site, First: a.First,
+		By: key.Approve(opriv, kernel.TaskHash("t2", a.Site, a.First))}}
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, f.now); ok {
+		t.Fatal("another task's approval")
+	}
+	moved := a
+	moved.Site = "other.example"
+	forged.Approval = &moved
+	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, f.now); ok {
+		t.Fatal("an approval moved to another site")
+	}
+}
