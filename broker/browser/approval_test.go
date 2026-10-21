@@ -730,7 +730,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 func TestOnlyThePasskeyApproves(t *testing.T) {
 	hpub, hpriv := seedKey(2)
 	soon := key.LimitExpires(time.Now().UnixMilli() + MaxApproval/2)
-	for _, id := range []string{"minted", "bare", "uncapped", "standing", "long", "tap"} {
+	for _, id := range []string{"minted", "bare", "uncapped", "standing", "long", "tap", "late", "below"} {
 		r := newCart(t, nil, 0)
 		r.run(t, 1, "ask", r.root, read(pressOrder))
 		a := r.stepApproval(t, "ask")
@@ -739,6 +739,11 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 			t.Fatal(err)
 		}
 		switch id {
+		case "minted":
+			// Brief, named and capped, but the home clerk signed it, not the phone.
+			if k, err = key.Derive(r.root, hpriv, hpub, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1), soon); err != nil {
+				t.Fatal(err)
+			}
 		case "bare":
 			if k, err = key.Narrow(k, r.phone, key.LimitUses(1), soon); err != nil {
 				t.Fatal(err)
@@ -753,17 +758,28 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 			}
 		case "long":
 			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1),
-				key.LimitExpires(time.Now().UnixMilli()+2*MaxApproval)); err != nil {
+				key.LimitExpires(time.Now().UnixMilli()+16*60*1000)); err != nil {
 				t.Fatal(err)
 			}
 		case "tap":
 			k = r.approve(t, a.Print)
+		case "below":
+			// The clerk's own link under the owner's tap: the tip is no longer the owner's.
+			if k, err = key.Derive(r.approve(t, a.Print), hpriv, hpub, key.LimitContent(a.Print), key.LimitUses(1), soon); err != nil {
+				t.Fatal(err)
+			}
+		case "late":
+			// A link expiring just inside MaxApproval is an approval.
+			if k, err = key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
+				key.LimitExpires(time.Now().UnixMilli()+MaxApproval-60_000)); err != nil {
+				t.Fatal(err)
+			}
 		}
 		r.run(t, 2, id, k, submitStep(a, pressOrder))
 		s, clicks := r.step(id), len(forwarded(t, r.h, "click"))
-		if id == "tap" {
+		if id == "tap" || id == "late" {
 			if s.Phase != kernel.PDone || clicks != 1 {
-				t.Fatalf("tap: phase %s (%s), %d clicks", s.Phase, s.Detail, clicks)
+				t.Fatalf("%s: phase %s (%s), %d clicks", id, s.Phase, s.Detail, clicks)
 			}
 		} else if s.Phase != kernel.PFailed || s.Detail != "unapproved" || clicks != 0 {
 			t.Fatalf("%s: phase %s (%s), %d clicks", id, s.Phase, s.Detail, clicks)
