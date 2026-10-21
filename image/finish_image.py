@@ -305,8 +305,6 @@ def slot_a_violations(img, table, data, tree, allowed=None):
                         digest = hashlib.sha256(m.group()).hexdigest()
                         if m.start() < SCAN_CHUNK and (what, digest) not in allowed:
                             out.append("%s in %s at byte %d, sha256 %s" % (what, name, p + m.start(), digest))
-                            if len(out) == 1:  # DEBUG-REMOVE
-                                out.append("ctx=%r" % want[max(0, m.start() - 400):m.start()])  # DEBUG-REMOVE
             # The partition past the split file (the slack after a hash tree) holds nothing.
             for d, h in data_extents(di, start + n, start + size) if same else ():
                 for p in range(d, h, SCAN_CHUNK):

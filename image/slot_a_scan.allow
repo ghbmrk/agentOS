@@ -2,3 +2,11 @@
 # One per line: the kind, a space, the SHA-256 of the matched bytes (the key header and the start
 # of its body), then "# why". A key not listed here fails the build, which prints its SHA-256;
 # review the file it sits in, then add it. An empty list means no key ships in /usr.
+private key 282b7f8a15853c74cc6b4f5a402a760ceb273e671d74c0d5e7eb7b775642bbc6  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key b622eef9c9318240944ad94c12982297f07f707eb52bda4f12aed20b8778e078  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key 4e3c543ae1697c1f4cb40b2f77502077bfa01f4fded253ff3aa770ed97c7746b  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key cc2e92f78cec84058440b64b68c15ed5c48728286165924798835abcaa8d459d  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key 8a47f050736577cb859d73484b69060a0b637a74d3beb6d83e6af9e78972a11d  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key 218f5d67b5739393fdd83d43f623d240442abc654d1e07d37db03665ba802432  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key 7d28eb4b7d72597edae081da4f79456c07ecc4c598ea920d19e25ebb6db43a3a  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
+private key dca365ff42c54c4849f405578e7989f08676d84f37dc7700b1b01b9e183c3db8  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
