@@ -4,6 +4,7 @@ package clerk_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -147,5 +148,68 @@ func TestSecretsConcurrentPutsLoseNothing(t *testing.T) {
 	mem, _ := s.MarshalBinary()
 	if s.Len() != 16 || !bytes.Equal(mem, disk) {
 		t.Fatalf("concurrent Puts left %d slots, at rest equal to memory: %v", s.Len(), bytes.Equal(mem, disk))
+	}
+}
+
+// Remove persists through the store's write like Put, leaves the store as it
+// was when the write fails, and writes nothing for a missing slot.
+func TestSecretsRemovePersists(t *testing.T) {
+	sl := sealer(t)
+	var disk []byte
+	writes, fail := 0, false
+	s := clerk.NewSecrets(sl, func(b []byte) error {
+		if fail {
+			return errors.New("disk full")
+		}
+		writes++
+		disk = bytes.Clone(b)
+		return nil
+	})
+	_ = s.Put("a", clerk.KindStatic, []byte("canary-a"))
+	_ = s.Put("b", clerk.KindStatic, []byte("canary-b"))
+	fail = true
+	if err := s.Remove("a"); err == nil || !s.Has("a") {
+		t.Fatal("a Remove whose write failed changed the store")
+	}
+	fail = false
+	if err := s.Remove("a"); err != nil {
+		t.Fatal(err)
+	}
+	re := clerk.NewSecrets(sl, nil)
+	if err := re.UnmarshalBinary(disk); err != nil || re.Has("a") || !re.Has("b") {
+		t.Fatalf("at-rest form after Remove: err %v, a %v, b %v", err, re.Has("a"), re.Has("b"))
+	}
+	n := writes
+	if err := s.Remove("a"); err != nil || writes != n {
+		t.Fatal("removing a missing slot wrote or failed")
+	}
+}
+
+// Login opens its static slot at each call: it gives the password, and after a
+// Remove, once the name holds a grant, or for a slot outside MailSlots, it
+// gives nothing.
+func TestSecretsLoginOpensPerConnection(t *testing.T) {
+	s := clerk.NewSecrets(sealer(t), nil)
+	cred := s.Login("mail/a", "you@example.com")
+	if _, err := cred(context.Background()); err == nil {
+		t.Fatal("Login gave a credential for a missing slot")
+	}
+	_ = s.Put("mail/a", clerk.KindStatic, []byte("canary-pass-0001"))
+	l, err := cred(context.Background())
+	if err != nil || l.User != "you@example.com" || l.Secret != "canary-pass-0001" || l.OAuth {
+		t.Fatalf("Login = %+v, %v", l, err)
+	}
+	_ = s.Remove("mail/a")
+	if _, err := cred(context.Background()); err == nil {
+		t.Fatal("Login still gave the password after Remove")
+	}
+	_ = s.Put("mail/a", clerk.KindGrant, []byte("canary-grant-0001"))
+	if l, err := cred(context.Background()); err == nil || l.Secret != "" {
+		t.Fatal("Login opened a grant slot")
+	}
+	// Another clerk's static slot is not a mail password: Login is no getter.
+	_ = s.Put("exit-key", clerk.KindStatic, []byte("canary-api-key-0001"))
+	if l, err := s.Login("exit-key", "x")(context.Background()); err == nil || l.Secret != "" {
+		t.Fatal("Login opened a slot outside MailSlots")
 	}
 }
