@@ -517,7 +517,7 @@ func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, erro
 	if len(k.Links) > 1 {
 		return 0, ErrNotAGrant
 	}
-	if err := key.CheckChain(k, s.Passkeys()); err != nil {
+	if _, err := key.Chain(k, s.Passkeys()); err != nil {
 		return 0, err
 	}
 	from := at + GrantHold

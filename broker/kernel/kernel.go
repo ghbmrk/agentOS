@@ -17,10 +17,11 @@ const (
 	CPlan      = "plan"        // the plan is malformed
 	CDuplicate = "duplicate"   // the same effect within 24 hours needs a fresh owner key (KRN-8)
 	CClerk     = "no-clerk"
-	CPool      = "pool"      // the pool is at the owner's reserve until it resets (RES-5)
-	CNotHeld   = "not-held"  // no hold on that task
-	CExtension = "extension" // the key cannot extend this hold
-	CHeld      = "held"      // the task is held until the owner extends it (LOG-7)
+	CPool      = "pool"       // the pool is at the owner's reserve until it resets (RES-5)
+	CNotHeld   = "not-held"   // no hold on that task
+	CExtension = "extension"  // the key cannot extend this hold
+	CHeld      = "held"       // the task is held until the owner extends it (LOG-7)
+	CBroken    = "log-broken" // a write failed: no spend until the log is reopened (KRN-5)
 )
 
 // Admit decides a submitted plan against the state. It is pure: the same state
@@ -399,6 +400,11 @@ func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
 // caps, that the plan is active and that it is not held: the check a clerk
 // makes before a metered call (LOG-7).
 func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) *key.Refusal {
+	if k.log.broken {
+		// A call admitted now could not be metered, and may follow a
+		// widening whose anchor failed (KRN-5).
+		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
+	}
 	ps, v, r := k.funding(now, plan)
 	if r != nil {
 		return r
@@ -432,21 +438,20 @@ func (k *Kernel) Meter(now int64, plan, route string, amount int64, source strin
 	return err
 }
 
-// Hold stops a plan's spend after rf, the refusal that used up its cap. It
-// stays held until the owner extends it (LOG-7).
+// Hold stops a plan's spend after rf, the refusal of one of its spend caps,
+// used up or too small for the call (MIG-4-spend-b1). It stays held until
+// the owner extends it (LOG-7).
 func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 	if rf == nil || (rf.Code != key.RSpendTask && rf.Code != key.RSpendDay) {
-		return errors.New("kernel: only an exhausted spend cap holds a plan")
+		return errors.New("kernel: only a refused spend cap holds a plan")
 	}
 	ps, v, r := k.funding(now, plan)
 	if r != nil {
 		return r
 	}
-	cited, r := k.owned(now, ps.Plan.Key)
-	if r != nil {
-		return r
-	}
-	_, err := k.emit(now, TSpendHeld, spendHeld{plan, rf.Code, rf.Detail, cited.Root(), v.ID()})
+	// The cited key was verified when its plan was admitted; its root is all
+	// the hold names.
+	_, err := k.emit(now, TSpendHeld, spendHeld{plan, rf.Code, rf.Detail, rootOf(ps.Plan.Key), v.ID()})
 	return err
 }
 
