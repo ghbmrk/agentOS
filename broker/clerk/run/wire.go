@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -61,14 +63,21 @@ type snapshot struct {
 	// alone, as of the call on the kernel's clock (kernel.OneOff). A root it
 	// does not name has line 0: any spend needs a second passkey.
 	OneOffLines map[key.ID]int64 `json:"one_off_lines"`
+	// Served is the task the chain serves, live as of the call (nil: none or
+	// ended); the clerk judges its timeout on its own clock (KRN-5).
+	Served *kernel.Task `json:"task"`
 }
 
 // view is the kernel's side: what v says of r. A plan that does not verify
 // gets no grants, and a step not in flight no dispatch or uses; the clerk
-// refuses either.
+// refuses either. It shares nothing with v, since Tick sends it outside the
+// kernel's lock while STOP, a revoke or a pause changes v.
 func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int64) snapshot {
-	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{}, Changes: *v.ChangesView()}
-	s.Enrolled, s.Unenrolled = v.Enrollments()
+	c := v.ChangesView()
+	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{},
+		Changes: key.Changes{Revoked: maps.Clone(c.Revoked), Paused: maps.Clone(c.Paused), Stopped: c.Stopped}}
+	es, un := v.Enrollments()
+	s.Enrolled, s.Unenrolled = slices.Clone(es), slices.Clone(un)
 	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, anchors, r.Plan.Key))
 	if err != nil {
 		return s
@@ -79,6 +88,9 @@ func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int6
 		}
 	}
 	s.OneOffLines[ver.Root()] = v.OneOffLine(ver.Root(), now)
+	if t, ok := v.Task(ver.Limits.Task, now); ok {
+		s.Served = &t
+	}
 	d, ok := v.Dispatched(r)
 	if !ok {
 		return s
@@ -101,6 +113,14 @@ func (s *snapshot) ChangesView() *key.Changes { return &s.Changes }
 
 // OneOffLine answers as of the call, whatever now the clerk asks at.
 func (s *snapshot) OneOffLine(root key.ID, _ int64) int64 { return s.OneOffLines[root] }
+
+// Task answers for the chain's task only, while now is before its timeout.
+func (s *snapshot) Task(id string, now int64) (kernel.Task, bool) {
+	if s.Served == nil || s.Served.ID != id || now >= s.Served.Until {
+		return kernel.Task{}, false
+	}
+	return *s.Served, true
+}
 
 // LedgerBefore answers only for the dispatch the snapshot was taken at.
 func (s *snapshot) LedgerBefore(seq uint64) key.Ledger {
@@ -155,29 +175,43 @@ type remote struct {
 }
 
 func (c remote) Do(r kernel.Request, v kernel.View) kernel.Result {
-	a, sent := c.call(opDo, r, v)
+	return c.do(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+}
+
+func (c remote) Probe(r kernel.Request, v kernel.View) string {
+	return c.probe(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+}
+
+// do and probe make a call with a view taken under the kernel's lock, so the
+// call itself runs without it (KRN-7).
+func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
+	a, sent := c.call(opDo, r, s)
 	switch {
 	case !sent:
-		// Nothing reached a clerk, so nothing happened: the step fails as it
-		// does at a clerk the kernel does not have.
-		return kernel.Result{Outcome: "failed", Detail: DUnreachable}
+		// Nothing reached the clerk, so nothing happened: the kernel sends
+		// it again after a wait (kernel.OUnsent).
+		return kernel.Result{Outcome: kernel.OUnsent, Detail: DUnreachable}
 	case a == nil:
 		return kernel.Result{Outcome: "unknown", Detail: DLost}
 	}
 	return kernel.Result{Outcome: one(a.Outcome, "ok", "failed"), Detail: detail(a.Detail)}
 }
 
-func (c remote) Probe(r kernel.Request, v kernel.View) string {
-	if a, _ := c.call(opProbe, r, v); a != nil {
-		return one(a.Outcome, "done", "notdone")
+func (c remote) probe(r kernel.Request, s snapshot) string {
+	a, sent := c.call(opProbe, r, s)
+	switch {
+	case !sent:
+		return kernel.OUnreached // no check was made, so none counts
+	case a == nil:
+		return "unknown"
 	}
-	return "unknown"
+	return one(a.Outcome, "done", "notdone")
 }
 
 // call sends one call and reads its answer. sent is false only when no byte
 // of the call can have reached the clerk.
-func (c remote) call(op string, r kernel.Request, v kernel.View) (a *answer, sent bool) {
-	b, err := json.Marshal(call{op, r, view(v, c.anchors, r, time.Now().UnixMilli())})
+func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent bool) {
+	b, err := json.Marshal(call{op, r, s})
 	if err != nil {
 		return nil, false
 	}

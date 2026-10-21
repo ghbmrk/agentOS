@@ -283,7 +283,7 @@ func scanMemory(hash []byte) (found bool, scanned int64, err error) {
 }
 
 // Each side admits only the other's uid. A kernel that finds another uid on
-// the clerk's socket sends nothing and fails the step; a clerk socket that
+// the clerk's socket sends nothing, so the step is sent again later; a clerk socket that
 // admits another uid answers the kernel nothing, so the step is unknown and
 // the provider sees nothing.
 func TestPeersAreCheckedByUID(t *testing.T) {
@@ -294,8 +294,8 @@ func TestPeersAreCheckedByUID(t *testing.T) {
 	b.open()
 	id := b.submit("carol")
 	b.tick(b.now)
-	if st := b.step(id); st.Phase != kernel.PFailed || st.Detail != DUnreachable {
-		t.Fatalf("step %+v, want failed %s", st, DUnreachable)
+	if st := b.step(id); st.Phase != kernel.PUnsent || st.Detail != DUnreachable {
+		t.Fatalf("step %+v, want unsent %s", st, DUnreachable)
 	}
 
 	// A clerk socket that admits some other uid, not the kernel's.
@@ -367,10 +367,14 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 			t.Errorf("clerk probed %q: kernel took %q, want %q", c.probe, p, c.wantPr)
 		}
 	}
-	// No clerk listening: nothing was sent, so the step fails.
+	// No clerk listening: nothing was sent, so the step is sent again later,
+	// and a probe made no check.
 	r := remote{Remote{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}, nil}
-	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != "failed" || got.Detail != DUnreachable {
-		t.Fatalf("no clerk: %+v, want failed %s", got, DUnreachable)
+	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != kernel.OUnsent || got.Detail != DUnreachable {
+		t.Fatalf("no clerk: %+v, want unsent %s", got, DUnreachable)
+	}
+	if got := r.Probe(kernel.Request{}, kernel.NewState(nil)); got != kernel.OUnreached {
+		t.Fatalf("no clerk, probed: %q, want %s", got, kernel.OUnreached)
 	}
 }
 
@@ -501,4 +505,183 @@ func TestViewCarriesTheOneOffLine(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// The view carries the chain's task as the kernel's log has it, and the
+// clerk judges its timeout and approval itself (KRN-5, CLK-3).
+func TestViewCarriesTheChainsTask(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "unused.sock"))
+	served, err := key.Derive(b.key, holderPriv, holderPub, key.LimitTask("t1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
+	a.By = key.Approve(ownerPriv, kernel.TaskHash("t1", 0, a.Site, a.First))
+	ps := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "erin", "msg": "hello"}, Content: "text", Labels: []string{"public"}}
+	in := kernel.SignPlan(kernel.Plan{ID: "in", Key: served, Steps: []kernel.PlanStep{ps}}, holderPriv)
+	out := kernel.SignPlan(kernel.Plan{ID: "out", Key: b.key, Steps: []kernel.PlanStep{ps}}, holderPriv)
+	b.h.With(func(k *kernel.Kernel) error {
+		if err := k.OpenTask(b.now, "t1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.ApproveTask(b.now, "t1", a); err != nil {
+			t.Fatal(err)
+		}
+		s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now)
+		ver, err := kernel.VerifyPlan(in, kernel.PlanOwners(&s, anchors, in.Key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := kernel.TaskApproved(&s, anchors, ver, a.Site, b.now); !ok || got.Site != a.Site || got.At != b.now {
+			t.Fatalf("the view's task approval: %+v %v", got, ok)
+		}
+		if _, ok := s.Task("t1", b.now+kernel.TaskTimeout); ok {
+			t.Fatal("the view's task past its timeout on the clerk's clock")
+		}
+		if _, ok := s.Task("t2", b.now); ok {
+			t.Fatal("the view answered for a task the chain does not serve")
+		}
+		if s := view(k.State(), anchors, kernel.Request{Plan: out}, b.now); s.Served != nil {
+			t.Fatalf("a chain with no task carried one: %+v", s.Served)
+		}
+		if err := k.EndTask(b.now, "t1"); err != nil {
+			t.Fatal(err)
+		}
+		if s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now); s.Served != nil {
+			t.Fatal("the view carried an ended task")
+		}
+		return nil
+	})
+}
+
+// hung is a clerk whose Do waits until released.
+type hung struct {
+	in, release chan struct{}
+}
+
+func (h hung) Do(kernel.Request, kernel.View) kernel.Result {
+	h.in <- struct{}{}
+	<-h.release
+	return kernel.Result{Outcome: "ok"}
+}
+func (hung) Probe(kernel.Request, kernel.View) string { return "notdone" }
+
+// STOP, and every other owner call, returns while a clerk call hangs: Tick
+// makes clerk calls outside the kernel's lock (KRN-7, OWN-18). The answer is
+// logged once the clerk returns.
+func TestStopReturnsWhileAClerkCallHangs(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "hung.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := hung{make(chan struct{}), make(chan struct{})}
+	go ServeClerk(ln, c, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	id := b.submit("dave")
+	ticked := make(chan error, 1)
+	go func() { ticked <- b.h.Tick(b.now) }()
+	<-c.in
+	stopped := make(chan error, 1)
+	go func() { stopped <- b.h.With(func(k *kernel.Kernel) error { return k.Stop(b.now) }) }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("STOP waited on a hung clerk call")
+	}
+	close(c.release)
+	if err := <-ticked; err != nil {
+		t.Fatal(err)
+	}
+	if st := b.step(id); st.Phase != kernel.PDone {
+		t.Fatalf("the hung call's answer was not logged: %+v", st)
+	}
+}
+
+// first is a clerk whose first call hangs until released; it counts the
+// calls that reach it.
+type first struct {
+	in, release chan struct{}
+	mu          sync.Mutex
+	n           int
+}
+
+func (f *first) Do(kernel.Request, kernel.View) kernel.Result {
+	f.mu.Lock()
+	f.n++
+	n := f.n
+	f.mu.Unlock()
+	if n == 1 {
+		f.in <- struct{}{}
+		<-f.release
+	}
+	return kernel.Result{Outcome: "ok"}
+}
+func (*first) Probe(kernel.Request, kernel.View) string { return "notdone" }
+
+// A STOP logged while one clerk call hangs stops every call after it in the
+// same Tick: the kernel checks each dispatch again, under the lock, just
+// before it is sent, and the stopped one is cancelled unsent (KRN-7).
+func TestAStopWhileACallHangsSendsNothingAfterIt(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "first.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &first{in: make(chan struct{}), release: make(chan struct{})}
+	go ServeClerk(ln, c, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	a, z := b.submit("dave"), b.submit("erin")
+	ticked := make(chan error, 1)
+	go func() { ticked <- b.h.Tick(b.now) }()
+	<-c.in
+	if err := b.h.With(func(k *kernel.Kernel) error { return k.Stop(b.now) }); err != nil {
+		t.Fatal(err)
+	}
+	close(c.release)
+	if err := <-ticked; err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n != 1 || b.step(a).Phase != kernel.PDone || b.step(z).Phase != kernel.PCancelled {
+		t.Fatalf("after STOP: %d calls reached the clerk, steps %s and %s", c.n, b.step(a).Phase, b.step(z).Phase)
+	}
+}
+
+// A view shares nothing with the kernel's state: Tick sends it outside the
+// lock while revokes and pauses change that state (KRN-7). Run under -race.
+func TestTickRacesNoOwnerChange(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "race.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ServeClerk(ln, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "ok"} }}, anchors)
+	t.Cleanup(func() { ln.Close() })
+	b := newBox(t, sock)
+	for i := 0; i < 20; i++ {
+		b.submit(fmt.Sprintf("r%d", i))
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.h.Tick(b.now) }()
+	for i := 0; ; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+		id := key.ID{byte(i), byte(i >> 8), 1}
+		if err := b.h.With(func(k *kernel.Kernel) error { return k.Revoke(b.now, id) }); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

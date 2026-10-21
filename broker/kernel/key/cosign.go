@@ -36,7 +36,7 @@ func Approved(owners, anchors []ed25519.PublicKey, what [32]byte, signers []ed25
 		add(pk)
 	}
 	for _, c := range cos {
-		if len(c.By) == ed25519.PublicKeySize && ed25519.Verify(c.By, cosignMsg(what), c.Sig) {
+		if c.Over(what) {
 			add(c.By)
 		}
 	}
@@ -63,4 +63,9 @@ func whoSigned(owners []ed25519.PublicKey, msg, sig []byte) ed25519.PublicKey {
 		}
 	}
 	return nil
+}
+
+// Over reports whether c is a verifying co-signature over the change named what.
+func (c Cosign) Over(what [32]byte) bool {
+	return len(c.By) == ed25519.PublicKeySize && ed25519.Verify(c.By, cosignMsg(what), c.Sig)
 }
