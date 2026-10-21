@@ -50,7 +50,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - Declared scope: `broker/clerk/run/`, `broker/clerk/secrets.go` and its test, `docs/LANES.md` (a gate file, so a separate Security accept is needed), and this brief.
 
 **Slice 3a acceptance tests (MIG-4-run-m to o):**
-- `kernelsock_test.go::TestEverySocketCallIsTheDirectCall`. Every call on both tables, made through its socket on one kernel and directly on a twin, gives the same answer and logs the same entries; each read gives the same result on a state where it is not empty.
+- `kernelsock_test.go::TestEverySocketCallIsTheDirectCall`. Every call on both tables, made through its typed client (`Owner`, `Meter`) and socket on one kernel and directly on a twin, gives the same answer and logs the same entries; every action but the two admits succeeds (retry on a parked step, extend with a real extension), and each read gives the same result on a state where it is not empty.
 - `::TestOwnerSocketServesTheSeam`. A refusal keeps its code, a named error is the same value (`errors.Is`), and the reads after a lost answer show what the owner's calls changed.
 - `::TestEachSocketServesOnlyItsSide`. No call is on both tables; owner calls on the meter socket and metering calls on the owner socket are refused and log nothing.
 - `::TestKernelSocketsCheckPeerUID`. A socket for another uid takes no call, and a caller sends nothing to a socket another uid holds.

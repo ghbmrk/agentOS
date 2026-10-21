@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -433,24 +434,29 @@ func TestNoErrorCrossesAsSuccess(t *testing.T) {
 }
 
 // twin is a call made the same way on two kernels with the same log: direct
-// on one, through its side's socket on the other.
+// on one, and through the caller's typed client and its side's socket on the
+// other.
 type twin struct {
-	name  string
-	op    string
-	args  any
-	out   any                               // the socket's result, decoded into this
-	call  func(*kernel.Kernel) (any, error) // the direct call
-	empty func(any) bool                    // a read that would pass on an empty state
+	name string
+	op   string // the table row the call reaches
+	sock func(Owner, Meter) (any, error)
+	call func(*kernel.Kernel) (any, error) // the direct call
+	read func(any) bool                    // for a read: whether its result is not empty
 }
 
-// Every call on both tables does over the socket what the direct call does
-// (docs/LANES.md): the same answer, the same entries in the log, and, for a
-// read, the same result, each read made on a state where it is not empty.
+// Every call on both tables does through its client and socket what the
+// direct call does (docs/LANES.md): the same answer, the same entries in the
+// log, and, for a read, the same result, each read made on a state where it
+// is not empty, and each action on a state where it succeeds.
 func TestEverySocketCallIsTheDirectCall(t *testing.T) {
-	at := time.Now().UnixMilli()
-	direct := newBoxAt(t, filepath.Join(shortDir(t), "none-a.sock"), "web", at, key.Post)
-	sock := newBoxAt(t, filepath.Join(shortDir(t), "none-b.sock"), "web", at, key.Post)
-	clock := func() int64 { return at }
+	var clk atomic.Int64
+	clk.Store(time.Now().UnixMilli())
+	at := clk.Load()
+	// A clerk that never answers, so a step is unknown and, after
+	// MaxChecks probes, parked for RETRY.
+	clerkSock := serveFake(t, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "unknown"} }, probe: "unknown"})
+	direct := newBoxAt(t, clerkSock, "web", at, key.Post)
+	sock := newBoxAt(t, clerkSock, "web", at, key.Post)
 	conns := map[string]Conn{}
 	for _, side := range []Side{OwnerSide, MeterSide} {
 		path := filepath.Join(shortDir(t), side.name+".sock")
@@ -459,17 +465,25 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { ln.Close() })
-		go ServeKernel(ln, sock.h, side, clock)
+		go ServeKernel(ln, sock.h, side, clk.Load)
 		conns[side.name] = Conn{Socket: path, UID: os.Getuid(), Timeout: 10 * time.Second}
 	}
+	o, m := Owner{conns["owner"]}, Meter{conns["meter"]}
 
-	// A plan under a key capped at 100 a task, for the metering calls.
-	root := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "m"})
-	capped, err := key.ClerkKey(root, ownerPriv, holderPub, at, 1<<40, key.LimitSpendTask(100))
-	if err != nil {
-		t.Fatal(err)
+	// A plan under a key capped at 100 a task, for the metering calls, and
+	// a second root whose capped key can release it once held.
+	issue := func(serial string, cv ...key.Caveat) (key.Key, key.Key, []key.Cosign) {
+		root := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: serial})
+		ck, err := key.ClerkKey(root, ownerPriv, holderPub, at, 1<<40, cv...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return root, ck, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}
 	}
-	cos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, capped)), key.Approve(sparePriv, kernel.BatchHash(root, capped))}
+	root, capped, cos := issue("m", key.LimitSpendTask(100))
+	eroot, ext, ecos := issue("e", key.LimitSpendTask(500))
+	other := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "x"})
+	ocos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(other)), key.Approve(sparePriv, kernel.BatchHash(other))}
 	step := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "alice", "msg": "hi"}, Content: "text", Labels: []string{"public"}}
 	pm := kernel.SignPlan(kernel.Plan{ID: "m", Key: capped, Steps: []kernel.PlanStep{step}}, holderPriv)
 	p1 := kernel.SignPlan(kernel.Plan{ID: "p1", Key: direct.key, Steps: []kernel.PlanStep{step}}, holderPriv)
@@ -479,12 +493,13 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	phone, phonePriv := gen(8)
 	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
-	// Another grant for the issue call itself.
-	other := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "x"})
-	ocos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(other)), key.Approve(sparePriv, kernel.BatchHash(other))}
+	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(phonePriv, kernel.TaskHash("t1", 0, "shop.test", "r"))}
 	for _, b := range []*box{direct, sock} {
 		if err := b.h.With(func(k *kernel.Kernel) error {
 			if err := k.Issue(at-kernel.GrantHold, cos, root, capped); err != nil {
+				return err
+			}
+			if err := k.Issue(at-kernel.GrantHold, ecos, eroot, ext); err != nil {
 				return err
 			}
 			return k.OpenTask(at, "t1")
@@ -492,86 +507,117 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// park runs both kernels on until plan p1's step is parked.
+	park := func() {
+		for range 4 * kernel.MaxChecks {
+			now := clk.Add(kernel.ProbeEvery)
+			direct.tick(now)
+			sock.tick(now)
+		}
+		if st := direct.step("p1"); st.Phase != kernel.PParked {
+			t.Fatalf("p1 is %s, want parked", st.Phase)
+		}
+	}
 	nonEmpty := func(v any) bool { b, _ := json.Marshal(v); return len(b) > 4 }
+	now := func() int64 { return clk.Load() }
+	plan := func(k *kernel.Kernel, id string) planRead {
+		p := k.State().Plans[id]
+		r := planRead{Status: p.Status}
+		for _, st := range p.Steps {
+			r.Phases = append(r.Phases, st.Phase)
+		}
+		return r
+	}
 
 	cases := []twin{
-		{name: "submit", op: "submit", args: p1, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(at, p1) }},
-		{name: "issue", op: "issue", args: issueArgs{ocos, []key.Key{other}}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(at, ocos, other) }},
-		{name: "submit capped", op: "submit", args: pm, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(at, pm) }},
-		{name: "enroll", op: "enroll", args: key.Enroll(ownerPriv, phone), call: func(k *kernel.Kernel) (any, error) { return nil, k.Enroll(at, key.Enroll(ownerPriv, phone)) }},
-		{name: "approvetask", op: "approvetask", args: approveArgs{"t1", kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(phonePriv, kernel.TaskHash("t1", 0, "shop.test", "r"))}},
+		{name: "submit", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
+		{name: "issue", op: "issue", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
+		{name: "submit capped", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(pm) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), pm) }},
+		{name: "enroll", op: "enroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Enroll(key.Enroll(ownerPriv, phone)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Enroll(now(), key.Enroll(ownerPriv, phone)) }},
+		{name: "approvetask", op: "approvetask", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveTask("t1", approval) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveTask(now(), "t1", approval) }},
+		{name: "task", op: "task", read: func(v any) bool { return len(v.(kernel.Task).Approvals) > 0 },
+			sock: func(o Owner, _ Meter) (any, error) {
+				tk, ok, err := o.Task("t1")
+				if !ok {
+					return nil, err
+				}
+				return tk, err
+			},
 			call: func(k *kernel.Kernel) (any, error) {
-				return nil, k.ApproveTask(at, "t1", kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(phonePriv, kernel.TaskHash("t1", 0, "shop.test", "r"))})
+				tk, ok := k.State().Task("t1", now())
+				if !ok {
+					return nil, nil
+				}
+				return tk, nil
 			}},
-		{name: "task", op: "task", args: "t1", out: &taskRead{}, empty: func(v any) bool { return v.(*taskRead).Task != nil && len(v.(*taskRead).Task.Approvals) > 0 }, call: func(k *kernel.Kernel) (any, error) {
-			tk, ok := k.State().Task("t1", at)
-			if !ok {
-				return taskRead{}, nil
-			}
-			return taskRead{&tk}, nil
-		}},
-		{name: "setline", op: "setline", args: lineArgs{Percent: 100}, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(at, 100) }},
-		{name: "reserve", op: "reserve", args: poolArgs{Pool: "full", Reserve: kernel.PoolFull}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(at, "full", kernel.PoolFull) }},
-		{name: "meter", op: "meter", args: spendArgs{Plan: "m", Route: "api", Amount: 37, Source: "provider"}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(at, "m", "api", 37, "provider") }},
-		{name: "admitspend", op: "admitspend", args: spendArgs{Plan: "m", Amount: 1000}, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitSpend(at, "m", 1000)) }},
-		{name: "admitpool", op: "admitpool", args: poolArgs{Pool: "full"}, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(at, "full")) }},
-		{name: "readpool", op: "readpool", args: poolArgs{Pool: "codex", Used: 300, ResetAt: at + 1000}, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(at, "codex", 300, at+1000) }},
-		{name: "hold", op: "hold", args: spendArgs{Plan: "m", Rf: spend}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(at, "m", spend) }},
-		{name: "extend", op: "extend", args: extendArgs{capped, "m"}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(at, capped, "m") }},
-		{name: "retry", op: "retry", args: stepArgs{"p1", 0}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(at, "p1", 0) }},
-		{name: "undo", op: "undo", args: stepArgs{"p1", 0}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(at, "p1", 0) }},
-		{name: "pause", op: "pause", args: ver.ID(), call: func(k *kernel.Kernel) (any, error) { return nil, k.Pause(at, ver.ID()) }},
-		{name: "unpause", op: "unpause", args: ver.ID(), call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(at, ver.ID()) }},
-		{name: "stop", op: "stop", call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(at) }},
-		{name: "changes", op: "changes", out: &key.Changes{}, empty: nonEmpty, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
-		{name: "resume", op: "resume", call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(at) }},
-		{name: "status", op: "status", out: &[]kernel.Unsettled{}, empty: nonEmpty, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
-		{name: "linechanges", op: "linechanges", out: new(int), empty: func(v any) bool { return *v.(*int) > 0 }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
-		{name: "spendheld", op: "spendheld", out: &map[string]kernel.SpendHold{}, empty: nonEmpty, call: func(k *kernel.Kernel) (any, error) { return k.State().SpendHeld, nil }},
-		{name: "pools", op: "pools", out: &map[string]kernel.Pool{}, empty: nonEmpty, call: func(k *kernel.Kernel) (any, error) { return k.State().Pools, nil }},
-		{name: "enrollments", op: "enrollments", out: &enrolled{}, empty: func(v any) bool { return len(v.(*enrolled).Enrolled) > 0 }, call: func(k *kernel.Kernel) (any, error) {
-			es, un := k.State().Enrollments()
-			return enrolled{es, un}, nil
-		}},
-		{name: "plan", op: "plan", args: "p1", out: &planRead{}, empty: func(v any) bool { return v.(*planRead).Status != "" }, call: func(k *kernel.Kernel) (any, error) {
-			p := k.State().Plans["p1"]
-			r := planRead{Status: p.Status}
-			for _, st := range p.Steps {
-				r.Phases = append(r.Phases, st.Phase)
-			}
-			return r, nil
-		}},
-		{name: "granted", op: "granted", args: ver.Root(), out: &grantRead{}, empty: func(v any) bool { return v.(*grantRead).OK }, call: func(k *kernel.Kernel) (any, error) {
-			from, ok := k.State().Granted(ver.Root())
-			return grantRead{from, ok}, nil
-		}},
-		{name: "unenroll", op: "unenroll", args: phone, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unenroll(at, phone) }},
-		{name: "revoke", op: "revoke", args: ver.ID(), call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(at, ver.ID()) }},
-		{name: "cancel", op: "cancel", args: stepArgs{Plan: "p1"}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(at, "p1") }},
+		{name: "setline", op: "setline", sock: func(o Owner, _ Meter) (any, error) { return nil, o.SetLine(100) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(now(), 100) }},
+		{name: "reserve", op: "reserve", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Reserve("full", kernel.PoolFull) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", kernel.PoolFull) }},
+		{name: "meter", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, "m", "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), "m", "api", 37, "provider") }},
+		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitSpend(0, "m", 1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitSpend(now(), "m", 1000)) }},
+		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
+		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", 300, at+1000) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", 300, at+1000) }},
+		{name: "hold", op: "hold", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
+		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().SpendHeld, nil }},
+		{name: "extend", op: "extend", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Extend(ext, "m") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(now(), ext, "m") }},
+		{name: "pause", op: "pause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Pause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Pause(now(), ver.ID()) }},
+		{name: "unpause", op: "unpause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},
+		{name: "stop", op: "stop", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Stop() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(now()) }},
+		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
+		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now()) }},
+		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
+		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0) }},
+		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
+		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Pools, nil }},
+		{name: "enrollments", op: "enrollments", read: func(v any) bool { return len(v.(enrolled).Enrolled) > 0 },
+			sock: func(o Owner, _ Meter) (any, error) {
+				es, un, err := o.Enrollments()
+				return enrolled{es, un}, err
+			},
+			call: func(k *kernel.Kernel) (any, error) {
+				es, un := k.State().Enrollments()
+				return enrolled{es, un}, nil
+			}},
+		{name: "plan", op: "plan", read: func(v any) bool { return v.(planRead).Status != "" },
+			sock: func(o Owner, _ Meter) (any, error) {
+				status, phases, _, err := o.Plan("p1")
+				return planRead{status, phases}, err
+			},
+			call: func(k *kernel.Kernel) (any, error) { return plan(k, "p1"), nil }},
+		{name: "granted", op: "granted", read: func(v any) bool { return v.(grantRead).OK },
+			sock: func(o Owner, _ Meter) (any, error) {
+				from, ok, err := o.Granted(ver.Root())
+				return grantRead{from, ok}, err
+			},
+			call: func(k *kernel.Kernel) (any, error) {
+				from, ok := k.State().Granted(ver.Root())
+				return grantRead{from, ok}, nil
+			}},
+		{name: "undo", op: "undo", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Undo("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(now(), "p1", 0) }},
+		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unenroll(phone) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unenroll(now(), phone) }},
+		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
+		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
 	}
+	// Refused on both kernels by design: the admission past the cap and the
+	// pool at its reserve. Every other action succeeds.
+	refused := map[string]bool{"admitspend": true, "admitpool": true}
 	served := map[string]bool{}
 	for _, c := range cases {
-		if c.name == "status" { // an unsent step, from a tick with its clerk down
-			direct.tick(at)
-			sock.tick(at)
-		}
-		side := "owner"
-		if _, ok := MeterSide.ops[c.op]; ok {
-			side = "meter"
+		if c.name == "status" {
+			park()
 		}
 		served[c.op] = true
 		before := sock.entries()
 		var want any
 		var wantErr error
 		direct.h.With(func(k *kernel.Kernel) error { want, wantErr = c.call(k); return nil })
-		gotErr := conns[side].call(c.op, c.args, c.out)
-		if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
+		got, gotErr := c.sock(o, m)
+		if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) || (wantErr != nil) != refused[c.name] {
 			t.Fatalf("%s: the socket answers %v, the direct call %v", c.name, gotErr, wantErr)
 		}
-		if c.out != nil {
+		if c.read != nil {
 			wb, _ := json.Marshal(want)
-			gb, _ := json.Marshal(c.out)
-			if string(wb) != string(gb) || !c.empty(c.out) {
+			gb, _ := json.Marshal(got)
+			if string(wb) != string(gb) || want == nil || !c.read(want) {
 				t.Fatalf("%s: the socket reads %s, the direct read %s (want a read that is not empty)", c.name, gb, wb)
 			}
 		}
