@@ -32,23 +32,31 @@ func site(rawURL string) string {
 
 // secretWords mark a screen that may reveal or create a secret (VRB-1):
 // show an API key, reset a password, add a device, export, change account
-// recovery. Pairs are matched joined ("two factor" as "twofactor"). The
-// list errs wide: a false match costs one more tap, a miss would let a
+// recovery. Pairs are matched joined ("two factor" as "twofactor"). Words
+// a checkout also uses ("Security code", "Gift card PIN", "Remember this
+// device", a "?token=" URL) count only in a pair that names the secret.
+// The list errs wide: a false match costs one more tap, a miss would let a
 // task's tap cover a secret (#2689 item 3).
-var secretWords = wordSet(`password passwords passcode passkey passkeys passphrase pin recovery
+var secretWords = wordSet(`password passwords passcode passkey passkeys passphrase recovery
 	mfa 2fa 2sv twofactor twostep onetime otp totp authenticator authentication
-	secret secrets apikey apikeys token tokens credential credentials export backup
-	device devices security`)
+	secret secrets apikey apikeys credential credentials key keys ssh gpg oauth
+	securitysettings securityquestion securityquestions securitykey securitykeys
+	accesstoken accesstokens apitoken apitokens newtoken changepin newpin resetpin
+	adddevice newdevice yourdevices backupcode backupcodes exportdata exportaccount changeemail`)
 
-// secretText reports whether any of texts reads as a secret screen.
-func secretText(texts ...string) bool {
+// secretText is the first of texts' words, or joined word pairs, that
+// reads as a secret screen, "" if none.
+func secretText(texts ...string) string {
 	for _, t := range texts {
 		w := words(t)
 		for i := range w {
-			if secretWords[w[i]] || i+1 < len(w) && secretWords[w[i]+w[i+1]] {
-				return true
+			if secretWords[w[i]] {
+				return w[i]
+			}
+			if i+1 < len(w) && secretWords[w[i]+w[i+1]] {
+				return w[i] + " " + w[i+1]
 			}
 		}
 	}
-	return false
+	return ""
 }

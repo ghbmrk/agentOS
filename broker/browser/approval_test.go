@@ -117,6 +117,11 @@ func TestApprovedButtonIsSentOnce(t *testing.T) {
 	if s := r.step("buy"); s.Phase != kernel.PDone {
 		t.Fatalf("approved press: phase %s (%s)", s.Phase, s.Detail)
 	}
+	// An exact approval is not a task's: its result carries no STATUS line.
+	var res Result
+	if err := json.Unmarshal([]byte(r.step("buy").Detail), &res); err != nil || res.Covered != "" || res.Approval != nil {
+		t.Fatalf("exact submit result %+v (%v)", res, err)
+	}
 	r.run(t, 3, "again", k, submitStep(a, pressOrder))
 	if p := r.k.State().Plans["again"]; len(p.Steps) > 0 && p.Steps[0].Phase == kernel.PDone {
 		t.Fatal("the same submit ran twice")

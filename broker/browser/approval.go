@@ -106,8 +106,12 @@ func (g *Gate) approval(req Request, l link) Approval {
 		req.URL = g.untoken(req.URL)
 	}
 	origin, _ := originKey(g.page)
+	// A control that names no target, or only script, acts on the page's own
+	// site. Any other target is the site it names, and one with no http(s)
+	// site (a URL a browser reads differently from url.Parse) has none, so
+	// no task approval covers it (CLK-3).
 	reach := l.target
-	if site(reach) == "" {
+	if reach == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(reach)), "javascript:") {
 		reach = g.page
 	}
 	a := Approval{Origin: origin, Site: site(reach), Page: show(g.untoken(g.page), MaxURL), Verb: req.Verb, Role: show(shown.role, maxLabel),

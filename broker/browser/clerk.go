@@ -82,8 +82,9 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		// on the site the request reaches (CLK-3, D-147).
 		var tc *cover
 		if !approval(ver, now) {
-			a, ok := kernel.TaskApproved(v, c.Anchors, ver, c.g.siteOf([]byte(st.Args["msg"].Value)), now)
-			if !ok {
+			site := c.g.siteOf([]byte(st.Args["msg"].Value))
+			a, ok := kernel.TaskApproved(v, c.Anchors, ver, site, now)
+			if site == "" || !ok {
 				c.record(id, ran{})
 				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 			}
@@ -199,7 +200,7 @@ func approval(ver *key.Verified, now int64) bool {
 func coveredLine(a Approval, now int64) string {
 	label := a.Label
 	if label == "" {
-		label = a.Role
+		label = strings.TrimSpace(a.Role + " " + a.Verb + " " + a.Target)
 	}
 	return "Sent on " + a.Site + ": " + label + ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
 }

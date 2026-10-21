@@ -170,11 +170,26 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 		"other site":  {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com", a.Print} }, "another site"},
 		"no site":     {orderPage, pressBuy, func(a Approval) cover { return cover{"", "ap1:other"} }, "another site"},
 		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
+		"script link": {"- main [ref=e1]:\n  - link \"Place order\" [ref=e9]:\n    - /url: javascript:void(0)", pressBuy,
+			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, ""},
+		"cross-site link": {"- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test/confirm?step=2", pressBuy,
+			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, "another site"},
+		"unparsed target": {"- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test\\confirm?go=1", pressBuy,
+			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, "another site"},
+		"secret url": {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+		"secret target": {"- main [ref=e1]:\n  - link \"Continue\" [ref=e9]:\n    - /url: /confirm/recovery-codes?step=2", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+		"secret heading": {"- main [ref=e1]:\n  - heading \"Recovery codes\" [ref=e2]\n  - button \"Generate\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 		"secret name": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 		"secret field": {orderPage + "\n  - textbox \"Backup codes\" [ref=e4]", pressBuy,
 			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 	} {
-		h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", c.page), "click": shopReply("/done", doneShot)}, "", 0)
+		path := "/checkout"
+		if name == "secret url" {
+			path = "/settings/recovery"
+		}
+		h := newHarness(t, map[string]any{"snapshot": shopReply(path, c.page), "click": shopReply("/done", doneShot)}, "", 0)
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
 		a := approvalOf(t, h.do(t, c.line))
 		tc := c.tc(a)
@@ -189,5 +204,40 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 			res.Approval == nil || res.Approval.Print != a.Print {
 			t.Fatalf("%s: %+v", name, res)
 		}
+	}
+}
+
+// A page with no http(s) site, such as about:blank, has no site, so no task
+// approval covers a submit there, even one given over site "".
+func TestSitelessPageIsNeverCovered(t *testing.T) {
+	blank := map[string]any{"ok": true, "url": "about:blank", "snapshot": orderPage}
+	h := newHarness(t, map[string]any{"snapshot": blank}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	a := approvalOf(t, h.do(t, pressBuy))
+	tc := cover{"", "ap1:other"}
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, &tc); a.Site != "" || written || !strings.Contains(res.Detail, "another site") {
+		t.Fatalf("site %q: %+v", a.Site, res)
+	}
+	r := newClerkRig(t, newHarness(t, map[string]any{"snapshot": blank, "click": shopReply("/done", doneShot)}, "", 0))
+	if err := r.k.OpenTask(0, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	k := r.taskKey(t, "t1")
+	r.run(t, 1, "look", k, read(`{"v":0,"verb":"snapshot"}`))
+	r.run(t, 2, "ask", k, read(pressBuy))
+	a = r.stepApproval(t, "ask")
+	r.tapTask(t, 3, "t1", Approval{Site: "", Print: "ap1:other"})
+	r.run(t, 4, "buy", k, submitStep(a, pressBuy))
+	if s := r.step("buy"); s.Phase != kernel.PFailed || s.Detail != "unapproved" || len(forwarded(t, r.h, "click")) != 0 {
+		t.Fatalf("buy: phase %s (%s)", s.Phase, s.Detail)
+	}
+}
+
+// A covered navigate has no label: its STATUS line names the verb and the
+// target instead.
+func TestCoveredLineNamesAnUnlabelledSubmit(t *testing.T) {
+	got := coveredLine(Approval{Site: "example.test", Verb: "navigate", Target: "https://shop.example.test/transfer?to=synthAlice"}, 0)
+	if want := "Sent on example.test: navigate https://shop.example.test/transfer?to=synthAlice, 1970-01-01T00:00:00Z"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

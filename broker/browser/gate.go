@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -291,7 +292,7 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
 	}
 	if tc != nil {
-		if why := g.asksAgain(req, l, a, *tc); why != "" {
+		if why := g.asksAgain(l, a, *tc); why != "" {
 			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
 				Detail: why + "; it needs the owner's approval of this exact request; nothing was sent"}, false, false
 		}
@@ -307,37 +308,41 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 	return out, true, g.stopped
 }
 
-// asksAgain is why a task's approval tc does not cover req, which reaches
-// l and the gate would approve as a, or "" if it does (CLK-3 "What asks
+// asksAgain is why a task's approval tc does not cover a request that
+// reaches l and that the gate would approve as a, or "" if it does (CLK-3 "What asks
 // again"). The held request the owner approved is covered on its site.
 // Another task's approval never reaches here: the clerk reads only the
 // approval of the task its key serves (kernel.TaskApproved). A readable
 // value over a limit is the key's to refuse (clerk.Verify). The clerk
 // fills no credential or card and refuses any step claiming a flow label
 // (C4), so no fill or private entry can follow the approval yet.
-func (g *Gate) asksAgain(req Request, l link, a Approval, tc cover) string {
+func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
 	switch {
-	case a.Site != tc.site:
+	case a.Site == "" || a.Site != tc.site:
 		return "it is on another site than the task's approval"
 	case a.Print == tc.first:
 		return ""
-	case g.secretScreen(req, l):
-		return "it is on a screen that may reveal or create a secret (VRB-1)"
+	}
+	if w := g.secretScreen(l); w != "" {
+		return "it is on a screen that may reveal or create a secret (VRB-1: " + strconv.Quote(w) + ")"
 	}
 	return ""
 }
 
-// secretScreen reports whether req, reaching l, is on a screen that may
-// reveal or create a secret (VRB-1), read from what the gate itself saw: a
-// secret word in the page's URL, the control's name or target, or the name
-// of any field on the page ("Password", "Backup codes"). Pages have no
-// recipe that says otherwise, so a match asks again. A field's value is
-// not a sign: the gate counts every untyped value as a possible password
-// (G10), and a prefilled address would make every checkout one.
-func (g *Gate) secretScreen(req Request, l link) bool {
-	texts := []string{g.page, l.name, l.target, req.URL}
+// secretScreen is the secret word, "" if none, that puts a request
+// reaching l on a screen that may reveal or create a secret (VRB-1), read
+// from what the gate itself saw: the page's URL, the control's name and
+// target (a navigate's URL), and the names of the page's fields and
+// headings ("Password", "Recovery codes"). Other link and button names on
+// the page are not read, since a site shows its "Settings" or "Sign in"
+// link on every page. Pages have no recipe that says otherwise, so a match
+// asks again. A field's value is not a sign: the gate counts every untyped
+// value as a possible password (G10), and a prefilled address would make
+// every checkout one.
+func (g *Gate) secretScreen(l link) string {
+	texts := []string{g.untoken(g.page), l.name, l.target}
 	for _, r := range g.refs {
-		if fieldRoles[r.role] {
+		if fieldRoles[r.role] || r.role == "heading" {
 			texts = append(texts, r.name)
 		}
 	}
