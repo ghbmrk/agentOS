@@ -134,6 +134,12 @@ func TestUnreadablePriceAsksAgain(t *testing.T) {
 		!strings.Contains(res.Detail, "price") || len(forwarded(t, r.h, "click")) != 1 {
 		t.Fatalf("buy: %s %+v", r.step("buy").Phase, res)
 	}
+	// A new tap over the held request replaces the site's approval.
+	r.tapTask(t, 7, "t1", *res.Approval)
+	r.run(t, 8, "buy2", k, submitStep(a2, pressBuy))
+	if s := r.step("buy2"); s.Phase != kernel.PDone || len(forwarded(t, r.h, "click")) != 2 {
+		t.Fatalf("buy after a new tap: phase %s (%s)", s.Phase, s.Detail)
+	}
 }
 
 // The tap covers only the task it was given in: the same flow in another
@@ -146,6 +152,17 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 	r.tapTask(t, 3, "t1", a1)
 	if err := r.k.OpenTask(4, "t2"); err != nil {
 		t.Fatal(err)
+	}
+	// A tap for another site in the same task covers nothing here.
+	if err := r.k.OpenTask(4, "t3"); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := a1
+	elsewhere.Site = "example.com"
+	r.tapTask(t, 4, "t3", elsewhere)
+	r.run(t, 5, "elsewhere", r.taskKey(t, "t3"), submitStep(a1, pressCont))
+	if s := r.step("elsewhere"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
+		t.Fatalf("other site: phase %s (%s)", s.Phase, s.Detail)
 	}
 	r.run(t, 5, "other", r.taskKey(t, "t2"), submitStep(a1, pressCont))
 	if s := r.step("other"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {

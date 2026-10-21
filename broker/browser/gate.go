@@ -387,6 +387,18 @@ func (g *Gate) print(raw []byte) string {
 	return g.approval(req, l).Print
 }
 
+// siteOf is the site raw reaches now (Approval.Site), "" if the gate would
+// ask no approval for it: the site whose task approval the clerk reads.
+func (g *Gate) siteOf(raw []byte) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, l, _, need, refused := g.judge(raw)
+	if refused != nil || !need {
+		return ""
+	}
+	return g.approval(req, l).Site
+}
+
 // small bounds every field of res but the snapshot and the approval,
 // which their makers bound. logged applies it to every result, so a logged
 // result is bounded (MaxDetail).

@@ -79,10 +79,10 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
 	case key.Post:
 		// The owner approves this exact print, or the task the key serves
-		// on one site (CLK-3, D-147).
+		// on the site the request reaches (CLK-3, D-147).
 		var tc *cover
 		if !approval(ver, now) {
-			a, ok := kernel.TaskApproved(v, c.Anchors, ver, now)
+			a, ok := kernel.TaskApproved(v, c.Anchors, ver, c.g.siteOf([]byte(st.Args["msg"].Value)), now)
 			if !ok {
 				c.record(id, ran{})
 				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
