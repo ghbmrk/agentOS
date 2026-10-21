@@ -56,7 +56,7 @@ func (r *clerkRig) stepApproval(t *testing.T, id string) Approval {
 func (r *clerkRig) approve(t *testing.T, prints ...string) key.Key {
 	t.Helper()
 	k, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(prints...),
-		key.LimitUses(int64(len(prints))), key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))
+		key.LimitUses(int64(len(prints))), key.LimitExpires(MaxApproval/2)) // the rig's clock is the log's time, near 0
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestUncappedPrintKeyReleasesNothing(t *testing.T) {
 		"not print": {key.LimitVerbs(key.Post), key.LimitContent(a.Print, "plain"), key.LimitUses(1)},
 		"over cap":  {key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(2)},
 	} {
-		k, err := key.Narrow(r.root, r.phone, append(cav, key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))...)
+		k, err := key.Narrow(r.root, r.phone, append(cav, key.LimitExpires(MaxApproval/2))...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -588,7 +588,12 @@ func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
 		map[string]any{"ok": true, "url": "https://shop.example.test/cart"}}}, 0)
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
-	k := r.approve(t, a.Print)
+	// The approval lives its longest, so it outlasts the ten checks on the
+	// rig's clock.
+	k, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1), key.LimitExpires(MaxApproval))
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.run(t, 2, "buy", k, submitStep(a, pressOrder))
 	for i := int64(1); i <= kernel.MaxChecks+1; i++ {
 		if err := r.k.Tick(2 + i*kernel.ProbeEvery); err != nil {
@@ -691,7 +696,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	}
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
-	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, time.Now().UnixMilli(), 1<<40)
+	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, 3-kernel.GrantHold, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +707,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 		t.Fatal(err)
 	}
 	k2, err := key.Narrow(root2, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
-		key.LimitExpires(time.Now().UnixMilli()+MaxApproval/2))
+		key.LimitExpires(MaxApproval/2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +722,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, err := key.Chain(twice, r.k.State().Passkeys()); err != nil || approval(v, time.Now().UnixMilli()) {
+	if v, err := key.Chain(twice, r.k.State().Passkeys()); err != nil || approval(v, 0) {
 		t.Fatal("a key listing one print twice is an approval")
 	}
 }
@@ -729,7 +734,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 // The same caveats on the phone's own link send once (OWN-9, #2675).
 func TestOnlyThePasskeyApproves(t *testing.T) {
 	hpub, hpriv := seedKey(2)
-	soon := key.LimitExpires(time.Now().UnixMilli() + MaxApproval/2)
+	soon := key.LimitExpires(MaxApproval / 2)
 	for _, id := range []string{"minted", "bare", "uncapped", "standing", "long", "tap", "late", "below"} {
 		r := newCart(t, nil, 0)
 		r.run(t, 1, "ask", r.root, read(pressOrder))
@@ -758,7 +763,7 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 			}
 		case "long":
 			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1),
-				key.LimitExpires(time.Now().UnixMilli()+16*60*1000)); err != nil {
+				key.LimitExpires(16*60*1000)); err != nil {
 				t.Fatal(err)
 			}
 		case "tap":
@@ -771,7 +776,7 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 		case "late":
 			// A link expiring just inside MaxApproval is an approval.
 			if k, err = key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
-				key.LimitExpires(time.Now().UnixMilli()+MaxApproval-60_000)); err != nil {
+				key.LimitExpires(MaxApproval-60_000)); err != nil {
 				t.Fatal(err)
 			}
 		}

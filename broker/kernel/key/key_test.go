@@ -80,12 +80,12 @@ func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 
 func TestWrongOwnerAndBadSig(t *testing.T) {
 	o, h, k := root(t)
-	if err := CheckChain(k, []ed25519.PublicKey{gen(9).pub}); !errors.Is(err, ErrWrongOwner) {
+	if _, err := Chain(k, []ed25519.PublicKey{gen(9).pub}); !errors.Is(err, ErrWrongOwner) {
 		t.Fatal(err)
 	}
 	bad := k
 	bad.Root.Clerk = "bank"
-	if err := CheckChain(bad, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
+	if _, err := Chain(bad, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered root: %v", err)
 	}
 	d, err := Derive(k, h.priv, gen(3).pub, LimitVerbs(Trash))
@@ -93,7 +93,7 @@ func TestWrongOwnerAndBadSig(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Links[0].Caveats[0] = LimitVerbs(Trash, Organize)
-	if err := CheckChain(d, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
+	if _, err := Chain(d, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatalf("tampered link: %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestDomainsDoNotCross(t *testing.T) {
 	}
 	sig := ed25519.Sign(o.priv, append([]byte(DomainLink), rootBody(k.Root)...))
 	k.Root.Sig = sig
-	if err := CheckChain(k, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
+	if _, err := Chain(k, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrBadSig) {
 		t.Fatal(err)
 	}
 }
@@ -129,14 +129,14 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 	}
 	// A hostile holder signs a loosening link directly; Verify rejects it.
 	e := Extend(d, h2.priv, Link{Caveats: []Caveat{LimitVerbs(Trash, Organize, Unsubscribe)}, Holder: gen(4).pub})
-	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
+	if _, err := Chain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
 		t.Fatalf("hostile widen: %v", err)
 	}
 	// Dropping a limit by omission is not a loosening, but a later larger cap is.
 	c1, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(100), LimitExpires(1000), LimitHold(10, 20))
 	for _, bad := range []Caveat{LimitSpendDay(101), LimitExpires(1001), LimitHold(5, 20), LimitHold(10, 19)} {
 		e := Extend(c1, h2.priv, Link{Caveats: []Caveat{bad}, Holder: gen(4).pub})
-		if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
+		if _, err := Chain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrLoosens) {
 			t.Fatalf("%v: %v", bad.Kind, err)
 		}
 	}
@@ -145,11 +145,11 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 func TestUnknownKindAndNonCanonicalRejected(t *testing.T) {
 	o, h, k := root(t)
 	e := Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: "anything"}}, Holder: gen(4).pub})
-	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrUnknownKind) {
+	if _, err := Chain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrUnknownKind) {
 		t.Fatal(err)
 	}
 	e = Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: KVerbs, Set: []string{"trash", "organize"}}}, Holder: gen(4).pub})
-	if err := CheckChain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrMalformed) {
+	if _, err := Chain(e, []ed25519.PublicKey{o.pub}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("unsorted: %v", err)
 	}
 }
@@ -459,12 +459,12 @@ func TestPasskeysAreTheAnchorsAndWhatTheyEnroll(t *testing.T) {
 		t.Fatal("a revoked anchor and what it enrolled stay out")
 	}
 	r := Issue(phone.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "b"})
-	if err := CheckChain(r, set); err != nil {
+	if _, err := Chain(r, set); err != nil {
 		t.Fatalf("a root the enrolled phone issued: %v", err)
 	}
 	for _, by := range []kp{old, stranger} {
 		s := Issue(by.priv, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "s"})
-		if err := CheckChain(s, set); !errors.Is(err, ErrWrongOwner) {
+		if _, err := Chain(s, set); !errors.Is(err, ErrWrongOwner) {
 			t.Fatalf("a root no passkey in the set issued: %v", err)
 		}
 	}

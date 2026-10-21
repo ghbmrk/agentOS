@@ -507,13 +507,6 @@ func Chain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 	return verifyChain(k, owners)
 }
 
-// CheckChain checks a key as data, without a use: for an owner granting a
-// root or a first link into the log. It confers nothing.
-func CheckChain(k Key, owners []ed25519.PublicKey) error {
-	_, err := Chain(k, owners)
-	return err
-}
-
 // verifyChain verifies k. With owners nil it skips the signature checks, for
 // Derive, which has already been handed a key the caller holds.
 func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {

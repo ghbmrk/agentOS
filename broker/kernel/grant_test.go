@@ -377,3 +377,25 @@ func TestUnenrollCancelsAPhonesLinkUnderAnAnchorsRoot(t *testing.T) {
 		t.Fatalf("a link under a revoked root listed as pending: %d", len(got))
 	}
 }
+
+// A clerk key lives at most ClerkLife once live: a tap cannot sign one that
+// runs for years (D-146, #2670).
+func TestAClerkKeyLivesAtMostClerkLifeOnceLive(t *testing.T) {
+	r := newRig(t)
+	at := 10 * hour
+	life := func(exp int64, c ...key.Caveat) error {
+		k, err := key.Derive(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub,
+			append([]key.Caveat{key.LimitExpires(exp), key.LimitSpendDay(1 << 40)}, c...)...)
+		must(t, err)
+		return r.issue(at, k)
+	}
+	if err := life(at + kernel.GrantHold + key.ClerkLife + 1); !errors.Is(err, kernel.ErrLife) {
+		t.Fatalf("a key past ClerkLife once live: %v", err)
+	}
+	if err := life(at+kernel.GrantHold+key.ClerkLife+1, key.LimitExpires(at+key.ClerkLife)); err != nil {
+		t.Fatalf("an earlier second expiry bounds it: %v", err)
+	}
+	if err := life(at + kernel.GrantHold + key.ClerkLife); err != nil {
+		t.Fatalf("a key of exactly ClerkLife once live: %v", err)
+	}
+}

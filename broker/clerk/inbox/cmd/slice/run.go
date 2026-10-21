@@ -155,18 +155,58 @@ func Run(in Input) (Outcome, error) {
 	tick := func(at int64) error { clock = at; return k.Tick(at) }
 	// The owner's passkey granted the root and the home clerk's key to it at
 	// setup, a hold before the run, and it and the second hardware key co-signed the
-	// batch, since it is new power (D-146). The clerk key outlives the run and
-	// spends nothing.
+	// batch, since it is new power (D-146). The clerk key spends nothing and
+	// lives 30 days; a tap renews it at the same limits before it lapses, so
+	// it covers a history longer than its life.
 	root := key.Issue(ownerPriv, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
-	ck, err := key.ClerkKey(root, ownerPriv, holderPub, today, 0)
+	setup := issued - kernel.GrantHold
+	ck, err := key.ClerkKey(root, ownerPriv, holderPub, setup, 0)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := k.Issue(issued-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
+	if err := k.Issue(setup, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
 		return Outcome{}, err
 	}
 	if err := log.Anchor(); err != nil {
 		return Outcome{}, err
+	}
+	var bulk, unsub key.Key
+	derive := func() (err error) {
+		// The hold and the daily cap are caveats on the keys handed to the
+		// planner, not properties of the planner: it cannot lift them
+		// (inbox.PlannerKeys).
+		bulk, unsub, err = inbox.PlannerKeys(ck, holderPriv, plannerPub, baseHoldMS, noveltyMS)
+		return err
+	}
+	if err := derive(); err != nil {
+		return Outcome{}, err
+	}
+	lapse := setup + key.ClerkLife
+	// renewals are the log entries of those renewals. Each rides a tap the
+	// owner already makes (D-146: every passkey tap renews), so none is a tap
+	// the run asked for.
+	renewals := map[uint64]bool{}
+	renewThrough := func(t int64) error {
+		for lapse <= t {
+			at := max(clock, lapse-dayMS)
+			if ck, err = key.ClerkKey(root, ownerPriv, holderPub, at, 0); err != nil {
+				return err
+			}
+			if err := k.Issue(at, nil, ck); err != nil {
+				return err
+			}
+			// Only a renewal the kernel made live at once is left out of the
+			// taps: one it held is new power the owner tapped for.
+			if g, ok := k.State().Grants[ck.Tip()]; !ok || g.From != at {
+				return fmt.Errorf("slice: the renewal at %d was not live at once", at)
+			}
+			renewals[k.State().Seq] = true
+			lapse = at + key.ClerkLife
+			if err := derive(); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	var approved *KeyView
 	if !standing {
@@ -176,13 +216,6 @@ func Run(in Input) (Outcome, error) {
 		}
 		approved = &v
 	}
-	// The hold and the daily cap are caveats on the keys handed to the planner,
-	// not properties of the planner: it cannot lift them (inbox.PlannerKeys).
-	bulk, unsub, err := inbox.PlannerKeys(ck, holderPriv, plannerPub, baseHoldMS, noveltyMS)
-	if err != nil {
-		return Outcome{}, err
-	}
-
 	// Earlier unsubscribes: replayed as done, so their senders are no longer novel.
 	prior := append([]inbox.Delivery(nil), in.Prior...)
 	sort.Slice(prior, func(i, j int) bool { return prior[i].Date < prior[j].Date })
@@ -198,6 +231,9 @@ func Run(in Input) (Outcome, error) {
 		seeded[h] = true
 		seedPlans[id] = true
 		acct.Preload(kernel.Idem(id, 0))
+		if err := renewThrough(t + noveltyMS); err != nil {
+			return Outcome{}, err
+		}
 		step := kernel.PlanStep{Verb: key.Unsubscribe, Clerk: inbox.Name, Args: map[string]string{"to": h}}
 		if err := k.Submit(t, kernel.SignPlan(kernel.Plan{ID: id, Key: unsub, Steps: []kernel.PlanStep{step}}, plannerPriv)); err != nil {
 			return Outcome{}, err
@@ -214,6 +250,9 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	t0 := now0.UnixMilli()
+	if err := renewThrough(t0 + noveltyMS); err != nil {
+		return Outcome{}, err
+	}
 	listing := acct.Listing()
 	plans, left := inbox.Plans(listing, bulk, unsub, plannerPriv)
 	for _, p := range plans {
@@ -259,7 +298,7 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	out := Outcome{Requests: acct.Posts(), Effects: acct.Effects(), Refusals: append(acct.Refusals(), kernelRefusals...),
-		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, plannerPriv, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing),
+		StatusLines: []StatusLine{}, Holds: holds(k, acct, unsub, plannerPriv, ownerPub, seedPlans), OwnerTaps: ownerTaps(k, standing, renewals),
 		KeysAtApproval: approved, KeysAtEnd: end, OutsideMailClerk: outside(listing)}
 	for _, r := range out.Refusals {
 		if r.Reason == statusCause {
@@ -314,11 +353,12 @@ func keyView(k key.Key, holder ed25519.PrivateKey, owner ed25519.PublicKey, acco
 }
 
 // ownerTaps lists the owner approvals the log holds: every entry that widens
-// what may happen. A standing key was approved before this run and is not a tap.
-func ownerTaps(k *kernel.Kernel, standing bool) []string {
+// what may happen, less same-limit renewals. A standing key was approved
+// before this run and is not a tap.
+func ownerTaps(k *kernel.Kernel, standing bool, renewals map[uint64]bool) []string {
 	taps := []string{}
 	for _, e := range k.Log().Entries() {
-		if kernel.Widening(e.Type) {
+		if kernel.Widening(e.Type) && !renewals[e.Seq] {
 			taps = append(taps, "approve-key")
 		}
 	}

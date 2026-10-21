@@ -460,3 +460,57 @@ func TestPoolStateSurvivesReplay(t *testing.T) {
 		t.Fatal("replayed pool lost its reading")
 	}
 }
+
+// A lowered reserve anchors at once: with the anchor down it is refused, no
+// spend is admitted on the broken log, and after a restart the reserve is
+// back where it was (KRN-5, KRN-7, #2613 items 8, 9).
+func TestAnUnanchoredReserveDropBreaksTheLogAndAdmitsNoSpend(t *testing.T) {
+	r := newRig(t)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
+	must(t, r.k.Reserve(1, "p", 300))
+	must(t, r.k.Log().Anchor())
+	r.anchor.down = true
+	if err := r.k.Reserve(2, "p", 100); err == nil {
+		t.Fatal("a lowered reserve whose anchor failed must be refused")
+	}
+	if rf := r.k.AdmitSpend(3, "t1", 1); rf == nil || rf.Code != kernel.CBroken {
+		t.Fatalf("a call admitted on a broken log: %v", rf)
+	}
+	r.anchor.down = false
+	r.boot(4)
+	if got := r.k.State().Pools["p"].Reserve; got != 300 {
+		t.Fatalf("reserve after restart %d, want 300", got)
+	}
+	if rf := r.k.AdmitSpend(5, "t1", 1); rf != nil {
+		t.Fatalf("a reopened log admits spend: %v", rf)
+	}
+}
+
+// An extended plan stops spending once its envelope is revoked, and an
+// extension of a plan whose cited key is paused is refused at once (KEY-6,
+// #2613 items 9, 12).
+func TestARevokedEnvelopeFundsNothingAndAPausedKeysPlanIsNotExtended(t *testing.T) {
+	r := newRig(t)
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	modelPlan(r, "t1", k)
+	modelPlan(r, "t2", k)
+	env := envelope(r, 500, 800)
+	exhaust(r, "t1", 10)
+	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(100)), "t1"))
+	must(t, r.k.Revoke(4, key.Key{Root: env.Root}.Tip()))
+	if rf := r.k.AdmitSpend(5, "t1", 1); rf == nil || rf.Code != key.RRevoked {
+		t.Fatalf("a revoked envelope still funds the plan: %v", rf)
+	}
+	r = newRig(t)
+	k = modelKey(r, "m1", key.LimitSpendTask(10))
+	modelPlan(r, "t1", k)
+	env = envelope(r, 500, 800)
+	exhaust(r, "t1", 10)
+	must(t, r.k.Pause(3, k.Tip()))
+	if err := r.k.Extend(4, extension(r, env, key.LimitSpendTask(100)), "t1"); err == nil {
+		t.Fatal("a plan whose cited key is paused was extended")
+	}
+	if _, ok := r.k.State().Extended["t1"]; ok {
+		t.Fatal("the refused extension was logged")
+	}
+}
