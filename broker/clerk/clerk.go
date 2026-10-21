@@ -52,8 +52,17 @@ func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r k
 
 // Verify is Check that also returns the plan key's verified chain when the
 // request passes, for a clerk that asks more of the key, such as an owner's
-// approval (Verified.ByOwner).
+// approval (Verified.ByOwner). A refused request returns no chain, whichever
+// check refused it: this is the one place that holds.
 func Verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
+	ver, rf := verify(anchors, name, facts, now, r, v)
+	if rf != nil {
+		return nil, rf
+	}
+	return ver, nil
+}
+
+func verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
 	st := r.Step()
 	if st.Clerk != name {
 		return nil, &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
@@ -75,25 +84,25 @@ func Verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r 
 		return nil, &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
 	}
 	if rf := kernel.Live(v, ver, now); rf != nil {
-		return nil, rf
+		return ver, rf
 	}
 	if rf := kernel.OneOff(v, owners, anchors, r.Plan, now); rf != nil {
-		return nil, rf
+		return ver, rf
 	}
 	d, ok := v.Dispatched(r)
 	if !ok {
-		return nil, &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
+		return ver, &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
 	}
 	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
 	if rf := ver.Authorize(st, ctx); rf != nil {
-		return nil, rf
+		return ver, rf
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
 		if !d.Held {
-			return nil, &key.Refusal{Code: RHold, Detail: "step was not held"}
+			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
 		if now < d.HeldAt+ver.Limits.Window(d.Novel) {
-			return nil, &key.Refusal{Code: RHold, Detail: "window not over"}
+			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}
 	return ver, nil

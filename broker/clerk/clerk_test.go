@@ -348,7 +348,11 @@ func TestClerkVerifyReturnsTheChainItChecked(t *testing.T) {
 			t.Fatalf("%s: %v, by owner %v", c.id, rf, ver != nil && ver.ByOwner)
 		}
 	}
+	// Refused before the key is checked, and after it verified.
 	if ver, rf := clerk.Verify(anchors, "web", f.mail.Facts, f.now, f.req, f.view()); rf == nil || ver != nil {
-		t.Fatal("a refused request returns no chain")
+		t.Fatal("a step for another clerk returns no chain")
+	}
+	if ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("v3", approved, stepOf(key.Send)), f.view()); rf == nil || ver != nil {
+		t.Fatal("a verb the key lacks returns no chain")
 	}
 }
