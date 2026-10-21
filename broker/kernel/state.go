@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -382,6 +383,17 @@ func (s *State) Status() []Unsettled {
 // retryable: only a parked step of a live plan. The owner's cancel stands,
 // and a step still being reconciled may yet prove done.
 func retryable(p *PlanState, st *StepState) bool { return st.Phase == PParked && p.Status == SActive }
+
+// Dispatched reports whether the log holds this exact request: the signed plan
+// as the log carries it, in flight, with the attempt and the entries the
+// kernel recorded. A clerk that runs only such a request cannot be driven by a
+// caller's own request or view. Now is not recorded and is not checked.
+func (s *State) Dispatched(r Request) bool {
+	p, st := s.step(stepRef{r.Plan.ID, r.Index})
+	return st != nil && st.Phase == PInflight && r.Attempt > 0 && st.Attempt == r.Attempt &&
+		r.Idem == Idem(r.Plan.ID, r.Index) && r.DispatchSeq == st.DispatchSeq && r.HeldSeq == st.HeldSeq &&
+		reflect.DeepEqual(r.Plan, p.Plan)
+}
 
 func body[T any](e Entry) (T, error) {
 	var b T
