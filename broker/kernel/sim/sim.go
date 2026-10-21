@@ -48,6 +48,7 @@ type Result struct {
 	AnchorFailed  int // anchor writes that failed
 	WidenUnproven int // widenings whose anchor failed, left live until the log is reopened
 	UnheldRefused int // plans under a key their signer does not hold, rejected
+	BigRefused    int // big grants refused for a missing second passkey
 	HeldByClerk   int // irreversible steps the clerk held back on its own clock
 }
 
@@ -244,6 +245,7 @@ type sim struct {
 	w      *world
 	k      *kernel.Kernel
 	owner  keyPair // the passkey: holds every root
+	spare  keyPair // the second hardware key: co-signs big grants
 	holder keyPair // the home clerk: holds the passkey's clerk key of each root
 	planr  keyPair // holds only the keys derived to it
 	head   keyPair
@@ -260,6 +262,7 @@ type sim struct {
 	// window, or a few hours ahead when nothing is held.
 	hostile                          bool
 	clockBack, widenUnproven, unheld int
+	bigRefused, submits              int
 }
 
 // kt is the kernel's clock.
@@ -411,7 +414,31 @@ func (s *sim) anyKey() key.Key {
 	if len(s.pool) == 0 {
 		return key.Key{}
 	}
+	if live := s.live(); len(live) > 0 && s.pick(4) != 0 {
+		return live[s.pick(len(live))] // the home clerk mostly uses a key that works
+	}
 	return s.pool[s.pick(len(s.pool))]
+}
+
+// live is the pool's keys the kernel would admit now: granted past their
+// hold, and none of their chain revoked.
+func (s *sim) live() []key.Key {
+	st := s.k.State()
+	var out []key.Key
+	for _, k := range s.pool {
+		v, err := key.Chain(k, st.Passkeys())
+		if err != nil || kernel.Live(st, v, s.kt()) != nil {
+			continue
+		}
+		ok := true
+		for _, id := range v.IDs {
+			ok = ok && !st.Changes.Revoked[id]
+		}
+		if ok {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func (s *sim) step() kernel.PlanStep {
@@ -431,7 +458,8 @@ func (s *sim) step() kernel.PlanStep {
 }
 
 func (s *sim) submit() error {
-	id := fmt.Sprintf("p%d", len(s.plans))
+	s.submits++ // a fresh id each time, even after a submit the log kept but a crash cut short
+	id := fmt.Sprintf("p%d", s.submits)
 	if len(s.plans) > 0 && s.pick(12) == 0 {
 		id = s.plans[s.pick(len(s.plans))] // a replayed plan id
 	}
@@ -473,7 +501,7 @@ func (s *sim) op() error {
 		}
 		s.logf("tick")
 		return s.k.Tick(s.kt())
-	case c == 9 && len(s.ids) > 0:
+	case c == 9 && len(s.ids) > 0 && s.pick(2) == 0:
 		id := s.ids[s.pick(len(s.ids))]
 		s.logf("revoke")
 		return s.k.Revoke(s.kt(), id)
@@ -532,8 +560,8 @@ func (s *sim) op() error {
 		i := s.pick(len(s.roots))
 		k := s.clerkKey(s.owner.priv, s.roots[i])
 		s.logf("renew clerk key of root %d", i)
-		if err := s.widened(s.k.Issue(s.kt(), k)); err != nil {
-			return err
+		if err := s.grant(k); err != nil {
+			return s.refusedBig(err)
 		}
 		s.pool = append(s.pool, k)
 		s.ids = append(s.ids, k.Tip())
@@ -541,12 +569,57 @@ func (s *sim) op() error {
 		r := s.newRoot()
 		k := s.clerkKey(s.owner.priv, r)
 		s.logf("grant root")
-		if err := s.widened(s.k.Issue(s.kt(), r, k)); err != nil {
-			return err
+		if err := s.grant(r, k); err != nil {
+			return s.refusedBig(err)
 		}
 		s.remember(r, k)
 	}
 	return nil
+}
+
+// approve is each passkey's co-signature over the batch keys.
+func approve(keys []key.Key, by ...keyPair) []key.Cosign {
+	var cos []key.Cosign
+	for _, p := range by {
+		cos = append(cos, key.Approve(p.priv, kernel.BatchHash(keys...)))
+	}
+	return cos
+}
+
+// grant issues a batch the owner's two hardware keys co-sign most of the
+// time, and otherwise the owner's alone, the owner's and the home clerk's,
+// which counts for nothing, or none: a big batch is then refused whole
+// (D-146).
+func (s *sim) grant(keys ...key.Key) error {
+	var cos []key.Cosign
+	switch s.pick(8) {
+	case 0:
+	case 1:
+		cos = approve(keys, s.owner, s.holder)
+	case 2:
+		cos = approve(keys, s.owner)
+	default:
+		cos = approve(keys, s.owner, s.spare)
+	}
+	err := s.widened(s.k.Issue(s.kt(), cos, keys...))
+	if errors.Is(err, kernel.ErrNeedsCosign) {
+		for _, c := range cos {
+			if bytes.Equal(c.By, s.spare.pub) {
+				s.w.bad = append(s.w.bad, "a batch the second hardware key co-signed was refused")
+			}
+		}
+	}
+	return err
+}
+
+// refusedBig counts a big batch refused for its missing second passkey; any
+// other error stands.
+func (s *sim) refusedBig(err error) error {
+	if errors.Is(err, kernel.ErrNeedsCosign) {
+		s.bigRefused++
+		return nil
+	}
+	return err
 }
 
 // pastHolds is a jump that puts the kernel's clock just past every held
@@ -625,7 +698,8 @@ func Run(c Config) (*Result, error) {
 	s.disk = &Disk{rng: rng}
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
-	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
+	s.spare = gen(rng)
+	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub, s.spare.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -642,10 +716,15 @@ func Run(c Config) (*Result, error) {
 	for i := 0; i < 4; i++ { // set up a day ago, so past the hold
 		r := s.newRoot()
 		k := s.clerkKey(s.owner.priv, r)
-		if err := s.k.Issue(-kernel.GrantHold, r, k); err != nil {
+		if err := s.k.Issue(-kernel.GrantHold, approve([]key.Key{r, k}, s.owner, s.spare), r, k); err != nil {
 			return nil, err
 		}
 		s.remember(r, k)
+		// The home clerk also narrows its key to hold irreversible steps,
+		// so held steps meet the hostile clock in every run.
+		if hk, err := key.Derive(k, s.holder.priv, s.holder.pub, key.LimitHold(hour/6, hour/2)); err == nil {
+			s.pool = append(s.pool, hk)
+		}
 	}
 	fail := func(err error) (*Result, error) {
 		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))
@@ -676,7 +755,7 @@ func Run(c Config) (*Result, error) {
 	}
 	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
-		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld,
+		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld, BigRefused: s.bigRefused,
 		HeldByClerk: s.w.held}, nil
 }
 

@@ -104,7 +104,8 @@ func (f *exitFix) reboot(t *testing.T, x kernel.Clerk, now int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.k, err = kernel.Boot(l, []ed25519.PublicKey{f.opub}, map[string]kernel.Clerk{"web": x}, now); err != nil {
+	bpub, _ := backup()
+	if f.k, err = kernel.Boot(l, []ed25519.PublicKey{f.opub, bpub}, map[string]kernel.Clerk{"web": x}, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -178,7 +179,7 @@ func setupExitOps(t *testing.T, h func(w http.ResponseWriter, r *http.Request), 
 	if f.root, err = key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post, key.Fetch}, Serial: "r1"}), opriv, hpub, 0, 1<<40); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.k.Issue(-kernel.GrantHold, key.Key{Root: f.root.Root}, f.root); err != nil {
+	if err := f.k.Issue(-kernel.GrantHold, cosigned(key.Key{Root: f.root.Root}, f.root), key.Key{Root: f.root.Root}, f.root); err != nil {
 		t.Fatal(err)
 	}
 	return f

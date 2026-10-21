@@ -8,7 +8,9 @@ import (
 
 // World is what VRB-2 reads besides the message: the DKIM key records, the
 // provider table, earlier deliveries, the owner's contacts, and the owner's
-// last opens of each sender's mail. JSON names follow the eval's world.json.
+// last opens of each sender's mail; and what the alert guard reads (isAlert):
+// the provider's authserv-id and the owner's alert senders. JSON names follow
+// the eval's world.json.
 type World struct {
 	DKIMKeys      map[string]string `json:"dkim_keys"`
 	ProviderTable []string          `json:"provider_table"`
@@ -17,6 +19,8 @@ type World struct {
 	KnownSenders  []string          `json:"known_senders"`
 	Today         string            `json:"today"`
 	LastOpened    map[string]string `json:"last_opened"`
+	AuthServ      string            `json:"authserv"`
+	AlertSenders  []string          `json:"alert_senders"`
 }
 
 // unopenedDays is how long a sender's mail must have gone unopened, and how old
