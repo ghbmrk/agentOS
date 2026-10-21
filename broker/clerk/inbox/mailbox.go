@@ -124,6 +124,35 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 	return out, nil
 }
 
+// Opened is World.LastOpened for the account (#2618): every sender with a
+// read (\Seen) mail in any folder, keyed by lower-cased address, as opened
+// today. IMAP keeps no time a mail was opened, so a seen mail is taken as
+// opened today whenever it was delivered, and such a sender is never
+// unsubscribed on a guess (fail closed). A sender whose mails the owner read
+// and then deleted for good leaves no seen mail and reads as never opened;
+// the box's own record of each mail turning \Seen replaces this guess
+// (ASSUMPTIONS.md MIG-4-mail-reader-5). Any folder that cannot be read fails
+// the whole answer, so no partial list passes for a full one.
+func (l *Live) Opened(ctx context.Context, today string) (map[string]string, error) {
+	fs, err := l.st.Folders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, f := range fs {
+		hs, err := l.st.SeenFrom(ctx, f.Name)
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range hs {
+			if a := FromAddress(h); a != "" {
+				out[a] = today
+			}
+		}
+	}
+	return out, nil
+}
+
 // newest is the n highest UIDs, in ascending order.
 func newest(uids []uint32, n int) []uint32 {
 	s := append([]uint32(nil), uids...)

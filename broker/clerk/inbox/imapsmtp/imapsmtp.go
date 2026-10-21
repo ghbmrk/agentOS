@@ -256,6 +256,11 @@ func (b *budgetConn) Read(p []byte) (int, error) {
 
 // sessionN is session for a call that fetches up to n messages.
 func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) error) error {
+	return s.sessionB(ctx, s.replyBudget(n), f)
+}
+
+// sessionB is session with a reply budget of budget bytes.
+func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Client) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(ctx, s.cfg.IMAP, s.cfg.IMAPSec)
@@ -276,7 +281,7 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
-	c, err := client.New(&budgetConn{conn, s.replyBudget(n)})
+	c, err := client.New(&budgetConn{conn, budget})
 	if err != nil {
 		return err
 	}
@@ -428,6 +433,81 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 			Flags: append([]string(nil), m.Flags...), Raw: raw})
 	}
 	return out, <-done
+}
+
+// fromMax bounds the From header SeenFrom reads of each message, and
+// seenBatch the UIDs one of its FETCH commands names.
+const (
+	fromMax   = 1 << 10
+	seenBatch = 1000
+)
+
+// SeenFrom returns the From header of every message in folder that carries
+// \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM)] so nothing is marked read.
+// The UIDs are searched in one session and fetched in a second under the
+// same UID validity (ErrValidity otherwise), whose reply budget is sized to
+// what the search found: fromMax and fetchFrame for each.
+func (s *Store) SeenFrom(ctx context.Context, folder string) ([][]byte, error) {
+	var validity uint32
+	var uids []uint32
+	err := s.session(ctx, func(c *client.Client) error {
+		st, err := c.Select(folder, true)
+		if err != nil {
+			return err
+		}
+		validity = st.UidValidity
+		if st.Messages == 0 {
+			return nil
+		}
+		crit := imap.NewSearchCriteria()
+		crit.WithFlags = []string{imap.SeenFlag}
+		uids, err = c.UidSearch(crit)
+		return err
+	})
+	if err != nil || len(uids) == 0 {
+		return nil, err
+	}
+	var out [][]byte
+	budget := s.replyBase + int64(len(uids))*(fromMax+fetchFrame)
+	err = s.sessionB(ctx, budget, func(c *client.Client) error {
+		if err := selectAt(c, folder, true, validity); err != nil {
+			return err
+		}
+		sec := &imap.BodySectionName{Peek: true, Partial: []int{0, fromMax},
+			BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From"}}}
+		items := []imap.FetchItem{imap.FetchUid, sec.FetchItem()}
+		want := make(map[uint32]bool, len(uids))
+		for _, u := range uids {
+			want[u] = true
+		}
+		for i := 0; i < len(uids); i += seenBatch {
+			set := new(imap.SeqSet)
+			set.AddNum(uids[i:min(i+seenBatch, len(uids))]...)
+			ch := make(chan *imap.Message, 16)
+			done := make(chan error, 1)
+			go func() { done <- c.UidFetch(set, items, ch) }()
+			// As in fetch: one header per requested UID, so a server that
+			// repeats or invents messages cannot grow out.
+			for m := range ch {
+				if !want[m.Uid] || len(m.Body) == 0 {
+					continue
+				}
+				delete(want, m.Uid)
+				for _, l := range m.Body {
+					if l != nil {
+						h, _ := io.ReadAll(l)
+						out = append(out, h)
+						break
+					}
+				}
+			}
+			if err := <-done; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // Find returns the messages in folder whose Message-ID header holds id and
