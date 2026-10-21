@@ -15,7 +15,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
    - the atomic Secrets writer and the old-format refusal (`OpenSecrets`);
    - the software `AESSealer` under a test key;
    - tests that run the clerk and a fake provider as separate processes.
-2. The mail clerk's process with its sealed static slot (#2655), and `Reconnect` with an owner-signed proof (#2643 b, which needs KRN-ownerlink after #2674).
+2. The mail clerk's process with its sealed static slot (#2655): `OpenMail`, `SetMail` and `RemoveMail` in `broker/clerk/run`, with `clerk.Secrets.Login` and `Remove` in `broker/clerk/secrets.go` (the kernel lane waived ownership of these two methods) and an unbound `inbox.Account` judging the kernel's view (#2685, mail lane). `Reconnect` with an owner-signed proof (#2643 b) follows after KRN-ownerlink.
 3. The owner seam served on the kernel's socket for sub B's callers, then `clerk/model` wired in place of `broker/meter` (#2572 Step C).
 4. After STO-2: the production Sealer, the boot unlock, the `cmd/` mains with `procguard.Isolate`, and the unit files under `image/`. This slice also deletes `cmd/agentos-egress`, `-holder` and `-checker` once they are covered.
 
@@ -30,9 +30,10 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - #2643 d: `secrets_test.go::TestSecretsOldFormatRefused`. The slot-to-blob form is refused and left as it was.
 - CLK-1: `run_test.go::TestNoSecretInKernelProcess`. After a step that sent the clerk's secret (the provider confirms it by hash), the secret is in neither the log file, the log's entries nor any readable mapping of the kernel's process. A positive control shows the scan finds a secret that is present.
 - CLK-1: `secrets_test.go::TestSecretsFileIsTheClerksOwn`. A directory or file open to other uids, a symlink, or another uid's directory or file is refused. As root, another uid cannot read the file.
+- #2655: `mail_test.go::TestMailClerkSignsInWithTheSealedPassword` (a dispatched step lands on the server through a clerk that signed in with the sealed password, which is in neither the clerk's files nor the log), `::TestMailRemovalTakesEffectAtTheNextConnection` (a removal or a wrong password takes effect with no restart; it fails on a credential read once), `::TestMailSetupRefusalsKeepTheirWording`, and `broker/clerk/secrets_test.go::TestSecretsRemovePersists` and `::TestSecretsLoginOpensPerConnection`.
 - CLK-1, CLK-2: `run_test.go::TestPeersAreCheckedByUID` and `::TestClerkRefusesAViewWithoutTheLedger`. A wrong peer uid on either end sends nothing. A view missing a charged scope's ledger is refused before the clerk runs.
 
-**Declared scope:** `broker/clerk/run/` (new), `broker/core/core.txt` (one `wiring clerk/run` line), `docs/LANES.md` (the frozen seam), this brief.
+**Declared scope:** `broker/clerk/run/` (new), `broker/core/core.txt` (one `wiring clerk/run` line), `docs/LANES.md` (the frozen seam), this brief. Slice 2 adds `broker/clerk/secrets.go` and its test (two methods, by the kernel lane's waiver).
 
 **Guard files:** `broker/core/core.txt` (the wiring line, so the core test lets the host call the kernel's write paths). `tools/risk_tier.py` needs nothing: a new `broker/` path is tier A by default. `tools/g1_scope_g2.txt` needs nothing: `allow broker/clerk/` already covers the directory. `broker/daemon/arc2_test.go` needs nothing: the daemon imports nothing new.
 

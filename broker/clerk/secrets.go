@@ -1,6 +1,7 @@
 package clerk
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -8,6 +9,8 @@ import (
 	"errors"
 	"maps"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 )
 
 // Sealer seals and opens one secret under a key that never leaves it. The
@@ -66,6 +69,8 @@ func (k Kind) valid() bool { return k == KindStatic || k == KindGrant }
 // Secrets holds the clerks' credentials as sealed slots (CLK-1, STO-2). A
 // secret is opened only inside this package, for one request, and no method
 // returns it: the planner, the log and the caller of a clerk never see it.
+// The one way out is Login, the mail transport's credential for one
+// connection inside the clerk's own process.
 type Secrets struct {
 	s     Sealer
 	write func(atRest []byte) error
@@ -122,6 +127,47 @@ func (s *Secrets) Put(slot string, k Kind, secret []byte) error {
 	}
 	s.m = next
 	return nil
+}
+
+// Remove deletes slot. With a durable store it returns only after the at-rest
+// form without it is written; if writing fails, the store is unchanged. A
+// missing slot writes nothing.
+func (s *Secrets) Remove(slot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[slot]; !ok {
+		return nil
+	}
+	next := maps.Clone(s.m)
+	delete(next, slot)
+	if s.write != nil {
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if err := s.write(b); err != nil {
+			return err
+		}
+	}
+	s.m = next
+	return nil
+}
+
+// Login is the mail transport's credential (imapsmtp.Config.Credential) from
+// a static slot (MIG-4-mail-a-8). Each call opens the slot afresh, so a
+// removed or replaced password takes effect at the next connection, and a
+// slot of another kind does not open. The Secret string is a copy that clear
+// cannot wipe; it lives for one connection in the clerk's own process, as
+// the exit's header does.
+func (s *Secrets) Login(slot, user string) func(context.Context) (imapsmtp.Login, error) {
+	return func(context.Context) (imapsmtp.Login, error) {
+		var l imapsmtp.Login
+		err := s.with(slot, KindStatic, func(p []byte) error {
+			l = imapsmtp.Login{User: user, Secret: string(p)}
+			return nil
+		})
+		return l, err
+	}
 }
 
 func (s *Secrets) Has(slot string) bool {

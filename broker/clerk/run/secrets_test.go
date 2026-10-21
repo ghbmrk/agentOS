@@ -54,7 +54,7 @@ func TestSecretsWriteStoppedAtEveryStepLeavesAWholeForm(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := writeAtomic(dir, next, func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
+		if err := writeAtomic(dir, secretsName, next, func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
 			t.Fatalf("step %d: %v, want stopped", i, err)
 		}
 		if err := loadsWhole(dir); err != nil {
@@ -62,13 +62,13 @@ func TestSecretsWriteStoppedAtEveryStepLeavesAWholeForm(t *testing.T) {
 		}
 		// A temporary torn mid-write is never read, and the next write
 		// replaces it.
-		if err := os.WriteFile(filepath.Join(dir, secretsTemp), next[:len(next)/2], 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, secretsName+".tmp"), next[:len(next)/2], 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := loadsWhole(dir); err != nil {
 			t.Fatalf("with a torn temporary after step %d: %v", i, err)
 		}
-		if err := writeAtomic(dir, next, nil); err != nil {
+		if err := writeAtomic(dir, secretsName, next, nil); err != nil {
 			t.Fatalf("write after a stop at step %d: %v", i, err)
 		}
 		if err := loadsWhole(dir); err != nil {
