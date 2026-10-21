@@ -697,7 +697,10 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.k.Issue(3-kernel.GrantHold, key.Key{Root: root2.Root}, root2); err != nil {
+	_, bpriv := seedKey(12)
+	batch := []key.Key{{Root: root2.Root}, root2}
+	cosign := []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}
+	if err := r.k.Issue(3-kernel.GrantHold, cosign, batch...); err != nil {
 		t.Fatal(err)
 	}
 	k2, err := key.Derive(root2, hpriv, hpub, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1))
