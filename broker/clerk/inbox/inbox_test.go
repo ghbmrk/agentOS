@@ -184,6 +184,27 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 	}
 }
 
+// An unbound account, as in the clerk's own process, judges the view the
+// kernel sends: it acts on a step that view shows dispatched and refuses one
+// it does not, or no view at all.
+func TestAnUnboundAccountJudgesTheKernelsView(t *testing.T) {
+	r := newRig(t, 30)
+	r.acct.Bind(nil)
+	r.run(t, r.step("real", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"}))
+	if fx := r.acct.Effects(); len(fx) != 1 || fx[0].Verb != string(key.Organize) {
+		t.Fatalf("dispatched step: effects %+v", fx)
+	}
+	forced := r.step("forced", key.Trash, map[string]string{"target": "M22"})
+	for _, v := range []kernel.View{r.k.State(), nil} {
+		if res := r.acct.Do(kernel.Request{Plan: forced}, v); res.Outcome == "ok" || len(r.acct.Effects()) != 1 {
+			t.Fatalf("forced trash ran: %+v %v", res, r.acct.Effects())
+		}
+		if rf := r.lastRefusal(t); rf.Reason != "not-dispatched" {
+			t.Fatalf("refusal %+v", rf)
+		}
+	}
+}
+
 // A request that copies a dispatched one but changes the step is not it.
 func TestChangedStepOfDispatchedRequestIsRefused(t *testing.T) {
 	r := newRig(t, 30)
