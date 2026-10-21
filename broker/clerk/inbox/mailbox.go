@@ -35,7 +35,7 @@ const (
 	nNoMove     NotDone = "no-move"         // the server cannot MOVE without EXPUNGE
 	nNoTrash    NotDone = "no-trash-folder" // the account has no folder with the trash role
 	nNoPoster   NotDone = "no-poster"       // no one-click POSTer is wired (#2601)
-	nBadFlag    NotDone = "bad-flag"        // a label that is not an IMAP keyword
+	nBadFlag    NotDone = "bad-flag"        // a label that is not one of the clerk's keywords
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -158,8 +158,12 @@ func before(err error) error {
 // errUnconfirmed: the effect was asked for but the read-back does not show it.
 var errUnconfirmed = errors.New("inbox: the mailbox does not show the effect")
 
-// Label adds label to the mail as an IMAP keyword and reads it back.
+// Label adds label to the mail as an IMAP keyword and reads it back. Only
+// the clerk's own keywords are labels: a system flag such as \Deleted is not.
 func (l *Live) Label(ctx context.Context, id, label string) error {
+	if !strings.HasPrefix(label, labelPrefix) {
+		return nBadFlag
+	}
 	m, _, err := l.mail(id)
 	if err != nil {
 		return err

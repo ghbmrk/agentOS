@@ -248,7 +248,7 @@ func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
 		verb    key.Verb
 	}{
 		{"keyword dropped", func(s *imaptest.Server) { s.DropKeywords(true) }, key.Organize},
-		{"move keeps the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveKeeps) }, key.Trash},
+		{"move copies and keeps the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveKeeps) }, key.Trash},
 		{"move loses the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveLoses) }, key.Trash},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -356,10 +356,12 @@ func TestAClassOutsideTheListCannotReachTheMailbox(t *testing.T) {
 func TestLiveRefusesALabelThatIsNotAKeyword(t *testing.T) {
 	const m, other = "<b1@shop.test>", "<p1@example.test>"
 	lr := newLiveRig(t, 30, nil, rawMail(m, "news@shop.test", "Sale"), rawMail(other, "pat@example.test", "Hi"))
-	err := lr.box.Label(context.Background(), lr.mail[m], "agentOS/bulk\r\nA1 UID STORE 1:* +FLAGS (\\Deleted)")
-	var nd NotDone
-	if !errors.As(err, &nd) || nd != nBadFlag {
-		t.Fatalf("Label = %v, want %v", err, nBadFlag)
+	for _, label := range []string{"agentOS/bulk\r\nA1 UID STORE 1:* +FLAGS (\\Deleted)", "\\Deleted", "\\Seen", "NonJunk"} {
+		err := lr.box.Label(context.Background(), lr.mail[m], label)
+		var nd NotDone
+		if !errors.As(err, &nd) || nd != nBadFlag {
+			t.Fatalf("Label(%q) = %v, want %v", label, err, nBadFlag)
+		}
 	}
 	for _, id := range []string{m, other} {
 		if _, flags := lr.flagsOf(t, id); len(flags) != 0 {

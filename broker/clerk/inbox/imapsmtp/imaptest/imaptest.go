@@ -82,7 +82,7 @@ type Move int
 
 const (
 	MoveOK    Move = iota // moves the message
-	MoveKeeps             // answers OK and leaves the message where it was
+	MoveKeeps             // answers OK, copies the message and keeps the original, as COPY does
 	MoveLoses             // answers OK and puts the message nowhere
 )
 
@@ -549,9 +549,6 @@ func (m *mbox) transfer(uid bool, set *imap.SeqSet, dest string, move bool) erro
 		return backend.ErrNoSuchMailbox
 	}
 	src := m.b()
-	if move && m.s.move == MoveKeeps {
-		return nil
-	}
 	var keep []*msg
 	for i, x := range src.msgs {
 		id := uint32(i + 1)
@@ -569,7 +566,7 @@ func (m *mbox) transfer(uid bool, set *imap.SeqSet, dest string, move bool) erro
 		if !move || m.s.move != MoveLoses {
 			d.msgs = append(d.msgs, &c)
 		}
-		if !move {
+		if !move || m.s.move == MoveKeeps {
 			keep = append(keep, x)
 		}
 	}
