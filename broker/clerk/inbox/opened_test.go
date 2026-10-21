@@ -28,7 +28,8 @@ func liveStore(t *testing.T, srv *imaptest.Server) *imapsmtp.Store {
 
 // #2618: every sender with a read mail, in any folder, is opened today, keyed
 // by lower-cased address as Evaluate looks it up; a sender with only unread
-// mail is not; and reading the flags marks nothing read.
+// mail is not; and every message keeps its flags. Only seen mail is fetched,
+// so this cannot show BODY.PEEK at work; it shows nothing else changed.
 func TestOpenedCountsEverySeenSenderAsOpenedToday(t *testing.T) {
 	srv := imaptest.Start(t)
 	srv.Deliver("INBOX", rawMail("<a@shop.test>", "News <News@Shop.Test>", "Sale"), `\Seen`)
@@ -78,6 +79,24 @@ func TestOpenedFailsWhenAFolderCannotBeRead(t *testing.T) {
 	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
 	srv.FailList("Archive", true)
+	if got, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19"); err == nil || got != nil {
+		t.Fatalf("opened %v, err %v; want an error", got, err)
+	}
+}
+
+// Past openedMax bytes of addresses the answer fails, not shrinks: a cut list
+// would make the senders left out look never opened.
+func TestOpenedFailsPastWhatItKeeps(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	srv.Deliver("INBOX", rawMail("<b@shop.test>", "news@shop.test", "Sale 2"), `\Seen`)
+	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
+	defer func(n int) { openedMax = n }(openedMax)
+	openedMax = len("news@shop.test") + len("pat@example.test")
+	if _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19"); err != nil {
+		t.Fatalf("at the bound: %v", err)
+	}
+	openedMax--
 	if got, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19"); err == nil || got != nil {
 		t.Fatalf("opened %v, err %v; want an error", got, err)
 	}

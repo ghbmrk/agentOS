@@ -124,6 +124,13 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 	return out, nil
 }
 
+// openedMax bounds the addresses Opened keeps, in bytes, so one call's memory
+// stays under a Fetch call's budget whatever the server sends (M21,
+// tests/test_egress_memory.py); an account past it fails closed.
+var openedMax = 8 << 20
+
+var errTooManySenders = errors.New("inbox: more read senders than the clerk keeps")
+
 // Opened is World.LastOpened for the account (#2618): every sender with a
 // read (\Seen) mail in any folder, keyed by lower-cased address, as opened
 // today. IMAP keeps no time a mail was opened, so a seen mail is taken as
@@ -131,23 +138,29 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 // unsubscribed on a guess (fail closed). A sender whose mails the owner read
 // and then deleted for good leaves no seen mail and reads as never opened;
 // the box's own record of each mail turning \Seen replaces this guess
-// (ASSUMPTIONS.md MIG-4-mail-reader-5). Any folder that cannot be read fails
-// the whole answer, so no partial list passes for a full one.
+// (ASSUMPTIONS.md MIG-4-mail-reader-5). Any folder that cannot be read in
+// full fails the whole answer, so no partial list passes for a full one.
 func (l *Live) Opened(ctx context.Context, today string) (map[string]string, error) {
 	fs, err := l.st.Folders(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
+	kept := 0
 	for _, f := range fs {
-		hs, err := l.st.SeenFrom(ctx, f.Name)
+		err := l.st.SeenFrom(ctx, f.Name, func(h []byte) error {
+			a := FromAddress(h)
+			if _, ok := out[a]; ok || a == "" {
+				return nil
+			}
+			if kept += len(a); kept > openedMax {
+				return errTooManySenders
+			}
+			out[a] = today
+			return nil
+		})
 		if err != nil {
 			return nil, err
-		}
-		for _, h := range hs {
-			if a := FromAddress(h); a != "" {
-				out[a] = today
-			}
 		}
 	}
 	return out, nil
