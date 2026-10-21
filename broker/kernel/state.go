@@ -77,8 +77,11 @@ const (
 	// Task entries are in task.go.
 )
 
+// schema is each entry type's body version. key.issued is 2: its body became
+// a grant batch (#2663), so a log written before cannot fold it as one
+// (#2670 item 4).
 var schema = map[string]int{
-	TKeyIssued: 1, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TLine: 1, TStop: 1, TResume: 1,
+	TKeyIssued: 2, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TLine: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,

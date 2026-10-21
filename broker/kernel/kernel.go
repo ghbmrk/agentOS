@@ -323,7 +323,7 @@ func (k *Kernel) Log() *Log     { return k.log }
 
 // emit logs first, then folds: a failed write leaves the state as it was.
 func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
-	e, err := k.log.Append(now, typ, 1, body)
+	e, err := k.log.Append(now, typ, schema[typ], body)
 	if err != nil {
 		return e, err
 	}
