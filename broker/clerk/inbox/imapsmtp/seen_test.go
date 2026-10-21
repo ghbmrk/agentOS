@@ -73,7 +73,7 @@ func seenSearch(t *testing.T, validities []int, search, fetch string) string {
 // seenFrom collects what Seen hands over.
 func seenFrom(s *Store, folder string) ([][]byte, error) {
 	var out [][]byte
-	err := s.Seen(context.Background(), folder, func(h []byte) error {
+	err := s.Seen(context.Background(), folder, func(h []byte, _ time.Time) error {
 		out = append(out, h)
 		return nil
 	})
@@ -193,7 +193,7 @@ func TestSeenStopsOnTheCallersError(t *testing.T) {
 	stop := errors.New("stop")
 	addr := seenServer(t, []int{7, 7}, header(1, "a@x.test")+header(2, "d@x.test"))
 	n := 0
-	err := hostileStore(t, addr, 5*time.Second).Seen(context.Background(), "INBOX", func([]byte) error { n++; return stop })
+	err := hostileStore(t, addr, 5*time.Second).Seen(context.Background(), "INBOX", func([]byte, time.Time) error { n++; return stop })
 	if !errors.Is(err, stop) || n != 1 {
 		t.Fatalf("err %v after %d headers, want stop after 1", err, n)
 	}

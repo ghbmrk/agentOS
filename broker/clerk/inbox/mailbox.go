@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 )
@@ -129,8 +131,8 @@ func (l *Live) Read(ctx context.Context) ([]Mail, error) {
 // SeenLog is the clerk's record of each mail turning \Seen (#2684), its own
 // state, which Opened replaces whole on each read and the clerk's process
 // keeps sealed (MIG-4-run). Since is the day the record began. Each entry
-// holds only a sender, a digest of the mail's Message-ID and the day the
-// clerk first saw the mail read.
+// holds only a sender, a digest naming the mail and the day the clerk first
+// saw it read.
 type SeenLog struct {
 	Since string `json:"since"`
 	Seen  []Seen `json:"seen"`
@@ -143,10 +145,13 @@ type Seen struct {
 	Date string `json:"date"`
 }
 
-// seenID names a mail by its sender and Message-ID without keeping either
-// Message-ID, which can carry a host or account name.
-func seenID(from, messageID string) [16]byte {
-	h := sha256.Sum256([]byte(from + "\n" + messageID))
+// seenID names a mail by its sender, Message-ID and arrival without keeping
+// the Message-ID, which can carry a host or account name. The arrival is the
+// server's INTERNALDATE, so a new mail that reuses an earlier one's
+// Message-ID is a new entry, dated the day it is first seen read, and cannot
+// pass for the old read.
+func seenID(from, messageID string, arrived time.Time) [16]byte {
+	h := sha256.Sum256([]byte(from + "\n" + messageID + "\n" + strconv.FormatInt(arrived.Unix(), 10)))
 	return [16]byte(h[:16])
 }
 
@@ -156,9 +161,11 @@ func seenID(from, messageID string) [16]byte {
 // and senderCost, a log entry its sender and entryCost: the most each costs in
 // the maps, the log read in and the log handed back, measured at about 300
 // bytes an entry (TestOpenedHoldsNoMoreThanItCharges). The bound is as many
-// read mails as one UID SEARCH can name, searchMax, at entryCost each, about
-// 384 MiB: a mailbox the transport can read at all is, up to the length of
-// its senders' addresses, not refused for its size.
+// read mails as one folder's UID SEARCH can name, searchMax, at entryCost
+// each, about 384 MiB. It holds the whole call: every folder's read mail, the
+// log's entries for mail since deleted, and the senders' addresses on top, so
+// an account with more than that fails closed (no sender is unsubscribed),
+// where a single folder that large could not be searched at all.
 var openedMax = searchMax * entryCost
 
 // searchMax is how many UIDs one search reply can carry: the IMAP client's
@@ -170,7 +177,7 @@ const (
 	entryCost  = 384
 )
 
-var errTooManySenders = errors.New("inbox: more read mail than the clerk keeps")
+var errTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
 
 // opened is one Opened call's state: LastOpened as it is built, and the log
 // by digest, each entry marked when this read found its mail.
@@ -190,34 +197,41 @@ type logged struct {
 
 func (o *opened) charge(n int) error {
 	if o.kept += n; o.kept > openedMax {
-		return errTooManySenders
+		return errTooMuchReadMail
 	}
 	return nil
 }
 
 // newOpened starts from log. Until the log has watched for unopenedDays, and
-// for a read mail with no Message-ID, a read mail counts as opened today; an
-// entry whose day is not a date counts as today; a log with no valid Since
-// begins today.
+// for a read mail with no Message-ID or INTERNALDATE, a read mail counts as
+// opened today. A log with no valid Since, or one after today, begins today;
+// an entry dated outside Since to today counts as today; and an entry the
+// clerk did not write opens the sender it names today.
 func newOpened(today string, log SeenLog) (*opened, error) {
 	o := &opened{today: today, since: log.Since, senders: map[string]string{}, log: map[[16]byte]logged{}}
-	since, ok := day(log.Since)
-	now, ok2 := day(today)
+	now, ok := day(today)
+	since, ok2 := day(log.Since)
 	if !ok || !ok2 || since.After(now) {
-		o.since = today
+		since, o.since = now, today
 	}
-	o.watched = ok && ok2 && int(now.Sub(since).Hours()/24) >= unopenedDays
+	o.watched = int(now.Sub(since).Hours()/24) >= unopenedDays
 	for _, e := range log.Seen {
-		var id [16]byte
-		if b, err := hex.DecodeString(e.ID); err != nil || len(b) != len(id) || e.From == "" {
-			continue // not an entry the clerk wrote
-		} else {
-			copy(id[:], b)
+		if e.From == "" {
+			continue // names no sender to open
 		}
-		if _, ok := day(e.Date); !ok {
+		b, err := hex.DecodeString(e.ID)
+		if err != nil || len(b) != 16 {
+			// Not an entry the clerk wrote: its sender is opened on this read,
+			// and the log handed back drops it.
+			if err := o.open(e.From, today); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if d, ok := day(e.Date); !ok || d.Before(since) || d.After(now) {
 			e.Date = today
 		}
-		if err := o.add(id, e.From, e.Date, false); err != nil {
+		if err := o.add([16]byte(b), e.From, e.Date, false); err != nil {
 			return nil, err
 		}
 	}
@@ -259,18 +273,19 @@ func (o *opened) open(from, date string) error {
 	return nil
 }
 
-// header takes one read mail's From and Message-ID headers.
-func (o *opened) header(h []byte) error {
+// header takes one read mail's From and Message-ID headers and arrival.
+func (o *opened) header(h []byte, arrived time.Time) error {
 	from, mid := FromAddress(h), messageID(h)
 	if from == "" {
 		return nil
 	}
-	if mid != "" {
-		if err := o.add(seenID(from, mid), from, o.today, true); err != nil {
+	named := mid != "" && !arrived.IsZero()
+	if named {
+		if err := o.add(seenID(from, mid, arrived), from, o.today, true); err != nil {
 			return err
 		}
 	}
-	if !o.watched || mid == "" {
+	if !o.watched || !named {
 		return o.open(from, o.today)
 	}
 	return nil
@@ -298,7 +313,7 @@ func (o *opened) result() (map[string]string, SeenLog) {
 // sender is opened on its latest entry's day, so a mail the owner read and
 // then deleted for good still counts. IMAP keeps no time a mail was opened,
 // so until the log has watched for unopenedDays, and for a read mail with no
-// Message-ID, a read mail is taken as opened today whenever it was delivered:
+// Message-ID or INTERNALDATE, a read mail is taken as opened today whenever it was delivered:
 // no sender is unsubscribed on a guess (fail closed). Any folder that cannot
 // be read in full fails the whole answer, and the caller then keeps its log
 // as it was: no partial answer passes for a full one.

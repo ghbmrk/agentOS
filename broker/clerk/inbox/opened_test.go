@@ -13,10 +13,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
+
+// arrived is the INTERNALDATE the tests deliver logged mail at.
+var arrived = time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)
 
 // liveStore is a transport to the test server.
 func liveStore(t *testing.T, srv *imaptest.Server) *imapsmtp.Store {
@@ -94,11 +98,11 @@ func TestOpenedFailsWhenAFolderCannotBeRead(t *testing.T) {
 // its mail is gone for good.
 func TestTheSeenLogKeepsADeletedReadMailOpened(t *testing.T) {
 	srv := imaptest.Start(t)
-	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	srv.Deliver("INBOX", rawMail("<b@spam.test>", "x@spam.test", "Win"))
 	l := NewLive(liveStore(t, srv))
 	_, log, err := l.Opened(context.Background(), "2026-07-01", SeenLog{})
-	id := seenID("news@shop.test", "<a@shop.test>")
+	id := seenID("news@shop.test", "<a@shop.test>", arrived)
 	want := SeenLog{Since: "2026-07-01", Seen: []Seen{{From: "news@shop.test", ID: hex.EncodeToString(id[:]), Date: "2026-07-01"}}}
 	if err != nil || !reflect.DeepEqual(log, want) {
 		t.Fatalf("log %+v, err %v; want %+v", log, err, want)
@@ -123,10 +127,10 @@ func TestTheSeenLogKeepsADeletedReadMailOpened(t *testing.T) {
 // mail is gone opens nothing and is dropped.
 func TestTheSeenLogsDatesReplaceTheGuessAfterNinetyDays(t *testing.T) {
 	srv := imaptest.Start(t)
-	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	srv.Deliver("INBOX", rawMail("<c@list.test>", "new@list.test", "Digest"), `\Seen`)
 	srv.Deliver("INBOX", "From: bare@none.test\nSubject: x\n\nbody\n", `\Seen`)
-	a, gone := seenID("news@shop.test", "<a@shop.test>"), seenID("gone@old.test", "<g@old.test>")
+	a, gone := seenID("news@shop.test", "<a@shop.test>", arrived), seenID("gone@old.test", "<g@old.test>", arrived)
 	log := SeenLog{Since: "2026-01-02", Seen: []Seen{
 		{From: "news@shop.test", ID: hex.EncodeToString(a[:]), Date: "2026-01-02"},
 		{From: "gone@old.test", ID: hex.EncodeToString(gone[:]), Date: "2026-01-02"},
@@ -147,14 +151,38 @@ func TestTheSeenLogsDatesReplaceTheGuessAfterNinetyDays(t *testing.T) {
 	}
 }
 
-// The log fails closed: an entry whose day is not a date counts as today; a
-// log with no valid start, or one in the future, begins today, so nothing is
-// watched yet; an entry the clerk did not write is skipped; and a Message-ID
-// another sender used does not stand in for this sender's read.
+// A new mail that reuses an earlier read mail's Message-ID is a new entry,
+// dated the day it is read, so a sender cannot keep one old read standing in
+// for every later mail; and a read mail the server gives no INTERNALDATE is
+// opened today and logged under no name.
+func TestAReusedMessageIDIsANewRead(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", arrived.Add(30*24*time.Hour), rawMail("<a@shop.test>", "news@shop.test", "Sale again"), `\Seen`)
+	a := seenID("news@shop.test", "<a@shop.test>", arrived)
+	log := SeenLog{Since: "2026-01-02", Seen: []Seen{{From: "news@shop.test", ID: hex.EncodeToString(a[:]), Date: "2026-01-02"}}}
+	got, kept, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-06-01", log)
+	if err != nil || got["news@shop.test"] != "2026-06-01" || len(kept.Seen) != 1 || kept.Seen[0].Date != "2026-06-01" {
+		t.Fatalf("opened %v, log %+v, err %v; want the reused ID read today", got, kept, err)
+	}
+	o, _ := newOpened("2026-06-01", log)
+	if err := o.header([]byte("From: news@shop.test\r\nMessage-Id: <a@shop.test>\r\n\r\n"), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, kept := o.result(); got["news@shop.test"] != "2026-06-01" || len(kept.Seen) != 0 {
+		t.Fatalf("no INTERNALDATE: opened %v, log %+v; want opened today, nothing logged", got, kept)
+	}
+}
+
+// The log fails closed: a log with no valid start, or one in the future,
+// begins today, so nothing is watched yet; an entry whose day is not a date,
+// or is outside the log's start to today, counts as today, so a reset log
+// trusts none of its old days; an entry the clerk did not write opens the
+// sender it names today and is dropped; and a Message-ID another sender used
+// does not stand in for this sender's read.
 func TestTheSeenLogFailsClosed(t *testing.T) {
 	srv := imaptest.Start(t)
-	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
-	hexID := func(from, mid string) string { id := seenID(from, mid); return hex.EncodeToString(id[:]) }
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	hexID := func(from, mid string) string { id := seenID(from, mid, arrived); return hex.EncodeToString(id[:]) }
 	l := NewLive(liveStore(t, srv))
 	for _, since := range []string{"someday", "2027-01-01"} {
 		log := SeenLog{Since: since, Seen: []Seen{
@@ -162,13 +190,16 @@ func TestTheSeenLogFailsClosed(t *testing.T) {
 			{From: "other@evil.test", ID: hexID("other@evil.test", "<a@shop.test>"), Date: "2026-05-30"},
 			{From: "forged@x.test", ID: "<a@shop.test>", Date: "2020-01-01"},
 			{From: "", ID: hexID("", "<n@x.test>"), Date: "2026-05-30"},
+			{From: "later@list.test", ID: hexID("later@list.test", "<l@list.test>"), Date: "2026-09-01"},
+			{From: "news@shop.test", ID: hexID("news@shop.test", "<a@shop.test>"), Date: "2026-01-02"},
 		}}
 		got, kept, err := l.Opened(context.Background(), "2026-06-01", log)
-		want := map[string]string{"gone@list.test": "2026-06-01", "other@evil.test": "2026-05-30", "news@shop.test": "2026-06-01"}
+		want := map[string]string{"gone@list.test": "2026-06-01", "other@evil.test": "2026-06-01", "news@shop.test": "2026-06-01", "later@list.test": "2026-06-01", "forged@x.test": "2026-06-01"}
 		wantLog := SeenLog{Since: "2026-06-01", Seen: []Seen{
 			{From: "gone@list.test", ID: hexID("gone@list.test", "<g@list.test>"), Date: "2026-06-01"},
+			{From: "later@list.test", ID: hexID("later@list.test", "<l@list.test>"), Date: "2026-06-01"},
 			{From: "news@shop.test", ID: hexID("news@shop.test", "<a@shop.test>"), Date: "2026-06-01"},
-			{From: "other@evil.test", ID: hexID("other@evil.test", "<a@shop.test>"), Date: "2026-05-30"},
+			{From: "other@evil.test", ID: hexID("other@evil.test", "<a@shop.test>"), Date: "2026-06-01"},
 		}}
 		if err != nil || !maps.Equal(got, want) || !reflect.DeepEqual(kept, wantLog) {
 			t.Fatalf("since %s: opened %v, log %+v, err %v; want %v, %+v", since, got, kept, err, want, wantLog)
@@ -213,7 +244,7 @@ func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
 		before := ms.HeapAlloc
 		o, _ := newOpened("2026-10-19", SeenLog{})
 		n := 0
-		for ; o.header(head(n)) == nil; n++ {
+		for ; o.header(head(n), arrived) == nil; n++ {
 		}
 		first, kept := o.result() // a sender with no logged mail lives only here
 		o = nil
