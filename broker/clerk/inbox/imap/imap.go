@@ -110,6 +110,9 @@ type Message struct {
 	Raw   []byte
 }
 
+// ErrNoMove is returned before acting by a server without MOVE.
+var ErrNoMove = errors.New("imap: the server does not support MOVE")
+
 // ErrValidity is returned before acting when a folder's UID validity is
 // not the one a reference was read under.
 var ErrValidity = errors.New("imap: the folder was renumbered since it was read")
@@ -460,7 +463,7 @@ func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error
 func (s *Store) Move(ctx context.Context, m Ref, to string) error {
 	return s.session(ctx, func(c *client.Client) error {
 		if ok, _ := c.Support("MOVE"); !ok {
-			return errors.New("imap: the server does not support MOVE")
+			return ErrNoMove
 		}
 		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
 			return err

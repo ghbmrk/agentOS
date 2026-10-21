@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -60,10 +61,12 @@ type Refusal struct {
 	Reason string  `json:"reason"`
 }
 
-// Account is the mail clerk over a synthetic mailbox (CLK-2, VRB-2, VRB-3).
-// It is the only place a mail is read, an effect applied or a request made.
+// Account is the mail clerk (CLK-2, VRB-2, VRB-3) over one mailbox: the
+// synthetic one of the eval, or the owner's (Live). It is the only place a
+// mail is read, an effect applied or a request made.
 type Account struct {
 	owner     ed25519.PublicKey
+	box       Mailbox
 	secret    []byte
 	world     func() World
 	body      string
@@ -97,12 +100,16 @@ func (a *Account) Handle(addr string) string {
 // NewAccount reads every mail once. A mail is unsubscribable when the reader
 // calls it bulk and VRB-2 holds; only then does the planner get a handle. The
 // world is read again when a step runs, so a verdict that has aged out is not
-// acted on. secret keys the handles and must hold at least 128 bits.
-func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mails []Mail, retentionDays int, oneClickBody string) (*Account, error) {
+// acted on. secret keys the handles and must hold at least 128 bits. box is
+// where the effects land, and must be the mailbox the mails were read from.
+func NewAccount(owner ed25519.PublicKey, secret []byte, world func() World, mails []Mail, box Mailbox, retentionDays int, oneClickBody string) (*Account, error) {
 	if len(secret) < minSecret {
 		return nil, errors.New("inbox: handle secret shorter than 128 bits")
 	}
-	a := &Account{owner: owner, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
+	if box == nil {
+		return nil, errors.New("inbox: no mailbox")
+	}
+	a := &Account{owner: owner, box: box, secret: append([]byte(nil), secret...), world: world, body: oneClickBody,
 		retention: retentionDays, mails: map[string]Mail{}, mailOf: map[string]string{}, done: map[string]bool{}}
 	for _, m := range mails {
 		it := Item{Mail: m.ID, Class: m.Class}
@@ -182,6 +189,9 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 		if !ok {
 			return a.refuse(string(s.Verb), target, "unknown-mail")
 		}
+		if m.Class == "" {
+			return a.refuse(string(s.Verb), target, "unclassified")
+		}
 		if s.Verb == key.Organize && s.Args["label"].Value != labelPrefix+m.Class {
 			return a.refuse(string(s.Verb), target, "bad-label")
 		}
@@ -192,6 +202,15 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 			if a.retention < minRetentionDays {
 				return a.refuse(string(key.DeleteRemote), target, "trash-not-restorable")
 			}
+		}
+		var err error
+		if s.Verb == key.Trash {
+			err = a.box.Trash(context.Background(), target)
+		} else {
+			err = a.box.Label(context.Background(), target, s.Args["label"].Value)
+		}
+		if res, ok := a.landed(string(s.Verb), target, err); !ok {
+			return res
 		}
 		a.effects = append(a.effects, Effect{Verb: string(s.Verb), Mail: target, Label: s.Args["label"].Value})
 	case key.Unsubscribe:
@@ -205,8 +224,12 @@ func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
 		if !ok {
 			return a.refuse(string(s.Verb), id, "no-longer-eligible")
 		}
-		a.posts = append(a.posts, Post{Method: "POST", URL: u, Body: a.body,
-			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}})
+		p := Post{Method: "POST", URL: u, Body: a.body,
+			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}}
+		if res, ok := a.landed(string(s.Verb), id, a.box.Post(context.Background(), p)); !ok {
+			return res
+		}
+		a.posts = append(a.posts, p)
 		a.effects = append(a.effects, Effect{Verb: string(s.Verb), Mail: id})
 	default:
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "outside-key")
@@ -227,6 +250,22 @@ func (a *Account) Probe(r kernel.Request, _ kernel.View) string {
 		return "done"
 	}
 	return "notdone"
+}
+
+// landed reads a mailbox's answer: nil is done; NotDone is a refusal before
+// acting, recorded like the clerk's own; anything else may have acted and was
+// not confirmed, so the kernel probes and parks it (KRN-8). Every mailbox
+// effect is idempotent (a keyword set again, a move of a mail already moved
+// is confirmed by the same read-back), so a resend after unknown is safe.
+func (a *Account) landed(op, mail string, err error) (kernel.Result, bool) {
+	var nd NotDone
+	switch {
+	case err == nil:
+		return kernel.Result{}, true
+	case errors.As(err, &nd):
+		return a.refuse(op, mail, string(nd)), false
+	}
+	return kernel.Result{Outcome: "unknown", Detail: "unconfirmed"}, false
 }
 
 func (a *Account) refuse(op, mail, reason string) kernel.Result {
