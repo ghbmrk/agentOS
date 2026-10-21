@@ -1,0 +1,22 @@
+#!/bin/sh
+# Prints "foreign=none", or "foreign=" and the block devices, comma-separated, that are mounted or
+# swapped on and do not sit on the disk the box booted from: a host PC's disk, a loop device, a
+# USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). Sources that
+# are not block devices (tmpfs, proc, a 9p share) are not disks and are not listed. Prints
+# "foreign=unknown" when the boot disk or a device cannot be read, so a damaged answer is no "none".
+# boot-report prints this on every boot and CI reads it with a host disk attached (ci_boot.sh).
+roots() { lsblk -snrpo NAME,TYPE "$1" 2>/dev/null | while read -r name type; do
+	case $type in disk | loop | rom) echo "$name" ;; esac
+done | sort -u; }
+boot=$(roots "$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')")
+[ -n "$boot" ] && [ "$(echo "$boot" | wc -l)" = 1 ] || { echo "foreign=unknown"; exit 0; }
+bad=
+for s in $( { findmnt -rno SOURCE; swapon --noheadings --raw --show=NAME; } 2>/dev/null | sed 's/\[.*//' | sort -u); do
+	case $s in /dev/*) ;; *) continue ;; esac
+	d=$(readlink -f "$s")
+	[ -b "$d" ] || { bad="$bad,$s"; continue; }
+	r=$(roots "$d")
+	[ -n "$r" ] || { echo "foreign=unknown"; exit 0; }
+	[ "$r" = "$boot" ] || bad="$bad,$s"
+done
+echo "foreign=${bad#,}" | sed 's/^foreign=$/foreign=none/'

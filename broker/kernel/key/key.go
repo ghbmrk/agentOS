@@ -400,6 +400,7 @@ type Verified struct {
 	Key    Key
 	IDs    []ID // the root's ID, then each link's: every prefix
 	Limits Limits
+	held   bool // set by Verify only: the submitter signed as the tip's holder
 }
 
 // Sign is the tip holder's proof of possession: its signature over the key's
@@ -427,16 +428,25 @@ func Verify(k Key, owner ed25519.PublicKey, use, sig []byte) (*Verified, error) 
 	if !ed25519.Verify(k.holder(), useMsg(v.ID(), use), sig) {
 		return nil, ErrNotHolder
 	}
+	v.held = true
 	return v, nil
+}
+
+// Chain checks a key as data, without a use: for a key the log already
+// vouches for, a plan's key (held when its plan was admitted) or an
+// extension the owner granted. Its Verified can be charged (Spend) but never
+// authorizes a step, since nobody has signed as its holder.
+func Chain(k Key, owner ed25519.PublicKey) (*Verified, error) {
+	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
+		return nil, ErrWrongOwner
+	}
+	return verifyChain(k, owner)
 }
 
 // CheckChain checks a key as data, without a use: for an owner issuing a
 // root into the log. It confers nothing.
 func CheckChain(k Key, owner ed25519.PublicKey) error {
-	if len(owner) != ed25519.PublicKeySize || !bytes.Equal(k.Root.Owner, owner) {
-		return ErrWrongOwner
-	}
-	_, err := verifyChain(k, owner)
+	_, err := Chain(k, owner)
 	return err
 }
 

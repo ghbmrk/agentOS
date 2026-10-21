@@ -450,3 +450,27 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 }
 
 func seedPriv(b byte) ed25519.PrivateKey { _, p := seed(b); return p }
+
+// The inbox clerk judges a hold on its own clock: a kernel whose clock runs
+// past the window releases the unsubscribe, and the clerk, still inside it,
+// refuses and posts nothing (CLK-2, KEY-8).
+func TestInboxClerkKeepsTheHoldOnItsOwnClock(t *testing.T) {
+	r := newRig(t, 30, key.LimitHold(600_000, dayMS))
+	h := handleOfMail(t, r, "M01")
+	if err := r.k.Submit(t0, r.step("u", key.Unsubscribe, map[string]string{"to": h})); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.tick(t0); err != nil { // held at t0
+		t.Fatal(err)
+	}
+	r.now = t0 + 1 // the clerk's clock: inside both windows
+	if err := r.k.Tick(t0 + 2*dayMS); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.acct.Posts()) != 0 {
+		t.Fatalf("posted inside the hold on the clerk's clock: %v", r.acct.Posts())
+	}
+	if rf := r.lastRefusal(t); rf.Reason != "hold" {
+		t.Fatalf("refusal %+v, want hold", rf)
+	}
+}

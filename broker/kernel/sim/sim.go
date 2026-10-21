@@ -252,11 +252,11 @@ type sim struct {
 	plans  []string
 	now    int64 // the true time, which the clerk reads
 	ahead  int64 // how far the kernel's clock runs ahead of it
+	trace  []string
+	nonce  *rand.ChaCha8
+
 	// hostile: at each tick the kernel's clock jumps past every held step's
 	// window, or a few hours ahead when nothing is held.
-	trace []string
-	nonce *rand.ChaCha8
-
 	hostile                          bool
 	clockBack, widenUnproven, unheld int
 }

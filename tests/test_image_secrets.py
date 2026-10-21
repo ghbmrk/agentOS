@@ -8,6 +8,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -30,6 +31,9 @@ PEM_SLASH = ('{"private_key": "' + ("-----BEGIN " + "PRIVATE KEY-----\n" + "Q0/O
              "Q0FOQVJZ" * 8 + "\n-----END " + "PRIVATE KEY-----\n").replace("/", "\\/").replace("\n", "\\n")
              + '"}').encode()
 CARD = ("firstboot-" + "card.json").encode()
+# The key indented under its header: a YAML block scalar, and a JSON value pretty-printed in an object.
+PEM_YAML = ("key: |\n  -----BEGIN " + "PRIVATE KEY-----\n  " + "Q0FOQVJZ" * 8 + "\n  -----END " + "PRIVATE KEY-----\n").encode()
+PEM_JSON_INDENT = ('{"private_key": "-----BEGIN ' + 'PRIVATE KEY-----\\n    ' + "Q0FOQVJZ" * 8 + '\\n"}').encode()
 
 
 def load(name, path):
@@ -76,6 +80,7 @@ class SecretScanTest(unittest.TestCase):
         # REQ: HW-1
         for where in ("esp", "slot b 3", "slot b 4", "root"):
             for what, data in (("private key", PEM), ("private key", PEM_JSON), ("private key", PEM_SLASH),
+                               ("private key", PEM_YAML), ("private key", PEM_JSON_INDENT),
                                ("age secret key", AGE), ("Owner Card", CARD)):
                 with self.subTest(where=where, what=what), tempfile.TemporaryDirectory() as d:
                     off = PART[where] + 4096 + 17
@@ -111,7 +116,7 @@ class SecretScanTest(unittest.TestCase):
         # header followed by many of them is rejected in linear time, not by the job timeout.
         header = ("-----BEGIN " + "PRIVATE KEY-----").encode()
         with tempfile.TemporaryDirectory() as d:
-            for run in (b"\\n", b"\\/\\n"):
+            for run in (b"\\n", b"\\/\\n", b" \n", b"\t\n", b" " * 15 + b"\n"):
                 img = self.disk(d, [(PART["root"], header + run * 200)])
                 start = time.monotonic()
                 self.assertEqual(finish.secret_violations(img, TABLE), [])
@@ -131,7 +136,7 @@ class SecretScanTest(unittest.TestCase):
         table = {"sectorsize": 512, "partitions": [p for p in TABLE["partitions"] if p["name"] != "agentos_1.0"]}
         with tempfile.TemporaryDirectory() as d:
             bad = finish.secret_violations(self.disk(d, [(PART["agentos_1.0"] + 5, CARD)]), table)
-        self.assertIn("found 1", bad[0])
+        self.assertIn("expected /usr slot A's two partitions", bad[0])
         self.assertEqual(bad[1:], ["Owner Card at byte %d" % (PART["agentos_1.0"] + 5)])
 
     def test_main_refuses_a_disk_with_a_secret(self):
@@ -166,6 +171,182 @@ class SecretScanTest(unittest.TestCase):
         self.assertIn("HW-1", str(e.exception.code))
         self.assertIn("byte 7", str(e.exception.code))
         self.assertEqual(calls, [(str(pathlib.Path(d) / "agentos_1.0.raw"), {"partitions": []})])
+
+
+class SlotATest(unittest.TestCase):
+    """HW-1: slot A's disk ranges equal the verified split files, and /usr holds no key but the allowed."""
+
+    SIZE = MB * 512
+
+    def build(self, d, data=b"", tree=b"", disk_writes=()):
+        """A disk whose slot A holds DATA and its verity TREE (at the partition starts), and the
+        split files holding the same bytes; disk_writes are (offset, bytes) added on the disk only."""
+        d = pathlib.Path(d)
+        img = d / "disk.raw"
+        with open(img, "wb") as f:
+            f.truncate(8 << 20)
+            for part, blob in (("agentos_1.0", data), ("agentos_1.0_verity", tree)):
+                f.seek(PART[part])
+                f.write(blob)
+            for off, blob in disk_writes:
+                f.seek(off)
+                f.write(blob)
+        (d / "usr.raw").write_bytes(data)
+        (d / "usr-verity.raw").write_bytes(tree)
+        return str(img), d / "usr.raw", d / "usr-verity.raw"
+
+    def check(self, d, allowed=frozenset(), **kw):
+        img, data, tree = self.build(d, **kw)
+        return finish.slot_a_violations(img, TABLE, data, tree, allowed)
+
+    def test_matching_ranges_and_no_key_pass(self):
+        # REQ: HW-1
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self.check(d, data=b"erofs" * 1000, tree=b"tree" * 100), [])
+
+    def test_a_key_in_usr_fails_unless_its_hash_is_allowed(self):
+        # REQ: HW-1
+        import hashlib
+        with tempfile.TemporaryDirectory() as d:
+            bad = self.check(d, data=b"x" * 100 + PEM)
+            self.assertEqual(len(bad), 1)
+            self.assertIn("private key in usr.raw at byte 100", bad[0])
+            digest = hashlib.sha256(finish.SLOT_A_PATTERNS[0][1].search(PEM).group()).hexdigest()
+            self.assertIn(digest, bad[0])
+            self.assertNotIn(PEM.decode()[:30], bad[0])
+            self.assertEqual(self.check(d, {("private key", digest)}, data=b"x" * 100 + PEM), [])
+            # The card's names are the box's own (agentosd carries them), and a key in the
+            # verity tree's file is not content.
+            self.assertEqual(self.check(d, data=CARD * 3, tree=PEM), [])
+
+    def test_a_new_key_beside_an_allowed_one_still_fails(self):
+        # REQ: HW-1
+        import hashlib
+        other = PEM.replace(b"Q0FOQVJZ", b"Q0FOQVJa")
+        digest = hashlib.sha256(finish.SLOT_A_PATTERNS[0][1].search(PEM).group()).hexdigest()
+        with tempfile.TemporaryDirectory() as d:
+            bad = self.check(d, {("private key", digest)}, data=PEM + b"\0" * 64 + other)
+        self.assertEqual(len(bad), 1)
+
+    def test_a_key_across_a_chunk_boundary_is_found_once(self):
+        # REQ: HW-1
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.multiple(finish, SCAN_CHUNK=1 << 16, SCAN_OVERLAP=4096):
+            bad = self.check(d, data=b"x" * ((1 << 16) - 20) + PEM)
+        self.assertEqual(len(bad), 1)
+
+    def test_a_disk_range_that_differs_from_the_split_file_fails(self):
+        # REQ: HW-1
+        with tempfile.TemporaryDirectory() as d:
+            bad = self.check(d, data=b"a" * 1000, tree=b"t" * 1000, disk_writes=[(PART["agentos_1.0"] + 700, b"Z")])
+            self.assertEqual(bad, ["disk differs from usr.raw at byte 700"])
+            bad = self.check(d, data=b"a" * 1000, tree=b"t" * 1000,
+                             disk_writes=[(PART["agentos_1.0_verity"] + 999, b"Z")])
+            self.assertEqual(bad, ["disk differs from usr-verity.raw at byte 999"])
+
+    def test_data_in_the_slack_after_the_split_file_fails(self):
+        # REQ: HW-1
+        # The verity partition is larger than its hash tree; nothing hashes what follows it.
+        with tempfile.TemporaryDirectory() as d:
+            bad = self.check(d, data=b"a" * 1000, tree=b"t" * 1000,
+                             disk_writes=[(PART["agentos_1.0_verity"] + 5000, b"payload")])
+            self.assertEqual(len(bad), 1)
+            self.assertIn("after usr-verity.raw", bad[0])
+            self.assertEqual(self.check(d, data=b"a" * 1000, tree=b"t" * 1000), [])
+
+    def test_a_file_larger_than_its_partition_fails(self):
+        # REQ: HW-1
+        with tempfile.TemporaryDirectory() as d:
+            img, data, tree = self.build(d, data=b"a", tree=b"t")
+            data.write_bytes(b"a" * (self.SIZE + 1))
+            bad = finish.slot_a_violations(img, TABLE, data, tree, frozenset())
+        self.assertIn("does not fit", bad[0])
+
+    def test_without_slot_as_two_partitions_it_is_reported(self):
+        # REQ: HW-1
+        table = {"sectorsize": 512, "partitions": [p for p in TABLE["partitions"] if p["name"] != "agentos_1.0"]}
+        with tempfile.TemporaryDirectory() as d:
+            img, data, tree = self.build(d)
+            self.assertEqual(finish.slot_a_violations(img, table, data, tree, frozenset()),
+                             ["expected /usr slot A's two partitions"])
+
+    def test_main_checks_slot_a_after_verifying_usr(self):
+        # REQ: HW-1
+        src = (IMG / "finish_image.py").read_text()
+        self.assertLess(src.index("    verify_usr(data, tree, roothash)\n"), src.index("    bad = slot_a_violations("))
+
+    def test_the_shipped_allowlist_parses(self):
+        # REQ: HW-1
+        allowed = finish.slot_a_allowed()
+        for kind, digest in allowed:
+            self.assertIn(kind, [k for k, _ in finish.SLOT_A_PATTERNS])
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+
+class ForeignDisksTest(unittest.TestCase):
+    """ONB-2, HW-8: the guest reports every mount or swap on a disk other than the boot disk."""
+
+    SCRIPT = IMG / "mkosi/mkosi.extra/usr/lib/agentos/foreign-disks"
+
+    def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3"):
+        """Runs the script with stand-ins for findmnt, swapon, readlink and lsblk. mounts and swaps
+        are space-separated sources; chains maps a device to its lsblk -s lines ("NAME TYPE")."""
+        chains = chains or {}
+        lines = lambda words: "".join("echo '%s'\n" % w for w in words.split())
+
+        def stub(t, name, body):
+            (t / name).write_text("#!/bin/sh\n" + body)
+            (t / name).chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            stub(t, "findmnt", 'case "$*" in "-no SOURCE /") echo %s ;; *)\n%s;; esac\n' % (root, lines(mounts)))
+            stub(t, "swapon", lines(swaps))
+            stub(t, "readlink", 'echo "$2"\n')
+            stub(t, "lsblk", 'case "$3" in\n%s*) exit 1 ;; esac\n' % "".join(
+                "%s) %s;;\n" % (dev, lines("\n".join(ln.replace(" ", "_") for ln in out)).replace("_", " "))
+                for dev, out in chains.items()))
+            script = self.SCRIPT.read_text().replace('[ -b "$d" ]', "true")
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]))
+            return subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True).stdout.strip()
+
+    BOOT = {"/dev/vda3": ["/dev/vda3 part", "/dev/vda disk"], "/dev/vda1": ["/dev/vda1 part", "/dev/vda disk"],
+            "/dev/mapper/usr": ["/dev/mapper/usr dm", "/dev/vda4 part", "/dev/vda disk", "/dev/vda5 part", "/dev/vda disk"]}
+
+    def test_only_the_boot_disk_reads_none(self):
+        # REQ: HW-8, ONB-2
+        out = self.run_script("/dev/vda3 /dev/vda1 /dev/mapper/usr tmpfs proc 9p-share systemd-1", chains=self.BOOT)
+        self.assertEqual(out, "foreign=none")
+
+    def test_a_read_only_mount_of_a_host_partition_is_listed(self):
+        # REQ: HW-8, ONB-2
+        chains = dict(self.BOOT, **{"/dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1", chains=chains), "foreign=/dev/vdb1")
+
+    def test_a_swap_on_a_host_disk_is_listed(self):
+        # REQ: HW-8, ONB-2
+        chains = dict(self.BOOT, **{"/dev/vdb3": ["/dev/vdb3 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3", swaps="/dev/vdb3", chains=chains), "foreign=/dev/vdb3")
+
+    def test_a_loop_device_is_listed(self):
+        # REQ: HW-8, ONB-2
+        chains = dict(self.BOOT, **{"/dev/loop0": ["/dev/loop0 loop"]})
+        self.assertEqual(self.run_script("/dev/vda3 /dev/loop0", chains=chains), "foreign=/dev/loop0")
+
+    def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
+        # REQ: HW-8, ONB-2
+        self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT), "foreign=unknown")
+        self.assertEqual(self.run_script("/dev/vda3", chains={}), "foreign=unknown")
+
+    def test_boot_report_prints_the_line_and_ci_reads_it_on_both_boots(self):
+        # REQ: HW-8, ONB-2
+        report = (IMG / "mkosi/mkosi.extra/usr/lib/agentos/boot-report").read_text()
+        self.assertIn('echo "agentos-disks: $(/usr/lib/agentos/foreign-disks 2>/dev/null || echo foreign=unknown)"', report)
+        sh = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('has "$W/console.log" "agentos-disks: foreign=none"', sh)
+        self.assertIn('has "$W/console-e2e.log" "agentos-disks: foreign=none"', sh)
+        self.assertRegex(sh, r'UNTIL="agentos-e2e: DONE[^\n]* boot "\$W/console-e2e\.log" "\$W/e2e\.raw" "\$H2"\n')
+        self.assertIn("MISS host disk unchanged (e2e boot)", sh)
 
 
 class HostDiskBootTest(unittest.TestCase):
