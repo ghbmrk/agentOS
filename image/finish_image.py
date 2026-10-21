@@ -496,7 +496,8 @@ def main(out, version):
     verify_usr(data, tree, roothash)
     bad = slot_a_violations(str(img), partition_table(str(img)), data, tree)
     if bad:
-        sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s" % bad)
+        sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s; a key that ships in "
+                 "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files, boot)

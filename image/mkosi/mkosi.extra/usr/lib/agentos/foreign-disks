@@ -1,17 +1,27 @@
 #!/bin/sh
 # Prints "foreign=none", or "foreign=" and the block devices, comma-separated, that are mounted or
 # swapped on and do not sit on the disk the box booted from: a host PC's disk, a loop device, a
-# USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). Sources that
-# are not block devices (tmpfs, proc, a 9p share) are not disks and are not listed. Prints
-# "foreign=unknown" when the boot disk or a device cannot be read, so a damaged answer is no "none".
-# boot-report prints this on every boot and CI reads it with a host disk attached (ci_boot.sh).
+# USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). The mounts are
+# read from every process's mountinfo, so a mount in a private namespace counts. Sources that are
+# not block devices (tmpfs, proc, a 9p share) are not disks and are not listed. Prints
+# "foreign=unknown" when the boot disk, the mount listing or a device cannot be read, so a damaged
+# answer is no "none". boot-report prints this on every boot and CI reads it with a host disk
+# attached (ci_boot.sh); the end-to-end run prints it again when it is done.
+proc=${AGENTOS_PROC:-/proc}
 roots() { lsblk -snrpo NAME,TYPE "$1" 2>/dev/null | while read -r name type; do
 	case $type in disk | loop | rom) echo "$name" ;; esac
 done | sort -u; }
-boot=$(roots "$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')")
+root=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')
+boot=$(roots "$root")
 [ -n "$boot" ] && [ "$(echo "$boot" | wc -l)" = 1 ] || { echo "foreign=unknown"; exit 0; }
+# A source is the word two after the lone "-" in a mountinfo line. A process can exit while its file is
+# read, so errors are ignored; the listing must still name the root source, or it is not the listing.
+srcs=$( { cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
+	awk '{ for (i = 1; i < NF; i++) if ($i == "-") { print $(i + 2); break } }'
+	tail -n +2 "$proc/swaps" 2>/dev/null | cut -d' ' -f1; } | sed 's/\[.*//' | sort -u)
+echo "$srcs" | grep -qxF "$root" && [ -r "$proc/swaps" ] || { echo "foreign=unknown"; exit 0; }
 bad=
-for s in $( { findmnt -rno SOURCE; swapon --noheadings --raw --show=NAME; } 2>/dev/null | sed 's/\[.*//' | sort -u); do
+for s in $srcs; do
 	case $s in /dev/*) ;; *) continue ;; esac
 	d=$(readlink -f "$s")
 	[ -b "$d" ] || { bad="$bad,$s"; continue; }

@@ -2,6 +2,8 @@
 # One per line: the kind, a space, the SHA-256 of the matched bytes (the key header and the start
 # of its body), then "# why". A key not listed here fails the build, which prints its SHA-256;
 # review the file it sits in, then add it. An empty list means no key ships in /usr.
+# The hash covers the bytes SECRET_PATTERNS matches, so changing the private-key pattern in
+# finish_image.py changes every hash here: the next build lists them again to re-add.
 private key 282b7f8a15853c74cc6b4f5a402a760ceb273e671d74c0d5e7eb7b775642bbc6  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
 private key b622eef9c9318240944ad94c12982297f07f707eb52bda4f12aed20b8778e078  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)
 private key 4e3c543ae1697c1f4cb40b2f77502077bfa01f4fded253ff3aa770ed97c7746b  # libgnutls30 FIPS self-test keys (next to gnutls_pk_self_test in the library; public test data)

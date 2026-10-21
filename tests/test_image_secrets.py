@@ -235,6 +235,15 @@ class SlotATest(unittest.TestCase):
             bad = self.check(d, data=b"x" * ((1 << 16) - 20) + PEM)
         self.assertEqual(len(bad), 1)
 
+    def test_a_key_starting_in_the_overlap_is_left_to_the_next_chunk(self):
+        # REQ: HW-1
+        # The first read runs on past its chunk by the overlap; a match that starts there is the next
+        # chunk's, so it is reported once.
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.multiple(finish, SCAN_CHUNK=1 << 16, SCAN_OVERLAP=4096):
+            bad = self.check(d, data=b"x" * ((1 << 16) + 100) + PEM)
+        self.assertEqual(len(bad), 1)
+
     def test_a_disk_range_that_differs_from_the_split_file_fails(self):
         # REQ: HW-1
         with tempfile.TemporaryDirectory() as d:
@@ -288,9 +297,10 @@ class ForeignDisksTest(unittest.TestCase):
 
     SCRIPT = IMG / "mkosi/mkosi.extra/usr/lib/agentos/foreign-disks"
 
-    def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3"):
-        """Runs the script with stand-ins for findmnt, swapon, readlink and lsblk. mounts and swaps
-        are space-separated sources; chains maps a device to its lsblk -s lines ("NAME TYPE")."""
+    def run_script(self, mounts, swaps="", chains=None, root="/dev/vda3", namespaces=None, real_b=False):
+        """Runs the script on a stand-in /proc. mounts and swaps are space-separated sources;
+        namespaces is a list of further mount lists, each its own process's mountinfo; chains maps a
+        device to its lsblk -s lines ("NAME TYPE"). Unless real_b, every /dev name counts as a block device."""
         chains = chains or {}
         lines = lambda words: "".join("echo '%s'\n" % w for w in words.split())
 
@@ -300,14 +310,22 @@ class ForeignDisksTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as t:
             t = pathlib.Path(t)
-            stub(t, "findmnt", 'case "$*" in "-no SOURCE /") echo %s ;; *)\n%s;; esac\n' % (root, lines(mounts)))
-            stub(t, "swapon", lines(swaps))
+            proc = t / "proc"
+            for pid, ms in enumerate([mounts] + list(namespaces or []), 1):
+                (proc / str(pid)).mkdir(parents=True)
+                (proc / str(pid) / "mountinfo").write_text("".join(
+                    "%d 1 0:%d / /m%d rw - ext4 %s rw\n" % (i, i, i, m) for i, m in enumerate(ms.split(), 1)))
+            (proc / "swaps").write_text("Filename Type Size Used Priority\n" +
+                                        "".join("%s partition 1 0 -2\n" % w for w in swaps.split()))
+            stub(t, "findmnt", "echo %s\n" % root)
             stub(t, "readlink", 'echo "$2"\n')
             stub(t, "lsblk", 'case "$3" in\n%s*) exit 1 ;; esac\n' % "".join(
                 "%s) %s;;\n" % (dev, lines("\n".join(ln.replace(" ", "_") for ln in out)).replace("_", " "))
                 for dev, out in chains.items()))
-            script = self.SCRIPT.read_text().replace('[ -b "$d" ]', "true")
-            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]))
+            script = self.SCRIPT.read_text()
+            if not real_b:
+                script = script.replace('[ -b "$d" ]', "true")
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_PROC=str(proc))
             return subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True).stdout.strip()
 
     BOOT = {"/dev/vda3": ["/dev/vda3 part", "/dev/vda disk"], "/dev/vda1": ["/dev/vda1 part", "/dev/vda disk"],
@@ -333,6 +351,24 @@ class ForeignDisksTest(unittest.TestCase):
         chains = dict(self.BOOT, **{"/dev/loop0": ["/dev/loop0 loop"]})
         self.assertEqual(self.run_script("/dev/vda3 /dev/loop0", chains=chains), "foreign=/dev/loop0")
 
+    def test_a_mount_in_another_namespace_is_listed(self):
+        # REQ: HW-8, ONB-2
+        chains = dict(self.BOOT, **{"/dev/vdb1": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3", namespaces=["/dev/vda3 /dev/vdb1"], chains=chains),
+                         "foreign=/dev/vdb1")
+
+    def test_a_listing_without_the_root_source_is_unknown_not_none(self):
+        # REQ: HW-8, ONB-2
+        # A mount listing that cannot be read leaves no root source in it; that must not read as none.
+        self.assertEqual(self.run_script("", chains=self.BOOT), "foreign=unknown")
+
+    def test_a_dev_source_that_is_not_a_block_device_is_listed(self):
+        # REQ: HW-8, ONB-2
+        # Neither name is a block device here (/dev/null is a character device), so both are foreign.
+        chains = dict(self.BOOT, **{"/dev/null": ["/dev/null disk"]})
+        self.assertEqual(self.run_script("/dev/vda3 /dev/null", chains=chains, real_b=True),
+                         "foreign=/dev/null,/dev/vda3")
+
     def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2
         self.assertEqual(self.run_script("/dev/vda3 /dev/vdb1", chains=self.BOOT), "foreign=unknown")
@@ -343,8 +379,12 @@ class ForeignDisksTest(unittest.TestCase):
         report = (IMG / "mkosi/mkosi.extra/usr/lib/agentos/boot-report").read_text()
         self.assertIn('echo "agentos-disks: $(/usr/lib/agentos/foreign-disks 2>/dev/null || echo foreign=unknown)"', report)
         sh = (IMG / "ci_boot.sh").read_text()
-        self.assertIn('has "$W/console.log" "agentos-disks: foreign=none"', sh)
-        self.assertIn('has "$W/console-e2e.log" "agentos-disks: foreign=none"', sh)
+        # Exactly one line of each kind, reading foreign=none: a "none" line cannot hide a listing.
+        self.assertIn('disks_none "$W/console.log" "agentos-disks:"', sh)
+        self.assertIn('disks_none "$W/console-e2e.log" "agentos-disks:"', sh)
+        self.assertIn('disks_none "$W/console-e2e.log" "agentos-disks-end:"', sh)
+        unit = (IMG / "e2e/agentos-e2e.service").read_text()
+        self.assertIn("ExecStartPost=/bin/sh -c 'echo \"agentos-disks-end: $(/usr/lib/agentos/foreign-disks)\"'", unit)
         self.assertRegex(sh, r'UNTIL="agentos-e2e: DONE[^\n]* boot "\$W/console-e2e\.log" "\$W/e2e\.raw" "\$H2"\n')
         self.assertIn("MISS host disk unchanged (e2e boot)", sh)
 
