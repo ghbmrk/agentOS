@@ -153,8 +153,11 @@ func (a *Account) eligible(m Mail) (string, bool) {
 	return u, m.Class == "bulk" && reason == ROK && !isAlert(m.Raw, w)
 }
 
-// Bind ties the account to the kernel whose log it serves. Do runs only a step
-// that log shows the kernel dispatched.
+// Bind ties the account to the kernel whose log it serves, in the kernel's
+// own process. Do then runs only a step that log shows the kernel
+// dispatched, whatever view the caller passes. An account that is not bound
+// (the clerk's own process, behind run.ServeClerk) judges the view the
+// kernel sent with the request instead (ASSUMPTIONS.md MIG-4-mail-reader-6).
 func (a *Account) Bind(s *kernel.State) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -180,23 +183,28 @@ func Reason(code string) string {
 	return code
 }
 
-// Do runs one step. Whatever the request and view say, it acts only on a step
-// the bound kernel's log shows it dispatched, and judges the mail from its own
-// copy: class, VRB-2 and retention are the clerk's, not the caller's.
-func (a *Account) Do(r kernel.Request, _ kernel.View) kernel.Result {
+// Do runs one step. It acts only on a step the bound kernel's log, or the
+// kernel's view when unbound (Bind), shows it dispatched, and judges the mail
+// from its own copy: class, VRB-2 and retention are the clerk's, not the
+// caller's.
+func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := r.Step()
-	if a.state == nil {
+	view := v
+	if a.state != nil { // a nil *State in view would not be a nil View
+		view = a.state
+	}
+	if view == nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
 	}
-	if _, ok := a.state.Dispatched(r); !ok {
+	if _, ok := view.Dispatched(r); !ok {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, "not-dispatched")
 	}
 	if a.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := clerk.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, a.state); rf != nil {
+	if rf := clerk.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, view); rf != nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {
