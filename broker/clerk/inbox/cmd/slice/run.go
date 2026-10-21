@@ -119,7 +119,7 @@ func Run(in Input) (Outcome, error) {
 	}
 	standing := in.Standing != nil
 
-	acct, err := inbox.NewAccount(anchors, handleSecret, func() inbox.World { return in.World }, in.Mails,
+	acct, err := inbox.NewAccount(anchors, handleSecret, func() inbox.World { return in.World }, in.Mails, inbox.Synthetic{},
 		in.RetentionDays, in.OneClickBody)
 	if err != nil {
 		return Outcome{}, err

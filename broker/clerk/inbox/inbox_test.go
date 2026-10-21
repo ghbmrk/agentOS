@@ -54,13 +54,19 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 		ms = append(ms, Mail{ID: m.ID, Raw: raw[m.ID], Class: m.Class})
 	}
 	ms = append(ms, Mail{ID: "A01", Raw: raw["M01"], Class: "alert"})
+	return newRigOn(t, w, ms, Synthetic{}, retention, caveats...)
+}
+
+// newRigOn boots a real kernel over the given mails, read from box.
+func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, caveats ...key.Caveat) *rig {
+	t.Helper()
 	ownerPub, ownerPriv := seed(1)
 	holderPub, holderPriv := seed(2)
 	headPub, headPriv := seed(3)
 	plannerPub, plannerPriv := seed(4)
 	r := &rig{world: &w, plannerPriv: plannerPriv, now: t0}
 	var err error
-	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, retention, "List-Unsubscribe=One-Click")
+	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,14 +399,14 @@ func TestHandleIsKeyedAndWide(t *testing.T) {
 	if h != a.Handle("news@shop.test") || h == a.Handle("letters@weekly.test") {
 		t.Fatal("handle is not a function of the address")
 	}
-	other, err := NewAccount(nil, []byte("another-secret-key-0"), func() World { return World{} }, nil, 30, "")
+	other, err := NewAccount(nil, []byte("another-secret-key-0"), func() World { return World{} }, nil, Synthetic{}, 30, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if other.Handle("news@shop.test") == h {
 		t.Fatal("handle does not depend on the secret")
 	}
-	if _, err := NewAccount(nil, []byte("short"), func() World { return World{} }, nil, 30, ""); err == nil {
+	if _, err := NewAccount(nil, []byte("short"), func() World { return World{} }, nil, Synthetic{}, 30, ""); err == nil {
 		t.Fatal("a secret under 128 bits was accepted")
 	}
 }
