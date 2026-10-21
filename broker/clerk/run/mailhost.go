@@ -178,15 +178,8 @@ func ListenMail(path string, uid int) (net.Listener, error) { return ListenKerne
 
 // ServeMail answers side's calls to h on ln until ln closes.
 func ServeMail(ln net.Listener, h *MailHost, side MailSide) error {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return err
-		}
-		go serveOne(conn, func(name string, args json.RawMessage) (json.RawMessage, error) {
+	return serveConns(ln, maxConns, func(conn net.Conn) {
+		serveOne(conn, func(name string, args json.RawMessage) (json.RawMessage, error) {
 			f, ok := side.ops[name]
 			if !ok {
 				return nil, errors.New("run: the " + side.name + " socket has no call " + name)
@@ -197,7 +190,7 @@ func ServeMail(ln net.Listener, h *MailHost, side MailSide) error {
 			}
 			return json.Marshal(res)
 		})
-	}
+	})
 }
 
 // MailOwner is the owner side's caller of the mail process.
