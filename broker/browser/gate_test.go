@@ -88,6 +88,17 @@ func fakeDriver() {
 				"snapshot": strings.Repeat("- text: kettle\n", MaxSnapshot/10)})
 			r = big
 		}
+		if string(r) == `"huge"` {
+			// Every field oversized, and a snapshot JSON escapes sixfold.
+			navs := make([]string, 100)
+			for i := range navs {
+				navs[i] = "https://elsewhere.example.test/" + strings.Repeat("x", 3000)
+			}
+			huge, _ := json.Marshal(map[string]any{"ok": true, "url": "https://shop.example.test/",
+				"title": strings.Repeat("t", 64<<10), "detail": strings.Repeat("d", 64<<10),
+				"refused_navigations": navs, "snapshot": strings.Repeat("- text: \x01<\n", MaxSnapshot/4)})
+			r = huge
+		}
 		if string(r) == `"exit"` {
 			os.Exit(3)
 		}

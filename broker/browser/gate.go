@@ -3,6 +3,7 @@ package browser
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,13 @@ import (
 
 // MaxLine bounds one driver reply.
 const MaxLine = 8 << 20
+
+// Bounds on a reply's other fields.
+const (
+	maxTitle     = 1024
+	maxErrDetail = 4096
+	maxRefused   = 16
+)
 
 // MaxDownloadScan bounds how much of a downloaded file the gate reads to scan;
 // a larger file is withheld rather than passed unscanned.
@@ -55,6 +63,10 @@ type Config struct {
 	// typing and selects free (G9, D-147). Left false, identity is unknown
 	// and the gate fails closed.
 	LoggedOut bool
+	// TokenParams are the recipe's session and anti-forgery token query
+	// parameters. Their values are left out of an approval's print, so a
+	// rotated token is the same submit (CLK-3).
+	TokenParams []string
 }
 
 // Result is everything an agent can see from one request. Fields the driver
@@ -76,6 +88,8 @@ type Result struct {
 	// "approval_required"): the role, quoted name and target of the ref, or
 	// the URL of a navigate, after the output filter.
 	To string `json:"to,omitempty"`
+	// Approval is what the owner would approve for it (CLK-3).
+	Approval *Approval `json:"approval,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -85,6 +99,9 @@ type Gate struct {
 	filter  filter
 	ws      string
 	links   stateLinks
+	// secret keys approval prints; it never leaves the gate.
+	secret []byte
+	tokens map[string]bool
 
 	mu      sync.Mutex
 	cmd     *childproc.Cmd
@@ -105,6 +122,8 @@ type Gate struct {
 	// every snapshot with an omitted field is withheld: forgetting agent
 	// text would let its echo answer a guess (PR #2273 security delta).
 	lost bool
+	// sent is every approval print this gate has sent: each at most once.
+	sent map[string]bool
 }
 
 // Start launches the driver for one account.
@@ -130,6 +149,14 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60 * time.Second
 	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, err
+	}
+	tokens := map[string]bool{}
+	for _, t := range cfg.TokenParams {
+		tokens[t] = true
+	}
 	args := append(append([]string{}, cfg.Driver[1:]...), "--origins")
 	args = append(append(args, cfg.Origins...), "--workspace", ws)
 	env := childproc.NewEnv(append([]string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + ws, "LANG=C.UTF-8"}, cfg.Env...)...)
@@ -147,6 +174,7 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
+		secret: secret, tokens: tokens, sent: map[string]bool{},
 		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
@@ -210,38 +238,92 @@ var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is no
 // do runs one request line and returns what the agent may see. Only the
 // clerk calls it. An action that needs the owner's approval is refused
 // unsent (approval_required): no recipe covers any page yet, so it needs
-// the owner's approval of the exact request (CLK-3), and To names what it
-// reaches. effect reports an action that may change state at the site
-// (judgeClosed), sent only because the session is logged out; lost reports
-// that the executor stopped after it was written, so whether it acted is
-// unknown (KRN-8).
+// the owner's approval of the exact request (CLK-3), which the result's
+// Approval describes and submit then sends. effect reports an action that
+// may change state at the site (judgeClosed), sent only because the
+// session is logged out; lost reports that the executor stopped after it
+// was written, so whether it acted is unknown (KRN-8).
 func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.stopped {
-		return stoppedResult, false, false
-	}
-	req, err := Parse(raw)
-	if err != nil {
-		d, _ := g.filter.text(err.Error())
-		return Result{Error: "protocol", Detail: d}, false, false
-	}
-	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
-		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}, false, false
-	}
-	l, effect, refused := g.judgeClosed(req)
-	need := effect
-	if refused == nil && g.cfg.LoggedOut {
-		l, need, refused = g.judgeLoggedOut(req)
-	}
+	req, l, effect, need, refused := g.judge(raw)
 	if refused != nil {
 		return *refused, false, false
 	}
 	if need {
-		t, _ := g.filter.text(l.to())
-		return Result{Error: "approval_required", To: t,
-			Detail: "this action may change state at the site and needs the owner's approval of this exact request, which this browser cannot ask for yet (CLK-3); nothing was sent"}, false, false
+		a := g.approval(req, l)
+		return Result{Error: "approval_required", To: a.To, Approval: &a,
+			Detail: "this action may change state at the site and needs the owner's approval of this exact request; nothing was sent"}, false, false
 	}
+	out := g.forward(ctx, req)
+	return out, effect, effect && g.stopped
+}
+
+// submit sends raw, an action the owner approved as print reaching to,
+// only if the gate would still ask for that very approval now (CLK-3,
+// CLK-2), and at most once per print. written reports that it reached the
+// driver; lost that the executor stopped after it was written (KRN-8).
+func (g *Gate) submit(ctx context.Context, raw []byte, to, print string) (res Result, written, lost bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, l, _, need, refused := g.judge(raw)
+	switch {
+	case refused != nil:
+		return *refused, false, false
+	case !need:
+		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}, false, false
+	}
+	if a := g.approval(req, l); a.Print != print || a.To != to {
+		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
+	}
+	if g.sent[print] {
+		return Result{Error: "already_sent", Detail: "this approved request was sent already; nothing was sent"}, false, false
+	}
+	g.sent[print] = true
+	out := g.forward(ctx, req)
+	return out, true, g.stopped
+}
+
+// print is the approval print the gate would ask for raw now, "" if it
+// would ask for none.
+func (g *Gate) print(raw []byte) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, l, _, need, refused := g.judge(raw)
+	if refused != nil || !need {
+		return ""
+	}
+	return g.approval(req, l).Print
+}
+
+// judge parses raw and judges it: what it reaches, whether it may change
+// state at the site (effect, judgeClosed) and whether it needs the owner's
+// approval here (need: effect, or under D-147 judgeLoggedOut's answer). A
+// request it refuses was not sent.
+func (g *Gate) judge(raw []byte) (req Request, l link, effect, need bool, refused *Result) {
+	if g.stopped {
+		stopped := stoppedResult
+		return req, l, false, false, &stopped
+	}
+	req, err := Parse(raw)
+	if err != nil {
+		d, _ := g.filter.text(err.Error())
+		return req, l, false, false, &Result{Error: "protocol", Detail: d}
+	}
+	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
+		return req, l, false, false, &Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
+	}
+	l, effect, refused = g.judgeClosed(req)
+	need = effect
+	if refused == nil && g.cfg.LoggedOut {
+		l, need, refused = g.judgeLoggedOut(req)
+	}
+	return req, l, effect, need, refused
+}
+
+// forward sends a request the gate has allowed, recording what the agent
+// put on pages.
+func (g *Gate) forward(ctx context.Context, req Request) Result {
 	switch req.Verb {
 	case "type":
 		g.say(req.Text)
@@ -252,21 +334,26 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 	if req.Verb == "type" && out.OK {
 		g.remember(req, out.URL)
 	}
-	return out, effect, effect && g.stopped
+	return out
 }
 
-// effect reports whether the request line raw may change state at the site
-// as judgeClosed sees it now. A line the gate cannot judge, its ref unseen,
-// counts as one (fail closed); a line the protocol refuses was never sent.
-func (g *Gate) effect(raw []byte) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+// mayAct reports whether raw may have changed state at the site, judged
+// without the refs: with no record of what Do judged, as after a restart,
+// any line naming a ref may have acted (KRN-8).
+func (g *Gate) mayAct(raw []byte) bool {
 	req, err := Parse(raw)
 	if err != nil {
 		return false
 	}
-	_, effect, refused := g.judgeClosed(req)
-	return effect || refused != nil
+	switch req.Verb {
+	case "snapshot", "screenshot":
+		return false
+	case "type":
+		return req.Submit
+	case "navigate":
+		return g.links.match(req.URL)
+	}
+	return true
 }
 
 // judgeClosed reports what req reaches and whether it may change state at
@@ -519,6 +606,15 @@ func (g *Gate) post(verb string, res Result) (Result, bool) {
 		n += k
 	}
 	res.Redactions += n
+	// Everything but the snapshot is bounded small, so a logged result is
+	// bounded (MaxDetail).
+	res.Title, res.Detail = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail)
+	if len(res.RefusedNavigations) > maxRefused {
+		res.RefusedNavigations = res.RefusedNavigations[:maxRefused]
+	}
+	for i := range res.RefusedNavigations {
+		res.RefusedNavigations[i] = capText(res.RefusedNavigations[i], maxTitle)
+	}
 	if len(res.Snapshot) > MaxSnapshot {
 		cut := MaxSnapshot
 		for cut > 0 && !utf8.RuneStart(res.Snapshot[cut]) {
