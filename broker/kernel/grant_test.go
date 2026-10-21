@@ -3,6 +3,7 @@ package kernel_test
 // REQ: KEY-1, KEY-4, KEY-6, KRN-7, CLK-2
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -195,5 +196,57 @@ func TestClerkKeepsTheGrantHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	}
 	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != kernel.CGrantHeld {
 		t.Fatalf("detail %q, want %q", d, kernel.CGrantHeld)
+	}
+}
+
+// A first link is a grant of its own: one under a granted root, never
+// granted itself, confers nothing (D-146, KEY-1).
+func TestAFirstLinkNotGrantedConfersNothing(t *testing.T) {
+	r := newRig(t)
+	ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, 0, 1<<39)
+	must(t, err)
+	if c := admits(r, r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}}), 0); c != kernel.CUngranted {
+		t.Fatalf("an ungranted first link: %q", c)
+	}
+}
+
+// A first link is never live before its root, whatever time its entry
+// carries (a kernel clock set back, KRN-7).
+func TestAFirstLinkIsNeverLiveBeforeItsRoot(t *testing.T) {
+	r := newRig(t)
+	root := trashRoot(r, "r2", r.owner)
+	must(t, r.k.Issue(10*hour, root))
+	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
+	must(t, err)
+	must(t, r.k.Issue(0, ck))
+	rf, _ := r.k.State().Granted(root.Tip())
+	if from, _ := r.k.State().Granted(ck.Tip()); from < rf {
+		t.Fatalf("first link live at %d, its root at %d", from, rf)
+	}
+}
+
+// The fold, not only Issue, checks a grant against the passkeys in the set at
+// its entry: a log that carries a cut-off phone's grant does not grant it.
+func TestReplayGrantsNothingFromACutOffPasskey(t *testing.T) {
+	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	root := trashRoot(r, "phone", phone)
+	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 0, 10)
+	must(t, err)
+	must(t, r.k.Issue(0, root, ck))
+	must(t, r.k.Unenroll(1, phone.pub))
+	again, err := key.ClerkKey(root, phone.priv, r.holder.pub, 2, 10)
+	must(t, err)
+	es := r.k.Log().Entries()
+	body, _ := json.Marshal(struct{ Keys []key.Key }{[]key.Key{again}})
+	es = append(es, kernel.Entry{Seq: uint64(len(es) + 1), At: 2, Type: kernel.TKeyIssued, V: 1, Body: body})
+	s, err := kernel.Replay(r.anchors(), es)
+	must(t, err)
+	if _, ok := s.Granted(again.Tip()); ok {
+		t.Fatal("a cut-off passkey's grant folded in")
+	}
+	if _, ok := s.Granted(ck.Tip()); !ok {
+		t.Fatal("its earlier grant stands")
 	}
 }
