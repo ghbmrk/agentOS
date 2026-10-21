@@ -85,12 +85,13 @@ def legitimate_peak():
 
 
 def seen_peak():
-    """What one Live.Opened call can hold (#2685): the search's UIDs at the field bound (M21, about a
-    million, 4 bytes each), one SeenFrom batch session's fixed read budget, and the senders it keeps (openedMax charges each
-    its map entry's cost, which TestOpenedHoldsNoMoreThanItCharges measures)."""
+    """What one Store.Seen call can hold (#2685): the search's UIDs at the field bound (M21, about a
+    million, 4 bytes each) and one batch session's fixed read budget. What Live.Opened keeps is the
+    mail clerk's own memory (openedMax, #2684), never the vault's: see
+    test_the_vault_never_reads_who_was_opened."""
     imap = "clerk/inbox/imapsmtp/imapsmtp.go"
-    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "fromMax") + 8 * KiB)
-    return 4 * MiB + batch + go_int("clerk/inbox/mailbox.go", "openedMax")
+    batch = 16 * MiB + go_int(imap, "seenBatch") * (go_int(imap, "headMax") + 8 * KiB)
+    return 4 * MiB + batch
 
 
 class VaultMemoryCeiling(unittest.TestCase):
@@ -104,6 +105,15 @@ class VaultMemoryCeiling(unittest.TestCase):
     def test_reading_who_was_opened_costs_no_more_than_a_fetch(self):
         fetch = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
         self.assertLessEqual(seen_peak(), fetch)
+
+    def test_the_vault_never_reads_who_was_opened(self):
+        # The vault's mail store wraps the transport without Seen, and nothing outside the mail
+        # clerk's package links Live, so neither Seen nor openedMax counts in the vault's ceiling.
+        self.assertNotIn(".Seen(", (BROKER / "mail/imapsmtp/imapsmtp.go").read_text())
+        inbox = BROKER / "clerk/inbox"
+        for f in BROKER.rglob("*.go"):
+            if inbox not in f.parents and "/vendor/" not in str(f):
+                self.assertNotIn('broker/clerk/inbox"', f.read_text(), f)
 
     def test_memory_max_is_set_within_the_derived_range(self):
         cap = size(self.one("MemoryMax"))

@@ -57,6 +57,9 @@ func newRig(t *testing.T, retention int, caveats ...key.Caveat) *rig {
 	return newRigOn(t, w, ms, Synthetic{}, retention, caveats...)
 }
 
+// rigClerk is what the rig's kernel runs for the account; a test may wrap it.
+var rigClerk = func(a *Account) kernel.Clerk { return a }
+
 // newRigOn boots a real kernel over the given mails, read from box.
 func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, caveats ...key.Caveat) *rig {
 	t.Helper()
@@ -75,7 +78,7 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.k, err = kernel.Boot(log, anchors(), map[string]kernel.Clerk{Name: r.acct}, t0-dayMS)
+	r.k, err = kernel.Boot(log, anchors(), map[string]kernel.Clerk{Name: rigClerk(r.acct)}, t0-dayMS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +186,41 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 		t.Fatalf("refusal %+v", rf)
 	}
 }
+
+// refusingView answers no to everything a clerk asks of a view.
+type refusingView struct{ kernel.View }
+
+func (refusingView) Granted(key.ID) (int64, bool)                         { return 0, false }
+func (refusingView) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) { return nil, nil }
+func (refusingView) ChangesView() *key.Changes                            { return &key.Changes{} }
+func (refusingView) LedgerBefore(uint64) key.Ledger                       { return noUses{} }
+func (refusingView) Dispatched(kernel.Request) (kernel.Dispatch, bool) {
+	return kernel.Dispatch{}, false
+}
+func (refusingView) OneOffLine(key.ID, int64) int64 { return 0 }
+
+// A bound account judges only its kernel's state: a step that kernel
+// dispatched runs even when the view handed to Do refuses everything, so a
+// caller's view can neither stop nor steer the check.
+func TestABoundAccountJudgesOnlyItsKernel(t *testing.T) {
+	defer func(f func(*Account) kernel.Clerk) { rigClerk = f }(rigClerk)
+	rigClerk = func(a *Account) kernel.Clerk { return viewSwap{a} }
+	r := newRig(t, 30)
+	r.run(t, r.step("real", key.Organize, map[string]string{"target": "M22", "label": "agentOS/personal"}))
+	if fx := r.acct.Effects(); len(fx) != 1 || fx[0].Verb != string(key.Organize) {
+		t.Fatalf("dispatched step under a refusing view: effects %+v", fx)
+	}
+}
+
+type noUses struct{}
+
+func (noUses) Uses(key.ID) []key.Use { return nil }
+
+// viewSwap hands the account a refusingView in place of the kernel's.
+type viewSwap struct{ a *Account }
+
+func (w viewSwap) Do(r kernel.Request, _ kernel.View) kernel.Result { return w.a.Do(r, refusingView{}) }
+func (w viewSwap) Probe(r kernel.Request, _ kernel.View) string     { return w.a.Probe(r, refusingView{}) }
 
 // An unbound account, as in the clerk's own process, judges the view the
 // kernel sends: it acts on a step that view shows dispatched and refuses one
