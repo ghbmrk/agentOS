@@ -340,7 +340,7 @@ class ForeignDisksTest(unittest.TestCase):
                 for dev, out in keyed.items()))
             script = self.SCRIPT.read_text()
             if not real_b:
-                script = script.replace('[ -b "$d" ]', "true")
+                script = script.replace('[ ! -b "$d" ]', "false")
             env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_PROC=str(proc))
             return subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True).stdout.strip()
 
@@ -398,6 +398,20 @@ class ForeignDisksTest(unittest.TestCase):
         chains = dict(self.BOOT, **{"/dev/null": ["/dev/null disk"]})
         self.assertEqual(self.run_script("/dev/vda3", swaps="/dev/null", chains=chains, real_b=True),
                          "foreign=/dev/null")
+
+    def test_a_block_node_made_outside_dev_is_listed_as_swap_and_as_a_major_0_mount(self):
+        # REQ: HW-8, ONB-2
+        # mknod can put a block node at any path; swapon and a btrfs mount keep that path as the name.
+        chains = dict(self.BOOT, **{"/run/hostswap": ["/dev/vdb2 part", "/dev/vdb disk"],
+                                    "/run/hostbtrfs": ["/dev/vdb1 part", "/dev/vdb disk"]})
+        self.assertEqual(self.run_script("/dev/vda3", swaps="/run/hostswap", chains=chains), "foreign=/run/hostswap")
+        self.assertEqual(self.run_script("/dev/vda3 /run/hostbtrfs@0:50", chains=chains), "foreign=/run/hostbtrfs")
+
+    def test_a_swap_file_outside_dev_is_no_foreign_disk(self):
+        # REQ: HW-8, ONB-2
+        # Not a block node: the file lives on a mount the number scan judged.
+        out = self.run_script("/dev/vda3", swaps="/var/swapfile", chains=self.BOOT, real_b=True)
+        self.assertEqual(out, "foreign=none")
 
     def test_a_device_lsblk_cannot_read_is_unknown_not_none(self):
         # REQ: HW-8, ONB-2

@@ -4,7 +4,8 @@
 # USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). The mounts are
 # read from every process's mountinfo, so a mount in a private namespace counts, and a mount is a
 # block device by its major:minor number (major 0 is a virtual file system), not by the source
-# string, which a mount(2) call can write as any path. Prints "foreign=unknown" when the boot disk,
+# string, which a mount(2) call can write as any path (swap and a major-0 mount name their device by
+# path, so those paths are resolved to the node they open wherever it is). Prints "foreign=unknown" when the boot disk,
 # the mount listing or a device cannot be read, so a damaged answer is no "none". boot-report prints
 # this on every boot and CI reads it with a host disk attached (ci_boot.sh); the end-to-end run
 # prints it again when it is done.
@@ -32,13 +33,20 @@ for m in $mms; do
 	[ "$r" = "$boot" ] || bad="$bad,$(chain "/dev/block/$m" | head -n 1 | cut -d' ' -f1)"
 done
 # Swap is named by path, and so is a mount whose file system keeps its own anonymous device number
-# (major 0, as btrfs does) and names the real device only as its source.
+# (major 0, as btrfs does) and names the real device only as its source; both are resolved by the
+# node they open, not by where it sits.
 for s in $( { tail -n +2 "$proc/swaps" | cut -d' ' -f1
 	cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
 		awk '$3 ~ /^0:/ { for (i = 4; i < NF; i++) if ($i == "-") { print $(i + 2); break } }'; } | sort -u); do
-	case $s in /dev/*) ;; *) continue ;; esac
+	case $s in /*) ;; *) continue ;; esac
 	d=$(readlink -f "$s")
-	[ -b "$d" ] || { bad="$bad,$s"; continue; }
+	# A path anywhere may be a block node (mknod), so every absolute source is resolved; one that is
+	# no block device is foreign only under /dev, and elsewhere is a file (a swap file, an overlay
+	# directory) whose file system the mount scan above already judged.
+	if [ ! -b "$d" ]; then
+		case $s in /dev/*) bad="$bad,$s" ;; esac
+		continue
+	fi
 	r=$(roots "$d")
 	[ -n "$r" ] || unknown "device $s"
 	[ "$r" = "$boot" ] || bad="$bad,$s"
