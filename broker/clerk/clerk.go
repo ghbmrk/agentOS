@@ -137,7 +137,7 @@ type Effect struct {
 // Mail is a fake mail clerk over an in-memory mailbox. The sim runs this
 // same code, so what the sim proves of a clerk it proves of this one.
 type Mail struct {
-	Name  string
+	Name string
 	// Anchors are the owner's hardware keys, the clerk's own trust root.
 	Anchors []ed25519.PublicKey
 	// Fault is consulted for op "do" and "probe"; nil means no fault.

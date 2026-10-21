@@ -53,7 +53,7 @@ type rig struct {
 	mail   *clerk.Mail
 	k      *kernel.Kernel
 	ck     key.Key // the home clerk's key: the passkey's grant to the holder
-	now    int64 // the mail clerk's own clock
+	now    int64   // the mail clerk's own clock
 }
 
 // tick runs the kernel at now, with the clerk's own clock at now too.
