@@ -310,7 +310,9 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 
 // asksAgain is why a task's approval tc does not cover a request that
 // reaches l and that the gate would approve as a, or "" if it does (CLK-3 "What asks
-// again"). The held request the owner approved is covered on its site.
+// again"). The held request the owner approved is covered on its site,
+// unless it is on a secret screen: a request there never opens a task
+// approval and is approved per step (VRB-1, CLK-5 "Secret screens").
 // Another task's approval never reaches here: the clerk reads only the
 // approval of the task its key serves (kernel.TaskApproved). A readable
 // value over a limit is the key's to refuse (clerk.Verify). The clerk
@@ -320,8 +322,6 @@ func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
 	switch {
 	case a.Site == "" || a.Site != tc.site:
 		return "it is on another site than the task's approval"
-	case a.Print == tc.first:
-		return ""
 	}
 	if w := g.secretScreen(l); w != "" {
 		return "it is on a screen that may reveal or create a secret (VRB-1: " + strconv.Quote(w) + ")"
@@ -329,11 +329,15 @@ func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
 	return ""
 }
 
+// secretRoles are the roles, besides the text-entry fieldRoles, whose
+// names secretScreen reads: the other field kinds and headings.
+var secretRoles = wordSet(`checkbox radio switch menuitemcheckbox menuitemradio listbox option slider heading`)
+
 // secretScreen is the secret word, "" if none, that puts a request
 // reaching l on a screen that may reveal or create a secret (VRB-1), read
 // from what the gate itself saw: the page's URL, the control's name and
-// target (a navigate's URL), and the names of the page's fields and
-// headings ("Password", "Recovery codes"). Other link and button names on
+// target (a navigate's URL), and the names of the page's fields of every
+// kind and its headings ("Password", "Recovery codes"). Other link and button names on
 // the page are not read, since a site shows its "Settings" or "Sign in"
 // link on every page. Pages have no recipe that says otherwise, so a match
 // asks again. A field's value is not a sign: the gate counts every untyped
@@ -342,7 +346,7 @@ func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
 func (g *Gate) secretScreen(l link) string {
 	texts := []string{g.untoken(g.page), l.name, l.target}
 	for _, r := range g.refs {
-		if fieldRoles[r.role] || r.role == "heading" {
+		if fieldRoles[r.role] || secretRoles[r.role] {
 			texts = append(texts, r.name)
 		}
 	}

@@ -165,11 +165,19 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 		tc         func(Approval) cover
 		want       string
 	}{
-		"held":        {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
-		"later":       {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, ""},
-		"other site":  {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com", a.Print} }, "another site"},
-		"no site":     {orderPage, pressBuy, func(a Approval) cover { return cover{"", "ap1:other"} }, "another site"},
-		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
+		"held":       {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, ""},
+		"later":      {orderPage, pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, ""},
+		"other site": {orderPage, pressBuy, func(a Approval) cover { return cover{"example.com", a.Print} }, "another site"},
+		"no site":    {orderPage, pressBuy, func(a Approval) cover { return cover{"", "ap1:other"} }, "another site"},
+		// A request on a secret screen never rides a task approval, even
+		// the held one: it is approved per step (VRB-1).
+		"held secret": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, a.Print} }, `(VRB-1: "password")`},
+		"secret checkbox": {"- main [ref=e1]:\n  - checkbox \"I saved my recovery codes\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "recovery")`},
+		"secret radio": {"- main [ref=e1]:\n  - radio \"Text me a passcode\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "passcode")`},
+		"secret switch": {"- main [ref=e1]:\n  - switch \"Two-step sign-in\" [ref=e4]\n  - button \"Done\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "two step")`},
 		"script link": {"- main [ref=e1]:\n  - link \"Place order\" [ref=e9]:\n    - /url: javascript:void(0)", pressBuy,
 			func(a Approval) cover { return cover{"example.test", "ap1:other"} }, ""},
 		"cross-site link": {"- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test/confirm?step=2", pressBuy,
@@ -183,7 +191,13 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 		"secret name": {strings.Replace(orderPage, "Place order", "Change password", 1), pressBuy, func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
 		"secret field": {orderPage + "\n  - textbox \"Backup codes\" [ref=e4]", pressBuy,
-			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, "secret"},
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "backup")`},
+		"add a device": {"- main [ref=e1]:\n  - heading \"Trusted devices\" [ref=e2]\n  - button \"Add a device\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "device")`},
+		"export": {"- main [ref=e1]:\n  - button \"Export\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "export")`},
+		"create token": {"- main [ref=e1]:\n  - textbox \"Token name\" [ref=e4]\n  - button \"Create\" [ref=e9]", pressBuy,
+			func(a Approval) cover { return cover{a.Site, "ap1:other"} }, `(VRB-1: "token")`},
 	} {
 		path := "/checkout"
 		if name == "secret url" {
@@ -239,5 +253,29 @@ func TestCoveredLineNamesAnUnlabelledSubmit(t *testing.T) {
 	got := coveredLine(Approval{Site: "example.test", Verb: "navigate", Target: "https://shop.example.test/transfer?to=synthAlice"}, 0)
 	if want := "Sent on example.test: navigate https://shop.example.test/transfer?to=synthAlice, 1970-01-01T00:00:00Z"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// A covered submit the page does not answer ok gets no STATUS line: only a
+// sent request is listed (CLK-3).
+func TestCoveredLineOnlyWhenSent(t *testing.T) {
+	r := newClerkRig(t, newHarness(t, map[string]any{
+		"snapshot": shopReply("/cart", contPage),
+		"click":    map[string]any{"ok": false, "error": "timeout_in_page", "url": "https://shop.example.test/cart"},
+	}, "", 0))
+	if err := r.k.OpenTask(0, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	k := r.taskKey(t, "t1")
+	r.run(t, 1, "look", k, read(`{"v":0,"verb":"snapshot"}`))
+	r.run(t, 2, "ask", k, read(pressCont))
+	a := r.stepApproval(t, "ask")
+	r.tapTask(t, 3, "t1", a)
+	r.run(t, 4, "cont", k, submitStep(a, pressCont))
+	if len(forwarded(t, r.h, "click")) != 1 {
+		t.Fatal("the covered submit was not sent")
+	}
+	if res := r.result(t, "cont"); res.OK || res.Covered != "" {
+		t.Fatalf("%+v", res)
 	}
 }

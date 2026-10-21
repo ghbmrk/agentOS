@@ -29,7 +29,16 @@ func TestSiteIsTheRegistrableDomain(t *testing.T) {
 // REQ: CLK-3, VRB-1
 func TestSecretScreenWords(t *testing.T) {
 	for _, s := range []string{"Change password", "/account/recovery", "Set up 2FA", "Two-factor authentication",
-		"Show API key", "Add SSH key", "Change email", "/login/oauth/authorize", "Security settings", "Backup codes", "Generate new token", "Add device", "Export data", "one-time code", "/settings/apiKeys", "Recovery codes"} {
+		"Show API key", "Add SSH key", "Change email", "/login/oauth/authorize", "Security settings", "Backup codes", "Generate new token", "Add device", "Export data", "one-time code", "/settings/apiKeys", "Recovery codes",
+		// VRB-1's own examples, verbatim.
+		"show an API key", "reset a password", "add a device", "export", "change account recovery",
+		// Phrasings a pair list missed (#2711 round 2).
+		"Add a device", "Link a device", "Trusted devices", "Manage devices", "Remove device", "Export", "Export your data", "/account/export",
+		"Export vault", "Export contacts", "/settings/export", "Create token", "Generate token", "Regenerate token", "Tokens", "/settings/tokens",
+		"/account/tokens", "/settings/security", "/account/security", "Sign-in & security", "Account security", "Security", "Set PIN",
+		"Change your PIN", "Download backup", "Seed phrase", "/vault?token=abc&view=export",
+		// Plurals (CLK-5 "Secret screens").
+		"Access tokens", "API tokens", "Security questions", "Passphrases", "Passcodes", "Authenticators", "OTPs", "Secrets", "SSH keys"} {
 		if secretText(s) == "" {
 			t.Errorf("%q not read as a secret screen", s)
 		}

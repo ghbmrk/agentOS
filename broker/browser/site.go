@@ -31,32 +31,80 @@ func site(rawURL string) string {
 }
 
 // secretWords mark a screen that may reveal or create a secret (VRB-1):
-// show an API key, reset a password, add a device, export, change account
-// recovery. Pairs are matched joined ("two factor" as "twofactor"). Words
-// a checkout also uses ("Security code", "Gift card PIN", "Remember this
-// device", a "?token=" URL) count only in a pair that names the secret.
-// The list errs wide: a false match costs one more tap, a miss would let a
-// task's tap cover a secret (#2689 item 3).
-var secretWords = wordSet(`password passwords passcode passkey passkeys passphrase recovery
+// show an API key or token, reset a password or PIN, add a device, export,
+// back up, change account recovery or security. Pairs are matched joined
+// ("two factor" as "twofactor"), and each word also matches its plural
+// ("Passphrases"). The list fails closed: a word counts on
+// its own, and only the checkout phrases in notSecret, which use the same
+// words for something else, are passed over. A false match costs one more
+// tap; a miss would let a task's tap cover a secret (#2689 item 3).
+var secretWords = wordSet(`password passcode passkey passphrase recovery
 	mfa 2fa 2sv twofactor twostep onetime otp totp authenticator authentication
-	secret secrets apikey apikeys credential credentials key keys ssh gpg oauth
-	securitysettings securityquestion securityquestions securitykey securitykeys
-	accesstoken accesstokens apitoken apitokens newtoken changepin newpin resetpin
-	adddevice newdevice yourdevices backupcode backupcodes exportdata exportaccount changeemail`)
+	secret credential key ssh gpg oauth token export device backup security pin
+	seedphrase changeemail`)
+
+// isSecret reports whether w, or w less a plural "s", is a secret word.
+func isSecret(w string) bool {
+	return secretWords[w] || strings.HasSuffix(w, "s") && secretWords[w[:len(w)-1]]
+}
+
+// notSecret are the phrases a checkout or a product page shows that use a
+// secret word for something else: a card's security code, a gift card's
+// PIN, a "remember this device" box, a home security product.
+var notSecret = [][]string{
+	{"security", "code"}, {"gift", "card", "pin"}, {"pin", "code"}, {"enamel", "pin"},
+	{"remember", "this", "device"}, {"home", "security"}, {"backup", "battery"},
+}
 
 // secretText is the first of texts' words, or joined word pairs, that
-// reads as a secret screen, "" if none.
+// reads as a secret screen, "" if none. A URL's query parameter named
+// token is a session token, not a token screen, so its key is not read.
 func secretText(texts ...string) string {
 	for _, t := range texts {
-		w := words(t)
-		for i := range w {
-			if secretWords[w[i]] {
+		w := words(dropTokenKey(t))
+	next:
+		for i := 0; i < len(w); i++ {
+			for _, p := range notSecret {
+				if hasPrefix(w[i:], p) {
+					i += len(p) - 1
+					continue next
+				}
+			}
+			if isSecret(w[i]) {
 				return w[i]
 			}
-			if i+1 < len(w) && secretWords[w[i]+w[i+1]] {
+			if i+1 < len(w) && isSecret(w[i]+w[i+1]) {
 				return w[i] + " " + w[i+1]
 			}
 		}
 	}
 	return ""
+}
+
+func hasPrefix(w, p []string) bool {
+	if len(w) < len(p) {
+		return false
+	}
+	for i := range p {
+		if w[i] != p[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// dropTokenKey is t with the key of a "token=" query parameter removed,
+// its value kept ("?token=abc" reads "?=abc").
+func dropTokenKey(t string) string {
+	q := strings.IndexByte(t, '?')
+	if q < 0 {
+		return t
+	}
+	pairs := strings.Split(t[q+1:], "&")
+	for i, p := range pairs {
+		if k, v, ok := strings.Cut(p, "="); ok && strings.EqualFold(k, "token") {
+			pairs[i] = "=" + v
+		}
+	}
+	return t[:q+1] + strings.Join(pairs, "&")
 }
