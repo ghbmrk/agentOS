@@ -13,6 +13,7 @@ const (
 	CKey       = "key"         // the chain does not verify
 	CUngranted = "not-granted" // the passkey never granted the key's root or first link into the log
 	CGrantHeld = "grant-held"  // the grant is still in its hold (D-146)
+	CCutOff    = "cut-off"     // a passkey cut off since narrowed the key (key.Narrow)
 	CPlan      = "plan"        // the plan is malformed
 	CDuplicate = "duplicate"   // the same effect within 24 hours needs a fresh owner key (KRN-8)
 	CClerk     = "no-clerk"
@@ -228,8 +229,15 @@ type View interface {
 
 // Live refuses a key unless its grants, its root and its first link, are in
 // the log and past their hold at now (D-146). Keys below the first link are
-// the clerk's own narrowings and need no grant.
+// narrowings, the clerk's own or a passkey's (key.Narrow), and need no grant;
+// a passkey's stands only while that passkey is not cut off.
 func Live(v View, ver *key.Verified, now int64) *key.Refusal {
+	_, cut := v.Enrollments()
+	for _, p := range ver.Narrowers {
+		if key.In(cut, p) {
+			return &key.Refusal{Code: CCutOff, Detail: "narrowed by a cut-off passkey"}
+		}
+	}
 	for _, id := range ver.IDs[:min(2, len(ver.IDs))] {
 		from, ok := v.Granted(id)
 		if !ok {
