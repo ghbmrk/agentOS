@@ -319,7 +319,8 @@ func (g *Gate) print(raw []byte) string {
 }
 
 // small bounds every field of res but the snapshot and the approval,
-// which their makers bound, so a logged result is bounded (MaxDetail).
+// which their makers bound. logged applies it to every result, so a logged
+// result is bounded (MaxDetail).
 func small(res Result) Result {
 	res.Title, res.Detail, res.URL = capText(res.Title, maxTitle), capText(res.Detail, maxErrDetail), capText(res.URL, MaxURL)
 	res.Error, res.To, res.Path = capText(res.Error, maxTitle), capText(res.To, MaxURL+maxLabel), capText(res.Path, maxTitle)
@@ -647,7 +648,6 @@ func (g *Gate) post(verb string, res Result) (Result, bool) {
 		n += k
 	}
 	res.Redactions += n
-	res = small(res)
 	// The snapshot is bounded as the log holds it, JSON-escaped.
 	for n := len(js(res.Snapshot)); len(res.Snapshot) > MaxSnapshot || n > MaxSnapshot; n = len(js(res.Snapshot)) {
 		cut := min(MaxSnapshot, len(res.Snapshot)*MaxSnapshot/n)
