@@ -51,6 +51,9 @@ core clerk/inbox
 open kernel.Normalize
 open clerk.Check
 open clerk.Verify
+# A pure read of the log's view: the live approval of the task a key serves
+# on one site, for a clerk to cover a request with (CLK-3, #2711).
+open kernel.TaskApproved
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
