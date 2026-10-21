@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // The S5 driver behind the gate, against S5's local fixture site. Needs
@@ -64,7 +62,7 @@ sys.stdin.read()`)
 		Driver:    wrapDriver(t, []string{py, filepath.Join(s5, "executor.py")}, []string{"S5_CHROME=" + chrome}),
 		Origins:   []string{site},
 		Workspace: filepath.Join(t.TempDir(), "ws"),
-		Scrub:     vault.NewRedactor([][]byte{[]byte(canaryShown)}),
+		Scrub:     fakeScrubber{canaryShown},
 		Timeout:   60 * time.Second,
 	})
 	if err != nil {
@@ -73,7 +71,7 @@ sys.stdin.read()`)
 	t.Cleanup(func() { g.Close() })
 	var transcript []string
 	do := func(req string) Result {
-		r := g.Do(context.Background(), []byte(req))
+		r, _, _ := g.do(context.Background(), []byte(req))
 		b, _ := json.Marshal(r)
 		transcript = append(transcript, string(b))
 		return r

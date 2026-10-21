@@ -14,8 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // The test binary doubles as a scripted driver: with BROWSER_FAKE_DRIVER set it
@@ -117,7 +115,7 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 			"BROWSER_FAKE_FILE=" + file}, env...)),
 		Origins:   []string{"https://shop.example.test"},
 		Workspace: ws,
-		Scrub:     vault.NewRedactor([][]byte{[]byte("vaultCanarySessionV4lt"), []byte("pw-canary-short")}),
+		Scrub:     fakeScrubber{"vaultCanarySessionV4lt", "pw-canary-short"},
 		Timeout:   timeout,
 	})
 	if err != nil {
@@ -125,11 +123,15 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 	}
 	t.Cleanup(func() { g.Close() })
 	// Tests of other rules click e1 and download e2 without a snapshot;
-	// the gate refuses a ref it has not seen (ADP-14-get), so they start
-	// as seen non-link elements. A snapshot reply replaces them.
-	g.refs = map[string]link{"e1": {}, "e2": {}}
+	// the gate refuses a ref it has not seen (ADP-14-get) and sends only a
+	// link to a plain target as a read, so they start as seen links. A
+	// snapshot reply replaces them.
+	g.refs = map[string]link{"e1": plainLink, "e2": plainLink}
 	return &harness{g: g, log: log, ws: ws}
 }
+
+// plainLink is a link whose click can only read a page.
+var plainLink = link{role: "link", name: "Kettle", target: "https://shop.example.test/products/kettle"}
 
 // wrapDriver returns a driver argv that sets env, NAME=value pairs, and
 // runs argv: the fakes' settings are test-only keys, so they travel in
@@ -156,7 +158,14 @@ func wrapDriver(t *testing.T, argv, env []string) []string {
 
 func (h *harness) do(t *testing.T, raw string) Result {
 	t.Helper()
-	return h.g.Do(context.Background(), []byte(raw))
+	res, _, _ := h.g.do(context.Background(), []byte(raw))
+	return res
+}
+
+// shown is s as the output filter lets the agent see it.
+func (h *harness) shown(s string) string {
+	t, _ := h.g.filter.text(s)
+	return t
 }
 
 func (h *harness) received(t *testing.T) []string {
@@ -380,13 +389,12 @@ func TestOutputPathMustBeAFlatWorkspaceName(t *testing.T) {
 // the page URL is required on every ok reply; without it the gate cannot check
 // confinement and stops the executor.
 func TestOKReplyWithoutAURLStopsTheExecutor(t *testing.T) {
-	for _, verb := range []string{"navigate", "click", "type", "select", "snapshot", "download"} {
+	for _, verb := range []string{"navigate", "click", "type", "snapshot", "download"} {
 		h := newHarness(t, map[string]any{verb: map[string]any{"ok": true}}, "clean", 0)
 		req := map[string]string{
 			"navigate": `{"v":0,"verb":"navigate","url":"https://shop.example.test/"}`,
 			"click":    `{"v":0,"verb":"click","ref":"e1"}`,
 			"type":     `{"v":0,"verb":"type","ref":"e1","text":"x"}`,
-			"select":   `{"v":0,"verb":"select","ref":"e1","option":"a"}`,
 			"snapshot": `{"v":0,"verb":"snapshot"}`,
 			"download": `{"v":0,"verb":"download","ref":"e1"}`,
 		}[verb]
@@ -529,7 +537,7 @@ func TestGateOmitsEntryValuesTheDriverDidNotReport(t *testing.T) {
 	if r.PasswordFields != 1 {
 		t.Fatalf("PasswordFields = %d, want the gate's count 1", r.PasswordFields)
 	}
-	if got := h.do(t, `{"v":0,"verb":"click","ref":"e6"}`); !got.OK {
+	if got := h.do(t, `{"v":0,"verb":"click","ref":"e5"}`); !got.OK {
 		t.Fatalf("click after omission refused: %+v", got)
 	}
 }
@@ -558,7 +566,7 @@ func TestGateKeepsTextTheAgentTyped(t *testing.T) {
 		"type":     snapReply("", 0),
 		"snapshot": snapReply(snap, 0),
 	}, "", 0)
-	h.g.refs["e3"] = link{}
+	h.g.refs["e3"] = plainLink
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle"}`)
 	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 	if !strings.Contains(r.Snapshot, `[ref=e3]: kettle`) {
@@ -577,7 +585,7 @@ func TestGateTypedTextIsNoOracle(t *testing.T) {
 		"type":     snapReply("", 0),
 		"snapshot": snapReply(snap, 0),
 	}, "", 0)
-	h.g.refs["e3"] = link{}
+	h.g.refs["e3"] = plainLink
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+pwCanary+`"}`)
 	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 	if !strings.Contains(r.Snapshot, `[ref=e5]: `+omittedMark) {
@@ -591,7 +599,7 @@ func TestGateTypedFieldShowsAGuessEitherWay(t *testing.T) {
 	for _, guess := range []string{"wrongGuess1", pwCanary} {
 		snap := "- textbox \"Note\" [ref=e3]:\n  - text: " + guess + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
 		h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
-		h.g.refs["e3"] = link{}
+		h.g.refs["e3"] = plainLink
 		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+guess+`"}`)
 		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 		want := "- textbox \"Note\" [ref=e3]:\n  - text: " + guess + "\n- textbox \"Code\" [ref=e5]: " + omittedMark
@@ -628,8 +636,8 @@ func TestGateTypedTextFollowsTheTypeReply(t *testing.T) {
 		"https://shop.example.test/other":   false,
 	} {
 		h := newHarness(t, map[string]any{"type": typed, "snapshot": results(url)}, "", 0)
-		h.g.refs["e3"] = link{}
-		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":true}`)
+		h.g.refs["e3"] = plainLink
+		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle"}`)
 		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 		if strings.Contains(r.Snapshot, "kettle") != visible {
 			t.Fatalf("%s: got %q", url, r.Snapshot)
@@ -646,7 +654,7 @@ func TestGateTypedGuessIsNoOracleThroughCopies(t *testing.T) {
 	var seen []string
 	for _, guess := range []string{"wrongGuess1", pwCanary} {
 		h := newHarness(t, map[string]any{"type": typed, "snapshot": snap}, "", 0)
-		h.g.refs["e3"] = link{}
+		h.g.refs["e3"] = plainLink
 		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+guess+`"}`)
 		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 		if strings.Contains(r.Snapshot, pwCanary) {
@@ -679,7 +687,7 @@ func TestGateOmitsValuesOfFieldsWithoutRefs(t *testing.T) {
 func TestGateTypedNonEntryKeepsNothing(t *testing.T) {
 	snap := "- group \"Editor\" [ref=e3]:\n  - text: Note " + pwCanary + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
 	h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
-	h.g.refs["e3"] = link{}
+	h.g.refs["e3"] = plainLink
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Note"}`)
 	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 	if strings.Contains(r.Snapshot, pwCanary) {
@@ -733,7 +741,7 @@ func TestGateForgetsStaleTypedText(t *testing.T) {
 			snapReply(between, 0),
 			snapReply("- textbox \"Code\" [ref=e3]: "+pwCanary, 0),
 		}}, "", 0)
-		h.g.refs["e3"] = link{}
+		h.g.refs["e3"] = plainLink
 		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+pwCanary+`"}`)
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
 		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
@@ -760,7 +768,7 @@ func TestGateEchoOutsideFieldWithholdsSnapshot(t *testing.T) {
 func TestGateRefInValueCannotBorrowTypedRef(t *testing.T) {
 	snap := "- textbox \"Ed\" [ref=e4]: x\n- textbox \"K\": y[ref=e4]" + pwCanary
 	h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
-	h.g.refs["e4"] = link{}
+	h.g.refs["e4"] = plainLink
 	h.do(t, `{"v":0,"verb":"type","ref":"e4","text":"x"}`)
 	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 	if strings.Contains(r.Snapshot, pwCanary) || !strings.Contains(r.Snapshot, `[ref=e4]: x`) {
@@ -800,7 +808,7 @@ func TestGateGuessEchoIsNoOracle(t *testing.T) {
 		for _, guess := range []string{"wrongGuess1", pwCanary} {
 			reply := map[string]any{"ok": true, "url": c.url, "snapshot": c.snap(guess)}
 			h := newHarness(t, map[string]any{c.verb: reply, "snapshot": reply}, "", 0)
-			h.g.refs["e3"] = link{}
+			h.g.refs["e3"] = plainLink
 			h.do(t, `{"v":0,"verb":"`+c.verb+`",`+fmt.Sprintf(c.req, guess)+`}`)
 			r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 			if strings.Contains(r.Snapshot, pwCanary) || (r.Snapshot == withheldMark) != c.withheld {
@@ -825,7 +833,7 @@ func TestGateGuessEchoAfterOverflowIsNoOracle(t *testing.T) {
 			snap := "- heading \"Results for " + guess + "\" [level=1]\n- textbox \"Code\" [ref=e5]: " + pwCanary
 			reply := map[string]any{"ok": true, "url": search, "snapshot": snap}
 			h := newHarness(t, map[string]any{"navigate": reply, "type": reply, "snapshot": reply}, "", 0)
-			h.g.refs["e3"] = link{}
+			h.g.refs["e3"] = plainLink
 			if route == "query values" {
 				h.do(t, `{"v":0,"verb":"navigate","url":"`+search+`?q=`+guess+`"}`)
 				for range 2 {

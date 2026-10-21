@@ -1,9 +1,6 @@
 package browser
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"net/url"
 	"strconv"
@@ -11,11 +8,11 @@ import (
 	"unicode"
 )
 
-// ADP-14 holds a submit by method, but a site can change state on a GET:
-// an unsubscribe or confirm link, a one-click cancel. The gate holds a
-// credentialed GET to a URL that reads as such an action for the owner's
-// approval, like a POST (ADP-14-get). The patterns are a heuristic that
-// fails closed; part 2's network egress gate is the boundary (AS1).
+// A site can change state on a GET as well as by a submit: an unsubscribe
+// or confirm link, a one-click cancel. The gate refuses a credentialed GET
+// to a URL that reads as such an action, which then waits for the owner's
+// approval like a submit (CLK-3, ADP-14-get). The patterns are a heuristic
+// that fails closed; part 2's network egress gate is the boundary (AS1).
 
 // actionWords are path or query words that name a state change.
 var actionWords = wordSet(`unsubscribe unsub subscribe resubscribe optout optin confirm confirmation
@@ -182,12 +179,25 @@ type link struct {
 	dismiss bool
 }
 
-// held reports whether a click on l may change state at the site.
-func (l link) held(s stateLinks) bool {
+// acts reports whether following l reads as a state change at the site.
+func (l link) acts(s stateLinks) bool {
 	if l.target != "" && s.match(l.target) {
 		return true
 	}
 	return l.clickable && !l.dismiss && hasAction(words(l.name))
+}
+
+// to names what an action on l reaches, for the owner's approval: the URL
+// for a navigate, else the role, quoted name and target of the ref.
+func (l link) to() string {
+	if l.role == "" && l.name == "" {
+		return l.target
+	}
+	s := l.role + " " + strconv.Quote(l.name)
+	if l.target != "" {
+		s += " " + l.target
+	}
+	return s
 }
 
 // clickRoles are the roles whose activation is the click itself.
@@ -319,91 +329,4 @@ func parseRefs(snapshot, page string) map[string]link {
 		refs[n.ref] = l
 	}
 	return refs
-}
-
-// Hold is a request the gate keeps for the owner's approval instead of
-// sending: a GET to URL on Origin, from a navigate or from a click or
-// download on Ref. A click on an element that shows no target (a button
-// named "Unsubscribe") is held with an empty URL, Origin and Method, and is
-// bound to the ref's Role and Name.
-type Hold struct {
-	Verb   string
-	Ref    string
-	Role   string
-	Name   string
-	Origin string
-	Method string
-	URL    string
-	req    Request
-}
-
-// maxHolds bounds the store; the oldest hold is dropped first, and
-// approving a dropped hold sends nothing (AS4).
-const maxHolds = 32
-
-func (g *Gate) hold(req Request, l link) Result {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	id := "h" + hex.EncodeToString(b[:])
-	h := Hold{Verb: req.Verb, Ref: req.Ref, Role: l.role, Name: l.name, URL: l.target, req: req}
-	if l.target != "" {
-		h.Origin, _ = originKey(l.target)
-		h.Method = "GET"
-	}
-	if len(g.holdOrder) >= maxHolds {
-		delete(g.holds, g.holdOrder[0])
-		g.holdOrder = g.holdOrder[1:]
-	}
-	g.holds[id] = h
-	g.holdOrder = append(g.holdOrder, id)
-	return Result{Error: "held", Hold: id,
-		Detail: "this link may change state at the site; held for the owner's approval (ADP-14)"}
-}
-
-func (g *Gate) dropHold(id string) {
-	delete(g.holds, id)
-	for i, h := range g.holdOrder {
-		if h == id {
-			g.holdOrder = append(g.holdOrder[:i:i], g.holdOrder[i+1:]...)
-			break
-		}
-	}
-}
-
-// Held returns a held request for the broker's approval prompt.
-func (g *Gate) Held(id string) (Hold, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	h, ok := g.holds[id]
-	return h, ok
-}
-
-var errNotHeld = Result{Error: "not_held", Detail: "no such hold, or the URL is not the held one"}
-
-// Release sends a held request once, on the owner's approval. It is the
-// broker's call, not a protocol verb, so an agent cannot reach it. url
-// must equal the held URL; any other value sends nothing and keeps the
-// hold. A held click or download is sent only if a fresh snapshot shows
-// the ref with the same role, name and target; otherwise the hold is void.
-func (g *Gate) Release(ctx context.Context, id, url string) Result {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	h, ok := g.holds[id]
-	if !ok || url != h.URL {
-		return errNotHeld
-	}
-	g.dropHold(id)
-	if g.stopped {
-		return stoppedResult
-	}
-	if h.Verb != "navigate" {
-		snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
-		if !ok {
-			return snap
-		}
-		if l, seen := g.refs[h.Ref]; !snap.OK || !seen || l.role != h.Role || l.name != h.Name || l.target != h.URL {
-			return Result{Error: "not_held", Detail: "the link changed since it was held; nothing was sent"}
-		}
-	}
-	return g.send(ctx, h.req)
 }
