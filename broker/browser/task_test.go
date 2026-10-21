@@ -54,11 +54,16 @@ func (r *clerkRig) taskKey(t *testing.T, id string) key.Key {
 }
 
 // tapTask is the owner's one tap for task id over the held request a: the
-// phone passkey co-signs the task, the site and the request (CLK-3).
+// phone passkey co-signs the task, its place in the task, the site and the
+// request (CLK-3).
 func (r *clerkRig) tapTask(t *testing.T, now int64, id string, a Approval) {
 	t.Helper()
-	by := key.Approve(r.phone, kernel.TaskHash(id, a.Site, a.Print))
-	if err := r.k.ApproveTask(now, id, kernel.TaskApproval{Site: a.Site, First: a.Print, By: by}); err != nil {
+	task, ok := r.k.State().Task(id, now)
+	if !ok {
+		t.Fatalf("task %s is not live", id)
+	}
+	by := key.Approve(r.phone, kernel.TaskHash(id, task.Taps, a.Site, a.Print))
+	if err := r.k.ApproveTask(now, id, kernel.TaskApproval{Site: a.Site, First: a.Print, By: by, N: task.Taps}); err != nil {
 		t.Fatal(err)
 	}
 }
