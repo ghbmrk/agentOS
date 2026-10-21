@@ -4,12 +4,14 @@
 # USB stick (HW-8, ONB-2: no file system of a host disk is opened, read-only or not). The mounts are
 # read from every process's mountinfo, so a mount in a private namespace counts, and a mount is a
 # block device by its major:minor number (major 0 is a virtual file system), not by the source
-# string, which a mount(2) call can write as any path (swap and a major-0 mount name their device by
-# path, so those paths are resolved to the node they open wherever it is). Prints "foreign=unknown" when the boot disk,
-# the mount listing or a device cannot be read, so a damaged answer is no "none". boot-report prints
+# string, which a mount(2) call can write as any path. Swap is resolved to the node its path opens, and
+# a major-0 file system that reads block devices (btrfs) is read from sysfs. Prints "foreign=unknown"
+# when the boot disk, the mount listing or a device cannot be read or understood, so a damaged answer
+# is no "none". boot-report prints
 # this on every boot and CI reads it with a host disk attached (ci_boot.sh); the end-to-end run
 # prints it again when it is done.
 proc=${AGENTOS_PROC:-/proc}
+sys=${AGENTOS_SYS:-/sys}
 # unknown WHY: the answer when something cannot be read; WHY says what, for the console reader.
 unknown() { echo "foreign=unknown ($1)"; exit 0; }
 # chain DEV: lsblk's lines "NAME TYPE" for DEV and what it sits on; roots is the disks among them.
@@ -32,21 +34,26 @@ for m in $mms; do
 	[ -n "$r" ] || unknown "device $m"
 	[ "$r" = "$boot" ] || bad="$bad,$(chain "/dev/block/$m" | head -n 1 | cut -d' ' -f1)"
 done
-# Swap is named by path, and so is a mount whose file system keeps its own anonymous device number
-# (major 0, as btrfs does) and names the real device only as its source; both are resolved by the
-# node they open, not by where it sits.
-for s in $( { tail -n +2 "$proc/swaps" | cut -d' ' -f1
-	cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
-		awk '$3 ~ /^0:/ { for (i = 4; i < NF; i++) if ($i == "-") { print $(i + 2); break } }'; } | sort -u); do
-	case $s in /*) ;; *) continue ;; esac
+# A file system with an anonymous number (major 0) hides its block devices behind a source string,
+# which mount(2) writes as any path, so they are read from the kernel instead: btrfs lists the
+# device numbers of its mounted file systems in sysfs. One that reads block devices and is not
+# understood here is unknown rather than none.
+anon=$(cat "$proc"/[0-9]*/mountinfo 2>/dev/null |
+	awk '$3 ~ /^0:/ { for (i = 4; i < NF; i++) if ($i == "-") { print $(i + 1); break } }' | sort -u)
+echo "$anon" | grep -qxE 'bcachefs|zfs' && unknown "file system not understood"
+bt=$(cat "$sys"/fs/btrfs/*/devices/*/dev 2>/dev/null | sort -u)
+if echo "$anon" | grep -qx btrfs; then [ -n "$bt" ] || unknown "btrfs devices unreadable"; fi
+for m in $bt; do
+	r=$(roots "/dev/block/$m")
+	[ -n "$r" ] || unknown "device $m"
+	[ "$r" = "$boot" ] || bad="$bad,$(chain "/dev/block/$m" | head -n 1 | cut -d' ' -f1)"
+done
+# Swap is named by path. An area of type partition is a block node whatever its path (mknod can put
+# one anywhere, and unlink it after swapon), so one that is none now is unknown; type file lives on
+# a mount judged above.
+for s in $(tail -n +2 "$proc/swaps" | awk '$2 == "partition" { print $1 }'); do
 	d=$(readlink -f "$s")
-	# A path anywhere may be a block node (mknod), so every absolute source is resolved; one that is
-	# no block device is foreign only under /dev, and elsewhere is a file (a swap file, an overlay
-	# directory) whose file system the mount scan above already judged.
-	if [ ! -b "$d" ]; then
-		case $s in /dev/*) bad="$bad,$s" ;; esac
-		continue
-	fi
+	[ -b "$d" ] || unknown "swap $s"
 	r=$(roots "$d")
 	[ -n "$r" ] || unknown "device $s"
 	[ "$r" = "$boot" ] || bad="$bad,$s"
