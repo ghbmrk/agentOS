@@ -279,9 +279,12 @@ func (k *Kernel) Issue(now int64, root key.Key) error {
 	return k.owner(now, TKeyIssued, keyIssued{root})
 }
 
-// owned verifies ky against the owner and that its root was issued.
+// owned verifies ky as a chain from the owner and that its root was issued.
+// It is for keys the log already vouches for: a plan's key was held when the
+// plan was admitted (VerifyPlan), and an extension comes over the owner
+// channel. The result can be charged but never authorizes a step.
 func (k *Kernel) owned(ky key.Key) (*key.Verified, *key.Refusal) {
-	v, err := key.Verify(ky, k.s.Owner)
+	v, err := key.Chain(ky, k.s.Owner)
 	if err != nil {
 		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}

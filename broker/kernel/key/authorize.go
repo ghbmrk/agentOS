@@ -126,6 +126,9 @@ func (v *Verified) live(c Context) *Refusal {
 // Authorize is the whole key check: one pure function, shared by the kernel
 // and every clerk (KEY-2). It fails closed on a missing view.
 func (v *Verified) Authorize(s Step, c Context) *Refusal {
+	if !v.held {
+		return refuse(RMalformed, "no proof of possession")
+	}
 	if r := v.live(c); r != nil {
 		return r
 	}

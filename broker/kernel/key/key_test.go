@@ -334,3 +334,26 @@ func TestUseNeedsTheLastHolder(t *testing.T) {
 		t.Fatal("domains equal")
 	}
 }
+
+// A key checked as a chain alone can be charged for spend, which moves no
+// step, and never authorizes one: nobody has signed as its holder.
+func TestChainAloneNeverAuthorizes(t *testing.T) {
+	o, h, k := root(t)
+	d, err := Derive(k, h.priv, gen(3).pub, LimitSpendTask(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := Chain(d, o.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := v.Spend("t", 5, ctx(1, ledger{})); r != nil {
+		t.Fatalf("a chained key funds spend: %v", r)
+	}
+	if r := v.Authorize(step(Trash), ctx(1, ledger{})); r == nil || r.Code != RMalformed {
+		t.Fatalf("a chained key authorizes a step: %v", r)
+	}
+	if _, err := Chain(d, gen(9).pub); !errors.Is(err, ErrWrongOwner) {
+		t.Fatalf("wrong owner: %v", err)
+	}
+}
