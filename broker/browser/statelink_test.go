@@ -179,7 +179,7 @@ func TestActionsTheGateCannotJudgeWaitForApproval(t *testing.T) {
 	}
 }
 
-// D-145: a session holding none of the owner's identity can harm the owner
+// D-147: a session holding none of the owner's identity can harm the owner
 // only through a URL that acts or carries a token, so logged out a button,
 // a select and a submit are free while such a URL still waits for approval.
 func TestLoggedOutActionsAreFreeButActingURLsAreNot(t *testing.T) {

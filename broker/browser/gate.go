@@ -52,7 +52,7 @@ type Config struct {
 	StateLinks []string
 	// LoggedOut declares that the clerk supplies this account's sessions
 	// no identity: no cookies, password or card. Only then are clicks,
-	// typing and selects free (G9, D-145). Left false, identity is unknown
+	// typing and selects free (G9, D-147). Left false, identity is unknown
 	// and the gate fails closed.
 	LoggedOut bool
 }
@@ -249,7 +249,7 @@ func (g *Gate) do(ctx context.Context, raw []byte) Result {
 // judge reports what req reaches and whether it needs the owner's approval.
 // Logged out, an action can harm the owner only through a URL that itself
 // acts or carries a token, so only a navigate or a link to a target G9
-// matches does (D-145). Otherwise it fails closed: only a snapshot, a
+// matches does (D-147). Otherwise it fails closed: only a snapshot, a
 // screenshot, typing without submit, a click that focuses a text field,
 // and a navigate or a link followed to a target G9 does not match are
 // free. A button, a select or a submit shows the gate no request, so on an
