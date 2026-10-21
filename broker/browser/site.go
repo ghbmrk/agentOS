@@ -43,9 +43,11 @@ var secretWords = wordSet(`password passcode passkey passphrase recovery
 	secret credential key ssh gpg oauth token export device backup security pin
 	seedphrase changeemail`)
 
-// isSecret reports whether w, or w less a plural "s", is a secret word.
+// isSecret reports whether w, or the singular of a plural w ("keys",
+// "recoveries"), is a secret word.
 func isSecret(w string) bool {
-	return secretWords[w] || strings.HasSuffix(w, "s") && secretWords[w[:len(w)-1]]
+	return secretWords[w] || strings.HasSuffix(w, "s") && secretWords[w[:len(w)-1]] ||
+		strings.HasSuffix(w, "ies") && secretWords[w[:len(w)-3]+"y"]
 }
 
 // notSecret are the whole texts a checkout or a product page shows that
