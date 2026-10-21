@@ -4,11 +4,12 @@ the permission ask skips it only in its exact shape (OPERATING §7).
 
 An allow rule's `*` also matches spaces, so without this hook a call could carry another
 method, field, `--input` or `@file` on the same endpoint. Any command in which one of RULES
-matches anywhere (a compound command included), as written or with quotes and backslashes
-removed, whitespace collapsed and case ignored, must be, as a whole, one of SHAPES; anything
-else goes to the permission ask. Commands no rule matches pass through to the normal
-permission flow. tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to
-its rule.
+matches anywhere (a compound command included), as written or with quotes, `$` and
+backslashes removed, whitespace collapsed and case ignored, must be, as a whole, one of SHAPES;
+anything else goes to the permission ask. A command longer than MAX_SCAN that contains `gh`
+goes to the ask unscanned, so the rule search never runs past the hook timeout (#2562).
+Commands no rule matches pass through to the normal permission flow.
+tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to its rule.
 """
 import json
 import re
@@ -42,13 +43,16 @@ SHAPES = [
 _RULE_RES = [re.compile(".*".join(r"\s+".join(map(re.escape, p.split(" "))) for p in r.split("*")),
                         re.S | re.I)
              for r in RULES]
+# The longest command the rule search scans; longer ones that contain `gh` go to the ask.
+MAX_SCAN = 8 * 1024
 # Characters a shell gives meaning to; none appears in any shape.
 _SHELL = set(";&|<>()$`\\\"'{}*?!#~\n\r\t")
 
 
 def normalized(command):
-    """The command with line continuations, quotes and backslashes removed and whitespace collapsed."""
-    return " ".join(re.sub(r"['\"\\]", "", command.replace("\\\n", "")).split())
+    """The command with line continuations, quotes, `$` and backslashes removed and whitespace
+    collapsed (`$` so ANSI-C quoting such as $'...' is stripped like any other quote)."""
+    return " ".join(re.sub(r"['\"\\$]", "", command.replace("\\\n", "")).split())
 
 
 def guarded(command):
@@ -65,6 +69,8 @@ def exact(command):
 
 def decide(command):
     """None lets the call go on; a string is the reason it goes to the permission ask."""
+    if len(command) > MAX_SCAN and "gh" in normalized(command).lower():
+        return f"gh_shape hook: a command over {MAX_SCAN} bytes that contains gh is not scanned"
     if guarded(command) and not exact(command):
         return ("gh allow rule matched but the call is not one of the exact shapes in "
                 ".claude/hooks/gh_shape.py (arm, disarm, pinned merge, label add or remove: "
