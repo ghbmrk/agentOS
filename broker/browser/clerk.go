@@ -47,11 +47,11 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	var line, to string
 	post := false
-	switch r.Step.Verb {
+	switch st := r.Step(); st.Verb {
 	case key.Read:
-		line = r.Step.Args["query"].Value
+		line = st.Args["query"].Value
 	case key.Post:
-		line, to, post = r.Step.Args["msg"].Value, r.Step.Args["to"].Value, true
+		line, to, post = st.Args["msg"].Value, st.Args["to"].Value, true
 	default:
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
 	}
@@ -84,7 +84,7 @@ func (c *Clerk) Probe(r kernel.Request, _ kernel.View) string {
 		}
 		return "unknown"
 	}
-	if r.Step.Verb == key.Read {
+	if r.Step().Verb == key.Read {
 		return "notdone"
 	}
 	return "unknown"

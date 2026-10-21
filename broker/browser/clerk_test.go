@@ -64,17 +64,23 @@ func (r *clerkRig) held(t *testing.T, base, novel int64) key.Key {
 	return d
 }
 
-func read(line string) key.Step {
-	return key.Step{Verb: key.Read, Clerk: "web", Args: map[string]key.Arg{"query": {Value: line}}}
+func read(line string) kernel.PlanStep {
+	return kernel.PlanStep{Verb: key.Read, Clerk: "web", Args: map[string]string{"query": line}}
 }
 
-func post(to, line string) key.Step {
-	return key.Step{Verb: key.Post, Clerk: "web", Args: map[string]key.Arg{"to": {Value: to}, "msg": {Value: line}}}
+func post(to, line string) kernel.PlanStep {
+	return kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": to, "msg": line}}
 }
 
-func (r *clerkRig) run(t *testing.T, now int64, id string, k key.Key, s key.Step) {
+// plan is s alone under k, signed by the holder of every key here.
+func plan(id string, k key.Key, s kernel.PlanStep) kernel.Plan {
+	_, hpriv := seedKey(2)
+	return kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{s}}, hpriv)
+}
+
+func (r *clerkRig) run(t *testing.T, now int64, id string, k key.Key, s kernel.PlanStep) {
 	t.Helper()
-	if err := r.k.Submit(now, kernel.Plan{ID: id, Key: k, Steps: []key.Step{s}}); err != nil {
+	if err := r.k.Submit(now, plan(id, k, s)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.k.Tick(now); err != nil {
@@ -138,20 +144,21 @@ func TestPostIsHeldThenSentOnce(t *testing.T) {
 		t.Fatal("no step.result in the log")
 	}
 	// The same Idem again is the remembered result, not a second send.
-	req := kernel.Request{Plan: "p1", Step: kernel.Normalize("p1", post(unsubShown, navUnsub)), Key: k, Idem: kernel.Idem("p1", 0), Now: 4 * hour}
+	req := kernel.Request{Plan: plan("p1", k, post(unsubShown, navUnsub)), Idem: kernel.Idem("p1", 0), Now: 4 * hour}
 	if res := r.c.Do(req, r.k.State()); res.Outcome != "ok" || len(r.h.received(t)) != 1 {
 		t.Fatalf("redo %+v, driver got %q", res, r.h.received(t))
 	}
 }
 
-// A post whose to does not name what the action reaches is refused unsent.
+// A post whose to does not name what the action reaches is refused unsent:
+// by the kernel when to is missing, else by the clerk.
 func TestPostToAnotherTargetIsRefused(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
 	for i, to := range []string{unsubURL, "https://shop.example.test/unsubscribe/all?token=[REDACTED]", ""} {
 		id := "p" + string(rune('1'+i))
 		r.run(t, 0, id, r.root, post(to, navUnsub))
-		if s := r.step(id); s.Phase != kernel.PFailed {
-			t.Fatalf("to %q: phase %s", to, s.Phase)
+		if p := r.k.State().Plans[id]; p.Status != kernel.SRejected && p.Steps[0].Phase != kernel.PFailed {
+			t.Fatalf("to %q: plan %s", to, p.Status)
 		}
 	}
 	if got := r.h.received(t); len(got) != 0 {
@@ -179,7 +186,7 @@ func TestLostPostIsParkedNotResent(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	// A read whose answer was lost is safe to run again.
-	if p := r.c.Probe(kernel.Request{Idem: "other", Step: read(navUnsub)}, r.k.State()); p != "notdone" {
+	if p := r.c.Probe(kernel.Request{Plan: plan("p9", r.root, read(navUnsub)), Idem: "other"}, r.k.State()); p != "notdone" {
 		t.Fatalf("read probe %s", p)
 	}
 }
@@ -188,15 +195,8 @@ func TestLostPostIsParkedNotResent(t *testing.T) {
 // revoked key, a root absent from the log, and the key's own bounds (CLK-2).
 func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	r := newClerkRig(t, newHarness(t, nil, "", 0))
-	owner := func(s key.Step) key.Step {
-		for n, a := range s.Args {
-			s.Args[n] = key.Arg{Value: a.Value, Source: key.SrcOwner}
-		}
-		s.Recipient, s.Task = s.Args["to"].Value, "t"
-		return s
-	}
-	req := func(idem string, k key.Key, s key.Step) kernel.Request {
-		return kernel.Request{Plan: "p", Step: owner(s), Key: k, Idem: idem, Now: 1}
+	req := func(idem string, k key.Key, s kernel.PlanStep) kernel.Request {
+		return kernel.Request{Plan: plan("p", k, s), Idem: idem, Now: 1}
 	}
 	safe := `{"v":0,"verb":"navigate","url":"https://shop.example.test/products/kettle"}`
 	if res := r.c.Do(req("i0", r.root, read(safe)), r.k.State()); res.Outcome != "ok" {
@@ -220,8 +220,7 @@ func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	if res := r.c.Do(req("i3", bound, post(unsubShown, navUnsub)), r.k.State()); res.Outcome != "failed" {
 		t.Fatalf("recipient outside the key's bound: %+v", res)
 	}
-	v, _ := key.Verify(r.root, r.owner)
-	if err := r.k.Revoke(1, v.ID()); err != nil {
+	if err := r.k.Revoke(1, r.root.Tip()); err != nil {
 		t.Fatal(err)
 	}
 	if res := r.c.Do(req("i4", r.root, read(safe)), r.k.State()); res.Outcome != "failed" {
