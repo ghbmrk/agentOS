@@ -1,5 +1,5 @@
 name: intake
-# CX-BOARD-INTAKE-wf (#2668, fix 2 of #1780): a collaborator's work-item issue that cannot
+# BOARD-INTAKE-wf (#2668, fix 2 of #1780): a collaborator's work-item issue that cannot
 # render on BOARD.md gets one comment naming every problem, edited in place on each event and
 # deleted once the issue is well formed (tools/board.py intake runs render's own checks). Main's
 # code runs with the issue-scoped token; the issue number is the only event value it reads, so

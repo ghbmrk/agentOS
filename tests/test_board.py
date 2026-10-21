@@ -315,7 +315,7 @@ class IntakeProblemsTest(unittest.TestCase):
 
 
 class IntakeCommentTest(unittest.TestCase):
-    """CX-BOARD-INTAKE-wf (#2668): a malformed work item hears it on its issue, once.
+    """BOARD-INTAKE-wf (#2668): a malformed work item hears it on its issue, once.
     REQ: INTAKE-1, INTAKE-2"""
 
     def items(self):

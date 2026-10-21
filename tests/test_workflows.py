@@ -145,7 +145,7 @@ PREMERGE_LINES = [
 ]
 
 
-# CX-BOARD-INTAKE-wf (#2668): intake.yml holds `issues: write` on an event any collaborator
+# BOARD-INTAKE-wf (#2668): intake.yml holds `issues: write` on an event any collaborator
 # triggers by editing an issue, so it is pinned line by line too: the trigger set, the
 # collaborator and work-item condition, the permissions, a credential-free checkout of main and
 # a run line whose only event value is the issue number, passed through env (INTAKE-3).
@@ -373,7 +373,7 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
 
     def test_intake_is_pinned(self):
-        # CX-BOARD-INTAKE-wf (#2668, INTAKE-3): the shipped workflow equals its pin, and no other
+        # BOARD-INTAKE-wf (#2668, INTAKE-3): the shipped workflow equals its pin, and no other
         # workflow runs the intake command.
         self.assertEqual(lane_gate_problems((WORKFLOWS / "intake.yml").read_text(), INTAKE_LINES), [])
         for f in self.files():
@@ -381,7 +381,7 @@ class WorkflowTest(unittest.TestCase):
                 self.assertNotIn("board.py intake", f.read_text(), f.name)
 
     def test_intake_check_catches_each_reported_edit(self):
-        # CX-BOARD-INTAKE-wf (#2668, INTAKE-3): each widening or issue-text path fails the pin.
+        # BOARD-INTAKE-wf (#2668, INTAKE-3): each widening or issue-text path fails the pin.
         text = (WORKFLOWS / "intake.yml").read_text()
         run = INTAKE_LINES[-1][len("        run: "):]
         step = "      - name: Comment on the issue while it cannot render (tools/board.py intake)\n"

@@ -1,6 +1,6 @@
-# CX-BOARD-INTAKE-wf: an intake check comments on a malformed work-item issue
+# BOARD-INTAKE-wf: an intake check comments on a malformed work-item issue
 
-Work item: #2668 (fix 2 of #1780; fix 1 merged as #1807). Board section: Harness and operating model. Tier: A (`.github/`). Builder: Opus. Usage estimate: 80k tokens.
+Work item: #2668 (fix 2 of #1780; fix 1 merged as #1807). The ID drops the `CX-` prefix the issue was filed with: the lane gate reads `CX-` as the Codex lane, which is tier C only. Board section: Harness and operating model. Tier: A (`.github/`). Builder: Opus. Usage estimate: 80k tokens.
 
 **Why.** `board.yml` failed from 2026-10-12 to 2026-10-15 on malformed work-item issues, so BOARD.md was dark for three days. Since #1807 one render names every bad issue, but only in a workflow log nobody reads. The filer should hear it on the issue, at filing time.
 
@@ -17,7 +17,7 @@ Work item: #2668 (fix 2 of #1780; fix 1 merged as #1807). Board section: Harness
 
 ## Scope
 
-`tools/board.py`, `tests/test_board.py`, `tests/test_workflows.py`, `.github/workflows/intake.yml`, `briefs/CX-BOARD-INTAKE-wf.md`, `tools/ASSUMPTIONS.md`.
+`tools/board.py`, `tests/test_board.py`, `tests/test_workflows.py`, `.github/workflows/intake.yml`, `briefs/BOARD-INTAKE-wf.md`, `tools/ASSUMPTIONS.md`.
 
 **Guard files:** none (no new package).
 
