@@ -53,7 +53,7 @@ func TestSecretScreenWords(t *testing.T) {
 		"/x?access_token=1", "/x?TOKEN=1", "Enter CVV / Security code", "PIN", "Change gift card PIN",
 		// A checkout phrase's plural is not exempt: "Security codes" may be
 		// backup codes (fail closed).
-		"Security codes", "Gift card PINs"} {
+		"Security codes", "Gift card PINs", "Backup batteries"} {
 		if secretText(s) == "" {
 			t.Errorf("%q not read as a secret screen", s)
 		}
