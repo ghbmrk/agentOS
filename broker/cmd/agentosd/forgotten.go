@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // maxForgotten bounds the goals kept in the tombstone; past it the oldest
@@ -17,11 +16,8 @@ import (
 const maxForgotten = 65536
 
 // forgotten is the tombstone of the goals the owner forgot (W3-tasks part
-// 1; security F1 on #123). The journal still holds a forgotten goal's
-// intents, so learning skips them: Loop 1's mining and the compiler read
-// the journal through it (skip), and no text, values or case is kept for
-// the goal again. It holds goal IDs and when they were forgotten, never
-// content.
+// 1; security F1 on #123): no task text is kept for a forgotten goal
+// again. It holds goal IDs and when they were forgotten, never content.
 type forgotten struct {
 	store change.Store
 	now   func() time.Time
@@ -38,7 +34,7 @@ func openForgotten(store change.Store, now func() time.Time) (*forgotten, error)
 	}
 	if b != nil {
 		if err := json.Unmarshal(b, &f.st); err != nil {
-			return nil, fmt.Errorf("learning: forgotten goals: %v", err)
+			return nil, fmt.Errorf("forget: forgotten goals: %v", err)
 		}
 	}
 	return f, nil
@@ -93,44 +89,4 @@ func (f *forgotten) add(goal string) error {
 		return err
 	}
 	return f.store.Save(b)
-}
-
-// List is the journal without the forgotten goals' intents.
-func (r lateReader) List() []journal.Status {
-	e := r.e.Load()
-	if e == nil {
-		return nil
-	}
-	sts := e.List()
-	out := sts[:0:0]
-	for _, s := range sts {
-		if !r.gone.has(s.Intent.GoalID) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// Trail is the journal's records without the forgotten goals' intents:
-// a record naming one only by ID goes with the intent's own record.
-func (r lateReader) Trail() []journal.Record {
-	e := r.e.Load()
-	if e == nil {
-		return nil
-	}
-	rs := e.Trail()
-	dropped := map[string]bool{}
-	for _, x := range rs {
-		if x.Intent != nil && r.gone.has(x.Intent.GoalID) {
-			dropped[x.Intent.ID] = true
-		}
-	}
-	out := rs[:0:0]
-	for _, x := range rs {
-		if dropped[x.ID] || x.Intent != nil && dropped[x.Intent.ID] {
-			continue
-		}
-		out = append(out, x)
-	}
-	return out
 }

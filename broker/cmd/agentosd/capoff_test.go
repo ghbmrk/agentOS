@@ -18,7 +18,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/localui"
-	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
@@ -56,7 +55,7 @@ func newCapBoxWith(t *testing.T, add func(*capLines)) *capBox {
 	}
 	// A model route that answers, so only the case under test is off.
 	b.caps.model = reachableModel(t)
-	b.caps.updateChecks(stubUpdates{})
+	b.caps.updateChecks(true)
 	b.cfg.Notes = []func() string{func() string { return clockNoteForTest }}
 	b.reg = newCapLines(b.caps)
 	if add != nil {
@@ -172,19 +171,10 @@ func shortDir(t *testing.T) string {
 	return d
 }
 
-// stubUpdates stands in for maintain.Loop3 once W5b constructs it.
-type stubUpdates struct{}
-
-func (stubUpdates) Loop() loops.Loop { return loops.Maintain }
-func (stubUpdates) Next(context.Context, bool) (loops.Job, bool) {
-	return loops.Job{}, false
-}
-
 // capCase is one capability-off case: induce turns it on in b, and name
 // is the words its line starts with.
 type capCase struct {
 	row, name string
-	learn     bool // needs the learning plane open
 	induce    func(t *testing.T, b *capBox)
 	clear     func(t *testing.T, b *capBox) // nil: holds for the process's life
 }
@@ -243,42 +233,17 @@ func capCases() []capCase {
 			b.caps.workers(workerTools(nil, images{"other": "/x"}, "worker", "sleep infinity", 2048, workerGates{}) != nil)
 		}},
 		{row: "C11_update_checks", name: "Update checks:", induce: func(t *testing.T, b *capBox) {
-			b.caps.updateChecks(nil)
+			b.caps.updateChecks(false)
 		}, clear: func(t *testing.T, b *capBox) {
-			b.caps.updateChecks(stubUpdates{})
-		}},
-		{row: "C12_routing_held", name: "Routing:", learn: true, induce: func(t *testing.T, b *capBox) {
-			// Opened with no routing socket: routing changes are held.
-		}, clear: func(t *testing.T, b *capBox) {
-			if got, ok := b.cfg.Settings(b.ctx, "LEARNING OFF", true); !ok {
-				t.Fatalf("LEARNING OFF: %q", got)
-			}
+			b.caps.updateChecks(true)
 		}},
 	}
 }
 
-// openCapLearning opens the learning plane on b with no routing socket.
-func openCapLearning(t *testing.T, b *capBox) *learning {
-	t.Helper()
-	lp, err := openLearning(learnPaths{Dir: b.dir, Spare: filepath.Join(b.dir, "spare.json")}, true, &b.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.caps.learning(lp)
-	return lp
-}
-
-// startCapBox opens what c needs and runs the daemon.
+// startCapBox runs the daemon for c.
 func startCapBox(t *testing.T, c capCase) *capBox {
 	b := newCapBox(t)
-	var lp *learning
-	if c.learn {
-		lp = openCapLearning(t, b)
-	}
 	b.run()
-	if lp != nil {
-		attachForTest(t, lp, b.ctx, b.cancel, b.d)
-	}
 	return b
 }
 
@@ -292,18 +257,14 @@ func TestEveryOffCapabilityHasOneStatusLine(t *testing.T) {
 	for _, c := range capCases() {
 		t.Run(c.row, func(t *testing.T) {
 			b := startCapBox(t, c)
-			if c.learn {
-				// Learning opened: the line stands from the start.
-			} else {
-				s := b.status()
-				for _, l := range capLineTexts() {
-					if strings.Contains(s, l) {
-						t.Fatalf("condition absent, %q in %q", l, s)
-					}
+			s := b.status()
+			for _, l := range capLineTexts() {
+				if strings.Contains(s, l) {
+					t.Fatalf("condition absent, %q in %q", l, s)
 				}
 			}
 			c.induce(t, b)
-			s := b.status()
+			s = b.status()
 			if n := linesNaming(s, c.name); n != 1 {
 				t.Fatalf("%d %q lines in %q", n, c.name, s)
 			}
@@ -376,7 +337,7 @@ func TestCapabilityLinesRepeatInTheDigestWhileTheyLast(t *testing.T) {
 		p.now = func() time.Time { return now }
 		caps := newCapState("")
 		caps.model = p
-		caps.updateChecks(stubUpdates{})
+		caps.updateChecks(true)
 		reg := newCapLines(caps)
 		if d := reg.Digest(); len(d) != 1 || d[0] != modelUnreachable {
 			t.Fatalf("socket down: %q", d)
@@ -392,7 +353,7 @@ func TestCapabilityLinesRepeatInTheDigestWhileTheyLast(t *testing.T) {
 	t.Run("live_not_latched", func(t *testing.T) {
 		caps := newCapState("")
 		caps.model = reachableModel(t)
-		caps.updateChecks(stubUpdates{})
+		caps.updateChecks(true)
 		reg := newCapLines(caps)
 		caps.agentOff(agentNoSoftware)
 		caps.recallWired(false)
@@ -432,25 +393,22 @@ func TestModelProbeIsCachedAMinute(t *testing.T) {
 	}
 }
 
-// OP-9: the registry is in STATUS when the learning plane failed to open,
+// OP-9: the registry is in STATUS when the forget plane failed to open,
 // and its Digest still returns lines then.
-func TestCapabilityLinesWithoutTheLearningPlane(t *testing.T) {
+func TestCapabilityLinesWithoutTheForgetPlane(t *testing.T) {
 	b := newCapBox(t)
-	learningOff(&b.cfg)
+	wireSettings(&b.cfg, nil)
 	b.caps.recallWired(false)
-	b.caps.updateChecks(nil)
+	b.caps.updateChecks(false)
 	b.run()
 	s := b.status()
-	for _, want := range []string{recallOffLine, updateChecksOff, learningOffNote} {
+	for _, want := range []string{recallOffLine, updateChecksOff} {
 		if !strings.Contains(s, want) {
 			t.Errorf("STATUS %q lacks %q", s, want)
 		}
 	}
 	if d := b.reg.Digest(); len(d) != 2 {
 		t.Fatalf("digest: %q", d)
-	}
-	if strings.Contains(s, "Routing:") {
-		t.Errorf("routing line with no learning plane: %q", s)
 	}
 }
 
@@ -479,7 +437,7 @@ func TestCapabilityLinesAreOwnerWorded(t *testing.T) {
 	// A planted entry fails the scan of the registry itself.
 	caps := newCapState("")
 	caps.model = reachableModel(t)
-	caps.updateChecks(stubUpdates{})
+	caps.updateChecks(true)
 	reg := newCapLines(caps)
 	reg.add("planted", capConfig, func() string { return "Model: -egress is empty; restart me." })
 	if reg.check() == nil {
@@ -515,54 +473,6 @@ func TestOwnerChoicesAreDigestOnly(t *testing.T) {
 	}
 }
 
-// REQ: A11, OP-9
-// A11: with learning on but unable to run, STATUS names the cause: no
-// replay machine to test changes on (always, since agentosd runs none),
-// no builder, no model socket, or no model grant, each alone.
-func TestLearningUnableToRunNamesTheCause(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		induce func(b *capBox, lp *learning)
-		want   string
-	}{
-		{"no_builder", func(b *capBox, lp *learning) { lp.builderOff.Store(true) }, builderOffNote},
-		{"no_model_socket", func(b *capBox, lp *learning) {
-			b.caps.model = newModelProbe(filepath.Join(shortDir(t), "gone.sock"))
-		}, modelUnreachable},
-		{"no_model_grant", func(b *capBox, lp *learning) {
-			b.caps.model = modelWith(t, modelroute.ModelState{Open: true})
-		}, modelNoGrant},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			b := newCapBox(t)
-			lp := openCapLearning(t, b)
-			b.run()
-			attachForTest(t, lp, b.ctx, b.cancel, b.d)
-			if !lp.learningOn() {
-				t.Fatal("learning is not on")
-			}
-			before := b.status()
-			if !strings.Contains(before, noTestNote) {
-				t.Fatalf("STATUS %q does not say changes are not tested", before)
-			}
-			for _, l := range []string{builderOffNote, builderUnsetNote, modelUnreachable, modelUnset, modelNoGrant, modelLocked} {
-				if strings.Contains(before, l) {
-					t.Fatalf("a cause before any: %q", before)
-				}
-			}
-			c.induce(b, lp)
-			s := b.status()
-			// STATUS drops apostrophes (control plainLine).
-			if !strings.Contains(s, strings.ReplaceAll(c.want, "'", "")) {
-				t.Fatalf("STATUS %q does not name %q", s, c.want)
-			}
-			if !strings.Contains(strings.ToLower(c.want), "learn") {
-				t.Errorf("cause line %q does not say learning is affected", c.want)
-			}
-		})
-	}
-}
-
 // OP-9: a plain file where the socket belongs reads as not reachable.
 func TestModelProbeWantsASocket(t *testing.T) {
 	path := filepath.Join(shortDir(t), "m.sock")
@@ -586,7 +496,7 @@ func TestModelLinesFollowTheVaultProcess(t *testing.T) {
 	p.now = func() time.Time { return now }
 	caps := newCapState("")
 	caps.model = p
-	caps.updateChecks(stubUpdates{})
+	caps.updateChecks(true)
 	reg := newCapLines(caps)
 	step := func(name, want string) {
 		t.Helper()

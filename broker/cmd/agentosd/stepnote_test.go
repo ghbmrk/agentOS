@@ -5,9 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -40,41 +38,9 @@ func TestSR23sStepErrMarksTheReason(t *testing.T) {
 	}
 }
 
-// The digest carries the Rollback line verbatim once it outlasts a digest
-// period: daily for 7 days, then weekly, and at once when the line
-// changes (UX on SR2-3s R1).
-func TestSR23sDigestCadence(t *testing.T) {
-	shown := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
-	line := "Rollback: the agent's files since 08:59 can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
-	if _, ok := stepDigestKey("", shown, shown.Add(48*time.Hour)); ok {
-		t.Fatal("a key with no line")
-	}
-	if _, ok := stepDigestKey(line, shown, shown.Add(23*time.Hour)); ok {
-		t.Fatal("a key inside the first digest period")
-	}
-	keys := map[string]bool{}
-	for h := 24; h <= 24*29; h++ {
-		k, ok := stepDigestKey(line, shown, shown.Add(time.Duration(h)*time.Hour))
-		if !ok || !strings.HasSuffix(k, line) {
-			t.Fatalf("hour %d: key %q", h, k)
-		}
-		keys[k] = true
-	}
-	// Days 1 to 7 daily, then weeks from day 8: 8-14, 15-21, 22-28, 29.
-	if len(keys) != 7+4 {
-		t.Fatalf("%d digest lines in 29 days, want 11", len(keys))
-	}
-	k1, _ := stepDigestKey(line, shown, shown.Add(30*time.Hour))
-	k2, _ := stepDigestKey(strings.Replace(line, "08:59", "10:12", 1), shown, shown.Add(30*time.Hour))
-	if k1 == k2 {
-		t.Fatal("a new since-time kept the old key")
-	}
-}
-
 type fakeSteps struct{ line string }
 
-func (f fakeSteps) StepNote() string              { return f.line }
-func (f fakeSteps) StepLine() (string, time.Time) { return f.line, time.Time{} }
+func (f fakeSteps) StepNote() string { return f.line }
 
 // STATUS carries the plane's Rollback line: newStepNotes adds it to the
 // notes main hands the daemon, empty until the plane opens (L3 on #179).
@@ -85,7 +51,7 @@ func TestSR23sStatusNotesCarryTheLine(t *testing.T) {
 		t.Fatalf("notes %d before the plane opens", len(notes))
 	}
 	line := "Rollback: the agent's files since 08:59 can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
-	steps.open(t.Context(), fakeSteps{line}, nil)
+	steps.open(fakeSteps{line})
 	if got := notes[0](); got != line {
 		t.Fatalf("STATUS note = %q", got)
 	}

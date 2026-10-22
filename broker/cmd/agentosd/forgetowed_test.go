@@ -250,7 +250,6 @@ func TestARetryingForgetIsToldAfterARealRestart(t *testing.T) {
 	<-done
 	x.stop()
 	x.d.Wait()
-	lp.running.Wait()
 	lp.tasks.store = tasks
 	for {
 		select {
@@ -393,7 +392,7 @@ func TestAGarbageOwedFileFailsSafe(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+		lp, err := openForgetPlane(dir, &daemon.Config{
 			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
 		if err != nil {
 			t.Fatalf("%q: learning did not open: %v", body, err)
@@ -483,7 +482,7 @@ func TestAnOwedTextNotSentStaysOwedAsWired(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "forget-owed.json"), []byte(`{"`+owedLostKey+`":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+	lp, err := openForgetPlane(dir, &daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
 	if err != nil {
 		t.Fatal(err)

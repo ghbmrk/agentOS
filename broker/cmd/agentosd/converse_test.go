@@ -17,7 +17,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/loops"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -183,13 +182,9 @@ func chatCode(t time.Time) string {
 // a length check cannot fail; the reply is whole only if it still ends with
 // the pacing line's last item, which is HELP's last piece.
 func TestCH15HelpNamesChatUncut(t *testing.T) {
-	for _, learning := range []bool{true, false} {
+	{
 		var dc daemon.Config
-		if learning {
-			dc.HelpExtra = loops.HelpLine
-		} else {
-			learningOff(&dc)
-		}
+		wireSettings(&dc, nil)
 		(&ownerRenew{now: time.Now}).wire(&dc)
 		r := pacedOwner(t, ownerch.Pacing{}, at23)
 		ch, err := ownerch.New(ownerch.Config{
@@ -203,15 +198,12 @@ func TestCH15HelpNamesChatUncut(t *testing.T) {
 		}
 		got := ch.Handle(context.Background(), ownerNum, "HELP")
 		if len(got) != 1 || len(got[0]) > control.MaxText || !strings.HasSuffix(got[0], "ACK 5.") {
-			t.Fatalf("learning %v: HELP is not one whole text (cut at %d bytes): %q", learning, control.MaxText, got)
+			t.Fatalf("HELP is not one whole text (cut at %d bytes): %q", control.MaxText, got)
 		}
 		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
-			"LOOPS", "HELP LOOPS", "RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
-			if !learning && (word == "LOOPS" || word == "HELP LOOPS") {
-				word = "Spare-time"
-			}
+			"RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
 			if !strings.Contains(got[0], word) {
-				t.Fatalf("learning %v: HELP (%d bytes) lacks %s: %q", learning, len(got[0]), word, got[0])
+				t.Fatalf("HELP (%d bytes) lacks %s: %q", len(got[0]), word, got[0])
 			}
 		}
 	}

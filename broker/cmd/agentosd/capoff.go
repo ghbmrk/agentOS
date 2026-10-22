@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
@@ -43,7 +42,7 @@ const (
 	// C2: no model route is configured.
 	modelUnset = "Model: not set up, so your agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
-	modelUnreachable = "Model: not reachable, so your agent cannot think and learning cannot test changes; " + fixRestart + "."
+	modelUnreachable = "Model: not reachable, so your agent cannot think; " + fixRestart + "."
 	// C2: no model provider is granted (A11's no-grant cause): no -grant
 	// and no key stored at setup (egress K24). No add-key step is served
 	// past setup yet, so the line names none
@@ -62,16 +61,14 @@ const (
 	questionsOffLine = "Questions from agents: cannot reach you, and the time check is off; " + fixRestart + "."
 	// C10: the machine plane is up but no worker image is registered.
 	workersOffLine = "Worker tools: not set up here; " + fixUpdate + "."
-	// C11: no update-check loop (Loop 3) is registered.
+	// C11: no update-check loop (Loop 3) runs on this box version.
 	updateChecksOff = "Update checks: not running here; " + fixUpdate + "."
-	// C12: learning is on but routing changes are held.
-	routingHeldLine = "Routing: learning cannot change how work is routed here; " + fixUpdate + "."
 )
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
-		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine}
+		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff}
 }
 
 // capClass is why a capability is off. An owner choice (LOOPS OFF, say)
@@ -105,7 +102,6 @@ func newCapLines(s *capState) *capLines {
 	r.add("questions", capHost, s.questionsLine)
 	r.add("workers", capConfig, s.workersLine)
 	r.add("update-checks", capHeld, s.updatesLine)
-	r.add("routing", capConfig, s.routingLine)
 	return r
 }
 
@@ -193,8 +189,7 @@ type capState struct {
 	recallOff    atomic.Bool            // C7
 	questionsOff atomic.Bool            // C9
 	workersOff   atomic.Bool            // C10
-	updates      atomic.Bool            // C11: an update-check source is registered
-	learn        atomic.Pointer[learning]
+	updates      atomic.Bool            // C11: an update check runs
 }
 
 func newCapState(modelSocket string) *capState {
@@ -220,12 +215,12 @@ func (s *capState) agentOff(line string) {
 	s.agent.Store(&line)
 }
 
-func (s *capState) recallWired(on bool)  { s.recallOff.Store(!on) }
-func (s *capState) workers(on bool)      { s.workersOff.Store(!on) }
-func (s *capState) learning(l *learning) { s.learn.Store(l) }
+func (s *capState) recallWired(on bool) { s.recallOff.Store(!on) }
+func (s *capState) workers(on bool)     { s.workersOff.Store(!on) }
 
-// updateChecks registers Loop 3's source (W5b); nil means none.
-func (s *capState) updateChecks(src loops.Source) { s.updates.Store(src != nil) }
+// updateChecks records whether an update check runs (W5b). None is built,
+// so main never sets it and STATUS says update checks are not running.
+func (s *capState) updateChecks(on bool) { s.updates.Store(on) }
 
 func (s *capState) agentLine() string {
 	if l := s.agent.Load(); l != nil && !s.held.Load() {
@@ -254,16 +249,6 @@ func lineIf(off bool, line string) string {
 		return line
 	}
 	return ""
-}
-
-// routingLine is C12: learning on, but routing changes held (no routing
-// socket). With learning off or not open it says nothing.
-func (s *capState) routingLine() string {
-	l := s.learn.Load()
-	if l == nil || l.routing != nil || !l.learningOn() {
-		return ""
-	}
-	return routingHeldLine
 }
 
 // modelProbeEvery is how long a model-route probe is believed.

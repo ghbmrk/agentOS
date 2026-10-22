@@ -5,7 +5,6 @@ package loops
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -183,28 +182,6 @@ func TestAFailedCaseAddIsRetried(t *testing.T) {
 	}
 	if b := r.p.Files("config")[seedPath]; string(b) != reference {
 		t.Fatalf("tree %s", b)
-	}
-}
-
-// P3-4b-1b item 4 (LOOP-3): the scan covers the daemon's loop2NotRun
-// table, and a banned word planted in it fails the scan.
-func TestTheWordingScanCoversLoop2NotRun(t *testing.T) {
-	src, err := os.ReadFile(daemonLoop2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "var loop2NotRun = map[") || !contains(ownerTables, daemonLoop2) {
-		t.Fatal("loop2NotRun is not in a scanned file")
-	}
-	if !contains(ownerTables, daemonLearn) {
-		t.Fatal("learn.go's loop 2 owner text is not scanned")
-	}
-	planted := strings.Replace(string(src), `"needs the updater"`, `"needs the updater to detect it"`, 1)
-	if planted == string(src) {
-		t.Fatal("no loop2NotRun entry to plant in")
-	}
-	if bad := scanWording(t, daemonLoop2, planted); len(bad) != 1 || bad[0] != "needs the updater to detect it" {
-		t.Fatalf("planted scan: %q", bad)
 	}
 }
 

@@ -489,34 +489,25 @@ func TestDigestConfirmsTheDestinationOnce(t *testing.T) {
 	}
 }
 
-type fakeCases struct{ ids []string }
-
-func (f *fakeCases) ForgetTasks(ids ...string) (int, error) {
-	f.ids = append(f.ids, ids...)
-	return len(ids), errors.New("cases")
-}
-
 // TestADeletionForgetsKeptReplies: a deletion's reach (CAP-3) forgets
-// every kept reply, which may quote the deleted record (security C6), as
-// well as the learning plane's cases.
+// every kept reply, which may quote the deleted record (security C6).
 func TestADeletionForgetsKeptReplies(t *testing.T) {
 	r := newEvRig(t, "")
 	r.ev.kept.keep("quotes the record")
-	c := &fakeCases{}
-	n, err := forgetFan{cases: c, kept: r.ev.kept}.ForgetTasks("agent/1")
-	if n != 0 || err == nil || !slices.Equal(c.ids, []string{"agent/1"}) || len(r.ev.kept.list()) != 0 {
-		t.Fatalf("forgot %d %v %v %d", n, err, c.ids, len(r.ev.kept.list()))
+	n, err := forgetFan{kept: r.ev.kept}.ForgetTasks("agent/1")
+	if n != 0 || err != nil || len(r.ev.kept.list()) != 0 {
+		t.Fatalf("forgot %d %v %d", n, err, len(r.ev.kept.list()))
 	}
 	r.ev.kept.keep("again")
 	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); err != nil || len(r.ev.kept.list()) != 0 {
-		t.Fatalf("without learning: %v", err)
+		t.Fatalf("again: %v", err)
 	}
 }
 
 // REQ: CAP3-F1
 // TestADeletionCountsHeldAgentTexts: a deletion's reach returns how many
-// held agent texts the owner channel dropped, not the learning plane's
-// count, so the forget reply can tell the owner (CAP3-F1).
+// held agent texts the owner channel dropped, so the forget reply can
+// tell the owner (CAP3-F1).
 func TestADeletionCountsHeldAgentTexts(t *testing.T) {
 	r := newEvRig(t, "")
 	o := pacedOwner(t, quiet22to7(), at23)
@@ -524,10 +515,9 @@ func TestADeletionCountsHeldAgentTexts(t *testing.T) {
 	if err := o.ch.Notify("Held agent text."); err != nil {
 		t.Fatal(err)
 	}
-	c := &fakeCases{}
-	n, err := forgetFan{cases: c, kept: r.ev.kept}.ForgetTasks("agent/1")
-	if n != 1 || err == nil || !slices.Equal(c.ids, []string{"agent/1"}) {
-		t.Fatalf("forgot %d %v %v", n, err, c.ids)
+	n, err := forgetFan{kept: r.ev.kept}.ForgetTasks("agent/1")
+	if n != 1 || err != nil {
+		t.Fatalf("forgot %d %v", n, err)
 	}
 	if n, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); n != 0 || err != nil {
 		t.Fatalf("again: %d %v", n, err)
@@ -750,9 +740,8 @@ func TestDEL1f1DeletionReachesTheOutbox(t *testing.T) {
 	src.add("quotes the record")
 	r.ev.kept.keep("quotes it too")
 	r.ev.serve(src)
-	c := &fakeCases{}
-	if _, err := (forgetFan{cases: c, kept: r.ev.kept}).ForgetTasks("agent/1"); err == nil || !slices.Equal(c.ids, []string{"agent/1"}) {
-		t.Fatalf("forget: %v %v", err, c.ids)
+	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+		t.Fatalf("forget: %v", err)
 	}
 	if len(src.PendingReplies()) != 0 || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("left %d waiting, %d kept", len(src.PendingReplies()), len(r.ev.kept.list()))

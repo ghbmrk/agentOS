@@ -5824,15 +5824,15 @@ class FuzzConfineTest(unittest.TestCase):
     # REQ: LOOP-1, LOOP-7
     # P3-4b-3r-confine requirement 2: fuzz children run as an unprivileged system user the image
     # creates; it owns LOOP-7's state and reaches it through the broker's 0700 state directory by an
-    # ACL entry granting search only. The user is the one agentosd looks up.
+    # ACL entry granting search only. The user is the one agentosd looked up.
     # P3-4b-3r-confine-r2 moved the state out of the broker's directory and took the ACL away.
+    # MIG-4-untrusted-learn (#2776 b): agentosd no longer runs fuzz children, so it names neither the
+    # user nor the state; the image's user, ACLs and fuzz binaries go in a later image change.
 
     def test_the_image_creates_the_fuzz_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf").read_text().splitlines()
         users = [l.split() for l in lines if l.strip() and not l.startswith("#")]
         self.assertEqual([u[:3] for u in users], [["u", "agentos-fuzz", "-"]])
-        learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
-        self.assertRegex(learn, r'fuzzUser\s*=\s*"agentos-fuzz"')
 
     def tmpfiles(self):
         return [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
@@ -5851,11 +5851,9 @@ class FuzzConfineTest(unittest.TestCase):
                 for e in (l[6].split(",") if l[0].startswith("a") and len(l) > 6 else []):
                     if e.startswith(("u:agentos-fuzz:", "user:agentos-fuzz:", "g:agentos-fuzz:", "group:agentos-fuzz:")):
                         self.assertEqual(e.rsplit(":", 1)[1], "---", "the fuzz user is granted %s on %s" % (e, l[1]))
-        # agentosd creates the fuzz state (loop7.Load) and gives it to the user (Jail.Own): a tmpfiles line
-        # would also run at image build and ship it.
+        # The fuzz state was created on the box (loop7.Load), never by a tmpfiles line, which would also
+        # run at image build and ship it.
         self.assertFalse([l for l in lines if l[1] == "/var/lib/agentos-fuzz" or l[1].startswith("/var/lib/agentos-fuzz/")])
-        learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
-        self.assertRegex(learn, r'fuzzState\s*=\s*"/var/lib/agentos-fuzz"')
         # Nothing else on the box is given to the fuzz user.
         shared = ("/var/lib/agentos", "/tmp", "/var/tmp", "/dev/shm")
         others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in shared]

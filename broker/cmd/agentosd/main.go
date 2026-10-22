@@ -31,7 +31,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
-	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/mail/mailsock"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -109,7 +108,6 @@ func stepErr(err error) error {
 // stepSource is the guest plane's view of failing step snapshots.
 type stepSource interface {
 	StepNote() string
-	StepLine() (string, time.Time)
 }
 
 type stepSrc struct{ stepSource }
@@ -125,65 +123,17 @@ func newStepNotes(notes *[]func() string) *stepNotes {
 	return n
 }
 
-// open points the line at src and, with a digest to tell, starts telling
-// it there.
-func (n *stepNotes) open(ctx context.Context, src stepSource, notice func(key, line string) error) {
-	n.p.Store(&stepSrc{src})
-	if notice != nil {
-		go n.digest(ctx, notice)
-	}
-}
+// open points the line at src. STATUS carries it; nothing else does,
+// since the digest it was queued for went with the learning loop's
+// pipeline (MIG-4-untrusted-learn; DRB-1: what waits on the owner is in
+// STATUS).
+func (n *stepNotes) open(src stepSource) { n.p.Store(&stepSrc{src}) }
 
 func (n *stepNotes) Note() string {
 	if p := n.p.Load(); p != nil {
 		return p.StepNote()
 	}
 	return ""
-}
-
-// digestPeriod is how long the Rollback line stands before the digest
-// carries it too (security R1, UX on SR2-3s).
-const digestPeriod = 24 * time.Hour
-
-// stepDigestKey is the digest notice key for the Rollback line STATUS has
-// carried since shown, at now: none in the first digest period, then one
-// a day for 7 days, then one a week (W5's cadence). The key holds the
-// line, so a new reason or since-time is told at once; a success clears
-// the line, and with it any further key.
-func stepDigestKey(line string, shown, now time.Time) (string, bool) {
-	if line == "" || now.Sub(shown) < digestPeriod {
-		return "", false
-	}
-	d := int(now.Sub(shown) / digestPeriod)
-	if d > 7 {
-		d = 8 + (d-8)/7
-	}
-	return fmt.Sprintf("sr2-3s:%d:%s", d, line), true
-}
-
-// digest queues the Rollback line for the owner's digest on stepDigestKey's
-// cadence, each minute until ctx ends. The line is the STATUS line,
-// verbatim: the digest adds no wording of its own.
-func (n *stepNotes) digest(ctx context.Context, notice func(key, line string) error) {
-	t := time.NewTicker(time.Minute)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		p := n.p.Load()
-		if p == nil {
-			continue
-		}
-		line, shown := p.StepLine()
-		if key, ok := stepDigestKey(line, shown, time.Now()); ok {
-			if err := notice(key, line); err != nil {
-				log.Printf("rollback notice: %v", err)
-			}
-		}
-	}
 }
 
 func (a machines) RaisePrivate(id string) error { return a.m.RaiseLabel(id, vm.Private) }
@@ -195,22 +145,18 @@ func (a machines) Lineage(id string) (string, error) {
 
 // lateServices routes each machine to its guest services, which need the
 // manager and so are built after it; machines start only once they exist.
-// agentosd runs no replay machines (MIG-4-untrusted-learn): a machine named
-// as one (vm.EvalPrefix) gets no services, never the live plane with its
-// journal, executors and owner (replay R7); every other machine goes to
-// the live guest plane.
-type lateServices struct{ live, build atomic.Pointer[svc] }
+// agentosd runs no replay or builder machines (MIG-4-untrusted-learn): a
+// machine named as one (vm.EvalPrefix, vm.BuilderPrefix) gets no
+// services, never the live plane with its journal, executors and owner
+// (replay R7, C-3c-2); every other machine goes to the live guest plane.
+type lateServices struct{ live atomic.Pointer[svc] }
 
 type svc struct{ vm.Services }
 
 func (l *lateServices) pick(id string) *svc {
 	switch {
-	case strings.HasPrefix(id, vm.EvalPrefix):
+	case strings.HasPrefix(id, vm.EvalPrefix), strings.HasPrefix(id, vm.BuilderPrefix):
 		return nil
-	case strings.HasPrefix(id, loopbuild.Prefix):
-		// Loop 1's builder machines get the builder's socket or nothing,
-		// never the live plane with managed_tree (C-3c-2).
-		return l.build.Load()
 	}
 	return l.live.Load()
 }
@@ -356,10 +302,10 @@ func main() {
 	imgs := images{}
 	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket, recallDir string
 	var agentImage, agentLaunch string
-	var diskReserveMB, machineDiskMB, agentMemMB, builderMemMB int64
+	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
-	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
-	var learn learnPaths
+	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
+	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var mailSocket, checkerVerify string
 	var noticeSocket string
@@ -390,7 +336,7 @@ func main() {
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
-	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk and runs no fuzz targets")
+	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
 	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
@@ -411,13 +357,8 @@ func main() {
 	flag.StringVar(&checkerVerify, "checker-verify", "", "agentos-checker's verify socket, which checks the owner's code-generator codes while the vault process holds only the unlock proof (CH-4); empty keeps every check on -owner-verify")
 	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
-	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
-	learn.Fuzz, learn.Loop7, learn.FuzzUser = fuzzRelease, fuzzState, fuzzUser
-	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
-	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
-	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
-	flag.StringVar(&builderLaunch, "builder-launch", defaultBuilderLaunch, "how a builder machine starts: argv and env (guest/builder/launch.json); empty uses the image's own")
-	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
+	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the owner's FORGET state: task texts, tombstones and the restored forget log (W3-forget)")
+	flag.StringVar(&routingSocket, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, from which the model routes read how many attempts the owner's rule allows; empty holds MaxRetries")
 	var workerImage, workerArgv string
 	var workerMaxMB, workerLayerMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
@@ -440,7 +381,6 @@ func main() {
 	if err := checkDiskQuotaFlag(diskQuota); err != nil {
 		log.Fatal(err)
 	}
-	learn.DiskQuota = diskQuota
 	// The provider images whose pinned CLI versions both provider runners
 	// read at each gate check (#1877).
 	pins := readImagePins(imgs, provagent.Builtins())
@@ -454,7 +394,6 @@ func main() {
 	})
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
-	namedAgentImage := agentImage // the builder never runs it, agent or not
 	if mem.AgentOff != "" {
 		// The broker stays up, STOP and STATUS included; no agent machine
 		// is kept and no replay machine opened, and STATUS says why.
@@ -493,13 +432,13 @@ func main() {
 	// held mode texts the owner why, takes their answer, and the start
 	// goes on once it releases the restore (W3-forget-b1-7). With no owner
 	// to text, agentosd does not start.
-	if held := restoreHold(learn.Dir); held != nil {
+	if held := restoreHold(learnDir); held != nil {
 		owner, err := heldOwner(cfg.OwnerNumber, localsrv.FileRecord{Path: setupRecord})
 		if err != nil {
 			log.Fatalf("%v; %v", held, err)
 		}
 		log.Print(held)
-		m := heldMode{Learn: learn.Dir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
+		m := heldMode{Learn: learnDir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
 			Message: !modemBridge || ownerMessage, Logf: log.Printf}
 		if modemBridge {
 			m.Link = modemlink.New(modemlink.Config{Owner: owner})
@@ -513,7 +452,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := restoreHold(learn.Dir); err != nil {
+		if err := restoreHold(learnDir); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -596,9 +535,6 @@ func main() {
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
-			// The machines group sits in the delegated root, where the
-			// fuzz children's leaf goes too (loop7 Jail, L7-6).
-			learn.Cgroup = filepath.Dir(g.Path)
 		}
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
@@ -628,8 +564,8 @@ func main() {
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
 	capLines.wire(&cfg)
-	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
-	// is never called, and STATUS says update checks are not running.
+	// No update-check loop (Loop 3, W5b) runs: STATUS says update checks
+	// are not running.
 	agent := &lateAgent{}
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
@@ -697,23 +633,18 @@ func main() {
 		cfg.BridgeOnly = !ownerMessage
 	}
 
-	// The learning plane failing must not take the owner channel down
-	// either: without it loop settings are refused and nothing adopts.
-	// The tree's procedures, skills and context reach the agent through
-	// managed_tree, private machines only (W4).
-	tree := newLiveTree(log.Printf)
-	learn.Tree = tree
-	var lp *learning
-	if err := os.MkdirAll(learn.Dir, 0o700); err != nil {
-		log.Printf("learning disabled: %v", err)
-	} else if lp, err = openLearning(learn, runsc != "" && egressSocket != "", &cfg); err != nil {
-		log.Printf("learning disabled: %v", err)
+	// The forget plane failing must not take the owner channel down
+	// either: without it FORGET is answered that it cannot run.
+	var lp *forgetPlane
+	if err := os.MkdirAll(learnDir, 0o700); err != nil {
+		log.Printf("forget disabled: %v", err)
+	} else if lp, err = openForgetPlane(learnDir, &cfg); err != nil {
+		log.Printf("forget disabled: %v", err)
 	}
 	if lp == nil {
-		learningOff(&cfg)
+		wireSettings(&cfg, nil)
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
-		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// One clock for the journal, the gate and the mail adapter, so the
 	// organize bound counts the journal's stamps on the adapter's day
@@ -757,9 +688,9 @@ func main() {
 	// read from the routing socket off the request path (SR3-7-f2); with
 	// no routing socket they hold MaxRetries.
 	var retries func() int
-	if egressSocket != "" && learn.Routing != "" {
+	if egressSocket != "" && routingSocket != "" {
 		spare := &modelroute.Spare{}
-		go spare.Run(ctx, modelroute.NewRouting(learn.Routing).State, 30*time.Second)
+		go spare.Run(ctx, modelroute.NewRouting(routingSocket).State, 30*time.Second)
 		retries = spare.Retries
 		// The line names other routes only when some class of the owner's
 		// rule has a route past its first (#1264 item 3): a plan-only rule
@@ -788,21 +719,16 @@ func main() {
 	pacer.attach(ctx, d.Owner(), time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
-	// Deletions reach the journal's guest intents (CAP-3), when learning
-	// runs what it keeps of them (change C19, learning.ForgetTasks),
+	// Deletions reach the journal's guest intents (CAP-3),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
 		Notify: recallNotify(d.Owner), HeldDropped: recallHeldDropped(d.Owner)}
 	// and every reply kept on the box (CH-20).
-	fan := forgetFan{kept: ev.kept}
-	if lp != nil {
-		fan.cases = lp
-	}
-	recallCfg.Cases = fan
+	recallCfg.Cases = forgetFan{kept: ev.kept}
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
 	if mw != nil {
-		wireMail(ctx, mw, d, mailSocket, learn.Dir, mailStatus, cfg.Now)
+		wireMail(ctx, mw, d, mailSocket, learnDir, mailStatus, cfg.Now)
 	}
 	if noticeSocket != "" {
 		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)
@@ -856,7 +782,6 @@ func main() {
 			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
-			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
@@ -869,7 +794,7 @@ func main() {
 				wt.Provider = providerTool{pr}
 			}
 			caps.workers(wt != nil)
-			tools := registeredTools(qs, tree, recallTools, wt)
+			tools := registeredTools(qs, recallTools, wt)
 			if wt != nil {
 				startReaper(ctx, wt, m, 5*time.Second)
 			}
@@ -881,11 +806,7 @@ func main() {
 				services.live.Store(&svc{plane})
 				ev.serve(plane)
 				agentStatus.replies.Store(&replyWait{plane})
-				var notice func(key, line string) error
-				if lp != nil {
-					notice = lp.pipe.Notice
-				}
-				steps.open(ctx, plane, notice)
+				steps.open(plane)
 				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				if lp != nil {
 					oa.Delivered = lp.delivered
@@ -893,11 +814,6 @@ func main() {
 				var to ownerAgent = oa
 				agent.a.Store(&to)
 				defer plane.Shutdown()
-				if lp != nil {
-					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
-					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress, bc.Retries = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket, retries
-					lp.startBuilder(m, imgs, services, bc)
-				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
@@ -1030,7 +946,7 @@ func flagSet(fs *flag.FlagSet, name string) bool {
 }
 
 // workerTools serves the worker-machine tools (CAP-8) on the live guest
-// plane only: builder machines never get them. Nil, offering
+// plane only. Nil, offering
 // none, when no worker image is registered.
 func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g workerGates) *workers.Tools {
 	if image == "" {

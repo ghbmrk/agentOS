@@ -908,27 +908,16 @@ func (k *keptReplies) loadLocked() []keptReply {
 }
 
 // forgetFan is what a deletion reaches beyond the journal (recalltool
-// Cases): the learning plane's cases, if it runs, every kept reply and
-// reply waiting in the guest outbox, and the owner channel's recent texts,
-// since any may quote the deleted record (security C6 on #148, DEL-1-f1,
-// #2360).
+// Cases): every kept reply and reply waiting in the guest outbox, and the
+// owner channel's recent texts, since any may quote the deleted record
+// (security C6 on #148, DEL-1-f1, #2360). The learning plane's cases went
+// with it (MIG-4-untrusted-learn).
 type forgetFan struct {
-	cases recallCases
-	kept  *keptReplies
-}
-
-type recallCases interface {
-	ForgetTasks(ids ...string) (int, error)
+	kept *keptReplies
 }
 
 // ForgetTasks returns what recall's forget reply counts (recalltool
-// Cases): the held agent texts the owner channel dropped (CAP3-F1), not
-// the learning plane's case count, which no reply words.
-func (f forgetFan) ForgetTasks(ids ...string) (int, error) {
-	held, kerr := f.kept.forget()
-	if f.cases == nil {
-		return held, kerr
-	}
-	_, err := f.cases.ForgetTasks(ids...)
-	return held, errors.Join(err, kerr)
+// Cases): the held agent texts the owner channel dropped (CAP3-F1).
+func (f forgetFan) ForgetTasks(...string) (int, error) {
+	return f.kept.forget()
 }

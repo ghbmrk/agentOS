@@ -1,84 +1,15 @@
 package main
 
 import (
-	"context"
 	"flag"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/budget"
-	"github.com/ghbmrk/agentos/broker/daemon"
 )
 
 // REQ: RES-2
-
-// MIG-4-untrusted-learn (from PE2, UX-114-1, potency C1 on #114): agentosd
-// runs no replay machine, so while learning is on the owner sees it is
-// paused in effect: STATUS says so after the clock note, and turning
-// learning or all loops back on says nothing new will be adopted, keeping
-// the "if this wasn't you" line (security C1 on #49). With learning off,
-// neither appears.
-func TestNoReplayIsSaid(t *testing.T) {
-	dir := t.TempDir()
-	cfg := daemon.Config{
-		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
-		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
-		OwnerState: filepath.Join(dir, "owner.json"),
-	}
-	cfg.Notes = []func() string{func() string { return "clock note" }}
-	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() { cancel() }()
-	d, err := daemon.Run(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attachForTest(t, lp, ctx, cancel, d)
-	notes := func() (out []string) {
-		for _, n := range cfg.Notes {
-			if s := n(); s != "" && !strings.HasPrefix(s, "Loop 2:") { // Loop 2's own line: loop2_test.go
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	if got := notes(); len(got) != 2 || got[0] != "clock note" || got[1] != noTestNote {
-		t.Fatalf("notes with learning on: %q", got)
-	}
-	if noTestNote != "Learning: paused, I cannot test changes yet." {
-		t.Fatalf("note %q", noTestNote)
-	}
-	// STATUS drops characters such as apostrophes (control plainLine).
-	if strings.IndexFunc(noTestNote, notPlain) >= 0 {
-		t.Fatalf("note %q holds a character STATUS drops", noTestNote)
-	}
-	if got, ok := cfg.Settings(ctx, "LEARNING OFF", true); !ok || strings.Contains(got, "test changes") {
-		t.Errorf("LEARNING OFF: %q", got)
-	}
-	if got := notes(); len(got) != 1 {
-		t.Fatalf("notes with learning off: %q", got)
-	}
-	for msg, want := range map[string]string{
-		"LEARNING ON": "Learning is on, but I cannot test changes yet, so nothing new will be adopted. Reply LEARNING OFF if this wasn't you.",
-		"LOOPS ON":    "Spare-time work is back on. Learning is on, but I cannot test changes yet, so nothing new will be adopted. Reply LOOPS OFF if this wasn't you.",
-	} {
-		if got, ok := cfg.Settings(ctx, msg, true); !ok || got != want {
-			t.Errorf("%s: %q", msg, got)
-		}
-	}
-	// Other settings are unchanged.
-	if got, ok := cfg.Settings(ctx, "SECURITY TESTS ON", true); !ok || strings.Contains(got, "test changes") {
-		t.Errorf("SECURITY TESTS ON: %q", got)
-	}
-	cancel()
-	d.Wait()
-}
 
 // PE6 (R1 on #114): unless -capacity-mb is given, admission's capacity is
 // this box's memory less the rest of the RES-2 floor budget (host,
