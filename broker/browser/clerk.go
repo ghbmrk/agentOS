@@ -78,6 +78,9 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	var res Result
 	var rec ran
+	// line is the clerk's own STATUS line: the driver's reply never sets
+	// one, so a page cannot list text the owner never approved (CLK-3).
+	var line string
 	switch st.Verb {
 	case key.Read:
 		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value), c.tasks(v, ver, now))
@@ -103,12 +106,13 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 		}
 		if tc != nil && res.OK && res.Approval != nil {
-			res.Covered = coveredLine(*res.Approval, now)
+			line = coveredLine(*res.Approval, now)
 		}
 	default:
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
 	}
+	res.Covered = line
 	rec.ok, rec.covered = res.OK, res.Covered
 	c.record(id, rec)
 	out := kernel.Result{Outcome: "failed", Detail: logged(res), Covered: res.Covered}

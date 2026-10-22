@@ -753,7 +753,8 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
 	if c.Kind == ActProbe {
-		if !shown(res.Covered) {
+		// Only a done step is listed: no other finding's line is logged.
+		if res.Outcome != "done" || !shown(res.Covered) {
 			res.Covered = ""
 		}
 		_, err := k.emit(now, TStepProbed, stepProbed{stepRef{c.Req.Plan.ID, c.Req.Index}, res.Outcome, res.Covered})

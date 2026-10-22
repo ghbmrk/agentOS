@@ -96,9 +96,14 @@ func TestAnUnreachedProbeCountsNoCheck(t *testing.T) {
 func TestAProbedSubmitGetsItsCoveredLine(t *testing.T) {
 	line := "Sent on shop.example: Place order, 00:00 UTC"
 	for name, c := range map[string]struct {
-		covered string
-		listed  bool
-	}{"shown": {line, true}, "bidi": {"Sent on shop.example: \u202eyaP", false}} {
+		outcome, covered string
+		listed           bool
+	}{
+		"shown":   {"done", line, true},
+		"bidi":    {"done", "Sent on shop.example: \u202eyaP", false},
+		"notdone": {"notdone", line, false},
+		"unknown": {"unknown", line, false},
+	} {
 		r := newRig(t)
 		r.plan("p1", r.ck, st(key.Trash, "m1"))
 		must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
@@ -107,17 +112,47 @@ func TestAProbedSubmitGetsItsCoveredLine(t *testing.T) {
 		if p.Kind != kernel.ActProbe {
 			t.Fatalf("%s: call %+v", name, p)
 		}
-		must(t, r.k.Answer(at, p, kernel.Result{Outcome: "done", Covered: c.covered}))
+		must(t, r.k.Answer(at, p, kernel.Result{Outcome: c.outcome, Covered: c.covered}))
 		got := r.k.State().Covered(at)
-		if r.phase("p1").Phase != kernel.PDone || (len(got) == 1) != c.listed || c.listed && got[0].Line != line {
+		if (len(got) == 1) != c.listed || c.listed && (got[0].Line != line || r.phase("p1").Phase != kernel.PDone) {
 			t.Fatalf("%s: covered %+v", name, got)
 		}
 		for _, e := range r.k.Log().Entries() {
-			if !c.listed && strings.Contains(string(e.Body), "yaP") {
-				t.Fatalf("%s: a line not shown reached the log", name)
+			if !c.listed && strings.Contains(string(e.Body), c.covered) {
+				t.Fatalf("%s: a line not listed reached the log", name)
 			}
 		}
 		r.replays()
+	}
+}
+
+// lostAnswer is a clerk whose dispatch answer is lost and whose probe finds
+// the step done with its covered line.
+type lostAnswer struct{ line string }
+
+func (lostAnswer) Do(kernel.Request, kernel.View) kernel.Result {
+	return kernel.Result{Outcome: "unknown"}
+}
+
+func (c lostAnswer) Probe(kernel.Request, kernel.View) kernel.Result {
+	return kernel.Result{Outcome: "done", Covered: c.line}
+}
+
+// Tick carries a probe's covered line from the clerk to STATUS, as Answer
+// does when the host process drives the calls (CLK-3, KRN-8).
+func TestTickCarriesAProbedLine(t *testing.T) {
+	line := "Sent on shop.example: Place order, 00:00 UTC"
+	r := newRig(t)
+	l, err := kernel.Open(cfg(r))
+	must(t, err)
+	r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{"mail": lostAnswer{line}}, 0)
+	must(t, err)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	must(t, r.tick(1))
+	at := int64(1) + kernel.ProbeEvery
+	must(t, r.tick(at))
+	if got := r.k.State().Covered(at); len(got) != 1 || got[0].Line != line || r.phase("p1").Phase != kernel.PDone {
+		t.Fatalf("covered %+v, phase %s", got, r.phase("p1").Phase)
 	}
 }
 
