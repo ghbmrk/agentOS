@@ -230,12 +230,19 @@ func (h *MailHost) told(through int64) {
 	if !warm {
 		return
 	}
-	h.idle() // a read in flight may add the notice again; it ends first
-	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
-	if s, err := readMail(h.dir); err == nil {
-		// A record that cannot be saved tells the warm-up's end again.
-		_ = markTold(h.dir, h.cfg.Sealer, slotOf(s))
+	s, err := readMail(h.dir)
+	if err != nil {
+		return
 	}
+	h.idle() // a read in flight may add the notice again; it ends first
+	// The owner was shown this account's warm-up end: if a setup changed the
+	// account while the read ended, the new one's is not yet told (#2742 item 14).
+	if now, err := readMail(h.dir); err != nil || slotOf(now) != slotOf(s) {
+		return
+	}
+	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
+	// A record that cannot be saved tells the warm-up's end again.
+	_ = markTold(h.dir, h.cfg.Sealer, slotOf(s))
 }
 
 // MailAccount is whether an account is set up, and its settings (never its
