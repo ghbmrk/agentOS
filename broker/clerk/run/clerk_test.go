@@ -249,7 +249,7 @@ func TestAGrantTheClerkCannotTakeIsRefusedAtStage(t *testing.T) {
 		[]byte(`not json canary-refresh-bad`),
 	} {
 		got, err := r.owner.Stage("s1", bad)
-		if err == nil || err.Error() != ErrBadGrant.Error() || got != "" {
+		if !errors.Is(err, ErrBadGrant) || got != "" { // the owner side tells it by errors.Is
 			t.Fatalf("staging %q: %q, %v; want ErrBadGrant", bad, got, err)
 		}
 	}
