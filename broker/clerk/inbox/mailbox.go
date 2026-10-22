@@ -45,6 +45,7 @@ const (
 	nSignInRefused NotDone = "sign-in-refused" // the server refused the login (imapsmtp.ErrLoginRefused)
 	nUnreachable   NotDone = "unreachable"     // the mail server was not reached (imapsmtp.ErrUnreachable)
 	nNoSignIn      NotDone = "no-sign-in"      // the server offers no sign-in the clerk supports (imapsmtp.ErrNoSignIn)
+	nNoUIDNext     NotDone = "no-uidnext"      // the trash gave no next UID to confirm a move by (imapsmtp.ErrNoUIDNext)
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -75,15 +76,25 @@ type Live struct {
 	mu    sync.Mutex
 	refs  map[string]liveMail
 	trash string // the trash folder's name, "" when the account has none
+	// claimed holds the trash copies that confirmed a trash, so a copy
+	// confirms one trash only: another mail with the same Message-ID, whose
+	// own move was lost, is not confirmed by it.
+	claimed map[imapsmtp.Ref]bool
 }
 
 type liveMail struct {
 	ref imapsmtp.Ref
 	id  string // the Message-ID header, for the trash read-back
+	// The trash's UID validity and next UID before the first move of this
+	// mail, kept for its resends: a move whose answer was lost has put the
+	// copy below a UIDNEXT read again.
+	trashValidity, trashNext uint32
 }
 
 // NewLive is a mailbox over st.
-func NewLive(st *imapsmtp.Store) *Live { return &Live{st: st, refs: map[string]liveMail{}} }
+func NewLive(st *imapsmtp.Store) *Live {
+	return &Live{st: st, refs: map[string]liveMail{}, claimed: map[imapsmtp.Ref]bool{}}
+}
 
 // Read fetches the newest readMax inbox mails with BODY.PEEK, unclassified:
 // a class comes from a reader, not from the mailbox. It replaces what an
@@ -379,6 +390,8 @@ func before(err error) error {
 		return nUnreachable
 	case errors.Is(err, imapsmtp.ErrNoSignIn):
 		return nNoSignIn
+	case errors.Is(err, imapsmtp.ErrNoUIDNext):
+		return nNoUIDNext
 	}
 	return err
 }
@@ -420,6 +433,16 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if trash == "" {
 		return nNoTrash
 	}
+	// Only a copy that arrives in the trash with this move confirms it: an
+	// older one with the same Message-ID would confirm a move that did not
+	// happen (#2665).
+	validity, next := m.trashValidity, m.trashNext
+	if next == 0 {
+		if validity, next, err = l.st.Next(ctx, trash); err != nil {
+			return before(err)
+		}
+		l.markTrash(id, validity, next)
+	}
 	if err := l.st.Move(ctx, m.ref, trash); err != nil {
 		return before(err)
 	}
@@ -430,14 +453,39 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if len(left) != 0 || m.id == "" {
 		return errUnconfirmed
 	}
-	there, err := l.st.Find(ctx, trash, m.id, func(x imapsmtp.Message) bool { return messageID(x.Raw) == m.id })
+	there, err := l.st.FindSince(ctx, trash, validity, next, m.id, func(x imapsmtp.Message) bool { return messageID(x.Raw) == m.id })
 	if err != nil {
 		return err
 	}
-	if len(there) == 0 {
+	if !l.claim(there) {
 		return errUnconfirmed
 	}
 	return nil
+}
+
+// claim marks the first of copies that no trash has claimed yet, and reports
+// whether there was one.
+func (l *Live) claim(copies []imapsmtp.Message) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range copies {
+		if !l.claimed[c.Ref] {
+			l.claimed[c.Ref] = true
+			return true
+		}
+	}
+	return false
+}
+
+// markTrash keeps the trash's validity and next UID from before mail id's
+// first move.
+func (l *Live) markTrash(id string, validity, next uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if m, ok := l.refs[id]; ok && m.trashNext == 0 {
+		m.trashValidity, m.trashNext = validity, next
+		l.refs[id] = m
+	}
 }
 
 // Post refuses: the one-click POSTer and its egress rules are #2601, so a
