@@ -171,6 +171,7 @@ type hostRig struct {
 	onDial  atomic.Pointer[func()] // run as each connection is forwarded, before the server answers
 	day     atomic.Pointer[string] // the world's Today; nil: today
 	to      atomic.Pointer[string] // where connections go instead of srv
+	failing string                 // failReads' server that closes each connection; "": none
 }
 
 // nextDay moves the world's Today on a day.
@@ -1052,5 +1053,124 @@ func TestUnreadableSettingsAreToldAtTheNextReread(t *testing.T) {
 	want := "I could not read your mailbox: I could not read my own settings for your mail account. Set up the mail account again on my Wi-Fi page."
 	if st, _ := r.owner.Status(); !slices.Contains(st.Lines, want) {
 		t.Fatalf("status with unreadable settings: %q", st.Lines)
+	}
+}
+
+// failReads makes every read attempt fail while its Mark still works: from
+// the next re-read on, each re-read's first connection (its change check,
+// or the read's own Mark on a new day) reaches the server, and every later
+// one reaches a server that closes it at once.
+func (r *hostRig) failReads(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	dead := ln.Addr().String()
+	r.failing = dead
+}
+
+// reread is the planner's re-read, with failReads' first connection let
+// through.
+func (r *hostRig) reread(t *testing.T) {
+	t.Helper()
+	var n atomic.Int64
+	dead := r.failing
+	f := func() {
+		if dead != "" && n.Add(1) == 2 {
+			r.to.Store(&dead)
+		}
+	}
+	r.onDial.Store(&f)
+	defer func() { r.onDial.Store(nil); r.to.Store(nil) }()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A read that fails again under the Mark of the read that failed before it
+// is not tried again within the day until the Mark moves: each later
+// re-read is one change check, never a read attempt, so a server whose Mark
+// works but whose read keeps failing cannot make each re-read a full read
+// (#2742, #2768 review). The first failure still gets one more try under
+// its own Mark, which a passing fault needs.
+func TestARepeatedFailureWaitsForTheMarkToMove(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.failReads(t)
+	r.nextDay()
+	r.reread(t)
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("status after a failed read: %v", st.Lines)
+	}
+	before := r.dials.Load()
+	r.reread(t)
+	if n := r.dials.Load() - before; n < 2 {
+		t.Fatalf("the re-read after a first failure made %d connections, want a change check and a read attempt", n)
+	}
+	before = r.dials.Load()
+	for range 3 {
+		r.reread(t)
+	}
+	if n := r.dials.Load() - before; n != 3 {
+		t.Fatalf("3 re-reads after a repeated failure under an unchanged Mark made %d connections, want 3 change checks", n)
+	}
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") || !has(st.Lines, "I'll try again when your mail changes, or tomorrow.") {
+		t.Fatalf("status after a repeated failure: %v", st.Lines)
+	}
+
+	// A moved Mark reads again, and a failure under it is a first failure
+	// again, with its own one more try.
+	r.moved()
+	for i := range 2 {
+		before = r.dials.Load()
+		r.reread(t)
+		if n := r.dials.Load() - before; n < 2 {
+			t.Fatalf("re-read %d after the Mark moved made %d connections, want a read attempt", i+1, n)
+		}
+	}
+
+	// The fault passes, but nothing moved: the line stands until the Mark does.
+	r.failing = ""
+	r.reread(t)
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("an unchanged Mark was read again after a repeated failure: %v", st.Lines)
+	}
+	r.moved()
+	r.reread(t)
+	if st, _ := r.owner.Status(); has(st.Lines, "could not read your mailbox") {
+		t.Fatalf("the line outlived the fault once the Mark moved: %v", st.Lines)
+	}
+}
+
+// A repeated failure waits for the Mark only within the day: the next day
+// reads again, and its first failure gets its own one more try.
+func TestARepeatedFailureIsTriedAgainTheNextDay(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.failReads(t)
+	r.nextDay()
+	r.reread(t)
+	r.reread(t)
+	r.nextDay()
+	for i := range 2 {
+		before := r.dials.Load()
+		r.reread(t)
+		if n := r.dials.Load() - before; n < 2 {
+			t.Fatalf("re-read %d of the next day made %d connections, want a read attempt", i+1, n)
+		}
+	}
+	before := r.dials.Load()
+	r.reread(t)
+	if n := r.dials.Load() - before; n != 1 {
+		t.Fatalf("the third re-read of the next day made %d connections, want one change check", n)
 	}
 }

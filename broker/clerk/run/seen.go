@@ -132,10 +132,11 @@ type MailStatus struct {
 // mail when one mail is the cause, and never the server's own text, which
 // the server chooses (#2698 item 16).
 func trouble(err error) (why, next string) {
-	// After a failed read, any Mark reads again, and one that cannot be
-	// compared waits for the next day (recheck), so the next check, or
-	// tomorrow at the latest, is when (#2742, #2768 review).
-	const again = "I'll try again at the next check, or tomorrow at the latest."
+	// A failure that repeats under an unchanged Mark, and a Mark that
+	// cannot be compared, wait for the next day; only a moved Mark reads
+	// sooner (recheck), so a change of mail, or tomorrow, is when. A first
+	// failure's one more try is not promised (#2742, #2768 review).
+	const again = "I'll try again when your mail changes, or tomorrow."
 	var long *imapsmtp.LongHeaderError
 	switch {
 	case errors.As(err, &long):

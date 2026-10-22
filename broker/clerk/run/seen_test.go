@@ -330,7 +330,7 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	// next step never sends the owner to archive or move it (#2742 item 3c;
 	// inbox's TestDeletingOldReadMailClearsTooMuchReadMail follows the
 	// advice through Opened).
-	if _, next := trouble(inbox.ErrTooMuchReadMail); next != "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder. I'll try again at the next check, or tomorrow at the latest." {
+	if _, next := trouble(inbox.ErrTooMuchReadMail); next != "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder. I'll try again when your mail changes, or tomorrow." {
 		t.Errorf("too much read mail: next step %q", next)
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {

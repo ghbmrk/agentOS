@@ -38,6 +38,7 @@ type MailHost struct {
 	reading chan struct{} // the read in flight; setup and removal wait for it
 	mark    inbox.Mark    // the mailbox's Mark from just before the last read; nil: none
 	day     string        // the last read's day (MailConfig.day); "": none since the account changed
+	fails   int           // failed reads in a row within day under mark; 0 after a good read
 	changes int64         // account changes so far (changed)
 	seq     int64
 	notices []notice
@@ -110,7 +111,10 @@ func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailCo
 // released while the mailbox is read. A read in flight is shared, not
 // started again: it is of the account as it is now, since setup and removal
 // wait for it before they change the account (idle). Once a read is done,
-// the mailbox is read again only when recheck says so (#2742 item 1).
+// the mailbox is read again only when recheck says so (#2742 item 1): a
+// first failure gets one more try under any Mark, and a failure that
+// repeats under an unchanged Mark within the day waits for the Mark to move
+// or the next day (#2742, #2768 review).
 func (h *MailHost) refresh() {
 	if h.reading != nil {
 		h.wait()
@@ -118,13 +122,13 @@ func (h *MailHost) refresh() {
 	}
 	done := make(chan struct{})
 	h.reading = done
-	last, day, failed, today := h.mark, h.day, h.why != "", h.cfg.day()
+	last, day, fails, today := h.mark, h.day, h.fails, h.cfg.day()
 	h.mu.Unlock()
 	var m *Mail
 	var mark inbox.Mark
 	read, err := true, error(nil)
 	if day != "" {
-		read, mark, err = recheck(h.ctx, last, day, failed, h.dir, h.sec, h.cfg)
+		read, mark, err = recheck(h.ctx, last, day, fails == 1, h.dir, h.sec, h.cfg)
 	}
 	if read && err == nil {
 		m, mark, err = openMail(h.ctx, h.dir, h.sec, h.cfg, mark)
@@ -136,11 +140,15 @@ func (h *MailHost) refresh() {
 		return
 	}
 	h.mark, h.day = mark, today
-	h.why, h.stop = "", nil
+	h.why, h.stop, h.fails = "", nil, 0
 	switch {
 	case errors.Is(err, ErrNoMailAccount):
 		h.cur = nil
 	case err != nil:
+		h.fails = 1
+		if fails > 0 && day == today && last.Same(mark) {
+			h.fails = fails + 1
+		}
 		// The last clerk this account opened goes on serving the kernel's
 		// steps: each signs in afresh, and judges the kernel's view.
 		why, next := trouble(err)

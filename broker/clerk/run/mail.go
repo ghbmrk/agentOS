@@ -303,13 +303,16 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 // recheck is whether the account is read again after a read on day under
 // last, and the Mark to keep for the new read (#2742 item 1). A new day
 // reads it, since Opened moves with the day; within the day, only a Mark
-// that differs from last does, or, after a failed read (failed), any Mark
-// at all, so a server back from an outage is read. A Mark that cannot be
+// that differs from last does, or, after a first failed read (retry), any
+// Mark at all, so a server back from an outage is read. A failure that
+// repeats under an unchanged Mark gets no retry, so a server whose Mark
+// works but whose read keeps failing reads again only when the Mark moves
+// or the next day (#2742, #2768 review). A Mark that cannot be
 // taken or compared waits for the next day, whatever the reason, so such a
 // server never makes each re-read a full read; but a refused sign-in is
 // answered as the read's own failure (err), with no second sign-in, so the
 // host stops signing in at once.
-func recheck(ctx context.Context, last inbox.Mark, day string, failed bool, dir string, sec *clerk.Secrets, c MailConfig) (read bool, mark inbox.Mark, err error) {
+func recheck(ctx context.Context, last inbox.Mark, day string, retry bool, dir string, sec *clerk.Secrets, c MailConfig) (read bool, mark inbox.Mark, err error) {
 	if day != c.day() {
 		return true, nil, nil
 	}
@@ -321,16 +324,16 @@ func recheck(ctx context.Context, last inbox.Mark, day string, failed bool, dir 
 	if stops(err) {
 		return true, nil, err
 	}
-	return due(last, failed, now, err), now, nil
+	return due(last, retry, now, err), now, nil
 }
 
 // due is recheck's answer within the day, for a read under last, given the
 // Mark now with the error taking it.
-func due(last inbox.Mark, failed bool, now inbox.Mark, err error) bool {
+func due(last inbox.Mark, retry bool, now inbox.Mark, err error) bool {
 	switch {
 	case err != nil || !now.Same(now): // no Mark Same can trust
 		return false
-	case failed:
+	case retry:
 		return true
 	}
 	return !last.Same(now)
