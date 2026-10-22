@@ -156,6 +156,14 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if _, st := loadSeen(r.dir, testSealer(), r.slot); st != seenBad {
 		t.Fatal("an altered record loads")
 	}
+	// Marking the warm-up's end told leaves an altered record as it is: it
+	// is not replaced by an empty one marked told (#2742 item 4).
+	if err := markTold(r.dir, testSealer(), r.slot); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, b) {
+		t.Fatal("marking told replaced an altered record")
+	}
 	if _, st := r.opened(today); !has(st.Lines, "could not be read, so I began it again") {
 		t.Fatalf("after an altered record, status %v does not say the record started over", st.Lines)
 	}
@@ -280,12 +288,16 @@ func TestTheSeenRecordFollowsItsAccount(t *testing.T) {
 // show as escapes (#2698 items 2, 6, 16, 21, 22).
 func TestTroubleIsToldInFixedWords(t *testing.T) {
 	const leak = "CANARY-SERVER-TEXT"
+	// A zone off UTC, so the arrival's local time differs from its UTC time
+	// whatever zone the test runs in (#2742 item 4).
+	defer func(l *time.Location) { time.Local = l }(time.Local)
+	time.Local = time.FixedZone("test", 5*3600+30*60)
 	arrived := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	cases := []struct {
 		err  error
 		want string
 	}{
-		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived ` + arrived.In(time.Local).Format("2 January 2006 at 15:04") + `, subject "Hi\x1b[2J")`},
+		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived 2 January 2026 at 15:30, subject "Hi\x1b[2J")`},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrLoginRefused, leak), "refused my sign-in"},
 		{fmt.Errorf("%w, reading mail: %s", imapsmtp.ErrNoSignIn, leak), "doesn't accept a password sign-in"},
 		{fmt.Errorf("%w: %s", inbox.ErrTooMuchReadMail, leak), "more read mail than I can keep track of"},
@@ -313,6 +325,11 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	// next step names the server settings, never a password.
 	if _, next := trouble(imapsmtp.ErrNoSignIn); strings.Contains(strings.ToLower(next), "password") || !strings.Contains(next, "IMAP and SMTP server settings") {
 		t.Errorf("no sign-in: next step %q", next)
+	}
+	// Every folder is read, so only mail deleted for good helps; the next
+	// step never sends the owner to archive or move it (#2742 item 3).
+	if _, next := trouble(inbox.ErrTooMuchReadMail); !strings.Contains(next, "Delete old read mail for good") || !strings.Contains(next, "doesn't help") {
+		t.Errorf("too much read mail: next step %q", next)
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {
 		t.Errorf("a long folder name is not cut: %d bytes", len(why))
@@ -353,5 +370,19 @@ func TestTheWarmUpsEndCountsInPlainWords(t *testing.T) {
 		if got := warmedUp(n); !strings.Contains(got, want) {
 			t.Errorf("%d: %q", n, got)
 		}
+	}
+}
+
+// A record that cannot be saved is told with what follows: the next check
+// tries again (#2742 item 3).
+func TestAnUnsavedRecordIsToldWithItsNextStep(t *testing.T) {
+	r := newSeenRig(t)
+	r.srv.Deliver("INBOX", mailFrom("news@shop.test", "<n1@shop.test>"), `\Seen`)
+	// A directory where the write's temporary goes makes every save fail.
+	if err := os.MkdirAll(filepath.Join(r.dir, seenFile+".tmp", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, st := r.opened(today); !has(st.Lines, "could not save my record of the mail you read") || !has(st.Lines, "I'll try again at the next check.") {
+		t.Fatalf("status after a failed save: %v", st.Lines)
 	}
 }

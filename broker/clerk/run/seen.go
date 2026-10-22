@@ -160,7 +160,9 @@ func trouble(err error) (why, next string) {
 		return "your mail server doesn't accept a password sign-in" + forSide(err) + " with these settings",
 			"On my Wi-Fi page, set up the mail account again with the " + servers + " server settings your provider gives for mail apps. If your provider only allows signing in through its own page, I can't use this account yet."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
-		return "you have more read mail than I can keep track of", "Delete or archive old read mail outside your mail account, and I'll resume at the next check."
+		// Every folder is read, Archive and Trash too, so only mail deleted
+		// for good leaves the count (#2742 item 3).
+		return "you have more read mail than I can keep track of", "Delete old read mail for good, from your trash too: moving or archiving it doesn't help, since I read every folder. " + again
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
@@ -237,7 +239,7 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 	if err := saveSeen(dir, s, slot, rec); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
-		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them.")
+		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again at the next check.")
 	}
 	return got, st
 }

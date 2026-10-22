@@ -237,7 +237,12 @@ func (h *MailHost) status() OwnerStatus {
 	if h.why != "" {
 		st.Lines = append(st.Lines, h.why)
 	}
-	if h.cur != nil {
+	if h.cur != nil && len(h.cur.Status.Lines) > 0 {
+		if h.why != "" {
+			// The clerk's lines are of the last read that worked, not of
+			// the one that just failed (#2742 item 3).
+			st.Lines = append(st.Lines, "From my last good read of your mailbox:")
+		}
 		st.Lines = append(st.Lines, h.cur.Status.Lines...)
 	}
 	for _, n := range h.notices {
