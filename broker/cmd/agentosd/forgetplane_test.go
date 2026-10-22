@@ -12,11 +12,21 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // REQ: CAP-3
 
 const ownerNum = "+15550000001"
+
+// learnTemp is spelled out so agentosd imports no more old core; this
+// pins it to durable's, or the sweep would miss temps holding task text
+// (Security release finding on #2808).
+func TestLearnTempIsDurablesTempPrefix(t *testing.T) {
+	if learnTemp != durable.TempPrefix {
+		t.Fatalf("learnTemp = %q, durable.TempPrefix = %q", learnTemp, durable.TempPrefix)
+	}
+}
 
 // attachForTest attaches lp to the running daemon d and ends d with the
 // test.
