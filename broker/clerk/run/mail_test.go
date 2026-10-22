@@ -426,38 +426,35 @@ func TestAFailedOpenedReadOffersNoUnsubscribe(t *testing.T) {
 	}
 }
 
-// A read is skipped only on its own day, under a Mark the same as the one
-// it was read under, and with its record of read mail settled; a STATUS
-// that leaves an item out waits for the next day, and any other failure to
-// take the Mark reads again (#2742 item 1).
-func TestWhenAnUnchangedMailboxIsReadAgain(t *testing.T) {
+// Within the day, a re-read reads only under a Mark that differs from the
+// last read's, or after a failed read under any Mark; a Mark that cannot be
+// taken or compared waits for the next day, whatever the reason (#2742
+// item 1).
+func TestWhenAMailboxIsReadAgainWithinTheDay(t *testing.T) {
 	mk := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 5, Messages: 3}}
 	moved := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 6, Messages: 4}}
-	read := func(mark inbox.Mark, again bool) *Mail {
-		return &Mail{mark: mark, day: "2026-10-21", Status: MailStatus{again: again}}
-	}
+	blank := inbox.Mark{{Folder: "INBOX", Validity: 1, Messages: 4}} // no UIDNEXT: Same trusts it never
 	partial := fmt.Errorf("%w: UNSEEN in %q", imapsmtp.ErrPartialStatus, "INBOX")
 	for _, c := range []struct {
-		name  string
-		m     *Mail
-		today string
-		now   inbox.Mark
-		err   error
-		want  bool
+		name   string
+		last   inbox.Mark
+		failed bool
+		now    inbox.Mark
+		err    error
+		want   bool
 	}{
-		{"unchanged", read(mk, false), "2026-10-21", mk, nil, true},
-		{"a new day", read(mk, false), "2026-10-22", mk, nil, false},
-		{"moved", read(mk, false), "2026-10-21", moved, nil, false},
-		{"record unsettled", read(mk, true), "2026-10-21", mk, nil, false},
-		{"partial STATUS", read(mk, false), "2026-10-21", nil, partial, true},
-		{"partial STATUS, a new day", read(mk, false), "2026-10-22", nil, partial, false},
-		{"refused sign-in", read(mk, false), "2026-10-21", nil, imapsmtp.ErrLoginRefused, false},
-		{"unreachable", read(mk, false), "2026-10-21", nil, imapsmtp.ErrUnreachable, false},
-		{"no Mark at the read", read(nil, false), "2026-10-21", mk, nil, false},
-		{"no Mark at the read, partial STATUS", read(nil, false), "2026-10-21", nil, partial, true},
+		{"unchanged", mk, false, mk, nil, false},
+		{"moved", mk, false, moved, nil, true},
+		{"no Mark at the last read", nil, false, mk, nil, true},
+		{"after a failed read", mk, true, mk, nil, true},
+		{"partial STATUS", mk, false, nil, partial, false},
+		{"unreachable", mk, false, nil, imapsmtp.ErrUnreachable, false},
+		{"unreachable after a failed read", mk, true, nil, imapsmtp.ErrUnreachable, false},
+		{"a Mark Same never trusts", mk, false, blank, nil, false},
+		{"a Mark Same never trusts, after a failed read", mk, true, blank, nil, false},
 	} {
-		if got := unchanged(c.m, c.today, c.now, c.err); got != c.want {
-			t.Errorf("%s: unchanged %v, want %v", c.name, got, c.want)
+		if got := due(c.last, c.failed, c.now, c.err); got != c.want {
+			t.Errorf("%s: due %v, want %v", c.name, got, c.want)
 		}
 	}
 }

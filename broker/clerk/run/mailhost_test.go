@@ -169,6 +169,16 @@ type hostRig struct {
 	dials   atomic.Int64           // connections the clerk made to it
 	more    int                    // mails moved delivered
 	onDial  atomic.Pointer[func()] // run as each connection is forwarded, before the server answers
+	day     atomic.Pointer[string] // the world's Today; nil: today
+	to      atomic.Pointer[string] // where connections go instead of srv
+}
+
+// nextDay moves the world's Today on a day.
+func (r *hostRig) nextDay() {
+	d := r.h.cfg.World().Today
+	t, _ := time.Parse(time.DateOnly, d)
+	next := t.AddDate(0, 0, 1).Format(time.DateOnly)
+	r.day.Store(&next)
 }
 
 // moved delivers another mail, so the next re-read finds the mailbox's Mark
@@ -220,6 +230,9 @@ func newHostRig(t *testing.T, password string) *hostRig {
 		if f := r.onDial.Load(); f != nil {
 			(*f)()
 		}
+		if a := r.to.Load(); a != nil {
+			return *a
+		}
 		return r.srv.IMAP
 	}, &r.dials)
 	dir := shortDir(t)
@@ -231,6 +244,12 @@ func newHostRig(t *testing.T, password string) *hostRig {
 		t.Fatal(err)
 	}
 	cfg := mailConfig()
+	cfg.World = func() inbox.World {
+		if d := r.day.Load(); d != nil {
+			return inbox.World{Today: *d}
+		}
+		return inbox.World{Today: today}
+	}
 	cfg.Ask = func(context.Context, string) (string, error) {
 		r.asks.Add(1)
 		if r.hold.Load() {
@@ -286,7 +305,7 @@ func TestAMailboxReadHoldsUpNothingElse(t *testing.T) {
 // next good read clears the line (#2732 item 2).
 func TestAFailedReadKeepsTheLastClerk(t *testing.T) {
 	r := newHostRig(t, imaptest.Password)
-	r.moved()
+	r.nextDay() // the re-read reads
 	r.srv.FailList("INBOX", true)
 	if ls, err := r.planner.Reread(); err != nil || len(ls) != 1 {
 		t.Fatalf("a failed re-read: %v, %v; want the last listing", ls, err)
@@ -845,4 +864,107 @@ func TestAnUnchangedMailboxIsNotReadAgain(t *testing.T) {
 	if ls, err := r.planner.Reread(); err != nil || len(ls) != 3 {
 		t.Fatalf("mail that arrived during the last read: %v, %v; want it read", ls, err)
 	}
+}
+
+// No server can make each re-read a full read: one whose Mark cannot be
+// compared (here, STATUS gives no UIDNEXT) is read again only on the next
+// day, even after new mail (#2742 item 1).
+func TestAnUncomparableMarkWaitsForTheNextDay(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.srv.NoUIDNext(true)
+	r.moved()
+	before := r.asks.Load()
+	for range 3 {
+		if _, err := r.planner.Reread(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := r.asks.Load() - before; n != 0 {
+		t.Fatalf("re-reads under an uncomparable Mark classed %d mails, want none", n)
+	}
+	r.nextDay()
+	if ls, err := r.planner.Reread(); err != nil || len(ls) != 2 {
+		t.Fatalf("the next day's re-read: %v, %v; want the new mail", ls, err)
+	}
+}
+
+// After a failed read, a re-read reads again once the server answers, even
+// with the mailbox unchanged, so the failure's line clears (#2742 item 1).
+func TestAServerBackFromAnOutageIsReadAgain(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.srv.FailList("INBOX", true)
+	r.nextDay()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("status after a failed read: %v", st.Lines)
+	}
+	r.srv.FailList("INBOX", false)
+	if _, err := r.planner.Listing(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); has(st.Lines, "could not read your mailbox") {
+		t.Fatalf("the line outlived the outage: %v", st.Lines)
+	}
+}
+
+// A change check whose sign-in the server refuses is the read's own
+// failure: no second sign-in follows it, and the host stops signing in
+// (#2742 item 1).
+func TestARefusedChangeCheckSignsInOnce(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	refusing := refusingIMAP(t)
+	r.to.Store(&refusing)
+	before := r.dials.Load()
+	if _, err := r.planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
+		t.Fatalf("a re-read whose change check is refused: %v, want ErrSignInRefused", err)
+	}
+	if _, err := r.planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
+		t.Fatalf("the next re-read: %v, want ErrSignInRefused", err)
+	}
+	if n := r.dials.Load() - before; n != 1 {
+		t.Fatalf("a refused change check made %d connections, want 1", n)
+	}
+}
+
+// refusingIMAP is an IMAP server that refuses every sign-in.
+func refusingIMAP(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(10 * time.Second))
+				io.WriteString(c, "* OK [CAPABILITY IMAP4rev1] ready\r\n")
+				rd := bufio.NewReader(c)
+				for {
+					line, err := rd.ReadString('\n')
+					f := strings.Fields(line)
+					if err != nil || len(f) < 2 {
+						return
+					}
+					switch strings.ToUpper(f[1]) {
+					case "CAPABILITY":
+						io.WriteString(c, "* CAPABILITY IMAP4rev1\r\n"+f[0]+" OK done\r\n")
+					case "LOGIN":
+						io.WriteString(c, f[0]+" NO [AUTHENTICATIONFAILED] no\r\n")
+					default:
+						io.WriteString(c, "* BYE bye\r\n"+f[0]+" OK done\r\n")
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return l.Addr().String()
 }

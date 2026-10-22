@@ -83,9 +83,6 @@ func TestOpenedFailureKeepsEverySenderAndSaysSo(t *testing.T) {
 	if !has(st.Lines, "Unsubscribing is paused") {
 		t.Fatalf("status %v names no pause", st.Lines)
 	}
-	if !st.again {
-		t.Fatal("a failed list of a folder left the next read free to skip")
-	}
 	if _, err := os.Stat(filepath.Join(r.dir, seenFile)); !os.IsNotExist(err) {
 		t.Fatalf("a failed read wrote a record (%v)", err)
 	}
@@ -389,27 +386,5 @@ func TestAnUnsavedRecordIsToldWithItsNextStep(t *testing.T) {
 	}
 	if _, st := r.opened(today); !has(st.Lines, "could not save my record of the mail you read") || !has(st.Lines, "I'll try again at the next check.") {
 		t.Fatalf("status after a failed save: %v", st.Lines)
-	} else if !st.again {
-		t.Fatal("a failed save left the next read free to skip")
-	}
-}
-
-// Only failures that last until the owner changes the mailbox let an
-// unchanged mailbox go unread; any other is tried again (#2742 item 1).
-func TestOnlyALastingFailureWaitsForAChange(t *testing.T) {
-	for _, c := range []struct {
-		err  error
-		want bool
-	}{
-		{fmt.Errorf("%w: 9 entries", inbox.ErrTooMuchReadMail), true},
-		{fmt.Errorf("seen: %w", &imapsmtp.LongHeaderError{Folder: "Archive"}), true},
-		{imapsmtp.ErrUnreachable, false},
-		{imapsmtp.ErrTimeout, false},
-		{imapsmtp.ErrUnanswered, false},
-		{errors.New("other"), false},
-	} {
-		if got := lasting(c.err); got != c.want {
-			t.Errorf("lasting(%v) = %v, want %v", c.err, got, c.want)
-		}
 	}
 }

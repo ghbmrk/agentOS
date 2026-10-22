@@ -255,8 +255,6 @@ type Mail struct {
 	*inbox.Account
 	Status MailStatus
 	world  func() inbox.World // the world the account judges VRB-2 in
-	mark   inbox.Mark         // the mailbox's Mark before the read; nil: none
-	day    string             // the read's date
 }
 
 // OpenMail is the mail clerk over the account in dir: it reads the newest
@@ -265,58 +263,82 @@ type Mail struct {
 // opened at that connection. LastOpened in the world VRB-2 reads is the
 // clerk's own, from the account's read mail and its sealed record
 // (lastOpened); the rest of the world is c.World's, and its Today dates the
-// read. The mailbox's Mark is taken before the read, so mail arriving
-// during it moves the next one.
+// read.
 func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) (*Mail, error) {
+	m, _, err := openMail(ctx, dir, sec, c, nil)
+	return m, err
+}
+
+// openMail is OpenMail, and the mailbox's Mark from just before the read,
+// so mail arriving during the read moves the next one: mark if given, or
+// one it takes first (nil on any error). The Mark comes back also when the
+// read fails.
+func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig, mark inbox.Mark) (*Mail, inbox.Mark, error) {
 	box, s, err := mailBox(dir, sec, c)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	mark, _ := box.Mark(ctx) // nil on any error: the next read is not skipped
+	if mark == nil {
+		mark, _ = box.Mark(ctx)
+	}
 	ms, err := box.Read(ctx)
 	if err != nil {
-		return nil, err
+		return nil, mark, err
 	}
 	today := c.today()
 	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
-	m := &Mail{Status: status, mark: mark, day: today, world: func() inbox.World {
+	m := &Mail{Status: status, world: func() inbox.World {
 		w := c.World()
 		w.LastOpened = opened
 		return w
 	}}
 	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
-		return nil, err
+		return nil, mark, err
 	}
-	return m, nil
+	return m, mark, nil
 }
 
-// Unchanged reports whether a read now would find what m's read found: the
-// same day, which Opened also moves with, and a Mark the same as the one m
-// was read under (#2742 item 1). A server whose STATUS leaves an item out
-// is read again the next day, not at every listing; any other error reads
-// again, so a failure such as a refused sign-in is found and told. A read
-// with no Mark, or whose record of read mail may yet come out otherwise
-// (MailStatus.again), is read again at once.
-func (m *Mail) Unchanged(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) bool {
-	today := c.today()
-	if m.day != today || m.Status.again {
-		return false
+// recheck is whether the account is read again after a read on day under
+// last, and the Mark to keep for the new read (#2742 item 1). A new day
+// reads it, since Opened moves with the day; within the day, only a Mark
+// that differs from last does, or, after a failed read (failed), any Mark
+// at all, so a server back from an outage is read. A Mark that cannot be
+// taken or compared waits for the next day, whatever the reason, so no
+// server can make each re-read a full read; but a refused sign-in is
+// answered as the read's own failure (err), with no second sign-in, so the
+// host stops signing in at once.
+func recheck(ctx context.Context, last inbox.Mark, day string, failed bool, dir string, sec *clerk.Secrets, c MailConfig) (read bool, mark inbox.Mark, err error) {
+	if day != c.day() {
+		return true, nil, nil
 	}
 	box, _, err := mailBox(dir, sec, c)
 	if err != nil {
-		return false
+		return true, nil, nil // the read says why, without the network
 	}
 	now, err := box.Mark(ctx)
-	return unchanged(m, today, now, err)
+	if stops(err) {
+		return true, nil, err
+	}
+	return due(last, failed, now, err), now, nil
 }
 
-// unchanged is Unchanged's answer for m, given today and the Mark now with
-// the error taking it.
-func unchanged(m *Mail, today string, now inbox.Mark, err error) bool {
-	if m.day != today || m.Status.again {
+// due is recheck's answer within the day, for a read under last, given the
+// Mark now with the error taking it.
+func due(last inbox.Mark, failed bool, now inbox.Mark, err error) bool {
+	switch {
+	case err != nil || !now.Same(now): // no Mark Same can trust
 		return false
+	case failed:
+		return true
 	}
-	return errors.Is(err, imapsmtp.ErrPartialStatus) || m.mark.Same(now)
+	return !last.Same(now)
+}
+
+// day is the day a read stands for: c's world's, which Opened reads, and
+// the clock's, so a world whose date stands still cannot keep a read for
+// good.
+func (c MailConfig) day() string {
+	return c.today() + " " + time.Now().UTC().Format(time.DateOnly)
 }
 
 // mailBox is the mailbox of the account in dir, and its settings.
