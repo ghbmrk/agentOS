@@ -36,6 +36,8 @@ type MailHost struct {
 	why     string        // why the last read failed; "" if it did not
 	stop    error         // a sign-in failure only setup clears (stops): no sign-in until setup
 	reading chan struct{} // the read in flight; setup and removal wait for it
+	mark    inbox.Mark    // the mailbox's Mark from just before the last read; nil: none
+	day     string        // the last read's day (MailConfig.day); "": none since the account changed
 	changes int64         // account changes so far (changed)
 	seq     int64
 	notices []notice
@@ -107,7 +109,8 @@ func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailCo
 // refresh reads the account again and waits for the read; h.mu is held, and
 // released while the mailbox is read. A read in flight is shared, not
 // started again: it is of the account as it is now, since setup and removal
-// wait for it before they change the account (idle).
+// wait for it before they change the account (idle). Once a read is done,
+// the mailbox is read again only when recheck says so (#2742 item 1).
 func (h *MailHost) refresh() {
 	if h.reading != nil {
 		h.wait()
@@ -115,11 +118,24 @@ func (h *MailHost) refresh() {
 	}
 	done := make(chan struct{})
 	h.reading = done
+	last, day, failed, today := h.mark, h.day, h.why != "", h.cfg.day()
 	h.mu.Unlock()
-	m, err := OpenMail(h.ctx, h.dir, h.sec, h.cfg)
+	var m *Mail
+	var mark inbox.Mark
+	read, err := true, error(nil)
+	if day != "" {
+		read, mark, err = recheck(h.ctx, last, day, failed, h.dir, h.sec, h.cfg)
+	}
+	if read && err == nil {
+		m, mark, err = openMail(h.ctx, h.dir, h.sec, h.cfg, mark)
+	}
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
+	if !read {
+		return
+	}
+	h.mark, h.day = mark, today
 	h.why, h.stop = "", nil
 	switch {
 	case errors.Is(err, ErrNoMailAccount):
@@ -161,6 +177,7 @@ func (h *MailHost) idle() {
 func (h *MailHost) changed() {
 	h.changes++
 	h.cur, h.why, h.stop = nil, "", nil
+	h.mark, h.day = nil, ""
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
 
@@ -277,7 +294,8 @@ func (h *MailHost) told(through int64) {
 	}
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 	if s, err := readMail(h.dir); err == nil {
-		// A record that cannot be saved tells the warm-up's end again.
+		// A record that cannot be saved tells the warm-up's end again, at
+		// the next read.
 		_ = markTold(h.dir, h.cfg.Sealer, slotOf(s))
 	}
 }
