@@ -48,11 +48,12 @@ class RootfsScriptTest(unittest.TestCase):
         self.assertIn(f"Codex CLI {VERSION}", (CODEX / "ASSUMPTIONS.md").read_text())
 
     # REQ: CAP-11, CRED-5
-    def test_script_records_the_pin(self):
-        # The image records its pinned CLI version at usr/lib/agentos/cli-version (#1877);
-        # agentosd's reader went with its provider runner (#2780).
+    def test_script_records_the_pin_where_agentosd_reads_it(self):
+        # agentosd reads usr/lib/agentos/cli-version as the image's ImageVersion (#1877).
         text = SCRIPT.read_text()
         self.assertIn("printf '%s\\n' \"$CODEX_VERSION\" >usr/lib/agentos/cli-version\n", text)
+        pin = (ROOT / "broker/cmd/agentosd/imagepin.go").read_text()
+        self.assertIn('const cliPinPath = "usr/lib/agentos/cli-version"', pin)
 
     # REQ: CRED-5, CRED-1
     def test_script_writes_no_login(self):
