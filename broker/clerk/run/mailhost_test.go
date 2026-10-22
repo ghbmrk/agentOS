@@ -913,6 +913,35 @@ func TestAServerBackFromAnOutageIsReadAgain(t *testing.T) {
 	}
 }
 
+// A change check that fails for any reason but a refused sign-in is told,
+// beside the last good read's lines, until a check works again; the last
+// read goes on serving, and the failed check reads nothing (#2742, #2768
+// review).
+func TestAFailedChangeCheckIsTold(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.failReads(t)
+	dead := r.failing
+	r.to.Store(&dead)
+	before := r.asks.Load()
+	if ls, err := r.planner.Reread(); err != nil || len(ls) != 1 {
+		t.Fatalf("a re-read whose change check fails: %v, %v; want the last read's listing", ls, err)
+	}
+	if n := r.asks.Load() - before; n != 0 {
+		t.Fatalf("a failed change check classed %d mails", n)
+	}
+	st, _ := r.owner.Status()
+	if len(st.Lines) == 0 || !strings.HasPrefix(st.Lines[0], "I could not check your mailbox for new mail: ") || !strings.HasSuffix(st.Lines[0], "I'll try again when your mail changes, or tomorrow.") || !has(st.Lines, "From my last good read of your mailbox:") || has(st.Lines, "I could not read your mailbox") {
+		t.Fatalf("status after a failed change check: %q", st.Lines)
+	}
+	r.to.Store(nil)
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); has(st.Lines, "could not check your mailbox") || has(st.Lines, "From my last good read") {
+		t.Fatalf("the line outlived the failed check: %q", st.Lines)
+	}
+}
+
 // A change check whose sign-in the server refuses is the read's own
 // failure: no second sign-in follows it, and the host stops signing in
 // (#2742 item 1).
@@ -1031,6 +1060,20 @@ func TestAFailedReadKeepsItsDay(t *testing.T) {
 	}
 	if n := r.dials.Load() - before; n != 3 {
 		t.Fatalf("3 re-reads after a failed read under an uncomparable Mark made %d connections, want 3 change checks", n)
+	}
+}
+
+// A read that fails under a Mark the server gives but Same never trusts (no
+// UIDNEXT) promises only tomorrow: such a Mark never moves (#2742, #2815
+// review).
+func TestAFailureUnderAnUncomparableMarkPromisesTomorrow(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.srv.NoUIDNext(true)
+	r.failReads(t)
+	r.nextDay() // the read's own Mark is the first connection, and works
+	r.reread(t)
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") || !has(st.Lines, "I'll try again tomorrow.") || has(st.Lines, "when your mail changes") {
+		t.Fatalf("status after a failed read under an uncomparable Mark: %q", st.Lines)
 	}
 }
 
