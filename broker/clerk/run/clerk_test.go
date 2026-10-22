@@ -117,8 +117,14 @@ func (r *exitRig) narrowBy(by ed25519.PrivateKey, cs ...key.Caveat) key.Key {
 // and returns its state and whether the store changed.
 func (r *exitRig) reconnect(id string, k key.Key, target, digest string) (kernel.StepState, bool) {
 	r.t.Helper()
+	return r.reconnectClaiming(id, k, target, digest, grantPrint(digest))
+}
+
+// reconnectClaiming is reconnect with the step's content claimed as content.
+func (r *exitRig) reconnectClaiming(id string, k key.Key, target, digest, content string) (kernel.StepState, bool) {
+	r.t.Helper()
 	before, _ := r.sec.MarshalBinary()
-	p := kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": target, "value": digest}, Content: grantPrint(digest)}}}, holderPriv)
+	p := kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": target, "value": digest}, Content: content}}}, holderPriv)
 	if err := r.h.With(func(k *kernel.Kernel) error { return k.Submit(r.now, p) }); err != nil {
 		r.t.Fatal(err)
 	}
@@ -165,6 +171,8 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		{"a narrowing for anything else", r.narrow(key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of any verb", r.narrow(key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"an approval of change-account and more", r.narrow(key.LimitVerbs(key.ChangeAccount, key.Post), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"an approval of this grant and another", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest), grantPrint(other)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval naming no grant", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of more than one use", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(2), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"a lasting approval", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval+60000)), "web", digest, false, DNotApproved},
@@ -187,6 +195,9 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 	st, changed := r.reconnect("ok", r.approve(digest), "web", digest)
 	if !changed || st.Phase != kernel.PDone {
 		t.Fatalf("the approved reconnect: step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+	if r.host.staged.grant != nil || r.host.staged.plan != "" {
+		t.Fatal("the reconnect left its staged grant in memory")
 	}
 	r.now += key.DayMS // past the kernel's own duplicate guard (KRN-8)
 	if st, changed := r.reconnect("again", r.approve(digest), "web", digest); changed || st.Detail != DNotStaged {
@@ -319,4 +330,49 @@ func plainLog(t *testing.T, path string, k [32]byte) []byte {
 		t.Fatal("the log is empty")
 	}
 	return out
+}
+
+// The exact approval lasts MaxApproval, so under a key that holds a novel
+// step for less, the reconnect is held and then made; under a key that holds
+// it for longer, the approval has expired when the hold ends and the slot is
+// left as it was. Each reconnect names a new grant, so each is novel (row u).
+func TestAReconnectOutlastsOnlyAHoldShorterThanItsApproval(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		hold int64
+		done bool
+	}{
+		{"a 10-minute novelty window", 10 * 60 * 1000, true},
+		{"a 30-minute novelty window", 30 * 60 * 1000, false},
+	} {
+		r := newExitRig(t)
+		grant := []byte(`{"refresh_token":"canary-refresh-held","client_id":"agentos-test"}`)
+		d := r.stage("held", grant)
+		r.now += 1000
+		k := r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(d)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval), key.LimitHold(0, c.hold))
+		before, _ := r.sec.MarshalBinary()
+		if st, _ := r.reconnect("held", k, "web", d); st.Phase != kernel.PHeld {
+			t.Fatalf("%s: the reconnect was not held: %s %q", c.name, st.Phase, st.Detail)
+		}
+		r.now += c.hold + 1000
+		r.tick(r.now)
+		after, _ := r.sec.MarshalBinary()
+		if changed := !bytes.Equal(before, after); changed != c.done {
+			t.Errorf("%s: store changed %v, want %v (step %+v)", c.name, changed, c.done, r.step("held"))
+		}
+	}
+}
+
+// The clerk judges a reconnect's content by its own facts, the print of the
+// grant the step's value names: a step claiming the approved grant while its
+// value names another staged one is refused, and the slot is unchanged.
+func TestAReconnectClaimingAnotherGrantIsRefused(t *testing.T) {
+	r := newExitRig(t)
+	grant := []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`)
+	approved := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
+	digest := r.stage("claim", grant)
+	st, changed := r.reconnectClaiming("claim", r.approve(approved), "web", digest, grantPrint(approved))
+	if changed || st.Detail != clerk.RClaim {
+		t.Fatalf("step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
 }
