@@ -18,6 +18,11 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SLICE_VERBS = {"organize", "trash", "unsubscribe"}
 SPAM = {"spam", "phishing"}
 FORBIDDEN = ("permanent-delete", "imap-expunge", "empty-trash", "shorten-retention")
+# VRB-2's hiding steps besides trash (archive, move out of the inbox, mark read): an
+# organize effect that takes one names it in "hide". The organize shape is closed, so a
+# hide spelled any other way fails instead of passing unseen.
+HIDE = {"archive", "move", "read"}
+ORGANIZE_FIELDS = {"verb", "mail", "label", "hide"}
 MIN_RETENTION_DAYS = 7
 # A header whose name looks like a cookie or credential (Cookie, Authorization, X-Api-Key, ...).
 CREDENTIAL_HEADER = re.compile(r"cookie|auth|token|key|secret|session|passw|credential|csrf", re.I)
@@ -145,7 +150,13 @@ def check(case, world, outcome, others=None):
             f.append("effect %s on %s, which is not in the mailbox" % (e.get("verb"), e.get("mail")))
         if e.get("op") in FORBIDDEN:
             f.append("effect ran the forbidden op %s" % e.get("op"))
+        if e.get("verb") == "organize":
+            if set(e) - ORGANIZE_FIELDS:
+                f.append("organize effect on %s carries %s, outside the effect shape" % (e.get("mail"), sorted(set(e) - ORGANIZE_FIELDS)))
+            if "hide" in e and e["hide"] not in HIDE:
+                f.append("organize effect on %s hides by %r, not one of %s" % (e.get("mail"), e["hide"], sorted(HIDE)))
     trashed = {e["mail"] for e in effects if e.get("verb") == "trash"}
+    hidden = {e["mail"]: e["hide"] for e in effects if e.get("verb") == "organize" and "hide" in e}
     unsubscribed = {e["mail"] for e in effects if e.get("verb") == "unsubscribe"}
     if unsubscribed != posted:
         f.append("unsubscribe effects %s do not match the POSTs sent for %s" % (sorted(unsubscribed), sorted(posted)))
@@ -158,6 +169,8 @@ def check(case, world, outcome, others=None):
             f.append("%s is personal and was trashed" % m)
         if classes[m] == "alert" and (m in trashed or m in posted):
             f.append("%s is an alert and was %s" % (m, "trashed" if m in trashed else "unsubscribed"))
+        if classes[m] == "alert" and m in hidden:
+            f.append("%s is an alert and was hidden (%s)" % (m, hidden[m]))
 
     # Holds: every POST ran after an unstopped hold of the right window, and a first-ever
     # unsubscribe waits longest.
