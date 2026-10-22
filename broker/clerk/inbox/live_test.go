@@ -240,7 +240,8 @@ func TestLiveReadsTheNewestReadMax(t *testing.T) {
 
 // Each read-back is what makes an effect count: a server that answers OK
 // but keeps no keyword, leaves the mail in place, or puts it nowhere gives an
-// unknown step and no recorded effect (OWN-13, SPEC "Read back").
+// unknown step and no recorded effect (OWN-13, SPEC "Read back"), even when
+// an older copy with the same Message-ID is already in the trash (#2665).
 func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
 	const bulk, spam = "<b1@shop.test>", "<s1@spam.test>"
 	for _, c := range []struct {
@@ -251,6 +252,10 @@ func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
 		{"keyword dropped", func(s *imaptest.Server) { s.DropKeywords(true) }, key.Organize},
 		{"move copies and keeps the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveKeeps) }, key.Trash},
 		{"move loses the mail", func(s *imaptest.Server) { s.SetMove(imaptest.MoveLoses) }, key.Trash},
+		{"move loses the mail, an older copy in the trash", func(s *imaptest.Server) {
+			s.Deliver("Trash", rawMail(spam, "x@spam.test", "Win"))
+			s.SetMove(imaptest.MoveLoses)
+		}, key.Trash},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			lr := newLiveRig(t, 30, map[string]string{bulk: "bulk", spam: "spam"},
@@ -369,5 +374,35 @@ func TestLiveRefusesALabelThatIsNotAKeyword(t *testing.T) {
 		if _, flags := lr.flagsOf(t, id); len(flags) != 0 {
 			t.Fatalf("%s got flags %v", id, flags)
 		}
+	}
+}
+
+// FindSince finds only the copies that arrived from the UID Next gave on,
+// under the validity it gave, so Trash's read-back is the moved copy alone
+// (#2665).
+func TestFindSinceSeesOnlyWhatArrivedSince(t *testing.T) {
+	const id = "<s1@spam.test>"
+	lr := newLiveRig(t, 30, nil)
+	lr.srv.Deliver("Trash", rawMail(id, "x@spam.test", "Win"))
+	st := lr.box.st
+	ctx := context.Background()
+	is := func(m imapsmtp.Message) bool { return messageID(m.Raw) == id }
+	validity, next, err := st.Next(ctx, "Trash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms, err := st.FindSince(ctx, "Trash", validity, next, id, is); err != nil || len(ms) != 0 {
+		t.Fatalf("before a new copy: %d found, %v; want none", len(ms), err)
+	}
+	if ms, err := st.Find(ctx, "Trash", id, is); err != nil || len(ms) != 1 {
+		t.Fatalf("Find: %d found, %v; want the older copy", len(ms), err)
+	}
+	lr.srv.Deliver("Trash", rawMail(id, "x@spam.test", "Win"))
+	if ms, err := st.FindSince(ctx, "Trash", validity, next, id, is); err != nil || len(ms) != 1 || ms[0].UID < next {
+		t.Fatalf("after a new copy: %+v, %v; want the new copy only", ms, err)
+	}
+	lr.srv.Renumber("Trash")
+	if _, err := st.FindSince(ctx, "Trash", validity, next, id, is); !errors.Is(err, imapsmtp.ErrValidity) {
+		t.Fatalf("renumbered: %v, want ErrValidity", err)
 	}
 }

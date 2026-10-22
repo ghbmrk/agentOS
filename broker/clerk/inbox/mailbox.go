@@ -420,6 +420,13 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if trash == "" {
 		return nNoTrash
 	}
+	// Only a copy that arrives in the trash with this move confirms it: an
+	// older one with the same Message-ID would confirm a move that did not
+	// happen (#2665).
+	validity, next, err := l.st.Next(ctx, trash)
+	if err != nil {
+		return before(err)
+	}
 	if err := l.st.Move(ctx, m.ref, trash); err != nil {
 		return before(err)
 	}
@@ -430,7 +437,7 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if len(left) != 0 || m.id == "" {
 		return errUnconfirmed
 	}
-	there, err := l.st.Find(ctx, trash, m.id, func(x imapsmtp.Message) bool { return messageID(x.Raw) == m.id })
+	there, err := l.st.FindSince(ctx, trash, validity, next, m.id, func(x imapsmtp.Message) bool { return messageID(x.Raw) == m.id })
 	if err != nil {
 		return err
 	}

@@ -803,19 +803,56 @@ func readUIDs(c *client.Client, only map[uint32]bool) ([]uint32, error) {
 	return slices.DeleteFunc(uids, func(u uint32) bool { return !only[u] }), nil
 }
 
+// Next is folder's UID validity and the UID its next message will take, so
+// a later Find can look at only what arrived since.
+func (s *Store) Next(ctx context.Context, folder string) (validity, next uint32, err error) {
+	err = s.session(ctx, func(c *client.Client) error {
+		st, err := c.Select(folder, true)
+		if err != nil {
+			return err
+		}
+		validity, next = st.UidValidity, st.UidNext
+		return nil
+	})
+	return validity, next, err
+}
+
 // Find returns the messages in folder whose Message-ID header holds id and
 // that match accepts. Servers match a header search by substring, so match
 // checks the whole value.
 func (s *Store) Find(ctx context.Context, folder, id string, match func(Message) bool) ([]Message, error) {
+	return s.find(ctx, folder, 0, 0, id, match)
+}
+
+// FindSince is Find over only the messages that arrived in folder from UID
+// from on, under validity (ErrValidity otherwise).
+func (s *Store) FindSince(ctx context.Context, folder string, validity, from uint32, id string, match func(Message) bool) ([]Message, error) {
+	if validity == 0 {
+		return nil, ErrValidity
+	}
+	return s.find(ctx, folder, validity, from, id, match)
+}
+
+// find is Find, from UID from on under validity unless validity is 0.
+func (s *Store) find(ctx context.Context, folder string, validity, from uint32, id string, match func(Message) bool) ([]Message, error) {
 	var out []Message
 	err := s.session(ctx, func(c *client.Client) error {
 		st, err := c.Select(folder, true)
 		if err != nil {
 			return err
 		}
+		if validity != 0 && st.UidValidity != validity {
+			return ErrValidity
+		}
 		crit := imap.NewSearchCriteria()
 		crit.Header.Add("Message-Id", id)
+		if validity != 0 {
+			crit.Uid = new(imap.SeqSet)
+			crit.Uid.AddRange(max(from, 1), 0)
+		}
 		uids, err := c.UidSearch(crit)
+		// from:* holds the folder's last UID even when it is below from.
+		uids = slices.DeleteFunc(uids, func(u uint32) bool { return u < from })
 		if err != nil || len(uids) == 0 {
 			return err
 		}
