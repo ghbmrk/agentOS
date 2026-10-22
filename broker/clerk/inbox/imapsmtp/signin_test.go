@@ -147,10 +147,11 @@ func signInCall(ctx context.Context, s *Store, greet string) error {
 // A sign-in is ErrLoginRefused only when the server answered it as a
 // refusal, a token's included, so the host stops signing in only then, and
 // ErrNoSignIn when the server offers no sign-in the clerk supports for the
-// login; either names the side it failed on and stands however the
-// connection then ends. A server down for now, a dropped connection, a
-// temporary SMTP failure or a CAPABILITY the server would not answer passes
-// with time. Capability and mechanism names are case-insensitive.
+// login; either names the side it failed on, in its text and to SideOf, and
+// stands however the connection then ends. A server down for now, a dropped
+// connection, a temporary SMTP failure or a CAPABILITY the server would not
+// answer passes with time and has no side. Capability and mechanism names
+// are case-insensitive.
 func TestOnlyARefusalIsALoginRefused(t *testing.T) {
 	const (
 		oauthGreet = "* OK [CAPABILITY IMAP4rev1 AUTH=XOAUTH2 SASL-IR] ready\r\n"
@@ -191,11 +192,14 @@ func TestOnlyARefusalIsALoginRefused(t *testing.T) {
 	} {
 		err := signInCall(context.Background(), signInStore(t, serve(t, c.sc), 500*time.Millisecond, c.oauth), c.sc.greet)
 		refused, none := errors.Is(err, ErrLoginRefused), errors.Is(err, ErrNoSignIn)
-		on := sending
+		on := Sending
 		if strings.HasPrefix(c.sc.greet, "* ") {
-			on = reading
+			on = Reading
 		}
-		if err == nil || c.want == nil && (refused || none) || c.want != nil && (!errors.Is(err, c.want) || !strings.HasSuffix(err.Error(), on)) {
+		if c.want == nil {
+			on = ""
+		}
+		if err == nil || c.want == nil && (refused || none) || c.want != nil && (!errors.Is(err, c.want) || !strings.HasSuffix(err.Error(), string(on))) || SideOf(err) != on {
 			t.Errorf("%s: err %v, want %v, %s", name, err, c.want, on)
 		}
 	}
