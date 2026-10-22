@@ -147,7 +147,14 @@ func trouble(err error) (why, next string) {
 		return "a read mail in " + quoted(long.Folder) + " (arrived " + at + subject + ") has a From or Message-ID line too long to check safely",
 			"Delete it or move it out of your mail, and I'll resume at the next check."
 	case errors.Is(err, imapsmtp.ErrLoginRefused):
-		return "your mail server refused my sign-in", "Set up the mail account again on my Wi-Fi page."
+		return "your mail server refused my sign-in",
+			"Set up the mail account again on my Wi-Fi page. If your provider uses two-step sign-in, use an app password it gives for mail apps."
+	case errors.Is(err, imapsmtp.ErrNoSignIn):
+		// Only a change of setup clears it: trying again cannot, and nor can
+		// another password, since the server answers before one is sent
+		// (#2698 item 32).
+		return "your mail server doesn't accept a password sign-in with these settings",
+			"On my Wi-Fi page, set up the mail account again with the IMAP and SMTP server settings your provider gives for mail apps. If your provider only allows signing in through its own page, I can't use this account yet."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
 		return "you have more read mail than I can keep track of", "Delete or archive old read mail outside your mail account, and I'll resume at the next check."
 	case errors.Is(err, imapsmtp.ErrUnreachable):
