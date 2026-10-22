@@ -868,11 +868,14 @@ func (k *Kernel) act(now int64, a Act) (*Call, error) {
 	_, known := k.clerks[sp.Clerk]
 	switch a.Kind {
 	case ActDispatch:
-		if _, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, req.Idem(), st.HeldSeq}); err != nil {
+		if !known {
+			// No clerk can run the step, so nothing is sent or charged: the
+			// plan is cancelled before its dispatch is logged.
+			_, err := k.emit(now, TPlanCancel, planCancel{Plan: a.Plan, Code: CClerk, Detail: sp.Clerk})
 			return nil, err
 		}
-		if !known {
-			return nil, k.result(now, a.Plan, a.Index, "failed", CClerk)
+		if _, err := k.emit(now, TStepDispatch, stepDispatch{ref, a.Attempt, req.Idem(), st.HeldSeq}); err != nil {
+			return nil, err
 		}
 		return &Call{ActDispatch, sp.Clerk, req}, nil
 	case ActProbe:
