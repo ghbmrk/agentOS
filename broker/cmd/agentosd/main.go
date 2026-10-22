@@ -195,7 +195,7 @@ func (a machines) Lineage(id string) (string, error) {
 
 // lateServices routes each machine to its guest services, which need the
 // manager and so are built after it; machines start only once they exist.
-// agentosd runs no replay machines (MIG-4-unhook-replay): a machine named
+// agentosd runs no replay machines (MIG-4-untrusted-learn): a machine named
 // as one (vm.EvalPrefix) gets no services, never the live plane with its
 // journal, executors and owner (replay R7); every other machine goes to
 // the live guest plane.

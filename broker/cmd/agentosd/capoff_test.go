@@ -542,7 +542,7 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 				t.Fatal("learning is not on")
 			}
 			before := b.status()
-			if !strings.Contains(before, strings.ReplaceAll(noTestNote, "'", "")) {
+			if !strings.Contains(before, noTestNote) {
 				t.Fatalf("STATUS %q does not say changes are not tested", before)
 			}
 			for _, l := range []string{builderOffNote, builderUnsetNote, modelUnreachable, modelUnset, modelNoGrant, modelLocked} {

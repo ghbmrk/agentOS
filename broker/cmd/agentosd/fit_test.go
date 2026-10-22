@@ -15,7 +15,7 @@ import (
 
 // REQ: RES-2
 
-// MIG-4-unhook-replay (from PE2, UX-114-1, potency C1 on #114): agentosd
+// MIG-4-untrusted-learn (from PE2, UX-114-1, potency C1 on #114): agentosd
 // runs no replay machine, so while learning is on the owner sees it is
 // paused in effect: STATUS says so after the clock note, and turning
 // learning or all loops back on says nothing new will be adopted, keeping
@@ -51,8 +51,12 @@ func TestNoReplayIsSaid(t *testing.T) {
 	if got := notes(); len(got) != 2 || got[0] != "clock note" || got[1] != noTestNote {
 		t.Fatalf("notes with learning on: %q", got)
 	}
-	if noTestNote != "Learning: paused, I can't test changes yet." {
+	if noTestNote != "Learning: paused, I cannot test changes yet." {
 		t.Fatalf("note %q", noTestNote)
+	}
+	// STATUS drops characters such as apostrophes (control plainLine).
+	if strings.IndexFunc(noTestNote, notPlain) >= 0 {
+		t.Fatalf("note %q holds a character STATUS drops", noTestNote)
 	}
 	if got, ok := cfg.Settings(ctx, "LEARNING OFF", true); !ok || strings.Contains(got, "test changes") {
 		t.Errorf("LEARNING OFF: %q", got)
@@ -61,8 +65,8 @@ func TestNoReplayIsSaid(t *testing.T) {
 		t.Fatalf("notes with learning off: %q", got)
 	}
 	for msg, want := range map[string]string{
-		"LEARNING ON": "Learning is on, but I can't test changes yet, so nothing new will be adopted. Reply LEARNING OFF if this wasn't you.",
-		"LOOPS ON":    "Spare-time work is back on. Learning is on, but I can't test changes yet, so nothing new will be adopted. Reply LOOPS OFF if this wasn't you.",
+		"LEARNING ON": "Learning is on, but I cannot test changes yet, so nothing new will be adopted. Reply LEARNING OFF if this wasn't you.",
+		"LOOPS ON":    "Spare-time work is back on. Learning is on, but I cannot test changes yet, so nothing new will be adopted. Reply LOOPS OFF if this wasn't you.",
 	} {
 		if got, ok := cfg.Settings(ctx, msg, true); !ok || got != want {
 			t.Errorf("%s: %q", msg, got)

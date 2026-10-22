@@ -554,10 +554,10 @@ func journalRedacted(v string) bool {
 // replay machine, so no change is tested and none adopts (change C8)
 // until the kernel's replay gate does it (SPEC HLD-3). It follows the
 // time check's note.
-const noTestNote = "Learning: paused, I can't test changes yet."
+const noTestNote = "Learning: paused, I cannot test changes yet."
 
 // noTestOn is what turning learning back on adds.
-const noTestOn = "Learning is on, but I can't test changes yet, so nothing new will be adopted."
+const noTestOn = "Learning is on, but I cannot test changes yet, so nothing new will be adopted."
 
 func (l *learning) note() string {
 	if l.learningOn() {
