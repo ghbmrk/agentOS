@@ -52,6 +52,7 @@ type flaky struct {
 	model.Ledger
 	fail, failPool bool
 	lose           bool // the log records the usage, but its answer is lost
+	refuse         bool // the log refuses the settlement outright
 }
 
 func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
@@ -64,6 +65,9 @@ func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
 func (f *flaky) Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error {
 	if f.fail {
 		return errors.New("log down")
+	}
+	if f.refuse {
+		return kernel.ErrNotAdmitted
 	}
 	if err := f.Ledger.Meter(now, a, route, amount, source); err != nil || !f.lose {
 		return err
@@ -313,6 +317,18 @@ func TestALostSettlementIsRecordedOnce(t *testing.T) {
 	}
 	if used != 2 {
 		t.Fatalf("%d uses recorded, want each once", used)
+	}
+}
+
+// Only a retry reads an already-settled refusal as recorded: refused on its
+// first attempt, the usage is not known to be recorded, and the reply is
+// withheld.
+func TestAFirstSettlementRefusedIsNotRecorded(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, _, lg := rig(t, f)
+	lg.refuse = true
+	if reply, err := c.Call(1, "t", "api", "hi", 50); err == nil || reply != "" {
+		t.Fatalf("a refused settlement: %q %v, want the reply withheld", reply, err)
 	}
 }
 

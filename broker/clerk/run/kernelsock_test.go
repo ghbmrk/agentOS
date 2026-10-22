@@ -563,7 +563,13 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			},
 			call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 37); return a, refusal(r) }},
 		{name: "meter", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
-		{name: "meter again", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
+		{name: "meter again", op: "meter", sock: func(_ Owner, m Meter) (any, error) {
+			err := m.Meter(0, admitted, "api", 37, "provider")
+			if !errors.Is(err, kernel.ErrNotAdmitted) { // the model clerk's retry reads it as recorded
+				t.Errorf("a second settlement over the socket: %v, want %v", err, kernel.ErrNotAdmitted)
+			}
+			return nil, err
+		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
 		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { a, r := m.AdmitSpend(0, "m", 1000); return a, refusal(r) }, call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 1000); return a, refusal(r) }},
 		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
 		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", 300, at+1000) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", 300, at+1000) }},

@@ -36,7 +36,8 @@ type PoolReading struct{ Used, ResetAt int64 }
 // request was written (a refused connection, a failed lookup), and an error
 // the provider does not bill (an overload or server error it reports as
 // unbilled) with a Reported zero. Any other error is charged the admitted worst
-// case.
+// case. The clerk calls it from several calls at once, outside its lock, so it
+// must be safe for concurrent use.
 type Provider interface {
 	Call(route, prompt string, maxOut int64) (reply string, u Usage, err error)
 }
