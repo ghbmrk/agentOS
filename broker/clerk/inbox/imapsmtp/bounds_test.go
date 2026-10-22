@@ -300,10 +300,9 @@ func TestFlagsUpdateKeepsTheBody(t *testing.T) {
 	}
 }
 
-// smtpFlood is a raw SMTP server that answers each command with 250
-// (AUTH 235, DATA 354 and then 250, QUIT 221) until the client sends
-// one starting with on, and then writes prefix
-// and chunk, over and over, until the client stops reading. An empty on
+// smtpFlood is a raw SMTP server that answers each command with 250 (EHLO
+// offering AUTH PLAIN, AUTH 235, DATA 354 and then 250, QUIT 221) until the
+// client sends one starting with on, and then writes prefix and chunk, over and over, until the client stops reading. An empty on
 // floods the greeting. It stands in for a hostile mail host that never
 // ends an SMTP reply (SR3-mail-k18d-smtp). The number of bytes it wrote
 // is sent on the returned channel when the connection ends.
@@ -416,6 +415,8 @@ func smtpServe(t testing.TB, l net.Listener, on, prefix, chunk string) (string, 
 				return
 			case strings.HasPrefix(cmd, "AUTH"):
 				c.Write([]byte("235 ok\r\n"))
+			case strings.HasPrefix(cmd, "EHLO"):
+				c.Write([]byte("250-x.test\r\n250 AUTH PLAIN\r\n"))
 			case strings.HasPrefix(cmd, "DATA"):
 				c.Write([]byte("354 go on\r\n"))
 				for line != ".\r\n" {

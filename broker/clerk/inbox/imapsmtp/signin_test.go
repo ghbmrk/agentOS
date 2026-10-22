@@ -11,19 +11,26 @@ import (
 	"time"
 )
 
-// signInServer takes one connection, greets it, answers an SMTP EHLO with
-// AUTH PLAIN, ends at an IMAP LOGOUT or SMTP QUIT, cancels an SMTP sign-in
-// on "*", and answers the sign-in, a LOGIN or AUTH line, with answer
-// (an IMAP answer after the command's tag); "drop" closes the connection
-// and "stall" leaves it unanswered.
-func signInServer(t *testing.T, greet, answer string) string {
-	return mailServer(t, greet, answer, "221 bye")
+const imapGreet, smtpGreet = "* OK [CAPABILITY IMAP4rev1] ready\r\n", "220 x.test ready\r\n"
+
+// script is what a mail server says to one connection: greet, the AUTH
+// mechanisms its EHLO offers, its answer to the sign-in (a LOGIN,
+// AUTHENTICATE or AUTH line; an IMAP answer goes after the command's tag),
+// and its answer to an SMTP QUIT. A sign-in answer "drop" closes the
+// connection, "stall" leaves it unanswered, and "challenge:" sends an
+// error challenge first and the rest after the client's response. A quit
+// "stall" leaves a QUIT or an IMAP LOGOUT unanswered.
+type script struct {
+	greet, mechs, signIn, quit string
 }
 
-// mailServer is signInServer that also takes an SMTP mail and answers QUIT
-// with quit ("stall" leaves it unanswered).
-func mailServer(t *testing.T, greet, answer, quit string) string {
+// serve takes one connection and plays sc: an SMTP server answers NOOP,
+// cancels a sign-in on "*" and takes a mail; an IMAP server ends at LOGOUT.
+func serve(t *testing.T, sc script) string {
 	t.Helper()
+	if sc.quit == "" {
+		sc.quit = "221 bye"
+	}
 	l := listenLoopback(t)
 	go func() {
 		c, err := l.Accept()
@@ -34,7 +41,7 @@ func mailServer(t *testing.T, greet, answer, quit string) string {
 		c.SetDeadline(time.Now().Add(10 * time.Second))
 		w := bufio.NewWriter(c)
 		say := func(s string) { w.WriteString(s); w.Flush() }
-		say(greet)
+		say(sc.greet)
 		r := bufio.NewReader(c)
 		for {
 			line, err := r.ReadString('\n')
@@ -44,11 +51,21 @@ func mailServer(t *testing.T, greet, answer, quit string) string {
 			f := strings.Fields(line)
 			switch {
 			case len(f) > 1 && strings.EqualFold(f[1], "LOGOUT"):
+				if sc.quit == "stall" {
+					r.ReadString('\n')
+					return
+				}
 				say("* BYE\r\n" + f[0] + " OK bye\r\n")
 				return
 			case len(f) > 0 && strings.EqualFold(f[0], "EHLO"):
-				say("250-x.test\r\n250 AUTH PLAIN\r\n")
-			case len(f) > 1 && (strings.EqualFold(f[1], "LOGIN") || strings.EqualFold(f[0], "AUTH")):
+				if sc.mechs == "" {
+					say("250 x.test\r\n")
+				} else {
+					say("250-x.test\r\n250 AUTH " + sc.mechs + "\r\n")
+				}
+			case len(f) > 1 && (strings.EqualFold(f[1], "LOGIN") || strings.EqualFold(f[1], "AUTHENTICATE") || strings.EqualFold(f[0], "AUTH")):
+				smtp := strings.EqualFold(f[0], "AUTH")
+				answer := sc.signIn
 				switch answer {
 				case "drop":
 					return
@@ -56,11 +73,25 @@ func mailServer(t *testing.T, greet, answer, quit string) string {
 					r.ReadString('\n')
 					return
 				}
-				if strings.EqualFold(f[0], "AUTH") {
+				if rest, ok := strings.CutPrefix(answer, "challenge:"); ok {
+					if smtp {
+						say("334 eyJzdGF0dXMiOiI0MDEifQ==\r\n")
+					} else {
+						say("+ eyJzdGF0dXMiOiI0MDEifQ==\r\n")
+					}
+					if l, _ := r.ReadString('\n'); l != "\r\n" {
+						say("bad response " + l)
+						return
+					}
+					answer = rest
+				}
+				if smtp {
 					say(answer + "\r\n")
 				} else {
 					say(f[0] + " " + answer + "\r\n")
 				}
+			case len(f) > 0 && strings.EqualFold(f[0], "NOOP"):
+				say("250 ok\r\n")
 			case strings.TrimSpace(line) == "*":
 				say("501 5.0.0 cancelled\r\n")
 			case len(f) > 0 && (strings.EqualFold(f[0], "MAIL") || strings.EqualFold(f[0], "RCPT")):
@@ -71,11 +102,11 @@ func mailServer(t *testing.T, greet, answer, quit string) string {
 				}
 				say("250 queued\r\n")
 			case len(f) > 0 && strings.EqualFold(f[0], "QUIT"):
-				if quit == "stall" {
+				if sc.quit == "stall" {
 					r.ReadString('\n')
 					return
 				}
-				say(quit + "\r\n")
+				say(sc.quit + "\r\n")
 				return
 			}
 		}
@@ -83,50 +114,68 @@ func mailServer(t *testing.T, greet, answer, quit string) string {
 	return l.Addr().String()
 }
 
-// A sign-in is ErrLoginRefused only when the server answered it as a
-// refusal, or would refuse it unsent (LOGINDISABLED), so the host stops
-// signing in only then: a server down for now,
-// a dropped connection or a temporary SMTP failure passes with time.
-func TestOnlyARefusalIsALoginRefused(t *testing.T) {
-	const imapGreet, smtpGreet = "* OK [CAPABILITY IMAP4rev1] ready\r\n", "220 x.test ready\r\n"
-	for name, c := range map[string]struct {
-		greet, answer string
-		refused       bool
-	}{
-		"imap NO":          {imapGreet, "NO [AUTHENTICATIONFAILED] wrong", true},
-		"imap BAD":         {imapGreet, "BAD no", true},
-		"imap UNAVAILABLE": {imapGreet, "NO [UNAVAILABLE] down for now", false},
-		"imap drop":        {imapGreet, "drop", false},
-		"imap disabled":    {"* OK [CAPABILITY IMAP4rev1 LOGINDISABLED] ready\r\n", "OK in", true},
-		"smtp 535":         {smtpGreet, "535 5.7.8 wrong", true},
-		"smtp 454":         {smtpGreet, "454 4.7.0 Temporary authentication failure", false},
-		"smtp drop":        {smtpGreet, "drop", false},
-	} {
-		s := hostileStore(t, signInServer(t, c.greet, c.answer), 5*time.Second)
-		var err error
-		if strings.HasPrefix(c.greet, "* ") {
-			_, _, err = s.UIDs(context.Background(), "INBOX")
-		} else {
-			err = s.Submit(context.Background(), []string{"a@example.test"}, []byte("x"))
+// signInStore is hostileStore signing in with a token when oauth is set.
+func signInStore(t *testing.T, addr string, timeout time.Duration, oauth bool) *Store {
+	s := hostileStore(t, addr, timeout)
+	if oauth {
+		s.cfg.Credential = func(context.Context) (Login, error) {
+			return Login{User: "canary-user", Secret: "canary-token", OAuth: true}, nil
 		}
-		if err == nil || errors.Is(err, ErrLoginRefused) != c.refused {
-			t.Errorf("%s: err %v, refused %v", name, err, c.refused)
+	}
+	return s
+}
+
+// signInCall reads or sends, as greet says which server it is.
+func signInCall(ctx context.Context, s *Store, greet string) error {
+	if strings.HasPrefix(greet, "* ") {
+		_, _, err := s.UIDs(ctx, "INBOX")
+		return err
+	}
+	return s.Submit(ctx, []string{"a@example.test"}, []byte("Subject: x\r\n\r\nx\r\n"))
+}
+
+// A sign-in is ErrLoginRefused only when the server answered it as a
+// refusal, a token's included, so the host stops signing in only then, and
+// ErrNoSignIn when the server offers no way to sign in with the login; a
+// server down for now, a dropped connection or a temporary SMTP failure
+// passes with time.
+func TestOnlyARefusalIsALoginRefused(t *testing.T) {
+	const oauthGreet = "* OK [CAPABILITY IMAP4rev1 AUTH=XOAUTH2 SASL-IR] ready\r\n"
+	for name, c := range map[string]struct {
+		sc    script
+		oauth bool
+		want  error // nil: neither ErrLoginRefused nor ErrNoSignIn
+	}{
+		"imap NO":           {script{greet: imapGreet, signIn: "NO [AUTHENTICATIONFAILED] wrong"}, false, ErrLoginRefused},
+		"imap BAD":          {script{greet: imapGreet, signIn: "BAD no"}, false, ErrLoginRefused},
+		"imap UNAVAILABLE":  {script{greet: imapGreet, signIn: "NO [UNAVAILABLE] down for now"}, false, nil},
+		"imap drop":         {script{greet: imapGreet, signIn: "drop"}, false, nil},
+		"imap disabled":     {script{greet: "* OK [CAPABILITY IMAP4rev1 LOGINDISABLED] ready\r\n", signIn: "OK in"}, false, ErrNoSignIn},
+		"imap token":        {script{greet: oauthGreet, signIn: "challenge:NO [AUTHENTICATIONFAILED] invalid token"}, true, ErrLoginRefused},
+		"imap no XOAUTH2":   {script{greet: imapGreet, signIn: "OK in"}, true, ErrNoSignIn},
+		"smtp 535":          {script{greet: smtpGreet, mechs: "PLAIN", signIn: "535 5.7.8 wrong"}, false, ErrLoginRefused},
+		"smtp 454":          {script{greet: smtpGreet, mechs: "PLAIN", signIn: "454 4.7.0 Temporary authentication failure"}, false, nil},
+		"smtp drop":         {script{greet: smtpGreet, mechs: "PLAIN", signIn: "drop"}, false, nil},
+		"smtp token":        {script{greet: smtpGreet, mechs: "PLAIN XOAUTH2", signIn: "challenge:535 5.7.8 invalid token"}, true, ErrLoginRefused},
+		"smtp no AUTH":      {script{greet: smtpGreet, signIn: "235 ok"}, false, ErrNoSignIn},
+		"smtp no XOAUTH2":   {script{greet: smtpGreet, mechs: "PLAIN LOGIN", signIn: "235 ok"}, true, ErrNoSignIn},
+		"imap refused, cut": {script{greet: imapGreet, signIn: "NO [AUTHENTICATIONFAILED] wrong", quit: "stall"}, false, ErrLoginRefused},
+	} {
+		err := signInCall(context.Background(), signInStore(t, serve(t, c.sc), 500*time.Millisecond, c.oauth), c.sc.greet)
+		refused, none := errors.Is(err, ErrLoginRefused), errors.Is(err, ErrNoSignIn)
+		if err == nil || c.want == nil && (refused || none) || c.want != nil && !errors.Is(err, c.want) {
+			t.Errorf("%s: err %v, want %v", name, err, c.want)
 		}
 	}
 }
 
 // A caller that stops a sign-in is told so, not that the login was refused.
 func TestASignInTheCallerStopsIsNotRefused(t *testing.T) {
-	for greet, call := range map[string]func(*Store, context.Context) error{
-		"* OK [CAPABILITY IMAP4rev1] ready\r\n": func(s *Store, ctx context.Context) error { _, _, err := s.UIDs(ctx, "INBOX"); return err },
-		"220 x.test ready\r\n": func(s *Store, ctx context.Context) error {
-			return s.Submit(ctx, []string{"a@example.test"}, []byte("x"))
-		},
-	} {
+	for _, sc := range []script{{greet: imapGreet, signIn: "stall"}, {greet: smtpGreet, mechs: "PLAIN", signIn: "stall"}} {
 		ctx, cancel := context.WithCancel(context.Background())
 		time.AfterFunc(200*time.Millisecond, cancel)
-		if err := call(hostileStore(t, signInServer(t, greet, "stall"), 5*time.Second), ctx); !errors.Is(err, context.Canceled) {
-			t.Errorf("%q: err %v, want the caller's cancel", greet, err)
+		if err := signInCall(ctx, hostileStore(t, serve(t, sc), 5*time.Second), sc.greet); !errors.Is(err, context.Canceled) {
+			t.Errorf("%q: err %v, want the caller's cancel", sc.greet, err)
 		}
 	}
 }
@@ -134,8 +183,8 @@ func TestASignInTheCallerStopsIsNotRefused(t *testing.T) {
 // A mail the server took is sent, even if its QUIT is then cut off: failing
 // it would have the caller send it twice.
 func TestAMailTakenIsSentWhateverItsQuit(t *testing.T) {
-	addr := mailServer(t, "220 x.test ready\r\n", "235 2.7.0 ok", "stall")
-	if err := hostileStore(t, addr, 500*time.Millisecond).Submit(context.Background(), []string{"a@example.test"}, []byte("Subject: x\r\n\r\nx\r\n")); err != nil {
+	sc := script{greet: smtpGreet, mechs: "PLAIN", signIn: "235 2.7.0 ok", quit: "stall"}
+	if err := signInCall(context.Background(), hostileStore(t, serve(t, sc), 500*time.Millisecond), sc.greet); err != nil {
 		t.Fatalf("err %v, want the mail sent", err)
 	}
 }
@@ -143,12 +192,9 @@ func TestAMailTakenIsSentWhateverItsQuit(t *testing.T) {
 // A sign-in the server leaves unanswered past the timeout says so, not that
 // the login was refused, reading or sending.
 func TestAStalledSignInTimesOut(t *testing.T) {
-	for greet, call := range map[string]func(*Store) error{
-		"* OK [CAPABILITY IMAP4rev1] ready\r\n": func(s *Store) error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
-		"220 x.test ready\r\n":                  func(s *Store) error { return s.Submit(context.Background(), []string{"a@example.test"}, []byte("x")) },
-	} {
-		if err := call(hostileStore(t, signInServer(t, greet, "stall"), 500*time.Millisecond)); !errors.Is(err, ErrTimeout) {
-			t.Errorf("%q: err %v, want ErrTimeout", greet, err)
+	for _, sc := range []script{{greet: imapGreet, signIn: "stall"}, {greet: smtpGreet, mechs: "PLAIN", signIn: "stall"}} {
+		if err := signInCall(context.Background(), hostileStore(t, serve(t, sc), 500*time.Millisecond), sc.greet); !errors.Is(err, ErrTimeout) {
+			t.Errorf("%q: err %v, want ErrTimeout", sc.greet, err)
 		}
 	}
 }
