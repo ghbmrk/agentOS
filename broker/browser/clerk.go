@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -44,6 +45,9 @@ type ran struct {
 	// ok: the driver answered it ok; lost: the executor stopped after the
 	// write, so whether it acted is unknown.
 	ok, lost bool
+	// covered: a covered submit's STATUS line, for Probe to give again
+	// when Do's answer was lost (CLK-3).
+	covered string
 }
 
 // NewClerk returns the clerk for one gate.
@@ -74,21 +78,20 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	var res Result
 	var rec ran
+	// line is the clerk's own STATUS line: the driver's reply never sets
+	// one, so a page cannot list text the owner never approved (CLK-3).
+	var line string
 	switch st.Verb {
 	case key.Read:
-		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
+		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value), c.tasks(v, ver, now))
 	case key.Post:
 		// The owner approves this exact print, or the task the key serves
-		// on the site the request reaches (CLK-3, D-147).
-		var tc *cover
+		// on the site the request reaches (CLK-3, D-147). A task with an
+		// approval on another site gets the approval this request needs;
+		// one with none fails unapproved.
+		var tc covers
 		if !approval(ver, now) {
-			site := c.g.siteOf([]byte(st.Args["msg"].Value))
-			a, ok := kernel.TaskApproved(v, c.Anchors, ver, site, now)
-			if site == "" || !ok {
-				c.record(id, ran{})
-				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
-			}
-			tc = &cover{site: a.Site}
+			tc = c.tasks(v, ver, now)
 		}
 		// A redo of a submit this clerk wrote and did not see succeed is
 		// the owner's RETRY: Probe answers unknown for it, so the kernel
@@ -98,16 +101,21 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		prev := c.ran[id]
 		c.mu.Unlock()
 		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok, tc)
+		if res.Error == "unapproved" {
+			c.record(id, ran{})
+			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+		}
 		if tc != nil && res.OK && res.Approval != nil {
-			res.Covered = coveredLine(*res.Approval, now)
+			line = coveredLine(*res.Approval, now)
 		}
 	default:
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
 	}
-	rec.ok = res.OK
+	res.Covered = line
+	rec.ok, rec.covered = res.OK, res.Covered
 	c.record(id, rec)
-	out := kernel.Result{Outcome: "failed", Detail: logged(res)}
+	out := kernel.Result{Outcome: "failed", Detail: logged(res), Covered: res.Covered}
 	switch {
 	case res.OK:
 		out.Outcome = "ok"
@@ -135,24 +143,24 @@ func (c *Clerk) record(id string, r ran) {
 // refused unsent, is notdone. With no record, as after a restart, a post
 // is unknown, and so, on a logged-out session, is any read that may have
 // acted: the kernel parks them rather than sending them twice (KRN-8).
-func (c *Clerk) Probe(r kernel.Request, _ kernel.View) string {
+func (c *Clerk) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	st := step(r)
 	c.mu.Lock()
 	rec, ok := c.ran[stepID(r)]
 	c.mu.Unlock()
 	switch {
 	case ok && rec.effect && rec.ok:
-		return "done"
+		return kernel.Result{Outcome: "done", Covered: rec.covered}
 	case ok && rec.effect:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case ok:
-		return "notdone"
+		return kernel.Result{Outcome: "notdone"}
 	case st.Verb == key.Post:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case st.Verb == key.Read && c.g.cfg.LoggedOut && c.g.mayAct([]byte(st.Args["query"].Value)):
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
-	return "notdone"
+	return kernel.Result{Outcome: "notdone"}
 }
 
 // facts is the clerk's own reading of a step's claims. A read of a page
@@ -196,14 +204,28 @@ func approval(ver *key.Verified, now int64) bool {
 
 // coveredLine is the fixed-wording STATUS line for a submit a task's
 // approval covered: the site, the control's visible label and the time
-// sent (CLK-3). Its full fields are the approval beside it in the log.
+// sent (CLK-3). Its full fields are the approval beside it in the log. The
+// site and label are cut so the line fits kernel.MaxShown, which drops a
+// longer line rather than show it.
 func coveredLine(a Approval, now int64) string {
 	label := a.Label
 	if label == "" {
 		label = strings.TrimSpace(a.Role + " " + a.Verb + " " + a.Target)
 	}
-	return "Sent on " + a.Site + ": " + label + ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
+	at := ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
+	site := a.Site
+	if strings.ContainsFunc(site, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
+		// A host the browser reads raw can hold a character that hides or
+		// reshapes the line, which the kernel would drop: show it escaped.
+		site = strconv.QuoteToASCII(site)
+	}
+	site = capText(site, maxLineSite)
+	room := kernel.MaxShown - len("Sent on : ") - len(site) - len(at) - len("…")
+	return "Sent on " + site + ": " + capText(label, room) + at
 }
+
+// maxLineSite bounds the site in a covered line, leaving the label room.
+const maxLineSite = 96
 
 // MaxApproval bounds how long an approval may live, in ms: one task's
 // submits, not a standing permission (D-147).
@@ -223,6 +245,20 @@ func logged(res Result) string {
 		d, _ = json.Marshal(small(res))
 	}
 	return string(d)
+}
+
+// tasks reads the approvals of the task ver's key serves, live on the
+// clerk's clock and co-signed by a passkey of its own anchors' set: the
+// first of the sites asked that has one, nil if none (CLK-3).
+func (c *Clerk) tasks(v kernel.View, ver *key.Verified, now int64) covers {
+	return func(sites ...string) *cover {
+		for _, s := range sites {
+			if a, ok := kernel.TaskApproved(v, c.Anchors, ver, s, now); ok {
+				return &cover{a.Site}
+			}
+		}
+		return nil
+	}
 }
 
 // stepID names a step of a signed plan.

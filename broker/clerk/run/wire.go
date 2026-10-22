@@ -216,7 +216,7 @@ func (c remote) Do(r kernel.Request, v kernel.View) kernel.Result {
 	return c.do(r, view(v, c.anchors, r, time.Now().UnixMilli()))
 }
 
-func (c remote) Probe(r kernel.Request, v kernel.View) string {
+func (c remote) Probe(r kernel.Request, v kernel.View) kernel.Result {
 	return c.probe(r, view(v, c.anchors, r, time.Now().UnixMilli()))
 }
 
@@ -239,15 +239,15 @@ func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
 	return kernel.Result{Outcome: one(a.Outcome, "ok", "failed"), Detail: detail(a.Detail), Covered: a.Covered}
 }
 
-func (c remote) probe(r kernel.Request, s snapshot) string {
+func (c remote) probe(r kernel.Request, s snapshot) kernel.Result {
 	a, sent, _ := c.call(opProbe, r, s)
 	switch {
 	case !sent:
-		return kernel.OUnreached // no check was made, so none counts
+		return kernel.Result{Outcome: kernel.OUnreached} // no check was made, so none counts
 	case a == nil:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
-	return one(a.Outcome, "done", "notdone")
+	return kernel.Result{Outcome: one(a.Outcome, "done", "notdone"), Covered: a.Covered}
 }
 
 // call sends one call and reads its answer. sent is false only when no byte
@@ -326,7 +326,8 @@ func serve(conn net.Conn, c kernel.Clerk, anchors []ed25519.PublicKey) {
 	var out answer
 	switch {
 	case in.Op == opProbe:
-		out.Outcome = c.Probe(in.Req, &in.View)
+		res := c.Probe(in.Req, &in.View)
+		out = answer{Outcome: res.Outcome, Covered: res.Covered}
 	case in.Op != opDo:
 		return
 	case !in.View.covers(anchors, in.Req):

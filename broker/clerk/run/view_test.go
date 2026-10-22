@@ -238,7 +238,7 @@ func TestAFailedWriteIsUnknown(t *testing.T) {
 	if res := c.do(r, snapshot{}); res.Outcome != "unknown" || res.Detail != DLost {
 		t.Fatalf("a call cut off mid-write: %+v, want unknown %s", res, DLost)
 	}
-	if got := c.probe(r, snapshot{}); got != "unknown" {
+	if got := c.probe(r, snapshot{}).Outcome; got != "unknown" {
 		t.Fatalf("a probe cut off mid-write: %q, want unknown", got)
 	}
 }
@@ -287,7 +287,7 @@ func TestACallPastTheBoundIsNeverSent(t *testing.T) {
 	if res := c.do(big, snapshot{}); res.Outcome != "failed" || res.Detail != DTooLarge {
 		t.Errorf("a call past the bound: %+v", res)
 	}
-	if got := c.probe(big, snapshot{}); got != kernel.OUnreached {
+	if got := c.probe(big, snapshot{}).Outcome; got != kernel.OUnreached {
 		t.Errorf("a probe past the bound: %q", got)
 	}
 	if res := c.do(fits, snapshot{}); res.Detail != "whole" {

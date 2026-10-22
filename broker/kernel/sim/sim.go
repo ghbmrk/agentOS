@@ -168,7 +168,7 @@ func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
 	return res
 }
 
-func (w *world) Probe(r kernel.Request, v kernel.View) string { return w.mail.Probe(r, v) }
+func (w *world) Probe(r kernel.Request, v kernel.View) kernel.Result { return w.mail.Probe(r, v) }
 
 // judge records an effect the clerk just applied and judges it against what
 // the key and the log's view said at that instant, on the true clock.

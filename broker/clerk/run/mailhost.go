@@ -78,10 +78,10 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 }
 
 // Probe asks the open clerk; with none, the step's effect cannot be checked.
-func (h *MailHost) Probe(r kernel.Request, v kernel.View) string {
+func (h *MailHost) Probe(r kernel.Request, v kernel.View) kernel.Result {
 	m := h.clerk()
 	if m == nil {
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
 	return m.Probe(r, v)
 }
