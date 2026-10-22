@@ -496,10 +496,7 @@ func (x *Exit) save() string {
 // to DReconnect; the caller has already proved the owner (CH-3). It returns
 // once the new grant is durable, and the next step redeems it.
 func (x *Exit) Reconnect(grant []byte) error {
-	if x.refresh == "" {
-		return errors.New("clerk: this clerk has no refresh grant")
-	}
-	if _, err := readGrant(grant); err != nil {
+	if err := x.CheckGrant(grant); err != nil {
 		return err
 	}
 	x.tmu.Lock()
@@ -509,6 +506,18 @@ func (x *Exit) Reconnect(grant []byte) error {
 	}
 	x.refused, x.unsaved, x.token, x.tokenExp = false, nil, "", 0
 	return nil
+}
+
+// CheckGrant is Reconnect's own refusal, without the write: it reports
+// whether Reconnect would take grant. The owner side runs it when it stages
+// a grant, so a malformed one is refused before the owner's tap and hold,
+// not after them as a credential failure.
+func (x *Exit) CheckGrant(grant []byte) error {
+	if x.refresh == "" {
+		return errors.New("clerk: this clerk has no refresh grant")
+	}
+	_, err := readGrant(grant)
+	return err
 }
 
 type tokenAnswer struct {

@@ -378,6 +378,30 @@ func TestReconnectNeedsARefreshClerk(t *testing.T) {
 	}
 }
 
+// CheckGrant refuses what Reconnect refuses and writes nothing, so the owner
+// side can refuse a malformed grant when it stages it (#2742 item 6).
+func TestCheckGrantMatchesReconnect(t *testing.T) {
+	o := setupOAuth(t)
+	f := setupExit(t, nil)
+	for _, g := range []string{`{"scope":"x","refresh_token":"canary-new"}`, `{"client_id":"agentos-test"}`, `not json`, `{"refresh_token":""}`} {
+		if o.x.CheckGrant([]byte(g)) == nil {
+			t.Fatalf("CheckGrant took %s", g)
+		}
+	}
+	good := []byte(`{"refresh_token":"canary-new","client_id":"agentos-test","client_secret":"canary-client-secret"}`)
+	if err := o.x.CheckGrant(good); err != nil {
+		t.Fatal(err)
+	}
+	if f.x.CheckGrant(good) == nil {
+		t.Fatal("a clerk with a static secret would take a refresh grant")
+	}
+	o.post("i1", 1)
+	if g := o.grants[len(o.grants)-1].Get("refresh_token"); g == "canary-new" {
+		t.Fatal("CheckGrant wrote the grant")
+	}
+	o.noCanary(t)
+}
+
 // The #2638 R1 acceptance test: rotate, restart from the at-rest form, and the
 // rotated token is the one redeemed.
 func TestExitRotatedGrantSurvivesARestart(t *testing.T) {
