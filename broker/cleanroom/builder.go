@@ -7,7 +7,7 @@
 // public repository, a toolchain, and synthetic fixtures. The machine is
 // labelled public and is never forked from another machine, and its broker
 // socket serves only three things: the hint, a place to submit the result,
-// and the metered model route. It has no tools that reach an executor, no
+// and the model clerk's route. It has no tools that reach an executor, no
 // owner channel, no vault, journal, recall index, or workspace, and no
 // network but that socket. It builds the generalized skill, adapter, or
 // regression from public information, tests it on the synthetic fixtures,
@@ -32,7 +32,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/hint"
 	"github.com/ghbmrk/agentos/broker/inflight"
-	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -60,10 +59,11 @@ type Config struct {
 	MemMB int64 // 0 means 1024
 	Argv  []string
 	Env   []string // static; never owner data
-	// Model serves a machine's model route; with it, Meter is required and
-	// every call is metered (OP-8). Nil answers 503.
+	// Model serves a machine's model route. It is the model clerk's provider
+	// endpoint (PLN-5 a, CLK-7), which admits each call against its key's
+	// spend caveat and meters it; the clean room adds no meter of its own.
+	// Nil answers 503.
 	Model func(machine string) http.Handler
-	Meter *meter.Meter
 	// Schema is the public hint schema; nil means hint.Default().
 	Schema *hint.Schema
 	// Timeout bounds one job's wall time (0 means 2 h). Attempts bounds how
@@ -104,9 +104,6 @@ var _ hint.Outbox = (*Builder)(nil)
 func New(cfg Config) (*Builder, error) {
 	if cfg.Dir == "" || cfg.Machines == nil || cfg.Image == "" {
 		return nil, errors.New("cleanroom: Dir, Machines, and Image are required")
-	}
-	if cfg.Model != nil && cfg.Meter == nil {
-		return nil, errors.New("cleanroom: model egress needs the OP-8 meter")
 	}
 	if cfg.Schema == nil {
 		cfg.Schema = hint.Default()

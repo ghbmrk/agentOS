@@ -193,7 +193,7 @@ func (s *session) model() http.Handler {
 			http.Error(w, "no model egress is configured", http.StatusServiceUnavailable)
 		})
 	}
-	return s.b.cfg.Meter.WrapBound(s.id, s.b.cfg.Model(s.id))
+	return s.b.cfg.Model(s.id)
 }
 
 func (s *session) hint(w http.ResponseWriter, r *http.Request) {

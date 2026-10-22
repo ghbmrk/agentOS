@@ -258,7 +258,7 @@ class ListTest(unittest.TestCase):
                   # MIG-4-untrusted (D-139, #2578): docs/LANES.md's sub B port directories.
                   "broker/loops/x.go", "broker/loop7/x.go", "broker/machprobe/x.go",
                   "broker/sockprobe/x.go", "broker/compile/x.go", "broker/skill/x.go",
-                  "broker/cleanroom/x.go", "broker/hint/x.go", "broker/pubsend/x.go",
+                  "broker/cleanroom/x.go", "broker/hint/x.go",
                   "broker/attention/x.go", "broker/probecmd/x.go", "broker/corpus/x.go",
                   "broker/loopbuild/x.go"):
             self.assertTrue(g.check([p], G2_LIST, gate=G2)[0], p)

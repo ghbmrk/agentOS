@@ -22,7 +22,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/hint"
-	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -351,17 +350,12 @@ func TestCleanRoomHasNoPrivateServices(t *testing.T) {
 	}
 }
 
-// OSS-2: model calls from a clean room go through the OP-8 meter under its
-// own machine ID.
-func TestCleanRoomModelCallsAreMetered(t *testing.T) {
-	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
-	if err != nil {
-		t.Fatal(err)
-	}
+// OSS-2, CLK-7: model calls from a clean room reach only the model clerk's
+// route, under the clean room's own machine ID, which admits and meters them.
+func TestCleanRoomModelCallsReachModelClerk(t *testing.T) {
 	var routed []string
 	var mu sync.Mutex
 	r := newRig(t, func(c *Config) {
-		c.Meter = mtr
 		c.Model = func(machine string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				mu.Lock()
@@ -387,12 +381,6 @@ func TestCleanRoomModelCallsAreMetered(t *testing.T) {
 	r.f.wg.Wait()
 	if len(routed) != 1 || routed[0] != id+" /v1/chat/completions" {
 		t.Fatalf("routed %v", routed)
-	}
-	if u := mtr.Usage(id); u.Calls != 1 {
-		t.Fatalf("meter saw %+v", u)
-	}
-	if _, err := New(Config{Dir: t.TempDir(), Machines: newFake(), Image: "x", Model: func(string) http.Handler { return nil }}); err == nil {
-		t.Fatal("model route without a meter accepted")
 	}
 }
 

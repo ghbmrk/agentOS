@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/hint"
 )
 
@@ -316,7 +315,17 @@ func (f faultFn) hit(op, path string) error {
 // (SR3-8-f2).
 var (
 	syncFile  = (*os.File).Sync
-	syncDirFn = durable.SyncDir
+	syncDirFn = func(dir string) error {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		err = d.Sync()
+		if cerr := d.Close(); err == nil {
+			err = cerr
+		}
+		return err
+	}
 )
 
 // fileSync runs the hook, then syncs file. Every durable file sync goes
