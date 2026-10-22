@@ -1,9 +1,12 @@
 package inbox
 
 import (
+	"net"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // World is what VRB-2 reads besides the message: the DKIM key records, the
@@ -56,18 +59,23 @@ const (
 
 var listed = []string{"from", "list-unsubscribe", "list-unsubscribe-post"}
 
-// org is the organizational domain: the last two labels. Every fixture domain is
-// under the reserved single-label TLD .test, where that is exact; a public-suffix
-// list replaces it before real mail does (ASSUMPTIONS.md).
+// org is the organizational domain: the public suffix, by the Public Suffix
+// List with its private part, and one label more, so a.co.uk and b.co.uk, or
+// a.github.io and b.github.io, are two organizations. A domain that is a
+// public suffix itself, an IP address or empty has none: "" (MIG-3-R1,
+// #2600).
 func org(domain string) string {
-	l := strings.Split(strings.TrimRight(strings.ToLower(domain), "."), ".")
-	if len(l) > 2 {
-		l = l[len(l)-2:]
+	d := strings.TrimRight(strings.ToLower(domain), ".")
+	o, err := publicsuffix.EffectiveTLDPlusOne(d)
+	if err != nil || net.ParseIP(d) != nil {
+		return ""
 	}
-	return strings.Join(l, ".")
+	return o
 }
 
-func aligned(a, b string) bool { return org(a) == org(b) }
+// aligned reports whether a and b share an organizational domain; one with
+// none aligns with nothing.
+func aligned(a, b string) bool { return org(a) != "" && org(a) == org(b) }
 
 // skeleton folds confusable pairs from Unicode's confusables.txt (UTS #39).
 func skeleton(domain string) string {
