@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -41,7 +42,8 @@ func TestLoopSettingsAreAnsweredByTheBox(t *testing.T) {
 		} else {
 			wireSettings(&cfg, nil)
 		}
-		for _, msg := range []string{"LOOPS OFF", "LOOP 1 ON", "LEARNING OFF", "SECURITY TESTS ON", "SPARE BUDGET 900", "HELP LOOPS", "STOP SHARING"} {
+		for _, msg := range []string{"LOOPS OFF", "LOOP 1 ON", "LEARNING OFF", "SECURITY TESTS ON", "SPARE BUDGET 900", "HELP LOOPS", "STOP SHARING",
+			"UPDATES FAST", "UPDATE SOAK 14", "HELP UPDATES"} {
 			for _, unlocked := range []bool{true, false} {
 				if got, ok := cfg.Settings(context.Background(), msg, unlocked); !ok || got != loopsOffText {
 					t.Fatalf("plane %v, %s (unlocked %v): %q %v", plane, msg, unlocked, got, ok)
@@ -61,6 +63,11 @@ func TestLoopSettingsAreAnsweredByTheBox(t *testing.T) {
 		if cfg.HelpExtra != "" {
 			t.Fatalf("HELP names a setting the box no longer has: %q", cfg.HelpExtra)
 		}
+	}
+	// Not gone for good (HLD-4), and an owner who had LEARNING OFF is told
+	// task texts are kept for FORGET (NL-4; security 2 on #2801).
+	if !strings.Contains(loopsOffText, "in this version") || !strings.Contains(loopsOffText, "30 days") || strings.Contains(loopsOffText, "no longer") {
+		t.Fatalf("loopsOffText: %q", loopsOffText)
 	}
 	// One GSM-7 segment each.
 	for _, l := range []string{loopsOffText, forgetOffText} {
@@ -169,5 +176,97 @@ func TestForgetReportsAFailedSave(t *testing.T) {
 	}
 	if _, ok := lp.tasks.get(goal); ok {
 		t.Fatal("task text kept in memory")
+	}
+}
+
+// statusNotes is every STATUS note cfg holds now.
+func statusNotes(cfg *daemon.Config) []string {
+	var out []string
+	for _, n := range cfg.Notes {
+		if l := n(); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A temp a crash left from durable.WriteFile (a copy of harvest.json, say)
+// is removed when the forget plane opens, with the learning state, since
+// FORGET cannot reach a task in it (CAP-3; security 1 on #2801).
+func TestOpenSweepsCrashLeftTemps(t *testing.T) {
+	dir := t.TempDir()
+	temp := filepath.Join(dir, learnTemp+"harvest.json-123")
+	if err := os.WriteFile(temp, []byte(`{"goal":"CANARY-temp-task"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := daemon.Config{}
+	lp, err := openForgetPlane(dir, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(temp); !os.IsNotExist(err) {
+		t.Fatalf("crash-left temp kept: %v", err)
+	}
+	if lp.notErased || len(statusNotes(&cfg)) != 0 {
+		t.Fatalf("STATUS says not erased: %q", statusNotes(&cfg))
+	}
+}
+
+// LOG-4 (erase fails closed, owner told; security 3 on #2801): old learning
+// state or a temp that does not remove is named in STATUS, and the next
+// start tries again.
+func TestEraseFailureIsToldInStatus(t *testing.T) {
+	for _, which := range []string{"learned", "temp"} {
+		t.Run(which, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "harvest.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fail := errors.New("read-only disk")
+			if which == "learned" {
+				removeAll = func(string) error { return fail }
+			} else {
+				sweepTemp = func(string) error { return fail }
+			}
+			cfg := daemon.Config{}
+			_, err := openForgetPlane(dir, &cfg)
+			sweepTemp, removeAll = sweepLearnTemp, os.RemoveAll
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotErased {
+				t.Fatalf("STATUS notes %q", got)
+			}
+			// The next start tries again, and the line goes.
+			cfg = daemon.Config{}
+			if _, err := openForgetPlane(dir, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := statusNotes(&cfg); len(got) != 0 {
+				t.Fatalf("STATUS notes after the retry %q", got)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "harvest.json")); !os.IsNotExist(err) {
+				t.Fatalf("retry left the state: %v", err)
+			}
+		})
+	}
+}
+
+// UX R1 on #92: when the forget plane does not open, STATUS says FORGET is
+// not running and that a restart may fix it; when it opens, no such line.
+func TestStatusSaysWhenForgetIsNotRunning(t *testing.T) {
+	cfg := daemon.Config{}
+	wireSettings(&cfg, nil)
+	if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotRunning {
+		t.Fatalf("STATUS notes %q", got)
+	}
+	cfg = daemon.Config{}
+	if _, err := openForgetPlane(t.TempDir(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range statusNotes(&cfg) {
+		if l == forgetNotRunning {
+			t.Fatal("forget plane open, STATUS says it is not running")
+		}
 	}
 }

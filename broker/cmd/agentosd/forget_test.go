@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -541,5 +542,78 @@ func TestAnUnsavedForgetIsNotDone(t *testing.T) {
 	}
 	if got, ok := again.forgetOwner.Text(context.Background(), "FORGET", true); !ok || !strings.Contains(got, `"pay the gas bill CANARY-…"`) {
 		t.Fatalf("not listed after the restart: %q", got)
+	}
+}
+
+// unknownExec leaves every attempt's outcome unknown, as a crash would.
+type unknownExec struct{}
+
+func (unknownExec) Execute(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+func (unknownExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+// NL-8 (combined 2 on #2801): an intent left open for the deleted change or
+// loops executor (a pending LOOPS ON approval, say) settles as not applied
+// on YES, and an attempt whose outcome was unknown settles when checked,
+// instead of failing with ErrNoExecutor. FORGET's executor stays.
+func TestRetiredExecutorsSettleOpenIntents(t *testing.T) {
+	ctx := context.Background()
+	redact := func(string) string { return daemon.Redacted }
+	cfg := daemon.Config{}
+	if _, err := openForgetPlane(t.TempDir(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	forget := cfg.BrokerExecutors[grants.ForgetExecutor]
+	registerRetired(&cfg)
+	if cfg.BrokerExecutors[grants.ForgetExecutor] != forget || forget == nil {
+		t.Fatal("FORGET's executor replaced")
+	}
+	var retired []string
+	for name, x := range cfg.BrokerExecutors {
+		if _, ok := x.(retiredExecutor); ok {
+			retired = append(retired, name)
+		}
+	}
+	sort.Strings(retired)
+	if strings.Join(retired, ",") != "change,loops" {
+		t.Fatalf("retired executors %q", retired)
+	}
+	for _, name := range retired {
+		t.Run(name, func(t *testing.T) {
+			// A pending approval, then YES.
+			store := &journal.MemStore{}
+			eng, err := journal.Open(store, allowAll{}, cfg.BrokerExecutors, redact)
+			must(t, err)
+			in := journal.Intent{ID: "pending", Origin: "owner", Account: "broker", Action: "set", Executor: name}
+			_, err = eng.Submit(in)
+			must(t, err)
+			_, err = eng.Authorize(ctx, in.ID)
+			must(t, err)
+			st, err := eng.Dispatch(ctx, in.ID)
+			if err != nil || st.State != journal.NotApplied {
+				t.Fatalf("YES: %v %v", st.State, err)
+			}
+			// An attempt left unknown by the old executor.
+			store = &journal.MemStore{}
+			old, err := journal.Open(store, allowAll{}, map[string]journal.Executor{name: unknownExec{}}, redact)
+			must(t, err)
+			in.ID = "unclear"
+			_, err = old.Submit(in)
+			must(t, err)
+			_, err = old.Authorize(ctx, in.ID)
+			must(t, err)
+			if st, _ := old.Dispatch(ctx, in.ID); st.State != journal.OutcomeUnknown {
+				t.Fatalf("old dispatch: %v", st.State)
+			}
+			eng, err = journal.Open(store, allowAll{}, cfg.BrokerExecutors, redact)
+			must(t, err)
+			eng.Reconcile(ctx)
+			if st, err := eng.Get(in.ID); err != nil || st.State != journal.NotApplied {
+				t.Fatalf("checked: %v %v", st.State, err)
+			}
+		})
 	}
 }
