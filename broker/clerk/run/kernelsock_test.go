@@ -307,6 +307,38 @@ func TestAKernelCallCutOffIsLost(t *testing.T) {
 	}
 }
 
+// A call past what the socket reads is never sent: it is ErrTooLarge, not
+// ErrLost, since the server would have read only part of it (#2742 item 9).
+func TestAKernelCallPastTheBoundIsNeverSent(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "big.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var dials atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			c.Close()
+		}
+	}()
+	c := Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}
+	// sized is an argument whose call is n bytes with its newline.
+	b, _ := json.Marshal(kernelCall{"stop", mustRaw("")})
+	sized := func(n int) string { return strings.Repeat("a", n-len(b)-1) }
+	if err := c.call("stop", sized(maxCall+1), nil); !errors.Is(err, ErrTooLarge) || dials.Load() != 0 {
+		t.Fatalf("a call one byte past the bound: %v after %d connections, want %v and none", err, dials.Load(), ErrTooLarge)
+	}
+	if err := c.call("stop", sized(maxCall), nil); errors.Is(err, ErrTooLarge) || dials.Load() != 1 {
+		t.Fatalf("a call at the bound: %v after %d connections, want it sent", err, dials.Load())
+	}
+}
+
 // A provider's own error, which can carry its URL or a key, never leaves the
 // model clerk's process: the planner sees ErrModelCall, while a refusal
 // still crosses with its code (CLK-1, #2717 Security 1).

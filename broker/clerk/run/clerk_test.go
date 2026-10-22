@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,6 +234,42 @@ func TestAReconnectThatFailsChangesNothing(t *testing.T) {
 	}
 	if _, err := OpenSecrets(r.dir, testSealer()); err != nil {
 		t.Fatalf("the Secrets file no longer opens: %v", err)
+	}
+}
+
+// A reconnect whose new grant is renamed into place but whose directory sync
+// fails is unknown, not failed: the grant is on disk, and may or may not
+// survive a crash (#2742 item 7).
+func TestAReconnectWrittenButNotSyncedIsUnknown(t *testing.T) {
+	r := newExitRig(t)
+	grant := []byte(`{"refresh_token":"canary-refresh-unsynced","client_id":"agentos-test"}`)
+	d := r.stage("u", grant)
+	file := filepath.Join(r.dir, secretsName)
+	before, _ := os.ReadFile(file)
+	sync := syncDir
+	t.Cleanup(func() { syncDir = sync })
+	syncDir = func(string) error { return errors.New("synthetic sync failure") }
+	st, _ := r.reconnect("u", r.approve(d), "web", d)
+	syncDir = sync
+	if after, _ := os.ReadFile(file); bytes.Equal(before, after) {
+		t.Fatal("the new grant was not renamed into place")
+	}
+	if st.Phase != kernel.PUnknown {
+		t.Fatalf("a reconnect written but not synced: %s %q", st.Phase, st.Detail)
+	}
+	r.last.mu.Lock()
+	req, v := r.last.req, r.last.view
+	r.last.mu.Unlock()
+	if got := r.host.Probe(req, v).Outcome; got != "unknown" {
+		t.Fatalf("a probe of the unsynced reconnect: %q", got)
+	}
+	// The staged grant is kept, so the same step sent again (a RETRY)
+	// makes the reconnect, and only then is it done.
+	if res := r.host.Do(req, v); res.Outcome != "ok" {
+		t.Fatalf("the reconnect sent again: %+v", res)
+	}
+	if got := r.host.Probe(req, v).Outcome; got != "done" {
+		t.Fatalf("a probe after the reconnect sent again: %q", got)
 	}
 }
 
