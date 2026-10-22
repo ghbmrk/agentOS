@@ -60,6 +60,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - `::TestModelClerkWithoutTheKernelCallsNothing` and `::TestAKernelCallCutOffIsLost`. An unreachable meter socket refuses admission with `log-broken`; a call cut off mid-answer is `ErrLost`, and one never sent `ErrUnreachable`.
 - `::TestAProviderErrorStaysInTheModelClerk`. A provider error carrying a canary key reaches the planner as `ErrModelCall`, without the canary.
 - `::TestAKernelSocketOutlivesAFailedAccept`, `::TestASocketServesABoundedNumberAtOnce` and `::TestNoErrorCrossesAsSuccess`.
+- `kernelsock_test.go::TestAWrappedErrorCrossesAsWhatItWraps` (#2742 item 13): an error wrapping a known sentinel, such as `kernel.ErrRetryRefused` with its code, crosses with its own text and is still that sentinel to `errors.Is`; one wrapping none matches none.
 - Declared scope: `broker/clerk/run/` and this brief.
 
 **Slice 3b acceptance tests (MIG-4-run-p to s; #2698 items 1 to 3, 8, 10 to 13):**
