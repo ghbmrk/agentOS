@@ -73,6 +73,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - `mailhost_test.go::TestAMailboxReadHoldsUpNothingElse`. During a read, the owner's status and a step are answered at once; two overlapping re-reads read the mailbox once.
 - `::TestSetupWaitsForTheReadInFlight` and `::TestRemovalWaitsForTheReadInFlight`. Setup and removal write nothing while a read is in flight, and land after it. After a removal, no record of read mail is left on disk.
 - `::TestAFailedReadKeepsTheLastClerk`. A failed re-read keeps the last listing and clerk and says why in fixed words; a good read clears the line.
+- `::TestAStepsRefusedSignInStopsTheClerk` (#2708 item 2). A step whose own sign-in the server refuses fails as `sign-in-refused`. STATUS then names the refusal, and re-reads stop until setup.
 - `::TestARefusedSignInStopsStepsSigningIn`. While the server refuses the sign-in, a kernel step fails as `sign-in-refused` and a probe answers `unknown`, neither connecting, even with a clerk the account opened before.
 - `::TestARefusedSignInWaitsForTheOwner`. After a refused sign-in, re-reads and listings make no connection to the server until the owner sets the account up again.
 - `::TestTheOwnerReadsWhetherAnAccountIsSetUp` and `::TestMailSetupRunsOnTheClerksOwnSocket`. The account read never carries the password; reading notices uses none up, and `told` drops only those up to its point.

@@ -60,7 +60,7 @@ const DNoAccount = "no-account"
 // DSignInRefused is a step's detail while the server refuses the sign-in:
 // nothing is sent until the owner sets the account up again, so no plan can
 // drive failed sign-ins toward a provider's lockout (#2737 combined 4). It
-// is the mail clerk's own word for a step the server refused that way.
+// is inbox's own word for a step the server refused that way.
 const DSignInRefused = "sign-in-refused"
 
 // ErrSignInRefused is the planner's answer while the server refuses the
@@ -163,7 +163,19 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case m == nil:
 		return kernel.Result{Outcome: "failed", Detail: DNoAccount}
 	}
-	return m.Do(r, v)
+	res := m.Do(r, v)
+	if res.Outcome == "failed" && res.Detail == DSignInRefused {
+		// The server refused the step's own sign-in, before any effect: no
+		// step, probe or read signs in again until the owner sets the account
+		// up again, and STATUS says so (#2708 item 2).
+		h.mu.Lock()
+		if h.cur == m {
+			why, next := trouble(imapsmtp.ErrLoginRefused)
+			h.why, h.refused = "I stopped working in your mailbox: "+why+". "+next, true
+		}
+		h.mu.Unlock()
+	}
+	return res
 }
 
 // Probe asks the open clerk; with none, or while the server refuses the

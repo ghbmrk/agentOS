@@ -333,6 +333,54 @@ func TestARefusedSignInStopsStepsSigningIn(t *testing.T) {
 	}
 }
 
+// A step whose own sign-in the server refuses fails before any effect, and
+// from then on nothing signs in until the owner sets the account up again:
+// the step's refusal stops the clerk as a refused read does (#2708 item 2).
+func TestAStepsRefusedSignInStopsTheClerk(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.Deliver("INBOX", "From: news@shop.test\nTo: "+imaptest.User+"\nSubject: Sale\nMessage-ID: <m1@shop.test>\n\nsynthetic body\n")
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}
+	if err := SetMail(dir, sec, s, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+	planner := MailPlanner{serveMail(t, h, MailPlannerSide)}
+	ls, err := planner.Listing()
+	if err != nil || len(ls) != 1 {
+		t.Fatalf("the listing: %v, %v", ls, err)
+	}
+	sock := filepath.Join(shortDir(t), "mail.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go ServeClerk(ln, h, anchors)
+	b := newBoxFor(t, sock, inbox.Name, key.Organize)
+	// The password changes at the server's side, as an owner's reset would:
+	// the open clerk's next sign-in is refused.
+	if err := SetMail(dir, sec, s, "not-the-password-1"); err != nil {
+		t.Fatal(err)
+	}
+	id := b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/bulk"}})
+	b.tick(b.now)
+	if st := b.step(id); st.Detail != DSignInRefused {
+		t.Fatalf("a step whose sign-in was refused: %s %q", st.Phase, st.Detail)
+	}
+	if st, _ := owner.Status(); !has(st.Lines, "refused my sign-in") {
+		t.Fatalf("status after a step's refused sign-in: %v", st.Lines)
+	}
+	if _, err := planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
+		t.Fatalf("a re-read after a step's refused sign-in: %v", err)
+	}
+}
+
 // The owner's setup page reads whether an account is set up, and its
 // settings, never the password; the read uses up no notice (#2732 item 3).
 func TestTheOwnerReadsWhetherAnAccountIsSetUp(t *testing.T) {
