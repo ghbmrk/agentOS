@@ -105,6 +105,32 @@ func TestAnUnsentStepCancels(t *testing.T) {
 	}
 }
 
+// The brief's failure path, end to end: a key good for two uses runs one step
+// whose answer is lost and one that is never sent. Cancelling the unsent one
+// gives back only its own use, so the owner's re-plan of it is admitted and
+// sent; the lost one stays charged (KRN-8).
+func TestACancelledUnsentStepFreesItsUse(t *testing.T) {
+	r := newRig(t)
+	k := r.derive(key.LimitUses(2))
+	r.plan("p0", k, st(key.Trash, "m0"))
+	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
+	r.plan("p1", k, st(key.Trash, "m1"))
+	must(t, r.k.Answer(2, r.calls(2, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+	must(t, r.k.Cancel(3, "p1"))
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 1 {
+		t.Fatalf("%d uses charged after the cancel, want the lost step's one", n)
+	}
+	r.plan("p2", k, st(key.Trash, "m1"))
+	c := r.calls(4, 1)[0]
+	if c.Kind != kernel.ActDispatch || c.Req.Plan.ID != "p2" {
+		t.Fatalf("the re-plan was not sent: %+v", c)
+	}
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 2 {
+		t.Fatalf("%d uses charged after the re-plan", n)
+	}
+	r.replays()
+}
+
 // A probe that could not reach its clerk made no check, so a clerk that is
 // down never parks a step (OWN-17, KRN-8).
 func TestAnUnreachedProbeCountsNoCheck(t *testing.T) {

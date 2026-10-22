@@ -29,6 +29,8 @@ Out of scope:
 ## Acceptance tests
 
 - KRN-8, CH-11: `broker/kernel/kernel_test.go::TestRetryRunsTheKeyChecksAgain` (a RETRY under a STOP or a revoke is refused and the step stays parked; one narrowed after the RETRY returns the step to parked, charged; a retried step a probe finds not done is refunded at cancel).
+- KRN-8: `broker/kernel/calls_test.go::TestACancelledUnsentStepFreesItsUse` (the failure path end to end: a key good for two uses, a lost step and an unsent one; the cancel frees only the unsent one's use, and the re-plan is sent).
+- KRN-8, CH-11: `broker/kernel/kernel_test.go::TestRetryUnderAPauseRunsOnResume`.
 - KRN-8: `broker/kernel/calls_test.go::TestAnUnsentStepCancels`. Its cases are a cancel of an unsent step, an unsent answer after a cancel, a STOP before the send, an unknown step that is cancelled (keeps its charge), and that step later probed not done.
 
 ## Estimate

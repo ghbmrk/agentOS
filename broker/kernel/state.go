@@ -378,9 +378,6 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 		return
 	}
 	st.Phase = PCancelled
-	if st.DispatchSeq == 0 {
-		return
-	}
 	for _, id := range p.Scopes {
 		s.uses[id] = slices.DeleteFunc(s.uses[id], func(u usedRec) bool { return u.Seq == st.DispatchSeq })
 	}

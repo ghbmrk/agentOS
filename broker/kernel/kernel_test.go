@@ -916,6 +916,27 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	r.replays()
 }
 
+// A pause only delays a RETRY: it is accepted, waits while the key is
+// paused, and runs once the key resumes (KRN-8, CH-11).
+func TestRetryUnderAPauseRunsOnResume(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.ck)
+	must(t, r.k.Pause(at+1, r.ck.Tip()))
+	must(t, r.k.Retry(at+2, "p1", 0))
+	must(t, r.tick(at+3))
+	if r.status("p1") != kernel.SActive || len(r.mail.Effects()) != 0 {
+		t.Fatalf("under the pause: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+	must(t, r.k.Unpause(at+4, r.ck.Tip()))
+	for now := at + 5; now <= at+5+kernel.MaxUnsentWait && r.status("p1") != kernel.SDone; now += kernel.UnsentWait {
+		must(t, r.tick(now))
+	}
+	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
+		t.Fatalf("after the resume: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+	r.replays()
+}
+
 // Only a parked step of a live plan can be retried; anything else is refused
 // and leaves no entry.
 func TestRetryRefusesAStepThatIsNotParked(t *testing.T) {
