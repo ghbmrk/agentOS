@@ -271,15 +271,17 @@ func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig)
 
 // openMail is OpenMail, and the mailbox's Mark from just before the read,
 // so mail arriving during the read moves the next one: mark if given, or
-// one it takes first (nil on any error). The Mark comes back also when the
-// read fails.
+// one it takes first (nil on any error; a refused sign-in fails the read).
+// The Mark comes back also when the read fails.
 func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig, mark inbox.Mark) (*Mail, inbox.Mark, error) {
 	box, s, err := mailBox(dir, sec, c)
 	if err != nil {
 		return nil, nil, err
 	}
 	if mark == nil {
-		mark, _ = box.Mark(ctx)
+		if mark, err = box.Mark(ctx); stops(err) {
+			return nil, nil, err // the sign-in's answer stands: no second sign-in
+		}
 	}
 	ms, err := box.Read(ctx)
 	if err != nil {

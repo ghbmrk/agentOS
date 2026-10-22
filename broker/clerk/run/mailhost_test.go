@@ -337,6 +337,9 @@ func TestARefusedSignInWaitsForTheOwner(t *testing.T) {
 		t.Fatalf("status after a refused sign-in: %v", st.Lines)
 	}
 	dials := r.dials.Load()
+	if dials != 1 {
+		t.Fatalf("the refused first read signed in %d times, want once", dials) // the Mark's refusal ends it (#2742 item 1)
+	}
 	for range 3 {
 		if _, err := r.planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
 			t.Fatalf("a re-read after a refused sign-in: %v", err)
