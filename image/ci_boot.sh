@@ -293,9 +293,10 @@ EOF
 entries() { mdir -b -i "$1@@$(esp "$1")" ::/loader/entries | sed 's|.*/||' | grep '\.conf$' | LC_ALL=C sort; }
 forced_fail() {
 	cat <<'EOS'
+# tail on the efivarfs file itself printed nothing in CI (#2800's first run); fallback's cat does read it.
 v=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 [ -e $v ] || exit 0
-echo "agentos-forced: health FAIL on counted entry $(tail -c +5 $v | tr -d '\000' | sed 's/.*\\//')"
+echo "agentos-forced: health FAIL on counted entry $(cat $v | tail -c +5 | tr -d '\000' | sed 's/.*\\//')"
 exit 1
 EOS
 }
