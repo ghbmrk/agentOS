@@ -1033,6 +1033,41 @@ class HealthTest(unittest.TestCase):
         r = self.run_health()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def cat_vanishes(self, dev, gone=True):
+        # A cat whose read of DEV's forwarding switch fails as if the device left between the
+        # health check's glob and its read; with GONE the file is removed first (#2803).
+        rm = 'rm -f "$1"; ' if gone else ''
+        stub(self.bin, "cat", 'case "$1" in */conf/%s/*forwarding) %sexit 1 ;; esac; exec /bin/cat "$@"'
+             % (dev, rm))
+
+    def test_device_that_vanishes_mid_check_passes(self):
+        # REQ: UPD-1. #2803: hwsim moved wlan1 into its own namespace between the glob and the read.
+        for v in ("ipv4", "ipv6"):
+            write(self.root, "proc/sys/net/%s/conf/wlan1/forwarding" % v, "0\n")
+        write(self.root, "proc/sys/net/ipv6/conf/wlan1/force_forwarding", "0\n")
+        self.cat_vanishes("wlan1")
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("forward=off", r.stdout)
+
+    def test_device_present_but_unreadable_fails(self):
+        # Only a switch that is gone is skipped: one still present that cannot be read fails.
+        self.cat_vanishes("eth0", gone=False)
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("forwarding is on (/proc/sys/net/ipv4/conf/eth0/forwarding)", r.stdout)
+
+    def test_global_switches_never_skipped(self):
+        # "all", "default" and ip_forward never vanish: a failed read of one fails even if it is gone.
+        for dev in ("all", "default"):
+            with self.subTest(dev):
+                self.tearDown()
+                self.setUp()
+                self.cat_vanishes(dev)
+                r = self.run_health()
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("agentos-health: FAIL", r.stdout)
+
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
             b"\x06\x00\x00\x00\x00")
@@ -1077,6 +1112,7 @@ class HealthTest(unittest.TestCase):
             "ipv6 eth0 forced forwarding": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "1\n"),
             "ipv4 device switches unreadable": lambda: shutil.rmtree(self.root / "proc/sys/net/ipv4/conf"),
             "ipv6 default unreadable": lambda: (self.root / "proc/sys/net/ipv6/conf/default/forwarding").unlink(),
+            "ipv4 all unreadable": lambda: (self.root / "proc/sys/net/ipv4/conf/all/forwarding").unlink(),
         }
         for name, breakit in cases.items():
             with self.subTest(name):

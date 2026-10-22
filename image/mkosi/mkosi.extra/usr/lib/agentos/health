@@ -49,17 +49,19 @@ last=$(nft list chain inet agentos_inbound input 2>/dev/null | grep -v '^[[:spac
 [ "$(cat "$R/proc/sys/kernel/core_pattern" 2>/dev/null)" = "|/usr/bin/false" ] || fail "core dumps are not discarded"
 # The box routes nothing (#1478): the inbound drop has no forward hook, so forwarding must be off.
 # IPv4 forwards by input device, so every device's switch counts, and "default" (what a new device
-# starts with); an unreadable or missing switch fails. Kernels from 6.17 also force IPv6 forwarding
-# per device.
-for f in "$R/proc/sys/net/ipv4/ip_forward" "$R"/proc/sys/net/ipv4/conf/*/forwarding \
-	"$R"/proc/sys/net/ipv6/conf/*/forwarding; do
-	[ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
+# starts with). Kernels from 6.17 also force IPv6 forwarding per device. A device can vanish
+# between the glob and the read (a radio moved to another namespace, a USB NIC unplugged; #2803):
+# a switch that is gone forwards nothing, so it is skipped only when it no longer exists; a switch
+# still present that does not read 0 fails.
+for f in "$R"/proc/sys/net/ipv4/conf/*/forwarding "$R"/proc/sys/net/ipv6/conf/*/forwarding \
+	"$R"/proc/sys/net/ipv6/conf/*/force_forwarding; do
+	[ "$(cat "$f" 2>/dev/null)" = 0 ] || [ ! -e "$f" ] || fail "forwarding is on (${f#"$R"})"
 done
-for f in "$R"/proc/sys/net/ipv6/conf/*/force_forwarding; do
-	[ ! -e "$f" ] || [ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
-done
-for f in "$R/proc/sys/net/ipv4/conf/default/forwarding" "$R/proc/sys/net/ipv6/conf/all/forwarding" \
+# The global switch, "all" and "default" never vanish: missing or unreadable fails.
+for f in "$R/proc/sys/net/ipv4/ip_forward" "$R/proc/sys/net/ipv4/conf/all/forwarding" \
+	"$R/proc/sys/net/ipv4/conf/default/forwarding" "$R/proc/sys/net/ipv6/conf/all/forwarding" \
 	"$R/proc/sys/net/ipv6/conf/default/forwarding"; do
 	[ -e "$f" ] || fail "forwarding state unreadable (${f#"$R"})"
+	[ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
 done
 echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop swap=off dumps=off forward=off"
