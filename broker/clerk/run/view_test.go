@@ -238,7 +238,7 @@ func TestAFailedWriteIsUnknown(t *testing.T) {
 	if res := c.do(r, snapshot{}); res.Outcome != "unknown" || res.Detail != DLost {
 		t.Fatalf("a call cut off mid-write: %+v, want unknown %s", res, DLost)
 	}
-	if got := c.probe(r, snapshot{}); got != "unknown" {
+	if got := c.probe(r, snapshot{}).Outcome; got != "unknown" {
 		t.Fatalf("a probe cut off mid-write: %q, want unknown", got)
 	}
 }

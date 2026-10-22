@@ -168,10 +168,10 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 // Probe asks the open clerk; with none, or while the server refuses the
 // sign-in, the step's effect cannot be checked.
-func (h *MailHost) Probe(r kernel.Request, v kernel.View) string {
+func (h *MailHost) Probe(r kernel.Request, v kernel.View) kernel.Result {
 	m, refused := h.clerk()
 	if m == nil || refused {
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
 	return m.Probe(r, v)
 }

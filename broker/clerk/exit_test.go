@@ -224,7 +224,7 @@ func TestExitSendsDeclaredRequestWithSecretAndIdempotencyKey(t *testing.T) {
 func TestExitIsIdempotentAndProbes(t *testing.T) {
 	f := setupExit(t, nil)
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
-	if f.x.Probe(q, f.view()) != "unknown" {
+	if f.x.Probe(q, f.view()).Outcome != "unknown" {
 		t.Fatal("a clerk with no memory of a step must not claim it was never sent (KRN-8)")
 	}
 	f.x.Do(q, f.view())
@@ -232,7 +232,7 @@ func TestExitIsIdempotentAndProbes(t *testing.T) {
 	if f.hits.Load() != 1 {
 		t.Fatalf("same idempotency key reached the remote %d times", f.hits.Load())
 	}
-	if f.x.Probe(q, f.view()) != "done" {
+	if f.x.Probe(q, f.view()).Outcome != "done" {
 		t.Fatal("completed step must probe done")
 	}
 }
@@ -243,7 +243,7 @@ func TestExitUnknownOnServerErrorThenProbeUnknown(t *testing.T) {
 	if r := f.x.Do(q, f.view()); r.Outcome != "unknown" {
 		t.Fatalf("a 5xx may have acted: %+v", r)
 	}
-	if f.x.Probe(q, f.view()) != "unknown" {
+	if f.x.Probe(q, f.view()).Outcome != "unknown" {
 		t.Fatal("an attempted step with no answer must probe unknown")
 	}
 }
@@ -724,11 +724,11 @@ func TestExitBusyWaitsForRetryAfter(t *testing.T) {
 	})
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
 	f.x.Do(q, f.view())
-	if f.x.Probe(q, f.view()) != "unknown" {
+	if f.x.Probe(q, f.view()).Outcome != "unknown" {
 		t.Fatal("a 429 must not be sent again before Retry-After")
 	}
 	f.clock.Add(120_000)
-	if f.x.Probe(q, f.view()) != "notdone" {
+	if f.x.Probe(q, f.view()).Outcome != "notdone" {
 		t.Fatal("a 429 is safe to send again after Retry-After")
 	}
 }
@@ -740,11 +740,11 @@ func TestExitBusyWaitIsCapped(t *testing.T) {
 	})
 	q := f.req(key.Post, "i1", map[string]string{"to": "bob", "msg": "hi"})
 	f.x.Do(q, f.view())
-	if f.x.Probe(q, f.view()) != "unknown" {
+	if f.x.Probe(q, f.view()).Outcome != "unknown" {
 		t.Fatal("a huge Retry-After must not overflow into an immediate resend")
 	}
 	f.clock.Add(24 * 60 * 60 * 1000)
-	if f.x.Probe(q, f.view()) != "notdone" {
+	if f.x.Probe(q, f.view()).Outcome != "notdone" {
 		t.Fatal("a Retry-After wait is capped at one day")
 	}
 }
@@ -801,7 +801,7 @@ func TestExitDoesNotHoldItsLockAcrossARequest(t *testing.T) {
 	go func() {
 		q := f.req(key.Post, "other", map[string]string{"to": "bob", "msg": "hi"})
 		f.x.Do(q, f.view())
-		done <- f.x.Probe(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.view())
+		done <- f.x.Probe(f.req(key.Post, "slow", map[string]string{"to": "slow", "msg": "hi"}), f.view()).Outcome
 	}()
 	select {
 	case p := <-done:

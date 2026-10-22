@@ -273,7 +273,7 @@ func Live(v View, ver *key.Verified, now int64) *key.Refusal {
 // without acting.
 type Clerk interface {
 	Do(r Request, v View) Result
-	Probe(r Request, v View) string
+	Probe(r Request, v View) Result // Outcome done, notdone or unknown; Covered on a done covered submit
 }
 
 // Kernel appends to the log, folds the entry into the state, and runs the
@@ -753,7 +753,11 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
 	if c.Kind == ActProbe {
-		_, err := k.emit(now, TStepProbed, stepProbed{stepRef{c.Req.Plan.ID, c.Req.Index}, res.Outcome})
+		// Only a done step is listed: no other finding's line is logged.
+		if res.Outcome != "done" || !shown(res.Covered) {
+			res.Covered = ""
+		}
+		_, err := k.emit(now, TStepProbed, stepProbed{stepRef{c.Req.Plan.ID, c.Req.Index}, res.Outcome, res.Covered})
 		return err
 	}
 	return k.answer(now, c.Req.Plan.ID, c.Req.Index, res)
@@ -822,9 +826,9 @@ func (k *Kernel) Tick(now int64) error {
 				continue
 			}
 			cl := k.clerks[c.Clerk]
-			res := Result{}
+			var res Result
 			if c.Kind == ActProbe {
-				res.Outcome = cl.Probe(c.Req, k.s)
+				res = cl.Probe(c.Req, k.s)
 			} else {
 				res = cl.Do(c.Req, k.s)
 			}

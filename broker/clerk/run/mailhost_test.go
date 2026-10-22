@@ -325,7 +325,7 @@ func TestARefusedSignInStopsStepsSigningIn(t *testing.T) {
 	if res := r.h.Do(req, nil); res.Outcome != "failed" || res.Detail != DSignInRefused {
 		t.Errorf("a step while the sign-in is refused: %+v", res)
 	}
-	if got := r.h.Probe(req, nil); got != "unknown" {
+	if got := r.h.Probe(req, nil).Outcome; got != "unknown" {
 		t.Errorf("a probe while the sign-in is refused: %q", got)
 	}
 	if n := r.dials.Load() - dials; n != 0 {
