@@ -105,28 +105,54 @@ func TestAnUnsentStepCancels(t *testing.T) {
 	}
 }
 
-// The brief's failure path, end to end: a key good for two uses runs one step
-// whose answer is lost and one that is never sent. Cancelling the unsent one
-// gives back only its own use, so the owner's re-plan of it is admitted and
-// sent; the lost one stays charged (KRN-8).
+// The brief's failure path, end to end: a key good for three uses runs a step
+// whose answer is lost, one that is never sent, and a later one whose answer
+// is lost too. Cancelling the unsent one gives back only its own use, so the
+// owner's re-plan of it is admitted and sent; the lost ones, before and after
+// it, stay charged (KRN-8, #2744).
 func TestACancelledUnsentStepFreesItsUse(t *testing.T) {
 	r := newRig(t)
-	k := r.derive(key.LimitUses(2))
+	k := r.derive(key.LimitUses(3))
 	r.plan("p0", k, st(key.Trash, "m0"))
 	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
 	r.plan("p1", k, st(key.Trash, "m1"))
-	must(t, r.k.Answer(2, r.calls(2, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+	unsent := r.calls(2, 1)[0]
+	// A later plan's charge on the same key stays when p1 is cancelled.
+	r.plan("p3", k, st(key.Trash, "m3"))
+	must(t, r.k.Answer(2, r.calls(2, 1)[0], kernel.Result{Outcome: "unknown"}))
+	must(t, r.k.Answer(2, unsent, kernel.Result{Outcome: kernel.OUnsent}))
 	must(t, r.k.Cancel(3, "p1"))
-	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 1 {
-		t.Fatalf("%d uses charged after the cancel, want the lost step's one", n)
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 2 {
+		t.Fatalf("%d uses charged after the cancel, want the two lost steps'", n)
 	}
 	r.plan("p2", k, st(key.Trash, "m1"))
 	c := r.calls(4, 1)[0]
 	if c.Kind != kernel.ActDispatch || c.Req.Plan.ID != "p2" {
 		t.Fatalf("the re-plan was not sent: %+v", c)
 	}
-	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 2 {
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 3 {
 		t.Fatalf("%d uses charged after the re-plan", n)
+	}
+	r.replays()
+}
+
+// A step for a clerk the kernel was not booted with is never sent: its plan
+// is cancelled before any dispatch is logged, so nothing is charged (#2744).
+func TestAStepForAnUnknownClerkIsNotCharged(t *testing.T) {
+	r := newRig(t)
+	l, err := kernel.Open(cfg(r))
+	must(t, err)
+	r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{}, 0)
+	must(t, err)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	r.calls(1, 0)
+	if r.status("p1") != kernel.SCancelled || r.phase("p1").Phase != kernel.PCancelled || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 0 {
+		t.Fatalf("status %s, phase %s, %d uses", r.status("p1"), r.phase("p1").Phase, len(r.k.State().Ledger().Uses(r.ck.Tip())))
+	}
+	for _, e := range r.k.Log().Entries() {
+		if e.Type == kernel.TStepDispatch {
+			t.Fatal("a dispatch was logged for a step no clerk can run")
+		}
 	}
 	r.replays()
 }
