@@ -104,7 +104,7 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 		strings.Join(to.OneOf, ",") != "ap@client.test" || rate(l) != 3 || len(l.Caps) != 1 {
 		t.Fatalf("key %+v", l)
 	}
-	if s[0].Short != "S1" || s[0].Approved != 10 || !slices.Equal(s[0].Detail, Describe("books", s[0].Caveats)) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
+	if s[0].Short != "S1" || s[0].Approved != 10 || !slices.Equal(s[0].Detail, Describe("books", false, s[0].Caveats)) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
 		!strings.Contains(s[0].Text, "10 times in a row since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
 		t.Fatalf("text %q", s[0].Text)
 	}
@@ -114,8 +114,8 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 }
 
 // KEY-5: a NO, an UNDO, or an edit resets the run; an expiry does not;
-// approvals of different recipients leave the recipients unbounded by
-// value; a verb's amount argument is capped at the largest approved.
+// approvals of different recipients bound the key to those seen
+// (security on #2796); a verb's amount argument is capped at the largest approved.
 func TestRunResetsAndShapesRule(t *testing.T) {
 	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 8; i++ {
@@ -140,8 +140,8 @@ func TestRunResetsAndShapesRule(t *testing.T) {
 		observe(t, o, d)
 	}
 	s := suggestions(t, o)
-	if len(s) != 1 || len(limits(t, s[0]).Args) != 0 || strings.Contains(s[0].Text, "amounts up to") {
-		t.Fatalf("a send has no amount argument to cap: %+v", s)
+	if len(s) != 1 || len(limits(t, s[0]).Args) != 1 || len(limits(t, s[0]).Args["to"].OneOf) != 10 || strings.Contains(s[0].Text, "amounts up to") {
+		t.Fatalf("the key bounds the recipients to the ten seen, and a send has no amount argument to cap: %+v", s)
 	}
 	o = newOpt(t, &memStore{}, nil)
 	for i := 0; i < 10; i++ {
@@ -311,6 +311,18 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	}
 	if !strings.Contains(s[0].Text, "20 of my replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
+	}
+	// KEY-2 (combined review on #2796): the card says each reply is
+	// texted first with UNDO and goes only to the thread's participants.
+	d := s[0].Detail
+	if !slices.Contains(d, Term{"Runs", "send as replies in existing threads, without asking; each is texted to you first and sends after the undo window unless you reply UNDO"}) ||
+		!slices.Contains(d, Term{"Recipients", "the thread's own participants only"}) || slices.Contains(d, Term{"Argument to", "any"}) {
+		t.Fatalf("thread card %+v", d)
+	}
+	for _, x := range d {
+		if strings.Contains(x.Value, "notifying") {
+			t.Fatalf("thread card says %q", x.Value)
+		}
 	}
 }
 
@@ -556,8 +568,8 @@ func TestDescribeWordsEveryCaveat(t *testing.T) {
 		key.LimitSpendTask(500), key.LimitSpendDay(900), key.LimitRate(50), key.LimitRateRecipient(25),
 		key.LimitExpires(t0.UnixMilli()), key.LimitUses(3), key.LimitHold(600000, 900000), key.LimitTask("T1"),
 	}
-	d := Describe("books", cs)
-	if len(d) != len(cs)+1 || d[0] != (Term{"Clerk", "books"}) {
+	d := Describe("books", false, cs)
+	if len(d) != len(cs)+2 || d[0] != (Term{"Clerk", "books"}) {
 		t.Fatalf("%+v", d)
 	}
 	want := []Term{
@@ -566,6 +578,7 @@ func TestDescribeWordsEveryCaveat(t *testing.T) {
 		{"Spend per task", "up to 5.00"}, {"Spend per day", "up to 9.00"}, {"Per day", "at most 50 runs"},
 		{"Per recipient", "at most 25 runs a day"}, {"Expires", "Oct 5 2026 09:00 UTC"}, {"Uses", "at most 3"},
 		{"Hold", "10m0s before it runs, 15m0s when new"}, {"Task", "only T1"},
+		{"Argument item", "any"}, // buy's one argument no caveat bounds
 	}
 	if !slices.Equal(d[1:], want) {
 		t.Fatalf("got  %+v\nwant %+v", d[1:], want)
@@ -583,11 +596,51 @@ func TestDescribeWordsEveryCaveat(t *testing.T) {
 			c[i].N += 60000 // a minute: the expiry shows minutes
 			c[i].Set = append(slices.Clone(c[i].Set), "zz")
 		}
-		if slices.Equal(Describe("books", c), d) {
+		if slices.Equal(Describe("books", false, c), d) {
 			t.Errorf("caveat %d (%s) changed but the wording did not", i, cs[i].Kind)
 		}
 	}
-	if Describe("books", []key.Caveat{{Kind: "novel"}})[1].Label != "Unknown limit" {
+	if Describe("books", false, []key.Caveat{{Kind: "novel"}})[1].Label != "Unknown limit" {
 		t.Fatal("an unknown kind must still show")
+	}
+}
+
+// KEY-5, KEY-2 (security on #2796): a proposal for every eligible verb
+// bounds its object argument to the objects the run named, so a planner
+// cannot pick another; a run that named none earns nothing. A template
+// filled per record (msg) still earns, and the card shows each unbounded
+// argument as "any".
+func TestEveryProposalBoundsItsObject(t *testing.T) {
+	for _, v := range []key.Verb{key.Unsubscribe, key.Send, key.Post, key.Actuate, key.Buy, key.Share, key.DeleteRemote,
+		key.ChangeAccount, key.ActuatePhysical} {
+		o := newOpt(t, &memStore{}, nil)
+		for i := 0; i < 10; i++ {
+			d := invoice(i)
+			d.Verb, d.Recipients = v, []string{"r" + strconv.Itoa(i%3)}
+			d.Args = map[string]string{"msg": "Invoice #" + strconv.Itoa(i) + " is attached."}
+			observe(t, o, d)
+		}
+		s := suggestions(t, o)
+		if len(s) != 1 {
+			t.Fatalf("%s: %+v", v, s)
+		}
+		obj := limits(t, s[0]).Args[key.RecipientArg(v)]
+		if strings.Join(obj.OneOf, ",") != "r0,r1,r2" {
+			t.Errorf("%s: object bound %+v", v, obj)
+		}
+		for _, n := range key.ArgNames(v) {
+			if _, ok := limits(t, s[0]).Args[n]; !ok && !slices.Contains(s[0].Detail, Term{"Argument " + n, "any"}) {
+				t.Errorf("%s: unbounded %s is not on the card: %+v", v, n, s[0].Detail)
+			}
+		}
+		o = newOpt(t, &memStore{}, nil)
+		for i := 0; i < 10; i++ {
+			d := invoice(i)
+			d.Verb, d.Recipients = v, nil
+			observe(t, o, d)
+		}
+		if s := suggestions(t, o); len(s) != 0 {
+			t.Errorf("%s: a run naming no object earned %+v", v, s)
+		}
 	}
 }

@@ -17,7 +17,7 @@ import (
 // its terms are the key's fixed wording, one per caveat (attention.Describe),
 // so the card is rendered from the caveats the passkey tap would sign.
 func keyItem(ref, clerk string, cs []key.Caveat) owner.Item {
-	ds := attention.Describe(clerk, cs)
+	ds := attention.Describe(clerk, false, cs)
 	ts := make([]owner.Term, len(ds))
 	for i, d := range ds {
 		ts[i] = owner.Term{Label: d.Label, Value: d.Value}
@@ -86,6 +86,7 @@ func TestSR3_3ThePageCardShowsTheWholeKey(t *testing.T) {
 		"Per day:</b> at most 50 runs",
 		"Per recipient:</b> at most 25 runs a day",
 		"Hold:</b> 10m0s before it runs, 15m0s when new",
+		"Argument msg:</b> any",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("card lacks %q:\n%s", want, c)
@@ -166,7 +167,7 @@ func TestSR3_3TheCardCrossesTheSocketWhole(t *testing.T) {
 	if len(held.Items) == 1 {
 		terms, _ = held.Items[0].Terms.List()
 	}
-	if len(terms) != len(invoiceKey())+1 {
+	if len(terms) != len(invoiceKey())+2 { // the clerk, then each caveat, then send's unbounded msg
 		t.Fatalf("held: %+v", held)
 	}
 	if got := a.form(rid).Get("sum"); got != held.Sum {

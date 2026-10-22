@@ -59,9 +59,11 @@ type Decision struct {
 	// covers (KEY-5).
 	Content string
 	// Args are the step's other arguments, as approved: every argument
-	// but its object (Recipients), its amount, and for a thread reply its
-	// message.
-	Args       map[string]string
+	// but its object (Recipients), its amount, and its message (msg),
+	// which the content caveat bounds.
+	Args map[string]string
+	// Recipients is the step's object argument's value, as the clerk read
+	// it (key.RecipientArg names it).
 	Recipients []string
 	// Amount is the verified amount in minor units (0 when no money moves).
 	Amount int64
@@ -109,15 +111,15 @@ type class struct {
 	Reply bool     `json:"reply,omitempty"`
 	// Run is the current run of unedited, verified approvals; the fields
 	// after it describe that run.
-	Run        int               `json:"run"`
-	Since      time.Time         `json:"since"`
-	Content    string            `json:"content,omitempty"`
-	Fixed      map[string]string `json:"fixed,omitempty"`
-	Templated  bool              `json:"templated"`
-	Recipients []string          `json:"recipients,omitempty"`
-	SameRcpt   bool              `json:"same_rcpt"`
-	MaxAmount  int64             `json:"max_amount,omitempty"`
-	Days       map[string]int    `json:"days,omitempty"`
+	Run       int               `json:"run"`
+	Since     time.Time         `json:"since"`
+	Content   string            `json:"content,omitempty"`
+	Fixed     map[string]string `json:"fixed,omitempty"`
+	Templated bool              `json:"templated"`
+	// Recipients is every object the run's approvals named.
+	Recipients []string       `json:"recipients,omitempty"`
+	MaxAmount  int64          `json:"max_amount,omitempty"`
+	Days       map[string]int `json:"days,omitempty"`
 	// Recent holds whether each of the last EditWindow answered replies
 	// was edited (reply classes only).
 	Recent []bool `json:"recent,omitempty"`
@@ -238,17 +240,18 @@ func (o *Optimizer) Observe(d Decision) error {
 		return o.save() // an unverified or edited approval never counts
 	}
 	fixed := maps.Clone(d.Args)
+	delete(fixed, "msg") // a template filled per record varies; the content caveat bounds it
 	ok := d.Content != ""
 	day := d.At.UTC().Format("2006-01-02")
 	if c.Run == 0 {
 		c.Since, c.Content, c.Fixed, c.Templated = d.At, d.Content, fixed, ok
-		c.Recipients, c.SameRcpt = sorted(d.Recipients), true
+		c.Recipients = nil
 		c.Days = map[string]int{}
 	} else {
 		c.Templated = c.Templated && ok && c.Content == d.Content && maps.Equal(c.Fixed, fixed)
-		c.SameRcpt = c.SameRcpt && strings.Join(c.Recipients, "\n") == strings.Join(sorted(d.Recipients), "\n")
 	}
 	c.Run++
+	c.Recipients = union(c.Recipients, d.Recipients)
 	c.Days[day]++
 	c.MaxAmount = max(c.MaxAmount, d.Amount)
 	if c.Snooze > 0 {
@@ -259,7 +262,9 @@ func (o *Optimizer) Observe(d Decision) error {
 
 // earnedLocked reports whether a class may be suggested now.
 func (o *Optimizer) earnedLocked(c *class) bool {
-	if c.Run < o.threshold(c) || c.Snooze > 0 || !c.Templated {
+	// A templated key always bounds its object: a run that named none
+	// leaves nothing to bound it to, so it earns nothing (KEY-2).
+	if c.Run < o.threshold(c) || c.Snooze > 0 || !c.Templated || (!c.Reply && len(c.Recipients) == 0) {
 		return false
 	}
 	if c.Reply && o.cfg.ReplyEditPercent > 0 { // strict: an edit already reset the run
@@ -279,7 +284,7 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 // reset ends the run; the edit-rate window (Recent) is kept, since it
 // covers the last answered replies whatever happened between (KEY-5).
 func (c *class) reset() {
-	c.Run, c.Content, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, "", nil, false, nil, false, 0, nil
+	c.Run, c.Content, c.Fixed, c.Templated, c.Recipients, c.MaxAmount, c.Days = 0, "", nil, false, nil, 0, nil
 	c.Short, c.Offered, c.Offers = "", time.Time{}, 0
 }
 
@@ -288,6 +293,12 @@ func (o *Optimizer) threshold(c *class) int {
 		return o.cfg.ReplyThreshold
 	}
 	return o.cfg.Threshold
+}
+
+// union is a and b as one sorted set.
+func union(a, b []string) []string {
+	out := sorted(append(append([]string(nil), a...), b...))
+	return slices.Compact(out)
 }
 
 func sorted(ss []string) []string {
@@ -367,7 +378,7 @@ func caveats(c *class, perDay int64) []key.Caveat {
 	for _, n := range names {
 		cs = append(cs, key.LimitArg(key.ArgBound{Name: n, OneOf: []string{c.Fixed[n]}}))
 	}
-	if c.SameRcpt && len(c.Recipients) > 0 && !c.Reply {
+	if !c.Reply {
 		cs = append(cs, key.LimitArg(key.ArgBound{Name: key.RecipientArg(c.Verb), OneOf: c.Recipients}))
 	}
 	if amountBound(c) {
@@ -411,7 +422,7 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 			Short: c.Short, Clerk: c.Clerk, Caveats: cs, Approved: c.Run, Since: c.Since,
 			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open my Wi-Fi page. Reply NO %s to stop suggesting it.",
 				summary(c, perDay), c.Short),
-			Detail: Describe(c.Clerk, cs),
+			Detail: Describe(c.Clerk, c.Reply, cs),
 		})
 	}
 	if dirty {
@@ -429,13 +440,47 @@ type Term struct {
 }
 
 // Describe is the fixed wording of a key on clerk with caveats cs, one
-// term per caveat, in their order. It renders every closed caveat kind
-// (KEY-2), so no caveat the key carries is left off the card that asks for
-// it.
-func Describe(clerk string, cs []key.Caveat) []Term {
+// term per caveat, in their order, then one "any" term for each argument
+// of the key's verbs that no caveat bounds. It renders every closed caveat
+// kind (KEY-2), so neither a caveat the key carries nor a bound it lacks
+// is left off the card that asks for it.
+//
+// thread marks a thread-scoped key (KEY-2): each reply it covers is texted
+// to the owner first and sends after the undo window, to the thread's own
+// participants, so its card says so instead of "without notifying you".
+func Describe(clerk string, thread bool, cs []key.Caveat) []Term {
 	out := []Term{{"Clerk", clerk}}
+	bound := map[string]bool{}
+	var verbs []string
 	for _, c := range cs {
-		out = append(out, term(c))
+		if t := term(c); thread && c.Kind == key.KVerbs {
+			out = append(out, Term{"Runs", strings.Join(c.Set, ", ") +
+				" as replies in existing threads, without asking; each is texted to you first and sends after the undo window unless you reply UNDO"})
+		} else {
+			out = append(out, t)
+		}
+		switch {
+		case c.Kind == key.KArg && c.Arg != nil:
+			bound[c.Arg.Name] = true
+		case c.Kind == key.KVerbs:
+			verbs = c.Set
+		}
+	}
+	var open []string
+	for _, v := range verbs {
+		for _, n := range key.ArgNames(key.Verb(v)) {
+			if thread && n == key.RecipientArg(key.Verb(v)) {
+				bound[n] = true // the thread's participants, as the clerk reads them
+				out = append(out, Term{"Recipients", "the thread's own participants only"})
+			}
+			if !bound[n] && !slices.Contains(open, n) {
+				open = append(open, n)
+			}
+		}
+	}
+	sort.Strings(open)
+	for _, n := range open {
+		out = append(out, Term{"Argument " + n, "any"})
 	}
 	return out
 }
@@ -478,9 +523,9 @@ func term(c key.Caveat) Term {
 	case key.KSpendDay:
 		return Term{"Spend per day", "up to " + minor(c.N)}
 	case key.KRateDay:
-		return Term{"Per day", fmt.Sprintf("at most %d runs", c.N)}
+		return Term{"Per day", fmt.Sprintf("at most %d %s", c.N, plural(c.N, "run"))}
 	case key.KRateRecipient:
-		return Term{"Per recipient", fmt.Sprintf("at most %d runs a day", c.N)}
+		return Term{"Per recipient", fmt.Sprintf("at most %d %s a day", c.N, plural(c.N, "run"))}
 	case key.KExpires:
 		return Term{"Expires", time.UnixMilli(c.N).UTC().Format("Jan 2 2006 15:04 UTC")}
 	case key.KUses:
@@ -491,6 +536,13 @@ func term(c key.Caveat) Term {
 		return Term{"Task", list(c.Set)}
 	}
 	return Term{"Unknown limit", c.Kind}
+}
+
+func plural(n int64, w string) string {
+	if n == 1 {
+		return w
+	}
+	return w + "s"
 }
 
 // minorIf shows the amount argument in minor units as an amount, any
