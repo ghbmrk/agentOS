@@ -207,9 +207,11 @@ const (
 
 // ErrTooMuchReadMail fails an Opened call past openedMax. It does not pass
 // with time or by archiving, since every folder is read: the owner must
-// delete read mail for good, from the trash too. Read mail since the last
-// good read, and logged mail older than unopenedDays, each free their charge
-// once deleted; logged mail younger than that frees it only once it ages.
+// delete read mail for good, from the trash too. Deleting a mail read since
+// the last good read frees its whole charge, so deleting those always clears
+// it; a mail the log first saw read more than unopenedDays ago frees about
+// half (entryCost less oldCost), and one logged since frees nothing until it
+// is that old.
 var ErrTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
 
 // opened is one Opened call's state: LastOpened as it is built, and the log
@@ -402,25 +404,24 @@ func (l *Live) Opened(ctx context.Context, today string, log SeenLog) (map[strin
 	return got, kept, nil
 }
 
-// Mark is the mailbox's state across its folders, as STATUS gives it: a
-// caller that keeps the Mark of its last good read reads again only when
-// Same says the mailbox changed (#2742 item 1). Without CONDSTORE a mail
-// read and another marked unread together, with nothing else changed, leave
-// it the same, so a caller still reads again after a ceiling.
+// Mark is the mailbox's state across its folders, as STATUS gives it, so a
+// caller can skip a full read that would find nothing new (#2742 item 1).
+// The caller takes the Mark before a read and keeps it once the read is
+// done, whether it succeeded or failed for good (ErrTooMuchReadMail): taken
+// after, it would already hold mail that arrived during the read; and a
+// lasting failure is tried again only when the owner's changes move the
+// Mark. It reads again only when Same says the mailbox changed, or an error
+// leaves no Mark, and in any case after a ceiling well under unopenedDays:
+// without CONDSTORE a mail read and another marked unread together, with
+// nothing else changed, leave the Mark the same, and Opened also moves with
+// the day (a read mail with no Message-ID, and every read mail before the
+// log has watched for unopenedDays, counts as opened today).
 type Mark []imapsmtp.Mark
 
-// Mark is the mailbox's Mark now: one listing and one session of STATUS.
+// Mark is the mailbox's Mark now: one session listing the folders and
+// asking each one's STATUS; on any error it is nil.
 func (l *Live) Mark(ctx context.Context) (Mark, error) {
-	fs, err := l.st.Folders(ctx)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, len(fs))
-	for i, f := range fs {
-		names[i] = f.Name
-	}
-	slices.Sort(names)
-	ms, err := l.st.Marks(ctx, names)
+	ms, err := l.st.Marks(ctx)
 	return Mark(ms), err
 }
 

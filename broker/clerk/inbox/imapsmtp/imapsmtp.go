@@ -480,19 +480,26 @@ func (quiet) Println(...interface{})        {}
 // Folders lists the account's folders with their special-use roles.
 func (s *Store) Folders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
-	err := s.session(ctx, func(c *client.Client) error {
-		ch := make(chan *imap.MailboxInfo, 32)
-		done := make(chan error, 1)
-		go func() { done <- c.List("", "*", ch) }()
-		for m := range ch {
-			if has(m.Attributes, imap.NoSelectAttr) {
-				continue
-			}
-			out = append(out, Folder{Name: m.Name, Role: role(m)})
-		}
-		return <-done
+	err := s.session(ctx, func(c *client.Client) (err error) {
+		out, err = folders(c)
+		return err
 	})
 	return out, err
+}
+
+// folders lists the selectable folders in session c.
+func folders(c *client.Client) ([]Folder, error) {
+	var out []Folder
+	ch := make(chan *imap.MailboxInfo, 32)
+	done := make(chan error, 1)
+	go func() { done <- c.List("", "*", ch) }()
+	for m := range ch {
+		if has(m.Attributes, imap.NoSelectAttr) {
+			continue
+		}
+		out = append(out, Folder{Name: m.Name, Role: role(m)})
+	}
+	return out, <-done
 }
 
 func role(m *imap.MailboxInfo) Role {
@@ -939,28 +946,51 @@ type Mark struct {
 	ModSeq                           string // HIGHESTMODSEQ, "" without CONDSTORE
 }
 
-// Marks is each of folders' Mark, in order, read in one session.
-func (s *Store) Marks(ctx context.Context, folders []string) ([]Mark, error) {
+// ErrPartialStatus fails Marks when a folder's STATUS reply leaves out an
+// item asked for: a count missing reads as 0, which is a count, so the mark
+// would stay the same however the folder changed.
+var ErrPartialStatus = errors.New("imapsmtp: a STATUS reply left out an item asked for")
+
+// Marks is the Mark of each selectable folder, sorted by name, listed and
+// read in one session; on any error it is nil, never a partial list.
+func (s *Store) Marks(ctx context.Context) ([]Mark, error) {
 	var out []Mark
 	err := s.session(ctx, func(c *client.Client) error {
+		fs, err := folders(c)
+		if err != nil {
+			return err
+		}
+		names := make([]string, len(fs))
+		for i, f := range fs {
+			names[i] = f.Name
+		}
+		slices.Sort(names)
 		items := []imap.StatusItem{imap.StatusUidValidity, imap.StatusUidNext, imap.StatusMessages, imap.StatusUnseen}
 		if ok, _ := c.Support("CONDSTORE"); ok {
 			items = append(items, "HIGHESTMODSEQ")
 		}
-		for _, f := range folders {
+		for _, f := range names {
 			st, err := c.Status(f, items)
 			if err != nil {
 				return err
 			}
+			for _, it := range items {
+				if _, ok := st.Items[it]; !ok {
+					return stand{fmt.Errorf("%w: %s in %q", ErrPartialStatus, it, f)}
+				}
+			}
 			m := Mark{Folder: f, Validity: st.UidValidity, Next: st.UidNext, Messages: st.Messages, Unseen: st.Unseen}
-			if v, ok := st.Items["HIGHESTMODSEQ"]; ok && v != nil {
+			if v := st.Items["HIGHESTMODSEQ"]; v != nil {
 				m.ModSeq = fmt.Sprint(v)
 			}
 			out = append(out, m)
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Ensure creates folder if it does not exist.
