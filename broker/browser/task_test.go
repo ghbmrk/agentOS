@@ -5,8 +5,12 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -96,8 +100,13 @@ func TestOneTapCoversTheTasksSubmits(t *testing.T) {
 	if c := r.result(t, "cont").Covered; !strings.HasPrefix(c, `Sent on example.test: "Continue", `) {
 		t.Fatalf("covered %q", c)
 	}
+	// The read of Place order says the task's tap covers it, so the
+	// planner posts it without asking the owner.
 	r.run(t, 5, "ask2", k, read(pressBuy))
 	a2 := r.stepApproval(t, "ask2")
+	if res := r.result(t, "ask2"); res.Error != "task_approved" || !strings.Contains(res.Detail, "covers this request on example.test") {
+		t.Fatalf("read under the tap: %+v", res)
+	}
 	r.run(t, 6, "buy", k, submitStep(a2, pressBuy))
 	if s := r.step("buy"); s.Phase != kernel.PDone {
 		t.Fatalf("place order: phase %s (%s)", s.Phase, s.Detail)
@@ -107,6 +116,10 @@ func TestOneTapCoversTheTasksSubmits(t *testing.T) {
 	}
 	if got := forwarded(t, r.h, "click"); len(got) != 2 {
 		t.Fatalf("clicks %q", got)
+	}
+	// STATUS lists both, from the clerk's lines (#2705).
+	if cs := r.k.State().Covered(6); len(cs) != 2 || cs[0].Line != r.result(t, "cont").Covered || cs[1].Line != r.result(t, "buy").Covered {
+		t.Fatalf("STATUS covered %+v", cs)
 	}
 	// Sent once: the same submit again sends nothing.
 	r.run(t, 7, "again", k, submitStep(a2, pressBuy))
@@ -125,7 +138,9 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 	if err := r.k.OpenTask(4, "t2"); err != nil {
 		t.Fatal(err)
 	}
-	// A tap for another site in the same task covers nothing here.
+	// A tap for a site this gate never built an approval for covers
+	// nothing and names no site a card could offer (a site split the
+	// gate saw is TestASiteSplitAsksForTheOtherSitesTap).
 	if err := r.k.OpenTask(4, "t3"); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +234,7 @@ func TestCoveredSubmitAsksAgain(t *testing.T) {
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
 		a := approvalOf(t, h.do(t, c.line))
 		tc := c.tc(a)
-		res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print, false, &tc)
+		res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print, false, fixed(tc))
 		if c.want == "" {
 			if !res.OK || !written || res.Approval == nil || res.Approval.Print != a.Print {
 				t.Fatalf("%s: %+v", name, res)
@@ -241,7 +256,7 @@ func TestSitelessPageIsNeverCovered(t *testing.T) {
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	a := approvalOf(t, h.do(t, pressBuy))
 	tc := cover{""}
-	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, &tc); a.Site != "" || written || !strings.Contains(res.Detail, "another site") {
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, fixed(tc)); a.Site != "" || written || !strings.Contains(res.Detail, "another site") {
 		t.Fatalf("site %q: %+v", a.Site, res)
 	}
 	r := newClerkRig(t, newHarness(t, map[string]any{"snapshot": blank, "click": shopReply("/done", doneShot)}, "", 0))
@@ -254,8 +269,8 @@ func TestSitelessPageIsNeverCovered(t *testing.T) {
 	a = r.stepApproval(t, "ask")
 	r.tapTask(t, 3, "t1", Approval{Site: "", Print: "ap1:other"})
 	r.run(t, 4, "buy", k, submitStep(a, pressBuy))
-	if s := r.step("buy"); s.Phase != kernel.PFailed || s.Detail != "unapproved" || len(forwarded(t, r.h, "click")) != 0 {
-		t.Fatalf("buy: phase %s (%s)", s.Phase, s.Detail)
+	if res := r.result(t, "buy"); r.step("buy").Phase != kernel.PFailed || res.Error != "approval_required" || len(forwarded(t, r.h, "click")) != 0 {
+		t.Fatalf("buy: %+v", res)
 	}
 }
 
@@ -265,6 +280,24 @@ func TestCoveredLineNamesAnUnlabelledSubmit(t *testing.T) {
 	got := coveredLine(Approval{Site: "example.test", Verb: "navigate", Target: "https://shop.example.test/transfer?to=synthAlice"}, 0)
 	if want := "Sent on example.test: navigate https://shop.example.test/transfer?to=synthAlice, 1970-01-01T00:00:00Z"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// A covered line fits the kernel's STATUS bound whatever the site and
+// label, and keeps its time: a longer line would be dropped, not shown.
+func TestCoveredLineFitsStatus(t *testing.T) {
+	long := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + ".test"
+	for _, a := range []Approval{
+		{Site: long, Label: strconv.Quote(strings.Repeat("Place order ", 20))},
+		{Site: long, Verb: "navigate", Target: "https://" + long + "/" + strings.Repeat("x", 4000)},
+		{Site: strings.Repeat("d", 300) + ".test", Label: `"Pay"`},
+		{Site: "pay\u202e.test", Label: `"Pay"`},
+	} {
+		got := coveredLine(a, 0)
+		if len(got) > kernel.MaxShown || !utf8.ValidString(got) || !strings.HasSuffix(got, ", 1970-01-01T00:00:00Z") ||
+			strings.ContainsFunc(got, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
+			t.Fatalf("%d bytes: %q", len(got), got)
+		}
 	}
 }
 
@@ -308,5 +341,110 @@ func TestCardFillAfterTheTapIsRefused(t *testing.T) {
 	}
 	if got := forwarded(t, r.h, "type"); len(got) != 0 {
 		t.Fatalf("typed %q", got)
+	}
+}
+
+// fixed reads one task approval for every site.
+func fixed(c cover) covers { return func(...string) *cover { return &c } }
+
+// A site split: the tap covers the cart on example.test, and the next
+// submit is a link to another site. The post asks again with that
+// request's approval, which names its own site, so the card can offer
+// the task's tap there; once tapped, it is sent (CLK-3).
+func TestASiteSplitAsksForTheOtherSitesTap(t *testing.T) {
+	payPage := "- main [ref=e1]:\n  - link \"Pay\" [ref=e9]:\n    - /url: https://pay.other.test/confirm?step=2"
+	r := newClerkRig(t, newHarness(t, map[string]any{
+		"snapshot": shopReply("/cart", contPage),
+		"click":    []any{shopReply("/checkout", payPage), shopReply("/done", doneShot)},
+	}, "", 0))
+	if err := r.k.OpenTask(0, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	k := r.taskKey(t, "t1")
+	r.run(t, 1, "look", k, read(`{"v":0,"verb":"snapshot"}`))
+	r.run(t, 2, "ask", k, read(pressCont))
+	a1 := r.stepApproval(t, "ask")
+	r.tapTask(t, 3, "t1", a1)
+	r.run(t, 4, "cont", k, submitStep(a1, pressCont))
+	r.run(t, 5, "ask2", k, read(pressBuy))
+	res := r.result(t, "ask2")
+	if res.Error != "approval_required" || !strings.Contains(res.Detail, "another site than the task's approval") {
+		t.Fatalf("read: %+v", res)
+	}
+	a2 := r.stepApproval(t, "ask2")
+	if a2.Site != "other.test" {
+		t.Fatalf("site %q", a2.Site)
+	}
+	r.run(t, 6, "pay", k, submitStep(a2, pressBuy))
+	if res := r.result(t, "pay"); res.Error != "approval_required" || res.Approval == nil || res.Approval.Site != "other.test" ||
+		!strings.Contains(res.Detail, "another site") {
+		t.Fatalf("post: %+v", res)
+	}
+	r.tapTask(t, 7, "t1", a2)
+	r.run(t, 8, "pay2", k, submitStep(a2, pressBuy))
+	if s := r.step("pay2"); s.Phase != kernel.PDone {
+		t.Fatalf("pay after its tap: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "click"); len(got) != 2 {
+		t.Fatalf("clicks %q", got)
+	}
+}
+
+// A read says what a post would meet: covered by the task's tap, on
+// another site, or on a secret screen, which carries its word on the
+// Approval so the card asks only for this exact approval (VRB-1). With no
+// task approval it reads as before.
+func TestAReadSaysWhetherTheTasksTapCoversIt(t *testing.T) {
+	secret := "- main [ref=e1]:\n  - heading \"Backup codes\" [ref=e2]\n  - button \"Place order\" [ref=e9]"
+	for name, c := range map[string]struct {
+		page            string
+		tc              *cover
+		err, want, word string
+	}{
+		"covered":      {orderPage, &cover{"example.test"}, "task_approved", "covers this request on example.test", ""},
+		"other site":   {orderPage, &cover{"example.com"}, "approval_required", "another site than the task's approval", ""},
+		"secret":       {secret, &cover{"example.test"}, "approval_required", `(VRB-1: "backup")`, "backup"},
+		"no task":      {orderPage, nil, "approval_required", "needs the owner's approval of this exact request", ""},
+		"secret alone": {secret, nil, "approval_required", "needs the owner's approval of this exact request", "backup"},
+	} {
+		h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", c.page)}, "", 0)
+		h.do(t, `{"v":0,"verb":"snapshot"}`)
+		var tasks covers
+		if c.tc != nil {
+			tasks = fixed(*c.tc)
+		}
+		res, effect, _ := h.g.do(context.Background(), []byte(pressBuy), tasks)
+		if effect || res.Error != c.err || !strings.Contains(res.Detail, c.want) || res.Approval == nil || res.Approval.Secret != c.word {
+			t.Fatalf("%s: %+v", name, res)
+		}
+		if got := forwarded(t, h, "click"); len(got) != 0 {
+			t.Fatalf("%s: clicked %q", name, got)
+		}
+	}
+}
+
+// The gate remembers at most maxAsked sites a tap can name; past that a
+// new site is not remembered, so its approval elsewhere fails unapproved
+// rather than grow the set without bound.
+func TestAskedSitesAreBounded(t *testing.T) {
+	h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", orderPage), "click": shopReply("/done", doneShot)}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for i := len(h.g.asked); i < maxAsked; i++ {
+		h.g.asked[strconv.Itoa(i)+".test"] = true
+	}
+	a := approvalOf(t, h.do(t, pressBuy))
+	if len(h.g.asked) != maxAsked || h.g.asked["example.test"] {
+		t.Fatalf("asked %d, example.test %v", len(h.g.asked), h.g.asked["example.test"])
+	}
+	// A tap on that unremembered site still covers it: the gate asks for
+	// the request's own site first.
+	tap := func(sites ...string) *cover {
+		if slices.Contains(sites, "example.test") {
+			return &cover{"example.test"}
+		}
+		return nil
+	}
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, tap); !written || !res.OK {
+		t.Fatalf("past the bound: %+v", res)
 	}
 }
