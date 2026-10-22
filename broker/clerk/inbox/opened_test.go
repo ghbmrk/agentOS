@@ -175,13 +175,23 @@ func TestAReusedMessageIDIsANewRead(t *testing.T) {
 }
 
 // A read mail whose headers are too long fails the answer, and the error
-// names its folder and arrival so the owner can find and remove it.
+// names it so the owner can find and remove it: its folder and arrival in
+// the text, and its subject, decoded and only as a field, since it is the
+// mail's content; a subject past subjectMax is cut and marked.
 func TestOpenedNamesAMailWhoseHeadersAreTooLong(t *testing.T) {
-	srv := imaptest.Start(t)
-	srv.DeliverAt("Archive", arrived, rawMail("<a@shop.test>", "news@shop.test ("+strings.Repeat("x", 9<<10)+")", "Sale"), `\Seen`)
-	_, _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-06-01", SeenLog{})
-	if !errors.Is(err, imapsmtp.ErrLongHeader) || !strings.Contains(err.Error(), "Archive") || !strings.Contains(err.Error(), "2026-01-02 09:00") {
-		t.Fatalf("err %v; want ErrLongHeader naming Archive and 2026-01-02 09:00", err)
+	long := "news@shop.test (" + strings.Repeat("x", 9<<10) + ")"
+	for subject, want := range map[string]string{
+		"=?UTF-8?Q?Gro=C3=9Fer_Sale?=": "Großer Sale",
+		strings.Repeat("y", 2<<10):     strings.Repeat("y", 1<<10-len("Subject: ")) + "…",
+	} {
+		srv := imaptest.Start(t)
+		srv.DeliverAt("Archive", arrived, rawMail("<a@shop.test>", long, subject), `\Seen`)
+		_, _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-06-01", SeenLog{})
+		var lh *imapsmtp.LongHeaderError
+		if !errors.As(err, &lh) || !errors.Is(err, imapsmtp.ErrLongHeader) || lh.Subject != want ||
+			!strings.Contains(err.Error(), "the mail in Archive that arrived 2026-01-02 09:00") || strings.Contains(err.Error(), want[:4]) {
+			t.Fatalf("err %v (%+v); want ErrLongHeader naming Archive and 2026-01-02 09:00, subject %q kept out of the text", err, lh, want)
+		}
 	}
 }
 

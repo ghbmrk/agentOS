@@ -17,12 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/smtp"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
@@ -234,6 +236,14 @@ const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
 // errReplyTooLarge ends a session whose replies passed their budget.
 var errReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
 
+// ErrTimeout ends a session, or one of its steps, that ran past the timeout:
+// the server stopped answering, which is not a refusal or a bad reply.
+var ErrTimeout = errors.New("imapsmtp: the mail server stopped answering")
+
+// stand is an error a session's step reached from what the server had
+// already sent, which a timeout after it does not replace.
+type stand struct{ error }
+
 func (s *Store) replyBudget(fetches int) int64 {
 	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
 }
@@ -282,16 +292,37 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 // timeout. The client's reader reads ahead, so one reply can be charged to
 // two adjacent windows, never more: what a step holds is bounded by its own
 // window and the one before.
-func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) error {
+func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) (err error) {
+	// A session cut off at its timeout fails with ErrTimeout, not with what
+	// the closed connection reports; an error f reached from what the server
+	// had already sent (stand) is kept, whenever the cut-off came.
+	var late atomic.Bool
+	defer func() {
+		var st stand
+		if errors.As(err, &st) {
+			err = st.error
+		} else if err != nil && late.Load() {
+			err = ErrTimeout
+		}
+	}()
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
+		if dctx.Err() == context.DeadlineExceeded {
+			late.Store(true)
+		}
 		return err
 	}
-	if dl, ok := dctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
+	// go-imap clears the connection's deadline at each command, so a timer
+	// closes the connection instead: at the dial's deadline for the greeting,
+	// handshake and sign-in, then once a step has run for the timeout, as
+	// renew restarts it. Every cut-off goes through it and so marks the
+	// session late.
+	dl, _ := dctx.Deadline()
+	raw := conn
+	step := time.AfterFunc(time.Until(dl), func() { late.Store(true); raw.Close() })
+	defer step.Stop()
 	switch s.cfg.IMAPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
@@ -303,10 +334,6 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
-	// go-imap clears the connection's deadline at each command, so a timer
-	// closes it once a step has run for the timeout; renew restarts it.
-	step := time.AfterFunc(s.cfg.Timeout, func() { conn.Close() })
-	defer step.Stop()
 	bc := newBudgetConn(conn, budget)
 	c, err := client.New(bc)
 	if err != nil {
@@ -314,7 +341,12 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	}
 	c.ErrorLog = quiet{}
 	defer c.Logout()
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	stop := context.AfterFunc(ctx, func() {
+		if ctx.Err() == context.DeadlineExceeded {
+			late.Store(true)
+		}
+		conn.Close()
+	})
 	defer stop()
 	l, err := s.cfg.Credential(dctx)
 	if err != nil {
@@ -483,6 +515,31 @@ var (
 	ErrLongHeader = errors.New("imapsmtp: a mail's headers are too long to read")
 )
 
+// LongHeaderError is ErrLongHeader for one mail, named so the owner can find
+// it: its folder, its INTERNALDATE (zero if the server sent none) and its
+// Subject, read on its own under subjectMax bytes, since its other headers
+// are what was too long. Error names the folder, arrival and UID, never the
+// subject: that is the mail's content, for the owner's eyes, not a log.
+type LongHeaderError struct {
+	Folder  string
+	Arrived time.Time
+	UID     uint32
+	Subject string
+}
+
+func (e *LongHeaderError) Error() string {
+	at := "at an unknown time"
+	if !e.Arrived.IsZero() {
+		at = e.Arrived.Format("2006-01-02 15:04 -0700")
+	}
+	return fmt.Sprintf("%v: the mail in %s that arrived %s (UID %d)", ErrLongHeader, e.Folder, at, e.UID)
+}
+
+func (e *LongHeaderError) Unwrap() error { return ErrLongHeader }
+
+// subjectMax bounds the Subject a LongHeaderError reads.
+const subjectMax = 1 << 10
+
 // Seen hands each the From and Message-ID headers of every message in folder
 // that carries \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM MESSAGE-ID)] so
 // nothing is marked read, and its INTERNALDATE: the time the server took the
@@ -534,11 +591,7 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 					delete(want, m.Uid)
 					h, _ := io.ReadAll(io.LimitReader(l, headMax+1))
 					if len(h) > headMax {
-						at := "at an unknown time"
-						if !m.InternalDate.IsZero() {
-							at = m.InternalDate.Format("2006-01-02 15:04 -0700")
-						}
-						bad = fmt.Errorf("%w: the mail in %s that arrived %s (UID %d)", ErrLongHeader, folder, at, m.Uid)
+						bad = &LongHeaderError{Folder: folder, Arrived: m.InternalDate, UID: m.Uid}
 					} else {
 						bad = each(h, m.InternalDate)
 					}
@@ -548,8 +601,11 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 			if err := <-done; err != nil {
 				return err
 			}
+			if lh, ok := bad.(*LongHeaderError); ok {
+				lh.Subject = subject(c, lh.UID)
+			}
 			if bad != nil {
-				return bad
+				return stand{bad}
 			}
 			if len(want) > 0 {
 				left, err := readUIDs(c, want)
@@ -557,12 +613,60 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 					return err
 				}
 				if len(left) > 0 {
-					return ErrUnanswered
+					return stand{ErrUnanswered}
 				}
 			}
 		}
 		return nil
 	})
+}
+
+// subject is mail uid's Subject header, unfolded and decoded, read with
+// BODY.PEEK under subjectMax bytes; one cut there ends in "…". A failed read
+// leaves it empty: the error it names stands without it.
+func subject(c *client.Client, uid uint32) string {
+	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, subjectMax + 1},
+		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"Subject"}}}
+	set := new(imap.SeqSet)
+	set.AddNum(uid)
+	ch := make(chan *imap.Message, 4)
+	done := make(chan error, 1)
+	go func() { done <- c.UidFetch(set, []imap.FetchItem{imap.FetchUid, sec.FetchItem()}, ch) }()
+	// The client passes on only answers for uid; the first stands.
+	var h []byte
+	for m := range ch {
+		for _, l := range m.Body {
+			if l != nil && h == nil {
+				h, _ = io.ReadAll(io.LimitReader(l, subjectMax+1))
+			}
+		}
+	}
+	if <-done != nil {
+		return ""
+	}
+	cut := len(h) > subjectMax
+	v := string(h[:min(len(h), subjectMax)])
+	if name, rest, ok := strings.Cut(v, ":"); !ok || !strings.EqualFold(strings.TrimSpace(name), "Subject") {
+		return ""
+	} else {
+		v = rest
+	}
+	if d, err := new(mime.WordDecoder).DecodeHeader(v); err == nil {
+		v = d
+	}
+	// A cut can split a character; and the sender wrote this, so no control
+	// or bidi character it carries can break or reorder the owner's line.
+	v = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(v, ""))
+	v = strings.Join(strings.Fields(v), " ")
+	if cut {
+		v += "…"
+	}
+	return v
 }
 
 // readUIDs searches the selected folder for its read mail: all of it, or,

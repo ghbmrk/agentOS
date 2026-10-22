@@ -6,10 +6,14 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // seenServer is a raw IMAP server for Seen that takes one connection: it logs
@@ -22,12 +26,15 @@ func seenServer(t *testing.T, fetch string) string {
 // seenSearch is seenServer with the UID SEARCH's untagged answer ("NO" fails
 // it).
 func seenSearch(t *testing.T, search, fetch string) string {
-	return seenServe(t, func(string, int) string { return search }, fetch, 0)
+	return seenServe(t, func(string, int) string { return search }, each(fetch), 0)
 }
 
+// each answers every UID FETCH alike.
+func each(fetch string) func(int) string { return func(int) string { return fetch } }
+
 // seenServe is seenSearch answering the nth UID SEARCH, whose command line is
-// cmd, with search(cmd, n), and each UID FETCH after delay.
-func seenServe(t *testing.T, search func(cmd string, n int) string, fetch string, delay time.Duration) string {
+// cmd, with search(cmd, n), and the nth UID FETCH with fetch(n) after delay.
+func seenServe(t *testing.T, search func(cmd string, n int) string, fetch func(n int) string, delay time.Duration) string {
 	t.Helper()
 	l := listenLoopback(t)
 	go func() {
@@ -41,7 +48,7 @@ func seenServe(t *testing.T, search func(cmd string, n int) string, fetch string
 		say := func(s string) { w.WriteString(s); w.Flush() }
 		say("* OK [CAPABILITY IMAP4rev1] ready\r\n")
 		r := bufio.NewReader(c)
-		n := 0
+		n, k := 0, 0
 		for {
 			line, err := r.ReadString('\n')
 			if err != nil {
@@ -64,11 +71,14 @@ func seenServe(t *testing.T, search func(cmd string, n int) string, fetch string
 					say(a + tag + " OK done\r\n")
 				}
 				n++
-			case cmd == "UID" && fetch == "NO":
-				say(tag + " NO failed\r\n")
 			case cmd == "UID":
+				a := fetch(k)
+				if k++; a == "NO" {
+					say(tag + " NO failed\r\n")
+					continue
+				}
 				time.Sleep(delay)
-				say(fetch + tag + " OK done\r\n")
+				say(a + tag + " OK done\r\n")
 			case cmd == "LOGOUT":
 				say("* BYE\r\n" + tag + " OK done\r\n")
 			default:
@@ -156,23 +166,91 @@ func TestSeenLetsGoOfAMailGoneSinceTheSearch(t *testing.T) {
 			return "* SEARCH 9\r\n"
 		}
 		return "* SEARCH 1 2\r\n"
-	}, header(1, "a@x.test"), 0)
+	}, each(header(1, "a@x.test")), 0)
 	if got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); err != nil || len(got) != 1 {
 		t.Fatalf("headers %q, err %v; want the one still there", got, err)
 	}
 }
 
-// A search or a batch the server stalls fails the call once it has run for
-// the timeout.
+// A search or a batch the server stalls fails the call with ErrTimeout once
+// it has run for the timeout, not long after.
 func TestSeenTimesOutAStalledStep(t *testing.T) {
-	stall := func(string, int) string { time.Sleep(3 * time.Second); return "* SEARCH 1 2\r\n" }
+	stall := func(string, int) string { time.Sleep(5 * time.Second); return "* SEARCH 1 2\r\n" }
 	for name, addr := range map[string]string{
-		"search": seenServe(t, stall, header(1, "a@x.test")+header(2, "d@x.test"), 0),
-		"batch":  seenServe(t, func(string, int) string { return "* SEARCH 1 2\r\n" }, header(1, "a@x.test")+header(2, "d@x.test"), 3*time.Second),
+		"search": seenServe(t, stall, each(header(1, "a@x.test")+header(2, "d@x.test")), 0),
+		"batch":  seenServe(t, func(string, int) string { return "* SEARCH 1 2\r\n" }, each(header(1, "a@x.test")+header(2, "d@x.test")), 5*time.Second),
 	} {
 		start := time.Now()
-		if _, err := seenFrom(hostileStore(t, addr, 300*time.Millisecond), "INBOX"); err == nil || time.Since(start) > 2*time.Second {
-			t.Fatalf("%s: err %v after %v; want a failure at the timeout", name, err, time.Since(start))
+		if _, err := seenFrom(hostileStore(t, addr, 500*time.Millisecond), "INBOX"); !errors.Is(err, ErrTimeout) || time.Since(start) > 1400*time.Millisecond {
+			t.Fatalf("%s: err %v after %v; want ErrTimeout at the timeout", name, err, time.Since(start))
+		}
+	}
+}
+
+// Every session cut off at its timeout fails with ErrTimeout, a one-step
+// session as much as Seen's, whichever runs out first: the store's timeout,
+// the caller's deadline, or that deadline passing before the dial.
+func TestASessionCutOffAtItsTimeoutSaysSo(t *testing.T) {
+	stall := func(string, int) string { time.Sleep(5 * time.Second); return "* SEARCH 1\r\n" }
+	for name, c := range map[string]struct {
+		timeout, deadline time.Duration
+	}{
+		"timeout":  {500 * time.Millisecond, time.Minute},
+		"deadline": {time.Minute, 500 * time.Millisecond},
+		"dial":     {time.Minute, -time.Second},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), c.deadline)
+		_, _, err := hostileStore(t, seenServe(t, stall, each(""), 0), c.timeout).UIDs(ctx, "INBOX")
+		cancel()
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("%s: err %v, want ErrTimeout", name, err)
+		}
+	}
+}
+
+// A server that takes the connection and never answers the handshake is
+// cut off at the timeout counted from the dial, and says so: the dial here
+// takes a fifth of the timeout, so a cut-off counted from the connection, or
+// one that does not mark the session late, fails the test.
+func TestAStalledHandshakeTimesOut(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(io.Discard, c); c.Close() }()
+		}
+	}()
+	const timeout = 500 * time.Millisecond
+	s, err := New(Config{
+		IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
+		Timeout:    timeout,
+		Credential: func(context.Context) (Login, error) { return Login{}, nil },
+		From:       "owner@example.test",
+		Guard: netguard.New(netguard.Config{
+			Resolver: answers{"8.8.8.8"},
+			Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				time.Sleep(timeout / 5)
+				return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]func() error{
+		"Seen": func() error { _, err := seenFrom(s, "INBOX"); return err },
+		"UIDs": func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+	} {
+		start := time.Now()
+		if err := call(); !errors.Is(err, ErrTimeout) || time.Since(start) > 2*timeout {
+			t.Fatalf("%s: err %v after %v, want ErrTimeout within %v", name, err, time.Since(start), 2*timeout)
 		}
 	}
 }
@@ -185,9 +263,56 @@ func TestSeenFailsWhenTheSecondSearchFails(t *testing.T) {
 			return "NO"
 		}
 		return "* SEARCH 1 2\r\n"
-	}, header(1, "a@x.test"), 0)
+	}, each(header(1, "a@x.test")), 0)
 	if got, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX"); err == nil {
 		t.Fatalf("headers %q with no error", got)
+	}
+}
+
+// subjectAnswer is a UID FETCH answer of a Subject section for uid.
+func subjectAnswer(uid int, h string) string {
+	return "* " + strconv.Itoa(uid) + " FETCH (UID " + strconv.Itoa(uid) + " BODY[HEADER.FIELDS (SUBJECT)]<0> {" + strconv.Itoa(len(h)) + "}\r\n" + h + ")\r\n"
+}
+
+// A header too long names its mail by the Subject the server sends for that
+// UID first, unfolded, decoded, and with control and bidi characters taken
+// out, so the sender cannot write a line of the owner's status; a section
+// that is not a Subject names nothing.
+func TestSeenNamesALongHeaderBySubject(t *testing.T) {
+	long := header(1, "a@x.test ("+strings.Repeat("x", headMax)+")")
+	for answer, want := range map[string]string{
+		subjectAnswer(2, "Subject: wrong\r\n\r\n") + subjectAnswer(1, "Subject: first\r\n part\r\n\r\n") + subjectAnswer(1, "Subject: second\r\n\r\n"): "first part",
+		subjectAnswer(1, "Subject: =?UTF-8?Q?ok=0AOPENED_nothing=1B[2J=E2=80=AE?=\r\n\r\n"):                                                            "ok OPENED nothing [2J",
+		subjectAnswer(1, "X-Subject: no\r\n\r\n"): "",
+	} {
+		addr := seenServe(t, func(string, int) string { return "* SEARCH 1\r\n" }, func(n int) string {
+			if n == 0 {
+				return long
+			}
+			return answer
+		}, 0)
+		_, err := seenFrom(hostileStore(t, addr, 5*time.Second), "INBOX")
+		var lh *LongHeaderError
+		if !errors.As(err, &lh) || lh.Subject != want {
+			t.Fatalf("err %v (%+v); want a LongHeaderError with subject %q", err, lh, want)
+		}
+	}
+}
+
+// A long header found before the timeout stands when the subject's read is
+// cut off: the error is what the server sent, not ErrTimeout.
+func TestALongHeaderStandsWhenItsSubjectTimesOut(t *testing.T) {
+	long := header(1, "a@x.test ("+strings.Repeat("x", headMax)+")")
+	addr := seenServe(t, func(string, int) string { return "* SEARCH 1\r\n" }, func(n int) string {
+		if n > 0 {
+			time.Sleep(5 * time.Second)
+		}
+		return long
+	}, 0)
+	_, err := seenFrom(hostileStore(t, addr, 500*time.Millisecond), "INBOX")
+	var lh *LongHeaderError
+	if !errors.As(err, &lh) || errors.Is(err, ErrTimeout) || lh.Subject != "" {
+		t.Fatalf("err %v; want the LongHeaderError, with no subject", err)
 	}
 }
 
@@ -195,7 +320,7 @@ func TestSeenFailsWhenTheSecondSearchFails(t *testing.T) {
 // one, each within it, pass.
 func TestSeenRenewsTheTimeoutForEachBatch(t *testing.T) {
 	search, fetch := seenUIDs(3 * seenBatch)
-	addr := seenServe(t, func(string, int) string { return search }, fetch, 400*time.Millisecond)
+	addr := seenServe(t, func(string, int) string { return search }, each(fetch), 400*time.Millisecond)
 	if got, err := seenFrom(hostileStore(t, addr, time.Second), "INBOX"); err != nil || len(got) != 3*seenBatch {
 		t.Fatalf("%d headers, err %v; want %d", len(got), err, 3*seenBatch)
 	}
@@ -222,6 +347,7 @@ func TestSeenRenewsTheBudgetForEachBatch(t *testing.T) {
 		b.WriteString(pad)
 	}
 	s := hostileStore(t, seenSearch(t, search, b.String()), 5*time.Second)
+	s.replyBase = 64 << 10 // a batch must not fit in what sign-in left
 	if got, err := seenFrom(s, "INBOX"); err != nil || len(got) != 3*seenBatch {
 		t.Fatalf("%d headers, err %v; want %d", len(got), err, 3*seenBatch)
 	}
