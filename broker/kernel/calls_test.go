@@ -146,6 +146,9 @@ func TestAStepForAnUnknownClerkIsNotCharged(t *testing.T) {
 	must(t, err)
 	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	r.calls(1, 0)
+	if p := r.k.State().Plans["p1"]; p.Cancel != kernel.CClerk || p.CancelDetail != "mail" {
+		t.Fatalf("cancelled as %q %q, want the clerk named", p.Cancel, p.CancelDetail)
+	}
 	if r.status("p1") != kernel.SCancelled || r.phase("p1").Phase != kernel.PCancelled || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 0 {
 		t.Fatalf("status %s, phase %s, %d uses", r.status("p1"), r.phase("p1").Phase, len(r.k.State().Ledger().Uses(r.ck.Tip())))
 	}

@@ -329,6 +329,9 @@ type PlanState struct {
 	Scopes []key.ID
 	Next   int
 	Steps  []StepState
+	// Cancel is why a cancelled plan was cancelled, for STATUS: the code
+	// ("owner", a key refusal, or no-clerk) and its detail (OWN-17).
+	Cancel, CancelDetail string
 }
 
 // SpendHold is why a plan's spend is stopped. Root is the root of the key the
@@ -932,7 +935,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
-			p.Status = SCancelled
+			p.Status, p.Cancel, p.CancelDetail = SCancelled, b.Code, b.Detail
 			if st := &p.Steps[p.Next]; sendable(st.Phase) {
 				s.cancelUnsent(p, st)
 			}
