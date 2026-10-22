@@ -139,7 +139,12 @@ func writeAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 		func() error { return f.Sync() },
 		func() error { return f.Close() },
 		func() error { return os.Rename(tmp, dst) }, // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is sealed content, not a lifecycle, and the next step syncs the directory
-		func() error { return syncDir(dir) },
+		func() error {
+			if err := syncDir(dir); err != nil {
+				return fmt.Errorf("%w: %w", errUnsynced, err)
+			}
+			return nil
+		},
 	}
 	for i, step := range steps {
 		if err := step(); err != nil {
@@ -160,7 +165,13 @@ func writeAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 
 var errStopped = errors.New("run: write stopped")
 
-func syncDir(dir string) error {
+// errUnsynced is a write whose rename succeeded but whose directory sync
+// failed: the new form is in place, and may or may not survive a crash, so
+// the write neither failed nor took effect for certain (#2742 item 7).
+var errUnsynced = errors.New("run: written, but the directory sync failed")
+
+// syncDir syncs dir; a variable so a test can fail it.
+var syncDir = func(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
