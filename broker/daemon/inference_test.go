@@ -44,9 +44,7 @@ import (
 )
 
 // linked is the composition root and what W3 links into it.
-// compile is named so a later import of it is checked even if agentosd
-// stops linking it (arbitrator on W3 step 3a).
-var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "compile", "loopbuild"}
+var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "loopbuild"}
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.

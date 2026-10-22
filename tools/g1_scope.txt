@@ -176,7 +176,6 @@ allow broker/vm/
 allow broker/workers/
 
 # Imported by agentosd but frozen (Tight).
-frozen-import broker/compile/
 frozen-import broker/corpus/
 frozen-import broker/loop7/
 frozen-import broker/loopbuild/

@@ -2,7 +2,7 @@
 //
 // A compiled skill is a fixed list of broker effects with typed inputs
 // ("slots"), compiled by the broker from repeated successful trajectories
-// (package compile) and adopted only through the change pipeline (§11) as
+// (package compile, since deleted) and adopted only through the change pipeline (§11) as
 // a file skills/<id>.json in the managed tree. A procedure is the same
 // format compiled from one trajectory with every value a slot, so it
 // replays the recorded steps on new inputs.
@@ -17,5 +17,5 @@
 // did not succeed. The runner then stops and hands the remaining steps,
 // with their bound values, back to the model.
 //
-// Assumptions are listed in broker/compile/ASSUMPTIONS.md.
+// Assumptions are listed in ASSUMPTIONS.md next to this file.
 package skill
