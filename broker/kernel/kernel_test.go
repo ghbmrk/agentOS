@@ -813,7 +813,8 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
 	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0))
-	want := kernel.Unsettled{Plan: "p1", Verb: key.Trash, Clerk: "mail", Phase: kernel.PUnknown, Detail: "no answer"}
+	want := kernel.Unsettled{Plan: "p1", Verb: key.Trash, Clerk: "mail", Phase: kernel.PUnknown, Detail: "no answer",
+		Recipient: "m1", PlanStatus: kernel.SActive}
 	if got := r.k.State().Status(); len(got) != 1 || got[0] != want {
 		t.Fatalf("status %+v, want %+v", got, want)
 	}
@@ -825,8 +826,23 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 		t.Fatalf("status %+v, want %+v", got, want)
 	}
 	must(t, r.k.Cancel(kernel.MaxChecks*kernel.ProbeEvery*2, "p1"))
-	if got := r.k.State().Status(); len(got) != 1 || got[0].Retry {
-		t.Fatalf("a cancelled plan's parked step is still listed, and is not retried: %+v", got)
+	if got := r.k.State().Status(); len(got) != 1 || got[0].Retry || got[0].PlanStatus != kernel.SCancelled || got[0].Cancel != "owner" {
+		t.Fatalf("a cancelled plan's parked step is still listed, with its cancel, and is not retried: %+v", got)
+	}
+}
+
+// A STATUS entry carries what the owner's RETRY tier is judged on, from the
+// plan's own step: a purchase moves money, so its retry is high tier (CH-10,
+// CH-11).
+func TestStatusCarriesTheRetryTierFacts(t *testing.T) {
+	r := newRig(t)
+	ck := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	r.plan("p1", ck, kernel.PlanStep{Verb: key.Buy, Clerk: "mail", Args: map[string]string{"to": "shop", "amount": "500", "item": "lamp"}})
+	must(t, r.tick(0))
+	got := r.k.State().Status()
+	if len(got) != 1 || !got[0].Money || got[0].Amount != 500 || got[0].Recipient != "shop" {
+		t.Fatalf("status %+v", got)
 	}
 }
 
