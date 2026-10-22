@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -421,6 +422,12 @@ func (m *mbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 			}
 		case imap.StatusUidValidity:
 			st.UidValidity = b.validity
+		case imap.StatusUnseen:
+			for _, x := range b.msgs {
+				if !slices.Contains(x.flags, imap.SeenFlag) {
+					st.Unseen++
+				}
+			}
 		}
 	}
 	return st, nil

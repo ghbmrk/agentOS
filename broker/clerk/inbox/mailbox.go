@@ -357,6 +357,44 @@ func (l *Live) Opened(ctx context.Context, today string, log SeenLog) (map[strin
 	return got, kept, nil
 }
 
+// Mark is the mailbox's state across its folders, as STATUS gives it: a
+// caller that keeps the Mark of its last good read reads again only when
+// Same says the mailbox changed (#2742 item 1). Without CONDSTORE a mail
+// read and another marked unread together, with nothing else changed, leave
+// it the same, so a caller still reads again after a ceiling.
+type Mark []imapsmtp.Mark
+
+// Mark is the mailbox's Mark now: one listing and one session of STATUS.
+func (l *Live) Mark(ctx context.Context) (Mark, error) {
+	fs, err := l.st.Folders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(fs))
+	for i, f := range fs {
+		names[i] = f.Name
+	}
+	slices.Sort(names)
+	ms, err := l.st.Marks(ctx, names)
+	return Mark(ms), err
+}
+
+// Same reports whether m and o show the mailbox unchanged: the same folders
+// in the same state, every one with a UID validity and next UID to go by.
+// A Mark with a folder the server gave neither is never the same (fail
+// closed).
+func (m Mark) Same(o Mark) bool {
+	if len(m) == 0 || !slices.Equal(m, o) {
+		return false
+	}
+	for _, f := range m {
+		if f.Validity == 0 || f.Next == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // newest is the n highest UIDs, in ascending order.
 func newest(uids []uint32, n int) []uint32 {
 	s := append([]uint32(nil), uids...)
