@@ -685,3 +685,18 @@ func TestTickRacesNoOwnerChange(t *testing.T) {
 		}
 	}
 }
+
+// A covered submit's STATUS line crosses the clerk's socket into the log
+// (CLK-3, #2705).
+func TestACoveredLineCrossesTheSocket(t *testing.T) {
+	line := "Sent on shop.example: Place order, 12:00 UTC"
+	b := newBox(t, serveFake(t, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "ok", Covered: line} }}))
+	id := b.submit("dave")
+	b.tick(b.now)
+	b.h.With(func(k *kernel.Kernel) error {
+		if c := k.State().Covered(b.now); len(c) != 1 || c[0].Plan != id || c[0].Line != line {
+			t.Fatalf("covered %+v", c)
+		}
+		return nil
+	})
+}

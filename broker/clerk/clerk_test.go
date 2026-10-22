@@ -399,6 +399,16 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if got, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, f.now); !ok || got.First != renewed.First || got.At != 2 {
 		t.Fatalf("the renewed approval: %+v %v", got, ok)
 	}
+	second := kernel.TaskApproval{Site: "second.example", First: "https://second.example/", N: 2}
+	second.By = key.Approve(opriv, kernel.TaskHash("t1", 2, second.Site, second.First))
+	if err := f.k.ApproveTask(3, "t1", second); err != nil {
+		t.Fatal(err)
+	}
+	for site, first := range map[string]string{a.Site: renewed.First, second.Site: second.First} {
+		if got, ok := kernel.TaskApproved(f.view(), anchors, ver, site, f.now); !ok || got.First != first {
+			t.Fatalf("%s: %+v %v", site, got, ok)
+		}
+	}
 	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, 1+kernel.TaskTimeout); ok {
 		t.Fatal("an approval past its task's timeout on the clerk's clock")
 	}

@@ -209,18 +209,20 @@ func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
 // fill, replaces the earlier one (CLK-3).
 func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 	r := newRig(t)
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
 	must(t, r.k.OpenTask(0, "t1"))
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	other := kernel.TaskApproval{Site: "other.example", First: "https://other.example/"}
 	other.N, other.By = 1, key.Approve(r.owner.priv, kernel.TaskHash("t1", 1, other.Site, other.First))
 	must(t, r.k.ApproveTask(2, "t1", other))
-	must(t, r.k.ApproveTask(3, "t1", approval("t1", 2, r.spare)))
+	must(t, r.k.ApproveTask(3, "t1", approval("t1", 2, phone)))
 	tk, _ := r.k.State().Task("t1", 4)
-	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || !bytes.Equal(tk.Approvals[site].By.By, r.spare.pub) || tk.Approvals[other.Site].At != 2 {
+	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || !bytes.Equal(tk.Approvals[site].By.By, phone.pub) || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("approvals %+v", tk.Approvals)
 	}
 	delete(tk.Approvals, other.Site) // the answer is a copy
-	must(t, r.k.Unenroll(5, r.spare.pub))
+	must(t, r.k.Unenroll(5, phone.pub))
 	if tk, _ := r.k.State().Task("t1", 6); len(tk.Approvals) != 1 || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("after the cut-off: %+v", tk.Approvals)
 	}
@@ -238,7 +240,7 @@ func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 	must(t, r.k.ApproveTask(10, "t1", approval("t1", 1, r.spare)))
 	again := a
 	again.N = 2
-	for name, b := range map[string]kernel.TaskApproval{"as logged": a, "renumbered": again} {
+	for name, b := range map[string]kernel.TaskApproval{"as logged": a, "renumbered": again, "ahead": approval("t1", 3, r.owner)} {
 		if err := r.k.ApproveTask(20, "t1", b); err != kernel.ErrTaskApproval {
 			t.Errorf("a replay %s: %v", name, err)
 		}

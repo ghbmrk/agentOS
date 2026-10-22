@@ -476,6 +476,9 @@ func TestAnUnanchoredReserveDropBreaksTheLogAndAdmitsNoSpend(t *testing.T) {
 	if rf := r.k.AdmitSpend(3, "t1", 1); rf == nil || rf.Code != kernel.CBroken {
 		t.Fatalf("a call admitted on a broken log: %v", rf)
 	}
+	if rf := r.k.AdmitPool(3, "p"); rf == nil || rf.Code != kernel.CBroken {
+		t.Fatalf("a pool admitted on a broken log: %v", rf)
+	}
 	r.anchor.down = false
 	r.boot(4)
 	if got := r.k.State().Pools["p"].Reserve; got != 300 {

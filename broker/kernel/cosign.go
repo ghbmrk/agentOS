@@ -76,7 +76,7 @@ func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*pow
 		w := holderAt{k.Root.Clerk, ""}
 		day := int64(0)
 		if len(k.Links) > 0 {
-			exp, _ := expiry(k.Links[0].Caveats)
+			exp := lapse(k.Links[0].Caveats)
 			if exp != nil && *exp <= at {
 				return
 			}
@@ -182,7 +182,7 @@ func (s *State) OneOffLine(root key.ID, now int64) int64 {
 	day := int64(0)
 	for id, g := range s.Grants {
 		if len(g.Key.Links) == 1 && rootOf(g.Key) == root && g.From <= now && !s.Changes.Revoked[id] && !s.Changes.Revoked[root] {
-			if exp, _ := expiry(g.Key.Links[0].Caveats); exp != nil && *exp > now {
+			if exp := lapse(g.Key.Links[0].Caveats); exp != nil && *exp > now {
 				day = max(day, spendDay(g.Key.Links[0].Caveats))
 			}
 		}

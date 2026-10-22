@@ -48,6 +48,7 @@ type call struct {
 type answer struct {
 	Outcome string `json:"outcome"`
 	Detail  string `json:"detail"`
+	Covered string `json:"covered,omitempty"` // the kernel's fold bounds it (kernel.MaxShown)
 }
 
 // snapshot is the log's view of one request, as of the call: everything
@@ -231,7 +232,7 @@ func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
 	case a == nil:
 		return kernel.Result{Outcome: "unknown", Detail: DLost}
 	}
-	return kernel.Result{Outcome: one(a.Outcome, "ok", "failed"), Detail: detail(a.Detail)}
+	return kernel.Result{Outcome: one(a.Outcome, "ok", "failed"), Detail: detail(a.Detail), Covered: a.Covered}
 }
 
 func (c remote) probe(r kernel.Request, s snapshot) string {
@@ -329,10 +330,10 @@ func serve(conn net.Conn, c kernel.Clerk, anchors []ed25519.PublicKey) {
 	case in.Op != opDo:
 		return
 	case !in.View.covers(anchors, in.Req):
-		out = answer{"failed", DView}
+		out = answer{Outcome: "failed", Detail: DView}
 	default:
 		res := c.Do(in.Req, &in.View)
-		out = answer{res.Outcome, res.Detail}
+		out = answer{res.Outcome, res.Detail, res.Covered}
 	}
 	b, _ := json.Marshal(out)
 	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
