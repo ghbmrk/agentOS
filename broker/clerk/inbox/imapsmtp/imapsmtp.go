@@ -20,6 +20,7 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -304,8 +305,6 @@ func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) er
 
 // sessionB is session with a reply budget of budget bytes.
 func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Client) error) error {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-	defer cancel()
 	return s.sessionR(ctx, budget, func(c *client.Client, _ func(int64)) error { return f(c) })
 }
 
@@ -315,31 +314,16 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 // two adjacent windows, never more: what a step holds is bounded by its own
 // window and the one before.
 func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) (err error) {
-	// A session cut off fails with why, ErrReplyTooLarge or ErrTimeout, not
-	// with what the closed connection reports; an error f reached from what
-	// the server had already sent (stand) is kept, whenever the cut-off came.
 	var late atomic.Bool
 	var bc *budgetConn
-	defer func() {
-		var st stand
-		switch {
-		case errors.As(err, &st):
-			err = st.error
-		case err == nil:
-		case bc != nil && bc.over.Load():
-			err = ErrReplyTooLarge
-		case late.Load():
-			err = ErrTimeout
-		}
-	}()
-	if err := ctx.Err(); err != nil {
-		late.Store(err == context.DeadlineExceeded)
-		return err
-	}
+	defer func() { err = ended(err, bc != nil && bc.over.Load(), late.Load(), ctx) }()
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
+		// The caller's deadline, passed before or during the dial, not the
+		// dial's own timeout, ended it.
+		late.Store(ctx.Err() == context.DeadlineExceeded)
 		return err
 	}
 	// go-imap clears the connection's deadline at each command, so a timer
@@ -386,9 +370,44 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 		err = c.Login(l.User, l.Secret)
 	}
 	if err != nil {
-		return ErrLoginRefused
+		return signIn(err)
 	}
 	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
+}
+
+// ended is a session's or submission's error as it ended: an answer the
+// server had sent (stand) as it is; otherwise, if it was cut off, why, not
+// what the closed connection reports: its read budget spent, its timeout or
+// a deadline, or its caller stopping it.
+func ended(err error, over, late bool, caller context.Context) error {
+	var st stand
+	switch {
+	case errors.As(err, &st):
+		return st.error
+	case err == nil:
+		return nil
+	case over:
+		return ErrReplyTooLarge
+	case late:
+		return ErrTimeout
+	case caller.Err() == context.Canceled:
+		return context.Canceled
+	}
+	return err
+}
+
+// signIn is a failed sign-in's error: ErrLoginRefused, standing, only when
+// the server answered it as a refusal, an IMAP NO or BAD other than
+// UNAVAILABLE (RFC 5530: the server is down for now), a LOGINDISABLED
+// server, or an SMTP 5xx; any other failure passes with time and is
+// mapped as the session ended.
+func signIn(err error) error {
+	var st *imap.StatusError
+	var tp *textproto.Error
+	if errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE" || errors.Is(err, client.ErrLoginDisabled) || errors.As(err, &tp) && tp.Code >= 500 {
+		return stand{ErrLoginRefused}
+	}
+	return errors.New("imapsmtp: the sign-in did not complete")
 }
 
 type quiet struct{}
@@ -679,10 +698,12 @@ func subject(c *client.Client, uid uint32) string {
 	} else {
 		v = rest
 	}
-	// A cut inside an encoded word leaves it undecodable: it goes, rather
-	// than show the owner its raw form. Q and B text carry no "?=".
-	if i := strings.LastIndex(v, "=?"); cut && i >= 0 && !strings.Contains(v[i+2:], "?=") {
-		v = v[:i]
+	// A cut inside an encoded word, =?charset?encoding?text?=, leaves it
+	// undecodable: it goes, rather than show the owner its raw form.
+	if i := strings.LastIndex(v, "=?"); cut && i >= 0 {
+		if p := strings.SplitN(v[i+2:], "?", 4); len(p) < 4 || !strings.HasPrefix(p[3], "=") {
+			v = v[:i]
+		}
 	}
 	if d, err := new(mime.WordDecoder).DecodeHeader(v); err == nil {
 		v = d
@@ -843,23 +864,18 @@ const smtpReplyBudget = 1 << 20
 // Submit sends raw over SMTP submission from the configured address.
 // A submission cut off fails with why, as a session does (sessionR).
 func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err error) {
+	caller := ctx
+	var late atomic.Bool
+	var bc *budgetConn
+	defer func() { err = ended(err, bc != nil && bc.over.Load(), late.Load(), caller) }()
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(ctx, s.cfg.SMTP, s.cfg.SMTPSec)
 	if err != nil {
+		late.Store(caller.Err() == context.DeadlineExceeded)
 		return err
 	}
-	bc := newBudgetConn(conn, smtpReplyBudget)
-	var late atomic.Bool
-	defer func() {
-		switch {
-		case err == nil:
-		case bc.over.Load():
-			err = ErrReplyTooLarge
-		case late.Load():
-			err = ErrTimeout
-		}
-	}()
+	bc = newBudgetConn(conn, smtpReplyBudget)
 	// The timeout closes the connection, marked late first, so what the
 	// closed connection reports is never mistaken for the server's answer.
 	tcp := conn
@@ -909,7 +925,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		auth = smtpXOAuth2{xoauth2{l.User, l.Secret}}
 	}
 	if err := c.Auth(auth); err != nil {
-		return ErrLoginRefused
+		return signIn(err)
 	}
 	if err := c.Mail(s.cfg.From); err != nil {
 		return err
@@ -929,7 +945,11 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 	if err := w.Close(); err != nil {
 		return err
 	}
-	return c.Quit()
+	// The server took the mail at its answer to the data's end (RFC 5321
+	// 4.1.1.4): a QUIT that fails after it is not a failed send, which a
+	// caller would retry and so send twice.
+	c.Quit()
+	return nil
 }
 
 // xoauth2 is the XOAUTH2 mechanism for IMAP (sasl.Client); smtpXOAuth2

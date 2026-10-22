@@ -40,6 +40,10 @@ const (
 	nNoTrash    NotDone = "no-trash-folder" // the account has no folder with the trash role
 	nNoPoster   NotDone = "no-poster"       // no one-click POSTer is wired (#2601)
 	nBadFlag    NotDone = "bad-flag"        // a label that is not one of the clerk's keywords
+	// A change's session signs in before it acts, so a refused sign-in or a
+	// server never reached has changed nothing.
+	nSignInRefused NotDone = "sign-in-refused" // the server refused the login (imapsmtp.ErrLoginRefused)
+	nUnreachable   NotDone = "unreachable"     // the mail server was not reached (imapsmtp.ErrUnreachable)
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -368,6 +372,10 @@ func before(err error) error {
 		return nNoMove
 	case errors.Is(err, imapsmtp.ErrBadFlag):
 		return nBadFlag
+	case errors.Is(err, imapsmtp.ErrLoginRefused):
+		return nSignInRefused
+	case errors.Is(err, imapsmtp.ErrUnreachable):
+		return nUnreachable
 	}
 	return err
 }

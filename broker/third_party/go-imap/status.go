@@ -83,10 +83,20 @@ func (r *StatusResp) Err() error {
 	}
 
 	if r.Type == StatusRespNo || r.Type == StatusRespBad {
-		return errors.New(r.Info)
+		// agentos: the status itself, so a caller can tell a server's answer,
+		// and its response code, from a closed connection.
+		return &StatusError{Resp: r}
 	}
 	return nil
 }
+
+// agentos: StatusError is a NO or BAD status a command ended with. Its text
+// is the status info, as before.
+type StatusError struct {
+	Resp *StatusResp
+}
+
+func (err *StatusError) Error() string { return err.Resp.Info }
 
 func (r *StatusResp) WriteTo(w *Writer) error {
 	tag := RawString(r.Tag)

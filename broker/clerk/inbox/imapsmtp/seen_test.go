@@ -296,6 +296,29 @@ func TestADialThatFailsSaysTheServerWasNotReached(t *testing.T) {
 	}
 }
 
+// A dial the caller's deadline ends, passed before it or during it, says
+// the timeout ran out, not that the server was not reached, reading or
+// sending.
+func TestADialTheCallersDeadlineEndsTimesOut(t *testing.T) {
+	s := guardedStore(t, 5*time.Second, func(ctx context.Context, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	for name, d := range map[string]time.Duration{"before": -time.Second, "during": 200 * time.Millisecond} {
+		for call, f := range map[string]func(context.Context) error{
+			"UIDs":   func(ctx context.Context) error { _, _, err := s.UIDs(ctx, "INBOX"); return err },
+			"Submit": func(ctx context.Context) error { return s.Submit(ctx, []string{"a@example.test"}, []byte("x")) },
+		} {
+			ctx, cancel := context.WithTimeout(context.Background(), d)
+			err := f(ctx)
+			cancel()
+			if !errors.Is(err, ErrTimeout) {
+				t.Fatalf("%s %s: err %v, want ErrTimeout", name, call, err)
+			}
+		}
+	}
+}
+
 // A caller that stops a dial is told so, not that the server was not
 // reached.
 func TestADialTheCallerStopsIsNotUnreachable(t *testing.T) {
@@ -362,7 +385,10 @@ func TestSeenNamesALongHeaderBySubject(t *testing.T) {
 		subjectAnswer(2, "Subject: wrong\r\n\r\n") + subjectAnswer(1, "Subject: first\r\n part\r\n\r\n") + subjectAnswer(1, "Subject: second\r\n\r\n"): "first part",
 		subjectAnswer(1, "Subject: =?UTF-8?Q?ok=0AOPENED_nothing=1B[2J=E2=80=AE?=\r\n\r\n"):                                                            "ok OPENED nothing [2J",
 		subjectAnswer(1, "X-Subject: no\r\n\r\n"): "",
-		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?"+strings.Repeat("x", subjectMax)+"?=\r\n\r\n"): "Großer…",
+		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?"+strings.Repeat("x", subjectMax)+"?=\r\n\r\n"):       "Großer…",
+		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?=C3=A9"+strings.Repeat("x", subjectMax)+"?=\r\n\r\n"): "Großer…",
+		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= "+strings.Repeat("x", subjectMax)+"\r\n\r\n"):                   "Großer " + strings.Repeat("x", subjectMax-len("Subject: =?UTF-8?Q?Gro=C3=9Fer?= ")) + "…",
+		subjectAnswer(1, "Subject: a =? b\r\n\r\n"):                                                                        "a =? b",
 	} {
 		addr := seenServe(t, func(string, int) string { return "* SEARCH 1\r\n" }, func(n int) string {
 			if n == 0 {
