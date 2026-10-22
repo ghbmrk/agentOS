@@ -1012,11 +1012,11 @@ class HealthTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_health(self):
+    def run_health(self, cwd=None):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
                    AGENTOS_LIB=str(self.lib), AGENTOS_HEALTH_ROOT=str(self.root))
         return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/health")], env=env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=cwd)
 
     def test_pass(self):
         r = self.run_health()
@@ -1093,6 +1093,22 @@ class HealthTest(unittest.TestCase):
         r = self.run_health()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("forwarding is on (/proc/sys/net/ipv6/conf/x/force_forwarding)", r.stdout)
+
+    def test_device_globs_ignore_the_working_directory(self):
+        # REQ: UPD-1. A working directory holding a path that matches a device pattern must not
+        # stand in for the real devices: eth0 with forwarding on still fails.
+        for rel, sw in (("ipv4/conf/zz/forwarding", "ipv4/conf/eth0/forwarding"),
+                        ("ipv6/conf/zz/forwarding", "ipv6/conf/eth0/forwarding"),
+                        ("ipv6/conf/zz/force_forwarding", "ipv6/conf/eth0/force_forwarding")):
+            with self.subTest(rel):
+                self.tearDown()
+                self.setUp()
+                cwd = pathlib.Path(self.tmp.name) / "cwd"
+                write(cwd, rel, "0\n")
+                write(self.root, "proc/sys/net/" + sw, "1\n")
+                r = self.run_health(cwd=cwd)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("forwarding is on (/proc/sys/net/%s)" % sw, r.stdout)
 
     def test_device_that_keeps_vanishing_fails(self):
         # One re-glob is the limit: a switch that is gone again on the second pass fails.
