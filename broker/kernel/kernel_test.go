@@ -932,6 +932,35 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	r.replays()
 }
 
+// A redo that fails, even with nothing sent (too-large), leaves the step
+// parked, charged and listed: the send before it may have acted, and only the
+// kernel knows the step was retried (KRN-8). It can be retried again.
+func TestARetriedStepThatFailsParksAgain(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.ck)
+	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
+	if st := r.phase("p1"); st.Phase != kernel.PParked || r.status("p1") != kernel.SActive || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 1 {
+		t.Fatalf("phase %s, status %s after a failed redo", st.Phase, r.status("p1"))
+	}
+	if s := r.k.State().Status(); len(s) != 1 || s[0].Phase != kernel.PParked || !s[0].Retry || s[0].Detail != "too-large" {
+		t.Fatalf("STATUS %+v", s)
+	}
+	r.replays()
+	must(t, r.k.Retry(at+3, "p1", 0))
+	must(t, r.tick(at+4))
+	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
+		t.Fatalf("second retry: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+	// A first send that fails is still a failure: nothing was uncertain.
+	f := newRig(t)
+	f.plan("p1", f.ck, st(key.Trash, "m1"))
+	must(t, f.k.Answer(0, f.calls(0, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
+	if f.status("p1") != kernel.SFailed || f.phase("p1").Phase != kernel.PFailed {
+		t.Fatalf("first send: status %s, phase %s", f.status("p1"), f.phase("p1").Phase)
+	}
+}
+
 // A RETRY for a step whose clerk the kernel was not booted with is refused:
 // its redo could reach no clerk and would cancel the plan (#2747).
 func TestRetryRefusesAMissingClerk(t *testing.T) {
