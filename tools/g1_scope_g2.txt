@@ -21,6 +21,10 @@
 # builder guest and binary (A11), probecmd (LOOP-7), evals/, and the other spikes. Photo
 # (CH-22-27: broker/photo/, broker/cmd/agentos-photo/) is listed so its chain can build;
 # no G2 binary imports it.
+# Migration step 4 (D-139; docs/LANES.md port map, "Sub B, untrusted side"): the ports in
+# #2578 (#2776-#2790) delete old-core use from the untrusted directories, so the ones above
+# that the port map names are listed after all. D-098 still bars new rows and follow-ups
+# there (OPERATING §5, "Scope freeze"); this list no longer enforces it for them.
 
 freeze on
 since 2026-10-17T17:06:19Z
@@ -173,13 +177,24 @@ allow broker/voice/
 allow broker/vm/
 allow broker/workers/
 
+# MIG-4-untrusted ports (D-139, #2578): sub B's port-map directories that D-098 froze or no
+# G2 test needs. The `frozen-import` lines for compile, corpus, loop7, loopbuild, loops and
+# skill moved here.
+allow broker/attention/
+allow broker/cleanroom/
+allow broker/compile/
+allow broker/corpus/
+allow broker/hint/
+allow broker/loop7/
+allow broker/loopbuild/
+allow broker/loops/
+allow broker/machprobe/
+allow broker/probecmd/
+allow broker/pubsend/
+allow broker/skill/
+allow broker/sockprobe/
+
 # Imported by the G2 binaries but frozen (D-098).
-frozen-import broker/compile/
-frozen-import broker/corpus/
-frozen-import broker/loop7/
-frozen-import broker/loopbuild/
-frozen-import broker/loops/
 frozen-import broker/sendrules/
 frozen-import broker/sipsign/
-frozen-import broker/skill/
 frozen-import broker/smsapi/
