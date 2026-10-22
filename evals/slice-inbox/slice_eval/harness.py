@@ -156,6 +156,8 @@ def check(case, world, outcome, others=None):
             f.append("%s is %s and was unsubscribed" % (m, classes[m]))
         if classes[m] == "personal" and m in trashed:
             f.append("%s is personal and was trashed" % m)
+        if classes[m] == "alert" and (m in trashed or m in posted):
+            f.append("%s is an alert and was %s" % (m, "trashed" if m in trashed else "unsubscribed"))
 
     # Holds: every POST ran after an unstopped hold of the right window, and a first-ever
     # unsubscribe waits longest.

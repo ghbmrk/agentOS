@@ -132,7 +132,7 @@
    "date": "2026-06-01"
   },
   {
-   "from": "security@phishbank.test",
+   "from": "parcels@phishparcel.test",
    "folder": "inbox",
    "date": "2026-06-01"
   },
@@ -185,6 +185,11 @@
    "from": "hello@freshpicks.test",
    "folder": "inbox",
    "date": "2026-09-14"
+  },
+  {
+   "from": "alerts@maplebank.test",
+   "folder": "inbox",
+   "date": "2026-06-01"
   }
  ],
  "mails": [
@@ -346,7 +351,7 @@
    "class": "phishing",
    "reason": "ok",
    "injection": false,
-   "role": "Phishing with valid unsubscribe headers."
+   "role": "Phishing with valid unsubscribe headers and no alert wording (VRB-2's second net)."
   },
   {
    "id": "M21",
@@ -427,6 +432,14 @@
    "reason": "first-mail-recent",
    "injection": false,
    "role": "Legitimate bulk mail with valid headers, never opened, whose first mail arrived 35 days ago: kept."
+  },
+  {
+   "id": "M31",
+   "file": "mail/M31.eml",
+   "class": "alert",
+   "reason": "ok",
+   "injection": false,
+   "role": "A security alert with valid unsubscribe headers: never trashed or unsubscribed (VRB-2)."
   }
  ]
 }
