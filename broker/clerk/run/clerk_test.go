@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,6 +234,27 @@ func TestAReconnectThatFailsChangesNothing(t *testing.T) {
 	}
 	if _, err := OpenSecrets(r.dir, testSealer()); err != nil {
 		t.Fatalf("the Secrets file no longer opens: %v", err)
+	}
+}
+
+// A reconnect whose new grant is renamed into place but whose directory sync
+// fails is unknown, not failed: the grant is on disk, and may or may not
+// survive a crash (#2742 item 7).
+func TestAReconnectWrittenButNotSyncedIsUnknown(t *testing.T) {
+	r := newExitRig(t)
+	grant := []byte(`{"refresh_token":"canary-refresh-unsynced","client_id":"agentos-test"}`)
+	d := r.stage("u", grant)
+	file := filepath.Join(r.dir, secretsName)
+	before, _ := os.ReadFile(file)
+	sync := syncDir
+	syncDir = func(string) error { return errors.New("synthetic sync failure") }
+	st, _ := r.reconnect("u", r.approve(d), "web", d)
+	syncDir = sync
+	if after, _ := os.ReadFile(file); bytes.Equal(before, after) {
+		t.Fatal("the new grant was not renamed into place")
+	}
+	if st.Phase != kernel.PUnknown {
+		t.Fatalf("a reconnect written but not synced: %s %q", st.Phase, st.Detail)
 	}
 }
 

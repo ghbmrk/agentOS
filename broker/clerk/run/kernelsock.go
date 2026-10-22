@@ -321,6 +321,10 @@ var ErrLost = errors.New("run: the answer was lost; it may or may not have taken
 // socket, or another uid holds it.
 var ErrUnreachable = errors.New("run: the socket could not be reached; nothing was sent")
 
+// ErrTooLarge is a call past what the socket reads (maxCall): it was never
+// sent.
+var ErrTooLarge = errors.New("run: the call is too large for the socket; nothing was sent")
+
 // wireErrors are the errors a socket's answer names by their text, so the
 // caller gets the same value back and errors.Is works across the socket,
 // also for an error that wraps one (kernel.ErrRetryRefused with its code):
@@ -366,6 +370,11 @@ func (c Conn) call(op string, args, out any) error {
 	b, err := json.Marshal(kernelCall{op, mustRaw(args)})
 	if err != nil {
 		return err
+	}
+	if len(b)+1 > maxCall {
+		// The server would read only part of it, and the call would
+		// read as lost though it was never taken (#2742 item 9).
+		return ErrTooLarge
 	}
 	d := c.Timeout
 	if d == 0 {

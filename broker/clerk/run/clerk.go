@@ -143,7 +143,12 @@ func (h *ExitHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case h.staged.grant == nil || h.staged.plan != r.Plan.ID || grantDigest(h.staged.grant) != digest:
 		return kernel.Result{Outcome: "failed", Detail: DNotStaged}
 	}
-	if err := h.x.Reconnect(h.staged.grant); err != nil {
+	if err := h.x.Reconnect(h.staged.grant); errors.Is(err, errUnsynced) {
+		// The new grant is on disk but not surely durable: whether the
+		// step took effect is unknown, and the staged grant stays for a
+		// RETRY under the same key (#2742 item 7).
+		return kernel.Result{Outcome: "unknown"}
+	} else if err != nil {
 		return kernel.Result{Outcome: "failed", Detail: clerk.DCredential}
 	}
 	clear(h.staged.grant)
