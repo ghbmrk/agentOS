@@ -23,20 +23,17 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
-	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/notice"
-	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -299,14 +296,13 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket, recallDir string
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
 	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var checkerVerify string
 	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
@@ -349,11 +345,9 @@ func main() {
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
 	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the owner's agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
-	flag.StringVar(&workerRoutes, "worker-routes", "/run/agentos-egress/provider.sock", "the vault process's provider control socket, which opens each provider worker's route socket (#1014); empty gives provider workers no route")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
-	flag.StringVar(&checkerVerify, "checker-verify", "", "agentos-checker's verify socket, which checks the owner's code-generator codes while the vault process holds only the unlock proof (CH-4); empty keeps every check on -owner-verify")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the owner's FORGET state: task texts, tombstones and the restored forget log (W3-forget)")
 	flag.StringVar(&routingSocket, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, from which the model routes read how many attempts the owner's rule allows; empty holds MaxRetries")
@@ -379,9 +373,6 @@ func main() {
 	if err := checkDiskQuotaFlag(diskQuota); err != nil {
 		log.Fatal(err)
 	}
-	// The provider images whose pinned CLI versions both provider runners
-	// read at each gate check (#1877).
-	pins := readImagePins(imgs, provagent.Builtins())
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -474,26 +465,9 @@ func main() {
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}
-		// "Use my plan" signs in through the provider's CLI in one private
-		// worker (ONB-3, #1264 c4e2b), on machines opened only if it is used
-		// and closed before agentosd opens its own below.
-		var signInHost *setupHost
-		if runsc != "" && workerRoutes != "" {
-			signInHost, m.SignIn = newSetupPlane(setupMachines{
-				runsc: runsc, stateDir: stateDir, rc: modelroute.NewRouteControl(workerRoutes), diskQuota: diskQuota,
-				images: imgs, admit: cfg.Admission,
-				cgroups:       boxMachines,
-				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
-			}, pins)
-		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)
 		stop()
-		if signInHost != nil {
-			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			signInHost.Close(cctx)
-			cancel()
-		}
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -578,11 +552,7 @@ func main() {
 	var line *secondLine
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
-		ov := ownerVerifier{v: verifier}
-		if checkerVerify != "" {
-			ov.checker = checkersock.VerifyClient(checkerVerify)
-		}
-		cfg.OwnerVerifier = ov
+		cfg.OwnerVerifier = ownerVerifier{v: verifier}
 		// The second line's STATUS line (potency R1 on #139).
 		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
@@ -602,15 +572,6 @@ func main() {
 	}
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
-	}
-	// ONB-9's plan sign-in line; the provider runner sets and clears it.
-	planLine := &planNote{}
-	cfg.Notes = append(cfg.Notes, planLine.Note)
-	// #1264: the Wi-Fi page offers that sign-in again after setup, through
-	// the provider runner once it exists (ONB-3, ONB-9).
-	pageSI := &pageSignIn{note: planLine}
-	if cfg.PageSocket != nil {
-		cfg.PageSocket.PlanSignIn = pageSI
 	}
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
@@ -681,10 +642,6 @@ func main() {
 		spare := &modelroute.Spare{}
 		go spare.Run(ctx, modelroute.NewRouting(routingSocket).State, 30*time.Second)
 		retries = spare.Retries
-		// The line names other routes only when some class of the owner's
-		// rule has a route past its first (#1264 item 3): a plan-only rule
-		// has one route per class. Unknown reads as plan-only.
-		planLine.others = func() bool { return spare.Retries() >= 1 }
 	}
 	steps := newStepNotes(&cfg.Notes)
 	// FORGET's item 2s a restart interrupted resume once recall opens
@@ -745,11 +702,6 @@ func main() {
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
 		}
-		var planRoutes *modelroute.RouteControl
-		if workerRoutes != "" {
-			planRoutes = modelroute.NewRouteControl(workerRoutes)
-			vmc.ProviderRoutes = planRoutes
-		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)
 		if err != nil {
@@ -769,16 +721,6 @@ func main() {
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
-			if wt != nil && planRoutes != nil {
-				pr := providerRunner(m, planRoutes, planLine, pins)
-				pr.Background = ctx   // a sign-in's wait ends at shutdown
-				pr.Stops = d.Engine() // a stopped route stays stopped across a restart (OP-11)
-				journalProviderRuns(pr, d.Engine())
-				pageSI.r.Store(pr)
-				// #1856: plan readings and the owner's reserve (RES-5).
-				wirePlanUsage(pr, planRoutes)
-				wt.Provider = providerTool{pr}
-			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, recallTools, wt)
 			if wt != nil {
@@ -943,93 +885,6 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 		return nil
 	}
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: g.stopped, Free: g.room, Avail: g.avail}
-}
-
-// providerRunner serves provider_run (CAP-11) over the built-in
-// declarations and the vault process's route control rc. The owner's grant
-// and private mark are rc's plan state (#1264), and note carries ONB-9's
-// sign-in line. Every other owner-side input is closed until its row lands:
-// no consent. The image's pinned CLI version is read from the image by
-// pins at each check (#1877), as setup's sign-in reads it; an image that
-// pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
-// fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
-// wirePlanUsage (#1856); without them admission refuses (RES-5 fails
-// closed). Its Journal logs each run until journalProviderRuns wires it
-// to the engine journal (OP-8). Nothing calls StartSignIn until the setup page does (#1264
-// c4e2b). A nil rc or note leaves those inputs closed, as nil pins
-// leave the gate.
-func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
-	r := &provagent.Runner{
-		Host: m, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
-		ImageVersion: pins.version,
-		Granted:      func(string) bool { return false },
-		PrivateOK:    func(string) bool { return false },
-		Consent:      func(string) bool { return false },
-		Logf:         log.Printf,
-		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
-		// The page's busy text names this wait (CH-12, #1945).
-		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
-		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
-	}
-	r.Journal = providerJournal{}.journal // logged until journalProviderRuns (PJ-1)
-	if rc != nil {
-		r.Granted = func(p string) bool { return planGranted(rc, p) }
-		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
-		r.SignInStored = func(id string) bool { return planSignInStored(rc, id) }
-		r.SignInFor = rc.SignInFor
-	}
-	if note != nil {
-		r.SignIn, r.OnSignedIn = note.set, note.clear
-	}
-	return r
-}
-
-// providerTool adapts the runner to the worker tools' ProviderRunner, so
-// workers links neither provagent nor the model route (ARC-2). A refusal
-// crosses as its closed reason only.
-type providerTool struct{ r *provagent.Runner }
-
-func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
-	out, err := p.r.Run(ctx, provagent.Request{Machine: q.Machine, Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
-		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
-	var ref *provagent.Refusal
-	if errors.As(err, &ref) {
-		return "", &workers.ProviderRefusal{Reason: workers.ProviderReason(ref.Reason)}
-	}
-	return out, err
-}
-
-// planSeeder adapts the vault process's route control to provagent's
-// Seeder, mapping its errors onto provagent's sentinels. The control socket
-// mints Codex placeholders only (egress PlanLogins.Seed), so any other
-// provider is refused before it is asked (#1378, #1379, #1380 add theirs).
-type planSeeder struct{ rc *modelroute.RouteControl }
-
-func (s planSeeder) Seed(provider, id string, private bool) (map[string][]byte, error) {
-	if provider != "codex" {
-		return nil, fmt.Errorf("no plan seed for provider %q", provider)
-	}
-	if s.rc == nil {
-		return nil, errors.New("no plan route control")
-	}
-	seed, err := s.rc.Seed(id, private)
-	switch {
-	case err == nil:
-		return seed, nil
-	case errors.Is(err, modelroute.ErrNoPlanLogin):
-		return nil, fmt.Errorf("%w: %v", provagent.ErrNoLogin, err)
-	case errors.Is(err, modelroute.ErrRouteBusy):
-		return nil, fmt.Errorf("%w: %v", provagent.ErrRouteBusy, err)
-	case errors.Is(err, modelroute.ErrVaultLocked):
-		return nil, fmt.Errorf("%w: %v", provagent.ErrVaultLocked, err)
-	}
-	return nil, err
-}
-
-func (s planSeeder) Close(id string) {
-	if s.rc != nil {
-		s.rc.Close(id)
-	}
 }
 
 // workerGates are what the worker tools read of the box: the owner's
@@ -1234,27 +1089,15 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 
 // ownerVerifier gives the owner channel the vault process's verify
 // operation, translating why a check did not run into the channel's terms.
-// With a checker, codes go to the checker, which holds the seed while the
-// vault is open and spends the same last step the unlock does (CH-4); the
-// vault process then checks only the unlock's proof. Acts (owner.Item.Act)
-// go to the checker with the code, which approves each once for the
-// holders (CH-4, CH-10); the vault process records no acts, so a code that
-// carries acts and cannot reach a checker is not checked at all.
+// The vault process records no acts (owner.Item.Act), so a code that
+// carries acts is not checked at all and no act is approved: approvals of
+// irreversible acts are the kernel's owner seam now (KRN-4, CH-10; the
+// checker split went with #2780).
 type ownerVerifier struct {
-	v       *modelroute.Verifier
-	checker *checkersock.Client
+	v *modelroute.Verifier
 }
 
 func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...owner.CheckerAct) (int64, bool, error) {
-	proof := strings.HasPrefix(code, owner.UnlockProofPrefix)
-	if o.checker != nil && !proof {
-		cas := make([]checkersock.Act, len(acts))
-		for i, a := range acts {
-			cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
-		}
-		step, ok, err := o.checker.VerifyTOTP(code, after, counted, cas...)
-		return step, ok, checkerVerifyErr(err)
-	}
 	if len(acts) > 0 {
 		return 0, false, &owner.VerifyError{Kind: owner.VaultDown}
 	}
@@ -1262,57 +1105,15 @@ func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts .
 	return step, ok, ownerVerifyErr(err)
 }
 
-// RevokeActs withdraws approvals the checker recorded for acts the owner
-// channel will not run (REV-3). Without a checker no act was approved, so
-// there is nothing to withdraw.
-func (o ownerVerifier) RevokeActs(acts ...string) error {
-	if o.checker == nil {
-		return nil
-	}
-	return o.checker.Revoke(acts...)
-}
+// RevokeActs has nothing to withdraw: no act was approved (REV-3).
+func (o ownerVerifier) RevokeActs(...string) error { return nil }
 
-// ReleaseActs opens the checker's held approvals for acts whose items left
-// their undo window (REV-3). Without a checker no act was approved, so
-// there is nothing to open.
-func (o ownerVerifier) ReleaseActs(acts ...string) error {
-	if o.checker == nil {
-		return nil
-	}
-	return o.checker.Release(acts...)
-}
+// ReleaseActs has nothing to open: no act was approved (REV-3).
+func (o ownerVerifier) ReleaseActs(...string) error { return nil }
 
-// AllowActs records the acts of a low-tier texted YES or a grid cell as
-// allowed approvals at the checker, which serve irreversible acts but no
-// secret one (CH-4, ADP-9). Without a checker nothing can record them, so
-// the channel approves nothing.
-func (o ownerVerifier) AllowActs(acts ...owner.CheckerAct) error {
-	if o.checker == nil {
-		return &owner.VerifyError{Kind: owner.VaultDown}
-	}
-	cas := make([]checkersock.Act, len(acts))
-	for i, a := range acts {
-		cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
-	}
-	return o.checker.Allow(cas...)
-}
-
-// checkerVerifyErr is ownerVerifyErr for the checker: no seed means the
-// vault is locked, a checker that is not running is down, and any other
-// failure leaves the check's outcome unknown.
-func checkerVerifyErr(err error) error {
-	var pe *checkersock.PausedError
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, checkersock.ErrNoSeed):
-		return &owner.VerifyError{Kind: owner.VaultLocked}
-	case errors.As(err, &pe):
-		return &owner.VerifyError{Kind: owner.VerifyPaused, Until: pe.Until}
-	case errors.Is(err, checkersock.ErrDown):
-		return &owner.VerifyError{Kind: owner.VaultDown}
-	}
-	return &owner.VerifyError{Kind: owner.VerifyLost}
+// AllowActs cannot record an approval, so the channel approves nothing.
+func (o ownerVerifier) AllowActs(...owner.CheckerAct) error {
+	return &owner.VerifyError{Kind: owner.VaultDown}
 }
 
 func ownerVerifyErr(err error) error {

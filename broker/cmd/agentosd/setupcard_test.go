@@ -16,14 +16,15 @@ import (
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
-	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: HW-1, ONB-7
 
-// cardVault makes a sealed vault from the card's passphrase, as the vault
-// process will (recovery.Provision); a retry with the same card is a no-op.
-// Reset removes a vault made from a card nobody confirmed.
+// cardVault stands in for the store the card's passphrase seals
+// (recovery.Provision): it writes a store file and a key file that records
+// the passphrase, so a test can tell which card made it; a retry with the
+// same card is a no-op. Reset removes a store made from a card nobody
+// confirmed.
 type cardVault struct {
 	dir    string
 	made   *card.Card
@@ -39,12 +40,25 @@ func (v *cardVault) Provision(c *card.Card) error {
 		return nil
 	}
 	vp, kp := v.paths()
-	vv, err := vault.CreateSealed(vp, kp, vault.Passphrase(c.VaultPassphrase))
-	if err != nil {
+	if err := os.WriteFile(vp, []byte("sealed"), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(kp, []byte(c.VaultPassphrase), 0o600); err != nil {
 		return err
 	}
 	v.made = c
-	return vv.Close()
+	return nil
+}
+
+// madeFrom reports whether the store on disk was made from passphrase.
+func (v *cardVault) madeFrom(passphrase string) bool {
+	vp, kp := v.paths()
+	k, err := os.ReadFile(kp)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(vp)
+	return err == nil && string(k) == passphrase
 }
 
 func (v *cardVault) Reset() error {
@@ -234,8 +248,8 @@ func TestARestartAfterAKilledConfirmShowsANewCard(t *testing.T) {
 	if err := f2.confirm(t, s); err != nil {
 		t.Fatalf("new card: %v", err)
 	}
-	if _, err := vault.OpenSealed(vp, kp, vault.Passphrase(f2.shown.VaultPassphrase)); err != nil {
-		t.Fatalf("vault not made from the new card: %v", err)
+	if !f2.vault.madeFrom(f2.shown.VaultPassphrase) {
+		t.Fatal("vault not made from the new card")
 	}
 	if s.Hold() != nil {
 		t.Fatal("held after the confirm")

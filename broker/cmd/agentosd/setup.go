@@ -71,9 +71,6 @@ type setupMode struct {
 	// which the claim rotates (OpSetupWiFi, HW-10, #1692); empty, neither
 	// setup Wi-Fi op is served.
 	SetupNet string
-	// SignIn starts a plan route's device-code sign-in at setup (c4e2b,
-	// ONB-3); nil offers no plan sign-in.
-	SignIn localsrv.SignIn
 }
 
 // cardHold is the Owner Card step as setup's finish sees it
@@ -165,7 +162,6 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		Join:      joiner(m.NetJoin, m.Seen),
 		Networks:  scanner(m.NetJoin),
 		Providers: providersOf(m.Enroll),
-		SignIn:    m.SignIn,
 		Finished:  func(owner string) { finished <- owner }}
 	if m.Line != nil {
 		cfg.Line = m.Line // a nil *SetupLine would be a non-nil interface
@@ -328,7 +324,8 @@ func providersOf(e localsrv.Enroller) localsrv.Providers {
 
 // Providers lists the vault's built-in providers. An adapter takes an API
 // key at setup; a plan route takes a device-code sign-in instead (c4e2b),
-// which the page offers only while setup's SignIn is ready for it.
+// which agentosd no longer offers: plan logins move to the model clerk
+// (CLK-7, #2780).
 func (e enroller) Providers() ([]localapi.SetupProvider, error) {
 	ps, err := e.v.SetupProviders()
 	if err != nil {
