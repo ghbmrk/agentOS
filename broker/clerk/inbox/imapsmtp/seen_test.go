@@ -6,10 +6,14 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // seenServer is a raw IMAP server for Seen that takes one connection: it logs
@@ -200,6 +204,53 @@ func TestASessionCutOffAtItsTimeoutSaysSo(t *testing.T) {
 		cancel()
 		if !errors.Is(err, ErrTimeout) {
 			t.Fatalf("%s: err %v, want ErrTimeout", name, err)
+		}
+	}
+}
+
+// A server that takes the connection and never answers the handshake is
+// cut off at the timeout counted from the dial, and says so: the dial here
+// takes a fifth of the timeout, so a cut-off counted from the connection, or
+// one that does not mark the session late, fails the test.
+func TestAStalledHandshakeTimesOut(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(io.Discard, c); c.Close() }()
+		}
+	}()
+	const timeout = 500 * time.Millisecond
+	s, err := New(Config{
+		IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
+		Timeout:    timeout,
+		Credential: func(context.Context) (Login, error) { return Login{}, nil },
+		From:       "owner@example.test",
+		Guard: netguard.New(netguard.Config{
+			Resolver: answers{"8.8.8.8"},
+			Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				time.Sleep(timeout / 5)
+				return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]func() error{
+		"Seen": func() error { _, err := seenFrom(s, "INBOX"); return err },
+		"UIDs": func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+	} {
+		start := time.Now()
+		if err := call(); !errors.Is(err, ErrTimeout) || time.Since(start) > 2*timeout {
+			t.Fatalf("%s: err %v after %v, want ErrTimeout within %v", name, err, time.Since(start), 2*timeout)
 		}
 	}
 }

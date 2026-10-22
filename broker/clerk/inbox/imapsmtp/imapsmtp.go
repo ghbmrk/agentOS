@@ -314,9 +314,15 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 		}
 		return err
 	}
-	if dl, ok := dctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
+	// go-imap clears the connection's deadline at each command, so a timer
+	// closes the connection instead: at the dial's deadline for the greeting,
+	// handshake and sign-in, then once a step has run for the timeout, as
+	// renew restarts it. Every cut-off goes through it and so marks the
+	// session late.
+	dl, _ := dctx.Deadline()
+	raw := conn
+	step := time.AfterFunc(time.Until(dl), func() { late.Store(true); raw.Close() })
+	defer step.Stop()
 	switch s.cfg.IMAPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
@@ -328,10 +334,6 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
-	// go-imap clears the connection's deadline at each command, so a timer
-	// closes it once a step has run for the timeout; renew restarts it.
-	step := time.AfterFunc(s.cfg.Timeout, func() { late.Store(true); conn.Close() })
-	defer step.Stop()
 	bc := newBudgetConn(conn, budget)
 	c, err := client.New(bc)
 	if err != nil {
