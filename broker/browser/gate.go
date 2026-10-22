@@ -320,26 +320,30 @@ func (g *Gate) do(ctx context.Context, raw []byte, tasks covers) (res Result, ef
 func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tasks covers) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if tasks != nil && tasks.of(g, "") == nil {
-		// The task has no live approval on any site a tap can name.
-		return Result{Error: "unapproved"}, false, false
-	}
 	req, l, _, need, refused := g.judge(raw)
+	var a Approval
+	if refused == nil && need {
+		a = g.approval(req, l)
+	}
+	// A task with no live approval on the request's site, nor on any
+	// other site a tap can name, approved nothing: unapproved, whatever
+	// the request.
+	var tc *cover
+	if tasks != nil {
+		if tc = tasks.of(g, a.Site); tc == nil {
+			return Result{Error: "unapproved"}, false, false
+		}
+	}
 	switch {
 	case refused != nil:
 		return *refused, false, false
 	case !need:
 		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}, false, false
 	}
-	a := g.approval(req, l)
 	if a.Print != print || a.To != to {
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
 	}
-	if tasks != nil {
-		tc := tasks.of(g, a.Site)
-		if tc == nil {
-			return Result{Error: "unapproved"}, false, false
-		}
+	if tc != nil {
 		if why := asksAgain(a, *tc); why != "" {
 			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
 				Detail: why + "; it needs the owner's approval of this exact request; nothing was sent"}, false, false

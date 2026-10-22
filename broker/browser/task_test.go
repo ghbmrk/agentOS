@@ -5,9 +5,11 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -288,9 +290,12 @@ func TestCoveredLineFitsStatus(t *testing.T) {
 	for _, a := range []Approval{
 		{Site: long, Label: strconv.Quote(strings.Repeat("Place order ", 20))},
 		{Site: long, Verb: "navigate", Target: "https://" + long + "/" + strings.Repeat("x", 4000)},
+		{Site: strings.Repeat("d", 300) + ".test", Label: `"Pay"`},
+		{Site: "pay\u202e.test", Label: `"Pay"`},
 	} {
 		got := coveredLine(a, 0)
-		if len(got) > kernel.MaxShown || !utf8.ValidString(got) || !strings.HasSuffix(got, ", 1970-01-01T00:00:00Z") {
+		if len(got) > kernel.MaxShown || !utf8.ValidString(got) || !strings.HasSuffix(got, ", 1970-01-01T00:00:00Z") ||
+			strings.ContainsFunc(got, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
 			t.Fatalf("%d bytes: %q", len(got), got)
 		}
 	}
@@ -422,13 +427,24 @@ func TestAReadSaysWhetherTheTasksTapCoversIt(t *testing.T) {
 // new site is not remembered, so its approval elsewhere fails unapproved
 // rather than grow the set without bound.
 func TestAskedSitesAreBounded(t *testing.T) {
-	h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", orderPage)}, "", 0)
+	h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", orderPage), "click": shopReply("/done", doneShot)}, "", 0)
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	for i := len(h.g.asked); i < maxAsked; i++ {
 		h.g.asked[strconv.Itoa(i)+".test"] = true
 	}
-	approvalOf(t, h.do(t, pressBuy))
+	a := approvalOf(t, h.do(t, pressBuy))
 	if len(h.g.asked) != maxAsked || h.g.asked["example.test"] {
 		t.Fatalf("asked %d, example.test %v", len(h.g.asked), h.g.asked["example.test"])
+	}
+	// A tap on that unremembered site still covers it: the gate asks for
+	// the request's own site first.
+	tap := func(sites ...string) *cover {
+		if slices.Contains(sites, "example.test") {
+			return &cover{"example.test"}
+		}
+		return nil
+	}
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressBuy), a.To, a.Print, false, tap); !written || !res.OK {
+		t.Fatalf("past the bound: %+v", res)
 	}
 }

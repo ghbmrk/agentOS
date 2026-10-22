@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -205,7 +206,13 @@ func coveredLine(a Approval, now int64) string {
 		label = strings.TrimSpace(a.Role + " " + a.Verb + " " + a.Target)
 	}
 	at := ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
-	site := capText(a.Site, maxLineSite)
+	site := a.Site
+	if strings.ContainsFunc(site, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
+		// A host the browser reads raw can hold a character that hides or
+		// reshapes the line, which the kernel would drop: show it escaped.
+		site = strconv.QuoteToASCII(site)
+	}
+	site = capText(site, maxLineSite)
 	room := kernel.MaxShown - len("Sent on : ") - len(site) - len(at) - len("…")
 	return "Sent on " + site + ": " + capText(label, room) + at
 }
