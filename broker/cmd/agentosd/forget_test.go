@@ -358,7 +358,7 @@ type forgetDaemon struct {
 	t     *testing.T
 	dir   string
 	cfg   *daemon.Config
-	lp    *learning
+	lp    *forgetPlane
 	d     *daemon.Daemon
 	ctx   context.Context
 	stop  context.CancelFunc
@@ -378,7 +378,7 @@ func newForgetDaemonAt(t *testing.T, dir string) *forgetDaemon {
 		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
 		OwnerState: filepath.Join(dir, "owner.json"), Modem: box,
 	}
-	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, cfg)
+	lp, err := openForgetPlane(dir, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,13 +429,10 @@ func (x *forgetDaemon) ask(n int, object string) (id, code string) {
 	return m[1], m[3]
 }
 
-// kept reports whether goal's task text and values are still kept.
+// kept reports whether goal's task text is still kept.
 func (x *forgetDaemon) kept(goal string) bool {
 	_, text := x.lp.tasks.get(goal)
-	x.lp.values.mu.Lock()
-	_, values := x.lp.values.st[goal]
-	x.lp.values.mu.Unlock()
-	return text && values && !x.lp.forgotten.has(goal)
+	return text && !x.lp.forgotten.has(goal)
 }
 
 // forgets lists the journal's forget intents.
@@ -460,7 +457,6 @@ func TestForgetEndToEnd(t *testing.T) {
 	for _, g := range []string{"owner:b", "owner:a"} {
 		text := map[string]string{"owner:a": "book a table for friday CANARY-forget", "owner:b": "pay the gas bill"}[g]
 		lp.tasks.put(g, text, false, viaSMS)
-		lp.values.observe(journal.Intent{ID: "agent/" + g, GoalID: g, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 		time.Sleep(time.Millisecond) // a is the newer
 	}
 	id, code := x.ask(1, "'book a table for friday..'")
@@ -535,7 +531,7 @@ func TestAnUnsavedForgetIsNotDone(t *testing.T) {
 		t.Fatal("the task's text was deleted")
 	}
 	// A restart: the stores as saved, with no tombstone for the goal.
-	again, err := openLearning(learnPaths{Dir: x.dir, Spare: filepath.Join(x.dir, "spare.json")}, false, &daemon.Config{
+	again, err := openForgetPlane(x.dir, &daemon.Config{
 		JournalPath: x.cfg.JournalPath, SocketDir: x.cfg.SocketDir, OwnerNumber: ownerNum})
 	if err != nil {
 		t.Fatal(err)

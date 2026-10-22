@@ -171,28 +171,6 @@ func TestNoDailyOwnerText(t *testing.T) {
 	waitNoText(t, r)
 }
 
-// DIG-RM-b DRB-1 (brief ID).
-
-// TestNoDigestWhileLearningIsDown: the digest used to name learning being
-// off once a day; now the line is in STATUS only, and nothing is texted.
-func TestNoDigestWhileLearningIsDown(t *testing.T) {
-	var cfg daemon.Config
-	p := newOwnerPacer(&cfg)
-	learningOff(&cfg)
-	found := false
-	for _, n := range cfg.Notes {
-		found = found || n() == learningOffNote
-	}
-	if !found {
-		t.Fatal("STATUS does not say learning is off")
-	}
-	r := pacedOwner(t, ownerch.Pacing{}, day0.Add(7*time.Hour))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	p.attach(ctx, r.ch, time.Millisecond)
-	waitNoText(t, r)
-}
-
 // directSends are the calls in agentosd that put a text on the owner line
 // without the owner channel (a two-argument Send on a link), each as
 // "file:func"; the owner channel's own sends pace, hold and dedupe.
@@ -593,7 +571,7 @@ func TestMainWiresStatusNotes(t *testing.T) {
 	}
 	run := at("d, err := daemon.Run(ctx, cfg)")
 	set := at("unclear.set(d.RetryWaiting)")
-	mailWire := at("wireMail(ctx, mw, d, mailSocket, learn.Dir, mailStatus, cfg.Now)")
+	mailWire := at("wireMail(ctx, mw, d, mailSocket, learnDir, mailStatus, cfg.Now)")
 	if !(parse < remove && remove < wire && wire < run && run < set && run < mailWire) {
 		t.Fatalf("order: parse %d remove %d wire %d run %d set %d mail %d", parse, remove, wire, run, set, mailWire)
 	}

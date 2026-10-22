@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
@@ -547,4 +550,35 @@ func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnD
 	if note != nil {
 		note.days.Store(days)
 	}
+}
+
+// readValuesKey reads the box's values key, which mail's UNDO subkey is
+// derived from (undoSubkey), made on first use: written durably, so a
+// crash never leaves a short key, and refused when others can read it. It
+// stays in the learn directory, where the deleted compiler's task values
+// first made it.
+func readValuesKey(path string) ([]byte, error) {
+	key, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		key = make([]byte, 32)
+		if _, err = rand.Read(key); err != nil {
+			return nil, err
+		}
+		if err = durable.WriteFile(path, key, 0o600); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("values key: key file is readable by others")
+	}
+	if len(key) != 32 {
+		return nil, errors.New("values key: bad key")
+	}
+	return key, nil
 }

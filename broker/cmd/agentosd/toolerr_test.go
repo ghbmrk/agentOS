@@ -236,10 +236,6 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	qs := &questions{}
 	qs.b.Store(book)
 
-	tree := newLiveTree(func(string, ...any) {})
-	tree.label = func(m string) (vm.Label, error) { return 0, fmt.Errorf("stat %s/labels/%s: no such file", dir, m) }
-	tree.markReady()
-
 	wt := &workers.Tools{M: canaryMachines{dir: dir}, Image: "base", Argv: []string{"/sbin/init"}, MaxMemMB: 512}
 	// Recall opens with one public item, then its storage and label
 	// raises fail, so each recall tool reaches a failing backend.
@@ -264,7 +260,7 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	broken.Store(true)
 	recallTools := &recalltool.Late{}
 	recallTools.Set(rt)
-	tools := registeredTools(qs, tree, recallTools, wt)
+	tools := registeredTools(qs, recallTools, wt)
 
 	denied, err := journal.Open(&journal.MemStore{}, canaryPolicy{dir: dir}, map[string]journal.Executor{"mail": noExec{}}, func(s string) string { return s })
 	if err != nil {
@@ -319,10 +315,10 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 		served[tl.Name] = true
 	}
 	// Every family agentosd registers for the agent is listed: the effect,
-	// question, recall and worker tools. managed_tree is the bridge's and
-	// is not (#1488 L-1).
-	if served[toolTree] {
-		t.Fatalf("%s listed: %v", toolTree, served)
+	// question, recall and worker tools. managed_tree is not served
+	// (MIG-4-untrusted-learn).
+	if served["managed_tree"] {
+		t.Fatalf("managed_tree listed: %v", served)
 	}
 	for _, n := range []string{"effect_request", "effect_status", question.ToolAsk, question.ToolStatus, "recall_search", "recall_note", "owner_preferences", "worker_create", "worker_exec", "worker_destroy"} {
 		if !served[n] {

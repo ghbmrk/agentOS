@@ -159,9 +159,9 @@ func writeRestoredLog(t *testing.T, dir, entries string) {
 // ready, and its agent take-backs run once recall opens.
 func TestRestoredForgetLogIsReplayed(t *testing.T) {
 	dir := t.TempDir()
-	open := func() *learning {
+	open := func() *forgetPlane {
 		t.Helper()
-		lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+		lp, err := openForgetPlane(dir, &daemon.Config{
 			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
 		if err != nil {
 			t.Fatal(err)
@@ -213,13 +213,13 @@ func TestPendingRestoreHoldsTheStart(t *testing.T) {
 	}
 	err := restoreHold(dir)
 	if err == nil || !strings.Contains(err.Error(), recovery.PendingNotice(reason)) || !strings.Contains(err.Error(), reason) ||
-		strings.Contains(err.Error(), learningOffText) || strings.Contains(err.Error(), forgetOffText) {
+		strings.Contains(err.Error(), loopsOffText) || strings.Contains(err.Error(), forgetOffText) {
 		t.Fatalf("%v", err)
 	}
 }
 
 // A held restore, or a state-dir copy that does not read, never opens the
-// learning plane either.
+// forget plane either.
 func TestPendingRestoreHoldsLearning(t *testing.T) {
 	for _, c := range []struct {
 		name, file, body string
@@ -231,11 +231,10 @@ func TestPendingRestoreHoldsLearning(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, c.file), []byte(c.body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		lt := newLiveTree(t.Logf)
-		_, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json"), Tree: lt}, false, &daemon.Config{
+		_, err := openForgetPlane(dir, &daemon.Config{
 			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
 		if err == nil {
-			t.Fatalf("%s: learning opened", c.name)
+			t.Fatalf("%s: the forget plane opened", c.name)
 		}
 	}
 }

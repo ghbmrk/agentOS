@@ -8,21 +8,17 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/loops"
 )
 
-// Task texts are kept for harvesting (W3, potency PW3 on #90): a case's
-// input is the owner's task message the agent's item answered (loops L6),
-// and the journal holds only its goal ID. Only the owner's task chat to
-// the agent machine is kept, never a replay's; at most maxTasks, none
+// Task texts are kept for FORGET's list (W3-forget): the journal holds
+// only a task's goal ID, and the owner picks the task to forget by its
+// text. They were first kept for Loop 1's harvest (potency PW3 on #90),
+// which went with the learning loop (MIG-4-untrusted-learn). Only the
+// owner's task chat to the agent machine is kept; at most maxTasks, none
 // past keepTasks, in the learn directory, which only the broker reads.
 const (
 	maxTasks  = 512
 	keepTasks = 30 * 24 * time.Hour
-	// maxVerdicts bounds the owner verdicts waiting to be harvested; more
-	// are dropped, with a fixed log line.
-	maxVerdicts = 256
 )
 
 type taskText struct {
@@ -94,7 +90,7 @@ func (t *taskTexts) saveLocked() error {
 		err = t.store.Save(b)
 	}
 	if err != nil {
-		t.logf("learning: task texts not saved: %v", err)
+		t.logf("forget: task texts not saved: %v", err)
 	}
 	t.dirty = err != nil
 	return err
@@ -172,45 +168,4 @@ func (t *taskTexts) recent(n int) []recentTask {
 		out = out[:n]
 	}
 	return out
-}
-
-// harvester is loops.Harvester as harvestOutcome uses it.
-type harvester interface {
-	Harvest(loops.Outcome) error
-}
-
-// harvestOutcome records the owner's final verdict on an agent's effect
-// (grants.Config.Outcome) as a Loop 1 case. An implicit acceptance is a
-// weaker, capped good verdict under its own source (loops L6). With no
-// task text kept for its goal, there is no case input, so nothing is
-// recorded. Only a fixed class is logged, never the item or the task.
-func harvestOutcome(h harvester, tasks *taskTexts, o grants.OwnerOutcome, logf func(string, ...any)) {
-	var a loops.Action
-	switch o.Verdict {
-	case grants.OwnerAccepted:
-		a = loops.Approved
-	case grants.OwnerDeclined:
-		a = loops.Denied
-	case grants.OwnerUndone:
-		a = loops.Undone
-	case grants.OwnerAcceptedImplicitly:
-		a = loops.Implicit
-	default:
-		return
-	}
-	task, ok := tasks.get(o.Intent.GoalID)
-	if !ok {
-		logf("learning: owner verdict not harvested: no task text for its goal")
-		return
-	}
-	out, err := json.Marshal(o.Intent.Params)
-	if err != nil {
-		return
-	}
-	switch err := h.Harvest(loops.Outcome{Intent: o.Intent.ID, Action: a, Input: []byte(task.Text), Output: out, Public: task.Public}); {
-	case errors.Is(err, loops.ErrImplicitCap):
-		logf("learning: owner verdict not harvested: daily cap on implicit acceptances")
-	case err != nil:
-		logf("learning: owner verdict not harvested: refused") // the error may quote the case
-	}
 }

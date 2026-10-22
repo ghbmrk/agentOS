@@ -719,11 +719,12 @@ func (c *client) do(ctx context.Context) (net.Conn, error) {
 
 // REQ: LOOP-7, LOOP-9
 //
-// P3-4b-3a requirement 1: agentosd links LOOP-7's fuzz runner. Since
-// P3-4b-3r-env-r8 the runners start children through childproc, which
-// holds the reviewed os/exec entry; neither runner has one of its own,
-// and no other package of the graph gains one (vm/gvisor and clock keep
-// theirs until P3-4b-3r-env-r8b).
+// P3-4b-3a: LOOP-7's fuzz runner (which agentosd no longer links since
+// MIG-4-untrusted-learn) and the probe runner start children through
+// childproc since P3-4b-3r-env-r8, which holds the reviewed os/exec
+// entry; neither runner has one of its own, and no other package of the
+// graph gains one (vm/gvisor and clock keep theirs until
+// P3-4b-3r-env-r8b).
 func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 	for _, p := range []string{"loop7", "probecmd"} {
 		if escapeOK[p]["os/exec"] != "" {
@@ -738,13 +739,6 @@ func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 		if es["os/exec"] != "" && !runners[p] {
 			t.Errorf("%s has an os/exec entry no review named", p)
 		}
-	}
-	found := false
-	for _, p := range linkedDeps(t) {
-		found = found || p.path == module+"loop7"
-	}
-	if !found {
-		t.Fatal("agentosd does not link loop7: the fuzz source is not wired")
 	}
 }
 

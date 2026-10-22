@@ -30,7 +30,7 @@ import (
 // puts to the owner as an ordinary approval request, so its YES carries
 // the request's texted code at the tier the owner's limits give a forget
 // (security C1). Once approved, the task is forgotten tombstone first
-// (learning.forgetTask), retried until every save holds, and only then is
+// (forgetPlane.forgetTask), retried until every save holds, and only then is
 // the owner told, with what it undid as a count (#160 ruling).
 
 const (
@@ -185,7 +185,7 @@ type ownerForget struct {
 	// learned counts what a forget of the goal would undo now
 	// (change.Pipeline.LearnedFrom).
 	learned func(goal string) int
-	// forget is learning.forgetTask: tombstone first, then every store.
+	// forget is forgetPlane.forgetTask: tombstone first, then the text.
 	forget func(goal string) error
 	// forgotten reports a goal's tombstone (forgotten.has).
 	forgotten func(goal string) bool
@@ -224,7 +224,7 @@ type ownerForget struct {
 	owed        *forgetOwed
 	owedAtStart []string
 	// tell, if set, sends an owner text and reports whether it went
-	// (loop2Notify.try); a done text is owed until it does (L3 B1 on
+	// (ownerNotify.try); a done text is owed until it does (L3 B1 on
 	// #425). Unset, inform sends and is taken as sent.
 	tell func(string) error
 	// toldLater, if set, is called when a tellLater loop ends (tests).
@@ -1197,7 +1197,7 @@ func (f *ownerForget) siblingApproved(ctx context.Context, id string) bool {
 }
 
 // Reconcile: a forget interrupted by a restart is finished by the
-// tombstone's replay at start (learning.replayForgotten) once the
+// tombstone's replay at start (forgetPlane.replayForgotten) once the
 // tombstone holds; otherwise it did not happen.
 func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	if grants.ForgetAgentGoal(in.ID) != "" {
@@ -1452,8 +1452,8 @@ func (f *ownerForget) paid(goal string) {
 }
 
 // finishOwed texts the done text of each forget the last boot owed, once
-// the start-up replay (learning.replayForgotten, which runs before the
-// learning plane opens) has finished it: a forget still retrying at
+// the start-up replay (forgetPlane.replayForgotten, which runs before the
+// forget plane opens) has finished it: a forget still retrying at
 // shutdown (UX-182-3), cut off by a crash after its tombstone, or told
 // "Not forgotten" whose tombstone a later save wrote (SHOULD 4 of L3 on
 // #182). Like any done forget it is appended to the forget log, once. One

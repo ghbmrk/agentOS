@@ -31,10 +31,10 @@ type restoreBox struct {
 	texts []string
 }
 
-func (b *restoreBox) open() *learning {
+func (b *restoreBox) open() *forgetPlane {
 	b.t.Helper()
 	b.cfg = &daemon.Config{JournalPath: filepath.Join(b.dir, "journal.log"), SocketDir: filepath.Join(b.dir, "run"), OwnerNumber: ownerNum}
-	lp, err := openLearning(learnPaths{Dir: b.dir, Spare: filepath.Join(b.dir, "spare.json")}, false, b.cfg)
+	lp, err := openForgetPlane(b.dir, b.cfg)
 	if err != nil {
 		b.t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func (b *restoreBox) open() *learning {
 }
 
 // attach is the part of learning.attach that texts what the boot owes.
-func (b *restoreBox) attach(lp *learning) []string {
+func (b *restoreBox) attach(lp *forgetPlane) []string {
 	b.mu.Lock()
 	b.texts = nil
 	b.mu.Unlock()

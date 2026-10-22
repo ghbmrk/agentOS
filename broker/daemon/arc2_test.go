@@ -65,15 +65,11 @@ var controlPath = map[string][]string{
 	// (modelroute, P2-4) and journals the denials that come back, and
 	// gives the owner channel the vault process's verify operation
 	// (owner.Verifier, egress K7). It keeps the owner's agent machine
-	// running as foreground work (admission.Foreground, RES-1). It runs the
-	// learning plane in-process (W3): the change pipeline, the loop
-	// scheduler, and the replay evaluator, whose transitive imports
-	// TestAgentosdLinksNoInference holds free of inference. It names the
-	// grants gate's types to harvest the owner's verdicts (PW3 on #90).
-	// Loop 1's skill compiler (compile) is its one in-process builder: it
-	// calls no model and imports only the skill file format (W3 step 3a).
-	// Every other builder runs in its own machine behind loopbuild's
-	// socket (W3-builder).
+	// running as foreground work (admission.Foreground, RES-1). The
+	// learning plane went with MIG-4-untrusted-learn: what is left is the
+	// owner's FORGET, whose stores are change's file stores, and the loop
+	// settings parser (loops.ParseText), with which the box answers the
+	// old loop settings texts.
 	// It runs the owner-question book (W9) on the box clock (P2-9).
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
@@ -90,13 +86,7 @@ var controlPath = map[string][]string{
 	// the page's root summary (localapi) the daemon serves. A held restore
 	// (W3-forget-b1-7) serves the bridge's ops itself, hears its state
 	// report (bridgeproto) and checks its texts fit (modem); both are
-	// already linked through modemlink. It wires LOOP-7's fuzz source
-	// (loop7, P3-4b-3a), whose one exec runs release-listed fuzz binaries
-	// (TestAgentosdLinksNoInference's escapeOK); loop7 does not import
-	// sockprobe, whose in-guest dialer stays out of the daemon. It replays
-	// the corpus built into the binary through the in-process closed
-	// checks (corpus, P3-4b-4c-corpus), which links no mail code. It fits
-	// its own owner texts to one text as Inform fits them (control). It binds the owner's mail
+	// already linked through modemlink. It fits its own owner texts to one text as Inform fits them (control). It binds the owner's mail
 	// account (SR3-mail-w2): the mail adapter (mail, which judges organize
 	// by verb) over the vault process's mail socket (mail/mailsock), so the
 	// credential and the IMAP and SMTP clients stay in agentos-egress (M1);
@@ -109,7 +99,7 @@ var controlPath = map[string][]string{
 	// verify owner codes through checker/checkersock, a dial-only client
 	// of the checker's verify socket, so agentosd links none of the
 	// checker that holds the seed (SIM-split-wire, CH-4).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

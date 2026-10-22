@@ -246,9 +246,9 @@ func TestForgetRetryingSurvivesARestore(t *testing.T) {
 	}
 	// The backup: taken before the forget, the task's text kept.
 	dir := t.TempDir()
-	open := func() *learning {
+	open := func() *forgetPlane {
 		t.Helper()
-		lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &daemon.Config{
+		lp, err := openForgetPlane(dir, &daemon.Config{
 			JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"), OwnerNumber: ownerNum})
 		if err != nil {
 			t.Fatal(err)
@@ -271,9 +271,6 @@ func TestForgetRetryingSurvivesARestore(t *testing.T) {
 	}
 	if _, ok := again.tasks.get("owner:a"); ok {
 		t.Fatal("the forgotten task's text is back after the restore")
-	}
-	if !again.learn.Forgot("owner:a") || again.learn.Forgot("owner:b") {
-		t.Fatal("Loop 1 still learns from the forgotten task")
 	}
 	if _, ok := again.tasks.get("owner:b"); !ok {
 		t.Fatal("a kept task was forgotten")
