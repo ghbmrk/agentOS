@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
-	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
@@ -200,7 +200,7 @@ func (f FileStore) Save(s SetupState) error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(f.Path, b, 0o600)
+	return change.FileStore{Path: f.Path}.Save(b)
 }
 
 // HeldStore keeps every field of SetupState in Inner but Unsaved, which it
@@ -248,7 +248,7 @@ func (h HeldStore) Save(s SetupState) error {
 	if err != nil {
 		return err
 	}
-	if err := durable.WriteFile(h.Path, b, 0o600); err != nil {
+	if err := (change.FileStore{Path: h.Path}).Save(b); err != nil {
 		return err
 	}
 	return h.Inner.Save(s)

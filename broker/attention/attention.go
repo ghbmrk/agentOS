@@ -1,14 +1,14 @@
-// Package attention is the attention optimizer's proposer (SPEC CAP-6):
-// it watches the owner's approval decisions and, when a class of request
-// has been approved unchanged often enough, suggests converting it into an
-// owner pre-allowance (ADP-9), or for in-thread replies a context-scoped
-// reply rule (ADP-11). It only suggests: it holds no journal, grant, or
-// owner-channel handle, so it cannot enact anything. Taking a suggestion
-// is the owner's own new-grant intent (CH-3: code plus local page), which
-// the grants package checks like any other.
+// Package attention proposes standing keys from use (SPEC KEY-5): it
+// watches the owner's approval decisions and, when approvals of one shape
+// recur (same clerk, verb and argument class, approved unedited), drafts
+// the narrowest key that covers them as caveats (KEY-2), or for in-thread
+// replies a thread-scoped one. It only proposes: it holds no kernel, key or
+// owner-channel handle, so it cannot enact anything. Taking a proposal is
+// the owner's passkey tap, which makes the key, live after KEY-4's grant
+// hold.
 //
 // It also keeps A10's split of owner approvals into necessary and
-// avoidable. The package uses no inference (ARC-2).
+// avoidable. The package uses no inference.
 //
 // Assumptions are listed in ASSUMPTIONS.md next to this file.
 package attention
@@ -17,45 +17,55 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/verb"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// Decision is one owner answer to an approval request, as the grants gate
-// saw it. Every field comes from the broker (the verifier's reading and
-// the gate's rendering), never from the agent.
+// Decision is one owner answer to an approval of a plan step, as the log
+// holds it. Every field comes from the kernel and the clerk (what the clerk
+// read from the source system or the owner fixed), never from a planner.
 type Decision struct {
-	Account string
-	Action  string
-	// Verb is the action's verb under the account's adapter grant.
-	Verb string
+	// Clerk is the clerk the step ran on, and Verb its verb (VRB-2).
+	Clerk string
+	Verb  key.Verb
+	// Thread: the step was a reply in an existing thread, the shape a
+	// thread-scoped key covers (KEY-2).
+	Thread bool
 	// Approved is the owner's YES; false is a NO or an UNDO.
 	Approved bool
 	// Expired: the request lapsed unanswered. Silence is not a judgment,
 	// so it neither counts nor resets (potency PA1).
 	Expired bool
 	// Edited: the owner changed the item before it went out. It resets the
-	// run like a NO (ADP-9). For a reply class it never counts toward the
-	// run but resets it only past Config.ReplyEditPercent (ADP-11).
+	// run like a NO (KEY-5). For a reply class it never counts toward the
+	// run but resets it only past Config.ReplyEditPercent (KEY-5).
 	Edited bool
 	// Wrong: the owner later judged it wrong (OP-7). It resets any run.
 	Wrong bool
-	// Verified: the approval line came from the account's verifier. An
-	// unverified approval can never match a pre-allowance (grants GR5), so
-	// it does not count; an unverified NO, UNDO, edit, or wrong verdict
-	// still resets the run (ADP-11).
+	// Verified: every argument the approval showed was read by the clerk
+	// or fixed by the owner. A key bounds only such arguments (KEY-2), so
+	// an unverified approval does not count; an unverified NO, UNDO, edit,
+	// or wrong verdict still resets the run.
 	Verified bool
-	// Params and Recipients are what was approved; Amount is the verified
-	// amount in minor units (0 when no money moves).
-	Params     map[string]any
+	// Content is the step's content class as the clerk reported it: an
+	// owner-approved template filled only from verified fields, or a
+	// thread scope. Empty is any other content, which no standing key
+	// covers (KEY-5).
+	Content string
+	// Args are the step's other arguments, as approved: every argument
+	// but its object (Recipients), its amount, and for a thread reply its
+	// message.
+	Args       map[string]string
 	Recipients []string
-	Amount     int64
-	At         time.Time
+	// Amount is the verified amount in minor units (0 when no money moves).
+	Amount int64
+	At     time.Time
 }
 
 // Store persists the optimizer's state; change.MemStore and
@@ -69,38 +79,39 @@ type Store interface {
 type Config struct {
 	Store Store
 	// Threshold is the run of unedited approvals that earns a
-	// pre-allowance suggestion (ADP-9). Default 10.
+	// standing-key suggestion (KEY-5). Default 10.
 	Threshold int
 	// ReplyThreshold is the run that earns a context-scoped reply rule
-	// (ADP-11 "earned"). Default 20.
+	// (KEY-5's thread scope). Default 20.
 	ReplyThreshold int
-	// ReplyEditPercent lets an ADP-11 reply class earn its suggestion
+	// ReplyEditPercent lets a reply class earn its suggestion
 	// despite light edits: ReplyThreshold unedited approvals (edited ones
 	// never count) with at most this percentage edited among the last
-	// EditWindow answered (SPEC ADP-11; Mark, 2026-10-05, "Allow light
+	// EditWindow answered (SPEC KEY-5; Mark, 2026-10-05, "Allow light
 	// edits"). Default 10. Negative: the strict run, any edit resets.
 	ReplyEditPercent int
-	// UserContent reports an account whose service publishes user content
+	// UserContent reports a clerk whose service publishes user content
 	// (paste sites, file shares, URL shorteners): never suggested, since
 	// an attacker can read what it receives (the SPEC egress-allowlist note,
 	// security review). Required, so a missing check cannot fail open.
-	UserContent func(account string) bool
+	UserContent func(clerk string) bool
 	// ShortID gives the owner-facing ID of a suggestion (CH-12). Nil: S1,
 	// S2, ...
 	ShortID func(taken func(string) bool) (string, error)
 }
 
-// class is one kind of request: an account, an action, and the fixed
-// params that make it templated content.
+// class is one shape of request: a clerk, a verb, and whether it is a
+// thread reply. The fixed content and arguments of its run are its
+// argument class.
 type class struct {
-	Account string `json:"account"`
-	Action  string `json:"action"`
-	Verb    string `json:"verb"`
-	Reply   bool   `json:"reply,omitempty"`
+	Clerk string   `json:"clerk"`
+	Verb  key.Verb `json:"verb"`
+	Reply bool     `json:"reply,omitempty"`
 	// Run is the current run of unedited, verified approvals; the fields
 	// after it describe that run.
 	Run        int               `json:"run"`
 	Since      time.Time         `json:"since"`
+	Content    string            `json:"content,omitempty"`
 	Fixed      map[string]string `json:"fixed,omitempty"`
 	Templated  bool              `json:"templated"`
 	Recipients []string          `json:"recipients,omitempty"`
@@ -171,22 +182,17 @@ func New(cfg Config) (*Optimizer, error) {
 // Config.ReplyEditPercent is not negative.
 const EditWindow = 30
 
-// Body is the param that makes a send an in-thread reply (grants
-// ParamBody); Record names the source record (grants ParamRecord).
-const (
-	Body   = grants.ParamBody
-	Record = grants.ParamRecord
-)
-
-func key(account, action string, reply bool) string {
-	return fmt.Sprintf("%s\x00%s\x00%v", account, action, reply)
+func classKey(clerk string, v key.Verb, reply bool) string {
+	return fmt.Sprintf("%s\x00%s\x00%v", clerk, v, reply)
 }
 
-// eligible reports whether a verb may ever be pre-allowed: irreversible,
-// and not reveal-or-create-secret (CRED-6 keeps per-action approval).
-func eligible(v string) bool {
-	c, ok := verb.ClassOf(v)
-	return ok && c == verb.Irreversible
+// eligible reports whether a verb may ever have a standing key:
+// irreversible (a reversible verb needs no approval), and not
+// reveal-or-create-secret, a VRB-1 step that keeps per-step approval under
+// any key (KEY-5).
+func eligible(v key.Verb) bool {
+	c, ok := key.ClassOf(v)
+	return ok && c.Irreversible() && v != key.RevealOrCreateSecret
 }
 
 // Observe records one owner decision. A Wrong verdict is the owner's
@@ -196,14 +202,13 @@ func (o *Optimizer) Observe(d Decision) error {
 	if d.Expired {
 		return nil
 	}
-	_, reply := d.Params[Body]
-	reply = reply && d.Verb == verb.Send
+	reply := d.Thread && d.Verb == key.Send
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	k := key(d.Account, d.Action, reply)
+	k := classKey(d.Clerk, d.Verb, reply)
 	c := o.st.Classes[k]
 	if d.Approved && !d.Wrong {
-		// A10: avoidable only when a pre-allowance would have let this
+		// A10: avoidable only when a standing key would have let this
 		// exact item through: eligible, verified, unedited, earned.
 		if c != nil && eligible(d.Verb) && d.Verified && !d.Edited && o.earnedLocked(c) {
 			o.st.Avoidable++
@@ -215,7 +220,7 @@ func (o *Optimizer) Observe(d Decision) error {
 		return o.save()
 	}
 	if c == nil {
-		c = &class{Account: d.Account, Action: d.Action, Verb: d.Verb, Reply: reply}
+		c = &class{Clerk: d.Clerk, Verb: d.Verb, Reply: reply}
 		o.st.Classes[k] = c
 	}
 	if !d.Approved || d.Wrong || (d.Edited && (!reply || o.cfg.ReplyEditPercent <= 0)) {
@@ -232,14 +237,15 @@ func (o *Optimizer) Observe(d Decision) error {
 	if !d.Verified || d.Edited {
 		return o.save() // an unverified or edited approval never counts
 	}
-	fixed, ok := fixedParams(d.Params, reply)
+	fixed := maps.Clone(d.Args)
+	ok := d.Content != ""
 	day := d.At.UTC().Format("2006-01-02")
 	if c.Run == 0 {
-		c.Since, c.Fixed, c.Templated = d.At, fixed, ok
+		c.Since, c.Content, c.Fixed, c.Templated = d.At, d.Content, fixed, ok
 		c.Recipients, c.SameRcpt = sorted(d.Recipients), true
 		c.Days = map[string]int{}
 	} else {
-		c.Templated = c.Templated && ok && equalMap(c.Fixed, fixed)
+		c.Templated = c.Templated && ok && c.Content == d.Content && maps.Equal(c.Fixed, fixed)
 		c.SameRcpt = c.SameRcpt && strings.Join(c.Recipients, "\n") == strings.Join(sorted(d.Recipients), "\n")
 	}
 	c.Run++
@@ -267,13 +273,13 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 			return false
 		}
 	}
-	return o.cfg.UserContent == nil || !o.cfg.UserContent(c.Account)
+	return o.cfg.UserContent == nil || !o.cfg.UserContent(c.Clerk)
 }
 
 // reset ends the run; the edit-rate window (Recent) is kept, since it
-// covers the last answered replies whatever happened between (ADP-11).
+// covers the last answered replies whatever happened between (KEY-5).
 func (c *class) reset() {
-	c.Run, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, nil, false, nil, false, 0, nil
+	c.Run, c.Content, c.Fixed, c.Templated, c.Recipients, c.SameRcpt, c.MaxAmount, c.Days = 0, "", nil, false, nil, false, 0, nil
 	c.Short, c.Offered, c.Offers = "", time.Time{}, 0
 }
 
@@ -282,36 +288,6 @@ func (o *Optimizer) threshold(c *class) int {
 		return o.cfg.ReplyThreshold
 	}
 	return o.cfg.Threshold
-}
-
-// fixedParams returns the params a rule would fix: every param but the
-// record (and a reply's body) must be a string, since ADP-9 allows only
-// templated content filled from verified fields. ok is false otherwise.
-func fixedParams(p map[string]any, reply bool) (map[string]string, bool) {
-	out := map[string]string{}
-	for k, v := range p {
-		if k == Record || (reply && k == Body) {
-			continue
-		}
-		s, isStr := v.(string)
-		if !isStr {
-			return nil, false
-		}
-		out[k] = s
-	}
-	return out, true
-}
-
-func equalMap(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if w, ok := b[k]; !ok || w != v {
-			return false
-		}
-	}
-	return true
 }
 
 func sorted(ss []string) []string {
@@ -328,52 +304,85 @@ func (o *Optimizer) save() error {
 	return o.cfg.Store.Save(b)
 }
 
-// Suggestion is one proposed rule, with its evidence. Spec is a draft of
-// the grant intent the owner would make; Text is the owner's line, in
-// fixed wording built from broker fields only (ADP-9).
+// Suggestion is one proposed standing key, with its evidence. Clerk and
+// Caveats are the draft the owner's passkey tap would sign (KEY-4); Text
+// is the owner's line, in fixed wording built from logged fields only.
 type Suggestion struct {
 	Short    string
-	Spec     grants.Spec
+	Clerk    string
+	Caveats  []key.Caveat
 	Approved int
 	Since    time.Time
 	// Text is the owner's text (at most 3 SMS segments, CH-12); Detail
-	// is the full fixed wording (grants.Describe) for the Wi-Fi page,
-	// where the owner confirms the rule.
+	// is the full fixed wording (Describe) for the owner page, where the
+	// owner confirms the key.
 	Text   string
-	Detail string
+	Detail []Term
 }
 
-// evidence is the owner-facing run: strict for ADP-9, unedited count for
-// replies (which may include edits that did not count).
+// evidence is the owner-facing run: strict for a templated key, unedited
+// count for replies (which may include edits that did not count).
 func evidence(c *class) string {
 	since := c.Since.UTC().Format("Jan 2")
 	if c.Reply {
-		return fmt.Sprintf("You approved %d of my replies on %s unedited since %s.", c.Run, c.Account, since)
+		return fmt.Sprintf("You approved %d of my replies on %s unedited since %s.", c.Run, c.Clerk, since)
 	}
-	return fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed.", c.Action, c.Account, c.Run, since)
+	return fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed.", c.Verb, c.Clerk, c.Run, since)
 }
 
 // MaxText is CH-12's three GSM-7 segments.
 const MaxText = 3 * 153
 
-// summary is the rule in one clause for the owner's text.
-func summary(spec grants.Spec) string {
-	r := spec.Rule
-	if r.Reply {
-		return fmt.Sprintf("let me reply in existing threads on %s without asking, up to %d a day.", spec.Account, r.PerDay)
+// summary is the key in one clause for the owner's text.
+func summary(c *class, perDay int64) string {
+	if c.Reply {
+		return fmt.Sprintf("let me reply in existing threads on %s without asking, up to %d a day.", c.Clerk, perDay)
 	}
 	money := "no money"
-	if r.AmountCap > 0 {
-		money = "amounts up to " + fmt.Sprintf("%d.%02d", r.AmountCap/100, r.AmountCap%100)
+	if amountBound(c) {
+		money = "amounts up to " + minor(c.MaxAmount)
 	}
-	return fmt.Sprintf("let it run without asking, up to %d a day, %s.", r.PerDay, money)
+	return fmt.Sprintf("let it run without asking, up to %d a day, %s.", perDay, money)
+}
+
+func minor(n int64) string { return fmt.Sprintf("%d.%02d", n/100, n%100) }
+
+// amountBound reports whether the key bounds the amount: money moved, and
+// the verb carries it as its amount argument (KEY-2).
+func amountBound(c *class) bool {
+	return c.MaxAmount > 0 && !c.Reply && slices.Contains(key.ArgNames(c.Verb), key.ArgAmount)
+}
+
+// caveats is the narrowest key that covers c's run (KEY-5): its one verb,
+// its content class, each fixed argument at the value it had every time,
+// the recipients when they never changed, the largest amount approved,
+// and the median day's count as the daily rate.
+func caveats(c *class, perDay int64) []key.Caveat {
+	cs := []key.Caveat{key.LimitVerbs(c.Verb), key.LimitContent(c.Content)}
+	names := make([]string, 0, len(c.Fixed))
+	for n := range c.Fixed {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		cs = append(cs, key.LimitArg(key.ArgBound{Name: n, OneOf: []string{c.Fixed[n]}}))
+	}
+	if c.SameRcpt && len(c.Recipients) > 0 && !c.Reply {
+		cs = append(cs, key.LimitArg(key.ArgBound{Name: key.RecipientArg(c.Verb), OneOf: c.Recipients}))
+	}
+	if amountBound(c) {
+		m := c.MaxAmount
+		cs = append(cs, key.LimitArg(key.ArgBound{Name: key.ArgAmount, Max: &m}))
+	}
+	return append(cs, key.LimitRate(perDay))
 }
 
 // Suggestions returns the classes that have earned a suggestion, in a
 // stable order. A class earns one when its run of unedited, verified
-// approvals reaches the threshold (ADP-11's for replies), every approval
-// carried the same fixed params, and it is not a user-content service. A
-// run with the same recipients every time fixes them in the rule.
+// approvals reaches the threshold (the thread scope's for replies), every
+// approval carried the same content class and arguments, and it is not a
+// user-content service. A run with the same recipients every time fixes
+// them in the key.
 func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -389,7 +398,6 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		if !o.earnedLocked(c) {
 			continue
 		}
-		out = append(out, Suggestion{})
 		if c.Short == "" {
 			s, err := o.shortLocked()
 			if err != nil {
@@ -397,24 +405,14 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 			}
 			c.Short, dirty = s, true
 		}
-		r := &grants.Rule{Action: c.Action, PerRecord: 1, PerDay: 1, Reply: c.Reply}
-		if len(c.Fixed) > 0 {
-			r.Params = c.Fixed
-		}
-		r.PerDay = max(r.PerDay, median(c.Days))
-		if c.SameRcpt && len(c.Recipients) > 0 && !c.Reply {
-			r.Recipients = c.Recipients
-		}
-		if c.MaxAmount > 0 && !c.Reply {
-			r.AmountCap, r.HoldDays = c.MaxAmount, 3
-		}
-		spec := grants.Spec{Account: c.Account, Rule: r}
-		out[len(out)-1] = Suggestion{
-			Short: c.Short, Spec: spec, Approved: c.Run, Since: c.Since,
+		perDay := int64(max(1, median(c.Days)))
+		cs := caveats(c, perDay)
+		out = append(out, Suggestion{
+			Short: c.Short, Clerk: c.Clerk, Caveats: cs, Approved: c.Run, Since: c.Since,
 			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open my Wi-Fi page. Reply NO %s to stop suggesting it.",
-				summary(spec), c.Short),
-			Detail: grants.Describe(spec),
-		}
+				summary(c, perDay), c.Short),
+			Detail: Describe(c.Clerk, cs),
+		})
 	}
 	if dirty {
 		if err := o.save(); err != nil {
@@ -422,6 +420,86 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		}
 	}
 	return out, nil
+}
+
+// Term is one line of a key's fixed wording: a label and the value the
+// caveat holds, shown as is.
+type Term struct {
+	Label, Value string
+}
+
+// Describe is the fixed wording of a key on clerk with caveats cs, one
+// term per caveat, in their order. It renders every closed caveat kind
+// (KEY-2), so no caveat the key carries is left off the card that asks for
+// it.
+func Describe(clerk string, cs []key.Caveat) []Term {
+	out := []Term{{"Clerk", clerk}}
+	for _, c := range cs {
+		out = append(out, term(c))
+	}
+	return out
+}
+
+func term(c key.Caveat) Term {
+	list := func(s []string) string {
+		if len(s) == 0 {
+			return "none"
+		}
+		return "only " + strings.Join(s, ", ")
+	}
+	ms := func(n int64) string { return (time.Duration(n) * time.Millisecond).String() }
+	switch c.Kind {
+	case key.KVerbs:
+		return Term{"Runs", strings.Join(c.Set, ", ") + ", without asking or notifying you"}
+	case key.KContent:
+		return Term{"Content", list(c.Set)}
+	case key.KLabels:
+		return Term{"Data labels", list(c.Set)}
+	case key.KArg:
+		if c.Arg == nil {
+			return Term{"Argument", "malformed"}
+		}
+		var b []string
+		if c.Arg.OneOf != nil {
+			b = append(b, list(c.Arg.OneOf))
+		}
+		if c.Arg.Min != nil {
+			b = append(b, "at least "+minorIf(c.Arg.Name, *c.Arg.Min))
+		}
+		if c.Arg.Max != nil {
+			b = append(b, "up to "+minorIf(c.Arg.Name, *c.Arg.Max))
+		}
+		if len(b) == 0 {
+			b = append(b, "any")
+		}
+		return Term{"Argument " + c.Arg.Name, strings.Join(b, ", ")}
+	case key.KSpendTask:
+		return Term{"Spend per task", "up to " + minor(c.N)}
+	case key.KSpendDay:
+		return Term{"Spend per day", "up to " + minor(c.N)}
+	case key.KRateDay:
+		return Term{"Per day", fmt.Sprintf("at most %d runs", c.N)}
+	case key.KRateRecipient:
+		return Term{"Per recipient", fmt.Sprintf("at most %d runs a day", c.N)}
+	case key.KExpires:
+		return Term{"Expires", time.UnixMilli(c.N).UTC().Format("Jan 2 2006 15:04 UTC")}
+	case key.KUses:
+		return Term{"Uses", fmt.Sprintf("at most %d", c.N)}
+	case key.KHold:
+		return Term{"Hold", fmt.Sprintf("%s before it runs, %s when new", ms(c.N), ms(c.M))}
+	case key.KTask:
+		return Term{"Task", list(c.Set)}
+	}
+	return Term{"Unknown limit", c.Kind}
+}
+
+// minorIf shows the amount argument in minor units as an amount, any
+// other bound as the number.
+func minorIf(name string, n int64) string {
+	if name == key.ArgAmount {
+		return minor(n)
+	}
+	return fmt.Sprint(n)
 }
 
 func (o *Optimizer) shortLocked() (string, error) {
@@ -524,7 +602,7 @@ func (o *Optimizer) Decline(short string) error {
 }
 
 // Split is A10's count of owner approvals: avoidable ones came after the
-// class had earned a suggestion (a pre-allowance would have covered
+// class had earned a suggestion (a standing key would have covered
 // them), necessary ones before.
 func (o *Optimizer) Split() (necessary, avoidable int) {
 	o.mu.Lock()

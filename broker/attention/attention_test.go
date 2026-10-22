@@ -1,21 +1,26 @@
 package attention
 
-// REQ: CAP-6, ADP-9, ADP-11, A10
+// REQ: KEY-5, KEY-2, A10
 
 import (
 	"go/parser"
 	"go/token"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/verb"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 var t0 = time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+
+// memStore is a Store in memory.
+type memStore struct{ b []byte }
+
+func (m *memStore) Load() ([]byte, error) { return m.b, nil }
+func (m *memStore) Save(b []byte) error   { m.b = append([]byte(nil), b...); return nil }
 
 func newOpt(t *testing.T, st Store, mod func(*Config)) *Optimizer {
 	t.Helper()
@@ -30,12 +35,32 @@ func newOpt(t *testing.T, st Store, mod func(*Config)) *Optimizer {
 	return o
 }
 
-// invoice is a verified, templated send: the template is fixed and the
-// record is read from the source.
+// invoice is a verified, templated send: the template is the content class
+// and the record's fields fill it.
 func invoice(i int) Decision {
-	return Decision{Account: "books", Action: "invoice.send", Verb: verb.Send, Approved: true, Verified: true,
-		Params:     map[string]any{"template": "monthly", Record: "inv-" + strconv.Itoa(i)},
+	return Decision{Clerk: "books", Verb: key.Send, Approved: true, Verified: true, Content: "template:monthly",
 		Recipients: []string{"ap@client.test"}, At: t0.Add(time.Duration(i) * 6 * time.Hour)}
+}
+
+// limits folds s's caveats, failing on a malformed one: a proposal the
+// key-check library would refuse is no proposal.
+func limits(t *testing.T, s Suggestion) key.Limits {
+	t.Helper()
+	l, err := key.Fold(s.Caveats)
+	if err != nil {
+		t.Fatalf("caveats %+v: %v", s.Caveats, err)
+	}
+	return l
+}
+
+// rate is the daily rate cap l carries, 0 for none.
+func rate(l key.Limits) int64 {
+	for _, c := range l.Caps {
+		if c.Kind == key.KRateDay {
+			return c.N
+		}
+	}
+	return 0
 }
 
 func observe(t *testing.T, o *Optimizer, ds ...Decision) {
@@ -56,12 +81,12 @@ func suggestions(t *testing.T, o *Optimizer) []Suggestion {
 	return s
 }
 
-// CAP-6, ADP-9: a class approved unchanged Threshold times in a row earns a
-// suggestion: a deterministic rule with the fixed params, the recipients
-// that never changed, scope bounds from what was approved, and the owner's
-// line in fixed wording with its evidence.
+// KEY-5: a class approved unchanged Threshold times in a row earns a
+// suggestion: the narrowest key that covers it, with its one verb, its
+// content class, the recipients that never changed, a daily rate from what
+// was approved, and the owner's line in fixed wording with its evidence.
 func TestSuggestsAfterRunOfApprovals(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 9; i++ {
 		observe(t, o, invoice(i))
 	}
@@ -73,12 +98,13 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 	if len(s) != 1 {
 		t.Fatalf("%+v", s)
 	}
-	r := s[0].Spec.Rule
-	if s[0].Spec.Account != "books" || r.Action != "invoice.send" || r.Params["template"] != "monthly" || len(r.Params) != 1 ||
-		len(r.Recipients) != 1 || r.Recipients[0] != "ap@client.test" || r.PerRecord != 1 || r.PerDay != 3 || r.AmountCap != 0 || r.Reply {
-		t.Fatalf("rule %+v", r)
+	l := limits(t, s[0])
+	to := l.Args["to"]
+	if s[0].Clerk != "books" || strings.Join(l.Verbs, ",") != "send" || strings.Join(l.Content, ",") != "template:monthly" || len(l.Args) != 1 ||
+		strings.Join(to.OneOf, ",") != "ap@client.test" || rate(l) != 3 || len(l.Caps) != 1 {
+		t.Fatalf("key %+v", l)
 	}
-	if s[0].Short != "S1" || s[0].Approved != 10 || s[0].Detail != grants.Describe(s[0].Spec) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
+	if s[0].Short != "S1" || s[0].Approved != 10 || !slices.Equal(s[0].Detail, Describe("books", s[0].Caveats)) || !strings.Contains(s[0].Text, "up to 3 a day, no money.") ||
 		!strings.Contains(s[0].Text, "10 times in a row since Oct 5") || !strings.HasSuffix(s[0].Text, "Reply NO S1 to stop suggesting it.") {
 		t.Fatalf("text %q", s[0].Text)
 	}
@@ -87,11 +113,11 @@ func TestSuggestsAfterRunOfApprovals(t *testing.T) {
 	}
 }
 
-// CAP-6: a NO, an UNDO, or an edit resets the run; an expiry does not; approvals of
-// different recipients leave the recipients to the source record; an
-// amount sets the cap and a hold.
+// KEY-5: a NO, an UNDO, or an edit resets the run; an expiry does not;
+// approvals of different recipients leave the recipients unbounded by
+// value; a verb's amount argument is capped at the largest approved.
 func TestRunResetsAndShapesRule(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 8; i++ {
 		observe(t, o, invoice(i))
 	}
@@ -114,26 +140,44 @@ func TestRunResetsAndShapesRule(t *testing.T) {
 		observe(t, o, d)
 	}
 	s := suggestions(t, o)
-	if len(s) != 1 || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 10000 || s[0].Spec.Rule.HoldDays != 3 {
+	if len(s) != 1 || len(limits(t, s[0]).Args) != 0 || strings.Contains(s[0].Text, "amounts up to") {
+		t.Fatalf("a send has no amount argument to cap: %+v", s)
+	}
+	o = newOpt(t, &memStore{}, nil)
+	for i := 0; i < 10; i++ {
+		d := invoice(i)
+		d.Verb, d.Content, d.Args = key.Buy, "template:refill", map[string]string{"item": "toner"}
+		d.Amount = int64(1000 * (i + 1))
+		observe(t, o, d)
+	}
+	s = suggestions(t, o)
+	if len(s) != 1 {
 		t.Fatalf("%+v", s)
+	}
+	l := limits(t, s[0])
+	if a := l.Args[key.ArgAmount]; a.Max == nil || *a.Max != 10000 || strings.Join(l.Args["item"].OneOf, ",") != "toner" ||
+		!strings.Contains(s[0].Text, "amounts up to 100.00") {
+		t.Fatalf("%+v %q", l, s[0].Text)
 	}
 }
 
-// CAP-6, ADP-9: never suggested: CRED-6 (reveal-or-create-secret), a
-// reversible verb (needs no rule), a user-content service, a class whose
-// fixed params changed or were not plain strings (no templated content).
-// An unverified approval does not count; an expired item neither counts
-// nor resets.
+// KEY-5: never suggested: reveal-or-create-secret (VRB-1 keeps per-step
+// approval), a reversible verb (needs no key), a user-content service, a
+// class whose arguments changed or whose content is no template or thread
+// scope. An unverified approval does not count; an expired item neither
+// counts nor resets.
 func TestExclusions(t *testing.T) {
 	for name, mut := range map[string]func(i int, d *Decision){
-		"secret":     func(_ int, d *Decision) { d.Verb = verb.RevealSecret },
-		"reversible": func(_ int, d *Decision) { d.Verb = verb.Draft },
-		"paste site": func(_ int, d *Decision) { d.Account = "paste" },
-		"free text":  func(i int, d *Decision) { d.Params["note"] = "text " + strconv.Itoa(i) },
-		"non-string": func(_ int, d *Decision) { d.Params["copies"] = 2 },
-		"unverified": func(_ int, d *Decision) { d.Verified = false },
+		"secret":       func(_ int, d *Decision) { d.Verb = key.RevealOrCreateSecret },
+		"reversible":   func(_ int, d *Decision) { d.Verb = key.Draft },
+		"unknown verb": func(_ int, d *Decision) { d.Verb = "wire" },
+		"paste site":   func(_ int, d *Decision) { d.Clerk = "paste" },
+		"changed arg":  func(i int, d *Decision) { d.Args = map[string]string{"note": "text " + strconv.Itoa(i)} },
+		"free text":    func(_ int, d *Decision) { d.Content = "" },
+		"content":      func(i int, d *Decision) { d.Content = "template:" + strconv.Itoa(i%2) },
+		"unverified":   func(_ int, d *Decision) { d.Verified = false },
 	} {
-		o := newOpt(t, &change.MemStore{}, func(c *Config) { c.UserContent = func(a string) bool { return a == "paste" } })
+		o := newOpt(t, &memStore{}, func(c *Config) { c.UserContent = func(a string) bool { return a == "paste" } })
 		for i := 0; i < 30; i++ {
 			d := invoice(i)
 			mut(i, &d)
@@ -146,7 +190,7 @@ func TestExclusions(t *testing.T) {
 			t.Errorf("%s: %d avoidable of %d", name, a, n+a)
 		}
 	}
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 10; i++ {
 		if i == 5 {
 			d := invoice(99)
@@ -161,12 +205,12 @@ func TestExclusions(t *testing.T) {
 	if len(suggestions(t, o)) != 1 {
 		t.Fatal("an unverified approval or an expired item must not reset the run")
 	}
-	if _, err := New(Config{Store: &change.MemStore{}}); err == nil {
+	if _, err := New(Config{Store: &memStore{}}); err == nil {
 		t.Fatal("New must require UserContent")
 	}
 }
 
-// ADP-9, ADP-11 (L3 B1): a NO, UNDO, edit, or wrong verdict resets the run
+// KEY-5 (L3 B1): a NO, UNDO, edit, or wrong verdict resets the run
 // even when the item was unverified; the owner's rejection of an item the
 // verifier could not read is still evidence.
 func TestUnverifiedRejectionResets(t *testing.T) {
@@ -175,7 +219,7 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 		"edit":  func(d *Decision) { d.Edited = true },
 		"wrong": func(d *Decision) { d.Wrong = true },
 	} {
-		o := newOpt(t, &change.MemStore{}, strict)
+		o := newOpt(t, &memStore{}, strict)
 		for i := 0; i < 25; i++ {
 			d := reply(i, false)
 			if i == 10 {
@@ -187,7 +231,7 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 		if s := suggestions(t, o); len(s) != 0 {
 			t.Errorf("%s: suggested %q", name, s[0].Text)
 		}
-		o = newOpt(t, &change.MemStore{}, nil)
+		o = newOpt(t, &memStore{}, nil)
 		for i := 0; i < 15; i++ {
 			d := invoice(i)
 			if i == 7 {
@@ -197,12 +241,12 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 			observe(t, o, d)
 		}
 		if s := suggestions(t, o); len(s) != 0 {
-			t.Errorf("ADP-9 %s: suggested %q", name, s[0].Text)
+			t.Errorf("templated %s: suggested %q", name, s[0].Text)
 		}
 	}
 	// Under the default light-edit rule, unverified edits still count in
 	// the edit rate: 4 unverified edits among 24 replies (17%) earn nothing.
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 24; i++ {
 		d := reply(i, i%6 == 0)
 		d.Verified = i%6 != 0
@@ -213,7 +257,7 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 	}
 	// The reviewer's probe: an unverified NO at #10 and edit at #11 among
 	// 25 replies leave a run of 14, short of 20.
-	o = newOpt(t, &change.MemStore{}, nil)
+	o = newOpt(t, &memStore{}, nil)
 	for i := 0; i < 25; i++ {
 		d := reply(i, i == 10)
 		if i == 9 || i == 10 {
@@ -230,19 +274,26 @@ func TestUnverifiedRejectionResets(t *testing.T) {
 }
 
 func reply(i int, edited bool) Decision {
-	return Decision{Account: "mail", Action: "message.reply", Verb: verb.Send, Approved: true, Verified: true, Edited: edited,
-		Params:     map[string]any{Record: "thread-" + strconv.Itoa(i), Body: "free text " + strconv.Itoa(i)},
+	return Decision{Clerk: "mail", Verb: key.Send, Thread: true, Approved: true, Verified: true, Edited: edited, Content: "thread",
 		Recipients: []string{"same@peer.test"}, At: t0.Add(time.Duration(i) * time.Hour)}
+}
+
+// isReply reports whether s is a thread-scoped key: send under the thread
+// content class, with no recipient or amount bound by value.
+func isReply(t *testing.T, s Suggestion) bool {
+	l := limits(t, s)
+	return strings.Join(l.Verbs, ",") == "send" && strings.Join(l.Content, ",") == "thread" && len(l.Args) == 0
 }
 
 // strict is the reply rule without light edits: any edit resets the run.
 func strict(c *Config) { c.ReplyEditPercent = -1 }
 
-// ADP-11, CAP-6, A15: with the strict setting a reply rule is offered only
+// KEY-5, KEY-2: with the strict setting a thread-scoped key is offered only
 // after a run of 20 unedited approvals; an edit, a NO, or a wrong verdict
-// resets the run. The rule fixes no recipients and no money.
+// resets the run. The key fixes no recipients and no money: the thread's
+// participants are the clerk's to read.
 func TestReplyRuleIsEarned(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, strict)
+	o := newOpt(t, &memStore{}, strict)
 	for i := 0; i < 15; i++ {
 		observe(t, o, reply(i, false))
 	}
@@ -255,7 +306,7 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	}
 	observe(t, o, reply(35, false))
 	s := suggestions(t, o)
-	if len(s) != 1 || !s[0].Spec.Rule.Reply || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 0 || len(s[0].Spec.Rule.Params) != 0 {
+	if len(s) != 1 || !isReply(t, s[0]) {
 		t.Fatalf("%+v", s)
 	}
 	if !strings.Contains(s[0].Text, "20 of my replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
@@ -263,11 +314,11 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	}
 }
 
-// ADP-11 (L3 F1): a reset keeps the edit-rate window. Five edits, a NO,
+// KEY-5 (L3 F1): a reset keeps the edit-rate window. Five edits, a NO,
 // then 20 unedited approvals: 5 of the last 25 answered were edited (20%),
 // so nothing is offered.
 func TestResetKeepsEditRate(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 5; i++ {
 		observe(t, o, reply(i, true))
 	}
@@ -282,13 +333,13 @@ func TestResetKeepsEditRate(t *testing.T) {
 	}
 }
 
-// ADP-11 by default (Mark, 2026-10-05, "Allow light edits"): 20 unedited
+// KEY-5 by default (Mark, 2026-10-05, "Allow light edits"): 20 unedited
 // approvals, edited ones never counting, with at most 10% edited among the
 // last 30 answered. A cosmetic edit still earns; a higher edit rate does
 // not; a NO or a wrong verdict resets.
 func TestReplyLightEdits(t *testing.T) {
 	var pa2 func(*Config)
-	o := newOpt(t, &change.MemStore{}, pa2)
+	o := newOpt(t, &memStore{}, pa2)
 	for i := 0; i < 19; i++ {
 		observe(t, o, reply(i, i == 7)) // one cosmetic edit
 	}
@@ -298,14 +349,14 @@ func TestReplyLightEdits(t *testing.T) {
 	observe(t, o, reply(19, false))
 	observe(t, o, reply(20, false))
 	s := suggestions(t, o)
-	if len(s) != 1 || !s[0].Spec.Rule.Reply || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 0 || len(s[0].Spec.Rule.Params) != 0 {
+	if len(s) != 1 || !isReply(t, s[0]) {
 		t.Fatalf("one edit among 21 must still earn: %+v", s)
 	}
 	if !strings.Contains(s[0].Text, "20 of my replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
 	}
 
-	o = newOpt(t, &change.MemStore{}, pa2)
+	o = newOpt(t, &memStore{}, pa2)
 	for i := 0; i < 24; i++ {
 		observe(t, o, reply(i, i%6 == 0)) // 4 of 24 edited: 17%
 	}
@@ -313,7 +364,7 @@ func TestReplyLightEdits(t *testing.T) {
 		t.Fatalf("an edit rate above 10%% earned: %+v", s)
 	}
 
-	o = newOpt(t, &change.MemStore{}, pa2)
+	o = newOpt(t, &memStore{}, pa2)
 	for i := 0; i < 25; i++ {
 		d := reply(i, false)
 		if i == 10 {
@@ -326,7 +377,7 @@ func TestReplyLightEdits(t *testing.T) {
 	}
 	d := reply(30, false)
 	d.Wrong = true
-	o = newOpt(t, &change.MemStore{}, pa2)
+	o = newOpt(t, &memStore{}, pa2)
 	for i := 0; i < 25; i++ {
 		observe(t, o, reply(i, false))
 		if i == 10 {
@@ -338,10 +389,10 @@ func TestReplyLightEdits(t *testing.T) {
 	}
 }
 
-// CAP-6: the owner's NO stops the suggestion until the class earns twice
+// KEY-5: the owner's NO stops the suggestion until the class earns twice
 // the threshold again; state survives a restart.
 func TestDeclineAndRestart(t *testing.T) {
-	st := &change.MemStore{}
+	st := &memStore{}
 	o := newOpt(t, st, nil)
 	for i := 0; i < 10; i++ {
 		observe(t, o, invoice(i))
@@ -367,10 +418,10 @@ func TestDeclineAndRestart(t *testing.T) {
 }
 
 // A10: owner approvals split into necessary (before the class earned a
-// suggestion) and avoidable (after: a pre-allowance would have covered
+// suggestion) and avoidable (after: a standing key would have covered
 // them).
 func TestApprovalSplit(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 14; i++ {
 		observe(t, o, invoice(i))
 	}
@@ -382,13 +433,13 @@ func TestApprovalSplit(t *testing.T) {
 	}
 	// Unverified, ineligible, and edited approvals were all necessary; a
 	// later wrong verdict is not a second approval.
-	o = newOpt(t, &change.MemStore{}, nil)
+	o = newOpt(t, &memStore{}, nil)
 	for i := 0; i < 10; i++ {
 		observe(t, o, invoice(i))
 	}
 	u, r, e, w := invoice(10), invoice(11), invoice(12), invoice(3)
 	u.Verified = false
-	r.Verb = verb.Draft
+	r.Verb = key.Draft
 	e.Edited = true
 	w.Wrong = true
 	observe(t, o, u, r, e, w)
@@ -397,10 +448,10 @@ func TestApprovalSplit(t *testing.T) {
 	}
 }
 
-// CAP-6: the drafted daily cap is the median day, so bunching approvals
+// KEY-5: the drafted daily rate is the median day, so bunching approvals
 // into one day cannot raise it.
 func TestPerDayIsMedian(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 10; i++ {
 		d := invoice(i)
 		d.At = t0.Add(time.Duration(i) * 24 * time.Hour)
@@ -409,14 +460,14 @@ func TestPerDayIsMedian(t *testing.T) {
 		}
 		observe(t, o, d)
 	}
-	if s := suggestions(t, o); len(s) != 1 || s[0].Spec.Rule.PerDay != 1 {
+	if s := suggestions(t, o); len(s) != 1 || rate(limits(t, s[0])) != 1 {
 		t.Fatalf("%+v", s)
 	}
 }
 
 // CH-12: fallback short IDs stay within three characters.
 func TestShortIDsAreBounded(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < MaxShort; i++ {
 		o.st.Classes[strconv.Itoa(i)] = &class{Short: "taken"}
 		s, err := o.shortLocked()
@@ -430,16 +481,16 @@ func TestShortIDsAreBounded(t *testing.T) {
 	}
 }
 
-// CAP-6: the optimizer proposes and never enacts. It holds no handle on
-// the journal, the grants gate, or the owner channel, so a suggestion can
-// only take effect as the owner's own new-grant intent.
+// KEY-5: the optimizer proposes and never enacts. It holds no handle on
+// the kernel, a key, or the owner channel: only the key package's types,
+// so a suggestion can only take effect as the owner's passkey tap.
 func TestCannotEnact(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "attention.go", nil, parser.ImportsOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := map[string]bool{"encoding/json": true, "errors": true, "fmt": true, "sort": true, "strings": true,
-		"sync": true, "time": true, "github.com/ghbmrk/agentos/broker/grants": true, "github.com/ghbmrk/agentos/broker/verb": true}
+	allowed := map[string]bool{"encoding/json": true, "errors": true, "fmt": true, "maps": true, "slices": true, "sort": true,
+		"strings": true, "sync": true, "time": true, "github.com/ghbmrk/agentos/broker/kernel/key": true}
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
 		if !allowed[p] {
@@ -448,16 +499,16 @@ func TestCannotEnact(t *testing.T) {
 	}
 }
 
-// CAP-6, CH-12 (UX-52-2): the owner's text fits three GSM-7 segments even
-// for the longest names and an amount cap; the full rule is on the Wi-Fi
+// KEY-5, CH-12 (UX-52-2): the owner's text fits three GSM-7 segments even
+// for the longest names and an amount cap; the full key is on the owner
 // page (Detail).
 func TestTextFitsThreeSegments(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	long := strings.Repeat("a", 64)
 	for i := 0; i < 10; i++ {
 		d := invoice(i)
-		d.Account, d.Action, d.Amount = long, strings.Repeat("b", 64), 99999999999
-		d.Params["template"] = strings.Repeat("t", 200)
+		d.Clerk, d.Verb, d.Amount = long, key.Buy, 99999999999
+		d.Content = strings.Repeat("t", 200)
 		observe(t, o, d)
 	}
 	s := suggestions(t, o)
@@ -466,10 +517,10 @@ func TestTextFitsThreeSegments(t *testing.T) {
 	}
 }
 
-// CAP-6 (UX-52-3): a suggestion goes to the owner at most weekly, and two
+// KEY-5 (UX-52-3): a suggestion goes to the owner at most weekly, and two
 // unanswered offers count as a NO.
 func TestOffersAreWeeklyAndLapse(t *testing.T) {
-	o := newOpt(t, &change.MemStore{}, nil)
+	o := newOpt(t, &memStore{}, nil)
 	for i := 0; i < 10; i++ {
 		observe(t, o, invoice(i))
 	}
@@ -490,5 +541,53 @@ func TestOffersAreWeeklyAndLapse(t *testing.T) {
 	}
 	if due(day.Add(14*24*time.Hour)) != 0 || len(suggestions(t, o)) != 0 {
 		t.Fatal("two unanswered offers must count as a NO")
+	}
+}
+
+// KEY-2, KEY-5: Describe words every closed caveat kind, one term each, so
+// a card built from it leaves no caveat off; a change to any caveat
+// changes the wording.
+func TestDescribeWordsEveryCaveat(t *testing.T) {
+	lo, hi := int64(100), int64(15000000)
+	cs := []key.Caveat{
+		key.LimitVerbs(key.Buy), key.LimitContent("template:inv"), key.LimitLabels("public"),
+		key.LimitArg(key.ArgBound{Name: "to", OneOf: []string{"billing@acme.example"}}),
+		key.LimitArg(key.ArgBound{Name: key.ArgAmount, Min: &lo, Max: &hi}),
+		key.LimitSpendTask(500), key.LimitSpendDay(900), key.LimitRate(50), key.LimitRateRecipient(25),
+		key.LimitExpires(t0.UnixMilli()), key.LimitUses(3), key.LimitHold(600000, 900000), key.LimitTask("T1"),
+	}
+	d := Describe("books", cs)
+	if len(d) != len(cs)+1 || d[0] != (Term{"Clerk", "books"}) {
+		t.Fatalf("%+v", d)
+	}
+	want := []Term{
+		{"Runs", "buy, without asking or notifying you"}, {"Content", "only template:inv"}, {"Data labels", "only public"},
+		{"Argument to", "only billing@acme.example"}, {"Argument amount", "at least 1.00, up to 150000.00"},
+		{"Spend per task", "up to 5.00"}, {"Spend per day", "up to 9.00"}, {"Per day", "at most 50 runs"},
+		{"Per recipient", "at most 25 runs a day"}, {"Expires", "Oct 5 2026 09:00 UTC"}, {"Uses", "at most 3"},
+		{"Hold", "10m0s before it runs, 15m0s when new"}, {"Task", "only T1"},
+	}
+	if !slices.Equal(d[1:], want) {
+		t.Fatalf("got  %+v\nwant %+v", d[1:], want)
+	}
+	for i := range cs {
+		c := slices.Clone(cs)
+		switch c[i].Kind {
+		case key.KArg:
+			b := *c[i].Arg
+			b.Name += "x"
+			c[i].Arg = &b
+		case key.KVerbs:
+			c[i] = key.LimitVerbs(key.Send)
+		default:
+			c[i].N += 60000 // a minute: the expiry shows minutes
+			c[i].Set = append(slices.Clone(c[i].Set), "zz")
+		}
+		if slices.Equal(Describe("books", c), d) {
+			t.Errorf("caveat %d (%s) changed but the wording did not", i, cs[i].Kind)
+		}
+	}
+	if Describe("books", []key.Caveat{{Kind: "novel"}})[1].Label != "Unknown limit" {
+		t.Fatal("an unknown kind must still show")
 	}
 }
