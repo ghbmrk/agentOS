@@ -190,7 +190,6 @@ allow broker/loopbuild/
 allow broker/loops/
 allow broker/machprobe/
 allow broker/probecmd/
-allow broker/pubsend/
 allow broker/skill/
 allow broker/sockprobe/
 
