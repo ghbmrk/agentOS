@@ -23,6 +23,10 @@ const (
 // refused, never migrated (clerk ASSUMPTIONS MIG-4-exit-e, #2643 d).
 var ErrOldFormat = errors.New("run: secrets file is in the old slot-to-blob form; refused")
 
+// errSecretsTooLarge refuses a Secrets file past maxSecrets, at open and at
+// every write.
+var errSecretsTooLarge = errors.New("run: secrets file too large")
+
 // OpenSecrets opens a clerk's Secrets from dir, the clerk's own directory, and
 // makes every later Put durable in it (CLK-1, STO-2). dir and the file in it
 // must belong to this process's uid and be closed to every other uid, so
@@ -32,7 +36,14 @@ func OpenSecrets(dir string, s clerk.Sealer) (*clerk.Secrets, error) {
 	if err := private(dir, true); err != nil {
 		return nil, err
 	}
-	sec := clerk.NewSecrets(s, func(b []byte) error { return writeAtomic(dir, secretsName, b, nil) })
+	sec := clerk.NewSecrets(s, func(b []byte) error {
+		// A form the next open would refuse is never written: the write
+		// fails and the store keeps its last form (#2738 Security 2).
+		if len(b) > maxSecrets {
+			return errSecretsTooLarge
+		}
+		return writeAtomic(dir, secretsName, b, nil)
+	})
 	f, err := os.OpenFile(filepath.Join(dir, secretsName), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return sec, nil
@@ -49,7 +60,7 @@ func OpenSecrets(dir string, s clerk.Sealer) (*clerk.Secrets, error) {
 		return nil, err
 	}
 	if len(b) > maxSecrets {
-		return nil, errors.New("run: secrets file too large")
+		return nil, errSecretsTooLarge
 	}
 	if old(b) {
 		return nil, ErrOldFormat
