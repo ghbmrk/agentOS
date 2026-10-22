@@ -687,6 +687,10 @@ func (k *Kernel) Retry(now int64, plan string, index int) error {
 	if r := k.sendable(now, p, st, index); r != nil && r.Code != key.RPaused {
 		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code, r.Detail)
 	}
+	if c := p.Plan.Steps[index].Clerk; k.clerks[c] == nil {
+		// The redo could reach no clerk and would cancel the plan.
+		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, CClerk, c)
+	}
 	return k.owner(now, TStepRetried, stepRef{plan, index})
 }
 

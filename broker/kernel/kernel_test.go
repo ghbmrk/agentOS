@@ -916,6 +916,24 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	r.replays()
 }
 
+// A RETRY for a step whose clerk the kernel was not booted with is refused:
+// its redo could reach no clerk and would cancel the plan (#2747).
+func TestRetryRefusesAMissingClerk(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.ck)
+	l, err := kernel.Open(cfg(r))
+	must(t, err)
+	r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{}, at+1)
+	must(t, err)
+	n := r.k.Log().Len()
+	if err := r.k.Retry(at+2, "p1", 0); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
+		t.Fatalf("retry %v, log %d -> %d", err, n, r.k.Log().Len())
+	}
+	if r.status("p1") != kernel.SActive || r.phase("p1").Phase != kernel.PParked {
+		t.Fatalf("status %s, phase %s", r.status("p1"), r.phase("p1").Phase)
+	}
+}
+
 // A pause only delays a RETRY: it is accepted, waits while the key is
 // paused, and runs once the key resumes (KRN-8, CH-11).
 func TestRetryUnderAPauseRunsOnResume(t *testing.T) {
