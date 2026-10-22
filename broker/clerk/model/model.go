@@ -108,7 +108,14 @@ func (p Price) cost(in, out int64) (int64, error) {
 // (flush), so the call whose write failed is the last.
 func (c *Clerk) owe(now int64, write func(now int64) error) error {
 	if err := write(now); err != nil {
-		c.owed = append(c.owed, write)
+		c.owed = append(c.owed, func(now int64) error {
+			// A retry of a settlement whose answer was lost after it landed:
+			// the kernel settles an admission once, so it is recorded.
+			if err := write(now); !errors.Is(err, kernel.ErrNotAdmitted) {
+				return err
+			}
+			return nil
+		})
 		return err
 	}
 	return nil

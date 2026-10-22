@@ -51,6 +51,7 @@ func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 type flaky struct {
 	model.Ledger
 	fail, failPool bool
+	lose           bool // the log records the usage, but its answer is lost
 }
 
 func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
@@ -64,7 +65,10 @@ func (f *flaky) Meter(now int64, a kernel.Admitted, route string, amount int64, 
 	if f.fail {
 		return errors.New("log down")
 	}
-	return f.Ledger.Meter(now, a, route, amount, source)
+	if err := f.Ledger.Meter(now, a, route, amount, source); err != nil || !f.lose {
+		return err
+	}
+	return errors.New("answer lost")
 }
 
 // rig boots a kernel and submits active plans "t" and "big" citing a model key
@@ -284,6 +288,31 @@ func TestUnrecordedSpendShutsTheClerkUntilTheLogRecords(t *testing.T) {
 	}
 	if len(used) != 2 || !strings.Contains(used[0], `"amount":70`) {
 		t.Fatalf("the owed usage is recorded first: %v", used)
+	}
+}
+
+// A settlement whose answer is lost after the log took it is retried; the
+// retry is refused as already settled, which counts as recorded, so the use
+// is recorded once and calls resume.
+func TestALostSettlementIsRecordedOnce(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, k, lg := rig(t, f)
+	lg.lose = true
+	if _, err := c.Call(1, "t", "api", "hi", 50); err == nil {
+		t.Fatal("a lost answer is not known to be recorded")
+	}
+	lg.lose = false
+	if _, err := c.Call(2, "big", "api", "hi", 1); err != nil {
+		t.Fatalf("calls resume once the retry finds it settled: %v", err)
+	}
+	used := 0
+	for _, e := range k.Log().Entries() {
+		if e.Type == kernel.TModelUsed {
+			used++
+		}
+	}
+	if used != 2 {
+		t.Fatalf("%d uses recorded, want each once", used)
 	}
 }
 

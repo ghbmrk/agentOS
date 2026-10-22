@@ -331,11 +331,13 @@ func TestAProviderErrorStaysInTheModelClerk(t *testing.T) {
 // admitAll is a ledger that admits and records everything.
 type admitAll struct{}
 
-func (admitAll) AdmitSpend(int64, string, int64) *key.Refusal     { return nil }
-func (admitAll) Meter(int64, string, string, int64, string) error { return nil }
-func (admitAll) Hold(int64, string, *key.Refusal) error           { return nil }
-func (admitAll) AdmitPool(int64, string) *key.Refusal             { return nil }
-func (admitAll) ReadPool(int64, string, int64, int64) error       { return nil }
+func (admitAll) AdmitSpend(_ int64, plan string, _ int64) (kernel.Admitted, *key.Refusal) {
+	return kernel.Admitted{Plan: plan}, nil
+}
+func (admitAll) Meter(int64, kernel.Admitted, string, int64, string) error { return nil }
+func (admitAll) Hold(int64, string, *key.Refusal) error                    { return nil }
+func (admitAll) AdmitPool(int64, string) *key.Refusal                      { return nil }
+func (admitAll) ReadPool(int64, string, int64, int64) error                { return nil }
 
 // failingOnce is a listener whose first accept fails as a process out of
 // descriptors does.
@@ -529,6 +531,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		return r
 	}
 
+	var admitted kernel.Admitted // the socket's admission, settled by both kernels' meter
 	cases := []twin{
 		{name: "submit", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
 		{name: "issue", op: "issue", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
@@ -552,8 +555,16 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			}},
 		{name: "setline", op: "setline", sock: func(o Owner, _ Meter) (any, error) { return nil, o.SetLine(100) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(now(), 100) }},
 		{name: "reserve", op: "reserve", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Reserve("full", kernel.PoolFull) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", kernel.PoolFull) }},
-		{name: "meter", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, "m", "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), "m", "api", 37, "provider") }},
-		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitSpend(0, "m", 1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitSpend(now(), "m", 1000)) }},
+		{name: "admit", op: "admitspend", read: func(v any) bool { return v.(kernel.Admitted).Seq > 0 },
+			sock: func(_ Owner, m Meter) (any, error) {
+				a, r := m.AdmitSpend(0, "m", 37)
+				admitted = a
+				return a, refusal(r)
+			},
+			call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 37); return a, refusal(r) }},
+		{name: "meter", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
+		{name: "meter again", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
+		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { a, r := m.AdmitSpend(0, "m", 1000); return a, refusal(r) }, call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 1000); return a, refusal(r) }},
 		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
 		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", 300, at+1000) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", 300, at+1000) }},
 		{name: "hold", op: "hold", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
@@ -599,7 +610,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	// Refused on both kernels by design: the admission past the cap and the
 	// pool at its reserve. Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {
