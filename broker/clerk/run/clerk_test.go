@@ -1,14 +1,16 @@
 package run
 
-// REQ: CLK-1, CH-3, OWN-9
+// REQ: CLK-1, CH-3, OWN-9, KRN-8
 
 import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +30,7 @@ type exitRig struct {
 	owner ExitOwner
 	host  *ExitHost
 	last  *seenCall
+	dir   string // the clerk's Secrets directory
 }
 
 // seenCall keeps the last call the kernel made to the host, to replay it.
@@ -57,7 +60,9 @@ func newExitRig(t *testing.T) *exitRig {
 	if err := sec.Put("web", clerk.KindGrant, []byte(`{"refresh_token":"canary-refresh-old","client_id":"agentos-test"}`)); err != nil {
 		t.Fatal(err)
 	}
-	d := clerk.Declaration{Name: "web", Ops: ops("https://example.com:1"), Guard: guard("127.0.0.1:1"), Refresh: "https://example.com/token"}
+	// The clerk reads the rig's clock, as the kernel does.
+	var b *box
+	d := clerk.Declaration{Name: "web", Ops: ops("https://example.com:1"), Guard: guard("127.0.0.1:1"), Refresh: "https://example.com/token", Clock: func() int64 { return b.now }}
 	x, err := clerk.NewExit(d, anchors, sec, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -78,36 +83,45 @@ func newExitRig(t *testing.T) *exitRig {
 	}
 	t.Cleanup(func() { oln.Close() })
 	go ServeExitOwner(oln, h)
-	b := newBoxFor(t, sock, "web", key.Post, key.ChangeAccount)
+	b = newBoxFor(t, sock, "web", key.Post, key.ChangeAccount)
 	if err := b.h.With(func(k *kernel.Kernel) error { return k.Enroll(b.now, key.Enroll(ownerPriv, phonePub)) }); err != nil {
 		t.Fatal(err)
 	}
-	return &exitRig{box: b, sec: sec, host: h, last: last, owner: ExitOwner{Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
+	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
 }
 
-// approve is the owner's phone narrowing the clerk key for one use: each a
-// new link, since a link's use is counted once.
-func (r *exitRig) approve() key.Key {
+// approve is the owner's phone approving exactly a reconnect to the grant
+// with digest d: change-account only, that value only, one use, for
+// MaxApproval. Time moves on a second each call, so each is a new link.
+func (r *exitRig) approve(d string) key.Key {
 	r.t.Helper()
-	k, err := key.Narrow(r.key, phonePriv, key.LimitUses(1), key.LimitExpires(r.now+10*key.DayMS))
+	r.now += 1000
+	return r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(d)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval))
+}
+
+func (r *exitRig) narrow(cs ...key.Caveat) key.Key {
+	r.t.Helper()
+	return r.narrowBy(phonePriv, cs...)
+}
+
+func (r *exitRig) narrowBy(by ed25519.PrivateKey, cs ...key.Caveat) key.Key {
+	r.t.Helper()
+	k, err := key.Narrow(r.key, by, cs...)
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	return k
 }
 
-// reconnect runs a change-account step for grant digest under k, and
-// returns its state and whether the store changed.
-func (r *exitRig) reconnect(k key.Key, target, digest string) (kernel.StepState, bool) {
+// reconnect runs plan id, a change-account step for grant digest under k,
+// and returns its state and whether the store changed.
+func (r *exitRig) reconnect(id string, k key.Key, target, digest string) (kernel.StepState, bool) {
 	r.t.Helper()
 	before, _ := r.sec.MarshalBinary()
-	r.plans++
-	id := "c" + string(rune('0'+r.plans))
-	p := kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": target, "value": digest}}}}, holderPriv)
+	p := kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": target, "value": digest}, Content: grantPrint(digest)}}}, holderPriv)
 	if err := r.h.With(func(k *kernel.Kernel) error { return k.Submit(r.now, p) }); err != nil {
 		r.t.Fatal(err)
 	}
-	r.now += 2 * key.DayMS
 	r.tick(r.now)
 	after, _ := r.sec.MarshalBinary()
 	var st kernel.StepState
@@ -120,46 +134,94 @@ func (r *exitRig) reconnect(k key.Key, target, digest string) (kernel.StepState,
 	return st, !bytes.Equal(before, after)
 }
 
+func (r *exitRig) stage(plan string, grant []byte) string {
+	r.t.Helper()
+	d, err := r.owner.Stage(plan, grant)
+	if err != nil || d != grantDigest(grant) {
+		r.t.Fatalf("staging: %q, %v", d, err)
+	}
+	return d
+}
+
 // The owner's Reconnect, out of the kernel's process, is a change-account
-// step under a key the owner's passkey narrowed, naming the grant the
-// owner's side staged on the clerk's own socket by its digest. Without the
-// passkey's approval, for another clerk, or for a grant not staged, the
-// slot is unchanged; with all three it is replaced once, and the staged
-// grant is spent (#2643 b).
-func TestReconnectNeedsTheOwnersApprovalAndTheStagedGrant(t *testing.T) {
+// step under the owner's exact approval, naming by digest the grant the
+// owner's side staged for that plan on the clerk's own socket. The clerk
+// key alone, a narrowing the owner gave for anything else, another clerk,
+// another plan, or a grant not staged leaves the slot unchanged; with all
+// of it the slot is replaced once and the staged grant is spent (#2643 b).
+func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 	r := newExitRig(t)
 	grant := []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`)
-	digest, err := r.owner.Stage(grant)
-	if err != nil || digest != grantDigest(grant) {
-		t.Fatalf("staging: %q, %v", digest, err)
-	}
+	digest := grantDigest(grant)
 	other := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
-	for _, c := range []struct {
+	for i, c := range []struct {
 		name           string
-		approved       bool
+		k              key.Key
 		target, digest string
+		otherPlan      bool
 		detail         string
 	}{
-		{"the clerk's own key", false, "web", digest, DNotApproved},
-		{"another grant", true, "web", other, DNotStaged},
-		{"another clerk", true, "mail", digest, DNotThis},
+		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
+		{"a narrowing for anything else", r.narrow(key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"an approval of any verb", r.narrow(key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"an approval naming no grant", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"an approval of more than one use", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(2), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"a lasting approval", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval+60000)), "web", digest, false, DNotApproved},
+		{"another grant", r.approve(other), "web", other, false, DNotStaged},
+		{"another clerk", r.approve(digest), "mail", digest, false, DNotThis},
+		{"another plan", r.approve(digest), "web", digest, true, DNotStaged},
 	} {
-		k := r.key
-		if c.approved {
-			k = r.approve()
+		id := "case" + string(rune('a'+i))
+		staged := id
+		if c.otherPlan {
+			staged = "someone-else"
 		}
-		st, changed := r.reconnect(k, c.target, c.digest)
+		r.stage(staged, grant)
+		st, changed := r.reconnect(id, c.k, c.target, c.digest)
 		if changed || st.Detail != c.detail {
 			t.Errorf("%s: step %s %q, store changed %v", c.name, st.Phase, st.Detail, changed)
 		}
 	}
-	st, changed := r.reconnect(r.approve(), "web", digest)
+	r.stage("ok", grant)
+	st, changed := r.reconnect("ok", r.approve(digest), "web", digest)
 	if !changed || st.Phase != kernel.PDone {
 		t.Fatalf("the approved reconnect: step %s %q, store changed %v", st.Phase, st.Detail, changed)
 	}
 	r.now += key.DayMS // past the kernel's own duplicate guard (KRN-8)
-	if st, changed := r.reconnect(r.approve(), "web", digest); changed || st.Detail != DNotStaged {
+	if st, changed := r.reconnect("again", r.approve(digest), "web", digest); changed || st.Detail != DNotStaged {
 		t.Fatalf("a spent staged grant was used again: step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+}
+
+// A reconnect the clerk cannot make (a grant that does not read, or one
+// that would take the Secrets file past what the next open reads) fails,
+// is not done to a probe, and leaves the slot and the file as they were.
+func TestAReconnectThatFailsChangesNothing(t *testing.T) {
+	r := newExitRig(t)
+	for _, c := range []struct {
+		name  string
+		grant []byte
+	}{
+		{"a grant that does not read", []byte(`{"token":"canary-refresh-bad"}`)},
+		{"a grant past the file's bound", []byte(`{"refresh_token":"` + strings.Repeat("r", maxSecrets) + `"}`)},
+	} {
+		r.plans++
+		id := "f" + string(rune('0'+r.plans))
+		d := r.stage(id, c.grant)
+		st, changed := r.reconnect(id, r.approve(d), "web", d)
+		if changed || st.Detail != clerk.DCredential {
+			t.Errorf("%s: step %s %q, store changed %v", c.name, st.Phase, st.Detail, changed)
+		}
+		r.last.mu.Lock()
+		req, v := r.last.req, r.last.view
+		r.last.mu.Unlock()
+		if got := r.host.Probe(req, v); got != "unknown" {
+			t.Errorf("%s: probe %q", c.name, got)
+		}
+	}
+	if _, err := OpenSecrets(r.dir, testSealer()); err != nil {
+		t.Fatalf("the Secrets file no longer opens: %v", err)
 	}
 }
 
@@ -168,19 +230,61 @@ func TestReconnectNeedsTheOwnersApprovalAndTheStagedGrant(t *testing.T) {
 func TestTheStagedGrantNeverReachesTheLog(t *testing.T) {
 	r := newExitRig(t)
 	grant := []byte(`{"refresh_token":"canary-refresh-log","client_id":"agentos-test"}`)
-	if err := r.owner.call("reconnect", grant, nil); err == nil {
+	if err := r.owner.call("reconnect", stageArgs{"log", grant}, nil); err == nil {
 		t.Fatal("the exit owner socket answered a call other than stage")
 	}
-	digest, err := r.owner.Stage(grant)
-	if err != nil {
-		t.Fatal(err)
+	for _, a := range []stageArgs{{"", grant}, {"log", nil}} {
+		if err := r.owner.call("stage", a, nil); err == nil {
+			t.Fatalf("staging %+v was taken", a)
+		}
 	}
-	if _, changed := r.reconnect(r.approve(), "web", digest); !changed {
+	digest := r.stage("log", grant)
+	if _, changed := r.reconnect("log", r.approve(digest), "web", digest); !changed {
 		t.Fatal("the approved reconnect changed nothing")
 	}
 	log := plainLog(t, r.cfg.Log, r.cfg.Key)
 	if bytes.Contains(log, []byte("canary-refresh-log")) || !bytes.Contains(log, []byte(digest)) {
 		t.Fatal("the log carries the grant, or not its digest")
+	}
+}
+
+// A change-account step acts once, and only as the kernel sent it: the same
+// step sent again after it ran, or one the kernel never sent, leaves the slot
+// as it is, however the owner approved it; the host answers the kernel's
+// probe from what it did (#2643 b).
+func TestReconnectActsOnceAndOnlyAsTheKernelSentIt(t *testing.T) {
+	r := newExitRig(t)
+	grant := []byte(`{"refresh_token":"canary-refresh-once","client_id":"agentos-test"}`)
+	digest := r.stage("once", grant)
+	if st, changed := r.reconnect("once", r.approve(digest), "web", digest); !changed || st.Phase != kernel.PDone {
+		t.Fatalf("the approved reconnect: step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+	r.last.mu.Lock()
+	sent, sentView := r.last.req, r.last.view
+	r.last.mu.Unlock()
+	if got := r.host.Probe(sent, sentView); got != "done" {
+		t.Errorf("probe of the step that ran: %q", got)
+	}
+	r.stage("once", grant)
+	before, _ := r.sec.MarshalBinary()
+	if res := r.host.Do(sent, sentView); res.Outcome != "ok" {
+		t.Errorf("the step sent again: %+v", res)
+	}
+	// One the kernel never sent: an approved plan, verified against the
+	// kernel's view, but not dispatched.
+	r.stage("never", grant)
+	p := kernel.SignPlan(kernel.Plan{ID: "never", Key: r.approve(digest), Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": "web", "value": digest}, Content: grantPrint(digest)}}}, holderPriv)
+	req := kernel.Request{Plan: p}
+	var v snapshot
+	r.h.With(func(k *kernel.Kernel) error { v = view(k.State(), anchors, req, r.now); return nil })
+	if res := r.host.Do(req, &v); res.Outcome != "failed" {
+		t.Errorf("a step the kernel never sent: %+v", res)
+	}
+	if got := r.host.Probe(req, &v); got != "unknown" {
+		t.Errorf("probe of a step that never ran: %q", got)
+	}
+	if after, _ := r.sec.MarshalBinary(); !bytes.Equal(before, after) {
+		t.Fatal("a step sent again, or never sent, changed the slot")
 	}
 }
 
@@ -215,48 +319,4 @@ func plainLog(t *testing.T, path string, k [32]byte) []byte {
 		t.Fatal("the log is empty")
 	}
 	return out
-}
-
-// A change-account step acts once, and only as the kernel sent it: the same
-// step sent again after it ran, or one the kernel never sent, leaves the slot
-// as it is, however the owner approved it; the host answers the kernel's
-// probe from what it did (#2643 b).
-func TestReconnectActsOnceAndOnlyAsTheKernelSentIt(t *testing.T) {
-	r := newExitRig(t)
-	grant := []byte(`{"refresh_token":"canary-refresh-once","client_id":"agentos-test"}`)
-	digest, err := r.owner.Stage(grant)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st, changed := r.reconnect(r.approve(), "web", digest); !changed || st.Phase != kernel.PDone {
-		t.Fatalf("the approved reconnect: step %s %q, store changed %v", st.Phase, st.Detail, changed)
-	}
-	r.last.mu.Lock()
-	sent, sentView := r.last.req, r.last.view
-	r.last.mu.Unlock()
-	if got := r.host.Probe(sent, sentView); got != "done" {
-		t.Errorf("probe of the step that ran: %q", got)
-	}
-	if _, err := r.owner.Stage(grant); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := r.sec.MarshalBinary()
-	if res := r.host.Do(sent, sentView); res.Outcome != "ok" {
-		t.Errorf("the step sent again: %+v", res)
-	}
-	// One the kernel never sent: an approved plan, verified against the
-	// kernel's view, but not dispatched.
-	p := kernel.SignPlan(kernel.Plan{ID: "never", Key: r.approve(), Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": "web", "value": digest}}}}, holderPriv)
-	req := kernel.Request{Plan: p}
-	var v snapshot
-	r.h.With(func(k *kernel.Kernel) error { v = view(k.State(), anchors, req, r.now); return nil })
-	if res := r.host.Do(req, &v); res.Outcome != "failed" {
-		t.Errorf("a step the kernel never sent: %+v", res)
-	}
-	if got := r.host.Probe(req, &v); got != "unknown" {
-		t.Errorf("probe of a step that never ran: %q", got)
-	}
-	if after, _ := r.sec.MarshalBinary(); !bytes.Equal(before, after) {
-		t.Fatal("a step sent again, or never sent, changed the slot")
-	}
 }
