@@ -318,6 +318,7 @@ type StepState struct {
 	Detail      string // the clerk's last answer, for STATUS
 	Covered     string // a covered submit's STATUS line (CLK-3)
 	SentAt      int64  // when the log recorded it sent
+	Retried     bool   // RETRY sent it again: it may have acted until a probe finds it not done
 }
 
 type PlanState struct {
@@ -366,11 +367,16 @@ type usedRec struct {
 	key.Use
 }
 
-// cancelUnsent cancels step st of plan p, which is known never to have acted:
-// queued, unsent, or proved not done. Its dispatch's charge comes off the
-// ledger, so a cancel leaves no cap spent on an effect that never happened
-// (KRN-8). A step that may have acted is never cancelled this way.
+// cancelUnsent cancels step st of plan p, which nothing has sent since it
+// was last known not to have acted: queued, unsent, or proved not done. Its
+// dispatch's charge comes off the ledger, so a cancel leaves no cap spent on
+// an effect that never happened (KRN-8). A step RETRY sent again may have
+// acted before it parked, so it goes back to parked, charged and listed.
 func (s *State) cancelUnsent(p *PlanState, st *StepState) {
+	if st.Retried {
+		st.Phase = PParked
+		return
+	}
 	st.Phase = PCancelled
 	if st.DispatchSeq == 0 {
 		return
@@ -997,7 +1003,7 @@ func (s *State) Apply(e Entry) error {
 					st.Covered, st.SentAt = b.Covered, e.At
 				}
 			case "notdone":
-				st.Phase = PRedo
+				st.Phase, st.Retried = PRedo, false
 				if p.Status != SActive {
 					s.cancelUnsent(p, st)
 				}
@@ -1032,7 +1038,7 @@ func (s *State) Apply(e Entry) error {
 		// The redo runs Next's checks again: key, revocation, pause, STOP,
 		// limits as of the first dispatch, under the same idempotency key.
 		if p, st := s.step(b); st != nil && retryable(p, st) {
-			st.Phase, st.Checks = PRedo, 0
+			st.Phase, st.Checks, st.Retried = PRedo, 0, true
 		}
 	case TTaskOpened, TTaskApproved, TTaskEnded:
 		return s.applyTask(e)

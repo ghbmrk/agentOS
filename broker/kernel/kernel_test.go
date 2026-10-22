@@ -858,22 +858,62 @@ func TestRetryRedispatchesAParkedStep(t *testing.T) {
 	}
 }
 
-// RETRY widens nothing else: the redo meets the same checks as any dispatch,
-// so a key revoked, or a STOP, while the step was parked still refuses it.
+// RETRY widens nothing else: the redo meets the same checks as any dispatch.
+// A RETRY under a key revoked, or a STOP, while the step was parked is
+// refused, and the step stays parked. One that comes after the RETRY cancels
+// the plan unsent, and the step goes back to parked, still charged, since it
+// may have acted before it parked (KRN-8).
 func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	for name, narrow := range map[string]func(*rig, int64) error{
 		"revoked": func(r *rig, at int64) error { return r.k.Revoke(at, r.ck.Tip()) },
 		"stopped": func(r *rig, at int64) error { return r.k.Stop(at) },
 	} {
+		parked := func(r *rig, when string) {
+			t.Helper()
+			st := r.phase("p1")
+			if st.Phase != kernel.PParked || len(r.mail.Effects()) != 0 || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 1 {
+				t.Fatalf("%s %s: phase %s, %d effects", name, when, st.Phase, len(r.mail.Effects()))
+			}
+			if s := r.k.State().Status(); len(s) != 1 || s[0].Phase != kernel.PParked {
+				t.Fatalf("%s %s: STATUS %+v", name, when, s)
+			}
+		}
 		r := newRig(t)
 		at := r.park(r.ck)
 		must(t, narrow(r, at+1))
-		must(t, r.k.Retry(at+2, "p1", 0))
-		must(t, r.tick(at+3))
-		if r.status("p1") != kernel.SCancelled || len(r.mail.Effects()) != 0 {
-			t.Fatalf("%s: status %s, %d effects", name, r.status("p1"), len(r.mail.Effects()))
+		n := r.k.Log().Len()
+		if err := r.k.Retry(at+2, "p1", 0); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
+			t.Fatalf("%s before: retry %v", name, err)
 		}
+		must(t, r.tick(at+3))
+		if r.status("p1") != kernel.SActive {
+			t.Fatalf("%s before: a refused retry cancelled the plan: %s", name, r.status("p1"))
+		}
+		parked(r, "before")
+		r = newRig(t)
+		at = r.park(r.ck)
+		must(t, r.k.Retry(at+1, "p1", 0))
+		must(t, narrow(r, at+2))
+		must(t, r.tick(at+3))
+		if r.status("p1") != kernel.SCancelled {
+			t.Fatalf("%s after: status %s", name, r.status("p1"))
+		}
+		parked(r, "after")
+		r.replays()
 	}
+	// A probe that finds a retried step not done proves it never acted, so a
+	// cancel then gives its charge back.
+	r := newRig(t)
+	at := r.park(r.ck)
+	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "unknown"}))
+	must(t, r.k.Cancel(at+3, "p1"))
+	pr := at + 2 + kernel.ProbeEvery
+	must(t, r.k.Answer(pr, r.calls(pr, 1)[0], kernel.Result{Outcome: "notdone"}))
+	if ph := r.phase("p1").Phase; ph != kernel.PCancelled || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 0 {
+		t.Fatalf("phase %s after a probe found the retried step not done", ph)
+	}
+	r.replays()
 }
 
 // Only a parked step of a live plan can be retried; anything else is refused
