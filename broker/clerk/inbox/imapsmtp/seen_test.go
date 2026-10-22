@@ -425,12 +425,19 @@ func TestALongHeaderStandsWhenItsSubjectTimesOut(t *testing.T) {
 }
 
 // Each batch gets a fresh timeout: batches that together take longer than
-// one, each within it, pass.
+// one, each within it, pass. Three delays just past a third of the timeout
+// pass it for certain, and leave each batch about two thirds of it, many
+// times what a batch of seenBatch headers costs under -race on a busy runner.
 func TestSeenRenewsTheTimeoutForEachBatch(t *testing.T) {
+	const timeout, delay = 2 * time.Second, 700 * time.Millisecond
 	search, fetch := seenUIDs(3 * seenBatch)
-	addr := seenServe(t, func(string, int) string { return search }, each(fetch), 400*time.Millisecond)
-	if got, err := seenFrom(hostileStore(t, addr, time.Second), "INBOX"); err != nil || len(got) != 3*seenBatch {
+	addr := seenServe(t, func(string, int) string { return search }, each(fetch), delay)
+	start := time.Now()
+	if got, err := seenFrom(hostileStore(t, addr, timeout), "INBOX"); err != nil || len(got) != 3*seenBatch {
 		t.Fatalf("%d headers, err %v; want %d", len(got), err, 3*seenBatch)
+	}
+	if took := time.Since(start); took <= timeout {
+		t.Fatalf("the batches took %v, within one timeout of %v: nothing was renewed", took, timeout)
 	}
 }
 
