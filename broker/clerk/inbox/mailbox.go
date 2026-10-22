@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -181,7 +182,13 @@ func seenID(from, messageID string, arrived time.Time) [16]byte {
 // each, about 384 MiB. It holds the whole call: every folder's read mail, the
 // log's entries for mail since deleted, and the senders' addresses on top, so
 // an account with more than that fails closed (no sender is unsubscribed),
-// where a single folder that large could not be searched at all.
+// where a single folder that large could not be searched at all. An entry
+// older than unopenedDays is charged only oldCost, what reading it in and
+// finding it again cost (measured at about 150 bytes,
+// TestOpenedHoldsNoMoreThanItChargesForOldEntries), until the read finds its
+// mail and it is charged in full: deleting such a mail for good frees the
+// rest of its charge (#2742 item 3c), where before the frozen log kept every
+// entry charged and a call past the bound failed for good.
 var openedMax = OpenedMax
 
 // OpenedMax is openedMax as the package sets it, for what is derived from
@@ -195,10 +202,14 @@ const searchMax = 1 << 20
 const (
 	senderCost = 128
 	entryCost  = 384
+	oldCost    = 192
 )
 
 // ErrTooMuchReadMail fails an Opened call past openedMax. It does not pass
-// with time: the owner must delete or archive read mail.
+// with time or by archiving, since every folder is read: the owner must
+// delete read mail for good, from the trash too. Read mail since the last
+// good read, and logged mail older than unopenedDays, each free their charge
+// once deleted; logged mail younger than that frees it only once it ages.
 var ErrTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
 
 // opened is one Opened call's state: LastOpened as it is built, and the log
@@ -209,7 +220,15 @@ type opened struct {
 	since   string
 	senders map[string]string
 	log     map[[16]byte]logged
+	old     []oldEntry // the log's entries older than unopenedDays, by digest
 	kept    int
+}
+
+// oldEntry is a log entry older than unopenedDays, kept out of the log until
+// the read finds its mail: one that is gone is dropped, having cost oldCost.
+type oldEntry struct {
+	id         [16]byte
+	from, date string
 }
 
 type logged struct {
@@ -237,6 +256,9 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 		since, o.since = now, today
 	}
 	o.watched = int(now.Sub(since).Hours()/24) >= unopenedDays
+	if o.watched {
+		o.old = make([]oldEntry, 0, len(log.Seen))
+	}
 	for _, e := range log.Seen {
 		if e.From == "" {
 			continue // names no sender to open
@@ -250,13 +272,25 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 			id := seenID(e.From, e.ID, time.Time{})
 			b, e.Date = id[:], today
 		}
-		if d, ok := day(e.Date); !ok || d.Before(since) || d.After(now) {
-			e.Date = today
+		d, ok := day(e.Date)
+		if !ok || d.Before(since) || d.After(now) {
+			d, e.Date = now, today
+		}
+		if int(now.Sub(d).Hours()/24) >= unopenedDays {
+			if err := o.charge(len(e.From) + oldCost); err != nil {
+				return nil, err
+			}
+			if err := o.open(e.From, e.Date); err != nil {
+				return nil, err
+			}
+			o.old = append(o.old, oldEntry{id: [16]byte(b), from: e.From, date: e.Date})
+			continue
 		}
 		if err := o.add([16]byte(b), e.From, e.Date, false); err != nil {
 			return nil, err
 		}
 	}
+	slices.SortFunc(o.old, func(a, b oldEntry) int { return bytes.Compare(a.id[:], b.id[:]) })
 	return o, nil
 }
 
@@ -269,6 +303,17 @@ func (o *opened) add(id [16]byte, from, date string, present bool) error {
 			o.log[id] = e
 		}
 		return nil
+	}
+	if present {
+		// A logged old entry the read finds keeps its day; its sender and
+		// oldCost are already charged.
+		if i, ok := slices.BinarySearchFunc(o.old, id, func(e oldEntry, id [16]byte) int { return bytes.Compare(e.id[:], id[:]) }); ok {
+			if err := o.charge(entryCost - oldCost); err != nil {
+				return err
+			}
+			o.log[id] = logged{from: o.old[i].from, date: o.old[i].date, present: true}
+			return nil
+		}
 	}
 	if err := o.charge(len(from) + entryCost); err != nil {
 		return err

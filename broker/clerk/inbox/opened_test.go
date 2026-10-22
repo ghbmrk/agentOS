@@ -335,3 +335,75 @@ func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
 		runtime.KeepAlive(o2)
 	}
 }
+
+// A logged entry older than unopenedDays holds no more than oldCost and its
+// sender's address until the read finds its mail: a log of only such
+// entries, filled to the bound, read in as the clerk's process stores it,
+// loads within openedMax, and one whose mail is gone is dropped.
+func TestOpenedHoldsNoMoreThanItChargesForOldEntries(t *testing.T) {
+	defer func(n int) { openedMax = n }(openedMax)
+	openedMax = 32 << 20 // the charge per entry, not the bound's size, is under test
+	from := func(n int) string { return fmt.Sprintf("s%x@b", n%64) }
+	n := (openedMax - 64*(senderCost+len("s3f@b"))) / (oldCost + len("s3f@b"))
+	b := func() []byte { // the log as the clerk's process stores it, held throughout
+		log := SeenLog{Since: "2026-01-02", Seen: make([]Seen, n)}
+		for i := range log.Seen {
+			id := seenID(from(i), fmt.Sprintf("<%x>", i), arrived)
+			log.Seen[i] = Seen{From: from(i), ID: hex.EncodeToString(id[:]), Date: "2026-01-02"}
+		}
+		b, _ := json.Marshal(log)
+		return b
+	}()
+	var log SeenLog
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.GC() // and the encoder's pooled buffer, which outlives one
+	runtime.ReadMemStats(&ms)
+	before := ms.HeapAlloc
+	if err := json.Unmarshal(b, &log); err != nil {
+		t.Fatal(err)
+	}
+	o, err := newOpened("2026-10-19", log)
+	if err != nil {
+		t.Fatalf("%d old entries do not load: %v", n, err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	if held := int64(ms.HeapAlloc) - int64(before); held > int64(openedMax) {
+		t.Fatalf("%d old entries hold %d bytes, more than openedMax %d", n, held, openedMax)
+	}
+	if _, kept := o.result(); len(kept.Seen) != 0 {
+		t.Fatalf("kept %d entries whose mail is gone", len(kept.Seen))
+	}
+	runtime.KeepAlive(log)
+	runtime.KeepAlive(b)
+}
+
+// Past the bound, deleting logged read mail older than unopenedDays for good
+// lets the next read pass (#2742 item 3c): its entry is charged in full only
+// while the read still finds its mail. Before, the frozen log kept every
+// entry charged, so only deleting mail read since the last good read helped.
+func TestDeletingOldReadMailClearsTooMuchReadMail(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	srv.DeliverAt("INBOX", arrived, rawMail("<b@shop.test>", "news@shop.test", "Sale 2"), `\Seen`)
+	l := NewLive(liveStore(t, srv))
+	_, log, err := l.Opened(context.Background(), "2026-01-02", SeenLog{})
+	if err != nil || len(log.Seen) != 2 {
+		t.Fatalf("first read: log %+v, err %v", log, err)
+	}
+	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
+	defer func(n int) { openedMax = n }(openedMax)
+	news, pat := len("news@shop.test"), len("pat@example.test")
+	// Both logged mails present and charged in full, plus the new read mail.
+	openedMax = news + senderCost + 2*news + 2*entryCost + pat + senderCost + pat + entryCost - 1
+	const today = "2026-10-19"
+	if _, _, err := l.Opened(context.Background(), today, log); !errors.Is(err, ErrTooMuchReadMail) {
+		t.Fatalf("past the bound: err %v, want ErrTooMuchReadMail", err)
+	}
+	srv.Remove("INBOX", "<a@shop.test>")
+	got, kept, err := l.Opened(context.Background(), today, log)
+	if err != nil || len(kept.Seen) != 2 || got["news@shop.test"] != "2026-01-02" || got["pat@example.test"] != today {
+		t.Fatalf("after deleting an old read mail: opened %v, log %+v, err %v", got, kept, err)
+	}
+}
