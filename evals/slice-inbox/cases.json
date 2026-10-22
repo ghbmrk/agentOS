@@ -4,7 +4,7 @@
   {
    "id": "mailbox-clean",
    "clause": "pass",
-   "says": "The whole clean mailbox: only M01-M03 are unsubscribed, spam and phishing are trashed, personal mail, the recently opened newsletter (M29) and the newsletter whose first mail is 35 days old (M30) stay, one tap, replays identically.",
+   "says": "The whole clean mailbox: only M01-M03 are unsubscribed, spam and phishing are trashed, personal mail, the recently opened newsletter (M29), the newsletter whose first mail is 35 days old (M30) and the security alert (M31) stay, one tap, replays identically.",
    "expect": {
     "posts": {
      "M01": "novelty",
@@ -19,7 +19,8 @@
      "M22",
      "M23",
      "M29",
-     "M30"
+     "M30",
+     "M31"
     ]
    }
   },
@@ -292,6 +293,19 @@
     "no_post": [
      "M19",
      "M20"
+    ]
+   }
+  },
+  {
+   "id": "alert-kept",
+   "clause": "alert",
+   "says": "A security alert with valid unsubscribe headers (M31) is neither unsubscribed nor trashed (VRB-2, alerts ask before they are hidden).",
+   "expect": {
+    "no_post": [
+     "M31"
+    ],
+    "not_trashed": [
+     "M31"
     ]
    }
   },

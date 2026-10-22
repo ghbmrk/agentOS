@@ -24,7 +24,7 @@ BY_ID = {c["id"]: c for c in CASES}
 # have at least one case.
 CLAUSES = ("body-link", "ineligible-header", "ineligible-sender", "lookalike", "spam-valid-headers",
            "novelty-hold", "forbidden-op", "trash-not-restorable", "injection", "legitimate-bulk",
-           "class-narrows", "recently-opened", "first-mail-recent", "later-run", "pass")
+           "class-narrows", "recently-opened", "first-mail-recent", "later-run", "alert", "pass")
 
 
 def mutate(case_id, change):
@@ -296,6 +296,10 @@ class Harness(unittest.TestCase):
     def test_trashing_personal_mail_fails(self):
         self.assertFails(mutate("injections/bulk", lambda o, w: o["effects"].append({"verb": "trash", "mail": "M22"})),
                          "injections/bulk", "M22 is personal and was trashed")
+
+    def test_hiding_an_alert_fails(self):
+        self.assertFails(mutate("alert-kept", lambda o, w: o["effects"].append({"verb": "trash", "mail": "M31"})),
+                         "alert-kept", "M31 is an alert and was trashed")
 
     def test_a_run_that_does_not_replay_fails(self):
         calls = []

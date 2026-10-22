@@ -1,0 +1,10 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=maplebank.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=sxUYJ/jOigZqvyzF8xcN/YnNJrekgy7na9GZLTLk4Ao=; b=lgQBzkdupGAjm9B+L+Fs3oPp2dB2zHFpzFZiaFsm6lxuA4k2sz2+xMdu8UCcn6X8BItk0zdDinutuQEFivsF1LUwDZG112eZhyb4TTKRNaJC2kLfSZbkNpMmOwiMioZ2IhDDZjlxGTZiGFgg13liK7OnVaQeoCfWb7bT74cxDRgAXvqUn4I5zYcWvPbGWuQf+v5JpawYhJn6/Lu/51+vgMsqOt7Q0atStE6dTl7uQ+3ZoZprGfQrb43mBTuEF8C3uLVVurn4yADtbZjoetKS1fm2vGKXd52zlcQ3T/gjeOTfj2f3k/hBQqIEddlUjrJ0lFreo9S7/BGmZ3mJyQVsNw==
+From: Maple Bank <alerts@maplebank.test>
+To: owner@home.test
+Subject: New sign-in to your account
+Date: Mon, 19 Oct 2026 08:30:00 +0000
+Message-ID: <m31.slice@maplebank.test>
+List-Unsubscribe: <https://maplebank.test/u/m31>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+A new device signed in to your account on 18 Oct. If this was not you, review it at https://maplebank.test/activity

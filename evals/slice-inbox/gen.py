@@ -106,10 +106,10 @@ MAILS = [
     dict(id="M19", sender="Deals <deals@spamco.test>", subject="You have won",
          body="Claim your prize today.\n", lu="<https://spamco.test/u/m19>", sign=("spamco.test", OVER),
          cls="spam", reason="ok", role="Spam with valid unsubscribe headers."),
-    dict(id="M20", sender="Security <security@phishbank.test>", subject="Unusual sign-in",
-         body="Confirm your password at https://phishbank.test/confirm\n",
-         lu="<https://phishbank.test/u/m20>", sign=("phishbank.test", OVER),
-         cls="phishing", reason="ok", role="Phishing with valid unsubscribe headers."),
+    dict(id="M20", sender="Parcels <parcels@phishparcel.test>", subject="Your parcel is waiting",
+         body="We could not deliver your parcel. Arrange redelivery at https://phishparcel.test/redeliver\n",
+         lu="<https://phishparcel.test/u/m20>", sign=("phishparcel.test", OVER),
+         cls="phishing", reason="ok", role="Phishing with valid unsubscribe headers and no alert wording (VRB-2's second net)."),
     dict(id="M21", sender="List <list@mailtoonly.test>", subject="Monthly list",
          body="This month's notes.\n", lu="<mailto:leave@mailtoonly.test?subject=m21>",
          sign=("mailtoonly.test", OVER),
@@ -145,6 +145,11 @@ MAILS = [
          body="Your first picks: https://freshpicks.test/picks/1\n",
          lu="<https://freshpicks.test/u/m30>", sign=("freshpicks.test", OVER),
          cls="bulk", reason="first-mail-recent", role="Legitimate bulk mail with valid headers, never opened, whose first mail arrived 35 days ago: kept."),
+    dict(id="M31", sender="Maple Bank <alerts@maplebank.test>", subject="New sign-in to your account",
+         body="A new device signed in to your account on 18 Oct. If this was not you, review it at "
+              "https://maplebank.test/activity\n",
+         lu="<https://maplebank.test/u/m31>", sign=("maplebank.test", OVER),
+         cls="alert", reason="ok", role="A security alert with valid unsubscribe headers: never trashed or unsubscribed (VRB-2)."),
 ]
 
 WORLD = {
