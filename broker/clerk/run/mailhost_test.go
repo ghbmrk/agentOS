@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
@@ -443,49 +444,52 @@ func TestTheOwnerReadsWhetherAnAccountIsSetUp(t *testing.T) {
 	}
 }
 
-// The owner was shown one account's warm-up end: a setup of another account
-// that lands while Told waits for the read in flight, and reads the new
-// account at once, does not mark that one's as told (#2742 item 14). Which
-// of the two waiters goes first is the scheduler's, so this runs a few times.
+// The owner was shown one account's warm-up end: a change of account while
+// Told waits for the read in flight, even to another account and back, began
+// that account's record again, and Told does not mark it (#2742 item 14).
+// The wait is a bubble's (synctest), so Told is surely waiting when the
+// account changes.
 func TestToldMarksOnlyTheAccountShown(t *testing.T) {
-	for range 5 {
-		r := newHostRig(t, imaptest.Password)
-		now, _ := time.Parse(time.DateOnly, today)
-		s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
-		other := s
-		other.User = imaptest.User // a sign-in name given: another account's slot
-		rec := sealedSeen{Log: inbox.SeenLog{Since: now.AddDate(0, 0, -100).Format(time.DateOnly)}}
-		if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec); err != nil {
-			t.Fatal(err)
-		}
-		r.h = NewMailHost(context.Background(), r.h.dir, r.h.sec, r.h.cfg)
-		r.owner = MailOwner{serveMail(t, r.h, MailOwnerSide)}
-		r.planner = MailPlanner{serveMail(t, r.h, MailPlannerSide)}
-		st, _ := r.owner.Status()
-		if len(st.Notices) != 1 {
-			t.Fatalf("after the warm-up: %v", st.Notices)
-		}
-		r.hold.Store(true)
-		go r.planner.Reread()
-		<-r.held
-		set := make(chan error, 1)
-		go func() { set <- r.owner.SetMail(other, imaptest.Password) }()
-		time.Sleep(50 * time.Millisecond)
-		told := make(chan error, 1)
-		go func() { told <- r.owner.Told(st.Through) }()
-		time.Sleep(50 * time.Millisecond)
-		r.hold.Store(false)
-		close(r.release)
-		if err := <-set; err != nil {
-			t.Fatal(err)
-		}
-		if err := <-told; err != nil {
-			t.Fatal(err)
-		}
-		got, ok := loadSeen(r.h.dir, testSealer(), slotOf(other))
-		if ok != seenLoaded || got.Told {
-			t.Fatalf("the new account's record: %v, told %v", ok, got.Told)
-		}
+	r := newHostRig(t, imaptest.Password)
+	s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
+	other := s
+	other.User = imaptest.User // a sign-in name given: another account's slot
+	for _, back := range [][]MailSettings{{other}, {other, s}} {
+		synctest.Test(t, func(t *testing.T) {
+			if err := SetMail(r.h.dir, r.h.sec, s, imaptest.Password); err != nil {
+				t.Fatal(err)
+			}
+			h := &MailHost{ctx: context.Background(), dir: r.h.dir, sec: r.h.sec, cfg: r.h.cfg}
+			h.notify(true, "I have learned when you read mail.")
+			done := make(chan struct{})
+			h.reading = done // a read in flight
+			told := make(chan struct{})
+			go func() { h.told(h.seq); close(told) }()
+			synctest.Wait() // Told waits for the read
+			h.mu.Lock()
+			for _, a := range back {
+				if err := SetMail(h.dir, h.sec, a, imaptest.Password); err != nil {
+					t.Fatal(err)
+				}
+				h.changed()
+			}
+			h.notify(true, "the new account's own warm-up end") // a read after setup told it
+			last := back[len(back)-1]
+			fresh := sealedSeen{Log: inbox.SeenLog{Since: today}}
+			if err := saveSeen(h.dir, testSealer(), slotOf(last), fresh); err != nil {
+				t.Fatal(err)
+			}
+			h.reading = nil
+			close(done)
+			h.mu.Unlock()
+			<-told
+			if got, ok := loadSeen(h.dir, testSealer(), slotOf(last)); ok != seenLoaded || got.Told {
+				t.Fatalf("after %d changes, the account's new record: %v, told %v", len(back), ok, got.Told)
+			}
+			if !slices.ContainsFunc(h.notices, func(n notice) bool { return n.warm }) {
+				t.Fatalf("after %d changes, Told dropped the new account's warm-up end", len(back))
+			}
+		})
 	}
 }
 
