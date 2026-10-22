@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -365,7 +366,9 @@ func (c *Client) gotStatusCaps(args []interface{}) {
 	c.caps = make(map[string]bool)
 	for _, cap := range args {
 		if cap, ok := cap.(string); ok {
-			c.caps[cap] = true
+			// agentos: capability names are case-insensitive (RFC 3501
+			// section 9); kept upper-cased, as Support is asked them.
+			c.caps[strings.ToUpper(cap)] = true
 		}
 	}
 }

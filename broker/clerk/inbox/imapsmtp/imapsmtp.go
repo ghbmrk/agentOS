@@ -252,11 +252,12 @@ var ErrReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its siz
 // the account, so it waits for the owner to set the account up again.
 var ErrLoginRefused = errors.New("imapsmtp: the server refused the login")
 
-// ErrNoSignIn ends a session or submission whose server offers no way to
-// sign in with the account's login: no XOAUTH2 for a token, LOGINDISABLED,
-// or no SMTP AUTH with its mechanism. Nothing was sent, and signing in again
-// cannot help: the owner must change the account's setup.
-var ErrNoSignIn = errors.New("imapsmtp: the server offers no way to sign in with this login")
+// ErrNoSignIn ends a session or submission whose server offers no sign-in
+// the clerk supports for the account's login: no XOAUTH2 for a token,
+// LOGINDISABLED without AUTH=PLAIN, or no SMTP AUTH with its mechanism.
+// Nothing was sent, and signing in again cannot help: the owner must change
+// the account's setup.
+var ErrNoSignIn = errors.New("imapsmtp: the server offers no sign-in the clerk supports for this login")
 
 // ErrUnreachable ends a session whose dial failed: the mail server was never
 // reached, as when the box's own network is down, which is not the server
@@ -370,21 +371,49 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	if err != nil {
 		return errors.New("imapsmtp: no credential")
 	}
-	if l.OAuth {
-		var ok bool
-		if ok, err = c.SupportAuth("XOAUTH2"); err == nil && !ok {
-			return stand{ErrNoSignIn}
-		} else if err == nil {
-			err = c.Authenticate(xoauth2{l.User, l.Secret})
-		}
+	auth, err := imapAuth(c, l)
+	if err != nil {
+		return err
+	}
+	if auth != nil {
+		err = c.Authenticate(auth)
 	} else {
 		err = c.Login(l.User, l.Secret)
 	}
 	if err != nil {
-		return signIn(err)
+		return signIn(err, reading)
 	}
 	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
 }
+
+// imapAuth is the sign-in the IMAP server offers for l: XOAUTH2 for a token;
+// LOGIN (nil) for a password, or AUTHENTICATE PLAIN where LOGINDISABLED. It
+// is ErrNoSignIn when the server offers neither, and not a sign-in failure
+// when its capabilities could not be read: no login was sent.
+func imapAuth(c *client.Client, l Login) (sasl.Client, error) {
+	mech, auth := "XOAUTH2", sasl.Client(xoauth2{l.User, l.Secret})
+	if !l.OAuth {
+		mech, auth = "PLAIN", sasl.NewPlainClient("", l.User, l.Secret)
+	}
+	off, err := c.Support("LOGINDISABLED")
+	if err != nil {
+		return nil, errors.New("imapsmtp: the server did not say how to sign in")
+	}
+	if !l.OAuth && !off {
+		return nil, nil
+	}
+	if ok, _ := c.SupportAuth(mech); !ok {
+		return nil, stand{side(ErrNoSignIn, reading)}
+	}
+	return auth, nil
+}
+
+// reading and sending name the side of the account a sign-in failed on, as
+// the two are set up apart: the IMAP server reads, the SMTP server sends.
+const reading, sending = "reading mail", "sending mail"
+
+// side is e for one side of the account: errors.Is(side(e, s), e) holds.
+func side(e error, s string) error { return fmt.Errorf("%w, %s", e, s) }
 
 // ended is a session's or submission's error as it ended: an answer the
 // server had sent (stand) as it is; otherwise, if it was cut off, why, not
@@ -407,19 +436,15 @@ func ended(err error, over, late bool, caller context.Context) error {
 	return err
 }
 
-// signIn is a failed sign-in's error, standing when the server answered
-// it: ErrLoginRefused for a refusal, an IMAP NO or BAD other than
-// UNAVAILABLE (RFC 5530: the server is down for now) or an SMTP 5xx, and
-// ErrNoSignIn for a LOGINDISABLED server. Any other failure passes with time
-// and is mapped as the session ended.
-func signIn(err error) error {
+// signIn is a failed sign-in's error on side s, standing as ErrLoginRefused
+// when the server refused it: an IMAP NO or BAD other than UNAVAILABLE (RFC
+// 5530: the server is down for now) or an SMTP 5xx. Any other failure passes
+// with time and is mapped as the session ended.
+func signIn(err error, s string) error {
 	var st *imap.StatusError
 	var tp *textproto.Error
-	switch {
-	case errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE", errors.As(err, &tp) && tp.Code >= 500:
-		return stand{ErrLoginRefused}
-	case errors.Is(err, client.ErrLoginDisabled):
-		return stand{ErrNoSignIn}
+	if errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE" || errors.As(err, &tp) && tp.Code >= 500 {
+		return stand{side(ErrLoginRefused, s)}
 	}
 	return errors.New("imapsmtp: the sign-in did not complete")
 }
@@ -945,10 +970,10 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		if err := c.Noop(); err != nil {
 			return err
 		}
-		return stand{ErrNoSignIn}
+		return stand{side(ErrNoSignIn, sending)}
 	}
 	if err := c.Auth(auth); err != nil {
-		return signIn(err)
+		return signIn(err, sending)
 	}
 	if err := c.Mail(s.cfg.From); err != nil {
 		return err
