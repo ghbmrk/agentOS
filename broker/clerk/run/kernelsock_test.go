@@ -461,6 +461,12 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 		if got == nil || got.Error() != c.err.Error() {
 			t.Fatalf("%v crossed as %v", c.err, got)
 		}
+		if c.is != nil && !errors.Is(got, c.is) {
+			t.Fatalf("%v crossed as %v, which is not %v", c.err, got, c.is)
+		}
+		if c.err == c.is && got != c.is {
+			t.Fatalf("the sentinel %v crossed as another value, %#v", c.is, got)
+		}
 		for _, e := range wireList {
 			if errors.Is(got, e) != (e == c.is) {
 				t.Errorf("%v crossed: errors.Is(%v) = %v", c.err, e, errors.Is(got, e))
