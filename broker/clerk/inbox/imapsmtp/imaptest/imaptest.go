@@ -75,6 +75,7 @@ type Server struct {
 	smtpFail  bool
 	keywords  bool // drop keywords a STORE sets, as a server without \* does
 	move      Move
+	noUIDNext bool // SELECT gives no UIDNEXT, against RFC 3501
 }
 
 // Move is how the server answers a MOVE.
@@ -223,6 +224,13 @@ func (s *Server) DropKeywords(drop bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.keywords = drop
+}
+
+// NoUIDNext makes SELECT give no UIDNEXT.
+func (s *Server) NoUIDNext(none bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noUIDNext = none
 }
 
 // SetMove sets how the server answers a MOVE.
@@ -408,7 +416,9 @@ func (m *mbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 		case imap.StatusMessages:
 			st.Messages = uint32(len(b.msgs))
 		case imap.StatusUidNext:
-			st.UidNext = b.next
+			if !m.s.noUIDNext {
+				st.UidNext = b.next
+			}
 		case imap.StatusUidValidity:
 			st.UidValidity = b.validity
 		}
@@ -483,7 +493,22 @@ func (m *mbox) SearchMessages(uid bool, c *imap.SearchCriteria) ([]uint32, error
 		return nil, errors.New("listing failed")
 	}
 	var out []uint32
-	for i, x := range m.b().msgs {
+	msgs := m.b().msgs
+	if c.Uid != nil && len(msgs) > 0 {
+		// "*" is the folder's last UID, so n:* above it still holds that
+		// UID (RFC 3501 section 6.4.8), which backendutil does not do.
+		last, uids := msgs[len(msgs)-1].uid, new(imap.SeqSet)
+		for _, q := range c.Uid.Set {
+			if q.Stop == 0 {
+				q.Stop = last
+			}
+			uids.AddRange(min(q.Start, q.Stop), max(q.Start, q.Stop))
+		}
+		cc := *c
+		cc.Uid = uids
+		c = &cc
+	}
+	for i, x := range msgs {
 		e, err := message.Read(bytes.NewReader(x.body))
 		if err != nil && e == nil {
 			continue

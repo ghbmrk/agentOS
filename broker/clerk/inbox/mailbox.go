@@ -45,6 +45,7 @@ const (
 	nSignInRefused NotDone = "sign-in-refused" // the server refused the login (imapsmtp.ErrLoginRefused)
 	nUnreachable   NotDone = "unreachable"     // the mail server was not reached (imapsmtp.ErrUnreachable)
 	nNoSignIn      NotDone = "no-sign-in"      // the server offers no sign-in the clerk supports (imapsmtp.ErrNoSignIn)
+	nNoUIDNext     NotDone = "no-uidnext"      // the trash gave no next UID to confirm a move by (imapsmtp.ErrNoUIDNext)
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -80,6 +81,10 @@ type Live struct {
 type liveMail struct {
 	ref imapsmtp.Ref
 	id  string // the Message-ID header, for the trash read-back
+	// The trash's UID validity and next UID before the first move of this
+	// mail, kept for its resends: a move whose answer was lost has put the
+	// copy below a UIDNEXT read again.
+	trashValidity, trashNext uint32
 }
 
 // NewLive is a mailbox over st.
@@ -379,6 +384,8 @@ func before(err error) error {
 		return nUnreachable
 	case errors.Is(err, imapsmtp.ErrNoSignIn):
 		return nNoSignIn
+	case errors.Is(err, imapsmtp.ErrNoUIDNext):
+		return nNoUIDNext
 	}
 	return err
 }
@@ -423,9 +430,12 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	// Only a copy that arrives in the trash with this move confirms it: an
 	// older one with the same Message-ID would confirm a move that did not
 	// happen (#2665).
-	validity, next, err := l.st.Next(ctx, trash)
-	if err != nil {
-		return before(err)
+	validity, next := m.trashValidity, m.trashNext
+	if next == 0 {
+		if validity, next, err = l.st.Next(ctx, trash); err != nil {
+			return before(err)
+		}
+		l.markTrash(id, validity, next)
 	}
 	if err := l.st.Move(ctx, m.ref, trash); err != nil {
 		return before(err)
@@ -445,6 +455,17 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 		return errUnconfirmed
 	}
 	return nil
+}
+
+// markTrash keeps the trash's validity and next UID from before mail id's
+// first move.
+func (l *Live) markTrash(id string, validity, next uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if m, ok := l.refs[id]; ok && m.trashNext == 0 {
+		m.trashValidity, m.trashNext = validity, next
+		l.refs[id] = m
+	}
 }
 
 // Post refuses: the one-click POSTer and its egress rules are #2601, so a

@@ -803,15 +803,22 @@ func readUIDs(c *client.Client, only map[uint32]bool) ([]uint32, error) {
 	return slices.DeleteFunc(uids, func(u uint32) bool { return !only[u] }), nil
 }
 
+// ErrNoUIDNext is returned for a folder whose SELECT gave no UID validity
+// or next UID, both of which RFC 3501 requires: what arrives in it from now
+// on cannot be told from what was there.
+var ErrNoUIDNext = errors.New("imapsmtp: the server did not give the folder's next UID")
+
 // Next is folder's UID validity and the UID its next message will take, so
-// a later Find can look at only what arrived since.
+// a later FindSince can look at only what arrived since.
 func (s *Store) Next(ctx context.Context, folder string) (validity, next uint32, err error) {
 	err = s.session(ctx, func(c *client.Client) error {
 		st, err := c.Select(folder, true)
 		if err != nil {
 			return err
 		}
-		validity, next = st.UidValidity, st.UidNext
+		if validity, next = st.UidValidity, st.UidNext; validity == 0 || next == 0 {
+			return stand{ErrNoUIDNext}
+		}
 		return nil
 	})
 	return validity, next, err
@@ -825,10 +832,10 @@ func (s *Store) Find(ctx context.Context, folder, id string, match func(Message)
 }
 
 // FindSince is Find over only the messages that arrived in folder from UID
-// from on, under validity (ErrValidity otherwise).
+// from on, under validity (ErrValidity otherwise), both as Next gave them.
 func (s *Store) FindSince(ctx context.Context, folder string, validity, from uint32, id string, match func(Message) bool) ([]Message, error) {
-	if validity == 0 {
-		return nil, ErrValidity
+	if validity == 0 || from == 0 {
+		return nil, ErrNoUIDNext
 	}
 	return s.find(ctx, folder, validity, from, id, match)
 }
