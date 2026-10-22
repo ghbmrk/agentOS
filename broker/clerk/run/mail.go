@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -121,7 +122,8 @@ var mailMu sync.Mutex
 // SetMail sets up or replaces the account in dir, the mail clerk's own
 // directory: the password goes, sealed, to the slot named for the settings,
 // and the settings beside it. A refusal writes nothing. The steps are: put the
-// new slot, write the settings, drop every other mail slot. A crash at any
+// new slot, write the settings, drop another account's record of read mail,
+// drop every other mail slot. A crash at any
 // point leaves the settings naming an account whose own slot holds its own
 // password, so no password goes to another account's servers, and the next
 // SetMail or RemoveMail drops whatever slot the crash left.
@@ -148,9 +150,19 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 	mailMu.Lock()
 	defer mailMu.Unlock()
 	cur := slotOf(s)
+	prev, perr := readMail(dir)
+	same := perr == nil && slotOf(prev) == cur
 	steps := []func() error{
 		func() error { return sec.Put(cur, clerk.KindStatic, []byte(password)) },
 		func() error { return writeAtomic(dir, mailSettings, b, nil) },
+		func() error {
+			// Another account's record of read mail does not load under this
+			// one; dropping it makes the restart a new account's, not a loss.
+			if same {
+				return nil
+			}
+			return removeFiles(dir, seenFile)
+		},
 		func() error { return sec.RemovePrefix(clerk.MailSlots, cur) },
 	}
 	for i, step := range steps {
@@ -177,8 +189,14 @@ func RemoveMail(dir string, sec *clerk.Secrets) error {
 		return err
 	}
 	// A temporary a crashed write left may hold a sealed password or the
-	// settings; it is never read, and it goes too.
-	for _, name := range []string{secretsName + ".tmp", mailSettings + ".tmp", mailSettings} {
+	// settings; it is never read, and it goes too, with the record of read
+	// mail.
+	return removeFiles(dir, secretsName+".tmp", mailSettings+".tmp", mailSettings, seenFile, seenFile+".tmp")
+}
+
+// removeFiles removes the named files from dir, if there, and syncs it.
+func removeFiles(dir string, names ...string) error {
+	for _, name := range names {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -226,18 +244,33 @@ type MailConfig struct {
 	OneClickBody  string
 	TLS           *tls.Config      // nil: system roots, the server's name
 	Guard         *netguard.Policy // nil: imapsmtp's default policy
+	// Sealer seals the record of read mail, as it does the Secrets file.
+	Sealer clerk.Sealer
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 }
 
+// Mail is the mail clerk a process serves, and what it tells the owner.
+type Mail struct {
+	*inbox.Account
+	Status MailStatus
+	world  func() inbox.World // the world the account judges VRB-2 in
+}
+
 // OpenMail is the mail clerk over the account in dir: it reads the newest
-// inbox mails through the owner's mailbox, classes them with c.Ask, and
-// returns the clerk to serve with ServeClerk. Every connection signs in with
-// the password sealed in sec, opened at that connection.
-func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Account, error) {
+// inbox mails, classes them with c.Ask, and returns the clerk to serve with
+// ServeClerk. Every connection signs in with the password sealed in sec,
+// opened at that connection. LastOpened in the world VRB-2 reads is the
+// clerk's own, from the account's read mail and its sealed record
+// (lastOpened); the rest of the world is c.World's, and its Today dates the
+// read.
+func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) (*Mail, error) {
 	s, err := readMail(dir)
 	if err != nil {
 		return nil, err
+	}
+	if c.Sealer == nil || c.World == nil {
+		return nil, errors.New("run: a mail clerk needs its sealer and its world")
 	}
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
 		Credential: sec.Login(slotOf(s), s.login()), From: s.Address, Guard: c.Guard}
@@ -256,5 +289,18 @@ func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig)
 	if err != nil {
 		return nil, err
 	}
-	return inbox.NewAccount(c.Anchors, c.HandleSecret, c.World, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody)
+	today := c.World().Today
+	if today == "" {
+		today = time.Now().UTC().Format(time.DateOnly)
+	}
+	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
+	m := &Mail{Status: status, world: func() inbox.World {
+		w := c.World()
+		w.LastOpened = opened
+		return w
+	}}
+	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

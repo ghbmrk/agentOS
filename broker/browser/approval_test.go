@@ -32,10 +32,11 @@ func cartReply(snapshot string) map[string]any {
 
 const pressOrder = `{"v":0,"verb":"click","ref":"e6"}`
 
-// approvalOf is the approval a refused read carries.
+// approvalOf is the approval a refused read carries, whether it needs a
+// tap or the task's approval covers it.
 func approvalOf(t *testing.T, r Result) Approval {
 	t.Helper()
-	if r.Error != "approval_required" || r.Approval == nil || r.Approval.Print == "" {
+	if r.Error != "approval_required" && r.Error != "task_approved" || r.Approval == nil || r.Approval.Print == "" {
 		t.Fatalf("not an approval: %+v", r)
 	}
 	return *r.Approval
