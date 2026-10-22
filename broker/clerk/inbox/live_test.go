@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -276,7 +277,8 @@ func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
 
 // A transport refusal before acting is the clerk's NotDone, by its reason.
 func TestLiveRefusalsBeforeActingKeepTheirReason(t *testing.T) {
-	for err, want := range map[error]NotDone{imapsmtp.ErrValidity: nRenumbered, imapsmtp.ErrNoMove: nNoMove} {
+	for err, want := range map[error]NotDone{imapsmtp.ErrValidity: nRenumbered, imapsmtp.ErrNoMove: nNoMove,
+		imapsmtp.ErrLoginRefused: nSignInRefused, fmt.Errorf("%w: no route", imapsmtp.ErrUnreachable): nUnreachable} {
 		if got := before(err); got != want {
 			t.Fatalf("before(%v) = %v, want %v", err, got, want)
 		}
