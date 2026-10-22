@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -355,10 +356,21 @@ func TestConcurrentCallsShareNoBudget(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := c.Call(1, "t", "api", "hi", 59); done <- err }() // worst case 60
 	<-f.in
-	if _, err := c.Call(1, "t", "api", "hi", 40); err == nil {
+	second := func(maxOut int64) error { // fails fast if the first call holds the clerk's lock
+		r := make(chan error, 1)
+		go func() { _, err := c.Call(1, "t", "api", "hi", maxOut); r <- err }()
+		select {
+		case err := <-r:
+			return err
+		case <-time.After(10 * time.Second):
+			t.Fatal("a second call waited on the first: the clerk holds its lock across the provider call")
+			return nil
+		}
+	}
+	if err := second(40); err == nil {
 		t.Fatal("a second call shared the first one's budget")
 	}
-	if _, err := c.Call(1, "t", "api", "hi", 39); err != nil {
+	if err := second(39); err != nil {
 		t.Fatalf("the rest of the budget: %v", err)
 	}
 	close(f.release)

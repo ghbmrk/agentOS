@@ -676,8 +676,11 @@ func (s *sim) syncPhone() {
 func (s *sim) cut() {
 	st := s.k.State()
 	for _, id := range s.byPhone {
-		if g, ok := st.Grants[id]; !ok || g.From > s.kt() {
+		g, ok := st.Grants[id]
+		if !ok || g.From > s.kt() { // never live: dropped by a crash, or cancelled in its hold
 			s.w.dead[id] = true
+		}
+		if ok && g.From > s.kt() {
 			s.cutCancelled++
 		}
 	}

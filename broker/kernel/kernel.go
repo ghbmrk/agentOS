@@ -460,7 +460,13 @@ func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *ke
 	}
 	if r := v.Spend(plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
 		settled := key.Context{Now: now, Changes: &k.s.Changes, Ledger: ledger{s: k.s, settled: true}}
-		if (r.Code == key.RSpendTask || r.Code == key.RSpendDay) && v.Spend(plan, amount, settled) == nil {
+		sr := v.Spend(plan, amount, settled)
+		if sr != nil {
+			// The cap settled usage alone exhausts, which is the one a hold
+			// names, even when open admissions push another over first.
+			return Admitted{}, sr
+		}
+		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
 			// Only calls still in flight fill the cap: this one waits for
 			// them, and nothing holds the plan.
 			return Admitted{}, &key.Refusal{Code: CInFlight, Detail: r.Code}
@@ -475,7 +481,8 @@ func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *ke
 }
 
 // CInFlight refuses a metered call whose worst case fits the caps once the
-// calls still in flight settle: it is retried, and never holds the plan.
+// calls still in flight settle: the caller may ask again later, and it never
+// holds the plan.
 const CInFlight = "in-flight"
 
 // ErrNotAdmitted refuses a Meter that cites no open admission.

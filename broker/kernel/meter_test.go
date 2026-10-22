@@ -245,18 +245,50 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 
 // Usage is recorded against the key a call was admitted under, even once
 // that key is revoked mid-call (LOG-7).
-func TestUsageOfARevokedKeyIsRecorded(t *testing.T) {
+// A settlement charges the key the call was admitted under, from its
+// reservation, not the one funding the plan when it settles: an extension
+// granted mid-call carries none of the call admitted before it (LOG-7, #2613
+// item 1).
+func TestASettlementChargesTheKeyItWasAdmittedUnder(t *testing.T) {
 	r := newRig(t)
 	k := modelKey(r, "m1", key.LimitSpendTask(100))
 	modelPlan(r, "t1", k)
-	a, rf := r.k.AdmitSpend(1, "t1", 50)
+	env := envelope(r, 500, 800)
+	a, rf := r.k.AdmitSpend(1, "t1", 40)
 	if rf != nil {
 		t.Fatal(rf)
 	}
-	must(t, r.k.Revoke(2, k.Tip()))
-	must(t, r.k.Meter(3, a, "api", 30, "provider"))
-	if n := sum(r.k.State().Ledger().Uses(k.Tip())); n != 30 {
-		t.Fatalf("recorded %d, want 30", n)
+	must(t, r.meter(1, "t1", "api", 60, "provider"))
+	rf = r.admit(2, "t1", 50)
+	if rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("the cap is used up: %v", rf)
+	}
+	must(t, r.k.Hold(2, "t1", rf))
+	ext := extension(r, env, key.LimitSpendTask(300))
+	must(t, r.k.Extend(3, ext, "t1"))
+	must(t, r.k.Meter(4, a, "api", 40, "provider"))
+	if n := sum(r.k.State().Ledger().Uses(k.Tip())); n != 100 {
+		t.Fatalf("the admitted key carries %d, want 100", n)
+	}
+	if rf := r.admit(5, "t1", 300); rf != nil {
+		t.Fatalf("the extension's whole cap is left: %v", rf)
+	}
+}
+
+// When open admissions push one cap over and settled usage alone exhausts
+// another, the refusal names the exhausted one, which a hold then names
+// (LOG-7).
+func TestARefusalNamesTheCapSettledUsageExhausts(t *testing.T) {
+	r := newRig(t)
+	k := modelKey(r, "m1", key.LimitSpendTask(100), key.LimitSpendDay(100))
+	modelPlan(r, "t1", k)
+	modelPlan(r, "t2", k)
+	must(t, r.meter(1, "t2", "api", 50, "provider"))
+	if _, rf := r.k.AdmitSpend(1, "t1", 40); rf != nil {
+		t.Fatal(rf)
+	}
+	if rf := r.admit(1, "t1", 70); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("refused %v, want the day cap", rf)
 	}
 }
 
