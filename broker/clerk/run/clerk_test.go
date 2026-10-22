@@ -360,6 +360,10 @@ func TestAReconnectOutlastsOnlyAHoldShorterThanItsApproval(t *testing.T) {
 		if changed := !bytes.Equal(before, after); changed != c.done {
 			t.Errorf("%s: store changed %v, want %v (step %+v)", c.name, changed, c.done, r.step("held"))
 		}
+		// Undone means ended: the approval ran out, not a hold that never ends.
+		if st := r.step("held"); !c.done && st.Phase != kernel.PCancelled {
+			t.Errorf("%s: the expired reconnect is %s %q, want cancelled", c.name, st.Phase, st.Detail)
+		}
 	}
 }
 
