@@ -91,6 +91,36 @@ func TestAnUnreachedProbeCountsNoCheck(t *testing.T) {
 	r.replays()
 }
 
+// A covered submit whose answer was lost gets its STATUS line from the probe
+// that finds it done; a line not shown is dropped there too (CLK-3, #2727).
+func TestAProbedSubmitGetsItsCoveredLine(t *testing.T) {
+	line := "Sent on shop.example: Place order, 00:00 UTC"
+	for name, c := range map[string]struct {
+		covered string
+		listed  bool
+	}{"shown": {line, true}, "bidi": {"Sent on shop.example: \u202eyaP", false}} {
+		r := newRig(t)
+		r.plan("p1", r.ck, st(key.Trash, "m1"))
+		must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
+		at := int64(1) + kernel.ProbeEvery
+		p := r.calls(at, 1)[0]
+		if p.Kind != kernel.ActProbe {
+			t.Fatalf("%s: call %+v", name, p)
+		}
+		must(t, r.k.Answer(at, p, kernel.Result{Outcome: "done", Covered: c.covered}))
+		got := r.k.State().Covered(at)
+		if r.phase("p1").Phase != kernel.PDone || (len(got) == 1) != c.listed || c.listed && got[0].Line != line {
+			t.Fatalf("%s: covered %+v", name, got)
+		}
+		for _, e := range r.k.Log().Entries() {
+			if !c.listed && strings.Contains(string(e.Body), "yaP") {
+				t.Fatalf("%s: a line not shown reached the log", name)
+			}
+		}
+		r.replays()
+	}
+}
+
 // A dispatch is checked again just before it goes to its clerk: a STOP,
 // revoke or cancel logged since Calls cancels it unsent, and a pause leaves
 // it unsent until the key resumes. Nothing reaches the clerk (KRN-7).

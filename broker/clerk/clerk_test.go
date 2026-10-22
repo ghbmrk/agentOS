@@ -119,7 +119,7 @@ func TestClerkRechecksAndIsIdempotent(t *testing.T) {
 	if r := f.mail.Do(f.req, f.view()); r.Outcome != "ok" || len(f.mail.Effects()) != 1 {
 		t.Fatal("same idempotency key must not act twice")
 	}
-	if f.mail.Probe(f.req, f.view()) != "done" {
+	if f.mail.Probe(f.req, f.view()).Outcome != "done" {
 		t.Fatal("probe must report done")
 	}
 }

@@ -44,6 +44,9 @@ type ran struct {
 	// ok: the driver answered it ok; lost: the executor stopped after the
 	// write, so whether it acted is unknown.
 	ok, lost bool
+	// covered: a covered submit's STATUS line, for Probe to give again
+	// when Do's answer was lost (CLK-3).
+	covered string
 }
 
 // NewClerk returns the clerk for one gate.
@@ -105,7 +108,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		c.record(id, ran{})
 		return kernel.Result{Outcome: "failed", Detail: "verb"}
 	}
-	rec.ok = res.OK
+	rec.ok, rec.covered = res.OK, res.Covered
 	c.record(id, rec)
 	out := kernel.Result{Outcome: "failed", Detail: logged(res)}
 	switch {
@@ -135,24 +138,24 @@ func (c *Clerk) record(id string, r ran) {
 // refused unsent, is notdone. With no record, as after a restart, a post
 // is unknown, and so, on a logged-out session, is any read that may have
 // acted: the kernel parks them rather than sending them twice (KRN-8).
-func (c *Clerk) Probe(r kernel.Request, _ kernel.View) string {
+func (c *Clerk) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	st := step(r)
 	c.mu.Lock()
 	rec, ok := c.ran[stepID(r)]
 	c.mu.Unlock()
 	switch {
 	case ok && rec.effect && rec.ok:
-		return "done"
+		return kernel.Result{Outcome: "done", Covered: rec.covered}
 	case ok && rec.effect:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case ok:
-		return "notdone"
+		return kernel.Result{Outcome: "notdone"}
 	case st.Verb == key.Post:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case st.Verb == key.Read && c.g.cfg.LoggedOut && c.g.mayAct([]byte(st.Args["query"].Value)):
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
-	return "notdone"
+	return kernel.Result{Outcome: "notdone"}
 }
 
 // facts is the clerk's own reading of a step's claims. A read of a page

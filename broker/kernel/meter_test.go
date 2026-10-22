@@ -243,8 +243,6 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 	r.replays()
 }
 
-// Usage is recorded against the key a call was admitted under, even once
-// that key is revoked mid-call (LOG-7).
 // A settlement charges the key the call was admitted under, from its
 // reservation, not the one funding the plan when it settles: an extension
 // granted mid-call carries none of the call admitted before it (LOG-7, #2613

@@ -231,7 +231,7 @@ func TestExitRefreshesOnceOn401UnderTheSameKey(t *testing.T) {
 	if r.Outcome != "ok" || o.redeems != 2 || len(o.api) != 3 || o.api[2] != "Bearer canary-access-2" {
 		t.Fatalf("%+v, redeems %d, API saw %q", r, o.redeems, o.api)
 	}
-	if o.x.Probe(q, o.view()) != "done" {
+	if o.x.Probe(q, o.view()).Outcome != "done" {
 		t.Fatal("the resent step must probe done")
 	}
 	o.noCanary(t, r.Detail)

@@ -279,18 +279,18 @@ func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, 
 // the same read-back), and for at most MaxChecks mailbox calls per step;
 // then unknown, so the kernel parks the step. An unconfirmed unsubscribe is
 // never sent again: a one-click POST is not idempotent.
-func (a *Account) Probe(r kernel.Request, _ kernel.View) string {
+func (a *Account) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
 	case a.done[r.Idem()]:
-		return "done"
+		return kernel.Result{Outcome: "done"}
 	case a.sends[r.Idem()] >= kernel.MaxChecks:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case r.Step().Verb == key.Organize || r.Step().Verb == key.Trash:
-		return "notdone"
+		return kernel.Result{Outcome: "notdone"}
 	}
-	return "unknown"
+	return kernel.Result{Outcome: "unknown"}
 }
 
 // landed reads a mailbox's answer: nil is done; NotDone is a refusal before

@@ -287,7 +287,7 @@ func TestLostSubmitParksAfterRestart(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	req := kernel.Request{Plan: plan("buy", k, step)}
-	if p := NewClerk("web", r.owner, r.h.g).Probe(req, r.k.State()); p != "unknown" {
+	if p := NewClerk("web", r.owner, r.h.g).Probe(req, r.k.State()).Outcome; p != "unknown" {
 		t.Fatalf("fresh clerk probe %s", p)
 	}
 
@@ -295,7 +295,7 @@ func TestLostSubmitParksAfterRestart(t *testing.T) {
 	unsent := submitStep(Approval{To: `button "Place order"`, Print: "ap1:00"}, pressOrder)
 	req = kernel.Request{Plan: plan("x", r.root, unsent)}
 	r.c.Do(req, r.k.State())
-	if p := r.c.Probe(req, r.k.State()); p != "notdone" {
+	if p := r.c.Probe(req, r.k.State()).Outcome; p != "notdone" {
 		t.Fatalf("refused post probes %s", p)
 	}
 }
@@ -313,7 +313,7 @@ func TestLoggedOutProbeUsesWhatDoJudged(t *testing.T) {
 	r.run(t, 0, "p1", r.root, press)
 	h.g.refs["e6"] = plainLink
 	req := kernel.Request{Plan: plan("p1", r.root, press)}
-	if p := r.c.Probe(req, r.k.State()); p != "unknown" {
+	if p := r.c.Probe(req, r.k.State()).Outcome; p != "unknown" {
 		t.Fatalf("probe after ref reuse %s", p)
 	}
 	fresh := newHarness(t, nil, "", 0)
@@ -330,7 +330,7 @@ func TestLoggedOutProbeUsesWhatDoJudged(t *testing.T) {
 		navUnsub: "unknown",
 	} {
 		q := kernel.Request{Plan: plan("q", r.root, read(line))}
-		if p := c.Probe(q, r.k.State()); p != want {
+		if p := c.Probe(q, r.k.State()).Outcome; p != want {
 			t.Fatalf("%s: probe %s, want %s", line, p, want)
 		}
 	}
@@ -578,7 +578,7 @@ func TestRefusedRedoKeepsTheWrittenRecord(t *testing.T) {
 	if res := r.c.Do(req, r.k.State()); res.Outcome != "failed" {
 		t.Fatalf("redo: %+v", res)
 	}
-	if p := r.c.Probe(req, r.k.State()); p != "unknown" {
+	if p := r.c.Probe(req, r.k.State()).Outcome; p != "unknown" {
 		t.Fatalf("probe after a refused redo %s", p)
 	}
 }

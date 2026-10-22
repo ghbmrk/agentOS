@@ -276,7 +276,8 @@ type (
 	}
 	stepProbed struct {
 		stepRef
-		Outcome string `json:"outcome"` // done, notdone, unknown
+		Outcome string `json:"outcome"`           // done, notdone, unknown
+		Covered string `json:"covered,omitempty"` // a covered submit's line, when its answer was lost (CLK-3)
 	}
 )
 
@@ -978,6 +979,9 @@ func (s *State) Apply(e Entry) error {
 			switch b.Outcome {
 			case "done":
 				s.complete(p, b.Index, e.At)
+				if b.Covered != "" && shown(b.Covered) {
+					st.Covered, st.SentAt = b.Covered, e.At
+				}
 			case "notdone":
 				st.Phase = PRedo
 				if p.Status != SActive {

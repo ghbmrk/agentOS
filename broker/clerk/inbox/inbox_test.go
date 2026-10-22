@@ -220,7 +220,9 @@ func (noUses) Uses(key.ID) []key.Use { return nil }
 type viewSwap struct{ a *Account }
 
 func (w viewSwap) Do(r kernel.Request, _ kernel.View) kernel.Result { return w.a.Do(r, refusingView{}) }
-func (w viewSwap) Probe(r kernel.Request, _ kernel.View) string     { return w.a.Probe(r, refusingView{}) }
+func (w viewSwap) Probe(r kernel.Request, _ kernel.View) kernel.Result {
+	return w.a.Probe(r, refusingView{})
+}
 
 // An unbound account, as in the clerk's own process, judges the view the
 // kernel sends: it acts on a step that view shows dispatched and refuses one
