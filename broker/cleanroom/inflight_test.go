@@ -5,6 +5,7 @@ package cleanroom
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/inflight"
-	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 func heap() int64 {
@@ -83,16 +83,6 @@ func holdUploads(t *testing.T, dir, path string, n, size, hold int) func() []int
 	}
 }
 
-func bigMeter(t *testing.T) *meter.Meter {
-	t.Helper()
-	big := meter.Limits{Calls: 1 << 20, Tokens: 1 << 50}
-	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: big, OverallCap: big})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mtr
-}
-
 // RES-5 (#2314's combined finding): many large uploads held open at once
 // hold the broker's memory to its budget, not one buffer each, and each
 // waits for room rather than being refused.
@@ -109,7 +99,7 @@ func TestHeldUploadsKeepHeapBoundedAndWait(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, func(c *Config) {
-				c.Meter, c.Model = bigMeter(t), func(string) http.Handler { return http.NotFoundHandler() }
+				c.Model = func(string) http.Handler { return http.NotFoundHandler() }
 				c.InFlightBytes = tc.budget
 				c.Timeout = 2 * time.Minute
 			})
@@ -159,7 +149,6 @@ func TestManySmallRequestsRunTogether(t *testing.T) {
 	in, peak := 0, 0
 	gate := make(chan struct{})
 	r := newRig(t, func(c *Config) {
-		c.Meter = bigMeter(t)
 		c.Model = func(string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				mu.Lock()
@@ -212,7 +201,7 @@ func TestManySmallRequestsRunTogether(t *testing.T) {
 func TestRequestOverShareIsRefusedUnread(t *testing.T) {
 	var code int
 	r := newRig(t, func(c *Config) {
-		c.Meter, c.Model = bigMeter(t), func(string) http.Handler { return http.NotFoundHandler() }
+		c.Model = func(string) http.Handler { return http.NotFoundHandler() }
 		c.InFlightBytes = 64 << 20 // a 32 MiB share; an 8 MiB model call needs more
 	})
 	r.f.guest = func(id, dir string) {
@@ -254,10 +243,13 @@ func keys(n int, wrap string) []byte {
 
 // RES-5: what each route reserves covers all it allocates for the
 // costliest body shapes measured (ASSUMPTIONS RES-5-membudget-I2), at every size. The
-// model route's meter is WrapBound's, which also scans the body.
+// model route stands in for the model clerk's endpoint, which decodes the
+// request to admit it (CLK-7).
 func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
-	mtr := bigMeter(t)
-	model := mtr.WrapBound("m", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body) }))
+	model := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var v any
+		json.NewDecoder(r.Body).Decode(&v)
+	})
 	s := &session{}
 	for _, n := range []int{4 << 10, 64 << 10, 1 << 20, 7 << 20} {
 		for _, tc := range []struct {
@@ -277,67 +269,5 @@ func TestRouteCostsCoverWhatHandlersAllocate(t *testing.T) {
 				t.Errorf("%s at %d bytes allocates %d, more than the %d reserved", tc.name, len(tc.body), got, want)
 			}
 		}
-	}
-}
-
-// RES-5 (security on #2327): model calls in flight together cannot pass
-// the meter's per-machine cap, even when the provider counts a token per
-// byte, four times the meter's estimate.
-func TestParallelCallsKeepMachineCap(t *testing.T) {
-	const tokens, n, rounds, pad = 10000, 16, 3, 2000
-	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.Limits{Calls: 1 << 20, Tokens: tokens}, OverallCap: meter.DefaultOverallCap})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	in := 0
-	all := make(chan struct{})
-	var once sync.Once
-	var machine string
-	r := newRig(t, func(c *Config) {
-		c.Meter = mtr
-		c.Model = func(string) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				mu.Lock()
-				if in++; in == n {
-					once.Do(func() { close(all) })
-				}
-				mu.Unlock()
-				select {
-				case <-all:
-				case <-time.After(300 * time.Millisecond):
-				}
-				mu.Lock()
-				in--
-				mu.Unlock()
-				fmt.Fprintf(w, `{"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":10}}`, len(body))
-			})
-		}
-	})
-	body := []byte(`{"model":"m","max_tokens":10,"messages":[],"pad":"` + strings.Repeat("a", pad) + `"}`)
-	r.f.guest = func(id, dir string) {
-		machine = id
-		for range rounds {
-			var wg sync.WaitGroup
-			for range n {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					call(client(dir), "POST", "/model/v1/chat/completions", body)
-				}()
-			}
-			wg.Wait()
-		}
-		call(client(dir), "POST", "/cleanroom/result", goodResult())
-	}
-	r.b.Send(nextDay(), [][]byte{skillHint(t)})
-	r.run()
-	waitFor(t, "outcome", func() bool { return len(r.outcomes()) == 1 })
-	r.f.wg.Wait()
-	// A call with none of the machine's others in flight is charged at
-	// the estimate, so the cap is soft by that one call (inflight RES-5-membudget-I8).
-	if got, most := mtr.Usage(machine).Tokens, int64(tokens+len(body)+10); got > most {
-		t.Errorf("machine used %d tokens; its cap is %d, soft by one call (%d)", got, tokens, most)
 	}
 }
