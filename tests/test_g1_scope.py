@@ -158,8 +158,8 @@ class CheckTest(unittest.TestCase):
             pathlib.Path(d, "f").write_text("0")
             git("add", "f")
             git("commit", "-qm", "base")
-            os.makedirs(pathlib.Path(d, "broker/attention"))
-            pathlib.Path(d, "broker/attention/a.go").write_text("package attention")
+            os.makedirs(pathlib.Path(d, "broker/floor"))
+            pathlib.Path(d, "broker/floor/a.go").write_text("package floor")
             git("add", ".")
             git("commit", "-qm", "head")
             cwd = os.getcwd()
@@ -240,13 +240,10 @@ class ListTest(unittest.TestCase):
                 self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
 
     def test_frozen_paths_stay_out(self):  # G1-freeze-a, -h
-        # D-098's groups and what no G2 test needs.
-        for p in ("broker/loops/x.go", "broker/loop7/x.go", "broker/machprobe/x.go",
-                  "broker/sockprobe/x.go", "broker/compile/x.go", "broker/skill/x.go",
-                  "broker/cleanroom/x.go", "broker/hint/x.go", "broker/pubid/x.go",
-                  "broker/pubsend/x.go", "broker/sipsign/x.go", "broker/smsapi/x.go",
-                  "broker/sendrules/x.go", "broker/attention/x.go", "broker/floor/x.go",
-                  "broker/probecmd/x.go", "broker/cmd/agentos-builder/main.go",
+        # D-098's groups and what no G2 test needs, minus the MIG-4-untrusted port directories.
+        for p in ("broker/pubid/x.go", "broker/sipsign/x.go", "broker/smsapi/x.go",
+                  "broker/sendrules/x.go", "broker/floor/x.go",
+                  "broker/cmd/agentos-builder/main.go",
                   "broker/cmd/agentos-a8scan/main.go", "guest/builder/x", "spikes/S10-pact/x",
                   "evals/review/x", "broker/newpkg/x.go", "broker/projection/x.go", "newdir/x"):
             self.assertFalse(g.check([p], G2_LIST, gate=G2)[0], p)
@@ -257,7 +254,13 @@ class ListTest(unittest.TestCase):
                   "broker/browser/x.go", "broker/recall/x.go",
                   "broker/holder/x.go", "broker/cmd/agentos-holder/main.go",
                   "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh",
-                  "broker/photo/x.go", "broker/cmd/agentos-photo/main.go"):
+                  "broker/photo/x.go", "broker/cmd/agentos-photo/main.go",
+                  # MIG-4-untrusted (D-139, #2578): docs/LANES.md's sub B port directories.
+                  "broker/loops/x.go", "broker/loop7/x.go", "broker/machprobe/x.go",
+                  "broker/sockprobe/x.go", "broker/compile/x.go", "broker/skill/x.go",
+                  "broker/cleanroom/x.go", "broker/hint/x.go", "broker/pubsend/x.go",
+                  "broker/attention/x.go", "broker/probecmd/x.go", "broker/corpus/x.go",
+                  "broker/loopbuild/x.go"):
             self.assertTrue(g.check([p], G2_LIST, gate=G2)[0], p)
 
 
