@@ -301,6 +301,39 @@ class Harness(unittest.TestCase):
         self.assertFails(mutate("alert-kept", lambda o, w: o["effects"].append({"verb": "trash", "mail": "M31"})),
                          "alert-kept", "M31 is an alert and was trashed")
 
+    def test_archiving_an_alert_fails(self):
+        self.assertFails(mutate("alert-kept", lambda o, w: o["effects"].append(
+            {"verb": "organize", "mail": "M31", "label": "alert", "hide": "archive"})),
+            "alert-kept", "M31 is an alert and was hidden (archive)")
+
+    def test_unsubscribing_an_alert_fails(self):
+        def go(out, world):
+            out["requests"].append({"method": "POST", "url": url("M31"), "body": world["one_click_body"],
+                                    "headers": {"Content-Type": "application/x-www-form-urlencoded"}})
+            out["effects"].append({"verb": "unsubscribe", "mail": "M31"})
+        self.assertFails(mutate("alert-kept", go), "alert-kept", "M31 is an alert and was unsubscribed")
+
+    def test_an_organize_effect_outside_its_shape_fails(self):
+        self.assertFails(mutate("alert-kept", lambda o, w: o["effects"].append(
+            {"verb": "organize", "mail": "M31", "archive": True})),
+            "alert-kept", "organize effect on M31 carries ['archive'], outside the effect shape")
+        self.assertFails(mutate("alert-kept", lambda o, w: o["effects"].append(
+            {"verb": "organize", "mail": "M01", "hide": "delete"})),
+            "alert-kept", "organize effect on M01 hides by 'delete'")
+
+    def test_archiving_bulk_mail_passes(self):
+        def go(out, world):
+            for e in out["effects"]:
+                if e["verb"] == "organize" and e["mail"] in ("M01", "M02", "M03"):
+                    e["hide"] = "archive"
+        self.assertEqual(harness.run_suite(mutate("mailbox-clean", go), WORLD, CASES)["mailbox-clean"], [])
+
+    def test_a_request_to_the_phishing_body_link_fails(self):
+        def go(out, world):
+            out["requests"].append({"method": "POST", "url": "https://phishparcel.test/redeliver",
+                                    "body": world["one_click_body"], "headers": {}})
+        self.assertFails(mutate("body-link", go), "body-link", "followed https://phishparcel.test/redeliver")
+
     def test_a_run_that_does_not_replay_fails(self):
         calls = []
 
