@@ -76,6 +76,10 @@ type Live struct {
 	mu    sync.Mutex
 	refs  map[string]liveMail
 	trash string // the trash folder's name, "" when the account has none
+	// claimed holds the trash copies that confirmed a trash, so a copy
+	// confirms one trash only: another mail with the same Message-ID, whose
+	// own move was lost, is not confirmed by it.
+	claimed map[imapsmtp.Ref]bool
 }
 
 type liveMail struct {
@@ -88,7 +92,9 @@ type liveMail struct {
 }
 
 // NewLive is a mailbox over st.
-func NewLive(st *imapsmtp.Store) *Live { return &Live{st: st, refs: map[string]liveMail{}} }
+func NewLive(st *imapsmtp.Store) *Live {
+	return &Live{st: st, refs: map[string]liveMail{}, claimed: map[imapsmtp.Ref]bool{}}
+}
 
 // Read fetches the newest readMax inbox mails with BODY.PEEK, unclassified:
 // a class comes from a reader, not from the mailbox. It replaces what an
@@ -451,10 +457,24 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if len(there) == 0 {
+	if !l.claim(there) {
 		return errUnconfirmed
 	}
 	return nil
+}
+
+// claim marks the first of copies that no trash has claimed yet, and reports
+// whether there was one.
+func (l *Live) claim(copies []imapsmtp.Message) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range copies {
+		if !l.claimed[c.Ref] {
+			l.claimed[c.Ref] = true
+			return true
+		}
+	}
+	return false
 }
 
 // markTrash keeps the trash's validity and next UID from before mail id's

@@ -401,6 +401,9 @@ func TestFindSinceSeesOnlyWhatArrivedSince(t *testing.T) {
 	if ms, err := st.FindSince(ctx, "Trash", validity, next, id, is); err != nil || len(ms) != 1 || ms[0].UID < next {
 		t.Fatalf("after a new copy: %+v, %v; want the new copy only", ms, err)
 	}
+	if _, err := st.FindSince(ctx, "Trash", validity, 0, id, is); !errors.Is(err, imapsmtp.ErrNoUIDNext) {
+		t.Fatalf("from UID 0: %v, want ErrNoUIDNext", err)
+	}
 	lr.srv.Renumber("Trash")
 	if _, err := st.FindSince(ctx, "Trash", validity, next, id, is); !errors.Is(err, imapsmtp.ErrValidity) {
 		t.Fatalf("renumbered: %v, want ErrValidity", err)
@@ -437,5 +440,33 @@ func TestLiveResentTrashIsConfirmedByTheFirstMove(t *testing.T) {
 	lr.srv.SetMove(imaptest.MoveOK)
 	if err := lr.box.Trash(context.Background(), lr.mail[spam]); err != nil {
 		t.Fatalf("resent trash: %v, want confirmed", err)
+	}
+}
+
+// A copy in the trash confirms one trash only: two mails with one Message-ID,
+// the first's move lost and the second's landed, leave the first unconfirmed
+// on its resend, though the second's copy arrived after its mark (#2759).
+func TestLiveTrashCopyConfirmsOneTrashOnly(t *testing.T) {
+	const id = "<s1@spam.test>"
+	lr := newLiveRig(t, 30, nil, rawMail(id, "x@spam.test", "Win"), rawMail(id, "x@spam.test", "Win"))
+	var a, b string
+	for ref, m := range lr.box.refs {
+		if a == "" || m.ref.UID < lr.box.refs[a].ref.UID {
+			a, b = ref, a
+		} else {
+			b = ref
+		}
+	}
+	ctx := context.Background()
+	lr.srv.SetMove(imaptest.MoveLoses)
+	if err := lr.box.Trash(ctx, a); err != errUnconfirmed {
+		t.Fatalf("lost move: %v, want unconfirmed", err)
+	}
+	lr.srv.SetMove(imaptest.MoveOK)
+	if err := lr.box.Trash(ctx, b); err != nil {
+		t.Fatalf("second mail: %v, want confirmed", err)
+	}
+	if err := lr.box.Trash(ctx, a); err != errUnconfirmed {
+		t.Fatalf("resent lost move: %v, want unconfirmed (only the second mail's copy is in the trash)", err)
 	}
 }
