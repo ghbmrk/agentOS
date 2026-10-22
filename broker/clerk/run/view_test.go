@@ -287,9 +287,7 @@ func TestACallPastTheBoundIsNeverSent(t *testing.T) {
 	if res := c.do(big, snapshot{}); res.Outcome != "failed" || res.Detail != DTooLarge {
 		t.Errorf("a call past the bound: %+v", res)
 	}
-	// A probe that can never be sent counts a check, so the step parks
-	// rather than probing forever (#2742 item 8).
-	if got := c.probe(big, snapshot{}).Outcome; got != "unknown" {
+	if got := c.probe(big, snapshot{}).Outcome; got != kernel.OUnreached {
 		t.Errorf("a probe past the bound: %q", got)
 	}
 	if res := c.do(fits, snapshot{}); res.Detail != "whole" {
