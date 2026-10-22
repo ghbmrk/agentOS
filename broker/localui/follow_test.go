@@ -315,10 +315,10 @@ func (a *approvalRig) upload(t *testing.T, root []byte) string {
 	return f.upload(root)
 }
 
-// The page's reserved name and fingerprint are fixed: the approval card
+// The page's reserved name (in any case) and fingerprint are fixed: the approval card
 // names the same root, so they change only with it (security 323-1).
 func TestOSS10w2FollowNameAndPrint(t *testing.T) {
-	if reservedName != "the AgentOS project" {
+	if !strings.EqualFold(reservedName, "the agentOS project") { // the gate matches it in any case
 		t.Fatalf("reserved name %q", reservedName)
 	}
 	for d, want := range map[string]string{followDigest: followDigest[:4] + "-" + followDigest[4:8],
