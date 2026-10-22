@@ -246,6 +246,11 @@ const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
 // server sent more than the clerk reads, which is not a timeout or a refusal.
 var ErrReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
 
+// ErrLoginRefused ends a session or submission whose sign-in the server
+// refused. Signing in again with the same login risks the provider locking
+// the account, so it waits for the owner to set the account up again.
+var ErrLoginRefused = errors.New("imapsmtp: the server refused the login")
+
 // ErrUnreachable ends a session whose dial failed: the mail server was never
 // reached, as when the box's own network is down, which is not the server
 // stopping or refusing.
@@ -381,7 +386,7 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 		err = c.Login(l.User, l.Secret)
 	}
 	if err != nil {
-		return errors.New("imapsmtp: the server refused the login")
+		return ErrLoginRefused
 	}
 	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
 }
@@ -904,7 +909,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		auth = smtpXOAuth2{xoauth2{l.User, l.Secret}}
 	}
 	if err := c.Auth(auth); err != nil {
-		return errors.New("imapsmtp: the server refused the login")
+		return ErrLoginRefused
 	}
 	if err := c.Mail(s.cfg.From); err != nil {
 		return err

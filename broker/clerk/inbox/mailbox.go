@@ -166,7 +166,11 @@ func seenID(from, messageID string, arrived time.Time) [16]byte {
 // log's entries for mail since deleted, and the senders' addresses on top, so
 // an account with more than that fails closed (no sender is unsubscribed),
 // where a single folder that large could not be searched at all.
-var openedMax = searchMax * entryCost
+var openedMax = OpenedMax
+
+// OpenedMax is openedMax as the package sets it, for what is derived from
+// it (the host's sealed seen log).
+const OpenedMax = searchMax * entryCost
 
 // searchMax is how many UIDs one search reply can carry: the IMAP client's
 // field bound (mail M21; tests/test_egress_memory.py checks the two agree).
@@ -177,7 +181,9 @@ const (
 	entryCost  = 384
 )
 
-var errTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
+// ErrTooMuchReadMail fails an Opened call past openedMax. It does not pass
+// with time: the owner must delete or archive read mail.
+var ErrTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
 
 // opened is one Opened call's state: LastOpened as it is built, and the log
 // by digest, each entry marked when this read found its mail.
@@ -197,7 +203,7 @@ type logged struct {
 
 func (o *opened) charge(n int) error {
 	if o.kept += n; o.kept > openedMax {
-		return errTooMuchReadMail
+		return ErrTooMuchReadMail
 	}
 	return nil
 }
