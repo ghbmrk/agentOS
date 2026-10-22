@@ -1,6 +1,12 @@
 package browser
 
-import "testing"
+import (
+	"maps"
+	"os"
+	"slices"
+	"strings"
+	"testing"
+)
 
 // REQ: CLK-3
 func TestSiteIsTheRegistrableDomain(t *testing.T) {
@@ -42,8 +48,12 @@ func TestSecretScreenWords(t *testing.T) {
 		// A checkout's own phrase beside a secret verb still marks the screen.
 		"Change PIN code", "Reset your PIN code", "Enter security code", "Enter the security code we sent to your phone",
 		"Send security code", "Security code sent", "Gift card PIN reset", "New PIN code", "/cards/pin-code",
+		"Recoveries", "Account recoveries", "Securities",
 		"Set a new PIN code", "Reset PIN code", "Home security settings", "/vault?export=1", "/account?view=recovery",
-		"/x?access_token=1", "/x?TOKEN=1", "Enter CVV / Security code", "PIN", "Change gift card PIN"} {
+		"/x?access_token=1", "/x?TOKEN=1", "Enter CVV / Security code", "PIN", "Change gift card PIN",
+		// A checkout phrase's plural is not exempt: "Security codes" may be
+		// backup codes (fail closed).
+		"Security codes", "Gift card PINs", "Backup batteries"} {
 		if secretText(s) == "" {
 			t.Errorf("%q not read as a secret screen", s)
 		}
@@ -54,5 +64,50 @@ func TestSecretScreenWords(t *testing.T) {
 		if w := secretText(s); w != "" {
 			t.Errorf("%q read as a secret screen (%q)", s, w)
 		}
+	}
+}
+
+// The clerk's lists are SPEC CLK-5 "Secret screens" word for word: every
+// alone entry and pair marks, and the checkout phrases are exactly the
+// whole texts passed over (VRB-1). A word dropped from either side fails.
+// REQ: VRB-1
+func TestSecretListsAreTheSpecs(t *testing.T) {
+	b, err := os.ReadFile("../../SPEC.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := string(b)
+	between := func(from, to string) []string {
+		i := strings.Index(spec, from)
+		if i < 0 {
+			t.Fatalf("SPEC has no %q", from)
+		}
+		rest := spec[i+len(from):]
+		j := strings.Index(rest, to)
+		if j < 0 {
+			t.Fatalf("SPEC has no %q after %q", to, from)
+		}
+		var out []string
+		for _, e := range strings.Split(rest[:j], ",") {
+			out = append(out, strings.Join(words(e), ""))
+		}
+		return out
+	}
+	marks := append(between("exact form listed): ", "."),
+		between("**Alone** also: ", ".")...)
+	marks = append(marks, between("**Only as a pair:** ", ".")...)
+	want := map[string]bool{}
+	for _, w := range marks {
+		want[w] = true
+	}
+	if !maps.Equal(want, secretWords) {
+		t.Errorf("secretWords %v, SPEC %v", slices.Sorted(maps.Keys(secretWords)), slices.Sorted(maps.Keys(want)))
+	}
+	exempt := map[string]bool{}
+	for _, p := range between("one of the checkout phrases ", " (") {
+		exempt[p] = true
+	}
+	if !maps.Equal(exempt, notSecret) {
+		t.Errorf("notSecret %v, SPEC %v", slices.Sorted(maps.Keys(notSecret)), slices.Sorted(maps.Keys(exempt)))
 	}
 }
