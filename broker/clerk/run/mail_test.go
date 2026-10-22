@@ -362,3 +362,64 @@ func TestMailClerkRefusesAStepTheLogHasNotInFlight(t *testing.T) {
 		t.Fatalf("a step not in flight: %+v, filed %v; want refused and nothing filed", res, r.filed("<m1@shop.test>"))
 	}
 }
+
+// fixtureWorld is the slice eval's world and key records, read only: its M01
+// is a DKIM-signed one-click bulk mail that VRB-2 passes.
+func fixtureWorld(t *testing.T) (inbox.World, []byte) {
+	t.Helper()
+	dir := filepath.Join("..", "..", "..", "evals", "slice-inbox")
+	var w inbox.World
+	for name, v := range map[string]any{"world.json": &w, "keys.json": &w.DKIMKeys} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "mail", "M01.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w, raw
+}
+
+// The account OpenMail returns judges VRB-2 in the clerk's own LastOpened.
+// With the read of opened mail working, the fixture's one-click bulk mail is
+// offered for unsubscribing; when that read fails, the sender counts as
+// opened today and is not (#2698 item 1; Security delta on #2728).
+func TestAFailedOpenedReadOffersNoUnsubscribe(t *testing.T) {
+	w, raw := fixtureWorld(t)
+	offered := func(fail bool) bool {
+		srv := imaptest.Start(t)
+		srv.Deliver("INBOX", strings.ReplaceAll(string(raw), "\r\n", "\n"))
+		srv.Deliver("Archive", mailFrom("pat@example.test", "<p1@example.test>"), `\Seen`)
+		srv.FailList("Archive", fail)
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+			t.Fatal(err)
+		}
+		cfg := mailConfig()
+		cfg.World = func() inbox.World { return w }
+		m, err := OpenMail(context.Background(), dir, sec, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ls := m.Listing()
+		if len(ls) != 1 {
+			t.Fatalf("the clerk listed %d mails", len(ls))
+		}
+		return ls[0].Sender != ""
+	}
+	if !offered(false) {
+		t.Fatal("with the read of opened mail working, the fixture's sender is not offered")
+	}
+	if offered(true) {
+		t.Fatal("after a failed read of opened mail, the sender is offered for unsubscribing")
+	}
+}
