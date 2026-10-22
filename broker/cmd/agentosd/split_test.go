@@ -28,9 +28,9 @@ func sentences(n int) string {
 // three texts in order, each within one text, cut at sentence ends, and
 // nothing is kept or cut (CH-12, D-127).
 func TestLongReplyArrivesWhole(t *testing.T) {
-	r := newEvRig(t, "")
+	r := newEvRig(t)
 	long := sentences(room*5/2 - 40)
-	r.ev.reply("agent", true, long, "")
+	r.ev.sendSplit("agent", long)
 	got := r.texts()
 	if len(got) != 3 {
 		t.Fatalf("%d texts: %q", len(got), got)
@@ -54,9 +54,9 @@ func TestLongReplyArrivesWhole(t *testing.T) {
 // TestTooLongReplyIsCutInTheThirdText: a reply of about four texts goes as
 // three, the third ending with the cut note, and is kept whole (CH-12).
 func TestTooLongReplyIsCutInTheThirdText(t *testing.T) {
-	r := newEvRig(t, "")
+	r := newEvRig(t)
 	long := sentences(room * 4)
-	r.ev.reply("agent", true, long, "")
+	r.ev.sendSplit("agent", long)
 	got := r.texts()
 	if len(got) != 3 {
 		t.Fatalf("%d texts", len(got))
@@ -135,8 +135,8 @@ func TestSecretIsCheckedBeforeTheSplit(t *testing.T) {
 	if !owner.SecretShaped(long) {
 		t.Fatal("the fixture is not secret-shaped")
 	}
-	r := newEvRig(t, "")
-	r.ev.reply("agent", true, long, "")
+	r := newEvRig(t)
+	r.ev.sendSplit("agent", long)
 	if got := r.texts(); len(got) != 1 || owner.Disclose(got[0]) != owner.Hidden {
 		t.Fatalf("a split secret went out as %d texts", len(got))
 	}
@@ -145,10 +145,10 @@ func TestSecretIsCheckedBeforeTheSplit(t *testing.T) {
 // TestFailedTextStopsTheRest: when a text does not go, the later ones are
 // not sent out of order and the reply is kept (CH-12).
 func TestFailedTextStopsTheRest(t *testing.T) {
-	r := newEvRig(t, "")
+	r := newEvRig(t)
 	n := 0
 	r.ev.notify = func(string) error { n++; return errNoSend }
-	r.ev.reply("agent", true, sentences(room*2), "")
+	r.ev.sendSplit("agent", sentences(room*2))
 	if n != 1 || len(r.ev.kept.list()) != 1 {
 		t.Fatalf("sent %d after a failure, kept %d", n, len(r.ev.kept.list()))
 	}

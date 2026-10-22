@@ -16,7 +16,7 @@ import (
 // reaction carries after a deletion is pinned in broker/owner.
 func TestADeletionForgetsTheOwnerChannelsRecentReplies(t *testing.T) {
 	r := pacedOwner(t, ownerch.Pacing{}, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
-	ev := newEvRig(t, "").ev
+	ev := newEvRig(t).ev
 	ev.wireOwner(func() *ownerch.Channel { return r.ch })
 	if err := r.ch.Converse("The Acme contract renews on the third of March at forty dollars a seat."); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestADeletionForgetsTheOwnerChannelsRecentReplies(t *testing.T) {
 // deletion in between leaves them alone.
 func TestAReplyInFlightAcrossADeletionIsForgottenOnSettle(t *testing.T) {
 	r := pacedOwner(t, ownerch.Pacing{}, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
-	ev := newEvRig(t, "").ev
+	ev := newEvRig(t).ev
 	ev.wireOwner(func() *ownerch.Channel { return r.ch })
 	say := func(s string) string { return strings.Join(r.ch.Handle(context.Background(), ownerNum, s), " | ") }
 	quote := "Liked “Agent: The Acme contract renews…”"

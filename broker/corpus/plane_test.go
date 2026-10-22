@@ -10,14 +10,15 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fakeRelay stands in for a guest machine: each route does what the real
 // check on it does, unless open says the route lets everything through.
+// Its mailbox has no labels configured, so it refuses every label, and
+// its alert wording is AlertPayload; the real mailbox checks are the mail
+// clerk's (VRB-2), replayed through a real guest in vm/gvisor.
 type fakeRelay struct {
-	a    *mail.Adapter
 	open map[string]bool
 	err  error
 }
@@ -30,22 +31,21 @@ func (f fakeRelay) Reply(_ context.Context, s string) (string, error) {
 }
 
 func (f fakeRelay) Label(_ context.Context, s string) (bool, error) {
-	_, err := f.a.LabelClass(s)
-	return f.open[LabelCheck] || err == nil, f.err
+	return f.open[LabelCheck], f.err
 }
 
 func (f fakeRelay) Archive(_ context.Context, s string) (bool, error) {
-	return f.open[AlertPatterns] || !f.a.AlertWording(s), f.err
+	return f.open[AlertPatterns] || !strings.Contains(s, AlertPayload), f.err
 }
 
 func (f fakeRelay) AutoReply(_ context.Context, s string) (bool, error) {
 	return f.open[CommitmentFilter] || owner.Commitments{}.Match(s) == "", f.err
 }
 
-// LOOP-7 (P3-4b-4d): the checks taken through a guest keep Checks' names
-// and payloads, and a guest path that holds reports nothing.
+// LOOP-7 (P3-4b-4d): the checks taken through a guest keep the shared
+// names and payloads, and a guest path that holds reports nothing.
 func TestPlaneChecksHoldOverThePublishedCorpus(t *testing.T) {
-	checks := PlaneChecks(fakeRelay{a: adapter(t)})
+	checks := PlaneChecks(fakeRelay{})
 	want := map[string]string{CodeFilter: CodePayload, AlertPatterns: AlertPayload, LabelCheck: LabelPayload,
 		CommitmentFilter: CommitmentPayload}
 	if len(checks) != len(want) {
@@ -67,9 +67,8 @@ func TestPlaneChecksHoldOverThePublishedCorpus(t *testing.T) {
 // reports findings that carry an item ID and a check name, nothing of the
 // text.
 func TestAnOpenGuestPathIsFound(t *testing.T) {
-	a := adapter(t)
 	for _, name := range []string{CodeFilter, AlertPatterns, LabelCheck, CommitmentFilter} {
-		if _, err := probe(t, PlaneChecks(fakeRelay{a: a, open: map[string]bool{name: true}})).Run(context.Background()); err == nil {
+		if _, err := probe(t, PlaneChecks(fakeRelay{open: map[string]bool{name: true}})).Run(context.Background()); err == nil {
 			t.Fatalf("%s: an open path passed its bare payload", name)
 		}
 	}
@@ -78,7 +77,7 @@ func TestAnOpenGuestPathIsFound(t *testing.T) {
 	for _, it := range p.Items {
 		ids[it.ID] = true
 	}
-	for _, c := range PlaneChecks(fakeRelay{a: a}) {
+	for _, c := range PlaneChecks(fakeRelay{}) {
 		inner := c.Deliver
 		c.Deliver = func(ctx context.Context, s string) (bool, error) {
 			caught, err := inner(ctx, s)
@@ -99,7 +98,7 @@ func TestAnOpenGuestPathIsFound(t *testing.T) {
 
 // LOOP-7: a route the broker saw no outcome on fails the run.
 func TestAFailedRouteFailsThePlaneRun(t *testing.T) {
-	res, err := probe(t, PlaneChecks(fakeRelay{a: adapter(t), err: errors.New("guest gone")})).Run(context.Background())
+	res, err := probe(t, PlaneChecks(fakeRelay{err: errors.New("guest gone")})).Run(context.Background())
 	if err == nil || len(res.Found) != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -110,7 +109,7 @@ func TestAFailedRouteFailsThePlaneRun(t *testing.T) {
 // the guest is asked.
 func TestATextOverOneOwnerTextFailsTheCodeFilter(t *testing.T) {
 	asked := false
-	r := fakeRelay{a: adapter(t)}
+	r := fakeRelay{}
 	for _, c := range PlaneChecks(askedRelay{r, &asked}) {
 		if c.Name != CodeFilter {
 			continue

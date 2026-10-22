@@ -68,16 +68,12 @@ func (n *unclearNote) line() string {
 	return fmt.Sprintf("%d actions did not go; not resent. Text RETRY to send them.", len(ps))
 }
 
-// wireStatusNotes adds STATUS's lines for what waits on the owner, read
+// wireStatusNotes adds STATUS's line for what waits on the owner, read
 // when asked rather than texted (DRB-1): effects left unclear and parked
-// rather than retried, or proved not done (OP-2, DRA-3), then the UNDO of
-// each mail day still undoable and its alerts (ADP-2). Both read the daemon
-// once it runs: the caller sets unclear after daemon.Run and passes mail
-// to wireMail.
-func wireStatusNotes(cfg *daemon.Config) (*unclearNote, *mailNote) {
+// rather than retried, or proved not done (OP-2, DRA-3). It reads the
+// daemon once it runs: the caller sets it after daemon.Run.
+func wireStatusNotes(cfg *daemon.Config) *unclearNote {
 	unclear := &unclearNote{loc: time.Local}
-	mail := &mailNote{}
 	cfg.Notes = append(cfg.Notes, unclear.line)
-	cfg.Notes = append(cfg.Notes, mail.codes, mail.alerts)
-	return unclear, mail
+	return unclear
 }

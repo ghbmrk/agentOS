@@ -43,10 +43,10 @@ type Relay interface {
 // PlaneChecks are the closed checks taken through r's guest: the code
 // filter on the owner's line, the label check and the alert patterns on
 // the mailbox, and the commitment filter on the grants gate's auto-reply
-// (ADP-11, P3-4b-4e). Each keeps Checks' name and payload. Checks keeps
-// its in-process copy of every check as a second probe: this one needs a
-// guest machine (and runsc, in a box), so the in-process copy covers a
-// box that runs without them. A text the owner's line would clip fails
+// (ADP-11, P3-4b-4e). InProcess keeps an in-process copy of the code and
+// commitment filters as a second probe: this one needs a guest machine
+// (and runsc, in a box), so the in-process copy covers a box that runs
+// without them. A text the owner's line would clip fails
 // the code filter's run before the guest is asked: the clip could cut the
 // code, so a missing code would be no verdict.
 func PlaneChecks(r Relay) []loops.ClosedCheck {
