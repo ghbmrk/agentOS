@@ -197,6 +197,9 @@ func TestAProbedSubmitGetsItsCoveredLine(t *testing.T) {
 	}{
 		"shown":   {"done", line, true},
 		"bidi":    {"done", "Sent on shop.example: \u202eyaP", false},
+		"joined":  {"done", "Sent on shop.example: \U0001F468\u200d\U0001F469\u200d\U0001F467, 00:00 UTC", true},
+		"zwsp":    {"done", "Sent on shop.example: Pla\u200bce order, 00:00 UTC", false},
+		"tag":     {"done", "Sent on shop.example: Place order\U000E0041, 00:00 UTC", false},
 		"notdone": {"notdone", line, false},
 		"unknown": {"unknown", line, false},
 	} {
@@ -210,7 +213,7 @@ func TestAProbedSubmitGetsItsCoveredLine(t *testing.T) {
 		}
 		must(t, r.k.Answer(at, p, kernel.Result{Outcome: c.outcome, Covered: c.covered}))
 		got := r.k.State().Covered(at)
-		if (len(got) == 1) != c.listed || c.listed && (got[0].Line != line || r.phase("p1").Phase != kernel.PDone) {
+		if (len(got) == 1) != c.listed || c.listed && (got[0].Line != c.covered || r.phase("p1").Phase != kernel.PDone) {
 			t.Fatalf("%s: covered %+v", name, got)
 		}
 		for _, e := range r.k.Log().Entries() {
