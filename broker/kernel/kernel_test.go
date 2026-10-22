@@ -608,6 +608,9 @@ func TestEntryTypesAreClosed(t *testing.T) {
 	if _, err := r.k.Log().Append(0, kernel.TStop, 2, struct{}{}); !errors.Is(err, kernel.ErrUnknown) {
 		t.Fatal("unknown version must be refused (LOG-5)")
 	}
+	if _, err := r.k.Log().Append(0, kernel.TKeyIssued, 1, struct{}{}); !errors.Is(err, kernel.ErrUnknown) {
+		t.Fatalf("a key.issued body from before grant batches: %v", err)
+	}
 }
 
 // REQ: KRN-8

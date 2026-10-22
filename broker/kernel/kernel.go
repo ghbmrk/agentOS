@@ -323,7 +323,7 @@ func (k *Kernel) Log() *Log     { return k.log }
 
 // emit logs first, then folds: a failed write leaves the state as it was.
 func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
-	e, err := k.log.Append(now, typ, 1, body)
+	e, err := k.log.Append(now, typ, schema[typ], body)
 	if err != nil {
 		return e, err
 	}
@@ -426,45 +426,84 @@ func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
 	return cited.Live(key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
 }
 
+// Admitted is a metered call's admission: the worst case it may spend,
+// reserved against the plan's key in the log until Meter settles it.
+type Admitted struct {
+	Plan string `json:"plan"`
+	Seq  uint64 `json:"seq"` // the reservation entry
+}
+
 // AdmitSpend checks that the plan's key may spend amount more under its spend
-// caps, that the plan is active and that it is not held: the check a clerk
-// makes before a metered call (LOG-7).
-func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) *key.Refusal {
+// caps, that the plan is active and that it is not held, and reserves amount:
+// the check a clerk makes before a metered call (LOG-7). The reservation
+// counts against every cap until Meter settles it, so calls admitted at once,
+// by one clerk or several, never share the same remaining budget (#2613 item
+// 1). One that is never settled stays charged at its worst case.
+func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *key.Refusal) {
 	if k.log.broken {
 		// A call admitted now could not be metered, and may follow a
 		// widening whose anchor failed (KRN-5).
-		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
+		return Admitted{}, &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
 	}
 	ps, v, r := k.funding(now, plan)
 	if r != nil {
-		return r
+		return Admitted{}, r
 	}
 	if r := k.citedLive(now, ps); r != nil {
-		return r
+		return Admitted{}, r
 	}
 	if ps.Status != SActive {
-		return &key.Refusal{Code: CPlan, Detail: "plan is " + ps.Status}
+		return Admitted{}, &key.Refusal{Code: CPlan, Detail: "plan is " + ps.Status}
 	}
 	if h, held := k.s.SpendHeld[plan]; held {
-		return &key.Refusal{Code: CHeld, Detail: h.Code}
+		return Admitted{}, &key.Refusal{Code: CHeld, Detail: h.Code}
 	}
-	return v.Spend(plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+	if r := v.Spend(plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+		settled := key.Context{Now: now, Changes: &k.s.Changes, Ledger: ledger{s: k.s, settled: true}}
+		sr := v.Spend(plan, amount, settled)
+		if sr != nil {
+			// The cap settled usage alone exhausts, which is the one a hold
+			// names, even when open admissions push another over first.
+			return Admitted{}, sr
+		}
+		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
+			// Only calls still in flight fill the cap: this one waits for
+			// them, and nothing holds the plan.
+			return Admitted{}, &key.Refusal{Code: CInFlight, Detail: r.Code}
+		}
+		return Admitted{}, r
+	}
+	e, err := k.emit(now, TSpendReserved, spendReserved{v.Root(), v.Scopes(), plan, amount})
+	if err != nil {
+		return Admitted{}, &key.Refusal{Code: CBroken, Detail: err.Error()}
+	}
+	return Admitted{plan, e.Seq}, nil
 }
 
-// Meter records usage a clerk metered itself against the plan's key. Usage
-// that happened is always recorded, even past a cap or after the plan ended,
-// so the next admission sees it; a negative amount is refused, since spend
-// never refunds. source says whose count amount is: the provider's, the
-// clerk's own or the worst case admitted (LOG-7).
-func (k *Kernel) Meter(now int64, plan, route string, amount int64, source string) error {
+// CInFlight refuses a metered call whose worst case fits the caps once the
+// calls still in flight settle: the caller may ask again later, and it never
+// holds the plan.
+const CInFlight = "in-flight"
+
+// ErrNotAdmitted refuses a Meter that cites no open admission.
+var ErrNotAdmitted = errors.New("kernel: usage is metered against its own open admission")
+
+// Meter settles admission a with the usage the clerk metered: amount replaces
+// the reserved worst case, charged to the key the call was admitted under.
+// Usage that happened is always recorded, even past a cap or after the plan
+// ended or its key was revoked, so the next admission sees it; a negative
+// amount is refused, since spend never refunds. source says whose count
+// amount is: the provider's, the clerk's own or the worst case admitted
+// (LOG-7).
+func (k *Kernel) Meter(now int64, a Admitted, route string, amount int64, source string) error {
 	if amount < 0 {
 		return errors.New("kernel: metered usage is never negative")
 	}
-	_, v, r := k.funding(now, plan)
-	if r != nil {
-		return r
+	rs := k.s.reserved[a.Seq]
+	if rs == nil || rs.Task != a.Plan {
+		return ErrNotAdmitted
 	}
-	_, err := k.emit(now, TModelUsed, modelUsed{v.Root(), v.Scopes(), plan, route, amount, source})
+	_, err := k.emit(now, TModelUsed, modelUsed{rs.Root, rs.Scopes, a.Plan, route, amount, source, a.Seq})
 	return err
 }
 

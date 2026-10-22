@@ -106,6 +106,7 @@ type (
 	}
 	spendArgs struct {
 		Plan   string       `json:"plan"`
+		Seq    uint64       `json:"seq,omitempty"` // the admission a meter settles
 		Route  string       `json:"route,omitempty"`
 		Amount int64        `json:"amount"`
 		Source string       `json:"source,omitempty"`
@@ -188,11 +189,19 @@ var OwnerSide = Side{"owner", map[string]op{
 // MeterSide is the model clerk's table (clerk/model, #2572): the metering
 // seam and nothing else.
 var MeterSide = Side{"meter", map[string]op{
-	"admitspend": act(func(k *kernel.Kernel, now int64, a spendArgs) error {
-		return refusal(k.AdmitSpend(now, a.Plan, a.Amount))
-	}),
+	"admitspend": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a spendArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, errArgs
+		}
+		ad, r := k.AdmitSpend(now, a.Plan, a.Amount)
+		if r != nil {
+			return nil, r
+		}
+		return ad, nil
+	},
 	"meter": act(func(k *kernel.Kernel, now int64, a spendArgs) error {
-		return k.Meter(now, a.Plan, a.Route, a.Amount, a.Source)
+		return k.Meter(now, kernel.Admitted{Plan: a.Plan, Seq: a.Seq}, a.Route, a.Amount, a.Source)
 	}),
 	"hold":      act(func(k *kernel.Kernel, now int64, a spendArgs) error { return k.Hold(now, a.Plan, a.Rf) }),
 	"admitpool": act(func(k *kernel.Kernel, now int64, a poolArgs) error { return refusal(k.AdmitPool(now, a.Pool)) }),
@@ -314,7 +323,7 @@ func init() {
 	for _, e := range []error{
 		kernel.ErrDuplicatePlan, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
-		kernel.ErrBroken, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
+		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, errArgs, ErrModelCall, ErrNoMailAccount,
 		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword,
 	} {
@@ -469,15 +478,20 @@ func (o Owner) Task(id string) (kernel.Task, bool, error) {
 // Meter is the metering seam over the kernel process's meter socket: a
 // model.Ledger for the model clerk's process. The now each method takes is
 // ignored, since the kernel's clock decides. A lost Meter answer is retried
-// by the clerk (model.Clerk owes it), which may count the use twice: spend
-// only ever over-counts, which narrows.
+// by the clerk (model.Clerk owes it); the kernel settles an admission once,
+// so a retry of one that landed is refused (kernel.ErrNotAdmitted) and the
+// clerk counts it recorded.
 type Meter struct{ Conn }
 
-func (m Meter) AdmitSpend(_ int64, plan string, amount int64) *key.Refusal {
-	return asRefusal(m.call("admitspend", spendArgs{Plan: plan, Amount: amount}, nil))
+func (m Meter) AdmitSpend(_ int64, plan string, amount int64) (kernel.Admitted, *key.Refusal) {
+	var a kernel.Admitted
+	if r := asRefusal(m.call("admitspend", spendArgs{Plan: plan, Amount: amount}, &a)); r != nil {
+		return kernel.Admitted{}, r
+	}
+	return a, nil
 }
-func (m Meter) Meter(_ int64, plan, route string, amount int64, source string) error {
-	return m.call("meter", spendArgs{Plan: plan, Route: route, Amount: amount, Source: source}, nil)
+func (m Meter) Meter(_ int64, a kernel.Admitted, route string, amount int64, source string) error {
+	return m.call("meter", spendArgs{Plan: a.Plan, Seq: a.Seq, Route: route, Amount: amount, Source: source}, nil)
 }
 func (m Meter) Hold(_ int64, plan string, rf *key.Refusal) error {
 	return m.call("hold", spendArgs{Plan: plan, Rf: rf}, nil)
