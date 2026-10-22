@@ -381,7 +381,7 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 		err = c.Login(l.User, l.Secret)
 	}
 	if err != nil {
-		return signIn(err, reading)
+		return signIn(err, Reading)
 	}
 	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
 }
@@ -403,17 +403,40 @@ func imapAuth(c *client.Client, l Login) (sasl.Client, error) {
 		return nil, nil
 	}
 	if ok, _ := c.SupportAuth(mech); !ok {
-		return nil, stand{side(ErrNoSignIn, reading)}
+		return nil, stand{side(ErrNoSignIn, Reading)}
 	}
 	return auth, nil
 }
 
-// reading and sending name the side of the account a sign-in failed on, as
-// the two are set up apart: the IMAP server reads, the SMTP server sends.
-const reading, sending = "reading mail", "sending mail"
+// Side is the side of the account a sign-in failed on, as the two are set
+// up apart: the IMAP server reads, the SMTP server sends.
+type Side string
 
-// side is e for one side of the account: errors.Is(side(e, s), e) holds.
-func side(e error, s string) error { return fmt.Errorf("%w, %s", e, s) }
+const (
+	Reading Side = "reading mail"
+	Sending Side = "sending mail"
+)
+
+// SideOf is the side err's sign-in failed on, or "" for an error that is
+// not a sign-in's (ErrLoginRefused or ErrNoSignIn).
+func SideOf(err error) Side {
+	var e sideError
+	if errors.As(err, &e) {
+		return e.s
+	}
+	return ""
+}
+
+// sideError is e on side s: errors.Is(side(e, s), e) holds.
+type sideError struct {
+	error
+	s Side
+}
+
+func (e sideError) Error() string { return e.error.Error() + ", " + string(e.s) }
+func (e sideError) Unwrap() error { return e.error }
+
+func side(e error, s Side) error { return sideError{e, s} }
 
 // ended is a session's or submission's error as it ended: an answer the
 // server had sent (stand) as it is; otherwise, if it was cut off, why, not
@@ -440,7 +463,7 @@ func ended(err error, over, late bool, caller context.Context) error {
 // when the server refused it: an IMAP NO or BAD other than UNAVAILABLE (RFC
 // 5530: the server is down for now) or an SMTP 5xx. Any other failure passes
 // with time and is mapped as the session ended.
-func signIn(err error, s string) error {
+func signIn(err error, s Side) error {
 	var st *imap.StatusError
 	var tp *textproto.Error
 	if errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE" || errors.As(err, &tp) && tp.Code >= 500 {
@@ -970,10 +993,10 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		if err := c.Noop(); err != nil {
 			return err
 		}
-		return stand{side(ErrNoSignIn, sending)}
+		return stand{side(ErrNoSignIn, Sending)}
 	}
 	if err := c.Auth(auth); err != nil {
-		return signIn(err, sending)
+		return signIn(err, Sending)
 	}
 	if err := c.Mail(s.cfg.From); err != nil {
 		return err
