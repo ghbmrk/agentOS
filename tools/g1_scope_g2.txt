@@ -182,7 +182,6 @@ allow broker/workers/
 # skill moved here.
 allow broker/attention/
 allow broker/cleanroom/
-allow broker/compile/
 allow broker/corpus/
 allow broker/hint/
 allow broker/loop7/
