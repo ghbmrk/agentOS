@@ -845,19 +845,25 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		return err
 	}
 	bc := newBudgetConn(conn, smtpReplyBudget)
+	var late atomic.Bool
 	defer func() {
 		switch {
 		case err == nil:
 		case bc.over.Load():
 			err = ErrReplyTooLarge
-		case ctx.Err() == context.DeadlineExceeded:
+		case late.Load():
 			err = ErrTimeout
 		}
 	}()
-	if dl, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	// The timeout closes the connection, marked late first, so what the
+	// closed connection reports is never mistaken for the server's answer.
+	tcp := conn
+	stop := context.AfterFunc(ctx, func() {
+		if ctx.Err() == context.DeadlineExceeded {
+			late.Store(true)
+		}
+		tcp.Close()
+	})
 	defer stop()
 	// The budget sits under TLS, so in implicit-TLS mode net/smtp still
 	// sees a *tls.Conn and lets PLAIN and XOAUTH2 authenticate; it then
