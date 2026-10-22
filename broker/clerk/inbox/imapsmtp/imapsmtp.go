@@ -188,15 +188,24 @@ func New(cfg Config) (*Store, error) {
 // (New refused any other), which is the box itself, not the home network;
 // it dials without a name lookup. Every other connection goes through the
 // address policy, which resolves, checks every answer and checks the
-// address connected (DEV-2).
+// address connected (DEV-2). A dial that fails, unless the policy refused
+// it or the caller stopped it, fails with ErrUnreachable, the timeout
+// running out on the dial included: no server answered.
 func (s *Store) dial(ctx context.Context, addr string, sec Security) (net.Conn, error) {
+	var conn net.Conn
+	var err error
 	if sec == Plain {
 		if !loopback(addr) {
 			return nil, ErrInsecure
 		}
-		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = s.cfg.Guard.DialContext(ctx, "tcp", addr)
 	}
-	return s.cfg.Guard.DialContext(ctx, "tcp", addr)
+	if err != nil && !errors.Is(err, netguard.ErrDenied) && !errors.Is(err, context.Canceled) {
+		err = fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	return conn, err
 }
 
 func loopback(addr string) bool {
@@ -233,8 +242,14 @@ func (s *Store) session(ctx context.Context, f func(c *client.Client) error) err
 // few messages carrying one Message-ID.
 const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
 
-// errReplyTooLarge ends a session whose replies passed their budget.
-var errReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
+// ErrReplyTooLarge ends a session whose replies passed their budget: the
+// server sent more than the clerk reads, which is not a timeout or a refusal.
+var ErrReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
+
+// ErrUnreachable ends a session whose dial failed: the mail server was never
+// reached, as when the box's own network is down, which is not the server
+// stopping or refusing.
+var ErrUnreachable = errors.New("imapsmtp: could not reach the mail server")
 
 // ErrTimeout ends a session, or one of its steps, that ran past the timeout:
 // the server stopped answering, which is not a refusal or a bad reply.
@@ -254,6 +269,7 @@ func (s *Store) replyBudget(fetches int) int64 {
 type budgetConn struct {
 	net.Conn
 	left atomic.Int64
+	over atomic.Bool // a read found the budget spent
 }
 
 func newBudgetConn(c net.Conn, budget int64) *budgetConn {
@@ -265,7 +281,8 @@ func newBudgetConn(c net.Conn, budget int64) *budgetConn {
 func (b *budgetConn) Read(p []byte) (int, error) {
 	left := b.left.Load()
 	if left <= 0 {
-		return 0, errReplyTooLarge
+		b.over.Store(true)
+		return 0, ErrReplyTooLarge
 	}
 	if int64(len(p)) > left {
 		p = p[:left]
@@ -293,25 +310,31 @@ func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Cli
 // two adjacent windows, never more: what a step holds is bounded by its own
 // window and the one before.
 func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) (err error) {
-	// A session cut off at its timeout fails with ErrTimeout, not with what
-	// the closed connection reports; an error f reached from what the server
-	// had already sent (stand) is kept, whenever the cut-off came.
+	// A session cut off fails with why, ErrReplyTooLarge or ErrTimeout, not
+	// with what the closed connection reports; an error f reached from what
+	// the server had already sent (stand) is kept, whenever the cut-off came.
 	var late atomic.Bool
+	var bc *budgetConn
 	defer func() {
 		var st stand
-		if errors.As(err, &st) {
+		switch {
+		case errors.As(err, &st):
 			err = st.error
-		} else if err != nil && late.Load() {
+		case err == nil:
+		case bc != nil && bc.over.Load():
+			err = ErrReplyTooLarge
+		case late.Load():
 			err = ErrTimeout
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		late.Store(err == context.DeadlineExceeded)
+		return err
+	}
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
-		if dctx.Err() == context.DeadlineExceeded {
-			late.Store(true)
-		}
 		return err
 	}
 	// go-imap clears the connection's deadline at each command, so a timer
@@ -334,7 +357,7 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 	// The connection is closed however the session ends: Logout does not
 	// close it once the client's reader has stopped on a bad reply.
 	defer conn.Close()
-	bc := newBudgetConn(conn, budget)
+	bc = newBudgetConn(conn, budget)
 	c, err := client.New(bc)
 	if err != nil {
 		return err
@@ -651,6 +674,11 @@ func subject(c *client.Client, uid uint32) string {
 	} else {
 		v = rest
 	}
+	// A cut inside an encoded word leaves it undecodable: it goes, rather
+	// than show the owner its raw form. Q and B text carry no "?=".
+	if i := strings.LastIndex(v, "=?"); cut && i >= 0 && !strings.Contains(v[i+2:], "?=") {
+		v = v[:i]
+	}
 	if d, err := new(mime.WordDecoder).DecodeHeader(v); err == nil {
 		v = d
 	}
@@ -808,13 +836,24 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 const smtpReplyBudget = 1 << 20
 
 // Submit sends raw over SMTP submission from the configured address.
-func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
+// A submission cut off fails with why, as a session does (sessionR).
+func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(ctx, s.cfg.SMTP, s.cfg.SMTPSec)
 	if err != nil {
 		return err
 	}
+	bc := newBudgetConn(conn, smtpReplyBudget)
+	defer func() {
+		switch {
+		case err == nil:
+		case bc.over.Load():
+			err = ErrReplyTooLarge
+		case ctx.Err() == context.DeadlineExceeded:
+			err = ErrTimeout
+		}
+	}()
 	if dl, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(dl)
 	}
@@ -823,7 +862,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	// The budget sits under TLS, so in implicit-TLS mode net/smtp still
 	// sees a *tls.Conn and lets PLAIN and XOAUTH2 authenticate; it then
 	// counts ciphertext, which is just as bounded.
-	conn = newBudgetConn(conn, smtpReplyBudget)
+	conn = bc
 	switch s.cfg.SMTPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.SMTP))
