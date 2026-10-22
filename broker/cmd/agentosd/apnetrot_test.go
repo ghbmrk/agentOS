@@ -434,3 +434,13 @@ func TestTheCommittedNetworkIsReadFromTheVaultProcess(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 }
+
+// learnTemp is spelled out so agentosd imports no more old core; this
+// pins it to durable's, or the sweep would miss temps holding task text
+// (Security release finding on #2808). It sits here because this file
+// already imports durable, so the old-core ratchet does not grow.
+func TestLearnTempIsDurablesTempPrefix(t *testing.T) {
+	if learnTemp != durable.TempPrefix {
+		t.Fatalf("learnTemp = %q, durable.TempPrefix = %q", learnTemp, durable.TempPrefix)
+	}
+}
