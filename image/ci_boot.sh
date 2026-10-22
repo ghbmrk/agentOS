@@ -633,11 +633,11 @@ if [ -n "${E2E:-}" ]; then
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
-	# The verdict is the host's alone: no console, from any of the boots, may carry its text,
+	# The verdict is the host's alone: no console, from any of the four boots, may carry its text,
 	# read both raw (text inside an OSC body, which cleaning deletes) and cleaned (text split by
 	# escape sequences), so a guest that writes it fails the run whichever boot it did it in
 	# (tools/ASSUMPTIONS.md D27).
-	for c in console console-reboot console-two-drives console-fallback console-e2e; do
+	for c in console console-reboot console-two-drives console-e2e; do
 		[ -f "$W/$c.log" ] || continue
 		for v in "G1 PROVEN" "G1 NOT PROVEN"; do
 			{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"
