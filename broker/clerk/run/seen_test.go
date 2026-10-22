@@ -326,6 +326,13 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	if _, next := trouble(imapsmtp.ErrNoSignIn); strings.Contains(strings.ToLower(next), "password") || !strings.Contains(next, "IMAP and SMTP server settings") {
 		t.Errorf("no sign-in: next step %q", next)
 	}
+	// Every folder is read, so only mail deleted for good frees room; the
+	// next step never sends the owner to archive or move it (#2742 item 3c;
+	// inbox's TestDeletingOldReadMailClearsTooMuchReadMail follows the
+	// advice through Opened).
+	if _, next := trouble(inbox.ErrTooMuchReadMail); !strings.Contains(next, "Delete read mail for good, from your trash too") || !strings.Contains(next, "doesn't help") {
+		t.Errorf("too much read mail: next step %q", next)
+	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {
 		t.Errorf("a long folder name is not cut: %d bytes", len(why))
 	}

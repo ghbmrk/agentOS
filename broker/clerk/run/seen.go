@@ -160,7 +160,11 @@ func trouble(err error) (why, next string) {
 		return "your mail server doesn't accept a password sign-in" + forSide(err) + " with these settings",
 			"On my Wi-Fi page, set up the mail account again with the " + servers + " server settings your provider gives for mail apps. If your provider only allows signing in through its own page, I can't use this account yet."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
-		return "you have more read mail than I can keep track of", "Delete or archive old read mail outside your mail account, and I'll resume at the next check."
+		// Every folder is read, Archive and Trash too, so only mail deleted
+		// for good frees room: at once for mail read since the last good
+		// read, and for old logged mail (inbox.ErrTooMuchReadMail, #2742
+		// item 3c).
+		return "you have more read mail than I can keep track of", "Delete read mail for good, from your trash too: the mail you read most recently frees room at once. Moving or archiving it doesn't help, since I read every folder. " + again
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
