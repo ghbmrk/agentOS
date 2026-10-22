@@ -63,12 +63,17 @@ const (
 	workersOffLine = "Worker tools: not set up here; " + fixUpdate + "."
 	// C11: no update-check loop (Loop 3) runs on this box version.
 	updateChecksOff = "Update checks: not running here; " + fixUpdate + "."
+	// The forget plane did not open, so FORGET cannot run (UX R1 on #92).
+	forgetNotRunning = "Forget: not running; " + fixRestart + "."
+	// Old learning state or a crash-left temp did not remove at start;
+	// the next start tries again (LOG-4).
+	forgetNotErased = "Forget: old learning data not fully erased; " + fixRestart + "."
 )
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
-		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff}
+		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotRunning, forgetNotErased}
 }
 
 // capClass is why a capability is off. An owner choice (LOOPS OFF, say)

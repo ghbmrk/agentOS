@@ -644,6 +644,9 @@ func main() {
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
 	}
+	// Intents left open for the deleted change and loops executors settle
+	// as not applied (NL-8).
+	registerRetired(&cfg)
 	// One clock for the journal and the gate.
 	cfg.Now = func() time.Time { return time.Now().UTC() }
 	cfg.Grants.Now = cfg.Now

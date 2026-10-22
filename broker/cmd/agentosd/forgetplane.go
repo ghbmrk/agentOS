@@ -35,6 +35,9 @@ type forgetPlane struct {
 	forgotten   *forgotten
 	notify      ownerNotify
 	forgetOwner *ownerForget
+	// notErased: some old learning state or a crash-left temp did not
+	// remove at this start (LOG-4: erase fails closed, owner told).
+	notErased bool
 }
 
 // learnedFiles are the learning loop's state in the learn directory. The
@@ -45,15 +48,57 @@ type forgetPlane struct {
 var learnedFiles = []string{"change.json", "change.json.d", "harvest.json", "values.json",
 	"loops.json", "loop2.json", "routing-learned.json"}
 
-// removeLearned removes learnedFiles from dir. A file it cannot remove is
-// logged by name only and tried again at the next start.
-func removeLearned(dir string) {
-	for _, name := range learnedFiles {
-		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
-			log.Printf("forget: old learning state %s not removed: %v", name, err)
+// learnTemp is durable.TempPrefix: durable.WriteFile's temp files carry
+// it, and a crash between write and rename leaves one behind. It is
+// spelled here, not imported, so agentosd's imports of the old core do
+// not grow (trace.py --ratchet).
+const learnTemp = ".durable-"
+
+// sweepLearnTemp removes every learnTemp file in dir, as
+// durable.SweepTemp does: one that will not go does not shield the rest.
+func sweepLearnTemp(dir string) error {
+	names, err := filepath.Glob(filepath.Join(dir, learnTemp+"*"))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, n := range names {
+		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
 		}
 	}
+	return errors.Join(errs...)
 }
+
+// sweepTemp and removeAll are removeLearned's, swapped by tests.
+var (
+	sweepTemp = sweepLearnTemp
+	removeAll = os.RemoveAll
+)
+
+// removeLearned removes learnedFiles and the temps a crash left in dir
+// (durable.WriteFile's, learnTemp, which may hold a copy of harvest.json or
+// values.json and so task text; security 1 on #2801). Nothing else writes
+// to dir yet. A file it cannot remove is logged by name only and tried
+// again at the next start; it reports whether all went, so STATUS can
+// tell the owner (LOG-4).
+func removeLearned(dir string) bool {
+	ok := true
+	if err := sweepTemp(dir); err != nil {
+		log.Printf("forget: crash-left temp files not removed: %v", err)
+		ok = false
+	}
+	for _, name := range learnedFiles {
+		if err := removeAll(filepath.Join(dir, name)); err != nil {
+			log.Printf("forget: old learning state %s not removed: %v", name, err)
+			ok = false
+		}
+	}
+	return ok
+}
+
+// erasedNote is STATUS's line while old learning state is left at rest.
+func (l *forgetPlane) erasedNote() string { return lineIf(l.notErased, forgetNotErased) }
 
 // openForgetPlane opens the forget plane in dir and wires the owner's
 // FORGET and settings texts into the daemon's configuration.
@@ -62,8 +107,7 @@ func openForgetPlane(dir string, cfg *daemon.Config) (*forgetPlane, error) {
 	if err != nil {
 		return nil, err
 	}
-	removeLearned(dir)
-	l := &forgetPlane{}
+	l := &forgetPlane{notErased: !removeLearned(dir)}
 	if l.tasks, err = openTaskTexts(change.FileStore{Path: filepath.Join(dir, "tasks.json")}, time.Now, log.Printf); err != nil {
 		return nil, err
 	}
@@ -132,25 +176,31 @@ func openForgetPlane(dir string, cfg *daemon.Config) (*forgetPlane, error) {
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	wireSettings(cfg, l.forgetOwner)
-	cfg.Notes = append(cfg.Notes, l.forgetOwner.Note, l.forgetOwner.RetryNote)
+	cfg.Notes = append(cfg.Notes, l.forgetOwner.Note, l.forgetOwner.RetryNote, l.erasedNote)
 	return l, nil
 }
 
 // loopsOffText answers the owner's loop settings texts (LOOPS, LEARNING,
 // SECURITY TESTS or UPDATE CHECKS OFF/ON, SPARE BUDGET, HELP LOOPS and
-// the rest of loops.ParseText): the box runs no spare-time work
-// (MIG-4-untrusted-learn).
-const loopsOffText = "I no longer do spare-time work (learning, self-tests, update checks), so there is nothing to turn on or off."
+// the rest of loops.ParseText, the UPDATES texts among them): the box
+// runs no spare-time work in this version (MIG-4-untrusted-learn; HLD-4),
+// and an owner who had LEARNING OFF learns that task texts are now kept
+// for FORGET's list (NL-4; security 2 on #2801).
+const loopsOffText = "I don't do spare-time work (learning, self-tests, update checks) in this version, so nothing changes. I keep task texts up to 30 days for FORGET."
 
 // forgetOffText answers FORGET when the forget plane could not open.
 const forgetOffText = "I can't forget tasks right now. Restarting me may fix it."
 
 // wireSettings answers the owner's settings texts: FORGET through f, or
-// forgetOffText when f is nil (the forget plane did not open), and the
+// forgetOffText when f is nil (the forget plane did not open, which
+// STATUS then says too), and the
 // old loop settings with loopsOffText. Both are answered by the box,
 // locked or not, never sent to the agent as chat, and a loop setting
 // changes nothing, so it runs in a locked session.
 func wireSettings(cfg *daemon.Config, f *ownerForget) {
+	if f == nil {
+		cfg.Notes = append(cfg.Notes, func() string { return forgetNotRunning })
+	}
 	cfg.Settings = func(ctx context.Context, msg string, unlocked bool) (string, bool) {
 		if _, ok := parseForget(msg); ok {
 			if f == nil {
@@ -327,4 +377,30 @@ func openOwedFile(store change.Store, path string) *forgetOwed {
 		log.Printf("forget: owed done texts lost, kept aside as %s: %v", aside, err)
 	}
 	return owed
+}
+
+// retiredExecutor settles an intent for an executor this version no
+// longer has (change and loops, deleted with the learning loop): nothing
+// runs, so every attempt is not applied, and an open approval (a pending
+// LOOPS ON or SPARE BUDGET) or a parked attempt settles on YES or RETRY
+// instead of failing with journal.ErrNoExecutor (NL-8). The kernel's log
+// replaces the journal (#2781).
+type retiredExecutor struct{}
+
+func (retiredExecutor) Execute(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "retired in this version"}
+}
+
+func (r retiredExecutor) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {
+	return r.Execute(ctx, in, n)
+}
+
+// registerRetired registers retiredExecutor for the deleted executors.
+func registerRetired(cfg *daemon.Config) {
+	if cfg.BrokerExecutors == nil {
+		cfg.BrokerExecutors = map[string]journal.Executor{}
+	}
+	for _, name := range []string{change.Executor, loops.Executor} {
+		cfg.BrokerExecutors[name] = retiredExecutor{}
+	}
 }
