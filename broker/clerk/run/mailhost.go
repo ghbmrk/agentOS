@@ -1,6 +1,7 @@
 package run
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,17 +32,18 @@ type MailHost struct {
 	sec *clerk.Secrets
 	cfg MailConfig
 
-	mu      sync.Mutex
-	cur     *Mail         // the last clerk this account opened; nil: none
-	why     string        // why the last read failed; "" if it did not
-	stop    error         // a sign-in failure only setup clears (stops): no sign-in until setup
-	reading chan struct{} // the read in flight; setup and removal wait for it
-	mark    inbox.Mark    // the mailbox's Mark from just before the last read; nil: none
-	day     string        // the last read's day (MailConfig.day); "": none since the account changed
-	fails   int           // failed reads in a row within day under mark; 0 after a good read
-	changes int64         // account changes so far (changed)
-	seq     int64
-	notices []notice
+	mu       sync.Mutex
+	cur      *Mail         // the last clerk this account opened; nil: none
+	why      string        // why the last read failed; "" if it did not
+	checkWhy string        // why the last change check failed, since the last read; "" if it did not
+	stop     error         // a sign-in failure only setup clears (stops): no sign-in until setup
+	reading  chan struct{} // the read in flight; setup and removal wait for it
+	mark     inbox.Mark    // the mailbox's Mark from just before the last read; nil: none
+	day      string        // the last read's day (MailConfig.day); "": none since the account changed
+	fails    int           // failed reads in a row within day under mark; 0 after a good read
+	changes  int64         // account changes so far (changed)
+	seq      int64
+	notices  []notice
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -137,10 +139,19 @@ func (h *MailHost) refresh() {
 	h.reading = nil
 	close(done)
 	if !read {
+		// The last read stands. A change check that failed, for any
+		// reason but a refused sign-in (which reads), is told until a
+		// check or a read works: otherwise STATUS would say nothing until
+		// the server answers or the next day (#2742, #2768 review).
+		h.checkWhy = ""
+		if err != nil {
+			why, next := trouble(err, last)
+			h.checkWhy = "I could not check your mailbox for new mail: " + why + ". " + next
+		}
 		return
 	}
 	h.mark, h.day = mark, today
-	h.why, h.stop, h.fails = "", nil, 0
+	h.why, h.checkWhy, h.stop, h.fails = "", "", nil, 0
 	switch {
 	case errors.Is(err, ErrNoMailAccount):
 		h.cur = nil
@@ -151,7 +162,7 @@ func (h *MailHost) refresh() {
 		}
 		// The last clerk this account opened goes on serving the kernel's
 		// steps: each signs in afresh, and judges the kernel's view.
-		why, next := trouble(err)
+		why, next := trouble(err, mark)
 		h.why = "I could not read your mailbox: " + why + ". " + next
 		if stops(err) {
 			h.stop = err
@@ -184,7 +195,7 @@ func (h *MailHost) idle() {
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
 	h.changes++
-	h.cur, h.why, h.stop = nil, "", nil
+	h.cur, h.why, h.checkWhy, h.stop = nil, "", "", nil
 	h.mark, h.day = nil, ""
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
@@ -227,7 +238,7 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 		// none.
 		h.mu.Lock()
 		if h.cur == m {
-			why, next := trouble(stop)
+			why, next := trouble(stop, nil)
 			h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, stop
 		}
 		h.mu.Unlock()
@@ -259,11 +270,14 @@ func (h *MailHost) status() OwnerStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var st OwnerStatus
-	if h.why != "" {
-		st.Lines = append(st.Lines, h.why)
+	// A failed read's line already says the mailbox is not read; a change
+	// check failing since is told only after a good read.
+	why := cmp.Or(h.why, h.checkWhy)
+	if why != "" {
+		st.Lines = append(st.Lines, why)
 	}
 	if h.cur != nil && len(h.cur.Status.Lines) > 0 {
-		if h.why != "" {
+		if why != "" {
 			// The clerk's lines are of the last read that worked, not of
 			// the one that just failed (#2742 item 3).
 			st.Lines = append(st.Lines, "From my last good read of your mailbox:")

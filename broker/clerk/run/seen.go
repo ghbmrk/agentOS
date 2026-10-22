@@ -128,15 +128,12 @@ type MailStatus struct {
 }
 
 // trouble is the owner's words for why a read of the mailbox failed, and
-// what happens next: a fixed reason for each kind of failure, naming the
-// mail when one mail is the cause, and never the server's own text, which
-// the server chooses (#2698 item 16).
-func trouble(err error) (why, next string) {
-	// A failure that repeats under an unchanged Mark, and a Mark that
-	// cannot be compared, wait for the next day; only a moved Mark reads
-	// sooner (recheck), so a change of mail, or tomorrow, is when. A first
-	// failure's one more try is not promised (#2742, #2768 review).
-	const again = "I'll try again when your mail changes, or tomorrow."
+// what happens next under mark, the Mark kept for the next check: a fixed
+// reason for each kind of failure, naming the mail when one mail is the
+// cause, and never the server's own text, which the server chooses (#2698
+// item 16).
+func trouble(err error, mark inbox.Mark) (why, next string) {
+	again := tryAgain(mark)
 	var long *imapsmtp.LongHeaderError
 	switch {
 	case errors.As(err, &long):
@@ -186,6 +183,22 @@ func trouble(err error) (why, next string) {
 	}
 }
 
+// tryAgain is when a failure that may pass is tried again, after a read
+// under mark. A failure that repeats under an unchanged Mark, and a Mark
+// that cannot be compared, wait for the next day; only a moved Mark reads
+// sooner (recheck), so a change of mail, or tomorrow, is when. A first
+// failure's one more try is not promised (#2742, #2768 review). A Mark the
+// server gave that Same never trusts (no UIDNEXT, say) never moves, so only
+// tomorrow is promised (#2742, #2815 review). With no Mark at all (taking
+// it failed) the server's Marks are not known, and any Mark it gives later
+// reads again (due), so the change of mail stays.
+func tryAgain(mark inbox.Mark) string {
+	if mark != nil && !mark.Same(mark) {
+		return "I'll try again tomorrow."
+	}
+	return "I'll try again when your mail changes, or tomorrow."
+}
+
 // tooMuchNext is the owner's step for too much read mail. It gives no
 // amount: the read stops at the first charge past the bound, so how far
 // past is not known.
@@ -211,11 +224,11 @@ func quoted(s string) string {
 }
 
 // lastOpened is World.LastOpened for the mails ms of the account at slot, as
-// of today, and what the owner is told. When Opened fails, every sender in ms
+// of today, read under mark, and what the owner is told. When Opened fails, every sender in ms
 // counts as opened today, so no unsubscribe passes VRB-2, and the record is
 // kept as it was. An empty LastOpened would read as "never opened" and let
 // every unsubscribe through (#2698 item 1).
-func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail) (map[string]string, MailStatus) {
+func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark) (map[string]string, MailStatus) {
 	var st MailStatus
 	rec, loaded := loadSeen(dir, s, slot) // not loaded: an empty record, which Opened starts today
 	got, kept, err := box.Opened(ctx, today, rec.Log)
@@ -226,7 +239,7 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 				fail[from] = today
 			}
 		}
-		why, next := trouble(err)
+		why, next := trouble(err, mark)
 		st.Lines = append(st.Lines, "Unsubscribing is paused: "+why+", so I can't tell whose mail you have read. "+next)
 		return fail, st
 	}
@@ -256,7 +269,7 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 		// record as it was, which only re-dates mail to today.
 		// The read stood, so the next save is the next read's: when the
 		// Mark moves or the day changes (recheck).
-		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again when your mail changes, or tomorrow.")
+		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. "+tryAgain(mark))
 	}
 	return got, st
 }

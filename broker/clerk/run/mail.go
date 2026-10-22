@@ -288,7 +288,7 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 		return nil, mark, err
 	}
 	today := c.today()
-	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
+	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms, mark)
 	m := &Mail{Status: status, world: func() inbox.World {
 		w := c.World()
 		w.LastOpened = opened
@@ -311,7 +311,9 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 // taken or compared waits for the next day, whatever the reason, so such a
 // server never makes each re-read a full read; but a refused sign-in is
 // answered as the read's own failure (err), with no second sign-in, so the
-// host stops signing in at once.
+// host stops signing in at once. Any other failure to take the Mark is
+// answered too, with no read (err with read false), so the owner is told
+// the change check is failing (#2742, #2768 review).
 func recheck(ctx context.Context, last inbox.Mark, day string, retry bool, dir string, sec *clerk.Secrets, c MailConfig) (read bool, mark inbox.Mark, err error) {
 	if day != c.day() {
 		return true, nil, nil
@@ -324,7 +326,7 @@ func recheck(ctx context.Context, last inbox.Mark, day string, retry bool, dir s
 	if stops(err) {
 		return true, nil, err
 	}
-	return due(last, retry, now, err), now, nil
+	return due(last, retry, now, err), now, err
 }
 
 // due is recheck's answer within the day, for a read under last, given the
