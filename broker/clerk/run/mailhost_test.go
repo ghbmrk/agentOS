@@ -783,4 +783,9 @@ func TestAFailedReadLabelsTheLastGoodReadsLines(t *testing.T) {
 	if got := h.status().Lines; !slices.Equal(got, []string{"old line"}) {
 		t.Fatalf("status after a good read: %q", got)
 	}
+	// A last good read with no lines gets no label either.
+	h.why, h.cur.Status.Lines = "I could not read your mailbox: reason. Next.", nil
+	if got := h.status().Lines; !slices.Equal(got, []string{h.why}) {
+		t.Fatalf("status after a failed read, no older lines: %q", got)
+	}
 }
