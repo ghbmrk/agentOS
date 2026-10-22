@@ -23,7 +23,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
-	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
@@ -306,7 +305,6 @@ func main() {
 	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var checkerVerify string
 	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
@@ -353,7 +351,6 @@ func main() {
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
-	flag.StringVar(&checkerVerify, "checker-verify", "", "agentos-checker's verify socket, which checks the owner's code-generator codes while the vault process holds only the unlock proof (CH-4); empty keeps every check on -owner-verify")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the owner's FORGET state: task texts, tombstones and the restored forget log (W3-forget)")
 	flag.StringVar(&routingSocket, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, from which the model routes read how many attempts the owner's rule allows; empty holds MaxRetries")
@@ -578,11 +575,7 @@ func main() {
 	var line *secondLine
 	if verifySocket != "" {
 		verifier = modelroute.NewVerifier(verifySocket)
-		ov := ownerVerifier{v: verifier}
-		if checkerVerify != "" {
-			ov.checker = checkersock.VerifyClient(checkerVerify)
-		}
-		cfg.OwnerVerifier = ov
+		cfg.OwnerVerifier = ownerVerifier{v: verifier}
 		// The second line's STATUS line (potency R1 on #139).
 		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
@@ -1234,27 +1227,15 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 
 // ownerVerifier gives the owner channel the vault process's verify
 // operation, translating why a check did not run into the channel's terms.
-// With a checker, codes go to the checker, which holds the seed while the
-// vault is open and spends the same last step the unlock does (CH-4); the
-// vault process then checks only the unlock's proof. Acts (owner.Item.Act)
-// go to the checker with the code, which approves each once for the
-// holders (CH-4, CH-10); the vault process records no acts, so a code that
-// carries acts and cannot reach a checker is not checked at all.
+// The vault process records no acts (owner.Item.Act), so a code that
+// carries acts is not checked at all and no act is approved: approvals of
+// irreversible acts are the kernel's owner seam now (KRN-4, CH-10; the
+// checker split went with #2780).
 type ownerVerifier struct {
-	v       *modelroute.Verifier
-	checker *checkersock.Client
+	v *modelroute.Verifier
 }
 
 func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts ...owner.CheckerAct) (int64, bool, error) {
-	proof := strings.HasPrefix(code, owner.UnlockProofPrefix)
-	if o.checker != nil && !proof {
-		cas := make([]checkersock.Act, len(acts))
-		for i, a := range acts {
-			cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
-		}
-		step, ok, err := o.checker.VerifyTOTP(code, after, counted, cas...)
-		return step, ok, checkerVerifyErr(err)
-	}
 	if len(acts) > 0 {
 		return 0, false, &owner.VerifyError{Kind: owner.VaultDown}
 	}
@@ -1262,57 +1243,15 @@ func (o ownerVerifier) VerifyTOTP(code string, after int64, counted bool, acts .
 	return step, ok, ownerVerifyErr(err)
 }
 
-// RevokeActs withdraws approvals the checker recorded for acts the owner
-// channel will not run (REV-3). Without a checker no act was approved, so
-// there is nothing to withdraw.
-func (o ownerVerifier) RevokeActs(acts ...string) error {
-	if o.checker == nil {
-		return nil
-	}
-	return o.checker.Revoke(acts...)
-}
+// RevokeActs has nothing to withdraw: no act was approved (REV-3).
+func (o ownerVerifier) RevokeActs(...string) error { return nil }
 
-// ReleaseActs opens the checker's held approvals for acts whose items left
-// their undo window (REV-3). Without a checker no act was approved, so
-// there is nothing to open.
-func (o ownerVerifier) ReleaseActs(acts ...string) error {
-	if o.checker == nil {
-		return nil
-	}
-	return o.checker.Release(acts...)
-}
+// ReleaseActs has nothing to open: no act was approved (REV-3).
+func (o ownerVerifier) ReleaseActs(...string) error { return nil }
 
-// AllowActs records the acts of a low-tier texted YES or a grid cell as
-// allowed approvals at the checker, which serve irreversible acts but no
-// secret one (CH-4, ADP-9). Without a checker nothing can record them, so
-// the channel approves nothing.
-func (o ownerVerifier) AllowActs(acts ...owner.CheckerAct) error {
-	if o.checker == nil {
-		return &owner.VerifyError{Kind: owner.VaultDown}
-	}
-	cas := make([]checkersock.Act, len(acts))
-	for i, a := range acts {
-		cas[i] = checkersock.Act{Act: a.Act, Held: a.Held}
-	}
-	return o.checker.Allow(cas...)
-}
-
-// checkerVerifyErr is ownerVerifyErr for the checker: no seed means the
-// vault is locked, a checker that is not running is down, and any other
-// failure leaves the check's outcome unknown.
-func checkerVerifyErr(err error) error {
-	var pe *checkersock.PausedError
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, checkersock.ErrNoSeed):
-		return &owner.VerifyError{Kind: owner.VaultLocked}
-	case errors.As(err, &pe):
-		return &owner.VerifyError{Kind: owner.VerifyPaused, Until: pe.Until}
-	case errors.Is(err, checkersock.ErrDown):
-		return &owner.VerifyError{Kind: owner.VaultDown}
-	}
-	return &owner.VerifyError{Kind: owner.VerifyLost}
+// AllowActs cannot record an approval, so the channel approves nothing.
+func (o ownerVerifier) AllowActs(...owner.CheckerAct) error {
+	return &owner.VerifyError{Kind: owner.VaultDown}
 }
 
 func ownerVerifyErr(err error) error {
