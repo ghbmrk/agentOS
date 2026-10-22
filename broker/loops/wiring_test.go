@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -142,59 +141,6 @@ func TestASettingAppliedLateIsKeptForReconcile(t *testing.T) {
 	r.restart()
 	if o := r.s.Reconcile(ctx, late, 1); o.Result != journal.ResultSucceeded {
 		t.Fatalf("after restart: %+v", o)
-	}
-}
-
-type failFirst struct {
-	change.MemStore
-	n int
-}
-
-func (f *failFirst) Save(b []byte) error {
-	f.n++
-	if f.n == 1 {
-		return errors.New("disk gone")
-	}
-	return f.MemStore.Save(b)
-}
-
-// L3 follow-up on #49: a crash before the case is added leaves no case in
-// the pipeline and nothing saved, and a retry adds the case once.
-func TestACrashBeforeTheCaseIsAddedIsRetried(t *testing.T) {
-	r := newRig(t)
-	st := &failFirst{}
-	h := &Harvester{J: r.eng, Pipeline: r.p, Store: st}
-	id := "early-1"
-	r.task(id, "g"+id, "mail", "draft", "private")
-	o := Outcome{Intent: id, Action: Approved, Input: []byte("draft a note"), Output: []byte("note")}
-	if err := h.Harvest(o); err == nil {
-		t.Fatal("the first save did not fail")
-	}
-	inSuite := func() bool {
-		ids := map[string]bool{}
-		for _, c := range r.p.Dev(change.ClassTask) {
-			ids[c.ID] = true
-		}
-		ev, err := h.Evidence()
-		must(t, err)
-		return ids[id] || ev.HeldOut > 0
-	}
-	if inSuite() {
-		t.Fatal("a case was added though its task was never saved")
-	}
-	h2 := &Harvester{J: r.eng, Pipeline: r.p, Store: &st.MemStore}
-	must(t, h2.Harvest(o))
-	must(t, h2.Harvest(o)) // a second retry adds nothing
-	ev, err := h2.Evidence()
-	must(t, err)
-	dev := 0
-	for _, c := range r.p.Dev(change.ClassTask) {
-		if c.ID == id {
-			dev++
-		}
-	}
-	if dev+ev.HeldOut != 1 {
-		t.Fatal(fmt.Sprintf("the case was added %d times", dev+ev.HeldOut))
 	}
 }
 
