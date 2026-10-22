@@ -168,7 +168,7 @@ func TestPostIsRefusedUnsent(t *testing.T) {
 		ptr(post(unsubShown, navUnsub)):        "unknown",
 	} {
 		req := kernel.Request{Plan: plan("p", r.root, *s)}
-		if p := fresh.Probe(req, r.k.State()); p != want {
+		if p := fresh.Probe(req, r.k.State()).Outcome; p != want {
 			t.Fatalf("%s probe %s, want %s", s.Verb, p, want)
 		}
 	}
@@ -202,7 +202,7 @@ func TestLoggedOutEffectIsParkedNotResent(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	req := kernel.Request{Plan: plan("p1", r.root, press)}
-	if p := NewClerk("web", r.owner, h.g).Probe(req, r.k.State()); p != "unknown" {
+	if p := NewClerk("web", r.owner, h.g).Probe(req, r.k.State()).Outcome; p != "unknown" {
 		t.Fatalf("fresh clerk probe %s", p)
 	}
 
@@ -212,7 +212,7 @@ func TestLoggedOutEffectIsParkedNotResent(t *testing.T) {
 	r = newClerkRig(t, ok)
 	r.run(t, 0, "p2", r.root, press)
 	req = kernel.Request{Plan: plan("p2", r.root, press)}
-	if s, p := r.step("p2").Phase, r.c.Probe(req, r.k.State()); s != kernel.PDone || p != "done" {
+	if s, p := r.step("p2").Phase, r.c.Probe(req, r.k.State()).Outcome; s != kernel.PDone || p != "done" {
 		t.Fatalf("phase %s, probe %s", s, p)
 	}
 }

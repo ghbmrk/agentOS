@@ -100,9 +100,9 @@ func (h *Kernel) Tick(now int64) error {
 				continue
 			}
 			r := h.clerks[c.Clerk]
-			res := kernel.Result{}
+			var res kernel.Result
 			if c.Kind == kernel.ActProbe {
-				res.Outcome = r.probe(c.Req, s)
+				res = r.probe(c.Req, s)
 			} else {
 				res = r.do(c.Req, s)
 			}

@@ -706,7 +706,7 @@ func classify(resp *http.Response, err error) (kernel.Result, string, int64) {
 // restart this memory is empty and the kernel marks every in-flight step
 // unknown, so a clerk that cannot say the step was never sent must not invite
 // a resend (KRN-8). It invites at most MaxChecks sends per key.
-func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
+func (x *Exit) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	s := x.state[r.Idem()]
@@ -715,16 +715,16 @@ func (x *Exit) Probe(r kernel.Request, _ kernel.View) string {
 	}
 	switch {
 	case s.phase == pDone:
-		return "done"
+		return kernel.Result{Outcome: "done"}
 	case s.phase == pSending || s.sends >= kernel.MaxChecks:
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case s.phase == pNotSent:
 		if x.clock.Now() >= s.retryAt {
-			return "notdone"
+			return kernel.Result{Outcome: "notdone"}
 		}
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	case x.ops[r.Step().Verb].Idempotent:
-		return "notdone"
+		return kernel.Result{Outcome: "notdone"}
 	}
-	return "unknown"
+	return kernel.Result{Outcome: "unknown"}
 }

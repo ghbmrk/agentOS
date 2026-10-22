@@ -39,9 +39,10 @@ func site(rawURL string) string {
 // same words for something else, are passed over. A false match costs one more
 // tap; a miss would let a task's tap cover a secret (#2689 item 3).
 var secretWords = wordSet(`password passcode passkey passphrase recovery
-	mfa 2fa 2sv twofactor twostep onetime otp totp authenticator authentication
+	mfa 2fa 2sv twofactor twostep 2step onetime otp totp authenticator authentication
 	secret credential key ssh gpg oauth token export device backup security pin
-	seedphrase changeemail`)
+	seedphrase changeemail updateemail editemail revokesession revokeaccess
+	activesession connectedapp authorizeapp authorizeapplication`)
 
 // isSecret reports whether w, or the singular of a plural w ("keys",
 // "recoveries"), is a secret word.

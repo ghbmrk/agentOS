@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -175,7 +176,7 @@ func wrapDriver(t *testing.T, argv, env []string) []string {
 
 func (h *harness) do(t *testing.T, raw string) Result {
 	t.Helper()
-	res, _, _ := h.g.do(context.Background(), []byte(raw))
+	res, _, _ := h.g.do(context.Background(), []byte(raw), nil)
 	return res
 }
 
@@ -872,5 +873,43 @@ func TestGateGuessEchoAfterOverflowIsNoOracle(t *testing.T) {
 		if seen[0] != seen[1] {
 			t.Fatalf("%s: right and wrong guesses differ", route)
 		}
+	}
+}
+
+// A driver that answers but stops reading fills the request pipe. The
+// write shares the reply's deadline, so the gate stops the executor
+// instead of blocking the step with its lock held (K8, #2609).
+func TestADriverThatStopsReadingIsStopped(t *testing.T) {
+	ws := t.TempDir()
+	g, err := Start(context.Background(), Config{
+		Driver:    []string{"/bin/sh", "-c", `exec yes '{"ok":true,"url":"https://shop.example.test/"}'`},
+		Origins:   []string{"https://shop.example.test"},
+		Workspace: ws,
+		Timeout:   500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	g.refs = map[string]link{"e1": {role: "textbox", name: "Note"}}
+	line := []byte(`{"v":0,"verb":"type","ref":"e1","text":"` + strings.Repeat("n", 2000) + `"}`)
+	done := make(chan Result, 1)
+	go func() {
+		for i := 0; i < 1000; i++ {
+			if res, _, _ := g.do(context.Background(), line, nil); !res.OK {
+				done <- res
+				return
+			}
+		}
+		done <- Result{}
+	}()
+	select {
+	case res := <-done:
+		if res.Error != "timeout" || !g.stopped {
+			t.Fatalf("%+v", res)
+		}
+	case <-time.After(20 * time.Second):
+		_ = syscall.Kill(-g.cmd.Pid(), syscall.SIGKILL) // unblock the write so cleanup can run
+		t.Fatal("a blocked write held the step")
 	}
 }

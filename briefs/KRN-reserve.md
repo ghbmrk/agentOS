@@ -15,7 +15,6 @@ Work item: #2613 item 1 (concurrent admission), with #2670 item 4 (KRN-schema: `
 
 Out of scope:
 - A timeout that settles an admission left open by a dead clerk.
-- The kernel process's socket for the metering side (MIG-4-run slice 3).
 
 ## Scope
 

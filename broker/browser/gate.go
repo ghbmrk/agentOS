@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,8 +50,8 @@ type Config struct {
 	Workspace string
 	// Scrub removes the vault's exact secret values from every output.
 	Scrub Scrubber
-	// Timeout bounds one driver reply; 0 means 60s. A driver that misses it
-	// is stopped.
+	// Timeout bounds writing one request and reading its reply; 0 means
+	// 60s. A driver that misses it is stopped.
 	Timeout time.Duration
 	// Env is the driver's whole environment beyond PATH, HOME and LANG; the
 	// broker's own environment is never inherited. Each key must be on
@@ -131,12 +133,36 @@ type Gate struct {
 	lost bool
 	// sent is every approval print this gate has sent: each at most once.
 	sent map[string]bool
+	// asked is every site the gate built an approval for in its life: the
+	// sites a task's tap can name (covers).
+	asked map[string]bool
 }
 
 // cover is a task approval as the clerk read it from the log: the site it
 // covers (CLK-3). The held request it was given over is covered like any
 // other request on that site, so the gate needs nothing more of it.
 type cover struct{ site string }
+
+// covers is the clerk's reader of the task approvals: the first of sites
+// on which the task its key serves has a live approval, nil if none. The
+// gate asks for the request's site first, then every other site it has
+// built an approval for, which are the sites a tap can name, so it can say
+// a request is on another site than the task's approval. A nil covers
+// reads no task at all.
+type covers func(sites ...string) *cover
+
+// of is the task approval for site, or else another live one of the task.
+func (f covers) of(g *Gate, site string) *cover {
+	if f == nil {
+		return nil
+	}
+	return f(append([]string{site}, slices.Sorted(maps.Keys(g.asked))...)...)
+}
+
+// maxAsked bounds the sites the gate remembers building approvals for.
+// Past it, a request on an unremembered site reads only its own site's
+// approval: the post fails unapproved rather than name the other site.
+const maxAsked = 1024
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {
@@ -186,7 +212,7 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
-		secret: secret, tokens: tokens, sent: map[string]bool{},
+		secret: secret, tokens: tokens, sent: map[string]bool{}, asked: map[string]bool{},
 		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
@@ -251,11 +277,14 @@ var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is no
 // clerk calls it. An action that needs the owner's approval is refused
 // unsent (approval_required): no recipe covers any page yet, so it needs
 // the owner's approval of the exact request (CLK-3), which the result's
-// Approval describes and submit then sends. effect reports an action that
-// may change state at the site (judgeClosed), sent only because the
-// session is logged out; lost reports that the executor stopped after it
-// was written, so whether it acted is unknown (KRN-8).
-func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost bool) {
+// Approval describes and submit then sends. Under tasks, a request the
+// task's approval covers says so (task_approved), and one it does not
+// says why, so the planner asks the owner only when a tap is needed.
+// effect reports an action that may change state at the site
+// (judgeClosed), sent only because the session is logged out; lost
+// reports that the executor stopped after it was written, so whether it
+// acted is unknown (KRN-8).
+func (g *Gate) do(ctx context.Context, raw []byte, tasks covers) (res Result, effect, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	req, l, effect, need, refused := g.judge(raw)
@@ -264,8 +293,16 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 	}
 	if need {
 		a := g.approval(req, l)
-		return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
-			Detail: "this action may change state at the site and needs the owner's approval of this exact request; nothing was sent"}, false, false
+		res := Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
+			Detail: "this action may change state at the site and needs the owner's approval of this exact request; nothing was sent"}
+		if tc := tasks.of(g, a.Site); tc != nil {
+			if why := asksAgain(a, *tc); why != "" {
+				res.Detail = why + "; it needs the owner's approval of this exact request; nothing was sent"
+			} else {
+				res.Error, res.Detail = "task_approved", "the task's approval covers this request on "+a.Site+"; send it as a post with this approval; nothing was sent"
+			}
+		}
+		return res, false, false
 	}
 	out := g.forward(ctx, req)
 	return out, effect, effect && g.stopped
@@ -273,27 +310,41 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 
 // submit sends raw, an action the owner approved as print reaching to,
 // only if the gate would still ask for that very approval now (CLK-3,
-// CLK-2), and at most once per print. With tc, the owner approved the task
-// rather than this print: the gate sends it only where asksAgain finds no
-// reason to ask, and the result carries its approval for the log. written
+// CLK-2), and at most once per print. With tasks, the owner approved the
+// task rather than this print: the gate reads the task's approval for the
+// site the request reaches now, under its lock, sends it only where
+// asksAgain finds no reason to ask, and the result carries its approval
+// for the log. written
 // reports that it reached the driver; lost that the executor stopped after
 // it was written (KRN-8).
-func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tc *cover) (res Result, written, lost bool) {
+func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tasks covers) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	req, l, _, need, refused := g.judge(raw)
+	var a Approval
+	if refused == nil && need {
+		a = g.approval(req, l)
+	}
+	// A task with no live approval on the request's site, nor on any
+	// other site a tap can name, approved nothing: unapproved, whatever
+	// the request.
+	var tc *cover
+	if tasks != nil {
+		if tc = tasks.of(g, a.Site); tc == nil {
+			return Result{Error: "unapproved"}, false, false
+		}
+	}
 	switch {
 	case refused != nil:
 		return *refused, false, false
 	case !need:
 		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}, false, false
 	}
-	a := g.approval(req, l)
 	if a.Print != print || a.To != to {
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
 	}
 	if tc != nil {
-		if why := g.asksAgain(l, a, *tc); why != "" {
+		if why := asksAgain(a, *tc); why != "" {
 			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
 				Detail: why + "; it needs the owner's approval of this exact request; nothing was sent"}, false, false
 		}
@@ -303,29 +354,28 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 	}
 	g.sent[print] = true
 	out := g.forward(ctx, req)
-	if tc != nil {
+	if tasks != nil {
 		out.Approval = &a
 	}
 	return out, true, g.stopped
 }
 
-// asksAgain is why a task's approval tc does not cover a request that
-// reaches l and that the gate would approve as a, or "" if it does (CLK-3 "What asks
-// again"). The held request the owner approved is covered on its site,
-// unless it is on a secret screen: a request there never opens a task
-// approval and is approved per step (VRB-1, CLK-5 "Secret screens").
-// Another task's approval never reaches here: the clerk reads only the
-// approval of the task its key serves (kernel.TaskApproved). A readable
-// value over a limit is the key's to refuse (clerk.Verify). The clerk
-// fills no credential or card and refuses any step claiming a flow label
-// (C4), so no fill or private entry can follow the approval yet.
-func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
+// asksAgain is why a task's approval tc does not cover a request the gate
+// would approve as a, or "" if it does (CLK-3 "What asks again"). The held
+// request the owner approved is covered on its site, unless it is on a
+// secret screen (a.Secret): a request there never opens a task approval
+// and is approved per step (VRB-1, CLK-5 "Secret screens"). Another task's
+// approval never reaches here: the clerk reads only the approval of the
+// task its key serves (kernel.TaskApproved). A readable value over a limit
+// is the key's to refuse (clerk.Verify). The clerk fills no credential or
+// card and refuses any step claiming a flow label (C4), so no fill or
+// private entry can follow the approval yet.
+func asksAgain(a Approval, tc cover) string {
 	switch {
 	case a.Site == "" || a.Site != tc.site:
 		return "it is on another site than the task's approval"
-	}
-	if w := g.secretScreen(l); w != "" {
-		return "it is on a screen that may reveal or create a secret (VRB-1: " + strconv.Quote(w) + ")"
+	case a.Secret != "":
+		return "it is on a screen that may reveal or create a secret (VRB-1: " + strconv.Quote(a.Secret) + ")"
 	}
 	return ""
 }
@@ -383,18 +433,6 @@ func (g *Gate) print(raw []byte) string {
 		return ""
 	}
 	return g.approval(req, l).Print
-}
-
-// siteOf is the site raw reaches now (Approval.Site), "" if the gate would
-// ask no approval for it: the site whose task approval the clerk reads.
-func (g *Gate) siteOf(raw []byte) string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	req, l, _, need, refused := g.judge(raw)
-	if refused != nil || !need {
-		return ""
-	}
-	return g.approval(req, l).Site
 }
 
 // small bounds every field of res but the snapshot and the approval,
@@ -656,14 +694,30 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 }
 
 // roundtrip sends one canonical request and filters the reply. ok is false
-// when the executor was stopped.
+// when the executor was stopped. The write and the reply share one
+// deadline, so a driver that stops reading stops the executor rather than
+// block the step (K8).
 func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
-	if _, err := g.stdin.Write(append(req.Encode(), '\n')); err != nil {
-		g.stop()
-		return stoppedResult, false
-	}
 	t := time.NewTimer(g.cfg.Timeout)
 	defer t.Stop()
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := g.stdin.Write(append(req.Encode(), '\n'))
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		if err != nil {
+			g.stop()
+			return stoppedResult, false
+		}
+	case <-t.C:
+		g.stop()
+		return Result{Error: "timeout", Detail: "the browser did not read the request in time; executor stopped"}, false
+	case <-ctx.Done():
+		g.stop()
+		return Result{Error: "timeout", Detail: "request cancelled; executor stopped"}, false
+	}
 	var line []byte
 	select {
 	case l, open := <-g.lines:

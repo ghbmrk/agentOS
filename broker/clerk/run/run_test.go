@@ -329,12 +329,15 @@ func TestPeersAreCheckedByUID(t *testing.T) {
 
 // fakeClerk answers every call with do's result.
 type fakeClerk struct {
-	do    func() kernel.Result
-	probe string
+	do      func() kernel.Result
+	probe   string
+	covered string // what Probe gives with its outcome
 }
 
 func (f fakeClerk) Do(kernel.Request, kernel.View) kernel.Result { return f.do() }
-func (f fakeClerk) Probe(kernel.Request, kernel.View) string     { return f.probe }
+func (f fakeClerk) Probe(kernel.Request, kernel.View) kernel.Result {
+	return kernel.Result{Outcome: f.probe, Covered: f.covered}
+}
 
 // serveFake serves c on a fresh socket for the test's uid.
 func serveFake(t *testing.T, c kernel.Clerk) string {
@@ -370,7 +373,7 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 		if got.Outcome != c.want || got.Detail != c.detail {
 			t.Errorf("clerk answered %+v: kernel took %+v, want %s %q", c.res, got, c.want, c.detail)
 		}
-		if p := r.Probe(kernel.Request{}, v); p != c.wantPr {
+		if p := r.Probe(kernel.Request{}, v).Outcome; p != c.wantPr {
 			t.Errorf("clerk probed %q: kernel took %q, want %q", c.probe, p, c.wantPr)
 		}
 	}
@@ -380,7 +383,7 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != kernel.OUnsent || got.Detail != DUnreachable {
 		t.Fatalf("no clerk: %+v, want unsent %s", got, DUnreachable)
 	}
-	if got := r.Probe(kernel.Request{}, kernel.NewState(nil)); got != kernel.OUnreached {
+	if got := r.Probe(kernel.Request{}, kernel.NewState(nil)).Outcome; got != kernel.OUnreached {
 		t.Fatalf("no clerk, probed: %q, want %s", got, kernel.OUnreached)
 	}
 }
@@ -571,7 +574,9 @@ func (h hung) Do(kernel.Request, kernel.View) kernel.Result {
 	<-h.release
 	return kernel.Result{Outcome: "ok"}
 }
-func (hung) Probe(kernel.Request, kernel.View) string { return "notdone" }
+func (hung) Probe(kernel.Request, kernel.View) kernel.Result {
+	return kernel.Result{Outcome: "notdone"}
+}
 
 // STOP, and every other owner call, returns while a clerk call hangs: Tick
 // makes clerk calls outside the kernel's lock (KRN-7, OWN-18). The answer is
@@ -628,7 +633,9 @@ func (f *first) Do(kernel.Request, kernel.View) kernel.Result {
 	}
 	return kernel.Result{Outcome: "ok"}
 }
-func (*first) Probe(kernel.Request, kernel.View) string { return "notdone" }
+func (*first) Probe(kernel.Request, kernel.View) kernel.Result {
+	return kernel.Result{Outcome: "notdone"}
+}
 
 // A STOP logged while one clerk call hangs stops every call after it in the
 // same Tick: the kernel checks each dispatch again, under the lock, just
@@ -697,13 +704,19 @@ func TestTickRacesNoOwnerChange(t *testing.T) {
 // (CLK-3, #2705).
 func TestACoveredLineCrossesTheSocket(t *testing.T) {
 	line := "Sent on shop.example: Place order, 12:00 UTC"
-	b := newBox(t, serveFake(t, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "ok", Covered: line} }}))
-	id := b.submit("dave")
-	b.tick(b.now)
-	b.h.With(func(k *kernel.Kernel) error {
-		if c := k.State().Covered(b.now); len(c) != 1 || c[0].Plan != id || c[0].Line != line {
-			t.Fatalf("covered %+v", c)
-		}
-		return nil
-	})
+	for name, f := range map[string]fakeClerk{
+		"answered": {do: func() kernel.Result { return kernel.Result{Outcome: "ok", Covered: line} }},
+		"probed":   {do: func() kernel.Result { return kernel.Result{Outcome: "unknown"} }, probe: "done", covered: line},
+	} {
+		b := newBox(t, serveFake(t, f))
+		id := b.submit("dave")
+		b.tick(b.now)
+		b.tick(b.now + kernel.ProbeEvery)
+		b.h.With(func(k *kernel.Kernel) error {
+			if c := k.State().Covered(b.now + kernel.ProbeEvery); len(c) != 1 || c[0].Plan != id || c[0].Line != line {
+				t.Fatalf("%s: covered %+v", name, c)
+			}
+			return nil
+		})
+	}
 }

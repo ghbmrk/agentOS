@@ -215,16 +215,16 @@ func (m *Mail) apply(r kernel.Request) {
 	m.effects = append(m.effects, Effect{r.Idem(), r.Step()})
 }
 
-func (m *Mail) Probe(r kernel.Request, _ kernel.View) string {
+func (m *Mail) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fault("probe", r) != FaultNone {
-		return "unknown"
+		return kernel.Result{Outcome: "unknown"}
 	}
 	if m.done[r.Idem()] {
-		return "done"
+		return kernel.Result{Outcome: "done"}
 	}
-	return "notdone"
+	return kernel.Result{Outcome: "notdone"}
 }
 
 // Effects returns a copy of the applied steps, in order.
