@@ -366,6 +366,20 @@ type usedRec struct {
 	key.Use
 }
 
+// cancelUnsent cancels step st of plan p, which is known never to have acted:
+// queued, unsent, or proved not done. Its dispatch's charge comes off the
+// ledger, so a cancel leaves no cap spent on an effect that never happened
+// (KRN-8). A step that may have acted is never cancelled this way.
+func (s *State) cancelUnsent(p *PlanState, st *StepState) {
+	st.Phase = PCancelled
+	if st.DispatchSeq == 0 {
+		return
+	}
+	for _, id := range p.Scopes {
+		s.uses[id] = slices.DeleteFunc(s.uses[id], func(u usedRec) bool { return u.Seq == st.DispatchSeq })
+	}
+}
+
 // State is the log folded: the only input to Decide besides the event.
 type State struct {
 	// The owner's passkeys (D-146): the anchors, the hardware keys; each
@@ -917,7 +931,7 @@ func (s *State) Apply(e Entry) error {
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
 			p.Status = SCancelled
 			if st := &p.Steps[p.Next]; sendable(st.Phase) {
-				st.Phase = PCancelled
+				s.cancelUnsent(p, st)
 			}
 		}
 	case TStepHeld:
@@ -959,7 +973,7 @@ func (s *State) Apply(e Entry) error {
 			case OUnsent:
 				st.Phase, st.NextProbe = PUnsent, e.At+unsentWait(st.Attempt)
 				if p.Status != SActive {
-					st.Phase = PCancelled // nothing was sent, and nothing will be
+					s.cancelUnsent(p, st) // nothing was sent, and nothing will be
 				}
 			case "failed":
 				st.Phase = PFailed
@@ -985,7 +999,7 @@ func (s *State) Apply(e Entry) error {
 			case "notdone":
 				st.Phase = PRedo
 				if p.Status != SActive {
-					st.Phase = PCancelled
+					s.cancelUnsent(p, st)
 				}
 			case OUnreached:
 				st.NextProbe = e.At + ProbeEvery // no check was made, so none counts
