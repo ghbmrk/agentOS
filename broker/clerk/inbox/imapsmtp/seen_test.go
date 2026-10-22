@@ -208,10 +208,39 @@ func TestASessionCutOffAtItsTimeoutSaysSo(t *testing.T) {
 	}
 }
 
+// guardedStore is a TLS store for mail.example whose dials go through the
+// address policy to connect.
+func guardedStore(t *testing.T, timeout time.Duration, connect func(ctx context.Context, network string) (net.Conn, error)) *Store {
+	t.Helper()
+	s, err := New(Config{
+		IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
+		Timeout:    timeout,
+		Credential: func(context.Context) (Login, error) { return Login{}, nil },
+		From:       "owner@example.test",
+		Guard: netguard.New(netguard.Config{
+			Resolver: answers{"8.8.8.8"},
+			Connect:  func(ctx context.Context, network, _ string) (net.Conn, error) { return connect(ctx, network) },
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// readCalls are a session of steps and a one-step session.
+func readCalls(s *Store) map[string]func() error {
+	return map[string]func() error{
+		"Seen": func() error { _, err := seenFrom(s, "INBOX"); return err },
+		"UIDs": func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+	}
+}
+
 // A server that takes the connection and never answers the handshake is
 // cut off at the timeout counted from the dial, and says so: the dial here
-// takes a fifth of the timeout, so a cut-off counted from the connection, or
-// one that does not mark the session late, fails the test.
+// takes half the timeout, so a cut-off counted from the connection ends a
+// quarter of the timeout past the bound, and one that does not mark the
+// session late says what the closed connection reports.
 func TestAStalledHandshakeTimesOut(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -227,31 +256,80 @@ func TestAStalledHandshakeTimesOut(t *testing.T) {
 			go func() { io.Copy(io.Discard, c); c.Close() }()
 		}
 	}()
-	const timeout = 500 * time.Millisecond
-	s, err := New(Config{
-		IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
-		Timeout:    timeout,
-		Credential: func(context.Context) (Login, error) { return Login{}, nil },
-		From:       "owner@example.test",
-		Guard: netguard.New(netguard.Config{
-			Resolver: answers{"8.8.8.8"},
-			Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				time.Sleep(timeout / 5)
-				return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
-			},
-		}),
+	const timeout = time.Second
+	s := guardedStore(t, timeout, func(ctx context.Context, network string) (net.Conn, error) {
+		time.Sleep(timeout / 2)
+		return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
 	})
+	for name, call := range readCalls(s) {
+		start := time.Now()
+		if err := call(); !errors.Is(err, ErrTimeout) || time.Since(start) > timeout*5/4 {
+			t.Fatalf("%s: err %v after %v, want ErrTimeout within %v", name, err, time.Since(start), timeout*5/4)
+		}
+	}
+}
+
+// A dial that fails, refused or never answered until the timeout, says the
+// server could not be reached, not that it stopped answering; a dial the
+// address policy refuses says so instead (TestMailDialsRefusePrivateAndReboundAnswers).
+func TestADialThatFailsSaysTheServerWasNotReached(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, call := range map[string]func() error{
-		"Seen": func() error { _, err := seenFrom(s, "INBOX"); return err },
-		"UIDs": func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+	closed := ln.Addr().String()
+	ln.Close()
+	for name, connect := range map[string]func(ctx context.Context, network string) (net.Conn, error){
+		"refused": func(ctx context.Context, network string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, closed)
+		},
+		"silent": func(ctx context.Context, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
 	} {
-		start := time.Now()
-		if err := call(); !errors.Is(err, ErrTimeout) || time.Since(start) > 2*timeout {
-			t.Fatalf("%s: err %v after %v, want ErrTimeout within %v", name, err, time.Since(start), 2*timeout)
+		for call, f := range readCalls(guardedStore(t, 500*time.Millisecond, connect)) {
+			if err := f(); !errors.Is(err, ErrUnreachable) || errors.Is(err, ErrTimeout) {
+				t.Fatalf("%s %s: err %v, want ErrUnreachable", name, call, err)
+			}
 		}
+	}
+}
+
+// A caller that stops a dial is told so, not that the server was not
+// reached.
+func TestADialTheCallerStopsIsNotUnreachable(t *testing.T) {
+	s := guardedStore(t, 5*time.Second, func(ctx context.Context, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	if _, _, err := s.UIDs(ctx, "INBOX"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnreachable) {
+		t.Fatalf("err %v, want the caller's cancel", err)
+	}
+}
+
+// A submission server that takes the connection and never greets is cut
+// off at the timeout and says so.
+func TestAStalledSubmissionTimesOut(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(io.Discard, c); c.Close() }()
+		}
+	}()
+	err = hostileStore(t, ln.Addr().String(), 500*time.Millisecond).Submit(context.Background(), []string{"a@example.test"}, []byte("x"))
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err %v, want ErrTimeout", err)
 	}
 }
 
@@ -284,6 +362,7 @@ func TestSeenNamesALongHeaderBySubject(t *testing.T) {
 		subjectAnswer(2, "Subject: wrong\r\n\r\n") + subjectAnswer(1, "Subject: first\r\n part\r\n\r\n") + subjectAnswer(1, "Subject: second\r\n\r\n"): "first part",
 		subjectAnswer(1, "Subject: =?UTF-8?Q?ok=0AOPENED_nothing=1B[2J=E2=80=AE?=\r\n\r\n"):                                                            "ok OPENED nothing [2J",
 		subjectAnswer(1, "X-Subject: no\r\n\r\n"): "",
+		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?"+strings.Repeat("x", subjectMax)+"?=\r\n\r\n"): "Großer…",
 	} {
 		addr := seenServe(t, func(string, int) string { return "* SEARCH 1\r\n" }, func(n int) string {
 			if n == 0 {
@@ -364,8 +443,8 @@ func TestSeenBudgetsTheBatchNotTheSearch(t *testing.T) {
 		b.WriteString(pad)
 	}
 	s := hostileStore(t, seenSearch(t, search, b.String()), 5*time.Second)
-	if _, err := seenFrom(s, "INBOX"); err == nil {
-		t.Fatal("a reply past one batch's budget passed")
+	if _, err := seenFrom(s, "INBOX"); !errors.Is(err, ErrReplyTooLarge) {
+		t.Fatalf("a reply past one batch's budget: err %v, want ErrReplyTooLarge", err)
 	}
 }
 

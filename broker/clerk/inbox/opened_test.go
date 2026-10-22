@@ -36,6 +36,25 @@ func liveStore(t *testing.T, srv *imaptest.Server) *imapsmtp.Store {
 	return st
 }
 
+// A sign-in the server refuses, reading or sending, says so, so the host can
+// stop signing in until the owner sets the account up again.
+func TestARefusedLoginSaysSo(t *testing.T) {
+	srv := imaptest.Start(t)
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+		Credential: func(context.Context) (imapsmtp.Login, error) {
+			return imapsmtp.Login{User: imaptest.User, Secret: "canary-wrong"}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewLive(st).Opened(context.Background(), "2026-10-19", SeenLog{}); !errors.Is(err, imapsmtp.ErrLoginRefused) {
+		t.Fatalf("read: err %v, want ErrLoginRefused", err)
+	}
+	if err := st.Submit(context.Background(), []string{"a@example.test"}, []byte("x")); !errors.Is(err, imapsmtp.ErrLoginRefused) {
+		t.Fatalf("send: err %v, want ErrLoginRefused", err)
+	}
+}
+
 // #2618: every sender with a read mail, in any folder, is opened today, keyed
 // by lower-cased address as Evaluate looks it up; a sender with only unread
 // mail is not; and every message keeps its flags. Only seen mail is fetched,
@@ -264,8 +283,8 @@ func TestOpenedFailsPastWhatItKeeps(t *testing.T) {
 		t.Fatalf("at the bound: %v", err)
 	}
 	openedMax--
-	if got, _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19", SeenLog{}); err == nil || got != nil {
-		t.Fatalf("opened %v, err %v; want an error", got, err)
+	if got, _, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19", SeenLog{}); !errors.Is(err, ErrTooMuchReadMail) || got != nil {
+		t.Fatalf("opened %v, err %v; want ErrTooMuchReadMail", got, err)
 	}
 }
 

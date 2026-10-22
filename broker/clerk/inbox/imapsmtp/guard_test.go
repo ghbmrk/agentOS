@@ -49,10 +49,10 @@ func TestMailDialsRefusePrivateAndReboundAnswers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Folders(context.Background()); !errors.Is(err, netguard.ErrDenied) {
+		if _, err := s.Folders(context.Background()); !errors.Is(err, netguard.ErrDenied) || errors.Is(err, ErrUnreachable) {
 			t.Fatalf("%s: IMAP: %v", name, err)
 		}
-		if err := s.Submit(context.Background(), []string{"a@example.test"}, []byte("x")); !errors.Is(err, netguard.ErrDenied) {
+		if err := s.Submit(context.Background(), []string{"a@example.test"}, []byte("x")); !errors.Is(err, netguard.ErrDenied) || errors.Is(err, ErrUnreachable) {
 			t.Fatalf("%s: SMTP: %v", name, err)
 		}
 		if dialed.Load() != 0 {
