@@ -548,10 +548,8 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 	cost := float64(max(after.Tokens-before.Tokens, 0)) + math.Max(secs, 0)*s.cfg.ComputeTokens
 	interrupted = errors.Is(res.Err, change.ErrInterrupted)
 	parked = errors.Is(res.Err, change.ErrParked)
-	// A requeued unit is offered again at once, unmeasured (W3-forget-b2).
-	requeued := errors.Is(res.Err, ErrRequeued)
 	s.mu.Lock()
-	preempted := r.preempted || interrupted || requeued
+	preempted := r.preempted || interrupted
 	s.cur = nil
 	m := s.loops[l]
 	m.spent += cost
@@ -576,7 +574,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 	s.mu.Unlock()
 	cancel(nil)
 	close(r.done)
-	if res.Err != nil && !parked && !requeued {
+	if res.Err != nil && !parked {
 		s.cfg.Logf("loops: %s %s: %v", l, job.Name, res.Err)
 	}
 	return interrupted, parked
