@@ -74,8 +74,10 @@ func loadSeen(dir string, s clerk.Sealer, slot string) (r sealedSeen, st seenSta
 	if err != nil || privateFile(f) != nil || fi.Size() > maxSeen {
 		return r, seenBad
 	}
-	blob, err := io.ReadAll(io.LimitReader(f, maxSeen+1))
-	if err != nil || len(blob) > maxSeen {
+	// Read in one allocation of the file's size: the file is replaced by
+	// rename, never written in place, so the open one does not grow.
+	blob := make([]byte, fi.Size())
+	if _, err := io.ReadFull(f, blob); err != nil {
 		return r, seenBad
 	}
 	plain, err := s.Open(blob, seenAAD(slot))
@@ -136,7 +138,7 @@ func trouble(err error) (why, next string) {
 	case errors.As(err, &long):
 		at := "at an unknown time"
 		if !long.Arrived.IsZero() {
-			at = long.Arrived.In(time.Local).Format("2 Jan 2006, 15:04")
+			at = long.Arrived.In(time.Local).Format("2 January 2006 at 15:04")
 		}
 		subject := ""
 		if long.Subject != "" {

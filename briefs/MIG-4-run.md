@@ -71,11 +71,12 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 
 **Slice 3b follow-up acceptance tests (#2732; MIG-4-run-p to t; #2698 items 2, 5, 6, 16, 21, 22):**
 - `mailhost_test.go::TestAMailboxReadHoldsUpNothingElse`. During a read, the owner's status and a step are answered at once; two overlapping re-reads read the mailbox once.
-- `::TestSetupWaitsForTheReadInFlight`. Setup writes nothing while a read is in flight, and lands after it.
+- `::TestSetupWaitsForTheReadInFlight` and `::TestRemovalWaitsForTheReadInFlight`. Setup and removal write nothing while a read is in flight, and land after it. After a removal, no record of read mail is left on disk.
 - `::TestAFailedReadKeepsTheLastClerk`. A failed re-read keeps the last listing and clerk and says why in fixed words; a good read clears the line.
+- `::TestARefusedSignInStopsStepsSigningIn`. While the server refuses the sign-in, a kernel step fails as `sign-in-refused` and a probe answers `unknown`, neither connecting, even with a clerk the account opened before.
 - `::TestARefusedSignInWaitsForTheOwner`. After a refused sign-in, re-reads and listings make no connection to the server until the owner sets the account up again.
 - `::TestTheOwnerReadsWhetherAnAccountIsSetUp` and `::TestMailSetupRunsOnTheClerksOwnSocket`. The account read never carries the password; reading notices uses none up, and `told` drops only those up to its point.
-- `::TestTheWarmUpsEndIsToldUntilShown`. The warm-up's end survives restarts until shown, is never told after, and a change of account drops an unshown one. `::TestUnreadableSettingsAreToldInFixedWords`.
+- `::TestTheWarmUpsEndIsToldUntilShown`. The warm-up's end survives restarts until shown. It is never told after, even when a re-read lands between the owner side's read and its Told, or is still in flight as Told arrives, and a change of account drops an unshown one. `::TestUnreadableSettingsAreToldInFixedWords`.
 - `seen_test.go::TestTroubleIsToldInFixedWords`. Every error class gets fixed words and a next step, no server text, quoted and cut names. `::TestTheWarmUpsEndCountsInPlainWords`.
 - `::TestEveryLogOpenedKeepsFitsTheRecord`. The record spends less per entry than `Opened` charges, for addresses of 1 byte to 8 KiB.
 - `mail_test.go::TestAFailedOpenedReadOffersNoUnsubscribe`. With the eval set's signed one-click mail, a working read offers its sender and a failed read of opened mail does not, through the account `OpenMail` returns.

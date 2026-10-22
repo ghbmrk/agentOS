@@ -32,12 +32,10 @@ type MailHost struct {
 	cfg MailConfig
 
 	mu      sync.Mutex
-	cur     *Mail  // the last clerk this account opened; nil: none
-	gen     int    // the account's generation: setup and removal advance it
-	why     string // why the last read failed; "" if it did not
-	refused bool   // the server refused the last sign-in: no read until setup
-	reading chan struct{}
-	readGen int // the generation the read in flight is for
+	cur     *Mail         // the last clerk this account opened; nil: none
+	why     string        // why the last read failed; "" if it did not
+	refused bool          // the server refused the last sign-in: no read until setup
+	reading chan struct{} // the read in flight; setup and removal wait for it
 	seq     int64
 	notices []notice
 }
@@ -59,6 +57,12 @@ const (
 // DNoAccount is the clerk's detail for a step while no account is open.
 const DNoAccount = "no-account"
 
+// DSignInRefused is a step's detail while the server refuses the sign-in:
+// nothing is sent until the owner sets the account up again, so no plan can
+// drive failed sign-ins toward a provider's lockout (#2737 combined 4). It
+// is the mail clerk's own word for a step the server refused that way.
+const DSignInRefused = "sign-in-refused"
+
 // ErrSignInRefused is the planner's answer while the server refuses the
 // clerk's sign-in: nothing is read again until the owner sets the account
 // up again, so the planner cannot drive repeated failed sign-ins toward the
@@ -75,26 +79,21 @@ func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailCo
 }
 
 // refresh reads the account again and waits for the read; h.mu is held, and
-// released while the mailbox is read. A read in flight for the account as it
-// is now is shared, not started again.
+// released while the mailbox is read. A read in flight is shared, not
+// started again: it is of the account as it is now, since setup and removal
+// wait for it before they change the account (idle).
 func (h *MailHost) refresh() {
-	for h.reading != nil {
-		shared := h.readGen == h.gen
+	if h.reading != nil {
 		h.wait()
-		if shared {
-			return
-		}
+		return
 	}
-	done, gen := make(chan struct{}), h.gen
-	h.reading, h.readGen = done, gen
+	done := make(chan struct{})
+	h.reading = done
 	h.mu.Unlock()
 	m, err := OpenMail(h.ctx, h.dir, h.sec, h.cfg)
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
-	if gen != h.gen {
-		return // the account changed while it was read
-	}
 	h.why, h.refused = "", false
 	switch {
 	case errors.Is(err, ErrNoMailAccount):
@@ -129,39 +128,49 @@ func (h *MailHost) idle() {
 	}
 }
 
-// changed starts a new generation of the account: the old clerk stops
-// serving, and an unread warm-up notice, which was about it, is dropped.
+// changed follows a change of account: the old clerk stops serving, and an
+// unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
-	h.gen++
 	h.cur, h.why, h.refused = nil, "", false
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
 
+// notify adds a notice. A warm-up notice already waiting keeps its place
+// with the newer text, so the owner side's Told for it still covers it.
 func (h *MailHost) notify(warm bool, text string) {
+	if i := slices.IndexFunc(h.notices, func(n notice) bool { return n.warm }); warm && i >= 0 {
+		h.notices[i].text = text
+		return
+	}
 	h.seq++
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm == warm && (warm || n.text == text) })
 	h.notices = append(h.notices, notice{h.seq, warm, text})
 }
 
-func (h *MailHost) clerk() *Mail {
+func (h *MailHost) clerk() (m *Mail, refused bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cur
+	return h.cur, h.refused
 }
 
-// Do runs r on the open clerk; with none, nothing is sent.
+// Do runs r on the open clerk; with none, or while the server refuses the
+// sign-in, nothing is sent.
 func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
-	m := h.clerk()
-	if m == nil {
+	m, refused := h.clerk()
+	switch {
+	case refused:
+		return kernel.Result{Outcome: "failed", Detail: DSignInRefused}
+	case m == nil:
 		return kernel.Result{Outcome: "failed", Detail: DNoAccount}
 	}
 	return m.Do(r, v)
 }
 
-// Probe asks the open clerk; with none, the step's effect cannot be checked.
+// Probe asks the open clerk; with none, or while the server refuses the
+// sign-in, the step's effect cannot be checked.
 func (h *MailHost) Probe(r kernel.Request, v kernel.View) string {
-	m := h.clerk()
-	if m == nil {
+	m, refused := h.clerk()
+	if m == nil || refused {
 		return "unknown"
 	}
 	return m.Probe(r, v)
@@ -195,7 +204,9 @@ func (h *MailHost) status() OwnerStatus {
 }
 
 // told drops the notices up to through. Once the owner has read the end of
-// the warm-up, the record keeps that, so it is not told again.
+// the warm-up, the record keeps that, and a warm-up notice a later read gave
+// (a re-read between the owner side's read and this call) is the same news,
+// so it goes too: the end is told once.
 func (h *MailHost) told(through int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -207,7 +218,8 @@ func (h *MailHost) told(through int64) {
 	if !warm {
 		return
 	}
-	h.idle()
+	h.idle() // a read in flight may add the notice again; it ends first
+	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 	if s, err := readMail(h.dir); err == nil {
 		// A record that cannot be saved tells the warm-up's end again.
 		_ = markTold(h.dir, h.cfg.Sealer, slotOf(s))

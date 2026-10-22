@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // serveMail serves side of h on a fresh socket for the test's uid.
@@ -308,6 +309,30 @@ func TestARefusedSignInWaitsForTheOwner(t *testing.T) {
 	}
 }
 
+// While the server refuses the sign-in, the kernel's steps and probes do
+// not sign in either, even with a clerk the account opened before: no plan
+// drives failed sign-ins toward a lockout (#2737 combined 4).
+func TestARefusedSignInStopsStepsSigningIn(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	if m, _ := r.h.clerk(); m == nil {
+		t.Fatal("no clerk opened")
+	}
+	r.h.mu.Lock()
+	r.h.refused = true // as a re-read the server refused leaves it
+	r.h.mu.Unlock()
+	dials := r.dials.Load()
+	req := kernel.Request{Plan: kernel.Plan{ID: "p", Steps: []kernel.PlanStep{{Verb: key.Trash, Clerk: "mail"}}}}
+	if res := r.h.Do(req, nil); res.Outcome != "failed" || res.Detail != DSignInRefused {
+		t.Errorf("a step while the sign-in is refused: %+v", res)
+	}
+	if got := r.h.Probe(req, nil); got != "unknown" {
+		t.Errorf("a probe while the sign-in is refused: %q", got)
+	}
+	if n := r.dials.Load() - dials; n != 0 {
+		t.Fatalf("a step or probe signed in %d times while refused", n)
+	}
+}
+
 // The owner's setup page reads whether an account is set up, and its
 // settings, never the password; the read uses up no notice (#2732 item 3).
 func TestTheOwnerReadsWhetherAnAccountIsSetUp(t *testing.T) {
@@ -385,6 +410,29 @@ func TestSetupWaitsForTheReadInFlight(t *testing.T) {
 	}
 }
 
+// A removal waits for the read in flight too, so that read cannot write
+// the removed account's record of read mail back after it (#2737 combined 1).
+func TestRemovalWaitsForTheReadInFlight(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.hold.Store(true)
+	go r.planner.Reread()
+	<-r.held
+	removed := make(chan error, 1)
+	go func() { removed <- r.owner.RemoveMail() }()
+	time.Sleep(200 * time.Millisecond)
+	if a, err := r.owner.Account(); err != nil || !a.Set {
+		t.Fatalf("a removal wrote while a read was in flight: %+v, %v", a, err)
+	}
+	r.hold.Store(false)
+	close(r.release)
+	if err := <-removed; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(r.h.dir, seenFile)); !os.IsNotExist(err) {
+		t.Fatalf("the removed account's record of read mail is on disk: %v", err)
+	}
+}
+
 // The end of the warm-up is told until the owner's side says it was shown,
 // and then never again, across a restart of the clerk's process (#2732
 // item 7).
@@ -406,9 +454,21 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 		t.Fatalf("after the warm-up: %v", st.Notices)
 	}
 	restart() // not yet shown: told again
+	r.planner = MailPlanner{serveMail(t, r.h, MailPlannerSide)}
 	st, _ = r.owner.Status()
 	if len(st.Notices) != 1 {
 		t.Fatalf("an unshown warm-up notice was lost in a restart: %v", st.Notices)
+	}
+	// A re-read between the owner side's read and its Told tells it anew;
+	// shown once, it is not told again (#2737 lens UX 1).
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.owner.Told(st.Through); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); len(st.Notices) != 0 {
+		t.Fatalf("a warm-up notice re-read before it was marked shown was told again: %v", st.Notices)
 	}
 	if err := r.owner.Told(st.Through); err != nil {
 		t.Fatal(err)
@@ -416,6 +476,29 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 	restart()
 	if st, _ := r.owner.Status(); len(st.Notices) != 0 {
 		t.Fatalf("a shown warm-up notice was told again: %v", st.Notices)
+	}
+
+	// Nor when the re-read is still in flight as the owner side says it was
+	// shown: that read began from the record before it kept the telling.
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec); err != nil {
+		t.Fatal(err)
+	}
+	restart()
+	r.planner = MailPlanner{serveMail(t, r.h, MailPlannerSide)}
+	st, _ = r.owner.Status()
+	r.hold.Store(true)
+	go r.planner.Reread()
+	<-r.held
+	told := make(chan error, 1)
+	go func() { told <- r.owner.Told(st.Through) }()
+	time.Sleep(200 * time.Millisecond)
+	r.hold.Store(false)
+	close(r.release)
+	if err := <-told; err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); len(st.Notices) != 0 {
+		t.Fatalf("a read in flight as the warm-up's end was shown told it again: %v", st.Notices)
 	}
 
 	// An unshown warm-up notice was about the account as it was: a change of

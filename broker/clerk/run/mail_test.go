@@ -1,6 +1,6 @@
 package run
 
-// REQ: CLK-1, CLK-2, STO-2
+// REQ: CLK-1, CLK-2, STO-2, VRB-2
 
 import (
 	"bytes"

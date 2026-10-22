@@ -285,7 +285,7 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 		err  error
 		want string
 	}{
-		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived ` + arrived.In(time.Local).Format("2 Jan 2006, 15:04") + `, subject "Hi\x1b[2J")`},
+		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived ` + arrived.In(time.Local).Format("2 January 2006 at 15:04") + `, subject "Hi\x1b[2J")`},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrLoginRefused, leak), "refused my sign-in"},
 		{fmt.Errorf("%w: %s", inbox.ErrTooMuchReadMail, leak), "more read mail than I can keep track of"},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrUnreachable, leak), "couldn't reach your mail server"},
