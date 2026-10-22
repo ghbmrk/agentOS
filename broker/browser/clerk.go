@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"maps"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,13 +80,11 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	case key.Post:
 		// The owner approves this exact print, or the task the key serves
 		// on the site the request reaches (CLK-3, D-147). A task with an
-		// approval on another site gets the approval this request needs.
+		// approval on another site gets the approval this request needs;
+		// one with none fails unapproved.
 		var tc covers
 		if !approval(ver, now) {
-			if tc = c.tasks(v, ver, now); tc("") == nil {
-				c.record(id, ran{})
-				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
-			}
+			tc = c.tasks(v, ver, now)
 		}
 		// A redo of a submit this clerk wrote and did not see succeed is
 		// the owner's RETRY: Probe answers unknown for it, so the kernel
@@ -98,6 +94,10 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 		prev := c.ran[id]
 		c.mu.Unlock()
 		res, rec.effect, rec.lost = c.g.submit(context.Background(), []byte(st.Args["msg"].Value), st.Args["to"].Value, st.Content, prev.effect && !prev.ok, tc)
+		if res.Error == "unapproved" {
+			c.record(id, ran{})
+			return kernel.Result{Outcome: "failed", Detail: "unapproved"}
+		}
 		if tc != nil && res.OK && res.Approval != nil {
 			res.Covered = coveredLine(*res.Approval, now)
 		}
@@ -235,12 +235,10 @@ func logged(res Result) string {
 
 // tasks reads the approvals of the task ver's key serves, live on the
 // clerk's clock and co-signed by a passkey of its own anchors' set: the
-// one for the site asked, or else the first other one, by site, so the
-// gate can say a request is on another site; nil if there is none (CLK-3).
+// first of the sites asked that has one, nil if none (CLK-3).
 func (c *Clerk) tasks(v kernel.View, ver *key.Verified, now int64) covers {
-	return func(site string) *cover {
-		t, _ := v.Task(ver.Limits.Task, now)
-		for _, s := range append([]string{site}, slices.Sorted(maps.Keys(t.Approvals))...) {
+	return func(sites ...string) *cover {
+		for _, s := range sites {
 			if a, ok := kernel.TaskApproved(v, c.Anchors, ver, s, now); ok {
 				return &cover{a.Site}
 			}

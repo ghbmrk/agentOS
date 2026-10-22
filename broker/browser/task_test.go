@@ -136,9 +136,9 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 	if err := r.k.OpenTask(4, "t2"); err != nil {
 		t.Fatal(err)
 	}
-	// A tap for another site in the same task covers nothing here: the
-	// post asks again with the approval this request needs and why, so the
-	// card can offer the tap for its site (a site split).
+	// A tap for a site this gate never built an approval for covers
+	// nothing and names no site a card could offer (a site split the
+	// gate saw is TestASiteSplitAsksForTheOtherSitesTap).
 	if err := r.k.OpenTask(4, "t3"); err != nil {
 		t.Fatal(err)
 	}
@@ -146,9 +146,8 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 	elsewhere.Site = "example.com"
 	r.tapTask(t, 4, "t3", elsewhere)
 	r.run(t, 5, "elsewhere", r.taskKey(t, "t3"), submitStep(a1, pressCont))
-	if res := r.result(t, "elsewhere"); r.step("elsewhere").Phase != kernel.PFailed || res.Error != "approval_required" ||
-		!strings.Contains(res.Detail, "another site than the task's approval") || res.Approval == nil || res.Approval.Print != a1.Print || res.Approval.Site != "example.test" {
-		t.Fatalf("other site: %+v", res)
+	if s := r.step("elsewhere"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
+		t.Fatalf("other site: phase %s (%s)", s.Phase, s.Detail)
 	}
 	r.run(t, 5, "other", r.taskKey(t, "t2"), submitStep(a1, pressCont))
 	if s := r.step("other"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
@@ -341,7 +340,7 @@ func TestCardFillAfterTheTapIsRefused(t *testing.T) {
 }
 
 // fixed reads one task approval for every site.
-func fixed(c cover) covers { return func(string) *cover { return &c } }
+func fixed(c cover) covers { return func(...string) *cover { return &c } }
 
 // A site split: the tap covers the cart on example.test, and the next
 // submit is a link to another site. The post asks again with that
@@ -416,5 +415,20 @@ func TestAReadSaysWhetherTheTasksTapCoversIt(t *testing.T) {
 		if got := forwarded(t, h, "click"); len(got) != 0 {
 			t.Fatalf("%s: clicked %q", name, got)
 		}
+	}
+}
+
+// The gate remembers at most maxAsked sites a tap can name; past that a
+// new site is not remembered, so its approval elsewhere fails unapproved
+// rather than grow the set without bound.
+func TestAskedSitesAreBounded(t *testing.T) {
+	h := newHarness(t, map[string]any{"snapshot": shopReply("/checkout", orderPage)}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for i := len(h.g.asked); i < maxAsked; i++ {
+		h.g.asked[strconv.Itoa(i)+".test"] = true
+	}
+	approvalOf(t, h.do(t, pressBuy))
+	if len(h.g.asked) != maxAsked || h.g.asked["example.test"] {
+		t.Fatalf("asked %d, example.test %v", len(h.g.asked), h.g.asked["example.test"])
 	}
 }

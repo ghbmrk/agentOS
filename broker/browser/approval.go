@@ -122,6 +122,9 @@ func (g *Gate) approval(req Request, l link) Approval {
 	a := Approval{Origin: origin, Site: site(reach), Page: show(g.untoken(g.page), MaxURL), Verb: req.Verb, Role: show(shown.role, maxLabel),
 		Target: show(shown.target, MaxURL), Unknown: unknown, Request: show(string(req.Encode()), maxRequest)}
 	a.Secret = g.secretScreen(l)
+	if len(g.asked) < maxAsked {
+		g.asked[a.Site] = true
+	}
 	if shown.name != "" {
 		a.Label = quote(shown.name)
 		a.Folded = capText(owner.SkeletonFold(show(shown.name, maxLabel), true), maxLabel)

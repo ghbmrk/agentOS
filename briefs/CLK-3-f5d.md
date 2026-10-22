@@ -10,7 +10,7 @@ Board row: #2714 (tier A, lane:primary). Source: #2714 items 1 to 3, comment 632
 - **KRN-5**: which owner messages open a task (#2689 item 6).
 
 ## Design
-- The clerk reads the task's approvals through one function (`covers`) that the gate calls under its lock with the site it computes: the approval for that site, else another live one of the task. A post or read on another site then gets `approval_required` with that request's Approval and the reason, so sub B's card offers the tap for `Approval.Site`. With no approval in the task, a post stays `unapproved`.
+- The clerk reads the task's approvals through one function (`covers`) that the gate calls under its lock with the site it computes, then with every site it has built an approval for (the sites a tap can name, at most 1024): the approval for that site, else another live one of the task. The clerk does not list the task itself, since `broker/core` counts `kernel.View.Task` as a write path. A post or read on another site then gets `approval_required` with that request's Approval and the reason, so sub B's card offers the tap for `Approval.Site`. With no approval in the task, a post stays `unapproved`.
 - A read the task's tap covers answers `task_approved` with its Approval; one it does not cover says why.
 - `Approval.Secret` is the listed word that marks the screen. `asksAgain` reads it, so a task tap never covers such a request and the card asks for the exact approval.
 - New pairs (update email, edit email, revoke session, revoke access, active session, connected app, authorize app, authorize application) and `2-step`, in SPEC and code together. No single word is narrowed: every context signal is page text, a false match costs one tap and loses nothing, and the structural fix for a site's checkout is its recipe (VRB-2).
@@ -30,4 +30,4 @@ Board row: #2714 (tier A, lane:primary). Source: #2714 items 1 to 3, comment 632
 - Out of scope: sub B's card (noted on #2578); K9 request ids (the executor, #2609); scheme and port (#2714 item 4, later).
 
 ## Acceptance tests
-**Acceptance tests:** in `broker/browser/task_test.go`: `TestASiteSplitAsksForTheOtherSitesTap` (BRS-22), `TestAReadSaysWhetherTheTasksTapCoversIt` (BRS-23, BRS-24), `TestOneTapCoversTheTasksSubmits` and `TestCoveredLineFitsStatus` (BRS-26); in `site_test.go`: `TestSecretScreenCorpus` (BRS-25), `TestSecretListsAreTheSpecs`; in `gate_test.go`: `TestADriverThatStopsReadingIsStopped` (BRS-27). `REQ: CLK-3, VRB-1`.
+**Acceptance tests:** in `broker/browser/task_test.go`: `TestASiteSplitAsksForTheOtherSitesTap` (BRS-22), `TestAReadSaysWhetherTheTasksTapCoversIt` (BRS-23, BRS-24), `TestOneTapCoversTheTasksSubmits` and `TestCoveredLineFitsStatus` (BRS-26), `TestAskedSitesAreBounded` (BRS-22); in `site_test.go`: `TestSecretScreenCorpus` (BRS-25), `TestSecretListsAreTheSpecs`; in `gate_test.go`: `TestADriverThatStopsReadingIsStopped` (BRS-27). `REQ: CLK-3, VRB-1`.

@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,6 +133,9 @@ type Gate struct {
 	lost bool
 	// sent is every approval print this gate has sent: each at most once.
 	sent map[string]bool
+	// asked is every site the gate built an approval for in its life: the
+	// sites a task's tap can name (covers).
+	asked map[string]bool
 }
 
 // cover is a task approval as the clerk read it from the log: the site it
@@ -138,18 +143,26 @@ type Gate struct {
 // other request on that site, so the gate needs nothing more of it.
 type cover struct{ site string }
 
-// covers is the task approval the clerk reads for a request on a site:
-// that site's, or else another live one of the same task, so the gate can
-// say the request is on another site; nil if the task has none. A nil
-// covers reads no task at all.
-type covers func(site string) *cover
+// covers is the clerk's reader of the task approvals: the first of sites
+// on which the task its key serves has a live approval, nil if none. The
+// gate asks for the request's site first, then every other site it has
+// built an approval for, which are the sites a tap can name, so it can say
+// a request is on another site than the task's approval. A nil covers
+// reads no task at all.
+type covers func(sites ...string) *cover
 
-func (f covers) of(site string) *cover {
+// of is the task approval for site, or else another live one of the task.
+func (f covers) of(g *Gate, site string) *cover {
 	if f == nil {
 		return nil
 	}
-	return f(site)
+	return f(append([]string{site}, slices.Sorted(maps.Keys(g.asked))...)...)
 }
+
+// maxAsked bounds the sites the gate remembers building approvals for.
+// Past it, a request on an unremembered site reads only its own site's
+// approval: the post fails unapproved rather than name the other site.
+const maxAsked = 1024
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {
@@ -199,7 +212,7 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 		return nil, err
 	}
 	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
-		secret: secret, tokens: tokens, sent: map[string]bool{},
+		secret: secret, tokens: tokens, sent: map[string]bool{}, asked: map[string]bool{},
 		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
@@ -282,7 +295,7 @@ func (g *Gate) do(ctx context.Context, raw []byte, tasks covers) (res Result, ef
 		a := g.approval(req, l)
 		res := Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
 			Detail: "this action may change state at the site and needs the owner's approval of this exact request; nothing was sent"}
-		if tc := tasks.of(a.Site); tc != nil {
+		if tc := tasks.of(g, a.Site); tc != nil {
 			if why := asksAgain(a, *tc); why != "" {
 				res.Detail = why + "; it needs the owner's approval of this exact request; nothing was sent"
 			} else {
@@ -307,6 +320,10 @@ func (g *Gate) do(ctx context.Context, raw []byte, tasks covers) (res Result, ef
 func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tasks covers) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if tasks != nil && tasks.of(g, "") == nil {
+		// The task has no live approval on any site a tap can name.
+		return Result{Error: "unapproved"}, false, false
+	}
 	req, l, _, need, refused := g.judge(raw)
 	switch {
 	case refused != nil:
@@ -319,9 +336,9 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
 	}
 	if tasks != nil {
-		tc := tasks(a.Site)
+		tc := tasks.of(g, a.Site)
 		if tc == nil {
-			return Result{Error: "unapproved", Detail: "the task has no live approval; nothing was sent"}, false, false
+			return Result{Error: "unapproved"}, false, false
 		}
 		if why := asksAgain(a, *tc); why != "" {
 			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
