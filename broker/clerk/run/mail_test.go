@@ -427,33 +427,35 @@ func TestAFailedOpenedReadOffersNoUnsubscribe(t *testing.T) {
 }
 
 // Within the day, a re-read reads only under a Mark that differs from the
-// last read's, or after a failed read under any Mark; a Mark that cannot be
-// taken or compared waits for the next day, whatever the reason (#2742
-// item 1).
+// last read's, or under any Mark once after a first failed read (retry); a
+// Mark that cannot be taken or compared waits for the next day, whatever
+// the reason (#2742 item 1, #2768 review).
 func TestWhenAMailboxIsReadAgainWithinTheDay(t *testing.T) {
 	mk := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 5, Messages: 3}}
 	moved := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 6, Messages: 4}}
 	blank := inbox.Mark{{Folder: "INBOX", Validity: 1, Messages: 4}} // no UIDNEXT: Same trusts it never
 	partial := fmt.Errorf("%w: UNSEEN in %q", imapsmtp.ErrPartialStatus, "INBOX")
 	for _, c := range []struct {
-		name   string
-		last   inbox.Mark
-		failed bool
-		now    inbox.Mark
-		err    error
-		want   bool
+		name  string
+		last  inbox.Mark
+		retry bool
+		now   inbox.Mark
+		err   error
+		want  bool
 	}{
 		{"unchanged", mk, false, mk, nil, false},
 		{"moved", mk, false, moved, nil, true},
 		{"no Mark at the last read", nil, false, mk, nil, true},
-		{"after a failed read", mk, true, mk, nil, true},
+		{"after a first failed read", mk, true, mk, nil, true},
+		{"after a repeated failed read", mk, false, mk, nil, false},
+		{"after a repeated failed read, moved", mk, false, moved, nil, true},
 		{"partial STATUS", mk, false, nil, partial, false},
 		{"unreachable", mk, false, nil, imapsmtp.ErrUnreachable, false},
 		{"unreachable after a failed read", mk, true, nil, imapsmtp.ErrUnreachable, false},
 		{"a Mark Same never trusts", mk, false, blank, nil, false},
 		{"a Mark Same never trusts, after a failed read", mk, true, blank, nil, false},
 	} {
-		if got := due(c.last, c.failed, c.now, c.err); got != c.want {
+		if got := due(c.last, c.retry, c.now, c.err); got != c.want {
 			t.Errorf("%s: due %v, want %v", c.name, got, c.want)
 		}
 	}
