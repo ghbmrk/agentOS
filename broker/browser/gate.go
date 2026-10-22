@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -90,6 +91,9 @@ type Result struct {
 	To string `json:"to,omitempty"`
 	// Approval is what the owner would approve for it (CLK-3).
 	Approval *Approval `json:"approval,omitempty"`
+	// Covered is the STATUS line for a submit a task's approval covered,
+	// once sent: the site, the control's label and the time (CLK-3).
+	Covered string `json:"covered,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -128,6 +132,11 @@ type Gate struct {
 	// sent is every approval print this gate has sent: each at most once.
 	sent map[string]bool
 }
+
+// cover is a task approval as the clerk read it from the log: the site it
+// covers (CLK-3). The held request it was given over is covered like any
+// other request on that site, so the gate needs nothing more of it.
+type cover struct{ site string }
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {
@@ -264,9 +273,12 @@ func (g *Gate) do(ctx context.Context, raw []byte) (res Result, effect, lost boo
 
 // submit sends raw, an action the owner approved as print reaching to,
 // only if the gate would still ask for that very approval now (CLK-3,
-// CLK-2), and at most once per print. written reports that it reached the
-// driver; lost that the executor stopped after it was written (KRN-8).
-func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool) (res Result, written, lost bool) {
+// CLK-2), and at most once per print. With tc, the owner approved the task
+// rather than this print: the gate sends it only where asksAgain finds no
+// reason to ask, and the result carries its approval for the log. written
+// reports that it reached the driver; lost that the executor stopped after
+// it was written (KRN-8).
+func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry bool, tc *cover) (res Result, written, lost bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	req, l, _, need, refused := g.judge(raw)
@@ -276,15 +288,70 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 	case !need:
 		return Result{Error: "not_a_submit", Detail: "this action needs no approval; send it as a read"}, false, false
 	}
-	if a := g.approval(req, l); a.Print != print || a.To != to {
+	a := g.approval(req, l)
+	if a.Print != print || a.To != to {
 		return Result{Error: "changed", Detail: "the page or the request differs from what the owner approved; nothing was sent"}, false, false
+	}
+	if tc != nil {
+		if why := g.asksAgain(l, a, *tc); why != "" {
+			return Result{Error: "approval_required", To: strings.TrimSuffix(a.To, " · "+a.Print), Approval: &a,
+				Detail: why + "; it needs the owner's approval of this exact request; nothing was sent"}, false, false
+		}
 	}
 	if g.sent[print] && !retry {
 		return Result{Error: "already_sent", Detail: "this approved request was sent already; nothing was sent"}, false, false
 	}
 	g.sent[print] = true
 	out := g.forward(ctx, req)
+	if tc != nil {
+		out.Approval = &a
+	}
 	return out, true, g.stopped
+}
+
+// asksAgain is why a task's approval tc does not cover a request that
+// reaches l and that the gate would approve as a, or "" if it does (CLK-3 "What asks
+// again"). The held request the owner approved is covered on its site,
+// unless it is on a secret screen: a request there never opens a task
+// approval and is approved per step (VRB-1, CLK-5 "Secret screens").
+// Another task's approval never reaches here: the clerk reads only the
+// approval of the task its key serves (kernel.TaskApproved). A readable
+// value over a limit is the key's to refuse (clerk.Verify). The clerk
+// fills no credential or card and refuses any step claiming a flow label
+// (C4), so no fill or private entry can follow the approval yet.
+func (g *Gate) asksAgain(l link, a Approval, tc cover) string {
+	switch {
+	case a.Site == "" || a.Site != tc.site:
+		return "it is on another site than the task's approval"
+	}
+	if w := g.secretScreen(l); w != "" {
+		return "it is on a screen that may reveal or create a secret (VRB-1: " + strconv.Quote(w) + ")"
+	}
+	return ""
+}
+
+// secretRoles are the roles, besides the text-entry fieldRoles, whose
+// names secretScreen reads: the other field kinds and headings.
+var secretRoles = wordSet(`checkbox radio switch menuitemcheckbox menuitemradio listbox option slider heading`)
+
+// secretScreen is the secret word, "" if none, that puts a request
+// reaching l on a screen that may reveal or create a secret (VRB-1), read
+// from what the gate itself saw: the page's URL, the control's name and
+// target (a navigate's URL), and the names of the page's fields of every
+// kind and its headings ("Password", "Recovery codes"). Other link and button names on
+// the page are not read, since a site shows its "Settings" or "Sign in"
+// link on every page. Pages have no recipe that says otherwise, so a match
+// asks again. A field's value is not a sign: the gate counts every untyped
+// value as a possible password (G10), and a prefilled address would make
+// every checkout one.
+func (g *Gate) secretScreen(l link) string {
+	texts := []string{g.untoken(g.page), l.name, l.target}
+	for _, r := range g.refs {
+		if fieldRoles[r.role] || secretRoles[r.role] {
+			texts = append(texts, r.name)
+		}
+	}
+	return secretText(texts...)
 }
 
 // reask answers a post whose print the page no longer yields: the
@@ -316,6 +383,18 @@ func (g *Gate) print(raw []byte) string {
 		return ""
 	}
 	return g.approval(req, l).Print
+}
+
+// siteOf is the site raw reaches now (Approval.Site), "" if the gate would
+// ask no approval for it: the site whose task approval the clerk reads.
+func (g *Gate) siteOf(raw []byte) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	req, l, _, need, refused := g.judge(raw)
+	if refused != nil || !need {
+		return ""
+	}
+	return g.approval(req, l).Site
 }
 
 // small bounds every field of res but the snapshot and the approval,

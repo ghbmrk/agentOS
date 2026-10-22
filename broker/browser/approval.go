@@ -17,12 +17,15 @@ import (
 // unsent (CLK-3 unknown submits, CH-10). Every field is one the gate read:
 // from the page's snapshot, from what the agent typed on that page, or the
 // canonical request itself, filtered like any output. Site text is quoted
-// and capped, with its CH-12 fold beside it. The owner's approval is a key
-// for a post whose content is Print (one tap per task may list several),
-// so the kernel checks it and its log counts it (D-147).
+// and capped, with its CH-12 fold beside it. The owner approves it as a
+// key for a post whose content is Print, or as the task's approval over
+// Site and Print, which covers the task's later submits on Site (D-147).
 type Approval struct {
 	Origin string `json:"origin"` // the page's origin, scheme://host:port
-	Page   string `json:"page"`   // the page the action is on
+	// Site is the site the request reaches (site), which a task approval
+	// names: one tap covers the task's later submits there (CLK-3).
+	Site   string `json:"site"`
+	Page   string `json:"page"` // the page the action is on
 	Verb   string `json:"verb"`
 	Role   string `json:"role,omitempty"`   // the control's role
 	Label  string `json:"label,omitempty"`  // its visible name, quoted and capped
@@ -103,7 +106,15 @@ func (g *Gate) approval(req Request, l link) Approval {
 		req.URL = g.untoken(req.URL)
 	}
 	origin, _ := originKey(g.page)
-	a := Approval{Origin: origin, Page: show(g.untoken(g.page), MaxURL), Verb: req.Verb, Role: show(shown.role, maxLabel),
+	// A control that names no target, or only script, acts on the page's own
+	// site. Any other target is the site it names, and one with no http(s)
+	// site (a URL a browser reads differently from url.Parse) has none, so
+	// no task approval covers it (CLK-3).
+	reach := l.target
+	if reach == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(reach)), "javascript:") {
+		reach = g.page
+	}
+	a := Approval{Origin: origin, Site: site(reach), Page: show(g.untoken(g.page), MaxURL), Verb: req.Verb, Role: show(shown.role, maxLabel),
 		Target: show(shown.target, MaxURL), Unknown: unknown, Request: show(string(req.Encode()), maxRequest)}
 	if shown.name != "" {
 		a.Label = quote(shown.name)

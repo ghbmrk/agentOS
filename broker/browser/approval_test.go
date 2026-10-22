@@ -117,6 +117,11 @@ func TestApprovedButtonIsSentOnce(t *testing.T) {
 	if s := r.step("buy"); s.Phase != kernel.PDone {
 		t.Fatalf("approved press: phase %s (%s)", s.Phase, s.Detail)
 	}
+	// An exact approval is not a task's: its result carries no STATUS line.
+	var res Result
+	if err := json.Unmarshal([]byte(r.step("buy").Detail), &res); err != nil || res.Covered != "" || res.Approval != nil {
+		t.Fatalf("exact submit result %+v (%v)", res, err)
+	}
 	r.run(t, 3, "again", k, submitStep(a, pressOrder))
 	if p := r.k.State().Plans["again"]; len(p.Steps) > 0 && p.Steps[0].Phase == kernel.PDone {
 		t.Fatal("the same submit ran twice")
@@ -125,7 +130,7 @@ func TestApprovedButtonIsSentOnce(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	// Within one process the gate refuses a print it has sent, under any key.
-	res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false)
+	res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false, nil)
 	if written || res.Error != "already_sent" {
 		t.Fatalf("resend: %+v", res)
 	}
@@ -142,13 +147,13 @@ func TestReorderedRequestIsTheSameSubmit(t *testing.T) {
 		t.Fatalf("print %q, want %q", p, a.Print)
 	}
 	ctx := context.Background()
-	if res, _, _ := h.g.submit(ctx, []byte(reordered), a.To, a.Print, false); !res.OK {
+	if res, _, _ := h.g.submit(ctx, []byte(reordered), a.To, a.Print, false, nil); !res.OK {
 		t.Fatalf("first: %+v", res)
 	}
-	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false); written || res.Error != "already_sent" {
+	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false, nil); written || res.Error != "already_sent" {
 		t.Fatalf("second: %+v", res)
 	}
-	if res, written, _ := h.g.submit(ctx, []byte(`{"v":0,"verb":"click","ref":"e8"}`), a.To, a.Print, false); written || res.Error != "not_a_submit" {
+	if res, written, _ := h.g.submit(ctx, []byte(`{"v":0,"verb":"click","ref":"e8"}`), a.To, a.Print, false, nil); written || res.Error != "not_a_submit" {
 		t.Fatalf("a plain link: %+v", res)
 	}
 	if got := forwarded(t, h, "click"); len(got) != 1 {
@@ -169,7 +174,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
 		a := approvalOf(t, h.do(t, c.line))
 		h.do(t, `{"v":0,"verb":"snapshot"}`)
-		if res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print, false); written || res.Error != "changed" {
+		if res, written, _ := h.g.submit(ctx, []byte(c.line), a.To, a.Print, false, nil); written || res.Error != "changed" {
 			t.Fatalf("%s: %+v", name, res)
 		}
 		if got := h.received(t); len(got) != 2 {
@@ -185,7 +190,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 		t.Fatalf("fields %+v", a.Fields)
 	}
 	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Ring twice"}`)
-	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false); written || res.Error != "changed" {
+	if res, written, _ := h.g.submit(ctx, []byte(pressOrder), a.To, a.Print, false, nil); written || res.Error != "changed" {
 		t.Fatalf("retyped: %+v", res)
 	}
 
@@ -196,7 +201,7 @@ func TestChangedPageSendsNothing(t *testing.T) {
 	confirm := `{"v":0,"verb":"click","ref":"e7"}`
 	a = approvalOf(t, h.do(t, confirm))
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	if res, _, _ := h.g.submit(ctx, []byte(confirm), a.To, a.Print, false); !res.OK {
+	if res, _, _ := h.g.submit(ctx, []byte(confirm), a.To, a.Print, false, nil); !res.OK {
 		t.Fatalf("rotated token: %+v", res)
 	}
 }
@@ -509,7 +514,7 @@ func TestTokenBlankingKeepsTheRestOfTheQuery(t *testing.T) {
 	a := approvalOf(t, h.do(t, nav(base)))
 	for _, u := range []string{"https://shop.example.test/transfer?csrf=synthT1&to=synthBob", base + "&to=synthMallory;x", base + "&to=synthMallory%zz",
 		"https://shop.example.test/transfer?csrf=synthT2;to=synthMallory&to=synthAlice"} {
-		if res, written, _ := h.g.submit(context.Background(), []byte(nav(u)), a.To, a.Print, false); written || res.Error != "changed" {
+		if res, written, _ := h.g.submit(context.Background(), []byte(nav(u)), a.To, a.Print, false, nil); written || res.Error != "changed" {
 			t.Fatalf("%s: %+v", u, res)
 		}
 	}
@@ -523,7 +528,7 @@ func TestTokenBlankingKeepsTheRestOfTheQuery(t *testing.T) {
 		}
 	}
 	rotated := "https://shop.example.test/transfer?csrf=synthT2&to=synthAlice"
-	if res, _, _ := h.g.submit(context.Background(), []byte(nav(rotated)), a.To, a.Print, false); !res.OK {
+	if res, _, _ := h.g.submit(context.Background(), []byte(nav(rotated)), a.To, a.Print, false, nil); !res.OK {
 		t.Fatalf("rotated: %+v", res)
 	}
 }
@@ -555,7 +560,7 @@ func TestSameControlOnAnotherPageIsAnotherPrint(t *testing.T) {
 	if b := approvalOf(t, h.do(t, pressOrder)); a.Print == b.Print {
 		t.Fatal("one print on two pages")
 	}
-	if res, written, _ := h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false); written || res.Error != "changed" {
+	if res, written, _ := h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false, nil); written || res.Error != "changed" {
 		t.Fatalf("other page: %+v", res)
 	}
 }
@@ -617,7 +622,7 @@ func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	// Any other step with that print is still refused.
-	if res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false); written || res.Error != "already_sent" {
+	if res, written, _ := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false, nil); written || res.Error != "already_sent" {
 		t.Fatalf("resend: %+v", res)
 	}
 }
