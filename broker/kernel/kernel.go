@@ -666,15 +666,26 @@ func (k *Kernel) Undo(now int64, plan string, index int) error {
 }
 
 // ErrNotParked refuses a RETRY of a step that is not parked in a live plan.
-var ErrNotParked = errors.New("kernel: no parked step there to retry")
+var ErrNotParked = errors.New("kernel: no parked step of a live plan there to retry")
+
+// ErrRetryRefused refuses a RETRY whose redo the key's checks would refuse
+// now (a STOP, a revoke, an expiry, a limit); the step stays parked.
+var ErrRetryRefused = errors.New("kernel: the step cannot be sent again now")
 
 // Retry is the owner's RETRY of a parked step (KRN-8, CH-11): the owner
 // accepts that its effect may happen twice. The step is sent again under its
 // own idempotency key and only after the same checks as any dispatch. Like
 // every widening it anchors before it counts.
 func (k *Kernel) Retry(now int64, plan string, index int) error {
-	if p, st := k.s.step(stepRef{plan, index}); st == nil || !retryable(p, st) {
+	p, st := k.s.step(stepRef{plan, index})
+	if st == nil || !retryable(p, st) {
 		return ErrNotParked
+	}
+	// A redo that Next would refuse now (a STOP, a revoke, an expiry, a
+	// limit) would cancel the plan: refuse the RETRY instead and leave the
+	// step parked. A pause only delays the redo until the key resumes.
+	if r := k.sendable(now, p, st, index); r != nil && r.Code != key.RPaused {
+		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code, r.Detail)
 	}
 	return k.owner(now, TStepRetried, stepRef{plan, index})
 }

@@ -52,16 +52,83 @@ func TestAnUnsentStepIsSentAgainAfterItsWait(t *testing.T) {
 	r.replays()
 }
 
-// The owner can cancel a step that was never sent.
+// The owner can cancel a step that was never sent, and the cancel takes its
+// charge off the ledger: nothing acted, so no cap stays spent. A step that
+// may have acted keeps its charge until a probe proves it not done (KRN-8).
 func TestAnUnsentStepCancels(t *testing.T) {
-	r := newRig(t)
-	r.plan("p1", r.ck, st(key.Trash, "m1"))
-	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
-	must(t, r.k.Cancel(2, "p1"))
-	if r.phase("p1").Phase != kernel.PCancelled {
-		t.Fatalf("phase %s", r.phase("p1").Phase)
+	uses := func(r *rig) int { return len(r.k.State().Ledger().Uses(r.ck.Tip())) }
+	for name, tc := range map[string]struct {
+		run  func(*rig)
+		kept int
+	}{
+		"cancel unsent": {func(r *rig) {
+			must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+			must(t, r.k.Cancel(2, "p1"))
+		}, 0},
+		"unsent after cancel": {func(r *rig) {
+			c := r.calls(1, 1)[0]
+			must(t, r.k.Cancel(1, "p1"))
+			must(t, r.k.Answer(2, c, kernel.Result{Outcome: kernel.OUnsent}))
+		}, 0},
+		"stopped before send": {func(r *rig) {
+			c := r.calls(1, 1)[0]
+			must(t, r.k.Stop(1))
+			if ok, err := r.k.Send(1, c); ok || err != nil {
+				t.Fatalf("sent %v %v", ok, err)
+			}
+		}, 0},
+		"unknown cancelled": {func(r *rig) {
+			must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
+			must(t, r.k.Cancel(2, "p1"))
+		}, 1},
+		"unknown cancelled, probed notdone": {func(r *rig) {
+			must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
+			must(t, r.k.Cancel(2, "p1"))
+			at := int64(1) + kernel.ProbeEvery
+			must(t, r.k.Answer(at, r.calls(at, 1)[0], kernel.Result{Outcome: "notdone"}))
+		}, 0},
+	} {
+		r := newRig(t)
+		r.plan("p1", r.ck, st(key.Trash, "m1"))
+		tc.run(r)
+		want := kernel.PCancelled
+		if tc.kept == 1 {
+			want = kernel.PUnknown
+		}
+		if r.phase("p1").Phase != want || uses(r) != tc.kept {
+			t.Fatalf("%s: phase %s, %d uses charged", name, r.phase("p1").Phase, uses(r))
+		}
+		if tc.kept == 0 {
+			r.calls(1+kernel.UnsentWait, 0) // nothing is sent again
+		}
+		r.replays()
 	}
-	r.calls(1+kernel.UnsentWait, 0)
+}
+
+// The brief's failure path, end to end: a key good for two uses runs one step
+// whose answer is lost and one that is never sent. Cancelling the unsent one
+// gives back only its own use, so the owner's re-plan of it is admitted and
+// sent; the lost one stays charged (KRN-8).
+func TestACancelledUnsentStepFreesItsUse(t *testing.T) {
+	r := newRig(t)
+	k := r.derive(key.LimitUses(2))
+	r.plan("p0", k, st(key.Trash, "m0"))
+	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: "unknown"}))
+	r.plan("p1", k, st(key.Trash, "m1"))
+	must(t, r.k.Answer(2, r.calls(2, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+	must(t, r.k.Cancel(3, "p1"))
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 1 {
+		t.Fatalf("%d uses charged after the cancel, want the lost step's one", n)
+	}
+	r.plan("p2", k, st(key.Trash, "m1"))
+	c := r.calls(4, 1)[0]
+	if c.Kind != kernel.ActDispatch || c.Req.Plan.ID != "p2" {
+		t.Fatalf("the re-plan was not sent: %+v", c)
+	}
+	if n := len(r.k.State().Ledger().Uses(k.Tip())); n != 2 {
+		t.Fatalf("%d uses charged after the re-plan", n)
+	}
+	r.replays()
 }
 
 // A probe that could not reach its clerk made no check, so a clerk that is
