@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
@@ -344,7 +345,8 @@ func TestAStepsRefusedSignInStopsTheClerk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}
+	var dials atomic.Int64
+	s := MailSettings{Address: imaptest.User, IMAP: forward(t, srv.IMAP, &dials), SMTP: srv.SMTP}
 	if err := SetMail(dir, sec, s, imaptest.Password); err != nil {
 		t.Fatal(err)
 	}
@@ -376,8 +378,18 @@ func TestAStepsRefusedSignInStopsTheClerk(t *testing.T) {
 	if st, _ := owner.Status(); !has(st.Lines, "refused my sign-in") {
 		t.Fatalf("status after a step's refused sign-in: %v", st.Lines)
 	}
+	// Nothing signs in again: not a re-read, not the next step (#2742 item 15).
+	n := dials.Load()
 	if _, err := planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
 		t.Fatalf("a re-read after a step's refused sign-in: %v", err)
+	}
+	id = b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/later"}})
+	b.tick(b.now)
+	if st := b.step(id); st.Detail != DSignInRefused {
+		t.Fatalf("the next step after a refused sign-in: %s %q", st.Phase, st.Detail)
+	}
+	if got := dials.Load(); got != n {
+		t.Fatalf("%d sign-ins after the server refused one", got-n)
 	}
 }
 
@@ -429,6 +441,91 @@ func TestTheOwnerReadsWhetherAnAccountIsSetUp(t *testing.T) {
 	}
 	if st, _ := r.owner.Status(); !slices.Equal(st.Notices, []string{noteMailRemoved}) {
 		t.Fatalf("Told dropped a notice that came after the status read: %v", st.Notices)
+	}
+}
+
+// The owner was shown one account's warm-up end: a change of account while
+// Told waits for the read in flight, even to another account and back, began
+// that account's record again, and Told does not mark it (#2742 item 14).
+// The wait is a bubble's (synctest), so Told is surely waiting when the
+// account changes.
+func TestToldMarksOnlyTheAccountShown(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
+	other := s
+	other.User = imaptest.User // a sign-in name given: another account's slot
+	for _, back := range [][]MailSettings{{other}, {other, s}} {
+		synctest.Test(t, func(t *testing.T) {
+			if err := SetMail(r.h.dir, r.h.sec, s, imaptest.Password); err != nil {
+				t.Fatal(err)
+			}
+			h := &MailHost{ctx: context.Background(), dir: r.h.dir, sec: r.h.sec, cfg: r.h.cfg}
+			h.notify(true, "I have learned when you read mail.")
+			done := make(chan struct{})
+			h.reading = done // a read in flight
+			told := make(chan struct{})
+			go func() { h.told(h.seq); close(told) }()
+			synctest.Wait() // Told waits for the read
+			h.mu.Lock()
+			for _, a := range back {
+				if err := SetMail(h.dir, h.sec, a, imaptest.Password); err != nil {
+					t.Fatal(err)
+				}
+				h.changed()
+			}
+			h.notify(true, "the new account's own warm-up end") // a read after setup told it
+			last := back[len(back)-1]
+			fresh := sealedSeen{Log: inbox.SeenLog{Since: today}}
+			if err := saveSeen(h.dir, testSealer(), slotOf(last), fresh); err != nil {
+				t.Fatal(err)
+			}
+			h.reading = nil
+			close(done)
+			h.mu.Unlock()
+			<-told
+			if got, ok := loadSeen(h.dir, testSealer(), slotOf(last)); ok != seenLoaded || got.Told {
+				t.Fatalf("after %d changes, the account's new record: %v, told %v", len(back), ok, got.Told)
+			}
+			if !slices.ContainsFunc(h.notices, func(n notice) bool { return n.warm }) {
+				t.Fatalf("after %d changes, Told dropped the new account's warm-up end", len(back))
+			}
+		})
+	}
+}
+
+// Told covers only the notices the owner side read: a warm-up end that came
+// after that read stays to be told, and the record does not keep it as told.
+// Two replacements before the owner looks are one notice (#2742 items 16, 17).
+func TestToldLeavesTheWarmUpEndItDidNotCover(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
+	other := s
+	other.User = imaptest.User // a sign-in name given: another account's slot
+	for range 2 {
+		if err := r.owner.SetMail(other, imaptest.Password); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _ := r.owner.Status()
+	if !slices.Equal(st.Notices, []string{noteMailReplaced}) {
+		t.Fatalf("after two replacements: %v", st.Notices)
+	}
+	now, _ := time.Parse(time.DateOnly, today)
+	rec := sealedSeen{Log: inbox.SeenLog{Since: now.AddDate(0, 0, -100).Format(time.DateOnly)}}
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(other), rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.owner.Told(st.Through); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); len(st.Notices) != 1 || !strings.HasPrefix(st.Notices[0], "I have learned") {
+		t.Fatalf("Told dropped a warm-up end the owner side had not read: %v", st.Notices)
+	}
+	if got, ok := loadSeen(r.h.dir, testSealer(), slotOf(other)); ok != seenLoaded || got.Told {
+		t.Fatalf("the record kept an unread warm-up end as told: %v, %v", ok, got.Told)
 	}
 }
 

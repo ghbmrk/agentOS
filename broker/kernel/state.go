@@ -684,6 +684,16 @@ type Unsettled struct {
 	Checks int
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
+	// What the owner's RETRY tier is judged on (CH-10, CH-11), from the
+	// plan's own step: its spend, whether its verb moves money (always
+	// the high tier), and its recipient.
+	Amount    int64
+	Money     bool
+	Recipient string
+	// The plan's status, and why it was cancelled: a cancelled plan's step
+	// stays listed while it may have acted, but nothing more is tried.
+	PlanStatus           string
+	Cancel, CancelDetail string
 }
 
 // Status lists the unsettled steps in submission order.
@@ -696,9 +706,11 @@ func (s *State) Status() []Unsettled {
 			if st.Phase != PUnknown && st.Phase != PParked && st.Phase != PUnsent {
 				continue
 			}
-			ps := p.Plan.Steps[i]
-			out = append(out, Unsettled{Plan: id, Index: i, Verb: ps.Verb, Clerk: ps.Clerk,
-				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st)})
+			ks := p.Plan.Step(i)
+			out = append(out, Unsettled{Plan: id, Index: i, Verb: ks.Verb, Clerk: ks.Clerk,
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st),
+				Amount: ks.Amount, Money: slices.Contains(key.ArgNames(ks.Verb), key.ArgAmount), Recipient: ks.Recipient,
+				PlanStatus: p.Status, Cancel: p.Cancel, CancelDetail: p.CancelDetail})
 		}
 	}
 	return out
@@ -714,9 +726,15 @@ func shown(s string) bool {
 }
 
 // unseen is a rune that reshapes or hides the line the owner reads: a
-// control, a format character such as a bidi override, or a line or
-// paragraph separator.
+// control, a line or paragraph separator, or a format character such as a
+// bidi override, an invisible space or a tag. Only the two joiners are
+// shown: U+200D builds an emoji from parts (a button labelled with a
+// family emoji), and U+200C shapes Persian and Indic words. Neither
+// reorders text or carries any of its own (#2740).
 func unseen(r rune) bool {
+	if r == '\u200c' || r == '\u200d' {
+		return false
+	}
 	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
 }
 

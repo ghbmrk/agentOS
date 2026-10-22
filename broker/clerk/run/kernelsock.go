@@ -43,6 +43,7 @@ type kernelAnswer struct {
 	Result  json.RawMessage `json:"result,omitempty"`
 	Refusal *key.Refusal    `json:"refusal,omitempty"`
 	Error   string          `json:"error,omitempty"`
+	Is      string          `json:"is,omitempty"` // the wireErrors sentinel Error wraps, if any
 }
 
 // act is a call that changes the log, made with its decoded arguments.
@@ -295,6 +296,12 @@ func serveOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 		}
 	case err.Error() != "":
 		out.Error = err.Error()
+		for _, e := range wireList {
+			if errors.Is(err, e) {
+				out.Is = e.Error()
+				break
+			}
+		}
 	default:
 		// Never an empty answer, which would read as success.
 		out.Error = "run: an error with no text"
@@ -315,21 +322,36 @@ var ErrLost = errors.New("run: the answer was lost; it may or may not have taken
 var ErrUnreachable = errors.New("run: the socket could not be reached; nothing was sent")
 
 // wireErrors are the errors a socket's answer names by their text, so the
-// caller gets the same value back and errors.Is works across the socket.
-// Any other error crosses as its text alone.
-var wireErrors = map[string]error{}
+// caller gets the same value back and errors.Is works across the socket,
+// also for an error that wraps one (kernel.ErrRetryRefused with its code):
+// that crosses with its own text, naming the sentinel it wraps. Any other
+// error crosses as its text alone.
+var (
+	wireList   []error
+	wireErrors = map[string]error{}
+)
 
 func init() {
-	for _, e := range []error{
-		kernel.ErrDuplicatePlan, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
+	wireList = []error{
+		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, errArgs, ErrModelCall, ErrNoMailAccount,
 		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword,
-	} {
+	}
+	for _, e := range wireList {
 		wireErrors[e.Error()] = e
 	}
 }
+
+// wrapped is an error that crossed a socket wrapping a wireErrors sentinel.
+type wrapped struct {
+	text string
+	is   error
+}
+
+func (w wrapped) Error() string { return w.text }
+func (w wrapped) Unwrap() error { return w.is }
 
 // Conn is how a process reaches a socket of the kernel's process or of the
 // model clerk's.
@@ -371,6 +393,9 @@ func (c Conn) call(op string, args, out any) error {
 	case a.Error != "":
 		if e, ok := wireErrors[a.Error]; ok {
 			return e
+		}
+		if e, ok := wireErrors[a.Is]; ok {
+			return wrapped{a.Error, e}
 		}
 		return errors.New(a.Error)
 	case out != nil:
