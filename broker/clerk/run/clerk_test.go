@@ -215,7 +215,6 @@ func TestAReconnectThatFailsChangesNothing(t *testing.T) {
 		name  string
 		grant []byte
 	}{
-		{"a grant that does not read", []byte(`{"token":"canary-refresh-bad"}`)},
 		{"a grant past the file's bound", []byte(`{"refresh_token":"` + strings.Repeat("r", maxSecrets) + `"}`)},
 	} {
 		r.plans++
@@ -234,6 +233,28 @@ func TestAReconnectThatFailsChangesNothing(t *testing.T) {
 	}
 	if _, err := OpenSecrets(r.dir, testSealer()); err != nil {
 		t.Fatalf("the Secrets file no longer opens: %v", err)
+	}
+}
+
+// A grant Reconnect could not take is refused when the owner's side stages
+// it, before the tap and the hold, in fixed words that never carry the
+// grant; the grant staged before it stays, and its step still runs (#2742
+// item 6).
+func TestAGrantTheClerkCannotTakeIsRefusedAtStage(t *testing.T) {
+	r := newExitRig(t)
+	good := []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`)
+	d := r.stage("s1", good)
+	for _, bad := range [][]byte{
+		[]byte(`{"token":"canary-refresh-bad"}`),
+		[]byte(`not json canary-refresh-bad`),
+	} {
+		got, err := r.owner.Stage("s1", bad)
+		if err == nil || err.Error() != ErrBadGrant.Error() || got != "" {
+			t.Fatalf("staging %q: %q, %v; want ErrBadGrant", bad, got, err)
+		}
+	}
+	if st, changed := r.reconnect("s1", r.approve(d), "web", d); st.Phase != kernel.PDone || !changed {
+		t.Fatalf("the grant staged before a refused one: step %s %q, store changed %v", st.Phase, st.Detail, changed)
 	}
 }
 

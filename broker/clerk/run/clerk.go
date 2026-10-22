@@ -177,14 +177,24 @@ func grantDigest(g []byte) string {
 	return hex.EncodeToString(d[:])
 }
 
+// ErrBadGrant refuses, at stage, a grant the clerk's Reconnect could not
+// take, so the owner learns it before the tap and the hold rather than
+// after them as a credential failure (#2742 item 6). Its words are fixed:
+// never the grant's.
+var ErrBadGrant = errors.New("run: the new sign-in gave a grant this clerk cannot use; nothing was staged")
+
 // stage keeps g for plan's change-account step, in place of any grant
-// staged before, and returns its digest.
-func (h *ExitHost) stage(plan string, g []byte) string {
+// staged before, and returns its digest. A grant the clerk could not take
+// is refused (ErrBadGrant) and changes nothing.
+func (h *ExitHost) stage(plan string, g []byte) (string, error) {
+	if h.x.CheckGrant(g) != nil {
+		return "", ErrBadGrant
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	clear(h.staged.grant)
 	h.staged = staged{plan, append([]byte(nil), g...)}
-	return grantDigest(g)
+	return grantDigest(g), nil
 }
 
 type stageArgs struct {
@@ -208,7 +218,11 @@ func ServeExitOwner(ln net.Listener, h *ExitHost) error {
 				return nil, errors.New("run: the exit owner socket has one call, stage, with a plan and a grant")
 			}
 			defer clear(a.Grant)
-			return json.Marshal(h.stage(a.Plan, a.Grant))
+			d, err := h.stage(a.Plan, a.Grant)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(d)
 		})
 	})
 }
