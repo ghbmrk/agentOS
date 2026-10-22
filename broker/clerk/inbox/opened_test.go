@@ -407,3 +407,32 @@ func TestDeletingOldReadMailClearsTooMuchReadMail(t *testing.T) {
 		t.Fatalf("after deleting an old read mail: opened %v, log %+v, err %v", got, kept, err)
 	}
 }
+
+// Deleting a mail read since the last good read, not yet logged, frees its
+// whole charge, so it clears ErrTooMuchReadMail at once: the step the
+// owner is told to take first (#2742 item 3c; #2766 review).
+func TestDeletingNewlyReadMailClearsTooMuchReadMail(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	srv.DeliverAt("INBOX", arrived, rawMail("<b@shop.test>", "news@shop.test", "Sale 2"), `\Seen`)
+	l := NewLive(liveStore(t, srv))
+	_, log, err := l.Opened(context.Background(), "2026-01-02", SeenLog{})
+	if err != nil || len(log.Seen) != 2 {
+		t.Fatalf("first read: log %+v, err %v", log, err)
+	}
+	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
+	defer func(n int) { openedMax = n }(openedMax)
+	news, pat := len("news@shop.test"), len("pat@example.test")
+	// As in TestDeletingOldReadMailClearsTooMuchReadMail: one under the charge
+	// of both logged mails and the new read mail.
+	openedMax = news + senderCost + 2*news + 2*entryCost + pat + senderCost + pat + entryCost - 1
+	const today = "2026-10-19"
+	if _, _, err := l.Opened(context.Background(), today, log); !errors.Is(err, ErrTooMuchReadMail) {
+		t.Fatalf("past the bound: err %v, want ErrTooMuchReadMail", err)
+	}
+	srv.Remove("Archive", "<c@example.test>")
+	got, kept, err := l.Opened(context.Background(), today, log)
+	if err != nil || len(kept.Seen) != 2 || got["news@shop.test"] != "2026-01-02" || got["pat@example.test"] != "" {
+		t.Fatalf("after deleting the newly read mail: opened %v, log %+v, err %v", got, kept, err)
+	}
+}

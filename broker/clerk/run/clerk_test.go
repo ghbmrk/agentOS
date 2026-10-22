@@ -53,17 +53,28 @@ func (c *seenCall) Probe(r kernel.Request, v kernel.View) kernel.Result { return
 
 func newExitRig(t *testing.T) *exitRig {
 	t.Helper()
+	return newExitRigFor(t, "https://example.com/token")
+}
+
+// newExitRigFor is newExitRig for a clerk whose token endpoint is refresh;
+// with none, its slot holds a static secret.
+func newExitRigFor(t *testing.T, refresh string) *exitRig {
+	t.Helper()
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sec.Put("web", clerk.KindGrant, []byte(`{"refresh_token":"canary-refresh-old","client_id":"agentos-test"}`)); err != nil {
+	kind, secret := clerk.KindGrant, []byte(`{"refresh_token":"canary-refresh-old","client_id":"agentos-test"}`)
+	if refresh == "" {
+		kind, secret = clerk.KindStatic, []byte("canary-static-secret")
+	}
+	if err := sec.Put("web", kind, secret); err != nil {
 		t.Fatal(err)
 	}
 	// The clerk reads the rig's clock, as the kernel does.
 	var b *box
-	d := clerk.Declaration{Name: "web", Ops: ops("https://example.com:1"), Guard: guard("127.0.0.1:1"), Refresh: "https://example.com/token", Clock: func() int64 { return b.now }}
+	d := clerk.Declaration{Name: "web", Ops: ops("https://example.com:1"), Guard: guard("127.0.0.1:1"), Refresh: refresh, Clock: func() int64 { return b.now }}
 	x, err := clerk.NewExit(d, anchors, sec, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +266,21 @@ func TestAGrantTheClerkCannotTakeIsRefusedAtStage(t *testing.T) {
 	}
 	if st, changed := r.reconnect("s1", r.approve(d), "web", d); st.Phase != kernel.PDone || !changed {
 		t.Fatalf("the grant staged before a refused one: step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+}
+
+// A clerk with no token endpoint takes no grant at all: staging one through
+// the owner socket is refused as ErrNoReconnect, which the owner side tells
+// by errors.Is, and never as ErrBadGrant, whose words send the owner to sign
+// in again, which cannot help (#2771 review).
+func TestAClerkWithNoRefreshGrantRefusesEveryStage(t *testing.T) {
+	r := newExitRigFor(t, "")
+	got, err := r.owner.Stage("s1", []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`))
+	if !errors.Is(err, ErrNoReconnect) || errors.Is(err, ErrBadGrant) || got != "" {
+		t.Fatalf("staging for a clerk with no refresh grant: %q, %v; want ErrNoReconnect", got, err)
+	}
+	if strings.Contains(err.Error(), "sign in again") {
+		t.Fatalf("the refusal sends the owner to sign in again: %q", err)
 	}
 }
 

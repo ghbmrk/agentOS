@@ -45,6 +45,7 @@ type ExitHost struct {
 	name    string
 	anchors []ed25519.PublicKey
 	clock   clerk.Clock
+	refresh bool // the clerk has a token endpoint, so it can take a new grant
 
 	mu     sync.Mutex
 	staged staged          // the grant the owner's side staged; zero: none
@@ -61,7 +62,7 @@ type staged struct {
 
 // NewExitHost serves x, declared as d, whose keys chain to anchors.
 func NewExitHost(x *clerk.Exit, d clerk.Declaration, anchors []ed25519.PublicKey) *ExitHost {
-	return &ExitHost{x: x, name: d.Name, anchors: anchors, clock: d.Clock, done: map[string]bool{}}
+	return &ExitHost{x: x, name: d.Name, anchors: anchors, clock: d.Clock, refresh: d.Refresh != "", done: map[string]bool{}}
 }
 
 // Detail codes for a change-account step the host refuses.
@@ -180,13 +181,22 @@ func grantDigest(g []byte) string {
 // ErrBadGrant refuses, at stage, a grant the clerk's Reconnect could not
 // take, so the owner learns it before the tap and the hold rather than
 // after them as a credential failure (#2742 item 6). Its words are fixed:
-// never the grant's.
-var ErrBadGrant = errors.New("run: the new sign-in gave a grant this clerk cannot use; nothing was staged")
+// never the grant's. They say that the grant staged before, if any, stands.
+var ErrBadGrant = errors.New("run: the new sign-in gave a grant this clerk cannot use. Nothing changed; sign in again")
+
+// ErrNoReconnect refuses, at stage, any grant for a clerk with no token
+// endpoint: it uses a static secret, which no sign-in can change,
+// and the owner is not told to sign in again (#2742, #2771 review).
+var ErrNoReconnect = errors.New("run: this clerk uses a saved secret, not a sign-in, so a new sign-in cannot change it. Nothing changed")
 
 // stage keeps g for plan's change-account step, in place of any grant
 // staged before, and returns its digest. A grant the clerk could not take
-// is refused (ErrBadGrant) and changes nothing.
+// is refused (ErrBadGrant, or ErrNoReconnect for a clerk that takes none)
+// and changes nothing.
 func (h *ExitHost) stage(plan string, g []byte) (string, error) {
+	if !h.refresh {
+		return "", ErrNoReconnect
+	}
 	if h.x.CheckGrant(g) != nil {
 		return "", ErrBadGrant
 	}

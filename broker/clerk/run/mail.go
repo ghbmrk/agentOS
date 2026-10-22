@@ -305,8 +305,8 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 // reads it, since Opened moves with the day; within the day, only a Mark
 // that differs from last does, or, after a failed read (failed), any Mark
 // at all, so a server back from an outage is read. A Mark that cannot be
-// taken or compared waits for the next day, whatever the reason, so no
-// server can make each re-read a full read; but a refused sign-in is
+// taken or compared waits for the next day, whatever the reason, so such a
+// server never makes each re-read a full read; but a refused sign-in is
 // answered as the read's own failure (err), with no second sign-in, so the
 // host stops signing in at once.
 func recheck(ctx context.Context, last inbox.Mark, day string, failed bool, dir string, sec *clerk.Secrets, c MailConfig) (read bool, mark inbox.Mark, err error) {
@@ -346,6 +346,10 @@ func (c MailConfig) day() string {
 // mailBox is the mailbox of the account in dir, and its settings.
 func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSettings, error) {
 	s, err := readMail(dir)
+	if err != nil && !errors.Is(err, ErrNoMailAccount) {
+		// Told as the settings' fault, not the server's (trouble).
+		return nil, s, fmt.Errorf("%w: %w", errMailUnreadable, err)
+	}
 	if err != nil {
 		return nil, s, err
 	}
