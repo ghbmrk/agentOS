@@ -67,7 +67,7 @@ var listed = []string{"from", "list-unsubscribe", "list-unsubscribe-post"}
 func org(domain string) string {
 	d := strings.TrimRight(strings.ToLower(domain), ".")
 	o, err := publicsuffix.EffectiveTLDPlusOne(d)
-	if err != nil || net.ParseIP(d) != nil {
+	if err != nil || net.ParseIP(strings.Trim(d, "[]")) != nil {
 		return ""
 	}
 	return o
@@ -76,6 +76,21 @@ func org(domain string) string {
 // aligned reports whether a and b share an organizational domain; one with
 // none aligns with nothing.
 func aligned(a, b string) bool { return org(a) != "" && org(a) == org(b) }
+
+// lookalike reports whether domain, of another organization than known,
+// reads as known's organizational domain or a name under it once confusable
+// characters are folded. The whole domain is folded, not its own
+// organizational domain, which can stop short of the part that imitates:
+// shop.rnyshopify.com against shop.myshopify.com, or barclays.c0.uk against
+// barclays.co.uk (#2756).
+func lookalike(domain, known string) bool {
+	k := org(known)
+	if k == "" || org(domain) == k {
+		return false
+	}
+	d, sk := skeleton(strings.TrimRight(domain, ".")), skeleton(k)
+	return d == sk || strings.HasSuffix(d, "."+sk)
+}
 
 // skeleton folds confusable pairs from Unicode's confusables.txt (UTS #39).
 func skeleton(domain string) string {
@@ -214,7 +229,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 		return RDKIML, url
 	}
 	host := urlHost(url)
-	hostOK := contains(w.ProviderTable, org(host))
+	hostOK := org(host) != "" && contains(w.ProviderTable, org(host))
 	for _, s := range noL {
 		hostOK = hostOK || aligned(host, s.D)
 	}
@@ -234,7 +249,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	}
 	for _, a := range append(append([]string(nil), w.Contacts...), w.KnownSenders...) {
 		_, d, _ := strings.Cut(a, "@")
-		if k := org(d); org(domain) != k && skeleton(org(domain)) == skeleton(k) {
+		if lookalike(domain, d) {
 			return RLookalike, url
 		}
 	}
