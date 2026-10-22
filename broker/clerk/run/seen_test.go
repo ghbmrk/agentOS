@@ -330,7 +330,7 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	// next step never sends the owner to archive or move it (#2742 item 3c;
 	// inbox's TestDeletingOldReadMailClearsTooMuchReadMail follows the
 	// advice through Opened).
-	if _, next := trouble(inbox.ErrTooMuchReadMail); !strings.Contains(next, "Delete read mail for good, from your trash too") || !strings.Contains(next, "doesn't help") {
+	if _, next := trouble(inbox.ErrTooMuchReadMail); next != "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder. I'll try again at the next check, or tomorrow at the latest." {
 		t.Errorf("too much read mail: next step %q", next)
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {
@@ -375,8 +375,9 @@ func TestTheWarmUpsEndCountsInPlainWords(t *testing.T) {
 	}
 }
 
-// A record that cannot be saved is told with what follows: the next check
-// tries again (#2742 item 3).
+// A record that cannot be saved is told with what follows: the next read,
+// when the mail changes or the next day, tries again (#2742 item 3; #2768
+// review).
 func TestAnUnsavedRecordIsToldWithItsNextStep(t *testing.T) {
 	r := newSeenRig(t)
 	r.srv.Deliver("INBOX", mailFrom("news@shop.test", "<n1@shop.test>"), `\Seen`)
@@ -384,7 +385,7 @@ func TestAnUnsavedRecordIsToldWithItsNextStep(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(r.dir, seenFile+".tmp", "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, st := r.opened(today); !has(st.Lines, "could not save my record of the mail you read") || !has(st.Lines, "I'll try again at the next check.") {
+	if _, st := r.opened(today); !has(st.Lines, "could not save my record of the mail you read") || !has(st.Lines, "I'll try again when your mail changes, or tomorrow.") {
 		t.Fatalf("status after a failed save: %v", st.Lines)
 	}
 }

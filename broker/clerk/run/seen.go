@@ -132,7 +132,10 @@ type MailStatus struct {
 // mail when one mail is the cause, and never the server's own text, which
 // the server chooses (#2698 item 16).
 func trouble(err error) (why, next string) {
-	const again = "I'll try again at the next check."
+	// After a failed read, any Mark reads again, and one that cannot be
+	// compared waits for the next day (recheck), so the next check, or
+	// tomorrow at the latest, is when (#2742, #2768 review).
+	const again = "I'll try again at the next check, or tomorrow at the latest."
 	var long *imapsmtp.LongHeaderError
 	switch {
 	case errors.As(err, &long):
@@ -159,12 +162,16 @@ func trouble(err error) (why, next string) {
 		}
 		return "your mail server doesn't accept a password sign-in" + forSide(err) + " with these settings",
 			"On my Wi-Fi page, set up the mail account again with the " + servers + " server settings your provider gives for mail apps. If your provider only allows signing in through its own page, I can't use this account yet."
+	case errors.Is(err, errMailUnreadable):
+		// Setup writes the settings afresh; trying again cannot help.
+		return "I could not read my own settings for your mail account",
+			"Set up the mail account again on my Wi-Fi page."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
 		// Every folder is read, Archive and Trash too, so only mail deleted
 		// for good frees room: at once for mail read since the last good
 		// read, and for old logged mail (inbox.ErrTooMuchReadMail, #2742
 		// item 3c).
-		return "you have more read mail than I can keep track of", "Delete read mail for good, from your trash too: the mail you read most recently frees room at once. Moving or archiving it doesn't help, since I read every folder. " + again
+		return "you have more read mail than I can keep track of", tooMuchNext + " " + again
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
@@ -177,6 +184,11 @@ func trouble(err error) (why, next string) {
 		return "your mail server's answer was not one I could use", again
 	}
 }
+
+// tooMuchNext is the owner's step for too much read mail. It gives no
+// amount: the read stops at the first charge past the bound, so how far
+// past is not known.
+const tooMuchNext = "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder."
 
 // forSide names the side of the account a sign-in failed on, for the
 // owner's text, or nothing when err does not say (#2698 item 32).
@@ -241,7 +253,9 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 	if err := saveSeen(dir, s, slot, rec); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
-		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again at the next check.")
+		// The read stood, so the next save is the next read's: when the
+		// Mark moves or the day changes (recheck).
+		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again when your mail changes, or tomorrow.")
 	}
 	return got, st
 }

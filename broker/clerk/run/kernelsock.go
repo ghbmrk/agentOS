@@ -341,7 +341,7 @@ func init() {
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, errArgs, ErrModelCall, ErrNoMailAccount,
-		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword, ErrBadGrant,
+		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword, ErrBadGrant, ErrNoReconnect,
 	}
 	for _, e := range wireList {
 		wireErrors[e.Error()] = e

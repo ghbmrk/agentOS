@@ -971,3 +971,86 @@ func refusingIMAP(t *testing.T) string {
 	}()
 	return l.Addr().String()
 }
+
+// A read's day is the clock's as well as the world's, so a world whose date
+// stands still cannot keep one read for good (#2742 item 1; #2768 review).
+func TestTheReadsDayMovesWithTheClock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := MailConfig{World: func() inbox.World { return inbox.World{Today: "2026-01-02"} }}
+		d := c.day()
+		time.Sleep(24 * time.Hour)
+		if c.day() == d {
+			t.Fatalf("a day later on the clock, under the same world date, the day is still %q", d)
+		}
+	})
+}
+
+// A re-read that finds the Mark moved reads under that Mark, without a
+// second change check: the change check and the read's own sessions, no
+// more (#2742 item 1; #2768 review).
+func TestARereadReadsUnderTheMarkItChecked(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.moved()
+	r.nextDay() // the read takes its own Mark
+	before := r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	read := r.dials.Load() - before
+	r.moved() // within the day: the change check's Mark is the read's
+	before = r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.dials.Load() - before; n != read {
+		t.Fatalf("a re-read after a moved Mark made %d connections; a read taking its own Mark makes %d", n, read)
+	}
+}
+
+// A failed read keeps its Mark and day, so a server whose Mark cannot be
+// compared is not read again within the day after it fails either: each
+// re-read is one change check, never a read attempt (#2742 item 1; #2768
+// review).
+func TestAFailedReadKeepsItsDay(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	r.srv.NoUIDNext(true)
+	r.srv.FailList("INBOX", true)
+	r.nextDay()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); !has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("status after a failed read: %v", st.Lines)
+	}
+	before := r.dials.Load()
+	for range 3 {
+		if _, err := r.planner.Reread(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := r.dials.Load() - before; n != 3 {
+		t.Fatalf("3 re-reads after a failed read under an uncomparable Mark made %d connections, want 3 change checks", n)
+	}
+}
+
+// Settings that become unreadable after a good read are told at the next
+// re-read as the settings' fault, with setup as the step, and the re-read
+// makes no connection (#2742 item 1; #2768 review).
+func TestUnreadableSettingsAreToldAtTheNextReread(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	if err := os.Chmod(filepath.Join(r.h.dir, mailSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.moved()
+	before := r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.dials.Load() - before; n != 0 {
+		t.Fatalf("a re-read with unreadable settings made %d connections", n)
+	}
+	want := "I could not read your mailbox: I could not read my own settings for your mail account. Set up the mail account again on my Wi-Fi page."
+	if st, _ := r.owner.Status(); !slices.Contains(st.Lines, want) {
+		t.Fatalf("status with unreadable settings: %q", st.Lines)
+	}
+}
