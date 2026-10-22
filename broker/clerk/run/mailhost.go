@@ -36,6 +36,7 @@ type MailHost struct {
 	why     string        // why the last read failed; "" if it did not
 	refused bool          // the server refused the last sign-in: no read until setup
 	reading chan struct{} // the read in flight; setup and removal wait for it
+	changes int64         // account changes so far (changed)
 	seq     int64
 	notices []notice
 }
@@ -131,6 +132,7 @@ func (h *MailHost) idle() {
 // changed follows a change of account: the old clerk stops serving, and an
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
+	h.changes++
 	h.cur, h.why, h.refused = nil, "", false
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
@@ -230,7 +232,14 @@ func (h *MailHost) told(through int64) {
 	if !warm {
 		return
 	}
+	shown := h.changes
 	h.idle() // a read in flight may add the notice again; it ends first
+	// The owner was shown the warm-up end of the account as it was: if a setup
+	// changed it while the read ended, even back to the same settings, the
+	// account's record began again and its end is not yet told (#2742 item 14).
+	if h.changes != shown {
+		return
+	}
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 	if s, err := readMail(h.dir); err == nil {
 		// A record that cannot be saved tells the warm-up's end again.
