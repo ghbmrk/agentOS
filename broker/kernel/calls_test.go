@@ -161,9 +161,6 @@ func TestTheUnsentWaitBacksOff(t *testing.T) {
 	r.replays()
 }
 
-// STATUS lists each covered submit once sent, in the clerk's fixed wording,
-// for as long as a task approval lives; a line the owner could not be shown
-// as one line is not listed (CLK-3, #2705).
 // The fold refuses a covered line not shown, whatever the log holds
 // (CLK-3): Answer drops one first, so only a raw entry reaches the fold.
 func TestTheFoldListsNoLineNotShown(t *testing.T) {
@@ -180,6 +177,9 @@ func TestTheFoldListsNoLineNotShown(t *testing.T) {
 	}
 }
 
+// STATUS lists each covered submit once sent, in the clerk's fixed wording,
+// for as long as a task approval lives; a line the owner could not be shown
+// as one line is not listed (CLK-3, #2705).
 func TestStatusListsCoveredSubmits(t *testing.T) {
 	r := newRig(t)
 	r.plan("p1", r.ck, st(key.Trash, "m1"), st(key.Trash, "m2"))
