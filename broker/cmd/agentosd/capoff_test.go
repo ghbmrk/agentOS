@@ -516,16 +516,15 @@ func TestOwnerChoicesAreDigestOnly(t *testing.T) {
 }
 
 // REQ: A11, OP-9
-// A11: with learning on but unable to run, STATUS names the cause: the
-// memory too small, no builder, no model socket, or no model grant, each
-// alone.
+// A11: with learning on but unable to run, STATUS names the cause: no
+// replay machine to test changes on (always, since agentosd runs none),
+// no builder, no model socket, or no model grant, each alone.
 func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		induce func(b *capBox, lp *learning)
 		want   string
 	}{
-		{"memory_too_small", func(b *capBox, lp *learning) { lp.noRoom.Store(true) }, noRoomNote},
 		{"no_builder", func(b *capBox, lp *learning) { lp.builderOff.Store(true) }, builderOffNote},
 		{"no_model_socket", func(b *capBox, lp *learning) {
 			b.caps.model = newModelProbe(filepath.Join(shortDir(t), "gone.sock"))
@@ -543,7 +542,10 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 				t.Fatal("learning is not on")
 			}
 			before := b.status()
-			for _, l := range []string{noRoomNote, builderOffNote, builderUnsetNote, modelUnreachable, modelUnset, modelNoGrant, modelLocked} {
+			if !strings.Contains(before, strings.ReplaceAll(noTestNote, "'", "")) {
+				t.Fatalf("STATUS %q does not say changes are not tested", before)
+			}
+			for _, l := range []string{builderOffNote, builderUnsetNote, modelUnreachable, modelUnset, modelNoGrant, modelLocked} {
 				if strings.Contains(before, l) {
 					t.Fatalf("a cause before any: %q", before)
 				}

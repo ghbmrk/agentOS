@@ -26,29 +26,14 @@ import (
 // owner channel the daemon makes; until it opens, and for good when there
 // is no owner channel, nothing is answered and no tool is offered. The box
 // clock guard is its own dependency (CLOCK-guard-own, #1246): it opens
-// before the book and stays open when the book cannot, since the sleeper
-// and STATUS read it too.
+// before the book and stays open when the book cannot, since STATUS
+// reads it too.
 type questions struct {
 	b atomic.Pointer[question.Book]
 	g atomic.Pointer[clock.Guard]
 	// run is the guard's and the book's loops, which write state files
 	// until ctx is done; wait waits for them.
 	run sync.WaitGroup
-}
-
-// pending reports a question held or waiting for the owner (PE7).
-func (q *questions) pending() bool {
-	b := q.b.Load()
-	return b != nil && b.Open()
-}
-
-// restricted reports whether the box clock check restricts time-sensitive
-// checks (TIM-1): the sleeper's hours and its longest sleep read the box
-// clock, so the agent does not sleep then (security R1 on #149). A guard
-// that has not opened, or could not, restricts too (#1246).
-func (q *questions) restricted() bool {
-	g := q.g.Load()
-	return g == nil || g.Status().Restricted()
 }
 
 // wait returns once the loops open started have stopped (cancel their
@@ -73,7 +58,7 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 // Clock is STATUS's time check line (a control.Handler note): the guard's
 // last check in the box's zone, so a restriction is visible while the
 // guard texts nothing (UX R3, L3 S1 on #95). With no guard open the
-// line says so, since restricted() then holds (#1246).
+// line says so: time-sensitive checks are then restricted (#1246).
 func (q *questions) Clock() string {
 	g := q.g.Load()
 	if g == nil {

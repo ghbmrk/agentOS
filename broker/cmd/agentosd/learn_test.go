@@ -56,8 +56,8 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	for i := 0; i < maxVerdicts+10; i++ {
 		cfg.Grants.Outcome(grants.OwnerOutcome{Intent: journal.Intent{ID: fmt.Sprint("agent/", i)}, Verdict: grants.OwnerAccepted})
 	}
-	if _, err := lp.eval.Run(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
-		t.Fatalf("evaluation with no evaluator: %v", err)
+	if _, err := (noReplay{}).Run(context.Background(), change.Tree{}, change.Probe{ID: "p"}); !errors.Is(err, change.ErrNotEvaluated) {
+		t.Fatalf("evaluation with no replay machine: %v", err)
 	}
 	if _, limit := lp.spare.Overall(); limit != loops.SpareLimits(loops.NoSpareBudget) {
 		t.Fatalf("spare cap %+v", limit)
@@ -116,21 +116,6 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	}
 	cancel()
 	d.Wait()
-}
-
-// The vault process's refusals of replay machines' model calls are logged,
-// never journaled: egress records feed the owner's alerts and digest. Only
-// a fixed class is logged, never the reason text, which may quote a
-// private replay's request.
-func TestEvalDenialsStayOutOfTheJournal(t *testing.T) {
-	var logged []string
-	deny := evalDenied(func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
-	deny("eval-0a1b", modelroute.Denial{Reason: modelroute.ReasonEvalCeiling, Status: 403})
-	deny("eval-0a1b", modelroute.Denial{Reason: "denied: CANARY-7f3e quoted request", Status: 403})
-	deny("agent", modelroute.Denial{Reason: "denied"})
-	if len(logged) != 2 || !strings.Contains(logged[0], "price ceiling") || strings.Contains(logged[1], "CANARY") {
-		t.Fatalf("logged %q", logged)
-	}
 }
 
 // Routing adoptions are held in agentosd until agentos-egress follows them
@@ -279,7 +264,7 @@ func ruleTree(r routerule.Rule) change.Tree {
 func openRouting(t *testing.T, store change.Store, f *fakeRouting) (*syncedRouting, *change.Pipeline) {
 	t.Helper()
 	s := &syncedRouting{r: f, restoring: true, logf: t.Logf}
-	p, err := change.New(change.Config{Store: store, Evaluator: &lateEvaluator{}, Targets: map[string]change.Target{"routing": s}})
+	p, err := change.New(change.Config{Store: store, Evaluator: noReplay{}, Targets: map[string]change.Target{"routing": s}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,9 +463,6 @@ func TestLearningBusyCause(t *testing.T) {
 	if b, o, p := l.busyCause(); !b || o || !p {
 		t.Fatalf("unattached: %v %v %v", b, o, p)
 	}
-	if l.revokedForOwner("eval-1") {
-		t.Fatal("unattached: a revoke read as the owner's")
-	}
 	c, err := admission.New(admission.Config{CapacityMB: 4000, HeadroomMB: 500}, yield{})
 	if err != nil {
 		t.Fatal(err)
@@ -488,15 +470,6 @@ func TestLearningBusyCause(t *testing.T) {
 	l.adm.Store(c)
 	if b, o, p := l.busyCause(); b || o || p {
 		t.Fatalf("idle: %v %v %v", b, o, p)
-	}
-	if _, err := c.Admit(admission.Request{ID: "eval-1", Class: admission.Experiment, MemMB: 3000}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Admit(admission.Request{ID: "agent", Class: admission.Foreground, MemMB: 3000}); err != nil {
-		t.Fatal(err)
-	}
-	if !l.revokedForOwner("eval-1") {
-		t.Fatal("a revoke for the owner's agent not read as the owner's")
 	}
 }
 

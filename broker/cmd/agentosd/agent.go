@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -49,19 +51,12 @@ type keeper struct {
 	every time.Duration
 	logf  func(format string, args ...any)
 
-	// sleep, if set, is the agent's sleeper (PE7): the keeper does not
-	// start an agent it put to sleep.
-	sleep *sleeper
-
 	mu     sync.Mutex
 	status string // STATUS line while not running; empty once it runs
 }
 
 // Status is the keeper's STATUS line: empty while the machine runs.
 func (k *keeper) Status() string {
-	if k.sleep != nil && k.sleep.Asleep() {
-		return sleepStatus
-	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.status
@@ -81,12 +76,8 @@ func (k *keeper) setStatus(err error) {
 	k.mu.Unlock()
 }
 
-// ensure brings the machine to running, or says why it is not; an agent
-// asleep is left to its sleeper.
+// ensure brings the machine to running, or says why it is not.
 func (k *keeper) ensure(ctx context.Context) error {
-	if k.sleep != nil {
-		return k.sleep.whileAwake(func() error { return k.start(ctx) })
-	}
 	return k.start(ctx)
 }
 
@@ -190,4 +181,69 @@ func launchSpec(path string) (argv, env []string, err error) {
 		return nil, nil, fmt.Errorf("%s: no argv", path)
 	}
 	return l.Argv, l.Env, nil
+}
+
+// agentKeeper is the keeper of the agent machine id. A sleep checkpoint
+// left from when the box slept its agent to make room for a replay
+// machine (PE7, gone with replay from agentosd) is woken from first, so
+// none outlives the mode (security R1 on #147, R2 on #149).
+func agentKeeper(ctx context.Context, m *vm.Manager, record func(journal.SleepNote) error, id string, spec vm.Spec) *keeper {
+	wakeLeftover(ctx, m, id, record, log.Printf)
+	return &keeper{m: m, id: id, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+}
+
+// sleepMachines is the vm.Manager part wakeLeftover uses.
+type sleepMachines interface {
+	Get(id string) (vm.Machine, error)
+	Snapshot(id string) (vm.Snapshot, error)
+	ResumeFromCheckpoint(ctx context.Context, id, snapID string) (vm.Wake, error)
+}
+
+// wakeRestart is the journal's cause for that wake (PE7 condition 12).
+const wakeRestart = "restart"
+
+// coldCodes are vm's cold-wake reasons as journal codes (potency R1 on
+// #147).
+var coldCodes = map[string]string{
+	vm.ColdNotSleep: "not_sleep_checkpoint",
+	vm.ColdNewer:    "newer_snapshot",
+	vm.ColdStarted:  "started_since",
+	vm.ColdChanged:  "checkpoint_changed",
+	vm.ColdFailed:   "restore_failed",
+}
+
+func coldCode(w vm.Wake) string {
+	if w.Restored {
+		return ""
+	}
+	if c, ok := coldCodes[w.Cold]; ok {
+		return c
+	}
+	return "unknown"
+}
+
+// wakeLeftover wakes agent machine id when it is stopped with a sleep
+// checkpoint of its own as its newest snapshot. The checkpoint is
+// restored, or deleted if it cannot be (vm ResumeFromCheckpoint), and the
+// wake is journaled. Any other state is left to the keeper.
+func wakeLeftover(ctx context.Context, m sleepMachines, id string, record func(journal.SleepNote) error, logf func(string, ...any)) {
+	mc, err := m.Get(id)
+	if err != nil || mc.State == vm.Running || mc.Last == "" {
+		return
+	}
+	snap, err := m.Snapshot(mc.Last)
+	if err != nil || !snap.Sleep || snap.Machine != id {
+		return
+	}
+	w, err := m.ResumeFromCheckpoint(ctx, id, snap.ID)
+	if err != nil {
+		logf("agent machine %s: waking after a restart: %v", id, err)
+	}
+	if record == nil {
+		return
+	}
+	n := journal.SleepNote{Event: journal.SleepAwake, Cause: wakeRestart, Cold: coldCode(w), Machine: id}
+	if err := record(n); err != nil {
+		logf("agent machine %s: journaling %s: %v", id, n.Event, err)
+	}
 }

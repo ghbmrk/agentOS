@@ -163,14 +163,11 @@ func TestClockLineOnlyForExceptions(t *testing.T) {
 
 // CLOCK-guard-own (#1246): the box clock guard is its own dependency. A
 // question store that fails to load, or no owner channel, leaves the
-// guard open, so the sleeper and STATUS still read it; a guard that never
-// opened reads as restricted.
+// guard open, so STATUS still reads it; a guard that never opened reads
+// as restricted.
 func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
 	var unopened questions
-	if !unopened.restricted() {
-		t.Fatal("an unopened clock guard did not restrict")
-	}
-	if l := unopened.Clock(); !strings.HasPrefix(l, "Time check: not running") {
+	if l := unopened.Clock(); !strings.HasPrefix(l, "Time check: not running (time-sensitive checks restricted)") {
 		t.Fatalf("STATUS clock line with no guard: %q", l)
 	}
 
@@ -210,10 +207,8 @@ func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
 		if qs.g.Load() == nil {
 			t.Fatalf("ownerless %v: the clock guard did not open", ownerless)
 		}
-		no := func() bool { return false }
-		w := sleepWork{intent: no, undo: no, gate: no, handed: no, qs: qs}
-		if !w.checks()["clock"]() {
-			t.Fatalf("ownerless %v: the guard's restriction did not keep the agent awake", ownerless)
+		if !qs.g.Load().Status().Restricted() {
+			t.Fatalf("ownerless %v: the guard's restriction did not hold", ownerless)
 		}
 		if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") {
 			t.Fatalf("ownerless %v: STATUS clock line: %q", ownerless, l)

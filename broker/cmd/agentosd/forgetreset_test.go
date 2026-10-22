@@ -31,7 +31,6 @@ func TestForgetResetReachesTheLivePlane(t *testing.T) {
 	s.Reset("agent") // nothing stored yet
 	live := &resetServices{}
 	s.live.Store(&svc{live})
-	s.eval.Store(&svc{&recServices{}})
 	s.Reset("agent")
 	s.Reset(vm.EvalPrefix + "0a1b")
 	if len(live.resets) != 1 || live.resets[0] != "agent" {
