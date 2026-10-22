@@ -33,7 +33,7 @@ type rootView struct {
 	Expires string
 	Digest  string
 	// Print is the short fingerprint the approval card shows
-	// (grants.FollowPrint).
+	// (followPrint).
 	Print string
 	// Project: the root follows from the project root the box last
 	// trusted, so the form offers only switching back, with no name (WF1).
@@ -72,12 +72,12 @@ const (
 	followReservedName = "Choose another name. Only switching back may be called " + reservedName + "."
 )
 
-// reservedName starts only the switch back's line (grants.ReservedFollowName;
-// security 323-1). The page refuses it before asking, and the gate again.
+// reservedName starts only the switch back's line (security 323-1). The
+// page refuses it before asking, and agentosd again.
 const reservedName = "the AgentOS project"
 
-// followPrint is grants.FollowPrint: the digest's first 8 hex characters in
-// two groups of 4, as the approval card shows them.
+// followPrint is the digest's first 8 hex characters in two groups of 4, as
+// the approval card shows them.
 func followPrint(digest string) string {
 	if len(digest) < 8 {
 		return ""

@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -316,15 +315,16 @@ func (a *approvalRig) upload(t *testing.T, root []byte) string {
 	return f.upload(root)
 }
 
-// The page mirrors the gate's reserved name and fingerprint (localui does
-// not import grants), so the page and the approval card always agree.
-func TestOSS10w2FollowMirrorsTheGate(t *testing.T) {
-	if reservedName != grants.ReservedFollowName {
-		t.Fatalf("%q != %q", reservedName, grants.ReservedFollowName)
+// The page's reserved name (in any case) and fingerprint are fixed: the approval card
+// names the same root, so they change only with it (security 323-1).
+func TestOSS10w2FollowNameAndPrint(t *testing.T) {
+	if !strings.EqualFold(reservedName, "the agentOS project") { // the gate matches it in any case
+		t.Fatalf("reserved name %q", reservedName)
 	}
-	for _, d := range []string{followDigest, strings.Repeat("0123456789", 6) + "abcd", ""} {
-		if followPrint(d) != grants.FollowPrint(d) {
-			t.Fatalf("%q: %q != %q", d, followPrint(d), grants.FollowPrint(d))
+	for d, want := range map[string]string{followDigest: followDigest[:4] + "-" + followDigest[4:8],
+		strings.Repeat("0123456789", 6) + "abcd": "0123-4567", "0123456": "", "": ""} {
+		if got := followPrint(d); got != want {
+			t.Fatalf("%q: %q, want %q", d, got, want)
 		}
 	}
 }

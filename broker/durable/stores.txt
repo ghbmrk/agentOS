@@ -28,7 +28,6 @@ follow debt debt:#1947
 guest debt debt:#1947
 journal journal
 localsrv config
-localui config
 meter debt debt:#1947
 owner debt debt:audit-2.2
 photo/keep content
