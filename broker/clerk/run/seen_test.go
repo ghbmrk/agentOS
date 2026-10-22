@@ -5,6 +5,9 @@ package run
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,7 +126,7 @@ func (o *opens) Open(blob, aad []byte) ([]byte, error) {
 func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	r := newSeenRig(t)
 	r.srv.Deliver("INBOX", mailFrom("pat@example.test", "<p1@example.test>"), `\Seen`)
-	if got, st := r.opened(today); got["pat@example.test"] != today || !has(st.Lines, "began its record") {
+	if got, st := r.opened(today); got["pat@example.test"] != today || !has(st.Lines, "I began my record") {
 		t.Fatalf("first read: %v, %v", got, st.Lines)
 	}
 	path := filepath.Join(r.dir, seenFile)
@@ -131,16 +134,16 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if err != nil || bytes.Contains(b, []byte("example.test")) {
 		t.Fatalf("the record is missing or names a sender in the clear (%v)", err)
 	}
-	if _, ok := loadSeen(r.dir, testSealer(), r.slot); !ok {
+	if _, st := loadSeen(r.dir, testSealer(), r.slot); st != seenLoaded {
 		t.Fatal("the record the clerk wrote does not load")
 	}
-	if _, ok := loadSeen(r.dir, testSealer(), r.slot+"x"); ok {
+	if _, st := loadSeen(r.dir, testSealer(), r.slot+"x"); st != seenBad {
 		t.Fatal("a record loads under another account")
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loadSeen(r.dir, testSealer(), r.slot); ok {
+	if _, st := loadSeen(r.dir, testSealer(), r.slot); st != seenBad {
 		t.Fatal("a record others can read loads")
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -150,10 +153,10 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loadSeen(r.dir, testSealer(), r.slot); ok {
+	if _, st := loadSeen(r.dir, testSealer(), r.slot); st != seenBad {
 		t.Fatal("an altered record loads")
 	}
-	if _, st := r.opened(today); !has(st.Lines, "began its record") {
+	if _, st := r.opened(today); !has(st.Lines, "could not be read, so I began it again") {
 		t.Fatalf("after an altered record, status %v does not say the record started over", st.Lines)
 	}
 	// Past its bound the record is refused before it is read or opened.
@@ -163,9 +166,9 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	o := &opens{Sealer: testSealer()}
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, ok := loadSeen(r.dir, o, r.slot)
+	_, st := loadSeen(r.dir, o, r.slot)
 	runtime.ReadMemStats(&after)
-	if ok || o.n != 0 {
+	if st != seenBad || o.n != 0 {
 		t.Fatalf("a record past its bound loads or is opened (%d opens)", o.n)
 	}
 	if read := after.TotalAlloc - before.TotalAlloc; read > maxSeen/8 {
@@ -184,7 +187,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 80).Format(time.DateOnly)) || len(st.Notices) != 0 {
+	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 80).Format("2 January 2006")+", I") || st.WarmedUp != "" {
 		t.Fatalf("during the warm-up: %+v", st)
 	}
 
@@ -196,11 +199,19 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, st := r.opened(today)
-	if len(st.Notices) != 1 || !strings.Contains(st.Notices[0], " 1 senders") || has(st.Lines, "Until") {
-		t.Fatalf("at the warm-up's end: %+v, want one notice naming 1 sender", st)
+	if st.WarmedUp != warmedUp(1) || has(st.Lines, "Until") {
+		t.Fatalf("at the warm-up's end: %+v, want the notice naming 1 sender", st)
 	}
-	if _, st := r.opened(today); len(st.Notices) != 0 {
-		t.Fatalf("the warm-up's end was told again: %v", st.Notices)
+	// Until the owner has read it, it is told again, at every read; after,
+	// never.
+	if _, st := r.opened(today); st.WarmedUp == "" {
+		t.Fatalf("the warm-up's end, unread, was not told again: %+v", st)
+	}
+	if err := markTold(r.dir, testSealer(), r.slot); err != nil {
+		t.Fatal(err)
+	}
+	if _, st := r.opened(today); st.WarmedUp != "" {
+		t.Fatalf("the warm-up's end was told again once read: %v", st.WarmedUp)
 	}
 
 	// The boundary: a record 89 days old still warms up; at 90 days it has
@@ -209,7 +220,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 1).Format(time.DateOnly)) || len(st.Notices) != 0 {
+	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 1).Format("2 January 2006")) || st.WarmedUp != "" {
 		t.Fatalf("on day 89: %+v", st)
 	}
 	rec = sealedSeen{Log: inbox.SeenLog{Since: at(90), Seen: []inbox.Seen{
@@ -219,7 +230,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, st := r.opened(today); has(st.Lines, "Until") || len(st.Notices) != 1 || !strings.Contains(st.Notices[0], " 1 senders") {
+	if _, st := r.opened(today); has(st.Lines, "Until") || st.WarmedUp != warmedUp(1) {
 		t.Fatalf("on day 90: %+v, want one notice naming 1 sender", st)
 	}
 }
@@ -260,5 +271,74 @@ func TestTheSeenRecordFollowsItsAccount(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a removal kept the record (%v)", err)
+	}
+}
+
+// Every failure the owner is told about gets fixed words and a next step,
+// never the server's own text; a mail that is the cause is named by its
+// folder, local arrival and subject, quoted so control and bidi characters
+// show as escapes (#2698 items 2, 6, 16, 21, 22).
+func TestTroubleIsToldInFixedWords(t *testing.T) {
+	const leak = "CANARY-SERVER-TEXT"
+	arrived := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived ` + arrived.In(time.Local).Format("2 January 2006 at 15:04") + `, subject "Hi\x1b[2J")`},
+		{fmt.Errorf("%w: %s", imapsmtp.ErrLoginRefused, leak), "refused my sign-in"},
+		{fmt.Errorf("%w: %s", inbox.ErrTooMuchReadMail, leak), "more read mail than I can keep track of"},
+		{fmt.Errorf("%w: %s", imapsmtp.ErrUnreachable, leak), "couldn't reach your mail server"},
+		{fmt.Errorf("%w: %s", imapsmtp.ErrTimeout, leak), "stopped answering"},
+		{fmt.Errorf("%w: %s", imapsmtp.ErrUnanswered, leak), "did not answer for every read mail"},
+		{fmt.Errorf("%w: %s", imapsmtp.ErrReplyTooLarge, leak), "more than I accept in one answer"},
+		{errors.New(leak), "not one I could use"},
+	}
+	for _, c := range cases {
+		why, next := trouble(c.err)
+		line := why + ". " + next
+		if !strings.Contains(why, c.want) || strings.Contains(line, leak) || strings.ContainsFunc(line, func(r rune) bool { return r == 0x202e || r == 0x1b }) || next == "" {
+			t.Errorf("%v: told %q", c.err, line)
+		}
+	}
+	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {
+		t.Errorf("a long folder name is not cut: %d bytes", len(why))
+	}
+}
+
+// Any log Opened can keep fits the record: the record spends on an entry its
+// address and less than Opened charges for the rest, OpenedMax/(1<<20) bytes
+// (inbox's entryCost, at searchMax = 1<<20 entries), so a log at Opened's
+// bound is within maxSeen whatever its addresses' length (#2732 item 6).
+func TestEveryLogOpenedKeepsFitsTheRecord(t *testing.T) {
+	charge := inbox.OpenedMax / (1 << 20)
+	for _, n := range []int{1, 40, 8 << 10} {
+		var log inbox.SeenLog
+		log.Since = today
+		addr := strings.Repeat("a", n-1) + "@"
+		cost := 0
+		for i := range 2000 {
+			log.Seen = append(log.Seen, inbox.Seen{From: addr, ID: fmt.Sprintf("%032x", i), Date: today})
+			cost += n + charge
+		}
+		var b bytes.Buffer
+		if err := gob.NewEncoder(&b).Encode(sealedSeen{Log: log, Told: true}); err != nil {
+			t.Fatal(err)
+		}
+		if b.Len() > cost {
+			t.Errorf("addresses of %d bytes: the record spends %d on what Opened charges %d", n, b.Len(), cost)
+		}
+	}
+	if maxSeen < inbox.OpenedMax {
+		t.Fatal("maxSeen is under Opened's bound")
+	}
+}
+
+// The warm-up's end counts its senders in plain words.
+func TestTheWarmUpsEndCountsInPlainWords(t *testing.T) {
+	for n, want := range map[int]string{0: "None of the senders", 1: "1 sender whose mail you have not opened in 90 days may now be unsubscribed from; it still", 2: "2 senders whose mail you have not opened in 90 days may now be unsubscribed from; each still"} {
+		if got := warmedUp(n); !strings.Contains(got, want) {
+			t.Errorf("%d: %q", n, got)
+		}
 	}
 }

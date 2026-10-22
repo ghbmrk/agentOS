@@ -33,6 +33,7 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - CLK-1: `secrets_test.go::TestSecretsFileIsTheClerksOwn`. A directory or file open to other uids, a symlink, or another uid's directory or file is refused. As root, another uid cannot read the file.
 - #2655: `mail_test.go::TestMailClerkSignsInWithTheSealedPassword` (a dispatched step lands on the server through a clerk that signed in with the sealed password, which is in neither the clerk's files nor the log), `::TestMailRemovalTakesEffectAtTheNextConnection` (a removal or a wrong password takes effect with no restart; it fails on a credential read once), `::TestMailReplacementSendsNoPasswordToTheOldServer` and `::TestMailSetupStoppedBetweenItsWritesSendsTheOldPassword` (a password goes only to its own account's servers; both fail on one slot for every account), `::TestMailSettingsFileIsTheClerksOwn`, `::TestMailSetupRefusalsKeepTheirWording`, and `broker/clerk/secrets_test.go::TestSecretsRemovePersists` and `::TestSecretsLoginOpensPerConnection`.
 - CLK-1, CLK-2: `run_test.go::TestPeersAreCheckedByUID` and `::TestClerkRefusesAViewWithoutTheLedger`. A wrong peer uid on either end sends nothing. A view missing a charged scope's ledger is refused before the clerk runs.
+- #2708 item 1: `view_test.go::TestACallPastTheBoundIsNeverSent`. A call one byte past `maxCall` never reaches the clerk. Its step fails as `too-large`, and its probe counts no check. A call exactly at the bound is sent and read whole.
 
 **Declared scope:** `broker/clerk/run/` (new), `broker/core/core.txt` (one `wiring clerk/run` line), `docs/LANES.md` (the frozen seam), this brief. Slice 2 adds `broker/clerk/secrets.go` and its test (two methods, by the kernel lane's waiver).
 
@@ -63,9 +64,22 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 
 **Slice 3b acceptance tests (MIG-4-run-p to s; #2698 items 1 to 3, 8, 10 to 13):**
 - `mailhost_test.go::TestMailSetupRunsOnTheClerksOwnSocket`. Setup, replacement and removal run on the mail process's owner socket; a refusal keeps its wording and a refused replacement is not told; each replacement and removal is told once in the old setup's words; the planner's listing follows the account and is read again on request; with no account a step is `no-account`.
-- `::TestEachMailSocketServesOnlyItsSide`. The planner cannot set up, remove or read status, and the owner's socket has no listing.
+- `::TestEachMailSocketServesOnlyItsSide`. The planner cannot set up, remove, or read the account or status, and the owner's socket has no listing.
 - `seen_test.go::TestOpenedFailureKeepsEverySenderAndSaysSo`. A failed `Opened` keeps every listed sender opened today, in the world the account `OpenMail` returns judges VRB-2 in, writes no record and puts a pause line in STATUS.
 - `::TestTheSeenRecordIsSealedAndBoundToItsAccount`. The record names no sender in the clear; one altered, sealed for another account or readable by others does not load, one past its bound is refused before it is read or opened, and the next read says the record began again.
 - `::TestTheWarmUpsEndIsToldOnce` (day 89 still warms up; day 90 ends it and counts mail read exactly 90 days ago) and `::TestTheSeenRecordFollowsItsAccount`.
 - `mail_test.go::TestMailClerkRefusesAStepTheLogHasNotInFlight`.
 - Declared scope: `broker/clerk/run/` and this brief.
+
+**Slice 3b follow-up acceptance tests (#2732; MIG-4-run-p to t; #2698 items 2, 5, 6, 16, 21, 22):**
+- `mailhost_test.go::TestAMailboxReadHoldsUpNothingElse`. During a read, the owner's status and a step are answered at once; two overlapping re-reads read the mailbox once.
+- `::TestSetupWaitsForTheReadInFlight` and `::TestRemovalWaitsForTheReadInFlight`. Setup and removal write nothing while a read is in flight, and land after it. After a removal, no record of read mail is left on disk.
+- `::TestAFailedReadKeepsTheLastClerk`. A failed re-read keeps the last listing and clerk and says why in fixed words; a good read clears the line.
+- `::TestAStepsRefusedSignInStopsTheClerk` (#2708 item 2). A step whose own sign-in the server refuses fails as `sign-in-refused`. STATUS then names the refusal, and re-reads stop until setup.
+- `::TestARefusedSignInStopsStepsSigningIn`. While the server refuses the sign-in, a kernel step fails as `sign-in-refused` and a probe answers `unknown`, neither connecting, even with a clerk the account opened before.
+- `::TestARefusedSignInWaitsForTheOwner`. After a refused sign-in, re-reads and listings make no connection to the server until the owner sets the account up again.
+- `::TestTheOwnerReadsWhetherAnAccountIsSetUp` and `::TestMailSetupRunsOnTheClerksOwnSocket`. The account read never carries the password; reading notices uses none up, and `told` drops only those up to its point.
+- `::TestTheWarmUpsEndIsToldUntilShown`. The warm-up's end survives restarts until shown. It is never told after, even when a re-read lands between the owner side's read and its Told, or is still in flight as Told arrives, and a change of account drops an unshown one. `::TestUnreadableSettingsAreToldInFixedWords`.
+- `seen_test.go::TestTroubleIsToldInFixedWords`. Every error class gets fixed words and a next step, no server text, quoted and cut names. `::TestTheWarmUpsEndCountsInPlainWords`.
+- `::TestEveryLogOpenedKeepsFitsTheRecord`. The record spends less per entry than `Opened` charges, for addresses of 1 byte to 8 KiB.
+- `mail_test.go::TestAFailedOpenedReadOffersNoUnsubscribe`. With the eval set's signed one-click mail, a working read offers its sender and a failed read of opened mail does not, through the account `OpenMail` returns.

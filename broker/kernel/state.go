@@ -318,6 +318,7 @@ type StepState struct {
 	Detail      string // the clerk's last answer, for STATUS
 	Covered     string // a covered submit's STATUS line (CLK-3)
 	SentAt      int64  // when the log recorded it sent
+	Retried     bool   // RETRY sent it again: it may have acted until a probe finds it not done
 }
 
 type PlanState struct {
@@ -364,6 +365,22 @@ const PoolFull = 1000
 type usedRec struct {
 	Seq uint64
 	key.Use
+}
+
+// cancelUnsent cancels step st of plan p, which nothing has sent since it
+// was last known not to have acted: queued, unsent, or proved not done. Its
+// dispatch's charge comes off the ledger, so a cancel leaves no cap spent on
+// an effect that never happened (KRN-8). A step RETRY sent again may have
+// acted before it parked, so it goes back to parked, charged and listed.
+func (s *State) cancelUnsent(p *PlanState, st *StepState) {
+	if st.Retried {
+		st.Phase = PParked
+		return
+	}
+	st.Phase = PCancelled
+	for _, id := range p.Scopes {
+		s.uses[id] = slices.DeleteFunc(s.uses[id], func(u usedRec) bool { return u.Seq == st.DispatchSeq })
+	}
 }
 
 // State is the log folded: the only input to Decide besides the event.
@@ -917,7 +934,7 @@ func (s *State) Apply(e Entry) error {
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
 			p.Status = SCancelled
 			if st := &p.Steps[p.Next]; sendable(st.Phase) {
-				st.Phase = PCancelled
+				s.cancelUnsent(p, st)
 			}
 		}
 	case TStepHeld:
@@ -959,7 +976,7 @@ func (s *State) Apply(e Entry) error {
 			case OUnsent:
 				st.Phase, st.NextProbe = PUnsent, e.At+unsentWait(st.Attempt)
 				if p.Status != SActive {
-					st.Phase = PCancelled // nothing was sent, and nothing will be
+					s.cancelUnsent(p, st) // nothing was sent, and nothing will be
 				}
 			case "failed":
 				st.Phase = PFailed
@@ -983,9 +1000,9 @@ func (s *State) Apply(e Entry) error {
 					st.Covered, st.SentAt = b.Covered, e.At
 				}
 			case "notdone":
-				st.Phase = PRedo
+				st.Phase, st.Retried = PRedo, false
 				if p.Status != SActive {
-					st.Phase = PCancelled
+					s.cancelUnsent(p, st)
 				}
 			case OUnreached:
 				st.NextProbe = e.At + ProbeEvery // no check was made, so none counts
@@ -1018,7 +1035,7 @@ func (s *State) Apply(e Entry) error {
 		// The redo runs Next's checks again: key, revocation, pause, STOP,
 		// limits as of the first dispatch, under the same idempotency key.
 		if p, st := s.step(b); st != nil && retryable(p, st) {
-			st.Phase, st.Checks = PRedo, 0
+			st.Phase, st.Checks, st.Retried = PRedo, 0, true
 		}
 	case TTaskOpened, TTaskApproved, TTaskEnded:
 		return s.applyTask(e)

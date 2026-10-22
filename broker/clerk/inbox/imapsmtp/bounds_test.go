@@ -124,8 +124,8 @@ func TestHostileReplyIsBounded(t *testing.T) {
 			d := time.Since(start)
 			grew := peak()
 			runtime.ReadMemStats(&after)
-			if err == nil {
-				t.Fatal("an endless reply was answered as success")
+			if !errors.Is(err, ErrReplyTooLarge) {
+				t.Fatalf("an endless reply: err %v, want ErrReplyTooLarge", err)
 			}
 			if d > 5*time.Second {
 				t.Fatalf("the call took %v: it read until the timeout instead of stopping at its budget", d)
@@ -479,8 +479,8 @@ func TestHostileSMTPReplyIsBounded(t *testing.T) {
 			d := time.Since(start)
 			grew := peak()
 			runtime.ReadMemStats(&after)
-			if err == nil {
-				t.Fatal("an endless reply was answered as success")
+			if !errors.Is(err, ErrReplyTooLarge) {
+				t.Fatalf("an endless reply: err %v, want ErrReplyTooLarge", err)
 			}
 			if d > 5*time.Second {
 				t.Fatalf("the call took %v: it read until the timeout instead of stopping at its budget", d)
