@@ -10,11 +10,13 @@
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
 # GUID shared) fails the health check, so that boot is never blessed and reboots into its next try.
-# With E2E set to a directory holding a static box-e2e (broker/e2e/boxe2e), a fourth boot on a
+# A drive holding a previous release, with health forced to fail on counted boots, runs its new
+# entry's tries down to zero and falls back to the previous release (IMG-3).
+# With E2E set to a directory holding a static box-e2e (broker/e2e/boxe2e), a last boot on a
 # fresh copy runs the end-to-end setup run inside the box (#1688): e2e/ holds its unit and drop-ins,
 # passed as SMBIOS credentials, which systemd honours only in a VM, so the image itself is unchanged.
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
-# console-two-drives.log, console-e2e.log.
+# console-two-drives.log, console-fallback.log, console-e2e.log.
 set -eu
 HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
@@ -267,6 +269,76 @@ hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"
 # The failed check reboots into the entry's next try without anyone at the PC (UPD-1).
 has "$W/console-two-drives.log" "agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting"
 rm -f "$W/two-a.raw" "$W/two-b.raw"
+
+# Forced-fail fallback (UPD-1, IMG-3; REQ: UPD-1): a fresh copy whose ESP also holds a previous
+# release, the same entry under version 0 and without a counter (blessed), as an updater would
+# leave it. A drop-in passed as an SMBIOS credential, so the image itself is unchanged, fails the
+# health check on every counted boot and passes it on an uncounted one: the new release fails
+# every try, its counter runs down to zero across the reboots and it is never blessed, then the
+# fallback reboots into the previous release, which passes. Each forced failure prints the entry
+# it booted, so the console shows the counter at each try. The previous release has the same
+# /usr (slot B holds none until an updater writes one), so this shows the boot-counting fallback,
+# not a slot-B boot (image/ASSUMPTIONS.md I4).
+# esp DISK: the byte offset of the ESP (partition 1), for mtools' "-i DISK@@OFFSET".
+esp() {
+	python3 - "$1" <<'EOF'
+import sys
+with open(sys.argv[1], "rb") as f:
+    f.seek(512); h = f.read(92)
+    f.seek(int.from_bytes(h[72:80], "little") * 512); e = f.read(128)
+print(int.from_bytes(e[32:40], "little") * 512)
+EOF
+}
+# entries DISK: the boot entry file names on the drive's ESP, sorted, one per line.
+entries() { mdir -b -i "$1@@$(esp "$1")" ::/loader/entries | sed 's|.*/||' | grep '\.conf$' | LC_ALL=C sort; }
+forced_fail() {
+	cat <<'EOS'
+v=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+[ -e $v ] || exit 0
+echo "agentos-forced: health FAIL on counted entry $(tail -c +5 $v | tr -d '\000' | sed 's/.*\\//')"
+exit 1
+EOS
+}
+F=$W/fallback.raw
+copy "$F"
+new=$(entries "$F")
+if [ "$(echo "$new" | wc -l)" = 1 ] && echo "$new" | grep -qx 'agentos_[0-9][0-9.]*+3\.conf'; then
+	echo "ok   one counted entry $new"
+else
+	echo "MISS one entry agentos_VERSION+3.conf on the ESP ($(echo "$new" | tr '\n' ' '))"; fail=1
+fi
+base=${new%+3.conf}
+mtype -i "$F@@$(esp "$F")" "::/loader/entries/$new" | sed 's/^version .*/version 0/' >"$W/prev.conf"
+mcopy -i "$F@@$(esp "$F")" "$W/prev.conf" ::/loader/entries/agentos_0.conf
+FORCED_UNIT="[Service]\nExecStartPre=/bin/sh -c 'echo $(forced_fail | base64 -w0) | base64 -d | sh'\n"
+EXTRA="$(nm_cred systemd.unit-dropin.agentos-health.service "$FORCED_UNIT")" \
+	UNTIL="agentos-boot: bless=clean\|agentos-fallback: this boot entry is not counted\|agentos-fallback: no tries left on this boot entry and no other release" \
+	boot "$W/console-fallback.log" "$F"
+# Three tries, each failed with the counter one lower, each followed by the fallback's reboot.
+for want in "agentos-forced: health FAIL on counted entry $base+2-1.conf" \
+	"agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting" \
+	"agentos-forced: health FAIL on counted entry $base+1-2.conf" \
+	"agentos-fallback: health check failed, 1 tries left on this boot entry; rebooting" \
+	"agentos-forced: health FAIL on counted entry $base+0-3.conf" \
+	"agentos-fallback: no tries left on this boot entry; rebooting into the previous release"; do
+	has "$W/console-fallback.log" "$want"
+done
+[ "$(grep -ac "agentos-forced: " "$W/console-fallback.log")" = 3 ] && echo "ok   exactly three failed tries" ||
+	{ echo "MISS exactly three failed tries"; fail=1; }
+# Then the previous release boots, passes and stays up; the new release was never blessed.
+has "$W/console-fallback.log" "agentos-health: PASS secure_boot=on usr=verity"
+has "$W/console-fallback.log" "agentos-boot: bless=clean"
+hasnt "$W/console-fallback.log" "agentos-boot: bless=good"
+last=$(grep -a "agentos-forced: \|agentos-health: \|agentos-boot: " "$W/console-fallback.log" | clean | tail -n 1)
+case $last in
+*"agentos-boot: bless=clean"*) echo "ok   the previous release's report is the last boot" ;;
+*) echo "MISS the previous release's report as the last boot (last: $last)"; fail=1 ;;
+esac
+# On the ESP the new entry is spent and unblessed (+0-3), and the previous one is unchanged.
+got=$(entries "$F" | tr '\n' ' ')
+[ "$got" = "agentos_0.conf $base+0-3.conf " ] && echo "ok   entries $got" ||
+	{ echo "MISS entries agentos_0.conf $base+0-3.conf (got $got)"; fail=1; }
+rm -f "$F" "$W/prev.conf"
 
 # The station beside the access point (#936 r4b, image/ASSUMPTIONS.md P2-2w-c3-r4b-2-I1): a fresh copy boots
 # with mac80211_hwsim's two radios. wlan0 stands in for the box's; wlan1's radio is moved into its
@@ -561,11 +633,11 @@ if [ -n "${E2E:-}" ]; then
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
-	# The verdict is the host's alone: no console, from any of the four boots, may carry its text,
+	# The verdict is the host's alone: no console, from any of the boots, may carry its text,
 	# read both raw (text inside an OSC body, which cleaning deletes) and cleaned (text split by
 	# escape sequences), so a guest that writes it fails the run whichever boot it did it in
 	# (tools/ASSUMPTIONS.md D27).
-	for c in console console-reboot console-two-drives console-e2e; do
+	for c in console console-reboot console-two-drives console-fallback console-e2e; do
 		[ -f "$W/$c.log" ] || continue
 		for v in "G1 PROVEN" "G1 NOT PROVEN"; do
 			{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"

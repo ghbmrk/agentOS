@@ -140,7 +140,7 @@ jobs:
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives console-e2e; do
+          for l in console console-reboot console-two-drives console-fallback console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record
