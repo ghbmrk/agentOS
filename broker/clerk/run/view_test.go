@@ -242,3 +242,59 @@ func TestAFailedWriteIsUnknown(t *testing.T) {
 		t.Fatalf("a probe cut off mid-write: %q, want unknown", got)
 	}
 }
+
+// A call past what the clerk reads is never sent: the step fails as
+// too-large, not unknown, so it does not park with a false warning that it
+// may have happened, and a probe counts no check (#2708 item 1). One just
+// under the bound is sent.
+func TestACallPastTheBoundIsNeverSent(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "c.sock")
+	ln, err := ListenClerk(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan int, 1)
+	go func() {
+		n := 0
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				got <- n
+				return
+			}
+			n++
+			// The clerk's own read (serve): the call at the bound is read whole.
+			var in call
+			detail := "whole"
+			if json.NewDecoder(io.LimitReader(conn, maxCall)).Decode(&in) != nil {
+				detail = "cut"
+			}
+			conn.Write([]byte(`{"outcome":"failed","detail":"` + detail + `"}` + "\n"))
+			conn.Close()
+		}
+	}()
+	c := remote{Remote: Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
+	// sized is a request whose call is n bytes with its newline.
+	sized := func(n int) kernel.Request {
+		b, _ := json.Marshal(call{opDo, kernel.Request{}, snapshot{}})
+		return kernel.Request{Plan: kernel.Plan{ID: strings.Repeat("p", n-len(b)-1)}}
+	}
+	big, fits := sized(maxCall+1), sized(maxCall)
+	if b, _ := json.Marshal(call{opDo, fits, snapshot{}}); len(b)+1 != maxCall {
+		t.Fatalf("the call that fits is %d bytes with its newline, want %d", len(b)+1, maxCall)
+	}
+	if res := c.do(big, snapshot{}); res.Outcome != "failed" || res.Detail != DTooLarge {
+		t.Errorf("a call past the bound: %+v", res)
+	}
+	if got := c.probe(big, snapshot{}); got != kernel.OUnreached {
+		t.Errorf("a probe past the bound: %q", got)
+	}
+	if res := c.do(fits, snapshot{}); res.Detail != "whole" {
+		t.Errorf("a call at the bound: %+v", res)
+	}
+	ln.Close()
+	if n := <-got; n != 1 {
+		t.Fatalf("%d calls reached the clerk, want only the one at the bound", n)
+	}
+}

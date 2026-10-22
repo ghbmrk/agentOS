@@ -36,6 +36,7 @@ const (
 	DUnreachable = "unreachable" // no clerk listening, or the wrong uid on the socket; nothing sent
 	DLost        = "lost"        // the call was sent and no answer came back
 	DView        = "view"        // the call's view does not cover the step; nothing sent
+	DTooLarge    = "too-large"   // the call is past what a clerk reads (maxCall); nothing sent
 )
 
 type call struct {
@@ -222,8 +223,12 @@ func (c remote) Probe(r kernel.Request, v kernel.View) string {
 // do and probe make a call with a view taken under the kernel's lock, so the
 // call itself runs without it (KRN-7).
 func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
-	a, sent := c.call(opDo, r, s)
+	a, sent, big := c.call(opDo, r, s)
 	switch {
+	case big:
+		// The clerk would read only part of it, so it was never sent and
+		// nothing happened: a typed failure, not a lost answer.
+		return kernel.Result{Outcome: "failed", Detail: DTooLarge}
 	case !sent:
 		// Nothing reached the clerk, so nothing happened: the kernel sends
 		// it again after a wait (kernel.OUnsent).
@@ -235,7 +240,7 @@ func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
 }
 
 func (c remote) probe(r kernel.Request, s snapshot) string {
-	a, sent := c.call(opProbe, r, s)
+	a, sent, _ := c.call(opProbe, r, s)
 	switch {
 	case !sent:
 		return kernel.OUnreached // no check was made, so none counts
@@ -246,11 +251,16 @@ func (c remote) probe(r kernel.Request, s snapshot) string {
 }
 
 // call sends one call and reads its answer. sent is false only when no byte
-// of the call can have reached the clerk.
-func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent bool) {
+// of the call can have reached the clerk. big is true for a call past
+// maxCall, which the clerk would read only part of, so it is not sent
+// (#2708 item 1).
+func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent, big bool) {
 	b, err := json.Marshal(call{op, r, s})
 	if err != nil {
-		return nil, false
+		return nil, false, false
+	}
+	if len(b)+1 > maxCall {
+		return nil, false, true
 	}
 	d := c.Timeout
 	if d == 0 {
@@ -258,21 +268,21 @@ func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent b
 	}
 	conn, err := net.DialTimeout("unix", c.Socket, 10*time.Second)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	defer conn.Close()
 	if uid, ok := sockets.PeerUID(conn); !ok || uid != c.UID {
-		return nil, false
+		return nil, false, false
 	}
 	conn.SetDeadline(time.Now().Add(d))
 	if _, err := conn.Write(append(b, '\n')); err != nil {
-		return nil, true
+		return nil, true, false
 	}
 	var ans answer
 	if json.NewDecoder(io.LimitReader(conn, maxAnswer)).Decode(&ans) != nil {
-		return nil, true
+		return nil, true, false
 	}
-	return &ans, true
+	return &ans, true, false
 }
 
 // one is outcome when it is one of ok, else unknown.
