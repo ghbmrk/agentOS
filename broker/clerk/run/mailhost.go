@@ -107,7 +107,8 @@ func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailCo
 // refresh reads the account again and waits for the read; h.mu is held, and
 // released while the mailbox is read. A read in flight is shared, not
 // started again: it is of the account as it is now, since setup and removal
-// wait for it before they change the account (idle).
+// wait for it before they change the account (idle). After a good read, a
+// mailbox Mail.Unchanged finds the same is not read again (#2742 item 1).
 func (h *MailHost) refresh() {
 	if h.reading != nil {
 		h.wait()
@@ -115,11 +116,20 @@ func (h *MailHost) refresh() {
 	}
 	done := make(chan struct{})
 	h.reading = done
+	last, failed := h.cur, h.why != ""
 	h.mu.Unlock()
-	m, err := OpenMail(h.ctx, h.dir, h.sec, h.cfg)
+	var m *Mail
+	var err error
+	skip := last != nil && !failed && last.Unchanged(h.ctx, h.dir, h.sec, h.cfg)
+	if !skip {
+		m, err = OpenMail(h.ctx, h.dir, h.sec, h.cfg)
+	}
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
+	if skip {
+		return
+	}
 	h.why, h.stop = "", nil
 	switch {
 	case errors.Is(err, ErrNoMailAccount):

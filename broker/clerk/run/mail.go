@@ -255,6 +255,8 @@ type Mail struct {
 	*inbox.Account
 	Status MailStatus
 	world  func() inbox.World // the world the account judges VRB-2 in
+	mark   inbox.Mark         // the mailbox's Mark before the read; nil: none
+	day    string             // the read's date
 }
 
 // OpenMail is the mail clerk over the account in dir: it reads the newest
@@ -263,14 +265,68 @@ type Mail struct {
 // opened at that connection. LastOpened in the world VRB-2 reads is the
 // clerk's own, from the account's read mail and its sealed record
 // (lastOpened); the rest of the world is c.World's, and its Today dates the
-// read.
+// read. The mailbox's Mark is taken before the read, so mail arriving
+// during it moves the next one.
 func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) (*Mail, error) {
-	s, err := readMail(dir)
+	box, s, err := mailBox(dir, sec, c)
 	if err != nil {
 		return nil, err
 	}
+	mark, _ := box.Mark(ctx) // nil on any error: the next read is not skipped
+	ms, err := box.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	today := c.today()
+	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
+	m := &Mail{Status: status, mark: mark, day: today, world: func() inbox.World {
+		w := c.World()
+		w.LastOpened = opened
+		return w
+	}}
+	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// Unchanged reports whether a read now would find what m's read found: the
+// same day, which Opened also moves with, and a Mark the same as the one m
+// was read under (#2742 item 1). A server whose STATUS leaves an item out
+// is read again the next day, not at every listing; any other error reads
+// again, so a failure such as a refused sign-in is found and told. A read
+// with no Mark, or whose record of read mail may yet come out otherwise
+// (MailStatus.again), is read again at once.
+func (m *Mail) Unchanged(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig) bool {
+	today := c.today()
+	if m.day != today || m.Status.again {
+		return false
+	}
+	box, _, err := mailBox(dir, sec, c)
+	if err != nil {
+		return false
+	}
+	now, err := box.Mark(ctx)
+	return unchanged(m, today, now, err)
+}
+
+// unchanged is Unchanged's answer for m, given today and the Mark now with
+// the error taking it.
+func unchanged(m *Mail, today string, now inbox.Mark, err error) bool {
+	if m.day != today || m.Status.again {
+		return false
+	}
+	return errors.Is(err, imapsmtp.ErrPartialStatus) || m.mark.Same(now)
+}
+
+// mailBox is the mailbox of the account in dir, and its settings.
+func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSettings, error) {
+	s, err := readMail(dir)
+	if err != nil {
+		return nil, s, err
+	}
 	if c.Sealer == nil || c.World == nil {
-		return nil, errors.New("run: a mail clerk needs its sealer and its world")
+		return nil, s, errors.New("run: a mail clerk needs its sealer and its world")
 	}
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
 		Credential: sec.Login(slotOf(s), s.login()), From: s.Address, Guard: c.Guard}
@@ -282,25 +338,15 @@ func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig)
 	}
 	st, err := imapsmtp.New(cfg)
 	if err != nil {
-		return nil, err
+		return nil, s, err
 	}
-	box := inbox.NewLive(st)
-	ms, err := box.Read(ctx)
-	if err != nil {
-		return nil, err
+	return inbox.NewLive(st), s, nil
+}
+
+// today is the date c's world gives, or UTC's.
+func (c MailConfig) today() string {
+	if t := c.World().Today; t != "" {
+		return t
 	}
-	today := c.World().Today
-	if today == "" {
-		today = time.Now().UTC().Format(time.DateOnly)
-	}
-	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
-	m := &Mail{Status: status, world: func() inbox.World {
-		w := c.World()
-		w.LastOpened = opened
-		return w
-	}}
-	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
-		return nil, err
-	}
-	return m, nil
+	return time.Now().UTC().Format(time.DateOnly)
 }

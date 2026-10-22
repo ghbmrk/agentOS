@@ -125,6 +125,11 @@ func markTold(dir string, s clerk.Sealer, slot string) error {
 type MailStatus struct {
 	Lines    []string
 	WarmedUp string
+	// again: the record of read mail failed for a reason the next read may
+	// not repeat, so an unchanged mailbox is read again all the same. The
+	// lasting reasons last until the owner changes the mailbox, which moves
+	// its Mark (Mail.Unchanged).
+	again bool
 }
 
 // trouble is the owner's words for why a read of the mailbox failed, and
@@ -213,6 +218,7 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 				fail[from] = today
 			}
 		}
+		st.again = !lasting(err)
 		why, next := trouble(err)
 		st.Lines = append(st.Lines, "Unsubscribing is paused: "+why+", so I can't tell whose mail you have read. "+next)
 		return fail, st
@@ -241,9 +247,18 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 	if err := saveSeen(dir, s, slot, rec); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
+		st.again = true
 		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again at the next check.")
 	}
 	return got, st
+}
+
+// lasting reports whether err, failing the record of read mail, lasts
+// until the owner changes the mailbox: too much read mail, or one read
+// mail's header too long to check.
+func lasting(err error) bool {
+	var long *imapsmtp.LongHeaderError
+	return errors.Is(err, inbox.ErrTooMuchReadMail) || errors.As(err, &long)
 }
 
 // warmedUp is the notice that the warm-up ended, with n senders eligible.

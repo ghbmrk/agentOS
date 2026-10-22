@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -164,8 +165,17 @@ type hostRig struct {
 	held    chan struct{} // a read reached the reader while held
 	release chan struct{}
 	asks    atomic.Int64
-	imap    string       // the server's IMAP address, through a forwarder
-	dials   atomic.Int64 // connections the clerk made to it
+	imap    string                 // the server's IMAP address, through a forwarder
+	dials   atomic.Int64           // connections the clerk made to it
+	more    int                    // mails moved delivered
+	onDial  atomic.Pointer[func()] // run as each connection is forwarded, before the server answers
+}
+
+// moved delivers another mail, so the next re-read finds the mailbox's Mark
+// moved and reads it (#2742 item 1).
+func (r *hostRig) moved() {
+	r.more++
+	r.srv.Deliver("INBOX", mailFrom("deals@shop.test", fmt.Sprintf("<d%d@shop.test>", r.more)))
 }
 
 // forward relays connections to addr, counting them in n: every sign-in
@@ -206,7 +216,12 @@ func newHostRig(t *testing.T, password string) *hostRig {
 	t.Helper()
 	r := &hostRig{srv: imaptest.Start(t), held: make(chan struct{}, 8), release: make(chan struct{})}
 	r.srv.Deliver("INBOX", mailFrom("news@shop.test", "<n1@shop.test>"))
-	r.imap = forward(t, r.srv.IMAP, &r.dials)
+	r.imap = forwardTo(t, func() string {
+		if f := r.onDial.Load(); f != nil {
+			(*f)()
+		}
+		return r.srv.IMAP
+	}, &r.dials)
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
 	if err != nil {
@@ -235,6 +250,7 @@ func newHostRig(t *testing.T, password string) *hostRig {
 // that overlap it share it (#2732 item 1).
 func TestAMailboxReadHoldsUpNothingElse(t *testing.T) {
 	r := newHostRig(t, imaptest.Password)
+	r.moved()
 	r.hold.Store(true)
 	before := r.asks.Load()
 	done := make(chan error, 2)
@@ -260,8 +276,8 @@ func TestAMailboxReadHoldsUpNothingElse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := r.asks.Load() - before; n != 1 {
-		t.Fatalf("two overlapping re-reads read the mailbox %d times, want once", n)
+	if n := r.asks.Load() - before; n != 2 { // one read classes both mails
+		t.Fatalf("two overlapping re-reads classed %d mails, want one read's 2", n)
 	}
 }
 
@@ -270,6 +286,7 @@ func TestAMailboxReadHoldsUpNothingElse(t *testing.T) {
 // next good read clears the line (#2732 item 2).
 func TestAFailedReadKeepsTheLastClerk(t *testing.T) {
 	r := newHostRig(t, imaptest.Password)
+	r.moved()
 	r.srv.FailList("INBOX", true)
 	if ls, err := r.planner.Reread(); err != nil || len(ls) != 1 {
 		t.Fatalf("a failed re-read: %v, %v; want the last listing", ls, err)
@@ -615,6 +632,7 @@ func TestToldLeavesTheWarmUpEndItDidNotCover(t *testing.T) {
 	if err := saveSeen(r.h.dir, testSealer(), slotOf(other), rec); err != nil {
 		t.Fatal(err)
 	}
+	r.moved()
 	if _, err := r.planner.Reread(); err != nil {
 		t.Fatal(err)
 	}
@@ -635,6 +653,7 @@ func TestSetupWaitsForTheReadInFlight(t *testing.T) {
 	r := newHostRig(t, imaptest.Password)
 	s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
 	r.hold.Store(true)
+	r.moved()
 	go r.planner.Reread()
 	<-r.held
 	other := s
@@ -660,6 +679,7 @@ func TestSetupWaitsForTheReadInFlight(t *testing.T) {
 func TestRemovalWaitsForTheReadInFlight(t *testing.T) {
 	r := newHostRig(t, imaptest.Password)
 	r.hold.Store(true)
+	r.moved()
 	go r.planner.Reread()
 	<-r.held
 	removed := make(chan error, 1)
@@ -706,6 +726,7 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 	}
 	// A re-read between the owner side's read and its Told tells it anew;
 	// shown once, it is not told again (#2737 lens UX 1).
+	r.moved()
 	if _, err := r.planner.Reread(); err != nil {
 		t.Fatal(err)
 	}
@@ -732,6 +753,7 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 	r.planner = MailPlanner{serveMail(t, r.h, MailPlannerSide)}
 	st, _ = r.owner.Status()
 	r.hold.Store(true)
+	r.moved()
 	go r.planner.Reread()
 	<-r.held
 	told := make(chan error, 1)
@@ -787,5 +809,40 @@ func TestAFailedReadLabelsTheLastGoodReadsLines(t *testing.T) {
 	h.why, h.cur.Status.Lines = "I could not read your mailbox: reason. Next.", nil
 	if got := h.status().Lines; !slices.Equal(got, []string{h.why}) {
 		t.Fatalf("status after a failed read, no older lines: %q", got)
+	}
+}
+
+// A re-read on the same day of a mailbox whose Mark has not moved reads
+// nothing; new mail reads it again, even mail that arrived during the last
+// read, too late for it, since the Mark is taken before the read (#2742
+// item 1).
+func TestAnUnchangedMailboxIsNotReadAgain(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	before := r.asks.Load()
+	for range 3 {
+		if ls, err := r.planner.Reread(); err != nil || len(ls) != 1 {
+			t.Fatalf("a re-read of an unchanged mailbox: %v, %v", ls, err)
+		}
+	}
+	if n := r.asks.Load() - before; n != 0 {
+		t.Fatalf("re-reads of an unchanged mailbox classed %d mails, want none", n)
+	}
+
+	r.moved()
+	var dials atomic.Int64
+	during := func() {
+		// Sessions: the change check, the read's Mark, then the read's
+		// folders, UIDs and fetch; the mail lands after the UIDs.
+		if dials.Add(1) == 5 {
+			r.moved()
+		}
+	}
+	r.onDial.Store(&during)
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	r.onDial.Store(nil)
+	if ls, err := r.planner.Reread(); err != nil || len(ls) != 3 {
+		t.Fatalf("mail that arrived during the last read: %v, %v; want it read", ls, err)
 	}
 }

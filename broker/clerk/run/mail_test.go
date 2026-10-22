@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -421,5 +423,41 @@ func TestAFailedOpenedReadOffersNoUnsubscribe(t *testing.T) {
 	}
 	if offered(true) {
 		t.Fatal("after a failed read of opened mail, the sender is offered for unsubscribing")
+	}
+}
+
+// A read is skipped only on its own day, under a Mark the same as the one
+// it was read under, and with its record of read mail settled; a STATUS
+// that leaves an item out waits for the next day, and any other failure to
+// take the Mark reads again (#2742 item 1).
+func TestWhenAnUnchangedMailboxIsReadAgain(t *testing.T) {
+	mk := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 5, Messages: 3}}
+	moved := inbox.Mark{{Folder: "INBOX", Validity: 1, Next: 6, Messages: 4}}
+	read := func(mark inbox.Mark, again bool) *Mail {
+		return &Mail{mark: mark, day: "2026-10-21", Status: MailStatus{again: again}}
+	}
+	partial := fmt.Errorf("%w: UNSEEN in %q", imapsmtp.ErrPartialStatus, "INBOX")
+	for _, c := range []struct {
+		name  string
+		m     *Mail
+		today string
+		now   inbox.Mark
+		err   error
+		want  bool
+	}{
+		{"unchanged", read(mk, false), "2026-10-21", mk, nil, true},
+		{"a new day", read(mk, false), "2026-10-22", mk, nil, false},
+		{"moved", read(mk, false), "2026-10-21", moved, nil, false},
+		{"record unsettled", read(mk, true), "2026-10-21", mk, nil, false},
+		{"partial STATUS", read(mk, false), "2026-10-21", nil, partial, true},
+		{"partial STATUS, a new day", read(mk, false), "2026-10-22", nil, partial, false},
+		{"refused sign-in", read(mk, false), "2026-10-21", nil, imapsmtp.ErrLoginRefused, false},
+		{"unreachable", read(mk, false), "2026-10-21", nil, imapsmtp.ErrUnreachable, false},
+		{"no Mark at the read", read(nil, false), "2026-10-21", mk, nil, false},
+		{"no Mark at the read, partial STATUS", read(nil, false), "2026-10-21", nil, partial, true},
+	} {
+		if got := unchanged(c.m, c.today, c.now, c.err); got != c.want {
+			t.Errorf("%s: unchanged %v, want %v", c.name, got, c.want)
+		}
 	}
 }
