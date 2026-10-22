@@ -111,3 +111,35 @@ func TestSecretListsAreTheSpecs(t *testing.T) {
 		t.Errorf("notSecret %v, SPEC %v", slices.Sorted(maps.Keys(notSecret)), slices.Sorted(maps.Keys(exempt)))
 	}
 }
+
+// The secret-screen check measured on a synthetic corpus of checkout,
+// product and account-settings texts (testdata/secret_screens.txt): every
+// line's mark is pinned, so a list change that adds a false positive or a
+// miss fails here. The counts are in ASSUMPTIONS T3.
+func TestSecretScreenCorpus(t *testing.T) {
+	b, err := os.ReadFile("testdata/secret_screens.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var section string
+	n := map[string]int{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = strings.Trim(line, "[]")
+			continue
+		}
+		mark, text, ok := strings.Cut(line, " ")
+		if !ok || !strings.Contains("-+!", mark) || len(mark) != 1 {
+			continue
+		}
+		if got, want := secretText(text) != "", mark != "-"; got != want {
+			t.Errorf("%s %q: marked %v, want %v (%q)", section, text, got, want, secretText(text))
+		}
+		n[section+mark]++
+	}
+	if n["checkout-"] == 0 || n["secret+"] == 0 || n["checkout+"]+n["secret!"] > 0 {
+		t.Fatalf("corpus shape %v", n)
+	}
+	t.Logf("checkout texts %d, false positives %d; secret texts %d, missed %d",
+		n["checkout-"]+n["checkout!"], n["checkout!"], n["secret+"]+n["secret-"], n["secret-"])
+}

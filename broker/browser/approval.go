@@ -40,6 +40,11 @@ type Approval struct {
 	// FieldsOmitted counts typed fields past maxFields, which Print still
 	// covers.
 	FieldsOmitted int `json:"fields_omitted,omitempty"`
+	// Secret is the word that marks the request's screen as one that may
+	// reveal or create a secret (VRB-1, CLK-5 "Secret screens"), "" if
+	// none. No task approval covers such a request, so the card asks only
+	// for this exact approval, never the task's tap.
+	Secret string `json:"secret,omitempty"`
 	// Unknown names what the gate cannot read and the prompt must say is
 	// unknown: the accessibility snapshot shows no method, hidden fields
 	// or untyped fields, those the agent did not type (K15).
@@ -116,6 +121,7 @@ func (g *Gate) approval(req Request, l link) Approval {
 	}
 	a := Approval{Origin: origin, Site: site(reach), Page: show(g.untoken(g.page), MaxURL), Verb: req.Verb, Role: show(shown.role, maxLabel),
 		Target: show(shown.target, MaxURL), Unknown: unknown, Request: show(string(req.Encode()), maxRequest)}
+	a.Secret = g.secretScreen(l)
 	if shown.name != "" {
 		a.Label = quote(shown.name)
 		a.Folded = capText(owner.SkeletonFold(show(shown.name, maxLabel), true), maxLabel)

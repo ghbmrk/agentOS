@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,19 +78,17 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	var rec ran
 	switch st.Verb {
 	case key.Read:
-		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value))
+		res, rec.effect, rec.lost = c.g.do(context.Background(), []byte(st.Args["query"].Value), c.tasks(v, ver, now))
 	case key.Post:
 		// The owner approves this exact print, or the task the key serves
-		// on the site the request reaches (CLK-3, D-147).
-		var tc *cover
+		// on the site the request reaches (CLK-3, D-147). A task with an
+		// approval on another site gets the approval this request needs.
+		var tc covers
 		if !approval(ver, now) {
-			site := c.g.siteOf([]byte(st.Args["msg"].Value))
-			a, ok := kernel.TaskApproved(v, c.Anchors, ver, site, now)
-			if site == "" || !ok {
+			if tc = c.tasks(v, ver, now); tc("") == nil {
 				c.record(id, ran{})
 				return kernel.Result{Outcome: "failed", Detail: "unapproved"}
 			}
-			tc = &cover{site: a.Site}
 		}
 		// A redo of a submit this clerk wrote and did not see succeed is
 		// the owner's RETRY: Probe answers unknown for it, so the kernel
@@ -107,7 +107,7 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	}
 	rec.ok = res.OK
 	c.record(id, rec)
-	out := kernel.Result{Outcome: "failed", Detail: logged(res)}
+	out := kernel.Result{Outcome: "failed", Detail: logged(res), Covered: res.Covered}
 	switch {
 	case res.OK:
 		out.Outcome = "ok"
@@ -196,14 +196,22 @@ func approval(ver *key.Verified, now int64) bool {
 
 // coveredLine is the fixed-wording STATUS line for a submit a task's
 // approval covered: the site, the control's visible label and the time
-// sent (CLK-3). Its full fields are the approval beside it in the log.
+// sent (CLK-3). Its full fields are the approval beside it in the log. The
+// site and label are cut so the line fits kernel.MaxShown, which drops a
+// longer line rather than show it.
 func coveredLine(a Approval, now int64) string {
 	label := a.Label
 	if label == "" {
 		label = strings.TrimSpace(a.Role + " " + a.Verb + " " + a.Target)
 	}
-	return "Sent on " + a.Site + ": " + label + ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
+	at := ", " + time.UnixMilli(now).UTC().Format(time.RFC3339)
+	site := capText(a.Site, maxLineSite)
+	room := kernel.MaxShown - len("Sent on : ") - len(site) - len(at) - len("…")
+	return "Sent on " + site + ": " + capText(label, room) + at
 }
+
+// maxLineSite bounds the site in a covered line, leaving the label room.
+const maxLineSite = 96
 
 // MaxApproval bounds how long an approval may live, in ms: one task's
 // submits, not a standing permission (D-147).
@@ -223,6 +231,22 @@ func logged(res Result) string {
 		d, _ = json.Marshal(small(res))
 	}
 	return string(d)
+}
+
+// tasks reads the approvals of the task ver's key serves, live on the
+// clerk's clock and co-signed by a passkey of its own anchors' set: the
+// one for the site asked, or else the first other one, by site, so the
+// gate can say a request is on another site; nil if there is none (CLK-3).
+func (c *Clerk) tasks(v kernel.View, ver *key.Verified, now int64) covers {
+	return func(site string) *cover {
+		t, _ := v.Task(ver.Limits.Task, now)
+		for _, s := range append([]string{site}, slices.Sorted(maps.Keys(t.Approvals))...) {
+			if a, ok := kernel.TaskApproved(v, c.Anchors, ver, s, now); ok {
+				return &cover{a.Site}
+			}
+		}
+		return nil
+	}
 }
 
 // stepID names a step of a signed plan.
