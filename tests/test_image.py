@@ -1012,11 +1012,11 @@ class HealthTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_health(self):
+    def run_health(self, cwd=None):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]),
                    AGENTOS_LIB=str(self.lib), AGENTOS_HEALTH_ROOT=str(self.root))
         return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/health")], env=env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=cwd)
 
     def test_pass(self):
         r = self.run_health()
@@ -1033,40 +1033,110 @@ class HealthTest(unittest.TestCase):
         r = self.run_health()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def cat_vanishes(self, dev, gone=True):
-        # A cat whose read of DEV's forwarding switch fails as if the device left between the
-        # health check's glob and its read; with GONE the file is removed first (#2803).
+    def cat_vanishes(self, path, gone=True):
+        # A cat whose read of PATH (a sysctl under /proc/sys/net, glob allowed) fails as if the
+        # device left between the health check's glob and its read; with GONE the file is removed
+        # first (#2803).
         rm = 'rm -f "$1"; ' if gone else ''
-        stub(self.bin, "cat", 'case "$1" in */conf/%s/*forwarding) %sexit 1 ;; esac; exec /bin/cat "$@"'
-             % (dev, rm))
+        stub(self.bin, "cat", 'case "$1" in */proc/sys/net/%s) %sexit 1 ;; esac; exec /bin/cat "$@"'
+             % (path, rm))
 
     def test_device_that_vanishes_mid_check_passes(self):
         # REQ: UPD-1. #2803: hwsim moved wlan1 into its own namespace between the glob and the read.
         for v in ("ipv4", "ipv6"):
             write(self.root, "proc/sys/net/%s/conf/wlan1/forwarding" % v, "0\n")
         write(self.root, "proc/sys/net/ipv6/conf/wlan1/force_forwarding", "0\n")
-        self.cat_vanishes("wlan1")
+        self.cat_vanishes("*/conf/wlan1/*forwarding")
         r = self.run_health()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("forward=off", r.stdout)
 
     def test_device_present_but_unreadable_fails(self):
         # Only a switch that is gone is skipped: one still present that cannot be read fails.
-        self.cat_vanishes("eth0", gone=False)
+        self.cat_vanishes("*/conf/eth0/*forwarding", gone=False)
         r = self.run_health()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("forwarding is on (/proc/sys/net/ipv4/conf/eth0/forwarding)", r.stdout)
 
-    def test_global_switches_never_skipped(self):
-        # "all", "default" and ip_forward never vanish: a failed read of one fails even if it is gone.
-        for dev in ("all", "default"):
-            with self.subTest(dev):
+    def test_renamed_device_is_reglobbed(self):
+        # REQ: UPD-1. A rename looks like a vanish, and the new name was never globbed: eth0 with
+        # forwarding on becomes eth1 during its read (the read fails) or just after it (the read
+        # gave 1 and the switch is gone by the existence check). The fresh glob finds eth1.
+        for name, act in (("during the read", "exit 1"), ("after the read", "echo 1; exit 0")):
+            with self.subTest(name):
                 self.tearDown()
                 self.setUp()
-                self.cat_vanishes(dev)
+                conf = self.root / "proc/sys/net/ipv4/conf"
+                write(conf, "eth0/forwarding", "1\n")
+                stub(self.bin, "cat", 'case "$1" in */ipv4/conf/eth0/forwarding) mv "%s/eth0" "%s/eth1"; %s ;; esac;'
+                                      ' exec /bin/cat "$@"' % (conf, conf, act))
                 r = self.run_health()
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("agentos-health: FAIL", r.stdout)
+                self.assertIn("forwarding is on (/proc/sys/net/ipv4/conf/eth1/forwarding)", r.stdout)
+
+    def test_missing_device_tree_fails_on_all(self):
+        # With no ipv4/conf at all the device glob matches nothing, which is no device; the check
+        # still fails, because "all" and "default" must exist.
+        shutil.rmtree(self.root / "proc/sys/net/ipv4/conf")
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("forwarding state unreadable (/proc/sys/net/ipv4/conf/all/forwarding)", r.stdout)
+
+    def test_device_named_like_the_glob_is_reglobbed(self):
+        # A device may be named "*", so a path equal to the glob is no device only when "all"
+        # lacks the switch too. Here "all" has it, so "*" renamed mid-read gets the fresh glob.
+        conf = self.root / "proc/sys/net/ipv6/conf"
+        write(conf, "all/force_forwarding", "0\n")
+        write(conf, "*/force_forwarding", "1\n")
+        stub(self.bin, "cat", 'case "$1" in */ipv6/conf/[*]/force_forwarding) mv "%s/*" "%s/x"; exit 1 ;; esac;'
+                              ' exec /bin/cat "$@"' % (conf, conf))
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("forwarding is on (/proc/sys/net/ipv6/conf/x/force_forwarding)", r.stdout)
+
+    def test_device_globs_ignore_the_working_directory(self):
+        # REQ: UPD-1. A working directory holding a path that matches a device pattern must not
+        # stand in for the real devices: eth0 with forwarding on still fails.
+        for rel, sw in (("ipv4/conf/zz/forwarding", "ipv4/conf/eth0/forwarding"),
+                        ("ipv6/conf/zz/forwarding", "ipv6/conf/eth0/forwarding"),
+                        ("ipv6/conf/zz/force_forwarding", "ipv6/conf/eth0/force_forwarding")):
+            with self.subTest(rel):
+                self.tearDown()
+                self.setUp()
+                cwd = pathlib.Path(self.tmp.name) / "cwd"
+                write(cwd, rel, "0\n")
+                write(self.root, "proc/sys/net/" + sw, "1\n")
+                r = self.run_health(cwd=cwd)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("forwarding is on (/proc/sys/net/%s)" % sw, r.stdout)
+
+    def test_device_that_keeps_vanishing_fails(self):
+        # One re-glob is the limit: a switch that is gone again on the second pass fails.
+        conf = self.root / "proc/sys/net/ipv4/conf"
+        write(conf, "wlan1/forwarding", "0\n")
+        stub(self.bin, "cat", 'case "$1" in */ipv4/conf/wlan1/*) mv "%s/wlan1" "%s/wlan2"; exit 1 ;;'
+                              ' */ipv4/conf/wlan2/*) mv "%s/wlan2" "%s/wlan1"; exit 1 ;; esac; exec /bin/cat "$@"'
+             % ((conf,) * 4))
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("forwarding switches keep vanishing", r.stdout)
+
+    def test_global_switches_never_skipped(self):
+        # ip_forward, "all" and "default" never vanish: a failed read of one fails, whether the
+        # switch is still present or gone. ip_forward is read only by the global check; "all" and
+        # "default" are first read by the device loop, so one gone there fails as missing.
+        for path, gone, why in (("ipv4/ip_forward", True, "is on"), ("ipv4/ip_forward", False, "is on"),
+                                ("ipv4/conf/all/forwarding", True, "state unreadable"),
+                                ("ipv4/conf/all/forwarding", False, "is on"),
+                                ("ipv6/conf/default/forwarding", True, "state unreadable"),
+                                ("ipv6/conf/default/forwarding", False, "is on")):
+            with self.subTest(path=path, gone=gone):
+                self.tearDown()
+                self.setUp()
+                self.cat_vanishes(path, gone)
+                r = self.run_health()
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("forwarding %s (/proc/sys/net/%s)" % (why, path), r.stdout)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -1110,7 +1180,6 @@ class HealthTest(unittest.TestCase):
             "ipv6 default forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/default/forwarding", "1\n"),
             "ipv6 eth0 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/forwarding", "1\n"),
             "ipv6 eth0 forced forwarding": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "1\n"),
-            "ipv4 device switches unreadable": lambda: shutil.rmtree(self.root / "proc/sys/net/ipv4/conf"),
             "ipv6 default unreadable": lambda: (self.root / "proc/sys/net/ipv6/conf/default/forwarding").unlink(),
             "ipv4 all unreadable": lambda: (self.root / "proc/sys/net/ipv4/conf/all/forwarding").unlink(),
         }

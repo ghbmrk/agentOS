@@ -52,11 +52,27 @@ last=$(nft list chain inet agentos_inbound input 2>/dev/null | grep -v '^[[:spac
 # starts with). Kernels from 6.17 also force IPv6 forwarding per device. A device can vanish
 # between the glob and the read (a radio moved to another namespace, a USB NIC unplugged; #2803):
 # a switch that is gone forwards nothing, so it is skipped only when it no longer exists; a switch
-# still present that does not read 0 fails.
-for f in "$R"/proc/sys/net/ipv4/conf/*/forwarding "$R"/proc/sys/net/ipv6/conf/*/forwarding \
-	"$R"/proc/sys/net/ipv6/conf/*/force_forwarding; do
-	[ "$(cat "$f" 2>/dev/null)" = 0 ] || [ ! -e "$f" ] || fail "forwarding is on (${f#"$R"})"
-done
+# still present that does not read 0 fails. A rename also looks like a vanish, and the new name was
+# never globbed, so any skip re-runs the loop once with a fresh glob, and a second skip fails.
+devices() {
+	gone=
+	# Quoted, so the patterns glob only under /proc, never against the working directory.
+	for p in 'ipv4/conf/*/forwarding' 'ipv6/conf/*/forwarding' 'ipv6/conf/*/force_forwarding'; do
+		for f in "$R"/proc/sys/net/$p; do
+			[ "$(cat "$f" 2>/dev/null)" = 0 ] && continue
+			[ -e "$f" ] && fail "forwarding is on (${f#"$R"})"
+			# A glob that matches nothing comes back as itself (force_forwarding before 6.17): no
+			# device, unless "all" has the switch, when the glob should have matched at least that.
+			[ "$f" = "$R/proc/sys/net/$p" ] && [ ! -e "$R/proc/sys/net/${p%/\**}/all/${p##*/}" ] && continue
+			gone=${f#"$R"}
+		done
+	done
+}
+devices
+if [ -n "$gone" ]; then
+	devices
+	[ -z "$gone" ] || fail "forwarding switches keep vanishing ($gone)"
+fi
 # The global switch, "all" and "default" never vanish: missing or unreadable fails.
 for f in "$R/proc/sys/net/ipv4/ip_forward" "$R/proc/sys/net/ipv4/conf/all/forwarding" \
 	"$R/proc/sys/net/ipv4/conf/default/forwarding" "$R/proc/sys/net/ipv6/conf/all/forwarding" \
