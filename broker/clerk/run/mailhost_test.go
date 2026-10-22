@@ -3,6 +3,7 @@ package run
 // REQ: CLK-1, CH-11, VRB-2
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,7 +19,9 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -169,6 +172,12 @@ type hostRig struct {
 // attempt, refused or not, is one.
 func forward(t *testing.T, addr string, n *atomic.Int64) string {
 	t.Helper()
+	return forwardTo(t, func() string { return addr }, n)
+}
+
+// forwardTo is forward to whichever server to names at each connection.
+func forwardTo(t *testing.T, to func() string, n *atomic.Int64) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +190,7 @@ func forward(t *testing.T, addr string, n *atomic.Int64) string {
 				return
 			}
 			n.Add(1)
-			up, err := net.Dial("tcp", addr)
+			up, err := net.Dial("tcp", to())
 			if err != nil {
 				c.Close()
 				continue
@@ -287,7 +296,8 @@ func TestAFailedReadKeepsTheLastClerk(t *testing.T) {
 // (#2698 item 5).
 func TestARefusedSignInWaitsForTheOwner(t *testing.T) {
 	r := newHostRig(t, "not-the-password-1")
-	if st, _ := r.owner.Status(); !has(st.Lines, "refused my sign-in") {
+	// The side reaches STATUS through the host's path (#2698 items 32, 38).
+	if st, _ := r.owner.Status(); !has(st.Lines, "refused my sign-in for reading mail") {
 		t.Fatalf("status after a refused sign-in: %v", st.Lines)
 	}
 	dials := r.dials.Load()
@@ -314,82 +324,172 @@ func TestARefusedSignInWaitsForTheOwner(t *testing.T) {
 // not sign in either, even with a clerk the account opened before: no plan
 // drives failed sign-ins toward a lockout (#2737 combined 4).
 func TestARefusedSignInStopsStepsSigningIn(t *testing.T) {
-	r := newHostRig(t, imaptest.Password)
-	if m, _ := r.h.clerk(); m == nil {
-		t.Fatal("no clerk opened")
-	}
-	r.h.mu.Lock()
-	r.h.refused = true // as a re-read the server refused leaves it
-	r.h.mu.Unlock()
-	dials := r.dials.Load()
-	req := kernel.Request{Plan: kernel.Plan{ID: "p", Steps: []kernel.PlanStep{{Verb: key.Trash, Clerk: "mail"}}}}
-	if res := r.h.Do(req, nil); res.Outcome != "failed" || res.Detail != DSignInRefused {
-		t.Errorf("a step while the sign-in is refused: %+v", res)
-	}
-	if got := r.h.Probe(req, nil).Outcome; got != "unknown" {
-		t.Errorf("a probe while the sign-in is refused: %q", got)
-	}
-	if n := r.dials.Load() - dials; n != 0 {
-		t.Fatalf("a step or probe signed in %d times while refused", n)
+	for stop, detail := range map[error]string{imapsmtp.ErrLoginRefused: DSignInRefused, imapsmtp.ErrNoSignIn: DNoSignIn} {
+		r := newHostRig(t, imaptest.Password)
+		if m, _ := r.h.clerk(); m == nil {
+			t.Fatal("no clerk opened")
+		}
+		r.h.mu.Lock()
+		r.h.stop = stop // as a re-read that failed this way leaves it
+		r.h.mu.Unlock()
+		dials := r.dials.Load()
+		req := kernel.Request{Plan: kernel.Plan{ID: "p", Steps: []kernel.PlanStep{{Verb: key.Trash, Clerk: "mail"}}}}
+		if res := r.h.Do(req, nil); res.Outcome != "failed" || res.Detail != detail {
+			t.Errorf("a step after %v: %+v", stop, res)
+		}
+		if got := r.h.Probe(req, nil).Outcome; got != "unknown" {
+			t.Errorf("a probe after %v: %q", stop, got)
+		}
+		if n := r.dials.Load() - dials; n != 0 {
+			t.Fatalf("a step or probe signed in %d times after %v", n, stop)
+		}
 	}
 }
 
-// A step whose own sign-in the server refuses fails before any effect, and
-// from then on nothing signs in until the owner sets the account up again:
-// the step's refusal stops the clerk as a refused read does (#2708 item 2).
-func TestAStepsRefusedSignInStopsTheClerk(t *testing.T) {
-	srv := imaptest.Start(t)
-	srv.Deliver("INBOX", "From: news@shop.test\nTo: "+imaptest.User+"\nSubject: Sale\nMessage-ID: <m1@shop.test>\n\nsynthetic body\n")
+// noSignIn serves an IMAP server that offers no sign-in the clerk can make
+// (LOGINDISABLED, no AUTH=PLAIN), counting connections in dials.
+func noSignIn(t *testing.T, dials *atomic.Int64) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			go func() {
+				defer c.Close()
+				io.WriteString(c, "* OK [CAPABILITY IMAP4rev1 LOGINDISABLED] ready\r\n")
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					if tag, cmd, _ := strings.Cut(sc.Text(), " "); strings.EqualFold(cmd, "LOGOUT") {
+						io.WriteString(c, "* BYE\r\n"+tag+" OK bye\r\n")
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A server that offers no sign-in the clerk can make with these settings
+// (LOGINDISABLED, no AUTH=PLAIN) stops the clerk as a refusal does: STATUS
+// names the reading side and the IMAP settings, never a password, and
+// neither re-reads nor listings connect again until setup (#2698 item 32).
+func TestAServerWithNoSignInWaitsForTheOwner(t *testing.T) {
+	var dials atomic.Int64
+	addr := noSignIn(t, &dials)
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var dials atomic.Int64
-	s := MailSettings{Address: imaptest.User, IMAP: forward(t, srv.IMAP, &dials), SMTP: srv.SMTP}
-	if err := SetMail(dir, sec, s, imaptest.Password); err != nil {
+	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: addr, SMTP: "127.0.0.1:1"}, imaptest.Password); err != nil {
 		t.Fatal(err)
 	}
 	h := NewMailHost(context.Background(), dir, sec, mailConfig())
 	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
 	planner := MailPlanner{serveMail(t, h, MailPlannerSide)}
-	ls, err := planner.Listing()
-	if err != nil || len(ls) != 1 {
-		t.Fatalf("the listing: %v, %v", ls, err)
+	st, _ := owner.Status()
+	if !has(st.Lines, "doesn't accept a password sign-in for reading mail") || !has(st.Lines, "IMAP server settings") || has(st.Lines, "password from") || has(st.Lines, "try again") {
+		t.Fatalf("status for a server with no sign-in: %v", st.Lines)
 	}
-	sock := filepath.Join(shortDir(t), "mail.sock")
-	ln, err := ListenClerk(sock, os.Getuid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	go ServeClerk(ln, h, anchors)
-	b := newBoxFor(t, sock, inbox.Name, key.Organize)
-	// The password changes at the server's side, as an owner's reset would:
-	// the open clerk's next sign-in is refused.
-	if err := SetMail(dir, sec, s, "not-the-password-1"); err != nil {
-		t.Fatal(err)
-	}
-	id := b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/bulk"}})
-	b.tick(b.now)
-	if st := b.step(id); st.Detail != DSignInRefused {
-		t.Fatalf("a step whose sign-in was refused: %s %q", st.Phase, st.Detail)
-	}
-	if st, _ := owner.Status(); !has(st.Lines, "refused my sign-in") {
-		t.Fatalf("status after a step's refused sign-in: %v", st.Lines)
-	}
-	// Nothing signs in again: not a re-read, not the next step (#2742 item 15).
 	n := dials.Load()
-	if _, err := planner.Reread(); err == nil || err.Error() != ErrSignInRefused.Error() {
-		t.Fatalf("a re-read after a step's refused sign-in: %v", err)
+	for range 3 {
+		if _, err := planner.Reread(); err == nil || err.Error() != ErrNoPasswordSignIn.Error() {
+			t.Fatalf("a re-read: %v", err)
+		}
 	}
-	id = b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/later"}})
-	b.tick(b.now)
-	if st := b.step(id); st.Detail != DSignInRefused {
-		t.Fatalf("the next step after a refused sign-in: %s %q", st.Phase, st.Detail)
+	if got := dials.Load() - n; got != 0 {
+		t.Fatalf("%d connections after the server offered no sign-in", got)
 	}
-	if got := dials.Load(); got != n {
-		t.Fatalf("%d sign-ins after the server refused one", got-n)
+}
+
+// A step whose own sign-in the server refuses, or finds no sign-in for,
+// fails before any effect, and from then on nothing signs in until the owner
+// sets the account up again: the step's failure stops the clerk as a failed
+// read does (#2708 item 2, #2698 item 32).
+func TestAStepsFailedSignInStopsTheClerk(t *testing.T) {
+	for _, c := range []struct {
+		name, detail, status string
+		planner              error
+		// fail makes the open clerk's next sign-in fail that way.
+		fail func(t *testing.T, dir string, sec *clerk.Secrets, s MailSettings, to *atomic.Pointer[string], dials *atomic.Int64)
+	}{
+		{"refused", DSignInRefused, "refused my sign-in", ErrSignInRefused,
+			// The password changes at the server's side, as an owner's
+			// reset would.
+			func(t *testing.T, dir string, sec *clerk.Secrets, s MailSettings, _ *atomic.Pointer[string], _ *atomic.Int64) {
+				if err := SetMail(dir, sec, s, "not-the-password-1"); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{"no sign-in", DNoSignIn, "doesn't accept a password sign-in with these settings", ErrNoPasswordSignIn,
+			// The provider turns password sign-in off.
+			func(t *testing.T, _ string, _ *clerk.Secrets, _ MailSettings, to *atomic.Pointer[string], dials *atomic.Int64) {
+				addr := noSignIn(t, dials)
+				to.Store(&addr)
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := imaptest.Start(t)
+			srv.Deliver("INBOX", "From: news@shop.test\nTo: "+imaptest.User+"\nSubject: Sale\nMessage-ID: <m1@shop.test>\n\nsynthetic body\n")
+			dir := shortDir(t)
+			sec, err := OpenSecrets(dir, testSealer())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dials atomic.Int64
+			var to atomic.Pointer[string]
+			to.Store(&srv.IMAP)
+			s := MailSettings{Address: imaptest.User, IMAP: forwardTo(t, func() string { return *to.Load() }, &dials), SMTP: srv.SMTP}
+			if err := SetMail(dir, sec, s, imaptest.Password); err != nil {
+				t.Fatal(err)
+			}
+			h := NewMailHost(context.Background(), dir, sec, mailConfig())
+			owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+			planner := MailPlanner{serveMail(t, h, MailPlannerSide)}
+			ls, err := planner.Listing()
+			if err != nil || len(ls) != 1 {
+				t.Fatalf("the listing: %v, %v", ls, err)
+			}
+			sock := filepath.Join(shortDir(t), "mail.sock")
+			ln, err := ListenClerk(sock, os.Getuid())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			go ServeClerk(ln, h, anchors)
+			b := newBoxFor(t, sock, inbox.Name, key.Organize)
+			c.fail(t, dir, sec, s, &to, &dials)
+			id := b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/bulk"}})
+			b.tick(b.now)
+			if st := b.step(id); st.Detail != c.detail {
+				t.Fatalf("a step whose sign-in failed: %s %q", st.Phase, st.Detail)
+			}
+			if st, _ := owner.Status(); !has(st.Lines, "I stopped working in your mailbox: your mail server "+c.status) {
+				t.Fatalf("status after a step's failed sign-in: %v", st.Lines)
+			}
+			// Nothing signs in again: not a re-read, not the next step (#2742 item 15).
+			n := dials.Load()
+			if _, err := planner.Reread(); err == nil || err.Error() != c.planner.Error() {
+				t.Fatalf("a re-read after a step's failed sign-in: %v", err)
+			}
+			id = b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/later"}})
+			b.tick(b.now)
+			if st := b.step(id); st.Detail != c.detail {
+				t.Fatalf("the next step after a failed sign-in: %s %q", st.Phase, st.Detail)
+			}
+			if got := dials.Load(); got != n {
+				t.Fatalf("%d sign-ins after the server's sign-in failed", got-n)
+			}
+		})
 	}
 }
 

@@ -34,7 +34,7 @@ type MailHost struct {
 	mu      sync.Mutex
 	cur     *Mail         // the last clerk this account opened; nil: none
 	why     string        // why the last read failed; "" if it did not
-	refused bool          // the server refused the last sign-in: no read until setup
+	stop    error         // a sign-in failure only setup clears (stops): no sign-in until setup
 	reading chan struct{} // the read in flight; setup and removal wait for it
 	changes int64         // account changes so far (changed)
 	seq     int64
@@ -64,11 +64,36 @@ const DNoAccount = "no-account"
 // is inbox's own word for a step the server refused that way.
 const DSignInRefused = "sign-in-refused"
 
+// DNoSignIn is a step's detail while the server offers no sign-in the clerk
+// can make with these settings (imapsmtp.ErrNoSignIn): as with a refusal,
+// nothing is sent until the owner sets the account up again, since no retry
+// can change what the server offers (#2698 item 32). It is inbox's word too.
+const DNoSignIn = "no-sign-in"
+
 // ErrSignInRefused is the planner's answer while the server refuses the
 // clerk's sign-in: nothing is read again until the owner sets the account
 // up again, so the planner cannot drive repeated failed sign-ins toward the
 // provider's lockout (#2698 item 5).
 var ErrSignInRefused = errors.New("run: the mail server refused the sign-in; the owner must set the account up again")
+
+// ErrNoPasswordSignIn is the planner's answer while the server offers no
+// sign-in the clerk can make with these settings: nothing is read again
+// until the owner sets the account up again.
+var ErrNoPasswordSignIn = errors.New("run: the mail server offers no sign-in with these settings; the owner must set the account up again")
+
+// stops reports whether err is a sign-in failure only a change of setup
+// clears, and so stops every sign-in until then.
+func stops(err error) bool {
+	return errors.Is(err, imapsmtp.ErrLoginRefused) || errors.Is(err, imapsmtp.ErrNoSignIn)
+}
+
+// stopped is what a step, and the planner, get while stop holds.
+func stopped(stop error) (detail string, planner error) {
+	if errors.Is(stop, imapsmtp.ErrNoSignIn) {
+		return DNoSignIn, ErrNoPasswordSignIn
+	}
+	return DSignInRefused, ErrSignInRefused
+}
 
 // NewMailHost opens the account in dir, if there is one.
 func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailConfig) *MailHost {
@@ -95,7 +120,7 @@ func (h *MailHost) refresh() {
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
-	h.why, h.refused = "", false
+	h.why, h.stop = "", nil
 	switch {
 	case errors.Is(err, ErrNoMailAccount):
 		h.cur = nil
@@ -104,7 +129,9 @@ func (h *MailHost) refresh() {
 		// steps: each signs in afresh, and judges the kernel's view.
 		why, next := trouble(err)
 		h.why = "I could not read your mailbox: " + why + ". " + next
-		h.refused = errors.Is(err, imapsmtp.ErrLoginRefused)
+		if stops(err) {
+			h.stop = err
+		}
 	default:
 		h.cur = m
 		if m.Status.WarmedUp != "" {
@@ -133,7 +160,7 @@ func (h *MailHost) idle() {
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
 	h.changes++
-	h.cur, h.why, h.refused = nil, "", false
+	h.cur, h.why, h.stop = nil, "", nil
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
 
@@ -149,31 +176,34 @@ func (h *MailHost) notify(warm bool, text string) {
 	h.notices = append(h.notices, notice{h.seq, warm, text})
 }
 
-func (h *MailHost) clerk() (m *Mail, refused bool) {
+func (h *MailHost) clerk() (m *Mail, stop error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cur, h.refused
+	return h.cur, h.stop
 }
 
-// Do runs r on the open clerk; with none, or while the server refuses the
-// sign-in, nothing is sent.
+// Do runs r on the open clerk; with none, or while a sign-in failure only
+// setup clears holds, nothing is sent.
 func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
-	m, refused := h.clerk()
+	m, stop := h.clerk()
 	switch {
-	case refused:
-		return kernel.Result{Outcome: "failed", Detail: DSignInRefused}
+	case stop != nil:
+		detail, _ := stopped(stop)
+		return kernel.Result{Outcome: "failed", Detail: detail}
 	case m == nil:
 		return kernel.Result{Outcome: "failed", Detail: DNoAccount}
 	}
 	res := m.Do(r, v)
-	if res.Outcome == "failed" && res.Detail == DSignInRefused {
-		// The server refused the step's own sign-in, before any effect: no
+	if stop := map[string]error{DSignInRefused: imapsmtp.ErrLoginRefused, DNoSignIn: imapsmtp.ErrNoSignIn}[res.Detail]; res.Outcome == "failed" && stop != nil {
+		// The step's own sign-in failed that way, before any effect: no
 		// step, probe or read signs in again until the owner sets the account
-		// up again, and STATUS says so (#2708 item 2).
+		// up again, and STATUS says so (#2708 item 2, #2698 item 32). The
+		// step's detail carries no side (#2698 item 37), so the line names
+		// none.
 		h.mu.Lock()
 		if h.cur == m {
-			why, next := trouble(imapsmtp.ErrLoginRefused)
-			h.why, h.refused = "I stopped working in your mailbox: "+why+". "+next, true
+			why, next := trouble(stop)
+			h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, stop
 		}
 		h.mu.Unlock()
 	}
@@ -183,8 +213,8 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 // Probe asks the open clerk; with none, or while the server refuses the
 // sign-in, the step's effect cannot be checked.
 func (h *MailHost) Probe(r kernel.Request, v kernel.View) kernel.Result {
-	m, refused := h.clerk()
-	if m == nil || refused {
+	m, stop := h.clerk()
+	if m == nil || stop != nil {
 		return kernel.Result{Outcome: "unknown"}
 	}
 	return m.Probe(r, v)
@@ -344,12 +374,13 @@ var MailPlannerSide = MailSide{"mail planner", map[string]mailOp{
 func (h *MailHost) listing(again bool) ([]inbox.Item, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.refused && (again || h.why != "") {
+	if h.stop == nil && (again || h.why != "") {
 		h.refresh()
 	}
 	switch {
-	case h.refused:
-		return nil, ErrSignInRefused
+	case h.stop != nil:
+		_, err := stopped(h.stop)
+		return nil, err
 	case h.cur == nil:
 		return nil, ErrNoMailAccount
 	}
