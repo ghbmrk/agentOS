@@ -59,3 +59,12 @@ Work item #2682, part of #2541 (MIG-4, migration step 4). Sub A, tier A. Parent 
 - `::TestAProviderErrorStaysInTheModelClerk`. A provider error carrying a canary key reaches the planner as `ErrModelCall`, without the canary.
 - `::TestAKernelSocketOutlivesAFailedAccept`, `::TestASocketServesABoundedNumberAtOnce` and `::TestNoErrorCrossesAsSuccess`.
 - Declared scope: `broker/clerk/run/` and this brief.
+
+**Slice 3b acceptance tests (MIG-4-run-p to s; #2698 items 1 to 3, 8, 10 to 13):**
+- `mailhost_test.go::TestMailSetupRunsOnTheClerksOwnSocket`. Setup, replacement and removal run on the mail process's owner socket; a refusal keeps its wording and a refused replacement is not told; each replacement and removal is told once in the old setup's words; the planner's listing follows the account and is read again on request; with no account a step is `no-account`.
+- `::TestEachMailSocketServesOnlyItsSide`. The planner cannot set up, remove or read status, and the owner's socket has no listing.
+- `seen_test.go::TestOpenedFailureKeepsEverySenderAndSaysSo`. A failed `Opened` keeps every listed sender opened today, in the world the account `OpenMail` returns judges VRB-2 in, writes no record and puts a pause line in STATUS.
+- `::TestTheSeenRecordIsSealedAndBoundToItsAccount`. The record names no sender in the clear; one altered, sealed for another account or readable by others does not load, one past its bound is refused before it is read or opened, and the next read says the record began again.
+- `::TestTheWarmUpsEndIsToldOnce` (day 89 still warms up; day 90 ends it and counts mail read exactly 90 days ago) and `::TestTheSeenRecordFollowsItsAccount`.
+- `mail_test.go::TestMailClerkRefusesAStepTheLogHasNotInFlight`.
+- Declared scope: `broker/clerk/run/` and this brief.

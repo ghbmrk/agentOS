@@ -45,12 +45,7 @@ func newMailRig(t *testing.T, msgIDs ...string) *mailRig {
 	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
 		t.Fatal(err)
 	}
-	acct, err := OpenMail(context.Background(), dir, sec, MailConfig{
-		Anchors: anchors, HandleSecret: bytes.Repeat([]byte{9}, 16),
-		Ask:   func(context.Context, string) (string, error) { return "bulk", nil },
-		World: func() inbox.World { return inbox.World{Today: "2026-10-21"} }, RetentionDays: 30,
-		plain: true,
-	})
+	acct, err := OpenMail(context.Background(), dir, sec, mailConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +65,17 @@ func newMailRig(t *testing.T, msgIDs ...string) *mailRig {
 		r.ids[id] = ls[i].Mail
 	}
 	return r
+}
+
+// mailConfig is the test clerk's configuration: every mail bulk, the test
+// sealer, a fixed day, and the loopback server's plain connections.
+func mailConfig() MailConfig {
+	return MailConfig{
+		Anchors: anchors, HandleSecret: bytes.Repeat([]byte{9}, 16),
+		Ask:   func(context.Context, string) (string, error) { return "bulk", nil },
+		World: func() inbox.World { return inbox.World{Today: "2026-10-21"} }, RetentionDays: 30,
+		Sealer: testSealer(), plain: true,
+	}
 }
 
 // organize submits and runs a step filing the mail id under the bulk label.
@@ -124,7 +130,7 @@ func TestMailRemovalTakesEffectAtTheNextConnection(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(r.dir, mailSettings)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("removal left the settings")
 	}
-	if _, err := OpenMail(context.Background(), r.dir, r.sec, MailConfig{plain: true}); !errors.Is(err, ErrNoMailAccount) {
+	if _, err := OpenMail(context.Background(), r.dir, r.sec, mailConfig()); !errors.Is(err, ErrNoMailAccount) {
 		t.Fatalf("OpenMail after removal: %v, want ErrNoMailAccount", err)
 	}
 
@@ -164,8 +170,7 @@ func TestMailReplacementSendsNoPasswordToTheOldServer(t *testing.T) {
 	if r.sec.Has(slotOf(MailSettings{Address: imaptest.User, IMAP: r.srv.IMAP, SMTP: r.srv.SMTP})) || r.sec.Len() != 1 {
 		t.Fatalf("the replaced password is still sealed (%d slots)", r.sec.Len())
 	}
-	if _, err := OpenMail(context.Background(), r.dir, r.sec, MailConfig{HandleSecret: bytes.Repeat([]byte{9}, 16),
-		Ask: func(context.Context, string) (string, error) { return "bulk", nil }, plain: true}); err != nil || len(srvB.Logins()) == 0 {
+	if _, err := OpenMail(context.Background(), r.dir, r.sec, mailConfig()); err != nil || len(srvB.Logins()) == 0 {
 		t.Fatalf("a clerk opened on the new account: %v, %d logins there", err, len(srvB.Logins()))
 	}
 }
@@ -338,5 +343,22 @@ func TestMailSettingsFileIsTheClerksOwn(t *testing.T) {
 	}
 	if _, err := readMail(dir); err == nil {
 		t.Fatal("a symlinked settings file was read")
+	}
+}
+
+// The unbound mail clerk judges the view the kernel sends, so a request the
+// log has not put in flight is refused at the clerk's process, across its
+// socket, and nothing lands on the server (#2698 item 8, CLK-2).
+func TestMailClerkRefusesAStepTheLogHasNotInFlight(t *testing.T) {
+	r := newMailRig(t, "<m1@shop.test>")
+	id := r.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": r.ids["<m1@shop.test>"], "label": "agentOS/bulk"}})
+	var res kernel.Result
+	r.h.With(func(k *kernel.Kernel) error {
+		req := kernel.Request{Plan: k.State().Plans[id].Plan}
+		res = remote{r.remote, anchors}.do(req, view(k.State(), anchors, req, r.now))
+		return nil
+	})
+	if res.Outcome != "failed" || r.filed("<m1@shop.test>") {
+		t.Fatalf("a step not in flight: %+v, filed %v; want refused and nothing filed", res, r.filed("<m1@shop.test>"))
 	}
 }
