@@ -102,8 +102,8 @@ func TestMarkSameFailsClosed(t *testing.T) {
 func TestMarkFailsWithAFolder(t *testing.T) {
 	srv, l := markRig(t)
 	srv.FailList("Trash", true)
-	if m, err := l.Mark(context.Background()); err == nil {
-		t.Fatalf("mark %+v despite a failed STATUS", m)
+	if m, err := l.Mark(context.Background()); err == nil || m != nil {
+		t.Fatalf("mark %+v, err %v; want no mark despite a failed STATUS", m, err)
 	}
 }
 
