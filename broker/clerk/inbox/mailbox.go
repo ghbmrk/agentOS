@@ -44,6 +44,7 @@ const (
 	// server never reached has changed nothing.
 	nSignInRefused NotDone = "sign-in-refused" // the server refused the login (imapsmtp.ErrLoginRefused)
 	nUnreachable   NotDone = "unreachable"     // the mail server was not reached (imapsmtp.ErrUnreachable)
+	nNoSignIn      NotDone = "no-sign-in"      // the server offers no way to sign in with the login (imapsmtp.ErrNoSignIn)
 )
 
 // Synthetic is the eval's mailbox (MIG-3-1): every effect is accepted and
@@ -376,6 +377,8 @@ func before(err error) error {
 		return nSignInRefused
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return nUnreachable
+	case errors.Is(err, imapsmtp.ErrNoSignIn):
+		return nNoSignIn
 	}
 	return err
 }

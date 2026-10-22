@@ -252,6 +252,12 @@ var ErrReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its siz
 // the account, so it waits for the owner to set the account up again.
 var ErrLoginRefused = errors.New("imapsmtp: the server refused the login")
 
+// ErrNoSignIn ends a session or submission whose server offers no way to
+// sign in with the account's login: no XOAUTH2 for a token, LOGINDISABLED,
+// or no SMTP AUTH with its mechanism. Nothing was sent, and signing in again
+// cannot help: the owner must change the account's setup.
+var ErrNoSignIn = errors.New("imapsmtp: the server offers no way to sign in with this login")
+
 // ErrUnreachable ends a session whose dial failed: the mail server was never
 // reached, as when the box's own network is down, which is not the server
 // stopping or refusing.
@@ -365,7 +371,12 @@ func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Cli
 		return errors.New("imapsmtp: no credential")
 	}
 	if l.OAuth {
-		err = c.Authenticate(xoauth2{l.User, l.Secret})
+		var ok bool
+		if ok, err = c.SupportAuth("XOAUTH2"); err == nil && !ok {
+			return stand{ErrNoSignIn}
+		} else if err == nil {
+			err = c.Authenticate(xoauth2{l.User, l.Secret})
+		}
 	} else {
 		err = c.Login(l.User, l.Secret)
 	}
@@ -396,16 +407,19 @@ func ended(err error, over, late bool, caller context.Context) error {
 	return err
 }
 
-// signIn is a failed sign-in's error: ErrLoginRefused, standing, only when
-// the server answered it as a refusal, an IMAP NO or BAD other than
-// UNAVAILABLE (RFC 5530: the server is down for now), a LOGINDISABLED
-// server, or an SMTP 5xx; any other failure passes with time and is
-// mapped as the session ended.
+// signIn is a failed sign-in's error, standing when the server answered
+// it: ErrLoginRefused for a refusal, an IMAP NO or BAD other than
+// UNAVAILABLE (RFC 5530: the server is down for now) or an SMTP 5xx, and
+// ErrNoSignIn for a LOGINDISABLED server. Any other failure passes with time
+// and is mapped as the session ended.
 func signIn(err error) error {
 	var st *imap.StatusError
 	var tp *textproto.Error
-	if errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE" || errors.Is(err, client.ErrLoginDisabled) || errors.As(err, &tp) && tp.Code >= 500 {
+	switch {
+	case errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE", errors.As(err, &tp) && tp.Code >= 500:
 		return stand{ErrLoginRefused}
+	case errors.Is(err, client.ErrLoginDisabled):
+		return stand{ErrNoSignIn}
 	}
 	return errors.New("imapsmtp: the sign-in did not complete")
 }
@@ -921,8 +935,17 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 		return errors.New("imapsmtp: no credential")
 	}
 	var auth smtp.Auth = smtp.PlainAuth("", l.User, l.Secret, host)
+	mech := "PLAIN"
 	if l.OAuth {
-		auth = smtpXOAuth2{xoauth2{l.User, l.Secret}}
+		auth, mech = smtpXOAuth2{xoauth2{l.User, l.Secret}}, "XOAUTH2"
+	}
+	if ok, mechs := c.Extension("AUTH"); !ok || !slices.Contains(strings.Fields(strings.ToUpper(mechs)), mech) {
+		// Extension says false too when the EHLO failed: Noop returns that
+		// failure, or the server's answer once it is there.
+		if err := c.Noop(); err != nil {
+			return err
+		}
+		return stand{ErrNoSignIn}
 	}
 	if err := c.Auth(auth); err != nil {
 		return signIn(err)
@@ -963,7 +986,11 @@ func (x xoauth2) ir() []byte {
 }
 
 func (x xoauth2) Start() (string, []byte, error) { return "XOAUTH2", x.ir(), nil }
-func (x xoauth2) Next([]byte) ([]byte, error)    { return nil, errors.New("imapsmtp: XOAUTH2 refused") }
+
+// Next answers the server's error challenge, its refusal of the token, with
+// the empty response XOAUTH2 asks for, so the server ends the exchange with
+// its NO and the refusal reads as one (signIn).
+func (x xoauth2) Next([]byte) ([]byte, error) { return []byte{}, nil }
 
 type smtpXOAuth2 struct{ xoauth2 }
 
@@ -978,9 +1005,11 @@ func (x smtpXOAuth2) Start(server *smtp.ServerInfo) (string, []byte, error) {
 	return "XOAUTH2", x.ir(), nil
 }
 
+// Next answers an error challenge as xoauth2.Next does, so the server ends
+// the exchange with its 5xx.
 func (x smtpXOAuth2) Next(_ []byte, more bool) ([]byte, error) {
 	if more {
-		return nil, errors.New("imapsmtp: XOAUTH2 refused")
+		return []byte{}, nil
 	}
 	return nil, nil
 }

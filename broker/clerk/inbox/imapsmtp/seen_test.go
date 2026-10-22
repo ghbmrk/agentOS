@@ -228,11 +228,12 @@ func guardedStore(t *testing.T, timeout time.Duration, connect func(ctx context.
 	return s
 }
 
-// readCalls are a session of steps and a one-step session.
-func readCalls(s *Store) map[string]func() error {
+// mailCalls are a session of steps, a one-step session and a submission.
+func mailCalls(s *Store) map[string]func() error {
 	return map[string]func() error{
-		"Seen": func() error { _, err := seenFrom(s, "INBOX"); return err },
-		"UIDs": func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+		"Seen":   func() error { _, err := seenFrom(s, "INBOX"); return err },
+		"UIDs":   func() error { _, _, err := s.UIDs(context.Background(), "INBOX"); return err },
+		"Submit": func() error { return s.Submit(context.Background(), []string{"a@example.test"}, []byte("x")) },
 	}
 }
 
@@ -261,7 +262,7 @@ func TestAStalledHandshakeTimesOut(t *testing.T) {
 		time.Sleep(timeout / 2)
 		return (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
 	})
-	for name, call := range readCalls(s) {
+	for name, call := range mailCalls(s) {
 		start := time.Now()
 		if err := call(); !errors.Is(err, ErrTimeout) || time.Since(start) > timeout*5/4 {
 			t.Fatalf("%s: err %v after %v, want ErrTimeout within %v", name, err, time.Since(start), timeout*5/4)
@@ -288,7 +289,7 @@ func TestADialThatFailsSaysTheServerWasNotReached(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	} {
-		for call, f := range readCalls(guardedStore(t, 500*time.Millisecond, connect)) {
+		for call, f := range mailCalls(guardedStore(t, 500*time.Millisecond, connect)) {
 			if err := f(); !errors.Is(err, ErrUnreachable) || errors.Is(err, ErrTimeout) {
 				t.Fatalf("%s %s: err %v, want ErrUnreachable", name, call, err)
 			}
@@ -389,6 +390,8 @@ func TestSeenNamesALongHeaderBySubject(t *testing.T) {
 		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?=C3=A9"+strings.Repeat("x", subjectMax)+"?=\r\n\r\n"): "Großer…",
 		subjectAnswer(1, "Subject: =?UTF-8?Q?Gro=C3=9Fer?= "+strings.Repeat("x", subjectMax)+"\r\n\r\n"):                   "Großer " + strings.Repeat("x", subjectMax-len("Subject: =?UTF-8?Q?Gro=C3=9Fer?= ")) + "…",
 		subjectAnswer(1, "Subject: a =? b\r\n\r\n"):                                                                        "a =? b",
+		// cut between an encoded word's closing "?" and "="
+		subjectAnswer(1, cutAt("Subject: =?UTF-8?Q?Gro=C3=9Fer?= =?UTF-8?Q?", "?=\r\n\r\n")): "Großer…",
 	} {
 		addr := seenServe(t, func(string, int) string { return "* SEARCH 1\r\n" }, func(n int) string {
 			if n == 0 {
@@ -494,4 +497,10 @@ func TestSeenStopsOnTheCallersError(t *testing.T) {
 	if !errors.Is(err, stop) || n != 1 {
 		t.Fatalf("err %v after %d headers, want stop after 1", err, n)
 	}
+}
+
+// cutAt is a Subject field of head, x's, and tail, whose first subjectMax
+// bytes end at tail's first byte.
+func cutAt(head, tail string) string {
+	return head + strings.Repeat("x", subjectMax-len(head)-1) + tail
 }
