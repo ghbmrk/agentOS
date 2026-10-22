@@ -52,7 +52,7 @@ func (f *fakeOutbox) add(text string) {
 // them) go out first, in the order the guests sent them, then each new
 // one as it is poked; each leaves the outbox only after it went out.
 func TestDEL1OutboxDrainsInOrder(t *testing.T) {
-	r := newEvRig(t, "")
+	r := newEvRig(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	src := &fakeOutbox{sent: r.texts}

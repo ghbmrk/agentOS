@@ -57,14 +57,13 @@ func TestEveryEmbeddedItemFitsOneOwnerText(t *testing.T) {
 	}
 }
 
-// LOOP-7: the checks a broker process holds without a mail adapter are
-// the code filter and the commitment filter, with Checks' names and
-// payloads; over the embedded corpus a clean run finds nothing and takes
+// LOOP-7: the checks a broker process holds itself are the code filter
+// and the commitment filter, with the shared names and payloads; over the embedded corpus a clean run finds nothing and takes
 // each item through each check.
 func TestTheInProcessChecksHoldOverTheEmbeddedCorpus(t *testing.T) {
-	in, all := InProcess(owner.Commitments{}), Checks(nil, owner.Commitments{})
+	in := InProcess(owner.Commitments{})
 	if len(in) != 2 || in[0].Name != CodeFilter || in[1].Name != CommitmentFilter ||
-		in[0].Payload != all[0].Payload || in[1].Payload != all[1].Payload {
+		in[0].Payload != CodePayload || in[1].Payload != CommitmentPayload {
 		t.Fatalf("in-process checks %+v", in)
 	}
 	p, err := Probe(time.Hour, owner.Commitments{})

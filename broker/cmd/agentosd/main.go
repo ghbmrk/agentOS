@@ -31,7 +31,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
-	"github.com/ghbmrk/agentos/broker/mail/mailsock"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -307,7 +306,7 @@ func main() {
 	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var mailSocket, checkerVerify string
+	var checkerVerify string
 	var noticeSocket string
 	localUIUID := -1
 	floor := budget.Floor()
@@ -355,7 +354,6 @@ func main() {
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&checkerVerify, "checker-verify", "", "agentos-checker's verify socket, which checks the owner's code-generator codes while the vault process holds only the unlock proof (CH-4); empty keeps every check on -owner-verify")
-	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
 	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the owner's FORGET state: task texts, tombstones and the restored forget log (W3-forget)")
 	flag.StringVar(&routingSocket, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, from which the model routes read how many attempts the owner's rule allows; empty holds MaxRetries")
@@ -365,7 +363,7 @@ func main() {
 	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
 	flag.Int64Var(&workerLayerMB, "worker-layer-mb", 4096, "the most one worker's files may hold, MB; over it the worker takes no command or snapshot until it shrinks; 0 is no cap beyond the disk reserve")
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
-	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "private agent replies that could not be emailed, kept for the local page (CH-20)")
+	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "agent replies too long for a text or that could not be sent, kept for the local page (CH-20)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
@@ -548,7 +546,7 @@ func main() {
 	// reaches the agent.
 	qs := &questions{}
 	// STATUS notes read in wiring order: the time check, then what waits
-	// on the owner (unclear effects, the mail UNDO codes and alerts), then
+	// on the owner (unclear effects), then
 	// the capability-off lines (OP-9, capoff.go), then spare-time work not
 	// running (learningOff, below), then recall's (an agent holding a
 	// deleted record, or memory not open), then the second line's. The
@@ -557,7 +555,7 @@ func main() {
 	qs.wire(&cfg)
 	// No daily text (DRB-1): what waits on the owner is in STATUS, read
 	// when asked.
-	unclear, mailStatus := wireStatusNotes(&cfg)
+	unclear := wireStatusNotes(&cfg)
 	// Each line reads live state set as the box opens below; the daemon
 	// copies the notes, so they are wired now.
 	caps := newCapState(egressSocket)
@@ -646,25 +644,13 @@ func main() {
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
 	}
-	// One clock for the journal, the gate and the mail adapter, so the
-	// organize bound counts the journal's stamps on the adapter's day
-	// (SR3-mail-w2 W2-c).
+	// One clock for the journal and the gate.
 	cfg.Now = func() time.Time { return time.Now().UTC() }
 	cfg.Grants.Now = cfg.Now
-	// The owner's mail account (SR3-mail-w2): registered now, bound to
-	// the vault process's account once the journal is open.
-	var mw *lateMail
-	if mailSocket != "" {
-		mw = newLateMail()
-		mw.wire(&cfg)
-	}
-	// Evidence delivery (CH-20): with a destination set, private replies
-	// are emailed to it, to the connected mail account's own address;
-	// while none is connected, none can be set and replies go by text.
-	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
-	if mw != nil {
-		ev.mail = mw
-	}
+	// Agent replies (CH-20): texted, or kept for the local page when too
+	// long. The mail clerk runs in its own process and has no share route
+	// to an owner destination yet, so no destination can be set.
+	ev := newEvidence(keptPath, log.Printf)
 	ev.wire(&cfg)
 	// RENEW (CAP-3): the owner starts a full agent memory over, by name,
 	// only on the gate's approval.
@@ -726,9 +712,6 @@ func main() {
 	recallCfg.Cases = forgetFan{kept: ev.kept}
 	if lp != nil {
 		lp.attach(ctx, d)
-	}
-	if mw != nil {
-		wireMail(ctx, mw, d, mailSocket, learnDir, mailStatus, cfg.Now)
 	}
 	if noticeSocket != "" {
 		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)

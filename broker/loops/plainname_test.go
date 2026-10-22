@@ -15,7 +15,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fuzzTargets is every top-level `func Fuzz…` in the broker's test files,
@@ -78,7 +77,7 @@ func TestThePlainNameMapCoversEveryLoop7Subject(t *testing.T) {
 	for _, x := range reg.Targets {
 		fs = append(fs, loops.Finding{Check: loops.CheckCanary, Subject: x.Name})
 	}
-	for _, c := range corpus.Checks(nil, owner.Commitments{}) {
+	for _, c := range corpus.PlaneChecks(nil) {
 		fs = append(fs, loops.Finding{Check: loops.CheckCorpus, Subject: "item", Detail: c.Name})
 	}
 	fs = append(fs, loops.Finding{Check: loops.CheckProbe, Subject: "socket.vm1"})
