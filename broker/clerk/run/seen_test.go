@@ -7,10 +7,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
@@ -81,6 +83,36 @@ func TestOpenedFailureKeepsEverySenderAndSaysSo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(r.dir, seenFile)); !os.IsNotExist(err) {
 		t.Fatalf("a failed read wrote a record (%v)", err)
 	}
+
+	// The account OpenMail returns judges VRB-2 in that LastOpened.
+	sec, err := OpenSecrets(r.dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMail(r.dir, sec, MailSettings{Address: imaptest.User, IMAP: r.srv.IMAP, SMTP: r.srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	m, err := OpenMail(context.Background(), r.dir, sec, mailConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.world().LastOpened; got["news@shop.test"] != today {
+		t.Fatalf("the account's LastOpened %v does not keep the listed sender", got)
+	}
+	if !has(m.Status.Lines, "Unsubscribing is paused") {
+		t.Fatalf("the clerk's status %v names no pause", m.Status.Lines)
+	}
+}
+
+// opens counts the records a sealer is asked to open.
+type opens struct {
+	clerk.Sealer
+	n int
+}
+
+func (o *opens) Open(blob, aad []byte) ([]byte, error) {
+	o.n++
+	return o.Sealer.Open(blob, aad)
 }
 
 // The record is sealed and bound to its account: it names no sender in the
@@ -105,6 +137,15 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if _, ok := loadSeen(r.dir, testSealer(), r.slot+"x"); ok {
 		t.Fatal("a record loads under another account")
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadSeen(r.dir, testSealer(), r.slot); ok {
+		t.Fatal("a record others can read loads")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	b[len(b)/2] ^= 1
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
@@ -115,11 +156,20 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if _, st := r.opened(today); !has(st.Lines, "began its record") {
 		t.Fatalf("after an altered record, status %v does not say the record started over", st.Lines)
 	}
+	// Past its bound the record is refused before it is read or opened.
 	if err := os.Truncate(path, maxSeen+1); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loadSeen(r.dir, testSealer(), r.slot); ok {
-		t.Fatal("a record past its bound loads")
+	o := &opens{Sealer: testSealer()}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, ok := loadSeen(r.dir, o, r.slot)
+	runtime.ReadMemStats(&after)
+	if ok || o.n != 0 {
+		t.Fatalf("a record past its bound loads or is opened (%d opens)", o.n)
+	}
+	if read := after.TotalAlloc - before.TotalAlloc; read > maxSeen/8 {
+		t.Fatalf("refusing a record past its bound took %d bytes: it was read", read)
 	}
 }
 
@@ -151,6 +201,26 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	}
 	if _, st := r.opened(today); len(st.Notices) != 0 {
 		t.Fatalf("the warm-up's end was told again: %v", st.Notices)
+	}
+
+	// The boundary: a record 89 days old still warms up; at 90 days it has
+	// ended, and mail read exactly 90 days ago counts while 89 does not.
+	rec = sealedSeen{Log: inbox.SeenLog{Since: at(89)}}
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 1).Format(time.DateOnly)) || len(st.Notices) != 0 {
+		t.Fatalf("on day 89: %+v", st)
+	}
+	rec = sealedSeen{Log: inbox.SeenLog{Since: at(90), Seen: []inbox.Seen{
+		{From: "ninety@shop.test", ID: strings.Repeat("ef", 16), Date: at(90)},
+		{From: "eightynine@shop.test", ID: strings.Repeat("01", 16), Date: at(89)},
+	}}}
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, st := r.opened(today); has(st.Lines, "Until") || len(st.Notices) != 1 || !strings.Contains(st.Notices[0], " 1 senders") {
+		t.Fatalf("on day 90: %+v, want one notice naming 1 sender", st)
 	}
 }
 

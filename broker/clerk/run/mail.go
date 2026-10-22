@@ -254,6 +254,7 @@ type MailConfig struct {
 type Mail struct {
 	*inbox.Account
 	Status MailStatus
+	world  func() inbox.World // the world the account judges VRB-2 in
 }
 
 // OpenMail is the mail clerk over the account in dir: it reads the newest
@@ -293,14 +294,13 @@ func OpenMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig)
 		today = time.Now().UTC().Format(time.DateOnly)
 	}
 	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms)
-	world := func() inbox.World {
+	m := &Mail{Status: status, world: func() inbox.World {
 		w := c.World()
 		w.LastOpened = opened
 		return w
-	}
-	a, err := inbox.NewAccount(c.Anchors, c.HandleSecret, world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody)
-	if err != nil {
+	}}
+	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
 		return nil, err
 	}
-	return &Mail{a, status}, nil
+	return m, nil
 }

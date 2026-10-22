@@ -68,6 +68,12 @@ func TestMailSetupRunsOnTheClerksOwnSocket(t *testing.T) {
 		t.Fatalf("status after the first setup: %+v, %v", st, err)
 	}
 
+	if err := owner.SetMail(bad, imaptest.Password); err == nil {
+		t.Fatal("a refused replacement was taken")
+	}
+	if st, _ := owner.Status(); len(st.Notices) != 0 {
+		t.Fatalf("a refused replacement was told as one: %+v", st)
+	}
 	if err := owner.SetMail(s, imaptest.Password); err != nil {
 		t.Fatal(err)
 	}
