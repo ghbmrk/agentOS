@@ -435,6 +435,40 @@ func TestNoErrorCrossesAsSuccess(t *testing.T) {
 	}
 }
 
+// An error wrapping a sentinel crosses a socket with its own text and still
+// is that sentinel to errors.Is; an error wrapping none is none of them
+// (#2742 item 13).
+func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
+	for _, c := range []struct {
+		err error
+		is  error
+	}{
+		{fmt.Errorf("%w: %s: %s", kernel.ErrRetryRefused, kernel.CBroken, "detail"), kernel.ErrRetryRefused},
+		{fmt.Errorf("submit: %w", kernel.ErrDuplicatePlan), kernel.ErrDuplicatePlan},
+		{kernel.ErrNotParked, kernel.ErrNotParked},
+		{errors.New("kernel: something else"), nil},
+	} {
+		sock := filepath.Join(shortDir(t), "w.sock")
+		ln, err := ListenKernel(sock, os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		go serveConns(ln, 1, func(conn net.Conn) {
+			serveOne(conn, func(string, json.RawMessage) (json.RawMessage, error) { return nil, c.err })
+		})
+		got := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).call("x", nil, nil)
+		ln.Close()
+		if got == nil || got.Error() != c.err.Error() {
+			t.Fatalf("%v crossed as %v", c.err, got)
+		}
+		for _, e := range wireList {
+			if errors.Is(got, e) != (e == c.is) {
+				t.Errorf("%v crossed: errors.Is(%v) = %v", c.err, e, errors.Is(got, e))
+			}
+		}
+	}
+}
+
 // twin is a call made the same way on two kernels with the same log: direct
 // on one, and through the caller's typed client and its side's socket on the
 // other.
