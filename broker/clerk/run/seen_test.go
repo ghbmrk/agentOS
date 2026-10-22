@@ -287,6 +287,7 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	}{
 		{&imapsmtp.LongHeaderError{Folder: "Arch\u202eive", Arrived: arrived, UID: 7, Subject: "Hi\x1b[2J"}, `a read mail in "Arch\u202eive" (arrived ` + arrived.In(time.Local).Format("2 January 2006 at 15:04") + `, subject "Hi\x1b[2J")`},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrLoginRefused, leak), "refused my sign-in"},
+		{fmt.Errorf("%w, reading mail: %s", imapsmtp.ErrNoSignIn, leak), "offers no way for me to sign in"},
 		{fmt.Errorf("%w: %s", inbox.ErrTooMuchReadMail, leak), "more read mail than I can keep track of"},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrUnreachable, leak), "couldn't reach your mail server"},
 		{fmt.Errorf("%w: %s", imapsmtp.ErrTimeout, leak), "stopped answering"},
@@ -299,6 +300,13 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 		line := why + ". " + next
 		if !strings.Contains(why, c.want) || strings.Contains(line, leak) || strings.ContainsFunc(line, func(r rune) bool { return r == 0x202e || r == 0x1b }) || next == "" {
 			t.Errorf("%v: told %q", c.err, line)
+		}
+	}
+	// Only a change of setup clears a refusal or a server with no sign-in for
+	// this login, so neither promises to try again (#2698 item 32).
+	for _, e := range []error{imapsmtp.ErrLoginRefused, imapsmtp.ErrNoSignIn} {
+		if _, next := trouble(e); strings.Contains(next, "try again") || !strings.Contains(next, "Wi-Fi page") {
+			t.Errorf("%v: next step %q", e, next)
 		}
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}); len(why) > 300 {

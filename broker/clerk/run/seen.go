@@ -148,6 +148,10 @@ func trouble(err error) (why, next string) {
 			"Delete it or move it out of your mail, and I'll resume at the next check."
 	case errors.Is(err, imapsmtp.ErrLoginRefused):
 		return "your mail server refused my sign-in", "Set up the mail account again on my Wi-Fi page."
+	case errors.Is(err, imapsmtp.ErrNoSignIn):
+		// Only a change of setup clears it: trying again cannot (#2698 item 32).
+		return "your mail server offers no way for me to sign in with this login",
+			"On my Wi-Fi page, set up the mail account again with an app password from your provider, or with the IMAP and SMTP server settings it gives."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
 		return "you have more read mail than I can keep track of", "Delete or archive old read mail outside your mail account, and I'll resume at the next check."
 	case errors.Is(err, imapsmtp.ErrUnreachable):
