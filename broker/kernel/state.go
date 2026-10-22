@@ -1000,6 +1000,13 @@ func (s *State) Apply(e Entry) error {
 					s.cancelUnsent(p, st) // nothing was sent, and nothing will be
 				}
 			case "failed":
+				// A redo's failure says only that the redo did not act: the
+				// send before it may have, so the step parks again, charged
+				// and listed, for the owner to retry or cancel (KRN-8).
+				if st.Retried {
+					st.Phase = PParked
+					break
+				}
 				st.Phase = PFailed
 				if p.Status == SActive {
 					p.Status = SFailed
