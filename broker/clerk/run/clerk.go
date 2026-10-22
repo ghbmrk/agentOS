@@ -155,16 +155,16 @@ func (h *ExitHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 // Probe asks the clerk, except for a change-account step, which acts only
 // here and only on this process's memory: done once it ran, and unknown
 // otherwise, since a restart forgets the staged grant as well.
-func (h *ExitHost) Probe(r kernel.Request, v kernel.View) string {
+func (h *ExitHost) Probe(r kernel.Request, v kernel.View) kernel.Result {
 	if r.Step().Verb != key.ChangeAccount {
 		return h.x.Probe(r, v)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.done[r.Idem()] {
-		return "done"
+		return kernel.Result{Outcome: "done"}
 	}
-	return "unknown"
+	return kernel.Result{Outcome: "unknown"}
 }
 
 func grantDigest(g []byte) string {

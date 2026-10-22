@@ -48,7 +48,7 @@ func (c *seenCall) Do(r kernel.Request, v kernel.View) kernel.Result {
 	return c.h.Do(r, v)
 }
 
-func (c *seenCall) Probe(r kernel.Request, v kernel.View) string { return c.h.Probe(r, v) }
+func (c *seenCall) Probe(r kernel.Request, v kernel.View) kernel.Result { return c.h.Probe(r, v) }
 
 func newExitRig(t *testing.T) *exitRig {
 	t.Helper()
@@ -216,7 +216,7 @@ func TestAReconnectThatFailsChangesNothing(t *testing.T) {
 		r.last.mu.Lock()
 		req, v := r.last.req, r.last.view
 		r.last.mu.Unlock()
-		if got := r.host.Probe(req, v); got != "unknown" {
+		if got := r.host.Probe(req, v).Outcome; got != "unknown" {
 			t.Errorf("%s: probe %q", c.name, got)
 		}
 	}
@@ -262,7 +262,7 @@ func TestReconnectActsOnceAndOnlyAsTheKernelSentIt(t *testing.T) {
 	r.last.mu.Lock()
 	sent, sentView := r.last.req, r.last.view
 	r.last.mu.Unlock()
-	if got := r.host.Probe(sent, sentView); got != "done" {
+	if got := r.host.Probe(sent, sentView).Outcome; got != "done" {
 		t.Errorf("probe of the step that ran: %q", got)
 	}
 	r.stage("once", grant)
@@ -280,7 +280,7 @@ func TestReconnectActsOnceAndOnlyAsTheKernelSentIt(t *testing.T) {
 	if res := r.host.Do(req, &v); res.Outcome != "failed" {
 		t.Errorf("a step the kernel never sent: %+v", res)
 	}
-	if got := r.host.Probe(req, &v); got != "unknown" {
+	if got := r.host.Probe(req, &v).Outcome; got != "unknown" {
 		t.Errorf("probe of a step that never ran: %q", got)
 	}
 	if after, _ := r.sec.MarshalBinary(); !bytes.Equal(before, after) {
