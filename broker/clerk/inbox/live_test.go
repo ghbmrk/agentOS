@@ -207,7 +207,7 @@ func TestLiveUnconfirmedTrashIsUnknownAndNotRecorded(t *testing.T) {
 	if n := len(lr.acct.Effects()); n != 0 {
 		t.Fatalf("an unconfirmed trash was recorded: %+v", lr.acct.Effects())
 	}
-	if res := lr.acct.Probe(kernel.Request{Plan: p}, lr.k.State()); res != "notdone" {
+	if res := lr.acct.Probe(kernel.Request{Plan: p}, lr.k.State()).Outcome; res != "notdone" {
 		t.Fatalf("probe %q after an unconfirmed trash", res)
 	}
 }
@@ -267,7 +267,7 @@ func TestLiveReadBackCatchesAnEffectTheServerDidNotKeep(t *testing.T) {
 			if len(lr.acct.Refusals()) != 0 {
 				t.Fatalf("an unconfirmed effect was recorded as a refusal: %+v", lr.acct.Refusals())
 			}
-			if got := lr.acct.Probe(kernel.Request{Plan: p}, lr.k.State()); got != "notdone" {
+			if got := lr.acct.Probe(kernel.Request{Plan: p}, lr.k.State()).Outcome; got != "notdone" {
 				t.Fatalf("probe %q, want notdone (an idempotent effect may be sent again)", got)
 			}
 		})
@@ -332,7 +332,7 @@ func TestAnUnconfirmedUnsubscribeIsNeverResent(t *testing.T) {
 	if box.calls != 1 {
 		t.Fatalf("%d POSTs, want exactly 1", box.calls)
 	}
-	if got := r.acct.Probe(kernel.Request{Plan: p}, r.k.State()); got != "unknown" {
+	if got := r.acct.Probe(kernel.Request{Plan: p}, r.k.State()).Outcome; got != "unknown" {
 		t.Fatalf("probe %q, want unknown", got)
 	}
 }
