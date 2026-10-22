@@ -929,6 +929,40 @@ func (s *Store) Move(ctx context.Context, m Ref, to string) error {
 	})
 }
 
+// Mark is what a folder's STATUS says of its contents. It changes when mail
+// arrives or leaves, when the number of unread mails changes, and, where the
+// server has CONDSTORE (RFC 7162), when any flag changes; without CONDSTORE
+// one mail read and another marked unread together leave it as it was.
+type Mark struct {
+	Folder                           string
+	Validity, Next, Messages, Unseen uint32
+	ModSeq                           string // HIGHESTMODSEQ, "" without CONDSTORE
+}
+
+// Marks is each of folders' Mark, in order, read in one session.
+func (s *Store) Marks(ctx context.Context, folders []string) ([]Mark, error) {
+	var out []Mark
+	err := s.session(ctx, func(c *client.Client) error {
+		items := []imap.StatusItem{imap.StatusUidValidity, imap.StatusUidNext, imap.StatusMessages, imap.StatusUnseen}
+		if ok, _ := c.Support("CONDSTORE"); ok {
+			items = append(items, "HIGHESTMODSEQ")
+		}
+		for _, f := range folders {
+			st, err := c.Status(f, items)
+			if err != nil {
+				return err
+			}
+			m := Mark{Folder: f, Validity: st.UidValidity, Next: st.UidNext, Messages: st.Messages, Unseen: st.Unseen}
+			if v, ok := st.Items["HIGHESTMODSEQ"]; ok && v != nil {
+				m.ModSeq = fmt.Sprint(v)
+			}
+			out = append(out, m)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Ensure creates folder if it does not exist.
 func (s *Store) Ensure(ctx context.Context, folder string) error {
 	return s.session(ctx, func(c *client.Client) error {
