@@ -140,7 +140,7 @@ func openForgetPlane(dir string, cfg *daemon.Config) (*forgetPlane, error) {
 // SECURITY TESTS or UPDATE CHECKS OFF/ON, SPARE BUDGET, HELP LOOPS and
 // the rest of loops.ParseText): the box runs no spare-time work
 // (MIG-4-untrusted-learn).
-const loopsOffText = "Spare-time work (learning, self-tests, update checks) is not part of this box version."
+const loopsOffText = "I no longer do spare-time work (learning, self-tests, update checks), so there is nothing to turn on or off."
 
 // forgetOffText answers FORGET when the forget plane could not open.
 const forgetOffText = "I can't forget tasks right now. Restarting me may fix it."
