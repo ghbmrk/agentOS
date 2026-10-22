@@ -191,11 +191,18 @@ func TestRestoredForgetLogIsReplayed(t *testing.T) {
 	f := again.forgetOwner
 	w := &fakeWork{ok: true}
 	f.agent.Store(&forgetAgent{work: w, lineage: func() (string, error) { return "agent.l1", nil }})
+	// The done text has no channel here, so it is retried; end that loop
+	// as a shutdown would before the test returns, or its log lines race
+	// a later test's captured log (#2697).
+	ended := make(chan struct{})
+	f.sleep = func(context.Context, time.Duration) bool { return false }
+	f.toldLater = func() { close(ended) }
 	f.resumeAgent(context.Background())
 	f.resumeAgent(context.Background()) // done once: recall holds it
 	if len(w.backs) != 1 || !w.backs[0].Equal(since) || !w.asked[0] {
 		t.Fatalf("agent take-backs %v %v", w.backs, w.asked)
 	}
+	within(t, ended)
 }
 
 // S1/U2 on #409: a restore the forget log's check held (broker/recovery's
