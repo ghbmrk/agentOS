@@ -17,7 +17,7 @@ EnvironmentFile=-/etc/agentos/agentosd.env
 Slice=agentos.slice
 Delegate=yes
 # No child gains privileges through a setuid or file-capability binary (agentosd L7-6): runsc
-# keeps root's full set, and fuzz children never regain what their jail took (LOOP-7).
+# keeps root's full set.
 NoNewPrivileges=yes
 # The Owner Card passphrase lives in this process's memory and cannot be zeroed (card C13): it
 # never dumps core (IMG-nodump; the image also discards dumps and has no swap).

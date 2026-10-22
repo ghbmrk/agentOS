@@ -348,7 +348,6 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
-          fetch-depth: 2 # a PR's test merge and its base, for the fuzz peaks decision
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
@@ -395,11 +394,6 @@ jobs:
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
-          # Fuzz children's leaf, user, network and tree (P3-4b-3r-confine), as
-          # root, in a run of their own.
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v ./loop7
           # The inference service's jail, leaf and OOM (INFER-SVC INF-1, INF-6),
           # with no_new_privs as agentosd.service runs it. Its tests skip off
           # root or without the cgroup, so the step fails on any skip and
@@ -412,9 +406,6 @@ jobs:
             github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \
             github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf || exit 1
           [ "$rc" -eq 0 ]
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
-            go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
@@ -429,46 +420,6 @@ jobs:
             --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
             env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
             -test.run '^TestHostapdChildRunsAsItsOwnUser$'
-      - name: Does this change reach the fuzz leaf peaks? (CI-SHARD)
-        # A pull request skips the measurement only when tools/ci_split.py, as the BASE commit
-        # has it, finds no changed path among its inputs: the directories of every module
-        # package the targets and loop7's test build from, the fuzz manifest, the module files
-        # and the workflow. The base copy is defence in depth only: on pull_request this
-        # workflow comes from the PR head, so a PR can rewrite this step; ci.yml and ci_split.py
-        # are tier A (human review) and in PEAK_FILES, so changing either always measures. A
-        # push to main, any other event, any error here, and any path git quotes measure.
-        id: peaks
-        working-directory: broker
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          run=run
-          t=$RUNNER_TEMP
-          # HEAD is the PR's test merge (base^1, branch^2), as in the checks job.
-          if [ "$EVENT" = pull_request ] \
-            && git show HEAD^1:tools/ci_split.py > "$t/ci_split.py" 2>/dev/null \
-            && git -c core.quotePath=false diff -z --no-renames --name-only HEAD^1 HEAD > "$t/changed" \
-            && pkgs=$(jq -r '.targets[].pkg | "./" + .' ../image/fuzz-targets.json | sort -u) \
-            && { CGO_ENABLED=0 go list -deps -test ./loop7 $pkgs && go list -deps -test ./loop7 $pkgs; } > "$t/deps"; then
-            run=$(python3 -I "$t/ci_split.py" peaks --event "$EVENT" --deps "$t/deps" --changed "$t/changed") || run=run
-          fi
-          [ "$run" = skip ] || run=run
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "Fuzz leaf memory peaks: $run"
-          if [ "$run" = skip ]; then
-            echo "### Fuzz leaf memory peaks: skipped, no input changed" >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)
-        if: steps.peaks.outputs.run != 'skip'
-        # Each target in the image's fuzz manifest, built as image/build.sh builds it, runs one
-        # round as agentosd wires it in a fresh leaf; the table of memory.peak sets the leaf's
-        # cap (agentosd L7-6) and goes to the step summary.
-        working-directory: broker
-        run: |
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_FUZZ_PEAKS=/tmp/fuzz-peaks.md \
-            go test -count=1 -v -timeout 40m -run '^TestFuzzLeafPeakPerTarget$' ./loop7
-          { echo "### Fuzz leaf memory peaks"; cat /tmp/fuzz-peaks.md; } >> "$GITHUB_STEP_SUMMARY"
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
@@ -478,14 +429,6 @@ jobs:
           cd broker && sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
-      - name: Loop 1 builder image under gVisor (W3-builder-image)
-        # The minimal builder image (brief client only) runs a builder job in
-        # a private lb- machine; a scripted model stands in for a provider.
-        run: |
-          sh guest/builder/build-rootfs.sh /tmp/lbroot
-          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_BUILDER_ROOTFS=/tmp/lbroot \
-            go test -count=1 -v -run '^TestIntegrationBuilderImage$' ./e2e
       - name: Codex CLI containment under gVisor (S8-W1-contain, #1720)
         # The pinned CLI runs one tool call in a pw- machine from the built image, holding only a
         # synthetic placeholder login; the tool must not reach the forwarder, the route socket or

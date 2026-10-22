@@ -15,10 +15,6 @@ usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/stub/os-release 0444 root
 usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/tpm2-pcr-signature.json 0444 root root - /.extra/tpm2-pcr-signature.json
 usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/tpm2-pcr-public-key.pem 0444 root root - /.extra/tpm2-pcr-public-key.pem
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos 0700 root root -
-usr/lib/tmpfiles.d/agentos.conf	a+ /var/lib/agentos - - - - u:agentos-fuzz:---
-usr/lib/tmpfiles.d/agentos.conf	a+ /tmp - - - - u:agentos-fuzz:---
-usr/lib/tmpfiles.d/agentos.conf	a+ /var/tmp - - - - u:agentos-fuzz:---
-usr/lib/tmpfiles.d/agentos.conf	a+ /dev/shm - - - - u:agentos-fuzz:---
 usr/lib/tmpfiles.d/credstore.conf	d /etc/credstore 0700 root root
 usr/lib/tmpfiles.d/credstore.conf	d /etc/credstore.encrypted 0700 root root
 usr/lib/tmpfiles.d/credstore.conf	z /run/credstore 0700 root root

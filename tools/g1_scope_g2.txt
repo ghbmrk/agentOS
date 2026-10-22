@@ -178,19 +178,16 @@ allow broker/vm/
 allow broker/workers/
 
 # MIG-4-untrusted ports (D-139, #2578): sub B's port-map directories that D-098 froze or no
-# G2 test needs. The `frozen-import` lines for compile, corpus, loop7, loopbuild, loops and
-# skill moved here.
+# G2 test needs. The `frozen-import` lines for compile, corpus, loops and skill moved here
+# (loop7, loopbuild and sockprobe were listed until #2787 deleted them).
 allow broker/attention/
 allow broker/cleanroom/
 allow broker/corpus/
 allow broker/hint/
-allow broker/loop7/
-allow broker/loopbuild/
 allow broker/loops/
 allow broker/machprobe/
 allow broker/probecmd/
 allow broker/skill/
-allow broker/sockprobe/
 
 # Imported by the G2 binaries but frozen (D-098).
 frozen-import broker/sendrules/

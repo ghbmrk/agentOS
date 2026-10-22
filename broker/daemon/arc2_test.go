@@ -165,10 +165,6 @@ var guestPlane = map[string]struct {
 	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"recalltool": {[]string{"recall", "events", "journal", "guesterr"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	// Loop 1's model-backed builder (W3-builder) serves each builder
-	// machine its own socket, as replay does: the brief, one candidate,
-	// and the metered model route; no executors, no network clients.
-	"loopbuild": {[]string{"admission", "change", "journal", "inflight", "loops", "meter", "vm"}, []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).

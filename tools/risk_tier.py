@@ -87,7 +87,6 @@ TIER_A_BROKER = {
     # CRED-1 custody (#1654): recall's scrubber and the event bus that runs it
     # decide what authentication material reaches the recall index and event log.
     "events", "recall",
-    "loop7",                      # also (b): fuzz-child jail and netns; CRED-1 child env
     "maintain",                   # also (b): attestor keys that gate security releases
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
     "recovery",
@@ -112,23 +111,21 @@ TIER_A_BROKER = {
 # broker/ packages that meet none of the three criteria: tier B.
 TIER_B_BROKER = {
     "accel", "admission", "attention", "budget",
-    # cgroup is B, but core vm kills machines and loop7 freezes its jail
-    # through it: a change to Kill or Freeze is reviewed with those callers.
+    # cgroup is B, but core vm kills machines through it: a change to Kill
+    # or Freeze is reviewed with that caller.
     "cgroup",
     "corpus", "floor", "fold", "hostchange", "inflight",
-    "loopbuild", "machprobe", "quota", "routerule", "skill",
-    "sockprobe", "test", "voice",
+    "machprobe", "quota", "routerule", "skill", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
 # Third-party source compiled into the broker: the code go.sum pins.
 TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
-# image/ builds what ships (image/fuzz-targets.json too: build.sh installs it as
-# the release's fuzz manifest, so it is not test-only); .github/ builds the image,
+# image/ builds what ships; .github/ builds the image,
 # gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
 # decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
 # which paths a PR may touch during the G1 freeze (G1-freeze); tools/ci_split decides
-# which broker packages each race shard runs and when the fuzz peaks step skips (CI-SHARD).
+# which broker packages each race shard runs (CI-SHARD).
 # tools/premerge decides which PRs need Mark and when an accepted head still holds; the
 # tests that pin the merge gates and the lens READMEs (review rules) left its Mark-only
 # list on Mark's "Narrow only" (2026-10-16), so they keep the full review instead.
