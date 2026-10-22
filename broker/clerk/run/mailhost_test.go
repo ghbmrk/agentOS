@@ -771,3 +771,21 @@ func TestUnreadableSettingsAreToldInFixedWords(t *testing.T) {
 		t.Fatalf("an unreadable settings file: %v", err)
 	}
 }
+
+// After a read fails, the lines of the last read that worked are told as
+// that, under the reason, not as news of the failed read (#2742 item 3).
+func TestAFailedReadLabelsTheLastGoodReadsLines(t *testing.T) {
+	h := &MailHost{why: "I could not read your mailbox: reason. Next.", cur: &Mail{Status: MailStatus{Lines: []string{"old line"}}}}
+	if got := h.status().Lines; !slices.Equal(got, []string{h.why, "From my last good read of your mailbox:", "old line"}) {
+		t.Fatalf("status after a failed read: %q", got)
+	}
+	h.why = ""
+	if got := h.status().Lines; !slices.Equal(got, []string{"old line"}) {
+		t.Fatalf("status after a good read: %q", got)
+	}
+	// A last good read with no lines gets no label either.
+	h.why, h.cur.Status.Lines = "I could not read your mailbox: reason. Next.", nil
+	if got := h.status().Lines; !slices.Equal(got, []string{h.why}) {
+		t.Fatalf("status after a failed read, no older lines: %q", got)
+	}
+}

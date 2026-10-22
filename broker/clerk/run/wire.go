@@ -240,8 +240,14 @@ func (c remote) do(r kernel.Request, s snapshot) kernel.Result {
 }
 
 func (c remote) probe(r kernel.Request, s snapshot) kernel.Result {
-	a, sent, _ := c.call(opProbe, r, s)
+	a, sent, big := c.call(opProbe, r, s)
 	switch {
+	case big:
+		// The view outgrew what the clerk reads, so no probe can ever be
+		// sent: each counts a check, and the step parks with its warning
+		// rather than probing forever. A RETRY that cannot be sent either
+		// parks it again (KRN-refail, #2742 item 8).
+		return kernel.Result{Outcome: "unknown"}
 	case !sent:
 		return kernel.Result{Outcome: kernel.OUnreached} // no check was made, so none counts
 	case a == nil:

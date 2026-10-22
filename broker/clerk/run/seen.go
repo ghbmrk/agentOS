@@ -237,7 +237,7 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 	if err := saveSeen(dir, s, slot, rec); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
-		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them.")
+		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. I'll try again at the next check.")
 	}
 	return got, st
 }
