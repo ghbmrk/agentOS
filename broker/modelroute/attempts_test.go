@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/meter"
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // REQ: OP-8, ARC-7 (SR3-7-f1b, SR3-7-f1c)
@@ -109,7 +109,7 @@ func TestSR3_7f1cTrailerCarriesFailedAttempts(t *testing.T) {
 // that also claims attempts, a status outside HTTP's, or a count out of
 // range.
 func TestSR3_7f1cValidTrailer(t *testing.T) {
-	failed := []route.Attempt{{Provider: "anthropic", Status: 504, Full: true}}
+	failed := []routerule.Attempt{{Provider: "anthropic", Status: 504, Full: true}}
 	for _, c := range []struct {
 		name string
 		u    Usage
@@ -123,12 +123,12 @@ func TestSR3_7f1cValidTrailer(t *testing.T) {
 		{"none and unserved", Usage{None: true, Unserved: true}, false},
 		{"none with an attempt", Usage{None: true, Failed: failed}, false},
 		{"more attempts than allowed", Usage{Failed: append(failed, failed...), Unserved: true}, false},
-		{"status 99", Usage{Failed: []route.Attempt{{Status: 99}}, Unserved: true}, false},
-		{"status 600", Usage{Failed: []route.Attempt{{Status: 600}}, Unserved: true}, false},
-		{"status 100", Usage{Failed: []route.Attempt{{Status: 100}}, Unserved: true}, true},
-		{"status 599", Usage{Failed: []route.Attempt{{Status: 599}}, Unserved: true}, true},
+		{"status 99", Usage{Failed: []routerule.Attempt{{Status: 99}}, Unserved: true}, false},
+		{"status 600", Usage{Failed: []routerule.Attempt{{Status: 600}}, Unserved: true}, false},
+		{"status 100", Usage{Failed: []routerule.Attempt{{Status: 100}}, Unserved: true}, true},
+		{"status 599", Usage{Failed: []routerule.Attempt{{Status: 599}}, Unserved: true}, true},
 		{"negative count", Usage{Input: -1}, false},
-		{"negative attempt count", Usage{Failed: []route.Attempt{{Status: 504, Output: -1}}, Unserved: true}, false},
+		{"negative attempt count", Usage{Failed: []routerule.Attempt{{Status: 504, Output: -1}}, Unserved: true}, false},
 		{"count past 1e12", Usage{Output: 1e12 + 1}, false},
 	} {
 		if got := c.u.valid(0); got != c.want {

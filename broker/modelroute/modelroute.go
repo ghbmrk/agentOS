@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
-	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // Headers between the broker and the vault process. Every header with the
@@ -99,9 +99,9 @@ type Usage struct {
 	Complete    bool   `json:"complete"`
 	OutputChars int64  `json:"output_chars"`
 
-	Failed   []route.Attempt `json:"failed,omitempty"`
-	Unserved bool            `json:"unserved,omitempty"`
-	None     bool            `json:"none,omitempty"`
+	Failed   []routerule.Attempt `json:"failed,omitempty"`
+	Unserved bool                `json:"unserved,omitempty"`
+	None     bool                `json:"none,omitempty"`
 }
 
 // MaxRetries bounds HeaderAttempts.
@@ -376,7 +376,7 @@ func unanswered(ctx context.Context, allowed int) {
 // meterAttempts is a as the meter's own type, which has the same fields
 // and charges them (Attempt.charge in broker/meter) until #2584 moves the
 // charge here.
-func meterAttempts(a []route.Attempt) []meter.Attempt {
+func meterAttempts(a []routerule.Attempt) []meter.Attempt {
 	out := make([]meter.Attempt, len(a))
 	for i, x := range a {
 		out[i] = meter.Attempt(x)
