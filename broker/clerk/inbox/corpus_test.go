@@ -1,6 +1,6 @@
 package inbox
 
-// REQ: VRB-2, LOOP-7
+// REQ: VRB-2
 
 import (
 	"context"
