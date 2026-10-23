@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +17,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/owner"
-	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
 // Agent replies (CH-20). An agent reply is texted to the owner; one too
@@ -324,7 +324,7 @@ func converse(channel func() *owner.Channel) func(string) error {
 // Kept replies: a reply that could not be sent, or was too long for
 // maxReplyTexts texts, waits here for the box's local page (BOARD CH-20p): at most
 // maxKept, none past keepReplies, in a 0600 file in the box's state
-// directory. A deletion's reach (CAP-3) forgets them all (forgetFan).
+// directory. A deletion's reach (CAP-3) forgets them all (forget).
 const (
 	maxKept     = 20
 	keepReplies = 7 * 24 * time.Hour
@@ -426,7 +426,10 @@ func tellHeldDropped(ch *owner.Channel, n int) error {
 	if ch == nil {
 		return errors.New("no owner channel")
 	}
-	return ch.Post(owner.ClassApproval, recalltool.HeldDroppedText(n))
+	if n == 1 {
+		return ch.Post(owner.ClassApproval, "A deletion dropped 1 held agent text.")
+	}
+	return ch.Post(owner.ClassApproval, fmt.Sprintf("A deletion dropped %d held agent texts.", n))
 }
 
 func (k *keptReplies) keep(text string) {
@@ -451,7 +454,10 @@ func (k *keptReplies) saveLocked(l []keptReply) {
 // is about, so a deletion drops them all, as it does the kept ones
 // (DEL-1-f1b). For the same reason it clears the owner channel's recent
 // texts, which a reaction's quote would bring back (#2360). It returns
-// how many held agent texts the owner channel dropped (CAP3-F1).
+// how many held agent texts the owner channel dropped (CAP3-F1). Nothing
+// calls it in this version: FORGET and recall's deletions are deleted
+// (#2781); it stays as the hook the kernel's erase (#2823) is to reach
+// the kept replies by.
 func (k *keptReplies) forget() (int, error) {
 	k.fmu.Lock()
 	defer k.fmu.Unlock()
@@ -493,19 +499,4 @@ func (k *keptReplies) loadLocked() []keptReply {
 		}
 	}
 	return out
-}
-
-// forgetFan is what a deletion reaches beyond the journal (recalltool
-// Cases): every kept reply and reply waiting in the guest outbox, and the
-// owner channel's recent texts, since any may quote the deleted record
-// (security C6 on #148, DEL-1-f1, #2360). The learning plane's cases went
-// with it (MIG-4-untrusted-learn).
-type forgetFan struct {
-	kept *keptReplies
-}
-
-// ForgetTasks returns what recall's forget reply counts (recalltool
-// Cases): the held agent texts the owner channel dropped (CAP3-F1).
-func (f forgetFan) ForgetTasks(...string) (int, error) {
-	return f.kept.forget()
 }

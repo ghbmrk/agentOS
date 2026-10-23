@@ -393,11 +393,11 @@ func TestModelProbeIsCachedAMinute(t *testing.T) {
 	}
 }
 
-// OP-9: the registry is in STATUS when the forget plane failed to open,
+// OP-9: the registry is in STATUS beside the old settings texts,
 // and its Digest still returns lines then.
-func TestCapabilityLinesWithoutTheForgetPlane(t *testing.T) {
+func TestCapabilityLinesBesideTheOldSettings(t *testing.T) {
 	b := newCapBox(t)
-	wireSettings(&b.cfg, nil)
+	wireSettings(&b.cfg)
 	b.caps.recallWired(false)
 	b.caps.updateChecks(false)
 	b.run()
