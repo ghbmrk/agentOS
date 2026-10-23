@@ -33,6 +33,9 @@
   {"id": "GHSA-rj75-hqrm-r3gf", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
   {"id": "GHSA-rpw4-54j3-4h4q", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
   {"id": "GHSA-rvq5-wwqv-78pq", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
-  {"id": "GHSA-rxp7-6hxx-x8q5", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."}
+  {"id": "GHSA-rxp7-6hxx-x8q5", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
+  {"id": "GHSA-4qv8-2p9j-2685", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici bundled inside openclaw (8.10.2) and npm (6.29.0); no release of either bundles the fixed 8.12.2 / 6.29.1 yet, and a bundled dependency cannot be overridden."},
+  {"id": "GHSA-f72v-6w45-q472", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici 8.10.2 bundled inside openclaw; no openclaw release bundles the fixed 8.12.2 yet, and a bundled dependency cannot be overridden."},
+  {"id": "GHSA-xjj6-f33q-929c", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici bundled inside openclaw (8.10.2) and npm (6.29.0); no release of either bundles the fixed 8.12.2 / 6.29.1 yet, and a bundled dependency cannot be overridden."}
  ]
 }
