@@ -1184,12 +1184,16 @@ def ini_words(files, section, key):
 
 def namespace_mount_violations(name, files):
     """UPD-10: a unit the check covers mounts nothing under /usr in its own namespace (NAMESPACE_MOUNTS)
-    and sets none of NAMESPACE_ROOTS."""
+    and sets none of NAMESPACE_ROOTS. Each TemporaryFileSystem= it can write ends noexec, and it sets no
+    PrivateTmp=disconnected: systemd 257 leaves a unit's own mounts out of NoExecPaths=/ (apply_mounts'
+    noexec deny list keeps every entry), so a fresh tmpfs executes unless its own options say noexec."""
     out = []
     try:
         for key in NAMESPACE_ROOTS:
             if ini_words(files, "Service", key):
                 out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
+        if ini_last(files, "Service", "PrivateTmp") == "disconnected":
+            out.append("%s: PrivateTmp=disconnected mounts a tmpfs that executes; use PrivateTmp=yes (UPD-10)" % name)
         for key in NAMESPACE_MOUNTS:
             for w in ini_words(files, "Service", key):
                 if any(c in w for c in "\"'%\\"):
@@ -1200,6 +1204,11 @@ def namespace_mount_violations(name, files):
                 norm = "/" + "/".join(x for x in target.split("/") if x not in ("", "."))
                 if ".." in norm.split("/") or any(norm == u or norm.startswith(u + "/") for u in (EXEC_ONLY,) + USR_ALIASES):
                     out.append("%s: %s=%s mounts under %s, which executes (UPD-10)" % (name, key, w, EXEC_ONLY))
+                if key == "TemporaryFileSystem":
+                    opts = parts[1].split(",") if len(parts) > 1 else []
+                    ro = [o for o in opts if o in ("ro", "rw")]
+                    if (not ro or ro[-1] != "ro") and not mount_noexec(",".join(opts)):
+                        out.append("%s: TemporaryFileSystem=%s is writable and does not end noexec (UPD-10)" % (name, w))
     except ValueError as e:
         out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
     return out

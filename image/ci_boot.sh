@@ -179,8 +179,12 @@ NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")"
 # in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP, which
 # gpt-auto mounts at the empty /boot when there is no XBOOTLDR) and must find every one refused, each
 # but root's directories on its own mount; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
-# finds the same in a tmpfs it mounts itself; and the weekly reboot timer is armed. Passed the same
-# way as the NetworkManager check.
+# finds the same in its private /tmp and /var/tmp, its StateDirectory= and a TemporaryFileSystem= it mounts
+# noexec; and the weekly reboot timer is armed. Passed the same way as the NetworkManager check.
+# systemd 257 leaves every namespace mount out of NoExecPaths=/'s recursive remount (apply_mounts' noexec
+# deny list keeps all entries), so a unit's binds stay noexec only through the host mounts they bind, and
+# its own tmpfs only through its noexec option, which mkosi.finalize requires (build (a) at 9d00e6b ran
+# a planted file in a plain TemporaryFileSystem=).
 noexec_check() {
 	cat <<'EOS'
 say() { echo "agentos-noexec: $*"; }
@@ -197,9 +201,13 @@ for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
 	fi
 	rm -f "$f"
 done
-r=$(systemd-run --quiet --wait --pipe -p NoExecPaths=/ -p ExecPaths=/usr -p TemporaryFileSystem=/mnt /bin/sh -c \
-	'cp /usr/bin/true /mnt/t && chmod 0755 /mnt/t && { if /mnt/t; then echo ran; else echo refused; fi; }' 2>&1)
-[ "$r" = refused ] && say "unit tmpfs refused" || say "FAIL unit tmpfs: $r"
+systemd-run --quiet --wait --pipe -p NoExecPaths=/ -p ExecPaths=/usr -p PrivateTmp=yes -p StateDirectory=agentos-noexec-probe \
+	-p TemporaryFileSystem=/mnt:noexec /bin/sh -c 'for p in tmp:/tmp var-tmp:/var/tmp state:$STATE_DIRECTORY tmpfs:/mnt; do
+		n=${p%%:*} f=${p#*:}/agentos-implant
+		if cp /usr/bin/true "$f" && chmod 0755 "$f"; then
+			if "$f"; then echo "FAIL unit $n ran"; else echo "unit $n refused"; fi
+		else echo "FAIL unit $n could not plant"; fi
+	done' 2>/dev/null | while read -r l; do say "$l"; done
 systemctl is-active --quiet agentos-reboot.timer && say "reboot timer active" || say "FAIL reboot timer not active"
 say done
 EOS
@@ -229,7 +237,8 @@ hasnt "$W/console.log" "agentos-nm: FAIL"
 for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
 	has "$W/console.log" "agentos-noexec: $d refused"
 done
-for want in "agentos-noexec: unit tmpfs refused" "agentos-noexec: reboot timer active" "agentos-noexec: done"; do
+for want in "agentos-noexec: unit tmp refused" "agentos-noexec: unit var-tmp refused" "agentos-noexec: unit state refused" \
+	"agentos-noexec: unit tmpfs refused" "agentos-noexec: reboot timer active" "agentos-noexec: done"; do
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-noexec: FAIL"

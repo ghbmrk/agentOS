@@ -114,14 +114,33 @@ class NoExecTreeTest(unittest.TestCase):
                     f.unlink()
         self.assertEqual(self.v(), [])
 
+    def test_a_units_own_tmpfs_ends_noexec(self):
+        # systemd 257 leaves a unit's own mounts out of NoExecPaths=/ (build (a) at 9d00e6b ran a file
+        # planted in a plain TemporaryFileSystem=), so a tmpfs the unit can write must say noexec itself.
+        unit = self.root / SYSTEM / "agentos-egress.service"
+        good = unit.read_text()
+        for line in ("TemporaryFileSystem=/var/x", "TemporaryFileSystem=/var/x:mode=0700", "TemporaryFileSystem=/var/x:noexec,exec",
+                     "TemporaryFileSystem=/var/x:ro,rw", "TemporaryFileSystem=/var/x:noexec,defaults"):
+            with self.subTest(line):
+                unit.write_text(good + "\n[Service]\n" + line + "\n")
+                self.assertEqual(self.v(), ["agentos-egress.service: %s is writable and does not end noexec (UPD-10)" % line])
+        for line in ("TemporaryFileSystem=/var/x:noexec", "TemporaryFileSystem=/var/x:mode=0700,nosuid,nodev,noexec",
+                     "TemporaryFileSystem=/var/x:ro", "TemporaryFileSystem=/var/x:rw,ro", "PrivateTmp=yes"):
+            with self.subTest(line):
+                unit.write_text(good + "\n[Service]\n" + line + "\n")
+                self.assertEqual(self.v(), [])
+        unit.write_text(good + "\n[Service]\nPrivateTmp=disconnected\n")
+        self.assertEqual(self.v(), ["agentos-egress.service: PrivateTmp=disconnected mounts a tmpfs that executes; "
+                                    "use PrivateTmp=yes (UPD-10)"])
+
     def test_nothing_is_mounted_under_usr_in_a_unit(self):
         # ExecPaths=/usr makes whatever a unit mounts under /usr in its own namespace executable.
         unit = self.root / SYSTEM / "agentos-egress.service"
         good = unit.read_text()
         for line in ("BindPaths=/var/lib/x:/usr/lib/x", "BindReadOnlyPaths=-/var/x:/usr/x:rbind", "BindPaths=/usr/lib/x",
-                     "TemporaryFileSystem=/usr/local:rw", "ReadWritePaths=-/usr/lib/agentos", "MountImages=/var/i.raw:/usr/x",
-                     "BindPaths=/var/x:/usr", "TemporaryFileSystem=/usr/./x", "BindPaths=/var/x:/bin/x",
-                     "TemporaryFileSystem=/lib/agentos", "BindReadOnlyPaths=/var/x:/sbin", "ReadWritePaths=/lib64"):
+                     "TemporaryFileSystem=/usr/local:rw,noexec", "ReadWritePaths=-/usr/lib/agentos", "MountImages=/var/i.raw:/usr/x",
+                     "BindPaths=/var/x:/usr", "TemporaryFileSystem=/usr/./x:ro", "BindPaths=/var/x:/bin/x",
+                     "TemporaryFileSystem=/lib/agentos:ro", "BindReadOnlyPaths=/var/x:/sbin", "ReadWritePaths=/lib64"):
             with self.subTest(line):
                 unit.write_text(good + "\n[Service]\n" + line + "\n")
                 self.assertEqual(len(self.v()), 1, self.v())
@@ -130,7 +149,7 @@ class NoExecTreeTest(unittest.TestCase):
             with self.subTest(key):
                 unit.write_text(good + "\n[Service]\n%s=/var/lib/x\n" % key)
                 self.assertEqual(self.v(), ["agentos-egress.service: sets %s; only the image's own /usr may execute (UPD-10)" % key])
-        for line in ("BindPaths=/usr/lib/x:/var/lib/x", "TemporaryFileSystem=/var/usr", "BindPaths=/usrx", "BindPaths=/library",
+        for line in ("BindPaths=/usr/lib/x:/var/lib/x", "TemporaryFileSystem=/var/usr:ro", "BindPaths=/usrx", "BindPaths=/library",
                      "BindPaths=/usr/x\nBindPaths="):
             with self.subTest(line):
                 unit.write_text(good + "\n[Service]\n" + line + "\n")
@@ -332,12 +351,20 @@ class BootProbeTest(unittest.TestCase):
         # check unseen (#2875 L3, build (a) at b2a9007). One drop-in wants both checks.
         self.assertIn('EXTRA="$NM_EXTRA$NX_EXTRA$CHECKS_WANTED"', sh)
         self.assertIn("Wants=agentos-nm-check.service agentos-noexec-check.service", sh)
-        for var in ("NM_EXTRA", "NX_EXTRA"):
+        # No credential name repeats on the first boot, whose EXTRA these variables and REPORT_FIRST make up.
+        names = []
+        for var in ("NM_EXTRA", "NX_EXTRA", "CHECKS_WANTED", "REPORT_FIRST"):
             line = re.search(r"^%s=.*$" % var, sh, re.M).group(0)
-            self.assertNotIn("unit-dropin", line)
+            names += re.findall(r"(?:nm_cred |credential\.binary:)([\w.@-]+)", line)
+        self.assertEqual(len(names), 4, names)
+        self.assertEqual(len(names), len(set(names)), names)
         probe = re.search(r"noexec_check\(\) \{\n\tcat <<'EOS'\n(.*?)\nEOS\n", sh, re.S).group(1)
         self.assertEqual(subprocess.run(["sh", "-n"], input=probe, text=True).returncode, 0)
-        for want in ("agentos-noexec: unit tmpfs refused", "agentos-noexec: reboot timer active", "agentos-noexec: done"):
+        for n in ("tmp", "var-tmp", "state", "tmpfs"):
+            self.assertIn("%s:" % n, probe)
+            self.assertIn('"agentos-noexec: unit %s refused"' % n, sh)
+        self.assertIn("-p TemporaryFileSystem=/mnt:noexec", probe)
+        for want in ("agentos-noexec: reboot timer active", "agentos-noexec: done"):
             self.assertIn(want, sh)
         self.assertIn('hasnt "$W/console.log" "agentos-noexec: FAIL"', sh)
 
