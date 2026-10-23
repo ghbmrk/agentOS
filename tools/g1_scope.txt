@@ -131,6 +131,8 @@ allow broker/hostdisk/
 allow broker/infer/supervise/
 allow broker/inflight/
 allow broker/journal/
+# The kernel meter the spare budget is charged to; broker/loops imports it (MIG-4-spend-m, #2588).
+allow broker/kernel/
 allow broker/localapi/
 allow broker/localsrv/
 allow broker/localui/

@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
 // REQ: LOOP-0, LOOP-1, LOOP-2, LOOP-3, RES-1
@@ -215,14 +216,14 @@ func TestSpareBudgetIsNeverExceeded(t *testing.T) {
 	req, _ := ParseText("spare budget 2")
 	must(t, r.s.Set(context.Background(), req))
 	// Two replay calls use the budget up; the third is refused by the
-	// spare meter itself, whoever makes it.
+	// kernel itself, on the spare key's day cap, whoever makes it.
 	for i := 0; i < 2; i++ {
-		c, err := r.spare.Start("eval-1", 10, 10)
-		must(t, err)
-		c.Done(20)
+		if rf := r.call(SpareCap(1, loopstest.OutPerM)); rf != nil {
+			t.Fatal(rf)
+		}
 	}
-	if _, err := r.spare.Start("eval-2", 10, 10); !errors.Is(err, meter.ErrExhausted) {
-		t.Fatalf("call past the spare budget: %v", err)
+	if rf := r.call(1); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("call past the spare budget: %v", rf)
 	}
 	for i := 0; i < 5; i++ {
 		r.s.Tick(context.Background())
@@ -242,9 +243,9 @@ func TestModelWorkRunsWithNoFixedBudget(t *testing.T) {
 	modelWork := &source{loop: Improve, clk: r.clk, queue: -1, value: 1, model: true}
 	r.restart(modelWork)
 	for i := 0; i < 2; i++ {
-		c, err := r.spare.Start("eval-1", 10, 10)
-		must(t, err)
-		c.Done(20)
+		if rf := r.call(SpareCap(1, loopstest.OutPerM)); rf != nil {
+			t.Fatal(rf)
+		}
 	}
 	for i := 0; i < 3; i++ {
 		r.s.Tick(context.Background())
@@ -313,8 +314,9 @@ func TestWorkYieldsWhenTheBoxGetsBusyEvenWithoutPreempt(t *testing.T) {
 
 // REQ: LOOP-5, LOOP-2
 //
-// Evaluation keeps its reserve of the spare budget while the scheduler
-// runs evaluation work, and lends it out otherwise (arbitrator, #49).
+// Evaluation has its own share of the spare budget: replay machines cite
+// a child of the spare key whose day cap is EvalReserve of the budget, and
+// the scheduler says while it runs evaluation work (MIG-4-spend-m).
 
 type evalSource struct {
 	evaluates bool
@@ -326,43 +328,43 @@ func (e *evalSource) Next(context.Context, bool) (Job, bool) {
 	return Job{Name: "unit", Evaluates: e.evaluates, Run: func(context.Context) Result { return e.run() }}, true
 }
 
-func TestEvaluationWorkKeepsItsReserveOfTheSpareBudget(t *testing.T) {
+func TestEvaluationKeyHoldsItsShareOfTheSpareBudget(t *testing.T) {
 	r := newRig(t)
 	src := &evalSource{}
 	r.restart(src)
-	must(t, r.s.cfg.Spare.SetOverallCap(meter.Limits{Calls: 10, Tokens: 1_000_000}))
-	must(t, r.s.cfg.Spare.SetShares([]meter.Share{r.s.EvalShare()}))
-	builderCalls := func() int {
+	req, _ := ParseText("spare budget 10")
+	must(t, r.s.Set(context.Background(), req))
+	ek, err := r.s.EvalKey()
+	must(t, err)
+	one := SpareCap(1, loopstest.OutPerM)
+	calls := func(k key.Key) int {
 		n := 0
-		for {
-			c, err := r.s.cfg.Spare.Start("builder", 1, 1)
-			if err != nil {
-				return n
-			}
-			c.Done(2)
+		for r.kern.Call(k, one) == nil {
 			n++
 		}
+		return n
 	}
 	var during int
-	var evalOK error
 	src.evaluates = true
 	src.run = func() Result {
 		if !r.s.Evaluating() {
 			t.Error("not evaluating while evaluation work runs")
 		}
-		during = builderCalls()
-		_, evalOK = r.s.cfg.Spare.Start("eval-1", 1, 1)
+		during = calls(ek)
 		return Result{Value: 1}
 	}
 	r.s.Tick(context.Background())
-	if during != 7 || evalOK != nil {
-		t.Fatalf("during evaluation work: builder made %d calls (want 7 of 10), evaluation got %v", during, evalOK)
+	if during != 3 {
+		t.Fatalf("evaluation made %d calls; want its 3 of 10", during)
 	}
 	if r.s.Evaluating() {
 		t.Fatal("still evaluating after the unit ended")
 	}
-	// Outside evaluation work the rest of the reserve is lent.
-	if n := builderCalls(); n != 2 {
-		t.Fatalf("builder made %d calls outside evaluation work; want the 2 left", n)
+	if rf := r.kern.Call(ek, one); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("evaluation past its share: %v", rf)
+	}
+	// The rest of the budget is the spare key's, and nothing past it.
+	if n := calls(r.spare.Key()); n != 7 {
+		t.Fatalf("other loop work made %d calls; want the 7 left", n)
 	}
 }

@@ -3,13 +3,13 @@ package loops
 import (
 	"context"
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
 // REQ: LOOP-0, LOOP-2, LOOP-6, OP-5
@@ -28,8 +28,8 @@ func TestLoopsAreOnByDefaultAndSaidInOneLine(t *testing.T) {
 	if set.SpareCalls != NoSpareBudget {
 		t.Fatalf("default spare budget %d, want no fixed budget", set.SpareCalls)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(NoSpareBudget) {
-		t.Fatalf("spare meter cap %+v, want no fixed budget", limit)
+	if c := r.spare.Cap(); c != SpareCap(NoSpareBudget, loopstest.OutPerM) {
+		t.Fatalf("spare cap %d, want no fixed budget", c)
 	}
 	line := DefaultsLine(set.SpareCalls)
 	if strings.Count(line, ".") != 1 || !strings.Contains(line, "LOOPS OFF") || !strings.Contains(line, "spare plan quota") || !strings.Contains(line, "at most 1500 AI calls a day while a pay-per-token key") || !strings.Contains(line, "and check for updates") {
@@ -39,33 +39,35 @@ func TestLoopsAreOnByDefaultAndSaidInOneLine(t *testing.T) {
 
 // LOOP-0 (#2291) and OP-8: the default has no fixed call budget, but loop
 // calls can reach pay-per-token routes, which keep a money cap, so the
-// spare meter holds the OP-8 default cap. Security's repro on #2319: 2000
-// replay calls of 10 000 tokens (20M) were all admitted; past the cap they
-// are refused. A budget at or under the cap applies on text; above it is a
-// raise.
+// spare key holds the OP-8 default of 1500 calls a day, in minor units.
+// Security's repro on #2319: 2000 replay calls of 10 000 tokens (20M) were
+// all admitted; past the cap they are refused. A budget at or under the cap
+// applies on text; above it is a raise.
 func TestNoFixedBudgetKeepsThePaidRouteMoneyCap(t *testing.T) {
-	if SpareLimits(NoSpareBudget) != meter.DefaultOverallCap {
-		t.Fatalf("no-budget cap %+v, want the OP-8 default %+v", SpareLimits(NoSpareBudget), meter.DefaultOverallCap)
+	one := SpareCap(1, loopstest.OutPerM)
+	if c := SpareCap(NoSpareBudget, loopstest.OutPerM); c != PaidRouteCalls*one || c != loopstest.EnvelopeCap {
+		t.Fatalf("no-budget cap %d, want the OP-8 default of %d calls", c, PaidRouteCalls)
 	}
-	if SpareLimits(0) != (meter.Limits{Calls: 1, Tokens: 1}) {
-		t.Fatalf("a zero budget must fit no call: %+v", SpareLimits(0))
+	if SpareCap(0, loopstest.OutPerM) != 0 {
+		t.Fatalf("a zero budget must fit no call: %d", SpareCap(0, loopstest.OutPerM))
 	}
 	r := newRig(t)
 	admitted := 0
 	for i := 0; i < 2000; i++ {
-		c, err := r.spare.Start("eval-"+strconv.Itoa(i), 9000, 1000)
-		if err != nil {
+		rf := r.call(one)
+		if rf != nil {
+			if rf.Code != key.RSpendDay {
+				t.Fatal(rf)
+			}
 			break
 		}
-		c.Done(10000)
 		admitted++
 	}
-	if admitted != int(meter.DefaultOverallCap.Calls) {
-		t.Fatalf("%d loop calls admitted with no fixed budget, want the paid-route cap %d", admitted, meter.DefaultOverallCap.Calls)
+	if admitted != int(PaidRouteCalls) {
+		t.Fatalf("%d loop calls admitted with no fixed budget, want the paid-route cap %d", admitted, PaidRouteCalls)
 	}
-	used, _ := r.spare.Overall()
-	if used.Tokens > meter.DefaultOverallCap.Tokens {
-		t.Fatalf("%d tokens spent, over the paid-route cap", used.Tokens)
+	if used := r.spare.Used(r.clk.now().UnixMilli()); used > SpareCap(NoSpareBudget, loopstest.OutPerM) {
+		t.Fatalf("%d spent, over the paid-route cap", used)
 	}
 	ctx := context.Background()
 	if got, ok := r.s.Text(ctx, "SPARE BUDGET 2000", true); ok && r.s.Settings().SpareCalls == 2000 {
@@ -80,8 +82,8 @@ func TestNoFixedBudgetKeepsThePaidRouteMoneyCap(t *testing.T) {
 	if asked := r.pol.wasAsked(); len(asked) != 1 {
 		t.Fatalf("a budget at the cap asked the owner: %v", asked)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(1500) {
-		t.Fatalf("set budget not applied to the spare meter: %+v", limit)
+	if c := r.spare.Cap(); c != SpareCap(1500, loopstest.OutPerM) || r.kern.Widened != 0 {
+		t.Fatalf("set budget not applied to the spare key: %d (widened %d)", c, r.kern.Widened)
 	}
 }
 
@@ -182,8 +184,8 @@ func TestSpareBudgetLowersOnTextAndRaisesOnlyWithApproval(t *testing.T) {
 	ctx := context.Background()
 	req, _ := ParseText("SPARE BUDGET 20")
 	must(t, r.s.Set(ctx, req))
-	if _, limit := r.spare.Overall(); limit != SpareLimits(20) {
-		t.Fatalf("lowered budget not applied to the spare meter: %+v", limit)
+	if c := r.spare.Cap(); c != SpareCap(20, loopstest.OutPerM) {
+		t.Fatalf("lowered budget not applied to the spare key: %d", c)
 	}
 	if asked := r.pol.wasAsked(); len(asked) != 0 {
 		t.Fatalf("lowering the budget asked the owner: %v", asked)
@@ -198,8 +200,8 @@ func TestSpareBudgetLowersOnTextAndRaisesOnlyWithApproval(t *testing.T) {
 	}
 	r.pol.approve = true
 	must(t, r.s.Set(ctx, req))
-	if _, limit := r.spare.Overall(); limit != SpareLimits(400) {
-		t.Fatalf("approved raise not applied: %+v", limit)
+	if c := r.spare.Cap(); c != SpareCap(400, loopstest.OutPerM) {
+		t.Fatalf("approved raise not applied: %d", c)
 	}
 }
 
@@ -223,8 +225,8 @@ func TestOnlyTheOwnerChangesLoopSettings(t *testing.T) {
 	if err != nil || rep.State != change.StateRejected {
 		t.Fatalf("budget candidate: %+v, %v", rep, err)
 	}
-	if _, limit := r.spare.Overall(); limit != SpareLimits(NoSpareBudget) {
-		t.Fatalf("spare cap changed: %+v", limit)
+	if c := r.spare.Cap(); c != SpareCap(NoSpareBudget, loopstest.OutPerM) {
+		t.Fatalf("spare cap changed: %d", c)
 	}
 }
 
@@ -262,10 +264,10 @@ func TestZeroSpareBudgetAllowsNoModelCall(t *testing.T) {
 	r := newRig(t)
 	req, _ := ParseText("SPARE BUDGET 0")
 	must(t, r.s.Set(context.Background(), req))
-	// Every metered call reserves output (meter.Wrap), so the smallest
-	// real call is one input and one output token.
-	if _, err := r.spare.Start("eval-x", 1, 1); err == nil {
-		t.Fatal("a model call fit under a zero spare budget")
+	// The clerk admits every call at its worst case (Clerk.Call), so the
+	// smallest real call costs at least one minor unit.
+	if rf := r.call(1); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("a model call fit under a zero spare budget: %v", rf)
 	}
 }
 

@@ -4,14 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
 // clock is a settable test clock.
@@ -97,7 +97,8 @@ func (x *tasks) Reconcile(context.Context, journal.Intent, int) journal.Outcome 
 type rig struct {
 	t     *testing.T
 	clk   *clock
-	spare *meter.Meter
+	spare *Spare
+	kern  *loopstest.Kernel
 	store *change.MemStore
 	s     *Scheduler
 	pol   *policy
@@ -111,15 +112,7 @@ func newRig(t *testing.T, sources ...Source) *rig {
 	t.Helper()
 	r := &rig{t: t, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}, store: &change.MemStore{}}
 	var err error
-	r.spare, err = meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: SpareLimits(NoSpareBudget),
-		Now:        r.clk.now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	r.spare, r.kern = newSpare(t, r.clk.now)
 	r.tasks = &tasks{out: map[string]journal.Result{}, delay: map[string]time.Duration{}, clk: r.clk}
 	r.ev = &evaluator{}
 	r.p, err = change.New(change.Config{
@@ -254,4 +247,17 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// newSpare is a spare envelope on a kernel of its own (loopstest).
+func newSpare(t *testing.T, now func() time.Time) (*Spare, *loopstest.Kernel) {
+	t.Helper()
+	k := loopstest.New(t, now)
+	return &Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, Revoke: k.Revoke, OutPerM: loopstest.OutPerM}, k
+}
+
+// call is one spare call of amount minor units, charged to the spare key.
+func (r *rig) call(amount int64) *key.Refusal {
+	r.t.Helper()
+	return r.kern.Call(r.spare.Key(), amount)
 }

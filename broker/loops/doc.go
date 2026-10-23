@@ -12,7 +12,7 @@
 // worthwhile work the scheduler sleeps until something new arrives.
 //
 // Loop model calls (counterfactual replay, the clean-room builder) are
-// metered against one dedicated meter, the spare budget, separate from every work budget (LOOP-2, OP-8). Its cap is an
+// charged to one dedicated key, the spare envelope, separate from every work budget (LOOP-2, OP-8). Its day cap is an
 // owner setting, changed only by an owner-origin intent; nothing a loop
 // runs can raise it (LOOP-6, CHG-2).
 //
