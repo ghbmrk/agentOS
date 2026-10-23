@@ -501,6 +501,5 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 	s.tokens++
 	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer",
-		"scope": "https://www.googleapis.com/auth/gmail.modify"})
+	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer"})
 }
