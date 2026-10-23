@@ -32,10 +32,10 @@ import (
 // children that need it. A new key is a reviewed entry with its reason.
 var allowedKeys = map[string]string{
 	"PATH":    "every child: where its own helpers are; never the daemon's value by copy",
-	"HOME":    "fuzz and probe children (loop7, probecmd): their scratch directory",
-	"TMPDIR":  "fuzz and probe children (loop7, probecmd): their scratch directory",
-	"GOCACHE": "Go fuzz and probe binaries (loop7, probecmd): off, so no cache outside scratch",
-	"GOFLAGS": "Go fuzz and probe binaries (loop7, probecmd): empty, so no flags from outside",
+	"HOME":    "probe children (probecmd): their scratch directory",
+	"TMPDIR":  "probe children (probecmd): their scratch directory",
+	"GOCACHE": "Go probe binaries (probecmd): off, so no cache outside scratch",
+	"GOFLAGS": "Go probe binaries (probecmd): empty, so no flags from outside",
 	"LANG":    "the browser driver (browser): C.UTF-8, so page text decodes the same everywhere",
 	// The guest runtime the guest bridge starts (agentos-guest-bridge).
 	// Both run in the guest, where no AGENTOS_* variable exists; the

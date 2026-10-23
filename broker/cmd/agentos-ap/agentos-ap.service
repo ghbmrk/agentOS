@@ -65,7 +65,7 @@ NoNewPrivileges=yes
 # Owner and guest content and the meter and clock state agentosd trusts
 # are masked too (#2626), and none of these masks is a guarantee. Each
 # has a "-", so a path missing at loader start is skipped, and agentosd
-# makes most of its directories (loop7, learn, machines...) and files
+# makes most of its directories (learn, machines...) and files
 # later; a mask on a directory holds only if the directory existed then.
 # A mask on a file is a bind mount on its dentry, and agentosd rewrites
 # state by temp file and rename (broker/durable), which detaches that
