@@ -175,10 +175,36 @@ EOS
 nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
 NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
 NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service\n')"
+# No code from writable storage (UPD-10): the first boot plants a copy of /usr/bin/true, mode 0755,
+# in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP) and
+# must find every one refused; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
+# finds the same in a tmpfs it mounts itself; and the weekly reboot timer is armed. Passed the same
+# way as the NetworkManager check.
+noexec_check() {
+	cat <<'EOS'
+say() { echo "agentos-noexec: $*"; }
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /efi; do
+	f="${d%/}/agentos-implant"
+	if cp /usr/bin/true "$f" 2>/dev/null && chmod 0755 "$f" 2>/dev/null; then
+		if "$f" 2>/dev/null; then say "FAIL $d ran"; else say "$d refused"; fi
+	else
+		say "FAIL $d could not plant"
+	fi
+	rm -f "$f"
+done
+r=$(systemd-run --quiet --wait --pipe -p NoExecPaths=/ -p ExecPaths=/usr -p TemporaryFileSystem=/mnt /bin/sh -c \
+	'cp /usr/bin/true /mnt/t && chmod 0755 /mnt/t && { if /mnt/t; then echo ran; else echo refused; fi; }' 2>&1)
+[ "$r" = refused ] && say "unit tmpfs refused" || say "FAIL unit tmpfs: $r"
+systemctl is-active --quiet agentos-reboot.timer && say "reboot timer active" || say "FAIL reboot timer not active"
+say done
+EOS
+}
+NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
+NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-noexec-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
-EXTRA="$NM_EXTRA" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+EXTRA="$NM_EXTRA$NX_EXTRA" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
@@ -192,6 +218,13 @@ for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every devic
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-nm: FAIL"
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /efi; do
+	has "$W/console.log" "agentos-noexec: $d refused"
+done
+for want in "agentos-noexec: unit tmpfs refused" "agentos-noexec: reboot timer active" "agentos-noexec: done"; do
+	has "$W/console.log" "$want"
+done
+hasnt "$W/console.log" "agentos-noexec: FAIL"
 # polkitd is 0.106 or later (JS rules), read from the package manifest mkosi wrote beside the image.
 if python3 "$HERE/compare_manifests.py" --polkitd "$(dirname "$IMG")"; then
 	echo "ok   polkitd 0.106 or later"

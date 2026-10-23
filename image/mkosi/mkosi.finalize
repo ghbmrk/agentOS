@@ -17,7 +17,9 @@ Every tmpfiles.d line must be on tmpfiles.allow, nothing but mkosi's credentials
 store, and no configuration file it reads may be a link other than a mask to /dev/null, or be reached
 through a step that is not root's or that anyone else can write; no link anywhere in the tree may
 reach into a directory anyone on the box can write (#1543). Every udev rules file, generator and
-modules-load.d file must be on exec.allow by its hash (#1556).
+modules-load.d file must be on exec.allow by its hash (#1556). And nothing writable may execute
+(UPD-10): every agentos service sets NoExecPaths=/ with ExecPaths= on /usr alone, and every fstab line
+and mount unit is noexec.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
@@ -306,7 +308,8 @@ def _violations(root):
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
-            + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root))
+            + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
+            + noexec_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1093,6 +1096,157 @@ def card_unit_violations(root):
         limit = ini_last(files, "Service", "LimitCORE")
         if limit not in ("0", "0:0"):
             out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
+    return out
+
+
+# UPD-10 (D-149): no trusted-base process runs code from writable storage. Every agentos unit the
+# image ships sets NoExecPaths=/ with ExecPaths= only on the read-only, verity-checked /usr; root is
+# mounted noexec by the boot entry (finish_image.py); the writable mounts the box makes at boot are
+# noexec through etc/fstab (systemd-remount-fs applies it to the API file systems) or their mount
+# unit's Options=.
+NOEXEC_UNITS = re.compile(r"agentos[^@/]*(@[^/]*)?\.service$")
+# agentosd.service: the old core's broker, frozen while the kernel replaces it (D-139); its unit
+# hardening is #917. Root's noexec mount still holds for it.
+NOEXEC_EXEMPT = ("agentosd.service",)
+EXEC_ONLY = "/usr"
+# The API file systems systemd mounts writable before it reads any unit; systemd-remount-fs remounts
+# each with its etc/fstab options (mount_point_is_api in src/shared/mount-setup.c).
+NOEXEC_FSTAB = ("/dev", "/dev/shm", "/run")
+# Mount units the image may ship without noexec: trixie systemd's own kernel file systems, which hold
+# no file anyone can write and then execute (message queues, huge pages, kernel interfaces). Any other
+# .mount unit, tmp.mount included, ends with noexec in its Options=.
+NOEXEC_MOUNT_STOCK = ("dev-hugepages.mount", "dev-mqueue.mount", "proc-sys-fs-binfmt_misc.mount",
+                      "sys-fs-fuse-connections.mount", "sys-kernel-config.mount", "sys-kernel-debug.mount",
+                      "sys-kernel-tracing.mount")
+
+
+def mount_noexec(options):
+    """Whether mount OPTIONS (comma-separated) end noexec: the last of exec, noexec and defaults
+    (which means exec) decides, as libmount applies them in order."""
+    last = None
+    for o in (options or "").split(","):
+        if o in ("exec", "noexec", "defaults"):
+            last = o
+    return last == "noexec"
+
+
+def ini_paths(files, section, key):
+    """The path list systemd ends up with for SECTION.KEY across FILES in order (NoExecPaths=,
+    ExecPaths=): each assignment adds its words, an empty one resets the list. Each word is returned
+    without its '-' (ignore a missing path) prefix. Raises ValueError for what the check does not
+    model: a quote, a specifier, a '+' prefix, a relative path or a '.' or '..' component; and for a
+    file systemd may read only in part."""
+    val = []
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        for s, k, v in lines:
+            if (s, k) != (section, key):
+                continue
+            if not v:
+                val = []
+                continue
+            for w in v.split():
+                p = w[1:] if w.startswith("-") else w
+                if any(c in p for c in "\"'%\\") or not p.startswith("/") or {".", ".."} & set(p.split("/")):
+                    raise ValueError("%s=%s in %s: the tree check does not model it" % (key, w, f.name))
+                val.append("/" + "/".join(x for x in p.split("/") if x))
+    return val
+
+
+def noexec_violations(root):
+    """UPD-10: each agentos service the tree ships but NOEXEC_EXEMPT, with every drop-in systemd
+    257.13 applies to it (as card_unit_violations reads them), ends with "/" in NoExecPaths= and a
+    non-empty ExecPaths= of /usr and paths below it only. A template's instance units and drop-ins are
+    refused rather than modelled, and so is a link as an agentos unit or any link to one. etc/fstab
+    holds NOEXEC_FSTAB, and every line it holds ends noexec; every .mount unit but NOEXEC_MOUNT_STOCK
+    ends noexec, after its drop-ins."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    names = set()
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            rel = d + "/" + n
+            unit = n[:-2] if n.endswith(".d") else n
+            m = NOEXEC_UNITS.match(unit)
+            if m and "@" in unit and not unit.endswith("@.service"):
+                out.append("%s: an instance of a template; the tree check does not model instance units" % rel)
+                continue
+            st = tree_lstat(root, rel)
+            if n.endswith(".service") and stat.S_ISLNK(st.st_mode):
+                try:
+                    target = tree_chase(root, rel)[0].rsplit("/", 1)[-1]
+                except OSError:
+                    target = None
+                if m or (target and NOEXEC_UNITS.match(target) and target not in NOEXEC_EXEMPT):
+                    out.append("%s: a link%s; the tree check reads only a regular agentos unit file"
+                               % (rel, " to " + target if target else ""))
+                continue
+            if m and n == unit and n not in NOEXEC_EXEMPT:
+                names.add(n)
+    for name in sorted(names):
+        unit = next(Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name))
+        files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+                                    + ["%s/service.d" % d for d in UNIT_PATHS])
+        try:
+            noexec = ini_paths(files, "Service", "NoExecPaths")
+            execs = ini_paths(files, "Service", "ExecPaths")
+        except ValueError as e:
+            out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
+            continue
+        if "/" not in noexec:
+            out.append("%s: NoExecPaths does not hold /; must be NoExecPaths=/ (UPD-10)" % name)
+        if not execs:
+            out.append("%s: no ExecPaths; must be ExecPaths=%s (UPD-10)" % (name, EXEC_ONLY))
+        for p in execs:
+            if p != EXEC_ONLY and not p.startswith(EXEC_ONLY + "/"):
+                out.append("%s: ExecPaths holds %s; only %s, which is read-only, may execute (UPD-10)"
+                           % (name, p, EXEC_ONLY))
+    out += fstab_noexec_violations(root)
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            if not n.endswith(".mount") or n in NOEXEC_MOUNT_STOCK:
+                continue
+            files = [Conf(root, d + "/" + n)] + conf_files(root, ["%s/%s.d" % (u, x) for u in UNIT_PATHS
+                                                                  for x in unit_dropin_names(n)]
+                                                           + ["%s/mount.d" % u for u in UNIT_PATHS])
+            if any(tree_lstat(root, e + "/" + n) for e in dirs[:dirs.index(d)]):
+                continue  # shadowed by the same name earlier in the search path, checked there
+            try:
+                masked = conf_chase(root, d + "/" + n) is None
+            except OSError:
+                masked = False
+            if masked:
+                continue
+            opts = ini_last(files, "Mount", "Options")
+            if not mount_noexec(opts):
+                out.append("%s/%s: Options=%s does not end noexec (UPD-10)" % (d, n, opts or ""))
+    return out
+
+
+def fstab_noexec_violations(root):
+    """UPD-10: etc/fstab mounts nothing executable. It lists each of NOEXEC_FSTAB, and every line in it
+    ends noexec; a swap line is swap_violations'."""
+    out, seen = [], set()
+    try:
+        text = Conf(root, "etc/fstab").text()
+    except FileNotFoundError:
+        text = ""
+    except OSError as e:
+        return ["etc/fstab: unreadable (%s); the tree check never passes a file it cannot read" % e.strerror]
+    for ln in text.splitlines():
+        f = ln.split()
+        if not f or f[0].startswith("#") or (len(f) >= 3 and f[2] == "swap"):
+            continue
+        target = "/" + "/".join(x for x in f[1].split("/") if x) if len(f) >= 2 else "?"
+        seen.add(target)
+        if len(f) < 4 or not mount_noexec(f[3]):
+            out.append("etc/fstab: %s is mounted without noexec (UPD-10)" % target)
+    for t in NOEXEC_FSTAB:
+        if t not in seen:
+            out.append("etc/fstab: no %s line; the box remounts it noexec from etc/fstab (UPD-10)" % t)
     return out
 
 

@@ -1,0 +1,21 @@
+#!/bin/sh
+# The weekly reboot (UPD-10), from agentos-reboot.timer. A shutdown block inhibitor means the box
+# is busy (UPD-6: a call or accepted work holds one), so the reboot waits for it to go, retrying
+# every five minutes; but never past a week of uptime, so an implant cannot hold the box up by
+# taking an inhibitor of its own. The timer fires weekly, so the box is never up longer than that.
+# AGENTOS_HEALTH_ROOT exists for tests/test_image_noexec.py.
+set -u
+R=${AGENTOS_HEALTH_ROOT:-}
+WEEK=604800
+STEP=300
+up() { cut -d. -f1 "$R/proc/uptime"; }
+while [ "$(up)" -lt "$WEEK" ]; do
+	if systemctl reboot --check-inhibitors=yes; then
+		echo "agentos-reboot: rebooting"
+		exit 0
+	fi
+	echo "agentos-reboot: inhibited; trying again in ${STEP}s"
+	sleep "$STEP"
+done
+echo "agentos-reboot: up a week; rebooting through any inhibitor"
+exec systemctl reboot --check-inhibitors=no
