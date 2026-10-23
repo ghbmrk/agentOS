@@ -38,6 +38,8 @@
   {"id": "GO-2026-6612", "issue": 2921, "where": "broker", "why": "Vendored golang.org/x/net v0.57.0 below its fixed version v0.60.0 (the standard-library copy is fixed by go1.26.10); fixed by the module bump tracked in the issue."},
   {"id": "GO-2026-6617", "issue": 2921, "where": "broker", "why": "Vendored golang.org/x/net v0.57.0 below its fixed version v0.60.0 (the standard-library copy is fixed by go1.26.10); fixed by the module bump tracked in the issue."},
   {"id": "GHSA-rxp7-6hxx-x8q5", "issue": 2908, "where": "guest/openclaw/package-lock.json", "why": "ip-address 10.7.2 bundled inside npm, which OpenClaw depends on; no npm release bundles the fixed 10.7.4 yet, and a bundled dependency cannot be overridden."},
+  {"id": "GHSA-4qv8-2p9j-2685", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici bundled inside openclaw (8.10.2) and npm (6.29.0); no release of either bundles the fixed 8.12.2 / 6.29.1 yet, and a bundled dependency cannot be overridden."},
+  {"id": "GHSA-f72v-6w45-q472", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici 8.10.2 bundled inside openclaw; no openclaw release bundles the fixed 8.12.2 yet, and a bundled dependency cannot be overridden."},
   {"id": "GHSA-xjj6-f33q-929c", "issue": 2929, "where": "guest/openclaw/package-lock.json", "why": "undici bundled inside openclaw (8.10.2) and npm (6.29.0); no release of either bundles the fixed 8.12.2 / 6.29.1 yet, and a bundled dependency cannot be overridden."}
  ]
 }
