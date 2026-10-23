@@ -96,6 +96,8 @@ var (
 	ErrLastSlot = errors.New("seal: the last slot cannot be removed")
 	// ErrClosed: the store was closed and its key wiped.
 	ErrClosed = errors.New("seal: the store is closed")
+	// ErrNoPolicyKey: a TPM unlock was asked without the box's policy key.
+	ErrNoPolicyKey = errors.New("seal: a tpm unlock needs the box's policy key")
 	// ErrExists: Create found a file already at the path.
 	ErrExists = errors.New("seal: a store already exists there")
 )
@@ -112,11 +114,13 @@ const (
 // Factor opens a slot, or makes one.
 type Factor interface{ kind() Kind }
 
-// TPM is the trusted-host factor. Unlock needs TPM and, if the slot has a
-// boot PIN, PIN. Enrolling a slot (Create, AddSlot) also needs PolicyKey,
-// the box's policy key whose private half belongs in this store (HW-5a),
-// and the boot paths it signed, at least one; Host names the PC for the
-// owner.
+// TPM is the trusted-host factor. Unlock needs TPM, PolicyKey and, if the
+// slot has a boot PIN, PIN. PolicyKey is the box's policy key, whose private
+// half belongs in this store (HW-5a). Unlock tries only slots sealed under
+// it: anyone can seal a store of their own to this TPM under a key they
+// hold, so the pin must come from somewhere other than the drive (STO-2b,
+// STO-2c). Enrolling a slot (Create, AddSlot) also needs the boot paths the
+// key signed, at least one; Host names the PC for the owner.
 type TPM struct {
 	TPM       transport.TPM
 	PIN       string
@@ -440,9 +444,13 @@ func Unlock(path string, f Factor) (*Store, error) {
 		return nil, err
 	}
 	var srk []byte
-	if t, ok := f.(TPM); ok {
+	t, isTPM := f.(TPM)
+	if isTPM {
 		if t.TPM == nil {
 			return nil, ErrNoSlot
+		}
+		if t.PolicyKey == nil {
+			return nil, ErrNoPolicyKey
 		}
 		if srk, err = tpmseal.Identity(t.TPM); err != nil {
 			return nil, err
@@ -452,7 +460,13 @@ func Unlock(path string, f Factor) (*Store, error) {
 	var errs []error
 	for i := range fl.Slots {
 		sl := &fl.Slots[i]
-		if sl.Kind != f.kind() || (srk != nil && !bytes.Equal(sl.Sealed.SRKName, srk)) {
+		if sl.Kind != f.kind() {
+			continue
+		}
+		// A tpm slot opens only on its own TPM and only if sealed under
+		// the box's policy key: a slot sealed under any other key is
+		// someone else's store, so it is skipped before any unseal (A8).
+		if isTPM && (!bytes.Equal(sl.Sealed.SRKName, srk) || !sealedUnder(sl.Sealed, t.PolicyKey)) {
 			continue
 		}
 		tried = true
@@ -493,6 +507,11 @@ func Unlock(path string, f Factor) (*Store, error) {
 	return nil, errors.Join(append([]error{ErrWrongFactor}, errs...)...)
 }
 
+func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
+	pub, err := s.PolicyPublicKey()
+	return err == nil && pub.Equal(key)
+}
+
 func readFile(path string) ([]byte, error) {
 	fh, err := os.Open(path)
 	if err != nil {
@@ -531,7 +550,11 @@ func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
 }
 
 // commit writes the store with slots and entries e, then takes them. A
-// failed write leaves both the file and the store as they were.
+// write that fails before the rename leaves both the file and the store as
+// they were. Once the rename is done the file holds the new slots, so the
+// store takes them even if the directory sync then fails, and returns that
+// error: otherwise the next commit would write the old slots back, and a
+// failed Replace of a compromised passphrase would revive it (REC-4).
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
@@ -539,11 +562,11 @@ func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(s.path, b); err != nil {
-		return err
+	renamed, err := writeAtomic(s.path, b)
+	if renamed {
+		s.f, s.entries = nf, e
 	}
-	s.f, s.entries = nf, e
-	return nil
+	return err
 }
 
 func (s *Store) live() error {
@@ -809,17 +832,18 @@ func (s *Store) Close() {
 }
 
 // writeAtomic replaces path with b: a temporary file in the same
-// directory, synced, renamed over path, and the directory synced.
-func writeAtomic(path string, b []byte) error {
+// directory, synced, renamed over path, and the directory synced. renamed
+// says whether path now holds b, even when err is the directory sync's.
+func writeAtomic(path string, b []byte) (renamed bool, err error) {
 	tmp, err := writeTemp(path, b)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmp, path); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is key material, not a lifecycle, and the file and directory are synced here
 		os.Remove(tmp)
-		return err
+		return false, err
 	}
-	return syncDir(filepath.Dir(path))
+	return true, syncDir(filepath.Dir(path))
 }
 
 // writeNew is writeAtomic that refuses to replace an existing file.
@@ -861,7 +885,8 @@ func writeTemp(path string, b []byte) (string, error) {
 	return name, nil
 }
 
-func syncDir(dir string) error {
+// syncDir is a variable so a test can make the directory sync fail.
+var syncDir = func(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
