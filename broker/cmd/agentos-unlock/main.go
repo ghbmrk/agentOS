@@ -169,7 +169,8 @@ func handOff(b []byte, c config) error {
 
 // kernelEnv is the kernel process's whole environment. It reads no
 // variable, so nothing of the unlock step's environment, a root unit's,
-// reaches it (cmd/agentosd ASSUMPTIONS L7-2).
+// reaches it (reviews/security/README.md, the row on a child inheriting
+// the daemon's whole environment).
 var kernelEnv = []string{}
 
 // drop makes uid and gid this process's every id, with no supplementary

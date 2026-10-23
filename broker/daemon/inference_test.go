@@ -763,7 +763,7 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // a flagged unit is named by its function, or by "var" or "type" and its
 // names.
 //
-// Procedural, held by review (cmd/agentosd ASSUMPTIONS L7-2):
+// Procedural, held by review (reviews/security/README.md, the row on a child inheriting the daemon's environment):
 //   - an Env value the check cannot classify: a parameter, another
 //     struct's field, a map lookup, a declaration in another file, a
 //     multi-value call;
@@ -1664,11 +1664,11 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		t.Errorf("child started without Env (it inherits the broker's environment); set Env to an explicit list (cmd/agentosd ASSUMPTIONS L7-2):\n%s", strings.Join(bad, "\n"))
+		t.Errorf("child started without Env (it inherits the broker's environment); set Env to an explicit list (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(bad, "\n"))
 	}
 	if len(inherit) > 0 {
 		sort.Strings(inherit)
-		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment); name each variable the child needs instead (cmd/agentosd ASSUMPTIONS L7-2):\n%s", strings.Join(inherit, "\n"))
+		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment); name each variable the child needs instead (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(inherit, "\n"))
 	}
 	for k := range envExempt {
 		if !seen[k] {
