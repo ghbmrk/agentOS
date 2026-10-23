@@ -1,0 +1,31 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-FORK-1",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "CVE-0000-0102"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py; not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "example.com/fork",
+    "ecosystem": "Go"
+   },
+   "ranges": [
+    {
+     "type": "SEMVER",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "1.2.2"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
