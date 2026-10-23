@@ -18,15 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
-          fetch-depth: 2 # the test merge and both its parents
+          fetch-depth: 2 # the test merge and its parents
           persist-credentials: false
       - name: Count words (tools/word_budget.py, base copy)
         shell: bash # -eo pipefail, so tee keeps the tool's exit status
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          # HEAD is the PR's test merge (base^1, branch^2), as in scope.yml.
+          # HEAD is the PR's test merge (base^1, branch^2), as in scope.yml. Count the base
+          # against the merge itself, not the branch tip: a stale branch's tip lacks main's
+          # later edits, which would read as its own growth or hide it.
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/body.md"
           git show HEAD^1:tools/word_budget.py > "$RUNNER_TEMP/word_budget.py" 2>/dev/null \
             || cp tools/word_budget.py "$RUNNER_TEMP/word_budget.py"
-          python3 -I "$RUNNER_TEMP/word_budget.py" --git HEAD^1 HEAD^2 --body-file "$RUNNER_TEMP/body.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -I "$RUNNER_TEMP/word_budget.py" --git HEAD^1 HEAD --body-file "$RUNNER_TEMP/body.md" | tee -a "$GITHUB_STEP_SUMMARY"
