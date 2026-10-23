@@ -5,6 +5,7 @@ Sources, all re-read in full on every run so METRICS.md is regenerated, never ap
   git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states (the
                                        hand-kept board up to SIM-repo-2b, the generated one since)
   LEDGER.md                            usage readings (weekly %, all models and Fable only); phase table
+  working tree                         SPEC.md and process-doc word counts (tools/word_budget.py, D-152)
   GitHub API                           PRs: L3 verdicts in collaborators' reviews, `Defect: <ID>`
                                        lines in bodies; this repository's own Actions runs and
                                        their attempts (CI flakes); `state:` labels added to
@@ -28,6 +29,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+import word_budget  # tools/, beside this file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Plan weeks reset Sunday 06:00 Mark's local time (LEDGER.md). Commit timestamps put that at
@@ -609,6 +612,24 @@ def _ledger_stale(raw):
             f"{LEDGER_STALE_HOURS} hours old; take a reading (D-085).**", ""]
 
 
+def _repair_share(cells):
+    """`Defect:` lines per reviewed merge, from a rendered row's defect and first-pass cells."""
+    defects = re.match(r"\d+", cells[COLUMNS.index("Defects after merge")])
+    judged = re.search(r"/(\d+)\)", cells[COLUMNS.index("First-pass L3 accept")])
+    if not defects or not judged:
+        return NONE
+    d, n = int(defects.group()), int(judged.group(1))
+    return f"{d / n:.2f} ({d}/{n})"
+
+
+def _lead(rows, words):
+    """D-152: the repair share leads, with the spec and process word counts beside it."""
+    size = (f"SPEC.md {words['spec']:,} words; process docs {words['process']:,} words "
+            "(both shrink-only on main, `tools/word_budget.py`)." if words else f"Word counts: {NA}.")
+    return ["## Repair share (D-152)", "", "`Defect:` lines per reviewed merge, by week:", "",
+            *[f"- {cells[0]}: {_repair_share(cells)}" for cells in rows], "", size, ""]
+
+
 def render(weeks, raw, previous_md=None):
     old = _previous(previous_md)
     lines = [
@@ -618,11 +639,8 @@ def render(weeks, raw, previous_md=None):
         "Inputs for the L4 meta loop (PLAN.md §2). Regenerated daily by `.github/workflows/metrics.yml`, "
         f"or on demand. Data as of {raw['now'][:16].replace('T', ' ')} UTC.",
         "",
-        "## Weekly",
-        "",
-        "| " + " | ".join(COLUMNS) + " |",
-        "|" + "---|" * len(COLUMNS),
     ]
+    rows = []
     for w in weeks:
         cells = _cells(w)
         prev = old.get(w["week"])
@@ -632,7 +650,10 @@ def render(weeks, raw, previous_md=None):
             closed = not w["current"] and not _open_week(prev[0])
             cells = [o if (c in (NONE, NA) and o not in (NONE, NA)) or (closed and i in FROZEN) else c
                      for i, (c, o) in enumerate(zip(cells, prev))]
-        lines.append("| " + " | ".join(cells) + " |")
+        rows.append(cells)
+    lines += _lead(rows, raw.get("words"))
+    lines += ["## Weekly", "", "| " + " | ".join(COLUMNS) + " |", "|" + "---|" * len(COLUMNS)]
+    lines += ["| " + " | ".join(cells) + " |" for cells in rows]
     base = baseline(raw)
     lines += ["", "## Baseline (D-085)", "",
               "Mean of the two 7-day windows before 2026-10-09 (2026-09-25 to 2026-10-09, UTC-4). "
@@ -659,6 +680,8 @@ def render(weeks, raw, previous_md=None):
         "",
         "## Definitions",
         "",
+        "- **Repair share**: `Defect:` lines (Defects after merge) over the merged PRs with an L3 verdict "
+        "(the First-pass L3 accept denominator) that week; word counts as `tools/word_budget.py` counts them (D-152).",
         "- **Week**: a plan week, Sunday 06:00 to Sunday 06:00 Mark's local time (UTC-4 assumed).",
         "- **Usage**: the highest weekly-limit reading in LEDGER.md that week, all models / Fable only. "
         "Model usage is not metered per package; Mark's usage screen is the source (LEDGER B-6). "
@@ -740,7 +763,7 @@ def main(argv=None):
             "now": args.now or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,
             "readings": ledger_readings(ledger), "phases": ledger_phases(ledger),
-            "pulls": pulls, "runs": runs,
+            "pulls": pulls, "runs": runs, "words": word_budget.tree_counts(root),
             "states": collect_states(args.repo, os.environ.get("GITHUB_TOKEN")),
         }
         if args.raw_out:

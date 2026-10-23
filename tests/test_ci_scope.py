@@ -218,7 +218,7 @@ MACHINES_LINES = [
     '          persist-credentials: false',
     '      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0',
     '        with:',
-    '          go-version: "1.26.8" # = broker/go.mod\'s toolchain line; checked below',
+    '          go-version: "1.26.10" # = broker/go.mod\'s toolchain line; checked below',
     '          cache: false',
     '      - name: Go is the toolchain go.mod names',
     '        run: |',
