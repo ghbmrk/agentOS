@@ -1,0 +1,6 @@
+# example.com/dep v1.0.0
+## explicit
+example.com/dep
+# example.com/quiet v1.0.0
+## explicit
+example.com/quiet
