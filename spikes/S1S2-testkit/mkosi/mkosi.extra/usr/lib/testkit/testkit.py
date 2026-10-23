@@ -205,10 +205,8 @@ def read_verify():
 
 
 # PE2: the RES-2 floor budget, MiB, and agentosd's default machine budgets (-agent-mem-mb,
-# -headroom-mb; broker/cmd/agentosd/main.go). What remains after host, inference, browser and
-# headroom is the agent-machine pool. agentosd runs no replay machine since #2791 (its
-# -replay-mem-mb flag is gone); REPLAY_MB keeps that flag's old default so this check still asks
-# for the same spare room and stays comparable with earlier S1 runs.
+# -replay-mem-mb, -headroom-mb; broker/cmd/agentosd/main.go). What remains after host, inference,
+# browser and headroom is the agent-machine pool; it must hold the agent and one replay machine.
 FLOOR = {"host": 1024, "inference": 2048, "browser": 512, "headroom": 600}
 AGENT_MB, REPLAY_MB = 1536, 1024
 # RES-2c: agentosd's cap on capacity is budget.CapMB, one OpenClaw machine (budget.OpenClawMB)
