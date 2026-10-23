@@ -106,7 +106,8 @@ open meter.Report
 open meter.Another
 
 allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key (vault TestOnlyRecoveryCallsRebase)
-allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
+allow loops kernel.State.Ledger -- the scheduler reads the spend charged to its spare envelope (MIG-4-spend-m); a read of the folded log that records nothing
+allow loops/loopstest kernel.* -- the spare-envelope test fixture boots a kernel on an in-memory log and drives it as the owner and the model clerk would; only tests import it
 allow replay guest.New -- LOOP5 replays a run on its own guest plane
 allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
 allow clerk/model kernel.Kernel.AdmitSpend -- the model clerk asks the kernel's own check before a call; it is a read of the log and records nothing
