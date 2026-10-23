@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// REQ: OP-8, ARC-7
+// REQ: CLK-3, LOG-7
 
 // TestObjectRefusesAmbiguousBodies: Object, moved from broker/meter
 // (#2585), accepts one JSON object and refuses anything a case-folding

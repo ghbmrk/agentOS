@@ -8,7 +8,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 )
 
-// REQ: ARC-7 (SR3-7-f1c)
+// REQ: LOG-7
 
 // TestAttemptWireUnchanged: route.Attempt replaced meter.Attempt on the
 // egress usage trailer (MIG-4-spend-m, #2585) with the same fields and
