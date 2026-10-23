@@ -350,3 +350,78 @@ func TestInboundExemptRemoveIsAnIdempotentDelete(t *testing.T) {
 		}
 	}
 }
+
+// forwardVerdict parses the forward chain of the rendered table of the
+// given family and returns the verdict for a packet routed (inet) or
+// bridged (bridge) from iif to oif: the first rule whose matches hold, else
+// the chain policy. Like verdict, it understands only what InboundRules
+// renders.
+func forwardVerdict(t *testing.T, rules, family, iif, oif string) string {
+	t.Helper()
+	ex := exemptSet(t, rules)
+	tbl, inTable, inChain, policy := "table "+family+" "+InboundTable+" {", false, false, ""
+	for _, ln := range strings.Split(rules, "\n") {
+		ln = strings.TrimSpace(ln)
+		switch {
+		case ln == tbl:
+			inTable = true
+			continue
+		case !inTable:
+			continue
+		case strings.HasPrefix(ln, "type filter hook forward priority filter; policy "):
+			inChain, policy = true, strings.TrimSuffix(strings.TrimPrefix(ln, "type filter hook forward priority filter; policy "), ";")
+			continue
+		case !inChain:
+			continue
+		case ln == "}":
+			return policy
+		case ln == "iifname @exempt accept":
+			if ex[iif] {
+				return "accept"
+			}
+		case ln == "oifname @exempt accept":
+			if ex[oif] {
+				return "accept"
+			}
+		default:
+			t.Fatalf("forward rule form not understood: %q", ln)
+		}
+	}
+	t.Fatalf("no %s forward chain:\n%s", family, rules)
+	return ""
+}
+
+// REQ: DEV-2, CH-9
+// I21 (#2824): the box routes nothing. Whatever turns forwarding on (a
+// NetworkManager shared or access-point profile written by a compromised
+// netjoin helper, a sysctl), a packet routed or bridged between the home
+// network's links, or onto an interface nobody named, is dropped. Only a
+// packet entering or leaving an exempt interface is left to the table that
+// governs it (agentos_ap, whose passthrough must still work).
+func TestInboundDropsEveryForwardedPacket(t *testing.T) {
+	zero := render(t, Inbound{})
+	for _, l := range [][2]string{{"eth0", "usb0"}, {"wlsta0", "wlsta0"}, {"wlsta0", "eth0"}, {"usb0", "wlan1"}} {
+		if v := forwardVerdict(t, zero, "inet", l[0], l[1]); v != "drop" {
+			t.Errorf("inet %s -> %s: %s, want drop", l[0], l[1], v)
+		}
+		if v := forwardVerdict(t, zero, "bridge", l[0], l[1]); v != "drop" {
+			t.Errorf("bridge %s -> %s: %s, want drop", l[0], l[1], v)
+		}
+	}
+	ap := render(t, Inbound{Exempt: []string{"ap0"}})
+	for _, l := range [][2]string{{"ap0", "eth0"}, {"eth0", "ap0"}} {
+		if v := forwardVerdict(t, ap, "inet", l[0], l[1]); v != "accept" {
+			t.Errorf("exempt ap0, inet %s -> %s: %s, want accept (agentos_ap governs it)", l[0], l[1], v)
+		}
+	}
+	for _, l := range [][2]string{{"eth0", "usb0"}, {"wlsta0", "eth0"}} {
+		if v := forwardVerdict(t, ap, "inet", l[0], l[1]); v != "drop" {
+			t.Errorf("exempt ap0, inet %s -> %s: %s, want drop", l[0], l[1], v)
+		}
+	}
+	for _, l := range [][2]string{{"ap0", "eth0"}, {"eth0", "ap0"}} {
+		if v := forwardVerdict(t, ap, "bridge", l[0], l[1]); v != "drop" {
+			t.Errorf("exempt ap0, bridge %s -> %s: %s, want drop (nothing on the box bridges)", l[0], l[1], v)
+		}
+	}
+}

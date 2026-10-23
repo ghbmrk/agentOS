@@ -16,4 +16,14 @@ table inet agentos_inbound {
     ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
     drop
   }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    iifname @exempt accept
+    oifname @exempt accept
+  }
+}
+table bridge agentos_inbound {
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
 }

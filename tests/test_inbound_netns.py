@@ -27,6 +27,12 @@
 # or at the box's IPv6 link-local address, and each address opens once the drop is gone (the
 # control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
+#
+# NoRoutingThroughTheDrop is I21, the box routes nothing (#2824): with forwarding turned on in the
+# box (as a NetworkManager shared profile does, with NetworkManager's own accept-and-masquerade
+# table loaded beside it), a home host on eth0 reaches nothing on usb0's side, over IPv4 or IPv6,
+# routed or bridged; and the access point's passthrough, which agentos_ap governs, still forwards.
+# REQ: DEV-2, CH-9
 import configparser
 import errno
 import fcntl
@@ -208,6 +214,121 @@ class InboundOnAHomeNetwork(unittest.TestCase):
         # from that global address.
         self.assertTrue(reaches(BOX, ROUTER6), "box cannot reach the router over IPv6")
 
+LAN, FAR = "agentos-t-lan", "agentos-t-far"
+LAN_NET6, FAR_NET6 = "2001:db8:a::", "2001:db8:b::"
+
+# What NetworkManager loads for ipv4.method=shared on usb0 (nm-shared-<iface>): accept forwarding
+# to and from the link and masquerade it. A drop in agentos_inbound must outlast it.
+NM_SHARED = """table ip nm-shared-usb0 {
+  chain filter_forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "usb0" accept
+    oifname "usb0" accept
+  }
+  chain nat_postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 198.51.100.0/24 ip daddr != 198.51.100.0/24 masquerade
+  }
+}
+"""
+
+
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
+                     "needs root, ip and nft")
+class NoRoutingThroughTheDrop(unittest.TestCase):
+    """The box between two networks, eth0 to LAN and usb0 to FAR, with forwarding on."""
+
+    def setUp(self):
+        self.procs = []
+        self.addCleanup(self.cleanup)
+        for ns in (BOX, LAN, FAR):
+            sh("ip", "netns", "add", ns)
+            sh("ip", "link", "set", "lo", "up", ns=ns)
+        # Forwarding goes on first, as NetworkManager turns it on before the link carries traffic.
+        sh("sysctl", "-qw", "net.ipv4.ip_forward=1", ns=BOX)
+        if IPV6:
+            sh("sysctl", "-qw", "net.ipv6.conf.all.forwarding=1", ns=BOX)
+        for box, ns, peer, v4, v6 in (("eth0", LAN, "l0", "192.0.2", LAN_NET6), ("usb0", FAR, "f0", "198.51.100", FAR_NET6)):
+            sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", ns)
+            for n, dev, host in ((BOX, box, 1), (ns, peer, 2)):
+                if IPV6:
+                    sh("sysctl", "-qw", "net.ipv6.conf.%s.accept_dad=0" % dev, ns=n)
+                sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=n)
+                if IPV6:
+                    sh("ip", "-6", "addr", "add", "%s%d/64" % (v6, host), "dev", dev, "nodad", ns=n)
+                sh("ip", "link", "set", dev, "up", ns=n)
+            sh("ip", "route", "add", "default", "via", v4 + ".1", ns=ns)
+            if IPV6:
+                sh("ip", "-6", "route", "add", "default", "via", v6 + "1", ns=ns)
+        p = subprocess.Popen(["ip", "netns", "exec", FAR, "python3", "-c", LISTEN, "6" if IPV6 else "4"])
+        self.procs.append(p)
+        for _ in range(50):
+            if sh("ss", "-Htln", "sport = :%d" % PORT, ns=FAR, check=False).stdout.strip():
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("listener in %s did not start" % FAR)
+
+    def cleanup(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        for ns in (BOX, LAN, FAR):
+            sh("ip", "netns", "del", ns, check=False)
+
+    def nft(self, text):
+        r = subprocess.run(["ip", "netns", "exec", BOX, "nft", "-f", "-"], input=text, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def far(self):
+        return ["198.51.100.2"] + ([FAR_NET6 + "2"] if IPV6 else [])
+
+    def routes(self, addr):
+        # The control: a freshly linked network may need a moment for neighbour discovery.
+        for _ in range(10):
+            if reaches(LAN, addr):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def diagnose(self):
+        return "".join(sh(*c, ns=n, check=False).stdout
+                       for n in (BOX, LAN, FAR) for c in (("ip", "-6", "addr"), ("ip", "-6", "route"), ("ip", "-6", "neigh"))) \
+            + sh("sysctl", "net.ipv6.conf.all.forwarding", "net.ipv6.conf.eth0.forwarding",
+                 "net.ipv6.conf.usb0.forwarding", ns=BOX, check=False).stdout
+
+    def test_forwarding_turned_on_routes_nothing(self):
+        for addr in self.far():
+            self.assertTrue(self.routes(addr), "control: the box does not route to %s before the rules\n%s"
+                            % (addr, self.diagnose()))
+        self.nft(NM_SHARED)
+        self.nft(RULES.read_text())
+        for addr in self.far():
+            with self.subTest(lan_to=addr):
+                self.assertFalse(reaches(LAN, addr), "the box routed a home host to %s" % addr)
+        # The box's own connections on either link still work.
+        self.assertTrue(reaches(BOX, "198.51.100.2"))
+
+    def test_a_bridge_forwards_nothing(self):
+        # A bridge profile enslaving both links: frames between them never reach the inet hooks.
+        for dev in ("eth0", "usb0"):
+            sh("ip", "addr", "flush", "dev", dev, ns=BOX)
+        sh("ip", "addr", "flush", "dev", "f0", ns=FAR)
+        sh("ip", "addr", "add", "192.0.2.3/24", "dev", "f0", ns=FAR)
+        sh("ip", "link", "add", "br0", "type", "bridge", ns=BOX)
+        for dev in ("eth0", "usb0"):
+            sh("ip", "link", "set", dev, "master", "br0", ns=BOX)
+        sh("ip", "link", "set", "br0", "up", ns=BOX)
+        for _ in range(50):
+            if reaches(LAN, "192.0.2.3"):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("control: the bridge does not forward before the rules")
+        self.nft(RULES.read_text())
+        self.assertFalse(reaches(LAN, "192.0.2.3"), "the box bridged a home host to another link")
+
+
 AP_EXEMPT = ROOT / "image/mkosi/mkosi.extra/usr/lib/agentos/ap-exempt"
 PHONE = "agentos-t-phone"
 LOCALUI = ROOT / "broker/localui/testdata"
@@ -215,6 +336,30 @@ AP_LOAD, AP_REMOVE, AP_UNLOAD = (LOCALUI / f for f in (
     "agentos_ap-ap0.nft", "exempt-remove-ap0.nft", "agentos_ap-unload.nft"))
 UI = 80
 AP_BOX, AP_V4 = "10.42.0.1", "10.42.0"
+# agentos_ap for ap0 with passthrough to the uplink eth0, as localui.NftRules renders it (its
+# private-range refusal shortened to the ranges this test uses; 192.0.2.0/24 is not among them).
+AP_PASSTHROUGH = """table inet agentos_ap {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "ap0" ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport 80 accept
+    iifname "ap0" udp dport { 53, 67 } accept
+    iifname "ap0" tcp dport 53 accept
+    iifname "ap0" drop
+    iifname != "ap0" tcp dport 80 ip daddr 10.42.0.1 drop
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "ap0" oifname "eth0" ip saddr 10.42.0.0/24 ip daddr != { 10.0.0.0/8, 198.51.100.0/24 } accept
+    iifname "eth0" oifname "ap0" ct state established,related accept
+    iifname "ap0" drop
+    oifname "ap0" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "eth0" ip saddr 10.42.0.0/24 masquerade
+  }
+}
+"""
 
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
@@ -401,6 +546,24 @@ class AccessPointThroughTheDrop(unittest.TestCase):
             with self.subTest(port=port):
                 self.assertFalse(reaches(HOME, "203.0.113.1", port), "a host behind wl1 reached port %d" % port)
         self.assertTrue(reaches(PHONE, AP_BOX, UI), "the access point itself stopped working")
+
+    def test_passthrough_still_forwards_through_the_access_point(self):
+        # agentos_ap governs ap0's forwarding (passthrough); agentos_inbound's forward drop leaves
+        # an exempt interface to it, and drops the same path once ap0 leaves the set.
+        sh("ip", "route", "add", "default", "via", AP_BOX, ns=PHONE)
+        sh("ip", "route", "add", AP_V4 + ".0/24", "via", "192.0.2.1", ns=HOME)  # the control has no NAT
+        sh("sysctl", "-qw", "net.ipv4.ip_forward=1", ns=BOX)
+        self.listen(HOME, PORT)
+        self.assertTrue(reaches(PHONE, "192.0.2.2"), "control: the box does not forward before the rules")
+        self.load()
+        r = subprocess.run(["ip", "netns", "exec", BOX, "nft", "-f", "-"], input=AP_PASSTHROUGH,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reaches(PHONE, "192.0.2.2"), "the box forwarded from an access point not in the set")
+        r = self.exempt("ap0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(reaches(PHONE, "192.0.2.2"), "the forward drop blocked the access point's passthrough")
+        self.assertFalse(reaches(HOME, "198.51.100.1"), "a home host reached a box port")
 
     def test_single_radio_home_wifi_after_the_access_point(self):
         # DEV-net-g acceptance 3, the single-radio failure path: the access point comes up, stops,
