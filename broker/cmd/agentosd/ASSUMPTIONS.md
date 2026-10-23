@@ -2,6 +2,8 @@
 
 ## Owed take-backs (W3-forget-b2c)
 
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
+
 Started by W3-forget-b2c (owed take-backs for FORGET's item 2, the UX
 release finding R-1/R-2 on #327). Each row is a reading of the spec, or a
 gap left for a later package, that a reviewer may want to change.
@@ -15,6 +17,8 @@ gap left for a later package, that a reviewer may want to change.
 | 5 | Every approved take-back is in the forget log before the owner is told, owed or done, so a restore replays it (`resumeRestored`); one logged twice is taken back once, as recall reports it handled. | W3-forget-b1 (forget log), security 4a on #427 | `TestForgetItem2OwedSurvivesARestore` fails. |
 
 ## Owed done texts (W3-forget-b3)
+
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
 
 Built for W3-forget-b3 ("Promised done text survives a restart") against CAP-3, UX-182-3 and SHOULD 4 of L3 on #182. Covers the owed done texts in `broker/cmd/agentosd` (`forget.go`, `forgetplane.go`). Each row is a reading of the spec or the brief that a reviewer may want to change.
 
@@ -33,6 +37,8 @@ Built for W3-forget-b3 ("Promised done text survives a restart") against CAP-3, 
 | F11 | **A failed owed save is saved again before the forget can finish.** If `Execute`'s owed save fails and the forget goes to `retry`, each pass saves it again before forgetting, until it holds; it stops at shutdown like the forget. What is still lost: a text whose owed save fails on every pass up to the one where the forget holds, plus a crash before that text sends; or an owed save that fails when the forget finishes at once in `Execute`, plus a crash before the send. In the first case the owner may have been told `forgetNotSaved` ("I'll text you when it's done") and never is. Both need a failing disk and a crash; `done` keeps the text owed in memory, so without a crash it is still told. Logs carry store errors only. | CAP-3; UX-182-3; security S2 on #425 | Block the forget until the owed save holds, if the owner's promise must survive a failing disk. |
 
 ## The Forget page's hook (W3-forget-b3r)
+
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
 
 Built for W3-forget-b3r (potency R2 of W3-forget-b3) against CAP-3, CH-7 and CH-8. Covers `PageTasks`, `PageForget` and `wirePage` in `forget.go`; the page is `broker/localui` (L33 there).
 
@@ -95,6 +101,8 @@ Built for CRED-5f-mr (release from #525: L3 R1, Security 2, Potency 2) against O
 
 ## Owed take-back texts (W3-forget-b2c-2)
 
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
+
 Built for W3-forget-b2c-2 ("Item 2's texts are owed until they send") against UX-182-3, CH-12 and CAP-3. Covers `agentBack`, `carryAgent` and `finishOwed` in `forget.go`.
 
 | ID | Assumption | Source | If wrong |
@@ -107,6 +115,8 @@ Built for W3-forget-b2c-2 ("Item 2's texts are owed until they send") against UX
 
 ## Item 1's forget log entry while it retries (W3-forget-b2c-f3)
 
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
+
 Built for W3-forget-b2c-f3 against CAP-3 and CH-12. Covers `Execute`, `retry` and `logForget` in `forget.go`.
 
 | ID | Assumption | Source | If wrong |
@@ -118,6 +128,8 @@ Built for W3-forget-b2c-f3 against CAP-3 and CH-12. Covers `Execute`, `retry` an
 
 ## A restored item 1 forget still retrying (W3-forget-b2c-f1-r1)
 
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
+
 Built for W3-forget-b2c-f1-r1 against CAP-3, UX-182-3 and CH-12. Covers `openForgetPlane`'s restored-forget loop (`forgetplane.go`) and `retry`, `purgeLater`, `finishOwed` and `RetryNote` (`forget.go`).
 
 | ID | Assumption | Source | If wrong |
@@ -128,6 +140,8 @@ Built for W3-forget-b2c-f1-r1 against CAP-3, UX-182-3 and CH-12. Covers `openFor
 | R8 | **A done marker means the done text sent** (W3-forget-b2c-f1-r2). `markDone` appends one after any logged item 1 done text sends (`done` or `tellLater`), never for item 2 or the lost-owed text, so a crash between text and marker repeats the text (the lesser harm). The restore owes nothing for a goal whose last forget entry is followed by a marker, and drops the restored learn dir's owe of it when not tombstoned; it still tombstones and purges the goal. A goal the backup had already tombstoned and owes is still told again (LATER l14). Until the vault process wires the log (W3-forget-b1-5) no marker is written. | brief R2A, R2B; UX 2 on #610 | Keep the marker's seq in the owed record. |
 
 ## Done only when recall says done (W3-forget-reach)
+
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
 
 Built for W3-forget-reach against CAP-3, UX-182-3, RCH-4, RCH-5 and CH-12. Covers `agentBack`, `carryAgent`, `agentDone`, `tellAgent`, `agentTakenBack`, `judgeAgent`, `resumeAgent`, `finishOwed`, `agentBackWithoutAsking` and `owedForget.Taking` in `forget.go`, and the `OnTakenBack` wiring in `main.go`.
 
@@ -186,6 +200,8 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 
 ## RENEW on the owner channel (RECALL-prov-owner)
 
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
+
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | RW1 | **RENEW lists, RENEW n asks.** RENEW is a settings hook (`cfg.Settings`, chained ahead of earlier ones) taken only in an unlocked owner session; locked, it is not taken, so the channel asks for the unlock (CH-21). It lists up to 9 lineages from recall's `Full`, numbered, by agent name (the root machine the broker chose), clipped to 16 characters and shown as "agent" if anything but letters, digits, `-` and `_` appears, so no guest text reaches the owner. RENEW n picks only from the list sent in the last 10 minutes; the lineage asked about is the broker's own, never the owner's or a guest's text. The ask's question is the notice, so RENEW n sends no reply of its own when asked. | CAP-3, CH-21 | — |
@@ -238,6 +254,8 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | AR1 | **agentosd puts the vault's committed Wi-Fi network back in `ap-net.json` (CTRL-card-rot-ap-2-s8).** `watchCommittedWiFi` asks the verify socket's `GET /committed-wifi` at start and every `apUpEvery`; after a reconcile it only asks, so it writes again only after the vault was seen locked and then open again. It writes only over a file that parses and holds the same SSID, a network that passes `apnet.Validate`, by `durable.WriteFile` at 0600 (a failed directory sync counts as written), and not at all when the file already matches. A missing or invalid file, another name or an invalid network is refused once per open and logged without either network (CH-7). No card, a Wi-Fi part still owed, or no answer is asked again on the next tick. | REC-4, CH-7 | A lock-and-unlock missed between two ticks is not seen; the next unlock is. A rotation that changes the SSID would need the name rule changed here and in `rotateAPNet`. |
 | AR2 | `apNetMu` is held across the vault read and the write in both `reconcileAPNet` and `rotateAPNet`'s page rotation, so a reconcile that read the vault before a commit cannot overwrite that rotation's newer network. | REC-4 | A third writer of `ap-net.json` in this process must take it too. |
 ## FORGET item 2 with recall off and no agent machine (JRN-startup-reconcile s5, #1412)
+
+*Retired by #2781: FORGET, RENEW and recall are deleted from `agentosd` (see "FORGET, RENEW and recall deleted" below). Kept for #2823, which rebuilds forget on the kernel.*
 
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
@@ -313,11 +331,24 @@ The rest of the learning loop leaves `agentosd`: the change pipeline, the loop s
 
 | ID | Assumption | Source | If wrong |
 |---|---|---|---|
-| NL-1 | **FORGET's learning half goes with the stores it reached.** `forgetPlane.forgetTask` tombstones the goal, then deletes its task text; the pipeline cascade, harvested cases, Loop 1's goal state and task values are deleted with their code. `ownerForget.learned` is always 0, so no "undid n learned changes" line is said. `forget.go` is otherwise unchanged for #2781. | CAP-3; HLD-4 | Port the cascade if a learning store returns before #2781. |
-| NL-2 | **The learning loop's files are removed at start.** `openForgetPlane` removes `change.json` (with `change.json.d`), `harvest.json`, `values.json`, `loops.json`, `loop2.json` and `routing-learned.json` from the learn directory, with any temp a crash left from `durable.WriteFile` (`.durable-*`, which may copy one of them), since FORGET can no longer reach a task in them; a failure is logged by name, STATUS says "Forget: old learning data not fully erased; restart me." (LOG-4), and the next start retries. `values.key` stays: mail's UNDO subkey is derived from it (`readValuesKey`, now in `mail.go`). The spare meter (`-spare-meter`, outside the learn directory) holds counts only and is left. | CAP-3 | Keep a store whose data FORGET still reaches. |
+| NL-1 | *(Superseded by FD-1.)* **FORGET's learning half goes with the stores it reached.** `forgetPlane.forgetTask` tombstones the goal, then deletes its task text; the pipeline cascade, harvested cases, Loop 1's goal state and task values are deleted with their code. `ownerForget.learned` is always 0, so no "undid n learned changes" line is said. `forget.go` is otherwise unchanged for #2781. | CAP-3; HLD-4 | Port the cascade if a learning store returns before #2781. |
+| NL-2 | *(Extended by FD-2.)* **The learning loop's files are removed at start.** `openForgetPlane` removes `change.json` (with `change.json.d`), `harvest.json`, `values.json`, `loops.json`, `loop2.json` and `routing-learned.json` from the learn directory, with any temp a crash left from `durable.WriteFile` (`.durable-*`, which may copy one of them), since FORGET can no longer reach a task in them; a failure is logged by name, STATUS says "Forget: old learning data not fully erased; restart me." (LOG-4), and the next start retries. `values.key` stays: mail's UNDO subkey is derived from it (`readValuesKey`, now in `mail.go`). The spare meter (`-spare-meter`, outside the learn directory) holds counts only and is left. | CAP-3 | Keep a store whose data FORGET still reaches. |
 | NL-3 | **Loop settings are answered, not passed on.** LOOPS, LOOP n, LEARNING, SECURITY TESTS, UPDATE CHECKS, SPARE BUDGET, STOP/START SHARING and HELP LOOPS (`loops.ParseText`) get `loopsOffText` from the box, locked or not, and never reach the agent as chat. HELP no longer names them and STATUS has no learning line. The `loops` import that remains is only this parser; #2786 replaces it when `loops` goes. | OWN-15; CH-11 | Pass them to the agent, or drop the answer once owners no longer send them. |
-| NL-4 | **Task texts are kept whenever FORGET is up.** They were kept only while learning was on (UX-101-1); with the setting gone, they are FORGET's list, kept for every owner task (at most 512, none past 30 days) unless the goal was forgotten. | CAP-3; W3-forget | Stop keeping them, and FORGET lists nothing new. |
+| NL-4 | *(Superseded by FD-2.)* **Task texts are kept whenever FORGET is up.** They were kept only while learning was on (UX-101-1); with the setting gone, they are FORGET's list, kept for every owner task (at most 512, none past 30 days) unless the goal was forgotten. | CAP-3; W3-forget | Stop keeping them, and FORGET lists nothing new. |
 | NL-5 | **Builder machines get no services.** `lateServices.pick` gives a machine named `vm.BuilderPrefix` nothing, as it does a replay machine (C-3c-2), and nothing in `agentosd` creates one. `-builder-image`, `-builder-launch`, `-builder-mem-mb` and `-spare-meter` are gone; the image passes none of them. | C-3c-2 | A box passing one fails at start on an unknown flag. |
 | NL-6 | **`managed_tree` is not served.** The guest bridge's tree sync (`cmd/agentos-guest-bridge/tree.go`, #2784's) gets an unknown-tool answer and logs it once per change; the agent keeps no adopted tree. | W4 (retired) | Serve an empty tree until #2784 removes the sync. |
 | NL-7 | **The Rollback line is STATUS only.** Its digest copy was queued on the pipeline's notices, which nothing rendered (DRB-1), so it goes with the pipeline. | DRB-1; SR2-3s | — |
 | NL-8 | **Open change and loops intents settle as not applied.** `change.Executor` and `loops.Executor` are registered to `retiredExecutor` (`registerRetired`), whose Execute and Reconcile both answer `ResultNotApplied`: a pending LOOPS ON or SPARE BUDGET approval settles on YES, and an `outcome_unknown` attempt settles when checked (one redispatch, also not applied), instead of `journal.ErrNoExecutor`. Nothing they did is undone. | OP-2; HLD-4 | Drop the stub when the journal moves to the kernel (#2781), or settle such intents another way if an owner sees "not applied" for a setting they approved. |
+
+## FORGET, RENEW and recall deleted (MIG-4-untrusted-forget, #2781)
+
+Mark decided (Decisions 7, 2026-10-23, option 2 on #2781) to delete the owner's FORGET, RENEW and the recall wiring from `agentosd` now, with no port: they were built on the old core (`grants`, `journal`, `change`, `recall`, `recalltool`), and forget comes back as a kernel-log erase (#2823, LOG-4). `forget.go`, `forgotten.go`, `renew.go`, `tasks.go`, `notify.go` and their tests are gone; `forgetplane.go` is now `learnstate.go`, keeping only the start-up erase, the fixed replies, the restore hold and the retired executors. No package in `agentosd` imports `recall` or `recalltool`.
+
+| ID | Assumption | Source | If wrong |
+|---|---|---|---|
+| FD-1 | **No box forgets until #2823.** FORGET (alone, LAST or a list number) gets `forgetOffText` and RENEW (alone or with one word) gets `renewOffText` from the box, locked or not, and neither reaches the agent as chat; longer texts that start with those words are task chat, as before. HELP names neither, and the local page no longer serves or lists its Forget page (`localui` L33; UX on #2827: a page with no hook could only fail and say to reload), and STATUS always shows `forgetNotRunning` ("Forget: not running here; nothing to do; a later box version adds it."). | CAP-3, LOG-4 (owed to #2823); OP-9 | #2823 wires the kernel's erase in place of the fixed replies. |
+| FD-2 | **FORGET's state is erased at start, with the learning loop's.** `tasks.json`, `forgotten.json`, `forget-owed.json` and `forget-owed.json.bad` join `learnedFiles`, so the owner's task texts do not stay at rest where nothing can forget them (CAP-3), and a restore that brings them back loses them at the next start. A failure is logged by name and STATUS shows `forgetNotErased` until a start removes them (LOG-4: erase fails closed, owner told). The restored `forget-log.json` stays: the held restore reads it. | CAP-3, LOG-4 | — |
+| FD-3 | **Memory across tasks is off on every box.** No recall tools are served on the guest socket, STATUS shows `recallOffLine` (C7), and the recall directory (`/var/lib/agentos/recall`) is no longer opened: it is left at rest, not deleted, since its store and lifecycle belong to #2579, which deletes `recall`. | OP-9; CAP-3 | Class `release` (Security and L3 on #2827), carried to #2579; #2823 names the upgrade path for a lineage held at upgrade (FD-4). |
+| FD-4 | **Open FORGET and recall intents settle as not applied.** `registerRetired` also registers `retiredExecutor` for `grants.ForgetExecutor` and sets the daemon's `Recall` to it, so a pending FORGET, RENEW or recall rollback approval settles on YES as not applied (NL-8), instead of failing with `journal.ErrNoExecutor`. `Grants.Contained` is unset, so no lineage is held from forks or merges. | NL-8 | — |
+| FD-5 | **A deletion still reaches every kept reply through one hook.** `keptReplies.forget` (kept replies, the guest outbox and the owner channel's recent texts, with the held-text count CAP3-F1) stays with its tests, though nothing calls it in this version: it is the hook #2823's erase is to call. `recallNotify`, `recallHeldDropped` and `forgetFan` are gone; `tellHeldDropped` spells the count text itself. | CAP-3, CAP3-F1, DEL-1-f1 | — |
+| FD-6 | **The held restore is unchanged.** `held.go` and `restoreconfirm.go` still hold a start on recovery's marker and ask the owner when they last forgot something, since `broker/recovery` still writes it; after this PR no new forget is logged, so the question's real date is the last forget before the deletion. | CAP-3; D-065, D-071 | #2823 or the recovery port decides the hold's future. |

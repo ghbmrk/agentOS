@@ -180,11 +180,14 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
-                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt"):
+                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
+                  # #2438: this gate's own tests and the lens rules need the Security accept too.
+                  "tests/test_premerge.py", "tests/test_premerge_lens.py", "reviews/l3/README.md",
+                  "reviews/security/README.md", "reviews/ux/README.txt"):
             self.assertEqual(premerge.mark_paths([f]), [f], f)
-        # Narrowed on Mark's "Narrow only" (2026-10-16): lens READMEs and the gate tests are agent-mergeable.
+        # The other gate tests stay as narrowed on Mark's "Narrow only" (2026-10-16).
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
-                  "reviews/l3/README.md", "reviews/security/README.md", "tests/test_premerge.py", "tests/test_risk_tier.py",
+                  "reviews/README.md", "reviews/a/b/README.md", "tests/x/test_premerge.py", "tests/test_risk_tier.py",
                   "tests/test_ci_scope.py", "tests/test_g1_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
                   "tests/test_lane.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
@@ -306,7 +309,7 @@ class PremergeTest(unittest.TestCase):
     def test_check_gate(self):
         import json
         git(self.r, "checkout", "-q", "-b", "pr")
-        self.write("b.txt", "x\n")
+        self.write("b.md", "x\n")  # top-level *.md: tier C, so no lens screen is owed
         sha = self.commit("code")
         c = lambda verdict, sha, at, who="OWNER", pr=7, mark="<!-- record: l3 -->": {
             "author_association": who, "created_at": at, "updated_at": at,
@@ -334,24 +337,28 @@ class PremergeTest(unittest.TestCase):
         # a later fix-list supersedes the accept
         self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
         # a push after the accept reads as changed; a delta accept at the new head clears it
-        self.write("b.txt", "y\n")
+        self.write("b.md", "y\n")
         new = self.commit("later")
-        self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
+        self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.md"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
     def test_check_gate_spec_needs_nothing_extra(self):
-        # D-137 supersedes D-130: a SPEC.md change merges on its accept alone, with no Transcribes: line.
+        # D-137 supersedes D-130: a SPEC.md change merges on its accepts alone, with no Transcribes: line.
+        # SPEC.md is tier B, so those are L3 plus the combined pass (#2644), which one comment may carry.
         import json
         git(self.r, "checkout", "-q", "-b", "pr")
         self.write("SPEC.md", "spec\n")
         sha = self.commit("spec")
         f = pathlib.Path(self._d.name + ".comments.json")
         self.addCleanup(lambda: f.unlink(missing_ok=True))
-        f.write_text(json.dumps([{"author_association": "OWNER", "created_at": "1", "updated_at": "1",
-            "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: l3 -->\n"}]))
-        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
-                           cwd=self.r, capture_output=True, text=True)
-        self.assertEqual((r.returncode, r.stdout.split()), (0, ["same"]))
+        def run(mark):
+            f.write_text(json.dumps([{"author_association": "OWNER", "created_at": "1", "updated_at": "1",
+                "body": f"Verdict: accept\n# t\nRecord: PR #7 · package X-1 · head {sha[:7]}\n{mark}\n"}]))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run("<!-- record: l3 -->"), (1, ["needs-lens", "combined"]))
+        self.assertEqual(run("<!-- record: combined -->"), (0, ["same"]))
 
     def test_check_gate_files_need_a_separate_security_accept(self):
         # D-137: a PR touching a --needs-mark path also needs the newest trusted Security verdict, in a comment
@@ -416,40 +423,103 @@ class PremergeTest(unittest.TestCase):
         self.write("TRACE.md", "t\n")
         self.commit("trace")
         self.assertEqual(run("bot/trace"), (0, ["bot"]))
-        for ref in ("bot/metrics", "bot/board", "bot/records"):  # another bot's file
+        for ref in ("bot/metrics", "bot/board"):  # another bot's file
             self.assertEqual(run(ref), (1, ["not-bot", "TRACE.md"]), ref)
-        for ref in ("pkg/x", "bot/trace2", "xbot/trace", "bot/trace/x"):  # not a bot branch
+        # not a bot branch; bot/records went with records.yml (#2235)
+        for ref in ("pkg/x", "bot/trace2", "xbot/trace", "bot/trace/x", "bot/records"):
             self.assertEqual(run(ref), (1, ["not-bot"]), ref)
         self.write("b.txt", "x\n")
         self.commit("smuggled code")
         self.assertEqual(run("bot/trace"), (1, ["not-bot", "b.txt"]))
 
-    def test_bot_gate_records_adds_only_new_record_files(self):
-        git(self.r, "checkout", "-q", "main")
-        (self.r / "reviews/l3").mkdir(parents=True)
-        self.write("reviews/l3/README.md", "lens\n")
-        self.write("reviews/l3/2026-10-01-pr1.md", "old\n")
-        self.commit("lens")
+    def test_bot_gate_records_is_gone(self):
+        # #2235: records.yml was its only writer, so a bot/records branch of new review files is hand-made and needs a verdict.
+        self.assertNotIn("bot/records", premerge.BOT)
         git(self.r, "checkout", "-q", "-b", "pr")
-        run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/records", "--base", "main"],
-                                     cwd=self.r, capture_output=True, text=True)
-        (self.r / "reviews/security").mkdir()
-        self.write("reviews/l3/2026-10-15-pr2.md", "new\n")
-        self.write("reviews/security/2026-10-15-pr2.md", "new\n")
+        (self.r / "reviews/security").mkdir(parents=True)
+        self.write("reviews/security/2026-10-15-pr2.md", "fabricated\n")
         self.commit("records")
-        r = run()
-        self.assertEqual((r.returncode, r.stdout.split()), (0, ["bot"]))
-        for path, text in (("reviews/l3/2026-10-01-pr1.md", "edited\n"), ("reviews/l3/README.md", "loosened\n"),
-                           ("reviews/x.md", "top\n")):
-            self.write(path, text)
-            self.commit("bad")
-            r = run()
-            self.assertEqual((r.returncode, r.stdout.split()), (1, ["not-bot", path]), path)
-            git(self.r, "reset", "-q", "--hard", "HEAD~1")
-        (self.r / "reviews/l3/2026-10-01-pr1.md").unlink()
-        self.commit("delete a record")
-        r = run()
-        self.assertEqual((r.returncode, r.stdout.split()), (1, ["not-bot", "reviews/l3/2026-10-01-pr1.md"]))
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/records", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.split()), (1, ["not-bot"]))
+
+    def lens_run(self, comments):
+        import json
+        f = pathlib.Path(self._d.name + ".comments.json")
+        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        f.write_text(json.dumps(comments))
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        return r.returncode, r.stdout.split()
+
+    @staticmethod
+    def rec(v, head, marks, who="OWNER", at="1", pr=7):
+        return {"author_association": who, "created_at": at, "updated_at": at,
+                "body": f"Verdict: {v}\n# t\nRecord: PR #{pr} · package X-1 · head {head[:7]}\n{marks}"}
+
+    def test_check_gate_tier_a_needs_ux_and_potency(self):
+        # PREMERGE-lens (#2644): #2628 and #2632 were tier A and merged on L3 and Security alone.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "image").mkdir()
+        self.write("image/build.sh", "true\n")
+        sha = self.commit("tier A")
+        self.assertEqual(premerge.lenses_owed(["image/build.sh"]), ["ux", "potency"])
+        l3 = self.rec("accept", sha, "<!-- record: l3 -->\n", at="0")
+        ux = lambda v="accept", head=sha, **k: self.rec(v, head, "<!-- record: ux -->\n", **k)
+        pot = lambda v="accept", head=sha, **k: self.rec(v, head, "<!-- record: potency -->\n", **k)
+        run = self.lens_run
+        self.assertEqual(run([l3]), (1, ["needs-lens", "ux,potency"]))
+        self.assertEqual(run([l3, ux()]), (1, ["needs-lens", "potency"]))
+        self.assertEqual(run([l3, pot()]), (1, ["needs-lens", "ux"]))
+        self.assertEqual(run([l3, ux(), pot()]), (0, ["same"]))
+        # one comment carrying both markers covers both lenses
+        both = self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n")
+        self.assertEqual(run([l3, both]), (0, ["same"]))
+        # untrusted, other PR, fix-list, edited, unknown head, superseded: none counts
+        for bad in (ux(who="NONE"), ux(pr=8), ux("fix-list"), {**ux(), "updated_at": "9"}, ux(head="0" * 40)):
+            self.assertEqual(run([l3, bad, pot()]), (1, ["needs-lens", "ux"]), bad)
+        self.assertEqual(run([l3, ux(at="1"), ux("fix-list", at="2"), pot()]), (1, ["needs-lens", "ux"]))
+        # a marker that is not on its own line is not a marker
+        inline = self.rec("accept", sha, "see <!-- record: ux --> above\n")
+        self.assertEqual(run([l3, inline, pot()]), (1, ["needs-lens", "ux"]))
+        # main merged in after the accepts: they carry; a later push needs fresh lens accepts
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "main\n")
+        self.commit("main moves")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        self.assertEqual(run([l3, ux(), pot()]), (0, ["same"]))
+        self.write("image/build.sh", "false\n")
+        new = self.commit("later")
+        l3new = self.rec("accept", new, "<!-- record: l3 -->\n", at="2")
+        self.assertEqual(run([l3, ux(), pot(), l3new]), (1, ["needs-lens", "ux,potency"]))
+        self.assertEqual(run([l3, ux(), pot(), l3new, ux(head=new, at="3"), pot(head=new, at="3")]), (0, ["same"]))
+
+    def test_check_gate_lens_comes_before_security(self):
+        # A tier-A gate-file PR owes both; the lens screen is reported first, then the Security accept.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "tools").mkdir()
+        self.write("tools/premerge.py", "x\n")
+        sha = self.commit("gate")
+        l3 = self.rec("accept", sha, "<!-- record: l3 -->\n", at="0")
+        lens = self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n")
+        self.assertEqual(self.lens_run([l3]), (1, ["needs-lens", "ux,potency"]))
+        self.assertEqual(self.lens_run([l3, lens]), (1, ["needs-security", "tools/premerge.py"]))
+        sec = self.rec("accept", sha, "<!-- record: security -->\n", at="2")
+        self.assertEqual(self.lens_run([l3, lens, sec]), (0, ["same"]))
+
+    def test_lenses_owed_by_tier(self):
+        owed = premerge.lenses_owed
+        self.assertEqual(owed(["b.md", "docs/x.md"]), [])  # tier C
+        self.assertEqual(owed(["SPEC.md"]), ["combined"])  # tier B
+        self.assertEqual(owed(["b.txt", "b.md"]), ["combined"])  # unmatched path: B
+        self.assertEqual(owed(["image/build.sh", "SPEC.md"]), ["ux", "potency"])  # highest tier wins
+        # D-086: a tier-A diff confined to assurance tooling owes potency only
+        for files in (["tools/depaudit.py"], ["tools/canary.py", "tests/test_canary.py"], ["assurance/dep-targets.json"],
+                      ["tools/risk_tier.py", "tests/test_risk_tier_custody.py"]):
+            self.assertEqual(owed(files), ["potency"], files)
+        for files in (["tools/canary.py", "image/build.sh"], ["tools/canary.py", "b.md"], ["tools/premerge.py"]):
+            self.assertEqual(owed(files), ["ux", "potency"], files)
 
 
 if __name__ == "__main__":

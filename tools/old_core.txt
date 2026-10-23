@@ -11,5 +11,4 @@ broker/recalltool
 broker/egress
 broker/holder
 broker/checker
-broker/replay
 broker/durable

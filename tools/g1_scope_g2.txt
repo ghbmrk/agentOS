@@ -164,7 +164,6 @@ allow broker/quota/
 allow broker/recall/
 allow broker/recalltool/
 allow broker/recovery/
-allow broker/replay/
 allow broker/reversible/
 allow broker/route/
 allow broker/routerule/

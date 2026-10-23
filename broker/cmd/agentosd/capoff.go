@@ -55,7 +55,7 @@ const (
 	// owner's mail or files wait. The AI providers page, which owner
 	// lines call "my Wi-Fi page" (CH-21), allows one.
 	modelNoPrivate = "Model: no AI provider may see your private data, so most tasks wait; allow one on my Wi-Fi page."
-	// C7: no recall directory or vault verifier.
+	// C7: recall is deleted (#2781), so on every box.
 	recallOffLine = "Memory across tasks: off here; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.
 	questionsOffLine = "Questions from agents: cannot reach you, and the time check is off; " + fixRestart + "."
@@ -63,8 +63,9 @@ const (
 	workersOffLine = "Worker tools: not set up here; " + fixUpdate + "."
 	// C11: no update-check loop (Loop 3) runs on this box version.
 	updateChecksOff = "Update checks: not running here; " + fixUpdate + "."
-	// The forget plane did not open, so FORGET cannot run (UX R1 on #92).
-	forgetNotRunning = "Forget: not running; " + fixRestart + "."
+	// FORGET is deleted until the kernel's erase brings it back (#2781,
+	// #2823).
+	forgetNotRunning = "Forget: not running here; " + fixUpdate + "."
 	// Old learning state or a crash-left temp did not remove at start;
 	// the next start tries again (LOG-4).
 	forgetNotErased = "Forget: old learning data not fully erased; " + fixRestart + "."

@@ -150,7 +150,6 @@ allow broker/provagent/
 allow broker/question/
 allow broker/quota/
 allow broker/recovery/
-allow broker/replay/
 allow broker/reversible/
 # broker/route/ file by file: the API-key adapters' own files stay frozen (one model route).
 allow broker/route/ASSUMPTIONS.md

@@ -39,7 +39,7 @@ const (
 	nRenumbered NotDone = "renumbered"      // the folder's UID validity changed
 	nNoMove     NotDone = "no-move"         // the server cannot MOVE without EXPUNGE
 	nNoTrash    NotDone = "no-trash-folder" // the account has no folder with the trash role
-	nNoPoster   NotDone = "no-poster"       // no one-click POSTer is wired (#2601)
+	nNoPoster   NotDone = "no-poster"       // the mailbox has no one-click POSTer (#2601)
 	nBadFlag    NotDone = "bad-flag"        // a label that is not one of the clerk's keywords
 	// A change's session signs in before it acts, so a refused sign-in or a
 	// server never reached has changed nothing.
@@ -72,7 +72,8 @@ const fetchBatch = 50
 // a label is an IMAP keyword, a trash is a UID MOVE to the account's trash
 // folder, never an EXPUNGE. Each effect is read back before it counts.
 type Live struct {
-	st *imapsmtp.Store
+	st     *imapsmtp.Store
+	poster *Poster // nil, unless WithPoster: unsubscribes are refused (no-poster)
 
 	mu    sync.Mutex
 	refs  map[string]liveMail
@@ -92,9 +93,20 @@ type liveMail struct {
 	trashValidity, trashNext uint32
 }
 
-// NewLive is a mailbox over st.
+// NewLive is a mailbox over st. It has no Poster, so its unsubscribes are
+// refused (no-poster) until WithPoster turns them on.
 func NewLive(st *imapsmtp.Store) *Live {
 	return &Live{st: st, refs: map[string]liveMail{}, claimed: map[imapsmtp.Ref]bool{}}
+}
+
+// WithPoster gives l a Poster on st's own address policy, so its
+// unsubscribes reach no address the mail servers could not, and returns l.
+// Call it before l is used. The clerk turns it on only once a failing
+// Opened read saves the senders it found (#2841, run ASSUMPTIONS
+// MIG-4-run-q); until then a sender read recently could look never opened.
+func (l *Live) WithPoster() *Live {
+	l.poster = NewPoster(l.st.Guard(), nil)
+	return l
 }
 
 // Read fetches the newest readMax inbox mails with BODY.PEEK, unclassified:
@@ -572,9 +584,15 @@ func (l *Live) markTrash(id string, validity, next uint32) {
 	}
 }
 
-// Post refuses: the one-click POSTer and its egress rules are #2601, so a
-// live unsubscribe is not sent and not reported as sent.
-func (l *Live) Post(context.Context, Post) error { return nNoPoster }
+// Post sends the one-click unsubscribe through the mailbox's Poster
+// (#2601). A Live with none, as NewLive gives, refuses (no-poster), so the
+// unsubscribe is not sent and not reported as sent.
+func (l *Live) Post(ctx context.Context, p Post) error {
+	if l.poster == nil {
+		return nNoPoster
+	}
+	return l.poster.Post(ctx, p)
+}
 
 func hasFlag(flags []string, f string) bool {
 	for _, x := range flags {

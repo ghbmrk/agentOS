@@ -185,6 +185,10 @@ func New(cfg Config) (*Store, error) {
 	return &Store{cfg: cfg, replyBase: 16 << 20}, nil
 }
 
+// Guard is the address policy the store dials through, for the clerk's
+// other egress (the one-click POSTer) to share.
+func (s *Store) Guard() *netguard.Policy { return s.cfg.Guard }
+
 // dial connects to addr. A Plain connection is a literal loopback address
 // (New refused any other), which is the box itself, not the home network;
 // it dials without a name lookup. Every other connection goes through the
