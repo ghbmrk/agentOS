@@ -1,7 +1,9 @@
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
-# usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, the
+# D-Bus system.conf, system.d and system-services files, and NetworkManager's unit file as systemd
+# resolves it. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -72,3 +74,5 @@ usr/lib/udev/rules.d/85-nm-unmanaged.rules	sha256:afce2a870bf2cefb2b52214ed959d0
 usr/lib/udev/rules.d/90-iocost.rules	sha256:39b1d6239c29d1a42fd4d8563ce55916958590021b947c534a630c80b7952815
 usr/lib/udev/rules.d/95-dm-notify.rules	sha256:d24e725fc78306ff2355eb91e4eebcc7dc9388d54dc27d20d6fe6f695054d536
 usr/lib/udev/rules.d/99-systemd.rules	sha256:d63ba2ea309aadf7794a5f84b0f394c2e48fe630640aa37e9963cd9d1b769d89
+usr/share/polkit-1/rules.d/50-agentos-netjoin.rules	sha256:c1f261462ba79c98d5d4ed24da7348f7153c70a3f68a24eeca89a5fe5aa24906
+usr/share/dbus-1/system.d/agentos-netjoin.conf	sha256:126ce0d6c16a0502f35f93bc3aa96344d5cec851c90724ff6847cf1a723ab746

@@ -2,6 +2,7 @@
 # build-time check that pins it, and the packages and units around it. The boot checks are in
 # image/ci_boot.sh, which the image workflow runs.
 # REQ: ONB-3, ONB-4, DEV-2, CH-9, STO-2
+import hashlib
 import json
 import os
 import pathlib
@@ -30,6 +31,7 @@ SHIPPED = {
 
 UNIT = "usr/lib/systemd/system/NetworkManager.service"
 DROPIN_SRC = MK / "mkosi.extra" / check.NM_DROPIN
+STATE_SRC = MK / "mkosi.extra" / check.NM_STATE_DROPIN
 
 
 def nm_tree(root, conf=None):
@@ -37,6 +39,7 @@ def nm_tree(root, conf=None):
     write(root, "usr/sbin/NetworkManager", "\x7fELF", 0o755)
     write(root, UNIT, "[Service]\nExecStart=%s\n" % check.NM_EXEC)
     write(root, check.NM_DROPIN, DROPIN_SRC.read_text())
+    write(root, check.NM_STATE_DROPIN, STATE_SRC.read_text())
     write(root, CONF, CONF_SRC.read_text() if conf is None else conf)
 
 
@@ -237,6 +240,50 @@ class FinalizeCheckTest(unittest.TestCase):
     # REQ: DEV-2
     def test_the_shipped_drop_in_is_the_text_the_check_allows(self):
         self.assertEqual(DROPIN_SRC.read_bytes(), check.NM_DROPIN_TEXT)
+        self.assertEqual(STATE_SRC.read_bytes(), check.NM_STATE_TEXT)
+
+    # REQ: STO-2
+    def test_the_state_drop_in_missing_or_changed_is_refused(self):
+        # #2622 item 1: without it, leases, seen BSSIDs and secret_key reach the drive.
+        (self.root / check.NM_STATE_DROPIN).unlink()
+        self.assertIn("%s: missing" % check.NM_STATE_DROPIN, " | ".join(refused(self.root)))
+        for body in ("", "[Service]\n", STATE_SRC.read_text().replace(",noexec", ""),
+                     STATE_SRC.read_text() + "BindPaths=/var/x:/var/lib/NetworkManager\n"):
+            with self.subTest(body=body):
+                write(self.root, check.NM_STATE_DROPIN, body)
+                self.assertTrue(refused(self.root))
+        write(self.root, check.NM_STATE_DROPIN, STATE_SRC.read_text())
+        self.assertEqual(refused(self.root), [])
+        # An /etc copy of the same name replaces it, and is refused.
+        write(self.root, "etc/systemd/system/NetworkManager.service.d/agentos-state.conf", "[Service]\n")
+        self.assertTrue(refused(self.root))
+
+    # REQ: DEV-2, CH-9
+    def test_the_resolved_unit_is_held_by_hash(self):
+        # #2622 (Security later item on #2607): the unit file systemd picks is on exec.allow by its hash,
+        # so a key the checks above do not name (ExecStartPre) fails until it is reviewed.
+        listed = {rel: value for rel, value, _ in check.exec_entries(self.root)}
+        body = "[Service]\nExecStart=%s\n" % check.NM_EXEC
+        self.assertEqual(listed[UNIT], "sha256:" + hashlib.sha256(body.encode()).hexdigest())
+        allowed = {(UNIT, listed[UNIT])}
+        self.assertEqual([v for v in check.exec_allow_violations(self.root, allowed) if "NetworkManager" in v], [])
+        write(self.root, UNIT, body + "ExecStartPre=/bin/sh -c 'sysctl -w net.ipv4.ip_forward=1'\n")
+        self.assertEqual(refused(self.root), [])  # the key checks alone pass it; the hash does not
+        self.assertIn("%s: not on the boot-code allowlist" % UNIT,
+                      " | ".join(check.exec_allow_violations(self.root, allowed)))
+        # A unit of the same name in /etc wins, and is listed under its own path.
+        write(self.root, UNIT, body)
+        over = "etc/systemd/system/NetworkManager.service"
+        write(self.root, over, body)
+        listed = {rel for rel, _, _ in check.exec_entries(self.root)}
+        self.assertIn(over, listed)
+        self.assertNotIn(UNIT, listed)
+        self.assertIn("%s: not on the boot-code allowlist" % over,
+                      " | ".join(check.exec_allow_violations(self.root, allowed)))
+        # No NetworkManager in the tree, no entry.
+        with tempfile.TemporaryDirectory() as d:
+            write(pathlib.Path(d), UNIT, body)
+            self.assertNotIn(UNIT, {rel for rel, _, _ in check.exec_entries(d)})
 
     # REQ: DEV-2
     def test_a_file_behind_a_linked_parent_is_refused(self):
@@ -313,6 +360,14 @@ class ImageFilesTest(unittest.TestCase):
         self.assertIn(["enable", "NetworkManager.service"], lines)
         self.assertIn(["disable", "NetworkManager-wait-online.service"], lines)
         self.assertIn(["disable", "NetworkManager-dispatcher.service"], lines)
+
+    # REQ: STO-2
+    def test_networkmanager_state_is_a_private_tmpfs(self):
+        # #2622 item 1: /var/lib/NetworkManager is a tmpfs in NetworkManager's own mount namespace.
+        d = ini(STATE_SRC)["Service"]
+        path, _, opts = d["TemporaryFileSystem"].partition(":")
+        self.assertEqual(path, "/var/lib/NetworkManager")
+        self.assertEqual(set(opts.split(",")), {"mode=0700", "nosuid", "nodev", "noexec"})
 
     # REQ: DEV-2
     def test_networkmanager_needs_the_inbound_drop_first(self):
