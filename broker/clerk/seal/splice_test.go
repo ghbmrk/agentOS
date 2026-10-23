@@ -115,6 +115,10 @@ func TestAPlantedShortTPMKeyIsAnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	anchor, err := s.Anchor()
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.Close()
 	rewrite(t, path, func(fl *file) {
 		planted := fl.Slots[0]
@@ -124,7 +128,7 @@ func TestAPlantedShortTPMKeyIsAnError(t *testing.T) {
 		}
 		fl.Slots = append([]slot{planted}, fl.Slots...)
 	})
-	_, err = Unlock(path, TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey})
+	_, err = Unlock(path, TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor})
 	if !errors.Is(err, ErrCorrupt) && !errors.Is(err, ErrTampered) {
 		t.Fatalf("a planted short tpm key: got %v, want the store refused", err)
 	}

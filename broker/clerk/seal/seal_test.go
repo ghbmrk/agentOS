@@ -286,18 +286,25 @@ func TestTrustedHostSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	anchor, err := s.Anchor()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := s.Slots(); len(got) != 2 || got[1].Kind != seal.KindTPM || got[1].Host != "Test PC" {
 		t.Fatalf("slots: %+v", got)
 	}
 
 	boot(sw, "initrd-A", "usrhash=aaaa quiet")
-	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey}))
-	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM()}); !errors.Is(err, seal.ErrNoPolicyKey) {
+	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}))
+	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), Anchor: anchor}); !errors.Is(err, seal.ErrNoPolicyKey) {
 		t.Fatalf("no policy key: got %v, want ErrNoPolicyKey", err)
+	}
+	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey}); !errors.Is(err, seal.ErrNoAnchor) {
+		t.Fatalf("no anchor: got %v, want ErrNoAnchor", err)
 	}
 
 	boot(sw, "initrd-A-with-a-keylogger", "usrhash=aaaa quiet")
-	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey}); !errors.Is(err, tpmseal.ErrNoPolicy) || !errors.Is(err, seal.ErrWrongFactor) {
+	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}); !errors.Is(err, tpmseal.ErrNoPolicy) || !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("modified initrd: got %v, want ErrNoPolicy", err)
 	}
 
@@ -316,22 +323,22 @@ func TestTrustedHostSlot(t *testing.T) {
 		t.Fatal("a boot path signed by another key was accepted")
 	}
 	boot(sw, "initrd-B", "usrhash=bbbb quiet")
-	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey}))
+	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}))
 
 	// A boot PIN, replacing the slot: the old slot no longer opens.
 	withPIN := tpmFactor(t, sw, key, "4711")
 	if _, err := s.Replace(id, withPIN); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey}); !errors.Is(err, tpmseal.ErrNeedPIN) {
+	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}); !errors.Is(err, tpmseal.ErrNeedPIN) {
 		t.Fatalf("no PIN: got %v, want ErrNeedPIN", err)
 	}
-	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, PIN: "4711"}))
+	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor, PIN: "4711"}))
 
 	// Another PC's TPM has no slot here.
 	sw2 := swtpm.Start(t)
 	boot(sw2, "initrd-B", "usrhash=bbbb quiet")
-	if _, err := seal.Unlock(path, seal.TPM{TPM: sw2.TPM(), PolicyKey: &key.PublicKey}); !errors.Is(err, seal.ErrNoSlot) {
+	if _, err := seal.Unlock(path, seal.TPM{TPM: sw2.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}); !errors.Is(err, seal.ErrNoSlot) {
 		t.Fatalf("another PC: got %v, want ErrNoSlot", err)
 	}
 }
@@ -348,7 +355,11 @@ func TestAStoreSealedUnderAnotherPolicyKeyDoesNotOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, _ := create(t, tpmFactor(t, sw, boxKey, ""))
+	path, owner := create(t, tpmFactor(t, sw, boxKey, ""))
+	anchor, err := owner.Anchor()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The attacker, booted from a live USB, signs the owner's released
 	// boot path with a key of their own.
@@ -372,7 +383,7 @@ func TestAStoreSealedUnderAnotherPolicyKeyDoesNotOpen(t *testing.T) {
 	}
 
 	boot(sw, "initrd-A", "usrhash=aaaa quiet")
-	s, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &boxKey.PublicKey})
+	s, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &boxKey.PublicKey, Anchor: anchor})
 	if err == nil {
 		s.Close()
 		t.Fatal("the box opened a store sealed under the attacker's policy key")
@@ -394,10 +405,13 @@ func TestAFailedDirSyncDoesNotReviveAReplacedSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	restore := seal.FailDirSync(errors.New("directory sync failed"))
-	_, err = s.Replace(id, recovery(t))
+	nid, err := s.Replace(id, recovery(t))
 	restore()
 	if err == nil {
 		t.Fatal("Replace hid the directory sync's error")
+	}
+	if nid == "" {
+		t.Fatal("Replace returned no ID for the slot now in place")
 	}
 	if err := s.Put("ch4/seed", []byte("next write")); err != nil {
 		t.Fatal(err)
@@ -406,4 +420,51 @@ func TestAFailedDirSyncDoesNotReviveAReplacedSlot(t *testing.T) {
 		t.Fatalf("the replaced passphrase after the next write: got %v, want ErrNoSlot", err)
 	}
 	unlock(t, path, r)
+}
+
+// A8, HW-5a (second Security blocker on #2834): a whole store someone wrote
+// under the box's own policy key does not open. Sealing to the TPM under
+// that key needs only its public half, and the owner's signed boot paths
+// are in the owner's file, so the attacker's slot unseals on the genuine
+// boot; only the off-drive anchor, which commits to the store key, tells
+// their store from the owner's.
+func TestAWholeStoreUnderTheBoxsPolicyKeyDoesNotOpen(t *testing.T) {
+	sw := swtpm.Start(t)
+	boot(sw, "initrd-A", "usrhash=aaaa quiet")
+	boxKey, err := tpmseal.NewPolicyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := tpmFactor(t, sw, boxKey, "")
+	path, owner := create(t, f)
+	anchor, err := owner.Anchor()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The attacker, booted from a live USB, needs no private key: the
+	// box's public policy key and its signed boot paths are on the drive.
+	boot(sw, "attacker-live-usb", "")
+	evilPath, evil := create(t, seal.TPM{TPM: sw.TPM(), PolicyKey: &boxKey.PublicKey, Policies: f.Policies})
+	if err := evil.Put("ch4/seed", []byte("attacker-known")); err != nil {
+		t.Fatal(err)
+	}
+	evil.Close()
+	b, err := os.ReadFile(evilPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	boot(sw, "initrd-A", "usrhash=aaaa quiet")
+	s, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &boxKey.PublicKey, Anchor: anchor})
+	if err == nil {
+		s.Close()
+		t.Fatal("the box opened a whole store the attacker wrote under its policy key")
+	}
+	if !errors.Is(err, seal.ErrTampered) {
+		t.Fatalf("got %v, want ErrTampered", err)
+	}
 }

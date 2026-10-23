@@ -19,9 +19,12 @@
 // The whole file is MAC'd under a key derived from the store key, so a slot
 // added, removed or altered on the drive by anyone without the key makes the
 // store refuse to open. Replacing the whole file with a store of someone
-// else's is stopped for a TPM unlock by pinning the box's policy key (see
-// TPM); it releases none of the owner's secrets in any case. Every change
-// is written to a temporary file, synced and renamed into place.
+// else's is a different attack: the MAC is then under their key. A
+// passphrase or recovery unlock refuses it because the owner's factor opens
+// no slot in it; a TPM unlock refuses it because it must be given the
+// store's anchor, a value derived from the store key and kept off the drive
+// (see TPM). Every change is written to a temporary file, synced and
+// renamed into place.
 package seal
 
 import (
@@ -100,6 +103,8 @@ var (
 	ErrClosed = errors.New("seal: the store is closed")
 	// ErrNoPolicyKey: a TPM unlock was asked without the box's policy key.
 	ErrNoPolicyKey = errors.New("seal: a tpm unlock needs my policy key")
+	// ErrNoAnchor: a TPM unlock was asked without the store's anchor.
+	ErrNoAnchor = errors.New("seal: a tpm unlock needs my store's anchor")
 	// ErrExists: Create found a file already at the path.
 	ErrExists = errors.New("seal: a store already exists there")
 )
@@ -116,17 +121,23 @@ const (
 // Factor opens a slot, or makes one.
 type Factor interface{ kind() Kind }
 
-// TPM is the trusted-host factor. Unlock needs TPM, PolicyKey and, if the
-// slot has a boot PIN, PIN. PolicyKey is the box's policy key, whose private
-// half belongs in this store (HW-5a). Unlock tries only slots sealed under
-// it: anyone can seal a store of their own to this TPM under a key they
-// hold, so the pin must come from somewhere other than the drive (STO-2b,
-// STO-2c). Enrolling a slot (Create, AddSlot) also needs the boot paths the
-// key signed, at least one; Host names the PC for the owner.
+// TPM is the trusted-host factor. Unlock needs TPM, PolicyKey, Anchor and,
+// if the slot has a boot PIN, PIN. PolicyKey is the box's policy key, whose
+// private half belongs in this store (HW-5a); Unlock tries only slots
+// sealed under it. That alone does not authenticate the store: sealing to
+// this TPM under the policy key needs only its public half, and the signed
+// boot paths are public, so anyone with the drive can write a whole store
+// of their own that unseals here. Anchor (Store.Anchor) commits to the
+// store key itself, and Unlock refuses a store whose key does not derive
+// it. Neither is secret, but both must come from somewhere the drive's
+// writer cannot change (STO-2b, STO-2c). Enrolling a slot (Create, AddSlot)
+// needs PolicyKey and the boot paths it signed, at least one, but no
+// Anchor; Host names the PC for the owner.
 type TPM struct {
 	TPM       transport.TPM
 	PIN       string
 	PolicyKey *ecdsa.PublicKey
+	Anchor    []byte
 	Policies  []tpmseal.Policy
 	Host      string
 }
@@ -464,6 +475,9 @@ func Unlock(path string, f Factor) (*Store, error) {
 		if t.PolicyKey == nil {
 			return nil, ErrNoPolicyKey
 		}
+		if len(t.Anchor) != AnchorLen {
+			return nil, ErrNoAnchor
+		}
 		if srk, err = tpmseal.Identity(t.TPM); err != nil {
 			return nil, err
 		}
@@ -496,6 +510,13 @@ func Unlock(path string, f Factor) (*Store, error) {
 			wipe(key)
 			return nil, ErrTampered
 		}
+		// A whole store someone else wrote MACs under their own key, and
+		// its tpm slot unseals here; only the off-drive anchor tells it
+		// from the owner's.
+		if isTPM && !hmac.Equal(anchor(key, fl.ID), t.Anchor) {
+			wipe(key)
+			return nil, ErrTampered
+		}
 		ek := derive(key, fl.ID, "entries", keyLen)
 		plain, err := open(ek, fl.Entries, entriesAAD(fl.ID))
 		wipe(ek)
@@ -522,6 +543,23 @@ func Unlock(path string, f Factor) (*Store, error) {
 func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	pub, err := s.PolicyPublicKey()
 	return err == nil && pub.Equal(key)
+}
+
+// AnchorLen is the length of a store's anchor.
+const AnchorLen = 32
+
+func anchor(key, id []byte) []byte { return derive(key, id, "anchor", AnchorLen) }
+
+// Anchor commits to the store key: a one-way value under its own HKDF
+// label, which a TPM unlock must be given (see TPM). It is not secret; it
+// never changes, since the store key is never rotated (STO-2a-d).
+func (s *Store) Anchor() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.live(); err != nil {
+		return nil, err
+	}
+	return anchor(s.key, s.f.ID), nil
 }
 
 func readFile(path string) ([]byte, error) {
@@ -624,10 +662,17 @@ func (s *Store) AddSlot(f Factor) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := s.commit(append(slices.Clone(s.f.Slots), sl), s.entries); err != nil {
+	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries))
+}
+
+// committed returns the new slot's id with err when the slot is in place, which
+// it is after a rename even if the directory sync failed: the caller must
+// still learn its ID.
+func (s *Store) committed(id string, err error) (string, error) {
+	if err != nil && s.find(id) < 0 {
 		return "", err
 	}
-	return sl.ID, nil
+	return id, err
 }
 
 func (s *Store) find(id string) int {
@@ -670,10 +715,7 @@ func (s *Store) Replace(id string, f Factor) (string, error) {
 	}
 	slots := slices.Clone(s.f.Slots)
 	slots[i] = sl
-	if err := s.commit(slots, s.entries); err != nil {
-		return "", err
-	}
-	return sl.ID, nil
+	return s.committed(sl.ID, s.commit(slots, s.entries))
 }
 
 // SetPolicies replaces a tpm slot's signed boot paths: an update adds the
