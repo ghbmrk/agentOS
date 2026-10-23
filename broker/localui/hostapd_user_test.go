@@ -171,9 +171,8 @@ func threadStatus(path string) (capBnd, nnp string, ok bool) {
 // starts afterwards from other goroutines (dnsmasq, ip) keep the loader's
 // own. The process's main thread is the one exception the runtime makes:
 // a locked goroutine that exits there wedges it for good (runtime.mexit)
-// and no goroutine runs on it again, so it is left out of the scan (as in
-// loop7's TestNoNewPrivsStaysOffTheDaemonsOtherThreads). Root only: the
-// bounding-set drop needs CAP_SETPCAP.
+// and no goroutine runs on it again, so it is left out of the scan.
+// Root only: the bounding-set drop needs CAP_SETPCAP.
 func TestConfinementStaysOffTheLoadersOtherThreads(t *testing.T) {
 	if os.Geteuid() != 0 {
 		if os.Getenv("AGENTOS_REQUIRE_APUSER") == "1" {

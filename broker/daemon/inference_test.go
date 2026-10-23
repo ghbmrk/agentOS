@@ -93,7 +93,7 @@ var netOK = map[string]allowance{
 	// The local inference service's client and supervisor (INFER-SVC
 	// INF-2, INF-1): the client dials the service's unix socket; the
 	// supervisor makes that socket, hands it to the jailed service as fd 3
-	// and starts it into the inference leaf, as loop7's jail does.
+	// and starts it into the inference leaf.
 	"infer": {"dials only the inference service's unix socket", []string{"net.Conn", "net.Dialer"}},
 	"infer/supervise": {"the inference service's unix listener; its jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; its start into the inference leaf",
 		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
