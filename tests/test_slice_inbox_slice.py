@@ -45,7 +45,7 @@ def adapter(case, world):
     request = {
         "world": {k: world[k] for k in ("dkim_keys", "provider_table", "history", "contacts",
                                         "known_senders", "today", "last_opened",
-                                        "unsubscribe_unopened_days")},
+                                        "unsubscribe_unopened_days", "authserv", "alert_senders")},
         "mails": [{"id": i, "raw": base64.b64encode(by_id[i]["raw"]).decode(), "class": classes[i]}
                   for i in ids],
         "owner": world["owner"],
