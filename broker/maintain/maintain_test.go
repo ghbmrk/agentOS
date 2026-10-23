@@ -6,14 +6,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -346,13 +345,7 @@ func TestRunsUnderScheduler(t *testing.T) {
 	r := newRig(t)
 	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
-	spare, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
-		Now:        r.clk.now,
-	})
-	r.must(err)
+	spare := spareOn(t, r.clk.now)
 	busy := true
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l},
 		Busy: func() bool { return busy }, Now: r.clk.now})
@@ -529,13 +522,7 @@ func TestWakeUnparksLoop3(t *testing.T) {
 	// Three daily checks that find nothing park Loop 3 as dry (LOOP-3);
 	// a Wake (network up, channel change, new release) brings it back.
 	r := newRig(t)
-	spare, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
-		Now:        r.clk.now,
-	})
-	r.must(err)
+	spare := spareOn(t, r.clk.now)
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
 	r.must(err)
 	for d := 0; d < 3; d++ {
@@ -644,13 +631,7 @@ func TestFailedChecksNotParkedByScheduler(t *testing.T) {
 	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.mirrors = []update.Source{failSource{}}
-	spare, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
-		Now:        r.clk.now,
-	})
-	r.must(err)
+	spare := spareOn(t, r.clk.now)
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
 	r.must(err)
 	for h := 0; h < 6; h++ {
@@ -767,13 +748,7 @@ func TestComingBackOnlineChecksEvenWhenParked(t *testing.T) {
 	// resting state; coming back online still checks at once, and a
 	// security fix found then keeps it offered (Urgent) and in the share.
 	r := newRig(t)
-	spare, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000},
-		OverallCap: loops.SpareLimits(loops.NoSpareBudget),
-		Now:        r.clk.now,
-	})
-	r.must(err)
+	spare := spareOn(t, r.clk.now)
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare, Sources: []loops.Source{r.l}, Now: r.clk.now})
 	r.must(err)
 	for d := 0; d < 3; d++ {
@@ -869,4 +844,11 @@ func TestOSS9UnlistedReportsNeverEndASoak(t *testing.T) {
 	if len(r.p.proposed()) != 1 {
 		t.Fatal("not proposed once a listed attestor passed it")
 	}
+}
+
+// spareOn is a spare envelope on a kernel of its own (loopstest).
+func spareOn(t *testing.T, now func() time.Time) *loops.Spare {
+	t.Helper()
+	k := loopstest.New(t, now)
+	return &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
 }

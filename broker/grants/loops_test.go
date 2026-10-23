@@ -9,14 +9,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -25,11 +25,8 @@ var _ Loops = (*loops.Scheduler)(nil)
 
 func loopsRig(t *testing.T) (*rig, *loops.Scheduler) {
 	t.Helper()
-	spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.NoSpareBudget)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	k := loopstest.New(t, time.Now)
+	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare})
 	if err != nil {
 		t.Fatal(err)
@@ -154,11 +151,8 @@ func (r *recordingChanges) Decided(context.Context, journal.Intent, string) { r.
 // #48 C7/Q3 regression (L3 on #57): a lapsed loop setting never reaches
 // the change pipeline's Decided.
 func TestALapsedRaiseIsNotAChangeDecision(t *testing.T) {
-	spare, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "spare.json"),
-		MachineCap: meter.Limits{Calls: 50, Tokens: 500_000}, OverallCap: loops.SpareLimits(loops.NoSpareBudget)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	k := loopstest.New(t, time.Now)
+	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare})
 	if err != nil {
 		t.Fatal(err)

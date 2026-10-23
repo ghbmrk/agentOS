@@ -14,7 +14,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -48,7 +47,7 @@ type Settings struct {
 	Off bool `json:"off"`
 	// Paused lists loops the owner turned off one by one.
 	Paused map[Loop]bool `json:"paused,omitempty"`
-	// Spare is the spare AI budget per meter window (LOOP-2), counted in
+	// Spare is the spare AI budget per day (LOOP-2), counted in
 	// model calls; tokens scale with it (TokensPerCall).
 	SpareCalls int64 `json:"spare_calls"`
 	// Updates are the owner's update channel and cadence (UPD-4, UPD-5),
@@ -118,18 +117,18 @@ func (s Settings) On(l Loop) bool { return !s.Off && !s.Paused[l] }
 // An owner's SPARE BUDGET n sets a fixed one.
 const NoSpareBudget int64 = -1
 
-// PaidRouteCap is what the spare meter holds with no fixed budget. Loop
-// calls through the model socket can reach pay-per-token API routes, which
-// keep a money cap (OP-8), and until RES-5a the meter cannot tell those
-// from plan quota, so no fixed budget is the OP-8 default cap, not
-// unlimited (security and combined fix-lists on #2319).
-var PaidRouteCap = meter.DefaultOverallCap
+// PaidRouteCalls is the spare budget with no fixed one. Loop calls through
+// the model socket can reach pay-per-token API routes, which keep a money cap
+// (OP-8), and until RES-5a the cap cannot tell those from plan quota, so no
+// fixed budget is the OP-8 default of 1500 calls a day, not unlimited
+// (security and combined fix-lists on #2319).
+const PaidRouteCalls int64 = 1500
 
 // budgetCalls is the calls a day the budget cur allows: the paid-route
 // cap when there is no fixed budget.
 func budgetCalls(cur int64) int64 {
 	if cur < 0 {
-		return PaidRouteCap.Calls
+		return PaidRouteCalls
 	}
 	return cur
 }
@@ -137,20 +136,16 @@ func budgetCalls(cur int64) int64 {
 // withinBudget reports whether calls is at most the budget cur.
 func withinBudget(calls, cur int64) bool { return calls <= budgetCalls(cur) }
 
-// TokensPerCall turns the owner's call count into the meter's token cap.
+// TokensPerCall turns the owner's call count into output tokens.
 const TokensPerCall = 10_000
 
-// SpareLimits is the meter cap for a spare budget of calls. The meter has
-// no zero cap, so a zero budget is one call of one token: no real call
-// fits under it. No fixed budget is PaidRouteCap.
-func SpareLimits(calls int64) meter.Limits {
-	if calls < 0 {
-		return PaidRouteCap
-	}
-	if calls == 0 {
-		return meter.Limits{Calls: 1, Tokens: 1}
-	}
-	return meter.Limits{Calls: calls, Tokens: calls * TokensPerCall}
+// SpareCap is the day spend cap, in minor units, for a spare budget of calls
+// on a route priced outPerM minor units per million output tokens: each call
+// its TokensPerCall at that price, rounded up. No fixed budget is
+// PaidRouteCalls. A zero budget is a zero cap: no call that costs anything
+// fits under it.
+func SpareCap(calls, outPerM int64) int64 {
+	return mulDiv(budgetCalls(calls), TokensPerCall*max(outPerM, 0), 1_000_000, true)
 }
 
 // MaxSpareCalls bounds what one owner text may set, so a typo cannot ask
@@ -510,7 +505,7 @@ var errNoSharing = errors.New("loops: sharing is not wired")
 func DefaultsLine(calls int64) string {
 	if calls < 0 {
 		return "In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, " +
-			fmt.Sprintf("using spare plan quota beyond what you need, at most %d AI calls a day while a pay-per-token key may be used; reply LOOPS OFF to stop that.", PaidRouteCap.Calls)
+			fmt.Sprintf("using spare plan quota beyond what you need, at most %d AI calls a day while a pay-per-token key may be used; reply LOOPS OFF to stop that.", PaidRouteCalls)
 	}
 	return fmt.Sprintf("In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, "+
 		"using up to %d AI calls a day; reply LOOPS OFF to stop that.", calls)
@@ -812,7 +807,7 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 		next.SpareCalls = r.Calls
 	}
 	if r.Kind == KindBudget && s.cfg.Spare != nil {
-		if err := s.cfg.Spare.SetOverallCap(SpareLimits(r.Calls)); err != nil {
+		if err := s.cfg.Spare.SetCap(SpareCap(r.Calls, s.cfg.Spare.OutPerM)); err != nil {
 			return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 		}
 	}
@@ -825,7 +820,7 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 		s.st.Settings = prev
 		s.st.Order, s.st.Applied = prevOrder, prevApplied
 		if r.Kind == KindBudget && s.cfg.Spare != nil {
-			_ = s.cfg.Spare.SetOverallCap(SpareLimits(prev.SpareCalls))
+			_ = s.cfg.Spare.SetCap(SpareCap(prev.SpareCalls, s.cfg.Spare.OutPerM))
 		}
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not saved"}
 	}
