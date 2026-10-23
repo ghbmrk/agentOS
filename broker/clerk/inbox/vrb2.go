@@ -262,7 +262,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	}
 	// No entry means the owner has never opened the sender's mail; an entry
 	// that is not a date is not evidence of that.
-	if o, seen := w.LastOpened[sender]; seen {
+	if o, seen := lastOpened(w.LastOpened, sender); seen {
 		opened, ok := day(o)
 		if !ok {
 			return RBadDate, url
@@ -272,4 +272,28 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 		}
 	}
 	return ROK, url
+}
+
+// lastOpened is sender's last_opened entry, keyed by lower-cased address
+// (#2618). A key the reader wrote in another case, or with surrounding space,
+// still counts, so a read sender never looks never opened; of several such
+// keys the latest date counts, and one that is not a date makes the mail
+// ineligible.
+func lastOpened(m map[string]string, sender string) (string, bool) {
+	if o, ok := m[sender]; ok {
+		return o, true
+	}
+	got, seen := "", false
+	for k, o := range m {
+		if !strings.EqualFold(strings.TrimSpace(k), sender) {
+			continue
+		}
+		if _, ok := day(o); !ok {
+			return o, true
+		}
+		if !seen || o > got {
+			got, seen = o, true
+		}
+	}
+	return got, seen
 }
