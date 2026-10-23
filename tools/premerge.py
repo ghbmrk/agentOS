@@ -28,18 +28,29 @@ prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push 
 fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A gate-file PR (the `--needs-mark` list)
 also needs a separate Security accept (D-137): the newest trusted verdict comment marked `security` and not
 `l3` or `combined` is `accept` and its reviewed diff equals `head`'s; otherwise it prints `needs-security <files>`
-and exits 1. A verdict comment edited after posting never accepts (it reads as `not-accepted`
+and exits 1. Before that, the lens screen the PR's tier needs (OPERATING §3-§4, PREMERGE-lens #2644; tier from
+tools/risk_tier.py over the same file list, read from the checkout, which in the workflow is the base): on tier A
+the newest trusted verdicts marked `ux` and `potency` (one comment may carry both), on tier B the newest marked
+`combined`, each an `accept` whose reviewed diff equals `head`'s. A tier-A diff confined to assurance tooling owes
+`potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts (it reads as `not-accepted`
 until a newer comment supersedes it); never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
-bot's output (records: new reviews/<lens>/ files only, never a README or an existing record). Otherwise it
+bot's output. Otherwise it
 prints `not-bot <files>` and exits 1. The caller checks that the branch is this repository's, not a fork's.
 """
+import importlib.util
 import json
+import pathlib
 import re
 import subprocess
 import sys
+
+# By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
+risk_tier = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(risk_tier)
 
 # Pinned so local config (renames, external drivers, colour) cannot change the file list.
 DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"]
@@ -48,11 +59,12 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 # Gate files: a PR touching any of these also needs a separate Security accept (D-137, OPERATING §7).
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
 # broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); the tests that pin the merge gates count too
-# (PREMERGE-paths, #1835). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# (PREMERGE-paths, #1835), as do this gate's own tests and the lens rules, so a PR cannot weaken them on L3 alone (#2438). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace)\.py|tools/old_core\.txt|tools/(ci_scope|g1_scope)[^/]*",
+                        r"tools/(risk_tier|premerge|trace)\.py|tools/old_core\.txt|tools/(ci_scope|g1_scope)[^/]*|"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
                         re.DOTALL)
 
 
@@ -78,10 +90,23 @@ _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 
 
-def verdict(comments, pr, security=False):
+# A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
+ASSURANCE = re.compile(r"(?:tools/|tests/test_)(?:depaudit|canary|risk_tier)[^/]*|assurance/.*", re.DOTALL)
+
+
+def lenses_owed(files):
+    """The lens verdicts the tier of `files` needs besides L3 (OPERATING §3-§4)."""
+    tier, _ = risk_tier.tier_of_change(files)
+    if tier == "A":
+        return ["potency"] if all(ASSURANCE.fullmatch(f) for f in files) else ["ux", "potency"]
+    return ["combined"] if tier == "B" else []
+
+
+def verdict(comments, pr, security=False, lens=None):
     """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None.
 
-    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead.
+    With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
+    with `lens`, of the newest trusted verdict comment carrying that lens's marker.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed."""
     found = None
@@ -89,8 +114,11 @@ def verdict(comments, pr, security=False):
         body = c.get("body") or ""
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
-        lens = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and lens:
+        if lens:
+            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", body, re.M)
+        else:
+            marked = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
+        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
@@ -110,12 +138,11 @@ def _replayed(cwd, reviewed, onto):
 
 
 # Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml, board.yml, records.yml.
+# metrics.yml, board.yml. bot/records left with records.yml (cut 4, #2234; #2235).
 BOT = {
     "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
     "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
     "bot/board": (re.compile(r"BOARD\.md"), "AM"),
-    "bot/records": (re.compile(r"reviews/[^/\n]+/(?!README)[^/\n]+\.md", re.DOTALL), "A"),
 }
 
 
@@ -158,6 +185,10 @@ def _same(reviewed, head, base):
         return False
 
 
+def _accepted(v, head, base):
+    return bool(v) and v[0] == "accept" and _same(v[1], head, base)
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -178,9 +209,14 @@ def main(argv):
         if changed:
             print("changed " + " ".join(changed))
             return 1
-        gate = mark_paths(mark_range(".", base, head))
+        files = mark_range(".", base, head)
+        lenses = [x for x in lenses_owed(files) if not _accepted(verdict(comments, pr, lens=x), head, base)]
+        if lenses:
+            print("needs-lens " + ",".join(lenses))
+            return 1
+        gate = mark_paths(files)
         sec = verdict(comments, pr, security=True)
-        if gate and not (sec and sec[0] == "accept" and _same(sec[1], head, base)):
+        if gate and not _accepted(sec, head, base):
             print("needs-security " + " ".join(gate))
             return 1
         print("same")
