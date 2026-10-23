@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/route"
 )
 
 // Headers between the broker and the vault process. Every header with the
@@ -98,7 +99,7 @@ type Usage struct {
 	Complete    bool   `json:"complete"`
 	OutputChars int64  `json:"output_chars"`
 
-	Failed   []meter.Attempt `json:"failed,omitempty"`
+	Failed   []route.Attempt `json:"failed,omitempty"`
 	Unserved bool            `json:"unserved,omitempty"`
 	None     bool            `json:"none,omitempty"`
 }
@@ -330,7 +331,7 @@ func (s *scrubTrailers) Read(b []byte) (int, error) {
 				if !u.None {
 					meter.Report(s.ctx, meter.Usage{Provider: u.Provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
 						CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars,
-						Failed: u.Failed, Unserved: u.Unserved})
+						Failed: meterAttempts(u.Failed), Unserved: u.Unserved})
 				}
 			}
 		}
@@ -370,6 +371,17 @@ func unanswered(ctx context.Context, allowed int) {
 		failed[i] = meter.Attempt{Full: true}
 	}
 	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: failed})
+}
+
+// meterAttempts is a as the meter's own type, which has the same fields
+// and charges them (Attempt.charge in broker/meter) until #2584 moves the
+// charge here.
+func meterAttempts(a []route.Attempt) []meter.Attempt {
+	out := make([]meter.Attempt, len(a))
+	for i, x := range a {
+		out[i] = meter.Attempt(x)
+	}
+	return out
 }
 
 // valid refuses negative or absurd counts, which the meter would otherwise

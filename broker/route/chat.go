@@ -8,8 +8,6 @@ import (
 	"io"
 	"reflect"
 	"strings"
-
-	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // chatRequest is the part of an OpenAI chat-completions body (the guest
@@ -223,12 +221,12 @@ var chatKeys = func() []string {
 
 // parseChat decodes exactly one JSON object; trailing data is refused, so
 // the router and every provider read the same request. Its top-level keys
-// pass meter.Object first: the decoder below matches them to fields
+// pass Object first: the decoder below matches them to fields
 // case-insensitively, last match winning, so a repeated key, or one
 // differing from another or from a field only in case, would let it read
 // a value (n, an output limit) other than the one the meter checked.
 func parseChat(body []byte) (*chatRequest, error) {
-	if _, err := meter.Object(body, chatKeys...); err != nil {
+	if _, err := Object(body, chatKeys...); err != nil {
 		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -303,8 +301,8 @@ type Usage struct {
 	OutputChars int64 `json:"output_chars"`
 	// Failed are the attempts the router sent and failed over from
 	// before this one; Unserved, that none served the call (SR3-7-f1c).
-	Failed   []meter.Attempt `json:"failed,omitempty"`
-	Unserved bool            `json:"unserved,omitempty"`
+	Failed   []Attempt `json:"failed,omitempty"`
+	Unserved bool      `json:"unserved,omitempty"`
 }
 
 // Total is every token the call was billed for.
