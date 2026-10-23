@@ -286,20 +286,10 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	// signed by the end of today and not expiring before it, so one that
 	// expires or was signed at any hour of today is judged as harshly as the
 	// day allows.
-	var current []Sig
 	today, todayOK := day(w.Today)
-	for _, s := range pass {
-		if s.T < 0 && s.X < 0 {
-			current = append(current, s)
-			continue
-		}
-		if !todayOK {
-			return RBadDate, url
-		}
-		end := today.Unix() + 24*60*60
-		if s.T < end && (s.X < 0 || s.X >= end) {
-			current = append(current, s)
-		}
+	current, dated := currentSigs(pass, w.Today)
+	if !dated {
+		return RBadDate, url
 	}
 	if len(current) == 0 {
 		return RDKIMNotCurrent, url
@@ -389,4 +379,25 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 		}
 	}
 	return ROK, url
+}
+
+// currentSigs is the signatures of pass still current on today (RFC 6376 t=
+// and x=, MIG-3-R3): signed by the end of today and not expiring before it.
+// dated is false when a signature carries a time and today is not a day.
+func currentSigs(pass []Sig, today string) (current []Sig, dated bool) {
+	t, ok := day(today)
+	for _, s := range pass {
+		if s.T < 0 && s.X < 0 {
+			current = append(current, s)
+			continue
+		}
+		if !ok {
+			return nil, false
+		}
+		end := t.Unix() + 24*60*60
+		if s.T < end && (s.X < 0 || s.X >= end) {
+			current = append(current, s)
+		}
+	}
+	return current, true
 }

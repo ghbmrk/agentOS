@@ -470,3 +470,24 @@ func TestLiveTrashCopyConfirmsOneTrashOnly(t *testing.T) {
 		t.Fatalf("resent lost move: %v, want unconfirmed (only the second mail's copy is in the trash)", err)
 	}
 }
+
+// An organize after the mail's trash lands on its copy in the trash, as the
+// slice's plans run it (A21 on IMAP), and a second trash of it is already
+// done.
+func TestLiveOrganizeAfterTrashLandsOnTheTrashCopy(t *testing.T) {
+	const spam = "<s1@spam.test>"
+	lr := newLiveRig(t, 30, map[string]string{spam: "spam"}, rawMail(spam, "x@spam.test", "Win"))
+	ctx := context.Background()
+	if err := lr.box.Trash(ctx, lr.mail[spam]); err != nil {
+		t.Fatal(err)
+	}
+	if err := lr.box.Label(ctx, lr.mail[spam], "agentOS/spam"); err != nil {
+		t.Fatalf("organize after trash: %v", err)
+	}
+	if err := lr.box.Trash(ctx, lr.mail[spam]); err != nil {
+		t.Fatalf("second trash: %v", err)
+	}
+	if folder, flags := lr.flagsOf(t, spam); folder != "Trash" || !slices.ContainsFunc(flags, func(f string) bool { return strings.EqualFold(f, "agentOS/spam") }) {
+		t.Fatalf("the mail is in %s with %v, want Trash with agentOS/spam", folder, flags)
+	}
+}
