@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -202,6 +203,31 @@ func drop(uid, gid int) error {
 		if g != gid {
 			return fmt.Errorf("agentos-unlock: still in group %d", g)
 		}
+	}
+	return noCaps()
+}
+
+// noCaps checks that no capability survived the drop: a unit with
+// no-setuid-fixup securebits or ambient capabilities would otherwise carry
+// some through setresuid and the exec (#2896 L3 item 3).
+func noCaps() error {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return err
+	}
+	seen := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		name, v, ok := strings.Cut(l, ":")
+		if !ok || name != "CapPrm" && name != "CapEff" && name != "CapAmb" {
+			continue
+		}
+		seen++
+		if strings.Trim(strings.TrimSpace(v), "0") != "" {
+			return fmt.Errorf("agentos-unlock: %s is %s after the drop, not empty", name, strings.TrimSpace(v))
+		}
+	}
+	if seen != 3 {
+		return errors.New("agentos-unlock: cannot read my capability sets")
 	}
 	return nil
 }

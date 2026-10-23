@@ -277,6 +277,9 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 			if len(f) >= 1 && f[0] == "Groups:" && len(f) > 1 && strings.Join(f[1:], " ") != "65534" {
 				t.Errorf("the kernel process keeps %s", l)
 			}
+			if len(f) == 2 && (f[0] == "CapPrm:" || f[0] == "CapEff:" || f[0] == "CapAmb:" || f[0] == "CapInh:") && strings.Trim(f[1], "0") != "" {
+				t.Errorf("the kernel process keeps %s", l)
+			}
 		}
 	}
 	must(t, r.owner().Stop())
@@ -384,5 +387,17 @@ func TestParse(t *testing.T) {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
 		}
+	}
+}
+
+// A capability left after the drop is caught: root holds them all, a
+// plain user none.
+func TestNoCapsSeesCapabilities(t *testing.T) {
+	err := noCaps()
+	if os.Geteuid() == 0 && err == nil {
+		t.Fatal("root's capabilities went unseen")
+	}
+	if os.Geteuid() != 0 && err != nil {
+		t.Fatalf("a plain user: %v", err)
 	}
 }

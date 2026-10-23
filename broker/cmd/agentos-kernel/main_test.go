@@ -3,8 +3,13 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // REQ: CLK-1, LOG-2
@@ -45,7 +50,51 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 // LOG-2: with no anchor off the log's disk the kernel does not start, and
 // it takes no keys from the unlock step.
 func TestNoAnchorNoKernel(t *testing.T) {
-	if err := start(good, io.Discard, productionAnchor); !errors.Is(err, errNoAnchor) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root the root refusal comes first (TestARefusedKernelLeavesTheKeysUnread)")
+	}
+	r := fullPipe(t)
+	if err := start(good, io.Discard, productionAnchor, r); !errors.Is(err, errNoAnchor) {
 		t.Fatalf("got %v, want errNoAnchor", err)
+	}
+	unread(t, r)
+}
+
+// CLK-1: a kernel refused as root or as a peer's uid takes no key, so the
+// keys never sit in a process a peer could read (#2896 L3 item 1).
+func TestARefusedKernelLeavesTheKeysUnread(t *testing.T) {
+	args := slices.Clone(good)
+	args[slices.Index(args, "-owner-uid")+1] = strconv.Itoa(os.Getuid())
+	r := fullPipe(t)
+	anchor := func() (kernel.Anchor, error) { return &kernel.MemAnchor{}, nil }
+	err := start(args, io.Discard, anchor, r)
+	if err == nil || !strings.Contains(err.Error(), "root") && !strings.Contains(err.Error(), "peer uid") {
+		t.Fatalf("got %v, want a root or peer-uid refusal", err)
+	}
+	unread(t, r)
+}
+
+// fullPipe is a pipe's read end holding a hand-off-sized payload, its
+// writer closed.
+func fullPipe(t *testing.T) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	if _, err := w.Write(make([]byte, 600)); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	return r
+}
+
+// unread checks that every byte is still in the pipe.
+func unread(t *testing.T, r *os.File) {
+	t.Helper()
+	b, err := io.ReadAll(r)
+	if err != nil || len(b) != 600 {
+		t.Fatalf("the hand-off was read: %d bytes left, %v", len(b), err)
 	}
 }

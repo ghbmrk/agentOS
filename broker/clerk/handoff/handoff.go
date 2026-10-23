@@ -103,12 +103,15 @@ func ReadKeys(f *os.File) (KernelKeys, error) {
 	if err := syscall.Fstat(int(f.Fd()), &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFIFO {
 		return KernelKeys{}, ErrHandoff
 	}
-	b, err := io.ReadAll(io.LimitReader(f, int64(maxHandoff)+1))
-	defer clear(b)
-	if err != nil {
+	// One buffer of fixed size, so no grown copy of the keys is left for
+	// the collector (#2896 L3 item 2). A hand-off that fills it is too long.
+	buf := make([]byte, maxHandoff+1)
+	defer clear(buf)
+	n, err := io.ReadFull(f, buf)
+	if err == nil || !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return KernelKeys{}, ErrHandoff
 	}
-	return parseKeys(b)
+	return parseKeys(buf[:n])
 }
 
 func parseKeys(b []byte) (KernelKeys, error) {

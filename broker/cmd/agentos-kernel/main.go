@@ -31,11 +31,12 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
 func main() {
 	log.SetFlags(0)
-	if err := start(os.Args[1:], os.Stderr, productionAnchor); err != nil {
+	if err := start(os.Args[1:], os.Stderr, productionAnchor, os.NewFile(handoff.KeyFD, "unlock-keys")); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -94,18 +95,26 @@ func parse(args []string, stderr io.Writer) (run.MainConfig, error) {
 	return c, nil
 }
 
-// start runs the kernel. The anchor is checked before the keys are read, so
-// a kernel that cannot start never takes them.
-func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error)) error {
+// start runs the kernel with the unlock step's hand-off on keyFile. Every
+// refusal comes before the keys are read, so a kernel that cannot start
+// never takes them: not as root, not as a peer's uid, and not while
+// dumpable, since a peer could then read them from its memory (CLK-1).
+func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error), keyFile *os.File) error {
 	cfg, err := parse(args, stderr)
 	if err != nil {
+		return err
+	}
+	if os.Geteuid() == 0 {
+		return errors.New("agentos-kernel: the kernel never runs as root")
+	}
+	if err := procguard.Isolate(cfg.Peers...); err != nil {
 		return err
 	}
 	a, err := anchor()
 	if err != nil {
 		return err
 	}
-	keys, err := handoff.ReadKeys(os.NewFile(handoff.KeyFD, "unlock-keys"))
+	keys, err := handoff.ReadKeys(keyFile)
 	if err != nil {
 		return err
 	}
