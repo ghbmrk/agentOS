@@ -1,0 +1,39 @@
+{
+ "schema_version": "1.3.1",
+ "id": "GO-0000-0002",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [],
+ "summary": "Synthetic control entry for tools/vulncheck.py; not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "example.com/quiet",
+    "ecosystem": "Go"
+   },
+   "ranges": [
+    {
+     "type": "SEMVER",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "1.0.1"
+      }
+     ]
+    }
+   ],
+   "ecosystem_specific": {
+    "imports": [
+     {
+      "path": "example.com/quiet",
+      "symbols": [
+       "Unsafe"
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,31 @@
+[
+ {
+  "path": "example.com/dep",
+  "vulns": [
+   {
+    "id": "GO-0000-0001",
+    "modified": "2026-01-01T00:00:00Z",
+    "fixed": "1.0.1"
+   }
+  ]
+ },
+ {
+  "path": "example.com/quiet",
+  "vulns": [
+   {
+    "id": "GO-0000-0002",
+    "modified": "2026-01-01T00:00:00Z",
+    "fixed": "1.0.1"
+   }
+  ]
+ },
+ {
+  "path": "stdlib",
+  "vulns": [
+   {
+    "id": "GO-0000-0003",
+    "modified": "2026-01-01T00:00:00Z"
+   }
+  ]
+ }
+]

@@ -129,9 +129,11 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # tools/premerge decides which PRs need Mark and when an accepted head still holds; the
 # tests that pin the merge gates and the lens READMEs (review rules) left its Mark-only
 # list on Mark's "Narrow only" (2026-10-16), so they keep the full review instead.
+# tools/vulncheck and its planted fixture decide which known vulnerabilities fail CI (EVL-5).
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope", "tools/ci_split", "tools/premerge",
+    "tools/g1_scope", "tools/ci_split", "tools/premerge", "tools/vulncheck",
+    "tests/fixtures/vulncheck/",
     "tests/test_premerge", "tests/test_risk_tier", "tests/test_ci_scope", "tests/test_g1_scope",
     "tests/test_workflows", "tests/test_merge_queue", "tests/test_lane",
     "image/", ".github/", ".claude/",

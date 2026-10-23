@@ -1,0 +1,67 @@
+name: vulncheck
+# SPEC EVL-5 (D-149, #2855): govulncheck and an OSV scan on every pull request. A known
+# vulnerability reachable from the project's code, or in a vendored or image dependency,
+# fails unless an open issue named in assurance/vulncheck.json records why it is accepted.
+# The control step runs first: the same scanners, in the same job, must catch every
+# vulnerability planted in tests/fixtures/vulncheck, so a clean scan is not a scan that
+# read nothing.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 6 * * *" # daily: new advisories land without new commits
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# The scanners are built with the toolchain go.mod names; nothing downloads another.
+env:
+  GOTOOLCHAIN: local
+jobs:
+  # CI-docs: a records-only change adds no dependency; the daily schedule always scans.
+  scope:
+    uses: ./.github/workflows/scope.yml
+  vulncheck:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read # --check-issues: each acceptance's issue must be open
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      # govulncheck reports standard-library findings for the Go it runs with, so it is
+      # the toolchain the broker builds with.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      # Pinned versions; the Go checksum database verifies every module go install fetches.
+      - name: Install govulncheck and osv-scanner
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Control (planted vulnerabilities, offline databases)
+        run: python3 tools/vulncheck.py control
+      - name: Known vulnerabilities (EVL-5)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/vulncheck.py run --check-issues --report vulncheck-report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: vulncheck-report
+          path: vulncheck-report.json
+          if-no-files-found: ignore

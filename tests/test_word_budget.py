@@ -3,6 +3,7 @@
 No SPEC requirement IDs: process tooling, not SPEC.md behaviour. All data is synthetic.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,43 @@ class GitTest(unittest.TestCase):
             (root / "body.md").write_text("Word-budget: D-7\n")
             self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 0)
             self.assertEqual(run("--git", "HEAD", "HEAD~1").returncode, 0)
+
+    def test_the_workflow_counts_the_merge_not_a_stale_tip(self):
+        # A branch forked before main changed CLAUDE.md. Its tip still has the old text, so
+        # comparing the tip with main reads main's later edit as the branch's own: a false
+        # fail when main shrank, a hidden growth when main grew. The test merge is right.
+        wf = (pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/word-budget.yml").read_text()
+        refs = re.search(r'word_budget\.py" --git (\S+) (\S+) ', wf).groups()
+        self.assertEqual(refs, ("HEAD^1", "HEAD"))
+        tool = pathlib.Path(word_budget.__file__)
+        for main_edit, branch_edit, want in (("a b c d", None, 0),        # main shrank, branch idle
+                                             ("x " * 20, "e f g", 1)):    # main grew, branch grew
+            with tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True)
+                root = pathlib.Path(d)
+                git("init", "-q", "-b", "main")
+                git("config", "user.email", "t@example.invalid")
+                git("config", "user.name", "t")
+                (root / "CLAUDE.md").write_text("a b c d e f g h")
+                (root / "AGENTS.md").write_text("a b")
+                (root / "DECISIONS.md").write_text(DECISIONS)
+                git("add", "-A")
+                git("commit", "-qm", "fork point")
+                git("checkout", "-qb", "branch")
+                (root / "LATER.md").write_text("unrelated")
+                if branch_edit:
+                    (root / "AGENTS.md").write_text(branch_edit)
+                git("add", "-A")
+                git("commit", "-qm", "branch")
+                git("checkout", "-q", "main")
+                (root / "CLAUDE.md").write_text(main_edit)
+                git("commit", "-qam", "main moves on")
+                git("merge", "-q", "--no-ff", "-m", "test merge", "branch")
+                run = lambda *a: subprocess.run([sys.executable, "-I", str(tool), "--git", *a], cwd=d,
+                                                capture_output=True, text=True)
+                got = run(*refs)
+                self.assertEqual(got.returncode, want, got.stdout + got.stderr)
+                self.assertEqual(run("HEAD^1", "HEAD^2").returncode, 1 - want, "the tip comparison was right here")
 
 
 if __name__ == "__main__":

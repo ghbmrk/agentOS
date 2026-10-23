@@ -1,0 +1,31 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-CONTROL-1",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "GHSA-0000-0000-0001"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py; not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "left-pad",
+    "ecosystem": "npm"
+   },
+   "ranges": [
+    {
+     "type": "SEMVER",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "1.0.1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
