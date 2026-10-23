@@ -1156,6 +1156,53 @@ def ini_paths(files, section, key):
     return val
 
 
+# UPD-10 (Security release finding on #2875): settings that mount something in a unit's namespace,
+# where ExecPaths=/usr would make it executable if it lands under /usr. Each word's target is the
+# field after the first ':' when there is one (BindPaths=SRC:DST), else the word itself; an image or
+# root setting is refused whatever it names, since it replaces or overlays what /usr holds.
+NAMESPACE_MOUNTS = ("BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem", "ReadWritePaths", "MountImages")
+NAMESPACE_ROOTS = ("RootDirectory", "RootImage", "ExtensionImages", "ExtensionDirectories")
+
+
+def ini_words(files, section, key):
+    """The words systemd ends up with for list setting SECTION.KEY across FILES in order: each
+    assignment adds its words, an empty one resets the list. ValueError for a file systemd may read
+    only in part."""
+    val = []
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        for s, k, v in lines:
+            if (s, k) == (section, key):
+                val = v.split() if v else []
+    return val
+
+
+def namespace_mount_violations(name, files):
+    """UPD-10: a unit the check covers mounts nothing under /usr in its own namespace (NAMESPACE_MOUNTS)
+    and sets none of NAMESPACE_ROOTS."""
+    out = []
+    try:
+        for key in NAMESPACE_ROOTS:
+            if ini_words(files, "Service", key):
+                out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
+        for key in NAMESPACE_MOUNTS:
+            for w in ini_words(files, "Service", key):
+                if any(c in w for c in "\"'%\\"):
+                    out.append("%s: %s=%s: the tree check does not model it (UPD-10)" % (name, key, w))
+                    continue
+                parts = w.lstrip("-+").split(":")
+                target = parts[1] if key in ("BindPaths", "BindReadOnlyPaths", "MountImages") and len(parts) > 1 else parts[0]
+                norm = "/" + "/".join(x for x in target.split("/") if x not in ("", "."))
+                if ".." in norm.split("/") or norm == EXEC_ONLY or norm.startswith(EXEC_ONLY + "/"):
+                    out.append("%s: %s=%s mounts under %s, which executes (UPD-10)" % (name, key, w, EXEC_ONLY))
+    except ValueError as e:
+        out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
+    return out
+
+
 def noexec_violations(root):
     """UPD-10: each agentos service the tree ships but NOEXEC_EXEMPT, with every drop-in systemd
     257.13 applies to it (as card_unit_violations reads them), ends with "/" in NoExecPaths= and a
@@ -1196,6 +1243,7 @@ def noexec_violations(root):
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
             continue
+        out += namespace_mount_violations(name, files)
         if "/" not in noexec:
             out.append("%s: NoExecPaths does not hold /; must be NoExecPaths=/ (UPD-10)" % name)
         if not execs:

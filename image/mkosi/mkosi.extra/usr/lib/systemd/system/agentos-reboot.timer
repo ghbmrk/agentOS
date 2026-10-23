@@ -7,6 +7,9 @@ Description=agentOS weekly reboot
 
 [Timer]
 OnCalendar=Sun *-*-* 03:00:00
+# The week also on the monotonic clock: a wall clock held back (a compromised time source) never
+# keeps the box up past a week of uptime, where reboot-weekly reboots through any inhibitor.
+OnBootSec=7d
 AccuracySec=1min
 # A boot after a missed Sunday is already a fresh start: no catch-up reboot.
 Persistent=no

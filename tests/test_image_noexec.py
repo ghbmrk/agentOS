@@ -114,6 +114,34 @@ class NoExecTreeTest(unittest.TestCase):
                     f.unlink()
         self.assertEqual(self.v(), [])
 
+    def test_nothing_is_mounted_under_usr_in_a_unit(self):
+        # ExecPaths=/usr makes whatever a unit mounts under /usr in its own namespace executable.
+        unit = self.root / SYSTEM / "agentos-egress.service"
+        good = unit.read_text()
+        for line in ("BindPaths=/var/lib/x:/usr/lib/x", "BindReadOnlyPaths=-/var/x:/usr/x:rbind", "BindPaths=/usr/lib/x",
+                     "TemporaryFileSystem=/usr/local:rw", "ReadWritePaths=-/usr/lib/agentos", "MountImages=/var/i.raw:/usr/x",
+                     "BindPaths=/var/x:/usr", "TemporaryFileSystem=/usr/./x"):
+            with self.subTest(line):
+                unit.write_text(good + "\n[Service]\n" + line + "\n")
+                self.assertEqual(len(self.v()), 1, self.v())
+                self.assertIn("mounts under /usr, which executes", self.v()[0])
+        for key in check.NAMESPACE_ROOTS:
+            with self.subTest(key):
+                unit.write_text(good + "\n[Service]\n%s=/var/lib/x\n" % key)
+                self.assertEqual(self.v(), ["agentos-egress.service: sets %s; only the image's own /usr may execute (UPD-10)" % key])
+        for line in ("BindPaths=/usr/lib/x:/var/lib/x", "TemporaryFileSystem=/var/usr", "BindPaths=/usrx",
+                     "BindPaths=/usr/x\nBindPaths="):
+            with self.subTest(line):
+                unit.write_text(good + "\n[Service]\n" + line + "\n")
+                self.assertEqual(self.v(), [])
+        unit.write_text(good + "\n[Service]\nBindPaths=%t/x:/var/x\n")
+        self.assertIn("does not model it", " ".join(self.v()))
+        f = write(self.root, "etc/systemd/system/service.d/50-x.conf", "[Service]\nBindPaths=/var/x:/usr/x\n")
+        unit.write_text(good)
+        self.assertTrue(self.v() and all("mounts under /usr" in x for x in self.v()), self.v())
+        f.unlink()
+        self.assertEqual(self.v(), [])
+
     def test_instances_and_links_are_refused_not_modelled(self):
         for rel in ("etc/systemd/system/agentos-ap-exempt@wlan0.service.d/50-x.conf",
                     "etc/systemd/system/agentos-ap-exempt@wlan0.service"):
@@ -280,6 +308,7 @@ class WeeklyRebootTest(unittest.TestCase):
         t = ini(UNITS / "agentos-reboot.timer")
         self.assertEqual(t["Timer"]["OnCalendar"], "Sun *-*-* 03:00:00")
         self.assertEqual(t["Timer"]["Persistent"], "no")
+        self.assertEqual(t["Timer"]["OnBootSec"], "7d")  # the week on the monotonic clock too
         self.assertEqual(t["Install"]["WantedBy"], "timers.target")
         s = ini(UNITS / "agentos-reboot.service")["Service"]
         self.assertEqual(s["ExecStart"], "/usr/lib/agentos/reboot-weekly")
