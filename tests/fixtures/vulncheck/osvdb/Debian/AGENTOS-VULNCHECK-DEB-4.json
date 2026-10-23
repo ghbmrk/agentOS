@@ -1,0 +1,28 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-DEB-4",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "CVE-0000-0105"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py; not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "agentos-nofix",
+    "ecosystem": "Debian:13"
+   },
+   "ranges": [
+    {
+     "type": "ECOSYSTEM",
+     "events": [
+      {
+       "introduced": "0"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
