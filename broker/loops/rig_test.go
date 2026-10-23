@@ -253,7 +253,7 @@ func must(t *testing.T, err error) {
 func newSpare(t *testing.T, now func() time.Time) (*Spare, *loopstest.Kernel) {
 	t.Helper()
 	k := loopstest.New(t, now)
-	return &Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}, k
+	return &Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, Revoke: k.Revoke, OutPerM: loopstest.OutPerM}, k
 }
 
 // call is one spare call of amount minor units, charged to the spare key.

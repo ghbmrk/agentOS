@@ -26,7 +26,7 @@ var _ Loops = (*loops.Scheduler)(nil)
 func loopsRig(t *testing.T) (*rig, *loops.Scheduler) {
 	t.Helper()
 	k := loopstest.New(t, time.Now)
-	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
+	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, Revoke: k.Revoke, OutPerM: loopstest.OutPerM}
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare})
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func (r *recordingChanges) Decided(context.Context, journal.Intent, string) { r.
 // the change pipeline's Decided.
 func TestALapsedRaiseIsNotAChangeDecision(t *testing.T) {
 	k := loopstest.New(t, time.Now)
-	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
+	spare := &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, Revoke: k.Revoke, OutPerM: loopstest.OutPerM}
 	s, err := loops.New(loops.Config{Store: &change.MemStore{}, Spare: spare})
 	if err != nil {
 		t.Fatal(err)

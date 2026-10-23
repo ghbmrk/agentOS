@@ -1,7 +1,7 @@
 // Package loopstest is a spare envelope over an in-memory kernel, for tests
 // of the loop scheduler and its callers. It does not import loops, so the
 // scheduler's own tests can use it: a test builds its loops.Spare from
-// State, Envelope, Holder, Widen and OutPerM.
+// State, Envelope, Holder, Widen, Revoke and OutPerM.
 package loopstest
 
 import (
@@ -75,6 +75,9 @@ func (k *Kernel) Widen(n int64) (key.Key, error) {
 	return k.grant(k.ms(), n), nil
 }
 
+// Revoke is the owner's revocation of id, for loops.Spare.Revoke.
+func (k *Kernel) Revoke(id key.ID) error { return k.K.Revoke(k.ms(), id) }
+
 func (k *Kernel) pub(p ed25519.PrivateKey) ed25519.PublicKey { return p.Public().(ed25519.PublicKey) }
 
 func (k *Kernel) ms() int64 { return k.now().UnixMilli() }
@@ -103,12 +106,25 @@ func (k *Kernel) grant(at, n int64, with ...key.Key) key.Key {
 // (LOG-7). It returns the kernel's refusal, if any.
 func (k *Kernel) Call(ck key.Key, amount int64) *key.Refusal {
 	k.t.Helper()
+	return k.Spend(k.Plan(ck), amount)
+}
+
+// Plan submits a plan citing ck for one model call and returns its ID.
+func (k *Kernel) Plan(ck key.Key) string {
+	k.t.Helper()
 	k.n++
 	id := "loop-" + strconv.Itoa(k.n)
 	p := kernel.SignPlan(kernel.Plan{ID: id, Key: ck, Steps: []kernel.PlanStep{
 		{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}}}, k.Holder)
+	k.must(k.K.Submit(k.ms(), p))
+	return id
+}
+
+// Spend is a model call under plan id, admitted for amount minor units and
+// metered at that. It returns the kernel's refusal, if any.
+func (k *Kernel) Spend(id string, amount int64) *key.Refusal {
+	k.t.Helper()
 	at := k.ms()
-	k.must(k.K.Submit(at, p))
 	a, rf := k.K.AdmitSpend(at, id, amount)
 	if rf != nil {
 		return rf

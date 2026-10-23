@@ -690,7 +690,8 @@ const EvalReserve = 0.3
 func (s *Scheduler) Evaluating() bool { return s.evaluating.Load() }
 
 // EvalKey is the key replay machines cite: a child of the spare key whose
-// day cap is EvalReserve of the spare budget (Spare.EvalKey). Evaluating
+// day cap is EvalReserve of the spare budget (Spare.EvalKey); a lowering
+// revokes it, so a replay machine asks again after one. Evaluating
 // stays the scheduler's own predicate, read before a call goes to the clerk.
 func (s *Scheduler) EvalKey() (key.Key, error) { return s.cfg.Spare.EvalKey() }
 

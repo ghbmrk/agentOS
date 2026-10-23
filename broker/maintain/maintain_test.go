@@ -850,5 +850,5 @@ func TestOSS9UnlistedReportsNeverEndASoak(t *testing.T) {
 func spareOn(t *testing.T, now func() time.Time) *loops.Spare {
 	t.Helper()
 	k := loopstest.New(t, now)
-	return &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, OutPerM: loopstest.OutPerM}
+	return &loops.Spare{State: k.State, Envelope: k.Envelope, Holder: k.Holder, Widen: k.Widen, Revoke: k.Revoke, OutPerM: loopstest.OutPerM}
 }

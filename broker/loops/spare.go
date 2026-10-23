@@ -2,6 +2,7 @@ package loops
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"math"
 	"math/big"
@@ -15,7 +16,9 @@ import (
 // key of its own, never the guests', that every loop model call is charged
 // to. Loop plans cite Key(); the model clerk charges each call to that key
 // and, through its chain, to the envelope, so the owner's budget is the day
-// cap the current key holds. Loop code has no other handle on it.
+// cap the current key holds. Loop code has no other handle on it. The
+// envelope itself is never handed out: every key loops cite is a derivation
+// of it, so a lowering can revoke them all.
 type Spare struct {
 	// State is the kernel's state (Kernel.State); the spend charged to the
 	// envelope is read from its ledger.
@@ -29,6 +32,10 @@ type Spare struct {
 	// is a widening no derivation can make. Nil: the cap is never raised
 	// past the envelope's.
 	Widen func(n int64) (key.Key, error)
+	// Revoke is the owner's revocation (Kernel.Revoke), a narrowing: a
+	// lowering revokes every key handed out before it, so none stays live
+	// at its old cap. Nil: the cap is never lowered once a key is out.
+	Revoke func(id key.ID) error
 	// OutPerM is the spare route's output price, minor units per million
 	// tokens: what turns the owner's calls into a cap (SpareCap).
 	OutPerM int64
@@ -38,10 +45,15 @@ type Spare struct {
 	cur  key.Key  // the key loop plans cite: the envelope or a narrowing of it
 	cap  int64    // cur's day cap
 	envs []key.ID // every envelope held: spend under each counts toward the day
+	out  []key.ID // every key handed out and not yet revoked; EvalKey's are their children
 }
 
 // ErrNoWiden refuses a cap above the envelope's when no passkey can widen it.
 var ErrNoWiden = errors.New("loops: raising the spare cap needs the owner's passkey")
+
+// ErrNoRevoke refuses a lowering when keys handed out at the old cap cannot
+// be revoked.
+var ErrNoRevoke = errors.New("loops: lowering the spare cap needs the owner's revocation")
 
 // dayCap is the lowest day spend cap k's chain sets.
 func dayCap(k key.Key) (int64, bool) {
@@ -62,9 +74,12 @@ func dayCap(k key.Key) (int64, bool) {
 	return n, ok
 }
 
-// SetCap makes n the day cap of the key loop plans cite. A cap at or below
-// the envelope's is a derivation of it; a higher one is a fresh envelope from
-// Widen. On an error nothing changes.
+// SetCap makes n the day cap of the key loop plans cite: a derivation of the
+// envelope, or, for a cap above the envelope's, of a fresh envelope from
+// Widen. A lowering first revokes every key handed out before it, Key's and
+// EvalKey's, so the kernel holds every plan to the new cap at once (L3 on
+// #2837). On an error the cap and key do not change; keys already revoked
+// stay revoked, which only refuses calls.
 func (s *Spare) SetCap(n int64) error {
 	if n < 0 {
 		return errors.New("loops: negative spare cap")
@@ -98,19 +113,35 @@ func (s *Spare) SetCap(n int64) error {
 		env, envCap = w, n
 		envs = append(append([]key.ID{}, s.envs...), w.Tip())
 	}
-	cur := env
-	if n < envCap {
-		k, err := key.Derive(env, s.Holder, s.Holder.Public().(ed25519.PublicKey), key.LimitSpendDay(n))
-		if err != nil {
-			return err
+	nonce, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64/2))
+	if err != nil {
+		return err
+	}
+	// The use cap is a nonce no loop reaches: derivation is deterministic,
+	// so without it a cap set again would derive a key already revoked.
+	cur, err := key.Derive(env, s.Holder, s.Holder.Public().(ed25519.PublicKey),
+		key.LimitSpendDay(n), key.LimitUses(math.MaxInt64-nonce.Int64()))
+	if err != nil {
+		return err
+	}
+	if s.set && n < s.cap {
+		if len(s.out) > 0 && s.Revoke == nil {
+			return ErrNoRevoke
 		}
-		cur = k
+		for len(s.out) > 0 {
+			if err := s.Revoke(s.out[0]); err != nil {
+				return err
+			}
+			s.out = s.out[1:]
+		}
 	}
 	s.Envelope, s.envs, s.cur, s.cap, s.set = env, envs, cur, n, true
+	s.out = append(s.out, cur.Tip())
 	return nil
 }
 
-// Key is the key loop plans cite now.
+// Key is the key loop plans cite now. A lowering revokes it, so a plan cites
+// the key current when it is made.
 func (s *Spare) Key() key.Key {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,7 +198,8 @@ func (s *Spare) Calls(amount int64) int64 {
 
 // EvalKey is evaluation's key (LOOP-5): a child of the spare key whose own
 // day cap is EvalReserve of the budget, so replay machines that cite it
-// spend at most that share. Evaluating stays the loop's own predicate,
+// spend at most that share. It descends from the current key, so a lowering
+// revokes it with that key. Evaluating stays the loop's own predicate,
 // checked before a call goes to the clerk.
 func (s *Spare) EvalKey() (key.Key, error) {
 	s.mu.Lock()
@@ -176,8 +208,11 @@ func (s *Spare) EvalKey() (key.Key, error) {
 	if !set {
 		return key.Key{}, errors.New("loops: spare cap not set")
 	}
-	return key.Derive(cur, s.Holder, s.Holder.Public().(ed25519.PublicKey), key.LimitSpendDay(int64(math.Ceil(float64(n)*EvalReserve))))
+	return key.Derive(cur, s.Holder, s.Holder.Public().(ed25519.PublicKey), key.LimitSpendDay(mulDiv(n, evalNum, evalDen, true)))
 }
+
+// evalNum/evalDen is EvalReserve as an exact fraction, for caps past 2^53.
+const evalNum, evalDen = 3, 10
 
 // mulDiv is a*b/c in big arithmetic, rounded up or down, clamped to int64.
 func mulDiv(a, b, c int64, up bool) int64 {

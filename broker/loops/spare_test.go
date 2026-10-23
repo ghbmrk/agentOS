@@ -110,3 +110,70 @@ func TestSpareCapRoundsUpAndClamps(t *testing.T) {
 		t.Fatalf("overflow not clamped: %d", got)
 	}
 }
+
+// A lowering holds every key handed out before it to the new cap: the kernel
+// refuses a call under a plan citing an older Key or EvalKey, one already
+// running included, so none stays live at its old cap (L3 on #2837).
+func TestLoweringTheSpareCapRevokesKeysHandedOutBefore(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	one := SpareCap(1, loopstest.OutPerM)
+	lower := func(n int64, stale map[string]key.Key) {
+		t.Helper()
+		running := map[string]string{}
+		for name, ck := range stale {
+			running[name] = k.Plan(ck)
+			if rf := k.Spend(running[name], one); rf != nil {
+				t.Fatalf("%s: %v", name, rf)
+			}
+		}
+		must(t, sp.SetCap(n))
+		for name, ck := range stale {
+			if rf := k.Spend(running[name], one); rf == nil || rf.Code != key.RRevoked {
+				t.Fatalf("a running plan citing the %s spent after the cap was lowered to %d: %v", name, n, rf)
+			}
+			if rf := k.Call(ck, one); rf == nil {
+				t.Fatalf("a new plan citing the %s spent after the cap was lowered to %d", name, n)
+			}
+		}
+	}
+	must(t, sp.SetCap(loopstest.EnvelopeCap))
+	if sp.Key().Tip() == sp.Envelope.Tip() {
+		t.Fatal("the envelope itself was handed out")
+	}
+	lower(10*one, map[string]key.Key{"envelope-cap key": sp.Key()})
+	ek, err := sp.EvalKey()
+	must(t, err)
+	lower(0, map[string]key.Key{"earlier key": sp.Key(), "evaluation key": ek})
+	if rf := k.Call(sp.Key(), one); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("current key past a zero cap: %v", rf)
+	}
+	// A raise takes nothing back, and a cap set again derives a fresh key,
+	// never the one revoked.
+	must(t, sp.SetCap(10*one))
+	if rf := k.Call(sp.Key(), one); rf != nil {
+		t.Fatal(rf)
+	}
+}
+
+func TestLoweringTheSpareCapNeedsTheOwnersRevocation(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	must(t, sp.SetCap(10))
+	old := sp.Key()
+	id := k.Plan(old)
+	sp.Revoke = nil
+	if err := sp.SetCap(5); !errors.Is(err, ErrNoRevoke) || sp.Cap() != 10 || sp.Key().Tip() != old.Tip() {
+		t.Fatalf("lowered with no revocation: %v, cap %d", err, sp.Cap())
+	}
+	fail := errors.New("revocation not anchored")
+	sp.Revoke = func(key.ID) error { return fail }
+	if err := sp.SetCap(5); !errors.Is(err, fail) || sp.Cap() != 10 {
+		t.Fatalf("lowered past a failed revocation: %v, cap %d", err, sp.Cap())
+	}
+	sp.Revoke = k.Revoke
+	must(t, sp.SetCap(5))
+	if rf := k.Spend(id, 1); rf == nil || rf.Code != key.RRevoked {
+		t.Fatalf("earlier key live after the retried lowering: %v", rf)
+	}
+}
