@@ -44,8 +44,8 @@ COVERED = re.compile(r"^Covered: (\d+) / \d+", re.M)
 NONE = "—"
 NA = "n/a"  # a column that cannot be computed from the data at hand (never printed as 0)
 OPEN_STATES = ("queued", "building", "in review", "escalated")
-# D-085 convergence measures (CONV-0). The guard compares weeks starting after DECISION with the
-# mean of the two 7-day windows that end at DECISION 00:00 local time.
+# D-086 convergence measures (CONV-0). The guard compares the two latest full weeks with the
+# two 7-day windows that end at DECISION 00:00 local time.
 DECISION = dt.date(2026, 10, 9)
 STALE_HOURS = 48
 LEDGER_STALE_HOURS = 36
@@ -373,7 +373,7 @@ def week_start(t, tz):
 
 
 def convergence(raw, tz, a, b):
-    """D-085 measures for the window [a, b): open rows at b, follow-up rows and promotions first seen
+    """D-086 measures for the window [a, b): open rows at b, follow-up rows and promotions first seen
     in the window, PRs merged and `Defect:` lines. None where the raw data cannot say."""
     snaps = sorted(raw["board"], key=lambda x: _when(x["at"], tz))
     upto = [x for x in snaps if _when(x["at"], tz) < b]
@@ -392,6 +392,7 @@ def convergence(raw, tz, a, b):
     merged = [p for p in raw["pulls"] if p.get("merged_at") and a <= _when(p["merged_at"], tz) < b]
     out["merged"] = len(merged)
     out["defects"] = sorted(d for p in merged for d in defects(p["body"]))
+    out["defects_per_pr"] = len(out["defects"]) / len(merged) if merged else None
     out["followups_per_pr"] = out["followups"] / len(merged) if merged and out["followups"] is not None else None
     return out
 
@@ -418,7 +419,8 @@ def open_by_lane(raw):
 
 
 def baseline(raw):
-    """Mean of the two 7-day windows before DECISION, per D-085 measure (None where unknown)."""
+    """Mean of the two 7-day windows before DECISION, per D-086 measure (None where unknown).
+    Defects per merged PR pools the two windows: all their `Defect:` lines over all their merges."""
     tz = dt.timezone(dt.timedelta(hours=raw.get("tz_hours", TZ_HOURS)))
     end = dt.datetime.combine(DECISION, dt.time(), tzinfo=tz)
     wins = [convergence(raw, tz, end - dt.timedelta(days=14), end - dt.timedelta(days=7)),
@@ -426,6 +428,8 @@ def baseline(raw):
     wins = [dict(w, defects=len(w["defects"])) for w in wins]
     mean = lambda k: None if any(w[k] is None for w in wins) else sum(w[k] for w in wins) / 2
     out = {k: mean(k) for k in ("open_rows", "followups", "followups_per_pr", "promotions", "defects")}
+    n = sum(w["merged"] for w in wins)
+    out["defects_per_pr"] = sum(w["defects"] for w in wins) / n if n else None
     out["stale"] = None  # open PRs are known only at run time; no history to average
     return out
 
@@ -529,7 +533,9 @@ def compute(raw):
             "followups_per_pr": conv["followups_per_pr"], "promotions": conv["promotions"],
             "stale": stale_now if out[-1]["current"] else None,
             "lanes": lanes_now if out[-1]["current"] else None,
-            "red": {k for k, v in (("promotions", conv["promotions"]), ("defects", len(conv["defects"])))
+            "defects_per_pr": conv["defects_per_pr"],
+            # D-086 guard (amended 2026-10-23): promotions per week, `Defect:` lines per merged PR.
+            "red": {k for k, v in (("promotions", conv["promotions"]), ("defects_per_pr", conv["defects_per_pr"]))
                     if judged_week and v is not None and base[k] is not None and v > base[k]},
         })
     return out
@@ -545,7 +551,7 @@ COLUMNS = [
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
     "L3 rounds per merged PR", "Usage per merged PR", "L3 causes",
     "Open BOARD rows", "Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release",
-    "Stale PRs (48 h)", "Open PRs by lane",
+    "Stale PRs (48 h)", "Open PRs by lane", "Defects per merged PR",
 ]
 
 
@@ -574,8 +580,7 @@ def _cells(w):
         f"{w['usage_per_req']:.2f} pts (reading {w['reading_at'].replace('T', ' ')})" if w["usage_per_req"] is not None else NONE,
         _ratio(w["first_pass_ok"], w["first_pass_n"]),
         _ratio(w["escalated"], w["reviewed"]),
-        (f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE))
-        + red("defects"),
+        f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE),
         _ratio(w["flaky"], w["runs"]),
         f"{w['rounds'] / w['first_pass_n']:.1f}" if w["first_pass_n"] else NONE,
         f"{w['usage_all'] / w['merged']:.2f} pts" if w["usage_all"] is not None and w["merged"] else NONE,
@@ -587,6 +592,8 @@ def _cells(w):
         NA if w["stale"] is None else str(len(w["stale"])),
         NA if w["lanes"] is None else
         ", ".join(f"{k} {v}" for k, v in sorted(w["lanes"].items())) + f" (cap about {LANE_CAP})",
+        NONE if w["defects_per_pr"] is None else
+        f"{w['defects_per_pr']:.2f} ({len(w['defects'])}/{w['merged']})" + red("defects_per_pr"),
     ]
 
 
@@ -598,15 +605,30 @@ def _previous(text):
 
 
 def _ledger_stale(raw):
-    """First line of METRICS.md when LEDGER.md's newest reading is over LEDGER_STALE_HOURS old (D-085)."""
+    """First line of METRICS.md when LEDGER.md's newest reading is over LEDGER_STALE_HOURS old (D-086)."""
     tz = dt.timezone(dt.timedelta(hours=raw.get("tz_hours", TZ_HOURS)))
     newest = max((r["at"] for r in raw["readings"]), default=None)
     if newest is None:
-        return ["**LEDGER.md has no reading; take one (D-085).**", ""]
+        return ["**LEDGER.md has no reading; take one (D-086).**", ""]
     if _when(raw["now"], tz) - _when(newest, tz) <= dt.timedelta(hours=LEDGER_STALE_HOURS):
         return []
     return [f"**LEDGER.md is stale: its newest reading, {newest.replace('T', ' ')} (local), is over "
-            f"{LEDGER_STALE_HOURS} hours old; take a reading (D-085).**", ""]
+            f"{LEDGER_STALE_HOURS} hours old; take a reading (D-086).**", ""]
+
+
+def guard(weeks):
+    """D-086 guard lines. Only the two latest full weeks are judged, so the guard clears once
+    either of them is back at or under baseline; the current, partial week never counts."""
+    full = [w for w in weeks if not w["current"]][-2:]
+    if len(full) < 2 or (dt.date.fromisoformat(full[1]["week"]) - dt.date.fromisoformat(full[0]["week"])).days != 7:
+        return ["", "D-086 guard: not judged (needs two consecutive full weeks)."]
+    span = f"weeks starting {full[0]['week']} and {full[1]['week']}"
+    tripped = [name for key, name in (("promotions", "promotions"), ("defects_per_pr", "`Defect:` lines per merged PR"))
+               if all(key in w["red"] for w in full)]
+    if not tripped:
+        return ["", f"D-086 guard clear: the {span} are not both above baseline."]
+    return ["", "D-086 guard tripped: items 2 to 4 are reverted by a new decision row (decisions/D-086.md)",
+            f"(both of the {span} above baseline: {', '.join(tripped)})"]
 
 
 def render(weeks, raw, previous_md=None):
@@ -632,22 +654,23 @@ def render(weeks, raw, previous_md=None):
             closed = not w["current"] and not _open_week(prev[0])
             cells = [o if (c in (NONE, NA) and o not in (NONE, NA)) or (closed and i in FROZEN) else c
                      for i, (c, o) in enumerate(zip(cells, prev))]
+            # Before the 2026-10-23 guard change the frozen defect count carried the red mark.
+            i = COLUMNS.index("Defects after merge")
+            cells[i] = cells[i].removesuffix(" red")
         lines.append("| " + " | ".join(cells) + " |")
     base = baseline(raw)
-    lines += ["", "## Baseline (D-085)", "",
-              "Mean of the two 7-day windows before 2026-10-09 (2026-09-25 to 2026-10-09, UTC-4). "
-              "A week starting after 2026-10-09 is marked `red` when its promotions or `Defect:` lines exceed it.",
+    lines += ["", "## Baseline (D-086)", "",
+              "Mean of the two 7-day windows before 2026-10-09 (2026-09-25 to 2026-10-09, UTC-4); defects per merged PR "
+              "pools both windows. A week starting after 2026-10-09 is marked `red` when its promotions or its "
+              "`Defect:` lines per merged PR exceed it.",
               "", "| Column | Baseline |", "|---|---|"]
     for key, name in (("open_rows", "Open BOARD rows"), ("followups", "Follow-up rows added"),
                       ("followups_per_pr", "Follow-ups per merged PR"), ("promotions", "Promotions later to release"),
                       ("defects", "Defects after merge"), ("stale", "Stale PRs (48 h)")):
         lines.append(f"| {name} | {NA if base[key] is None else format(base[key], 'g')} |")
-    for key, name in (("promotions", "promotions"), ("defects", "`Defect:` lines")):
-        if any(a["red"] >= {key} and b["red"] >= {key} and
-               (dt.date.fromisoformat(b["week"]) - dt.date.fromisoformat(a["week"])).days == 7
-               for a, b in zip(weeks, weeks[1:])):
-            lines += ["", "D-085 guard tripped: revert the release-class rule (decisions/D-085.md)",
-                      f"(two weeks in a row above baseline: {name})"]
+    lines.append(f"| Defects per merged PR | "
+                 f"{NA if base['defects_per_pr'] is None else format(base['defects_per_pr'], '.2f')} |")
+    lines += guard(weeks)
     noise_all = [x for w in weeks for x in w["noise"]]
     blockers = [r for c, r in noise_all if c == "blocker"]
     lines += ["", "Blockers not fixed (review noise, `wrong`, `intentional` or `didn't-matter`): "
@@ -676,6 +699,7 @@ def render(weeks, raw, previous_md=None):
         "`in review`, `merged` or `escalated`, up to that week.",
         "- **Defects after merge**: `Defect: <package ID>` lines in the bodies of PRs merged that week "
         "(a fix to code already merged; see the PR template).",
+        "- **Defects per merged PR**: those lines over all PRs merged that week; the D-086 guard's defect measure.",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
         "- **L3 rounds per merged PR**: distinct reviewed heads with an L3 verdict (OPERATING §4; a verdict "
@@ -693,7 +717,7 @@ def render(weeks, raw, previous_md=None):
         "counted for the current week only.",
         "- **Open PRs by lane**: open PRs per lane (a `lane:<name>` label, docs/LANES.md; no label is the peers) "
         "against a cap of about 10; current week only.",
-        "- **red** / **n/a**: red marks a week above the D-085 baseline; `n/a` means the data to compute a column is "
+        "- **red** / **n/a**: red marks a week above the D-086 baseline; `n/a` means the data to compute a column is "
         "absent (never printed as 0).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
         "recorded; the other columns are recomputed from git and LEDGER.md each run.",

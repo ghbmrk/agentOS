@@ -209,13 +209,14 @@ class RenderTest(unittest.TestCase):
     def test_rows_recorded_before_the_causes_column_keep_their_frozen_cells(self):
         raw = raw_fixture()
         first = metrics.render(metrics.compute(raw), raw)
-        # Drop the last column, as METRICS.md looked before it existed.
-        old = "\n".join(l.rsplit(" |", 2)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
+        # Drop the last two columns, as METRICS.md looked before they existed.
+        old = "\n".join(l.rsplit(" |", 3)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
         raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, old)
         row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
         self.assertIn("1/3", row)
-        self.assertTrue(row.endswith("| — |"))
+        # A frozen API column pads as recorded; defects per merged PR is recomputed from PR bodies.
+        self.assertTrue(row.endswith("| — | 0.00 (0/3) |"))
 
     def test_rows_recorded_with_fewer_columns_keep_their_frozen_cells(self):
         # METRICS.md on main predates the last three columns.
@@ -397,7 +398,7 @@ class GitHistoryTest(unittest.TestCase):
 
 
 def conv_raw():
-    """Synthetic data for D-085's convergence columns. Local time is UTC-4, so the baseline
+    """Synthetic data for D-086's convergence columns. Local time is UTC-4, so the baseline
     windows are 2026-09-25..10-02 and 10-02..10-09 (the two weeks before 2026-10-09)."""
     return {
         "now": "2026-10-20T12:00:00+00:00", "tz_hours": -4, "trace": [], "readings": [],
@@ -589,28 +590,80 @@ class BaselineAndGuardTest(unittest.TestCase):
         base = metrics.baseline(raw)
         self.assertEqual((base["open_rows"], base["followups"], base["promotions"]), (0, 0, 0))
 
-    def test_week_above_baseline_is_red_and_two_in_a_row_trip_the_guard(self):
-        md = self.render(conv_raw())
+    def test_latest_two_full_weeks_above_baseline_trip_the_guard(self):
+        raw = conv_raw()
+        raw["now"] = "2026-10-26T12:00:00+00:00"   # week 2026-10-18 is now full
+        md = self.render(raw)
         row = lambda wk: next(l for l in md.splitlines() if l.startswith(f"| {wk}"))
         self.assertIn("2 red", row("2026-10-11"))   # promotions 2 > 0.5
         self.assertIn("1 red", row("2026-10-18"))   # promotions 1 > 0.5
         self.assertNotIn("red", row("2026-10-04"))  # the decision's own week is not judged
-        self.assertIn("D-085 guard tripped: revert the release-class rule (decisions/D-085.md)", md)
+        self.assertIn("D-086 guard tripped: items 2 to 4 are reverted by a new decision row (decisions/D-086.md)", md)
+        self.assertIn("(both of the weeks starting 2026-10-11 and 2026-10-18 above baseline: promotions)", md)
+        self.assertNotIn("D-085", md)
+        self.assertTrue((pathlib.Path(__file__).resolve().parent.parent / "decisions" / "D-086.md").exists())
+
+    def test_the_current_partial_week_never_counts(self):
+        md = self.render(conv_raw())   # 2026-10-18 is current: only 10-04 and 10-11 are full
+        self.assertIn("1 red", next(l for l in md.splitlines() if l.startswith("| 2026-10-18")))
+        self.assertIn("D-086 guard clear: the weeks starting 2026-10-04 and 2026-10-11 are not both above baseline.", md)
+        self.assertNotIn("guard tripped", md)
+
+    def test_guard_clears_once_a_latest_full_week_is_back_under_baseline(self):
+        raw = conv_raw()
+        raw["now"] = "2026-11-02T12:00:00+00:00"
+        raw["board"].append(dict(raw["board"][-1], at="2026-10-26T12:00:00-04:00"))  # 2026-10-25 adds nothing
+        md = self.render(raw)
+        self.assertIn("1 red", next(l for l in md.splitlines() if l.startswith("| 2026-10-18")))  # the old pair stays red
+        self.assertIn("D-086 guard clear: the weeks starting 2026-10-18 and 2026-10-25", md)
+        self.assertNotIn("guard tripped", md)
 
     def test_one_red_week_or_a_gap_does_not_trip_the_guard(self):
         raw = conv_raw()
+        raw["now"] = "2026-10-26T12:00:00+00:00"
         raw["board"][-1]["flags"].pop("G")
         raw["board"][-1]["flags"]["F"] = "f"   # the last week adds no promotion
         md = self.render(raw)
         self.assertIn("2 red", next(l for l in md.splitlines() if l.startswith("| 2026-10-11")))
         self.assertNotIn("guard tripped", md)
-
-    def test_defects_above_baseline_are_red_too(self):
         raw = conv_raw()
+        raw["now"] = "2026-11-02T12:00:00+00:00"
+        raw["board"][-1]["at"] = "2026-10-26T12:00:00-04:00"   # no data for week 2026-10-18
+        self.assertIn("D-086 guard: not judged (needs two consecutive full weeks).", self.render(raw))
+
+    def test_defects_are_judged_per_merged_pr(self):
+        self.assertAlmostEqual(metrics.baseline(conv_raw())["defects_per_pr"], 0.5)   # 1 line over 2 merges
+        raw = conv_raw()
+        raw["pulls"][2]["body"] = "Defect: A"   # 1 line over 2 merges: at baseline, not above
+        md = self.render(raw)
+        row = next(l for l in md.splitlines() if l.startswith("| 2026-10-11"))
+        self.assertTrue(row.endswith("| 0.50 (1/2) |"))
+        self.assertIn("| Defects per merged PR | 0.50 |", md)
         for n in (3, 4):
             raw["pulls"][n - 1]["body"] = "Defect: A\nDefect: B"
-        md = self.render(raw)
-        self.assertIn("(A, A, B, B) red", next(l for l in md.splitlines() if l.startswith("| 2026-10-11")))
+        row = next(l for l in self.render(raw).splitlines() if l.startswith("| 2026-10-11"))
+        self.assertIn("| 4 (A, A, B, B) |", row)   # the count cell carries no mark
+        self.assertTrue(row.endswith("| 2.00 (4/2) red |"))
+
+    def test_more_merges_with_a_lower_defect_rate_are_not_red(self):
+        raw = conv_raw()
+        # 4 lines, twice the baseline week's count, over 10 merges: 0.40 per PR, under 0.50.
+        raw["pulls"] += [{"number": 100 + n, "merged_at": "2026-10-15T10:00:00Z", "body": "Defect: X" if n < 4 else "",
+                          "verdicts": ["accept"]} for n in range(8)]
+        row = next(l for l in self.render(raw).splitlines() if l.startswith("| 2026-10-11"))
+        self.assertTrue(row.endswith("| 0.40 (4/10) |"))
+
+    def test_a_recorded_red_on_the_frozen_defect_count_is_dropped(self):
+        raw = conv_raw()
+        raw["now"] = "2026-10-26T12:00:00+00:00"
+        first = self.render(raw)
+        old = first.replace("| 2026-10-11 | — | — | 0 | — | 100% (2/2) | 33% (1/3) | 0 |",
+                            "| 2026-10-11 | — | — | 0 | — | 100% (2/2) | 33% (1/3) | 0 red |")
+        self.assertNotEqual(old, first)
+        self.assertEqual(self.render_from(raw, old), first)
+
+    def render_from(self, raw, previous):
+        return metrics.render(metrics.compute(raw), raw, previous)
 
 
 class LedgerStaleTest(unittest.TestCase):
