@@ -99,7 +99,7 @@ var (
 	// ErrClosed: the store was closed and its key wiped.
 	ErrClosed = errors.New("seal: the store is closed")
 	// ErrNoPolicyKey: a TPM unlock was asked without the box's policy key.
-	ErrNoPolicyKey = errors.New("seal: a tpm unlock needs the box's policy key")
+	ErrNoPolicyKey = errors.New("seal: a tpm unlock needs my policy key")
 	// ErrExists: Create found a file already at the path.
 	ErrExists = errors.New("seal: a store already exists there")
 )
