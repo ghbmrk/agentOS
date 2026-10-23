@@ -175,7 +175,7 @@ func TestLiveMailIsClassedThroughTheModelClerkThenActedOn(t *testing.T) {
 		t.Fatalf("%d model calls, %d metered; want 2 and 202", p.calls, l.metered)
 	}
 
-	r := newRigOn(t, World{Today: "2026-10-19"}, classed, box, 30)
+	r := newRigOn(t, World{Today: "2026-10-19", AuthServ: authServ, AlertSenders: []string{"security.test"}}, classed, box, 30)
 	if rs := r.acct.Refusals(); len(rs) != 1 || rs[0].Reason != "unclassified" {
 		t.Fatalf("refusals %+v", rs)
 	}

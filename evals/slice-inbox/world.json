@@ -35,6 +35,11 @@
   "letter@reading.test": "2026-10-12"
  },
  "one_click_body": "List-Unsubscribe=One-Click",
+ "authserv": "mx.mailhub.test",
+ "alert_senders": [
+  "security@mailhub.test",
+  "maplebank.test"
+ ],
  "history": [
   {
    "from": "news@shop.test",

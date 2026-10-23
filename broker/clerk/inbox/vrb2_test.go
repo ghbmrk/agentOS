@@ -77,3 +77,19 @@ func TestDKIMTamperedBodyFails(t *testing.T) {
 		t.Fatalf("appended body must fail: %+v", s)
 	}
 }
+
+// #2618: last_opened is keyed by lower-cased address, and Evaluate finds an
+// entry whatever case the reader wrote it in, so a read sender never looks
+// never opened.
+func TestLastOpenedIsLookedUpWhateverItsCase(t *testing.T) {
+	w, _, raw := loadFixture(t)
+	if r, _ := Evaluate(raw["M01"], w); r != ROK {
+		t.Fatalf("control: M01 is %s", r)
+	}
+	for _, k := range []string{"News@Shop.Test", "NEWS@SHOP.TEST", " news@shop.test"} {
+		w.LastOpened = map[string]string{k: w.Today}
+		if r, _ := Evaluate(raw["M01"], w); r != RRecentlyOpened {
+			t.Errorf("%q: M01 is %s, want %s", k, r, RRecentlyOpened)
+		}
+	}
+}
