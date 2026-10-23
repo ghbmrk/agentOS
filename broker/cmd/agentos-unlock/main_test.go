@@ -91,7 +91,33 @@ type unlockRole struct {
 }
 
 func (r unlockRole) Config() config {
-	return config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, args: []string{asKernel, r.Kernel}}
+	c := config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, args: []string{asKernel, r.Kernel}}
+	if os.Geteuid() != 0 {
+		// A plain user cannot shed its supplementary groups. Every other
+		// check of the drop still runs first; as root the real drop runs.
+		c.dropTo = func(uid, gid int) error {
+			if err := drop(uid, gid); !errors.Is(err, errExtraGroup) {
+				return err
+			}
+			return nil
+		}
+	}
+	return c
+}
+
+// extraGroups says whether this process has a supplementary group besides
+// its gid.
+func extraGroups() bool {
+	gs, err := syscall.Getgroups()
+	if err != nil {
+		panic(err)
+	}
+	for _, g := range gs {
+		if g != os.Getgid() {
+			return true
+		}
+	}
+	return false
 }
 
 func (r unlockRole) pins(transport.TPM) (*ecdsa.PublicKey, []byte, error) {
@@ -375,7 +401,14 @@ func TestTheDropRefusesRootAndChecksItTook(t *testing.T) {
 		if err := drop(os.Getuid()+1, os.Getgid()); err == nil {
 			t.Error("a step that is not root became another uid")
 		}
-		if err := drop(os.Getuid(), os.Getgid()); err != nil {
+		// A plain user keeps any supplementary groups it has, and cannot
+		// drop them, so the step refuses it (CI's runner is in several).
+		err := drop(os.Getuid(), os.Getgid())
+		if extraGroups() {
+			if !errors.Is(err, errExtraGroup) {
+				t.Errorf("a plain user with supplementary groups: got %v, want errExtraGroup", err)
+			}
+		} else if err != nil {
 			t.Errorf("already the kernel's ids: %v", err)
 		}
 	}

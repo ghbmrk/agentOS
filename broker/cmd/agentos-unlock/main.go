@@ -58,6 +58,9 @@ type config struct {
 	store, tpm, exec string
 	uid, gid         int
 	args             []string // the kernel main's, after --
+	// dropTo replaces drop in tests that run as a plain user, who cannot
+	// shed supplementary groups; the command line never sets it.
+	dropTo func(uid, gid int) error
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -158,7 +161,11 @@ func handOff(b []byte, c config) error {
 	if err != nil {
 		return err
 	}
-	if err := drop(c.uid, c.gid); err != nil {
+	dropTo := drop
+	if c.dropTo != nil {
+		dropTo = c.dropTo
+	}
+	if err := dropTo(c.uid, c.gid); err != nil {
 		return err
 	}
 	if err := inherit(int(r.Fd()), handoff.KeyFD); err != nil {
@@ -205,13 +212,23 @@ func drop(uid, gid int) error {
 	if ru != uid || eu != uid || su != uid || rg != gid || eg != gid || sg != gid {
 		return fmt.Errorf("agentos-unlock: running as uid %d/%d/%d gid %d/%d/%d, not the kernel's %d:%d", ru, eu, su, rg, eg, sg, uid, gid)
 	}
+	if err := noCaps(); err != nil {
+		return err
+	}
+	// Last, so a test that cannot shed its own groups (below) has had
+	// every other check.
 	for _, g := range gs {
 		if g != gid {
-			return fmt.Errorf("agentos-unlock: still in group %d", g)
+			return fmt.Errorf("%w %d", errExtraGroup, g)
 		}
 	}
-	return noCaps()
+	return nil
 }
+
+// errExtraGroup: the step keeps a supplementary group. Only root can drop
+// one, so a step not started as root with extra groups is refused: they
+// would reach the kernel, a tss group with it the TPM.
+var errExtraGroup = errors.New("agentos-unlock: still in group")
 
 // noCaps checks that no capability survived the drop: a unit with
 // no-setuid-fixup securebits or ambient capabilities would otherwise carry
