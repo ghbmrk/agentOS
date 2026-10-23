@@ -141,6 +141,10 @@ func TestIDNDomainsCompareInALabelForm(t *testing.T) {
 			func(w World) World { w.History[0].From = aFrom; return w }, ROK},
 		{"provider table in the other form", uFrom, "https://mail.bücher-hub.test/u", "bücher.test",
 			func(w World) World { w.ProviderTable = []string{"xn--bcher-hub-q9a.test"}; return w }, ROK},
+		{"provider entry names a host under the URL's organization", "news@shop.test", "https://mail.esp.test/u", "shop.test",
+			func(w World) World { w.ProviderTable = []string{"x.y.esp.test"}; return w }, RURLHost},
+		{"opened recently, recorded fullwidth", uFrom, "https://bücher.test/u", "bücher.test",
+			func(w World) World { w.LastOpened = map[string]string{"news@ｂücher.test": "2026-10-12"}; return w }, RRecentlyOpened},
 		{"opened recently, recorded in the other form", uFrom, "https://bücher.test/u", "bücher.test",
 			func(w World) World { w.LastOpened = map[string]string{aFrom: "2026-10-12"}; return w }, RRecentlyOpened},
 		{"one of two opens recent", aFrom, "https://bücher.test/u", "bücher.test",
@@ -183,6 +187,9 @@ func TestLookalikeUsesTheUTS39Skeleton(t *testing.T) {
 		{"bücher.test", "bucher.test", false},        // a diaeresis shows: UTS #39 keeps it
 		{"apple.test", "orange.test", false},
 		{"apple.test", "аpple.test", true},
+		{"ᗯikipedia.test", "wikipedia.test", true}, // ᗯ to ѡ to w to vv: three rounds
+		{"Мicrosoft.test", "microsoft.test", true}, // Cyrillic capital М to m to rn, as written
+		{"ꓵikipedia.test", "nikipedia.test", true}, // ꓵ to ո to n
 	} {
 		if got := lookalike(c.domain, c.known); got != c.want {
 			t.Errorf("lookalike(%q, %q) = %v, want %v (skeletons %q, %q)", c.domain, c.known, got, c.want,
@@ -199,5 +206,18 @@ func TestEvaluateRefusesALookalikeWrittenInCapitals(t *testing.T) {
 	w.Contacts = []string{"help@paypal.test"}
 	if got, _ := Evaluate(raw, w); got != RLookalike {
 		t.Fatalf("%q, want %q", got, RLookalike)
+	}
+}
+
+// The skeleton is a fixed point: folding it again changes nothing, for every
+// code point the table maps, so no prototype that lower-casing exposes is
+// left unfolded (#2603).
+func TestSkeletonIsAFixedPoint(t *testing.T) {
+	for r := range confusables {
+		for _, s := range []string{string(r), string(r) + "ikipedia.test"} {
+			if k := skeleton(s); skeleton(k) != k {
+				t.Errorf("%U: skeleton %q folds again to %q", r, k, skeleton(k))
+			}
+		}
 	}
 }

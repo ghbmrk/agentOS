@@ -94,6 +94,22 @@ func canonAddr(a string) string {
 	return local + "@" + d
 }
 
+// openedAddr is canonAddr for a last_opened key, falling back to IDNA's
+// lookup mapping (fullwidth to ASCII and the like), so an open recorded under
+// a From written that way still counts for the sender: counting more opens
+// only refuses more.
+func openedAddr(a string) string {
+	if c := canonAddr(a); c != "" {
+		return c
+	}
+	local, d, ok := strings.Cut(strings.ToLower(a), "@")
+	d, err := idna.Lookup.ToASCII(strings.TrimRight(d, "."))
+	if !ok || local == "" || d == "" || err != nil {
+		return ""
+	}
+	return local + "@" + d
+}
+
 // org is the organizational domain, in A-label form: the public suffix, by
 // the Public Suffix List with its private part, and one label more, so
 // a.co.uk and b.co.uk, or a.github.io and b.github.io, are two
@@ -325,7 +341,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	host := urlHost(url)
 	hostOK := false
 	for _, p := range w.ProviderTable {
-		hostOK = hostOK || (org(host) != "" && org(p) == org(host))
+		hostOK = hostOK || (org(host) != "" && alabel(p) == org(host))
 	}
 	for _, s := range noL {
 		hostOK = hostOK || aligned(host, s.D)
@@ -360,7 +376,7 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	// that is not a date is not evidence of that. Every entry for the sender,
 	// in either domain form, counts.
 	for a, o := range w.LastOpened {
-		if canonAddr(a) != sender {
+		if openedAddr(a) != sender {
 			continue
 		}
 		opened, ok := day(o)
