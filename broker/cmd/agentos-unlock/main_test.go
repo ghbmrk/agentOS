@@ -27,6 +27,7 @@ import (
 
 	"github.com/google/go-tpm/tpm2/transport"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -65,7 +66,7 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		keys, err := run.ReadKeys(os.NewFile(run.KeyFD, "keys"))
+		keys, err := handoff.ReadKeys(os.NewFile(handoff.KeyFD, "keys"))
 		if err == nil {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 			err = run.RunKernel(ctx, cfg, keys, &kernel.MemAnchor{})
@@ -117,7 +118,7 @@ type rig struct {
 	anchor             []byte
 	kernelUID, kernelG int
 	ownerUID, meterUID int
-	keys               run.KernelKeys // what the store derives, read through its recovery slot
+	keys               handoff.KernelKeys // what the store derives, read through its recovery slot
 }
 
 func newRig(t *testing.T, putAnchors bool) *rig {
@@ -156,7 +157,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
 	must(t, err)
 	if putAnchors {
-		must(t, st.Put(run.AnchorsEntry, append(bytes.Clone(gen(1)), gen(2)...)))
+		must(t, st.Put(handoff.AnchorsEntry, append(bytes.Clone(gen(1)), gen(2)...)))
 	}
 	r.anchor, err = st.Anchor()
 	must(t, err)

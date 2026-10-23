@@ -1,4 +1,12 @@
-package run
+// Package handoff is the unlock step's hand-off to the kernel process
+// (STO-2b, STO-2a-e). The unlock step opens the sealed store as root,
+// derives the kernel's keys, writes them to a pipe, drops to the kernel's
+// uid and execs the kernel main with the pipe's read end as descriptor
+// KeyFD. So the store key stays with the step that unlocked, which is gone
+// once the kernel runs, and the kernel holds only its own keys (CLK-1). The
+// package links neither the store nor the kernel, so the unlock step, which
+// runs as root, links no more than it needs.
+package handoff
 
 import (
 	"bytes"
@@ -8,13 +16,6 @@ import (
 	"os"
 	"syscall"
 )
-
-// The unlock step's hand-off to the kernel process (STO-2b, STO-2a-e). The
-// unlock step opens the sealed store as root, derives the kernel's keys,
-// writes them to a pipe, drops to the kernel's uid and execs the kernel main
-// with the pipe's read end as descriptor KeyFD. So the store key stays with
-// the step that unlocked, which is gone once the kernel runs, and the kernel
-// holds only its own keys (CLK-1).
 
 // KeyFD is the descriptor the kernel main reads its keys from.
 const KeyFD = 3
@@ -36,7 +37,7 @@ const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 1 + MaxAnchors*ed25
 
 // ErrHandoff: the hand-off is not one this kernel reads. Nothing in it is
 // used.
-var ErrHandoff = errors.New("run: the unlock step's hand-off is damaged or missing")
+var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or missing")
 
 // KernelKeys is what the unlock step hands the kernel process: the log's
 // key, the head-signing key and the owner's anchors.

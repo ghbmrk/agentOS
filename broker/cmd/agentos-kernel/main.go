@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
@@ -104,7 +105,7 @@ func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error)
 	if err != nil {
 		return err
 	}
-	keys, err := run.ReadKeys(os.NewFile(run.KeyFD, "unlock-keys"))
+	keys, err := handoff.ReadKeys(os.NewFile(handoff.KeyFD, "unlock-keys"))
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
@@ -40,7 +41,7 @@ var ErrLogKey = errors.New("run: the log does not open under my store's key; I s
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
 // opens the log under keys, serves OwnerSide and MeterSide, and runs plans
 // every Tick until ctx ends. anchor is where signed heads go (LOG-2).
-func RunKernel(ctx context.Context, cfg MainConfig, keys KernelKeys, anchor kernel.Anchor) error {
+func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
 	}

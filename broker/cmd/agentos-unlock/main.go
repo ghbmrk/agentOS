@@ -30,7 +30,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
-	"github.com/ghbmrk/agentos/broker/clerk/run"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
@@ -111,7 +111,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, fmt.Errorf("agentos-unlock: %w", err)
 	}
 	defer st.Close()
-	var k run.KernelKeys
+	var k handoff.KernelKeys
 	defer k.Wipe()
 	if k.Log, err = st.LogKey(); err != nil {
 		return nil, err
@@ -119,14 +119,14 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if k.Head, err = st.HeadKey(); err != nil {
 		return nil, err
 	}
-	raw, ok, err := st.Get(run.AnchorsEntry)
+	raw, ok, err := st.Get(handoff.AnchorsEntry)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, errors.New("agentos-unlock: my store holds none of your hardware keys; set the box up again")
 	}
-	if k.Anchors, err = run.ParseAnchors(raw); err != nil {
+	if k.Anchors, err = handoff.ParseAnchors(raw); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: your hardware keys in my store: %w", err)
 	}
 	return k.Marshal()
@@ -142,7 +142,7 @@ func openTPM(path string) (transport.TPMCloser, error) {
 }
 
 // handOff writes b to a pipe, drops to the kernel's ids and execs the
-// kernel main with the pipe's read end as run.KeyFD. b is far below a
+// kernel main with the pipe's read end as handoff.KeyFD. b is far below a
 // pipe's buffer, so the write completes with no reader yet.
 func handOff(b []byte, c config) error {
 	r, w, err := os.Pipe()
@@ -160,7 +160,7 @@ func handOff(b []byte, c config) error {
 	if err := drop(c.uid, c.gid); err != nil {
 		return err
 	}
-	if err := inherit(int(r.Fd()), run.KeyFD); err != nil {
+	if err := inherit(int(r.Fd()), handoff.KeyFD); err != nil {
 		return err
 	}
 	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), os.Environ())
