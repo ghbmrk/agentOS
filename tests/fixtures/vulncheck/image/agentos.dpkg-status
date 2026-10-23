@@ -1,0 +1,34 @@
+Package: libplant1
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: amd64
+Source: agentos-plant (1.0-1)
+Version: 1.0-1+b1
+Description: planted binary package whose source has a control advisory
+ tools/vulncheck.py control: osv-scanner must query it by its source name.
+
+Package: agentos-fixed
+Status: install ok installed
+Priority: optional
+Section: misc
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: all
+Version: 1.0-2
+Description: planted package at the advisory's fixed version
+ tools/vulncheck.py control: it must not be reported.
+
+Package: agentos-removed
+Status: deinstall ok config-files
+Priority: optional
+Section: misc
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: all
+Source: agentos-gone
+Version: 1.0-1
+Description: planted package that is not installed
+ tools/vulncheck.py control: only installed packages ship.

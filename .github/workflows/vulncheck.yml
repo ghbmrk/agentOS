@@ -1,5 +1,5 @@
 name: vulncheck
-# SPEC EVL-5 (D-149, #2855): govulncheck and an OSV scan on every pull request. A known
+# SPEC EVL-5 (D-149, #2855, #2886): govulncheck and an OSV scan on every pull request. A known
 # vulnerability reachable from the project's code, or in a vendored or image dependency,
 # fails unless an open issue named in assurance/vulncheck.json records why it is accepted.
 # The control step runs first: the same scanners, in the same job, must catch every
@@ -32,6 +32,7 @@ jobs:
     permissions:
       contents: read
       issues: read # --check-issues: each acceptance's issue must be open
+      actions: read # the image scan downloads main's latest image package list
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -59,9 +60,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/vulncheck.py run --check-issues --report vulncheck-report.json
+      # The image's Debian packages (#2886): image.yml scans each build's own list; this rescans
+      # the list of main's latest image build that has one, daily, for advisories published
+      # since. A pull request is not scanned here: one that changes the image runs image.yml.
+      # No list at all fails the scan (vulncheck.py image).
+      - name: Known vulnerabilities in main's latest image (EVL-5)
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          d="$RUNNER_TEMP/image"
+          for id in $(gh run list -R "$GITHUB_REPOSITORY" -w image.yml -b main -e push -s completed -L 30 \
+              --json databaseId -q '.[].databaseId'); do
+            rm -rf "$d"
+            gh run download "$id" -R "$GITHUB_REPOSITORY" -n release-a -D "$d" || continue
+            [ -s "$d/agentos.dpkg-status" ] && { echo "image packages from image.yml run $id"; break; }
+          done
+          python3 tools/vulncheck.py image "$d" --check-issues --report image-vulncheck-report.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: vulncheck-report
-          path: vulncheck-report.json
+          path: |
+            vulncheck-report.json
+            image-vulncheck-report.json
           if-no-files-found: ignore
