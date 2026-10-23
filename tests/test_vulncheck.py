@@ -1,4 +1,4 @@
-"""tools/vulncheck.py: the known-vulnerability gate (SPEC EVL-5, TN-vulncheck #2855).
+"""tools/vulncheck.py: the known-vulnerability gate (SPEC EVL-5, TN-vulncheck #2855, #2886).
 
 REQ: EVL-5
 
@@ -13,6 +13,7 @@ import pathlib
 import re
 import shutil
 import sys
+import tarfile
 import tempfile
 import unittest
 import urllib.error
@@ -22,6 +23,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import vulncheck  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "vulncheck.yml"
+IMAGE_WORKFLOW = ROOT / ".github" / "workflows" / "image.yml"
+POSTINST = ROOT / "image" / "mkosi" / "mkosi.postinst"
 
 
 def stream(*findings, modules=("example.com/m",), config=True, osv=()):
@@ -84,7 +87,7 @@ class GoFindingsTest(unittest.TestCase):
 
     def test_vendored_reads_modules_txt(self):
         got = vulncheck.vendored(ROOT / "tests" / "fixtures" / "vulncheck" / "gomod")
-        self.assertEqual(got, {"example.com/dep", "example.com/quiet"})
+        self.assertEqual(got, {"example.com/dep", "example.com/fork", "example.com/quiet"})
         self.assertEqual(vulncheck.vendored(ROOT / "docs"), set())
         broker = vulncheck.vendored(ROOT / "broker")
         self.assertIn("github.com/emersion/go-imap", broker)  # a replaced module still counts
@@ -233,6 +236,185 @@ class RecordsTest(unittest.TestCase):
             vulncheck.os.environ.update(env)
 
 
+def osv_pkg(name, version, eco, *vulns, binary=None):
+    meta = {"name": name, "version": version, "ecosystem": eco}
+    if binary:
+        meta["os_package_name"] = binary
+    return {"package": meta, "groups": [{"ids": [v], "aliases": [v, f"CVE-{v}"]} for v in vulns]}
+
+
+class ForkTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("go"), "go not installed")
+    def test_dir_replaced_reads_the_required_release(self):
+        # TN-vulncheck-5: the fork's version is the upstream release its require line names.
+        self.assertEqual(vulncheck.dir_replaced(vulncheck.FIXTURE / "gomod"),
+                         [("example.com/fork", "v1.2.1", "./fork")])
+        self.assertIn(("github.com/emersion/go-imap", "v1.2.1", "./third_party/go-imap"),
+                      vulncheck.dir_replaced(ROOT / "broker"))
+
+    @unittest.skipUnless(shutil.which("go"), "go not installed")
+    def test_module_replacements_and_unrequired_replaces_are_not_forks(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (pathlib.Path(tmp.name) / "go.mod").write_text(
+            "module example.com/m\n\ngo 1.22\n\nrequire (\n\texample.com/a v1.0.0\n\texample.com/b v1.0.0\n)\n\n"
+            "replace example.com/a => example.com/a2 v1.0.1\n"
+            "replace example.com/b v1.0.0 => ../b\n"
+            "replace example.com/unused => ./unused\n")
+        self.assertEqual(vulncheck.dir_replaced(tmp.name), [("example.com/b", "v1.0.0", "../b")])
+
+    def test_every_vulnerability_in_a_fork_fails(self):
+        forks = [("example.com/f", "v1.2.1", "./f"), ("example.com/g", "v2.0.0", "./g")]
+        doc = {"results": [{"source": {"path": "/tmp/x/osv-scanner.json"}, "packages": [
+            osv_pkg("example.com/f", "1.2.1", "Go", "GO-9"), osv_pkg("example.com/g", "2.0.0", "Go"),
+            osv_pkg("example.com/other", "1.0.0", "Go", "GO-8")]}]}
+        fs, probs = vulncheck.fork_findings("broker", doc, forks)
+        self.assertEqual(probs, [])
+        self.assertEqual([(f["where"], f["id"], f["aliases"], f["version"], f["fails"]) for f in fs],
+                         [("broker", "GO-9", ["CVE-GO-9"], "v1.2.1", True)])
+        self.assertIn("example.com/f => ./f", fs[0]["package"])
+
+    def test_a_fork_the_scan_did_not_report_is_a_problem(self):
+        fs, probs = vulncheck.fork_findings("broker", {"results": []}, [("example.com/f", "v1.0.0", "./f")])
+        self.assertEqual(fs, [])
+        self.assertEqual(len(probs), 1)
+        self.assertIn("example.com/f", probs[0])
+
+    def test_lockfile_lists_each_fork_without_the_v(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        f = pathlib.Path(tmp.name) / "osv-scanner.json"
+        vulncheck.fork_lockfile([("example.com/f", "v1.2.1", "./f")], f)
+        pkgs = json.loads(f.read_text())["results"][0]["packages"]
+        self.assertEqual(pkgs, [{"package": {"name": "example.com/f", "version": "1.2.1", "ecosystem": "Go"}}])
+
+
+class ImageTest(unittest.TestCase):
+    CANARY = {**osv_pkg("curl", "0", "Debian:13", "DEBIAN-CVE-0", binary=vulncheck.CANARY)}
+
+    def image(self, *pkgs, canary=True):
+        return {"results": [{"source": {"path": "/var/lib/dpkg/status"},
+                             "packages": list(pkgs) + ([self.CANARY] if canary else [])}]}
+
+    def scan(self, records, found, src="x"):
+        saved = vulncheck.run_image, vulncheck.manifest_problems
+        vulncheck.run_image = lambda src, env=None, offline=False: ([dict(f) for f in found], [])
+        vulncheck.manifest_problems = lambda src: []
+        try:
+            return vulncheck.scan_image({"accepted": records}, src)
+        finally:
+            vulncheck.run_image, vulncheck.manifest_problems = saved
+
+    def test_every_vulnerability_in_an_image_package_fails(self):
+        # TN-vulncheck-6: queried by source package; the binary is shown beside it; the
+        # canary's own findings are dropped.
+        fs, probs = vulncheck.image_findings(self.image(
+            osv_pkg("openssl", "3.5.1-1", "Debian:13", "DSA-1", binary="libssl3t64"),
+            osv_pkg("zlib", "1.3-1", "Debian:13", binary="zlib1g")))
+        self.assertEqual(probs, [])
+        self.assertEqual([(f["where"], f["id"], f["package"], f["module"], f["fails"]) for f in fs],
+                         [("image", "DSA-1", "Debian:13:openssl (libssl3t64)", "openssl", True)])
+
+    def test_a_failed_query_is_a_problem_not_a_clean_scan(self):
+        # L3 blocker on #2917: osv-scanner's image scan reports a failed OSV query as packages
+        # with no vulnerabilities and exits 0; the canary must then match nothing.
+        pkg = osv_pkg("openssl", "3.5.1-1", "Debian:13", binary="libssl3t64")
+        for doc in (self.image(pkg, canary=False),
+                    {"results": [{"packages": [pkg, osv_pkg("curl", "0", "Debian:13", binary=vulncheck.CANARY)]}]}):
+            probs = vulncheck.image_findings(doc)[1]
+            self.assertEqual(len(probs), 1, probs)
+            self.assertIn("canary", probs[0])
+
+    def test_a_scan_that_read_nothing_or_the_wrong_release_is_a_problem(self):
+        self.assertEqual(vulncheck.image_findings(self.image())[1], ["the image scan reported no packages"])
+        for eco in ("Ubuntu:24.04", "Debian", ""):
+            doc = self.image(osv_pkg("openssl", "3.5.1-1", eco))
+            self.assertEqual(len(vulncheck.image_findings(doc)[1]), 1, eco)
+
+    def test_archive_holds_the_two_files_and_the_canary_where_debian_keeps_them(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = pathlib.Path(tmp.name) / "a.tar"
+        vulncheck.image_archive(vulncheck.FIXTURE / "image", out)
+        with tarfile.open(out) as t:
+            manifest = json.load(t.extractfile("manifest.json"))
+            layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
+            status = layer.extractfile("var/lib/dpkg/status").read()
+            self.assertTrue(status.startswith((vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_bytes().rstrip(b"\n")))
+            self.assertIn((vulncheck.CANARY, "0"), vulncheck.dpkg_installed(status.decode()))
+            self.assertIn(b"ID=debian", layer.extractfile("etc/os-release").read())
+
+    def test_a_missing_or_empty_list_fails(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.image_archive(d, d / "a.tar")
+        (d / vulncheck.DPKG_STATUS).write_text("")
+        (d / vulncheck.OS_RELEASE).write_text("ID=debian\n")
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.image_archive(d, d / "a.tar")
+
+    def test_status_must_list_the_manifests_packages(self):
+        # Security release finding on #2917: the scanned list is tied to the manifest the
+        # reproduce job compares across runners.
+        self.assertEqual(vulncheck.manifest_problems(vulncheck.FIXTURE / "image"), [])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        status = (vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_text()
+        (d / vulncheck.DPKG_STATUS).write_text(status)
+        self.assertEqual(len(vulncheck.manifest_problems(d)), 1)  # no manifest
+        m = json.loads((vulncheck.FIXTURE / "image" / "agentos_control.manifest").read_text())
+        m["packages"] = m["packages"][1:]
+        (d / "a.manifest").write_text(json.dumps(m))
+        probs = vulncheck.manifest_problems(d)
+        self.assertEqual(len(probs), 1)
+        self.assertIn("agentos-fixed", probs[0])
+        self.assertEqual(vulncheck.dpkg_installed(status),
+                         {("libplant1", "1.0-1+b1"), ("agentos-fixed", "1.0-2"), ("agentos-nofix", "2.0-1")})
+
+    def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
+        recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
+                {"id": "DSA-2", "issue": 1, "why": "x"},
+                {"id": "DSA-3", "issue": 1, "why": "x", "where": "image", "package": "other"}]
+        found = [{**fail(i), "where": "image"} for i in ("DSA-1", "DSA-2", "DSA-3")]
+        fs, probs, unused = self.scan(recs, found)
+        self.assertEqual(([vulncheck.verdict(f) for f in fs], probs), (["accepted #1", "FAIL", "FAIL"], []))
+        self.assertEqual([r["id"] for r in unused], ["DSA-3"])
+
+    def test_an_image_record_names_its_package_and_only_an_image_record_does(self):
+        good = {"id": "DSA-1", "issue": 1, "why": "x"}
+        self.assertEqual(vulncheck.record_problems([{**good, "where": "image", "package": "curl"}]), [])
+        for bad in ({**good, "where": "image"}, {**good, "package": "curl"},
+                    {**good, "where": "broker", "package": "curl"}, {**good, "where": "image", "package": " "}):
+            self.assertEqual(len(vulncheck.record_problems([bad])), 1, bad)
+
+    def test_check_issues_partitions_the_records(self):
+        # Potency finding on #2917: closing #2919 must withdraw the image acceptances.
+        cfg = {"accepted": [{"id": "A", "where": "image"}, {"id": "B"}, {"id": "C", "where": "broker"}]}
+        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "image")], ["A"])
+        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "run")], ["B", "C"])
+
+    def test_a_record_cannot_accept_an_advisory_debian_has_fixed(self):
+        # TN-vulncheck-6: once Debian ships a fix, the finding fails until the image is rebuilt.
+        def pkg(name, *events):
+            return {**osv_pkg(name, "1.0-1", "Debian:13", "DEBIAN-CVE-1"),
+                    "vulnerabilities": [{"id": "DEBIAN-CVE-1", "affected": [
+                        {"package": {"ecosystem": "Debian:12", "name": name}, "ranges": [{"events": [{"fixed": "0.9"}]}]},
+                        {"package": {"ecosystem": "Debian:13", "name": name},
+                         "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, *events]}]}]}]}
+        fs, probs = vulncheck.image_findings(self.image(pkg("a", {"fixed": "1.0-2"}), pkg("b")))
+        self.assertEqual(probs, [])
+        self.assertEqual([(f["package"], f["fixed"]) for f in fs], [("Debian:13:a (a)", "1.0-2"), ("Debian:13:b (b)", "")])
+        recs = [{"id": "DEBIAN-CVE-1", "issue": 1, "why": "x", "where": "image", "package": p} for p in "ab"]
+        fs, probs, unused = self.scan(recs, fs)
+        self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
+        out = io.StringIO()
+        vulncheck.summary(fs, [], unused, out)
+        self.assertIn("fix: rebuild the image", out.getvalue())
+        self.assertNotIn("or add a record", out.getvalue())
+
 class ConfigTest(unittest.TestCase):
     def test_config_is_valid_and_targets_exist(self):
         cfg = json.loads(vulncheck.CONFIG.read_text())
@@ -276,10 +458,32 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("GOTOOLCHAIN: local", wf)
 
     def test_token_is_read_only(self):
+        for wf in (WORKFLOW.read_text(), IMAGE_WORKFLOW.read_text()):
+            grants = re.findall(r"(?m)^\s+(contents|issues|pull-requests|actions|checks|statuses):\s*(\w+)", wf)
+            self.assertTrue(grants)
+            self.assertEqual({g for _, g in grants}, {"read"})
+
+    def test_image_build_is_scanned_after_the_control(self):
+        # TN-vulncheck-6: every image build scans its own package list, with the same pins.
+        wf = IMAGE_WORKFLOW.read_text()
+        job = wf[wf.index("\n  image-vulncheck:"):]
+        self.assertIn("needs: build", job)
+        self.assertLess(job.index("python3 tools/vulncheck.py control"),
+                        job.index("python3 tools/vulncheck.py image rec --check-issues"))
+        self.assertNotIn("continue-on-error", job)
+        pins = r"go install (\S+@v\d+\.\d+\.\d+)\n"
+        self.assertEqual(re.findall(pins, job), re.findall(pins, WORKFLOW.read_text()))
+        self.assertEqual(len(re.findall(pins, job)), 2)
+        for name in (vulncheck.DPKG_STATUS, vulncheck.OS_RELEASE):
+            self.assertIn(f'"$RUNNER_TEMP"/out/{name}', wf)
+            self.assertIn(f'"$OUTPUTDIR/{name}"', POSTINST.read_text())
+        self.assertTrue(POSTINST.stat().st_mode & 0o111)
+
+    def test_main_image_is_rescanned_daily(self):
         wf = WORKFLOW.read_text()
-        grants = re.findall(r"(?m)^\s+(contents|issues|pull-requests|actions|checks|statuses):\s*(\w+)", wf)
-        self.assertTrue(grants)
-        self.assertEqual({g for _, g in grants}, {"read"})
+        step = wf[wf.index("Known vulnerabilities in main's latest image"):]
+        self.assertIn("github.event_name == 'schedule'", step)
+        self.assertIn('python3 tools/vulncheck.py image "$d" --check-issues', step)
 
 
 @unittest.skipUnless(shutil.which("govulncheck") and shutil.which("osv-scanner"),
