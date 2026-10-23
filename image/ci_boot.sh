@@ -174,7 +174,7 @@ EOS
 }
 nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
 NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
-NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service\n')"
+NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")"
 # No code from writable storage (UPD-10): the first boot plants a copy of /usr/bin/true, mode 0755,
 # in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP, which
 # gpt-auto mounts at the empty /boot when there is no XBOOTLDR) and must find every one refused, each
@@ -205,11 +205,14 @@ say done
 EOS
 }
 NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
-NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-noexec-check.service\n')"
+NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
+# One multi-user.target drop-in starts both checks: systemd reads a credential name once, so a
+# second systemd.unit-dropin.multi-user.target would be dropped, and its check never run (#2875).
+CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
-EXTRA="$NM_EXTRA$NX_EXTRA" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+EXTRA="$NM_EXTRA$NX_EXTRA$CHECKS_WANTED" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do

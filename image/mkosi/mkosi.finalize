@@ -1162,6 +1162,8 @@ def ini_paths(files, section, key):
 # root setting is refused whatever it names, since it replaces or overlays what /usr holds.
 NAMESPACE_MOUNTS = ("BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem", "ReadWritePaths", "MountImages")
 NAMESPACE_ROOTS = ("RootDirectory", "RootImage", "ExtensionImages", "ExtensionDirectories")
+# trixie's merged-/usr links: a target under one of these lands under /usr.
+USR_ALIASES = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 
 
 def ini_words(files, section, key):
@@ -1196,7 +1198,7 @@ def namespace_mount_violations(name, files):
                 parts = w.lstrip("-+").split(":")
                 target = parts[1] if key in ("BindPaths", "BindReadOnlyPaths", "MountImages") and len(parts) > 1 else parts[0]
                 norm = "/" + "/".join(x for x in target.split("/") if x not in ("", "."))
-                if ".." in norm.split("/") or norm == EXEC_ONLY or norm.startswith(EXEC_ONLY + "/"):
+                if ".." in norm.split("/") or any(norm == u or norm.startswith(u + "/") for u in (EXEC_ONLY,) + USR_ALIASES):
                     out.append("%s: %s=%s mounts under %s, which executes (UPD-10)" % (name, key, w, EXEC_ONLY))
     except ValueError as e:
         out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))

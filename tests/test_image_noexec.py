@@ -120,7 +120,8 @@ class NoExecTreeTest(unittest.TestCase):
         good = unit.read_text()
         for line in ("BindPaths=/var/lib/x:/usr/lib/x", "BindReadOnlyPaths=-/var/x:/usr/x:rbind", "BindPaths=/usr/lib/x",
                      "TemporaryFileSystem=/usr/local:rw", "ReadWritePaths=-/usr/lib/agentos", "MountImages=/var/i.raw:/usr/x",
-                     "BindPaths=/var/x:/usr", "TemporaryFileSystem=/usr/./x"):
+                     "BindPaths=/var/x:/usr", "TemporaryFileSystem=/usr/./x", "BindPaths=/var/x:/bin/x",
+                     "TemporaryFileSystem=/lib/agentos", "BindReadOnlyPaths=/var/x:/sbin", "ReadWritePaths=/lib64"):
             with self.subTest(line):
                 unit.write_text(good + "\n[Service]\n" + line + "\n")
                 self.assertEqual(len(self.v()), 1, self.v())
@@ -129,7 +130,7 @@ class NoExecTreeTest(unittest.TestCase):
             with self.subTest(key):
                 unit.write_text(good + "\n[Service]\n%s=/var/lib/x\n" % key)
                 self.assertEqual(self.v(), ["agentos-egress.service: sets %s; only the image's own /usr may execute (UPD-10)" % key])
-        for line in ("BindPaths=/usr/lib/x:/var/lib/x", "TemporaryFileSystem=/var/usr", "BindPaths=/usrx",
+        for line in ("BindPaths=/usr/lib/x:/var/lib/x", "TemporaryFileSystem=/var/usr", "BindPaths=/usrx", "BindPaths=/library",
                      "BindPaths=/usr/x\nBindPaths="):
             with self.subTest(line):
                 unit.write_text(good + "\n[Service]\n" + line + "\n")
@@ -327,7 +328,13 @@ class BootProbeTest(unittest.TestCase):
         self.assertEqual(sh.count("for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do"), 2)
         self.assertIn('mountpoint -q "$d"', sh)
         self.assertIn('has "$W/console.log" "agentos-noexec: $d refused"', sh)
-        self.assertIn('EXTRA="$NM_EXTRA$NX_EXTRA"', sh)
+        # systemd reads a credential name once: two multi-user.target drop-ins on one boot would drop one
+        # check unseen (#2875 L3, build (a) at b2a9007). One drop-in wants both checks.
+        self.assertIn('EXTRA="$NM_EXTRA$NX_EXTRA$CHECKS_WANTED"', sh)
+        self.assertIn("Wants=agentos-nm-check.service agentos-noexec-check.service", sh)
+        for var in ("NM_EXTRA", "NX_EXTRA"):
+            line = re.search(r"^%s=.*$" % var, sh, re.M).group(0)
+            self.assertNotIn("unit-dropin", line)
         probe = re.search(r"noexec_check\(\) \{\n\tcat <<'EOS'\n(.*?)\nEOS\n", sh, re.S).group(1)
         self.assertEqual(subprocess.run(["sh", "-n"], input=probe, text=True).returncode, 0)
         for want in ("agentos-noexec: unit tmpfs refused", "agentos-noexec: reboot timer active", "agentos-noexec: done"):
