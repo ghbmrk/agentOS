@@ -1,7 +1,9 @@
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
-# usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, the
+# D-Bus system.conf, system.d and system-services files, and NetworkManager's unit file as systemd
+# resolves it. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -72,3 +74,47 @@ usr/lib/udev/rules.d/85-nm-unmanaged.rules	sha256:afce2a870bf2cefb2b52214ed959d0
 usr/lib/udev/rules.d/90-iocost.rules	sha256:39b1d6239c29d1a42fd4d8563ce55916958590021b947c534a630c80b7952815
 usr/lib/udev/rules.d/95-dm-notify.rules	sha256:d24e725fc78306ff2355eb91e4eebcc7dc9388d54dc27d20d6fe6f695054d536
 usr/lib/udev/rules.d/99-systemd.rules	sha256:d63ba2ea309aadf7794a5f84b0f394c2e48fe630640aa37e9963cd9d1b769d89
+usr/share/polkit-1/rules.d/50-agentos-netjoin.rules	sha256:c1f261462ba79c98d5d4ed24da7348f7153c70a3f68a24eeca89a5fe5aa24906
+usr/share/polkit-1/rules.d/50-default.rules	sha256:29f073ed9a8a6996b62f718e2bec962d5c84d311d23bb874830b4f9887eeabbf
+usr/share/polkit-1/rules.d/org.freedesktop.NetworkManager.rules	sha256:c9c419a58f716c4de1f469a362dbb00745c0d35ae3077857b03168bdd9b06ee0
+usr/share/polkit-1/rules.d/systemd-networkd.rules	sha256:f199e386a9297858331b00df07ed0b0ee5fcf4bea67f6c0bccc8a92b7e310bbd
+usr/share/polkit-1/actions/io.systemd.credentials.policy	sha256:420012cda45aebb3a011e5d4b07ae086081bf5e8e51d5318bd523320564acc16
+usr/share/polkit-1/actions/org.dpkg.pkexec.update-alternatives.policy	sha256:1d9b3e2745d17e399e6823119909a6614b17c402ca020c0ea0a097212503b70c
+usr/share/polkit-1/actions/org.freedesktop.NetworkManager.policy	sha256:28637287354d3363213f42b6a7781c6357647e6d80164f316a717c684b1e2349
+usr/share/polkit-1/actions/org.freedesktop.hostname1.policy	sha256:d5c9355ebf31aa0b42e5a460369b9cb1ed673dc27d761cc9f57c85f21204cc74
+usr/share/polkit-1/actions/org.freedesktop.locale1.policy	sha256:bc502d176f5cdf8a11159ec6ad242d4ae53c52e9d0782a9814898d8c51cc3828
+usr/share/polkit-1/actions/org.freedesktop.login1.policy	sha256:b2c416657bac00b38e66d37a3c4a541bdd0000d06aabe0a5f6e94580ea4c7807
+usr/share/polkit-1/actions/org.freedesktop.network1.policy	sha256:cdfd0719922861c7762e2ad2cb7035c9293a7b65df873db62ad60b7f7465d033
+usr/share/polkit-1/actions/org.freedesktop.policykit.policy	sha256:ef8d3dbd10c0c6223239bcdab57700444e0904f6368a8df41abbbcdf11c3caad
+usr/share/polkit-1/actions/org.freedesktop.resolve1.policy	sha256:4fb86aa726ab115815e9c124bc13bb87221655feade6b236ccd70f618209aa5a
+usr/share/polkit-1/actions/org.freedesktop.systemd1.policy	sha256:05b867df07111f0693828fce4db65e6d14d653244952f7a598f4a4b600164d3b
+usr/share/polkit-1/actions/org.freedesktop.timedate1.policy	sha256:e369f5176cd8a272df31b6eab5b24702c6491d20d5e02bb0a2144b8f5e69d3dd
+usr/share/polkit-1/actions/org.freedesktop.timesync1.policy	sha256:d545cfcf0ae8fc7a79281a8aa093009275dafb81c0d5231a99d8f9e454ecb3ce
+usr/share/dbus-1/system.d/agentos-netjoin.conf	sha256:126ce0d6c16a0502f35f93bc3aa96344d5cec851c90724ff6847cf1a723ab746
+usr/share/dbus-1/system.d/dnsmasq.conf	sha256:2eb414d1116632ce2c42fc28c0b937b8e0530beb4fec67c35b783e31e56e6534
+usr/share/dbus-1/system.d/nm-dispatcher.conf	sha256:01f2698c4100942dc890a6822b1db936384ef50875035b2bc25914e7d3adff03
+usr/share/dbus-1/system.d/nm-priv-helper.conf	sha256:05047b466bf2edd606638c8ecc6f4911694c5de599e953c247fd33ca275d0de6
+usr/share/dbus-1/system.d/org.freedesktop.NetworkManager.conf	sha256:b1585b5ef00dcdb47c6fb45994c47f656ca5d78ca00d79fbe2e1a745be42bb32
+usr/share/dbus-1/system.d/org.freedesktop.PolicyKit1.conf	sha256:28067ad27702251ba38d9794738cb81e18ce2151d26b3d103a33b4107c2f9877
+usr/share/dbus-1/system.d/org.freedesktop.hostname1.conf	sha256:98e7eb579288791e01081e75b577baf904ff7eb921afa6738158b86e97d034a7
+usr/share/dbus-1/system.d/org.freedesktop.locale1.conf	sha256:9702f64ef33e68a78d9d1cf852b37c1e64cbde16d2eda96ecbf950c03865e6b3
+usr/share/dbus-1/system.d/org.freedesktop.login1.conf	sha256:8c12da23940f6ea80495e47a4d0bf9eece02374ed3a9d1e663932afd0271d46d
+usr/share/dbus-1/system.d/org.freedesktop.network1.conf	sha256:3517cb15b466c8e6826c4f4261477ab61ea11c23cbd10c69bfb2f54ef97357cc
+usr/share/dbus-1/system.d/org.freedesktop.resolve1.conf	sha256:1586cbabf4977b1e43d858373f2128b641e920fd6b995b0b231986cab53b3a7f
+usr/share/dbus-1/system.d/org.freedesktop.systemd1.conf	sha256:001d478086c87eb19f5446311c1177fde7d7ce6dd7787e1e63f49fe9d4438cd2
+usr/share/dbus-1/system.d/org.freedesktop.timedate1.conf	sha256:f34b0a017d95991ea8f1409e9abc53346664612982c5d2349b481d471c7de9d7
+usr/share/dbus-1/system.d/systemd-localed-read-only.conf	sha256:432850740e33674be733f92e7548c6445985c3212302693365b14c50e6956e32
+usr/share/dbus-1/system.d/wpa_supplicant.conf	sha256:ee31ea73eba80bbcef4ca921d1c880a7d301c47371d2cb89752282fe239d5522
+usr/share/dbus-1/system-services/fi.w1.wpa_supplicant1.service	sha256:49d615b76d0ad0922e84f19de2b67b71d99c84709d80bffdd5dd07fee5fe0f45
+usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service	sha256:baed12288339ed4b1df90f017beb8af07b56eba1b2edc4a60914880c13617af1
+usr/share/dbus-1/system-services/org.freedesktop.hostname1.service	sha256:b3bed9d69c469af707e9ee8f136cf234a2ee50b63544a4d782d205097ef980f5
+usr/share/dbus-1/system-services/org.freedesktop.locale1.service	sha256:6b3e6b3596a7c0bbb3b354aeec11ac03b351af4462bf7711c20c8f770a7e18f8
+usr/share/dbus-1/system-services/org.freedesktop.login1.service	sha256:b587e7aa8272f22a8e94c283781ff11730352cd23c2dfcf6109863ea15da9b10
+usr/share/dbus-1/system-services/org.freedesktop.network1.service	sha256:2b6ff324305f9a9d650a48cc94c91764601e3ff4bc671d0e2596a54d039b7150
+usr/share/dbus-1/system-services/org.freedesktop.nm_dispatcher.service	sha256:809666fb276c3d1f91f6c2fcae3e72d217595c0034829dc7d3a5a191e43a1cc9
+usr/share/dbus-1/system-services/org.freedesktop.nm_priv_helper.service	sha256:77bc536d4f275958c639943415524ef88557e42efe7bdf4f4363fe6284eb1a18
+usr/share/dbus-1/system-services/org.freedesktop.resolve1.service	sha256:5fc8808faa8da6c61553f11985eb8eb828b34e628421f3aedbb421e0d61426d1
+usr/share/dbus-1/system-services/org.freedesktop.systemd1.service	sha256:eac6205bbfde5563ebdd74f9d420db2d19b1fd2fadc7bc47ae8d55845a8bb82d
+usr/share/dbus-1/system-services/org.freedesktop.timedate1.service	sha256:0f3891c48db89bfaff72f50ab239b0a500a651a14998ce25d50373bd33d17ec9
+usr/share/dbus-1/system.conf	sha256:c0a02340950ce376ccee26d58df2c77466c534dcd368b3486b4b6a60d3741f6b
+usr/lib/systemd/system/NetworkManager.service	sha256:653eebaff3e3284a5e99d25103807faacf0bdce1e35babdcbdbb2e25f106738a

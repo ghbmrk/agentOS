@@ -4432,9 +4432,13 @@ class ExecAllowTest(unittest.TestCase):
             if ln and not ln.startswith("#"):
                 rel, tab, value = ln.partition("\t")
                 self.assertTrue(tab, ln)
-                self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
+                self.assertRegex(rel, r"^((etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
                                       r"((environment-)?generators|shutdown|sleep)/[^/]+|"
-                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)$")
+                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)|"
+                                      # #2622: bus and polkit policy, and NetworkManager's unit.
+                                      r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
+                                      r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
+                                      r"system\.conf)|usr/lib/systemd/system/NetworkManager\.service)$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
@@ -4561,6 +4565,69 @@ class ExecAllowTest(unittest.TestCase):
         p = write(self.root, "usr/lib/modules-load.d/x.conf", "tun\n")
         p.chmod(0o666)
         self.assertIn("usr/lib/modules-load.d/x.conf: unreadable", " | ".join(self.v()))
+
+    # #2622 item 3: the bus and authorisation policy packages ship, every entry in every directory.
+    POLICY = ("etc/polkit-1/rules.d/49-x.rules", "usr/local/share/polkit-1/rules.d/49-x.rules",
+              "usr/share/polkit-1/rules.d/49-x.rules", "usr/share/polkit-1/actions/x.policy",
+              "etc/dbus-1/system.d/x.conf", "etc/dbus-1/system-local.conf", "etc/dbus-1/system.conf",
+              "usr/local/share/dbus-1/system.d/x.conf", "usr/share/dbus-1/system.d/x.conf",
+              "usr/share/dbus-1/system.conf", "usr/share/dbus-1/system-services/x.service",
+              "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
+              # Names a reader's own filter might skip are hashed all the same.
+              "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+    YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
+    NETJOIN = {"usr/share/polkit-1/rules.d/50-agentos-netjoin.rules": "50-agentos-netjoin.rules",
+               "usr/share/dbus-1/system.d/agentos-netjoin.conf": "agentos-netjoin.conf"}
+
+    def test_policy_files_are_held_by_hash(self):
+        for rel in self.POLICY:
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, self.YES)
+                listed = rel
+                want = "%s: not on the boot-code allowlist (%s, #1556)" % (listed, check.EXEC_ALLOW_REPO)
+                v = self.v()
+                self.assertEqual(len(v), 1, v)
+                self.assertTrue(v[0].startswith(want), v)
+                self.assertTrue(v[0].endswith("entry: %s\t%s" % (listed, self.entry(self.YES))), v)
+                self.assertIn(want, " | ".join(check.violations(self.root)))
+                allowed = check.exec_allowed() | {(listed, self.entry(self.YES))}
+                self.assertEqual(self.v(allowed), [])
+                write(self.root, rel, self.YES.replace("YES", "AUTH_ADMIN"))
+                self.assertTrue(self.v(allowed))
+                p.unlink()
+
+    def test_policy_links_run_and_unreadable_are_refused(self):
+        write(self.root, "var/tmp/x.rules", self.YES)
+        f = link(self.root, "usr/share/polkit-1/rules.d/49-x.rules", "/var/tmp/x.rules")
+        self.assertIn("usr/share/polkit-1/rules.d/49-x.rules: unreadable (", " | ".join(self.v()))
+        f.unlink()
+        (self.root / "usr/share/polkit-1/rules.d").rmdir()
+        (self.root / "var/tmp/r").mkdir()
+        f = link(self.root, "usr/share/polkit-1/rules.d", "/var/tmp/r")
+        self.assertIn("usr/share/polkit-1/rules.d: unreadable (", " | ".join(self.v()))
+        f.unlink()
+        # A directory where a policy directory should be is refused, never skipped.
+        write(self.root, "etc/dbus-1", "")
+        self.assertIn("etc/dbus-1: unreadable (not a directory", " | ".join(self.v()))
+        (self.root / "etc/dbus-1").unlink()
+        p = write(self.root, "etc/dbus-1/system.d/x.conf", "<busconfig/>\n")
+        p.chmod(0o666)
+        self.assertIn("etc/dbus-1/system.d/x.conf: unreadable", " | ".join(self.v()))
+        p.unlink()
+        write(self.root, "run/polkit-1/rules.d/x.rules", self.YES)
+        self.assertIn("run/polkit-1/rules.d: not on the boot-code allowlist; /run is a tmpfs on the box",
+                      " | ".join(self.v()))
+
+    def test_the_netjoin_policy_is_listed_as_build_sh_installs_it(self):
+        # build.sh copies both files from broker/cmd/agentos-netjoin; their entries are the source's hash.
+        allowed = check.exec_allowed()
+        build = (IMG / "build.sh").read_text()
+        for rel, src in self.NETJOIN.items():
+            with self.subTest(rel=rel):
+                self.assertIn('"$STAGE/%s"' % rel, build)
+                data = (ROOT / "broker/cmd/agentos-netjoin" / src).read_text()
+                self.assertIn((rel, self.entry(data)), allowed)
 
     def test_found_under_mkosi_and_missing_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
