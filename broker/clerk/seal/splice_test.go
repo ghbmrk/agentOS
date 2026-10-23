@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/tpmseal"
+	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
 
 func rewrite(t *testing.T, path string, edit func(f *file)) {
@@ -88,5 +91,41 @@ func TestAWrapIsBoundToItsStore(t *testing.T) {
 	rewrite(t, filepath.Join(dir, "b"), func(f *file) { f.Slots = append(f.Slots, fa.Slots[0]) })
 	if _, err := Unlock(filepath.Join(dir, "b"), r); !errors.Is(err, ErrWrongFactor) {
 		t.Fatalf("a wrap from another store: got %v, want ErrWrongFactor", err)
+	}
+}
+
+// A tpm slot planted first in the file that unseals to a key of the wrong
+// length (SealTo needs only the box's public policy key and the SRK's
+// public area) makes Unlock return an error, not panic.
+func TestAPlantedShortTPMKeyIsAnError(t *testing.T) {
+	sw := swtpm.Start(t)
+	sw.Reboot()
+	sw.Measure(9, "initrd-A")
+	key, err := tpmseal.NewPolicyKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := tpmseal.SignCurrent(sw.TPM(), key, []uint{9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Policies: []tpmseal.Policy{p}}
+	path := filepath.Join(t.TempDir(), "store")
+	s, err := Create(path, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	rewrite(t, path, func(fl *file) {
+		planted := fl.Slots[0]
+		planted.ID = "00000000000000ff"
+		if planted.Sealed, err = tpmseal.SealTo(planted.Sealed.SRKPublic, []byte("short"), &key.PublicKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		fl.Slots = append([]slot{planted}, fl.Slots...)
+	})
+	_, err = Unlock(path, TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey})
+	if !errors.Is(err, ErrCorrupt) && !errors.Is(err, ErrTampered) {
+		t.Fatalf("a planted short tpm key: got %v, want the store refused", err)
 	}
 }

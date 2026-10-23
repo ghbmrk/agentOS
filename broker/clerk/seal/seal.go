@@ -18,8 +18,10 @@
 //
 // The whole file is MAC'd under a key derived from the store key, so a slot
 // added, removed or altered on the drive by anyone without the key makes the
-// store refuse to open. Every change is written to a temporary file, synced
-// and renamed into place.
+// store refuse to open. Replacing the whole file with a store of someone
+// else's is stopped for a TPM unlock by pinning the box's policy key (see
+// TPM); it releases none of the owner's secrets in any case. Every change
+// is written to a temporary file, synced and renamed into place.
 package seal
 
 import (
@@ -327,7 +329,17 @@ func slotKey(s *slot, f Factor) ([]byte, error) {
 		}
 		return hkdf.Key(sha256.New, f.Key, s.Salt, label+"recovery-slot", keyLen)
 	case TPM:
-		return tpmseal.Unseal(f.TPM, s.Sealed, s.Policies, f.PIN)
+		k, err := tpmseal.Unseal(f.TPM, s.Sealed, s.Policies, f.PIN)
+		if err != nil {
+			return nil, err
+		}
+		// SealTo can seal any secret under the box's public policy key,
+		// so a planted slot may unseal to a key of the wrong length.
+		if len(k) != keyLen {
+			wipe(k)
+			return nil, fmt.Errorf("%w: a tpm slot unsealed to %d bytes", ErrCorrupt, len(k))
+		}
+		return k, nil
 	}
 	return nil, ErrNoSlot
 }
