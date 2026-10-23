@@ -32,6 +32,7 @@
   {"id": "GO-2026-6354", "issue": 2894, "where": "broker", "why": "Vendored golang.org/x module below its fixed version; fixed by the module bump tracked in the issue."},
   {"id": "GO-2026-6355", "issue": 2894, "where": "broker", "why": "Vendored golang.org/x module below its fixed version; fixed by the module bump tracked in the issue."},
   {"id": "GO-2026-6629", "issue": 2894, "where": "broker", "why": "Vendored golang.org/x module below its fixed version; fixed by the module bump tracked in the issue."},
+  {"id": "GHSA-27r3-jxmh-p828", "issue": 2918, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile (body-parser 2.3.0); fixed by the lockfile refresh tracked in the issue."},
   {"id": "GHSA-22jm-h49p-29qw", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
   {"id": "GHSA-2vr4-cq9g-pvrc", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
   {"id": "GHSA-3wwx-pv8p-q78v", "issue": 2895, "where": "guest/openclaw/package-lock.json", "why": "Advisory in the guest image's openclaw lockfile; fixed by the lockfile refresh tracked in the issue."},
