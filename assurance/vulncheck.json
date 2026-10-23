@@ -1,0 +1,7 @@
+{
+ "_doc": "tools/vulncheck.py (SPEC EVL-5). go_targets: module directories govulncheck scans. osv_sources: lockfiles the OSV scan must report (it scans every lockfile; these guard against a scan that reads nothing). skip_paths: the control fixture, scanned only by `vulncheck.py control`. accepted: one record per accepted vulnerability, {id (ID or alias), issue (an open issue recording why), why, optional where (Go target or lockfile)}.",
+ "go_targets": ["broker"],
+ "osv_sources": ["guest/openclaw/package-lock.json"],
+ "skip_paths": ["tests/fixtures/vulncheck"],
+ "accepted": []
+}
