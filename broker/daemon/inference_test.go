@@ -4,12 +4,12 @@ package daemon
 //
 // W3's gate (arbitrator, adopting potency PW1 on #56; L3 on #62): agentosd,
 // and every package W3 links into it (the change pipeline, the loop
-// scheduler, the replay evaluator, the grants gate), hold no
-// inference-capable code. No model router or provider adapter, no egress
-// proxy, and no network client except the modelroute proxy, which speaks
-// only to the vault process's unix socket. A package that newly needs
-// net/http, a socket-level import, or an escape hatch (cgo, unsafe, plugin,
-// os/exec, assembly) must be added below, with its reason, by review.
+// scheduler, the grants gate), hold no inference-capable code. No model
+// router or provider adapter, no egress proxy, and no network client
+// except the modelroute proxy, which speaks only to the vault process's
+// unix socket. A package that newly needs net/http, a socket-level import,
+// or an escape hatch (cgo, unsafe, plugin, os/exec, assembly) must be added
+// below, with its reason, by review.
 //
 // This is a tripwire against drift, not proof against an adversary (L3 on
 // #83). Residuals it does not cover, held by review instead: the standard
@@ -44,7 +44,7 @@ import (
 )
 
 // linked is the composition root and what W3 links into it.
-var linked = []string{compositionRoot, "change", "loops", "replay", "grants"}
+var linked = []string{compositionRoot, "change", "loops", "grants"}
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.
@@ -60,7 +60,6 @@ var httpOK = map[string]string{
 	"meter":                   "wraps guest model handlers (OP-8); serves, never dials",
 	"guest":                   "serves the guest plane over the machine socket; never dials",
 	"modelroute":              "the one client: forwards model calls to the vault process's unix socket",
-	"replay":                  "serves replay machines' plane like guest; never dials",
 	"owner/notice/noticesock": "the second client, as modelroute: reads the vault process's notice socket (a unix-socket HTTP long poll), every dial on unix (P2-2w c4e4 s2b); by review",
 	"checker/checkersock":     "the third client, as modelroute: asks the checker's verify socket to check an owner code, every dial on unix (SIM-split-wire); by review",
 	"inflight":                "admits the clean room's model calls under its memory budget (RES-5); serves, never dials",
@@ -627,7 +626,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"guest", src(`nh "net/http"`, `var c = &nh.Client{}`)},
 		{"guest", src(`. "net/http"`, `var c = DefaultClient`)},
 		{"loops", src(`"net/http/httputil"`, `var p = httputil.NewSingleHostReverseProxy(nil)`)},
-		{"replay", src(`"net/http/httptest"`, `var c = httptest.NewServer(nil).Client()`)},
+		{"meter", src(`"net/http/httptest"`, `var c = httptest.NewServer(nil).Client()`)},
 		{"loops", src(`"crypto/tls"`, `var c, _ = tls.Dial("tcp", "x:443", nil)`)},
 		{"journal", src(`"syscall"`, `var fd, _ = syscall.Socket(2, 1, 0)`)},
 		{"guest", src(`"net"`, `var c, _ = net.ListenPacket("udp", ":0")`)},

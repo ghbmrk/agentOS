@@ -156,9 +156,6 @@ var guestPlane = map[string]struct {
 	// through golang.org/x/sys/unix, as loop7 does, and
 	// TestAgentosdLinksNoInference holds its imports.
 	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
-	// Replay (LOOP-5) serves replay machines through a guest plane of its
-	// own: no journal writes, no executors, no network clients.
-	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).
