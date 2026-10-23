@@ -244,9 +244,9 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 
 // Spend is the check a metered call (a model call, a paid API call) makes
 // before it runs: the key is live, serves task when it serves one, and its
-// spend caps hold for amount more under task (LOG-7, KRN-5). Spend is authorized by the funding key's spend caveat,
-// whatever clerk the key was issued for, and a key with no spend cap funds
-// nothing. The kernel runs it in AdmitSpend, the check a clerk makes before a
+// spend caps hold for amount more under task (LOG-7, KRN-5). Spend is
+// authorized by the funding key's spend caveat, whatever clerk the key was
+// issued for, and a key with no spend cap funds nothing. The kernel runs it in AdmitSpend, the check a clerk makes before a
 // call; Meter records usage and does not run it.
 func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 	if r := v.Live(c); r != nil {

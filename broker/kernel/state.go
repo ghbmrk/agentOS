@@ -171,15 +171,9 @@ func (p Plan) text() bool {
 // Step is step i as the key is checked against it and the clerk sees it.
 func (p Plan) Step(i int) key.Step { return Normalize(p.Task(), p.Steps[i]) }
 
-// Task is what the plan's steps and metered calls are charged under: the task
-// its key serves (KRN-5), so a per-task cap spans every re-plan of the task;
-// for a key that serves none, the plan itself.
-func (p Plan) Task() string {
-	if t := key.TaskOf(p.Key); t != "" {
-		return t
-	}
-	return p.ID
-}
+// Task is what the plan's steps and metered calls are charged under
+// (key.ChargeTask).
+func (p Plan) Task() string { return key.ChargeTask(p.Key, p.ID) }
 
 // Entry bodies.
 type (
@@ -464,7 +458,7 @@ func Shape(s key.Step) string {
 
 // Normalize is the one place a submitted step becomes the step the key is
 // checked against. The planner writes only arguments, and none of them counts
-// as owner or clerk sourced; the task is task (Plan.Task), the recipient is the verb's object
+// as owner or clerk sourced; the task is task (Plan.Task, key.ChargeTask), the recipient is the verb's object
 // argument and the amount is the "amount" argument in its one canonical
 // spelling, any other (010, +10) unreadable and so negative, which Authorize
 // refuses; one spelling per number keeps the duplicate fingerprint exact. The kernel, the clerk and a replay all see
@@ -805,7 +799,7 @@ func (s *State) planTask(plan string) string {
 	if p := s.Plans[plan]; p != nil {
 		return p.Plan.Task()
 	}
-	return plan
+	return key.PlanPrefix + plan
 }
 
 // Apply folds one entry. It is deterministic and does no I/O, so the live

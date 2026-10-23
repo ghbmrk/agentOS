@@ -280,3 +280,28 @@ func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A plan whose key serves no task is charged as itself, never as a task it
+// is named like: the planner chooses plan ids, so a plan named "t1" spends
+// none of task t1's budget, and no task opens under the plans' prefix
+// (KRN-5, LOG-7, #2927 L3 fix-list 1).
+func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	t1, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask("t1"))
+	must(t, err)
+	modelPlan(r, "t1", k)
+	modelPlan(r, "p2", t1)
+	must(t, r.meter(1, "t1", "api", 10, "provider"))
+	if rf := r.admit(2, "p2", 10); rf != nil {
+		t.Fatalf("a plan named like the task drained it: %v", rf)
+	}
+	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("the plan's own cap: %v", rf)
+	}
+	if err := r.k.OpenTask(3, key.PlanPrefix+"t1"); err == nil {
+		t.Fatal("a task opened under the plans' prefix")
+	}
+	r.replays()
+}

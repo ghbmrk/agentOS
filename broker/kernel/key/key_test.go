@@ -239,6 +239,9 @@ func TestAKeyServesOnlyItsTask(t *testing.T) {
 	if TaskOf(served) != "t1" || TaskOf(k) != "" || TaskOf(Key{}) != "" {
 		t.Fatalf("TaskOf: %q %q", TaskOf(served), TaskOf(k))
 	}
+	if ChargeTask(served, "p") != "t1" || ChargeTask(k, "t1") != PlanPrefix+"t1" {
+		t.Fatalf("ChargeTask: %q %q", ChargeTask(served, "p"), ChargeTask(k, "t1"))
+	}
 	v := verified(t, served, o, h)
 	s := step(Trash)
 	s.Task = "t1"
