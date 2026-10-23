@@ -244,9 +244,15 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
         for ns in (BOX, LAN, FAR):
             sh("ip", "netns", "add", ns)
             sh("ip", "link", "set", "lo", "up", ns=ns)
+        # Forwarding goes on first, as NetworkManager turns it on before the link carries traffic.
+        sh("sysctl", "-qw", "net.ipv4.ip_forward=1", ns=BOX)
+        if IPV6:
+            sh("sysctl", "-qw", "net.ipv6.conf.all.forwarding=1", ns=BOX)
         for box, ns, peer, v4, v6 in (("eth0", LAN, "l0", "192.0.2", LAN_NET6), ("usb0", FAR, "f0", "198.51.100", FAR_NET6)):
             sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", ns)
             for n, dev, host in ((BOX, box, 1), (ns, peer, 2)):
+                if IPV6:
+                    sh("sysctl", "-qw", "net.ipv6.conf.%s.accept_dad=0" % dev, ns=n)
                 sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=n)
                 if IPV6:
                     sh("ip", "-6", "addr", "add", "%s%d/64" % (v6, host), "dev", dev, "nodad", ns=n)
@@ -254,9 +260,6 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
             sh("ip", "route", "add", "default", "via", v4 + ".1", ns=ns)
             if IPV6:
                 sh("ip", "-6", "route", "add", "default", "via", v6 + "1", ns=ns)
-        sh("sysctl", "-qw", "net.ipv4.ip_forward=1", ns=BOX)
-        if IPV6:
-            sh("sysctl", "-qw", "net.ipv6.conf.all.forwarding=1", ns=BOX)
         p = subprocess.Popen(["ip", "netns", "exec", FAR, "python3", "-c", LISTEN, "6" if IPV6 else "4"])
         self.procs.append(p)
         for _ in range(50):
@@ -280,9 +283,24 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
     def far(self):
         return ["198.51.100.2"] + ([FAR_NET6 + "2"] if IPV6 else [])
 
+    def routes(self, addr):
+        # The control: a freshly linked network may need a moment for neighbour discovery.
+        for _ in range(10):
+            if reaches(LAN, addr):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def diagnose(self):
+        return "".join(sh(*c, ns=n, check=False).stdout
+                       for n in (BOX, LAN, FAR) for c in (("ip", "-6", "addr"), ("ip", "-6", "route"), ("ip", "-6", "neigh"))) \
+            + sh("sysctl", "net.ipv6.conf.all.forwarding", "net.ipv6.conf.eth0.forwarding",
+                 "net.ipv6.conf.usb0.forwarding", ns=BOX, check=False).stdout
+
     def test_forwarding_turned_on_routes_nothing(self):
         for addr in self.far():
-            self.assertTrue(reaches(LAN, addr), "control: the box does not route to %s before the rules" % addr)
+            self.assertTrue(self.routes(addr), "control: the box does not route to %s before the rules\n%s"
+                            % (addr, self.diagnose()))
         self.nft(NM_SHARED)
         self.nft(RULES.read_text())
         for addr in self.far():
