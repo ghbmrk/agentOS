@@ -22,6 +22,12 @@ type fakePC struct {
 	auth     map[string][]byte
 	broken   bool // the TPM stops answering
 	noIncr   bool // increments fail
+	// halfDefines is how many more Defines make the counter and then
+	// report an error, as a TPM that defines the index and fails its
+	// first increment does.
+	halfDefines int
+	findErr     bool // Find fails
+	noDefine    bool // Define fails and makes nothing
 }
 
 func newPC(host string) *fakePC {
@@ -33,7 +39,7 @@ var errTPM = errors.New("tpm not answering")
 func (p *fakePC) Host() string { return p.host }
 
 func (p *fakePC) Find(id []byte) ([]byte, bool, error) {
-	if p.broken {
+	if p.broken || p.findErr {
 		return nil, false, errTPM
 	}
 	_, ok := p.counters[hex.EncodeToString(id)]
@@ -41,12 +47,16 @@ func (p *fakePC) Find(id []byte) ([]byte, bool, error) {
 }
 
 func (p *fakePC) Define(id, auth []byte) ([]byte, error) {
-	if p.broken {
+	if p.broken || p.noDefine {
 		return nil, errTPM
 	}
 	k := hex.EncodeToString(id)
 	if _, ok := p.counters[k]; !ok {
 		p.counters[k], p.auth[k] = p.max, append([]byte(nil), auth...)
+	}
+	if p.halfDefines > 0 {
+		p.halfDefines--
+		return nil, errTPM
 	}
 	return id, nil
 }
@@ -425,6 +435,91 @@ func TestFailedAnchorLeavesNoPendingAnchor(t *testing.T) {
 	defer v.Close()
 	if err := v.Bind(pc); !errors.Is(err, ErrRolledBack) {
 		t.Fatalf("copy from the failed-anchor window: %v", err)
+	}
+}
+
+// A Define that makes the counter and then reports an error keeps the
+// pending anchor: dropping it would leave this PC holding a counter for
+// the vault and the current file with no anchor, refused as an old copy.
+// One failure is recovered in the same call.
+func TestHalfDefinedCounterIsAdoptedAtOnce(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	pc.halfDefines = 1
+	if err := v.Anchor(pc); err != nil {
+		t.Fatalf("Anchor after one half-made counter: %v", err)
+	}
+	if a := v.Anchors(); len(a) != 1 || a[0].Pending {
+		t.Fatalf("anchor not adopted: %+v", a)
+	}
+}
+
+// When the counter keeps failing after it is made, Anchor reports the
+// error and keeps the pending anchor; a retry on the open vault, or the
+// next unlock on the same PC, adopts the counter, and a copy from before
+// anchoring, or from after it, is then refused.
+func TestHalfDefinedCounterRetryAndReopen(t *testing.T) {
+	for _, reopen := range []bool{false, true} {
+		d, pc := newDrive(t), newPC("alpha")
+		v := d.open()
+		mustPut(t, v, "openai", "sk-canary-before-anchor")
+		before := d.copy()
+		pc.halfDefines = 2
+		if err := v.Anchor(pc); err == nil {
+			t.Fatal("Anchor succeeded with a failing counter")
+		}
+		if a := v.Anchors(); len(a) != 1 || !a[0].Pending {
+			t.Fatalf("pending anchor dropped with its counter made: %+v", a)
+		}
+		if reopen {
+			v.Close()
+			v = d.open()
+			if err := v.Bind(pc); err != nil {
+				t.Fatalf("reopen on the same PC: %v", err)
+			}
+		} else if err := v.Anchor(pc); err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		if a := v.Anchors(); len(a) != 1 || a[0].Pending {
+			t.Fatalf("counter not adopted (reopen=%v): %+v", reopen, a)
+		}
+		mustPut(t, v, "github", "ghp-canary-anchored")
+		after := d.copy()
+		v.Delete("openai")
+		v.Close()
+
+		for name, old := range map[string][]byte{"before anchoring": before, "after anchoring": after} {
+			d.putBack(old)
+			v = d.open()
+			if err := v.Bind(pc); !errors.Is(err, ErrRolledBack) {
+				t.Fatalf("copy from %s (reopen=%v): %v", name, reopen, err)
+			}
+			v.Close()
+		}
+	}
+}
+
+// Re-trusting a PC whose counter went, when no new counter can be made,
+// puts the old anchor back rather than removing it: the PC still reports
+// its counter missing.
+func TestFailedRetrustKeepsMissingAnchor(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	pc.counters = map[string]uint64{}
+	pc.noDefine = true
+	if err := v.Anchor(pc); err == nil {
+		t.Fatal("re-trust succeeded without a counter")
+	}
+	if a := v.Anchors(); len(a) != 1 || a[0].Pending || a[0].Ref == nil {
+		t.Fatalf("anchor after failed re-trust: %+v", a)
+	}
+	if err := v.Bind(pc); !errors.Is(err, ErrCounterMissing) {
+		t.Fatalf("after failed re-trust: %v", err)
 	}
 }
 

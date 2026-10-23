@@ -205,6 +205,9 @@ func (v *Vault) Anchor(c Counter) error {
 	if err := v.ensureID(); err != nil {
 		return err
 	}
+	// missing is the anchor whose counter went, if this call replaced it
+	// with a pending one.
+	var missing *Anchor
 	err := v.bind(c)
 	if errors.Is(err, ErrCounterMissing) {
 		// Trusting the PC again after its counter went: make a new one.
@@ -217,6 +220,7 @@ func (v *Vault) Anchor(c Counter) error {
 			v.anchors[i] = prev
 			return werr
 		}
+		missing = &prev
 	} else if err != nil {
 		return err
 	}
@@ -234,18 +238,46 @@ func (v *Vault) Anchor(c Counter) error {
 	}
 	ref, err := c.Define(v.id, v.counterAuth)
 	if err != nil {
-		// No counter was made (NV full, TPM refusing): take the pending
-		// anchor back out, so a pending anchor survives only a crash
-		// between the two writes (review of #45, B2). Left in, every
-		// later write would carry it, and a copy taken meanwhile would
-		// adopt the counter once one is made.
-		next := append(append([]Anchor(nil), v.anchors[:i]...), v.anchors[i+1:]...)
-		if werr := v.landed(v.write(next)); werr == nil {
-			v.anchors = next
-		}
-		return fmt.Errorf("vault: rollback counter: %w", err)
+		return v.defineFailed(c, i, missing, err)
 	}
 	return v.adopt(c, i, ref)
+}
+
+// defineFailed settles anchor i, pending, after Define reported an error.
+// A failed Define may still have made the counter: the TPM can define the
+// index and then fail its first increment, or answer the define with an
+// error after doing it. Only when Find shows no counter is the pending
+// anchor taken back out (review of #45, B2): left in, every later write
+// would carry it, and a copy taken meanwhile would adopt the counter once
+// one is made. When a counter is there, this file is the one it was made
+// for, so the anchor stays and the counter is adopted now if it answers,
+// or by the next Bind or Anchor; dropping the anchor would leave this PC
+// holding a counter for the vault and a current file with no anchor for
+// it, which Bind refuses as an old copy. When Find fails too (the TPM
+// stopped answering), the anchor comes out as when no counter was made,
+// so B2 holds for a silent TPM. missing, if set, is the anchor this call
+// replaced because its counter went; it goes back in place of the pending
+// one, since an anchor is never removed. Caller holds mu.
+func (v *Vault) defineFailed(c Counter, i int, missing *Anchor, derr error) error {
+	derr = fmt.Errorf("vault: rollback counter: %w", derr)
+	if _, ok, ferr := c.Find(v.id); ferr == nil && ok {
+		ref, err := c.Define(v.id, v.counterAuth)
+		if err != nil {
+			return derr
+		}
+		return v.adopt(c, i, ref)
+	}
+	var next []Anchor
+	if missing != nil {
+		next = append([]Anchor(nil), v.anchors...)
+		next[i] = *missing
+	} else {
+		next = append(append([]Anchor(nil), v.anchors[:i]...), v.anchors[i+1:]...)
+	}
+	if werr := v.landed(v.write(next)); werr == nil {
+		v.anchors = next
+	}
+	return derr
 }
 
 // adopt points anchor i at the counter ref, binds it, and writes the file.
