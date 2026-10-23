@@ -59,7 +59,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         if: env.RECORDS != 'true'
         with:
-          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         if: env.RECORDS != 'true'
@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
@@ -285,7 +285,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
@@ -324,7 +324,7 @@ jobs:
         # func in that package. FuzzSlots writes sealed files per input (~100 execs/s), so its
         # first chunk is 2000 execs: fuzzrun's default 20000 overran the chunk's cap.
         run: |
-          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000 clerk/seal:FuzzParse; do
+          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000 clerk/seal:FuzzParse kernel/key:FuzzRefModel; do
             IFS=: read -r pkg target cal <<< "$t"
             python3 ../tools/fuzzrun.py --pkg "./$pkg" --target "$target" ${cal:+--calibrate "$cal"} --budget 20s || exit 1
           done
@@ -351,7 +351,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |

@@ -1,5 +1,6 @@
 """Tests for tools/ci_scope.py and its wiring into the workflows (CI-docs)."""
 import pathlib
+import posixpath
 import re
 import subprocess
 import sys
@@ -86,7 +87,7 @@ class ScopeTest(unittest.TestCase):
 
     def test_prose_no_test_reads_is_a_record(self):
         # REQ: CI-PATHS
-        for p in ("README.md", "PLAN.md", "SPEC.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
+        for p in ("README.md", "PLAN.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
                   "docs/LANES.md", "docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md", "docs/conv-3-triage.md", "docs/conv-5-uncovered.md",
                   "docs/development/trial-measurements.md", "docs/learning/new.md",
                   "docs/security/provider-worker-isolation.md", "docs/security/deep/x.md"):
@@ -94,9 +95,9 @@ class ScopeTest(unittest.TestCase):
 
     def test_prose_a_test_or_tool_reads_stays_full(self):
         # REQ: CI-PATHS
-        # owners-guide.md: broker/hostchange's Go test reads it. The rest are not Markdown
-        # prose, or sit outside the listed paths.
-        for p in ("docs/owners-guide.md", "docs/security/provider-worker-surfaces.csv",
+        # owners-guide.md: broker/hostchange's Go test reads it; SPEC.md: broker/browser's.
+        # The rest are not Markdown prose, or sit outside the listed paths.
+        for p in ("docs/owners-guide.md", "SPEC.md", "docs/security/provider-worker-surfaces.csv",
                   "docs/development/x.sh", "docs/new-top-level.md"):
             self.assertEqual(ci_scope.scope_of([p]), ("full", p), p)
 
@@ -218,7 +219,7 @@ MACHINES_LINES = [
     '          persist-credentials: false',
     '      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0',
     '        with:',
-    '          go-version: "1.26.8" # = broker/go.mod\'s toolchain line; checked below',
+    '          go-version: "1.26.10" # = broker/go.mod\'s toolchain line; checked below',
     '          cache: false',
     '      - name: Go is the toolchain go.mod names',
     '        run: |',
@@ -308,6 +309,56 @@ def machines_problems(ci):
     return problems
 
 
+GO_STRING = re.compile(r'"((?:[^"\\\n]|\\.)*)"|`([^`]*)`')
+GO_JOIN = re.compile(r'filepath\.Join\(((?:\s*(?:"[^"\n]*"|`[^`]*`)\s*,?)+)\)')
+GO_EMBED = re.compile(r"^//go:embed (.+)$", re.M)
+
+
+def go_record_refs(path, text):
+    """Record paths a Go file names: a string literal, an all-literal filepath.Join or a
+    go:embed pattern. A literal counts as written (repository-relative) and relative to the
+    file's package directory, where `go test` runs; an embed only the latter. A record
+    directory itself counts."""
+    names = [a or b for a, b in GO_STRING.findall(text)]
+    names += ["/".join(a or b for a, b in GO_STRING.findall(m)) for m in GO_JOIN.findall(text)]
+    pkg = posixpath.dirname(path)
+    embeds = [posixpath.join(pkg, w) for m in GO_EMBED.findall(text) for w in m.split()]
+    dirs = tuple(d.rstrip("/") for d in ci_scope.RECORD_DIRS)
+    found = []
+    for n in names + embeds:
+        for c in {posixpath.normpath(n), posixpath.normpath(posixpath.join(pkg, n))}:
+            if ci_scope.is_record(c) or c in dirs:
+                found.append(c)
+    return sorted(set(found))
+
+
+class GoReaderTest(unittest.TestCase):
+    """ci_scope's rule, enforced: no Go file reads a record, since the records run skips Go."""
+
+    def test_no_go_file_names_a_record(self):
+        # REQ: CI-PATHS
+        files = [f for f in git(ROOT, "ls-files", "-z", "--", "*.go").split("\0")
+                 if f and not f.startswith("broker/vendor/")]
+        self.assertIn("broker/browser/site_test.go", files)
+        bad = {f: r for f in files if (r := go_record_refs(f, (ROOT / f).read_text(errors="replace")))}
+        self.assertEqual(bad, {}, "a Go file reads a record: drop that path from tools/ci_scope.py's set")
+
+    def test_the_scan_finds_each_form(self):
+        f = "broker/x/x_test.go"
+        for src, want in (('os.ReadFile("../../SPEC.md")', []),
+                          ('os.ReadFile("../../PLAN.md")', ["PLAN.md"]),
+                          ("os.ReadFile(`../../docs/OPERATING.md`)", ["docs/OPERATING.md"]),
+                          ('filepath.Join("..", "..", "BOARD.md")', ["BOARD.md"]),
+                          ('os.ReadDir("../../reviews")', ["reviews"]),
+                          ('os.ReadFile("../../reviews/l3/README.md")', ["reviews/l3/README.md"]),
+                          ('const p = "DECISIONS.md"', ["DECISIONS.md"]),
+                          ("//go:embed CLAUDE.md", []),
+                          ('os.ReadFile("../../docs/owners-guide.md")', []),
+                          ('m := map[string]string{"skill/SKILL.md": "x", "a.md": "y"}', [])):
+            self.assertEqual(go_record_refs(f, src), want, src)
+        self.assertEqual(go_record_refs("docs/x.go", "//go:embed LANES.md\n"), ["docs/LANES.md"])
+
+
 class WiringTest(unittest.TestCase):
     """The workflows fail safe: only an exact 'true' from scope skips anything."""
 
@@ -354,11 +405,11 @@ class WiringTest(unittest.TestCase):
                      "tests.test_g1_scope.CheckTest", "tests.test_g1_scope.ListTest"):
             self.assertIn(name, records_audit.records_run_tests())
 
-    def test_a_spec_only_change_runs_the_spec_readers(self):
+    def test_a_spec_only_change_runs_full_ci(self):
         # REQ: CI-PATHS
-        # SPEC.md is a record, so a SPEC-only PR takes the records run, whose list full CI's
-        # record-read audit (tests/records_audit.py) holds to every reader.
-        self.assertEqual(ci_scope.scope_of(["SPEC.md"]), ("records", None))
+        # broker/browser's Go test reads SPEC.md, and the records run skips the Go jobs, so a
+        # SPEC-only PR takes full CI (the records run alone let a SPEC edit break main).
+        self.assertEqual(ci_scope.scope_of(["SPEC.md"]), ("full", "SPEC.md"))
 
     def test_full_unit_tests_audit_record_reads_against_the_records_step(self):
         # REQ: CI-PATHS
@@ -404,7 +455,7 @@ class WiringTest(unittest.TestCase):
         own = '1 openat(AT_FDCWD<{r}>, "{r}/tests/__pycache__/test_m.cpython-312.pyc", O_RDONLY) = 3<{r}/tests/__pycache__/test_m.cpython-312.pyc>\n'
         end = "1 +++ exited with 0 +++\n"
         reads = {
-            "SPEC.md": '2 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3<{r}/SPEC.md>\n',
+            "README.md": '2 openat(AT_FDCWD<{r}>, "README.md", O_RDONLY) = 3<{r}/README.md>\n',
             "docs/OPERATING.md": '3 openat(AT_FDCWD</>, "{r}/docs/OPERATING.md", O_RDONLY) = -1 EACCES (Permission denied)\n',
             "reviews/l3": '4 openat(5<{r}/reviews>, "l3", O_RDONLY|O_DIRECTORY) = 6<{r}/reviews/l3>\n',
             "BOARD.md": '5 open("BOARD.md", O_RDONLY <unfinished ...>\n',
@@ -415,11 +466,11 @@ class WiringTest(unittest.TestCase):
                          '8 <... openat resumed>) = 3<{r}/LEDGER.md>\n',
             ".git/objects/ab/cdef": '10 openat(AT_FDCWD<{r}>, ".git/objects/ab/cdef", O_RDONLY) = 3<{r}/.git/objects/ab/cdef>\n',
         }
-        quiet = ('11 openat(AT_FDCWD</tmp/x>, "SPEC.md", O_WRONLY|O_CREAT, 0644) = 3</tmp/x/SPEC.md>\n'
+        quiet = ('11 openat(AT_FDCWD</tmp/x>, "README.md", O_WRONLY|O_CREAT, 0644) = 3</tmp/x/README.md>\n'
                  '12 openat(AT_FDCWD<{r}>, "docs/owners-guide.md", O_RDONLY) = 3<{r}/docs/owners-guide.md>\n'
                  '13 openat(AT_FDCWD<{r}>, "docs", O_RDONLY|O_DIRECTORY) = 3<{r}/docs>\n'
-                 '14 openat(AT_FDCWD<{r}>, "SPEC.md", O_RDONLY) = 3</tmp/copy.md>\n'
-                 '15 execve("/usr/bin/cat", ["cat", "SPEC.md"], 0x1 /* 3 vars */) = 0\n')
+                 '14 openat(AT_FDCWD<{r}>, "README.md", O_RDONLY) = 3</tmp/copy.md>\n'
+                 '15 execve("/usr/bin/cat", ["cat", "README.md"], 0x1 /* 3 vars */) = 0\n')
         problems = records_audit.problems
 
         def trace(*parts):
@@ -429,7 +480,7 @@ class WiringTest(unittest.TestCase):
             self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m.A", "tests.test_m.A.test_a"]),
                              [f"tests.test_m\t{rel}"], rel)
             self.assertEqual(problems(trace(own, quiet, line, end), ["tests.test_m"]), [], rel)
-        self.assertEqual(problems(trace(reads["SPEC.md"], end), ["tests.test_m"]),
+        self.assertEqual(problems(trace(reads["README.md"], end), ["tests.test_m"]),
                          ["tests.test_m\tno open of the module's own file: tracing did not run"])
         self.assertEqual(problems(trace(own, quiet, "16 +++ exited with 0 +++\n"), ["tests.test_m"]),
                          ["tests.test_m\tthe trace ends before the module's run exits: it was cut short"])

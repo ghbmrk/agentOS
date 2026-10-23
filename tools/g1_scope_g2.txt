@@ -40,6 +40,11 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
+# #2896 (STO-2b-1): adds broker/cmd/agentos-kernel/ and broker/cmd/agentos-unlock/, which
+# are in G2's scope but not yet on main. An allow line must name a path in the repo
+# (test_every_entry_exists), so this exempts it until it merges; then two allow lines
+# replace it, as #2545's did.
+exempt-pr 2896
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
