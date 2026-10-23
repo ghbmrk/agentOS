@@ -140,7 +140,7 @@ class TreeCheckTest(unittest.TestCase):
 
     # REQ: DEV-2, CH-9
     def test_distro_network_files_are_refused(self):
-        # #1478: agentos_inbound has only an input hook, so nothing may turn on forwarding. Debian's
+        # #1478: nothing may turn on forwarding (agentos_inbound's forward drop, #2824, is the other layer). Debian's
         # container and VM files set IPMasquerade=both (which turns it on) and the ad-hoc one turns
         # on multicast DNS on a radio; the built tree must carry none of them live.
         for name, body in DISTRO_NETWORKS.items():
@@ -1211,20 +1211,26 @@ class ApExemptTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def nft(self, fail="", ap="wlap0", members='"lo"'):
+    def nft(self, fail="", ap="wlap0", members='"lo"', fwd=("iifname", "oifname")):
         # Logs each call, and the script of "nft -f -"; FAIL names the call ("list set",
         # "list chain", "add", "get", "-f") that fails. "list chain" prints agentos_ap's input chain
-        # for AP, as nft prints it (absent when AP is empty); "list set" prints MEMBERS.
+        # for AP, as nft prints it (absent when AP is empty), or its forward chain with a drop for
+        # AP on each side FWD names; "list set" prints MEMBERS.
         stub(self.bin, "nft", r"""echo "$*" >>"%(log)s"
 [ "$1" = -f ] && sed 's/^/  /' >>"%(log)s"
 case "$1 $2" in "%(fail)s" | "%(fail)s "*) echo "nft: $1 failed" >&2; exit 1 ;; esac
 case "$1 $2" in
 "list chain") [ -n "%(ap)s" ] || exit 1
-  printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
-  printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n' ;;
+  if [ "$5" = forward ]; then
+    for k in %(fwd)s; do printf '\t\t%%s "%(ap)s" drop\n' "$k"; done
+  else
+    printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
+    printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n'
+  fi ;;
 "list set") echo "elements = { %(members)s }" ;;
 esac
-exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"')))
+exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"'),
+                 fwd=" ".join(fwd)))
 
     def run_exempt(self, *args):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_SYSFS=str(self.sys))
@@ -1241,6 +1247,7 @@ exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.repla
         self.assertEqual(self.calls(), [
             "list set inet agentos_inbound exempt",
             "list chain inet agentos_ap input",
+            "list chain inet agentos_ap forward",
             'add element inet agentos_inbound exempt { "wlap0" }',
             'get element inet agentos_inbound exempt { "wlap0" }',
         ])
@@ -1271,6 +1278,19 @@ exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.repla
                 r = self.run_exempt(iface)
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertIn("agentos_ap is not loaded for %s" % iface, r.stdout)
+                self.assertFalse([c for c in self.calls() if c.startswith("add")])
+
+    def test_only_an_access_point_whose_forwarding_agentos_ap_drops_is_added(self):
+        # #2824: the exempt set also exempts the interface from agentos_inbound's forward drop, so
+        # agentos_ap's forward chain must drop it in both directions (passthrough is accepted
+        # before those drops), or it stays closed.
+        for fwd in ((), ("iifname",), ("oifname",)):
+            with self.subTest(forward_drops=fwd):
+                self.log.unlink(missing_ok=True)
+                self.nft(fwd=fwd)
+                r = self.run_exempt("wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos_ap does not drop forwarding for wlap0", r.stdout)
                 self.assertFalse([c for c in self.calls() if c.startswith("add")])
 
     def test_only_a_wireless_interface_is_added(self):
@@ -4432,9 +4452,13 @@ class ExecAllowTest(unittest.TestCase):
             if ln and not ln.startswith("#"):
                 rel, tab, value = ln.partition("\t")
                 self.assertTrue(tab, ln)
-                self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
+                self.assertRegex(rel, r"^((etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
                                       r"((environment-)?generators|shutdown|sleep)/[^/]+|"
-                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)$")
+                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)|"
+                                      # #2622: bus and polkit policy, and NetworkManager's unit.
+                                      r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
+                                      r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
+                                      r"system\.conf)|usr/lib/systemd/system/NetworkManager\.service)$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
@@ -4561,6 +4585,69 @@ class ExecAllowTest(unittest.TestCase):
         p = write(self.root, "usr/lib/modules-load.d/x.conf", "tun\n")
         p.chmod(0o666)
         self.assertIn("usr/lib/modules-load.d/x.conf: unreadable", " | ".join(self.v()))
+
+    # #2622 item 3: the bus and authorisation policy packages ship, every entry in every directory.
+    POLICY = ("etc/polkit-1/rules.d/49-x.rules", "usr/local/share/polkit-1/rules.d/49-x.rules",
+              "usr/share/polkit-1/rules.d/49-x.rules", "usr/share/polkit-1/actions/x.policy",
+              "etc/dbus-1/system.d/x.conf", "etc/dbus-1/system-local.conf", "etc/dbus-1/system.conf",
+              "usr/local/share/dbus-1/system.d/x.conf", "usr/share/dbus-1/system.d/x.conf",
+              "usr/share/dbus-1/system.conf", "usr/share/dbus-1/system-services/x.service",
+              "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
+              # Names a reader's own filter might skip are hashed all the same.
+              "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+    YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
+    NETJOIN = {"usr/share/polkit-1/rules.d/50-agentos-netjoin.rules": "50-agentos-netjoin.rules",
+               "usr/share/dbus-1/system.d/agentos-netjoin.conf": "agentos-netjoin.conf"}
+
+    def test_policy_files_are_held_by_hash(self):
+        for rel in self.POLICY:
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, self.YES)
+                listed = rel
+                want = "%s: not on the boot-code allowlist (%s, #1556)" % (listed, check.EXEC_ALLOW_REPO)
+                v = self.v()
+                self.assertEqual(len(v), 1, v)
+                self.assertTrue(v[0].startswith(want), v)
+                self.assertTrue(v[0].endswith("entry: %s\t%s" % (listed, self.entry(self.YES))), v)
+                self.assertIn(want, " | ".join(check.violations(self.root)))
+                allowed = check.exec_allowed() | {(listed, self.entry(self.YES))}
+                self.assertEqual(self.v(allowed), [])
+                write(self.root, rel, self.YES.replace("YES", "AUTH_ADMIN"))
+                self.assertTrue(self.v(allowed))
+                p.unlink()
+
+    def test_policy_links_run_and_unreadable_are_refused(self):
+        write(self.root, "var/tmp/x.rules", self.YES)
+        f = link(self.root, "usr/share/polkit-1/rules.d/49-x.rules", "/var/tmp/x.rules")
+        self.assertIn("usr/share/polkit-1/rules.d/49-x.rules: unreadable (", " | ".join(self.v()))
+        f.unlink()
+        (self.root / "usr/share/polkit-1/rules.d").rmdir()
+        (self.root / "var/tmp/r").mkdir()
+        f = link(self.root, "usr/share/polkit-1/rules.d", "/var/tmp/r")
+        self.assertIn("usr/share/polkit-1/rules.d: unreadable (", " | ".join(self.v()))
+        f.unlink()
+        # A directory where a policy directory should be is refused, never skipped.
+        write(self.root, "etc/dbus-1", "")
+        self.assertIn("etc/dbus-1: unreadable (not a directory", " | ".join(self.v()))
+        (self.root / "etc/dbus-1").unlink()
+        p = write(self.root, "etc/dbus-1/system.d/x.conf", "<busconfig/>\n")
+        p.chmod(0o666)
+        self.assertIn("etc/dbus-1/system.d/x.conf: unreadable", " | ".join(self.v()))
+        p.unlink()
+        write(self.root, "run/polkit-1/rules.d/x.rules", self.YES)
+        self.assertIn("run/polkit-1/rules.d: not on the boot-code allowlist; /run is a tmpfs on the box",
+                      " | ".join(self.v()))
+
+    def test_the_netjoin_policy_is_listed_as_build_sh_installs_it(self):
+        # build.sh copies both files from broker/cmd/agentos-netjoin; their entries are the source's hash.
+        allowed = check.exec_allowed()
+        build = (IMG / "build.sh").read_text()
+        for rel, src in self.NETJOIN.items():
+            with self.subTest(rel=rel):
+                self.assertIn('"$STAGE/%s"' % rel, build)
+                data = (ROOT / "broker/cmd/agentos-netjoin" / src).read_text()
+                self.assertIn((rel, self.entry(data)), allowed)
 
     def test_found_under_mkosi_and_missing_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

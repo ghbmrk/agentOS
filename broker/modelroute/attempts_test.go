@@ -9,14 +9,19 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // REQ: OP-8, ARC-7 (SR3-7-f1b, SR3-7-f1c)
 
 const attemptsBody = `{"model":"default","max_tokens":100}`
 
+// estimate is the meter's input estimate for an n-byte body: four bytes a
+// token, rounded up.
+func estimate(n int64) int64 { return (n + 3) / 4 }
+
 // attemptWorst is one attempt's worst charge for attemptsBody.
-var attemptWorst = meter.Tokens(int64(len(attemptsBody))) + 100
+var attemptWorst = estimate(int64(len(attemptsBody))) + 100
 
 func attemptsMeter(t *testing.T, tokens int64) *meter.Meter {
 	t.Helper()
@@ -70,7 +75,7 @@ func TestSR3_7f1bAllowanceIsTheBrokers(t *testing.T) {
 // for a call no route served; a trailer saying nothing was sent upstream
 // leaves the meter its own count; the allowance not spent is refunded.
 func TestSR3_7f1cTrailerCarriesFailedAttempts(t *testing.T) {
-	in := meter.Tokens(int64(len(attemptsBody)))
+	in := estimate(int64(len(attemptsBody)))
 	const page = `{"error":{"message":"x"}}`
 	for _, c := range []struct {
 		name, trailer string
@@ -108,7 +113,7 @@ func TestSR3_7f1cTrailerCarriesFailedAttempts(t *testing.T) {
 // that also claims attempts, a status outside HTTP's, or a count out of
 // range.
 func TestSR3_7f1cValidTrailer(t *testing.T) {
-	failed := []meter.Attempt{{Provider: "anthropic", Status: 504, Full: true}}
+	failed := []routerule.Attempt{{Provider: "anthropic", Status: 504, Full: true}}
 	for _, c := range []struct {
 		name string
 		u    Usage
@@ -122,12 +127,12 @@ func TestSR3_7f1cValidTrailer(t *testing.T) {
 		{"none and unserved", Usage{None: true, Unserved: true}, false},
 		{"none with an attempt", Usage{None: true, Failed: failed}, false},
 		{"more attempts than allowed", Usage{Failed: append(failed, failed...), Unserved: true}, false},
-		{"status 99", Usage{Failed: []meter.Attempt{{Status: 99}}, Unserved: true}, false},
-		{"status 600", Usage{Failed: []meter.Attempt{{Status: 600}}, Unserved: true}, false},
-		{"status 100", Usage{Failed: []meter.Attempt{{Status: 100}}, Unserved: true}, true},
-		{"status 599", Usage{Failed: []meter.Attempt{{Status: 599}}, Unserved: true}, true},
+		{"status 99", Usage{Failed: []routerule.Attempt{{Status: 99}}, Unserved: true}, false},
+		{"status 600", Usage{Failed: []routerule.Attempt{{Status: 600}}, Unserved: true}, false},
+		{"status 100", Usage{Failed: []routerule.Attempt{{Status: 100}}, Unserved: true}, true},
+		{"status 599", Usage{Failed: []routerule.Attempt{{Status: 599}}, Unserved: true}, true},
 		{"negative count", Usage{Input: -1}, false},
-		{"negative attempt count", Usage{Failed: []meter.Attempt{{Status: 504, Output: -1}}, Unserved: true}, false},
+		{"negative attempt count", Usage{Failed: []routerule.Attempt{{Status: 504, Output: -1}}, Unserved: true}, false},
 		{"count past 1e12", Usage{Output: 1e12 + 1}, false},
 	} {
 		if got := c.u.valid(0); got != c.want {
@@ -142,7 +147,7 @@ func TestSR3_7f1cValidTrailer(t *testing.T) {
 // with no trailer announced (the vault process's own denial) is left the
 // meter's own count.
 func TestSR3_7f1cTrailerFallbackFailsClosed(t *testing.T) {
-	in := meter.Tokens(int64(len(attemptsBody)))
+	in := estimate(int64(len(attemptsBody)))
 	t.Run("announced, closed unread", func(t *testing.T) {
 		// The meter's writer drains a body the guest hung up on, so the
 		// reverse proxy reads to the end; Close is the path for any other

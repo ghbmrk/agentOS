@@ -153,12 +153,9 @@ var guestPlane = map[string]struct {
 	// The local inference service's protocol and client (INFER-SVC INF-5):
 	// the standard library only, dialing the service's unix socket. Its
 	// supervisor (infer/supervise) has no plane entry: it sets no_new_privs
-	// through golang.org/x/sys/unix, as loop7 does, and
-	// TestAgentosdLinksNoInference holds its imports.
+	// through golang.org/x/sys/unix, and TestAgentosdLinksNoInference
+	// holds its imports.
 	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
-	// Replay (LOOP-5) serves replay machines through a guest plane of its
-	// own: no journal writes, no executors, no network clients.
-	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).
@@ -195,7 +192,9 @@ var learningPlane = map[string]struct {
 	// change reads the closed verb list to check an adapter's demo runs
 	// before adoption (ADP-8b); verb is standard library only.
 	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
-	"loops":  {[]string{"change", "journal", "meter", "owner", "skill/format", "vm"}, forbiddenStd},
+	// loops reads its spare envelope's spend from the kernel's log and
+	// derives the narrower spare keys (MIG-4-spend-m).
+	"loops": {[]string{"change", "journal", "kernel", "kernel/key", "owner", "skill/format"}, forbiddenStd},
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.
 	"skill/format": {nil, forbiddenStd},

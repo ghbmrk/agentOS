@@ -45,6 +45,9 @@ wiring cmd/agentos-a8scan
 # the log, boots the kernel, and carries each call to a clerk's socket.
 wiring clerk/run
 core clerk/inbox
+# The sealed store (STO-2, #2828): the store key's slots and the keys derived
+# from it. Only the unlock step (STO-2b) opens it.
+core clerk/seal
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -106,9 +109,8 @@ open meter.Report
 open meter.Another
 
 allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key (vault TestOnlyRecoveryCallsRebase)
-allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
-allow replay guest.New -- LOOP5 replays a run on its own guest plane
-allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
+allow loops kernel.State.Ledger -- the scheduler reads the spend charged to its spare envelope (MIG-4-spend-m); a read of the folded log that records nothing
+allow loops/loopstest kernel.* -- the spare-envelope test fixture boots a kernel on an in-memory log and drives it as the owner and the model clerk would; only tests import it
 allow clerk/model kernel.Kernel.AdmitSpend -- the model clerk asks the kernel's own check before a call; it is a read of the log and records nothing
 allow clerk/model kernel.Kernel.AdmitPool -- the model clerk asks whether a pool is open; a past reset time logs the widening pool.reset, which the kernel alone decides
 allow clerk/model kernel.Kernel.Meter -- the model clerk records the spend of its own call, charged to the plan's key; the kernel refuses a negative amount and a plan it does not know

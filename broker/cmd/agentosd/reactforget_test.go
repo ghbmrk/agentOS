@@ -27,7 +27,7 @@ func TestADeletionForgetsTheOwnerChannelsRecentReplies(t *testing.T) {
 	if got := say(quote); !strings.Contains(got, "reaction is held") {
 		t.Fatalf("locked reaction: %q", got)
 	}
-	if _, err := (forgetFan{kept: ev.kept}).ForgetTasks("agent/1"); err != nil {
+	if _, err := ev.kept.forget(); err != nil {
 		t.Fatal(err)
 	}
 	if got := say(quote); strings.Contains(got, "both were dropped") || !strings.Contains(got, "reaction is held") {
@@ -49,7 +49,7 @@ func TestAReplyInFlightAcrossADeletionIsForgottenOnSettle(t *testing.T) {
 	ev.kept.fmu.Lock()
 	gen := ev.kept.gen
 	ev.kept.fmu.Unlock()
-	if _, err := (forgetFan{kept: ev.kept}).ForgetTasks("agent/1"); err != nil {
+	if _, err := ev.kept.forget(); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.ch.Converse("The Acme contract renews on the third of March at forty dollars a seat."); err != nil {

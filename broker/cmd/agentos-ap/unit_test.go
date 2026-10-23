@@ -122,7 +122,8 @@ var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
 // maskedDirs are agentosd's state directories under /var/lib/agentos. A
 // mask on a directory survives agentosd's renames inside it, but only if
 // the directory existed at loader start: the "-" skips a missing one, and
-// agentosd makes most of them later (#2626).
+// agentosd makes most of them later (#2626). loop7 is no longer made
+// (#2787 deleted it), but an upgraded box keeps its tree, so it stays masked.
 var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7"}
 
 // lapsingFiles are agentosd's state files at the top of /var/lib/agentos.

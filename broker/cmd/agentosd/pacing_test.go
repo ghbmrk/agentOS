@@ -162,12 +162,10 @@ func TestGrantsWiringReadsTheOwner(t *testing.T) {
 // REQ: CH-15 (W5-Dc-r1b QH-9)
 
 // TestCallersUseTheirClass: in quiet hours, a fork-switch alert goes at
-// once; a forget notice, a forget done text, an agent reply and a recall take-back notice are held, the last two
-// unless their class is urgent (approval is by default, D-129).
+// once and an agent reply is held, unless the owner made agent texts
+// urgent.
 func TestCallersUseTheirClass(t *testing.T) {
 	r := pacedOwner(t, quiet22to7Held(), at23)
-	var ln ownerNotify
-	ln.ch.Store(r.ch)
 	fs := &followSetting{}
 	fs.owner.Store(r.ch)
 	if err := fs.alert(context.Background(), "Updates now come from another source. Not you? Switch back there and change your codes."); err != nil {
@@ -176,52 +174,19 @@ func TestCallersUseTheirClass(t *testing.T) {
 	if got := r.sent(); len(got) != 1 || !strings.Contains(got[0], "Not you?") {
 		t.Fatalf("fork-switch alert: %q", got)
 	}
-	ln.send("Forget notice.")
-	if err := ln.try("Forget done."); err != nil {
-		t.Fatal(err)
-	}
 	ev := &evidence{notify: r.ch.Notify, logf: t.Logf} // as evidence.attach wires it
 	ev.send("agent", "Your invoice is drafted.")
-	notice := recallNotify(func() *ownerch.Channel { return r.ch })
-	if err := notice("Taken back: the agent's work since Monday."); err != nil {
-		t.Fatal(err)
-	}
 	if got := r.sent(); len(got) != 0 {
 		t.Fatalf("paced texts sent in quiet hours: %q", got)
 	}
 
-	// By default the recall notice, approval class, goes at once with
-	// the agent prefix; the agent reply is still held.
-	d := pacedOwner(t, quiet22to7(), at23)
-	ev = &evidence{notify: d.ch.Notify, logf: t.Logf}
-	ev.send("agent", "Your invoice is drafted.")
-	if err := recallNotify(func() *ownerch.Channel { return d.ch })("Taken back."); err != nil {
-		t.Fatal(err)
-	}
-	if got := d.sent(); len(got) != 1 || got[0] != ownerch.AgentPrefix+"Taken back." {
-		t.Fatalf("default: recall notice not sent alone: %q", got)
-	}
-
-	// The owner's urgent classes let agent replies and recall notices
-	// through, with the agent prefix.
+	// The owner's urgent agent class lets agent replies through, with the
+	// agent prefix.
 	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
 	ev = &evidence{notify: u.ch.Notify, logf: t.Logf}
 	ev.send("agent", "Your invoice is drafted.")
-	if err := recallNotify(func() *ownerch.Channel { return u.ch })("Taken back: the agent's work since Monday."); err != nil {
-		t.Fatal(err)
-	}
-	got := u.sent()
-	if len(got) != 2 || !strings.HasPrefix(got[0], ownerch.AgentPrefix) || !strings.HasPrefix(got[1], ownerch.AgentPrefix) {
-		t.Fatalf("urgent agent and approval texts: %q", got)
-	}
-	// Without approval urgent, the recall notice is held even with agent
-	// urgent: it is approval class, not agent.
-	a := pacedOwner(t, quiet22to7Held(ownerch.ClassAgent), at23)
-	if err := recallNotify(func() *ownerch.Channel { return a.ch })("Taken back."); err != nil {
-		t.Fatal(err)
-	}
-	if got := a.sent(); len(got) != 0 {
-		t.Fatalf("recall notice sent as agent class: %q", got)
+	if got := u.sent(); len(got) != 1 || !strings.HasPrefix(got[0], ownerch.AgentPrefix) {
+		t.Fatalf("urgent agent text: %q", got)
 	}
 }
 

@@ -32,11 +32,22 @@ func Routed(r *Router) func(machine string) http.Handler {
 				meter.Report(req.Context(), meter.Usage{
 					Provider: provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 					Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars,
-					Failed: u.Failed, Unserved: u.Unserved,
+					Failed: meterAttempts(u.Failed), Unserved: u.Unserved,
 				})
 			})
 			ctx = WithAttempt(ctx, func() bool { return meter.Another(req.Context()) })
 			h.ServeHTTP(w, req.WithContext(ctx))
 		})
 	}
+}
+
+// meterAttempts is a as the meter's own type, which has the same fields
+// and charges them (Attempt.charge in broker/meter). It goes with Routed
+// once the route handler calls the model clerk (#2583, the Wrap row).
+func meterAttempts(a []Attempt) []meter.Attempt {
+	out := make([]meter.Attempt, len(a))
+	for i, x := range a {
+		out[i] = meter.Attempt(x)
+	}
+	return out
 }

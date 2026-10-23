@@ -108,6 +108,14 @@ func InboundExemptRemove(iface string) (string, error) {
 // source as RFC 4861 allows, all with hop limit 255 so none was routed in;
 // DHCPv4 and DHCPv6 replies from their server ports); the listed devices
 // and discovery ports; and drops everything else.
+//
+// The box routes nothing (image I21), so the table also drops every
+// forwarded packet, IPv4 and IPv6, unless it enters or leaves an exempt
+// interface, whose table governs it (agentos_ap drops all but passthrough).
+// A second table of the same name in the bridge family drops every bridged
+// frame, which the inet hooks never see. Forwarding that NetworkManager or
+// a sysctl turns on (a shared or access-point profile, #2824) is then
+// inert: a drop in any table is final, whatever another table accepts.
 func InboundRules(c Inbound) (string, error) {
 	if err := c.Validate(); err != nil {
 		return "", err
@@ -151,6 +159,16 @@ func InboundRules(c Inbound) (string, error) {
 		line("    udp dport %d accept", discoveryUDP[p])
 	}
 	line("    drop")
+	line("  }")
+	line("  chain forward {")
+	line("    type filter hook forward priority filter; policy drop;")
+	line("    iifname @%s accept", InboundExemptSet)
+	line("    oifname @%s accept", InboundExemptSet)
+	line("  }")
+	line("}")
+	line("table bridge %s {", InboundTable)
+	line("  chain forward {")
+	line("    type filter hook forward priority filter; policy drop;")
 	line("  }")
 	line("}")
 	return b.String(), nil

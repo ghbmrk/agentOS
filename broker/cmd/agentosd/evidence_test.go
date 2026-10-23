@@ -86,12 +86,12 @@ func TestLongRepliesAreKept(t *testing.T) {
 func TestADeletionForgetsKeptReplies(t *testing.T) {
 	r := newEvRig(t)
 	r.ev.kept.keep("quotes the record")
-	n, err := forgetFan{kept: r.ev.kept}.ForgetTasks("agent/1")
+	n, err := r.ev.kept.forget()
 	if n != 0 || err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("forgot %d %v %d", n, err, len(r.ev.kept.list()))
 	}
 	r.ev.kept.keep("again")
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); err != nil || len(r.ev.kept.list()) != 0 {
+	if _, err := r.ev.kept.forget(); err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("again: %v", err)
 	}
 }
@@ -107,11 +107,11 @@ func TestADeletionCountsHeldAgentTexts(t *testing.T) {
 	if err := o.ch.Notify("Held agent text."); err != nil {
 		t.Fatal(err)
 	}
-	n, err := forgetFan{kept: r.ev.kept}.ForgetTasks("agent/1")
+	n, err := r.ev.kept.forget()
 	if n != 1 || err != nil {
 		t.Fatalf("forgot %d %v", n, err)
 	}
-	if n, err := (forgetFan{kept: r.ev.kept}).ForgetTasks(); n != 0 || err != nil {
+	if n, err := r.ev.kept.forget(); n != 0 || err != nil {
 		t.Fatalf("again: %d %v", n, err)
 	}
 }
@@ -148,8 +148,8 @@ func TestSettleAcrossADeletionCountsHeldAgentTexts(t *testing.T) {
 // REQ: CAP3-F1
 // With learning off a deletion still counts the held agent texts it
 // dropped; a settle across a deletion that dropped none tells nothing;
-// and recall's count goes out as the same broker text (later items on
-// #2510).
+// and a count told directly goes out as the same broker text (later
+// items on #2510).
 func TestHeldDroppedCountHasOneSender(t *testing.T) {
 	r := newEvRig(t)
 	o := pacedOwner(t, quiet22to7(), at23)
@@ -158,7 +158,7 @@ func TestHeldDroppedCountHasOneSender(t *testing.T) {
 	if err := o.ch.Notify("Held agent text."); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); n != 1 || err != nil {
+	if n, err := r.ev.kept.forget(); n != 1 || err != nil {
 		t.Fatalf("learning off: forgot %d %v", n, err)
 	}
 	gen, _ := r.ev.kept.pending(&fakeOutbox{})
@@ -169,26 +169,26 @@ func TestHeldDroppedCountHasOneSender(t *testing.T) {
 	if got := o.sent(); len(got) != 0 {
 		t.Fatalf("none held: sent %q", got)
 	}
-	if err := recallHeldDropped(own)(2); err != nil {
+	if err := tellHeldDropped(own(), 2); err != nil {
 		t.Fatal(err)
 	}
 	if got := o.sent(); len(got) != 1 || got[0] != "A deletion dropped 2 held agent texts." {
-		t.Fatalf("recall: sent %q", got)
+		t.Fatalf("told: sent %q", got)
 	}
 }
 
 // REQ: CAP3-F1
 // The count of held agent texts a deletion dropped is a broker text: held
-// in quiet hours under URGENT APPROVAL OFF beside recall's agent-text
-// confirmation, it survives a second forget that drops the confirmation,
+// in quiet hours under URGENT APPROVAL OFF beside an approval-class
+// agent-text confirmation, it survives a second forget that drops the confirmation,
 // and goes at the next release.
 func TestHeldDroppedCountSurvivesNextForget(t *testing.T) {
 	o := pacedOwner(t, quiet22to7Held(), at23)
 	own := func() *owner.Channel { return o.ch }
-	if err := recallNotify(own)("Done: root forgot a mail you deleted."); err != nil {
+	if err := o.ch.NotifyAs(owner.ClassApproval, "Done: root forgot a mail you deleted."); err != nil {
 		t.Fatal(err)
 	}
-	if err := recallHeldDropped(own)(2); err != nil {
+	if err := tellHeldDropped(own(), 2); err != nil {
 		t.Fatal(err)
 	}
 	if got := o.sent(); len(got) != 0 {
@@ -242,25 +242,25 @@ func (f *forgettingOutbox) retired() []string {
 // cannot drop them fails the deletion rather than passing it.
 func TestDEL1f1DeletionReachesTheOutbox(t *testing.T) {
 	r := newEvRig(t)
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+	if _, err := r.ev.kept.forget(); err != nil {
 		t.Fatalf("before the plane opens: %v", err)
 	}
 	src := &forgettingOutbox{fakeOutbox: fakeOutbox{sent: r.texts}}
 	src.add("quotes the record")
 	r.ev.kept.keep("quotes it too")
 	r.ev.serve(src)
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+	if _, err := r.ev.kept.forget(); err != nil {
 		t.Fatalf("forget: %v", err)
 	}
 	if len(src.PendingReplies()) != 0 || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("left %d waiting, %d kept", len(src.PendingReplies()), len(r.ev.kept.list()))
 	}
 	src.fail = errors.New("outbox not saved")
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); !errors.Is(err, src.fail) {
+	if _, err := r.ev.kept.forget(); !errors.Is(err, src.fail) {
 		t.Fatalf("failed drop: %v", err)
 	}
 	r.ev.serve(&fakeOutbox{sent: r.texts})
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err == nil {
+	if _, err := r.ev.kept.forget(); err == nil {
 		t.Fatal("an outbox the deletion cannot reach passed")
 	}
 }
@@ -291,7 +291,7 @@ func TestDEL1f1ForgetDuringARoute(t *testing.T) {
 	go r.ev.run(ctx)
 	r.ev.serve(src)
 	<-started
-	if _, err := (forgetFan{kept: r.ev.kept}).ForgetTasks("agent/1"); err != nil {
+	if _, err := r.ev.kept.forget(); err != nil {
 		t.Fatal(err)
 	}
 	close(release)

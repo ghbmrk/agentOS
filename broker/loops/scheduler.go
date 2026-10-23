@@ -15,8 +15,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
-	"github.com/ghbmrk/agentos/broker/vm"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // Job is one unit of loop work.
@@ -27,7 +26,7 @@ type Job struct {
 	// the spare budget has no room.
 	UsesModel bool
 	// Evaluates marks work that runs replay evaluations; while it runs,
-	// the spare meter keeps evaluation's reserved share (EvalShare).
+	// replay machines cite evaluation's key (Spare.EvalKey).
 	Evaluates bool
 	// Run does the work. It must return soon after ctx is cancelled (the
 	// scheduler's Preempt), and a source whose job was cancelled offers
@@ -95,11 +94,11 @@ type Journal = change.Journal
 // Config configures New.
 type Config struct {
 	Store change.Store
-	// Spare is the spare budget meter (LOOP-2): a meter of its own, never
-	// the guests', through which every loop model call goes (replay,
-	// clean room, Loop 1's builder). Its overall cap is set from the
-	// owner's setting; Loop code has no other handle on it.
-	Spare   *meter.Meter
+	// Spare is the spare envelope (LOOP-2): a key of its own, never the
+	// guests', that every loop model call is charged to (replay, clean
+	// room). Its day cap is set from the owner's setting; Loop code has no
+	// other handle on it.
+	Spare   *Spare
 	Sources []Source
 	// Journal is where settings intents go; set it with Attach when the
 	// engine is built after the scheduler.
@@ -202,10 +201,13 @@ type measure struct {
 const ewma = 0.3
 
 // New loads the settings (every loop on, on first start) and applies the
-// spare budget to the spare meter.
+// spare budget to the spare envelope.
 func New(cfg Config) (*Scheduler, error) {
-	if cfg.Store == nil || cfg.Spare == nil {
+	if cfg.Store == nil || cfg.Spare == nil || cfg.Spare.State == nil {
 		return nil, errors.New("loops: Store and Spare are required")
+	}
+	if cfg.Spare.OutPerM <= 0 {
+		return nil, errors.New("loops: the spare route needs a price")
 	}
 	if cfg.YieldTarget <= 0 {
 		cfg.YieldTarget = 2 * time.Second
@@ -276,7 +278,7 @@ func New(cfg Config) (*Scheduler, error) {
 		s.st.Applied = map[string]bool{}
 	}
 	s.orderLocked()
-	if err := cfg.Spare.SetOverallCap(SpareLimits(s.st.Settings.SpareCalls)); err != nil {
+	if err := cfg.Spare.SetCap(SpareCap(s.st.Settings.SpareCalls, cfg.Spare.OutPerM)); err != nil {
 		return nil, err
 	}
 	if b == nil {
@@ -395,8 +397,7 @@ func (s *Scheduler) tick(ctx context.Context, idle bool) (bool, time.Duration) {
 	if set.Off {
 		return false, s.cfg.Idle
 	}
-	used, limit := s.cfg.Spare.Overall()
-	modelOK := set.SpareCalls != 0 && used.Calls < limit.Calls && used.Tokens < limit.Tokens
+	modelOK := set.SpareCalls != 0 && s.cfg.Spare.Room(s.cfg.Now().UnixMilli())
 	parkedSeen := false
 	for _, src := range s.order(set) {
 		job, ok := src.Next(ctx, modelOK)
@@ -517,8 +518,8 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 		r.stopLocked(change.ErrOwnerStop)
 	}
 	s.mu.Unlock()
-	before, _ := s.cfg.Spare.Overall()
 	start := s.cfg.Now()
+	before := s.cfg.Spare.Used(start.UnixMilli())
 
 	watch := make(chan struct{})
 	go func() {
@@ -543,9 +544,12 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 	s.evaluating.Store(false)
 	close(watch)
 
-	after, _ := s.cfg.Spare.Overall()
-	secs := s.cfg.Now().Sub(start).Seconds()
-	cost := float64(max(after.Tokens-before.Tokens, 0)) + math.Max(secs, 0)*s.cfg.ComputeTokens
+	end := s.cfg.Now()
+	// Spend made just before start can leave the day window by the end and
+	// hide some of the run's own; the run's figure is never below zero.
+	after := s.cfg.Spare.Used(end.UnixMilli())
+	secs := end.Sub(start).Seconds()
+	cost := float64(s.cfg.Spare.Tokens(max(after-before, 0))) + math.Max(secs, 0)*s.cfg.ComputeTokens
 	interrupted = errors.Is(res.Err, change.ErrInterrupted)
 	parked = errors.Is(res.Err, change.ErrParked)
 	s.mu.Lock()
@@ -664,9 +668,8 @@ func (s *Scheduler) Digest() []string {
 			}
 		}
 	}
-	used, _ := s.cfg.Spare.Overall()
-	if used.Calls > 0 {
-		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", used.Calls, budgetCalls(set.SpareCalls)))
+	if used := s.cfg.Spare.Used(s.cfg.Now().UnixMilli()); used > 0 {
+		out = append(out, fmt.Sprintf("Spare-time AI use, last 24 hours: %d of %d calls (self-tests and learning).", s.cfg.Spare.Calls(used), budgetCalls(set.SpareCalls)))
 	}
 	for _, src := range s.cfg.Sources {
 		if d, ok := src.(Digester); ok && set.On(src.Loop()) {
@@ -686,14 +689,11 @@ const EvalReserve = 0.3
 // Evaluating reports whether the unit running now runs replay evaluations.
 func (s *Scheduler) Evaluating() bool { return s.evaluating.Load() }
 
-// EvalShare is the spare meter's share for replay machines: EvalReserve of
-// the spare budget, kept from every other spare-meter user (builders, the
-// clean room) while the scheduler runs evaluation work, and lent to them
-// otherwise. The wiring passes it, with the clean room's share, to
-// Spare.SetShares (loops L3).
-func (s *Scheduler) EvalShare() meter.Share {
-	return meter.Share{Prefix: vm.EvalPrefix, Reserve: EvalReserve, Active: s.Evaluating}
-}
+// EvalKey is the key replay machines cite: a child of the spare key whose
+// day cap is EvalReserve of the spare budget (Spare.EvalKey); a lowering
+// revokes it, so a replay machine asks again after one. Evaluating
+// stays the scheduler's own predicate, read before a call goes to the clerk.
+func (s *Scheduler) EvalKey() (key.Key, error) { return s.cfg.Spare.EvalKey() }
 
 // it is the pronoun for a loop's word name.
 func it(l Loop) string {

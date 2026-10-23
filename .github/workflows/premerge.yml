@@ -2,10 +2,10 @@ name: premerge
 # PREMERGE-wire (#1860, #1834): posts the `premerge` commit status on a PR's head. It is
 # `success` only when `tools/premerge.py --check` prints `same`: the newest trusted L3 verdict
 # comment is an accept and the diff it reviewed (its `Record:` head) equals the head's, so a
-# push after the accept, a later fix-list, a deleted accept or a PR never reviewed all fail.
-# The generated-file bot PRs (bot/trace, bot/metrics, bot/board, bot/records from this
-# repository, not a fork) carry no verdict and pass through `--bot` when they change only
-# their own output. Main must require the `premerge` status (a ruleset change Mark makes).
+# push after the accept, a later fix-list, a deleted accept or a PR never reviewed all fail;
+# the lens screen the tier owes and, on a gate-file PR, the Security accept must match too.
+# The generated-file bot PRs (bot/trace, bot/metrics, bot/board from this repository, not a
+# fork) carry no verdict and pass through `--bot` when they change only their own output. Main must require the `premerge` status (a ruleset change Mark makes).
 # It reruns on every PR push and on every PR comment created, edited or deleted. Both events
 # run the BASE branch's workflow file and tools/premerge.py: the PR head is fetched as git
 # objects for `git merge-tree` and `git diff`; it is never checked out, imported or executed.

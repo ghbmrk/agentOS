@@ -109,6 +109,13 @@ NM_EXEC = "/usr/sbin/NetworkManager --no-daemon"
 NM_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
 NM_DROPIN_TEXT = (b"# Never without the inbound drop (DEV-net-e 2a): if it failed to load, this does not start.\n"
                   b"[Unit]\nRequires=agentos-inbound.service\nAfter=agentos-inbound.service\n")
+# #2622: NetworkManager's state directory (DHCP leases, seen BSSIDs, timestamps, secret_key,
+# NetworkManager.state) is a tmpfs in its own mount namespace, so none of it reaches the drive.
+NM_STATE_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-state.conf"
+NM_STATE_TEXT = (b"# NetworkManager's state stays in RAM, never on the drive (#2622): leases, seen BSSIDs and\n"
+                 b"# secret_key are gone at every stop.\n"
+                 b"[Service]\nTemporaryFileSystem=/var/lib/NetworkManager:mode=0700,nosuid,nodev,noexec\n")
+NM_DROPINS = {NM_DROPIN: NM_DROPIN_TEXT, NM_STATE_DROPIN: NM_STATE_TEXT}
 NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
            ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
            ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
@@ -193,6 +200,18 @@ EXEC_CHANNELS = (("udev/rules.d", ".rules", False), ("systemd/system-generators"
                  ("modprobe.d", ".conf", True), ("sysctl.d", ".conf", False), ("binfmt.d", ".conf", False),
                  ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False))
 EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
+# #2622: the bus and authorisation policy the packages ship, held to exec.allow the same way. polkitd
+# runs every rules.d file as JavaScript and takes an action's defaults from actions; dbus-daemon reads
+# system.conf, which includes system.d and everything under etc/dbus-1, and starts system-services
+# files' Exec lines as root. Each directory is walked whole and every entry in it, whatever its name
+# or suffix, is hashed (polkitd loads a dot name ending .rules; the readers' own filters are not
+# modelled). Anything in polkitd's /run directory is refused like the exec channels' /run copies.
+POLICY_DIRS = ("etc/polkit-1/rules.d", "usr/local/share/polkit-1/rules.d", "usr/share/polkit-1/rules.d",
+               "usr/share/polkit-1/actions", "etc/dbus-1", "usr/local/share/dbus-1/system.d",
+               "usr/share/dbus-1/system.d", "usr/local/share/dbus-1/system-services",
+               "usr/share/dbus-1/system-services", "lib/dbus-1/system-services")
+POLICY_FILES = ("usr/share/dbus-1/system.conf",)
+POLICY_RUN = ("run/polkit-1/rules.d",)
 
 _MAKERS = None  # #1829: tmpfiles_makers and tmpfiles_removers by root while violations() runs, else None
 
@@ -1803,18 +1822,50 @@ def exec_entries(root):
     """(file, value or None, error) of every file in every exec channel directory, not only the one
     that wins its name: a generator that is not executable is skipped without taking the name, so a
     winner-only list could miss the one that runs. A directory is resolved inside the image (lib is
-    usr/lib's link), and each file is listed once under its in-image path."""
+    usr/lib's link), and each file is listed once under its in-image path. Then every entry under
+    POLICY_DIRS, each of POLICY_FILES, and NetworkManager's unit file as systemd resolves it (#2622)."""
     root, seen = str(root), set()
+    for f in exec_files(root):
+        if f.rel in seen:
+            continue
+        seen.add(f.rel)
+        try:
+            yield f.rel, exec_value(f), None
+        except OSError as e:
+            yield f.rel, None, e.strerror
+
+
+def exec_files(root):
+    """The Confs exec_entries lists, with repeats. A policy directory that exists but does not resolve
+    to a directory inside the image, or that cannot be listed, is listed itself, so it is refused."""
     for d, suffix, kmod in EXEC_CHANNELS:
         for top in EXEC_TOPS:
-            for f in conf_files(root, ("%s/%s" % (top, d),), suffix, kmod):
-                if f.rel in seen:
-                    continue
-                seen.add(f.rel)
-                try:
-                    yield f.rel, exec_value(f), None
-                except OSError as e:
-                    yield f.rel, None, e.strerror
+            yield from conf_files(root, ("%s/%s" % (top, d),), suffix, kmod)
+    for d in POLICY_DIRS:
+        if not entry_mode(root, d):
+            continue
+        try:
+            path = conf_chase(root, d)
+            st = None if path is None else tree_lstat(root, path)
+        except OSError as e:
+            yield Conf(root, d, e.strerror)
+            continue
+        if st is None or not stat.S_ISDIR(st.st_mode):
+            yield Conf(root, d, "not a directory; the tree check reads only a directory")
+            continue
+        out = []
+        for rel, st in nm_walk(root, path, out):
+            if not stat.S_ISDIR(st.st_mode):
+                yield Conf(root, rel)
+        for e in out:
+            yield Conf(root, path, e)
+    for rel in POLICY_FILES:
+        if entry_mode(root, rel):
+            yield Conf(root, rel)
+    if any(entry_mode(root, rel) for rel in NM_PRESENT):
+        unit = nm_unit(root)
+        if unit is not None:
+            yield unit
 
 
 def exec_allowed(path=None):
@@ -1831,13 +1882,13 @@ def exec_allow_violations(root, allowed=None):
         return ["%s: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, modprobe.d, "
                 "sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)" % EXEC_ALLOW]
     out = []
-    for d, _, _ in EXEC_CHANNELS:
+    for d in ["run/" + d for d, _, _ in EXEC_CHANNELS] + list(POLICY_RUN):
         try:
-            present = tree_lstat(root, "run/" + d) is not None
+            present = tree_lstat(root, d) is not None
         except OSError:
             present = True
         if present:
-            out.append("run/%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d)
+            out.append("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d)
     for rel, value, err in exec_entries(root):
         if value is None:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, err))
@@ -1858,7 +1909,9 @@ EXEC_ALLOW_HEADER = """\
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
-# usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, the
+# D-Bus system.conf, system.d and system-services files, and NetworkManager's unit file as systemd
+# resolves it. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -1970,13 +2023,23 @@ def nm_walk(root, rel, out):
             yield from nm_walk(root, r, out)
 
 
+def nm_unit(root):
+    """NetworkManager's unit file as systemd resolves it: NM_UNIT in the first unit directory that
+    holds one, or None. exec.allow pins it by hash (#2622)."""
+    root = str(root)
+    return next((Conf(root, d + "/" + NM_UNIT) for d in unit_dirs(root)[0] if tree_lstat(root, d + "/" + NM_UNIT)),
+                None)
+
+
 def nm_unit_violations(root):
     """The NetworkManager unit as systemd 257.13 resolves it (see NM_EXEC): the unit file, its
     drop-ins under its own name, any name that links to it (dbus-org.freedesktop.NetworkManager) and
-    each name's prefixes, in every unit directory and in service.d."""
+    each name's prefixes, in every unit directory and in service.d. The unit file itself is also on
+    exec.allow by its hash (#2622), so a key these checks do not name (ExecStartPre, BindPaths) is
+    reviewed too."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    unit = next((Conf(root, d + "/" + NM_UNIT) for d in dirs if tree_lstat(root, d + "/" + NM_UNIT)), None)
+    unit = nm_unit(root)
     if unit is None:
         return out + ["%s: missing; NetworkManager must start from the shipped unit" % NM_UNIT]
     if unit.is_link():
@@ -1996,16 +2059,18 @@ def nm_unit_violations(root):
                             + ["%s/service.d" % d for d in UNIT_PATHS]):
             files[f.rel] = f
     for rel, f in sorted(files.items()):
-        if rel != NM_DROPIN:
-            out.append("%s: a drop-in for %s; the only one is %s" % (rel, NM_UNIT, NM_DROPIN))
+        if rel not in NM_DROPINS:
+            out.append("%s: a drop-in for %s; the only ones are %s" % (rel, NM_UNIT, " and ".join(sorted(NM_DROPINS))))
         else:
             try:
-                if f.content() != NM_DROPIN_TEXT:
+                if f.content() != NM_DROPINS[rel]:
                     out.append("%s: not the shipped drop-in" % rel)
             except OSError as e:
                 out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, e.strerror))
     if NM_DROPIN not in files:
         out.append("%s: missing; NetworkManager must not start without the inbound drop" % NM_DROPIN)
+    if NM_STATE_DROPIN not in files:
+        out.append("%s: missing; NetworkManager's state would reach the drive (#2622)" % NM_STATE_DROPIN)
     execs = []
     for f in [unit] + [f for r, f in sorted(files.items())]:
         try:

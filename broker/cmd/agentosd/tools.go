@@ -9,13 +9,13 @@ import (
 )
 
 // registeredTools is every broker tool set agentosd serves on a guest
-// socket beside the effect tools: the question tools, the recall tools,
-// and the worker tools when an image is registered (wt not nil). Their
-// errors reach the guest only through the guest plane's filter (guesterr,
-// SR2-3g). managed_tree went with the learning loop (MIG-4-untrusted-learn):
-// nothing adopts a tree for the agent any more.
-func registeredTools(qs *questions, recall guest.Tools, wt *workers.Tools) toolSet {
-	tools := toolSet{qs.tools(), recall}
+// socket beside the effect tools: the question tools, and the worker
+// tools when an image is registered (wt not nil). Their errors reach the
+// guest only through the guest plane's filter (guesterr, SR2-3g).
+// managed_tree went with the learning loop (MIG-4-untrusted-learn), and
+// the recall tools with recall (#2781).
+func registeredTools(qs *questions, wt *workers.Tools) toolSet {
+	tools := toolSet{qs.tools()}
 	if wt != nil {
 		tools = append(tools, wt)
 	}

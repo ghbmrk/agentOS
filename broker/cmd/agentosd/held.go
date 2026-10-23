@@ -43,7 +43,7 @@ type heldLink interface {
 }
 
 type heldMode struct {
-	Learn            string // the forget plane's directory (-learn), which holds the marker
+	Learn            string // the learn directory (-learn), which holds the marker
 	Dir              string // socket directory
 	Owner            string
 	PeerUID, PeerGID *int     // the modem bridge's, as on the daemon's owner socket

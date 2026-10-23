@@ -131,6 +131,8 @@ allow broker/hostdisk/
 allow broker/infer/supervise/
 allow broker/inflight/
 allow broker/journal/
+# The kernel meter the spare budget is charged to; broker/loops imports it (MIG-4-spend-m, #2588).
+allow broker/kernel/
 allow broker/localapi/
 allow broker/localsrv/
 allow broker/localui/
@@ -148,7 +150,6 @@ allow broker/provagent/
 allow broker/question/
 allow broker/quota/
 allow broker/recovery/
-allow broker/replay/
 allow broker/reversible/
 # broker/route/ file by file: the API-key adapters' own files stay frozen (one model route).
 allow broker/route/ASSUMPTIONS.md

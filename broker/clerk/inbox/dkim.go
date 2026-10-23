@@ -113,11 +113,13 @@ type Sig struct {
 	D    string   // the d= domain, "" when absent
 	H    []string // the h= names, lower case
 	L    bool     // the signature carries l=
+	T, X int64    // t= (signed at) and x= (expires), Unix seconds; -1 when absent
 	Pass bool
 }
 
 // VerifyDKIM checks every DKIM-Signature of raw (RFC 6376: rsa-sha256,
-// relaxed/relaxed). keys maps "<s>._domainkey.<d>" to a key record's base64 p=.
+// relaxed/relaxed). keys maps "<s>._domainkey.<d>", d in A-labels, to a key
+// record's base64 p=.
 func VerifyDKIM(raw []byte, keys map[string]string) []Sig {
 	hs, body := splitMessage(raw)
 	var out []Sig
@@ -131,7 +133,7 @@ func VerifyDKIM(raw []byte, keys map[string]string) []Sig {
 }
 
 func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
-	var r Sig
+	r := Sig{T: -1, X: -1}
 	t, err := sigTags(value)
 	if err != nil {
 		return r
@@ -150,7 +152,18 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	if !contains(r.H, "from") {
 		return r
 	}
-	rec, ok := keys[t["s"]+"._domainkey."+r.D]
+	// RFC 6376 section 3.5: t= and x= are at most 12 digits, and x= is later
+	// than t=. A malformed one fails the signature; whether it is current is
+	// judged against the day by Evaluate, so verifying needs no clock.
+	var ok bool
+	if r.T, ok = unixTag(t, "t"); !ok {
+		return r
+	}
+	if r.X, ok = unixTag(t, "x"); !ok || (r.T >= 0 && r.X >= 0 && r.X <= r.T) {
+		return r
+	}
+	// RFC 8616 section 4: a d= in U-labels is looked up as its A-labels.
+	rec, ok := keys[t["s"]+"._domainkey."+alabel(r.D)]
 	if !ok {
 		return r
 	}
@@ -184,6 +197,22 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	sum := sha256.Sum256(in)
 	r.Pass = rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) == nil
 	return r
+}
+
+var digits = regexp.MustCompile(`^[0-9]{1,12}$`)
+
+// unixTag is tag k of t as Unix seconds, -1 when absent; ok is false when it
+// is not 1 to 12 digits.
+func unixTag(t map[string]string, k string) (n int64, ok bool) {
+	v, has := t[k]
+	if !has {
+		return -1, true
+	}
+	if !digits.MatchString(v) {
+		return -1, false
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	return n, err == nil
 }
 
 func contains(s []string, x string) bool {

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
 // Headers between the broker and the vault process. Every header with the
@@ -98,9 +99,9 @@ type Usage struct {
 	Complete    bool   `json:"complete"`
 	OutputChars int64  `json:"output_chars"`
 
-	Failed   []meter.Attempt `json:"failed,omitempty"`
-	Unserved bool            `json:"unserved,omitempty"`
-	None     bool            `json:"none,omitempty"`
+	Failed   []routerule.Attempt `json:"failed,omitempty"`
+	Unserved bool                `json:"unserved,omitempty"`
+	None     bool                `json:"none,omitempty"`
 }
 
 // MaxRetries bounds HeaderAttempts.
@@ -330,7 +331,7 @@ func (s *scrubTrailers) Read(b []byte) (int, error) {
 				if !u.None {
 					meter.Report(s.ctx, meter.Usage{Provider: u.Provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
 						CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars,
-						Failed: u.Failed, Unserved: u.Unserved})
+						Failed: meterAttempts(u.Failed), Unserved: u.Unserved})
 				}
 			}
 		}
@@ -365,11 +366,22 @@ func (s *scrubTrailers) unanswered() {
 // a provider and spent all allowed attempts past the first, each at its
 // full reservation.
 func unanswered(ctx context.Context, allowed int) {
-	failed := make([]meter.Attempt, max(0, min(allowed, MaxRetries)))
+	failed := make([]routerule.Attempt, max(0, min(allowed, MaxRetries)))
 	for i := range failed {
-		failed[i] = meter.Attempt{Full: true}
+		failed[i] = routerule.Attempt{Full: true}
 	}
-	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: failed})
+	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: meterAttempts(failed)})
+}
+
+// meterAttempts returns a as the meter's own type, which has the same fields
+// and charges them (Attempt.charge in broker/meter) until #2584 moves the
+// charge here.
+func meterAttempts(a []routerule.Attempt) []meter.Attempt {
+	out := make([]meter.Attempt, len(a))
+	for i, x := range a {
+		out[i] = meter.Attempt(x)
+	}
+	return out
 }
 
 // valid refuses negative or absurd counts, which the meter would otherwise
