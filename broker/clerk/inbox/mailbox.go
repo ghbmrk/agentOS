@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -101,9 +102,10 @@ func NewLive(st *imapsmtp.Store) *Live {
 
 // WithPoster gives l a Poster on st's own address policy, so its
 // unsubscribes reach no address the mail servers could not, and returns l.
-// Call it before l is used. The clerk turns it on only once a failing
-// Opened read saves the senders it found (#2841, run ASSUMPTIONS
-// MIG-4-run-q); until then a sender read recently could look never opened.
+// Call it before l is used. The clerk turns it on (#2841): a failing
+// Opened read hands back the read mail it found, which the clerk keeps, so
+// a sender read recently does not look never opened after the owner deletes
+// that mail (run ASSUMPTIONS MIG-4-run-q).
 func (l *Live) WithPoster() *Live {
 	l.poster = NewPoster(l.st.Guard(), nil)
 	return l
@@ -211,23 +213,48 @@ const OpenedMax = searchMax * entryCost
 // field bound (mail M21; tests/test_egress_memory.py checks the two agree).
 const searchMax = 1 << 20
 
+// freshCost is what a read past the bound spends on each entry it logged,
+// to keep the newest (fresh): one heap slot, at most twice its 24 bytes.
 const (
 	senderCost = 128
 	entryCost  = 384
 	oldCost    = 192
+	freshCost  = 48
 )
 
 // ErrTooMuchReadMail fails an Opened call past openedMax. It does not pass
-// with time or by archiving, since every folder is read: the owner must
-// delete read mail for good, from the trash too. Deleting a mail read since
-// the last good read frees its whole charge, so deleting those always clears
-// it; a mail the log first saw read more than unopenedDays ago frees about
-// half (entryCost less oldCost), and one logged since frees nothing until it
-// is that old.
+// by archiving, since every folder is read: the owner must delete read mail
+// for good, from the trash too. The failing read still hands back the read
+// mail it found (#2841), so a sender read since the last good read stays
+// opened when the owner deletes that mail; such an entry is kept, charged in
+// full, for unopenedDays, so deleting that mail frees nothing until then. A
+// mail the log first saw read more than unopenedDays ago frees about half
+// its charge (entryCost less oldCost), and a read mail the failing read did
+// not keep frees all of it.
 var ErrTooMuchReadMail = errors.New("inbox: more read mail than the clerk keeps")
 
+// TooMuchReadMailError is ErrTooMuchReadMail from a read that went on past
+// the bound, with what deleting can free. Every read mail whose deletion
+// frees room arrived from After to Before: one the read had to drop, and one
+// the log first saw read more than unopenedDays ago (which arrived by that
+// day, at a time not kept, so After is then zero). Deleting the read mail
+// that arrived in that span lets the next read pass, unless more is read
+// meanwhile (TestTheTooMuchReadMailStepWorks). Other read mail the log
+// keeps, charged in full for unopenedDays, so deleting it frees nothing
+// yet: during the warm-up, mail read long ago among it. Before is zero when
+// no deletion frees room: the read dropped nothing, so the log it handed
+// back fits, and the next read gets through with no step.
+type TooMuchReadMailError struct{ After, Before time.Time }
+
+func (e *TooMuchReadMailError) Error() string { return ErrTooMuchReadMail.Error() }
+func (e *TooMuchReadMailError) Unwrap() error { return ErrTooMuchReadMail }
+
 // opened is one Opened call's state: LastOpened as it is built, and the log
-// by digest, each entry marked when this read found its mail.
+// by digest, each entry marked when this read found its mail. Once a charge
+// runs past openedMax the read is full: it goes on through every folder, but
+// only to log read mail the log lacks, and keeps the newest of it within the
+// bound (keep), so the read mail the owner read last is what a failing read
+// hands back.
 type opened struct {
 	today   string
 	watched bool
@@ -236,6 +263,30 @@ type opened struct {
 	log     map[[16]byte]logged
 	old     []oldEntry // the log's entries older than unopenedDays, by digest
 	kept    int
+	full    bool
+	fresh   freshHeap // once full: the entries this read logged, oldest arrival first
+	before  time.Time // once full: the latest arrival among the entries dropped
+	after   time.Time // and the earliest, zero once an old entry counts
+	oldSeen bool      // an old entry counts toward before
+}
+
+// fresh is an entry this read logged, by its mail's arrival.
+type fresh struct {
+	arrived int64
+	id      [16]byte
+}
+
+type freshHeap []fresh
+
+func (h freshHeap) Len() int           { return len(h) }
+func (h freshHeap) Less(i, j int) bool { return h[i].arrived < h[j].arrived }
+func (h freshHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *freshHeap) Push(x any)        { *h = append(*h, x.(fresh)) }
+func (h *freshHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
 }
 
 // oldEntry is a log entry older than unopenedDays, kept out of the log until
@@ -245,15 +296,20 @@ type oldEntry struct {
 	from, date string
 }
 
+// logged is a log entry; arrived, in Unix seconds, is set only on one this
+// read logged.
 type logged struct {
 	from, date string
 	present    bool
+	arrived    int64
 }
 
+// charge spends n of openedMax, or nothing if n does not fit.
 func (o *opened) charge(n int) error {
-	if o.kept += n; o.kept > openedMax {
+	if o.kept+n > openedMax {
 		return ErrTooMuchReadMail
 	}
+	o.kept += n
 	return nil
 }
 
@@ -300,7 +356,7 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 			o.old = append(o.old, oldEntry{id: [16]byte(b), from: e.From, date: e.Date})
 			continue
 		}
-		if err := o.add([16]byte(b), e.From, e.Date, false); err != nil {
+		if err := o.add([16]byte(b), e.From, e.Date, false, 0); err != nil {
 			return nil, err
 		}
 	}
@@ -309,8 +365,8 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 }
 
 // add logs a mail once and opens its sender on the entry's day; a mail this
-// read found is marked present.
-func (o *opened) add(id [16]byte, from, date string, present bool) error {
+// read found is marked present, and one the log lacked carries its arrival.
+func (o *opened) add(id [16]byte, from, date string, present bool, arrived int64) error {
 	if e, ok := o.log[id]; ok {
 		if present && !e.present {
 			e.present = true
@@ -335,7 +391,7 @@ func (o *opened) add(id [16]byte, from, date string, present bool) error {
 	if err := o.open(from, date); err != nil {
 		return err
 	}
-	o.log[id] = logged{from: from, date: date, present: present}
+	o.log[id] = logged{from: from, date: date, present: present, arrived: arrived}
 	return nil
 }
 
@@ -355,22 +411,129 @@ func (o *opened) open(from, date string) error {
 }
 
 // header takes one read mail's From and Message-ID headers and arrival.
+// A charge past openedMax makes the read full rather than failing it.
 func (o *opened) header(h []byte, arrived time.Time) error {
 	from, mid := FromAddress(h), messageID(h)
 	if from == "" {
 		return nil
 	}
 	named := mid != "" && !arrived.IsZero()
+	if o.full {
+		if named {
+			o.keep(seenID(from, mid, arrived), from, arrived.Unix())
+		}
+		return nil
+	}
+	err := error(nil)
 	if named {
-		if err := o.add(seenID(from, mid, arrived), from, o.today, true); err != nil {
-			return err
+		err = o.add(seenID(from, mid, arrived), from, o.today, true, arrived.Unix())
+	}
+	if err == nil && (!o.watched || !named) {
+		err = o.open(from, o.today)
+	}
+	if errors.Is(err, ErrTooMuchReadMail) {
+		o.fill()
+		if named {
+			o.keep(seenID(from, mid, arrived), from, arrived.Unix())
+		}
+		return nil
+	}
+	return err
+}
+
+// fill makes the read full: every entry it logged so far is kept by arrival
+// and charged up to fullCost, so dropping it frees no more than it was
+// charged (its sender stays charged as well), and the bound is then made
+// good.
+func (o *opened) fill() {
+	o.full = true
+	for id, e := range o.log {
+		if e.arrived != 0 {
+			o.kept += fullCost(e.from) - len(e.from) - entryCost
+			o.fresh = append(o.fresh, fresh{arrived: e.arrived, id: id})
 		}
 	}
-	if !o.watched || !named {
-		return o.open(from, o.today)
-	}
-	return nil
+	heap.Init(&o.fresh)
+	o.evict()
 }
+
+// keep logs, in a full read, a read mail the log lacks, dated today. A full
+// read hands back no LastOpened, so its sender is not opened; the entry is
+// charged its sender's cost as well, so the log handed back loads within
+// openedMax whichever entries are dropped, and dropping it frees it all.
+func (o *opened) keep(id [16]byte, from string, arrived int64) {
+	if _, ok := o.log[id]; ok {
+		return
+	}
+	if _, ok := slices.BinarySearchFunc(o.old, id, func(e oldEntry, id [16]byte) int { return bytes.Compare(e.id[:], id[:]) }); ok {
+		return // kept as it is: an old entry the read finds needs no new day
+	}
+	o.kept += fullCost(from)
+	o.log[id] = logged{from: from, date: o.today, present: true, arrived: arrived}
+	heap.Push(&o.fresh, fresh{arrived: arrived, id: id})
+	o.evict()
+}
+
+// evict brings a full read back within openedMax. It drops the log's
+// entries older than unopenedDays first: such an entry opens nothing, and
+// if its mail is still there the next read logs it again, dated that day
+// (fail closed). Then it drops what this read logged, oldest arrival first,
+// so the newest read mail stays. The log's own recent entries, and the
+// senders charged, are never dropped: they fitted before this read.
+func (o *opened) evict() {
+	for o.kept > openedMax {
+		if n := len(o.old); n > 0 {
+			e := o.old[n-1]
+			o.old = o.old[:n-1]
+			o.kept -= len(e.from) + oldCost
+			o.dropOld(e.date)
+			if l, ok := o.log[e.id]; ok && l.arrived == 0 && l.date == e.date {
+				delete(o.log, e.id) // found by this read, and charged the rest
+				o.kept -= entryCost - oldCost
+			}
+			continue
+		}
+		if len(o.fresh) == 0 {
+			return
+		}
+		f := heap.Pop(&o.fresh).(fresh)
+		o.kept -= fullCost(o.log[f.id].from)
+		delete(o.log, f.id)
+		o.drop(time.Unix(f.arrived, 0).UTC())
+	}
+}
+
+// drop notes that a mail which arrived at t no longer stands in the log.
+func (o *opened) drop(t time.Time) {
+	if t.After(o.before) {
+		o.before = t
+	}
+	if !o.oldSeen && (o.after.IsZero() || t.Before(o.after)) {
+		o.after = t
+	}
+}
+
+// dropOld notes an entry the log first saw read on day d, older than
+// unopenedDays: its mail arrived by the end of d, at a time not kept.
+func (o *opened) dropOld(d string) {
+	t, _ := day(d)
+	o.drop(t.Add(24*time.Hour - time.Second))
+	o.oldSeen, o.after = true, time.Time{}
+}
+
+// tooMuch is a full read's error: Before covers the mail it dropped and the
+// log's entries older than unopenedDays it kept, whose mail, if still there,
+// the next read charges in full.
+func (o *opened) tooMuch() error {
+	for _, e := range o.old {
+		o.dropOld(e.date)
+	}
+	return &TooMuchReadMailError{After: o.after, Before: o.before}
+}
+
+// fullCost is what a full read charges an entry it keeps: the entry, its
+// heap slot and its sender's cost.
+func fullCost(from string) int { return 2*len(from) + entryCost + freshCost + senderCost }
 
 // result is LastOpened and the log to keep: every entry this read found, and
 // every other one from the last unopenedDays, which still opens its sender;
@@ -388,6 +551,33 @@ func (o *opened) result() (map[string]string, SeenLog) {
 	return o.senders, out
 }
 
+// partial is the log to keep after a read that failed: every entry it began
+// with, since a read that did not finish cannot tell whose mail is gone, and
+// every read mail it logged. It is empty (nil Seen) when the read logged
+// none, so the caller keeps its record as it was.
+func (o *opened) partial() SeenLog {
+	n := 0
+	for _, e := range o.log {
+		if e.arrived != 0 {
+			n++
+		}
+	}
+	if n == 0 {
+		return SeenLog{}
+	}
+	out := SeenLog{Since: o.since, Seen: make([]Seen, 0, len(o.log)+len(o.old))}
+	for id, e := range o.log {
+		out.Seen = append(out.Seen, Seen{From: e.from, ID: hex.EncodeToString(id[:]), Date: e.date})
+	}
+	for _, e := range o.old {
+		if _, ok := o.log[e.id]; !ok {
+			out.Seen = append(out.Seen, Seen{From: e.from, ID: hex.EncodeToString(e.id[:]), Date: e.date})
+		}
+	}
+	slices.SortFunc(out.Seen, func(a, b Seen) int { return strings.Compare(a.From+a.ID, b.From+b.ID) })
+	return out
+}
+
 // Opened is World.LastOpened for the account (#2618), keyed by lower-cased
 // address, and the log to keep in place of log (#2684). Each read (\Seen)
 // mail in any folder that log lacks is logged, dated today, and a logged
@@ -396,8 +586,13 @@ func (o *opened) result() (map[string]string, SeenLog) {
 // so until the log has watched for unopenedDays, and for a read mail with no
 // Message-ID or INTERNALDATE, a read mail is taken as opened today whenever it was delivered:
 // no sender is unsubscribed on a guess (fail closed). Any folder that cannot
-// be read in full fails the whole answer, and the caller then keeps its log
-// as it was: no partial answer passes for a full one.
+// be read in full fails the whole answer, as does a read past openedMax
+// (ErrTooMuchReadMail): no partial answer passes for a full one, so no
+// LastOpened is handed back. The log is (#2841): a failed read hands back
+// every entry it began with and the read mail it logged before it failed
+// (partial), the newest within openedMax once past it, so a sender the owner
+// read since the last good read stays opened if the owner then deletes that
+// mail; when it logged none, the log is empty and the caller keeps its own.
 func (l *Live) Opened(ctx context.Context, today string, log SeenLog) (map[string]string, SeenLog, error) {
 	o, err := newOpened(today, log)
 	if err != nil {
@@ -409,8 +604,11 @@ func (l *Live) Opened(ctx context.Context, today string, log SeenLog) (map[strin
 	}
 	for _, f := range fs {
 		if err := l.st.Seen(ctx, f.Name, o.header); err != nil {
-			return nil, SeenLog{}, err
+			return nil, o.partial(), err
 		}
+	}
+	if o.full {
+		return nil, o.partial(), o.tooMuch()
 	}
 	got, kept := o.result()
 	return got, kept, nil
