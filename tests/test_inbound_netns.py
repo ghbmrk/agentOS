@@ -215,7 +215,7 @@ class InboundOnAHomeNetwork(unittest.TestCase):
         self.assertTrue(reaches(BOX, ROUTER6), "box cannot reach the router over IPv6")
 
 LAN, FAR = "agentos-t-lan", "agentos-t-far"
-LAN6, FAR6 = "2001:db8:a::", "2001:db8:b::"
+LAN_NET6, FAR_NET6 = "2001:db8:a::", "2001:db8:b::"
 
 # What NetworkManager loads for ipv4.method=shared on usb0 (nm-shared-<iface>): accept forwarding
 # to and from the link and masquerade it. A drop in agentos_inbound must outlast it.
@@ -244,7 +244,7 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
         for ns in (BOX, LAN, FAR):
             sh("ip", "netns", "add", ns)
             sh("ip", "link", "set", "lo", "up", ns=ns)
-        for box, ns, peer, v4, v6 in (("eth0", LAN, "l0", "192.0.2", LAN6), ("usb0", FAR, "f0", "198.51.100", FAR6)):
+        for box, ns, peer, v4, v6 in (("eth0", LAN, "l0", "192.0.2", LAN_NET6), ("usb0", FAR, "f0", "198.51.100", FAR_NET6)):
             sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", ns)
             for n, dev, host in ((BOX, box, 1), (ns, peer, 2)):
                 sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=n)
@@ -278,7 +278,7 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def far(self):
-        return ["198.51.100.2"] + ([FAR6 + "2"] if IPV6 else [])
+        return ["198.51.100.2"] + ([FAR_NET6 + "2"] if IPV6 else [])
 
     def test_forwarding_turned_on_routes_nothing(self):
         for addr in self.far():

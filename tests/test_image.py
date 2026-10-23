@@ -140,7 +140,7 @@ class TreeCheckTest(unittest.TestCase):
 
     # REQ: DEV-2, CH-9
     def test_distro_network_files_are_refused(self):
-        # #1478: agentos_inbound has only an input hook, so nothing may turn on forwarding. Debian's
+        # #1478: nothing may turn on forwarding (agentos_inbound's forward drop, #2824, is the other layer). Debian's
         # container and VM files set IPMasquerade=both (which turns it on) and the ad-hoc one turns
         # on multicast DNS on a radio; the built tree must carry none of them live.
         for name, body in DISTRO_NETWORKS.items():
@@ -1211,20 +1211,26 @@ class ApExemptTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def nft(self, fail="", ap="wlap0", members='"lo"'):
+    def nft(self, fail="", ap="wlap0", members='"lo"', fwd=("iifname", "oifname")):
         # Logs each call, and the script of "nft -f -"; FAIL names the call ("list set",
         # "list chain", "add", "get", "-f") that fails. "list chain" prints agentos_ap's input chain
-        # for AP, as nft prints it (absent when AP is empty); "list set" prints MEMBERS.
+        # for AP, as nft prints it (absent when AP is empty), or its forward chain with a drop for
+        # AP on each side FWD names; "list set" prints MEMBERS.
         stub(self.bin, "nft", r"""echo "$*" >>"%(log)s"
 [ "$1" = -f ] && sed 's/^/  /' >>"%(log)s"
 case "$1 $2" in "%(fail)s" | "%(fail)s "*) echo "nft: $1 failed" >&2; exit 1 ;; esac
 case "$1 $2" in
 "list chain") [ -n "%(ap)s" ] || exit 1
-  printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
-  printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n' ;;
+  if [ "$5" = forward ]; then
+    for k in %(fwd)s; do printf '\t\t%%s "%(ap)s" drop\n' "$k"; done
+  else
+    printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
+    printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n'
+  fi ;;
 "list set") echo "elements = { %(members)s }" ;;
 esac
-exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"')))
+exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"'),
+                 fwd=" ".join(fwd)))
 
     def run_exempt(self, *args):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_SYSFS=str(self.sys))
@@ -1241,6 +1247,7 @@ exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.repla
         self.assertEqual(self.calls(), [
             "list set inet agentos_inbound exempt",
             "list chain inet agentos_ap input",
+            "list chain inet agentos_ap forward",
             'add element inet agentos_inbound exempt { "wlap0" }',
             'get element inet agentos_inbound exempt { "wlap0" }',
         ])
@@ -1271,6 +1278,19 @@ exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.repla
                 r = self.run_exempt(iface)
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertIn("agentos_ap is not loaded for %s" % iface, r.stdout)
+                self.assertFalse([c for c in self.calls() if c.startswith("add")])
+
+    def test_only_an_access_point_whose_forwarding_agentos_ap_drops_is_added(self):
+        # #2824: the exempt set also exempts the interface from agentos_inbound's forward drop, so
+        # agentos_ap's forward chain must drop it in both directions (passthrough is accepted
+        # before those drops), or it stays closed.
+        for fwd in ((), ("iifname",), ("oifname",)):
+            with self.subTest(forward_drops=fwd):
+                self.log.unlink(missing_ok=True)
+                self.nft(fwd=fwd)
+                r = self.run_exempt("wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos_ap does not drop forwarding for wlap0", r.stdout)
                 self.assertFalse([c for c in self.calls() if c.startswith("add")])
 
     def test_only_a_wireless_interface_is_added(self):

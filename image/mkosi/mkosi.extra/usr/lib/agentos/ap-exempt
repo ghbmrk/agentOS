@@ -5,10 +5,13 @@
 # agentos_inbound table's exempt set, and that drop is final, so the owner's phone on the box's
 # Wi-Fi reaches the local page only once its interface is in the set. CH-9's agentos_ap table then
 # holds that interface to the page, DHCP and DNS, so the set may name an interface only while
-# agentos_ap is loaded for it.
+# agentos_ap is loaded for it. The set also exempts the interface from agentos_inbound's forward
+# drop (#2824), so agentos_ap's forward chain must drop the interface's forwarding both ways too
+# (all but passthrough, which it accepts before those drops).
 #   ap-exempt <iface>           run by agentos-ap-exempt@<iface>.service at each access-point
 #                               bring-up, which fails if this does. It adds <iface> only if it is
-#                               wireless and agentos_ap's input chain ends in a drop for it: the
+#                               wireless, agentos_ap's input chain ends in a drop for it and its
+#                               forward chain drops it in and out: the
 #                               loader loads agentos_ap first, for the interface it created as the
 #                               access point, so a second radio, the uplink, a USB tether or a
 #                               second NIC stays dropped.
@@ -51,6 +54,11 @@ fi
 nft list set $SET >/dev/null || fail "the inbound rules are not loaded"
 nft list chain inet agentos_ap input | sed 's/^[[:space:]]*//' | grep -qxF "iifname \"$i\" drop" ||
 	fail "agentos_ap is not loaded for $i"
+fwd=$(nft list chain inet agentos_ap forward) || fail "agentos_ap is not loaded for $i"
+for k in iifname oifname; do
+	printf '%s\n' "$fwd" | sed 's/^[[:space:]]*//' | grep -qxF "$k \"$i\" drop" ||
+		fail "agentos_ap does not drop forwarding for $i"
+done
 nft add element $SET "{ \"$i\" }" || fail "could not add $i to the inbound exempt set"
 nft get element $SET "{ \"$i\" }" >/dev/null || fail "$i is not in the inbound exempt set"
 echo "agentos-ap-exempt: OK $i"
