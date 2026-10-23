@@ -502,9 +502,6 @@
   "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service": {
     "bdad58aa3ad2f1e78b4c2a33c6cca7a5fe7156668efe7b4f59fbebb0448139be": 1
   },
-  "image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf": {
-    "8de690a7215558f9fa6ee0a987da4a531fbd54e4eab4aefcc8cdf520acf689de": 1
-  },
   "reviews/combined/2026-10-13-pr1381.md": {
     "dbafc1633fd9f1c566008fe5fde293f2e852867c08558ce6a965be3b5d76bb80": 1,
     "dd1739e2a5431edaa27232759ab1d2d012b82157928a00921661ebc1951fc6df": 1

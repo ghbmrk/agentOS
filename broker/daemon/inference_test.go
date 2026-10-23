@@ -44,7 +44,7 @@ import (
 )
 
 // linked is the composition root and what W3 links into it.
-var linked = []string{compositionRoot, "change", "loops", "replay", "grants", "loopbuild"}
+var linked = []string{compositionRoot, "change", "loops", "replay", "grants"}
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.
@@ -61,10 +61,9 @@ var httpOK = map[string]string{
 	"guest":                   "serves the guest plane over the machine socket; never dials",
 	"modelroute":              "the one client: forwards model calls to the vault process's unix socket",
 	"replay":                  "serves replay machines' plane like guest; never dials",
-	"loopbuild":               "serves Loop 1's builder machines their own socket (W3-builder); never dials",
 	"owner/notice/noticesock": "the second client, as modelroute: reads the vault process's notice socket (a unix-socket HTTP long poll), every dial on unix (P2-2w c4e4 s2b); by review",
 	"checker/checkersock":     "the third client, as modelroute: asks the checker's verify socket to check an owner code, every dial on unix (SIM-split-wire); by review",
-	"inflight":                "admits loopbuild's model calls under its memory budget (RES-5); serves, never dials",
+	"inflight":                "admits the clean room's model calls under its memory budget (RES-5); serves, never dials",
 }
 
 // allowance is what one package may use of a socket-capable import: the
@@ -102,9 +101,8 @@ var netOK = map[string]allowance{
 			"net.Listen", "net.UnixListener",
 			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Close", "syscall.Credential",
 			"syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
-	"loopbuild": {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
-	"journal":   {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"update":    {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
+	"journal": {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
+	"update":  {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	// Recall (CAP-3, #59): one broker per index, as for the journal.
 	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
@@ -128,17 +126,8 @@ var netOK = map[string]allowance{
 	// The box clock check (P2-9, W9 links it for question deadlines).
 	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; no network client",
 		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex"}},
-	// LOOP-7's runners start children in a process group of their own and
-	// kill the group on cancel (#515 Security 1). loop7's fuzz children
-	// also start as an unprivileged user in an empty network namespace,
-	// and Jail.Own reads owners and link counts (P3-4b-3r-confine); each
-	// starts from a thread with no_new_privs set (P3-4b-3r-confine-r3).
-	// Their IPC namespace is their own, and a user namespace mapping only
-	// their ids stops them retagging their tree out of its quota
-	// (P3-4b-3r-confine-r2).
-	"loop7": {"process-group kill of its fuzz children; their jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; owner and link-count checks",
-		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
-			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
+	// The probe runner starts its children in a process group of their own
+	// and kills the group on cancel (#515 Security 1).
 	"probecmd": {"its probe children's own process group", []string{"syscall.SysProcAttr"}},
 	// The one package that starts a process (P3-4b-3r-env-r8).
 	"childproc": {"a child's SysProcAttr, and the process-group kill on cancel", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
@@ -148,7 +137,7 @@ var netOK = map[string]allowance{
 		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
-	// RES-5: wraps loopbuild's listener so each open connection holds budget; never listens or dials.
+	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 }
 
@@ -717,14 +706,14 @@ func (c *client) do(ctx context.Context) (net.Conn, error) {
 
 // REQ: LOOP-7, LOOP-9
 //
-// P3-4b-3a: LOOP-7's fuzz runner (which agentosd no longer links since
-// MIG-4-untrusted-learn) and the probe runner start children through
-// childproc since P3-4b-3r-env-r8, which holds the reviewed os/exec
-// entry; neither runner has one of its own, and no other package of the
+// P3-4b-3a: the probe runner starts children through childproc since
+// P3-4b-3r-env-r8, which holds the reviewed os/exec entry (LOOP-7's fuzz
+// runner, loop7, did too until #2787 deleted it); the runner has no
+// entry of its own, and no other package of the
 // graph gains one (vm/gvisor and clock keep theirs until
 // P3-4b-3r-env-r8b).
 func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
-	for _, p := range []string{"loop7", "probecmd"} {
+	for _, p := range []string{"probecmd"} {
 		if escapeOK[p]["os/exec"] != "" {
 			t.Errorf("%s has its own os/exec entry; it starts children through childproc", p)
 		}

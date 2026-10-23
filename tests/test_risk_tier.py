@@ -29,17 +29,15 @@ class RiskTierTest(unittest.TestCase):
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
-            "broker/sockprobe/probe.go": "B",
             # loops is A through its core.txt allow lines.
             "broker/loops/probe.go": "A",
             "broker/loops/machine.go": "A",
-            # Tier-A-narrow (#1698): loop7 and probecmd build CRED-1 child
-            # environments and gate effects, so they stay A (Security #1700
+            # Tier-A-narrow (#1698): probecmd builds CRED-1 child
+            # environments and gates effects, so it stays A (Security #1700
             # f1, f4); corpus and machprobe meet no criterion and are B.
             "broker/probecmd/probecmd.go": "A",
             "broker/corpus/checks.go": "B",
             "broker/machprobe/machprobe.go": "B",
-            "broker/loop7/loop7.go": "A",
             # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
             "broker/sim/world.go": "A",
             # REQ: HW-10 (CTRL-claim-tier, #1067 R1: the lockout and one-claim rule)
@@ -69,7 +67,6 @@ class RiskTierTest(unittest.TestCase):
             "image/build.sh",
             "image/finish_image.py",
             "image/ci_boot.sh",
-            "image/fuzz-targets.json",
             "image/mkosi/mkosi.conf",
             "image/mkosi/mkosi.finalize",
             "image/mkosi/mkosi.repart/10-root.conf",
@@ -297,7 +294,7 @@ class RiskTierTest(unittest.TestCase):
         for path, want in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(rt.tier_of(path), want)
-        for pkg in ("cgroup", "corpus", "hostchange", "machprobe", "sockprobe"):
+        for pkg in ("cgroup", "corpus", "hostchange", "machprobe"):
             with self.subTest(demoted=pkg):
                 self.assertIn(pkg, rt.TIER_B_BROKER)
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "B")

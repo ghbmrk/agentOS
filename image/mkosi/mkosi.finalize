@@ -135,14 +135,12 @@ BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
 # systemd mounts /tmp, /dev/shm and /dev/mqueue 1777, and tmpfiles' tmp.conf and legacy.conf make
 # /var/tmp and /run/lock 1777 at boot. Any directory the tree itself gives o+w counts too.
 WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
-# #1702: directories a service user or a login user owns on the box. A unit's fuzz children run in
-# var/lib/agentos-fuzz (tmpfiles' ACLs deny that user /tmp, /var/tmp and /dev/shm, so it is the one
-# place it can write), agentos-localui serves the LAN-facing setup page from var/lib/agentos-localui,
-# the vault's user from var/lib/agentos-egress; DynamicUser services live under var/lib/private, and
-# people under home and run/user; the egress, netjoin and ap units' RuntimeDirectory= lives under run.
+# #1702: directories a service user or a login user owns on the box. agentos-localui serves the
+# LAN-facing setup page from var/lib/agentos-localui, the vault's user from var/lib/agentos-egress;
+# DynamicUser services live under var/lib/private, and people under home and run/user; the egress,
+# netjoin and ap units' RuntimeDirectory= lives under run.
 # A link into one is refused like one into WORLD_WRITABLE.
-SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home",
-                "run/user", "var/lib/private",
+SERVICE_DIRS = ("var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user", "var/lib/private",
                 "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
@@ -265,9 +263,6 @@ def _violations(root):
             out.append("etc/agentos: owner configuration; written at onboarding only")
         elif d == "var/lib/agentos" and tree_dir(root, d) and tree_listdir(root, tree_dir(root, d)):
             out.append("var/lib/agentos: broker state; must be empty")
-    # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
-    if entry_mode(root, "var/lib/agentos-fuzz"):
-        out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
     # The vault and the page's claim state: their units create them on the box (#1249, #1270).
     for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
         if entry_mode(root, d):

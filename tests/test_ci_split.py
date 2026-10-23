@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 
@@ -113,116 +112,8 @@ class SplitTest(unittest.TestCase):
         self.assertEqual([ci_split.weight(p) for p in out], sorted((ci_split.weight(p) for p in out), reverse=True))
 
 
-class PeaksTest(unittest.TestCase):
-    """The fuzz-peaks measurement is skipped only for a PR that misses all its inputs."""
-
-    DEPS = [f"{M}/loop7", f"{M}/loop7.test", f"{M}/sockets", f"{M}/sockets [{M}/sockets.test]",
-            f"{M}/cgroup", "fmt", "golang.org/x/sys/unix"]
-
-    def need(self, event, *changed, deps=DEPS):
-        return ci_split.peaks_needed(event, list(changed), deps)
-
-    def test_a_push_or_any_non_pr_event_measures(self):
-        for event in ("push", "workflow_dispatch", "schedule", "merge_group", ""):
-            self.assertTrue(self.need(event, "README.md"), event)
-
-    def test_a_pr_that_misses_every_input_skips(self):
-        self.assertFalse(self.need("pull_request", "README.md", "docs/OPERATING.md", "broker/pubid/x.go",
-                                   "broker/sockets2/x.go", "tools/trace.py"))
-
-    def test_a_pr_touching_an_input_measures(self):
-        for path in ("broker/sockets/x.go", "broker/sockets/testdata/fuzz/FuzzRequest/seed",
-                     "broker/loop7/peak_test.go", "broker/cgroup/cgroup.go", "image/fuzz-targets.json",
-                     "image/build.sh", "broker/go.mod", "broker/go.sum", "broker/vendor/x/y.go",
-                     ".github/workflows/ci.yml", "tools/ci_split.py"):
-            self.assertTrue(self.need("pull_request", "README.md", path), path)
-
-    def test_an_empty_change_or_no_dependency_list_measures(self):
-        self.assertTrue(self.need("pull_request"))
-        self.assertTrue(self.need("pull_request", "", " "))
-        self.assertTrue(self.need("pull_request", "README.md", deps=[]))
-        self.assertTrue(self.need("pull_request", "README.md", deps=["fmt"]))
-
-    def test_an_unreadable_file_measures(self):
-        with tempfile.TemporaryDirectory() as d:
-            changed = pathlib.Path(d) / "changed"
-            changed.write_text("README.md\n")
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                ci_split.main(["peaks", "--event", "pull_request", "--deps", str(pathlib.Path(d) / "none"),
-                               "--changed", str(changed)])
-            self.assertEqual(buf.getvalue().strip(), "run")
-            deps = pathlib.Path(d) / "deps"
-            deps.write_text("\n".join(self.DEPS))
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                ci_split.main(["peaks", "--event", "pull_request", "--deps", str(deps), "--changed", str(changed)])
-            self.assertEqual(buf.getvalue().strip(), "skip")
-
-
-class QuotedPathTest(unittest.TestCase):
-    """A changed path git quotes (non-ASCII, `"`, `\\`, control bytes) never makes the step skip."""
-
-    DEPS = PeaksTest.DEPS
-
-    def git(self, d, *args):
-        return subprocess.run(["git", *args], cwd=d, check=True, capture_output=True).stdout
-
-    def decide(self, changed_bytes):
-        with tempfile.TemporaryDirectory() as d:
-            changed = pathlib.Path(d) / "changed"
-            changed.write_bytes(changed_bytes)
-            deps = pathlib.Path(d) / "deps"
-            deps.write_text("\n".join(self.DEPS))
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                ci_split.main(["peaks", "--event", "pull_request", "--deps", str(deps), "--changed", str(changed)])
-            return buf.getvalue().strip()
-
-    def diffs(self, *names):
-        """(default `git diff --name-only`, ci.yml's `-z` form) for a commit adding `names`."""
-        if not shutil.which("git"):
-            self.skipTest("no git")
-        with tempfile.TemporaryDirectory() as d:
-            env = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-            self.git(d, "init", "-q")
-            (pathlib.Path(d) / "README.md").write_text("x\n")
-            self.git(d, "add", "README.md")
-            self.git(d, *env, "commit", "-qm", "base")
-            for n in names:
-                f = pathlib.Path(d) / n
-                f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_text("package loop7\n")
-            self.git(d, "add", "-A")
-            self.git(d, *env, "commit", "-qm", "change")
-            plain = self.git(d, "-c", "core.quotePath=true", "diff", "--no-renames", "--name-only", "HEAD^1", "HEAD")
-            z = self.git(d, "-c", "core.quotePath=false", "diff", "-z", "--no-renames", "--name-only",
-                         "HEAD^1", "HEAD")
-            return plain, z
-
-    def test_a_quoted_path_in_a_fuzz_target_package_measures(self):
-        plain, z = self.diffs("broker/loop7/\u00fc.go", 'broker/loop7/a"b.go')
-        self.assertIn(b'"broker/loop7/\\303\\274.go"', plain)  # git did quote it
-        self.assertEqual(self.decide(plain), "run")
-        self.assertEqual(self.decide(z), "run")
-        for n in ("broker/loop7/\u00fc.go", 'broker/loop7/a"b.go'):
-            self.assertIn(n.encode(), z.split(b"\0"))
-
-    def test_a_quoted_path_anywhere_measures(self):
-        plain, z = self.diffs("docs/\u00fc.md")
-        self.assertTrue(plain.startswith(b'"'))
-        self.assertEqual(self.decide(plain), "run")  # fail safe: never unquote
-        self.assertEqual(self.decide(z), "skip")     # -z names it exactly, and it is no input
-
-    def test_nul_separated_paths_are_read_whole(self):
-        self.assertEqual(ci_split.changed_paths("a\0broker/loop7/x\ny.go\0"), ["a", "broker/loop7/x\ny.go", ""])
-        self.assertTrue(ci_split.peaks_needed("pull_request", ['"docs/x"'], self.DEPS))
-        self.assertEqual(self.decide(b"README.md\0broker/loop7/x\ny.go\0"), "run")
-        self.assertEqual(self.decide(b"README.md\0docs/\xff.md\0"), "skip")
-
-
 class WiringTest(unittest.TestCase):
-    """ci.yml runs the split it tests, and the peaks filter fails toward measuring."""
+    """ci.yml runs the split it tests."""
 
     def setUp(self):
         self.ci = CI.read_text()
@@ -270,22 +161,6 @@ class WiringTest(unittest.TestCase):
         step = checks[checks.index("- name: OP-2 same-effect model"):]
         step = step[:step.index("- name: Fuzz the broker")]
         self.assertIn("go test -count=1 -timeout 20m -parallel 2 -run ", step)
-
-    def test_the_peaks_step_skips_only_on_an_exact_skip(self):
-        machines = job(self.ci, "machines")
-        self.assertIn("fetch-depth: 2", machines)
-        step = machines[machines.index("- name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)"):]
-        self.assertIn("        if: steps.peaks.outputs.run != 'skip'\n", step[:step.index("run: |")])
-        dec = machines[machines.index("id: peaks"):machines.index("- name: Fuzz leaf memory peaks (P3")]
-        self.assertIn("run=run", dec)
-        self.assertIn('[ "$run" = skip ] || run=run', dec)
-        self.assertIn('[ "$EVENT" = pull_request ]', dec)
-        # The base commit's rule decides, as scope.yml does for ci_scope.py.
-        self.assertIn("git show HEAD^1:tools/ci_split.py", dec)
-        self.assertIn("git -c core.quotePath=false diff -z --no-renames --name-only HEAD^1 HEAD", dec)
-        self.assertNotIn("cannot change the rule", dec)
-        self.assertIn('python3 -I "$t/ci_split.py" peaks', dec)
-        self.assertNotIn("paths:", self.ci[:self.ci.index("\njobs:\n")])
 
 
 if __name__ == "__main__":

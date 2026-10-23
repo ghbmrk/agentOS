@@ -2433,7 +2433,7 @@ class ConfFilesTest(unittest.TestCase):
         self.assertIn("etc/systemd/system/getty@.service.d: a link to /var/tmp, inside /var/tmp,", self.v())
 
     def test_a_link_into_a_service_users_directory_is_refused(self):
-        # #1702 item 3: a compromise of the fuzz user, the page's user or a login user then becomes
+        # #1702 item 3: a compromise of a service user, the page's user or a login user then becomes
         # root, since systemd and udev read the link's target as root.
         for d in check.SERVICE_DIRS:
             for rel, target in (("etc/systemd/system/ssh.service.d/x.conf", "/%s/x.conf" % d),
@@ -2446,7 +2446,7 @@ class ConfFilesTest(unittest.TestCase):
                     finally:
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
-            "var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
+            "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
             "var/lib/private", "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")))
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
@@ -5874,112 +5874,6 @@ class LocaluiClaimTest(unittest.TestCase):
     def test_nothing_to_move(self):
         self.assertEqual(self.run_claim(), "")
         self.assertFalse((self.root / "var/lib/agentos-localui/claim.json").exists())
-
-
-def fuzz_targets(broker):
-    """(pkg, name) for every Go fuzz target in broker's *_test.go files, skipping raw strings
-    (a generated source in a test, like loop7's planted target, is not a target) and testdata."""
-    out = set()
-    for f in pathlib.Path(broker).rglob("*_test.go"):
-        if "testdata" in f.parts:
-            continue
-        text = re.sub(r"`[^`]*`", "", f.read_text())
-        for name in re.findall(r"^func (Fuzz\w*)\(\w+ \*testing\.F\)", text, re.M):
-            out.add((f.parent.relative_to(broker).as_posix(), name))
-    return out
-
-
-class FuzzManifestTest(unittest.TestCase):
-    # REQ: LOOP-7, LOOP-9
-    # P3-4b-3a requirement 4: the image ships a binary for every fuzz target in the tree, listed in
-    # the manifest agentosd reads; a new target without a binary fails here.
-
-    def manifest(self):
-        return json.loads((IMG / "fuzz-targets.json").read_text())["targets"]
-
-    def test_manifest_lists_every_fuzz_target(self):
-        listed = {(t["pkg"], t["name"]) for t in self.manifest()}
-        found = fuzz_targets(ROOT / "broker")
-        self.assertTrue(found)
-        self.assertEqual(sorted(found - listed), [], "fuzz targets with no binary in the image")
-        self.assertEqual(sorted(listed - found), [], "manifest entries with no fuzz target")
-        for t in self.manifest():
-            self.assertEqual(sorted(t), ["binary", "name", "pkg"])
-            self.assertEqual(t["binary"], t["pkg"].replace("/", "_") + ".test")
-            self.assertRegex(t["pkg"], r"^[a-z0-9]+(/[a-z0-9]+)*$")
-
-    def test_scan_finds_a_new_target_and_skips_generated_source(self):
-        with tempfile.TemporaryDirectory() as d:
-            d = pathlib.Path(d)
-            write(d, "a/x_test.go", "package a\nfunc FuzzNew(f *testing.F) {}\n")
-            write(d, "b/y_test.go", "package b\nvar src = `\nfunc FuzzPlanted(f *testing.F) {\n` + c + `}`\n")
-            write(d, "c/testdata/z_test.go", "package c\nfunc FuzzData(f *testing.F) {}\n")
-            self.assertEqual(fuzz_targets(d), {("a", "FuzzNew")})
-
-    def test_build_ships_binaries_seeds_and_manifest(self):
-        b = (IMG / "build.sh").read_text()
-        self.assertIn('install -D -m 0644 "$REPO/image/fuzz-targets.json" "$FUZZ/manifest.json"', b)
-        self.assertIn("FUZZ=$STAGE/usr/lib/agentos/fuzz", b)
-        self.assertRegex(b, r"go test -c -trimpath [^\n]*-fuzz=\.")
-        self.assertIn("-test.list '^Fuzz'", b)  # a binary's targets must match the manifest
-        self.assertIn('"$FUZZ/corpus/$pkg/$name"', b)
-
-
-class FuzzConfineTest(unittest.TestCase):
-    # REQ: LOOP-1, LOOP-7
-    # P3-4b-3r-confine requirement 2: fuzz children run as an unprivileged system user the image
-    # creates; it owns LOOP-7's state and reaches it through the broker's 0700 state directory by an
-    # ACL entry granting search only. The user is the one agentosd looked up.
-    # P3-4b-3r-confine-r2 moved the state out of the broker's directory and took the ACL away.
-    # MIG-4-untrusted-learn (#2776 b): agentosd no longer runs fuzz children, so it names neither the
-    # user nor the state; the image's user, ACLs and fuzz binaries go in a later image change.
-
-    def test_the_image_creates_the_fuzz_user(self):
-        lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf").read_text().splitlines()
-        users = [l.split() for l in lines if l.strip() and not l.startswith("#")]
-        self.assertEqual([u[:3] for u in users], [["u", "agentos-fuzz", "-"]])
-
-    def tmpfiles(self):
-        return [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
-                if l.strip() and not l.startswith("#")]
-
-    # REQ: LOOP-7, RES-4
-    # P3-4b-3r-confine-r2 requirement 1: the fuzz user's tree is its own, beside the broker's 0700 state
-    # directory rather than in it, and the user is granted nothing there: a search entry would open every
-    # file below it whose own mode lets others read it (#588 L3 3, Security R3).
-    def test_the_fuzz_user_is_granted_nothing_in_the_broker_s_state(self):
-        lines = self.tmpfiles()
-        self.assertIn(["d", "/var/lib/agentos", "0700", "root", "root", "-"], lines)
-        self.assertFalse([l for l in lines if l[1].startswith("/var/lib/agentos/")])
-        for l in lines:
-            if l[1] == "/var/lib/agentos" or l[1].startswith("/var/lib/agentos/"):
-                for e in (l[6].split(",") if l[0].startswith("a") and len(l) > 6 else []):
-                    if e.startswith(("u:agentos-fuzz:", "user:agentos-fuzz:", "g:agentos-fuzz:", "group:agentos-fuzz:")):
-                        self.assertEqual(e.rsplit(":", 1)[1], "---", "the fuzz user is granted %s on %s" % (e, l[1]))
-        # The fuzz state was created on the box (loop7.Load), never by a tmpfiles line, which would also
-        # run at image build and ship it.
-        self.assertFalse([l for l in lines if l[1] == "/var/lib/agentos-fuzz" or l[1].startswith("/var/lib/agentos-fuzz/")])
-        # Nothing else on the box is given to the fuzz user.
-        shared = ("/var/lib/agentos", "/tmp", "/var/tmp", "/dev/shm")
-        others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in shared]
-        self.assertEqual(others, [])
-
-    def test_the_image_does_not_ship_the_fuzz_state(self):
-        with tempfile.TemporaryDirectory() as d:
-            nodump(pathlib.Path(d))
-            radio(pathlib.Path(d))
-            uplink(pathlib.Path(d))
-            self.assertEqual(check.violations(d), [])
-            os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
-            self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
-
-    # REQ: LOOP-1, RES-4
-    # P3-4b-3r-confine-r4 requirement 3: the fuzz user cannot write the shared world-writable directories,
-    # which its quota does not cover; the entry names that user only, so no other user loses them.
-    def test_the_fuzz_user_cannot_write_the_shared_temp_dirs(self):
-        lines = self.tmpfiles()
-        for d in ("/tmp", "/var/tmp", "/dev/shm"):
-            self.assertEqual([l for l in lines if l[1] == d], [["a+", d, "-", "-", "-", "-", "u:agentos-fuzz:---"]])
 
 
 class CodexPinTest(unittest.TestCase):

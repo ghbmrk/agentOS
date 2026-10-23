@@ -17,8 +17,8 @@
 // runs can raise it (LOOP-6, CHG-2).
 //
 // Loop 1, which mined the journal for hypotheses, and its Harvester were
-// deleted (#2786 part a, HLD-4: off until it beats the baseline); brief.go
-// keeps the builder contract loopbuild still implements.
+// deleted (#2786 part a, HLD-4: off until it beats the baseline); its
+// builder contract went with loopbuild (#2787).
 //
 // Loop 2's passive checks and finding handling (LOOP-8 to LOOP-10) are
 // Guard, in secure.go. Loop 3 plugs in as a Source. The package uses no inference (ARC-2).
