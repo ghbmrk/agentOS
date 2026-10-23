@@ -1,0 +1,29 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-CANARY",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [],
+ "summary": "Synthetic control entry for tools/vulncheck.py's image canary; not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "curl",
+    "ecosystem": "Debian:13"
+   },
+   "ranges": [
+    {
+     "type": "ECOSYSTEM",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "1.0-1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

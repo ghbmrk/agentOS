@@ -22,8 +22,11 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          file and os-release that image/mkosi/mkosi.postinst copies out of the build tree
          (agentos.dpkg-status, agentos.os-release). osv-scanner reads them as a one-layer
          container image, so each installed package is queried by its source package in
-         Debian:<VERSION_ID>. Any vulnerability fails; only records whose where is "image"
-         apply here, and `run` ignores those records.
+         Debian:<VERSION_ID>, with a canary (source curl at version 0) that must match an
+         advisory, since osv-scanner reports a failed image query as no vulnerabilities. The
+         status file must list exactly the packages of the mkosi manifest in DIR. Any
+         vulnerability fails. Only records whose where is "image" apply here (`run` ignores
+         them); each names its source package, and accepts only an advisory with no Debian fix.
 control  The same scans against tests/fixtures/vulncheck with planted synthetic databases,
          offline: every planted vulnerability must fail, the unreachable standard-library one
          must not, and the fixture's acceptance records must clear the rest. The workflows run
@@ -65,11 +68,18 @@ FIXTURE = ROOT / "tests" / "fixtures" / "vulncheck"
 STDLIB = "stdlib"
 # osv-scanner: 0 nothing found, 1 vulnerabilities found; anything else is an error.
 OSV_OK = (0, 1)
-RECORD_KEYS = {"id", "issue", "why", "where"}
+RECORD_KEYS = {"id", "issue", "why", "where", "package"}
 # The `where` of every image finding, and of every record that accepts one.
 IMAGE = "image"
 # What mkosi.postinst writes to the image build's output directory.
 DPKG_STATUS, OS_RELEASE = "agentos.dpkg-status", "agentos.os-release"
+# A package the image scan adds to every query: source curl at version 0, which every Debian
+# advisory against curl affects. osv-scanner's image scan reports packages with no
+# vulnerabilities when its OSV query fails, and exits 0; a canary with no advisory is that.
+CANARY, CANARY_SOURCE = "agentos-vulncheck-canary", "curl"
+CANARY_STANZA = (f"Package: {CANARY}\nStatus: install ok installed\nArchitecture: all\n"
+                 f"Source: {CANARY_SOURCE} (0)\nVersion: 0\n"
+                 "Description: tools/vulncheck.py canary; not in the image\n")
 
 # What the control must see with no records, as (where, ID): the reachable symbol, the
 # vendored module's unreachable package, the npm plant, and the same plant in a tracked
@@ -101,9 +111,9 @@ CONTROL_CONFIG = {
          "where": "ignored/package-lock.json"},
         {"id": "CVE-0000-0102", "issue": 1, "why": "control: fork accepted by alias", "where": "gomod"},
         {"id": "AGENTOS-VULNCHECK-DEB-1", "issue": 1, "why": "control: Debian has fixed it, so this "
-         "cannot accept it", "where": IMAGE},
+         "cannot accept it", "where": IMAGE, "package": "agentos-plant"},
         {"id": "CVE-0000-0105", "issue": 1, "why": "control: no Debian fix; accepted by alias",
-         "where": IMAGE},
+         "where": IMAGE, "package": "agentos-nofix"},
     ],
 }
 
@@ -237,6 +247,10 @@ def record_problems(records):
             problems.append(f"{tag}: no reason")
         if "where" in r and (not isinstance(r["where"], str) or not r["where"].strip()):
             problems.append(f"{tag}: where must name a Go target or lockfile")
+        if (r.get("where") == IMAGE) != ("package" in r):
+            problems.append(f"{tag}: an image record, and only an image record, names its source package")
+        elif "package" in r and (not isinstance(r["package"], str) or not r["package"].strip()):
+            problems.append(f"{tag}: package must name a Debian source package")
     return problems
 
 
@@ -246,7 +260,8 @@ def apply_records(findings, records):
     for f in findings:
         names = {f["id"], *f["aliases"]}
         for n, r in enumerate(records):
-            if r["id"] in names and r.get("where", f["where"]) == f["where"]:
+            if (r["id"] in names and r.get("where", f["where"]) == f["where"]
+                    and r.get("package", f["module"]) == f["module"]):
                 f["accepted_by"] = r["issue"]
                 used.add(n)
                 break
@@ -380,7 +395,8 @@ def run_forks(where, target_dir, env=None, offline=False):
 def image_archive(src, dest):
     """A one-layer docker-archive holding SRC's dpkg status and os-release where a Debian
     tree keeps them, the input osv-scanner's image scan reads: its dpkg extractor takes the
-    ecosystem from os-release and queries each installed package by its source package."""
+    ecosystem from os-release and queries each installed package by its source package. The
+    status file gains the canary (CANARY_STANZA)."""
     files = {"etc/os-release": pathlib.Path(src) / OS_RELEASE,
              "var/lib/dpkg/status": pathlib.Path(src) / DPKG_STATUS}
     for f in files.values():
@@ -394,6 +410,8 @@ def image_archive(src, dest):
             t.addfile(ti)
         for name, f in files.items():
             data = f.read_bytes()
+            if name == "var/lib/dpkg/status":
+                data = data.rstrip(b"\n") + b"\n\n" + CANARY_STANZA.encode()
             ti = tarfile.TarInfo(name)
             ti.size, ti.mode = len(data), 0o644
             t.addfile(ti, io.BytesIO(data))
@@ -414,10 +432,13 @@ def image_archive(src, dest):
 
 def image_findings(doc):
     """Findings from an osv-scanner image report, and the problems with what it scanned."""
-    found, problems, n = [], [], 0
+    found, problems, n, canary = [], [], 0, None
     for res in doc.get("results") or []:
         for pkg in res.get("packages") or []:
             meta = pkg["package"]
+            if meta.get("os_package_name") == CANARY:
+                canary = len(_vulns(pkg, IMAGE, "", ""))
+                continue
             n += 1
             eco = meta.get("ecosystem", "")
             if not re.fullmatch(r"Debian:\d+", eco):
@@ -430,7 +451,40 @@ def image_findings(doc):
             found += vulns
     if not n:
         problems.append("the image scan reported no packages")
+    if not canary:
+        problems.append(f"the canary ({CANARY_SOURCE} at version 0) matched no advisory, so the OSV "
+                        "query did not run or returned nothing; the scan proves nothing")
     return sorted(found, key=lambda x: (x["id"], x["package"])), problems
+
+
+def dpkg_installed(text):
+    """(Package, Version) of each installed package in a dpkg status file."""
+    out = set()
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = dict(m.groups() for m in re.finditer(r"(?m)^([A-Za-z-]+):[ \t]*(.*)$", stanza))
+        if fields.get("Status", "").endswith(" installed") and fields.get("Package"):
+            out.add((fields["Package"], fields.get("Version", "")))
+    return out
+
+
+def manifest_problems(src):
+    """The status file must list exactly the packages of the build's mkosi manifest, which
+    image.yml's reproduce job compares across two runners."""
+    found = sorted(pathlib.Path(src).glob("*.manifest"))
+    if len(found) != 1:
+        return [f"{src}: expected one mkosi *.manifest beside {DPKG_STATUS}, found {len(found)}"]
+    try:
+        pkgs = json.loads(found[0].read_text())["packages"]
+        manifest = {(p["name"], p["version"]) for p in pkgs}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"{found[0]}: unreadable manifest: {e}"]
+    status = dpkg_installed((pathlib.Path(src) / DPKG_STATUS).read_text())
+    if status == manifest:
+        return []
+    extra, missing = sorted(status - manifest), sorted(manifest - status)
+    return [f"{DPKG_STATUS} does not list the manifest's packages: only in the status file "
+            f"{extra[:5]}{'...' if len(extra) > 5 else ''}, only in the manifest "
+            f"{missing[:5]}{'...' if len(missing) > 5 else ''}"]
 
 
 def debian_fix(pkg, ids, name, eco):
@@ -492,7 +546,14 @@ def scan_image(config, src, osv_env=None, offline=False):
         return [], problems, []
     records = [r for r in config.get("accepted", []) if r.get("where") == IMAGE]
     findings, problems = run_image(src, osv_env, offline)
+    problems += manifest_problems(src)
     return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
+
+
+def issue_records(config, cmd):
+    """The records whose issues `cmd --check-issues` checks: the image's for `image`, the
+    rest for `run`."""
+    return [r for r in config.get("accepted", []) if (r.get("where") == IMAGE) == (cmd == "image")]
 
 
 def verdict(f):
@@ -515,7 +576,10 @@ def summary(findings, problems, unused, out=None):
         print(f"problem: {p}", file=out)
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
-    if failing:
+    if any(f["where"] == IMAGE and f["fixed"] for f in failing):
+        print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
+              "version, and no record can accept those", file=out)
+    if any(not (f["where"] == IMAGE and f["fixed"]) for f in failing):
         print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
     return not failing and not problems
@@ -602,8 +666,7 @@ def main(argv=None):
         if not repo or not token:
             problems.append("--check-issues needs GITHUB_REPOSITORY and GITHUB_TOKEN")
         else:
-            mine = [r for r in config.get("accepted", []) if (r.get("where") == IMAGE) == (a.cmd == "image")]
-            problems += issue_problems(mine, repo, token)
+            problems += issue_problems(issue_records(config, a.cmd), repo, token)
     ok = summary(findings, problems, unused)
     if a.report:
         pathlib.Path(a.report).write_text(json.dumps(

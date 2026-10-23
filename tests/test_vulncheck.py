@@ -290,23 +290,48 @@ class ForkTest(unittest.TestCase):
 
 
 class ImageTest(unittest.TestCase):
+    CANARY = {**osv_pkg("curl", "0", "Debian:13", "DEBIAN-CVE-0", binary=vulncheck.CANARY)}
+
+    def image(self, *pkgs, canary=True):
+        return {"results": [{"source": {"path": "/var/lib/dpkg/status"},
+                             "packages": list(pkgs) + ([self.CANARY] if canary else [])}]}
+
+    def scan(self, records, found, src="x"):
+        saved = vulncheck.run_image, vulncheck.manifest_problems
+        vulncheck.run_image = lambda src, env=None, offline=False: ([dict(f) for f in found], [])
+        vulncheck.manifest_problems = lambda src: []
+        try:
+            return vulncheck.scan_image({"accepted": records}, src)
+        finally:
+            vulncheck.run_image, vulncheck.manifest_problems = saved
+
     def test_every_vulnerability_in_an_image_package_fails(self):
-        # TN-vulncheck-6: queried by source package; the binary is shown beside it.
-        doc = {"results": [{"source": {"path": "/var/lib/dpkg/status"}, "packages": [
+        # TN-vulncheck-6: queried by source package; the binary is shown beside it; the
+        # canary's own findings are dropped.
+        fs, probs = vulncheck.image_findings(self.image(
             osv_pkg("openssl", "3.5.1-1", "Debian:13", "DSA-1", binary="libssl3t64"),
-            osv_pkg("zlib", "1.3-1", "Debian:13", binary="zlib1g")]}]}
-        fs, probs = vulncheck.image_findings(doc)
+            osv_pkg("zlib", "1.3-1", "Debian:13", binary="zlib1g")))
         self.assertEqual(probs, [])
-        self.assertEqual([(f["where"], f["id"], f["package"], f["fails"]) for f in fs],
-                         [("image", "DSA-1", "Debian:13:openssl (libssl3t64)", True)])
+        self.assertEqual([(f["where"], f["id"], f["package"], f["module"], f["fails"]) for f in fs],
+                         [("image", "DSA-1", "Debian:13:openssl (libssl3t64)", "openssl", True)])
+
+    def test_a_failed_query_is_a_problem_not_a_clean_scan(self):
+        # L3 blocker on #2917: osv-scanner's image scan reports a failed OSV query as packages
+        # with no vulnerabilities and exits 0; the canary must then match nothing.
+        pkg = osv_pkg("openssl", "3.5.1-1", "Debian:13", binary="libssl3t64")
+        for doc in (self.image(pkg, canary=False),
+                    {"results": [{"packages": [pkg, osv_pkg("curl", "0", "Debian:13", binary=vulncheck.CANARY)]}]}):
+            probs = vulncheck.image_findings(doc)[1]
+            self.assertEqual(len(probs), 1, probs)
+            self.assertIn("canary", probs[0])
 
     def test_a_scan_that_read_nothing_or_the_wrong_release_is_a_problem(self):
-        self.assertEqual(vulncheck.image_findings({"results": []})[1], ["the image scan reported no packages"])
+        self.assertEqual(vulncheck.image_findings(self.image())[1], ["the image scan reported no packages"])
         for eco in ("Ubuntu:24.04", "Debian", ""):
-            doc = {"results": [{"packages": [osv_pkg("openssl", "3.5.1-1", eco)]}]}
+            doc = self.image(osv_pkg("openssl", "3.5.1-1", eco))
             self.assertEqual(len(vulncheck.image_findings(doc)[1]), 1, eco)
 
-    def test_archive_holds_the_two_files_where_debian_keeps_them(self):
+    def test_archive_holds_the_two_files_and_the_canary_where_debian_keeps_them(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         out = pathlib.Path(tmp.name) / "a.tar"
@@ -314,8 +339,9 @@ class ImageTest(unittest.TestCase):
         with tarfile.open(out) as t:
             manifest = json.load(t.extractfile("manifest.json"))
             layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
-            self.assertEqual(layer.extractfile("var/lib/dpkg/status").read(),
-                             (vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_bytes())
+            status = layer.extractfile("var/lib/dpkg/status").read()
+            self.assertTrue(status.startswith((vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_bytes().rstrip(b"\n")))
+            self.assertIn((vulncheck.CANARY, "0"), vulncheck.dpkg_installed(status.decode()))
             self.assertIn(b"ID=debian", layer.extractfile("etc/os-release").read())
 
     def test_a_missing_or_empty_list_fails(self):
@@ -329,17 +355,46 @@ class ImageTest(unittest.TestCase):
         with self.assertRaises(vulncheck.ScanError):
             vulncheck.image_archive(d, d / "a.tar")
 
-    def test_image_records_apply_only_to_the_image_scan(self):
-        recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image"},
-                {"id": "DSA-2", "issue": 1, "why": "x"}]
-        found = [{**fail("DSA-1"), "where": "image"}, {**fail("DSA-2"), "where": "image"}]
-        saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False: ([dict(f) for f in found], [])
-        try:
-            fs, probs, unused = vulncheck.scan_image({"accepted": recs}, "x")
-        finally:
-            vulncheck.run_image = saved
-        self.assertEqual(([vulncheck.verdict(f) for f in fs], probs, unused), (["accepted #1", "FAIL"], [], []))
+    def test_status_must_list_the_manifests_packages(self):
+        # Security release finding on #2917: the scanned list is tied to the manifest the
+        # reproduce job compares across runners.
+        self.assertEqual(vulncheck.manifest_problems(vulncheck.FIXTURE / "image"), [])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        status = (vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_text()
+        (d / vulncheck.DPKG_STATUS).write_text(status)
+        self.assertEqual(len(vulncheck.manifest_problems(d)), 1)  # no manifest
+        m = json.loads((vulncheck.FIXTURE / "image" / "agentos_control.manifest").read_text())
+        m["packages"] = m["packages"][1:]
+        (d / "a.manifest").write_text(json.dumps(m))
+        probs = vulncheck.manifest_problems(d)
+        self.assertEqual(len(probs), 1)
+        self.assertIn("agentos-fixed", probs[0])
+        self.assertEqual(vulncheck.dpkg_installed(status),
+                         {("libplant1", "1.0-1+b1"), ("agentos-fixed", "1.0-2"), ("agentos-nofix", "2.0-1")})
+
+    def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
+        recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
+                {"id": "DSA-2", "issue": 1, "why": "x"},
+                {"id": "DSA-3", "issue": 1, "why": "x", "where": "image", "package": "other"}]
+        found = [{**fail(i), "where": "image"} for i in ("DSA-1", "DSA-2", "DSA-3")]
+        fs, probs, unused = self.scan(recs, found)
+        self.assertEqual(([vulncheck.verdict(f) for f in fs], probs), (["accepted #1", "FAIL", "FAIL"], []))
+        self.assertEqual([r["id"] for r in unused], ["DSA-3"])
+
+    def test_an_image_record_names_its_package_and_only_an_image_record_does(self):
+        good = {"id": "DSA-1", "issue": 1, "why": "x"}
+        self.assertEqual(vulncheck.record_problems([{**good, "where": "image", "package": "curl"}]), [])
+        for bad in ({**good, "where": "image"}, {**good, "package": "curl"},
+                    {**good, "where": "broker", "package": "curl"}, {**good, "where": "image", "package": " "}):
+            self.assertEqual(len(vulncheck.record_problems([bad])), 1, bad)
+
+    def test_check_issues_partitions_the_records(self):
+        # Potency finding on #2917: closing #2919 must withdraw the image acceptances.
+        cfg = {"accepted": [{"id": "A", "where": "image"}, {"id": "B"}, {"id": "C", "where": "broker"}]}
+        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "image")], ["A"])
+        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "run")], ["B", "C"])
 
     def test_a_record_cannot_accept_an_advisory_debian_has_fixed(self):
         # TN-vulncheck-6: once Debian ships a fix, the finding fails until the image is rebuilt.
@@ -349,18 +404,16 @@ class ImageTest(unittest.TestCase):
                         {"package": {"ecosystem": "Debian:12", "name": name}, "ranges": [{"events": [{"fixed": "0.9"}]}]},
                         {"package": {"ecosystem": "Debian:13", "name": name},
                          "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, *events]}]}]}]}
-        doc = {"results": [{"packages": [pkg("a", {"fixed": "1.0-2"}), pkg("b")]}]}
-        fs, probs = vulncheck.image_findings(doc)
+        fs, probs = vulncheck.image_findings(self.image(pkg("a", {"fixed": "1.0-2"}), pkg("b")))
+        self.assertEqual(probs, [])
         self.assertEqual([(f["package"], f["fixed"]) for f in fs], [("Debian:13:a (a)", "1.0-2"), ("Debian:13:b (b)", "")])
-        rec = {"id": "DEBIAN-CVE-1", "issue": 1, "why": "x", "where": "image"}
-        saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False: (fs, probs)
-        try:
-            fs, probs, unused = vulncheck.scan_image({"accepted": [rec]}, "x")
-        finally:
-            vulncheck.run_image = saved
+        recs = [{"id": "DEBIAN-CVE-1", "issue": 1, "why": "x", "where": "image", "package": p} for p in "ab"]
+        fs, probs, unused = self.scan(recs, fs)
         self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
-
+        out = io.StringIO()
+        vulncheck.summary(fs, [], unused, out)
+        self.assertIn("fix: rebuild the image", out.getvalue())
+        self.assertNotIn("or add a record", out.getvalue())
 
 class ConfigTest(unittest.TestCase):
     def test_config_is_valid_and_targets_exist(self):

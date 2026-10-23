@@ -210,8 +210,8 @@ jobs:
   image-vulncheck:
     # SPEC EVL-5 (#2886): a known vulnerability in a Debian package the image ships fails unless
     # an open issue named in assurance/vulncheck.json (a record whose where is "image") records
-    # why it is accepted. Build a's package list (mkosi.postinst); the reproduce job checks b's
-    # lists the same packages. The scanners and their pins are vulncheck.yml's, and the control
+    # why it is accepted. Build a's package list (mkosi.postinst), which vulncheck.py checks
+    # against build a's mkosi manifest; the reproduce job checks b's manifest lists the same. The scanners and their pins are vulncheck.yml's, and the control
     # runs first, so a clean scan counts only because the same scanners caught every plant.
     # vulncheck.yml rescans main's latest image daily, for advisories published after a build.
     needs: build
