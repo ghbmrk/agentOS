@@ -30,8 +30,10 @@ type Counter interface {
 //
 // Put writes the file first and then advances the counter. A crash between
 // the two leaves the file one ahead; Open then takes the head before it, so
-// a Put that never returned confirms nothing, as with any anchor whose Put
-// failed (kernel.Open drops the widening it covered).
+// a Put that did not return nil confirms nothing, as with any anchor whose
+// Put failed (kernel.Open drops the widening it covered). Open then moves the
+// counter two numbers on, past any record a failed Put left (ASSUMPTIONS
+// LOG-anchor-tpm-b).
 type CounterAnchor struct {
 	mu     sync.Mutex
 	dir    string
@@ -66,8 +68,12 @@ var (
 	// ErrAnchorBroken: a Put failed part way; nothing more is anchored
 	// until the anchor is opened again.
 	ErrAnchorBroken = errors.New("run: the anchor failed a write; reopen it")
-	// ErrAnchorBehind: a head behind, or forking from, the anchored one.
-	ErrAnchorBehind = errors.New("run: the head is behind or forks from the anchored head")
+	// ErrAnchorBehind: a head behind the anchored one, or another head at
+	// its seq. A fork at a later seq is kernel.Open's ErrFork.
+	ErrAnchorBehind = errors.New("run: the head is behind the anchored head")
+	// ErrLogExists: InitCounterAnchor on a box that already has a log, where a
+	// fresh anchor would switch the log's rollback check off.
+	ErrLogExists = errors.New("run: a log exists; the anchor is started only before it")
 )
 
 // anchorRec is one write of the head file. Head is the anchored head; Prev
@@ -88,9 +94,16 @@ type anchorFile struct {
 func anchorMsg(rec []byte) []byte { return append([]byte(domainAnchor), rec...) }
 
 // InitCounterAnchor starts the head file in dir at the counter's current
-// value, with no head. Enrollment alone calls it, on a box with no log (STO-2c).
-func InitCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) error {
+// value, with no head. Enrollment alone calls it (STO-2c), before the log at
+// logPath exists: a head file deleted on a box with a log is never replaced
+// by a fresh one.
+func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) error {
 	if err := private(dir, true); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(logPath); err == nil {
+		return ErrLogExists
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Join(dir, anchorName)); err == nil {
@@ -112,9 +125,10 @@ func InitCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) error {
 // OpenCounterAnchor loads the head file in dir and checks it against the
 // counter. It fails closed: a missing, rolled-back, ahead or unsigned file is
 // an error, so kernel.Open never runs against an anchor it cannot trust.
-// It then rewrites the file at the next number, so no record a failed Put
-// may have left (a temporary copied off the drive) can match the counter
-// later.
+// It then rewrites the file twice, at the next two numbers. A failed Put
+// left its record (the file, or a temporary copied off the drive) at the next
+// number, and the first rewrite reuses that number; the second leaves it
+// behind the counter, so the failed Put's head can no longer count.
 func OpenCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) (*CounterAnchor, error) {
 	if err := private(dir, true); err != nil {
 		return nil, err
@@ -138,8 +152,10 @@ func OpenCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) (*Counter
 	default:
 		return nil, ErrAnchorAhead
 	}
-	if err := a.write(a.head, a.head); err != nil {
-		return nil, err
+	for range 2 {
+		if err := a.write(a.head, a.head); err != nil {
+			return nil, err
+		}
 	}
 	return a, nil
 }
@@ -185,9 +201,11 @@ func signAnchor(sign ed25519.PrivateKey, rec anchorRec) ([]byte, error) {
 	return json.Marshal(anchorFile{Rec: rb, Sig: ed25519.Sign(sign, anchorMsg(rb))})
 }
 
-// write puts head at the next number, then advances the counter. Any
-// failure breaks the anchor until it is opened again, so a number is never
-// written twice with different heads.
+// write puts head at the next number, then advances the counter. An
+// increment that errors is checked by a read, since a TPM may count and lose
+// its answer; a Put the counter did count returns nil. Any other failure
+// breaks the anchor until it is opened again, so no number is written with a
+// second head before Open moves the counter past it.
 func (a *CounterAnchor) write(head, prev *kernel.Head) error {
 	if a.n == ^uint64(0) {
 		a.broken = true
@@ -198,7 +216,11 @@ func (a *CounterAnchor) write(head, prev *kernel.Head) error {
 		err = writeAtomic(a.dir, anchorName, b, a.stop)
 	}
 	if err == nil {
-		err = a.c.Increment()
+		if err = a.c.Increment(); err != nil {
+			if got, rerr := a.c.Read(); rerr == nil && got == a.n+1 {
+				err = nil
+			}
+		}
 	}
 	if err != nil {
 		a.broken = true

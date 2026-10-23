@@ -5,6 +5,7 @@ package run
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -18,10 +19,10 @@ import (
 
 // fakeCounter is the TPM counter's contract: it only goes up. failInc fails
 // the next Increment, as a power cut or a TPM error between the file write
-// and the count would.
+// and the count would; lostInc counts the next one but loses its answer.
 type fakeCounter struct {
-	n       uint64
-	failInc bool
+	n                uint64
+	failInc, lostInc bool
 }
 
 func (c *fakeCounter) Read() (uint64, error) { return c.n, nil }
@@ -31,8 +32,15 @@ func (c *fakeCounter) Increment() error {
 		return errors.New("fake: increment failed")
 	}
 	c.n++
+	if c.lostInc {
+		c.lostInc = false
+		return errors.New("fake: increment answer lost")
+	}
 	return nil
 }
+
+// noLog is a log path where no log exists yet, as at enrollment.
+func noLog(t *testing.T) string { return filepath.Join(t.TempDir(), "log") }
 
 func headKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
@@ -52,7 +60,7 @@ func head(priv ed25519.PrivateKey, seq uint64) kernel.Head {
 func newAnchor(t *testing.T) (string, *fakeCounter, ed25519.PrivateKey, *CounterAnchor) {
 	t.Helper()
 	dir, c, priv := clerkDir(t), &fakeCounter{n: 1000}, headKey(t)
-	if err := InitCounterAnchor(dir, c, priv); err != nil {
+	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)
 	}
 	a, err := OpenCounterAnchor(dir, c, priv)
@@ -133,11 +141,23 @@ func TestCounterAnchorRefusesAMissingFile(t *testing.T) {
 	if _, err := OpenCounterAnchor(dir, c, priv); !errors.Is(err, ErrAnchorMissing) {
 		t.Fatalf("missing file: %v", err)
 	}
-	if err := InitCounterAnchor(dir, c, priv); err != nil {
+	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)
 	}
-	if err := InitCounterAnchor(dir, c, priv); !errors.Is(err, ErrAnchorExists) {
+	if err := InitCounterAnchor(dir, noLog(t), c, priv); !errors.Is(err, ErrAnchorExists) {
 		t.Fatalf("init over a file: %v", err)
+	}
+	// With the head file gone from a box that has a log, enrollment cannot
+	// start a fresh anchor over that log.
+	if err := os.Remove(filepath.Join(dir, anchorName)); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(t.TempDir(), "log")
+	if err := os.WriteFile(log, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitCounterAnchor(dir, log, c, priv); !errors.Is(err, ErrLogExists) {
+		t.Fatalf("init beside a log: %v", err)
 	}
 }
 
@@ -224,8 +244,9 @@ func TestCounterAnchorCrashBetweenWriteAndCount(t *testing.T) {
 }
 
 // A crash at any step of the file write leaves an anchor that opens on the
-// last counted head, and the head file a failed Put left behind (here its
-// temporary, as a copy taken off the drive) never matches the counter later.
+// last counted head, and the head file a failed Put left behind (its
+// temporary, or the renamed file, copied off the drive) never matches the
+// counter once the anchor has been opened, starting with the first reopen.
 func TestCounterAnchorCrashDuringTheFileWrite(t *testing.T) {
 	for step := 0; step < 6; step++ {
 		dir, c, priv, a := newAnchor(t)
@@ -241,11 +262,6 @@ func TestCounterAnchorCrashDuringTheFileWrite(t *testing.T) {
 		if h := latest(t, dir, c, priv); h.Seq != 2 {
 			t.Fatalf("step %d: reopened on seq %d, want 2", step, h.Seq)
 		}
-		b, err := OpenCounterAnchor(dir, c, priv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		put(t, b, head(priv, 8))
 		if len(stray) == 0 {
 			continue
 		}
@@ -324,16 +340,17 @@ func TestCounterAnchorOnTheTPMCounter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, auth := make([]byte, 16), make([]byte, 16)
+	id, raw := make([]byte, 16), make([]byte, 16)
 	rand.Read(id)
-	rand.Read(auth)
+	rand.Read(raw)
+	auth := []byte(hex.EncodeToString(raw)) // an auth value holds no zero byte
 	ref, err := tpmseal.DefineCounter(s.TPM(), srk, id, auth)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: auth}
 	dir, priv := clerkDir(t), headKey(t)
-	if err := InitCounterAnchor(dir, c, priv); err != nil {
+	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)
 	}
 	a, err := OpenCounterAnchor(dir, c, priv)
@@ -350,5 +367,78 @@ func TestCounterAnchorOnTheTPMCounter(t *testing.T) {
 	anchorRestore(t, dir, old)
 	if _, err := OpenCounterAnchor(dir, c, priv); !errors.Is(err, ErrAnchorRolledBack) {
 		t.Fatalf("rolled-back file on the TPM counter: %v", err)
+	}
+}
+
+// The L3 and Security repro (#2890): a widening whose anchor failed is
+// dropped at the next reopen, and putting the drive back as it was just
+// after the failure (log and the failed Put's record) is refused straight
+// after that one reopen, so the failed RESUME never comes back (KRN-7).
+func TestCounterAnchorFailedPutNeverCountsAfterOneReopen(t *testing.T) {
+	for _, fail := range []string{"temp written", "renamed", "count failed"} {
+		dir, c, priv, a := newAnchor(t)
+		st := &kernel.MemStore{}
+		cfg := kernel.Config{Store: st, Anchor: a, Key: [32]byte{7}, Pub: priv.Public().(ed25519.PublicKey), Sign: priv, Rand: rand.Reader}
+		l, err := kernel.Open(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append(1, kernel.TStop, 1, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Anchor(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append(2, kernel.TResume, 1, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		switch fail {
+		case "temp written":
+			a.stop = func(i int) bool { return i == 1 }
+		case "renamed":
+			a.stop = func(i int) bool { return i == 4 }
+		default:
+			c.failInc = true
+		}
+		if err := l.Anchor(); err == nil {
+			t.Fatalf("%s: Anchor returned nil", fail)
+		}
+		image := append([]byte(nil), st.B...)
+		stray := anchorSnap(t, dir)
+		if fail == "temp written" {
+			stray, _ = os.ReadFile(filepath.Join(dir, anchorName+".tmp"))
+		}
+
+		reopen := func() (*kernel.Log, error) {
+			b, err := OpenCounterAnchor(dir, c, priv)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Store, cfg.Anchor = &kernel.MemStore{B: append([]byte(nil), image...)}, b
+			return kernel.Open(cfg)
+		}
+		l2, err := reopen()
+		if err != nil || l2.Len() != 1 {
+			t.Fatalf("%s: first reopen: %v, %v", fail, l2, err)
+		}
+		anchorRestore(t, dir, stray)
+		if l3, err := reopen(); !errors.Is(err, ErrAnchorRolledBack) {
+			t.Fatalf("%s: the failed Put's record after one reopen: %v, %v", fail, l3, err)
+		}
+	}
+}
+
+// A TPM that counts the write but loses its answer: the read after the
+// error shows the count, so the Put returns nil and the head counts.
+func TestCounterAnchorIncrementAnswerLost(t *testing.T) {
+	dir, c, priv, a := newAnchor(t)
+	put(t, a, head(priv, 2))
+	c.lostInc = true
+	if err := a.Put(head(priv, 5)); err != nil {
+		t.Fatalf("Put with the count landed: %v", err)
+	}
+	put(t, a, head(priv, 6))
+	if h := latest(t, dir, c, priv); h.Seq != 6 {
+		t.Fatalf("reopened on seq %d, want 6", h.Seq)
 	}
 }
