@@ -330,8 +330,24 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	// next step never sends the owner to archive or move it (#2742 item 3c;
 	// inbox's TestDeletingOldReadMailClearsTooMuchReadMail follows the
 	// advice through Opened).
-	if _, next := trouble(inbox.ErrTooMuchReadMail, nil); next != "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder. I'll try again when your mail changes, or tomorrow." {
-		t.Errorf("too much read mail: next step %q", next)
+	// The step names the read mail to delete by when it arrived, as the read
+	// found it (inbox's TestTheTooMuchReadMailStepWorks applies it during the
+	// warm-up and after; #2891 UX finding 1), or says no step is needed.
+	local := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 12, 0, 0, 0, time.Local) }
+	const keep = " for good, and delete it from your trash too. Deleting other read mail doesn't help yet, since I keep note of it for 90 days. Moving or archiving mail doesn't help, since I read every folder. I'll try again when your mail changes, or tomorrow."
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&inbox.TooMuchReadMailError{After: local(2026, 10, 8), Before: local(2026, 10, 9)}, "Delete the read mail that arrived from 8 October 2026 to 9 October 2026" + keep},
+		{&inbox.TooMuchReadMailError{After: local(2026, 10, 9), Before: local(2026, 10, 9)}, "Delete the read mail that arrived on 9 October 2026" + keep},
+		{&inbox.TooMuchReadMailError{Before: local(2026, 6, 1)}, "Delete the read mail that arrived on or before 1 June 2026" + keep},
+		{&inbox.TooMuchReadMailError{}, "I've noted the read mail I found, so my next try should get through. I'll try again when your mail changes, or tomorrow."},
+		{inbox.ErrTooMuchReadMail, "I'll try again when your mail changes, or tomorrow."},
+	} {
+		if why, next := trouble(c.err, nil); why != "you have more read mail than I can keep track of" || next != c.want {
+			t.Errorf("too much read mail (%v): %q, next step %q; want %q", c.err, why, next, c.want)
+		}
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}, nil); len(why) > 300 {
 		t.Errorf("a long folder name is not cut: %d bytes", len(why))
@@ -411,5 +427,60 @@ func TestAnUnsavedRecordIsToldWithItsNextStep(t *testing.T) {
 	}
 	if _, st := r.opened(today); !has(st.Lines, "could not save my record of the mail you read") || !has(st.Lines, "I'll try again when your mail changes, or tomorrow.") {
 		t.Fatalf("status after a failed save: %v", st.Lines)
+	}
+}
+
+// The failure path #2841 closes, through the clerk's record: the owner reads
+// S's mail, the next read fails after finding it (here a later read mail
+// whose headers are too long), and the owner deletes both. The record took
+// in S's entry when the read failed, so the next good read still counts S
+// opened, where before it was kept as it was and S looked never opened.
+func TestAFailingReadSavesTheSendersItFound(t *testing.T) {
+	r := newSeenRig(t)
+	r.srv.Deliver("INBOX", mailFrom("old@example.test", "<o1@example.test>"), `\Seen`)
+	if _, st := r.opened("2026-07-01"); has(st.Lines, "paused") {
+		t.Fatalf("first read: %v", st.Lines)
+	}
+	r.srv.Deliver("INBOX", mailFrom("sam@example.test", "<s1@example.test>"), `\Seen`)
+	r.srv.Deliver("INBOX", "From: x@spam.test\nMessage-ID: <"+strings.Repeat("l", 9<<10)+">\n\nbody\n", `\Seen`)
+	got, st := r.opened(today)
+	if !has(st.Lines, "Unsubscribing is paused") || has(st.Lines, "could not save") {
+		t.Fatalf("status %v after a failing read", st.Lines)
+	}
+	if got["sam@example.test"] != today {
+		t.Fatalf("a failed read's LastOpened %v does not keep the listed sender", got)
+	}
+	r.srv.Remove("INBOX", "<s1@example.test>")
+	r.srv.Remove("INBOX", "<"+strings.Repeat("l", 9<<10)+">")
+	got, st = r.opened(today)
+	if has(st.Lines, "paused") || got["sam@example.test"] != today || got["old@example.test"] != "2026-07-01" {
+		t.Fatalf("after deleting the mail the failing read found: opened %v, status %v; sam must stay opened", got, st.Lines)
+	}
+	rec, loaded := loadSeen(r.dir, testSealer(), r.slot)
+	if loaded != seenLoaded || rec.Log.Since != "2026-07-01" || len(rec.Log.Seen) != 2 {
+		t.Fatalf("record %+v (%v): want the first read's and sam's entries", rec.Log, loaded)
+	}
+}
+
+// The clerk's mailbox sends live unsubscribes (#2841): its Post goes to the
+// Poster, which judges the URL, rather than refusing for want of one.
+func TestTheClerksMailboxHasAPoster(t *testing.T) {
+	srv := imaptest.Start(t)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	box, _, err := mailBox(dir, sec, mailConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nd inbox.NotDone
+	err = box.Post(context.Background(), inbox.Post{Method: "POST", URL: "http://127.0.0.1/u"})
+	if !errors.As(err, &nd) || nd == "no-poster" {
+		t.Fatalf("Post = %v: want the Poster's own refusal, not no-poster", err)
 	}
 }
