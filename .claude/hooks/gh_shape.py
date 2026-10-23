@@ -6,8 +6,10 @@ An allow rule's `*` also matches spaces, so without this hook a call could carry
 method, field, `--input` or `@file` on the same endpoint. Any command in which one of RULES
 matches anywhere (a compound command included), as written or with quotes, `$` and
 backslashes removed, whitespace collapsed and case ignored, must be, as a whole, one of SHAPES;
-anything else goes to the permission ask. A command longer than MAX_SCAN that contains `gh`
-goes to the ask unscanned, so the rule search never runs past the hook timeout (#2562).
+anything else goes to the permission ask. A command longer than MAX_SCAN characters whose
+normalized form contains `gh`, whitespace, then `api` (case ignored) goes to the ask unscanned,
+so the rule search never runs past the hook timeout (#2562). Every rule starts with `gh api`,
+and normalization cannot split those tokens, so no longer command can match a rule (#2720).
 Commands no rule matches pass through to the normal permission flow.
 tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to its rule.
 """
@@ -43,8 +45,10 @@ SHAPES = [
 _RULE_RES = [re.compile(".*".join(r"\s+".join(map(re.escape, p.split(" "))) for p in r.split("*")),
                         re.S | re.I)
              for r in RULES]
-# The longest command the rule search scans; longer ones that contain `gh` go to the ask.
+# The longest command, in characters, the rule search scans; longer ones that contain
+# `gh api` (after normalizing) go to the ask.
 MAX_SCAN = 8 * 1024
+_GH_API = re.compile(r"gh\s+api", re.I)
 # Characters a shell gives meaning to; none appears in any shape.
 _SHELL = set(";&|<>()$`\\\"'{}*?!#~\n\r\t")
 
@@ -69,8 +73,8 @@ def exact(command):
 
 def decide(command):
     """None lets the call go on; a string is the reason it goes to the permission ask."""
-    if len(command) > MAX_SCAN and "gh" in normalized(command).lower():
-        return f"gh_shape hook: a command over {MAX_SCAN} bytes that contains gh is not scanned"
+    if len(command) > MAX_SCAN and _GH_API.search(normalized(command)):
+        return f"gh_shape hook: a command over {MAX_SCAN} characters that contains gh api is not scanned"
     if guarded(command) and not exact(command):
         return ("gh allow rule matched but the call is not one of the exact shapes in "
                 ".claude/hooks/gh_shape.py (arm, disarm, pinned merge, label add or remove: "

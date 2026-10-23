@@ -125,6 +125,19 @@ class GhShapeHookTest(unittest.TestCase):
             self.assertEqual(run_hook({"tool_name": "Bash", "tool_input": {"command": c}}), "ask")
         self.assertIsNone(run_hook({"tool_name": "Bash", "tool_input": {"command": f"echo {pad}"}}))
 
+    def test_long_commands_without_gh_api_pass(self):
+        # #2720: "gh" alone (high, through, github) no longer sends a long command to the ask.
+        prose = ("The high road through github is thoughtful. " * 250)[:LONG]
+        for c in (f"echo '{prose}'", f"cat > notes.md <<'EOF'\n{prose}\nEOF"):
+            self.assertGreater(len(c), gh_shape.MAX_SCAN)
+            self.assertIsNone(gh_shape.decide(c), c[:40])
+            self.assertIsNone(run_hook({"tool_name": "Bash", "tool_input": {"command": c}}))
+        for c in (f"echo '{prose}'; g''h api {R}/pulls/1", f"echo '{prose}'; GH\\\n  API {R}/x",
+                  f"echo '{prose}'; g\"h\" $'api' {R}/x"):
+            self.assertIsNotNone(gh_shape.decide(c), c[-30:])
+            self.assertEqual(run_hook({"tool_name": "Bash", "tool_input": {"command": c}}), "ask")
+        self.assertIn("characters", gh_shape.decide(f"echo '{prose}'; gh api x"))
+
     def test_a_huge_command_is_decided_fast(self):
         import time
         c = "gh api -X PUT " + f"{R}/pulls/1/ccr/auto_merge " * 50000
