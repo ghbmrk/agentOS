@@ -534,22 +534,53 @@ func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 }
 
 // A failed Issue itself: no plan runs under it, and a reboot forgets it.
+// The grant is the passkey's root and a clerk key under it, its hold already
+// passed, and the plans are the holder's own correctly signed ones, so only
+// the lost grant can refuse them: with the anchor up the same grant admits
+// and runs the same plan.
 func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
-	r := newRig(t)
-	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
-	r.anchor.down = true
-	if err := r.issue(1, other); err == nil {
-		t.Fatal("an unconfirmed issue must report it")
+	failedGrant := func(down bool) (*rig, key.Key, int) {
+		r := newRig(t)
+		root := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+		ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 1<<40)
+		must(t, err)
+		n := r.k.Log().Len()
+		r.anchor.down = down
+		err = r.issue(-kernel.GrantHold, root, ck)
+		if down != (err != nil) {
+			t.Fatalf("issue with the anchor down=%v: %v", down, err)
+		}
+		return r, ck, n
 	}
-	if err := r.k.Submit(2, r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})); err == nil {
-		t.Fatal("nothing may build on an unconfirmed issue")
+	steps := []kernel.PlanStep{st(key.Trash, "m1")}
+
+	r, ck, n := failedGrant(true)
+	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: steps})); !errors.Is(err, kernel.ErrBroken) {
+		t.Fatalf("nothing may build on an unconfirmed issue: %v", err)
 	}
 	r.anchor.down = false
-	r.boot(3)
-	r.plan("p2", other, st(key.Trash, "m1"))
-	must(t, r.tick(4))
+	r.boot(1)
+	if r.k.Log().Len() != n {
+		t.Fatalf("the log holds %d entries after the reboot, %d before the failed issue", r.k.Log().Len(), n)
+	}
+	if c := admits(r, r.sign(kernel.Plan{ID: "p2", Key: ck, Steps: steps}), 1); c != kernel.CUngranted {
+		t.Fatalf("a plan under a grant the anchor never confirmed: %q; want %q (KEY-1)", c, kernel.CUngranted)
+	}
+	r.plan("p2", ck, steps...)
+	must(t, r.tick(2))
 	if r.status("p2") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatal("an issue the anchor never confirmed must not survive a reboot (KEY-1)")
+	}
+
+	r, ck, _ = failedGrant(false) // the control: the same grant, anchored
+	r.boot(1)
+	if c := admits(r, r.sign(kernel.Plan{ID: "p2", Key: ck, Steps: steps}), 1); c != "" {
+		t.Fatalf("a plan under an anchored grant: %q", c)
+	}
+	r.plan("p2", ck, steps...)
+	must(t, r.tick(2))
+	if len(r.mail.Effects()) != 1 {
+		t.Fatalf("an anchored grant's plan ran %d effects, want 1", len(r.mail.Effects()))
 	}
 }
 

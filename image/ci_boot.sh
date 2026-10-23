@@ -474,17 +474,18 @@ for port in 22 80 443 18789 5355; do
 done
 
 # Loader restart: wlsta0 survives, is not duplicated, and stays joined; the access point comes back.
+# The restart must succeed and the loader must log serving anew, or the checks below read the old state.
 idx=$(cat /sys/class/net/wlsta0/ifindex)
 served=$(logged "serving the")
-systemctl restart agentos-ap.service
-until_ok 120 served_again
+MSG="the loader restart succeeded"; check systemctl restart agentos-ap.service
+MSG="the restarted loader logged serving"; check until_ok 120 served_again
 MSG="after the loader restart, the box's access point serves again"; check until_ok 60 ap_up
 MSG="wlsta0 survived the loader restart"; check same_station
 MSG="after the loader restart, one station on the radio"; check [ "$(radio_ifs)" = 2 ]
 MSG="the station stayed joined after the loader restart"; check until_ok 60 joined
 
 # Helper restart: no change to wlsta0 or the connection.
-systemctl restart agentos-netjoin.service
+MSG="the helper restart succeeded"; check systemctl restart agentos-netjoin.service
 sleep 3
 MSG="the helper restart left the station"; check eval 'same_station && joined'
 nopsk
@@ -514,9 +515,10 @@ for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exi
 	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
 	"the loader logged the station allowed" "station joined" "station has a lease" "DNS resolves over the station" \
 	"the box's access point stays up" "station reaches the test network" "probe 22 dropped" "probe 80 dropped" \
-	"probe 443 dropped" "probe 18789 dropped" "probe 5355 dropped" "after the loader restart, the box's access point serves again" \
+	"probe 443 dropped" "probe 18789 dropped" "probe 5355 dropped" "the loader restart succeeded" \
+	"the restarted loader logged serving" "after the loader restart, the box's access point serves again" \
 	"wlsta0 survived the loader restart" "after the loader restart, one station on the radio" \
-	"the station stayed joined after the loader restart" "the helper restart left the station" \
+	"the station stayed joined after the loader restart" "the helper restart succeeded" "the helper restart left the station" \
 	"the PSK is in no journal line" "the PSK is in no file on the drive" "done"; do
 	has "$W/console-hwsim.log" "agentos-hwsim: $want"
 done
