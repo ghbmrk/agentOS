@@ -2,6 +2,8 @@ package inbox
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -100,6 +102,33 @@ func GmailCalls(base, slot string) []clerk.Call {
 // GmailDeclaration is the mail clerk's declaration for a Gmail account.
 func GmailDeclaration(base, token, slot string, guard *netguard.Policy, clock clerk.Clock) clerk.APIDeclaration {
 	return clerk.APIDeclaration{Name: Name, Calls: GmailCalls(base, slot), Guard: guard, Refresh: token, Clock: clock}
+}
+
+// OpenGmail is a Gmail mailbox over base and token whose refresh grant lives
+// only in this process, sealed under a key drawn here, for the runs where no
+// store keeps it: the inbox slice on the Gmail fake (A21) and the contract
+// run against a test account (A22). roots nil trusts the system's
+// authorities. The mail clerk's process seals the grant in its own store
+// instead (#2925).
+func OpenGmail(base, token string, grant []byte, guard *netguard.Policy, roots *x509.CertPool) (*Gmail, error) {
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, err
+	}
+	sl, err := clerk.NewAESSealer(k)
+	clear(k)
+	if err != nil {
+		return nil, err
+	}
+	sec := clerk.NewSecrets(sl, nil)
+	if err := sec.Put("gmail", clerk.KindGrant, grant); err != nil {
+		return nil, err
+	}
+	api, err := clerk.NewAPI(GmailDeclaration(base, token, "gmail", guard, nil), sec, roots)
+	if err != nil {
+		return nil, err
+	}
+	return NewGmail(api), nil
 }
 
 // Gmail is the owner's mailbox over the Gmail API (D-150), beside Live's
@@ -221,7 +250,7 @@ func (g *Gmail) Read(ctx context.Context) ([]Mail, error) {
 		}
 		mid := "gmail-" + id
 		refs[mid] = id
-		out = append(out, Mail{ID: mid, Raw: g.api.Redact(raw)})
+		out = append(out, Mail{ID: mid, Raw: g.api.RedactToken(raw)})
 	}
 	g.mu.Lock()
 	g.refs = refs

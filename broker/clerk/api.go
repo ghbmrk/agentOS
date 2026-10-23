@@ -172,10 +172,10 @@ func (a *API) Call(ctx context.Context, name string, args map[string]string) (An
 	return a.do(ctx, c, req, []byte(tok))
 }
 
-// Redact replaces the clerk's live access token in b, for a body the caller
+// RedactToken replaces the clerk's live access token in b, for a body the caller
 // decoded from an answer (a provider's base64 message), where Call's own
 // redaction could not see it. It returns b, changed in place or replaced.
-func (a *API) Redact(b []byte) []byte {
+func (a *API) RedactToken(b []byte) []byte {
 	a.tmu.Lock()
 	tok := a.token
 	a.tmu.Unlock()

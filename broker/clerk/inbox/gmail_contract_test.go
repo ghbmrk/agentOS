@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -32,19 +31,10 @@ func TestGmailContractAgainstARealTestAccount(t *testing.T) {
 	if grant == "" {
 		t.Skip(contractGrant + " is not set: the contract runs on its schedule, not in CI")
 	}
-	sl, err := clerk.NewAESSealer(make([]byte, 32))
+	box, err := OpenGmail(GmailBase, GmailToken, []byte(grant), netguard.New(netguard.Config{}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sec := clerk.NewSecrets(sl, nil)
-	if err := sec.Put("gmail", clerk.KindGrant, []byte(grant)); err != nil {
-		t.Fatal(err)
-	}
-	api, err := clerk.NewAPI(GmailDeclaration(GmailBase, GmailToken, "gmail", netguard.New(netguard.Config{}), nil), sec, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	box := NewGmail(api)
 	ctx := context.Background()
 	var profile struct {
 		Email string `json:"emailAddress"`

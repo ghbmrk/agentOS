@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
@@ -108,22 +107,11 @@ func openAccount(kind string, mails []inbox.Mail) (*account, error) {
 		for mid, m := range byMID {
 			gid[mid] = srv.Deliver(m.Raw)
 		}
-		sl, err := clerk.NewAESSealer(make([]byte, 32))
+		g, err := inbox.OpenGmail(srv.Base(), srv.Token(), gmailtest.Grant(), srv.Guard(), srv.Roots())
 		if err != nil {
 			srv.Close()
 			return nil, err
 		}
-		sec := clerk.NewSecrets(sl, nil)
-		if err := sec.Put("gmail", clerk.KindGrant, gmailtest.Grant()); err != nil {
-			srv.Close()
-			return nil, err
-		}
-		api, err := clerk.NewAPI(inbox.GmailDeclaration(srv.Base(), srv.Token(), "gmail", srv.Guard(), nil), sec, srv.Roots())
-		if err != nil {
-			srv.Close()
-			return nil, err
-		}
-		g := inbox.NewGmail(api)
 		a.box, read = g, g.Read
 		a.check = func(effects []inbox.Effect) error { return checkGmail(srv, byMID, gid, effects) }
 	default:

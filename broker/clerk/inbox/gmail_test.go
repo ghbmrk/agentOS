@@ -29,20 +29,11 @@ func newGmail(t *testing.T) (*Gmail, *gmailtest.Server) {
 	t.Helper()
 	srv := gmailtest.New()
 	t.Cleanup(srv.Close)
-	k := bytes.Repeat([]byte{7}, 32)
-	sl, err := clerk.NewAESSealer(k)
+	g, err := OpenGmail(srv.Base(), srv.Token(), gmailtest.Grant(), srv.Guard(), srv.Roots())
 	if err != nil {
 		t.Fatal(err)
 	}
-	sec := clerk.NewSecrets(sl, nil)
-	if err := sec.Put("gmail", clerk.KindGrant, gmailtest.Grant()); err != nil {
-		t.Fatal(err)
-	}
-	api, err := clerk.NewAPI(GmailDeclaration(srv.Base(), srv.Token(), "gmail", srv.Guard(), nil), sec, srv.Roots())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return NewGmail(api), srv
+	return g, srv
 }
 
 type gmailRig struct {
