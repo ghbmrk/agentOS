@@ -101,15 +101,36 @@ func TestASenderWithAReadMailIsNotUnsubscribed(t *testing.T) {
 	}
 }
 
-// A folder that cannot be read fails the whole answer, and hands back no log
-// to keep: a partial list would make the senders it missed look never opened.
+// A folder that cannot be read fails the whole answer and hands back no
+// LastOpened: a partial list would make the senders it missed look never
+// opened. The log it hands back keeps every entry it began with and adds
+// only read mail it found (#2841); one that found none hands back none.
 func TestOpenedFailsWhenAFolderCannotBeRead(t *testing.T) {
 	srv := imaptest.Start(t)
+	srv.DeliverAt("Drafts", arrived, rawMail("<o@shop.test>", "old@shop.test", "Old"), `\Seen`)
+	l := NewLive(liveStore(t, srv))
+	_, first, err := l.Opened(context.Background(), "2026-01-02", SeenLog{})
+	if err != nil || len(first.Seen) != 1 {
+		t.Fatalf("first read: log %+v, err %v", first, err)
+	}
+	srv.Remove("Drafts", "<o@shop.test>")
 	srv.Deliver("INBOX", rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
 	srv.FailList("Archive", true)
-	if got, log, err := NewLive(liveStore(t, srv)).Opened(context.Background(), "2026-10-19", SeenLog{}); err == nil || got != nil || log.Seen != nil {
-		t.Fatalf("opened %v, log %v, err %v; want an error", got, log, err)
+	got, log, err := l.Opened(context.Background(), "2026-10-19", first)
+	if err == nil || got != nil {
+		t.Fatalf("opened %v, err %v; want an error", got, err)
+	}
+	froms := map[string]bool{}
+	for _, e := range log.Seen {
+		froms[e.From] = true
+	}
+	if log.Seen != nil && (!froms["old@shop.test"] || !froms["news@shop.test"] || froms["pat@example.test"] || log.Since != "2026-01-02") {
+		t.Fatalf("log %+v: want the entry it began with and the read mail it found", log)
+	}
+	srv.Remove("INBOX", "<a@shop.test>")
+	if _, log, err := l.Opened(context.Background(), "2026-10-19", first); err == nil || log.Seen != nil {
+		t.Fatalf("a failed read that found no read mail handed back log %+v (err %v)", log, err)
 	}
 }
 
@@ -306,7 +327,10 @@ func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
 		before := ms.HeapAlloc
 		o, _ := newOpened("2026-10-19", SeenLog{})
 		n := 0
-		for ; o.header(head(n), arrived) == nil; n++ {
+		for ; !o.full; n++ {
+			if err := o.header(head(n), arrived); err != nil {
+				t.Fatal(err)
+			}
 		}
 		first, kept := o.result() // a sender with no logged mail lives only here
 		o = nil
@@ -334,6 +358,52 @@ func TestOpenedHoldsNoMoreThanItCharges(t *testing.T) {
 		runtime.KeepAlive(again)
 		runtime.KeepAlive(o2)
 	}
+}
+
+// A full read holds no more than it charges either: filled until full, then
+// fed as many newer read mails again, each dropping an older one, it holds
+// the maps, its heap and the log it hands back within openedMax, and that
+// log loads within openedMax (#2841).
+func TestAFullReadHoldsNoMoreThanItCharges(t *testing.T) {
+	defer func(n int) { openedMax = n }(openedMax)
+	openedMax = 32 << 20 // the charge per entry, not the bound's size, is under test
+	head := func(n int) []byte { return []byte(fmt.Sprintf("From: s%x@b\r\nMessage-Id: <%x>\r\n\r\n", n%64, n)) }
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	before := ms.HeapAlloc
+	o, _ := newOpened("2026-10-19", SeenLog{})
+	n := 0
+	for ; !o.full; n++ {
+		if err := o.header(head(n), arrived.Add(time.Duration(n)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := n; i < 2*n; i++ {
+		if err := o.header(head(i), arrived.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := o.partial()
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	if held := int64(ms.HeapAlloc) - int64(before); held > int64(openedMax) {
+		t.Fatalf("a full read of %d mails holds %d bytes, more than openedMax %d", 2*n, held, openedMax)
+	}
+	if o.kept > openedMax || len(kept.Seen) == 0 {
+		t.Fatalf("a full read charged %d of %d and kept %d entries", o.kept, openedMax, len(kept.Seen))
+	}
+	if !slices.ContainsFunc(kept.Seen, func(e Seen) bool {
+		id := seenID("s"+fmt.Sprintf("%x", (2*n-1)%64)+"@b", fmt.Sprintf("<%x>", 2*n-1), arrived.Add(time.Duration(2*n-1)*time.Second))
+		return e.ID == hex.EncodeToString(id[:])
+	}) {
+		t.Fatal("a full read dropped the newest read mail")
+	}
+	o = nil
+	if _, err := newOpened("2026-10-19", kept); err != nil {
+		t.Fatalf("the log a full read hands back does not load: %v", err)
+	}
+	runtime.KeepAlive(kept)
 }
 
 // A logged entry older than unopenedDays holds no more than oldCost and its
@@ -408,10 +478,11 @@ func TestDeletingOldReadMailClearsTooMuchReadMail(t *testing.T) {
 	}
 }
 
-// Deleting a mail read since the last good read, not yet logged, frees its
-// whole charge, so it clears ErrTooMuchReadMail at once: the step the
-// owner is told to take first (#2742 item 3c; #2766 review).
-func TestDeletingNewlyReadMailClearsTooMuchReadMail(t *testing.T) {
+// The failure path #2841 closes: the owner reads S's mail, the next read
+// fails with ErrTooMuchReadMail, and the owner deletes that mail. The failing
+// read hands back S's entry with the log it began with, so the next good
+// read still counts S opened.
+func TestAFailingReadKeepsTheSendersItFound(t *testing.T) {
 	srv := imaptest.Start(t)
 	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
 	srv.DeliverAt("INBOX", arrived, rawMail("<b@shop.test>", "news@shop.test", "Sale 2"), `\Seen`)
@@ -423,16 +494,76 @@ func TestDeletingNewlyReadMailClearsTooMuchReadMail(t *testing.T) {
 	srv.Deliver("Archive", rawMail("<c@example.test>", "pat@example.test", "Hi"), `\Seen`)
 	defer func(n int) { openedMax = n }(openedMax)
 	news, pat := len("news@shop.test"), len("pat@example.test")
-	// As in TestDeletingOldReadMailClearsTooMuchReadMail: one under the charge
-	// of both logged mails and the new read mail.
+	// One under the charge of both logged mails and the new read mail, with
+	// room for the new mail once the read is full and drops an old entry.
 	openedMax = news + senderCost + 2*news + 2*entryCost + pat + senderCost + pat + entryCost - 1
 	const today = "2026-10-19"
-	if _, _, err := l.Opened(context.Background(), today, log); !errors.Is(err, ErrTooMuchReadMail) {
-		t.Fatalf("past the bound: err %v, want ErrTooMuchReadMail", err)
+	got, kept, err := l.Opened(context.Background(), today, log)
+	if !errors.Is(err, ErrTooMuchReadMail) || got != nil {
+		t.Fatalf("past the bound: opened %v, err %v; want ErrTooMuchReadMail", got, err)
+	}
+	var found bool
+	for _, e := range kept.Seen {
+		if e.From == "pat@example.test" && e.Date == today {
+			found = true
+		}
+	}
+	if !found || kept.Since != "2026-01-02" {
+		t.Fatalf("the failing read handed back %+v, without the read mail it found", kept)
 	}
 	srv.Remove("Archive", "<c@example.test>")
+	openedMax = OpenedMax
+	got, again, err := l.Opened(context.Background(), today, kept)
+	// The full read made room by dropping an old entry of news's, whose mail
+	// is still there, so news is logged again today (fail closed).
+	if err != nil || got["pat@example.test"] != today || got["news@shop.test"] != today {
+		t.Fatalf("after deleting the mail the failing read found: opened %v, err %v; pat must stay opened", got, err)
+	}
+	if !slices.ContainsFunc(again.Seen, func(e Seen) bool { return e.From == "pat@example.test" }) {
+		t.Fatalf("the good read dropped pat's entry: %+v", again)
+	}
+}
+
+// A full read keeps the newest read mail. Past the bound it drops the log's
+// entries older than unopenedDays first, which open nothing, then the read
+// mail it logged with the oldest arrival, whichever folder or order the
+// server gives; the log's recent entries stay.
+func TestAFullReadKeepsTheNewestReadMail(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", arrived, rawMail("<a@shop.test>", "news@shop.test", "Sale"), `\Seen`)
+	l := NewLive(liveStore(t, srv))
+	_, log, err := l.Opened(context.Background(), "2026-01-02", SeenLog{})
+	if err != nil || len(log.Seen) != 1 {
+		t.Fatalf("first read: log %+v, err %v", log, err)
+	}
+	srv.DeliverAt("Archive", time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC), rawMail("<r@example.test>", "rae@example.test", "Recent"), `\Seen`)
+	_, log, err = l.Opened(context.Background(), "2026-10-01", log)
+	if err != nil || len(log.Seen) != 2 {
+		t.Fatalf("second read: log %+v, err %v", log, err)
+	}
+	const today = "2026-10-19"
+	for i, at := range []time.Time{
+		time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC), // the newest, first in its folder
+		time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC),
+	} {
+		folder := []string{"INBOX", "Archive", "Junk"}[i%3]
+		srv.DeliverAt(folder, at, rawMail(fmt.Sprintf("<n%d@x.test>", i), fmt.Sprintf("s%d@x.test", i), "New"), `\Seen`)
+	}
+	defer func(n int) { openedMax = n }(openedMax)
+	// The recent entry and the old entry's sender, which a full read never
+	// drops, plus room for one entry a full read keeps.
+	news, rae := len("news@shop.test"), len("rae@example.test")
+	openedMax = news + senderCost + rae + senderCost + rae + entryCost + fullCost("s0@x.test")
 	got, kept, err := l.Opened(context.Background(), today, log)
-	if err != nil || len(kept.Seen) != 2 || got["news@shop.test"] != "2026-01-02" || got["pat@example.test"] != "" {
-		t.Fatalf("after deleting the newly read mail: opened %v, log %+v, err %v", got, kept, err)
+	if !errors.Is(err, ErrTooMuchReadMail) || got != nil {
+		t.Fatalf("opened %v, err %v; want ErrTooMuchReadMail", got, err)
+	}
+	var froms []string
+	for _, e := range kept.Seen {
+		froms = append(froms, e.From)
+	}
+	if !slices.Equal(froms, []string{"rae@example.test", "s0@x.test"}) {
+		t.Fatalf("a full read kept %v; want the recent entry and the newest read mail", froms)
 	}
 }
