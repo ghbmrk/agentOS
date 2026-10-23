@@ -366,14 +366,14 @@ func (s *scrubTrailers) unanswered() {
 // a provider and spent all allowed attempts past the first, each at its
 // full reservation.
 func unanswered(ctx context.Context, allowed int) {
-	failed := make([]meter.Attempt, max(0, min(allowed, MaxRetries)))
+	failed := make([]routerule.Attempt, max(0, min(allowed, MaxRetries)))
 	for i := range failed {
-		failed[i] = meter.Attempt{Full: true}
+		failed[i] = routerule.Attempt{Full: true}
 	}
-	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: failed})
+	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: meterAttempts(failed)})
 }
 
-// meterAttempts is a as the meter's own type, which has the same fields
+// meterAttempts returns a as the meter's own type, which has the same fields
 // and charges them (Attempt.charge in broker/meter) until #2584 moves the
 // charge here.
 func meterAttempts(a []routerule.Attempt) []meter.Attempt {
