@@ -32,7 +32,7 @@ import (
 // children that need it. A new key is a reviewed entry with its reason.
 var allowedKeys = map[string]string{
 	"PATH":    "every child: where its own helpers are; never the daemon's value by copy",
-	"HOME":    "probe children (probecmd): their scratch directory",
+	"HOME":    "probe children (probecmd) and the browser driver (browser): their scratch or workspace directory; the guest runtime (agentos-guest-bridge): its own home; the Codex CLI in a provider worker: CODEX_HOME, never the workspace (guest/codex C11)",
 	"TMPDIR":  "probe children (probecmd): their scratch directory",
 	"GOCACHE": "Go probe binaries (probecmd): off, so no cache outside scratch",
 	"GOFLAGS": "Go probe binaries (probecmd): empty, so no flags from outside",

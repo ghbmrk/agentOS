@@ -566,7 +566,7 @@ func TestServiceGetsOnlyItsListener(t *testing.T) {
 }
 
 // cgroupParent returns a fresh writable cgroup v2 group under
-// AGENTOS_CGROUP_PARENT, as loop7's machine tests do, or skips.
+// AGENTOS_CGROUP_PARENT, or skips.
 func cgroupParent(t *testing.T) *cgroup.Group {
 	t.Helper()
 	needRoot(t)

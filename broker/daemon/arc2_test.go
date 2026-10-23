@@ -153,8 +153,8 @@ var guestPlane = map[string]struct {
 	// The local inference service's protocol and client (INFER-SVC INF-5):
 	// the standard library only, dialing the service's unix socket. Its
 	// supervisor (infer/supervise) has no plane entry: it sets no_new_privs
-	// through golang.org/x/sys/unix, as loop7 does, and
-	// TestAgentosdLinksNoInference holds its imports.
+	// through golang.org/x/sys/unix, and TestAgentosdLinksNoInference
+	// holds its imports.
 	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
