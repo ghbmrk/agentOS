@@ -799,6 +799,9 @@ func (s *sim) check() error {
 	if !reflect.DeepEqual(re, s.k.State()) {
 		return errors.New("invariant: replay differs from the live state")
 	}
+	if _, err := kernel.Rederive(s.w.anchors, es); err != nil {
+		return fmt.Errorf("invariant: %w", err)
+	}
 	dispatched := map[string]bool{}
 	for _, e := range es {
 		if e.Type == kernel.TStepDispatch {

@@ -31,6 +31,8 @@ func (r *rig) replays() {
 	if !reflect.DeepEqual(re, r.k.State()) {
 		r.t.Fatal("replay differs from the live state (KRN-1)")
 	}
+	_, err = kernel.Rederive(r.anchors(), r.k.Log().Entries())
+	must(r.t, err)
 }
 
 func (r *rig) admits(id string, k key.Key, at int64) *key.Refusal {

@@ -684,7 +684,7 @@ func (k *Kernel) Retry(now int64, plan string, index int) error {
 	// A redo that Next would refuse now (a STOP, a revoke, an expiry, a
 	// limit) would cancel the plan: refuse the RETRY instead and leave the
 	// step parked. A pause only delays the redo until the key resumes.
-	if r := k.sendable(now, p, st, index); r != nil && r.Code != key.RPaused {
+	if r := sendCheck(k.s, p, st, index, now); r != nil && r.Code != key.RPaused {
 		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code, r.Detail)
 	}
 	if c := p.Plan.Steps[index].Clerk; k.clerks[c] == nil {
@@ -797,7 +797,7 @@ func (k *Kernel) Send(now int64, c Call) (bool, error) {
 	}
 	r := &key.Refusal{Code: CPlan, Detail: "plan is " + p.Status}
 	if p.Status == SActive {
-		r = k.sendable(now, p, st, c.Req.Index)
+		r = sendCheck(k.s, p, st, c.Req.Index, now)
 	}
 	if r == nil {
 		return true, nil
@@ -812,15 +812,15 @@ func (k *Kernel) Send(now int64, c Call) (bool, error) {
 	return false, err
 }
 
-// sendable checks step i of p as Next did before its dispatch, against the
+// sendCheck checks step i of p as Next did before its dispatch, against the
 // ledger before that dispatch, so the dispatch's own charge is not counted
-// twice.
-func (k *Kernel) sendable(now int64, p *PlanState, st *StepState, i int) *key.Refusal {
-	v, err := VerifyPlan(p.Plan, k.s.owners(p.Plan.Key))
+// twice. It is pure over the state, so Rederive makes the same check.
+func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Refusal {
+	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
 		return &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.LedgerBefore(st.DispatchSeq)})
+	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
 }
 
 // Tick runs every active plan as far as the clock allows, calling the
