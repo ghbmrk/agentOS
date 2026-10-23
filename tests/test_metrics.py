@@ -192,6 +192,21 @@ class ComputeTest(unittest.TestCase):
 
 
 class RenderTest(unittest.TestCase):
+    def test_repair_share_and_word_counts_lead(self):
+        # D-152: `Defect:` lines per reviewed merge come first, with the spec and process word counts.
+        raw = dict(raw_fixture(), words={"spec": 56847, "process": 14379})
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertLess(md.index("## Repair share (D-152)"), md.index("## Weekly"))
+        self.assertIn("- 2026-10-04: 0.00 (0/2)", md)  # two merged PRs had a verdict, no Defect line
+        self.assertIn("- 2026-10-11 (current, reading 2026-10-11 07:00): 1.00 (1/1)", md)
+        self.assertIn("- 2026-09-27: —", md)  # nothing merged
+        self.assertIn("SPEC.md 56,847 words; process docs 14,379 words", md)
+        # Raw data saved before D-152 has no counts; the frozen-row parse still sees one weekly table.
+        raw.pop("words")
+        again = metrics.render(metrics.compute(raw), raw, md)
+        self.assertIn("Word counts: n/a.", again)
+        self.assertEqual(len(metrics._previous(again)), 3)
+
     def test_render_is_deterministic_and_keeps_old_values_for_expired_data(self):
         raw = raw_fixture()
         first = metrics.render(metrics.compute(raw), raw)
