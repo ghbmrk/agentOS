@@ -301,3 +301,16 @@ func increment(t transport.TPM, srkName []byte, handle uint32, name, auth []byte
 	}
 	return nil
 }
+
+// Counter is one rollback counter as a value that reads and advances
+// itself, for a holder that numbers its own writes with it: the log anchor
+// on a trusted host (run.CounterAnchor, LOG-2, STO-1).
+type Counter struct {
+	TPM  transport.TPM
+	SRK  []byte // the storage root key's pinned name
+	Ref  CounterRef
+	Auth []byte
+}
+
+func (c Counter) Read() (uint64, error) { return ReadCounter(c.TPM, c.SRK, c.Ref, c.Auth) }
+func (c Counter) Increment() error      { return IncrementCounter(c.TPM, c.SRK, c.Ref, c.Auth) }
