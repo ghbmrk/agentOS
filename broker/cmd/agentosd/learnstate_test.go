@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -90,7 +91,7 @@ func TestOpenRemovesTheLearningState(t *testing.T) {
 			t.Errorf("%s left: %v", name, err)
 		}
 	}
-	for _, name := range []string{"tasks.json", "forgotten.json", "forget-owed.json"} {
+	for _, name := range []string{"tasks.json", "forgotten.json", "forget-owed.json", "forget-owed.json.bad"} {
 		found := false
 		for _, l := range learnedFiles {
 			found = found || l == name
@@ -197,6 +198,24 @@ func TestDeletedExecutorsSettleNotApplied(t *testing.T) {
 		}
 		if o := ex.Execute(context.Background(), journal.Intent{}, 1); o.Result != journal.ResultNotApplied {
 			t.Fatalf("executor %d: %+v", i, o)
+		}
+	}
+}
+
+// main wires what this file's tests pin: STATUS's always-off recall line
+// (OP-9; FD-3) and the retired executors (NL-8; FD-4), both before the
+// daemon runs, which copies the notes and the executors (potency on
+// #2827).
+func TestMainWiresTheDeletedCapabilities(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	run := strings.Index(s, "daemon.Run(ctx, cfg)")
+	for _, call := range []string{"caps.recallWired(false)", "registerRetired(&cfg)", "openLearnState(learnDir, &cfg)"} {
+		if i := strings.Index(s, call); i < 0 || run < 0 || i > run {
+			t.Errorf("main.go does not call %s before daemon.Run (%d, %d)", call, i, run)
 		}
 	}
 }
