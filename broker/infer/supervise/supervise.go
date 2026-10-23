@@ -277,12 +277,11 @@ func (s *Supervisor) listen() (*os.File, error) {
 	return f, nil
 }
 
-// jail sets the service's user and namespaces (INF-1, INF-6), loop7's
-// Jail.attr reimplemented: an empty network namespace whose only device
-// is a loopback that is down, an IPC namespace of its own, and a user
-// namespace mapping only the service's user and group to themselves, so
-// it keeps its ids, gains no capability across exec, and has no
-// supplementary group.
+// jail sets the service's user and namespaces (INF-1, INF-6): an empty
+// network namespace whose only device is a loopback that is down, an IPC
+// namespace of its own, and a user namespace mapping only the service's
+// user and group to themselves, so it keeps its ids, gains no
+// capability across exec, and has no supplementary group.
 func jail(a *syscall.SysProcAttr, uid, gid uint32) {
 	a.Credential = &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}
 	a.Cloneflags = syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUSER
@@ -296,8 +295,7 @@ func jail(a *syscall.SysProcAttr, uid, gid uint32) {
 // gains privileges through a setuid or file-capability binary. The flag
 // is per thread and Go's fork clones the child from the calling thread;
 // the goroutine exits still locked, so the runtime ends that thread and
-// the flag reaches no other child (loop7's startNoNewPrivs, reimplemented:
-// loop7 is frozen).
+// the flag reaches no other child.
 func startNoNewPrivs(start func() error) error {
 	done := make(chan error, 1)
 	go func() {
