@@ -251,3 +251,32 @@ func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A task's per-task cap spans its re-plans: a plan's steps and metered calls
+// are charged under the task its key serves, not under the plan, and a plan
+// for another task has its own (KRN-5, LOG-7, #2902).
+func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t2"))
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	serve := func(task string) key.Key {
+		s, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask(task))
+		must(t, err)
+		return s
+	}
+	modelPlan(r, "p1", serve("t1"))
+	modelPlan(r, "p2", serve("t1"))
+	modelPlan(r, "p3", serve("t2"))
+	must(t, r.meter(1, "p1", "api", 8, "provider"))
+	if rf := r.admit(2, "p2", 3); rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("a re-plan started a fresh per-task budget: %v", rf)
+	}
+	if rf := r.admit(2, "p2", 2); rf != nil {
+		t.Fatalf("the task's last 2: %v", rf)
+	}
+	if rf := r.admit(2, "p3", 10); rf != nil {
+		t.Fatalf("another task's budget: %v", rf)
+	}
+	r.replays()
+}

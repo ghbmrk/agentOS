@@ -503,6 +503,16 @@ func Reach(k Key) []string {
 	return v.Limits.Verbs
 }
 
+// TaskOf is the task k serves, from its task caveat; "" for a key that serves
+// none or is malformed. It checks no signature (KRN-5).
+func TaskOf(k Key) string {
+	v, err := verifyChain(k, nil)
+	if err != nil {
+		return ""
+	}
+	return v.Limits.Task
+}
+
 // Verified is a key whose chain has checked out.
 type Verified struct {
 	Key    Key

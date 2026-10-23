@@ -176,6 +176,7 @@ const (
 	mExpiryEdge  // a key at its expiry
 	// authorize
 	mClerk          // a step on another clerk
+	mStepTask       // a step for another task than the key's
 	mStepVerbRoot   // a verb outside the root
 	mStepVerbCaveat // a verb outside a verbs caveat
 	mArgCount       // a step with an extra argument
@@ -218,6 +219,7 @@ const (
 	mUses
 	mUsesEdge
 	// spend
+	mSpendForTask   // a metered call for another task than the key's
 	mSpendAmountNeg // a negative metered amount
 	mSpendCapped    // a metered call on a key with no spend cap
 	nMutants
@@ -567,6 +569,9 @@ func (m mutant) authorize(w mWorld) []string {
 	if s.Clerk != k.clerk && m.on(mClerk) {
 		out = append(out, key.RClerk)
 	}
+	if m.otherTask(k, s.Task, mStepTask) {
+		out = append(out, key.RTask)
+	}
 	if !slices.Contains(k.verbs, string(s.Verb)) && m.on(mStepVerbRoot) {
 		out = append(out, key.RVerb)
 	}
@@ -641,11 +646,25 @@ func (m mutant) authorize(w mWorld) []string {
 	return append(out, m.caps(w, s, false)...)
 }
 
+// otherTask reports whether task is not the one a task caveat of k names:
+// a key serves only its task (KRN-5).
+func (m mutant) otherTask(k mKey, task string, x mutant) bool {
+	for _, c := range k.all() {
+		if c.Kind == key.KTask && taskOf(c) != task && m.on(x) {
+			return true
+		}
+	}
+	return false
+}
+
 // spend returns every refusal code a metered call earns; none admits it.
 func (m mutant) spend(w mWorld) []string {
 	out := m.live(w)
 	if w.noView && m.on(mNoView) {
 		return out
+	}
+	if m.otherTask(w.k, w.spendFor, mSpendForTask) {
+		out = append(out, key.RTask)
 	}
 	if w.spendAmt < 0 && m.on(mSpendAmountNeg) {
 		return append(out, key.RMalformed)
@@ -1337,7 +1356,7 @@ const (
 )
 
 var allCodes = []string{key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
-	key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay, key.RRate, key.RUses}
+	key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay, key.RRate, key.RUses, key.RTask}
 
 // TestRefModelAgrees fuzzes the library against the model over fixed seeds,
 // so every kernel change runs it with the race shards (EVL-1). It also
