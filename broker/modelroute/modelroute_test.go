@@ -207,7 +207,7 @@ func TestUnansweredCallCharges(t *testing.T) {
 			if w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("got %d", w.Code)
 			}
-			input := meter.Tokens(int64(len(c.body)))
+			input := estimate(int64(len(c.body)))
 			want := input + c.extra
 			if c.extra > 0 {
 				// It may also have spent every further attempt it was
@@ -485,7 +485,7 @@ func TestUsageTrailerReachesMeterNotGuest(t *testing.T) {
 			}
 			want := c.want
 			if want < 0 {
-				want = (MaxRetries + 1) * (meter.Tokens(int64(len(body))) + 100)
+				want = (MaxRetries + 1) * (estimate(int64(len(body))) + 100)
 			}
 			if u := m.Usage("m1"); u.Tokens != want {
 				t.Fatalf("charged %d tokens, want %d", u.Tokens, want)
@@ -544,7 +544,7 @@ func TestTruncatedBodyChargesEveryAllowedAttempt(t *testing.T) {
 	const body = `{"model":"default","max_tokens":100}`
 	w := httptest.NewRecorder()
 	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
-	if want := (MaxRetries + 1) * (meter.Tokens(int64(len(body))) + 100); m.Usage("m1").Tokens != want {
+	if want := (MaxRetries + 1) * (estimate(int64(len(body))) + 100); m.Usage("m1").Tokens != want {
 		t.Fatalf("charged %d tokens, want every allowed attempt's reservation %d", m.Usage("m1").Tokens, want)
 	}
 }
@@ -661,7 +661,7 @@ func TestNoConnectionChargesInputOnly(t *testing.T) {
 			if w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("got %d", w.Code)
 			}
-			if want, u := meter.Tokens(int64(len(body))), m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
+			if want, u := estimate(int64(len(body))), m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
 				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
 			}
 		})

@@ -16,8 +16,12 @@ import (
 
 const attemptsBody = `{"model":"default","max_tokens":100}`
 
+// estimate is the meter's input estimate for an n-byte body: four bytes a
+// token, rounded up.
+func estimate(n int64) int64 { return (n + 3) / 4 }
+
 // attemptWorst is one attempt's worst charge for attemptsBody.
-var attemptWorst = meter.Tokens(int64(len(attemptsBody))) + 100
+var attemptWorst = estimate(int64(len(attemptsBody))) + 100
 
 func attemptsMeter(t *testing.T, tokens int64) *meter.Meter {
 	t.Helper()
@@ -71,7 +75,7 @@ func TestSR3_7f1bAllowanceIsTheBrokers(t *testing.T) {
 // for a call no route served; a trailer saying nothing was sent upstream
 // leaves the meter its own count; the allowance not spent is refunded.
 func TestSR3_7f1cTrailerCarriesFailedAttempts(t *testing.T) {
-	in := meter.Tokens(int64(len(attemptsBody)))
+	in := estimate(int64(len(attemptsBody)))
 	const page = `{"error":{"message":"x"}}`
 	for _, c := range []struct {
 		name, trailer string
@@ -143,7 +147,7 @@ func TestSR3_7f1cValidTrailer(t *testing.T) {
 // with no trailer announced (the vault process's own denial) is left the
 // meter's own count.
 func TestSR3_7f1cTrailerFallbackFailsClosed(t *testing.T) {
-	in := meter.Tokens(int64(len(attemptsBody)))
+	in := estimate(int64(len(attemptsBody)))
 	t.Run("announced, closed unread", func(t *testing.T) {
 		// The meter's writer drains a body the guest hung up on, so the
 		// reverse proxy reads to the end; Close is the path for any other
