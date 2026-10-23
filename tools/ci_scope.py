@@ -9,10 +9,11 @@ the document checks (trace, doclint, board, the tests of those tools) and skips 
 machine and host jobs; assurance.yml skips its scans. Everything else runs full CI.
 
 The set is deliberately narrow: Markdown files whose only readers are checks the records
-run itself executes (D29, CI-PATHS), so SPEC.md, CLAUDE.md and the other contract documents
-are records too. A path outside it, an empty change, or any doubt gives `full`: every
+run itself executes (D29, CI-PATHS), so CLAUDE.md and the other process documents are
+records too. A path outside it, an empty change, or any doubt gives `full`: every
 non-Markdown file, and any Markdown a Go test, a go:embed or the image reads (for
-instance docs/owners-guide.md). tools/g1_scope.py reuses `is_record`, so widening the set
+instance docs/owners-guide.md, and SPEC.md, which broker/browser's test reads).
+tests/test_ci_scope.py fails if a Go file names a record path. tools/g1_scope.py reuses `is_record`, so widening the set
 widens the G1 freeze's records-only pass as well.
 
 The workflows run the base commit's copy of this file (`git show BASE:tools/ci_scope.py`),
@@ -34,7 +35,7 @@ import sys
 RECORD_FILES = frozenset({
     "BOARD.md", "LATER.md", "LEDGER.md", "DECISIONS.md", "METRICS.md", "TRACE.md",
     "docs/MARK-QUEUE.md",
-    "README.md", "PLAN.md", "SPEC.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
+    "README.md", "PLAN.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
     "docs/LANES.md", "docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md",
     "docs/conv-3-triage.md", "docs/conv-5-uncovered.md",
 })

@@ -373,7 +373,9 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSet
 	if err != nil {
 		return nil, s, err
 	}
-	return inbox.NewLive(st), s, nil
+	// Live unsubscribes are on (#2841): a failing read keeps the read mail
+	// it found (lastOpened), so VRB-2 holds after the owner deletes it.
+	return inbox.NewLive(st).WithPoster(), s, nil
 }
 
 // today is the date c's world gives, or UTC's.
