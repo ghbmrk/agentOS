@@ -256,7 +256,16 @@ func TestTheSenderNetFailsClosedOnAmbiguousMail(t *testing.T) {
 			t.Errorf("%s: an alert by its sender", c.name)
 		}
 	}
-	if !isAlert([]byte("Authentication-Results: "+authServ+"; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>\r\n"+body), w) {
-		t.Fatal("control: a single aligned pass is not an alert")
+	// A single sender in a well-formed From is an alert however its header is
+	// written: folded, or with a name encoded in a charset Go cannot decode.
+	for _, from := range []string{
+		"<notice@bank.test>",
+		"\"Bank of Test Customer Security Team\"\r\n <notice@bank.test>",
+		"=?windows-1252?Q?S=E9curit=E9_Banque?= <notice@bank.test>",
+		"=?iso-2022-jp?B?GyRCJWEhPCVrGyhC?= <notice@bank.test>",
+	} {
+		if !isAlert([]byte("Authentication-Results: "+authServ+"; dmarc=pass header.from=bank.test\r\nFrom: "+from+"\r\n"+body), w) {
+			t.Errorf("control: From %q with a single aligned pass is not an alert", from)
+		}
 	}
 }

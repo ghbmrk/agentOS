@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"mime"
 	"net/mail"
 	"strings"
 )
@@ -36,6 +37,8 @@ func guardOff(w World) bool {
 // more than one address in it, is never an alert by its sender: which one the
 // provider's DMARC result is for is not known, so a forged alert must not
 // reach the owner as one from a trusted sender (#2681 item 5).
+var unfold = strings.NewReplacer("\r\n", "", "\n", "", "\r", "")
+
 func alertSender(raw []byte, w World) bool {
 	hs, _ := splitMessage(raw)
 	auth, froms := "", 0
@@ -54,7 +57,10 @@ func alertSender(raw []byte, w World) bool {
 	if froms != 1 {
 		return false
 	}
-	if l, err := (&mail.AddressParser{}).ParseList(strings.TrimSpace(string(from))); err != nil || len(l) != 1 {
+	// Unfolded, and with an encoded-word name in any charset read as raw
+	// bytes, so a well-formed single sender is never taken for two.
+	p := mail.AddressParser{WordDecoder: &mime.WordDecoder{CharsetReader: rawCharset}}
+	if l, err := p.ParseList(strings.TrimSpace(unfold.Replace(string(from)))); err != nil || len(l) != 1 {
 		return false
 	}
 	addr := FromAddress(raw)
