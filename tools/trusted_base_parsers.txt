@@ -1,0 +1,148 @@
+# Parser registry for tools/trusted_base.py (SPEC KRN-2, #2849).
+#
+#   parser <pattern> -- <what untrusted bytes it decodes>
+#   inert  <pattern> -- <why it decodes none>
+#
+# A parser is a package that turns bytes a party outside the trusted processes can write
+# (a guest, a network peer, a device, the local UI or a phone, the modem bridge, owner text,
+# an update mirror, a backup) into structure. Fixed-alphabet codecs (base64, hex,
+# encoding/binary) are not parsers. A pattern is an import path; `/...` also matches its
+# subpackages; the longest path wins, and an exact path beats `/...` on the same one. Every linked package outside the standard
+# library must match a line here; a standard-library package counts only if a parser line
+# names it. An own package whose inputs are uncertain is classed parser: an overcount shows,
+# an undercount hides. Turning a parser line inert needs a `Trusted-base: registry --` reason.
+
+# --- Own packages (broker module) ---
+inert  github.com/ghbmrk/agentos/broker/accel -- reads the host's own device files
+inert  github.com/ghbmrk/agentos/broker/admission -- in-process admission arithmetic
+inert  github.com/ghbmrk/agentos/broker/apnet -- serves the card's network file; decodes only its own record
+inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup budgets
+inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup files
+inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
+inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own configuration
+inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its own records
+inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
+inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/infer/supervise -- starts the inference service; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/journal -- reads its own write-ahead journal
+inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's own records
+inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records
+inert  github.com/ghbmrk/agentos/broker/mail/mailsock -- socket between trusted processes (agentosd and agentos-egress)
+inert  github.com/ghbmrk/agentos/broker/netguard -- address policy over parsed netip values
+inert  github.com/ghbmrk/agentos/broker/owner/notice -- notice codes as data; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/owner/notice/noticesock -- socket between trusted processes (agentosd and agentos-egress)
+inert  github.com/ghbmrk/agentos/broker/procguard -- process hardening; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/provagent -- declares plan routes as values
+inert  github.com/ghbmrk/agentos/broker/quota -- sets disk quotas; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/recall -- reads its own index
+inert  github.com/ghbmrk/agentos/broker/reversible -- declarations as values
+inert  github.com/ghbmrk/agentos/broker/routerule -- rule types as values
+inert  github.com/ghbmrk/agentos/broker/sendrules -- recipient rules over parsed values
+inert  github.com/ghbmrk/agentos/broker/vault -- reads its own encrypted store
+inert  github.com/ghbmrk/agentos/broker/verb -- the closed verb list as values
+parser github.com/ghbmrk/agentos/broker/attest -- attestation documents
+parser github.com/ghbmrk/agentos/broker/boxname -- the name the owner types at setup
+parser github.com/ghbmrk/agentos/broker/bridgeproto -- the modem bridge's messages on owner.sock
+parser github.com/ghbmrk/agentos/broker/change -- change proposals from loops and guests
+parser github.com/ghbmrk/agentos/broker/checker -- owner codes and approval requests (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/claim -- the claim code a phone presents
+parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- IMAP and SMTP replies from the owner's mail provider
+parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentosd -- process entry; decodes requests and replies (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/control -- the owner's control words
+parser github.com/ghbmrk/agentos/broker/egress -- proxied HTTP requests and provider replies
+parser github.com/ghbmrk/agentos/broker/fold -- oversized tool results for guests
+parser github.com/ghbmrk/agentos/broker/follow -- the update root the local page approves
+parser github.com/ghbmrk/agentos/broker/guest -- the guest interface, one socket per agent machine
+parser github.com/ghbmrk/agentos/broker/holder -- provider replies to a spent login
+parser github.com/ghbmrk/agentos/broker/kernel -- requests and key chains from clerks and planners
+parser github.com/ghbmrk/agentos/broker/kernel/key -- key chains any holder presents
+parser github.com/ghbmrk/agentos/broker/localapi -- the local UI's messages on localui.sock
+parser github.com/ghbmrk/agentos/broker/localsrv -- the local UI's ops on localui.sock
+parser github.com/ghbmrk/agentos/broker/mail -- mail messages
+parser github.com/ghbmrk/agentos/broker/mail/imapsmtp -- mail from the IMAP transport
+parser github.com/ghbmrk/agentos/broker/maintain -- release listings from update mirrors
+parser github.com/ghbmrk/agentos/broker/meter -- provider usage replies
+parser github.com/ghbmrk/agentos/broker/modelroute -- guests' model requests
+parser github.com/ghbmrk/agentos/broker/modem -- SIM and carrier messages
+parser github.com/ghbmrk/agentos/broker/modemlink -- the modem bridge's messages
+parser github.com/ghbmrk/agentos/broker/netjoin -- replies from the netjoin helper
+parser github.com/ghbmrk/agentos/broker/owner -- the owner's texts
+parser github.com/ghbmrk/agentos/broker/question -- guests' questions to the owner
+parser github.com/ghbmrk/agentos/broker/recovery -- backups restored onto new hardware
+parser github.com/ghbmrk/agentos/broker/route -- model providers' replies
+parser github.com/ghbmrk/agentos/broker/sipsign -- digest challenges and the modem bridge's sign requests
+parser github.com/ghbmrk/agentos/broker/smsapi -- a texting provider's HTTP replies
+parser github.com/ghbmrk/agentos/broker/sockets -- framing on every peer socket, guests' included
+parser github.com/ghbmrk/agentos/broker/tpmseal -- TPM replies and sealed blobs
+parser github.com/ghbmrk/agentos/broker/update -- update metadata from mirrors
+parser github.com/ghbmrk/agentos/broker/vm -- agent machine state (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/vm/gvisor -- runsc's output about guest machines
+parser github.com/ghbmrk/agentos/broker/vm/overlay -- overlay upper layers a guest wrote
+parser github.com/ghbmrk/agentos/broker/workers -- guests' worker-machine requests and files
+
+# --- Dependencies (vendored modules and third_party/) ---
+parser github.com/emersion/go-imap/... -- IMAP server responses (third_party/go-imap)
+parser github.com/emersion/go-sasl -- SASL server challenges
+parser github.com/google/go-containerregistry/pkg/name -- image references from update metadata
+parser github.com/google/go-tpm/... -- TPM command responses
+parser github.com/icholy/digest/... -- HTTP Digest challenge headers
+parser github.com/opencontainers/go-digest -- content digest strings
+inert  github.com/secure-systems-lab/go-securesystemslib/cjson -- canonical JSON encoder only
+parser github.com/secure-systems-lab/go-securesystemslib/encrypted -- encrypted key documents
+inert  github.com/sigstore/protobuf-specs/... -- generated message types; decoding is in google.golang.org/protobuf
+parser github.com/sigstore/sigstore/pkg/cryptoutils -- PEM and DER keys and certificates
+parser github.com/sigstore/sigstore/pkg/signature -- signatures and public keys
+inert  github.com/sigstore/sigstore/pkg/signature/options -- option values
+parser github.com/sigstore/sigstore/pkg/signature/payload -- simple-signing JSON payloads
+parser github.com/theupdateframework/go-tuf/v2/... -- TUF metadata from update mirrors
+inert  golang.org/x/crypto/... -- cryptographic primitives over fixed-size inputs
+inert  golang.org/x/sys/... -- system call wrappers
+inert  golang.org/x/term -- terminal control
+parser golang.org/x/text/encoding/... -- legacy character sets in mail bodies
+inert  golang.org/x/text/encoding/internal/... -- tables and identifiers for the decoders
+parser golang.org/x/text/language -- BCP 47 language tags
+parser golang.org/x/text/internal/language/... -- BCP 47 language tags
+inert  golang.org/x/text/internal/tag -- lookup tables
+inert  golang.org/x/text/internal/utf8internal -- UTF-8 tables
+inert  golang.org/x/text/runes -- rune transforms over decoded text
+inert  golang.org/x/text/transform -- streaming transform plumbing
+inert  google.golang.org/genproto/... -- generated annotations
+inert  google.golang.org/protobuf/... -- descriptors, reflection and runtime support
+parser google.golang.org/protobuf/encoding/... -- protobuf wire and text format
+parser google.golang.org/protobuf/internal/encoding/... -- protobuf wire and text format internals
+parser google.golang.org/protobuf/internal/impl -- protobuf message unmarshalling
+parser google.golang.org/protobuf/proto -- protobuf Unmarshal
+
+# --- Standard library (counted only when listed) ---
+parser archive/tar -- tar archives
+parser compress/flate -- DEFLATE streams
+parser compress/gzip -- gzip streams
+parser crypto/tls -- TLS handshake messages
+parser crypto/x509 -- certificates and keys
+parser encoding/asn1 -- ASN.1 DER
+parser encoding/json -- JSON
+parser encoding/pem -- PEM blocks
+parser html -- HTML entities
+parser mime -- MIME headers and encoded words
+parser mime/multipart -- multipart bodies
+parser mime/quotedprintable -- quoted-printable bodies
+parser net -- DNS replies
+parser net/http -- HTTP/1 and HTTP/2 messages
+parser net/http/httputil -- HTTP dumps and reverse-proxy replies
+parser net/http/internal -- chunked transfer coding
+parser net/mail -- mail headers and addresses
+parser net/smtp -- SMTP server replies
+parser net/textproto -- text protocol headers
+parser net/url -- URLs
+parser vendor/golang.org/x/crypto/cryptobyte/... -- length-prefixed TLS and ASN.1 structures
+parser vendor/golang.org/x/net/dns/dnsmessage -- DNS messages
+parser vendor/golang.org/x/net/http/httpguts -- HTTP header tokens
+parser vendor/golang.org/x/net/http2/hpack -- HTTP/2 header compression
+parser vendor/golang.org/x/net/idna -- internationalised host names
