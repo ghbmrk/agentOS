@@ -374,9 +374,10 @@ func Evaluate(raw []byte, w World) (reason, url string) {
 	}
 	// No entry means the owner has never opened the sender's mail; an entry
 	// that is not a date is not evidence of that. Every entry for the sender,
-	// in either domain form, counts.
+	// in either domain form and any case, with surrounding space or not,
+	// counts (#2618).
 	for a, o := range w.LastOpened {
-		if openedAddr(a) != sender {
+		if openedAddr(strings.TrimSpace(a)) != sender {
 			continue
 		}
 		opened, ok := day(o)

@@ -144,11 +144,14 @@ func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, 
 // message is this plus the class the clerk itself assigned to it.
 const labelPrefix = "agentOS/"
 
-// eligible is the one rule for unsubscribing: the reader calls the mail bulk,
-// it is not an alert and VRB-2 holds for it now. It returns the one-click URL
-// to post to.
+// eligible is the one rule for unsubscribing: the alert guard has its inputs,
+// the reader calls the mail bulk, it is not an alert and VRB-2 holds for it
+// now. It returns the one-click URL to post to.
 func (a *Account) eligible(m Mail) (string, bool) {
 	w := a.world()
+	if guardOff(w) {
+		return "", false
+	}
 	reason, u := Evaluate(m.Raw, w)
 	return u, m.Class == "bulk" && reason == ROK && !isAlert(m.Raw, w)
 }
@@ -224,7 +227,9 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 			if m.Class != "spam" && m.Class != "phishing" {
 				return a.refuse(string(s.Verb), target, "not-trashable")
 			}
-			if isAlert(m.Raw, a.world()) {
+			if w := a.world(); guardOff(w) {
+				return a.refuse(string(s.Verb), target, "no-alert-guard")
+			} else if isAlert(m.Raw, w) {
 				return a.refuse(string(s.Verb), target, "alert")
 			}
 			if a.retention < minRetentionDays {
@@ -249,6 +254,9 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 			return a.refuse(string(s.Verb), "", "unknown-sender")
 		}
 		m := a.mails[id]
+		if guardOff(a.world()) {
+			return a.refuse(string(s.Verb), id, "no-alert-guard")
+		}
 		u, ok := a.eligible(m)
 		if !ok {
 			return a.refuse(string(s.Verb), id, "no-longer-eligible")

@@ -170,6 +170,10 @@ WORLD = {
     "unsubscribe_unopened_days": 90,
     "last_opened": {"news@shop.test": "2026-06-30", "letter@reading.test": "2026-10-12"},
     "one_click_body": ONE_CLICK,
+    # The alert guard's inputs (#2681): the provider's authserv-id and the senders the owner
+    # keeps as alert senders. The clerk refuses to trash or unsubscribe without both.
+    "authserv": "mx.mailhub.test",
+    "alert_senders": ["security@mailhub.test", "maplebank.test"],
 }
 
 

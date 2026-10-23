@@ -1,29 +1,77 @@
 package inbox
 
-import "strings"
+import (
+	"mime"
+	"net/mail"
+	"strings"
+)
 
-// isAlert is the alert guard (#2604): a mail is an alert when its sender
-// passes an aligned DMARC check the provider wrote and is one the owner keeps
-// as an alert sender (the provider's security sender, a service the owner
-// holds an account with, a sender marked financial or identity). The clerk
-// never trashes or unsubscribes an alert, whatever the reader called it.
-// VRB-2's second net, security-alert wording whoever sent it, waits on the
-// eval's phishing case (ASSUMPTIONS.md MIG-4-mail-reader-3).
+// isAlert is the alert guard (#2604, #2681): a mail is an alert when its
+// sender passes an aligned DMARC check the provider wrote and is one the owner
+// keeps as an alert sender (the provider's security sender, a service the owner
+// holds an account with, a sender marked financial or identity); or, whoever
+// sent it, when it carries security-alert wording or a code (VRB-2's second
+// net, wordingAlert). The clerk never trashes or unsubscribes an alert,
+// whatever the reader called it.
 func isAlert(raw []byte, w World) bool {
-	hs, _ := splitMessage(raw)
-	for _, h := range hs {
-		if h.key() == "authentication-results" { // the topmost: the provider's own
-			from := FromAddress(raw)
-			return dmarcPass(string(h.value), from, w.AuthServ) && senderIn(from, w.AlertSenders)
+	return alertSender(raw, w) || wordingAlert(mailText(raw))
+}
+
+// guardOff reports whether the guard lacks an input it needs: with no
+// authserv-id no header is the provider's, and with no alert senders no
+// sender is one, so the first net would be off without a trace. The clerk
+// then trashes and unsubscribes nothing (no-alert-guard).
+func guardOff(w World) bool {
+	if strings.TrimSpace(w.AuthServ) == "" {
+		return true
+	}
+	for _, e := range w.AlertSenders {
+		if strings.TrimSpace(e) != "" {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// alertSender is the first net. A mail with more than one From header, or
+// more than one address in it, is never an alert by its sender: which one the
+// provider's DMARC result is for is not known, so a forged alert must not
+// reach the owner as one from a trusted sender (#2681 item 5).
+var unfold = strings.NewReplacer("\r\n", "", "\n", "", "\r", "")
+
+func alertSender(raw []byte, w World) bool {
+	hs, _ := splitMessage(raw)
+	auth, froms := "", 0
+	var from []byte
+	for _, h := range hs {
+		switch h.key() {
+		case "authentication-results":
+			if auth == "" { // the topmost: the provider's own
+				auth = string(h.value)
+			}
+		case "from":
+			froms++
+			from = h.value
+		}
+	}
+	if froms != 1 {
+		return false
+	}
+	// Unfolded, and with an encoded-word name in any charset read as raw
+	// bytes, so a well-formed single sender is never taken for two.
+	p := mail.AddressParser{WordDecoder: &mime.WordDecoder{CharsetReader: rawCharset}}
+	if l, err := p.ParseList(strings.TrimSpace(unfold.Replace(string(from)))); err != nil || len(l) != 1 {
+		return false
+	}
+	addr := FromAddress(raw)
+	return dmarcPass(auth, addr, w.AuthServ) && senderIn(addr, w.AlertSenders)
 }
 
 // dmarcPass reads only the topmost Authentication-Results header, and only if
 // the provider's own server wrote it (its authserv-id): a sender can add more
-// of these headers, never above the provider's. The DMARC result must be
-// aligned with the From domain.
+// of these headers, never above the provider's. Every DMARC result in it must
+// pass aligned with the From domain, so a header whose results conflict
+// passes nothing (#2681 item 5).
 func dmarcPass(header, from, authServ string) bool {
 	if authServ == "" || header == "" || from == "" {
 		return false
@@ -32,12 +80,17 @@ func dmarcPass(header, from, authServ string) bool {
 	if !strings.EqualFold(id, authServ) {
 		return false
 	}
+	pass := false
 	for _, r := range rs {
-		if r.Method == "dmarc" && r.Result == "pass" && strings.EqualFold(r.Props["header.from"], domainOf(from)) {
-			return true
+		if r.Method != "dmarc" {
+			continue
 		}
+		if r.Result != "pass" || !strings.EqualFold(r.Props["header.from"], domainOf(from)) {
+			return false
+		}
+		pass = true
 	}
-	return false
+	return pass
 }
 
 func domainOf(addr string) string {

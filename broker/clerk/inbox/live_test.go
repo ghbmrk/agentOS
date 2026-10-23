@@ -60,7 +60,7 @@ func newLiveRig(t *testing.T, retention int, classes map[string]string, raws ...
 		ms[i].Class = classes[id]
 		lr.mail[id] = ms[i].ID
 	}
-	lr.rig = newRigOn(t, World{Today: "2026-10-19"}, ms, box, retention)
+	lr.rig = newRigOn(t, World{Today: "2026-10-19", AuthServ: authServ, AlertSenders: []string{"security.test"}}, ms, box, retention)
 	return lr
 }
 

@@ -5,7 +5,7 @@ description: agentOS reviewer (L3 and lens) rules. Load before posting any revie
 
 # Reviewer (L3) rules
 
-Moved verbatim from CLAUDE.md (2026-10-17). Also load the agentos-budget skill.
+Also load the agentos-budget skill.
 
 - Review in a fresh context, from the diff plus the cited requirement IDs. Don't rely on the builder's reasoning.
 - First line `Verdict: accept|fix-list|reject`; any verdict but accept adds `Cause: spec-gap|brief-gap|defect|scope`. Each point cites a requirement ID or a concrete defect and carries its class (OPERATING §4). Last line: the PR's next step and the reviews still owed.

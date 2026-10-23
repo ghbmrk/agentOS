@@ -223,3 +223,38 @@ func TestCounterPinsTheSRK(t *testing.T) {
 		t.Fatalf("define with another SRK name: %v", err)
 	}
 }
+
+// REQ: LOG-2, STO-1
+//
+// The Counter value reads and advances the same NV counter, and a value
+// with the wrong auth does neither (LOG-anchor-tpm, #2881).
+func TestCounterValueReadsAndAdvances(t *testing.T) {
+	s := swtpm.Start(t)
+	srk, id, auth := srkName(t, s), vaultID(t), counterAuth(t)
+	ref, err := tpmseal.DefineCounter(s.TPM(), srk, id, auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	n, err := c.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Increment(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, s, srk, ref, auth); got != n+1 {
+		t.Fatalf("after Increment: %d, want %d", got, n+1)
+	}
+	bad := c
+	bad.Auth = counterAuth(t)
+	if _, err := bad.Read(); err == nil {
+		t.Fatal("read with the wrong auth")
+	}
+	if err := bad.Increment(); err == nil {
+		t.Fatal("advanced with the wrong auth")
+	}
+	if got := read(t, s, srk, ref, auth); got != n+1 {
+		t.Fatalf("after wrong-auth tries: %d, want %d", got, n+1)
+	}
+}
