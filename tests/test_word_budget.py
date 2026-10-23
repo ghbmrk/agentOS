@@ -26,10 +26,17 @@ class CountTest(unittest.TestCase):
     def test_a_word_is_a_run_of_non_whitespace(self):
         self.assertEqual(word_budget.words("a  b\n— `c d`\t|"), 6)
 
-    def test_repository_counts_cover_both_sets(self):
-        got = word_budget.tree_counts(pathlib.Path(__file__).resolve().parent.parent)
-        self.assertGreater(got["spec"], 0)
-        self.assertGreater(got["process"], 0)
+    def test_tree_counts_read_only_the_members(self):
+        # Synthetic tree, not the repository: a test that opens a record must run on ci.yml's
+        # records-only step (tests/records_audit.py), and tree_counts opens only the members.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for path, text in {"SPEC.md": "a b c", "CLAUDE.md": "a", "docs/OPERATING.md": "a b",
+                               ".claude/skills/x/SKILL.md": "a", ".claude/skills/x/notes.md": "a b c d",
+                               "reviews/l3/README.md": "a b c d"}.items():
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            self.assertEqual(word_budget.tree_counts(root), {"spec": 3, "process": 4})
 
 
 class CheckTest(unittest.TestCase):

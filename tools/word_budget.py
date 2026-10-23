@@ -50,8 +50,8 @@ def counts(read, paths):
 
 def tree_counts(root):
     root = pathlib.Path(root)
-    paths = [p.relative_to(root).as_posix() for p in root.rglob("*.md")
-             if ".git" not in p.relative_to(root).parts]
+    named = [p for p in SPEC + PROCESS if (root / p).is_file()]
+    paths = named + [p.relative_to(root).as_posix() for p in root.glob(".claude/skills/*/SKILL.md")]
     return counts(lambda p: (root / p).read_text(encoding="utf-8"), paths)
 
 
