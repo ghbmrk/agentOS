@@ -1,0 +1,2 @@
+# The control plant: a tracked lockfile this file hides from a scan that honours .gitignore.
+package-lock.json
