@@ -176,17 +176,22 @@ nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "
 NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
 NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service\n')"
 # No code from writable storage (UPD-10): the first boot plants a copy of /usr/bin/true, mode 0755,
-# in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP) and
-# must find every one refused; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
+# in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP, which
+# gpt-auto mounts at the empty /boot when there is no XBOOTLDR) and must find every one refused, each
+# but root's directories on its own mount; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
 # finds the same in a tmpfs it mounts itself; and the weekly reboot timer is armed. Passed the same
 # way as the NetworkManager check.
 noexec_check() {
 	cat <<'EOS'
 say() { echo "agentos-noexec: $*"; }
-for d in / /var/tmp /etc /tmp /run /dev/shm /dev /efi; do
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
 	f="${d%/}/agentos-implant"
 	if cp /usr/bin/true "$f" 2>/dev/null && chmod 0755 "$f" 2>/dev/null; then
-		if "$f" 2>/dev/null; then say "FAIL $d ran"; else say "$d refused"; fi
+		# Each but root's own directories must be its own mount (the planted file off root's file
+		# system), or its line would prove only root's noexec.
+		case $d in /|/var/tmp|/etc) own=yes ;; *) mountpoint -q "$d" && [ "$(stat -c %d "$f")" != "$(stat -c %d /)" ] && own=yes || own=no ;; esac
+		if [ "$own" = no ]; then say "FAIL $d is not its own mount"
+		elif "$f" 2>/dev/null; then say "FAIL $d ran"; else say "$d refused"; fi
 	else
 		say "FAIL $d could not plant"
 	fi
@@ -218,7 +223,7 @@ for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every devic
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-nm: FAIL"
-for d in / /var/tmp /etc /tmp /run /dev/shm /dev /efi; do
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
 	has "$W/console.log" "agentos-noexec: $d refused"
 done
 for want in "agentos-noexec: unit tmpfs refused" "agentos-noexec: reboot timer active" "agentos-noexec: done"; do

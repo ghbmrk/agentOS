@@ -295,7 +295,8 @@ class BootProbeTest(unittest.TestCase):
     def test_ci_boot_probes_every_writable_mount(self):
         sh = (ROOT / "image/ci_boot.sh").read_text()
         # The same list plants in the guest and is read back on the host.
-        self.assertEqual(sh.count("for d in / /var/tmp /etc /tmp /run /dev/shm /dev /efi; do"), 2)
+        self.assertEqual(sh.count("for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do"), 2)
+        self.assertIn('mountpoint -q "$d"', sh)
         self.assertIn('has "$W/console.log" "agentos-noexec: $d refused"', sh)
         self.assertIn('EXTRA="$NM_EXTRA$NX_EXTRA"', sh)
         probe = re.search(r"noexec_check\(\) \{\n\tcat <<'EOS'\n(.*?)\nEOS\n", sh, re.S).group(1)
