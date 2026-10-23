@@ -815,7 +815,7 @@ func writeAtomic(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, path); err != nil { // durable:exempt broker/durable is old core (D-139); the file and its directory are synced here
 		os.Remove(tmp)
 		return err
 	}

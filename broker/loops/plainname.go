@@ -34,6 +34,7 @@ var fuzzNames = map[string]string{
 	"sockets.FuzzFrames":            "the check that reads agent messages",
 	"sockets.FuzzRequest":           "the check that reads agent requests",
 	"tpmseal.FuzzParse":             "the check that reads sealed-key records",
+	"seal.FuzzParse":                "the check that reads the sealed store's header",
 	"netguard.FuzzSourcesRead":      "the check that reads the home router's answers",
 	"netguard.FuzzGatewayPolicy":    "the check that keeps the router's address blocked",
 	"netguard.FuzzCheck":            "the check that decides where an agent may connect",
