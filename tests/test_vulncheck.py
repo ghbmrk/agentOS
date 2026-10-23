@@ -105,7 +105,7 @@ class OsvFindingsTest(unittest.TestCase):
         # TN-vulncheck-c
         doc = osv_doc(("/r/a/package-lock.json", [pkg("x", "npm", "GHSA-1"), pkg("y", "npm")]),
                       ("/r/broker/go.mod", [pkg("golang.org/x/net", "Go", "GO-9")]))
-        fs, probs = vulncheck.osv_findings(doc, "/r", [], ["a/package-lock.json"])
+        fs, probs = vulncheck.osv_findings(doc, "/r", [], ["a/package-lock.json"], ["broker"])
         self.assertEqual(probs, [])
         self.assertEqual([(f["where"], f["id"], f["aliases"], f["fails"]) for f in fs],
                          [("a/package-lock.json", "GHSA-1", ["CVE-GHSA-1"], True)])
@@ -115,6 +115,24 @@ class OsvFindingsTest(unittest.TestCase):
         doc = osv_doc(("/r/a/package-lock.json", []))
         _, probs = vulncheck.osv_findings(doc, "/r", [], ["a/package-lock.json", "b/x.lock"])
         self.assertEqual(len(probs), 2)
+
+    def test_go_module_outside_targets_is_a_problem(self):
+        # Potency finding 1: OSV leaves Go to govulncheck, so an unlisted go.mod is unscanned.
+        doc = osv_doc(("/r/broker/go.mod", [pkg("x", "Go")]),
+                      ("/r/broker/third_party/m/go.mod", [pkg("y", "Go")]),
+                      ("/r/spikes/s/go.mod", [pkg("z", "Go")]),
+                      ("/r/guest/new/go.mod", [pkg("w", "Go")]))
+        _, probs = vulncheck.osv_findings(doc, "/r", ["spikes"], [], ["broker"])
+        self.assertEqual(probs, ["guest/new/go.mod: a Go module outside go_targets; add it there or to skip_paths"])
+
+    def test_scan_ignores_gitignore(self):
+        # Security finding 1: a tracked lockfile a .gitignore names is still scanned; the
+        # control's ignored/ plant proves the flag works with the real scanner.
+        src = (ROOT / "tools" / "vulncheck.py").read_text()
+        self.assertIn('"--no-ignore"', src)
+        x = ROOT / "tests" / "fixtures" / "vulncheck" / "ignored"
+        self.assertIn("package-lock.json", (x / ".gitignore").read_text().splitlines())
+        self.assertIn(("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"), vulncheck.CONTROL_FAILS)
 
     def test_skip_paths_drop_the_fixture(self):
         doc = osv_doc(("/r/tests/fixtures/vulncheck/npm/package-lock.json", [pkg("left-pad", "npm", "P")]),
@@ -152,14 +170,23 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual(len(vulncheck.record_problems([bad])), 1, bad)
 
     def test_bad_records_stop_the_scan(self):
-        fs, probs, _ = vulncheck.scan({"go_targets": [], "accepted": [{"id": "x"}]}, ROOT)
+        fs, probs, _ = vulncheck.scan({"go_targets": ["broker"], "osv_sources": ["a"],
+                                       "accepted": [{"id": "x"}]}, ROOT)
         self.assertEqual(fs, [])
         self.assertTrue(probs)
 
+    def test_empty_config_sides_stop_the_scan(self):
+        # Security finding 3: an empty side would pass with nothing scanned.
+        for cfg in ({"go_targets": [], "osv_sources": ["a"]}, {"go_targets": ["broker"]}):
+            fs, probs, _ = vulncheck.scan(cfg, ROOT)
+            self.assertEqual((fs, len(probs)), ([], 1), cfg)
+
     def test_cited_issue_must_be_an_open_issue(self):
         # TN-vulncheck-d: closing the issue withdraws the acceptance.
-        answers = {1: {"state": "open"}, 2: {"state": "closed"},
-                   3: {"state": "open", "pull_request": {}}, 4: 404}
+        answers = {1: {"state": "open", "title": "Accept V1", "body": None},
+                   2: {"state": "closed", "title": "V2"},
+                   3: {"state": "open", "pull_request": {}, "body": "V3"}, 4: 404,
+                   5: {"state": "open", "title": "unrelated", "body": "names V9 only"}}
         seen = []
 
         class Resp(io.BytesIO):
@@ -176,12 +203,14 @@ class RecordsTest(unittest.TestCase):
                 raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
             return Resp(json.dumps(answers[n]).encode())
 
-        recs = [{"id": f"V{n}", "issue": n, "why": "x"} for n in (1, 2, 3, 4, 1)]
+        recs = [{"id": f"V{n}", "issue": n, "why": "x"} for n in (1, 2, 3, 4, 1, 5)]
         probs = vulncheck.issue_problems(recs, "o/r", "tok", opener)
-        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(seen), 5)
         self.assertEqual(seen[0], ("https://api.github.com/repos/o/r/issues/1", "Bearer tok"))
-        self.assertEqual(len(probs), 3)
+        self.assertEqual(len(probs), 4, probs)
         self.assertTrue(any("closed" in p for p in probs) and any("pull request" in p for p in probs))
+        # Security finding 2: an open issue that does not name the vulnerability accepts nothing.
+        self.assertIn("issue #5 does not name V5, which a record accepts with it", probs)
 
     def test_check_issues_without_a_token_fails(self):
         # TN-vulncheck-d: in CI an acceptance that cannot be checked is a failure, not a pass.
@@ -214,6 +243,7 @@ class ConfigTest(unittest.TestCase):
         for s in cfg["osv_sources"]:
             self.assertTrue((ROOT / s).exists(), s)
         self.assertIn("tests/fixtures/vulncheck", cfg["skip_paths"])
+        self.assertEqual(set(cfg["skip_paths"]), {"tests/fixtures/vulncheck", "spikes"})
 
     def test_every_shipped_lockfile_is_expected(self):
         # A lockfile under guest/ or image/ is an image dependency; list it so a scan

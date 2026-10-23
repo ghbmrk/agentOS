@@ -10,17 +10,19 @@ run      govulncheck on each Go target of assurance/vulncheck.json and an OSV sc
              in the tree ships in the image or is vendored, so presence alone fails.
          A record names the vulnerability (its ID or any alias), the issue that records why it
          is accepted, and the reason. With --check-issues each cited issue must be an open
-         issue (not a PR) on GITHUB_REPOSITORY, read with GITHUB_TOKEN; closing the issue
-         withdraws the acceptance.
+         issue (not a PR) on GITHUB_REPOSITORY that names the record's id in its title or
+         body, read with GITHUB_TOKEN; closing the issue withdraws the acceptance.
 control  The same scan against tests/fixtures/vulncheck with planted synthetic databases,
          offline: every planted vulnerability must fail, the unreachable standard-library one
          must not, and the fixture's acceptance records must clear the rest. The workflow runs
          it first, so a clean `run` counts only because the same scanners, in the same job,
          caught every plant.
 
-A scan that reads nothing fails: a govulncheck stream with no config or no modules, an
-expected lockfile the OSV scan did not report, or a scanner exit code other than its
-clean/found codes.
+A scan that reads nothing fails: an empty go_targets or osv_sources, a govulncheck stream
+with no config or no modules, an expected lockfile the OSV scan did not report, a go.mod
+outside every Go target (neither scanner would check it), or a scanner exit code other
+than its clean/found codes. The OSV scan ignores .gitignore, so a tracked lockfile cannot
+be hidden by one.
 
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
@@ -48,10 +50,14 @@ STDLIB = "stdlib"
 OSV_OK = (0, 1)
 RECORD_KEYS = {"id", "issue", "why", "where"}
 
-# What the control must see with no records: the reachable symbol, the vendored module's
-# unreachable package, and the npm plant. GO-0000-0003 (stdlib fmt, symbol not called) passes.
-CONTROL_FAILS = {"GO-0000-0001", "GO-0000-0002", "AGENTOS-VULNCHECK-CONTROL-1"}
-CONTROL_INFO = {"GO-0000-0003"}
+# What the control must see with no records, as (where, ID): the reachable symbol, the
+# vendored module's unreachable package, the npm plant, and the same plant in a tracked
+# lockfile that a .gitignore beside it names (osv-scanner skips those without --no-ignore).
+# GO-0000-0003 (stdlib fmt, symbol not called) passes.
+CONTROL_FAILS = {("gomod", "GO-0000-0001"), ("gomod", "GO-0000-0002"),
+                 ("npm/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"),
+                 ("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1")}
+CONTROL_INFO = {("gomod", "GO-0000-0003")}
 CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
@@ -61,6 +67,8 @@ CONTROL_CONFIG = {
         {"id": "GO-0000-0002", "issue": 1, "why": "control: accepted by ID", "where": "gomod"},
         {"id": "GHSA-0000-0000-0001", "issue": 1, "why": "control: accepted by alias",
          "where": "npm/package-lock.json"},
+        {"id": "AGENTOS-VULNCHECK-CONTROL-1", "issue": 1, "why": "control: accepted by ID",
+         "where": "ignored/package-lock.json"},
     ],
 }
 
@@ -130,15 +138,24 @@ def go_findings(where, objs, vendored_mods):
     return sorted(best.values(), key=lambda x: x["id"])
 
 
-def osv_findings(doc, root, skip, expected):
-    """Findings from an osv-scanner JSON report, and the problems with what it scanned."""
+def under(rel, dirs):
+    return any(rel == d.rstrip("/") or rel.startswith(d.rstrip("/") + "/") for d in dirs)
+
+
+def osv_findings(doc, root, skip, expected, go_targets=()):
+    """Findings from an osv-scanner JSON report, and the problems with what it scanned.
+
+    Go packages are left to govulncheck, so a go.mod outside every Go target (and outside
+    skip_paths) is a problem: neither scanner would check its dependencies."""
     root = pathlib.Path(root).resolve()
     found, scanned, problems = [], set(), []
     for res in doc.get("results") or []:
         p = pathlib.Path(res["source"]["path"])
         rel = (p.resolve().relative_to(root) if p.is_absolute() else p).as_posix()
-        if any(rel == s.rstrip("/") or rel.startswith(s.rstrip("/") + "/") for s in skip):
+        if under(rel, skip):
             continue
+        if pathlib.PurePosixPath(rel).name == "go.mod" and not under(rel, go_targets):
+            problems.append(f"{rel}: a Go module outside go_targets; add it there or to skip_paths")
         if res.get("packages"):
             scanned.add(rel)
         for pkg in res.get("packages") or []:
@@ -195,7 +212,8 @@ def apply_records(findings, records):
 
 
 def issue_problems(records, repo, token, opener=urllib.request.urlopen):
-    """Each cited issue must exist on repo, be an issue rather than a PR, and be open."""
+    """Each cited issue must exist on repo, be an issue rather than a PR, be open, and name
+    the vulnerability (the record's id) in its title or body."""
     problems = []
     for num in sorted({r["issue"] for r in records}):
         req = urllib.request.Request(
@@ -214,6 +232,11 @@ def issue_problems(records, repo, token, opener=urllib.request.urlopen):
             problems.append(f"issue #{num} is a pull request; an acceptance names an issue")
         elif issue.get("state") != "open":
             problems.append(f"issue #{num} is {issue.get('state')}; a closed issue withdraws the acceptance")
+        else:
+            text = f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
+            for r in records:
+                if r["issue"] == num and r["id"] not in text:
+                    problems.append(f"issue #{num} does not name {r['id']}, which a record accepts with it")
     return problems
 
 
@@ -232,8 +255,9 @@ def run_osv(root, env=None, offline=False):
     exe = shutil.which("osv-scanner")
     if not exe:
         raise ScanError("osv-scanner is not on PATH")
-    cmd = [exe, "scan", "source", "-r", "--format", "json", "--all-packages", "--all-vulns",
-           "--no-call-analysis=all"]  # Go reachability is govulncheck's, run above
+    # --no-ignore: a .gitignore the PR adds must not hide a tracked lockfile from the scan.
+    cmd = [exe, "scan", "source", "-r", "--no-ignore", "--format", "json", "--all-packages",
+           "--all-vulns", "--no-call-analysis=all"]  # Go reachability is govulncheck's, run above
     if offline:
         cmd += ["--offline", "--offline-vulnerabilities"]
     p = subprocess.run(cmd + ["."], cwd=root, capture_output=True, text=True,
@@ -250,6 +274,9 @@ def scan(config, root, go_db=None, osv_env=None, offline=False):
     """Findings and problems for one tree; records applied, issues not checked."""
     records = config.get("accepted", [])
     problems = record_problems(records)
+    for key in ("go_targets", "osv_sources"):
+        if not config.get(key):
+            problems.append(f"{key} is empty, so that side of the scan would read nothing")
     if problems:
         return [], problems, []
     findings = []
@@ -257,7 +284,8 @@ def scan(config, root, go_db=None, osv_env=None, offline=False):
         d = pathlib.Path(root) / t
         findings += go_findings(t, run_govulncheck(d, go_db), vendored(d))
     osv, osv_problems = osv_findings(run_osv(root, osv_env, offline), root,
-                                     config.get("skip_paths", []), config.get("osv_sources", []))
+                                     config.get("skip_paths", []), config["osv_sources"],
+                                     config["go_targets"])
     findings += osv
     problems += osv_problems
     unused = apply_records([f for f in findings if f["fails"]], records)
@@ -284,6 +312,9 @@ def summary(findings, problems, unused, out=None):
         print(f"problem: {p}", file=out)
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
+    if failing:
+        print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
+              "naming an open issue that names the vulnerability and says why it is accepted", file=out)
     return not failing and not problems
 
 
@@ -304,8 +335,8 @@ def control():
         findings, probs, _ = scan(bare, FIXTURE, **kw)
         summary(findings, probs, [])
         problems += [f"no records: {p}" for p in probs]
-        fails = {f["id"] for f in findings if f["fails"]}
-        info = {f["id"] for f in findings if not f["fails"]}
+        fails = {(f["where"], f["id"]) for f in findings if f["fails"]}
+        info = {(f["where"], f["id"]) for f in findings if not f["fails"]}
         if fails != CONTROL_FAILS:
             problems.append(f"planted failures: want {sorted(CONTROL_FAILS)}, got {sorted(fails)}")
         if info != CONTROL_INFO:
