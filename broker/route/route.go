@@ -40,7 +40,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
@@ -394,8 +393,8 @@ func report(ctx context.Context, provider string, u Usage) {
 // generated output, so is charged the call's full output reservation.
 // Usage the provider reported in its error body, and output a broken
 // stream produced, count too.
-func failedAttempt(provider string, a *attempt) meter.Attempt {
-	f := meter.Attempt{Provider: provider, Status: a.status}
+func failedAttempt(provider string, a *attempt) Attempt {
+	f := Attempt{Provider: provider, Status: a.status}
 	f.Full = a.status != http.StatusUnauthorized && a.status != http.StatusTooManyRequests
 	u := errorUsage(a.body)
 	if a.usage != nil {
@@ -533,10 +532,10 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 
 	var (
 		eligible, exhausted int
-		soonest             time.Time       // earliest end of a cooldown met
-		failed              []meter.Attempt // attempts that failed over, charged (SR3-7-f1a)
-		bounded             bool            // the meter refused another attempt (SR3-7-f1b)
-		last                *attempt        // the last failover, if any
+		soonest             time.Time // earliest end of a cooldown met
+		failed              []Attempt // attempts that failed over, charged (SR3-7-f1a)
+		bounded             bool      // the meter refused another attempt (SR3-7-f1b)
+		last                *attempt  // the last failover, if any
 		unsupportedWhy      string
 	)
 	for _, rt := range routes {
