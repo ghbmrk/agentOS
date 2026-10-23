@@ -166,10 +166,10 @@ func trouble(err error, mark inbox.Mark) (why, next string) {
 			"Set up the mail account again on my Wi-Fi page."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
 		// Every folder is read, Archive and Trash too, so only mail deleted
-		// for good frees room: at once for mail read since the last good
-		// read, and for old logged mail (inbox.ErrTooMuchReadMail, #2742
-		// item 3c).
-		return "you have more read mail than I can keep track of", tooMuchNext + " " + again
+		// for good frees room, and only the mail the read names by arrival:
+		// the rest the record keeps for 90 days whether it is deleted or not
+		// (inbox.TooMuchReadMailError, #2841, #2891 UX finding 1).
+		return "you have more read mail than I can keep track of", tooMuchNext(err) + again
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
@@ -199,10 +199,30 @@ func tryAgain(mark inbox.Mark) string {
 	return "I'll try again when your mail changes, or tomorrow."
 }
 
-// tooMuchNext is the owner's step for too much read mail. It gives no
-// amount: the read stops at the first charge past the bound, so how far
-// past is not known.
-const tooMuchNext = "Delete some read mail for good, and delete it from your trash too. Mail you read most recently frees the most room. Moving or archiving mail doesn't help, since I read every folder."
+// tooMuchNext is the owner's step for too much read mail, followed by a
+// space: the read mail to delete, named by when it arrived (which the owner's
+// mail app shows), since deleting any other frees nothing yet; or, when no
+// deletion helps, that the next try should get through. A record too large
+// to read back names no step, since none the owner can take shrinks it.
+func tooMuchNext(err error) string {
+	var tm *inbox.TooMuchReadMailError
+	if !errors.As(err, &tm) {
+		return ""
+	}
+	if tm.Before.IsZero() {
+		return "I've noted the read mail I found, so my next try should get through. "
+	}
+	const keep = " for good, and delete it from your trash too. Deleting other read mail doesn't help yet, since I keep note of it for 90 days. Moving or archiving mail doesn't help, since I read every folder. "
+	date := func(t time.Time) string { return t.In(time.Local).Format("2 January 2006") }
+	switch from, to := date(tm.After), date(tm.Before); {
+	case tm.After.IsZero():
+		return "Delete the read mail that arrived on or before " + to + keep
+	case from == to:
+		return "Delete the read mail that arrived on " + to + keep
+	default:
+		return "Delete the read mail that arrived from " + from + " to " + to + keep
+	}
+}
 
 // forSide names the side of the account a sign-in failed on, for the
 // owner's text, or nothing when err does not say (#2698 item 32).
@@ -225,9 +245,13 @@ func quoted(s string) string {
 
 // lastOpened is World.LastOpened for the mails ms of the account at slot, as
 // of today, read under mark, and what the owner is told. When Opened fails, every sender in ms
-// counts as opened today, so no unsubscribe passes VRB-2, and the record is
-// kept as it was. An empty LastOpened would read as "never opened" and let
-// every unsubscribe through (#2698 item 1).
+// counts as opened today, so no unsubscribe passes VRB-2, and the record
+// takes in the read mail the failing read found (#2841): Opened hands back
+// the record it began from with that mail added, bounded by
+// inbox.OpenedMax, so a sender read since the last good read stays opened
+// after the owner deletes that mail. A failing read that found none leaves
+// the record as it was. An empty LastOpened would read as "never opened"
+// and let every unsubscribe through (#2698 item 1).
 func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark) (map[string]string, MailStatus) {
 	var st MailStatus
 	rec, loaded := loadSeen(dir, s, slot) // not loaded: an empty record, which Opened starts today
@@ -241,14 +265,16 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 		}
 		why, next := trouble(err, mark)
 		st.Lines = append(st.Lines, "Unsubscribing is paused: "+why+", so I can't tell whose mail you have read. "+next)
+		if kept.Seen != nil {
+			st.Lines = append(st.Lines, began(loaded)...)
+			rec.Log = kept
+			if err := saveSeen(dir, s, slot, rec); err != nil {
+				st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. "+tryAgain(mark))
+			}
+		}
 		return fail, st
 	}
-	switch loaded {
-	case seenMissing:
-		st.Lines = append(st.Lines, "I began my record of the mail you read today.")
-	case seenBad:
-		st.Lines = append(st.Lines, "My saved record of the mail you read could not be read, so I began it again today.")
-	}
+	st.Lines = append(st.Lines, began(loaded)...)
 	since, _ := time.Parse(time.DateOnly, kept.Since)
 	now, _ := time.Parse(time.DateOnly, today)
 	ends := since.AddDate(0, 0, warmDays)
@@ -272,6 +298,17 @@ func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer
 		st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. "+tryAgain(mark))
 	}
 	return got, st
+}
+
+// began is what the owner is told when a read starts the record afresh.
+func began(loaded seenState) []string {
+	switch loaded {
+	case seenMissing:
+		return []string{"I began my record of the mail you read today."}
+	case seenBad:
+		return []string{"My saved record of the mail you read could not be read, so I began it again today."}
+	}
+	return nil
 }
 
 // warmedUp is the notice that the warm-up ended, with n senders eligible.
