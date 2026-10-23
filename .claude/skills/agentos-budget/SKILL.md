@@ -5,9 +5,7 @@ description: agentOS budget and session-cost rules. Load with the builder or rev
 
 # Budget (reasons: OPERATING §1, §5)
 
-Moved verbatim from CLAUDE.md (2026-10-17).
-
-- The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset (Mark, 2026-10-04). ~14% a day is not a ceiling: "14% a day shouldn't be a ceiling. No ceiling as long as not wasteful" (Mark, 2026-10-13 12:40Z). Spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
+- The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset (Mark, 2026-10-04). There is no daily ceiling (Mark, 2026-10-13). Spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
 - Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).

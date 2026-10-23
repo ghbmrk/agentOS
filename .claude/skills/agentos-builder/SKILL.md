@@ -5,7 +5,7 @@ description: agentOS builder (L2) rules. Load before starting any package build,
 
 # Builder (L2) rules
 
-Moved verbatim from CLAUDE.md (2026-10-17). Also load the agentos-budget skill.
+Also load the agentos-budget skill.
 
 - Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; a brief listed in `tools/brief_acceptance_baseline.txt` predates that rule, so name its tests in the PR body and carry on (OPERATING §5).
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
