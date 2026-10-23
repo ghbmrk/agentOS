@@ -81,10 +81,13 @@ CONTROL_FAILS = {("gomod", "GO-0000-0001"), ("gomod", "GO-0000-0002"),
                  ("npm/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"),
                  ("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1")}
 CONTROL_INFO = {("gomod", "GO-0000-0003")}
-# The image plant: binary libplant1 of source agentos-plant 1.0-1, queried by its source.
-# agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
+# The image plants: binary libplant1 of source agentos-plant 1.0-1, queried by its source, whose
+# advisory Debian has fixed (in 1.0-2), so no record can accept it; and agentos-nofix, whose
+# advisory has no fix, which the fixture's record accepts. agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
 # which has its own advisory) is not installed, so none of them may be reported.
-CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1")}
+CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4")}
+# With the fixture's records: the fixed advisory still fails and its record goes unused.
+CONTROL_IMAGE_VERDICTS = {("AGENTOS-VULNCHECK-DEB-1", "FAIL"), ("AGENTOS-VULNCHECK-DEB-4", "accepted #1")}
 CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
@@ -97,7 +100,9 @@ CONTROL_CONFIG = {
         {"id": "AGENTOS-VULNCHECK-CONTROL-1", "issue": 1, "why": "control: accepted by ID",
          "where": "ignored/package-lock.json"},
         {"id": "CVE-0000-0102", "issue": 1, "why": "control: fork accepted by alias", "where": "gomod"},
-        {"id": "AGENTOS-VULNCHECK-DEB-1", "issue": 1, "why": "control: image accepted by ID",
+        {"id": "AGENTOS-VULNCHECK-DEB-1", "issue": 1, "why": "control: Debian has fixed it, so this "
+         "cannot accept it", "where": IMAGE},
+        {"id": "CVE-0000-0105", "issue": 1, "why": "control: no Debian fix; accepted by alias",
          "where": IMAGE},
     ],
 }
@@ -419,10 +424,29 @@ def image_findings(doc):
                 problems.append(f"{meta.get('name')}: ecosystem {eco!r} is not a versioned Debian "
                                 "release, so its advisories would not match; check agentos.os-release")
             binary = meta.get("os_package_name") or meta.get("name", "")
-            found += _vulns(pkg, IMAGE, f"{eco}:{meta.get('name', '')} ({binary})", meta.get("version", ""))
+            vulns = _vulns(pkg, IMAGE, f"{eco}:{meta.get('name', '')} ({binary})", meta.get("version", ""))
+            for f in vulns:
+                f["fixed"] = debian_fix(pkg, {f["id"], *f["aliases"]}, meta.get("name"), eco)
+            found += vulns
     if not n:
         problems.append("the image scan reported no packages")
     return sorted(found, key=lambda x: (x["id"], x["package"])), problems
+
+
+def debian_fix(pkg, ids, name, eco):
+    """The version that fixes one of IDS in source package NAME in ECO, from the advisory
+    entries in one package of an osv-scanner report; "" when Debian has no fix there."""
+    for v in pkg.get("vulnerabilities") or []:
+        if v.get("id") not in ids:
+            continue
+        for a in v.get("affected") or []:
+            pk = a.get("package") or {}
+            if pk.get("ecosystem") == eco and pk.get("name") == name:
+                for r in a.get("ranges") or []:
+                    for e in r.get("events") or []:
+                        if e.get("fixed"):
+                            return e["fixed"]
+    return ""
 
 
 def run_image(src, env=None, offline=False):
@@ -459,13 +483,16 @@ def scan(config, root, go_db=None, osv_env=None, offline=False):
 
 
 def scan_image(config, src, osv_env=None, offline=False):
-    """Findings and problems for one image's packages; image records applied."""
+    """Findings and problems for one image's packages; image records applied.
+
+    A record accepts only an advisory Debian has not fixed in the image's release: once a fix
+    ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
     problems = record_problems(config.get("accepted", []))
     if problems:
         return [], problems, []
     records = [r for r in config.get("accepted", []) if r.get("where") == IMAGE]
     findings, problems = run_image(src, osv_env, offline)
-    return findings, problems, apply_records(findings, records)
+    return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
 
 
 def verdict(f):
@@ -531,9 +558,12 @@ def control():
         if fails != CONTROL_IMAGE_FAILS:
             problems.append(f"planted image failures: want {sorted(CONTROL_IMAGE_FAILS)}, got {sorted(fails)}")
         findings, probs, unused = scan_image(CONTROL_CONFIG, FIXTURE / IMAGE, **img)
+        summary(findings, probs, unused)
         problems += [f"image, with records: {p}" for p in probs]
-        if not summary(findings, probs, unused) or unused:
-            problems.append("the fixture's image record did not clear the planted image failure")
+        got = {(f["id"], verdict(f)) for f in findings}
+        if got != CONTROL_IMAGE_VERDICTS or [r["id"] for r in unused] != ["AGENTOS-VULNCHECK-DEB-1"]:
+            problems.append(f"image records: want {sorted(CONTROL_IMAGE_VERDICTS)} with the DEB-1 record "
+                            f"unused, got {sorted(got)}, unused {[r['id'] for r in unused]}")
     return problems
 
 

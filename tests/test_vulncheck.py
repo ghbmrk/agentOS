@@ -341,6 +341,26 @@ class ImageTest(unittest.TestCase):
             vulncheck.run_image = saved
         self.assertEqual(([vulncheck.verdict(f) for f in fs], probs, unused), (["accepted #1", "FAIL"], [], []))
 
+    def test_a_record_cannot_accept_an_advisory_debian_has_fixed(self):
+        # TN-vulncheck-6: once Debian ships a fix, the finding fails until the image is rebuilt.
+        def pkg(name, *events):
+            return {**osv_pkg(name, "1.0-1", "Debian:13", "DEBIAN-CVE-1"),
+                    "vulnerabilities": [{"id": "DEBIAN-CVE-1", "affected": [
+                        {"package": {"ecosystem": "Debian:12", "name": name}, "ranges": [{"events": [{"fixed": "0.9"}]}]},
+                        {"package": {"ecosystem": "Debian:13", "name": name},
+                         "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, *events]}]}]}]}
+        doc = {"results": [{"packages": [pkg("a", {"fixed": "1.0-2"}), pkg("b")]}]}
+        fs, probs = vulncheck.image_findings(doc)
+        self.assertEqual([(f["package"], f["fixed"]) for f in fs], [("Debian:13:a (a)", "1.0-2"), ("Debian:13:b (b)", "")])
+        rec = {"id": "DEBIAN-CVE-1", "issue": 1, "why": "x", "where": "image"}
+        saved = vulncheck.run_image
+        vulncheck.run_image = lambda src, env=None, offline=False: (fs, probs)
+        try:
+            fs, probs, unused = vulncheck.scan_image({"accepted": [rec]}, "x")
+        finally:
+            vulncheck.run_image = saved
+        self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
+
 
 class ConfigTest(unittest.TestCase):
     def test_config_is_valid_and_targets_exist(self):
