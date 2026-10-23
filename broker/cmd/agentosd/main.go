@@ -36,8 +36,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/notice"
 	"github.com/ghbmrk/agentos/broker/provagent"
-	"github.com/ghbmrk/agentos/broker/recall"
-	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 	"github.com/ghbmrk/agentos/broker/workers"
@@ -235,70 +233,10 @@ type ownerAgent interface {
 	Deliver(ctx context.Context, text string, public bool) error
 }
 
-// recallLabels gives the recall index the machine manager's REV-5 labels.
-// Raise returns once the label is private, which model egress and the
-// guest plane read per request.
-type recallLabels struct{ m *vm.Manager }
-
-func (r recallLabels) Label(id string) recall.Label {
-	if r.m.DataLabel(id) == vm.Public.String() {
-		return recall.Public
-	}
-	return recall.Private
-}
-
-func (r recallLabels) Raise(id string) error { return r.m.RaiseLabel(id, vm.Private) }
-
-// recallMachines is where a recall deletion reaches the machines.
-type recallMachines struct{ *vm.Manager }
-
-func (r recallMachines) Plan(lineage string, since time.Time) (recalltool.Plan, error) {
-	p, err := r.ResetPlan(lineage, since)
-	return recalltool.Plan{To: p.To, Changes: p.Changes}, err
-}
-
-// openRecall waits for the owner to unlock the vault, takes the recall
-// identity key from the vault process (recall K5), and opens recall, its
-// event bus and provenance record, then serves the recall tools. Until then
-// the tools answer that recall opens after the unlock. STOP and STATUS
-// never wait on any of it. sc carries the labels and where deletions reach
-// (the journal and, when machines run, the machine manager).
-func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.ServiceConfig, late *recalltool.Late, exec *recalltool.LateExecutor) {
-	var key []byte
-	for {
-		k, err := v.RecallKey()
-		if err == nil {
-			key = k
-			break
-		}
-		if !errors.Is(err, modelroute.ErrVaultLocked) {
-			log.Printf("recall: waiting for the vault process: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(10 * time.Second):
-		}
-	}
-	sc.Key, sc.Logf = key, log.Printf
-	svc, err := recalltool.OpenService(sc)
-	clear(key)
-	if err != nil {
-		log.Printf("recall disabled: %v; agents stay contained", err)
-		exec.Failed()
-		return
-	}
-	late.Set(svc.Tools)
-	exec.Set(svc.Reach)
-	log.Printf("recall open: %d items", svc.Index.Len())
-	svc.Run(ctx, log.Printf)
-	svc.Close()
-}
-
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket, recallDir string
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket string
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
@@ -349,10 +287,9 @@ func main() {
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&workerRoutes, "worker-routes", "/run/agentos-egress/provider.sock", "the vault process's provider control socket, which opens each provider worker's route socket (#1014); empty gives provider workers no route")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
-	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&noticeSocket, "notice-socket", "/run/agentos-egress/"+notice.Socket, "the vault process's notice socket, whose owner notices are texted to the owner; empty texts none")
-	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the owner's FORGET state: task texts, tombstones and the restored forget log (W3-forget)")
+	flag.StringVar(&learnDir, "learn", "/var/lib/agentos/learn", "the old learning plane's directory: its state is erased at start, and a restore's forget log is checked here (W3-forget-b1)")
 	flag.StringVar(&routingSocket, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, from which the model routes read how many attempts the owner's rule allows; empty holds MaxRetries")
 	var workerImage, workerArgv string
 	var workerMaxMB, workerLayerMB int64
@@ -423,7 +360,7 @@ func main() {
 		cfg.PageSocket = pageSocket(localUIUID, gid, apNetPath, verifySocket)
 	}
 	// A restore the forget log's check held opens nothing on the restored
-	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
+	// tree: no agent machines (W3-forget-b1; security C3). The
 	// held mode texts the owner why, takes their answer, and the start
 	// goes on once it releases the restore (W3-forget-b1-7). With no owner
 	// to text, agentosd does not start.
@@ -545,8 +482,7 @@ func main() {
 	// STATUS notes read in wiring order: the time check, then what waits
 	// on the owner (unclear effects), then
 	// the capability-off lines (OP-9, capoff.go), then spare-time work not
-	// running (learningOff, below), then recall's (an agent holding a
-	// deleted record, or memory not open), then the second line's. The
+	// running (learningOff, below), then the second line's. The
 	// texted STATUS leaves out whole notes that do not fit, from the
 	// end, so keep the clock first and the waiting lines before the rest.
 	qs.wire(&cfg)
@@ -579,12 +515,9 @@ func main() {
 		// The second line's STATUS line (potency R1 on #139).
 		line = &secondLine{get: verifier.SecondLine, texts: verifier.SecondLineTexts}
 	}
-	recallTools := &recalltool.Late{}
-	// Rollbacks the owner approves run here (recalltool W10).
-	recallExec := &recalltool.LateExecutor{}
-	cfg.Recall = recallExec
-	cfg.Grants.Contained = recallExec.Contained
-	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	// Recall, FORGET and RENEW are deleted (#2781): memory across tasks is
+	// off on every box, and STATUS says so (OP-9).
+	caps.recallWired(false)
 	// Approval requests follow the owner's pacing setting and spend its one
 	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
 	// QH-10). The channel is attached once the daemon runs.
@@ -624,21 +557,11 @@ func main() {
 		cfg.BridgeOnly = !ownerMessage
 	}
 
-	// The forget plane failing must not take the owner channel down
-	// either: without it FORGET is answered that it cannot run.
-	var lp *forgetPlane
-	if err := os.MkdirAll(learnDir, 0o700); err != nil {
-		log.Printf("forget disabled: %v", err)
-	} else if lp, err = openForgetPlane(learnDir, &cfg); err != nil {
-		log.Printf("forget disabled: %v", err)
-	}
-	if lp == nil {
-		wireSettings(&cfg, nil)
-	} else {
-		lp.forgetOwner.wirePage(&cfg)
-	}
-	// Intents left open for the deleted change and loops executors settle
-	// as not applied (NL-8).
+	// The old learning plane's state is erased, and FORGET, RENEW and the
+	// loop settings get fixed replies (#2781).
+	openLearnState(learnDir, &cfg)
+	// Intents left open for the deleted change, loops, forget and recall
+	// executors settle as not applied (NL-8).
 	registerRetired(&cfg)
 	// One clock for the journal and the gate.
 	cfg.Now = func() time.Time { return time.Now().UTC() }
@@ -648,9 +571,6 @@ func main() {
 	// to an owner destination yet, so no destination can be set.
 	ev := newEvidence(keptPath, log.Printf)
 	ev.wire(&cfg)
-	// RENEW (CAP-3): the owner starts a full agent memory over, by name,
-	// only on the gate's approval.
-	(&ownerRenew{r: recallExec, now: time.Now}).wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
 	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)
@@ -680,19 +600,6 @@ func main() {
 		planLine.others = func() bool { return spare.Retries() >= 1 }
 	}
 	steps := newStepNotes(&cfg.Notes)
-	// FORGET's item 2s a restart interrupted resume once recall opens
-	// (#327 L3 B-3), including one startup reconcile finds late (#1370);
-	// with recall off the owner is told they cannot, once boot setup is
-	// done (Security S1 on #1382). Wired before the daemon serves the
-	// owner and starts reconcile; resumeBoot runs at the end of setup.
-	var resumeBoot func()
-	if lp != nil {
-		var onOpen func(func())
-		if recallDir != "" && verifier != nil {
-			onOpen = recallExec.OnOpen
-		}
-		resumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)
-	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -701,14 +608,6 @@ func main() {
 	pacer.attach(ctx, d.Owner(), time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
-	// Deletions reach the journal's guest intents (CAP-3),
-	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
-		Notify: recallNotify(d.Owner), HeldDropped: recallHeldDropped(d.Owner)}
-	// and every reply kept on the box (CH-20).
-	recallCfg.Cases = forgetFan{kept: ev.kept}
-	if lp != nil {
-		lp.attach(ctx, d)
-	}
 	if noticeSocket != "" {
 		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)
 	}
@@ -734,9 +633,6 @@ func main() {
 			DiskReserveBytes: diskReserveMB << 20,
 			MachineDiskBytes: machineDiskMB << 20,
 			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
-			// A lineage holding a record the owner deleted is not forked
-			// or merged until that is settled (recall W10).
-			Contained: recallExec.Contained,
 		}
 		var planRoutes *modelroute.RouteControl
 		if workerRoutes != "" {
@@ -750,16 +646,6 @@ func main() {
 			caps.agentOff(agentNoMachines)
 		} else {
 			pre.m.Store(m)
-			if lp != nil {
-				// FORGET's item 2 (W3-forget-b2b): the agent machine's
-				// work since a task, taken back by recall's Reach.
-				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
-					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
-				// Recall's Retry reports a take-back it finished here,
-				// which tells item 2's done text (RCH-3, RCH-4).
-				recallCfg.OnTakenBack = func(_ string, since time.Time) { lp.forgetOwner.agentTakenBack(ctx, since) }
-			}
-			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
@@ -773,7 +659,7 @@ func main() {
 				wt.Provider = providerTool{pr}
 			}
 			caps.workers(wt != nil)
-			tools := registeredTools(qs, recallTools, wt)
+			tools := registeredTools(qs, wt)
 			if wt != nil {
 				startReaper(ctx, wt, m, 5*time.Second)
 			}
@@ -786,11 +672,7 @@ func main() {
 				ev.serve(plane)
 				agentStatus.replies.Store(&replyWait{plane})
 				steps.open(plane)
-				oa := &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
-				if lp != nil {
-					oa.Delivered = lp.delivered
-				}
-				var to ownerAgent = oa
+				var to ownerAgent = &guest.OwnerAgent{Plane: plane, Machine: agentMachine}
 				agent.a.Store(&to)
 				defer plane.Shutdown()
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
@@ -803,22 +685,6 @@ func main() {
 					go k.run(ctx)
 				}
 			}
-		}
-	}
-	// The recall identity key is vault-held (recall K5): recall opens once
-	// the vault process can hand it over.
-	// FORGET's item 2s a restart interrupted resume once recall opens;
-	// with recall off they cannot, and the owner is told so (wireResume).
-	if recallDir != "" && verifier != nil {
-		if resumeBoot != nil {
-			resumeBoot()
-		}
-		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
-	} else {
-		recallExec.Off()
-		caps.recallWired(false)
-		if resumeBoot != nil {
-			resumeBoot()
 		}
 	}
 	if line != nil {
@@ -1268,9 +1134,6 @@ func ownerVerifyErr(err error) error {
 	return &owner.VerifyError{Kind: kind, Until: ve.Until}
 }
 
-// recallNotify is recall's take-back notice to the owner. Each closes a
-// take-back the owner approved, so it is approval class; the texts name
-// the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
 // informOwner sends the broker's fixed-wording notices (owner.Inform)
 // once the owner channel is up.
 func informOwner(own func() *owner.Channel) func(string) error {
@@ -1280,22 +1143,6 @@ func informOwner(own func() *owner.Channel) func(string) error {
 		}
 		return errors.New("no owner channel")
 	}
-}
-
-func recallNotify(own func() *owner.Channel) func(string) error {
-	return func(text string) error {
-		if ch := own(); ch != nil {
-			return ch.NotifyAs(owner.ClassApproval, text)
-		}
-		return errors.New("no owner channel")
-	}
-}
-
-// recallHeldDropped tells the owner how many held agent texts a recall
-// reset with no confirmation of its own dropped, through the same sender
-// as a reply routed across a deletion (CAP3-F1).
-func recallHeldDropped(own func() *owner.Channel) func(int) error {
-	return func(n int) error { return tellHeldDropped(own(), n) }
 }
 
 // ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,

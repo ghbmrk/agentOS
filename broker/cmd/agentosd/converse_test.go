@@ -175,8 +175,8 @@ func chatCode(t time.Time) string {
 }
 
 // REQ: CH-15, OWN-4
-// HELP as agentosd sends it, with the learning line (on or off) and RENEW
-// wired as main wires them, fits one owner text uncut and names CHAT
+// HELP as agentosd sends it, with the old settings wired as main wires
+// them (RENEW is deleted, #2781, and HELP no longer names it), fits one owner text uncut and names CHAT
 // (combined F1 on #2390): a check on the pacing constant alone missed that
 // CHAT never reached the owner. Fit cuts every reply to control.MaxText, so
 // a length check cannot fail; the reply is whole only if it still ends with
@@ -184,8 +184,7 @@ func chatCode(t time.Time) string {
 func TestCH15HelpNamesChatUncut(t *testing.T) {
 	{
 		var dc daemon.Config
-		wireSettings(&dc, nil)
-		(&ownerRenew{now: time.Now}).wire(&dc)
+		wireSettings(&dc)
 		r := pacedOwner(t, ownerch.Pacing{}, at23)
 		ch, err := ownerch.New(ownerch.Config{
 			Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: &ownerch.MemStore{},
@@ -201,10 +200,13 @@ func TestCH15HelpNamesChatUncut(t *testing.T) {
 			t.Fatalf("HELP is not one whole text (cut at %d bytes): %q", control.MaxText, got)
 		}
 		for _, word := range []string{"STOP", "RESUME", "STATUS", "YES", "NO", "UNDO", "MORE", "NAME", "PUBLIC",
-			"RENEW", "QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
+			"QUIET", "TEXTS", "URGENT", "CHAT 30", "ACK 5"} {
 			if !strings.Contains(got[0], word) {
 				t.Fatalf("HELP (%d bytes) lacks %s: %q", len(got[0]), word, got[0])
 			}
+		}
+		if strings.Contains(got[0], "RENEW") || strings.Contains(got[0], "FORGET") {
+			t.Fatalf("HELP names a deleted setting: %q", got[0])
 		}
 	}
 }

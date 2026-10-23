@@ -320,9 +320,9 @@ func TestHeldNamesAreRecoverys(t *testing.T) {
 	if _, released, err := answerHeld(dir, "C"); err != nil || !released {
 		t.Fatalf("the fixture's right answer: %v %v", released, err)
 	}
-	got, err := readRestoredForgets(dir)
-	if err != nil || len(got) != 1 || got[0].Goal != heldCanary {
-		t.Fatalf("handed on %+v %v", got, err)
+	got, err := os.ReadFile(filepath.Join(dir, forgetLogFile))
+	if err != nil || !strings.Contains(string(got), heldCanary) {
+		t.Fatalf("handed on %q %v", got, err)
 	}
 }
 
