@@ -37,6 +37,11 @@ var exempt = map[string]string{
 	// reached only by the session bus's dbus-launch autolaunch and the
 	// darwin launchctl lookup, neither of which netjoin calls.
 	"github.com/godbus/dbus/v5": "session-bus autolaunch only (dbus-launch, launchctl); agentos-netjoin dials the system bus, D-108",
+	// STO-2b-1 (#2884): the unlock step starts no child. After dropping to
+	// the kernel's ids it replaces itself with the kernel main
+	// (syscall.Exec), with an explicit empty environment and only the
+	// key pipe on fd 3, so no root process lives on with the store key.
+	"cmd/agentos-unlock": "execs the kernel main in place after its privilege drop, empty environment (STO-2b-1)",
 }
 
 // launchers are the selectors, by import path, that start a process

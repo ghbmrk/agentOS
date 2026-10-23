@@ -40,14 +40,13 @@ import (
 const (
 	roleEnv   = "AGENTOS_UNLOCK_ROLE"
 	unlockEnv = "AGENTOS_UNLOCK_CFG"
-	kernelEnv = "AGENTOS_KERNEL_CFG"
 	asKernel  = "as-kernel" // the kernel main's argument from the unlock step
 )
 
 func TestMain(m *testing.M) {
 	role := os.Getenv(roleEnv)
-	if len(os.Args) == 2 && os.Args[1] == asKernel {
-		role = "kernel" // the unlock step exec'd this, with the unlock role's environment
+	if len(os.Args) == 3 && os.Args[1] == asKernel {
+		role = "kernel" // the unlock step exec'd this, with an empty environment
 	}
 	switch role {
 	case "":
@@ -62,7 +61,7 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	case "kernel":
 		var cfg run.MainConfig
-		if err := json.Unmarshal([]byte(os.Getenv(kernelEnv)), &cfg); err != nil {
+		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
@@ -85,13 +84,14 @@ func TestMain(m *testing.M) {
 // gives it.
 type unlockRole struct {
 	Store, TPM, Exec string
+	Kernel           string // the kernel's run.MainConfig, as JSON: its one argument after asKernel
 	UID, GID         int
 	PolicyKey        []byte // PKIX
 	Anchor           []byte
 }
 
 func (r unlockRole) Config() config {
-	return config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, args: []string{asKernel}}
+	return config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, args: []string{asKernel, r.Kernel}}
 }
 
 func (r unlockRole) pins(transport.TPM) (*ecdsa.PublicKey, []byte, error) {
@@ -211,12 +211,14 @@ func (r *rig) mainConfig() run.MainConfig {
 // boot runs the unlock step, which becomes the kernel process.
 func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	r.t.Helper()
-	u, err := json.Marshal(r.role(&r.policy.PublicKey, r.anchor))
-	must(r.t, err)
 	k, err := json.Marshal(r.mainConfig())
 	must(r.t, err)
+	role := r.role(&r.policy.PublicKey, r.anchor)
+	role.Kernel = string(k)
+	u, err := json.Marshal(role)
+	must(r.t, err)
 	cmd := exec.Command(r.bin, "-test.run=^$")
-	cmd.Env = append(os.Environ(), roleEnv+"=unlock", unlockEnv+"="+string(u), kernelEnv+"="+string(k))
+	cmd.Env = append(os.Environ(), roleEnv+"=unlock", unlockEnv+"="+string(u))
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	must(r.t, cmd.Start())
@@ -266,6 +268,11 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 			if strings.Contains(to, r.store) || strings.Contains(to, r.sw.Socket()) {
 				t.Errorf("the kernel process holds %s open", to)
 			}
+		}
+		env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", cmd.Process.Pid))
+		must(t, err)
+		if len(env) != 0 {
+			t.Errorf("the kernel process inherited an environment: %q", env)
 		}
 		st, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
 		must(t, err)

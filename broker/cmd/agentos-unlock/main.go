@@ -4,7 +4,7 @@
 // uid and gid and execs the kernel main, with the keys on an inherited pipe
 // (descriptor 3):
 //
-//	agentos-unlock -store /var/lib/agentos/store -uid 980 -gid 980 \
+//	agentos-unlock -store /var/lib/agentos-store/store -uid 980 -gid 980 \
 //	    -exec /usr/lib/agentos/agentos-kernel -- -log ... -owner-sock ...
 //
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
@@ -125,7 +125,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, errors.New("agentos-unlock: my store holds none of your hardware keys; set the box up again")
+		return nil, errors.New("agentos-unlock: my store holds none of your hardware keys; set me up again")
 	}
 	if k.Anchors, err = handoff.ParseAnchors(raw); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: your hardware keys in my store: %w", err)
@@ -164,8 +164,13 @@ func handOff(b []byte, c config) error {
 	if err := inherit(int(r.Fd()), handoff.KeyFD); err != nil {
 		return err
 	}
-	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), os.Environ())
+	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), kernelEnv)
 }
+
+// kernelEnv is the kernel process's whole environment. It reads no
+// variable, so nothing of the unlock step's environment, a root unit's,
+// reaches it (cmd/agentosd ASSUMPTIONS L7-2).
+var kernelEnv = []string{}
 
 // drop makes uid and gid this process's every id, with no supplementary
 // groups, and checks that root cannot be taken back. A step not running as
