@@ -95,7 +95,9 @@ func postURL(raw string) (*url.URL, bool) {
 		return nil, false
 	}
 	h := u.Hostname()
-	if _, err := netip.ParseAddr(h); err == nil || !hostName.MatchString(strings.ToLower(h)) {
+	// A name whose last label is all digits reads as an address somewhere.
+	last := h[strings.LastIndexByte(h, '.')+1:]
+	if _, err := netip.ParseAddr(h); err == nil || !hostName.MatchString(strings.ToLower(h)) || strings.Trim(last, "0123456789") == "" {
 		return nil, false
 	}
 	// The host VRB-2 aligned with the signing domain is the host posted to.
@@ -124,6 +126,8 @@ func (ps *Poster) Post(ctx context.Context, p Post) error {
 	for k, v := range p.Headers {
 		req.Header.Set(k, v)
 	}
+	// No User-Agent: the sender's endpoint learns nothing of the box.
+	req.Header["User-Agent"] = []string{""}
 	res, err := ps.client.Do(req)
 	if err != nil {
 		switch {

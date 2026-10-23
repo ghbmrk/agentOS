@@ -102,7 +102,7 @@ func TestPosterSendsOneClickToAPublicName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rg.hits != 1 || rg.got.Method != "POST" || rg.got.URL.RequestURI() != "/u?id=7" || rg.gotBody != "List-Unsubscribe=One-Click" ||
-		rg.got.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || rg.got.Host != "example.com" {
+		rg.got.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || rg.got.Host != "example.com" || rg.got.Header["User-Agent"] != nil {
 		t.Fatalf("hits %d request %+v body %q", rg.hits, rg.got, rg.gotBody)
 	}
 	// Pinned: one lookup, and the connect went to the checked literal.
@@ -138,6 +138,7 @@ func TestPosterRefusesBadURLShapes(t *testing.T) {
 		"https:///u",                                              // no host
 		"mailto:u@example.com",                                    // not https
 		"https://-example.com/u",                                  // not LDH
+		"https://1.2.3.04/u",                                      // an all-digit last label reads as an address
 		"https://example.com/" + string(make([]byte, postURLMax)), // too long (and NULs)
 	} {
 		wantNotDone(t, rg.poster.Post(context.Background(), onePost(u)), nBadURL)
@@ -208,7 +209,8 @@ func TestPosterSendsNothingWithoutAConnection(t *testing.T) {
 	}
 }
 
-// The live mailbox posts through the store's own address policy.
+// The live mailbox posts only once WithPoster turns it on, and then through
+// the store's own address policy.
 func TestLivePostsThroughTheStoresPolicy(t *testing.T) {
 	res := &fakeResolver{answers: map[string][]netip.Addr{"shop.test": {netip.MustParseAddr("192.168.0.9")}}}
 	connects := 0
@@ -221,7 +223,13 @@ func TestLivePostsThroughTheStoresPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantNotDone(t, NewLive(st).Post(context.Background(), onePost("https://shop.test/u")), nEgress)
+	// NewLive alone keeps unsubscribes refused until the bounded save
+	// lands (#2841).
+	wantNotDone(t, NewLive(st).Post(context.Background(), onePost("https://shop.test/u")), nNoPoster)
+	if res.lookups != 0 {
+		t.Fatalf("lookups %d without a poster", res.lookups)
+	}
+	wantNotDone(t, NewLive(st).WithPoster().Post(context.Background(), onePost("https://shop.test/u")), nEgress)
 	if res.lookups != 1 || connects != 0 {
 		t.Fatalf("lookups %d connects %d", res.lookups, connects)
 	}
