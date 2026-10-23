@@ -815,7 +815,7 @@ func writeAtomic(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil { // durable:exempt broker/durable is old core (D-139); the file and its directory are synced here
+	if err := os.Rename(tmp, path); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is key material, not a lifecycle, and the file and directory are synced here
 		os.Remove(tmp)
 		return err
 	}
