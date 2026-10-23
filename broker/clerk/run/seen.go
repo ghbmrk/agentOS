@@ -166,10 +166,10 @@ func trouble(err error, mark inbox.Mark) (why, next string) {
 			"Set up the mail account again on my Wi-Fi page."
 	case errors.Is(err, inbox.ErrTooMuchReadMail):
 		// Every folder is read, Archive and Trash too, so only mail deleted
-		// for good frees room. Mail read recently is kept in the record for
-		// 90 days whether it is deleted or not (#2841), so old read mail is
-		// what frees room (inbox.ErrTooMuchReadMail, #2742 item 3c).
-		return "you have more read mail than I can keep track of", tooMuchNext + " " + again
+		// for good frees room, and only the mail the read names by arrival:
+		// the rest the record keeps for 90 days whether it is deleted or not
+		// (inbox.TooMuchReadMailError, #2841, #2891 UX finding 1).
+		return "you have more read mail than I can keep track of", tooMuchNext(err) + again
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
@@ -199,10 +199,30 @@ func tryAgain(mark inbox.Mark) string {
 	return "I'll try again when your mail changes, or tomorrow."
 }
 
-// tooMuchNext is the owner's step for too much read mail. It gives no
-// amount: past the bound the read keeps only what fits, so how far past is
-// not known.
-const tooMuchNext = "Delete some read mail for good, and delete it from your trash too. Delete mail you read long ago: I keep note of mail you read in the last 90 days even after it's deleted, so deleting that doesn't help yet. Moving or archiving mail doesn't help, since I read every folder."
+// tooMuchNext is the owner's step for too much read mail, followed by a
+// space: the read mail to delete, named by when it arrived (which the owner's
+// mail app shows), since deleting any other frees nothing yet; or, when no
+// deletion helps, that the next try should get through. A record too large
+// to read back names no step, since none the owner can take shrinks it.
+func tooMuchNext(err error) string {
+	var tm *inbox.TooMuchReadMailError
+	if !errors.As(err, &tm) {
+		return ""
+	}
+	if tm.Before.IsZero() {
+		return "I've noted the read mail I found, so my next try should get through. "
+	}
+	const keep = " for good, and delete it from your trash too. Deleting other read mail doesn't help yet, since I keep note of it for 90 days. Moving or archiving mail doesn't help, since I read every folder. "
+	date := func(t time.Time) string { return t.In(time.Local).Format("2 January 2006") }
+	switch from, to := date(tm.After), date(tm.Before); {
+	case tm.After.IsZero():
+		return "Delete the read mail that arrived on or before " + to + keep
+	case from == to:
+		return "Delete the read mail that arrived on " + to + keep
+	default:
+		return "Delete the read mail that arrived from " + from + " to " + to + keep
+	}
+}
 
 // forSide names the side of the account a sign-in failed on, for the
 // owner's text, or nothing when err does not say (#2698 item 32).

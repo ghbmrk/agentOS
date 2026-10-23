@@ -567,3 +567,65 @@ func TestAFullReadKeepsTheNewestReadMail(t *testing.T) {
 		t.Fatalf("a full read kept %v; want the recent entry and the newest read mail", froms)
 	}
 }
+
+// The step a full read gives works, during the warm-up and after it (#2891
+// UX finding 1): over a sweep of bounds, at each one where the read fails,
+// deleting every read mail that arrived from After to Before (nothing when
+// Before is zero) lets the next read pass, and during the warm-up that span
+// leaves out mail read long ago, which frees nothing then.
+func TestTheTooMuchReadMailStepWorks(t *testing.T) {
+	type mail struct {
+		id, from string
+		at       time.Time
+	}
+	old := mail{"<o@x.test>", "old@x.test", time.Date(2015, 3, 1, 9, 0, 0, 0, time.UTC)}
+	news := []mail{
+		{"<n1@x.test>", "new1@x.test", time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)},
+		{"<n2@x.test>", "new2@x.test", time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)},
+	}
+	defer func(n int) { openedMax = n }(openedMax)
+	for _, first := range []string{"2026-10-01", "2026-06-01"} { // in the warm-up at the failing read, and past it
+		failed := 0
+		for max := 1000; max <= 3000; max += 4 {
+			srv := imaptest.Start(t)
+			l := NewLive(liveStore(t, srv))
+			srv.DeliverAt("INBOX", old.at, rawMail(old.id, old.from, "Old"), `\Seen`)
+			openedMax = OpenedMax
+			_, log, err := l.Opened(context.Background(), first, SeenLog{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, m := range news {
+				srv.DeliverAt([]string{"INBOX", "Archive"}[i], m.at, rawMail(m.id, m.from, "New"), `\Seen`)
+			}
+			openedMax = max
+			const today = "2026-10-10"
+			_, kept, err := l.Opened(context.Background(), today, log)
+			var tm *TooMuchReadMailError
+			if err == nil || !errors.As(err, &tm) {
+				if err != nil && !errors.Is(err, ErrTooMuchReadMail) {
+					t.Fatal(err)
+				}
+				continue // fits, or the log alone does not: no read to give a step
+			}
+			failed++
+			if kept.Seen == nil {
+				kept = log
+			}
+			for i, m := range append([]mail{old}, news...) {
+				if !tm.Before.IsZero() && !m.at.After(tm.Before) && !m.at.Before(tm.After) {
+					srv.Remove([]string{"INBOX", "INBOX", "Archive"}[i], m.id)
+				}
+			}
+			if first == "2026-10-01" && !tm.Before.IsZero() && !old.at.Before(tm.After) {
+				t.Fatalf("bound %d: during the warm-up the step %v to %v takes in mail read long ago", max, tm.After, tm.Before)
+			}
+			if _, _, err := l.Opened(context.Background(), today, kept); err != nil {
+				t.Fatalf("first read %s, bound %d: after the step (delete read mail that arrived from %v to %v), the next read fails: %v", first, max, tm.After, tm.Before, err)
+			}
+		}
+		if failed == 0 {
+			t.Fatalf("first read %s: no bound in the sweep fails the read", first)
+		}
+	}
+}

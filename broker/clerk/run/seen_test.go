@@ -330,8 +330,24 @@ func TestTroubleIsToldInFixedWords(t *testing.T) {
 	// next step never sends the owner to archive or move it (#2742 item 3c;
 	// inbox's TestDeletingOldReadMailClearsTooMuchReadMail follows the
 	// advice through Opened).
-	if _, next := trouble(inbox.ErrTooMuchReadMail, nil); next != "Delete some read mail for good, and delete it from your trash too. Delete mail you read long ago: I keep note of mail you read in the last 90 days even after it's deleted, so deleting that doesn't help yet. Moving or archiving mail doesn't help, since I read every folder. I'll try again when your mail changes, or tomorrow." {
-		t.Errorf("too much read mail: next step %q", next)
+	// The step names the read mail to delete by when it arrived, as the read
+	// found it (inbox's TestTheTooMuchReadMailStepWorks applies it during the
+	// warm-up and after; #2891 UX finding 1), or says no step is needed.
+	local := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 12, 0, 0, 0, time.Local) }
+	const keep = " for good, and delete it from your trash too. Deleting other read mail doesn't help yet, since I keep note of it for 90 days. Moving or archiving mail doesn't help, since I read every folder. I'll try again when your mail changes, or tomorrow."
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&inbox.TooMuchReadMailError{After: local(2026, 10, 8), Before: local(2026, 10, 9)}, "Delete the read mail that arrived from 8 October 2026 to 9 October 2026" + keep},
+		{&inbox.TooMuchReadMailError{After: local(2026, 10, 9), Before: local(2026, 10, 9)}, "Delete the read mail that arrived on 9 October 2026" + keep},
+		{&inbox.TooMuchReadMailError{Before: local(2026, 6, 1)}, "Delete the read mail that arrived on or before 1 June 2026" + keep},
+		{&inbox.TooMuchReadMailError{}, "I've noted the read mail I found, so my next try should get through. I'll try again when your mail changes, or tomorrow."},
+		{inbox.ErrTooMuchReadMail, "I'll try again when your mail changes, or tomorrow."},
+	} {
+		if why, next := trouble(c.err, nil); why != "you have more read mail than I can keep track of" || next != c.want {
+			t.Errorf("too much read mail (%v): %q, next step %q; want %q", c.err, why, next, c.want)
+		}
 	}
 	if why, _ := trouble(&imapsmtp.LongHeaderError{Folder: strings.Repeat("f", 500)}, nil); len(why) > 300 {
 		t.Errorf("a long folder name is not cut: %d bytes", len(why))
