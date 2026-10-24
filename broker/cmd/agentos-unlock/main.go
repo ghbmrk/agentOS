@@ -8,19 +8,23 @@
 //	    -exec /usr/lib/agentos/agentos-kernel -- -log ... -owner-sock ...
 //
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
-// it before the exec, and the kernel gets only the log key, the head key and
-// the owner's anchors. The box's policy key and the store's anchor come
+// it before the exec, and the kernel gets only the log key, the head key,
+// the log anchor's counter and the owner's anchors on descriptor 3, and one
+// connection to the TPM on descriptor 4 for that counter (LOG-2, STO-1),
+// since the kernel's uid can open no TPM itself. The box's policy key and the store's anchor come
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
 package main
 
 import (
 	"crypto/ecdsa"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +37,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
 func main() {
@@ -102,7 +107,12 @@ func unlockAndExec(c config, pins pinSource) error {
 		return err
 	}
 	defer clear(b)
-	return handOff(b, c)
+	tpm, err := kernelTPM(c.tpm)
+	if err != nil {
+		return fmt.Errorf("agentos-unlock: the kernel's TPM connection: %w", err)
+	}
+	defer tpm.Close()
+	return handOff(b, tpm, c)
 }
 
 // unlock opens the store through this PC's tpm slot and returns the
@@ -140,7 +150,65 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if k.Anchors, err = handoff.ParseAnchors(raw); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: your hardware keys in my store: %w", err)
 	}
+	if k.Counter, err = counter(st); err != nil {
+		return nil, err
+	}
+	// seal.Unlock opened the tpm slot, which is sealed under this SRK's
+	// name, so this name is the PC's, not the drive's.
+	if k.Counter.SRK, err = tpmseal.Identity(t); err != nil {
+		return nil, err
+	}
 	return k.Marshal()
+}
+
+// counterRec is handoff.CounterEntry's value, as enrollment writes it.
+type counterRec struct {
+	Ref  json.RawMessage `json:"ref"`
+	Auth []byte          `json:"auth"`
+}
+
+// counter reads the log anchor's counter from the store. A store without
+// one was never enrolled whole: the kernel would have no anchor.
+func counter(st *seal.Store) (handoff.Counter, error) {
+	raw, ok, err := st.Get(handoff.CounterEntry)
+	if err != nil {
+		return handoff.Counter{}, err
+	}
+	if !ok {
+		return handoff.Counter{}, errors.New("agentos-unlock: my store holds no counter for my log; set me up again")
+	}
+	defer clear(raw)
+	var r counterRec
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store: %w", err)
+	}
+	ref, err := tpmseal.ParseCounterRef(r.Ref)
+	if err != nil || len(r.Auth) == 0 {
+		clear(r.Auth)
+		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store does not read")
+	}
+	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: r.Auth}, nil
+}
+
+// kernelTPM opens the kernel's own connection to the TPM at path: the
+// resource manager's device, or one stream to a software TPM's socket.
+func kernelTPM(path string) (*os.File, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		if fi.Mode()&os.ModeCharDevice == 0 {
+			return nil, fmt.Errorf("%s is no TPM", path)
+		}
+		return os.OpenFile(path, os.O_RDWR, 0)
+	}
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return conn.(*net.UnixConn).File()
 }
 
 // openTPM opens the TPM at path: the kernel's resource manager on the box,
@@ -153,9 +221,10 @@ func openTPM(path string) (transport.TPMCloser, error) {
 }
 
 // handOff writes b to a pipe, drops to the kernel's ids and execs the
-// kernel main with the pipe's read end as handoff.KeyFD. b is far below a
-// pipe's buffer, so the write completes with no reader yet.
-func handOff(b []byte, c config) error {
+// kernel main with the pipe's read end as handoff.KeyFD and tpm as
+// handoff.TPMFD. b is far below a pipe's buffer, so the write completes with
+// no reader yet.
+func handOff(b []byte, tpm *os.File, c config) error {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -175,7 +244,7 @@ func handOff(b []byte, c config) error {
 	if err := dropTo(c.uid, c.gid); err != nil {
 		return err
 	}
-	if err := inherit(int(r.Fd()), handoff.KeyFD); err != nil {
+	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(tpm.Fd()): handoff.TPMFD}); err != nil {
 		return err
 	}
 	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), kernelEnv)
@@ -275,15 +344,22 @@ func getres(trap uintptr) (r, e, s int) {
 	return int(a), int(b), int(c)
 }
 
-// inherit makes fd survive the exec as want; every other descriptor Go
-// opened is close-on-exec.
-func inherit(fd, want int) error {
-	if fd == want {
-		_, _, e := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, 0)
+// inherit makes each descriptor survive the exec as the number it maps to;
+// every other descriptor Go opened is close-on-exec. Each is first copied
+// above every target, so moving one never overwrites another still to move.
+func inherit(fds map[int]int) error {
+	high := map[int]int{}
+	for fd, want := range fds {
+		h, _, e := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 16)
 		if e != 0 {
 			return e
 		}
-		return nil
+		high[int(h)] = want
 	}
-	return syscall.Dup3(fd, want, 0)
+	for h, want := range high {
+		if err := syscall.Dup3(h, want, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
