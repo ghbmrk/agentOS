@@ -573,6 +573,7 @@ func TestParse(t *testing.T) {
 		{"-state", "s", "-rotate"},
 		{"-state", "/s", "-rotate", "-delete"},
 		append(append([]string{}, good...), "-pcrs", "24"),
+		append(append([]string{}, good...), "-pcrs", "16,23"), // nothing the unlock step can cap (#2977)
 	} {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
@@ -644,7 +645,11 @@ func TestRotateCutAfterEachTPMCommand(t *testing.T) {
 func tpmPCRs(st *seal.Store) [][]uint {
 	for _, sl := range st.Slots() {
 		if sl.Kind == seal.KindTPM {
-			return sl.PCRs
+			var out [][]uint
+			for _, p := range sl.Policies {
+				out = append(out, p.PCRs)
+			}
+			return out
 		}
 	}
 	return nil
@@ -682,6 +687,47 @@ func TestRotateKeepsTheEnrolledPCRs(t *testing.T) {
 	noErr(t, rotate(c, b.sw.TPM()))
 	if got := tpmPCRs(b.enrolled()); len(got) != 1 || !slices.Equal(got[0], testPCRs) {
 		t.Fatalf("the new slot's selections are %v, want [%v]", got, testPCRs)
+	}
+}
+
+// #2977: a rotation on a running box, after the unlock step capped the
+// slot's boot path, re-signs the slot's boot paths instead of reading the
+// capped PCRs, so the next boot unlocks under the new key, on the enrolled
+// boot path and on one an update approved (the A/B update of T6). The
+// capped slot opens nothing, so it opens the store by the passphrase.
+func TestRotateAfterTheCapOpensOnTheNextBoot(t *testing.T) {
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	old := b.who()
+	st := b.enrolled()
+	var slot string
+	var pols []tpmseal.Policy
+	for _, sl := range st.Slots() {
+		if sl.Kind == seal.KindTPM {
+			slot, pols = sl.ID, sl.Policies
+		}
+	}
+	update := get(tpmseal.Sign(parseKey(t, st), testPCRs, [][]byte{swtpm.Predict("initrd-B"), swtpm.Predict("usrhash=bbbb quiet")}))
+	noErr(t, st.SetPolicies(slot, append(pols, update)))
+	st.Close()
+
+	noErr(t, tpmseal.Cap(b.sw.TPM(), [][]uint{testPCRs}))
+	// The capped slot opens nothing, so a rotation now needs the passphrase.
+	noPass := b.c
+	noPass.passphrase = ""
+	if err := rotate(noPass, b.sw.TPM()); !errors.Is(err, errCapped) {
+		t.Fatalf("after the cap, no passphrase: got %v, want errCapped", err)
+	}
+	noErr(t, rotate(b.c, b.sw.TPM()))
+	b.reboot()
+	if now := b.who(); now == nil || bytes.Equal(now, old) {
+		t.Fatal("the rotation did not move the pins to a new key")
+	}
+	b.sw.Reboot()
+	b.sw.Measure(9, "initrd-B")
+	b.sw.Measure(12, "usrhash=bbbb quiet")
+	if now := b.who(); now == nil || bytes.Equal(now, old) {
+		t.Fatal("the update's boot path does not unlock under the new key")
 	}
 }
 
