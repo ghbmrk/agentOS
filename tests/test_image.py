@@ -90,8 +90,14 @@ NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noex
 
 
 def noexec(root):
-    for rel in NOEXEC_FILES:
+    for rel in NOEXEC_FILES + MAIN_SIDE_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
+# The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
+# every agentos unit carries; the tree check refuses the units nodump() writes without them.
+MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
+                   "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
@@ -5703,7 +5709,8 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-hostapd", "agentos-localui", "agentos-modem", "agentos-netjoin"])
+        self.assertEqual(users, ["agentos-egress", "agentos-hostapd", "agentos-kernel", "agentos-localui", "agentos-model",
+                                 "agentos-modem", "agentos-netjoin", "agentos-owner"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem"),
                            (NETJOIN_UNIT, "agentos-netjoin")):
             s = ini(unit)["Service"]

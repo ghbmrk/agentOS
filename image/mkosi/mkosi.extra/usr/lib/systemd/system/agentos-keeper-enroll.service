@@ -1,0 +1,45 @@
+# Enrollment (STO-2c, cmd/agentos-enroll): the one-shot step on a trusted host that makes this box's
+# sealed store, its TPM pins and the log's counter anchor. It runs only while there is no store, and
+# only once setup has put the Owner Card's two factors in /run/agentos-setup (root-only files): the
+# store is never made with its tpm slot alone (#2905 open point 1). A rerun after a crash finishes or
+# redoes the attempt (ASSUMPTIONS STO-2c-a).
+[Unit]
+Description=agentOS enrollment
+ConditionPathExists=!/var/lib/agentos-store/store
+ConditionPathExists=/run/agentos-setup/passphrase
+ConditionPathExists=/run/agentos-setup/recovery
+After=local-fs.target systemd-sysusers.service
+Before=agentos-keeper-kernel.service
+
+[Service]
+Type=oneshot
+# The store's directory (root's), and the kernel's, which enrollment's anchor and the kernel's log
+# live in; the kernel's uid owns it, so the kernel can make its log there. tmpfiles.d makes both at
+# boot too, for the main side's mask (#2981).
+StateDirectory=agentos-store
+StateDirectoryMode=0700
+ExecStartPre=/usr/bin/install -d -m 0700 -o agentos-kernel -g agentos-kernel /var/lib/agentos-kernel
+ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state /var/lib/agentos-store \
+        -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log \
+        -kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel \
+        -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery
+# The factors are not kept once the store holds them (#2981); on a failure they stay for a retry.
+ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery
+StandardError=journal+console
+# The store key and the box's policy key live in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# The TPM is the keeper's (#2889 Security later 2): only its units may open the resource manager.
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+WantedBy=multi-user.target

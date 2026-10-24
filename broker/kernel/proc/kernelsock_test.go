@@ -1,4 +1,4 @@
-package run
+package proc
 
 // REQ: CLK-1, CLK-7, LOG-7, KRN-7
 
@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -152,12 +151,12 @@ func TestEachSocketServesOnlyItsSide(t *testing.T) {
 	}
 	before := b.entries()
 	for _, op := range []string{"stop", "issue", "resume", "status", "submit"} {
-		if err := meter.call(op, nil, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+		if err := meter.Call(op, nil, nil); err == nil || !strings.Contains(err.Error(), "no call") {
 			t.Fatalf("%s on the meter socket: %v, want refused", op, err)
 		}
 	}
 	for _, op := range []string{"meter", "hold", "readpool", "admitspend"} {
-		if err := owner.call(op, spendArgs{Plan: "p1", Amount: 1}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+		if err := owner.Call(op, spendArgs{Plan: "p1", Amount: 1}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
 			t.Fatalf("%s on the owner socket: %v, want refused", op, err)
 		}
 	}
@@ -182,99 +181,6 @@ func TestKernelSocketsCheckPeerUID(t *testing.T) {
 	}
 	if n := b.entries(); n != before {
 		t.Fatalf("calls refused by uid logged %d entries", n-before)
-	}
-}
-
-// fakeProvider answers every model call with 400 bytes, or err, and counts
-// them.
-type fakeProvider struct {
-	calls int
-	err   error
-}
-
-func (f *fakeProvider) Call(route, prompt string, maxOut int64) (string, model.Usage, error) {
-	f.calls++
-	return strings.Repeat("x", 400), model.Usage{}, f.err
-}
-
-// The model clerk runs apart from the kernel and meters through the meter
-// socket: a call is admitted against the plan's cap, its use lands in the
-// log on the kernel's clock whatever the clerk's says, and a call past the
-// cap is refused with the cap's code, which holds the plan, without reaching
-// the provider (LOG-7, #2572).
-func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
-	b := newBoxFor(t, filepath.Join(shortDir(t), "web.sock"), "model", key.Read)
-	root := key.Issue(ownerPriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
-	ky, err := key.ClerkKey(root, ownerPriv, holderPub, b.now, 1<<40, key.LimitSpendTask(100))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ky)), key.Approve(sparePriv, kernel.BatchHash(root, ky))}
-	p := kernel.SignPlan(kernel.Plan{ID: "t", Key: ky, Steps: []kernel.PlanStep{{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}}}, holderPriv)
-	if err := b.h.With(func(k *kernel.Kernel) error {
-		if err := k.Issue(b.now-kernel.GrantHold, cos, root, ky); err != nil {
-			return err
-		}
-		return k.Submit(b.now, p)
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	pr := &fakeProvider{}
-	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1_000_000, OutPerM: 1_000_000}}, Provider: pr,
-		Ledger: Meter{serveSide(t, b, MeterSide, os.Getuid())}}
-	sock := filepath.Join(shortDir(t), "model.sock")
-	ln, err := ListenModel(sock, os.Getuid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go ServeModel(ln, c, func() int64 { return 0 }) // a clerk clock far behind
-	m := Model{Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
-
-	start := time.Now().UnixMilli()
-	if reply, err := m.Call("t", "api", "hi", 50); err != nil || len(reply) != 400 {
-		t.Fatalf("a call within the cap: %d bytes, %v", len(reply), err)
-	}
-	var used kernel.Entry
-	b.h.With(func(k *kernel.Kernel) error {
-		for _, e := range k.Log().Entries() {
-			if e.Type == kernel.TModelUsed {
-				used = e
-			}
-		}
-		return nil
-	})
-	if used.Type == "" || used.At < start || !strings.Contains(string(used.Body), `"api"`) {
-		t.Fatalf("the metered use: %+v, want a model.used entry at the kernel's time (>= %d)", used, start)
-	}
-
-	_, err = m.Call("t", "api", "hi", 1000)
-	var rf *key.Refusal
-	if !errors.As(err, &rf) || rf.Code != key.RSpendTask {
-		t.Fatalf("a call past the cap: %v, want refusal %s", err, key.RSpendTask)
-	}
-	if pr.calls != 1 {
-		t.Fatalf("the provider saw %d calls, want 1", pr.calls)
-	}
-	b.h.With(func(k *kernel.Kernel) error {
-		if _, ok := k.State().SpendHeld["t"]; !ok {
-			t.Fatal("the plan past its cap is not held")
-		}
-		return nil
-	})
-}
-
-// A meter socket that cannot be reached admits nothing: the clerk refuses
-// the call as the broken log does, and the provider is never called.
-func TestModelClerkWithoutTheKernelCallsNothing(t *testing.T) {
-	pr := &fakeProvider{}
-	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1, OutPerM: 1}}, Provider: pr,
-		Ledger: Meter{Conn{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}}}
-	_, err := c.Call(0, "t", "api", "hi", 10)
-	var rf *key.Refusal
-	if !errors.As(err, &rf) || rf.Code != kernel.CBroken || pr.calls != 0 {
-		t.Fatalf("no kernel: %v with %d provider calls, want refusal %s and none", err, pr.calls, kernel.CBroken)
 	}
 }
 
@@ -331,45 +237,13 @@ func TestAKernelCallPastTheBoundIsNeverSent(t *testing.T) {
 	// sized is an argument whose call is n bytes with its newline.
 	b, _ := json.Marshal(kernelCall{"stop", mustRaw("")})
 	sized := func(n int) string { return strings.Repeat("a", n-len(b)-1) }
-	if err := c.call("stop", sized(maxCall+1), nil); !errors.Is(err, ErrTooLarge) || dials.Load() != 0 {
+	if err := c.Call("stop", sized(maxCall+1), nil); !errors.Is(err, ErrTooLarge) || dials.Load() != 0 {
 		t.Fatalf("a call one byte past the bound: %v after %d connections, want %v and none", err, dials.Load(), ErrTooLarge)
 	}
-	if err := c.call("stop", sized(maxCall), nil); errors.Is(err, ErrTooLarge) || dials.Load() != 1 {
+	if err := c.Call("stop", sized(maxCall), nil); errors.Is(err, ErrTooLarge) || dials.Load() != 1 {
 		t.Fatalf("a call at the bound: %v after %d connections, want it sent", err, dials.Load())
 	}
 }
-
-// A provider's own error, which can carry its URL or a key, never leaves the
-// model clerk's process: the planner sees ErrModelCall, while a refusal
-// still crosses with its code (CLK-1, #2717 Security 1).
-func TestAProviderErrorStaysInTheModelClerk(t *testing.T) {
-	const canary = "CANARY-SECRET-2717"
-	pr := &fakeProvider{err: errors.New("Post https://api.example.test/v1?key=" + canary + ": 401")}
-	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1, OutPerM: 1}}, Provider: pr, Ledger: admitAll{}}
-	sock := filepath.Join(shortDir(t), "model.sock")
-	ln, err := ListenModel(sock, os.Getuid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go ServeModel(ln, c, func() int64 { return 0 })
-	m := Model{Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
-	_, err = m.Call("t", "api", "hi", 10)
-	if !errors.Is(err, ErrModelCall) || strings.Contains(err.Error(), canary) || pr.calls != 1 {
-		t.Fatalf("a failed provider call: %v (%d calls), want %v without the canary", err, pr.calls, ErrModelCall)
-	}
-}
-
-// admitAll is a ledger that admits and records everything.
-type admitAll struct{}
-
-func (admitAll) AdmitSpend(_ int64, plan string, _ int64) (kernel.Admitted, *key.Refusal) {
-	return kernel.Admitted{Plan: plan}, nil
-}
-func (admitAll) Meter(int64, kernel.Admitted, string, int64, string) error { return nil }
-func (admitAll) Hold(int64, string, *key.Refusal) error                    { return nil }
-func (admitAll) AdmitPool(int64, string) *key.Refusal                      { return nil }
-func (admitAll) ReadPool(int64, string, int64, int64) error                { return nil }
 
 // failingOnce is a listener whose first accept fails as a process out of
 // descriptors does.
@@ -403,7 +277,7 @@ func TestAKernelSocketOutlivesAFailedAccept(t *testing.T) {
 	}
 }
 
-// A socket serves at most maxConns calls at once; the rest wait in the
+// A socket serves at most MaxConns calls at once; the rest wait in the
 // backlog and are served as slots free, so a side that floods its socket
 // holds a bounded number of the process's descriptors.
 func TestASocketServesABoundedNumberAtOnce(t *testing.T) {
@@ -416,7 +290,7 @@ func TestASocketServesABoundedNumberAtOnce(t *testing.T) {
 	var mu sync.Mutex
 	now, peak := 0, 0
 	release := make(chan struct{})
-	go serveConns(ln, maxConns, func(c net.Conn) {
+	go ServeConns(ln, MaxConns, func(c net.Conn) {
 		defer c.Close()
 		mu.Lock()
 		now++
@@ -428,7 +302,7 @@ func TestASocketServesABoundedNumberAtOnce(t *testing.T) {
 		mu.Unlock()
 	})
 	var conns []net.Conn
-	for range maxConns + 8 {
+	for range MaxConns + 8 {
 		c, err := net.Dial("unix", sock)
 		if err != nil {
 			t.Fatal(err)
@@ -443,8 +317,8 @@ func TestASocketServesABoundedNumberAtOnce(t *testing.T) {
 	for _, c := range conns {
 		c.Close()
 	}
-	if got != maxConns {
-		t.Fatalf("%d calls served at once, want %d", got, maxConns)
+	if got != MaxConns {
+		t.Fatalf("%d calls served at once, want %d", got, MaxConns)
 	}
 }
 
@@ -457,10 +331,10 @@ func TestNoErrorCrossesAsSuccess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		go serveConns(ln, 1, func(c net.Conn) {
-			serveOne(c, func(string, json.RawMessage) (json.RawMessage, error) { return nil, bad })
+		go ServeConns(ln, 1, func(c net.Conn) {
+			ServeOne(c, func(string, json.RawMessage) (json.RawMessage, error) { return nil, bad })
 		})
-		if err := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).call("x", nil, nil); err == nil {
+		if err := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).Call("x", nil, nil); err == nil {
 			t.Fatalf("%#v crossed as success", bad)
 		}
 		ln.Close()
@@ -485,10 +359,10 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		go serveConns(ln, 1, func(conn net.Conn) {
-			serveOne(conn, func(string, json.RawMessage) (json.RawMessage, error) { return nil, c.err })
+		go ServeConns(ln, 1, func(conn net.Conn) {
+			ServeOne(conn, func(string, json.RawMessage) (json.RawMessage, error) { return nil, c.err })
 		})
-		got := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).call("x", nil, nil)
+		got := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).Call("x", nil, nil)
 		ln.Close()
 		if got == nil || got.Error() != c.err.Error() {
 			t.Fatalf("%v crossed as %v", c.err, got)

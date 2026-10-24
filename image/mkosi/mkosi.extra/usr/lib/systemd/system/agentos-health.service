@@ -14,6 +14,11 @@ StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/
 ExecPaths=/usr
+# Block devices only, and the device mapper's control node for veritysetup: only the keeper's
+# units reach the TPM (#2889, STO-2c). Not char-misc, which holds /dev/tpm0 too.
+DevicePolicy=closed
+DeviceAllow=block-* r
+DeviceAllow=/dev/mapper/control rw
 
 [Install]
 RequiredBy=boot-complete.target

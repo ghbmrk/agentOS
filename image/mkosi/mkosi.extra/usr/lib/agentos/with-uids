@@ -1,7 +1,8 @@
 #!/bin/sh
-# Runs a command with each argument that is exactly @uid:NAME replaced by NAME's uid (#1249). The
-# units name their peers' users, which systemd-sysusers creates with uids chosen on the box, and the
-# Go commands take uids. A user that does not exist stops the start: a wrong uid would let the wrong
+# Runs a command with each argument that is exactly @uid:NAME replaced by NAME's uid (#1249), and
+# each @gid:NAME by NAME's primary gid (the keeper's unlock step drops to both, STO-2c). The units
+# name their peers' users, which systemd-sysusers creates with ids chosen on the box, and the Go
+# commands take ids. A user that does not exist stops the start: a wrong uid would let the wrong
 # peer onto a socket, and -1 would turn one off.
 set -eu
 n=$#
@@ -12,6 +13,9 @@ while [ "$n" -gt 0 ]; do
 	@uid:*)
 		u=$(id -u -- "${a#@uid:}" 2>/dev/null) || { echo "with-uids: no user ${a#@uid:}" >&2; exit 1; }
 		set -- "$@" "$u" ;;
+	@gid:*)
+		g=$(id -g -- "${a#@gid:}" 2>/dev/null) || { echo "with-uids: no user ${a#@gid:}" >&2; exit 1; }
+		set -- "$@" "$g" ;;
 	*) set -- "$@" "$a" ;;
 	esac
 	n=$((n - 1))

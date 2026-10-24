@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -290,7 +291,8 @@ func TestTrustedHostSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Slots(); len(got) != 2 || got[1].Kind != seal.KindTPM || got[1].Host != "Test PC" {
+	if got := s.Slots(); len(got) != 2 || got[1].Kind != seal.KindTPM || got[1].Host != "Test PC" ||
+		len(got[1].PCRs) != 1 || !slices.Equal(got[1].PCRs[0], pcrs) || got[0].PCRs != nil {
 		t.Fatalf("slots: %+v", got)
 	}
 

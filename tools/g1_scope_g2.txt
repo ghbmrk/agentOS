@@ -40,11 +40,10 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
-# #2957 (STO-2c-i): adds broker/cmd/agentos-enroll/, the sealed store's enrollment step,
-# which is in G2's scope but not yet on main. An allow line must name a path in the repo
-# (test_every_entry_exists), so this exempts it until it merges; then an allow line
-# replaces it, as #2896's did.
-exempt-pr 2957
+# #2990 (RELIC-1): deletes relics of superseded designs, some outside this list (pubid,
+# evals/review/ and two spikes). Mark: "If deletion is reversible then delete" (2026-10-24
+# 12:11Z, cmsg_01R91wiieBzMSvPKFsAJVvuKAFtTNWiK8ju7sC8gNLP4PA). Remove once it merges.
+exempt-pr 2990
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
@@ -98,11 +97,12 @@ allow broker/third_party/
 allow broker/vendor/
 
 # G2 binaries: G1's plus the key holder (SIM-split, CRED), the release signer (UPD-8, A14),
-# and the sealed store's kernel and unlock step (STO-2b-1, #2896).
+# and the sealed store's kernel, unlock and enrollment steps (STO-2b-1 #2896, STO-2c-i #2957).
 allow broker/cmd/agentos-ap/
 allow broker/cmd/agentos-checker/
 allow broker/cmd/agentos-clock-boot/
 allow broker/cmd/agentos-egress/
+allow broker/cmd/agentos-enroll/
 allow broker/cmd/agentos-guest-bridge/
 allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/

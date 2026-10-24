@@ -4,6 +4,7 @@ package clerk_test
 
 import (
 	"crypto/ed25519"
+	"math"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -172,6 +173,38 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 	g.now = 10 * 3600000
 	if res := g.mail.Do(u, g.view()); res.Outcome != "failed" || len(g.mail.Effects()) != 0 {
 		t.Fatal("an irreversible step that was never held must be refused")
+	}
+}
+
+// heldAt is the view with every step a test built held at at, as novel.
+type heldAt struct {
+	inFlight
+	at int64
+}
+
+func (v heldAt) Dispatched(r kernel.Request) (kernel.Dispatch, bool) {
+	d, ok := v.inFlight.Dispatched(r)
+	d.Held, d.HeldAt, d.Novel = true, v.at, true
+	return d, ok
+}
+
+// The clerk's own hold check saturates too: a hold near MaxInt64, which any
+// holder may narrow to, never wraps the due time to a time already past, so
+// a kernel that dispatches such a step still gets a refusal (KEY-8, #2952).
+func TestClerkHoldNearMaxInt64NeverWrapsToNow(t *testing.T) {
+	g := setup(t, key.Unsubscribe)
+	hpub, _ := gen(2)
+	for i, hold := range []key.Caveat{key.LimitHold(3600000, math.MaxInt64), key.LimitHold(0, math.MaxInt64)} {
+		d, err := key.Derive(g.root, hpubPriv(), hpub, hold)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u := g.request(string(rune('a'+i)), d, stepOf(key.Unsubscribe))
+		g.now = 10 * 3600000
+		res := g.mail.Do(u, heldAt{inFlight{g.k.State(), g.plans}, 1})
+		if res.Outcome != "failed" || len(g.mail.Effects()) != 0 {
+			t.Fatalf("hold %d: %+v, %d effects: the clerk ran a step under a hold near MaxInt64", i, res, len(g.mail.Effects()))
+		}
 	}
 }
 

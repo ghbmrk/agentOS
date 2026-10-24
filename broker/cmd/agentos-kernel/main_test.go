@@ -1,21 +1,26 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
-// REQ: CLK-1, LOG-2
+// REQ: CLK-1, LOG-2, KRN-2
 
 var good = []string{
-	"-log", "/var/lib/agentos-kernel/log",
+	"-log", "/var/lib/agentos-kernel/log", "-anchor-dir", "/var/lib/agentos-kernel/anchor",
 	"-owner-sock", "/run/agentos-kernel/owner.sock", "-owner-uid", "981",
 	"-meter-sock", "/run/agentos-kernel/meter.sock", "-meter-uid", "982",
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
@@ -39,7 +44,9 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 		append(slices.Clone(good), "-clerk", "web=/x,0"),
 		append(slices.Clone(good), "-owner-uid", "0"),
 		append(slices.Clone(good), "stray"),
+		append(slices.Clone(good), "-anchor-dir", "anchor"),
 		good[2:],
+		good[4:],
 	} {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
@@ -47,17 +54,53 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 	}
 }
 
-// LOG-2: with no anchor off the log's disk the kernel does not start, and
-// it takes no keys from the unlock step.
-func TestNoAnchorNoKernel(t *testing.T) {
+// LOG-2: with no TPM connection there is no counter to anchor the log,
+// and the kernel does not start: not on a closed descriptor, a file on the
+// drive or a pipe standing in for the TPM.
+func TestNoTPMNoKernel(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("as root the root refusal comes first (TestARefusedKernelLeavesTheKeysUnread)")
 	}
-	r := fullPipe(t)
-	if err := start(good, io.Discard, productionAnchor, r); !errors.Is(err, errNoAnchor) {
-		t.Fatalf("got %v, want errNoAnchor", err)
+	f, err := os.Create(filepath.Join(t.TempDir(), "tpm"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	unread(t, r)
+	defer f.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	for name, tpm := range map[string]*os.File{"none": nil, "file": f, "pipe": r} {
+		if err := start(good, io.Discard, anchor.Open, handoffPipe(t), tpm); !errors.Is(err, anchor.ErrNoTPM) {
+			t.Errorf("%s: got %v, want ErrNoTPM", name, err)
+		}
+	}
+}
+
+// handoffPipe is a pipe holding a whole hand-off, its writer closed.
+func handoffPipe(t *testing.T) *os.File {
+	t.Helper()
+	k := handoff.KernelKeys{
+		Head:    ed25519.NewKeyFromSeed(make([]byte, 32)),
+		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: []byte("a")},
+		Anchors: []ed25519.PublicKey{make([]byte, 32)},
+	}
+	b, err := k.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	if _, err := w.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	return r
 }
 
 // CLK-1: a kernel refused as root or as a peer's uid takes no key, so the
@@ -66,8 +109,8 @@ func TestARefusedKernelLeavesTheKeysUnread(t *testing.T) {
 	args := slices.Clone(good)
 	args[slices.Index(args, "-owner-uid")+1] = strconv.Itoa(os.Getuid())
 	r := fullPipe(t)
-	anchor := func() (kernel.Anchor, error) { return &kernel.MemAnchor{}, nil }
-	err := start(args, io.Discard, anchor, r)
+	anchor := func(string, handoff.KernelKeys, *os.File) (kernel.Anchor, error) { return &kernel.MemAnchor{}, nil }
+	err := start(args, io.Discard, anchor, r, nil)
 	if err == nil || !strings.Contains(err.Error(), "root") && !strings.Contains(err.Error(), "peer uid") {
 		t.Fatalf("got %v, want a root or peer-uid refusal", err)
 	}
@@ -96,5 +139,23 @@ func unread(t *testing.T, r *os.File) {
 	b, err := io.ReadAll(r)
 	if err != nil || len(b) != 600 {
 		t.Fatalf("the hand-off was read: %d bytes left, %v", len(b), err)
+	}
+}
+
+// KRN-2 (#2892): the kernel's process links no clerk's code, so no mail or
+// model parser is in it: of broker/clerk it links only the unlock step's
+// hand-off, and no IMAP library or the golang.org/x/net and x/text modules the
+// mail clerk brings (the standard library's vendored copies are its own).
+func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	const clerk = "github.com/ghbmrk/agentos/broker/clerk"
+	for _, p := range strings.Fields(string(out)) {
+		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" ||
+			strings.HasPrefix(p, "github.com/emersion/") || strings.HasPrefix(p, "golang.org/x/net/") || strings.HasPrefix(p, "golang.org/x/text/") {
+			t.Errorf("agentos-kernel links %s", p)
+		}
 	}
 }

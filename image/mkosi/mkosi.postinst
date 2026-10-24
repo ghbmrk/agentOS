@@ -1,8 +1,10 @@
 #!/bin/sh
-# Copy the image's package list out of the build tree for the known-vulnerability scan (SPEC
+# Purge the packages the box does not need and check nothing left links them (#2919, drop.py),
+# then copy the image's package list out of the build tree for the known-vulnerability scan (SPEC
 # EVL-5, #2886): dpkg's status file, which names each installed package's source package (the name
 # Debian's advisories use), and os-release, which names the Debian release. image.yml hands both
-# to `tools/vulncheck.py image`. Nothing in the tree changes, and neither file is in SHA256SUMS.
+# to `tools/vulncheck.py image`. Neither copied file is in SHA256SUMS.
 set -eu
+python3 "$SRCDIR/drop.py" "$BUILDROOT"
 cp "$BUILDROOT/var/lib/dpkg/status" "$OUTPUTDIR/agentos.dpkg-status"
 cp "$BUILDROOT/usr/lib/os-release" "$OUTPUTDIR/agentos.os-release"

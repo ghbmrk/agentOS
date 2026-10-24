@@ -180,7 +180,7 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
-                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
+                  "tools/g1_scope.py", "tools/g1_scope_g2.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
                   "tools/trusted_base.py", "tools/trusted_core.txt",
                   # #2438: this gate's own tests and the lens rules need the Security accept too.

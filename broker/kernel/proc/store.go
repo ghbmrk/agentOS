@@ -1,4 +1,4 @@
-package run
+package proc
 
 import (
 	"errors"
@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // FileStore is the log on disk: a kernel.Store whose Append returns only once
@@ -24,7 +25,7 @@ func OpenFileStore(path string) (*FileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := privateFile(f); err != nil {
+	if err := privfile.CheckFile(f); err != nil {
 		f.Close()
 		return nil, err
 	}

@@ -13,7 +13,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools")
 import word_budget  # noqa: E402
 
 DECISIONS = "| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n" \
-            "| D-7 | 2026-10-23 | active | more words | Mark |\n| D-8 | 2026-10-23 | superseded | x | Mark |\n"
+            "| D-7 | 2026-10-23 | active | more words for #42 | Mark |\n| D-8 | 2026-10-23 | superseded | x #42 | Mark |\n" \
+            "| D-9 | 2026-10-23 | active | words for #420 and #4 | Mark |\n"
 
 
 class CountTest(unittest.TestCase):
@@ -56,12 +57,18 @@ class CheckTest(unittest.TestCase):
         ok, _ = word_budget.check(self.base, {"spec": 10, "process": 51}, "", DECISIONS)
         self.assertFalse(ok)
 
-    def test_waiver_must_name_an_active_decision(self):
+    def test_waiver_must_name_an_active_decision_that_names_the_pr(self):
+        # #2945: an active row is not enough; it has to name this PR, so a standing row
+        # (D-152 itself, say) cannot waive an unrelated PR's growth.
         head = {"spec": 120, "process": 50}
-        self.assertTrue(word_budget.check(self.base, head, "Body.\nWord-budget: D-7\n", DECISIONS)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-8", DECISIONS)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-9", DECISIONS)[0])
-        self.assertFalse(word_budget.check(self.base, head, "See Word-budget: D-7 inline", DECISIONS)[0])
+        self.assertTrue(word_budget.check(self.base, head, "Body.\nWord-budget: D-7\n", DECISIONS, 42)[0])
+        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS, 43)[0])
+        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS)[0])
+        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-8", DECISIONS, 42)[0])
+        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-9", DECISIONS, 42)[0])
+        self.assertTrue(word_budget.check(self.base, head, "Word-budget: D-9", DECISIONS, 420)[0])
+        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-10", DECISIONS, 42)[0])
+        self.assertFalse(word_budget.check(self.base, head, "See Word-budget: D-7 inline", DECISIONS, 42)[0])
 
 
 class GitTest(unittest.TestCase):
@@ -79,15 +86,23 @@ class GitTest(unittest.TestCase):
             git("add", "-A")
             git("commit", "-qm", "base")
             (root / ".claude/skills/x/SKILL.md").write_text("c")
+            # The PR adds its own waiver row: it does not count, the base's rows do (#2945).
+            (root / "DECISIONS.md").write_text(DECISIONS + "| D-11 | 2026-10-24 | active | more words for #42 | Mark |\n")
             git("add", "-A")
             git("commit", "-qm", "head")
             tool = pathlib.Path(word_budget.__file__)
-            run = lambda *a: subprocess.run([sys.executable, "-I", str(tool), *a], cwd=d, capture_output=True, text=True)
+            env = lambda pr: {"PATH": "/usr/bin:/bin", **({"PR_NUMBER": pr} if pr else {})}
+            run = lambda *a, pr="42": subprocess.run([sys.executable, "-I", str(tool), *a], cwd=d, capture_output=True,
+                                                     text=True, env=env(pr))
             grew = run("--git", "HEAD~1", "HEAD")
             self.assertEqual(grew.returncode, 1, grew.stdout + grew.stderr)
             self.assertIn("process: 2 -> 3 words (+1)", grew.stdout)
             (root / "body.md").write_text("Word-budget: D-7\n")
             self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 0)
+            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md", pr="").returncode, 1)
+            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md", pr="43").returncode, 1)
+            (root / "body.md").write_text("Word-budget: D-11\n")
+            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 1)
             self.assertEqual(run("--git", "HEAD", "HEAD~1").returncode, 0)
 
     def test_the_workflow_counts_the_merge_not_a_stale_tip(self):
@@ -97,6 +112,7 @@ class GitTest(unittest.TestCase):
         wf = (pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/word-budget.yml").read_text()
         refs = re.search(r'word_budget\.py" --git (\S+) (\S+) ', wf).groups()
         self.assertEqual(refs, ("HEAD^1", "HEAD"))
+        self.assertIn("PR_NUMBER: ${{ github.event.pull_request.number }}", wf)
         tool = pathlib.Path(word_budget.__file__)
         for main_edit, branch_edit, want in (("a b c d", None, 0),        # main shrank, branch idle
                                              ("x " * 20, "e f g", 1)):    # main grew, branch grew

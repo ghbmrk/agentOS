@@ -15,6 +15,10 @@ StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/
 ExecPaths=/usr
+# Block devices only (sfdisk writes the drive's GUIDs): only the keeper's
+# units reach the TPM (#2889, STO-2c). Not char-misc, which holds /dev/tpm0 too.
+DevicePolicy=closed
+DeviceAllow=block-* rw
 
 [Install]
 WantedBy=multi-user.target

@@ -2,8 +2,8 @@ package main
 
 // The end-to-end test runs this test binary again in two roles. "unlock" is
 // this command with a test pin source; it execs the binary once more as
-// "kernel", which is cmd/agentos-kernel's body (run.RunKernel) with an
-// in-memory anchor, since no production anchor exists yet. Run as root, the
+// "kernel", which is cmd/agentos-kernel's body: its anchor (the TPM counter,
+// over the connection on handoff.TPMFD) and proc.RunKernel. Run as root, the
 // kernel drops to nobody, and every uid check is the real one.
 
 import (
@@ -28,9 +28,10 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
-	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -60,15 +61,19 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, unlockAndExec(r.Config(), r.pins))
 		os.Exit(2)
 	case "kernel":
-		var cfg run.MainConfig
+		var cfg kernelRole
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		keys, err := handoff.ReadKeys(os.NewFile(handoff.KeyFD, "keys"))
+		var a kernel.Anchor
+		if err == nil {
+			a, err = anchor.Open(cfg.AnchorDir, keys, os.NewFile(handoff.TPMFD, "tpm"))
+		}
 		if err == nil {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
-			err = run.RunKernel(ctx, cfg, keys, &kernel.MemAnchor{})
+			err = proc.RunKernel(ctx, cfg.Main, keys, a)
 			stop()
 		}
 		if err != nil {
@@ -80,11 +85,18 @@ func TestMain(m *testing.M) {
 	os.Exit(3)
 }
 
+// kernelRole is the kernel main's configuration: its one argument after
+// asKernel, as JSON.
+type kernelRole struct {
+	Main      proc.MainConfig
+	AnchorDir string
+}
+
 // unlockRole is the unlock step's command line, and the pins a test source
 // gives it.
 type unlockRole struct {
 	Store, TPM, Exec string
-	Kernel           string // the kernel's run.MainConfig, as JSON: its one argument after asKernel
+	Kernel           string // the kernel's kernelRole, as JSON: its one argument after asKernel
 	UID, GID         int
 	PolicyKey        []byte // PKIX
 	Anchor           []byte
@@ -134,19 +146,23 @@ func gen(seed byte) ed25519.PublicKey {
 
 var pcrs = []uint{9, 12}
 
-// rig is a box: a software TPM, a sealed store with a tpm slot and the
-// owner's anchors, and the ids the processes run as.
+// rig is a box as enrollment leaves it: a software TPM, a sealed store
+// with a tpm slot, the log's counter and the owner's anchors, the anchor's
+// head file, and the ids the processes run as.
 type rig struct {
 	t                  *testing.T
 	sw                 *swtpm.TPM
 	dir, store, bin    string
 	policy             *ecdsa.PrivateKey
+	recovery           []byte
 	anchor             []byte
 	kernelUID, kernelG int
 	ownerUID, meterUID int
 	keys               handoff.KernelKeys // what the store derives, read through its recovery slot
 }
 
+// newRig makes the box; putAnchors false leaves the owner's anchors out of
+// the store.
 func newRig(t *testing.T, putAnchors bool) *rig {
 	t.Helper()
 	r := &rig{t: t, sw: swtpm.Start(t)}
@@ -176,6 +192,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	rec := make([]byte, seal.RecoveryLen)
 	rec[0] = 1
+	r.recovery = rec
 	r.store = filepath.Join(dir, "store")
 	st, err := seal.Create(r.store, seal.Recovery{Key: rec})
 	must(t, err)
@@ -191,8 +208,33 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	r.keys.Head, err = st.HeadKey()
 	must(t, err)
+	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
+
+// enrollCounter defines the log's counter, records it in the store and
+// starts the anchor's head file, as agentos-enroll does (STO-2c).
+func (r *rig) enrollCounter(st *seal.Store) handoff.Counter {
+	t := r.t
+	srk, err := tpmseal.Identity(r.sw.TPM())
+	must(t, err)
+	auth := []byte("0123456789abcdef0123456789abcdef")
+	ref, err := tpmseal.DefineCounter(r.sw.TPM(), srk, st.ID(), auth)
+	must(t, err)
+	b, err := json.Marshal(map[string]any{"ref": json.RawMessage(ref.Marshal()), "auth": auth})
+	must(t, err)
+	must(t, st.Put(handoff.CounterEntry, b))
+	dir := r.anchorDir()
+	must(t, os.Mkdir(dir, 0o700))
+	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	must(t, proc.InitCounterAnchor(dir, r.mainConfig().Log, c, r.keys.Head))
+	for _, p := range []string{filepath.Join(dir, "anchor"), dir} {
+		must(t, os.Lchown(p, r.kernelUID, r.kernelG))
+	}
+	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: auth}
+}
+
+func (r *rig) anchorDir() string { return filepath.Join(r.dir, "k", "anchor") }
 
 func must(t *testing.T, err error) {
 	t.Helper()
@@ -221,8 +263,8 @@ func (r *rig) role(pk *ecdsa.PublicKey, anchor []byte) unlockRole {
 	return unlockRole{Store: r.store, TPM: r.sw.Socket(), Exec: r.bin, UID: r.kernelUID, GID: r.kernelG, PolicyKey: der, Anchor: anchor}
 }
 
-func (r *rig) mainConfig() run.MainConfig {
-	c := run.MainConfig{
+func (r *rig) mainConfig() proc.MainConfig {
+	c := proc.MainConfig{
 		Log:       filepath.Join(r.dir, "k", "log"),
 		OwnerSock: filepath.Join(r.dir, "k", "owner.sock"), OwnerUID: r.ownerUID,
 		MeterSock: filepath.Join(r.dir, "k", "meter.sock"), MeterUID: r.meterUID,
@@ -237,7 +279,7 @@ func (r *rig) mainConfig() run.MainConfig {
 // boot runs the unlock step, which becomes the kernel process.
 func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	r.t.Helper()
-	k, err := json.Marshal(r.mainConfig())
+	k, err := json.Marshal(kernelRole{Main: r.mainConfig(), AnchorDir: r.anchorDir()})
 	must(r.t, err)
 	role := r.role(&r.policy.PublicKey, r.anchor)
 	role.Kernel = string(k)
@@ -252,8 +294,8 @@ func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	return cmd, &out
 }
 
-func (r *rig) owner() run.Owner {
-	return run.Owner{Conn: run.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
+func (r *rig) owner() proc.Owner {
+	return proc.Owner{Conn: proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
 }
 
 // up waits for the owner socket to answer, as the kernel's uid.
@@ -269,6 +311,21 @@ func (r *rig) up(cmd *exec.Cmd, out *bytes.Buffer) {
 	}
 }
 
+// exited waits for a kernel that should refuse to start; one still running
+// after the wait fails the test.
+func (r *rig) exited(cmd *exec.Cmd) error {
+	r.t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second):
+		r.t.Fatal("the kernel started")
+		return nil
+	}
+}
+
 func (r *rig) shutdown(cmd *exec.Cmd, out *bytes.Buffer) {
 	r.t.Helper()
 	must(r.t, cmd.Process.Signal(syscall.SIGTERM))
@@ -277,11 +334,12 @@ func (r *rig) shutdown(cmd *exec.Cmd, out *bytes.Buffer) {
 	}
 }
 
-// STO-2, CLK-1, HW-5a: at boot the unlock step opens the store through
-// this PC's tpm slot and becomes the kernel process under the kernel's own
-// uid, which answers on the owner socket. The process holds neither the
-// store nor the TPM open, and a second boot reads the first boot's log, so
-// the log key it was handed is the store's.
+// STO-2, CLK-1, HW-5a, LOG-2: at boot the unlock step opens the store
+// through this PC's tpm slot and becomes the kernel process under the
+// kernel's own uid, which opens its counter anchor and answers on the owner
+// socket. The process holds the store open nowhere, and a second boot reads
+// the first boot's log and anchor, so the log key and counter it was handed
+// are the store's.
 func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	r := newRig(t, true)
 	cmd, out := r.boot()
@@ -328,15 +386,50 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	r.shutdown(cmd, out)
 }
 
+// LOG-2, STO-1: a drive rolled back, log and anchor together, to a copy
+// from an earlier boot starts no kernel, since the counter has moved past
+// it; the kernel says so and the copy is left as it was.
+func TestARolledBackDriveStartsNoKernel(t *testing.T) {
+	r := newRig(t, true)
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	files := []string{r.mainConfig().Log, filepath.Join(r.anchorDir(), "anchor")}
+	saved := map[string][]byte{}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		must(t, err)
+		saved[f] = b
+	}
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	must(t, r.owner().Stop())
+	r.shutdown(cmd, out)
+	for f, b := range saved {
+		must(t, os.WriteFile(f, b, 0o600))
+	}
+	cmd, out = r.boot()
+	if err := r.exited(cmd); err == nil || !strings.Contains(out.String(), proc.ErrAnchorRolledBack.Error()) {
+		t.Fatalf("the kernel started on a rolled-back drive: %v\n%s", err, out)
+	}
+	for f, b := range saved {
+		got, err := os.ReadFile(f)
+		must(t, err)
+		if !bytes.Equal(got, b) {
+			t.Errorf("the refused kernel changed %s", f)
+		}
+	}
+}
+
 // STO-2a-b: a log the store's key does not open is never a fresh box. The
 // kernel process refuses it, and the log is left as it was.
 func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	r := newRig(t, true)
-	other := run.KernelConfig{
+	other := proc.KernelConfig{
 		Log: r.mainConfig().Log, Anchor: &kernel.MemAnchor{}, Key: [32]byte{1},
 		Pub: r.keys.Head.Public().(ed25519.PublicKey), Sign: r.keys.Head, Anchors: []ed25519.PublicKey{gen(1), gen(2)},
 	}
-	h, err := run.OpenKernel(other, time.Now().UnixMilli())
+	h, err := proc.OpenKernel(other, time.Now().UnixMilli())
 	must(t, err)
 	must(t, h.With(func(k *kernel.Kernel) error { return k.Stop(time.Now().UnixMilli()) }))
 	h.Close()
@@ -345,7 +438,7 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	must(t, err)
 	cmd, out := r.boot()
 	err = cmd.Wait()
-	if err == nil || !strings.Contains(out.String(), run.ErrLogKey.Error()) {
+	if err == nil || !strings.Contains(out.String(), proc.ErrLogKey.Error()) {
 		t.Fatalf("the kernel took a log under another key: %v\n%s", err, out)
 	}
 	after, err := os.ReadFile(other.Log)
@@ -383,6 +476,22 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	bare := newRig(t, false)
 	if _, err := unlock(bare.role(&bare.policy.PublicKey, bare.anchor).Config(), bare.role(&bare.policy.PublicKey, bare.anchor).pins); err == nil || !strings.Contains(err.Error(), "hardware keys") {
 		t.Fatalf("no owner's anchors: got %v", err)
+	}
+
+	// LOG-2: a store with no counter, or one that does not read, hands
+	// the kernel nothing, so no kernel starts without its anchor.
+	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal()) + `}`)} {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		if v == nil {
+			must(t, st.Delete(handoff.CounterEntry))
+		} else {
+			must(t, st.Put(handoff.CounterEntry, v))
+		}
+		st.Close()
+		if _, err := unlock(c, r.role(&r.policy.PublicKey, r.anchor).pins); err == nil || !strings.Contains(err.Error(), "counter") {
+			t.Errorf("%s counter: got %v", name, err)
+		}
 	}
 }
 
@@ -427,7 +536,7 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
 	b, err := unlock(c, storePins(r.store))
 	must(t, err)
-	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Anchors: []ed25519.PublicKey{gen(1), gen(2)}}.Marshal()
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []ed25519.PublicKey{gen(1), gen(2)}}.Marshal()
 	must(t, err)
 	if !bytes.Equal(b, want) {
 		t.Fatal("the hand-off is not the store's keys")

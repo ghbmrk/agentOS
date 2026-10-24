@@ -1,7 +1,7 @@
 name: g1-freeze
 # Gate freeze (G1-freeze #1687, D-128): a PR that touches paths outside a gate list whose
-# freeze is on fails (G1: tools/g1_scope.txt, off since G1 passed; G2: tools/g1_scope_g2.txt,
-# until A4, A5, A9 and A14 pass on a VM), unless it was opened before that list's `since`
+# freeze is on fails (G2: tools/g1_scope_g2.txt, until A4, A5, A9 and A14 pass on a VM; G1's
+# list was deleted once G1 passed), unless it was opened before that list's `since`
 # time (and its timeline shows no reopen, force-push or retarget since then, #1717), is an
 # `exempt-pr` line, or changes only records. It runs on pull_request_target, so
 # the workflow file, tools/g1_scope.py and the lists are the BASE commit's: a PR cannot widen

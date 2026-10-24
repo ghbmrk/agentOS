@@ -19,7 +19,8 @@ through a step that is not root's or that anyone else can write; no link anywher
 reach into a directory anyone on the box can write (#1543). Every udev rules file, generator and
 modules-load.d file must be on exec.allow by its hash (#1556). And nothing writable may execute
 (UPD-10): every agentos service sets NoExecPaths=/ with ExecPaths= on /usr alone, and every fstab line
-and mount unit is noexec.
+and mount unit is noexec. The keeper (STO-2c, D-154): only its units reach the TPM or its state, and
+its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
@@ -309,7 +310,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + noexec_violations(root))
+            + noexec_violations(root) + keeper_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1178,7 +1179,7 @@ def ini_words(files, section, key):
             raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
         for s, k, v in lines:
             if (s, k) == (section, key):
-                val = v.split() if v else []
+                val = val + v.split() if v else []
     return val
 
 
@@ -1284,6 +1285,291 @@ def noexec_violations(root):
                 out.append("%s/%s: Options=%s does not end noexec (UPD-10)" % (d, n, opts or ""))
     return out
 
+
+
+# The keeper (STO-2c, D-154, #2905): enrollment, the unlock step and the kernel it becomes. Its units
+# are named KEEPER_PREFIX and listed here, and this list is the group's one place in the checks: a
+# later VM or board deployment (#2943) replaces it and leaves the main side's rules alone.
+KEEPER_PREFIX = "agentos-keeper-"
+KEEPER_SLICE = "agentos-keeper.slice"
+KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service")
+# The keeper's state: the sealed store, the kernel's log and anchor, and the Owner Card's factors that
+# setup leaves for enrollment. No main-side unit sees it; the image makes each at boot (tmpfiles.d).
+KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup")
+# Settings whose files the service manager opens as root and hands to the unit, past its mask and
+# DAC (#2981): each value's path, as the field after FIELD ':'s (None: the whole value), with a
+# prefix stripped.
+MANAGER_FILES = {"OpenFile": 0, "LoadCredential": 1, "LoadCredentialEncrypted": 1, "EnvironmentFile": None,
+                 "TTYPath": None}
+STD_FILES = ("file:", "append:", "truncate:")
+# The directories the manager makes and chowns for a unit, by setting, under these roots.
+MANAGER_DIRS = {"StateDirectory": "/var/lib", "RuntimeDirectory": "/run", "CacheDirectory": "/var/cache",
+                "LogsDirectory": "/var/log", "ConfigurationDirectory": "/etc"}
+# The bind settings, whose source is a view of the host's tree made in mount order, so a source
+# above the keeper's state can be bound before the mask is.
+BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
+# The units that run agentos-unlock and so open the log's counter anchor (#2899, #2897).
+UNLOCK_UNITS = ("agentos-keeper-kernel.service",)
+# Starts of an unlock unit in one boot: each spends two of the counter's increments (LOG-anchor-tpm-b).
+START_LIMIT_MAX = 5
+# The units that may open the TPM (#2889 Security later 2): the keeper's, and the old core's vault
+# process until it is deleted (D-139). Only through the resource manager.
+TPM_UNITS = KEEPER_UNITS + ("agentos-egress.service",)
+TPM_DEVICE = "/dev/tpmrm0"
+# Groups that can open a TPM node: tpm-udev's, and the resource manager's (60-agentos-tpm.rules).
+TPM_GROUPS = ("tss", "agentos-egress")
+# DeviceAllow= groups (/proc/devices) that hold a TPM node: tpm0 is also misc 10:224 (tpm-chip.c).
+TPM_DEVICE_GROUPS = ("tpm", "tpmrm", "misc")
+# Units whose commands may run with full privileges ("+"), outside the namespace and device policy:
+# the old core's vault process (its drive-id and egress-setup steps, image/ASSUMPTIONS.md I14).
+FULL_PRIVILEGE_EXEMPT = ("agentos-egress.service",)
+EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
+             "ExecStopPost")
+TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
+
+
+def unit_with_dropins(root, dirs, name):
+    """Unit NAME's file, the first in DIRS, then every drop-in systemd 257.13 applies to it (as
+    card_unit_violations reads them); None if no directory holds it."""
+    unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
+    if unit is None:
+        return None
+    typ = name.rsplit(".", 1)[1]
+    return [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+                               + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
+
+
+def ini_entries(files, section, key):
+    """Every value of SECTION.KEY across FILES in order, an empty one resetting the list: for
+    settings where each assignment adds one entry (DeviceAllow=, Exec*=). ValueError as ini_words."""
+    val = []
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        for s, k, v in lines:
+            if (s, k) == (section, key):
+                val = val + [v] if v else []
+    return val
+
+
+def ini_keys(files, section):
+    """Every key FILES set in SECTION. ValueError as ini_words."""
+    out = set()
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        out |= {k for s, k, _ in lines if s == section}
+    return out
+
+
+def tpm_spec(spec):
+    """Whether DeviceAllow= specifier SPEC can reach a TPM node: a /dev/tpm path, a /dev/char or
+    /dev/block path (by number, not modelled), or a char- group whose pattern (systemd matches it with
+    fnmatch against /proc/devices) matches one of TPM_DEVICE_GROUPS."""
+    if spec.startswith(("/dev/tpm", "/dev/char/", "/dev/block/")):
+        return True
+    if spec.startswith("char-"):
+        return any(fnmatch.fnmatchcase(g, spec[len("char-"):]) for g in TPM_DEVICE_GROUPS)
+    return False
+
+
+def under(path, roots):
+    """Whether PATH is one of ROOTS or below one."""
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+def keeper_reach(path, above=False):
+    """Whether absolute PATH is at or under a KEEPER_PATHS entry, takes a '..' step, or (ABOVE) is a
+    directory holding one."""
+    norm = "/" + "/".join(x for x in path.split("/") if x not in ("", "."))
+    return (".." in norm.split("/") or under(norm, KEEPER_PATHS)
+            or above and any(norm == "/" or under(k, (norm,)) for k in KEEPER_PATHS))
+
+
+def manager_paths(files):
+    """(key, value, path) for each path the service manager opens or makes as root for the unit FILES
+    describe (MANAGER_FILES, StandardInput=/StandardOutput=/StandardError= files, MANAGER_DIRS). A
+    relative LoadCredential= path is a credential store's, so not listed. ValueError as ini_words."""
+    out = []
+    for key, field in MANAGER_FILES.items():
+        for v in ini_entries(files, "Service", key):
+            p = v if field is None else (v.split(":") + [""] * field)[field]
+            out.append((key, v, p.lstrip("-")))
+    for key in ("StandardInput", "StandardOutput", "StandardError"):
+        v = ini_last(files, "Service", key) or ""
+        if v.startswith(STD_FILES):
+            out.append((key, v, v.split(":", 1)[1]))
+    for key, top in MANAGER_DIRS.items():
+        for w in ini_words(files, "Service", key):
+            out += [(key, w, top + "/" + d) for d in w.split(":")]
+    return [(k, v, p) for k, v, p in out if p.startswith("/") or any(c in p for c in "\"'%\\")
+            or k not in ("LoadCredential", "LoadCredentialEncrypted")]
+
+
+def keeper_violations(root):
+    """STO-2c (#2905, D-154): the keeper's units and the main side's.
+    - Keeper: every agentos-keeper-* service is in KEEPER_UNITS and in KEEPER_SLICE; no other unit is
+      in that slice (tests/test_image_keeper.py checks the image ships them). Every other agentos service but NOEXEC_EXEMPT ends with every KEEPER_PATHS entry
+      in InaccessiblePaths=, none with a "-", and mounts nothing over, under or from one of them, nor
+      binds one from above it. The service manager opens no file and makes no directory for it at,
+      under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981).
+    - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
+      only TPM_DEVICE under DevicePolicy=closed or strict; every other agentos service but
+      NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
+      in a TPM_GROUPS group, and no sysusers.d line puts a user in one. No command runs with full
+      privileges ("+" or PermissionsStartOnly=yes, outside the namespace and device policy) but
+      FULL_PRIVILEGE_EXEMPT's.
+    - #2899: an UNLOCK_UNITS unit is given no descriptor past 2 (no Sockets=, OpenFile=, descriptor
+      store, or .socket unit that starts it), sets NoNewPrivileges=yes and no AmbientCapabilities= or
+      SecureBits=.
+    - #2897: an UNLOCK_UNITS unit sets StartLimitBurst= (1 to START_LIMIT_MAX) and a non-zero
+      StartLimitIntervalSec= in [Unit], and no failure or start-limit action that reboots, which would
+      restart it on every boot."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    names, sockets = set(), []
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            if n.endswith(".socket"):
+                sockets.append(n)
+            # noexec_violations refuses a link or an instance as an agentos unit.
+            if NOEXEC_UNITS.match(n) and not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode) and (
+                    "@" not in n or n.endswith("@.service")):
+                names.add(n)
+    for name in sorted(names):
+        files = unit_with_dropins(root, dirs, name)
+        try:
+            out += keeper_unit_violations(name, files)
+        except ValueError as e:
+            out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
+    for n in sorted(set(sockets)):
+        files = unit_with_dropins(root, dirs, n)
+        svc = ini_last(files, "Socket", "Service") or n[:-len(".socket")] + ".service"
+        if svc.startswith("unreadable ") or svc in UNLOCK_UNITS or n[:-len(".socket")] + ".service" in UNLOCK_UNITS:
+            out.append("%s: starts %s with its sockets; nothing reaches the unlock step past descriptor 2 (#2899)"
+                       % (n, svc))
+    out += sysusers_tpm_violations(root)
+    return out
+
+
+def keeper_unit_violations(name, files):
+    """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins)."""
+    out = []
+    keeper = name in KEEPER_UNITS
+    if name.startswith(KEEPER_PREFIX) and not keeper:
+        out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
+    slice_ = ini_last(files, "Service", "Slice")
+    if keeper and slice_ != KEEPER_SLICE:
+        out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
+    if not keeper and slice_ == KEEPER_SLICE:
+        out.append("%s: in %s but not one of the keeper's units (D-154)" % (name, KEEPER_SLICE))
+    if not keeper and name not in NOEXEC_EXEMPT:
+        hidden = ini_paths(files, "Service", "InaccessiblePaths")
+        words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
+        for p in KEEPER_PATHS:
+            if p not in hidden:
+                out.append("%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
+                           % (name, p))
+            elif p not in words:
+                # #2981: systemd skips a "-" path missing when the unit starts, and the path may come later.
+                out.append("%s: InaccessiblePaths=-%s gives no mask while the path is missing; the image makes it "
+                           "at boot (D-154)" % (name, p))
+        # A mount's source, or a path whose access it changes, at or under the keeper's state; a bind's
+        # source above it too.
+        for key in NAMESPACE_MOUNTS + ("ReadOnlyPaths", "ExecPaths", "NoExecPaths"):
+            for w in ini_words(files, "Service", key):
+                if keeper_reach(w.lstrip("-+").split(":")[0], above=key in BIND_MOUNTS):
+                    out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, w))
+        # #2981: what the manager opens or makes as root for the unit, at, under or above it.
+        for key, v, p in manager_paths(files):
+            if any(c in p for c in "\"'%\\"):
+                out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
+            elif keeper_reach(p, above=True):
+                out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+    # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
+    start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
+    if start_only and name not in FULL_PRIVILEGE_EXEMPT:
+        out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
+                   "namespace (STO-2c)" % name)
+    for key in EXEC_KEYS:
+        for v in ini_entries(files, "Service", key):
+            prefix = re.match(r"[-@:+!|]*", v).group(0)
+            if "+" in prefix and name not in FULL_PRIVILEGE_EXEMPT:
+                out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
+                           % (name, key, v.split()[0]))
+    allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]
+    policy = ini_last(files, "Service", "DevicePolicy")
+    if name in TPM_UNITS:
+        for spec in allows:
+            if tpm_spec(spec) and spec != TPM_DEVICE:
+                out.append("%s: DeviceAllow=%s; a TPM unit opens only %s (#2889)" % (name, spec, TPM_DEVICE))
+        if policy not in ("closed", "strict"):
+            out.append("%s: DevicePolicy is %s; a TPM unit sets closed or strict (#2889)" % (name, policy))
+    else:
+        for spec in allows:
+            if tpm_spec(spec):
+                out.append("%s: DeviceAllow=%s reaches the TPM; only %s may (#2889)" % (name, spec, ", ".join(TPM_UNITS)))
+        private = (ini_last(files, "Service", "PrivateDevices") or "").lower() in TRUE_WORDS
+        if name not in NOEXEC_EXEMPT and not private and policy not in ("closed", "strict"):
+            out.append("%s: neither PrivateDevices=yes nor DevicePolicy=closed; only %s may reach the TPM (#2889)"
+                       % (name, ", ".join(TPM_UNITS)))
+        for key in ("User", "Group", "SupplementaryGroups"):
+            for g in ini_words(files, "Service", key):
+                if g in TPM_GROUPS:
+                    out.append("%s: %s=%s can open the TPM (#2889)" % (name, key, g))
+    if name in UNLOCK_UNITS:
+        for key in ("Sockets", "OpenFile", "FileDescriptorStoreMax", "AmbientCapabilities", "SecureBits"):
+            v = ini_entries(files, "Service", key)
+            if key == "FileDescriptorStoreMax":
+                v = [x for x in v if x != "0"]
+            if v:
+                out.append("%s: sets %s=%s; nothing reaches the unlock step past descriptor 2 and no privilege "
+                           "survives its drop (#2899)" % (name, key, v[-1]))
+        if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
+            out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
+        service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
+        if service_limits or "StartLimitInterval" in ini_keys(files, "Unit"):
+            out.append("%s: a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree "
+                       "check does not model it (#2897)" % name)
+        burst = ini_last(files, "Unit", "StartLimitBurst")
+        if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
+            out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
+                       % (name, burst, START_LIMIT_MAX))
+        interval = ini_last(files, "Unit", "StartLimitIntervalSec")
+        if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
+            out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
+                       % (name, interval))
+        for key in ("StartLimitAction", "FailureAction", "SuccessAction", "JobTimeoutAction"):
+            v = ini_last(files, "Unit", key)
+            if v not in (None, "none"):
+                out.append("%s: %s=%s; a reboot starts the unlock step again (#2897)" % (name, key, v))
+    return out
+
+
+def sysusers_tpm_violations(root):
+    """#2889: no sysusers.d line puts a user in a TPM_GROUPS group: an m line naming one, or a u line
+    whose ID gives one as its group (uid:group)."""
+    out = []
+    for f in conf_files(root, conf_paths("sysusers.d")):
+        try:
+            lines = f.content().decode("utf-8", "replace").splitlines()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes it (#2889)" % (f.rel, e.strerror))
+            continue
+        for n, ln in enumerate(lines, 1):
+            w = ln.split()
+            if not w or w[0].startswith("#"):
+                continue
+            if w[0].rstrip("!") == "m" and len(w) > 2 and w[2] in TPM_GROUPS:
+                out.append("%s:%d: puts %s in %s, which can open the TPM (#2889)" % (f.rel, n, w[1], w[2]))
+            if w[0].rstrip("!") == "u" and len(w) > 2 and ":" in w[2] and w[2].split(":", 1)[1] in TPM_GROUPS:
+                out.append("%s:%d: gives %s the group %s, which can open the TPM (#2889)"
+                           % (f.rel, n, w[1], w[2].split(":", 1)[1]))
+    return out
 
 def fstab_noexec_violations(root):
     """UPD-10: etc/fstab mounts nothing executable. It lists each of NOEXEC_FSTAB, and every line in it

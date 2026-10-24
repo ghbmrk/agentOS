@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"reflect"
 	"strings"
@@ -231,7 +232,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
-			if !d.Held || now < d.HeldAt+ver.Limits.Window(d.Novel) {
+			if !d.Held || now < ver.Limits.Due(d.HeldAt, d.Novel) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}
@@ -763,8 +764,9 @@ func (s *sim) pastHolds() int64 {
 				continue
 			}
 			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
-				due := p.Steps[i].HeldAt + v.Limits.Window(p.Steps[i].Novel)
-				ahead = max(ahead, due-s.now+60_000)
+				if due := v.Limits.Due(p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
+					ahead = max(ahead, due-s.now+60_000) // a step never due sets no jump
+				}
 			}
 		}
 	}
@@ -784,6 +786,17 @@ func (s *sim) widened(err error) error {
 
 func crashed(err error) bool {
 	return errors.Is(err, errCrash) || errors.Is(err, errFull) || errors.Is(err, kernel.ErrBroken)
+}
+
+// rederive checks that the live log, before a boot can drop its unconfirmed
+// tail, gives every decision in it again from the entries before it (KRN-1).
+// Each entry is in the log at some boot, so this sees every one; it runs only
+// there because it reverifies every plan.
+func (s *sim) rederive() error {
+	if _, err := kernel.Rederive(s.w.anchors, s.k.Log().Entries()); err != nil {
+		return fmt.Errorf("invariant: %w", err)
+	}
+	return nil
 }
 
 // check judges the run so far.
@@ -868,6 +881,9 @@ func Run(c Config) (*Result, error) {
 				return fail(err)
 			}
 			s.logf("crash")
+			if err := s.rederive(); err != nil {
+				return fail(err)
+			}
 			if err := s.boot(); err != nil {
 				return fail(err)
 			}
@@ -875,6 +891,9 @@ func Run(c Config) (*Result, error) {
 		if err := s.check(); err != nil {
 			return fail(err)
 		}
+	}
+	if err := s.rederive(); err != nil {
+		return fail(err)
 	}
 	if err := s.boot(); err != nil {
 		return fail(err)

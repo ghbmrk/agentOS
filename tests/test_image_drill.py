@@ -209,7 +209,9 @@ class DrillTest(unittest.TestCase):
     def test_ci_boot_runs_a_drill(self):
         sh = (ROOT / "image/ci_boot.sh").read_text()
         self.assertIn("systemctl start --no-block agentos-reboot.service", sh)
-        self.assertIn('UNTIL="agentos-drill: \\|agentos-health: FAIL"', sh)
+        # The pair runs on to the second boot's keeper line, which the boot report prints after the
+        # drill's line (STO-2c).
+        self.assertIn('UNTIL="agentos-keeper: enroll=skipped\\|agentos-keeper: enroll=failed\\|agentos-health: FAIL"', sh)
         for want in ('has "$W/console-reboot.log" "agentos-reboot: drill image=verified"',
                      'has "$W/console-reboot.log" "agentos-drill: pass image=verified clean_core_seconds="',
                      'hasnt "$W/console-reboot.log" "agentos-drill: FAIL"'):

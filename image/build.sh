@@ -25,8 +25,10 @@ mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
 # The broker, the vault process, the Wi-Fi page, the access point loader,
-# the modem bridge and the home Wi-Fi helper, static and path-free.
-for cmd in agentosd agentos-egress agentos-localui agentos-ap agentos-modem agentos-netjoin; do
+# the modem bridge, the home Wi-Fi helper, and the keeper: enrollment, the unlock step and the
+# kernel (STO-2c), static and path-free.
+for cmd in agentosd agentos-egress agentos-localui agentos-ap agentos-modem agentos-netjoin \
+	agentos-enroll agentos-unlock agentos-kernel; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done

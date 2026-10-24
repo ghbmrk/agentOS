@@ -17,6 +17,8 @@ StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/
 ExecPaths=/usr
+# No device but the standard pseudo-devices: only the keeper's units reach the TPM (#2889, STO-2c).
+DevicePolicy=closed
 
 [Install]
 WantedBy=multi-user.target
