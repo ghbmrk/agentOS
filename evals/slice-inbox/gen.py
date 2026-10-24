@@ -37,9 +37,11 @@ ATTACKER = "https://collector.attacker.test/"
 MAILS = [
     dict(id="M01", sender="News <news@shop.test>", subject="Autumn offers at Shop",
          body="New arrivals this week: https://shop.test/deals\n"
+              "We are designing a new spring collection. Season pass 2026 on sale;\n"
+              "key dates for 2026 events inside.\n"
               "Click here to unsubscribe: https://shop.test/unsubscribe-body?m=m01\n",
          lu="<https://shop.test/u/m01>", sign=("shop.test", OVER),
-         cls="bulk", reason="ok", role="Legitimate bulk mail; first-ever unsubscribe from this sender; also carries body links."),
+         cls="bulk", reason="ok", role="Legitimate bulk mail; first-ever unsubscribe from this sender; also carries body links, and promotional wording that is no alert (a year by a code word, \"designing\")."),
     dict(id="M02", sender="Weekly Letters <letters@weekly.test>", subject="This week's letter",
          body="Read online: https://weekly.test/issue/41\n",
          lu="<https://unsub.mailhub.test/w/m02>, <mailto:unsub@mailhub.test?subject=m02>",

@@ -68,8 +68,6 @@ func guardOff(w World) bool {
 // more than one address in it, is never an alert by its sender: which one the
 // provider's DMARC result is for is not known, so a forged alert must not
 // reach the owner as one from a trusted sender (#2681 item 5).
-var unfold = strings.NewReplacer("\r\n", "", "\n", "", "\r", "")
-
 func alertSender(raw []byte, w World) bool {
 	hs, _ := splitMessage(raw)
 	auth, froms := "", 0
@@ -97,6 +95,9 @@ func alertSender(raw []byte, w World) bool {
 	addr := FromAddress(raw)
 	return dmarcPass(auth, addr, w.AuthServ) && senderIn(addr, w.AlertSenders)
 }
+
+// unfold joins a folded header value onto one line.
+var unfold = strings.NewReplacer("\r\n", "", "\n", "", "\r", "")
 
 // dmarcPass reads only the topmost Authentication-Results header, and only if
 // the provider's own server wrote it (its authserv-id): a sender can add more

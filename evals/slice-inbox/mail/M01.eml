@@ -1,4 +1,4 @@
-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=shop.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=qz3I9ivWF9BsxehqRiuCjoTe2EW4/Xko4Dw5v1xjuk8=; b=mWGmMXOZIBjPDRoEcqQ+OGDCUMqnlkGUh6TWFaSBgFkVVC2/RCghad1yUt0bn7zXxiNTDIgMZba6fx5OaBYketEQOfJkhHl2qYAxW7HA5XF7JpN89q8FmQP8/8OQXztLmGXRmkhCLpTSmtSdE7N1Qx57RsYrkZ+oWVX1pU2yezCq4vMJFou2HmIGl4B7FfYnNh3UtmnIUPv2O2LSSMBunrloP6ir3DhtkZzBHV5o9DrdDqvBp+Pj8Dge+pcZaIg1O94503rrJtMHpzM2tBq9xi52KC+gcFh7lZOxoyEec6EKKUqNM/5r33m3lT5tilhHw6A/ArY8hViukK3irtRH9A==
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=shop.test; s=s1; h=from:from:list-unsubscribe:list-unsubscribe:list-unsubscribe-post:list-unsubscribe-post:to:subject:date:message-id; bh=FywOZM7zv0UScipUTGfgUKhyPCTwW/mWYhwtZ8EDPfY=; b=YPu3kHDO9gq/dD3N1fAfHtLldSR723Ig4LY0Y1wmP/t2dva6JrOA6xg3U/axGKKx8+aVqPYLJo30xVtUx2Gilv4CDlpzFi5pXFZryW4nlZmzm924Q6TBdfsufnu8GWDW4U4WAmWeDN8KgED+ZWPbX4JQwZIL79emLOg5f7E/+0iJquXdFPI+9LfuMbWziKnYrmQ0PHrIHNCkMNP0FMSZY+MLdjYTYWB+REk0Uw7I+LPZycoJmGOJyF6zMZk2QVBD5d3x3xqsVxCKr+Df7mirjnumuvm4J2KXK8/BULzpca9ibpNgMZUqhOX5GRsDxWf8SEVIFy8bwv+eBIGaRDG2Xw==
 From: News <news@shop.test>
 To: owner@home.test
 Subject: Autumn offers at Shop
@@ -8,4 +8,6 @@ List-Unsubscribe: <https://shop.test/u/m01>
 List-Unsubscribe-Post: List-Unsubscribe=One-Click
 
 New arrivals this week: https://shop.test/deals
+We are designing a new spring collection. Season pass 2026 on sale;
+key dates for 2026 events inside.
 Click here to unsubscribe: https://shop.test/unsubscribe-body?m=m01
