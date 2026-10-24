@@ -106,7 +106,8 @@ const (
 
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
 // verbs, content and labels; Arg for arg; N for a cap, an expiry (unix ms) or
-// a hold's base window (ms); M for a hold's novelty window (ms).
+// a hold's base window (ms); M for a hold's novelty window (ms), or 1 on a
+// day spend cap that counts the clerk's whole account (LowerSpendDay).
 type Caveat struct {
 	Kind string    `json:"kind"`
 	Set  []string  `json:"set"`
@@ -162,6 +163,11 @@ func LimitTask(id string) Caveat        { return Caveat{Kind: KTask, Set: []stri
 func LimitHold(baseMS, noveltyMS int64) Caveat {
 	return Caveat{Kind: KHold, N: baseMS, M: noveltyMS}
 }
+
+// LowerSpendDay caps the day spend of the clerk's whole account under the
+// root, where LimitSpendDay caps this key's own share: lowering a budget by
+// narrowing then holds the spend made earlier that day (#2838).
+func LowerSpendDay(n int64) Caveat { return Caveat{Kind: KSpendDay, N: n, M: 1} }
 
 // Cap is one counted limit and the chain prefix that set it. Counts are
 // charged to every prefix of a step's key, so a parent's cap limits all its
@@ -301,6 +307,9 @@ func (l *Limits) apply(c Caveat, scope ID) error {
 	case KSpendTask, KSpendDay, KRateDay, KRateRecipient, KUses:
 		if c.N < 0 {
 			return fmt.Errorf("%w: negative cap", ErrMalformed)
+		}
+		if c.M != 0 && (c.M != 1 || c.Kind != KSpendDay) {
+			return fmt.Errorf("%w: cap scope", ErrMalformed)
 		}
 		for _, o := range l.Caps {
 			if o.Kind == c.Kind && c.N > o.N {
@@ -645,7 +654,11 @@ func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 			v.account = scope
 		}
 		for _, c := range l.Caveats {
-			if err := v.Limits.apply(c, scope); err != nil {
+			s := scope
+			if c.Kind == KSpendDay && c.M == 1 {
+				s = v.account
+			}
+			if err := v.Limits.apply(c, s); err != nil {
 				return nil, err
 			}
 		}

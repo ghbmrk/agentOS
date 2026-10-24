@@ -118,9 +118,12 @@ func (s *Spare) SetCap(n int64) error {
 		return err
 	}
 	// The use cap is a nonce no loop reaches: derivation is deterministic,
-	// so without it a cap set again would derive a key already revoked.
+	// so without it a cap set again would derive a key already revoked. The
+	// day cap counts the whole account, so the day's earlier spend under
+	// every envelope and key counts toward it, and a key set at the same or
+	// a lower cap than a later one cannot add to the day (#2838).
 	cur, err := key.Derive(env, s.Holder, s.Holder.Public().(ed25519.PublicKey),
-		key.LimitSpendDay(n), key.LimitUses(math.MaxInt64-nonce.Int64()))
+		key.LowerSpendDay(n), key.LimitUses(math.MaxInt64-nonce.Int64()))
 	if err != nil {
 		return err
 	}

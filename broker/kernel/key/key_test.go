@@ -314,6 +314,36 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	}
 }
 
+// A lowered day cap counts the clerk's whole account, so lowering a budget
+// by narrowing holds the spend already made that day; a plain day cap counts
+// only its own link's share (#2838: 1000 of 1500 spent, lowered to 500).
+func TestLoweredDayCapCountsTheAccount(t *testing.T) {
+	o, h, k := root(t)
+	env, _ := Derive(k, h.priv, h.pub, LimitSpendDay(1500))
+	lowered, _ := Derive(env, h.priv, h.pub, LowerSpendDay(500))
+	share, _ := Derive(env, h.priv, h.pub, LimitSpendDay(500))
+	vl, vs := verified(t, lowered, o, h), verified(t, share, o, h)
+	account := vl.Scopes()[len(vl.Scopes())-1]
+	l := ledger{account: {{At: 900, Amount: 1000}}, vl.IDs[1]: {{At: 900, Amount: 1000}}, vl.IDs[2]: {{At: 900, Amount: 1000}}}
+	if r := vl.Spend("", 1, ctx(1000, l)); r == nil || r.Code != RSpendDay {
+		t.Fatalf("a lowered cap admitted spend past the day's earlier spend: %v", r)
+	}
+	if r := vs.Spend("", 500, ctx(1000, l)); r != nil {
+		t.Fatalf("a share's cap counted spend outside its link: %v", r)
+	}
+	if r := vl.Spend("", 1, ctx(900+DayMS, l)); r != nil {
+		t.Fatalf("the earlier spend did not leave the window: %v", r)
+	}
+	for _, bad := range []Caveat{{Kind: KSpendDay, N: 5, M: 2}, {Kind: KSpendTask, N: 5, M: 1}, {Kind: KUses, N: 5, M: 1}} {
+		if _, err := Derive(env, h.priv, h.pub, bad); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("%+v: %v", bad, err)
+		}
+	}
+	if _, err := Derive(lowered, h.priv, h.pub, LowerSpendDay(501)); !errors.Is(err, ErrLoosens) {
+		t.Fatalf("a lowered cap raised: %v", err)
+	}
+}
+
 // A sum past int64 exceeds every cap: a step or a ledger use near MaxInt64
 // must not wrap the window's sum below the cap (#2942 review, the keydiff
 // overflow probe). Each cap is tested on its own and refuses with its own

@@ -145,7 +145,9 @@ func TestLoweringTheSpareCapRevokesKeysHandedOutBefore(t *testing.T) {
 	ek, err := sp.EvalKey()
 	must(t, err)
 	lower(0, map[string]key.Key{"earlier key": sp.Key(), "evaluation key": ek})
-	if rf := k.Call(sp.Key(), one); rf == nil || rf.Code != key.RSpendDay {
+	// The day's spend is already past a zero cap, so the kernel rejects
+	// the plan itself (#2838).
+	if rf := k.Call(sp.Key(), one); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("current key past a zero cap: %v", rf)
 	}
 	// A raise takes nothing back, and a cap set again derives a fresh key,
@@ -175,5 +177,36 @@ func TestLoweringTheSpareCapNeedsTheOwnersRevocation(t *testing.T) {
 	must(t, sp.SetCap(5))
 	if rf := k.Spend(id, 1); rf == nil || rf.Code != key.RRevoked {
 		t.Fatalf("earlier key live after the retried lowering: %v", rf)
+	}
+}
+
+// The kernel holds a new cap to the day's earlier spend (#2838): after a
+// lowering, the spend made before it counts toward the new cap, and a cap
+// set twice gives no second key room past it.
+func TestTheSpareCapCountsTheDaysEarlierSpend(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	one := SpareCap(1, loopstest.OutPerM)
+	must(t, sp.SetCap(3*one))
+	for i := 0; i < 2; i++ {
+		if rf := k.Call(sp.Key(), one); rf != nil {
+			t.Fatal(rf)
+		}
+	}
+	must(t, sp.SetCap(2*one))
+	if rf := k.Call(sp.Key(), one); rf == nil || rf.Code != key.RSpendDay {
+		t.Fatalf("a call past the lowered cap, counting the day's earlier spend: %v", rf)
+	}
+	clk.add(time.Duration(key.DayMS) * time.Millisecond)
+	first := sp.Key()
+	must(t, sp.SetCap(2*one))
+	calls := 0
+	for _, ck := range []key.Key{first, sp.Key(), first, sp.Key()} {
+		if k.Call(ck, one) == nil {
+			calls++
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("%d calls under a 2-call cap set twice", calls)
 	}
 }
