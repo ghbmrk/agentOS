@@ -111,8 +111,8 @@ func NewSignIn(d SignInDeclaration, secrets *Secrets, roots *x509.CertPool) (*Si
 	if d.Guard == nil {
 		return nil, errors.New("clerk: a sign-in needs the home-network policy (DEV-2)")
 	}
-	for _, e := range []string{d.Auth, d.Token, d.Revoke} {
-		if e == d.Revoke && e == "" {
+	for i, e := range []string{d.Auth, d.Token, d.Revoke} {
+		if i == 2 && e == "" { // a provider without a revocation endpoint
 			continue
 		}
 		if u, err := url.Parse(e); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || strings.Contains(e, "#") {
@@ -143,7 +143,7 @@ var ownParams = []string{"response_type", "client_id", "redirect_uri", "scope", 
 
 func loopback(u *url.URL) bool {
 	h := u.Hostname()
-	return u.Scheme == "http" && (h == "127.0.0.1" || h == "[::1]" || h == "::1") && u.Port() != "" &&
+	return u.Scheme == "http" && (h == "127.0.0.1" || h == "::1") && u.Port() != "" &&
 		u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
@@ -270,10 +270,10 @@ type signInAnswer struct {
 func (s *SignIn) exchange(ctx context.Context, form url.Values) (signInAnswer, int) {
 	var t signInAnswer
 	status, body := s.post(ctx, s.d.Token, form)
+	defer clear(body)
 	if status/100 == 2 && json.Unmarshal(body, &t) != nil {
 		return signInAnswer{}, status
 	}
-	clear(body)
 	return t, status
 }
 

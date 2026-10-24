@@ -31,6 +31,8 @@ func TestNewSignInRefusesUnsafeDeclarations(t *testing.T) {
 		"http auth":        func(d *clerk.SignInDeclaration) { d.Auth = "http://example.com/auth" },
 		"query token":      func(d *clerk.SignInDeclaration) { d.Token += "?x=1" },
 		"http revoke":      func(d *clerk.SignInDeclaration) { d.Revoke = "http://example.com/revoke" },
+		"no auth":          func(d *clerk.SignInDeclaration) { d.Auth, d.Revoke = "", "" },
+		"no token":         func(d *clerk.SignInDeclaration) { d.Token, d.Revoke = "", "" },
 		"remote redirect":  func(d *clerk.SignInDeclaration) { d.Redirect = "http://example.com:8521/cb" },
 		"https redirect":   func(d *clerk.SignInDeclaration) { d.Redirect = "https://127.0.0.1:8521/cb" },
 		"no port":          func(d *clerk.SignInDeclaration) { d.Redirect = "http://127.0.0.1/cb" },
