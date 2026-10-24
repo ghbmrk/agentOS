@@ -727,6 +727,9 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if trash == "" {
 		return nNoTrash
 	}
+	if m.ref.Folder == trash {
+		return nil // an earlier trash moved it there and was confirmed
+	}
 	// Only a copy that arrives in the trash with this move confirms it: an
 	// older one with the same Message-ID would confirm a move that did not
 	// happen (#2665).
@@ -751,20 +754,25 @@ func (l *Live) Trash(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if !l.claim(there) {
+	if !l.claim(id, there) {
 		return errUnconfirmed
 	}
 	return nil
 }
 
-// claim marks the first of copies that no trash has claimed yet, and reports
-// whether there was one.
-func (l *Live) claim(copies []imapsmtp.Message) bool {
+// claim marks the first of copies that no trash has claimed yet as mail
+// id's, so a later step on the mail (an organize after its trash) acts on
+// the copy in the trash, and reports whether there was one.
+func (l *Live) claim(id string, copies []imapsmtp.Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, c := range copies {
 		if !l.claimed[c.Ref] {
 			l.claimed[c.Ref] = true
+			if m, ok := l.refs[id]; ok {
+				m.ref = c.Ref
+				l.refs[id] = m
+			}
 			return true
 		}
 	}

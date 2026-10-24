@@ -176,6 +176,17 @@ def quota_violations(img, table, entry):
     return out
 
 
+def noexec_violations(entry):
+    """UPD-10: the entry mounts root noexec. gpt-auto takes the last rootflags=, and of its exec,
+    noexec and defaults (which means exec) the last decides, as libmount applies them in order."""
+    flags = entry_args(entry, "rootflags")
+    last = None
+    for o in (flags[-1] if flags else "").split(","):
+        if o in ("exec", "noexec", "defaults"):
+            last = o
+    return [] if last == "noexec" else ["boot entry does not mount root with rootflags=...,noexec"]
+
+
 # HW-1 on the built disk, not only on the tree mkosi.finalize saw (IMG-1): every byte of the disk
 # outside /usr slot A (the partition table, the ESP, root and the empty slot B) holds no private key
 # and no Owner Card. Slot A is checked apart (slot_a_violations): its ranges equal the verified split
@@ -482,6 +493,9 @@ def main(out, version):
     bad = quota_violations(str(img), partition_table(str(img)), text)
     if bad:
         sys.exit("agent machines would have no disk quota (RES-4): %s" % bad)
+    bad = noexec_violations(text)
+    if bad:
+        sys.exit("code on the writable root could run (UPD-10): %s" % bad)
     bad = secret_violations(str(img), partition_table(str(img)))
     if bad:
         sys.exit("disk holds a private key or Owner Card outside /usr (HW-1): %s" % bad)

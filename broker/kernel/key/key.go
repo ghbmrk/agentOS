@@ -503,6 +503,31 @@ func Reach(k Key) []string {
 	return v.Limits.Verbs
 }
 
+// TaskOf is the task k serves, from its task caveat; "" for a key that serves
+// none or is malformed. It checks no signature (KRN-5).
+func TaskOf(k Key) string {
+	v, err := verifyChain(k, nil)
+	if err != nil {
+		return ""
+	}
+	return v.Limits.Task
+}
+
+// PlanPrefix starts the charge key of a plan whose key serves no task. The
+// planner names its plans, so no task id may start with it (the kernel opens
+// none that does): a plan named like a task is never charged as that task.
+const PlanPrefix = "\x00plan\x00"
+
+// ChargeTask is what a plan's steps and metered calls are charged under, the
+// task a per-task cap counts (LOG-7, KRN-5): the task k serves, so the cap
+// spans every re-plan of it, else the plan itself under PlanPrefix.
+func ChargeTask(k Key, plan string) string {
+	if t := TaskOf(k); t != "" {
+		return t
+	}
+	return PlanPrefix + plan
+}
+
 // Verified is a key whose chain has checked out.
 type Verified struct {
 	Key    Key

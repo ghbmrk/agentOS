@@ -77,6 +77,7 @@ const (
 	RSpendDay  = "spend-day"
 	RRate      = "rate"
 	RUses      = "uses"
+	RTask      = "task" // a step or a metered call for another task than the key's (KRN-5)
 )
 
 // Refusal is a closed reason code plus detail for the log.
@@ -136,6 +137,9 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	if s.Clerk != l.Clerk {
 		return refuse(RClerk, "key is for %s", l.Clerk)
 	}
+	if r := v.task(s.Task); r != nil {
+		return r
+	}
 	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)
 	}
@@ -173,6 +177,16 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	return v.caps(s, c, false)
 }
 
+// task refuses a use for another task than the one the key serves: a key
+// moves to no other task, so neither its steps nor its per-task cap can be
+// named for one (KRN-5).
+func (v *Verified) task(t string) *Refusal {
+	if l := v.Limits.Task; l != "" && t != l {
+		return refuse(RTask, "key is for task %s", l)
+	}
+	return nil
+}
+
 // caps checks every cap against the ledger as if s were charged now;
 // spendOnly skips the rate and use caps, which count steps, not metered usage.
 func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
@@ -184,15 +198,16 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 			continue
 		}
 		var n, sum int64
+		ok := true // false once sum leaves int64: it then exceeds every cap
 		for _, u := range c.Ledger.Uses(cp.Scope) {
 			switch cp.Kind {
 			case KSpendTask:
-				if u.Task == s.Task {
-					sum += u.Amount
+				if u.Task == s.Task && ok {
+					sum, ok = add(sum, u.Amount)
 				}
 			case KSpendDay:
-				if u.At > c.Now-DayMS {
-					sum += u.Amount
+				if u.At > c.Now-DayMS && ok {
+					sum, ok = add(sum, u.Amount)
 				}
 			case KRateDay:
 				if u.At > c.Now-DayMS {
@@ -206,13 +221,16 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 				n++
 			}
 		}
+		if ok {
+			sum, ok = add(sum, s.Amount)
+		}
 		switch cp.Kind {
 		case KSpendTask:
-			if sum+s.Amount > cp.N {
+			if !ok || sum > cp.N {
 				return refuse(RSpendTask, "cap %d", cp.N)
 			}
 		case KSpendDay:
-			if sum+s.Amount > cp.N {
+			if !ok || sum > cp.N {
 				return refuse(RSpendDay, "cap %d", cp.N)
 			}
 		case KRateDay, KRateRecipient:
@@ -228,14 +246,24 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 	return nil
 }
 
+// add is a+b and whether it stayed in int64. A spend sum that wrapped
+// would pass any cap, so caps refuse one that did not (Defect: KEY).
+func add(a, b int64) (int64, bool) {
+	s := a + b
+	return s, (s > a) == (b > 0)
+}
+
 // Spend is the check a metered call (a model call, a paid API call) makes
-// before it runs: the key is live and its spend caps hold for amount more
-// under task (LOG-7). Spend is authorized by the funding key's spend caveat,
-// whatever clerk the key was issued for, and a key with no spend cap funds
-// nothing. The kernel runs it in AdmitSpend, the check a clerk makes before a
+// before it runs: the key is live, serves task when it serves one, and its
+// spend caps hold for amount more under task (LOG-7, KRN-5). Spend is
+// authorized by the funding key's spend caveat, whatever clerk the key was
+// issued for, and a key with no spend cap funds nothing. The kernel runs it in AdmitSpend, the check a clerk makes before a
 // call; Meter records usage and does not run it.
 func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 	if r := v.Live(c); r != nil {
+		return r
+	}
+	if r := v.task(task); r != nil {
 		return r
 	}
 	if amount < 0 {

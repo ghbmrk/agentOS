@@ -165,6 +165,7 @@ class SecretScanTest(unittest.TestCase):
                                              swap_violations=lambda parts, text: [],
                                              partition_table=lambda img: {"partitions": []},
                                              quota_violations=lambda img, table, text: [],
+                                             noexec_violations=lambda text: [],
                                              secret_violations=secrets):
             with self.assertRaises(SystemExit) as e:
                 finish.main(d, "1.0")

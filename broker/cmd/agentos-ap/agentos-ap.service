@@ -105,6 +105,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
 # the only device beyond the pseudo-devices.
 DevicePolicy=closed
 DeviceAllow=/dev/rfkill rw
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target

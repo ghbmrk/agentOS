@@ -58,12 +58,12 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 
 # Gate files: a PR touching any of these also needs a separate Security accept (D-137, OPERATING §7).
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
-# broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); the tests that pin the merge gates count too
+# broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); tools/trusted_base.py and tools/trusted_core.txt are the trusted core's budget (KRN-2cap, #2935); the tests that pin the merge gates count too
 # (PREMERGE-paths, #1835), as do this gate's own tests and the lens rules, so a PR cannot weaken them on L3 alone (#2438). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace)\.py|tools/old_core\.txt|tools/(ci_scope|g1_scope)[^/]*|"
+                        r"tools/(risk_tier|premerge|trace|trusted_base)\.py|tools/(old_core|trusted_core)\.txt|tools/(ci_scope|g1_scope)[^/]*|"
                         r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
                         re.DOTALL)
 

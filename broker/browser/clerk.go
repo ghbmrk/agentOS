@@ -271,5 +271,5 @@ func step(r kernel.Request) key.Step {
 	if r.Index < 0 || r.Index >= len(r.Plan.Steps) {
 		return key.Step{}
 	}
-	return kernel.Normalize(r.Plan.ID, r.Plan.Steps[r.Index])
+	return kernel.Normalize(key.ChargeTask(r.Plan.Key, r.Plan.ID), r.Plan.Steps[r.Index])
 }

@@ -8,6 +8,16 @@
       "host": "auth.openai.com",
       "class": "optional",
       "dependency": "Codex CLI provider worker (CAP-11, optional per DEP-3): OpenAI's device sign-in page. The worker's CLI reaches it only through the egress sign-in route, and the owner opens it on their phone to enter the code (ONB-3 step 6, #1264)."
+    },
+    {
+      "host": "gmail.googleapis.com",
+      "class": "optional",
+      "dependency": "Gmail API (CLK-9, D-150; optional per DEP-3): the mail clerk's declared calls on the owner's Gmail account (broker/clerk/inbox/gmail.go, #2851). Only an owner who connects Gmail reaches it; IMAP and SMTP serve any other provider."
+    },
+    {
+      "host": "oauth2.googleapis.com",
+      "class": "optional",
+      "dependency": "Google's OAuth token endpoint (D-150; optional per DEP-3): the mail clerk redeems its sealed Gmail refresh grant there (broker/clerk/inbox/gmail.go, #2851). Only an owner who connects Gmail reaches it."
     }
   ],
   "claim_literals": [
