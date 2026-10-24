@@ -1,5 +1,5 @@
 //! Reads one case per line on stdin and writes one verdict per line, for the
-//! differential harness (broker/keydiff). A case is
+//! differential harness (broker/test/keydiff). A case is
 //! {"op": "chain"|"verify"|"authorize"|"spend", "key", "owners", "use", "sig",
 //! "step", "task", "amount", "ctx"}; a verdict is {"valid", "bad", "codes",
 //! "hold", "scopes"}.

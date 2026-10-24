@@ -1,6 +1,6 @@
 # keycheck: assumptions
 
-Built for KEY-diff (#2933), part 1 of change 2 in the ideal-backwards answer, which Mark approved. It covers `keycheck/` and `broker/keydiff/`. Each row is a reading a reviewer may want to change.
+Built for KEY-diff (#2933), part 1 of change 2 in the ideal-backwards answer, which Mark approved. It covers `assurance/keycheck/` and `broker/test/keydiff/`. Each row is a reading a reviewer may want to change.
 
 | ID | Assumption | Rests on | If wrong |
 |---|---|---|---|

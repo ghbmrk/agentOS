@@ -1,21 +1,21 @@
 name: keycheck
-# KEY-diff (#2933, SPEC §19 risk 32): keycheck/ is a second key check, in Rust, written from
-# SPEC KEY-1..KEY-8 rather than from broker/kernel/key. broker/keydiff builds keys, steps and
+# KEY-diff (#2933, SPEC §19 risk 32): assurance/keycheck/ is a second key check, in Rust, written from
+# SPEC KEY-1..KEY-8 rather than from broker/kernel/key. broker/test/keydiff builds keys, steps and
 # log views with the Go library and fails on any verdict the two disagree on. A PR runs a
 # fixed sweep plus a sweep from a seed no earlier run used; the daily run sweeps further.
 on:
   pull_request:
     paths:
-      - "keycheck/**"
-      - "broker/keydiff/**"
+      - "assurance/keycheck/**"
+      - "broker/test/keydiff/**"
       - "broker/kernel/key/**"
       - "broker/go.mod"
       - ".github/workflows/keycheck.yml"
   push:
     branches: [main]
     paths:
-      - "keycheck/**"
-      - "broker/keydiff/**"
+      - "assurance/keycheck/**"
+      - "broker/test/keydiff/**"
       - "broker/kernel/key/**"
       - "broker/go.mod"
       - ".github/workflows/keycheck.yml"
@@ -37,7 +37,7 @@ jobs:
           go-version: "1.26.10" # = broker/go.mod's toolchain line, as in ci.yml
           cache: false
       - name: keycheck builds, lints and passes its own tests
-        working-directory: keycheck
+        working-directory: assurance/keycheck
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
@@ -46,9 +46,9 @@ jobs:
       - name: The Go library and keycheck agree
         working-directory: broker
         env:
-          KEYCHECK: ${{ github.workspace }}/keycheck/target/release/keycheck
+          KEYCHECK: ${{ github.workspace }}/assurance/keycheck/target/release/keycheck
           CASES: ${{ github.event_name == 'schedule' && '400000' || '60000' }}
           RUN: ${{ github.run_id }}
         run: |
-          KEYDIFF_CASES=20000 go test -count=1 -run '^TestKeyDiff$' ./keydiff/
-          KEYDIFF_FROM=$(( (RUN % 100000) * 1000000 )) KEYDIFF_CASES=$CASES go test -count=1 -timeout 25m -run '^TestKeyDiff$' ./keydiff/
+          KEYDIFF_CASES=20000 go test -count=1 -run '^TestKeyDiff$' ./test/keydiff/
+          KEYDIFF_FROM=$(( (RUN % 100000) * 1000000 )) KEYDIFF_CASES=$CASES go test -count=1 -timeout 25m -run '^TestKeyDiff$' ./test/keydiff/
