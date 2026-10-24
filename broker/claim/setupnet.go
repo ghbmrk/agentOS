@@ -13,8 +13,9 @@ import (
 // Wi-Fi the phone joins before the Owner Card exists (§8.1 step 4,
 // CTRL-claim-ap). The seller flow writes it into the image root-owned
 // 0600 beside StatePath and prints it on the sticker; firstboot serves it
-// until the card is confirmed, then burns it.
-const SetupNetPath = "/var/lib/agentos/setup-net.json"
+// until the card is confirmed, then burns it. It is in the access point
+// loader's own directory (apnet.Dir, #2626); a test keeps the two equal.
+const SetupNetPath = "/var/lib/agentos/ap/setup-net.json"
 
 // SetupSSIDPrefix starts every setup network's name. The card's network
 // is "AgentOS-" and four symbols, so the two never look alike.

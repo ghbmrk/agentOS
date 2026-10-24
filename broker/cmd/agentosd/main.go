@@ -240,7 +240,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
-	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath string
+	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath, ownedPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -280,6 +280,7 @@ func main() {
 	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
 	flag.StringVar(&setupNetPath, "setup-net", defaultSetupNet, "a preloaded box's setup network (HW-10, #1692): the claim rotates its password here, root-only, for agentos-ap; empty, it is not rotated")
+	flag.StringVar(&ownedPath, "owned", apnet.Owned, "the owned marker (#2626): made once the owner's number is known, for agentos-ap, which cannot see the owner state; empty, it is not made")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -370,6 +371,11 @@ func main() {
 			log.Fatalf("%v; %v", held, err)
 		}
 		log.Print(held)
+		// The owner is known, so the loader stops serving setup while
+		// the restore is held.
+		if err := markOwned(ownedPath); err != nil {
+			log.Fatalf("owned marker: %v", err)
+		}
 		m := heldMode{Learn: learnDir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
 			Message: !modemBridge || ownerMessage, Logf: log.Printf}
 		if modemBridge {
@@ -435,6 +441,9 @@ func main() {
 			log.Fatal(err)
 		}
 		cfg.OwnerNumber = owner
+	}
+	if err := markOwned(ownedPath); err != nil {
+		log.Fatalf("owned marker: %v", err)
 	}
 
 	// RES-3: nothing below depends on what is found here. The local

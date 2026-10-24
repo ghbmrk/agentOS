@@ -8,14 +8,17 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/apnet"
+	"github.com/ghbmrk/agentos/broker/claim"
 )
 
 // REQ: ARC-1, DEV-net-h, CH-7, CRED-1
 
 // The loader runs as root, so its unit bounds what root keeps: the
 // network, firewall and child capabilities only (no CAP_DAC_OVERRIDE), a
-// read-only system but for agentosd's state (the burn) with the vault and
-// agentosd's other secrets hidden, no devices but the radio's rfkill, no
+// read-only system with agentosd's state absent but for the loader's own
+// directory (the burn) and the vault hidden, no devices but the radio's rfkill, no
 // kernel tunables (core_pattern would escape every sandbox), no core
 // dumps (the setup network's password), and the inbound drop in place
 // before it starts. hostapd parses frames from anyone in radio range.
@@ -36,11 +39,16 @@ func TestTheUnitIsBounded(t *testing.T) {
 	for k, want := range map[string][]string{
 		"Requires": {"agentos-inbound.service"},
 		// The secrets it hides exist before it starts (#1426).
-		"After":                  {"agentos-inbound.service agentos-egress.service agentosd.service"},
-		"CapabilityBoundingSet":  {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP"},
-		"NoNewPrivileges":        {"yes"},
-		"ProtectSystem":          {"strict"},
-		"ReadWritePaths":         {"/var/lib/agentos"},
+		"After":                 {"agentos-inbound.service agentos-egress.service agentosd.service"},
+		"CapabilityBoundingSet": {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP"},
+		"NoNewPrivileges":       {"yes"},
+		"ProtectSystem":         {"strict"},
+		// agentosd's state is absent but for the loader's own
+		// directory (#2626; TestOnlyTheLoadersDirectoryIsBound).
+		"TemporaryFileSystem":    {"/var/lib/agentos:ro"},
+		"BindPaths":              {apnet.Dir},
+		"ReadWritePaths":         nil,
+		"BindReadOnlyPaths":      nil,
 		"DevicePolicy":           {"closed"},
 		"DeviceAllow":            {"/dev/rfkill rw"},
 		"ProtectKernelTunables":  {"yes"},
@@ -62,15 +70,11 @@ func TestTheUnitIsBounded(t *testing.T) {
 	}
 	hidden := strings.Fields(strings.Join(set["InaccessiblePaths"], " "))
 	// The vault's sockets check only uid == broker uid, which is root in
-	// the shipped unit, so the loader must not reach them (#1628).
-	for _, p := range []string{"-/var/lib/agentos-egress", "-/var/lib/agentos/vault", "-/run/agentos-egress"} {
+	// the shipped unit, so the loader must not reach them (#1628). The
+	// vault under /var/lib/agentos is absent with the rest (#2626).
+	for _, p := range []string{"-/var/lib/agentos-egress", "-/run/agentos-egress"} {
 		if !slices.Contains(hidden, p) {
 			t.Errorf("InaccessiblePaths %q lacks %s", hidden, p)
-		}
-	}
-	for _, p := range hidden {
-		if strings.Contains(p, "owner.json") || strings.Contains(p, "setup-net") || strings.Contains(p, "ap-net") {
-			t.Errorf("hides %s, which the loader reads or burns", p)
 		}
 	}
 	if _, ok := set["User"]; ok {
@@ -114,66 +118,56 @@ func TestEgressKeepsTheMaskedDirectory(t *testing.T) {
 	}
 }
 
-// loaderState is what the loader reaches under /var/lib/agentos: the setup
-// network it reads and burns, the card's network it serves, and the owner
-// state whose presence ends setup.
-var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
+// loaderState is what the loader reaches under /var/lib/agentos, all in
+// its own directory (apnet.Dir): the setup network it reads and burns,
+// the card's network it serves, and agentosd's owned marker, whose
+// presence ends setup.
+var loaderState = []string{claim.SetupNetPath, apnet.Path, apnet.Owned}
 
-// maskedDirs are agentosd's state directories under /var/lib/agentos. A
-// mask on a directory survives agentosd's renames inside it, but only if
-// the directory existed at loader start: the "-" skips a missing one, and
-// agentosd makes most of them later (#2626). loop7 is no longer made
-// (#2787 deleted it), but an upgraded box keeps its tree, so it stays masked.
-// drill is not agentosd's: it holds the restore drill's record (#2932).
-var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7", "drill"}
+var statePath = regexp.MustCompile(`/var/lib/agentos(/[A-Za-z0-9._/-]*[A-Za-z0-9._-])?`)
 
-// lapsingFiles are agentosd's state files at the top of /var/lib/agentos.
-// The unit masks them, but a mask on a file lapses at agentosd's first
-// rewrite (temp file and rename detaches the mount on the old dentry), so
-// the loader reaches each one from then on. They stay exposed until
-// #2626 moves the loader's files into their own directory.
-var lapsingFiles = []string{"journal.log", "claim.json", "drive-id", "meter.json", "spare-meter.json", "kept-replies.json", "guest-inbox.json", "clock.json", "questions.json", "setup.json", "card-latch.json"}
-
-// joinedState is agentosd state under /var/lib/agentos whose name is
-// joined to the directory at run time (cmd/agentosd/questions.go), so a
-// literal path may not name it.
-var joinedState = []string{"questions.json", "clock.json"}
-
-var statePath = regexp.MustCompile(`/var/lib/agentos/([A-Za-z0-9._-]+)`)
-
-// Every state path under /var/lib/agentos that the broker's code or the
-// image names is either one of the three the loader needs, a directory in
-// maskedDirs (masked only if it existed at loader start), or a file in
-// lapsingFiles, whose mask holds only until agentosd first rewrites it
-// (#2626). This test does not show anything is hidden; it keeps a new
-// path from going unclassed, and
-// keeps the unit's masks and these lists the same.
-func TestAgentosdStateIsHidden(t *testing.T) {
+// The loader's namespace holds /var/lib/agentos as an empty read-only
+// tmpfs with only apnet.Dir bound in (#2626), so nothing agentosd keeps
+// there is reachable unless it is inside that directory. Every state
+// path under /var/lib/agentos that the broker's code or the image names
+// is outside apnet.Dir or one of the loader's three files: a new path
+// agentosd adds is hidden by default, and one put in the loader's
+// directory fails here. The unit's flags name the same three files.
+func TestOnlyTheLoadersDirectoryIsBound(t *testing.T) {
 	b, err := os.ReadFile("agentos-ap.service")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var masked []string
 	for _, l := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "InaccessiblePaths="); ok {
-			for _, p := range strings.Fields(v) {
-				if n, ok := strings.CutPrefix(p, "-/var/lib/agentos/"); ok {
-					masked = append(masked, n)
-				}
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "#") {
+			continue
+		}
+		k, v, _ := strings.Cut(l, "=")
+		for _, f := range strings.Fields(v) {
+			f = strings.TrimLeft(f, "-+")
+			if !strings.HasPrefix(f, "/var/lib/agentos/") && f != "/var/lib/agentos" {
+				continue
+			}
+			ok := k == "TemporaryFileSystem" && f == "/var/lib/agentos:ro" ||
+				k == "BindPaths" && f == apnet.Dir
+			if !ok {
+				t.Errorf("%s names %s; only apnet.Dir is bound in under /var/lib/agentos", k, f)
 			}
 		}
 	}
-	slices.Sort(masked)
-	want := slices.Concat(maskedDirs, lapsingFiles)
-	slices.Sort(want)
-	if !slices.Equal(masked, want) {
-		t.Errorf("the unit masks %q under /var/lib/agentos; maskedDirs and lapsingFiles list %q", masked, want)
+	for _, flag := range []string{"-ap-net " + apnet.Path} {
+		if !strings.Contains(string(b), flag) {
+			t.Errorf("ExecStart lacks %s", flag)
+		}
+	}
+	for _, p := range loaderState {
+		if filepath.Dir(p) != apnet.Dir {
+			t.Errorf("%s is not in the loader's directory %s", p, apnet.Dir)
+		}
 	}
 	named := map[string]string{}
-	for _, n := range joinedState {
-		named[n] = "joinedState"
-	}
-	for _, root := range []string{"../..", "../../../image/mkosi/mkosi.extra"} {
+	for _, root := range []string{"../..", "../../../image"} {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -184,15 +178,15 @@ func TestAgentosdStateIsHidden(t *testing.T) {
 				}
 				return nil
 			}
-			if strings.HasSuffix(p, "_test.go") || (root == "../.." && !strings.HasSuffix(p, ".go")) {
+			if strings.HasSuffix(p, "_test.go") || strings.HasSuffix(p, ".md") || (root == "../.." && !strings.HasSuffix(p, ".go")) {
 				return nil
 			}
 			src, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
-			for _, m := range statePath.FindAllSubmatch(src, -1) {
-				named[string(m[1])] = p
+			for _, m := range statePath.FindAll(src, -1) {
+				named[string(m)] = p
 			}
 			return nil
 		})
@@ -200,17 +194,12 @@ func TestAgentosdStateIsHidden(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(named) < len(joinedState)+len(loaderState) {
-		t.Fatalf("found only %d state paths; the walk is broken", len(named))
+	if _, ok := named[claim.SetupNetPath]; !ok {
+		t.Fatalf("the walk found no %s; it is broken", claim.SetupNetPath)
 	}
 	for n, where := range named {
-		if !slices.Contains(loaderState, n) && !slices.Contains(want, n) {
-			t.Errorf("/var/lib/agentos/%s (named in %s) is in none of loaderState, maskedDirs or lapsingFiles", n, where)
-		}
-	}
-	for _, n := range loaderState {
-		if _, ok := named[n]; !ok {
-			t.Errorf("loaderState lists %s, which nothing names", n)
+		if strings.HasPrefix(n, apnet.Dir+"/") && !slices.Contains(loaderState, n) {
+			t.Errorf("%s (named in %s) is in the loader's directory but is none of its files", n, where)
 		}
 	}
 }

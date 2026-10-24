@@ -270,7 +270,7 @@ class StaleLabelTest(unittest.TestCase):
 
 
 class IntakeProblemsTest(unittest.TestCase):
-    """CX-BOARD-INTAKE: one run names every malformed work-item issue, and still writes nothing."""
+    """CX-BOARD-INTAKE: one run names every malformed work-item issue; render --repo lists them on the board."""
 
     def malformed(self):
         a, b, c, d, e = (dict(i, author_association="OWNER") for i in issues()[:1] * 5)
@@ -302,16 +302,33 @@ class IntakeProblemsTest(unittest.TestCase):
         self.assertIn("issue #999: a second issue for A-1", text)
         self.assertIn("issue #998: ", text)
 
-    def test_render_and_check_print_all_and_write_nothing(self):
-        items = [dict(i, author_association="OWNER") for i in self.malformed()]
-        for command in ("render", "check"):
-            out, err = io.StringIO(), io.StringIO()
-            with redirect_stdout(out), redirect_stderr(err):
-                code = board.main([command, "--repo", "o/r"], read=lambda: BOARD + board.GENERATED + "\n",
-                                  fetch=github(items))
-            self.assertEqual((code, out.getvalue()), (1, ""), command)
-            lines = [x for x in err.getvalue().splitlines() if x.startswith("board: issue #")]
-            self.assertEqual(len(lines), 5, err.getvalue())
+    def test_render_lists_every_malformed_issue_on_the_board_and_still_renders(self):
+        # One malformed issue used to fail every board.yml run, so BOARD.md kept a stale copy
+        # (emptied by #2799) for two days; now the good rows render and the bad issues are named.
+        skeleton = BOARD + board.GENERATED + "\n"
+        items = opened(issues(skeleton)) + [dict(i, author_association="OWNER") for i in self.malformed()]
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = board.main(["render", "--repo", "o/r"], read=lambda: skeleton, fetch=github(items))
+        rendered = out.getvalue()
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertTrue(rendered.startswith(LIVE + board.GENERATED + "\n\n" + board.UNRENDERED + "\n"), rendered)
+        listed = rendered.split("```text\n")[1].split("```")[0].splitlines()
+        self.assertEqual([p.split(":")[0] for p in listed], [f"issue #{n}" for n in range(200, 205)])
+        self.assertEqual(len([x for x in err.getvalue().splitlines() if x.startswith("board: issue #")]), 5)
+        # Each render replaces the list: rendering the rendered board gives it back, and once
+        # the issues are fixed the list goes.
+        self.assertEqual(board.render(rendered, items, listed=True), rendered)
+        self.assertEqual(board.render(rendered, opened(issues(skeleton)), listed=True), LIVE + board.GENERATED + "\n")
+        # check --repo compares the committed file, list included, with the live issues; plain
+        # check and the strict render ignore the list.
+        for text, want in ((rendered, 0), (LIVE + board.GENERATED + "\n", 1)):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                code = board.main(["check", "--repo", "o/r"], read=lambda: text, fetch=github(items))
+            self.assertEqual(code, want)
+        self.assertEqual(board.live(rendered), LIVE + board.GENERATED + "\n")
+        with self.assertRaises(board.Malformed):
+            board.render(skeleton, items)
 
 
 class IntakeCommentTest(unittest.TestCase):
@@ -476,6 +493,15 @@ class CliTest(unittest.TestCase):
         for by in board.COLLABORATORS:
             code, out, _ = self.run_repo("render", text=BOARD, items=opened(issues()) + opened([dict(fake, number=999)], by))
             self.assertIn("| X-1 | Fake |", out, by)
+
+    def test_an_empty_issue_listing_is_refused_not_rendered(self):
+        # #2799: GitHub answered one board.yml run with no issues, and the empty board it
+        # rendered replaced every row on main.
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        for command in ("render", "check"):
+            code, out, err = self.run_repo(command, text=generated, items=[])
+            self.assertEqual((code, out), (1, ""), command)
+            self.assertIn("listed no open work-item issues", err)
 
     def test_check_repo_compares_a_generated_board_with_the_live_issues(self):
         generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
