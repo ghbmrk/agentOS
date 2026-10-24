@@ -34,7 +34,14 @@ DROP = {
     "tar": ("tar", "Essential, but nothing on the box runs it: build.sh and mkosi unpack on the build host"),
     "diffutils": ("diffutils", "Essential, but nothing on the box runs diff or cmp"),
     "perl-base": ("perl", "Essential, but only package maintainer scripts run perl, and the box runs no package manager"),
+    "libsqlite3-0": ("sqlite3", "only liblastlog2-2 links it"),
+    "liblastlog2-2": ("util-linux", "nothing on the box records or reads lastlog2's login database: there is no login"),
+    "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
+    "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
 }
+# Dropped packages whose source the box still runs other packages of, so the source's image
+# records stay (tests/test_image_drop.py).
+PARTIAL = ("liblastlog2-2",)
 # Essential packages: dpkg removes them only with --force-remove-essential, in a second call after
 # the rest, so no other package's removal script finds perl or diff already gone.
 ESSENTIAL = ("tar", "diffutils", "perl-base")
@@ -44,6 +51,7 @@ FILES = (
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-wwan.so",
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-wwan.so",
     "usr/bin/nmtui*",
+    "usr/bin/ss",
     # dpkg's daily database backup runs tar and cmp; the box's dpkg database never changes.
     "usr/lib/systemd/system/dpkg-db-backup.service",
     "usr/lib/systemd/system/dpkg-db-backup.timer",
