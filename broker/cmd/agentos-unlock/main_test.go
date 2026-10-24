@@ -361,8 +361,8 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 func TestTheUnlockStepFailsClosed(t *testing.T) {
 	r := newRig(t, true)
 	c := r.role(&r.policy.PublicKey, r.anchor).Config()
-	if err := unlockAndExec(c, noPins); !errors.Is(err, errNoPins) {
-		t.Fatalf("no pin source: got %v, want errNoPins", err)
+	if err := unlockAndExec(c, storePins(c.store)); !errors.Is(err, tpmseal.ErrNoPins) {
+		t.Fatalf("no pins on the TPM: got %v, want ErrNoPins", err)
 	}
 	wrong := bytes.Clone(r.anchor)
 	wrong[0] ^= 1
@@ -393,7 +393,7 @@ func TestTheDropRefusesRootAndChecksItTook(t *testing.T) {
 		if err := drop(ids[0], ids[1]); err == nil {
 			t.Errorf("drop to %v was allowed", ids)
 		}
-		if err := unlockAndExec(config{uid: ids[0], gid: ids[1]}, noPins); err == nil || errors.Is(err, errNoPins) {
+		if err := unlockAndExec(config{uid: ids[0], gid: ids[1]}, storePins("/nonexistent")); err == nil || errors.Is(err, os.ErrNotExist) {
 			t.Errorf("unlock for %v went as far as the pins: %v", ids, err)
 		}
 	}
@@ -411,6 +411,34 @@ func TestTheDropRefusesRootAndChecksItTook(t *testing.T) {
 		} else if err != nil {
 			t.Errorf("already the kernel's ids: %v", err)
 		}
+	}
+}
+
+// STO-2c: the production source reads the policy key and anchor that
+// enrollment pinned on this TPM, and unlocks with them; pins of another key
+// or anchor for the same store open nothing.
+func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
+	r := newRig(t, true)
+	c := r.role(&r.policy.PublicKey, r.anchor).Config()
+	id, err := seal.ReadID(r.store)
+	must(t, err)
+	srk, err := tpmseal.Identity(r.sw.TPM())
+	must(t, err)
+	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
+	b, err := unlock(c, storePins(r.store))
+	must(t, err)
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Anchors: []ed25519.PublicKey{gen(1), gen(2)}}.Marshal()
+	must(t, err)
+	if !bytes.Equal(b, want) {
+		t.Fatal("the hand-off is not the store's keys")
+	}
+
+	wrong := bytes.Clone(r.anchor)
+	wrong[0] ^= 1
+	must(t, tpmseal.FreePins(r.sw.TPM(), srk, id))
+	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: wrong}))
+	if _, err := unlock(c, storePins(r.store)); !errors.Is(err, seal.ErrTampered) {
+		t.Fatalf("pins with another anchor: got %v, want ErrTampered", err)
 	}
 }
 

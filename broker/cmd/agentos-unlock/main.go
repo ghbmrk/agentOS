@@ -9,9 +9,9 @@
 //
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
 // it before the exec, and the kernel gets only the log key, the head key and
-// the owner's anchors. The box's policy key and the store's anchor must come
-// from somewhere the drive's writer cannot change (STO-2a-k); until that
-// source lands (STO-pins, #2682) this step unlocks nothing.
+// the owner's anchors. The box's policy key and the store's anchor come
+// from the store's pins index on this PC's TPM, which enrollment wrote
+// (STO-2a-k, STO-2c), never from the drive.
 package main
 
 import (
@@ -39,7 +39,7 @@ func main() {
 	log.SetFlags(0)
 	c, err := parse(os.Args[1:], os.Stderr)
 	if err == nil {
-		err = unlockAndExec(c, noPins)
+		err = unlockAndExec(c, storePins(c.store))
 	}
 	log.Fatal(err)
 }
@@ -49,10 +49,17 @@ func main() {
 // an error unlocks nothing.
 type pinSource func(transport.TPM) (policyKey *ecdsa.PublicKey, anchor []byte, err error)
 
-var errNoPins = errors.New("agentos-unlock: no place off the drive holds my policy key and store anchor yet (STO-pins); I unlock nothing")
-
-// noPins is the production source until the TPM NV index lands.
-func noPins(transport.TPM) (*ecdsa.PublicKey, []byte, error) { return nil, nil, errNoPins }
+// storePins is the production source: the pins index on this TPM for the
+// store at path (seal.Pinned). No pins there unlocks nothing.
+func storePins(path string) pinSource {
+	return func(t transport.TPM) (*ecdsa.PublicKey, []byte, error) {
+		f, err := seal.Pinned(t, path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("agentos-unlock: my policy key and store anchor on this PC's TPM: %w", err)
+		}
+		return f.PolicyKey, f.Anchor, nil
+	}
+}
 
 type config struct {
 	store, tpm, exec string
