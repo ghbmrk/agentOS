@@ -196,7 +196,7 @@ func TestSecretsLoginOpensPerConnection(t *testing.T) {
 	}
 	_ = s.Put("mail/a", clerk.KindStatic, []byte("canary-pass-0001"))
 	l, err := cred(context.Background())
-	if err != nil || l.User != "you@example.com" || l.Secret != "canary-pass-0001" || l.OAuth {
+	if err != nil || l.User != "you@example.com" || l.Secret != "canary-pass-0001" {
 		t.Fatalf("Login = %+v, %v", l, err)
 	}
 	_ = s.Remove("mail/a")

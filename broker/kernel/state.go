@@ -169,7 +169,11 @@ func (p Plan) text() bool {
 }
 
 // Step is step i as the key is checked against it and the clerk sees it.
-func (p Plan) Step(i int) key.Step { return Normalize(p.ID, p.Steps[i]) }
+func (p Plan) Step(i int) key.Step { return Normalize(p.Task(), p.Steps[i]) }
+
+// Task is what the plan's steps and metered calls are charged under
+// (key.ChargeTask).
+func (p Plan) Task() string { return key.ChargeTask(p.Key, p.ID) }
 
 // Entry bodies.
 type (
@@ -454,19 +458,19 @@ func Shape(s key.Step) string {
 
 // Normalize is the one place a submitted step becomes the step the key is
 // checked against. The planner writes only arguments, and none of them counts
-// as owner or clerk sourced; the task is the plan, the recipient is the verb's object
+// as owner or clerk sourced; the task is task (Plan.Task, key.ChargeTask), the recipient is the verb's object
 // argument and the amount is the "amount" argument in its one canonical
 // spelling, any other (010, +10) unreadable and so negative, which Authorize
 // refuses; one spelling per number keeps the duplicate fingerprint exact. The kernel, the clerk and a replay all see
 // this step (KEY-2, KRN-3). Content and labels stay the planner's claims; a
 // clerk with facts checks them (CLK-2).
-func Normalize(plan string, s PlanStep) key.Step {
+func Normalize(task string, s PlanStep) key.Step {
 	args := make(map[string]key.Arg, len(s.Args))
 	for n, v := range s.Args {
 		args[n] = key.Arg{Value: v, Source: key.SrcPlanner}
 	}
 	out := key.Step{Verb: s.Verb, Clerk: s.Clerk, Args: args, Content: s.Content,
-		Labels: append([]string(nil), s.Labels...), Task: plan, Recipient: s.Args[key.RecipientArg(s.Verb)]}
+		Labels: append([]string(nil), s.Labels...), Task: task, Recipient: s.Args[key.RecipientArg(s.Verb)]}
 	if v, ok := s.Args[key.ArgAmount]; ok {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 || strconv.FormatInt(n, 10) != v {
@@ -790,6 +794,14 @@ func (s *State) step(r stepRef) (*PlanState, *StepState) {
 	return p, &p.Steps[r.Index]
 }
 
+// planTask is the task plan's metered usage is charged under (Plan.Task).
+func (s *State) planTask(plan string) string {
+	if p := s.Plans[plan]; p != nil {
+		return p.Plan.Task()
+	}
+	return key.PlanPrefix + plan
+}
+
 // Apply folds one entry. It is deterministic and does no I/O, so the live
 // kernel, a replay and an audit reach the same state.
 func (s *State) Apply(e Entry) error {
@@ -858,7 +870,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		s.reserved[e.Seq] = &b
 		for _, id := range b.Scopes {
-			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task}})
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: s.planTask(b.Task)}})
 		}
 	case TModelUsed:
 		b, err := body[modelUsed](e)
@@ -872,7 +884,7 @@ func (s *State) Apply(e Entry) error {
 			}
 		}
 		for _, id := range b.Scopes {
-			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: b.Task}})
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: s.planTask(b.Task)}})
 		}
 	case TSpendHeld:
 		b, err := body[spendHeld](e)

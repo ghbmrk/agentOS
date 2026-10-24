@@ -6,3 +6,6 @@ Documentation=file:/usr/lib/agentos/fallback
 Type=oneshot
 ExecStart=/usr/lib/agentos/fallback
 StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

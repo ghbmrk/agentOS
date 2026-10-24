@@ -1,0 +1,33 @@
+# The trusted core and its shrink-only budget (KRN-2cap, #2935; change 1 of the 2026-10-23
+# ideal-backwards review, approved by Mark). Read by tools/trusted_base.py on every PR.
+#
+#   root <dir>                  a package of the core: a directory under broker/
+#   allow <path>                one package the core may link with no known line and whose
+#                               lines do not count: only packages of golang.org/x/crypto and
+#                               golang.org/x/sys. The standard library is always allowed.
+#   known <path> -- <reason>    a package outside the roots, the standard library and the allow
+#                               lines that the core links today. Shrink only: adding one, adding
+#                               an allow line, dropping a root, or growing the core's lines over
+#                               the merge base needs a `Trusted-core: <decision ID>` line in the
+#                               PR body naming Mark's decision. A known line the core no longer
+#                               links fails until it is deleted.
+
+root kernel
+root kernel/key
+root clerk
+
+allow golang.org/x/sys/unix
+
+# Today's links outside the allow lines (2026-10-23). Change 5 of the review (untrusted
+# parsers out of the authority process) and the Gmail API route (D-150) retire these.
+known github.com/ghbmrk/agentos/broker/netguard -- clerk/exit.go checks each dial against its netguard.Policy
+known github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- clerk/secrets.go hands the mail clerk its IMAP login (Secrets.Login)
+known github.com/emersion/go-imap -- via imapsmtp: IMAP parser of untrusted server bytes
+known github.com/emersion/go-imap/client -- via imapsmtp
+known github.com/emersion/go-imap/commands -- via imapsmtp
+known github.com/emersion/go-imap/responses -- via imapsmtp
+known github.com/emersion/go-imap/utf7 -- via imapsmtp
+known github.com/emersion/go-sasl -- via imapsmtp: SASL login
+known golang.org/x/text/encoding -- via go-imap (charset decoding)
+known golang.org/x/text/encoding/internal/identifier -- via go-imap
+known golang.org/x/text/transform -- via go-imap

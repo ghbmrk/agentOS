@@ -55,6 +55,9 @@ UMask=0077
 # Network: the system bus and its own socket only.
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target

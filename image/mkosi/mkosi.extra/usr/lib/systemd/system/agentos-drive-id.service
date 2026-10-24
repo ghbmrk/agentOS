@@ -12,6 +12,9 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/drive-id assign
 StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8
+// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8, KRN-5
 
 type kp struct {
 	pub  ed25519.PublicKey
@@ -225,6 +225,46 @@ func TestContentAndLabels(t *testing.T) {
 	s.Content, s.Labels = "text", []string{"public", "medical"}
 	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RLabels {
 		t.Fatal(r)
+	}
+}
+
+// A key serving a task admits steps and metered calls for that task alone,
+// and its per-task cap counts only that task's uses (KRN-5, CLK-2, #2902).
+func TestAKeyServesOnlyItsTask(t *testing.T) {
+	o, h, k := root(t)
+	served, err := Derive(k, h.priv, h.pub, LimitTask("t1"), LimitSpendTask(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if TaskOf(served) != "t1" || TaskOf(k) != "" || TaskOf(Key{}) != "" {
+		t.Fatalf("TaskOf: %q %q", TaskOf(served), TaskOf(k))
+	}
+	if ChargeTask(served, "p") != "t1" || ChargeTask(k, "t1") != PlanPrefix+"t1" {
+		t.Fatalf("ChargeTask: %q %q", ChargeTask(served, "p"), ChargeTask(k, "t1"))
+	}
+	v := verified(t, served, o, h)
+	s := step(Trash)
+	s.Task = "t1"
+	if r := v.Authorize(s, ctx(1, ledger{})); r != nil {
+		t.Fatalf("its own task: %v", r)
+	}
+	if r := v.Spend("t1", 10, ctx(1, ledger{})); r != nil {
+		t.Fatalf("its own task's spend: %v", r)
+	}
+	for _, other := range []string{"t2", ""} {
+		s.Task = other
+		if r := v.Authorize(s, ctx(1, ledger{})); r == nil || r.Code != RTask {
+			t.Fatalf("step for task %q: %v", other, r)
+		}
+		// Another task's empty ledger would leave the per-task cap whole.
+		if r := v.Spend(other, 10, ctx(1, ledger{})); r == nil || r.Code != RTask {
+			t.Fatalf("spend for task %q: %v", other, r)
+		}
+	}
+	// A key serving no task takes a step for any.
+	s.Task = "t2"
+	if r := verified(t, k, o, h).Authorize(s, ctx(1, nil)); r != nil {
+		t.Fatalf("a key serving no task: %v", r)
 	}
 }
 

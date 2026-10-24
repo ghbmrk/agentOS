@@ -458,9 +458,10 @@ func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *ke
 	if h, held := k.s.SpendHeld[plan]; held {
 		return Admitted{}, &key.Refusal{Code: CHeld, Detail: h.Code}
 	}
-	if r := v.Spend(plan, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+	task := ps.Plan.Task()
+	if r := v.Spend(task, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
 		settled := key.Context{Now: now, Changes: &k.s.Changes, Ledger: ledger{s: k.s, settled: true}}
-		sr := v.Spend(plan, amount, settled)
+		sr := v.Spend(task, amount, settled)
 		if sr != nil {
 			// The cap settled usage alone exhausts, which is the one a hold
 			// names, even when open admissions push another over first.
@@ -558,7 +559,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if !bounded {
 		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
 	}
-	if r := v.Spend(plan, 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
 		return r
 	}
 	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
