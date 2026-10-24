@@ -250,7 +250,16 @@ func (c *conn) open(guard *netguard.Policy, refresh, slot string, roots *x509.Ce
 		c.refresh = refresh
 	}
 	c.slot = slot
-	c.client = &http.Client{
+	c.client = guarded(guard, roots)
+	return nil
+}
+
+// guarded is the transport every clerk that sends HTTPS owns: no proxy from
+// the environment, no cookie jar, no redirects, and every dial through the
+// guard. Its TLS keeps Go's default key exchange, X25519MLKEM768 first, so a
+// server that offers the hybrid gets it (TestClerkTLSUsesTheHybridKeyExchange).
+func guarded(guard *netguard.Policy, roots *x509.CertPool) *http.Client {
+	return &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
 			DialContext:         guard.DialContext,
@@ -260,7 +269,6 @@ func (c *conn) open(guard *netguard.Policy, refresh, slot string, roots *x509.Ce
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return nil
 }
 
 func (x *Exit) declare(op Op) (decl, error) {

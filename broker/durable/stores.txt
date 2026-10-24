@@ -19,7 +19,6 @@
 apnet config
 change debt debt:audit-2.5
 checker debt debt:#1947
-cleanroom debt debt:#1947
 clock debt debt:#1947
 cmd/agentos-egress debt debt:#1947
 cmd/agentos-guest-bridge content
@@ -31,7 +30,6 @@ localsrv config
 meter debt debt:#1947
 owner debt debt:audit-2.2
 photo/keep content
-pubid debt debt:#1947
 question debt debt:#1947
 recall content
 recovery debt debt:#1947

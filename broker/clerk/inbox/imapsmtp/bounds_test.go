@@ -24,8 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-imap"
-
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -254,32 +253,6 @@ func TestDeepNestingChild(t *testing.T) {
 	t.Logf("k18b: call failed: %v", err)
 }
 
-// TestResponseFieldsAreBounded (SR3-mail-k18b): one response of tiny
-// fields, the shape that holds the most memory per byte, stops at a
-// million fields, which bounds what any response holds whatever the
-// read budget. A UID SEARCH of a million messages still parses.
-func TestResponseFieldsAreBounded(t *testing.T) {
-	const max = 1 << 20
-	read := func(fields int) (uint64, error) {
-		reply := "* SEARCH " + strings.Repeat("a ", fields-1) + "a\r\n"
-		runtime.GC()
-		peak := heapPeak()
-		_, err := imap.ReadResp(imap.NewReader(bufio.NewReader(strings.NewReader(reply))))
-		return peak(), err
-	}
-	if _, err := read(max - 1); err != nil {
-		t.Fatalf("a SEARCH of %d UIDs failed: %v", max-1, err)
-	}
-	grew, err := read(max + 1)
-	if !errors.Is(err, imap.ErrTooManyFields) {
-		t.Fatalf("a response of %d fields: err %v, want ErrTooManyFields", max+1, err)
-	}
-	if grew > 96<<20 {
-		t.Fatalf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
-	}
-	t.Logf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
-}
-
 // TestFlagsUpdateKeepsTheBody (SR3-mail-k18b): a server may send an
 // unsolicited FLAGS-only FETCH for a message during the UID FETCH that
 // reads it (a flag changed meanwhile). That response must not take the
@@ -358,7 +331,7 @@ func listenLoopback(t testing.TB) net.Listener {
 // addr, so net/smtp authenticates to a non-loopback name.
 func tlsStore(t testing.TB, addr string, pool *x509.CertPool, timeout time.Duration) *Store {
 	t.Helper()
-	s, err := New(Config{
+	s, err := New(Config{Conn: imapconn.Pipe(),
 		IMAP: "mail.example.com:993", SMTP: "mail.example.com:465", IMAPSec: TLS, SMTPSec: TLS,
 		From: "owner@example.test", Timeout: timeout,
 		TLS: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},

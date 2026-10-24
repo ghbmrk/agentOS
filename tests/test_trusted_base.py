@@ -81,25 +81,27 @@ class Pure(unittest.TestCase):
                 tb.parse_registry(text)
 
     def test_reason_lines(self):
-        got, bad = tb.reasons("x\nTrusted-base: lines -- new kernel module for STO-2\n"
-                              "Trusted-base: deps -- TODO\nTrusted-base: size -- big growth\n"
-                              "  Trusted-base: parsers -- adds the CBOR decoder\n")
-        self.assertEqual(set(got), {"lines", "parsers"})
+        got, bad = tb.reasons("x\nTrusted-base: registry -- dec reads its own frames\n"
+                              "Trusted-base: parsers -- TODO\nTrusted-base: size -- big growth\n"
+                              "  Trusted-base: lines -- an old body's line, ignored now\n")
+        self.assertEqual(set(got), {"registry"})
         self.assertEqual(len(bad), 2)
 
     def m(self, lines=10, deps=10, parsers=("p",), unclassified=()):
         return {"lines": lines, "deps": deps, "parsers": set(parsers), "unclassified": list(unclassified)}
 
-    def test_each_growth_needs_its_own_reason(self):
-        # KRN-2m-e: each of the three grows alone and fails without its key, passes with it.
-        cases = [("lines", self.m(lines=11)), ("deps", self.m(deps=11)), ("parsers", self.m(parsers=("p", "q")))]
-        for key, head in cases:
-            problems, owed = tb.compare(self.m(), head, [], "")
-            self.assertEqual(set(owed), {key})
-            self.assertEqual(len(problems), 1, key)
-            other = next(k for k in tb.KEYS if k != key)
-            self.assertTrue(tb.compare(self.m(), head, [], f"Trusted-base: {other} -- unrelated reason here")[0])
-            self.assertEqual(tb.compare(self.m(), head, [], f"Trusted-base: {key} -- needed for the change")[0], [])
+    def test_new_parser_needs_its_own_reason(self):
+        # KRN-2m-e: a new parser fails without its key, passes with it.
+        head = self.m(parsers=("p", "q"))
+        problems, owed = tb.compare(self.m(), head, [], "")
+        self.assertEqual(set(owed), {"parsers"})
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(tb.compare(self.m(), head, [], "Trusted-base: registry -- unrelated reason here")[0])
+        self.assertEqual(tb.compare(self.m(), head, [], "Trusted-base: parsers -- needed for the change")[0], [])
+
+    def test_line_growth_is_reported_not_gated(self):
+        # D-157: own and dependency growth passes with no body line; the trusted core gates the keeper.
+        self.assertEqual(tb.compare(self.m(), self.m(lines=11, deps=11), [], ""), ([], {}))
 
     def test_shrink_and_equal_pass_without_reason(self):
         self.assertEqual(tb.compare(self.m(), self.m(), [], "")[0], [])
@@ -158,16 +160,14 @@ class SyntheticTree(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("| Own lines |", out)
 
-    def test_own_growth_fails_then_passes_with_reason(self):
+    def test_own_growth_is_reported_and_passes(self):
         tree(self.head, extra_own=5)
         rc, out = self.check()
-        self.assertEqual(rc, 1, out)
-        self.assertIn("+5", out)
-        rc, out = self.check("Body.\n\nTrusted-base: lines -- calc grows for the test\n")
         self.assertEqual(rc, 0, out)
+        self.assertIn("+5", out)
 
     def test_new_trusted_main_counts(self):
-        # KRN-2m-a: the process list is the head tree's core.txt; a new wiring binary grows lines.
+        # KRN-2m-a: the process list is the head tree's core.txt; a new wiring binary is measured.
         tree(self.head, mains=("a", "b"))
         write(self.head, tb.REGISTRY, REGISTRY + f"parser {OWN}/cmd/b -- entry\n")
         rc, out = self.check()
@@ -413,10 +413,13 @@ class Repository(unittest.TestCase):
         self.assertTrue(m["parsers"])
 
     def test_core_file_parses_and_names_the_core(self):
-        # KRN-2cap: the kernel, the key-check library and the clerk check path.
+        # KRN-2cap and D-157: D-154's keeper domain, the kernel and its process, the key-check
+        # library, the clerk check path, the sealed store and the unlock step.
         core = tb.parse_core((ROOT / tb.CORE).read_text())
-        self.assertTrue({"kernel", "kernel/key", "clerk"} <= core["root"])
-        self.assertEqual(core["allow"], {"golang.org/x/sys/unix"})
+        self.assertTrue({"kernel", "kernel/key", "cmd/agentos-kernel", "clerk", "clerk/seal",
+                         "cmd/agentos-unlock"} <= core["root"])
+        self.assertEqual(core["allow"], {"golang.org/x/sys/unix", "golang.org/x/sys/cpu",
+                                         "golang.org/x/crypto/argon2", "golang.org/x/crypto/blake2b"})
         self.assertTrue(all(a.startswith(("golang.org/x/crypto/", "golang.org/x/sys/")) for a in core["allow"]))
 
     @unittest.skipUnless(toolchain_ok(), "the Go toolchain broker/go.mod names is not on PATH")

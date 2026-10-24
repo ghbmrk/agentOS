@@ -16,7 +16,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/cleanroom"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -293,7 +292,7 @@ func TestCheckAgentMachine(t *testing.T) {
 	}
 	// Every broker-reserved prefix is refused, pinned to the packages
 	// that reserve them (S2).
-	for _, p := range []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, vm.BuilderPrefix, vm.EvalPrefix, vm.WorkerPrefix, cleanroom.Prefix} {
+	for _, p := range []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, vm.BuilderPrefix, vm.EvalPrefix, vm.WorkerPrefix, "cr-"} {
 		if err := checkAgentMachine(p + "1"); err == nil {
 			t.Errorf("reserved prefix %q accepted", p)
 		}

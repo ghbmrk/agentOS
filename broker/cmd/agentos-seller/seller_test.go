@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -231,7 +232,7 @@ func TestPrepRefuses(t *testing.T) {
 	needTools(t)
 	good := standardDisk(t, rootTree)
 	held := map[string]string{"var/lib/agentos/claim.json": `{"salt":"AAAA"}`}
-	heldNet := map[string]string{"var/lib/agentos/setup-net.json": `{}`}
+	heldNet := map[string]string{"var/lib/agentos/ap/setup-net.json": `{}`}
 	for k, v := range rootTree {
 		held[k] = v
 		heldNet[k] = v
@@ -327,6 +328,7 @@ func TestPrepSealsOneState(t *testing.T) {
 	}
 	want := map[string]bool{
 		"/var/lib/agentos 040700 0:0":      true,
+		apnet.Dir + " 040700 0:0":          true,
 		claim.StatePath + " 100600 0:0":    true,
 		claim.SetupNetPath + " 100600 0:0": true,
 	}

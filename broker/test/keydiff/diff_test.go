@@ -3,7 +3,8 @@
 // is a key, a step or metered call and a log view built from one seed with
 // the Go library; both sides judge it and the test fails on any disagreement:
 // whether the chain verifies, the scopes a use is charged to, the hold window,
-// and whether the step or call is admitted. The Go library returns its first
+// whether the owner narrowed the key and with which passkeys, whether the step
+// or call is admitted, and whether a renewal stays within the grant it renews. The Go library returns its first
 // refusal and keycheck every refusal it finds, so the Go code must be one of
 // them. Set KEYCHECK to the keycheck binary; without it the test skips.
 package keydiff
@@ -16,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand"
 	"os"
@@ -97,11 +99,13 @@ type wireUse struct {
 }
 
 type wireCtx struct {
-	Now     int64                `json:"now"`
-	Revoked []string             `json:"revoked"`
-	Paused  []string             `json:"paused"`
-	Stopped bool                 `json:"stopped"`
-	Uses    map[string][]wireUse `json:"uses"`
+	Now      int64                `json:"now"`
+	Revoked  []string             `json:"revoked"`
+	Paused   []string             `json:"paused"`
+	Stopped  bool                 `json:"stopped"`
+	Uses     map[string][]wireUse `json:"uses"`
+	NoView   bool                 `json:"no_view"`
+	NoLedger bool                 `json:"no_ledger"`
 }
 
 type wireCase struct {
@@ -116,15 +120,27 @@ type wireCase struct {
 	Ctx    wireCtx             `json:"ctx"`
 }
 
+// renewCase asks whether a renewal's first link is within the old one's.
+type renewCase struct {
+	Op    string       `json:"op"`
+	Renew []key.Caveat `json:"renew"`
+	Was   []key.Caveat `json:"was"`
+}
+
 type verdict struct {
 	Valid  bool     `json:"valid"`
 	Bad    string   `json:"bad"`
 	Codes  []string `json:"codes"`
 	Hold   []int64  `json:"hold"`
 	Scopes []string `json:"scopes"`
+	// ByOwner and Narrowers: the owner narrowed the tip, and which
+	// passkeys narrowed any link (Verified.ByOwner, Verified.Narrowers).
+	ByOwner   bool     `json:"by_owner"`
+	Narrowers []string `json:"narrowers"`
+	Within    bool     `json:"within"`
 }
 
-func (c *checker) judge(w wireCase) (verdict, error) {
+func (c *checker) judge(w any) (verdict, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.in.Encode(w); err != nil {
@@ -189,7 +205,8 @@ type gen struct {
 
 // Edge inputs every sweep must draw: each is a place the two checkers once
 // disagreed or could.
-var edges = []string{"empty-clerk", "no-verbs", "empty-arg-name", "off-curve-holder", "huge-amount"}
+var edges = []string{"empty-clerk", "no-verbs", "empty-arg-name", "off-curve-holder", "huge-amount",
+	"root-not-canonical", "fitted-step", "quiet-view", "no-view", "no-ledger", "by-owner", "narrowed-mid", "within", "not-within"}
 
 func (g gen) edge(name string, pct int) bool {
 	if g.p(pct) {
@@ -249,26 +266,7 @@ func (g gen) caveat(first bool) key.Caveat {
 	case 2:
 		return key.Caveat{Kind: key.KLabels, Set: g.subset(labelSet)}
 	case 3:
-		b := key.ArgBound{Name: pick(g, []string{"to", "amount", "target", "msg"})}
-		if g.edge("empty-arg-name", 3) {
-			b.Name = ""
-		}
-		if g.p(50) {
-			b.OneOf = g.subset(values)
-		}
-		if g.p(40) {
-			n := g.num(-5, 600)
-			b.Min = &n
-		}
-		if g.p(40) {
-			n := g.num(-5, 600)
-			b.Max = &n
-		}
-		c := key.Caveat{Kind: key.KArg, Arg: &b}
-		if g.p(3) {
-			c.Arg = nil
-		}
-		return c
+		return g.argCaveat()
 	case 4:
 		return key.Caveat{Kind: key.KSpendTask, N: g.num(-1, 60)}
 	case 5:
@@ -295,6 +293,29 @@ func (g gen) caveat(first bool) key.Caveat {
 		}
 		return key.Caveat{Kind: key.KExpires, N: t0 + g.num(1, 6)*key.DayMS}
 	}
+}
+
+func (g gen) argCaveat() key.Caveat {
+	b := key.ArgBound{Name: pick(g, []string{"to", "amount", "target", "msg"})}
+	if g.edge("empty-arg-name", 3) {
+		b.Name = ""
+	}
+	if g.p(50) {
+		b.OneOf = g.subset(values)
+	}
+	if g.p(40) {
+		n := g.num(-5, 600)
+		b.Min = &n
+	}
+	if g.p(40) {
+		n := g.num(-5, 600)
+		b.Max = &n
+	}
+	c := key.Caveat{Kind: key.KArg, Arg: &b}
+	if g.p(3) {
+		c.Arg = nil
+	}
+	return c
 }
 
 // world is one case: the key and the private key of whoever holds its tip.
@@ -329,6 +350,22 @@ func (g gen) key() world {
 		clerk = ""
 	}
 	k := key.Issue(owner.priv, key.Root{Clerk: clerk, Verbs: vs, Serial: strconv.Itoa(g.r.Intn(100))})
+	if len(k.Root.Verbs) > 1 && g.edge("root-not-canonical", 3) {
+		// Issue sorts a root's verbs, so a root out of order or with a
+		// repeat is signed here by hand.
+		if g.p(50) {
+			k.Root.Verbs[0], k.Root.Verbs[1] = k.Root.Verbs[1], k.Root.Verbs[0]
+		} else {
+			k.Root.Verbs = append(k.Root.Verbs, k.Root.Verbs[0])
+		}
+		body, _ := json.Marshal(struct {
+			Owner  ed25519.PublicKey `json:"owner"`
+			Clerk  string            `json:"clerk"`
+			Verbs  []key.Verb        `json:"verbs"`
+			Serial string            `json:"serial"`
+		}{k.Root.Owner, k.Root.Clerk, k.Root.Verbs, k.Root.Serial})
+		k.Root.Sig = ed25519.Sign(owner.priv, append([]byte(key.DomainRoot), body...))
+	}
 	w := world{k: k, owners: []ed25519.PublicKey{pass1.pub, pass2.pub}}
 	n := g.r.Intn(5)
 	if g.p(2) {
@@ -342,8 +379,11 @@ func (g gen) key() world {
 		for j := g.r.Intn(4); j > 0; j-- {
 			cav = append(cav, g.caveat(i == 0))
 		}
-		if n > 8 {
-			cav = nil
+		if g.p(10) {
+			cav = append(cav, g.argCaveat())
+		}
+		if n > 8 && i > 0 {
+			cav = nil // an over-long chain still has a bounded first link, so only its length is wrong
 		}
 		next := pick(g, everyone[2:4])
 		if w.holder != nil && g.p(30) {
@@ -427,6 +467,108 @@ func (g gen) step(clerk string) key.Step {
 	return s
 }
 
+// fit makes s a step key limits l admit, apart from its caps, the ledger
+// and the live checks, then now and then breaks one rule by the least it can:
+// a bounded argument one outside its range or set, or from the wrong source.
+// A random step earns several refusals at once, which hides a rule the
+// library drops behind another; a fitted one earns at most one.
+func (g gen) fit(s key.Step, l key.Limits) key.Step {
+	s.Clerk = l.Clerk
+	if l.Task != "" {
+		s.Task = l.Task
+	}
+	// A verb that declares every bounded argument, so none is refused as
+	// missing, when the key allows one.
+	var fit []string
+	for _, v := range l.Verbs {
+		if !slices.ContainsFunc(slices.Collect(maps.Keys(l.Args)), func(n string) bool {
+			return !slices.Contains(key.ArgNames(key.Verb(v)), n)
+		}) {
+			fit = append(fit, v)
+		}
+	}
+	if len(fit) == 0 {
+		fit = l.Verbs
+	}
+	if len(fit) > 0 {
+		s.Verb = key.Verb(pick(g, fit))
+	}
+	if len(l.Content) > 0 {
+		s.Content = pick(g, l.Content)
+	}
+	if l.Labels != nil {
+		s.Labels = slices.DeleteFunc(slices.Clone(s.Labels), func(x string) bool { return !slices.Contains(l.Labels, x) })
+	}
+	s.Amount = g.num(0, 5)
+	s.Args = map[string]key.Arg{}
+	for _, n := range key.ArgNames(s.Verb) {
+		s.Args[n] = key.Arg{Value: pick(g, values[:3]), Source: pick(g, sources[:2])}
+		b, ok := l.Args[n]
+		if !ok {
+			continue
+		}
+		lo, hi := int64(-5), int64(600)
+		if b.Min != nil {
+			lo = *b.Min
+		}
+		if b.Max != nil {
+			hi = *b.Max
+		}
+		var fits []string
+		for _, v := range b.OneOf {
+			x, err := strconv.ParseInt(v, 10, 64)
+			if (b.Min == nil && b.Max == nil) || (err == nil && x >= lo && x <= hi) {
+				fits = append(fits, v)
+			}
+		}
+		switch {
+		case len(fits) > 0:
+			s.Args[n] = key.Arg{Value: pick(g, fits), Source: s.Args[n].Source}
+		case b.OneOf == nil && lo <= hi && (b.Min != nil || b.Max != nil):
+			s.Args[n] = key.Arg{Value: strconv.FormatInt(g.num(lo, hi), 10), Source: s.Args[n].Source}
+		}
+		if !g.p(50) {
+			continue
+		}
+		a := s.Args[n]
+		breaks := []func(){func() { a.Source = pick(g, sources[2:]) }}
+		if b.Min != nil {
+			breaks = append(breaks, func() { a.Value = strconv.FormatInt(*b.Min-1, 10) })
+		}
+		if b.Max != nil {
+			breaks = append(breaks, func() { a.Value = strconv.FormatInt(*b.Max+1, 10) })
+		}
+		if out := slices.DeleteFunc(slices.Clone(values), func(v string) bool { return slices.Contains(b.OneOf, v) }); b.OneOf != nil && len(out) > 0 {
+			breaks = append(breaks, func() { a.Value = pick(g, out) })
+		}
+		pick(g, breaks)()
+		s.Args[n] = a
+	}
+	return s
+}
+
+// quiet is a log view under which a fitted step earns at most one refusal:
+// a time before every expiry the generator draws, nothing revoked, paused or
+// stopped, and each scope's uses free and at the rolling day's edge, so only
+// a rate or use cap, or a rule a library mutant breaks, can refuse it.
+func (g gen) quiet(scopes []key.ID, recipient string) (key.Context, wireCtx) {
+	g.reached["quiet-view"] = true
+	now := t0 - 2*key.DayMS
+	wc := wireCtx{Now: now, Uses: map[string][]wireUse{}}
+	l := ledger{}
+	for _, s := range scopes {
+		for n := g.r.Intn(3); n > 0; n-- {
+			u := key.Use{At: now - key.DayMS + g.num(-1, 1), Recipient: recipient, Task: pick(g, tasks)}
+			if g.p(30) {
+				u.Recipient = pick(g, values[:3])
+			}
+			l[s] = append(l[s], u)
+			wc.Uses[s.String()] = append(wc.Uses[s.String()], wireUse(u))
+		}
+	}
+	return key.Context{Now: now, Changes: &key.Changes{}, Ledger: l}, wc
+}
+
 func (g gen) ctx(scopes []key.ID, ids []key.ID) (key.Context, wireCtx) {
 	now := t0 + g.num(-2, 8)*key.DayMS/4 + g.num(-2, 2)
 	ch := &key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}, Stopped: g.p(4)}
@@ -455,7 +597,16 @@ func (g gen) ctx(scopes []key.ID, ids []key.ID) (key.Context, wireCtx) {
 			wc.Uses[s.String()] = append(wc.Uses[s.String()], wireUse(u))
 		}
 	}
-	return key.Context{Now: now, Changes: ch, Ledger: l}, wc
+	kc := key.Context{Now: now, Changes: ch, Ledger: l}
+	if g.p(2) {
+		kc.Changes, wc.NoView = nil, true
+		g.reached["no-view"] = true
+	}
+	if g.p(2) {
+		kc.Ledger, wc.NoLedger = nil, true
+		g.reached["no-ledger"] = true
+	}
+	return kc, wc
 }
 
 func toWire(s key.Step) wireStep {
@@ -541,6 +692,12 @@ func one(c *checker, seed int64, t *tally) string {
 	ctx, wctx := g.ctx(scopes, ids)
 	wc.Ctx = wctx
 	st := g.step(w.k.Root.Clerk)
+	if err == nil && g.edge("fitted-step", 40) {
+		st = g.fit(st, v.Limits)
+		if g.p(60) {
+			ctx, wc.Ctx = g.quiet(scopes, st.Recipient)
+		}
+	}
 	wc.Step = toWire(st)
 	wc.Task, wc.Amount = pick(g, tasks), g.num(-1, 30)
 	if g.p(3) {
@@ -573,6 +730,18 @@ func one(c *checker, seed int64, t *tally) string {
 	if hold := []int64{v.Limits.Window(false), v.Limits.Window(true)}; !slices.Equal(hold, got.Hold) {
 		return fmt.Sprintf("hold: library %v, keycheck %v", hold, got.Hold)
 	}
+	var narrowers []string
+	for _, p := range v.Narrowers {
+		narrowers = append(narrowers, fmt.Sprintf("%x", []byte(p)))
+	}
+	if v.ByOwner != got.ByOwner || !slices.Equal(narrowers, got.Narrowers) {
+		return fmt.Sprintf("narrowed: library %v %v, keycheck %v %v", v.ByOwner, narrowers, got.ByOwner, got.Narrowers)
+	}
+	if v.ByOwner {
+		g.reached["by-owner"] = true
+	} else if len(narrowers) > 0 {
+		g.reached["narrowed-mid"] = true
+	}
 	var r *key.Refusal
 	switch op {
 	case "authorize":
@@ -602,6 +771,121 @@ func one(c *checker, seed int64, t *tally) string {
 		return fmt.Sprintf("op %s: library %v, keycheck %v", op, r, got.Codes)
 	}
 	return ""
+}
+
+// renewal judges case seed's renewal: a first link's caveats against the
+// grant's it renews, both folded alone (Limits.Within, KEY-4). The renewal
+// is the grant's caveats nudged once or twice, looser or tighter.
+func renewal(c *checker, seed int64, t *tally) string {
+	g := gen{rand.New(rand.NewSource(^seed)), map[string]bool{}}
+	defer t.reach(g.reached)
+	var was []key.Caveat
+	for j := g.r.Intn(5); j > 0; j-- {
+		was = append(was, g.caveat(true))
+	}
+	renew := slices.Clone(was)
+	for j := 1 + g.r.Intn(2); j > 0; j-- {
+		renew = g.nudge(renew)
+	}
+	got, jerr := c.judge(renewCase{"within", renew, was})
+	if jerr != nil {
+		return "keycheck: " + jerr.Error()
+	}
+	nl, nerr := key.Fold(renew)
+	ol, oerr := key.Fold(was)
+	if (nerr == nil && oerr == nil) != got.Valid {
+		return fmt.Sprintf("within: library fold errors %v / %v, keycheck valid %v (%s)", nerr, oerr, got.Valid, got.Bad)
+	}
+	if !got.Valid {
+		return ""
+	}
+	in := nl.Within(ol)
+	if in {
+		g.reached["within"] = true
+	} else {
+		g.reached["not-within"] = true
+	}
+	if in != got.Within {
+		return fmt.Sprintf("within: library %v, keycheck %v (renew %+v, was %+v)", in, got.Within, renew, was)
+	}
+	return ""
+}
+
+// nudge drops, adds or moves one caveat of cs by one step.
+func (g gen) nudge(cs []key.Caveat) []key.Caveat {
+	if len(cs) == 0 || g.p(20) {
+		return append(cs, g.caveat(true))
+	}
+	i := g.r.Intn(len(cs))
+	if g.p(20) {
+		return slices.Delete(slices.Clone(cs), i, i+1)
+	}
+	out := slices.Clone(cs)
+	c := out[i]
+	d := int64(1)
+	if g.p(50) {
+		d = -1
+	}
+	switch c.Kind {
+	case key.KVerbs, key.KContent, key.KLabels, key.KTask:
+		c.Set = g.nudgeSet(c.Set)
+	case key.KArg:
+		if c.Arg == nil {
+			break
+		}
+		b := *c.Arg
+		switch g.r.Intn(3) {
+		case 0:
+			b.OneOf = g.nudgeSet(b.OneOf)
+		case 1:
+			b.Min = g.nudgeBound(b.Min, d)
+		default:
+			b.Max = g.nudgeBound(b.Max, d)
+		}
+		c.Arg = &b
+	case key.KHold:
+		if g.p(50) {
+			c.N += d * 1000
+		} else {
+			c.M += d * 1000
+		}
+	default:
+		c.N += d
+	}
+	out[i] = c
+	return out
+}
+
+// nudgeSet drops one member of s or adds one value it lacks, keeping it
+// sorted, or now and then opens it (nil).
+func (g gen) nudgeSet(s []string) []string {
+	if g.p(10) {
+		return nil
+	}
+	out := slices.Clone(s)
+	if len(out) > 0 && g.p(50) {
+		i := g.r.Intn(len(out))
+		return slices.Delete(out, i, i+1)
+	}
+	pool := append(append(append([]string{}, values...), labelSet...), contents...)
+	pool = append(append(pool, tasks[:2]...), "read", "send", "buy", "trash")
+	if x := pick(g, pool); !slices.Contains(out, x) {
+		out = append(out, x)
+		slices.Sort(out)
+	}
+	return out
+}
+
+func (g gen) nudgeBound(b *int64, d int64) *int64 {
+	if b == nil || g.p(15) {
+		if b != nil {
+			return nil
+		}
+		n := g.num(-5, 600)
+		return &n
+	}
+	n := *b + d
+	return &n
 }
 
 func kindOf(err error) string {
@@ -641,13 +925,18 @@ func TestKeyDiff(t *testing.T) {
 		}
 		from = v
 	}
+	// KEYDIFF_STOP stops the sweep at the first disagreement, for the
+	// predicate-reach test, which only needs one.
+	stop := os.Getenv("KEYDIFF_STOP") != ""
 	tl := newTally()
 	bad := 0
-	for seed := from; seed < from+n; seed++ {
-		if d := one(c, seed, tl); d != "" {
-			bad++
-			if bad <= 20 {
-				t.Errorf("seed %d: %s", seed, d)
+	for seed := from; seed < from+n && (bad == 0 || !stop); seed++ {
+		for _, d := range []string{one(c, seed, tl), renewal(c, seed, tl)} {
+			if d != "" {
+				bad++
+				if bad <= 20 {
+					t.Errorf("seed %d: %s", seed, d)
+				}
 			}
 		}
 	}
@@ -687,7 +976,8 @@ func FuzzKeyDiff(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, seed int64) {
-		if d := one(start(t), seed, newTally()); d != "" {
+		c, tl := start(t), newTally()
+		if d := one(c, seed, tl) + renewal(c, seed, tl); d != "" {
 			t.Fatal(d)
 		}
 	})

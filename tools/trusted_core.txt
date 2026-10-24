@@ -1,5 +1,7 @@
 # The trusted core and its shrink-only budget (KRN-2cap, #2935; change 1 of the 2026-10-23
-# ideal-backwards review, approved by Mark). Read by tools/trusted_base.py on every PR.
+# ideal-backwards review, approved by Mark). Read by tools/trusted_base.py on every PR. This is
+# the one list of D-154's keeper domain (D-157): the kernel's verdict and key state, the kernel
+# process that holds the log key and head, the sealed store, the unlock step and the clerks.
 #
 #   root <dir>                  a package of the core: a directory under broker/
 #   allow <path>                one package the core may link with no known line and whose
@@ -14,10 +16,31 @@
 
 root kernel
 root kernel/key
+root cmd/agentos-kernel
 root clerk
+root clerk/seal
+root cmd/agentos-unlock
 
 allow golang.org/x/sys/unix
+allow golang.org/x/sys/cpu
+allow golang.org/x/crypto/argon2
+allow golang.org/x/crypto/blake2b
 
 # Today's links outside the allow lines (2026-10-23). Change 5 of the review (untrusted
 # parsers out of the authority process) and the Gmail API route (D-150) retire these.
 known github.com/ghbmrk/agentos/broker/netguard -- clerk/exit.go checks each dial against its netguard.Policy
+
+# The kernel process and the unlock step's links (D-157, 2026-10-24).
+known github.com/ghbmrk/agentos/broker/kernel/proc -- the kernel process: log file, anchors, owner socket
+known github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor -- the kernel main reads the log anchor's TPM counter
+known github.com/ghbmrk/agentos/broker/kernel/privfile -- kernel/proc checks its private files
+known github.com/ghbmrk/agentos/broker/sockets -- kernel/proc serves its frames on a sockets listener
+known github.com/ghbmrk/agentos/broker/procguard -- kernel/proc runs procguard.Isolate at start
+known github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step hands the kernel its keys on descriptor 3
+known github.com/ghbmrk/agentos/broker/tpmseal -- the sealed store's tpm slot and the log anchor's counter
+known github.com/google/go-tpm/tpm2 -- tpmseal talks to the TPM
+known github.com/google/go-tpm/legacy/tpm2 -- go-tpm's tpm2 and transport link it
+known github.com/google/go-tpm/tpmutil -- go-tpm's framing
+known github.com/google/go-tpm/tpm2/transport -- go-tpm's transport interface
+known github.com/google/go-tpm/tpm2/transport/linuxtpm -- the unlock step opens /dev/tpmrm0
+known github.com/google/go-tpm/tpm2/transport/linuxudstpm -- the unlock step's swtpm socket

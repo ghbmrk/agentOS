@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap/client"
+
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire"
 )
 
 // hostile is a raw IMAP server that logs in, selects any folder with
@@ -85,7 +88,7 @@ func converse(c net.Conn, fetch string, hangup bool) string {
 
 func hostileStore(t testing.TB, addr string, timeout time.Duration) *Store {
 	t.Helper()
-	s, err := New(Config{IMAP: addr, SMTP: addr, IMAPSec: Plain, SMTPSec: Plain, From: "owner@example.test",
+	s, err := New(Config{Conn: imapconn.Pipe(), IMAP: addr, SMTP: addr, IMAPSec: Plain, SMTPSec: Plain, From: "owner@example.test",
 		Timeout: timeout,
 		Credential: func(context.Context) (Login, error) {
 			return Login{User: "canary-user", Secret: "canary-secret"}, nil
@@ -169,7 +172,8 @@ func tail(s string, n int) string {
 // stream can complete the command (it cannot know the tag) and the error
 // check only guards against a reply taken for success; it is not a check
 // that replies are parsed correctly. The deadline bounds any that stall.
-// It runs Store.Fetch's own steps (selectAt, then fetch) on a go-imap
+// It runs Store.Fetch's request in the connection process's own step
+// (imapconn.Handle: select at the validity, then fetch) on a go-imap
 // client over net.Pipe rather than a dialed socket: LOOP-7 replays this
 // target in a jail whose network namespace has no usable loopback.
 func FuzzIMAPReplies(f *testing.F) {
@@ -205,16 +209,12 @@ func FuzzIMAPReplies(f *testing.F) {
 			cl.Close()
 			t.Fatalf("greeting: %v", err)
 		}
-		c.ErrorLog = quiet{}
 		defer c.Logout()
 		defer cl.Close()
 		if err := c.Login("canary-user", "canary-secret"); err != nil {
 			t.Fatalf("login: %v", err)
 		}
-		if err := selectAt(c, "INBOX", true, 7); err != nil {
-			t.Fatalf("select: %v", err)
-		}
-		if _, err := s.fetch(c, "INBOX", 7, []uint32{1}); err == nil {
+		if r := imapconn.Handle(c, imapwire.Request{Op: imapwire.OpFetch, Folder: "INBOX", Validity: 7, UIDs: []uint32{1}, MaxFetch: s.cfg.MaxFetch}); r.Err == "" {
 			t.Fatalf("stream %q was answered as success", stream)
 		}
 	})

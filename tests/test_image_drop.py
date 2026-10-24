@@ -150,6 +150,16 @@ class NeededTest(unittest.TestCase):
         self.assertEqual({drop.DROP[p][0] for p in ("mokutil", "libefivar1t64")}, {"mokutil", "efivar"})
         self.assertNotIn("shim", {src for src, _ in drop.DROP.values()})
 
+    def test_sqlite_goes_with_lastlog2_and_tirpc_with_ss(self):
+        # libsqlite3-0 is linked only by liblastlog2-2, liblastlog2-2 only by lslogins, and
+        # libtirpc3t64 only by ss; util-linux keeps its other packages, so its records stay (PARTIAL).
+        self.assertEqual({drop.DROP[p][0] for p in ("libsqlite3-0", "libtirpc3t64", "libtirpc-common")},
+                         {"sqlite3", "libtirpc"})
+        self.assertEqual(drop.DROP["liblastlog2-2"][0], "util-linux")
+        self.assertIn("usr/bin/ss", drop.FILES)
+        self.assertIn("usr/bin/lslogins", drop.FILES)
+        self.assertEqual(set(drop.PARTIAL), {"liblastlog2-2"})
+
 
 class InterpreterTest(unittest.TestCase):
     def setUp(self):
@@ -218,7 +228,9 @@ class WiringTest(unittest.TestCase):
 
     def test_no_record_accepts_a_dropped_source(self):
         records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
-        gone = {src for src, _ in drop.DROP.values()}
+        gone = {src for p, (src, _) in drop.DROP.items() if p not in drop.PARTIAL}
+        self.assertTrue(set(drop.PARTIAL) <= set(drop.DROP))
+        self.assertTrue({drop.DROP[p][0] for p in drop.PARTIAL}.isdisjoint(gone))
         self.assertEqual([r["id"] for r in records if r.get("where") == "image" and r["package"] in gone], [])
 
 

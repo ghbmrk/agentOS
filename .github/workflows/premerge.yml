@@ -18,6 +18,13 @@ name: premerge
 # rerun's `success` releases it. The job goes red only when the
 # script errors; once the head is known, an error exit still posts `failure` (the EXIT trap),
 # so a rerun that dies cannot leave an earlier `success` standing on the head.
+# PREMERGE-source (#1943): any pusher can post a GitHub Actions status (a branch workflow with
+# `statuses: write`), so the status is posted with a token of the premerge GitHub App, whose key
+# lives in the `premerge` environment that only main may deploy to, and the ruleset pins
+# `premerge` to that App. A `pull_request_target` or comment run has ref main and gets the key; a
+# branch workflow, or the base copy of a PR into another branch, does not. Until the App is set
+# (vars.PREMERGE_APP_CLIENT_ID unset) the status falls back to github.token; once the ruleset pins
+# the App, such a status counts for nothing, so a missing or broken App fails closed.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -34,6 +41,7 @@ jobs:
     if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
     permissions:
       contents: read
       issues: read
@@ -44,11 +52,20 @@ jobs:
         with:
           fetch-depth: 0 # the merge base with the PR head
           persist-credentials: false
+      - name: premerge App token
+        id: app
+        if: vars.PREMERGE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.PREMERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PREMERGE_APP_KEY }}
+          permission-statuses: write
       - name: Premerge (base copy of tools/premerge.py)
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           # The head, branch and base come from the API, not the event: a comment event has no PR payload.
           gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
@@ -56,7 +73,7 @@ jobs:
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
           posted=no
           post() {
-            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \
+            GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \
               -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
             posted=yes
           }
@@ -67,6 +84,8 @@ jobs:
           state=failure
           # errexit does not apply inside a substitution that is part of `&&`, so each step exits on its own failure.
           out=$(
+            # The ruleset guards main only: a run for a PR into another branch must not mark its head.
+            [ "$BASE_REF" = main ] || { echo "base-not-main"; exit 1; }
             git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \
               "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1
             git cat-file -e "$HEAD_SHA^{commit}" || exit 1

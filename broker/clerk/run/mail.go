@@ -1,10 +1,12 @@
 package run
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,15 +44,25 @@ const (
 )
 
 // MailSettings is the account as the owner enters it. IMAP is implicit TLS;
-// SMTP is implicit TLS, or STARTTLS when StartTLS is set. A password or app
-// password only: OAuth is not set up here.
+// SMTP is implicit TLS, or STARTTLS when StartTLS is set, with a password or
+// app password. An API account (API "gmail", D-150) names only its address:
+// its sealed grant is put by the owner's sign-in (#2852), and the clerk
+// works through the API's declared calls (#2925).
 type MailSettings struct {
 	Address  string `json:"address"`
-	IMAP     string `json:"imap"` // host:port
-	SMTP     string `json:"smtp"` // host:port
+	IMAP     string `json:"imap,omitempty"` // host:port
+	SMTP     string `json:"smtp,omitempty"` // host:port
 	StartTLS bool   `json:"starttls,omitempty"`
 	User     string `json:"user,omitempty"` // sign-in name; empty is Address
+	API      string `json:"api,omitempty"`  // "gmail", or "" for IMAP and SMTP
 }
+
+// APIGmail is the API a Gmail account's settings name.
+const APIGmail = "gmail"
+
+// gmailRetentionDays is how long Gmail's trash keeps a mail, which a Gmail
+// account's clerk trims under in place of the owner's setting (#2925).
+const gmailRetentionDays = 30
 
 // Setup refusals: one fixed reason per field, never the value entered. The
 // wording is the old setup's (cmd/agentos-egress/mailaccount.go), kept as is.
@@ -59,6 +71,11 @@ var (
 	ErrMailServer       = errors.New("Enter each server as name:port, like imap.example.com:993 and smtp.example.com:465, from your provider's settings page.")
 	ErrMailUser         = errors.New("Enter the sign-in name on one line, or leave it empty to sign in with the address.")
 	ErrWeakMailPassword = errors.New("Paste the mailbox password or app password from your provider, 12 to 256 characters on one line.")
+	// ErrMailAPI refuses settings that name an API the clerk has none for,
+	// or that mix an API account with servers, or a password setup of one.
+	ErrMailAPI = errors.New("Connect Gmail with its sign-in on the owner page; it takes no servers or password.")
+	// ErrNoGrant refuses a Gmail setup before its sign-in has finished.
+	ErrNoGrant = errors.New("Sign in to Gmail on the owner page first.")
 	// ErrNoMailAccount is OpenMail's refusal when no account is set up.
 	ErrNoMailAccount = errors.New("run: no mail account is set up")
 )
@@ -66,6 +83,16 @@ var (
 func (s MailSettings) check() error {
 	if a, err := netmail.ParseAddress(s.Address); err != nil || a.Name != "" || a.Address != s.Address {
 		return ErrMailAddress
+	}
+	switch s.API {
+	case "":
+	case APIGmail:
+		if s.IMAP != "" || s.SMTP != "" || s.StartTLS || s.User != "" {
+			return ErrMailAPI
+		}
+		return nil
+	default:
+		return ErrMailAPI
 	}
 	for _, hp := range []string{s.IMAP, s.SMTP} {
 		if !hostPort(hp) {
@@ -135,11 +162,8 @@ func SetMail(dir string, sec *clerk.Secrets, s MailSettings, password string) er
 // setMail is SetMail; stop, for tests only, ends it after step i as a crash
 // would.
 func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, stop func(i int) bool) error {
-	if err := s.check(); err != nil {
+	if err := checkSetup(s, password); err != nil {
 		return err
-	}
-	if !mailPassword(password) {
-		return ErrWeakMailPassword
 	}
 	if err := privfile.Check(dir, true); err != nil {
 		return err
@@ -150,11 +174,66 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 	}
 	mailMu.Lock()
 	defer mailMu.Unlock()
+	return switchMail(dir, sec, s, b, func() error { return sec.Put(slotOf(s), clerk.KindStatic, []byte(password)) }, stop)
+}
+
+// checkSetup is SetMail's refusals of what the owner entered.
+func checkSetup(s MailSettings, password string) error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if s.API != "" {
+		return ErrMailAPI // its grant comes from its sign-in (SetGmail)
+	}
+	if !mailPassword(password) {
+		return ErrWeakMailPassword
+	}
+	return nil
+}
+
+// GmailSlot is the slot a Gmail account's refresh grant is sealed in, for
+// its sign-in (clerk.SignInDeclaration's Slot) to put it before SetGmail.
+func GmailSlot(address string) string { return slotOf(MailSettings{Address: address, API: APIGmail}) }
+
+// SetGmail sets up or replaces the account in dir with the Gmail account at
+// address, once its sign-in has put the grant in GmailSlot(address): the
+// settings, then another account's record of read mail and every other mail
+// slot dropped, as SetMail does after its password. A refusal writes
+// nothing.
+func SetGmail(dir string, sec *clerk.Secrets, address string) error {
+	return setGmail(dir, sec, address, nil)
+}
+
+// setGmail is SetGmail; stop is setMail's.
+func setGmail(dir string, sec *clerk.Secrets, address string, stop func(i int) bool) error {
+	s := MailSettings{Address: address, API: APIGmail}
+	if err := s.check(); err != nil {
+		return err
+	}
+	if err := privfile.Check(dir, true); err != nil {
+		return err
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	mailMu.Lock()
+	defer mailMu.Unlock()
+	if !sec.Has(slotOf(s)) {
+		return ErrNoGrant
+	}
+	return switchMail(dir, sec, s, b, func() error { return nil }, stop)
+}
+
+// switchMail is setup's steps after its checks, with mailMu held: put the
+// account's secret (put), write the settings b, drop another account's
+// record of read mail, drop every other mail slot.
+func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put func() error, stop func(i int) bool) error {
 	cur := slotOf(s)
 	prev, perr := readMail(dir)
 	same := perr == nil && slotOf(prev) == cur
 	steps := []func() error{
-		func() error { return sec.Put(cur, clerk.KindStatic, []byte(password)) },
+		put,
 		func() error { return privfile.WriteAtomic(dir, mailSettings, b, nil) },
 		func() error {
 			// Another account's record of read mail does not load under this
@@ -247,8 +326,16 @@ type MailConfig struct {
 	Guard         *netguard.Policy // nil: imapsmtp's default policy
 	// Sealer seals the record of read mail, as it does the Secrets file.
 	Sealer clerk.Sealer
+	// Conn starts a fresh IMAP connection process for each session and
+	// returns its control connection (imapsmtp.Config.Conn, #2937 gap 2):
+	// the only process that parses IMAP. An IMAP account needs it.
+	Conn func(context.Context) (*net.UnixConn, error)
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
+	// gmail is the Gmail API's root, token endpoint, consent page and
+	// revocation endpoint, inbox's GmailBase, GmailToken, GmailConsent and
+	// GmailRevoke when empty: a fake's, in tests only.
+	gmail struct{ base, token, consent, revoke string }
 }
 
 // Mail is the mail clerk a process serves, and what it tells the owner.
@@ -295,10 +382,19 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 		w.LastOpened = opened
 		return w
 	}}
-	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, c.RetentionDays, c.OneClickBody); err != nil {
+	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, retention(s, c), c.OneClickBody); err != nil {
 		return nil, mark, err
 	}
 	return m, mark, nil
+}
+
+// retention is how many days the account's trash keeps a mail: Gmail's own
+// 30 for a Gmail account, the owner's setting for any other.
+func retention(s MailSettings, c MailConfig) int {
+	if s.API == APIGmail {
+		return gmailRetentionDays
+	}
+	return c.RetentionDays
 }
 
 // recheck is whether the account is read again after a read on day under
@@ -349,8 +445,18 @@ func (c MailConfig) day() string {
 	return c.today() + " " + time.Now().UTC().Format(time.DateOnly)
 }
 
-// mailBox is the mailbox of the account in dir, and its settings.
-func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSettings, error) {
+// mailbox is what the clerk's process reads and acts through: inbox.Live
+// over IMAP and SMTP, or inbox.Gmail over the Gmail API's declared calls.
+type mailbox interface {
+	inbox.Mailbox
+	Read(ctx context.Context) ([]inbox.Mail, error)
+	Opened(ctx context.Context, today string, log inbox.SeenLog) (map[string]string, inbox.SeenLog, error)
+	Mark(ctx context.Context) (inbox.Mark, error)
+}
+
+// mailBox is the mailbox of the account in dir, chosen by its settings'
+// API, and its settings.
+func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (mailbox, MailSettings, error) {
 	s, err := readMail(dir)
 	if err != nil && !errors.Is(err, ErrNoMailAccount) {
 		// Told as the settings' fault, not the server's (trouble).
@@ -362,12 +468,16 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSet
 	if c.Sealer == nil || c.World == nil {
 		return nil, s, errors.New("run: a mail clerk needs its sealer and its world")
 	}
+	if s.API == APIGmail {
+		g, err := gmailBox(sec, slotOf(s), c)
+		return g, s, err
+	}
 	login := sec.Login(slotOf(s), s.login())
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
 		Credential: func(ctx context.Context) (imapsmtp.Login, error) {
 			l, err := login(ctx)
 			return imapsmtp.Login{User: l.User, Secret: l.Secret}, err
-		}, From: s.Address, Guard: c.Guard}
+		}, From: s.Address, Guard: c.Guard, Conn: c.Conn}
 	if s.StartTLS {
 		cfg.SMTPSec = imapsmtp.StartTLS
 	}
@@ -381,6 +491,34 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSet
 	// Live unsubscribes are on (#2841): a failing read keeps the read mail
 	// it found (lastOpened), so VRB-2 holds after the owner deletes it.
 	return inbox.NewLive(st).WithPoster(), s, nil
+}
+
+// gmailBox is a Gmail mailbox whose grant is sealed in slot of sec. Its
+// calls and its unsubscribes go through c.Guard, the home-network policy
+// (imapsmtp's default when nil), and trust c.TLS's roots, the system's when
+// none.
+func gmailBox(sec *clerk.Secrets, slot string, c MailConfig) (*inbox.Gmail, error) {
+	guard, roots := c.gmailNet()
+	base, token := cmp.Or(c.gmail.base, inbox.GmailBase), cmp.Or(c.gmail.token, inbox.GmailToken)
+	api, err := clerk.NewAPI(inbox.GmailDeclaration(base, token, slot, guard, nil), sec, roots)
+	if err != nil {
+		return nil, err
+	}
+	return inbox.NewGmail(api).WithPoster(guard), nil
+}
+
+// gmailNet is the home-network policy Gmail's calls go through, c.Guard or
+// imapsmtp's default, and the roots they trust, c.TLS's or the system's.
+func (c MailConfig) gmailNet() (*netguard.Policy, *x509.CertPool) {
+	guard := c.Guard
+	if guard == nil {
+		guard = netguard.New(netguard.Config{})
+	}
+	var roots *x509.CertPool
+	if c.TLS != nil {
+		roots = c.TLS.RootCAs
+	}
+	return guard, roots
 }
 
 // today is the date c's world gives, or UTC's.

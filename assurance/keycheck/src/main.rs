@@ -2,9 +2,11 @@
 //! differential harness (broker/test/keydiff). A case is
 //! {"op": "chain"|"verify"|"authorize"|"spend", "key", "owners", "use", "sig",
 //! "step", "task", "amount", "ctx"}; a verdict is {"valid", "bad", "codes",
-//! "hold", "scopes"}.
+//! "hold", "scopes", "by_owner", "narrowers"}. A case {"op": "within", "renew",
+//! "was"} compares two first links' caveats; its verdict is {"valid",
+//! "within"}, valid when both fold.
 
-use keycheck::{chain, verify, wire, Context, Step};
+use keycheck::{chain, fold, verify, wire, within, Context, Step};
 use serde::Deserialize;
 use std::io::{self, BufRead, Write};
 
@@ -21,9 +23,22 @@ struct Case {
     task: String,
     amount: i64,
     ctx: Context,
+    renew: Option<Vec<wire::Caveat>>,
+    was: Option<Vec<wire::Caveat>>,
 }
 
 fn verdict(c: &Case) -> serde_json::Value {
+    if c.op == "within" {
+        return match (
+            fold(c.renew.as_deref().unwrap_or(&[])),
+            fold(c.was.as_deref().unwrap_or(&[])),
+        ) {
+            (Ok(n), Ok(o)) => serde_json::json!({"valid": true, "within": within(&n, &o)}),
+            (Err(b), _) | (_, Err(b)) => {
+                serde_json::json!({"valid": false, "bad": format!("{b:?}")})
+            }
+        };
+    }
     let owners: Vec<Vec<u8>> = c.owners.iter().map(|b| b.get().to_vec()).collect();
     let checked = match c.op.as_str() {
         "chain" | "spend" => chain(&c.key, &owners),
@@ -43,6 +58,8 @@ fn verdict(c: &Case) -> serde_json::Value {
         "codes": codes,
         "hold": [k.limits.window(false), k.limits.window(true)],
         "scopes": k.scopes().iter().map(wire::hex).collect::<Vec<_>>(),
+        "by_owner": k.by_owner,
+        "narrowers": k.narrowers.iter().map(|p| p.iter().map(|b| format!("{b:02x}")).collect::<String>()).collect::<Vec<_>>(),
     })
 }
 

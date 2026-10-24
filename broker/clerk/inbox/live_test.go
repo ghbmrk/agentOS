@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -42,7 +43,7 @@ func newLiveRig(t *testing.T, retention int, classes map[string]string, raws ...
 	for _, raw := range raws {
 		srv.Deliver("INBOX", raw)
 	}
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}})

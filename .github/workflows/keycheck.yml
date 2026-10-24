@@ -52,3 +52,11 @@ jobs:
         run: |
           KEYDIFF_CASES=20000 go test -count=1 -run '^TestKeyDiff$' ./test/keydiff/
           KEYDIFF_FROM=$(( (RUN % 100000) * 1000000 )) KEYDIFF_CASES=$CASES go test -count=1 -timeout 25m -run '^TestKeyDiff$' ./test/keydiff/
+      - name: The sweep reaches every predicate the library checks
+        # #2989: each library mutant drops one predicate of broker/kernel/key
+        # and must be caught by a disagreement with keycheck.
+        working-directory: broker
+        env:
+          KEYCHECK: ${{ github.workspace }}/assurance/keycheck/target/release/keycheck
+          KEYDIFF_REACH: "1"
+        run: go test -count=1 -timeout 20m -run '^TestPredicateReach$' ./test/keydiff/
