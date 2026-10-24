@@ -134,3 +134,28 @@ func TestOWN4AckDelaySetting(t *testing.T) {
 		t.Fatalf("locked ACK 45 set %d", got)
 	}
 }
+
+// REQ: CH-15, QH-6
+// URGENT APPROVAL also paces the agent's questions to the owner, which go
+// in the approval class (D-129, O22), so every settings text that names
+// the setting says so (PACE-help-questions, #2394).
+func TestPACEHelpNamesQuestions(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	for _, c := range []struct{ msg, want string }{
+		{"URGENT APPROVAL OFF", "Approval requests and the agent's questions now wait for quiet hours to end and for room in the hourly limit."},
+		{"TEXTS 5", "Texts set: 5 an hour. More wait for the next hour, except security alerts and replies to you."},
+		{"URGENT APPROVAL ON", "Approval requests and the agent's questions now go at once, in quiet hours too."},
+		{"TEXTS 4", "Texts set: 4 an hour. More wait for the next hour, except security alerts, approval requests and the agent's questions and replies to you."},
+	} {
+		if got := r.say(c.msg); got != c.want {
+			t.Fatalf("%s: %q, want %q", c.msg, got, c.want)
+		}
+	}
+	if got := r.say("TEXTS 0"); got != pacingForms || !strings.HasSuffix(got, "approval requests and the agent's questions do unless URGENT APPROVAL OFF.") {
+		t.Fatalf("forms: %q", got)
+	}
+	if got := r.say("HELP"); !strings.HasSuffix(got, "URGENT APPROVAL/AGENT ON/OFF (approval covers questions), CHAT 30, ACK 5.") {
+		t.Fatalf("HELP: %q", got)
+	}
+}

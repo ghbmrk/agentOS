@@ -496,7 +496,7 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	}
 	// The code unlocks; RUN then applies the held setting.
 	r.unlock()
-	const quietSet = "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts and approval requests. Reply QUIET OFF to end them."
+	const quietSet = "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts, approval requests and the agent's questions. Reply QUIET OFF to end them."
 	if got := r.say("RUN"); got != quietSet {
 		t.Fatalf("QUIET after unlock: %q", got)
 	}
@@ -511,7 +511,7 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	}
 	// W5-Dc-r15-2: approval is urgent by default (D-129); OFF is
 	// saved and survives a restart, and ON clears it.
-	if got := r.say("URGENT approval OFF"); !strings.HasPrefix(got, "Approval requests now wait") {
+	if got := r.say("URGENT approval OFF"); !strings.HasPrefix(got, "Approval requests and the agent's questions now wait") {
 		t.Fatalf("URGENT approval OFF: %q", got)
 	}
 	if r.ch.Urgent(ClassApproval) {
@@ -523,7 +523,7 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	if again := newRig(t, r.store); again.ch.Urgent(ClassApproval) {
 		t.Fatal("URGENT approval OFF lost on restart")
 	}
-	if got := r.say("URGENT approval ON"); !strings.HasPrefix(got, "Approval requests now go at once") {
+	if got := r.say("URGENT approval ON"); !strings.HasPrefix(got, "Approval requests and the agent's questions now go at once") {
 		t.Fatalf("URGENT approval ON: %q", got)
 	}
 	if !r.ch.Urgent(ClassApproval) {
