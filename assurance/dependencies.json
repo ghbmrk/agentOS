@@ -18,6 +18,11 @@
       "host": "oauth2.googleapis.com",
       "class": "optional",
       "dependency": "Google's OAuth token endpoint (D-150; optional per DEP-3): the mail clerk redeems its sealed Gmail refresh grant there (broker/clerk/inbox/gmail.go, #2851). Only an owner who connects Gmail reaches it."
+    },
+    {
+      "host": "accounts.google.com",
+      "class": "optional",
+      "dependency": "Google's OAuth consent page (D-150; optional per DEP-3): the address a Gmail sign-in gives the owner to open on their own phone (broker/clerk/inbox/gmailauth.go, #2852). The box never dials it; only an owner who connects Gmail sees it."
     }
   ],
   "claim_literals": [
@@ -40,6 +45,11 @@
       "file": "broker/provagent/declare.go",
       "host": "x.ai",
       "why": "TermsURL of the grok qualification record: the terms page read for #1377, recorded as data and never contacted (#1378)."
+    },
+    {
+      "file": "broker/clerk/inbox/gmailauth.go",
+      "host": "www.googleapis.com",
+      "why": "Google's Gmail OAuth scope names (https://www.googleapis.com/auth/gmail.*), sent as the consent page's scope parameter and compared with the token endpoint's answer; identifiers only, never contacted (#2852, CLK-9)."
     }
   ],
   "inert_literals": [

@@ -11,6 +11,7 @@ package gmailtest
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -65,7 +66,15 @@ type Server struct {
 	forwards []string
 	autoFwd  string
 	grantOK  bool
+	// Sign-in (D-150): the codes consent issued, each with its PKCE
+	// challenge, redirect and scope; the scope the next consent grants
+	// beyond the asked one; and the tokens revoked.
+	codes   map[string]consent
+	wider   string
+	revoked []string
 }
+
+type consent struct{ challenge, redirect, scope string }
 
 // Message is one stored message.
 type Message struct {
@@ -83,7 +92,7 @@ var system = []string{"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT"
 
 // New starts a fake; Close stops it.
 func New() *Server {
-	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, grantOK: true}
+	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, grantOK: true, codes: map[string]consent{}}
 	for _, id := range system {
 		s.labels = append(s.labels, Label{ID: id, Name: id, Type: "system"})
 	}
@@ -106,6 +115,53 @@ func (s *Server) Base() string { return s.origin() + "/gmail/v1/users/me" }
 
 // Token is the fake's token endpoint, in GmailToken's place.
 func (s *Server) Token() string { return s.origin() + "/token" }
+
+// Consent is the fake's consent page and Revoke its revocation endpoint.
+func (s *Server) Consent() string { return s.origin() + "/consent" }
+func (s *Server) Revoke() string  { return s.origin() + "/revoke" }
+
+// Approve is the owner approving the consent address the clerk gave, on
+// their phone: it checks the request is Google's installed-app shape with
+// PKCE S256 and returns the loopback address the browser lands on, with a
+// code and the state. ok false is a consent the fake would refuse to show.
+func (s *Server) Approve(address string) (landing string, ok bool) {
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme+"://"+u.Host+u.Path != s.Consent() {
+		return "", false
+	}
+	q := u.Query()
+	if q.Get("response_type") != "code" || q.Get("client_id") != Client || q.Get("code_challenge_method") != "S256" ||
+		len(q.Get("code_challenge")) != 43 || q.Get("state") == "" || q.Get("access_type") != "offline" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scope := q.Get("scope")
+	if s.wider != "" {
+		scope += " " + s.wider
+	}
+	code := "canary-gmailtest-code-" + strconv.Itoa(len(s.codes)+1)
+	s.codes[code] = consent{q.Get("code_challenge"), q.Get("redirect_uri"), scope}
+	return q.Get("redirect_uri") + "?" + url.Values{"state": {q.Get("state")}, "code": {code}, "scope": {scope}}.Encode(), true
+}
+
+// Deny is the owner pressing Cancel on the consent page.
+func Deny(address string) string {
+	u, _ := url.Parse(address)
+	q := u.Query()
+	return q.Get("redirect_uri") + "?" + url.Values{"state": {q.Get("state")}, "error": {"access_denied"}}.Encode()
+}
+
+// Wider makes every later consent grant scope too, as Google's
+// include_granted_scopes does with an earlier grant.
+func (s *Server) Wider(scope string) { s.mu.Lock(); s.wider = scope; s.mu.Unlock() }
+
+// Revoked lists the tokens revoked, in order.
+func (s *Server) Revoked() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.revoked)
+}
 
 // Roots trusts the fake's certificate.
 func (s *Server) Roots() *x509.CertPool {
@@ -252,6 +308,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	if r.URL.Path == "/token" {
 		s.serveToken(w, r)
+		return
+	}
+	if r.URL.Path == "/revoke" {
+		s.serveRevoke(w, r)
 		return
 	}
 	line := r.Method + " " + r.URL.Path
@@ -491,7 +551,52 @@ func headers(raw []byte, only []string) []map[string]string {
 	return out
 }
 
+// serveCode redeems a consent's code once (RFC 6749 section 4.1.3), checking
+// the PKCE verifier against its challenge (RFC 7636 section 4.6), the
+// redirect and the client.
+func (s *Server) serveCode(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.codes[r.Form.Get("code")]
+	delete(s.codes, r.Form.Get("code"))
+	sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != c.challenge || r.Form.Get("redirect_uri") != c.redirect ||
+		r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+		return
+	}
+	s.tokens++
+	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
+	s.grantOK = true
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer",
+		"refresh_token": Refresh, "scope": c.scope})
+}
+
+// serveRevoke revokes a token (RFC 7009): the refresh token kills the grant
+// and its access token; an unknown token answers 400, as Google's does.
+func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
+	t := ""
+	if r.ParseForm() == nil {
+		t = r.Form.Get("token")
+	}
+	switch {
+	case t == Refresh && s.grantOK:
+		s.grantOK, s.token = false, ""
+	case t != "" && t == s.token:
+		s.token = ""
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_token"}`))
+		return
+	}
+	s.revoked = append(s.revoked, t)
+}
+
 func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
+	if r.ParseForm() == nil && r.Form.Get("grant_type") == "authorization_code" {
+		s.serveCode(w, r)
+		return
+	}
 	if r.ParseForm() != nil || r.Form.Get("grant_type") != "refresh_token" || !s.grantOK ||
 		r.Form.Get("refresh_token") != Refresh || r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
 		w.WriteHeader(http.StatusBadRequest)

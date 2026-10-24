@@ -46,6 +46,9 @@ var thirdPartyHosts = map[string]bool{
 	// The Gmail API and Google's token endpoint, reached only by an owner who
 	// connects Gmail to the mail clerk (CLK-9, D-150, #2851).
 	"gmail.googleapis.com": true, "oauth2.googleapis.com": true,
+	// Google's consent page, which the owner opens on their phone, and the
+	// host Gmail's scope names sit under, never dialed (#2852).
+	"accounts.google.com": true, "www.googleapis.com": true,
 }
 
 // projectHost names a domain the project could run: anything carrying
