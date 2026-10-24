@@ -114,6 +114,8 @@ pub struct Limits {
     pub task: Option<String>,
     // The tightest value of each cap so far, for the narrowing rule.
     pub tightest: HashMap<&'static str, i64>,
+    /// Set by `fold` once a verbs caveat narrows the closed list.
+    pub verbs_named: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,12 @@ pub struct Checked {
     pub caps: Vec<Cap>,
     /// The submitter signed the use as the tip's holder.
     pub held: bool,
+    /// The tip is a link after the first that an owner passkey signed for
+    /// its parent's holder: the owner narrowed the key (KRN-ownerlink).
+    pub by_owner: bool,
+    /// The passkeys that signed such links, anywhere in the chain, so a
+    /// passkey cut off since can be checked against them.
+    pub narrowers: Vec<Vec<u8>>,
 }
 
 fn pk(b: &[u8]) -> Option<VerifyingKey> {
@@ -143,7 +151,12 @@ fn signed(by: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 }
 
 fn any_signed(owners: &[Vec<u8>], msg: &[u8], sig: &[u8]) -> bool {
-    owners.iter().any(|o| o.len() == 32 && signed(o, msg, sig))
+    who_signed(owners, msg, sig).is_some()
+}
+
+/// The first owner passkey, in the order given, whose signature sig is.
+fn who_signed<'a>(owners: &'a [Vec<u8>], msg: &[u8], sig: &[u8]) -> Option<&'a Vec<u8>> {
+    owners.iter().find(|o| o.len() == 32 && signed(o, msg, sig))
 }
 
 fn is_owner(owners: &[Vec<u8>], k: &[u8]) -> bool {
@@ -329,6 +342,8 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
     let mut caps = Vec::new();
     let mut account = None;
     let mut prev_holder: Option<&[u8]> = None;
+    let mut by_owner = false;
+    let mut narrowers = Vec::new();
     for (i, link) in links.iter().enumerate() {
         let prev = *ids.last().unwrap();
         let holder = link.holder.get();
@@ -338,18 +353,21 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
             return Err(Bad::Malformed("holder is not 32 bytes"));
         }
         let msg = wire::link_msg(&prev, link);
-        let ok = match prev_holder {
+        by_owner = false;
+        match prev_holder {
             // A bare root is held by the owner's passkeys (KEY-4).
-            None => any_signed(owners, &msg, link.sig.get()),
+            None if any_signed(owners, &msg, link.sig.get()) => {}
             // A link is signed by its parent's holder, or by a passkey that
             // narrows the key for that same holder (KRN-ownerlink).
-            Some(p) => {
-                signed(p, &msg, link.sig.get())
-                    || (p == holder && any_signed(owners, &msg, link.sig.get()))
-            }
-        };
-        if !ok {
-            return Err(Bad::BadSig);
+            Some(p) if signed(p, &msg, link.sig.get()) => {}
+            Some(p) if p == holder => match who_signed(owners, &msg, link.sig.get()) {
+                Some(o) => {
+                    by_owner = true;
+                    narrowers.push(o.clone());
+                }
+                None => return Err(Bad::BadSig),
+            },
+            _ => return Err(Bad::BadSig),
         }
         let id = wire::link_id(&prev, link);
         let scope = if i == 0 {
@@ -378,7 +396,57 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
         limits: l,
         caps,
         held: false,
+        by_owner,
+        narrowers,
     })
+}
+
+/// The limits of one link's caveats alone, as a first link sets them, for
+/// comparing a renewal with the grant it renews. Verbs start as the whole
+/// closed list, and `verbs_named` says whether a caveat narrowed them.
+pub fn fold(cavs: &[wire::Caveat]) -> Result<(Limits, Vec<Cap>), Bad> {
+    let mut l = Limits {
+        verbs: VERBS.iter().map(|(v, _)| v.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut caps = Vec::new();
+    for c in cavs {
+        l.add(c, Id::default(), &mut caps)?;
+        l.verbs_named |= c.kind == "verbs";
+    }
+    Ok((l, caps))
+}
+
+/// Whether a renewal's first link (`new`) allows nothing the grant it renews
+/// (`old`) does not, expiry aside: every limit `old` sets, `new` sets at least
+/// as tightly (KEY-4: a renewal at the same limits is live at once).
+pub fn within(new: &(Limits, Vec<Cap>), old: &(Limits, Vec<Cap>)) -> bool {
+    let ((n, ncaps), (o, ocaps)) = (new, old);
+    let set = |a: &Option<BTreeSet<String>>, b: &Option<BTreeSet<String>>| match (a, b) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(a), Some(b)) => a.is_subset(b),
+    };
+    let verbs = !o.verbs_named || (n.verbs_named && n.verbs.is_subset(&o.verbs));
+    let args = o.args.iter().all(|(name, ob)| {
+        n.args.get(name).is_some_and(|nb| {
+            set(&nb.one_of, &ob.one_of)
+                && ob.min.is_none_or(|m| nb.min.is_some_and(|x| x >= m))
+                && ob.max.is_none_or(|m| nb.max.is_some_and(|x| x <= m))
+        })
+    });
+    let caps = ocaps
+        .iter()
+        .all(|oc| ncaps.iter().any(|nc| nc.kind == oc.kind && nc.n <= oc.n));
+    let task = o.task.is_none() || n.task == o.task;
+    verbs
+        && set(&n.content, &o.content)
+        && set(&n.labels, &o.labels)
+        && args
+        && caps
+        && task
+        && n.hold_base >= o.hold_base
+        && n.hold_novelty >= o.hold_novelty
 }
 
 /// Checks the chain and that sig is the tip holder's over use: only the last
@@ -439,6 +507,10 @@ pub struct Context {
     pub stopped: bool,
     #[serde(deserialize_with = "nullable")]
     pub uses: HashMap<String, Vec<Use>>,
+    /// No revocation view was given: every use fails closed.
+    pub no_view: bool,
+    /// No ledger was given: a capped key fails closed.
+    pub no_ledger: bool,
 }
 
 /// Reads null as empty, as a Go nil slice or map is.
@@ -470,6 +542,9 @@ impl Checked {
     /// KEY-7), and expiry.
     pub fn live(&self, c: &Context) -> BTreeSet<&'static str> {
         let mut out = BTreeSet::new();
+        if c.no_view {
+            out.insert(MALFORMED);
+        }
         if c.stopped {
             out.insert(STOPPED);
         }
@@ -501,6 +576,9 @@ impl Checked {
     /// LOG-7's money caps: the per-task total and the rolling daily total,
     /// each with this charge added, in exact arithmetic so no total wraps.
     fn money(&self, task: &str, amount: i64, c: &Context, out: &mut BTreeSet<&'static str>) {
+        if c.no_ledger && !self.caps.is_empty() {
+            out.insert(MALFORMED);
+        }
         let total = |it: &mut dyn Iterator<Item = &Use>| {
             it.map(|u| u.amount as i128).sum::<i128>() + amount as i128
         };
@@ -740,6 +818,58 @@ mod tests {
         let t1 = extend(&k, &c, &g, vec![cav("task", 0, 0, Some(&["t1"]))]);
         let t2 = extend(&t1, &g, &g, vec![cav("task", 0, 0, Some(&["t2"]))]);
         assert!(matches!(chain(&t2, &owners), Err(Bad::Loosens(_))));
+    }
+
+    #[test]
+    fn an_owner_narrowing_is_reported() {
+        let (o, c, g) = (party(1), party(3), party(4));
+        let owners = vec![pub_(&o)];
+        let k = extend(&root(&o), &o, &c, bounds());
+        let narrowed = extend(&k, &o, &c, vec![cav("uses", 3, 0, None)]);
+        let v = chain(&narrowed, &owners).unwrap();
+        assert!(v.by_owner);
+        assert_eq!(v.narrowers, vec![pub_(&o)]);
+        let handed = chain(&extend(&narrowed, &c, &g, vec![]), &owners).unwrap();
+        assert!(!handed.by_owner);
+        assert_eq!(handed.narrowers, vec![pub_(&o)]);
+        assert!(!chain(&k, &owners).unwrap().by_owner);
+        assert_eq!(
+            chain(&extend(&k, &o, &g, vec![]), &owners).unwrap_err(),
+            Bad::BadSig
+        );
+    }
+
+    #[test]
+    fn a_renewal_is_within_the_grant_it_renews() {
+        let old = fold(&[
+            cav("spend-day", 50, 0, None),
+            cav("labels", 0, 0, Some(&["a", "b"])),
+            cav("hold", 10, 20, None),
+        ])
+        .unwrap();
+        let same = fold(&[
+            cav("labels", 0, 0, Some(&["a"])),
+            cav("spend-day", 50, 0, None),
+            cav("hold", 10, 20, None),
+            cav("verbs", 0, 0, Some(&["send"])),
+        ])
+        .unwrap();
+        assert!(within(&same, &old));
+        assert!(!within(&old, &same));
+        let raised = fold(&[
+            cav("spend-day", 51, 0, None),
+            cav("labels", 0, 0, Some(&["a"])),
+            cav("hold", 10, 20, None),
+        ])
+        .unwrap();
+        assert!(!within(&raised, &old));
+        let shorter = fold(&[
+            cav("spend-day", 50, 0, None),
+            cav("labels", 0, 0, Some(&["a"])),
+            cav("hold", 10, 19, None),
+        ])
+        .unwrap();
+        assert!(!within(&shorter, &old));
     }
 
     #[test]

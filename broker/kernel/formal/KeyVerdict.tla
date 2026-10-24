@@ -13,9 +13,10 @@
 (* broker/kernel/key/testdata/formal/.                                      *)
 (*                                                                          *)
 (* Signatures are not bytes here: a link records who signed it. Argument    *)
-(* bounds, content and the spend and rate caps are left to the Go reference *)
-(* model (broker/kernel/key/refmodel_test.go); `uses` stands for the        *)
-(* counted caps, since all of them charge every prefix of a chain alike.    *)
+(* bounds, content and the spend and rate caps are left to keycheck, the    *)
+(* Rust key check fuzzed against the library (broker/test/keydiff); `uses`  *)
+(* stands for the counted caps, since all of them charge every prefix of a  *)
+(* chain alike.                                                             *)
 EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS MaxLinks, MaxNow, MaxUsed
