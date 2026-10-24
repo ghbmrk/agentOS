@@ -1,0 +1,31 @@
+#!/bin/sh
+# The monthly restore drill's report (#2932), on the first healthy boot after the drill's reboot
+# (agentos-drill-report.service runs after boot-complete.target, which the health check gates). The
+# time to a clean core is the image check's seconds plus the seconds from the reboot to this boot.
+# The backup (BAK-1) and the kernel's log (LOG-2) are not on the box yet, so they read none: never a
+# pass for what was not drilled. last.json is the record STATUS reads once the kernel serves it.
+# A drill that fails is a bug: the line reads FAIL and the unit fails.
+# AGENTOS_HEALTH_ROOT exists for tests/test_image_drill.py.
+set -u
+R=${AGENTOS_HEALTH_ROOT:-}
+D=$R/var/lib/agentos/drill
+p=$(cat "$D/pending" 2>/dev/null) || p=
+# One number or word per key, from reboot-weekly's one line; anything else reads as missing.
+get() { printf '%s\n' "$p" | tr ' ' '\n' | sed -n "s/^$1=\([a-z0-9]*\)\$/\1/p" | head -n 1; }
+image=$(get image) secs=$(get image_seconds) at=$(get reboot_at)
+now=$(date +%s)
+result=pass restart= clean=
+case $secs:$at in *[!0-9:]* | :* | *:) result=FAIL ;; *)
+	restart=$((now - at)) clean=$((secs + now - at))
+	# A clock that went back across the reboot gives no time at all.
+	[ "$restart" -ge 0 ] || { result=FAIL restart= clean=; } ;;
+esac
+[ "$image" = verified ] || result=FAIL
+mkdir -p -m 0700 "$D"
+printf '{"at":%s,"result":"%s","image":"%s","image_seconds":%s,"restart_seconds":%s,"clean_core_seconds":%s,"backup":"none","log":"none"}\n' \
+	"$now" "$(echo "$result" | tr A-Z a-z)" "${image:-none}" "${secs:-null}" "${restart:-null}" "${clean:-null}" >"$D/last.json.new" &&
+	mv -f "$D/last.json.new" "$D/last.json"
+rm -f "$D/pending"
+# One line, one write (image/ASSUMPTIONS.md I24).
+echo "agentos-drill: $result image=${image:-none} clean_core_seconds=${clean:-none} image_seconds=${secs:-none} restart_seconds=${restart:-none} backup=none log=none (no backup: this drive is the only copy)"
+[ "$result" = pass ]
