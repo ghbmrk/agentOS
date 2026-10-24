@@ -28,7 +28,9 @@ adds a `known` or `allow` line, drops a root or deletes the file fails unless th
 line `Trusted-core: <decision ID>` naming an active DECISIONS.md row of the base tree whose
 text names the PR (`#<number>`, from --pr), so neither a row added by the PR itself nor an
 unrelated standing row can waive it; the reviewer checks that the row records Mark approving
-the growth (the D-152 word budget, for code; #2945). In CI the base tree is the base branch tip
+the growth (the D-152 word budget, for code; #2945). Growth that implements a design Mark
+already approved needs no card: a one-row DECISIONS.md PR names the PR and cites that approval
+under D-159, and merges first (decisions/D-159.md). In CI the base tree is the base branch tip
 and the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
 gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
