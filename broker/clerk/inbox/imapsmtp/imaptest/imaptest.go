@@ -115,6 +115,17 @@ type msg struct {
 // folders (with their special-use attributes) until the test ends.
 func Start(t *testing.T) *Server {
 	t.Helper()
+	s, stop, err := Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	return s
+}
+
+// Run is Start outside a test, for the inbox slice's run on a real mailbox
+// (A21); stop ends the server.
+func Run() (*Server, func(), error) {
 	s := &Server{boxes: map[string]*box{}, validity: 1, failList: map[string]bool{}, hidden: map[string]bool{}}
 	for name, attr := range map[string]string{"INBOX": "", "Archive": imap.ArchiveAttr, "Drafts": imap.DraftsAttr,
 		"Sent": imap.SentAttr, "Trash": imap.TrashAttr, "Junk": imap.JunkAttr} {
@@ -122,7 +133,7 @@ func Start(t *testing.T) *Server {
 	}
 	il, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 	srv := server.New(&be{s})
 	srv.AllowInsecureAuth = true
@@ -131,12 +142,12 @@ func Start(t *testing.T) *Server {
 	go srv.Serve(il)
 	sl, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		srv.Close()
+		return nil, nil, err
 	}
 	go s.serveSMTP(sl)
 	s.IMAP, s.SMTP = il.Addr().String(), sl.Addr().String()
-	t.Cleanup(func() { srv.Close(); sl.Close() })
-	return s
+	return s, func() { srv.Close(); sl.Close() }, nil
 }
 
 // AddFolder adds a folder with a special-use attribute (or none).
