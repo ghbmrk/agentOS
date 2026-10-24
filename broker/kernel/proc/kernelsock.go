@@ -155,6 +155,10 @@ var OwnerSide = Side{"owner", map[string]op{
 	"unpause": act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
 	"stop":    act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
 	"resume":  act(func(k *kernel.Kernel, now int64, _ none) error { return k.Resume(now) }),
+	"setup":   act(func(k *kernel.Kernel, now int64, f kernel.FirstAnchors) error { return k.Setup(now, f) }),
+	"setupinfo": func(k *kernel.Kernel, _ int64, _ json.RawMessage) (any, error) {
+		return SetupInfo{Open: k.State().SetupOpen(), Box: k.Box()}, nil
+	},
 
 	"status":      read(func(s *kernel.State, _ int64, _ none) []kernel.Unsettled { return s.Status() }),
 	"linechanges": read(func(s *kernel.State, _ int64, _ none) int { return s.LineChanges() }),
@@ -257,6 +261,21 @@ func ServeConns(ln net.Listener, n int, handle func(net.Conn)) error {
 	}
 }
 
+// SetupInfo is what the setup page needs before the owner's keys sign:
+// whether setup is still open, and the box's head key they sign over.
+type SetupInfo struct {
+	Open bool              `json:"open"`
+	Box  ed25519.PublicKey `json:"box"`
+}
+
+// setupOps are the only calls a kernel with no anchors serves: the setup
+// step, what it signs over, and STATUS (#2905 open point 2).
+var setupOps = map[string]bool{"owner/setup": true, "owner/setupinfo": true, "owner/status": true}
+
+// ErrSetupOnly refuses every other call until setup has logged the owner's
+// hardware keys.
+var ErrSetupOnly = errors.New("run: I am waiting for setup; I take only your two hardware keys until then")
+
 func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
 	ServeOne(conn, func(name string, args json.RawMessage) (out json.RawMessage, err error) {
 		f, ok := side.ops[name]
@@ -264,6 +283,9 @@ func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
 			return nil, errors.New("run: the " + side.name + " socket has no call " + name)
 		}
 		err = h.With(func(k *kernel.Kernel) error {
+			if len(k.State().Anchors) == 0 && !setupOps[side.name+"/"+name] {
+				return ErrSetupOnly
+			}
 			res, err := f(k, clock(), args)
 			if err == nil && res != nil {
 				// Encoded under the lock: the caller gets a copy.
@@ -341,7 +363,7 @@ func init() {
 		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
-		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs,
+		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 	}
 	for _, e := range wireList {
 		wireErrors[e.Error()] = e
@@ -479,6 +501,12 @@ func (o Owner) Pause(id key.ID) error   { return o.Call("pause", id, nil) }
 func (o Owner) Unpause(id key.ID) error { return o.Call("unpause", id, nil) }
 func (o Owner) Stop() error             { return o.Call("stop", nil, nil) }
 func (o Owner) Resume() error           { return o.Call("resume", nil, nil) }
+
+// Setup logs the owner's first hardware keys on a setup-only kernel.
+func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
+
+// SetupInfo reads whether setup is open and the box key it signs over.
+func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", nil, &i); return }
 
 func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
 func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }

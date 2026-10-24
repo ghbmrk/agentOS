@@ -60,7 +60,8 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 
 // KernelKeys is what the unlock step hands the kernel process: the log's
 // key, the head-signing key, the log anchor's counter and the owner's
-// anchors.
+// anchors, none when the store holds none (the kernel then starts
+// setup-only and takes them into its log, kernel.Setup).
 type KernelKeys struct {
 	Log     [32]byte
 	Head    ed25519.PrivateKey
@@ -109,7 +110,7 @@ func ParseAnchors(b []byte) ([]ed25519.PublicKey, error) {
 
 // Marshal encodes k for the pipe. The caller wipes the result.
 func (k KernelKeys) Marshal() ([]byte, error) {
-	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) < 1 || len(k.Anchors) > MaxAnchors {
+	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
@@ -194,11 +195,13 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if len(rest) != 1+n*ed25519.PublicKeySize {
 		return KernelKeys{}, ErrHandoff
 	}
-	anchors, err := ParseAnchors(rest[1:])
-	if err != nil {
-		return KernelKeys{}, err
+	var k KernelKeys
+	if n > 0 { // none: the store has no anchors yet, so the kernel starts setup-only
+		var err error
+		if k.Anchors, err = ParseAnchors(rest[1:]); err != nil {
+			return KernelKeys{}, err
+		}
 	}
-	k := KernelKeys{Anchors: anchors}
 	o = len(handoffTag)
 	copy(k.Log[:], b[o:o+32])
 	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])
