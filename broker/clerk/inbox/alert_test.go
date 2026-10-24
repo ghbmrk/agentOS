@@ -3,6 +3,7 @@ package inbox
 // REQ: VRB-2 (assumptions MIG-4-mail-reader-2, -3)
 
 import (
+	"bytes"
 	"encoding/base64"
 	"slices"
 	"strings"
@@ -266,6 +267,88 @@ func TestTheSenderNetFailsClosedOnAmbiguousMail(t *testing.T) {
 	} {
 		if !isAlert([]byte("Authentication-Results: "+authServ+"; dmarc=pass header.from=bank.test\r\nFrom: "+from+"\r\n"+body), w) {
 			t.Errorf("control: From %q with a single aligned pass is not an alert", from)
+		}
+	}
+}
+
+// An alert counts as a signal only once the clerk verifies its DKIM
+// signature itself, aligned with the From domain: the provider's DMARC pass
+// alone, a signature for another domain, a broken one or an expired one is
+// not enough. The guard is unchanged: none of them is trashed.
+func TestAnAlertCountsOnlyWhenItsDKIMVerifies(t *testing.T) {
+	const from = "alerts@security.test"
+	pass := authServ + "; dmarc=pass header.from=security.test"
+	good, keys := signed(t, from, "https://security.test/u", "security.test", "")
+	other, otherKeys := signed(t, from, "https://security.test/u", "elsewhere.test", "")
+	expired, _ := signed(t, from, "https://security.test/u", "security.test", "; x="+unix(t, "2026-10-01T00:00:00Z"))
+	for k, v := range otherKeys {
+		keys[k] = v
+	}
+	w := World{DKIMKeys: keys, Today: "2026-10-19", AuthServ: authServ, AlertSenders: []string{"security.test"}}
+	cases := map[string]struct {
+		raw  []byte
+		want bool
+	}{
+		"verified":        {withAuth(good, pass), true},
+		"no dmarc pass":   {good, false},
+		"unsigned":        {withAuth([]byte("From: "+from+"\r\nSubject: New sign-in\r\n\r\nHello.\r\n"), pass), false},
+		"other domain":    {withAuth(other, pass), false},
+		"changed after":   {withAuth(bytes.Replace(good, []byte("Hello."), []byte("Hello!"), 1), pass), false},
+		"expired":         {withAuth(expired, pass), false},
+		"not kept sender": {withAuth(good, pass), false},
+	}
+	for name, c := range cases {
+		cw := w
+		if name == "not kept sender" {
+			cw.AlertSenders = []string{"bank.test"}
+		}
+		if got := VerifiedAlert(c.raw, cw); got != c.want {
+			t.Errorf("%s: VerifiedAlert = %v, want %v", name, got, c.want)
+		}
+	}
+	ms := []Mail{{ID: "a1", Raw: withAuth(good, pass), Class: "spam"}, {ID: "a2", Raw: good, Class: "spam"}}
+	r := newRigOn(t, w, ms, Synthetic{}, 30)
+	if got := r.acct.Alerts(); len(got) != 1 || got[0] != "a1" {
+		t.Fatalf("Alerts = %v, want [a1]", got)
+	}
+}
+
+// #2888: ordinary promotional wording is not an alert. A phrase counts only on
+// word boundaries, so "designing" and "design in" hold no "signin" or "sign in",
+// and a year (19xx, 20xx) next to a code word is a date, which CH-19 lets pass.
+// A plainly written alert keeps its protection, inflected, run on or beside
+// another script: only the start of a phrase is bounded.
+func TestPromotionalWordingIsNotAnAlert(t *testing.T) {
+	for _, c := range []struct {
+		text  string
+		alert bool
+	}{
+		{"We are designing a new spring collection", false},
+		{"Our new design in stores now", false},
+		{"Season pass 2026 on sale", false},
+		{"Key dates for 2026 events", false},
+		{"Codes for the 1999 reunion", false},
+		{"Sign in to see your offers", true},
+		{"Our new design in stores; sign in to shop", true},
+		{"New sign-in from Chrome", true},
+		{"Someone tried to signin to your account", true},
+		{"Was this you?", true},
+		{"Your code is 2100", true},
+		{"Your code is 1899", true},
+		{"Your code is 482913", true},
+		{"PIN 2026-77", true},
+		{"Multiple failed login attempts on your account", true},
+		{"Review recent sign-ins to your account", true},
+		{"Someone signed into your account from Windows", true},
+		{"We noticed new logins to your account", true},
+		{"Your verification codes are below", true},
+		{"Security alerts for your account", true},
+		{"Unusual signon activity", true},
+		{"新しいsign-inがありました", true},
+		{"アカウントのsecurity alert", true},
+	} {
+		if got := wordingAlert(c.text); got != c.alert {
+			t.Errorf("%q: alert %v, want %v", c.text, got, c.alert)
 		}
 	}
 }

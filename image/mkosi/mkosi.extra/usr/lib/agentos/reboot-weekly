@@ -3,13 +3,44 @@
 # is busy (UPD-6: a call or accepted work holds one), so the reboot waits for it to go, retrying
 # every five minutes; but never past a week of uptime, so an implant cannot hold the box up by
 # taking an inhibitor of its own. The timer fires weekly, so the box is never up longer than that.
-# AGENTOS_HEALTH_ROOT exists for tests/test_image_noexec.py.
+# Once a month the reboot is a restore drill (#2932): first every block of the booted /usr is read
+# through dm-verity against the signed boot entry's usrhash=, then the reboot is the clean start, and
+# drill-report times it to the healthy boot (agentos-drill-report.service). A failed check still
+# reboots: the week's bound holds whatever the drill found.
+# AGENTOS_HEALTH_ROOT exists for tests/test_image_noexec.py and tests/test_image_drill.py.
 set -u
 R=${AGENTOS_HEALTH_ROOT:-}
 WEEK=604800
 STEP=300
+D=$R/var/lib/agentos/drill
 up() { cut -d. -f1 "$R/proc/uptime"; }
+# Due when no drill finished in the last 27 days, so one Sunday in four or five. drill-report touches
+# last.json on every drill, passed or failed.
+due() { [ -z "$(find "$D/last.json" -mtime -27 2>/dev/null)" ]; }
+image=
+if due; then
+	start=$(date +%s)
+	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
+	st=$(veritysetup status usr 2>/dev/null)
+	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')
+	hash=$(printf '%s\n' "$st" | sed -n 's/^ *hash device: *//p')
+	image=failed
+	# verify reads both partitions, not the mapping, and checks the whole tree against the signed hash.
+	[ -n "$want" ] && [ -n "$data" ] && [ -n "$hash" ] &&
+		ionice -c 3 nice -n 19 veritysetup verify "$data" "$hash" "$want" >/dev/null 2>&1 && image=verified
+	secs=$(($(date +%s) - start))
+	mkdir -p -m 0700 "$D"
+	echo "agentos-reboot: drill image=$image in ${secs}s; the reboot is the clean start"
+fi
+# The drill's record, rewritten just before each reboot is asked for, so a wait on an inhibitor is not
+# counted in the time to a clean core.
+stamp() {
+	[ -n "$image" ] || return 0
+	printf 'image=%s image_seconds=%s reboot_at=%s\n' "$image" "$secs" "$(date +%s)" >"$D/pending.new" &&
+		mv -f "$D/pending.new" "$D/pending"
+}
 while [ "$(up)" -lt "$WEEK" ]; do
+	stamp
 	if systemctl reboot --check-inhibitors=yes; then
 		echo "agentos-reboot: rebooting"
 		exit 0
@@ -18,4 +49,5 @@ while [ "$(up)" -lt "$WEEK" ]; do
 	sleep "$STEP"
 done
 echo "agentos-reboot: up a week; rebooting through any inhibitor"
+stamp
 exec systemctl reboot --check-inhibitors=no

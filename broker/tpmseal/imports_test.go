@@ -8,8 +8,15 @@ import (
 
 // REQ: ARC-1, ARC-2
 
-// Only the vault process talks to the TPM: it alone holds the vault the
-// sealed key opens (vault V2). No other broker binary links this package.
+// Only the vault process, the unlock step and enrollment talk to the TPM:
+// they alone open or make what the sealed key opens (vault V2, STO-2b,
+// STO-2c). No other broker binary links this package.
+var linksTPM = map[string]bool{
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-egress": true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-enroll": true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-unlock": true,
+}
+
 func TestOnlyTheVaultProcessLinksTPMSeal(t *testing.T) {
 	out, err := exec.Command("go", "list", "-C", "..", "-f", "{{.ImportPath}} {{join .Deps \" \"}}", "./cmd/...").Output()
 	if err != nil {
@@ -19,7 +26,7 @@ func TestOnlyTheVaultProcessLinksTPMSeal(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Fields(line)
 		for _, dep := range f[1:] {
-			if dep == self && f[0] != "github.com/ghbmrk/agentos/broker/cmd/agentos-egress" {
+			if dep == self && !linksTPM[f[0]] {
 				t.Errorf("%s links the TPM seal", f[0])
 			}
 		}

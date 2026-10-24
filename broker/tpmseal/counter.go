@@ -121,13 +121,33 @@ const (
 )
 
 func probe(t transport.TPM, h tpm2.TPMHandle, id []byte) (slotState, error) {
+	st, _, err := probeName(t, h, id)
+	return st, err
+}
+
+// probeName is probe that also returns the index's name.
+func probeName(t transport.TPM, h tpm2.TPMHandle, id []byte) (slotState, []byte, error) {
+	name, err := readName(t, h)
+	if err != nil || name == nil {
+		return slotFree, nil, err
+	}
+	st, err := counterStateOf(h, id, name)
+	return st, name, err
+}
+
+// readName returns the name of the index at h, or nil if there is none.
+func readName(t transport.TPM, h tpm2.TPMHandle) ([]byte, error) {
 	rsp, err := tpm2.NVReadPublic{NVIndex: h}.Execute(t)
 	if err != nil {
 		if errors.Is(err, tpm2.TPMRCHandle) {
-			return slotFree, nil
+			return nil, nil
 		}
-		return 0, fmt.Errorf("tpmseal: read NV index: %w", err)
+		return nil, fmt.Errorf("tpmseal: read NV index: %w", err)
 	}
+	return rsp.NVName.Buffer, nil
+}
+
+func counterStateOf(h tpm2.TPMHandle, id, name []byte) (slotState, error) {
 	written, err := nvName(counterPublic(h, id, true))
 	if err != nil {
 		return 0, err
@@ -137,9 +157,9 @@ func probe(t transport.TPM, h tpm2.TPMHandle, id []byte) (slotState, error) {
 		return 0, err
 	}
 	switch {
-	case bytes.Equal(rsp.NVName.Buffer, written):
+	case bytes.Equal(name, written):
 		return slotOurs, nil
-	case bytes.Equal(rsp.NVName.Buffer, fresh):
+	case bytes.Equal(name, fresh):
 		return slotOursFresh, nil
 	}
 	return slotOther, nil

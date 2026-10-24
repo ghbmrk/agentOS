@@ -1,0 +1,22 @@
+[Unit]
+Description=agentOS restore drill report
+Documentation=file:/usr/lib/agentos/drill-report
+# The first healthy boot after the drill's reboot (reboot-weekly writes pending): Requires= as well
+# as After=, so a boot whose health check fails never reports, and pending waits for the healthy boot
+# that follows (systemd.special(7), as agentos-drive-id.service). Before the boot report, so its line
+# reaches the console ahead of the serial login (image/ASSUMPTIONS.md I24).
+ConditionPathExists=/var/lib/agentos/drill/pending
+Requires=boot-complete.target
+After=boot-complete.target
+Before=agentos-boot-report.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/drill-report
+StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+WantedBy=multi-user.target
