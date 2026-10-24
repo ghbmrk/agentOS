@@ -151,12 +151,13 @@ class NeededTest(unittest.TestCase):
         self.assertNotIn("shim", {src for src, _ in drop.DROP.values()})
 
     def test_sqlite_goes_with_lastlog2_and_tirpc_with_ss(self):
-        # libsqlite3-0 is linked only by liblastlog2-2, and libtirpc3t64 only by ss; util-linux
-        # keeps its other packages, so its records stay (PARTIAL).
+        # libsqlite3-0 is linked only by liblastlog2-2, liblastlog2-2 only by lslogins, and
+        # libtirpc3t64 only by ss; util-linux keeps its other packages, so its records stay (PARTIAL).
         self.assertEqual({drop.DROP[p][0] for p in ("libsqlite3-0", "libtirpc3t64", "libtirpc-common")},
                          {"sqlite3", "libtirpc"})
         self.assertEqual(drop.DROP["liblastlog2-2"][0], "util-linux")
         self.assertIn("usr/bin/ss", drop.FILES)
+        self.assertIn("usr/bin/lslogins", drop.FILES)
         self.assertEqual(set(drop.PARTIAL), {"liblastlog2-2"})
 
 

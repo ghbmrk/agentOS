@@ -35,7 +35,7 @@ DROP = {
     "diffutils": ("diffutils", "Essential, but nothing on the box runs diff or cmp"),
     "perl-base": ("perl", "Essential, but only package maintainer scripts run perl, and the box runs no package manager"),
     "libsqlite3-0": ("sqlite3", "only liblastlog2-2 links it"),
-    "liblastlog2-2": ("util-linux", "nothing on the box records or reads lastlog2's login database: there is no login"),
+    "liblastlog2-2": ("util-linux", "only lslogins links it, an account-listing tool for a person at a shell; the box has no login"),
     "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
     "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
 }
@@ -52,6 +52,7 @@ FILES = (
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-wwan.so",
     "usr/bin/nmtui*",
     "usr/bin/ss",
+    "usr/bin/lslogins",
     # dpkg's daily database backup runs tar and cmp; the box's dpkg database never changes.
     "usr/lib/systemd/system/dpkg-db-backup.service",
     "usr/lib/systemd/system/dpkg-db-backup.timer",
