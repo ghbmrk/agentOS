@@ -4,6 +4,8 @@ package firstboot
 
 import (
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/card"
@@ -184,5 +186,60 @@ func TestRetryRerunAfterAFailedReset(t *testing.T) {
 	}
 	if retried, err := RetryRerun(fb.Card); !retried || err != nil || fb.Card.Display() == nil || fb.Card.Hold() == nil {
 		t.Fatalf("claimed card retry: retried %v, %v", retried, err)
+	}
+}
+
+// #2397 (M13): a rerun whose reset works but whose new card cannot be
+// made keeps the rerun: RetryRerun shows a card, and the hold is released
+// only once that card is confirmed.
+func TestRetryRerunAfterTheCardCannotBeMade(t *testing.T) {
+	var shown card.Card
+	fail := false
+	s, err := NewCardStep(&change.MemStore{}, card.DisplayConfig{
+		Generate: func(rd io.Reader) (*card.Card, error) {
+			if fail {
+				fail = false
+				return nil, errors.New("no randomness")
+			}
+			c, err := card.Generate(rd)
+			if err == nil {
+				shown = *c
+			}
+			return c, err
+		},
+		Provision: func(*card.Card) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := func(d *card.Display) {
+		t.Helper()
+		if d == nil {
+			t.Fatal("no card shown")
+		}
+		w, g := d.Asks()
+		if err := d.Confirm(strings.Fields(shown.VaultPassphrase)[w-1], strings.Split(shown.RecoveryKey, "-")[g-1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	confirm(s.Display())
+	first := shown.RecoveryKey
+	resets := 0
+	fail = true
+	if err := s.Again(func() error { resets++; return nil }); err == nil {
+		t.Fatal("rerun past a card that could not be made")
+	}
+	if s.Display() != nil || s.Hold() == nil || resets != 1 {
+		t.Fatalf("display %v, hold %v, resets %d", s.Display(), s.Hold(), resets)
+	}
+	if retried, err := RetryRerun(s); !retried || err != nil || s.Display() == nil {
+		t.Fatalf("retry: retried %v, %v", retried, err)
+	}
+	if !errors.Is(s.Hold(), ErrCardPending) || shown.RecoveryKey == first {
+		t.Fatalf("hold %v before the new card's confirm", s.Hold())
+	}
+	confirm(s.Display())
+	if s.Hold() != nil {
+		t.Fatal(s.Hold())
 	}
 }
