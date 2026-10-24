@@ -1,7 +1,8 @@
 name: word-budget
 # D-152: SPEC.md and the process docs only shrink on main. tools/word_budget.py counts both
 # sets at the PR's base and head and fails a PR that grows either one, unless its body has a
-# `Word-budget: <decision ID>` line naming an active DECISIONS.md row. It runs as the BASE
+# `Word-budget: <decision ID>` line naming an active DECISIONS.md row at the base that names
+# the PR (#2945; PR_NUMBER below). It runs as the BASE
 # commit has it, so a PR cannot loosen the check for itself; with no base copy (only the PR
 # that adds the file) it runs the head's. `edited` reruns it when the body changes.
 on:
@@ -24,6 +25,7 @@ jobs:
         shell: bash # -eo pipefail, so tee keeps the tool's exit status
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # HEAD is the PR's test merge (base^1, branch^2), as in scope.yml. Count the base
           # against the merge itself, not the branch tip: a stale branch's tip lacks main's

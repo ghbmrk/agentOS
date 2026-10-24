@@ -212,7 +212,10 @@ class SyntheticTree(unittest.TestCase):
 
 
 CORE = "root calc\nallow golang.org/x/crypto/argon2\n"
-DECISIONS = "| ID | Date | Status | Decision |\n|---|---|---|---|\n| D-7 | 2026-10-23 | active | grow calc |\n| D-6 | 2026-10-01 | superseded | old |\n"
+# D-7 names the test PR (#42, as --pr 42); D-5 is active but names another PR (#2945).
+PR = 42
+DECISIONS = ("| ID | Date | Status | Decision |\n|---|---|---|---|\n| D-7 | 2026-10-23 | active | grow calc for #42 |\n"
+             "| D-6 | 2026-10-01 | superseded | old #42 |\n| D-5 | 2026-10-01 | active | the trusted core, #420 |\n")
 
 
 class CorePure(unittest.TestCase):
@@ -250,13 +253,16 @@ class CorePure(unittest.TestCase):
             self.assertEqual(set(owed), {key})
             self.assertEqual(len(problems), 1, key)
             self.assertIn("no `Trusted-core: <decision ID>` line", problems[0])
-            for body in ("Trusted-core: D-6", "Trusted-core: D-8", "Trusted-base: lines -- calc grows here"):
-                self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, body, DECISIONS)[0], (key, body))
-            self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, "Body.\nTrusted-core: D-7\n", DECISIONS)[0], [])
+            for body in ("Trusted-core: D-6", "Trusted-core: D-8", "Trusted-core: D-5", "Trusted-base: lines -- calc grows here"):
+                self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, body, DECISIONS, PR)[0], (key, body))
+            self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, "Body.\nTrusted-core: D-7\n", DECISIONS, PR)[0], [])
+            # #2945: the row has to name this PR; with no PR number nothing waives.
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS, 43)[0])
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS)[0])
 
     def test_unlisted_and_unused_fail_whatever_the_body(self):
         head = self.m(unlisted=["new/pkg"])
-        self.assertTrue(tb.compare_core(self.c(), self.c(), self.m(), head, "Trusted-core: D-7", DECISIONS)[0])
+        self.assertTrue(tb.compare_core(self.c(), self.c(), self.m(), head, "Trusted-core: D-7", DECISIONS, PR)[0])
         self.assertTrue(tb.compare_core(None, self.c(), None, head, "", "")[0])
         self.assertTrue(tb.compare_core(None, self.c(), None, self.m(unused=["a/b"]), "", "")[0])
 
@@ -277,14 +283,16 @@ class CoreTree(unittest.TestCase):
         self.body = os.path.join(self.tmp, "body.txt")
         tree(self.base)
         write(self.base, tb.CORE, CORE)
+        write(self.base, "DECISIONS.md", DECISIONS)
 
-    def check(self, body="", head_core=CORE, **kw):
+    def check(self, body="", head_core=CORE, pr=PR, head_decisions="", **kw):
         tree(self.head, **kw)
-        write(self.head, "DECISIONS.md", DECISIONS)
+        write(self.head, "DECISIONS.md", DECISIONS + head_decisions)
         if head_core is not None:
             write(self.head, tb.CORE, head_core)
         pathlib.Path(self.body).write_text(body)
-        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body])
+        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body]
+                   + ([] if pr is None else ["--pr", str(pr)]))
 
     def test_counts_only_the_roots_closure(self):
         m = tb.measure_core(self.base, tb.parse_core(CORE))
@@ -304,6 +312,18 @@ class CoreTree(unittest.TestCase):
         self.assertEqual(self.check("Trusted-base: lines -- calc grows here", extra_own=4)[0], 1)
         rc, out = self.check("Trusted-base: lines -- calc grows here\nTrusted-core: D-7\n", extra_own=4)
         self.assertEqual(rc, 0, out)
+
+    def test_the_decision_is_the_base_trees_and_names_the_pr(self):
+        # #2945 (L3 3 and Security R2 on #2941): a row the PR adds itself, a row for another PR,
+        # and a waiver checked with no PR number all fail.
+        body = "Trusted-base: lines -- calc grows here\n"
+        own_row = "| D-9 | 2026-10-24 | active | grow calc for #42 |\n"
+        rc, out = self.check(body + "Trusted-core: D-9\n", head_decisions=own_row, extra_own=4)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("names no active DECISIONS.md row on the base branch that names #42", out)
+        self.assertEqual(self.check(body + "Trusted-core: D-7\n", pr=43, extra_own=4)[0], 1)
+        self.assertEqual(self.check(body + "Trusted-core: D-7\n", pr=None, extra_own=4)[0], 1)
+        self.assertEqual(self.check(body + "Trusted-core: D-5\n", extra_own=4)[0], 1)
 
     def test_new_import_fails_until_listed_with_a_decision(self):
         body = "Trusted-base: lines -- calc links dec now\n"
@@ -345,8 +365,7 @@ class CoreTree(unittest.TestCase):
 
     def checked(self, body, fallback, **kw):
         tree(self.head, **kw)
-        write(self.head, "DECISIONS.md", DECISIONS)
-        return tb.run_check(self.base, self.head, body, fallback_tree=fallback)[0]
+        return tb.run_check(self.base, self.head, body, fallback_tree=fallback, pr=PR)[0]
 
     def test_branch_older_than_the_file_uses_the_running_copy(self):
         # L3 blocker on #2941: neither tree has the file, the base branch tip does.
@@ -429,7 +448,7 @@ PIN = [
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
     "        with:",
     "          ref: ${{ github.event.pull_request.base.sha }}",
-    "          fetch-depth: 0 # the merge base with the PR head",
+    "          fetch-depth: 0 # history for the merge with the PR head",
     "          persist-credentials: false",
     "      - name: Go version (the base's broker/go.mod toolchain line)",
     "        id: go",
@@ -449,12 +468,14 @@ PIN = [
     "        run: |",
     "          git fetch --no-tags origin \"+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head\"",
     "          git cat-file -e \"$HEAD_SHA^{commit}\"",
-    "          MERGE_BASE=$(git merge-base HEAD \"$HEAD_SHA\")",
-    "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/base\" \"$MERGE_BASE\"",
-    "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/head\" \"$HEAD_SHA\"",
+    "          MERGED=$(git merge-tree --write-tree --no-messages HEAD \"$HEAD_SHA\")",
+    "          MERGE=$(git -c user.name=trusted-base -c user.email=trusted-base@invalid commit-tree"
+    " -p HEAD -p \"$HEAD_SHA\" -m merge \"$MERGED\")",
+    "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/base\" HEAD",
+    "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/head\" \"$MERGE\"",
     "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/body.txt\"",
     "          python3 -I tools/trusted_base.py check --base-tree \"$RUNNER_TEMP/base\" --head-tree \"$RUNNER_TEMP/head\""
-    " --body \"$RUNNER_TEMP/body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+    " --body \"$RUNNER_TEMP/body.txt\" --pr \"$PR_NUMBER\" --markdown \"$GITHUB_STEP_SUMMARY\"",
 ]
 
 
@@ -484,9 +505,100 @@ class Workflow(unittest.TestCase):
                          ("python3 -I tools/trusted_base.py", "python3 -I \"$RUNNER_TEMP/head/tools/trusted_base.py\""),
                          ("      contents: read\n    steps:", "      contents: write\n    steps:"),
                          ("--markdown \"$GITHUB_STEP_SUMMARY\"", "--markdown \"$GITHUB_STEP_SUMMARY\" || true"),
+                         (" --pr \"$PR_NUMBER\"", ""),
+                         ("--detach \"$RUNNER_TEMP/head\" \"$MERGE\"", "--detach \"$RUNNER_TEMP/head\" \"$HEAD_SHA\""),
+                         ("--detach \"$RUNNER_TEMP/base\" HEAD", "--detach \"$RUNNER_TEMP/base\" \"$(git merge-base HEAD \"$HEAD_SHA\")\""),
                          ("    runs-on: ubuntu-latest", "    continue-on-error: true\n    runs-on: ubuntu-latest")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
+
+
+def merge_steps():
+    """The workflow's lines from the merge to the worktrees, as one bash script."""
+    text = (ROOT / ".github/workflows/trusted-base.yml").read_text().split("\n")
+    start = next(i for i, l in enumerate(text) if "MERGED=$(git merge-tree" in l)
+    end = next(i for i, l in enumerate(text) if '"$RUNNER_TEMP/head" "$MERGE"' in l)
+    return "set -e\n" + "\n".join(l.strip() for l in text[start:end + 1]) + "\n"
+
+
+@unittest.skipUnless(shutil.which("go"), "go is not installed")
+class MergeMeasure(unittest.TestCase):
+    """#2945 (L3 2 on #2941): the workflow measures the base tip against the head merged onto it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        saved, tb.FALLBACK = tb.FALLBACK, pathlib.Path(self.tmp, "no-fallback")
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        self.git("init", "-q", "-b", "main")
+        tree(self.repo, extra_own=20)
+        write(self.repo, tb.CORE, CORE)
+        write(self.repo, "DECISIONS.md", DECISIONS)
+        self.commit("fork point")
+
+    def git(self, *a):
+        return subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        self.git("commit", "-qm", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def measure(self, head_sha):
+        """rc of the workflow's merge lines plus the check, run on main's checkout."""
+        self.git("checkout", "-q", "main")
+        env = {**os.environ, "HEAD_SHA": head_sha, "RUNNER_TEMP": os.path.join(self.tmp, f"run-{head_sha[:7]}")}
+        os.makedirs(env["RUNNER_TEMP"])
+        r = subprocess.run(["bash", "-c", merge_steps()], cwd=self.repo, env=env, capture_output=True, text=True)
+        if r.returncode:
+            return r.returncode, "merge step: " + r.stdout + r.stderr
+        body = os.path.join(env["RUNNER_TEMP"], "body.txt")
+        pathlib.Path(body).write_text("Trusted-base: lines -- calc grows here\n")
+        return run(["check", "--base-tree", os.path.join(env["RUNNER_TEMP"], "base"),
+                    "--head-tree", os.path.join(env["RUNNER_TEMP"], "head"), "--body", body, "--pr", str(PR)])
+
+    def test_cherry_picked_cut_does_not_keep_the_old_budget(self):
+        # main cuts 20 lines; the branch copies the cut instead of merging main and adds 10.
+        self.git("checkout", "-qb", "branch")
+        self.git("checkout", "-q", "main")
+        tree(self.repo)
+        self.commit("main cuts calc")
+        self.git("checkout", "-q", "branch")
+        tree(self.repo)
+        write(self.repo, "broker/calc/more.go", "package calc\n" + "// y\n" * 10)
+        head = self.commit("branch: the same cut, by hand, plus a 10-line file")
+        merge_base = self.git("merge-base", "main", head)
+        old = tempfile.mkdtemp(dir=self.tmp)
+        self.git("worktree", "add", "-q", "--detach", old + "/b", merge_base)
+        self.git("worktree", "add", "-q", "--detach", old + "/h", head)
+        body = os.path.join(old, "body.txt")
+        pathlib.Path(body).write_text("Trusted-base: lines -- calc grows here\n")
+        # The merge-base measure this replaces reads the branch as a 10-line cut.
+        self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h", "--body", body])[0], 0)
+        rc, out = self.measure(head)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("core lines", out)
+
+    def test_conflict_fails_closed(self):
+        self.git("checkout", "-qb", "branch")
+        write(self.repo, "broker/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n")
+        head = self.commit("branch edits calc")
+        self.git("checkout", "-q", "main")
+        write(self.repo, "broker/calc/calc.go", "package calc\n\nfunc Add(a, b int) int { return a - -b }\n")
+        self.commit("main edits calc")
+        rc, out = self.measure(head)
+        self.assertNotEqual(rc, 0, out)
+        self.assertTrue(out.startswith("merge step: "), out)
+
+    def test_clean_merge_unchanged_passes(self):
+        self.git("checkout", "-qb", "branch")
+        write(self.repo, "notes.txt", "unrelated\n")
+        head = self.commit("branch adds a note")
+        rc, out = self.measure(head)
+        self.assertEqual(rc, 0, out)
 
 
 if __name__ == "__main__":

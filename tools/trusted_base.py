@@ -25,15 +25,19 @@ package or a vendored file under it in at +0). Every such package other than a r
 `known` line, so a new import fails whatever the body, and a `known` line the core no longer
 links must be deleted. Against the base tree's file and measure, a head that grows core lines,
 adds a `known` or `allow` line, drops a root or deletes the file fails unless the body has a
-line `Trusted-core: <decision ID>` naming an active DECISIONS.md row at the head; the reviewer
-checks that the row records Mark approving the growth (the D-152 word budget, for code). The
-budget is the merge base, so it ratchets down on every merge with nothing to keep in step.
-A merge base with no core file (a branch older than the file) is measured, with the head, by
-the file of the checkout the tool runs from, which is the base branch tip in CI.
+line `Trusted-core: <decision ID>` naming an active DECISIONS.md row of the base tree whose
+text names the PR (`#<number>`, from --pr), so neither a row added by the PR itself nor an
+unrelated standing row can waive it; the reviewer checks that the row records Mark approving
+the growth (the D-152 word budget, for code; #2945). In CI the base tree is the base branch tip
+and the head tree is the PR head merged onto it, so the budget is what main holds now and the
+measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
+gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
+no core file (one older than the file) is measured, with the head, by the file of the checkout
+the tool runs from, which is the base branch tip in CI.
 
 Usage:
   tools/trusted_base.py measure [--tree DIR]       print one tree's measure; exit 1 if a package is unclassified
-  tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--markdown FILE]
+  tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--pr N] [--markdown FILE]
       the registry is the head tree's; the base tree's registry is read only to find
       reclassified parsers. Exit 0 pass, 1 growth without a reason or an unclassified
       package, 2 a measurement error.
@@ -296,16 +300,17 @@ def measure_core(tree, core):
     return m
 
 
-def active_decision(decisions, ident):
-    """True if DECISIONS.md text has a row for `ident` whose status is active (as tools/word_budget.py)."""
+def active_decision(decisions, ident, pr):
+    """True if DECISIONS.md text has a row for `ident` whose status is active and whose text names
+    PR `pr` as `#<pr>` (as tools/word_budget.py); never true without a PR number."""
     for line in decisions.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) >= 3 and cells[0] == ident:
-            return cells[2] == "active"
+            return cells[2] == "active" and pr is not None and bool(re.search(rf"#{int(pr)}(?!\d)", line))
     return False
 
 
-def compare_core(base_core, head_core, base, head, body, decisions):
+def compare_core(base_core, head_core, base, head, body, decisions, pr=None):
     """(problems, owed) for the core; base_core and base are None when the base has no core file."""
     problems, owed = [], {}
     if head is not None:
@@ -325,8 +330,9 @@ def compare_core(base_core, head_core, base, head, body, decisions):
                     owed[kind] = f"{kind} lines {verb}: " + ", ".join(sorted(change))
     if owed:
         w = WAIVER.search(body or "")
-        if not (w and active_decision(decisions, w.group(1))):
-            why = f"`Trusted-core: {w.group(1)}` names no active DECISIONS.md row" if w else "no `Trusted-core: <decision ID>` line"
+        if not (w and active_decision(decisions, w.group(1), pr)):
+            why = (f"`Trusted-core: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
+                   if w else "no `Trusted-core: <decision ID>` line")
             problems += [f"{detail}, and the PR body has {why}" for detail in owed.values()]
     return problems, owed
 
@@ -340,12 +346,12 @@ def core_table(base, head, owed, problems):
         for label, b, h in (("Core lines", base and base["lines"], head["lines"]),
                             ("Linked packages outside std and allow", base and len(base["imports"]), len(head["imports"]))):
             out.append(f"| {label} | {'-' if b is None else b} | {h} | {'-' if b is None else f'{h - b:+d}'} |")
-    out += ["", "**Fail:**" if problems else "**Pass.**" + (" Growth names a decision (reviewer: confirm Mark approved it)." if owed else "")]
+    out += ["", "**Fail:**" if problems else "**Pass.**" + (" Growth names a decision that names this PR (reviewer: confirm Mark approved it)." if owed else "")]
     out += [f"- {p}" for p in problems]
     return "\n".join(out) + "\n"
 
 
-def run_check(base_tree, head_tree, body, fallback_tree=None):
+def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
     head_pkgs = packages(head_tree)
@@ -364,9 +370,10 @@ def run_check(base_tree, head_tree, body, fallback_tree=None):
             head_core = base_core
     cbase = base_core and measure_core(base_tree, base_core)
     chead = head_core and measure_core(head_tree, head_core)
-    decisions = pathlib.Path(head_tree, "DECISIONS.md")
+    # The base tree's decisions: a row the PR adds itself is not yet Mark's record (#2945).
+    decisions = pathlib.Path(base_tree, "DECISIONS.md")
     cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body,
-                                    decisions.read_text() if decisions.exists() else "")
+                                    decisions.read_text() if decisions.exists() else "", pr)
     return problems + cproblems, text + core_table(cbase, chead, cowed, cproblems)
 
 
@@ -379,6 +386,7 @@ def main(argv=None):
     c.add_argument("--base-tree", required=True)
     c.add_argument("--head-tree", required=True)
     c.add_argument("--body", required=True, help="file holding the PR body")
+    c.add_argument("--pr", type=int, help="the PR number a waiving decision row must name")
     c.add_argument("--markdown", help="also write the table to this file")
     a = ap.parse_args(argv)
     try:
@@ -397,7 +405,7 @@ def main(argv=None):
             text += "".join(f"- {p}\n" for p in problems)
         else:
             body = pathlib.Path(a.body).read_text()
-            problems, text = run_check(a.base_tree, a.head_tree, body)
+            problems, text = run_check(a.base_tree, a.head_tree, body, pr=a.pr)
     except (MeasureError, OSError, ValueError) as e:
         print(f"trusted_base: {e}", file=sys.stderr)
         return 2
