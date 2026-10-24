@@ -424,6 +424,9 @@ func TestTheFilterRefusesUndeclaredCommands(t *testing.T) {
 		{"APPEND", "APPEND INBOX {3+}\r\nabc", readCall},
 		{"RENAME", "RENAME INBOX Old", readCall},
 		{"COPY", "UID COPY 1 Trash", readCall},
+		{"a fetch with a quoted item", `UID FETCH 1 (BODY.PEEK[HEADER.FIELDS ("X")])`, readCall},
+		{"a fetch with a literal", "UID FETCH 1 (BODY.PEEK[HEADER.FIELDS {1}", readCall},
+		{"a non-synchronizing literal", "UID SEARCH HEADER X {1+}", readCall},
 		{"IDLE", "IDLE", readCall},
 		{"STARTTLS", "STARTTLS", readCall},
 		{"LOGIN", "LOGIN a b", readCall},
@@ -576,8 +579,8 @@ func TestWritesStayInTheirFolder(t *testing.T) {
 // synchronizing literal's bytes go only after the server's "+". A server
 // that refuses the literal with a tagged answer reads what follows as a new
 // command (RFC 3501 7.5), so a literal sent at once could smuggle one; the
-// session ends instead. A non-synchronizing literal passes only where the
-// server must read it (LITERAL+), and a bare CR inside a line is refused.
+// session ends instead. A non-synchronizing literal never passes, and a
+// bare CR inside a line is refused.
 func TestALiteralWaitsForTheServer(t *testing.T) {
 	inner := "h2 UID EXPUNGE 1:*\r\n"
 	srv := newRFCServer(t)
@@ -590,7 +593,7 @@ func TestALiteralWaitsForTheServer(t *testing.T) {
 	if err == nil || strings.Contains(srv.log(), "EXPUNGE") {
 		t.Fatalf("a refused literal: err %v, server log %s", err, srv.log())
 	}
-	// Without LITERAL+ a non-synchronizing literal is refused outright.
+	// A non-synchronizing literal is refused outright.
 	srv = newRFCServer(t)
 	conn = hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
 		io.WriteString(w, "h1 NOOP {"+strconv.Itoa(len(inner))+"+}\r\n"+inner)
@@ -599,7 +602,7 @@ func TestALiteralWaitsForTheServer(t *testing.T) {
 	})
 	_, _, err = hostileClerk(t, srv.addr, conn, 5*time.Second).UIDs(context.Background(), "INBOX")
 	if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "EXPUNGE") || strings.Contains(srv.log(), "h1 NOOP") {
-		t.Fatalf("a non-synchronizing literal without LITERAL+: err %v, server log %s", err, srv.log())
+		t.Fatalf("a non-synchronizing literal: err %v, server log %s", err, srv.log())
 	}
 	// A bare CR inside a command line.
 	srv = newRFCServer(t)
@@ -837,15 +840,21 @@ func FuzzServerFraming(f *testing.F) {
 			"h2 OK done\r\n"
 		want := []string{"h1 NO", "h3 BAD", "* OK", "* LIST", "* 1 FETCH", "* STATUS", "+ ", "* BYE", "* NO", "h2 OK"}
 		heads, lost := framed(in, int(cut%17)+1)
-		if lost && codeOpen([]byte("* NO "+e)) {
+		if lost {
 			// Words that open a response code at the start of a status
-			// text are ambiguous: the framing is lost, which refuses every
-			// literal after it, and the lines before it were right.
-			want = want[:8]
-			heads = heads[:min(len(heads), 8)]
-			lost = false
+			// or "+" text, ending in {n}, are ambiguous: the framing is
+			// lost there, which refuses every literal after it, and the
+			// lines up to it were right.
+			switch {
+			case codeOpen([]byte("+ " + e)):
+				want = want[:7]
+			case codeOpen([]byte("* NO " + e)):
+				want = want[:9]
+			default:
+				t.Fatalf("lost on %q, lines %q", e, heads)
+			}
 		}
-		if lost || len(heads) != len(want) {
+		if len(heads) != len(want) {
 			t.Fatalf("lost %v, lines %q", lost, heads)
 		}
 		for i := range want {
@@ -936,24 +945,20 @@ func TestMailboxNamesEncodeAsGoIMAPDoes(t *testing.T) {
 	}
 }
 
-// TestTheFilterCountsLiterals (A5): bytes inside a {n} or {n+} literal
-// are data, even when they spell a command, and the command after the
-// literal is still filtered. A literal counted one byte short or long
-// desynchronises the filter, which then refuses the honest command: a
-// command line ends in CRLF, never a bare LF.
+// TestTheFilterCountsLiterals (A5): bytes inside a {n} literal are data,
+// even when they spell a command, and the command after the literal is
+// still filtered. A literal counted one byte long eats the CR of the line
+// after it, which is refused. (One counted short sends the same bytes: its
+// last byte joins the line after it, under the same CR and LF rule.)
 func TestTheFilterCountsLiterals(t *testing.T) {
-	for _, sync := range []string{"+", ""} {
-		const inner = "h3 EXPUNGE\r\n" // 12 bytes
+	for _, c := range []struct{ first, lit, rest string }{
+		{"h1 UID SEARCH HEADER Message-Id", "h3 EXPUNGE", ""},
+	} {
 		srv := newLogServer(t)
 		conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
-			first := "h1 UID SEARCH HEADER Message-Id {" + strconv.Itoa(len(inner)) + sync + "}\r\n"
-			if sync == "" {
-				io.WriteString(w, first)
-				br.ReadString('\n') // "+ go on"
-				io.WriteString(w, inner+"\r\n")
-			} else {
-				io.WriteString(w, first+inner+"\r\n")
-			}
+			io.WriteString(w, c.first+" {"+strconv.Itoa(len(c.lit))+"}\r\n")
+			br.ReadString('\n') // "+ go on"
+			io.WriteString(w, c.lit+c.rest+"\r\n")
 			if tagged(br, "h1") != nil {
 				return
 			}
@@ -963,13 +968,13 @@ func TestTheFilterCountsLiterals(t *testing.T) {
 		})
 		_, _, err := hostileClerk(t, srv.addr, conn, 5*time.Second).UIDs(context.Background(), "INBOX")
 		if !errors.Is(err, ErrConnRefused) {
-			t.Fatalf("sync %q: err %v, want ErrConnRefused for h2", sync, err)
+			t.Fatalf("%s: err %v, want ErrConnRefused for h2", c.first, err)
 		}
-		if !srv.saw("h1 UID SEARCH", inner) {
-			t.Fatalf("sync %q: the command with a literal never reached the server", sync)
+		if !srv.saw(c.first, c.lit) {
+			t.Fatalf("%s: the command with a literal never reached the server", c.first)
 		}
 		if srv.saw("h2 EXPUNGE") {
-			t.Fatalf("sync %q: the command after the literal passed", sync)
+			t.Fatalf("%s: the command after the literal passed", c.first)
 		}
 	}
 }

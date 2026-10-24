@@ -40,8 +40,6 @@ type session struct {
 	local *net.UnixConn
 	step  *time.Timer
 
-	caps map[string]bool // the server's, signed in (signIn)
-
 	left                          atomic.Int64 // the reply budget left, renewed only by do
 	allow                         atomic.Pointer[allowance]
 	wait                          atomic.Pointer[waiter]
@@ -128,7 +126,7 @@ func (s *Store) session(ctx context.Context, f func(x *session) error) (err erro
 	if err != nil {
 		return errors.New("imapsmtp: could not hand the session to the connection process")
 	}
-	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step, caps: caps,
+	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step,
 		closed: make(chan struct{}), downDone: make(chan struct{})}
 	defer x.teardown()
 	// Until the first request, the base budget covers what the sign-in left
@@ -191,6 +189,11 @@ func handOff(ctrl *net.UnixConn, caps map[string]bool) (*net.UnixConn, error) {
 func greeting(caps map[string]bool) string {
 	var l []string
 	for c := range caps {
+		// No LITERAL+ or LITERAL-: go-imap then sends only synchronizing
+		// literals, the only kind the filter passes.
+		if u := strings.ToUpper(c); u == "LITERAL+" || u == "LITERAL-" {
+			continue
+		}
 		if tagOK(strings.ReplaceAll(c, "+", "")) && !strings.ContainsAny(c, "]") {
 			l = append(l, c)
 		}
@@ -371,16 +374,26 @@ func classify(head []byte) lineKind {
 	return kindUnknown
 }
 
-// codeOpen says whether a status line opens a response code that could
-// carry arguments: its text starts with "[", an atom and a space (RFC 3501
-// 7.1). An atom holds no "{", so "[{5}" is text.
+// codeOpen says whether a status or continuation line opens a response
+// code that could carry arguments: its text, after "tag OK|NO|BAD|BYE|
+// PREAUTH " or after "+ ", starts with "[", an atom and a space (RFC 3501
+// 7.1, 7.5). An atom holds no "{", so "[{5}" is text.
 func codeOpen(head []byte) bool {
 	f := strings.SplitN(string(head), " ", 4)
-	if len(f) < 4 || len(f[2]) < 2 || f[2][0] != '[' {
+	var code string
+	switch {
+	case len(f) >= 3 && f[0] == "+":
+		code = f[1]
+	case len(f) >= 4 && f[0] != "+" && statusWords[strings.ToUpper(f[1])]:
+		code = f[2]
+	default:
 		return false
 	}
-	for i := 1; i < len(f[2]); i++ {
-		if c := f[2][i]; c <= 0x20 || c >= 0x7f || strings.IndexByte(`(){%*"\]`, c) >= 0 {
+	if len(code) < 2 || code[0] != '[' {
+		return false
+	}
+	for i := 1; i < len(code); i++ {
+		if c := code[i]; c <= 0x20 || c >= 0x7f || strings.IndexByte(`(){%*"\]`, c) >= 0 {
 			return false
 		}
 	}
@@ -478,11 +491,11 @@ const filterLine = 64 << 10
 
 // filter relays the connection's commands to the server, each only if its
 // allowance permits it (A5). It reads each command's tag and verb and skips
-// {n} and {n+} literals by count, so no literal's bytes are read as a
-// command. Each line ends in CRLF and holds no other CR (RFC 3501 2.2), so
-// a miscounted literal shows. A synchronizing literal waits for the
-// server's "+"; a non-synchronizing one passes only where the server must
-// read it. A refused command is never sent; it ends the session.
+// {n} literals by count, so no literal's bytes are read as a command. Each
+// line ends in CRLF and holds no other CR (RFC 3501 2.2). A literal waits
+// for the server's "+" and holds no CR or LF; a non-synchronizing {n+} one
+// never passes. A refused command is never sent; it ends the session. The
+// argument that this suffices is at the top of filter_fuzz_test.go.
 func (x *session) filter() {
 	br := bufio.NewReaderSize(x.local, filterLine)
 	refuse := func() { x.refused.Store(true); x.teardown() }
@@ -506,11 +519,15 @@ func (x *session) filter() {
 		for {
 			n, more := literal(line)
 			var w *waiter
-			if more && !x.literalOK(line, n) {
+			if more && nonSync(line) {
+				// A server reads a non-synchronizing literal only when its
+				// parser reaches it, even under LITERAL+: Dovecot reads none
+				// on a NOOP or after a parse error, and takes its bytes as
+				// the next command (Security's #3018 delta).
 				refuse()
 				return
 			}
-			if more && !nonSync(line) {
+			if more {
 				// A synchronizing literal goes only after the server's "+":
 				// a server may refuse it with a tagged answer and read what
 				// follows as a new command (RFC 3501 7.5).
@@ -537,7 +554,7 @@ func (x *session) filter() {
 					return
 				}
 			}
-			if _, err := io.CopyN(x.up, br, n); err != nil {
+			if !x.literalBytes(br, n, verb == "APPEND") {
 				return
 			}
 			if line, err = br.ReadSlice('\n'); err != nil {
@@ -564,12 +581,27 @@ func nonSync(line []byte) bool {
 	return bytes.HasSuffix(bytes.TrimRight(line, "\r\n"), []byte("+}"))
 }
 
-// literalOK says whether the server takes line's literal of n bytes as
-// the client sends it: a synchronizing one always (it waits for "+"); a
-// non-synchronizing one only where the server must read it whatever it
-// then answers, under LITERAL+, or LITERAL- up to 4096 bytes (RFC 7888).
-func (x *session) literalOK(line []byte, n int64) bool {
-	return !nonSync(line) || x.caps["LITERAL+"] || x.caps["LITERAL-"] && n <= 4096
+// literalBytes copies a literal's n bytes from br to the server, after
+// its "+". Outside an APPEND's message they hold no CR or LF: no astring
+// the requests need does, and a server may echo a literal raw in
+// its answer (a mailbox not found), where a CRLF would start a line of the
+// connection's choosing (L3's #3018 delta). Such a byte ends the session;
+// the server, reading the literal, takes nothing it sent as a command.
+func (x *session) literalBytes(br *bufio.Reader, n int64, message bool) bool {
+	for n > 0 {
+		b, err := br.Peek(int(min(n, int64(br.Size()))))
+		if !message && bytes.ContainsAny(b, "\r\n") {
+			x.refused.Store(true)
+			x.teardown()
+			return false
+		}
+		if _, werr := x.up.Write(b); werr != nil || err != nil {
+			return false
+		}
+		br.Discard(len(b))
+		n -= int64(len(b))
+	}
+	return true
 }
 
 // literal is the length of the literal line announces at its end, {n} or
@@ -636,8 +668,12 @@ func (a *allowance) command(line []byte) (string, bool) {
 		ok := verb == "SELECT" && !a.selected && rest == a.folder
 		a.selected = a.selected || ok
 		return verb, ok
+	case verb == "UID FETCH":
+		// go-imap's fetch items are atoms: with no quote, backslash or
+		// literal, whatever the server echoes of them is atoms too.
+		return verb, peekOnly(rest) && !strings.ContainsAny(rest, `"\{`)
 	case reads[verb]:
-		return verb, verb != "UID FETCH" || peekOnly(rest)
+		return verb, true
 	case verb == "UID STORE" && a.store != 0:
 		return verb, a.selected && a.storeOK(rest)
 	case verb == "UID MOVE" && a.move != 0:
@@ -649,13 +685,11 @@ func (a *allowance) command(line []byte) (string, bool) {
 }
 
 // continuation says whether a line after a literal, within a command of
-// verb, may pass: a fetch's items stay peek-only, and a write's SELECT,
-// UID STORE or UID MOVE carries no literal at all.
+// verb, may pass: a fetch, a write's SELECT, UID STORE or UID MOVE carries
+// no literal at all.
 func (a *allowance) continuation(verb string, line []byte) bool {
 	switch {
-	case verb == "UID FETCH":
-		return peekOnly(string(line))
-	case verb == "UID STORE", verb == "UID MOVE", a.write() && verb == "SELECT":
+	case verb == "UID FETCH", verb == "UID STORE", verb == "UID MOVE", a.write() && verb == "SELECT":
 		return false
 	}
 	return true
