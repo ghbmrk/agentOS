@@ -20,6 +20,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // mailRig is the kernel's process (the box) and the mail clerk served on its
@@ -52,11 +54,11 @@ func newMailRig(t *testing.T, msgIDs ...string) *mailRig {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(shortDir(t), "mail.sock")
-	ln, err := ListenClerk(sock, os.Getuid())
+	ln, err := proc.ListenClerk(sock, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	go ServeClerk(ln, acct, anchors)
+	go proc.ServeClerk(ln, acct, anchors)
 	t.Cleanup(func() { ln.Close() })
 	r := &mailRig{box: newBoxFor(t, sock, inbox.Name, key.Organize), srv: srv, dir: dir, sec: sec, ids: map[string]string{}}
 	ls := acct.Listing()
@@ -215,7 +217,7 @@ func TestMailSetupStoppedAtEveryStepSendsOnlyItsOwnPassword(t *testing.T) {
 		if err := SetMail(dir, sec, a, pass[a]); err != nil {
 			t.Fatal(err)
 		}
-		if err := setMail(dir, sec, b, pass[b], func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
+		if err := setMail(dir, sec, b, pass[b], func(j int) bool { return j == i }); !errors.Is(err, privfile.ErrStopped) {
 			t.Fatalf("stop after step %d: %v", i, err)
 		}
 		sec, err = OpenSecrets(dir, testSealer()) // the restarted clerk process
@@ -263,7 +265,7 @@ func TestMailRemovalLeavesNoCrashedTemporary(t *testing.T) {
 		b, _ := json.Marshal(a)
 		for _, name := range []string{secretsName, mailSettings} {
 			body := map[string][]byte{secretsName: atRest, mailSettings: b}[name]
-			if err := writeAtomic(dir, name, body, func(i int) bool { return i == 2 }); !errors.Is(err, errStopped) {
+			if err := privfile.WriteAtomic(dir, name, body, func(i int) bool { return i == 2 }); !errors.Is(err, privfile.ErrStopped) {
 				t.Fatal(err)
 			}
 		}
@@ -357,7 +359,7 @@ func TestMailClerkRefusesAStepTheLogHasNotInFlight(t *testing.T) {
 	var res kernel.Result
 	r.h.With(func(k *kernel.Kernel) error {
 		req := kernel.Request{Plan: k.State().Plans[id].Plan}
-		res = remote{r.remote, anchors}.do(req, view(k.State(), anchors, req, r.now))
+		res = r.remote.Clerk(anchors).Do(req, k.State())
 		return nil
 	})
 	if res.Outcome != "failed" || r.filed("<m1@shop.test>") {

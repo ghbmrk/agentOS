@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
-// REQ: CLK-1, LOG-2
+// REQ: CLK-1, LOG-2, KRN-2
 
 var good = []string{
 	"-log", "/var/lib/agentos-kernel/log",
@@ -96,5 +97,23 @@ func unread(t *testing.T, r *os.File) {
 	b, err := io.ReadAll(r)
 	if err != nil || len(b) != 600 {
 		t.Fatalf("the hand-off was read: %d bytes left, %v", len(b), err)
+	}
+}
+
+// KRN-2 (#2892): the kernel's process links no clerk's code, so no mail or
+// model parser is in it: of broker/clerk it links only the unlock step's
+// hand-off, and no IMAP library or the golang.org/x/net and x/text modules the
+// mail clerk brings (the standard library's vendored copies are its own).
+func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	const clerk = "github.com/ghbmrk/agentos/broker/clerk"
+	for _, p := range strings.Fields(string(out)) {
+		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" ||
+			strings.HasPrefix(p, "github.com/emersion/") || strings.HasPrefix(p, "golang.org/x/net/") || strings.HasPrefix(p, "golang.org/x/text/") {
+			t.Errorf("agentos-kernel links %s", p)
+		}
 	}
 }
