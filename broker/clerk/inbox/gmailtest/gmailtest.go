@@ -10,6 +10,7 @@
 package gmailtest
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
@@ -66,6 +67,9 @@ type Server struct {
 	forwards []string
 	autoFwd  string
 	grantOK  bool
+	endless  int    // read listings left that name a next page, whatever the last
+	otherID  bool   // metadata answers name another message's id
+	user     string // the address the profile names; "" is User
 	// Sign-in (D-150): the codes consent issued, each with its PKCE
 	// challenge, redirect and scope; the scope the next consent grants
 	// beyond the asked one; and the tokens revoked.
@@ -270,6 +274,17 @@ func (s *Server) Tokens() int {
 	return s.tokens
 }
 
+// Endless makes the next n listings of read mail name a next page of the
+// same ids, as an API that never ends its listing would.
+func (s *Server) Endless(n int) { s.mu.Lock(); s.endless = n; s.mu.Unlock() }
+
+// As makes the profile name address, as another Google account signed in
+// on the consent page would.
+func (s *Server) As(address string) { s.mu.Lock(); s.user = address; s.mu.Unlock() }
+
+// OtherID makes each metadata answer name an id other than the one asked.
+func (s *Server) OtherID(on bool) { s.mu.Lock(); s.otherID = on; s.mu.Unlock() }
+
 // Lie makes a modify or trash answer 200 and change nothing, as a lost
 // write would.
 func (s *Server) Lie(on bool) { s.mu.Lock(); s.lie = on; s.mu.Unlock() }
@@ -398,6 +413,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			out["raw"] = base64.URLEncoding.EncodeToString(raw)
 		case "metadata", "full":
 			out["payload"] = map[string]any{"headers": headers(m.Raw, q["metadataHeaders"])}
+			if s.otherID {
+				out["id"] = m.ID + "0"
+			}
 		}
 		reply(out)
 	case r.Method == "POST" && actionPath.MatchString(p):
@@ -515,7 +533,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/settings/autoForwarding":
 		reply(map[string]any{"enabled": s.autoFwd != "", "emailAddress": s.autoFwd, "disposition": "leaveInInbox"})
 	case r.Method == "GET" && p == "/gmail/v1/users/me/profile":
-		reply(map[string]any{"emailAddress": User, "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
+		reply(map[string]any{"emailAddress": cmp.Or(s.user, User), "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
 	default:
 		s.calls = s.calls[:len(s.calls)-1]
 		refuse(http.StatusNotFound)
@@ -563,6 +581,10 @@ func (s *Server) list(q url.Values, reply func(any)) {
 	out := map[string]any{"messages": page, "resultSizeEstimate": len(ids)}
 	if start+max < len(ids) {
 		out["nextPageToken"] = strconv.Itoa(start + max)
+	}
+	if read && s.endless > 0 {
+		s.endless--
+		out["nextPageToken"] = strconv.Itoa(start)
 	}
 	reply(out)
 }

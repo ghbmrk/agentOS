@@ -56,10 +56,11 @@ const (
 	// gReadQuery is the read mail Opened lists, in every label, spam and
 	// trash too, as Live reads every folder: a mail without UNREAD.
 	gReadQuery = "/messages?q=-is%3Aunread&includeSpamTrash=true&maxResults=" + gListLimit
-	// gPagesMax bounds Opened's pages: as many ids as openedMax could ever
-	// log, so an API that never ends its listing fails the read.
-	gPagesMax = searchMax / 500
 )
+
+// gPagesMax bounds Opened's pages: as many ids as openedMax could ever log,
+// so an API that never ends its listing fails the read. A var for tests.
+var gPagesMax = searchMax / 500
 
 // GmailCalls is Gmail's declaration over base (GmailBase, or a fake's), its
 // secret in slot as a bearer token redeemed from the sealed refresh grant.
@@ -499,6 +500,21 @@ func (g *Gmail) History(ctx context.Context) (string, error) {
 		return "", errors.New("inbox: gmail: the profile has no history id")
 	}
 	return p.History, nil
+}
+
+// Address is the account's own address, as its profile names it: the
+// account a finished sign-in is for (#3009).
+func (g *Gmail) Address(ctx context.Context) (string, error) {
+	var p struct {
+		Email string `json:"emailAddress"`
+	}
+	if _, err := g.call(ctx, gProfile, nil, &p); err != nil {
+		return "", err
+	}
+	if p.Email == "" {
+		return "", errors.New("inbox: gmail: the profile has no address")
+	}
+	return p.Email, nil
 }
 
 // Changed reports whether the inbox changed since mark. A mark Gmail no

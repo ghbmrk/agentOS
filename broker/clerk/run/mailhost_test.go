@@ -140,7 +140,7 @@ func TestEachMailSocketServesOnlyItsSide(t *testing.T) {
 	h := NewMailHost(context.Background(), dir, sec, mailConfig())
 	owner := serveMail(t, h, MailOwnerSide)
 	planner := serveMail(t, h, MailPlannerSide)
-	for _, op := range []string{"setmail", "removemail", "status", "account", "told"} {
+	for _, op := range []string{"setmail", "removemail", "gmailbegin", "gmailfinish", "gmailrevoke", "status", "account", "told"} {
 		if err := planner.Call(op, setMailArgs{Settings: MailSettings{Address: "a@b.test", IMAP: "i.test:993", SMTP: "s.test:465"}, Password: "a-password-12"}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
 			t.Fatalf("%s on the planner's socket: %v", op, err)
 		}
