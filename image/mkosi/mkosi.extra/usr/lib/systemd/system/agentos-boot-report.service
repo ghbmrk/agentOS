@@ -1,7 +1,8 @@
 [Unit]
 Description=AgentOS boot report
-# After the Wi-Fi page's claim hand-over, so the report reads its final state (#1743).
-After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service agentos-localui-claim.service
+# After the Wi-Fi page's claim hand-over, so the report reads its final state (#1743), and after
+# enrollment, so its keeper line reads enrollment's result, not a job still queued (STO-2c).
+After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service agentos-localui-claim.service agentos-keeper-enroll.service
 
 [Service]
 Type=oneshot
@@ -10,8 +11,10 @@ StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/
 ExecPaths=/usr
-# No device but the standard pseudo-devices: only the keeper's units reach the TPM (#2889, STO-2c).
+# Block devices, read only (bless-boot status opens the ESP, foreign-disks reads each disk): only the
+# keeper's units reach the TPM (#2889, STO-2c). Not char-misc, which holds /dev/tpm0 too.
 DevicePolicy=closed
+DeviceAllow=block-* r
 
 [Install]
 WantedBy=multi-user.target

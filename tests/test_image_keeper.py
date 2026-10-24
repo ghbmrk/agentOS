@@ -314,6 +314,15 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn('"agentos-keeper: enroll=ran"', ci)
         self.assertIn('"agentos-keeper: enroll=skipped"', ci)
         self.assertIn("my store holds none of your hardware keys", ci)
+        self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
+        # The CI units whose mounts outlive one command lift the main-side mask in a drop-in that
+        # sorts after it.
+        for unit in ("agentos-hwsim-setup.service", "agentos-e2e-seal.service"):
+            self.assertIn("'systemd.unit-dropin.%s~99-ci-unmask' '[Service]\\nInaccessiblePaths=\\n'" % unit, ci)
+        self.assertLess("50-main-side.conf", "99-ci-unmask.conf")
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
+        for n in check.KEEPER_UNITS:
+            self.assertIn("enable " + n, preset)
 
 
 if __name__ == "__main__":

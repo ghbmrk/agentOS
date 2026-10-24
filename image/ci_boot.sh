@@ -317,7 +317,9 @@ DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT"
 # enrolled (#2905 open point 2): the kernel answering is that point's to add here.
 KEEPER_FACTORS='d /run/agentos-setup 0700 root root -\nf /run/agentos-setup/passphrase 0600 root root - ci-synthetic-passphrase-not-a-secret\nf /run/agentos-setup/recovery 0600 root root - 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n'
 KEEPER_EXTRA="$(nm_cred tmpfiles.extra "$KEEPER_FACTORS")"
-EXTRA="$DRILL_EXTRA$KEEPER_EXTRA" UNTIL="agentos-drill: \|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
+# The drill's line comes before the boot report's (agentos-drill-report.service is ordered before it),
+# so the boot runs until the second boot's keeper line.
+EXTRA="$DRILL_EXTRA$KEEPER_EXTRA" UNTIL="agentos-keeper: enroll=skipped\|agentos-keeper: enroll=failed\|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-keeper: enroll=ran"
 has "$W/console-reboot.log" "agentos-keeper: enroll=skipped"
 # After the drill's reboot too, so the tpm slot opened again on a second boot's PCRs.
@@ -570,6 +572,11 @@ EOS
 hwsim_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
 HWSIM_UNITS="$(hwsim_cred systemd.extra-unit.agentos-hwsim-setup.service "[Unit]\nDescription=agentOS hwsim radios (CI only)\nAfter=systemd-udevd.service systemd-tmpfiles-setup.service\nBefore=agentos-ap.service NetworkManager.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/mkdir -p /run/agentos-hwsim/share\nExecStart=/bin/mount -t 9p -o trans=virtio,version=9p2000.L,ro hwsim /run/agentos-hwsim/share\nExecStart=/bin/sh /run/agentos-hwsim/share/setup.sh\n")"
 HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred systemd.extra-unit.agentos-hwsim-check.service "[Unit]\nDescription=agentOS station check (CI only)\nRequires=agentos-hwsim-setup.service\nAfter=agentos-hwsim-setup.service agentos-ap.service NetworkManager.service agentos-netjoin.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=900\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/bash /run/agentos-hwsim/share/check.sh\n")"
+# The image's main-side mask (agentos-.service.d/50-main-side.conf, STO-2c) gives every agentos-*
+# unit its own mount namespace, so this unit's 9p mount would reach neither its next command nor the
+# check: a named drop-in that sorts after the mask lifts it for this CI-only unit (debug-generator's
+# "~NAME" credential suffix names the drop-in file).
+HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred 'systemd.unit-dropin.agentos-hwsim-setup.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')"
 HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-hwsim-setup.service agentos-hwsim-check.service\n')"
 # The host's iw, or Ubuntu's package unpacked without installing it (apt verifies it).
 hwsim_iw() {
@@ -691,11 +698,13 @@ e2e_console() {
 if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
 	copy "$W/e2e.raw" 24G
+	# agentos-e2e-seal's 9p mount must reach the host for agentos-e2e: its drop-in lifts the main-side
+	# mask, as for agentos-hwsim-setup.
 	# A host disk beside the drive here too: setup's services and the agent machines run on this boot.
 	H2=$W/host-e2e.raw
 	host_disk "$H2"
 	host2_before=$(sha256sum <"$H2")
-	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(nm_cred 'systemd.unit-dropin.agentos-e2e-seal.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw" "$H2"
 	[ "$(sha256sum <"$H2")" = "$host2_before" ] && echo "ok   host disk unchanged (e2e boot)" || { echo "MISS host disk unchanged (e2e boot)"; fail=1; }
 	disks_none "$W/console-e2e.log" "agentos-disks:"
