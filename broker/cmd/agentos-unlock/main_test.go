@@ -166,9 +166,7 @@ type rig struct {
 func newRig(t *testing.T, putAnchors bool) *rig {
 	t.Helper()
 	r := &rig{t: t, sw: swtpm.Start(t)}
-	r.sw.Reboot()
-	r.sw.Measure(9, "initrd-A")
-	r.sw.Measure(12, "usrhash=aaaa quiet")
+	r.reboot()
 	r.kernelUID, r.kernelG, r.ownerUID, r.meterUID = os.Getuid(), os.Getgid(), os.Getuid(), os.Getuid()
 	if os.Geteuid() == 0 {
 		r.kernelUID, r.kernelG, r.meterUID = 65534, 65534, 65533
@@ -276,9 +274,19 @@ func (r *rig) mainConfig() proc.MainConfig {
 	return c
 }
 
-// boot runs the unlock step, which becomes the kernel process.
+// reboot power-cycles the PC into its approved boot path. Each boot needs
+// one: an unlock caps the slot until the next (#2977).
+func (r *rig) reboot() {
+	r.sw.Reboot()
+	r.sw.Measure(9, "initrd-A")
+	r.sw.Measure(12, "usrhash=aaaa quiet")
+}
+
+// boot power-cycles the PC and runs the unlock step, which becomes the
+// kernel process.
 func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	r.t.Helper()
+	r.reboot()
 	k, err := json.Marshal(kernelRole{Main: r.mainConfig(), AnchorDir: r.anchorDir()})
 	must(r.t, err)
 	role := r.role(&r.policy.PublicKey, r.anchor)
@@ -472,6 +480,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	} else {
 		clear(b)
 	}
+	r.reboot()
 
 	bare := newRig(t, false)
 	if _, err := unlock(bare.role(&bare.policy.PublicKey, bare.anchor).Config(), bare.role(&bare.policy.PublicKey, bare.anchor).pins); err == nil || !strings.Contains(err.Error(), "hardware keys") {
@@ -489,6 +498,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 			must(t, st.Put(handoff.CounterEntry, v))
 		}
 		st.Close()
+		r.reboot()
 		if _, err := unlock(c, r.role(&r.policy.PublicKey, r.anchor).pins); err == nil || !strings.Contains(err.Error(), "counter") {
 			t.Errorf("%s counter: got %v", name, err)
 		}
@@ -544,10 +554,63 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 
 	wrong := bytes.Clone(r.anchor)
 	wrong[0] ^= 1
+	r.reboot()
 	must(t, tpmseal.FreePins(r.sw.TPM(), srk, id))
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: wrong}))
 	if _, err := unlock(c, storePins(r.store)); !errors.Is(err, seal.ErrTampered) {
 		t.Fatalf("pins with another anchor: got %v, want ErrTampered", err)
+	}
+}
+
+// K6 (#2977), CLK-1: once the unlock step has the store open, it caps the
+// slot's boot path, so for the rest of the boot no connection to this TPM
+// unseals it. PCRs are the TPM's, not a connection's, so this holds for the
+// kernel's on handoff.TPMFD as for this test's (a software TPM serves one
+// connection at a time, so it is tried once the kernel has stopped, still in
+// the same boot). The next boot unlocks as before.
+func TestTheSlotIsLockedAfterUnlock(t *testing.T) {
+	r := newRig(t, true)
+	c := r.role(&r.policy.PublicKey, r.anchor).Config()
+	pins := r.role(&r.policy.PublicKey, r.anchor).pins
+	b, err := unlock(c, pins)
+	must(t, err)
+	clear(b)
+	if _, err := unlock(c, pins); !errors.Is(err, tpmseal.ErrNoPolicy) {
+		t.Fatalf("a second unlock in the same boot: got %v, want ErrNoPolicy", err)
+	}
+	tpmOpens := func() error {
+		st, err := seal.Unlock(r.store, seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Anchor: r.anchor})
+		if err == nil {
+			st.Close()
+		}
+		return err
+	}
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if err := tpmOpens(); !errors.Is(err, tpmseal.ErrNoPolicy) {
+		t.Errorf("after the kernel's boot, the tpm slot: got %v, want ErrNoPolicy", err)
+	}
+	r.reboot()
+	must(t, tpmOpens())
+}
+
+// A boot path the step cannot cap (here a slot over PCR 16, which locality 0
+// can reset) hands the kernel nothing, though the store opened.
+func TestAnUncappableSlotUnlocksNothing(t *testing.T) {
+	r := newRig(t, true)
+	r.sw.Measure(16, "resettable")
+	p, err := tpmseal.SignCurrent(r.sw.TPM(), r.policy, []uint{16})
+	must(t, err)
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	must(t, err)
+	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
+	must(t, err)
+	st.Close()
+	c := r.role(&r.policy.PublicKey, r.anchor).Config()
+	if b, err := unlock(c, r.role(&r.policy.PublicKey, r.anchor).pins); err == nil || !strings.Contains(err.Error(), "cannot be capped") {
+		clear(b)
+		t.Fatalf("an uncappable slot: got %v", err)
 	}
 }
 
