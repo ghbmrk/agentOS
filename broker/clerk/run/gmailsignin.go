@@ -136,7 +136,8 @@ func (g *gmailSignIn) address(h *MailHost) (string, error) {
 }
 
 // gmailBegin starts a sign-in for use and returns the consent address, or a
-// detail. reg nil signs in again with the Gmail account's registration.
+// detail. reg nil signs in again with the Gmail account's registration, or,
+// with no Gmail account set up, signs in with the kept one (#3055).
 func (h *MailHost) gmailBegin(use string, reg *clerk.Registration) gmailBegun {
 	var g *gmailSignIn
 	var err error
@@ -148,8 +149,17 @@ func (h *MailHost) gmailBegin(use string, reg *clerk.Registration) gmailBegun {
 		if rerr == nil && s.API == APIGmail && h.sec.Has(slotOf(s)) {
 			g, err = h.heldGmailSignIn(slotOf(s), s.Address)
 		}
+		if g == nil && err == nil && h.cfg.Sealer != nil {
+			// No account to sign in again with: a first sign-in with the
+			// registration kept apart (#3055).
+			if r, ok := loadReg(h.dir, h.cfg.Sealer); ok {
+				reg = &r
+			}
+		}
 		h.mu.Unlock()
-		if g == nil && err == nil {
+		if reg != nil {
+			g, err = h.ownGmailSignIn()
+		} else if g == nil && err == nil {
 			return gmailBegun{Detail: clerk.DNoAccount}
 		}
 	}
@@ -247,6 +257,9 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	if perr == nil && !same {
 		h.notify(false, noteMailReplaced)
 	}
+	// The registration outlives the account (#3055); a failed write leaves
+	// the account set up and the owner enters it again after a removal.
+	err = errors.Join(err, keepReg(h.dir, h.cfg.Sealer, g.grant))
 	h.refresh()
 	if err != nil {
 		return "", err // the account is set up; only a later step of the write failed
