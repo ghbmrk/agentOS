@@ -85,19 +85,20 @@ var schema = map[string]int{
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
-	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1,
+	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
 func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got == v }
 
-// Widening entries grant power back: a resume, a key, a passkey, the owner's RETRY,
+// Widening entries grant power back: a resume, a key, a passkey, the first
+// anchors (setup), the owner's RETRY,
 // which lets an effect that may have happened run again, and the spend and
 // pool entries that reopen budget. Only one that an anchor covers counts
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
-		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved
+		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -810,6 +811,8 @@ func (s *State) Apply(e Entry) error {
 	}
 	s.Seq = e.Seq
 	switch e.Type {
+	case TAnchorsSet:
+		return s.applySetup(e)
 	case TKeyIssued:
 		b, err := body[grantBatch](e)
 		if err != nil {

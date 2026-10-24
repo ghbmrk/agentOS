@@ -208,20 +208,29 @@ type Remote struct {
 
 // Clerk is r as the kernel calls it: each call carries the view of the
 // kernel.View it is given, verified against anchors.
-func (r Remote) Clerk(anchors []ed25519.PublicKey) kernel.Clerk { return remote{r, anchors} }
+func (r Remote) Clerk(anchors []ed25519.PublicKey) kernel.Clerk {
+	return remote{r, func() []ed25519.PublicKey { return anchors }}
+}
 
 // remote is a Remote as a kernel.Clerk.
 type remote struct {
 	Remote
-	anchors []ed25519.PublicKey
+	anchors func() []ed25519.PublicKey
+}
+
+func (c remote) keys() []ed25519.PublicKey {
+	if c.anchors == nil {
+		return nil
+	}
+	return c.anchors()
 }
 
 func (c remote) Do(r kernel.Request, v kernel.View) kernel.Result {
-	return c.do(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+	return c.do(r, view(v, c.keys(), r, time.Now().UnixMilli()))
 }
 
 func (c remote) Probe(r kernel.Request, v kernel.View) kernel.Result {
-	return c.probe(r, view(v, c.anchors, r, time.Now().UnixMilli()))
+	return c.probe(r, view(v, c.keys(), r, time.Now().UnixMilli()))
 }
 
 // do and probe make a call with a view taken under the kernel's lock, so the

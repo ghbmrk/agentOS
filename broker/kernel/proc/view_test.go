@@ -234,7 +234,7 @@ func TestAFailedWriteIsUnknown(t *testing.T) {
 	}()
 	ps := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "alice", "msg": strings.Repeat("x", 2<<20)}}
 	r := kernel.Request{Plan: kernel.Plan{ID: "big", Steps: []kernel.PlanStep{ps}}}
-	c := remote{Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}, anchors}
+	c := Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}.Clerk(anchors).(remote)
 	if res := c.do(r, snapshot{}); res.Outcome != "unknown" || res.Detail != DLost {
 		t.Fatalf("a call cut off mid-write: %+v, want unknown %s", res, DLost)
 	}

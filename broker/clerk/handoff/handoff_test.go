@@ -127,8 +127,21 @@ func TestAnchorsAreBounded(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrHandoff", name, err)
 		}
 	}
-	if _, err := (KernelKeys{Head: headPriv, Counter: testCounter()}).Marshal(); !errors.Is(err, ErrHandoff) {
-		t.Fatalf("no anchors: got %v", err)
+}
+
+// #2905 open point 2: a store with no anchors yet hands over none, and the
+// kernel starts setup-only. A count of none with keys after it is refused.
+func TestNoAnchorsStartsSetupOnly(t *testing.T) {
+	b, err := (KernelKeys{Head: headPriv, Counter: testCounter()}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := parseKeys(b)
+	if err != nil || len(k.Anchors) != 0 || !k.Head.Equal(headPriv) {
+		t.Fatalf("no anchors: %v %v", k.Anchors, err)
+	}
+	if _, err := parseKeys(append(b, ownerPub...)); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("a key after a count of none: got %v, want ErrHandoff", err)
 	}
 }
 
