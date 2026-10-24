@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 // alertPhrases are VRB-2's second alert net: security-alert wording that
@@ -77,9 +76,11 @@ func wordingAlert(text string) bool {
 	return codeNearWord(strings.ReplaceAll(f, "sign in", "signin"))
 }
 
-// containsWord reports whether p occurs in s on word boundaries: neither
-// neighbour is a letter or a digit, so "signin" is not read inside
-// "designing" (#2888).
+// containsWord reports whether p occurs in s at the start of a word: the
+// character before it is not an ASCII letter or digit, so "signin" is not
+// read inside "designing" (#2888). The end is left open, so inflected and
+// run-on forms ("login attempts", "sign-ins", "signed into") still match,
+// and another script's letter beside it is a boundary.
 func containsWord(s, p string) bool {
 	for i := 0; ; {
 		j := strings.Index(s[i:], p)
@@ -87,16 +88,14 @@ func containsWord(s, p string) bool {
 			return false
 		}
 		j += i
-		before, _ := utf8.DecodeLastRuneInString(s[:j])
-		after, _ := utf8.DecodeRuneInString(s[j+len(p):])
-		if !wordRune(before) && !wordRune(after) {
+		if j == 0 || !asciiWord(s[j-1]) {
 			return true
 		}
 		i = j + 1
 	}
 }
 
-func wordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+func asciiWord(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
 
 func foldText(s string) string {
 	var b strings.Builder
