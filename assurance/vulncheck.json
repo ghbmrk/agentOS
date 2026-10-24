@@ -117,7 +117,6 @@
   {"id": "DEBIAN-CVE-2026-6368", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-67693", "issue": 2919, "where": "image", "package": "gnutls28", "why": "Image package gnutls28 3.8.9-3+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-6791", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
-  {"id": "DEBIAN-CVE-2026-6862", "issue": 2919, "where": "image", "package": "efivar", "why": "Image package efivar 38-3.1+b1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-76642", "issue": 2919, "where": "image", "package": "util-linux", "why": "Image package util-linux 1:2.41.5-0+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-77117", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-78408", "issue": 2919, "where": "image", "package": "util-linux", "why": "Image package util-linux 1:2.41.5-0+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
