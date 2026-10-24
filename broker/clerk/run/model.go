@@ -7,7 +7,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -35,8 +35,8 @@ func ListenModel(path string, plannerUID int) (net.Listener, error) {
 // connection; c serializes them. clock is the model clerk process's, which
 // only orders the clerk's own owed log writes: the kernel dates every one.
 func ServeModel(ln net.Listener, c *model.Clerk, clock func() int64) error {
-	return kernelproc.ServeConns(ln, kernelproc.MaxConns, func(conn net.Conn) {
-		kernelproc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
+	return proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
+		proc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
 			var a modelArgs
 			if op != "call" || json.Unmarshal(raw, &a) != nil {
 				return nil, errors.New("run: the model socket has one call, call")
@@ -69,7 +69,7 @@ func modelError(err error) error {
 // refusal arrives as the *key.Refusal the kernel gave, any other failure as
 // ErrModelCall, and a lost answer as ErrLost; the call's spend, if any, is
 // metered all the same.
-type Model struct{ kernelproc.Conn }
+type Model struct{ proc.Conn }
 
 func (m Model) Call(plan, route, prompt string, maxOut int64) (reply string, err error) {
 	err = m.Conn.Call("call", modelArgs{plan, route, prompt, maxOut}, &reply)

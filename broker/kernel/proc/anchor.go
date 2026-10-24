@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 import (
 	"crypto/ed25519"
@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // Counter is a count that only goes up and lives off the log's disk: the

@@ -19,8 +19,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 var phonePub, phonePriv = gen(8)
@@ -83,13 +83,13 @@ func newExitRigFor(t *testing.T, refresh string) *exitRig {
 	}
 	h := NewExitHost(x, d, anchors)
 	sock := filepath.Join(shortDir(t), "x.sock")
-	ln, err := kernelproc.ListenClerk(sock, os.Getuid())
+	ln, err := proc.ListenClerk(sock, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
 	last := &seenCall{h: h}
-	go kernelproc.ServeClerk(ln, last, anchors)
+	go proc.ServeClerk(ln, last, anchors)
 	osock := filepath.Join(shortDir(t), "o.sock")
 	oln, err := ListenExitOwner(osock, os.Getuid())
 	if err != nil {
@@ -101,7 +101,7 @@ func newExitRigFor(t *testing.T, refresh string) *exitRig {
 	if err := b.h.With(func(k *kernel.Kernel) error { return k.Enroll(b.now, key.Enroll(ownerPriv, phonePub)) }); err != nil {
 		t.Fatal(err)
 	}
-	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{kernelproc.Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
+	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{proc.Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
 }
 
 // approve is the owner's phone approving exactly a reconnect to the grant

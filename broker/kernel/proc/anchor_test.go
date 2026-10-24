@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 // REQ: LOG-2, STO-1
 

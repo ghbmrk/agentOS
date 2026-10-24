@@ -20,8 +20,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // mailRig is the kernel's process (the box) and the mail clerk served on its
@@ -54,11 +54,11 @@ func newMailRig(t *testing.T, msgIDs ...string) *mailRig {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(shortDir(t), "mail.sock")
-	ln, err := kernelproc.ListenClerk(sock, os.Getuid())
+	ln, err := proc.ListenClerk(sock, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	go kernelproc.ServeClerk(ln, acct, anchors)
+	go proc.ServeClerk(ln, acct, anchors)
 	t.Cleanup(func() { ln.Close() })
 	r := &mailRig{box: newBoxFor(t, sock, inbox.Name, key.Organize), srv: srv, dir: dir, sec: sec, ids: map[string]string{}}
 	ls := acct.Listing()

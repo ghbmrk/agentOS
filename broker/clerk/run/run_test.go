@@ -21,19 +21,19 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // box is the test process as the kernel's process, with one clerk at
 // sock.
 type box struct {
 	t      *testing.T
-	h      *kernelproc.Kernel
-	cfg    kernelproc.KernelConfig
+	h      *proc.Kernel
+	cfg    proc.KernelConfig
 	key    key.Key // the clerk key the holder signs plans under
 	now    int64
 	plans  int
-	remote kernelproc.Remote
+	remote proc.Remote
 }
 
 func newBox(t *testing.T, sock string) *box {
@@ -51,11 +51,11 @@ func newBoxFor(t *testing.T, sock, name string, verbs ...key.Verb) *box {
 // hold the same keys.
 func newBoxAt(t *testing.T, sock, name string, now int64, verbs ...key.Verb) *box {
 	t.Helper()
-	b := &box{t: t, now: now, remote: kernelproc.Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
-	b.cfg = kernelproc.KernelConfig{
+	b := &box{t: t, now: now, remote: proc.Remote{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}}
+	b.cfg = proc.KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
 		Pub: headPub, Sign: headPriv, Anchors: anchors,
-		Clerks: map[string]kernelproc.Remote{name: b.remote},
+		Clerks: map[string]proc.Remote{name: b.remote},
 	}
 	b.open()
 	t.Cleanup(func() { b.h.Close() })
@@ -76,7 +76,7 @@ func newBoxAt(t *testing.T, sock, name string, now int64, verbs ...key.Verb) *bo
 // open starts the kernel's process over the box's log, as a restart does.
 func (b *box) open() {
 	b.t.Helper()
-	h, err := kernelproc.OpenKernel(b.cfg, b.now)
+	h, err := proc.OpenKernel(b.cfg, b.now)
 	if err != nil {
 		b.t.Fatal(err)
 	}
@@ -180,8 +180,8 @@ func TestKilledClerkDoesNotResend(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the kernel did not notice the clerk's death")
 	}
-	if st := b.step(id); st.Phase != kernel.PUnknown || st.Detail != kernelproc.DLost {
-		t.Fatalf("step %+v, want unknown %s", st, kernelproc.DLost)
+	if st := b.step(id); st.Phase != kernel.PUnknown || st.Detail != proc.DLost {
+		t.Fatalf("step %+v, want unknown %s", st, proc.DLost)
 	}
 	w.startClerk(t)
 	at := b.now
@@ -296,27 +296,27 @@ func scanMemory(hash []byte) (found bool, scanned int64, err error) {
 func TestPeersAreCheckedByUID(t *testing.T) {
 	w := newWorld(t)
 	b := newBox(t, w.sock)
-	b.cfg.Clerks["web"] = kernelproc.Remote{Socket: w.sock, UID: os.Getuid() + 1}
+	b.cfg.Clerks["web"] = proc.Remote{Socket: w.sock, UID: os.Getuid() + 1}
 	b.h.Close()
 	b.open()
 	id := b.submit("carol")
 	b.tick(b.now)
-	if st := b.step(id); st.Phase != kernel.PUnsent || st.Detail != kernelproc.DUnreachable {
-		t.Fatalf("step %+v, want unsent %s", st, kernelproc.DUnreachable)
+	if st := b.step(id); st.Phase != kernel.PUnsent || st.Detail != proc.DUnreachable {
+		t.Fatalf("step %+v, want unsent %s", st, proc.DUnreachable)
 	}
 
 	// A clerk socket that admits some other uid, not the kernel's.
 	sock := filepath.Join(shortDir(t), "other.sock")
-	ln, err := kernelproc.ListenClerk(sock, os.Getuid()+1)
+	ln, err := proc.ListenClerk(sock, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
 	calls := 0
-	go kernelproc.ServeClerk(ln, fakeClerk{do: func() kernel.Result { calls++; return kernel.Result{Outcome: "ok"} }}, nil)
+	go proc.ServeClerk(ln, fakeClerk{do: func() kernel.Result { calls++; return kernel.Result{Outcome: "ok"} }}, nil)
 	var res kernel.Result
 	b.h.With(func(k *kernel.Kernel) error {
-		res = kernelproc.Remote{Socket: sock, UID: os.Getuid(), Timeout: 2 * time.Second}.Clerk(nil).Do(kernel.Request{Plan: k.State().Plans[id].Plan}, k.State())
+		res = proc.Remote{Socket: sock, UID: os.Getuid(), Timeout: 2 * time.Second}.Clerk(nil).Do(kernel.Request{Plan: k.State().Plans[id].Plan}, k.State())
 		return nil
 	})
 	if res.Outcome != "unknown" || calls != 0 {
@@ -344,14 +344,14 @@ func TestClerkErrorsCrossASocketAsThemselves(t *testing.T) {
 	for _, want := range []error{ErrModelCall, ErrNoMailAccount, ErrMailAddress, ErrMailServer, ErrMailUser,
 		ErrWeakMailPassword, ErrBadGrant, ErrNoReconnect, fmt.Errorf("stage: %w", ErrBadGrant)} {
 		sock := filepath.Join(shortDir(t), "e.sock")
-		ln, err := kernelproc.ListenKernel(sock, os.Getuid())
+		ln, err := proc.ListenKernel(sock, os.Getuid())
 		if err != nil {
 			t.Fatal(err)
 		}
-		go kernelproc.ServeConns(ln, 1, func(c net.Conn) {
-			kernelproc.ServeOne(c, func(string, json.RawMessage) (json.RawMessage, error) { return nil, want })
+		go proc.ServeConns(ln, 1, func(c net.Conn) {
+			proc.ServeOne(c, func(string, json.RawMessage) (json.RawMessage, error) { return nil, want })
 		})
-		got := kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}.Call("x", nil, nil)
+		got := proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}.Call("x", nil, nil)
 		ln.Close()
 		if got == nil || got.Error() != want.Error() || !errors.Is(got, errors.Unwrap(want)) && got != want {
 			t.Fatalf("%v crossed as %#v", want, got)

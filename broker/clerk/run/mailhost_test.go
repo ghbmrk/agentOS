@@ -26,11 +26,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // serveMail serves side of h on a fresh socket for the test's uid.
-func serveMail(t *testing.T, h *MailHost, side MailSide) kernelproc.Conn {
+func serveMail(t *testing.T, h *MailHost, side MailSide) proc.Conn {
 	t.Helper()
 	sock := filepath.Join(shortDir(t), "m.sock")
 	ln, err := ListenMail(sock, os.Getuid())
@@ -39,7 +39,7 @@ func serveMail(t *testing.T, h *MailHost, side MailSide) kernelproc.Conn {
 	}
 	t.Cleanup(func() { ln.Close() })
 	go ServeMail(ln, h, side)
-	return kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}
+	return proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}
 }
 
 // The owner sets up, replaces and removes the account on the mail process's
@@ -501,12 +501,12 @@ func TestAStepsFailedSignInStopsTheClerk(t *testing.T) {
 				t.Fatalf("the listing: %v, %v", ls, err)
 			}
 			sock := filepath.Join(shortDir(t), "mail.sock")
-			ln, err := kernelproc.ListenClerk(sock, os.Getuid())
+			ln, err := proc.ListenClerk(sock, os.Getuid())
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { ln.Close() })
-			go kernelproc.ServeClerk(ln, h, anchors)
+			go proc.ServeClerk(ln, h, anchors)
 			b := newBoxFor(t, sock, inbox.Name, key.Organize)
 			c.fail(t, dir, sec, s, &to, &dials)
 			id := b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/bulk"}})

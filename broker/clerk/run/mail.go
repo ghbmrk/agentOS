@@ -24,8 +24,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/netguard"
-	"github.com/ghbmrk/agentos/broker/privfile"
 )
 
 // The mail clerk's process (MIG-4-mail-run, #2655). Its directory holds the

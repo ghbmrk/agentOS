@@ -1,11 +1,11 @@
-// Package kernelproc is the kernel's process (MIG-4-run, #2682; option A;
+// Package proc is the kernel's process (MIG-4-run, #2682; option A;
 // split from broker/clerk/run by KRN-2 split, #2892): it holds the log and
 // reaches each clerk over that clerk's socket. It never holds a credential,
 // and it links no clerk's code, so no mail or model parser is in the kernel
 // process (SPEC KRN-2). The wire both sides speak (the call, the view and
 // the socket helpers) lives here too, and broker/clerk/run, the clerks'
 // processes, imports it.
-package kernelproc
+package proc
 
 import (
 	"crypto/ed25519"

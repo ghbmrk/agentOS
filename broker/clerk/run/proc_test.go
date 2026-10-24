@@ -33,7 +33,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -165,9 +165,9 @@ func clerkProc() {
 	fail(err)
 	uid, err := strconv.Atoi(os.Getenv("RUN_KERNEL_UID"))
 	fail(err)
-	ln, err := kernelproc.ListenClerk(os.Getenv("RUN_SOCK"), uid)
+	ln, err := proc.ListenClerk(os.Getenv("RUN_SOCK"), uid)
 	fail(err)
-	fail(kernelproc.ServeClerk(ln, x, anchors))
+	fail(proc.ServeClerk(ln, x, anchors))
 }
 
 // writer puts a new secret into RUN_DIR's store, over and over, until killed.

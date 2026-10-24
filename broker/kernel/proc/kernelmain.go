@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 import (
 	"context"

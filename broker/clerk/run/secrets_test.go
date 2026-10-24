@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 func clerkDir(t *testing.T) string {

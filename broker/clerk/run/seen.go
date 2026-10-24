@@ -16,7 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // The mail clerk's record of read mail (#2684, #2698 items 1, 2, 10 to 12).

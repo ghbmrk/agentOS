@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // fakeProvider answers every model call with 400 bytes, or err, and counts
@@ -53,7 +53,7 @@ func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
 
 	pr := &fakeProvider{}
 	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1_000_000, OutPerM: 1_000_000}}, Provider: pr,
-		Ledger: kernelproc.Meter{Conn: serveMeter(t, b)}}
+		Ledger: proc.Meter{Conn: serveMeter(t, b)}}
 	sock := filepath.Join(shortDir(t), "model.sock")
 	ln, err := ListenModel(sock, os.Getuid())
 	if err != nil {
@@ -61,7 +61,7 @@ func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
 	}
 	defer ln.Close()
 	go ServeModel(ln, c, func() int64 { return 0 }) // a clerk clock far behind
-	m := Model{kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
+	m := Model{proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
 
 	start := time.Now().UnixMilli()
 	if reply, err := m.Call("t", "api", "hi", 50); err != nil || len(reply) != 400 {
@@ -101,7 +101,7 @@ func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
 func TestModelClerkWithoutTheKernelCallsNothing(t *testing.T) {
 	pr := &fakeProvider{}
 	c := &model.Clerk{Routes: map[string]model.Price{"api": {InPerM: 1, OutPerM: 1}}, Provider: pr,
-		Ledger: kernelproc.Meter{Conn: kernelproc.Conn{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}}}
+		Ledger: proc.Meter{Conn: proc.Conn{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}}}
 	_, err := c.Call(0, "t", "api", "hi", 10)
 	var rf *key.Refusal
 	if !errors.As(err, &rf) || rf.Code != kernel.CBroken || pr.calls != 0 {
@@ -123,7 +123,7 @@ func TestAProviderErrorStaysInTheModelClerk(t *testing.T) {
 	}
 	defer ln.Close()
 	go ServeModel(ln, c, func() int64 { return 0 })
-	m := Model{kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
+	m := Model{proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
 	_, err = m.Call("t", "api", "hi", 10)
 	if !errors.Is(err, ErrModelCall) || strings.Contains(err.Error(), canary) || pr.calls != 1 {
 		t.Fatalf("a failed provider call: %v (%d calls), want %v without the canary", err, pr.calls, ErrModelCall)
@@ -147,14 +147,14 @@ func (admitAll) ReadPool(int64, string, int64, int64) error { return nil }
 
 // serveMeter serves b's kernel's meter side on a fresh socket that admits
 // this uid, and returns a Conn to it.
-func serveMeter(t *testing.T, b *box) kernelproc.Conn {
+func serveMeter(t *testing.T, b *box) proc.Conn {
 	t.Helper()
 	sock := filepath.Join(shortDir(t), "meter.sock")
-	ln, err := kernelproc.ListenKernel(sock, os.Getuid())
+	ln, err := proc.ListenKernel(sock, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go kernelproc.ServeKernel(ln, b.h, kernelproc.MeterSide, func() int64 { return time.Now().UnixMilli() })
-	return kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}
+	go proc.ServeKernel(ln, b.h, proc.MeterSide, func() int64 { return time.Now().UnixMilli() })
+	return proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}
 }

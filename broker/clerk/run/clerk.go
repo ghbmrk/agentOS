@@ -14,8 +14,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // OpenExit builds the exit clerk a clerk process serves: its Secrets from
@@ -217,14 +217,14 @@ type stageArgs struct {
 // ListenExitOwner opens the exit clerk process's owner socket, admitting
 // only the owner side's uid, which is never the planner's.
 func ListenExitOwner(path string, ownerUID int) (net.Listener, error) {
-	return kernelproc.ListenKernel(path, ownerUID)
+	return proc.ListenKernel(path, ownerUID)
 }
 
 // ServeExitOwner answers the owner side's one call, stage, on ln until ln
 // closes. The grant crosses only this socket, never the kernel's.
 func ServeExitOwner(ln net.Listener, h *ExitHost) error {
-	return kernelproc.ServeConns(ln, kernelproc.MaxConns, func(conn net.Conn) {
-		kernelproc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
+	return proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
+		proc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
 			var a stageArgs
 			if op != "stage" || json.Unmarshal(raw, &a) != nil || a.Plan == "" || len(a.Grant) == 0 {
 				return nil, errors.New("run: the exit owner socket has one call, stage, with a plan and a grant")
@@ -240,7 +240,7 @@ func ServeExitOwner(ln net.Listener, h *ExitHost) error {
 }
 
 // ExitOwner is the owner side's caller of the exit clerk's process.
-type ExitOwner struct{ kernelproc.Conn }
+type ExitOwner struct{ proc.Conn }
 
 // Stage hands the clerk the grant the owner's new sign-in gave, for the plan
 // whose change-account step the owner approves, and returns the digest that

@@ -10,7 +10,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // The Secrets file and its temporary, inside the clerk's own directory.

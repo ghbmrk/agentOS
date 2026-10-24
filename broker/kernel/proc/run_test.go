@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 // REQ: CLK-2, KRN-7, KRN-8, STO-2
 

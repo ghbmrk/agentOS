@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
-	"github.com/ghbmrk/agentos/broker/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // FileStore is the log on disk: a kernel.Store whose Append returns only once

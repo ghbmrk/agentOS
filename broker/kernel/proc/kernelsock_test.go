@@ -1,4 +1,4 @@
-package kernelproc
+package proc
 
 // REQ: CLK-1, CLK-7, LOG-7, KRN-7
 

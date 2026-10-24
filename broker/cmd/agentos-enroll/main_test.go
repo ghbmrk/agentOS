@@ -19,7 +19,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -216,7 +216,7 @@ func (b *box) openAnchor(st *seal.Store) error {
 	if err != nil {
 		b.t.Fatal(err)
 	}
-	_, err = kernelproc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head)
+	_, err = proc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head)
 	if err != nil {
 		b.t.Fatalf("the counter anchor: %v", err)
 	}
@@ -424,13 +424,13 @@ func TestCounterMadeByAFailedCreate(t *testing.T) {
 	b.openAnchor(st)
 	noErr(t, os.WriteFile(filepath.Join(b.c.anchorDir, anchorFile), old, 0o600))
 	head := get(st.HeadKey())
-	if _, err := kernelproc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head); !errors.Is(err, kernelproc.ErrAnchorRolledBack) {
+	if _, err := proc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head); !errors.Is(err, proc.ErrAnchorRolledBack) {
 		t.Fatalf("an old head file: got %v, want ErrAnchorRolledBack", err)
 	}
 	// 4. A box whose counter was deleted keeps failing closed: the anchor
 	// does not open and enrollment does not start over.
 	noErr(t, tpmseal.FreeCounter(b.sw.TPM(), b.srk(), st.ID()))
-	if _, err := kernelproc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head); err == nil {
+	if _, err := proc.OpenCounterAnchor(b.c.anchorDir, b.counter(st), head); err == nil {
 		t.Fatal("the anchor opened with its counter gone")
 	}
 	if err := enroll(b.c, b.sw.TPM()); !errors.Is(err, errEnrolled) {

@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/kernel"
-	"github.com/ghbmrk/agentos/broker/kernelproc"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // MailHost is the mail clerk's process around its clerk (MIG-4-run slice 3b):
@@ -363,7 +363,7 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 	"setmail": func(h *MailHost, raw json.RawMessage) (any, error) {
 		var a setMailArgs
 		if json.Unmarshal(raw, &a) != nil {
-			return nil, kernelproc.ErrArgs
+			return nil, proc.ErrArgs
 		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -400,7 +400,7 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 	"told": func(h *MailHost, raw json.RawMessage) (any, error) {
 		var through int64
 		if json.Unmarshal(raw, &through) != nil {
-			return nil, kernelproc.ErrArgs
+			return nil, proc.ErrArgs
 		}
 		h.told(through)
 		return nil, nil
@@ -436,13 +436,13 @@ func (h *MailHost) listing(again bool) ([]inbox.Item, error) {
 // ListenMail opens one of the mail process's sockets besides the kernel's,
 // admitting only that side's uid.
 func ListenMail(path string, uid int) (net.Listener, error) {
-	return kernelproc.ListenKernel(path, uid)
+	return proc.ListenKernel(path, uid)
 }
 
 // ServeMail answers side's calls to h on ln until ln closes.
 func ServeMail(ln net.Listener, h *MailHost, side MailSide) error {
-	return kernelproc.ServeConns(ln, kernelproc.MaxConns, func(conn net.Conn) {
-		kernelproc.ServeOne(conn, func(name string, args json.RawMessage) (json.RawMessage, error) {
+	return proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
+		proc.ServeOne(conn, func(name string, args json.RawMessage) (json.RawMessage, error) {
 			f, ok := side.ops[name]
 			if !ok {
 				return nil, errors.New("run: the " + side.name + " socket has no call " + name)
@@ -457,7 +457,7 @@ func ServeMail(ln net.Listener, h *MailHost, side MailSide) error {
 }
 
 // MailOwner is the owner side's caller of the mail process.
-type MailOwner struct{ kernelproc.Conn }
+type MailOwner struct{ proc.Conn }
 
 func (o MailOwner) SetMail(s MailSettings, password string) error {
 	return o.Call("setmail", setMailArgs{s, password}, nil)
@@ -479,7 +479,7 @@ func (o MailOwner) Account() (a MailAccount, err error) {
 }
 
 // MailPlanner is the planner's caller of the mail process.
-type MailPlanner struct{ kernelproc.Conn }
+type MailPlanner struct{ proc.Conn }
 
 func (p MailPlanner) Listing() (ls []inbox.Item, err error) {
 	err = p.Call("listing", nil, &ls)

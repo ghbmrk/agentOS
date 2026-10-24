@@ -1,6 +1,6 @@
 // Package privfile holds a process's own private files: a check that a path
 // is this uid's alone, and a write that a crash leaves whole. The kernel's
-// process (broker/kernelproc) and the clerks' (broker/clerk/run) both use it;
+// process (broker/kernel/proc) and the clerks' (broker/clerk/run) both use it;
 // it was split out of broker/clerk/run so the kernel links no clerk code
 // (KRN-2 split, #2892). The error texts keep their run: prefix.
 package privfile
