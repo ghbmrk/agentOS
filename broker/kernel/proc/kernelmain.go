@@ -50,7 +50,7 @@ func markUp(path string) {
 		err = f.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "run: mark that I am up, so a later failure of mine reboots the box: %v\n", err)
+		fmt.Fprintf(os.Stderr, "run: mark that I am up, so a later failure of mine reboots me: %v\n", err)
 	}
 }
 
