@@ -1,7 +1,8 @@
 name: trusted-base
 # KRN-2m (#2849): measures the trusted base on every PR (own lines, dependency lines, parsers;
-# SPEC KRN-2) and shows the table in this check's job summary; it fails a PR that grows any of
-# them without a `Trusted-base: <key> -- <reason>` line in its body. It runs on
+# SPEC KRN-2) and shows the table in this check's job summary; it fails a PR that adds a parser
+# without a `Trusted-base: <key> -- <reason>` line in its body, or grows the trusted core
+# (tools/trusted_core.txt) without a `Trusted-core:` line. It runs on
 # pull_request_target, so the workflow and tools/trusted_base.py are the base branch's copies:
 # a PR cannot loosen the check it is measured by. The base side is base.sha; the head side is
 # the PR head merged onto it with `git merge-tree`, so the measure is what lands and a branch
