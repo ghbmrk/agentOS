@@ -786,6 +786,17 @@ func crashed(err error) bool {
 	return errors.Is(err, errCrash) || errors.Is(err, errFull) || errors.Is(err, kernel.ErrBroken)
 }
 
+// rederive checks that the live log, before a boot can drop its unconfirmed
+// tail, gives every decision in it again from the entries before it (KRN-1).
+// Each entry is in the log at some boot, so this sees every one; it runs only
+// there because it reverifies every plan.
+func (s *sim) rederive() error {
+	if _, err := kernel.Rederive(s.w.anchors, s.k.Log().Entries()); err != nil {
+		return fmt.Errorf("invariant: %w", err)
+	}
+	return nil
+}
+
 // check judges the run so far.
 func (s *sim) check() error {
 	if len(s.w.bad) > 0 {
@@ -798,9 +809,6 @@ func (s *sim) check() error {
 	}
 	if !reflect.DeepEqual(re, s.k.State()) {
 		return errors.New("invariant: replay differs from the live state")
-	}
-	if _, err := kernel.Rederive(s.w.anchors, es); err != nil {
-		return fmt.Errorf("invariant: %w", err)
 	}
 	dispatched := map[string]bool{}
 	for _, e := range es {
@@ -871,6 +879,9 @@ func Run(c Config) (*Result, error) {
 				return fail(err)
 			}
 			s.logf("crash")
+			if err := s.rederive(); err != nil {
+				return fail(err)
+			}
 			if err := s.boot(); err != nil {
 				return fail(err)
 			}
@@ -878,6 +889,9 @@ func Run(c Config) (*Result, error) {
 		if err := s.check(); err != nil {
 			return fail(err)
 		}
+	}
+	if err := s.rederive(); err != nil {
+		return fail(err)
 	}
 	if err := s.boot(); err != nil {
 		return fail(err)
