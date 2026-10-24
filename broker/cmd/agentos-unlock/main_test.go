@@ -581,6 +581,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	must(t, err)
 	must(t, st.Put(handoff.AnchorsEntry, []byte("short")))
 	st.Close()
+	bare.reboot() // the first unlock capped the slot (#2977)
 	if _, err := unlock(bc.Config(), bc.pins); err == nil || !strings.Contains(err.Error(), "hardware keys") {
 		t.Fatalf("anchors that do not read: got %v", err)
 	}
