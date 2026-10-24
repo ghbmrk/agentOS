@@ -4,6 +4,7 @@ package kernel_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -70,6 +71,27 @@ func TestUsageOverAnAdmissionIsStillRecorded(t *testing.T) {
 	}
 	must(t, r.k.Cancel(3, "t1"))
 	must(t, r.k.Meter(4, b, "api", 5, "admitted")) // spend that happened is recorded after the plan ended
+}
+
+// A sum past int64 exceeds every cap, so usage near MaxInt64, metered or
+// asked for, never wraps the window's sum back under one (Defect: KEY).
+func TestSpendThatOverflowsIsRefused(t *testing.T) {
+	r := newRig(t)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	must(t, r.meter(1, "t1", "api", 1, "provider"))
+	if rf := r.admit(2, "t1", math.MaxInt64); !spendRefused(rf) {
+		t.Fatalf("MaxInt64 after 1 spent: %v", rf)
+	}
+	modelPlan(r, "t2", modelKey(r, "m2", key.LimitSpendTask(100)))
+	must(t, r.meter(3, "t2", "api", math.MaxInt64, "provider"))
+	if rf := r.admit(4, "t2", 1); !spendRefused(rf) {
+		t.Fatalf("1 after MaxInt64 metered: %v", rf)
+	}
+	r.replays()
+}
+
+func spendRefused(rf *key.Refusal) bool {
+	return rf != nil && (rf.Code == key.RSpendTask || rf.Code == key.RSpendDay)
 }
 
 // Spend never refunds: a negative amount is refused at both the check and the record.

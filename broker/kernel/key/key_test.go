@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -310,6 +311,51 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	nl.Ledger = nil
 	if r := v.Authorize(s, nl); r == nil || r.Code != RMalformed {
 		t.Fatal("caps without a ledger must fail closed")
+	}
+}
+
+// A sum past int64 exceeds every cap: a step or a ledger use near MaxInt64
+// must not wrap the window's sum below the cap (#2942 review, the keydiff
+// overflow probe).
+func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
+	o, h, k := root(t)
+	h2 := gen(3)
+	d, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(50), LimitSpendTask(50))
+	v := verified(t, d, o, h2)
+	// every prefix carries the same uses, so no other cap refuses first
+	all := func(us ...Use) ledger {
+		l := ledger{}
+		for _, id := range v.Scopes() {
+			l[id] = us
+		}
+		return l
+	}
+	s := step(Trash)
+	s.Task = "t1"
+	for name, tc := range map[string]struct {
+		amount int64
+		l      ledger
+		spend  bool
+	}{
+		"huge step, 1 spent":       {math.MaxInt64, all(Use{At: 900, Amount: 1, Task: "t1"}), false},
+		"huge step, nothing spent": {math.MaxInt64, all(), false},
+		"huge use, step of 1":      {1, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}), false},
+		"two huge uses, step of 0": {0, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}, Use{At: 901, Amount: math.MaxInt64, Task: "t1"}), false},
+		"spend: huge, 1 used":      {math.MaxInt64, all(Use{At: 900, Amount: 1, Task: "t1"}), true},
+		"spend: 1, huge used":      {1, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var r *Refusal
+			if tc.spend {
+				r = v.Spend("t1", tc.amount, ctx(1000, tc.l))
+			} else {
+				s.Amount = tc.amount
+				r = v.Authorize(s, ctx(1000, tc.l))
+			}
+			if r == nil || (r.Code != RSpendDay && r.Code != RSpendTask) {
+				t.Fatalf("want a spend refusal, got %v", r)
+			}
+		})
 	}
 }
 
