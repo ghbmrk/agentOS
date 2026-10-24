@@ -139,13 +139,21 @@ const (
 )
 
 func probePins(t transport.TPM, h tpm2.TPMHandle, id []byte) (pinsState, error) {
-	rsp, err := tpm2.NVReadPublic{NVIndex: h}.Execute(t)
-	if err != nil {
-		if errors.Is(err, tpm2.TPMRCHandle) {
-			return pinsFree, nil
-		}
-		return 0, fmt.Errorf("tpmseal: read NV index: %w", err)
+	st, _, err := probePinsName(t, h, id)
+	return st, err
+}
+
+// probePinsName is probePins that also returns the index's name.
+func probePinsName(t transport.TPM, h tpm2.TPMHandle, id []byte) (pinsState, []byte, error) {
+	name, err := readName(t, h)
+	if err != nil || name == nil {
+		return pinsFree, nil, err
 	}
+	st, err := pinsStateOf(h, id, name)
+	return st, name, err
+}
+
+func pinsStateOf(h tpm2.TPMHandle, id, name []byte) (pinsState, error) {
 	for _, s := range []struct {
 		written, locked bool
 		st              pinsState
@@ -154,7 +162,7 @@ func probePins(t transport.TPM, h tpm2.TPMHandle, id []byte) (pinsState, error) 
 		if err != nil {
 			return 0, err
 		}
-		if bytes.Equal(rsp.NVName.Buffer, n) {
+		if bytes.Equal(name, n) {
 			return s.st, nil
 		}
 	}

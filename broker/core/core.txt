@@ -53,6 +53,10 @@ core clerk/seal
 # inherited pipe.
 wiring cmd/agentos-unlock
 wiring cmd/agentos-kernel
+# Enrollment (STO-2c, #2905): the one-shot step at first boot that creates the
+# store, its slots, the log's counter anchor and the TPM pins, and rotates the
+# policy key or deletes the store later.
+wiring cmd/agentos-enroll
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
