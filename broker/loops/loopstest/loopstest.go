@@ -22,7 +22,7 @@ const OutPerM = 10_000
 // core.txt grants this package kernel.* because only tests link it. The
 // guard holds that wherever the files are reached from (a symlink, a
 // vendored copy, a build tag): a binary go test did not build stops here
-// (CO7).
+// (core/ASSUMPTIONS.md, CORE-fixture-imports-a).
 func init() {
 	if !testing.Testing() {
 		panic("loopstest is a test fixture: linked into a binary go test did not build")

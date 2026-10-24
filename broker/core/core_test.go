@@ -392,7 +392,7 @@ func TestEveryCoreListEntryExists(t *testing.T) {
 }
 
 // fixtures are the allow-line packages core.txt grants on the grounds that
-// only tests link them: a name ending in test, and kernel/sim (CO7).
+// only tests link them: a name ending in test, and kernel/sim (CORE-fixture-imports-a).
 func fixtures(t *testing.T, l list) []string {
 	t.Helper()
 	var fs []string
