@@ -27,6 +27,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/hex"
@@ -79,8 +80,8 @@ const (
 
 // The fixed refusals. Each leaves everything as it was.
 var (
-	errEnrolled  = errors.New("agentos-enroll: this box already has a sealed store; I change nothing")
-	errLogExists = errors.New("agentos-enroll: this box already has a log; I change nothing")
+	errEnrolled  = errors.New("agentos-enroll: I already have a sealed store; I change nothing")
+	errLogExists = errors.New("agentos-enroll: I already have a log; I change nothing")
 	errOtherPins = errors.New("agentos-enroll: this PC's TPM already holds another store's pins; I change nothing")
 	errStaged    = errors.New("agentos-enroll: my unfinished store does not read; I change nothing")
 )
@@ -113,7 +114,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.recovery, "recovery-file", "", "a root-only file holding the recovery key, hex")
 	fs.IntVar(&c.kernelUID, "kernel-uid", -1, "the kernel's uid, which owns the anchor")
 	fs.IntVar(&c.kernelGID, "kernel-gid", -1, "the kernel's gid")
-	fs.BoolVar(&c.rotate, "rotate", false, "rotate the box's policy key")
+	fs.BoolVar(&c.rotate, "rotate", false, "rotate my policy key")
 	fs.BoolVar(&c.delete, "delete", false, "free the store's NV indexes and remove it")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -376,7 +377,7 @@ func factors(c config) (pass, rec []byte, err error) {
 	if pass, err = readSecret(c.passphrase); err != nil {
 		return nil, nil, err
 	}
-	pass = []byte(strings.TrimRight(string(pass), "\n"))
+	pass = bytes.TrimRight(pass, "\n")
 	h, err := readSecret(c.recovery)
 	if err != nil {
 		clear(pass)
@@ -463,7 +464,7 @@ func open(c config, t transport.TPM) (*seal.Store, error) {
 		return nil, err
 	}
 	defer clear(pass)
-	return seal.Unlock(c.storePath(), seal.Passphrase{Phrase: []byte(strings.TrimRight(string(pass), "\n"))})
+	return seal.Unlock(c.storePath(), seal.Passphrase{Phrase: bytes.TrimRight(pass, "\n")})
 }
 
 // rotate moves the store's tpm slot to a new policy key. Steps, each named
