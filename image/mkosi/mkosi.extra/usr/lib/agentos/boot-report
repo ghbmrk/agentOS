@@ -67,3 +67,16 @@ fi
 # that sits beside the drive is never opened, even read-only. CI's boot test attaches one on the first
 # and the end-to-end boot and needs foreign=none (image/ASSUMPTIONS.md IMG-1-1).
 echo "agentos-disks: $(/usr/lib/agentos/foreign-disks 2>/dev/null || echo foreign=unknown)"
+# STO-2c: the keeper. enroll=ran when enrollment made the sealed store this boot, skipped when its
+# conditions held it back (a store already, or no Owner Card factors from setup yet), failed
+# otherwise; kernel= the kernel unit's state. Read from systemd: this unit cannot see the keeper's
+# state (agentos-.service.d/50-main-side.conf). CI's boot test reads it with the unlock step's own
+# console lines (image/ci_boot.sh).
+case $(systemctl show -P ConditionResult agentos-keeper-enroll.service 2>/dev/null):$(systemctl show -P Result agentos-keeper-enroll.service 2>/dev/null):$(systemctl show -P ActiveState agentos-keeper-enroll.service 2>/dev/null) in
+yes:success:inactive) e=ran ;;
+no:success:inactive) e=skipped ;;
+*:*:activating) e=running ;;
+yes:*:* | no:*:*) e=failed ;;
+*) e=unknown ;;
+esac
+echo "agentos-keeper: enroll=$e kernel=$(systemctl is-active agentos-keeper-kernel.service 2>/dev/null)"

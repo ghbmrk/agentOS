@@ -90,8 +90,13 @@ NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noex
 
 
 def noexec(root):
-    for rel in NOEXEC_FILES:
+    for rel in NOEXEC_FILES + MAIN_SIDE_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
+# The main side's mask over the keeper's state (STO-2c, D-154), which every agentos unit but the
+# keeper's carries; the tree check refuses the units nodump() writes without it.
+MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",)
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
