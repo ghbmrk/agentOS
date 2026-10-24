@@ -57,11 +57,12 @@ type power struct {
 }
 
 // day is the holder's daily budget at the clerk: each root's is its own
-// account (key.account), so they add up.
+// account (key.account), so they add up. The sum saturates before it adds,
+// so a cap near MaxInt64 never wraps it negative (Defect: KEY, #2950).
 func (p *power) day() int64 {
 	var n int64
 	for _, d := range p.days {
-		n = min(n+d, math.MaxInt64/2)
+		n += min(max(d, 0), math.MaxInt64/2-n)
 	}
 	return n
 }

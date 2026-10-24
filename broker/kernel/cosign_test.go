@@ -5,6 +5,7 @@ package kernel_test
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -268,5 +269,25 @@ func TestNewRootsAddToTheBudgetTheLineMeasures(t *testing.T) {
 	}
 	if err := r.issue(at+2, three...); err != nil {
 		t.Fatalf("with the hardware key: %v", err)
+	}
+}
+
+// A holder's daily budget sums its roots' caps without wrapping: a phone's
+// new root with a cap near MaxInt64 beside a 100/day one is big, whatever
+// order the roots are summed in (Defect: KEY, #2950). Each round is a fresh
+// map, so the rounds cover both orders.
+func TestAHugeRootCapNeedsACosignInAnyOrder(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		r := newRig(t)
+		phone := gen(8)
+		must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+		r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
+		at := 10 * hour
+		root := key.Issue(phone.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m2"})
+		k, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, math.MaxInt64)
+		must(t, err)
+		if err := r.k.Issue(at, approve([]key.Key{root, k}, phone), root, k); !errors.Is(err, kernel.ErrNeedsCosign) {
+			t.Fatalf("round %d: a phone raised a 100/day holder to MaxInt64/day: %v", i, err)
+		}
 	}
 }
