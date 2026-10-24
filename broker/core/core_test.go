@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -333,6 +334,101 @@ func TestAFixtureThatDecidesThroughAnInterfaceFails(t *testing.T) {
 	found := writePaths(t, readList(t), "./core/testdata/decidesgrants")
 	if len(found) != 1 || !strings.HasPrefix(found[0], "core/testdata/decidesgrants reaches core write path grants.Gate.Decide through an interface ") {
 		t.Fatalf("want exactly the fixture's grants.Gate.Decide interface, got %q", found)
+	}
+}
+
+// fixture reports whether a package core.txt allows is a test fixture: a
+// *test package, or the kernel's seeded harness. core.txt grants fixtures
+// wildcards on the grounds that only tests import them.
+func fixture(pkg string) bool {
+	return strings.HasSuffix(path.Base(pkg), "test") || pkg == "kernel/sim"
+}
+
+// fixtureImports returns one line per package patterns name, other than
+// the fixtures themselves, whose non-test build reaches a fixture core.txt
+// allows, directly or through another package. go list leaves _test.go
+// imports out of Deps, so a test that imports a fixture passes.
+func fixtureImports(t *testing.T, l list, patterns ...string) []string {
+	t.Helper()
+	args := append([]string{"list", "-json=ImportPath,Deps,Error"}, patterns...)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = moduleRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, stderr.String())
+	}
+	var found []string
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var p struct {
+			ImportPath string
+			Deps       []string
+			Error      *struct{ Err string }
+		}
+		if err := dec.Decode(&p); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if p.Error != nil {
+			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
+		}
+		pkg := strings.TrimPrefix(p.ImportPath, modPrefix)
+		if l.allow[pkg] != nil && fixture(pkg) {
+			continue
+		}
+		for _, d := range p.Deps {
+			if dep, ok := strings.CutPrefix(d, modPrefix); ok && l.allow[dep] != nil && fixture(dep) {
+				found = append(found, fmt.Sprintf("%s imports test fixture %s outside its _test.go files", pkg, dep))
+			}
+		}
+	}
+	return found
+}
+
+// REQ: ARC-1
+// The wildcards core.txt grants loops/loopstest and kernel/sim hold only
+// while no shipped package imports them (#2848).
+func TestFixturesAreImportedOnlyByTests(t *testing.T) {
+	l := readList(t)
+	var n int
+	for p := range l.allow {
+		if fixture(p) {
+			n++
+		}
+	}
+	if n == 0 {
+		t.Fatal("core.txt allows no test fixture; drop this check or fix fixture()")
+	}
+	for _, f := range fixtureImports(t, l, "./...") {
+		t.Error(f + "; move the import into a _test.go file")
+	}
+}
+
+// A package that imports loopstest from a non-test file fails, directly or
+// through a package in between; one that imports it only from a _test.go
+// file passes.
+func TestAFixtureImportedOutsideATestFails(t *testing.T) {
+	l := readList(t)
+	for _, c := range []struct {
+		pkg  string
+		want int
+	}{
+		{"core/testdata/importsloopstest", 1},
+		{"core/testdata/viaimportsloopstest", 1},
+		{"core/testdata/testimportsloopstest", 0},
+	} {
+		found := fixtureImports(t, l, "./"+c.pkg)
+		if len(found) != c.want {
+			t.Errorf("%s: want %d finding(s), got %q", c.pkg, c.want, found)
+		}
+		for _, f := range found {
+			if !strings.HasPrefix(f, c.pkg+" imports test fixture loops/loopstest ") {
+				t.Errorf("%s: unexpected finding %q", c.pkg, f)
+			}
+		}
 	}
 }
 
