@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -1073,6 +1074,29 @@ func TestUnanchoredRetryDoesNotSurviveReboot(t *testing.T) {
 	must(t, r.tick(at+4))
 	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PParked || len(r.mail.Effects()) != 0 {
 		t.Fatalf("phase %s, %d effects after an unconfirmed retry", ph, len(r.mail.Effects()))
+	}
+}
+
+// A hold window near MaxInt64 is a narrowing any holder may make; its due
+// time saturates, so the held step waits rather than wrapping to a time
+// already past and running at once (KEY-8, KEY-3, #2952).
+func TestAHoldNearMaxInt64NeverWrapsToNow(t *testing.T) {
+	for name, hold := range map[string]key.Caveat{
+		"novelty only":     key.LimitHold(hour, math.MaxInt64),
+		"base and novelty": key.LimitHold(math.MaxInt64, math.MaxInt64),
+		"no base":          key.LimitHold(0, math.MaxInt64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.plan("p1", r.derive(hold), st(key.Unsubscribe, "list-a"))
+			for _, at := range []int64{1, 2, hour, 20 * hour} {
+				must(t, r.tick(at))
+			}
+			if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SActive {
+				t.Fatalf("status %s, %d effects: a held step ran under a hold near MaxInt64", r.status("p1"), len(r.mail.Effects()))
+			}
+			r.replays()
+		})
 	}
 }
 
