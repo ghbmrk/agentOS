@@ -608,14 +608,14 @@ func (s *Store) find(ctx context.Context, folder string, validity, from uint32, 
 
 // SetFlags adds and removes flags on one message, only while its folder
 // has the UID validity m was read under. The filter lets through only the
-// UID STORE of these flags on this UID.
+// UID STORE of these flags on this UID in m's folder.
 func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error {
 	if !flagsValid(add) || !flagsValid(remove) {
 		return ErrBadFlag
 	}
 	return s.session(ctx, func(x *session) error {
 		_, err := x.do(imapwire.Request{Op: imapwire.OpSetFlags, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, Add: add, Remove: remove},
-			s.replyBudget(0), allowance{store: m.UID, add: add, remove: remove})
+			s.replyBudget(0), allowance{store: m.UID, add: add, remove: remove, folder: selectArg(m.Folder)})
 		return err
 	})
 }
@@ -624,11 +624,11 @@ func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error
 // emulated with COPY, flag and EXPUNGE: an EXPUNGE would also remove
 // anything else the owner had marked deleted in that folder. Like
 // SetFlags it acts only under the UID validity m was read under, and the
-// filter lets through only a UID MOVE of this UID.
+// filter lets through only a UID MOVE of this UID in m's folder to to.
 func (s *Store) Move(ctx context.Context, m Ref, to string) error {
 	return s.session(ctx, func(x *session) error {
 		_, err := x.do(imapwire.Request{Op: imapwire.OpMove, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, To: to},
-			s.replyBudget(0), allowance{move: m.UID})
+			s.replyBudget(0), allowance{move: m.UID, folder: selectArg(m.Folder), to: mailboxArg(to)})
 		return err
 	})
 }

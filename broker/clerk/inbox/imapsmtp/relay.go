@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,15 +40,32 @@ type session struct {
 	local *net.UnixConn
 	step  *time.Timer
 
-	left                atomic.Int64 // the reply budget left, renewed only by do
-	allow               atomic.Pointer[allowance]
-	over, late, refused atomic.Bool
-	closeOnce           sync.Once
+	caps map[string]bool // the server's, signed in (signIn)
+
+	left                          atomic.Int64 // the reply budget left, renewed only by do
+	allow                         atomic.Pointer[allowance]
+	wait                          atomic.Pointer[waiter]
+	over, late, refused, rejected atomic.Bool
+	closeOnce                     sync.Once
+	closed, downDone              chan struct{}
 }
+
+// waiter is the filter waiting for the server's answer to a synchronizing
+// literal in the command tagged tag: true for its "+", false for the
+// command's tagged answer, which refuses the literal.
+type waiter struct {
+	tag string
+	ch  chan bool
+}
+
+// errLiteralRejected ends a session whose server refused a synchronizing
+// literal: its bytes never went, and the session cannot continue in step.
+var errLiteralRejected = errors.New("imapsmtp: the mail server refused a command's literal")
 
 // teardown closes everything the session holds, once.
 func (x *session) teardown() {
 	x.closeOnce.Do(func() {
+		close(x.closed)
 		x.up.Close()
 		x.ctrl.Close()
 		x.local.Close()
@@ -102,14 +120,16 @@ func (s *Store) session(ctx context.Context, f func(x *session) error) (err erro
 	})
 	defer stop()
 	br := bufio.NewReaderSize(conn, preauthLine)
-	if err := s.signIn(dctx, conn, br); err != nil {
+	caps, err := s.signIn(dctx, conn, br)
+	if err != nil {
 		return err
 	}
-	local, err := handOff(ctrl)
+	local, err := handOff(ctrl, caps)
 	if err != nil {
 		return errors.New("imapsmtp: could not hand the session to the connection process")
 	}
-	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step}
+	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step, caps: caps,
+		closed: make(chan struct{}), downDone: make(chan struct{})}
 	defer x.teardown()
 	// Until the first request, the base budget covers what the sign-in left
 	// unread and go-imap's start-up CAPABILITY.
@@ -123,6 +143,9 @@ func (s *Store) session(ctx context.Context, f func(x *session) error) (err erro
 	over.Store(x.over.Load())
 	if x.refused.Load() {
 		return ErrConnRefused
+	}
+	if x.rejected.Load() {
+		return errLiteralRejected
 	}
 	if err == nil && !x.over.Load() && !late.Load() {
 		// The process is idle after its last answer: stop the relay and
@@ -138,7 +161,7 @@ func (s *Store) session(ctx context.Context, f func(x *session) error) (err erro
 // socketpair and passes the other end to the connection process with the
 // first byte on ctrl (SCM_RIGHTS). go-imap enters the authenticated state
 // on PREAUTH. The process never sees the sign-in.
-func handOff(ctrl *net.UnixConn) (*net.UnixConn, error) {
+func handOff(ctrl *net.UnixConn, caps map[string]bool) (*net.UnixConn, error) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -151,7 +174,7 @@ func handOff(ctrl *net.UnixConn) (*net.UnixConn, error) {
 		return nil, err
 	}
 	local := c.(*net.UnixConn)
-	if _, err := io.WriteString(local, "* PREAUTH ready\r\n"); err != nil {
+	if _, err := io.WriteString(local, greeting(caps)); err != nil {
 		local.Close()
 		return nil, err
 	}
@@ -160,6 +183,23 @@ func handOff(ctrl *net.UnixConn) (*net.UnixConn, error) {
 		return nil, err
 	}
 	return local, nil
+}
+
+// greeting is the synthetic PREAUTH greeting, carrying the server's
+// signed-in capabilities that are atoms, so go-imap decides what it may
+// send (non-synchronizing literals) from the list the filter reads.
+func greeting(caps map[string]bool) string {
+	var l []string
+	for c := range caps {
+		if tagOK(strings.ReplaceAll(c, "+", "")) && !strings.ContainsAny(c, "]") {
+			l = append(l, c)
+		}
+	}
+	if len(l) == 0 {
+		return "* PREAUTH ready\r\n"
+	}
+	slices.Sort(l)
+	return "* PREAUTH [CAPABILITY " + strings.Join(l, " ") + "] ready\r\n"
 }
 
 // read is the allowance of a request that only reads.
@@ -199,7 +239,9 @@ func (x *session) do(req imapwire.Request, budget int64, a allowance) (imapwire.
 // the budget is spent, a byte more from the server ends the session as
 // over, unless do renewed the budget meanwhile.
 func (x *session) down(pending []byte) {
+	defer close(x.downDone)
 	defer x.local.CloseWrite()
+	var fr frames
 	buf := make([]byte, 32<<10)
 	for {
 		var n int
@@ -221,6 +263,7 @@ func (x *session) down(pending []byte) {
 			}
 		}
 		x.left.Add(-int64(n))
+		fr.feed(buf[:n], x.answered)
 		if n > 0 {
 			if _, werr := x.local.Write(buf[:n]); werr != nil {
 				return
@@ -232,6 +275,65 @@ func (x *session) down(pending []byte) {
 	}
 }
 
+// answered hands a waiting filter the server's answer to its literal: a
+// continuation ("+") or the command's tagged answer.
+func (x *session) answered(head []byte) {
+	w := x.wait.Load()
+	if w == nil {
+		return
+	}
+	switch {
+	case bytes.HasPrefix(head, []byte("+")):
+		if x.wait.CompareAndSwap(w, nil) {
+			w.ch <- true
+		}
+	case bytes.HasPrefix(head, []byte(w.tag+" ")):
+		if x.wait.CompareAndSwap(w, nil) {
+			w.ch <- false
+		}
+	}
+}
+
+// frames finds the server's response lines in the relayed bytes, skipping
+// {n} literals by count, and hands each line's start (up to frameHead
+// bytes) to its caller. It reads no more than that: it frames, it does not
+// parse.
+type frames struct {
+	head []byte
+	tail []byte // the line's last bytes, for a literal's {n}
+	lit  int64  // literal bytes still to skip
+}
+
+const frameHead = 128
+
+func (f *frames) feed(p []byte, line func(head []byte)) {
+	for len(p) > 0 {
+		if f.lit > 0 {
+			k := min(int64(len(p)), f.lit)
+			f.lit -= k
+			p = p[k:]
+			continue
+		}
+		c := p[0]
+		p = p[1:]
+		if len(f.head) < frameHead {
+			f.head = append(f.head, c)
+		}
+		if f.tail = append(f.tail, c); len(f.tail) > 32 {
+			f.tail = f.tail[1:]
+		}
+		if c == '\n' {
+			line(f.head)
+			if i := bytes.LastIndexByte(f.tail, '{'); i >= 0 {
+				if n, ok := literal(f.tail[i:]); ok {
+					f.lit = n
+				}
+			}
+			f.head, f.tail = f.head[:0], f.tail[:0]
+		}
+	}
+}
+
 // Bounds on the command filter: a command's line between literals, which
 // the filter holds whole before passing it on.
 const filterLine = 64 << 10
@@ -239,8 +341,10 @@ const filterLine = 64 << 10
 // filter relays the connection's commands to the server, each only if its
 // allowance permits it (A5). It reads each command's tag and verb and skips
 // {n} and {n+} literals by count, so no literal's bytes are read as a
-// command. Each line ends in CRLF (RFC 3501 2.2), so a miscounted literal
-// shows. A refused command is never sent; it ends the session.
+// command. Each line ends in CRLF and holds no other CR (RFC 3501 2.2), so
+// a miscounted literal shows. A synchronizing literal waits for the
+// server's "+"; a non-synchronizing one passes only where the server must
+// read it. A refused command is never sent; it ends the session.
 func (x *session) filter() {
 	br := bufio.NewReaderSize(x.local, filterLine)
 	refuse := func() { x.refused.Store(true); x.teardown() }
@@ -256,17 +360,44 @@ func (x *session) filter() {
 		}
 		a := x.allow.Load()
 		verb, ok := a.command(line)
-		if !ok || !bytes.HasSuffix(line, []byte("\r\n")) {
+		if !ok || !crlf(line) {
 			refuse()
 			return
 		}
+		tag, _, _ := bytes.Cut(line, []byte(" "))
 		for {
+			n, more := literal(line)
+			var w *waiter
+			if more && !x.literalOK(line, n) {
+				refuse()
+				return
+			}
+			if more && !nonSync(line) {
+				// A synchronizing literal goes only after the server's "+":
+				// a server may refuse it with a tagged answer and read what
+				// follows as a new command (RFC 3501 7.5).
+				w = &waiter{tag: string(tag), ch: make(chan bool, 1)}
+				x.wait.Store(w)
+			}
 			if _, err := x.up.Write(line); err != nil {
 				return
 			}
-			n, more := literal(line)
 			if !more {
 				break
+			}
+			if w != nil {
+				select {
+				case ok := <-w.ch:
+					if !ok {
+						x.rejected.Store(true)
+						x.teardown()
+						return
+					}
+				case <-x.closed:
+					return
+				case <-x.downDone:
+					return
+				}
 			}
 			if _, err := io.CopyN(x.up, br, n); err != nil {
 				return
@@ -277,12 +408,30 @@ func (x *session) filter() {
 				}
 				return
 			}
-			if !bytes.HasSuffix(line, []byte("\r\n")) || !a.continuation(verb, line) {
+			if !crlf(line) || !a.continuation(verb, line) {
 				refuse()
 				return
 			}
 		}
 	}
+}
+
+// crlf says whether line ends in CRLF and holds no other CR.
+func crlf(line []byte) bool {
+	return bytes.HasSuffix(line, []byte("\r\n")) && bytes.IndexByte(line[:len(line)-2], '\r') < 0
+}
+
+// nonSync says whether line's literal is non-synchronizing, {n+}.
+func nonSync(line []byte) bool {
+	return bytes.HasSuffix(bytes.TrimRight(line, "\r\n"), []byte("+}"))
+}
+
+// literalOK says whether the server takes line's literal of n bytes as
+// the client sends it: a synchronizing one always (it waits for "+"); a
+// non-synchronizing one only where the server must read it whatever it
+// then answers, under LITERAL+, or LITERAL- up to 4096 bytes (RFC 7888).
+func (x *session) literalOK(line []byte, n int64) bool {
+	return !nonSync(line) || x.caps["LITERAL+"] || x.caps["LITERAL-"] && n <= 4096
 }
 
 // literal is the length of the literal line announces at its end, {n} or
@@ -305,8 +454,10 @@ func literal(line []byte) (int64, bool) {
 }
 
 // allowance is what one typed request may send: the commands every read
-// needs, plus one UID STORE of the request's flags or one UID MOVE, each
-// on the request's UID only, and, for the old core, CREATE or APPEND.
+// needs, plus one UID STORE of the request's flags or one UID MOVE to the
+// request's target, each on the request's UID only and after the one
+// SELECT of the request's folder that a write may make (no EXAMINE, no
+// second SELECT), and, for the old core, CREATE or APPEND.
 // EXPUNGE, CLOSE, DELETE, RENAME, COPY, LOGIN, AUTHENTICATE, STARTTLS,
 // IDLE and anything unnamed are never allowed. A nil allowance, before the
 // first request, allows only the CAPABILITY go-imap sends as it starts.
@@ -314,7 +465,15 @@ type allowance struct {
 	store, move    uint32
 	add, remove    []string
 	create, append bool
+	// folder, set for a write, is the one SELECT the write may make, as
+	// go-imap writes it; to is its UID MOVE's target. selected is the
+	// filter's own note that the SELECT went.
+	folder, to string
+	selected   bool
 }
+
+// write says whether a is a store or a move.
+func (a *allowance) write() bool { return a != nil && (a.store != 0 || a.move != 0) }
 
 // reads are the commands every request may send.
 var reads = map[string]bool{"SELECT": true, "EXAMINE": true, "STATUS": true, "LIST": true, "UID FETCH": true,
@@ -335,13 +494,16 @@ func (a *allowance) command(line []byte) (string, bool) {
 	switch {
 	case a == nil:
 		return verb, verb == "CAPABILITY" && len(f) == 2
+	case a.write() && (verb == "SELECT" || verb == "EXAMINE"):
+		ok := verb == "SELECT" && !a.selected && rest == a.folder
+		a.selected = a.selected || ok
+		return verb, ok
 	case reads[verb]:
 		return verb, verb != "UID FETCH" || peekOnly(rest)
 	case verb == "UID STORE" && a.store != 0:
-		return verb, a.storeOK(rest)
+		return verb, a.selected && a.storeOK(rest)
 	case verb == "UID MOVE" && a.move != 0:
-		u, _, ok := strings.Cut(rest, " ")
-		return verb, ok && u == strconv.FormatUint(uint64(a.move), 10)
+		return verb, a.selected && rest == strconv.FormatUint(uint64(a.move), 10)+" "+a.to
 	case verb == "CREATE" && a.create, verb == "APPEND" && a.append:
 		return verb, true
 	}
@@ -349,13 +511,13 @@ func (a *allowance) command(line []byte) (string, bool) {
 }
 
 // continuation says whether a line after a literal, within a command of
-// verb, may pass: a fetch's items stay peek-only, and a UID STORE carries
-// no literal at all.
+// verb, may pass: a fetch's items stay peek-only, and a write's SELECT,
+// UID STORE or UID MOVE carries no literal at all.
 func (a *allowance) continuation(verb string, line []byte) bool {
-	switch verb {
-	case "UID FETCH":
+	switch {
+	case verb == "UID FETCH":
 		return peekOnly(string(line))
-	case "UID STORE":
+	case verb == "UID STORE", verb == "UID MOVE", a.write() && verb == "SELECT":
 		return false
 	}
 	return true

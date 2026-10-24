@@ -35,6 +35,9 @@ type preauth struct {
 	r    *bufio.Reader
 	n    int
 	caps map[string]bool // upper-cased; nil until the server lists them
+	// authed is set once the sign-in is sent, and fresh once the server
+	// lists its capabilities after that.
+	authed, fresh bool
 }
 
 // line is the server's next line without its CRLF.
@@ -58,6 +61,7 @@ func (p *preauth) line() (string, error) {
 // capsFrom records the capabilities a "[CAPABILITY ...]" code or a
 // "* CAPABILITY ..." line lists in s.
 func (p *preauth) capsFrom(list string) {
+	p.fresh = p.authed
 	p.caps = map[string]bool{}
 	for _, c := range strings.Fields(list) {
 		p.caps[strings.ToUpper(c)] = true
@@ -116,8 +120,28 @@ func (p *preauth) exchange(tag, cmd string, cont func() error) (string, string, 
 // offers neither, before any login is sent, and ErrLoginRefused when the
 // server refused it: a NO or BAD other than UNAVAILABLE (RFC 5530: the
 // server is down for now). Any other failure passes with time.
-func (s *Store) signIn(ctx context.Context, conn io.Writer, br *bufio.Reader) error {
+//
+// It returns the server's capabilities as of the signed-in state, which
+// go-imap is handed in the synthetic greeting and the filter reads
+// (LITERAL+): from the sign-in's answer, or a CAPABILITY sent after it,
+// or, where the server answers neither, the list from before.
+func (s *Store) signIn(ctx context.Context, conn io.Writer, br *bufio.Reader) (map[string]bool, error) {
 	p := &preauth{w: conn, r: br}
+	if err := s.authenticate(ctx, p); err != nil {
+		return nil, err
+	}
+	if !p.fresh {
+		p.authed = true
+		if _, _, err := p.exchange("A3", "CAPABILITY", nil); err != nil {
+			return nil, err
+		}
+	}
+	return p.caps, nil
+}
+
+// authenticate is signIn's greeting and sign-in on p.
+func (s *Store) authenticate(ctx context.Context, p *preauth) error {
+	conn := p.w
 	g, err := p.line()
 	if err != nil {
 		return err
@@ -130,6 +154,7 @@ func (s *Store) signIn(ctx context.Context, conn io.Writer, br *bufio.Reader) er
 		p.capsFrom(args)
 	}
 	if strings.EqualFold(kind, "PREAUTH") {
+		p.fresh = true
 		return nil
 	}
 	if p.caps == nil {
@@ -141,6 +166,7 @@ func (s *Store) signIn(ctx context.Context, conn io.Writer, br *bufio.Reader) er
 	if err != nil {
 		return errors.New("imapsmtp: no credential")
 	}
+	p.authed = true
 	var cmd string
 	var ir []byte
 	switch {

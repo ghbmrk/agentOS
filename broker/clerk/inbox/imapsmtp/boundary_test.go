@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	goutf7 "github.com/emersion/go-imap/utf7"
+
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
@@ -278,7 +280,7 @@ func (s *logServer) serve(c net.Conn) {
 	c.SetDeadline(time.Now().Add(20 * time.Second))
 	w := bufio.NewWriter(c)
 	say := func(x string) { w.WriteString(x); w.Flush() }
-	say("* OK [CAPABILITY IMAP4rev1 MOVE] ready\r\n")
+	say("* OK [CAPABILITY IMAP4rev1 MOVE LITERAL+] ready\r\n")
 	r := bufio.NewReader(c)
 	for {
 		var cmd strings.Builder
@@ -437,14 +439,20 @@ func TestTheFilterRefusesUndeclaredCommands(t *testing.T) {
 		{"the asked flag on another UID", `UID STORE 2 +FLAGS.SILENT (\Flagged)`, flagCall},
 		{"the asked flag as a set", `UID STORE 1:2 +FLAGS.SILENT (\Flagged)`, flagCall},
 		{"UID MOVE in a flag", "UID MOVE 1 Trash", flagCall},
-		{"a UID MOVE of a UID not asked for", "UID MOVE 6 Trash", moveCall},
-		{"a UID MOVE of a range", "UID MOVE 5:6 Trash", moveCall},
+		{"a UID MOVE of a UID not asked for", `UID MOVE 6 "Trash"`, moveCall},
+		{"a UID MOVE of a range", `UID MOVE 5:6 "Trash"`, moveCall},
+		{"the asked UID moved elsewhere", `UID MOVE 5 "Archive"`, moveCall},
+		{"the asked UID moved, unquoted", "UID MOVE 5 Trash", moveCall},
+		{"a second SELECT in a move", "SELECT Private", moveCall},
+		{"a second SELECT of the same folder", "SELECT INBOX", moveCall},
+		{"an EXAMINE in a flag", "EXAMINE Private", flagCall},
 		{"UID STORE in a move", `UID STORE 5 +FLAGS.SILENT (\Deleted)`, moveCall},
 		{"EXPUNGE in a move", "EXPUNGE", moveCall},
 		{"an untagged command", "* NOOP", readCall},
 	} {
 		srv := newLogServer(t)
 		conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+			selectFirst(q, br, w)
 			io.WriteString(w, "h1 "+c.cmd+"\r\n")
 			// A filter that passed it lets the server answer.
 			tagged(br, "h1")
@@ -467,15 +475,16 @@ func TestTheFilterRefusesUndeclaredCommands(t *testing.T) {
 		"a peek fetch":     {"UID FETCH 1:2 (UID FLAGS BODY.PEEK[]<0.262144>)", readCall},
 		"a header fetch":   {"UID FETCH 1 (UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (From Message-Id)]<0.8193>)", readCall},
 		"the asked store":  {`UID STORE 1 +FLAGS.SILENT (\Flagged)`, flagCall},
-		"the asked move":   {"UID MOVE 5 Trash", moveCall},
+		"the asked move":   {`UID MOVE 5 "Trash"`, moveCall},
 		"a search":         {"UID SEARCH SEEN", readCall},
-		"a select":         {"SELECT INBOX", moveCall},
+		"a status":         {"STATUS INBOX (UIDNEXT)", moveCall},
 		"RFC822.SIZE":      {"UID FETCH 1 (RFC822.SIZE)", readCall},
 		"RFC822.HEADER":    {"UID FETCH 1 (RFC822.HEADER)", readCall},
 		"a capability ask": {"CAPABILITY", readCall},
 	} {
 		srv := newLogServer(t)
 		conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+			selectFirst(q, br, w)
 			io.WriteString(w, "h1 "+c.cmd+"\r\n")
 			tagged(br, "h1")
 			answer(ctrl, imapwire.Response{Validity: 7})
@@ -486,6 +495,202 @@ func TestTheFilterRefusesUndeclaredCommands(t *testing.T) {
 		if !srv.saw("h1 ") {
 			t.Errorf("%s: the server did not receive it", name)
 		}
+	}
+}
+
+// selectFirst makes a write request's one SELECT, of its own folder, as
+// go-imap would.
+func selectFirst(q imapwire.Request, br *bufio.Reader, w net.Conn) {
+	if q.Op == imapwire.OpSetFlags || q.Op == imapwire.OpMove {
+		io.WriteString(w, "h0 SELECT "+selectArg(q.Folder)+"\r\n")
+		tagged(br, "h0")
+	}
+}
+
+// TestWritesStayInTheirFolder (A5, CLK-3; Security's #3018 repro): a
+// store or a move acts only after the one SELECT of the request's folder.
+// A connection that selects another folder first, or stores or moves
+// before selecting, is refused, and the server never sees the write.
+func TestWritesStayInTheirFolder(t *testing.T) {
+	for _, c := range []struct{ name, script string }{
+		{"a move in another folder", "h1 SELECT Private\r\n"},
+		{"a move in another folder, quoted", "h1 SELECT \"Private\"\r\n"},
+		{"a move after an EXAMINE", "h1 EXAMINE INBOX\r\n"},
+		{"a move before any SELECT", ""},
+	} {
+		srv := newRFCServer(t)
+		conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+			if c.script != "" {
+				io.WriteString(w, c.script)
+				if tagged(br, "h1") != nil {
+					return
+				}
+			}
+			io.WriteString(w, "h2 UID MOVE 5 \"Trash\"\r\n")
+			tagged(br, "h2")
+			answer(ctrl, imapwire.Response{})
+		})
+		err := hostileClerk(t, srv.addr, conn, 5*time.Second).Move(context.Background(), Ref{Folder: "INBOX", Validity: 7, UID: 5}, "Trash")
+		if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "MOVE") {
+			t.Errorf("%s: err %v, server log %s", c.name, err, srv.log())
+		}
+	}
+	srv := newRFCServer(t)
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, "h1 SELECT Private\r\n")
+		tagged(br, "h1")
+		io.WriteString(w, `h2 UID STORE 1 +FLAGS.SILENT (\Flagged)`+"\r\n")
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{})
+	})
+	err := hostileClerk(t, srv.addr, conn, 5*time.Second).SetFlags(context.Background(), Ref{Folder: "INBOX", Validity: 7, UID: 1}, []string{`\Flagged`}, nil)
+	if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "STORE") {
+		t.Errorf("a store in another folder: err %v, server log %s", err, srv.log())
+	}
+	srv = newRFCServer(t)
+	conn = hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, `h2 UID STORE 1 +FLAGS.SILENT (\Flagged)`+"\r\n")
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{})
+	})
+	err = hostileClerk(t, srv.addr, conn, 5*time.Second).SetFlags(context.Background(), Ref{Folder: "INBOX", Validity: 7, UID: 1}, []string{`\Flagged`}, nil)
+	if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "STORE") {
+		t.Errorf("a store before any SELECT: err %v, server log %s", err, srv.log())
+	}
+	// A folder go-imap writes in modified UTF-7 and quoted is matched as
+	// written, so the honest write passes.
+	srv = newRFCServer(t)
+	conn = hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, `h1 SELECT "Entw&APw-rfe"`+"\r\n")
+		tagged(br, "h1")
+		io.WriteString(w, `h2 UID MOVE 5 "&ZeVnLIqe-"`+"\r\n")
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{})
+	})
+	if err := hostileClerk(t, srv.addr, conn, 5*time.Second).Move(context.Background(), Ref{Folder: "Entwürfe", Validity: 7, UID: 5}, "日本語"); err != nil {
+		t.Errorf("an honest move between non-ASCII folders: %v (%s)", err, srv.log())
+	}
+}
+
+// TestALiteralWaitsForTheServer (A5; Security's and L3's #3018 repro): a
+// synchronizing literal's bytes go only after the server's "+". A server
+// that refuses the literal with a tagged answer reads what follows as a new
+// command (RFC 3501 7.5), so a literal sent at once could smuggle one; the
+// session ends instead. A non-synchronizing literal passes only where the
+// server must read it (LITERAL+), and a bare CR inside a line is refused.
+func TestALiteralWaitsForTheServer(t *testing.T) {
+	inner := "h2 UID EXPUNGE 1:*\r\n"
+	srv := newRFCServer(t)
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, "h1 NOOP {"+strconv.Itoa(len(inner))+"}\r\n"+inner)
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	_, _, err := hostileClerk(t, srv.addr, conn, 5*time.Second).UIDs(context.Background(), "INBOX")
+	if err == nil || strings.Contains(srv.log(), "EXPUNGE") {
+		t.Fatalf("a refused literal: err %v, server log %s", err, srv.log())
+	}
+	// Without LITERAL+ a non-synchronizing literal is refused outright.
+	srv = newRFCServer(t)
+	conn = hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, "h1 NOOP {"+strconv.Itoa(len(inner))+"+}\r\n"+inner)
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	_, _, err = hostileClerk(t, srv.addr, conn, 5*time.Second).UIDs(context.Background(), "INBOX")
+	if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "EXPUNGE") || strings.Contains(srv.log(), "h1 NOOP") {
+		t.Fatalf("a non-synchronizing literal without LITERAL+: err %v, server log %s", err, srv.log())
+	}
+	// A bare CR inside a command line.
+	srv = newRFCServer(t)
+	conn = hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, "h1 UID SEARCH SEEN\rh2 UID EXPUNGE 1:*\r\n")
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	_, _, err = hostileClerk(t, srv.addr, conn, 5*time.Second).UIDs(context.Background(), "INBOX")
+	if !errors.Is(err, ErrConnRefused) || strings.Contains(srv.log(), "EXPUNGE") {
+		t.Fatalf("a bare CR: err %v, server log %s", err, srv.log())
+	}
+}
+
+// rfcServer follows RFC 3501 7.5: it rejects every synchronizing literal
+// with a tagged BAD instead of "+", and then reads the next bytes as a new
+// command. It offers no LITERAL+. It logs each command with the folder
+// selected when it ran.
+type rfcServer struct {
+	addr string
+	mu   sync.Mutex
+	cmds []string
+}
+
+func newRFCServer(t *testing.T) *rfcServer {
+	l := listenLoopback(t)
+	s := &rfcServer{addr: l.Addr().String()}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go s.serve(c)
+		}
+	}()
+	return s
+}
+
+func (s *rfcServer) serve(c net.Conn) {
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	say := func(x string) { io.WriteString(c, x) }
+	say("* OK [CAPABILITY IMAP4rev1 MOVE] ready\r\n")
+	r := bufio.NewReader(c)
+	sel := ""
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		tag, verb := f[0], strings.ToUpper(f[1])
+		if _, ok := literal([]byte(line)); ok && !nonSync([]byte(line)) {
+			say(tag + " BAD literal refused\r\n")
+			continue
+		}
+		s.mu.Lock()
+		s.cmds = append(s.cmds, "["+sel+"] "+strings.TrimRight(line, "\r\n"))
+		s.mu.Unlock()
+		switch verb {
+		case "SELECT", "EXAMINE":
+			sel = f[2]
+			say("* 9 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n* OK [UIDNEXT 30] n\r\n" + tag + " OK done\r\n")
+		default:
+			say(tag + " OK done\r\n")
+		}
+	}
+}
+
+func (s *rfcServer) log() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Join(s.cmds, " | ")
+}
+
+// The clerk's modified UTF-7 is go-imap's, byte for byte, so a write's
+// folder is matched exactly as go-imap writes it.
+func TestMailboxNamesEncodeAsGoIMAPDoes(t *testing.T) {
+	for _, n := range []string{"INBOX", "inbox", "Trash", "A&B", "&", "Entwürfe", "日本語", "a 日 b", "😀 smile", "~peter/mail/台北/日本語",
+		"\x01ctl", "[Gmail]/All Mail", `quote"back\`, "a\x7f", ""} {
+		want, _ := goutf7.Encoding.NewEncoder().String(n)
+		if got := utf7(n); got != want {
+			t.Errorf("%q: %q, go-imap %q", n, got, want)
+		}
+	}
+	if selectArg("INBOX") != "INBOX" || selectArg("Trash") != `"Trash"` || mailboxArg("INBOX") != `"INBOX"` {
+		t.Fatal("quoting differs from go-imap's")
 	}
 }
 
@@ -661,13 +866,13 @@ func TestNewNeedsTheConnectionProcess(t *testing.T) {
 // or more than preauthLines lines, and refuses a literal.
 func FuzzPreauth(f *testing.F) {
 	for _, s := range []string{
-		"* OK [CAPABILITY IMAP4rev1] ready\r\nA2 OK in\r\n",
+		"* OK [CAPABILITY IMAP4rev1] ready\r\nA2 OK in\r\n* CAPABILITY IMAP4rev1 LITERAL+\r\nA3 OK\r\n",
 		"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=XOAUTH2 SASL-IR\r\nA1 OK done\r\n+ eyJ9\r\nA2 NO [AUTHENTICATIONFAILED] no\r\n",
 		"* OK [CAPABILITY IMAP4rev1 LOGINDISABLED AUTH=PLAIN] ready\r\n+ \r\n+ \r\nA2 OK\r\n",
 		"* PREAUTH hi\r\n",
 		"* BYE go\r\n",
 		"* OK {5}\r\nhello\r\n",
-		"* OK [CAPABILITY IMAP4rev1] {2}\r\nA2 OK in\r\n",
+		"* OK [CAPABILITY IMAP4rev1] {2}\r\nA2 OK in\r\nA3 OK\r\n",
 		"* OK ready\r\n* CAPABILITY {3+}\r\nabc\r\nA1 OK\r\n",
 		"* OK [CAPABILITY\r\n",
 		"A2 OK\r\n",
@@ -685,7 +890,7 @@ func FuzzPreauth(f *testing.F) {
 		}}}
 		cr := &countReader{r: strings.NewReader(in)}
 		br := bufio.NewReaderSize(cr, preauthLine)
-		err := s.signIn(context.Background(), io.Discard, br)
+		_, err := s.signIn(context.Background(), io.Discard, br)
 		if cr.n > int64(preauthLines+1)*preauthLine {
 			t.Fatalf("read %d bytes before sign-in", cr.n)
 		}
