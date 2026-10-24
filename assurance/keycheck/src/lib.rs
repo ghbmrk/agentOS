@@ -204,6 +204,10 @@ impl Limits {
     /// Adds one caveat, refusing any that removes or loosens a limit (KEY-3).
     fn add(&mut self, c: &wire::Caveat, scope: Id, caps: &mut Vec<Cap>) -> Result<(), Bad> {
         let mut capped = |l: &mut Limits, kind: CapKind, what: &'static str| {
+            // m = 1 on a day spend cap counts the clerk's whole account (#2838).
+            if c.m != 0 && (c.m != 1 || what != "spend-day") {
+                return Err(Bad::Malformed("cap scope"));
+            }
             l.cap(what, c.n)?;
             caps.push(Cap {
                 kind,
@@ -379,6 +383,10 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
         };
         let cavs = link.caveats.as_deref().unwrap_or(&[]);
         for c in cavs {
+            let scope = match account {
+                Some(a) if c.kind == "spend-day" && c.m == 1 => a,
+                _ => scope,
+            };
             l.add(c, scope, &mut caps)?;
         }
         if i == 0 {

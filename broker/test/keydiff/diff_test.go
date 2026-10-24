@@ -268,9 +268,9 @@ func (g gen) caveat(first bool) key.Caveat {
 	case 3:
 		return g.argCaveat()
 	case 4:
-		return key.Caveat{Kind: key.KSpendTask, N: g.num(-1, 60)}
+		return key.Caveat{Kind: key.KSpendTask, N: g.num(-1, 60), M: g.capScope(2)}
 	case 5:
-		return key.Caveat{Kind: key.KSpendDay, N: g.num(-1, 60)}
+		return key.Caveat{Kind: key.KSpendDay, N: g.num(-1, 60), M: g.capScope(40)}
 	case 6:
 		return key.Caveat{Kind: key.KRateDay, N: g.num(-1, 6)}
 	case 7:
@@ -854,6 +854,19 @@ func (g gen) nudge(cs []key.Caveat) []key.Caveat {
 	}
 	out[i] = c
 	return out
+}
+
+// capScope is a cap's M: 1, which on a day spend cap counts the clerk's
+// whole account (key.LowerSpendDay), pct percent of the time, and now and
+// then a value no cap takes.
+func (g gen) capScope(pct int) int64 {
+	switch {
+	case g.p(pct):
+		return 1
+	case g.p(3):
+		return g.num(-1, 2)
+	}
+	return 0
 }
 
 // nudgeSet drops one member of s or adds one value it lacks, keeping it

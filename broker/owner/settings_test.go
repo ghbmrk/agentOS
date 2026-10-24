@@ -138,7 +138,8 @@ func TestOWN4AckDelaySetting(t *testing.T) {
 // REQ: CH-15
 // URGENT APPROVAL also paces the agent's questions to the owner, which go
 // in the approval class (D-129, O22), so every settings text that names
-// the setting says so (PACE-help-questions, #2394).
+// the setting says so (PACE-help-questions, #2394). Each list ends with a
+// single "and" (TEXTS-reply-join, #3046).
 func TestPACEHelpNamesQuestions(t *testing.T) {
 	r := newRig(t, nil)
 	r.unlock()
@@ -146,7 +147,10 @@ func TestPACEHelpNamesQuestions(t *testing.T) {
 		{"URGENT APPROVAL OFF", "Approval requests and the agent's questions now wait for quiet hours to end and for room in the hourly limit."},
 		{"TEXTS 5", "Texts set: 5 an hour. More wait for the next hour, except security alerts and replies to you."},
 		{"URGENT APPROVAL ON", "Approval requests and the agent's questions now go at once, in quiet hours too."},
-		{"TEXTS 4", "Texts set: 4 an hour. More wait for the next hour, except security alerts, approval requests and the agent's questions and replies to you."},
+		{"TEXTS 4", "Texts set: 4 an hour. More wait for the next hour, except security alerts, approval requests, the agent's questions and replies to you."},
+		{"URGENT AGENT ON", "Agent texts now go at once, in quiet hours too."},
+		{"TEXTS 3", "Texts set: 3 an hour. More wait for the next hour, except security alerts, approval requests, the agent's questions, agent texts and replies to you."},
+		{"QUIET 22-7", "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts, approval requests, the agent's questions and agent texts. Reply QUIET OFF to end them."},
 	} {
 		if got := r.say(c.msg); got != c.want {
 			t.Fatalf("%s: %q, want %q", c.msg, got, c.want)

@@ -149,15 +149,17 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if k.Head, err = st.HeadKey(); err != nil {
 		return nil, err
 	}
+	// A store with no anchors hands over none: the kernel starts setup-only
+	// and takes the owner's hardware keys as its log's first entry (#2905
+	// open point 2). An entry that is there must read.
 	raw, ok, err := st.Get(handoff.AnchorsEntry)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
-		return nil, errors.New("agentos-unlock: my store holds none of your hardware keys; set me up again")
-	}
-	if k.Anchors, err = handoff.ParseAnchors(raw); err != nil {
-		return nil, fmt.Errorf("agentos-unlock: your hardware keys in my store: %w", err)
+	if ok {
+		if k.Anchors, err = handoff.ParseAnchors(raw); err != nil {
+			return nil, fmt.Errorf("agentos-unlock: your hardware keys in my store: %w", err)
+		}
 	}
 	if k.Counter, err = counter(st); err != nil {
 		return nil, err

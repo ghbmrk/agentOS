@@ -796,7 +796,7 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 		}
 		change = func(p *Pacing) { p.PerHour = n }
 		reply = func(p Pacing) string {
-			return fmt.Sprintf("Texts set: %d an hour. More wait for the next hour, except %s and replies to you.", n, urgentNames(p))
+			return fmt.Sprintf("Texts set: %d an hour. More wait for the next hour, except %s.", n, urgentNames(p, "replies to you"))
 		}
 	case "CHAT":
 		n, err := strconv.Atoi(f[1])
@@ -883,8 +883,9 @@ func pacingShape(f []string) bool {
 	return false
 }
 
-// urgentNames names what still goes at once, for the settings replies.
-func urgentNames(p Pacing) string {
+// urgentNames names what still goes at once, for the settings replies,
+// with more appended so the list ends with a single "and" (#3046).
+func urgentNames(p Pacing, more ...string) string {
 	names := []string{"security alerts"}
 	if p.urgent(ClassApproval) {
 		names = append(names, "approval requests", "the agent's questions")
@@ -892,6 +893,7 @@ func urgentNames(p Pacing) string {
 	if p.urgent(ClassAgent) {
 		names = append(names, "agent texts")
 	}
+	names = append(names, more...)
 	if len(names) == 1 {
 		return names[0]
 	}

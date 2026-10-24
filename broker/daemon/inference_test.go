@@ -88,6 +88,8 @@ var netOK = map[string]allowance{
 	"owner/notice/noticesock": {"dials only the vault process's notice unix socket", []string{"net.Conn", "net.Dialer"}},
 	// The checker's verify-socket client (SIM-split-wire), as modelroute.
 	"checker/checkersock": {"dials only the checker's verify unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
+	// The Connect page's client of the mail clerk's owner socket (#3006), as modelroute.
+	"localsrv/accountsock": {"dials only the mail clerk's owner unix socket", []string{"net.Dialer"}},
 	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
 	"netjoin": {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
 	// The local inference service's client and supervisor (INFER-SVC
@@ -189,7 +191,7 @@ var socketPkgs = map[string]bool{
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process,
 // and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true, "localsrv/accountsock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set

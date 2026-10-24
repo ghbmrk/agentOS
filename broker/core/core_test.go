@@ -10,7 +10,9 @@ package core
 // against the compiler's export data, so a call through an embedded field
 // or a method value counts as much as a direct call. An interface the
 // package declares counts too: when a core type satisfies it, each core
-// method behind the interface's methods is reachable through it.
+// method behind the interface's methods is reachable through it. The
+// check runs once for each build the repo ships (builds), so a file behind
+// a build tag, another GOOS or cgo is checked as much as the host's.
 
 import (
 	"bufio"
@@ -26,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -97,6 +100,28 @@ func covered(patterns []string, sym string) bool {
 	return false
 }
 
+// A build is one set of the tag, GOOS and cgo settings go list runs under.
+type build struct {
+	name    string
+	env     []string // added to the environment
+	flags   []string
+	overlay string // a go -overlay file, or ""
+	// partial: the module does not build whole under this GOOS, so a
+	// package that does not compile here is skipped. No binary for this
+	// GOOS can link it, so none ships its files.
+	partial bool
+}
+
+// builds are the settings the repo ships under: the host's with cgo on (CI
+// runs go test -race, which needs the C toolchain), image.yml's
+// agentos_e2e build of cmd/agentos-egress, and a non-linux GOOS, which
+// compiles each !linux file.
+var builds = []build{
+	{name: "host+cgo", env: []string{"CGO_ENABLED=1"}},
+	{name: "agentos_e2e", env: []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}, flags: []string{"-tags=agentos_e2e"}},
+	{name: "darwin", env: []string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0"}, partial: true},
+}
+
 type listed struct {
 	ImportPath      string
 	Dir             string
@@ -106,14 +131,23 @@ type listed struct {
 	Error           *struct{ Err string }
 }
 
-// load runs go list on patterns with their dependencies and returns the
-// packages the patterns name and an importer over everyone's export data.
-func load(t *testing.T, fset *token.FileSet, patterns ...string) ([]listed, types.Importer) {
+// load runs go list under b on patterns with their dependencies and
+// returns the packages the patterns name and an importer over everyone's
+// export data. Under a partial build it leaves out each package that does
+// not compile.
+func load(t *testing.T, fset *token.FileSet, b build, patterns ...string) ([]listed, types.Importer) {
 	t.Helper()
 	args := append([]string{"list", "-export", "-compiled", "-deps",
-		"-json=ImportPath,Dir,Export,CompiledGoFiles,DepOnly,Error"}, patterns...)
-	cmd := exec.Command("go", args...)
+		"-json=ImportPath,Dir,Export,CompiledGoFiles,DepOnly,Error"}, b.flags...)
+	if b.overlay != "" {
+		args = append(args, "-overlay="+b.overlay)
+	}
+	if b.partial {
+		args = append(args, "-e")
+	}
+	cmd := exec.Command("go", append(args, patterns...)...)
 	cmd.Dir = moduleRoot
+	cmd.Env = append(os.Environ(), b.env...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -129,6 +163,9 @@ func load(t *testing.T, fset *token.FileSet, patterns ...string) ([]listed, type
 			break
 		} else if err != nil {
 			t.Fatal(err)
+		}
+		if b.partial && (p.Error != nil || p.Export == "") {
+			continue // a dependent of a failed package has no error, only no export data
 		}
 		if p.Error != nil {
 			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
@@ -176,10 +213,10 @@ func symbol(obj types.Object, core map[string]bool) string {
 	return pkg + ".?." + f.Name()
 }
 
-// writePaths type-checks the non-test files of each package patterns name,
-// other than core and wiring packages, and returns one line per package
-// and write path it calls that core.txt does not open or allow.
-func writePaths(t *testing.T, l list, patterns ...string) []string {
+// writePaths type-checks under b the non-test files of each package
+// patterns name, other than core and wiring packages, and returns one line
+// per package and write path it calls that core.txt does not open or allow.
+func writePaths(t *testing.T, l list, b build, patterns ...string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	// Load the core with the patterns, so every core type is in hand for
@@ -188,8 +225,20 @@ func writePaths(t *testing.T, l list, patterns ...string) []string {
 	for p := range l.core {
 		all = append(all, "./"+p)
 	}
-	targets, imp := load(t, fset, all...)
-	coreTypes := namedTypes(t, imp, l.core)
+	targets, imp := load(t, fset, b, all...)
+	coreTypes := namedTypes(t, imp, l.core, b.partial)
+	replaced := map[string]string{}
+	if b.overlay != "" {
+		o, err := os.ReadFile(b.overlay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ov struct{ Replace map[string]string }
+		if err := json.Unmarshal(o, &ov); err != nil {
+			t.Fatal(err)
+		}
+		replaced = ov.Replace
+	}
 	var found []string
 	for _, p := range targets {
 		pkg, ok := strings.CutPrefix(p.ImportPath, modPrefix)
@@ -201,7 +250,15 @@ func writePaths(t *testing.T, l list, patterns ...string) []string {
 			if !filepath.IsAbs(name) {
 				name = filepath.Join(p.Dir, name)
 			}
-			af, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+			src := name
+			if r, ok := replaced[name]; ok {
+				src = r
+			}
+			text, err := os.ReadFile(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			af, err := parser.ParseFile(fset, name, text, parser.SkipObjectResolution)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,12 +301,16 @@ func writePaths(t *testing.T, l list, patterns ...string) []string {
 }
 
 // namedTypes returns every non-generic, non-interface named type the core
-// packages declare.
-func namedTypes(t *testing.T, imp types.Importer, core map[string]bool) []*types.Named {
+// packages declare. Under a partial build a core package that does not
+// compile is left out, as is everything that imports it.
+func namedTypes(t *testing.T, imp types.Importer, core map[string]bool, partial bool) []*types.Named {
 	t.Helper()
 	var named []*types.Named
 	for p := range core {
 		tp, err := imp.Import(modPrefix + p)
+		if err != nil && partial {
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -293,14 +354,63 @@ func throughInterface(iface *types.Interface, coreTypes []*types.Named, core map
 }
 
 func TestNoWritePathOutsideTheCore(t *testing.T) {
-	for _, f := range writePaths(t, readList(t), "./...") {
-		t.Error(f + "; submit an intent instead, or open or allow it in broker/core/core.txt with a reason")
+	l := readList(t)
+	for _, b := range builds {
+		t.Run(b.name, func(t *testing.T) {
+			for _, f := range writePaths(t, l, b, "./...") {
+				t.Error(f + "; submit an intent instead, or open or allow it in broker/core/core.txt with a reason")
+			}
+		})
+	}
+}
+
+// Each build reads the files only it compiles: a write path in a file
+// behind cgo, the agentos_e2e tag or !linux is found under that build and
+// no other. The package calls grants.Gate.Decide from all three files, and
+// writePaths names a package's write path once, at the first file it reads.
+func TestEachBuildChecksItsOwnFiles(t *testing.T) {
+	// The overlay fills core/testdata itself, which holds no Go file: cgo
+	// runs in the package directory, so it must exist.
+	const dir = "core/testdata"
+	decide := func(constraint, name string) string {
+		src := "package taggedgrants\n\n"
+		if constraint != "" {
+			src = "//go:build " + constraint + "\n\n" + src
+		}
+		if name == "Cgo" {
+			src += "// int one(void) { return 1; }\nimport \"C\"\n\n"
+		}
+		return src + fmt.Sprintf("import (\n\t%q\n\t%q\n)\n\nfunc Decide%s(g *grants.Gate, d owner.Decision) { g.Decide(d) }\n", modPrefix+"grants", modPrefix+"owner", name)
+	}
+	srcs := map[string]string{
+		dir + "/doc.go":   "// Package taggedgrants is overlaid by TestEachBuildChecksItsOwnFiles.\npackage taggedgrants\n",
+		dir + "/cgo.go":   decide("cgo", "Cgo"),
+		dir + "/e2e.go":   decide("agentos_e2e", "E2E"),
+		dir + "/other.go": decide("!linux", "Other"),
+	}
+	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "darwin": "other.go"}
+	if runtime.GOOS != "linux" {
+		want["host+cgo"] = "" // other.go compiles on the host too; either file may come first
+	}
+	ov := overlay(t, srcs)
+	l := readList(t)
+	for _, b := range builds {
+		file, ok := want[b.name]
+		if !ok {
+			t.Fatalf("no expectation for build %s", b.name)
+		}
+		b.overlay = ov
+		found := writePaths(t, l, b, "./"+dir)
+		if len(found) != 1 || !strings.HasPrefix(found[0], dir+" calls core write path grants.Gate.Decide ") ||
+			!strings.Contains(found[0], "/"+file+":") {
+			t.Errorf("%s: want exactly the grants.Gate.Decide call in %s, got %q", b.name, file, found)
+		}
 	}
 }
 
 // A package that writes grants directly fails the check; its Submit does not.
 func TestAFixtureThatWritesGrantsFails(t *testing.T) {
-	found := writePaths(t, readList(t), "./core/testdata/writesgrants")
+	found := writePaths(t, readList(t), builds[0], "./core/testdata/writesgrants")
 	if len(found) != 1 || !strings.HasPrefix(found[0], "core/testdata/writesgrants calls core write path grants.Gate.Decide ") {
 		t.Fatalf("want exactly the fixture's grants.Gate.Decide call, got %q", found)
 	}
@@ -320,7 +430,7 @@ func TestAnAllowLineCoversOnlyItsPackage(t *testing.T) {
 		}{{"control", 1}, {fixture, 0}} {
 			l := readList(t)
 			l.allow[c.pkg] = append(l.allow[c.pkg], "grants.Gate.Decide")
-			if found := writePaths(t, l, "./"+fixture); len(found) != c.want {
+			if found := writePaths(t, l, builds[0], "./"+fixture); len(found) != c.want {
 				t.Errorf("%s, allow %s grants.Gate.Decide: want %d finding(s), got %q", fixture, c.pkg, c.want, found)
 			}
 		}
@@ -330,7 +440,7 @@ func TestAnAllowLineCoversOnlyItsPackage(t *testing.T) {
 // A package that declares an interface a core type satisfies through a
 // write path fails the check, with no call to the core at all.
 func TestAFixtureThatDecidesThroughAnInterfaceFails(t *testing.T) {
-	found := writePaths(t, readList(t), "./core/testdata/decidesgrants")
+	found := writePaths(t, readList(t), builds[0], "./core/testdata/decidesgrants")
 	if len(found) != 1 || !strings.HasPrefix(found[0], "core/testdata/decidesgrants reaches core write path grants.Gate.Decide through an interface ") {
 		t.Fatalf("want exactly the fixture's grants.Gate.Decide interface, got %q", found)
 	}
@@ -351,7 +461,7 @@ func TestEveryCoreListEntryExists(t *testing.T) {
 	}
 	sort.Strings(pats)
 	fset := token.NewFileSet()
-	_, imp := load(t, fset, pats...) // fails on a package that does not exist
+	_, imp := load(t, fset, build{}, pats...) // fails on a package that does not exist
 	syms := append([]string{}, l.open...)
 	for _, s := range l.allow {
 		syms = append(syms, s...)
@@ -408,18 +518,18 @@ func fixtures(t *testing.T, l list) []string {
 	return fs
 }
 
-// overlay writes a go -overlay file that adds a main.go, with its source,
-// at each module path dir (which need not exist), and returns its path.
+// overlay writes a go -overlay file that adds each module path file (whose
+// directory need not exist), with its source, and returns its path.
 func overlay(t *testing.T, srcs map[string]string) string {
 	t.Helper()
 	tmp := t.TempDir()
 	replace := map[string]string{}
-	for dir, src := range srcs {
-		file := filepath.Join(tmp, strings.ReplaceAll(dir, "/", "_")+".go")
+	for name, src := range srcs {
+		file := filepath.Join(tmp, strings.ReplaceAll(name, "/", "_"))
 		if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		abs, err := filepath.Abs(filepath.Join(moduleRoot, dir, "main.go"))
+		abs, err := filepath.Abs(filepath.Join(moduleRoot, name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -450,7 +560,7 @@ func TestAFixtureStopsABinaryGoTestDidNotBuild(t *testing.T) {
 	for _, f := range fixtures(t, readList(t)) {
 		t.Run(f, func(t *testing.T) {
 			bin := filepath.Join(t.TempDir(), "linksfixture")
-			build := exec.Command("go", "build", "-overlay="+overlay(t, map[string]string{dir: importing("main", f)}), "-o", bin, "./"+dir)
+			build := exec.Command("go", "build", "-overlay="+overlay(t, map[string]string{dir + "/main.go": importing("main", f)}), "-o", bin, "./"+dir)
 			build.Dir = moduleRoot
 			if out, err := build.CombinedOutput(); err != nil {
 				t.Fatalf("go build: %v\n%s", err, out)
@@ -527,10 +637,10 @@ func TestAFixtureImportedOutsideATestFails(t *testing.T) {
 		srcs map[string]string
 		want int
 	}{
-		{"direct", map[string]string{dir: importing("main", "loops/loopstest")}, 1},
-		{"through another package", map[string]string{dir: importing("main", mid), mid: importing("mid", "kernel/sim")}, 2},
+		{"direct", map[string]string{dir + "/main.go": importing("main", "loops/loopstest")}, 1},
+		{"through another package", map[string]string{dir + "/main.go": importing("main", mid), mid + "/main.go": importing("mid", "kernel/sim")}, 2},
 		// loops' own tests use loopstest; loops itself must not.
-		{"from a test only", map[string]string{dir: importing("main", "loops")}, 0},
+		{"from a test only", map[string]string{dir + "/main.go": importing("main", "loops")}, 0},
 	} {
 		got := fixtureImporters(t, fs, []string{"-overlay=" + overlay(t, c.srcs)}, "./"+dir+"/...")
 		if len(got) != c.want {

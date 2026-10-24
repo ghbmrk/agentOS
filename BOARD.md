@@ -35,16 +35,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-fuzz-account | Remove the agentos-fuzz account and /var/lib/agentos-fuzz tree on upgraded boxes, the tree no later than the account (from #2816's reviews). | #2816 | queued (later; tier A) |
 | MIG-4-builder-grant | Delete agentos-egress's unused lb- builder-grant path, cmd/agentos-builder and guest/builder (from #2816's Security review). | #2816; D-139 old-core list | queued (later; tier A) |
 | KRN-erase | LOG-4 recall and erase in the kernel: per-subject data keys, erase as one log entry, restore re-applies newer erases; FORGET is rebuilt on it after #2781 deletes the old one. | MIG-2 | queued (sub A; tier A) |
-| KEY-spend-parent | Kernel: a narrowed spend-day cap also counts the parent's earlier spend that day; closes before any wiring passes a Spare to a live scheduler (from #2837). | #2847; kernel (#2525) | queued (release) |
 | MIG-3-R11 | VRB-2 later notes from the #2833 reviews: IDNA handling, owner-facing refusal reasons, eval fixtures, documented limits. | #2833 | queued (later) |
-| CORE-fixture-imports | A check that loops/loopstest and kernel/sim are imported only from _test.go files, since core.txt grants them wildcards (from #2837). | #2847 | building (release) |
 | TN-passkey | KEY-4: enrolled-passkey hold before a big widening, hardware-key co-sign for a one-off money step over the daily cap, UV-required flag in the assertion model and sim sweep. | A21 passed; second TN spec PR; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21) |
 | TN-lockdown | STOP <name> replaces LOCKDOWN: pause everything the name reaches at once (unresolvable name pauses all), text a one-time code to the sender's real number, narrow the scope on the code; undo is a widening at home (CH-11). | A21 passed; #2863, #2857; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21) |
 | MIG-4-recovery | broker/recovery rebuilt on the kernel log and sealed store: restore as an install, passkeys cut, compromised switch with new keys and CA, erase hold, hybrid seal; split before starting (REC-2, REC-5, LOG-4, CH-9, BAK-1). | A21 passed; #2823, #2828, #2577, #2682 | queued (release; sub A; tier A; after A21; split first) |
 | TN-witness-key | Witness key: watch reads, own revocations and pauses, fixed security texts only; clerks' declared watch reads as effect projections; narrowing operations for proofs (KRN-10). | A21 and G2 passed; #2851, #2852; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21 and G2) |
 | STO-1-reanchor | Owner-approved re-anchor of the TPM-counter anchor after a detected rollback (STO-1, REC-1). | #2890, recovery slice | queued (sub A; tier A) |
 | STO-2c | STO-2c enrollment and units: first boot creates the sealed store, seals the tpm slot under a per-box policy key, writes the NV pins and the counter anchor; units for enroll/unlock/kernel with restart bounds, no extra descriptors and a TPM device allowlist; policy-key rotation and owner-auth decision. Row (d) of the #2682 start-up slice; folds in #2897 and #2899. | STO-2 | building (sub A row, cut under the 2026-10-23 widening; tier A, gate file) |
-| STO-2c-cap | STO-2c-cap: unlock caps the boot policy after it unseals (#2976 Security finding 2), so the kernel's TPM descriptor cannot unseal the store; rotation re-signs without reading capped PCRs. | STO-2 | in review (tier A, gate file) |
 | STO-2c-agentosd | agentosd.service gets neither the keeper mask nor DevicePolicy=closed; drop it from NOEXEC_EXEMPT when agentosd is deleted (from #2978). | #2978; agentosd's deletion | queued (later, recheck) |
 | STO-2c-caps | STO-2c-caps main-side root one-shots drop CAP_SYS_ADMIN/SYS_PTRACE/MKNOD so the keeper mask holds against root (found on #2978). | STO-2c-caps | queued (later) |
 | STO-2c-f1 later | Keeper tree check: socket units, host-wide mounts and symlinks that reach keeper paths outside a main-side service's settings (from #2981). | #2981 | queued (later, recheck) |
@@ -55,8 +52,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-3-later | OAuth exit clerk: real no-token-in-log test, token timeout tests, transient-fault retry, error-code reading, provider tolerances (later items from #2638). | #2642 | queued (later) |
 | TB-parsers-ap | Split localui's AP loader so the root agentos-ap does not list gozxing (#2937 gap 5). | #2937 | queued (later) |
 | EVAL-alert-misclassed | Eval case: an alert the reader misclasses as spam is refused with reason alert (owed from #2604 / #2681). | #2835 | queued (later) |
-| CORE-list-buildtags | The core.txt write-path check also covers files behind build tags, other GOOS values and cgo (from #3040). | #3040 | queued (release) |
 | CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
+| CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
 
 ## Harness and operating model
 
@@ -191,12 +188,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-shadow | Shadow week: seven days of the inbox slice on the owner's real mailbox under a read-only grant, effects logged never sent, next-day read-back against the owner's own action, STATUS agreement by class (EVL-2, D-152). | A21 passed; G1 on the M6 Ultra; #2851, #2852 | queued (release; sub A; tier A; after A21) |
 | TN-gmail-contract | Scheduled Gmail contract run: the #2851 contract test against a real test account, weekly, outside required checks; A22 cites its last pass. | #2851, #1021 | queued (release; tier A; gate file) |
 | TN-gmail-auth-fold | Fold Gmail sign-in into the API clerk's token path as one more declared shape, shrinking #2956's trusted-core growth. | #2956 | queued (later) |
-| TN-gmail-connect | Serve the owner page's Connect step (localui Accounts) from the account clerk's sign-in across the keeper boundary (D-150, D-154). | #2853 | queued (release; tier A) |
 | TN-gmail-cost | Gmail read cost: cache read-mail metadata and reuse the access token across checks (TN-gmail-wire follow-up). | #2925 | queued (later; sub A; tier B) |
-| TN-gmail-socket-order | Gmail sign-in for another address revokes the replaced grant only after the new account is set up (TN-gmail-socket follow-up, A22). | #3023 | in review (release; tier A) |
 | TN-gmail-socket-crash | A durable record of a pending Gmail grant give-back, replayed at start, to close TN-gmail-socket-b's two crash windows (from #3027). | #3027 | queued (later, recheck) |
 | TN-gmail-signin-revoke | SignIn.Finish reports its own revoke answer on DScope/DNoGrant, so the owner learns of a kept grant (from #3027; needs a Trusted-core decision). | #3027; Trusted-core decision | queued (later) |
-| TN-gmail-signin-f1 | Per-grant refresh tokens in gmailtest with a kept-grant Read test, and the household registration kept apart from any grant (from the #3027 reviews). | #3027 | queued (release) |
 
 ## Devices, hardware and image (SPEC §13-14)
 
@@ -358,6 +352,5 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 These open work-item issues are left off the board until their issue is fixed; each carries an intake comment naming what to change.
 
 ```text
-issue #3046: body has no board-row block
-issue #3047: body has no board-row block
+issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
 ```

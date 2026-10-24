@@ -130,7 +130,7 @@ var recorded = map[string]bool{
 	TLine: true, TStop: true, TResume: true, TPlanSubmit: true, TStepResult: true, TStepProbed: true,
 	TStepUndone: true, TStepRetried: true, TModelUsed: true, TSpendReserved: true, TSpendHeld: true,
 	TSpendExtend: true, TPoolRead: true, TReserveUp: true, TReserveDown: true,
-	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true,
+	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
 }
 
 // decision is decide's entry for a pending plan.
