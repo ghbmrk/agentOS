@@ -283,7 +283,7 @@ def _violations(root):
     for d in OWNER_DIRS:
         if d == "etc/agentos" and entry_mode(root, d):
             out.append("etc/agentos: owner configuration; written at onboarding only")
-        elif d == "var/lib/agentos" and tree_dir(root, d) and tree_listdir(root, tree_dir(root, d)):
+        elif d == "var/lib/agentos" and tree_dir(root, d) and not empty_but_ap(root, tree_dir(root, d)):
             out.append("var/lib/agentos: broker state; must be empty")
     # The vault and the page's claim state: their units create them on the box (#1249, #1270).
     for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
@@ -516,6 +516,16 @@ def tree_lstat(root, rel):
         except FileNotFoundError:
             return None
     return st
+
+
+def empty_but_ap(root, rel):
+    """Whether directory REL holds nothing but an empty directory ap: the access point loader's
+    (apnet.Dir, #2626), which tmpfiles.d also makes at build. Empty, it is no broker state."""
+    names = tree_listdir(root, rel)
+    if not names:
+        return True
+    st = tree_lstat(root, rel + "/ap")
+    return names == ["ap"] and st is not None and stat.S_ISDIR(st.st_mode) and not tree_listdir(root, rel + "/ap")
 
 
 def tree_listdir(root, rel):
