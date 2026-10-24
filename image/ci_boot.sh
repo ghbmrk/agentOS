@@ -303,7 +303,16 @@ for k in 2 3 4 5; do
 done
 
 # The same drive boots again on its own GUIDs (the entry is already blessed) and keeps them.
-TMO=600 boot "$W/console-reboot.log" "$D"
+# That boot also runs the monthly restore drill end to end (#2932): with no drill on record one is
+# due, so a CI-only unit starts the weekly reboot after the boot report; reboot-weekly reads all of
+# /usr through verity against usrhash= and reboots in the guest, and the next healthy boot reports
+# the time to a clean core. The unit is skipped once a drill is on record, so the second boot stays up.
+DRILL_UNIT="[Unit]\nDescription=agentOS restore drill start (CI only)\nAfter=agentos-boot-report.service\nConditionPathExists=!/var/lib/agentos/drill/last.json\n[Service]\nType=oneshot\nExecStart=systemctl start --no-block agentos-reboot.service\n"
+DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-drill-ci.service\n')"
+EXTRA="$DRILL_EXTRA" UNTIL="agentos-drill: \|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
+has "$W/console-reboot.log" "agentos-reboot: drill image=verified"
+has "$W/console-reboot.log" "agentos-drill: pass image=verified clean_core_seconds="
+hasnt "$W/console-reboot.log" "agentos-drill: FAIL"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
 has "$W/console-reboot.log" "agentos-quota: root=ext4 prjquota flag=on"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"

@@ -8,11 +8,12 @@ import (
 
 // REQ: ARC-1, ARC-2
 
-// Only the vault process and the unlock step talk to the TPM: they alone
-// open what the sealed key opens (vault V2, STO-2b). No other broker binary
-// links this package.
+// Only the vault process, the unlock step and enrollment talk to the TPM:
+// they alone open or make what the sealed key opens (vault V2, STO-2b,
+// STO-2c). No other broker binary links this package.
 var linksTPM = map[string]bool{
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-egress": true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-enroll": true,
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-unlock": true,
 }
 

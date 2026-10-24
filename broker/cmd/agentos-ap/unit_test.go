@@ -124,7 +124,8 @@ var loaderState = []string{"setup-net.json", "ap-net.json", "owner.json"}
 // the directory existed at loader start: the "-" skips a missing one, and
 // agentosd makes most of them later (#2626). loop7 is no longer made
 // (#2787 deleted it), but an upgraded box keeps its tree, so it stays masked.
-var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7"}
+// drill is not agentosd's: it holds the restore drill's record (#2932).
+var maskedDirs = []string{"vault", "machines", "slots", "journal", "change", "recall", "learn", "skills", "modem", "digest", "loop7", "drill"}
 
 // lapsingFiles are agentosd's state files at the top of /var/lib/agentos.
 // The unit masks them, but a mask on a file lapses at agentosd's first

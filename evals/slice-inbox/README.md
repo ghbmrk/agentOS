@@ -12,6 +12,7 @@ The held-out cases for the first slice, "Sort my inbox and unsubscribe from and 
 | `slice_eval/dkim.py` | DKIM signing and verification, standard library only. |
 | `slice_eval/predicate.py` | A reference unsubscribe-eligibility predicate (VRB-2), used only to prove each fixture is what its case says. |
 | `slice_eval/harness.py` | Loads the set, runs an adapter over every case twice and checks each outcome; `reference` is an adapter that passes. |
+| `slice_eval/oneoff.py` | A read-only report over a kernel log export: one-off irreversible approvals (no standing key covered them) by ISO week, factor and verb, approvals and steps apart, and how many of those verbs later got a clerk key. One OWN-19 line beside decisions, never summed into it (#2964). |
 
 `tests/test_slice_inbox_eval.py` tests the set itself: each mail's predicate reason, coverage of every EVL-2 clause, that the data is synthetic, and that the harness passes `reference` and fails broken runs, one per check.
 

@@ -60,6 +60,7 @@ parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it 
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-enroll -- process entry; reads the staged store and the factor files (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-kernel -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-unlock -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentosd -- process entry; decodes requests and replies (uncertain; classed parser)
