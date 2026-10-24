@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // alertPhrases are VRB-2's second alert net: security-alert wording that
@@ -69,12 +70,33 @@ func wordingAlert(text string) bool {
 		return true
 	}
 	for _, p := range alertPhrases {
-		if strings.Contains(f, p) {
+		if containsWord(f, p) {
 			return true
 		}
 	}
 	return codeNearWord(strings.ReplaceAll(f, "sign in", "signin"))
 }
+
+// containsWord reports whether p occurs in s on word boundaries: neither
+// neighbour is a letter or a digit, so "signin" is not read inside
+// "designing" (#2888).
+func containsWord(s, p string) bool {
+	for i := 0; ; {
+		j := strings.Index(s[i:], p)
+		if j < 0 {
+			return false
+		}
+		j += i
+		before, _ := utf8.DecodeLastRuneInString(s[:j])
+		after, _ := utf8.DecodeRuneInString(s[j+len(p):])
+		if !wordRune(before) && !wordRune(after) {
+			return true
+		}
+		i = j + 1
+	}
+}
+
+func wordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
 
 func foldText(s string) string {
 	var b strings.Builder
@@ -147,9 +169,14 @@ func allDigits(w string) bool {
 }
 
 // codeLike is a 4-10 character token of letters, digits and dashes with at
-// least one digit (482913, G-482913, A1B2C3).
+// least one digit (482913, G-482913, A1B2C3). A year from 1900 to 2099 is a
+// date, which CH-19 lets pass (#2888).
 func codeLike(w string) bool {
-	return len(w) >= 4 && len(w) <= 10 && strings.ContainsAny(w, "0123456789")
+	return len(w) >= 4 && len(w) <= 10 && strings.ContainsAny(w, "0123456789") && !isYear(w)
+}
+
+func isYear(w string) bool {
+	return len(w) == 4 && allDigits(w) && (w[:2] == "19" || w[:2] == "20")
 }
 
 // The bounds on what mailText reads of one mail.

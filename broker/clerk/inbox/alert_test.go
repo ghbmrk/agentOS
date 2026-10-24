@@ -312,3 +312,33 @@ func TestAnAlertCountsOnlyWhenItsDKIMVerifies(t *testing.T) {
 		t.Fatalf("Alerts = %v, want [a1]", got)
 	}
 }
+
+// #2888: ordinary promotional wording is not an alert. A phrase counts only on
+// word boundaries, so "designing" and "design in" hold no "signin" or "sign in",
+// and a year (19xx, 20xx) next to a code word is a date, which CH-19 lets pass.
+// A plainly written alert keeps its protection.
+func TestPromotionalWordingIsNotAnAlert(t *testing.T) {
+	for _, c := range []struct {
+		text  string
+		alert bool
+	}{
+		{"We are designing a new spring collection", false},
+		{"Our new design in stores now", false},
+		{"Season pass 2026 on sale", false},
+		{"Key dates for 2026 events", false},
+		{"Codes for the 1999 reunion", false},
+		{"Sign in to see your offers", true},
+		{"Our new design in stores; sign in to shop", true},
+		{"New sign-in from Chrome", true},
+		{"Someone tried to signin to your account", true},
+		{"Was this you?", true},
+		{"Your code is 2100", true},
+		{"Your code is 1899", true},
+		{"Your code is 482913", true},
+		{"PIN 2026-77", true},
+	} {
+		if got := wordingAlert(c.text); got != c.alert {
+			t.Errorf("%q: alert %v, want %v", c.text, got, c.alert)
+		}
+	}
+}
