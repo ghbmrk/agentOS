@@ -292,7 +292,7 @@ func TestTrustedHostSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := s.Slots(); len(got) != 2 || got[1].Kind != seal.KindTPM || got[1].Host != "Test PC" ||
-		len(got[1].PCRs) != 1 || !slices.Equal(got[1].PCRs[0], pcrs) || got[0].PCRs != nil {
+		len(got[1].Policies) != 1 || !slices.Equal(got[1].Policies[0].PCRs, pcrs) || got[0].Policies != nil {
 		t.Fatalf("slots: %+v", got)
 	}
 

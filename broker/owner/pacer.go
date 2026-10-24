@@ -56,13 +56,13 @@ const (
 )
 
 // pacingForms answers a pacing setting with a bad value (QH-6).
-const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open), ACK 5 to 120 (seconds before I text \"On it.\"). Security alerts always go at once; approval requests do unless URGENT APPROVAL OFF."
+const pacingForms = "Settings: QUIET 22-7 (hours 0 to 23) or QUIET OFF, TEXTS 1 to 20 (texts an hour), URGENT APPROVAL ON or OFF, URGENT AGENT ON or OFF, CHAT 5 to 240 (minutes a chat stays open), ACK 5 to 120 (seconds before I text \"On it.\"). Security alerts always go at once; approval requests and the agent's questions do unless URGENT APPROVAL OFF."
 
 // pacingHelp is HELP's line for the pacing settings. It is terse because
 // agentosd's whole HELP must fit one owner text uncut (control.MaxText,
 // #2390 F1); a mistyped setting gets pacingForms, which says what each
 // value means.
-const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF, CHAT 30, ACK 5."
+const pacingHelp = "QUIET 22-7/OFF, TEXTS 3, URGENT APPROVAL/AGENT ON/OFF (approval covers questions), CHAT 30, ACK 5."
 
 const pacingNotSaved = "Setting not saved. Nothing changed. Try again."
 
@@ -836,7 +836,7 @@ func (c *Channel) pacingSetting(msg string, unlocked bool) (string, bool) {
 			}
 			p.Urgent = u
 		}
-		name := "Approval requests"
+		name := "Approval requests and the agent's questions"
 		if class == ClassAgent {
 			name = "Agent texts"
 		}
@@ -887,7 +887,7 @@ func pacingShape(f []string) bool {
 func urgentNames(p Pacing) string {
 	names := []string{"security alerts"}
 	if p.urgent(ClassApproval) {
-		names = append(names, "approval requests")
+		names = append(names, "approval requests", "the agent's questions")
 	}
 	if p.urgent(ClassAgent) {
 		names = append(names, "agent texts")

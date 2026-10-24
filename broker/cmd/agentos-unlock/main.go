@@ -11,7 +11,9 @@
 // it before the exec, and the kernel gets only the log key, the head key,
 // the log anchor's counter and the owner's anchors on descriptor 3, and one
 // connection to the TPM on descriptor 4 for that counter (LOG-2, STO-1),
-// since the kernel's uid can open no TPM itself. The box's policy key and the store's anchor come
+// since the kernel's uid can open no TPM itself. Before that hand-off it caps
+// the slot's boot path (#2977), so that connection unseals nothing for the
+// rest of the boot. The box's policy key and the store's anchor come
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
 package main
@@ -132,6 +134,13 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, fmt.Errorf("agentos-unlock: %w", err)
 	}
 	defer st.Close()
+	// Lock after use (#2977, K6): with the store open, cap every boot path
+	// of its tpm slots, so for the rest of this boot no connection to this
+	// TPM, the kernel's on handoff.TPMFD included, unseals them again. A
+	// cap that fails hands the kernel nothing.
+	if err := tpmseal.Cap(t, tpmSelections(st)); err != nil {
+		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
+	}
 	var k handoff.KernelKeys
 	defer k.Wipe()
 	if k.Log, err = st.LogKey(); err != nil {
@@ -161,6 +170,21 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	return k.Marshal()
+}
+
+// tpmSelections is every PCR selection of the store's tpm slots' boot
+// paths: a rotation cut short leaves two slots, and either would unseal.
+func tpmSelections(st *seal.Store) [][]uint {
+	var out [][]uint
+	for _, sl := range st.Slots() {
+		if sl.Kind != seal.KindTPM {
+			continue
+		}
+		for _, p := range sl.Policies {
+			out = append(out, p.PCRs)
+		}
+	}
+	return out
 }
 
 // counterRec is handoff.CounterEntry's value, as enrollment writes it.

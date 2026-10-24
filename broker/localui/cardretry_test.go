@@ -85,3 +85,36 @@ func TestAFailedCardResetIsRetriedWithoutARestart(t *testing.T) {
 		t.Fatalf("not GSM-7: %q", cardNotMade)
 	}
 }
+
+// #2397 (M9): only the paired phone's page load retries a failed card
+// reset. A load before pairing, or from another phone on the Wi-Fi, runs
+// no reset; the paired phone's next load does.
+func TestOnlyThePairedPhoneRetriesAFailedCardReset(t *testing.T) {
+	cr := newCardRig(t)
+	w, g := cr.answers()
+	if err := cr.step.Display().Confirm(w, g); err != nil {
+		t.Fatal(err)
+	}
+	resets := 0
+	reset := func() error { resets++; return errors.New("vault busy") }
+	if err := cr.step.Again(reset); err == nil || resets != 1 {
+		t.Fatalf("rerun: %v, resets %d", err, resets)
+	}
+	cr.get("/setup")
+	if resets != 1 {
+		t.Fatalf("a load before pairing reset the vault: resets %d", resets)
+	}
+	cr.toCard()
+	paired := resets
+	if paired < 2 {
+		t.Fatalf("the paired phone's loads did not retry: resets %d", resets)
+	}
+	cr.asOther(func() { cr.get("/setup") })
+	if resets != paired {
+		t.Fatalf("another phone's load reset the vault: resets %d, want %d", resets, paired)
+	}
+	cr.get("/setup")
+	if resets != paired+1 {
+		t.Fatalf("the paired phone's load: resets %d, want %d", resets, paired+1)
+	}
+}

@@ -388,18 +388,21 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		h.idle()
 		prev, err := readMail(h.dir)
 		replacing := err == nil
+		release := func() {}
 		if replacing {
-			h.revokeGmail(prev) // a Gmail account's grant, before SetMail drops it (A22)
+			release = h.holdGmail(prev) // a Gmail account's grant, given back once SetMail drops it (A22)
 		}
-		if err := SetMail(h.dir, h.sec, a.Settings, a.Password); err != nil {
-			return nil, err
+		err = SetMail(h.dir, h.sec, a.Settings, a.Password)
+		release()
+		if !h.setUp(slotOf(a.Settings)) {
+			return nil, err // the account before, and its grant, stand
 		}
 		h.changed()
 		if replacing {
 			h.notify(false, noteMailReplaced)
 		}
 		h.refresh()
-		return nil, nil
+		return nil, err
 	},
 	"removemail": func(h *MailHost, _ json.RawMessage) (any, error) {
 		h.mu.Lock()
@@ -407,10 +410,13 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		h.idle()
 		prev, err := readMail(h.dir)
 		removing := err == nil
+		release := func() {}
 		if removing {
-			h.revokeGmail(prev) // a Gmail account's grant, before RemoveMail drops it (A22)
+			release = h.holdGmail(prev) // a Gmail account's grant, given back once RemoveMail drops it (A22)
 		}
-		if err := RemoveMail(h.dir, h.sec); err != nil {
+		err = RemoveMail(h.dir, h.sec)
+		release()
+		if err != nil {
 			return nil, err
 		}
 		h.changed()
