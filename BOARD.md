@@ -192,7 +192,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-gmail-cost | Gmail read cost: cache read-mail metadata and reuse the access token across checks (TN-gmail-wire follow-up). | #2925 | queued (later; sub A; tier B) |
 | TN-gmail-socket-crash | A durable record of a pending Gmail grant give-back, replayed at start, to close TN-gmail-socket-b's two crash windows (from #3027). | #3027 | queued (later, recheck) |
 | TN-gmail-signin-revoke | SignIn.Finish reports its own revoke answer on DScope/DNoGrant, so the owner learns of a kept grant (from #3027; needs a Trusted-core decision). | #3027; Trusted-core decision | queued (later) |
-| TN-gmail-registration-f1 | Tests for the four surviving mutants of the kept Gmail registration (from the #3063 reviews). | #3063 | building (release) |
 
 ## Devices, hardware and image (SPEC §13-14)
 
