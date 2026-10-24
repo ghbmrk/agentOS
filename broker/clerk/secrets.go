@@ -10,8 +10,6 @@ import (
 	"maps"
 	"strings"
 	"sync"
-
-	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 )
 
 // Sealer seals and opens one secret under a key that never leaves it. The
@@ -185,6 +183,14 @@ func (s *Secrets) RemovePrefix(prefix, keep string) error {
 // MailSlots prefixes the only slots Login opens: a mailbox password.
 const MailSlots = "mail/"
 
+// MailLogin is a mailbox password as Login gives it. The mail transport
+// turns it into its own login (run's mailBox), so this package, which the
+// kernel's clerk check path links, links no mail parser (KRN-2, #2937).
+type MailLogin struct {
+	User   string
+	Secret string
+}
+
 // Login is the mail transport's credential (imapsmtp.Config.Credential) from
 // a static slot under MailSlots (MIG-4-mail-a-8); any other slot does not
 // open, so Login is no getter for another clerk's secret. Each call opens
@@ -192,14 +198,14 @@ const MailSlots = "mail/"
 // next connection, and a slot of another kind does not open. The Secret
 // string is a copy that clear cannot wipe; it lives for one connection in
 // the clerk's own process, as the exit's header does.
-func (s *Secrets) Login(slot, user string) func(context.Context) (imapsmtp.Login, error) {
-	return func(context.Context) (imapsmtp.Login, error) {
-		var l imapsmtp.Login
+func (s *Secrets) Login(slot, user string) func(context.Context) (MailLogin, error) {
+	return func(context.Context) (MailLogin, error) {
+		var l MailLogin
 		if !strings.HasPrefix(slot, MailSlots) {
 			return l, errors.New("clerk: Login opens only a mail slot")
 		}
 		err := s.with(slot, KindStatic, func(p []byte) error {
-			l = imapsmtp.Login{User: user, Secret: string(p)}
+			l = MailLogin{User: user, Secret: string(p)}
 			return nil
 		})
 		return l, err
