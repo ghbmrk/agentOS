@@ -81,7 +81,13 @@ type Message struct {
 	ID     string
 	Raw    []byte
 	Labels []string
+	// Arrived is the internalDate, in milliseconds: a second apart from
+	// 2026-10-01, in the order delivered.
+	Arrived int64
 }
+
+// arrivedBase is the first delivered message's internalDate.
+const arrivedBase = int64(1790812800000) // 2026-10-01T00:00:00Z
 
 // Label is one label of the account.
 type Label struct {
@@ -195,10 +201,29 @@ func (s *Server) Deliver(raw []byte, labels ...string) string {
 	if len(labels) == 0 {
 		labels = []string{"INBOX", "UNREAD"}
 	}
-	s.msgs[id] = &Message{ID: id, Raw: slices.Clone(raw), Labels: slices.Clone(labels)}
+	s.msgs[id] = &Message{ID: id, Raw: slices.Clone(raw), Labels: slices.Clone(labels), Arrived: arrivedBase + int64(s.next)*1000}
 	s.order = append(s.order, id)
 	s.change()
 	return id
+}
+
+// Open is the owner reading a message in their own mail app: its UNREAD
+// label goes.
+func (s *Server) Open(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.msgs[id]; m != nil {
+		m.Labels = slices.DeleteFunc(m.Labels, func(l string) bool { return l == "UNREAD" })
+		s.change()
+	}
+}
+
+// Erase is the owner deleting a message for good in their own mail app.
+func (s *Server) Erase(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.msgs, id)
+	s.change()
 }
 
 // Get is a stored message, as it is now.
@@ -351,6 +376,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.calls = append(s.calls, line)
 	switch {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/messages":
+		if q.Has("q") && q.Get("q") != "-is:unread" {
+			w.WriteHeader(http.StatusBadRequest) // a query the fake does not know
+			return
+		}
 		s.list(q, reply)
 	case r.Method == "GET" && msgPath.MatchString(p):
 		m := s.msgs[msgPath.FindStringSubmatch(p)[1]]
@@ -358,7 +387,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		out := map[string]any{"id": m.ID, "threadId": m.ID, "labelIds": m.Labels, "historyId": strconv.Itoa(s.history)}
+		out := map[string]any{"id": m.ID, "threadId": m.ID, "labelIds": m.Labels, "historyId": strconv.Itoa(s.history),
+			"internalDate": strconv.FormatInt(m.Arrived, 10)}
 		switch q.Get("format") {
 		case "raw":
 			raw := m.Raw
@@ -501,9 +531,13 @@ func (s *Server) hasLabel(id string) bool {
 	return false
 }
 
-// list answers messages.list for labelIds, newest first, in pages.
+// list answers messages.list for labelIds, newest first, in pages. The one
+// query it knows is read mail (-is:unread); spam and trash are listed only
+// with includeSpamTrash, as Gmail lists them.
 func (s *Server) list(q url.Values, reply func(any)) {
 	label := q.Get("labelIds")
+	read := q.Get("q") == "-is:unread"
+	all := q.Get("includeSpamTrash") == "true"
 	max, _ := strconv.Atoi(q.Get("maxResults"))
 	if max <= 0 || max > 500 {
 		max = 100
@@ -511,9 +545,16 @@ func (s *Server) list(q url.Values, reply func(any)) {
 	start, _ := strconv.Atoi(q.Get("pageToken"))
 	var ids []string
 	for i := len(s.order) - 1; i >= 0; i-- {
-		if m := s.msgs[s.order[i]]; m != nil && (label == "" || slices.Contains(m.Labels, label)) {
-			ids = append(ids, m.ID)
+		m := s.msgs[s.order[i]]
+		switch {
+		case m == nil, label != "" && !slices.Contains(m.Labels, label):
+			continue
+		case !all && (slices.Contains(m.Labels, "SPAM") || slices.Contains(m.Labels, "TRASH")):
+			continue
+		case read && slices.Contains(m.Labels, "UNREAD"):
+			continue
 		}
+		ids = append(ids, m.ID)
 	}
 	var page []map[string]string
 	for i := start; i < len(ids) && i < start+max; i++ {

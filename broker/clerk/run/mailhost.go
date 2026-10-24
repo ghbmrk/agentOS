@@ -82,6 +82,14 @@ const DNoSignIn = "no-sign-in"
 // provider's lockout (#2698 item 5).
 var ErrSignInRefused = errors.New("run: the mail server refused the sign-in; the owner must set the account up again")
 
+// DReconnect is a step's detail while Gmail refuses the clerk's grant
+// (inbox.ErrReconnect): nothing is sent until the owner signs in again. It
+// is inbox's word for a step refused that way.
+const DReconnect = "reconnect"
+
+// ErrReconnect is the planner's answer while Gmail refuses the grant.
+var ErrReconnect = errors.New("run: Gmail refused the clerk's sign-in; the owner must sign in again")
+
 // ErrNoPasswordSignIn is the planner's answer while the server offers no
 // sign-in the clerk can make with these settings: nothing is read again
 // until the owner sets the account up again.
@@ -90,13 +98,16 @@ var ErrNoPasswordSignIn = errors.New("run: the mail server offers no sign-in wit
 // stops reports whether err is a sign-in failure only a change of setup
 // clears, and so stops every sign-in until then.
 func stops(err error) bool {
-	return errors.Is(err, imapsmtp.ErrLoginRefused) || errors.Is(err, imapsmtp.ErrNoSignIn)
+	return errors.Is(err, imapsmtp.ErrLoginRefused) || errors.Is(err, imapsmtp.ErrNoSignIn) || errors.Is(err, inbox.ErrReconnect)
 }
 
 // stopped is what a step, and the planner, get while stop holds.
 func stopped(stop error) (detail string, planner error) {
-	if errors.Is(stop, imapsmtp.ErrNoSignIn) {
+	switch {
+	case errors.Is(stop, imapsmtp.ErrNoSignIn):
 		return DNoSignIn, ErrNoPasswordSignIn
+	case errors.Is(stop, inbox.ErrReconnect):
+		return DReconnect, ErrReconnect
 	}
 	return DSignInRefused, ErrSignInRefused
 }
@@ -231,7 +242,7 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return kernel.Result{Outcome: "failed", Detail: DNoAccount}
 	}
 	res := m.Do(r, v)
-	if stop := map[string]error{DSignInRefused: imapsmtp.ErrLoginRefused, DNoSignIn: imapsmtp.ErrNoSignIn}[res.Detail]; res.Outcome == "failed" && stop != nil {
+	if stop := map[string]error{DSignInRefused: imapsmtp.ErrLoginRefused, DNoSignIn: imapsmtp.ErrNoSignIn, DReconnect: inbox.ErrReconnect}[res.Detail]; res.Outcome == "failed" && stop != nil {
 		// The step's own sign-in failed that way, before any effect: no
 		// step, probe or read signs in again until the owner sets the account
 		// up again, and STATUS says so (#2708 item 2, #2698 item 32). The
