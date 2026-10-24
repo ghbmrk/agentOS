@@ -390,7 +390,7 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 	}
 	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "darwin": "other.go"}
 	if runtime.GOOS != "linux" {
-		want["host+cgo"] = "" // other.go compiles on the host too; either file may come first
+		want["host+cgo"] = "" // other.go compiles on the host too; either file may come first, so only the count is checked
 	}
 	ov := overlay(t, srcs)
 	l := readList(t)
@@ -402,7 +402,7 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 		b.overlay = ov
 		found := writePaths(t, l, b, "./"+dir)
 		if len(found) != 1 || !strings.HasPrefix(found[0], dir+" calls core write path grants.Gate.Decide ") ||
-			!strings.Contains(found[0], "/"+file+":") {
+			file != "" && !strings.Contains(found[0], "/"+file+":") {
 			t.Errorf("%s: want exactly the grants.Gate.Decide call in %s, got %q", b.name, file, found)
 		}
 	}
