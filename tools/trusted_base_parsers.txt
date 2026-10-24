@@ -52,7 +52,9 @@ parser github.com/ghbmrk/agentos/broker/claim -- the claim code a phone presents
 parser github.com/ghbmrk/agentos/broker/clerk -- a clerk's sealed Secrets file and its providers' replies
 parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
-parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- IMAP and SMTP replies from the owner's mail provider
+parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server responses, in the mail clerk's connection process (go-imap; #2937 gap 2)
+parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- pre-auth lines and SMTP replies
+parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire -- typed frames from the IMAP connection process
 parser github.com/ghbmrk/agentos/broker/clerk/model -- model providers' replies
 parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and mail sockets
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive

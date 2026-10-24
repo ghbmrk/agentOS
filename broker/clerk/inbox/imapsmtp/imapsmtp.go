@@ -6,18 +6,20 @@
 // server's own words. It deals in raw messages and their references; what
 // a message means is the clerk's.
 //
-// It reuses github.com/emersion/go-imap (v1, MIT) as the IMAP client; SMTP
-// is the standard library's net/smtp.
+// It links no IMAP parser (KRN-2, #2937 gap 2). It signs in itself, over a
+// small bounded reader of the server's pre-auth lines, then hands the
+// signed-in session to a connection process (imapconn) that runs go-imap
+// over a socketpair while this side relays the bytes, holding the reply
+// budget, the timeout and a filter that lets through only the commands the
+// typed request needs. What the connection answers is untrusted and
+// checked here. SMTP is the standard library's net/smtp.
 package imapsmtp
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -25,13 +27,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
+	"unicode/utf8"
 
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-imap/commands"
-	"github.com/emersion/go-sasl"
-
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -70,6 +68,10 @@ type Config struct {
 	// Guard is the home-network address policy every dial goes through
 	// (DEV-2). Nil means netguard.New with only the IANA registries.
 	Guard *netguard.Policy
+	// Conn returns the control connection to a fresh connection process,
+	// one per session (imapconn; imapconn.Pipe for tests and the old
+	// core). New refuses nil: there is no in-process fallback.
+	Conn func(ctx context.Context) (*net.UnixConn, error)
 }
 
 // Store is the owner's mailbox over IMAP and SMTP.
@@ -78,42 +80,37 @@ type Store struct {
 	replyBase int64 // see replyBudget; a field so tests can lower it
 }
 
-// Role is a folder's special use (RFC 6154), or "" for none.
-type Role string
+// The mailbox's types are the wire's (imapwire), so the connection
+// process answers them without linking this package.
+type (
+	Role            = imapwire.Role
+	Folder          = imapwire.Folder
+	Ref             = imapwire.Ref
+	Message         = imapwire.Message
+	Mark            = imapwire.Mark
+	LongHeaderError = imapwire.LongHeaderError
+)
 
 // The roles the clerk reads.
 const (
-	Inbox   Role = "inbox"
-	Archive Role = "archive"
-	Drafts  Role = "drafts"
-	Sent    Role = "sent"
-	Trash   Role = "trash"
-	Junk    Role = "junk"
-	All     Role = "all"
+	Inbox   = imapwire.Inbox
+	Archive = imapwire.Archive
+	Drafts  = imapwire.Drafts
+	Sent    = imapwire.Sent
+	Trash   = imapwire.Trash
+	Junk    = imapwire.Junk
+	All     = imapwire.All
 )
 
-// Folder is one selectable folder.
-type Folder struct {
-	Name string
-	Role Role
-}
-
-// Ref names one message by its full identity: its folder, the folder's UID
-// validity when the UID was read, and the UID. Under another validity the
-// same UID may be another message, so every change is checked against it.
-type Ref struct {
-	Folder   string
-	Validity uint32
-	UID      uint32
-}
-
-// Message is one message as the server holds it: its reference, its flags
-// and its first MaxFetch bytes, read without marking it read.
-type Message struct {
-	Ref
-	Flags []string
-	Raw   []byte
-}
+// The connection's reports, as the wire carries them: see imapwire.
+var (
+	ErrNoMove        = imapwire.ErrNoMove
+	ErrValidity      = imapwire.ErrValidity
+	ErrNoUIDNext     = imapwire.ErrNoUIDNext
+	ErrPartialStatus = imapwire.ErrPartialStatus
+	ErrUnanswered    = imapwire.ErrUnanswered
+	ErrLongHeader    = imapwire.ErrLongHeader
+)
 
 // ErrBadFlag is returned before acting for a flag that is neither a system
 // flag nor an RFC 3501 keyword atom. go-imap writes flags into the command
@@ -144,13 +141,6 @@ func flagsValid(flags []string) bool {
 	return true
 }
 
-// ErrNoMove is returned before acting by a server without MOVE.
-var ErrNoMove = errors.New("imapsmtp: the server does not support MOVE")
-
-// ErrValidity is returned before acting when a folder's UID validity is
-// not the one a reference was read under.
-var ErrValidity = errors.New("imapsmtp: the folder was renumbered since it was read")
-
 // ErrInsecure is returned for a Plain connection to a non-loopback host.
 var ErrInsecure = errors.New("imapsmtp: a plain connection is allowed only to loopback")
 
@@ -158,6 +148,9 @@ var ErrInsecure = errors.New("imapsmtp: a plain connection is allowed only to lo
 func New(cfg Config) (*Store, error) {
 	if cfg.IMAP == "" || cfg.SMTP == "" || cfg.Credential == nil || cfg.From == "" {
 		return nil, errors.New("imapsmtp: Config needs IMAP, SMTP, Credential and From")
+	}
+	if cfg.Conn == nil {
+		return nil, errors.New("imapsmtp: Config needs Conn, the connection process")
 	}
 	for _, x := range []struct {
 		addr string
@@ -233,11 +226,6 @@ func (s *Store) tlsConfig(addr string) *tls.Config {
 	return c
 }
 
-// session runs f on an authenticated IMAP connection.
-func (s *Store) session(ctx context.Context, f func(c *client.Client) error) error {
-	return s.sessionN(ctx, 0, f)
-}
-
 // A session may read 16 MiB from the server, plus MaxFetch and
 // fetchFrame for each message it fetches (SR3-mail-k18b). go-imap holds a
 // whole reply in memory, so without a bound a server that never ends one
@@ -280,9 +268,8 @@ func (s *Store) replyBudget(fetches int) int64 {
 	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
 }
 
-// budgetConn fails reads once left bytes have been read. left is atomic
-// because the client's reader reads while renew, between a session's steps,
-// sets it again.
+// budgetConn fails reads once left bytes have been read: a submission's
+// replies (an IMAP session's budget is its relay's, relay.go).
 type budgetConn struct {
 	net.Conn
 	left atomic.Int64
@@ -307,109 +294,6 @@ func (b *budgetConn) Read(p []byte) (int, error) {
 	n, err := b.Conn.Read(p)
 	b.left.Add(-int64(n))
 	return n, err
-}
-
-// sessionN is session for a call that fetches up to n messages.
-func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) error) error {
-	return s.sessionB(ctx, s.replyBudget(n), f)
-}
-
-// sessionB is session with a reply budget of budget bytes.
-func (s *Store) sessionB(ctx context.Context, budget int64, f func(c *client.Client) error) error {
-	return s.sessionR(ctx, budget, func(c *client.Client, _ func(int64)) error { return f(c) })
-}
-
-// sessionR is sessionB for a session of steps, signed in once: renew(n),
-// called before a step, gives it a fresh reply budget of n bytes and a fresh
-// timeout. The client's reader reads ahead, so one reply can be charged to
-// two adjacent windows, never more: what a step holds is bounded by its own
-// window and the one before.
-func (s *Store) sessionR(ctx context.Context, budget int64, f func(c *client.Client, renew func(n int64)) error) (err error) {
-	var late atomic.Bool
-	var bc *budgetConn
-	defer func() { err = ended(err, bc != nil && bc.over.Load(), late.Load(), ctx) }()
-	dctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-	defer cancel()
-	conn, err := s.dial(dctx, s.cfg.IMAP, s.cfg.IMAPSec)
-	if err != nil {
-		// The caller's deadline, passed before or during the dial, not the
-		// dial's own timeout, ended it.
-		late.Store(ctx.Err() == context.DeadlineExceeded)
-		return err
-	}
-	// go-imap clears the connection's deadline at each command, so a timer
-	// closes the connection instead: at the dial's deadline for the greeting,
-	// handshake and sign-in, then once a step has run for the timeout, as
-	// renew restarts it. Every cut-off goes through it and so marks the
-	// session late.
-	dl, _ := dctx.Deadline()
-	raw := conn
-	step := time.AfterFunc(time.Until(dl), func() { late.Store(true); raw.Close() })
-	defer step.Stop()
-	switch s.cfg.IMAPSec {
-	case TLS:
-		conn = tls.Client(conn, s.tlsConfig(s.cfg.IMAP))
-	case Plain:
-	default:
-		conn.Close()
-		return errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
-	}
-	// The connection is closed however the session ends: Logout does not
-	// close it once the client's reader has stopped on a bad reply.
-	defer conn.Close()
-	bc = newBudgetConn(conn, budget)
-	c, err := client.New(bc)
-	if err != nil {
-		return err
-	}
-	c.ErrorLog = quiet{}
-	defer c.Logout()
-	stop := context.AfterFunc(ctx, func() {
-		if ctx.Err() == context.DeadlineExceeded {
-			late.Store(true)
-		}
-		conn.Close()
-	})
-	defer stop()
-	l, err := s.cfg.Credential(dctx)
-	if err != nil {
-		return errors.New("imapsmtp: no credential")
-	}
-	auth, err := imapAuth(c, l)
-	if err != nil {
-		return err
-	}
-	if auth != nil {
-		err = c.Authenticate(auth)
-	} else {
-		err = c.Login(l.User, l.Secret)
-	}
-	if err != nil {
-		return signIn(err, Reading)
-	}
-	return f(c, func(n int64) { bc.left.Store(n); step.Reset(s.cfg.Timeout) })
-}
-
-// imapAuth is the sign-in the IMAP server offers for l: XOAUTH2 for a token;
-// LOGIN (nil) for a password, or AUTHENTICATE PLAIN where LOGINDISABLED. It
-// is ErrNoSignIn when the server offers neither, and not a sign-in failure
-// when its capabilities could not be read: no login was sent.
-func imapAuth(c *client.Client, l Login) (sasl.Client, error) {
-	mech, auth := "XOAUTH2", sasl.Client(xoauth2{l.User, l.Secret})
-	if !l.OAuth {
-		mech, auth = "PLAIN", sasl.NewPlainClient("", l.User, l.Secret)
-	}
-	off, err := c.Support("LOGINDISABLED")
-	if err != nil {
-		return nil, errors.New("imapsmtp: the server did not say how to sign in")
-	}
-	if !l.OAuth && !off {
-		return nil, nil
-	}
-	if ok, _ := c.SupportAuth(mech); !ok {
-		return nil, stand{side(ErrNoSignIn, Reading)}
-	}
-	return auth, nil
 }
 
 // Side is the side of the account a sign-in failed on, as the two are set
@@ -449,6 +333,8 @@ func side(e error, s Side) error { return sideError{e, s} }
 func ended(err error, over, late bool, caller context.Context) error {
 	var st stand
 	switch {
+	case errors.Is(err, ErrConnRefused):
+		return ErrConnRefused
 	case errors.As(err, &st):
 		return st.error
 	case err == nil:
@@ -463,156 +349,19 @@ func ended(err error, over, late bool, caller context.Context) error {
 	return err
 }
 
-// signIn is a failed sign-in's error on side s, standing as ErrLoginRefused
-// when the server refused it: an IMAP NO or BAD other than UNAVAILABLE (RFC
-// 5530: the server is down for now) or an SMTP 5xx. Any other failure passes
-// with time and is mapped as the session ended.
+// signIn is a failed SMTP sign-in's error, standing as ErrLoginRefused
+// when the server refused it with a 5xx. Any other failure passes with time
+// and is mapped as the submission ended. IMAP's is the pre-auth reader's
+// (preauth.go).
 func signIn(err error, s Side) error {
-	var st *imap.StatusError
 	var tp *textproto.Error
-	if errors.As(err, &st) && st.Resp.Code != "UNAVAILABLE" || errors.As(err, &tp) && tp.Code >= 500 {
+	if errors.As(err, &tp) && tp.Code >= 500 {
 		return stand{side(ErrLoginRefused, s)}
 	}
-	return errors.New("imapsmtp: the sign-in did not complete")
+	return errSignIn
 }
 
-type quiet struct{}
-
-func (quiet) Printf(string, ...interface{}) {}
-func (quiet) Println(...interface{})        {}
-
-// Folders lists the account's folders with their special-use roles.
-func (s *Store) Folders(ctx context.Context) ([]Folder, error) {
-	var out []Folder
-	err := s.session(ctx, func(c *client.Client) (err error) {
-		out, err = folders(c)
-		return err
-	})
-	return out, err
-}
-
-// folders lists the selectable folders in session c.
-func folders(c *client.Client) ([]Folder, error) {
-	var out []Folder
-	ch := make(chan *imap.MailboxInfo, 32)
-	done := make(chan error, 1)
-	go func() { done <- c.List("", "*", ch) }()
-	for m := range ch {
-		if has(m.Attributes, imap.NoSelectAttr) {
-			continue
-		}
-		out = append(out, Folder{Name: m.Name, Role: role(m)})
-	}
-	return out, <-done
-}
-
-func role(m *imap.MailboxInfo) Role {
-	if strings.EqualFold(m.Name, "INBOX") {
-		return Inbox
-	}
-	for a, r := range map[string]Role{imap.ArchiveAttr: Archive, imap.DraftsAttr: Drafts,
-		imap.SentAttr: Sent, imap.TrashAttr: Trash, imap.JunkAttr: Junk, imap.AllAttr: All} {
-		if has(m.Attributes, a) {
-			return r
-		}
-	}
-	return ""
-}
-
-func has(l []string, s string) bool {
-	for _, x := range l {
-		if strings.EqualFold(x, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// UIDs lists every message in folder.
-func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, error) {
-	var validity uint32
-	var uids []uint32
-	err := s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
-		if err != nil {
-			return err
-		}
-		validity = st.UidValidity
-		if st.Messages == 0 {
-			return nil
-		}
-		uids, err = c.UidSearch(imap.NewSearchCriteria())
-		return err
-	})
-	return validity, uids, err
-}
-
-// Fetch reads messages with BODY.PEEK, so none is marked read, only
-// while folder still has the UID validity the UIDs were listed under.
-func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]Message, error) {
-	if len(uids) == 0 {
-		return nil, nil
-	}
-	var out []Message
-	err := s.sessionN(ctx, len(uids), func(c *client.Client) error {
-		if err := selectAt(c, folder, true, validity); err != nil {
-			return err
-		}
-		var err error
-		out, err = s.fetch(c, folder, validity, uids)
-		return err
-	})
-	return out, err
-}
-
-// selectAt selects folder and refuses (ErrValidity) unless its UID
-// validity is the expected one: under another validity the UIDs the
-// caller holds may name other messages. The check and what follows run
-// in this one selected session.
-func selectAt(c *client.Client, folder string, readOnly bool, validity uint32) error {
-	st, err := c.Select(folder, readOnly)
-	if err != nil {
-		return err
-	}
-	if validity == 0 || st.UidValidity != validity {
-		return ErrValidity
-	}
-	return nil
-}
-
-func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []uint32) ([]Message, error) {
-	set := new(imap.SeqSet)
-	set.AddNum(uids...)
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, s.cfg.MaxFetch}}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchFlags, sec.FetchItem()}
-	ch := make(chan *imap.Message, 16)
-	done := make(chan error, 1)
-	go func() { done <- c.UidFetch(set, items, ch) }()
-	// Only the first response with a body for each requested UID is kept,
-	// so a server that repeats or invents messages cannot grow out, and an
-	// unsolicited FLAGS-only response does not take the slot (SR3-mail-k18b).
-	want := make(map[uint32]bool, len(uids))
-	for _, u := range uids {
-		want[u] = true
-	}
-	var out []Message
-	for m := range ch {
-		if !want[m.Uid] || len(m.Body) == 0 {
-			continue
-		}
-		delete(want, m.Uid)
-		var raw []byte
-		for _, l := range m.Body {
-			if l != nil {
-				raw, _ = io.ReadAll(l)
-				break
-			}
-		}
-		out = append(out, Message{Ref: Ref{Folder: folder, Validity: validity, UID: m.Uid},
-			Flags: append([]string(nil), m.Flags...), Raw: raw})
-	}
-	return out, <-done
-}
+var errSignIn = errors.New("imapsmtp: the sign-in did not complete")
 
 // headMax bounds the From and Message-ID headers Seen reads of each message,
 // and seenBatch the UIDs one of its batches fetches. Sign-in and the search
@@ -627,38 +376,99 @@ const (
 	seenBase  = 64 << 10
 )
 
-// ErrUnanswered is a FETCH that left a searched message, still there and
-// still read, without its header, and ErrLongHeader headers longer than
-// headMax: either would leave a mail out of what Seen found.
-var (
-	ErrUnanswered = errors.New("imapsmtp: the server did not answer for every message")
-	ErrLongHeader = errors.New("imapsmtp: a mail's headers are too long to read")
-)
-
-// LongHeaderError is ErrLongHeader for one mail, named so the owner can find
-// it: its folder, its INTERNALDATE (zero if the server sent none) and its
-// Subject, read on its own under subjectMax bytes, since its other headers
-// are what was too long. Error names the folder, arrival and UID, never the
-// subject: that is the mail's content, for the owner's eyes, not a log.
-type LongHeaderError struct {
-	Folder  string
-	Arrived time.Time
-	UID     uint32
-	Subject string
-}
-
-func (e *LongHeaderError) Error() string {
-	at := "at an unknown time"
-	if !e.Arrived.IsZero() {
-		at = e.Arrived.Format("2006-01-02 15:04 -0700")
-	}
-	return fmt.Sprintf("%v: the mail in %s that arrived %s (UID %d)", ErrLongHeader, e.Folder, at, e.UID)
-}
-
-func (e *LongHeaderError) Unwrap() error { return ErrLongHeader }
-
 // subjectMax bounds the Subject a LongHeaderError reads.
 const subjectMax = 1 << 10
+
+// Folders lists the account's folders with their special-use roles.
+func (s *Store) Folders(ctx context.Context) ([]Folder, error) {
+	var out []Folder
+	err := s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpFolders}, s.replyBudget(0), read)
+		if err != nil {
+			return err
+		}
+		for _, f := range r.Folders {
+			if f.Name == "" || !f.Role.Known() {
+				return errLied
+			}
+		}
+		out = r.Folders
+		return nil
+	})
+	return out, err
+}
+
+// UIDs lists every message in folder.
+func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, error) {
+	var validity uint32
+	var uids []uint32
+	err := s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpUIDs, Folder: folder}, s.replyBudget(0), read)
+		validity, uids = r.Validity, r.UIDs
+		return err
+	})
+	return validity, uids, err
+}
+
+// Fetch reads messages with BODY.PEEK, so none is marked read, only
+// while folder still has the UID validity the UIDs were listed under.
+func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]Message, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	var out []Message
+	err := s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpFetch, Folder: folder, Validity: validity, UIDs: uids, MaxFetch: s.cfg.MaxFetch},
+			s.replyBudget(len(uids)), read)
+		if err != nil {
+			return err
+		}
+		out, err = s.checked(r.Messages, folder, validity, set(uids), 0)
+		return err
+	})
+	return out, err
+}
+
+// errLied is an answer from the connection process outside what its request
+// allows: a message from another folder or validity, a UID not asked for,
+// more than asked, or a field past its bound. The connection is untrusted
+// (KRN-2), so its answer fails closed.
+var errLied = errors.New("imapsmtp: the connection process answered outside its request")
+
+func set(uids []uint32) map[uint32]bool {
+	m := make(map[uint32]bool, len(uids))
+	for _, u := range uids {
+		m[u] = true
+	}
+	return m
+}
+
+// checked is ms if every message is in folder under validity, names a UID
+// in want (when want is nil, one at least from), at most once, holds at
+// most MaxFetch bytes and carries only flags as a server writes them; else
+// errLied.
+func (s *Store) checked(ms []Message, folder string, validity uint32, want map[uint32]bool, from uint32) ([]Message, error) {
+	seen := map[uint32]bool{}
+	for _, m := range ms {
+		if m.Folder != folder || m.Validity != validity || seen[m.UID] || len(m.Raw) > s.cfg.MaxFetch ||
+			want != nil && !want[m.UID] || want == nil && m.UID < from || !flagsRead(m.Flags) {
+			return nil, errLied
+		}
+		seen[m.UID] = true
+	}
+	return ms, nil
+}
+
+// flagsRead says whether every flag is one a server can send: a keyword
+// atom, or a backslash and one (\Seen, \Recent and the rest).
+func flagsRead(flags []string) bool {
+	for _, f := range flags {
+		if !flagsValid([]string{strings.TrimPrefix(f, `\`)}) {
+			return false
+		}
+	}
+	return true
+}
 
 // Seen hands each the From and Message-ID headers of every message in folder
 // that carries \Seen, read with BODY.PEEK[HEADER.FIELDS (FROM MESSAGE-ID)] so
@@ -666,168 +476,89 @@ const subjectMax = 1 << 10
 // mail in, which the sender does not set and COPY and MOVE keep (RFC 3501
 // 6.4.7, RFC 6851), zero if the server sent none. It keeps none of them.
 // The UIDs are searched and then fetched seenBatch at a time in one session,
-// signed in once, each batch under a fresh read budget and timeout. Each
-// searched message must answer with its headers, at most headMax bytes; one
-// that did not answer is searched for again, and only one the owner deleted
-// or marked unread since is let go. Anything else, or an error from each,
-// fails the call, so no partial answer passes for a full one; a header too
-// long names its folder and arrival, so the owner can find the mail.
+// signed in once, each batch one typed request under a fresh read budget and
+// timeout that only this side renews. Each searched message must answer with
+// its headers, at most headMax bytes; one that did not answer is searched
+// for again, and only one the owner deleted or marked unread since is let
+// go. Anything else, or an error from each, fails the call, so no partial
+// answer passes for a full one; a header too long names its folder and
+// arrival, so the owner can find the mail.
 func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte, arrived time.Time) error) error {
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, headMax + 1},
-		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Message-Id"}}}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
-	return s.sessionR(ctx, s.replyBase, func(c *client.Client, renew func(int64)) error {
-		st, err := c.Select(folder, true)
-		if err != nil || st.Messages == 0 {
-			return err
-		}
-		uids, err := readUIDs(c, nil)
+	return s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpSeenSearch, Folder: folder}, s.replyBudget(0), read)
 		if err != nil {
 			return err
 		}
+		uids := r.UIDs
 		for i := 0; i < len(uids); i += seenBatch {
-			renew(seenBase + seenBatch*(headMax+fetchFrame))
 			batch := uids[i:min(i+seenBatch, len(uids))]
-			want := make(map[uint32]bool, len(batch))
-			for _, u := range batch {
-				want[u] = true
-			}
-			set := new(imap.SeqSet)
-			set.AddNum(batch...)
-			ch := make(chan *imap.Message, 16)
-			done := make(chan error, 1)
-			go func() { done <- c.UidFetch(set, items, ch) }()
-			// As in fetch: one header per requested UID, so a server that
-			// repeats or invents messages adds nothing.
-			var bad error
-			for m := range ch {
-				if bad != nil || !want[m.Uid] {
-					continue
-				}
-				for _, l := range m.Body {
-					if l == nil {
-						continue
-					}
-					delete(want, m.Uid)
-					h, _ := io.ReadAll(io.LimitReader(l, headMax+1))
-					if len(h) > headMax {
-						bad = &LongHeaderError{Folder: folder, Arrived: m.InternalDate, UID: m.Uid}
-					} else {
-						bad = each(h, m.InternalDate)
-					}
-					break
-				}
-			}
-			if err := <-done; err != nil {
+			want := set(batch)
+			r, err := x.do(imapwire.Request{Op: imapwire.OpSeenBatch, Folder: folder, UIDs: batch},
+				seenBase+seenBatch*(headMax+fetchFrame), read)
+			if err != nil && r.Err == "" {
 				return err
 			}
-			if lh, ok := bad.(*LongHeaderError); ok {
-				lh.Subject = subject(c, lh.UID)
+			// As the server answered: each header in turn, then why the
+			// batch ended. A fetch that failed stands over the caller's
+			// error and a long header, as it did in one session.
+			var bad error
+			for _, h := range r.Heads {
+				if !want[h.UID] || len(h.Header) > headMax {
+					return errLied
+				}
+				delete(want, h.UID)
+				if bad == nil {
+					bad = each(h.Header, h.Arrived)
+				}
 			}
-			if bad != nil {
+			switch {
+			case r.Err != "" && r.Err != codeLong && r.Err != codeUnanswered:
+				return err
+			case bad != nil:
 				return stand{bad}
-			}
-			if len(want) > 0 {
-				left, err := readUIDs(c, want)
-				if err != nil {
-					return err
+			case r.Err == codeLong:
+				if r.Long == nil || !want[r.Long.UID] {
+					return errLied
 				}
-				if len(left) > 0 {
-					return stand{ErrUnanswered}
+				lh := &LongHeaderError{Folder: folder, Arrived: r.Long.Arrived, UID: r.Long.UID}
+				// The subject read shares the batch's window: one that times
+				// out or fails leaves it empty, and the error stands.
+				if q, err := x.do(imapwire.Request{Op: imapwire.OpSubject, Folder: folder, UIDs: []uint32{lh.UID}}, 0, read); err == nil {
+					lh.Subject = subjectOf(q.Subject)
 				}
+				return stand{lh}
+			case err != nil:
+				return err
 			}
 		}
 		return nil
 	})
 }
 
-// subject is mail uid's Subject header, unfolded and decoded, read with
-// BODY.PEEK under subjectMax bytes; one cut there ends in "…". A failed read
-// leaves it empty: the error it names stands without it.
-func subject(c *client.Client, uid uint32) string {
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, subjectMax + 1},
-		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"Subject"}}}
-	set := new(imap.SeqSet)
-	set.AddNum(uid)
-	ch := make(chan *imap.Message, 4)
-	done := make(chan error, 1)
-	go func() { done <- c.UidFetch(set, []imap.FetchItem{imap.FetchUid, sec.FetchItem()}, ch) }()
-	// The client passes on only answers for uid; the first stands.
-	var h []byte
-	for m := range ch {
-		for _, l := range m.Body {
-			if l != nil && h == nil {
-				h, _ = io.ReadAll(io.LimitReader(l, subjectMax+1))
-			}
-		}
-	}
-	if <-done != nil {
+// subjectOf is a Subject the connection answered, as the owner may see it:
+// at most subjectMax bytes and its cut mark, on one plain line; else empty.
+func subjectOf(v string) string {
+	if len(v) > subjectMax+len("…") || !utf8.ValidString(v) {
 		return ""
 	}
-	cut := len(h) > subjectMax
-	v := string(h[:min(len(h), subjectMax)])
-	if name, rest, ok := strings.Cut(v, ":"); !ok || !strings.EqualFold(strings.TrimSpace(name), "Subject") {
-		return ""
-	} else {
-		v = rest
-	}
-	// A cut inside an encoded word, =?charset?encoding?text?=, leaves it
-	// undecodable: it goes, rather than show the owner its raw form.
-	if i := strings.LastIndex(v, "=?"); cut && i >= 0 {
-		if p := strings.SplitN(v[i+2:], "?", 4); len(p) < 4 || !strings.HasPrefix(p[3], "=") {
-			v = v[:i]
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 || r >= 0x2066 && r <= 0x2069 || r >= 0x202a && r <= 0x202e ||
+			r == 0x200e || r == 0x200f || r == 0x061c {
+			return ""
 		}
-	}
-	if d, err := new(mime.WordDecoder).DecodeHeader(v); err == nil {
-		v = d
-	}
-	// A cut can split a character; and the sender wrote this, so no control
-	// or bidi character it carries can break or reorder the owner's line.
-	v = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
-			return ' '
-		}
-		return r
-	}, strings.ToValidUTF8(v, ""))
-	v = strings.Join(strings.Fields(v), " ")
-	if cut {
-		v += "…"
 	}
 	return v
 }
 
-// readUIDs searches the selected folder for its read mail: all of it, or,
-// given only, those of its UIDs still there and still read.
-func readUIDs(c *client.Client, only map[uint32]bool) ([]uint32, error) {
-	crit := imap.NewSearchCriteria()
-	crit.WithFlags = []string{imap.SeenFlag}
-	if only != nil {
-		crit.Uid = new(imap.SeqSet)
-		for u := range only {
-			crit.Uid.AddNum(u)
-		}
-	}
-	uids, err := c.UidSearch(crit)
-	if only == nil || err != nil {
-		return uids, err
-	}
-	return slices.DeleteFunc(uids, func(u uint32) bool { return !only[u] }), nil
-}
-
-// ErrNoUIDNext is returned for a folder whose SELECT gave no UID validity
-// or next UID, both of which RFC 3501 requires: what arrives in it from now
-// on cannot be told from what was there.
-var ErrNoUIDNext = errors.New("imapsmtp: the server did not give the folder's next UID")
-
 // Next is folder's UID validity and the UID its next message will take, so
 // a later FindSince can look at only what arrived since.
 func (s *Store) Next(ctx context.Context, folder string) (validity, next uint32, err error) {
-	err = s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
+	err = s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpNext, Folder: folder}, s.replyBudget(0), read)
 		if err != nil {
 			return err
 		}
-		if validity, next = st.UidValidity, st.UidNext; validity == 0 || next == 0 {
+		if validity, next = r.Validity, r.Next; validity == 0 || next == 0 {
 			return stand{ErrNoUIDNext}
 		}
 		return nil
@@ -851,30 +582,20 @@ func (s *Store) FindSince(ctx context.Context, folder string, validity, from uin
 	return s.find(ctx, folder, validity, from, id, match)
 }
 
-// find is Find, from UID from on under validity unless validity is 0.
+// find is Find, from UID from on under validity unless validity is 0. The
+// connection returns the candidates; match runs here, on this side.
 func (s *Store) find(ctx context.Context, folder string, validity, from uint32, id string, match func(Message) bool) ([]Message, error) {
 	var out []Message
-	err := s.session(ctx, func(c *client.Client) error {
-		st, err := c.Select(folder, true)
+	err := s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpFind, Folder: folder, Validity: validity, From: from, ID: id, MaxFetch: s.cfg.MaxFetch},
+			s.replyBudget(0), read)
+		if err == nil && (validity != 0 && r.Validity != validity || r.Validity == 0 && len(r.Messages) > 0) {
+			err = errLied
+		}
 		if err != nil {
 			return err
 		}
-		if validity != 0 && st.UidValidity != validity {
-			return ErrValidity
-		}
-		crit := imap.NewSearchCriteria()
-		crit.Header.Add("Message-Id", id)
-		if validity != 0 {
-			crit.Uid = new(imap.SeqSet)
-			crit.Uid.AddRange(max(from, 1), 0)
-		}
-		uids, err := c.UidSearch(crit)
-		// from:* holds the folder's last UID even when it is below from.
-		uids = slices.DeleteFunc(uids, func(u uint32) bool { return u < from })
-		if err != nil || len(uids) == 0 {
-			return err
-		}
-		ms, err := s.fetch(c, folder, st.UidValidity, uids)
+		ms, err := s.checked(r.Messages, folder, r.Validity, nil, from)
 		for _, m := range ms {
 			if match(m) {
 				out = append(out, m)
@@ -886,109 +607,47 @@ func (s *Store) find(ctx context.Context, folder string, validity, from uint32, 
 }
 
 // SetFlags adds and removes flags on one message, only while its folder
-// has the UID validity m was read under.
+// has the UID validity m was read under. The filter lets through only the
+// UID STORE of these flags on this UID in m's folder.
 func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error {
 	if !flagsValid(add) || !flagsValid(remove) {
 		return ErrBadFlag
 	}
-	return s.session(ctx, func(c *client.Client) error {
-		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
-			return err
-		}
-		set := new(imap.SeqSet)
-		set.AddNum(m.UID)
-		for _, x := range []struct {
-			op    imap.FlagsOp
-			flags []string
-		}{{imap.AddFlags, add}, {imap.RemoveFlags, remove}} {
-			if len(x.flags) == 0 {
-				continue
-			}
-			v := make([]interface{}, len(x.flags))
-			for i, f := range x.flags {
-				v[i] = f
-			}
-			if err := c.UidStore(set, imap.FormatFlagsOp(x.op, true), v, nil); err != nil {
-				return err
-			}
-		}
-		return nil
+	return s.session(ctx, func(x *session) error {
+		_, err := x.do(imapwire.Request{Op: imapwire.OpSetFlags, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, Add: add, Remove: remove},
+			s.replyBudget(0), allowance{store: m.UID, add: add, remove: remove, folder: selectArg(m.Folder)})
+		return err
 	})
 }
 
 // Move moves one message. Servers without MOVE are refused rather than
 // emulated with COPY, flag and EXPUNGE: an EXPUNGE would also remove
 // anything else the owner had marked deleted in that folder. Like
-// SetFlags it acts only under the UID validity m was read under.
+// SetFlags it acts only under the UID validity m was read under, and the
+// filter lets through only a UID MOVE of this UID in m's folder to to.
 func (s *Store) Move(ctx context.Context, m Ref, to string) error {
-	return s.session(ctx, func(c *client.Client) error {
-		if ok, _ := c.Support("MOVE"); !ok {
-			return ErrNoMove
-		}
-		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
-			return err
-		}
-		set := new(imap.SeqSet)
-		set.AddNum(m.UID)
-		// UID MOVE itself, never go-imap's COPY, STORE and EXPUNGE
-		// fallback.
-		st, err := c.Execute(&commands.Uid{Cmd: &commands.Move{SeqSet: set, Mailbox: to}}, nil)
-		if err != nil {
-			return err
-		}
-		return st.Err()
+	return s.session(ctx, func(x *session) error {
+		_, err := x.do(imapwire.Request{Op: imapwire.OpMove, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, To: to},
+			s.replyBudget(0), allowance{move: m.UID, folder: selectArg(m.Folder), to: mailboxArg(to)})
+		return err
 	})
 }
-
-// Mark is what a folder's STATUS says of its contents. It changes when mail
-// arrives or leaves, when the number of unread mails changes, and, where the
-// server has CONDSTORE (RFC 7162), when any flag changes; without CONDSTORE
-// one mail read and another marked unread together leave it as it was.
-type Mark struct {
-	Folder                           string
-	Validity, Next, Messages, Unseen uint32
-	ModSeq                           string // HIGHESTMODSEQ, "" without CONDSTORE
-}
-
-// ErrPartialStatus fails Marks when a folder's STATUS reply leaves out an
-// item asked for: a count missing reads as 0, which is a count, so the mark
-// would stay the same however the folder changed.
-var ErrPartialStatus = errors.New("imapsmtp: a STATUS reply left out an item asked for")
 
 // Marks is the Mark of each selectable folder, sorted by name, listed and
 // read in one session; on any error it is nil, never a partial list.
 func (s *Store) Marks(ctx context.Context) ([]Mark, error) {
 	var out []Mark
-	err := s.session(ctx, func(c *client.Client) error {
-		fs, err := folders(c)
+	err := s.session(ctx, func(x *session) error {
+		r, err := x.do(imapwire.Request{Op: imapwire.OpMarks}, s.replyBudget(0), read)
 		if err != nil {
 			return err
 		}
-		names := make([]string, len(fs))
-		for i, f := range fs {
-			names[i] = f.Name
-		}
-		slices.Sort(names)
-		items := []imap.StatusItem{imap.StatusUidValidity, imap.StatusUidNext, imap.StatusMessages, imap.StatusUnseen}
-		if ok, _ := c.Support("CONDSTORE"); ok {
-			items = append(items, "HIGHESTMODSEQ")
-		}
-		for _, f := range names {
-			st, err := c.Status(f, items)
-			if err != nil {
-				return err
+		for i, m := range r.Marks {
+			if i > 0 && r.Marks[i-1].Folder >= m.Folder {
+				return errLied
 			}
-			for _, it := range items {
-				if _, ok := st.Items[it]; !ok {
-					return stand{fmt.Errorf("%w: %s in %q", ErrPartialStatus, it, f)}
-				}
-			}
-			m := Mark{Folder: f, Validity: st.UidValidity, Next: st.UidNext, Messages: st.Messages, Unseen: st.Unseen}
-			if v := st.Items["HIGHESTMODSEQ"]; v != nil {
-				m.ModSeq = fmt.Sprint(v)
-			}
-			out = append(out, m)
 		}
+		out = r.Marks
 		return nil
 	})
 	if err != nil {
@@ -997,33 +656,22 @@ func (s *Store) Marks(ctx context.Context) ([]Mark, error) {
 	return out, nil
 }
 
-// Ensure creates folder if it does not exist.
+// Ensure creates folder if it does not exist. Only the old core calls it.
 func (s *Store) Ensure(ctx context.Context, folder string) error {
-	return s.session(ctx, func(c *client.Client) error {
-		ch := make(chan *imap.MailboxInfo, 4)
-		done := make(chan error, 1)
-		go func() { done <- c.List("", folder, ch) }()
-		found := false
-		for m := range ch {
-			found = found || m.Name == folder
-		}
-		if err := <-done; err != nil {
-			return err
-		}
-		if found {
-			return nil
-		}
-		return c.Create(folder)
+	return s.session(ctx, func(x *session) error {
+		_, err := x.do(imapwire.Request{Op: imapwire.OpEnsure, Folder: folder}, s.replyBudget(0), allowance{create: true})
+		return err
 	})
 }
 
-// Append stores raw in folder.
+// Append stores raw in folder. Only the old core calls it.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) error {
 	if !flagsValid(flags) {
 		return ErrBadFlag
 	}
-	return s.session(ctx, func(c *client.Client) error {
-		return c.Append(folder, flags, date, bytes.NewBuffer(raw))
+	return s.session(ctx, func(x *session) error {
+		_, err := x.do(imapwire.Request{Op: imapwire.OpAppend, Folder: folder, Flags: flags, Date: date, Raw: raw}, s.replyBudget(0), allowance{append: true})
+		return err
 	})
 }
 
@@ -1135,22 +783,13 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) (err erro
 	return nil
 }
 
-// xoauth2 is the XOAUTH2 mechanism for IMAP (sasl.Client); smtpXOAuth2
-// is the same for SMTP (smtp.Auth).
+// xoauth2 is the XOAUTH2 initial response, for IMAP (preauth.go) and, as
+// smtpXOAuth2, for SMTP (smtp.Auth).
 type xoauth2 struct{ user, token string }
-
-var _ sasl.Client = xoauth2{}
 
 func (x xoauth2) ir() []byte {
 	return []byte("user=" + x.user + "\x01auth=Bearer " + x.token + "\x01\x01")
 }
-
-func (x xoauth2) Start() (string, []byte, error) { return "XOAUTH2", x.ir(), nil }
-
-// Next answers the server's error challenge, its refusal of the token, with
-// the empty response XOAUTH2 asks for, so the server ends the exchange with
-// its NO and the refusal reads as one (signIn).
-func (x xoauth2) Next([]byte) ([]byte, error) { return []byte{}, nil }
 
 type smtpXOAuth2 struct{ xoauth2 }
 

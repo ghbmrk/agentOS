@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 )
 
 // failedSelect is a raw IMAP server that logs in, refuses every SELECT
@@ -98,7 +100,7 @@ func TestFailedSelectThenExistsAnswers(t *testing.T) {
 // any connection: go-imap writes flags unquoted, so a space or a line
 // break would add a flag or a whole command (CRED-8).
 func TestFlagsThatAreNotAtomsAreRefusedBeforeActing(t *testing.T) {
-	s, err := New(Config{IMAP: "127.0.0.1:1", SMTP: "127.0.0.1:1", IMAPSec: Plain, SMTPSec: Plain, From: "o@example.test",
+	s, err := New(Config{Conn: imapconn.Pipe(), IMAP: "127.0.0.1:1", SMTP: "127.0.0.1:1", IMAPSec: Plain, SMTPSec: Plain, From: "o@example.test",
 		Credential: func(context.Context) (Login, error) { t.Fatal("a refused flag reached the login"); return Login{}, nil }})
 	if err != nil {
 		t.Fatal(err)

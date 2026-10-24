@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
@@ -26,7 +27,7 @@ var arrived = time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)
 // liveStore is a transport to the test server.
 func liveStore(t *testing.T, srv *imaptest.Server) *imapsmtp.Store {
 	t.Helper()
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}})
@@ -40,7 +41,7 @@ func liveStore(t *testing.T, srv *imaptest.Server) *imapsmtp.Store {
 // stop signing in until the owner sets the account up again.
 func TestARefusedLoginSaysSo(t *testing.T) {
 	srv := imaptest.Start(t)
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: "canary-wrong"}, nil
 		}})

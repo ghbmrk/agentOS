@@ -1,4 +1,4 @@
-package imapsmtp
+package imapconn
 
 // REQ: SR3-mail-k18
 
