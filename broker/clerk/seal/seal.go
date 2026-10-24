@@ -679,9 +679,10 @@ type SlotInfo struct {
 	// PolicyKey is the key a tpm slot was sealed under, so a rotation can
 	// tell the old key's slots from the new one's.
 	PolicyKey *ecdsa.PublicKey
-	// PCRs is each of a tpm slot's signed boot paths' PCR selection, in
-	// order, so a rotation re-signs over what enrollment measured (HW-5a).
-	PCRs [][]uint
+	// Policies is a tpm slot's signed boot paths, in order, so a rotation
+	// re-signs what enrollment measured (HW-5a) without reading the PCRs,
+	// which the unlock step has capped by then (#2977).
+	Policies []tpmseal.Policy
 }
 
 // Slots lists the store's slots.
@@ -696,7 +697,8 @@ func (s *Store) Slots() []SlotInfo {
 			in.PolicyKey, _ = sl.Sealed.PolicyPublicKey()
 		}
 		for _, p := range sl.Policies {
-			in.PCRs = append(in.PCRs, slices.Clone(p.PCRs))
+			p.PCRs, p.Digest, p.Signature = slices.Clone(p.PCRs), slices.Clone(p.Digest), slices.Clone(p.Signature)
+			in.Policies = append(in.Policies, p)
 		}
 		out = append(out, in)
 	}

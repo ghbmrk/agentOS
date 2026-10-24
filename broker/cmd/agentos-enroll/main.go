@@ -22,9 +22,9 @@
 // starts again. It never runs over a store, a log, or another store's locked
 // pins on this TPM: it refuses with fixed words and changes nothing.
 //
-// -rotate re-seals the tpm slot under a new policy key, over the PCR
-// selection the slot was enrolled with, and rewrites the pins (ASSUMPTIONS
-// STO-2c-b); -delete frees a store's NV indexes and removes it.
+// -rotate re-seals the tpm slot under a new policy key, re-signing the boot
+// paths the slot was enrolled with (never this boot's PCRs, which the unlock
+// step capped), and rewrites the pins (ASSUMPTIONS STO-2c-b); -delete frees a store's NV indexes and removes it.
 //
 // Enrollment runs as root, and -anchor-dir's parent may be the kernel uid's
 // to write. So the anchor's directory is removed, made and handed to the
@@ -92,6 +92,7 @@ var (
 	errLogExists = errors.New("agentos-enroll: I already have a log; I change nothing")
 	errOtherPins = errors.New("agentos-enroll: this PC's TPM already holds another store's pins; I change nothing")
 	errStaged    = errors.New("agentos-enroll: my unfinished store does not read; I change nothing")
+	errCapped    = errors.New("agentos-enroll: my tpm slot is locked until the next boot, since this boot has unlocked it; give me -passphrase-file")
 	errPCRs      = errors.New("agentos-enroll: -pcrs is not the selection my tpm slot was enrolled with; I change nothing")
 )
 
@@ -166,6 +167,10 @@ func parsePCRs(s string) ([]uint, error) {
 	}
 	if len(out) == 0 || len(out) > tpmseal.MaxPCRs {
 		return nil, fmt.Errorf("-pcrs: select 1 to %d PCRs", tpmseal.MaxPCRs)
+	}
+	// The unlock step caps the slot by extending one of these (#2977).
+	if _, err := tpmseal.CapPCR(out); err != nil {
+		return nil, fmt.Errorf("-pcrs: %w", err)
 	}
 	return out, nil
 }
@@ -282,6 +287,8 @@ func enroll(c config, t transport.TPM) error {
 	if err != nil {
 		return err
 	}
+	// This boot's PCRs are the boot path only before the unlock step has
+	// capped them (#2977); the units run enrollment before the kernel.
 	pol, err := tpmseal.SignCurrent(t, key, c.pcrs)
 	if err != nil {
 		return err
@@ -507,15 +514,22 @@ func newCounter(t transport.TPM, srk, id []byte) (counterRec, error) {
 	return r, nil
 }
 
-// open unlocks the store at -state through its pins on this TPM, or, when
-// the TPM holds none (a rotation stopped between freeing the old pins and
-// writing the new), through the passphrase in -passphrase-file.
+// open unlocks the store at -state through its pins on this TPM, or,
+// through the passphrase in -passphrase-file, when the TPM holds none (a
+// rotation stopped between freeing the old pins and writing the new) or the
+// tpm slot is capped for the rest of this boot (the unlock step has run,
+// #2977).
 func open(c config, t transport.TPM) (*seal.Store, error) {
 	f, err := seal.Pinned(t, c.storePath())
 	if err == nil {
-		return seal.Unlock(c.storePath(), f)
-	}
-	if !errors.Is(err, tpmseal.ErrNoPins) || c.passphrase == "" {
+		st, err := seal.Unlock(c.storePath(), f)
+		if !errors.Is(err, tpmseal.ErrNoPolicy) {
+			return st, err
+		}
+		if c.passphrase == "" {
+			return nil, errCapped
+		}
+	} else if !errors.Is(err, tpmseal.ErrNoPins) || c.passphrase == "" {
 		return nil, err
 	}
 	pass, err := readSecret(c.passphrase)
@@ -561,12 +575,15 @@ func rotate(c config, t transport.TPM) error {
 			return err
 		}
 	}
-	// The new slot is signed over the old slot's PCR selection, so a
-	// rotation measures what enrollment measured (HW-5a). It is read before
-	// anything changes; a rerun that finds the new slot made needs none.
-	var pcrs []uint
+	// The new slot re-signs the old slot's boot paths over its PCR
+	// selection, so a rotation keeps what enrollment measured (HW-5a). It
+	// never reads the PCRs: the unlock step capped one of them after its
+	// unseal (#2977), so values read now would open nothing on the next
+	// boot. They are read before anything changes; a rerun that finds the
+	// new slot made needs none.
+	var pols []tpmseal.Policy
 	if next == nil || !hasSlot(st, &next.PublicKey) {
-		if pcrs, err = slotPCRs(st, &old.PublicKey, c.pcrs); err != nil {
+		if pols, err = slotPolicies(st, &old.PublicKey, c.pcrs); err != nil {
 			return err
 		}
 	}
@@ -585,11 +602,15 @@ func rotate(c config, t transport.TPM) error {
 		return err
 	}
 	if !hasSlot(st, &next.PublicKey) {
-		pol, err := tpmseal.SignCurrent(t, next, pcrs)
-		if err != nil {
-			return err
+		signed := make([]tpmseal.Policy, 0, len(pols))
+		for _, p := range pols {
+			q, err := tpmseal.Resign(next, p)
+			if err != nil {
+				return err
+			}
+			signed = append(signed, q)
 		}
-		if _, err := st.AddSlot(seal.TPM{TPM: t, PolicyKey: &next.PublicKey, Policies: []tpmseal.Policy{pol}, Host: c.host}); err != nil {
+		if _, err := st.AddSlot(seal.TPM{TPM: t, PolicyKey: &next.PublicKey, Policies: signed, Host: c.host}); err != nil {
 			return err
 		}
 	}
@@ -643,34 +664,40 @@ func hasSlot(st *seal.Store, key *ecdsa.PublicKey) bool {
 	return false
 }
 
-// slotPCRs is the PCR selection of the tpm slot sealed under key. With no
-// -pcrs it is the slot's one selection; -pcrs must name one of the slot's
-// selections, and errPCRs refuses any other.
-func slotPCRs(st *seal.Store, key *ecdsa.PublicKey, asked []uint) ([]uint, error) {
+// slotPolicies is the boot paths, of one PCR selection, of the tpm slot
+// sealed under key; the store holds only boot paths a slot's key signed
+// (seal.SetPolicies), so a rotation re-signs nothing the box did not
+// already approve. With no -pcrs the slot must use one selection; -pcrs must
+// name one of the slot's selections, and errPCRs refuses any other.
+func slotPolicies(st *seal.Store, key *ecdsa.PublicKey, asked []uint) ([]tpmseal.Policy, error) {
+	var pols []tpmseal.Policy
 	var sels [][]uint
 	for _, sl := range st.Slots() {
 		if sl.Kind != seal.KindTPM || sl.PolicyKey == nil || !sl.PolicyKey.Equal(key) {
 			continue
 		}
-		for _, p := range sl.PCRs {
-			if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, p) }) {
-				sels = append(sels, p)
+		for _, p := range sl.Policies {
+			pols = append(pols, p)
+			if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, p.PCRs) }) {
+				sels = append(sels, p.PCRs)
 			}
 		}
 	}
+	var sel []uint
 	switch {
 	case len(sels) == 0:
 		return nil, errors.New("agentos-enroll: my store has no tpm slot under its policy key")
 	case asked == nil && len(sels) == 1:
-		return sels[0], nil
+		sel = sels[0]
 	case asked == nil:
 		return nil, fmt.Errorf("agentos-enroll: my tpm slot's boot paths use the selections %v; name one with -pcrs", sels)
+	default:
+		sel = slices.Sorted(slices.Values(asked))
+		if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, sel) }) {
+			return nil, fmt.Errorf("%w (it is %v)", errPCRs, sels)
+		}
 	}
-	asked = slices.Sorted(slices.Values(asked))
-	if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, asked) }) {
-		return nil, fmt.Errorf("%w (it is %v)", errPCRs, sels)
-	}
-	return asked, nil
+	return slices.DeleteFunc(pols, func(p tpmseal.Policy) bool { return !slices.Equal(p.PCRs, sel) }), nil
 }
 
 // deleteStore frees the store's pins and counter on this TPM, then removes
