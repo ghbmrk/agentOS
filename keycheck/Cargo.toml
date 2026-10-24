@@ -1,0 +1,16 @@
+[package]
+name = "keycheck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A second, independent key check (SPEC KEY-1..KEY-8, risk 32)"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+debug = false
