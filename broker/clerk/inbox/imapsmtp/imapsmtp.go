@@ -583,8 +583,14 @@ func (s *Store) FindSince(ctx context.Context, folder string, validity, from uin
 }
 
 // find is Find, from UID from on under validity unless validity is 0. The
-// connection returns the candidates; match runs here, on this side.
+// connection returns the candidates; match runs here, on this side. An id
+// holding a CR or LF (a Message-ID folded before a comment) matches
+// nothing: the filter refuses one in a literal, which would read as a
+// compromised connection (#3018's UX delta).
 func (s *Store) find(ctx context.Context, folder string, validity, from uint32, id string, match func(Message) bool) ([]Message, error) {
+	if strings.ContainsAny(id, "\r\n") {
+		return nil, nil
+	}
 	var out []Message
 	err := s.session(ctx, func(x *session) error {
 		r, err := x.do(imapwire.Request{Op: imapwire.OpFind, Folder: folder, Validity: validity, From: from, ID: id, MaxFetch: s.cfg.MaxFetch},
@@ -615,7 +621,7 @@ func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error
 	}
 	return s.session(ctx, func(x *session) error {
 		_, err := x.do(imapwire.Request{Op: imapwire.OpSetFlags, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, Add: add, Remove: remove},
-			s.replyBudget(0), allowance{store: m.UID, add: add, remove: remove, folder: selectArg(m.Folder)})
+			s.replyBudget(0), allowance{store: m.UID, add: add, remove: remove, folder: selectArg(m.Folder), validity: m.Validity})
 		return err
 	})
 }
@@ -628,7 +634,7 @@ func (s *Store) SetFlags(ctx context.Context, m Ref, add, remove []string) error
 func (s *Store) Move(ctx context.Context, m Ref, to string) error {
 	return s.session(ctx, func(x *session) error {
 		_, err := x.do(imapwire.Request{Op: imapwire.OpMove, Folder: m.Folder, Validity: m.Validity, UIDs: []uint32{m.UID}, To: to},
-			s.replyBudget(0), allowance{move: m.UID, folder: selectArg(m.Folder), to: mailboxArg(to)})
+			s.replyBudget(0), allowance{move: m.UID, folder: selectArg(m.Folder), to: mailboxArg(to), validity: m.Validity})
 		return err
 	})
 }
