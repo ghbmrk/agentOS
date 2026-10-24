@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
@@ -89,7 +90,7 @@ func openAccount(kind string, mails []inbox.Mail) (*account, error) {
 			// The fake writes CRLF line ends itself.
 			srv.Deliver("INBOX", strings.ReplaceAll(string(m.Raw), "\r\n", "\n"))
 		}
-		st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
+		st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
 			From: imaptest.User, Credential: func(context.Context) (imapsmtp.Login, error) {
 				return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 			}})

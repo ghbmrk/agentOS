@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -40,7 +41,7 @@ func TestMailDialsRefusePrivateAndReboundAnswers(t *testing.T) {
 		"mapped":    {"::ffff:10.0.0.9"},
 	} {
 		var dialed atomic.Int32
-		s, err := New(Config{
+		s, err := New(Config{Conn: imapconn.Pipe(),
 			IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
 			Credential: func(context.Context) (Login, error) { return Login{}, nil },
 			From:       "owner@example.test",

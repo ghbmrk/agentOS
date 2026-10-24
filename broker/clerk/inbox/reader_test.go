@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/clerk/model"
@@ -148,7 +149,7 @@ func TestLiveMailIsClassedThroughTheModelClerkThenActedOn(t *testing.T) {
 	srv.Deliver("INBOX", rawMail("<b1@shop.test>", "news@shop.test", "Sale"))
 	srv.Deliver("INBOX", rawMail("<s1@spam.test>", "x@spam.test", "Win"))
 	srv.Deliver("INBOX", rawMail("<p1@example.test>", "pat@example.test", "Hi"))
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}})

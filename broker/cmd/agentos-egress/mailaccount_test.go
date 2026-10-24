@@ -287,7 +287,9 @@ func TestTheMailboxIsServedOnItsOwnSocket(t *testing.T) {
 	if _, _, err := c.UIDs(ctx, "INBOX"); !errors.Is(err, mailsock.ErrFailed) {
 		t.Fatalf("failing list: %v", err)
 	}
-	if _, _, err := direct.UIDs(ctx, "INBOX"); err == nil || !strings.Contains(err.Error(), "listing failed") {
+	// The transport itself now keeps them behind too: they stay in the
+	// IMAP connection process (#2937 gap 2).
+	if _, _, err := direct.UIDs(ctx, "INBOX"); err == nil || strings.Contains(err.Error(), "listing failed") {
 		t.Fatalf("the server's words: %v", err)
 	}
 	all := tp.String()

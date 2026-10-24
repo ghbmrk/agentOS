@@ -318,6 +318,10 @@ type MailConfig struct {
 	Guard         *netguard.Policy // nil: imapsmtp's default policy
 	// Sealer seals the record of read mail, as it does the Secrets file.
 	Sealer clerk.Sealer
+	// Conn starts a fresh IMAP connection process for each session and
+	// returns its control connection (imapsmtp.Config.Conn, #2937 gap 2):
+	// the only process that parses IMAP. An IMAP account needs it.
+	Conn func(context.Context) (*net.UnixConn, error)
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 	// gmail is the Gmail API's root and token endpoint, GmailBase and
@@ -464,7 +468,7 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (mailbox, MailSetting
 		Credential: func(ctx context.Context) (imapsmtp.Login, error) {
 			l, err := login(ctx)
 			return imapsmtp.Login{User: l.User, Secret: l.Secret}, err
-		}, From: s.Address, Guard: c.Guard}
+		}, From: s.Address, Guard: c.Guard, Conn: c.Conn}
 	if s.StartTLS {
 		cfg.SMTPSec = imapsmtp.StartTLS
 	}

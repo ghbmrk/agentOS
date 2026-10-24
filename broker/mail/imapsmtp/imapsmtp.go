@@ -10,6 +10,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	transport "github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/mail"
 )
@@ -37,6 +38,10 @@ var _ mail.Store = (*Store)(nil)
 
 // New checks cfg.
 func New(cfg Config) (*Store, error) {
+	if cfg.Conn == nil {
+		// The old core serves its IMAP connections in-process (#2937 gap 2).
+		cfg.Conn = imapconn.Pipe()
+	}
 	t, err := transport.New(cfg)
 	if err != nil {
 		return nil, err

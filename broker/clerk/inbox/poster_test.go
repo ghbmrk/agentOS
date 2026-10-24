@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
@@ -218,7 +219,7 @@ func TestLivePostsThroughTheStoresPolicy(t *testing.T) {
 		connects++
 		return nil, errors.New("unreachable in test")
 	}})
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: "imap.test:993", SMTP: "smtp.test:465", From: "o@example.test", Guard: g,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: "imap.test:993", SMTP: "smtp.test:465", From: "o@example.test", Guard: g,
 		Credential: func(context.Context) (imapsmtp.Login, error) { return imapsmtp.Login{}, nil }})
 	if err != nil {
 		t.Fatal(err)
