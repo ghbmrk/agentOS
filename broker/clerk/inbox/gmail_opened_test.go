@@ -113,3 +113,54 @@ func TestGmailMarkMovesWithReadState(t *testing.T) {
 		t.Fatalf("Mark over a failing profile = %v, %v", m, err)
 	}
 }
+
+// A mail gone between the listing and its get (404) is left out, as one
+// deleted before the read, and the rest of the read stands (#3011 L3).
+func TestGmailOpenedSkipsAMailGoneBeforeItsGet(t *testing.T) {
+	box, srv := newGmail(t)
+	ctx := context.Background()
+	srv.Open(srv.Deliver([]byte(crlfMail("<a@x.test>", "news@shop.test", "read"))))
+	gone := srv.Deliver([]byte(crlfMail("<b@x.test>", "old@shop.test", "read, then deleted")))
+	srv.Open(gone)
+	srv.Fail("/messages/"+gone, http.StatusNotFound)
+	got, _, err := box.Opened(ctx, "2026-10-19", SeenLog{})
+	if err != nil {
+		t.Fatalf("a mail gone before its get failed the read: %v", err)
+	}
+	if got["news@shop.test"] != "2026-10-19" || got["old@shop.test"] != "" {
+		t.Fatalf("LastOpened = %v; want the mail still there only", got)
+	}
+}
+
+// A metadata answer that names another message is not read as the one
+// asked: the read fails closed (#3011 L3).
+func TestGmailOpenedRefusesAnAnswerForAnotherMail(t *testing.T) {
+	box, srv := newGmail(t)
+	srv.Open(srv.Deliver([]byte(crlfMail("<a@x.test>", "news@shop.test", "read"))))
+	srv.OtherID(true)
+	if got, _, err := box.Opened(context.Background(), "2026-10-19", SeenLog{}); err == nil || got != nil {
+		t.Fatalf("Opened over answers for another mail = %v, %v", got, err)
+	}
+}
+
+// A listing that never ends fails the read at gPagesMax pages, rather than
+// paging on (#3011 L3).
+func TestGmailOpenedBoundsAListingThatDoesNotEnd(t *testing.T) {
+	defer func(n int) { gPagesMax = n }(gPagesMax)
+	gPagesMax = 3
+	box, srv := newGmail(t)
+	srv.Open(srv.Deliver([]byte(crlfMail("<a@x.test>", "news@shop.test", "read"))))
+	srv.Endless(10) // ends after 11 pages, past the bound
+	if got, _, err := box.Opened(context.Background(), "2026-10-19", SeenLog{}); err == nil || got != nil {
+		t.Fatalf("Opened over a listing that does not end = %v, %v", got, err)
+	}
+	lists := 0
+	for _, c := range srv.Calls() {
+		if c == "GET /gmail/v1/users/me/messages" {
+			lists++
+		}
+	}
+	if lists != 3 {
+		t.Fatalf("Opened listed %d pages; want the bound, 3", lists)
+	}
+}

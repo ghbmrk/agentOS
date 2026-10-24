@@ -232,6 +232,13 @@ func (s *Secrets) Len() int {
 	return len(s.m)
 }
 
+// CopyTo seals slot's secret, of kind k, into to's toSlot. The secret is
+// opened only inside this package, as with's, so a clerk can move a grant
+// between its own stores without any method returning it (#3009).
+func (s *Secrets) CopyTo(slot string, k Kind, to *Secrets, toSlot string) error {
+	return s.with(slot, k, func(secret []byte) error { return to.Put(toSlot, k, secret) })
+}
+
 // with opens slot as kind for fn and wipes the plaintext after it returns. A
 // slot of another kind does not open: its AAD differs.
 func (s *Secrets) with(slot string, k Kind, fn func(secret []byte) error) error {
