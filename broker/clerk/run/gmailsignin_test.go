@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -307,5 +308,96 @@ func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
 		if revoked == kept || slices.Contains(st.Notices, noteGmailKept) != kept || !slices.Contains(st.Notices, noteMailReplaced) {
 			t.Fatalf("kept %v: revoked %v, notices %v", kept, srv.Revoked(), st.Notices)
 		}
+	}
+}
+
+// Two pastes at once finish the sign-in once: the other finds none
+// waiting, and the account's grant works (#3023 Security).
+func TestTwoPastesAtOnceFinishOnce(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		c.gmail.revoke = srv.Base() + "/revoke" // keeps the fake's one refresh token alive for the check
+		h := NewMailHost(context.Background(), dir, sec, c)
+		const other = "other@gmail.test"
+		srv.As(other)
+		landing, ok := srv.Approve(h.gmailBegin("watch", fakeClient).Consent)
+		if !ok {
+			t.Fatal("the fake refused the consent address")
+		}
+		var wg sync.WaitGroup
+		out := make([]string, 2)
+		for j := range out {
+			wg.Add(1)
+			go func() { defer wg.Done(); out[j], _ = h.gmailFinish("watch", landing) }()
+		}
+		wg.Wait()
+		slices.Sort(out)
+		if !slices.Equal(out, []string{clerk.DNoSignIn, clerk.DSignedIn + " watch"}) {
+			t.Fatalf("%d: details %q; want one finish and one nosignin", i, out)
+		}
+		box, err := gmailBox(sec, GmailSlot(other), h.cfg)
+		if err == nil {
+			_, err = box.Address(context.Background())
+		}
+		if err != nil {
+			t.Fatalf("%d: the account's grant does not work: %v", i, err)
+		}
+	}
+}
+
+// A paste that is not the loopback address keeps the sign-in waiting.
+func TestAWrongPasteKeepsTheSignInWaiting(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	consent, _, err := owner.GmailBegin("watch", fakeClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := owner.GmailFinish("watch", "https://example.test/"); d != clerk.DNotOurs {
+		t.Fatalf("a wrong paste = %q", d)
+	}
+	landing, _ := srv.Approve(consent)
+	if d, _ := owner.GmailFinish("watch", landing); d != clerk.DSignedIn+" watch" {
+		t.Fatalf("the right paste after a wrong one = %q", d)
+	}
+}
+
+// A sign-in again where the owner picks another Google account sets that
+// account up, and tells the owner the old grant was not given back (#3023
+// Security R3).
+func TestASignInAgainAsAnotherAccountTellsTheOwner(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	srv.As("other@gmail.test")
+	if d := signIn(t, srv, owner, "watch", nil); d != clerk.DSignedIn+" watch" {
+		t.Fatalf("GmailFinish = %q", d)
+	}
+	st, _ := owner.Status()
+	if a, _ := owner.Account(); a.Settings.Address != "other@gmail.test" || sec.Len() != 1 ||
+		!slices.Contains(st.Notices, noteGmailKept) || !slices.Contains(st.Notices, noteMailReplaced) {
+		t.Fatalf("account %+v, %d slots, notices %v", a.Settings, sec.Len(), st.Notices)
+	}
+}
+
+// A new grant Google keeps when it is given back is told to the owner
+// (#3023 Security R2).
+func TestAKeptGiveBackIsTold(t *testing.T) {
+	srv := gmailtest.New()
+	t.Cleanup(srv.Close)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := signInConfig(srv)
+	c.gmail.revoke = srv.Base() + "/revoke" // answers 401
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, c), MailOwnerSide)}
+	srv.Fail("/profile", 500)
+	if d := signIn(t, srv, owner, "watch", fakeClient); d != DGmailAddress {
+		t.Fatalf("GmailFinish = %q", d)
+	}
+	if st, _ := owner.Status(); !slices.Contains(st.Notices, noteGmailKept) || sec.Len() != 0 {
+		t.Fatalf("notices %v, %d slots", st.Notices, sec.Len())
 	}
 }

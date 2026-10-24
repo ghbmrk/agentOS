@@ -135,8 +135,11 @@ func (h *MailHost) gmailBegin(use string, reg *clerk.Registration) gmailBegun {
 // goes to its account's slot, and the account is opened again, which clears
 // a reconnect stop. It answers Finish's detail, or DGmailAddress.
 func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
+	// One paste finishes a sign-in: a second, concurrent one finds none
+	// waiting, so two calls never share g's grant (#3023 Security).
 	h.signMu.Lock()
 	g := h.signing
+	h.signing = nil
 	h.signMu.Unlock()
 	again := g != nil && g.sec == h.sec // a sign-in again, sealed in the account's own slot
 	if g == nil || again && !h.still(g.slot) {
@@ -147,16 +150,19 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	}
 	d := g.in.Finish(h.ctx, use, pasted)
 	defer func() { clear(g.grant) }() // set by Finish, so read when the call returns
+	if d == clerk.DNotOurs {
+		// Finish kept the sign-in waiting for the right paste.
+		h.signMu.Lock()
+		if h.signing == nil {
+			h.signing = g
+		}
+		h.signMu.Unlock()
+	}
 	if !strings.HasPrefix(d, clerk.DSignedIn+" ") {
 		return d, nil
 	}
-	h.signMu.Lock()
-	if h.signing == g {
-		h.signing = nil
-	}
-	h.signMu.Unlock()
 	if again && !h.still(g.slot) {
-		g.in.Revoke(h.ctx) // the account changed during Finish: give it back
+		h.giveBack(g, false) // the account changed during Finish
 		return clerk.DNoSignIn, nil
 	}
 	addr, err := g.address(h)
@@ -164,7 +170,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		err = MailSettings{Address: addr, API: APIGmail}.check()
 	}
 	if err != nil || len(g.grant) == 0 {
-		g.in.Revoke(h.ctx) // no account will use it
+		h.giveBack(g, false) // no account will use it
 		return DGmailAddress, nil
 	}
 	h.mu.Lock()
@@ -173,12 +179,17 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	prev, perr := readMail(h.dir)
 	slot := GmailSlot(addr)
 	if again && (perr != nil || slotOf(prev) != g.slot) {
-		g.in.Revoke(h.ctx) // as above: the account changed meanwhile
+		h.giveBack(g, true) // as above: the account changed meanwhile
 		return clerk.DNoSignIn, nil
 	}
 	replacing := perr == nil && slotOf(prev) != slot
-	if replacing && !again {
+	switch {
+	case replacing && !again:
 		h.revokeGmail(prev) // before the new slot is put, so the store holds prev's only
+	case replacing:
+		// Another Google account picked on a sign-in again: Finish sealed
+		// its grant over the old account's, which Google still lists.
+		h.notify(false, noteGmailKept)
 	}
 	err = nil
 	if slot != g.slot || !again {
@@ -189,7 +200,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	}
 	if err != nil {
 		if !again {
-			g.in.Revoke(h.ctx) // nothing names the new grant: give it back
+			h.giveBack(g, true) // nothing names the new grant
 		}
 		return "", err
 	}
@@ -199,6 +210,24 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	}
 	h.refresh()
 	return d, nil
+}
+
+// giveBack revokes g's new grant, which no account will use, with h.mu
+// held if locked. If Google keeps it, the owner is told the step that ends
+// it, and a sign-in again's grant leaves the account's store all the same
+// unless its slot is the account's own (CLK-1).
+func (h *MailHost) giveBack(g *gmailSignIn, locked bool) {
+	if !locked {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+	}
+	if g.in.Revoke(h.ctx) == clerk.DRevoked {
+		return
+	}
+	h.notify(false, noteGmailKept)
+	if s, err := readMail(h.dir); g.sec == h.sec && (err != nil || slotOf(s) != g.slot) {
+		_ = h.sec.Remove(g.slot) // a failed write leaves it for the next setup to drop
+	}
 }
 
 // still reports whether the account set up is still the one in slot.
