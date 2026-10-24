@@ -19,14 +19,17 @@ It is a measure, not a cap.
 
 The trusted core (KRN-2cap, #2935) is the budgeted subset: the `root` packages of
 tools/trusted_core.txt (kernel, key-check library, the clerk check path) and everything they
-link. Its lines are every linked package's outside the standard library and the `allow` lines
-(golang.org/x/crypto, golang.org/x/sys). Every such package other than a root must have a
+link. Its lines are every linked package's outside the standard library and the `allow` lines,
+each one exact package from golang.org/x/crypto or golang.org/x/sys (a subtree would let a new
+package or a vendored file under it in at +0). Every such package other than a root must have a
 `known` line, so a new import fails whatever the body, and a `known` line the core no longer
 links must be deleted. Against the base tree's file and measure, a head that grows core lines,
 adds a `known` or `allow` line, drops a root or deletes the file fails unless the body has a
 line `Trusted-core: <decision ID>` naming an active DECISIONS.md row at the head; the reviewer
 checks that the row records Mark approving the growth (the D-152 word budget, for code). The
 budget is the merge base, so it ratchets down on every merge with nothing to keep in step.
+A merge base with no core file (a branch older than the file) is measured, with the head, by
+the file of the checkout the tool runs from, which is the base branch tip in CI.
 
 Usage:
   tools/trusted_base.py measure [--tree DIR]       print one tree's measure; exit 1 if a package is unclassified
@@ -45,6 +48,7 @@ import sys
 
 REGISTRY = "tools/trusted_base_parsers.txt"
 CORE = "tools/trusted_core.txt"
+FALLBACK = pathlib.Path(__file__).resolve().parent.parent  # the checkout this copy runs from
 CORE_LIST = "broker/core/core.txt"
 METRICS = ("lines", "deps", "parsers")
 KEYS = METRICS + ("registry",)
@@ -262,6 +266,8 @@ def parse_core(text, where=CORE):
         kind, arg = m.group(1), m.group(2)
         if kind == "root" and (arg.startswith(("/", ".")) or ".." in arg.split("/")):
             raise MeasureError(f"{where}:{n}: a root is a directory under broker/, not {arg}")
+        if kind == "allow" and arg.endswith("/..."):
+            raise MeasureError(f"{where}:{n}: an allow line names one package, not a subtree: {arg}")
         if arg in core[kind]:
             raise MeasureError(f"{where}:{n}: {arg} is listed twice")
         core[kind].add(arg)
@@ -280,7 +286,7 @@ def measure_core(tree, core):
     roots = {f"{module_path(pathlib.Path(tree).resolve() / 'broker')}/{r}" for r in core["root"]}
     m = {"lines": 0, "imports": set()}
     for path, (kind, lines) in packages(tree, sorted("./" + r for r in core["root"])).items():
-        if kind == "std" or any(matches(a, path) for a in core["allow"]):
+        if kind == "std" or path in core["allow"]:
             continue
         m["lines"] += lines
         if path not in roots:
@@ -339,7 +345,7 @@ def core_table(base, head, owed, problems):
     return "\n".join(out) + "\n"
 
 
-def run_check(base_tree, head_tree, body):
+def run_check(base_tree, head_tree, body, fallback_tree=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
     head_pkgs = packages(head_tree)
@@ -350,6 +356,12 @@ def run_check(base_tree, head_tree, body):
     problems, owed = compare(base, head, reclassified, body)
     text = table(base, head, owed, problems, trusted_mains(head_tree))
     base_core, head_core = read_core(base_tree), read_core(head_tree)
+    if base_core is None:
+        # A branch whose merge base predates the core file is measured with the file of the
+        # checkout this tool runs from (the base branch tip), so it is not exempt (L3 on #2941).
+        base_core = read_core(fallback_tree or FALLBACK)
+        if head_core is None:
+            head_core = base_core
     cbase = base_core and measure_core(base_tree, base_core)
     chead = head_core and measure_core(head_tree, head_core)
     decisions = pathlib.Path(head_tree, "DECISIONS.md")

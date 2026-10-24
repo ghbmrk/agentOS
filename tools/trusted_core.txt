@@ -2,8 +2,9 @@
 # ideal-backwards review, approved by Mark). Read by tools/trusted_base.py on every PR.
 #
 #   root <dir>                  a package of the core: a directory under broker/
-#   allow <pattern>             a package the core may link with no line here; the standard
-#                               library is always allowed. <path>/... matches a subtree.
+#   allow <path>                one package the core may link with no known line and whose
+#                               lines do not count: only packages of golang.org/x/crypto and
+#                               golang.org/x/sys. The standard library is always allowed.
 #   known <path> -- <reason>    a package outside the roots, the standard library and the allow
 #                               lines that the core links today. Shrink only: adding one, adding
 #                               an allow line, dropping a root, or growing the core's lines over
@@ -15,8 +16,7 @@ root kernel
 root kernel/key
 root clerk
 
-allow golang.org/x/crypto/...
-allow golang.org/x/sys/...
+allow golang.org/x/sys/unix
 
 # Today's links outside the allow lines (2026-10-23). Change 5 of the review (untrusted
 # parsers out of the authority process) and the Gmail API route (D-150) retire these.
