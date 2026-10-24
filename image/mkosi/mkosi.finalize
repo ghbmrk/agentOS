@@ -1179,7 +1179,7 @@ def ini_words(files, section, key):
             raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
         for s, k, v in lines:
             if (s, k) == (section, key):
-                val = v.split() if v else []
+                val = val + v.split() if v else []
     return val
 
 
@@ -1293,8 +1293,21 @@ def noexec_violations(root):
 KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
 KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service")
-# The keeper's state: the sealed store, and the kernel's log and anchor. No main-side unit sees it.
-KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel")
+# The keeper's state: the sealed store, the kernel's log and anchor, and the Owner Card's factors that
+# setup leaves for enrollment. No main-side unit sees it; the image makes each at boot (tmpfiles.d).
+KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup")
+# Settings whose files the service manager opens as root and hands to the unit, past its mask and
+# DAC (#2981): each value's path, as the field after FIELD ':'s (None: the whole value), with a
+# prefix stripped.
+MANAGER_FILES = {"OpenFile": 0, "LoadCredential": 1, "LoadCredentialEncrypted": 1, "EnvironmentFile": None,
+                 "TTYPath": None}
+STD_FILES = ("file:", "append:", "truncate:")
+# The directories the manager makes and chowns for a unit, by setting, under these roots.
+MANAGER_DIRS = {"StateDirectory": "/var/lib", "RuntimeDirectory": "/run", "CacheDirectory": "/var/cache",
+                "LogsDirectory": "/var/log", "ConfigurationDirectory": "/etc"}
+# The bind settings, whose source is a view of the host's tree made in mount order, so a source
+# above the keeper's state can be bound before the mask is.
+BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
 # The units that run agentos-unlock and so open the log's counter anchor (#2899, #2897).
 UNLOCK_UNITS = ("agentos-keeper-kernel.service",)
 # Starts of an unlock unit in one boot: each spends two of the counter's increments (LOG-anchor-tpm-b).
@@ -1369,16 +1382,47 @@ def under(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
 
+def keeper_reach(path, above=False):
+    """Whether absolute PATH is at or under a KEEPER_PATHS entry, takes a '..' step, or (ABOVE) is a
+    directory holding one."""
+    norm = "/" + "/".join(x for x in path.split("/") if x not in ("", "."))
+    return (".." in norm.split("/") or under(norm, KEEPER_PATHS)
+            or above and any(norm == "/" or under(k, (norm,)) for k in KEEPER_PATHS))
+
+
+def manager_paths(files):
+    """(key, value, path) for each path the service manager opens or makes as root for the unit FILES
+    describe (MANAGER_FILES, StandardInput=/StandardOutput=/StandardError= files, MANAGER_DIRS). A
+    relative LoadCredential= path is a credential store's, so not listed. ValueError as ini_words."""
+    out = []
+    for key, field in MANAGER_FILES.items():
+        for v in ini_entries(files, "Service", key):
+            p = v if field is None else (v.split(":") + [""] * field)[field]
+            out.append((key, v, p.lstrip("-")))
+    for key in ("StandardInput", "StandardOutput", "StandardError"):
+        v = ini_last(files, "Service", key) or ""
+        if v.startswith(STD_FILES):
+            out.append((key, v, v.split(":", 1)[1]))
+    for key, top in MANAGER_DIRS.items():
+        for w in ini_words(files, "Service", key):
+            out += [(key, w, top + "/" + d) for d in w.split(":")]
+    return [(k, v, p) for k, v, p in out if p.startswith("/") or any(c in p for c in "\"'%\\")
+            or k not in ("LoadCredential", "LoadCredentialEncrypted")]
+
+
 def keeper_violations(root):
     """STO-2c (#2905, D-154): the keeper's units and the main side's.
     - Keeper: every agentos-keeper-* service is in KEEPER_UNITS and in KEEPER_SLICE; no other unit is
       in that slice (tests/test_image_keeper.py checks the image ships them). Every other agentos service but NOEXEC_EXEMPT ends with every KEEPER_PATHS entry
-      in InaccessiblePaths= and mounts nothing over, under or from one of them.
+      in InaccessiblePaths=, none with a "-", and mounts nothing over, under or from one of them, nor
+      binds one from above it. The service manager opens no file and makes no directory for it at,
+      under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981).
     - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
       only TPM_DEVICE under DevicePolicy=closed or strict; every other agentos service but
       NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
       in a TPM_GROUPS group, and no sysusers.d line puts a user in one. No command runs with full
-      privileges ("+", outside the namespace and device policy) but FULL_PRIVILEGE_EXEMPT's.
+      privileges ("+" or PermissionsStartOnly=yes, outside the namespace and device policy) but
+      FULL_PRIVILEGE_EXEMPT's.
     - #2899: an UNLOCK_UNITS unit is given no descriptor past 2 (no Sockets=, OpenFile=, descriptor
       store, or .socket unit that starts it), sets NoNewPrivileges=yes and no AmbientCapabilities= or
       SecureBits=.
@@ -1425,17 +1469,32 @@ def keeper_unit_violations(name, files):
         out.append("%s: in %s but not one of the keeper's units (D-154)" % (name, KEEPER_SLICE))
     if not keeper and name not in NOEXEC_EXEMPT:
         hidden = ini_paths(files, "Service", "InaccessiblePaths")
+        words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
         for p in KEEPER_PATHS:
             if p not in hidden:
                 out.append("%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
                            % (name, p))
-        # A mount's source, or a path whose access it changes, at or under the keeper's state.
+            elif p not in words:
+                # #2981: systemd skips a "-" path missing when the unit starts, and the path may come later.
+                out.append("%s: InaccessiblePaths=-%s gives no mask while the path is missing; the image makes it "
+                           "at boot (D-154)" % (name, p))
+        # A mount's source, or a path whose access it changes, at or under the keeper's state; a bind's
+        # source above it too.
         for key in NAMESPACE_MOUNTS + ("ReadOnlyPaths", "ExecPaths", "NoExecPaths"):
             for w in ini_words(files, "Service", key):
-                src = w.lstrip("-+").split(":")[0]
-                norm = "/" + "/".join(x for x in src.split("/") if x not in ("", "."))
-                if ".." in norm.split("/") or under(norm, KEEPER_PATHS):
+                if keeper_reach(w.lstrip("-+").split(":")[0], above=key in BIND_MOUNTS):
                     out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, w))
+        # #2981: what the manager opens or makes as root for the unit, at, under or above it.
+        for key, v, p in manager_paths(files):
+            if any(c in p for c in "\"'%\\"):
+                out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
+            elif keeper_reach(p, above=True):
+                out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+    # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
+    start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
+    if start_only and name not in FULL_PRIVILEGE_EXEMPT:
+        out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
+                   "namespace (STO-2c)" % name)
     for key in EXEC_KEYS:
         for v in ini_entries(files, "Service", key):
             prefix = re.match(r"[-@:+!|]*", v).group(0)
@@ -1484,7 +1543,7 @@ def keeper_unit_violations(name, files):
         if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
-        for key in ("StartLimitAction", "FailureAction"):
+        for key in ("StartLimitAction", "FailureAction", "SuccessAction", "JobTimeoutAction"):
             v = ini_last(files, "Unit", key)
             if v not in (None, "none"):
                 out.append("%s: %s=%s; a reboot starts the unlock step again (#2897)" % (name, key, v))

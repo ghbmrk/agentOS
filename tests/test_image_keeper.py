@@ -27,6 +27,7 @@ ENROLL = UNITS / "agentos-keeper-enroll.service"
 KERNEL = UNITS / "agentos-keeper-kernel.service"
 SYSUSERS = MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf"
 WITH_UIDS = MK / "mkosi.extra/usr/lib/agentos/with-uids"
+TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
 BOOT_REPORT = MK / "mkosi.extra/usr/lib/agentos/boot-report"
 CI_BOOT = ROOT / "image/ci_boot.sh"
 
@@ -80,7 +81,7 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(drop["Slice"], check.KEEPER_SLICE)
         self.assertEqual(drop["InaccessiblePaths"], "")
         main = ini(UNITS / "agentos-.service.d/50-main-side.conf")["Service"]["InaccessiblePaths"].split()
-        self.assertEqual(main, ["-" + p for p in check.KEEPER_PATHS])
+        self.assertEqual(main, list(check.KEEPER_PATHS))
         # The main side's mask sorts before the keeper's reset, so the reset wins for the keeper only.
         self.assertLess("50-main-side.conf", "90-keeper.conf")
 
@@ -98,7 +99,7 @@ class KeeperTreeTest(unittest.TestCase):
 
     def test_a_unit_that_lifts_the_mask_is_refused(self):
         write(self.root, SYSTEM + "agentos-localui.service.d/99-x.conf", "[Service]\nInaccessiblePaths=\n")
-        self.assertEqual(len(self.v()), 2)
+        self.assertEqual(len(self.v()), len(check.KEEPER_PATHS))
         self.assertTrue(all(l.startswith("agentos-localui.service: InaccessiblePaths does not hold") for l in self.v()))
 
     def test_a_mount_from_the_keeper_s_state_is_refused(self):
@@ -110,6 +111,77 @@ class KeeperTreeTest(unittest.TestCase):
                 self.add("agentos-netjoin.service", "Service", "%s=%s" % (key, w))
                 self.assertIn("agentos-netjoin.service: %s=%s reaches the keeper's state (D-154)" % (key, w), self.v())
                 self.unit("agentos-netjoin.service").write_text(good)
+        # Each assignment adds to the list: a later one does not hide an earlier one (#2981).
+        write(self.root, SYSTEM + "agentos-netjoin.service.d/99-x.conf",
+              "[Service]\nBindPaths=/var/lib/agentos-store:/x\nBindPaths=/srv/y\n")
+        self.assertEqual(self.v(), ["agentos-netjoin.service: BindPaths=/var/lib/agentos-store:/x reaches the keeper's "
+                                    "state (D-154)"])
+
+    def test_the_mask_holds_from_the_first_boot(self):
+        # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
+        # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
+        drop = UNITS / "agentos-.service.d/50-main-side.conf"
+        self.assertEqual(ini(drop)["Service"]["InaccessiblePaths"].split(), list(check.KEEPER_PATHS))
+        self.assertIn("systemd-tmpfiles-setup.service", ini(drop)["Unit"]["After"].split())
+        made = {w[1]: w for w in (l.split() for l in TMPFILES.read_text().splitlines()) if w and w[0] == "d"}
+        for p in check.KEEPER_PATHS:
+            self.assertEqual(made[p][2], "0700", p)
+        self.assertEqual(made["/var/lib/agentos-kernel"][3:5], ["agentos-kernel", "agentos-kernel"])
+        names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
+                       if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT)
+        self.edit("agentos-.service.d/50-main-side.conf", " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
+        self.assertEqual(self.v(), ["%s: InaccessiblePaths=-/var/lib/agentos-kernel gives no mask while the path is "
+                                    "missing; the image makes it at boot (D-154)" % n for n in names])
+
+    def test_the_setup_factors_are_masked_and_removed(self):
+        # #2981 (Security 2): the Owner Card's factors are hidden from the main side, and enrollment
+        # removes them once it has made the store.
+        e = exec_args(ENROLL)
+        factors = [arg(e, "passphrase-file"), arg(e, "recovery-file")]
+        self.assertEqual({f.rsplit("/", 1)[0] for f in factors}, {"/run/agentos-setup"})
+        self.assertIn("/run/agentos-setup", check.KEEPER_PATHS)
+        self.assertEqual(ini(ENROLL)["Service"]["ExecStartPost"].split(), ["/usr/bin/rm", "-f"] + factors)
+
+    def test_permissions_start_only_is_refused(self):
+        # #2981 (Security 3): it runs every command but ExecStart= with full privileges, as "+" does.
+        self.add("agentos-boot-report.service", "Service", "PermissionsStartOnly=yes")
+        self.assertEqual(self.v(), ["agentos-boot-report.service: PermissionsStartOnly=yes runs commands with full "
+                                    "privileges, outside its device policy and namespace (STO-2c)"])
+
+    def test_what_the_manager_opens_from_the_keeper_s_state_is_refused(self):
+        # #2981 (L3 1): a file the service manager opens as root and hands to the unit, a directory it
+        # makes and chowns for it, or a bind from above the keeper's state made before the mask.
+        reach = ("OpenFile=/var/lib/agentos-kernel/log:log:append", "LoadCredential=x:/var/lib/agentos-store/store",
+                 "LoadCredentialEncrypted=x:/var/lib/agentos-store", "EnvironmentFile=-/var/lib/agentos-kernel/env",
+                 "StandardInput=file:/var/lib/agentos-store/store", "StandardOutput=file:/var/lib/agentos-kernel/log",
+                 "StandardOutput=append:/run/agentos-setup/passphrase", "StandardError=truncate:/var/lib/agentos-kernel/x",
+                 "TTYPath=/var/lib/agentos-store/store", "StateDirectory=agentos-store",
+                 "StateDirectory=agentos x:agentos-kernel", "RuntimeDirectory=agentos-setup",
+                 "BindReadOnlyPaths=/var/lib:/srv/vl", "BindReadOnlyPaths=/:/srv/r", "BindPaths=-/run:/srv/run",
+                 "OpenFile=/var/lib", "StateDirectory=.")
+        for line in reach:
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                key, val = line.split("=", 1)
+                want = "agentos-boot-report.service: %s=%s reaches the keeper's state (D-154)" % (key, val)
+                if key.endswith("Directory"):
+                    want = "agentos-boot-report.service: %s=%s reaches the keeper's state (D-154)" % (
+                        key, [w for w in val.split() if w != "agentos"][0])
+                self.assertEqual(self.v(), [want])
+                self.assertIn(want, check.violations(self.root))
+                d.unlink()
+        for line in ("LoadCredential=x:%S/agentos-store/store", "EnvironmentFile=/var/lib/%i"):
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                self.assertEqual(self.v(), ["agentos-boot-report.service: %s: the tree check does not model it (D-154)" % line])
+                d.unlink()
+        for line in ("LoadCredential=x", "LoadCredential=x:x.cred", "OpenFile=/etc/hostname", "StandardOutput=journal",
+                     "BindReadOnlyPaths=/var/lib/agentos:/srv/a", "StateDirectory=agentos", "RuntimeDirectory=agentos-x",
+                     "StandardInput=file:/var/lib/agentos/in"):
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                self.assertEqual(self.v(), [])
+                d.unlink()
 
     def test_only_the_keeper_s_units_are_in_its_slice(self):
         self.add("agentos-localui.service", "Service", "Slice=agentos-keeper.slice")
@@ -234,6 +306,8 @@ class KeeperTreeTest(unittest.TestCase):
                  ("StartLimitIntervalSec=infinity\n", "StartLimitIntervalSec=0s\n", "StartLimitIntervalSec is 0s; a zero or unset interval does not bound restarts (#2897)"),
                  ("StartLimitBurst=3\n", "StartLimitBurst=3\nStartLimitAction=reboot\n", "StartLimitAction=reboot; a reboot starts the unlock step again (#2897)"),
                  ("StartLimitBurst=3\n", "StartLimitBurst=3\nFailureAction=reboot-force\n", "FailureAction=reboot-force; a reboot starts the unlock step again (#2897)"),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nSuccessAction=reboot\n", "SuccessAction=reboot; a reboot starts the unlock step again (#2897)"),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nJobTimeoutAction=reboot-force\n", "JobTimeoutAction=reboot-force; a reboot starts the unlock step again (#2897)"),
                  ("[Service]\n", "[Service]\nStartLimitBurst=100\n", "a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree check does not model it (#2897)"))
         for old, new, want in cases:
             with self.subTest(new or old):
@@ -283,7 +357,8 @@ class KeeperUnitsTest(unittest.TestCase):
         # Enrollment comes first, and makes the kernel's state directory for the kernel's user.
         self.assertIn("agentos-keeper-enroll.service", ini(KERNEL)["Unit"]["After"].split())
         self.assertIn("-o agentos-kernel -g agentos-kernel /var/lib/agentos-kernel", ini(ENROLL)["Service"]["ExecStartPre"])
-        self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0]}))
+        self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
+                                                             arg(e, "passphrase-file").rsplit("/", 1)[0]}))
 
     def test_the_users_exist_and_none_is_in_a_tpm_group(self):
         lines = [l.split() for l in SYSUSERS.read_text().splitlines() if l.strip() and not l.startswith("#")]
