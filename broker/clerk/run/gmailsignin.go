@@ -43,6 +43,11 @@ const (
 	// noteGmailKept names the step that ends a grant Google kept (CH-12).
 	noteGmailKept = "I could not give the Gmail sign-in back to Google, so Google may still list it. " +
 		"To end it, open myaccount.google.com/permissions signed in to that Gmail account, and remove the app you made for agentOS."
+	// noteGmailUnnamed is dropUnnamed's: nothing was given back, and the
+	// set-up account's grant must stay (#3027 L3 delta 1).
+	noteGmailUnnamed = "Google did not say which account you signed in as, so I set nothing up and left your Gmail account as it was. " +
+		"If you signed in as a different Google account, open myaccount.google.com/permissions in that account and remove the app you made for agentOS. " +
+		"Do not remove it from the account set up here, or its mail stops."
 )
 
 // errNoSealer: the config names no sealer to hold a copy of a grant under.
@@ -263,15 +268,18 @@ func (h *MailHost) giveBack(g *gmailSignIn, locked bool) {
 }
 
 // dropUnnamed drops g's new grant, whose account Google's profile did not
-// name. With a Gmail account set up it may be that account's own grant
-// (a sign-in again offers its address first), which Google's revocation of
-// the new one would end, so it is not given back: the owner is told the
-// step that ends it (#3027 L3 1). With none, it is given back.
+// name. With an account set up it may be that account's own grant (a
+// sign-in again offers its address first), which Google's revocation of
+// the new one would end, so it is not given back, and the owner is told
+// how to end it in another account only (#3027 L3 1). With none, it is
+// given back.
 func (h *MailHost) dropUnnamed(g *gmailSignIn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if s, err := readMail(h.dir); err == nil && s.API == APIGmail {
-		h.notify(false, noteGmailKept)
+	if _, err := readMail(h.dir); !errors.Is(err, ErrNoMailAccount) {
+		// Any account, or settings that do not read: the box may still
+		// hold a Gmail grant the revocation would end, so fail closed.
+		h.notify(false, noteGmailUnnamed)
 		return
 	}
 	h.giveBack(g, true)

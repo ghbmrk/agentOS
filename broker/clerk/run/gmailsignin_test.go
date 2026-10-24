@@ -543,7 +543,7 @@ func TestAFailedSameAddressSetupGivesNothingBack(t *testing.T) {
 // A sign-in whose profile fails while a Gmail account is set up gives
 // nothing back: the new grant may be that account's own, which Google's
 // revocation would end. The account's grant keeps working, and the owner
-// is told the step that ends the new one (#3027 L3 1).
+// is told to end the new one only in another account (#3027 L3 1).
 func TestASignInWithNoAddressKeepsTheAccountsGrantWorking(t *testing.T) {
 	for _, reg := range []*clerk.Registration{nil, fakeClient} {
 		srv, dir, sec := newGmailAccount(t)
@@ -558,9 +558,26 @@ func TestASignInWithNoAddressKeepsTheAccountsGrantWorking(t *testing.T) {
 			_, err = box.Read(context.Background())
 		}
 		st, _ := owner.Status()
-		if a, _ := owner.Account(); !a.Set || sec.Len() != 1 || srv.Revokes() != 0 || err != nil || !slices.Contains(st.Notices, noteGmailKept) {
+		if a, _ := owner.Account(); !a.Set || sec.Len() != 1 || srv.Revokes() != 0 || err != nil || !slices.Contains(st.Notices, noteGmailUnnamed) || slices.Contains(st.Notices, noteGmailKept) {
 			t.Fatalf("registration %v: account %+v, %d slots, %d revocations, read %v, notices %v",
 				reg != nil, a.Settings, sec.Len(), srv.Revokes(), err, st.Notices)
 		}
+	}
+}
+
+// Settings that do not read fail closed the same way: the box may still
+// hold a Gmail grant the revocation would end (#3027 L3 delta 2).
+func TestASignInWithNoAddressOverUnreadableSettingsGivesNothingBack(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	if err := os.WriteFile(filepath.Join(dir, mailSettings), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.Fail("/profile", 500)
+	if d, err := finishSignIn(t, srv, owner, fakeClient); err != nil || d != DGmailAddress {
+		t.Fatalf("GmailFinish = %q, %v", d, err)
+	}
+	if st, _ := owner.Status(); srv.Revokes() != 0 || !slices.Contains(st.Notices, noteGmailUnnamed) {
+		t.Fatalf("%d revocations, notices %v", srv.Revokes(), st.Notices)
 	}
 }
