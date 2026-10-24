@@ -31,7 +31,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
-// Canary values: a refresh grant and the access tokens the fake issues.
+// Canary values: the refresh grant the fake starts with, its client, and
+// the account it names. Each code exchange issues a refresh token of its
+// own (Issued), and access tokens are numbered as they are issued.
 const (
 	Refresh = "canary-gmailtest-refresh"
 	Client  = "canary-gmailtest-client"
@@ -39,11 +41,15 @@ const (
 	User    = "owner@gmail.test"
 )
 
-// Grant is the sealed refresh grant the fake's token endpoint accepts.
+// Grant is the sealed refresh grant for User the fake starts with.
 func Grant() []byte {
 	b, _ := json.Marshal(map[string]string{"refresh_token": Refresh, "client_id": Client, "client_secret": Secret})
 	return b
 }
+
+// Issued is the refresh token the fake's nth code exchange issues, from 1:
+// each sign-in's grant is its own, as Google's are.
+func Issued(n int) string { return Refresh + "-" + strconv.Itoa(n) }
 
 // Server is a running fake.
 type Server struct {
@@ -57,7 +63,10 @@ type Server struct {
 	history  int
 	changes  []int // history ids of inbox changes
 	tokens   int
-	token    string
+	token    string            // the access token last issued
+	grants   map[string]string // live refresh tokens, each with the account it names
+	access   map[string]string // live access tokens, each with its refresh token
+	issued   int               // code exchanges redeemed
 	refused  []string
 	calls    []string
 	lie      bool
@@ -66,10 +75,9 @@ type Server struct {
 	filters  int
 	forwards []string
 	autoFwd  string
-	grantOK  bool
 	endless  int    // read listings left that name a next page, whatever the last
 	otherID  bool   // metadata answers name another message's id
-	user     string // the address the profile names; "" is User
+	user     string // the account the next consent signs in as; "" is User
 	// Sign-in (D-150): the codes consent issued, each with its PKCE
 	// challenge, redirect and scope; the scope the next consent grants
 	// beyond the asked one; and the tokens revoked.
@@ -103,7 +111,8 @@ var system = []string{"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT"
 
 // New starts a fake; Close stops it.
 func New() *Server {
-	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, grantOK: true, codes: map[string]consent{}}
+	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, codes: map[string]consent{},
+		grants: map[string]string{Refresh: User}, access: map[string]string{}}
 	for _, id := range system {
 		s.labels = append(s.labels, Label{ID: id, Name: id, Type: "system"})
 	}
@@ -174,9 +183,8 @@ func (s *Server) Revoked() []string {
 	return slices.Clone(s.revoked)
 }
 
-// Revokes counts the revocation requests, including those answered 400:
-// every grant the fake issues shares Refresh, so a second grant's
-// revocation shows here and not in Revoked.
+// Revokes counts the revocation requests, including those answered 400,
+// such as one for a grant a revocation of the same account's ended.
 func (s *Server) Revokes() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -288,8 +296,9 @@ func (s *Server) Tokens() int {
 // same ids, as an API that never ends its listing would.
 func (s *Server) Endless(n int) { s.mu.Lock(); s.endless = n; s.mu.Unlock() }
 
-// As makes the profile name address, as another Google account signed in
-// on the consent page would.
+// As makes every later consent sign in as address, as another Google
+// account signed in on the consent page would: the grants those consents
+// issue, and the profile under them, name address.
 func (s *Server) As(address string) { s.mu.Lock(); s.user = address; s.mu.Unlock() }
 
 // OtherID makes each metadata answer name an id other than the one asked.
@@ -306,8 +315,9 @@ func (s *Server) Echo(on bool) { s.mu.Lock(); s.echo = on; s.mu.Unlock() }
 // Fail makes requests whose path ends in suffix answer status.
 func (s *Server) Fail(suffix string, status int) { s.mu.Lock(); s.fail[suffix] = status; s.mu.Unlock() }
 
-// RefuseGrant makes the token endpoint answer invalid_grant.
-func (s *Server) RefuseGrant() { s.mu.Lock(); s.grantOK = false; s.mu.Unlock() }
+// RefuseGrant makes the token endpoint answer invalid_grant for every
+// refresh token issued so far.
+func (s *Server) RefuseGrant() { s.mu.Lock(); clear(s.grants); s.mu.Unlock() }
 
 // SetDoors sets what the settings reads show.
 func (s *Server) SetDoors(filters int, forwards []string, autoFwd string) {
@@ -340,8 +350,17 @@ func (s *Server) Attempt(method, path, body string) int {
 	return resp.StatusCode
 }
 
-// Expire makes the next request with the current access token answer 401.
-func (s *Server) Expire() { s.mu.Lock(); s.token = ""; s.mu.Unlock() }
+// Expire makes the next request with any access token issued so far
+// answer 401.
+func (s *Server) Expire() { s.mu.Lock(); s.token = ""; clear(s.access); s.mu.Unlock() }
+
+// mint issues an access token under the refresh token refresh.
+func (s *Server) mint(refresh string) string {
+	s.tokens++
+	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
+	s.access[s.token] = refresh
+	return s.token
+}
 
 func (s *Server) change() {
 	s.history++
@@ -365,8 +384,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	line := r.Method + " " + r.URL.Path
-	auth := r.Header.Get("Authorization")
-	if s.token == "" || auth != "Bearer "+s.token {
+	bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	refresh, ok := s.access[bearer]
+	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -379,7 +399,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	reply := func(v any) {
 		b, _ := json.Marshal(v)
 		if s.echo {
-			b = []byte(strings.Replace(string(b), `{`, `{"echo":"`+s.token+`",`, 1))
+			b = []byte(strings.Replace(string(b), `{`, `{"echo":"`+bearer+`",`, 1))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(b)
@@ -418,7 +438,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		case "raw":
 			raw := m.Raw
 			if s.echo {
-				raw = append(slices.Clone(raw), []byte("\r\nX-Echo: "+s.token+"\r\n")...)
+				raw = append(slices.Clone(raw), []byte("\r\nX-Echo: "+bearer+"\r\n")...)
 			}
 			out["raw"] = base64.URLEncoding.EncodeToString(raw)
 		case "metadata", "full":
@@ -543,7 +563,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/settings/autoForwarding":
 		reply(map[string]any{"enabled": s.autoFwd != "", "emailAddress": s.autoFwd, "disposition": "leaveInInbox"})
 	case r.Method == "GET" && p == "/gmail/v1/users/me/profile":
-		reply(map[string]any{"emailAddress": cmp.Or(s.user, User), "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
+		reply(map[string]any{"emailAddress": s.grants[refresh], "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
 	default:
 		s.calls = s.calls[:len(s.calls)-1]
 		refuse(http.StatusNotFound)
@@ -637,28 +657,38 @@ func (s *Server) serveCode(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"invalid_grant"}`))
 		return
 	}
-	s.tokens++
-	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
-	s.grantOK = true
+	s.issued++
+	refresh := Issued(s.issued)
+	s.grants[refresh] = cmp.Or(s.user, User)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer",
-		"refresh_token": Refresh, "scope": c.scope})
+	json.NewEncoder(w).Encode(map[string]any{"access_token": s.mint(refresh), "expires_in": 3599, "token_type": "Bearer",
+		"refresh_token": refresh, "scope": c.scope})
 }
 
-// serveRevoke revokes a token (RFC 7009): the refresh token kills the grant
-// and its access token; an unknown token answers 400, as Google's does.
+// serveRevoke revokes a token (RFC 7009). A refresh token ends every grant
+// the client holds for its account, with their access tokens, as Google's
+// revocation ends the account's whole grant to the client; an access token
+// ends itself; an unknown or dead token answers 400, as Google's does.
 func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
 	s.revokes++
 	t := ""
 	if r.ParseForm() == nil {
 		t = r.Form.Get("token")
 	}
-	switch {
-	case t == Refresh && s.grantOK:
-		s.grantOK, s.token = false, ""
-	case t != "" && t == s.token:
-		s.token = ""
-	default:
+	if account, ok := s.grants[t]; ok {
+		for g, a := range s.grants {
+			if a == account {
+				delete(s.grants, g)
+			}
+		}
+		for a, g := range s.access {
+			if _, live := s.grants[g]; !live {
+				delete(s.access, a)
+			}
+		}
+	} else if _, ok := s.access[t]; ok {
+		delete(s.access, t)
+	} else {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid_token"}`))
 		return
@@ -671,14 +701,13 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 		s.serveCode(w, r)
 		return
 	}
-	if r.ParseForm() != nil || r.Form.Get("grant_type") != "refresh_token" || !s.grantOK ||
-		r.Form.Get("refresh_token") != Refresh || r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
+	refresh := r.Form.Get("refresh_token")
+	if _, live := s.grants[refresh]; r.ParseForm() != nil || r.Form.Get("grant_type") != "refresh_token" || !live ||
+		r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid_grant"}`))
 		return
 	}
-	s.tokens++
-	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer"})
+	json.NewEncoder(w).Encode(map[string]any{"access_token": s.mint(refresh), "expires_in": 3599, "token_type": "Bearer"})
 }

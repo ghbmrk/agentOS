@@ -170,7 +170,7 @@ func TestAGrantWithNoAddressIsGivenBack(t *testing.T) {
 	if d := signIn(t, srv, owner, "watch", fakeClient); d != DGmailAddress {
 		t.Fatalf("GmailFinish = %q, want %q", d, DGmailAddress)
 	}
-	if !slices.Contains(srv.Revoked(), gmailtest.Refresh) || sec.Len() != 0 {
+	if !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) || sec.Len() != 0 {
 		t.Fatalf("revoked %v, %d slots; want the grant given back and none kept", srv.Revoked(), sec.Len())
 	}
 	if a, _ := owner.Account(); a.Set {
@@ -462,9 +462,21 @@ func finishSignIn(t *testing.T, srv *gmailtest.Server, owner MailOwner, reg *cle
 	return owner.GmailFinish("watch", landing)
 }
 
+// readKept fails unless the grant sealed for gmailtest.User still reads.
+func readKept(t *testing.T, srv *gmailtest.Server, sec *clerk.Secrets) {
+	t.Helper()
+	box, err := gmailBox(sec, GmailSlot(gmailtest.User), signInConfig(srv))
+	if err == nil {
+		_, err = box.Read(context.Background())
+	}
+	if err != nil {
+		t.Fatalf("the kept grant does not read: %v", err)
+	}
+}
+
 // A replaced Gmail account's grant is given back only once the new account
 // is set up (#3026): when the setup fails, the account before stays set up
-// with a grant that works, and only the new grant is given back.
+// with a grant that works, and only the new grant is given back (#3030).
 func TestAFailedSetupKeepsTheReplacedGrant(t *testing.T) {
 	const other = "other@gmail.test"
 	imap := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
@@ -480,13 +492,13 @@ func TestAFailedSetupKeepsTheReplacedGrant(t *testing.T) {
 		if _, err := finishSignIn(t, srv, owner, reg); err == nil {
 			t.Fatalf("again %v: a sign-in whose setup failed answered no error", again)
 		}
-		// One revocation, the new grant's: the fake's grants share one
-		// refresh token, so the old grant's would be a second request.
 		a, _ := owner.Account()
-		if a.Settings.Address != gmailtest.User || !sec.Has(GmailSlot(gmailtest.User)) || sec.Has(GmailSlot(other)) || srv.Revokes() != 1 {
+		if a.Settings.Address != gmailtest.User || !sec.Has(GmailSlot(gmailtest.User)) || sec.Has(GmailSlot(other)) ||
+			srv.Revokes() != 1 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
 			t.Fatalf("again %v: account %+v, %d slots, revoked %v; want the old account kept with its grant",
 				again, a.Settings, sec.Len(), srv.Revoked())
 		}
+		readKept(t, srv, sec)
 	}
 	t.Run("setmail", func(t *testing.T) {
 		srv, dir, sec := newGmailAccount(t)
@@ -498,6 +510,7 @@ func TestAFailedSetupKeepsTheReplacedGrant(t *testing.T) {
 		if a, _ := owner.Account(); a.Settings.API != APIGmail || !sec.Has(GmailSlot(gmailtest.User)) || len(srv.Revoked()) != 0 {
 			t.Fatalf("account %+v, revoked %v; want the Gmail account kept with its grant", a.Settings, srv.Revoked())
 		}
+		readKept(t, srv, sec)
 		if err := os.RemoveAll(filepath.Join(dir, mailSettings+".tmp")); err != nil {
 			t.Fatal(err)
 		}

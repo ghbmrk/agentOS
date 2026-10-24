@@ -232,6 +232,7 @@ func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put fu
 	cur := slotOf(s)
 	prev, perr := readMail(dir)
 	same := perr == nil && slotOf(prev) == cur
+	had := sec.Has(cur)
 	steps := []func() error{
 		put,
 		func() error { return privfile.WriteAtomic(dir, mailSettings, b, nil) },
@@ -247,6 +248,12 @@ func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put fu
 	}
 	for i, step := range steps {
 		if err := step(); err != nil {
+			// A secret put for an account whose settings did not write goes
+			// again, so the account before keeps a store holding its own
+			// secret only and still opens (CLK-1, #3030).
+			if i == 1 && !had {
+				err = errors.Join(err, sec.Remove(cur))
+			}
 			return err
 		}
 		if stop != nil && stop(i) {

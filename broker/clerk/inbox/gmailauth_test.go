@@ -131,7 +131,7 @@ func TestGmailSignInRefusesAWiderGrantAndRevokesIt(t *testing.T) {
 	if r.sec.Has("gmail") {
 		t.Fatal("a wider grant was sealed")
 	}
-	if rv := r.srv.Revoked(); len(rv) != 1 || rv[0] != gmailtest.Refresh {
+	if rv := r.srv.Revoked(); len(rv) != 1 || rv[0] != gmailtest.Issued(1) {
 		t.Fatalf("revoked %v", rv)
 	}
 }
@@ -224,7 +224,7 @@ func TestGmailSignInRevokesItsOwnGrant(t *testing.T) {
 	if r.sec.Has("gmail") {
 		t.Fatal("the slot still holds the grant")
 	}
-	if rv := r.srv.Revoked(); len(rv) != 1 || rv[0] != gmailtest.Refresh {
+	if rv := r.srv.Revoked(); len(rv) != 1 || rv[0] != gmailtest.Issued(1) {
 		t.Fatalf("revoked %v", rv)
 	}
 	if d := r.in.Revoke(context.Background()); d != clerk.DNoAccount {
