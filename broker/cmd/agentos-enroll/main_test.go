@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-tpm/tpm2"
@@ -281,7 +283,7 @@ func TestEnrollRefusesAndChangesNothing(t *testing.T) {
 // A crash after each step finishes on the rerun into a store whose pins,
 // counter and slots agree, and the TPM keeps nothing of the dead attempt.
 func TestEnrollCrashAfterEachStep(t *testing.T) {
-	for _, step := range []string{"cleaned", "created", "slots", "counter", "anchor", "pins"} {
+	for _, step := range []string{"cleaned", "created", "slots", "counter", "head-file", "anchor", "pins"} {
 		t.Run(step, func(t *testing.T) {
 			b := newBox(t)
 			c := b.c
@@ -636,4 +638,93 @@ func TestRotateCutAfterEachTPMCommand(t *testing.T) {
 		}
 		b.enrolled()
 	}
+}
+
+// tpmPCRs is the PCR selections of the store's one tpm slot.
+func tpmPCRs(st *seal.Store) [][]uint {
+	for _, sl := range st.Slots() {
+		if sl.Kind == seal.KindTPM {
+			return sl.PCRs
+		}
+	}
+	return nil
+}
+
+// A rotation without -pcrs re-signs over the selection the box was enrolled
+// with (here 9,12, not the default), and the next boot still unlocks
+// through the pins (#2959). A -pcrs that names another selection is refused
+// and changes nothing; the same selection in another order is the same.
+func TestRotateKeepsTheEnrolledPCRs(t *testing.T) {
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	c := b.c
+	c.pcrs = []uint{9}
+	files, idx := b.files(), nv(t, b.sw.TPM())
+	if err := rotate(c, b.sw.TPM()); !errors.Is(err, errPCRs) {
+		t.Fatalf("-pcrs 9: got %v, want errPCRs", err)
+	}
+	if !sameMap(files, b.files()) || !sameMap(idx, nv(t, b.sw.TPM())) {
+		t.Fatal("a refused rotation changed something")
+	}
+
+	old := b.who()
+	c.pcrs = nil
+	noErr(t, rotate(c, b.sw.TPM()))
+	b.reboot()
+	if now := b.who(); now == nil || bytes.Equal(now, old) {
+		t.Fatal("the rotation did not move the pins to a new key")
+	}
+	if got := tpmPCRs(b.enrolled()); len(got) != 1 || !slices.Equal(got[0], testPCRs) {
+		t.Fatalf("the new slot's selections are %v, want [%v]", got, testPCRs)
+	}
+
+	c.pcrs = []uint{12, 9}
+	noErr(t, rotate(c, b.sw.TPM()))
+	if got := tpmPCRs(b.enrolled()); len(got) != 1 || !slices.Equal(got[0], testPCRs) {
+		t.Fatalf("the new slot's selections are %v, want [%v]", got, testPCRs)
+	}
+}
+
+// The anchor's directory is made and handed over by descriptor (#2960): a
+// symlink swapped in for it after the head file is written does not
+// redirect the chown, and a symlink left where it goes is refused, not
+// followed.
+func TestAnchorDirIsNotRedirected(t *testing.T) {
+	t.Run("swapped before the chown", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("a chown to another uid needs root")
+		}
+		b := newBox(t)
+		b.c.kernelUID, b.c.kernelGID = 4242, 4242
+		decoy, moved := t.TempDir(), b.c.anchorDir+".moved"
+		noErr(t, os.WriteFile(filepath.Join(decoy, anchorFile), []byte("root's"), 0o600))
+		c := b.c
+		c.stop = func(s string) bool {
+			if s == "head-file" {
+				noErr(t, os.Rename(c.anchorDir, moved))
+				noErr(t, os.Symlink(decoy, c.anchorDir))
+			}
+			return false
+		}
+		noErr(t, enroll(c, b.sw.TPM()))
+		owner := func(p string) uint32 { return get(os.Lstat(p)).Sys().(*syscall.Stat_t).Uid }
+		if owner(filepath.Join(decoy, anchorFile)) != 0 {
+			t.Fatal("the chown went through the symlink")
+		}
+		if owner(filepath.Join(moved, anchorFile)) != 4242 || owner(moved) != 4242 {
+			t.Fatal("the head file enrollment made is not the kernel's")
+		}
+	})
+	t.Run("symlink left in place", func(t *testing.T) {
+		b := newBox(t)
+		decoy := t.TempDir()
+		noErr(t, os.WriteFile(filepath.Join(decoy, anchorFile), []byte("not enrollment's"), 0o600))
+		noErr(t, os.Symlink(decoy, b.c.anchorDir))
+		if err := enroll(b.c, b.sw.TPM()); err == nil {
+			t.Fatal("enrollment went through a symlinked anchor directory")
+		}
+		if _, err := os.Lstat(filepath.Join(decoy, anchorFile)); err != nil {
+			t.Fatalf("enrollment removed a file through the symlink: %v", err)
+		}
+	})
 }
