@@ -251,3 +251,57 @@ func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A task's per-task cap spans its re-plans: a plan's steps and metered calls
+// are charged under the task its key serves, not under the plan, and a plan
+// for another task has its own (KRN-5, LOG-7, #2902).
+func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t2"))
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	serve := func(task string) key.Key {
+		s, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask(task))
+		must(t, err)
+		return s
+	}
+	modelPlan(r, "p1", serve("t1"))
+	modelPlan(r, "p2", serve("t1"))
+	modelPlan(r, "p3", serve("t2"))
+	must(t, r.meter(1, "p1", "api", 8, "provider"))
+	if rf := r.admit(2, "p2", 3); rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("a re-plan started a fresh per-task budget: %v", rf)
+	}
+	if rf := r.admit(2, "p2", 2); rf != nil {
+		t.Fatalf("the task's last 2: %v", rf)
+	}
+	if rf := r.admit(2, "p3", 10); rf != nil {
+		t.Fatalf("another task's budget: %v", rf)
+	}
+	r.replays()
+}
+
+// A plan whose key serves no task is charged as itself, never as a task it
+// is named like: the planner chooses plan ids, so a plan named "t1" spends
+// none of task t1's budget, and no task opens under the plans' prefix
+// (KRN-5, LOG-7, #2927 L3 fix-list 1).
+func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1"))
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	t1, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask("t1"))
+	must(t, err)
+	modelPlan(r, "t1", k)
+	modelPlan(r, "p2", t1)
+	must(t, r.meter(1, "t1", "api", 10, "provider"))
+	if rf := r.admit(2, "p2", 10); rf != nil {
+		t.Fatalf("a plan named like the task drained it: %v", rf)
+	}
+	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code != key.RSpendTask {
+		t.Fatalf("the plan's own cap: %v", rf)
+	}
+	if err := r.k.OpenTask(3, key.PlanPrefix+"t1"); err == nil {
+		t.Fatal("a task opened under the plans' prefix")
+	}
+	r.replays()
+}

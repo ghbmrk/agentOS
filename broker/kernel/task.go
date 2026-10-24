@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -157,7 +158,7 @@ func TaskApproved(v View, anchors []ed25519.PublicKey, ver *key.Verified, site s
 }
 
 func (s *State) openOK(t Task) error {
-	if t.ID == "" || !utf8.ValidString(t.ID) || s.tasks[t.ID] != nil || s.Stopped {
+	if t.ID == "" || !utf8.ValidString(t.ID) || strings.HasPrefix(t.ID, key.PlanPrefix) || s.tasks[t.ID] != nil || s.Stopped {
 		return ErrTaskOpen
 	}
 	return nil

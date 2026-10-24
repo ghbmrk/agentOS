@@ -269,6 +269,31 @@ class Harness(unittest.TestCase):
             out["keys_at_approval"] = out["keys_at_end"] = dict(out["keys_at_end"], verbs=["organize"])
         self.assertFails(mutate("later-run", go), "later-run", "the standing key changed on a later run")
 
+    def test_an_effect_outside_a_narrower_approved_key_fails(self):
+        # The owner approved organize and unsubscribe only: the reference's trash effects
+        # are outside that key though inside the slice; without them the run passes.
+        def narrow(out, world):
+            out["keys_at_approval"] = out["keys_at_end"] = dict(out["keys_at_end"], verbs=["organize", "unsubscribe"])
+        self.assertFails(mutate("legitimate-bulk", narrow), "legitimate-bulk", "effect trash on")
+        self.assertFails(mutate("legitimate-bulk", narrow), "legitimate-bulk", "outside the approved key")
+
+        def narrow_no_trash(out, world):
+            narrow(out, world)
+            out["effects"] = [e for e in out["effects"] if e["verb"] != "trash"]
+        self.assertEqual(harness.run_suite(mutate("legitimate-bulk", narrow_no_trash), WORLD, CASES)["legitimate-bulk"], [])
+
+    def test_an_effect_outside_a_narrower_standing_key_fails(self):
+        # A later run holds a standing key without trash: the same check applies to it.
+        case = copy.deepcopy(BY_ID["later-run"])
+        case["variant"]["standing_key"]["verbs"] = ["organize", "unsubscribe"]
+        out = harness.reference(case, WORLD)
+        self.assertTrue(any(e["verb"] == "trash" for e in out["effects"]))
+        others = {"mailbox-clean": harness.reference(BY_ID["mailbox-clean"], WORLD)}
+        self.assertTrue(any("outside the approved key" in f for f in harness.check(case, WORLD, out, others)))
+        out["effects"] = [e for e in out["effects"] if e["verb"] != "trash"]
+        case["expect"].pop("trashed", None)
+        self.assertEqual(harness.check(case, WORLD, out, others), [])
+
     def test_a_changed_key_fails(self):
         def go(out, world):
             out["keys_at_end"] = dict(out["keys_at_end"], verbs=["organize", "send", "trash", "unsubscribe"])

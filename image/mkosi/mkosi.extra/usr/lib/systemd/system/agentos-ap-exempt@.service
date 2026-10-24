@@ -17,3 +17,6 @@ RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/ap-exempt %I
 ExecStop=/usr/lib/agentos/ap-exempt --remove %I
 StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

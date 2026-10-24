@@ -17,6 +17,20 @@ own or dependency lines, adds a parser package, or reclassifies a parser as iner
 unless its body has a line `Trusted-base: <lines|deps|parsers|registry> -- <reason>`.
 It is a measure, not a cap.
 
+The trusted core (KRN-2cap, #2935) is the budgeted subset: the `root` packages of
+tools/trusted_core.txt (kernel, key-check library, the clerk check path) and everything they
+link. Its lines are every linked package's outside the standard library and the `allow` lines,
+each one exact package from golang.org/x/crypto or golang.org/x/sys (a subtree would let a new
+package or a vendored file under it in at +0). Every such package other than a root must have a
+`known` line, so a new import fails whatever the body, and a `known` line the core no longer
+links must be deleted. Against the base tree's file and measure, a head that grows core lines,
+adds a `known` or `allow` line, drops a root or deletes the file fails unless the body has a
+line `Trusted-core: <decision ID>` naming an active DECISIONS.md row at the head; the reviewer
+checks that the row records Mark approving the growth (the D-152 word budget, for code). The
+budget is the merge base, so it ratchets down on every merge with nothing to keep in step.
+A merge base with no core file (a branch older than the file) is measured, with the head, by
+the file of the checkout the tool runs from, which is the base branch tip in CI.
+
 Usage:
   tools/trusted_base.py measure [--tree DIR]       print one tree's measure; exit 1 if a package is unclassified
   tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--markdown FILE]
@@ -33,6 +47,8 @@ import subprocess
 import sys
 
 REGISTRY = "tools/trusted_base_parsers.txt"
+CORE = "tools/trusted_core.txt"
+FALLBACK = pathlib.Path(__file__).resolve().parent.parent  # the checkout this copy runs from
 CORE_LIST = "broker/core/core.txt"
 METRICS = ("lines", "deps", "parsers")
 KEYS = METRICS + ("registry",)
@@ -41,6 +57,7 @@ GO_ENV = {
     "GOTOOLCHAIN": "local", "GOWORK": "off", "GOPROXY": "off", "GOENV": "off",
 }
 REASON = re.compile(r"^\s*Trusted-base:\s*(\S+)\s+--\s+(.*?)\s*$")
+WAIVER = re.compile(r"^\s*Trusted-core:\s*(\S+)\s*$", re.M)
 PLACEHOLDER = re.compile(r"(?i)^(todo|tbd|n/?a|none|reason|-+|\.+)$")
 
 
@@ -98,12 +115,13 @@ def count_lines(path):
     return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
-def packages(tree):
-    """{import path: (kind, lines)} with kind own, dep or std, for the tree's trusted processes."""
+def packages(tree, targets=None):
+    """{import path: (kind, lines)} with kind own, dep or std, for the tree's trusted processes
+    (or for `targets`, ./<dir> paths under broker/)."""
     broker = pathlib.Path(tree).resolve() / "broker"
     own_mod = module_path(broker)
     out = {}
-    for p in go_list(broker, trusted_mains(tree)):
+    for p in go_list(broker, targets or trusted_mains(tree)):
         if p.get("Standard"):
             kind = "std"
         elif (p.get("Module") or {}).get("Path") == own_mod:
@@ -235,7 +253,99 @@ def read_rules(tree, required):
     return parse_registry(path.read_text(), str(path))
 
 
-def run_check(base_tree, head_tree, body):
+def parse_core(text, where=CORE):
+    """{"root": dirs, "allow": patterns, "known": import paths} from the core file's lines."""
+    core = {"root": set(), "allow": set(), "known": set()}
+    for n, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        m = re.fullmatch(r"(root|allow)\s+(\S+)", s) or re.fullmatch(r"(known)\s+(\S+)\s+--\s+(\S.*)", s)
+        if not m:
+            raise MeasureError(f"{where}:{n}: want `root <dir>`, `allow <pattern>` or `known <path> -- <reason>`: {s}")
+        kind, arg = m.group(1), m.group(2)
+        if kind == "root" and (arg.startswith(("/", ".")) or ".." in arg.split("/")):
+            raise MeasureError(f"{where}:{n}: a root is a directory under broker/, not {arg}")
+        if kind == "allow" and arg.endswith("/..."):
+            raise MeasureError(f"{where}:{n}: an allow line names one package, not a subtree: {arg}")
+        if arg in core[kind]:
+            raise MeasureError(f"{where}:{n}: {arg} is listed twice")
+        core[kind].add(arg)
+    if not core["root"]:
+        raise MeasureError(f"{where} names no root")
+    return core
+
+
+def read_core(tree):
+    path = pathlib.Path(tree) / CORE
+    return parse_core(path.read_text(), str(path)) if path.exists() else None
+
+
+def measure_core(tree, core):
+    """Core lines, the linked packages a known line must cover, and the known lines unused."""
+    roots = {f"{module_path(pathlib.Path(tree).resolve() / 'broker')}/{r}" for r in core["root"]}
+    m = {"lines": 0, "imports": set()}
+    for path, (kind, lines) in packages(tree, sorted("./" + r for r in core["root"])).items():
+        if kind == "std" or path in core["allow"]:
+            continue
+        m["lines"] += lines
+        if path not in roots:
+            m["imports"].add(path)
+    m["unlisted"] = sorted(m["imports"] - core["known"])
+    m["unused"] = sorted(core["known"] - m["imports"])
+    return m
+
+
+def active_decision(decisions, ident):
+    """True if DECISIONS.md text has a row for `ident` whose status is active (as tools/word_budget.py)."""
+    for line in decisions.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] == ident:
+            return cells[2] == "active"
+    return False
+
+
+def compare_core(base_core, head_core, base, head, body, decisions):
+    """(problems, owed) for the core; base_core and base are None when the base has no core file."""
+    problems, owed = [], {}
+    if head is not None:
+        problems += [f"{p} is linked into the trusted core but is not the standard library or an allow or known line of {CORE}"
+                     for p in head["unlisted"]]
+        problems += [f"{p} is a known line of {CORE} that the core no longer links: delete the line" for p in head["unused"]]
+    if base_core is not None:
+        if head_core is None:
+            owed["file"] = f"{CORE} is deleted"
+        else:
+            if head["lines"] > base["lines"]:
+                owed["lines"] = f"core lines {base['lines']} -> {head['lines']}"
+            for kind, change, verb in (("root", base_core["root"] - head_core["root"], "dropped"),
+                                       ("allow", head_core["allow"] - base_core["allow"], "added"),
+                                       ("known", head_core["known"] - base_core["known"], "added")):
+                if change:
+                    owed[kind] = f"{kind} lines {verb}: " + ", ".join(sorted(change))
+    if owed:
+        w = WAIVER.search(body or "")
+        if not (w and active_decision(decisions, w.group(1))):
+            why = f"`Trusted-core: {w.group(1)}` names no active DECISIONS.md row" if w else "no `Trusted-core: <decision ID>` line"
+            problems += [f"{detail}, and the PR body has {why}" for detail in owed.values()]
+    return problems, owed
+
+
+def core_table(base, head, owed, problems):
+    out = ["", "## Trusted core (KRN-2cap)", ""]
+    if head is None:
+        out.append(f"No {CORE} at the head.")
+    else:
+        out += ["| Measure | Base | Head | Change |", "|---|---:|---:|---:|"]
+        for label, b, h in (("Core lines", base and base["lines"], head["lines"]),
+                            ("Linked packages outside std and allow", base and len(base["imports"]), len(head["imports"]))):
+            out.append(f"| {label} | {'-' if b is None else b} | {h} | {'-' if b is None else f'{h - b:+d}'} |")
+    out += ["", "**Fail:**" if problems else "**Pass.**" + (" Growth names a decision (reviewer: confirm Mark approved it)." if owed else "")]
+    out += [f"- {p}" for p in problems]
+    return "\n".join(out) + "\n"
+
+
+def run_check(base_tree, head_tree, body, fallback_tree=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
     head_pkgs = packages(head_tree)
@@ -244,7 +354,20 @@ def run_check(base_tree, head_tree, body):
     reclassified = sorted(p for p in head_pkgs
                           if classify(p, base_rules) == "parser" and classify(p, rules) == "inert")
     problems, owed = compare(base, head, reclassified, body)
-    return problems, table(base, head, owed, problems, trusted_mains(head_tree))
+    text = table(base, head, owed, problems, trusted_mains(head_tree))
+    base_core, head_core = read_core(base_tree), read_core(head_tree)
+    if base_core is None:
+        # A branch whose merge base predates the core file is measured with the file of the
+        # checkout this tool runs from (the base branch tip), so it is not exempt (L3 on #2941).
+        base_core = read_core(fallback_tree or FALLBACK)
+        if head_core is None:
+            head_core = base_core
+    cbase = base_core and measure_core(base_tree, base_core)
+    chead = head_core and measure_core(head_tree, head_core)
+    decisions = pathlib.Path(head_tree, "DECISIONS.md")
+    cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body,
+                                    decisions.read_text() if decisions.exists() else "")
+    return problems + cproblems, text + core_table(cbase, chead, cowed, cproblems)
 
 
 def main(argv=None):
@@ -266,6 +389,11 @@ def main(argv=None):
                         for p in m["unclassified"]]
             text = (f"own lines {m['lines']}, dependency lines {m['deps']}, parsers {len(m['parsers'])}"
                     f" ({', '.join(x[2:] for x in trusted_mains(a.tree))})\n")
+            core = read_core(a.tree)
+            if core:
+                c = measure_core(a.tree, core)
+                text += f"core lines {c['lines']}, linked packages outside std and allow {len(c['imports'])}\n"
+                problems += compare_core(None, core, None, c, "", "")[0]
             text += "".join(f"- {p}\n" for p in problems)
         else:
             body = pathlib.Path(a.body).read_text()

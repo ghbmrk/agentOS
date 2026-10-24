@@ -1,0 +1,13 @@
+[Unit]
+Description=agentOS weekly reboot
+Documentation=file:/usr/lib/agentos/reboot-weekly
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/reboot-weekly
+# It may wait out a call or accepted work for up to a week of uptime (reboot-weekly).
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

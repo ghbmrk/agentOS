@@ -117,6 +117,9 @@ func (s *TPM) stop() {
 // /dev/tpmrm0 would.
 func (s *TPM) Open() (transport.TPMCloser, error) { return linuxudstpm.Open(s.sock()) }
 
+// Socket is the running TPM's socket, for a process the test starts.
+func (s *TPM) Socket() string { return s.sock() }
+
 // TPM is the transport to the running TPM.
 func (s *TPM) TPM() transport.TPM { return s.tpm }
 

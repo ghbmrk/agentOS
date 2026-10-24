@@ -275,27 +275,27 @@ func (r *loginRig) entry(t *testing.T) map[string]string {
 	return m
 }
 
-// A vault that cannot take the write fails the commit, so the proxy drops
-// the response; the placeholders do not move and no part of the refresh
-// is stored (the single-use refresh token is then spent upstream, and the
-// next refresh meets the provider's refusal, which stops the route).
+// A vault write failing after the commit's load fails the commit at its Put,
+// in fixed words; nothing moves, and a retry on the reopened vault works.
 func TestFailedVaultWriteStoresNothingAndKeepsPlaceholders(t *testing.T) {
 	r := newLoginRig(t)
-	old := newCanaryLogin(t)
+	old, fresh := newCanaryLogin(t), newCanaryLogin(t)
 	phs := r.store(t, "pw-a", old)
-	fresh := newCanaryLogin(t)
 	fresh.idToken, fresh.account = old.idToken, old.account
-
-	_, commit, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", fresh.creds())
-	if err != nil {
-		t.Fatal(err)
+	_, commit, _ := r.logins.ForWorker("codex", "pw-a").Swap("codex", fresh.creds())
+	ps := &pausingStore{LoginStore: r.v, armed: true, paused: make(chan struct{}), release: make(chan struct{})}
+	r.logins.open = func() (LoginStore, error) { return ps, nil }
+	go func() { <-ps.paused; r.v.Close(); close(ps.release) }() // after the load, before the Put
+	if err := commit(); err == nil || err.Error() != "plan login: vault write failed" {
+		t.Fatalf("a vault write failing after the load: %v; want the fixed vault-write refusal", err)
 	}
-	r.v.Close() // the write now fails
-	if err := commit(); err == nil {
-		t.Fatal("commit succeeded without a vault")
+	r.v, _ = vault.Open(filepath.Join(r.dir, "vault"), bytes.Repeat([]byte{7}, 32))
+	ps.LoginStore = r.v
+	if v, ok := r.logins.Resolve("codex", "pw-a", phs["refresh_token"]); !ok || v != old.refresh || r.entry(t)["refresh_token"] != old.refresh {
+		t.Fatal("a failed write moved the placeholder or the stored login")
 	}
-	if v, ok := r.logins.Resolve("codex", "pw-a", phs["refresh_token"]); ok && v == fresh.refresh {
-		t.Fatal("placeholder moved to the unstored login")
+	if err := commit(); err != nil || r.entry(t)["refresh_token"] != fresh.refresh {
+		t.Fatalf("a retry on the reopened vault: %v", err)
 	}
 }
 

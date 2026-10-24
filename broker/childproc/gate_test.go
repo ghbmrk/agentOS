@@ -5,6 +5,7 @@ package childproc
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -39,6 +40,20 @@ var exempt = map[string]string{
 	"github.com/godbus/dbus/v5": "session-bus autolaunch only (dbus-launch, launchctl); agentos-netjoin dials the system bus, D-108",
 }
 
+// inPlace names the packages, by the same key as exempt, that may name
+// syscall.Exec exactly once in their built files and no other launcher.
+// Unlike an exempt package, one is not cut from the graph, so importing
+// os/exec, directly or through another package, still fails the gate: it
+// may replace itself with another program, never start a child (#2896
+// Security 1).
+var inPlace = map[string]string{
+	// STO-2b-1 (#2884): after dropping to the kernel's ids, the unlock
+	// step replaces itself with the kernel main, with an empty environment
+	// and only the key pipe on fd 3, so no root process lives on with the
+	// store key.
+	"cmd/agentos-unlock": "execs the kernel main in place after its privilege drop (STO-2b-1)",
+}
+
 // launchers are the selectors, by import path, that start a process
 // without os/exec.
 var launchers = map[string]map[string]bool{
@@ -51,7 +66,7 @@ const module = "github.com/ghbmrk/agentos/broker"
 
 func TestOnlyChildprocStartsAProcess(t *testing.T) {
 	start := time.Now()
-	bad := gate(t, "..", module, exempt)
+	bad := gate(t, "..", module, exempt, inPlace)
 	if len(bad) > 0 {
 		t.Fatalf("a package outside childproc can start a process (P3-4b-3r-env-r8; start children through childproc):\n%s", strings.Join(bad, "\n"))
 	}
@@ -75,7 +90,7 @@ type node struct {
 // or a non-test file that names a launcher selector; and each exemption
 // that is no longer needed. A file no linux/amd64 build includes is held
 // to both rules too, by its own imports, and reported "(not built)".
-func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
+func gate(t *testing.T, dir, mod string, exempt, inPlace map[string]string) []string {
 	t.Helper()
 	// The graph is the union over both cgo settings: the shipped
 	// binaries build with CGO_ENABLED=0 (image/build.sh) and CI's race
@@ -208,7 +223,7 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 		return via[p]
 	}
 	var bad []string
-	used := map[string]bool{}
+	used, placed := map[string]bool{}, map[string]bool{}
 	for _, n := range nodes {
 		if n.std || n.path == mod+"/childproc" {
 			continue
@@ -252,11 +267,33 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 			}
 			continue
 		}
+		if inPlace[key(n.path)] != "" {
+			// One syscall.Exec in a built file is the allowance; a
+			// second, or one in a file no build includes, is not.
+			var execs []string
+			found = slices.DeleteFunc(found, func(f string) bool {
+				if strings.HasSuffix(f, ": names syscall.Exec") && !strings.Contains(f, " (not built)") {
+					execs = append(execs, f)
+					return true
+				}
+				return false
+			})
+			placed[key(n.path)] = len(execs) > 0
+			if len(execs) > 1 {
+				found = append(found, execs...)
+				found = append(found, n.path+": names syscall.Exec "+strconv.Itoa(len(execs))+" times; inPlace allows one")
+			}
+		}
 		bad = append(bad, found...)
 	}
 	for k := range exempt {
 		if !used[k] {
 			bad = append(bad, "exempt names "+k+", which no longer reaches os/exec or names a launcher: drop it")
+		}
+	}
+	for k := range inPlace {
+		if !placed[k] {
+			bad = append(bad, "inPlace names "+k+", which no longer names syscall.Exec: drop it")
 		}
 	}
 	sort.Strings(bad)
@@ -453,7 +490,7 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"old/o.go":  "package old\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
 		"user/u.go": "package user\nimport \"example.com/m/old\"\nfunc U() { old.O() }\n",
 	})
-	got := gate(t, root, "example.com/m", map[string]string{"old": "moves later", "stale": "gone"})
+	got := gate(t, root, "example.com/m", map[string]string{"old": "moves later", "stale": "gone"}, nil)
 	want := []string{
 		"example.com/m/a: reaches os/exec",
 		"example.com/m/b: reaches os/exec (example.com/m/b -> example.com/m/a -> os/exec)",
@@ -488,6 +525,50 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 			if strings.HasPrefix(g, "example.com/m"+ok) {
 				t.Errorf("reported, but passes: %s", g)
 			}
+		}
+	}
+	if t.Failed() {
+		t.Logf("got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// #2896 Security 1: a package allowed one in-place exec may name
+// syscall.Exec once and nothing else. A child started there, through
+// os/exec, ForkExec or a second Exec, fails the gate, and so does an
+// allowance no longer used.
+func TestInPlaceAllowsOneExecAndNoChild(t *testing.T) {
+	const exec1 = "package %s\nimport \"syscall\"\nfunc E() error { return syscall.Exec(\"/k\", nil, []string{}) }\n"
+	root := fixture(t, map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.25\n",
+		"childproc/c.go": childprocFixture,
+		"once/o.go":      fmt.Sprintf(exec1, "once"),
+		"child/o.go":     fmt.Sprintf(exec1, "child"),
+		"child/zz.go":    "package child\nimport \"os/exec\"\nfunc Z() { exec.Command(\"/bin/sh\").Run() }\n",
+		"fork/o.go":      fmt.Sprintf(exec1, "fork"),
+		"fork/zz.go":     "package fork\nimport \"syscall\"\nfunc Z() { syscall.ForkExec(\"/bin/sh\", nil, &syscall.ProcAttr{Env: []string{}}) }\n",
+		"twice/o.go":     fmt.Sprintf(exec1, "twice"),
+		"twice/zz.go":    "package twice\nimport \"syscall\"\nfunc Z() { syscall.Exec(\"/bin/sh\", nil, []string{}) }\n",
+		"via/o.go":       fmt.Sprintf(exec1, "via"),
+		"via/zz.go":      "package via\nimport \"example.com/m/runner\"\nvar _ = runner.R\n",
+		"runner/r.go":    "package runner\nimport \"os/exec\"\nfunc R() { exec.Command(\"/bin/sh\").Run() }\n",
+	})
+	allow := map[string]string{"once": "r", "child": "r", "fork": "r", "twice": "r", "via": "r", "stale": "r"}
+	got := gate(t, root, "example.com/m", nil, allow)
+	want := []string{
+		"example.com/m/child: reaches os/exec",
+		"example.com/m/fork/zz.go:3: names syscall.ForkExec",
+		"example.com/m/twice: names syscall.Exec 2 times; inPlace allows one",
+		"example.com/m/via: reaches os/exec (example.com/m/via -> example.com/m/runner -> os/exec)",
+		"inPlace names stale, which no longer names syscall.Exec: drop it",
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
+			t.Errorf("not reported: %s", w)
+		}
+	}
+	for _, g := range got {
+		if strings.HasPrefix(g, "example.com/m/once") {
+			t.Errorf("reported, but passes: %s", g)
 		}
 	}
 	if t.Failed() {

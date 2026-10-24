@@ -48,6 +48,11 @@ core clerk/inbox
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived
 # from it. Only the unlock step (STO-2b) opens it.
 core clerk/seal
+# The unlock step and the kernel's main (STO-2b-1, #2884): the one opens the
+# store as root and execs the other under the kernel's uid, the keys on an
+# inherited pipe.
+wiring cmd/agentos-unlock
+wiring cmd/agentos-kernel
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.

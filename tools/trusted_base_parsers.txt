@@ -48,12 +48,20 @@ parser github.com/ghbmrk/agentos/broker/bridgeproto -- the modem bridge's messag
 parser github.com/ghbmrk/agentos/broker/change -- change proposals from loops and guests
 parser github.com/ghbmrk/agentos/broker/checker -- owner codes and approval requests (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/claim -- the claim code a phone presents
+parser github.com/ghbmrk/agentos/broker/clerk -- a clerk's sealed Secrets file and its providers' replies
+parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
+parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- IMAP and SMTP replies from the owner's mail provider
+parser github.com/ghbmrk/agentos/broker/clerk/model -- model providers' replies
+parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the kernel's, clerks' and mail sockets, and the unlock step's hand-off
+parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-kernel -- process entry (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-unlock -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentosd -- process entry; decodes requests and replies (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/control -- the owner's control words
 parser github.com/ghbmrk/agentos/broker/egress -- proxied HTTP requests and provider replies
@@ -105,6 +113,8 @@ parser github.com/theupdateframework/go-tuf/v2/... -- TUF metadata from update m
 inert  golang.org/x/crypto/... -- cryptographic primitives over fixed-size inputs
 inert  golang.org/x/sys/... -- system call wrappers
 inert  golang.org/x/term -- terminal control
+parser golang.org/x/net/idna -- internationalised host names
+parser golang.org/x/net/publicsuffix -- host names looked up against the public suffix list
 parser golang.org/x/text/encoding/... -- legacy character sets in mail bodies
 inert  golang.org/x/text/encoding/internal/... -- tables and identifiers for the decoders
 parser golang.org/x/text/language -- BCP 47 language tags
@@ -113,6 +123,9 @@ inert  golang.org/x/text/internal/tag -- lookup tables
 inert  golang.org/x/text/internal/utf8internal -- UTF-8 tables
 inert  golang.org/x/text/runes -- rune transforms over decoded text
 inert  golang.org/x/text/transform -- streaming transform plumbing
+inert  golang.org/x/text/secure/bidirule -- a rule check over decoded host names
+inert  golang.org/x/text/unicode/bidi -- Unicode tables over decoded text
+inert  golang.org/x/text/unicode/norm -- Unicode normalisation over decoded text
 inert  google.golang.org/genproto/... -- generated annotations
 inert  google.golang.org/protobuf/... -- descriptors, reflection and runtime support
 parser google.golang.org/protobuf/encoding/... -- protobuf wire and text format
