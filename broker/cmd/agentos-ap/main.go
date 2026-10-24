@@ -10,7 +10,7 @@
 // -iface the setup network until the Owner Card step confirms or the box
 // is owned, and from then on the card's network (#1185), which the page
 // reports through agentosd before the confirm latches (-ap-net). It reads
-// the latch, the owner state and both files again every -poll. At the
+// the latch, the owned marker and both files again every -poll. At the
 // confirm it brings the access point down, burns the setup network
 // (firstboot.SetupNetwork), and brings it up with the card's network:
 // Down then Up, never Rekey, so the phone rejoins with the card's Wi-Fi QR
@@ -62,16 +62,16 @@ type config struct {
 	// Addr is the box's address on it, with the subnet's length.
 	Addr netip.Prefix
 	// Latch is the Owner Card step's latch (the page's file); Setup the
-	// setup network (root's); OwnerState agentosd's owner state, whose
-	// presence means setup has finished.
-	Latch, Setup, OwnerState string
+	// setup network (root's); Owned agentosd's owned marker (apnet.Owned),
+	// whose presence means setup has finished.
+	Latch, Setup, Owned string
 	// SysClassNet lists the interfaces; a wireless one has phy80211.
 	SysClassNet string
 	// APNet is the card's network, which the page reports through
 	// agentosd before the confirm (#1185); root's, mode 0600.
 	APNet string
 	// Poll is how often it looks for a late radio and, while it serves,
-	// for the confirm or the owner state.
+	// for the confirm or the owned marker.
 	Poll time.Duration
 }
 
@@ -86,7 +86,7 @@ func main() {
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "my address on the access point, with the subnet's length")
 	flag.StringVar(&c.Latch, "card-latch", "/var/lib/agentos-localui/card-latch.json", "the Owner Card step's latch (the page's)")
 	flag.StringVar(&c.Setup, "setup-net", claim.SetupNetPath, "the setup network the seller sealed (HW-10)")
-	flag.StringVar(&c.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "agentosd's owner state; present once setup has finished")
+	flag.StringVar(&c.Owned, "owned", apnet.Owned, "agentosd's owned marker; present once setup has finished")
 	flag.StringVar(&c.SysClassNet, "sys-class-net", "/sys/class/net", "where the kernel lists network interfaces")
 	flag.StringVar(&c.APNet, "ap-net", apnet.Path, "the card's Wi-Fi network, served once the card is confirmed")
 	flag.DurationVar(&c.Poll, "poll", 2*time.Second, "how often I look for a late radio and, while serving, for the confirm")
@@ -375,9 +375,9 @@ func waitForIface(ctx context.Context, c config, l *localui.APLoader) error {
 	}
 }
 
-// setupNetwork reads the latch and the owner state and asks
+// setupNetwork reads the latch and the owned marker and asks
 // firstboot.SetupNetwork, which burns through setup on a confirmed or
-// owned box. An owner state it cannot stat counts as owned.
+// owned box. An owned marker it cannot stat counts as owned.
 func setupNetwork(c config, setup firstboot.Store) (*claim.SetupNet, error) {
 	latch, err := readLatch(c.Latch)
 	if err != nil {
@@ -386,10 +386,10 @@ func setupNetwork(c config, setup firstboot.Store) (*claim.SetupNet, error) {
 	return firstboot.SetupNetwork(latch, owned(c), setup)
 }
 
-// owned says whether agentosd's owner state is there. One it cannot stat
+// owned says whether agentosd's owned marker is there. One it cannot stat
 // counts as owned.
 func owned(c config) bool {
-	_, err := os.Lstat(c.OwnerState)
+	_, err := os.Lstat(c.Owned)
 	return !errors.Is(err, os.ErrNotExist)
 }
 

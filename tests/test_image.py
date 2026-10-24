@@ -485,6 +485,16 @@ class TreeCheckTest(unittest.TestCase):
         (self.root / "etc/agentos").rmdir()
         write(self.root, "var/lib/agentos/journal.log", "{}")
         self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
+        (self.root / "var/lib/agentos/journal.log").unlink()
+        # The loader's directory (#2626) ships empty, as tmpfiles.d makes it at build; anything in it,
+        # or anything else beside it, is state.
+        (self.root / "var/lib/agentos/ap").mkdir()
+        self.assertNotIn("var/lib/agentos", " ".join(check.violations(self.root)))
+        write(self.root, "var/lib/agentos/ap/setup-net.json", "{}")
+        self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
+        (self.root / "var/lib/agentos/ap/setup-net.json").unlink()
+        (self.root / "var/lib/agentos/drive-id").write_text("x")
+        self.assertIn("var/lib/agentos", " ".join(check.violations(self.root)))
 
     def test_credstore_and_other_key_formats(self):
         write(self.root, "etc/credstore.encrypted/agentos.token", "x")
