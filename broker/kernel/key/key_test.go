@@ -345,11 +345,13 @@ func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
 		"day: huge step, nothing spent": {day, huge, nil, false, RSpendDay},
 		"day: 1 after a huge use":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
 		"day: 0 after two huge uses":    {day, 0, []Use{{At: now - 2, Amount: huge, Task: "t1"}, {At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
+		"day: 0 after M, M, 1":          {day, 0, []Use{{At: now - 3, Amount: huge, Task: "t1"}, {At: now - 2, Amount: huge, Task: "t1"}, {At: now - 1, Amount: 1, Task: "t1"}}, false, RSpendDay},
 		"day: spend huge, 1 used":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, true, RSpendDay},
 		"day: spend 1, huge used":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, true, RSpendDay},
 		// spend-task: the uses fell out of the day window, so only the task cap counts them
 		"task: 1 after a huge use":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, false, RSpendTask},
 		"task: 0 after two huge uses": {task, 0, []Use{{At: 1, Amount: huge, Task: "t1"}, {At: 2, Amount: huge, Task: "t1"}}, false, RSpendTask},
+		"task: 0 after M, M, 1":       {task, 0, []Use{{At: 1, Amount: huge, Task: "t1"}, {At: 2, Amount: huge, Task: "t1"}, {At: 3, Amount: 1, Task: "t1"}}, false, RSpendTask},
 		"task: spend 1, huge used":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, true, RSpendTask},
 	} {
 		t.Run(name, func(t *testing.T) {
