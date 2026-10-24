@@ -873,11 +873,16 @@ type rfcServer struct {
 	addr string
 	mu   sync.Mutex
 	cmds []string
+	// selected answers a SELECT or EXAMINE tagged tag; nil answers under
+	// UIDVALIDITY 7.
+	selected func(tag string) string
 }
 
-func newRFCServer(t *testing.T) *rfcServer {
+func newRFCServer(t *testing.T) *rfcServer { return newRFCServerSelecting(t, nil) }
+
+func newRFCServerSelecting(t *testing.T, selected func(tag string) string) *rfcServer {
 	l := listenLoopback(t)
-	s := &rfcServer{addr: l.Addr().String()}
+	s := &rfcServer{addr: l.Addr().String(), selected: selected}
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -917,6 +922,10 @@ func (s *rfcServer) serve(c net.Conn) {
 		switch verb {
 		case "SELECT", "EXAMINE":
 			sel = f[2]
+			if s.selected != nil {
+				say(s.selected(tag))
+				continue
+			}
 			say("* 9 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n* OK [UIDNEXT 30] n\r\n" + tag + " OK done\r\n")
 		default:
 			say(tag + " OK done\r\n")
@@ -928,6 +937,80 @@ func (s *rfcServer) log() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return strings.Join(s.cmds, " | ")
+}
+
+// A store or move passes only after its SELECT answered OK under the
+// request's UID validity, as the server named it: a folder renumbered since
+// the mail was read holds other mail under the same UID.
+func TestWritesBindTheirUIDValidity(t *testing.T) {
+	// REQ: TB-parsers-2-3
+	for _, c := range []struct {
+		name, answer string
+		ok           bool
+	}{
+		{"the request's validity", "* OK [UIDVALIDITY 7] v\r\n%s OK done\r\n", true},
+		{"lower case", "* ok [uidvalidity 7] v\r\n%s ok done\r\n", true},
+		{"another validity", "* OK [UIDVALIDITY 8] v\r\n%s OK done\r\n", false},
+		{"no validity", "* 9 EXISTS\r\n%s OK done\r\n", false},
+		{"two validities", "* OK [UIDVALIDITY 7] v\r\n* OK [UIDVALIDITY 8] v\r\n%s OK done\r\n", false},
+		{"a refused SELECT", "* OK [UIDVALIDITY 7] v\r\n%s NO no such folder\r\n", false},
+		{"a validity past 32 bits", "* OK [UIDVALIDITY 4294967303] v\r\n%s OK done\r\n", false},
+	} {
+		for _, w := range []struct {
+			verb, cmd string
+			call      func(s *Store) error
+		}{
+			{"MOVE", `UID MOVE 5 "Trash"`, func(s *Store) error {
+				return s.Move(context.Background(), Ref{Folder: "INBOX", Validity: 7, UID: 5}, "Trash")
+			}},
+			{"STORE", `UID STORE 5 +FLAGS.SILENT (\Flagged)`, func(s *Store) error {
+				return s.SetFlags(context.Background(), Ref{Folder: "INBOX", Validity: 7, UID: 5}, []string{`\Flagged`}, nil)
+			}},
+		} {
+			srv := newRFCServerSelecting(t, func(tag string) string { return strings.ReplaceAll(c.answer, "%s", tag) })
+			conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, wr net.Conn, ctrl *net.UnixConn) {
+				// The connection writes regardless of what the SELECT said.
+				io.WriteString(wr, "h1 SELECT INBOX\r\n")
+				tagged(br, "h1")
+				io.WriteString(wr, "h2 "+w.cmd+"\r\n")
+				tagged(br, "h2")
+				answer(ctrl, imapwire.Response{})
+			})
+			err := w.call(hostileClerk(t, srv.addr, conn, 5*time.Second))
+			sent := strings.Contains(srv.log(), w.verb)
+			if c.ok && (err != nil || !sent) {
+				t.Errorf("%s, %s: err %v, server log %s", c.name, w.verb, err, srv.log())
+			}
+			if !c.ok && (!errors.Is(err, ErrConnRefused) || sent) {
+				t.Errorf("%s, %s: err %v, want ErrConnRefused; server log %s", c.name, w.verb, err, srv.log())
+			}
+		}
+	}
+}
+
+// A Find for an id holding a line break, as a Message-ID folded before a
+// comment reads, matches nothing and opens no session, where the filter
+// would refuse its literal as a compromised connection's.
+func TestAFoldedIDFindsNothing(t *testing.T) {
+	// REQ: TB-parsers-2-3
+	srv := newRFCServer(t)
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	s := hostileClerk(t, srv.addr, conn, 5*time.Second)
+	for _, id := range []string{"<a2@example.test>\r\n (c)", "<a2@example.test>\n (c)", "<a2@example.test>\r"} {
+		ms, err := s.Find(context.Background(), "INBOX", id, func(Message) bool { return true })
+		if err != nil || len(ms) != 0 {
+			t.Errorf("Find %q: %d messages, err %v", id, len(ms), err)
+		}
+		ms, err = s.FindSince(context.Background(), "INBOX", 7, 1, id, func(Message) bool { return true })
+		if err != nil || len(ms) != 0 {
+			t.Errorf("FindSince %q: %d messages, err %v", id, len(ms), err)
+		}
+	}
+	if l := srv.log(); l != "" {
+		t.Errorf("a folded id reached the server: %s", l)
+	}
 }
 
 // The clerk's modified UTF-7 is go-imap's, byte for byte, so a write's
