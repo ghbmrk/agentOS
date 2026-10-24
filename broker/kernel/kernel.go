@@ -183,7 +183,7 @@ func Next(s *State, id string, now int64) Act {
 		return a
 	}
 	if st.Phase == PHeld {
-		if due := st.HeldAt + v.Limits.Window(st.Novel); now < due {
+		if due := v.Limits.Due(st.HeldAt, st.Novel); now < due {
 			a.WakeAt = due
 			return a
 		}

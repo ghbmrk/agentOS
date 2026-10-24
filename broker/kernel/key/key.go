@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 )
@@ -342,6 +343,17 @@ func (l Limits) Window(novel bool) int64 {
 		return l.HoldNovelty
 	}
 	return l.HoldBase
+}
+
+// Due is when a step held at heldAt may run. A due time past int64 is never
+// due, so a hold near MaxInt64, which any holder may narrow to, cannot wrap to
+// a time already past (KEY-8, #2952).
+func (l Limits) Due(heldAt int64, novel bool) int64 {
+	w := l.Window(novel)
+	if heldAt > 0 && w > math.MaxInt64-heldAt {
+		return math.MaxInt64
+	}
+	return heldAt + w
 }
 
 func rootBody(r Root) []byte {

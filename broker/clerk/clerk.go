@@ -101,7 +101,7 @@ func verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r 
 		if !d.Held {
 			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
-		if now < d.HeldAt+ver.Limits.Window(d.Novel) {
+		if now < ver.Limits.Due(d.HeldAt, d.Novel) {
 			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}
