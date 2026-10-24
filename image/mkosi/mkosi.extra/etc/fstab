@@ -1,0 +1,7 @@
+# No code from writable storage (UPD-10). Root is mounted noexec by the boot entry (rootflags=) and
+# /tmp by tmp.mount's drop-in; these are the writable file systems systemd mounts before it reads
+# any unit, which systemd-remount-fs remounts with these options early in boot. Each keeps the
+# flags systemd gives it and adds noexec. mkosi.finalize refuses a line here without noexec.
+devtmpfs /dev     devtmpfs nosuid,noexec       0 0
+tmpfs    /dev/shm tmpfs    nosuid,nodev,noexec 0 0
+tmpfs    /run     tmpfs    nosuid,nodev,noexec 0 0

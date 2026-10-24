@@ -13,6 +13,8 @@ enable agentos-modem.service
 enable agentos-modem-env.path
 enable agentos-netjoin.service
 enable agentos-drive-id.service
+# The weekly reboot (UPD-10).
+enable agentos-reboot.timer
 # Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
 disable nftables.service
 # Debian's hostapd.service would serve /etc/hostapd/hostapd.conf on the radio; agentos-ap runs hostapd.

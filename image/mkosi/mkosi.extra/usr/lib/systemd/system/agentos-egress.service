@@ -79,6 +79,9 @@ DevicePolicy=closed
 DeviceAllow=/dev/tpmrm0 rw
 # No IP filter: providers are reached from here, and netlink watches the routes.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target

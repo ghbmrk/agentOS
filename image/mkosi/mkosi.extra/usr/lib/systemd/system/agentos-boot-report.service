@@ -7,6 +7,9 @@ After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service a
 Type=oneshot
 ExecStart=/usr/lib/agentos/boot-report
 StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target
