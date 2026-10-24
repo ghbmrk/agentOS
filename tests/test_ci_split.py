@@ -32,7 +32,7 @@ def go_list():
 class SplitTest(unittest.TestCase):
     """Every package runs on exactly one shard."""
 
-    PKGS = [f"{M}/{p}" for p in ("pubid", "journal", "holder", "recall", "a", "b", "c", "d/e")]
+    PKGS = [f"{M}/{p}" for p in ("guest", "journal", "holder", "recall", "a", "b", "c", "d/e")]
 
     def assertExactCover(self, pkgs, parts):
         self.assertEqual(ci_split.gaps_and_duplicates(pkgs, parts), ([], [], []))
@@ -67,10 +67,10 @@ class SplitTest(unittest.TestCase):
 
     def test_the_heaviest_packages_go_to_different_shards(self):
         parts = ci_split.split(self.PKGS, 3)
-        for heavy in ("pubid", "journal", "holder"):
+        for heavy in ("guest", "journal", "holder"):
             self.assertEqual(sum(f"{M}/{heavy}" in part for part in parts), 1)
         self.assertEqual(len({i for i, part in enumerate(parts) for p in part
-                              if p in {f"{M}/pubid", f"{M}/journal", f"{M}/holder"}}), 3)
+                              if p in {f"{M}/guest", f"{M}/journal", f"{M}/holder"}}), 3)
 
     def test_a_duplicate_or_an_empty_list_or_no_shards_is_refused(self):
         with self.assertRaises(ValueError):
@@ -108,7 +108,7 @@ class SplitTest(unittest.TestCase):
         finally:
             sys.stdin = old
         out = buf.getvalue().split()
-        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("pubid", "journal", "holder", "recall")])
+        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("journal", "guest", "holder", "recall")])
         self.assertEqual([ci_split.weight(p) for p in out], sorted((ci_split.weight(p) for p in out), reverse=True))
 
 

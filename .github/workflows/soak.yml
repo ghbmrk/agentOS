@@ -43,7 +43,6 @@ jobs:
           - { pkg: hostdisk, target: FuzzProbe }
           - { pkg: recovery, target: FuzzParseRecoveryKey }
           - { pkg: tpmseal, target: FuzzParse }
-          - { pkg: hint, target: FuzzParse }
           - { pkg: attest, target: FuzzParse }
           - { pkg: sockets, target: FuzzRequest }
           - { pkg: sockets, target: FuzzFrames }

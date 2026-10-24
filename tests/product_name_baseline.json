@@ -249,9 +249,6 @@
     "6e0531084e61208ea6ae768a1c30c25daf3fb5629089d85942d2fdedd6829fc5": 1,
     "ffb10fd8347d6b8b9ad7f8da9ec63e688c8851267901202fc5ff24f82f4c928c": 1
   },
-  "broker/hint/ASSUMPTIONS.md": {
-    "d7f4b78ba2f4c6faf832a394635007d302ec76818381be5a7b8eb57c84bd1651": 1
-  },
   "broker/hostdisk/ASSUMPTIONS.md": {
     "b1b4d81000ae2f5645ef94aecc177162aad8715617938c7a5875fb81609e2bf6": 1
   },
@@ -620,16 +617,6 @@
     "1a09211bd84d3f345e15766caaeafb38d9a611438a7c1817c51433185dc454a7": 1,
     "1df439ce11853c8a15fe4ac4fd8fca6593889dbd1edf0f8d59c5d96a06faba0d": 1
   },
-  "spikes/S10-pact/ASSUMPTIONS.md": {
-    "9d6d18923671e9d5a484bfa4e97f0597d88ede099cff53dd8ee6db1bafadc03f": 1
-  },
-  "spikes/S10-pact/QUESTION.md": {
-    "b06be360af9c3a7ada057b1288cda9f74e19e15f931cafe830babb3ea6e6f4b6": 1
-  },
-  "spikes/S10-pact/RESULT.md": {
-    "0ddb60431541c71c82b7527b87305e36b990efe81eba34e2281ef07fff7a1296": 1,
-    "89b7a31e90fbd3169b87e4073ad6d65c0226dbbd0731d5ad69d6d0aee803f34a": 1
-  },
   "spikes/S1S2-testkit/CHECKLIST.md": {
     "374d5da8fc3b68bd729392a5877578cb01cb0bc09c8d9db268e754a03d542e37": 1
   },
@@ -658,12 +645,6 @@
     "852db0927c341b3796ae949fc68575f44d1d88ac17961a7c18267d9f12a7cc21": 1,
     "e80a3fd2c57a3d8f6b3f572acb3ea01559a51705686b574052edd6e05291a91e": 1,
     "faaa0132f466b4cb36dc253360454b38fb39597b3e395016498a48f6545836c5": 1
-  },
-  "spikes/S8-provider-workers/CODEX-TERMS.md": {
-    "cacd28a79fc6a17e07d264a5bd26f37eb170616cd32e89f1191bc5ae1dfaae64": 1
-  },
-  "spikes/S8-provider-workers/SPEC-DIFF.md": {
-    "e5ad91a9427798542e6b63aa7b17af3b9812bb16de407f3eb1e5d5bba8a500d4": 1
   },
   "tests/test_image.py": {
     "8574ea1ffd5fe2d6d76759f56c5d3212cfc88a94e22faf83bdb7b42d0c228d31": 1,
