@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -325,6 +326,20 @@ func (a *Account) refuse(op, mail, reason string) kernel.Result {
 }
 
 // Effects, Posts and Refusals return copies of what the clerk did, in order.
+// Alerts is the ids of the read mails that count as security signals
+// (VerifiedAlert), judged on the world as it is now.
+func (a *Account) Alerts() []string {
+	w := a.world()
+	var out []string
+	for id, m := range a.mails {
+		if VerifiedAlert(m.Raw, w) {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 func (a *Account) Effects() []Effect {
 	a.mu.Lock()
 	defer a.mu.Unlock()

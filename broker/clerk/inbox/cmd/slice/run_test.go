@@ -207,3 +207,29 @@ func TestRunCapsTrashAndSaysWhatIsLeft(t *testing.T) {
 		t.Fatalf("%d trashed, status %q, want 200 and %q", trashed, got, want)
 	}
 }
+
+// A21 on both mailboxes: the whole mailbox run through IMAP (inbox.Live)
+// and the Gmail API (inbox.Gmail) on fake accounts gives the synthetic run's
+// outcome and log, and each account shows exactly the run's effects, with
+// nothing marked read and nothing the Gmail account refuses asked for.
+func TestRunOnBothMailboxesMatchesTheSyntheticRun(t *testing.T) {
+	in := fixtureInput(t)
+	want, err := Run(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jw, _ := json.Marshal(want)
+	for _, kind := range []string{boxIMAP, boxGmail} {
+		in.Mailbox = kind
+		got, err := Run(in)
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if jg, _ := json.Marshal(got); string(jg) != string(jw) {
+			t.Fatalf("%s: the outcome differs from the synthetic run:\n%s\n%s", kind, jg, jw)
+		}
+		if len(got.Effects) == 0 {
+			t.Fatalf("%s: the run changed nothing", kind)
+		}
+	}
+}
