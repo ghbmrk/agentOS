@@ -394,6 +394,83 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	r.shutdown(cmd, out)
 }
 
+// #2905 open point 2 (Mark, cmsg_01R91wiieBzMSvPKFsAJVvuK7gq3jqjc2vQq7vC7kHmrzJ):
+// a store enrolled with no owner's anchors starts a setup-only kernel. It
+// answers STATUS and the setup step and refuses everything else; it takes
+// the owner's two hardware keys exactly once, each signing over this box's
+// head key, and then serves normally without a restart. The window stays
+// shut on the next boot, and a drive rolled back to before the setup entry
+// starts no kernel, so the window never reopens.
+func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
+	r := newRig(t, false)
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	o := r.owner()
+	if err := o.Stop(); !errors.Is(err, proc.ErrSetupOnly) {
+		t.Fatalf("STOP before setup: got %v, want ErrSetupOnly", err)
+	}
+	info, err := o.SetupInfo()
+	must(t, err)
+	box := r.keys.Head.Public().(ed25519.PublicKey)
+	if !info.Open || !info.Box.Equal(box) {
+		t.Fatalf("setup info %+v, want open over the box's head key", info)
+	}
+	saved := map[string][]byte{}
+	for _, f := range []string{r.mainConfig().Log, filepath.Join(r.anchorDir(), "anchor")} {
+		b, err := os.ReadFile(f)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		saved[f] = b
+	}
+	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
+	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
+	otherBox := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{13}, 32)).Public().(ed25519.PublicKey)
+	unsigned := kernel.SignSetup(box, hw1, hw2)
+	unsigned.Sigs[1] = unsigned.Sigs[0]
+	for name, f := range map[string]kernel.FirstAnchors{
+		"one key":            kernel.SignSetup(box, hw1),
+		"the same key twice": kernel.SignSetup(box, hw1, hw1),
+		"another box":        kernel.SignSetup(otherBox, hw1, hw2),
+		"one key unsigned":   unsigned,
+	} {
+		if err := o.Setup(f); !errors.Is(err, kernel.ErrSetupKeys) {
+			t.Errorf("%s: got %v, want ErrSetupKeys", name, err)
+		}
+	}
+	must(t, o.Setup(kernel.SignSetup(box, hw1, hw2)))
+	if info, err := o.SetupInfo(); err != nil || info.Open {
+		t.Fatalf("setup info after setup: %+v %v, want closed", info, err)
+	}
+	if err := o.Setup(kernel.SignSetup(box, hw2, hw1)); !errors.Is(err, kernel.ErrSetupClosed) {
+		t.Fatalf("a second setup: got %v, want ErrSetupClosed", err)
+	}
+	must(t, o.Stop()) // the kernel now serves as any other
+	r.shutdown(cmd, out)
+
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	if c, err := r.owner().Changes(); err != nil || !c.Stopped {
+		t.Fatalf("the second boot: %v %v, want the first boot's STOP", c, err)
+	}
+	if err := r.owner().Setup(kernel.SignSetup(box, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32)), hw1)); !errors.Is(err, kernel.ErrSetupClosed) {
+		t.Fatalf("setup on the second boot: got %v, want ErrSetupClosed", err)
+	}
+	r.shutdown(cmd, out)
+
+	for f, b := range saved {
+		if b == nil {
+			must(t, os.Remove(f))
+		} else {
+			must(t, os.WriteFile(f, b, 0o600))
+		}
+	}
+	cmd, out = r.boot()
+	if err := r.exited(cmd); err == nil || !strings.Contains(out.String(), proc.ErrAnchorRolledBack.Error()) {
+		t.Fatalf("a kernel started on a drive rolled back to before setup: %v\n%s", err, out)
+	}
+}
+
 // LOG-2, STO-1: a drive rolled back, log and anchor together, to a copy
 // from an earlier boot starts no kernel, since the counter has moved past
 // it; the kernel says so and the copy is left as it was.
@@ -482,9 +559,31 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	}
 	r.reboot()
 
+	// #2905 open point 2: a store with no owner's anchors yet hands over
+	// none, and the kernel starts setup-only; an anchors entry that does
+	// not read is refused.
 	bare := newRig(t, false)
-	if _, err := unlock(bare.role(&bare.policy.PublicKey, bare.anchor).Config(), bare.role(&bare.policy.PublicKey, bare.anchor).pins); err == nil || !strings.Contains(err.Error(), "hardware keys") {
-		t.Fatalf("no owner's anchors: got %v", err)
+	bc := bare.role(&bare.policy.PublicKey, bare.anchor)
+	b, err := unlock(bc.Config(), bc.pins)
+	if err != nil {
+		t.Fatalf("no owner's anchors: got %v, want a setup-only hand-off", err)
+	}
+	pr, pw, err := os.Pipe()
+	must(t, err)
+	_, err = pw.Write(b)
+	must(t, err)
+	pw.Close()
+	clear(b)
+	if k, err := handoff.ReadKeys(pr); err != nil || len(k.Anchors) != 0 {
+		t.Fatalf("no owner's anchors: hand-off %v %v, want none", k.Anchors, err)
+	}
+	st, err := seal.Unlock(bare.store, seal.Recovery{Key: bare.recovery})
+	must(t, err)
+	must(t, st.Put(handoff.AnchorsEntry, []byte("short")))
+	st.Close()
+	bare.reboot() // the first unlock capped the slot (#2977)
+	if _, err := unlock(bc.Config(), bc.pins); err == nil || !strings.Contains(err.Error(), "hardware keys") {
+		t.Fatalf("anchors that do not read: got %v", err)
 	}
 
 	// LOG-2: a store with no counter, or one that does not read, hands

@@ -25,7 +25,7 @@ type KernelConfig struct {
 	Key     [32]byte      // the log's AES-256-GCM key
 	Pub     ed25519.PublicKey
 	Sign    ed25519.PrivateKey
-	Anchors []ed25519.PublicKey // the owner's hardware keys (D-146)
+	Anchors []ed25519.PublicKey // the owner's hardware keys (D-146); none starts setup-only
 	Clerks  map[string]Remote   // every clerk the kernel runs, by name; a closed table
 }
 
@@ -34,19 +34,20 @@ type KernelConfig struct {
 // interleave inside the kernel. Clerk calls run outside it (Tick), so STOP,
 // a revoke or STATUS never waits on a clerk (KRN-7, OWN-18).
 type Kernel struct {
-	mu      sync.Mutex
-	k       *kernel.Kernel
-	store   *FileStore
-	clerks  map[string]remote
-	anchors []ed25519.PublicKey
+	mu     sync.Mutex
+	k      *kernel.Kernel
+	store  *FileStore
+	clerks map[string]remote
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
 // left undecided are decided, and steps left in flight are marked unknown,
-// to be probed through their clerk (KRN-8).
+// to be probed through their clerk (KRN-8). With no anchors from the store
+// and none in the log, the kernel is setup-only (kernel.Setup): its sockets
+// serve only the setup step until the owner's hardware keys are logged.
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
-	if cfg.Anchor == nil || cfg.Sign == nil || len(cfg.Anchors) == 0 {
-		return nil, errors.New("run: a kernel needs an anchor, the head key and the owner's anchors")
+	if cfg.Anchor == nil || cfg.Sign == nil {
+		return nil, errors.New("run: a kernel needs an anchor and the head key")
 	}
 	st, err := OpenFileStore(cfg.Log)
 	if err != nil {
@@ -57,17 +58,20 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
+	// A clerk's view is verified against the state's anchors, which setup
+	// may log after boot.
+	var k *kernel.Kernel
+	anchors := func() []ed25519.PublicKey { return k.State().Anchors }
 	clerks, kc := map[string]remote{}, map[string]kernel.Clerk{}
 	for name, r := range cfg.Clerks {
-		clerks[name] = remote{r, cfg.Anchors}
+		clerks[name] = remote{r, anchors}
 		kc[name] = clerks[name]
 	}
-	k, err := kernel.Boot(l, cfg.Anchors, kc, now)
-	if err != nil {
+	if k, err = kernel.Boot(l, cfg.Anchors, kc, now); err != nil {
 		st.Close()
 		return nil, err
 	}
-	return &Kernel{k: k, store: st, clerks: clerks, anchors: cfg.Anchors}, nil
+	return &Kernel{k: k, store: st, clerks: clerks}, nil
 }
 
 // Tick runs every plan as far as now allows. It takes the due calls under the
@@ -90,7 +94,7 @@ func (h *Kernel) Tick(now int64) error {
 			ok := false
 			err := h.With(func(k *kernel.Kernel) (err error) {
 				if ok, err = k.Send(now, c); ok {
-					s = view(k.State(), h.anchors, c.Req, now)
+					s = view(k.State(), k.State().Anchors, c.Req, now)
 				}
 				return err
 			})
