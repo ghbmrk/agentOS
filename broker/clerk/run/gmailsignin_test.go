@@ -5,6 +5,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -252,4 +253,31 @@ func TestGmailRevokeOverTheOwnerSocket(t *testing.T) {
 			t.Fatalf("a kept grant removed the account: %+v", a)
 		}
 	})
+}
+
+// A sign-in again offers the account's own address first, and if the owner
+// sets another account up while on Google's page, that setup stands and
+// the late grant is given back.
+func TestASignInAgainYieldsToALaterSetup(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	consent, d, err := owner.GmailBegin("watch", nil)
+	if err != nil || d != "" || !strings.Contains(consent, "login_hint="+url.QueryEscape(gmailtest.User)) {
+		t.Fatalf("GmailBegin = %q, %q, %v; want the account's address as the hint", consent, d, err)
+	}
+	imap := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	if err := owner.SetMail(imap, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	landing, ok := srv.Approve(consent)
+	if !ok {
+		t.Fatal("the fake refused the consent address")
+	}
+	if d, err := owner.GmailFinish("watch", landing); err != nil || d != clerk.DNoSignIn {
+		t.Fatalf("GmailFinish after a later setup = %q, %v", d, err)
+	}
+	if a, _ := owner.Account(); a.Settings != imap || sec.Has(GmailSlot(gmailtest.User)) || len(srv.Revoked()) != 1 {
+		t.Fatalf("account %+v, Gmail slot %v, revoked %v; want the IMAP setup kept, the old grant given back and no code redeemed",
+			a.Settings, sec.Has(GmailSlot(gmailtest.User)), srv.Revoked())
+	}
 }

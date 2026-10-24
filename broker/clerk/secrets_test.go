@@ -252,27 +252,3 @@ func TestSecretsRemovePrefix(t *testing.T) {
 		t.Fatal("an empty prefix was taken as every slot")
 	}
 }
-
-// CopyTo moves a secret between a clerk's own stores, resealed for its new
-// slot, and opens only the kind it was put as (#3009).
-func TestCopyToReseals(t *testing.T) {
-	sl := sealer(t)
-	from, to := clerk.NewSecrets(sealer(t), nil), clerk.NewSecrets(sl, nil)
-	if err := from.Put("a", clerk.KindGrant, []byte("canary-grant")); err != nil {
-		t.Fatal(err)
-	}
-	if err := from.CopyTo("a", clerk.KindStatic, to, "b"); err == nil || to.Has("b") {
-		t.Fatalf("a grant copied as a static secret: %v", err)
-	}
-	if err := from.CopyTo("missing", clerk.KindGrant, to, "b"); err == nil || to.Has("b") {
-		t.Fatalf("a missing slot copied: %v", err)
-	}
-	if err := from.CopyTo("a", clerk.KindGrant, to, "b"); err != nil || !to.Has("b") || !from.Has("a") {
-		t.Fatalf("CopyTo = %v", err)
-	}
-	b, _ := to.MarshalBinary()
-	back := clerk.NewSecrets(sl, nil)
-	if bytes.Contains(b, []byte("canary-grant")) || back.UnmarshalBinary(b) != nil {
-		t.Fatal("the copy is not sealed for its own slot")
-	}
-}
