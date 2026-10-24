@@ -540,17 +540,27 @@ func TestAFailedSameAddressSetupGivesNothingBack(t *testing.T) {
 	}
 }
 
-// A sign-in again whose profile fails gives its new grant back from its
-// own store, and the account keeps the grant it had (TN-gmail-socket-a's
-// second edge, #3026).
-func TestASignInAgainWithNoAddressKeepsTheAccountsGrant(t *testing.T) {
-	srv, dir, sec := newGmailAccount(t)
-	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
-	srv.Fail("/profile", 500)
-	if d, err := finishSignIn(t, srv, owner, nil); err != nil || d != DGmailAddress {
-		t.Fatalf("GmailFinish = %q, %v", d, err)
-	}
-	if a, _ := owner.Account(); !a.Set || !sec.Has(GmailSlot(gmailtest.User)) || sec.Len() != 1 || len(srv.Revoked()) != 1 {
-		t.Fatalf("account %+v, %d slots, revoked %v", a.Settings, sec.Len(), srv.Revoked())
+// A sign-in whose profile fails while a Gmail account is set up gives
+// nothing back: the new grant may be that account's own, which Google's
+// revocation would end. The account's grant keeps working, and the owner
+// is told the step that ends the new one (#3027 L3 1).
+func TestASignInWithNoAddressKeepsTheAccountsGrantWorking(t *testing.T) {
+	for _, reg := range []*clerk.Registration{nil, fakeClient} {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, c), MailOwnerSide)}
+		srv.Fail("/profile", 500)
+		if d, err := finishSignIn(t, srv, owner, reg); err != nil || d != DGmailAddress {
+			t.Fatalf("registration %v: GmailFinish = %q, %v", reg != nil, d, err)
+		}
+		box, err := gmailBox(sec, GmailSlot(gmailtest.User), c)
+		if err == nil {
+			_, err = box.Read(context.Background())
+		}
+		st, _ := owner.Status()
+		if a, _ := owner.Account(); !a.Set || sec.Len() != 1 || srv.Revokes() != 0 || err != nil || !slices.Contains(st.Notices, noteGmailKept) {
+			t.Fatalf("registration %v: account %+v, %d slots, %d revocations, read %v, notices %v",
+				reg != nil, a.Settings, sec.Len(), srv.Revokes(), err, st.Notices)
+		}
 	}
 }

@@ -205,7 +205,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		err = MailSettings{Address: addr, API: APIGmail}.check()
 	}
 	if err != nil || len(g.grant) == 0 {
-		h.giveBack(g, false) // no account will use it
+		h.dropUnnamed(g) // no account will use it
 		return DGmailAddress, nil
 	}
 	h.mu.Lock()
@@ -260,6 +260,21 @@ func (h *MailHost) giveBack(g *gmailSignIn, locked bool) {
 	if g.in.Revoke(h.ctx) != clerk.DRevoked {
 		h.notify(false, noteGmailKept)
 	}
+}
+
+// dropUnnamed drops g's new grant, whose account Google's profile did not
+// name. With a Gmail account set up it may be that account's own grant
+// (a sign-in again offers its address first), which Google's revocation of
+// the new one would end, so it is not given back: the owner is told the
+// step that ends it (#3027 L3 1). With none, it is given back.
+func (h *MailHost) dropUnnamed(g *gmailSignIn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s, err := readMail(h.dir); err == nil && s.API == APIGmail {
+		h.notify(false, noteGmailKept)
+		return
+	}
+	h.giveBack(g, true)
 }
 
 // still reports whether the account set up is still the one in slot.
