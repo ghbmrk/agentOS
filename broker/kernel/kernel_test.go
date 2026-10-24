@@ -672,7 +672,7 @@ func TestKernelDerivesSourceTaskRecipientAndAmount(t *testing.T) {
 	}
 	r.plan("p4", spend, st(key.Trash, "9"))
 	got := r.k.State().Plans["p4"].Plan.Step(0)
-	if got.Task != "p4" || got.Recipient != "9" || got.Amount != 0 || got.Args["target"].Source != key.SrcPlanner {
+	if got.Task != key.PlanPrefix+"p4" || got.Recipient != "9" || got.Amount != 0 || got.Args["target"].Source != key.SrcPlanner {
 		t.Fatalf("source, task, recipient and amount are derived, got %+v", got)
 	}
 }
