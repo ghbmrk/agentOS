@@ -364,9 +364,9 @@ func TestAWrongPasteKeepsTheSignInWaiting(t *testing.T) {
 }
 
 // A sign-in again where the owner picks another Google account sets that
-// account up, and tells the owner the old grant was not given back (#3023
-// Security R3).
-func TestASignInAgainAsAnotherAccountTellsTheOwner(t *testing.T) {
+// account up and then gives the old account's grant back, which its Finish
+// sealed only over a copy (#3023 Security R3, #3026).
+func TestASignInAgainAsAnotherAccountGivesTheOldGrantBack(t *testing.T) {
 	srv, dir, sec := newGmailAccount(t)
 	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
 	srv.As("other@gmail.test")
@@ -374,9 +374,9 @@ func TestASignInAgainAsAnotherAccountTellsTheOwner(t *testing.T) {
 		t.Fatalf("GmailFinish = %q", d)
 	}
 	st, _ := owner.Status()
-	if a, _ := owner.Account(); a.Settings.Address != "other@gmail.test" || sec.Len() != 1 ||
-		!slices.Contains(st.Notices, noteGmailKept) || !slices.Contains(st.Notices, noteMailReplaced) {
-		t.Fatalf("account %+v, %d slots, notices %v", a.Settings, sec.Len(), st.Notices)
+	if a, _ := owner.Account(); a.Settings.Address != "other@gmail.test" || sec.Len() != 1 || !sec.Has(GmailSlot("other@gmail.test")) ||
+		!slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || slices.Contains(st.Notices, noteGmailKept) || !slices.Contains(st.Notices, noteMailReplaced) {
+		t.Fatalf("account %+v, %d slots, revoked %v, notices %v", a.Settings, sec.Len(), srv.Revoked(), st.Notices)
 	}
 }
 
@@ -436,5 +436,121 @@ func TestAWrongAndARightPasteAtOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%d: the account's grant does not work: %v", i, err)
 		}
+	}
+}
+
+// blockSettings makes the next write of the account's settings fail, after
+// any slot is put: its temporary is a directory that does not remove.
+func blockSettings(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, mailSettings+".tmp", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// finishSignIn is signIn that returns GmailFinish's error too.
+func finishSignIn(t *testing.T, srv *gmailtest.Server, owner MailOwner, reg *clerk.Registration) (string, error) {
+	t.Helper()
+	consent, d, err := owner.GmailBegin("watch", reg)
+	if err != nil || d != "" {
+		t.Fatalf("GmailBegin = %q, %v", d, err)
+	}
+	landing, ok := srv.Approve(consent)
+	if !ok {
+		t.Fatal("the fake refused the consent address")
+	}
+	return owner.GmailFinish("watch", landing)
+}
+
+// A replaced Gmail account's grant is given back only once the new account
+// is set up (#3026): when the setup fails, the account before stays set up
+// with a grant that works, and only the new grant is given back.
+func TestAFailedSetupKeepsTheReplacedGrant(t *testing.T) {
+	const other = "other@gmail.test"
+	imap := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	for _, again := range []bool{false, true} {
+		srv, dir, sec := newGmailAccount(t)
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+		blockSettings(t, dir)
+		srv.As(other)
+		reg := fakeClient
+		if again {
+			reg = nil
+		}
+		if _, err := finishSignIn(t, srv, owner, reg); err == nil {
+			t.Fatalf("again %v: a sign-in whose setup failed answered no error", again)
+		}
+		// One revocation, the new grant's: the fake's grants share one
+		// refresh token, so the old grant's would be a second request.
+		a, _ := owner.Account()
+		if a.Settings.Address != gmailtest.User || !sec.Has(GmailSlot(gmailtest.User)) || sec.Has(GmailSlot(other)) || srv.Revokes() != 1 {
+			t.Fatalf("again %v: account %+v, %d slots, revoked %v; want the old account kept with its grant",
+				again, a.Settings, sec.Len(), srv.Revoked())
+		}
+	}
+	t.Run("setmail", func(t *testing.T) {
+		srv, dir, sec := newGmailAccount(t)
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+		blockSettings(t, dir)
+		if err := owner.SetMail(imap, imaptest.Password); err == nil {
+			t.Fatal("a setup whose write failed answered no error")
+		}
+		if a, _ := owner.Account(); a.Settings.API != APIGmail || !sec.Has(GmailSlot(gmailtest.User)) || len(srv.Revoked()) != 0 {
+			t.Fatalf("account %+v, revoked %v; want the Gmail account kept with its grant", a.Settings, srv.Revoked())
+		}
+		if err := os.RemoveAll(filepath.Join(dir, mailSettings+".tmp")); err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.SetMail(imap, imaptest.Password); err != nil || !slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) {
+			t.Fatalf("SetMail = %v, revoked %v", err, srv.Revoked())
+		}
+	})
+	// A removal that fails once the slots are dropped has nothing left to
+	// keep: the grant is given back all the same.
+	t.Run("removemail", func(t *testing.T) {
+		srv, dir, sec := newGmailAccount(t)
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+		blockSettings(t, dir)
+		if err := owner.RemoveMail(); err == nil {
+			t.Fatal("a removal that failed answered no error")
+		}
+		if sec.Len() != 0 || !slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) {
+			t.Fatalf("%d slots, revoked %v; want the dropped grant given back", sec.Len(), srv.Revoked())
+		}
+	})
+}
+
+// A first sign-in for the account's own address whose grant does not seal
+// gives nothing back: Google's revocation of the new grant would end the
+// account's own with it (#3026). One whose settings write fails has its
+// grant sealed already, so the account is set up with it.
+func TestAFailedSameAddressSetupGivesNothingBack(t *testing.T) {
+	for _, block := range []string{secretsName, mailSettings} {
+		srv, dir, sec := newGmailAccount(t)
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+		if err := os.MkdirAll(filepath.Join(dir, block+".tmp", "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := finishSignIn(t, srv, owner, fakeClient); err == nil {
+			t.Fatalf("%s: a sign-in whose write failed answered no error", block)
+		}
+		if a, _ := owner.Account(); a.Settings.Address != gmailtest.User || sec.Len() != 1 || len(srv.Revoked()) != 0 {
+			t.Fatalf("%s: account %+v, %d slots, revoked %v", block, a.Settings, sec.Len(), srv.Revoked())
+		}
+	}
+}
+
+// A sign-in again whose profile fails gives its new grant back from its
+// own store, and the account keeps the grant it had (TN-gmail-socket-a's
+// second edge, #3026).
+func TestASignInAgainWithNoAddressKeepsTheAccountsGrant(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	srv.Fail("/profile", 500)
+	if d, err := finishSignIn(t, srv, owner, nil); err != nil || d != DGmailAddress {
+		t.Fatalf("GmailFinish = %q, %v", d, err)
+	}
+	if a, _ := owner.Account(); !a.Set || !sec.Has(GmailSlot(gmailtest.User)) || sec.Len() != 1 || len(srv.Revoked()) != 1 {
+		t.Fatalf("account %+v, %d slots, revoked %v", a.Settings, sec.Len(), srv.Revoked())
 	}
 }
