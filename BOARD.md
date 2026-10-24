@@ -350,3 +350,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-3-f5e | Browser secret-screen measure per screen; remembered task sites across a restart (CLK-3, VRB-1) | #2730 | queued(tier A; lane primary) |
 | KRN-2cap-doc | KRN-2cap-doc: name the trusted-core budget in SPEC KRN-2 and the two new gate files in OPERATING §7 (found on KRN-2cap). | KRN-2 | queued (later) |
 | KRN-2 split doc | KRN-2 split doc: LANES.md's owner seam names `run.Kernel.With` in broker/clerk/run; it is now `kernelproc.Kernel.With` (found on KRN-2 split). | KRN-2 | queued (later) |
+
+<!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
+
+## Work items that cannot render
+
+These open work-item issues are left off the board until their issue is fixed; each carries an intake comment naming what to change.
+
+```text
+issue #3046: body has no board-row block
+issue #3047: body has no board-row block
+```
