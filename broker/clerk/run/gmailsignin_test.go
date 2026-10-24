@@ -581,3 +581,23 @@ func TestASignInWithNoAddressOverUnreadableSettingsGivesNothingBack(t *testing.T
 		t.Fatalf("%d revocations, notices %v", srv.Revokes(), st.Notices)
 	}
 }
+
+// With an IMAP account set up, no Gmail grant is in use, so a new grant
+// Google's profile names no address for is given back (#3027 Security
+// delta 1).
+func TestASignInWithNoAddressOverIMAPGivesTheGrantBack(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	imap := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	if err := owner.SetMail(imap, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	before := srv.Revokes()
+	srv.Fail("/profile", 500)
+	if d, err := finishSignIn(t, srv, owner, fakeClient); err != nil || d != DGmailAddress {
+		t.Fatalf("GmailFinish = %q, %v", d, err)
+	}
+	if st, _ := owner.Status(); srv.Revokes() != before+1 || slices.Contains(st.Notices, noteGmailUnnamed) {
+		t.Fatalf("%d revocations after %d, notices %v", srv.Revokes(), before, st.Notices)
+	}
+}

@@ -268,17 +268,18 @@ func (h *MailHost) giveBack(g *gmailSignIn, locked bool) {
 }
 
 // dropUnnamed drops g's new grant, whose account Google's profile did not
-// name. With an account set up it may be that account's own grant (a
-// sign-in again offers its address first), which Google's revocation of
-// the new one would end, so it is not given back, and the owner is told
-// how to end it in another account only (#3027 L3 1). With none, it is
-// given back.
+// name. With a Gmail account set up it may be that account's own grant
+// (a sign-in again offers its address first), which Google's revocation
+// of the new one would end, so it is not given back, and the owner is
+// told how to end it in another account only (#3027 L3 1). With no
+// account, or an IMAP one, it is given back.
 func (h *MailHost) dropUnnamed(g *gmailSignIn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, err := readMail(h.dir); !errors.Is(err, ErrNoMailAccount) {
-		// Any account, or settings that do not read: the box may still
-		// hold a Gmail grant the revocation would end, so fail closed.
+	if s, err := readMail(h.dir); !errors.Is(err, ErrNoMailAccount) && (err != nil || s.API == APIGmail) {
+		// A Gmail account, or settings that do not read: the box may
+		// still hold a Gmail grant the revocation would end, so fail
+		// closed. An IMAP account holds none (#3027 Security delta 1).
 		h.notify(false, noteGmailUnnamed)
 		return
 	}
