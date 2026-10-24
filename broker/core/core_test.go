@@ -390,3 +390,151 @@ func TestEveryCoreListEntryExists(t *testing.T) {
 		}
 	}
 }
+
+// fixtures are the allow-line packages core.txt grants on the grounds that
+// only tests link them: a name ending in test, and kernel/sim (CORE-fixture-imports-a).
+func fixtures(t *testing.T, l list) []string {
+	t.Helper()
+	var fs []string
+	for p := range l.allow {
+		if strings.HasSuffix(p, "test") || p == "kernel/sim" {
+			fs = append(fs, p)
+		}
+	}
+	sort.Strings(fs)
+	if len(fs) == 0 {
+		t.Fatal("core.txt allows no test fixture; update fixtures() if they were renamed")
+	}
+	return fs
+}
+
+// overlay writes a go -overlay file that adds a main.go, with its source,
+// at each module path dir (which need not exist), and returns its path.
+func overlay(t *testing.T, srcs map[string]string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	replace := map[string]string{}
+	for dir, src := range srcs {
+		file := filepath.Join(tmp, strings.ReplaceAll(dir, "/", "_")+".go")
+		if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		abs, err := filepath.Abs(filepath.Join(moduleRoot, dir, "main.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		replace[abs] = file
+	}
+	o, err := json.Marshal(map[string]map[string]string{"Replace": replace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(tmp, "overlay.json")
+	if err := os.WriteFile(path, o, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// importing is a package named name that imports path.
+func importing(name, path string) string {
+	return fmt.Sprintf("package %s\n\nimport _ %q\n\nfunc main() {}\n", name, modPrefix+path)
+}
+
+// The enforcement: each fixture's init stops any binary go test did not
+// build, so the files carry the rule along every route that reaches them
+// (a build tag, another GOOS, a symlinked or vendored copy) without this
+// test modelling the route.
+func TestAFixtureStopsABinaryGoTestDidNotBuild(t *testing.T) {
+	const dir = "core/testdata/linksfixture"
+	for _, f := range fixtures(t, readList(t)) {
+		t.Run(f, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "linksfixture")
+			build := exec.Command("go", "build", "-overlay="+overlay(t, map[string]string{dir: importing("main", f)}), "-o", bin, "./"+dir)
+			build.Dir = moduleRoot
+			if out, err := build.CombinedOutput(); err != nil {
+				t.Fatalf("go build: %v\n%s", err, out)
+			}
+			out, err := exec.Command(bin).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "is a test fixture") {
+				t.Fatalf("a binary linking %s ran: err %v, output %q; want its init to panic", f, err, out)
+			}
+		})
+	}
+}
+
+// fixtureImporters lists, in the host build of patterns, each package
+// outside the fixtures whose non-test files link a fixture.
+func fixtureImporters(t *testing.T, fs []string, goFlags []string, patterns ...string) []string {
+	t.Helper()
+	fixture := map[string]bool{}
+	for _, f := range fs {
+		fixture[modPrefix+f] = true
+	}
+	args := append(append([]string{"list"}, goFlags...), "-json=ImportPath,Deps,Error")
+	cmd := exec.Command("go", append(args, patterns...)...)
+	cmd.Dir = moduleRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, stderr.String())
+	}
+	var found []string
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var p struct {
+			ImportPath string
+			Deps       []string
+			Error      *struct{ Err string }
+		}
+		if err := dec.Decode(&p); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if p.Error != nil {
+			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
+		}
+		if fixture[p.ImportPath] {
+			continue
+		}
+		for _, d := range p.Deps {
+			if fixture[d] {
+				found = append(found, fmt.Sprintf("%s links test fixture %s outside its _test.go files", strings.TrimPrefix(p.ImportPath, modPrefix), strings.TrimPrefix(d, modPrefix)))
+			}
+		}
+	}
+	return found
+}
+
+// The fast pre-filter: in the host build, no package outside the fixtures
+// links one from its non-test files. It names the mistake in CI before a
+// binary runs; routes it does not model are the guard's to stop.
+func TestFixturesAreImportedOnlyByTests(t *testing.T) {
+	for _, f := range fixtureImporters(t, fixtures(t, readList(t)), nil, "./...") {
+		t.Error(f + "; import it only from _test.go files")
+	}
+}
+
+// The pre-filter flags a package that links a fixture, directly or through
+// another package, and not one that imports it only from a test.
+func TestAFixtureImportedOutsideATestFails(t *testing.T) {
+	const dir, mid = "core/testdata/importsfixture", "core/testdata/importsfixture/mid"
+	fs := fixtures(t, readList(t))
+	for _, c := range []struct {
+		name string
+		srcs map[string]string
+		want int
+	}{
+		{"direct", map[string]string{dir: importing("main", "loops/loopstest")}, 1},
+		{"through another package", map[string]string{dir: importing("main", mid), mid: importing("mid", "kernel/sim")}, 2},
+		// loops' own tests use loopstest; loops itself must not.
+		{"from a test only", map[string]string{dir: importing("main", "loops")}, 0},
+	} {
+		got := fixtureImporters(t, fs, []string{"-overlay=" + overlay(t, c.srcs)}, "./"+dir+"/...")
+		if len(got) != c.want {
+			t.Errorf("%s: want %d finding(s), got %q", c.name, c.want, got)
+		}
+	}
+}
