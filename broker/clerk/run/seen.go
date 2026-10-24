@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -171,6 +172,9 @@ func trouble(err error, mark inbox.Mark) (why, next string) {
 		// the rest the record keeps for 90 days whether it is deleted or not
 		// (inbox.TooMuchReadMailError, #2841, #2891 UX finding 1).
 		return "you have more read mail than I can keep track of", tooMuchNext(err) + again
+	case errors.Is(err, inbox.ErrReconnect):
+		// Only a new sign-in clears it (stops).
+		return "Gmail stopped letting me in", strings.TrimPrefix(inbox.GmailReconnect, "Gmail stopped letting me in. ")
 	case errors.Is(err, imapsmtp.ErrUnreachable):
 		return "I couldn't reach your mail server", again
 	case errors.Is(err, imapsmtp.ErrTimeout):
@@ -253,7 +257,7 @@ func quoted(s string) string {
 // after the owner deletes that mail. A failing read that found none leaves
 // the record as it was. An empty LastOpened would read as "never opened"
 // and let every unsubscribe through (#2698 item 1).
-func lastOpened(ctx context.Context, box *inbox.Live, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark) (map[string]string, MailStatus) {
+func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark) (map[string]string, MailStatus) {
 	var st MailStatus
 	rec, loaded := loadSeen(dir, s, slot) // not loaded: an empty record, which Opened starts today
 	got, kept, err := box.Opened(ctx, today, rec.Log)

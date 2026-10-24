@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -45,10 +47,18 @@ const (
 	gForwards  = "settings.forwardingAddresses.list"
 	gAutoFwd   = "settings.autoForwarding.get"
 	gProfile   = "profile.get"
+	gRead      = "messages.list.read"
+	gReadNext  = "messages.list.read.next"
 	gRawMax    = 1 << 20 // a raw message's answer; a mail past it is not read (fail closed)
 	gPageMax   = 1 << 20 // a list's or history's page
 	gSmallMax  = 64 << 10
 	gListLimit = "500" // ids per list page, Gmail's most
+	// gReadQuery is the read mail Opened lists, in every label, spam and
+	// trash too, as Live reads every folder: a mail without UNREAD.
+	gReadQuery = "/messages?q=-is%3Aunread&includeSpamTrash=true&maxResults=" + gListLimit
+	// gPagesMax bounds Opened's pages: as many ids as openedMax could ever
+	// log, so an API that never ends its listing fails the read.
+	gPagesMax = searchMax / 500
 )
 
 // GmailCalls is Gmail's declaration over base (GmailBase, or a fake's), its
@@ -56,7 +66,8 @@ const (
 // They are the calls TN-gmail-api names (CLK-9): list and get (metadata,
 // full, raw), adding an agentOS/ label, trash and untrash, the agentOS/
 // labels, send, history, the reads of filters, forwarding and
-// auto-forwarding, and the profile. The grant gmail.modify allows more
+// auto-forwarding, and the profile; and the list of read mail that Opened
+// pages through, its query a constant (#2925). The grant gmail.modify allows more
 // (permanent deletion needs the full-mail scope and settings writes
 // gmail.settings.*, which the box never asks for); this list is narrower
 // still.
@@ -77,6 +88,8 @@ func GmailCalls(base, slot string) []clerk.Call {
 	next.Query = map[string]string{"pageToken": "page"}
 	history := get(gHistory, "/history?labelId=INBOX", gPageMax, "start")
 	history.Query = map[string]string{"startHistoryId": "start"}
+	readNext := get(gReadNext, gReadQuery, gPageMax, "page")
+	readNext.Query = map[string]string{"pageToken": "page"}
 	label := post(gLabel, "/messages/{id}/modify", gSmallMax, map[string]string{"addLabelIds": "label"}, "id", "label")
 	label.Lists = []string{"addLabelIds"}
 	return []clerk.Call{
@@ -96,6 +109,8 @@ func GmailCalls(base, slot string) []clerk.Call {
 		get(gForwards, "/settings/forwardingAddresses", gSmallMax),
 		get(gAutoFwd, "/settings/autoForwarding", gSmallMax),
 		get(gProfile, "/profile", gSmallMax),
+		get(gRead, gReadQuery, gPageMax),
+		readNext,
 	}
 }
 
@@ -166,6 +181,10 @@ const (
 	nGmailUnsent NotDone = "gmail-not-sent" // the clerk sent nothing (credential, address, token endpoint)
 	nBadLabel    NotDone = "bad-label"      // the API named a label the clerk may not add
 )
+
+// ErrReconnect is a Gmail call's error once the token endpoint refuses the
+// grant: nothing is sent until the owner signs in again (GmailReconnect).
+var ErrReconnect error = nReconnect
 
 // call makes one declared call and decodes a 2xx answer into v (nil skips
 // it). Its error is NotDone when the call did nothing.
@@ -468,9 +487,8 @@ func (g *Gmail) Doors(ctx context.Context) (Doors, error) {
 	return d, nil
 }
 
-// Mark is the account's history id now, so a caller can skip a read that
-// would find nothing new (as Live's Mark).
-func (g *Gmail) Mark(ctx context.Context) (string, error) {
+// History is the account's history id now, which Changed reads from.
+func (g *Gmail) History(ctx context.Context) (string, error) {
 	var p struct {
 		History string `json:"historyId"`
 	}
@@ -502,4 +520,118 @@ func (g *Gmail) Changed(ctx context.Context, mark string) (bool, error) {
 		return true, err
 	}
 	return len(h.History) > 0 || h.Next != "", nil
+}
+
+// gmailHistory is the folder name a Gmail Mark carries its history id under.
+const gmailHistory = "gmail history"
+
+// Mark is the account's Mark now, for the clerk's process to skip a read
+// that would find nothing new (as Live's Mark, #2925): the profile's history
+// id, which Gmail moves on every change to the account, a read-state change
+// in any label included, so two equal Marks show nothing changed that Read
+// or Opened reads. It is carried as one Mark entry under gmailHistory, its
+// validity and next UID set so Same compares it; nil on any error.
+func (g *Gmail) Mark(ctx context.Context) (Mark, error) {
+	h, err := g.History(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return Mark{{Folder: gmailHistory, Validity: 1, Next: 1, ModSeq: h}}, nil
+}
+
+// gHeaders is a metadata get's answer: the From and Message-ID header
+// fields and the arrival, in milliseconds since the epoch.
+type gHeaders struct {
+	ID       string `json:"id"`
+	Internal string `json:"internalDate"`
+	Payload  struct {
+		Headers []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"headers"`
+	} `json:"payload"`
+}
+
+// header is the answer as header lines Opened reads, or an error for a
+// field that would read as more than one line.
+func (h gHeaders) header() ([]byte, time.Time, error) {
+	var b []byte
+	for _, f := range h.Payload.Headers {
+		if !strings.EqualFold(f.Name, "From") && !strings.EqualFold(f.Name, "Message-ID") {
+			continue
+		}
+		if strings.ContainsAny(f.Name+f.Value, "\r\n") {
+			return nil, time.Time{}, errors.New("inbox: gmail: a header field across lines")
+		}
+		b = append(b, f.Name+": "+f.Value+"\r\n"...)
+	}
+	b = append(b, "\r\n"...)
+	var arrived time.Time
+	if ms, err := strconv.ParseInt(h.Internal, 10, 64); err == nil && ms > 0 {
+		arrived = time.UnixMilli(ms).UTC()
+	}
+	return b, arrived, nil
+}
+
+// Opened is World.LastOpened for the account and the log to keep, as Live's
+// Opened (#2618, #2684), over Gmail's read state (#2925): a read mail is one
+// without UNREAD, in any label, spam and trash too. Each is listed by a
+// query the declaration fixes and read by its metadata (From, Message-ID,
+// internalDate), never its body, so nothing is marked read. A mail gone
+// between the list and the get is left out, as one deleted before the read;
+// any other failure fails the whole answer, which hands back the log it
+// began with and the read mail it logged (#2841), as Live's does.
+func (g *Gmail) Opened(ctx context.Context, today string, log SeenLog) (map[string]string, SeenLog, error) {
+	o, err := newOpened(today, log)
+	if err != nil {
+		return nil, SeenLog{}, err
+	}
+	page := ""
+	for n := 0; ; n++ {
+		if n == gPagesMax {
+			return nil, o.partial(), errors.New("inbox: gmail: a listing of read mail that does not end")
+		}
+		var l struct {
+			Messages []struct {
+				ID string `json:"id"`
+			} `json:"messages"`
+			Next string `json:"nextPageToken"`
+		}
+		name, args := gRead, map[string]string{}
+		if page != "" {
+			name, args = gReadNext, map[string]string{"page": page}
+		}
+		if _, err := g.call(ctx, name, args, &l); err != nil {
+			return nil, o.partial(), err
+		}
+		for _, m := range l.Messages {
+			if !gmailID.MatchString(m.ID) {
+				return nil, o.partial(), errors.New("inbox: gmail: a message id outside Gmail's form")
+			}
+			var h gHeaders
+			ans, bad := g.api.Call(ctx, gMetadata, map[string]string{"id": m.ID})
+			if bad == "" && ans.Status == http.StatusNotFound {
+				continue
+			}
+			if _, err := g.decodeInto(ans, bad, &h); err != nil {
+				return nil, o.partial(), err
+			}
+			raw, arrived, err := h.header()
+			if h.ID != m.ID || err != nil {
+				return nil, o.partial(), errors.New("inbox: gmail: a read mail's headers that do not decode")
+			}
+			if err := o.header(g.api.RedactToken(raw), arrived); err != nil {
+				return nil, o.partial(), err
+			}
+		}
+		if l.Next == "" || len(l.Messages) == 0 {
+			break
+		}
+		page = l.Next
+	}
+	if o.full {
+		return nil, o.partial(), o.tooMuch()
+	}
+	got, kept := o.result()
+	return got, kept, nil
 }
