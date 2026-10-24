@@ -10,7 +10,7 @@ The split is a pure function of the package list: packages are placed heaviest f
 tie). A package WEIGHTS does not name weighs 1, so a new package lands on the lightest shard;
 the split never drops it, it only balances less well until WEIGHTS names it. `shard` prints a
 shard's packages heaviest first: `go test` starts packages in command-line order, so the
-longest one (pubid) starts at once instead of after the packages that sort before it.
+longest one (journal) starts at once instead of after the packages that sort before it.
 
 Usage:
   tools/ci_split.py shard --shards N --index I < packages    this shard's packages
@@ -26,7 +26,7 @@ MODULE = "github.com/ghbmrk/agentos/broker"
 # rounded), for the packages at 10 s or over; the rest weigh 1. Stale numbers only unbalance
 # the shards.
 WEIGHTS = {
-    "pubid": 259, "journal": 223, "guest": 128, "cmd/agentosd": 124, "localui": 117,
+    "journal": 223, "guest": 128, "cmd/agentosd": 124, "localui": 117,
     "holder": 99, "cmd/agentos-egress": 83, "recovery": 72, "update": 62, "recall": 57,
     "kernel/sim": 35, "childproc": 35, "daemon": 34, "vm/gvisor": 33, "mail": 30,
     "change": 26, "loops": 25, "maintain": 18, "guesterr": 18, "core": 17,

@@ -14,7 +14,7 @@ an instruction classifier would suffice.
 ## What main contains (changed since the draft)
 
 - Custody modes are in SPEC (CRED-5, W1–W9) and the S8 stub results are merged
-  (`spikes/S8-provider-workers/RESULT.md`, #186).
+  (the S8-provider-workers spike, #186; deleted when worker-held mode was dropped, in git history).
 - Broker-held machinery exists: egress proxy with declared-operation injection
   (`broker/egress/proxy.go`), vault redactor (`broker/vault/redact.go`), recall
   scrubber (`broker/recall/scrub.go`), canary tooling with encoding coverage

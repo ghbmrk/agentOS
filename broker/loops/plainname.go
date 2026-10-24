@@ -22,7 +22,6 @@ var fuzzNames = map[string]string{
 	"decoder.FuzzDecode":            "the check that reads photos you send",
 	"digestqueue.FuzzLoadState":     "the check that reads my saved digest queue",
 	"guest.FuzzMCP":                 "the check that reads agent tool calls",
-	"hint.FuzzParse":                "the check that reads bridge hints",
 	"hostdisk.FuzzProbe":            "the check that reads attached disks",
 	"localui.FuzzScanPassphrase":    "the check that reads a passphrase photo",
 	"imapsmtp.FuzzIMAPReplies":      "the check that reads replies from your mail server",
