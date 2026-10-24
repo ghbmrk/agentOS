@@ -1,10 +1,11 @@
-// Package run runs the kernel and each credentialed clerk as processes of
-// their own (MIG-4-run, #2682; option A): the kernel's process holds the log
-// and reaches each clerk over that clerk's socket, and each clerk's process,
-// under its own uid, holds that one account's Secrets file and no other
-// (CLK-1, STO-3). The kernel process never holds a credential, and a clerk
-// process sees the log only through the view the kernel sends with each call.
-package run
+// Package kernelproc is the kernel's process (MIG-4-run, #2682; option A;
+// split from broker/clerk/run by KRN-2 split, #2892): it holds the log and
+// reaches each clerk over that clerk's socket. It never holds a credential,
+// and it links no clerk's code, so no mail or model parser is in the kernel
+// process (SPEC KRN-2). The wire both sides speak (the call, the view and
+// the socket helpers) lives here too, and broker/clerk/run, the clerks'
+// processes, imports it.
+package kernelproc
 
 import (
 	"crypto/ed25519"

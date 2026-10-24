@@ -33,6 +33,7 @@ inert  github.com/ghbmrk/agentos/broker/mail/mailsock -- socket between trusted 
 inert  github.com/ghbmrk/agentos/broker/netguard -- address policy over parsed netip values
 inert  github.com/ghbmrk/agentos/broker/owner/notice -- notice codes as data; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/owner/notice/noticesock -- socket between trusted processes (agentosd and agentos-egress)
+inert  github.com/ghbmrk/agentos/broker/privfile -- checks and replaces a process's own files; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/procguard -- process hardening; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/provagent -- declares plan routes as values
 inert  github.com/ghbmrk/agentos/broker/quota -- sets disk quotas; decodes nothing
@@ -53,7 +54,7 @@ parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- IMAP and SMTP replies from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/model -- model providers' replies
-parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the kernel's, clerks' and mail sockets, and the unlock step's hand-off
+parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and mail sockets
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
@@ -72,6 +73,7 @@ parser github.com/ghbmrk/agentos/broker/guest -- the guest interface, one socket
 parser github.com/ghbmrk/agentos/broker/holder -- provider replies to a spent login
 parser github.com/ghbmrk/agentos/broker/kernel -- requests and key chains from clerks and planners
 parser github.com/ghbmrk/agentos/broker/kernel/key -- key chains any holder presents
+parser github.com/ghbmrk/agentos/broker/kernelproc -- calls on the kernel's sockets, clerks' answers, and the log file and anchor on the drive
 parser github.com/ghbmrk/agentos/broker/localapi -- the local UI's messages on localui.sock
 parser github.com/ghbmrk/agentos/broker/localsrv -- the local UI's ops on localui.sock
 parser github.com/ghbmrk/agentos/broker/mail -- mail messages

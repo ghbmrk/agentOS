@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/privfile"
 )
 
 // The mail clerk's record of read mail (#2684, #2698 items 1, 2, 10 to 12).
@@ -71,7 +72,7 @@ func loadSeen(dir string, s clerk.Sealer, slot string) (r sealedSeen, st seenSta
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || privateFile(f) != nil || fi.Size() > maxSeen {
+	if err != nil || privfile.CheckFile(f) != nil || fi.Size() > maxSeen {
 		return r, seenBad
 	}
 	// Read in one allocation of the file's size: the file is replaced by
@@ -104,7 +105,7 @@ func saveSeen(dir string, s clerk.Sealer, slot string, r sealedSeen) error {
 	if len(blob) > maxSeen {
 		return errors.New("run: the record of read mail is past its bound")
 	}
-	return writeAtomic(dir, seenFile, blob, nil)
+	return privfile.WriteAtomic(dir, seenFile, blob, nil)
 }
 
 // markTold records that the owner has read the end of the warm-up, so it is

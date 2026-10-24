@@ -1,4 +1,4 @@
-package run
+package kernelproc
 
 // REQ: CLK-2, KRN-8, A4
 

@@ -26,10 +26,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernelproc"
 )
 
 // serveMail serves side of h on a fresh socket for the test's uid.
-func serveMail(t *testing.T, h *MailHost, side MailSide) Conn {
+func serveMail(t *testing.T, h *MailHost, side MailSide) kernelproc.Conn {
 	t.Helper()
 	sock := filepath.Join(shortDir(t), "m.sock")
 	ln, err := ListenMail(sock, os.Getuid())
@@ -38,7 +39,7 @@ func serveMail(t *testing.T, h *MailHost, side MailSide) Conn {
 	}
 	t.Cleanup(func() { ln.Close() })
 	go ServeMail(ln, h, side)
-	return Conn{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}
+	return kernelproc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 20 * time.Second}
 }
 
 // The owner sets up, replaces and removes the account on the mail process's
@@ -140,12 +141,12 @@ func TestEachMailSocketServesOnlyItsSide(t *testing.T) {
 	owner := serveMail(t, h, MailOwnerSide)
 	planner := serveMail(t, h, MailPlannerSide)
 	for _, op := range []string{"setmail", "removemail", "status", "account", "told"} {
-		if err := planner.call(op, setMailArgs{Settings: MailSettings{Address: "a@b.test", IMAP: "i.test:993", SMTP: "s.test:465"}, Password: "a-password-12"}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+		if err := planner.Call(op, setMailArgs{Settings: MailSettings{Address: "a@b.test", IMAP: "i.test:993", SMTP: "s.test:465"}, Password: "a-password-12"}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
 			t.Fatalf("%s on the planner's socket: %v", op, err)
 		}
 	}
 	for _, op := range []string{"listing", "reread"} {
-		if err := owner.call(op, nil, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+		if err := owner.Call(op, nil, nil); err == nil || !strings.Contains(err.Error(), "no call") {
 			t.Fatalf("%s on the owner's socket: %v", op, err)
 		}
 	}
@@ -500,12 +501,12 @@ func TestAStepsFailedSignInStopsTheClerk(t *testing.T) {
 				t.Fatalf("the listing: %v, %v", ls, err)
 			}
 			sock := filepath.Join(shortDir(t), "mail.sock")
-			ln, err := ListenClerk(sock, os.Getuid())
+			ln, err := kernelproc.ListenClerk(sock, os.Getuid())
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { ln.Close() })
-			go ServeClerk(ln, h, anchors)
+			go kernelproc.ServeClerk(ln, h, anchors)
 			b := newBoxFor(t, sock, inbox.Name, key.Organize)
 			c.fail(t, dir, sec, s, &to, &dials)
 			id := b.submitStep(kernel.PlanStep{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": ls[0].Mail, "label": "agentOS/bulk"}})
@@ -542,7 +543,7 @@ func TestTheOwnerReadsWhetherAnAccountIsSetUp(t *testing.T) {
 		t.Fatalf("the account read: %+v, %v", a, err)
 	}
 	var raw json.RawMessage
-	if err := r.owner.call("account", nil, &raw); err != nil || bytes.Contains(raw, []byte(imaptest.Password)) {
+	if err := r.owner.Call("account", nil, &raw); err != nil || bytes.Contains(raw, []byte(imaptest.Password)) {
 		t.Fatalf("the account read carries the password, or failed (%v)", err)
 	}
 	if err := r.owner.SetMail(s, imaptest.Password); err != nil {

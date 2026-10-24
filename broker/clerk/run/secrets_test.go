@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/privfile"
 )
 
 func clerkDir(t *testing.T) string {
@@ -54,7 +55,7 @@ func TestSecretsWriteStoppedAtEveryStepLeavesAWholeForm(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := writeAtomic(dir, secretsName, next, func(j int) bool { return j == i }); !errors.Is(err, errStopped) {
+		if err := privfile.WriteAtomic(dir, secretsName, next, func(j int) bool { return j == i }); !errors.Is(err, privfile.ErrStopped) {
 			t.Fatalf("step %d: %v, want stopped", i, err)
 		}
 		if err := loadsWhole(dir); err != nil {
@@ -68,7 +69,7 @@ func TestSecretsWriteStoppedAtEveryStepLeavesAWholeForm(t *testing.T) {
 		if err := loadsWhole(dir); err != nil {
 			t.Fatalf("with a torn temporary after step %d: %v", i, err)
 		}
-		if err := writeAtomic(dir, secretsName, next, nil); err != nil {
+		if err := privfile.WriteAtomic(dir, secretsName, next, nil); err != nil {
 			t.Fatalf("write after a stop at step %d: %v", i, err)
 		}
 		if err := loadsWhole(dir); err != nil {

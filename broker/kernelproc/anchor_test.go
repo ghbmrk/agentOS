@@ -1,4 +1,4 @@
-package run
+package kernelproc
 
 // REQ: LOG-2, STO-1
 
@@ -59,7 +59,7 @@ func head(priv ed25519.PrivateKey, seq uint64) kernel.Head {
 // where a TPM's might (not at zero), and opens it.
 func newAnchor(t *testing.T) (string, *fakeCounter, ed25519.PrivateKey, *CounterAnchor) {
 	t.Helper()
-	dir, c, priv := clerkDir(t), &fakeCounter{n: 1000}, headKey(t)
+	dir, c, priv := ownDir(t), &fakeCounter{n: 1000}, headKey(t)
 	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestCounterAnchorOnTheTPMCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: auth}
-	dir, priv := clerkDir(t), headKey(t)
+	dir, priv := ownDir(t), headKey(t)
 	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)
 	}
@@ -441,4 +441,14 @@ func TestCounterAnchorIncrementAnswerLost(t *testing.T) {
 	if h := latest(t, dir, c, priv); h.Seq != 6 {
 		t.Fatalf("reopened on seq %d, want 6", h.Seq)
 	}
+}
+
+// ownDir is a fresh directory this uid alone can open.
+func ownDir(t *testing.T) string {
+	t.Helper()
+	d := filepath.Join(t.TempDir(), "own")
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return d
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/privfile"
 )
 
 // The mail clerk's process (MIG-4-mail-run, #2655). Its directory holds the
@@ -140,7 +141,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 	if !mailPassword(password) {
 		return ErrWeakMailPassword
 	}
-	if err := private(dir, true); err != nil {
+	if err := privfile.Check(dir, true); err != nil {
 		return err
 	}
 	b, err := json.Marshal(s)
@@ -154,7 +155,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 	same := perr == nil && slotOf(prev) == cur
 	steps := []func() error{
 		func() error { return sec.Put(cur, clerk.KindStatic, []byte(password)) },
-		func() error { return writeAtomic(dir, mailSettings, b, nil) },
+		func() error { return privfile.WriteAtomic(dir, mailSettings, b, nil) },
 		func() error {
 			// Another account's record of read mail does not load under this
 			// one; dropping it makes the restart a new account's, not a loss.
@@ -170,7 +171,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 			return err
 		}
 		if stop != nil && stop(i) {
-			return errStopped
+			return privfile.ErrStopped
 		}
 	}
 	return nil
@@ -180,7 +181,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 // next connection has nothing to sign in with and no crash-left slot stays
 // sealed, then the settings and any temporary a crashed write left.
 func RemoveMail(dir string, sec *clerk.Secrets) error {
-	if err := private(dir, true); err != nil {
+	if err := privfile.Check(dir, true); err != nil {
 		return err
 	}
 	mailMu.Lock()
@@ -201,14 +202,14 @@ func removeFiles(dir string, names ...string) error {
 			return err
 		}
 	}
-	return syncDir(dir)
+	return privfile.SyncDir(dir)
 }
 
 // readMail loads dir's settings file under the same custody checks as the
 // Secrets file.
 func readMail(dir string) (MailSettings, error) {
 	var r MailSettings
-	if err := private(dir, true); err != nil {
+	if err := privfile.Check(dir, true); err != nil {
 		return r, err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, mailSettings), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -219,7 +220,7 @@ func readMail(dir string) (MailSettings, error) {
 		return r, err
 	}
 	defer f.Close()
-	if err := privateFile(f); err != nil {
+	if err := privfile.CheckFile(f); err != nil {
 		return r, err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxSettings+1))

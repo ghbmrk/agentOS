@@ -47,8 +47,8 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
-	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernelproc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -66,7 +66,7 @@ func main() {
 const (
 	storeName  = "store"
 	stagedName = "store.enrolling"
-	anchorFile = "anchor" // run.CounterAnchor's head file in -anchor-dir
+	anchorFile = "anchor" // kernelproc.CounterAnchor's head file in -anchor-dir
 
 	// Store entries enrollment writes. counterEntry is the kernel's: the
 	// counter's reference and auth value, which a kernel that opens the
@@ -311,7 +311,7 @@ func enroll(c config, t transport.TPM) error {
 	if err := os.Mkdir(c.anchorDir, 0o700); err != nil {
 		return err
 	}
-	if err := run.InitCounterAnchor(c.anchorDir, c.log, ctr.Counter(t, srk), head); err != nil {
+	if err := kernelproc.InitCounterAnchor(c.anchorDir, c.log, ctr.Counter(t, srk), head); err != nil {
 		return err
 	}
 	for _, p := range []string{filepath.Join(c.anchorDir, anchorFile), c.anchorDir} {

@@ -41,8 +41,12 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
-# The kernel's process and each clerk's process (MIG-4-run, #2682): it opens
-# the log, boots the kernel, and carries each call to a clerk's socket.
+# The kernel's process (MIG-4-run, #2682): it opens the log, boots the
+# kernel, and carries each call to a clerk's socket. It links no clerk's code
+# (KRN-2 split, #2892).
+wiring kernelproc
+# Each clerk's process (MIG-4-run, #2682): it holds one account's Secrets
+# file and answers the kernel's calls over kernelproc's wire.
 wiring clerk/run
 core clerk/inbox
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived

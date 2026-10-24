@@ -1,4 +1,4 @@
-package run
+package kernelproc
 
 import (
 	"crypto/ed25519"
@@ -51,7 +51,7 @@ func act[A any](f func(k *kernel.Kernel, now int64, a A) error) op {
 	return func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a A
 		if err := json.Unmarshal(raw, &a); err != nil {
-			return nil, errArgs
+			return nil, ErrArgs
 		}
 		return nil, f(k, now, a)
 	}
@@ -62,7 +62,7 @@ func read[A, R any](f func(s *kernel.State, now int64, a A) R) op {
 	return func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a A
 		if err := json.Unmarshal(raw, &a); err != nil {
-			return nil, errArgs
+			return nil, ErrArgs
 		}
 		return f(k.State(), now, a), nil
 	}
@@ -76,7 +76,8 @@ func refusal(r *key.Refusal) error {
 	return r
 }
 
-var errArgs = errors.New("run: the call's arguments do not decode")
+// ErrArgs is a socket call whose arguments do not decode.
+var ErrArgs = errors.New("run: the call's arguments do not decode")
 
 type (
 	stepArgs struct {
@@ -193,7 +194,7 @@ var MeterSide = Side{"meter", map[string]op{
 	"admitspend": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a spendArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
-			return nil, errArgs
+			return nil, ErrArgs
 		}
 		ad, r := k.AdmitSpend(now, a.Plan, a.Amount)
 		if r != nil {
@@ -221,19 +222,19 @@ func ListenKernel(path string, uid int) (net.Listener, error) {
 // own connection, so a slow caller never delays STOP; the kernel's lock
 // orders them. clock is the kernel process's.
 func ServeKernel(ln net.Listener, h *Kernel, side Side, clock func() int64) error {
-	return serveConns(ln, maxConns, func(conn net.Conn) { serveKernel(conn, h, side, clock) })
+	return ServeConns(ln, MaxConns, func(conn net.Conn) { serveKernel(conn, h, side, clock) })
 }
 
-// maxConns bounds the calls one socket serves at once. More wait in the
+// MaxConns bounds the calls one socket serves at once. More wait in the
 // listener's backlog, holding none of the process's descriptors, so a side
 // that floods its own socket cannot starve another side's (KRN-7).
-const maxConns = 16
+const MaxConns = 16
 
-// serveConns runs handle on each connection ln accepts, at most n at once,
+// ServeConns runs handle on each connection ln accepts, at most n at once,
 // until ln closes. Any other accept error (no descriptor free, a connection
 // aborted) is waited out, never the end of the socket, so the owner's STOP
 // still lands once a flood ends.
-func serveConns(ln net.Listener, n int, handle func(net.Conn)) error {
+func ServeConns(ln net.Listener, n int, handle func(net.Conn)) error {
 	slots := make(chan struct{}, n)
 	wait := 5 * time.Millisecond
 	for {
@@ -257,7 +258,7 @@ func serveConns(ln net.Listener, n int, handle func(net.Conn)) error {
 }
 
 func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
-	serveOne(conn, func(name string, args json.RawMessage) (out json.RawMessage, err error) {
+	ServeOne(conn, func(name string, args json.RawMessage) (out json.RawMessage, err error) {
 		f, ok := side.ops[name]
 		if !ok {
 			return nil, errors.New("run: the " + side.name + " socket has no call " + name)
@@ -274,8 +275,8 @@ func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
 	})
 }
 
-// serveOne answers the one call on conn with handle's result.
-func serveOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.RawMessage, error)) {
+// ServeOne answers the one call on conn with handle's result.
+func ServeOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.RawMessage, error)) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var in kernelCall
@@ -340,10 +341,20 @@ func init() {
 		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
-		key.ErrUnknownKind, key.ErrUncaveated, errArgs, ErrModelCall, ErrNoMailAccount,
-		ErrMailAddress, ErrMailServer, ErrMailUser, ErrWeakMailPassword, ErrBadGrant, ErrNoReconnect,
+		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs,
 	}
 	for _, e := range wireList {
+		wireErrors[e.Error()] = e
+	}
+}
+
+// WireErrors adds sentinels that cross a socket by their text, as the ones
+// above do. The clerks' processes (broker/clerk/run) add their own, which
+// this package cannot name without linking their code (#2892). Call it only
+// from an init function, before any socket is served or called.
+func WireErrors(errs ...error) {
+	for _, e := range errs {
+		wireList = append(wireList, e)
 		wireErrors[e.Error()] = e
 	}
 }
@@ -365,8 +376,8 @@ type Conn struct {
 	Timeout time.Duration // for the whole call; 0 is one minute
 }
 
-// call makes one call; out, when not nil, receives its result.
-func (c Conn) call(op string, args, out any) error {
+// Call makes one call; out, when not nil, receives its result.
+func (c Conn) Call(op string, args, out any) error {
 	b, err := json.Marshal(kernelCall{op, mustRaw(args)})
 	if err != nil {
 		return err
@@ -438,72 +449,72 @@ func asRefusal(err error) *key.Refusal {
 // Owner is the owner seam over the kernel process's owner socket.
 type Owner struct{ Conn }
 
-func (o Owner) Submit(p kernel.Plan) error { return o.call("submit", p, nil) }
+func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
 func (o Owner) Retry(plan string, index int) error {
-	return o.call("retry", stepArgs{plan, index}, nil)
+	return o.Call("retry", stepArgs{plan, index}, nil)
 }
-func (o Owner) Cancel(plan string) error { return o.call("cancel", stepArgs{Plan: plan}, nil) }
+func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan: plan}, nil) }
 func (o Owner) Undo(plan string, index int) error {
-	return o.call("undo", stepArgs{plan, index}, nil)
+	return o.Call("undo", stepArgs{plan, index}, nil)
 }
-func (o Owner) Enroll(e key.Enrollment) error       { return o.call("enroll", e, nil) }
-func (o Owner) Unenroll(pk ed25519.PublicKey) error { return o.call("unenroll", pk, nil) }
+func (o Owner) Enroll(e key.Enrollment) error       { return o.Call("enroll", e, nil) }
+func (o Owner) Unenroll(pk ed25519.PublicKey) error { return o.Call("unenroll", pk, nil) }
 func (o Owner) Extend(ext key.Key, plan string) error {
-	return o.call("extend", extendArgs{ext, plan}, nil)
+	return o.Call("extend", extendArgs{ext, plan}, nil)
 }
 func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
-	return o.call("setline", lineArgs{percent, cos}, nil)
+	return o.Call("setline", lineArgs{percent, cos}, nil)
 }
 func (o Owner) Reserve(pool string, reserve int64) error {
-	return o.call("reserve", poolArgs{Pool: pool, Reserve: reserve}, nil)
+	return o.Call("reserve", poolArgs{Pool: pool, Reserve: reserve}, nil)
 }
 func (o Owner) Issue(cos []key.Cosign, keys ...key.Key) error {
-	return o.call("issue", issueArgs{cos, keys}, nil)
+	return o.Call("issue", issueArgs{cos, keys}, nil)
 }
 func (o Owner) ApproveTask(id string, a kernel.TaskApproval) error {
-	return o.call("approvetask", approveArgs{id, a}, nil)
+	return o.Call("approvetask", approveArgs{id, a}, nil)
 }
-func (o Owner) Revoke(id key.ID) error  { return o.call("revoke", id, nil) }
-func (o Owner) Pause(id key.ID) error   { return o.call("pause", id, nil) }
-func (o Owner) Unpause(id key.ID) error { return o.call("unpause", id, nil) }
-func (o Owner) Stop() error             { return o.call("stop", nil, nil) }
-func (o Owner) Resume() error           { return o.call("resume", nil, nil) }
+func (o Owner) Revoke(id key.ID) error  { return o.Call("revoke", id, nil) }
+func (o Owner) Pause(id key.ID) error   { return o.Call("pause", id, nil) }
+func (o Owner) Unpause(id key.ID) error { return o.Call("unpause", id, nil) }
+func (o Owner) Stop() error             { return o.Call("stop", nil, nil) }
+func (o Owner) Resume() error           { return o.Call("resume", nil, nil) }
 
-func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.call("status", nil, &u); return }
-func (o Owner) LineChanges() (n int, err error)           { err = o.call("linechanges", nil, &n); return }
+func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
+func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
 func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
-	err = o.call("spendheld", nil, &m)
+	err = o.Call("spendheld", nil, &m)
 	return
 }
-func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.call("pools", nil, &m); return }
+func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
 func (o Owner) Enrollments() ([]key.Enrollment, []ed25519.PublicKey, error) {
 	var e enrolled
-	err := o.call("enrollments", nil, &e)
+	err := o.Call("enrollments", nil, &e)
 	return e.Enrolled, e.Unenrolled, err
 }
 
 // Changes is the revocations, pauses and STOP in force.
-func (o Owner) Changes() (c key.Changes, err error) { err = o.call("changes", nil, &c); return }
+func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
 
 // Plan is plan id's status and its steps' phases; ok is false when the log
 // has no such plan.
 func (o Owner) Plan(id string) (status string, phases []string, ok bool, err error) {
 	var r planRead
-	err = o.call("plan", id, &r)
+	err = o.Call("plan", id, &r)
 	return r.Status, r.Phases, r.Status != "", err
 }
 
 // Granted is when key id's grant is live from, if it is granted.
 func (o Owner) Granted(id key.ID) (from int64, ok bool, err error) {
 	var r grantRead
-	err = o.call("granted", id, &r)
+	err = o.Call("granted", id, &r)
 	return r.From, r.OK, err
 }
 
 // Task is task id while it is live on the kernel's clock.
 func (o Owner) Task(id string) (kernel.Task, bool, error) {
 	var t taskRead
-	if err := o.call("task", id, &t); err != nil || t.Task == nil {
+	if err := o.Call("task", id, &t); err != nil || t.Task == nil {
 		return kernel.Task{}, false, err
 	}
 	return *t.Task, true, nil
@@ -519,20 +530,20 @@ type Meter struct{ Conn }
 
 func (m Meter) AdmitSpend(_ int64, plan string, amount int64) (kernel.Admitted, *key.Refusal) {
 	var a kernel.Admitted
-	if r := asRefusal(m.call("admitspend", spendArgs{Plan: plan, Amount: amount}, &a)); r != nil {
+	if r := asRefusal(m.Call("admitspend", spendArgs{Plan: plan, Amount: amount}, &a)); r != nil {
 		return kernel.Admitted{}, r
 	}
 	return a, nil
 }
 func (m Meter) Meter(_ int64, a kernel.Admitted, route string, amount int64, source string) error {
-	return m.call("meter", spendArgs{Plan: a.Plan, Seq: a.Seq, Route: route, Amount: amount, Source: source}, nil)
+	return m.Call("meter", spendArgs{Plan: a.Plan, Seq: a.Seq, Route: route, Amount: amount, Source: source}, nil)
 }
 func (m Meter) Hold(_ int64, plan string, rf *key.Refusal) error {
-	return m.call("hold", spendArgs{Plan: plan, Rf: rf}, nil)
+	return m.Call("hold", spendArgs{Plan: plan, Rf: rf}, nil)
 }
 func (m Meter) AdmitPool(_ int64, pool string) *key.Refusal {
-	return asRefusal(m.call("admitpool", poolArgs{Pool: pool}, nil))
+	return asRefusal(m.Call("admitpool", poolArgs{Pool: pool}, nil))
 }
 func (m Meter) ReadPool(_ int64, pool string, used, resetAt int64) error {
-	return m.call("readpool", poolArgs{Pool: pool, Used: used, ResetAt: resetAt}, nil)
+	return m.Call("readpool", poolArgs{Pool: pool, Used: used, ResetAt: resetAt}, nil)
 }
