@@ -97,6 +97,7 @@ PREMERGE_LINES = [
     "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request",
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 5',
+    '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    permissions:',
     '      contents: read',
     '      issues: read',
@@ -107,18 +108,27 @@ PREMERGE_LINES = [
     '        with:',
     '          fetch-depth: 0 # the merge base with the PR head',
     '          persist-credentials: false',
+    '      - name: premerge App token',
+    '        id: app',
+    "        if: vars.PREMERGE_APP_CLIENT_ID != ''",
+    '        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0',
+    '        with:',
+    '          client-id: ${{ vars.PREMERGE_APP_CLIENT_ID }}',
+    '          private-key: ${{ secrets.PREMERGE_APP_KEY }}',
+    '          permission-statuses: write',
     '      - name: Premerge (base copy of tools/premerge.py)',
     '        env:',
     '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}',
     '          REPO: ${{ github.repository }}',
     '          GH_TOKEN: ${{ github.token }}',
+    '          STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}',
     '        run: |',
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
     '          posted=no',
     '          post() {',
-    '            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \\',
+    '            GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \\',
     '              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
     '            posted=yes',
     '          }',
@@ -128,6 +138,7 @@ PREMERGE_LINES = [
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
     '          state=failure',
     '          out=$(',
+    '            [ "$BASE_REF" = main ] || { echo "base-not-main"; exit 1; }',
     '            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \\',
     '              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1',
     '            git cat-file -e "$HEAD_SHA^{commit}" || exit 1',
@@ -448,6 +459,13 @@ class WorkflowTest(unittest.TestCase):
                      (") && state=success", ") || true; state=success"),
                      ("git cat-file -e \"$HEAD_SHA^{commit}\" || exit 1", "git cat-file -e \"$HEAD_SHA^{commit}\""),
                      ("          persist-credentials: false", "          persist-credentials: false\n          ref: refs/pull/1/head"),
+                     # PREMERGE-source (#1943): the key's environment, the App token on the post,
+                     # the token's one permission and the main-only base.
+                     ("    environment: premerge", "    # environment: premerge"),
+                     ("STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}", "STATUS_TOKEN: ${{ github.token }}"),
+                     ('GH_TOKEN="$STATUS_TOKEN" gh api -X POST', "gh api -X POST"),
+                     ("          permission-statuses: write", "          permission-statuses: write\n          permission-contents: write"),
+                     ('[ "$BASE_REF" = main ] || ', ""),
                      ):
             with self.subTest(edit[0]):
                 self.assertIn(edit[0], text)
@@ -472,10 +490,10 @@ class WorkflowTest(unittest.TestCase):
 STUB_GH = r"""#!/bin/sh
 case "$*" in
   "api -X POST "*) [ "$FAIL_AT" = post ] && [ ! -e "$STUBS/post-failed" ] && { : > "$STUBS/post-failed"; exit 1; }
-                   echo "$*" >> "$STUBS/posts"; exit 0 ;;
+                   echo "$*" >> "$STUBS/posts"; echo "$GH_TOKEN" >> "$STUBS/post-tokens"; exit 0 ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
-                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"main"}}' ;;
+                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"}}' ;;
   *) exit 2 ;;
 esac
 """
@@ -497,7 +515,7 @@ def premerge_script():
 class PremergeRunTest(unittest.TestCase):
     SHA = "a" * 40
 
-    def run_gate(self, verdict="no-verdict", fail_at="", ref="feature"):
+    def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -507,13 +525,15 @@ class PremergeRunTest(unittest.TestCase):
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
-                   "REF": ref, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
-                   "REPO": "o/r", "GH_TOKEN": "synthetic", "GITHUB_SERVER_URL": "https://example.invalid",
+                   "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
+                   "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
                    "GITHUB_RUN_ID": "1"}
             # The runner's default `run` shell.
             proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
+            if tokens is not None:
+                tokens.extend((stubs / "post-tokens").read_text().split())
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
 
     def test_failure_verdict_posts_failure_but_job_passes(self):
@@ -534,6 +554,20 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_gate("same", fail_at="comments"), (0, ["failure"]))
         code, states = self.run_gate("same", fail_at="post")
         self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_status_is_posted_with_the_app_token(self):
+        # PREMERGE-source-a (#1943): the post uses STATUS_TOKEN (the App's, which the ruleset
+        # pins), on success and on the trap's failure alike; reads keep the job's own token.
+        for verdict, fail_at in (("same", ""), ("no-verdict", ""), ("same", "jq")):
+            tokens = []
+            self.run_gate(verdict, fail_at=fail_at, tokens=tokens)
+            self.assertEqual(tokens, ["synthetic-app"], (verdict, fail_at))
+
+    def test_base_other_than_main_fails(self):
+        # PREMERGE-source-b (#1943): a comment run uses main's workflow for a PR into any branch;
+        # a head accepted against another base must not carry `success` into a PR to main.
+        self.assertEqual(self.run_gate("same", base="stacked"), (0, ["failure"]))
+        self.assertEqual(self.run_gate("bot", ref="bot/trace", base="stacked"), (0, ["failure"]))
 
     def test_error_before_head_known_fails_the_job(self):
         # Residual named in #1946: with the pulls API down there is no head to post to.
