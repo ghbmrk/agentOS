@@ -22,8 +22,14 @@
 // starts again. It never runs over a store, a log, or another store's locked
 // pins on this TPM: it refuses with fixed words and changes nothing.
 //
-// -rotate re-seals the tpm slot under a new policy key and rewrites the pins
-// (ASSUMPTIONS STO-2c-b); -delete frees a store's NV indexes and removes it.
+// -rotate re-seals the tpm slot under a new policy key, over the PCR
+// selection the slot was enrolled with, and rewrites the pins (ASSUMPTIONS
+// STO-2c-b); -delete frees a store's NV indexes and removes it.
+//
+// Enrollment runs as root, and -anchor-dir's parent may be the kernel uid's
+// to write. So the anchor's directory is removed, made and handed to the
+// kernel through descriptors on that parent, never by path: a symlink
+// swapped in between the steps cannot redirect root's writes or chown.
 package main
 
 import (
@@ -39,6 +45,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,6 +53,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -84,6 +92,7 @@ var (
 	errLogExists = errors.New("agentos-enroll: I already have a log; I change nothing")
 	errOtherPins = errors.New("agentos-enroll: this PC's TPM already holds another store's pins; I change nothing")
 	errStaged    = errors.New("agentos-enroll: my unfinished store does not read; I change nothing")
+	errPCRs      = errors.New("agentos-enroll: -pcrs is not the selection my tpm slot was enrolled with; I change nothing")
 )
 
 // errCrash is what a test's stop returns, as a crash would end the run.
@@ -92,7 +101,7 @@ var errCrash = errors.New("agentos-enroll: stopped (test crash)")
 type config struct {
 	state, anchorDir, log, tpm, host string
 	passphrase, recovery             string // root-only files
-	pcrs                             []uint
+	pcrs                             []uint // nil on -rotate: keep the slot's
 	kernelUID, kernelGID             int
 	rotate, delete                   bool
 	// stop, for tests only, ends the run after the named step as a crash
@@ -104,7 +113,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("agentos-enroll", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var c config
-	pcrs := fs.String("pcrs", defaultPCRs, "PCRs the boot path is measured into (SHA-256 bank)")
+	pcrs := fs.String("pcrs", "", "PCRs the boot path is measured into (SHA-256 bank); enrollment's default is "+defaultPCRs+", and -rotate keeps the enrolled selection")
 	fs.StringVar(&c.state, "state", "", "the store's directory")
 	fs.StringVar(&c.anchorDir, "anchor-dir", "", "the log anchor's directory, the kernel's")
 	fs.StringVar(&c.log, "log", "", "the kernel's log file, which must not exist yet")
@@ -119,9 +128,14 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
-	var err error
-	if c.pcrs, err = parsePCRs(*pcrs); err != nil {
-		return c, err
+	if *pcrs == "" && !c.rotate {
+		*pcrs = defaultPCRs
+	}
+	if *pcrs != "" {
+		var err error
+		if c.pcrs, err = parsePCRs(*pcrs); err != nil {
+			return c, err
+		}
 	}
 	switch {
 	case fs.NArg() != 0:
@@ -200,8 +214,8 @@ func exists(path string) (bool, error) {
 }
 
 // enroll makes the box's store. Steps, each named for a test's stop:
-// "cleaned", "created", "slots", "counter", "anchor", "pins", then the
-// rename.
+// "cleaned", "created", "slots", "counter", "head-file", "anchor", "pins",
+// then the rename.
 func enroll(c config, t transport.TPM) error {
 	for _, r := range []struct {
 		path string
@@ -244,8 +258,14 @@ func enroll(c config, t transport.TPM) error {
 			return err
 		}
 	}
+	parent, err := unix.Open(filepath.Dir(c.anchorDir), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: filepath.Dir(c.anchorDir), Err: err}
+	}
+	defer unix.Close(parent)
+	base := filepath.Base(c.anchorDir)
 	// No store and no log, so any head file here is a dead enrollment's.
-	if err := removeAnchor(c.anchorDir); err != nil {
+	if err := removeAnchor(parent, base); err != nil {
 		return err
 	}
 	if err := c.step("cleaned"); err != nil {
@@ -308,16 +328,8 @@ func enroll(c config, t transport.TPM) error {
 		return err
 	}
 	defer clear(head)
-	if err := os.Mkdir(c.anchorDir, 0o700); err != nil {
+	if err := makeAnchor(c, parent, base, ctr.Counter(t, srk), head); err != nil {
 		return err
-	}
-	if err := proc.InitCounterAnchor(c.anchorDir, c.log, ctr.Counter(t, srk), head); err != nil {
-		return err
-	}
-	for _, p := range []string{filepath.Join(c.anchorDir, anchorFile), c.anchorDir} {
-		if err := os.Lchown(p, c.kernelUID, c.kernelGID); err != nil {
-			return err
-		}
 	}
 	if err := c.step("anchor"); err != nil {
 		return err
@@ -350,15 +362,62 @@ func commit(c config) error {
 	return d.Sync()
 }
 
-// removeAnchor removes a dead enrollment's head file and its directory.
-func removeAnchor(dir string) error {
+// openDir opens the directory name in dirfd, never through a symlink.
+func openDir(dirfd int, name string) (int, error) {
+	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, &os.PathError{Op: "open", Path: name, Err: err}
+	}
+	return fd, nil
+}
+
+// removeAnchor removes a dead enrollment's head file and its directory,
+// name in parent. A symlink there is refused, not followed.
+func removeAnchor(parent int, name string) error {
+	dir, err := openDir(parent, name)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	defer unix.Close(dir)
 	for _, n := range []string{anchorFile, anchorFile + ".tmp"} {
-		if err := os.Remove(filepath.Join(dir, n)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		if err := unix.Unlinkat(dir, n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return &os.PathError{Op: "remove", Path: n, Err: err}
 		}
 	}
-	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := unix.Unlinkat(parent, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+		return &os.PathError{Op: "remove", Path: name, Err: err}
+	}
+	return nil
+}
+
+// makeAnchor makes the anchor's directory, name in parent, starts its head
+// file and hands both to the kernel uid, all through the directory's
+// descriptor. proc.InitCounterAnchor takes a path, so it gets the
+// descriptor's /proc path, which names this directory wherever it is
+// moved; and it refuses a directory that is not root's alone, so one
+// swapped in after the mkdir fails there.
+func makeAnchor(c config, parent int, name string, ctr proc.Counter, head []byte) error {
+	if err := unix.Mkdirat(parent, name, 0o700); err != nil {
+		return &os.PathError{Op: "mkdir", Path: name, Err: err}
+	}
+	dir, err := openDir(parent, name)
+	if err != nil {
 		return err
+	}
+	defer unix.Close(dir)
+	if err := proc.InitCounterAnchor(fmt.Sprintf("/proc/self/fd/%d/.", dir), c.log, ctr, head); err != nil {
+		return err
+	}
+	if err := c.step("head-file"); err != nil {
+		return err
+	}
+	if err := unix.Fchownat(dir, anchorFile, c.kernelUID, c.kernelGID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return &os.PathError{Op: "chown", Path: anchorFile, Err: err}
+	}
+	if err := unix.Fchown(dir, c.kernelUID, c.kernelGID); err != nil {
+		return &os.PathError{Op: "chown", Path: name, Err: err}
 	}
 	return nil
 }
@@ -495,28 +554,38 @@ func rotate(c config, t transport.TPM) error {
 	if err != nil {
 		return err
 	}
-	if !ok {
-		k, err := tpmseal.NewPolicyKey()
-		if err != nil {
+	defer func() { clear(nextDER) }()
+	var next *ecdsa.PrivateKey
+	if ok {
+		if next, err = tpmseal.ParsePolicyKey(nextDER); err != nil {
 			return err
 		}
-		if nextDER, err = tpmseal.MarshalPolicyKey(k); err != nil {
+	}
+	// The new slot is signed over the old slot's PCR selection, so a
+	// rotation measures what enrollment measured (HW-5a). It is read before
+	// anything changes; a rerun that finds the new slot made needs none.
+	var pcrs []uint
+	if next == nil || !hasSlot(st, &next.PublicKey) {
+		if pcrs, err = slotPCRs(st, &old.PublicKey, c.pcrs); err != nil {
+			return err
+		}
+	}
+	if next == nil {
+		if next, err = tpmseal.NewPolicyKey(); err != nil {
+			return err
+		}
+		if nextDER, err = tpmseal.MarshalPolicyKey(next); err != nil {
 			return err
 		}
 		if err := st.Put(nextKeyEntry, nextDER); err != nil {
 			return err
 		}
 	}
-	defer clear(nextDER)
-	next, err := tpmseal.ParsePolicyKey(nextDER)
-	if err != nil {
-		return err
-	}
 	if err := c.step("next-key"); err != nil {
 		return err
 	}
 	if !hasSlot(st, &next.PublicKey) {
-		pol, err := tpmseal.SignCurrent(t, next, c.pcrs)
+		pol, err := tpmseal.SignCurrent(t, next, pcrs)
 		if err != nil {
 			return err
 		}
@@ -572,6 +641,36 @@ func hasSlot(st *seal.Store, key *ecdsa.PublicKey) bool {
 		}
 	}
 	return false
+}
+
+// slotPCRs is the PCR selection of the tpm slot sealed under key. With no
+// -pcrs it is the slot's one selection; -pcrs must name one of the slot's
+// selections, and errPCRs refuses any other.
+func slotPCRs(st *seal.Store, key *ecdsa.PublicKey, asked []uint) ([]uint, error) {
+	var sels [][]uint
+	for _, sl := range st.Slots() {
+		if sl.Kind != seal.KindTPM || sl.PolicyKey == nil || !sl.PolicyKey.Equal(key) {
+			continue
+		}
+		for _, p := range sl.PCRs {
+			if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, p) }) {
+				sels = append(sels, p)
+			}
+		}
+	}
+	switch {
+	case len(sels) == 0:
+		return nil, errors.New("agentos-enroll: my store has no tpm slot under its policy key")
+	case asked == nil && len(sels) == 1:
+		return sels[0], nil
+	case asked == nil:
+		return nil, fmt.Errorf("agentos-enroll: my tpm slot's boot paths use the selections %v; name one with -pcrs", sels)
+	}
+	asked = slices.Sorted(slices.Values(asked))
+	if !slices.ContainsFunc(sels, func(s []uint) bool { return slices.Equal(s, asked) }) {
+		return nil, fmt.Errorf("%w (it is %v)", errPCRs, sels)
+	}
+	return asked, nil
 }
 
 // deleteStore frees the store's pins and counter on this TPM, then removes
