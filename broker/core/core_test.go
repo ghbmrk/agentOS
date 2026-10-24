@@ -352,7 +352,7 @@ func goDirs(t *testing.T, patterns ...string) []string {
 	t.Helper()
 	var pkgs []string
 	add := func(dir string) {
-		if names, _ := filepath.Glob(filepath.Join(dir, "*.go")); len(names) > 0 {
+		if hasGo(dir) {
 			rel, err := filepath.Rel(moduleRoot, dir)
 			if err != nil {
 				t.Fatal(err)
@@ -390,7 +390,7 @@ func goDirs(t *testing.T, patterns ...string) []string {
 
 // fixtureImports returns one line per package patterns name, other than
 // the fixtures themselves, whose non-test files reach a fixture core.txt
-// allows, directly or through other module packages. It reads every
+// allows, directly or through module, vendored or replaced packages. It reads every
 // non-test file's imports whatever its build constraints, since go list
 // sees one GOOS and tag set and a shipped build may use another
 // (cmd/agentos-egress is built with -tags agentos_e2e); cgo files and
@@ -398,16 +398,53 @@ func goDirs(t *testing.T, patterns ...string) []string {
 func fixtureImports(t *testing.T, l list, patterns ...string) []string {
 	t.Helper()
 	pkgs := goDirs(t, patterns...)
-	edges := map[string][]string{} // module package -> module packages its non-test files import
-	imports := func(pkg string) []string {
-		if e, ok := edges[pkg]; ok {
+	replaces := goModReplaces(t)
+	// dirs resolves an import path, read in the directory dir (relative to
+	// moduleRoot), to the directories that may supply it: a module package's
+	// own; for any other non-standard path, the nearest vendor copy and any
+	// local replace target. A path that resolves nowhere fails the test, so
+	// no edge is dropped silently.
+	dirs := func(dir, path string) []string {
+		if rel, ok := strings.CutPrefix(path, modPrefix); ok {
+			return []string{rel}
+		}
+		if first, _, _ := strings.Cut(path, "/"); !strings.Contains(first, ".") {
+			return nil // the standard library, or cgo's "C"
+		}
+		var out []string
+		for d := dir; ; d = filepath.ToSlash(filepath.Dir(d)) {
+			v := filepath.ToSlash(filepath.Join(d, "vendor", path))
+			if hasGo(filepath.Join(moduleRoot, v)) {
+				out = append(out, v)
+				break
+			}
+			if d == "." {
+				break
+			}
+		}
+		for old, target := range replaces {
+			if rest, ok := strings.CutPrefix(path, old); ok && (rest == "" || rest[0] == '/') {
+				if r := filepath.ToSlash(filepath.Join(target, rest)); hasGo(filepath.Join(moduleRoot, r)) {
+					out = append(out, r)
+				}
+			}
+		}
+		if len(out) == 0 {
+			t.Fatalf("%s: import %q resolves to no module, vendor or replace directory", dir, path)
+		}
+		return out
+	}
+	type edge struct{ path, dir string }
+	edges := map[string][]edge{} // directory -> imports of its non-test files
+	imports := func(dir string) []edge {
+		if e, ok := edges[dir]; ok {
 			return e
 		}
-		names, err := filepath.Glob(filepath.Join(moduleRoot, filepath.FromSlash(pkg), "*.go"))
+		names, err := filepath.Glob(filepath.Join(moduleRoot, filepath.FromSlash(dir), "*.go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		e := []string{}
+		e := []edge{}
 		fset := token.NewFileSet()
 		for _, name := range names {
 			if strings.HasSuffix(name, "_test.go") {
@@ -418,12 +455,13 @@ func fixtureImports(t *testing.T, l list, patterns ...string) []string {
 				t.Fatal(err)
 			}
 			for _, spec := range f.Imports {
-				if dep, ok := strings.CutPrefix(strings.Trim(spec.Path.Value, `"`), modPrefix); ok {
-					e = append(e, dep)
+				path := strings.Trim(spec.Path.Value, `"`)
+				for _, d := range dirs(dir, path) {
+					e = append(e, edge{path, d})
 				}
 			}
 		}
-		edges[pkg] = e
+		edges[dir] = e
 		return e
 	}
 	var found []string
@@ -434,23 +472,53 @@ func fixtureImports(t *testing.T, l list, patterns ...string) []string {
 		seen := map[string]bool{pkg: true}
 		queue := []string{pkg}
 		for len(queue) > 0 {
-			p := queue[0]
+			d := queue[0]
 			queue = queue[1:]
-			for _, dep := range imports(p) {
-				if seen[dep] {
+			for _, e := range imports(d) {
+				if seen[e.dir] {
 					continue
 				}
-				seen[dep] = true
-				if l.allow[dep] != nil && fixture(dep) {
+				seen[e.dir] = true
+				if dep, ok := strings.CutPrefix(e.path, modPrefix); ok && l.allow[dep] != nil && fixture(dep) {
 					found = append(found, fmt.Sprintf("%s imports test fixture %s outside its _test.go files", pkg, dep))
 					continue
 				}
-				queue = append(queue, dep)
+				queue = append(queue, e.dir)
 			}
 		}
 	}
 	sort.Strings(found)
 	return found
+}
+
+func hasGo(dir string) bool {
+	names, _ := filepath.Glob(filepath.Join(dir, "*.go"))
+	return len(names) > 0
+}
+
+// goModReplaces returns go.mod's replace directives that point at a local
+// directory, as module path -> directory relative to moduleRoot.
+func goModReplaces(t *testing.T) map[string]string {
+	t.Helper()
+	cmd := exec.Command("go", "mod", "edit", "-json")
+	cmd.Dir = moduleRoot
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go mod edit -json: %v", err)
+	}
+	var mod struct {
+		Replace []struct{ Old, New struct{ Path string } }
+	}
+	if err := json.Unmarshal(out, &mod); err != nil {
+		t.Fatal(err)
+	}
+	r := map[string]string{}
+	for _, rep := range mod.Replace {
+		if strings.HasPrefix(rep.New.Path, "./") || strings.HasPrefix(rep.New.Path, "../") {
+			r[rep.Old.Path] = filepath.ToSlash(filepath.Clean(rep.New.Path))
+		}
+	}
+	return r
 }
 
 // REQ: ARC-1
@@ -473,7 +541,8 @@ func TestFixturesAreImportedOnlyByTests(t *testing.T) {
 }
 
 // A package that imports loopstest from a non-test file fails, directly,
-// through a package in between, or from a file the host build leaves out;
+// through a module or vendored package in between, or from a file the host
+// build leaves out;
 // one that imports it only from a _test.go file passes.
 func TestAFixtureImportedOutsideATestFails(t *testing.T) {
 	l := readList(t)
@@ -485,6 +554,7 @@ func TestAFixtureImportedOutsideATestFails(t *testing.T) {
 		{"core/testdata/viaimportsloopstest", 1},
 		{"core/testdata/tagimportsloopstest", 1},
 		{"core/testdata/goosimportsloopstest", 1},
+		{"core/testdata/vendorimportsloopstest", 1},
 		{"core/testdata/testimportsloopstest", 0},
 	} {
 		found := fixtureImports(t, l, "./"+c.pkg)
