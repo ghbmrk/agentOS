@@ -13,9 +13,13 @@ package key_test
 // or whether a step or a metered call is admitted.
 //
 // The model reads only the library's exported data types (Caveat, Step, Use)
-// and, to name a ledger scope, Verified.IDs and Verified.Scopes. Signatures
-// are not modelled as bytes: the generator records who signed each part, and
-// the model judges that.
+// and, to name a ledger scope, Verified.IDs and Verified.Scopes. It names
+// the account of a renewal (a second first link off the same root) from that
+// key's own Scopes, so the two accounts must coincide exactly when the
+// holders do (KEY-4: a renewal starts no fresh budget). Signatures are not
+// modelled as bytes: the generator records who signed each part, and the
+// model judges that. Roots are signed by hand rather than by Issue, which
+// would normalise their verbs, so a non-canonical root reaches Verify.
 //
 // Every predicate the model evaluates is guarded by its own planted bug (a
 // mutant): m.on(x) is false only under mutant x, which drops that one
@@ -25,6 +29,7 @@ package key_test
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"runtime"
@@ -73,7 +78,7 @@ type mKey struct {
 	issuer   int // who signed the root
 	rootBad  bool
 	clerk    string
-	verbs    []string // as issued: sorted and unique
+	verbs    []string // as signed: sorted and unique unless drawn otherwise
 	links    []mLink
 	useBy    int   // who signed the use
 	nRevoked []int // chain prefixes revoked: 0 the root, i link i-1
@@ -89,15 +94,21 @@ type mUse struct {
 }
 
 type mWorld struct {
-	k        mKey
-	step     key.Step
-	now      int64
-	noView   bool // no revocation view
-	stopped  bool
-	noLedger bool
-	uses     []mUse
-	spendFor string // the task of a metered call
-	spendAmt int64
+	k mKey
+	// A renewal: a second first link off k's root, signed by renewSigner
+	// for renewHolder. Its caveats are compared with k's first link's
+	// (Limits.Within), and uses charged to its account are scope "acct2".
+	renewing                 bool
+	renew                    []key.Caveat
+	renewSigner, renewHolder int
+	step                     key.Step
+	now                      int64
+	noView                   bool // no revocation view
+	stopped                  bool
+	noLedger                 bool
+	uses                     []mUse
+	spendFor                 string // the task of a metered call
+	spendAmt                 int64
 }
 
 // mutant plants one bug in the model; faithful plants none.
@@ -122,6 +133,8 @@ const (
 	mRootClerk         // a root for no clerk
 	mRootVerbs         // a root with no verbs
 	mRootVerbValid     // a root verb off the list
+	mRootCanonical     // a root's verbs unsorted or duplicated
+	mLinkCount         // a chain longer than MaxLinks
 	mFirstSigner       // a first link signed by a non-passkey
 	mLinkSig           // a later link signed by neither the holder nor a passkey
 	mNarrowKeepsHolder // a passkey's narrowing that hands the key on
@@ -165,6 +178,24 @@ const (
 	mDeriveNovelty // the first novelty hold reported, not the longest
 	mDeriveTask    // the task not reported
 	mDeriveByOwner // a passkey's narrowing not reported
+	mNarrowers     // no narrowing passkey listed
+	mNarrowersMid  // a narrowing short of the tip not listed
+	// within (a renewal's first link against the old one's)
+	mWithinVerbs
+	mWithinContent
+	mWithinLabels
+	mWithinArg         // an arg bound the renewal drops
+	mWithinArgOneOf    // a wider arg set
+	mWithinArgMin      // a lower arg min
+	mWithinArgMax      // a higher arg max
+	mWithinCap         // a cap the renewal drops or raises
+	mWithinCapEdge     // a cap raised by one
+	mWithinTask        // a task caveat dropped
+	mWithinHoldBase    // a shorter base hold
+	mWithinHoldNovelty // a shorter novelty hold
+	// renewal accounts
+	mRenewFresh  // a renewal to the same holder charged to a fresh account
+	mRenewShared // a first link to another holder charged to this account
 	// live
 	mNoView      // a check with no revocation view
 	mStopped     // a step while stop is in force
@@ -233,6 +264,8 @@ var tighterMutant = map[string]mutant{
 }
 
 var canonicalMutant = map[string]mutant{key.KVerbs: mVerbsCanonical, key.KContent: mContentCanonical, key.KLabels: mLabelsCanonical}
+
+var withinMutant = map[string]mutant{key.KVerbs: mWithinVerbs, key.KContent: mWithinContent, key.KLabels: mWithinLabels}
 
 // capCode is the refusal code each cap kind earns.
 var capCode = map[string]string{
@@ -354,6 +387,9 @@ func (m mutant) chainOK(k mKey) bool {
 			}
 		}
 	}
+	if (m.on(mRootCanonical) && len(k.verbs) > 0 && !sortedUnique(k.verbs)) || (m.on(mLinkCount) && len(k.links) > key.MaxLinks) {
+		return false
+	}
 	var seen []key.Caveat
 	holder := -1 // the bare root: any passkey
 	for i, l := range k.links {
@@ -372,16 +408,8 @@ func (m mutant) chainOK(k mKey) bool {
 			}
 		}
 		for _, c := range l.cavs {
-			if !m.wellFormed(c) {
+			if !m.fits(c, seen) || (m.on(mVerbsInRoot) && c.Kind == key.KVerbs && !within(c.Set, k.verbs)) {
 				return false
-			}
-			if m.on(mVerbsInRoot) && c.Kind == key.KVerbs && !within(c.Set, k.verbs) {
-				return false
-			}
-			for _, e := range seen {
-				if sameKind(c, e) && !m.tighter(c, e) {
-					return false
-				}
 			}
 			seen = append(seen, c)
 		}
@@ -391,6 +419,99 @@ func (m mutant) chainOK(k mKey) bool {
 		return mOwner(k.useBy) || !m.on(mUseBareRoot)
 	}
 	return k.useBy == holder || !m.on(mUseTip)
+}
+
+// fits judges c alone and against every caveat before it.
+func (m mutant) fits(c key.Caveat, before []key.Caveat) bool {
+	if !m.wellFormed(c) {
+		return false
+	}
+	for _, e := range before {
+		if sameKind(c, e) && !m.tighter(c, e) {
+			return false
+		}
+	}
+	return true
+}
+
+// foldOK judges one link's caveats alone, as Fold does: no root, so no
+// verbs bound and no expiry or spend cap required.
+func (m mutant) foldOK(cs []key.Caveat) bool {
+	for i, c := range cs {
+		if !m.fits(c, cs[:i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// within judges whether caveats a allow nothing b does not, the expiry
+// aside: each predicate of b is met by one of a at least as tight. The
+// kernel renews a clerk key only on a first link within the old one's
+// (kernel.State.renews, D-146).
+func (m mutant) within(a, b []key.Caveat) bool {
+	some := func(ok func(c key.Caveat) bool) bool { return slices.ContainsFunc(a, ok) }
+	for _, e := range b {
+		var fine bool
+		switch e.Kind {
+		case key.KVerbs, key.KContent, key.KLabels:
+			fine = !m.on(withinMutant[e.Kind]) || some(func(c key.Caveat) bool { return c.Kind == e.Kind && within(c.Set, e.Set) })
+		case key.KArg:
+			o := argOf(e)
+			named := func(c key.Caveat) bool { return c.Kind == key.KArg && argOf(c).Name == o.Name }
+			if !some(named) {
+				fine = !m.on(mWithinArg)
+				break
+			}
+			fine = some(func(c key.Caveat) bool {
+				x := argOf(c)
+				return named(c) &&
+					(!m.on(mWithinArgOneOf) || o.OneOf == nil || (x.OneOf != nil && within(x.OneOf, o.OneOf))) &&
+					(!m.on(mWithinArgMin) || o.Min == nil || (x.Min != nil && *x.Min >= *o.Min)) &&
+					(!m.on(mWithinArgMax) || o.Max == nil || (x.Max != nil && *x.Max <= *o.Max))
+			})
+		case key.KTask:
+			fine = !m.on(mWithinTask) || some(func(c key.Caveat) bool { return c.Kind == key.KTask && taskOf(c) == taskOf(e) })
+		case key.KHold:
+			// no hold is a hold of 0
+			fine = (e.N <= 0 || !m.on(mWithinHoldBase) || some(func(c key.Caveat) bool { return c.Kind == key.KHold && c.N >= e.N })) &&
+				(e.M <= 0 || !m.on(mWithinHoldNovelty) || some(func(c key.Caveat) bool { return c.Kind == key.KHold && c.M >= e.M }))
+		default:
+			fine = !isCap(e.Kind) || !m.on(mWithinCap) ||
+				some(func(c key.Caveat) bool { return c.Kind == e.Kind && c.N <= e.N+m.slack(mWithinCapEdge) })
+		}
+		if !fine {
+			return false
+		}
+	}
+	return true
+}
+
+// renewal is the renewing key as the model sees it: k's root and one link.
+func (w mWorld) renewal() mKey {
+	r := w.k
+	r.links = []mLink{{signer: w.renewSigner, holder: w.renewHolder, cavs: w.renew}}
+	r.useBy, r.nRevoked, r.nPaused = w.renewHolder, nil, nil
+	return r
+}
+
+// acct2 is the model scope the renewal's account counts as: k's own account
+// ("acct") when the renewal verifies and goes to k's first holder, else a
+// decoy no cap reads.
+func (m mutant) acct2(w mWorld) string {
+	if !w.renewing || len(w.k.links) == 0 || !m.chainOK(w.renewal()) {
+		return "acct2"
+	}
+	counts := w.renewHolder == w.k.links[0].holder
+	if counts && !m.on(mRenewFresh) {
+		counts = false
+	} else if !counts && !m.on(mRenewShared) {
+		counts = true
+	}
+	if counts {
+		return "acct"
+	}
+	return "acct2"
 }
 
 func (k mKey) all() []key.Caveat {
@@ -408,6 +529,7 @@ type derived struct {
 	hold, novel int64
 	task        string
 	byOwner     bool
+	narrowers   []int // the passkeys that signed a narrowing, in chain order
 }
 
 func (m mutant) derive(k mKey) derived {
@@ -438,8 +560,14 @@ func (m mutant) derive(k mKey) derived {
 			}
 		}
 	}
-	if n := len(k.links); n >= 2 && m.on(mDeriveByOwner) {
+	n := len(k.links)
+	if n >= 2 && m.on(mDeriveByOwner) {
 		d.byOwner = k.links[n-1].signer != k.links[n-2].holder
+	}
+	for i := 1; i < n; i++ {
+		if k.links[i].signer != k.links[i-1].holder && m.on(mNarrowers) && (i == n-1 || m.on(mNarrowersMid)) {
+			d.narrowers = append(d.narrowers, k.links[i].signer)
+		}
 	}
 	return d
 }
@@ -497,6 +625,7 @@ func (m mutant) recent(at, now int64, window, edge mutant) bool {
 // spendOnly keeps the spend caps alone.
 func (m mutant) caps(w mWorld, s key.Step, spendOnly bool) []string {
 	var out []string
+	acct2 := m.acct2(w)
 	for i, l := range w.k.links {
 		for _, c := range l.cavs {
 			if !isCap(c.Kind) || (spendOnly && !isSpend(c.Kind) && m.on(mSpendRate)) {
@@ -510,7 +639,11 @@ func (m mutant) caps(w mWorld, s key.Step, spendOnly bool) []string {
 			}
 			var sum, n int64
 			for _, u := range w.uses {
-				if u.scope != scopeOf(i) && m.on(mCapScope) {
+				scope := u.scope
+				if scope == "acct2" {
+					scope = acct2
+				}
+				if scope != scopeOf(i) && m.on(mCapScope) {
 					continue
 				}
 				at := u.use.At
@@ -681,13 +814,23 @@ type outcome struct {
 	chainErr     error
 	d            derived
 	auth, spendc []string // the model's codes, or the library's one code
+	// The renewal: its caveats fold, they are within the first link's, and
+	// the renewing key verifies.
+	renewFold, within, renewed bool
 }
 
 func (m mutant) run(w mWorld) outcome {
-	if !m.chainOK(w.k) {
-		return outcome{}
+	var o outcome
+	if w.renewing {
+		o.renewFold = m.foldOK(w.renew)
+		o.within = o.renewFold && m.foldOK(w.k.links[0].cavs) && m.within(w.renew, w.k.links[0].cavs)
+		o.renewed = m.chainOK(w.renewal())
 	}
-	return outcome{chain: true, d: m.derive(w.k), auth: m.authorize(w), spendc: m.spend(w)}
+	if !m.chainOK(w.k) {
+		return o
+	}
+	o.chain, o.d, o.auth, o.spendc = true, m.derive(w.k), m.authorize(w), m.spend(w)
+	return o
 }
 
 // --- the generator -------------------------------------------------------
@@ -1009,6 +1152,62 @@ func (r *bits) flaw(c key.Caveat) key.Caveat {
 	return c
 }
 
+// renewal draws a second first link off w's root: mostly to the same
+// holder, with the first link's caveats and at most one of them nudged or
+// dropped, so a renewal that is not within the old key's limits mostly
+// breaks one rule alone.
+func (r *bits) renewal(w *mWorld) {
+	first := w.k.links[0]
+	w.renewing = true
+	w.renewSigner, w.renewHolder = []int{pAnchor, pPhone}[r.n(2)], first.holder
+	if r.n(4) == 0 {
+		w.renewHolder = r.n(nParties)
+	}
+	if !r.clean && r.n(8) == 0 {
+		w.renewSigner = r.n(nParties)
+	}
+	w.renew = slices.Clone(first.cavs)
+	// Within ignores the expiry, and every first link has one and a daily
+	// spend cap: change them, and the other caps, less often than the rest.
+	i := r.n(max(1, len(w.renew)))
+	for range 2 {
+		if len(w.renew) > 0 && (w.renew[i].Kind == key.KExpires || isCap(w.renew[i].Kind)) {
+			i = r.n(len(w.renew))
+		}
+	}
+	switch r.n(4) {
+	case 0: // the same limits
+	case 1:
+		if len(w.renew) == 0 {
+			break
+		}
+		w.renew = slices.Delete(w.renew, i, i+1)
+	default:
+		if len(w.renew) == 0 {
+			break
+		}
+		// Loosen as often as tighten, even in a clean world: a renewal
+		// that widens one limit is what Within must catch.
+		clean := r.clean
+		r.clean = false
+		was, _ := json.Marshal(w.renew[i])
+		for range 3 { // a nudge may move nothing
+			w.renew[i] = r.nudge(w.renew[i])
+			if now, _ := json.Marshal(w.renew[i]); string(now) != string(was) {
+				break
+			}
+		}
+		r.clean = clean
+	}
+	if r.n(8) == 0 {
+		kinds := gKinds
+		if r.clean {
+			kinds = kinds[:len(kinds)-1]
+		}
+		w.renew = append(w.renew, r.caveat(kinds[r.n(len(kinds))]))
+	}
+}
+
 func (r *bits) world() mWorld {
 	var w mWorld
 	k := &w.k
@@ -1052,7 +1251,11 @@ func (r *bits) world() mWorld {
 	}
 	holder := -1
 	var prior []key.Caveat
-	for range r.n(5) {
+	n := r.n(5)
+	if r.n(32) == 0 {
+		n = key.MaxLinks - 1 + r.n(3) // one short of, at or one past the bound
+	}
+	for i := range n {
 		l := mLink{holder: r.n(nParties)}
 		switch {
 		case !r.clean && r.n(8) == 0:
@@ -1072,7 +1275,11 @@ func (r *bits) world() mWorld {
 			l.cavs = append(l.cavs, key.LimitExpires(exp), key.LimitSpendDay(spend))
 			prior = append(prior, l.cavs...)
 		}
-		for range r.n(4) {
+		nc := r.n(4)
+		if i >= 4 {
+			nc = 0 // a long chain's tail only hands the key on
+		}
+		for range nc {
 			kinds := gKinds
 			if r.clean {
 				kinds = kinds[:len(kinds)-1] // no unknown kind
@@ -1169,6 +1376,15 @@ func (r *bits) world() mWorld {
 		}
 	}
 	w.spendFor, w.spendAmt = r.pick([]string{"t1", "t2"}), r.i64(-1, 0, 1, 3, 50)
+	if !r.clean && len(k.verbs) > 0 && r.n(16) == 0 {
+		// A root signed with its verbs out of order or twice.
+		if vs := slices.Clone(k.verbs); len(vs) > 1 && r.n(2) == 0 {
+			slices.Reverse(vs)
+			k.verbs = vs
+		} else {
+			k.verbs = append(vs, vs[r.n(len(vs))])
+		}
+	}
 
 	// A use's age is often at a window's edge, and its recipient and task
 	// often the step's.
@@ -1203,6 +1419,26 @@ func (r *bits) world() mWorld {
 			}
 		}
 	}
+	if len(k.links) > 0 && r.n(4) != 0 {
+		r.renewal(&w)
+		// Uses charged to the renewal's account: some at random, and some
+		// that move one of the first link's caps to its edge.
+		for range r.n(3) {
+			w.uses = append(w.uses, use("acct2", r.i64(0, 1, 3, 50)))
+		}
+		for _, c := range k.links[0].cavs {
+			if !isCap(c.Kind) || r.n(3) != 0 {
+				continue
+			}
+			if isSpend(c.Kind) {
+				w.uses = append(w.uses, use("acct2", max(0, c.N-s.Amount+r.i64(-1, 0, 1))))
+				continue
+			}
+			for range min(c.N+r.i64(-1, 0, 0, 1), 12) {
+				w.uses = append(w.uses, use("acct2", 0))
+			}
+		}
+	}
 	return w
 }
 
@@ -1219,13 +1455,27 @@ var parties = func() (ps [nParties]ed25519.PrivateKey) {
 
 func pub(p int) ed25519.PublicKey { return parties[p].Public().(ed25519.PublicKey) }
 
-// build makes the library's key from the model's.
-func build(w mWorld) key.Key {
-	vs := make([]key.Verb, len(w.k.verbs))
-	for i, v := range w.k.verbs {
+// signRoot signs a root as Issue does, by hand, without normalising its
+// verbs (KEY-1: the owner's signature over the root's fields).
+func signRoot(issuer int, clerk string, verbs []string) key.Root {
+	vs := make([]key.Verb, len(verbs))
+	for i, v := range verbs {
 		vs[i] = key.Verb(v)
 	}
-	k := key.Issue(parties[w.k.issuer], key.Root{Clerk: w.k.clerk, Verbs: vs, Serial: "ref"})
+	r := key.Root{Owner: pub(issuer), Clerk: clerk, Verbs: vs, Serial: "ref"}
+	body, _ := json.Marshal(struct {
+		Owner  ed25519.PublicKey `json:"owner"`
+		Clerk  string            `json:"clerk"`
+		Verbs  []key.Verb        `json:"verbs"`
+		Serial string            `json:"serial"`
+	}{r.Owner, r.Clerk, r.Verbs, r.Serial})
+	r.Sig = ed25519.Sign(parties[issuer], append([]byte(key.DomainRoot), body...))
+	return r
+}
+
+// build makes the library's key from the model's.
+func build(w mWorld) key.Key {
+	k := key.Key{Root: signRoot(w.k.issuer, w.k.clerk, w.k.verbs)}
 	if w.k.rootBad {
 		k.Root.Sig[0] ^= 1
 	}
@@ -1251,14 +1501,32 @@ func library(w mWorld) outcome {
 	k := build(w)
 	use := []byte("ref-use")
 	owners := []ed25519.PublicKey{pub(pAnchor), pub(pPhone)}
+	var o outcome
+	var acct2 *key.ID
+	if w.renewing {
+		a, errA := key.Fold(w.renew)
+		b, errB := key.Fold(w.k.links[0].cavs)
+		o.renewFold = errA == nil
+		o.within = errA == nil && errB == nil && a.Within(b)
+		rk := key.Extend(key.Key{Root: k.Root}, parties[w.renewSigner], key.Link{Caveats: w.renew, Holder: pub(w.renewHolder)})
+		if rv, err := key.Chain(rk, owners); err == nil {
+			o.renewed = true
+			sc := rv.Scopes()
+			acct2 = &sc[len(sc)-1]
+		}
+	}
 	v, err := key.Verify(k, owners, use, key.Sign(k, parties[w.k.useBy], use))
 	if err != nil {
-		return outcome{chainErr: err}
+		o.chainErr = err
+		return o
 	}
-	o := outcome{chain: true, d: derived{
+	o.chain, o.d = true, derived{
 		verbs: v.Limits.Verbs, notAfter: v.Limits.NotAfter, hold: v.Limits.Window(false), novel: v.Limits.Window(true),
 		task: v.Limits.Task, byOwner: v.ByOwner,
-	}}
+	}
+	for _, p := range v.Narrowers {
+		o.d.narrowers = append(o.d.narrowers, slices.IndexFunc(parties[:], func(q ed25519.PrivateKey) bool { return p.Equal(q.Public()) }))
+	}
 
 	// Name each model scope by the library's ID: the first link's budget is
 	// the clerk's account, the last of Scopes; link i's is its own ID.
@@ -1270,6 +1538,9 @@ func library(w mWorld) outcome {
 		for i := 1; i < len(ids)-1; i++ {
 			name[scopeOf(i)] = ids[i+1]
 		}
+	}
+	if acct2 != nil {
+		name["acct2"] = *acct2
 	}
 	c := key.Context{Now: w.now}
 	if !w.noView {
@@ -1298,6 +1569,10 @@ func library(w mWorld) outcome {
 // disagree compares the library's outcome with a model's and describes the
 // first disagreement, or returns "".
 func disagree(lib, mod outcome) string {
+	if lib.renewFold != mod.renewFold || lib.within != mod.within || lib.renewed != mod.renewed {
+		return fmt.Sprintf("renewal fold/within/verifies: model %v/%v/%v, library %v/%v/%v",
+			mod.renewFold, mod.within, mod.renewed, lib.renewFold, lib.within, lib.renewed)
+	}
 	if lib.chain != mod.chain {
 		return fmt.Sprintf("chain: model ok=%v, library err=%v", mod.chain, lib.chainErr)
 	}
@@ -1316,6 +1591,9 @@ func disagree(lib, mod outcome) string {
 	}
 	if l.task != d.task || l.byOwner != d.byOwner {
 		return fmt.Sprintf("task/by-owner: model %q/%v, library %q/%v", d.task, d.byOwner, l.task, l.byOwner)
+	}
+	if !slices.Equal(l.narrowers, d.narrowers) {
+		return fmt.Sprintf("narrowers: model %v, library %v", d.narrowers, l.narrowers)
 	}
 	if s := agree("authorize", mod.auth, lib.auth); s != "" {
 		return s
@@ -1382,7 +1660,7 @@ func TestRefModelAgrees(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	var admitted, verified int
+	var admitted, verified, longest, inside int
 	for i := range refSeeds {
 		w, lib := worlds[i], libs[i]
 		mod := faithful.run(w)
@@ -1398,6 +1676,12 @@ func TestRefModelAgrees(t *testing.T) {
 		verified++
 		if len(mod.auth) == 0 {
 			admitted++
+		}
+		if len(w.k.links) == key.MaxLinks {
+			longest++
+		}
+		if mod.within {
+			inside++
 		}
 		seen := map[string]int{}
 		for _, c := range w.k.all() {
@@ -1420,6 +1704,11 @@ func TestRefModelAgrees(t *testing.T) {
 	if verified < refSeeds/10 || admitted < refSeeds/100 {
 		t.Errorf("coverage too thin: %d chains verified, %d steps admitted of %d", verified, admitted, refSeeds)
 	}
+	// Nor one that never verifies a chain at the bound, or a renewal
+	// within the old key's limits.
+	if longest < soleFloor || inside < refSeeds/100 {
+		t.Errorf("coverage too thin: %d verified chains of %d links, %d renewals within", longest, key.MaxLinks, inside)
+	}
 	for m := faithful + 1; m < nMutants; m++ {
 		if !found[m] {
 			t.Errorf("planted bug %d not found in %d seeds", m, refSeeds)
@@ -1434,6 +1723,17 @@ func TestRefModelAgrees(t *testing.T) {
 		if sole[c] < soleFloor {
 			t.Errorf("refusal %s is the only one on %d seeds, want %d", c, sole[c], soleFloor)
 		}
+	}
+}
+
+// The model's roots are signed by hand; one with canonical verbs must be
+// the root Issue signs, or every chain would fail on its root alone.
+func TestRefModelSignsRootsAsIssue(t *testing.T) {
+	vs := []string{"draft", "read", "trash"}
+	got := signRoot(pPhone, "mail", vs)
+	want := key.Issue(parties[pPhone], key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash, key.Read, key.Draft, key.Read}, Serial: "ref"}).Root
+	if !slices.Equal(got.Sig, want.Sig) || !slices.Equal(got.Verbs, want.Verbs) {
+		t.Fatalf("hand-signed root %+v, Issue's %+v", got, want)
 	}
 }
 

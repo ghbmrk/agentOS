@@ -40,11 +40,11 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
-# #2896 (STO-2b-1): adds broker/cmd/agentos-kernel/ and broker/cmd/agentos-unlock/, which
-# are in G2's scope but not yet on main. An allow line must name a path in the repo
-# (test_every_entry_exists), so this exempts it until it merges; then two allow lines
-# replace it, as #2545's did.
-exempt-pr 2896
+# #2957 (STO-2c-i): adds broker/cmd/agentos-enroll/, the sealed store's enrollment step,
+# which is in G2's scope but not yet on main. An allow line must name a path in the repo
+# (test_every_entry_exists), so this exempts it until it merges; then an allow line
+# replaces it, as #2896's did.
+exempt-pr 2957
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
@@ -97,7 +97,8 @@ allow broker/test/
 allow broker/third_party/
 allow broker/vendor/
 
-# G2 binaries: G1's plus the key holder (SIM-split, CRED) and the release signer (UPD-8, A14).
+# G2 binaries: G1's plus the key holder (SIM-split, CRED), the release signer (UPD-8, A14),
+# and the sealed store's kernel and unlock step (STO-2b-1, #2896).
 allow broker/cmd/agentos-ap/
 allow broker/cmd/agentos-checker/
 allow broker/cmd/agentos-clock-boot/
@@ -106,12 +107,14 @@ allow broker/cmd/agentos-guest-bridge/
 allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/
 allow broker/cmd/agentos-infer/
+allow broker/cmd/agentos-kernel/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
 allow broker/cmd/agentos-netjoin/
 allow broker/cmd/agentos-photo/
 allow broker/cmd/agentos-release/
 allow broker/cmd/agentos-seller/
+allow broker/cmd/agentos-unlock/
 allow broker/cmd/agentosd/
 
 # Packages the G2 binaries import, plus the packages A4, A5 and A14 test directly:
