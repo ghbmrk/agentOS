@@ -1,11 +1,12 @@
 """Tests for tools/g1_scope.py, its lists and its workflow (G1-freeze, #1687; G2, D-128).
 
-No requirement IDs: CI tooling that holds work to a gate's path (G1: A1, D-104; G2: A4, A5,
-A9 and A14, D-128), not SPEC.md behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
-G1 fixes pass), -b (PRs opened before the freeze and exempt-pr lines), -c (records-only and empty changes), -d (the
-switch), -e (fail closed), -f (the list keeps up with the G1 binaries' imports) and -g (a PR
+No requirement IDs: CI tooling that holds work to a gate's path (G2: A4, A5, A9 and A14,
+D-128), not SPEC.md behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
+gate fixes pass), -b (PRs opened before the freeze and exempt-pr lines), -c (records-only and empty changes), -d (the
+switch), -e (fail closed), -f (the list keeps up with the gate binaries' imports) and -g (a PR
 reopened, force-pushed or retargeted after the freeze began loses the time exemption, #1717).
-D-128 adds -h: every gate's list applies, G1's is off and G2's is on.
+D-128 adds -h: every gate's list applies. G1-retire deleted G1's list once G1 had passed, so
+only G2's is left.
 """
 import os
 import pathlib
@@ -19,18 +20,16 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import g1_scope as g  # noqa: E402
 
-LIST = (ROOT / "tools" / "g1_scope.txt").read_text()
 G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_text()
-G2 = g.GATES[1]
+G2 = g.GATES[0]
 
-# The binaries the G1 path ships or runs (see the header of tools/g1_scope.txt).
-G1_BINARIES = (
+# G2's binaries (header of g1_scope_g2.txt): the G1 path's, plus the key holder and the
+# release signer.
+G2_BINARIES = (
     "agentosd", "agentos-egress", "agentos-localui", "agentos-ap", "agentos-modem",
     "agentos-netjoin", "agentos-guest-bridge", "agentos-seller", "agentos-checker",
-    "agentos-clock-boot", "agentos-hostdisk",
+    "agentos-clock-boot", "agentos-hostdisk", "agentos-holder", "agentos-release",
 )
-# G2's binaries: G1's plus the key holder and the release signer (header of g1_scope_g2.txt).
-G2_BINARIES = G1_BINARIES + ("agentos-holder", "agentos-release")
 
 SMALL = """
 freeze on
@@ -122,7 +121,7 @@ class CheckTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("`exempt-pr 1501`", text)
         self.assertIn("a plain Re-run replays the old event", text)
-        self.assertIn("fail=0 xfail=0 blocked=0", text)
+        self.assertIn("A4, A5, A9 and A14 pass on a VM", text)
 
     def test_records_only_and_empty_changes_pass(self):  # G1-freeze-c
         ok, msg = run(["reviews/l3/pr9.md", "BOARD.md", "decisions/D-200.md"], list_text=ON)
@@ -187,7 +186,6 @@ class CheckTest(unittest.TestCase):
         text = "\n".join(msg)
         self.assertIn("outside the G2 list (tools/g1_scope_g2.txt)", text)
         self.assertIn("A4, A5, A9 and A14 pass on a VM", text)
-        self.assertNotIn("g1_scope.txt", text)
         with self.assertRaisesRegex(g.ListError, "g1_scope_g2.txt"):
             g.check(["x"], "freeze on\n", gate=G2)
 
@@ -196,15 +194,13 @@ class CheckTest(unittest.TestCase):
             here, g.HERE = g.HERE, pathlib.Path(d)
             shutil.copy(here / "ci_scope.py", d)
             try:
-                lists = {"g1_scope.txt": SMALL.replace("freeze on", "freeze off"),
-                         "g1_scope_g2.txt": SMALL}
-                for name, text in lists.items():
-                    pathlib.Path(d, name).write_text(text)
+                pathlib.Path(d, "g1_scope_g2.txt").write_text(SMALL)
                 with _quiet():
                     self.assertEqual(g.main(["broker/localui/x.go"]), 0)
                     self.assertEqual(g.main(["broker/voice/v.go"]), 1)
-                    pathlib.Path(d, "g1_scope.txt").write_text(SMALL.replace("allow image/\n", ""))
-                    self.assertEqual(g.main(["image/build.sh"]), 1)
+                    # A passed gate's list is gone from GATES, so its file is never read.
+                    pathlib.Path(d, "g1_scope.txt").write_text("not a list\n")
+                    self.assertEqual(g.main(["broker/localui/x.go"]), 0)
                     pathlib.Path(d, "g1_scope_g2.txt").unlink()
                     self.assertEqual(g.main(["broker/localui/x.go"]), 2)
             finally:
@@ -223,18 +219,18 @@ class _quiet:
 
 class ListTest(unittest.TestCase):
     def test_checked_in_lists_parse(self):  # G1-freeze-d, -e, -h
-        for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
+        for name, text in (("g1_scope_g2.txt", G2_LIST),):
             g.parse_list(text, name)
             # The switch is one line, so lifting a freeze is a one-line diff.
             self.assertEqual(len([l for l in text.splitlines() if l.startswith("freeze ")]), 1, name)
 
-    def test_g1_is_off_and_g2_is_on(self):  # G1-freeze-h (D-128)
-        self.assertEqual([gate[1] for gate in g.GATES], ["g1_scope.txt", "g1_scope_g2.txt"])
-        self.assertFalse(g.parse_list(LIST)[0])
-        self.assertTrue(g.parse_list(G2_LIST, "g1_scope_g2.txt")[0])
+    def test_only_g2_is_left_and_it_is_on(self):  # G1-freeze-h (D-128, G1-retire)
+        self.assertEqual([gate[1] for gate in g.GATES], ["g1_scope_g2.txt"])
+        self.assertFalse((ROOT / "tools" / "g1_scope.txt").exists())
+        self.assertTrue(g.parse_list(G2_LIST)[0])
 
     def test_every_entry_exists(self):  # G1-freeze-f
-        for name, text in (("g1_scope.txt", LIST), ("g1_scope_g2.txt", G2_LIST)):
+        for name, text in (("g1_scope_g2.txt", G2_LIST),):
             _, _, allow, frozen, _ = g.parse_list(text, name)
             for e in allow + frozen:
                 self.assertTrue((ROOT / e).exists(), f"{name}: {e} names nothing in the repo")
@@ -264,7 +260,7 @@ class ListTest(unittest.TestCase):
 
 class GoImportsTest(unittest.TestCase):
     # Its own class so the records-only CI run, which sets up no Go, can name the other two:
-    # a records-only change cannot change what the G1 binaries import.
+    # a records-only change cannot change what the gate binaries import.
     def test_lists_cover_their_binaries_imports(self):  # G1-freeze-f, -h
         go = shutil.which("go")
         if not go:
@@ -274,7 +270,7 @@ class GoImportsTest(unittest.TestCase):
         broker = ROOT / "broker"
         mod = subprocess.run([go, "list", "-m"], cwd=broker, check=True,
                              capture_output=True, text=True).stdout.strip()
-        for gate, text, binaries in (("G1", LIST, G1_BINARIES), ("G2", G2_LIST, G2_BINARIES)):
+        for gate, text, binaries in (("G2", G2_LIST, G2_BINARIES),):
             out = subprocess.run([go, "list", "-deps", *[f"./cmd/{b}" for b in binaries]],
                                  cwd=broker, check=True, capture_output=True, text=True).stdout
             _, _, allow, frozen, _ = g.parse_list(text)

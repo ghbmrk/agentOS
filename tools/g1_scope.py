@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Gate freeze (G1-freeze #1687, D-128): fail a new PR that touches paths outside a gate's list.
 
-Until a gate passes, work goes to that gate's path. Each gate in GATES has its own list:
-G1 (`tools/g1_scope.txt`: controller boot, phone control and one model-backed task; A1,
-SPEC.md, Gates, D-104; off since G1-e2e #1688 passed in QEMU) and G2 (`tools/g1_scope_g2.txt`:
-A4, A5, A9 and A14 on a VM; D-128). A PR must pass every gate's list; a list whose diff
-check fails names the paths outside it.
+Until a gate passes, work goes to that gate's path. Each gate in GATES has its own list; today
+only G2 (`tools/g1_scope_g2.txt`: A4, A5, A9 and A14 on a VM; D-128). G1's list was deleted
+once G1 passed (D-128; G1-retire): a passed gate's list only drew amends. A PR must pass every
+gate's list; a list whose diff check fails names the paths outside it.
 
 Against one list, a PR passes when any of these holds, checked in order:
   1. the freeze is off (`freeze off` in that list: the single switch, flipped by a PR that
@@ -44,10 +43,9 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 
-# (name, list file, what lifts the freeze, where the freeze was set). G1 first: it is the
-# default for parse_list and check.
+# (name, list file, what lifts the freeze, where the freeze was set). The first is the
+# default for parse_list and check. A gate that passes leaves this tuple with its list.
 GATES = (
-    ("G1", "g1_scope.txt", "G1-e2e (#1688) passes in QEMU (fail=0 xfail=0 blocked=0)", "#1687"),
     ("G2", "g1_scope_g2.txt", "A4, A5, A9 and A14 pass on a VM (SPEC.md, Gates)", "D-128"),
 )
 
@@ -85,7 +83,7 @@ def when(text):
         raise ListError(f"bad time {text!r}") from None
 
 
-def parse_list(text, name="g1_scope.txt"):
+def parse_list(text, name=GATES[0][1]):
     """Return (freeze_on, since, allow, frozen_imports, exempt_prs). Raises ListError on any doubt.
     name is the list's file name, for messages."""
     freeze, since, allow, frozen, prs = None, None, [], [], set()
