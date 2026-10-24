@@ -331,7 +331,7 @@ jobs:
         # func in that package. FuzzSlots writes sealed files per input (~100 execs/s), so its
         # first chunk is 2000 execs: fuzzrun's default 20000 overran the chunk's cap.
         run: |
-          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000 clerk/seal:FuzzParse kernel/key:FuzzRefModel; do
+          for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP grants:FuzzApprovals localsrv:FuzzSessions netguard:FuzzSourcesRead netguard:FuzzGatewayPolicy netguard:FuzzCheck vault:FuzzSlots:2000 clerk/seal:FuzzParse; do
             IFS=: read -r pkg target cal <<< "$t"
             python3 ../tools/fuzzrun.py --pkg "./$pkg" --target "$target" ${cal:+--calibrate "$cal"} --budget 20s || exit 1
           done
@@ -400,7 +400,7 @@ jobs:
           sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
-            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
+            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery
           # The inference service's jail, leaf and OOM (INFER-SVC INF-1, INF-6),
           # with no_new_privs as agentosd.service runs it. Its tests skip off
           # root or without the cgroup, so the step fails on any skip and

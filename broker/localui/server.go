@@ -61,6 +61,11 @@ type Config struct {
 	// sign-in, where the owner changes a provider's private-data answer
 	// after setup (CAP-9, CH-3). It needs Vault.
 	Providers Providers
+	// Accounts, when set, is the account clerks' sign-in (#2852); the
+	// Connect step for each of Connect's declared accounts is then served
+	// at /accounts/ behind sign-in (#2853, D-150). They go together.
+	Accounts Accounts
+	Connect  []ConnectDeclaration
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
@@ -161,6 +166,19 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Providers != nil && cfg.Vault == nil {
 		return nil, errors.New("localui: the providers page needs the vault socket")
 	}
+	if (cfg.Accounts == nil) != (len(cfg.Connect) == 0) {
+		return nil, errors.New("localui: the accounts page needs its clerk and its declarations")
+	}
+	seen := map[string]bool{}
+	for _, d := range cfg.Connect {
+		if err := d.validate(); err != nil {
+			return nil, err
+		}
+		if seen[d.ID] {
+			return nil, errors.New("localui: two accounts share an ID")
+		}
+		seen[d.ID] = true
+	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
 	}
@@ -251,6 +269,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Providers != nil {
 		s.Mount("/providers", "AI providers", http.HandlerFunc(s.providers))
+	}
+	if s.cfg.Accounts != nil {
+		s.Mount("/accounts", "Accounts", http.HandlerFunc(s.accountsPage))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)

@@ -32,7 +32,9 @@ the GENERATED line and its rows come from the live issues, never from hand edits
            [--base FILE]         fail if the base branch's BOARD.md carries the GENERATED line
                                  and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
-                                 issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr
+                                 issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr.
+                                 With --repo, a malformed issue is listed at the end of the board
+                                 (UNRENDERED) instead of failing the run, and an empty listing fails
   board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
            [--comment]           queued, building, in review or escalated (STALE-1); with --comment, say so
                                  once per item and PR on the issue. Flags only: never relabels or closes.
@@ -73,6 +75,7 @@ ARCHIVED = ("docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md")
 RETIRED = ("LATER.md", "docs/MARK-QUEUE.md")
 INTAKE_MARK = "<!-- board-intake -->"
 BOT = "github-actions[bot]"  # the login GITHUB_TOKEN comments as
+UNRENDERED = "<!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->"
 GATE = re.compile(r"\bMark approves\b|\bowner to confirm\b|\bwithout Mark\b|\bMark's approval\b")
 
 
@@ -227,8 +230,17 @@ def row_of(item):
             "cells": cells, "state": states[0], "rest": rest}
 
 
-def render(skeleton, items):
-    """BOARD.md: the skeleton's text with its rows replaced by the live rows of items."""
+def _skeleton(text):
+    """text without the trailing list of issues that cannot render, which each render rewrites."""
+    head, sep, _ = text.partition("\n\n" + UNRENDERED + "\n")
+    return head + "\n" if sep else text
+
+
+def render(skeleton, items, listed=False):
+    """BOARD.md: the skeleton's text with its rows replaced by the live rows of items. A malformed
+    issue raises Malformed, or with listed, is named in a list at the end of the board: one bad
+    issue once failed every board.yml run for two days, so the board kept a stale copy instead."""
+    skeleton = _skeleton(skeleton)
     lines = skeleton.splitlines()
     widths = {s: len(_cells(lines[n])) - 2 for n, kind, s in _table_lines(skeleton) if kind == "header"}
     by_section, seen, problems = {}, {}, []
@@ -248,7 +260,7 @@ def render(skeleton, items):
             problems.append(f"issue #{row['number']}: {len(row['cells'])} middle cells, its table has {widths[row['section']]}")
         elif row["state"] in OPEN_STATES:
             by_section.setdefault(row["section"], []).append(row)
-    if problems:
+    if problems and not listed:
         raise Malformed(problems)
     out = []
     for n, kind, section in _table_lines(skeleton):
@@ -258,7 +270,12 @@ def render(skeleton, items):
         if kind == "rule":
             for row in sorted(by_section.get(section, []), key=lambda r: r["number"]):
                 out.append("| " + " | ".join([row["id"], *row["cells"], row["state"] + row["rest"]]) + " |")
-    return "\n".join(out) + ("\n" if skeleton.endswith("\n") else "")
+    if problems:
+        # Fenced like the intake comment, so issue text quoted in a problem renders as text.
+        out += ["", UNRENDERED, "", "## Work items that cannot render", "",
+                "These open work-item issues are left off the board until their issue is fixed; each "
+                "carries an intake comment naming what to change.", "", "```text", *problems, "```"]
+    return "\n".join(out) + ("\n" if skeleton.endswith("\n") or problems else "")
 
 
 def frozen_drift(items):
@@ -282,6 +299,7 @@ def archive(base, changed, root):
 
 def live(text):
     """BOARD.md with its terminal rows removed, line for line: what rendering must give."""
+    text = _skeleton(text)
     lines = text.splitlines()
     keep = [lines[n] for n, kind, _ in _table_lines(text)
             if kind != "row" or _cells(lines[n])[-1].startswith(OPEN_STATES)]
@@ -314,7 +332,7 @@ STALE_MARK = "<!-- board-stale: #{} -->"
 
 def readable_row(item):
     """row_of(item), or None after naming a malformed issue on stderr: a read-only scan skips it
-    instead of failing the whole run (render and check still raise, so a bad row is never hidden)."""
+    instead of failing the whole run (render --repo lists it on the board, so it is never hidden)."""
     try:
         return row_of(item)
     except ValueError as e:
@@ -359,14 +377,27 @@ def report_stale(fetch, repo, comment):
     return len(found)
 
 
-def intake_problems(skeleton, items, number):
-    """The problems render names for issue `number` among the live work items: the same checks,
-    including duplicate IDs and the section's cell count, never another issue's problem."""
+def render_problems(skeleton, items):
+    """Every problem render finds among items, one line each."""
     try:
         render(skeleton, items)
     except Malformed as e:
-        return [p for p in e.problems if p.startswith(f"issue #{number}: ")]
+        return e.problems
     return []
+
+
+def well_formed(item):
+    try:
+        row_of(item)
+    except ValueError:
+        return False
+    return True
+
+
+def intake_problems(skeleton, items, number):
+    """The problems render names for issue `number` among the live work items: the same checks,
+    including duplicate IDs and the section's cell count, never another issue's problem."""
+    return [p for p in render_problems(skeleton, items) if p.startswith(f"issue #{number}: ")]
 
 
 def intake_comment(problems):
@@ -497,7 +528,14 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     try:
         if args.repo and (args.command == "render" or GENERATED in text):
             items = work_items(fetch, args.repo)
-            generated = render(text, items)  # raises Malformed with every bad issue before notes
+            if not items:
+                # GitHub once answered a run with no issues, and board.yml committed a board with
+                # every row gone (#2799); an empty board is never the live one, so refuse it.
+                raise ValueError(f"GitHub listed no open {MARKER} issues for {args.repo}; refusing to render an empty board")
+            generated = render(text, items, listed=True)
+            for p in render_problems(text, items):
+                print(f"board: {p}", file=sys.stderr)
+            items = [i for i in items if well_formed(i)]  # the notes and the frozen check read rows
             for note in pr_notes(items, fetch(f"/repos/{args.repo}/pulls?state=all")):
                 print(f"board: {note}", file=sys.stderr)
             if args.command == "render":

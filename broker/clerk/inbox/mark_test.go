@@ -9,6 +9,7 @@ import (
 
 	"github.com/emersion/go-imap"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
@@ -19,7 +20,7 @@ func markRig(t *testing.T) (*imaptest.Server, *Live) {
 	t.Helper()
 	srv := imaptest.Start(t)
 	srv.Deliver("INBOX", rawMail("<m1@shop.test>", "a@shop.test", "Order"))
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain, From: imaptest.User,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}})

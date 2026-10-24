@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -78,7 +79,7 @@ func mailConfig() MailConfig {
 		Anchors: anchors, HandleSecret: bytes.Repeat([]byte{9}, 16),
 		Ask:   func(context.Context, string) (string, error) { return "bulk", nil },
 		World: func() inbox.World { return inbox.World{Today: "2026-10-21"} }, RetentionDays: 30,
-		Sealer: testSealer(), plain: true,
+		Sealer: testSealer(), plain: true, Conn: imapconn.Pipe(),
 	}
 }
 

@@ -15,10 +15,24 @@ import (
 	"strings"
 )
 
+// Dir is the access point loader's directory: the one path under
+// /var/lib/agentos that agentos-ap's unit binds in, read-write, so the
+// rest of agentosd's state is absent from the loader's namespace (#2626).
+// It holds the setup network (claim.SetupNetPath), the card's network
+// and the owned marker, and nothing else. The image makes it root's 0700
+// at every boot (tmpfiles.d/agentos.conf).
+const Dir = "/var/lib/agentos/ap"
+
 // Path is where the box keeps the card's network, root-owned 0600 beside
 // the setup network (claim.SetupNetPath). The password is held in the
 // clear, as WPA3-SAE needs it, and never logged (ARC-1).
-const Path = "/var/lib/agentos/ap-net.json"
+const Path = Dir + "/ap-net.json"
+
+// Owned is the owned marker: agentosd makes it, empty, once setup's
+// finish is recorded, at that finish and at every later start. The loader
+// reads its presence where it once read agentosd's owner state, which its
+// namespace no longer holds; one it cannot stat counts as owned.
+const Owned = Dir + "/owned"
 
 // Prefix starts the card's network name; the setup network's is
 // "AgentOS-Setup-", so the two never look alike.

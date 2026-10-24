@@ -17,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
@@ -35,7 +36,7 @@ type seenRig struct {
 func newSeenRig(t *testing.T) *seenRig {
 	t.Helper()
 	srv := imaptest.Start(t)
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
+	st, err := imapsmtp.New(imapsmtp.Config{Conn: imapconn.Pipe(), IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: imaptest.User, Secret: imaptest.Password}, nil
 		}, From: imaptest.User})

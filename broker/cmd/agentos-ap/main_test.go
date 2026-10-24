@@ -118,7 +118,7 @@ func newBox(t *testing.T, wireless ...string) *box {
 		t.Fatal(err)
 	}
 	return &box{cfg: config{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-		Latch: filepath.Join(d, "card-latch.json"), Setup: setup, OwnerState: filepath.Join(d, "owner.json"),
+		Latch: filepath.Join(d, "card-latch.json"), Setup: setup, Owned: filepath.Join(d, "owned"),
 		APNet:       filepath.Join(d, "ap-net.json"),
 		SysClassNet: sysNet(t, wireless, []string{"lo", "eth0"}), Poll: 10 * time.Millisecond}, host: &fakeHost{}, ap: &fakeAP{}, net: n}
 }
@@ -217,7 +217,7 @@ func TestOtherRadioIsBroughtDownOnly(t *testing.T) {
 func TestConfirmedOrOwnedBoxServesNoSetupNetwork(t *testing.T) {
 	for name, prep := range map[string]func(b *box){
 		"confirmed": func(b *box) { os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600) },
-		"owned":     func(b *box) { os.WriteFile(b.cfg.OwnerState, []byte(`{}`), 0o600) },
+		"owned":     func(b *box) { os.WriteFile(b.cfg.Owned, []byte(`{}`), 0o600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := newBox(t, "wlan0")
@@ -278,7 +278,7 @@ func TestARadioThatAppearsLateServes(t *testing.T) {
 func TestConfirmWhileServingBringsTheAccessPointDownThenBurns(t *testing.T) {
 	for name, act := range map[string]func(b *box){
 		"confirmed": func(b *box) { os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600) },
-		"owned":     func(b *box) { os.WriteFile(b.cfg.OwnerState, []byte(`{}`), 0o600) },
+		"owned":     func(b *box) { os.WriteFile(b.cfg.Owned, []byte(`{}`), 0o600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := newBox(t, "wlan0")
@@ -321,22 +321,22 @@ func TestConfirmWhileServingBringsTheAccessPointDownThenBurns(t *testing.T) {
 	}
 }
 
-// An owner state that cannot be stat'ed for any reason but its absence
+// An owned marker that cannot be stat'ed for any reason but its absence
 // counts as owned: the page cannot keep the setup network by making the
 // path unreadable.
-func TestUnreadableOwnerStateCountsAsOwned(t *testing.T) {
+func TestUnreadableOwnedMarkerCountsAsOwned(t *testing.T) {
 	cases := map[string]func(b *box){
 		"ENOTDIR": func(b *box) {
 			f := filepath.Join(t.TempDir(), "file")
 			os.WriteFile(f, nil, 0o600)
-			b.cfg.OwnerState = filepath.Join(f, "owner.json")
+			b.cfg.Owned = filepath.Join(f, "owned")
 		},
 	}
 	if os.Geteuid() != 0 {
 		cases["EACCES"] = func(b *box) {
 			d := filepath.Join(t.TempDir(), "locked")
 			os.Mkdir(d, 0o700)
-			b.cfg.OwnerState = filepath.Join(d, "owner.json")
+			b.cfg.Owned = filepath.Join(d, "owned")
 			os.Chmod(d, 0)
 			t.Cleanup(func() { os.Chmod(d, 0o700) })
 		}
@@ -345,7 +345,7 @@ func TestUnreadableOwnerStateCountsAsOwned(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := newBox(t, "wlan0")
 			prep(b)
-			if _, err := os.Lstat(b.cfg.OwnerState); err == nil || errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Lstat(b.cfg.Owned); err == nil || errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("Lstat = %v, want an error other than not-exist", err)
 			}
 			cancel, done := b.runAsync(t)
@@ -358,7 +358,7 @@ func TestUnreadableOwnerStateCountsAsOwned(t *testing.T) {
 				t.Fatal(err)
 			}
 			if b.startedCount() != 0 {
-				t.Fatal("served the setup network with an unreadable owner state")
+				t.Fatal("served the setup network with an unreadable owned marker")
 			}
 		})
 	}
@@ -533,7 +533,7 @@ func TestConfirmSwitchesToTheCardsNetwork(t *testing.T) {
 func TestRestartServesTheCardsNetwork(t *testing.T) {
 	for name, act := range map[string]func(b *box){
 		"confirmed": func(b *box) { os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600) },
-		"owned":     func(b *box) { os.WriteFile(b.cfg.OwnerState, []byte(`{}`), 0o600) },
+		"owned":     func(b *box) { os.WriteFile(b.cfg.Owned, []byte(`{}`), 0o600) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := newBox(t, "wlan0")

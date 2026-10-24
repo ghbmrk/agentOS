@@ -45,6 +45,9 @@ type MailHost struct {
 	changes  int64         // account changes so far (changed)
 	seq      int64
 	notices  []notice
+
+	signMu  sync.Mutex
+	signing *gmailSignIn // the Gmail sign-in waiting for its paste; nil: none
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -82,6 +85,14 @@ const DNoSignIn = "no-sign-in"
 // provider's lockout (#2698 item 5).
 var ErrSignInRefused = errors.New("run: the mail server refused the sign-in; the owner must set the account up again")
 
+// DReconnect is a step's detail while Gmail refuses the clerk's grant
+// (inbox.ErrReconnect): nothing is sent until the owner signs in again. It
+// is inbox's word for a step refused that way.
+const DReconnect = "reconnect"
+
+// ErrReconnect is the planner's answer while Gmail refuses the grant.
+var ErrReconnect = errors.New("run: Gmail refused the clerk's sign-in; the owner must sign in again")
+
 // ErrNoPasswordSignIn is the planner's answer while the server offers no
 // sign-in the clerk can make with these settings: nothing is read again
 // until the owner sets the account up again.
@@ -90,13 +101,16 @@ var ErrNoPasswordSignIn = errors.New("run: the mail server offers no sign-in wit
 // stops reports whether err is a sign-in failure only a change of setup
 // clears, and so stops every sign-in until then.
 func stops(err error) bool {
-	return errors.Is(err, imapsmtp.ErrLoginRefused) || errors.Is(err, imapsmtp.ErrNoSignIn)
+	return errors.Is(err, imapsmtp.ErrLoginRefused) || errors.Is(err, imapsmtp.ErrNoSignIn) || errors.Is(err, inbox.ErrReconnect)
 }
 
 // stopped is what a step, and the planner, get while stop holds.
 func stopped(stop error) (detail string, planner error) {
-	if errors.Is(stop, imapsmtp.ErrNoSignIn) {
+	switch {
+	case errors.Is(stop, imapsmtp.ErrNoSignIn):
 		return DNoSignIn, ErrNoPasswordSignIn
+	case errors.Is(stop, inbox.ErrReconnect):
+		return DReconnect, ErrReconnect
 	}
 	return DSignInRefused, ErrSignInRefused
 }
@@ -231,7 +245,7 @@ func (h *MailHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return kernel.Result{Outcome: "failed", Detail: DNoAccount}
 	}
 	res := m.Do(r, v)
-	if stop := map[string]error{DSignInRefused: imapsmtp.ErrLoginRefused, DNoSignIn: imapsmtp.ErrNoSignIn}[res.Detail]; res.Outcome == "failed" && stop != nil {
+	if stop := map[string]error{DSignInRefused: imapsmtp.ErrLoginRefused, DNoSignIn: imapsmtp.ErrNoSignIn, DReconnect: inbox.ErrReconnect}[res.Detail]; res.Outcome == "failed" && stop != nil {
 		// The step's own sign-in failed that way, before any effect: no
 		// step, probe or read signs in again until the owner sets the account
 		// up again, and STATUS says so (#2708 item 2, #2698 item 32). The
@@ -357,19 +371,26 @@ type MailSide struct {
 	ops  map[string]mailOp
 }
 
-// MailOwnerSide is the owner side's table: set up, remove, and read what the
-// clerk tells the owner.
+// MailOwnerSide is the owner side's table: set up, remove, sign in to Gmail
+// and give its sign-in back, and read what the clerk tells the owner.
 var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 	"setmail": func(h *MailHost, raw json.RawMessage) (any, error) {
 		var a setMailArgs
 		if json.Unmarshal(raw, &a) != nil {
 			return nil, proc.ErrArgs
 		}
+		// Refused before a Gmail grant is given back for nothing.
+		if err := checkSetup(a.Settings, a.Password); err != nil {
+			return nil, err
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.idle()
-		_, err := readMail(h.dir)
+		prev, err := readMail(h.dir)
 		replacing := err == nil
+		if replacing {
+			h.revokeGmail(prev) // a Gmail account's grant, before SetMail drops it (A22)
+		}
 		if err := SetMail(h.dir, h.sec, a.Settings, a.Password); err != nil {
 			return nil, err
 		}
@@ -384,8 +405,11 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.idle()
-		_, err := readMail(h.dir)
+		prev, err := readMail(h.dir)
 		removing := err == nil
+		if removing {
+			h.revokeGmail(prev) // a Gmail account's grant, before RemoveMail drops it (A22)
+		}
 		if err := RemoveMail(h.dir, h.sec); err != nil {
 			return nil, err
 		}
@@ -395,8 +419,27 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		}
 		return nil, nil
 	},
-	"status":  func(h *MailHost, _ json.RawMessage) (any, error) { return h.status(), nil },
-	"account": func(h *MailHost, _ json.RawMessage) (any, error) { return h.account() },
+	"gmailbegin": func(h *MailHost, raw json.RawMessage) (any, error) {
+		var a gmailBeginArgs
+		if json.Unmarshal(raw, &a) != nil {
+			return nil, proc.ErrArgs
+		}
+		var reg *clerk.Registration
+		if a.Registration != nil {
+			reg = &clerk.Registration{ID: a.Registration.ID, Secret: a.Registration.Secret}
+		}
+		return h.gmailBegin(a.Use, reg), nil
+	},
+	"gmailfinish": func(h *MailHost, raw json.RawMessage) (any, error) {
+		var a gmailFinishArgs
+		if json.Unmarshal(raw, &a) != nil {
+			return nil, proc.ErrArgs
+		}
+		return h.gmailFinish(a.Use, a.Pasted)
+	},
+	"gmailrevoke": func(h *MailHost, _ json.RawMessage) (any, error) { return h.gmailRevoke() },
+	"status":      func(h *MailHost, _ json.RawMessage) (any, error) { return h.status(), nil },
+	"account":     func(h *MailHost, _ json.RawMessage) (any, error) { return h.account() },
 	"told": func(h *MailHost, raw json.RawMessage) (any, error) {
 		var through int64
 		if json.Unmarshal(raw, &through) != nil {
@@ -463,6 +506,35 @@ func (o MailOwner) SetMail(s MailSettings, password string) error {
 	return o.Call("setmail", setMailArgs{s, password}, nil)
 }
 func (o MailOwner) RemoveMail() error { return o.Call("removemail", nil, nil) }
+
+// GmailBegin starts a Gmail sign-in for one declared use (inbox.GmailUses)
+// and returns the consent address, or a typed detail (clerk.D*). reg is
+// the household's client at the first sign-in; nil signs in again with the
+// Gmail account's own.
+func (o MailOwner) GmailBegin(use string, reg *clerk.Registration) (consent, detail string, err error) {
+	a := gmailBeginArgs{Use: use}
+	if reg != nil {
+		a.Registration = &gmailRegistration{reg.ID, reg.Secret}
+	}
+	var b gmailBegun
+	err = o.Call("gmailbegin", a, &b)
+	return b.Consent, b.Detail, err
+}
+
+// GmailFinish hands the mail process the address the owner pasted and the
+// use the owner confirmed: "signedin <use>" once the account is set up,
+// or a typed detail (clerk.D*, DGmailAddress).
+func (o MailOwner) GmailFinish(use, pasted string) (detail string, err error) {
+	err = o.Call("gmailfinish", gmailFinishArgs{use, pasted}, &detail)
+	return
+}
+
+// GmailRevoke gives the Gmail account's sign-in back to Google and removes
+// the account: clerk.DRevoked, or a typed detail with the account kept.
+func (o MailOwner) GmailRevoke() (detail string, err error) {
+	err = o.Call("gmailrevoke", nil, &detail)
+	return
+}
 func (o MailOwner) Status() (st OwnerStatus, err error) {
 	err = o.Call("status", nil, &st)
 	return

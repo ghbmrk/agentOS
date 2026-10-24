@@ -12,10 +12,10 @@ only reads the tree, so a PR's code is listed, never built or run.
   parsers     linked packages that tools/trusted_base_parsers.txt classes `parser`
 
 Every linked package outside the standard library must match a registry line, so no package
-enters a trusted process unclassified. Growth is allowed with a reason: a PR whose head grows
-own or dependency lines, adds a parser package, or reclassifies a parser as inert fails
-unless its body has a line `Trusted-base: <lines|deps|parsers|registry> -- <reason>`.
-It is a measure, not a cap.
+enters a trusted process unclassified. Own and dependency lines are reported, not gated: the
+keeper domain's growth is gated by the trusted core below (D-157). A PR whose head adds a
+parser package or reclassifies a parser as inert fails unless its body has a line
+`Trusted-base: <parsers|registry> -- <reason>`. It is a measure, not a cap.
 
 The trusted core (KRN-2cap, #2935) is the budgeted subset: the `root` packages of
 tools/trusted_core.txt (kernel, key-check library, the clerk check path) and everything they
@@ -54,8 +54,8 @@ REGISTRY = "tools/trusted_base_parsers.txt"
 CORE = "tools/trusted_core.txt"
 FALLBACK = pathlib.Path(__file__).resolve().parent.parent  # the checkout this copy runs from
 CORE_LIST = "broker/core/core.txt"
-METRICS = ("lines", "deps", "parsers")
-KEYS = METRICS + ("registry",)
+KEYS = ("parsers", "registry")
+RETIRED = ("lines", "deps")  # keys that no longer gate (D-157); a body that still has one passes
 GO_ENV = {
     "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64", "GOFLAGS": "-mod=vendor",
     "GOTOOLCHAIN": "local", "GOWORK": "off", "GOPROXY": "off", "GOENV": "off",
@@ -197,6 +197,8 @@ def reasons(body):
         if not r:
             continue
         key, why = r.group(1).lower(), r.group(2)
+        if key in RETIRED:
+            continue
         if key not in KEYS:
             bad.append(f"`{line.strip()}`: the key must be one of {', '.join(KEYS)}")
         elif len(why.split()) < 2 or PLACEHOLDER.match(why):
@@ -207,12 +209,9 @@ def reasons(body):
 
 
 def compare(base, head, reclassified, body):
-    """(problems, owed) for a base and head measure; owed maps each grown key to its detail."""
+    """(problems, owed) for a base and head measure; owed maps each key that needs a reason to its
+    detail. Own and dependency lines show in the table only."""
     owed = {}
-    if head["lines"] > base["lines"]:
-        owed["lines"] = f"own lines {base['lines']} -> {head['lines']}"
-    if head["deps"] > base["deps"]:
-        owed["deps"] = f"dependency lines {base['deps']} -> {head['deps']}"
     new = sorted(head["parsers"] - base["parsers"])
     if new:
         owed["parsers"] = "new parser packages: " + ", ".join(new)

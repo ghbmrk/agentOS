@@ -136,8 +136,8 @@ func withGrants(c *custody, g grants, agent string) *custody {
 
 // reservedPrefixes are the machine-name prefixes the broker gives its own
 // machines: builders (lb-), eval replays (eval-), workers (wk-) and clean
-// rooms (cr-). The test pins them to vm.WorkerPrefix and cleanroom.Prefix,
-// which this binary does not import.
+// rooms (cr-, kept reserved for publication's rebuild, SPEC PUB-1). The test
+// pins wk- to vm.WorkerPrefix, which this binary does not import.
 var reservedPrefixes = []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, "wk-", "cr-"}
 
 // checkAgentMachine checks -agent-machine: a machine name, never one with

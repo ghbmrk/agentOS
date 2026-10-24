@@ -10,7 +10,9 @@
 package gmailtest
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -65,14 +67,31 @@ type Server struct {
 	forwards []string
 	autoFwd  string
 	grantOK  bool
+	endless  int    // read listings left that name a next page, whatever the last
+	otherID  bool   // metadata answers name another message's id
+	user     string // the address the profile names; "" is User
+	// Sign-in (D-150): the codes consent issued, each with its PKCE
+	// challenge, redirect and scope; the scope the next consent grants
+	// beyond the asked one; and the tokens revoked.
+	codes   map[string]consent
+	wider   string
+	revoked []string
 }
+
+type consent struct{ challenge, redirect, scope string }
 
 // Message is one stored message.
 type Message struct {
 	ID     string
 	Raw    []byte
 	Labels []string
+	// Arrived is the internalDate, in milliseconds: a second apart from
+	// 2026-10-01, in the order delivered.
+	Arrived int64
 }
+
+// arrivedBase is the first delivered message's internalDate.
+const arrivedBase = int64(1790812800000) // 2026-10-01T00:00:00Z
 
 // Label is one label of the account.
 type Label struct {
@@ -83,7 +102,7 @@ var system = []string{"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT"
 
 // New starts a fake; Close stops it.
 func New() *Server {
-	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, grantOK: true}
+	s := &Server{msgs: map[string]*Message{}, history: 1000, fail: map[string]int{}, grantOK: true, codes: map[string]consent{}}
 	for _, id := range system {
 		s.labels = append(s.labels, Label{ID: id, Name: id, Type: "system"})
 	}
@@ -106,6 +125,53 @@ func (s *Server) Base() string { return s.origin() + "/gmail/v1/users/me" }
 
 // Token is the fake's token endpoint, in GmailToken's place.
 func (s *Server) Token() string { return s.origin() + "/token" }
+
+// Consent is the fake's consent page and Revoke its revocation endpoint.
+func (s *Server) Consent() string { return s.origin() + "/consent" }
+func (s *Server) Revoke() string  { return s.origin() + "/revoke" }
+
+// Approve is the owner approving the consent address the clerk gave, on
+// their phone: it checks the request is Google's installed-app shape with
+// PKCE S256 and returns the loopback address the browser lands on, with a
+// code and the state. ok false is a consent the fake would refuse to show.
+func (s *Server) Approve(address string) (landing string, ok bool) {
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme+"://"+u.Host+u.Path != s.Consent() {
+		return "", false
+	}
+	q := u.Query()
+	if q.Get("response_type") != "code" || q.Get("client_id") != Client || q.Get("code_challenge_method") != "S256" ||
+		len(q.Get("code_challenge")) != 43 || q.Get("state") == "" || q.Get("access_type") != "offline" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scope := q.Get("scope")
+	if s.wider != "" {
+		scope += " " + s.wider
+	}
+	code := "canary-gmailtest-code-" + strconv.Itoa(len(s.codes)+1)
+	s.codes[code] = consent{q.Get("code_challenge"), q.Get("redirect_uri"), scope}
+	return q.Get("redirect_uri") + "?" + url.Values{"state": {q.Get("state")}, "code": {code}, "scope": {scope}}.Encode(), true
+}
+
+// Deny is the owner pressing Cancel on the consent page.
+func Deny(address string) string {
+	u, _ := url.Parse(address)
+	q := u.Query()
+	return q.Get("redirect_uri") + "?" + url.Values{"state": {q.Get("state")}, "error": {"access_denied"}}.Encode()
+}
+
+// Wider makes every later consent grant scope too, as Google's
+// include_granted_scopes does with an earlier grant.
+func (s *Server) Wider(scope string) { s.mu.Lock(); s.wider = scope; s.mu.Unlock() }
+
+// Revoked lists the tokens revoked, in order.
+func (s *Server) Revoked() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.revoked)
+}
 
 // Roots trusts the fake's certificate.
 func (s *Server) Roots() *x509.CertPool {
@@ -139,10 +205,29 @@ func (s *Server) Deliver(raw []byte, labels ...string) string {
 	if len(labels) == 0 {
 		labels = []string{"INBOX", "UNREAD"}
 	}
-	s.msgs[id] = &Message{ID: id, Raw: slices.Clone(raw), Labels: slices.Clone(labels)}
+	s.msgs[id] = &Message{ID: id, Raw: slices.Clone(raw), Labels: slices.Clone(labels), Arrived: arrivedBase + int64(s.next)*1000}
 	s.order = append(s.order, id)
 	s.change()
 	return id
+}
+
+// Open is the owner reading a message in their own mail app: its UNREAD
+// label goes.
+func (s *Server) Open(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.msgs[id]; m != nil {
+		m.Labels = slices.DeleteFunc(m.Labels, func(l string) bool { return l == "UNREAD" })
+		s.change()
+	}
+}
+
+// Erase is the owner deleting a message for good in their own mail app.
+func (s *Server) Erase(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.msgs, id)
+	s.change()
 }
 
 // Get is a stored message, as it is now.
@@ -188,6 +273,17 @@ func (s *Server) Tokens() int {
 	defer s.mu.Unlock()
 	return s.tokens
 }
+
+// Endless makes the next n listings of read mail name a next page of the
+// same ids, as an API that never ends its listing would.
+func (s *Server) Endless(n int) { s.mu.Lock(); s.endless = n; s.mu.Unlock() }
+
+// As makes the profile name address, as another Google account signed in
+// on the consent page would.
+func (s *Server) As(address string) { s.mu.Lock(); s.user = address; s.mu.Unlock() }
+
+// OtherID makes each metadata answer name an id other than the one asked.
+func (s *Server) OtherID(on bool) { s.mu.Lock(); s.otherID = on; s.mu.Unlock() }
 
 // Lie makes a modify or trash answer 200 and change nothing, as a lost
 // write would.
@@ -254,6 +350,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.serveToken(w, r)
 		return
 	}
+	if r.URL.Path == "/revoke" {
+		s.serveRevoke(w, r)
+		return
+	}
 	line := r.Method + " " + r.URL.Path
 	auth := r.Header.Get("Authorization")
 	if s.token == "" || auth != "Bearer "+s.token {
@@ -291,6 +391,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.calls = append(s.calls, line)
 	switch {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/messages":
+		if q.Has("q") && q.Get("q") != "-is:unread" {
+			w.WriteHeader(http.StatusBadRequest) // a query the fake does not know
+			return
+		}
 		s.list(q, reply)
 	case r.Method == "GET" && msgPath.MatchString(p):
 		m := s.msgs[msgPath.FindStringSubmatch(p)[1]]
@@ -298,7 +402,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		out := map[string]any{"id": m.ID, "threadId": m.ID, "labelIds": m.Labels, "historyId": strconv.Itoa(s.history)}
+		out := map[string]any{"id": m.ID, "threadId": m.ID, "labelIds": m.Labels, "historyId": strconv.Itoa(s.history),
+			"internalDate": strconv.FormatInt(m.Arrived, 10)}
 		switch q.Get("format") {
 		case "raw":
 			raw := m.Raw
@@ -308,6 +413,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			out["raw"] = base64.URLEncoding.EncodeToString(raw)
 		case "metadata", "full":
 			out["payload"] = map[string]any{"headers": headers(m.Raw, q["metadataHeaders"])}
+			if s.otherID {
+				out["id"] = m.ID + "0"
+			}
 		}
 		reply(out)
 	case r.Method == "POST" && actionPath.MatchString(p):
@@ -425,7 +533,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/settings/autoForwarding":
 		reply(map[string]any{"enabled": s.autoFwd != "", "emailAddress": s.autoFwd, "disposition": "leaveInInbox"})
 	case r.Method == "GET" && p == "/gmail/v1/users/me/profile":
-		reply(map[string]any{"emailAddress": User, "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
+		reply(map[string]any{"emailAddress": cmp.Or(s.user, User), "messagesTotal": len(s.msgs), "historyId": strconv.Itoa(s.history)})
 	default:
 		s.calls = s.calls[:len(s.calls)-1]
 		refuse(http.StatusNotFound)
@@ -441,9 +549,13 @@ func (s *Server) hasLabel(id string) bool {
 	return false
 }
 
-// list answers messages.list for labelIds, newest first, in pages.
+// list answers messages.list for labelIds, newest first, in pages. The one
+// query it knows is read mail (-is:unread); spam and trash are listed only
+// with includeSpamTrash, as Gmail lists them.
 func (s *Server) list(q url.Values, reply func(any)) {
 	label := q.Get("labelIds")
+	read := q.Get("q") == "-is:unread"
+	all := q.Get("includeSpamTrash") == "true"
 	max, _ := strconv.Atoi(q.Get("maxResults"))
 	if max <= 0 || max > 500 {
 		max = 100
@@ -451,9 +563,16 @@ func (s *Server) list(q url.Values, reply func(any)) {
 	start, _ := strconv.Atoi(q.Get("pageToken"))
 	var ids []string
 	for i := len(s.order) - 1; i >= 0; i-- {
-		if m := s.msgs[s.order[i]]; m != nil && (label == "" || slices.Contains(m.Labels, label)) {
-			ids = append(ids, m.ID)
+		m := s.msgs[s.order[i]]
+		switch {
+		case m == nil, label != "" && !slices.Contains(m.Labels, label):
+			continue
+		case !all && (slices.Contains(m.Labels, "SPAM") || slices.Contains(m.Labels, "TRASH")):
+			continue
+		case read && slices.Contains(m.Labels, "UNREAD"):
+			continue
 		}
+		ids = append(ids, m.ID)
 	}
 	var page []map[string]string
 	for i := start; i < len(ids) && i < start+max; i++ {
@@ -462,6 +581,10 @@ func (s *Server) list(q url.Values, reply func(any)) {
 	out := map[string]any{"messages": page, "resultSizeEstimate": len(ids)}
 	if start+max < len(ids) {
 		out["nextPageToken"] = strconv.Itoa(start + max)
+	}
+	if read && s.endless > 0 {
+		s.endless--
+		out["nextPageToken"] = strconv.Itoa(start)
 	}
 	reply(out)
 }
@@ -491,7 +614,52 @@ func headers(raw []byte, only []string) []map[string]string {
 	return out
 }
 
+// serveCode redeems a consent's code once (RFC 6749 section 4.1.3), checking
+// the PKCE verifier against its challenge (RFC 7636 section 4.6), the
+// redirect and the client.
+func (s *Server) serveCode(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.codes[r.Form.Get("code")]
+	delete(s.codes, r.Form.Get("code"))
+	sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != c.challenge || r.Form.Get("redirect_uri") != c.redirect ||
+		r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+		return
+	}
+	s.tokens++
+	s.token = "canary-gmailtest-access-" + strconv.Itoa(s.tokens)
+	s.grantOK = true
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"access_token": s.token, "expires_in": 3599, "token_type": "Bearer",
+		"refresh_token": Refresh, "scope": c.scope})
+}
+
+// serveRevoke revokes a token (RFC 7009): the refresh token kills the grant
+// and its access token; an unknown token answers 400, as Google's does.
+func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
+	t := ""
+	if r.ParseForm() == nil {
+		t = r.Form.Get("token")
+	}
+	switch {
+	case t == Refresh && s.grantOK:
+		s.grantOK, s.token = false, ""
+	case t != "" && t == s.token:
+		s.token = ""
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_token"}`))
+		return
+	}
+	s.revoked = append(s.revoked, t)
+}
+
 func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
+	if r.ParseForm() == nil && r.Form.Get("grant_type") == "authorization_code" {
+		s.serveCode(w, r)
+		return
+	}
 	if r.ParseForm() != nil || r.Form.Get("grant_type") != "refresh_token" || !s.grantOK ||
 		r.Form.Get("refresh_token") != Refresh || r.Form.Get("client_id") != Client || r.Form.Get("client_secret") != Secret {
 		w.WriteHeader(http.StatusBadRequest)

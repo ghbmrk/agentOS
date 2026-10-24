@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -212,7 +213,7 @@ func TestASessionCutOffAtItsTimeoutSaysSo(t *testing.T) {
 // address policy to connect.
 func guardedStore(t *testing.T, timeout time.Duration, connect func(ctx context.Context, network string) (net.Conn, error)) *Store {
 	t.Helper()
-	s, err := New(Config{
+	s, err := New(Config{Conn: imapconn.Pipe(),
 		IMAP: "mail.example:993", SMTP: "mail.example:465", IMAPSec: TLS, SMTPSec: TLS,
 		Timeout:    timeout,
 		Credential: func(context.Context) (Login, error) { return Login{}, nil },
