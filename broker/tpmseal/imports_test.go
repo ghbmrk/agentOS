@@ -10,11 +10,15 @@ import (
 
 // Only the vault process, the unlock step and enrollment talk to the TPM:
 // they alone open or make what the sealed key opens (vault V2, STO-2b,
-// STO-2c). No other broker binary links this package.
+// STO-2c). The kernel links it for the log anchor's counter alone (LOG-2,
+// STO-1), over the one connection the unlock step hands it; it never sees
+// the store or a sealed blob. No other broker binary links this package.
 var linksTPM = map[string]bool{
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-egress": true,
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-enroll": true,
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-unlock": true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-egress":        true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-enroll":        true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel":        true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor": true,
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-unlock":        true,
 }
 
 func TestOnlyTheVaultProcessLinksTPMSeal(t *testing.T) {

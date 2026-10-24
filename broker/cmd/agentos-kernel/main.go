@@ -10,8 +10,9 @@
 // It refuses to run as root or as any peer's uid, makes itself non-dumpable,
 // serves the owner side and the model clerk's meter on their sockets, and
 // runs plans every second. It holds no credential and never the store key.
-// It needs a log anchor off the log's disk (LOG-2); until the TPM counter
-// anchor lands (LOG-anchor-tpm, #2682) it refuses to start.
+// Its log anchor is the TPM counter enrollment defined (LOG-2, STO-1): the
+// signed head lives in -anchor-dir and the counter numbers its writes, so a
+// drive rolled back, log and anchor together, is refused at start.
 package main
 
 import (
@@ -23,12 +24,14 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/procguard"
@@ -36,16 +39,14 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	if err := start(os.Args[1:], os.Stderr, productionAnchor, os.NewFile(handoff.KeyFD, "unlock-keys")); err != nil {
+	if err := start(os.Args[1:], os.Stderr, anchor.Open, os.NewFile(handoff.KeyFD, "unlock-keys"), os.NewFile(handoff.TPMFD, "tpm")); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// errNoAnchor: no production log anchor exists yet. MemAnchor would forget
-// every head at a restart, so a rolled-back log would pass (LOG-2).
-var errNoAnchor = errors.New("agentos-kernel: no log anchor off this disk yet (LOG-anchor-tpm); I start nothing")
-
-func productionAnchor() (kernel.Anchor, error) { return nil, errNoAnchor }
+// anchorFunc opens the log's anchor in dir with the unlock step's keys and
+// the TPM connection it handed over.
+type anchorFunc func(dir string, keys handoff.KernelKeys, tpm *os.File) (kernel.Anchor, error)
 
 type clerks map[string]proc.Remote
 
@@ -66,11 +67,19 @@ func (c clerks) Set(v string) error {
 	return nil
 }
 
-func parse(args []string, stderr io.Writer) (proc.MainConfig, error) {
+// config is the kernel process's: proc.MainConfig and the anchor's
+// directory.
+type config struct {
+	proc.MainConfig
+	AnchorDir string
+}
+
+func parse(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("agentos-kernel", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	c := proc.MainConfig{Clerks: map[string]proc.Remote{}}
+	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}}}
 	fs.StringVar(&c.Log, "log", "", "the log file")
+	fs.StringVar(&c.AnchorDir, "anchor-dir", "", "the log anchor's directory, beside the log")
 	fs.StringVar(&c.OwnerSock, "owner-sock", "", "the owner side's socket")
 	fs.IntVar(&c.OwnerUID, "owner-uid", -1, "the owner side's uid, the only peer on owner-sock")
 	fs.StringVar(&c.MeterSock, "meter-sock", "", "the model clerk's meter socket")
@@ -85,6 +94,8 @@ func parse(args []string, stderr io.Writer) (proc.MainConfig, error) {
 		return c, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	case c.Log == "" || c.OwnerSock == "" || c.MeterSock == "":
 		return c, errors.New("-log, -owner-sock and -meter-sock are required")
+	case !filepath.IsAbs(c.AnchorDir):
+		return c, errors.New("an absolute -anchor-dir is required")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
 	}
@@ -95,11 +106,13 @@ func parse(args []string, stderr io.Writer) (proc.MainConfig, error) {
 	return c, nil
 }
 
-// start runs the kernel with the unlock step's hand-off on keyFile. Every
-// refusal comes before the keys are read, so a kernel that cannot start
-// never takes them: not as root, not as a peer's uid, and not while
-// dumpable, since a peer could then read them from its memory (CLK-1).
-func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error), keyFile *os.File) error {
+// start runs the kernel with the unlock step's hand-off on keyFile and its
+// TPM connection on tpmFile. Every refusal of the process itself comes
+// before the keys are read, so a kernel that cannot start never takes them:
+// not as root, not as a peer's uid, and not while dumpable, since a peer
+// could then read them from its memory (CLK-1). The anchor is opened after,
+// since it signs with the head key; a refused anchor wipes the keys.
+func start(args []string, stderr io.Writer, anchor anchorFunc, keyFile, tpmFile *os.File) error {
 	cfg, err := parse(args, stderr)
 	if err != nil {
 		return err
@@ -110,16 +123,16 @@ func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error)
 	if err := procguard.Isolate(cfg.Peers...); err != nil {
 		return err
 	}
-	a, err := anchor()
-	if err != nil {
-		return err
-	}
 	keys, err := handoff.ReadKeys(keyFile)
 	if err != nil {
 		return err
 	}
 	defer keys.Wipe()
+	a, err := anchor(cfg.AnchorDir, keys, tpmFile)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	return proc.RunKernel(ctx, cfg, keys, a)
+	return proc.RunKernel(ctx, cfg.MainConfig, keys, a)
 }

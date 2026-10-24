@@ -24,7 +24,11 @@ var (
 )
 
 func testKeys() KernelKeys {
-	return KernelKeys{Log: [32]byte{9}, Head: headPriv, Anchors: anchors}
+	return KernelKeys{Log: [32]byte{9}, Head: headPriv, Counter: testCounter(), Anchors: anchors}
+}
+
+func testCounter() Counter {
+	return Counter{SRK: bytes.Repeat([]byte{5}, 34), Handle: 0x01801234, Name: bytes.Repeat([]byte{6}, 34), Auth: []byte("0123456789abcdef0123456789abcdef")}
 }
 
 // pipeWith is a pipe's read end holding b, its writer closed.
@@ -51,11 +55,14 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 2 || !k.Anchors[0].Equal(ownerPub) || !k.Anchors[1].Equal(sparePub) {
+	want := testCounter()
+	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 2 || !k.Anchors[0].Equal(ownerPub) || !k.Anchors[1].Equal(sparePub) ||
+		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth, want.Auth) {
 		t.Fatalf("keys did not survive the hand-off: %+v", k)
 	}
+	auth := k.Counter.Auth
 	k.Wipe()
-	if k.Head != nil || k.Log != ([32]byte{}) {
+	if k.Head != nil || k.Log != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
 		t.Fatal("Wipe left keys")
 	}
 }
@@ -69,11 +76,20 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	}
 	extra := append(bytes.Clone(good), 0)
 	retag := bytes.Clone(good)
-	retag[len(handoffTag)-2] = '2'
+	retag[len(handoffTag)-2] = '1' // a v1 hand-off, which carried no counter
 	miscount := bytes.Clone(good)
-	miscount[len(handoffTag)+64] = 3
+	miscount[len(good)-2*ed25519.PublicKeySize-1] = 3
+	o := len(handoffTag) + 64 // the SRK name's length
+	srkLong := bytes.Clone(good)
+	srkLong[o] = maxName + 1
+	srkNone := bytes.Clone(good)
+	srkNone[o] = 0
+	authLen := o + 1 + 34 + 4 + 1 + 34 // the auth value's length
+	authShort := bytes.Clone(good)
+	authShort[authLen]--
 	for name, b := range map[string][]byte{
 		"empty": nil, "short": good[:len(good)-1], "long": extra, "tag": retag, "count": miscount,
+		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
 	} {
 		if _, err := ReadKeys(pipeWith(t, b)); !errors.Is(err, ErrHandoff) {
@@ -111,7 +127,23 @@ func TestAnchorsAreBounded(t *testing.T) {
 			t.Errorf("%s: got %v, want ErrHandoff", name, err)
 		}
 	}
-	if _, err := (KernelKeys{Head: headPriv}).Marshal(); !errors.Is(err, ErrHandoff) {
+	if _, err := (KernelKeys{Head: headPriv, Counter: testCounter()}).Marshal(); !errors.Is(err, ErrHandoff) {
 		t.Fatalf("no anchors: got %v", err)
+	}
+}
+
+// LOG-2, STO-1: a hand-off without the log anchor's whole counter is never
+// written, so no kernel starts on an anchor it cannot advance.
+func TestTheCounterIsWhole(t *testing.T) {
+	for name, mut := range map[string]func(*Counter){
+		"no srk": func(c *Counter) { c.SRK = nil }, "no handle": func(c *Counter) { c.Handle = 0 },
+		"no name": func(c *Counter) { c.Name = nil }, "no auth": func(c *Counter) { c.Auth = nil },
+		"long name": func(c *Counter) { c.Name = make([]byte, maxName+1) },
+	} {
+		k := testKeys()
+		mut(&k.Counter)
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("%s: got %v, want ErrHandoff", name, err)
+		}
 	}
 }
