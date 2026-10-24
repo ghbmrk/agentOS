@@ -35,6 +35,10 @@ type Input struct {
 	Prior         []inbox.Delivery `json:"prior_unsubscribes"`
 	Script        []Scripted       `json:"script"`
 	Standing      *KeyView         `json:"standing"`
+	// Mailbox is where the run's effects land: "" for the synthetic
+	// mailbox, or "imap" or "gmail" for a fake account read and changed
+	// through the clerk's real mailbox for it (A21 on both mailboxes).
+	Mailbox string `json:"mailbox"`
 }
 
 // Scripted is one thing that happens during the run: the owner stops a hold,
@@ -119,7 +123,17 @@ func Run(in Input) (Outcome, error) {
 	}
 	standing := in.Standing != nil
 
-	acct, err := inbox.NewAccount(anchors, handleSecret, func() inbox.World { return in.World }, in.Mails, inbox.Synthetic{},
+	mails, box := in.Mails, inbox.Mailbox(inbox.Synthetic{})
+	var real *account
+	if in.Mailbox != "" {
+		var err error
+		if real, err = openAccount(in.Mailbox, in.Mails); err != nil {
+			return Outcome{}, err
+		}
+		defer real.stop()
+		mails, box = real.mails, real
+	}
+	acct, err := inbox.NewAccount(anchors, handleSecret, func() inbox.World { return in.World }, mails, box,
 		in.RetentionDays, in.OneClickBody)
 	if err != nil {
 		return Outcome{}, err
@@ -311,6 +325,11 @@ func Run(in Input) (Outcome, error) {
 	}
 	h := log.Entries()[len(log.Entries())-1].Hash()
 	out.LogDigest = hex.EncodeToString(h[:])
+	if real != nil {
+		if err := real.check(out.Effects); err != nil {
+			return Outcome{}, err
+		}
+	}
 	return out, nil
 }
 

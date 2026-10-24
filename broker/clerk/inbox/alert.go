@@ -3,6 +3,7 @@ package inbox
 import (
 	"mime"
 	"net/mail"
+	"slices"
 	"strings"
 )
 
@@ -15,6 +16,36 @@ import (
 // whatever the reader called it.
 func isAlert(raw []byte, w World) bool {
 	return alertSender(raw, w) || wordingAlert(mailText(raw))
+}
+
+// VerifiedAlert reports whether an alert counts as a signal (TN-gmail-api):
+// its sender passes the first net (an aligned DMARC pass the provider wrote,
+// from a kept alert sender) and the clerk itself verifies a current DKIM
+// signature on it with the world's key records, aligned with the From domain
+// and covering the From header (VRB-2's verifier). A provider's header alone
+// never makes a signal. The guard stays wider: an alert that does not verify
+// is still never trashed or unsubscribed; it only does not count.
+func VerifiedAlert(raw []byte, w World) bool {
+	if !alertSender(raw, w) {
+		return false
+	}
+	_, domain, _ := strings.Cut(canonAddr(FromAddress(raw)), "@")
+	if domain == "" {
+		return false
+	}
+	var pass []Sig
+	for _, s := range VerifyDKIM(raw, w.DKIMKeys) {
+		if s.Pass {
+			pass = append(pass, s)
+		}
+	}
+	current, _ := currentSigs(pass, w.Today)
+	for _, s := range current {
+		if aligned(s.D, domain) && slices.Contains(s.H, "from") {
+			return true
+		}
+	}
+	return false
 }
 
 // guardOff reports whether the guard lacks an input it needs: with no

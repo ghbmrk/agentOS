@@ -38,7 +38,7 @@ class SliceBinary:
         return cls.exe
 
 
-def adapter(case, world):
+def adapter(case, world, mailbox=""):
     ids, classes = harness.mailbox(case, world)
     by_id = harness.by_id(world)
     standing = harness.later_run_key(case)
@@ -54,6 +54,7 @@ def adapter(case, world):
         "prior_unsubscribes": world["prior_unsubscribes"],
         "script": case.get("variant", {}).get("script", []),
         "standing": standing,
+        "mailbox": mailbox,
     }
     done = subprocess.run([SliceBinary.build()], input=json.dumps(request).encode(),
                           capture_output=True, check=False)
@@ -71,6 +72,16 @@ class SliceInbox(unittest.TestCase):
     def test_every_case_passes(self):
         failures = {c: f for c, f in harness.run_suite(adapter).items() if f}
         self.assertEqual(failures, {})
+
+    def test_every_case_passes_on_both_mailboxes(self):
+        """A21 on IMAP and on the Gmail API (#2851): each case's effects land on a fake
+        account through the clerk's real mailbox for it, which the binary checks, and
+        the outcome is the synthetic run's."""
+        for mailbox in ("imap", "gmail"):
+            with self.subTest(mailbox=mailbox):
+                run = lambda case, world, m=mailbox: adapter(case, world, m)  # noqa: E731
+                failures = {c: f for c, f in harness.run_suite(run).items() if f}
+                self.assertEqual(failures, {})
 
 
 if __name__ == "__main__":
