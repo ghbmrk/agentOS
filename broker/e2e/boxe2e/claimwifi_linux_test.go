@@ -98,7 +98,7 @@ func wifiDriver(t *testing.T, f *fakeSetupWiFi, c *wifiBoxClaim) *driver {
 	t.Helper()
 	ui, err := localui.New(localui.Config{
 		AP: localui.APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-			SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"},
+			SSID: "agentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"},
 		Port:      80,
 		Claim:     c,
 		SetupWiFi: f,
