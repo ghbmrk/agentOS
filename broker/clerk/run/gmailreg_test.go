@@ -1,6 +1,6 @@
 package run
 
-// REQ: TN-gmail-registration-a, TN-gmail-registration-b, TN-gmail-registration-c, CLK-1
+// REQ: TN-gmail-registration-a, TN-gmail-registration-b, TN-gmail-registration-c, CLK-1 (TN-gmail-registration-f1)
 
 import (
 	"context"
@@ -128,5 +128,92 @@ func TestANewRegistrationReplacesTheKept(t *testing.T) {
 	}
 	if r, ok := loadReg(dir, testSealer()); !ok || r != *fakeClient {
 		t.Fatalf("kept registration %v, %v; want the new one", r.ID, ok)
+	}
+}
+
+// A Gmail account set up signs in again with its own registration, not the
+// kept one: the consent address offers the account's address first (#3065).
+func TestAnAccountSetUpBeatsTheKeptRegistration(t *testing.T) {
+	_, dir, _, owner := signedInHost(t)
+	if _, ok := loadReg(dir, testSealer()); !ok {
+		t.Fatal("no kept registration after the sign-in")
+	}
+	consent, d, err := owner.GmailBegin("watch", nil)
+	if err != nil || d != "" {
+		t.Fatalf("GmailBegin = %q, %v", d, err)
+	}
+	if u, _ := url.Parse(consent); u.Query().Get("login_hint") != gmailtest.User {
+		t.Fatalf("consent address %s is not a sign-in again", consent)
+	}
+}
+
+// A registration that fails to be kept leaves the account set up, and
+// GmailFinish says the write failed (#3065).
+func TestAFailedRegistrationWriteIsReported(t *testing.T) {
+	srv := gmailtest.New()
+	t.Cleanup(srv.Close)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory holding a file: no rename replaces it.
+	if err := os.MkdirAll(filepath.Join(dir, regFile, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	if _, err := finishSignIn(t, srv, owner, fakeClient); err == nil {
+		t.Fatal("GmailFinish reports no error for a registration it did not keep")
+	}
+	if a, err := owner.Account(); err != nil || a.Settings != (MailSettings{Address: gmailtest.User, API: APIGmail}) {
+		t.Fatalf("Account = %+v, %v; want the Gmail account set up", a, err)
+	}
+	if !sec.Has(GmailSlot(gmailtest.User)) {
+		t.Fatal("the Gmail grant is not sealed")
+	}
+}
+
+// A kept registration that is not the clerk's own private file, or holds no
+// ID or no secret though sealed as a registration, counts as missing (#3065).
+func TestAnUnfitRegistrationCountsAsMissing(t *testing.T) {
+	for name, spoil := range map[string]func(t *testing.T, path string){
+		"open to others": func(t *testing.T, path string) {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink": func(t *testing.T, path string) {
+			if err := os.Rename(path, path+".real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(path)+".real", path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"no secret": func(t *testing.T, path string) { sealReg(t, path, `{"id":"x","secret":""}`) },
+		"no id":     func(t *testing.T, path string) { sealReg(t, path, `{"id":"","secret":"y"}`) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, dir, _, owner := signedInHost(t)
+			if err := owner.RemoveMail(); err != nil {
+				t.Fatal(err)
+			}
+			spoil(t, filepath.Join(dir, regFile))
+			if _, d, err := owner.GmailBegin("watch", nil); err != nil || d != clerk.DNoAccount {
+				t.Fatalf("GmailBegin = %q, %v; want %q", d, err, clerk.DNoAccount)
+			}
+		})
+	}
+}
+
+// sealReg replaces path with plain sealed as a registration.
+func sealReg(t *testing.T, path, plain string) {
+	t.Helper()
+	blob, err := testSealer().Seal([]byte(plain), regAAD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := privfile.WriteAtomic(filepath.Dir(path), filepath.Base(path), blob, nil); err != nil {
+		t.Fatal(err)
 	}
 }
