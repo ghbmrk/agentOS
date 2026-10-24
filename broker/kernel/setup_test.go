@@ -141,6 +141,12 @@ func TestASetupEntryOutOfPlaceIsCorrupt(t *testing.T) {
 	if err := st.Apply(kernel.Entry{Seq: 2, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, f)}); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("setup second: got %v, want ErrCorrupt", err)
 	}
+	// Second after another entry, on a box with no anchors: a log that
+	// gives setup any place but first is not this box's (#2996 Security).
+	stop := kernel.Entry{Seq: 1, Type: kernel.TStop, V: 1, Body: []byte("{}")}
+	if _, err := kernel.Replay(nil, []kernel.Entry{stop, {Seq: 2, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, f)}}); !errors.Is(err, kernel.ErrCorrupt) {
+		t.Fatalf("setup after a stop: got %v, want ErrCorrupt", err)
+	}
 	one := kernel.SignSetup(s.k.Box(), s.owner.priv)
 	if _, err := kernel.Replay(nil, []kernel.Entry{{Seq: 1, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, one)}}); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("setup of one key: got %v, want ErrCorrupt", err)
