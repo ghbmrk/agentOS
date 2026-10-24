@@ -316,44 +316,55 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 
 // A sum past int64 exceeds every cap: a step or a ledger use near MaxInt64
 // must not wrap the window's sum below the cap (#2942 review, the keydiff
-// overflow probe).
+// overflow probe). Each cap is tested on its own and refuses with its own
+// code, so each guard is pinned.
 func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
 	o, h, k := root(t)
 	h2 := gen(3)
-	d, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(50), LimitSpendTask(50))
-	v := verified(t, d, o, h2)
+	day, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(50))
+	task, _ := Derive(k, h.priv, h2.pub, LimitSpendTask(50))
+	const now = DayMS + 1000
 	// every prefix carries the same uses, so no other cap refuses first
-	all := func(us ...Use) ledger {
+	all := func(v *Verified, us ...Use) ledger {
 		l := ledger{}
 		for _, id := range v.Scopes() {
 			l[id] = us
 		}
 		return l
 	}
-	s := step(Trash)
-	s.Task = "t1"
+	huge := int64(math.MaxInt64)
 	for name, tc := range map[string]struct {
+		key    Key
 		amount int64
-		l      ledger
+		uses   []Use
 		spend  bool
+		code   string
 	}{
-		"huge step, 1 spent":       {math.MaxInt64, all(Use{At: 900, Amount: 1, Task: "t1"}), false},
-		"huge step, nothing spent": {math.MaxInt64, all(), false},
-		"huge use, step of 1":      {1, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}), false},
-		"two huge uses, step of 0": {0, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}, Use{At: 901, Amount: math.MaxInt64, Task: "t1"}), false},
-		"spend: huge, 1 used":      {math.MaxInt64, all(Use{At: 900, Amount: 1, Task: "t1"}), true},
-		"spend: 1, huge used":      {1, all(Use{At: 900, Amount: math.MaxInt64, Task: "t1"}), true},
+		// spend-day: the uses are in the window
+		"day: huge step, 1 spent":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, false, RSpendDay},
+		"day: huge step, nothing spent": {day, huge, nil, false, RSpendDay},
+		"day: 1 after a huge use":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
+		"day: 0 after two huge uses":    {day, 0, []Use{{At: now - 2, Amount: huge, Task: "t1"}, {At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
+		"day: spend huge, 1 used":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, true, RSpendDay},
+		"day: spend 1, huge used":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, true, RSpendDay},
+		// spend-task: the uses fell out of the day window, so only the task cap counts them
+		"task: 1 after a huge use":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, false, RSpendTask},
+		"task: 0 after two huge uses": {task, 0, []Use{{At: 1, Amount: huge, Task: "t1"}, {At: 2, Amount: huge, Task: "t1"}}, false, RSpendTask},
+		"task: spend 1, huge used":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, true, RSpendTask},
 	} {
 		t.Run(name, func(t *testing.T) {
+			v := verified(t, tc.key, o, h2)
+			c := ctx(now, all(v, tc.uses...))
 			var r *Refusal
 			if tc.spend {
-				r = v.Spend("t1", tc.amount, ctx(1000, tc.l))
+				r = v.Spend("t1", tc.amount, c)
 			} else {
-				s.Amount = tc.amount
-				r = v.Authorize(s, ctx(1000, tc.l))
+				s := step(Trash)
+				s.Task, s.Amount = "t1", tc.amount
+				r = v.Authorize(s, c)
 			}
-			if r == nil || (r.Code != RSpendDay && r.Code != RSpendTask) {
-				t.Fatalf("want a spend refusal, got %v", r)
+			if r == nil || r.Code != tc.code {
+				t.Fatalf("want %s, got %v", tc.code, r)
 			}
 		})
 	}
