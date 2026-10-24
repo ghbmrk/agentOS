@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -63,7 +64,7 @@ func prep(c prepConfig) (err error) {
 	if err != nil {
 		return err
 	}
-	dirExists, err := preflight(c.Image, off)
+	missing, err := preflight(c.Image, off)
 	if err != nil {
 		return err
 	}
@@ -114,10 +115,10 @@ func prep(c prepConfig) (err error) {
 		return err
 	}
 	files := []sealed{{claim.StatePath, stateTemp, state}, {claim.SetupNetPath, netTemp, netFile}}
-	if err := sealInto(box, off, c.Out, files, dirExists); err != nil {
+	if err := sealInto(box, off, c.Out, files, missing); err != nil {
 		return err
 	}
-	if err := checkSealed(box, off, files, code, dirExists); err != nil {
+	if err := checkSealed(box, off, files, code, missing); err != nil {
 		return err
 	}
 	logf("sealed a claim state and a setup network into %s at %s", box, path.Dir(claim.StatePath))
@@ -210,52 +211,69 @@ func lookup(image string, off int64, p string) (entry, bool, error) {
 	return entry{}, false, nil
 }
 
+// sealDirs are the directories the sealed files go in, each in its
+// parent: the claim state's, and the access point loader's (apnet.Dir,
+// #2626), which holds the setup network.
+var sealDirs = []string{path.Dir(claim.StatePath), path.Dir(claim.SetupNetPath)}
+
 // preflight refuses an image without /var/lib or that already holds a
-// claim state or a setup network, and reports whether /var/lib/agentos
-// exists.
-func preflight(image string, off int64) (bool, error) {
+// claim state or a setup network, and reports which of sealDirs it lacks,
+// in order. Once one is missing, so is every one below it.
+func preflight(image string, off int64) ([]string, error) {
 	lib, ok, err := lookup(image, off, "/var/lib")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if !ok || !lib.dir() {
-		return false, fmt.Errorf("%s has no /var/lib in its root file system", image)
+		return nil, fmt.Errorf("%s has no /var/lib in its root file system", image)
 	}
-	dir := path.Dir(claim.StatePath)
-	d, ok, err := lookup(image, off, dir)
-	if err != nil || !ok {
-		return false, err
-	}
-	if !d.dir() {
-		return false, fmt.Errorf("%s: %s is not a directory", image, dir)
-	}
-	for p, what := range map[string]string{claim.StatePath: "a claim state", claim.SetupNetPath: "a setup network"} {
-		if _, held, err := lookup(image, off, p); err != nil {
-			return false, err
-		} else if held {
-			return false, fmt.Errorf("%s already holds %s", image, what)
+	var missing []string
+	for _, dir := range sealDirs {
+		if len(missing) > 0 {
+			missing = append(missing, dir)
+			continue
+		}
+		d, ok, err := lookup(image, off, dir)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			missing = append(missing, dir)
+			continue
+		}
+		if !d.dir() {
+			return nil, fmt.Errorf("%s: %s is not a directory", image, dir)
 		}
 	}
-	return true, nil
+	for p, what := range map[string]string{claim.StatePath: "a claim state", claim.SetupNetPath: "a setup network"} {
+		if slices.Contains(missing, path.Dir(p)) {
+			continue
+		}
+		if _, held, err := lookup(image, off, p); err != nil {
+			return nil, err
+		} else if held {
+			return nil, fmt.Errorf("%s already holds %s", image, what)
+		}
+	}
+	return missing, nil
 }
 
-// sealInto writes each file at its path, root:root 0600, creating
-// /var/lib/agentos root:root 0700 if the image has none. The files share
-// that directory.
-func sealInto(box string, off int64, tmpDir string, files []sealed, dirExists bool) error {
-	dir := path.Dir(claim.StatePath)
+// sealInto writes each file at its path, root:root 0600, first creating
+// each missing directory root:root 0700. Every file is in one of
+// sealDirs.
+func sealInto(box string, off int64, tmpDir string, files []sealed, missing []string) error {
 	var cmds []string
-	if !dirExists {
+	for _, dir := range missing {
 		cmds = append(cmds,
 			"mkdir "+dir,
 			"sif "+dir+" mode 040700",
 			"sif "+dir+" uid 0",
 			"sif "+dir+" gid 0")
 	}
-	cmds = append(cmds, "cd "+dir)
 	for _, f := range files {
-		if path.Dir(f.path) != dir {
-			return fmt.Errorf("%s is not in %s", f.path, dir)
+		dir := path.Dir(f.path)
+		if !slices.Contains(sealDirs, dir) {
+			return fmt.Errorf("%s is not in %v", f.path, sealDirs)
 		}
 		tmp := filepath.Join(tmpDir, f.temp)
 		if err := writeNew(tmp, f.data); err != nil {
@@ -263,6 +281,7 @@ func sealInto(box string, off int64, tmpDir string, files []sealed, dirExists bo
 		}
 		defer os.Remove(tmp)
 		cmds = append(cmds,
+			"cd "+dir,
 			"write "+f.temp+" "+path.Base(f.path),
 			"sif "+f.path+" mode 0100600",
 			"sif "+f.path+" uid 0",
@@ -281,13 +300,13 @@ func sealInto(box string, off int64, tmpDir string, files []sealed, dirExists bo
 // checkSealed reads the files back: owner and mode, the bytes, a clean
 // file system, a state the box opens unclaimed and the code claims, and a
 // setup network the box parses.
-func checkSealed(box string, off int64, files []sealed, code string, dirExisted bool) error {
+func checkSealed(box string, off int64, files []sealed, code string, missing []string) error {
 	want := map[string]string{}
 	for _, f := range files {
 		want[f.path] = "100600 0:0"
 	}
-	if !dirExisted {
-		want[path.Dir(claim.StatePath)] = "040700 0:0"
+	for _, dir := range missing {
+		want[dir] = "040700 0:0"
 	}
 	for p, w := range want {
 		e, ok, err := lookup(box, off, p)

@@ -17,7 +17,7 @@ import (
 
 // defaultSetupNet is claim.SetupNetPath, which agentosd may not link
 // (ARC-2); a test keeps them equal.
-const defaultSetupNet = "/var/lib/agentos/setup-net.json"
+const defaultSetupNet = "/var/lib/agentos/ap/setup-net.json"
 
 // setupWiFi is the setup network's file as agentosd reads and rewrites it
 // for the claim's rotation (HW-10, #1692): claim.SetupNet's fields, which

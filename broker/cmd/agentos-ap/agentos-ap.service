@@ -12,17 +12,16 @@
 # and reach verify.sock. It reads the page's latch, which the page can write, without
 # following a link and only so far. At the Owner Card confirm, or once the
 # box is owned, it brings the access point down, burns the setup network in
-# /var/lib/agentos, and brings it up with the card's network, which the page
-# reported through agentosd to /var/lib/agentos/ap-net.json (#1185). It
-# serves the card's network at every later start.
+# /var/lib/agentos/ap, and brings it up with the card's network, which the
+# page reported through agentosd to /var/lib/agentos/ap/ap-net.json
+# (#1185). It serves the card's network at every later start.
 [Unit]
 Description=agentOS access point loader
 # The inbound drop is in place before any radio is brought up. The masks
 # below cover only paths that exist at start: egress's state and runtime
 # directories do by then, and egress keeps its runtime directory across
 # restarts (RuntimeDirectoryPreserve, #1628) so the mask on its sockets
-# holds; agentosd's subtrees made after its fork (Type=simple) may
-# not, and a restart covers those.
+# holds. agentosd's state needs no mask (#2626).
 Requires=agentos-inbound.service
 After=agentos-inbound.service agentos-egress.service agentosd.service
 # The page listens on the access point's address.
@@ -31,7 +30,7 @@ Before=agentos-localui.service
 [Service]
 ExecStart=/usr/lib/agentos/agentos-ap -iface wlan0 -addr 10.42.0.1/24 \
         -card-latch /var/lib/agentos-localui/card-latch.json \
-        -ap-net /var/lib/agentos/ap-net.json
+        -ap-net /var/lib/agentos/ap/ap-net.json
 # A dead hostapd or dnsmasq fails the run; the restart brings every radio
 # down and serves again.
 Restart=always
@@ -56,30 +55,22 @@ LimitCORE=0
 # directories. Not CAP_CHOWN: it gives hostapd.conf to a group it is in.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP
 NoNewPrivileges=yes
-# Everything is read-only, the page's latch included, but the setup
-# file's directory: the burn is a durable rename beside the file, so a
-# narrower path cannot hold it. The secrets that share that directory,
-# and the vault's, are hidden instead (a path that does not exist yet is
-# skipped), and so are the vault's sockets: their only peer check is the
-# broker uid, which is root, and the access point never calls them (#1628).
-# Owner and guest content and the meter and clock state agentosd trusts
-# are masked too (#2626), and none of these masks is a guarantee. Each
-# has a "-", so a path missing at loader start is skipped, and agentosd
-# makes most of its directories (learn, machines...) and files
-# later; a mask on a directory holds only if the directory existed then.
-# A mask on a file is a bind mount on its dentry, and agentosd rewrites
-# state by temp file and rename (broker/durable), which detaches that
-# mount in every namespace: each file mask (claim.json, drive-id,
-# meter.json and the rest) lapses at agentosd's first rewrite, and the
-# loader can then read and write the file. The masks slow an attacker
-# down; they do not hide agentosd's state. Hiding it needs the three
-# files the loader shares with agentosd moved into their own directory,
-# so the loader's ReadWritePaths can stop at that directory; that is
-# #2626, open. TestAgentosdStateIsHidden keeps every state path classed.
+# Everything is read-only, the page's latch included, and agentosd's
+# state is absent (#2626): /var/lib/agentos is an empty read-only tmpfs
+# in the loader's namespace, with only the loader's own directory,
+# /var/lib/agentos/ap (apnet.Dir), bound in read-write. That directory
+# holds the setup network, which the loader burns by a durable rename
+# beside it, the card's network and agentosd's owned marker, and nothing
+# else. An allowlist, not masks: a state path agentosd adds, or a file it
+# rewrites by rename, is never visible here. The bind has no "-": with
+# no directory (tmpfiles.d/agentos.conf makes it) the unit fails rather
+# than serve. The vault's state and sockets are outside /var/lib/agentos
+# and stay masked: their only peer check is the broker uid, which is
+# root, and the access point never calls them (#1628).
 ProtectSystem=strict
-ReadWritePaths=/var/lib/agentos
-InaccessiblePaths=-/var/lib/agentos-egress -/run/agentos-egress -/var/lib/agentos/vault -/var/lib/agentos/machines -/var/lib/agentos/slots -/var/lib/agentos/journal -/var/lib/agentos/journal.log -/var/lib/agentos/change -/var/lib/agentos/recall -/var/lib/agentos/learn -/var/lib/agentos/skills -/var/lib/agentos/modem -/var/lib/agentos/claim.json -/var/lib/agentos/drive-id
-InaccessiblePaths=-/var/lib/agentos/digest -/var/lib/agentos/meter.json -/var/lib/agentos/spare-meter.json -/var/lib/agentos/kept-replies.json -/var/lib/agentos/guest-inbox.json -/var/lib/agentos/clock.json -/var/lib/agentos/questions.json -/var/lib/agentos/loop7 -/var/lib/agentos/setup.json -/var/lib/agentos/card-latch.json -/var/lib/agentos/drill
+TemporaryFileSystem=/var/lib/agentos:ro
+BindPaths=/var/lib/agentos/ap
+InaccessiblePaths=-/var/lib/agentos-egress -/run/agentos-egress
 ProtectHome=yes
 PrivateTmp=yes
 PrivateIPC=yes
