@@ -149,7 +149,6 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		return clerk.DNoSignIn, nil
 	}
 	d := g.in.Finish(h.ctx, use, pasted)
-	defer func() { clear(g.grant) }() // set by Finish, so read when the call returns
 	if d == clerk.DNotOurs {
 		// Finish kept the sign-in waiting for the right paste.
 		h.signMu.Lock()
@@ -161,6 +160,9 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	if !strings.HasPrefix(d, clerk.DSignedIn+" ") {
 		return d, nil
 	}
+	// Only the paste that signed in holds the grant, and only it wipes it: a
+	// sign-in put back above may already be another paste's (#3023 Security).
+	defer clear(g.grant)
 	if again && !h.still(g.slot) {
 		h.giveBack(g, false) // the account changed during Finish
 		return clerk.DNoSignIn, nil

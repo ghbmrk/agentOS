@@ -401,3 +401,40 @@ func TestAKeptGiveBackIsTold(t *testing.T) {
 		t.Fatalf("notices %v, %d slots", st.Notices, sec.Len())
 	}
 }
+
+// A wrong paste and the right one at once never wipe the grant the right
+// one seals (#3023 Security delta).
+func TestAWrongAndARightPasteAtOnce(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		c.gmail.revoke = srv.Base() + "/revoke" // keeps the fake's one refresh token alive for the check
+		h := NewMailHost(context.Background(), dir, sec, c)
+		const other = "other@gmail.test"
+		srv.As(other)
+		landing, ok := srv.Approve(h.gmailBegin("watch", fakeClient).Consent)
+		if !ok {
+			t.Fatal("the fake refused the consent address")
+		}
+		var wg sync.WaitGroup
+		out := make([]string, 2)
+		for j, p := range []string{"https://example.test/", landing} {
+			wg.Add(1)
+			go func() { defer wg.Done(); out[j], _ = h.gmailFinish("watch", p) }()
+		}
+		wg.Wait()
+		if out[1] != clerk.DSignedIn+" watch" {
+			if out[1] != clerk.DNoSignIn {
+				t.Fatalf("%d: the right paste = %q", i, out[1])
+			}
+			continue // the wrong one held the sign-in at that moment
+		}
+		box, err := gmailBox(sec, GmailSlot(other), h.cfg)
+		if err == nil {
+			_, err = box.Address(context.Background())
+		}
+		if err != nil {
+			t.Fatalf("%d: the account's grant does not work: %v", i, err)
+		}
+	}
+}
