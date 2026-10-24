@@ -244,13 +244,16 @@ func main() {
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
-	localUIUID := -1
+	localUIUID, mailUID := -1, -1
+	var mailOwner string
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
+	flag.StringVar(&mailOwner, "mail-owner", "", "the mail clerk's owner socket (clerk/run MailOwnerSide), which the local UI's Connect page signs in to Gmail through (#3006); empty, the page's account ops are refused")
+	flag.IntVar(&mailUID, "mail-uid", -1, "uid of the mail clerk's process, the only peer -mail-owner is called on")
 	var updateStore, shippedRoot string
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
@@ -359,6 +362,9 @@ func main() {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
 		cfg.PageSocket = pageSocket(localUIUID, gid, apNetPath, verifySocket)
+		if cfg.PageSocket.Accounts, err = pageAccounts(mailOwner, mailUID, localUIUID, cfg.ModemUID); err != nil {
+			log.Fatal(err)
+		}
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no agent machines (W3-forget-b1; security C3). The

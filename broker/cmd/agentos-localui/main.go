@@ -58,6 +58,7 @@ func main() {
 	var sock, vaultSock, held, iface, addr string
 	var fb boxFiles
 	var port int
+	var connectGmail bool
 	flag.StringVar(&sock, "sock", "/run/agentos/localui.sock", "agentosd's localui.sock (agentosd -localui-uid)")
 	flag.StringVar(&vaultSock, "vault-sock", "", "the vault process's unlock socket, for the unknown-host unlock page; empty: not served")
 	flag.StringVar(&held, "held", "/var/lib/agentos-localui/unsaved.json", "setup's private-content answers agentosd has not recorded, kept across a reboot (localui.HeldStore)")
@@ -67,6 +68,7 @@ func main() {
 	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
+	flag.BoolVar(&connectGmail, "connect-gmail", false, "serve the Connect page for Gmail at /accounts/ (#3006), through agentosd's account ops to the mail clerk; set only where agentosd runs with -mail-owner")
 	flag.Parse()
 	log.SetFlags(0)
 	debug.SetMemoryLimit(memoryLimit)
@@ -79,6 +81,9 @@ func main() {
 	fb.VaultSock = vaultSock
 	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock, held)
 	cfg.Station = station(sysClassNet, iface)
+	if connectGmail {
+		connect(&cfg, sock)
+	}
 	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
 	}
@@ -106,6 +111,15 @@ func config(ap localui.APConfig, port int, sock, vaultSock, held string) localui
 	}
 	cfg.Hooks = hooks
 	return cfg
+}
+
+// connect serves the Connect page for Gmail (#2853, #3006): its frames go
+// to agentosd's localui.sock, which checks the session and relays them to
+// the mail clerk across the keeper boundary (D-154 rule 1); the page holds
+// nothing of the sign-in.
+func connect(cfg *localui.Config, sock string) {
+	cfg.Accounts = localui.AgentosdAccounts{Owner: localui.Socket{Path: sock}}
+	cfg.Connect = []localui.ConnectDeclaration{localui.GmailConnect}
 }
 
 // sysClassNet is the kernel's list of network interfaces; the unit's

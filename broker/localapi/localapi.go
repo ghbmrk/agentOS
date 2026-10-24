@@ -81,10 +81,19 @@ const (
 	// and the start bound are refused before the code is checked.
 	OpPlanSignInReady = "page_plan_sign_in_ready"
 	OpPlanSignIn      = "page_plan_sign_in"
+	// OpAccountBegin (AccountBegin) and OpAccountFinish (AccountFinish)
+	// relay the Connect page's two frames to the account's clerk (#3006,
+	// D-154): the consent address or a detail out, the pasted address and
+	// the use the confirm screen named in. Each needs a session and no
+	// code: the sign-in is a tap, Google's warning and a paste (§12.1 step
+	// 7). ErrBadArgs when an account is not served or a field is past its
+	// bound; ErrFailed when the clerk did not answer.
+	OpAccountBegin  = "page_account_begin"
+	OpAccountFinish = "page_account_finish"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -114,6 +123,11 @@ const (
 	MaxPause = 128
 	// MaxGoal bounds a task's goal ID (OpForget).
 	MaxGoal = 128
+	// MaxClientField bounds an account registration's client ID and
+	// secret; MaxPasted the address the owner pasted (OpAccountBegin,
+	// OpAccountFinish).
+	MaxClientField = 512
+	MaxPasted      = 4 << 10
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -374,4 +388,42 @@ type AskResume struct {
 	Token string `json:"token"`
 	Grant string `json:"grant"`
 	Pause string `json:"pause"`
+}
+
+// AccountBegin starts account's sign-in for one declared use.
+// Registration is the household's client at the first sign-in; nil signs
+// in again with the client the clerk sealed.
+type AccountBegin struct {
+	Token        string               `json:"token"`
+	Account      string               `json:"account"`
+	Use          string               `json:"use"`
+	Registration *AccountRegistration `json:"registration,omitempty"`
+}
+
+// AccountRegistration is the household's own client (clerk.Registration).
+type AccountRegistration struct {
+	ID     string `json:"id"`
+	Secret string `json:"secret"`
+}
+
+// AccountBegun is the consent address, or the clerk's typed detail
+// (clerk.D*), which carries no value (CLK-4).
+type AccountBegun struct {
+	Consent string `json:"consent,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// AccountFinish hands account's clerk the address the owner pasted and the
+// use the confirm screen named. Its reply is an AccountFinished.
+type AccountFinish struct {
+	Token   string `json:"token"`
+	Account string `json:"account"`
+	Use     string `json:"use"`
+	Pasted  string `json:"pasted"`
+}
+
+// AccountFinished is the clerk's detail: "signedin <use>" once the grant
+// is sealed and the account set up, or a typed detail.
+type AccountFinished struct {
+	Detail string `json:"detail"`
 }
