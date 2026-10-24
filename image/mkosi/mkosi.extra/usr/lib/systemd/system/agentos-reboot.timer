@@ -1,0 +1,18 @@
+# The weekly reboot (UPD-10): the box starts again from its read-only /usr, so whatever an implant
+# started in memory ends, and nothing it left in writable storage runs (it is all noexec). Sunday
+# 03:00 box time (UTC until the owner's time zone is set) is the quiet time; the reboot also waits
+# out a call or accepted work (UPD-6), never past a week of uptime (/usr/lib/agentos/reboot-weekly).
+[Unit]
+Description=agentOS weekly reboot
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+# The week also on the monotonic clock: a wall clock held back (a compromised time source) never
+# keeps the box up past a week of uptime, where reboot-weekly reboots through any inhibitor.
+OnBootSec=7d
+AccuracySec=1min
+# A boot after a missed Sunday is already a fresh start: no catch-up reboot.
+Persistent=no
+
+[Install]
+WantedBy=timers.target

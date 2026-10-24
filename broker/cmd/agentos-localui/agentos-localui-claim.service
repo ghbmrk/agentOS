@@ -16,3 +16,6 @@ Type=oneshot
 ExecStart=/usr/lib/agentos/localui-claim
 PrivateNetwork=yes
 LimitCORE=0
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

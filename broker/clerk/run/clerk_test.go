@@ -263,6 +263,11 @@ func TestAGrantTheClerkCannotTakeIsRefusedAtStage(t *testing.T) {
 		if !errors.Is(err, ErrBadGrant) || got != "" { // the owner side tells it by errors.Is
 			t.Fatalf("staging %q: %q, %v; want ErrBadGrant", bad, got, err)
 		}
+		// errors.Is also passes an error that wraps ErrBadGrant with the
+		// grant in its text: only the fixed words cross.
+		if err.Error() != ErrBadGrant.Error() || strings.Contains(err.Error(), "canary") {
+			t.Fatalf("staging %q: the refusal reads %q, not ErrBadGrant's fixed words", bad, err)
+		}
 	}
 	if st, changed := r.reconnect("s1", r.approve(d), "web", d); st.Phase != kernel.PDone || !changed {
 		t.Fatalf("the grant staged before a refused one: step %s %q, store changed %v", st.Phase, st.Detail, changed)

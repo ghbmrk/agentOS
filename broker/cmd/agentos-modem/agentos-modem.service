@@ -72,6 +72,9 @@ RestrictAddressFamilies=AF_UNIX
 # before setup has written it (the line then reads as unbound).
 TemporaryFileSystem=/var/lib/agentos:ro
 BindReadOnlyPaths=-/var/lib/agentos/modem
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target
