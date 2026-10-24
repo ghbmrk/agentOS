@@ -14,7 +14,8 @@ Before=agentos-keeper-kernel.service
 [Service]
 Type=oneshot
 # The store's directory (root's), and the kernel's, which enrollment's anchor and the kernel's log
-# live in; the kernel's uid owns it, so the kernel can make its log there.
+# live in; the kernel's uid owns it, so the kernel can make its log there. tmpfiles.d makes both at
+# boot too, for the main side's mask (#2981).
 StateDirectory=agentos-store
 StateDirectoryMode=0700
 ExecStartPre=/usr/bin/install -d -m 0700 -o agentos-kernel -g agentos-kernel /var/lib/agentos-kernel
@@ -22,6 +23,8 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state /var
         -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log \
         -kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel \
         -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery
+# The factors are not kept once the store holds them (#2981); on a failure they stay for a retry.
+ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery
 StandardError=journal+console
 # The store key and the box's policy key live in this process's memory (IMG-nodump).
 LimitCORE=0

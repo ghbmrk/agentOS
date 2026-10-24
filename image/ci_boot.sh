@@ -310,12 +310,12 @@ done
 DRILL_UNIT="[Unit]\nDescription=agentOS restore drill start (CI only)\nAfter=agentos-boot-report.service\nConditionPathExists=!/var/lib/agentos/drill/last.json\n[Service]\nType=oneshot\nExecStart=systemctl start --no-block agentos-reboot.service\n"
 DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-drill-ci.service\n')"
 # The same boots enroll the keeper (STO-2c, #2905): setup's Owner Card factors, synthetic and CI's
-# only, reach /run/agentos-setup through a tmpfiles.extra credential, so the first of the two boots
-# makes the sealed store on this QEMU's swtpm and the second, on the same TPM, finds it. Each time
-# the unlock step opens the store through its tpm slot under the boot's PCRs, with the pins it
-# reads from the TPM, and then refuses at the owner's hardware keys, which onboarding has not
-# enrolled (#2905 open point 2): the kernel answering is that point's to add here.
-KEEPER_FACTORS='d /run/agentos-setup 0700 root root -\nf /run/agentos-setup/passphrase 0600 root root - ci-synthetic-passphrase-not-a-secret\nf /run/agentos-setup/recovery 0600 root root - 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n'
+# only, reach /run/agentos-setup (the image makes it) through a tmpfiles.extra credential, so the
+# first of the two boots makes the sealed store on this QEMU's swtpm and the second, on the same
+# TPM, finds it. Each time the unlock step opens the store through its tpm slot under the boot's
+# PCRs, with the pins it reads from the TPM, and then refuses at the owner's hardware keys, which
+# onboarding has not enrolled (#2905 open point 2): the kernel answering is that point's to add here.
+KEEPER_FACTORS='f /run/agentos-setup/passphrase 0600 root root - ci-synthetic-passphrase-not-a-secret\nf /run/agentos-setup/recovery 0600 root root - 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n'
 KEEPER_EXTRA="$(nm_cred tmpfiles.extra "$KEEPER_FACTORS")"
 # The drill's line comes before the boot report's (agentos-drill-report.service is ordered before it),
 # so the boot runs until the second boot's keeper line.
