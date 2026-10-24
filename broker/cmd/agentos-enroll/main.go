@@ -55,8 +55,8 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 	"golang.org/x/sys/unix"
 
-	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -74,7 +74,7 @@ func main() {
 const (
 	storeName  = "store"
 	stagedName = "store.enrolling"
-	anchorFile = "anchor" // run.CounterAnchor's head file in -anchor-dir
+	anchorFile = "anchor" // proc.CounterAnchor's head file in -anchor-dir
 
 	// Store entries enrollment writes. counterEntry is the kernel's: the
 	// counter's reference and auth value, which a kernel that opens the
@@ -394,11 +394,11 @@ func removeAnchor(parent int, name string) error {
 
 // makeAnchor makes the anchor's directory, name in parent, starts its head
 // file and hands both to the kernel uid, all through the directory's
-// descriptor. run.InitCounterAnchor takes a path, so it gets the
+// descriptor. proc.InitCounterAnchor takes a path, so it gets the
 // descriptor's /proc path, which names this directory wherever it is
 // moved; and it refuses a directory that is not root's alone, so one
 // swapped in after the mkdir fails there.
-func makeAnchor(c config, parent int, name string, ctr run.Counter, head []byte) error {
+func makeAnchor(c config, parent int, name string, ctr proc.Counter, head []byte) error {
 	if err := unix.Mkdirat(parent, name, 0o700); err != nil {
 		return &os.PathError{Op: "mkdir", Path: name, Err: err}
 	}
@@ -407,7 +407,7 @@ func makeAnchor(c config, parent int, name string, ctr run.Counter, head []byte)
 		return err
 	}
 	defer unix.Close(dir)
-	if err := run.InitCounterAnchor(fmt.Sprintf("/proc/self/fd/%d/.", dir), c.log, ctr, head); err != nil {
+	if err := proc.InitCounterAnchor(fmt.Sprintf("/proc/self/fd/%d/.", dir), c.log, ctr, head); err != nil {
 		return err
 	}
 	if err := c.step("head-file"); err != nil {

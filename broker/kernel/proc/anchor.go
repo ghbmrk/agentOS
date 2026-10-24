@@ -1,4 +1,4 @@
-package run
+package proc
 
 import (
 	"crypto/ed25519"
@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // Counter is a count that only goes up and lives off the log's disk: the
@@ -98,7 +99,7 @@ func anchorMsg(rec []byte) []byte { return append([]byte(domainAnchor), rec...) 
 // logPath exists: a head file deleted on a box with a log is never replaced
 // by a fresh one.
 func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) error {
-	if err := private(dir, true); err != nil {
+	if err := privfile.Check(dir, true); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(logPath); err == nil {
@@ -119,7 +120,7 @@ func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) 
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, anchorName, b, nil)
+	return privfile.WriteAtomic(dir, anchorName, b, nil)
 }
 
 // OpenCounterAnchor loads the head file in dir and checks it against the
@@ -130,7 +131,7 @@ func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) 
 // number, and the first rewrite reuses that number; the second leaves it
 // behind the counter, so the failed Put's head can no longer count.
 func OpenCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) (*CounterAnchor, error) {
-	if err := private(dir, true); err != nil {
+	if err := privfile.Check(dir, true); err != nil {
 		return nil, err
 	}
 	rec, err := readAnchor(dir, sign.Public().(ed25519.PublicKey))
@@ -169,7 +170,7 @@ func readAnchor(dir string, pub ed25519.PublicKey) (anchorRec, error) {
 		return anchorRec{}, err
 	}
 	defer f.Close()
-	if err := privateFile(f); err != nil {
+	if err := privfile.CheckFile(f); err != nil {
 		return anchorRec{}, err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxAnchor+1))
@@ -213,7 +214,7 @@ func (a *CounterAnchor) write(head, prev *kernel.Head) error {
 	}
 	b, err := signAnchor(a.sign, anchorRec{V: 1, N: a.n + 1, Head: head, Prev: prev})
 	if err == nil {
-		err = writeAtomic(a.dir, anchorName, b, a.stop)
+		err = privfile.WriteAtomic(a.dir, anchorName, b, a.stop)
 	}
 	if err == nil {
 		if err = a.c.Increment(); err != nil {

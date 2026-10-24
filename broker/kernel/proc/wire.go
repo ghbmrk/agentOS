@@ -1,4 +1,4 @@
-package run
+package proc
 
 import (
 	"crypto/ed25519"
@@ -206,6 +206,10 @@ type Remote struct {
 	Timeout time.Duration // for the whole call; 0 is five minutes
 }
 
+// Clerk is r as the kernel calls it: each call carries the view of the
+// kernel.View it is given, verified against anchors.
+func (r Remote) Clerk(anchors []ed25519.PublicKey) kernel.Clerk { return remote{r, anchors} }
+
 // remote is a Remote as a kernel.Clerk.
 type remote struct {
 	Remote
@@ -318,7 +322,7 @@ func ListenClerk(path string, kernelUID int) (net.Listener, error) {
 // ServeClerk answers the kernel's calls to c on ln, one at a time, until ln
 // closes. anchors are the clerk's own (D-146).
 func ServeClerk(ln net.Listener, c kernel.Clerk, anchors []ed25519.PublicKey) error {
-	return serveConns(ln, 1, func(conn net.Conn) { serve(conn, c, anchors) })
+	return ServeConns(ln, 1, func(conn net.Conn) { serve(conn, c, anchors) })
 }
 
 func serve(conn net.Conn, c kernel.Clerk, anchors []ed25519.PublicKey) {

@@ -2,7 +2,7 @@ package main
 
 // The end-to-end test runs this test binary again in two roles. "unlock" is
 // this command with a test pin source; it execs the binary once more as
-// "kernel", which is cmd/agentos-kernel's body (run.RunKernel) with an
+// "kernel", which is cmd/agentos-kernel's body (proc.RunKernel) with an
 // in-memory anchor, since no production anchor exists yet. Run as root, the
 // kernel drops to nobody, and every uid check is the real one.
 
@@ -28,9 +28,9 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
-	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -60,7 +60,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, unlockAndExec(r.Config(), r.pins))
 		os.Exit(2)
 	case "kernel":
-		var cfg run.MainConfig
+		var cfg proc.MainConfig
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -68,7 +68,7 @@ func TestMain(m *testing.M) {
 		keys, err := handoff.ReadKeys(os.NewFile(handoff.KeyFD, "keys"))
 		if err == nil {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
-			err = run.RunKernel(ctx, cfg, keys, &kernel.MemAnchor{})
+			err = proc.RunKernel(ctx, cfg, keys, &kernel.MemAnchor{})
 			stop()
 		}
 		if err != nil {
@@ -84,7 +84,7 @@ func TestMain(m *testing.M) {
 // gives it.
 type unlockRole struct {
 	Store, TPM, Exec string
-	Kernel           string // the kernel's run.MainConfig, as JSON: its one argument after asKernel
+	Kernel           string // the kernel's proc.MainConfig, as JSON: its one argument after asKernel
 	UID, GID         int
 	PolicyKey        []byte // PKIX
 	Anchor           []byte
@@ -221,8 +221,8 @@ func (r *rig) role(pk *ecdsa.PublicKey, anchor []byte) unlockRole {
 	return unlockRole{Store: r.store, TPM: r.sw.Socket(), Exec: r.bin, UID: r.kernelUID, GID: r.kernelG, PolicyKey: der, Anchor: anchor}
 }
 
-func (r *rig) mainConfig() run.MainConfig {
-	c := run.MainConfig{
+func (r *rig) mainConfig() proc.MainConfig {
+	c := proc.MainConfig{
 		Log:       filepath.Join(r.dir, "k", "log"),
 		OwnerSock: filepath.Join(r.dir, "k", "owner.sock"), OwnerUID: r.ownerUID,
 		MeterSock: filepath.Join(r.dir, "k", "meter.sock"), MeterUID: r.meterUID,
@@ -252,8 +252,8 @@ func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	return cmd, &out
 }
 
-func (r *rig) owner() run.Owner {
-	return run.Owner{Conn: run.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
+func (r *rig) owner() proc.Owner {
+	return proc.Owner{Conn: proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
 }
 
 // up waits for the owner socket to answer, as the kernel's uid.
@@ -332,11 +332,11 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 // kernel process refuses it, and the log is left as it was.
 func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	r := newRig(t, true)
-	other := run.KernelConfig{
+	other := proc.KernelConfig{
 		Log: r.mainConfig().Log, Anchor: &kernel.MemAnchor{}, Key: [32]byte{1},
 		Pub: r.keys.Head.Public().(ed25519.PublicKey), Sign: r.keys.Head, Anchors: []ed25519.PublicKey{gen(1), gen(2)},
 	}
-	h, err := run.OpenKernel(other, time.Now().UnixMilli())
+	h, err := proc.OpenKernel(other, time.Now().UnixMilli())
 	must(t, err)
 	must(t, h.With(func(k *kernel.Kernel) error { return k.Stop(time.Now().UnixMilli()) }))
 	h.Close()
@@ -345,7 +345,7 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	must(t, err)
 	cmd, out := r.boot()
 	err = cmd.Wait()
-	if err == nil || !strings.Contains(out.String(), run.ErrLogKey.Error()) {
+	if err == nil || !strings.Contains(out.String(), proc.ErrLogKey.Error()) {
 		t.Fatalf("the kernel took a log under another key: %v\n%s", err, out)
 	}
 	after, err := os.ReadFile(other.Log)

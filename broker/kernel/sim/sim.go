@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"reflect"
 	"strings"
@@ -231,7 +232,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
-			if !d.Held || now < d.HeldAt+ver.Limits.Window(d.Novel) {
+			if !d.Held || now < ver.Limits.Due(d.HeldAt, d.Novel) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}
@@ -763,8 +764,9 @@ func (s *sim) pastHolds() int64 {
 				continue
 			}
 			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
-				due := p.Steps[i].HeldAt + v.Limits.Window(p.Steps[i].Novel)
-				ahead = max(ahead, due-s.now+60_000)
+				if due := v.Limits.Due(p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
+					ahead = max(ahead, due-s.now+60_000) // a step never due sets no jump
+				}
 			}
 		}
 	}

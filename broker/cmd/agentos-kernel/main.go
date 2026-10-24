@@ -29,8 +29,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
-	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -47,9 +47,9 @@ var errNoAnchor = errors.New("agentos-kernel: no log anchor off this disk yet (L
 
 func productionAnchor() (kernel.Anchor, error) { return nil, errNoAnchor }
 
-type clerks map[string]run.Remote
+type clerks map[string]proc.Remote
 
-func (c clerks) String() string { return fmt.Sprint(map[string]run.Remote(c)) }
+func (c clerks) String() string { return fmt.Sprint(map[string]proc.Remote(c)) }
 
 // Set reads name=socket,uid.
 func (c clerks) Set(v string) error {
@@ -62,14 +62,14 @@ func (c clerks) Set(v string) error {
 	if _, dup := c[name]; dup {
 		return fmt.Errorf("clerk %q given twice", name)
 	}
-	c[name] = run.Remote{Socket: sock, UID: uid}
+	c[name] = proc.Remote{Socket: sock, UID: uid}
 	return nil
 }
 
-func parse(args []string, stderr io.Writer) (run.MainConfig, error) {
+func parse(args []string, stderr io.Writer) (proc.MainConfig, error) {
 	fs := flag.NewFlagSet("agentos-kernel", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	c := run.MainConfig{Clerks: map[string]run.Remote{}}
+	c := proc.MainConfig{Clerks: map[string]proc.Remote{}}
 	fs.StringVar(&c.Log, "log", "", "the log file")
 	fs.StringVar(&c.OwnerSock, "owner-sock", "", "the owner side's socket")
 	fs.IntVar(&c.OwnerUID, "owner-uid", -1, "the owner side's uid, the only peer on owner-sock")
@@ -121,5 +121,5 @@ func start(args []string, stderr io.Writer, anchor func() (kernel.Anchor, error)
 	defer keys.Wipe()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	return run.RunKernel(ctx, cfg, keys, a)
+	return proc.RunKernel(ctx, cfg, keys, a)
 }

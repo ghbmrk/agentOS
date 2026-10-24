@@ -19,6 +19,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 var phonePub, phonePriv = gen(8)
@@ -81,13 +83,13 @@ func newExitRigFor(t *testing.T, refresh string) *exitRig {
 	}
 	h := NewExitHost(x, d, anchors)
 	sock := filepath.Join(shortDir(t), "x.sock")
-	ln, err := ListenClerk(sock, os.Getuid())
+	ln, err := proc.ListenClerk(sock, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
 	last := &seenCall{h: h}
-	go ServeClerk(ln, last, anchors)
+	go proc.ServeClerk(ln, last, anchors)
 	osock := filepath.Join(shortDir(t), "o.sock")
 	oln, err := ListenExitOwner(osock, os.Getuid())
 	if err != nil {
@@ -99,7 +101,7 @@ func newExitRigFor(t *testing.T, refresh string) *exitRig {
 	if err := b.h.With(func(k *kernel.Kernel) error { return k.Enroll(b.now, key.Enroll(ownerPriv, phonePub)) }); err != nil {
 		t.Fatal(err)
 	}
-	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
+	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{proc.Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
 }
 
 // approve is the owner's phone approving exactly a reconnect to the grant
@@ -298,11 +300,11 @@ func TestAReconnectWrittenButNotSyncedIsUnknown(t *testing.T) {
 	d := r.stage("u", grant)
 	file := filepath.Join(r.dir, secretsName)
 	before, _ := os.ReadFile(file)
-	sync := syncDir
-	t.Cleanup(func() { syncDir = sync })
-	syncDir = func(string) error { return errors.New("synthetic sync failure") }
+	sync := privfile.SyncDir
+	t.Cleanup(func() { privfile.SyncDir = sync })
+	privfile.SyncDir = func(string) error { return errors.New("synthetic sync failure") }
 	st, _ := r.reconnect("u", r.approve(d), "web", d)
-	syncDir = sync
+	privfile.SyncDir = sync
 	if after, _ := os.ReadFile(file); bytes.Equal(before, after) {
 		t.Fatal("the new grant was not renamed into place")
 	}
@@ -330,11 +332,11 @@ func TestAReconnectWrittenButNotSyncedIsUnknown(t *testing.T) {
 func TestTheStagedGrantNeverReachesTheLog(t *testing.T) {
 	r := newExitRig(t)
 	grant := []byte(`{"refresh_token":"canary-refresh-log","client_id":"agentos-test"}`)
-	if err := r.owner.call("reconnect", stageArgs{"log", grant}, nil); err == nil {
+	if err := r.owner.Call("reconnect", stageArgs{"log", grant}, nil); err == nil {
 		t.Fatal("the exit owner socket answered a call other than stage")
 	}
 	for _, a := range []stageArgs{{"", grant}, {"log", nil}} {
-		if err := r.owner.call("stage", a, nil); err == nil {
+		if err := r.owner.Call("stage", a, nil); err == nil {
 			t.Fatalf("staging %+v was taken", a)
 		}
 	}
@@ -375,14 +377,17 @@ func TestReconnectActsOnceAndOnlyAsTheKernelSentIt(t *testing.T) {
 	r.stage("never", grant)
 	p := kernel.SignPlan(kernel.Plan{ID: "never", Key: r.approve(digest), Steps: []kernel.PlanStep{{Verb: key.ChangeAccount, Clerk: "web", Args: map[string]string{"target": "web", "value": digest}, Content: grantPrint(digest)}}}, holderPriv)
 	req := kernel.Request{Plan: p}
-	var v snapshot
-	r.h.With(func(k *kernel.Kernel) error { v = view(k.State(), anchors, req, r.now); return nil })
-	if res := r.host.Do(req, &v); res.Outcome != "failed" {
-		t.Errorf("a step the kernel never sent: %+v", res)
-	}
-	if got := r.host.Probe(req, &v).Outcome; got != "unknown" {
-		t.Errorf("probe of a step that never ran: %q", got)
-	}
+	// The log itself is the view, read under the kernel's lock: it has no
+	// dispatch for the step, as the view the kernel would send has none.
+	r.h.With(func(k *kernel.Kernel) error {
+		if res := r.host.Do(req, k.State()); res.Outcome != "failed" {
+			t.Errorf("a step the kernel never sent: %+v", res)
+		}
+		if got := r.host.Probe(req, k.State()).Outcome; got != "unknown" {
+			t.Errorf("probe of a step that never ran: %q", got)
+		}
+		return nil
+	})
 	if after, _ := r.sec.MarshalBinary(); !bytes.Equal(before, after) {
 		t.Fatal("a step sent again, or never sent, changed the slot")
 	}
