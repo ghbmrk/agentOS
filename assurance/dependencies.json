@@ -23,6 +23,11 @@
       "host": "accounts.google.com",
       "class": "optional",
       "dependency": "Google's OAuth consent page (D-150; optional per DEP-3): the address a Gmail sign-in gives the owner to open on their own phone (broker/clerk/inbox/gmailauth.go, #2852). The box never dials it; only an owner who connects Gmail sees it."
+    },
+    {
+      "host": "console.cloud.google.com",
+      "class": "optional",
+      "dependency": "Google's Cloud console (D-150; optional per DEP-3): the registration steps on the owner page's Gmail Connect step link there, to open on the owner's own device (broker/localui/connect.go, #2853). The box never dials it; only an owner who connects Gmail sees it."
     }
   ],
   "claim_literals": [

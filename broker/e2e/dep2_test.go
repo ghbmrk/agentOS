@@ -49,6 +49,9 @@ var thirdPartyHosts = map[string]bool{
 	// Google's consent page, which the owner opens on their phone, and the
 	// host Gmail's scope names sit under, never dialed (#2852).
 	"accounts.google.com": true, "www.googleapis.com": true,
+	// Google's Cloud console, which the Gmail Connect step's registration
+	// links open on the owner's own device, never dialed (#2853).
+	"console.cloud.google.com": true,
 }
 
 // projectHost names a domain the project could run: anything carrying
