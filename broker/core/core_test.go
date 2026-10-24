@@ -344,47 +344,112 @@ func fixture(pkg string) bool {
 	return strings.HasSuffix(path.Base(pkg), "test") || pkg == "kernel/sim"
 }
 
-// fixtureImports returns one line per package patterns name, other than
-// the fixtures themselves, whose non-test build reaches a fixture core.txt
-// allows, directly or through another package. go list leaves _test.go
-// imports out of Deps, so a test that imports a fixture passes.
-func fixtureImports(t *testing.T, l list, patterns ...string) []string {
+// goDirs returns the module packages patterns name ("./dir" or
+// "./dir/..."), as directories holding a .go file. Unlike go list it
+// keeps a package whose files the host build excludes. A "..." walk skips
+// testdata, vendor and directories go ignores, as go list does.
+func goDirs(t *testing.T, patterns ...string) []string {
 	t.Helper()
-	args := append([]string{"list", "-json=ImportPath,Deps,Error"}, patterns...)
-	cmd := exec.Command("go", args...)
-	cmd.Dir = moduleRoot
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.String())
-	}
-	var found []string
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var p struct {
-			ImportPath string
-			Deps       []string
-			Error      *struct{ Err string }
+	var pkgs []string
+	add := func(dir string) {
+		if names, _ := filepath.Glob(filepath.Join(dir, "*.go")); len(names) > 0 {
+			rel, err := filepath.Rel(moduleRoot, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkgs = append(pkgs, filepath.ToSlash(rel))
 		}
-		if err := dec.Decode(&p); err == io.EOF {
-			break
-		} else if err != nil {
+	}
+	for _, pat := range patterns {
+		root, walk := strings.CutSuffix(pat, "/...")
+		root = filepath.Join(moduleRoot, filepath.FromSlash(root))
+		if !walk {
+			add(root)
+			continue
+		}
+		err := filepath.WalkDir(root, func(dir string, d os.DirEntry, err error) error {
+			if err != nil || !d.IsDir() {
+				return err
+			}
+			name := d.Name()
+			if dir != root && (name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && dir != filepath.Clean(moduleRoot) {
+				return filepath.SkipDir
+			}
+			add(dir)
+			return nil
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Error != nil {
-			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
+	}
+	return pkgs
+}
+
+// fixtureImports returns one line per package patterns name, other than
+// the fixtures themselves, whose non-test files reach a fixture core.txt
+// allows, directly or through other module packages. It reads every
+// non-test file's imports whatever its build constraints, since go list
+// sees one GOOS and tag set and a shipped build may use another
+// (cmd/agentos-egress is built with -tags agentos_e2e); cgo files and
+// //go:build ignore scripts count too.
+func fixtureImports(t *testing.T, l list, patterns ...string) []string {
+	t.Helper()
+	pkgs := goDirs(t, patterns...)
+	edges := map[string][]string{} // module package -> module packages its non-test files import
+	imports := func(pkg string) []string {
+		if e, ok := edges[pkg]; ok {
+			return e
 		}
-		pkg := strings.TrimPrefix(p.ImportPath, modPrefix)
+		names, err := filepath.Glob(filepath.Join(moduleRoot, filepath.FromSlash(pkg), "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := []string{}
+		fset := token.NewFileSet()
+		for _, name := range names {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, spec := range f.Imports {
+				if dep, ok := strings.CutPrefix(strings.Trim(spec.Path.Value, `"`), modPrefix); ok {
+					e = append(e, dep)
+				}
+			}
+		}
+		edges[pkg] = e
+		return e
+	}
+	var found []string
+	for _, pkg := range pkgs {
 		if l.allow[pkg] != nil && fixture(pkg) {
 			continue
 		}
-		for _, d := range p.Deps {
-			if dep, ok := strings.CutPrefix(d, modPrefix); ok && l.allow[dep] != nil && fixture(dep) {
-				found = append(found, fmt.Sprintf("%s imports test fixture %s outside its _test.go files", pkg, dep))
+		seen := map[string]bool{pkg: true}
+		queue := []string{pkg}
+		for len(queue) > 0 {
+			p := queue[0]
+			queue = queue[1:]
+			for _, dep := range imports(p) {
+				if seen[dep] {
+					continue
+				}
+				seen[dep] = true
+				if l.allow[dep] != nil && fixture(dep) {
+					found = append(found, fmt.Sprintf("%s imports test fixture %s outside its _test.go files", pkg, dep))
+					continue
+				}
+				queue = append(queue, dep)
 			}
 		}
 	}
+	sort.Strings(found)
 	return found
 }
 
@@ -407,9 +472,9 @@ func TestFixturesAreImportedOnlyByTests(t *testing.T) {
 	}
 }
 
-// A package that imports loopstest from a non-test file fails, directly or
-// through a package in between; one that imports it only from a _test.go
-// file passes.
+// A package that imports loopstest from a non-test file fails, directly,
+// through a package in between, or from a file the host build leaves out;
+// one that imports it only from a _test.go file passes.
 func TestAFixtureImportedOutsideATestFails(t *testing.T) {
 	l := readList(t)
 	for _, c := range []struct {
@@ -418,6 +483,8 @@ func TestAFixtureImportedOutsideATestFails(t *testing.T) {
 	}{
 		{"core/testdata/importsloopstest", 1},
 		{"core/testdata/viaimportsloopstest", 1},
+		{"core/testdata/tagimportsloopstest", 1},
+		{"core/testdata/goosimportsloopstest", 1},
 		{"core/testdata/testimportsloopstest", 0},
 	} {
 		found := fixtureImports(t, l, "./"+c.pkg)
