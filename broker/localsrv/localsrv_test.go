@@ -113,7 +113,7 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	r.own = &fakeOwner{now: &r.now, left: 24}
-	r.srv = New(Config{Owner: r.own, Line: func() localapi.Line { return testLine }, Now: func() time.Time { return r.now },
+	r.srv = New(Config{Owner: r.own, Accounts: map[string]AccountSignIn{"gmail": &fakeAccount{}}, Line: func() localapi.Line { return testLine }, Now: func() time.Time { return r.now },
 		DescribeRoot: func(_ context.Context, root []byte, _ [][]byte) (localapi.RootSummary, error) {
 			if string(root) != "root" {
 				return localapi.RootSummary{}, errors.New("bad root")
@@ -229,6 +229,8 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpRotateAPNet:     localapi.Auth{Token: tok},
 		localapi.OpPlanSignInReady: localapi.Auth{Token: tok},
 		localapi.OpPlanSignIn:      localapi.PlanSignInStart{Token: tok, Code: good},
+		localapi.OpAccountBegin:    localapi.AccountBegin{Token: tok, Account: "gmail", Use: "watch"},
+		localapi.OpAccountFinish:   localapi.AccountFinish{Token: tok, Account: "gmail", Use: "watch", Pasted: "p"},
 	}
 }
 

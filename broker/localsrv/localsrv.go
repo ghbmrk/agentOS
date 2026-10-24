@@ -91,6 +91,9 @@ type Config struct {
 	// PlanSignIn signs a signed-out plan in again after setup (#1264);
 	// nil offers nothing.
 	PlanSignIn PlanSignIn
+	// Accounts are the account clerks' sign-ins by account ID, the Connect
+	// page's (#3006); an account not listed refuses both ops.
+	Accounts map[string]AccountSignIn
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -165,6 +168,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		// (#1264, CRED-5).
 		localapi.OpPlanSignInReady: s.planSignInReady,
 		localapi.OpPlanSignIn:      s.planSignIn,
+		// Connecting an account needs a session (#3006, §12.1 step 7).
+		localapi.OpAccountBegin:  s.accountBegin,
+		localapi.OpAccountFinish: s.accountFinish,
 	}
 }
 

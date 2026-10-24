@@ -716,3 +716,23 @@ func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
 		}
 	})
 }
+
+// #3006: -connect-gmail serves the Connect page for Gmail through
+// agentosd's localui.sock, the same socket as every other owner op; the
+// page is not served without it.
+func TestConnectGmailGoesThroughAgentosd(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
+	if cfg.Accounts != nil || cfg.Connect != nil {
+		t.Fatalf("accounts without -connect-gmail: %+v", cfg.Accounts)
+	}
+	connect(&cfg, "/run/agentos/localui.sock")
+	if a, ok := cfg.Accounts.(localui.AgentosdAccounts); !ok || a.Owner != (localui.Socket{Path: "/run/agentos/localui.sock"}) {
+		t.Fatalf("accounts %#v", cfg.Accounts)
+	}
+	if len(cfg.Connect) != 1 || cfg.Connect[0].ID != "gmail" {
+		t.Fatalf("connect %+v", cfg.Connect)
+	}
+	if _, err := localui.New(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
