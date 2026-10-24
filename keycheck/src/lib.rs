@@ -1,8 +1,9 @@
-//! keycheck: a second key check, written from SPEC KEY-1..KEY-8 and the design
-//! record (broker/kernel/ASSUMPTIONS.md), not from the Go library's logic, so
-//! a fault in broker/kernel/key is not shared by this one (SPEC §19 risk 32).
-//! Only the wire contract (`wire`) and the closed tables below (verbs, their
-//! argument lists, caveat kinds, refusal codes) are taken from the library.
+//! keycheck: a second key check, in another language, written from SPEC
+//! KEY-1..KEY-8 and the design record (broker/kernel/ASSUMPTIONS.md), so a
+//! fault in broker/kernel/key's code or crypto is not shared by this one (SPEC
+//! §19 risk 32). It is not a clean-room one: the wire contract (`wire`), the
+//! closed tables below and the rules SPEC leaves open are shared with the
+//! library, as ASSUMPTIONS.md KD-a lists.
 //!
 //! The library returns the first refusal it finds; this check returns every
 //! refusal a use earns, so the two can be compared without sharing an order.
@@ -213,6 +214,9 @@ impl Limits {
                     .arg
                     .as_ref()
                     .ok_or(Bad::Malformed("arg caveat without a bound"))?;
+                if a.name.is_empty() {
+                    return Err(Bad::Malformed("arg bound names no argument"));
+                }
                 let one_of = match &a.one_of {
                     None => None,
                     some => Some(canon(some)?),
@@ -304,9 +308,13 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
     if !signed(r.owner.get(), &wire::root_msg(r), r.sig.get()) {
         return Err(Bad::BadSig);
     }
+    // KEY-1: a root names one clerk and a set of verbs from the closed list.
+    if r.clerk.is_empty() {
+        return Err(Bad::Malformed("root names no clerk"));
+    }
     let verbs = canon(&r.verbs)?;
-    if verbs.iter().any(|v| verb_args(v).is_none()) {
-        return Err(Bad::Malformed("unknown verb"));
+    if verbs.is_empty() || verbs.iter().any(|v| verb_args(v).is_none()) {
+        return Err(Bad::Malformed("root verbs"));
     }
     let links = k.links();
     if links.len() > MAX_LINKS {
@@ -324,8 +332,10 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
     for (i, link) in links.iter().enumerate() {
         let prev = *ids.last().unwrap();
         let holder = link.holder.get();
-        if pk(holder).is_none() {
-            return Err(Bad::Malformed("holder is not a key"));
+        // A holder is a 32-byte public key. One that is not a curve point
+        // can sign nothing, so a key handed to it is dead, not malformed.
+        if holder.len() != 32 {
+            return Err(Bad::Malformed("holder is not 32 bytes"));
         }
         let msg = wire::link_msg(&prev, link);
         let ok = match prev_holder {
@@ -482,37 +492,51 @@ impl Checked {
         }
     }
 
-    /// Every cap, as if this use were charged now.
-    fn caps(&self, s: &Step, c: &Context, spend_only: bool, out: &mut BTreeSet<&'static str>) {
-        let day = |u: &&Use| u.at > c.now - DAY_MS;
+    /// The uses in the rolling day that ends at the context's time.
+    fn today<'a>(c: &'a Context, uses: &'a [Use]) -> impl Iterator<Item = &'a Use> + 'a {
+        let from = c.now.saturating_sub(DAY_MS);
+        uses.iter().filter(move |u| u.at > from)
+    }
+
+    /// LOG-7's money caps: the per-task total and the rolling daily total,
+    /// each with this charge added, in exact arithmetic so no total wraps.
+    fn money(&self, task: &str, amount: i64, c: &Context, out: &mut BTreeSet<&'static str>) {
+        let total = |it: &mut dyn Iterator<Item = &Use>| {
+            it.map(|u| u.amount as i128).sum::<i128>() + amount as i128
+        };
         for cap in &self.caps {
             let uses = c.uses(&cap.scope);
-            let (over, code) = match cap.kind {
-                CapKind::SpendTask => {
-                    let sum: i64 = uses
-                        .iter()
-                        .filter(|u| u.task == s.task)
-                        .map(|u| u.amount)
-                        .sum();
-                    (sum.saturating_add(s.amount) > cap.n, SPEND_TASK)
-                }
-                CapKind::SpendDay => {
-                    let sum: i64 = uses.iter().filter(day).map(|u| u.amount).sum();
-                    (sum.saturating_add(s.amount) > cap.n, SPEND_DAY)
-                }
-                _ if spend_only => continue,
-                CapKind::RateDay => (uses.iter().filter(day).count() as i64 + 1 > cap.n, RATE),
-                CapKind::RateRecipient => {
-                    let n = uses
-                        .iter()
-                        .filter(day)
-                        .filter(|u| u.recipient == s.recipient)
-                        .count();
-                    (n as i64 + 1 > cap.n, RATE)
-                }
-                CapKind::Uses => (uses.len() as i64 + 1 > cap.n, USES),
+            let (spent, code) = match cap.kind {
+                CapKind::SpendTask => (
+                    total(&mut uses.iter().filter(|u| u.task == task)),
+                    SPEND_TASK,
+                ),
+                CapKind::SpendDay => (total(&mut Self::today(c, uses)), SPEND_DAY),
+                _ => continue,
             };
-            if over {
+            if spent > cap.n as i128 {
+                out.insert(code);
+            }
+        }
+    }
+
+    /// KEY-2's counted caps on steps: a rolling daily count, a rolling daily
+    /// count per recipient and a lifetime use count, this step included.
+    fn counts(&self, s: &Step, c: &Context, out: &mut BTreeSet<&'static str>) {
+        for cap in &self.caps {
+            let uses = c.uses(&cap.scope);
+            let (n, code) = match cap.kind {
+                CapKind::RateDay => (Self::today(c, uses).count(), RATE),
+                CapKind::RateRecipient => (
+                    Self::today(c, uses)
+                        .filter(|u| u.recipient == s.recipient)
+                        .count(),
+                    RATE,
+                ),
+                CapKind::Uses => (uses.len(), USES),
+                _ => continue,
+            };
+            if n as i128 + 1 > cap.n as i128 {
                 out.insert(code);
             }
         }
@@ -578,14 +602,16 @@ impl Checked {
         if s.amount < 0 {
             out.insert(MALFORMED);
         } else {
-            self.caps(s, c, false, &mut out);
+            self.money(&s.task, s.amount, c, &mut out);
+            self.counts(s, c, &mut out);
         }
         out
     }
 
-    /// Every refusal a metered call of amount under task earns: the key is
-    /// live, serves task, and its spend caps hold; a key with no spend cap
-    /// funds nothing (LOG-7).
+    /// Every refusal a metered call (a model or paid API call) of amount
+    /// under task earns. LOG-7 meters it against the key's money caps; a key
+    /// that sets no money cap has no budget to meter against, so it pays for
+    /// no call.
     pub fn spend(&self, task: &str, amount: i64, c: &Context) -> BTreeSet<&'static str> {
         let mut out = self.live(c);
         self.task(task, &mut out);
@@ -600,12 +626,7 @@ impl Checked {
         {
             out.insert(MALFORMED);
         }
-        let s = Step {
-            task: task.to_string(),
-            amount,
-            ..Default::default()
-        };
-        self.caps(&s, c, true, &mut out);
+        self.money(task, amount, c, &mut out);
         out
     }
 }
@@ -719,6 +740,57 @@ mod tests {
         let t1 = extend(&k, &c, &g, vec![cav("task", 0, 0, Some(&["t1"]))]);
         let t2 = extend(&t1, &g, &g, vec![cav("task", 0, 0, Some(&["t2"]))]);
         assert!(matches!(chain(&t2, &owners), Err(Bad::Loosens(_))));
+    }
+
+    #[test]
+    fn a_root_names_one_clerk_and_some_verbs() {
+        let o = party(1);
+        let owners = vec![pub_(&o)];
+        let resign = |f: &dyn Fn(&mut Root)| {
+            let mut k = root(&o);
+            f(&mut k.root);
+            k.root.sig = Bytes(Some(o.sign(&wire::root_msg(&k.root)).to_bytes().to_vec()));
+            chain(&k, &owners)
+        };
+        assert!(matches!(
+            resign(&|r| r.clerk.clear()),
+            Err(Bad::Malformed(_))
+        ));
+        assert!(matches!(
+            resign(&|r| r.verbs = Some(vec![])),
+            Err(Bad::Malformed(_))
+        ));
+        let c = party(3);
+        let mut cavs = bounds();
+        cavs.push(Caveat {
+            kind: "arg".into(),
+            arg: Some(Default::default()),
+            ..Default::default()
+        });
+        assert!(matches!(
+            chain(&extend(&root(&o), &o, &c, cavs), &owners),
+            Err(Bad::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_money_total_never_wraps() {
+        let (o, c) = (party(1), party(3));
+        let owners = vec![pub_(&o)];
+        let v = chain(&extend(&root(&o), &o, &c, bounds()), &owners).unwrap();
+        let mut ctx = Context {
+            now: 500,
+            ..Default::default()
+        };
+        ctx.uses.insert(
+            wire::hex(&v.account.unwrap()),
+            vec![Use {
+                at: 499,
+                amount: 1,
+                ..Default::default()
+            }],
+        );
+        assert!(v.spend("t", i64::MAX, &ctx).contains(SPEND_DAY));
     }
 
     #[test]
