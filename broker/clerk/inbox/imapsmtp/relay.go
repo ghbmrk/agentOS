@@ -237,7 +237,8 @@ const filterLine = 64 << 10
 // filter relays the connection's commands to the server, each only if its
 // allowance permits it (A5). It reads each command's tag and verb and skips
 // {n} and {n+} literals by count, so no literal's bytes are read as a
-// command. A refused command is never sent; it ends the session.
+// command. Each line ends in CRLF (RFC 3501 2.2), so a miscounted literal
+// shows. A refused command is never sent; it ends the session.
 func (x *session) filter() {
 	br := bufio.NewReaderSize(x.local, filterLine)
 	refuse := func() { x.refused.Store(true); x.teardown() }
@@ -253,7 +254,7 @@ func (x *session) filter() {
 		}
 		a := x.allow.Load()
 		verb, ok := a.command(line)
-		if !ok {
+		if !ok || !bytes.HasSuffix(line, []byte("\r\n")) {
 			refuse()
 			return
 		}
@@ -274,7 +275,7 @@ func (x *session) filter() {
 				}
 				return
 			}
-			if !a.continuation(verb, line) {
+			if !bytes.HasSuffix(line, []byte("\r\n")) || !a.continuation(verb, line) {
 				refuse()
 				return
 			}
