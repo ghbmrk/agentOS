@@ -2,6 +2,8 @@
 # tpm slot with the pins on its TPM, derives the kernel's keys, closes the store and execs
 # agentos-kernel as the kernel's user, with the keys on descriptor 3 and one TPM connection on
 # descriptor 4 for the log's counter (LOG-2, STO-1). No process lives on with the store key (CLK-1).
+# The unlock step caps the tpm slot after its unseal (#2977), so no restart in the same boot unlocks:
+# a kernel that came up and then failed reboots the box (#2998, ExecStopPost= below).
 [Unit]
 Description=agentOS kernel
 ConditionPathExists=/var/lib/agentos-store/store
@@ -16,8 +18,8 @@ StartLimitBurst=3
 # no descriptor store), and nothing it starts gains privileges: it drops every id itself, and no
 # capability or securebits setting carries any past the drop (mkosi.finalize refuses one).
 NoNewPrivileges=yes
-# The kernel's sockets, which its peers reach: the directory holds only them (0711), and is the
-# kernel's to make them in.
+# The kernel's sockets, which its peers reach, and its "up" file (#2998): the directory holds only
+# them (0711), is the kernel's to make them in, and is made afresh for each start.
 RuntimeDirectory=agentos-kernel
 RuntimeDirectoryMode=0711
 ExecStartPre=/usr/bin/chown agentos-kernel:agentos-kernel /run/agentos-kernel
@@ -25,7 +27,14 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var
         -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
         -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \
         -owner-sock /run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner \
-        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model
+        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model -up /run/agentos-kernel/up
+# #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its
+# sockets listened, and it made "up") and then failed reboots the box. One refused at its start (no
+# owner's hardware keys, a log under another key, a rolled-back drive) never made "up": every boot
+# would repeat it, so it stays down as before. The reboot waits until the box has been up 30 minutes
+# (a boot timer past its time elapses at once), so a kernel that fails soon after every boot reboots
+# the box at most twice an hour, and spends at most four of the counter's increments an hour (#2897).
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" != success ] && [ -e /run/agentos-kernel/up ]; then exec /usr/bin/systemd-run --on-boot=30min --unit=agentos-kernel-reboot /usr/bin/systemctl reboot; fi'
 StandardError=journal+console
 Restart=on-failure
 RestartSec=10

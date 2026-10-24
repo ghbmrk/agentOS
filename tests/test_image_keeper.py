@@ -4,12 +4,14 @@ The keeper (D-154) is enrollment (agentos-keeper-enroll.service) and the unlock 
 kernel (agentos-keeper-kernel.service), in agentos-keeper.slice. Every other agentos unit is main side:
 it cannot see the keeper's state, and only the keeper's units (and the old core's vault process until
 it is deleted) reach the TPM. The unlock unit gets no descriptor past 2 and no privilege past its drop
-(#2899), and its restarts are bounded so a crash loop cannot wear the TPM counter (#2897). Each test
+(#2899), and its restarts are bounded so a crash loop cannot wear the TPM counter (#2897); a kernel
+that came up and then failed reboots the box, at most twice an hour (#2998). Each test
 of a refusal is a mutant of the shipped tree that mkosi.finalize must refuse. CI's boot test enrolls
 on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines)."""
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -315,6 +317,65 @@ class KeeperTreeTest(unittest.TestCase):
                 self.edit("agentos-keeper-kernel.service", old, new)
                 self.assertEqual(self.v(), ["agentos-keeper-kernel.service: " + want])
                 self.unit("agentos-keeper-kernel.service").write_text(good)
+
+    # #2998: after the unlock cap (#2977) no restart in the same boot unlocks, so a kernel that came up
+    # and then failed reboots the box, at most twice an hour; one refused at its start does not.
+
+    def test_a_kernel_that_came_up_and_failed_reboots_the_box(self):
+        k = exec_args(KERNEL)
+        kern = k[k.index("--") + 1:]
+        u = ini(KERNEL)
+        self.assertEqual(arg(kern, "up"), "/run/" + u["Service"]["RuntimeDirectory"] + "/up")
+        self.assertIn(arg(kern, "up"), check.KERNEL_REBOOT)
+        self.assertEqual(u["Service"]["ExecStopPost"], check.KERNEL_REBOOT)
+        self.assertEqual(u["Service"]["Restart"], "on-failure")
+        self.assertNotIn("RuntimeDirectoryPreserve", u["Service"])
+
+    def test_the_reboot_follows_only_a_kernel_that_came_up(self):
+        # The command as systemd runs it ($$ is one $), with the "up" file and systemd-run moved into a
+        # temporary directory: it asks for the boot-timed reboot only after a failure of a kernel that
+        # made "up".
+        argv = shlex.split(check.KERNEL_REBOOT.replace("$$", "$"))
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            run, calls = d / "systemd-run", d / "calls"
+            write(d, "systemd-run", '#!/bin/sh\necho "$*" >> %s\n' % calls, 0o755)
+            script = argv[2].replace("/run/agentos-kernel/up", str(d / "up")).replace("/usr/bin/systemd-run", str(run))
+            for result, up, want in (("success", True, False), ("exit-code", True, True), ("signal", True, True),
+                                     ("core-dump", True, True), ("exit-code", False, False), ("signal", False, False)):
+                with self.subTest(result=result, up=up):
+                    (d / "up").unlink(missing_ok=True)
+                    calls.unlink(missing_ok=True)
+                    if up:
+                        (d / "up").touch()
+                    subprocess.run([argv[0], argv[1], script], env={"SERVICE_RESULT": result}, check=True)
+                    got = calls.read_text() if calls.exists() else ""
+                    self.assertEqual(got, "--on-boot=30min --unit=agentos-kernel-reboot /usr/bin/systemctl reboot\n" if want else "")
+
+    def test_any_other_reboot_of_the_unlock_unit_is_refused(self):
+        name = "agentos-keeper-kernel.service"
+        stop = "ExecStopPost=" + check.KERNEL_REBOOT + "\n"
+        guard = "if [ \"$$SERVICE_RESULT\" != success ] && [ -e /run/agentos-kernel/up ]; then "
+        why = "can reboot the box; its one reboot is ExecStopPost=KERNEL_REBOOT, after a kernel that came up and no " \
+              "sooner than 30 minutes into the boot (#2897, #2998)"
+        cases = ((stop, stop.replace(guard, "if true; then "), "ExecStopPost=/usr/bin/sh " + why),
+                 (stop, stop.replace("--on-boot=30min", "--on-boot=1s"), "ExecStopPost=/usr/bin/sh " + why),
+                 (stop, stop.replace("ExecStopPost=", "ExecStopPost=-"), "ExecStopPost=-/usr/bin/sh " + why),
+                 (stop, stop + "ExecStopPost=/usr/bin/systemctl reboot\n", "ExecStopPost=/usr/bin/systemctl " + why),
+                 ("[Service]\n", "[Service]\nExecStartPre=/usr/bin/systemd-run --on-active=1 /usr/bin/true\n",
+                  "ExecStartPre=/usr/bin/systemd-run " + why),
+                 ("[Unit]\n", "[Unit]\nOnFailure=reboot.target\n",
+                  "OnFailure=reboot.target starts a unit when the kernel stops, which the tree check does not model; "
+                  "its one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #2998)"))
+        for old, new, want in cases:
+            with self.subTest(new):
+                good = self.unit(name).read_text()
+                self.edit(name, old, new)
+                self.assertEqual(self.v(), [name + ": " + want])
+                self.unit(name).write_text(good)
+        # Without the line the kernel stays down after the cap, as before #2998, which the check allows.
+        self.edit(name, stop, "")
+        self.assertEqual(self.v(), [])
 
     # UPD-10 (#2875) on the new units: noexec_violations covers every agentos unit.
 

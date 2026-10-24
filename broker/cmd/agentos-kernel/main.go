@@ -86,6 +86,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.MeterUID, "meter-uid", -1, "the model clerk's uid, the only peer on meter-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
+	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -96,6 +97,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-log, -owner-sock and -meter-sock are required")
 	case !filepath.IsAbs(c.AnchorDir):
 		return c, errors.New("an absolute -anchor-dir is required")
+	case c.Up != "" && !filepath.IsAbs(c.Up):
+		return c, errors.New("-up must be an absolute path")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
 	}

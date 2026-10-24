@@ -31,6 +31,27 @@ type MainConfig struct {
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
 	Tick  time.Duration // how often plans run; 0 is one second
+	// Up is a file made once both sockets listen, so the unit can tell a
+	// kernel that came up and then failed, which a reboot may cure, from
+	// one refused at its start, which every boot repeats (#2998). "" makes
+	// none.
+	Up string
+}
+
+// markUp makes path, empty. It never follows a link nor replaces what is
+// there. A failure is said and the kernel runs on: the file only lets a
+// later failure reboot the box (#2998), so its lack keeps nothing down.
+func markUp(path string) {
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err == nil {
+		err = f.Close()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "run: mark that I am up, so a later failure of mine reboots the box: %v\n", err)
+	}
 }
 
 // ErrLogKey: the log on the drive does not open under the key the unlock
@@ -80,6 +101,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 			errs <- fmt.Errorf("run: %s socket: %w", side.name, ServeKernel(ln, h, side, clock))
 		}(ln, s.side)
 	}
+	markUp(cfg.Up)
 	every := cfg.Tick
 	if every <= 0 {
 		every = time.Second
