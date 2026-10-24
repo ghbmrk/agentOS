@@ -306,6 +306,13 @@ jobs:
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
       - name: Vet
         run: go vet ./...
+      - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
+        # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
+        # replace directories), so an edited, added or deleted vendored file shows as a change.
+        run: |
+          go mod vendor
+          s=$(git status --porcelain --untracked-files=all -- vendor)
+          test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
         # The search is sequential, so the race detector finds nothing in it and
         # the race step skips it; here it runs at the bounds A19 states. -parallel 2 holds the
