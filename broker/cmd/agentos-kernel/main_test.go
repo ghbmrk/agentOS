@@ -45,6 +45,7 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 		append(slices.Clone(good), "-owner-uid", "0"),
 		append(slices.Clone(good), "stray"),
 		append(slices.Clone(good), "-anchor-dir", "anchor"),
+		append(slices.Clone(good), "-up", "up"),
 		good[2:],
 		good[4:],
 	} {
