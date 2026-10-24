@@ -55,6 +55,27 @@ func TestCapLocksTheSlotUntilTheNextBoot(t *testing.T) {
 	}
 }
 
+// #3001 Security 1: the capped value never recurs, so a policy signed over
+// capped PCRs (a re-enrolment after the unlock in the same boot) does not
+// open after the cap on a later boot; it fails closed to the other slots.
+func TestPolicySignedWhileCappedNeverOpens(t *testing.T) {
+	s := swtpm.Start(t)
+	boot(s, releaseA)
+	if err := tpmseal.Cap(s.TPM(), [][]uint{pcrs}); err != nil {
+		t.Fatal(err)
+	}
+	_, sealed, pols := enroll(t, s, newKey(t), "")
+	for range 2 {
+		boot(s, releaseA)
+		if err := tpmseal.Cap(s.TPM(), [][]uint{pcrs}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tpmseal.Unseal(s.TPM(), sealed, pols, ""); !errors.Is(err, tpmseal.ErrNoPolicy) {
+			t.Fatalf("signed while capped, a later boot's cap: got %v, want ErrNoPolicy", err)
+		}
+	}
+}
+
 // The cap extends the highest PCR of a selection that only a power cycle
 // resets, and refuses a selection with none, extending nothing.
 func TestCapPCR(t *testing.T) {

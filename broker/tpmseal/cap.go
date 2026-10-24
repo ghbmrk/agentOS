@@ -1,6 +1,7 @@
 package tpmseal
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -16,10 +17,6 @@ import (
 // nothing that can send this TPM commands (the kernel through the
 // connection it is handed, row STO-2c-tpm) can unseal the slot again. The
 // next boot measures from reset, and the slot opens as before.
-
-// capEvent is what Cap extends: a fixed tag, so the capped value is never
-// one a boot stage measures.
-var capEvent = sha256.Sum256([]byte("agentos-tpm-slot-cap/v1"))
 
 // capMax is the highest PCR Cap extends. PCRs 0 to 15 are extendable from
 // locality 0 and reset only by a power cycle; 16 and 23 can be reset from
@@ -43,7 +40,7 @@ func CapPCR(pcrs []uint) (uint, error) {
 }
 
 // Cap extends each selection's CapPCR (SHA-256 bank, the one policies
-// select) with capEvent, so no policy over any of sels matches again until
+// select) with a fresh random value, so no policy over any of sels matches again until
 // the TPM is reset. It extends nothing unless there is a selection and every
 // one can be capped.
 func Cap(t transport.TPM, sels [][]uint) error {
@@ -60,12 +57,20 @@ func Cap(t transport.TPM, sels [][]uint) error {
 			pcrs = append(pcrs, p)
 		}
 	}
+	// A fresh random value each time, never a fixed tag: a fixed one would
+	// give the same capped value every boot, so a policy ever signed over
+	// capped PCRs would open after the cap on each later boot (#3001
+	// Security 1). Random, it never recurs, and such a policy fails closed.
+	var ev [sha256.Size]byte
+	if _, err := rand.Read(ev[:]); err != nil {
+		return err
+	}
 	for _, p := range pcrs {
 		if _, err := (tpm2.PCRExtend{
 			PCRHandle: tpm2.AuthHandle{Handle: tpm2.TPMHandle(p), Auth: tpm2.PasswordAuth(nil)},
 			Digests: tpm2.TPMLDigestValues{Digests: []tpm2.TPMTHA{{
 				HashAlg: tpm2.TPMAlgSHA256,
-				Digest:  capEvent[:],
+				Digest:  ev[:],
 			}}},
 		}).Execute(t); err != nil {
 			return fmt.Errorf("tpmseal: cap PCR %d: %w", p, err)

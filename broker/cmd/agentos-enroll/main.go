@@ -92,7 +92,7 @@ var (
 	errLogExists = errors.New("agentos-enroll: I already have a log; I change nothing")
 	errOtherPins = errors.New("agentos-enroll: this PC's TPM already holds another store's pins; I change nothing")
 	errStaged    = errors.New("agentos-enroll: my unfinished store does not read; I change nothing")
-	errCapped    = errors.New("agentos-enroll: my tpm slot is locked until the next boot, since this boot has unlocked it; give me -passphrase-file")
+	errCapped    = errors.New("agentos-enroll: my tpm slot does not open on this boot (locked after this boot's unlock, or a boot path I never approved); give me -passphrase-file")
 	errPCRs      = errors.New("agentos-enroll: -pcrs is not the selection my tpm slot was enrolled with; I change nothing")
 )
 
