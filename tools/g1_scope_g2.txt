@@ -1,12 +1,24 @@
 # G2 list (D-128): the paths a PR may touch until gate G2 passes: A4, A5, A9 and A14 on a VM
 # (SPEC.md, "Gates"; PLAN.md P1). Read by tools/g1_scope.py, which checks every gate list
-# that says `freeze on`; the g1-freeze workflow uses the base commit's copies. The syntax is
-# the G1 list's (tools/g1_scope.txt). Lift this freeze with a PR that sets `freeze off` and
-# cites the VM runs in which A4, A5, A9 and A14 pass.
+# that says `freeze on`; the g1-freeze workflow uses the base commit's copies. Lift this
+# freeze with a PR that sets `freeze off` and cites the VM runs in which A4, A5, A9 and A14
+# pass.
+#
+#   freeze on|off       the single switch.
+#   since TIME          when the freeze began (UTC, 2026-10-17T17:06:19Z form). A PR opened
+#                       earlier passes; the time comes from the pull_request event, which the
+#                       author cannot set. A PR reopened, force-pushed or retargeted at or
+#                       after it loses that pass (#1717); an `exempt-pr` line restores it.
+#   exempt-pr N         PR N passes: an amend for work already under way that the time rule
+#                       misses (a split or rebuild of a row in flight when the freeze began).
+#   allow PATH          a PR may touch PATH: a trailing "/" means everything below it,
+#                       otherwise the one file.
+#   frozen-import DIR/  a broker package G2 binaries import but the list freezes anyway. The
+#                       drift test in tests/test_g1_scope.py accepts these as imports.
 #
 # Derived from G2's acceptance tests and their code paths, minus D-098's frozen groups:
 # - every package the G2 binaries import (`go list -deps`, G2_BINARIES in
-#   tests/test_g1_scope.py): G1's binaries plus agentos-holder and agentos-release;
+#   tests/test_g1_scope.py): the G1 path's binaries plus agentos-holder and agentos-release;
 # - what A4, A5 and A14 exercise directly beyond those: the credentialed browser (A5,
 #   CRED-12), the journal tail (A4), the CH-21 voice check (A14), the recall index
 #   (A14 CAP-3, so it leaves the G1 list's frozen imports), the simulators and scenario
@@ -81,7 +93,6 @@ allow guest/codex/
 allow guest/openclaw/
 allow spikes/CTRL-spike/
 allow spikes/S8-live/
-allow spikes/S8-provider-workers/
 
 # Broker module files, shared trees, the end-to-end tests, the simulators and the
 # A8/A9 scenario scripts.
@@ -188,9 +199,7 @@ allow broker/workers/
 # G2 test needs. The `frozen-import` lines for compile, corpus, loops and skill moved here
 # (loop7, loopbuild and sockprobe were listed until #2787 deleted them).
 allow broker/attention/
-allow broker/cleanroom/
 allow broker/corpus/
-allow broker/hint/
 allow broker/loops/
 allow broker/machprobe/
 allow broker/probecmd/

@@ -79,7 +79,7 @@ def core_list(path=CORE_LIST):
 TIER_A_BROKER = {
     # (a) a credential or secret
     "apnet",                      # the Owner Card's Wi-Fi password
-    "browser", "netjoin", "pubid", "tpmseal",
+    "browser", "netjoin", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
     # Card's values and the code-generator seed, and its verdict proves G1.
@@ -91,9 +91,9 @@ TIER_A_BROKER = {
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
     "recovery",
     # (b) gates an effect or approval
-    "apply", "card", "claim", "cleanroom", "clock", "firstboot",
+    "apply", "card", "claim", "clock", "firstboot",
     "follow",                     # switches the update root of trust
-    "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation

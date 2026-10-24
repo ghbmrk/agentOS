@@ -256,7 +256,7 @@ MACHINES_LINES = [
     '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
     '            AGENTOS_REQUIRE_QUOTA=1 \\',
-    '            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom',
+    '            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery',
     '          rc=0',
     '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
