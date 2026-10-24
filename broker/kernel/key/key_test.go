@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"math"
 	"testing"
 )
 
-// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8
+// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8, KRN-5
 
 type kp struct {
 	pub  ed25519.PublicKey
@@ -228,6 +229,46 @@ func TestContentAndLabels(t *testing.T) {
 	}
 }
 
+// A key serving a task admits steps and metered calls for that task alone,
+// and its per-task cap counts only that task's uses (KRN-5, CLK-2, #2902).
+func TestAKeyServesOnlyItsTask(t *testing.T) {
+	o, h, k := root(t)
+	served, err := Derive(k, h.priv, h.pub, LimitTask("t1"), LimitSpendTask(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if TaskOf(served) != "t1" || TaskOf(k) != "" || TaskOf(Key{}) != "" {
+		t.Fatalf("TaskOf: %q %q", TaskOf(served), TaskOf(k))
+	}
+	if ChargeTask(served, "p") != "t1" || ChargeTask(k, "t1") != PlanPrefix+"t1" {
+		t.Fatalf("ChargeTask: %q %q", ChargeTask(served, "p"), ChargeTask(k, "t1"))
+	}
+	v := verified(t, served, o, h)
+	s := step(Trash)
+	s.Task = "t1"
+	if r := v.Authorize(s, ctx(1, ledger{})); r != nil {
+		t.Fatalf("its own task: %v", r)
+	}
+	if r := v.Spend("t1", 10, ctx(1, ledger{})); r != nil {
+		t.Fatalf("its own task's spend: %v", r)
+	}
+	for _, other := range []string{"t2", ""} {
+		s.Task = other
+		if r := v.Authorize(s, ctx(1, ledger{})); r == nil || r.Code != RTask {
+			t.Fatalf("step for task %q: %v", other, r)
+		}
+		// Another task's empty ledger would leave the per-task cap whole.
+		if r := v.Spend(other, 10, ctx(1, ledger{})); r == nil || r.Code != RTask {
+			t.Fatalf("spend for task %q: %v", other, r)
+		}
+	}
+	// A key serving no task takes a step for any.
+	s.Task = "t2"
+	if r := verified(t, k, o, h).Authorize(s, ctx(1, nil)); r != nil {
+		t.Fatalf("a key serving no task: %v", r)
+	}
+}
+
 func TestCapsChargeEveryPrefix(t *testing.T) {
 	o, h, k := root(t)
 	h2 := gen(3)
@@ -270,6 +311,64 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	nl.Ledger = nil
 	if r := v.Authorize(s, nl); r == nil || r.Code != RMalformed {
 		t.Fatal("caps without a ledger must fail closed")
+	}
+}
+
+// A sum past int64 exceeds every cap: a step or a ledger use near MaxInt64
+// must not wrap the window's sum below the cap (#2942 review, the keydiff
+// overflow probe). Each cap is tested on its own and refuses with its own
+// code, so each guard is pinned.
+func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
+	o, h, k := root(t)
+	h2 := gen(3)
+	day, _ := Derive(k, h.priv, h2.pub, LimitSpendDay(50))
+	task, _ := Derive(k, h.priv, h2.pub, LimitSpendTask(50))
+	const now = DayMS + 1000
+	// every prefix carries the same uses, so no other cap refuses first
+	all := func(v *Verified, us ...Use) ledger {
+		l := ledger{}
+		for _, id := range v.Scopes() {
+			l[id] = us
+		}
+		return l
+	}
+	huge := int64(math.MaxInt64)
+	for name, tc := range map[string]struct {
+		key    Key
+		amount int64
+		uses   []Use
+		spend  bool
+		code   string
+	}{
+		// spend-day: the uses are in the window
+		"day: huge step, 1 spent":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, false, RSpendDay},
+		"day: huge step, nothing spent": {day, huge, nil, false, RSpendDay},
+		"day: 1 after a huge use":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
+		"day: 0 after two huge uses":    {day, 0, []Use{{At: now - 2, Amount: huge, Task: "t1"}, {At: now - 1, Amount: huge, Task: "t1"}}, false, RSpendDay},
+		"day: 0 after M, M, 1":          {day, 0, []Use{{At: now - 3, Amount: huge, Task: "t1"}, {At: now - 2, Amount: huge, Task: "t1"}, {At: now - 1, Amount: 1, Task: "t1"}}, false, RSpendDay},
+		"day: spend huge, 1 used":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, true, RSpendDay},
+		"day: spend 1, huge used":       {day, 1, []Use{{At: now - 1, Amount: huge, Task: "t1"}}, true, RSpendDay},
+		// spend-task: the uses fell out of the day window, so only the task cap counts them
+		"task: 1 after a huge use":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, false, RSpendTask},
+		"task: 0 after two huge uses": {task, 0, []Use{{At: 1, Amount: huge, Task: "t1"}, {At: 2, Amount: huge, Task: "t1"}}, false, RSpendTask},
+		"task: 0 after M, M, 1":       {task, 0, []Use{{At: 1, Amount: huge, Task: "t1"}, {At: 2, Amount: huge, Task: "t1"}, {At: 3, Amount: 1, Task: "t1"}}, false, RSpendTask},
+		"task: spend 1, huge used":    {task, 1, []Use{{At: 1, Amount: huge, Task: "t1"}}, true, RSpendTask},
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := verified(t, tc.key, o, h2)
+			c := ctx(now, all(v, tc.uses...))
+			var r *Refusal
+			if tc.spend {
+				r = v.Spend("t1", tc.amount, c)
+			} else {
+				s := step(Trash)
+				s.Task, s.Amount = "t1", tc.amount
+				r = v.Authorize(s, c)
+			}
+			if r == nil || r.Code != tc.code {
+				t.Fatalf("want %s, got %v", tc.code, r)
+			}
+		})
 	}
 }
 

@@ -110,15 +110,22 @@ const (
 // dials only the addresses its declaration allows, and gives back only typed
 // details (CLK-1..4, KRN-8).
 type Exit struct {
-	name    string
+	conn
 	anchors []ed25519.PublicKey
 	ops     map[key.Verb]decl
-	secrets *Secrets
-	client  *http.Client
-	clock   Clock
 
 	mu    sync.Mutex // guards state only, never held across a request
 	state map[string]*sent
+}
+
+// conn is what every clerk that sends HTTPS shares, an Exit or an API: its
+// name, its one secret slot, its transport and its clock, and the access
+// token it redeems from a sealed refresh grant.
+type conn struct {
+	name    string
+	secrets *Secrets
+	client  *http.Client
+	clock   Clock
 
 	// OAuth refresh. The access token lives only here, in memory: it is
 	// never logged, returned or written to the store, and a restart redeems
@@ -142,6 +149,11 @@ type decl struct {
 	Op
 	host   string
 	header string // the secret's header, canonical
+	// An API call's own fields (Call): its argument names, the JSON body
+	// fields sent as one-element arrays, and the most of an answer it reads.
+	names []string
+	lists []string
+	max   int64
 }
 
 // sent is what the clerk knows of one idempotency key.
@@ -193,7 +205,8 @@ func NewExit(d Declaration, anchors []ed25519.PublicKey, secrets *Secrets, roots
 	if d.Guard == nil {
 		return nil, errors.New("clerk: a declaration needs the home-network policy (DEV-2)")
 	}
-	x := &Exit{name: d.Name, anchors: anchors, ops: map[key.Verb]decl{}, secrets: secrets, state: map[string]*sent{}, clock: d.Clock}
+	x := &Exit{anchors: anchors, ops: map[key.Verb]decl{}, state: map[string]*sent{}}
+	x.name, x.secrets, x.clock = d.Name, secrets, d.Clock
 	slot := ""
 	for _, op := range d.Ops {
 		o, err := x.declare(op)
@@ -205,48 +218,65 @@ func NewExit(d Declaration, anchors []ed25519.PublicKey, secrets *Secrets, roots
 		}
 		x.ops[op.Verb] = o
 	}
+	if err := x.open(d.Guard, d.Refresh, slot, roots); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// open checks the clerk's one slot against its secrets and builds its
+// transport: no proxy from the environment, no cookie jar, no redirects, and
+// every dial through the guard.
+func (c *conn) open(guard *netguard.Policy, refresh, slot string, roots *x509.CertPool) error {
+	secrets := c.secrets
 	// The clerk holds its account's secret and no other (CLK-1).
 	if n := secrets.Len(); n > 1 || n == 1 && (slot == "" || !secrets.Has(slot)) {
-		return nil, errors.New("clerk: the secret store holds another account's secret (CLK-1)")
+		return errors.New("clerk: the secret store holds another account's secret (CLK-1)")
 	}
 	// Each path opens only its own kind of slot, so a grant never goes out
 	// as a bearer header and a static secret is never posted as a grant.
-	if d.Refresh == "" {
+	if refresh == "" {
 		if slot != "" && secrets.with(slot, KindStatic, func([]byte) error { return nil }) != nil {
-			return nil, errors.New("clerk: a clerk without a token endpoint needs a static secret in its slot")
+			return errors.New("clerk: a clerk without a token endpoint needs a static secret in its slot")
 		}
 	} else {
-		u, err := url.Parse(d.Refresh)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || strings.Contains(d.Refresh, "#") {
-			return nil, errors.New("clerk: a token endpoint needs a plain https URL")
+		u, err := url.Parse(refresh)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || strings.Contains(refresh, "#") {
+			return errors.New("clerk: a token endpoint needs a plain https URL")
 		}
 		if slot == "" || secrets.with(slot, KindGrant, func(g []byte) error { _, err := readGrant(g); return err }) != nil {
-			return nil, errors.New("clerk: refresh needs a sealed refresh grant in the clerk's slot")
+			return errors.New("clerk: refresh needs a sealed refresh grant in the clerk's slot")
 		}
-		x.refresh = d.Refresh
+		c.refresh = refresh
 	}
-	x.slot = slot
-	x.client = &http.Client{
+	c.slot = slot
+	c.client = &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
-			DialContext:         d.Guard.DialContext,
+			DialContext:         guard.DialContext,
 			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout: 10 * time.Second,
 			ForceAttemptHTTP2:   true,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return x, nil
+	return nil
 }
 
 func (x *Exit) declare(op Op) (decl, error) {
-	o := decl{Op: op}
 	if !key.Valid(op.Verb) {
-		return o, fmt.Errorf("clerk: %q is not a verb", op.Verb)
+		return decl{Op: op}, fmt.Errorf("clerk: %q is not a verb", op.Verb)
 	}
 	if _, dup := x.ops[op.Verb]; dup {
-		return o, fmt.Errorf("clerk: verb %s declared twice", op.Verb)
+		return decl{Op: op}, fmt.Errorf("clerk: verb %s declared twice", op.Verb)
 	}
+	return shape(op, string(op.Verb), key.ArgNames(op.Verb), x.secrets)
+}
+
+// shape checks one request shape whose values come from the arguments names,
+// for what, a verb or a call's name.
+func shape(op Op, what string, names []string, secrets *Secrets) (decl, error) {
+	o := decl{Op: op}
 	if !methRE.MatchString(op.Method) {
 		return o, errors.New("clerk: bad method")
 	}
@@ -268,10 +298,9 @@ func (x *Exit) declare(op Op) (decl, error) {
 	if err != nil {
 		return o, errors.New("clerk: bad constant query")
 	}
-	names := key.ArgNames(op.Verb)
 	arg := func(n string) error {
 		if !slices.Contains(names, n) {
-			return fmt.Errorf("clerk: %s has no argument %q", op.Verb, n)
+			return fmt.Errorf("clerk: %s has no argument %q", what, n)
 		}
 		return nil
 	}
@@ -311,7 +340,7 @@ func (x *Exit) declare(op Op) (decl, error) {
 			return o, errors.New("clerk: a secret header needs a slot")
 		}
 	} else {
-		if !x.secrets.Has(op.Slot) {
+		if !secrets.Has(op.Slot) {
 			return o, fmt.Errorf("clerk: no secret slot %q", op.Slot)
 		}
 		o.header = cmp(op.Header, "Authorization")
@@ -429,7 +458,7 @@ func (x *Exit) sendOAuth(op decl, req *http.Request, r kernel.Request, v kernel.
 // access returns a live access token. It redeems the grant when there is no
 // token, the token's life has run out, or the token is stale: the one the
 // remote just refused. A token another step redeemed meanwhile is reused.
-func (x *Exit) access(now int64, stale string) (string, string) {
+func (x *conn) access(now int64, stale string) (string, string) {
 	x.tmu.Lock()
 	defer x.tmu.Unlock()
 	if x.refused {
@@ -481,7 +510,7 @@ func (x *Exit) access(now int64, stale string) (string, string) {
 
 // save seals the unsaved grant into the durable store. On failure the grant
 // stays in memory, and the next step tries again.
-func (x *Exit) save() string {
+func (x *conn) save() string {
 	g, _ := json.Marshal(x.unsaved)
 	defer clear(g)
 	if x.secrets.Put(x.slot, KindGrant, g) != nil {
@@ -495,7 +524,7 @@ func (x *Exit) save() string {
 // sign-in gave, without enrolling the clerk again. It is the owner's answer
 // to DReconnect; the caller has already proved the owner (CH-3). It returns
 // once the new grant is durable, and the next step redeems it.
-func (x *Exit) Reconnect(grant []byte) error {
+func (x *conn) Reconnect(grant []byte) error {
 	if err := x.CheckGrant(grant); err != nil {
 		return err
 	}
@@ -512,7 +541,7 @@ func (x *Exit) Reconnect(grant []byte) error {
 // whether Reconnect would take grant. The owner side runs it when it stages
 // a grant, so a malformed one is refused before the owner's tap and hold,
 // not after them as a credential failure.
-func (x *Exit) CheckGrant(grant []byte) error {
+func (x *conn) CheckGrant(grant []byte) error {
 	if x.refresh == "" {
 		return errors.New("clerk: this clerk has no refresh grant")
 	}
@@ -531,7 +560,7 @@ type tokenAnswer struct {
 // no plain access token comes back with no access token. Only the status
 // reaches a detail; the endpoint's body, the grant and the tokens never do
 // (CLK-4).
-func (x *Exit) redeem(grant map[string]string) (tokenAnswer, int) {
+func (x *conn) redeem(grant map[string]string) (tokenAnswer, int) {
 	var t tokenAnswer
 	form := url.Values{"grant_type": {"refresh_token"}}
 	for k, v := range grant {
@@ -574,11 +603,24 @@ func readGrant(g []byte) (map[string]string, error) {
 
 func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	// Check has already matched the arguments to the declaration exactly.
-	args := r.Step().Args
+	args := map[string]string{}
+	for n, a := range r.Step().Args {
+		args[n] = a.Value
+	}
+	req, bad := op.request(args)
+	if bad != "" {
+		return nil, bad
+	}
+	req.Header.Set("Idempotency-Key", r.Idem())
+	return req, ""
+}
+
+// request builds the declared request with each value in its one place.
+func (op decl) request(args map[string]string) (*http.Request, string) {
 	bad := ""
 	target := slotRE.ReplaceAllStringFunc(op.URL, func(m string) string {
 		n := m[1 : len(m)-1]
-		v := args[n].Value
+		v := args[n]
 		if v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 			bad = DArg + " " + n
 		}
@@ -590,7 +632,7 @@ func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	if len(op.Query) > 0 {
 		q := url.Values{}
 		for p, n := range op.Query {
-			q.Set(p, args[n].Value)
+			q.Set(p, args[n])
 		}
 		sep := "?"
 		if strings.Contains(target, "?") {
@@ -602,15 +644,19 @@ func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	if len(op.Body) > 0 {
 		var b []byte
 		if op.Type == TypeJSON {
-			f := map[string]string{}
+			f := map[string]any{}
 			for field, n := range op.Body {
-				f[field] = args[n].Value
+				if slices.Contains(op.lists, field) {
+					f[field] = []string{args[n]}
+				} else {
+					f[field] = args[n]
+				}
 			}
 			b, _ = json.Marshal(f)
 		} else {
 			f := url.Values{}
 			for field, n := range op.Body {
-				f.Set(field, args[n].Value)
+				f.Set(field, args[n])
 			}
 			b = []byte(f.Encode())
 		}
@@ -626,7 +672,6 @@ func (x *Exit) build(op decl, r kernel.Request) (*http.Request, string) {
 	if op.Type != "" {
 		req.Header.Set("Content-Type", op.Type)
 	}
-	req.Header.Set("Idempotency-Key", r.Idem())
 	return req, ""
 }
 

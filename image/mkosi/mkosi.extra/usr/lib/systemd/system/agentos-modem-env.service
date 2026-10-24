@@ -32,3 +32,6 @@ SystemCallFilter=@system-service
 UMask=0077
 ProtectProc=invisible
 PrivateIPC=yes
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

@@ -43,6 +43,9 @@ var thirdPartyHosts = map[string]bool{
 	// pinned by hash (#1720; Mark's "Patch bwrap" decision). The project's own
 	// repository there is still a project host: projectHost flags github.com/ghbmrk.
 	"github.com": true,
+	// The Gmail API and Google's token endpoint, reached only by an owner who
+	// connects Gmail to the mail clerk (CLK-9, D-150, #2851).
+	"gmail.googleapis.com": true, "oauth2.googleapis.com": true,
 }
 
 // projectHost names a domain the project could run: anything carrying

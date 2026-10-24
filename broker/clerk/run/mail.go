@@ -361,8 +361,12 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (*inbox.Live, MailSet
 	if c.Sealer == nil || c.World == nil {
 		return nil, s, errors.New("run: a mail clerk needs its sealer and its world")
 	}
+	login := sec.Login(slotOf(s), s.login())
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
-		Credential: sec.Login(slotOf(s), s.login()), From: s.Address, Guard: c.Guard}
+		Credential: func(ctx context.Context) (imapsmtp.Login, error) {
+			l, err := login(ctx)
+			return imapsmtp.Login{User: l.User, Secret: l.Secret}, err
+		}, From: s.Address, Guard: c.Guard}
 	if s.StartTLS {
 		cfg.SMTPSec = imapsmtp.StartTLS
 	}

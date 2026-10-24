@@ -81,6 +81,17 @@ NODUMP_SRC = {"usr/lib/systemd/system/agentos-localui.service":
 def nodump(root):
     for rel in NODUMP:
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
+    noexec(root)
+
+
+# The image's noexec mounts (UPD-10): its fstab and /tmp drop-in, copied from mkosi.extra into every
+# tree nodump() makes, since the tree check refuses a tree without them.
+NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noexec.conf")
+
+
+def noexec(root):
+    for rel in NOEXEC_FILES:
+        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
@@ -1895,7 +1906,8 @@ class NoDumpTest(unittest.TestCase):
                 f = write(self.root, rel, text)
                 self.assertIn("swap", self.v())
                 f.unlink()
-        write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults 0 1\n")
+        write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults,noexec 0 1\n"
+              + (MK / "mkosi.extra/etc/fstab").read_text())
         self.assertEqual(check.violations(self.root), [])
 
     def test_no_swap_partition_and_generators_off(self):
@@ -2004,7 +2016,9 @@ class NoDumpTest(unittest.TestCase):
         # (gpt-auto honours rootflags=). finish_image.py checks both on the built disk.
         c = ini(MK / "mkosi.conf")["Content"]
         self.assertIn('SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project', c["Environment"].split("\n"))
-        self.assertIn("rootflags=prjquota", c["KernelCommandLine"].split())
+        flags = [w for w in c["KernelCommandLine"].split() if w.startswith("rootflags=")]
+        self.assertEqual(len(flags), 1)
+        self.assertIn("prjquota", flags[0][len("rootflags="):].split(","))
         self.assertEqual(ini(MK / "mkosi.repart/30-root.conf")["Partition"]["Format"], "ext4")
         entry = (ENTRY % H).replace("rw quiet", "rw quiet rootflags=prjquota")
         sb = bytearray(1024)
@@ -2295,6 +2309,7 @@ class ConfFilesTest(unittest.TestCase):
         # /etc/sysctl.d, or swap). It and etc/machine-id are now read through the chase: a link other
         # than a mask is refused, relative or absolute, before and after its target exists.
         (self.root / "etc/machine-id").unlink()
+        (self.root / "etc/fstab").unlink()
         for rel, body in (("etc/fstab", "/var/tmp/sd /etc/sysctl.d none bind 0 0\n"),
                           ("etc/machine-id", "0123456789abcdef0123456789abcdef\n")):
             for target in ("../var/tmp/" + rel[4:], "/var/tmp/" + rel[4:]):
@@ -2308,11 +2323,15 @@ class ConfFilesTest(unittest.TestCase):
                         t.unlink()
                     finally:
                         f.unlink()
-            # A mask still reads as nothing.
+            # A mask still reads as nothing: for etc/fstab, that is no noexec lines (UPD-10).
             with self.subTest(rel=rel, target="/dev/null"):
                 f = link(self.root, rel, "/dev/null")
-                self.assertEqual(check.violations(self.root), [])
+                self.assertEqual(check.violations(self.root), [] if rel != "etc/fstab" else [
+                    "etc/fstab: no %s line; the box remounts it noexec from etc/fstab (UPD-10)" % t
+                    for t in check.NOEXEC_FSTAB])
                 f.unlink()
+            if rel == "etc/fstab":
+                noexec(self.root)
         write(self.root, "etc/machine-id", "uninitialized\n")
         self.assertEqual(check.violations(self.root), [])
 

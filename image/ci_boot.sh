@@ -174,11 +174,53 @@ EOS
 }
 nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
 NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
-NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service\n')"
+NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")"
+# No code from writable storage (UPD-10): the first boot plants a copy of /usr/bin/true, mode 0755,
+# in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP, which
+# gpt-auto mounts at the empty /boot when there is no XBOOTLDR) and must find every one refused, each
+# but root's directories on its own mount; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
+# finds the same in its private /tmp and /var/tmp, its StateDirectory= and a TemporaryFileSystem= it mounts
+# noexec; and the weekly reboot timer is armed. Passed the same way as the NetworkManager check.
+# systemd 257 leaves every namespace mount out of NoExecPaths=/'s recursive remount (apply_mounts' noexec
+# deny list keeps all entries), so a unit's binds stay noexec only through the host mounts they bind, and
+# its own tmpfs only through its noexec option, which mkosi.finalize requires (build (a) at 9d00e6b ran
+# a planted file in a plain TemporaryFileSystem=).
+noexec_check() {
+	cat <<'EOS'
+say() { echo "agentos-noexec: $*"; }
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
+	f="${d%/}/agentos-implant"
+	if cp /usr/bin/true "$f" 2>/dev/null && chmod 0755 "$f" 2>/dev/null; then
+		# Each but root's own directories must be its own mount (the planted file off root's file
+		# system), or its line would prove only root's noexec.
+		case $d in /|/var/tmp|/etc) own=yes ;; *) mountpoint -q "$d" && [ "$(stat -c %d "$f")" != "$(stat -c %d /)" ] && own=yes || own=no ;; esac
+		if [ "$own" = no ]; then say "FAIL $d is not its own mount"
+		elif "$f" 2>/dev/null; then say "FAIL $d ran"; else say "$d refused"; fi
+	else
+		say "FAIL $d could not plant"
+	fi
+	rm -f "$f"
+done
+systemd-run --quiet --wait --pipe -p NoExecPaths=/ -p ExecPaths=/usr -p PrivateTmp=yes -p StateDirectory=agentos-noexec-probe \
+	-p TemporaryFileSystem=/mnt:noexec /bin/sh -c 'for p in tmp:/tmp var-tmp:/var/tmp state:$STATE_DIRECTORY tmpfs:/mnt; do
+		n=${p%%:*} f=${p#*:}/agentos-implant
+		if cp /usr/bin/true "$f" && chmod 0755 "$f"; then
+			if "$f"; then echo "FAIL unit $n ran"; else echo "unit $n refused"; fi
+		else echo "FAIL unit $n could not plant"; fi
+	done' 2>/dev/null | while read -r l; do say "$l"; done
+systemctl is-active --quiet agentos-reboot.timer && say "reboot timer active" || say "FAIL reboot timer not active"
+say done
+EOS
+}
+NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
+NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
+# One multi-user.target drop-in starts both checks: systemd reads a credential name once, so a
+# second systemd.unit-dropin.multi-user.target would be dropped, and its check never run (#2875).
+CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
-EXTRA="$NM_EXTRA" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+EXTRA="$NM_EXTRA$NX_EXTRA$CHECKS_WANTED" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
@@ -192,6 +234,14 @@ for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every devic
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-nm: FAIL"
+for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
+	has "$W/console.log" "agentos-noexec: $d refused"
+done
+for want in "agentos-noexec: unit tmp refused" "agentos-noexec: unit var-tmp refused" "agentos-noexec: unit state refused" \
+	"agentos-noexec: unit tmpfs refused" "agentos-noexec: reboot timer active" "agentos-noexec: done"; do
+	has "$W/console.log" "$want"
+done
+hasnt "$W/console.log" "agentos-noexec: FAIL"
 # polkitd is 0.106 or later (JS rules), read from the package manifest mkosi wrote beside the image.
 if python3 "$HERE/compare_manifests.py" --polkitd "$(dirname "$IMG")"; then
 	echo "ok   polkitd 0.106 or later"
@@ -474,17 +524,18 @@ for port in 22 80 443 18789 5355; do
 done
 
 # Loader restart: wlsta0 survives, is not duplicated, and stays joined; the access point comes back.
+# The restart must succeed and the loader must log serving anew, or the checks below read the old state.
 idx=$(cat /sys/class/net/wlsta0/ifindex)
 served=$(logged "serving the")
-systemctl restart agentos-ap.service
-until_ok 120 served_again
+MSG="the loader restart succeeded"; check systemctl restart agentos-ap.service
+MSG="the restarted loader logged serving"; check until_ok 120 served_again
 MSG="after the loader restart, the box's access point serves again"; check until_ok 60 ap_up
 MSG="wlsta0 survived the loader restart"; check same_station
 MSG="after the loader restart, one station on the radio"; check [ "$(radio_ifs)" = 2 ]
 MSG="the station stayed joined after the loader restart"; check until_ok 60 joined
 
 # Helper restart: no change to wlsta0 or the connection.
-systemctl restart agentos-netjoin.service
+MSG="the helper restart succeeded"; check systemctl restart agentos-netjoin.service
 sleep 3
 MSG="the helper restart left the station"; check eval 'same_station && joined'
 nopsk
@@ -514,9 +565,10 @@ for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exi
 	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
 	"the loader logged the station allowed" "station joined" "station has a lease" "DNS resolves over the station" \
 	"the box's access point stays up" "station reaches the test network" "probe 22 dropped" "probe 80 dropped" \
-	"probe 443 dropped" "probe 18789 dropped" "probe 5355 dropped" "after the loader restart, the box's access point serves again" \
+	"probe 443 dropped" "probe 18789 dropped" "probe 5355 dropped" "the loader restart succeeded" \
+	"the restarted loader logged serving" "after the loader restart, the box's access point serves again" \
 	"wlsta0 survived the loader restart" "after the loader restart, one station on the radio" \
-	"the station stayed joined after the loader restart" "the helper restart left the station" \
+	"the station stayed joined after the loader restart" "the helper restart succeeded" "the helper restart left the station" \
 	"the PSK is in no journal line" "the PSK is in no file on the drive" "done"; do
 	has "$W/console-hwsim.log" "agentos-hwsim: $want"
 done

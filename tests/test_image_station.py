@@ -166,6 +166,46 @@ class HwsimBootTest(unittest.TestCase):
         for w in wants("console-hwsim.log"):
             self.assertFalse(w.startswith("NOTE"), w)
 
+    def restarts(self, ap_rc=0, fresh=1, nj_rc=0):
+        # The guest's restart section, run with stubbed systemctl and loader log: the box's
+        # access point and station still look up from before the restart (the old state), so
+        # only the restart's own result and a fresh "serving the" line tell a good restart.
+        c = guest("hwsim_check")
+        pre = c[:c.index('MSG="wlsta0 exists"')]
+        sec = c[c.index("# Loader restart:"):c.index("nopsk\n", c.index("# Loader restart:"))]
+        stubs = """
+SERVED=3
+sleep() { :; }
+cat() { echo 7; }
+logged() { echo "$SERVED"; }
+ap_up() { :; }
+joined() { :; }
+radio_ifs() { echo 2; }
+systemctl() {
+	case "$1 $2" in
+	"restart agentos-ap.service") [ %d = 1 ] && SERVED=$((SERVED + 1)); return %d ;;
+	"restart agentos-netjoin.service") return %d ;;
+	esac
+}
+""" % (fresh, ap_rc, nj_rc)
+        out = subprocess.run(["bash"], input=pre + stubs + sec, capture_output=True, text=True).stdout
+        return [l[len("agentos-hwsim: "):] for l in out.splitlines()]
+
+    def test_a_failed_restart_never_reads_as_a_pass(self):
+        # The checks after a restart pass on the old state, so a rejected loader restart, a
+        # loader that never logs serving again, or a rejected helper restart must each FAIL.
+        good = self.restarts()
+        self.assertEqual([l for l in good if l.startswith("FAIL")], [])
+        for w in ("the loader restart succeeded", "the restarted loader logged serving",
+                  "after the loader restart, the box's access point serves again",
+                  "the helper restart succeeded", "the helper restart left the station"):
+            self.assertIn(w, good)
+            self.assertIn(w, wants("console-hwsim.log"))
+        for kw, want in ((dict(ap_rc=1, fresh=0), "FAIL the loader restart succeeded"),
+                         (dict(fresh=0), "FAIL the restarted loader logged serving"),
+                         (dict(nj_rc=1), "FAIL the helper restart succeeded")):
+            self.assertIn(want, self.restarts(**kw), kw)
+
     def test_assumptions_record_the_hwsim_boot(self):
         with open(os.path.join(ROOT, "image", "ASSUMPTIONS.md")) as f:
             a = f.read()

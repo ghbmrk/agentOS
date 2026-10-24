@@ -76,6 +76,9 @@ IPAddressAllow=10.42.0.0/24
 TemporaryFileSystem=/var/lib/agentos:ro
 # The claim and the card step pass codes through this process (IMG-nodump).
 LimitCORE=0
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
 
 [Install]
 WantedBy=multi-user.target
