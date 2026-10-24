@@ -9,8 +9,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/claim"
 )
 
-// REQ: ARC-1, CH-7
-
 // The owned marker is made once, empty and root's 0600, and a path already
 // there (a box set up before the marker, or one the loader replaced) is
 // left as it is rather than failing agentosd's start.
