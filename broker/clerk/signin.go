@@ -63,6 +63,7 @@ const (
 	DNoSignIn   = "nosignin"   // no sign-in is waiting, or it ran out
 	DNotOurs    = "notours"    // the pasted address is not the declared loopback one
 	DState      = "state"      // the pasted state is not this sign-in's
+	DUse        = "use"        // the confirmed use is not this sign-in's; it ended
 	DRefused    = "refused"    // the owner said no on the consent page
 	DScope      = "scope"      // the grant is not exactly the asked scope; it was revoked
 	DNoGrant    = "nogrant"    // the provider gave no refresh token
@@ -78,11 +79,10 @@ const signInLife = 15 * 60 * 1000
 
 // SignIn is the account clerk's own side of an installed-app sign-in: PKCE
 // S256 (RFC 7636), a state value, and the code redeemed by the clerk itself
-// through its guarded transport. Only the consent address leaves it, and
-// only the pasted address comes in; the verifier, the code's answer, the
-// tokens and the client secret stay in this process (D-154: the owner page
-// relays one frame each way). One sign-in waits at a time; a new Begin
-// replaces it.
+// through its guarded transport. Only the consent address leaves it, and only
+// the paste and its use come in; the verifier, the code's answer, the tokens
+// and the client secret stay here (D-154: one frame each way). One sign-in
+// waits at a time; a new Begin replaces it.
 type SignIn struct {
 	d       SignInDeclaration
 	secrets *Secrets
@@ -199,12 +199,11 @@ func random() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// Finish takes the address the owner pasted, redeems its code and seals the
-// grant, with the registration's client, in the account's slot. A paste of
-// the declared loopback address ends the waiting sign-in whatever it holds,
-// so a code or state is never tried twice. It returns "signedin <use>" or a
-// typed detail; nothing it returns carries a value.
-func (s *SignIn) Finish(ctx context.Context, pasted string) string {
+// Finish takes the paste and the use the owner confirmed, redeems the code
+// and seals the grant with the registration's client: "signedin <use>", or a
+// typed detail with no value. Any loopback paste ends the waiting sign-in, so
+// nothing is tried twice; a use not its own redeems nothing (CLK-9).
+func (s *SignIn) Finish(ctx context.Context, use, pasted string) string {
 	u, err := url.Parse(strings.TrimSpace(pasted))
 	want, _ := url.Parse(s.d.Redirect)
 	if err != nil || u.Scheme != want.Scheme || u.Host != want.Host || u.Path != want.Path || u.User != nil {
@@ -214,14 +213,15 @@ func (s *SignIn) Finish(ctx context.Context, pasted string) string {
 	p := s.pending
 	s.pending = nil
 	s.mu.Unlock()
-	if p == nil || s.d.Clock.Now() > p.until {
-		return DNoSignIn
-	}
 	q := u.Query()
-	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(p.state)) != 1 {
+	switch {
+	case p == nil || s.d.Clock.Now() > p.until:
+		return DNoSignIn
+	case use != p.use:
+		return DUse
+	case subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(p.state)) != 1:
 		return DState
-	}
-	if q.Get("error") != "" {
+	case q.Get("error") != "":
 		return DRefused
 	}
 	code := q.Get("code")
@@ -313,10 +313,9 @@ func (s *SignIn) revoke(ctx context.Context, tokens ...string) int {
 }
 
 // Revoke is the box cutting itself off: it revokes the account's grant at
-// the provider and removes it from the slot. A grant the provider no longer
-// knows (400, RFC 7009 section 2.2) is dead already and is removed too; any
-// other refusal keeps it, so the owner can try again or revoke it in their
-// account, and says "norevoke".
+// the provider and empties the slot. A grant the provider no longer knows
+// (400, RFC 7009 section 2.2) is dead already and goes too; any other refusal
+// keeps it and says "norevoke", so the owner can retry or revoke it themselves.
 func (s *SignIn) Revoke(ctx context.Context) string {
 	var refresh string
 	if err := s.secrets.with(s.d.Slot, KindGrant, func(g []byte) error {
