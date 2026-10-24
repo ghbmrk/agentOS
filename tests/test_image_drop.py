@@ -87,6 +87,17 @@ class NeededTest(unittest.TestCase):
         self.put("usr/bin/odd", elf(["x.so"], strtab_at=0x10))
         self.assertIn("unreadable dynamic section", drop.needed_violations(str(self.root), set())[0])
 
+    def test_a_removed_unit_loses_its_enablement_link(self):
+        unit = self.put("usr/lib/systemd/system/dpkg-db-backup.timer", b"[Timer]\n")
+        wants = self.root / "etc/systemd/system/timers.target.wants"
+        wants.mkdir(parents=True)
+        os.symlink("/usr/lib/systemd/system/dpkg-db-backup.timer", wants / "dpkg-db-backup.timer")
+        os.symlink("/usr/lib/systemd/system/other.timer", wants / "other.timer")
+        with mock.patch.object(drop, "FILES", ("usr/lib/systemd/system/dpkg-db-backup.timer",)):
+            self.assertEqual(drop.remove_files(str(self.root)), [])
+        self.assertFalse(unit.exists() or os.path.lexists(wants / "dpkg-db-backup.timer"))
+        self.assertTrue(os.path.lexists(wants / "other.timer"))
+
     def test_files_go_and_a_stale_pattern_fails(self):
         a = self.put("usr/bin/nmtui", b"x")
         b = self.put("usr/bin/nmtui-edit", b"x")
@@ -112,8 +123,84 @@ class NeededTest(unittest.TestCase):
             self.assertEqual(drop.main(str(self.root)), 1)
         self.assertEqual(calls[0][:3], ["mkosi-chroot", "dpkg-query", "-L"])
         self.assertEqual(calls[1][:4], ["mkosi-chroot", "dpkg", "--purge", "--force-depends"])
+        self.assertEqual(calls[2][:5], ["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential"])
         self.assertEqual(set(calls[0][3:]), set(drop.DROP))
-        self.assertEqual(set(calls[1][4:]), set(drop.DROP))
+        self.assertEqual(set(calls[1][4:]), set(drop.DROP) - set(drop.ESSENTIAL))
+        self.assertEqual(calls[2][5:], list(drop.ESSENTIAL))
+
+    def test_main_fails_on_a_script_a_dropped_program_runs(self):
+        def run(argv, **kw):
+            return mock.Mock(stdout="/usr/bin/perl\n/bin/tar\n")
+
+        self.put("usr/sbin/odd", b"#!/usr/bin/perl -w\nprint 1;\n").chmod(0o755)
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "FILES", ()), \
+                mock.patch.object(drop, "PERL_TOOLS", {}):
+            self.assertEqual(drop.main(str(self.root)), 1)
+            (self.root / "usr/sbin/odd").unlink()
+            self.assertEqual(drop.main(str(self.root)), 0)
+
+    def test_essential_packages_are_dropped(self):
+        self.assertTrue(set(drop.ESSENTIAL) <= set(drop.DROP))
+        self.assertEqual({drop.DROP[p][0] for p in ("tar", "diffutils", "perl-base")}, {"tar", "diffutils", "perl"})
+
+
+class InterpreterTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def put(self, rel, data, mode=0o755):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        p.chmod(mode)
+
+    def test_reads_the_interpreter(self):
+        self.assertEqual(drop.interpreter(b"#!/usr/bin/perl -w\n"), "/usr/bin/perl")
+        self.assertEqual(drop.interpreter(b"#! /bin/sh\n"), "/usr/bin/sh")
+        self.assertEqual(drop.interpreter(b"#!/usr/bin/env -S LC_ALL=C perl -T\n"), "perl")
+        self.assertEqual(drop.interpreter(b"#!/bin/env\n"), "")
+        self.assertIsNone(drop.interpreter(b"\x7fELF"))
+
+    def test_programs_are_usr_paths_under_bin(self):
+        listed = ["/.", "/bin/tar", "/usr/sbin/rmt-tar", "/usr/lib/mime/packages/tar", "/usr/share/doc/tar"]
+        self.assertEqual(drop.programs(listed), {"/usr/bin/tar", "/usr/sbin/rmt-tar"})
+
+    def test_a_script_a_dropped_program_runs_fails(self):
+        self.put("usr/bin/a", b"#!/usr/bin/perl\n")
+        self.put("usr/sbin/b", b"#!/usr/bin/env perl\n")
+        self.put("usr/lib/c", b"#!/bin/perl\n")
+        self.put("usr/bin/ok", b"#!/bin/sh\nperl -e 1\n")
+        self.put("usr/share/d", b"no shebang perl")
+        self.put("usr/share/perl5/M.pm", b"#!/usr/bin/perl\n", mode=0o644)
+        os.symlink("a", self.root / "usr/bin/link")
+        self.assertEqual(drop.interpreter_violations(str(self.root), {"/usr/bin/perl"}), [
+            "usr/bin/a: runs /usr/bin/perl, which a dropped package shipped",
+            "usr/lib/c: runs /usr/bin/perl, which a dropped package shipped",
+            "usr/sbin/b: runs perl, which a dropped package shipped",
+        ])
+        self.assertEqual(drop.interpreter_violations(str(self.root), {"/usr/bin/tar"}), [])
+
+    def test_an_allowed_package_keeps_its_scripts_and_a_stale_one_fails(self):
+        self.put("usr/sbin/adduser", b"#! /usr/bin/perl -T\n")
+        self.put("usr/bin/linux-version", b"#!/usr/bin/perl\n")
+        info = self.root / "var/lib/dpkg/info"
+        info.mkdir(parents=True)
+        (info / "adduser.list").write_text("/.\n/usr\n/usr/sbin/adduser\n")
+        (info / "linux-base.list").write_text("/bin/linux-version\n")
+        self.assertEqual(drop.interpreter_violations(str(self.root), {"/usr/bin/perl"}, {"adduser": "", "linux-base": ""}), [])
+        self.assertEqual(drop.interpreter_violations(str(self.root), {"/usr/bin/perl"}, {"adduser": "", "debconf": ""}), [
+            "usr/bin/linux-version: runs /usr/bin/perl, which a dropped package shipped",
+            "debconf: owns no script a dropped program runs; drop.py's PERL_TOOLS is stale",
+        ])
+
+    def test_owners_reads_dpkg_lists(self):
+        info = self.root / "var/lib/dpkg/info"
+        info.mkdir(parents=True)
+        (info / "libc6:amd64.list").write_text("/usr/lib/x86_64-linux-gnu/libc.so.6\n")
+        (info / "tar.list").write_text("/bin/tar\n")
+        self.assertEqual(drop.owners(str(self.root)), {"/usr/lib/x86_64-linux-gnu/libc.so.6": "libc6", "/usr/bin/tar": "tar"})
 
 
 class WiringTest(unittest.TestCase):

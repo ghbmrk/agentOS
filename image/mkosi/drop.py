@@ -6,7 +6,8 @@ known-vulnerability scan (EVL-5), so the scan and the package manifest see the p
 package below is a hard dependency of one the box keeps, so apt would remove the keeper with it;
 dpkg purges it with --force-depends instead, and FILES removes what used it. The NEEDED check then
 fails the build if any ELF file under usr still names a library a dropped package shipped: a forced
-purge must not leave a binary that cannot load.
+purge must not leave a binary that cannot load. The #! check does the same for an executable script
+whose interpreter a dropped package shipped (perl), bar the package tools in PERL_TOOLS.
 
 Source names are Debian's (what the advisories and assurance/vulncheck.json name); a dropped
 source has no image record there (tests/test_image_drop.py)."""
@@ -28,14 +29,37 @@ DROP = {
     "initramfs-tools-bin": ("initramfs-tools", "as initramfs-tools"),
     "dracut-install": ("dracut", "only initramfs-tools-core needs it"),
     "cpio": ("cpio", "only initramfs-tools-core needs it"),
+    "tar": ("tar", "Essential, but nothing on the box runs it: build.sh and mkosi unpack on the build host"),
+    "diffutils": ("diffutils", "Essential, but nothing on the box runs diff or cmp"),
+    "perl-base": ("perl", "Essential, but only package maintainer scripts run perl, and the box runs no package manager"),
 }
+# Essential packages: dpkg removes them only with --force-remove-essential, in a second call after
+# the rest, so no other package's removal script finds perl or diff already gone.
+ESSENTIAL = ("tar", "diffutils", "perl-base")
 # Files a kept package ships that link a dropped one. Each pattern must match: a stale one fails.
 FILES = (
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-bluetooth.so",
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-wwan.so",
     "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-wwan.so",
     "usr/bin/nmtui*",
+    # dpkg's daily database backup runs tar and cmp; the box's dpkg database never changes.
+    "usr/lib/systemd/system/dpkg-db-backup.service",
+    "usr/lib/systemd/system/dpkg-db-backup.timer",
+    "usr/libexec/dpkg/dpkg-db-backup",
 )
+# Kept packages whose perl scripts stay, unrunnable: package and admin tools that only maintainer
+# scripts or a person at a shell would start, and the box runs neither. The #! check refuses a perl
+# script from any other package, and a package here that ships none is stale.
+PERL_TOOLS = {
+    "adduser": "adduser, deluser",
+    "debconf": "debconf and its frontends, run by maintainer scripts",
+    "init-system-helpers": "deb-systemd-helper, deb-systemd-invoke, update-rc.d (maintainer scripts)",
+    "libpam-runtime": "pam-auth-update, pam_getenv",
+    "linux-base": "the kernel package's install hooks",
+    "openssl": "c_rehash, CA.pl, tsget.pl",
+    "sgml-base": "SGML catalog tools (maintainer scripts)",
+    "xml-core": "XML catalog tools (maintainer scripts)",
+}
 ET_EXEC, ET_DYN, EM_X86_64 = 2, 3, 62
 PT_LOAD, PT_DYNAMIC = 1, 2
 DT_NEEDED, DT_STRTAB = 1, 5
@@ -120,23 +144,99 @@ def shipped(paths):
     return {os.path.basename(p) for p in paths if ".so" in os.path.basename(p)}
 
 
+def usr_path(p):
+    """P with the merged-/usr /bin and /sbin spelled under /usr."""
+    return "/usr" + p if p.startswith(("/bin/", "/sbin/")) else p
+
+
+def programs(paths):
+    """The programs among the paths dpkg-query -L lists, as /usr paths."""
+    return {usr_path(p) for p in paths if os.path.dirname(usr_path(p)) in ("/usr/bin", "/usr/sbin")}
+
+
+def interpreter(line):
+    """The program a #! line runs: its interpreter, or the command /usr/bin/env runs. None for a
+    line that is not #!."""
+    if not line.startswith(b"#!"):
+        return None
+    words = line[2:].decode(errors="surrogateescape").split()
+    if not words:
+        return ""
+    if usr_path(words[0]) == "/usr/bin/env":
+        args = [w for w in words[1:] if not w.startswith("-") and "=" not in w]
+        return args[0] if args else ""
+    return usr_path(words[0])
+
+
+def owners(root):
+    """Each installed file's package, from dpkg's file lists in the tree: {"/usr/bin/x": "pkg"}."""
+    out = {}
+    for lst in sorted(glob.glob(os.path.join(root, "var/lib/dpkg/info/*.list"))):
+        pkg = os.path.basename(lst)[:-len(".list")].split(":")[0]
+        with open(lst, encoding="utf-8", errors="surrogateescape") as f:
+            for line in f:
+                out[usr_path(line.rstrip("\n"))] = pkg
+    return out
+
+
+def interpreter_violations(root, gone, allowed=(), top="usr"):
+    """One line per executable script under TOP whose #! runs a program in GONE, the programs the
+    dropped packages shipped, unless a package in ALLOWED owns it: a forced purge must not leave a
+    script the box could start and that cannot run. A bare name (from env) matches a dropped
+    program of that name. Also one line per package in ALLOWED that owns no such script."""
+    names = {os.path.basename(g) for g in gone}
+    owner = owners(root)
+    out, used = [], set()
+    for d, dirs, files in os.walk(os.path.join(root, top)):
+        dirs.sort()
+        for n in sorted(files):
+            p = os.path.join(d, n)
+            mode = os.lstat(p).st_mode
+            if not stat.S_ISREG(mode) or not mode & 0o111:
+                continue
+            with open(p, "rb") as f:
+                prog = interpreter(f.readline(256))
+            if not prog or not (prog in gone or ("/" not in prog and prog in names)):
+                continue
+            rel = os.path.relpath(p, root)
+            pkg = owner.get("/" + rel)
+            if pkg in allowed:
+                used.add(pkg)
+            else:
+                out.append("%s: runs %s, which a dropped package shipped" % (rel, prog))
+    out += ["%s: owns no script a dropped program runs; drop.py's PERL_TOOLS is stale" % p
+            for p in sorted(set(allowed) - used)]
+    return out
+
+
 def remove_files(root):
-    """Delete FILES from the tree; one line per pattern that matched nothing."""
-    out = []
+    """Delete FILES from the tree, and the links under etc/systemd that enabled a unit among them;
+    one line per pattern that matched nothing."""
+    out, units = [], set()
     for pattern in FILES:
         hits = sorted(glob.glob(os.path.join(root, pattern)))
         if not hits:
             out.append("%s: matches nothing; drop.py's FILES is stale" % pattern)
         for h in hits:
             os.unlink(h)
+            if "/systemd/system/" in h:
+                units.add(os.path.basename(h))
+    for d, _, files in os.walk(os.path.join(root, "etc/systemd")):
+        for n in files:
+            if n in units and os.path.islink(os.path.join(d, n)):
+                os.unlink(os.path.join(d, n))
     return out
 
 
 def main(root):
     listed = subprocess.run(["mkosi-chroot", "dpkg-query", "-L", *DROP], check=True,
                             stdout=subprocess.PIPE, text=True).stdout.splitlines()
-    subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", *DROP], check=True)
-    problems = remove_files(root) + needed_violations(root, shipped(listed))
+    rest = [p for p in DROP if p not in ESSENTIAL]
+    subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", *rest], check=True)
+    subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
+                    *ESSENTIAL], check=True)
+    problems = (remove_files(root) + needed_violations(root, shipped(listed))
+                + interpreter_violations(root, programs(listed), PERL_TOOLS))
     for p in problems:
         print("drop.py: " + p, file=sys.stderr)
     return 1 if problems else 0
