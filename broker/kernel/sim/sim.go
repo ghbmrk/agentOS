@@ -13,11 +13,22 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"strings"
+	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
+
+// core.txt grants this package kernel.* and clerk.* because only tests
+// link it. The guard holds that wherever the files are reached from (a
+// symlink, a vendored copy, a build tag): a binary go test did not build
+// stops here (CO7).
+func init() {
+	if !testing.Testing() {
+		panic("kernel/sim is a test fixture: linked into a binary go test did not build")
+	}
+}
 
 // Mutant plants one defect so a test can show the sweep catches it.
 type Mutant string
