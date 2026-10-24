@@ -235,7 +235,9 @@ func (s *Server) accountsPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		detail := s.cfg.Accounts.Finish(ctx, d.ID, pasted)
-		if use, ok := strings.CutPrefix(detail, dSignedIn+" "); ok && d.use(use) != nil {
+		if use, ok := strings.CutPrefix(detail, dSignedIn+" "); ok {
+			// A use the declaration lacks is still a sealed grant: say it
+			// connected rather than that nothing did.
 			v.Step, v.Use, v.Done = "done", d.use(use), d.Name+" is connected."
 			break
 		}
@@ -276,7 +278,8 @@ const (
 // connectText is the owner's wording for Finish's detail. Each names a
 // step that works (CH-12) and none carries a value.
 func connectText(detail string) string {
-	switch strings.Fields(detail + " ")[0] {
+	first, _, _ := strings.Cut(detail, " ")
+	switch first {
 	case dNotOurs:
 		return "That isn't the address your phone landed on. Copy the whole address from the page that didn't load (it starts with http://127.0.0.1), then start again."
 	case dNoSignIn:
@@ -330,7 +333,7 @@ func init() {
 <form method="post" action="/accounts/{{$a.ID}}"><input type="hidden" name="step" value="connect"><input type="hidden" name="pasted" value="{{.Pasted}}"><button>Connect</button></form>
 <p><a href="/accounts/{{$a.ID}}">Cancel</a></p>
 {{else if eq .Step "done"}}
-<p class="ok">{{.Done}} {{.Use.Name}}: I can {{.Use.Text}}.</p>
+<p class="ok">{{.Done}}{{with .Use}} {{.Name}}: I can {{.Text}}.{{end}}</p>
 <p><a href="/home">Done</a></p>
 {{else}}
 <p>You register your own {{$a.Provider}} client once, by hand, on your phone or computer. Each link opens {{$a.Provider}}'s console there.</p>

@@ -208,13 +208,13 @@ func TestConnectTextsForEachDetail(t *testing.T) {
 	r.signIn()
 	const landed = "http://127.0.0.1:8521/agentos?state=SECRETSTATE&code=SECRETCODE"
 	for _, d := range []string{clerk.DNoSignIn, clerk.DNotOurs, clerk.DState, clerk.DRefused, clerk.DScope, clerk.DNoGrant,
-		clerk.DExchange, clerk.DExchange + " http 400", clerk.DCredential, "something new"} {
+		clerk.DExchange, clerk.DExchange + " http 400", clerk.DCredential, "something new", "", " "} {
 		fa.finish = d
 		p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "pasted": {landed}}).Body.String())
 		if !strings.Contains(p, `class="err"`) || strings.Contains(p, "SECRET") || strings.Contains(p, "Gmail is connected") {
 			t.Errorf("%q:\n%s", d, p)
 		}
-		if d != "something new" && d != clerk.DCredential && connectText(d) == connectText("something new") {
+		if strings.TrimSpace(d) != "" && d != "something new" && d != clerk.DCredential && connectText(d) == connectText("something new") {
 			t.Errorf("%q has no text of its own", d)
 		}
 	}
@@ -285,5 +285,17 @@ func TestConnectDeclarationsAreChecked(t *testing.T) {
 		if _, err := New(c); err == nil {
 			t.Errorf("accepted %+v", c.Connect)
 		}
+	}
+}
+
+// A grant the clerk sealed under a use this page does not list still says
+// it connected, never that nothing did (CH-12).
+func TestConnectSaysConnectedForAnUnlistedUse(t *testing.T) {
+	r, fa := connectRig(t)
+	r.signIn()
+	fa.finish = "signedin newuse"
+	p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "pasted": {"http://127.0.0.1:8521/agentos?code=c"}}).Body.String())
+	if !strings.Contains(p, "Gmail is connected.") || strings.Contains(p, `class="err"`) {
+		t.Fatalf("unlisted use:\n%s", p)
 	}
 }
