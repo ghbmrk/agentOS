@@ -355,24 +355,56 @@ class ImageTest(unittest.TestCase):
         with self.assertRaises(vulncheck.ScanError):
             vulncheck.image_archive(d, d / "a.tar")
 
-    def test_status_must_list_the_manifests_packages(self):
-        # Security release finding on #2917: the scanned list is tied to the manifest the
-        # reproduce job compares across runners.
-        self.assertEqual(vulncheck.manifest_problems(vulncheck.FIXTURE / "image"), [])
+    def manifest_dir(self, edit):
+        """A copy of the fixture's status file beside its manifest after EDIT(packages)."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         d = pathlib.Path(tmp.name)
-        status = (vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_text()
-        (d / vulncheck.DPKG_STATUS).write_text(status)
-        self.assertEqual(len(vulncheck.manifest_problems(d)), 1)  # no manifest
+        shutil.copy(vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS, d)
         m = json.loads((vulncheck.FIXTURE / "image" / "agentos_control.manifest").read_text())
-        m["packages"] = m["packages"][1:]
+        edit(m["packages"])
         (d / "a.manifest").write_text(json.dumps(m))
-        probs = vulncheck.manifest_problems(d)
-        self.assertEqual(len(probs), 1)
-        self.assertIn("agentos-fixed", probs[0])
+        return d
+
+    def test_status_must_list_the_manifests_packages(self):
+        # Security release finding on #2917: the scanned list is tied to the manifest the
+        # reproduce job compares across runners. Combined review 6376479024 (#2930): equality is
+        # pinned in both directions and by version, not only one subset.
+        self.assertEqual(vulncheck.manifest_problems(vulncheck.FIXTURE / "image"), [])
+        status = (vulncheck.FIXTURE / "image" / vulncheck.DPKG_STATUS).read_text()
         self.assertEqual(vulncheck.dpkg_installed(status),
                          {("libplant1", "1.0-1+b1"), ("agentos-fixed", "1.0-2"), ("agentos-nofix", "2.0-1")})
+        d = self.manifest_dir(lambda pkgs: None)
+        (d / "a.manifest").unlink()
+        self.assertEqual(len(vulncheck.manifest_problems(d)), 1)  # no manifest
+        extra = {"type": "deb", "name": "agentos-unscanned", "version": "1.0-1", "architecture": "all"}
+        cases = {
+            # shipped but not scanned: the status file under-reports
+            "agentos-unscanned": lambda pkgs: pkgs.append(extra),
+            # scanned but not in the reproduced manifest: the status file over-reports
+            "agentos-fixed": lambda pkgs: pkgs.pop(0),
+            # same package, another version
+            "9.9-9": lambda pkgs: pkgs[1].update(version="9.9-9"),
+        }
+        for want, edit in cases.items():
+            with self.subTest(want):
+                probs = vulncheck.manifest_problems(self.manifest_dir(edit))
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn(want, probs[0])
+
+    def test_the_image_scan_reports_a_manifest_mismatch(self):
+        # Combined review 6376479024: scan_image must apply manifest_problems, not only have it.
+        d = self.manifest_dir(lambda pkgs: pkgs.pop(0))
+        saved = vulncheck.run_image
+        vulncheck.run_image = lambda src, env=None, offline=False: ([], [])
+        try:
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
+            self.assertEqual(probs, vulncheck.manifest_problems(d))
+            self.assertEqual(len(probs), 1)
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, vulncheck.FIXTURE / "image")
+            self.assertEqual(probs, [])
+        finally:
+            vulncheck.run_image = saved
 
     def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},

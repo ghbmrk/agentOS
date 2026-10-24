@@ -1,12 +1,14 @@
 name: trusted-base
 # KRN-2m (#2849): measures the trusted base on every PR (own lines, dependency lines, parsers;
-# SPEC KRN-2) against the PR's merge base, shows the table in this check's job summary, and
-# fails a PR that grows any of them without a `Trusted-base: <key> -- <reason>` line in its
-# body. It runs on pull_request_target, so the workflow and tools/trusted_base.py are the
-# base branch's copies: a PR cannot loosen the check it is measured by. The head and the
-# merge base are checked out as worktrees and only listed by `go list` (vendored, offline,
-# GOTOOLCHAIN=local); no PR code is built or run. `edited` reruns it when the body changes.
-# tests/test_trusted_base.py pins every line below.
+# SPEC KRN-2) and shows the table in this check's job summary; it fails a PR that grows any of
+# them without a `Trusted-base: <key> -- <reason>` line in its body. It runs on
+# pull_request_target, so the workflow and tools/trusted_base.py are the base branch's copies:
+# a PR cannot loosen the check it is measured by. The base side is base.sha; the head side is
+# the PR head merged onto it with `git merge-tree`, so the measure is what lands and a branch
+# cannot keep an older, larger budget (KRN-2cap-harden, #2945); a merge that conflicts fails
+# the step. Both trees are checked out as worktrees and only listed by `go list` (vendored,
+# offline, GOTOOLCHAIN=local); no PR code is built or run. `edited` reruns it when the body
+# changes. tests/test_trusted_base.py pins every line below.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -23,7 +25,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 0 # the merge base with the PR head
+          fetch-depth: 0 # history for the merge with the PR head
           persist-credentials: false
       - name: Go version (the base's broker/go.mod toolchain line)
         id: go
@@ -43,8 +45,10 @@ jobs:
         run: |
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"
           git cat-file -e "$HEAD_SHA^{commit}"
-          MERGE_BASE=$(git merge-base HEAD "$HEAD_SHA")
-          git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/base" "$MERGE_BASE"
-          git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/head" "$HEAD_SHA"
+          # Exit 1 on a conflict, which ends the step (bash -e): no merge, no pass.
+          MERGED=$(git merge-tree --write-tree --no-messages HEAD "$HEAD_SHA")
+          MERGE=$(git -c user.name=trusted-base -c user.email=trusted-base@invalid commit-tree -p HEAD -p "$HEAD_SHA" -m merge "$MERGED")
+          git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/base" HEAD
+          git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/head" "$MERGE"
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/body.txt"
-          python3 -I tools/trusted_base.py check --base-tree "$RUNNER_TEMP/base" --head-tree "$RUNNER_TEMP/head" --body "$RUNNER_TEMP/body.txt" --markdown "$GITHUB_STEP_SUMMARY"
+          python3 -I tools/trusted_base.py check --base-tree "$RUNNER_TEMP/base" --head-tree "$RUNNER_TEMP/head" --body "$RUNNER_TEMP/body.txt" --pr "$PR_NUMBER" --markdown "$GITHUB_STEP_SUMMARY"

@@ -198,15 +198,16 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 			continue
 		}
 		var n, sum int64
+		ok := true // false once sum leaves int64: it then exceeds every cap
 		for _, u := range c.Ledger.Uses(cp.Scope) {
 			switch cp.Kind {
 			case KSpendTask:
-				if u.Task == s.Task {
-					sum += u.Amount
+				if u.Task == s.Task && ok {
+					sum, ok = add(sum, u.Amount)
 				}
 			case KSpendDay:
-				if u.At > c.Now-DayMS {
-					sum += u.Amount
+				if u.At > c.Now-DayMS && ok {
+					sum, ok = add(sum, u.Amount)
 				}
 			case KRateDay:
 				if u.At > c.Now-DayMS {
@@ -220,13 +221,16 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 				n++
 			}
 		}
+		if ok {
+			sum, ok = add(sum, s.Amount)
+		}
 		switch cp.Kind {
 		case KSpendTask:
-			if sum+s.Amount > cp.N {
+			if !ok || sum > cp.N {
 				return refuse(RSpendTask, "cap %d", cp.N)
 			}
 		case KSpendDay:
-			if sum+s.Amount > cp.N {
+			if !ok || sum > cp.N {
 				return refuse(RSpendDay, "cap %d", cp.N)
 			}
 		case KRateDay, KRateRecipient:
@@ -240,6 +244,13 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 		}
 	}
 	return nil
+}
+
+// add is a+b and whether it stayed in int64. A spend sum that wrapped
+// would pass any cap, so caps refuse one that did not (Defect: KEY).
+func add(a, b int64) (int64, bool) {
+	s := a + b
+	return s, (s > a) == (b > 0)
 }
 
 // Spend is the check a metered call (a model call, a paid API call) makes

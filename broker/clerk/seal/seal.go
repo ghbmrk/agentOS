@@ -545,6 +545,51 @@ func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	return err == nil && pub.Equal(key)
 }
 
+// ReadID returns the ID of the store at path without unlocking it. It is
+// the drive's word, not authenticated: use it only to find what is keyed
+// by the ID off the drive (the TPM pins), which then checks it.
+func ReadID(path string) ([]byte, error) {
+	b, err := readFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := parse(b)
+	if err != nil {
+		return nil, err
+	}
+	return f.ID, nil
+}
+
+// Pinned is the TPM factor for the store at path on this PC: its policy key
+// and anchor come from the store's pins index on this TPM (tpmseal.ReadPins,
+// STO-2a-k), never from the drive. The ID that finds the index is the
+// drive's, but a changed ID finds no pins or another store's, whose anchor
+// this store's key does not derive, so Unlock still refuses. A TPM with no
+// pins for the store is tpmseal.ErrNoPins: the unlock fails closed, and the
+// owner's passphrase or recovery slot is the way in.
+func Pinned(t transport.TPM, path string) (TPM, error) {
+	id, err := ReadID(path)
+	if err != nil {
+		return TPM{}, err
+	}
+	srk, err := tpmseal.Identity(t)
+	if err != nil {
+		return TPM{}, err
+	}
+	p, err := tpmseal.ReadPins(t, srk, id)
+	if err != nil {
+		return TPM{}, err
+	}
+	return TPM{TPM: t, PolicyKey: p.PolicyKey, Anchor: p.Anchor}, nil
+}
+
+// ID is the store's ID, which the file's MAC covers.
+func (s *Store) ID() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bytes.Clone(s.f.ID)
+}
+
 // AnchorLen is the length of a store's anchor.
 const AnchorLen = 32
 
@@ -631,6 +676,9 @@ type SlotInfo struct {
 	ID   string
 	Kind Kind
 	Host string // a tpm slot's PC, if named
+	// PolicyKey is the key a tpm slot was sealed under, so a rotation can
+	// tell the old key's slots from the new one's.
+	PolicyKey *ecdsa.PublicKey
 }
 
 // Slots lists the store's slots.
@@ -642,6 +690,7 @@ func (s *Store) Slots() []SlotInfo {
 		in := SlotInfo{ID: sl.ID, Kind: sl.Kind}
 		if sl.Sealed != nil {
 			in.Host = sl.Sealed.Host
+			in.PolicyKey, _ = sl.Sealed.PolicyPublicKey()
 		}
 		out = append(out, in)
 	}
