@@ -1,6 +1,6 @@
 package imapconn
 
-// REQ: CRED-1, CRED-8
+// REQ: KRN-2, CLK-1
 
 import (
 	"bufio"

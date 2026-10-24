@@ -1,6 +1,6 @@
 package imapsmtp
 
-// REQ: KRN-2, CLK-1, CLK-3, A5, CRED-1
+// REQ: KRN-2, CLK-1, CLK-3, A5
 
 import (
 	"bufio"
