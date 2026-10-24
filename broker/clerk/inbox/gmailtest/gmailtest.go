@@ -76,6 +76,7 @@ type Server struct {
 	codes   map[string]consent
 	wider   string
 	revoked []string
+	revokes int // revocation requests, whatever their answer
 }
 
 type consent struct{ challenge, redirect, scope string }
@@ -171,6 +172,15 @@ func (s *Server) Revoked() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.revoked)
+}
+
+// Revokes counts the revocation requests, including those answered 400:
+// every grant the fake issues shares Refresh, so a second grant's
+// revocation shows here and not in Revoked.
+func (s *Server) Revokes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revokes
 }
 
 // Roots trusts the fake's certificate.
@@ -638,6 +648,7 @@ func (s *Server) serveCode(w http.ResponseWriter, r *http.Request) {
 // serveRevoke revokes a token (RFC 7009): the refresh token kills the grant
 // and its access token; an unknown token answers 400, as Google's does.
 func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
+	s.revokes++
 	t := ""
 	if r.ParseForm() == nil {
 		t = r.Form.Get("token")
