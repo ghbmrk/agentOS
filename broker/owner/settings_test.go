@@ -135,7 +135,7 @@ func TestOWN4AckDelaySetting(t *testing.T) {
 	}
 }
 
-// REQ: CH-15, QH-6
+// REQ: CH-15
 // URGENT APPROVAL also paces the agent's questions to the owner, which go
 // in the approval class (D-129, O22), so every settings text that names
 // the setting says so (PACE-help-questions, #2394).
