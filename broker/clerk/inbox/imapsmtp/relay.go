@@ -43,6 +43,7 @@ type session struct {
 	left                          atomic.Int64 // the reply budget left, renewed only by do
 	allow                         atomic.Pointer[allowance]
 	wait                          atomic.Pointer[waiter]
+	sel                           atomic.Pointer[selection]
 	over, late, refused, rejected atomic.Bool
 	closeOnce                     sync.Once
 	closed, downDone              chan struct{}
@@ -54,6 +55,51 @@ type session struct {
 type waiter struct {
 	tag string
 	ch  chan bool
+}
+
+// selection is the server's answer to a write's one SELECT, as the down
+// relay reads it: the UIDVALIDITY its untagged OK named, and its tagged
+// answer. A store or move passes only once that answer said OK under the
+// request's UID validity (A5); go-imap waits for it before writing.
+type selection struct {
+	tag      string
+	validity atomic.Uint32 // 0 until named; a second, different one leaves it 0
+	named    atomic.Bool
+	ok       atomic.Bool // the tagged answer came, and was OK
+}
+
+// under says whether the SELECT answered OK under validity, which is not 0.
+func (s *selection) under(validity uint32) bool {
+	return s != nil && validity != 0 && s.ok.Load() && s.validity.Load() == validity
+}
+
+// see follows one of the server's response lines while the SELECT is open,
+// and reports whether it was the SELECT's tagged answer.
+func (s *selection) see(head []byte) bool {
+	if rest, ok := cutFold(head, "* OK [UIDVALIDITY "); ok {
+		d, _, _ := bytes.Cut(rest, []byte("]"))
+		v, err := strconv.ParseUint(string(d), 10, 32)
+		if err != nil || s.named.Swap(true) && uint32(v) != s.validity.Load() {
+			v = 0
+		}
+		s.validity.Store(uint32(v))
+		return false
+	}
+	rest, ok := bytes.CutPrefix(head, []byte(s.tag+" "))
+	if !ok {
+		return false
+	}
+	w, _, _ := bytes.Cut(bytes.TrimRight(rest, "\r\n"), []byte(" "))
+	s.ok.Store(strings.EqualFold(string(w), "OK"))
+	return true
+}
+
+// cutFold is bytes.CutPrefix with prefix matched without regard to case.
+func cutFold(b []byte, prefix string) ([]byte, bool) {
+	if len(b) < len(prefix) || !strings.EqualFold(string(b[:len(prefix)]), prefix) {
+		return b, false
+	}
+	return b[len(prefix):], true
 }
 
 // errLiteralRejected ends a session whose server refused a synchronizing
@@ -283,6 +329,9 @@ func (x *session) down(pending []byte) {
 // the server's lines it reports none, and each later read of the server's
 // refuses a waiting literal at once.
 func (x *session) answered(head []byte, lost bool) {
+	if s := x.sel.Load(); s != nil && (lost || s.see(head)) {
+		x.sel.CompareAndSwap(s, nil)
+	}
 	w := x.wait.Load()
 	if w == nil {
 		return
@@ -516,6 +565,10 @@ func (x *session) filter() {
 			return
 		}
 		tag, _, _ := bytes.Cut(line, []byte(" "))
+		if a.write() && verb == "SELECT" {
+			// The down relay reads the SELECT's answer from here on.
+			x.sel.Store(a.sel)
+		}
 		for {
 			n, more := literal(line)
 			var w *waiter
@@ -627,7 +680,8 @@ func literal(line []byte) (int64, bool) {
 // needs, plus one UID STORE of the request's flags or one UID MOVE to the
 // request's target, each on the request's UID only and after the one
 // SELECT of the request's folder that a write may make (no EXAMINE, no
-// second SELECT), and, for the old core, CREATE or APPEND.
+// second SELECT) once the server answered it OK under the request's UID
+// validity, and, for the old core, CREATE or APPEND.
 // EXPUNGE, CLOSE, DELETE, RENAME, COPY, LOGIN, AUTHENTICATE, STARTTLS,
 // IDLE and anything unnamed are never allowed. A nil allowance, before the
 // first request, allows only the CAPABILITY go-imap sends as it starts.
@@ -636,10 +690,11 @@ type allowance struct {
 	add, remove    []string
 	create, append bool
 	// folder, set for a write, is the one SELECT the write may make, as
-	// go-imap writes it; to is its UID MOVE's target. selected is the
-	// filter's own note that the SELECT went.
+	// go-imap writes it, and validity the UID validity it must answer
+	// under; to is its UID MOVE's target. sel is the SELECT once it went.
 	folder, to string
-	selected   bool
+	validity   uint32
+	sel        *selection
 }
 
 // write says whether a is a store or a move.
@@ -665,8 +720,10 @@ func (a *allowance) command(line []byte) (string, bool) {
 	case a == nil:
 		return verb, verb == "CAPABILITY" && len(f) == 2
 	case a.write() && (verb == "SELECT" || verb == "EXAMINE"):
-		ok := verb == "SELECT" && !a.selected && rest == a.folder
-		a.selected = a.selected || ok
+		ok := verb == "SELECT" && a.sel == nil && rest == a.folder
+		if ok {
+			a.sel = &selection{tag: f[0]}
+		}
 		return verb, ok
 	case verb == "UID FETCH":
 		// go-imap's fetch items are atoms: with no quote, backslash or
@@ -675,9 +732,9 @@ func (a *allowance) command(line []byte) (string, bool) {
 	case reads[verb]:
 		return verb, true
 	case verb == "UID STORE" && a.store != 0:
-		return verb, a.selected && a.storeOK(rest)
+		return verb, a.sel.under(a.validity) && a.storeOK(rest)
 	case verb == "UID MOVE" && a.move != 0:
-		return verb, a.selected && rest == strconv.FormatUint(uint64(a.move), 10)+" "+a.to
+		return verb, a.sel.under(a.validity) && rest == strconv.FormatUint(uint64(a.move), 10)+" "+a.to
 	case verb == "CREATE" && a.create, verb == "APPEND" && a.append:
 		return verb, true
 	}
