@@ -73,8 +73,12 @@ func wordingAlert(text string) bool {
 			return true
 		}
 	}
-	return codeNearWord(strings.ReplaceAll(f, "sign in", "signin"))
+	return codeAfterCodeIs.MatchString(f) || codeNearWord(strings.ReplaceAll(f, "sign in", "signin"))
 }
+
+// codeAfterCodeIs is a 4-digit number right after "code is" or "code:",
+// which is a code even when it reads as a year (Mark, #2992).
+var codeAfterCodeIs = regexp.MustCompile(`code(?: is:?|:) ?[0-9]{4}(?:[^0-9]|$)`)
 
 // containsWord reports whether p occurs in s at the start of a word: the
 // character before it is not an ASCII letter or digit, so "signin" is not
@@ -169,10 +173,25 @@ func allDigits(w string) bool {
 
 // codeLike is a 4-10 character token of letters, digits and dashes with at
 // least one digit (482913, G-482913, A1B2C3). A year from 1900 to 2099 is a
-// date, which CH-19 lets pass (#2888).
+// date, which CH-19 lets pass (#2888), and a word with a few digits is a
+// promo code (#2992).
 func codeLike(w string) bool {
-	return len(w) >= 4 && len(w) <= 10 && strings.ContainsAny(w, "0123456789") && !isYear(w)
+	return len(w) >= 4 && len(w) <= 10 && strings.ContainsAny(w, "0123456789") && !isYear(w) && !promoCode(w)
 }
+
+// promoCode is one run of three or more letters and one run of digits, in
+// either order, with fewer digits than letters or a year: SAVE20, SPRING25,
+// 20OFF, SAVE2026. Login codes are digits or mixed (G-482913, A1B2C3, K7XQ).
+func promoCode(w string) bool {
+	m := promoShape.FindStringSubmatch(strings.ReplaceAll(w, "-", ""))
+	if m == nil {
+		return false
+	}
+	letters, digits := m[1]+m[4], m[2]+m[3]
+	return len(digits) < len(letters) || isYear(digits)
+}
+
+var promoShape = regexp.MustCompile(`^(?:([a-z]{3,})([0-9]+)|([0-9]+)([a-z]{3,}))$`)
 
 func isYear(w string) bool {
 	return len(w) == 4 && allDigits(w) && (w[:2] == "19" || w[:2] == "20")
