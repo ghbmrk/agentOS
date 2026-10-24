@@ -29,6 +29,8 @@ DROP = {
     "initramfs-tools-bin": ("initramfs-tools", "as initramfs-tools"),
     "dracut-install": ("dracut", "only initramfs-tools-core needs it"),
     "cpio": ("cpio", "only initramfs-tools-core needs it"),
+    "mokutil": ("mokutil", "shim-signed-common depends on it; it edits shim's MOK list from a shell, and the box has none"),
+    "libefivar1t64": ("efivar", "only mokutil links it"),
     "tar": ("tar", "Essential, but nothing on the box runs it: build.sh and mkosi unpack on the build host"),
     "diffutils": ("diffutils", "Essential, but nothing on the box runs diff or cmp"),
     "perl-base": ("perl", "Essential, but only package maintainer scripts run perl, and the box runs no package manager"),

@@ -143,6 +143,13 @@ class NeededTest(unittest.TestCase):
         self.assertTrue(set(drop.ESSENTIAL) <= set(drop.DROP))
         self.assertEqual({drop.DROP[p][0] for p in ("tar", "diffutils", "perl-base")}, {"tar", "diffutils", "perl"})
 
+    def test_efivar_goes_with_mokutil_and_shim_stays(self):
+        # shim-unsigned is the only package of source shim the scan sees, but the box boots shim's
+        # code from shim-signed (and its helpers), whose source differs: dropping shim-unsigned would
+        # hide the advisory while the code it names still runs first at boot.
+        self.assertEqual({drop.DROP[p][0] for p in ("mokutil", "libefivar1t64")}, {"mokutil", "efivar"})
+        self.assertNotIn("shim", {src for src, _ in drop.DROP.values()})
+
 
 class InterpreterTest(unittest.TestCase):
     def setUp(self):
