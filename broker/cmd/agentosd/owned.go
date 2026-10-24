@@ -4,8 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-
-	"github.com/ghbmrk/agentos/broker/durable"
+	"path/filepath"
 )
 
 // markOwned makes the owned marker (apnet.Owned, #2626) once the owner's
@@ -23,5 +22,23 @@ func markOwned(path string) error {
 	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return durable.WriteFile(path, nil, 0o600)
+	// Empty, it needs no temp file and rename: O_EXCL makes it once, and
+	// the file and its directory are synced so it survives a power cut.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
