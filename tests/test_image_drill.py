@@ -182,9 +182,21 @@ class DrillTest(unittest.TestCase):
                 last = self.last()
                 self.assertEqual((last["result"], last["clean_core_seconds"]), ("fail", None))
 
+    def test_a_record_that_cannot_be_written_fails(self):
+        self.reboot()
+        self.clock.write_text("1000095\n")
+        (self.drill / "last.json").mkdir()  # in the way: mv -T cannot replace a directory with a file
+        rc, out = self.report()
+        self.assertEqual(rc, 1, out)
+        self.assertTrue(out.startswith("agentos-drill: FAIL image=verified "), out)
+        self.assertTrue((self.drill / "pending").exists())
+
     def test_the_report_unit(self):
         u = ini(UNITS / "agentos-drill-report.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/var/lib/agentos/drill/pending")
+        # Requires= as well as After=: ordering alone would start the report on a boot whose health
+        # check failed, and record that boot's drill as a pass (#2958 L3 1).
+        self.assertEqual(u["Unit"]["Requires"], "boot-complete.target")
         self.assertEqual(u["Unit"]["After"], "boot-complete.target")
         self.assertEqual(u["Unit"]["Before"], "agentos-boot-report.service")
         self.assertEqual(u["Service"]["ExecStart"], "/usr/lib/agentos/drill-report")

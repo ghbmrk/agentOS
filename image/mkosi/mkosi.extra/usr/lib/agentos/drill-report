@@ -1,6 +1,6 @@
 #!/bin/sh
 # The monthly restore drill's report (#2932), on the first healthy boot after the drill's reboot
-# (agentos-drill-report.service runs after boot-complete.target, which the health check gates). The
+# (agentos-drill-report.service requires boot-complete.target, which the health check gates). The
 # time to a clean core is the image check's seconds plus the seconds from the reboot to this boot.
 # The backup (BAK-1) and the kernel's log (LOG-2) are not on the box yet, so they read none: never a
 # pass for what was not drilled. last.json is the record STATUS reads once the kernel serves it.
@@ -21,11 +21,13 @@ case $secs:$at in *[!0-9:]* | :* | *:) result=FAIL ;; *)
 	[ "$restart" -ge 0 ] || { result=FAIL restart= clean=; } ;;
 esac
 [ "$image" = verified ] || result=FAIL
+written=no
 mkdir -p -m 0700 "$D"
 printf '{"at":%s,"result":"%s","image":"%s","image_seconds":%s,"restart_seconds":%s,"clean_core_seconds":%s,"backup":"none","log":"none"}\n' \
 	"$now" "$(echo "$result" | tr A-Z a-z)" "${image:-none}" "${secs:-null}" "${restart:-null}" "${clean:-null}" >"$D/last.json.new" &&
-	mv -f "$D/last.json.new" "$D/last.json"
-rm -f "$D/pending"
+	mv -fT "$D/last.json.new" "$D/last.json" && written=yes
+# A record that could not be written (a full disk) fails the drill; pending stays for the next boot.
+[ "$written" = yes ] && rm -f "$D/pending" || result=FAIL
 # One line, one write (image/ASSUMPTIONS.md I24).
 echo "agentos-drill: $result image=${image:-none} clean_core_seconds=${clean:-none} image_seconds=${secs:-none} restart_seconds=${restart:-none} backup=none log=none (no backup: this drive is the only copy)"
 [ "$result" = pass ]
