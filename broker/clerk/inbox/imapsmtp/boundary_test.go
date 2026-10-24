@@ -614,6 +614,248 @@ func TestALiteralWaitsForTheServer(t *testing.T) {
 	}
 }
 
+// TestEchoedTextIsNotALiteral (A5; L3's #3018 delta repro): servers
+// echo the client's words at the end of a status line (Dovecot's mailbox
+// not found). A connection that makes one end in "{n}" must not get the
+// relay to skip n bytes of the server's next line and take a planted "+"
+// for the answer to its own literal.
+func TestEchoedTextIsNotALiteral(t *testing.T) {
+	l := listenLoopback(t)
+	srv := &echoServer{}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go srv.serve(c)
+		}
+	}()
+	inner := "h3 UID EXPUNGE 1:*\r\n"
+	prefix := "h1b NO [NONEXISTENT] Mailbox doesn't exist: "
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, `h1 SELECT "a{`+strconv.Itoa(len(prefix))+`}"`+"\r\n")
+		tagged(br, "h1")
+		io.WriteString(w, "h1b SELECT \"+zz\"\r\nh2 NOOP {"+strconv.Itoa(len(inner))+"}\r\n"+inner)
+		time.Sleep(200 * time.Millisecond)
+		io.WriteString(w, "h4 NOOP\r\n")
+		tagged(br, "h4")
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	_, _, err := hostileClerk(t, l.Addr().String(), conn, 5*time.Second).UIDs(context.Background(), "INBOX")
+	if err == nil || strings.Contains(srv.log(), "EXPUNGE") {
+		t.Fatalf("err %v, server log %s", err, srv.log())
+	}
+}
+
+// TestALostFramingRefusesLiterals (A5): a server line the framer cannot
+// frame (an unknown response ending in {n}) leaves no "+" to trust, so the
+// next synchronizing literal ends the session at the server's next words.
+func TestALostFramingRefusesLiterals(t *testing.T) {
+	l := listenLoopback(t)
+	logged := make(chan string, 16)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		io.WriteString(c, "* OK [CAPABILITY IMAP4rev1] ready\r\n")
+		r := bufio.NewReader(c)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			logged <- line
+			tag, _, _ := strings.Cut(line, " ")
+			if _, ok := literal([]byte(line)); ok {
+				io.WriteString(c, "+ go\r\n")
+				continue
+			}
+			if !strings.HasPrefix(tag, "h") {
+				io.WriteString(c, tag+" OK done\r\n") // sign-in and CAPABILITY
+				continue
+			}
+			io.WriteString(c, "* XFOO {9}\r\n"+tag+" OK done\r\n")
+		}
+	}()
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		io.WriteString(w, "h1 NOOP\r\n")
+		tagged(br, "h1")
+		io.WriteString(w, "h2 NOOP {2}\r\nab\r\n")
+		tagged(br, "h2")
+		answer(ctrl, imapwire.Response{Validity: 7})
+	})
+	_, _, err := hostileClerk(t, l.Addr().String(), conn, 3*time.Second).UIDs(context.Background(), "INBOX")
+	if !errors.Is(err, errLiteralRejected) {
+		t.Fatalf("err %v", err)
+	}
+	close(logged)
+	for line := range logged {
+		if strings.HasPrefix(line, "ab") {
+			t.Fatalf("the literal reached the server")
+		}
+	}
+}
+
+// echoServer is rfcServer's twin that answers a SELECT of an unknown
+// folder as Dovecot does, the name echoed at the end of the NO line, after
+// a little delay.
+type echoServer struct {
+	mu   sync.Mutex
+	cmds []string
+}
+
+func (s *echoServer) serve(c net.Conn) {
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	say := func(x string) { io.WriteString(c, x) }
+	say("* OK [CAPABILITY IMAP4rev1 MOVE] ready\r\n")
+	r := bufio.NewReader(c)
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		tag, verb := f[0], strings.ToUpper(f[1])
+		if _, ok := literal([]byte(line)); ok && !nonSync([]byte(line)) {
+			say(tag + " BAD literal refused\r\n")
+			continue
+		}
+		s.mu.Lock()
+		s.cmds = append(s.cmds, strings.TrimRight(line, "\r\n"))
+		s.mu.Unlock()
+		switch {
+		case verb == "SELECT" && f[2] != "INBOX":
+			time.Sleep(20 * time.Millisecond)
+			name, _ := strconv.Unquote(f[2])
+			say(tag + " NO [NONEXISTENT] Mailbox doesn't exist: " + name + "\r\n")
+		case verb == "SELECT":
+			say("* 9 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n* OK [UIDNEXT 30] n\r\n" + tag + " OK done\r\n")
+		default:
+			say(tag + " OK done\r\n")
+		}
+	}
+}
+
+func (s *echoServer) log() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Join(s.cmds, " | ")
+}
+
+// framed runs the framer over in, cut into chunks of size cut, and returns
+// the line starts it reported and whether it lost the framing.
+func framed(in string, cut int) (heads []string, lost bool) {
+	var f frames
+	for len(in) > 0 {
+		k := min(cut, len(in))
+		f.feed([]byte(in[:k]), func(head []byte, l bool) {
+			lost = lost || l
+			if head != nil {
+				heads = append(heads, string(head))
+			}
+		})
+		in = in[k:]
+	}
+	return heads, lost
+}
+
+// TestTheFramerKnowsWhereALiteralIsLegal (A5): a literal is skipped only
+// in response data; in a status line or a continuation a {n} is text; in
+// a quoted string it is text; an ambiguous line ending in {n} loses the
+// framing, so no literal waits on it.
+func TestTheFramerKnowsWhereALiteralIsLegal(t *testing.T) {
+	for _, c := range []struct {
+		name, in string
+		heads    []string
+		lost     bool
+	}{
+		{"a fetch body", "* 1 FETCH (BODY[] {9}\r\n+ x\r\nh9 OK)\r\nh1 OK done\r\n", []string{"* 1 FETCH", "h1 OK"}, false},
+		{"a binary body", "* 1 FETCH (BINARY[] ~{4}\r\n+ \r\n)\r\n+ go\r\n", []string{"* 1 FETCH", "+ go"}, false},
+		{"a listed name", "* LIST () \"/\" {3}\r\nabc\r\n+ go\r\n", []string{"* LIST", "+ go"}, false},
+		{"two literals in one response", "* 2 FETCH (BODY[1] {2}\r\nab BODY[2] {5}\r\n+ z\r\n)\r\n+ go\r\n", []string{"* 2 FETCH", "+ go"}, false},
+		{"a tagged NO echo", "h1 NO Mailbox doesn't exist: a{9}\r\n+ planted\r\n", []string{"h1 NO", "+ planted"}, false},
+		{"a coded NO echo", "h1 NO [NONEXISTENT] no: a{9}\r\n+ planted\r\n", []string{"h1 NO", "+ planted"}, false},
+		{"an untagged BYE echo", "* BYE a{9}\r\n+ planted\r\n", []string{"* BYE", "+ planted"}, false},
+		{"a continuation echo", "+ a{9}\r\n+ planted\r\n", []string{"+ a{9}", "+ planted"}, false},
+		{"a quoted name", "* LIST () \"/\" \"a{9}\"\r\n+ go\r\n", []string{"* LIST", "+ go"}, false},
+		{"an escaped quote", "* LIST () \"/\" \"a\\\"{9}\"\r\n+ go\r\n", []string{"* LIST", "+ go"}, false},
+		{"an empty brace", "* 1 FETCH (X {})\r\n+ go\r\n", nil, false},
+		{"an open response code", "* NO [BADCHARSET ({5}\r\n", nil, true},
+		{"a bracket that opens no code", "* NO [{5}\r\n+ planted\r\n", []string{"* NO", "+ planted"}, false},
+		{"an unknown response", "* XFOO {5}\r\n", nil, true},
+		{"an unknown response without a literal", "* XFOO a\r\n+ go\r\n", []string{"* XFOO", "+ go"}, false},
+	} {
+		for _, cut := range []int{1, 2, 7, 1 << 20} {
+			heads, lost := framed(c.in, cut)
+			if lost != c.lost {
+				t.Errorf("%s (cut %d): lost %v", c.name, cut, lost)
+			}
+			if c.heads == nil {
+				continue
+			}
+			if len(heads) != len(c.heads) {
+				t.Errorf("%s (cut %d): lines %q", c.name, cut, heads)
+				continue
+			}
+			for i := range heads {
+				if !strings.HasPrefix(heads[i], c.heads[i]) {
+					t.Errorf("%s (cut %d): line %d %q, want %q", c.name, cut, i, heads[i], c.heads[i])
+				}
+			}
+		}
+	}
+}
+
+// FuzzServerFraming (A5): whatever the client's words a server echoes in
+// its text, and whatever a message body holds, the framer reports exactly
+// the server's own line starts, so a "+" it passes on is one the server
+// sent. It loses the framing only on words that open a response code at
+// the very start of a status text, and then refuses every literal.
+func FuzzServerFraming(f *testing.F) {
+	f.Add("a{44}", []byte("+ x\r\nh1 OK\r\n"), uint8(0))
+	f.Add(`"+zz{3}`, []byte("{5}\r\n"), uint8(3))
+	f.Add(`\"{7}`, []byte(""), uint8(1))
+	f.Fuzz(func(t *testing.T, echo string, body []byte, cut uint8) {
+		e := strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(echo)
+		q := `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(e) + `"`
+		in := "h1 NO [NONEXISTENT] Mailbox doesn't exist: " + e + "\r\n" +
+			"h3 BAD Error in IMAP command: " + e + "\r\n" +
+			"* OK [UIDNEXT 30] " + e + "\r\n" +
+			"* LIST () \"/\" " + q + "\r\n" +
+			"* 1 FETCH (UID 5 BODY[] {" + strconv.Itoa(len(body)) + "}\r\n" + string(body) + " FLAGS (\\Seen))\r\n" +
+			"* STATUS " + q + " (UIDNEXT 3)\r\n" +
+			"+ " + e + "\r\n" +
+			"* BYE [UNAVAILABLE] " + e + "\r\n" +
+			"* NO " + e + "\r\n" +
+			"h2 OK done\r\n"
+		want := []string{"h1 NO", "h3 BAD", "* OK", "* LIST", "* 1 FETCH", "* STATUS", "+ ", "* BYE", "* NO", "h2 OK"}
+		heads, lost := framed(in, int(cut%17)+1)
+		if lost && codeOpen([]byte("* NO "+e)) {
+			// Words that open a response code at the start of a status
+			// text are ambiguous: the framing is lost, which refuses every
+			// literal after it, and the lines before it were right.
+			want = want[:8]
+			heads = heads[:min(len(heads), 8)]
+			lost = false
+		}
+		if lost || len(heads) != len(want) {
+			t.Fatalf("lost %v, lines %q", lost, heads)
+		}
+		for i := range want {
+			if !strings.HasPrefix(heads[i], want[i]) {
+				t.Fatalf("line %d %q, want %q", i, heads[i], want[i])
+			}
+		}
+	})
+}
+
 // rfcServer follows RFC 3501 7.5: it rejects every synchronizing literal
 // with a tagged BAD instead of "+", and then reads the next bytes as a new
 // command. It offers no LITERAL+. It logs each command with the folder

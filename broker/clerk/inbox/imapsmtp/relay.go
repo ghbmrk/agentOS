@@ -276,13 +276,19 @@ func (x *session) down(pending []byte) {
 }
 
 // answered hands a waiting filter the server's answer to its literal: a
-// continuation ("+") or the command's tagged answer.
-func (x *session) answered(head []byte) {
+// continuation ("+") or the command's tagged answer. Once the framer lost
+// the server's lines it reports none, and each later read of the server's
+// refuses a waiting literal at once.
+func (x *session) answered(head []byte, lost bool) {
 	w := x.wait.Load()
 	if w == nil {
 		return
 	}
 	switch {
+	case lost:
+		if x.wait.CompareAndSwap(w, nil) {
+			w.ch <- false
+		}
 	case bytes.HasPrefix(head, []byte("+")):
 		if x.wait.CompareAndSwap(w, nil) {
 			w.ch <- true
@@ -294,20 +300,100 @@ func (x *session) answered(head []byte) {
 	}
 }
 
-// frames finds the server's response lines in the relayed bytes, skipping
-// {n} literals by count, and hands each line's start (up to frameHead
-// bytes) to its caller. It reads no more than that: it frames, it does not
-// parse.
+// frames finds the server's response lines in the relayed bytes and hands
+// each line's start (up to frameHead bytes) to its caller, so a "+" it
+// reports is one the server sent (RFC 3501 7, 9). A literal is legal only
+// inside response data: a {n} that ends a line outside a quoted string in
+// a data response ("* 3 FETCH", "* LIST", "* STATUS", ...) is skipped by
+// count, and so is the rest of that response's continuation lines. A
+// status response ("tag OK|NO|BAD", "* OK|NO|BAD|BYE|PREAUTH") and a
+// continuation ("+") carry text, which servers fill with the client's own
+// words (a mailbox not found), so a {n} there is text. Atoms cannot hold
+// "{", so in data a trailing {n} outside quotes is always a literal. Only
+// two lines are ambiguous, a status line whose response code is still open
+// ("[BADCHARSET (" astrings) and an untagged response the framer does not
+// know; either one ending in {n} loses the framing for good.
 type frames struct {
-	head []byte
-	tail []byte // the line's last bytes, for a literal's {n}
-	lit  int64  // literal bytes still to skip
+	head  []byte
+	kind  lineKind // set at a line's end; kept while a response continues
+	cont  bool     // this line continues a response after a literal
+	quote bool     // inside a quoted string
+	esc   bool     // after a backslash inside one
+	brace int      // 0 none, 1 in "{digits", 2 "{digits}" or "{digits+}" closed
+	digit bool     // the brace holds a digit
+	plus  bool     // the brace held "+" before "}"
+	n     int64
+	shut  bool // a "]" outside quotes, which closes a status line's code
+	lit   int64
+	lost  bool
 }
+
+type lineKind int
+
+const (
+	kindText lineKind = iota
+	kindData
+	kindUnknown
+)
 
 const frameHead = 128
 
-func (f *frames) feed(p []byte, line func(head []byte)) {
+// dataResponses are the untagged responses that carry data, where a
+// literal may follow (RFC 3501 7.2-7.4, RFC 4731, 5161, 2971, 2342, 9208).
+var dataResponses = map[string]bool{"FETCH": true, "LIST": true, "LSUB": true, "STATUS": true, "SEARCH": true,
+	"ESEARCH": true, "FLAGS": true, "CAPABILITY": true, "ENABLED": true, "ID": true, "NAMESPACE": true,
+	"EXISTS": true, "RECENT": true, "EXPUNGE": true, "VANISHED": true, "QUOTA": true, "QUOTAROOT": true}
+
+// statusWords open a status response's text.
+var statusWords = map[string]bool{"OK": true, "NO": true, "BAD": true, "BYE": true, "PREAUTH": true}
+
+// classify names a response's first line from its start.
+func classify(head []byte) lineKind {
+	f := strings.SplitN(string(head), " ", 4)
+	switch {
+	case f[0] == "+":
+		return kindText
+	case f[0] != "*":
+		return kindText // a tagged response is a status response
+	case len(f) < 2:
+		return kindUnknown
+	}
+	w := strings.ToUpper(strings.TrimRight(f[1], "\r\n"))
+	if statusWords[w] {
+		return kindText
+	}
+	if _, err := strconv.ParseUint(w, 10, 32); err == nil && len(f) > 2 {
+		w = strings.ToUpper(strings.TrimRight(f[2], "\r\n"))
+	}
+	if dataResponses[w] {
+		return kindData
+	}
+	return kindUnknown
+}
+
+// codeOpen says whether a status line opens a response code that could
+// carry arguments: its text starts with "[", an atom and a space (RFC 3501
+// 7.1). An atom holds no "{", so "[{5}" is text.
+func codeOpen(head []byte) bool {
+	f := strings.SplitN(string(head), " ", 4)
+	if len(f) < 4 || len(f[2]) < 2 || f[2][0] != '[' {
+		return false
+	}
+	for i := 1; i < len(f[2]); i++ {
+		if c := f[2][i]; c <= 0x20 || c >= 0x7f || strings.IndexByte(`(){%*"\]`, c) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *frames) feed(p []byte, line func(head []byte, lost bool)) {
 	for len(p) > 0 {
+		if f.lost {
+			// Lost for good: say so once per chunk and pass the bytes.
+			line(nil, true)
+			return
+		}
 		if f.lit > 0 {
 			k := min(int64(len(p)), f.lit)
 			f.lit -= k
@@ -319,18 +405,70 @@ func (f *frames) feed(p []byte, line func(head []byte)) {
 		if len(f.head) < frameHead {
 			f.head = append(f.head, c)
 		}
-		if f.tail = append(f.tail, c); len(f.tail) > 32 {
-			f.tail = f.tail[1:]
+		if c != '\n' {
+			f.scan(c)
+			continue
 		}
-		if c == '\n' {
-			line(f.head)
-			if i := bytes.LastIndexByte(f.tail, '{'); i >= 0 {
-				if n, ok := literal(f.tail[i:]); ok {
-					f.lit = n
-				}
-			}
-			f.head, f.tail = f.head[:0], f.tail[:0]
+		kind := f.kind
+		if !f.cont {
+			kind = classify(f.head)
 		}
+		n, isLit := f.n, f.brace == 2 && !f.quote
+		switch {
+		case !isLit:
+		case kind == kindData:
+		case kind == kindText && (f.cont || !codeOpen(f.head) || f.shut):
+			isLit = false
+		default:
+			f.lost = true
+		}
+		if !f.cont {
+			line(f.head, f.lost)
+		}
+		f.head, f.quote, f.esc, f.brace, f.digit, f.plus, f.n, f.shut = f.head[:0], false, false, 0, false, false, 0, false
+		if f.lost {
+			line(nil, true)
+			return
+		}
+		f.kind, f.cont = kind, isLit
+		if isLit {
+			f.lit = n
+		}
+	}
+}
+
+// scan follows one byte of a line, other than its LF, for quotes, a
+// status line's response code and a trailing {n}.
+func (f *frames) scan(c byte) {
+	if c == '\r' {
+		return // the CR of CRLF; a brace closed before it stays closed
+	}
+	if f.quote {
+		switch {
+		case f.esc:
+			f.esc = false
+		case c == '\\':
+			f.esc = true
+		case c == '"':
+			f.quote = false
+		}
+		f.brace = 0
+		return
+	}
+	f.shut = f.shut || c == ']'
+	switch {
+	case c == '"':
+		f.quote, f.brace = true, 0
+	case c == '{':
+		f.brace, f.n, f.digit, f.plus = 1, 0, false, false
+	case f.brace == 1 && c >= '0' && c <= '9' && !f.plus && f.n < 1<<40:
+		f.n, f.digit = f.n*10+int64(c-'0'), true
+	case f.brace == 1 && c == '+' && f.digit && !f.plus:
+		f.plus = true
+	case f.brace == 1 && c == '}' && f.digit:
+		f.brace = 2
+	default:
+		f.brace = 0
 	}
 }
 
