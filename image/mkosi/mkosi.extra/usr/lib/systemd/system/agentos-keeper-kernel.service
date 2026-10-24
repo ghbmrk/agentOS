@@ -1,0 +1,48 @@
+# The kernel (STO-2b, STO-2c): agentos-unlock runs as root, opens the sealed store through this PC's
+# tpm slot with the pins on its TPM, derives the kernel's keys, closes the store and execs
+# agentos-kernel as the kernel's user, with the keys on descriptor 3 and one TPM connection on
+# descriptor 4 for the log's counter (LOG-2, STO-1). No process lives on with the store key (CLK-1).
+[Unit]
+Description=agentOS kernel
+ConditionPathExists=/var/lib/agentos-store/store
+After=local-fs.target systemd-sysusers.service agentos-keeper-enroll.service
+# #2897: each start opens the counter anchor, which spends two of the TPM counter's increments
+# (LOG-anchor-tpm-b), so a crash loop under Restart= stops after three starts in a boot.
+StartLimitIntervalSec=infinity
+StartLimitBurst=3
+
+[Service]
+# #2899: nothing reaches the unlock step past descriptor 2 (no socket activation, no OpenFile=,
+# no descriptor store), and nothing it starts gains privileges: it drops every id itself, and no
+# capability or securebits setting carries any past the drop (mkosi.finalize refuses one).
+NoNewPrivileges=yes
+# The kernel's sockets, which its peers reach: the directory holds only them (0711), and is the
+# kernel's to make them in.
+RuntimeDirectory=agentos-kernel
+RuntimeDirectoryMode=0711
+ExecStartPre=/usr/bin/chown agentos-kernel:agentos-kernel /run/agentos-kernel
+ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \
+        -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
+        -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \
+        -owner-sock /run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner \
+        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model
+StandardError=journal+console
+Restart=on-failure
+RestartSec=10
+# The store key, then the log and head keys, live in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# The TPM is the keeper's (#2889 Security later 2). The kernel's uid opens none: it uses the
+# connection unlock opened (ASSUMPTIONS STO-2c-g).
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+WantedBy=multi-user.target

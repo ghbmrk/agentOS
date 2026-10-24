@@ -1,0 +1,8 @@
+# The keeper (D-154, #2905): enrollment, the unlock step and the kernel it becomes. Its units are
+# named agentos-keeper-*, and that name is the group's one place: agentos-keeper-.service.d puts
+# each of them here and lifts the main side's mask, and mkosi.finalize admits exactly the units in
+# its KEEPER_UNITS. A later VM or board deployment (#2943) replaces this group and leaves the main
+# side's units alone.
+[Unit]
+Description=agentOS keeper
+Before=slices.target
