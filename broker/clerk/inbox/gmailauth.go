@@ -32,7 +32,7 @@ const GmailRedirect = "http://127.0.0.1:8521/agentos"
 // GmailReconnect is the owner text for a Gmail grant the token endpoint
 // refused (reconnect). It names both causes, since a client left in Testing
 // loses its grants 7 days after consent (D-150 item 3) and looks the same.
-const GmailReconnect = "Gmail stopped letting the box in. Either the sign-in was removed or ran out, " +
+const GmailReconnect = "Gmail stopped letting me in. Either the sign-in was removed or ran out, " +
 	"or your Google client is still in Testing, which ends every sign-in after 7 days: " +
 	"set it to In production, then sign in again on the owner page."
 
