@@ -40,6 +40,10 @@ exempt-pr 2319
 # 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
 exempt-pr 2399
 exempt-pr 2327
+# #2990 (RELIC-1): deletes relics of superseded designs, some outside this list (pubid,
+# evals/review/ and two spikes). Mark: "If deletion is reversible then delete" (2026-10-24
+# 12:11Z, cmsg_01R91wiieBzMSvPKFsAJVvuKAFtTNWiK8ju7sC8gNLP4PA). Remove once it merges.
+exempt-pr 2990
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
