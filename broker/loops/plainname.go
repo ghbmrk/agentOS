@@ -25,6 +25,7 @@ var fuzzNames = map[string]string{
 	"hostdisk.FuzzProbe":            "the check that reads attached disks",
 	"localui.FuzzScanPassphrase":    "the check that reads a passphrase photo",
 	"imapsmtp.FuzzIMAPReplies":      "the check that reads replies from your mail server",
+	"imapsmtp.FuzzPreauth":          "the check that reads your mail server's first lines, before sign-in",
 	"inbox.FuzzPostURL":             "the check that sends an unsubscribe only to a public web address",
 	"loops.FuzzParseText":           "the check that reads your settings texts",
 	"mail.FuzzParse":                "the check that reads incoming mail",

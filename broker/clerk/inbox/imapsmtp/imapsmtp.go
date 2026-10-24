@@ -444,18 +444,30 @@ func set(uids []uint32) map[uint32]bool {
 }
 
 // checked is ms if every message is in folder under validity, names a UID
-// in want (when want is nil, one at least from), at most once, and holds at
-// most MaxFetch bytes; else errLied.
+// in want (when want is nil, one at least from), at most once, holds at
+// most MaxFetch bytes and carries only flags as a server writes them; else
+// errLied.
 func (s *Store) checked(ms []Message, folder string, validity uint32, want map[uint32]bool, from uint32) ([]Message, error) {
 	seen := map[uint32]bool{}
 	for _, m := range ms {
 		if m.Folder != folder || m.Validity != validity || seen[m.UID] || len(m.Raw) > s.cfg.MaxFetch ||
-			want != nil && !want[m.UID] || want == nil && m.UID < from || !flagsValid(m.Flags) {
+			want != nil && !want[m.UID] || want == nil && m.UID < from || !flagsRead(m.Flags) {
 			return nil, errLied
 		}
 		seen[m.UID] = true
 	}
 	return ms, nil
+}
+
+// flagsRead says whether every flag is one a server can send: a keyword
+// atom, or a backslash and one (\Seen, \Recent and the rest).
+func flagsRead(flags []string) bool {
+	for _, f := range flags {
+		if !flagsValid([]string{strings.TrimPrefix(f, `\`)}) {
+			return false
+		}
+	}
+	return true
 }
 
 // Seen hands each the From and Message-ID headers of every message in folder

@@ -706,3 +706,17 @@ func (c *countReader) Read(p []byte) (int, error) {
 	c.n += int64(n)
 	return n, err
 }
+
+// An honest answer passes the checks: flags as servers send them, system
+// flags such as \Recent included.
+func TestAnHonestConnectionPasses(t *testing.T) {
+	srv := newLogServer(t)
+	conn := hostileConn(t, func(n int, q imapwire.Request, br *bufio.Reader, w net.Conn, ctrl *net.UnixConn) {
+		answer(ctrl, imapwire.Response{Messages: []imapwire.Message{{Ref: imapwire.Ref{Folder: "INBOX", Validity: 7, UID: 2},
+			Flags: []string{`\Seen`, `\Recent`, "$Forwarded", "agentOS/news"}, Raw: []byte("x")}}})
+	})
+	ms, err := hostileClerk(t, srv.addr, conn, time.Second).Fetch(context.Background(), "INBOX", 7, []uint32{1, 2})
+	if err != nil || len(ms) != 1 {
+		t.Fatalf("%v %v", ms, err)
+	}
+}

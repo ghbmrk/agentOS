@@ -43,7 +43,6 @@ type session struct {
 	allow               atomic.Pointer[allowance]
 	over, late, refused atomic.Bool
 	closeOnce           sync.Once
-	done                chan struct{}
 }
 
 // teardown closes everything the session holds, once.
@@ -110,8 +109,11 @@ func (s *Store) session(ctx context.Context, f func(x *session) error) (err erro
 	if err != nil {
 		return errors.New("imapsmtp: could not hand the session to the connection process")
 	}
-	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step, done: make(chan struct{})}
+	x := &session{s: s, up: conn, ctrl: ctrl, local: local, step: step}
 	defer x.teardown()
+	// Until the first request, the base budget covers what the sign-in left
+	// unread and go-imap's start-up CAPABILITY.
+	x.left.Store(s.replyBase)
 	// What the reader holds past the tagged OK is the server's, and goes
 	// down first, under the first request's budget.
 	pending, _ := br.Peek(br.Buffered())
