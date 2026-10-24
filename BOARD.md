@@ -20,7 +20,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-log | `broker/journal` and `broker/durable` become the kernel log and its stores; delete both and empty `tools/old_core.txt`. Last port: about 25 packages import them. | MIG-4-keys, MIG-4-untrusted, MIG-4-adapters | queued (sub A; tier A; Opus) |
 | MIG-4-untrusted | sub B directories in docs/LANES.md (owner, UI, guests, workers, change, loops, learning, voice, `cmd/agentosd` wiring): one row per directory group, port each onto the planner, reader and `plan` command, delete the old code in the same PR. Recall moved to sub A. | MIG-3 | queued (sub B; tier A) |
 | MIG-4-adapters | trusted-side routes, events and the private-data read side (`route`, `modelroute`, `routerule`, `infer`, `photo`, `events`, `e2e`, `test`, `pubid`, `maintain`, `recall`, `recalltool`, `provagent`, `cmd/agentos-photo`, `cmd/agentos-infer`, `evals/review/`): port to `Kernel.Submit` and the clerk interfaces, delete the old code in the same PR. Sub A, not Codex. | MIG-4-untrusted | queued (sub A, not Codex; tier A) |
-| MIG-3-R5 | Alert eval case in evals/slice-inbox and an alert guard in the real reader's classifier (from #2566). | #2566 | queued (release) |
 | MIG-3-17 | Narrow the standing planner key's unsubscribe verb to the sender handles the owner approved (from #2566). | #2566 | queued (later) |
 | MIG-4-exit-5 | Exit clerk reconnect: owner text and sign-in step, an owner-signed Reconnect, an atomic store write (release findings from #2642). | MIG-4-exit-4 (#2642); the clerk wired into the broker | queued (release; tier A) |
 | MIG-4-run | The process that runs the kernel, hosts each clerk and persists the sealed Secrets; parent of #2655, #2643, #2626 allowlist and #2572 Step C. | MIG-4-exit (#2571), MIG-4-mail-a (#2653), STO-2 for real secrets | queued (sub A; tier A) |
@@ -38,14 +37,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-erase | LOG-4 recall and erase in the kernel: per-subject data keys, erase as one log entry, restore re-applies newer erases; FORGET is rebuilt on it after #2781 deletes the old one. | MIG-2 | queued (sub A; tier A) |
 | KEY-spend-parent | Kernel: a narrowed spend-day cap also counts the parent's earlier spend that day; closes before any wiring passes a Spare to a live scheduler (from #2837). | #2847; kernel (#2525) | queued (release) |
 | MIG-3-R11 | VRB-2 later notes from the #2833 reviews: IDNA handling, owner-facing refusal reasons, eval fixtures, documented limits. | #2833 | queued (later) |
-| CORE-fixture-imports | A check that loops/loopstest and kernel/sim are imported only from _test.go files, since core.txt grants them wildcards (from #2837). | #2847 | queued (release) |
+| CORE-fixture-imports | A check that loops/loopstest and kernel/sim are imported only from _test.go files, since core.txt grants them wildcards (from #2837). | #2847 | building (release) |
 | TN-passkey | KEY-4: enrolled-passkey hold before a big widening, hardware-key co-sign for a one-off money step over the daily cap, UV-required flag in the assertion model and sim sweep. | A21 passed; second TN spec PR; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21) |
 | TN-lockdown | STOP <name> replaces LOCKDOWN: pause everything the name reaches at once (unresolvable name pauses all), text a one-time code to the sender's real number, narrow the scope on the code; undo is a widening at home (CH-11). | A21 passed; #2863, #2857; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21) |
 | MIG-4-recovery | broker/recovery rebuilt on the kernel log and sealed store: restore as an install, passkeys cut, compromised switch with new keys and CA, erase hold, hybrid seal; split before starting (REC-2, REC-5, LOG-4, CH-9, BAK-1). | A21 passed; #2823, #2828, #2577, #2682 | queued (release; sub A; tier A; after A21; split first) |
 | TN-witness-key | Witness key: watch reads, own revocations and pauses, fixed security texts only; clerks' declared watch reads as effect projections; narrowing operations for proofs (KRN-10). | A21 and G2 passed; #2851, #2852; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21 and G2) |
 | STO-1-reanchor | Owner-approved re-anchor of the TPM-counter anchor after a detected rollback (STO-1, REC-1). | #2890, recovery slice | queued (sub A; tier A) |
 | STO-2c | STO-2c enrollment and units: first boot creates the sealed store, seals the tpm slot under a per-box policy key, writes the NV pins and the counter anchor; units for enroll/unlock/kernel with restart bounds, no extra descriptors and a TPM device allowlist; policy-key rotation and owner-auth decision. Row (d) of the #2682 start-up slice; folds in #2897 and #2899. | STO-2 | building (sub A row, cut under the 2026-10-23 widening; tier A, gate file) |
-| TB-parsers | Keep parsers of untrusted bytes out of the trusted base's processes (KRN-2). | — | queued (release; tier A) |
 | STO-2c-cap | STO-2c-cap: unlock caps the boot policy after it unseals (#2976 Security finding 2), so the kernel's TPM descriptor cannot unseal the store; rotation re-signs without reading capped PCRs. | STO-2 | in review (tier A, gate file) |
 | STO-2c-agentosd | agentosd.service gets neither the keeper mask nor DevicePolicy=closed; drop it from NOEXEC_EXEMPT when agentosd is deleted (from #2978). | #2978; agentosd's deletion | queued (later, recheck) |
 | STO-2c-caps | STO-2c-caps main-side root one-shots drop CAP_SYS_ADMIN/SYS_PTRACE/MKNOD so the keeper mask holds against root (found on #2978). | STO-2c-caps | queued (later) |
@@ -54,6 +52,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | STO-2c-restart | STO-2c-restart: after the unlock cap (#2977), a kernel restart in the same boot cannot unlock; make a spent restart reboot the box (or equivalent) so the trusted host still restarts unattended. | STO-2 | building (tier A) |
 | TB-parsers-2-launch | Launch the mail clerk's IMAP connection process once per session, confined: own uid, no network, none of the clerk's files (from TB-parsers-2). | #2995 clerk-main row | queued (release; tier A) |
 | KRN-2-msgparse | Move RFC 5322 header and Gmail JSON parsing out of the mail clerk's process; fix netguard_allow.txt's stale Store.sessionB (from TB-parsers-2). | #3018 | queued (later) |
+| MIG-4-exit-3-later | OAuth exit clerk: real no-token-in-log test, token timeout tests, transient-fault retry, error-code reading, provider tolerances (later items from #2638). | #2642 | queued (later) |
+| TB-parsers-ap | Split localui's AP loader so the root agentos-ap does not list gozxing (#2937 gap 5). | #2937 | queued (later) |
+| EVAL-alert-misclassed | Eval case: an alert the reader misclasses as spam is refused with reason alert (owed from #2604 / #2681). | #2835 | queued (later) |
+| CORE-list-buildtags | The core.txt write-path check also covers files behind build tags, other GOOS values and cgo (from #3040). | #3040 | queued (release) |
+| CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
 
 ## Harness and operating model
 
@@ -72,7 +75,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI | CI guard: fail when the guest's own npm would rewrite guest/openclaw/package-lock.json (from the #2909 review). | #2855 | queued (later) |
 | VULN-debian | Reduce the image's unfixed Debian advisories by dropping packages it does not need; rebuild when Debian ships fixes (EVL-5 findings from TN-vulncheck-2). | #2886 | in review (release; tier A) |
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
-| BOARD-empty | Board render refuses an empty issue listing (#2799 emptied BOARD.md) and lists malformed work items on the board instead of failing every run | — | in review (C) |
 
 ## Owner channel and approvals (SPEC §10)
 
