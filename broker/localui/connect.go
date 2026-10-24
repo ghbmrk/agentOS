@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
 // Accounts is the account clerks' installed-app sign-in (clerk.SignIn,
@@ -16,17 +18,18 @@ import (
 // each way (D-154): the consent address comes out, the pasted address goes
 // in, and the verifier, the code's answer, the tokens and the client
 // secret stay in the clerk. Both answer a typed detail, "" for none,
-// carrying no value (CLK-4).
+// carrying no value (CLK-4). session is the phone's session token, which
+// agentosd checks before the frame goes on (AgentosdAccounts, #3006).
 type Accounts interface {
 	// Begin starts account's sign-in for one declared use and returns the
 	// consent address. reg is the household's client, given at its first
 	// sign-in; nil signs in again with the client the clerk sealed.
-	Begin(ctx context.Context, account, use string, reg *AccountRegistration) (consent, detail string)
+	Begin(ctx context.Context, session, account, use string, reg *AccountRegistration) (consent, detail string)
 	// Finish hands the clerk the address the owner pasted and the use the
 	// confirm screen named, and returns its detail: "signedin <use>" when
 	// the grant is sealed, "use" when the clerk's waiting sign-in is for
 	// another use (it refuses before redeeming anything).
-	Finish(ctx context.Context, account, use, pasted string) string
+	Finish(ctx context.Context, session, account, use, pasted string) string
 }
 
 // AccountRegistration is the household's own client (clerk.Registration).
@@ -131,10 +134,10 @@ func (d *ConnectDeclaration) consentLink(a string) string {
 	return a
 }
 
-// Bounds on what the Connect forms take.
+// Bounds on what the Connect forms take, agentosd's own (localapi).
 const (
-	maxClientField = 512
-	maxPasted      = 4 << 10
+	maxClientField = localapi.MaxClientField
+	maxPasted      = localapi.MaxPasted
 )
 
 // connectView is the Connect page in one of its steps: the registration
@@ -210,7 +213,7 @@ func (s *Server) accountsPage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		consent, detail := s.cfg.Accounts.Begin(ctx, d.ID, v.Use.ID, reg)
+		consent, detail := s.cfg.Accounts.Begin(ctx, cookieToken(r), d.ID, v.Use.ID, reg)
 		if detail == "" {
 			if v.Consent = d.consentLink(consent); v.Consent == "" {
 				detail = "badlink"
@@ -243,7 +246,7 @@ func (s *Server) accountsPage(w http.ResponseWriter, r *http.Request) {
 			v.Err = connectText(dNotOurs)
 			break
 		}
-		detail := s.cfg.Accounts.Finish(ctx, d.ID, confirmed.ID, pasted)
+		detail := s.cfg.Accounts.Finish(ctx, cookieToken(r), d.ID, confirmed.ID, pasted)
 		if use, ok := strings.CutPrefix(detail, dSignedIn+" "); ok {
 			// A use the declaration lacks is still a sealed grant: say it
 			// connected rather than that nothing did.

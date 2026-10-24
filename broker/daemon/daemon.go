@@ -209,6 +209,9 @@ type PageSocket struct {
 	RotateAPNet func() error
 	// PlanSignIn signs a signed-out plan in again from the page (#1264).
 	PlanSignIn localsrv.PlanSignIn
+	// Accounts are the account clerks' sign-ins the Connect page reaches,
+	// by account ID (#3006); nil refuses both ops.
+	Accounts map[string]localsrv.AccountSignIn
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -462,6 +465,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			}}
 		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
 		lcfg.PlanSignIn = cfg.PageSocket.PlanSignIn
+		lcfg.Accounts = cfg.PageSocket.Accounts
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}

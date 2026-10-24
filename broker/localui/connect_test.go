@@ -29,11 +29,13 @@ type fakeAccounts struct {
 	beginErr string
 	pasted   []string
 	finish   string
+	sessions []string
 }
 
-func (f *fakeAccounts) Begin(ctx context.Context, account, use string, reg *AccountRegistration) (string, string) {
+func (f *fakeAccounts) Begin(ctx context.Context, session, account, use string, reg *AccountRegistration) (string, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sessions = append(f.sessions, session)
 	f.begun = append(f.begun, account+" "+use)
 	f.reg = reg
 	if f.beginErr != "" {
@@ -42,9 +44,10 @@ func (f *fakeAccounts) Begin(ctx context.Context, account, use string, reg *Acco
 	return f.consent, ""
 }
 
-func (f *fakeAccounts) Finish(ctx context.Context, account, use, pasted string) string {
+func (f *fakeAccounts) Finish(ctx context.Context, session, account, use, pasted string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sessions = append(f.sessions, session)
 	f.pasted = append(f.pasted, account+" "+use+" "+pasted)
 	return f.finish
 }
