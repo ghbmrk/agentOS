@@ -17,7 +17,7 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `mkosi/mkosi.postinst` | Copies dpkg's status file and os-release to OUT as `agentos.dpkg-status` and `agentos.os-release`, for image.yml's known-vulnerability scan (`tools/vulncheck.py image`, EVL-5) |
 | `mkosi/tmpfiles.allow` | Every tmpfiles.d line the image may ship; `mkosi.finalize` fails the build on any other (#1543) |
 | `mkosi/exec.allow` | Every udev rules file, generator, modules-load.d, modprobe.d, sysctl.d and binfmt.d file, and systemd shutdown and sleep hook, the image may ship, by its SHA-256; `mkosi.finalize` fails the build on any other (#1556, #2176) |
-| `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth, the noexec `etc/fstab` and `/tmp` drop-in, and the weekly reboot (`agentos-reboot.timer`, UPD-10) |
+| `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth, the noexec `etc/fstab` and `/tmp` drop-in, the weekly reboot (`agentos-reboot.timer`, UPD-10) and its monthly restore drill (`agentos-drill-report.service`, #2932) |
 | `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest; fails the release on a private key or Owner Card anywhere on the disk outside `/usr` slot A (HW-1, IMG-1-1) |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop, and that a host disk attached on the first boot comes out unchanged (ONB-2, IMG-1-1) |
 | `probe_inbound.py` | Probes box ports through QEMU's host forwards for `ci_boot.sh`: dropped, answered or error |

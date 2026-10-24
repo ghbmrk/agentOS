@@ -275,6 +275,8 @@ class WeeklyRebootTest(unittest.TestCase):
         t = pathlib.Path(self.tmp.name)
         self.bin, self.root, self.log = t / "bin", t / "root", t / "calls.log"
         (self.root / "proc").mkdir(parents=True)
+        # A drill finished this month, so no restore drill is due (tests/test_image_drill.py).
+        write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
         # systemctl refuses while the inhibit file holds a number above zero, and counts it down;
         # sleep moves uptime on.
         self.inhibit = t / "inhibit"
