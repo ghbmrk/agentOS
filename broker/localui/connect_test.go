@@ -42,10 +42,10 @@ func (f *fakeAccounts) Begin(ctx context.Context, account, use string, reg *Acco
 	return f.consent, ""
 }
 
-func (f *fakeAccounts) Finish(ctx context.Context, account, pasted string) string {
+func (f *fakeAccounts) Finish(ctx context.Context, account, use, pasted string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pasted = append(f.pasted, account+" "+pasted)
+	f.pasted = append(f.pasted, account+" "+use+" "+pasted)
 	return f.finish
 }
 
@@ -137,17 +137,41 @@ func TestTheOwnerConnectsGmailOnTheLocalPage(t *testing.T) {
 	}
 	for _, want := range []string{"read every message and attachment", "send mail as you", "move messages to the trash",
 		"delete mail forever", "change your Gmail settings", "your Google password or sign-in", "your account recovery",
-		`name="step" value="connect"`, `<button>Connect</button>`} {
+		`name="step" value="connect"`, `name="use" value="sort"`, `<button>Connect</button>`} {
 		if !strings.Contains(p, want) {
 			t.Errorf("confirm screen lacks %q", want)
 		}
 	}
 
-	// Connect hands the clerk the pasted address, and says what it did.
-	w = r.post("/accounts/gmail", url.Values{"step": {"connect"}, "pasted": {landed}})
-	if p := html.UnescapeString(w.Body.String()); w.Code != 200 || !slices.Equal(fa.pasted, []string{"gmail " + landed}) ||
-		!strings.Contains(p, "Gmail is connected") || !strings.Contains(p, "Sort") {
+	// Connect hands the clerk the pasted address and the use the confirm
+	// screen named, and says what it did: for Sort, that it can send.
+	w = r.post("/accounts/gmail", url.Values{"step": {"connect"}, "use": {"sort"}, "pasted": {landed}})
+	if p := html.UnescapeString(w.Body.String()); w.Code != 200 || !slices.Equal(fa.pasted, []string{"gmail sort " + landed}) ||
+		!strings.Contains(p, "Gmail is connected") || !strings.Contains(p, "Sort") || !strings.Contains(p, "This also lets me send mail as you.") {
 		t.Fatalf("connect: %d %v\n%s", w.Code, fa.pasted, p)
+	}
+}
+
+// The Connect form names the use its confirm screen showed, and the clerk
+// is asked to finish only that use (#3012, the #3008 Security path): a
+// form with no use or an undeclared one reaches nothing.
+func TestConnectCarriesTheConfirmedUse(t *testing.T) {
+	r, fa := connectRig(t)
+	r.signIn()
+	const landed = "http://127.0.0.1:8521/agentos?state=s&code=c"
+	for _, use := range []string{"", "everything"} {
+		if w := r.post("/accounts/gmail", url.Values{"step": {"connect"}, "use": {use}, "pasted": {landed}}); w.Code != http.StatusBadRequest || len(fa.pasted) != 0 {
+			t.Fatalf("use %q: %d %v", use, w.Code, fa.pasted)
+		}
+	}
+	p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"paste"}, "use": {"watch"}, "pasted": {landed}}).Body.String())
+	if !strings.Contains(p, `name="use" value="watch"`) || strings.Contains(p, `value="sort"`) {
+		t.Fatalf("the Watch confirm screen does not carry Watch:\n%s", p)
+	}
+	fa.finish = clerk.DUse
+	p = html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "use": {"watch"}, "pasted": {landed}}).Body.String())
+	if !slices.Equal(fa.pasted, []string{"gmail watch " + landed}) || !strings.Contains(p, `class="err"`) || strings.Contains(p, "Gmail is connected") {
+		t.Fatalf("a use the clerk refused: %v\n%s", fa.pasted, p)
 	}
 }
 
@@ -199,7 +223,7 @@ func TestTheFirstConnectNeedsTheRegistration(t *testing.T) {
 func TestConnectTextsForEachDetail(t *testing.T) {
 	for mine, clerks := range map[string]string{dSignedIn: clerk.DSignedIn, dNoSignIn: clerk.DNoSignIn, dNotOurs: clerk.DNotOurs,
 		dState: clerk.DState, dRefused: clerk.DRefused, dScope: clerk.DScope, dNoGrant: clerk.DNoGrant, dExchange: clerk.DExchange,
-		dNoAccount: clerk.DNoAccount, dRegistered: clerk.DRegistered} {
+		dNoAccount: clerk.DNoAccount, dRegistered: clerk.DRegistered, dUse: clerk.DUse} {
 		if mine != clerks {
 			t.Errorf("page detail %q, clerk's %q", mine, clerks)
 		}
@@ -207,10 +231,10 @@ func TestConnectTextsForEachDetail(t *testing.T) {
 	r, fa := connectRig(t)
 	r.signIn()
 	const landed = "http://127.0.0.1:8521/agentos?state=SECRETSTATE&code=SECRETCODE"
-	for _, d := range []string{clerk.DNoSignIn, clerk.DNotOurs, clerk.DState, clerk.DRefused, clerk.DScope, clerk.DNoGrant,
+	for _, d := range []string{clerk.DNoSignIn, clerk.DNotOurs, clerk.DState, clerk.DUse, clerk.DRefused, clerk.DScope, clerk.DNoGrant,
 		clerk.DExchange, clerk.DExchange + " http 400", clerk.DCredential, "something new", "", " "} {
 		fa.finish = d
-		p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "pasted": {landed}}).Body.String())
+		p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "use": {"sort"}, "pasted": {landed}}).Body.String())
 		if !strings.Contains(p, `class="err"`) || strings.Contains(p, "SECRET") || strings.Contains(p, "Gmail is connected") {
 			t.Errorf("%q:\n%s", d, p)
 		}
@@ -294,7 +318,7 @@ func TestConnectSaysConnectedForAnUnlistedUse(t *testing.T) {
 	r, fa := connectRig(t)
 	r.signIn()
 	fa.finish = "signedin newuse"
-	p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "pasted": {"http://127.0.0.1:8521/agentos?code=c"}}).Body.String())
+	p := html.UnescapeString(r.post("/accounts/gmail", url.Values{"step": {"connect"}, "use": {"sort"}, "pasted": {"http://127.0.0.1:8521/agentos?code=c"}}).Body.String())
 	if !strings.Contains(p, "Gmail is connected.") || strings.Contains(p, `class="err"`) {
 		t.Fatalf("unlisted use:\n%s", p)
 	}

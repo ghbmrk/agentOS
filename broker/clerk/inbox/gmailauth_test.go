@@ -23,6 +23,9 @@ type signInRig struct {
 	sec *clerk.Secrets
 	in  *clerk.SignIn
 	out []string
+	// use is the last use begun, the one the owner page's confirm screen
+	// shows and its Connect form carries.
+	use string
 }
 
 func newSignIn(t *testing.T) *signInRig {
@@ -53,12 +56,16 @@ func (r *signInRig) begin(t *testing.T, use string, reg *clerk.Registration) str
 		t.Fatalf("Begin(%s) = %v", use, err)
 	}
 	r.out = append(r.out, addr)
+	r.use = use
 	return addr
 }
 
-// finish pastes landing and returns the detail.
-func (r *signInRig) finish(landing string) string {
-	d := r.in.Finish(context.Background(), landing)
+// finish pastes landing for the last use begun and returns the detail.
+func (r *signInRig) finish(landing string) string { return r.finishAs(r.use, landing) }
+
+// finishAs pastes landing on a confirm screen that named use.
+func (r *signInRig) finishAs(use, landing string) string {
+	d := r.in.Finish(context.Background(), use, landing)
 	r.out = append(r.out, d)
 	return d
 }
@@ -169,6 +176,36 @@ func TestGmailSignInChecksThePasteBeforeRedeeming(t *testing.T) {
 	_ = r2.begin(t, "watch", household) // a new Begin replaces the verifier and state
 	if d := r2.finish(landing2); d != clerk.DState {
 		t.Fatalf("stale state after a new Begin: %q", d)
+	}
+}
+
+// Finish is bound to the use the owner confirmed (#3012, the #3008 Security
+// path): with Watch begun in one tab and Sort in another, Sort's landing
+// address pasted on Watch's confirm screen redeems nothing, seals nothing
+// and ends the sign-in, so the paste cannot then be tried as Sort.
+func TestGmailSignInIsBoundToTheConfirmedUse(t *testing.T) {
+	r := newSignIn(t)
+	_ = r.begin(t, "watch", household)
+	landing, _ := r.srv.Approve(r.begin(t, "sort", household))
+	if d := r.finishAs("watch", landing); d != clerk.DUse {
+		t.Fatalf("Sort's landing on Watch's screen: %q", d)
+	}
+	if d := r.finishAs("sort", landing); d != clerk.DNoSignIn {
+		t.Fatalf("after a use refused: %q", d)
+	}
+	for _, use := range []string{"", "everything"} {
+		landing, _ := r.srv.Approve(r.begin(t, "watch", household))
+		if d := r.finishAs(use, landing); d != clerk.DUse {
+			t.Fatalf("use %q: %q", use, d)
+		}
+	}
+	if r.srv.Tokens() != 0 || r.sec.Has("gmail") {
+		t.Fatal("a code was redeemed for a use the owner did not confirm")
+	}
+	for _, o := range r.out {
+		if strings.Contains(o, gmailtest.Secret) {
+			t.Fatal("a detail carries the client secret")
+		}
 	}
 }
 

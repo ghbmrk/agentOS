@@ -77,7 +77,7 @@ func TestClerkTLSUsesTheHybridKeyExchange(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(addr)
-	in.Finish(context.Background(), "http://127.0.0.1:8521/cb?code=c&state="+u.Query().Get("state"))
+	in.Finish(context.Background(), "read", "http://127.0.0.1:8521/cb?code=c&state="+u.Query().Get("state"))
 	if len(curves) != 2 || curves[0] != tls.X25519MLKEM768 || curves[1] != tls.X25519MLKEM768 {
 		t.Fatalf("negotiated %v, want X25519MLKEM768 for the call and the exchange", curves)
 	}
@@ -103,7 +103,7 @@ func TestSignInRunsOutAndAKeptGrantStays(t *testing.T) {
 	addr, _ := in.Begin("read", &clerk.Registration{ID: "client", Secret: "canary-client-secret"})
 	u, _ := url.Parse(addr)
 	now += 15*60*1000 + 1
-	if got := in.Finish(context.Background(), "http://127.0.0.1:8521/cb?code=c&state="+u.Query().Get("state")); got != clerk.DNoSignIn {
+	if got := in.Finish(context.Background(), "read", "http://127.0.0.1:8521/cb?code=c&state="+u.Query().Get("state")); got != clerk.DNoSignIn {
 		t.Fatalf("a late paste = %q", got)
 	}
 	_ = sec.Put("grant", clerk.KindGrant, []byte(`{"refresh_token":"canary-refresh","client_id":"client","client_secret":"s"}`))

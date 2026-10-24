@@ -22,9 +22,11 @@ type Accounts interface {
 	// consent address. reg is the household's client, given at its first
 	// sign-in; nil signs in again with the client the clerk sealed.
 	Begin(ctx context.Context, account, use string, reg *AccountRegistration) (consent, detail string)
-	// Finish hands the clerk the address the owner pasted and returns its
-	// detail: "signedin <use>" when the grant is sealed.
-	Finish(ctx context.Context, account, pasted string) string
+	// Finish hands the clerk the address the owner pasted and the use the
+	// confirm screen named, and returns its detail: "signedin <use>" when
+	// the grant is sealed, "use" when the clerk's waiting sign-in is for
+	// another use (it refuses before redeeming anything).
+	Finish(ctx context.Context, account, use, pasted string) string
 }
 
 // AccountRegistration is the household's own client (clerk.Registration).
@@ -229,12 +231,19 @@ func (s *Server) accountsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Step = "confirm"
 	case "connect":
+		// The form carries the use its confirm screen showed; the clerk
+		// finishes only that use.
+		confirmed := d.use(f.Get("use"))
+		if confirmed == nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
 		pasted := strings.TrimSpace(f.Get("pasted"))
 		if pasted == "" || len(pasted) > maxPasted {
 			v.Err = connectText(dNotOurs)
 			break
 		}
-		detail := s.cfg.Accounts.Finish(ctx, d.ID, pasted)
+		detail := s.cfg.Accounts.Finish(ctx, d.ID, confirmed.ID, pasted)
 		if use, ok := strings.CutPrefix(detail, dSignedIn+" "); ok {
 			// A use the declaration lacks is still a sealed grant: say it
 			// connected rather than that nothing did.
@@ -267,6 +276,7 @@ const (
 	dNoSignIn   = "nosignin"
 	dNotOurs    = "notours"
 	dState      = "state"
+	dUse        = "use"
 	dRefused    = "refused"
 	dScope      = "scope"
 	dNoGrant    = "nogrant"
@@ -286,6 +296,8 @@ func connectText(detail string) string {
 		return "That sign-in ran out or was replaced by a newer one. Start again below."
 	case dState:
 		return "That address is from a different sign-in. Start again below, and paste the address from that one."
+	case dUse:
+		return "That address is from a sign-in for a different use than the one you confirmed, so nothing is connected. Start again below, and use one tab."
 	case dRefused:
 		return "You said no on Google's page, so nothing is connected. Start again below if you change your mind."
 	case dScope:
@@ -330,10 +342,10 @@ func init() {
 <ul>{{range .Use.Gets}}<li>{{.}}</li>{{end}}</ul>
 <p>It never gives me:</p>
 <ul>{{range $a.Never}}<li>{{.}}</li>{{end}}</ul>
-<form method="post" action="/accounts/{{$a.ID}}"><input type="hidden" name="step" value="connect"><input type="hidden" name="pasted" value="{{.Pasted}}"><button>Connect</button></form>
+<form method="post" action="/accounts/{{$a.ID}}"><input type="hidden" name="step" value="connect"><input type="hidden" name="use" value="{{.Use.ID}}"><input type="hidden" name="pasted" value="{{.Pasted}}"><button>Connect</button></form>
 <p><a href="/accounts/{{$a.ID}}">Cancel</a></p>
 {{else if eq .Step "done"}}
-<p class="ok">{{.Done}}{{with .Use}} {{.Name}}: I can {{.Text}}.{{end}}</p>
+<p class="ok">{{.Done}}{{with .Use}} {{.Name}}: I can {{.Text}}.{{with .Warn}} {{.}}{{end}}{{end}}</p>
 <p><a href="/home">Done</a></p>
 {{else}}
 <p>You register your own {{$a.Provider}} client once, by hand, on your phone or computer. Each link opens {{$a.Provider}}'s console there.</p>
