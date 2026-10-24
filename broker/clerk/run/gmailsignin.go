@@ -180,12 +180,17 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	if replacing && !again {
 		h.revokeGmail(prev) // before the new slot is put, so the store holds prev's only
 	}
+	err = nil
 	if slot != g.slot || !again {
-		if err := h.sec.Put(slot, clerk.KindGrant, g.grant); err != nil {
-			return "", err
-		}
+		err = h.sec.Put(slot, clerk.KindGrant, g.grant)
 	}
-	if err := SetGmail(h.dir, h.sec, addr); err != nil {
+	if err == nil {
+		err = SetGmail(h.dir, h.sec, addr)
+	}
+	if err != nil {
+		if !again {
+			g.in.Revoke(h.ctx) // nothing names the new grant: give it back
+		}
 		return "", err
 	}
 	h.changed()

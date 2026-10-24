@@ -281,3 +281,31 @@ func TestASignInAgainYieldsToALaterSetup(t *testing.T) {
 			a.Settings, sec.Has(GmailSlot(gmailtest.User)), srv.Revoked())
 	}
 }
+
+// A sign-in that sets up another Gmail address gives the account it
+// replaces its grant back first (A22, #3023 L3 1), and tells the owner the
+// step when Google keeps it.
+func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
+	const other = "other@gmail.test"
+	for _, kept := range []bool{false, true} {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		if kept {
+			c.gmail.revoke = srv.Base() + "/revoke" // answers 401
+		}
+		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, c), MailOwnerSide)}
+		srv.As(other)
+		if d := signIn(t, srv, owner, "watch", fakeClient); d != clerk.DSignedIn+" watch" {
+			t.Fatalf("kept %v: GmailFinish = %q", kept, d)
+		}
+		a, _ := owner.Account()
+		if a.Settings.Address != other || sec.Has(GmailSlot(gmailtest.User)) || !sec.Has(GmailSlot(other)) || sec.Len() != 1 {
+			t.Fatalf("kept %v: account %+v, %d slots; want the new address only", kept, a.Settings, sec.Len())
+		}
+		revoked := slices.Equal(srv.Revoked(), []string{gmailtest.Refresh})
+		st, _ := owner.Status()
+		if revoked == kept || slices.Contains(st.Notices, noteGmailKept) != kept || !slices.Contains(st.Notices, noteMailReplaced) {
+			t.Fatalf("kept %v: revoked %v, notices %v", kept, srv.Revoked(), st.Notices)
+		}
+	}
+}
