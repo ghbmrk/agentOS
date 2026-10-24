@@ -19,13 +19,19 @@ package keydiff
 // never edited. Set KEYDIFF_REACH and KEYCHECK to run it. Each sweep runs
 // the fixed seeds from 0 and stops at the first disagreement, so only a
 // mutant that survives runs all KEYDIFF_REACH_CASES of them (default 100000).
+// So first the unmutated library must agree with keycheck over that whole
+// range (#3002): a real disagreement at some seed would otherwise count every
+// mutant that survives up to it as killed.
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -391,6 +397,27 @@ func TestPredicateReach(t *testing.T) {
 	if cases == "" {
 		cases = "100000"
 	}
+	// The baseline check must itself catch a disagreement at the very end of
+	// the range: each seed asks keycheck two questions, and the fake flips
+	// the answer to the last.
+	t.Run("baseline-catches-plant", func(t *testing.T) {
+		n, err := strconv.Atoi(cases)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := 2 * n
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := sweep("", cases, "KEYCHECK="+self, "KEYDIFF_PLANT_REAL="+os.Getenv("KEYCHECK"), "KEYDIFF_PLANT_AT="+strconv.Itoa(at))
+		if err == nil || !strings.Contains(string(out), "cases disagree") {
+			t.Fatalf("a disagreement planted at keycheck's answer %d went unseen:\n%s", at, tail(string(out), 20))
+		}
+	})
+	if out, err := sweep("", cases); err != nil {
+		t.Fatalf("the unmutated library fails the sweep over the reach range, so no kill can be trusted:\n%s", tail(string(out), 20))
+	}
 	slots := make(chan struct{}, runtime.NumCPU())
 	for _, m := range libMutants {
 		t.Run(m.name, func(t *testing.T) {
@@ -415,9 +442,7 @@ func TestPredicateReach(t *testing.T) {
 			if err := os.WriteFile(ov, overlay, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command("go", "test", "-overlay", ov, "-count=1", "-run", "^TestKeyDiff$", ".")
-			cmd.Env = append(os.Environ(), "KEYDIFF_STOP=1", "KEYDIFF_REACH=", "KEYDIFF_FROM=0", "KEYDIFF_CASES="+cases)
-			out, err := cmd.CombinedOutput()
+			out, err := sweep(ov, cases)
 			switch {
 			case err == nil:
 				t.Errorf("survived: no seed separates the library from keycheck once it lets through %s", m.why)
@@ -430,6 +455,72 @@ func TestPredicateReach(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sweep runs TestKeyDiff over seeds 0..cases, stopping at the first
+// disagreement, with the library replaced as overlay ov says ("" for none)
+// and env added to the environment.
+func sweep(ov, cases string, env ...string) ([]byte, error) {
+	args := []string{"test"}
+	if ov != "" {
+		args = append(args, "-overlay", ov)
+	}
+	cmd := exec.Command("go", append(args, "-count=1", "-run", "^TestKeyDiff$", ".")...)
+	cmd.Env = append(append(os.Environ(), "KEYDIFF_STOP=1", "KEYDIFF_REACH=", "KEYDIFF_FROM=0", "KEYDIFF_CASES="+cases), env...)
+	return cmd.CombinedOutput()
+}
+
+// TestMain runs this binary as the planted fake keycheck when it is started
+// with no arguments, as keycheck is, and KEYDIFF_PLANT_REAL names the real one.
+// go test always passes -test flags, so the sweep's own binary never is.
+func TestMain(m *testing.M) {
+	if real := os.Getenv("KEYDIFF_PLANT_REAL"); real != "" && len(os.Args) == 1 {
+		at, _ := strconv.Atoi(os.Getenv("KEYDIFF_PLANT_AT"))
+		if err := plant(real, at); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// plant relays stdin to the real keycheck and its answers back, with the
+// verdict and the within flag of answer at (counted from 1) flipped.
+func plant(real string, at int) error {
+	cmd := exec.Command(real)
+	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
+	r, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1<<20), 1<<24)
+	w := bufio.NewWriter(os.Stdout)
+	for n := 1; sc.Scan(); n++ {
+		line := sc.Bytes()
+		if n == at {
+			var v map[string]any
+			if err := json.Unmarshal(line, &v); err != nil {
+				return err
+			}
+			valid, _ := v["valid"].(bool)
+			within, _ := v["within"].(bool)
+			v["valid"], v["within"] = !valid, !within
+			if line, err = json.Marshal(v); err != nil {
+				return err
+			}
+		}
+		w.Write(line)
+		w.WriteByte('\n')
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return cmd.Wait()
 }
 
 func tail(s string, n int) string {
