@@ -93,7 +93,14 @@ type Config struct {
 	// online, so the never-online note names Ethernet only and offers no
 	// rejoin (CH-12; P2-2w c4 r1). Nil assumes one.
 	Station func() bool
-	Now     func() time.Time
+	// HTTPS: the HTTPS listener serves this Server too, so a request on
+	// the plain listener for the page name (AP.PageName) is sent there
+	// (#3153). Unset, the plain listener serves the page name itself.
+	HTTPS bool
+	// PageRestore: agentosd answered that the box's page authority is
+	// missing on a claimed box; the status page says to restore it.
+	PageRestore bool
+	Now         func() time.Time
 	Rand    io.Reader
 }
 
@@ -317,6 +324,24 @@ func (s *Server) progress(r *http.Request) Progress {
 // vault page adds one hashed script (vaultCSP).
 const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
+// cspWith is pageCSP admitting only the scripts whose SHA-256 hashes
+// (base64) it is given: the one way a page adds a ceremony script, over
+// HTTP or HTTPS (vaultCSP; #2779a's passkey page).
+func cspWith(hashes ...string) string {
+	if len(hashes) == 0 {
+		return pageCSP
+	}
+	csp := pageCSP + "; script-src"
+	for _, h := range hashes {
+		csp += " 'sha256-" + h + "'"
+	}
+	return csp
+}
+
+// hstsAge is two years: a phone that has seen the HTTPS page once never
+// clicks through a bad certificate for it (CH-9).
+const hstsAge = "max-age=63072000"
+
 // ServeHTTP applies the CH-9 and CH-7 guards to every request, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// CH-9: only clients on the access point's subnet. The listener is
@@ -333,10 +358,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
-	// Any other host name is a phone's captive-portal check, or a page
-	// trying to reach the box through DNS rebinding: send it to the box's
-	// own address, and never act on it (ONB-5).
-	if r.Host != s.host {
+	if r.TLS != nil {
+		// HTTPS answers the page name only: never a redirect, so a
+		// DNS-rebound name gets nothing (#3153). SNI was checked at the
+		// handshake (PageTLS.Config).
+		if !s.isPageHost(r.Host, HTTPSPort) || r.TLS.ServerName != s.cfg.AP.pageName() {
+			http.Error(w, "Misdirected request", http.StatusMisdirectedRequest)
+			return
+		}
+		h.Set("Strict-Transport-Security", hstsAge)
+	} else if s.isPageHost(r.Host, s.cfg.Port) {
+		if s.cfg.HTTPS {
+			// The page name over plain HTTP goes to HTTPS, same path, so
+			// a phone that trusts the authority never stays on HTTP.
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			http.Redirect(w, r, "https://"+s.cfg.AP.pageName()+safeNext(r.URL.Path), http.StatusFound)
+			return
+		}
+		// No HTTPS: the plain listener serves the page name as it is.
+	} else if r.Host != s.host {
+		// Any other host name is a phone's captive-portal check, or a page
+		// trying to reach the box through DNS rebinding: send it to the
+		// box's own address, and never act on it (ONB-5).
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -360,10 +406,51 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return false
 	}
-	if o := r.Header.Get("Origin"); o != "" && o != "http://"+s.host {
+	if o := r.Header.Get("Origin"); o != "" && o != s.origin(r) {
 		return false
 	}
 	return true
+}
+
+// origin is the page's own origin for r: https://<page name> over HTTPS,
+// else http:// and the host ServeHTTP admitted.
+func (s *Server) origin(r *http.Request) string {
+	if r.TLS != nil {
+		return "https://" + s.cfg.AP.pageName()
+	}
+	if s.isPageHost(r.Host, s.cfg.Port) {
+		return "http://" + r.Host
+	}
+	return "http://" + s.host
+}
+
+// isPageHost: host is the page name, with the listener's port or none.
+func (s *Server) isPageHost(host string, port int) bool {
+	name := s.cfg.AP.pageName()
+	return host == name || host == net.JoinHostPort(name, strconv.Itoa(port))
+}
+
+// hostPrefix is the cookie name prefix over HTTPS (CH-9): a __Host-
+// cookie is Secure, has no Domain and Path=/, so no other name can set or
+// read it.
+const hostPrefix = "__Host-"
+
+// setCookie sets c; over HTTPS under a __Host- name, Secure, Path=/, no
+// Domain, SameSite=Strict, HttpOnly.
+func setCookie(w http.ResponseWriter, r *http.Request, c *http.Cookie) {
+	if r.TLS != nil {
+		c.Name, c.Secure, c.Path, c.Domain = hostPrefix+c.Name, true, "/", ""
+		c.SameSite, c.HttpOnly = http.SameSiteStrictMode, true
+	}
+	http.SetCookie(w, c)
+}
+
+// readCookie reads the cookie setCookie set under name for r's scheme.
+func readCookie(r *http.Request, name string) (*http.Cookie, error) {
+	if r.TLS != nil {
+		name = hostPrefix + name
+	}
+	return r.Cookie(name)
 }
 
 func (s *Server) post(f http.HandlerFunc) http.HandlerFunc {
@@ -404,7 +491,7 @@ func (s *Server) isSignedIn(r *http.Request) bool {
 // cookieToken is the phone's session token, "" if it has none of the
 // form agentosd mints.
 func cookieToken(r *http.Request) string {
-	c, err := r.Cookie(cookieName)
+	c, err := readCookie(r, cookieName)
 	if err != nil || len(c.Value) != 2*localapi.TokenBytes {
 		return ""
 	}
@@ -412,8 +499,8 @@ func cookieToken(r *http.Request) string {
 }
 
 // remember sets the phone's cookie to the session agentosd minted.
-func (s *Server) remember(w http.ResponseWriter, ses localapi.Session) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: ses.Token, Path: "/", Expires: ses.Until,
+func (s *Server) remember(w http.ResponseWriter, r *http.Request, ses localapi.Session) {
+	setCookie(w, r, &http.Cookie{Name: cookieName, Value: ses.Token, Path: "/", Expires: ses.Until,
 		MaxAge: int(ses.Until.Sub(s.cfg.Now()) / time.Second), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
@@ -462,6 +549,8 @@ type statusView struct {
 	// AskCode: the RESUME form asks a signed-in phone for a code, as
 	// agentosd needs one for an old sign-in.
 	AskCode bool
+	// Restore: the box's page authority is missing (Config.PageRestore).
+	Restore bool
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.statusPage(w, r, msgText(r)) }
@@ -471,7 +560,8 @@ func (s *Server) statusPage(w http.ResponseWriter, r *http.Request, msg string) 
 }
 
 func (s *Server) statusPageWith(w http.ResponseWriter, r *http.Request, msg string, askCode bool) {
-	v := statusView{Progress: s.progress(r), SignedIn: s.isSignedIn(r), Done: s.setupDone(r), Msg: msg, AskCode: askCode}
+	v := statusView{Progress: s.progress(r), SignedIn: s.isSignedIn(r), Done: s.setupDone(r), Msg: msg, AskCode: askCode,
+		Restore: s.cfg.PageRestore}
 	if v.Progress.Phase != "ready" {
 		v.Refresh = "10"
 	}
@@ -574,7 +664,7 @@ func (s *Server) checkSignIn(w http.ResponseWriter, r *http.Request, code string
 	case err != nil:
 		return "", errors.New("Could not check the code. Try again.")
 	}
-	s.remember(w, ses)
+	s.remember(w, r, ses)
 	return ses.Token, nil
 }
 
@@ -662,7 +752,7 @@ func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	setCookie(w, r, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/status", http.StatusSeeOther)
 }
 

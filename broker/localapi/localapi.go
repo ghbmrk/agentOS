@@ -7,7 +7,8 @@
 // L1 on the P2-2w plan). A code or grid cell passes through to agentosd,
 // which mints an opaque session token on a good sign-in; every op that
 // acts or reads the owner's requests presents that token. Only status,
-// STOP, the grid cell's challenge and sign-in itself need none.
+// STOP, the grid cell's challenge, sign-in itself and certify (a serving
+// certificate for the page name, #3153) need none.
 //
 // agentosd links this package and not the local UI, whose QR decoder
 // parses untrusted photos (L15). It carries no network client.
@@ -90,10 +91,19 @@ const (
 	// bound; ErrFailed when the clerk did not answer.
 	OpAccountBegin  = "page_account_begin"
 	OpAccountFinish = "page_account_finish"
+	// OpCertify (CertifyArgs) certifies the page's own serving key for the
+	// page name under agentosd's page authority and answers a Certified
+	// (OWN-page-https, #3153; CH-9): the leaf and the authority's
+	// certificate, never a key. It needs no token: the page asks at its
+	// start, before any sign-in, and the leaf names only the page.
+	// ErrNoAuthority when agentosd holds no authority (no sealer, or one
+	// that did not open on a fresh box), ErrRestore on a claimed box whose
+	// authority is missing, ErrBadArgs for a key that is not ECDSA P-256.
+	OpCertify = "page_certify"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpCertify}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -101,6 +111,8 @@ const (
 	ErrBadArgs      = "bad args"     // a field missing or past its bound
 	ErrLimited      = "limited"      // too many wrong codes on this socket in the last minute
 	ErrFailed       = "failed"       // the owner channel could not act
+	ErrNoAuthority  = "no authority" // OpCertify: no page authority; the page serves HTTP only
+	ErrRestore      = "restore"      // OpCertify: a claimed box lost its page authority; restore it
 )
 
 // Bounds on string fields (Security L3). Tokens are TokenBytes random
@@ -128,7 +140,22 @@ const (
 	// OpAccountFinish).
 	MaxClientField = 512
 	MaxPasted      = 4 << 10
+	// MaxPub bounds a serving key to certify, PKIX DER (a P-256 key is 91
+	// bytes).
+	MaxPub = 256
 )
+
+// CertifyArgs carries the page's serving public key, PKIX DER.
+type CertifyArgs struct {
+	Pub []byte `json:"pub"`
+}
+
+// Certified is a serving certificate for the page name and the authority
+// that signed it, both DER.
+type Certified struct {
+	Leaf      []byte `json:"leaf"`
+	Authority []byte `json:"authority"`
+}
 
 // Status is the box's state as the page shows it before sign-in: fixed
 // flags and fixed wording only, never task text, request contents,

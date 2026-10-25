@@ -235,10 +235,12 @@ func tokenOps(tok string) map[string]any {
 }
 
 // Security L1: without a token agentosd mints, every op but status, STOP,
-// the grid cell and sign-in itself is refused, whatever the client sends.
+// the grid cell, sign-in itself and certify (a leaf for the page name only,
+// #3153) is refused, whatever the client sends.
 func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 	r := newRig(t)
-	open := map[string]bool{localapi.OpStatus: true, localapi.OpStop: true, localapi.OpGridCell: true, localapi.OpSignIn: true}
+	open := map[string]bool{localapi.OpStatus: true, localapi.OpStop: true, localapi.OpGridCell: true, localapi.OpSignIn: true,
+		localapi.OpCertify: true}
 	if len(r.ops) != len(localapi.Ops) {
 		t.Fatalf("ops %d, contract lists %d", len(r.ops), len(localapi.Ops))
 	}
@@ -264,6 +266,9 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 		t.Fatalf("reached the channel: %v %v %v %v %d", r.own.answers, r.follows, r.adopted, r.forgets, r.rotated)
 	}
 	for op := range open {
+		if op == localapi.OpCertify {
+			continue // no page authority in this rig (certify_test.go)
+		}
 		var args any = struct{}{}
 		if op == localapi.OpSignIn {
 			args = localapi.SignIn{Code: good}
