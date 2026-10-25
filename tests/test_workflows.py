@@ -86,21 +86,23 @@ PREMERGE_LINES = [
     '    types: [opened, synchronize, reopened, edited]',
     '  issue_comment:',
     '    types: [created, edited, deleted]',
+    '  workflow_run:',
+    '    workflows: [ci, assurance, vulncheck, word-budget, g1-freeze, lane-gate, trusted-base, formal, keycheck, image, testkit-image]',
+    '    types: [completed]',
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request",
+    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]",
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
-    "      arm-node: ${{ steps.gate.outputs.arm-node }}",
-    "      arm-head: ${{ steps.gate.outputs.arm-head }}",
+    '      merge-head: ${{ steps.gate.outputs.merge-head }}',
     '    permissions:',
     '      contents: read',
     '      issues: read',
@@ -122,7 +124,7 @@ PREMERGE_LINES = [
     '      - name: Premerge (base copy of tools/premerge.py)',
     '        id: gate',
     '        env:',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
     '          REPO: ${{ github.repository }}',
     '          GH_TOKEN: ${{ github.token }}',
     '          STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}',
@@ -157,35 +159,39 @@ PREMERGE_LINES = [
     '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
-    '          if [ "$state" = success ] && [ "$out" = same ]; then',
-    '            node=$(jq -r \'select(.state == "open" and .draft == false and .auto_merge == null) | .node_id\' "$RUNNER_TEMP/pr.json")',
-    '            if echo "$node" | grep -Eqx \'[A-Za-z0-9_=-]+\'; then',
-    '              printf \'arm-node=%s\\narm-head=%s\\n\' "$node" "$HEAD_SHA" >> "$GITHUB_OUTPUT"',
-    '            fi',
+    '          if [ "$state" = success ] && [ "$out" = same ] && \\',
+    '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
+    '            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"',
     '          fi',
-    '  arm:',
-    '    name: arm',
+    '  merge:',
+    '    name: merge',
     '    needs: premerge-gate',
-    "    if: needs.premerge-gate.outputs.arm-node != ''",
+    "    if: needs.premerge-gate.outputs.merge-head != ''",
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 5',
     '    environment: bot # deployment branches: main only; holds BOT_PR_TOKEN',
     '    permissions: {}',
     '    steps:',
-    '      - name: Arm auto-merge at the accepted head',
+    '      - name: Merge the accepted head once every check on it is green',
     '        env:',
     '          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
     '          REPO: ${{ github.repository }}',
-    '          PR_NODE: ${{ needs.premerge-gate.outputs.arm-node }}',
-    '          HEAD_SHA: ${{ needs.premerge-gate.outputs.arm-head }}',
+    '          HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}',
     '        run: |',
     '          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
-    '          if ! gh api graphql -f id="$PR_NODE" -f sha="$HEAD_SHA" -f query=\'mutation($id: ID!, $sha: GitObjectID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE, expectedHeadOid: $sha}) { clientMutationId } }\' > /dev/null; then',
-    '            gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null',
+    '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \\',
+    '            --jq \'.check_runs[] | select(.name != "premerge-gate" and .name != "merge")',
+    '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
+    '          stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq \'.statuses[] | select(.state != "success") | .context\') \\',
+    '            || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }',
+    '          if [ -n "$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $runs $stats; exit 0; fi',
+    '          if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null; then',
+    '            echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0',
     '          fi',
-    '          echo "armed #$PR_NUMBER at $HEAD_SHA"',
+    '          echo "merged #$PR_NUMBER at $HEAD_SHA"',
 ]
 
 
@@ -303,8 +309,8 @@ class WorkflowTest(unittest.TestCase):
                 writes, env = "contents: write" in job, bool(re.search(r"(?m)^    environment: bot$", job))
                 if f.name in ("board.yml", "trace.yml", "metrics.yml"):
                     self.assertEqual(writes, env, f"{f.name}: {job.split(':', 1)[0]}")
-                elif f.name == "premerge.yml" and job.startswith("arm:\n"):
-                    # ARM-on-accept (#3103): arms with BOT_PR_TOKEN, so its merge starts push workflows on main.
+                elif f.name == "premerge.yml" and job.startswith("merge:\n"):
+                    # ARM-on-accept (#3103): merges with BOT_PR_TOKEN, so the merge starts push workflows on main.
                     self.assertRegex(job, r"(?m)^    environment: bot #.*\n    permissions: \{\}$", f.name)
                 else:
                     self.assertFalse(env or "BOT_PR_TOKEN" in job, f.name)
@@ -510,11 +516,15 @@ class WorkflowTest(unittest.TestCase):
                      ('GH_TOKEN="$STATUS_TOKEN" gh api -X POST', "gh api -X POST"),
                      ("          permission-statuses: write", "          permission-statuses: write\n          permission-contents: write"),
                      ('[ "$BASE_REF" = main ] || ', ""),
-                     # ARM-on-accept (#3103): only a `same` from --check arms (not `bot`), only an open,
-                     # non-draft, unarmed PR, pinned to the gate's head, with the main-only bot token.
+                     # ARM-on-accept (#3103): only a `same` from --check merges (not `bot`), only an open,
+                     # non-draft, unarmed PR, only with every check green, pinned to the gate's head,
+                     # with the main-only bot token.
                      ('[ "$out" = same ]', '[ "$out" != error ]'),
                      ('.draft == false and .auto_merge == null', '.auto_merge == null'),
-                     ("expectedHeadOid: $sha", "expectedHeadOid: null"),
+                     ('IN("success", "skipped", "neutral")', 'IN("success", "skipped", "neutral", "failure")'),
+                     ('select(.status != "completed" or ', 'select('),
+                     ('.statuses[] | select(.state != "success")', '.statuses[] | select(.state == "failure")'),
+                     ('if [ -n "$runs$stats" ]; then', 'if false; then'),
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
@@ -569,15 +579,15 @@ def run_block(lines, start):
     return "\n".join(l[10:] for l in lines[start:end]) + "\n"
 
 
-def arm_script():
+def merge_script():
     lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
-    return run_block(lines, lines.index("        run: |", lines.index("  arm:")) + 1)
+    return run_block(lines, lines.index("        run: |", lines.index("  merge:")) + 1)
 
 
 class PremergeRunTest(unittest.TestCase):
     SHA = "a" * 40
 
-    OPEN = '"state":"open","draft":false,"auto_merge":null,"node_id":"PR_kw1"'
+    OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN):
         real_jq = shutil.which("jq")
@@ -635,17 +645,16 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_gate("same", base="stacked"), (0, ["failure"]))
         self.assertEqual(self.run_gate("bot", ref="bot/trace", base="stacked"), (0, ["failure"]))
 
-    def test_only_a_full_accept_on_an_open_unarmed_pr_arms(self):
-        # ARM-on-accept (#3103): the gate hands the arm job the PR and the head it read, only on `same`.
+    def test_only_a_full_accept_on_an_open_unarmed_pr_merges(self):
+        # ARM-on-accept (#3103): the gate hands the merge job the head it read, only on `same`.
         out = []
         self.assertEqual(self.run_gate("same", outputs=out), (0, ["success"]))
-        self.assertEqual(out, ["arm-node=PR_kw1", "arm-head=" + self.SHA])
+        self.assertEqual(out, ["merge-head=" + self.SHA])
         for verdict, kw in (("no-verdict", {}), ("needs-security", {}), ("edited-verdict", {}), ("bot", {"ref": "bot/trace"}),
                             ("same", {"base": "stacked"}), ("same", {"fail_at": "comments"}),
                             ("same", {"pr_state": self.OPEN.replace('"draft":false', '"draft":true')}),
                             ("same", {"pr_state": self.OPEN.replace('"state":"open"', '"state":"closed"')}),
-                            ("same", {"pr_state": self.OPEN.replace('"auto_merge":null', '"auto_merge":{"merge_method":"merge"}')}),
-                            ("same", {"pr_state": self.OPEN.replace('PR_kw1', 'PR\\nx=1')})):
+                            ("same", {"pr_state": self.OPEN.replace('"auto_merge":null', '"auto_merge":{"merge_method":"merge"}')})):
             out = []
             self.run_gate(verdict, outputs=out, **kw)
             self.assertEqual(out, [], (verdict, kw))
@@ -656,55 +665,72 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual((code != 0, states), (True, []))
 
 
-STUB_ARM_GH = r"""#!/bin/sh
+STUB_MERGE_GH = r"""#!/bin/sh
 echo "$*" >> "$STUBS/calls"
-case "$1 $2" in
-  "api graphql") [ "$ARM" = ok ] ;;
-  "api -X") [ "$MERGE" = ok ] ;;
+case "$*" in
+  "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq "*) [ "$READ" = fail ] && exit 1
+     printf '%s' "$RUNS" | "$REAL_JQ" -r "$5" ;;
+  "api repos/o/r/commits/"*"/status?per_page=100 --jq "*) [ "$READ" = stat ] && exit 1; printf "%s" "$STATUSES" | "$REAL_JQ" -r "$4" ;;
+  "api -X PUT "*) [ "$MERGE" = ok ] ;;
   *) exit 2 ;;
 esac
 """
 
 
-class ArmRunTest(unittest.TestCase):
-    SHA = "b" * 40
+def run_(name, status="completed", conclusion="success"):
+    return {"name": name, "status": status, "conclusion": conclusion}
 
-    def run_arm(self, arm="ok", merge="ok", token="synthetic-bot", sha=SHA):
+
+class MergeRunTest(unittest.TestCase):
+    SHA = "b" * 40
+    GREEN = [run_("checks"), run_("count"), run_("formal", conclusion="skipped"), run_("premerge-gate"),
+             run_("merge", status="in_progress", conclusion=None)]
+
+    def run_merge(self, runs=GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok", token="synthetic-bot", sha=SHA):
+        real_jq = shutil.which("jq")
+        self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
             stubs = pathlib.Path(d)
-            (stubs / "gh").write_text(STUB_ARM_GH)
+            (stubs / "gh").write_text(STUB_MERGE_GH)
             (stubs / "gh").chmod(0o755)
-            (stubs / "run.sh").write_text(arm_script())
-            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "ARM": arm, "MERGE": merge, "GH_TOKEN": token,
-                   "PR_NUMBER": "7", "REPO": "o/r", "PR_NODE": "PR_kw1", "HEAD_SHA": sha}
+            (stubs / "run.sh").write_text(merge_script())
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
+                   "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha,
+                   "RUNS": json.dumps({"check_runs": list(runs)}),
+                   "STATUSES": json.dumps({"statuses": [{"context": c, "state": st} for c, st in statuses]})}
             proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             calls = (stubs / "calls").read_text().splitlines() if (stubs / "calls").exists() else []
-        return proc.returncode, calls
+        return proc.returncode, [c for c in calls if c.startswith("api -X PUT")], proc.stdout
 
-    def test_arms_pinned_to_the_head(self):
-        code, calls = self.run_arm()
-        self.assertEqual(code, 0)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("-f id=PR_kw1 -f sha=" + self.SHA, calls[0])
-        self.assertIn("expectedHeadOid: $sha", calls[0])
+    def test_all_green_merges_pinned_to_the_head(self):
+        self.assertEqual(self.run_merge()[:2],
+                         (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA]))
 
-    def test_already_mergeable_merges_pinned(self):
-        # GitHub refuses to arm a PR whose checks are all green already; the merge carries the same head pin.
-        code, calls = self.run_arm(arm="refused")
-        self.assertEqual(code, 0)
-        self.assertEqual(calls[1], "api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA)
+    def test_any_check_not_green_never_merges(self):
+        # #3123 review: main requires only some checks, so a running or red unrequired one must hold the merge too.
+        for bad in (run_("count", status="in_progress", conclusion=None), run_("count", conclusion="failure"),
+                    run_("vulncheck", conclusion="cancelled"), run_("lane-gate", status="queued", conclusion=None)):
+            code, puts, out = self.run_merge(runs=self.GREEN + [bad])
+            self.assertEqual((code, puts), (0, []), bad)
+            self.assertIn(bad["name"], out)
+        for st in ("pending", "failure", "error"):
+            self.assertEqual(self.run_merge(statuses=(("premerge", "success"), ("ext", st)))[:2], (0, []), st)
 
-    def test_head_moved_fails_visibly(self):
-        # A push since the gate read the head makes GitHub refuse both calls; the job goes red.
-        code, calls = self.run_arm(arm="refused", merge="refused")
-        self.assertNotEqual(code, 0)
-        self.assertEqual(len(calls), 2)
+    def test_refusals_and_unreadable_checks_warn_without_red(self):
+        # A comment-time run attaches to main's head, so a refusal must not read as main breaking (#1946).
+        code, puts, out = self.run_merge(merge="refused")
+        self.assertEqual((code, len(puts)), (0, 1))
+        self.assertIn("merge refused", out)
+        # A failed read is never an empty list of checks.
+        self.assertEqual(self.run_merge(read="fail")[:2], (0, []))
+        self.assertEqual(self.run_merge(read="fail", runs=[])[:2], (0, []))
+        self.assertEqual(self.run_merge(read="stat", statuses=())[:2], (0, []))
 
-    def test_no_token_or_bad_head_never_calls(self):
-        self.assertEqual(self.run_arm(token=""), (0, []))
-        code, calls = self.run_arm(sha="b" * 39)
-        self.assertEqual((code != 0, calls), (True, []))
+    def test_no_token_or_bad_head_never_merges(self):
+        self.assertEqual(self.run_merge(token="")[:2], (0, []))
+        code, puts, _ = self.run_merge(sha="b" * 39)
+        self.assertEqual((code != 0, puts), (True, []))
 
 
 if __name__ == "__main__":
