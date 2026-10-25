@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // REQ: CLK-1, LOG-2, KRN-2
@@ -86,7 +87,7 @@ func handoffPipe(t *testing.T) *os.File {
 	k := handoff.KernelKeys{
 		Head:    ed25519.NewKeyFromSeed(make([]byte, 32)),
 		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: []byte("a")},
-		Anchors: []ed25519.PublicKey{make([]byte, 32)},
+		Anchors: []key.PublicKey{key.Ed25519(make([]byte, 32))},
 	}
 	b, err := k.Marshal()
 	if err != nil {

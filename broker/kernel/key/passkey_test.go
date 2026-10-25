@@ -302,3 +302,44 @@ func TestAnES256SignatureHasOneEncoding(t *testing.T) {
 		t.Fatalf("a root re-encoded under a new ID: %v", err)
 	}
 }
+
+// KEY-4, #3138: DecodePublicKey is Encode's exact inverse, so the unlock
+// step's hand-off carries a hardware key as it was enrolled. A P-256 point
+// can hold NULs, so a decoder that split on NUL would misread one.
+func TestDecodeInvertsEncode(t *testing.T) {
+	var es PublicKey
+	for i := 0; i < 1000 && !es.Valid(); i++ {
+		if pk := newAuthenticator(t, "box.example").Public(); bytes.IndexByte(pk.Bytes()[1:], 0) >= 0 {
+			es = pk
+		}
+	}
+	if !es.Valid() {
+		t.Fatal("no point with a NUL in it")
+	}
+	ed := Ed25519(bytes.Repeat([]byte{7}, 32))
+	for _, pk := range []PublicKey{ed, es} {
+		if got, err := DecodePublicKey(pk.Encode()); err != nil || got != pk {
+			t.Errorf("%v: decoded %v %v", pk, got, err)
+		}
+	}
+	enc := es.Encode()
+	sep := len(enc) - 65 - 2
+	edit := func(f func([]byte) []byte) []byte { return f(bytes.Clone(enc)) }
+	off := bytes.Clone(enc)
+	off[sep+2] ^= 1 // X changed: the point is off the curve
+	colon := []byte("es256\x00box:example\x00" + string(es.Bytes()) + "\x00")
+	for name, b := range map[string][]byte{
+		"empty": nil, "31 bytes": make([]byte, 31), "33 bytes": make([]byte, 33),
+		"no final NUL":      enc[:len(enc)-1],
+		"final not NUL":     edit(func(b []byte) []byte { b[len(b)-1] = 'x'; return b }),
+		"separator not NUL": edit(func(b []byte) []byte { b[sep] = 'X'; return b }),
+		"bad prefix":        edit(func(b []byte) []byte { b[0] = 'E'; return b }),
+		"no rp id":          []byte("es256\x00\x00" + string(es.Bytes()) + "\x00"),
+		"off the curve":     off,
+		"rp id with colon":  colon,
+	} {
+		if _, err := DecodePublicKey(b); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: got %v, want ErrMalformed", name, err)
+		}
+	}
+}

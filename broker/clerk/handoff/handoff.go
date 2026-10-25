@@ -16,6 +16,8 @@ import (
 	"io"
 	"os"
 	"syscall"
+
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // KeyFD is the descriptor the kernel main reads its keys from.
@@ -36,19 +38,31 @@ const CounterEntry = "kernel/counter"
 const maxName = 64
 
 // AnchorsEntry is the sealed store's entry holding the owner's hardware keys
-// (D-146), each 32 bytes, one after another. The store's MAC covers it, so a
-// writer of the drive cannot swap in keys of their own.
+// (D-146), in EncodeAnchors' form, or, as first written, 32-byte Ed25519
+// keys one after another. The store's MAC covers it, so a writer of the
+// drive cannot swap in keys of their own.
 const AnchorsEntry = "kernel/anchors"
 
 // MaxAnchors bounds the owner's hardware keys in the hand-off.
 const MaxAnchors = 16
 
-const handoffTag = "agentos-kernel-keys/v2\n"
+const handoffTag = "agentos-kernel-keys/v3\n"
+
+// anchorsTag starts AnchorsEntry's versioned form. A first-form value reads
+// as it only if its first key starts with these bytes; only enrollment
+// writes the entry, under the store's MAC, so that is not an attacker's
+// choice.
+const anchorsTag, anchorsTagStem = "agentos-anchors/v1\n", "agentos-anchors/"
+
+// maxAnchor is the longest anchor on the wire: a uint16 length and an ES256
+// key's Encode, whose RP ID is at most 253 bytes.
+const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 
 // maxHandoff is the longest hand-off: the tag, the log key, the head seed,
-// the counter, the count and MaxAnchors keys. It is far below a pipe's
-// buffer, so the unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 1 + MaxAnchors*ed25519.PublicKeySize
+// the counter, the count and MaxAnchors ES256 keys, under 6 KiB. It is far
+// below a pipe's 64 KiB buffer, so the unlock step's write never waits for
+// a reader.
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -66,7 +80,7 @@ type KernelKeys struct {
 	Log     [32]byte
 	Head    ed25519.PrivateKey
 	Counter Counter
-	Anchors []ed25519.PublicKey
+	Anchors []key.PublicKey
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -89,21 +103,77 @@ func (c Counter) valid() bool {
 	return c.Handle != 0
 }
 
-// ParseAnchors reads AnchorsEntry's value: 1 to MaxAnchors distinct keys.
-func ParseAnchors(b []byte) ([]ed25519.PublicKey, error) {
+// ParseAnchors reads AnchorsEntry's value: 1 to MaxAnchors distinct keys,
+// in EncodeAnchors' form or the first one.
+func ParseAnchors(b []byte) ([]key.PublicKey, error) {
+	if bytes.HasPrefix(b, []byte(anchorsTagStem)) {
+		b, ok := bytes.CutPrefix(b, []byte(anchorsTag))
+		if !ok || len(b) < 1 || b[0] < 1 {
+			return nil, ErrHandoff
+		}
+		return parseAnchors(b[1:], int(b[0]))
+	}
 	n := len(b) / ed25519.PublicKeySize
 	if len(b)%ed25519.PublicKeySize != 0 || n < 1 || n > MaxAnchors {
 		return nil, ErrHandoff
 	}
-	out := make([]ed25519.PublicKey, n)
+	out := make([]key.PublicKey, n)
 	for i := range out {
-		k := ed25519.PublicKey(bytes.Clone(b[i*ed25519.PublicKeySize : (i+1)*ed25519.PublicKeySize]))
-		for _, prev := range out[:i] {
-			if prev.Equal(k) {
-				return nil, ErrHandoff
-			}
+		if out[i] = key.Ed25519(b[i*ed25519.PublicKeySize : (i+1)*ed25519.PublicKeySize]); key.In(out[:i], out[i]) {
+			return nil, ErrHandoff
 		}
-		out[i] = k
+	}
+	return out, nil
+}
+
+// EncodeAnchors is AnchorsEntry's value for 1 to MaxAnchors distinct keys.
+func EncodeAnchors(anchors []key.PublicKey) ([]byte, error) {
+	if len(anchors) < 1 {
+		return nil, ErrHandoff
+	}
+	return appendAnchors([]byte(anchorsTag), anchors)
+}
+
+// appendAnchors appends a count and each anchor's length and Encode.
+func appendAnchors(b []byte, anchors []key.PublicKey) ([]byte, error) {
+	if len(anchors) > MaxAnchors {
+		return nil, ErrHandoff
+	}
+	b = append(b, byte(len(anchors)))
+	for i, a := range anchors {
+		if !a.Valid() || key.In(anchors[:i], a) {
+			return nil, ErrHandoff
+		}
+		e := a.Encode()
+		b = binary.BigEndian.AppendUint16(b, uint16(len(e)))
+		b = append(b, e...)
+	}
+	return b, nil
+}
+
+// parseAnchors reads exactly n distinct anchors, at most MaxAnchors, and
+// nothing after them. The keys are copies of b.
+func parseAnchors(b []byte, n int) ([]key.PublicKey, error) {
+	if n > MaxAnchors {
+		return nil, ErrHandoff
+	}
+	var out []key.PublicKey
+	for range n {
+		if len(b) < 2 {
+			return nil, ErrHandoff
+		}
+		l := int(binary.BigEndian.Uint16(b))
+		if l == 0 || l > maxAnchor-2 || len(b) < 2+l {
+			return nil, ErrHandoff
+		}
+		a, err := key.DecodePublicKey(b[2 : 2+l])
+		if err != nil || !a.Valid() || key.In(out, a) {
+			return nil, ErrHandoff
+		}
+		out, b = append(out, a), b[2+l:]
+	}
+	if len(b) != 0 {
+		return nil, ErrHandoff
 	}
 	return out, nil
 }
@@ -124,15 +194,11 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.Counter.Name...)
 	b = append(b, byte(len(k.Counter.Auth)))
 	b = append(b, k.Counter.Auth...)
-	b = append(b, byte(len(k.Anchors)))
-	for _, a := range k.Anchors {
-		if len(a) != ed25519.PublicKeySize {
-			clear(b)
-			return nil, ErrHandoff
-		}
-		b = append(b, a...)
+	out, err := appendAnchors(b, k.Anchors)
+	if err != nil {
+		clear(b)
 	}
-	return b, nil
+	return out, err
 }
 
 // Wipe clears the keys. Copies already taken, such as the kernel's own, are
@@ -191,17 +257,12 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if c.Auth, rest, ok = field(rest); !ok || len(rest) < 1 || !c.valid() {
 		return KernelKeys{}, ErrHandoff
 	}
-	n := int(rest[0])
-	if len(rest) != 1+n*ed25519.PublicKeySize {
-		return KernelKeys{}, ErrHandoff
+	// None: the store has no anchors yet, so the kernel starts setup-only.
+	anchors, err := parseAnchors(rest[1:], int(rest[0]))
+	if err != nil {
+		return KernelKeys{}, err
 	}
-	var k KernelKeys
-	if n > 0 { // none: the store has no anchors yet, so the kernel starts setup-only
-		var err error
-		if k.Anchors, err = ParseAnchors(rest[1:]); err != nil {
-			return KernelKeys{}, err
-		}
-	}
+	k := KernelKeys{Anchors: anchors}
 	o = len(handoffTag)
 	copy(k.Log[:], b[o:o+32])
 	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])
