@@ -7,11 +7,15 @@ name: board
 # --repo compares the file with the live issues. The PR asks for auto-merge; that waits for
 # green checks only once main's ruleset requires them (stage 2), and without the repo's
 # 'Allow auto-merge' setting the PR is merged by hand.
+# BOARD-debounce (#3099): it renders every 6 hours, on dispatch and on a push touching BOARD.md,
+# never per issue event. Each render that changes the board merges a main commit, and main's strict
+# up-to-date rule puts every open PR behind it; per-event renders made one per label burst. The
+# issues stay the source of truth (board.py check --repo in ci.yml); dispatch for a fresh board.
 # The rendered board goes from render to commit as an artifact, never as a job output or env var:
 # an env string over 128 KiB (MAX_ARG_STRLEN) keeps bash from starting (CX-BOARD-ARGV, #1787).
 on:
-  issues:
-    types: [opened, edited, deleted, transferred, closed, reopened, labeled, unlabeled]
+  schedule:
+    - cron: '41 */6 * * *'
   push:
     branches: [main]
     paths: [BOARD.md]
@@ -24,11 +28,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   render:
-    # Only a collaborator's issue can be a work item (board.COLLABORATORS); an outsider's issue
-    # starts no run.
-    if: >-
-      github.ref == 'refs/heads/main' && (github.event_name != 'issues'
-      || contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association))
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
