@@ -1,0 +1,41 @@
+name: diag-2919
+# Temporary (#2919): prints why each remaining candidate package is in the image. Removed before review.
+on:
+  push:
+    branches: [claude/project-thread-z0vlq1]
+    paths: [".github/workflows/zz-diag-2919.yml"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  why:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-a
+          path: rel
+          run-id: 40190389229
+          github-token: ${{ github.token }}
+      - name: Install the image's packages and print reverse dependencies
+        run: |
+          set -u
+          ls -la rel
+          st=rel/agentos.dpkg-status
+          awk '/^Package:/{p=$2} /^Source:/{s=$2} /^Status:/{st=$4} /^$/{if(p)print p, (s?s:p), st; p=s=st=""}' "$st" | sort > pk.txt
+          echo "=== image packages: $(wc -l < pk.txt)"; cat pk.txt | tr '\n' ';'; echo
+          printf 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: trixie trixie-updates\nComponents: main non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\nTypes: deb\nURIs: http://deb.debian.org/debian-security\nSuites: trixie-security\nComponents: main non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' > /etc/apt/sources.list.d/debian.sources
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends binutils >/dev/null
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $(awk '{print $1}' pk.txt) >/dev/null 2>&1 || echo INSTALL-FAILED
+          for p in passwd login.defs login adduser libsemanage2 libsemanage-common libsepol2 libbz2-1.0 dpkg apt libapt-pkg7.0 libpopt0 libelf1t64 libbpf1 libxtables12 libncursesw6 libtinfo6 fdisk libfdisk1 libgssapi-krb5-2 libkrb5-3 libpolkit-agent-1-0 libpolkit-gobject-1-0 libglib2.0-0t64 libexpat1 libnghttp2-14 libp11-kit0 dmsetup libdevmapper1.02.1 libpam-modules libpam-runtime libpam0g libpam-systemd; do
+            echo "=== $p: $(dpkg-query -W -f='${Status} ${Priority} Essential=${Essential} src=${source:Package}' $p 2>&1) in-image=$(awk -v p=$p '$1==p{print "yes"}' pk.txt)"
+            apt-cache rdepends --installed --no-recommends --no-suggests --no-enhances "$p" 2>/dev/null | sed -n '3,40p' | tr '\n' ' '; echo
+            for so in $(dpkg -L "$p" 2>/dev/null | grep -E '\.so(\.[0-9]+)*$' | xargs -r -n1 basename | sort -u); do
+              users=$(find /usr -type f \( -perm -u+x -o -name '*.so*' \) 2>/dev/null | xargs -r objdump -p 2>/dev/null | awk -v s="$so" '/file format/{f=$1} $1=="NEEDED" && $2==s {print f}' | sed 's/:$//' | sort -u | tr '\n' ' ')
+              [ -n "$users" ] && echo "  NEEDED $so by: $users"
+            done
+          done
+          echo "=== passwd files"; dpkg -L passwd login.defs | grep -v '^/usr/share/\(doc\|man\|locale\|lintian\)' | tr '\n' ' '; echo
+          echo "=== login.defs readers"; grep -rl --binary-files=binary "login.defs" /usr/bin /usr/sbin /usr/lib/x86_64-linux-gnu /usr/lib/systemd 2>/dev/null | tr '\n' ' '; echo
