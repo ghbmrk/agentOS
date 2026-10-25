@@ -14,10 +14,19 @@ import (
 
 const authServ = "mx.example.test"
 
-// withAuth puts the provider's Authentication-Results above a fixture mail,
-// where the provider's server writes it.
+// withAuth puts the provider's SMTP hop and its Authentication-Results above
+// a fixture mail, where the provider's server writes them; the hop names the
+// field's authserv-id as its "by" host.
 func withAuth(raw []byte, value string) []byte {
-	return append([]byte("Authentication-Results: "+value+"\r\n"), raw...)
+	id, _, _ := strings.Cut(value, ";")
+	return append([]byte(smtpRecv(strings.TrimSpace(id))+"Authentication-Results: "+value+"\r\n"), raw...)
+}
+
+// smtpRecv is the Received field a provider writes when it takes a mail over
+// SMTP, in Gmail's shape.
+func smtpRecv(by string) string {
+	return "Received: from relay.sender.test (relay.sender.test. [192.0.2.1])\r\n        by " + by +
+		" with ESMTPS id a1si2;\r\n        Sun, 25 Oct 2026 20:00:00 -0700 (PDT)\r\n"
 }
 
 // alertRig is the fixture mailbox with M01 (bulk, unsubscribable) and M19
@@ -78,6 +87,9 @@ func TestTheAlertGuardTrustsOnlyTheProvidersAlignedPass(t *testing.T) {
 	w := World{AuthServ: authServ, AlertSenders: []string{"bank.test"}}
 	mail := func(from string, auth ...string) []byte {
 		var b []byte
+		if len(auth) > 0 {
+			b = []byte(smtpRecv(authServ))
+		}
 		for _, a := range auth {
 			b = append(b, "Authentication-Results: "+a+"\r\n"...)
 		}
@@ -111,6 +123,47 @@ func TestTheAlertGuardTrustsOnlyTheProvidersAlignedPass(t *testing.T) {
 		if isAlert(mail("notice@bank.test", auth), World{AlertSenders: w.AlertSenders}) {
 			t.Errorf("%q: an alert without the provider's authserv-id", auth)
 		}
+	}
+}
+
+// #3201: a field naming the provider counts only below the provider's own
+// SMTP hop. Mail with no provider field of its own (imported, inserted or
+// fetched by POP) carries the sender's forged field and Received, and is left
+// to the wording net.
+func TestTheSenderNetNeedsTheProvidersSMTPHop(t *testing.T) {
+	w := World{AuthServ: authServ, AlertSenders: []string{"bank.test"}}
+	forged := smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\n"
+	ar := "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\n"
+	const date = "; Sun, 25 Oct 2026 20:00:00 -0700\r\n"
+	const body = "From: Bank <notice@bank.test>\r\nSubject: Statement\r\n\r\nbody\r\n"
+	for _, c := range []struct {
+		name, head string
+		alert      bool
+	}{
+		{"forged field, no provider field above", ar, false},
+		{"forged field and hop, nothing above", forged, true}, // the residual A22 checks: see TN-alert-guard-forged-ar
+		{"fetched by POP", "Received: from pop.other.test [192.0.2.7]\r\n        by " + authServ + " with POP3 id p1\r\n        for <owner@example.test> (single-drop)" + date + forged, false},
+		{"fetched by POP, another by host", "Received: from pop.other.test by 2002:a05:6a10::1 with POP3 id p1" + date + forged, false},
+		{"added through the API", "Received: from 1029384756 named unknown by gmailapi.google.com with HTTPREST" + date + forged, false},
+		{"a hop above with no protocol", "Received: by 2002:a05:6a10::1 id z1" + date + forged, false},
+		{"a hop above with two protocols", "Received: by 2002:a05:6a10::1 with SMTP with POP3 id z1" + date + forged, false},
+		{"provider's internal SMTP hop above", "Received: by 2002:a05:6a10::1 with SMTP id z1" + date + forged, true},
+		{"protocol in any case", "Received: from relay.sender.test by " + authServ + " with esmtps id a1" + date + ar, true},
+		{"field above the hop", ar + smtpRecv(authServ), false},
+		{"hop only in a comment", "Received: from relay.sender.test (by " + authServ + " with ESMTPS) by relay.test with ESMTP id r1" + date + ar, false},
+		{"lookalike by host", smtpRecv(authServ+".evil.test") + ar, false},
+		{"protocol only in a comment", "Received: from relay.sender.test by " + authServ + " (with ESMTPS) with POP3 id a1" + date + ar, false},
+	} {
+		if got := alertSender([]byte(c.head+body), w); got != c.alert {
+			t.Errorf("%s: alert by its sender %v, want %v", c.name, got, c.alert)
+		}
+	}
+	// It fails closed to the wording net: the same POP mail with alert wording
+	// is still an alert.
+	pop := "Received: from pop.other.test by " + authServ + " with POP3 id p1" + date + forged +
+		"From: Bank <notice@bank.test>\r\nSubject: New sign-in from an unknown device\r\n\r\nbody\r\n"
+	if alertSender([]byte(pop), w) || !isAlert([]byte(pop), w) {
+		t.Error("a POP mail with alert wording is not left to the wording net")
 	}
 }
 
@@ -247,11 +300,11 @@ func TestTheSenderNetFailsClosedOnAmbiguousMail(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{"two From headers", "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>\r\nFrom: <x@evil.test>\r\n" + body},
-		{"two addresses in From", "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>, <x@evil.test>\r\n" + body},
-		{"pass then fail", "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test; dmarc=fail header.from=bank.test\r\nFrom: <notice@bank.test>\r\n" + body},
-		{"fail then pass", "Authentication-Results: " + authServ + "; dmarc=fail header.from=bank.test; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>\r\n" + body},
-		{"pass for another domain too", "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test; dmarc=pass header.from=evil.test\r\nFrom: <notice@bank.test>\r\n" + body},
+		{"two From headers", smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>\r\nFrom: <x@evil.test>\r\n" + body},
+		{"two addresses in From", smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>, <x@evil.test>\r\n" + body},
+		{"pass then fail", smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test; dmarc=fail header.from=bank.test\r\nFrom: <notice@bank.test>\r\n" + body},
+		{"fail then pass", smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=fail header.from=bank.test; dmarc=pass header.from=bank.test\r\nFrom: <notice@bank.test>\r\n" + body},
+		{"pass for another domain too", smtpRecv(authServ) + "Authentication-Results: " + authServ + "; dmarc=pass header.from=bank.test; dmarc=pass header.from=evil.test\r\nFrom: <notice@bank.test>\r\n" + body},
 	} {
 		if isAlert([]byte(c.raw), w) {
 			t.Errorf("%s: an alert by its sender", c.name)
@@ -265,7 +318,7 @@ func TestTheSenderNetFailsClosedOnAmbiguousMail(t *testing.T) {
 		"=?windows-1252?Q?S=E9curit=E9_Banque?= <notice@bank.test>",
 		"=?iso-2022-jp?B?GyRCJWEhPCVrGyhC?= <notice@bank.test>",
 	} {
-		if !isAlert([]byte("Authentication-Results: "+authServ+"; dmarc=pass header.from=bank.test\r\nFrom: "+from+"\r\n"+body), w) {
+		if !isAlert([]byte(smtpRecv(authServ)+"Authentication-Results: "+authServ+"; dmarc=pass header.from=bank.test\r\nFrom: "+from+"\r\n"+body), w) {
 			t.Errorf("control: From %q with a single aligned pass is not an alert", from)
 		}
 	}
