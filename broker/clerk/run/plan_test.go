@@ -152,12 +152,12 @@ func TestPlanGuestEndpointMetersEachCall(t *testing.T) {
 func planGuest(t *testing.T, login *plan.Login, task, window int64) (*box, func(string) (int, string)) {
 	t.Helper()
 	b := newBoxFor(t, filepath.Join(shortDir(t), "web.sock"), "model", key.Read)
-	root := key.Issue(ownerPriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
-	ky, err := key.ClerkKey(root, ownerPriv, holderPub, b.now, 1<<40, key.LimitSpendTask(task))
+	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
+	ky, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holderPub, b.now, 1<<40, key.LimitSpendTask(task))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ky)), key.Approve(sparePriv, kernel.BatchHash(root, ky))}
+	cos := []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(root, ky)), key.Approve(key.Ed25519Signer(sparePriv), kernel.BatchHash(root, ky))}
 	pl := kernel.SignPlan(kernel.Plan{ID: "t", Key: ky, Steps: []kernel.PlanStep{{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}}}, holderPriv)
 	if err := b.h.With(func(k *kernel.Kernel) error {
 		if err := k.Issue(b.now-kernel.GrantHold, cos, root, ky); err != nil {
