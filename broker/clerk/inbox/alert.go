@@ -70,14 +70,10 @@ func guardOff(w World) bool {
 // reach the owner as one from a trusted sender (#2681 item 5).
 func alertSender(raw []byte, w World) bool {
 	hs, _ := splitMessage(raw)
-	auth, froms := "", 0
+	auth, froms := providerAuthResults(hs, w.AuthServ), 0
 	var from []byte
 	for _, h := range hs {
 		switch h.key() {
-		case "authentication-results":
-			if auth == "" { // the topmost: the provider's own
-				auth = string(h.value)
-			}
 		case "from":
 			froms++
 			from = h.value
@@ -96,12 +92,80 @@ func alertSender(raw []byte, w World) bool {
 	return dmarcPass(auth, addr, w.AuthServ) && senderIn(addr, w.AlertSenders)
 }
 
+// providerAuthResults returns the topmost Authentication-Results value, but
+// only when the provider took the mail over SMTP and wrote that field at that
+// hop (#3201): the topmost Received naming authServ as its "by" host comes
+// above it, and that Received and every one above it name an SMTP protocol.
+// Mail the provider fetched by POP, or that was added through its API, has a
+// provider Received with another protocol (POP3, HTTPREST) above anything the
+// sender wrote, so a forged field naming the provider below it never counts,
+// and the mail is left to the wording net. A Received with no protocol, or one
+// that cannot be read, also ends the walk with "".
+func providerAuthResults(hs []header, authServ string) string {
+	hop := false
+	for _, h := range hs {
+		switch h.key() {
+		case "received":
+			if hop {
+				continue
+			}
+			by, ok := smtpHop(string(h.value))
+			if !ok {
+				return ""
+			}
+			hop = strings.EqualFold(by, authServ)
+		case "authentication-results":
+			if hop {
+				return string(h.value)
+			}
+			return "" // the topmost field sits above the provider's hop
+		}
+	}
+	return ""
+}
+
+// smtpHop reads a Received value (RFC 5321 §4.4): its "by" host, and whether
+// its "with" protocol is an SMTP one (RFC 3848, RFC 6531). Comments are removed
+// first, so a clause inside one is not read; a value with two "by" or two
+// "with" clauses, or none of the latter, is not an SMTP hop.
+func smtpHop(v string) (by string, ok bool) {
+	if i := strings.LastIndexByte(v, ';'); i >= 0 {
+		v = v[:i] // the date
+	}
+	f := fields(stripComments(v))
+	bys, withs := 0, 0
+	proto := ""
+	for i := 0; i+1 < len(f); i++ {
+		switch strings.ToLower(f[i]) {
+		case "by":
+			bys++
+			by = f[i+1]
+		case "with":
+			withs++
+			proto = strings.ToUpper(f[i+1])
+		}
+	}
+	if bys > 1 || withs != 1 {
+		return "", false
+	}
+	return by, smtpProtocols[proto]
+}
+
+// smtpProtocols are the "with" values of mail received over SMTP. SMTPS and
+// SMTPSA are not RFC 3848's but Gmail writes SMTPS on mail from Google's own
+// senders ("Google Transport Security").
+var smtpProtocols = map[string]bool{
+	"SMTP": true, "ESMTP": true, "ESMTPA": true, "ESMTPS": true, "ESMTPSA": true, "SMTPS": true, "SMTPSA": true,
+	"UTF8SMTP": true, "UTF8SMTPA": true, "UTF8SMTPS": true, "UTF8SMTPSA": true,
+}
+
 // unfold joins a folded header value onto one line.
 var unfold = strings.NewReplacer("\r\n", "", "\n", "", "\r", "")
 
-// dmarcPass reads only the topmost Authentication-Results header, and only if
-// the provider's own server wrote it (its authserv-id): a sender can add more
-// of these headers, never above the provider's. Every DMARC result in it must
+// dmarcPass reads the provider's Authentication-Results header (the topmost,
+// at the provider's SMTP hop: providerAuthResults), and only if its authserv-id
+// is the provider's: a sender can add more of these headers, never above the
+// provider's. Every DMARC result in it must
 // pass aligned with the From domain, so a header whose results conflict
 // passes nothing (#2681 item 5).
 func dmarcPass(header, from, authServ string) bool {
