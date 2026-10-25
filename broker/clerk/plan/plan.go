@@ -96,7 +96,9 @@ type Declaration struct {
 	Name string
 	// Version is the declaration's; a release that requalifies the route
 	// after an unswappable answer gives it a new one.
-	Version   string
+	Version string
+	// Mode is the read of the provider's published terms (CLK-7).
+	Mode      Mode
 	Endpoints []Endpoint
 	// Token is the exact token answer: these fields and no others. It
 	// declares access_token as a credential; refresh_token and id_token,
@@ -130,6 +132,17 @@ type Declaration struct {
 	// Guard is the home-network policy every dial goes through (DEV-2).
 	Guard *netguard.Policy
 }
+
+// Mode is how a provider's terms treat a proxy holding its plan login
+// (CLK-7). The model clerk's process gates sign-in and every guest request
+// on it (broker/clerk/run).
+type Mode string
+
+const (
+	Permitted   Mode = "permitted"   // the terms allow it
+	Unconfirmed Mode = "unconfirmed" // silent: runs only while the owner's consent stands
+	NotAllowed  Mode = "not-allowed" // barred or unclear: the API key route only
+)
 
 // Stops: why a route is down. An unswappable stop outranks a refused one.
 const (
@@ -295,6 +308,11 @@ func New(d Declaration, store *Store, roots *x509.CertPool) (*Login, error) {
 
 func (p *Login) validate() error {
 	d := p.d
+	switch d.Mode {
+	case Permitted, Unconfirmed, NotAllowed:
+	default:
+		return fmt.Errorf("clerk: plan %q: mode %q", d.Name, d.Mode)
+	}
 	seen := map[string]bool{}
 	for _, e := range d.Endpoints {
 		switch e.Kind {
@@ -668,6 +686,18 @@ func (p *Login) BeginSignIn(guest string) error {
 	}
 	p.signing[guest] = false
 	return nil
+}
+
+// Mode is the declaration's read of the provider's terms (CLK-7).
+func (p *Login) Mode() Mode { return p.d.Mode }
+
+// Signing reports whether guest is a sign-in guest (BeginSignIn), whether
+// or not its sign-in has committed.
+func (p *Login) Signing(guest string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.signing[guest]
+	return ok
 }
 
 // SignedIn reports whether guest's own sign-in committed the login. It is
@@ -1377,6 +1407,8 @@ func Codex(guard *netguard.Policy) Declaration {
 	return Declaration{
 		Name:    "codex",
 		Version: "codex-0.162.1-1",
+		// OpenAI's terms allow it: Codex is the default plan route (CLK-7).
+		Mode: Permitted,
 		Endpoints: []Endpoint{
 			{Name: "responses", Host: run, Method: "POST", Path: "/backend-api/codex/responses", Kind: Model},
 			{Name: "models", Host: run, Method: "GET", Path: "/backend-api/codex/models", Kind: Read, Query: []string{"client_version"}},
