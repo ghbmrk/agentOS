@@ -45,12 +45,6 @@ usr/lib/tmpfiles.d/legacy.conf	r! /forcefsck
 usr/lib/tmpfiles.d/legacy.conf	r! /fastboot
 usr/lib/tmpfiles.d/legacy.conf	r! /forcequotacheck
 usr/lib/tmpfiles.d/libselinux1.conf	d /run/setrans 0755 root root -   -
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/gshadow.lock
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/shadow.lock
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/passwd.lock
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/group.lock
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/subuid.lock
-usr/lib/tmpfiles.d/passwd.conf	r! /etc/subgid.lock
 usr/lib/tmpfiles.d/polkit-tmpfiles.conf	d /etc/polkit-1/rules.d 0750 root polkitd - -
 usr/lib/tmpfiles.d/provision.conf	f^ /etc/motd.d/50-provision.conf - - - - login.motd
 usr/lib/tmpfiles.d/provision.conf	f^ /etc/issue.d/50-provision.conf - - - - login.issue

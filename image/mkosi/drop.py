@@ -38,6 +38,13 @@ DROP = {
     "liblastlog2-2": ("util-linux", "only lslogins links it, an account-listing tool for a person at a shell; the box has no login"),
     "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
     "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
+    "passwd": ("shadow", "useradd and the other account tools; only maintainer scripts run them, and systemd-sysusers makes the box's users"),
+    "login.defs": ("shadow", "the account tools' settings; without it systemd-sysusers keeps its built-in id ranges, and the box has no login"),
+    "adduser": ("adduser", "a front end to useradd that only maintainer scripts run"),
+    "libsemanage2": ("libsemanage", "only useradd, userdel and usermod link it"),
+    "libsemanage-common": ("libsemanage", "only libsemanage2 reads it"),
+    "libsepol2": ("libsepol", "only libsemanage2 links it"),
+    "libbz2-1.0": ("bzip2", "only libsemanage2 and dpkg-deb link it; the box unpacks no package"),
 }
 # Dropped packages whose source the box still runs other packages of, so the source's image
 # records stay (tests/test_image_drop.py).
@@ -53,6 +60,8 @@ FILES = (
     "usr/bin/nmtui*",
     "usr/bin/ss",
     "usr/bin/lslogins",
+    # dpkg's package unpacker, the last file linking libbz2; the box's dpkg database never changes.
+    "usr/bin/dpkg-deb",
     # dpkg's daily database backup runs tar and cmp; the box's dpkg database never changes.
     "usr/lib/systemd/system/dpkg-db-backup.service",
     "usr/lib/systemd/system/dpkg-db-backup.timer",
@@ -62,7 +71,6 @@ FILES = (
 # scripts or a person at a shell would start, and the box runs neither. The #! check refuses a perl
 # script from any other package, and a package here that ships none is stale.
 PERL_TOOLS = {
-    "adduser": "adduser, deluser",
     "debconf": "debconf and its frontends, run by maintainer scripts",
     "init-system-helpers": "deb-systemd-helper, deb-systemd-invoke, update-rc.d (maintainer scripts)",
     "libpam-runtime": "pam-auth-update, pam_getenv",
