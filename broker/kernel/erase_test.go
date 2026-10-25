@@ -528,3 +528,19 @@ func TestARetriedDeleteBacksOff(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A delete that failed while the wall clock was ahead is retried once the
+// clock steps back, not held until the clock catches up (L3 on #3182).
+func TestARetryAfterTheClockStepsBack(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.notes.failDelete = true
+	r.k.Erase(86_400_000, s) // a day ahead
+	r.notes.failDelete = false
+	must(t, r.k.Tick(10))
+	if u := r.k.State().Unerased(); u != nil {
+		t.Fatalf("held after the clock stepped back: %+v", u)
+	}
+	r.replays()
+}

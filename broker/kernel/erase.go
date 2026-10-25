@@ -546,13 +546,15 @@ const (
 
 type (
 	eraseRef struct{ subject, store string }
-	backoff  struct{ next, wait int64 }
+	backoff  struct{ last, wait int64 } // the failed try's time and the wait after it
 )
 
 // held reports whether the delete of ref was tried and failed too recently.
+// A now before that try (a wall clock stepped back) holds nothing, so a
+// clock correction cannot keep a key on disk past RetryMax.
 func (k *Kernel) held(ref eraseRef, now int64) bool {
 	b, ok := k.retry[ref]
-	return ok && now < b.next
+	return ok && b.last <= now && now < b.last+b.wait
 }
 
 // failed pushes the next try of ref back, doubling its wait.
@@ -564,7 +566,7 @@ func (k *Kernel) failed(ref eraseRef, now int64) {
 	if b, ok := k.retry[ref]; ok {
 		w = min(2*b.wait, RetryMax)
 	}
-	k.retry[ref] = backoff{now + w, w}
+	k.retry[ref] = backoff{now, w}
 }
 
 // confirm deletes subject's key and its items in each store not yet
