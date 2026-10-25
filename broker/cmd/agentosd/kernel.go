@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -45,7 +47,7 @@ type setupReader interface {
 // reachKernel says, at start, whether the kernel answers on its owner
 // socket: once that it is not reached yet (the kernel's unit starts beside
 // the broker's, and on a box with no sealed store it never starts), then
-// once whether it is waiting for setup or running. It tries every every
+// once whether it is waiting for setup or running. It tries every `every`
 // until then, and stops at the first answer or refusal; it holds nothing
 // up. A setup-only kernel serves this call too.
 func reachKernel(ctx context.Context, k setupReader, every time.Duration, logf func(string, ...any)) {
@@ -72,4 +74,20 @@ func reachKernel(ctx context.Context, k setupReader, every time.Duration, logf f
 		case <-time.After(every):
 		}
 	}
+}
+
+// storedKernel is the owner commands' kernel (daemon.Config.Kernel,
+// #2783). With no sealed store the kernel's unit does not start and no
+// kernel can open a log or run a plan, so it reads as waiting for setup:
+// STOP and RESUME have nothing to reach there, and do not fail for it.
+type storedKernel struct {
+	kernelsock.Owner
+	store string
+}
+
+func (k storedKernel) SetupOpen(ctx context.Context) (bool, error) {
+	if _, err := os.Lstat(k.store); errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	return k.Owner.SetupOpen(ctx)
 }

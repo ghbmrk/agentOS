@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,5 +171,121 @@ func TestAnOwnerUIDThatCannotBeTakenSendsNothing(t *testing.T) {
 	err := asUID(os.Geteuid()+1, func() error { called = true; return nil })
 	if !errors.Is(err, errNoSeat) || called {
 		t.Fatalf("a call ran without the owner side's uid: %v", err)
+	}
+}
+
+// runningKernel serves a real OwnerSide of a kernel that has the owner's
+// two hardware keys, as setupKernel does.
+func runningKernel(t *testing.T) Owner {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anchors []ed25519.PublicKey
+	for range 2 {
+		a, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		anchors = append(anchors, a)
+	}
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: pub, Sign: priv, Anchors: anchors,
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	return Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+}
+
+// STOP and RESUME are logged on a running kernel, and its stop is read
+// back (#2783); a setup-only kernel refuses all three in its own words.
+func TestStopAndResumeReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	o := runningKernel(t)
+	for i, want := range []bool{false, true, false} {
+		switch i {
+		case 1:
+			if err := o.Stop(ctx); err != nil {
+				t.Fatal(err)
+			}
+		case 2:
+			if err := o.Resume(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, err := o.Stopped(ctx); err != nil || got != want {
+			t.Fatalf("step %d: stopped %v, %v; want %v", i, got, err, want)
+		}
+	}
+	s := setupKernel(t)
+	var r Refused
+	if _, err := s.Stopped(ctx); !errors.As(err, &r) {
+		t.Fatalf("a setup-only kernel's stop read: %v", err)
+	}
+	if err := s.Resume(ctx); !errors.As(err, &r) {
+		t.Fatalf("a setup-only kernel's RESUME: %v", err)
+	}
+}
+
+// cannedKernel answers every call on a socket of this process's uid with
+// one fixed line.
+func cannedKernel(t *testing.T, answer string) Owner {
+	t.Helper()
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			bufio.NewReader(c).ReadBytes('\n')
+			c.Write([]byte(answer + "\n"))
+			c.Close()
+		}
+	}()
+	return Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+}
+
+// A kernel's refusal (a key.Refusal) comes back as Refused with its code
+// and detail, never as success; a result that does not decode is lost,
+// never read as a default (#3072 L3 release 1).
+func TestARefusalAndAnUndecodableAnswer(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	o := cannedKernel(t, `{"refusal":{"code":"stopped","detail":"stop is in force"}}`)
+	var r Refused
+	if err := o.Stop(ctx); !errors.As(err, &r) || r.Text != "stopped: stop is in force" {
+		t.Fatalf("a refusal: %v", err)
+	}
+	if _, err := o.Stopped(ctx); !errors.As(err, &r) {
+		t.Fatalf("a refused read: %v", err)
+	}
+	o = cannedKernel(t, `{"result":"stopped"}`)
+	if got, err := o.Stopped(ctx); !errors.Is(err, ErrLost) || got {
+		t.Fatalf("an undecodable result: %v, %v", got, err)
+	}
+	o = cannedKernel(t, `{"result":`)
+	if err := o.Stop(ctx); !errors.Is(err, ErrLost) {
+		t.Fatalf("a cut answer: %v", err)
 	}
 }

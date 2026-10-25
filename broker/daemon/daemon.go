@@ -163,6 +163,9 @@ type Config struct {
 	// Notes are STATUS's exception lines (control.Handler.Notes); recall
 	// adds one while an agent holds a record the owner deleted (W10).
 	Notes []func() string
+	// Kernel, when set, is the kernel's owner seam: STOP, RESUME and
+	// STATUS's stopped line reach it too (#2783). Nil: no kernel.
+	Kernel KernelOwner
 	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
 	// on the owner channel (localapi, P2-2w). It needs OwnerState.
 	PageSocket *PageSocket
@@ -379,14 +382,21 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// keeps the floor invariants, one line naming the rule when it does not.
 	// A restart fence startup reconcile has not lifted rides it too (#1373).
 	notes := append(append([]func() string{check.Note(eng)}, unconfirmedNotes(eng)...), cfg.Notes...)
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
+	// The owner commands drive the kernel's owner seam as well as the
+	// journal engine when a kernel is configured (#2783).
+	var owned control.Engine = eng
+	if cfg.Kernel != nil {
+		b := &bothStops{Engine: eng, k: cfg.Kernel}
+		owned, notes = b, append([]func() string{b.note}, notes...)
+	}
+	h := &control.Handler{Engine: owned, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	rt := newRetrier(ctx, eng, gate)
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
-			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
+			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: owned, Agent: cfg.Agent,
 			Machines: machines, Notes: notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: rt.decide(gate.Decide), Narrow: gate.Narrow, Reissue: gate.Reissue, Retry: rt.items,
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
@@ -685,4 +695,105 @@ func followNonce() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // crypto/rand.Read never fails (Go 1.24)
 	return hex.EncodeToString(b)
+}
+
+// KernelOwner is the kernel's owner seam as the owner commands call it
+// (owner/kernelsock.Owner, #2783). STOP, RESUME and STATUS's stopped line
+// go to it as well as to the journal engine while both run actions: STOP
+// narrows both, so nothing either holds starts again until RESUME.
+type KernelOwner interface {
+	Stop(context.Context) error
+	Resume(context.Context) error
+	Stopped(context.Context) (bool, error)
+	SetupOpen(context.Context) (bool, error)
+}
+
+// kernelReadFor bounds STATUS's read of the kernel's stop, which runs on
+// the owner's reply path.
+const kernelReadFor = 2 * time.Second
+
+// kernelUnreached is STATUS's note while the kernel's stop cannot be read.
+const kernelUnreached = "The kernel is not answering; a STOP may not reach it yet. Reply STOP again later."
+
+// bothStops is control.Engine over the journal engine and the kernel.
+type bothStops struct {
+	control.Engine
+	k KernelOwner
+
+	mu     sync.Mutex
+	unread bool // the last read of the kernel's stop failed
+}
+
+// Stop records a STOP in the journal and on the kernel, and reports done
+// only when both recorded it (CH-2). A kernel waiting for setup holds no
+// plan and runs nothing, so its refusal is not a failure; one that cannot
+// be reached is, since it may hold plans it runs again once it answers.
+func (b *bothStops) Stop(ctx context.Context) (journal.StopReport, error) {
+	rep, err := b.Engine.Stop(ctx)
+	return rep, errors.Join(err, b.kernel(ctx, b.k.Stop))
+}
+
+// Resume lifts the kernel's STOP first: if that fails the journal stays
+// stopped too, so RESUME fails whole and is sent again. A STOP only the
+// kernel holds leaves the journal as it is.
+func (b *bothStops) Resume() error {
+	if err := b.kernel(context.Background(), b.k.Resume); err != nil {
+		return err
+	}
+	if !b.Engine.Stopped() {
+		return nil
+	}
+	return b.Engine.Resume()
+}
+
+// kernel runs a STOP or RESUME on the kernel; a setup-only kernel's
+// refusal is nothing to stop or lift.
+func (b *bothStops) kernel(ctx context.Context, f func(context.Context) error) error {
+	err := f(ctx)
+	if err != nil {
+		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
+			return nil
+		}
+	}
+	return err
+}
+
+// Stopped is true when either is stopped. A kernel whose stop cannot be
+// read is never reported stopped: STATUS would tell the owner nothing runs
+// while the journal's actions do. STATUS names it instead (note).
+func (b *bothStops) Stopped() bool {
+	if b.Engine.Stopped() {
+		b.setUnread(false)
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), kernelReadFor)
+	defer cancel()
+	stopped, err := b.k.Stopped(ctx)
+	if err != nil {
+		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
+			b.setUnread(false)
+			return false
+		}
+		b.setUnread(true)
+		return false
+	}
+	b.setUnread(false)
+	return stopped
+}
+
+func (b *bothStops) setUnread(v bool) {
+	b.mu.Lock()
+	b.unread = v
+	b.mu.Unlock()
+}
+
+// note is STATUS's line while the last read of the kernel's stop failed;
+// STATUS reads Stopped before its notes.
+func (b *bothStops) note() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.unread {
+		return kernelUnreached
+	}
+	return ""
 }
