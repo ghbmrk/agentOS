@@ -54,6 +54,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | EVAL-alert-misclassed | Eval case: an alert the reader misclasses as spam is refused with reason alert (owed from #2604 / #2681). | #2835 | queued (later) |
 | CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
 | CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
+| KRN-resume-gen | RESUME carries the stop generation it lifts; the kernel refuses a stale one (#3077 Security release 1); needs a Trusted-core decision. | MIG-4-daemon-retry | queued (sub B; tier A) |
 
 ## Harness and operating model
 
@@ -354,4 +355,5 @@ These open work-item issues are left off the board until their issue is fixed; e
 ```text
 issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
 issue #3073: 3 middle cells, its table has 2
+issue #3079: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
