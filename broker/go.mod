@@ -52,3 +52,5 @@ require (
 )
 
 replace github.com/emersion/go-imap => ./third_party/go-imap
+
+replace github.com/gen2brain/h265 => ./third_party/h265
