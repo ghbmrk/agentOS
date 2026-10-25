@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 // REQ: CH-2, KRN-7
@@ -293,16 +293,11 @@ func TestAHungKernelHoldsSTOPOnlyBriefly(t *testing.T) {
 	}
 }
 
-// failingResume is a journal engine whose RESUME fails to record.
-type failingResume struct{ stopped bool }
+// failingResume is the daemon's journal engine with a RESUME that fails
+// to record.
+type failingResume struct{ control.Engine }
 
-func (f *failingResume) Stop(context.Context) (journal.StopReport, error) {
-	f.stopped = true
-	return journal.StopReport{}, nil
-}
-func (f *failingResume) Resume() error          { return errors.New("fsync failed") }
-func (f *failingResume) Stopped() bool          { return f.stopped }
-func (f *failingResume) List() []journal.Status { return nil }
+func (failingResume) Resume() error { return errors.New("fsync failed") }
 
 // A RESUME that fails after the kernel took it leaves the kernel stopped
 // again, so "Still stopped." holds for both: the journal's write failing,
@@ -310,7 +305,8 @@ func (f *failingResume) List() []journal.Status { return nil }
 func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
 	ctx := context.Background()
 	k := &fakeKernel{}
-	b := &bothStops{Engine: &failingResume{}, k: k}
+	_, d := withKernelOwner(t, &fakeKernel{}, false)
+	b := &bothStops{Engine: failingResume{d.Engine()}, k: k}
 	if _, err := b.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +314,8 @@ func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
 		t.Fatalf("journal write failed: %v, kernel %+v", err, k)
 	}
 	k2 := &fakeKernel{lost: true}
-	b = &bothStops{Engine: &failingResume{}, k: k2}
+	_, d = withKernelOwner(t, &fakeKernel{}, false)
+	b = &bothStops{Engine: failingResume{d.Engine()}, k: k2}
 	if _, err := b.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
