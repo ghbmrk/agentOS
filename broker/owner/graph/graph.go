@@ -112,13 +112,18 @@ func validSource(s Source) bool { return s == Shipped || s == Answer || s == Obs
 
 // SelfDomain is the failure domain New gives a node that carries none: its
 // own, so an unlabelled node is never read as one no failure can reach.
-// Person and brake nodes get none.
+// Every node gets one but the owner's own person node, the one node that
+// is not modelled as failing.
 func SelfDomain(id string) string { return "self:" + id }
 
 // New checks and copies nodes and edges into a graph. It refuses an empty or
-// repeated ID, an unknown kind or source, an edge naming an unknown node or
-// repeating a From, a cutoff, brake or watch edge without exactly one From,
-// and a brake edge whose From is not a brake node.
+// repeated ID, an unknown kind or source, an owner node that is not a
+// person, an edge naming an unknown node or repeating a From, a cutoff,
+// brake or watch edge without exactly one From, a brake edge whose From is
+// not a brake node, any other edge whose From is one, and an AND or watch
+// edge whose From is the owner. A brake is a setting, never a credential or
+// a witness; the owner, who cannot fail, is never a credential or a
+// witness either, since what proves the owner, or tells them, can fail.
 func New(nodes []Node, edges []Edge) (*Graph, error) {
 	g := &Graph{index: make(map[string]int, len(nodes))}
 	for _, n := range nodes {
@@ -139,10 +144,13 @@ func New(nodes []Node, edges []Edge) (*Graph, error) {
 				return nil, fmt.Errorf("graph: node %q has unknown asset class %q", n.ID, c)
 			}
 		}
+		if n.Owner && n.Kind != Person {
+			return nil, fmt.Errorf("graph: owner node %q is a %s, not a person", n.ID, n.Kind)
+		}
 		n.Domains = append([]string(nil), n.Domains...)
-		if len(n.Domains) == 0 && n.Kind != Person && n.Kind != BrakeKind {
-			// Missing data is weak: a node nobody labelled can still fail
-			// on its own, through its maker or provider.
+		if len(n.Domains) == 0 && !n.Owner {
+			// Missing data is weak: a node nobody labelled, a person
+			// included, can still fail on its own.
 			n.Domains = []string{SelfDomain(n.ID)}
 		}
 		n.Assets = append([]Class(nil), n.Assets...)
@@ -174,6 +182,12 @@ func New(nodes []Node, edges []Edge) (*Graph, error) {
 				return nil, fmt.Errorf("graph: edge %d repeats %q", i, f)
 			}
 			seen[f] = true
+			if e.Kind != Brake && g.nodes[g.index[f]].Kind == BrakeKind {
+				return nil, fmt.Errorf("graph: %s edge %d is from brake %q", e.Kind, i, f)
+			}
+			if g.nodes[g.index[f]].Owner && (len(e.From) > 1 || e.Kind == Watch) {
+				return nil, fmt.Errorf("graph: %s edge %d uses owner %q as a credential or witness", e.Kind, i, f)
+			}
 		}
 		if e.Kind == Brake && g.nodes[g.index[e.From[0]]].Kind != BrakeKind {
 			return nil, fmt.Errorf("graph: brake edge %d is from %q, which is not a brake", i, e.From[0])

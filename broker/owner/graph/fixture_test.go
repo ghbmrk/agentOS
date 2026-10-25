@@ -63,6 +63,7 @@ func household(t *testing.T, ana bool) *Graph {
 		n("v.power", Power, "Home power", nil),
 		n("v.uplink", Uplink, "Home internet", nil),
 		oldmail, blog,
+		n("p.sis", Person, "Sister", nil), // a recovery contact: not the owner, so she can fail
 	}
 	edges := []Edge{
 		e(Act, "k.one", "p.owner"),
@@ -71,6 +72,7 @@ func household(t *testing.T, ana bool) *Graph {
 		e(Act, "a.mail", "k.one"),
 		e(Reset, "a.bank", "a.mail"),
 		e(Reset, "a.carrier", "a.mail"),
+		e(Reset, "a.carrier", "p.sis"),
 		e(Act, "a.bank", "d.phone"),
 		e(Reset, "a.registrar", "a.mail", "a.carrier"),
 		e(Copy, "c.codes", "a.mail"),
@@ -116,6 +118,8 @@ func household(t *testing.T, ana bool) *Graph {
 // registrar's reset needs the mailbox AND the carrier, so the carrier alone
 // takes nothing; the old email takes the old blog; the lock needs the box
 // AND the door controller. Ben: the same, but the lock falls to the box.
+// The sister can reset the carrier, so her own failure takes the carrier,
+// but the registrar still needs the mailbox too, which falls alone anyway.
 // Every unlabelled node also fails on its own (its "self:" domain): the
 // bank alone loses its data but its money stays held by the watched hold,
 // and the registrar, the codes, the car, the lock and the blog each fall

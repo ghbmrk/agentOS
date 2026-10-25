@@ -29,7 +29,7 @@ func TestTwoKeysOfOneMakerAreOneDomain(t *testing.T) {
 	t.Fatalf("one maker's two keys not counted as one domain: %v", g.CutSets(Identity))
 found:
 	if got := g.Domains(); !reflect.DeepEqual(got, dom("maker:yubico", "node:core", "node:home", "phone:ana", "provider:carrier", "provider:google", "provider:yahoo",
-		"self:a.bank", "self:a.blog", "self:a.registrar", "self:c.codes", "self:d.car", "self:d.lock", "self:v.power", "self:v.uplink")) {
+		"self:a.bank", "self:a.blog", "self:a.registrar", "self:b.card", "self:b.payee", "self:c.codes", "self:d.car", "self:d.lock", "self:p.sis", "self:v.power", "self:v.uplink")) {
 		t.Fatalf("domains = %v", got)
 	}
 	// A vault that needs both keys: one maker's keys fall to one failure;
@@ -109,22 +109,39 @@ func TestFixtureCutSets(t *testing.T) {
 	}
 }
 
+// naiveDomains is the test's own default-domain rule: every node but the
+// owner's person node fails, on its own domain if nobody labelled one.
+func naiveDomains(x Node) []string {
+	if len(x.Domains) == 0 && !(x.Owner && x.Kind == Person) {
+		return []string{"self:" + x.ID}
+	}
+	return x.Domains
+}
+
+// naiveDomainSet is the sorted union of naiveDomains over nodes.
+func naiveDomainSet(nodes []Node) []string {
+	set := map[string]bool{}
+	for _, x := range nodes {
+		for _, d := range naiveDomains(x) {
+			set[d] = true
+		}
+	}
+	return sortedKeys(set)
+}
+
 // naiveTaken re-derives a take from the definition, independently of the
 // engine: compromise by repeated passes over every edge, then the bound.
 func naiveTaken(nodes []Node, edges []Edge, asset string, c Class, d map[string]bool) bool {
 	comp := map[string]bool{}
 	for _, x := range nodes {
-		ds := x.Domains
-		if len(ds) == 0 && x.Kind != Person && x.Kind != BrakeKind {
-			ds = []string{"self:" + x.ID} // missing data is weak
-		}
-		for _, y := range ds {
+		for _, y := range naiveDomains(x) {
 			if d[y] {
 				comp[x.ID] = true
 			}
 		}
 	}
-	for i := 0; i <= len(nodes); i++ {
+	for changed := true; changed; {
+		changed = false
 		for _, ed := range edges {
 			if ed.Kind != Reset && ed.Kind != Copy && ed.Kind != Act {
 				continue
@@ -133,8 +150,8 @@ func naiveTaken(nodes []Node, edges []Edge, asset string, c Class, d map[string]
 			for _, f := range ed.From {
 				all = all && comp[f]
 			}
-			if all {
-				comp[ed.To] = true
+			if all && !comp[ed.To] {
+				comp[ed.To], changed = true, true
 			}
 		}
 	}
@@ -166,22 +183,33 @@ func randomGraph(r *rand.Rand) ([]Node, []Edge) {
 	nn := 4 + r.Intn(9)
 	var nodes []Node
 	for i := 0; i < nn; i++ {
-		x := Node{ID: "x." + strconv.Itoa(i), Kind: Account, Name: "N" + strconv.Itoa(i), Source: Shipped}
+		x := Node{ID: "x." + strconv.Itoa(i), Kind: allKinds[r.Intn(len(allKinds))], Name: "N" + strconv.Itoa(i), Source: Shipped}
+		x.Owner = x.Kind == Person && r.Intn(2) == 0
 		for k := 0; k < r.Intn(3); k++ {
 			x.Domains = append(x.Domains, "d:"+strconv.Itoa(r.Intn(nd)))
 		}
 		if r.Intn(3) == 0 {
 			x.Assets = append(x.Assets, Classes[r.Intn(4)])
 		}
-		if r.Intn(5) == 0 {
-			x.Kind, x.Set, x.Domains, x.Assets = BrakeKind, r.Intn(2) == 0, nil, nil
+		if x.Kind == BrakeKind {
+			x.Set, x.Owner, x.Assets = r.Intn(2) == 0, false, nil
 		}
 		nodes = append(nodes, x)
 	}
+	// A brake is never a control source or a witness; the owner is only a
+	// control source alone.
+	var srcs, owners []string
+	for _, x := range nodes {
+		if x.Owner {
+			owners = append(owners, x.ID)
+		} else if x.Kind != BrakeKind {
+			srcs = append(srcs, x.ID)
+		}
+	}
 	var edges []Edge
-	for k := 0; k < nn*2; k++ {
+	for k := 0; k < nn*2 && len(srcs) > 0; k++ {
 		to := nodes[r.Intn(nn)].ID
-		a, b := nodes[r.Intn(nn)].ID, nodes[r.Intn(nn)].ID
+		a, b := srcs[r.Intn(len(srcs))], srcs[r.Intn(len(srcs))]
 		switch r.Intn(6) {
 		case 0, 1, 2:
 			from := []string{a}
@@ -202,6 +230,9 @@ func randomGraph(r *rand.Rand) ([]Node, []Edge) {
 		case 5:
 			edges = append(edges, Edge{Kind: Watch, From: []string{a}, To: to, Source: Shipped})
 		}
+		if len(owners) > 0 && r.Intn(4) == 0 {
+			edges = append(edges, Edge{Kind: Act, From: []string{owners[r.Intn(len(owners))]}, To: to, Source: Shipped})
+		}
 	}
 	return nodes, edges
 }
@@ -216,7 +247,7 @@ func TestCutSetsMatchBruteForce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
-		doms := g.Domains()
+		doms := naiveDomainSet(nodes)
 		for _, c := range Classes {
 			want := map[string]bool{}
 			for _, a := range nodes {
@@ -656,18 +687,70 @@ func brakeSet(id, name string) Node {
 	return b
 }
 
-// TN-graph-a: a node nobody labelled is weak, not safe. It fails on its own
-// domain; person and brake nodes get none.
+// allKinds lists every node kind; TestAllKindsListed keeps it equal to the
+// engine's own list, so a new kind fails the mutation test until covered.
+var allKinds = []Kind{Account, Credential, Provider, Device, Key, Person, NodeKind, Surface, Power, Uplink, BrakeKind}
+
+func TestAllKindsListed(t *testing.T) {
+	got := map[Kind]bool{}
+	for _, k := range allKinds {
+		got[k] = true
+	}
+	if !reflect.DeepEqual(got, kinds) || len(allKinds) != len(kinds) {
+		t.Fatalf("allKinds %v differs from the engine's kinds %v", allKinds, kinds)
+	}
+}
+
+// TN-graph-a: a node nobody labelled is weak, not safe. Every node fails on
+// its own domain, a person or a brake included, except the owner's own
+// person node.
 func TestUnlabelledNodeIsItsOwnDomain(t *testing.T) {
 	own := n("p.me", Person, "Me", nil)
 	own.Owner = true
-	g := mustNew(t, []Node{own, n("a.b", Account, "Bank", nil, Money), brakeSet("b.h", "Hold")},
+	g := mustNew(t, []Node{own, n("a.b", Account, "Bank", nil, Money), brakeSet("b.h", "Hold"), n("p.sam", Person, "Sam", nil)},
 		[]Edge{e(Act, "a.b", "p.me"), e(Brake, "a.b", "b.h")})
 	if got := g.CutSets(Money); !reflect.DeepEqual(got, []Cut{{"a.b", dom(SelfDomain("a.b"))}}) {
 		t.Errorf("an unlabelled bank: cuts %v; want its own domain", got)
 	}
-	if got := g.Domains(); !reflect.DeepEqual(got, dom("self:a.b")) {
-		t.Errorf("domains = %v; person and brake nodes get none", got)
+	if got := g.Domains(); !reflect.DeepEqual(got, dom("self:a.b", "self:b.h", "self:p.sam")) {
+		t.Errorf("domains = %v; only the owner gets none", got)
+	}
+	// A recovery contact nobody labelled is one failure away, like any node.
+	h := mustNew(t, []Node{own, n("a.b", Account, "Bank", dom("provider:bank"), Money), n("p.sam", Person, "Sam", nil)},
+		[]Edge{e(Act, "a.b", "p.me"), e(Reset, "a.b", "p.sam")})
+	if got := h.CutSets(Money); !reflect.DeepEqual(got, []Cut{{"a.b", dom("provider:bank")}, {"a.b", dom("self:p.sam")}}) {
+		t.Errorf("a recovery contact's reset: cuts %v", got)
+	}
+}
+
+// TN-graph-a: a brake is a setting, never a credential or a witness; the
+// owner is never one member of an AND, nor a witness; and only a person can
+// be the owner.
+func TestNewRefusesBrakeSourcesAndNonPersonOwner(t *testing.T) {
+	own := n("p.me", Person, "Me", nil)
+	own.Owner = true
+	base := []Node{own, n("a.b", Account, "Bank", nil, Money), brakeSet("b.h", "Hold"), n("k.k", Key, "Key", nil)}
+	for _, ed := range []Edge{
+		e(Reset, "a.b", "b.h"), e(Copy, "a.b", "b.h"), e(Act, "a.b", "b.h"),
+		e(Reset, "a.b", "k.k", "b.h"), e(Watch, "a.b", "b.h"), e(Cutoff, "a.b", "b.h"),
+		e(Reset, "a.b", "k.k", "p.me"), e(Act, "a.b", "p.me", "k.k"), e(Watch, "a.b", "p.me"), e(Watch, "b.h", "p.me"),
+	} {
+		if _, err := New(base, []Edge{ed}); err == nil {
+			t.Errorf("accepted %s edge using a brake or the owner: %+v", ed.Kind, ed)
+		}
+	}
+	// A brake may still be braked from, watched and changed, and the owner
+	// may still act alone.
+	mustNew(t, base, []Edge{e(Brake, "a.b", "b.h"), e(Watch, "b.h", "k.k"), e(Act, "b.h", "k.k"), e(Act, "a.b", "p.me")})
+	for _, k := range allKinds {
+		if k == Person {
+			continue
+		}
+		x := n("x.o", k, "Thing", nil)
+		x.Owner = true
+		if _, err := New([]Node{x}, nil); err == nil {
+			t.Errorf("accepted a %s as the owner", k)
+		}
 	}
 }
 
@@ -883,7 +966,7 @@ func naiveCuts(nodes []Node, edges []Edge, asset string, c Class, doms []string)
 // brute force, reach and cut-off providers from CutOffs.
 func naiveWeakens(g, h *Graph) bool {
 	gn, ge, hn, he := g.Nodes(), g.Edges(), h.Nodes(), h.Edges()
-	gd, hd := g.Domains(), h.Domains()
+	gd, hd := naiveDomainSet(gn), naiveDomainSet(hn)
 	offs := func(x *Graph, c Class) (map[string]map[string]bool, map[string]bool) {
 		cut, un := x.CutOffs(c)
 		m := map[string]map[string]bool{}
@@ -929,10 +1012,10 @@ func naiveWeakens(g, h *Graph) bool {
 				if len(hOff[a.ID]) > 0 {
 					return true
 				}
-				for _, d := range a.Domains {
+				for _, d := range naiveDomains(a) {
 					only := true
 					for _, o := range hn {
-						if o.ID != a.ID && contains(o.Domains, d) {
+						if o.ID != a.ID && contains(naiveDomains(o), d) {
 							only = false
 						}
 					}
@@ -954,7 +1037,8 @@ func naiveWeakens(g, h *Graph) bool {
 // TN-graph-e: Effect.Weakens matches the invariant, restated from scratch,
 // over every one-step mutation of Ana's household: each edge dropped, new
 // single and AND edges onto each asset, a new cut-off onto each asset, the
-// card limit set, and a new money account under each kind of label.
+// card limit set, a new money account under each kind of label, and a new
+// node of every kind in every role (TN-graph-A15).
 func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 	g := household(t, true)
 	var ps []Proposal
@@ -984,17 +1068,63 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 				AddEdges: []Edge{e(Act, "a.new", from...)}})
 		}
 	}
-	for _, kind := range []Kind{Device, Account, Provider} {
-		ps = append(ps, Proposal{Text: "node", AddNodes: []Node{n("x.new", kind, "New thing", nil)},
-			AddEdges: []Edge{e(Act, "x.new", "p.owner"), e(Act, "a.bank", "x.new")}})
-		ps = append(ps, Proposal{Text: "node cuts", AddNodes: []Node{n("x.new", kind, "New thing", dom("provider:x"))},
-			AddEdges: []Edge{e(Cutoff, "a.registrar", "x.new")}})
+	// Every node kind, labelled and not: a new node as a control source onto
+	// each asset, as one member of an AND gate on each control edge, as a
+	// witness, and as a cut-off provider. A brake may only brake: as any
+	// other source it is refused. Nobody, of any kind, may join as owner.
+	var refused []Proposal
+	for _, kind := range allKinds {
+		for _, d := range [][]string{nil, dom("provider:x"), dom("phone:ana")} {
+			x := n("x.new", kind, "New thing", d)
+			add := func(edges ...Edge) Proposal {
+				return Proposal{Text: string(kind), AddNodes: []Node{x}, AddEdges: edges}
+			}
+			var srcs []Proposal
+			for _, a := range assets {
+				srcs = append(srcs, add(e(Act, a, "x.new")), add(e(Reset, a, "x.new")))
+			}
+			for _, ed := range g.Edges() {
+				if control(ed.Kind) {
+					gate := add(Edge{Kind: ed.Kind, From: append(ed.From, "x.new"), To: ed.To, Source: ed.Source})
+					gate.DropEdges = []Edge{ed}
+					if contains(ed.From, "p.owner") {
+						refused = append(refused, gate) // the owner in an AND
+					} else {
+						srcs = append(srcs, gate)
+					}
+				}
+			}
+			srcs = append(srcs, add(e(Watch, "b.payee", "x.new")), add(e(Watch, "a.bank", "x.new")), add(e(Cutoff, "a.registrar", "x.new")))
+			if kind == BrakeKind {
+				refused = append(refused, srcs...)
+				for _, a := range assets {
+					ps = append(ps, add(e(Brake, a, "x.new"), e(Watch, "x.new", "k.one")))
+				}
+			} else {
+				ps = append(ps, srcs...)
+			}
+			owner := add(e(Act, "a.mail", "x.new"))
+			owner.AddNodes = []Node{x}
+			owner.AddNodes[0].Owner = true
+			refused = append(refused, owner)
+		}
 	}
-	// Changing the owner set is refused outright.
-	ghost := n("p.ghost", Person, "Ana again", nil)
-	ghost.Owner = true
-	if _, err := g.Apply(Proposal{AddNodes: []Node{ghost}, AddEdges: []Edge{e(Act, "a.mail", "p.ghost")}}); err == nil {
-		t.Error("a proposal added an owner node")
+	// The owner as one member of an AND gate, or as a witness.
+	for _, ed := range g.Edges() {
+		if control(ed.Kind) && !contains(ed.From, "p.owner") {
+			gate := Proposal{Text: "owner gate", DropEdges: []Edge{ed},
+				AddEdges: []Edge{{Kind: ed.Kind, From: append(ed.From, "p.owner"), To: ed.To, Source: ed.Source}}}
+			refused = append(refused, gate)
+		}
+	}
+	refused = append(refused, Proposal{Text: "owner witness", AddEdges: []Edge{e(Watch, "b.payee", "p.owner")}})
+	for _, p := range refused {
+		if _, err := g.Apply(p); err == nil {
+			t.Errorf("applied %s: %+v", p.Text, p.AddEdges)
+		}
+		if _, ok := g.Next([]Proposal{p}); ok {
+			t.Errorf("Next offered a refused %s proposal", p.Text)
+		}
 	}
 	weak, fine := 0, 0
 	for i, p := range ps {
@@ -1008,6 +1138,25 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 		}
 		if want := naiveWeakens(g, h); eff.Weakens != want {
 			t.Errorf("mutation %d %+v: Weakens %v, invariant says %v", i, p, eff.Weakens, want)
+		}
+		// The engine's cuts are the brute force's, under its own default rule.
+		hd := naiveDomainSet(h.Nodes())
+		for _, c := range Classes {
+			want := map[string]bool{}
+			for _, x := range h.Nodes() {
+				if hasClass(x, c) {
+					for _, cut := range naiveCuts(h.Nodes(), h.Edges(), x.ID, c, hd) {
+						want[x.ID+"|"+strings.Join(cut, "|")] = true
+					}
+				}
+			}
+			got := map[string]bool{}
+			for _, cut := range h.CutSets(c) {
+				got[cut.Asset+"|"+strings.Join(cut.Domains, "|")] = true
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("mutation %d %s %s: cuts %v, brute force %v", i, p.Text, c, got, want)
+			}
 		}
 		if eff.Weakens {
 			weak++
@@ -1041,7 +1190,7 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 
 func smallestNaive(g *Graph, asset string, c Class) int {
 	min := 3
-	for _, cut := range naiveCuts(g.Nodes(), g.Edges(), asset, c, g.Domains()) {
+	for _, cut := range naiveCuts(g.Nodes(), g.Edges(), asset, c, naiveDomainSet(g.Nodes())) {
 		if len(cut) < min {
 			min = len(cut)
 		}
