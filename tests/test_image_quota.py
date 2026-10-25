@@ -22,6 +22,8 @@ ON = "agentos-quota: root=ext4 prjquota flag=on"
 CANON = ("/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} "
          "-modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui "
          "-netjoin-sock /run/agentos-netjoin/netjoin.sock "
+         "-kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel "
+         "-kernel-owner-uid @uid:agentos-owner "
          "-runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw "
          "-image codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on")
 EXEC = ("{ path=/usr/lib/agentos/with-uids ; argv[]=%s ; ignore_errors=no ; start_time=[n/a] ; "
