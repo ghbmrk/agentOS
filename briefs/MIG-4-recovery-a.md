@@ -1,0 +1,80 @@
+# MIG-4-recovery-a: the hybrid backup seal and the key-table re-wrap (BAK-1, D-168)
+
+Work item: #3185, slice a of #2865 (the split is in the project's `plans/2026-10-25-trust-nothing-rows.md`). Tier A. Size M.
+
+## Goal
+
+A new core package, `broker/backup`, that seals a backup with hybrid X25519 + ML-KEM-768 so opening one needs both secrets (BAK-1, D-149). It carries the page CA key and the edge key with the revoked-edge-key record, never the kernel or holder keys. It puts the live subjects' data keys in the backup, re-wrapped under a per-backup key and never under the log key, and it does D-168's re-wrap of an older backup's key table without an erased subject. It is a library: nothing in `cmd/` calls it yet. It reads the subject-key table only through `kernel.Keys` (`List`, `Get`) and liveness only through `kernel.State.Recall`, so it changes no kernel file.
+
+## Decided here
+
+1. **Who can open a backup: the recovery key only.** REC-1 says the recovery key and a backup restore everything, so the recovery key must be enough. The hardware keys are not recipients. They are FIDO2 signers, and decrypting with one would need the PRF (hmac-secret) extension, which SPEC does not name. Either key would also become a second way into every backup. They root the restored install (REC-2, slice b), which needs no decryption. Adding hardware-key recipients later is a SPEC change, not this slice's call.
+2. **The recipient is derived from the recovery key, and the box keeps only its public half.** `RecipientFor(rk []byte) (Recipient, error)` takes the card's 20-byte recovery key (`broker/card`), refuses fewer than 16 bytes, and derives the X25519 private key as `HKDF-SHA256(rk, info "agentos.backup.x25519.v1")` (32 bytes) and the ML-KEM-768 decapsulation key from a 64-byte seed `HKDF-SHA256(rk, info "agentos.backup.mlkem768.v1")` (`mlkem.NewDecapsulationKey768`). `Recipient` holds the X25519 public key and the 1184-byte encapsulation key, and its `ID()` is the first 16 bytes of SHA-256 over both, hex. Setup and every recovery-key rotation (REC-4) store the `Recipient`, which is public. The box never stores the recovery key or either private half: only the restore path (slice b) sees `rk`.
+3. **The seal (one construction for both objects).** Each sealed object has a fresh X25519 ephemeral key and a fresh ML-KEM encapsulation: `ssX = X25519(eph, R.X)`, `(ssM, ctM) = R.ek.Encapsulate()`, then key = `HKDF-SHA256(ikm = ssM || ssX, salt = none, info = "agentos.backup.seal.v1" || kind || ctM || eph.pub || R.X || SHA-256(R.ek))`, 32 bytes, for AES-256-GCM. Binding both ciphertexts and both public keys into the info is the X-Wing-style combiner, so a swapped half changes the key. `kind` is `content` or `keytable`, so one cannot be opened as the other. The header (magic `AGOSBAK1`, version 1, kind, backup ID, generation, recipient ID, `eph.pub`, `ctM`) is in the clear and is the AAD of every chunk. The body is chunked AEAD in the STREAM form: 64 KiB chunks, nonce = 88-bit chunk counter || 1 byte that is 1 on the last chunk only. Truncating, reordering or adding a chunk fails, and so does any header byte. Backups can be large, so neither seal nor open holds the body in memory.
+4. **A backup is two objects.** The **content object** (kind `content`, generation 0) is written once and never changed. The **key-table object** (kind `keytable`) is replaced at each re-wrap. Its fresh seal is the per-backup key that D-168 names, so "a new per-backup key" is a new seal, and "drop the old key" is deleting the previous table object. The box keeps no per-backup secret. Both objects carry the same random 16-byte backup ID.
+5. **The content object's manifest.** The content object's plaintext begins with a manifest (JSON, version 1): `backup_id`, `created` (unix seconds), `recipient` (ID), `page_ca` (opaque bytes; `broker/pageca` from #3172 is not merged, so nothing here parses it), `edge_key` (opaque bytes) and `revoked_edge` (a list of opaque fingerprints) (HW-15), and `sections` (name, length, SHA-256). The sections follow in order. Section names are a closed set: `log`, and `content/<store>` for each kernel content store name. `Write` refuses any other name. The manifest has no field that could hold a kernel or holder key. The edge key is carried as data only: restore trusts none until the owner-page step (BAK-1, slice b).
+6. **The key table.** `Write` builds the table from `keys.List()`. For each subject it keeps those where `state.Recall(sub)` is found and not `Erased`, so an erased subject is left out even while its key delete is still owed, and a key no `subject.opened` names is left out too. It then calls `keys.Get`. The table plaintext is JSON: `backup_id`, `generation`, and the entries (`subject`, `key`). Inside the seal, each key is bound to its subject through the AEAD. It is never wrapped under the log key. The package never calls `Put` or `Delete` on the live table. A live subject whose `Get` reports it missing fails `Write` with an error that names it: a backup that silently lacks a live key would lose that subject's content at restore.
+7. **The record the box keeps.** `Write` returns a `Record`: backup ID, recipient (the full public `Recipient`, not only its ID), created, the generation of the current table, the sorted subject IDs in the table, and the SHA-256 of each object as written. The caller persists it. Where it lives (a log entry or a file) is slice d's choice and the wiring's. Records hold opaque subject IDs and no keys.
+8. **D-168 re-wrap.** `Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Outcome)`:
+   - **The new table.** It is `rec.Subjects` intersected with the subjects still live, their keys read from the live table, sealed fresh to `rec.Recipient` and not to the current recipient. Otherwise a backup taken before a recovery-key rotation could no longer be restored with the key that opens its content. The generation goes up by one.
+   - **Order.** Put the new table, read it back and compare its SHA-256 to what was written (this confirms it; the box cannot open its own backups), then delete every older table generation that `t.Tables(backupID)` lists. Only then does it return the new `Record`. A crash between the steps leaves extra generations, and the next `Rewrap` deletes them. A restore picks the highest generation that opens and names the backup ID of its content object.
+   - **No change needed.** When nothing in `rec.Subjects` was erased, `Rewrap` returns `Outcome{Unchanged: true}` and writes nothing.
+   - **Outcome.** It names the result as `Rewrote`, `AppendOnly` (`t.AppendOnly()`, written nothing), `Offline` (Put or Get failed), `ReadBackMismatch`, `OldNotDeleted` (the new table is up but an older one remains: it still holds the subject), or `LiveKeyMissing` (refused, as in decision 6). Each one but `Rewrote` and `Unchanged` means the backup may still hold the erased items. Slice d turns this into `Confirmation`.
+   - **Inputs.** `Target` is a small interface (`PutTable`, `GetTable`, `DeleteTable`, `Tables`, `AppendOnly`) with an in-memory and a directory implementation here. Storage adapters are later rows.
+9. **Restore unwrap.** `Open(r io.Reader, rk []byte) (Manifest, *Sections, error)` opens a content object. `UnwrapTable(r io.Reader, rk []byte, backupID string, dst kernel.Keys) (n int, err error)` opens a table object, refuses one whose backup ID differs, refuses a `dst` whose `List` is not empty (it must be a fresh directory, in practice `proc.OpenFileKeys` on a new path), and `Put`s every entry. It does not drop erased subjects itself: `OpenContent` deletes the key of every subject the restored log has erased at the next start (D-167, #3160). The erases newer than the backup are slice b's hold.
+10. **Imports.** Only the standard library (`crypto/mlkem`, `crypto/ecdh`, `crypto/hkdf`, `crypto/aes`, `crypto/cipher`, `crypto/sha256`, `crypto/rand`, `encoding/json`, `io`, `os` for the directory target) and `broker/kernel`. Not `kernel/proc`, `broker/recovery`, `broker/card` or any clerk. Tests may import `kernel/proc`. An `imports_test.go` pins the list.
+
+`Recaller` is `interface{ Recall(string) (kernel.Recall, bool) }`, which `*kernel.State` satisfies.
+
+## Residual risks (record each in `broker/backup/ASSUMPTIONS.md`)
+
+1. **The recovery key bounds the seal.** The card's recovery key is 160 bits. Anyone holding a backup can test guesses offline against the public recipient. That is 2^160 classically, but about 2^80 serial quantum steps under Grover, below ML-KEM-768's category 3. The hybrid stops a break of X25519 alone and a break of ML-KEM alone. It does not raise the recovery key's entropy. A longer recovery key is a card and SPEC question (REC-4, STO-2), not this slice's.
+2. **A destination that keeps old versions.** Object versioning, a trash folder, or anyone who copied an older table object keeps the erased subject's key. `Rewrap` can see only what `Tables` lists. Storage adapters should delete all versions, and the confirmation wording (slice d) must not promise more than "re-sealed at this destination".
+3. **Rollback at restore.** Someone who kept an older table generation can hand it to a restore. Slice b's hold on erases newer than the backup must cover the restored key table, as #3186 already says.
+4. **Crash between put and delete.** Until the next `Rewrap`, the older table generation exists and `Outcome` says so. It is never reported as `Rewrote`.
+
+## Not in this package
+
+- Taking backups on a schedule, the choice page, the only-copy notice and the upload through a storage adapter's grant (old BAK-1 follow-ups). No row owns the running path that calls `Write` yet. The coordinator should file one, probably beside #2682's start-up wiring, since only the kernel process holds the key table.
+- Restore as an install, passkeys cut, the erase hold: slice b (#3186), which owns the restore lifecycle matrix.
+- The compromised switch: slice c (#3187).
+- Erase driving `Rewrap` and the `Confirmation` text: slice d (#3188).
+- Anything in `broker/kernel`, `broker/recovery`, `broker/localui`, `broker/owner` or `cmd/`.
+
+## Scope
+
+- New `broker/backup/`: `seal.go` (recipient, combiner, STREAM), `backup.go` (manifest, `Write`, `Open`, `Record`), `table.go` (table, `UnwrapTable`, `Rewrap`, `Outcome`), `target.go` (`Target`, `MemTarget`, `DirTarget`), the tests below, `ASSUMPTIONS.md`.
+- Guard files, pre-approved (each is a gate file, so the build PR needs the Security accept below):
+  - `broker/core/core.txt`: one line, `core backup`, with a one-line comment. This also makes `tools/risk_tier.py` rate it tier A, so `risk_tier.py` is not touched.
+  - `tools/trusted_core.txt`: one line, `root backup`.
+  - `tools/g1_scope_g2.txt`: one line, `allow broker/backup/`.
+- `briefs/MIG-4-recovery-a.md`.
+
+**Guard files:** `broker/core/core.txt` (`core backup`), `tools/trusted_core.txt` (`root backup`), `tools/g1_scope_g2.txt` (`allow broker/backup/`). None in `broker/daemon/arc2_test.go`: the package is on no control, machine, guest or learning plane.
+
+**Gates for the build PR.**
+- **Security accept.** `premerge.py --needs-mark` prints `mark` (core.txt, trusted_core.txt, g1_scope_g2.txt), so the PR needs a separate Security accept from a fresh session in its own `<!-- record: security -->` comment (D-137), in addition to tier A's L3.
+- **D-159 row.** `root backup` grows the trusted core by every line of the package. Once the build PR has a number, a one-row DECISIONS.md PR adds "Trusted-core growth (D-159) for PR #<n> (issue #3185, MIG-4-recovery-a): the hybrid backup seal and the key-table re-wrap in a new core package `broker/backup` (+<lines>)". It is an approved design under D-159: SPEC BAK-1 (D-149) and D-168, with the source being Mark's "Do all recs", cmsg_01R91wiieBzMSvPKFsAJVvuK4RKum9HBG97vi7x4EN2yt9 (card cmsg_01R91wiieBzMSvPKFsAJVvuKQkoZWPG5XC9NWwtgaBTy5T). The build PR's `Trusted-core:` line names that row after it merges (D-159 rule 3). Decision 1 (recovery key only) follows REC-1 and adds no design beyond it. If review reads it as a new design, it goes to Mark as a card before the row.
+- **Conflict guard (D-111).** Before starting, check that no open PR touches `core.txt`, `trusted_core.txt` or `g1_scope_g2.txt` on the lines near the additions. #3172 may add `broker/pageca` to the same lists; if it does, merge order decides and the second rebases.
+
+## Acceptance tests
+
+**Acceptance tests:**
+- BAK-1 hybrid: `broker/backup/seal_test.go::TestOpenNeedsBothSecrets`: a white-box combiner test in which a changed `ssX` or a changed `ssM` gives a different key, plus black-box tests where flipping one byte of `eph.pub` or of `ctM` fails to open. Catches a combiner that drops a half.
+- BAK-1 binding: `seal_test.go::TestKindAndHeaderAreBound`: a table object does not open as content, and any changed header byte (backup ID, generation, recipient) fails. Catches swapped objects.
+- BAK-1 stream: `seal_test.go::TestTruncatedReorderedOrExtendedFails`: removing the last chunk, swapping two chunks, appending one, and a zero-length body each fail or round-trip exactly. Catches a STREAM with no last-chunk flag.
+- BAK-1 recipient: `seal_test.go::TestRecipientIsDerivedAndPublicOnly`: the same `rk` gives the same `Recipient` and ID, a different `rk` fails to open, and `Recipient`'s encoded form holds no private bytes (compare against the derived private halves). Catches a stored private key.
+- BAK-1 manifest: `backup_test.go::TestManifestCarriesPageCAAndEdgeOnly`: after a round trip, the page CA, edge key and revoked record match. `Write` refuses a section outside `log` and `content/<store>`. Canary kernel-log-key and holder-key bytes, present in the test's kernel fixture, appear nowhere in the opened plaintext.
+- BAK-1 key table (D-167): `table_test.go::TestErasedAndUnnamedSubjectsAreLeftOut`: a real `kernel.Kernel` on `MemKeys` with three subjects. One is erased with its key delete made to fail, so the key is still in the table, and one key has no `subject.opened`. The table holds only the live subject.
+- BAK-1 key table: `table_test.go::TestALiveMissingKeyFailsWrite`.
+- BAK-1 key table: `table_test.go::TestTableNeverUsesTheLogKey`: no table ciphertext opens under the `FileKeys` log-key AEAD, and the package calls only `List` and `Get` (a `Keys` spy fails on `Put` or `Delete`).
+- D-168 re-wrap: `table_test.go::TestRewrapDropsTheSubjectAndTheOldTable`: after an erase, `Rewrap` yields generation+1 without the subject, the target lists only the new generation, the old bytes are gone, and the unwrap of the new table has no key for the subject.
+- D-168 rotation: `table_test.go::TestRewrapSealsToTheBackupsOwnRecipient`: after a recovery-key rotation, the rewrapped table opens with the old `rk` and not the new one.
+- D-168 outcomes: `table_test.go::TestRewrapOutcomes`: append-only, offline put, read-back mismatch, a delete that fails (`OldNotDeleted`), and nothing to do (`Unchanged`, no write). Each is reported and none is reported as `Rewrote`.
+- D-168 crash: `table_test.go::TestACrashBetweenPutAndDeleteIsFinishedNextTime`: the target fails after the put. The outcome is not `Rewrote`, and the next `Rewrap` deletes both older generations.
+- REC-1 unwrap: `table_test.go::TestUnwrapIntoAFreshFileKeys`: `UnwrapTable` into `proc.OpenFileKeys(t.TempDir())`, then a kernel booted on the backup's log with a later `subject.erased` appended. `OpenContent` deletes that key, and the other subjects' items `Read`. It also refuses a non-empty `dst` and a table whose backup ID differs from the content object's.
+- Imports: `imports_test.go::TestBackupImportsOnlyKernelAndStd`.
+
+## Estimate
+
+About 100k tokens, one session, on the strongest model (tier A): roughly 450 lines of code and 650 of tests. Checkpoint at 120k. If the directory `Target` pushes it over, drop `DirTarget` to a follow-up and keep `MemTarget`.
