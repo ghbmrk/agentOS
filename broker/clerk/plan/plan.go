@@ -66,6 +66,11 @@ type Endpoint struct {
 	Kind                     Kind
 	// Query names the query keys the endpoint takes, each at most once.
 	Query []string
+	// UserCode, on a device step, is the top-level key of its answer that
+	// holds the code the owner is shown: the clerk records it for the
+	// sign-in guest (UserCode), so the code shown is the one the provider
+	// gave, not the CLI's word for it.
+	UserCode string
 }
 
 // FieldKind is what a declared token-answer field may hold.
@@ -160,6 +165,7 @@ const (
 	DSave        = "plan-save"        // the login could not be sealed: the answer was dropped
 	DEncoded     = "plan-encoded"     // an encoded body either way
 	DStale       = "plan-stale"       // a refresh answered for a login since removed or replaced: dropped, nothing stopped
+	DEnded       = "plan-ended"       // a code exchange answered after its sign-in ended: dropped, nothing stored
 )
 
 // ErrRequalify is Resume's answer for a route an unswappable answer
@@ -224,8 +230,9 @@ type Login struct {
 
 	mu      sync.Mutex
 	guests  map[string]*planGuest
-	signing map[string]bool // sign-in guests, true once one committed the login
-	held    string          // a stop the slot could not record (fail closed)
+	signing map[string]bool   // sign-in guests, true once one committed the login
+	shown   map[string]string // sign-in guest -> the user code its device step forwarded
+	held    string            // a stop the slot could not record (fail closed)
 	// gen counts the logins the store has held: Remove and every sign-in
 	// commit move it, under cmu. A refresh exchange reads it together with
 	// the token it sends, under cmu, so its answer is judged only against
@@ -285,7 +292,7 @@ func New(d Declaration, store *Store, roots *x509.CertPool) (*Login, error) {
 		return nil, errors.New("clerk: a plan login needs its sealed store")
 	}
 	p := &Login{d: d, store: store, token: map[string]*Field{}, refused: map[string]bool{},
-		guests: map[string]*planGuest{}, signing: map[string]bool{}}
+		guests: map[string]*planGuest{}, signing: map[string]bool{}, shown: map[string]string{}}
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
@@ -322,6 +329,9 @@ func (p *Login) validate() error {
 		}
 		if e.Name == "" || !methRE.MatchString(e.Method) || !planPath.MatchString(e.Path) || !planHost.MatchString(e.Host) {
 			return fmt.Errorf("clerk: plan endpoint %q is out of shape", e.Name)
+		}
+		if e.UserCode != "" && e.Kind != Device {
+			return fmt.Errorf("clerk: plan endpoint %q: only a device step carries the user code", e.Name)
 		}
 		if (e.Kind == Read) != (e.Method == http.MethodGet) {
 			return fmt.Errorf("clerk: plan endpoint %q: a read is a GET and only a read is", e.Name)
@@ -548,6 +558,7 @@ func (p *Login) Remove() error {
 	p.mu.Lock()
 	clear(p.guests)
 	clear(p.signing)
+	clear(p.shown)
 	p.gen++
 	p.mu.Unlock()
 	return nil
@@ -709,13 +720,28 @@ func (p *Login) SignedIn(guest string) bool {
 	return p.signing[guest]
 }
 
-// Forget drops guest's placeholders and sign-in mark, when the guest is
-// destroyed.
-func (p *Login) Forget(guest string) {
+// UserCode is the user code the device step forwarded to sign-in guest
+// guest last, or "".
+func (p *Login) UserCode(guest string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.shown[guest]
+}
+
+// Forget drops guest's placeholders and sign-in mark, when the guest is
+// destroyed, and reports whether its sign-in committed the login. It waits
+// out a commit in progress, and a sign-in's code exchange that answers
+// after it is dropped (DEnded), so the report is final.
+func (p *Login) Forget(guest string) (signedIn bool) {
+	p.cmu.Lock()
+	defer p.cmu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	signedIn = p.signing[guest]
 	delete(p.guests, guest)
 	delete(p.signing, guest)
+	delete(p.shown, guest)
+	return signedIn
 }
 
 // resolve maps guest's own placeholder for field to the value the slot
@@ -856,7 +882,10 @@ func (p *Login) Do(ctx context.Context, guest string, r *http.Request, meter Met
 		}
 		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, out)
 		up.Header.Set("Content-Type", "application/json")
-		return p.send(up, "")
+		if e.UserCode == "" {
+			return p.send(up, "")
+		}
+		return p.userCode(up, guest, e.UserCode)
 	case Read:
 		if len(body) != 0 {
 			return nil, DUndeclared
@@ -995,6 +1024,32 @@ func (p *Login) answerHeader(k string) bool {
 		}
 	}
 	return false
+}
+
+// userCode makes the device step that answers the user code, records the
+// code for guest, and passes the answer on whole. An answer too large to
+// read is dropped.
+func (p *Login) userCode(up *http.Request, guest, key string) (*http.Response, string) {
+	a, detail := p.exchange(up)
+	if detail != "" {
+		return nil, detail
+	}
+	if a.body == nil {
+		return nil, DUndeclared
+	}
+	if a.status == http.StatusOK {
+		if obj, err := strictObject(a.body); err == nil {
+			if c, ok := obj[key].(string); ok && c != "" && len(c) <= maxDevice {
+				p.mu.Lock()
+				if _, ok := p.signing[guest]; ok {
+					p.shown[guest] = c
+				}
+				p.mu.Unlock()
+			}
+		}
+	}
+	return p.answer(&http.Response{StatusCode: a.status, Status: fmt.Sprintf("%d %s", a.status, http.StatusText(a.status)),
+		Header: a.header, ContentLength: int64(len(a.body)), Body: io.NopCloser(bytes.NewReader(a.body))}, ""), ""
 }
 
 // exchange makes a token request and reads its answer whole, bounded.
@@ -1312,6 +1367,12 @@ func (p *Login) swap(a *planAnswer, guest string, signIn bool) (*http.Response, 
 		return nil, DUnswappable
 	}
 	p.mu.Lock()
+	if _, ok := p.signing[guest]; signIn && !ok {
+		// Its sign-in ended (Forget) while the exchange was in flight.
+		p.mu.Unlock()
+		p.cmu.Unlock()
+		return nil, DEnded
+	}
 	g := p.guests[guest]
 	if g == nil || g.account != acct {
 		g = p.mint(acct)
@@ -1413,7 +1474,7 @@ func Codex(guard *netguard.Policy) Declaration {
 			{Name: "responses", Host: run, Method: "POST", Path: "/backend-api/codex/responses", Kind: Model},
 			{Name: "models", Host: run, Method: "GET", Path: "/backend-api/codex/models", Kind: Read, Query: []string{"client_version"}},
 			{Name: "refresh", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Refresh},
-			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: Device},
+			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: Device, UserCode: "user_code"},
 			{Name: "devicetoken", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/token", Kind: Device},
 			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Code},
 		},
