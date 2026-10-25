@@ -314,7 +314,7 @@ func writeFile(path string, b []byte) error {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(name, path)
+		err = os.Rename(name, path) // durable:exempt durable is outside the guest plane's ARC-2 import list; this is durable.WriteFile's sequence, and the directory sync follows
 	}
 	if err != nil {
 		os.Remove(name)
