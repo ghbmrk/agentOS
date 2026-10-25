@@ -1322,6 +1322,16 @@ BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
 UNLOCK_UNITS = ("agentos-keeper-kernel.service",)
 # Starts of an unlock unit in one boot: each spends two of the counter's increments (LOG-anchor-tpm-b).
 START_LIMIT_MAX = 5
+# The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
+# no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
+# an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
+# refused; the check models no other route.
+KERNEL_REBOOT = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" != success ] && [ -e /run/agentos-kernel/up ]; "
+                 "then exec /usr/bin/systemd-run --on-boot=30min --unit=agentos-kernel-reboot /usr/bin/systemctl reboot; fi'")
+# Each start of that unit first removes the last start's "up" (#2998): /run/agentos-kernel outlives a stop
+# (#3073), so without this a start refused after a good one would ask for the reboot.
+KERNEL_UP_CLEAR = "/usr/bin/rm -f /run/agentos-kernel/up"
+REBOOT_WORDS = re.compile(r"(?<![\w-])(systemctl|systemd-run|busctl|dbus-send|reboot|shutdown|halt|poweroff|kexec|telinit)(?![\w-])")
 # The units that may open the TPM (#2889 Security later 2): the keeper's, and the old core's vault
 # process until it is deleted (D-139). Only through the resource manager.
 TPM_UNITS = KEEPER_UNITS + ("agentos-egress.service",)
@@ -1438,7 +1448,9 @@ def keeper_violations(root):
       SecureBits=.
     - #2897: an UNLOCK_UNITS unit sets StartLimitBurst= (1 to START_LIMIT_MAX) and a non-zero
       StartLimitIntervalSec= in [Unit], and no failure or start-limit action that reboots, which would
-      restart it on every boot."""
+      restart it on every boot. Its one reboot is ExecStopPost=KERNEL_REBOOT (#2998); it sets no
+      OnFailure= or OnSuccess=, and no other command names a REBOOT_WORDS tool. With that line, an
+      ExecStartPre= is KERNEL_UP_CLEAR."""
     root = str(root)
     dirs, out = unit_dirs(root)
     names, sockets = set(), []
@@ -1557,6 +1569,20 @@ def keeper_unit_violations(name, files):
             v = ini_last(files, "Unit", key)
             if v not in (None, "none"):
                 out.append("%s: %s=%s; a reboot starts the unlock step again (#2897)" % (name, key, v))
+        for key in ("OnFailure", "OnSuccess"):
+            for v in ini_entries(files, "Unit", key):
+                out.append("%s: %s=%s starts a unit when the kernel stops, which the tree check does not model; its "
+                           "one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #2998)" % (name, key, v))
+        for key in EXEC_KEYS:
+            for v in ini_entries(files, "Service", key):
+                if REBOOT_WORDS.search(v) and (key, v) != ("ExecStopPost", KERNEL_REBOOT):
+                    out.append("%s: %s=%s can reboot the box; its one reboot is ExecStopPost=KERNEL_REBOOT, after a "
+                               "kernel that came up and no sooner than 30 minutes into the boot (#2897, #2998)"
+                               % (name, key, v.split()[0]))
+        if KERNEL_REBOOT in ini_entries(files, "Service", "ExecStopPost") and \
+                KERNEL_UP_CLEAR not in ini_entries(files, "Service", "ExecStartPre"):
+            out.append("%s: no ExecStartPre=%s; a start refused after a good one would find the last start's "
+                       "\"up\" and reboot the box (#2897, #2998)" % (name, KERNEL_UP_CLEAR))
     return out
 
 

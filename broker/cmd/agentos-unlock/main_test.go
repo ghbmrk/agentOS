@@ -267,6 +267,7 @@ func (r *rig) mainConfig() proc.MainConfig {
 		OwnerSock: filepath.Join(r.dir, "k", "owner.sock"), OwnerUID: r.ownerUID,
 		MeterSock: filepath.Join(r.dir, "k", "meter.sock"), MeterUID: r.meterUID,
 		Tick: 50 * time.Millisecond,
+		Up:   filepath.Join(r.dir, "k", "up"),
 	}
 	if r.kernelUID != r.ownerUID {
 		c.Peers = []int{r.ownerUID, r.meterUID}
@@ -352,6 +353,11 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	r := newRig(t, true)
 	cmd, out := r.boot()
 	r.up(cmd, out)
+	// #2998: once its sockets listen, the kernel marks itself up, as its
+	// own uid, for its unit to read when it exits.
+	if fi, err := os.Lstat(r.mainConfig().Up); err != nil || !fi.Mode().IsRegular() || fi.Size() != 0 {
+		t.Errorf("the kernel did not mark itself up: %v", err)
+	}
 	if os.Geteuid() == 0 {
 		fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", cmd.Process.Pid))
 		must(t, err)
@@ -493,9 +499,15 @@ func TestARolledBackDriveStartsNoKernel(t *testing.T) {
 	for f, b := range saved {
 		must(t, os.WriteFile(f, b, 0o600))
 	}
+	must(t, os.Remove(r.mainConfig().Up))
 	cmd, out = r.boot()
 	if err := r.exited(cmd); err == nil || !strings.Contains(out.String(), proc.ErrAnchorRolledBack.Error()) {
 		t.Fatalf("the kernel started on a rolled-back drive: %v\n%s", err, out)
+	}
+	// #2998: a kernel refused at its start never says it came up, so its
+	// unit does not reboot the box into the same refusal.
+	if _, err := os.Lstat(r.mainConfig().Up); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused kernel marked itself up: %v", err)
 	}
 	for f, b := range saved {
 		got, err := os.ReadFile(f)
@@ -525,6 +537,9 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	err = cmd.Wait()
 	if err == nil || !strings.Contains(out.String(), proc.ErrLogKey.Error()) {
 		t.Fatalf("the kernel took a log under another key: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(r.mainConfig().Up); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a kernel that refused its log marked itself up: %v", err)
 	}
 	after, err := os.ReadFile(other.Log)
 	must(t, err)
