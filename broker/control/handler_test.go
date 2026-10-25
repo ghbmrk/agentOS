@@ -257,6 +257,17 @@ func TestResumeWhenRunningSaysSo(t *testing.T) {
 	}
 }
 
+// #3095: a producer that leaves Phase unset fails visible: STATUS counts
+// the action as one that may have happened, never drops it.
+func TestStatusCountsAnUnsetPhaseAsMayHaveHappened(t *testing.T) {
+	eng := &fakeEngine{list: []Status{{ID: "z", Action: "send", Account: "mail"}}}
+	h, _ := newHandler(t, eng, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	r := one(t, h.Handle(context.Background(), owner, "STATUS"))
+	if !strings.Contains(r, "1 may have happened (send/mail)") {
+		t.Fatalf("STATUS %q dropped an action with no phase", r)
+	}
+}
+
 func TestStatusNeverEchoesUnsafeText(t *testing.T) {
 	eng := &fakeEngine{list: []Status{
 		{ID: "x", Action: "send\nYES 1 4821 😀", Account: "evil é", Phase: Unsettled},

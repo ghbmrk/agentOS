@@ -44,12 +44,14 @@ type StopReport struct {
 	Cancels    int      // cancel requests sent to services that take them
 }
 
-// Phase is where one action stands as STATUS counts it (SPEC §10).
+// Phase is where one action stands as STATUS counts it (SPEC §10). The
+// zero value is Unsettled, so a producer that leaves Phase unset shows
+// the action as one that may have happened rather than hiding it (#3095).
 type Phase int
 
 const (
-	Settled   Phase = iota // done, failed, denied or cancelled: not counted
-	Unsettled              // sent, or its outcome is unknown: it may have happened
+	Unsettled Phase = iota // sent, or its outcome is unknown: it may have happened
+	Settled                // done, failed, denied or cancelled: not counted
 	Held                   // authorized, or proved not done: it waits to run
 	Open                   // waits for the owner's decision
 )
