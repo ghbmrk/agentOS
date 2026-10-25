@@ -49,4 +49,19 @@ Also carries #3105's follow-ups: the `forbiddenPrefix` test case and the `gen` c
 - `TestAdmittedCallIsSettledOnce`, `TestCountRoundsUp` (LOG-7) in `broker/clerk/model/model_test.go`.
 - `TestPlanGuestEndpointMetersEachCall` (PLN-5, CLK-7, LOG-7, RES-5) in `broker/clerk/run/plan_test.go`: over the socket, a call is metered into the kernel's log with its pool reading and no real token reaches the guest; a call past the cap is 429 and never sent. `TestPlanStatusFromDetail` (CLK-4).
 
+**Slice (c), MIG-4-plan-login-c: sign-in and the owner calls** (#3104 comment 6397037553), `broker/clerk/run/plansignin.go`. It ports `provagent/signin.go` onto the plan login clerk.
+1. **Mode** (`plan.Declaration.Mode`): `permitted`, `unconfirmed` or `not-allowed`, the read of the provider's terms (CLK-7); `New` refuses any other. Codex is `permitted`.
+2. **Sign-in.** `PlanHost.Begin` starts the CLI's device-code sign-in through `SignInWorkers`, the guest host's interface (#2780(b)), as a fresh sign-in guest (`BeginSignIn`) whose only way out is its own endpoint (`ServePlan`). It returns the provider's own page (never the printed link), the code printed after a declared link, and whom the code is from. Success is only `SignedIn` for that guest; an exit, no code in time, an undeclared link or the owner's wall ends it as failed or timed out. The sandbox is destroyed and the guest forgotten on every path. One sign-in waits at a time.
+3. **Owner calls** on the model clerk process's owner socket (`ListenPlanOwner`, owner uid only): `planbegin`, `planstate` (mode, signed in, stop, the waiting page and code, how the last sign-in ended; no token), `planresume` (`Login.Resume`; `requalify` for an unswappable stop), `planremove` (ends a waiting sign-in, then `Login.Remove`).
+4. **Mode gate** (`PlanGuest.gate`, before anything is read or sent): `permitted` is open; `unconfirmed` serves its sign-in guest and otherwise only while `Consent()` stands, read at each request; `not-allowed` starts no sign-in and serves nothing. The kernel records consent and pause (KEY-4, CH-11); `cmd/agentosd` wires both (#2780(b)).
+
+**Scope (c):** `broker/clerk/run/` (new `plansignin.go`, `plansignin_test.go`; `plan.go`, `plan_test.go`, `ASSUMPTIONS.md`), `broker/clerk/plan/` (`plan.go`, `body_test.go`), this brief. No guard file changes.
+
+**Acceptance tests (c),** in `broker/clerk/run/plansignin_test.go`:
+- `TestPlanSignInShowsTheProvidersPageAndCode` (PLN-5, CLK-7): the owner gets the provider's page and the printed code with its provider; the CLI's code exchange through its endpoint signs in; the sandbox is destroyed and the guest forgotten.
+- `TestPlanSignInSucceedsOnlyByTheClerksRecord` (CLK-7): a stored login and a CLI exit are not success; no code, an undeclared link, a failed start or the wall end it; a second sign-in is busy.
+- `TestPlanModeGate` (CLK-7): `not-allowed` starts nothing and serves nothing; `unconfirmed` signs in without consent, refuses runs until consent, and stops at its withdrawal; nothing refused is sent.
+- `TestPlanOwnerSocket` (CLK-7, CLK-4): begin, state, remove and resume over the owner socket; an unswappable stop answers `requalify` and starts no sign-in.
+- `TestPlanSignInPromptCode`, and `TestPlanDeclarationRefusesAHostedBody` gains no mode and an unknown mode.
+
 **Usage estimate:** about 120k tokens per slice.
