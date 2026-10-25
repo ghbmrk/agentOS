@@ -35,6 +35,11 @@ Apache License 2.0 dependencies (broker/vendor)
 
 MIT dependencies (broker/vendor)
 - github.com/emersion/go-imap, go-message, go-sasl, go-textwrapper
+- github.com/gen2brain/h265 (the HEIC decoder in agentos-photo; a port of
+  rust_h265 and oxideav-h265, whose notices it carries in its LICENSE.
+  It grants no HEVC patent rights; HEVC is covered by patent pools and
+  unpooled holders, and a distributor of an image with it may need their
+  licences); broker/third_party/h265 is a patched copy of v0.2.3
 - github.com/gobwas/httphead, pool, ws
 - github.com/icholy/digest
 - github.com/makiuchi-d/gozxing

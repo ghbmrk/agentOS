@@ -1,0 +1,10 @@
+[
+  {"id": "payment-card", "name": "Payment card", "kind": "money", "group": "payment", "route": "none"},
+  {"id": "payment-wallet", "name": "Payment wallet", "kind": "money", "group": "payment", "route": "none"},
+  {"id": "mailbox", "name": "Give me an email address? About 1 minute.", "kind": "mail", "group": "mailbox", "route": "none"},
+  {"id": "gmail", "name": "Gmail", "kind": "mail", "group": "account",
+   "domains": ["google.com"], "signin": ["accounts.google.com"],
+   "narrower": true, "route": "oauth", "ongoing": true},
+  {"id": "electric-utility", "name": "Electric utility", "kind": "utility", "group": "account",
+   "route": "none", "ongoing": true, "implied_by": ["ev-charger", "thermostat"]}
+]

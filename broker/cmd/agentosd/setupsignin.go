@@ -205,6 +205,7 @@ type setupMachines struct {
 	admit                        admission.Config
 	diskReserveMB, machineDiskMB int64
 	workerLayerMB                int64
+	contained                    func(lineage string) bool // vm.Config.Contained
 }
 
 // open opens the manager. Admission is a controller of its own over the
@@ -234,6 +235,7 @@ func (c setupMachines) open(ctx context.Context) (provagent.Host, error) {
 		MachineDiskBytes: c.machineDiskMB << 20,
 		WorkerLayerBytes: workerLayerBytes(c.workerLayerMB),
 		ProviderRoutes:   c.providerRoutes(),
+		Contained:        c.contained,
 	}
 	md.set(&vmc)
 	m, err := vm.Open(ctx, vmc)

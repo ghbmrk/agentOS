@@ -173,6 +173,18 @@ func TestDecodeRefusals(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Errorf("sandbox ran %d times for files refused before it", len(f.calls))
 	}
+	// A HEIC, or any ISOBMFF file, goes to the sandbox, which says which
+	// brands it takes, under the HEIC cap (CH-photo-heic-1).
+	for _, in := range []string{"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", "\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf"} {
+		f := &fakeRunner{res: gvisor.OneShotResult{ExitCode: 10}}
+		if _, err := decode(t, []byte(in), f); err != RefuseType || len(f.calls) != 1 {
+			t.Errorf("%q: %v after %d runs; want the sandbox's type", in[4:12], err, len(f.calls))
+			continue
+		}
+		if f.calls[0].MemBytes != HEICMemBytes {
+			t.Errorf("%q: run capped at %d bytes; want HEICMemBytes", in[4:12], f.calls[0].MemBytes)
+		}
+	}
 	raw := pngFile(t, 4, 4)
 	for code, want := range map[int]Refusal{10: RefuseType, 11: RefuseSize, 12: RefusePixels, 13: RefuseDecode, 2: RefuseDecode, 137: RefuseDecode} {
 		if _, err := decode(t, raw, &fakeRunner{res: gvisor.OneShotResult{ExitCode: code}}); err != want {
@@ -213,6 +225,11 @@ func TestLimitsMatchDecoder(t *testing.T) {
 	for _, r := range []decoder.Refusal{decoder.RefuseType, decoder.RefuseSize, decoder.RefusePixels, decoder.RefuseDecode} {
 		if got := exitRefusal[r.ExitCode()]; string(got) != string(r) {
 			t.Errorf("exit %d maps to %q, decoder's %q", r.ExitCode(), got, r)
+		}
+	}
+	for _, in := range []string{"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", "\x00\x00\x00\x14ftypmif1\x00\x00\x00\x00hevc"} {
+		if decoder.IsHEIC([]byte(in)) && !isoBMFF([]byte(in)) {
+			t.Errorf("%q: the decoder takes it but the broker refuses it first", in)
 		}
 	}
 	var h header

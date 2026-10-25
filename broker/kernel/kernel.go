@@ -286,6 +286,9 @@ type Kernel struct {
 	// not state: a restart marks the dispatches unknown (Boot) and probes
 	// them again.
 	asked map[stepRef]bool
+	// The subject-key table and content stores, from OpenContent (erase.go).
+	keys   Keys
+	stores map[string]ContentStore
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")
@@ -835,10 +838,16 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Ref
 	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
 }
 
-// Tick runs every active plan as far as the clock allows, calling the
-// in-process clerks it was booted with as it goes. A step that cannot move
+// Tick retries the erases not yet confirmed, then runs every active plan as
+// far as the clock allows, calling the in-process clerks it was booted with
+// as it goes. A step that cannot move
 // yet is left for a later Tick.
 func (k *Kernel) Tick(now int64) error {
+	if k.keys != nil {
+		if err := k.confirmErases(now); err != nil {
+			return err
+		}
+	}
 	for n := 0; n < 4*MaxSteps; n++ {
 		cs, err := k.Calls(now)
 		if err != nil || len(cs) == 0 {

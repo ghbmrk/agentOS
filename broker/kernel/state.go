@@ -74,7 +74,7 @@ const (
 	TReserveUp     = "pool.reserve.raised"
 	TReserveDown   = "pool.reserve.lowered"
 	TPoolReset     = "pool.reset"
-	// Task entries are in task.go.
+	// Task entries are in task.go, subject entries in erase.go.
 )
 
 // schema is each entry type's body version. key.issued is 2: its body became
@@ -86,6 +86,7 @@ var schema = map[string]int{
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
+	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -419,6 +420,9 @@ type State struct {
 	Extended map[string]key.Key
 	Pools    map[string]Pool
 	tasks    map[string]*taskState
+	subjects map[string]*subjectState // erase.go
+	items    map[Hash]itemOf
+	owing    map[string]bool // erased subjects a store has not confirmed
 	Order    []string
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
@@ -438,7 +442,7 @@ func NewState(anchors []key.PublicKey) *State {
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
 		Grants:  map[key.ID]Grant{}, Plans: map[string]*PlanState{},
 		SpendHeld: map[string]SpendHold{}, Extended: map[string]key.Key{}, Pools: map[string]Pool{},
-		tasks: map[string]*taskState{}, uses: map[key.ID][]usedRec{}, reserved: map[uint64]*spendReserved{},
+		tasks: map[string]*taskState{}, subjects: map[string]*subjectState{}, items: map[Hash]itemOf{}, owing: map[string]bool{}, uses: map[key.ID][]usedRec{}, reserved: map[uint64]*spendReserved{},
 		seen: map[key.ID]map[string]int{}, recent: map[key.ID]map[string]int64{},
 	}
 }
@@ -1089,6 +1093,8 @@ func (s *State) Apply(e Entry) error {
 		}
 	case TTaskOpened, TTaskApproved, TTaskEnded:
 		return s.applyTask(e)
+	case TSubjectOpened, TContentStored, TSubjectErased, TEraseConfirmed:
+		return s.applyErase(e)
 	default:
 		return ErrUnknown
 	}
