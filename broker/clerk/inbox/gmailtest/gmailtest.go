@@ -76,9 +76,10 @@ type Server struct {
 	filters  int
 	forwards []string
 	autoFwd  string
-	endless  int    // read listings left that name a next page, whatever the last
-	otherID  bool   // metadata answers name another message's id
-	user     string // the account the next consent signs in as; "" is User
+	endless  int      // read listings left that name a next page, whatever the last
+	otherID  bool     // metadata answers name another message's id
+	pad      []string // ids each listing page carries past its maxResults
+	user     string   // the account the next consent signs in as; "" is User
 	// Sign-in (D-150): the codes consent issued, each with its PKCE
 	// challenge, redirect and scope; the scope the next consent grants
 	// beyond the asked one; and the tokens revoked.
@@ -323,6 +324,10 @@ func (s *Server) As(address string) { s.mu.Lock(); s.user = address; s.mu.Unlock
 
 // OtherID makes each metadata answer name an id other than the one asked.
 func (s *Server) OtherID(on bool) { s.mu.Lock(); s.otherID = on; s.mu.Unlock() }
+
+// Pad makes each listing page carry ids after its own, past maxResults, as
+// a misbehaving API might; an id need not name a message or fit Gmail's form.
+func (s *Server) Pad(ids ...string) { s.mu.Lock(); s.pad = ids; s.mu.Unlock() }
 
 // Lie makes a modify or trash answer 200 and change nothing, as a lost
 // write would.
@@ -628,6 +633,9 @@ func (s *Server) list(q url.Values, reply func(any)) {
 	var page []map[string]string
 	for i := start; i < len(ids) && i < start+max; i++ {
 		page = append(page, map[string]string{"id": ids[i], "threadId": ids[i]})
+	}
+	for _, id := range s.pad {
+		page = append(page, map[string]string{"id": id, "threadId": id})
 	}
 	out := map[string]any{"messages": page, "resultSizeEstimate": len(ids)}
 	if start+max < len(ids) {
