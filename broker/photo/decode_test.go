@@ -174,11 +174,15 @@ func TestDecodeRefusals(t *testing.T) {
 		t.Errorf("sandbox ran %d times for files refused before it", len(f.calls))
 	}
 	// A HEIC, or any ISOBMFF file, goes to the sandbox, which says which
-	// brands it takes.
+	// brands it takes, under the HEIC cap (CH-photo-heic-1).
 	for _, in := range []string{"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", "\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf"} {
 		f := &fakeRunner{res: gvisor.OneShotResult{ExitCode: 10}}
 		if _, err := decode(t, []byte(in), f); err != RefuseType || len(f.calls) != 1 {
 			t.Errorf("%q: %v after %d runs; want the sandbox's type", in[4:12], err, len(f.calls))
+			continue
+		}
+		if f.calls[0].MemBytes != HEICMemBytes {
+			t.Errorf("%q: run capped at %d bytes; want HEICMemBytes", in[4:12], f.calls[0].MemBytes)
 		}
 	}
 	raw := pngFile(t, 4, 4)

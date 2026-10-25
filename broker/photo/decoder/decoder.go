@@ -5,8 +5,7 @@
 // network, no broker state and a read-only root.
 //
 // It accepts JPEG, PNG and HEIC/HEIF by magic bytes, refuses more than
-// MaxInput bytes or MaxPixels pixels (MaxDeepPixels for a HEIC above 8
-// bits) before decoding any pixel, applies the EXIF orientation (a
+// MaxInput bytes or MaxPixels pixels before decoding any pixel, applies the EXIF orientation (a
 // HEIC's irot and imir instead), shrinks the long side to at most
 // MaxSide, and encodes a new image and a thumbnail from the decoded
 // pixels only, so no EXIF, GPS, XMP, ICC profile, comment or embedded
@@ -33,12 +32,8 @@ import (
 const (
 	MaxInput  = 20 << 20
 	MaxPixels = 50_000_000
-	// MaxDeepPixels bounds a HEIC above 8 bits, which decodes to 16-bit
-	// samples: at 50 MP it needs more than photo.MemBytes (ASSUMPTIONS
-	// CH-photo-heic-1), so it is refused as pixels rather than killed by the cap.
-	MaxDeepPixels = 24_000_000
-	MaxSide       = 4096
-	ThumbSide     = 320
+	MaxSide   = 4096
+	ThumbSide = 320
 	// JPEGQuality is the new JPEG's quality.
 	JPEGQuality = 90
 )
@@ -141,7 +136,7 @@ func Decode(raw []byte) ([]byte, error) {
 	var format string
 	var config func(io.Reader) (image.Config, error)
 	var decode func(io.Reader) (image.Image, error)
-	limit, heif := int64(MaxPixels), false
+	heif := false
 	switch {
 	case bytes.HasPrefix(raw, jpegMagic):
 		format, config, decode = "jpeg", jpeg.DecodeConfig, jpeg.Decode
@@ -156,18 +151,11 @@ func Decode(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, RefuseDecode
 	}
-	deep := false
-	if heif {
-		meta, ok := stillMeta(raw)
-		if !ok {
-			return nil, RefuseDecode
-		}
-		if deep = heifDeep(meta); deep {
-			limit = MaxDeepPixels
-		}
+	if heif && !still(raw) {
+		return nil, RefuseDecode
 	}
 	pixels := int64(cfg.Width) * int64(cfg.Height)
-	if cfg.Width <= 0 || cfg.Height <= 0 || pixels > limit {
+	if cfg.Width <= 0 || cfg.Height <= 0 || pixels > MaxPixels {
 		return nil, RefusePixels
 	}
 	if heif {
@@ -182,9 +170,6 @@ func Decode(raw []byte) ([]byte, error) {
 		return nil, RefuseDecode
 	}
 	b := src.Bounds()
-	if _, wide := src.(*image.NRGBA64); heif && wide && !deep {
-		return nil, RefuseDecode // its stream codes more bits than its hvcC says
-	}
 	if heif {
 		// irot may turn the picture and clap may crop it, so it fits the
 		// declared size either way up, never more.
@@ -216,51 +201,19 @@ func Decode(raw []byte) ([]byte, error) {
 	return frame, nil
 }
 
-// stillMeta returns raw's first top-level meta box, header included,
-// the one h265 reads. ok is false when raw has a top-level moov box, or
-// cannot be split into top-level boxes the way h265 splits it: h265
-// decodes a file's moov track frame by frame whenever its meta names no
-// usable primary item, so a file with one is refused, as a photo is a
-// still.
-func stillMeta(raw []byte) (meta []byte, ok bool) {
+// still reports whether raw has no top-level moov box and splits into
+// top-level boxes the way h265 splits them. h265 decodes a file's moov
+// track frame by frame whenever its meta names no usable primary item,
+// so a file with one is refused, as a photo is a still.
+func still(raw []byte) bool {
 	for b := raw; len(b) >= 8; {
 		typ, _, rest, framed := nextBox(b)
 		if !framed || typ == "moov" {
-			return nil, false
-		}
-		if typ == "meta" && meta == nil {
-			meta = b[:len(b)-len(rest)]
+			return false
 		}
 		b = rest
 	}
-	return meta, true
-}
-
-// heifDeep reports whether meta may describe a coded picture above 8
-// bits: whether any hvcC box in it (a still's, a grid's tiles', an alpha
-// plane's, wherever its ipco sits) fails to prove 8 bits for luma and
-// chroma. It neither walks the boxes inside meta nor trusts their
-// sizes. Wherever the four bytes "hvcC" occur, the box's body starts
-// right after them, or 8 bytes later when the size field before them is
-// 1 (a 64-bit size): the only two places a reader, h265 included, can
-// take that box's depth bytes from. Unless both are there and say 8
-// bits, the file counts as deep; a false match only lowers the limit.
-func heifDeep(meta []byte) bool {
-	tag := []byte("hvcC")
-	for i := 0; ; i++ {
-		j := bytes.Index(meta[i:], tag)
-		if j < 0 {
-			return false
-		}
-		i += j
-		body := i + 4
-		if i >= 4 && binary.BigEndian.Uint32(meta[i-4:]) == 1 {
-			body += 8
-		}
-		if body+19 > len(meta) || meta[body+17]&7 != 0 || meta[body+18]&7 != 0 {
-			return true
-		}
-	}
+	return true
 }
 
 // nextBox splits off b's first ISOBMFF box: its type, its body and what

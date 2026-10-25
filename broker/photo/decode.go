@@ -29,13 +29,16 @@ const (
 )
 
 // The one-shot run's limits. MemBytes covers a 50-megapixel 16-bit PNG,
-// the costliest file the decoder accepts (ASSUMPTIONS P-1); MaxOutput, a
-// 4096-pixel square PNG that compresses badly, plus its thumbnail.
+// the costliest JPEG or PNG the decoder accepts (ASSUMPTIONS P-1);
+// HEICMemBytes, any ISOBMFF file's run, covers a 50-megapixel HEIC above
+// 8 bits, which decodes to 16-bit samples (CH-photo-heic-1); MaxOutput,
+// a 4096-pixel square PNG that compresses badly, plus its thumbnail.
 const (
-	MemBytes  = 512 << 20
-	Timeout   = 30 * time.Second
-	MaxOutput = 80 << 20
-	maxHeader = 1 << 10
+	MemBytes     = 512 << 20
+	HEICMemBytes = 704 << 20
+	Timeout      = 30 * time.Second
+	MaxOutput    = 80 << 20
+	maxHeader    = 1 << 10
 )
 
 // Refusal is why a photo was not taken: one of the words below, which
@@ -116,9 +119,13 @@ func (d *Decoder) Decode(ctx context.Context, raw []byte) (Photo, error) {
 	if d.Cgroup == "" {
 		return Photo{}, errNoCgroup
 	}
+	mem := int64(MemBytes)
+	if isoBMFF(raw) {
+		mem = HEICMemBytes
+	}
 	res, err := d.Runner.RunOnce(ctx, gvisor.OneShot{
 		Name: "photo", Root: d.Root, Argv: []string{"/agentos-photo"},
-		Stdin: raw, MaxOutput: MaxOutput, MemBytes: MemBytes, Timeout: Timeout, Cgroup: d.Cgroup,
+		Stdin: raw, MaxOutput: MaxOutput, MemBytes: mem, Timeout: Timeout, Cgroup: d.Cgroup,
 	})
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return Photo{}, RefuseDecode // the run's own deadline: too costly

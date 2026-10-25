@@ -19,12 +19,29 @@ import (
 
 // softMemory is the Go heap's soft limit, below the container's cap
 // (photo.MemBytes), so the collector works harder before the cap kills
-// the process.
-const softMemory = 448 << 20
+// the process; heicSoftMemory is the same below a HEIC run's cap
+// (photo.HEICMemBytes).
+const (
+	softMemory     = 448 << 20
+	heicSoftMemory = 640 << 20
+)
 
 func main() {
-	debug.SetMemoryLimit(softMemory)
-	os.Exit(run(os.Stdin, os.Stdout, os.Stderr))
+	in := bufio.NewReaderSize(os.Stdin, 1<<12)
+	debug.SetMemoryLimit(softLimit(in))
+	os.Exit(run(in, os.Stdout, os.Stderr))
+}
+
+// softLimit picks the soft limit from the file's first bytes, the ones
+// that hold a HEIC's ftyp box. A HEIC whose ftyp box is longer than
+// they are keeps softMemory: the collector then works harder, still
+// under the larger cap.
+func softLimit(in *bufio.Reader) int64 {
+	head, _ := in.Peek(in.Size())
+	if decoder.IsHEIC(head) {
+		return heicSoftMemory
+	}
+	return softMemory
 }
 
 func run(in io.Reader, out, errOut io.Writer) int {

@@ -3,11 +3,13 @@ package main
 // REQ: CH-23
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
 	"testing"
 
@@ -305,23 +307,11 @@ func TestDecodeHEICOver50MPRefused(t *testing.T) {
 	if word != "pixels" || code != 12 || len(out) != 0 {
 		t.Fatalf("10001x5000: got %q exit %d with %d bytes out; want pixels, 12, none", word, code, len(out))
 	}
-	// Above 8 bits the limit is MaxDeepPixels.
-	deep := heicPhoto(t, 64, 64, heic.EncodeOptions{BitDepth: 10})
-	if _, err := decoder.Decode(withISPE(t, deep, 6000, 4001)); err != decoder.RefusePixels {
-		t.Fatalf("10-bit 6000x4001: got %v, want pixels", err)
-	}
-	// A grid's own item has no hvcC: the limit follows its tiles' depth.
-	deepGrid := heicPhoto(t, 64, 64, heic.EncodeOptions{BitDepth: 10, Tile: 32})
-	if _, err := decoder.Decode(withISPE(t, deepGrid, 5000, 5000)); err != decoder.RefusePixels {
-		t.Fatalf("10-bit grid 5000x5000: got %v, want pixels", err)
-	}
-	// Nor can an empty ipco ahead of the real one hide the tiles' depth.
-	if _, err := decoder.Decode(withIprpFirst(t, withISPE(t, deepGrid, 5000, 5000), []byte("\x00\x00\x00\x08ipco"))); err != decoder.RefusePixels {
-		t.Fatalf("10-bit grid behind an empty ipco: got %v, want pixels", err)
-	}
-	// An hvcC that says 8 bits over a 10-bit stream is refused.
-	if _, err := decoder.Decode(withHvcCDepth(t, deep, 0)); err != decoder.RefuseDecode {
-		t.Fatalf("10-bit stream declared 8-bit: got %v, want decode", err)
+	// Above 8 bits the limit is the same: nothing guesses the depth.
+	for name, o := range map[string]heic.EncodeOptions{"10-bit": {BitDepth: 10}, "10-bit grid": {BitDepth: 10, Tile: 32}} {
+		if _, err := decoder.Decode(withISPE(t, heicPhoto(t, 64, 64, o), 10001, 5000)); err != decoder.RefusePixels {
+			t.Fatalf("%s 10001x5000: got %v, want pixels", name, err)
+		}
 	}
 	// An ispe that lies small cannot let a bigger coded picture through.
 	big := heicPhoto(t, 640, 640, heic.EncodeOptions{Quality: 30})
@@ -376,27 +366,6 @@ func TestDecodeHEICNeedsAPrimaryItem(t *testing.T) {
 	}
 }
 
-// withIprpFirst returns raw with box placed first in its iprp, the boxes
-// holding it grown and the iloc offsets past meta moved to match.
-func withIprpFirst(t *testing.T, raw, box []byte) []byte {
-	t.Helper()
-	meta, mb := metaBoxes(t, raw)
-	sized := func(typ string, b []byte) []byte {
-		return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(b))), append([]byte(typ), b...)...)
-	}
-	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
-	for _, m := range mb {
-		if m.typ == "iprp" {
-			metaBody = append(metaBody, sized("iprp", append(append([]byte{}, box...), raw[m.start:m.end]...))...)
-		} else {
-			metaBody = append(metaBody, raw[m.start-8:m.end]...)
-		}
-	}
-	out := append(append(append([]byte{}, raw[:meta.start-8]...), sized("meta", metaBody)...), raw[meta.end:]...)
-	shiftIloc(t, out, meta.end, len(box))
-	return out
-}
-
 func TestDecodeHEICTypes(t *testing.T) {
 	for name, in := range map[string]string{
 		"avif":      "\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf",
@@ -418,118 +387,52 @@ func TestDecodeHEICTypes(t *testing.T) {
 	}
 }
 
-// withHvcC rewrites every hvcC box in ipco with f, regrowing ipco, iprp
-// and meta and moving the iloc offsets past meta.
-func withHvcC(t *testing.T, raw []byte, f func(body []byte) []byte) []byte {
-	t.Helper()
-	sized := func(typ string, b []byte) []byte {
-		return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(b))), append([]byte(typ), b...)...)
-	}
-	meta, mb := metaBoxes(t, raw)
-	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
-	for _, m := range mb {
-		if m.typ != "iprp" {
-			metaBody = append(metaBody, raw[m.start-8:m.end]...)
-			continue
-		}
-		var iprp []byte
-		for _, c := range children(t, raw, m.start, m.end) {
-			if c.typ != "ipco" {
-				iprp = append(iprp, raw[c.start-8:c.end]...)
-				continue
-			}
-			var ipco []byte
-			for _, p := range children(t, raw, c.start, c.end) {
-				if p.typ == "hvcC" {
-					ipco = append(ipco, f(raw[p.start:p.end])...)
-				} else {
-					ipco = append(ipco, raw[p.start-8:p.end]...)
-				}
-			}
-			iprp = append(iprp, sized("ipco", ipco)...)
-		}
-		metaBody = append(metaBody, sized("iprp", iprp)...)
-	}
-	newMeta := sized("meta", metaBody)
-	out := append(append(append([]byte{}, raw[:meta.start-8]...), newMeta...), raw[meta.end:]...)
-	shiftIloc(t, out, meta.end, len(newMeta)-(meta.end-meta.start+8))
-	return out
-}
-
-// withBeforeIprp returns raw with box placed in meta just before iprp,
-// meta grown and the iloc offsets past it moved to match.
-func withBeforeIprp(t *testing.T, raw, box []byte) []byte {
-	t.Helper()
-	meta, mb := metaBoxes(t, raw)
-	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
-	for _, m := range mb {
-		if m.typ == "iprp" {
-			metaBody = append(metaBody, box...)
-		}
-		metaBody = append(metaBody, raw[m.start-8:m.end]...)
-	}
-	sized := append(binary.BigEndian.AppendUint32(nil, uint32(8+len(metaBody))), append([]byte("meta"), metaBody...)...)
-	out := append(append(append([]byte{}, raw[:meta.start-8]...), sized...), raw[meta.end:]...)
-	shiftIloc(t, out, meta.end, len(box))
-	return out
-}
-
-// hvcCLarge writes an hvcC body with a 64-bit size.
-func hvcCLarge(body []byte) []byte {
-	b := append(binary.BigEndian.AppendUint32(nil, 1), "hvcC"...)
-	return append(binary.BigEndian.AppendUint64(b, uint64(16+len(body))), body...)
-}
-
-// hvcCPadded writes an hvcC body followed by 70,000 bytes h265 ignores.
-func hvcCPadded(body []byte) []byte {
-	body = append(append([]byte{}, body...), make([]byte, 70000)...)
-	return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(body))), append([]byte("hvcC"), body...)...)
-}
-
-// TestDecodeHEICDepthSeenWhereverH265ReadsIt is the property the 24 MP
-// limit rests on: for every layout here that h265 decodes, a file it
-// decodes above 8 bits is held to MaxDeepPixels before any decode, and
-// an 8-bit one is not. The layouts are those reviews of #3124 found a
-// box walk could miss: grids, an empty leading ipco or iprp, an hvcC
-// with a 64-bit size, and one padded past 64 KiB.
-func TestDecodeHEICDepthSeenWhereverH265ReadsIt(t *testing.T) {
-	layouts := map[string]func([]byte) []byte{
-		"plain":       func(b []byte) []byte { return b },
-		"empty ipco":  func(b []byte) []byte { return withIprpFirst(t, b, []byte("\x00\x00\x00\x08ipco")) },
-		"empty iprp":  func(b []byte) []byte { return withBeforeIprp(t, b, []byte("\x00\x00\x00\x08iprp")) },
-		"hvcC 64-bit": func(b []byte) []byte { return withHvcC(t, b, hvcCLarge) },
-		"hvcC padded": func(b []byte) []byte { return withHvcC(t, b, hvcCPadded) },
-	}
+// TestDecodeHEICDeepTakesFullLimit: a HEIC above 8 bits, still, grid or
+// 4:4:4, is held to MaxPixels like any other photo, and decodes whatever
+// its hvcC says its depth is: its 50 MP run fits HEICMemBytes
+// (ASSUMPTIONS CH-photo-heic-1), so no depth is guessed before decoding.
+func TestDecodeHEICDeepTakesFullLimit(t *testing.T) {
 	codings := map[string]heic.EncodeOptions{
 		"still": {}, "grid": {Tile: 32}, "4:4:4": {Chroma: heic.Chroma444},
 	}
-	for ln, layout := range layouts {
-		for cn, o := range codings {
-			for _, depth := range []int{8, 10, 12} {
-				o.BitDepth = depth
-				name := fmt.Sprintf("%s %s %d-bit", ln, cn, depth)
-				small := layout(heicPhoto(t, 64, 64, o))
-				img, err := heic.Decode(bytes.NewReader(small), heic.Options{AutoRotate: true})
-				if err != nil {
-					t.Fatalf("%s: h265 refuses the layout: %v", name, err)
-				}
-				_, wide := img.(*image.NRGBA64)
-				if wide != (depth > 8) {
-					t.Fatalf("%s: h265 gave %T", name, img)
-				}
-				if _, err := decoder.Decode(small); err != nil {
-					t.Errorf("%s at 64x64: %v", name, err)
-				}
-				// Over MaxDeepPixels, under MaxPixels.
-				big := layout(withISPE(t, heicPhoto(t, 64, 64, o), 6000, 4001))
-				_, err = decoder.Decode(big)
-				if wide && err != decoder.RefusePixels {
-					t.Errorf("%s declared 6000x4001: got %v, want pixels before decoding", name, err)
-				}
-				if !wide && err == decoder.RefusePixels {
-					t.Errorf("%s declared 6000x4001: refused as pixels, but 8 bits may have 50 MP", name)
-				}
+	for cn, o := range codings {
+		for _, depth := range []int{8, 10, 12} {
+			o.BitDepth = depth
+			name := fmt.Sprintf("%s %d-bit", cn, depth)
+			small := heicPhoto(t, 64, 64, o)
+			if _, err := decoder.Decode(small); err != nil {
+				t.Errorf("%s at 64x64: %v", name, err)
 			}
+			if _, err := decoder.Decode(withHvcCDepth(t, small, 0)); err != nil {
+				t.Errorf("%s with an hvcC saying 8 bits: %v", name, err)
+			}
+			if _, err := decoder.Decode(withISPE(t, small, 6000, 4001)); err == decoder.RefusePixels {
+				t.Errorf("%s declared 6000x4001: refused as pixels under MaxPixels", name)
+			}
+			if _, err := decoder.Decode(withISPE(t, small, 10001, 5000)); err != decoder.RefusePixels {
+				t.Errorf("%s declared 10001x5000: got %v, want pixels", name, err)
+			}
+		}
+	}
+}
+
+// TestSoftLimitFollowsType: a HEIC run's Go soft limit sits under its
+// larger cap; any other file keeps the JPEG and PNG one.
+func TestSoftLimitFollowsType(t *testing.T) {
+	for name, c := range map[string]struct {
+		in   []byte
+		want int64
+	}{
+		"heic": {heicPhoto(t, 64, 64, heic.EncodeOptions{}), heicSoftMemory},
+		"avif": {[]byte("\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf"), softMemory},
+		"png":  {pngHeader(64, 64), softMemory},
+	} {
+		in := bufio.NewReaderSize(bytes.NewReader(c.in), 1<<12)
+		if got := softLimit(in); got != c.want {
+			t.Errorf("%s: soft limit %d, want %d", name, got, c.want)
+		}
+		if rest, _ := io.ReadAll(in); !bytes.Equal(rest, c.in) {
+			t.Errorf("%s: reading the limit consumed input", name)
 		}
 	}
 }
