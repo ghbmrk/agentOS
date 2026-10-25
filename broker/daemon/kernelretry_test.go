@@ -274,6 +274,7 @@ func TestAKernelRETRYLineNamesItsAmountInTheHouseholdsCurrency(t *testing.T) {
 	}{
 		{1250, "EUR", "12.50 EUR"}, {5, "USD", "0.05 USD"}, {0, "GBP", "0.00 GBP"}, {1250, "JPY", "1250 JPY"},
 		{1250, "KWD", "1.250 KWD"}, {1250, "", "1250 minor units"}, {-1, "EUR", "-1 minor units"},
+		{1250, "CLF", "1250 minor units"}, {1250, "XAU", "1250 minor units"},
 	} {
 		if got := amountText(c.amount, c.currency); got != c.want {
 			t.Errorf("%d %q: %q, want %q", c.amount, c.currency, got, c.want)
@@ -301,10 +302,12 @@ func TestAKernelRETRYLineNamesItsAmountInTheHouseholdsCurrency(t *testing.T) {
 	}
 }
 
-// A currency that is not an ISO 4217 code is refused at start, so nothing
-// but three capital letters reaches the owner's texts.
+// A currency that is not an ISO 4217 code of a currency in circulation is
+// refused at start: nothing else reaches the owner's texts, and no code
+// whose minor unit is 4 or undefined (CLF, UYW, XAU, XDR) reads at the
+// wrong scale (#3141 Security 1).
 func TestABadCurrencyIsRefusedAtStart(t *testing.T) {
-	for _, cur := range []string{"eur", "EURO", "E R", "€"} {
+	for _, cur := range []string{"eur", "EURO", "E R", "€", "EUX", "CLF", "UYW", "XAU", "XDR", "XXX"} {
 		if _, err := Run(context.Background(), Config{OwnerNumber: owner, Currency: cur}); err == nil || !strings.Contains(err.Error(), "ISO 4217") {
 			t.Errorf("currency %q: %v", cur, err)
 		}

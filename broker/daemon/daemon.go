@@ -302,8 +302,8 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.OwnerNumber == "" && cfg.Auth == nil {
 		return nil, errors.New("daemon: owner number required")
 	}
-	if cfg.Currency != "" && !currencyRe.MatchString(cfg.Currency) {
-		return nil, fmt.Errorf("daemon: currency %q is not an ISO 4217 code", cfg.Currency)
+	if _, ok := minorDigits[cfg.Currency]; cfg.Currency != "" && !ok {
+		return nil, fmt.Errorf("daemon: currency %q is not an ISO 4217 code of a currency in circulation", cfg.Currency)
 	}
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}

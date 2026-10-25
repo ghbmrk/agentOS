@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,28 +147,37 @@ type retryAsk struct {
 	step *KernelStep
 }
 
-// currencyRe is an ISO 4217 code (Config.Currency).
-var currencyRe = regexp.MustCompile(`^[A-Z]{3}$`)
-
-// noMinor and threeMinor are the ISO 4217 codes whose minor unit is not a
-// hundredth: none, or a thousandth.
-var (
-	noMinor    = "BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX UYI VND VUV XAF XOF XPF"
-	threeMinor = "BHD IQD JOD KWD LYD OMR TND"
-)
+// minorDigits maps each currency Config.Currency may name, an ISO 4217
+// code of a currency in circulation, to the digits of its minor unit.
+// Fund, metal, drawing-right and test codes (CLF, UYW, XAU, XDR, XXX, ...)
+// are not listed: their minor unit is 4 or none, so an amount would read
+// at the wrong scale. Start refuses any code not here.
+var minorDigits = func() map[string]int {
+	m := map[string]int{}
+	for digits, codes := range []string{
+		"BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF",
+		"",
+		"AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF " +
+			"CNY COP CRC CUP CVE CZK DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GTQ GYD HKD HNL HTG HUF " +
+			"IDR ILS INR IRR JMD KES KGS KHR KPW KYD KZT LAK LBP LKR LRD LSL MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR " +
+			"MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD PAB PEN PGK PHP PKR PLN QAR RON RSD RUB SAR SBD SCR SDG SEK SGD " +
+			"SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TOP TRY TTD TWD TZS UAH USD UYU UZS VED VES WST XCD YER " +
+			"ZAR ZMW ZWG",
+		"BHD IQD JOD KWD LYD OMR TND",
+	} {
+		for _, c := range strings.Fields(codes) {
+			m[c] = digits
+		}
+	}
+	return m
+}()
 
 // amountText is amount, in minor units, as a RETRY line names it: in
 // currency's major units when one is set ("12.50 EUR"), else as it is.
 func amountText(amount int64, currency string) string {
-	if currency == "" || amount < 0 {
+	digits, ok := minorDigits[currency]
+	if !ok || amount < 0 {
 		return strconv.FormatInt(amount, 10) + " minor units"
-	}
-	digits := 2
-	switch {
-	case strings.Contains(noMinor, currency):
-		digits = 0
-	case strings.Contains(threeMinor, currency):
-		digits = 3
 	}
 	s := fmt.Sprintf("%0*d", digits+1, amount)
 	if digits > 0 {
