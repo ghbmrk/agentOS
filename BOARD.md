@@ -357,4 +357,6 @@ issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.
 issue #3073: 3 middle cells, its table has 2
 issue #3079: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #3082: body has no board-row block
+issue #3086: body has no board-row block
+issue #3087: body has no board-row block
 ```
