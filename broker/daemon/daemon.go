@@ -733,7 +733,8 @@ type KernelStep struct {
 	Clerk  string
 	Phase  string // KernelUnknown, KernelParked or KernelUnsent
 	Detail string
-	Retry  bool // the owner may RETRY it
+	Retry  bool  // the owner may RETRY it
+	SentAt int64 // when it was first sent (unix ms), which RETRY names
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount     int64

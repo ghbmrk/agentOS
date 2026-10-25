@@ -218,19 +218,23 @@ func (r *retrier) kernelParked(n int) []KernelStep {
 // SecretReveal as on the journal's path. A recipient the broker has not
 // looked up is high too (Classify), so only a reversible or low-class step
 // with neither money nor a recipient can be approved by a texted code. Its
-// outcome is unknown, so it may go twice, and the line says so (CH-12).
-// The kernel does not say when the step was first tried, so the line
-// cannot.
+// outcome is unknown, so it may go twice, and the line says so with when
+// it was first tried (CH-12, #3079).
 func kernelItem(s KernelStep) ownerch.Item {
 	cls, known := key.ClassOf(key.Verb(s.Verb))
 	low := known && cls != key.IrreversibleHigh
 	// A high or unknown verb's facts are left unverified (no recipient
 	// checked), which Classify reads as high, like the journal's
 	// unverified lines.
-	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient, Detail: "may go twice",
+	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient,
 		Facts: ownerch.Facts{Verb: s.Verb, NoRecipient: low && s.Recipient == ""}}
 	if key.Verb(s.Verb) == key.RevealOrCreateSecret {
 		it.Facts.Kind = ownerch.SecretReveal
+	}
+	if s.SentAt != 0 {
+		it.Retried = time.UnixMilli(s.SentAt) // "may go twice, first tried 14:02 Oct 13"
+	} else {
+		it.Detail = "may go twice"
 	}
 	if s.Money || s.Amount != 0 {
 		it.Amount = strconv.FormatInt(s.Amount, 10) + " minor units"

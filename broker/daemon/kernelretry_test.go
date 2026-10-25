@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -241,5 +243,22 @@ func TestEveryKernelVerbsRETRYTakesItsClasssTier(t *testing.T) {
 		if (v == key.RevealOrCreateSecret) != (it.Facts.Kind == ownerch.SecretReveal) {
 			t.Errorf("%s: kind %v", v, it.Facts.Kind)
 		}
+	}
+}
+
+// A parked kernel step's RETRY line names when it was first tried, as the
+// journal's does (#3079, CH-12).
+func TestAKernelRETRYLineNamesWhenTheStepWasFirstTried(t *testing.T) {
+	steps := kernelSteps()
+	steps[1].SentAt = time.Date(2026, 10, 13, 14, 2, 0, 0, time.Local).UnixMilli()
+	k := &fakeKernel{steps: steps}
+	d, phone := withKernelChannel(t, k)
+	if got := d.Owner().Handle(context.Background(), owner, "RETRY"); len(got) != 0 {
+		t.Fatalf("RETRY replies %q", got)
+	}
+	req := nextText(t, phone)
+	if !regexp.MustCompile(`organize on mail,[^.]* may go twice, first tried \d\d:\d\d Oct 1[34]`).MatchString(req) ||
+		strings.Count(req, "may go twice") != 1 {
+		t.Fatalf("request %q", req)
 	}
 }

@@ -322,7 +322,7 @@ type StepState struct {
 	Undone      bool
 	Detail      string // the clerk's last answer, for STATUS
 	Covered     string // a covered submit's STATUS line (CLK-3)
-	SentAt      int64  // when the log recorded it sent
+	SentAt      int64  // when the log first recorded it sent; a covered step's, when it was done
 	Retried     bool   // RETRY sent it again: it may have acted until a probe finds it not done
 }
 
@@ -690,6 +690,7 @@ type Unsettled struct {
 	Checks int
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
+	SentAt int64  // when it was first sent (unix ms), which a RETRY line names (#3079)
 	// What the owner's RETRY tier is judged on (CH-10, CH-11), from the
 	// plan's own step: its spend, whether its verb moves money (always
 	// the high tier), and its recipient.
@@ -714,7 +715,7 @@ func (s *State) Status() []Unsettled {
 			}
 			ks := p.Plan.Step(i)
 			out = append(out, Unsettled{Plan: id, Index: i, Verb: ks.Verb, Clerk: ks.Clerk,
-				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st),
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt,
 				Amount: ks.Amount, Money: slices.Contains(key.ArgNames(ks.Verb), key.ArgAmount), Recipient: ks.Recipient,
 				PlanStatus: p.Status, Cancel: p.Cancel, CancelDetail: p.CancelDetail})
 		}
@@ -991,7 +992,7 @@ func (s *State) Apply(e Entry) error {
 		if p, st := s.step(b.stepRef); st != nil && sendable(st.Phase) {
 			st.Phase, st.Attempt = PInflight, b.Attempt
 			if b.Attempt == 1 {
-				st.DispatchSeq = e.Seq
+				st.DispatchSeq, st.SentAt = e.Seq, e.At
 				sp := p.Plan.Step(b.Index)
 				for _, id := range p.Scopes {
 					s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: sp.Amount, Recipient: sp.Recipient, Task: sp.Task}})
