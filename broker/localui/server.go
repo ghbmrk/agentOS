@@ -101,7 +101,7 @@ type Config struct {
 	// missing on a claimed box; the status page says to restore it.
 	PageRestore bool
 	Now         func() time.Time
-	Rand    io.Reader
+	Rand        io.Reader
 }
 
 // Server is the local UI.
