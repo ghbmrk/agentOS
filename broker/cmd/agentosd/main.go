@@ -690,7 +690,7 @@ func main() {
 			pre.m.Store(m)
 			// Held lineages go back before any machine is served or
 			// pruned; the journal has the owner's NOs by now.
-			recallHeld.settle(ctx, m, d.Engine().List(), informOwner(d.Owner))
+			recallHeld.settle(ctx, m, recallNos(d.Engine().List()), informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
@@ -1194,6 +1194,27 @@ func ownerVerifyErr(err error) error {
 		modelroute.VerifyLost:   owner.VerifyLost,
 	}[ve.Kind]
 	return &owner.VerifyError{Kind: kind, Until: ve.Until}
+}
+
+// recallOwnerNo is the reason the journal records for the owner's NO to a
+// recall rollback question (recalltool's ownerNo).
+const recallOwnerNo = "not approved: owner"
+
+// recallNos are the owner's NOs to recall rollback questions in the
+// journal (VM-lineage-contained): denied with the owner's reason, not
+// expired or voided. Here, not in recallheld.go, so the old journal is
+// imported by no further file (old-core ratchet).
+func recallNos(intents []journal.Status) []recallNo {
+	var out []recallNo
+	for _, st := range intents {
+		if st.Intent.Action != journal.ActionRecallRollback || st.State != journal.Denied || st.Permission.Reason != recallOwnerNo {
+			continue
+		}
+		l, _ := st.Intent.Params["lineage"].(string)
+		items, _ := st.Intent.Params["items"].(string)
+		out = append(out, recallNo{l, items})
+	}
+	return out
 }
 
 // informOwner sends the broker's fixed-wording notices (owner.Inform)

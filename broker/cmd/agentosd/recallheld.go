@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/durable"
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // Recall lineages held at upgrade (VM-lineage-contained, LOG-4, CAP-3).
@@ -32,9 +30,6 @@ const (
 	// recallSettledFile, under the machines directory, records each
 	// lineage rolled back, so a restart never rolls it back again.
 	recallSettledFile = "recall-settled.json"
-	// recallOwnerNo is the reason the journal records for the owner's NO
-	// to a rollback question (recalltool's ownerNo).
-	recallOwnerNo = "not approved: owner"
 )
 
 // recallAtRest is the old -recall default (FD-3); tests read their own.
@@ -378,19 +373,18 @@ type lineageForgetter interface {
 	ForgetSince(ctx context.Context, lineage string, since time.Time) error
 }
 
-// keep reads the owner's NOs from the journal: a lineage is kept when a
-// denied rollback question of the owner's names it and covers every
-// deleted item it holds (recalltool's current). Matched on lineage and
-// items, not intent ID, since this reader's since may differ.
-func (h *recallHeld) keep(intents []journal.Status) {
+// recallNo is the owner's NO to a rollback question as the journal holds
+// it (recallNos in main.go): the lineage, and the comma-joined items asked.
+type recallNo struct{ lineage, items string }
+
+// keep reads the owner's NOs: a lineage is kept when a NO names it and
+// covers every deleted item it holds (recalltool's current). Matched on
+// lineage and items, not intent ID, since this reader's since may differ.
+func (h *recallHeld) keep(nos []recallNo) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, st := range intents {
-		if st.Intent.Action != journal.ActionRecallRollback || st.State != journal.Denied || st.Permission.Reason != recallOwnerNo {
-			continue
-		}
-		l, _ := st.Intent.Params["lineage"].(string)
-		items, _ := st.Intent.Params["items"].(string)
+	for _, no := range nos {
+		l, items := no.lineage, no.items
 		hl, ok := h.held[l]
 		if !ok {
 			continue
@@ -416,8 +410,8 @@ func (h *recallHeld) keep(intents []journal.Status) {
 // tells the owner of each rollback not yet told. A failed rollback leaves
 // its lineage contained until the next start; unknown files roll back
 // nothing.
-func (h *recallHeld) settle(ctx context.Context, m lineageForgetter, intents []journal.Status, tell func(string) error) {
-	h.keep(intents)
+func (h *recallHeld) settle(ctx context.Context, m lineageForgetter, nos []recallNo, tell func(string) error) {
+	h.keep(nos)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.unknown {
@@ -481,5 +475,5 @@ func (h *recallHeld) save() error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(h.path, b, 0o600)
+	return writeSynced(h.path, b)
 }

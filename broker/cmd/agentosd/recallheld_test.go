@@ -12,11 +12,10 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: LOG-4, CAP-3
+// REQ: LOG-4
 
 // recallBox is a box upgraded with a recall directory at rest.
 type recallBox struct {
@@ -48,7 +47,9 @@ func rec(v map[string]any) string {
 	return string(b)
 }
 
-func tomb(id string) string { return rec(map[string]any{"op": "tomb", "id": id, "at": time.Now().UTC()}) }
+func tomb(id string) string {
+	return rec(map[string]any{"op": "tomb", "id": id, "at": time.Now().UTC()})
+}
 
 func read(l string, at time.Time, ids ...string) string {
 	return rec(map[string]any{"l": l, "ids": ids, "at": at})
@@ -73,7 +74,7 @@ func (b *recallBox) open(contained func(string) bool) *vm.Manager {
 // start is one agentosd start: the set read before the machines open,
 // and the rollback after. wrap, when set, stands between settle and the
 // manager.
-func (b *recallBox) start(wrap func(*vm.Manager) lineageForgetter, intents []journal.Status) (*vm.Manager, *recallHeld, []string) {
+func (b *recallBox) start(wrap func(*vm.Manager) lineageForgetter, intents []rollbackAnswer) (*vm.Manager, *recallHeld, []string) {
 	b.t.Helper()
 	h := openRecallHeld(b.recall, filepath.Join(b.state, recallSettledFile), b.t.Logf)
 	m := b.open(h.Contained)
@@ -82,7 +83,7 @@ func (b *recallBox) start(wrap func(*vm.Manager) lineageForgetter, intents []jou
 		f = wrap(m)
 	}
 	var told []string
-	h.settle(context.Background(), f, intents, func(s string) error { told = append(told, s); return nil })
+	h.settle(context.Background(), f, recallNos(journalAnswers(intents)), func(s string) error { told = append(told, s); return nil })
 	return m, h, told
 }
 
@@ -317,24 +318,15 @@ func TestLOG4UnreadableRecallFilesContainEveryLineage(t *testing.T) {
 	}
 }
 
-func ownerNo(lineage, items string) journal.Status {
-	return journal.Status{
-		Intent:     journal.Intent{Action: journal.ActionRecallRollback, Params: map[string]any{"lineage": lineage, "items": items}},
-		State:      journal.Denied,
-		Permission: journal.Permission{Reason: recallOwnerNo},
-	}
-}
-
 // LOG-4: the owner's NO to the take-back stands: the lineage is neither
 // rolled back nor contained, and STATUS names it; a deletion the NO did
 // not cover holds it again.
 func TestLOG4OwnerKeptLineageNotRolledBack(t *testing.T) {
 	b := newHeldBox(t)
-	other := ownerNo(b.L, "X")
-	other.Permission.Reason = "expired" // no answer is not a NO
+	other := rollbackAnswer{b.L, "X", "expired"} // no answer is not a NO
 	wrong := ownerNo(b.M, "X")
 	fc := &forgetCalls{}
-	m, h, told := b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, []journal.Status{other, wrong, ownerNo(b.L, "W,X")})
+	m, h, told := b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, []rollbackAnswer{other, wrong, ownerNo(b.L, "W,X")})
 	if len(fc.calls) != 0 || len(told) != 0 || h.Contained(b.L) {
 		t.Fatalf("kept L: rollbacks %v, told %q, contained %v", fc.calls, told, h.Contained(b.L))
 	}
@@ -357,7 +349,7 @@ func TestLOG4OwnerKeptLineageNotRolledBack(t *testing.T) {
 	b.write("recall/meta.jsonl", tomb("X"), tomb("Y"))
 	b.write("provenance.jsonl", read(b.L, b.t1, "X"), read(b.L, b.t1.Add(time.Millisecond), "Y"))
 	fc = &forgetCalls{fail: "lamp"}
-	_, h, _ = b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, []journal.Status{ownerNo(b.L, "X")})
+	_, h, _ = b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, []rollbackAnswer{ownerNo(b.L, "X")})
 	if len(fc.calls) != 1 || !h.Contained(b.L) {
 		t.Fatalf("Y not covered by the NO: rollbacks %v, contained %v", fc.calls, h.Contained(b.L))
 	}
