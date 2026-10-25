@@ -174,6 +174,7 @@ var OwnerSide = Side{"owner", map[string]op{
 	"linechanges": read(func(s *kernel.State, _ int64, _ none) int { return s.LineChanges() }),
 	"spendheld":   read(func(s *kernel.State, _ int64, _ none) map[string]kernel.SpendHold { return s.SpendHeld }),
 	"pools":       read(func(s *kernel.State, _ int64, _ none) map[string]kernel.Pool { return s.Pools }),
+	"anchors":     read(func(s *kernel.State, _ int64, _ none) []key.PublicKey { return s.Anchors }),
 	"enrollments": read(func(s *kernel.State, _ int64, _ none) enrolled {
 		es, un := s.Enrollments()
 		return enrolled{es, un}
@@ -527,6 +528,11 @@ func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
 	return
 }
 func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
+
+// Anchors is the owner's hardware keys as setup logged them, in order: the
+// owner side lists them and finds which one signed an enrollment (#2779a).
+func (o Owner) Anchors() (a []key.PublicKey, err error) { err = o.Call("anchors", nil, &a); return }
+
 func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 	var e enrolled
 	err := o.Call("enrollments", nil, &e)
