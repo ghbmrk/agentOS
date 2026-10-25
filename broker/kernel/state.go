@@ -136,6 +136,10 @@ func (p Plan) use() []byte {
 	return b
 }
 
+// PlanMsg is the message p.Key's holder signs for p: for a bare root, a
+// passkey's challenge (key.Challenge).
+func PlanMsg(p Plan) []byte { return key.UseMsg(p.Key, p.use()) }
+
 // SignPlan signs p as the holder of p.Key.
 func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	p.Sig = key.Sign(p.Key, holder, p.use())

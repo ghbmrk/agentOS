@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"strings"
 )
 
@@ -65,8 +67,18 @@ func (pk PublicKey) Verify(msg, sig []byte) bool {
 	case AlgEd25519:
 		return ed25519.Verify(ed25519.PublicKey(pk.raw), msg, sig)
 	case AlgES256:
+		// A key's ID hashes its signatures, so a signature has exactly one
+		// accepted encoding: AssertionSig's (KEY-7). Any other spelling of
+		// the same assertion, or its high-S twin, would be a new ID with
+		// no tap, such as a revoked grant come back.
 		var a Assertion
-		return json.Unmarshal(sig, &a) == nil && pk.VerifyAssertion(msg, a)
+		d := json.NewDecoder(bytes.NewReader(sig))
+		d.DisallowUnknownFields()
+		if d.Decode(&a) != nil {
+			return false
+		}
+		canon, err := AssertionSig(a)
+		return err == nil && bytes.Equal(sig, canon) && pk.VerifyAssertion(msg, a)
 	}
 	return false
 }
@@ -145,6 +157,27 @@ type Assertion struct {
 	Signature         []byte `json:"signature"` // ASN.1 DER ECDSA
 }
 
+// AssertionSig is a's one accepted encoding as a signature: its JSON with
+// the ECDSA signature in DER at low S. An authenticator may return either
+// S; both verify, so the high one is replaced by n−S here, before the
+// signature is attached and can reach an ID.
+func AssertionSig(a Assertion) ([]byte, error) {
+	var rs struct{ R, S *big.Int }
+	if rest, err := asn1.Unmarshal(a.Signature, &rs); err != nil || len(rest) != 0 || rs.R.Sign() <= 0 || rs.S.Sign() <= 0 {
+		return nil, ErrMalformed
+	}
+	n := ecdsaP256.Params().N
+	if rs.S.Cmp(new(big.Int).Rsh(n, 1)) > 0 {
+		rs.S.Sub(n, rs.S)
+	}
+	der, err := asn1.Marshal(rs)
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	a.Signature = der
+	return json.Marshal(a)
+}
+
 // Authenticator-data flags (WebAuthn §6.1).
 const (
 	flagUP = 0x01 // user present: a tap
@@ -158,19 +191,23 @@ func Challenge(msg []byte) [32]byte { return sha256.Sum256(msg) }
 // VerifyAssertion reports whether a is pk's assertion over msg: a get()
 // ceremony whose challenge is Challenge(msg), on pk's RP ID, with the user
 // both present and verified, signed by pk's credential over
-// authenticatorData ‖ SHA-256(clientDataJSON). The sign count is not
-// checked (synced passkeys report 0), nor the origin: a client that can
-// reach the authenticator chooses the origin it reports, so the RP ID hash
-// the authenticator signs is the binding (ASSUMPTIONS MIG-2-a).
+// authenticatorData ‖ SHA-256(clientDataJSON), from the page at
+// https://<RP ID> itself, not framed by another origin. A browser lets any
+// subdomain of the RP ID ask for the tap; the origin check keeps those out.
+// The sign count is not checked (synced passkeys report 0) (ASSUMPTIONS
+// MIG-2-a). It accepts either S: Verify takes only AssertionSig's form.
 func (pk PublicKey) VerifyAssertion(msg []byte, a Assertion) bool {
 	if pk.alg != AlgES256 || len(a.AuthenticatorData) < 37 {
 		return false
 	}
 	var cd struct {
-		Type      string `json:"type"`
-		Challenge string `json:"challenge"`
+		Type        string `json:"type"`
+		Challenge   string `json:"challenge"`
+		Origin      string `json:"origin"`
+		CrossOrigin bool   `json:"crossOrigin"`
 	}
-	if json.Unmarshal(a.ClientDataJSON, &cd) != nil || cd.Type != "webauthn.get" {
+	if json.Unmarshal(a.ClientDataJSON, &cd) != nil || cd.Type != "webauthn.get" ||
+		cd.Origin != "https://"+pk.rpID || cd.CrossOrigin {
 		return false
 	}
 	c := Challenge(msg)
@@ -193,8 +230,9 @@ func (pk PublicKey) VerifyAssertion(msg []byte, a Assertion) bool {
 
 // Signer is a passkey that can sign here. A real passkey signs on the
 // owner's device instead: export the message (RootMsg, LinkMsg, EnrollMsg,
-// CosignMsg, UseMsg), hand Challenge(msg) to the page, and attach what
-// comes back (AttachRoot, AttachLink, or the Enrollment and Cosign fields).
+// CosignMsg, UseMsg), hand Challenge(msg) to the page, and attach
+// AssertionSig of what comes back (AttachRoot, AttachLink, or the
+// Enrollment and Cosign fields).
 type Signer interface {
 	Public() PublicKey
 	Sign(msg []byte) []byte

@@ -1,12 +1,17 @@
 package key
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
 	"testing"
 )
 
@@ -60,7 +65,10 @@ func (a *authenticator) Sign(msg []byte) []byte {
 	if err != nil {
 		a.t.Fatal(err)
 	}
-	b, _ := json.Marshal(Assertion{AuthenticatorData: ad, ClientDataJSON: cdj, Signature: sig})
+	b, err := AssertionSig(Assertion{AuthenticatorData: ad, ClientDataJSON: cdj, Signature: sig})
+	if err != nil {
+		a.t.Fatal(err)
+	}
 	return b
 }
 
@@ -86,6 +94,9 @@ func TestAWebAuthnAssertionVerifiesOnlyWhenEveryPartIsRight(t *testing.T) {
 		"UV clear":     func(_ map[string]any, ad []byte) []byte { ad[32] &^= flagUV; return ad },
 		"UP clear":     func(_ map[string]any, ad []byte) []byte { ad[32] &^= flagUP; return ad },
 		"wrong type":   func(cd map[string]any, ad []byte) []byte { cd["type"] = "webauthn.create"; return ad },
+		"subdomain":    func(cd map[string]any, ad []byte) []byte { cd["origin"] = "https://evil.owner.example"; return ad },
+		"plain http":   func(cd map[string]any, ad []byte) []byte { cd["origin"] = "http://owner.example"; return ad },
+		"cross origin": func(cd map[string]any, ad []byte) []byte { cd["crossOrigin"] = true; return ad },
 		"short data":   func(_ map[string]any, ad []byte) []byte { return ad[:36] },
 		"padded chall": func(cd map[string]any, ad []byte) []byte { cd["challenge"] = cd["challenge"].(string) + "="; return ad },
 	}
@@ -230,5 +241,64 @@ func TestAPasskeySignsByPrepareAndAttach(t *testing.T) {
 	hw.flags = flagUP // a tap with no user verification
 	if (Cosign{By: hw.Public(), Sig: hw.Sign(CosignMsg(what))}).Over(what) {
 		t.Fatal("a cosign without UV must not count")
+	}
+}
+
+// A signature has one accepted encoding, so one tap is one key ID: the same
+// assertion spelt another way, or with its high-S twin, verifies nothing,
+// and AssertionSig turns an authenticator's high S into the accepted form
+// (KEY-7, #3137 review).
+func TestAnES256SignatureHasOneEncoding(t *testing.T) {
+	msg := append([]byte(DomainRoot), "r"...)
+	a := newAuthenticator(t, "owner.example")
+	pk := a.Public()
+	sig := a.Sign(msg)
+	var as Assertion
+	if err := json.Unmarshal(sig, &as); err != nil {
+		t.Fatal(err)
+	}
+	var rs struct{ R, S *big.Int }
+	if _, err := asn1.Unmarshal(as.Signature, &rs); err != nil {
+		t.Fatal(err)
+	}
+	high := as
+	high.Signature, _ = asn1.Marshal(struct{ R, S *big.Int }{rs.R, new(big.Int).Sub(ecdsaP256.Params().N, rs.S)})
+	if !pk.VerifyAssertion(msg, high) {
+		t.Fatal("the high-S twin is a valid ECDSA signature")
+	}
+	highJSON, _ := json.Marshal(high)
+	reordered := fmt.Sprintf(`{"signature":%q,"client_data_json":%q,"authenticator_data":%q}`,
+		base64.StdEncoding.EncodeToString(as.Signature), base64.StdEncoding.EncodeToString(as.ClientDataJSON),
+		base64.StdEncoding.EncodeToString(as.AuthenticatorData))
+	extra := append(append([]byte{}, sig[:len(sig)-1]...), `,"x":1}`...)
+	for name, v := range map[string][]byte{
+		"leading space": append([]byte(" "), sig...), "trailing newline": append(append([]byte{}, sig...), '\n'),
+		"high S": highJSON, "fields reordered": []byte(reordered), "unknown field": extra,
+		"key case": bytes.Replace(sig, []byte(`"signature"`), []byte(`"Signature"`), 1),
+	} {
+		if bytes.Equal(v, sig) {
+			t.Fatalf("%s: not a variant", name)
+		}
+		if pk.Verify(msg, v) {
+			t.Errorf("%s: verified", name)
+		}
+	}
+	canon, err := AssertionSig(high)
+	if err != nil || !bytes.Equal(canon, sig) || !pk.Verify(msg, canon) {
+		t.Fatalf("AssertionSig must turn the high S into the one accepted form: %v", err)
+	}
+	if _, err := AssertionSig(Assertion{Signature: []byte{0x30, 0}}); err == nil {
+		t.Fatal("a signature that is no DER pair must be refused")
+	}
+	// The key IDs a tap makes: one root, one ID.
+	k := AttachRoot(PrepareRoot(pk, Root{Clerk: "mail", Verbs: []Verb{Trash}, Serial: "s"}), nil)
+	k = AttachRoot(k.Root, a.Sign(RootMsg(k.Root)))
+	if _, err := Chain(k, []PublicKey{pk}); err != nil {
+		t.Fatal(err)
+	}
+	k2 := k
+	k2.Root.Sig = append([]byte(" "), k.Root.Sig...)
+	if _, err := Chain(k2, []PublicKey{pk}); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("a root re-encoded under a new ID: %v", err)
 	}
 }
