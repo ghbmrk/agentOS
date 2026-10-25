@@ -167,6 +167,12 @@ type Config struct {
 	// Kernel, when set, is the kernel's owner seam: STOP, RESUME, STATUS
 	// and RETRY reach it too (#2783). Nil: no kernel.
 	Kernel KernelOwner
+	// Currency is the household's one currency, an ISO 4217 code such as
+	// "EUR": a kernel step's amount is in its minor units, and a RETRY line
+	// names it in this currency (#3079, Mark's card
+	// cmsg_01R91wiieBzMSvPKFsAJVvuKUgXeiUr5Cgukv7ac35d1X9). Empty: in
+	// minor units.
+	Currency string
 	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
 	// on the owner channel (localapi, P2-2w). It needs OwnerState.
 	PageSocket *PageSocket
@@ -296,6 +302,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.OwnerNumber == "" && cfg.Auth == nil {
 		return nil, errors.New("daemon: owner number required")
 	}
+	if cfg.Currency != "" && !currencyRe.MatchString(cfg.Currency) {
+		return nil, fmt.Errorf("daemon: currency %q is not an ISO 4217 code", cfg.Currency)
+	}
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
 	}
@@ -396,7 +405,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	handle := h.Handle
 	var ch *ownerch.Channel
 	rt := newRetrier(ctx, eng, gate)
-	rt.k = cfg.Kernel
+	rt.k, rt.currency = cfg.Kernel, cfg.Currency
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: owned, Agent: cfg.Agent,

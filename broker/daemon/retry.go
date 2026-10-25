@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,8 @@ type retrier struct {
 	// k, when set, is the kernel's owner seam: RETRY also offers the steps
 	// it holds parked, and an approved one is retried there (#2783 b).
 	k KernelOwner
+	// currency names a kernel step's amount (Config.Currency).
+	currency string
 
 	running sync.WaitGroup // retries started by decide
 
@@ -143,6 +146,36 @@ type retryAsk struct {
 	// step, for a step the kernel holds parked, is that step: the ask runs
 	// the kernel's retry, not the gate's.
 	step *KernelStep
+}
+
+// currencyRe is an ISO 4217 code (Config.Currency).
+var currencyRe = regexp.MustCompile(`^[A-Z]{3}$`)
+
+// noMinor and threeMinor are the ISO 4217 codes whose minor unit is not a
+// hundredth: none, or a thousandth.
+var (
+	noMinor    = "BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX UYI VND VUV XAF XOF XPF"
+	threeMinor = "BHD IQD JOD KWD LYD OMR TND"
+)
+
+// amountText is amount, in minor units, as a RETRY line names it: in
+// currency's major units when one is set ("12.50 EUR"), else as it is.
+func amountText(amount int64, currency string) string {
+	if currency == "" || amount < 0 {
+		return strconv.FormatInt(amount, 10) + " minor units"
+	}
+	digits := 2
+	switch {
+	case strings.Contains(noMinor, currency):
+		digits = 0
+	case strings.Contains(threeMinor, currency):
+		digits = 3
+	}
+	s := fmt.Sprintf("%0*d", digits+1, amount)
+	if digits > 0 {
+		s = s[:len(s)-digits] + "." + s[len(s)-digits:]
+	}
+	return s + " " + currency
 }
 
 func newRetrier(ctx context.Context, eng *journal.Engine, gate *grants.Gate) *retrier {
@@ -180,7 +213,7 @@ func (r *retrier) items() []ownerch.Item {
 		items = append(items, l.Shown)
 	}
 	for _, s := range r.kernelParked(retryMax - len(items)) {
-		a := kernelAsk(s)
+		a := kernelAsk(s, r.currency)
 		lines[a.line.Shown.Ref] = a
 		items = append(items, a.line.Shown)
 	}
@@ -220,7 +253,7 @@ func (r *retrier) kernelParked(n int) []KernelStep {
 // with neither money nor a recipient can be approved by a texted code. Its
 // outcome is unknown, so it may go twice, and the line says so with when
 // it was first tried (CH-12, #3079).
-func kernelItem(s KernelStep) ownerch.Item {
+func kernelItem(s KernelStep, currency string) ownerch.Item {
 	cls, known := key.ClassOf(key.Verb(s.Verb))
 	low := known && cls != key.IrreversibleHigh
 	// A high or unknown verb's facts are left unverified (no recipient
@@ -237,15 +270,15 @@ func kernelItem(s KernelStep) ownerch.Item {
 		it.Detail = "may go twice"
 	}
 	if s.Money || s.Amount != 0 {
-		it.Amount = strconv.FormatInt(s.Amount, 10) + " minor units"
+		it.Amount = amountText(s.Amount, currency)
 		it.Facts.Kind, it.Facts.HasAmount, it.Facts.Amount = ownerch.MoneyRetry, true, s.Amount
 	}
 	return it
 }
 
 // kernelAsk is the ask about a parked kernel step, under a ref new to it.
-func kernelAsk(s KernelStep) retryAsk {
-	it := kernelItem(s)
+func kernelAsk(s KernelStep, currency string) retryAsk {
+	it := kernelItem(s, currency)
 	it.Ref = kernelRefPrefix + newNonce()
 	return retryAsk{id: s.Plan, line: grants.RetryLine{Shown: it, Base: it}, step: &s}
 }

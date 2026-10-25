@@ -184,12 +184,12 @@ func TestAKernelRETRYLineTakesItsStepsTier(t *testing.T) {
 		{KernelStep{Verb: "send", Clerk: "mail", Recipient: "a@example.test"}, low, ownerch.High},
 		{KernelStep{Verb: "pay", Clerk: "bank", Money: true, Amount: 5}, low, ownerch.High},
 	} {
-		it := kernelItem(c.s)
+		it := kernelItem(c.s, "")
 		if got := ownerch.Classify(it.Facts, c.lim, it.Facts.RecipientSince); got != c.want {
 			t.Errorf("%+v: tier %v, want %v", c.s, got, c.want)
 		}
 	}
-	if it := kernelItem(KernelStep{Verb: "pay", Clerk: "bank", Money: true, Amount: 1250}); it.Amount != "1250 minor units" || it.Facts.Kind != ownerch.MoneyRetry {
+	if it := kernelItem(KernelStep{Verb: "pay", Clerk: "bank", Money: true, Amount: 1250}, ""); it.Amount != "1250 minor units" || it.Facts.Kind != ownerch.MoneyRetry {
 		t.Fatalf("a money step's line: %+v", it)
 	}
 }
@@ -206,7 +206,7 @@ func TestAKernelRETRYOfALocalLineNeedsThePage(t *testing.T) {
 	d.retry.inform = func(s string) error { told = append(told, s); return nil }
 	d.retry.mu.Unlock()
 	s := KernelStep{Plan: "p5", Verb: "send", Clerk: "mail", Recipient: "Alice <not canonical>"}
-	a := kernelAsk(s)
+	a := kernelAsk(s, "")
 	if ownerch.SMSApprovable(a.line.Shown) {
 		t.Fatal("the line is approvable by text")
 	}
@@ -236,7 +236,7 @@ func TestEveryKernelVerbsRETRYTakesItsClasssTier(t *testing.T) {
 		if known && cls != key.IrreversibleHigh {
 			want = ownerch.Low
 		}
-		it := kernelItem(KernelStep{Plan: "p", Verb: string(v), Clerk: "c", Phase: KernelParked, Retry: true})
+		it := kernelItem(KernelStep{Plan: "p", Verb: string(v), Clerk: "c", Phase: KernelParked, Retry: true}, "")
 		if got := ownerch.Classify(it.Facts, limits, it.Facts.RecipientSince); got != want {
 			t.Errorf("%s (class %d, known %v): tier %v, want %v", v, cls, known, got, want)
 		}
@@ -260,5 +260,53 @@ func TestAKernelRETRYLineNamesWhenTheStepWasFirstTried(t *testing.T) {
 	if !regexp.MustCompile(`organize on mail,[^.]* may go twice, first tried \d\d:\d\d Oct 1[34]`).MatchString(req) ||
 		strings.Count(req, "may go twice") != 1 {
 		t.Fatalf("request %q", req)
+	}
+}
+
+// A kernel step's amount reads in the household's currency, set in
+// agentosd's config, not in minor units (#3079, card
+// cmsg_01R91wiieBzMSvPKFsAJVvuKUgXeiUr5Cgukv7ac35d1X9).
+func TestAKernelRETRYLineNamesItsAmountInTheHouseholdsCurrency(t *testing.T) {
+	for _, c := range []struct {
+		amount   int64
+		currency string
+		want     string
+	}{
+		{1250, "EUR", "12.50 EUR"}, {5, "USD", "0.05 USD"}, {0, "GBP", "0.00 GBP"}, {1250, "JPY", "1250 JPY"},
+		{1250, "KWD", "1.250 KWD"}, {1250, "", "1250 minor units"}, {-1, "EUR", "-1 minor units"},
+	} {
+		if got := amountText(c.amount, c.currency); got != c.want {
+			t.Errorf("%d %q: %q, want %q", c.amount, c.currency, got, c.want)
+		}
+	}
+	steps := kernelSteps()
+	steps[1].Money, steps[1].Amount = true, 1250
+	k := &fakeKernel{steps: steps}
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	carrier := modem.NewCarrier()
+	phone := carrier.Line(owner)
+	_, d := startWith(t, dir, func(c *Config) {
+		c.Kernel, c.Auth, c.OwnerState, c.Modem = k, nil, filepath.Join(dir, "owner.json"), carrier.Line("+15550000009")
+		c.Currency = "EUR"
+	})
+	if got := d.Owner().Handle(context.Background(), owner, "RETRY"); len(got) != 0 {
+		t.Fatalf("RETRY replies %q", got)
+	}
+	if req := nextText(t, phone); !strings.Contains(req, "12.50 EUR") || strings.Contains(req, "minor units") {
+		t.Fatalf("request %q", req)
+	}
+}
+
+// A currency that is not an ISO 4217 code is refused at start, so nothing
+// but three capital letters reaches the owner's texts.
+func TestABadCurrencyIsRefusedAtStart(t *testing.T) {
+	for _, cur := range []string{"eur", "EURO", "E R", "€"} {
+		if _, err := Run(context.Background(), Config{OwnerNumber: owner, Currency: cur}); err == nil || !strings.Contains(err.Error(), "ISO 4217") {
+			t.Errorf("currency %q: %v", cur, err)
+		}
 	}
 }
