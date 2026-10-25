@@ -163,8 +163,8 @@ type Config struct {
 	// Notes are STATUS's exception lines (control.Handler.Notes); recall
 	// adds one while an agent holds a record the owner deleted (W10).
 	Notes []func() string
-	// Kernel, when set, is the kernel's owner seam: STOP, RESUME and
-	// STATUS's stopped line reach it too (#2783). Nil: no kernel.
+	// Kernel, when set, is the kernel's owner seam: STOP, RESUME, STATUS
+	// and RETRY reach it too (#2783). Nil: no kernel.
 	Kernel KernelOwner
 	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
 	// on the owner channel (localapi, P2-2w). It needs OwnerState.
@@ -394,6 +394,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	handle := h.Handle
 	var ch *ownerch.Channel
 	rt := newRetrier(ctx, eng, gate)
+	rt.k = cfg.Kernel
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: owned, Agent: cfg.Agent,
@@ -698,15 +699,58 @@ func followNonce() string {
 }
 
 // KernelOwner is the kernel's owner seam as the owner commands call it
-// (owner/kernelsock.Owner, #2783). STOP, RESUME and STATUS's stopped line
-// go to it as well as to the journal engine while both run actions: STOP
-// narrows both, so nothing either holds starts again until RESUME.
+// (owner/kernelsock.Owner, #2783). STOP, RESUME, STATUS and RETRY go to it
+// as well as to the journal engine while both run actions: STOP narrows
+// both, so nothing either holds starts again until RESUME; STATUS counts
+// the steps either has not settled; RETRY offers the parked effects and
+// steps of both.
 type KernelOwner interface {
 	Stop(context.Context) error
 	Resume(context.Context) error
 	Stopped(context.Context) (bool, error)
 	SetupOpen(context.Context) (bool, error)
+	Status(context.Context) ([]KernelStep, error)
+	// Retry returns KernelRefused for the kernel's refusal and
+	// ErrKernelLost for an answer that never came.
+	Retry(ctx context.Context, plan string, index int) error
 }
+
+// KernelStep is a step the kernel's log has not settled
+// (owner/kernelsock.Step, which agentosd converts: the control path links
+// no socket client): its outcome is unknown, it is parked for the owner's
+// RETRY, or its clerk was not reached.
+type KernelStep struct {
+	Plan   string
+	Index  int
+	Verb   string
+	Clerk  string
+	Phase  string // KernelUnknown, KernelParked or KernelUnsent
+	Detail string
+	Retry  bool // the owner may RETRY it
+	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
+	// spend in minor units, whether its verb moves money, its recipient.
+	Amount     int64
+	Money      bool
+	Recipient  string
+	PlanStatus string // KernelPlanActive, or how the plan ended
+}
+
+// KernelStep's phases and its live plan status.
+const (
+	KernelUnknown    = "unknown"
+	KernelParked     = "parked"
+	KernelUnsent     = "unsent"
+	KernelPlanActive = "active"
+)
+
+// KernelRefused is the kernel's refusal of a call, in its own words.
+type KernelRefused struct{ Text string }
+
+func (r KernelRefused) Error() string { return "daemon: the kernel refused: " + r.Text }
+
+// ErrKernelLost is a kernel call whose answer never came: it may or may
+// not have taken effect.
+var ErrKernelLost = errors.New("daemon: the kernel's answer was lost; it may or may not have taken effect")
 
 // kernelFor bounds each owner command's kernel leg (its call and the
 // setupinfo check after a refusal): STOP and RESUME run under the lock
@@ -718,13 +762,18 @@ var kernelFor = 2 * time.Second
 // kernelUnreached is STATUS's note while the kernel's stop cannot be read.
 const kernelUnreached = "Part of me is not answering, so a STOP may not have reached it. Reply STOP again later."
 
+// kernelUnlisted is STATUS's note while the kernel's stop reads but its
+// unsettled steps do not: the counts may leave some out.
+const kernelUnlisted = "Part of me is not answering, so I may have left some actions out of this."
+
 // bothStops is control.Engine over the journal engine and the kernel.
 type bothStops struct {
 	control.Engine
 	k KernelOwner
 
-	mu     sync.Mutex
-	unread bool // the last read of the kernel's stop failed
+	mu       sync.Mutex
+	unread   bool // the last read of the kernel's stop failed
+	unlisted bool // the last read of the kernel's unsettled steps failed
 }
 
 // Stop records a STOP in the journal and on the kernel, and reports done
@@ -770,40 +819,62 @@ func (b *bothStops) kernel(ctx context.Context, f func(context.Context) error) e
 
 // Stopped is true when either is stopped. A kernel whose stop cannot be
 // read is never reported stopped: STATUS would tell the owner nothing runs
-// while the journal's actions do. STATUS names it instead (note).
+// while the journal's actions do. STATUS names it instead (note). The
+// kernel is read even while the journal is stopped, so a STOP whose kernel
+// leg failed is named too (#3077 Security later 2).
 func (b *bothStops) Stopped() bool {
-	if b.Engine.Stopped() {
-		b.setUnread(false)
-		return true
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
 	stopped, err := b.k.Stopped(ctx)
-	if err != nil {
-		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
-			b.setUnread(false)
-			return false
-		}
-		b.setUnread(true)
-		return false
+	unread := err != nil
+	if unread {
+		open, oerr := b.k.SetupOpen(ctx)
+		stopped, unread = false, oerr != nil || !open
 	}
-	b.setUnread(false)
-	return stopped
-}
-
-func (b *bothStops) setUnread(v bool) {
 	b.mu.Lock()
-	b.unread = v
+	b.unread = unread
 	b.mu.Unlock()
+	return b.Engine.Stopped() || stopped
 }
 
-// note is STATUS's line while the last read of the kernel's stop failed;
-// STATUS reads Stopped before its notes.
+// List is the journal's actions, then the kernel's unsettled steps as
+// STATUS counts them (#2783 b): a step whose outcome is unknown, parked
+// or not, may have happened; one whose clerk was not reached waits to run
+// while its plan is active, and is left out once the plan has ended, since
+// it never acted. A kernel whose steps cannot be read adds none, and
+// STATUS names it (note); a setup-only kernel holds none.
+func (b *bothStops) List() []journal.Status {
+	out := b.Engine.List()
+	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
+	defer cancel()
+	steps, err := b.k.Status(ctx)
+	b.mu.Lock()
+	b.unlisted = err != nil
+	b.mu.Unlock()
+	for _, s := range steps {
+		st := journal.OutcomeUnknown
+		if s.Phase == KernelUnsent {
+			if s.PlanStatus != KernelPlanActive {
+				continue
+			}
+			st = journal.NotApplied
+		}
+		out = append(out, journal.Status{Intent: journal.Intent{ID: s.Plan, Action: s.Verb, Account: s.Clerk}, State: st})
+	}
+	return out
+}
+
+// note is STATUS's line while the last read of the kernel's stop, or of
+// its unsettled steps, failed; STATUS reads Stopped and List before its
+// notes.
 func (b *bothStops) note() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.unread {
+	switch {
+	case b.unread:
 		return kernelUnreached
+	case b.unlisted:
+		return kernelUnlisted
 	}
 	return ""
 }

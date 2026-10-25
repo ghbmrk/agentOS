@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,12 @@ type fakeKernel struct {
 	lost bool
 	// hang: STOP and RESUME are taken and never answered.
 	hang bool
+	// steps are the unsettled steps; unlisted refuses their read alone.
+	steps    []KernelStep
+	unlisted bool
+	// retried are the steps RETRY reached; retryErr is its answer.
+	retried  []string
+	retryErr error
 }
 
 var (
@@ -82,6 +90,30 @@ func (k *fakeKernel) Stopped(context.Context) (bool, error) {
 	defer k.mu.Unlock()
 	k.reads++
 	return k.stopped, k.refuse()
+}
+
+func (k *fakeKernel) Status(context.Context) ([]KernelStep, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	switch {
+	case k.down:
+		return nil, errDown
+	case k.unlisted:
+		return nil, errors.New("status refused")
+	case k.setup:
+		return nil, nil // a setup-only kernel holds none
+	}
+	return slices.Clone(k.steps), nil
+}
+
+func (k *fakeKernel) Retry(_ context.Context, plan string, index int) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.refuse(); err != nil {
+		return err
+	}
+	k.retried = append(k.retried, fmt.Sprintf("%s/%d", plan, index))
+	return k.retryErr
 }
 
 func (k *fakeKernel) SetupOpen(context.Context) (bool, error) {
