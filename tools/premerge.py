@@ -24,7 +24,7 @@ usage error (exit 2).
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
-prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
+prints `changed <files>`, `not-accepted`, `edited-verdict <kind>` or `no-verdict` and exits 1, so a push after the accept, a later
 fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A gate-file PR (the `--needs-mark` list)
 also needs a separate Security accept (D-137): the newest trusted verdict comment marked `security` and not
 `l3` or `combined` is `accept` and its reviewed diff equals `head`'s; otherwise it prints `needs-security <files>`
@@ -32,8 +32,9 @@ and exits 1. Before that, the lens screen the PR's tier needs (OPERATING §3-§4
 tools/risk_tier.py over the same file list, read from the checkout, which in the workflow is the base): on tier A
 the newest trusted verdicts marked `ux` and `potency` (one comment may carry both), on tier B the newest marked
 `combined`, each an `accept` whose reviewed diff equals `head`'s. A tier-A diff confined to assurance tooling owes
-`potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts (it reads as `not-accepted`
-until a newer comment supersedes it); never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+`potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts: while it is the newest of
+its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105), until a newer comment supersedes
+it. Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -189,6 +190,14 @@ def _accepted(v, head, base):
     return bool(v) and v[0] == "accept" and _same(v[1], head, base)
 
 
+# #3105: an edited accept read as a bare `not-accepted`, which looked like a gate bug; name the cause instead.
+EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a new comment"
+
+
+def _edited(v):
+    return bool(v) and v[0] == "edited"
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -202,7 +211,7 @@ def main(argv):
             base, args = args[1], args[2:]
         v = verdict(comments, pr)
         if v is None or v[0] != "accept":
-            print("no-verdict" if v is None else "not-accepted")
+            print("no-verdict" if v is None else EDITED.format("l3") if _edited(v) else "not-accepted")
             return 1
         head = args[0] if args else "HEAD"
         changed = compare(".", v[1], head, base)
@@ -210,14 +219,18 @@ def main(argv):
             print("changed " + " ".join(changed))
             return 1
         files = mark_range(".", base, head)
-        lenses = [x for x in lenses_owed(files) if not _accepted(verdict(comments, pr, lens=x), head, base)]
+        owed = {x: verdict(comments, pr, lens=x) for x in lenses_owed(files)}
+        lenses = [x for x, lv in owed.items() if not _accepted(lv, head, base)]
+        if any(_edited(owed[x]) for x in lenses):
+            print(EDITED.format(",".join(x for x in lenses if _edited(owed[x]))))
+            return 1
         if lenses:
             print("needs-lens " + ",".join(lenses))
             return 1
         gate = mark_paths(files)
         sec = verdict(comments, pr, security=True)
         if gate and not _accepted(sec, head, base):
-            print("needs-security " + " ".join(gate))
+            print(EDITED.format("security") if _edited(sec) else "needs-security " + " ".join(gate))
             return 1
         print("same")
         return 0

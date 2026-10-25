@@ -25,6 +25,14 @@ name: premerge
 # branch workflow, or the base copy of a PR into another branch, does not. Until the App is set
 # (vars.PREMERGE_APP_CLIENT_ID unset) the status falls back to github.token; once the ruleset pins
 # the App, such a status counts for nothing, so a missing or broken App fails closed.
+# ARM-on-accept (#3103): when the status it posts is `success` from `--check` (`same`), the
+# `arm` job arms auto-merge, so whichever review lands last, the full set arms the PR with no
+# session acting after its verdict, and auto-merge waits on CI itself. It arms an open,
+# non-draft, not yet armed PR only, pinned to the head the gate read (`expectedHeadOid`, or the
+# pinned merge when GitHub refuses to arm an already mergeable PR), so a push since then is
+# refused, and runs no repository code. It uses BOT_PR_TOKEN (the `bot` environment, main
+# only, D-123), not GITHUB_TOKEN, whose merges start no push workflows on main; without that
+# token it only warns, and a session arms by hand (OPERATING section 7).
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -42,6 +50,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
+    outputs:
+      arm-node: ${{ steps.gate.outputs.arm-node }}
+      arm-head: ${{ steps.gate.outputs.arm-head }}
     permissions:
       contents: read
       issues: read
@@ -61,6 +72,7 @@ jobs:
           private-key: ${{ secrets.PREMERGE_APP_KEY }}
           permission-statuses: write
       - name: Premerge (base copy of tools/premerge.py)
+        id: gate
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
@@ -100,3 +112,33 @@ jobs:
           out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
           echo "premerge $HEAD_SHA: $state ($out)"
           post "$state" "$out"
+          if [ "$state" = success ] && [ "$out" = same ]; then
+            node=$(jq -r 'select(.state == "open" and .draft == false and .auto_merge == null) | .node_id' "$RUNNER_TEMP/pr.json")
+            if echo "$node" | grep -Eqx '[A-Za-z0-9_=-]+'; then
+              printf 'arm-node=%s\narm-head=%s\n' "$node" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+  arm:
+    name: arm
+    needs: premerge-gate
+    if: needs.premerge-gate.outputs.arm-node != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: bot # deployment branches: main only; holds BOT_PR_TOKEN
+    permissions: {}
+    steps:
+      - name: Arm auto-merge at the accepted head
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          PR_NODE: ${{ needs.premerge-gate.outputs.arm-node }}
+          HEAD_SHA: ${{ needs.premerge-gate.outputs.arm-head }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }
+          echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
+          # GitHub refuses to arm a PR that is already mergeable: merge it, pinned to the same head.
+          if ! gh api graphql -f id="$PR_NODE" -f sha="$HEAD_SHA" -f query='mutation($id: ID!, $sha: GitObjectID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE, expectedHeadOid: $sha}) { clientMutationId } }' > /dev/null; then
+            gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null
+          fi
+          echo "armed #$PR_NUMBER at $HEAD_SHA"
