@@ -40,7 +40,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 		t.Fatalf("STATUS before setup: %v", err)
 	}
 	for name, err := range map[string]error{
-		"stop": o.Stop(), "resume": o.Resume(), "readpool": m.ReadPool(0, "codex", 1, 2),
+		"stop": o.Stop(), "resume": o.Resume(0), "readpool": m.ReadPool(0, "codex", 1, 2),
 	} {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("%s before setup: got %v, want ErrSetupOnly", name, err)

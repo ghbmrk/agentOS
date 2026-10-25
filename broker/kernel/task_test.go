@@ -124,7 +124,7 @@ func TestEachEndEndsTheTask(t *testing.T) {
 		"final result": func(r *rig) int64 { must(r.t, r.k.EndTask(1, "t1")); return 2 },
 		"stop": func(r *rig) int64 {
 			must(r.t, r.k.Stop(1))
-			must(r.t, r.k.Resume(2))
+			must(r.t, r.k.Resume(2, r.k.State().Stops))
 			return 3
 		},
 		"timeout": func(r *rig) int64 { return kernel.TaskTimeout },

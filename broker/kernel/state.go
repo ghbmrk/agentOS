@@ -400,6 +400,7 @@ type State struct {
 	Unenrolled []ed25519.PublicKey
 	Seq        uint64
 	Stopped    bool
+	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
 	Changes    key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
@@ -929,6 +930,7 @@ func (s *State) Apply(e Entry) error {
 		s.Pools[b.Pool] = p
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
+		s.Stops++
 		for _, t := range s.tasks {
 			t.ended = true // an ended task never comes back
 		}

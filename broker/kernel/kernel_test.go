@@ -463,7 +463,7 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 	must(t, r.k.Stop(2))
 	n := r.k.Log().Len()
 	r.anchor.down = true
-	if err := r.k.Resume(3); err == nil { // widening the anchor cannot confirm
+	if err := r.k.Resume(3, r.k.State().Stops); err == nil { // widening the anchor cannot confirm
 		t.Fatal("a resume the anchor cannot confirm must report it")
 	}
 	r.boot(4)
@@ -471,7 +471,7 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 		t.Fatal("an unconfirmed resume must not count after restart (KRN-7)")
 	}
 	r.anchor.down = false
-	must(t, r.k.Resume(5))
+	must(t, r.k.Resume(5, r.k.State().Stops))
 	r.boot(6)
 	if r.k.State().Stopped {
 		t.Fatal("an anchored resume must stand")
@@ -488,7 +488,7 @@ func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.k.Stop(1))
 	r.anchor.down = true
-	if err := r.k.Resume(2); err == nil {
+	if err := r.k.Resume(2, r.k.State().Stops); err == nil {
 		t.Fatal("an unconfirmed resume must report it")
 	}
 	if err := r.tick(3); err == nil { // the broken log refuses the dispatch entry, so the clerk is never called
@@ -619,7 +619,7 @@ func TestOwnerActionsAnchorThemselves(t *testing.T) {
 		t.Fatal("an issued root must survive restart with no explicit anchor (KEY-1)")
 	}
 	must(t, r.k.Stop(2))
-	must(t, r.k.Resume(3))
+	must(t, r.k.Resume(3, r.k.State().Stops))
 	r.boot(4)
 	if r.k.State().Stopped {
 		t.Fatal("a resume that returned nil must survive restart (KRN-7)")
@@ -1178,5 +1178,28 @@ func TestStatusNamesWhenTheStepWasFirstSent(t *testing.T) {
 	got := r.k.State().Status()
 	if len(got) != 1 || r.k.State().Plans["p1"].Steps[0].Attempt != 2 || got[0].SentAt != sent {
 		t.Fatalf("after a retry was sent: %+v, attempt %d; want sent at %d", got, r.k.State().Plans["p1"].Steps[0].Attempt, sent)
+	}
+}
+
+// A RESUME sent before a later STOP and served after it (agentosd gave up
+// on it, then the owner sent STOP) leaves the kernel stopped and logs
+// nothing; a RESUME naming the latest STOP lifts it, after a reboot too
+// (#3078, KRN-7).
+func TestAStaleRESUMELeavesALaterSTOPInForce(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Stop(1))
+	sent := r.k.State().Stops // the RESUME agentosd sent and abandoned
+	must(t, r.k.Stop(2))      // the owner's next STOP, served first
+	n := r.k.Log().Len()
+	if err := r.k.Resume(3, sent); !errors.Is(err, kernel.ErrStaleResume) {
+		t.Fatalf("a RESUME sent before the last STOP: %v", err)
+	}
+	if !r.k.State().Stopped || r.k.Log().Len() != n {
+		t.Fatal("a stale RESUME must leave the STOP in force and log nothing")
+	}
+	r.boot(4)
+	must(t, r.k.Resume(5, r.k.State().Stops))
+	if r.k.State().Stopped {
+		t.Fatal("a RESUME naming the latest STOP must lift it")
 	}
 }

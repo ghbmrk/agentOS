@@ -62,7 +62,7 @@ const (
 // The guest's fixed texts for a plan that did not run.
 const (
 	reasonNoKernel = "the kernel is not reached yet; nothing was submitted. Repeat plan with the same request_id later"
-	reasonNoKey    = "no key is granted to this machine yet, so no plan can run; the owner grants keys (KEY-4)"
+	reasonNoKey    = "no key is granted to this machine yet, so no plan can run and nothing was submitted; repeating will not help until the owner grants one"
 	reasonRejected = "the kernel rejected this plan (its key check, or a STOP in force), and no step ran; a reworded plan is not tried again (PLN-4)"
 	reasonRepeat   = "this request_id was used before; nothing new was submitted, and this is that plan's state"
 	reasonLost     = "the kernel did not answer; repeat plan with the same request_id to learn whether it was taken"
@@ -125,6 +125,11 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 	ok := false
 	if p.cfg.Keys != nil {
 		k, holder, ok = p.cfg.Keys(m.id)
+	}
+	if ok && len(holder) != ed25519.PrivateKeySize {
+		// SignPlan would panic on it; a broker fault, refused as no key.
+		p.cfg.Logf("guest %s: plan %s: holder key of %d bytes", m.id, a.RequestID, len(holder))
+		ok = false
 	}
 	if !ok {
 		return planState{RequestID: a.RequestID, State: "refused", Reason: reasonNoKey}, false, nil

@@ -211,32 +211,44 @@ func runningKernel(t *testing.T) Owner {
 }
 
 // STOP and RESUME are logged on a running kernel, and its stop is read
-// back (#2783); a setup-only kernel refuses all three in its own words.
+// back (#2783); a RESUME naming an earlier STOP than the last is refused
+// (#3078); a setup-only kernel refuses all three in its own words.
 func TestStopAndResumeReachTheKernel(t *testing.T) {
 	needRoot(t)
 	ctx := context.Background()
 	o := runningKernel(t)
-	for i, want := range []bool{false, true, false} {
+	var stale uint64
+	for i, want := range []bool{false, true, true, true, false} {
+		_, stops, _ := o.Stopped(ctx)
 		switch i {
 		case 1:
 			if err := o.Stop(ctx); err != nil {
 				t.Fatal(err)
 			}
 		case 2:
-			if err := o.Resume(ctx); err != nil {
+			stale = stops // a RESUME sent now and abandoned
+			if err := o.Stop(ctx); err != nil {
+				t.Fatal(err)
+			}
+		case 3:
+			if err := o.Resume(ctx, stale); !errors.As(err, new(Refused)) {
+				t.Fatalf("a RESUME sent before the last STOP: %v", err)
+			}
+		case 4:
+			if err := o.Resume(ctx, stops); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if got, err := o.Stopped(ctx); err != nil || got != want {
+		if got, _, err := o.Stopped(ctx); err != nil || got != want {
 			t.Fatalf("step %d: stopped %v, %v; want %v", i, got, err, want)
 		}
 	}
 	s := setupKernel(t)
 	var r Refused
-	if _, err := s.Stopped(ctx); !errors.As(err, &r) {
+	if _, _, err := s.Stopped(ctx); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's stop read: %v", err)
 	}
-	if err := s.Resume(ctx); !errors.As(err, &r) {
+	if err := s.Resume(ctx, 0); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's RESUME: %v", err)
 	}
 }
@@ -279,11 +291,11 @@ func TestARefusalAndAnUndecodableAnswer(t *testing.T) {
 	if err := o.Stop(ctx); !errors.As(err, &r) || r.Text != "stopped: stop is in force" {
 		t.Fatalf("a refusal: %v", err)
 	}
-	if _, err := o.Stopped(ctx); !errors.As(err, &r) {
+	if _, _, err := o.Stopped(ctx); !errors.As(err, &r) {
 		t.Fatalf("a refused read: %v", err)
 	}
 	o = cannedKernel(t, `{"result":"stopped"}`)
-	if got, err := o.Stopped(ctx); !errors.Is(err, ErrLost) || got {
+	if got, _, err := o.Stopped(ctx); !errors.Is(err, ErrLost) || got {
 		t.Fatalf("an undecodable result: %v, %v", got, err)
 	}
 	o = cannedKernel(t, `{"result":`)
