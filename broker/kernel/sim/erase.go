@@ -250,6 +250,9 @@ func judgeErase(k *kernel.Kernel, keys crashKeys, stores map[string]kernel.Conte
 		}
 	}
 	held := map[[2]string]bool{}
+	for s := range gone {
+		held[[2]string{s, kernel.KeyTable}] = true
+	}
 	for h, it := range items {
 		s, text := it.subject, it.text
 		held[[2]string{s, it.store}] = true

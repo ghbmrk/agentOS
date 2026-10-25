@@ -69,15 +69,15 @@ func newErig(t *testing.T) *erig {
 }
 
 // boot reopens the log and the content, as a restart does.
-func (r *erig) boot() []string {
+func (r *erig) boot() kernel.ContentReport {
 	r.t.Helper()
 	l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: r.rnd})
 	must(r.t, err)
 	r.k, err = kernel.Boot(l, nil, nil, 0)
 	must(r.t, err)
-	missing, err := r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 0)
+	rep, err := r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 0)
 	must(r.t, err)
-	return missing
+	return rep
 }
 
 func (r *erig) open() string {
@@ -128,7 +128,7 @@ func TestEraseMakesContentUnreadable(t *testing.T) {
 	}
 	c, err := r.k.Erase(3, s)
 	must(t, err)
-	if !reflect.DeepEqual(c, kernel.Confirmation{Subject: s, Confirmed: []string{"mail", "notes"}, OlderBackups: true}) {
+	if !reflect.DeepEqual(c, kernel.Confirmation{Subject: s, Confirmed: []string{kernel.KeyTable, "mail", "notes"}, OlderBackups: true}) {
 		t.Fatalf("confirmation %+v", c)
 	}
 	for _, h := range []kernel.Hash{h1, h2} {
@@ -190,7 +190,7 @@ func TestAStoreThatCannotDeleteStaysListed(t *testing.T) {
 	r.notes.failDelete = true
 	c, err := r.k.Erase(3, s)
 	must(t, err)
-	if !slices.Equal(c.Confirmed, []string{"mail"}) || !slices.Equal(c.Unconfirmed, []string{"notes"}) {
+	if !slices.Equal(c.Confirmed, []string{kernel.KeyTable, "mail"}) || !slices.Equal(c.Unconfirmed, []string{"notes"}) {
 		t.Fatalf("confirmation %+v", c)
 	}
 	want := []kernel.Unerased{{Subject: s, Items: 2, Stores: []string{"notes"}}}
@@ -208,21 +208,30 @@ func TestAStoreThatCannotDeleteStaysListed(t *testing.T) {
 	if got := r.k.State().Unerased(); got != nil {
 		t.Fatalf("still unerased %+v", got)
 	}
-	if r.count(kernel.TEraseConfirmed) != 2 {
-		t.Fatalf("%d confirmations, want one per store", r.count(kernel.TEraseConfirmed))
+	if r.count(kernel.TEraseConfirmed) != 3 {
+		t.Fatalf("%d confirmations, want one per store and one for the key", r.count(kernel.TEraseConfirmed))
 	}
 	r.replays()
 }
 
-// A key delete that fails is returned; Tick retries it, and failing that
-// the next OpenContent finishes it.
+// A key delete that fails is returned, the confirmation and Unerased name
+// the key table as not confirmed until it is, across a restart; Tick retries
+// it, and so does the next OpenContent.
 func TestAKeyDeleteFailureIsReturned(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
 	r.seal(s, "mail", "message", "a")
 	r.keys.failDelete = true
-	if _, err := r.k.Erase(3, s); !errors.Is(err, errDown) {
+	c, err := r.k.Erase(3, s)
+	if !errors.Is(err, errDown) {
 		t.Fatalf("erase with the key table down: %v", err)
+	}
+	if !slices.Equal(c.Unconfirmed, []string{kernel.KeyTable}) || !slices.Equal(c.Confirmed, []string{"mail"}) {
+		t.Fatalf("confirmation with the key kept: %+v", c)
+	}
+	owed := []kernel.Unerased{{Subject: s, Items: 1, Stores: []string{kernel.KeyTable}}}
+	if got := r.k.State().Unerased(); !reflect.DeepEqual(got, owed) {
+		t.Fatalf("unerased with the key kept: %+v", got)
 	}
 	if rc, _ := r.k.State().Recall(s); !rc.Erased {
 		t.Fatal("the subject is not erased in the log")
@@ -231,9 +240,13 @@ func TestAKeyDeleteFailureIsReturned(t *testing.T) {
 	if _, ok, _ := r.keys.Get(s); !ok {
 		t.Fatal("setup: the key should still be there")
 	}
+	r.boot()
+	if got := r.k.State().Unerased(); !reflect.DeepEqual(got, owed) {
+		t.Fatalf("unerased after a restart with the key kept: %+v", got)
+	}
 	r.keys.failDelete = false
 	r.boot()
-	if _, ok, _ := r.keys.Get(s); ok {
+	if _, ok, _ := r.keys.Get(s); ok || r.k.State().Unerased() != nil {
 		t.Fatal("OpenContent did not finish the key delete")
 	}
 
@@ -247,15 +260,20 @@ func TestAKeyDeleteFailureIsReturned(t *testing.T) {
 	}
 }
 
-// A key no subject.opened names (a crash between Put and the log write) is
-// dropped at the next start.
-func TestAKeyNoEntryNamesIsDropped(t *testing.T) {
+// A key no subject.opened names (a crash between Put and the log write, or
+// a log older than the table) is listed and kept: the log alone cannot
+// tell a crash's leftover from a key whose entries it lost.
+func TestAKeyNoEntryNamesIsListed(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
 	orphan := "0123456789abcdef0123456789abcdef"
 	r.keys.Put(orphan, kernel.SubjectKey{1})
-	r.boot()
-	if got, _ := r.keys.List(); !slices.Equal(got, []string{s}) {
+	if rep := r.boot(); !slices.Equal(rep.Unnamed, []string{orphan}) || rep.Missing != nil {
+		t.Fatalf("report %+v", rep)
+	}
+	want := []string{s, orphan}
+	slices.Sort(want)
+	if got, _ := r.keys.List(); !slices.Equal(got, want) {
 		t.Fatalf("keys after start %v", got)
 	}
 }
@@ -268,11 +286,11 @@ func TestAMissingKeyIsListed(t *testing.T) {
 	h := r.seal(a, "mail", "message", "x")
 	r.keys.MemKeys.Delete(a)
 	r.keys.Put(b, kernel.SubjectKey{7})
-	missing := r.boot()
+	rep := r.boot()
 	want := []string{a, b}
 	slices.Sort(want)
-	if !slices.Equal(missing, want) {
-		t.Fatalf("missing %v, want %v (not %s)", missing, want, c)
+	if !slices.Equal(rep.Missing, want) {
+		t.Fatalf("missing %v, want %v (not %s)", rep.Missing, want, c)
 	}
 	if _, err := r.k.Read(h); !errors.Is(err, kernel.ErrSubjectKey) {
 		t.Fatalf("read with the key gone: %v", err)
@@ -289,8 +307,8 @@ func TestRecallListsItemsThenOnlyTheErase(t *testing.T) {
 	if !ok || rc.Opened != 1 || rc.Erased || !reflect.DeepEqual(rc.Items, []kernel.Item{{Store: "mail", Hash: h, Class: kernel.ClassLabel, At: 2}}) {
 		t.Fatalf("recall %+v", rc)
 	}
-	if got, err := r.k.Named("Alice"); err != nil || !slices.Equal(got, []string{s}) {
-		t.Fatalf("named %v %v", got, err)
+	if got, unread := r.k.Named("Alice"); !slices.Equal(got, []string{s}) || unread != nil {
+		t.Fatalf("named %v %v", got, unread)
 	}
 	r.mail.failDelete = true
 	r.k.Erase(3, s)
@@ -410,5 +428,18 @@ func TestContentIsClosedUntilOpenContent(t *testing.T) {
 	}
 	if _, ok, _ := r.keys.Get(s); ok || len(r.mail.M) != 0 {
 		t.Fatal("OpenContent did not finish an erase logged before it")
+	}
+}
+
+// Recall by name skips a subject whose label cannot be read and lists it
+// apart, so one missing key or store down hides no other subject.
+func TestNamedSkipsAnUnreadableSubject(t *testing.T) {
+	r := newErig(t)
+	a, b := r.open(), r.open()
+	r.seal(a, "mail", kernel.ClassLabel, "Alice")
+	r.seal(b, "notes", kernel.ClassLabel, "Alice")
+	r.keys.MemKeys.Delete(a)
+	if got, unread := r.k.Named("Alice"); !slices.Equal(got, []string{b}) || !slices.Equal(unread, []string{a}) {
+		t.Fatalf("named %v, unread %v", got, unread)
 	}
 }

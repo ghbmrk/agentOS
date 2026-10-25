@@ -286,11 +286,9 @@ type Kernel struct {
 	// not state: a restart marks the dispatches unknown (Boot) and probes
 	// them again.
 	asked map[stepRef]bool
-	// The subject-key table and content stores, from OpenContent (erase.go),
-	// and the erased subjects' key deletes still to retry.
-	keys    Keys
-	stores  map[string]ContentStore
-	keyOwed map[string]bool
+	// The subject-key table and content stores, from OpenContent (erase.go).
+	keys   Keys
+	stores map[string]ContentStore
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")

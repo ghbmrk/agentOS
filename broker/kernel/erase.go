@@ -151,9 +151,16 @@ type (
 	}
 )
 
-// holding is the sorted stores items are in.
+// KeyTable names the subject-key table among an erase's stores: its
+// erase.confirmed records that the data key is gone, so an erase whose key
+// delete failed stays in Unerased, across restarts, until it is. No
+// content store takes the name.
+const KeyTable = "key-table"
+
+// holding is the sorted stores an erase must confirm: the key table and
+// every store items are in.
 func holding(items []Item) []string {
-	var out []string
+	out := []string{KeyTable}
 	for _, it := range items {
 		if !slices.Contains(out, it.Store) {
 			out = append(out, it.Store)
@@ -188,7 +195,7 @@ func (s *State) applyErase(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if st := s.subjects[b.Subject]; st != nil && !st.erased && name(b.Store) && name(b.Class) && s.items[b.Hash].subject == "" {
+		if st := s.subjects[b.Subject]; st != nil && !st.erased && name(b.Store) && b.Store != KeyTable && name(b.Class) && s.items[b.Hash].subject == "" {
 			it := Item{Store: b.Store, Hash: b.Hash, Class: b.Class, At: e.At}
 			st.items = append(st.items, it)
 			s.items[b.Hash] = itemOf{b.Subject, it}
@@ -200,9 +207,7 @@ func (s *State) applyErase(e Entry) error {
 		}
 		if st := s.subjects[b.Subject]; st != nil && !st.erased {
 			st.erased, st.erasedAt, st.stores, st.confirmed = true, e.At, holding(st.items), map[string]bool{}
-			if len(st.stores) > 0 {
-				s.owing[b.Subject] = true
-			}
+			s.owing[b.Subject] = true
 		}
 	case TEraseConfirmed:
 		b, err := body[eraseConfirmed](e)
@@ -276,37 +281,52 @@ func (s *State) liveSubjects() []string {
 	return out
 }
 
+// ContentReport is what OpenContent found in the key table.
+type ContentReport struct {
+	// Missing are opened, unerased subjects whose key is missing or not
+	// their own: their content does not open.
+	Missing []string `json:"missing,omitempty"`
+	// Unnamed are keys no subject.opened names: a crash between Put and
+	// the log write, or a log older than the table. They are kept, since
+	// the log alone cannot tell which, and nothing reads them.
+	Unnamed []string `json:"unnamed,omitempty"`
+}
+
 // OpenContent opens the subject-key table and the content stores, after
 // Boot, and re-applies every erase: it deletes the key of each erased
-// subject still in the table and each key no subject.opened names (a crash
-// between Put and the log write), and retries the stores. It returns the
-// opened, unerased subjects whose key is missing or not their own. Seal and
-// Read refuse until it has returned nil.
-func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int64) ([]string, error) {
+// subject still in the table and retries the stores. Seal and Read refuse
+// until it has returned nil.
+func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int64) (ContentReport, error) {
+	var rep ContentReport
 	listed, err := keys.List()
 	if err != nil {
-		return nil, err
+		return rep, err
 	}
 	slices.Sort(listed)
 	for _, sub := range listed {
-		if st := k.s.subjects[sub]; st == nil || st.erased {
-			if err := keys.Delete(sub); err != nil {
-				return nil, err
+		switch st := k.s.subjects[sub]; {
+		case st == nil:
+			rep.Unnamed = append(rep.Unnamed, sub)
+		case st.erased:
+			// A delete still owed stays listed in Unerased under KeyTable
+			// and is retried; a key back after its delete was confirmed
+			// keeps content closed.
+			if err := keys.Delete(sub); err != nil && st.confirmed[KeyTable] {
+				return ContentReport{}, err
 			}
 		}
 	}
-	var missing []string
 	for _, sub := range k.s.liveSubjects() {
 		dk, ok, err := keys.Get(sub)
 		if err != nil {
-			return nil, err
+			return ContentReport{}, err
 		}
 		if !ok || dataKeyID(dk) != k.s.subjects[sub].keyID {
-			missing = append(missing, sub)
+			rep.Missing = append(rep.Missing, sub)
 		}
 	}
-	k.keys, k.stores, k.keyOwed = keys, stores, map[string]bool{}
-	return missing, k.confirmErases(now)
+	k.keys, k.stores = keys, stores
+	return rep, k.confirmErases(now)
 }
 
 // OpenSubject opens a new subject: a random ID and data key, the key put in
@@ -330,7 +350,7 @@ func (k *Kernel) OpenSubject(now int64) (string, error) {
 	if err := k.keys.Put(sub, dk); err != nil {
 		return "", err
 	}
-	// A key whose entry is not written is dropped by the next OpenContent.
+	// A key whose entry is not written is listed by the next OpenContent.
 	if _, err := k.emit(now, TSubjectOpened, subjectOpened{sub, dataKeyID(dk)}); err != nil {
 		return "", err
 	}
@@ -370,7 +390,7 @@ func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte)
 		return Hash{}, err
 	}
 	cs := k.stores[store]
-	if cs == nil || !name(store) || !name(class) {
+	if cs == nil || !name(store) || store == KeyTable || !name(class) {
 		return Hash{}, ErrStore
 	}
 	a, err := newAEAD(dk)
@@ -428,33 +448,43 @@ func (k *Kernel) Read(h Hash) ([]byte, error) {
 	return pt, nil
 }
 
-// Named lists the live subjects one of whose labels reads name. The log
+// Named lists the live subjects one of whose labels reads label, and
+// apart from them those with a label that could not be read (a missing key,
+// a store down), so one fault does not hide every other subject. The log
 // holds no name, so recall by name opens the labels.
-func (k *Kernel) Named(label string) ([]string, error) {
-	var out []string
+func (k *Kernel) Named(label string) (found, unread []string) {
 	for _, sub := range k.s.liveSubjects() {
+		bad := false
 		for _, it := range k.s.subjects[sub].items {
 			if it.Class != ClassLabel {
 				continue
 			}
 			pt, err := k.Read(it.Hash)
 			if err != nil {
-				return nil, err
+				bad = true
+				continue
 			}
 			if string(pt) == label {
-				out = append(out, sub)
+				found = append(found, sub)
+				bad = false
 				break
 			}
 		}
+		if bad {
+			unread = append(unread, sub)
+		}
 	}
-	return out, nil
+	return found, unread
 }
 
 // Confirmation is what an erase has reached.
 type Confirmation struct {
-	Subject     string   `json:"subject"`
-	Confirmed   []string `json:"confirmed"`   // stores that deleted the subject's items
-	Unconfirmed []string `json:"unconfirmed"` // stores that have not: Unerased lists them and Tick retries
+	Subject string `json:"subject"`
+	// Confirmed and Unconfirmed name the stores that have and have not
+	// deleted the subject's items, and KeyTable once its key is or is not
+	// destroyed. Unerased lists the unconfirmed ones and Tick retries them.
+	Confirmed   []string `json:"confirmed"`
+	Unconfirmed []string `json:"unconfirmed"`
 	// OlderBackups is always true: a backup taken before the erase may
 	// still hold its items. The kernel has no backup list to name them by;
 	// the backup slice names and re-wraps them (#2865).
@@ -464,10 +494,11 @@ type Confirmation struct {
 // Erase erases subject (LOG-4), an owner act the owner channel
 // authenticates, like Stop. It logs subject.erased and anchors, then
 // deletes the key, then asks each store holding the subject's items to
-// delete them, logging erase.confirmed for each that does. Once the entry
-// is logged the subject is erased whatever fails after: a narrowing entry
-// that Open keeps, anchored or not, and re-applied at every start. A key
-// delete that fails is returned and retried by Tick and OpenContent. Before
+// delete them, logging erase.confirmed for the key table and for each store
+// that does. Once the entry is logged the subject is erased whatever fails
+// after: a narrowing entry that Open keeps, anchored or not, and re-applied
+// at every start. A key delete that fails is returned, leaves KeyTable
+// unconfirmed, and is retried by Tick and OpenContent. Before
 // OpenContent the erase is logged and ErrContentClosed returned: the key
 // goes when OpenContent runs.
 func (k *Kernel) Erase(now int64, subject string) (Confirmation, error) {
@@ -485,14 +516,8 @@ func (k *Kernel) Erase(now int64, subject string) (Confirmation, error) {
 	if k.keys == nil {
 		return k.confirmation(subject), errors.Join(err, ErrContentClosed)
 	}
-	if kerr := k.keys.Delete(subject); kerr != nil {
-		k.keyOwed[subject] = true
-		err = errors.Join(err, kerr)
-	}
-	if cerr := k.confirm(now, subject); cerr != nil {
-		err = errors.Join(err, cerr)
-	}
-	return k.confirmation(subject), err
+	kerr, cerr := k.confirm(now, subject)
+	return k.confirmation(subject), errors.Join(err, kerr, cerr)
 }
 
 func (k *Kernel) confirmation(subject string) Confirmation {
@@ -506,43 +531,41 @@ func (k *Kernel) confirmation(subject string) Confirmation {
 	return c
 }
 
-// confirm asks each store not yet confirmed for subject to delete its
-// items, and logs each that does. A store that fails stays unconfirmed; only
-// a log error is returned.
-func (k *Kernel) confirm(now int64, subject string) error {
+// confirm deletes subject's key and its items in each store not yet
+// confirmed, and logs each that does. One that fails stays unconfirmed:
+// keyErr is the key delete's error, err a log error.
+func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 	st := k.s.subjects[subject]
 	for _, store := range st.unconfirmed() {
-		cs := k.stores[store]
-		if cs == nil {
-			continue
-		}
 		ok := true
-		for _, it := range st.items {
-			if it.Store == store && cs.Delete(it.Hash) != nil {
-				ok = false
-				break
+		if store == KeyTable {
+			keyErr = k.keys.Delete(subject)
+			ok = keyErr == nil
+		} else if cs := k.stores[store]; cs == nil {
+			ok = false
+		} else {
+			for _, it := range st.items {
+				if it.Store == store && cs.Delete(it.Hash) != nil {
+					ok = false
+					break
+				}
 			}
 		}
 		if !ok {
 			continue
 		}
 		if _, err := k.emit(now, TEraseConfirmed, eraseConfirmed{subject, store}); err != nil {
-			return err
+			return keyErr, err
 		}
 	}
-	return nil
+	return keyErr, nil
 }
 
-// confirmErases retries the key deletes Erase could not make and the store
-// deletes not yet confirmed. Only a log error is returned.
+// confirmErases retries every erase not yet confirmed. Only a log error is
+// returned.
 func (k *Kernel) confirmErases(now int64) error {
-	for _, sub := range slices.Sorted(maps.Keys(k.keyOwed)) {
-		if k.keys.Delete(sub) == nil {
-			delete(k.keyOwed, sub)
-		}
-	}
 	for _, u := range k.s.Unerased() {
-		if err := k.confirm(now, u.Subject); err != nil {
+		if _, err := k.confirm(now, u.Subject); err != nil {
 			return err
 		}
 	}
