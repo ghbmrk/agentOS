@@ -28,7 +28,7 @@ func mixed(t *testing.T) *rig {
 	must(t, r.tick(4*hour+1))
 	must(t, r.k.Revoke(4*hour+2, revoked.Tip()))
 	must(t, r.tick(4*hour+3))
-	bank := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "bank", Verbs: []key.Verb{key.Trash}, Serial: "b1"}), 1<<40)
+	bank := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "bank", Verbs: []key.Verb{key.Trash}, Serial: "b1"}), 1<<40)
 	far := st(key.Trash, "m2")
 	far.Clerk = "bank"
 	r.plan("noclerk", bank, far)

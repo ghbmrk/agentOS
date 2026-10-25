@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"os"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -19,7 +21,7 @@ var (
 	holderPub, holderPriv = gen(2)
 	headPub, headPriv     = gen(3)
 	sparePub, sparePriv   = gen(4)
-	anchors               = []ed25519.PublicKey{ownerPub, sparePub}
+	anchors               = []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 )
 
 // shortDir is a temporary directory with a short path: a socket's path must

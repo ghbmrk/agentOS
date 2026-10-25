@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -42,29 +43,30 @@ var (
 // signature over SetupMsg, which proves the key signs and binds it to this
 // box's log, so it cannot be replayed onto another box.
 type FirstAnchors struct {
-	Anchors []ed25519.PublicKey `json:"anchors"`
-	Sigs    [][]byte            `json:"sigs"`
+	Anchors []key.PublicKey `json:"anchors"`
+	Sigs    [][]byte        `json:"sigs"`
 }
 
 // SetupMsg is what each hardware key signs: the domain, the box's head key
-// and every anchor, in order.
-func SetupMsg(box ed25519.PublicKey, anchors []ed25519.PublicKey) []byte {
+// and every anchor, in order, each after its length.
+func SetupMsg(box ed25519.PublicKey, anchors []key.PublicKey) []byte {
 	m := append([]byte(DomainSetup), box...)
 	for _, a := range anchors {
-		m = append(m, a...)
+		e := a.Encode()
+		m = append(binary.BigEndian.AppendUint16(m, uint16(len(e))), e...)
 	}
 	return m
 }
 
 // SignSetup is the owner's setup step, signed by each hardware key in turn.
-func SignSetup(box ed25519.PublicKey, keys ...ed25519.PrivateKey) FirstAnchors {
+func SignSetup(box ed25519.PublicKey, keys ...key.Signer) FirstAnchors {
 	var f FirstAnchors
 	for _, k := range keys {
-		f.Anchors = append(f.Anchors, k.Public().(ed25519.PublicKey))
+		f.Anchors = append(f.Anchors, k.Public())
 	}
 	msg := SetupMsg(box, f.Anchors)
 	for _, k := range keys {
-		f.Sigs = append(f.Sigs, ed25519.Sign(k, msg))
+		f.Sigs = append(f.Sigs, k.Sign(msg))
 	}
 	return f
 }
@@ -75,7 +77,7 @@ func (f FirstAnchors) shape() bool {
 		return false
 	}
 	for i, a := range f.Anchors {
-		if len(a) != ed25519.PublicKeySize || key.In(f.Anchors[:i], a) {
+		if !a.Valid() || key.In(f.Anchors[:i], a) {
 			return false
 		}
 	}
@@ -102,7 +104,7 @@ func (k *Kernel) Setup(now int64, f FirstAnchors) error {
 	}
 	msg := SetupMsg(k.log.cfg.Pub, f.Anchors)
 	for i, a := range f.Anchors {
-		if !ed25519.Verify(a, msg, f.Sigs[i]) {
+		if !a.Verify(msg, f.Sigs[i]) {
 			return ErrSetupKeys
 		}
 	}

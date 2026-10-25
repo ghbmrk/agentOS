@@ -115,8 +115,8 @@ type (
 		Rf     *key.Refusal `json:"refusal,omitempty"`
 	}
 	enrolled struct {
-		Enrolled   []key.Enrollment    `json:"enrolled"`
-		Unenrolled []ed25519.PublicKey `json:"unenrolled"`
+		Enrolled   []key.Enrollment `json:"enrolled"`
+		Unenrolled []key.PublicKey  `json:"unenrolled"`
 	}
 	taskRead struct {
 		Task *kernel.Task `json:"task"` // nil: not live
@@ -150,7 +150,7 @@ var OwnerSide = Side{"owner", map[string]op{
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
 	"undo":   act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Undo(now, a.Plan, a.Index) }),
 	"enroll": act(func(k *kernel.Kernel, now int64, e key.Enrollment) error { return k.Enroll(now, e) }),
-	"unenroll": act(func(k *kernel.Kernel, now int64, pk ed25519.PublicKey) error {
+	"unenroll": act(func(k *kernel.Kernel, now int64, pk key.PublicKey) error {
 		return k.Unenroll(now, pk)
 	}),
 	"extend":  act(func(k *kernel.Kernel, now int64, a extendArgs) error { return k.Extend(now, a.Ext, a.Plan) }),
@@ -489,8 +489,8 @@ func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan
 func (o Owner) Undo(plan string, index int) error {
 	return o.Call("undo", stepArgs{plan, index}, nil)
 }
-func (o Owner) Enroll(e key.Enrollment) error       { return o.Call("enroll", e, nil) }
-func (o Owner) Unenroll(pk ed25519.PublicKey) error { return o.Call("unenroll", pk, nil) }
+func (o Owner) Enroll(e key.Enrollment) error   { return o.Call("enroll", e, nil) }
+func (o Owner) Unenroll(pk key.PublicKey) error { return o.Call("unenroll", pk, nil) }
 func (o Owner) Extend(ext key.Key, plan string) error {
 	return o.Call("extend", extendArgs{ext, plan}, nil)
 }
@@ -527,7 +527,7 @@ func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
 	return
 }
 func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
-func (o Owner) Enrollments() ([]key.Enrollment, []ed25519.PublicKey, error) {
+func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 	var e enrolled
 	err := o.Call("enrollments", nil, &e)
 	return e.Enrolled, e.Unenrolled, err

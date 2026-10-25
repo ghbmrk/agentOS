@@ -59,14 +59,14 @@ func newBoxAt(t *testing.T, sock, name string, now int64, verbs ...key.Verb) *bo
 	}
 	b.open()
 	t.Cleanup(func() { b.h.Close() })
-	root := key.Issue(ownerPriv, key.Root{Clerk: name, Verbs: verbs, Serial: "r1"})
-	ck, err := key.ClerkKey(root, ownerPriv, holderPub, b.now, 1<<40)
+	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: name, Verbs: verbs, Serial: "r1"})
+	ck, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holderPub, b.now, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.key = ck
 	// New power: the owner's passkey and the second hardware key co-sign it (D-146).
-	cos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}
+	cos := []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(root, ck)), key.Approve(key.Ed25519Signer(sparePriv), kernel.BatchHash(root, ck))}
 	if err := b.h.With(func(k *kernel.Kernel) error { return k.Issue(b.now-kernel.GrantHold, cos, root, ck) }); err != nil {
 		t.Fatal(err)
 	}

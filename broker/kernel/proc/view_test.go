@@ -4,7 +4,6 @@ package proc
 
 import (
 	"cmp"
-	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +25,7 @@ import (
 type fakeView struct {
 	grants   map[key.ID]int64
 	enrolled []key.Enrollment
-	cut      []ed25519.PublicKey
+	cut      []key.PublicKey
 	changes  key.Changes
 	ledger   map[key.ID][]key.Use
 	dispatch kernel.Dispatch
@@ -35,7 +34,7 @@ type fakeView struct {
 }
 
 func (f *fakeView) Granted(id key.ID) (int64, bool) { from, ok := f.grants[id]; return from, ok }
-func (f *fakeView) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
+func (f *fakeView) Enrollments() ([]key.Enrollment, []key.PublicKey) {
 	return f.enrolled, f.cut
 }
 func (f *fakeView) ChangesView() *key.Changes { return &f.changes }
@@ -59,8 +58,8 @@ func (f *fakeView) Task(id string, now int64) (kernel.Task, bool) {
 // it dispatches, so only this test pins the wire.
 func TestViewCarriesWhatTheCheckReads(t *testing.T) {
 	now := time.Now().UnixMilli()
-	root := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "r1"})
-	ck, err := key.ClerkKey(root, ownerPriv, holderPub, now, 1<<40)
+	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "r1"})
+	ck, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holderPub, now, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +74,8 @@ func TestViewCarriesWhatTheCheckReads(t *testing.T) {
 	lost, _ := gen(9)
 	f := &fakeView{
 		grants:   map[key.ID]int64{},
-		enrolled: []key.Enrollment{key.Enroll(ownerPriv, phone)},
-		cut:      []ed25519.PublicKey{lost},
+		enrolled: []key.Enrollment{key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone))},
+		cut:      []key.PublicKey{key.Ed25519(lost)},
 		changes:  key.Changes{Revoked: map[key.ID]bool{ver.ID(): true}, Paused: map[key.ID]bool{ver.Root(): true}, Stopped: true},
 		ledger:   map[key.ID][]key.Use{},
 		line:     42,

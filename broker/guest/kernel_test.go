@@ -56,16 +56,16 @@ func newTestKernel(t testing.TB) *testKernel {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tk.k, err = kernel.Boot(l, []ed25519.PublicKey{pub(owner), pub(second)}, map[string]kernel.Clerk{"mail": tk}, tk.at); err != nil {
+	if tk.k, err = kernel.Boot(l, []key.PublicKey{key.Ed25519(pub(owner)), key.Ed25519(pub(second))}, map[string]kernel.Clerk{"mail": tk}, tk.at); err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(owner, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize, key.Trash}, Serial: "guest-1"})
+	root := key.Issue(key.Ed25519Signer(owner), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize, key.Trash}, Serial: "guest-1"})
 	setup := tk.at - kernel.GrantHold
-	if tk.clerk, err = key.ClerkKey(root, owner, pub(tk.host), setup, 0); err != nil {
+	if tk.clerk, err = key.ClerkKey(root, key.Ed25519Signer(owner), pub(tk.host), setup, 0); err != nil {
 		t.Fatal(err)
 	}
 	h := kernel.BatchHash(root, tk.clerk)
-	if err := tk.k.Issue(setup, []key.Cosign{key.Approve(owner, h), key.Approve(second, h)}, root, tk.clerk); err != nil {
+	if err := tk.k.Issue(setup, []key.Cosign{key.Approve(key.Ed25519Signer(owner), h), key.Approve(key.Ed25519Signer(second), h)}, root, tk.clerk); err != nil {
 		t.Fatal(err)
 	}
 	return tk

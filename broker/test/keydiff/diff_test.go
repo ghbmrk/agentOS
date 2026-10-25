@@ -111,7 +111,7 @@ type wireCtx struct {
 type wireCase struct {
 	Op     string              `json:"op"`
 	Key    key.Key             `json:"key"`
-	Owners []ed25519.PublicKey `json:"owners"`
+	Owners []key.PublicKey `json:"owners"`
 	Use    []byte              `json:"use"`
 	Sig    []byte              `json:"sig"`
 	Step   wireStep            `json:"step"`
@@ -321,7 +321,7 @@ func (g gen) argCaveat() key.Caveat {
 // world is one case: the key and the private key of whoever holds its tip.
 type world struct {
 	k      key.Key
-	owners []ed25519.PublicKey
+	owners []key.PublicKey
 	holder *party // nil: any passkey holds a bare root
 }
 
@@ -349,7 +349,7 @@ func (g gen) key() world {
 	if g.edge("empty-clerk", 2) {
 		clerk = ""
 	}
-	k := key.Issue(owner.priv, key.Root{Clerk: clerk, Verbs: vs, Serial: strconv.Itoa(g.r.Intn(100))})
+	k := key.Issue(key.Ed25519Signer(owner.priv), key.Root{Clerk: clerk, Verbs: vs, Serial: strconv.Itoa(g.r.Intn(100))})
 	if len(k.Root.Verbs) > 1 && g.edge("root-not-canonical", 3) {
 		// Issue sorts a root's verbs, so a root out of order or with a
 		// repeat is signed here by hand.
@@ -359,14 +359,14 @@ func (g gen) key() world {
 			k.Root.Verbs = append(k.Root.Verbs, k.Root.Verbs[0])
 		}
 		body, _ := json.Marshal(struct {
-			Owner  ed25519.PublicKey `json:"owner"`
-			Clerk  string            `json:"clerk"`
-			Verbs  []key.Verb        `json:"verbs"`
-			Serial string            `json:"serial"`
+			Owner  key.PublicKey `json:"owner"`
+			Clerk  string        `json:"clerk"`
+			Verbs  []key.Verb    `json:"verbs"`
+			Serial string        `json:"serial"`
 		}{k.Root.Owner, k.Root.Clerk, k.Root.Verbs, k.Root.Serial})
 		k.Root.Sig = ed25519.Sign(owner.priv, append([]byte(key.DomainRoot), body...))
 	}
-	w := world{k: k, owners: []ed25519.PublicKey{pass1.pub, pass2.pub}}
+	w := world{k: k, owners: []key.PublicKey{key.Ed25519(pass1.pub), key.Ed25519(pass2.pub)}}
 	n := g.r.Intn(5)
 	if g.p(2) {
 		n = key.MaxLinks + g.r.Intn(2)
@@ -738,7 +738,7 @@ func one(c *checker, seed int64, t *tally) string {
 	}
 	var narrowers []string
 	for _, p := range v.Narrowers {
-		narrowers = append(narrowers, fmt.Sprintf("%x", []byte(p)))
+		narrowers = append(narrowers, fmt.Sprintf("%x", p.Bytes()))
 	}
 	if v.ByOwner != got.ByOwner || !slices.Equal(narrowers, got.Narrowers) {
 		return fmt.Sprintf("narrowed: library %v %v, keycheck %v %v", v.ByOwner, narrowers, got.ByOwner, got.Narrowers)

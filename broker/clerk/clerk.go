@@ -4,7 +4,6 @@
 package clerk
 
 import (
-	"crypto/ed25519"
 	"strconv"
 	"sync"
 	"time"
@@ -45,7 +44,7 @@ func (c Clock) Now() int64 {
 // in the log on the clerk's clock, the log's record that this very plan's
 // step is in flight, the key's limits as of that step's first dispatch, and
 // for an irreversible verb the hold the log recorded (CLK-2).
-func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
+func Check(anchors []key.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) *key.Refusal {
 	_, rf := Verify(anchors, name, facts, now, r, v)
 	return rf
 }
@@ -54,7 +53,7 @@ func Check(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r k
 // request passes, for a clerk that asks more of the key, such as an owner's
 // approval (Verified.ByOwner). A refused request returns no chain, whichever
 // check refused it: this is the one place that holds.
-func Verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
+func Verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
 	ver, rf := verify(anchors, name, facts, now, r, v)
 	if rf != nil {
 		return nil, rf
@@ -62,7 +61,7 @@ func Verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r 
 	return ver, nil
 }
 
-func verify(anchors []ed25519.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
+func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
 	st := r.Step()
 	if st.Clerk != name {
 		return nil, &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
@@ -160,7 +159,7 @@ type Effect struct {
 type Mail struct {
 	Name string
 	// Anchors are the owner's hardware keys, the clerk's own trust root.
-	Anchors []ed25519.PublicKey
+	Anchors []key.PublicKey
 	// Fault is consulted for op "do" and "probe"; nil means no fault.
 	Fault func(op string, r kernel.Request) string
 	Clock Clock
@@ -174,7 +173,7 @@ type Mail struct {
 	effects []Effect
 }
 
-func NewMail(name string, anchors []ed25519.PublicKey) *Mail {
+func NewMail(name string, anchors []key.PublicKey) *Mail {
 	return &Mail{Name: name, Anchors: anchors, done: map[string]bool{}}
 }
 

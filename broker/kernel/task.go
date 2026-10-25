@@ -1,8 +1,6 @@
 package kernel
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -144,7 +142,7 @@ func (s *State) Task(id string, now int64) (Task, bool) {
 // clock, and only when a passkey of the clerk's own set, from its own
 // anchors, signed it over TaskHash for that site (CLK-2, CLK-3). The clerk
 // reads site from the request, never from the planner.
-func TaskApproved(v View, anchors []ed25519.PublicKey, ver *key.Verified, site string, now int64) (TaskApproval, bool) {
+func TaskApproved(v View, anchors []key.PublicKey, ver *key.Verified, site string, now int64) (TaskApproval, bool) {
 	t, ok := v.Task(ver.Limits.Task, now)
 	a, has := t.Approvals[site]
 	if !ok || !has || t.ID != ver.Limits.Task {
@@ -178,9 +176,9 @@ func (s *State) approveOK(b taskApproved, at int64) error {
 }
 
 // dropApprovals ends the task approvals passkey pk signed, now cut off.
-func (s *State) dropApprovals(pk ed25519.PublicKey) {
+func (s *State) dropApprovals(pk key.PublicKey) {
 	for _, t := range s.tasks {
-		maps.DeleteFunc(t.Approvals, func(_ string, a TaskApproval) bool { return bytes.Equal(a.By.By, pk) })
+		maps.DeleteFunc(t.Approvals, func(_ string, a TaskApproval) bool { return a.By.By == pk })
 	}
 }
 

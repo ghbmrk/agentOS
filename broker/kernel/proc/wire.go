@@ -1,7 +1,6 @@
 package proc
 
 import (
-	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"maps"
@@ -57,7 +56,7 @@ type snapshot struct {
 	Dispatch   *kernel.Dispatch     `json:"dispatch"` // nil: the step is not in flight
 	Grants     map[key.ID]int64     `json:"grants"`   // grant live-from, per chain ID granted
 	Enrolled   []key.Enrollment     `json:"enrolled"`
-	Unenrolled []ed25519.PublicKey  `json:"unenrolled"`
+	Unenrolled []key.PublicKey      `json:"unenrolled"`
 	Changes    key.Changes          `json:"changes"`
 	Ledger     map[key.ID][]key.Use `json:"ledger"` // uses before the dispatch, per scope
 	// OneOffLines is the most a one-off under the chain's root may spend
@@ -73,7 +72,7 @@ type snapshot struct {
 // gets no grants, and a step not in flight no dispatch or uses; the clerk
 // refuses either. It shares nothing with v, since Tick sends it outside the
 // kernel's lock while STOP, a revoke or a pause changes v.
-func view(v kernel.View, anchors []ed25519.PublicKey, r kernel.Request, now int64) snapshot {
+func view(v kernel.View, anchors []key.PublicKey, r kernel.Request, now int64) snapshot {
 	c := v.ChangesView()
 	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{},
 		Changes: key.Changes{Revoked: maps.Clone(c.Revoked), Paused: maps.Clone(c.Paused), Stopped: c.Stopped}}
@@ -144,7 +143,7 @@ func needed(all []key.Use, caps []key.Cap, scope key.ID, task string, now int64)
 // The clerk's side: snapshot is a kernel.View.
 
 func (s *snapshot) Granted(id key.ID) (int64, bool) { from, ok := s.Grants[id]; return from, ok }
-func (s *snapshot) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
+func (s *snapshot) Enrollments() ([]key.Enrollment, []key.PublicKey) {
 	return s.Enrolled, s.Unenrolled
 }
 func (s *snapshot) ChangesView() *key.Changes { return &s.Changes }
@@ -183,7 +182,7 @@ func (u uses) Uses(id key.ID) []key.Use { return u[id] }
 // chain charges, checked the way clerk.Check verifies it. A view that leaves
 // one out would read as unspent, so the clerk refuses rather than act on it.
 // A plan that does not verify here fails clerk.Check anyway.
-func (s *snapshot) covers(anchors []ed25519.PublicKey, r kernel.Request) bool {
+func (s *snapshot) covers(anchors []key.PublicKey, r kernel.Request) bool {
 	if s.Dispatch == nil {
 		return true
 	}
@@ -208,17 +207,17 @@ type Remote struct {
 
 // Clerk is r as the kernel calls it: each call carries the view of the
 // kernel.View it is given, verified against anchors.
-func (r Remote) Clerk(anchors []ed25519.PublicKey) kernel.Clerk {
-	return remote{r, func() []ed25519.PublicKey { return anchors }}
+func (r Remote) Clerk(anchors []key.PublicKey) kernel.Clerk {
+	return remote{r, func() []key.PublicKey { return anchors }}
 }
 
 // remote is a Remote as a kernel.Clerk.
 type remote struct {
 	Remote
-	anchors func() []ed25519.PublicKey
+	anchors func() []key.PublicKey
 }
 
-func (c remote) keys() []ed25519.PublicKey {
+func (c remote) keys() []key.PublicKey {
 	if c.anchors == nil {
 		return nil
 	}
@@ -330,11 +329,11 @@ func ListenClerk(path string, kernelUID int) (net.Listener, error) {
 
 // ServeClerk answers the kernel's calls to c on ln, one at a time, until ln
 // closes. anchors are the clerk's own (D-146).
-func ServeClerk(ln net.Listener, c kernel.Clerk, anchors []ed25519.PublicKey) error {
+func ServeClerk(ln net.Listener, c kernel.Clerk, anchors []key.PublicKey) error {
 	return ServeConns(ln, 1, func(conn net.Conn) { serve(conn, c, anchors) })
 }
 
-func serve(conn net.Conn, c kernel.Clerk, anchors []ed25519.PublicKey) {
+func serve(conn net.Conn, c kernel.Clerk, anchors []key.PublicKey) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var in call

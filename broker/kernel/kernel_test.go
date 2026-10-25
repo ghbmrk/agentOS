@@ -22,13 +22,15 @@ const hour = int64(3_600_000)
 type pair struct {
 	pub  ed25519.PublicKey
 	priv ed25519.PrivateKey
+	pk   key.PublicKey     // pub as a passkey
+	pass key.Ed25519Signer // priv as the fake authenticator
 }
 
 func gen(seed byte) pair {
 	s := make([]byte, ed25519.SeedSize)
 	s[0] = seed
 	p := ed25519.NewKeyFromSeed(s)
-	return pair{p.Public().(ed25519.PublicKey), p}
+	return pair{p.Public().(ed25519.PublicKey), p, key.Ed25519(p.Public().(ed25519.PublicKey)), key.Ed25519Signer(p)}
 }
 
 // flakyAnchor is an anchor that can be taken away: nothing new is confirmed while down.
@@ -75,14 +77,14 @@ func newRig(t *testing.T) *rig {
 	r.mail.Clock = func() int64 { return r.now }
 	r.boot(0)
 	// The grant anchors itself: the rig adds no anchor of its own.
-	r.ck = r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail",
+	r.ck = r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail",
 		Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: "r1"}), 1<<40)
 	return r
 }
 
 // anchors is the rig's passkey set: the owner's passkey and the second
 // hardware key, both anchors.
-func (r *rig) anchors() []ed25519.PublicKey { return []ed25519.PublicKey{r.owner.pub, r.spare.pub} }
+func (r *rig) anchors() []key.PublicKey { return []key.PublicKey{r.owner.pk, r.spare.pk} }
 
 // issue grants keys at at, co-signed by the owner's two hardware keys.
 func (r *rig) issue(at int64, keys ...key.Key) error {
@@ -93,7 +95,7 @@ func (r *rig) issue(at int64, keys ...key.Key) error {
 // before the test, so both are live (D-146). It returns the clerk key.
 func (r *rig) grant(root key.Key, spendDay int64, c ...key.Caveat) key.Key {
 	r.t.Helper()
-	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, spendDay, c...)
+	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, spendDay, c...)
 	must(r.t, err)
 	must(r.t, r.issue(-kernel.GrantHold, root, ck))
 	return ck
@@ -165,8 +167,8 @@ func TestPlannerArgIsRefusedWholePlanRejected(t *testing.T) {
 
 func TestUnknownRootRejected(t *testing.T) {
 	r := newRig(t)
-	other, err := key.ClerkKey(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "never-logged"}),
-		r.owner.priv, r.holder.pub, 0, 1)
+	other, err := key.ClerkKey(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "never-logged"}),
+		r.owner.pass, r.holder.pub, 0, 1)
 	must(t, err)
 	p := r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	if _, _, rf := kernel.Admit(r.k.State(), p, 0); rf == nil || rf.Code != kernel.CUngranted {
@@ -519,7 +521,7 @@ func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 	if err := r.k.Unpause(2, r.ck.Tip()); err == nil {
 		t.Fatal("an unconfirmed unpause must report it")
 	}
-	other := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+	other := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
 	if err := r.issue(3, other); !errors.Is(err, kernel.ErrBroken) {
 		t.Fatalf("nothing may build on an unconfirmed widening: %v", err)
 	}
@@ -542,8 +544,8 @@ func TestFailedUnpauseAndIssueDoNotSurviveReboot(t *testing.T) {
 func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	failedGrant := func(down bool) (*rig, key.Key, int) {
 		r := newRig(t)
-		root := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
-		ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 1<<40)
+		root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r2"})
+		ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40)
 		must(t, err)
 		n := r.k.Log().Len()
 		r.anchor.down = down
@@ -740,7 +742,7 @@ func TestUndeclaredOrMissingArgumentsRejectThePlan(t *testing.T) {
 // REQ: KRN-8
 func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	r := newRig(t)
-	buy := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
+	buy := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
 	step := func(amount string) kernel.PlanStep {
 		s := st(key.Buy, "shop")
 		s.Args["amount"] = amount
@@ -809,7 +811,7 @@ func TestPlanTextMustBeUTF8(t *testing.T) {
 	b := a
 	b.Steps = []kernel.PlanStep{st(key.Organize, "m\xfe")}
 	for _, p := range []kernel.Plan{a, b} {
-		if _, err := kernel.VerifyPlan(p, []ed25519.PublicKey{r.owner.pub}); !errors.Is(err, kernel.ErrNotText) {
+		if _, err := kernel.VerifyPlan(p, []key.PublicKey{r.owner.pk}); !errors.Is(err, kernel.ErrNotText) {
 			t.Fatalf("verify %q: %v, want ErrNotText", p.Steps[0].Args, err)
 		}
 	}
@@ -868,7 +870,7 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 // CH-11).
 func TestStatusCarriesTheRetryTierFacts(t *testing.T) {
 	r := newRig(t)
-	ck := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
+	ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "r2"}), 1<<40)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
 	r.plan("p1", ck, kernel.PlanStep{Verb: key.Buy, Clerk: "mail", Args: map[string]string{"to": "shop", "amount": "500", "item": "lamp"}})
 	must(t, r.tick(0))

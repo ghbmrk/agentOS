@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // KernelConfig is what the kernel process starts from. The log key and the
@@ -25,8 +26,8 @@ type KernelConfig struct {
 	Key     [32]byte      // the log's AES-256-GCM key
 	Pub     ed25519.PublicKey
 	Sign    ed25519.PrivateKey
-	Anchors []ed25519.PublicKey // the owner's hardware keys (D-146); none starts setup-only
-	Clerks  map[string]Remote   // every clerk the kernel runs, by name; a closed table
+	Anchors []key.PublicKey   // the owner's hardware keys (D-146); none starts setup-only
+	Clerks  map[string]Remote // every clerk the kernel runs, by name; a closed table
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -61,7 +62,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	// A clerk's view is verified against the state's anchors, which setup
 	// may log after boot.
 	var k *kernel.Kernel
-	anchors := func() []ed25519.PublicKey { return k.State().Anchors }
+	anchors := func() []key.PublicKey { return k.State().Anchors }
 	clerks, kc := map[string]remote{}, map[string]kernel.Clerk{}
 	for name, r := range cfg.Clerks {
 		clerks[name] = remote{r, anchors}
