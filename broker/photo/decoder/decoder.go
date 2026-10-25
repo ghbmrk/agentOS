@@ -238,6 +238,11 @@ func nextBox(b []byte) (typ string, body, rest []byte, ok bool) {
 	return string(b[4:8]), b[h:n], b[n:], true
 }
 
+// heicThreads bounds the goroutines one HEIC decode uses, so its peak
+// memory, measured on four cores against photo.HEICMemBytes (ASSUMPTIONS
+// CH-photo-heic-1), does not grow with the host's core count.
+const heicThreads = 4
+
 // heifDecoder decodes a HEIC's primary image with its clap, irot and
 // imir applied. Its coded frames may be no larger than the declared
 // size plus one 64-sample coding tree block of padding each way, so a
@@ -247,7 +252,7 @@ func nextBox(b []byte) (typ string, body, rest []byte, ok bool) {
 func heifDecoder(pixels int64) func(io.Reader) (image.Image, error) {
 	return func(r io.Reader) (image.Image, error) {
 		side := int64(math.Sqrt(float64(pixels))) + 1
-		return heic.Decode(r, heic.Options{AutoRotate: true, FrameSizeLimit: int(pixels + 2*64*side + 64*64)})
+		return heic.Decode(r, heic.Options{AutoRotate: true, FrameSizeLimit: int(pixels + 2*64*side + 64*64), Threads: heicThreads})
 	}
 }
 
