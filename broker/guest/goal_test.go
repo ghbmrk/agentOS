@@ -30,13 +30,16 @@ func (r *rig) reply(id, msg string) {
 	}
 }
 
-func (r *rig) goalOf(intentID string) string {
+// goalNow is the goal machine id's lineage serves now, as the plane names
+// it to the model route on a model call (G14).
+func (r *rig) goalNow(id string) string {
 	r.t.Helper()
-	s, err := r.eng.Get(intentID)
-	if err != nil {
-		r.t.Fatal(err)
+	if code, body := r.do(id, "POST", "/model/openai/v1/chat/completions", `{"messages":[]}`); code != 200 {
+		r.t.Fatalf("model call: %d %s", code, body)
 	}
-	return s.Intent.GoalID
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.goals[len(r.goals)-1]
 }
 
 func (r *rig) deliver(id, text string) string {
@@ -48,52 +51,37 @@ func (r *rig) deliver(id, text string) string {
 	return msg
 }
 
-// TestOP1EffectsCarryTheOwnerMessageTheyServe: an effect request is
-// stamped with the owner message its lineage was handed, and the stamp is
-// fixed per request ID: a repeat during a later message is the same
-// intent, runs once, and keeps its first goal.
-func TestOP1EffectsCarryTheOwnerMessageTheyServe(t *testing.T) {
+// TestOP1WorkServesTheOwnerMessageItWasHanded: the lineage's goal is the
+// owner message it was handed, and a fork serves its lineage's goal.
+func TestOP1WorkServesTheOwnerMessageItWasHanded(t *testing.T) {
 	r := newRig(t, nil)
 	r.ms.lineage["f1"] = "m1"
 	r.client("m1")
-	if st, e := r.tool("m1", "effect_request", send("r0")); st.State != "succeeded" {
-		t.Fatalf("r0: %+v %s", st, e)
-	}
-	if g := r.goalOf("m1/r0"); g != "" {
+	if g := r.goalNow("m1"); g != "" {
 		t.Fatalf("no owner message yet, goal %q", g)
 	}
 	a := r.deliver("m1", "book the dentist")
-	if st, _ := r.tool("m1", "effect_request", send("r-before")); st.State != "succeeded" || r.goalOf("m1/r-before") != "" {
-		t.Fatalf("a message not yet handed out is not served: goal %q", r.goalOf("m1/r-before"))
+	if g := r.goalNow("m1"); g != "" {
+		t.Fatalf("a message not yet handed out is not served: goal %q", g)
 	}
 	if got := r.fetch("m1"); got != a {
 		t.Fatalf("fetched %s, want %s", got, a)
 	}
-	r.tool("m1", "effect_request", send("r1"))
-	if g := r.goalOf("m1/r1"); g != GoalID(a) {
-		t.Fatalf("r1 goal %q, want %q", g, GoalID(a))
+	if g := r.goalNow("m1"); g != GoalID(a) {
+		t.Fatalf("goal %q, want %q", g, GoalID(a))
 	}
 	r.reply("m1", a)
 	b := r.deliver("m1", "renew the passport")
 	r.fetch("m1")
-	if st, e := r.tool("m1", "effect_request", send("r1")); st.State != "succeeded" || e != "" {
-		t.Fatalf("repeat of r1 during b: %+v %s", st, e)
-	}
-	if g := r.goalOf("m1/r1"); g != GoalID(a) || r.ex.runs["m1/r1"] != 1 {
-		t.Fatalf("repeat moved r1 to %q or ran it again (%d)", g, r.ex.runs["m1/r1"])
-	}
-	r.tool("f1", "effect_request", send("r2"))
-	if g := r.goalOf("m1/r2"); g != GoalID(b) {
-		t.Fatalf("a fork's request serves its lineage's message: %q, want %q", g, GoalID(b))
+	if g := r.goalNow("f1"); g != GoalID(b) {
+		t.Fatalf("a fork serves its lineage's message: %q, want %q", g, GoalID(b))
 	}
 	r.reply("m1", b)
-	r.tool("m1", "effect_request", send("r3"))
-	if g := r.goalOf("m1/r3"); g != GoalID(b) {
+	if g := r.goalNow("m1"); g != GoalID(b) {
 		t.Fatalf("after the answer, work still serves the last message: %q", g)
 	}
 	r.client("m2")
-	r.tool("m2", "effect_request", send("r4"))
-	if g := r.goalOf("m2/r4"); g != "" {
+	if g := r.goalNow("m2"); g != "" {
 		t.Fatalf("another lineage took m1's goal: %q", g)
 	}
 }
@@ -108,13 +96,11 @@ func TestOP1TwoOpenMessagesStampNoGoal(t *testing.T) {
 	b := r.deliver("m1", "two")
 	r.fetch("m1")
 	r.fetch("m1")
-	r.tool("m1", "effect_request", send("r1"))
-	if g := r.goalOf("m1/r1"); g != "" {
+	if g := r.goalNow("m1"); g != "" {
 		t.Fatalf("ambiguous goal stamped %q", g)
 	}
 	r.reply("m1", a)
-	r.tool("m1", "effect_request", send("r2"))
-	if g := r.goalOf("m1/r2"); g != GoalID(b) {
+	if g := r.goalNow("m1"); g != GoalID(b) {
 		t.Fatalf("one open message left, goal %q", g)
 	}
 }
@@ -131,40 +117,29 @@ func TestOP1GoalSurvivesABrokerRestart(t *testing.T) {
 	r.p.Shutdown()
 	r2 := newRig(t, func(c *Config) { c.InboxPath = path; c.Dir = r.p.cfg.Dir })
 	r2.client("m1")
-	r2.tool("m1", "effect_request", send("r1"))
-	if g := r2.goalOf("m1/r1"); g != GoalID(a) {
+	if g := r2.goalNow("m1"); g != GoalID(a) {
 		t.Fatalf("after restart, goal %q, want %q", g, GoalID(a))
 	}
 	r2.p.Close("m1") // destroyed: its lineage's goal goes with it
 	r2.p.Shutdown()
 	r3 := newRig(t, func(c *Config) { c.InboxPath = path; c.Dir = r.p.cfg.Dir })
 	r3.client("m1")
-	r3.tool("m1", "effect_request", send("r1"))
-	if g := r3.goalOf("m1/r1"); g != "" {
+	if g := r3.goalNow("m1"); g != "" {
 		t.Fatalf("a destroyed machine's goal came back: %q", g)
 	}
 }
 
-// TestOP8ModelUseIsChargedToTheGoal: model calls made while a lineage
-// serves an owner message are counted against that goal too.
+// TestOP8ModelUseIsChargedToTheGoal: every model call names the goal its
+// lineage serves when it arrives, a fork's included, so the wiring's meter
+// charges it there (OP-8, G14).
 func TestOP8ModelUseIsChargedToTheGoal(t *testing.T) {
 	r := newRig(t, nil)
 	r.ms.lineage["f1"] = "m1"
 	r.client("m1")
 	a := r.deliver("m1", "book the dentist")
 	r.fetch("m1")
-	if code, _ := r.do("m1", "POST", "/model/openai/v1/chat/completions", `{"messages":[]}`); code != 200 {
-		t.Fatal(code)
-	}
-	if code, _ := r.do("f1", "POST", "/model/openai/v1/chat/completions", `{"messages":[]}`); code != 200 {
-		t.Fatal(code)
-	}
-	u := r.meter.GoalUsage(GoalID(a))
-	if u.Calls != 2 || u.Tokens <= 0 {
-		t.Fatalf("goal usage %+v", u)
-	}
-	if u := r.meter.GoalUsage(""); u.Calls != 0 {
-		t.Fatalf("unattributed calls counted under the empty goal: %+v", u)
+	if g, h := r.goalNow("m1"), r.goalNow("f1"); g != GoalID(a) || h != GoalID(a) {
+		t.Fatalf("goals %q and %q, want %q", g, h, GoalID(a))
 	}
 }
 
@@ -184,40 +159,36 @@ func TestOP1LastGoalEndsOnDeliveryOrQuiet(t *testing.T) {
 	r.fetch("m1")
 	r.reply("m1", a)
 	now = now.Add(20 * time.Minute)
-	r.tool("m1", "effect_request", send("r1"))
-	if g := r.goalOf("m1/r1"); g != GoalID(a) {
+	if g := r.goalNow("m1"); g != GoalID(a) {
 		t.Fatalf("inside the window: %q", g)
 	}
 	now = now.Add(11 * time.Minute) // 31 min after the hand-out, 11 after r1
-	r.tool("m1", "effect_request", send("r3"))
-	if g := r.goalOf("m1/r3"); g != "" {
+	if g := r.goalNow("m1"); g != "" {
 		t.Fatalf("a guest request extended the window: %q", g)
 	}
 	b := r.deliver("m1", "renew the passport")
 	r.fetch("m1")
 	r.reply("m1", b)
 	r.deliver("m1", "something new") // delivered, not yet fetched
-	r.tool("m1", "effect_request", send("r4"))
-	if g := r.goalOf("m1/r4"); g != "" {
+	if g := r.goalNow("m1"); g != "" {
 		t.Fatalf("a new delivery did not end the last goal: %q", g)
 	}
 }
 
-// TestOP1GuestCannotNameAGoal: a goal the guest supplies, at the top level
-// or in params, is ignored; the broker's stamp stands.
+// TestOP1GuestCannotNameAGoal: a goal the guest sends with a model call is
+// ignored; the broker's stands.
 func TestOP1GuestCannotNameAGoal(t *testing.T) {
 	r := newRig(t, nil)
 	r.client("m1")
 	a := r.deliver("m1", "book the dentist")
 	r.fetch("m1")
-	args := send("r1")
-	args["goal_id"] = "owner:forged"
-	args["GoalID"] = "owner:forged"
-	args["params"] = map[string]any{"text": "hello", "goal_id": "owner:forged", "GoalID": "owner:forged"}
-	if st, e := r.tool("m1", "effect_request", args); st.State != "succeeded" {
-		t.Fatalf("%+v %s", st, e)
+	if code, _ := r.do("m1", "POST", "/model/openai/v1/chat/completions", `{"goal_id":"owner:forged"}`, "X-Goal", "owner:forged"); code != 200 {
+		t.Fatal(code)
 	}
-	if g := r.goalOf("m1/r1"); g != GoalID(a) {
+	r.mu.Lock()
+	g := r.goals[len(r.goals)-1]
+	r.mu.Unlock()
+	if g != GoalID(a) {
 		t.Fatalf("goal %q, want the broker's %q", g, GoalID(a))
 	}
 }

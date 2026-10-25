@@ -23,7 +23,7 @@ func TestStartSweepsCrashLeftInboxTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	sweepInboxTemps(inbox)
-	plane, err := guest.New(guest.Config{Dir: t.TempDir(), InboxPath: inbox, Machines: oneLineage{}, Effects: canaryEffects{}})
+	plane, err := guest.New(guest.Config{Dir: t.TempDir(), InboxPath: inbox, Machines: oneLineage{}})
 	if err != nil {
 		t.Fatal(err)
 	}

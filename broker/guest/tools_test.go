@@ -39,7 +39,7 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 	for _, tl := range r.rpc("fork-1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status,result_read,recall_search" {
+	if strings.Join(names, ",") != "plan,result_read,recall_search" {
 		t.Fatalf("tools %v", names)
 	}
 	res := r.rpc("fork-1", "tools/call", map[string]any{"name": "recall_search", "arguments": map[string]any{"query": "x"}}, "X-Machine", "m2")
@@ -58,27 +58,26 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 	if _, errText := r.tool("fork-1", "nope", nil); !strings.Contains(errText, "no tool") {
 		t.Fatalf("unknown tool: %s", errText)
 	}
-	if st, _ := r.tool("fork-1", "effect_request", send("r1")); st.State != "succeeded" {
-		t.Fatalf("effect tools: %+v", st)
+	if st, _ := r.tool("fork-1", "plan", send("r1")); st.State != "done" {
+		t.Fatalf("plan: %+v", st)
 	}
 }
 
 type shadowTools struct{ fakeTools }
 
 func (shadowTools) List() []map[string]any {
-	return []map[string]any{{"name": "effect_status"}, {"name": "result_read"}, {"name": "recall_search"}}
+	return []map[string]any{{"name": "plan"}, {"name": "result_read"}, {"name": "recall_search"}}
 }
 
-// A further tool set cannot list a tool under an effect tool's or
-// result_read's name: the broker's own names are served only by the plane
+// A further tool set cannot list a tool under plan's or result_read's name: the broker's own names are served only by the plane
 // (L3 N2 on #95, L3 on #670).
-func TestFurtherToolsCannotShadowTheEffectTools(t *testing.T) {
+func TestFurtherToolsCannotShadowThePlanTool(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Tools = &shadowTools{} })
 	var names []string
 	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status,result_read,recall_search" {
+	if strings.Join(names, ",") != "plan,result_read,recall_search" {
 		t.Fatalf("tools %v", names)
 	}
 }

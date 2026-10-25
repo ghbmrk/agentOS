@@ -90,7 +90,7 @@ func boot(t *testing.T, dir string) *broker {
 	}
 	plane, err := guest.New(guest.Config{
 		Dir: filepath.Join(dir, "run", "guests"), Machines: &machines{private: map[string]bool{}},
-		Effects: d.Engine(), Meter: mtr,
+		Meter: mtr,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestA9OfflineScenario(t *testing.T) {
 	if r := ownerText(t, owner, "STATUS"); !strings.HasPrefix(r, "Stopped.") {
 		t.Fatalf("STATUS: %q", r)
 	}
-	if code, body := guestCall(t, b, "m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`); code != 200 || !strings.Contains(body, "effect_request") {
+	if code, body := guestCall(t, b, "m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`); code != 200 || !strings.Contains(body, `"name":"plan"`) {
 		t.Fatalf("broker tools: %d %s", code, body)
 	}
 	if code, _ := guestCall(t, b, "m1", "POST", "/model/openai/v1/chat/completions", `{}`); code != http.StatusServiceUnavailable {

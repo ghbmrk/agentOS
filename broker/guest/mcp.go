@@ -2,17 +2,12 @@ package guest
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"regexp"
-	"strings"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/guesterr"
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // MCP over streamable HTTP, the subset a tool server needs: one JSON-RPC
@@ -56,32 +51,31 @@ type rpcError struct {
 }
 
 // Tool names avoid the bare word "intent": OpenClaw has a built-in tool of
-// that name (S4 finding 4).
+// that name (S4 finding 4). PLN-5 (b): plan is the one command a guest has
+// for anything outside its sandbox.
 var tools = []map[string]any{
 	{
-		"name": "effect_request",
-		"description": "Ask the broker for an effect outside this machine (send, post, buy, change an account...). " +
-			"The broker journals it, checks grants and approvals, and runs it at most once per request_id. " +
-			"Reuse the same request_id to retry; a new request_id is a new effect. Returns the request's state.",
+		"name": PlanTool,
+		"description": "Submit a plan to the box's kernel: steps run in order, each a verb on one clerk (an account or device) with string arguments. " +
+			"The kernel checks every step against this machine's key before anything runs, and runs the plan at most once per request_id. " +
+			"Repeat the same request_id, with or without steps, to read the plan's state; a new request_id is a new plan. Returns the plan's state.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"request_id": map[string]any{"type": "string", "description": "Your idempotency key: letters, digits, '.', '_', '-'; at most 64."},
-				"account":    map[string]any{"type": "string", "description": "The connected account the effect lands on."},
-				"action":     map[string]any{"type": "string", "description": "What to do, e.g. message.send."},
-				"params":     map[string]any{"type": "object"},
-				"recipients": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"steps": map[string]any{"type": "array", "items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"verb":    map[string]any{"type": "string", "description": "What to do, e.g. organize, trash, send."},
+						"clerk":   map[string]any{"type": "string", "description": "The clerk (account or device) the step runs on."},
+						"args":    map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+						"content": map[string]any{"type": "string"},
+						"labels":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+					"required": []string{"verb", "clerk"},
+				}},
 			},
-			"required": []string{"request_id", "account", "action"},
-		},
-	},
-	{
-		"name":        "effect_status",
-		"description": "Report the state of an earlier effect_request by its request_id.",
-		"inputSchema": map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"request_id": map[string]any{"type": "string"}},
-			"required":   []string{"request_id"},
+			"required": []string{"request_id"},
 		},
 	},
 	{
@@ -95,16 +89,14 @@ var tools = []map[string]any{
 	},
 }
 
-// heldReason is the guest's text for a request the broker holds back
-// for now. effect_status never runs a request, so the guest is told to
-// repeat it.
-const heldReason = "held by the broker for now (stopped, or another request on the account or with the same effect is unsettled or waiting to go); repeat effect_request with the same request_id later to try it again; effect_status only reports its state"
+// PlanTool is the guest's plan command (PLN-5 (b)).
+const PlanTool = "plan"
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
-// nameRE is an account or action name: lowercase ASCII only, so no
+// nameRE is a verb, clerk or label name: lowercase ASCII only, so no
 // spacing, invisible, look-alike, or case variant can pass for another
-// name in the checks below, in routing, or in the journal.
+// name in the kernel's checks or its log.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
@@ -152,8 +144,8 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if p.cfg.Tools != nil {
 			list = append([]map[string]any(nil), tools...)
 			for _, t := range p.cfg.Tools.List() {
-				// The effect tools' and result_read's names are the broker's own.
-				if n := t["name"]; n != "effect_request" && n != "effect_status" && n != "result_read" {
+				// plan's and result_read's names are the broker's own.
+				if n := t["name"]; n != PlanTool && n != "result_read" {
 					list = append(list, t)
 				}
 			}
@@ -182,7 +174,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			writeRPC(w, req.ID, m.whole(body, false), nil)
 			return
 		}
-		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
+		if call.Name != PlanTool && p.cfg.Tools != nil {
 			lineage, err := p.cfg.Machines.Lineage(m.id)
 			if err != nil {
 				writeRPC(w, req.ID, m.result("broker: unknown machine", true), nil)
@@ -203,7 +195,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		}
 		res, submitted, err := p.callTool(r.Context(), m, call.Name, call.Arguments)
 		if submitted {
-			p.step(m) // REV-1: after every effect request the journal took
+			p.step(m) // REV-1: after every plan submitted to the kernel
 		}
 		if err != nil {
 			writeRPC(w, req.ID, m.result(guesterr.Filter(m.id, call.Name, err).Error(), true), nil)
@@ -281,213 +273,4 @@ func encodeRPC(id json.RawMessage, result any, e *rpcError) []byte {
 	var b bytes.Buffer
 	json.NewEncoder(&b).Encode(out)
 	return b.Bytes()
-}
-
-// effectState is what a guest learns about its request. It carries the
-// broker's own fields only, never executor evidence.
-type effectState struct {
-	RequestID string `json:"request_id"`
-	State     string `json:"state"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-type effectArgs struct {
-	RequestID  string         `json:"request_id"`
-	Account    string         `json:"account"`
-	Action     string         `json:"action"`
-	Params     map[string]any `json:"params"`
-	Recipients []string       `json:"recipients"`
-}
-
-// Bounds on one effect request's guest-chosen fields.
-const (
-	maxParamsBytes = 16 << 10
-	maxRecipients  = 50
-	maxRecipient   = 320
-)
-
-// callTool runs one broker tool for machine m, and reports whether an
-// effect request reached the journal. Intent IDs and origins are the
-// machine's fork lineage: forks share their source's memory, so a request
-// a fork repeats from its source's history is the same intent and runs at
-// most once (OP-1), while no machine outside the lineage can read or
-// collide with it. The origin therefore names the lineage, not the fork.
-// Errors the guest sees are fixed strings; broker detail goes to Logf.
-func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.RawMessage) (effectState, bool, error) {
-	lineage := p.lineageOf(m)
-	if lineage == "" {
-		return effectState{}, false, guesterr.New("broker: unknown machine")
-	}
-	switch name {
-	case "effect_request":
-		var a effectArgs
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		if err := dec.Decode(&a); err != nil {
-			return effectState{}, false, guesterr.New("arguments must be an object")
-		}
-		if !requestIDRE.MatchString(a.RequestID) || a.Account == "" || a.Action == "" {
-			return effectState{}, false, guesterr.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
-		}
-		if !nameRE.MatchString(a.Account) || !nameRE.MatchString(a.Action) {
-			return effectState{}, false, guesterr.New("account and action must be lowercase names (a-z, 0-9, . _ -; at most 64)")
-		}
-		if params, _ := json.Marshal(a.Params); len(params) > maxParamsBytes {
-			return effectState{}, false, guesterr.Newf("params are larger than %d bytes", guesterr.Num(maxParamsBytes))
-		}
-		if len(a.Recipients) > maxRecipients {
-			return effectState{}, false, guesterr.Newf("more than %d recipients", guesterr.Num(maxRecipients))
-		}
-		for _, r := range a.Recipients {
-			if len(r) > maxRecipient {
-				return effectState{}, false, guesterr.Newf("a recipient is longer than %d bytes", guesterr.Num(maxRecipient))
-			}
-		}
-		// Broker-state intents (budgets, grants, the broker's own
-		// settings) come from the owner and the broker, never a guest:
-		// some of them narrow and so pass STOP (OP-5, ARC-7).
-		if a.Account == journal.BrokerAccount || strings.HasPrefix(a.Action, "meta.") {
-			return effectState{RequestID: a.RequestID, State: "refused", Reason: "broker-state changes are the owner's; a guest cannot request them"}, false, nil
-		}
-		if !m.rate.take(p.cfg.SubmitBurst, p.cfg.SubmitEvery) {
-			return effectState{}, false, guesterr.New("too many effect requests from this machine; wait and retry with the same request_id")
-		}
-		exec, ok := p.cfg.Route(a.Account)
-		if !ok {
-			return effectState{RequestID: a.RequestID, State: "refused", Reason: "no adapter is connected for that account"}, false, nil
-		}
-		label := p.label(m.id)
-		id, readOnly, prior, seen := p.intentID(lineage, a.RequestID, label)
-		// The goal is fixed by the first submission (G14): a repeat keeps
-		// the goal its request was journaled with, even if the lineage
-		// has moved on to another owner message since.
-		goal := prior.Intent.GoalID
-		if !seen {
-			goal = p.goal(lineage)
-		}
-		in := journal.Intent{
-			ID: id, GoalID: goal, Origin: "guest:" + lineage, Account: a.Account, Action: a.Action,
-			Params: a.Params, Recipients: a.Recipients, Executor: exec,
-			Machine: m.id, Label: label,
-		}
-		st, err := p.cfg.Effects.Submit(in)
-		if errors.Is(err, journal.ErrConflict) && !seen {
-			// A concurrent first submission of the same request may have
-			// won with another goal; the request is still the same one.
-			if prior, gerr := p.cfg.Effects.Get(id); gerr == nil && prior.Intent.GoalID != goal {
-				in.GoalID = prior.Intent.GoalID
-				st, err = p.cfg.Effects.Submit(in)
-			}
-		}
-		if err != nil {
-			if errors.Is(err, journal.ErrConflict) {
-				return effectState{}, false, guesterr.Newf("request_id %s was already used with different arguments", guesterr.Guest(a.RequestID))
-			}
-			p.cfg.Logf("guest %s: submit %s: %v", m.id, id, err)
-			return effectState{}, false, guesterr.New("broker refused the request")
-		}
-		if readOnly {
-			// A private machine repeating a request its lineage made while
-			// public sees it but does not drive it, so nothing a private
-			// machine does changes what a public one can observe (REV-5).
-			return state(m.id, name, a.RequestID, st), false, nil
-		}
-		if st.State == journal.Pending {
-			s2, err := p.cfg.Effects.Authorize(ctx, id)
-			if s2.Intent.ID == "" {
-				p.cfg.Logf("guest %s: authorize %s: %v", m.id, id, err)
-				return effectState{}, true, guesterr.New("broker could not decide; retry with the same request_id")
-			}
-			st = s2
-		}
-		var held error
-		if st.State == journal.Authorized || st.State == journal.NotApplied {
-			// The effect runs to an outcome even if the guest hangs up.
-			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-			defer cancel()
-			s2, err := p.cfg.Effects.Dispatch(dctx, id)
-			if s2.Intent.ID != "" {
-				st = s2
-			}
-			held = err
-		}
-		out := state(m.id, name, a.RequestID, st)
-		if held != nil && out.Reason == "" {
-			// Held: STOP, an unsettled request on the account, or
-			// another request with the same effect that is unsettled or
-			// waiting to go. effect_status only reports; repeating the
-			// request is what tries it again (R16).
-			p.cfg.Logf("guest %s: dispatch %s: %v", m.id, id, held)
-			out.Reason = heldReason
-		}
-		return out, true, nil
-	case "effect_status":
-		var a struct {
-			RequestID string `json:"request_id"`
-		}
-		if err := json.Unmarshal(raw, &a); err != nil || !requestIDRE.MatchString(a.RequestID) {
-			return effectState{}, false, guesterr.New("request_id is required")
-		}
-		var st journal.Status
-		err := journal.ErrNotFound
-		if p.label(m.id) == "private" {
-			st, err = p.cfg.Effects.Get(privateID(lineage, a.RequestID))
-		}
-		if err != nil {
-			st, err = p.cfg.Effects.Get(lineage + "/" + a.RequestID)
-		}
-		if err != nil {
-			return effectState{}, false, guesterr.Newf("no request %s", guesterr.Guest(a.RequestID))
-		}
-		return state(m.id, name, a.RequestID, st), false, nil
-	}
-	return effectState{}, false, guesterr.Newf("no tool %q", guesterr.Guest(clip(name, 64)))
-}
-
-// label is the machine's data label for the journal, failing closed.
-func (p *Plane) label(machine string) string {
-	if p.cfg.Label != nil {
-		if l := p.cfg.Label(machine); l == "public" || l == "private" {
-			return l
-		}
-	}
-	return "private"
-}
-
-// intentID partitions a lineage's requests by data label (REV-5). Public
-// machines use <lineage>/<request_id>; private ones <lineage>/private/<request_id>
-// (request IDs hold no '/', so the two never collide). A public machine
-// never sees, collides with, or learns anything from a private machine's
-// request. A private machine repeating a request its lineage made while
-// public gets that intent, read-only (OP-1: it runs at most once).
-//
-// When the request was journaled before, prior is its status and seen is
-// true.
-func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool, prior journal.Status, seen bool) {
-	pub := lineage + "/" + reqID
-	if label != "private" {
-		st, err := p.cfg.Effects.Get(pub)
-		return pub, false, st, err == nil
-	}
-	priv := privateID(lineage, reqID)
-	if st, err := p.cfg.Effects.Get(priv); err == nil {
-		return priv, false, st, true
-	}
-	if st, err := p.cfg.Effects.Get(pub); err == nil {
-		return pub, true, st, true
-	}
-	return priv, false, journal.Status{}, false
-}
-
-func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }
-
-// state is what the guest sees of st. A reason reaches it only as the
-// policy's guest text (SR2-3j); any other, which may name host paths or
-// internal IDs, is a ref, its detail only in the broker's log.
-func state(machine, tool, reqID string, st journal.Status) effectState {
-	why := st.Permission.GuestReason
-	if why == "" && st.Permission.Reason != "" {
-		why = tool + " " + guesterr.Logged("guest", machine, tool, errors.New(st.Permission.Reason))
-	}
-	return effectState{RequestID: reqID, State: string(st.State), Reason: why}
 }

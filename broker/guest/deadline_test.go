@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // REQ: CRED-8, K18g-3
@@ -22,7 +20,6 @@ func TestPlaneWriteDeadlineFreesStalledGuest(t *testing.T) {
 	done := make(chan struct{}, 4)
 	r := newRig(t, func(c *Config) {
 		c.MaxConns = 1
-		c.Meter = roomyMeter(t)
 		c.WriteTimeout = 200 * time.Millisecond
 		c.Model = func(string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -71,7 +68,6 @@ func TestPlaneWriteDeadlineKeepsLongReplies(t *testing.T) {
 	const d = 200 * time.Millisecond
 	r := newRig(t, func(c *Config) {
 		c.WriteTimeout = d
-		c.Meter = roomyMeter(t)
 		c.Model = func(string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				switch req.URL.Path {
@@ -121,18 +117,4 @@ func TestPlaneWriteDeadlineDefault(t *testing.T) {
 	if r.p.cfg.WriteTimeout != DefaultWriteTimeout || DefaultWriteTimeout <= 0 {
 		t.Fatalf("WriteTimeout defaulted to %v", r.p.cfg.WriteTimeout)
 	}
-}
-
-// roomyMeter meters calls without limiting these tests, whose replies (8 MiB
-// stalled, several calls) would spend the rig's caps.
-func roomyMeter(t *testing.T) *meter.Meter {
-	m, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "meter.json"),
-		MachineCap: meter.Limits{Calls: 100, Tokens: 1 << 40},
-		OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 40},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m
 }

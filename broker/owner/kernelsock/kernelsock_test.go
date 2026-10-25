@@ -383,3 +383,52 @@ func TestStatusReadsTheKernelsFrame(t *testing.T) {
 		}
 	}
 }
+
+// A guest's plan reaches a running kernel, which logs it and decides it at
+// once; Plan reads it back. A plan under a key the log never granted is
+// rejected, not dropped (PLN-4), and an unknown plan reads as absent.
+func TestSubmitAndPlanReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	o := runningKernel(t)
+	_, holder, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := kernel.SignPlan(kernel.Plan{ID: "m1/r1", Steps: []kernel.PlanStep{{Verb: "organize", Clerk: "mail",
+		Args: map[string]string{"target": "t", "label": "l"}}}}, holder)
+	if err := o.Submit(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, ok, err := o.Plan(ctx, "m1/r1"); err != nil || !ok || st != kernel.SRejected {
+		t.Fatalf("plan read %q %v %v", st, ok, err)
+	}
+	if st, _, ok, err := o.Plan(ctx, "m1/none"); err != nil || ok {
+		t.Fatalf("an unknown plan reads %q %v %v", st, ok, err)
+	}
+}
+
+// Submit and Plan send the bytes kernel/proc's own client sends.
+func TestSubmitAndPlanSendTheKernelsOwnCalls(t *testing.T) {
+	needRoot(t)
+	path, lines := capturingKernel(t)
+	pc := proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+	p := kernel.Plan{ID: "m1/r1", Steps: []kernel.PlanStep{{Verb: "organize", Clerk: "mail", Args: map[string]string{"target": "t"}}}, Sig: []byte{1}}
+	if err := pc.Submit(p); err != nil {
+		t.Fatal(err)
+	}
+	want := <-lines
+	if err := o.Submit(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-lines; got != want {
+		t.Fatalf("submit sends %q; kernel/proc sends %q", got, want)
+	}
+	pc.Plan("m1/r1")
+	want = <-lines
+	o.Plan(context.Background(), "m1/r1")
+	if got := <-lines; got != want {
+		t.Fatalf("plan sends %q; kernel/proc sends %q", got, want)
+	}
+}

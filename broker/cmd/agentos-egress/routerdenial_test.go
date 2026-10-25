@@ -77,7 +77,7 @@ func newRouterRig(t *testing.T) *routerRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane, err := guest.New(guest.Config{Dir: filepath.Join(work, "guests"), Machines: plainMachines{}, Effects: r.eng, Model: fwd, Meter: mtr})
+	plane, err := guest.New(guest.Config{Dir: filepath.Join(work, "guests"), Machines: plainMachines{}, Model: fwd, Meter: mtr})
 	if err != nil {
 		t.Fatal(err)
 	}

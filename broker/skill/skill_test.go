@@ -192,21 +192,32 @@ func TestDecodeRefuses(t *testing.T) {
 	}
 }
 
-// broker is a stand-in for the broker's /mcp effect_request tool.
+// broker is a stand-in for the broker's /mcp plan command.
 type broker struct {
 	mu   sync.Mutex
-	reqs []Effect
+	reqs []sentPlan
+}
+
+// sentPlan is a plan command's arguments as the broker reads them.
+type sentPlan struct {
+	RequestID string `json:"request_id"`
+	Steps     []struct {
+		Verb, Clerk string
+		Args        map[string]string
+	} `json:"steps"`
+	name string
 }
 
 func (b *broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID     json.RawMessage `json:"id"`
 		Params struct {
-			Name      string `json:"name"`
-			Arguments Effect `json:"arguments"`
+			Name      string   `json:"name"`
+			Arguments sentPlan `json:"arguments"`
 		} `json:"params"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+	req.Params.Arguments.name = req.Params.Name
 	b.mu.Lock()
 	b.reqs = append(b.reqs, req.Params.Arguments)
 	b.mu.Unlock()
@@ -232,7 +243,8 @@ func rpc(t *testing.T, url, method string, params any) map[string]any {
 }
 
 // CAP-5: inside the guest, each valid skill in the tree is one MCP tool;
-// calling it runs the steps through the broker's own effect_request. A
+// calling it runs the steps through the broker's own plan command, one plan
+// per step, its params as string arguments and its recipients as "to". A
 // file that fails validation or whose name is not its ID is not offered.
 func TestServerOffersAndRunsSkills(t *testing.T) {
 	dir := t.TempDir()
@@ -268,7 +280,8 @@ func TestServerOffersAndRunsSkills(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &res); err != nil || res.Status != "done" {
 		t.Fatalf("%s", text)
 	}
-	if len(b.reqs) != 2 || b.reqs[1].Action != "message.send" || b.reqs[1].RequestID != "skill-"+sk.ID+"-r9-2" {
+	if len(b.reqs) != 2 || b.reqs[1].name != "plan" || len(b.reqs[1].Steps) != 1 || b.reqs[1].Steps[0].Verb != "message.send" ||
+		b.reqs[1].Steps[0].Clerk != "mail" || b.reqs[1].Steps[0].Args["to"] != "bo@example.test" || b.reqs[1].RequestID != "skill-"+sk.ID+"-r9-2" {
 		t.Fatalf("broker saw %+v", b.reqs)
 	}
 	call = rpc(t, srv.URL, "tools/call", map[string]any{"name": "skill_k111111111111", "arguments": map[string]any{"run_id": "r1"}})

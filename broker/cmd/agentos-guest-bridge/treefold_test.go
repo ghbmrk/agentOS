@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,31 +16,15 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/fold"
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
-// planeMachines and noEffects are the least a guest.Plane needs: the
-// tree tests call no effect tools.
+// planeMachines is the least a guest.Plane needs: the tree tests submit no
+// plans, so the plane has no kernel.
 type planeMachines struct{}
 
 func (planeMachines) Step(context.Context, string) error { return nil }
 func (planeMachines) RaisePrivate(string) error          { return nil }
 func (planeMachines) Lineage(id string) (string, error)  { return id, nil }
-
-type noEffects struct{}
-
-func (noEffects) Submit(journal.Intent) (journal.Status, error) {
-	return journal.Status{}, errors.New("no effects")
-}
-func (noEffects) Authorize(context.Context, string) (journal.Status, error) {
-	return journal.Status{}, errors.New("no effects")
-}
-func (noEffects) Dispatch(context.Context, string) (journal.Status, error) {
-	return journal.Status{}, errors.New("no effects")
-}
-func (noEffects) Get(string) (journal.Status, error) {
-	return journal.Status{}, errors.New("no effects")
-}
 
 // treeTool serves managed_tree as agentosd's liveTree answers it, or a
 // fixed text in its place, and the agent's own tool "big", whose every
@@ -86,7 +69,7 @@ func (f *treeTool) Call(_ context.Context, _, _, name string, args json.RawMessa
 // tool result over fold.Max, and returns a client on its socket.
 func planeClient(t *testing.T, tool *treeTool) *http.Client {
 	t.Helper()
-	p, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: planeMachines{}, Effects: noEffects{}, Tools: tool})
+	p, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: planeMachines{}, Tools: tool})
 	if err != nil {
 		t.Fatal(err)
 	}

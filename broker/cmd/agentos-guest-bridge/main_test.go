@@ -19,7 +19,7 @@ import (
 )
 
 // CAP-5, K1: end to end through the bridge. The guest calls a skill on
-// /skills/mcp; each step reaches the broker's /mcp effect_request over the
+// /skills/mcp; each step reaches the broker's /mcp plan command over the
 // machine's socket as an ordinary effect request, and every other path
 // still goes to the broker unchanged.
 func TestBridgeRunsSkillThroughBroker(t *testing.T) {
@@ -30,7 +30,14 @@ func TestBridgeRunsSkillThroughBroker(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var paths []string
-	var effects []skill.Effect
+	type planArgs struct {
+		RequestID string `json:"request_id"`
+		Steps     []struct {
+			Verb, Clerk string
+			Args        map[string]string
+		} `json:"steps"`
+	}
+	var plans []planArgs
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -42,15 +49,15 @@ func TestBridgeRunsSkillThroughBroker(t *testing.T) {
 		var req struct {
 			ID     json.RawMessage `json:"id"`
 			Params struct {
-				Name      string       `json:"name"`
-				Arguments skill.Effect `json:"arguments"`
+				Name      string   `json:"name"`
+				Arguments planArgs `json:"arguments"`
 			} `json:"params"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		if req.Params.Name != "effect_request" {
+		if req.Params.Name != "plan" {
 			t.Errorf("tool %q", req.Params.Name)
 		}
-		effects = append(effects, req.Params.Arguments)
+		plans = append(plans, req.Params.Arguments)
 		st, _ := json.Marshal(skill.State{RequestID: req.Params.Arguments.RequestID, State: skill.Succeeded})
 		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
 			"result": map[string]any{"content": []map[string]string{{"type": "text", "text": string(st)}}}})
@@ -98,8 +105,9 @@ func TestBridgeRunsSkillThroughBroker(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(effects) != 2 || effects[1].RequestID != "skill-"+sk.ID+"-r1-2" || effects[1].Recipients[0] != "ann@example.test" {
-		t.Fatalf("broker saw %+v", effects)
+	if len(plans) != 2 || plans[1].RequestID != "skill-"+sk.ID+"-r1-2" || len(plans[1].Steps) != 1 ||
+		plans[1].Steps[0].Verb != "message.send" || plans[1].Steps[0].Clerk != "mail" || plans[1].Steps[0].Args["to"] != "ann@example.test" {
+		t.Fatalf("broker saw %+v", plans)
 	}
 	if paths[len(paths)-1] != "/v1/models" {
 		t.Fatalf("paths %v", paths)

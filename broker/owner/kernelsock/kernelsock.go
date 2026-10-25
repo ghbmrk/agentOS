@@ -12,7 +12,9 @@
 // path does not link (daemon TestARC2ControlPathCannotReachInference).
 // TestSpeaksTheKernelsWire serves the real OwnerSide to keep the two the
 // same. Only the calls agentosd makes are here; #2783 adds the seam's
-// actions as it moves the owner channel onto them.
+// actions as it moves the owner channel onto them. The plan types are the
+// kernel package's own (pure data and its key check, no process), so a plan
+// agentosd signs is the bytes the kernel verifies.
 package kernelsock
 
 import (
@@ -24,6 +26,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -210,4 +213,26 @@ type stepArgs struct {
 // now. It refuses a step that is not parked, or one it would not send now.
 func (o Owner) Retry(ctx context.Context, plan string, index int) error {
 	return o.call(ctx, "retry", stepArgs{plan, index}, nil)
+}
+
+// Submit logs a guest's plan on the kernel, which decides it at once (PLN-5
+// (b)): its authority is its key and the signature of the key's last holder,
+// not this channel. A plan the key check rejects is logged all the same
+// (PLN-4); Plan reads its status.
+func (o Owner) Submit(ctx context.Context, p kernel.Plan) error {
+	return o.call(ctx, "submit", p, nil)
+}
+
+// planRead is kernel/proc's planRead.
+type planRead struct {
+	Status string   `json:"status"` // "": no such plan
+	Phases []string `json:"phases"`
+}
+
+// Plan reads plan id's status and its steps' phases; ok is false when the
+// kernel's log holds no such plan.
+func (o Owner) Plan(ctx context.Context, id string) (status string, phases []string, ok bool, err error) {
+	var r planRead
+	err = o.call(ctx, "plan", id, &r)
+	return r.Status, r.Phases, r.Status != "", err
 }
