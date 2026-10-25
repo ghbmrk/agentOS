@@ -158,10 +158,11 @@ func Decode(raw []byte) ([]byte, error) {
 	}
 	deep := false
 	if heif {
-		if hasMovie(raw) {
+		meta, ok := stillMeta(raw)
+		if !ok {
 			return nil, RefuseDecode
 		}
-		if deep = heifDeep(raw); deep {
+		if deep = heifDeep(meta); deep {
 			limit = MaxDeepPixels
 		}
 	}
@@ -215,44 +216,51 @@ func Decode(raw []byte) ([]byte, error) {
 	return frame, nil
 }
 
-// hasMovie reports whether raw has a top-level moov box, or cannot be
-// split into top-level boxes the way h265 splits it. h265 decodes a
-// file's moov track frame by frame whenever its meta names no usable
-// primary item, so a file with one is refused: a photo is a still.
-func hasMovie(raw []byte) bool {
+// stillMeta returns raw's first top-level meta box, header included,
+// the one h265 reads. ok is false when raw has a top-level moov box, or
+// cannot be split into top-level boxes the way h265 splits it: h265
+// decodes a file's moov track frame by frame whenever its meta names no
+// usable primary item, so a file with one is refused, as a photo is a
+// still.
+func stillMeta(raw []byte) (meta []byte, ok bool) {
 	for b := raw; len(b) >= 8; {
-		typ, _, rest, ok := nextBox(b)
-		if !ok || typ == "moov" {
-			return true
+		typ, _, rest, framed := nextBox(b)
+		if !framed || typ == "moov" {
+			return nil, false
+		}
+		if typ == "meta" && meta == nil {
+			meta = b[:len(b)-len(rest)]
 		}
 		b = rest
 	}
-	return false
+	return meta, true
 }
 
-// heifDeep reports whether any hvcC box in raw (a still's, a grid's
-// tiles', an alpha plane's, wherever its ipco sits) declares more than
-// 8 bits for luma or chroma, or is too short to say. It looks for the
-// box's type wherever it occurs, framed by a plausible size, rather
-// than walking meta as h265 does, so no arrangement of boxes h265 reads
-// can hide one; a false match only lowers the limit.
-func heifDeep(raw []byte) bool {
-	for i := 4; i+4 <= len(raw); i++ {
-		j := bytes.Index(raw[i:], []byte("hvcC"))
+// heifDeep reports whether meta may describe a coded picture above 8
+// bits: whether any hvcC box in it (a still's, a grid's tiles', an alpha
+// plane's, wherever its ipco sits) fails to prove 8 bits for luma and
+// chroma. It neither walks the boxes inside meta nor trusts their
+// sizes. Wherever the four bytes "hvcC" occur, the box's body starts
+// right after them, or 8 bytes later when the size field before them is
+// 1 (a 64-bit size): the only two places a reader, h265 included, can
+// take that box's depth bytes from. Unless both are there and say 8
+// bits, the file counts as deep; a false match only lowers the limit.
+func heifDeep(meta []byte) bool {
+	tag := []byte("hvcC")
+	for i := 0; ; i++ {
+		j := bytes.Index(meta[i:], tag)
 		if j < 0 {
 			return false
 		}
 		i += j
-		n := int(binary.BigEndian.Uint32(raw[i-4:]))
-		if n < 8 || n > 1<<16 {
-			continue
+		body := i + 4
+		if i >= 4 && binary.BigEndian.Uint32(meta[i-4:]) == 1 {
+			body += 8
 		}
-		body := raw[i+4 : min(i-4+n, len(raw))]
-		if len(body) < 19 || body[17]&7 != 0 || body[18]&7 != 0 {
+		if body+19 > len(meta) || meta[body+17]&7 != 0 || meta[body+18]&7 != 0 {
 			return true
 		}
 	}
-	return false
 }
 
 // nextBox splits off b's first ISOBMFF box: its type, its body and what

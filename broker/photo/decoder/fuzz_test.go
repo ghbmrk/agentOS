@@ -50,6 +50,15 @@ func FuzzDecode(f *testing.F) {
 			}
 		}
 		Orientation(raw)
+		// The property the 24 MP limit rests on: any file h265 decodes
+		// above 8 bits, heifDeep sees as deep.
+		if meta, ok := stillMeta(raw); IsHEIC(raw) && ok {
+			if img, err := heic.Decode(bytes.NewReader(raw), heic.Options{AutoRotate: true}); err == nil {
+				if _, wide := img.(*image.NRGBA64); wide && !heifDeep(meta) {
+					t.Fatal("h265 decoded more than 8 bits; heifDeep said 8")
+				}
+			}
+		}
 		frame, err := Decode(raw)
 		if err != nil {
 			var r Refusal

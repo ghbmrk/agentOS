@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/color"
 	"os"
@@ -413,6 +414,122 @@ func TestDecodeHEICTypes(t *testing.T) {
 	} {
 		if word, code, out := refusal(t, in); word != "decode" || code != 13 || len(out) != 0 {
 			t.Errorf("%s: got %q exit %d with %d bytes out; want decode, 13, none", name, word, code, len(out))
+		}
+	}
+}
+
+// withHvcC rewrites every hvcC box in ipco with f, regrowing ipco, iprp
+// and meta and moving the iloc offsets past meta.
+func withHvcC(t *testing.T, raw []byte, f func(body []byte) []byte) []byte {
+	t.Helper()
+	sized := func(typ string, b []byte) []byte {
+		return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(b))), append([]byte(typ), b...)...)
+	}
+	meta, mb := metaBoxes(t, raw)
+	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
+	for _, m := range mb {
+		if m.typ != "iprp" {
+			metaBody = append(metaBody, raw[m.start-8:m.end]...)
+			continue
+		}
+		var iprp []byte
+		for _, c := range children(t, raw, m.start, m.end) {
+			if c.typ != "ipco" {
+				iprp = append(iprp, raw[c.start-8:c.end]...)
+				continue
+			}
+			var ipco []byte
+			for _, p := range children(t, raw, c.start, c.end) {
+				if p.typ == "hvcC" {
+					ipco = append(ipco, f(raw[p.start:p.end])...)
+				} else {
+					ipco = append(ipco, raw[p.start-8:p.end]...)
+				}
+			}
+			iprp = append(iprp, sized("ipco", ipco)...)
+		}
+		metaBody = append(metaBody, sized("iprp", iprp)...)
+	}
+	newMeta := sized("meta", metaBody)
+	out := append(append(append([]byte{}, raw[:meta.start-8]...), newMeta...), raw[meta.end:]...)
+	shiftIloc(t, out, meta.end, len(newMeta)-(meta.end-meta.start+8))
+	return out
+}
+
+// withBeforeIprp returns raw with box placed in meta just before iprp,
+// meta grown and the iloc offsets past it moved to match.
+func withBeforeIprp(t *testing.T, raw, box []byte) []byte {
+	t.Helper()
+	meta, mb := metaBoxes(t, raw)
+	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
+	for _, m := range mb {
+		if m.typ == "iprp" {
+			metaBody = append(metaBody, box...)
+		}
+		metaBody = append(metaBody, raw[m.start-8:m.end]...)
+	}
+	sized := append(binary.BigEndian.AppendUint32(nil, uint32(8+len(metaBody))), append([]byte("meta"), metaBody...)...)
+	out := append(append(append([]byte{}, raw[:meta.start-8]...), sized...), raw[meta.end:]...)
+	shiftIloc(t, out, meta.end, len(box))
+	return out
+}
+
+// hvcCLarge writes an hvcC body with a 64-bit size.
+func hvcCLarge(body []byte) []byte {
+	b := append(binary.BigEndian.AppendUint32(nil, 1), "hvcC"...)
+	return append(binary.BigEndian.AppendUint64(b, uint64(16+len(body))), body...)
+}
+
+// hvcCPadded writes an hvcC body followed by 70,000 bytes h265 ignores.
+func hvcCPadded(body []byte) []byte {
+	body = append(append([]byte{}, body...), make([]byte, 70000)...)
+	return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(body))), append([]byte("hvcC"), body...)...)
+}
+
+// TestDecodeHEICDepthSeenWhereverH265ReadsIt is the property the 24 MP
+// limit rests on: for every layout here that h265 decodes, a file it
+// decodes above 8 bits is held to MaxDeepPixels before any decode, and
+// an 8-bit one is not. The layouts are those reviews of #3124 found a
+// box walk could miss: grids, an empty leading ipco or iprp, an hvcC
+// with a 64-bit size, and one padded past 64 KiB.
+func TestDecodeHEICDepthSeenWhereverH265ReadsIt(t *testing.T) {
+	layouts := map[string]func([]byte) []byte{
+		"plain":       func(b []byte) []byte { return b },
+		"empty ipco":  func(b []byte) []byte { return withIprpFirst(t, b, []byte("\x00\x00\x00\x08ipco")) },
+		"empty iprp":  func(b []byte) []byte { return withBeforeIprp(t, b, []byte("\x00\x00\x00\x08iprp")) },
+		"hvcC 64-bit": func(b []byte) []byte { return withHvcC(t, b, hvcCLarge) },
+		"hvcC padded": func(b []byte) []byte { return withHvcC(t, b, hvcCPadded) },
+	}
+	codings := map[string]heic.EncodeOptions{
+		"still": {}, "grid": {Tile: 32}, "4:4:4": {Chroma: heic.Chroma444},
+	}
+	for ln, layout := range layouts {
+		for cn, o := range codings {
+			for _, depth := range []int{8, 10, 12} {
+				o.BitDepth = depth
+				name := fmt.Sprintf("%s %s %d-bit", ln, cn, depth)
+				small := layout(heicPhoto(t, 64, 64, o))
+				img, err := heic.Decode(bytes.NewReader(small), heic.Options{AutoRotate: true})
+				if err != nil {
+					t.Fatalf("%s: h265 refuses the layout: %v", name, err)
+				}
+				_, wide := img.(*image.NRGBA64)
+				if wide != (depth > 8) {
+					t.Fatalf("%s: h265 gave %T", name, img)
+				}
+				if _, err := decoder.Decode(small); err != nil {
+					t.Errorf("%s at 64x64: %v", name, err)
+				}
+				// Over MaxDeepPixels, under MaxPixels.
+				big := layout(withISPE(t, heicPhoto(t, 64, 64, o), 6000, 4001))
+				_, err = decoder.Decode(big)
+				if wide && err != decoder.RefusePixels {
+					t.Errorf("%s declared 6000x4001: got %v, want pixels before decoding", name, err)
+				}
+				if !wide && err == decoder.RefusePixels {
+					t.Errorf("%s declared 6000x4001: refused as pixels, but 8 bits may have 50 MP", name)
+				}
+			}
 		}
 	}
 }
