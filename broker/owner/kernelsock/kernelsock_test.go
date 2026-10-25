@@ -8,10 +8,12 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -287,5 +289,97 @@ func TestARefusalAndAnUndecodableAnswer(t *testing.T) {
 	o = cannedKernel(t, `{"result":`)
 	if err := o.Stop(ctx); !errors.Is(err, ErrLost) {
 		t.Fatalf("a cut answer: %v", err)
+	}
+}
+
+// STATUS's unsettled steps and RETRY reach a running kernel (#2783 b): it
+// has none, and refuses a RETRY of a step it does not hold parked in its
+// own words. A setup-only kernel holds no step, and refuses the RETRY.
+func TestStatusAndRetryReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	o := runningKernel(t)
+	if s, err := o.Status(ctx); err != nil || len(s) != 0 {
+		t.Fatalf("status: %+v, %v", s, err)
+	}
+	var r Refused
+	if err := o.Retry(ctx, "p1", 0); !errors.As(err, &r) || r.Text != kernel.ErrNotParked.Error() {
+		t.Fatalf("a RETRY of no parked step: %v", err)
+	}
+	s := setupKernel(t)
+	if st, err := s.Status(ctx); err != nil || len(st) != 0 {
+		t.Fatalf("a setup-only kernel's status: %+v, %v", st, err)
+	}
+	if err := s.Retry(ctx, "p1", 0); !errors.As(err, &r) {
+		t.Fatalf("a setup-only kernel's RETRY: %v", err)
+	}
+}
+
+// capturingKernel answers every call with an empty result and sends each
+// call's line on the channel it returns.
+func capturingKernel(t *testing.T) (string, <-chan string) {
+	t.Helper()
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	lines := make(chan string, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			l, _ := bufio.NewReader(c).ReadString('\n')
+			lines <- l
+			c.Write([]byte("{\"result\":null}\n"))
+			c.Close()
+		}
+	}()
+	return path, lines
+}
+
+// RETRY sends the bytes kernel/proc's own client sends, so the kernel reads
+// the plan and step the owner approved, not another (#2783 b).
+func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
+	needRoot(t)
+	path, lines := capturingKernel(t)
+	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2); err != nil {
+		t.Fatal(err)
+	}
+	want := <-lines
+	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-lines; got != want {
+		t.Fatalf("RETRY sends %q; kernel/proc sends %q", got, want)
+	}
+}
+
+// Status reads every field it names from the kernel's own frame
+// (kernel.Unsettled as the status read encodes it).
+func TestStatusReadsTheKernelsFrame(t *testing.T) {
+	needRoot(t)
+	u := []kernel.Unsettled{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: kernel.PParked, Checks: 6,
+		Detail: "no answer", Retry: true, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
+	b, err := json.Marshal(map[string]any{"result": u})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := cannedKernel(t, string(b)).Status(context.Background())
+	want := []Step{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: PhaseParked, Detail: "no answer", Retry: true,
+		Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("status reads %+v, %v; want %+v", got, err, want)
+	}
+	for k, v := range map[string]string{PhaseUnknown: kernel.PUnknown, PhaseParked: kernel.PParked, PhaseUnsent: kernel.PUnsent, PlanActive: kernel.SActive} {
+		if k != v {
+			t.Errorf("%q is %q in the kernel", k, v)
+		}
 	}
 }

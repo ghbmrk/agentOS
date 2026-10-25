@@ -13,6 +13,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -45,6 +46,11 @@ func settleLoop(ctx context.Context, eng *journal.Engine, every, wait, maxWait t
 // retryRefPrefix marks an owner-channel item that asks to retry a parked
 // effect (OP-2c), as opposed to a journal intent the gate asked about.
 const retryRefPrefix = "retry:"
+
+// kernelRefPrefix marks an owner-channel item that asks to retry a step
+// the kernel holds parked (#2783 b): "kretry:<nonce>". The step it names
+// is kept with the ask, never read back from the ref.
+const kernelRefPrefix = "kretry:"
 
 // retryMax is the most parked effects one RETRY asks about.
 const retryMax = 20
@@ -116,6 +122,10 @@ type retrier struct {
 	line func(context.Context, journal.ParkedIntent, string) grants.RetryLine
 	send func(ctx context.Context, a retryAsk, page bool) (journal.Status, error)
 
+	// k, when set, is the kernel's owner seam: RETRY also offers the steps
+	// it holds parked, and an approved one is retried there (#2783 b).
+	k KernelOwner
+
 	running sync.WaitGroup // retries started by decide
 
 	mu        sync.Mutex
@@ -130,6 +140,9 @@ type retryAsk struct {
 	attempt int
 	line    grants.RetryLine
 	notDone bool // a check proved attempt did not go (journal.NotResent)
+	// step, for a step the kernel holds parked, is that step: the ask runs
+	// the kernel's retry, not the gate's.
+	step *KernelStep
 }
 
 func newRetrier(ctx context.Context, eng *journal.Engine, gate *grants.Gate) *retrier {
@@ -166,12 +179,71 @@ func (r *retrier) items() []ownerch.Item {
 		lines[ref] = retryAsk{id: p.Intent.ID, attempt: p.Attempt, line: l, notDone: p.NotDone}
 		items = append(items, l.Shown)
 	}
+	for _, s := range r.kernelParked(retryMax - len(items)) {
+		a := kernelAsk(s)
+		lines[a.line.Shown.Ref] = a
+		items = append(items, a.line.Shown)
+	}
 	r.mu.Lock()
 	for ref, l := range lines {
 		r.lines[ref] = l
 	}
 	r.mu.Unlock()
 	return items
+}
+
+// kernelParked lists up to n steps the kernel holds parked for the owner's
+// RETRY, in its order. A kernel that cannot be read offers none: RETRY
+// then offers the journal's alone, and the next RETRY asks again.
+func (r *retrier) kernelParked(n int) []KernelStep {
+	if r.k == nil || n <= 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, kernelFor)
+	defer cancel()
+	steps, _ := r.k.Status(ctx)
+	var out []KernelStep
+	for _, s := range steps {
+		if s.Retry && len(out) < n {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// kernelItem is the line RETRY asks about for a parked kernel step, with
+// the tier its verb's class and its own facts give (CH-10, CH-11, KRN-4):
+// a verb that moves money is always the high tier, a code-generator code;
+// so is a verb key classes high, or does not know, and a secret's is a
+// SecretReveal as on the journal's path. A recipient the broker has not
+// looked up is high too (Classify), so only a reversible or low-class step
+// with neither money nor a recipient can be approved by a texted code. Its
+// outcome is unknown, so it may go twice, and the line says so (CH-12).
+// The kernel does not say when the step was first tried, so the line
+// cannot.
+func kernelItem(s KernelStep) ownerch.Item {
+	cls, known := key.ClassOf(key.Verb(s.Verb))
+	low := known && cls != key.IrreversibleHigh
+	// A high or unknown verb's facts are left unverified (no recipient
+	// checked), which Classify reads as high, like the journal's
+	// unverified lines.
+	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient, Detail: "may go twice",
+		Facts: ownerch.Facts{Verb: s.Verb, NoRecipient: low && s.Recipient == ""}}
+	if key.Verb(s.Verb) == key.RevealOrCreateSecret {
+		it.Facts.Kind = ownerch.SecretReveal
+	}
+	if s.Money || s.Amount != 0 {
+		it.Amount = strconv.FormatInt(s.Amount, 10) + " minor units"
+		it.Facts.Kind, it.Facts.HasAmount, it.Facts.Amount = ownerch.MoneyRetry, true, s.Amount
+	}
+	return it
+}
+
+// kernelAsk is the ask about a parked kernel step, under a ref new to it.
+func kernelAsk(s KernelStep) retryAsk {
+	it := kernelItem(s)
+	it.Ref = kernelRefPrefix + newNonce()
+	return retryAsk{id: s.Plan, line: grants.RetryLine{Shown: it, Base: it}, step: &s}
 }
 
 // decide wraps the gate's Decide hook: an approved retry item runs the
@@ -182,6 +254,22 @@ func (r *retrier) items() []ownerch.Item {
 // on one request never runs or drops another request's line.
 func (r *retrier) decide(next func(ownerch.Decision)) func(ownerch.Decision) {
 	return func(d ownerch.Decision) {
+		if strings.HasPrefix(d.Ref, kernelRefPrefix) {
+			r.mu.Lock()
+			a, known := r.lines[d.Ref]
+			delete(r.lines, d.Ref)
+			r.mu.Unlock()
+			if !d.Approved || !known || a.step == nil {
+				return
+			}
+			page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
+			r.running.Add(1)
+			go func() {
+				defer r.running.Done()
+				r.runKernel(d.Request, a, page)
+			}()
+			return
+		}
 		if !strings.HasPrefix(d.Ref, retryRefPrefix) {
 			next(d)
 			return
@@ -242,6 +330,59 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	if inform != nil {
 		inform(text)
 	}
+}
+
+// runKernel retries a parked kernel step and texts the owner how it
+// ended. The kernel only logs the RETRY: the step is sent again on a later
+// tick, under every check the kernel makes then, and STATUS shows how it
+// settles. A line the owner could not approve by text must have been
+// approved on the local page (grants ErrRetryNotConfirmed's rule). A lost
+// answer may or may not have logged it, and is never told as either.
+func (r *retrier) runKernel(req string, a retryAsk, page bool) {
+	what := a.line.Shown.Facts.Verb + " " + a.line.Shown.Object
+	var err error
+	if !ownerch.SMSApprovable(a.line.Shown) && !page {
+		err = grants.ErrRetryNotConfirmed
+	} else {
+		ctx, cancel := context.WithTimeout(r.ctx, kernelFor)
+		err = r.k.Retry(ctx, a.step.Plan, a.step.Index)
+		cancel()
+	}
+	var text string
+	switch {
+	case err == nil:
+		text = fmt.Sprintf("Retry %s: %s will be tried again; it may go twice. Text STATUS to see how it ends.", req, what)
+	case errors.Is(err, ErrKernelLost):
+		text = fmt.Sprintf("Retry %s: I could not tell whether %s will be tried again. Text STATUS to see; text RETRY to ask again.", req, what)
+	default:
+		text = fmt.Sprintf("Retry %s refused: %s. %s was not tried again; text RETRY later.", req, kernelRefusal(err), capital(what))
+	}
+	r.mu.Lock()
+	inform, refused := r.inform, r.onRefused
+	r.mu.Unlock()
+	if err != nil && refused != nil {
+		refused()
+	}
+	if inform != nil {
+		inform(text)
+	}
+}
+
+// kernelRefusal names why the kernel refused a retry, in fixed words: the
+// kernel's own text is matched, never shown.
+func kernelRefusal(err error) string {
+	var rf KernelRefused
+	switch {
+	case errors.Is(err, grants.ErrRetryNotConfirmed):
+		return "it must be approved on my Wi-Fi page"
+	case !errors.As(err, &rf):
+		return "it could not be started"
+	case strings.Contains(rf.Text, "no parked step"):
+		return "it is no longer waiting for a retry"
+	case strings.Contains(rf.Text, "stopped"):
+		return "STOP is on"
+	}
+	return "my checks refused it"
 }
 
 // supersededHow says, in fixed words, what the request that superseded a

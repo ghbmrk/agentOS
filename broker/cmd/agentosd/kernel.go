@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -83,6 +85,34 @@ func reachKernel(ctx context.Context, k setupReader, every time.Duration, logf f
 type storedKernel struct {
 	kernelsock.Owner
 	store string
+}
+
+// Status is the kernel's unsettled steps as the owner commands read them.
+func (k storedKernel) Status(ctx context.Context) ([]daemon.KernelStep, error) {
+	steps, err := k.Owner.Status(ctx)
+	out := make([]daemon.KernelStep, 0, len(steps))
+	for _, s := range steps {
+		out = append(out, daemon.KernelStep(s))
+	}
+	return out, kernelErr(err)
+}
+
+// Retry retries a parked step on the kernel.
+func (k storedKernel) Retry(ctx context.Context, plan string, index int) error {
+	return kernelErr(k.Owner.Retry(ctx, plan, index))
+}
+
+// kernelErr is err in the owner commands' terms: the kernel's refusal in
+// its own words, and an answer that may or may not have taken effect.
+func kernelErr(err error) error {
+	var r kernelsock.Refused
+	switch {
+	case errors.As(err, &r):
+		return daemon.KernelRefused{Text: r.Text}
+	case errors.Is(err, kernelsock.ErrLost):
+		return fmt.Errorf("%w (%v)", daemon.ErrKernelLost, err)
+	}
+	return err
 }
 
 func (k storedKernel) SetupOpen(ctx context.Context) (bool, error) {

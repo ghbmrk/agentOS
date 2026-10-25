@@ -159,3 +159,55 @@ func (o Owner) Stopped(ctx context.Context) (bool, error) {
 	err := o.call(ctx, "changes", nil, &c)
 	return c.Stopped, err
 }
+
+// Step is a step the kernel's log has not settled (kernel.Unsettled, the
+// owner seam's status read): its outcome is unknown, it is parked for the
+// owner's RETRY, or its clerk was not reached. The fields agentosd shows
+// or judges a RETRY on; the rest of the frame is not read here.
+type Step struct {
+	Plan   string
+	Index  int
+	Verb   string
+	Clerk  string
+	Phase  string // PhaseUnknown, PhaseParked or PhaseUnsent
+	Detail string // the clerk's last answer, which the kernel bounds
+	Retry  bool   // the owner may RETRY it
+	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
+	// spend in minor units, whether its verb moves money, its recipient.
+	Amount    int64
+	Money     bool
+	Recipient string
+	// PlanStatus is the plan's: a cancelled plan's step stays listed while
+	// it may have acted, but nothing more is tried.
+	PlanStatus string
+}
+
+// The phases and plan status Step carries (kernel PUnknown, PParked,
+// PUnsent, SActive).
+const (
+	PhaseUnknown = "unknown"
+	PhaseParked  = "parked"
+	PhaseUnsent  = "unsent"
+	PlanActive   = "active"
+)
+
+// Status lists the steps the kernel's log has not settled, in submission
+// order. A setup-only kernel holds none.
+func (o Owner) Status(ctx context.Context) ([]Step, error) {
+	var s []Step
+	err := o.call(ctx, "status", nil, &s)
+	return s, err
+}
+
+// stepArgs is kernel/proc's stepArgs.
+type stepArgs struct {
+	Plan  string `json:"plan"`
+	Index int    `json:"index"`
+}
+
+// Retry logs the owner's RETRY of a parked step and anchors it (KRN-7): the
+// kernel sends it again on a later tick, under every check it would make
+// now. It refuses a step that is not parked, or one it would not send now.
+func (o Owner) Retry(ctx context.Context, plan string, index int) error {
+	return o.call(ctx, "retry", stepArgs{plan, index}, nil)
+}

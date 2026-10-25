@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -109,5 +110,24 @@ func TestNoSealedStoreIsAKernelWaitingForSetup(t *testing.T) {
 	}
 	if _, err := k.SetupOpen(context.Background()); !errors.Is(err, kernelsock.ErrUnreachable) {
 		t.Fatalf("a store and no kernel: %v", err)
+	}
+}
+
+// The kernel's answers reach the owner commands in their own terms (#2783
+// b): a refusal keeps the kernel's words, a lost answer stays "may or may
+// not have taken effect", and anything else passes as it is.
+func TestTheKernelsAnswersInTheOwnerCommandsTerms(t *testing.T) {
+	var r daemon.KernelRefused
+	if err := kernelErr(kernelsock.Refused{Text: "kernel: no parked step"}); !errors.As(err, &r) || r.Text != "kernel: no parked step" {
+		t.Fatalf("a refusal: %v", err)
+	}
+	if err := kernelErr(kernelsock.ErrLost); !errors.Is(err, daemon.ErrKernelLost) || errors.As(err, &r) {
+		t.Fatalf("a lost answer: %v", err)
+	}
+	if err := kernelErr(kernelsock.ErrUnreachable); !errors.Is(err, kernelsock.ErrUnreachable) || errors.As(err, &r) || errors.Is(err, daemon.ErrKernelLost) {
+		t.Fatalf("an unreached kernel: %v", err)
+	}
+	if kernelErr(nil) != nil {
+		t.Fatal("success read as a failure")
 	}
 }
