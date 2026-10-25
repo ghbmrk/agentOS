@@ -2,6 +2,7 @@ package guest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,11 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3, ARC-6, ARC-7, OP-8
+// REQ: REV-1, REV-5, OP-1, ADP-10, CRED-1, ARC-3, ARC-6, ARC-7, OP-8, PLN-5
 
 // fakeMachines records steps and label changes.
 type fakeMachines struct {
@@ -34,11 +34,12 @@ type fakeMachines struct {
 	// a Lineage call then would deadlock on the box.
 	locked  bool
 	misuse  int
-	stepErr error // what Step answers; nil succeeds
+	stepErr error           // what Step answers; nil succeeds
+	gone    map[string]bool // machines the manager no longer knows
 }
 
 func newMachines() *fakeMachines {
-	return &fakeMachines{steps: map[string]int{}, private: map[string]bool{}, lineage: map[string]string{}}
+	return &fakeMachines{steps: map[string]int{}, private: map[string]bool{}, lineage: map[string]string{}, gone: map[string]bool{}}
 }
 
 func (f *fakeMachines) Step(_ context.Context, id string) error {
@@ -65,6 +66,9 @@ func (f *fakeMachines) Lineage(id string) (string, error) {
 	if f.locked {
 		f.misuse++
 	}
+	if f.gone[id] {
+		return "", errors.New("no such machine")
+	}
 	if l := f.lineage[id]; l != "" {
 		return l, nil
 	}
@@ -73,73 +77,38 @@ func (f *fakeMachines) Lineage(id string) (string, error) {
 
 func (f *fakeMachines) stepsOf(id string) int { f.mu.Lock(); defer f.mu.Unlock(); return f.steps[id] }
 
-// allow authorizes everything; exec counts effects.
-type allow struct{}
-
-func (allow) Check(context.Context, journal.Phase, journal.Intent) error { return nil }
-
-type exec struct {
-	mu   sync.Mutex
-	runs map[string]int
-}
-
-func (e *exec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.runs[in.ID]++
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
-}
-
-func (e *exec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultUnknown}
-}
-
 type rig struct {
 	t     testing.TB
 	p     *Plane
 	ms    *fakeMachines
-	eng   *journal.Engine
-	ex    *exec
-	meter *meter.Meter
+	kern  *testKernel
 	model int
+	goals []string // the goal each model call's context named
 	mu    sync.Mutex
 	reps  []string
 }
 
 func newRig(t testing.TB, mod func(*Config)) *rig {
 	t.Helper()
-	r := &rig{t: t, ms: newMachines(), ex: &exec{runs: map[string]int{}}}
-	eng, err := journal.Open(&journal.MemStore{}, allow{}, map[string]journal.Executor{"mail": r.ex}, func(s string) string { return s })
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.eng = eng
-	m, err := meter.Open(meter.Config{
-		Path:       filepath.Join(t.TempDir(), "meter.json"),
-		MachineCap: meter.Limits{Calls: 2, Tokens: 1 << 20},
-		OverallCap: meter.Limits{Calls: 100, Tokens: 1 << 30},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.meter = m
+	r := &rig{t: t, ms: newMachines(), kern: newTestKernel(t)}
 	cfg := Config{
 		Dir:      filepath.Join(t.TempDir(), "guests"),
 		Machines: r.ms,
-		Effects:  eng,
-		Route: func(account string) (string, bool) {
-			return "mail", account == "owner-mail"
-		},
-		Label: func(string) string { return "public" },
+		Kernel:   r.kern,
+		Keys:     r.kern.keys,
+		Label:    func(string) string { return "public" },
 		Model: func(machine string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				r.mu.Lock()
 				r.model++
+				g, _ := req.Context().Value(goalKey{}).(string)
+				r.goals = append(r.goals, g)
 				r.mu.Unlock()
 				fmt.Fprintf(w, `{"machine":%q,"path":%q,"raw":%q}`, machine, req.URL.Path, req.URL.EscapedPath())
 			})
 		},
-		Meter: m,
+		Meter:    passMeter{},
+		WithGoal: func(ctx context.Context, goal string) context.Context { return context.WithValue(ctx, goalKey{}, goal) },
 		OwnerReply: func(machine string, rep Reply) {
 			r.mu.Lock()
 			r.reps = append(r.reps, machine+" "+rep.ID+" "+rep.Text+"|"+rep.Summary)
@@ -157,6 +126,14 @@ func newRig(t testing.TB, mod func(*Config)) *rig {
 	t.Cleanup(p.Shutdown)
 	return r
 }
+
+// passMeter meters nothing; the rig's WithGoal puts the goal under goalKey,
+// where its model route reads it.
+type passMeter struct{}
+
+type goalKey struct{}
+
+func (passMeter) Wrap(_ string, h http.Handler) http.Handler { return h }
 
 // client talks to machine id's socket as its guest would.
 func (r *rig) client(id string) *http.Client {
@@ -208,23 +185,25 @@ func (r *rig) rpc(id, method string, params any, hdr ...string) map[string]any {
 }
 
 // tool calls a broker tool and returns its decoded state, or the error text.
-func (r *rig) tool(id, name string, args map[string]any, hdr ...string) (effectState, string) {
+func (r *rig) tool(id, name string, args map[string]any, hdr ...string) (planState, string) {
 	r.t.Helper()
 	res := r.rpc(id, "tools/call", map[string]any{"name": name, "arguments": args}, hdr...)
 	text := res["content"].([]any)[0].(map[string]any)["text"].(string)
 	if res["isError"] == true {
-		return effectState{}, text
+		return planState{}, text
 	}
-	var st effectState
+	var st planState
 	if err := json.Unmarshal([]byte(text), &st); err != nil {
 		r.t.Fatalf("tool result %q: %v", text, err)
 	}
 	return st, ""
 }
 
+// send is a one-step plan: organize a mail on the "mail" clerk, which the
+// test kernel's key covers.
 func send(reqID string) map[string]any {
-	return map[string]any{"request_id": reqID, "account": "owner-mail", "action": "message.send",
-		"params": map[string]any{"text": "hello"}, "recipients": []string{"a@example.test"}}
+	return map[string]any{"request_id": reqID, "steps": []map[string]any{
+		{"verb": "organize", "clerk": "mail", "args": map[string]string{"target": "mail-1", "label": "done"}}}}
 }
 
 // TestARC6SocketServesOnlyTheGuestInterface: the socket answers the ARC-6
@@ -242,7 +221,7 @@ func TestARC6SocketServesOnlyTheGuestInterface(t *testing.T) {
 	if code, _ := r.do("m1", "GET", "/mcp", ""); code != 405 {
 		t.Errorf("GET /mcp: %d (no server stream)", code)
 	}
-	r2 := newRig(t, func(c *Config) { c.Model, c.Meter = nil, nil })
+	r2 := newRig(t, func(c *Config) { c.Model = nil })
 	if code, _ := r2.do("m1", "POST", "/model/openai/v1/chat/completions", "{}"); code != 503 {
 		t.Errorf("model without egress: %d", code)
 	}
@@ -323,7 +302,7 @@ func TestARC6MCPHandshakeAndToolList(t *testing.T) {
 	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status,result_read" {
+	if strings.Join(names, ",") != "plan,result_read" {
 		t.Fatalf("tools %v", names)
 	}
 	r.rpc("m1", "ping", nil)
@@ -336,96 +315,109 @@ func TestARC6MCPHandshakeAndToolList(t *testing.T) {
 	}
 }
 
-// TestARC6IdentityComesFromTheSocket: the intent's origin is the machine
-// whose socket the call arrived on, whatever the request says, and another
-// machine can neither see nor collide with it.
+// TestARC6IdentityComesFromTheSocket: a plan's ID is the lineage of the
+// machine whose socket the call arrived on, whatever the request says, and
+// another machine can neither see nor collide with it.
 func TestARC6IdentityComesFromTheSocket(t *testing.T) {
 	r := newRig(t, nil)
-	st, errText := r.tool("m1", "effect_request", send("r1"), "X-Machine", "m2", "Authorization", "Bearer m2")
-	if errText != "" || st.State != "succeeded" {
-		t.Fatalf("effect_request: %+v %s", st, errText)
+	st, errText := r.tool("m1", "plan", send("r1"), "X-Machine", "m2", "Authorization", "Bearer m2")
+	if errText != "" || st.State != "done" || r.kern.ran("m1/r1") != 1 {
+		t.Fatalf("plan: %+v %s", st, errText)
 	}
-	s, err := r.eng.Get("m1/r1")
-	if err != nil || s.Intent.Origin != "guest:m1" {
-		t.Fatalf("intent %+v %v", s.Intent, err)
+	if _, errText := r.tool("m2", "plan", map[string]any{"request_id": "r1"}); errText == "" {
+		t.Fatal("m2 read m1's plan")
 	}
-	if _, errText := r.tool("m2", "effect_status", map[string]any{"request_id": "r1"}); errText == "" {
-		t.Fatal("m2 read m1's request")
-	}
-	st, _ = r.tool("m2", "effect_request", send("r1"))
-	if st.State != "succeeded" || r.ex.runs["m1/r1"] != 1 || r.ex.runs["m2/r1"] != 1 {
-		t.Fatalf("m2's r1 is not its own: %+v %v", st, r.ex.runs)
+	st, _ = r.tool("m2", "plan", send("r1"))
+	if st.State != "done" || r.kern.ran("m1/r1") != 1 || r.kern.ran("m2/r1") != 1 {
+		t.Fatalf("m2's r1 is not its own: %+v %v", st, r.kern.runs)
 	}
 }
 
-// TestOP1RetriesAndForksRunAnEffectOnce: the same request_id from a machine
-// or from a fork in its lineage is one intent and runs once; different
-// arguments under it are refused.
-func TestOP1RetriesAndForksRunAnEffectOnce(t *testing.T) {
+// TestOP1RetriesAndForksRunAPlanOnce: the same request_id from a machine
+// or from a fork in its lineage is one plan and runs once; different steps
+// under it submit nothing and say so.
+func TestOP1RetriesAndForksRunAPlanOnce(t *testing.T) {
 	r := newRig(t, nil)
 	r.ms.lineage["f1"] = "m1"
 	for _, id := range []string{"m1", "m1", "f1"} {
-		if st, e := r.tool(id, "effect_request", send("r1")); st.State != "succeeded" {
+		if st, e := r.tool(id, "plan", send("r1")); st.State != "done" {
 			t.Fatalf("%s: %+v %s", id, st, e)
 		}
 	}
-	if n := r.ex.runs["m1/r1"]; n != 1 {
-		t.Fatalf("effect ran %d times", n)
+	if n := r.kern.ran("m1/r1"); n != 1 {
+		t.Fatalf("plan ran %d times", n)
 	}
 	other := send("r1")
-	other["params"] = map[string]any{"text": "different"}
-	if _, e := r.tool("f1", "effect_request", other); !strings.Contains(e, "different arguments") {
-		t.Fatalf("conflict not refused: %q", e)
+	other["steps"].([]map[string]any)[0]["verb"] = "trash"
+	if st, e := r.tool("f1", "plan", other); e != "" || !strings.Contains(st.Reason, reasonRepeat) || r.kern.plans() != 1 {
+		t.Fatalf("a repeat with other steps: %+v %q, %d plans", st, e, r.kern.plans())
 	}
-	if st, _ := r.tool("f1", "effect_status", map[string]any{"request_id": "r1"}); st.State != "succeeded" {
-		t.Fatalf("fork cannot see its lineage's request: %+v", st)
+	if st, _ := r.tool("f1", "plan", map[string]any{"request_id": "r1"}); st.State != "done" || st.Reason != "" {
+		t.Fatalf("fork cannot read its lineage's plan: %+v", st)
 	}
 }
 
-// TestADP10NoAdapterNoIntent: an effect on an account with no connected
-// adapter is refused and nothing is journaled or run.
-func TestADP10NoAdapterNoIntent(t *testing.T) {
-	r := newRig(t, nil)
-	a := send("r1")
-	a["account"] = "bank"
-	st, _ := r.tool("m1", "effect_request", a)
-	if st.State != "refused" || len(r.eng.List()) != 0 {
-		t.Fatalf("%+v, %d intents", st, len(r.eng.List()))
+// TestPLN5NoKeyNoPlan: a machine with no key, or a plane with no kernel,
+// has every plan refused in fixed words, and nothing reaches the kernel.
+// Malformed calls are refused before anything is signed.
+func TestPLN5NoKeyNoPlan(t *testing.T) {
+	r := newRig(t, func(c *Config) {
+		keys := c.Keys
+		c.Keys = func(m string) (key.Key, ed25519.PrivateKey, bool) {
+			if m == "m2" {
+				return key.Key{}, nil, false
+			}
+			return keys(m)
+		}
+	})
+	if st, _ := r.tool("m2", "plan", send("r1")); st.State != "refused" || st.Reason != reasonNoKey || r.kern.plans() != 0 {
+		t.Fatalf("%+v, %d plans", st, r.kern.plans())
+	}
+	nk := newRig(t, func(c *Config) { c.Kernel = nil })
+	if st, _ := nk.tool("m1", "plan", send("r1")); st.State != "refused" || st.Reason != reasonNoKernel {
+		t.Fatalf("no kernel: %+v", st)
+	}
+	step := func(verb, clerk string) map[string]any {
+		return map[string]any{"verb": verb, "clerk": clerk, "args": map[string]string{"target": "t"}}
 	}
 	for _, bad := range []map[string]any{
-		{"account": "owner-mail", "action": "x"},
-		{"request_id": "a/b", "account": "owner-mail", "action": "x"},
-		{"request_id": strings.Repeat("a", 65), "account": "owner-mail", "action": "x"},
+		{"steps": []map[string]any{step("organize", "mail")}},
+		{"request_id": "a/b", "steps": []map[string]any{step("organize", "mail")}},
+		{"request_id": strings.Repeat("a", 65), "steps": []map[string]any{step("organize", "mail")}},
+		{"request_id": "x1", "steps": []map[string]any{step("Organize", "mail")}},
+		{"request_id": "x2", "steps": []map[string]any{step("organize", "")}},
+		{"request_id": "x3", "steps": []map[string]any{step("organize", "m\u0430il")}}, // Cyrillic a
+		{"request_id": "x4"}, // a first plan needs steps
 	} {
-		if _, e := r.tool("m1", "effect_request", bad); e == "" {
+		if _, e := r.tool("m1", "plan", bad); e == "" {
 			t.Errorf("accepted %v", bad)
 		}
 	}
-	if _, e := r.tool("m1", "intent", send("r2")); e == "" {
-		t.Fatal("unknown tool accepted")
+	if _, e := r.tool("m1", "effect_request", send("r2")); e == "" {
+		t.Fatal("the journal's effect tool is still served")
+	}
+	if r.kern.plans() != 0 || r.ms.stepsOf("m1") != 0 {
+		t.Fatalf("%d plans reached the kernel, %d steps", r.kern.plans(), r.ms.stepsOf("m1"))
 	}
 }
 
-// TestREV1StepAfterEveryEffectRequest: an effect request the journal took
-// is a step, so the machine's files are snapshotted after it (vm V3).
-// Status reads, refusals, and malformed calls are not steps, and a burst
-// of requests shares one trailing snapshot, so a looping guest cannot
-// flood the snapshot store (RES-4).
-func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
+// TestREV1StepAfterEveryPlan: a plan sent to the kernel is a step, so the
+// machine's files are snapshotted after it (vm V3). Status reads, refusals,
+// and malformed calls are not steps, and a burst of plans shares one
+// trailing snapshot, so a looping guest cannot flood the snapshot store
+// (RES-4).
+func TestREV1StepAfterEveryPlan(t *testing.T) {
 	// The burst below must finish inside one interval; 1 s leaves room
 	// for a loaded -race run.
 	r := newRig(t, func(c *Config) { c.StepInterval = time.Second })
-	r.tool("m1", "effect_request", send("r1"))
+	r.tool("m1", "plan", send("r1"))
 	if n := r.ms.stepsOf("m1"); n != 1 {
-		t.Fatalf("%d steps after one effect request", n)
+		t.Fatalf("%d steps after one plan", n)
 	}
-	r.tool("m1", "effect_status", map[string]any{"request_id": "r1"})
-	r.tool("m1", "effect_request", map[string]any{})
-	bank := send("r9")
-	bank["account"] = "bank"
-	r.tool("m1", "effect_request", bank)
+	r.tool("m1", "plan", map[string]any{"request_id": "r1"})
+	r.tool("m1", "plan", map[string]any{})
 	for i := 2; i < 12; i++ {
-		r.tool("m1", "effect_request", send(fmt.Sprintf("r%d", i)))
+		r.tool("m1", "plan", send(fmt.Sprintf("r%d", i)))
 	}
 	if n := r.ms.stepsOf("m1"); n != 1 {
 		t.Fatalf("%d steps inside the interval, want the first only", n)
@@ -434,18 +426,18 @@ func TestREV1StepAfterEveryEffectRequest(t *testing.T) {
 	if n := r.ms.stepsOf("m1"); n != 2 {
 		t.Fatalf("%d steps after the burst, want one trailing snapshot", n)
 	}
-	r.tool("m1", "effect_request", send("r20"))
+	r.tool("m1", "plan", send("r20"))
 	if n := r.ms.stepsOf("m1"); n != 3 {
-		t.Fatalf("%d steps: a request after the interval snapshots at once", n)
+		t.Fatalf("%d steps: a plan after the interval snapshots at once", n)
 	}
 }
 
 // stepsSettle waits until machine id's stepper owes nothing and a full
-// StepInterval has passed since its last snapshot, so the next effect
-// request snapshots at once. It reads the stepper's state rather than
-// sleeping a fixed time, which a late timer under load can outlast. A
-// trailing snapshot is due within one interval; one not taken within
-// three fails the test.
+// StepInterval has passed since its last snapshot, so the next plan
+// snapshots at once. It reads the stepper's state rather than sleeping a
+// fixed time, which a late timer under load can outlast. A trailing
+// snapshot is due within one interval; one not taken within three fails the
+// test.
 func (r *rig) stepsSettle(id string) {
 	r.t.Helper()
 	m := r.p.get(id)
@@ -469,74 +461,48 @@ func (r *rig) stepsSettle(id string) {
 	}
 }
 
-// TestOP5GuestCannotRequestBrokerState: broker-state intents (account
-// "broker", meta.* actions) are the owner's and the broker's. Some narrow
-// and so pass STOP; a guest's request for one is refused before routing
-// and nothing is journaled.
-func TestOP5GuestCannotRequestBrokerState(t *testing.T) {
-	r := newRig(t, func(c *Config) {
-		c.Route = func(string) (string, bool) { return "mail", true } // every account routes
-	})
-	for i, a := range []map[string]string{
-		{"account": "broker", "action": "meta.budget.lower"},
-		{"account": "Broker", "action": "anything"},
-		{"account": "owner-mail", "action": "META.grant.add"},
-		// Look-alikes: names are strict lowercase ASCII, so none of these
-		// reaches routing or the journal as a different name.
-		{"account": " broker", "action": "send"},
-		{"account": "broker ", "action": "send"},
-		{"account": "bro\u200bker", "action": "send"},
-		{"account": "br\u043e\u043aer", "action": "send"},          // Cyrillic o, k
-		{"account": "owner-mail", "action": "meta\u2024grant.add"}, // one dot leader
-		{"account": "owner-mail", "action": "\u200bmeta.grant.add"},
-		{"account": "owner-mail", "action": "m\u0435ta.grant.add"}, // Cyrillic e
-		{"account": "owner-mail", "action": "meta.grant.add\n"},
-		{"account": "owner\uff0dmail", "action": "send"}, // fullwidth hyphen
-	} {
-		args := map[string]any{"request_id": fmt.Sprint("b", i), "account": a["account"], "action": a["action"]}
-		st, e := r.tool("m1", "effect_request", args)
-		if st.State != "refused" && e == "" {
-			t.Fatalf("%q: %+v %s", args, st, e)
-		}
-	}
-	if n := len(r.eng.List()); n != 0 || r.ms.stepsOf("m1") != 0 {
-		t.Fatalf("%d intents journaled, %d steps", n, r.ms.stepsOf("m1"))
-	}
-}
-
-// TestCH2EffectRequestsAreBoundedAndRateLimited: one request's params and
-// recipients are bounded, and one machine's requests are rate-limited;
-// excess is refused and not journaled.
-func TestCH2EffectRequestsAreBoundedAndRateLimited(t *testing.T) {
+// TestCH2PlansAreBoundedAndRateLimited: one plan's steps are bounded, and
+// one machine's plans are rate-limited; excess is refused and never reaches
+// the kernel.
+func TestCH2PlansAreBoundedAndRateLimited(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.SubmitBurst, c.SubmitEvery = 3, time.Hour })
 	huge := send("h1")
-	huge["params"] = map[string]any{"text": strings.Repeat("x", 17<<10)}
+	huge["steps"].([]map[string]any)[0]["content"] = strings.Repeat("x", 17<<10)
 	many := send("h2")
-	rs := make([]string, 51)
-	for i := range rs {
-		rs[i] = fmt.Sprintf("r%d@example.test", i)
+	steps := make([]map[string]any, maxSteps+1)
+	for i := range steps {
+		steps[i] = send("h2")["steps"].([]map[string]any)[0]
 	}
-	many["recipients"] = rs
-	long := send("h3")
-	long["recipients"] = []string{strings.Repeat("a", 400)}
-	for _, a := range []map[string]any{huge, many, long} {
-		if _, e := r.tool("m1", "effect_request", a); e == "" {
+	many["steps"] = steps
+	labels := send("h3")
+	labels["steps"].([]map[string]any)[0]["labels"] = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	unnamed := []map[string]any{}
+	for i, l := range []string{"Public", "a b", "privé", "x/y", "", strings.Repeat("l", 65)} {
+		a := send(fmt.Sprintf("n%d", i))
+		a["steps"].([]map[string]any)[0]["labels"] = []string{l}
+		unnamed = append(unnamed, a)
+	}
+	for _, a := range append([]map[string]any{huge, many, labels}, unnamed...) {
+		if _, e := r.tool("m1", "plan", a); e == "" {
 			t.Fatalf("accepted %s", a["request_id"])
 		}
 	}
+	if n := r.kern.plans(); n != 0 {
+		t.Fatalf("%d refused plans reached the kernel", n)
+	}
 	for i := 0; i < 3; i++ {
-		if st, e := r.tool("m1", "effect_request", send(fmt.Sprintf("ok%d", i))); st.State != "succeeded" {
-			t.Fatalf("request %d: %+v %s", i, st, e)
+		if st, e := r.tool("m1", "plan", send(fmt.Sprintf("ok%d", i))); st.State != "done" {
+			t.Fatalf("plan %d: %+v %s", i, st, e)
 		}
 	}
-	if _, e := r.tool("m1", "effect_request", send("ok3")); !strings.Contains(e, "too many") {
+	if _, e := r.tool("m1", "plan", send("ok3")); !strings.Contains(e, "too many") {
 		t.Fatalf("burst not limited: %q", e)
 	}
-	if st, _ := r.tool("m2", "effect_request", send("ok0")); st.State != "succeeded" {
+	if st, _ := r.tool("m2", "plan", send("ok0")); st.State != "done" {
 		t.Fatal("another machine was limited")
 	}
-	if n := len(r.eng.List()); n != 4 {
-		t.Fatalf("%d intents journaled, want 4", n)
+	if n := r.kern.plans(); n != 4 {
+		t.Fatalf("%d plans reached the kernel, want 4", n)
 	}
 }
 
@@ -686,10 +652,10 @@ func (f *failRaise) RaisePrivate(id string) error {
 	return f.fakeMachines.RaisePrivate(id)
 }
 
-// TestOP8ModelRouteIsMeteredByMachine: model calls go through the meter,
-// charged to the socket's machine, and are refused once its cap is spent;
-// a plane that would serve model egress unmetered is refused.
-func TestOP8ModelRouteIsMeteredByMachine(t *testing.T) {
+// TestOP8ModelRouteIsTheMachines: model calls go through the meter to the
+// route for the machine whose socket they came on, whatever the request
+// says, and model egress is never served without a meter (OP-8).
+func TestOP8ModelRouteIsTheMachines(t *testing.T) {
 	r := newRig(t, nil)
 	for i := 0; i < 2; i++ {
 		code, body := r.do("m1", "POST", "/model/openai/v1/chat/completions", `{"messages":[]}`, "X-Machine", "m2")
@@ -697,16 +663,10 @@ func TestOP8ModelRouteIsMeteredByMachine(t *testing.T) {
 			t.Fatalf("call %d: %d %s", i, code, body)
 		}
 	}
-	if code, _ := r.do("m1", "POST", "/model/openai/v1/chat/completions", `{}`); code != 429 {
-		t.Fatalf("over cap: %d", code)
-	}
 	if r.model != 2 {
-		t.Fatalf("model egress called %d times", r.model)
+		t.Fatalf("model route called %d times", r.model)
 	}
-	if code, _ := r.do("m2", "POST", "/model/openai/v1/chat/completions", `{}`); code != 200 {
-		t.Fatalf("m2 charged for m1: %d", code)
-	}
-	if _, err := New(Config{Dir: t.TempDir(), Machines: r.ms, Effects: r.eng, Model: func(string) http.Handler { return nil }}); err == nil {
+	if _, err := New(Config{Dir: t.TempDir(), Machines: r.ms, Model: func(string) http.Handler { return nil }}); err == nil {
 		t.Fatal("model egress without a meter")
 	}
 }
@@ -838,14 +798,6 @@ func TestARC6PerMachineConcurrencyCap(t *testing.T) {
 	wg.Wait()
 }
 
-// TestOP8SpendNoteNamesTheTask: the journal note for an exhaustion says
-// which limit and task stopped the machine.
-func TestOP8SpendNoteNamesTheTask(t *testing.T) {
-	if n := SpendNote(meter.Exhausted{Scope: meter.ScopeTask, Machine: "m1", Task: "t1"}); n.Machine != "m1" || !strings.Contains(n.Reason, "t1") {
-		t.Fatalf("%+v", n)
-	}
-}
-
 // TestREV5PublicTaskKeepsTheLabel: a task the owner marked PUBLIC reaches
 // the guest without raising its label; the agent adapter delivers to its
 // one machine.
@@ -872,15 +824,17 @@ func TestREV5PublicTaskKeepsTheLabel(t *testing.T) {
 // TestIntentsRecordTheSubmittingMachineAndLabel: each intent records the
 // machine and its data label, failing closed to private when the label is
 // unknown, and a fork's repeat keeps the first submission's record.
-func TestIntentsRecordTheSubmittingMachineAndLabel(t *testing.T) {
+func TestPlansCarryTheSubmittingMachinesLabel(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Label = nil })
-	if st, e := r.tool("m1", "effect_request", send("r1")); st.State != "succeeded" {
+	pub := send("r1")
+	pub["steps"].([]map[string]any)[0]["labels"] = []string{"public"}
+	if st, e := r.tool("m1", "plan", pub); st.State != "done" {
 		t.Fatalf("%+v %s", st, e)
 	}
-	if s, _ := r.eng.Get("m1/private/r1"); s.Intent.Machine != "m1" || s.Intent.Label != "private" {
-		t.Fatalf("no label source: %q %q", s.Intent.Machine, s.Intent.Label)
+	if l := strings.Join(r.kern.labels("m1/private/r1"), ","); l != "private,public" {
+		t.Fatalf("an unlabelled machine's step carries %q", l)
 	}
-	pub := newRig(t, func(c *Config) {
+	pr := newRig(t, func(c *Config) {
 		c.Label = func(id string) string {
 			if id == "m1" {
 				return "public"
@@ -888,57 +842,59 @@ func TestIntentsRecordTheSubmittingMachineAndLabel(t *testing.T) {
 			return "bogus"
 		}
 	})
-	pub.ms.lineage["f1"] = "m1"
-	pub.tool("m1", "effect_request", send("r1"))
-	pub.tool("f1", "effect_request", send("r2"))
-	if s, _ := pub.eng.Get("m1/r1"); s.Intent.Label != "public" {
-		t.Fatalf("public machine recorded %q", s.Intent.Label)
+	pr.ms.lineage["f1"] = "m1"
+	pr.tool("m1", "plan", send("r1"))
+	pr.tool("f1", "plan", send("r2"))
+	if l := strings.Join(pr.kern.labels("m1/r1"), ","); l != "public" {
+		t.Fatalf("public machine's step carries %q", l)
 	}
-	if s, _ := pub.eng.Get("m1/private/r2"); s.Intent.Machine != "f1" || s.Intent.Label != "private" {
-		t.Fatalf("unknown label recorded %q %q", s.Intent.Machine, s.Intent.Label)
+	if l := strings.Join(pr.kern.labels("m1/private/r2"), ","); l != "private" {
+		t.Fatalf("unknown label's step carries %q", l)
 	}
 }
 
-// REQ: REV-5, OP-1, OP-5
+// REQ: REV-5, OP-1
 
 // TestLabelsPartitionRequests: a private fork cannot pass anything to its
-// public parent through request IDs, states, or reasons. Its own requests
-// live apart; a repeat of a request the lineage made while public reads
-// that intent without driving it; broker actions are refused unjournaled.
+// public parent through request IDs, states, or reasons. Its own plans
+// live apart; a repeat of a plan the lineage made while public reads it
+// without driving it.
 func TestLabelsPartitionRequests(t *testing.T) {
 	labels := map[string]string{"m1": "public", "f1": "private"}
 	r := newRig(t, func(c *Config) { c.Label = func(id string) string { return labels[id] } })
 	r.ms.lineage["f1"] = "m1"
 
-	st, _ := r.tool("f1", "effect_request", map[string]any{"request_id": "x1", "account": "broker", "action": "meta.canary-7f3a"})
-	if st.State != "refused" || strings.Contains(st.Reason, "canary") {
-		t.Fatalf("broker action: %+v", st)
-	}
-	if len(r.eng.List()) != 0 {
-		t.Fatal("a refused broker action was journaled")
-	}
-
 	// The private fork's own request is invisible to the public parent.
-	if st, _ := r.tool("f1", "effect_request", send("p1")); st.State != "succeeded" {
+	if st, _ := r.tool("f1", "plan", send("p1")); st.State != "done" {
 		t.Fatalf("fork request: %+v", st)
 	}
-	if _, e := r.tool("m1", "effect_status", map[string]any{"request_id": "p1"}); e == "" {
+	if _, e := r.tool("m1", "plan", map[string]any{"request_id": "p1"}); e == "" {
 		t.Fatal("the public parent read the private fork's request")
 	}
-	if st, _ := r.tool("m1", "effect_request", send("p1")); st.State != "succeeded" || r.ex.runs["m1/p1"] != 1 {
-		t.Fatalf("the parent's p1 is its own: %+v %v", st, r.ex.runs)
+	if st, _ := r.tool("m1", "plan", send("p1")); st.State != "done" || r.kern.ran("m1/p1") != 1 {
+		t.Fatalf("the parent's p1 is its own: %+v %v", st, r.kern.runs)
 	}
 
 	// A repeat of a public-era request reads it and runs nothing again.
-	if st, e := r.tool("f1", "effect_status", map[string]any{"request_id": "p1"}); e != "" || st.State != "succeeded" {
+	if st, e := r.tool("f1", "plan", map[string]any{"request_id": "p1"}); e != "" || st.State != "done" {
 		t.Fatalf("fork status of its own p1: %+v %s", st, e)
 	}
-	r.tool("m1", "effect_request", send("q1"))
-	if st, _ := r.tool("f1", "effect_request", send("q1")); st.State != "succeeded" || r.ex.runs["m1/q1"] != 1 {
-		t.Fatalf("fork repeat of a public request: %+v %v", st, r.ex.runs)
+	r.tool("m1", "plan", send("q1"))
+	n := r.kern.plans()
+	if st, _ := r.tool("f1", "plan", send("q1")); st.State != "done" || !strings.Contains(st.Reason, reasonRepeat) ||
+		r.kern.ran("m1/q1") != 1 || r.kern.ran("m1/private/q1") != 0 || r.kern.plans() != n {
+		t.Fatalf("fork repeat of a public request: %+v %v", st, r.kern.runs)
 	}
-	if s, _ := r.eng.Get("m1/q1"); s.Intent.Label != "public" {
-		t.Fatalf("label %q", s.Intent.Label)
+	// A private repeat of the machine's own private request reads that plan,
+	// not a public one, and runs nothing again.
+	r.tool("f1", "plan", send("p2"))
+	n = r.kern.plans()
+	if st, _ := r.tool("f1", "plan", send("p2")); st.State != "done" || !strings.Contains(st.Reason, reasonRepeat) ||
+		r.kern.ran("m1/private/p2") != 1 || r.kern.plans() != n {
+		t.Fatalf("private repeat of its own request: %+v %v", st, r.kern.runs)
+	}
+	if l := strings.Join(r.kern.labels("m1/q1"), ","); l != "public" {
+		t.Fatalf("labels %q", l)
 	}
 }
 
@@ -986,29 +942,5 @@ func TestOwnerAgentReportsDeliveredTasks(t *testing.T) {
 	_ = (OwnerAgent{Plane: r.p, Machine: "absent", Delivered: note}).Deliver(context.Background(), "x", false)
 	if len(got) != 1 || !strings.HasPrefix(got[0], "owner:") || !strings.HasSuffix(got[0], "|find bus times|true") {
 		t.Fatalf("reported %q", got)
-	}
-}
-
-// Security L1 on W5a: a guest cannot claim the broker's Loop 2 origin. An
-// "origin" in its request, at the top or in params, is not the intent's
-// origin, and a pause it asks for is refused before the journal.
-func TestAGuestCannotClaimTheLoop2Origin(t *testing.T) {
-	r := newRig(t, nil)
-	a := send("o1")
-	a["origin"] = "broker:loop2"
-	a["params"] = map[string]any{"text": "hello", "origin": "broker:loop2"}
-	if st, e := r.tool("m1", "effect_request", a); e != "" {
-		t.Fatalf("%+v %s", st, e)
-	}
-	// The effect is journaled, and under the guest's own origin.
-	if s, err := r.eng.Get("m1/o1"); err != nil || s.Intent.Origin != "guest:m1" {
-		t.Fatalf("intent origin %q: %v", s.Intent.Origin, err)
-	}
-	p := map[string]any{"request_id": "o2", "account": "owner-mail", "action": "meta.grant.pause", "origin": "broker:loop2"}
-	if st, e := r.tool("m1", "effect_request", p); st.State != "refused" || e != "" || !strings.Contains(st.Reason, "a guest cannot request them") {
-		t.Fatalf("pause: %+v %s", st, e)
-	}
-	if _, err := r.eng.Get("m1/o2"); err == nil {
-		t.Fatal("a guest's pause was journaled")
 	}
 }

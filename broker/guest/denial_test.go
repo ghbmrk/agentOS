@@ -1,90 +1,76 @@
 package guest
 
-// SR2-3j: a denial's reason reaches the guest only as the policy's guest
-// text; any other reason is a ref, its detail on a broker-log line.
+// SR2-3j: what the kernel's seam answers reaches the guest only as fixed
+// text; its detail goes to a broker-log line (PLN-4).
 //
-// REQ: RES-4, CAP-8, OP-2
+// REQ: RES-4, CAP-8, OP-2, PLN-4
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
-	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/guesterr"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // denialCanary is a synthetic host path; it is no real path on any box.
-const denialCanary = "/var/lib/agentos-canary-7f3a/grants.db"
+const denialCanary = "/var/lib/agentos-canary-7f3a/kernel.sock"
 
-// denyByID refuses r-plain with text naming the canary, and r-safe with
-// fixed guest text; it allows the rest.
-type denyByID struct{}
+// brokenKernel fails every call with text naming the canary.
+type brokenKernel struct{}
 
-func (denyByID) Check(_ context.Context, _ journal.Phase, in journal.Intent) error {
-	switch {
-	case strings.HasSuffix(in.ID, "/r-plain"):
-		return errors.New("cannot read " + denialCanary)
-	case strings.HasSuffix(in.ID, "/r-safe"):
-		return guesterr.New("needs the owner's approval")
-	}
-	return nil
+func (brokenKernel) Submit(context.Context, kernel.Plan) error {
+	return errors.New("dial " + denialCanary)
 }
 
-var denialRef = regexp.MustCompile(`^effect_(request|status) failed \(ref ([0-9a-f]{8})\); the broker's log has the detail$`)
+func (brokenKernel) Plan(context.Context, string) (string, []string, bool, error) {
+	return "", nil, false, errors.New("dial " + denialCanary)
+}
 
-func TestDenialReasonsReachTheGuestOnlyAsFixedText(t *testing.T) {
-	var buf bytes.Buffer
-	prev, flags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
-
-	eng, err := journal.Open(&journal.MemStore{}, denyByID{}, map[string]journal.Executor{"mail": &exec{runs: map[string]int{}}}, func(s string) string { return s })
-	if err != nil {
-		t.Fatal(err)
+func TestKernelFailuresReachTheGuestOnlyAsFixedText(t *testing.T) {
+	var logged []string
+	r := newRig(t, func(c *Config) {
+		c.Kernel = brokenKernel{}
+		c.Logf = func(f string, a ...any) { logged = append(logged, strings.TrimSpace(f)) }
+	})
+	st, e := r.tool("m1", "plan", send("r1"))
+	if e != "" || st.State != "unknown" || st.Reason != reasonLost || strings.Contains(st.Reason, "canary") {
+		t.Fatalf("%+v %q", st, e)
 	}
-	r := newRig(t, func(c *Config) { c.Effects = eng })
-	for _, tool := range []string{"effect_request", "effect_status"} {
-		args := map[string]any{"request_id": "r-plain"}
-		if tool == "effect_request" {
-			args = send("r-plain")
-		}
-		buf.Reset()
-		st, e := r.tool("m1", tool, args)
-		m := denialRef.FindStringSubmatch(st.Reason)
-		if e != "" || st.State != "denied" || m == nil || strings.Contains(st.Reason, "canary") {
-			t.Fatalf("%s: %+v %q", tool, st, e)
-		}
-		if !strings.Contains(buf.String(), "ref "+m[2]) || !strings.Contains(buf.String(), denialCanary) {
-			t.Fatalf("%s: the log has no line for ref %s:\n%s", tool, m[2], buf.String())
-		}
-	}
-	if st, e := r.tool("m1", "effect_request", send("r-safe")); e != "" || st.State != "denied" || st.Reason != "needs the owner's approval" {
-		t.Fatalf("safe: %+v %q", st, e)
+	if len(logged) == 0 {
+		t.Fatal("the broker's log has no line for the failure")
 	}
 }
 
-// R16 (OP-2): a request the broker holds back for now (here STOP) tells
-// the guest to repeat it, since effect_status only reports and never runs
-// it; the repeat is what goes once the hold lifts.
-func TestOP2HeldRequestTellsTheGuestToRepeatIt(t *testing.T) {
+// A plan the kernel's key check rejects says so in fixed words, and no step
+// runs (PLN-4): here a verb the machine's key does not reach.
+func TestPLN4ARejectedPlanSaysSoAndRunsNothing(t *testing.T) {
 	r := newRig(t, nil)
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
+	a := send("r-send")
+	a["steps"].([]map[string]any)[0]["verb"] = "send"
+	a["steps"].([]map[string]any)[0]["args"] = map[string]string{"to": "a@example.test", "msg": "hi"}
+	st, e := r.tool("m1", "plan", a)
+	if e != "" || st.State != kernel.SRejected || st.Reason != reasonRejected || r.kern.ran("m1/r-send") != 0 {
+		t.Fatalf("%+v %q", st, e)
 	}
-	st, e := r.tool("m1", "effect_request", send("r-held"))
-	if e != "" || st.State != "authorized" || st.Reason != heldReason ||
-		!strings.Contains(st.Reason, "repeat effect_request with the same request_id") {
-		t.Fatalf("held: %+v %q", st, e)
+}
+
+// R16 (OP-2): under STOP the kernel takes a plan and rejects it, so nothing
+// runs; after RESUME a new request_id runs (PLN-4: a rejected plan is not
+// tried again).
+func TestOP2APlanUnderStopRunsNothing(t *testing.T) {
+	r := newRig(t, nil)
+	r.kern.stop()
+	st, e := r.tool("m1", "plan", send("r-held"))
+	if e != "" || st.State != kernel.SRejected || r.kern.ran("m1/r-held") != 0 {
+		t.Fatalf("under STOP: %+v %q", st, e)
 	}
-	if err := r.eng.Resume(); err != nil {
-		t.Fatal(err)
+	r.kern.resume()
+	if st, e := r.tool("m1", "plan", send("r-held")); e != "" || st.State != kernel.SRejected {
+		t.Fatalf("a repeat after RESUME: %+v %q", st, e)
 	}
-	if st, e := r.tool("m1", "effect_request", send("r-held")); e != "" || st.State != "succeeded" {
-		t.Fatalf("repeat: %+v %q", st, e)
+	if st, e := r.tool("m1", "plan", send("r-after")); e != "" || st.State != kernel.SDone || r.kern.ran("m1/r-after") != 1 {
+		t.Fatalf("after RESUME: %+v %q", st, e)
 	}
 }

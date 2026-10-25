@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +20,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
@@ -82,58 +84,22 @@ func (c canaryMachines) DeleteFiles(_ context.Context, id string, _ vm.Deletion)
 	return vm.DeleteReport{}, c.err("delete", id)
 }
 
-// canaryEffects is a journal whose every answer is an error naming its
-// file, but for request ID "denied", which a real journal answers under
-// canaryPolicy (SR2-3j).
-type canaryEffects struct {
-	dir    string
-	denied *journal.Engine
+// canaryKernel is a kernel seam whose every answer is an error naming its
+// socket, as a kernel process that cannot be reached might.
+type canaryKernel struct{ dir string }
+
+func (c canaryKernel) err() error {
+	return fmt.Errorf("kernelsock: dial %s/owner.sock: permission denied", c.dir)
+}
+func (c canaryKernel) Submit(context.Context, kernel.Plan) error { return c.err() }
+func (c canaryKernel) Plan(context.Context, string) (string, []string, bool, error) {
+	return "", nil, false, c.err()
 }
 
-func (c canaryEffects) err() error {
-	return fmt.Errorf("journal: write %s/journal.log: no space left on device", c.dir)
-}
-func (c canaryEffects) Submit(in journal.Intent) (journal.Status, error) {
-	if strings.HasSuffix(in.ID, "/denied") {
-		return c.denied.Submit(in)
-	}
-	return journal.Status{}, c.err()
-}
-func (c canaryEffects) Authorize(ctx context.Context, id string) (journal.Status, error) {
-	if strings.HasSuffix(id, "/denied") {
-		return c.denied.Authorize(ctx, id)
-	}
-	return journal.Status{}, c.err()
-}
-func (c canaryEffects) Dispatch(ctx context.Context, id string) (journal.Status, error) {
-	if strings.HasSuffix(id, "/denied") {
-		return c.denied.Dispatch(ctx, id)
-	}
-	return journal.Status{}, c.err()
-}
-func (c canaryEffects) Get(id string) (journal.Status, error) {
-	if strings.HasSuffix(id, "/denied") {
-		return c.denied.Get(id)
-	}
-	return journal.Status{}, c.err()
-}
-
-// canaryPolicy refuses every intent with an error naming its file, as a
-// policy that cannot read its state might.
-type canaryPolicy struct{ dir string }
-
-func (c canaryPolicy) Check(context.Context, journal.Phase, journal.Intent) error {
-	return fmt.Errorf("grants: open %s/grants.json: permission denied", c.dir)
-}
-
-// noExec is an executor that is never reached: canaryPolicy refuses first.
-type noExec struct{}
-
-func (noExec) Execute(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultNotApplied}
-}
-func (noExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultNotApplied}
+// anyKey gives every machine a key, so its plans reach the seam.
+func anyKey(string) (key.Key, ed25519.PrivateKey, bool) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	return key.Key{}, priv, true
 }
 
 type oneLineage struct{}
@@ -185,16 +151,13 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	wt := &workers.Tools{M: canaryMachines{dir: dir}, Image: "base", Argv: []string{"/sbin/init"}, MaxMemMB: 512}
 	tools := registeredTools(qs, wt)
 
-	denied, err := journal.Open(&journal.MemStore{}, canaryPolicy{dir: dir}, map[string]journal.Executor{"mail": noExec{}}, func(s string) string { return s })
-	if err != nil {
-		t.Fatal(err)
-	}
 	plane, err := guest.New(guest.Config{
 		Dir:      filepath.Join(work, "g"),
 		Machines: oneLineage{},
-		Effects:  canaryEffects{dir: dir, denied: denied},
-		Route:    func(string) (string, bool) { return "mail", true },
+		Kernel:   canaryKernel{dir: dir},
+		Keys:     anyKey,
 		Tools:    tools,
+		Logf:     log.Printf, // as openGuestPlane sets it
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -237,15 +200,15 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	for _, tl := range list.Result.Tools {
 		served[tl.Name] = true
 	}
-	// Every family agentosd registers for the agent is listed: the effect,
-	// question and worker tools. managed_tree is not served
+	// Every family agentosd registers for the agent is listed: plan, the
+	// question and the worker tools. managed_tree is not served
 	// (MIG-4-untrusted-learn), nor the recall tools (#2781).
 	for _, n := range []string{"managed_tree", "recall_search", "recall_note", "owner_preferences"} {
 		if served[n] {
 			t.Fatalf("%s listed: %v", n, served)
 		}
 	}
-	for _, n := range []string{"effect_request", "effect_status", question.ToolAsk, question.ToolStatus, "worker_create", "worker_exec", "worker_destroy"} {
+	for _, n := range []string{guest.PlanTool, question.ToolAsk, question.ToolStatus, "worker_create", "worker_exec", "worker_destroy"} {
 		if !served[n] {
 			t.Fatalf("%s not listed: %v", n, served)
 		}
@@ -279,21 +242,13 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	if body := rpc("tools/call", map[string]any{"name": question.ToolAsk, "arguments": map[string]any{"request_id": "q2", "question": long, "default": "wait", "wait_minutes": wait}}); !strings.Contains(body, fmt.Sprintf("longer than %d characters", question.MaxText)) {
 		t.Errorf("over-long question: %s", body)
 	}
-	check("effect_request", map[string]any{"request_id": "r1", "account": "owner-mail", "action": "send", "params": map[string]any{"to": "a@example.com"}})
-	check("effect_status", map[string]any{"request_id": "r1"})
-	// A policy's refusal naming a host path is a denial the guest sees
-	// with a ref (SR2-3j).
-	for _, call := range []struct {
-		name string
-		args map[string]any
-	}{
-		{"effect_request", map[string]any{"request_id": "denied", "account": "owner-mail", "action": "send", "params": map[string]any{"to": "a@example.com"}}},
-		{"effect_status", map[string]any{"request_id": "denied"}},
-	} {
-		if body := check(call.name, call.args); !strings.Contains(body, `\"state\":\"denied\"`) || !refRE.MatchString(body) {
-			t.Errorf("%s: the policy's refusal is not a denial with a ref: %s", call.name, body)
-		}
+	// A kernel seam that fails with a host path in its error is fixed text
+	// to the guest, the path only in the broker's log.
+	plan := map[string]any{"request_id": "r1", "steps": []map[string]any{{"verb": "send", "clerk": "mail", "args": map[string]string{"to": "a@example.com", "msg": "hi"}}}}
+	if body := check(guest.PlanTool, plan); !strings.Contains(body, `\"state\":\"unknown\"`) {
+		t.Errorf("plan: a failing seam is not an unknown state: %s", body)
 	}
+	check(guest.PlanTool, map[string]any{"request_id": "r1"})
 	check("worker_create", map[string]any{"name": "w1"})
 	check("worker_exec", map[string]any{"worker": "w1", "argv": []string{"true"}})
 

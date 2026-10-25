@@ -9,12 +9,13 @@ import (
 )
 
 // Effects asks the broker for one effect and reports its state. In the
-// guest it is the broker's effect_request tool (MCPEffects).
+// guest it is the broker's plan command, one plan per step (MCPEffects).
 type Effects interface {
 	Request(ctx context.Context, e Effect) (State, error)
 }
 
-// Effect is one effect request, as effect_request takes it.
+// Effect is one skill step: Action is the plan step's verb and Account its
+// clerk (MCPEffects).
 type Effect struct {
 	RequestID  string         `json:"request_id"`
 	Account    string         `json:"account"`
@@ -23,15 +24,16 @@ type Effect struct {
 	Recipients []string       `json:"recipients,omitempty"`
 }
 
-// State is what the broker says about a request (effect_request's answer).
+// State is what the broker says about a step's plan (plan's answer).
 type State struct {
 	RequestID string `json:"request_id"`
 	State     string `json:"state"`
 	Reason    string `json:"reason,omitempty"`
 }
 
-// Succeeded is the one state that lets a skill go on.
-const Succeeded = "succeeded"
+// Succeeded is the one state that lets a skill go on: the kernel's status
+// of a plan whose every step is done (kernel.SDone).
+const Succeeded = "done"
 
 // Request IDs live in skill/format, so the broker's measurement can parse
 // them without linking this bridge (ARC-2).
@@ -107,8 +109,8 @@ func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMe
 		if st.State != Succeeded {
 			res.Stopped = &Stopped{Step: i + 1, RequestID: e.RequestID, State: st.State, Why: why(st)}
 			res.Remaining = effects[i+1:]
-			if st.State == "refused" {
-				res.Remaining = effects[i:] // never journaled
+			if st.State == "refused" || st.State == "rejected" {
+				res.Remaining = effects[i:] // nothing ran
 			}
 			return res
 		}
@@ -118,7 +120,7 @@ func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMe
 	return res
 }
 
-// brokerRefused is what the model is told when effect_request fails. The
+// brokerRefused is what the model is told when plan fails. The
 // error can name a host path, so a path is dropped and the sentence stays.
 func brokerRefused(err error) string {
 	msg := err.Error()
@@ -130,10 +132,10 @@ func brokerRefused(err error) string {
 
 func why(st State) string {
 	switch st.State {
-	case "pending", "authorized", "in_flight":
-		return "this step is not finished (it may be waiting for the owner); check it with effect_status before going on"
-	case "denied":
-		return "this step was denied"
+	case "pending", "active", "unknown":
+		return "this step is not finished (it may be waiting for its hold or the owner); repeat plan with its request_id before going on"
+	case "rejected":
+		return "the kernel rejected this step"
 	case "refused":
 		return "the broker refused this step"
 	}

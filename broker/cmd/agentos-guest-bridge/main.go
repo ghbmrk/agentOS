@@ -10,7 +10,7 @@
 //     calls (/model/...) and broker tools (/mcp) go this way (ARC-6 (a), (b)).
 //   - Serve the tree's compiled skills and procedures as MCP tools on
 //     /skills/mcp (CAP-5, package skill). A skill runs here, in the guest,
-//     and sends each step to the broker as an ordinary effect_request, so
+//     and sends each step to the broker as an ordinary one-step plan, so
 //     it carries no authority the guest lacks.
 //   - Keep the tree directory a copy of the box's adopted procedures,
 //     skills and context, fetched with the broker tool managed_tree, which
@@ -118,7 +118,7 @@ func startRuntime(args []string, token string) (*childproc.Cmd, error) {
 }
 
 // routes forwards the guest's requests to the broker and serves the
-// tree's skills, whose steps go back to the broker's own effect_request.
+// tree's skills, whose steps go back to the broker's own plan command.
 func routes(broker *http.Client, tree string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {

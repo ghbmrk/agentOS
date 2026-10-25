@@ -200,13 +200,15 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 		Path:       filepath.Join(work, "meter.json"),
 		MachineCap: meter.Limits{Calls: 40, Tokens: 1 << 24},
 		OverallCap: meter.Limits{Calls: 1000, Tokens: 1 << 30},
-		Notify:     func(e meter.Exhausted) { eng.RecordEgress(guest.SpendNote(e)) },
+		Notify: func(e meter.Exhausted) {
+			eng.RecordEgress(journal.EgressNote{Machine: e.Machine, Status: 429, Reason: "model spend limit reached (" + e.Scope + ")"})
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	plane, err := guest.New(guest.Config{
-		Dir: filepath.Join(work, "guests"), Machines: ms, Effects: eng,
+		Dir: filepath.Join(work, "guests"), Machines: ms,
 		Model: proxy.Handler, Meter: mtr,
 	})
 	if err != nil {
@@ -243,8 +245,8 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 		{"m2", "POST", "/model/anthropic/v1/messages", `{}`, nil},
 		{"m3", "POST", "/model/openai/v1/chat/completions", chat, nil},
 		{"m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, nil},
-		{"m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"effect_request","arguments":{"request_id":"r1","account":"provider-key","action":"secret.reveal"}}}`, nil},
-		{"m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"effect_status","arguments":{"request_id":"r1"}}}`, nil},
+		{"m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plan","arguments":{"request_id":"r1","steps":[{"verb":"read","clerk":"provider-key","args":{"query":"secret"}}]}}}`, nil},
+		{"m1", "POST", "/mcp", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plan","arguments":{"request_id":"r1"}}}`, nil},
 		{"m1", "GET", "/owner/next", "", nil},
 		// m1 now holds owner data: provider-side fetches are refused (REV-5, E10).
 		{"m1", "POST", "/model/openai/v1/chat/completions", `{"model":"g","messages":[],"tools":[{"type":"web_search"}]}`, nil},

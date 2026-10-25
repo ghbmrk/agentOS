@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +20,8 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/guest"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
@@ -31,8 +34,9 @@ import (
 // machine's broker socket as its only way out. One owner message goes in
 // through the guest plane's inbox (ARC-6 (c)); a scripted model behind the
 // metered model route (ARC-6 (a), OP-8) has OpenClaw call the broker's
-// effect_request tool over MCP (ARC-6 (b)); the journal runs the effect
-// once; the machine is snapshotted after the call (REV-1); the answer comes
+// plan command over MCP (PLN-5 (b)); the plane signs the plan under the
+// machine's key and the kernel's seam takes it once; the machine is
+// snapshotted after the call (REV-1); the answer comes
 // back to the owner. The owner's message raises the machine to private
 // (REV-5).
 //
@@ -55,28 +59,33 @@ func (r *managerRef) Lineage(id string) (string, error) {
 	return mc.Lineage, err
 }
 
-type allowAll struct{}
-
-func (allowAll) Check(context.Context, journal.Phase, journal.Intent) error { return nil }
-
-type mailer struct {
-	mu   sync.Mutex
-	runs []journal.Intent
+// planKernel is the kernel's seam as the plane reaches it: it records every
+// plan it takes and reads each as done.
+type planKernel struct {
+	mu    sync.Mutex
+	plans []kernel.Plan
 }
 
-func (m *mailer) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.runs = append(m.runs, in)
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "queued"}
+func (k *planKernel) Submit(_ context.Context, p kernel.Plan) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.plans = append(k.plans, p)
+	return nil
 }
 
-func (m *mailer) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultUnknown}
+func (k *planKernel) Plan(_ context.Context, id string) (string, []string, bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, p := range k.plans {
+		if p.ID == id {
+			return kernel.SDone, []string{kernel.PDone}, true, nil
+		}
+	}
+	return "", nil, false, nil
 }
 
 // scriptedModel is an OpenAI-compatible model that, asked "SCENARIO:send",
-// calls the broker's effect_request tool (directly, or through OpenClaw's
+// calls the broker's plan command (directly, or through OpenClaw's
 // tool_search and tool_call when the tool is deferred), then reports the
 // tool's answer. It is the S4 stub's script, in Go.
 type scriptedModel struct {
@@ -86,10 +95,14 @@ type scriptedModel struct {
 	tools [][]string
 }
 
-var effectArgs = map[string]any{
-	"request_id": "oc-1", "account": "owner-mail", "action": "message.send",
-	"params": map[string]any{"to": "owner", "text": "P1-7 hello"},
+var planArgs = map[string]any{
+	"request_id": "oc-1", "steps": []map[string]any{
+		{"verb": "send", "clerk": "owner-mail", "args": map[string]string{"to": "owner", "msg": "P1-7 hello"}}},
 }
+
+// planTool matches the broker's plan command as OpenClaw names an MCP
+// tool: the bare name, or the server's prefix and a separator before it.
+var planTool = regexp.MustCompile(`(^|[_.-])plan$`)
 
 type chatMsg struct {
 	Role      string          `json:"role"`
@@ -144,9 +157,9 @@ func (m *scriptedModel) reply(msgs []chatMsg, names []string) map[string]any {
 	}
 	if last.Role == "tool" {
 		if prev == "tool_search" {
-			ids := regexp.MustCompile(`"id"\s*:\s*"([^"]*effect_request[^"]*)"`).FindStringSubmatch(text(last.Content))
+			ids := regexp.MustCompile(`"id"\s*:\s*"((?:[^"]*[_.-])?plan)"`).FindStringSubmatch(text(last.Content))
 			if ids != nil {
-				return call("tool_call", map[string]any{"id": ids[1], "args": effectArgs})
+				return call("tool_call", map[string]any{"id": ids[1], "args": planArgs})
 			}
 		}
 		return say("done. broker said: " + text(last.Content))
@@ -155,13 +168,13 @@ func (m *scriptedModel) reply(msgs []chatMsg, names []string) map[string]any {
 		return say("no scenario")
 	}
 	for _, n := range names {
-		if strings.Contains(n, "effect_request") {
-			return call(n, effectArgs)
+		if planTool.MatchString(n) {
+			return call(n, planArgs)
 		}
 	}
 	for _, n := range names {
 		if n == "tool_search" {
-			return call("tool_search", map[string]any{"query": "effect_request"})
+			return call("tool_search", map[string]any{"query": "plan"})
 		}
 	}
 	return say("no broker tool offered: " + strings.Join(names, ","))
@@ -257,12 +270,11 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	ex := &mailer{}
-	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"mail": ex}, func(s string) string { return s })
+	kern := &planKernel{}
+	_, holder, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkJournal(t, eng)
 	mtr, err := meter.Open(meter.Config{
 		Path: filepath.Join(dir, "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap,
 	})
@@ -275,8 +287,8 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	plane, err := guest.New(guest.Config{
 		Dir:      filepath.Join(dir, "guests"),
 		Machines: ref,
-		Effects:  eng,
-		Route:    func(account string) (string, bool) { return "mail", account == "owner-mail" },
+		Kernel:   kern,
+		Keys:     func(string) (key.Key, ed25519.PrivateKey, bool) { return key.Key{}, holder, true },
 		Label: func(id string) string {
 			if l, err := ref.m.Load().Label(id); err == nil && l == vm.Public {
 				return "public"
@@ -347,17 +359,19 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	answered := time.Since(start)
 	t.Logf("machine started in %v; owner answer after %v: %q", created, answered, answer)
 
-	if !strings.Contains(answer, "done.") || !strings.Contains(answer, "succeeded") {
-		t.Fatalf("answer %q: want the broker's result for the effect", answer)
+	if !strings.Contains(answer, "done.") || !strings.Contains(answer, "phases") {
+		t.Fatalf("answer %q: want the broker's result for the plan", answer)
 	}
-	ex.mu.Lock()
-	runs := ex.runs
-	ex.mu.Unlock()
+	kern.mu.Lock()
+	plans := kern.plans
+	kern.mu.Unlock()
 	// Owner chat raised the machine to private before the guest read it
-	// (REV-5), so its requests live in the lineage's private namespace.
+	// (REV-5), so its plans live in the lineage's private namespace and
+	// carry the private label (PLN-3).
 	mc, _ := m.Get("agent")
-	if len(runs) != 1 || runs[0].ID != mc.Lineage+"/private/oc-1" || runs[0].Origin != "guest:"+mc.Lineage || runs[0].Action != "message.send" {
-		t.Fatalf("effects run: %+v, want %s/private/oc-1 once", runs, mc.Lineage)
+	if len(plans) != 1 || plans[0].ID != mc.Lineage+"/private/oc-1" || len(plans[0].Steps) != 1 ||
+		plans[0].Steps[0].Verb != key.Send || !slices.Contains(plans[0].Steps[0].Labels, "private") || len(plans[0].Sig) == 0 {
+		t.Fatalf("plans taken: %+v, want %s/private/oc-1 once, signed", plans, mc.Lineage)
 	}
 	if after := len(m.Snapshots("agent")); after <= before {
 		t.Fatalf("snapshots %d -> %d: want a Step after the tool call (REV-1)", before, after)
@@ -372,8 +386,5 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	}
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
-	}
-	if st, err := eng.Get(mc.Lineage + "/private/oc-1"); err != nil || st.State != journal.Succeeded {
-		t.Fatalf("journal: %+v %v", st, err)
 	}
 }

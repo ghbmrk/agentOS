@@ -124,12 +124,12 @@ func TestATreePollLeavesTheStepNoteForTheAgent(t *testing.T) {
 		c.StepInterval = time.Hour
 		c.Tools = &treeText{`{"version":"v1"}`}
 	})
-	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
+	r.tool("m1", "plan", send("r1")) // snapshots at once, and succeeds
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
-	r.tool("m1", "effect_request", send("r2"))
+	r.tool("m1", "plan", send("r2"))
 	r.intervalPasses("m1") // the trailing snapshot runs, and fails
 	r.treeCall("m1")       // one content item: no note
-	if got := r.notes("m1", "effect_status", map[string]any{"request_id": "r2"}); len(got) != 1 || got[0] != stepNoteNoRoom {
+	if got := r.notes("m1", "plan", map[string]any{"request_id": "r2"}); len(got) != 1 || got[0] != stepNoteNoRoom {
 		t.Fatalf("the agent's next result's notes = %q", got)
 	}
 }

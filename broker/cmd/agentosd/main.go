@@ -34,6 +34,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 	"github.com/ghbmrk/agentos/broker/owner/notice"
 	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -692,7 +693,7 @@ func main() {
 			if wt != nil {
 				startReaper(ctx, wt, m, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, seat, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 				caps.agentOff(agentNoMachines)
@@ -1057,8 +1058,10 @@ func sweepInboxTemps(inboxPath string) {
 }
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
-// machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
+// machine manager. Without them no agent machine can start. A guest's plan
+// goes to the kernel on its owner socket (PLN-5 (b)); with no kernel to call
+// (seat nil) every plan is refused.
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, seat *kernelsock.Owner, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -1068,7 +1071,7 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Notify: func(e meter.Exhausted) {
 			// The journal holds it; the owner sees it in STATUS once
 			// that renders egress records.
-			if err := eng.RecordEgress(guest.SpendNote(e)); err != nil {
+			if err := eng.RecordEgress(spendNote(e)); err != nil {
 				log.Printf("journal spend limit for %s: %v", e.Machine, err)
 			}
 		},
@@ -1092,12 +1095,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Dir:       filepath.Join(socketDir, "guests"),
 		InboxPath: inboxPath,
 		Machines:  machines{m},
-		// The grants gate decides every effect (OP-5, REV-2) and routes
-		// only accounts a grant connects.
-		Effects: d.Gate(),
-		Route:   d.Gate().Route,
-		Label:   label,
-		Meter:   mtr,
+		// No machine holds a key yet: issuing planner keys is the owner's
+		// passkey grant (KEY-3, KEY-4), which agentosd does not make yet
+		// (ASSUMPTIONS MIG-4-guest-plan-a), so every plan is refused with
+		// the plane's fixed reason.
+		Label: label,
 		// A guest's reply waits in the plane's outbox, on disk, until the
 		// evidence worker has routed it (DEL-1b); a private machine's
 		// goes to the owner's evidence destination when one is set
@@ -1108,7 +1110,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Tools: tools,
 		Logf:  log.Printf,
 	}
+	if seat != nil {
+		gcfg.Kernel = seat
+	}
 	if egressSocket != "" {
+		gcfg.Meter, gcfg.WithGoal = mtr, meter.WithGoal
 		gcfg.Model = modelroute.Forward(modelroute.Config{
 			Socket:  egressSocket,
 			Label:   m.DataLabel,
@@ -1118,6 +1124,16 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		})
 	}
 	return guest.New(gcfg)
+}
+
+// spendNote is the journal record for a meter exhaustion (OP-8): the first
+// refused call of each exhaustion, the one the owner is told about.
+func spendNote(e meter.Exhausted) journal.EgressNote {
+	reason := "model spend limit reached (" + e.Scope
+	if e.Task != "" {
+		reason += " " + e.Task
+	}
+	return journal.EgressNote{Machine: e.Machine, Status: 429, Reason: reason + ")"}
 }
 
 // ownerVerifier gives the owner channel the vault process's verify

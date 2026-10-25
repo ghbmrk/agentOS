@@ -142,7 +142,10 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"fold", "guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	// It signs each machine's plans and hands them to the kernel's seam
+	// (PLN-5 (b)): the kernel's plan and key types, pure data and the key
+	// check, never the kernel's process (kernel/proc).
+	"guest": {[]string{"fold", "guesterr", "kernel", "kernel/key"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// fold keeps an oversized tool result for the machine that produced it
 	// and hands back a stand-in. It stores bytes in memory. No network,

@@ -119,7 +119,7 @@ func FuzzMCP(f *testing.F) {
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":null,"method":"ping"}`,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"effect_status","arguments":{"request_id":"r1"}}}`,
-		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"effect_request","arguments":{"request_id":"r2","account":"other","action":"message.send"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plan","arguments":{"request_id":"r2","account":"other","action":"message.send"}}}`,
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":"x"}`,
 		`{"jsonrpc":"2.0","id":6,"method":"resources/list"}`,
 		`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`, `{"jsonrpc":"1.0","id":1,"method":"ping"}`,

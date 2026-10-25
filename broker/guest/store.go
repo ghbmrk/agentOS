@@ -5,10 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // store keeps unanswered owner messages on the broker's disk, so a broker
@@ -285,9 +284,50 @@ func (s *store) save() error {
 	if err != nil {
 		return err
 	}
-	if err := durable.WriteFile(s.path, b, 0o600); err != nil {
+	if err := writeFile(s.path, b); err != nil {
 		return err
 	}
 	s.unsaved = false
 	return nil
 }
+
+// writeFile replaces path with b (0600) so that a power cut leaves the old
+// file or the new one whole: a temporary file beside it, synced, renamed over
+// it, then the directory synced. A failed directory sync is still an error,
+// so the caller keeps its write debt (CAP-3, #2361) though the rename landed.
+// The temporary file's prefix is the one agentosd sweeps at start.
+func writeFile(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, tempPrefix+"*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(0o600)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(name, path) // durable:exempt durable is outside the guest plane's ARC-2 import list; this is durable.WriteFile's sequence, and the directory sync follows
+	}
+	if err != nil {
+		os.Remove(name)
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// tempPrefix is durable.TempPrefix, which agentosd's start-up sweep removes
+// (sweepInboxTemps).
+const tempPrefix = ".durable-"

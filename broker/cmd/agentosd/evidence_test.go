@@ -324,7 +324,7 @@ func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.ev.wake = make(chan struct{}, 1)
-	plane, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: oneLineage{}, Effects: canaryEffects{}, Replies: r.ev.poke})
+	plane, err := guest.New(guest.Config{Dir: t.TempDir(), Machines: oneLineage{}, Replies: r.ev.poke})
 	if err != nil {
 		t.Fatal(err)
 	}

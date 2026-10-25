@@ -118,7 +118,7 @@ func TestOP8RoutedCallsSettleFromProviderUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	plane, err := guest.New(guest.Config{
-		Dir: filepath.Join(work, "guests"), Machines: ms, Effects: eng,
+		Dir: filepath.Join(work, "guests"), Machines: ms,
 		Model: route.Routed(router), Meter: mtr,
 	})
 	if err != nil {

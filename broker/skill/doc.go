@@ -9,7 +9,7 @@
 //
 // The runner is guest code. It runs inside the agent machine, in
 // agentos-guest-bridge, which serves each skill as an MCP tool and sends
-// each step to the broker as an ordinary effect_request. A skill therefore
+// each step to the broker as an ordinary one-step plan. A skill therefore
 // carries no authority of its own: every step is journaled, checked
 // against grants, and approved exactly as if the guest had asked for it
 // (ARC-7). The model is consulted once, to fill the inputs, and again only

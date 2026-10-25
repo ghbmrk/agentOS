@@ -229,8 +229,8 @@ func writeRPC(w http.ResponseWriter, id json.RawMessage, result any, code int, m
 	json.NewEncoder(w).Encode(out)
 }
 
-// MCPEffects calls the broker's effect_request tool over MCP. URL is the
-// broker's /mcp endpoint as the guest reaches it.
+// MCPEffects calls the broker's plan command over MCP, one plan per step
+// (PLN-5 (b)). URL is the broker's /mcp endpoint as the guest reaches it.
 type MCPEffects struct {
 	Client *http.Client // required: nil refuses the request
 	URL    string
@@ -238,10 +238,10 @@ type MCPEffects struct {
 }
 
 func (m *MCPEffects) Request(ctx context.Context, e Effect) (State, error) {
-	args, _ := json.Marshal(e)
+	args, _ := json.Marshal(planOf(e))
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": m.seq.Add(1), "method": "tools/call",
-		"params": map[string]any{"name": "effect_request", "arguments": json.RawMessage(args)},
+		"params": map[string]any{"name": "plan", "arguments": json.RawMessage(args)},
 	})
 	ctx, cancel := context.WithTimeout(ctx, StepTimeout)
 	defer cancel()
@@ -287,4 +287,25 @@ func (m *MCPEffects) Request(ctx context.Context, e Effect) (State, error) {
 		return State{}, fmt.Errorf("broker answer: %v", err)
 	}
 	return st, nil
+}
+
+// planOf is step e as the plan command takes it: a one-step plan whose verb
+// is e's action and whose clerk is e's account. Its arguments are strings: a
+// string param as it is, any other its JSON text, and the recipients, comma
+// separated, as "to".
+func planOf(e Effect) map[string]any {
+	args := map[string]string{}
+	for k, v := range e.Params {
+		if s, ok := v.(string); ok {
+			args[k] = s
+		} else {
+			b, _ := json.Marshal(v)
+			args[k] = string(b)
+		}
+	}
+	if len(e.Recipients) > 0 {
+		args["to"] = strings.Join(e.Recipients, ",")
+	}
+	return map[string]any{"request_id": e.RequestID, "steps": []map[string]any{
+		{"verb": e.Action, "clerk": e.Account, "args": args}}}
 }

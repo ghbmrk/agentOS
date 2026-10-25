@@ -7,8 +7,9 @@
 // listener a request arrived on, never from anything the guest sends. The
 // socket serves exactly the ARC-6 services:
 //
-//	/model/<adapter>/...  (a) model access: the OP-8 meter, then model egress
-//	/mcp                  (b) broker tools over MCP (streamable HTTP, JSON)
+//	/model/<adapter>/...  (a) model access: the wiring's metered model route
+//	/mcp                  (b) the plan command and broker tools over MCP
+//	                          (streamable HTTP, JSON; PLN-5)
 //	/owner/next, /owner/reply
 //	                      (c) owner messages into the guest's inbound API,
 //	                          fetched by the guest's bridge, replies back
@@ -39,8 +40,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/fold"
-	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // Socket is the socket's file name inside a machine's services directory.
@@ -56,34 +55,32 @@ type Machines interface {
 	Lineage(id string) (string, error)
 }
 
-// Effects is the part of the journal engine broker tools use.
-type Effects interface {
-	Submit(journal.Intent) (journal.Status, error)
-	Authorize(ctx context.Context, id string) (journal.Status, error)
-	Dispatch(ctx context.Context, id string) (journal.Status, error)
-	Get(id string) (journal.Status, error)
-}
-
 // Config configures New.
 type Config struct {
 	// Dir holds one directory per machine; created 0700, broker-held, and
 	// never mounted whole into any guest.
 	Dir      string
 	Machines Machines
-	Effects  Effects
-	// Route picks the executor for an effect on account; false means no
-	// adapter is connected for it and the request is refused.
-	Route func(account string) (executor string, ok bool)
-	// Label reports a machine's data label (REV-5), recorded on each
-	// intent it submits. Nil, or an empty answer, records "private": an
-	// unknown label is never reported as public.
+	// Kernel takes the machines' plans (PLN-5 (b)). Nil refuses every
+	// plan: the kernel is not reached yet.
+	Kernel Kernel
+	// Keys holds each machine's key and signs its plans. Nil, or no key
+	// for a machine, refuses that machine's plans.
+	Keys Keys
+	// Label reports a machine's data label (REV-5), carried on each step
+	// of every plan it submits. Nil, or an empty answer, gives "private":
+	// an unknown label is never reported as public.
 	Label func(machine string) string
 	// Model returns machine's model egress (the egress proxy's handler).
 	// Nil answers 503: no model access.
 	Model func(machine string) http.Handler
 	// Meter meters every model call (OP-8). Required when Model is set:
 	// model egress is never served unmetered.
-	Meter *meter.Meter
+	Meter Meter
+	// WithGoal names, in a model call's context, the goal its lineage
+	// serves when it arrives (G14), for the meter to charge it to
+	// (agentosd's is meter.WithGoal). Nil names none.
+	WithGoal func(ctx context.Context, goal string) context.Context
 	// OwnerReply receives a guest's reply to an owner message. It is
 	// guest-written text: the owner channel filters it before it goes out
 	// (CH-19). Nil drops replies. It is told each reply once, after the
@@ -111,8 +108,8 @@ type Config struct {
 	// StepInterval is the least time between two per-step snapshots of one
 	// machine; requests inside it share one trailing snapshot. Default 2 s.
 	StepInterval time.Duration
-	// SubmitBurst and SubmitEvery rate-limit one machine's effect
-	// requests (a token bucket); excess is refused and not journaled.
+	// SubmitBurst and SubmitEvery rate-limit one machine's plans (a token
+	// bucket); excess is refused and never reaches the kernel.
 	// Defaults 20 and 3 s.
 	SubmitBurst int
 	SubmitEvery time.Duration
@@ -123,12 +120,12 @@ type Config struct {
 	// it for this long (G14); default DefaultGoalQuiet. Now is the clock.
 	GoalQuiet time.Duration
 	Now       func() time.Time
-	// Tools are further broker tools beside effect_request and
-	// effect_status (the recall tools, CAP-3). Nil offers none.
+	// Tools are further broker tools beside plan (the owner-question
+	// tools, the managed tree). Nil offers none.
 	Tools Tools
 }
 
-// Tools serves broker tools beyond effects. Identity is the machine the
+// Tools serves broker tools beyond plan. Identity is the machine the
 // socket belongs to and its fork lineage, never anything the guest sends.
 // Call reports handled=false for a name it does not serve. Its text and
 // error strings go to the guest as they are.
@@ -170,14 +167,11 @@ var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
 // New checks cfg and creates Dir.
 func New(cfg Config) (*Plane, error) {
-	if cfg.Dir == "" || cfg.Machines == nil || cfg.Effects == nil {
-		return nil, errors.New("guest: Dir, Machines, and Effects are required")
+	if cfg.Dir == "" || cfg.Machines == nil {
+		return nil, errors.New("guest: Dir and Machines are required")
 	}
 	if cfg.Model != nil && cfg.Meter == nil {
 		return nil, errors.New("guest: model egress needs the OP-8 meter")
-	}
-	if cfg.Route == nil {
-		cfg.Route = func(string) (string, bool) { return "", false }
 	}
 	if cfg.MaxConns <= 0 {
 		cfg.MaxConns = 8
@@ -445,9 +439,19 @@ func (p *Plane) model(m *machine) http.Handler {
 	metered := p.cfg.Meter.Wrap(m.id, p.cfg.Model(m.id))
 	// Each call also counts against the goal the lineage serves when it
 	// arrives (G14); the meter limits by machine, task, and box only.
+	if p.cfg.WithGoal == nil {
+		return metered
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		metered.ServeHTTP(w, r.WithContext(meter.WithGoal(r.Context(), p.goal(p.lineageOf(m)))))
+		metered.ServeHTTP(w, r.WithContext(p.cfg.WithGoal(r.Context(), p.goal(p.lineageOf(m)))))
 	})
+}
+
+// Meter is the part of the OP-8 meter the plane uses (*meter.Meter): it
+// meters each machine's model calls. The model clerk takes it over when
+// spend is admitted on the kernel (CLK-7, #2572).
+type Meter interface {
+	Wrap(machine string, h http.Handler) http.Handler
 }
 
 // stepper coalesces one machine's per-step snapshots (REV-1, vm V3).
@@ -558,12 +562,12 @@ func (m *machine) takeNote() string {
 	return n
 }
 
-// step snapshots machine m after an effect request reached the journal.
+// step snapshots machine m after a plan went to the kernel.
 // At most one snapshot runs per StepInterval: a request inside the
 // interval, or while one runs, is covered by one trailing snapshot, so a
 // looping guest cannot flood the snapshot store (RES-4). A failed
 // snapshot is a broker fault: it is reported, and the tool result still
-// goes back, since the effect it describes is already journaled.
+// goes back, since the plan it describes is already with the kernel.
 func (p *Plane) step(m *machine) {
 	s := &m.steps
 	s.mu.Lock()

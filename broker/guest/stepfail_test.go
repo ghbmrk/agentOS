@@ -70,18 +70,18 @@ func TestSR23sFailedStepTellsTheAgent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
 			r.ms.failSteps(tc.err)
-			got := r.notes("m1", "effect_request", send("r1"))
+			got := r.notes("m1", "plan", send("r1"))
 			if len(got) != 1 || got[0] != tc.want {
 				t.Fatalf("notes = %q, want %q", got, tc.want)
 			}
 			if strings.Contains(strings.Join(got, ""), "/") {
 				t.Fatalf("a note names a path: %q", got)
 			}
-			if again := r.notes("m1", "effect_status", map[string]any{"request_id": "r1"}); len(again) != 0 {
+			if again := r.notes("m1", "plan", map[string]any{"request_id": "r1"}); len(again) != 0 {
 				t.Fatalf("the note came twice: %q", again)
 			}
 			// Only the machine whose step failed is told (security S2).
-			if other := r.notes("m2", "effect_status", map[string]any{"request_id": "r1"}); len(other) != 0 {
+			if other := r.notes("m2", "plan", map[string]any{"request_id": "r1"}); len(other) != 0 {
 				t.Fatalf("another machine was told: %q", other)
 			}
 		})
@@ -92,13 +92,13 @@ func TestSR23sFailedStepTellsTheAgent(t *testing.T) {
 // whatever the tool.
 func TestSR23sTrailingStepFailureComesWithTheNextResult(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
-	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
+	r.tool("m1", "plan", send("r1")) // snapshots at once, and succeeds
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
-	if got := r.notes("m1", "effect_request", send("r2")); len(got) != 0 {
+	if got := r.notes("m1", "plan", send("r2")); len(got) != 0 {
 		t.Fatalf("a step inside the interval reported early: %q", got)
 	}
 	r.intervalPasses("m1") // the trailing snapshot runs, and fails
-	if got := r.notes("m1", "effect_status", map[string]any{"request_id": "r2"}); len(got) != 1 || got[0] != stepNoteNoRoom {
+	if got := r.notes("m1", "plan", map[string]any{"request_id": "r2"}); len(got) != 1 || got[0] != stepNoteNoRoom {
 		t.Fatalf("next result's notes = %q", got)
 	}
 }
@@ -116,26 +116,26 @@ func TestSR23sStatusWhileStepsKeepFailing(t *testing.T) {
 		{errors.New("pause failed"), "Rollback: my files since %s can't be rolled back yet; I couldn't save them. I'll try again after my next action. UNDO still works. Nothing to do unless this lasts."},
 	} {
 		r := newRig(t, func(c *Config) { c.StepInterval = time.Millisecond })
-		r.tool("m1", "effect_request", send("r0")) // a rollback point is saved
+		r.tool("m1", "plan", send("r0")) // a rollback point is saved
 		st := &r.p.get("m1").steps
 		st.mu.Lock()
 		saved := st.last
 		st.mu.Unlock()
 		r.ms.failSteps(fmt.Errorf("vm: %w", tc.err))
 		r.stepsSettle("m1")
-		r.tool("m1", "effect_request", send("r1"))
+		r.tool("m1", "plan", send("r1"))
 		if n := r.p.StepNote(); n != "" {
 			t.Fatalf("one failure gave the line %q", n)
 		}
 		r.stepsSettle("m1")
-		r.tool("m1", "effect_request", send("r2"))
+		r.tool("m1", "plan", send("r2"))
 		want := fmt.Sprintf(tc.line, saved.Local().Format("15:04"))
 		if n, shown := r.p.StepLine(); n != want || shown.IsZero() {
 			t.Fatalf("line = %q (shown %v), want %q", n, shown, want)
 		}
 		r.ms.failSteps(nil)
 		r.stepsSettle("m1")
-		r.tool("m1", "effect_request", send("r3"))
+		r.tool("m1", "plan", send("r3"))
 		if n, shown := r.p.StepLine(); n != "" || !shown.IsZero() {
 			t.Fatalf("line after a success = %q (shown %v)", n, shown)
 		}
@@ -147,12 +147,12 @@ func TestSR23sStatusWhileStepsKeepFailing(t *testing.T) {
 // saved (L3 MUST on #179).
 func TestSR23sSavedStepDropsTheUntoldNote(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
-	r.tool("m1", "effect_request", send("r1")) // snapshots at once, and succeeds
+	r.tool("m1", "plan", send("r1")) // snapshots at once, and succeeds
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
-	r.tool("m1", "effect_request", send("r2")) // inside the interval: trails
-	r.intervalPasses("m1")                     // the trailing snapshot fails, untold
+	r.tool("m1", "plan", send("r2")) // inside the interval: trails
+	r.intervalPasses("m1")           // the trailing snapshot fails, untold
 	r.ms.failSteps(nil)
-	if got := r.notes("m1", "effect_request", send("r3")); len(got) != 0 {
+	if got := r.notes("m1", "plan", send("r3")); len(got) != 0 {
 		t.Fatalf("a saved step still carried %q", got)
 	}
 }
@@ -162,14 +162,14 @@ func TestSR23sSavedStepDropsTheUntoldNote(t *testing.T) {
 func TestSR23sSinceTheFirstFailureWhenNoneSaved(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.StepInterval = time.Millisecond })
 	r.ms.failSteps(fmt.Errorf("vm: %w", ErrStepNoRoom))
-	r.tool("m1", "effect_request", send("r1"))
+	r.tool("m1", "plan", send("r1"))
 	st := &r.p.get("m1").steps
 	st.mu.Lock()
 	first := st.last
 	st.mu.Unlock()
 	r.stepsSettle("m1")
 	time.Sleep(5 * time.Millisecond)
-	r.tool("m1", "effect_request", send("r2"))
+	r.tool("m1", "plan", send("r2"))
 	st.mu.Lock()
 	saved, fails := st.saved, st.fails
 	st.mu.Unlock()
