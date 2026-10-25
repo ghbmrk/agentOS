@@ -125,7 +125,10 @@ type Config struct {
 	Key    [32]byte          // AES-256-GCM key, sealed to the core's TPM in production
 	Pub    ed25519.PublicKey // verifies anchored heads
 	Sign   ed25519.PrivateKey
-	Rand   io.Reader // nonces: crypto/rand in production, seeded in the sim
+	// Rand is the kernel's one random source: log and content nonces, and
+	// subject IDs and data keys (erase.go). Production (proc) pins it to
+	// crypto/rand; tests, the sim and eval runs seed it.
+	Rand io.Reader
 }
 
 // Log is the one append-only, encrypted, hash-chained record (LOG-1, LOG-2).

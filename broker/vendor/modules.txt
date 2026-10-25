@@ -23,6 +23,10 @@ github.com/emersion/go-textwrapper
 ## explicit; go 1.23.0
 github.com/emiago/sipgo
 github.com/emiago/sipgo/sip
+# github.com/gen2brain/h265 v0.2.3 => ./third_party/h265
+## explicit; go 1.26.4
+github.com/gen2brain/h265/heic
+github.com/gen2brain/h265/hevc
 # github.com/gobwas/httphead v0.1.0
 ## explicit; go 1.15
 github.com/gobwas/httphead
@@ -233,3 +237,4 @@ rsc.io/qr
 rsc.io/qr/coding
 rsc.io/qr/gf256
 # github.com/emersion/go-imap => ./third_party/go-imap
+# github.com/gen2brain/h265 => ./third_party/h265

@@ -143,8 +143,8 @@ func TestGmailDeclarationRefusesDeleteAndSettingsWrites(t *testing.T) {
 			t.Errorf("%s is not a bearer call on the account's own root: %+v", c.Name, c)
 		}
 	}
-	if len(calls) != 18 {
-		t.Fatalf("%d calls, want the 16 TN-gmail-api names and the read-mail list (#2925)", len(calls))
+	if len(calls) != 21 {
+		t.Fatalf("%d calls, want the 16 TN-gmail-api names, the read-mail list (#2925) and the account plan's three (TN-account-plan)", len(calls))
 	}
 	// And the declaration builds: each shape passes the exit's checks.
 	box, _ := newGmail(t)
