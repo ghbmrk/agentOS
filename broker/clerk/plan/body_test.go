@@ -215,6 +215,8 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		},
 		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
 		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
+		"no mode":         func(d *plan.Declaration) { d.Mode = "" },
+		"an unknown mode": func(d *plan.Declaration) { d.Mode = "allowed" },
 	} {
 		d := f.decl(t)
 		edit(&d)
