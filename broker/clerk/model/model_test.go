@@ -666,3 +666,71 @@ func TestOwedReadingKeepsTheWindowFromTheCall(t *testing.T) {
 		t.Fatalf("the pool reopens one window after the call: %v", err)
 	}
 }
+
+// A call the clerk does not make through its Provider (a CLI guest's request
+// the plan login clerk forwards, MIG-4-plan-login-b) is admitted at its worst
+// case by Admit and metered once by Settle, by the same rules as Call: the
+// provider's figure, nothing if the request never left, the clerk's own count
+// of a call that ended, and else the worst case. A second Settle records
+// nothing (LOG-7).
+func TestAdmittedCallIsSettledOnce(t *testing.T) {
+	c, k, _ := rig(t, &fake{})
+	entries := func() int { return len(k.Log().Entries()) }
+	for name, tc := range map[string]struct {
+		u      model.Usage
+		out    int64
+		err    error
+		amount string
+		source string
+	}{
+		"reported":       {model.Usage{In: 3, Out: 4, Reported: true}, 50, errors.New("cut"), `"amount":7`, `"source":"provider"`},
+		"never left":     {model.Usage{}, 50, model.ErrNotSent, `"amount":0`, `"source":"clerk"`},
+		"ended":          {model.Usage{}, 6, nil, `"amount":8`, `"source":"clerk"`},
+		"cut off":        {model.Usage{}, 6, errors.New("cut"), `"amount":10`, `"source":"admitted"`},
+		"reported wrong": {model.Usage{In: -1, Out: 4, Reported: true}, 6, nil, `"amount":10`, `"source":"admitted"`},
+	} {
+		// Worst case 2+8 = 10; all five settle within the cap of 100 in
+		// any order.
+		adm, err := c.Admit(1, "t", "api", 2, 8)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := adm.Settle(2, tc.u, tc.out, tc.err); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		e := lastEntry(k)
+		if e.Type != kernel.TModelUsed || !strings.Contains(string(e.Body), tc.amount) || !strings.Contains(string(e.Body), tc.source) {
+			t.Errorf("%s: entry %s %s, want %s %s", name, e.Type, e.Body, tc.amount, tc.source)
+		}
+		n := entries()
+		if err := adm.Settle(3, model.Usage{In: 99, Out: 99, Reported: true}, 0, nil); err != nil || entries() != n {
+			t.Errorf("%s: a second Settle recorded %d entries (%v)", name, entries()-n, err)
+		}
+	}
+	// The admission is the cap's: a worst case that does not fit is refused
+	// (and holds "t").
+	if _, err := c.Admit(4, "t", "api", 10, 1000); err == nil {
+		t.Fatal("a worst case past the cap was admitted")
+	}
+	// A pool route's reading is applied at the settlement.
+	adm, err := c.Admit(5, "big", "plan", 10, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.Settle(6, model.Usage{Pool: &model.PoolReading{Used: 1000, ResetAt: 1 << 40}}, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(7, "big", "plan", 10, 20); err == nil {
+		t.Fatal("a full pool reading did not close the pool")
+	}
+}
+
+// Count is the clerk's own count: four bytes a token, rounded up, with no
+// overflow at the top of the range.
+func TestCountRoundsUp(t *testing.T) {
+	for n, want := range map[int64]int64{0: 0, 1: 1, 4: 1, 5: 2, 400: 100, math.MaxInt64: math.MaxInt64/4 + 1} {
+		if got := model.Count(n); got != want {
+			t.Errorf("Count(%d) = %d, want %d", n, got, want)
+		}
+	}
+}

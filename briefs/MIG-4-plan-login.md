@@ -32,4 +32,21 @@ Work item #3104, prerequisite for #2780(b). Tier A. Split into three slices on t
 - `TestPlanClerkHoldsOneSlot` (CLK-1): a store sealed for another plan, or under another key, is refused.
 - `TestPlanStopHeldWhenTheSlotCannotRecordIt`: a failed slot write still stops the route.
 
+**Slice (b), MIG-4-plan-login-b: the guest's model endpoint and metering** (#3104 comment 6397037553).
+1. **Body schema** (`broker/clerk/plan/body.go`). The responses body is part of the plan's declaration (`Declaration.Body`), so it sits beside the rest of the measured route rather than in `broker/clerk/model`. It is the old core's `checkResponses`: declared keys, input types and content types; tools only where the CLI declares them, all client-side; `store` forced off; hosted-tool keys refused at `New`; no remote content source.
+2. **Metering** (`broker/clerk/plan/meter.go`, `broker/clerk/model`). `Do` takes the model clerk's `Meter`, which admits a checked model call before it is sent and is settled once from the stream's reported usage and the answer's pool headers (`Declaration.Pool`). `model.Clerk` gains `Admit` and `Admission.Settle`; `Call` uses them.
+3. **Listener** (`broker/clerk/run/plan.go`). `ListenPlan` and `ServePlan` serve one guest's provider API over HTTP on a socket that admits only its uid, charged to the plan and route it is built with.
+Also carries #3105's follow-ups: the `forbiddenPrefix` test case and the `gen` comment. #3110 (pin `client_id` and `scope`) needs a Codex capture and stays queued.
+
+**Scope (b):** `broker/clerk/plan/` (`plan.go`, new `body.go`, `meter.go`, `body_test.go`, `plan_test.go`, `ASSUMPTIONS.md`), `broker/clerk/model/` (`model.go`, `model_test.go`, `ASSUMPTIONS.md`), `broker/clerk/run/` (new `plan.go`, `plan_test.go`, `ASSUMPTIONS.md`), this brief. No guard file changes: the three packages are already `parser` lines, and `clerk/run` is wiring in `core.txt`.
+
+**Acceptance tests (b):**
+- `TestPlanModelBodyHeldToDeclaredShape` (PLN-5, CLK-7) in `broker/clerk/plan/body_test.go`: a request in the measured Codex shape (built in the test from the declaration, #809) passes with `store` forced off; each hosted, undeclared or remote shape is refused with nothing sent and nothing admitted.
+- `TestPlanDeclarationRefusesAHostedBody` (CLK-7, CLK-4): a hosted key or tool type, no body shape, or a response prefix that could pass a forbidden header is refused at `New`.
+- `TestPlanModelCallIsMeteredOnce` (LOG-7, RES-5): the meter sees the checked body before sending, is settled once with the reported usage and the pool reading, and a refused or missing meter sends nothing.
+- `TestPlanModelCallSettlesAsItEnded` (LOG-7): a cut stream, an error status, no figure, an unreadable or too-long event, an encoded answer and a refused dial each settle once, as they ended.
+- `TestPlanPoolReading` (RES-5): the tightest window per mille, reset in ms, a reached limit as full, an unreadable window as none.
+- `TestAdmittedCallIsSettledOnce`, `TestCountRoundsUp` (LOG-7) in `broker/clerk/model/model_test.go`.
+- `TestPlanGuestEndpointMetersEachCall` (PLN-5, CLK-7, LOG-7, RES-5) in `broker/clerk/run/plan_test.go`: over the socket, a call is metered into the kernel's log with its pool reading and no real token reaches the guest; a call past the cap is 429 and never sent. `TestPlanStatusFromDetail` (CLK-4).
+
 **Usage estimate:** about 120k tokens per slice.

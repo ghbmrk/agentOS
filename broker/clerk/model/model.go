@@ -75,7 +75,11 @@ type Clerk struct {
 }
 
 // tokens is the clerk's own count: four bytes a token, rounded up.
-func tokens(s string) int64 { return int64(len(s)+3) / 4 }
+func tokens(s string) int64 { return Count(int64(len(s))) }
+
+// Count is the clerk's own token count of n bytes: four bytes a token,
+// rounded up.
+func Count(n int64) int64 { return n/4 + min(n%4, 1) }
 
 var errOverflow = errors.New("model: cost out of range")
 
@@ -143,14 +147,60 @@ func (c *Clerk) flush(now int64) error {
 // full pool instead, since a reading can only narrow, and one the log cannot
 // write is owed until its reset time.
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
-	p, in, worst, a, err := c.admit(now, plan, route, prompt, maxOut)
+	adm, err := c.Admit(now, plan, route, tokens(prompt), maxOut)
 	if err != nil {
 		return "", err
 	}
 	// The provider is called without the lock: the kernel's reservation, not
 	// the clerk, keeps calls admitted at once inside the caps.
 	reply, u, callErr := c.Provider.Call(route, prompt, maxOut)
-	amount, src := worst, "admitted"
+	if merr := adm.Settle(now, u, tokens(reply), callErr); merr != nil {
+		return "", errors.Join(callErr, merr)
+	}
+	if callErr != nil {
+		return "", callErr
+	}
+	return reply, nil
+}
+
+// Admission is one admitted call, settled once by Settle. Call makes its
+// own; a call the clerk does not make through its Provider (a CLI guest's
+// request that the plan login clerk forwards, MIG-4-plan-login-b) is
+// admitted by Admit and settled when it ends.
+type Admission struct {
+	c         *Clerk
+	route     string
+	p         Price
+	in, worst int64
+	a         kernel.Admitted
+	once      sync.Once
+	err       error
+}
+
+// Admit admits a call of in input tokens (the clerk's count) and at most
+// maxOut output tokens, as Call does before it calls the provider.
+func (c *Clerk) Admit(now int64, plan, route string, in, maxOut int64) (*Admission, error) {
+	p, worst, a, err := c.admit(now, plan, route, in, maxOut)
+	if err != nil {
+		return nil, err
+	}
+	return &Admission{c: c, route: route, p: p, in: in, worst: worst, a: a}, nil
+}
+
+// Settle meters how the call ended, as Call does: the usage the provider
+// reported, nothing if callErr is ErrNotSent, the clerk's own count (the
+// admitted input and out output tokens) if callErr is nil, and else the
+// admitted worst case; and the pool reading, if any. A second Settle
+// records nothing and returns the first one's answer. An error is spend
+// the log has not recorded: no further call is made until it has.
+func (s *Admission) Settle(now int64, u Usage, out int64, callErr error) error {
+	s.once.Do(func() { s.err = s.c.settle(now, s, u, out, callErr) })
+	return s.err
+}
+
+func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr error) error {
+	p, a, route := s.p, s.a, s.route
+	amount, src := s.worst, "admitted"
 	var cerr error
 	switch {
 	case u.Reported:
@@ -159,11 +209,11 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 	case errors.Is(callErr, ErrNotSent):
 		amount, src = 0, "clerk" // the request never left
 	case callErr == nil:
-		amount, cerr = p.cost(in, tokens(reply))
+		amount, cerr = p.cost(s.in, out)
 		src = "clerk"
 	}
 	if cerr != nil {
-		amount, src = worst, "admitted"
+		amount, src = s.worst, "admitted"
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -183,48 +233,41 @@ func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (strin
 			return c.Ledger.ReadPool(now, p.Pool, kernel.PoolFull, reset)
 		})
 	}
-	if merr != nil {
-		return "", errors.Join(callErr, merr)
-	}
-	if callErr != nil {
-		return "", callErr
-	}
-	return reply, nil
+	return merr
 }
 
 // admit checks the route and admits the call's worst case, under the lock.
-func (c *Clerk) admit(now int64, plan, route, prompt string, maxOut int64) (Price, int64, int64, kernel.Admitted, error) {
+func (c *Clerk) admit(now int64, plan, route string, in, maxOut int64) (Price, int64, kernel.Admitted, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var none kernel.Admitted
 	if err := c.flush(now); err != nil {
-		return Price{}, 0, 0, none, err
+		return Price{}, 0, none, err
 	}
 	p, ok := c.Routes[route]
 	if !ok {
-		return Price{}, 0, 0, none, fmt.Errorf("model: no route %q", route)
+		return Price{}, 0, none, fmt.Errorf("model: no route %q", route)
 	}
 	if maxOut <= 0 {
-		return Price{}, 0, 0, none, errors.New("model: maxOut must be positive")
+		return Price{}, 0, none, errors.New("model: maxOut must be positive")
 	}
-	in := tokens(prompt)
 	worst, err := p.cost(in, maxOut)
 	if err != nil {
-		return Price{}, 0, 0, none, err
+		return Price{}, 0, none, err
 	}
 	if p.Pool != "" {
 		if r := c.Ledger.AdmitPool(now, p.Pool); r != nil {
-			return Price{}, 0, 0, none, r
+			return Price{}, 0, none, r
 		}
 	}
 	a, r := c.Ledger.AdmitSpend(now, plan, worst)
 	if r != nil {
 		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
 			if err := c.Ledger.Hold(now, plan, r); err != nil {
-				return Price{}, 0, 0, none, err
+				return Price{}, 0, none, err
 			}
 		}
-		return Price{}, 0, 0, none, r
+		return Price{}, 0, none, r
 	}
-	return p, in, worst, a, nil
+	return p, worst, a, nil
 }
