@@ -34,11 +34,12 @@ type fakeMachines struct {
 	// a Lineage call then would deadlock on the box.
 	locked  bool
 	misuse  int
-	stepErr error // what Step answers; nil succeeds
+	stepErr error           // what Step answers; nil succeeds
+	gone    map[string]bool // machines the manager no longer knows
 }
 
 func newMachines() *fakeMachines {
-	return &fakeMachines{steps: map[string]int{}, private: map[string]bool{}, lineage: map[string]string{}}
+	return &fakeMachines{steps: map[string]int{}, private: map[string]bool{}, lineage: map[string]string{}, gone: map[string]bool{}}
 }
 
 func (f *fakeMachines) Step(_ context.Context, id string) error {
@@ -64,6 +65,9 @@ func (f *fakeMachines) Lineage(id string) (string, error) {
 	defer f.mu.Unlock()
 	if f.locked {
 		f.misuse++
+	}
+	if f.gone[id] {
+		return "", errors.New("no such machine")
 	}
 	if l := f.lineage[id]; l != "" {
 		return l, nil
@@ -472,10 +476,19 @@ func TestCH2PlansAreBoundedAndRateLimited(t *testing.T) {
 	many["steps"] = steps
 	labels := send("h3")
 	labels["steps"].([]map[string]any)[0]["labels"] = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
-	for _, a := range []map[string]any{huge, many, labels} {
+	unnamed := []map[string]any{}
+	for i, l := range []string{"Public", "a b", "privé", "x/y", "", strings.Repeat("l", 65)} {
+		a := send(fmt.Sprintf("n%d", i))
+		a["steps"].([]map[string]any)[0]["labels"] = []string{l}
+		unnamed = append(unnamed, a)
+	}
+	for _, a := range append([]map[string]any{huge, many, labels}, unnamed...) {
 		if _, e := r.tool("m1", "plan", a); e == "" {
 			t.Fatalf("accepted %s", a["request_id"])
 		}
+	}
+	if n := r.kern.plans(); n != 0 {
+		t.Fatalf("%d refused plans reached the kernel", n)
 	}
 	for i := 0; i < 3; i++ {
 		if st, e := r.tool("m1", "plan", send(fmt.Sprintf("ok%d", i))); st.State != "done" {
@@ -867,8 +880,18 @@ func TestLabelsPartitionRequests(t *testing.T) {
 		t.Fatalf("fork status of its own p1: %+v %s", st, e)
 	}
 	r.tool("m1", "plan", send("q1"))
-	if st, _ := r.tool("f1", "plan", send("q1")); st.State != "done" || r.kern.ran("m1/q1") != 1 {
+	n := r.kern.plans()
+	if st, _ := r.tool("f1", "plan", send("q1")); st.State != "done" || !strings.Contains(st.Reason, reasonRepeat) ||
+		r.kern.ran("m1/q1") != 1 || r.kern.ran("m1/private/q1") != 0 || r.kern.plans() != n {
 		t.Fatalf("fork repeat of a public request: %+v %v", st, r.kern.runs)
+	}
+	// A private repeat of the machine's own private request reads that plan,
+	// not a public one, and runs nothing again.
+	r.tool("f1", "plan", send("p2"))
+	n = r.kern.plans()
+	if st, _ := r.tool("f1", "plan", send("p2")); st.State != "done" || !strings.Contains(st.Reason, reasonRepeat) ||
+		r.kern.ran("m1/private/p2") != 1 || r.kern.plans() != n {
+		t.Fatalf("private repeat of its own request: %+v %v", st, r.kern.runs)
 	}
 	if l := strings.Join(r.kern.labels("m1/q1"), ","); l != "public" {
 		t.Fatalf("labels %q", l)

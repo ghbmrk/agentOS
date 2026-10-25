@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"testing"
@@ -29,6 +30,13 @@ type testKernel struct {
 	// lose, when set, makes Submit report a lost answer after the kernel
 	// took the plan.
 	lose bool
+	// readErr, when set, makes Plan fail as a lost owner socket does.
+	readErr bool
+	// entered and hold, when set, make Submit signal entered and then wait
+	// for hold, giving up if its context ends first.
+	entered, hold chan struct{}
+	// refuse, when set, makes Submit refuse every plan before logging it.
+	refuse bool
 }
 
 func seedKey(b byte) ed25519.PrivateKey {
@@ -74,9 +82,20 @@ func (tk *testKernel) keys(machine string) (key.Key, ed25519.PrivateKey, bool) {
 	return k, m, true
 }
 
-func (tk *testKernel) Submit(_ context.Context, p kernel.Plan) error {
+func (tk *testKernel) Submit(ctx context.Context, p kernel.Plan) error {
+	if tk.hold != nil {
+		close(tk.entered)
+		select {
+		case <-tk.hold:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
+	if tk.refuse {
+		return errors.New("kernel: malformed plan")
+	}
 	tk.at++
 	if err := tk.k.Submit(tk.at, p); err != nil {
 		return err
@@ -93,6 +112,9 @@ func (tk *testKernel) Submit(_ context.Context, p kernel.Plan) error {
 func (tk *testKernel) Plan(_ context.Context, id string) (string, []string, bool, error) {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
+	if tk.readErr {
+		return "", nil, false, errors.New("owner socket: connection reset")
+	}
 	// The kernel process runs its plans on its own clock; here each read
 	// lets it.
 	tk.at++
