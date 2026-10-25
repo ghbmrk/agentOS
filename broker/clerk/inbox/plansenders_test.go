@@ -188,3 +188,41 @@ func TestPlanReaderReturnsOnlyDomains(t *testing.T) {
 		t.Fatal("a canary reached the result")
 	}
 }
+
+// A misanswering provider (#3197 item 2): each defence on the listing and
+// the get stops the answer it is for, so no test passes without it.
+func TestPlanReaderRefusesAMisansweringProvider(t *testing.T) {
+	t.Run("headers that name another mail", func(t *testing.T) {
+		box, srv := newGmail(t)
+		srv.Deliver([]byte(planMail("a@bank.test", gmailAR("pass", "bank.test"))))
+		srv.OtherID(true)
+		if got, err := box.PlanSenders(context.Background(), planAuthServ); err == nil || got != nil {
+			t.Fatalf("PlanSenders = %v, %v; want an error", got, err)
+		}
+	})
+	t.Run("an id outside Gmail's form", func(t *testing.T) {
+		box, srv := newGmail(t)
+		srv.Deliver([]byte(planMail("a@bank.test", gmailAR("pass", "bank.test"))))
+		srv.Pad("bad.id")
+		if got, err := box.PlanSenders(context.Background(), planAuthServ); err == nil || got != nil {
+			t.Fatalf("PlanSenders = %v, %v; want an error", got, err)
+		}
+		for _, r := range srv.Requests() {
+			if strings.Contains(r, "bad.id") {
+				t.Fatalf("the malformed id reached the API: %s", r)
+			}
+		}
+	})
+	t.Run("a page larger than maxResults", func(t *testing.T) {
+		box, srv := newGmail(t)
+		id := srv.Deliver([]byte(planMail("a@bank.test", gmailAR("pass", "bank.test"))))
+		srv.Pad(slices.Repeat([]string{id}, PlanMails)...)
+		got, err := box.PlanSenders(context.Background(), planAuthServ)
+		if err != nil || !slices.Equal(got, []string{"bank.test"}) {
+			t.Fatalf("PlanSenders = %v, %v", got, err)
+		}
+		if lists, gets := planRequests(srv.Requests()); len(lists) != 1 || len(gets) != PlanMails {
+			t.Fatalf("%d lists and %d gets, want 1 and %d", len(lists), len(gets), PlanMails)
+		}
+	})
+}
