@@ -18,6 +18,10 @@ The kernel holds one data key per subject, seals content under it, lists what it
 
 Entry types `subject.opened`, `content.stored`, `subject.erased` and `erase.confirmed` are version 1 and join the closed set in `state.go` (LOG-5). None is widening. Their fold can live in a new `erase.go`, as task entries live in `task.go`.
 
+## Decided (2026-10-25)
+
+Mark took every recommendation ("Do all recs", cmsg_01R91wiieBzMSvPKFsAJVvuK4RKum9HBG97vi7x4EN2yt9): the key table outside the log (card cmsg_01R91wiieBzMSvPKFsAJVvuKDAejf3f4MDFgLdQqe8UDkN), erase re-wrapping older backups' key tables (card cmsg_01R91wiieBzMSvPKFsAJVvuKQkoZWPG5XC9NWwtgaBTy5T), and rewinding sessions that read an erased item, telling the owner after (card cmsg_01R91wiieBzMSvPKFsAJVvuKTjvTbiZomrrfU1GfSTA8nx). Only the first is built here. The backup re-wrap needs a backup list and a kernel key per backup, so it is a separate slice with the backup half (#2865); the rewind is `cmd/agentosd`'s, in the FORGET follow-up. Until then the `Confirmation` says older backups may hold the items.
+
 ## Not in this package
 
 - Restore re-applying erases newer than a backup, the no-anchor, rolled-back and disagreeing holds, sealed classes and the passkey unseal; subject keys inside a backup: #2865 (comment on #2823 records the split).
@@ -35,9 +39,9 @@ Growth cites SPEC LOG-4, D-139 and Mark's card cmsg_01R91wiieBzMSvPKFsAJVvuKKsWF
 
 ## Scope
 
-- `broker/kernel/state.go` (entry constants and schema only), `broker/kernel/kernel.go` (`Erase`, `Seal`, `Read`, `OpenSubject`, `OpenContent`, the `Tick` retry), new `broker/kernel/erase.go`, new `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`.
+- `broker/kernel/state.go` (entry constants and schema only), `broker/kernel/rederive.go` (the four types join `recorded`, so `Rederive` reads them as inputs), `broker/kernel/kernel.go` (`Erase`, `Seal`, `Read`, `OpenSubject`, `OpenContent`, the `Tick` retry), new `broker/kernel/erase.go`, new `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`.
 - New `broker/kernel/proc/keytable.go` and `keytable_test.go`.
-- `broker/kernel/sim/sim.go`, `sim_test.go`.
+- `broker/kernel/sim/erase.go` (new), `sim_test.go`.
 - `briefs/KRN-erase.md`.
 
 Not `log.go`: `Open` already keeps non-widening entries. Waits for #3112, #3113 and #3116 to merge (D-111: they hold `state.go` and `kernel.go`).
