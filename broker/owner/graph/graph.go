@@ -110,6 +110,11 @@ type Graph struct {
 
 func validSource(s Source) bool { return s == Shipped || s == Answer || s == Observed }
 
+// SelfDomain is the failure domain New gives a node that carries none: its
+// own, so an unlabelled node is never read as one no failure can reach.
+// Person and brake nodes get none.
+func SelfDomain(id string) string { return "self:" + id }
+
 // New checks and copies nodes and edges into a graph. It refuses an empty or
 // repeated ID, an unknown kind or source, an edge naming an unknown node or
 // repeating a From, a cutoff, brake or watch edge without exactly one From,
@@ -135,6 +140,11 @@ func New(nodes []Node, edges []Edge) (*Graph, error) {
 			}
 		}
 		n.Domains = append([]string(nil), n.Domains...)
+		if len(n.Domains) == 0 && n.Kind != Person && n.Kind != BrakeKind {
+			// Missing data is weak: a node nobody labelled can still fail
+			// on its own, through its maker or provider.
+			n.Domains = []string{SelfDomain(n.ID)}
+		}
 		n.Assets = append([]Class(nil), n.Assets...)
 		g.index[n.ID] = len(g.nodes)
 		g.nodes = append(g.nodes, n)
@@ -256,19 +266,16 @@ func (g *Graph) closure(in []bool, all bool, kinds func(EdgeKind) bool, skip []b
 	return in
 }
 
-// Resolve finds the node a `STOP <name>` names: an ID first, then a unique
-// Name, both ignoring case. No match, or a Name shared by several nodes,
-// returns false, which the caller reads as "pause everything" (CH-11).
+// Resolve finds the node a `STOP <name>` names, matching a node's Name or
+// ID, ignoring case. It succeeds only when exactly one node matches either
+// way: no match, a Name several nodes share, or an ID that is another
+// node's Name returns false, which the caller reads as "pause everything"
+// (CH-11). An internal ID never shadows what the owner calls a thing.
 func (g *Graph) Resolve(name string) (string, bool) {
 	name = strings.TrimSpace(name)
-	for _, n := range g.nodes {
-		if strings.EqualFold(n.ID, name) {
-			return n.ID, true
-		}
-	}
 	found := ""
 	for _, n := range g.nodes {
-		if strings.EqualFold(n.Name, name) {
+		if strings.EqualFold(n.ID, name) || strings.EqualFold(n.Name, name) {
 			if found != "" {
 				return "", false
 			}

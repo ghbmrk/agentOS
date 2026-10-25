@@ -116,15 +116,25 @@ func household(t *testing.T, ana bool) *Graph {
 // registrar's reset needs the mailbox AND the carrier, so the carrier alone
 // takes nothing; the old email takes the old blog; the lock needs the box
 // AND the door controller. Ben: the same, but the lock falls to the box.
+// Every unlabelled node also fails on its own (its "self:" domain): the
+// bank alone loses its data but its money stays held by the watched hold,
+// and the registrar, the codes, the car, the lock and the blog each fall
+// alone.
 var anaCuts = map[Class][]Cut{
-	Money:    {{"a.bank", dom("maker:yubico")}, {"a.bank", dom("provider:google")}},
-	Identity: {{"a.registrar", dom("maker:yubico")}, {"a.registrar", dom("provider:google")}},
+	Money: {{"a.bank", dom("maker:yubico")}, {"a.bank", dom("provider:google")}},
+	Identity: {
+		{"a.registrar", dom("maker:yubico")}, {"a.registrar", dom("provider:google")},
+		{"a.registrar", dom("self:a.registrar")}, {"a.registrar", dom("self:c.codes")},
+	},
 	Data: {
-		{"a.bank", dom("maker:yubico")}, {"a.bank", dom("phone:ana")}, {"a.bank", dom("provider:google")},
-		{"a.blog", dom("provider:yahoo")},
+		{"a.bank", dom("maker:yubico")}, {"a.bank", dom("phone:ana")}, {"a.bank", dom("provider:google")}, {"a.bank", dom("self:a.bank")},
+		{"a.blog", dom("provider:yahoo")}, {"a.blog", dom("self:a.blog")},
 		{"a.mail", dom("maker:yubico")}, {"a.mail", dom("provider:google")},
 	},
-	Safety: {{"d.car", dom("phone:ana")}, {"d.lock", dom("node:core", "node:home")}},
+	Safety: {
+		{"d.car", dom("phone:ana")}, {"d.car", dom("self:d.car")},
+		{"d.lock", dom("self:d.lock")}, {"d.lock", dom("node:core", "node:home")},
+	},
 }
 
 func benCuts() map[Class][]Cut {
@@ -132,11 +142,14 @@ func benCuts() map[Class][]Cut {
 		Money:    anaCuts[Money],
 		Identity: anaCuts[Identity],
 		Data: {
-			{"a.bank", dom("maker:yubico")}, {"a.bank", dom("phone:ben")}, {"a.bank", dom("provider:google")},
-			{"a.blog", dom("provider:yahoo")},
+			{"a.bank", dom("maker:yubico")}, {"a.bank", dom("phone:ben")}, {"a.bank", dom("provider:google")}, {"a.bank", dom("self:a.bank")},
+			{"a.blog", dom("provider:yahoo")}, {"a.blog", dom("self:a.blog")},
 			{"a.mail", dom("maker:yubico")}, {"a.mail", dom("provider:google")},
 		},
-		Safety: {{"d.car", dom("phone:ben")}, {"d.lock", dom("node:core")}},
+		Safety: {
+			{"d.car", dom("phone:ben")}, {"d.car", dom("self:d.car")},
+			{"d.lock", dom("node:core")}, {"d.lock", dom("self:d.lock")},
+		},
 	}
 }
 
@@ -164,8 +177,20 @@ var anaBoard = Board{
 	Data:     {ThiefNeed: 1, CutOff: 3, Assets: 3},
 }
 
-// Candidate proposals against Ana.
+// Ben's cut-offs and board are Ana's: the lock is lost to power through the
+// box alone instead of the box and the door controller.
+var benCutOffs, benBoard = anaCutOffs, anaBoard
+
+// Candidate proposals against Ana. Taking the bank's reset off the mailbox
+// lifts money to 2; a watcher outside the household lifts it to 2 as well,
+// and both together to 3. The car key removes one of the car's two single
+// cuts: no class gain, but a step. The card limit has no watcher, so it
+// changes nothing.
 var (
+	bankReset = Proposal{
+		Text: "Stop the mailbox from resetting the bank", Minutes: 10, Structural: true,
+		DropEdges: []Edge{e(Reset, "a.bank", "a.mail")},
+	}
 	carKey = Proposal{
 		Text: "Make the car need Key 1 as well as the phone", Minutes: 10, Structural: true,
 		DropEdges: []Edge{e(Act, "d.car", "d.phone")},
@@ -177,10 +202,10 @@ var (
 		AddEdges: []Edge{e(Watch, "b.payee", "n.friend")},
 	}
 	both = Proposal{
-		Text: "Add a watcher and a car key", Minutes: 5,
+		Text: "Add a watcher and stop mailbox resets of the bank", Minutes: 5,
 		AddNodes:  witness.AddNodes,
-		AddEdges:  append(append([]Edge(nil), witness.AddEdges...), carKey.AddEdges...),
-		DropEdges: carKey.DropEdges,
+		AddEdges:  witness.AddEdges,
+		DropEdges: bankReset.DropEdges,
 	}
 	cardLimit = Proposal{Text: "Turn on the card limit", Minutes: 2, SetBrakes: []string{"b.card"}}
 )

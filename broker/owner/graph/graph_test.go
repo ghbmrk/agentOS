@@ -28,7 +28,8 @@ func TestTwoKeysOfOneMakerAreOneDomain(t *testing.T) {
 	}
 	t.Fatalf("one maker's two keys not counted as one domain: %v", g.CutSets(Identity))
 found:
-	if got := g.Domains(); !reflect.DeepEqual(got, dom("maker:yubico", "node:core", "node:home", "phone:ana", "provider:carrier", "provider:google", "provider:yahoo")) {
+	if got := g.Domains(); !reflect.DeepEqual(got, dom("maker:yubico", "node:core", "node:home", "phone:ana", "provider:carrier", "provider:google", "provider:yahoo",
+		"self:a.bank", "self:a.blog", "self:a.registrar", "self:c.codes", "self:d.car", "self:d.lock", "self:v.power", "self:v.uplink")) {
 		t.Fatalf("domains = %v", got)
 	}
 	// A vault that needs both keys: one maker's keys fall to one failure;
@@ -43,10 +44,10 @@ found:
 		}
 		return h.CutSets(Money)
 	}
-	if got := vault("maker:yubico"); !reflect.DeepEqual(got, []Cut{{"a.v", dom("maker:yubico")}}) {
+	if got := vault("maker:yubico"); !reflect.DeepEqual(got, []Cut{{"a.v", dom("maker:yubico")}, {"a.v", dom("self:a.v")}}) {
 		t.Errorf("one maker: %v", got)
 	}
-	if got := vault("maker:other"); !reflect.DeepEqual(got, []Cut{{"a.v", dom("maker:other", "maker:yubico")}}) {
+	if got := vault("maker:other"); !reflect.DeepEqual(got, []Cut{{"a.v", dom("self:a.v")}, {"a.v", dom("maker:other", "maker:yubico")}}) {
 		t.Errorf("two makers: %v", got)
 	}
 }
@@ -113,7 +114,11 @@ func TestFixtureCutSets(t *testing.T) {
 func naiveTaken(nodes []Node, edges []Edge, asset string, c Class, d map[string]bool) bool {
 	comp := map[string]bool{}
 	for _, x := range nodes {
-		for _, y := range x.Domains {
+		ds := x.Domains
+		if len(ds) == 0 && x.Kind != Person && x.Kind != BrakeKind {
+			ds = []string{"self:" + x.ID} // missing data is weak
+		}
+		for _, y := range ds {
 			if d[y] {
 				comp[x.ID] = true
 			}
@@ -256,10 +261,17 @@ func TestFixtureCutOffs(t *testing.T) {
 			t.Errorf("%s unreached = %v, want %v", c, unreached, anaUnreached[c])
 		}
 	}
-	// Ben's lock hangs on the box alone, which power also cuts.
+	// Ben's lock hangs on the box alone, which power also cuts; the rest
+	// matches Ana.
 	b := household(t, false)
-	if cut, _ := b.CutOffs(Safety); !reflect.DeepEqual(cut, []CutOff{{"d.lock", []string{"v.power"}}}) {
-		t.Errorf("Ben safety cut-offs = %v", cut)
+	for _, c := range Classes {
+		cut, unreached := b.CutOffs(c)
+		if !reflect.DeepEqual(cut, benCutOffs[c]) || !reflect.DeepEqual(unreached, anaUnreached[c]) {
+			t.Errorf("Ben %s cut-offs = %v, unreached %v", c, cut, unreached)
+		}
+	}
+	if got := b.Board(); !reflect.DeepEqual(got, benBoard) {
+		t.Errorf("Ben's board = %v, want %v", got, benBoard)
 	}
 }
 
@@ -304,6 +316,18 @@ func TestStopReachAndRotation(t *testing.T) {
 	if _, ok := h.Resolve("MAIL"); ok {
 		t.Error("an ambiguous name resolved")
 	}
+	// An internal ID that is another node's Name never wins: the owner
+	// cannot see IDs, so a collision pauses everything, never the wrong one.
+	s, err := New([]Node{n("bank", Account, "Old card", nil), n("a.x", Account, "Bank", nil)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := s.Resolve("Bank"); ok {
+		t.Errorf("Resolve(Bank) = %q: an ID shadowed the node the owner calls Bank", id)
+	}
+	if id, ok := s.Resolve("old card"); !ok || id != "bank" {
+		t.Errorf("Resolve(old card) = %q, %v", id, ok)
+	}
 }
 
 // TN-graph-e: a proposal's effect, without changing the graph.
@@ -314,7 +338,7 @@ func TestProposalEffectLeavesGraphUnchanged(t *testing.T) {
 	if !reflect.DeepEqual(before, anaBoard) {
 		t.Fatalf("Ana's board = %v, want %v", before, anaBoard)
 	}
-	for _, p := range []Proposal{carKey, witness, both, cardLimit} {
+	for _, p := range []Proposal{bankReset, carKey, witness, both, cardLimit} {
 		eff, err := g.Effect(p)
 		if err != nil {
 			t.Fatalf("%s: %v", p.Text, err)
@@ -322,9 +346,16 @@ func TestProposalEffectLeavesGraphUnchanged(t *testing.T) {
 		if !reflect.DeepEqual(eff.Before, anaBoard) {
 			t.Errorf("%s: Before = %v", p.Text, eff.Before)
 		}
-		want := map[string]int{carKey.Text: 1, witness.Text: 1, both.Text: 2, cardLimit.Text: 0}[p.Text]
-		if eff.Gain != want {
-			t.Errorf("%s: gain %d, want %d (after %v)", p.Text, eff.Gain, want, eff.After)
+		want := map[string]int{bankReset.Text: 1, carKey.Text: 0, witness.Text: 1, both.Text: 2, cardLimit.Text: 0}[p.Text]
+		if eff.Gain != want || eff.Weakens {
+			t.Errorf("%s: gain %d weakens %v, want %d and false (after %v)", p.Text, eff.Gain, eff.Weakens, want, eff.After)
+		}
+		// Steps: the bank reset removes money's two single cuts and two of
+		// the bank data's; the car key one of the car's; the watcher both of
+		// money's.
+		wantSteps := map[string]int{bankReset.Text: 4, carKey.Text: 1, witness.Text: 2, both.Text: 4, cardLimit.Text: 0}[p.Text]
+		if eff.Steps != wantSteps {
+			t.Errorf("%s: steps %d, want %d", p.Text, eff.Steps, wantSteps)
 		}
 	}
 	eff, _ := g.Effect(witness)
@@ -340,6 +371,13 @@ func TestProposalEffectLeavesGraphUnchanged(t *testing.T) {
 	if _, err := g.Apply(Proposal{DropEdges: []Edge{e(Act, "d.car", "k.one")}}); err == nil {
 		t.Error("Apply dropped an edge that is not there")
 	}
+	// A drop matches From as a set: {mail, mail} is not {mail, carrier}.
+	if _, err := g.Apply(Proposal{DropEdges: []Edge{e(Reset, "a.registrar", "a.mail", "a.mail")}}); err == nil {
+		t.Error("Apply dropped the mailbox-and-carrier reset for a repeated-From drop")
+	}
+	if _, err := g.Apply(Proposal{DropEdges: []Edge{e(Reset, "a.registrar", "a.carrier", "a.mail")}}); err != nil {
+		t.Errorf("a drop with From in another order: %v", err)
+	}
 	// Edges returned to the caller are copies too.
 	es := g.Edges()
 	es[0].From[0] = "a.bank"
@@ -352,8 +390,14 @@ func TestProposalEffectLeavesGraphUnchanged(t *testing.T) {
 // and never a zero-gain one; a class with no assets is never the weakest.
 func TestNextActionStructuralFirst(t *testing.T) {
 	g := household(t, true)
+	if p, ok := g.Next([]Proposal{witness, both, cardLimit, carKey, bankReset}); !ok || p.Text != bankReset.Text {
+		t.Errorf("Next = %q, %v; want the structural %q over higher gain", p.Text, ok, bankReset.Text)
+	}
+	// With no class gain left among structural ones, a step still counts:
+	// the car key removes one of the car's two single cuts (it would stall
+	// on the per-class minimum alone) and is structural.
 	if p, ok := g.Next([]Proposal{witness, both, cardLimit, carKey}); !ok || p.Text != carKey.Text {
-		t.Errorf("Next = %q, %v; want the structural %q over higher gain", p.Text, ok, carKey.Text)
+		t.Errorf("Next = %q, %v; want the structural step %q", p.Text, ok, carKey.Text)
 	}
 	if p, ok := g.Next([]Proposal{both, witness}); !ok || p.Text != witness.Text {
 		t.Errorf("Next = %q; want the higher gain per minute %q", p.Text, witness.Text)
@@ -368,8 +412,7 @@ func TestNextActionStructuralFirst(t *testing.T) {
 		t.Errorf("Ana's weakest = %v, %v; want money (ties broken by cut-offs, then order)", c, ok)
 	}
 
-	// A graph whose only asset is unreachable data: data needs more than two
-	// failures, as the empty classes score, yet only data can be weakest.
+	// A graph whose only asset is data: only data can be weakest.
 	d, err := New([]Node{n("a.d", Account, "Notes", nil, Data)}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -440,14 +483,18 @@ func gsmOK(s string) bool {
 // TN-graph-g: STATUS lines against Ana's.
 func TestStatusLines(t *testing.T) {
 	g := household(t, true)
-	cands := []Proposal{cardLimit, both, witness, carKey}
+	cands := []Proposal{cardLimit, both, witness, carKey, bankReset}
 	got := g.Lines(cands)
 	want := []string{
-		"Bank (money) is lost if Google and Mailbox fail. Fix: Let a friend's phone watch the new-payee hold",
-		"Bank (money) is lost if Key 1 and Key 2 fail. Fix: Let a friend's phone watch the new-payee hold",
-		"Domain registrar (identity) is lost if Google and Mailbox fail.",
-		"Domain registrar (identity) is lost if Key 1 and Key 2 fail.",
-		"Car (safety) is lost if Ana's phone fails. Fix: Make the car need Key 1 as well as the phone",
+		"Bank (money) is lost to one failure shared by Google and Mailbox. Fix: Stop the mailbox from resetting the bank",
+		"Bank (money) is lost to one failure shared by Key 1 and Key 2. Fix: Stop the mailbox from resetting the bank",
+		"Domain registrar (identity) is lost to one failure of its own maker or provider.",
+		"Domain registrar (identity) is lost to one failure shared by Google and Mailbox.",
+		"Domain registrar (identity) is lost to one failure shared by Key 1 and Key 2.",
+		"Domain registrar (identity) is lost to one failure of Registrar recovery codes.",
+		"Car (safety) is lost to one failure of Ana's phone. Fix: Make the car need Key 1 as well as the phone",
+		"Car (safety) is lost to one failure of its own maker or provider.",
+		"Front door lock (safety) is lost to one failure of its own maker or provider.",
 		"Bank: Card limit is off. Turn it on at Bank app, Cards, Limits.",
 		"Key 1 and Key 2 fail together, so needing both does not protect Domain registrar. Use two that fail separately.",
 		"Losing Google cuts you off from Bank and Mailbox.",
@@ -459,11 +506,19 @@ func TestStatusLines(t *testing.T) {
 	}
 	next, ok := g.Next(cands)
 	line := g.Line(next, ok)
-	if line != "Weakest is money: 1 failure can take it. Next: Make the car need Key 1 as well as the phone" {
+	if line != "Weakest is money: 1 failure can take it. Next: Stop the mailbox from resetting the bank" {
 		t.Errorf("Line = %q", line)
 	}
-	if g.Line(Proposal{}, false) != "Weakest is money: 1 failure can take it. Nothing needed now." {
-		t.Errorf("Line without a next action = %q", g.Line(Proposal{}, false))
+	// A one-failure weakness with no fix in hand never reads "nothing needed".
+	if got := g.Line(Proposal{}, false); got != "Weakest is money: 1 failure can take it. No fix is known yet." {
+		t.Errorf("Line without a next action = %q", got)
+	}
+	safe := mustNew(t, []Node{
+		n("a.b", Account, "Bank", nil, Money), brakeSet("b.h", "Hold"),
+		n("n.w1", NodeKind, "Watcher 1", nil), n("n.w2", NodeKind, "Watcher 2", nil),
+	}, []Edge{e(Brake, "a.b", "b.h"), e(Watch, "b.h", "n.w1"), e(Watch, "b.h", "n.w2")})
+	if got := safe.Line(Proposal{}, false); got != "Weakest is money: it takes more than 2 failures. Nothing needed now." {
+		t.Errorf("Line with two independent watchers = %q", got)
 	}
 	long := g.Line(Proposal{Text: strings.Repeat("Ä{x} ", 60)}, true)
 	all := append(append([]string{line, long}, got...), household(t, false).Lines(cands)...)
@@ -579,3 +634,111 @@ func TestImportsOnlyStdlib(t *testing.T) {
 }
 
 var _ = fmt.Sprint
+
+func mustNew(t *testing.T, nodes []Node, edges []Edge) *Graph {
+	t.Helper()
+	g, err := New(nodes, edges)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func brakeSet(id, name string) Node {
+	b := n(id, BrakeKind, name, nil)
+	b.Set = true
+	return b
+}
+
+// TN-graph-a: a node nobody labelled is weak, not safe. It fails on its own
+// domain; person and brake nodes get none.
+func TestUnlabelledNodeIsItsOwnDomain(t *testing.T) {
+	own := n("p.me", Person, "Me", nil)
+	own.Owner = true
+	g := mustNew(t, []Node{own, n("a.b", Account, "Bank", nil, Money), brakeSet("b.h", "Hold")},
+		[]Edge{e(Act, "a.b", "p.me"), e(Brake, "a.b", "b.h")})
+	if got := g.CutSets(Money); !reflect.DeepEqual(got, []Cut{{"a.b", dom(SelfDomain("a.b"))}}) {
+		t.Errorf("an unlabelled bank: cuts %v; want its own domain", got)
+	}
+	if got := g.Domains(); !reflect.DeepEqual(got, dom("self:a.b")) {
+		t.Errorf("domains = %v; person and brake nodes get none", got)
+	}
+}
+
+// TN-graph-e: Next and the STATUS fixes refuse a proposal that gives any
+// asset a new thief cut or a new cut-off provider, whatever its class gain
+// (KRN-11). Security's probe on #3193.
+func TestProposalNeverWeakensAnAsset(t *testing.T) {
+	own := n("p", Person, "Me", nil)
+	own.Owner = true
+	g := mustNew(t, []Node{own,
+		n("k1", Key, "Key A", dom("maker:a")), n("k2", Key, "Key B", dom("maker:b")),
+		n("ph", Device, "Phone", dom("phone")),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+		n("reg", Account, "Registrar", dom("provider:reg"), Identity),
+		n("v.isp", Provider, "Internet", dom("provider:isp")),
+	}, []Edge{
+		e(Act, "k1", "p"), e(Act, "k2", "p"), e(Act, "ph", "p"),
+		e(Reset, "bank", "k1", "k2"),
+		e(Reset, "reg", "ph"),
+	})
+	// The phone moves from the registrar to the bank: the registrar gets
+	// stronger, the bank gains a single cut through the phone.
+	trade := Proposal{Text: "Move phone recovery to the bank", Minutes: 1,
+		DropEdges: []Edge{e(Reset, "reg", "ph")},
+		AddEdges:  []Edge{e(Reset, "reg", "k1", "k2", "ph"), e(Reset, "bank", "ph")}}
+	eff, err := g.Effect(trade)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eff.Weakens {
+		t.Fatalf("a new single cut on the bank not flagged: %+v", eff)
+	}
+	if p, ok := g.Next([]Proposal{trade}); ok {
+		t.Errorf("Next recommends %q, which opens a single thief path on money", p.Text)
+	}
+	for _, s := range g.Lines([]Proposal{trade}) {
+		if strings.Contains(s, "Fix:") {
+			t.Errorf("Lines offers a weakening fix: %q", s)
+		}
+	}
+	// A trade with positive steps is still refused: it removes the
+	// registrar's two single cuts through the phone and the tablet but
+	// opens one on the bank.
+	two := mustNew(t, []Node{own,
+		n("ph", Device, "Phone", dom("phone")), n("tb", Device, "Tablet", dom("tablet")),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+		n("reg", Account, "Registrar", dom("provider:reg"), Identity),
+	}, []Edge{e(Act, "ph", "p"), e(Act, "tb", "p"), e(Reset, "reg", "ph"), e(Reset, "reg", "tb")})
+	swap := Proposal{Text: "Move device recovery to the bank", Minutes: 1, Structural: true,
+		DropEdges: []Edge{e(Reset, "reg", "ph"), e(Reset, "reg", "tb")},
+		AddEdges:  []Edge{e(Reset, "bank", "ph")}}
+	if eff, _ := two.Effect(swap); eff.Steps <= 0 || !eff.Weakens {
+		t.Fatalf("swap: steps %d weakens %v; want a positive step that weakens", eff.Steps, eff.Weakens)
+	}
+	if p, ok := two.Next([]Proposal{swap}); ok {
+		t.Errorf("Next recommends %q, which opens a single thief path on the bank", p.Text)
+	}
+	// A second asset of a class already at 1 is still guarded: the class
+	// minimum does not move, but the bank gains a single cut.
+	second := Proposal{Text: "Let the phone reset the bank", Minutes: 1, AddEdges: []Edge{e(Reset, "bank", "ph")}}
+	if eff, _ := g.Effect(second); !eff.Weakens {
+		t.Error("a new single cut is missed when the class minimum does not change")
+	}
+	// A new cut-off provider weakens too, with no thief cut involved.
+	cut := Proposal{Text: "Route the bank through the internet", Minutes: 1, AddEdges: []Edge{e(Cutoff, "bank", "v.isp")}}
+	if eff, _ := g.Effect(cut); !eff.Weakens {
+		t.Error("a new cut-off provider is missed")
+	}
+	// The original probe's figures: the trade lifts identity more than it
+	// drops money, which the summed gain alone would have recommended.
+	probe := mustNew(t, []Node{own,
+		n("k1", Key, "Key A", dom("maker:a")), n("k2", Key, "Key B", dom("maker:b")),
+		n("ph", Device, "Phone", dom("phone")),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+		n("reg", Account, "Registrar", nil, Identity),
+	}, []Edge{e(Act, "k1", "p"), e(Act, "k2", "p"), e(Act, "ph", "p"), e(Reset, "bank", "k1", "k2"), e(Reset, "reg", "ph")})
+	if p, ok := probe.Next([]Proposal{trade}); ok {
+		t.Errorf("probe: Next recommends %q", p.Text)
+	}
+}

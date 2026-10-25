@@ -48,15 +48,7 @@ func (g *Graph) Apply(p Proposal) (*Graph, error) {
 }
 
 func sameEdge(a, b Edge) bool {
-	if a.Kind != b.Kind || a.To != b.To || len(a.From) != len(b.From) {
-		return false
-	}
-	for _, f := range b.From {
-		if !contains(a.From, f) {
-			return false
-		}
-	}
-	return true
+	return a.Kind == b.Kind && a.To == b.To && subset(a.From, b.From) && subset(b.From, a.From)
 }
 
 // Score is one class's line on the scoreboard.
@@ -106,6 +98,101 @@ func (g *Graph) Weakest() (Class, bool) { return g.Board().Weakest() }
 type Effect struct {
 	Before, After Board
 	Gain          int // the sum over classes of the rise in ThiefNeed and the fall in CutOff
+	// Weakens is set when some asset, in any class, ends up with a thief
+	// cut it did not have (a single domain, or a pair not covering an
+	// earlier single or pair) or a new cut-off provider. Next and the
+	// STATUS fixes never offer such a proposal, whatever its gain.
+	Weakens bool
+	// Steps is the fall in single-domain cuts across every asset and class
+	// plus the fall in assets some provider can cut off: progress the
+	// per-class minimum misses, such as removing one of two single cuts.
+	Steps int
+}
+
+// steps counts the single-domain cuts and the cut-off assets in x.
+func (x exposure) steps() int {
+	n := 0
+	for _, v := range x {
+		for _, c := range v.cuts {
+			if len(c) == 1 {
+				n++
+			}
+		}
+		if len(v.cutBy) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// exposure is, per asset and class, its cuts and its cut-off providers.
+type exposure map[[2]string]struct {
+	cuts  [][]string
+	cutBy map[string]bool
+}
+
+func (g *Graph) exposure() exposure {
+	x := exposure{}
+	for _, c := range Classes {
+		for _, a := range g.assets(c) {
+			x[[2]string{g.nodes[a].ID, string(c)}] = struct {
+				cuts  [][]string
+				cutBy map[string]bool
+			}{nil, map[string]bool{}}
+		}
+		for _, cut := range g.CutSets(c) {
+			k := [2]string{cut.Asset, string(c)}
+			v := x[k]
+			v.cuts = append(v.cuts, cut.Domains)
+			x[k] = v
+		}
+		offs, _ := g.CutOffs(c)
+		for _, o := range offs {
+			for _, p := range o.Providers {
+				x[[2]string{o.Asset, string(c)}].cutBy[p] = true
+			}
+		}
+	}
+	return x
+}
+
+// weakens reports whether after gives any asset of before a cut that no cut
+// of before is contained in, or a cut-off provider before lacked (KRN-11:
+// a change never opens a new thief path or a new way to be cut off).
+func (before exposure) weakens(after exposure) bool {
+	for k, a := range after {
+		b, ok := before[k]
+		if !ok {
+			continue // a new asset has nothing to regress from
+		}
+		for _, cut := range a.cuts {
+			covered := false
+			for _, old := range b.cuts {
+				if subset(old, cut) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				return true
+			}
+		}
+		for p := range a.cutBy {
+			if !b.cutBy[p] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func subset(a, b []string) bool {
+	for _, x := range a {
+		if !contains(b, x) {
+			return false
+		}
+	}
+	return true
 }
 
 // Effect applies p to a copy and compares the boards.
@@ -119,12 +206,17 @@ func (g *Graph) Effect(p Proposal) (Effect, error) {
 		e.Gain += e.After[c].ThiefNeed - e.Before[c].ThiefNeed
 		e.Gain += e.Before[c].CutOff - e.After[c].CutOff
 	}
+	before, after := g.exposure(), h.exposure()
+	e.Weakens = before.weakens(after)
+	e.Steps = before.steps() - after.steps()
 	return e, nil
 }
 
 type ranked struct {
-	p    Proposal
-	gain int
+	p       Proposal
+	gain    int
+	steps   int
+	weakens bool
 }
 
 func minutes(p Proposal) int {
@@ -134,8 +226,8 @@ func minutes(p Proposal) int {
 	return p.Minutes
 }
 
-// rank orders candidates: structural first, then gain per owner minute, then
-// Text. Candidates that do not apply are dropped.
+// rank orders candidates: structural first, then gain per owner minute,
+// then steps per owner minute, then Text. Candidates that do not apply are dropped.
 func (g *Graph) rank(candidates []Proposal) []ranked {
 	var rs []ranked
 	for _, p := range candidates {
@@ -143,7 +235,7 @@ func (g *Graph) rank(candidates []Proposal) []ranked {
 		if err != nil {
 			continue
 		}
-		rs = append(rs, ranked{p, e.Gain})
+		rs = append(rs, ranked{p, e.Gain, e.Steps, e.Weakens})
 	}
 	sort.SliceStable(rs, func(i, j int) bool {
 		a, b := rs[i], rs[j]
@@ -153,17 +245,21 @@ func (g *Graph) rank(candidates []Proposal) []ranked {
 		if l, r := a.gain*minutes(b.p), b.gain*minutes(a.p); l != r {
 			return l > r
 		}
+		if l, r := a.steps*minutes(b.p), b.steps*minutes(a.p); l != r {
+			return l > r
+		}
 		return a.p.Text < b.p.Text
 	})
 	return rs
 }
 
-// Next picks the next action among candidates with gain above zero:
-// structural ones first, then the highest gain per owner minute, then by
+// Next picks the next action among candidates that weaken no asset
+// (Effect.Weakens) and have gain or steps above zero: structural ones first,
+// then the highest gain per owner minute, then steps per minute, then by
 // Text. It returns false when none qualifies.
 func (g *Graph) Next(candidates []Proposal) (Proposal, bool) {
 	for _, r := range g.rank(candidates) {
-		if r.gain > 0 {
+		if (r.gain > 0 || r.steps > 0) && !r.weakens {
 			return r.p, true
 		}
 	}

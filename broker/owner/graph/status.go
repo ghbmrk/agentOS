@@ -77,6 +77,9 @@ func (g *Graph) Line(next Proposal, ok bool) string {
 		take = "it takes more than 2 failures"
 	}
 	act := "Nothing needed now."
+	if g.Board()[c].ThiefNeed < 3 {
+		act = "No fix is known yet."
+	}
 	if ok {
 		act = "Next: " + next.Text
 	}
@@ -97,7 +100,7 @@ func (g *Graph) singles(c Class) map[[2]string]bool {
 
 // Lines are STATUS's lists (A22 Graph, CLK-11), in order: each money,
 // identity or safety asset one failure domain takes, with the fix that
-// removes that cut where a candidate does; each unset brake on a money or
+// removes that cut where a candidate does without weakening any asset; each unset brake on a money or
 // identity asset, with its page; each pair of safeguards required together
 // that share a failure domain; each provider whose loss cuts the owner off.
 // Lines name assets and things by the owner's names, never by ID or label.
@@ -130,13 +133,16 @@ func (g *Graph) Lines(candidates []Proposal) []string {
 		})
 		for _, k := range keys {
 			done[k] = true
-			verb := "fails"
-			if strings.Contains(g.domainNames(k[1]), " and ") {
-				verb = "fail"
+			cause := "of " + g.domainNames(k[1])
+			switch {
+			case k[1] == SelfDomain(k[0]):
+				cause = "of its own maker or provider"
+			case strings.Contains(cause, " and "):
+				cause = "shared by " + g.domainNames(k[1])
 			}
-			s := fmt.Sprintf("%s (%s) is lost if %s %s.", g.name(k[0]), c, g.domainNames(k[1]), verb)
+			s := fmt.Sprintf("%s (%s) is lost to one failure %s.", g.name(k[0]), c, cause)
 			for i, r := range ranked {
-				if !after[i][c][k] {
+				if !r.weakens && !after[i][c][k] {
 					s += " Fix: " + r.p.Text
 					break
 				}
