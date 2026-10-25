@@ -240,6 +240,17 @@ func (s *Server) Open(id string) {
 	}
 }
 
+// Move is the owner moving a message in their own mail app: its labels
+// become labels (TRASH, or no INBOX to archive it).
+func (s *Server) Move(id string, labels ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.msgs[id]; m != nil {
+		m.Labels = slices.Clone(labels)
+		s.change()
+	}
+}
+
 // Erase is the owner deleting a message for good in their own mail app.
 func (s *Server) Erase(id string) {
 	s.mu.Lock()
