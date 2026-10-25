@@ -109,15 +109,15 @@ type wireCtx struct {
 }
 
 type wireCase struct {
-	Op     string              `json:"op"`
-	Key    key.Key             `json:"key"`
-	Owners []ed25519.PublicKey `json:"owners"`
-	Use    []byte              `json:"use"`
-	Sig    []byte              `json:"sig"`
-	Step   wireStep            `json:"step"`
-	Task   string              `json:"task"`
-	Amount int64               `json:"amount"`
-	Ctx    wireCtx             `json:"ctx"`
+	Op     string          `json:"op"`
+	Key    key.Key         `json:"key"`
+	Owners []key.PublicKey `json:"owners"`
+	Use    []byte          `json:"use"`
+	Sig    []byte          `json:"sig"`
+	Step   wireStep        `json:"step"`
+	Task   string          `json:"task"`
+	Amount int64           `json:"amount"`
+	Ctx    wireCtx         `json:"ctx"`
 }
 
 // renewCase asks whether a renewal's first link is within the old one's.
@@ -321,7 +321,7 @@ func (g gen) argCaveat() key.Caveat {
 // world is one case: the key and the private key of whoever holds its tip.
 type world struct {
 	k      key.Key
-	owners []ed25519.PublicKey
+	owners []key.PublicKey
 	holder *party // nil: any passkey holds a bare root
 }
 
@@ -349,7 +349,7 @@ func (g gen) key() world {
 	if g.edge("empty-clerk", 2) {
 		clerk = ""
 	}
-	k := key.Issue(owner.priv, key.Root{Clerk: clerk, Verbs: vs, Serial: strconv.Itoa(g.r.Intn(100))})
+	k := key.Issue(key.Ed25519Signer(owner.priv), key.Root{Clerk: clerk, Verbs: vs, Serial: strconv.Itoa(g.r.Intn(100))})
 	if len(k.Root.Verbs) > 1 && g.edge("root-not-canonical", 3) {
 		// Issue sorts a root's verbs, so a root out of order or with a
 		// repeat is signed here by hand.
@@ -359,14 +359,14 @@ func (g gen) key() world {
 			k.Root.Verbs = append(k.Root.Verbs, k.Root.Verbs[0])
 		}
 		body, _ := json.Marshal(struct {
-			Owner  ed25519.PublicKey `json:"owner"`
-			Clerk  string            `json:"clerk"`
-			Verbs  []key.Verb        `json:"verbs"`
-			Serial string            `json:"serial"`
+			Owner  key.PublicKey `json:"owner"`
+			Clerk  string        `json:"clerk"`
+			Verbs  []key.Verb    `json:"verbs"`
+			Serial string        `json:"serial"`
 		}{k.Root.Owner, k.Root.Clerk, k.Root.Verbs, k.Root.Serial})
 		k.Root.Sig = ed25519.Sign(owner.priv, append([]byte(key.DomainRoot), body...))
 	}
-	w := world{k: k, owners: []ed25519.PublicKey{pass1.pub, pass2.pub}}
+	w := world{k: k, owners: []key.PublicKey{key.Ed25519(pass1.pub), key.Ed25519(pass2.pub)}}
 	n := g.r.Intn(5)
 	if g.p(2) {
 		n = key.MaxLinks + g.r.Intn(2)
@@ -658,6 +658,12 @@ func (t *tally) add(code string, err error, admitted, spendOK bool) {
 	}
 }
 
+// broken starts the description of a case keycheck gave no verdict on: it
+// exited or answered with something other than a verdict. That is a broken
+// harness, never a disagreement, so the sweep stops on it and the
+// predicate-reach check never counts it as a kill.
+const broken = "keycheck broke: "
+
 // one builds and judges case seed; it returns a description of any
 // disagreement.
 func one(c *checker, seed int64, t *tally) string {
@@ -705,7 +711,7 @@ func one(c *checker, seed int64, t *tally) string {
 	}
 	got, jerr := c.judge(wc)
 	if jerr != nil {
-		return "keycheck: " + jerr.Error()
+		return broken + jerr.Error()
 	}
 	if (err == nil) != got.Valid {
 		return fmt.Sprintf("op %s: library chain err %v, keycheck valid %v (%s)", op, err, got.Valid, got.Bad)
@@ -732,7 +738,7 @@ func one(c *checker, seed int64, t *tally) string {
 	}
 	var narrowers []string
 	for _, p := range v.Narrowers {
-		narrowers = append(narrowers, fmt.Sprintf("%x", []byte(p)))
+		narrowers = append(narrowers, fmt.Sprintf("%x", p.Bytes()))
 	}
 	if v.ByOwner != got.ByOwner || !slices.Equal(narrowers, got.Narrowers) {
 		return fmt.Sprintf("narrowed: library %v %v, keycheck %v %v", v.ByOwner, narrowers, got.ByOwner, got.Narrowers)
@@ -789,7 +795,7 @@ func renewal(c *checker, seed int64, t *tally) string {
 	}
 	got, jerr := c.judge(renewCase{"within", renew, was})
 	if jerr != nil {
-		return "keycheck: " + jerr.Error()
+		return broken + jerr.Error()
 	}
 	nl, nerr := key.Fold(renew)
 	ol, oerr := key.Fold(was)
@@ -945,6 +951,9 @@ func TestKeyDiff(t *testing.T) {
 	bad := 0
 	for seed := from; seed < from+n && (bad == 0 || !stop); seed++ {
 		for _, d := range []string{one(c, seed, tl), renewal(c, seed, tl)} {
+			if strings.HasPrefix(d, broken) {
+				t.Fatalf("seed %d: %s", seed, d)
+			}
 			if d != "" {
 				bad++
 				if bad <= 20 {

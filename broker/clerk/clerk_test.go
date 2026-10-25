@@ -23,7 +23,7 @@ func backup() (ed25519.PublicKey, ed25519.PrivateKey) { return gen(12) }
 func cosigned(keys ...key.Key) []key.Cosign {
 	_, o := gen(1)
 	_, b := backup()
-	return []key.Cosign{key.Approve(o, kernel.BatchHash(keys...)), key.Approve(b, kernel.BatchHash(keys...))}
+	return []key.Cosign{key.Approve(key.Ed25519Signer(o), kernel.BatchHash(keys...)), key.Approve(key.Ed25519Signer(b), kernel.BatchHash(keys...))}
 }
 
 func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -70,7 +70,7 @@ func setup(t *testing.T, verb key.Verb) *fix {
 	opub, opriv := gen(1)
 	hpub, _ := gen(2)
 	kpub, kpriv := gen(3)
-	mail := clerk.NewMail("mail", []ed25519.PublicKey{opub})
+	mail := clerk.NewMail("mail", []key.PublicKey{key.Ed25519(opub)})
 	f := &fix{mail: mail, now: 1, plans: map[string]kernel.Plan{}}
 	mail.Clock = func() int64 { return f.now }
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: kpub,
@@ -79,12 +79,12 @@ func setup(t *testing.T, verb key.Verb) *fix {
 		t.Fatal(err)
 	}
 	bpub, _ := backup()
-	k, err := kernel.Boot(l, []ed25519.PublicKey{opub, bpub}, map[string]kernel.Clerk{"mail": mail}, 0)
+	k, err := kernel.Boot(l, []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}, map[string]kernel.Clerk{"mail": mail}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The passkey's grant to the home clerk, a hold before the test (D-146).
-	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{verb}, Serial: "r1"}), opriv, hpub, 0, 1<<40)
+	root, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "mail", Verbs: []key.Verb{verb}, Serial: "r1"}), key.Ed25519Signer(opriv), hpub, 0, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestClerkRefusesUnknownRootAndUnheldIrreversible(t *testing.T) {
 	opub, opriv := gen(1)
 	hpub, _ := gen(2)
 	_ = opub
-	ghost, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "unlogged"}), opriv, hpub, 0, 1)
+	ghost, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "unlogged"}), key.Ed25519Signer(opriv), hpub, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestClerkRunsOnlyWhatTheHolderSigned(t *testing.T) {
 	outside := f.req
 	outside.Index = 1
 	for name, r := range map[string]kernel.Request{"swapped step": swapped, "stranger": stranger, "unsigned": unsigned, "index outside the plan": outside} {
-		if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
+		if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		if res := f.mail.Do(r, f.view()); res.Outcome != "failed" {
@@ -251,7 +251,7 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	other.Args["target"] = "y"
 	twin := kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{other}}, hpubPriv())
 	check := func(r kernel.Request) *key.Refusal {
-		return clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, f.now, r, f.k.State())
+		return clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, f.k.State())
 	}
 	var during [2]*key.Refusal
 	f.mail.Fault = func(op string, _ kernel.Request) string {
@@ -287,7 +287,7 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 // every step rather than take the planner's word (KEY-2, CLK-2).
 func TestClerkWithoutFactsRefuses(t *testing.T) {
 	f := setup(t, key.Trash)
-	if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != clerk.RClaim {
+	if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != clerk.RClaim {
 		t.Fatalf("a clerk with no facts passed a step: %v", rf)
 	}
 	claim := stepOf(key.Trash)
@@ -310,12 +310,12 @@ func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
 	spub, spriv := gen(9)
 	_ = spub
 	hpub, _ := gen(2)
-	forged, err := key.ClerkKey(key.Issue(spriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "forged"}), spriv, hpub, 0, 1)
+	forged, err := key.ClerkKey(key.Issue(key.Ed25519Signer(spriv), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "forged"}), key.Ed25519Signer(spriv), hpub, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := f.request("i9", forged, stepOf(key.Trash))
-	if rf := clerk.Check([]ed25519.PublicKey{opubOf()}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
+	if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
 		t.Fatalf("a forged root a lying view vouches for: %v", rf)
 	}
 	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
@@ -334,13 +334,13 @@ func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
 	f := setup(t, key.Buy)
 	opub, opriv := gen(1)
 	bpub, bpriv := backup()
-	anchors := []ed25519.PublicKey{opub, bpub}
+	anchors := []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
 	oneOff := func(id string, cos ...ed25519.PrivateKey) kernel.Request {
 		ps := stepOf(key.Buy)
 		ps.Args[key.ArgAmount] = "5"
 		p := kernel.SignPlan(kernel.Plan{ID: id, Key: key.Key{Root: f.root.Root}, Steps: []kernel.PlanStep{ps}}, opriv)
 		for _, c := range cos {
-			p.Cosigns = append(p.Cosigns, key.Approve(c, kernel.PlanHash(p)))
+			p.Cosigns = append(p.Cosigns, key.Approve(key.Ed25519Signer(c), kernel.PlanHash(p)))
 		}
 		f.plans[id] = p
 		return kernel.Request{Plan: p}
@@ -362,8 +362,8 @@ func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
 func TestClerkVerifyReturnsTheChainItChecked(t *testing.T) {
 	f := setup(t, key.Trash)
 	opub, opriv := gen(1)
-	anchors := []ed25519.PublicKey{opub}
-	approved, err := key.Narrow(f.root, opriv, key.LimitUses(1))
+	anchors := []key.PublicKey{key.Ed25519(opub)}
+	approved, err := key.Narrow(f.root, key.Ed25519Signer(opriv), key.LimitUses(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,12 +404,12 @@ func (v forgedTask) Task(string, int64) (kernel.Task, bool) { return v.t, true }
 func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	f := setup(t, key.Trash)
 	opub, opriv := gen(1)
-	anchors := []ed25519.PublicKey{opub}
+	anchors := []key.PublicKey{key.Ed25519(opub)}
 	if err := f.k.OpenTask(1, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}
-	a.By = key.Approve(opriv, kernel.TaskHash("t1", 0, a.Site, a.First))
+	a.By = key.Approve(key.Ed25519Signer(opriv), kernel.TaskHash("t1", 0, a.Site, a.First))
 	if err := f.k.ApproveTask(1, "t1", a); err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 		t.Fatalf("the live approval: %+v %v", got, ok)
 	}
 	renewed := kernel.TaskApproval{Site: a.Site, First: "https://shop.example/pay", N: 1}
-	renewed.By = key.Approve(opriv, kernel.TaskHash("t1", 1, renewed.Site, renewed.First))
+	renewed.By = key.Approve(key.Ed25519Signer(opriv), kernel.TaskHash("t1", 1, renewed.Site, renewed.First))
 	if err := f.k.ApproveTask(2, "t1", renewed); err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 		t.Fatalf("the renewed approval: %+v %v", got, ok)
 	}
 	second := kernel.TaskApproval{Site: "second.example", First: "https://second.example/", N: 2}
-	second.By = key.Approve(opriv, kernel.TaskHash("t1", 2, second.Site, second.First))
+	second.By = key.Approve(key.Ed25519Signer(opriv), kernel.TaskHash("t1", 2, second.Site, second.First))
 	if err := f.k.ApproveTask(3, "t1", second); err != nil {
 		t.Fatal(err)
 	}
@@ -451,12 +451,12 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	}
 	_, mpriv := gen(40)
 	forged := kernel.Task{ID: "t1", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
-		By: key.Approve(mpriv, kernel.TaskHash("t1", 0, a.Site, a.First))}}}
+		By: key.Approve(key.Ed25519Signer(mpriv), kernel.TaskHash("t1", 0, a.Site, a.First))}}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), forged}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("an approval no passkey the clerk knows signed")
 	}
 	other := kernel.Task{ID: "t2", Until: 1 + kernel.TaskTimeout, Approvals: map[string]kernel.TaskApproval{a.Site: {Site: a.Site, First: a.First,
-		By: key.Approve(opriv, kernel.TaskHash("t2", 0, a.Site, a.First))}}}
+		By: key.Approve(key.Ed25519Signer(opriv), kernel.TaskHash("t2", 0, a.Site, a.First))}}}
 	if _, ok := kernel.TaskApproved(forgedTask{f.view(), other}, anchors, ver, a.Site, f.now); ok {
 		t.Fatal("another task's approval")
 	}

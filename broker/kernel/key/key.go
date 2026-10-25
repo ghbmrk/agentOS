@@ -65,11 +65,11 @@ func (i *ID) UnmarshalText(b []byte) error {
 // holder is its owner, the passkey, so only a passkey tap uses a bare root or
 // derives from it (D-146). Widening is issuing a new root (KEY-4).
 type Root struct {
-	Owner  ed25519.PublicKey `json:"owner"`
-	Clerk  string            `json:"clerk"`
-	Verbs  []Verb            `json:"verbs"`
-	Serial string            `json:"serial"`
-	Sig    []byte            `json:"sig"`
+	Owner  PublicKey `json:"owner"`
+	Clerk  string    `json:"clerk"`
+	Verbs  []Verb    `json:"verbs"`
+	Serial string    `json:"serial"`
+	Sig    []byte    `json:"sig"`
 }
 
 // Link adds caveats and names the next holder. It is signed by the previous
@@ -367,10 +367,10 @@ func (l Limits) Due(heldAt int64, novel bool) int64 {
 
 func rootBody(r Root) []byte {
 	b, _ := json.Marshal(struct {
-		Owner  ed25519.PublicKey `json:"owner"`
-		Clerk  string            `json:"clerk"`
-		Verbs  []Verb            `json:"verbs"`
-		Serial string            `json:"serial"`
+		Owner  PublicKey `json:"owner"`
+		Clerk  string    `json:"clerk"`
+		Verbs  []Verb    `json:"verbs"`
+		Serial string    `json:"serial"`
 	}{r.Owner, r.Clerk, r.Verbs, r.Serial})
 	return b
 }
@@ -408,10 +408,17 @@ func linkMsg(prev ID, l Link) []byte {
 	return append(append([]byte(DomainLink), prev[:]...), linkBody(l)...)
 }
 
-// Issue signs a root with the owner's key (KEY-4). The root's verbs are
-// normalised.
-func Issue(owner ed25519.PrivateKey, r Root) Key {
-	r.Owner = owner.Public().(ed25519.PublicKey)
+// LinkMsg is the message the signer of link l after k signs: k's holder,
+// or a passkey for a first link or a narrowing (Narrow).
+func LinkMsg(k Key, l Link) []byte { return linkMsg(k.Tip(), l) }
+
+// RootMsg is the message root r's owner signs.
+func RootMsg(r Root) []byte { return append([]byte(DomainRoot), rootBody(r)...) }
+
+// PrepareRoot is r as owner issues it, its verbs normalised and unsigned:
+// sign RootMsg of it, then AttachRoot.
+func PrepareRoot(owner PublicKey, r Root) Root {
+	r.Owner, r.Sig = owner, nil
 	vs := make([]string, len(r.Verbs))
 	for i, v := range r.Verbs {
 		vs[i] = string(v)
@@ -420,8 +427,39 @@ func Issue(owner ed25519.PrivateKey, r Root) Key {
 	for _, v := range set(vs) {
 		r.Verbs = append(r.Verbs, Verb(v))
 	}
-	r.Sig = ed25519.Sign(owner, append([]byte(DomainRoot), rootBody(r)...))
+	return r
+}
+
+// AttachRoot is the key of root r with the owner's signature sig over
+// RootMsg(r). Verify checks it.
+func AttachRoot(r Root, sig []byte) Key {
+	r.Sig = sig
 	return Key{Root: r}
+}
+
+// Issue signs a root with the owner's passkey (KEY-4). The root's verbs are
+// normalised.
+func Issue(owner Signer, r Root) Key {
+	r = PrepareRoot(owner.Public(), r)
+	return AttachRoot(r, owner.Sign(RootMsg(r)))
+}
+
+// AttachLink is k extended by link l with sig, its signer's signature over
+// LinkMsg(k, l). It refuses a link that loosens k or a first link without
+// an expiry and a daily spend cap; Verify checks the signature.
+func AttachLink(k Key, l Link, sig []byte) (Key, error) {
+	l.Sig = sig
+	out := Key{Root: k.Root, Links: append(append([]Link{}, k.Links...), l)}
+	if _, err := verifyChain(out, nil); err != nil {
+		return Key{}, err
+	}
+	return out, nil
+}
+
+// passkeyLink is k extended by l, which passkey signs.
+func passkeyLink(k Key, passkey Signer, l Link) (Key, error) {
+	l.Sig = nil
+	return AttachLink(k, l, passkey.Sign(LinkMsg(k, l)))
 }
 
 // Tip is the ID of the key's last link, or of its root.
@@ -442,25 +480,25 @@ func (k Key) holder() ed25519.PublicKey {
 	return nil
 }
 
-// signedBy reports whether pk signed msg, as one named signer or, when
-// signer is nil, as any passkey in owners.
-func signedBy(signer ed25519.PublicKey, owners []ed25519.PublicKey, msg, sig []byte) bool {
+// signedBy reports whether signer signed msg or, when signer is nil, any
+// passkey in owners did.
+func signedBy(signer ed25519.PublicKey, owners []PublicKey, msg, sig []byte) bool {
 	if signer != nil {
 		return ed25519.Verify(signer, msg, sig)
 	}
-	return whoSigned(owners, msg, sig) != nil
+	return whoSigned(owners, msg, sig).Valid()
 }
 
-// SignedBy reports whether pk signed grant k: a root it issued, or a first
-// link it signed.
-func SignedBy(k Key, pk ed25519.PublicKey) bool {
-	if len(pk) != ed25519.PublicKeySize {
+// SignedBy reports whether passkey pk signed grant k: a root it issued, or
+// a first link it signed.
+func SignedBy(k Key, pk PublicKey) bool {
+	if !pk.Valid() {
 		return false
 	}
 	if len(k.Links) == 0 {
-		return bytes.Equal(k.Root.Owner, pk)
+		return k.Root.Owner == pk
 	}
-	return ed25519.Verify(pk, linkMsg(rootID(k.Root), k.Links[0]), k.Links[0].Sig)
+	return pk.Verify(linkMsg(rootID(k.Root), k.Links[0]), k.Links[0].Sig)
 }
 
 // Extend signs and appends l without checking narrowness. Verify rejects a
@@ -495,23 +533,22 @@ func Derive(k Key, holder ed25519.PrivateKey, next ed25519.PublicKey, cav ...Cav
 // holder lacked, so it is no grant and waits no hold (D-146), and its caps
 // count against the link alone. It refuses a bare root, where a new link
 // would be a grant.
-func Narrow(k Key, passkey ed25519.PrivateKey, cav ...Caveat) (Key, error) {
+func Narrow(k Key, passkey Signer, cav ...Caveat) (Key, error) {
 	h := k.holder()
 	if h == nil {
 		return Key{}, ErrNotHolder
 	}
-	out := Extend(k, passkey, Link{Caveats: cav, Holder: h})
-	if _, err := verifyChain(out, nil); err != nil {
-		return Key{}, err
-	}
-	return out, nil
+	return passkeyLink(k, passkey, Link{Caveats: cav, Holder: h})
 }
 
 // ClerkKey is the passkey's grant to a clerk: the root narrowed by caveats,
 // living ClerkLife from now under a daily spend cap (D-146). A renewal is a
 // new ClerkKey; plans already admitted keep the key they cite.
-func ClerkKey(root Key, passkey ed25519.PrivateKey, clerk ed25519.PublicKey, now, spendDay int64, cav ...Caveat) (Key, error) {
-	return Derive(root, passkey, clerk, append([]Caveat{LimitExpires(now + ClerkLife), LimitSpendDay(spendDay)}, cav...)...)
+func ClerkKey(root Key, passkey Signer, clerk ed25519.PublicKey, now, spendDay int64, cav ...Caveat) (Key, error) {
+	if len(root.Links) > 0 {
+		return Key{}, ErrNotHolder
+	}
+	return passkeyLink(root, passkey, Link{Caveats: append([]Caveat{LimitExpires(now + ClerkLife), LimitSpendDay(spendDay)}, cav...), Holder: clerk})
 }
 
 // Reach is the verbs k reaches: its root's, narrowed by its links; none when
@@ -560,15 +597,19 @@ type Verified struct {
 	ByOwner bool
 	// Narrowers are the passkeys that signed such links, checked against
 	// the passkeys cut off since (kernel.Live).
-	Narrowers []ed25519.PublicKey
+	Narrowers []PublicKey
 	account   ID // the first link's budget (account)
 }
 
 // Sign is the tip holder's proof of possession: its signature over the key's
-// tip and one use of it, such as a plan. A key without it is inert.
+// tip and one use of it, such as a plan. A key without it is inert. A
+// passkey signs a use of a bare root over UseMsg.
 func Sign(k Key, holder ed25519.PrivateKey, use []byte) []byte {
 	return ed25519.Sign(holder, useMsg(k.Tip(), use))
 }
+
+// UseMsg is the message k's holder signs for one use of k.
+func UseMsg(k Key, use []byte) []byte { return useMsg(k.Tip(), use) }
 
 func useMsg(tip ID, use []byte) []byte {
 	return append(append([]byte(DomainUse), tip[:]...), use...)
@@ -580,7 +621,7 @@ func useMsg(tip ID, use []byte) []byte {
 // authorized for a submitter who cannot sign as the key's last holder. The
 // root is signed by its owner, which must be in owners; a first link, and a
 // use of a bare root, by any passkey in owners (D-146).
-func Verify(k Key, owners []ed25519.PublicKey, use, sig []byte) (*Verified, error) {
+func Verify(k Key, owners []PublicKey, use, sig []byte) (*Verified, error) {
 	v, err := Chain(k, owners)
 	if err != nil {
 		return nil, err
@@ -596,7 +637,7 @@ func Verify(k Key, owners []ed25519.PublicKey, use, sig []byte) (*Verified, erro
 // vouches for, a plan's key (held when its plan was admitted) or an
 // extension the owner granted. Its Verified can be charged (Spend) but never
 // authorizes a step, since nobody has signed as its holder.
-func Chain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
+func Chain(k Key, owners []PublicKey) (*Verified, error) {
 	if !In(owners, k.Root.Owner) {
 		return nil, ErrWrongOwner
 	}
@@ -605,9 +646,9 @@ func Chain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 
 // verifyChain verifies k. With owners nil it skips the signature checks, for
 // Derive, which has already been handed a key the caller holds.
-func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
+func verifyChain(k Key, owners []PublicKey) (*Verified, error) {
 	r := k.Root
-	if len(r.Owner) != ed25519.PublicKeySize || r.Clerk == "" || len(r.Verbs) == 0 || len(k.Links) > MaxLinks {
+	if !r.Owner.Valid() || r.Clerk == "" || len(r.Verbs) == 0 || len(k.Links) > MaxLinks {
 		return nil, ErrMalformed
 	}
 	vs := make([]string, len(r.Verbs))
@@ -620,7 +661,7 @@ func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 	if !canonical(vs) {
 		return nil, fmt.Errorf("%w: root verbs not canonical", ErrMalformed)
 	}
-	if owners != nil && !ed25519.Verify(r.Owner, append([]byte(DomainRoot), rootBody(r)...), r.Sig) {
+	if owners != nil && !r.Owner.Verify(RootMsg(r), r.Sig) {
 		return nil, ErrBadSig
 	}
 	v := &Verified{Key: k, IDs: []ID{rootID(r)}, Limits: Limits{Clerk: r.Clerk, Verbs: vs}}
@@ -634,7 +675,7 @@ func verifyChain(k Key, owners []ed25519.PublicKey) (*Verified, error) {
 		if owners != nil && !signedBy(holder, owners, linkMsg(prev, l), l.Sig) {
 			// A passkey may narrow a key for its own holder (Narrow).
 			p := whoSigned(owners, linkMsg(prev, l), l.Sig)
-			if p == nil || !bytes.Equal(l.Holder, holder) {
+			if !p.Valid() || !bytes.Equal(l.Holder, holder) {
 				return nil, ErrBadSig
 			}
 			v.ByOwner = true
@@ -711,26 +752,28 @@ func bounded(cs []Caveat) bool {
 // a synced phone passkey is enrolled under them, so no cloud account is the
 // root.
 type Enrollment struct {
-	Passkey ed25519.PublicKey `json:"passkey"`
-	By      ed25519.PublicKey `json:"by"`
-	Sig     []byte            `json:"sig"`
+	Passkey PublicKey `json:"passkey"`
+	By      PublicKey `json:"by"`
+	Sig     []byte    `json:"sig"`
 }
 
-func enrollMsg(pk ed25519.PublicKey) []byte { return append([]byte(DomainEnroll), pk...) }
+// EnrollMsg is the message an anchor signs to enroll pk, naming its
+// algorithm and RP ID too.
+func EnrollMsg(pk PublicKey) []byte { return append([]byte(DomainEnroll), pk.Encode()...) }
 
 // Enroll is anchor's signature enrolling pk.
-func Enroll(anchor ed25519.PrivateKey, pk ed25519.PublicKey) Enrollment {
-	return Enrollment{Passkey: pk, By: anchor.Public().(ed25519.PublicKey), Sig: ed25519.Sign(anchor, enrollMsg(pk))}
+func Enroll(anchor Signer, pk PublicKey) Enrollment {
+	return Enrollment{Passkey: pk, By: anchor.Public(), Sig: anchor.Sign(EnrollMsg(pk))}
 }
 
 // Passkeys is the owner's set: the anchors, then each passkey an anchor
 // enrolled, less every revoked one. A revoked passkey never comes back, so an
 // old enrollment replayed adds nothing, and an enrollment no anchor signed
 // adds nothing, so the set needs no trust in whoever keeps the list.
-func Passkeys(anchors []ed25519.PublicKey, es []Enrollment, revoked []ed25519.PublicKey) []ed25519.PublicKey {
-	var set []ed25519.PublicKey
-	add := func(pk ed25519.PublicKey) {
-		if len(pk) == ed25519.PublicKeySize && !In(set, pk) {
+func Passkeys(anchors []PublicKey, es []Enrollment, revoked []PublicKey) []PublicKey {
+	var set []PublicKey
+	add := func(pk PublicKey) {
+		if pk.Valid() && !In(set, pk) {
 			set = append(set, pk)
 		}
 	}
@@ -738,7 +781,7 @@ func Passkeys(anchors []ed25519.PublicKey, es []Enrollment, revoked []ed25519.Pu
 		add(a)
 	}
 	for _, e := range es {
-		if In(anchors, e.By) && !In(revoked, e.Passkey) && ed25519.Verify(e.By, enrollMsg(e.Passkey), e.Sig) {
+		if In(anchors, e.By) && !In(revoked, e.Passkey) && e.By.Verify(EnrollMsg(e.Passkey), e.Sig) {
 			add(e.Passkey)
 		}
 	}
@@ -746,11 +789,6 @@ func Passkeys(anchors []ed25519.PublicKey, es []Enrollment, revoked []ed25519.Pu
 }
 
 // In reports whether pk is in set.
-func In(set []ed25519.PublicKey, pk ed25519.PublicKey) bool {
-	for _, p := range set {
-		if len(p) == ed25519.PublicKeySize && bytes.Equal(p, pk) {
-			return true
-		}
-	}
-	return false
+func In(set []PublicKey, pk PublicKey) bool {
+	return pk.Valid() && slices.Contains(set, pk)
 }

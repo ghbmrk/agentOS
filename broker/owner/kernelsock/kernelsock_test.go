@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
@@ -184,13 +185,13 @@ func runningKernel(t *testing.T) Owner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var anchors []ed25519.PublicKey
+	var anchors []key.PublicKey
 	for range 2 {
 		a, _, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		anchors = append(anchors, a)
+		anchors = append(anchors, key.Ed25519(a))
 	}
 	h, err := proc.OpenKernel(proc.KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
@@ -211,32 +212,44 @@ func runningKernel(t *testing.T) Owner {
 }
 
 // STOP and RESUME are logged on a running kernel, and its stop is read
-// back (#2783); a setup-only kernel refuses all three in its own words.
+// back (#2783); a RESUME naming an earlier STOP than the last is refused
+// (#3078); a setup-only kernel refuses all three in its own words.
 func TestStopAndResumeReachTheKernel(t *testing.T) {
 	needRoot(t)
 	ctx := context.Background()
 	o := runningKernel(t)
-	for i, want := range []bool{false, true, false} {
+	var stale uint64
+	for i, want := range []bool{false, true, true, true, false} {
+		_, stops, _ := o.Stopped(ctx)
 		switch i {
 		case 1:
 			if err := o.Stop(ctx); err != nil {
 				t.Fatal(err)
 			}
 		case 2:
-			if err := o.Resume(ctx); err != nil {
+			stale = stops // a RESUME sent now and abandoned
+			if err := o.Stop(ctx); err != nil {
+				t.Fatal(err)
+			}
+		case 3:
+			if err := o.Resume(ctx, stale); !errors.As(err, new(Refused)) {
+				t.Fatalf("a RESUME sent before the last STOP: %v", err)
+			}
+		case 4:
+			if err := o.Resume(ctx, stops); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if got, err := o.Stopped(ctx); err != nil || got != want {
+		if got, _, err := o.Stopped(ctx); err != nil || got != want {
 			t.Fatalf("step %d: stopped %v, %v; want %v", i, got, err, want)
 		}
 	}
 	s := setupKernel(t)
 	var r Refused
-	if _, err := s.Stopped(ctx); !errors.As(err, &r) {
+	if _, _, err := s.Stopped(ctx); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's stop read: %v", err)
 	}
-	if err := s.Resume(ctx); !errors.As(err, &r) {
+	if err := s.Resume(ctx, 0); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's RESUME: %v", err)
 	}
 }
@@ -279,11 +292,11 @@ func TestARefusalAndAnUndecodableAnswer(t *testing.T) {
 	if err := o.Stop(ctx); !errors.As(err, &r) || r.Text != "stopped: stop is in force" {
 		t.Fatalf("a refusal: %v", err)
 	}
-	if _, err := o.Stopped(ctx); !errors.As(err, &r) {
+	if _, _, err := o.Stopped(ctx); !errors.As(err, &r) {
 		t.Fatalf("a refused read: %v", err)
 	}
 	o = cannedKernel(t, `{"result":"stopped"}`)
-	if got, err := o.Stopped(ctx); !errors.Is(err, ErrLost) || got {
+	if got, _, err := o.Stopped(ctx); !errors.Is(err, ErrLost) || got {
 		t.Fatalf("an undecodable result: %v, %v", got, err)
 	}
 	o = cannedKernel(t, `{"result":`)
@@ -366,14 +379,14 @@ func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 func TestStatusReadsTheKernelsFrame(t *testing.T) {
 	needRoot(t)
 	u := []kernel.Unsettled{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: kernel.PParked, Checks: 6,
-		Detail: "no answer", Retry: true, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
+		Detail: "no answer", Retry: true, SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
 	b, err := json.Marshal(map[string]any{"result": u})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := cannedKernel(t, string(b)).Status(context.Background())
 	want := []Step{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: PhaseParked, Detail: "no answer", Retry: true,
-		Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
+		SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("status reads %+v, %v; want %+v", got, err, want)
 	}

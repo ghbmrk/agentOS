@@ -3,7 +3,6 @@ package clerk
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -111,7 +110,7 @@ const (
 // details (CLK-1..4, KRN-8).
 type Exit struct {
 	conn
-	anchors []ed25519.PublicKey
+	anchors []key.PublicKey
 	ops     map[key.Verb]decl
 
 	mu    sync.Mutex // guards state only, never held across a request
@@ -198,7 +197,7 @@ var (
 // surprise. The exit owns its transport: no proxy from the environment, no
 // cookie jar, no redirects, and every dial through the guard, which is
 // required. roots nil trusts the system's certificate authorities.
-func NewExit(d Declaration, anchors []ed25519.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
+func NewExit(d Declaration, anchors []key.PublicKey, secrets *Secrets, roots *x509.CertPool) (*Exit, error) {
 	if d.Name == "" {
 		return nil, errors.New("clerk: a declaration needs a name")
 	}

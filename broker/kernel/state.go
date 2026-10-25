@@ -136,6 +136,10 @@ func (p Plan) use() []byte {
 	return b
 }
 
+// PlanMsg is the message p.Key's holder signs for p: for a bare root, a
+// passkey's challenge (key.Challenge).
+func PlanMsg(p Plan) []byte { return key.UseMsg(p.Key, p.use()) }
+
 // SignPlan signs p as the holder of p.Key.
 func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	p.Sig = key.Sign(p.Key, holder, p.use())
@@ -147,7 +151,7 @@ func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
 
 // VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
-func VerifyPlan(p Plan, owners []ed25519.PublicKey) (*key.Verified, error) {
+func VerifyPlan(p Plan, owners []key.PublicKey) (*key.Verified, error) {
 	if !p.text() {
 		return nil, ErrNotText
 	}
@@ -190,7 +194,7 @@ type (
 		Cosigns []key.Cosign `json:",omitempty"`
 	}
 	enrolled   struct{ Enrollment key.Enrollment }
-	unenrolled struct{ Passkey ed25519.PublicKey }
+	unenrolled struct{ Passkey key.PublicKey }
 	keyID      struct{ ID key.ID }
 	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
 	modelUsed struct {
@@ -322,7 +326,7 @@ type StepState struct {
 	Undone      bool
 	Detail      string // the clerk's last answer, for STATUS
 	Covered     string // a covered submit's STATUS line (CLK-3)
-	SentAt      int64  // when the log recorded it sent
+	SentAt      int64  // when the log first recorded it sent; a covered step's, when it was done
 	Retried     bool   // RETRY sent it again: it may have acted until a probe finds it not done
 }
 
@@ -395,11 +399,12 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 type State struct {
 	// The owner's passkeys (D-146): the anchors, the hardware keys; each
 	// passkey an anchor enrolled; less those revoked.
-	Anchors    []ed25519.PublicKey
+	Anchors    []key.PublicKey
 	Enrolled   []key.Enrollment
-	Unenrolled []ed25519.PublicKey
+	Unenrolled []key.PublicKey
 	Seq        uint64
 	Stopped    bool
+	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
 	Changes    key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
@@ -427,7 +432,7 @@ type Grant struct {
 	From int64
 }
 
-func NewState(anchors []ed25519.PublicKey) *State {
+func NewState(anchors []key.PublicKey) *State {
 	return &State{
 		Anchors: anchors,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
@@ -439,7 +444,7 @@ func NewState(anchors []ed25519.PublicKey) *State {
 }
 
 // Replay folds a whole log.
-func Replay(anchors []ed25519.PublicKey, es []Entry) (*State, error) {
+func Replay(anchors []key.PublicKey, es []Entry) (*State, error) {
 	s := NewState(anchors)
 	for _, e := range es {
 		if err := s.Apply(e); err != nil {
@@ -529,12 +534,12 @@ func (s *State) ChangesView() *key.Changes { return &s.Changes }
 func (s *State) Granted(id key.ID) (int64, bool) { g, ok := s.Grants[id]; return g.From, ok }
 
 // Enrollments is what Passkeys reads, for a clerk to check with its own anchors.
-func (s *State) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
+func (s *State) Enrollments() ([]key.Enrollment, []key.PublicKey) {
 	return s.Enrolled, s.Unenrolled
 }
 
 // Passkeys is the owner's set (D-146).
-func (s *State) Passkeys() []ed25519.PublicKey {
+func (s *State) Passkeys() []key.PublicKey {
 	return key.Passkeys(s.Anchors, s.Enrolled, s.Unenrolled)
 }
 
@@ -649,7 +654,7 @@ func lapse(cs []key.Caveat) *int64 {
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
 
 // owners is the passkey set a plan's key is verified against (PlanOwners).
-func (s *State) owners(k key.Key) []ed25519.PublicKey { return PlanOwners(s, s.Anchors, k) }
+func (s *State) owners(k key.Key) []key.PublicKey { return PlanOwners(s, s.Anchors, k) }
 
 // PlanOwners is the passkey set a plan's key is verified against, in the
 // kernel and the clerk alike, from the checker's own anchors. For a key
@@ -658,7 +663,7 @@ func (s *State) owners(k key.Key) []ed25519.PublicKey { return PlanOwners(s, s.A
 // grant itself was checked against the set at its entry. For a bare root it
 // is the set now: only a passkey's own tap uses a bare root, and a cut-off
 // phone taps nothing (D-146).
-func PlanOwners(v View, anchors []ed25519.PublicKey, k key.Key) []ed25519.PublicKey {
+func PlanOwners(v View, anchors []key.PublicKey, k key.Key) []key.PublicKey {
 	es, un := v.Enrollments()
 	if _, ok := v.Granted(rootOf(k)); ok && len(k.Links) > 0 {
 		un = nil
@@ -689,6 +694,7 @@ type Unsettled struct {
 	Checks int
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
+	SentAt int64  // when it was first sent (unix ms), which a RETRY line names (#3079)
 	// What the owner's RETRY tier is judged on (CH-10, CH-11), from the
 	// plan's own step: its spend, whether its verb moves money (always
 	// the high tier), and its recipient.
@@ -713,7 +719,7 @@ func (s *State) Status() []Unsettled {
 			}
 			ks := p.Plan.Step(i)
 			out = append(out, Unsettled{Plan: id, Index: i, Verb: ks.Verb, Clerk: ks.Clerk,
-				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st),
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt,
 				Amount: ks.Amount, Money: slices.Contains(key.ArgNames(ks.Verb), key.ArgAmount), Recipient: ks.Recipient,
 				PlanStatus: p.Status, Cancel: p.Cancel, CancelDetail: p.CancelDetail})
 		}
@@ -928,6 +934,7 @@ func (s *State) Apply(e Entry) error {
 		s.Pools[b.Pool] = p
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
+		s.Stops++
 		for _, t := range s.tasks {
 			t.ended = true // an ended task never comes back
 		}
@@ -989,7 +996,7 @@ func (s *State) Apply(e Entry) error {
 		if p, st := s.step(b.stepRef); st != nil && sendable(st.Phase) {
 			st.Phase, st.Attempt = PInflight, b.Attempt
 			if b.Attempt == 1 {
-				st.DispatchSeq = e.Seq
+				st.DispatchSeq, st.SentAt = e.Seq, e.At
 				sp := p.Plan.Step(b.Index)
 				for _, id := range p.Scopes {
 					s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: sp.Amount, Recipient: sp.Recipient, Task: sp.Task}})

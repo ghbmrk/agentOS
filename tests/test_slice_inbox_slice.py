@@ -38,11 +38,12 @@ class SliceBinary:
         return cls.exe
 
 
-def adapter(case, world, mailbox=""):
+def request(case, world, mailbox=""):
+    """What the adapter hands the slice binary for one run of case on mailbox."""
     ids, classes = harness.mailbox(case, world)
     by_id = harness.by_id(world)
     standing = harness.later_run_key(case)
-    request = {
+    return {
         "world": {k: world[k] for k in ("dkim_keys", "provider_table", "history", "contacts",
                                         "known_senders", "today", "last_opened",
                                         "unsubscribe_unopened_days", "authserv", "alert_senders")},
@@ -56,7 +57,11 @@ def adapter(case, world, mailbox=""):
         "standing": standing,
         "mailbox": mailbox,
     }
-    done = subprocess.run([SliceBinary.build()], input=json.dumps(request).encode(),
+
+
+def adapter(case, world, mailbox=""):
+    done = subprocess.run([SliceBinary.build()],
+                          input=json.dumps(request(case, world, mailbox)).encode(),
                           capture_output=True, check=False)
     if done.returncode:
         raise RuntimeError(done.stderr.decode())

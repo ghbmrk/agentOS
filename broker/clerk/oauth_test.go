@@ -4,7 +4,6 @@ package clerk_test
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,7 +102,7 @@ func setupOAuth(t *testing.T) *oauthFix {
 	}
 	o.d = o.decl(o.ops)
 	o.d.Refresh = o.base() + "/token"
-	x, err := clerk.NewExit(o.d, []ed25519.PublicKey{o.opub}, sec, o.roots)
+	x, err := clerk.NewExit(o.d, []key.PublicKey{key.Ed25519(o.opub)}, sec, o.roots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +135,7 @@ func (o *oauthFix) restart(t *testing.T, now int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x, err := clerk.NewExit(o.d, []ed25519.PublicKey{o.opub}, sec, o.roots)
+	x, err := clerk.NewExit(o.d, []key.PublicKey{key.Ed25519(o.opub)}, sec, o.roots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,11 +539,11 @@ func TestNewExitRefusesABadRefreshDeclaration(t *testing.T) {
 		"unknown grant field": {"https://h.example/token", `{"refresh_token":"canary-r","scope":"all"}`, []clerk.Op{op}},
 		"no slot":             {"https://h.example/token", good, []clerk.Op{{Verb: key.Post, Method: "POST", URL: "https://h.example/v1"}}},
 	} {
-		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: c.ops, Refresh: c.url}, []ed25519.PublicKey{opub}, store(c.grant), nil); err == nil {
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: c.ops, Refresh: c.url}, []key.PublicKey{key.Ed25519(opub)}, store(c.grant), nil); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}, Refresh: "https://h.example/token"}, []ed25519.PublicKey{opub}, store(good), nil); err != nil {
+	if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}, Refresh: "https://h.example/token"}, []key.PublicKey{key.Ed25519(opub)}, store(good), nil); err != nil {
 		t.Fatalf("a good refresh declaration was refused: %v", err)
 	}
 }
@@ -577,7 +576,7 @@ func TestNewExitRefusesASlotOfTheOtherKind(t *testing.T) {
 		if err := s.Put("web", c.kind, []byte(grant)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}, Refresh: c.refresh}, []ed25519.PublicKey{opub}, s, nil); err == nil {
+		if _, err := clerk.NewExit(clerk.Declaration{Name: "web", Guard: pub, Ops: []clerk.Op{op}, Refresh: c.refresh}, []key.PublicKey{key.Ed25519(opub)}, s, nil); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

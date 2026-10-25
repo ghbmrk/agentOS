@@ -249,10 +249,12 @@ func main() {
 	var mailOwner string
 	kernelUID, kernelOwnerUID := -1, -1
 	var kernelOwner, kernelStore string
+	var planHolder, planGrant string
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
+	flag.StringVar(&cfg.Currency, "currency", "", "the household's one currency, an ISO 4217 code such as EUR, which a RETRY line names a kernel step's amount in; empty, in minor units (#3079)")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	flag.StringVar(&mailOwner, "mail-owner", "", "the mail clerk's owner socket (clerk/run MailOwnerSide), which the local UI's Connect page signs in to Gmail through (#3006); empty, the page's account ops are refused")
@@ -284,6 +286,8 @@ func main() {
 	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
 	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
+	flag.StringVar(&planHolder, "plan-holder", "/var/lib/agentos/plan-holder.key", "the key that holds the owner's clerk-key grant and signs guests' plans (#3087): made root-only at first start, kept across reboots; empty, no guest plan is signed")
+	flag.StringVar(&planGrant, "plan-grant", "/var/lib/agentos/plan-grant.json", "the owner's clerk-key grant to -plan-holder, root-only; absent, every guest plan is refused for want of a key (KEY-4)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
@@ -693,7 +697,8 @@ func main() {
 			if wt != nil {
 				startReaper(ctx, wt, m, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, seat, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
+			keys := openPlanKeys(planHolder, planGrant)
+			if plane, err := openGuestPlane(m, d, ev, seat, keys, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 				caps.agentOff(agentNoMachines)
@@ -1060,8 +1065,9 @@ func sweepInboxTemps(inboxPath string) {
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start. A guest's plan
 // goes to the kernel on its owner socket (PLN-5 (b)); with no kernel to call
-// (seat nil) every plan is refused.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, seat *kernelsock.Owner, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
+// (seat nil), or no key for a machine (keys nil, or no grant), every plan is
+// refused.
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, seat *kernelsock.Owner, keys guest.Keys, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -1095,10 +1101,10 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, seat *kernels
 		Dir:       filepath.Join(socketDir, "guests"),
 		InboxPath: inboxPath,
 		Machines:  machines{m},
-		// No machine holds a key yet: issuing planner keys is the owner's
-		// passkey grant (KEY-3, KEY-4), which agentosd does not make yet
-		// (ASSUMPTIONS MIG-4-guest-plan-a), so every plan is refused with
-		// the plane's fixed reason.
+		// Each machine's key is the owner's clerk-key grant narrowed to it
+		// (KEY-3, KEY-4); until the owner grants one, every plan is refused
+		// with the plane's fixed reason (ASSUMPTIONS MIG-4-guest-keys-a).
+		Keys:  keys,
 		Label: label,
 		// A guest's reply waits in the plane's outbox, on disk, until the
 		// evidence worker has routed it (DEL-1b); a private machine's

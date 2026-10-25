@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -196,7 +195,7 @@ func (s *State) OneOffLine(root key.ID, now int64) int64 {
 
 // OneOff refuses a one-off under a bare root whose spend is past the line
 // unless a second passkey, one of the two an anchor, co-signed it.
-func OneOff(v View, owners, anchors []ed25519.PublicKey, p Plan, now int64) *key.Refusal {
+func OneOff(v View, owners, anchors []key.PublicKey, p Plan, now int64) *key.Refusal {
 	if len(p.Key.Links) > 0 {
 		return nil
 	}
@@ -208,7 +207,7 @@ func OneOff(v View, owners, anchors []ed25519.PublicKey, p Plan, now int64) *key
 		return nil
 	}
 	signer := key.UseSigner(p.Key, owners, p.use(), p.Sig)
-	if !key.Approved(owners, anchors, PlanHash(p), []ed25519.PublicKey{signer}, p.Cosigns) {
+	if !key.Approved(owners, anchors, PlanHash(p), []key.PublicKey{signer}, p.Cosigns) {
 		return &key.Refusal{Code: CCosign, Detail: strconv.FormatInt(total, 10)}
 	}
 	return nil

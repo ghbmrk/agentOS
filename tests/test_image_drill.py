@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,8 +54,11 @@ class DrillTest(unittest.TestCase):
         self.status = STATUS
         (t / "status").write_text(self.status)
         stub(self.bin, "veritysetup", 'case $1 in status) [ "$2" = usr ] && cat "{s}" ;;\n'
-             'verify) echo "veritysetup $*" >>"{l}"; c=$(cat "{c}"); echo $((c + 40)) >"{c}"; exit $(cat "{rc}") ;;\n'
-             'esac'.format(s=t / "status", l=self.log, c=self.clock, rc=t / "rc"))
+             'verify) echo "veritysetup $*" >>"{l}"; [ -e "{h}" ] && exec "{sl}" 60\n'
+             'c=$(cat "{c}"); echo $((c + 40)) >"{c}"; exit $(cat "{rc}") ;;\n'
+             'esac'.format(s=t / "status", l=self.log, c=self.clock, rc=t / "rc", h=t / "hang",
+                           sl=shutil.which("sleep")))
+        self.hang = t / "hang"
         self.rc = t / "rc"
         self.rc.write_text("0\n")
         self.statusf = t / "status"
@@ -134,13 +138,32 @@ class DrillTest(unittest.TestCase):
         self.assertEqual(self.pending()["reboot_at"], "1000640")
         self.assertEqual(self.pending()["image_seconds"], "40")
 
-    def test_the_week_bound_holds_through_a_drill(self):
+    def test_a_week_already_up_starts_no_check(self):
+        # timeout 0 would be no bound at all, so with no time left the drill records an incomplete check.
         write(self.root, "proc/uptime", "604800.00 1.00\n")
         self.inhibit.write_text("1000000\n")
-        _, calls = self.reboot()
+        out, calls = self.reboot()
+        self.assertEqual(calls, ["systemctl reboot --check-inhibitors=no"])
+        self.assertIn("drill image=incomplete", out)
+        self.assertEqual(self.pending()["image"], "incomplete")
+
+    def test_a_stalled_check_is_cut_at_the_week(self):
+        # A verifier that never finishes, one second before the week is up: the check is killed at the
+        # bound, the record says so, and the reboot goes through the inhibitor once the week has passed.
+        write(self.root, "proc/uptime", "604799.00 1.00\n")
+        self.hang.write_text("")
+        self.inhibit.write_text("1000000\n")
+        t0 = time.monotonic()
+        out, calls = self.reboot()
+        self.assertLess(time.monotonic() - t0, 20)
         self.assertEqual(calls, ["veritysetup verify /dev/vda2 /dev/vda3 " + HASH,
+                                 "systemctl reboot --check-inhibitors=yes", "sleep 300",
                                  "systemctl reboot --check-inhibitors=no"])
-        self.assertEqual(self.pending()["image"], "verified")
+        self.assertIn("drill image=incomplete", out)
+        self.assertEqual(self.pending()["image"], "incomplete")
+        rc, line = self.report()
+        self.assertEqual(rc, 1)
+        self.assertTrue(line.startswith("agentos-drill: FAIL image=incomplete "), line)
 
     def test_the_report_after_the_reboot(self):
         self.reboot()

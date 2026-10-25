@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // #2905 open point 2: a kernel process started with no anchors serves only
@@ -40,7 +41,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 		t.Fatalf("STATUS before setup: %v", err)
 	}
 	for name, err := range map[string]error{
-		"stop": o.Stop(), "resume": o.Resume(), "readpool": m.ReadPool(0, "codex", 1, 2),
+		"stop": o.Stop(), "resume": o.Resume(0), "readpool": m.ReadPool(0, "codex", 1, 2),
 	} {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("%s before setup: got %v, want ErrSetupOnly", name, err)
@@ -50,7 +51,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 	if err != nil || !info.Open || !info.Box.Equal(headPub) {
 		t.Fatalf("setup info %+v %v", info, err)
 	}
-	if err := o.Setup(kernel.SignSetup(info.Box, ownerPriv, sparePriv)); err != nil {
+	if err := o.Setup(kernel.SignSetup(info.Box, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv))); err != nil {
 		t.Fatal(err)
 	}
 	if err := o.Stop(); err != nil {

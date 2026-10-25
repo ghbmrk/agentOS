@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 
@@ -234,7 +233,7 @@ type Dispatch struct {
 // View is the read-only part of the state a clerk checks against (CLK-2).
 type View interface {
 	Granted(id key.ID) (from int64, ok bool)
-	Enrollments() ([]key.Enrollment, []ed25519.PublicKey)
+	Enrollments() ([]key.Enrollment, []key.PublicKey)
 	ChangesView() *key.Changes
 	LedgerBefore(seq uint64) key.Ledger
 	// Dispatched answers only for a request the log has in flight now.
@@ -294,7 +293,7 @@ var ErrDuplicatePlan = errors.New("kernel: plan id already used")
 // Boot opens a kernel over a log: replay it, decide any plan that was
 // submitted but not decided, and mark every step that was in flight unknown,
 // to be probed (KRN-8).
-func Boot(l *Log, anchors []ed25519.PublicKey, clerks map[string]Clerk, now int64) (*Kernel, error) {
+func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64) (*Kernel, error) {
 	s, err := Replay(anchors, l.Entries())
 	if err != nil {
 		return nil, err
@@ -368,7 +367,7 @@ func (k *Kernel) Enroll(now int64, e key.Enrollment) error {
 // Unenroll cuts a passkey off for good, such as a lost phone's. Keys derived
 // from its grants in the log stand until they lapse; it signs no new grant
 // and no plan under a bare root.
-func (k *Kernel) Unenroll(now int64, pk ed25519.PublicKey) error {
+func (k *Kernel) Unenroll(now int64, pk key.PublicKey) error {
 	if key.In(k.s.Anchors, pk) {
 		return ErrAnchor
 	}
@@ -633,8 +632,20 @@ func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPa
 func (k *Kernel) Unpause(now int64, id key.ID) error {
 	return k.owner(now, TKeyResumed, keyID{id})
 }
-func (k *Kernel) Stop(now int64) error   { return k.owner(now, TStop, struct{}{}) }
-func (k *Kernel) Resume(now int64) error { return k.owner(now, TResume, struct{}{}) }
+func (k *Kernel) Stop(now int64) error { return k.owner(now, TStop, struct{}{}) }
+
+// ErrStaleResume refuses a RESUME sent before a STOP the kernel has since
+// logged: an owner told that STOP holds must not see it lifted (#3078).
+var ErrStaleResume = errors.New("kernel: a STOP was logged after this RESUME was sent")
+
+// Resume lifts the STOP whose count it names (State.Stops), and only that
+// one: a RESUME that waited behind a later STOP is refused, unlogged.
+func (k *Kernel) Resume(now int64, stops uint64) error {
+	if stops != k.s.Stops {
+		return ErrStaleResume
+	}
+	return k.owner(now, TResume, struct{}{})
+}
 
 // owner records an owner action and anchors the head at once, so a widening
 // the owner confirmed survives a restart (KRN-7, LOG-2). When the anchor

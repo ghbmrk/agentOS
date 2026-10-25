@@ -3,7 +3,6 @@ package kernel_test
 // REQ: KRN-5, CLK-3, KEY-3, D-147
 
 import (
-	"bytes"
 	"errors"
 	"reflect"
 	"testing"
@@ -16,7 +15,7 @@ import (
 const site, first = "shop.example", "https://shop.example/cart"
 
 func approval(id string, n int, by pair) kernel.TaskApproval {
-	return kernel.TaskApproval{Site: site, First: first, N: n, By: key.Approve(by.priv, kernel.TaskHash(id, n, site, first))}
+	return kernel.TaskApproval{Site: site, First: first, N: n, By: key.Approve(by.pass, kernel.TaskHash(id, n, site, first))}
 }
 
 // serve is a key for task id, narrowed from the clerk's key.
@@ -124,7 +123,7 @@ func TestEachEndEndsTheTask(t *testing.T) {
 		"final result": func(r *rig) int64 { must(r.t, r.k.EndTask(1, "t1")); return 2 },
 		"stop": func(r *rig) int64 {
 			must(r.t, r.k.Stop(1))
-			must(r.t, r.k.Resume(2))
+			must(r.t, r.k.Resume(2, r.k.State().Stops))
 			return 3
 		},
 		"timeout": func(r *rig) int64 { return kernel.TaskTimeout },
@@ -156,14 +155,14 @@ func TestEachEndEndsTheTask(t *testing.T) {
 func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	must(t, r.k.OpenTask(0, "t1"))
 	must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, phone)))
-	must(t, r.k.Unenroll(1, gen(21).pub))
+	must(t, r.k.Unenroll(1, gen(21).pk))
 	if tk, _ := r.k.State().Task("t1", 1); len(tk.Approvals) != 1 {
 		t.Fatal("cutting off another passkey ended the approval")
 	}
-	must(t, r.k.Unenroll(2, phone.pub))
+	must(t, r.k.Unenroll(2, phone.pk))
 	tk, ok := r.k.State().Task("t1", 2)
 	if !ok || len(tk.Approvals) != 0 {
 		t.Fatalf("after the cut-off: live %v, approvals %v", ok, tk.Approvals)
@@ -212,19 +211,19 @@ func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
 func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	must(t, r.k.OpenTask(0, "t1"))
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	other := kernel.TaskApproval{Site: "other.example", First: "https://other.example/"}
-	other.N, other.By = 1, key.Approve(r.owner.priv, kernel.TaskHash("t1", 1, other.Site, other.First))
+	other.N, other.By = 1, key.Approve(r.owner.pass, kernel.TaskHash("t1", 1, other.Site, other.First))
 	must(t, r.k.ApproveTask(2, "t1", other))
 	must(t, r.k.ApproveTask(3, "t1", approval("t1", 2, phone)))
 	tk, _ := r.k.State().Task("t1", 4)
-	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || !bytes.Equal(tk.Approvals[site].By.By, phone.pub) || tk.Approvals[other.Site].At != 2 {
+	if len(tk.Approvals) != 2 || tk.Approvals[site].At != 3 || tk.Approvals[site].By.By != phone.pk || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("approvals %+v", tk.Approvals)
 	}
 	delete(tk.Approvals, other.Site) // the answer is a copy
-	must(t, r.k.Unenroll(5, phone.pub))
+	must(t, r.k.Unenroll(5, phone.pk))
 	if tk, _ := r.k.State().Task("t1", 6); len(tk.Approvals) != 1 || tk.Approvals[other.Site].At != 2 {
 		t.Fatalf("after the cut-off: %+v", tk.Approvals)
 	}

@@ -167,6 +167,12 @@ type Config struct {
 	// Kernel, when set, is the kernel's owner seam: STOP, RESUME, STATUS
 	// and RETRY reach it too (#2783). Nil: no kernel.
 	Kernel KernelOwner
+	// Currency is the household's one currency, an ISO 4217 code such as
+	// "EUR": a kernel step's amount is in its minor units, and a RETRY line
+	// names it in this currency (#3079, Mark's card
+	// cmsg_01R91wiieBzMSvPKFsAJVvuKUgXeiUr5Cgukv7ac35d1X9). Empty: in
+	// minor units.
+	Currency string
 	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
 	// on the owner channel (localapi, P2-2w). It needs OwnerState.
 	PageSocket *PageSocket
@@ -296,6 +302,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.OwnerNumber == "" && cfg.Auth == nil {
 		return nil, errors.New("daemon: owner number required")
 	}
+	if _, ok := minorDigits[cfg.Currency]; cfg.Currency != "" && !ok {
+		return nil, fmt.Errorf("daemon: currency %q is not an ISO 4217 code of a currency in circulation", cfg.Currency)
+	}
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
 	}
@@ -396,7 +405,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	handle := h.Handle
 	var ch *ownerch.Channel
 	rt := newRetrier(ctx, eng, gate)
-	rt.k = cfg.Kernel
+	rt.k, rt.currency = cfg.Kernel, cfg.Currency
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: owned, Agent: cfg.Agent,
@@ -711,8 +720,10 @@ func followNonce() string {
 // steps of both.
 type KernelOwner interface {
 	Stop(context.Context) error
-	Resume(context.Context) error
-	Stopped(context.Context) (bool, error)
+	// Resume names the count of STOPs it lifts, as Stopped read it; the
+	// kernel refuses it once a later STOP is logged (#3078).
+	Resume(ctx context.Context, stops uint64) error
+	Stopped(context.Context) (stopped bool, stops uint64, err error)
 	SetupOpen(context.Context) (bool, error)
 	Status(context.Context) ([]KernelStep, error)
 	// Retry returns KernelRefused for the kernel's refusal and
@@ -731,7 +742,8 @@ type KernelStep struct {
 	Clerk  string
 	Phase  string // KernelUnknown, KernelParked or KernelUnsent
 	Detail string
-	Retry  bool // the owner may RETRY it
+	Retry  bool  // the owner may RETRY it
+	SentAt int64 // when it was first sent (unix ms), which RETRY names
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount     int64
@@ -796,7 +808,7 @@ func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
 // journal's write failed) STOPs the kernel again, so "Still stopped." holds
 // for both. A STOP only the kernel holds leaves the journal as it is.
 func (b *bothStops) Resume() error {
-	if err := b.kernel(context.Background(), b.k.Resume); err != nil {
+	if err := b.kernel(context.Background(), b.resumeKernel); err != nil {
 		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 	}
 	if !b.Engine.Stopped() {
@@ -806,6 +818,17 @@ func (b *bothStops) Resume() error {
 		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 	}
 	return nil
+}
+
+// resumeKernel lifts the STOP the kernel holds now: the RESUME names the
+// count of STOPs read with it, so one given up on here and served after
+// the owner's next STOP is refused, and that STOP holds (#3078).
+func (b *bothStops) resumeKernel(ctx context.Context) error {
+	_, stops, err := b.k.Stopped(ctx)
+	if err != nil {
+		return err
+	}
+	return b.k.Resume(ctx, stops)
 }
 
 // kernel runs a STOP or RESUME on the kernel; a setup-only kernel's
@@ -830,7 +853,7 @@ func (b *bothStops) kernel(ctx context.Context, f func(context.Context) error) e
 func (b *bothStops) Stopped() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
-	stopped, err := b.k.Stopped(ctx)
+	stopped, _, err := b.k.Stopped(ctx)
 	unread := err != nil
 	if unread {
 		open, oerr := b.k.SetupOpen(ctx)

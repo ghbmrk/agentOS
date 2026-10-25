@@ -25,23 +25,39 @@ name: premerge
 # branch workflow, or the base copy of a PR into another branch, does not. Until the App is set
 # (vars.PREMERGE_APP_CLIENT_ID unset) the status falls back to github.token; once the ruleset pins
 # the App, such a status counts for nothing, so a missing or broken App fails closed.
+# ARM-on-accept (#3103): when the status it posts is `success` from `--check` (`same`), the
+# `merge` job merges the PR once every check on the head is green, so whichever of the last
+# accept and the last CI run lands last, the PR merges with no session acting after its
+# verdict. Main's ruleset requires only some checks, so auto-merge would not wait for the rest
+# (#3123 review); the job reads them all instead. The gate therefore also reruns when a PR's
+# CI workflow completes. It merges an open, non-draft, unarmed PR only, pinned to the head the
+# gate read (`sha`), so a push since then is refused, and runs no repository code. A check
+# still running, or a refused merge, only warns: the next completion reruns it. It uses
+# BOT_PR_TOKEN (the `bot` environment, main only, D-123), not GITHUB_TOKEN, whose merges
+# start no push workflows on main; without that token it only warns, and a session arms by
+# hand (OPERATING section 7).
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
   issue_comment:
     types: [created, edited, deleted]
+  workflow_run:
+    workflows: [ci, assurance, vulncheck, word-budget, g1-freeze, lane-gate, trusted-base, formal, keycheck, image, testkit-image]
+    types: [completed]
 permissions:
   contents: read
 concurrency:
-  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
   cancel-in-progress: false
 jobs:
   premerge-gate:
     name: premerge-gate
-    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
+    outputs:
+      merge-head: ${{ steps.gate.outputs.merge-head }}
     permissions:
       contents: read
       issues: read
@@ -61,8 +77,9 @@ jobs:
           private-key: ${{ secrets.PREMERGE_APP_KEY }}
           permission-statuses: write
       - name: Premerge (base copy of tools/premerge.py)
+        id: gate
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}
@@ -100,3 +117,47 @@ jobs:
           out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
           echo "premerge $HEAD_SHA: $state ($out)"
           post "$state" "$out"
+          if [ "$state" = success ] && [ "$out" = same ] && \
+            jq -e '.state == "open" and .draft == false and .auto_merge == null' "$RUNNER_TEMP/pr.json" > /dev/null; then
+            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          fi
+  merge:
+    name: merge
+    needs: premerge-gate
+    if: needs.premerge-gate.outputs.merge-head != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: bot # deployment branches: main only; holds BOT_PR_TOKEN
+    permissions: {}
+    steps:
+      - name: Merge the accepted head once every check on it is green
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }
+          echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
+          # Every check run but this workflow's own jobs, and every status, must have passed.
+          # Each read stops the run on its own failure: a failed read must never look like no checks.
+          # A job has no check run until GitHub creates it (`needs: scope`), so the head's workflow
+          # runs must all have finished too (#3123 review). This workflow's own runs and this run's
+          # check suite are left out by path and id, not by a name another workflow could reuse.
+          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx '[0-9]+' \
+            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }
+          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
+            | jq -rs 'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)
+                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name') \
+            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
+          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs[]' \
+            | jq -r --argjson suite "$suite" 'select(.check_suite.id != $suite)
+                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name') \
+            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }
+          stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq '.statuses[] | select(.state != "success") | .context') \
+            || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }
+          if [ -n "$wfs$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $wfs $runs $stats; exit 0; fi
+          if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null; then
+            echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0
+          fi
+          echo "merged #$PR_NUMBER at $HEAD_SHA"

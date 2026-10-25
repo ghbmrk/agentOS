@@ -3,7 +3,6 @@ package run
 import (
 	"cmp"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -26,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
@@ -321,7 +321,7 @@ func readMail(dir string) (MailSettings, error) {
 
 // MailConfig is what the mail clerk's process is given besides its directory.
 type MailConfig struct {
-	Anchors []ed25519.PublicKey
+	Anchors []key.PublicKey
 	// HandleSecret keys the sender handles the planner sees (inbox.NewAccount).
 	HandleSecret []byte
 	// Ask is the quarantined read that classes each mail (inbox.Read).

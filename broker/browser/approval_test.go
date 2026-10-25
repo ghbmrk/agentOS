@@ -56,7 +56,7 @@ func (r *clerkRig) stepApproval(t *testing.T, id string) Approval {
 // home clerk's key to posts of exactly these prints, once each (OWN-9).
 func (r *clerkRig) approve(t *testing.T, prints ...string) key.Key {
 	t.Helper()
-	k, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(prints...),
+	k, err := key.Narrow(r.root, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(prints...),
 		key.LimitUses(int64(len(prints))), key.LimitExpires(MaxApproval/2)) // the rig's clock is the log's time, near 0
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +468,7 @@ func TestUncappedPrintKeyReleasesNothing(t *testing.T) {
 		"not print": {key.LimitVerbs(key.Post), key.LimitContent(a.Print, "plain"), key.LimitUses(1)},
 		"over cap":  {key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(2)},
 	} {
-		k, err := key.Narrow(r.root, r.phone, append(cav, key.LimitExpires(MaxApproval/2))...)
+		k, err := key.Narrow(r.root, key.Ed25519Signer(r.phone), append(cav, key.LimitExpires(MaxApproval/2))...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -596,7 +596,7 @@ func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
 	a := r.stepApproval(t, "ask")
 	// The approval lives its longest, so it outlasts the ten checks on the
 	// rig's clock.
-	k, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1), key.LimitExpires(MaxApproval))
+	k, err := key.Narrow(r.root, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1), key.LimitExpires(MaxApproval))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,17 +702,17 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	}
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
-	root2, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), opriv, hpub, 3-kernel.GrantHold, 1<<40)
+	root2, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), key.Ed25519Signer(opriv), hpub, 3-kernel.GrantHold, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, bpriv := seedKey(12)
 	batch := []key.Key{{Root: root2.Root}, root2}
-	cosign := []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}
+	cosign := []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}
 	if err := r.k.Issue(3-kernel.GrantHold, cosign, batch...); err != nil {
 		t.Fatal(err)
 	}
-	k2, err := key.Narrow(root2, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
+	k2, err := key.Narrow(root2, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
 		key.LimitExpires(MaxApproval/2))
 	if err != nil {
 		t.Fatal(err)
@@ -724,7 +724,7 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	if got := forwarded(t, r.h, "click"); len(got) != 1 {
 		t.Fatalf("driver got %q", got)
 	}
-	twice, err := key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print, a.Print), key.LimitUses(2))
+	twice, err := key.Narrow(r.root, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(a.Print, a.Print), key.LimitUses(2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,19 +756,19 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 				t.Fatal(err)
 			}
 		case "bare":
-			if k, err = key.Narrow(k, r.phone, key.LimitUses(1), soon); err != nil {
+			if k, err = key.Narrow(k, key.Ed25519Signer(r.phone), key.LimitUses(1), soon); err != nil {
 				t.Fatal(err)
 			}
 		case "uncapped":
-			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), soon); err != nil {
+			if k, err = key.Narrow(k, key.Ed25519Signer(r.phone), key.LimitContent(a.Print), soon); err != nil {
 				t.Fatal(err)
 			}
 		case "standing":
-			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1)); err != nil {
+			if k, err = key.Narrow(k, key.Ed25519Signer(r.phone), key.LimitContent(a.Print), key.LimitUses(1)); err != nil {
 				t.Fatal(err)
 			}
 		case "long":
-			if k, err = key.Narrow(k, r.phone, key.LimitContent(a.Print), key.LimitUses(1),
+			if k, err = key.Narrow(k, key.Ed25519Signer(r.phone), key.LimitContent(a.Print), key.LimitUses(1),
 				key.LimitExpires(16*60*1000)); err != nil {
 				t.Fatal(err)
 			}
@@ -781,7 +781,7 @@ func TestOnlyThePasskeyApproves(t *testing.T) {
 			}
 		case "late":
 			// A link expiring just inside MaxApproval is an approval.
-			if k, err = key.Narrow(r.root, r.phone, key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
+			if k, err = key.Narrow(r.root, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
 				key.LimitExpires(MaxApproval-60_000)); err != nil {
 				t.Fatal(err)
 			}

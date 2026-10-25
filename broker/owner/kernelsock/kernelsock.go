@@ -147,20 +147,31 @@ func (o Owner) SetupOpen(ctx context.Context) (bool, error) {
 // kernel holds runs again until a RESUME. A setup-only kernel refuses it.
 func (o Owner) Stop(ctx context.Context) error { return o.call(ctx, "stop", nil, nil) }
 
-// Resume logs a RESUME on the kernel and anchors it.
-func (o Owner) Resume(ctx context.Context) error { return o.call(ctx, "resume", nil, nil) }
+// Resume logs a RESUME on the kernel and anchors it. It names the count
+// of STOPs it lifts, as Stopped read it: the kernel refuses it once a later
+// STOP is logged, so a RESUME abandoned here never lifts that STOP (#3078).
+func (o Owner) Resume(ctx context.Context, stops uint64) error {
+	return o.call(ctx, "resume", resume{stops}, nil)
+}
 
-// changes is the part of kernel/key Changes read here.
+// resume is kernel/proc's resumeArgs.
+type resume struct {
+	Stops uint64 `json:"stops"`
+}
+
+// changes is the part of kernel/proc's changes read used here.
 type changes struct {
 	Stopped bool
+	Stops   uint64 `json:"stops"`
 }
 
 // Stopped reads whether a STOP is in force on the kernel (its log's
-// Changes view). A setup-only kernel refuses it.
-func (o Owner) Stopped(ctx context.Context) (bool, error) {
+// Changes view) and how many STOPs it has logged, which a RESUME names. A
+// setup-only kernel refuses it.
+func (o Owner) Stopped(ctx context.Context) (bool, uint64, error) {
 	var c changes
 	err := o.call(ctx, "changes", nil, &c)
-	return c.Stopped, err
+	return c.Stopped, c.Stops, err
 }
 
 // Step is a step the kernel's log has not settled (kernel.Unsettled, the
@@ -175,6 +186,7 @@ type Step struct {
 	Phase  string // PhaseUnknown, PhaseParked or PhaseUnsent
 	Detail string // the clerk's last answer, which the kernel bounds
 	Retry  bool   // the owner may RETRY it
+	SentAt int64  // when it was first sent (unix ms), which RETRY names
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount    int64

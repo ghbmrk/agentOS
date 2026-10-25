@@ -115,8 +115,8 @@ type (
 		Rf     *key.Refusal `json:"refusal,omitempty"`
 	}
 	enrolled struct {
-		Enrolled   []key.Enrollment    `json:"enrolled"`
-		Unenrolled []ed25519.PublicKey `json:"unenrolled"`
+		Enrolled   []key.Enrollment `json:"enrolled"`
+		Unenrolled []key.PublicKey  `json:"unenrolled"`
 	}
 	taskRead struct {
 		Task *kernel.Task `json:"task"` // nil: not live
@@ -124,6 +124,16 @@ type (
 	planRead struct {
 		Status string   `json:"status"` // "": no such plan
 		Phases []string `json:"phases"`
+	}
+	// resumeArgs names the STOP a RESUME lifts (kernel.State.Stops, #3078).
+	resumeArgs struct {
+		Stops uint64 `json:"stops"`
+	}
+	// changesRead is the key's changes view and the STOPs logged, which a
+	// RESUME names.
+	changesRead struct {
+		key.Changes
+		Stops uint64 `json:"stops"`
 	}
 	grantRead struct {
 		From int64 `json:"from"`
@@ -140,7 +150,7 @@ var OwnerSide = Side{"owner", map[string]op{
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
 	"undo":   act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Undo(now, a.Plan, a.Index) }),
 	"enroll": act(func(k *kernel.Kernel, now int64, e key.Enrollment) error { return k.Enroll(now, e) }),
-	"unenroll": act(func(k *kernel.Kernel, now int64, pk ed25519.PublicKey) error {
+	"unenroll": act(func(k *kernel.Kernel, now int64, pk key.PublicKey) error {
 		return k.Unenroll(now, pk)
 	}),
 	"extend":  act(func(k *kernel.Kernel, now int64, a extendArgs) error { return k.Extend(now, a.Ext, a.Plan) }),
@@ -154,7 +164,7 @@ var OwnerSide = Side{"owner", map[string]op{
 	"pause":   act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Pause(now, id) }),
 	"unpause": act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
 	"stop":    act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
-	"resume":  act(func(k *kernel.Kernel, now int64, _ none) error { return k.Resume(now) }),
+	"resume":  act(func(k *kernel.Kernel, now int64, a resumeArgs) error { return k.Resume(now, a.Stops) }),
 	"setup":   act(func(k *kernel.Kernel, now int64, f kernel.FirstAnchors) error { return k.Setup(now, f) }),
 	"setupinfo": func(k *kernel.Kernel, _ int64, _ json.RawMessage) (any, error) {
 		return SetupInfo{Open: k.State().SetupOpen(), Box: k.Box()}, nil
@@ -168,7 +178,7 @@ var OwnerSide = Side{"owner", map[string]op{
 		es, un := s.Enrollments()
 		return enrolled{es, un}
 	}),
-	"changes": read(func(s *kernel.State, _ int64, _ none) key.Changes { return *s.ChangesView() }),
+	"changes": read(func(s *kernel.State, _ int64, _ none) changesRead { return changesRead{*s.ChangesView(), s.Stops} }),
 	"plan": read(func(s *kernel.State, _ int64, id string) planRead {
 		p := s.Plans[id]
 		if p == nil {
@@ -479,8 +489,8 @@ func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan
 func (o Owner) Undo(plan string, index int) error {
 	return o.Call("undo", stepArgs{plan, index}, nil)
 }
-func (o Owner) Enroll(e key.Enrollment) error       { return o.Call("enroll", e, nil) }
-func (o Owner) Unenroll(pk ed25519.PublicKey) error { return o.Call("unenroll", pk, nil) }
+func (o Owner) Enroll(e key.Enrollment) error   { return o.Call("enroll", e, nil) }
+func (o Owner) Unenroll(pk key.PublicKey) error { return o.Call("unenroll", pk, nil) }
 func (o Owner) Extend(ext key.Key, plan string) error {
 	return o.Call("extend", extendArgs{ext, plan}, nil)
 }
@@ -500,7 +510,9 @@ func (o Owner) Revoke(id key.ID) error  { return o.Call("revoke", id, nil) }
 func (o Owner) Pause(id key.ID) error   { return o.Call("pause", id, nil) }
 func (o Owner) Unpause(id key.ID) error { return o.Call("unpause", id, nil) }
 func (o Owner) Stop() error             { return o.Call("stop", nil, nil) }
-func (o Owner) Resume() error           { return o.Call("resume", nil, nil) }
+
+// Resume lifts the STOP whose count it names (Changes's stops).
+func (o Owner) Resume(stops uint64) error { return o.Call("resume", resumeArgs{stops}, nil) }
 
 // Setup logs the owner's first hardware keys on a setup-only kernel.
 func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
@@ -515,7 +527,7 @@ func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
 	return
 }
 func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
-func (o Owner) Enrollments() ([]key.Enrollment, []ed25519.PublicKey, error) {
+func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 	var e enrolled
 	err := o.Call("enrollments", nil, &e)
 	return e.Enrolled, e.Unenrolled, err

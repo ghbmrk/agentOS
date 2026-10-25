@@ -27,9 +27,9 @@ type clerkRig struct {
 	h     *harness
 	c     *Clerk
 	k     *kernel.Kernel
-	owner []ed25519.PublicKey // the anchors
-	root  key.Key             // the home clerk's key
-	phone ed25519.PrivateKey  // the owner's enrolled phone passkey, which taps approvals
+	owner []key.PublicKey    // the anchors
+	root  key.Key            // the home clerk's key
+	phone ed25519.PrivateKey // the owner's enrolled phone passkey, which taps approvals
 }
 
 // newClerkRig boots a kernel whose only clerk is a browser clerk over h, and
@@ -40,7 +40,7 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 	hpub, _ := seedKey(2)
 	kpub, kpriv := seedKey(3)
 	bpub, bpriv := seedKey(12) // the second hardware key co-signs new power (D-146)
-	anchors := []ed25519.PublicKey{opub, bpub}
+	anchors := []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
 	c := NewClerk("web", anchors, h.g)
 	var k *kernel.Kernel
 	// The clerk's clock keeps the test's time: the time of the step the
@@ -56,16 +56,16 @@ func newClerkRig(t *testing.T, h *harness) *clerkRig {
 		t.Fatal(err)
 	}
 	// The passkey's grant to the home clerk, a hold before the test (D-146).
-	root, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"}), opriv, hpub, -kernel.GrantHold, 1<<40)
+	root, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r1"}), key.Ed25519Signer(opriv), hpub, -kernel.GrantHold, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	batch := []key.Key{{Root: root.Root}, root}
-	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(opriv, kernel.BatchHash(batch...)), key.Approve(bpriv, kernel.BatchHash(batch...))}, batch...); err != nil {
+	if err := k.Issue(-kernel.GrantHold, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	phonePub, phone := seedKey(8)
-	if err := k.Enroll(-kernel.GrantHold, key.Enroll(opriv, phonePub)); err != nil {
+	if err := k.Enroll(-kernel.GrantHold, key.Enroll(key.Ed25519Signer(opriv), key.Ed25519(phonePub))); err != nil {
 		t.Fatal(err)
 	}
 	return &clerkRig{h, c, k, anchors, root, phone}
@@ -231,7 +231,7 @@ func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	other.Clerk = "bank"
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
-	ghost, err := key.ClerkKey(key.Issue(opriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Read}, Serial: "unlogged"}), opriv, hpub, 0, 1)
+	ghost, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Read}, Serial: "unlogged"}), key.Ed25519Signer(opriv), hpub, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

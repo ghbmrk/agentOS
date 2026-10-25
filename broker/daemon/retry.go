@@ -125,6 +125,8 @@ type retrier struct {
 	// k, when set, is the kernel's owner seam: RETRY also offers the steps
 	// it holds parked, and an approved one is retried there (#2783 b).
 	k KernelOwner
+	// currency names a kernel step's amount (Config.Currency).
+	currency string
 
 	running sync.WaitGroup // retries started by decide
 
@@ -143,6 +145,45 @@ type retryAsk struct {
 	// step, for a step the kernel holds parked, is that step: the ask runs
 	// the kernel's retry, not the gate's.
 	step *KernelStep
+}
+
+// minorDigits maps each currency Config.Currency may name, an ISO 4217
+// code of a currency in circulation, to the digits of its minor unit.
+// Fund, metal, drawing-right and test codes (CLF, UYW, XAU, XDR, XXX, ...)
+// are not listed: their minor unit is 4 or none, so an amount would read
+// at the wrong scale. Start refuses any code not here.
+var minorDigits = func() map[string]int {
+	m := map[string]int{}
+	for digits, codes := range []string{
+		"BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF",
+		"",
+		"AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF " +
+			"CNY COP CRC CUP CVE CZK DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GTQ GYD HKD HNL HTG HUF " +
+			"IDR ILS INR IRR JMD KES KGS KHR KPW KYD KZT LAK LBP LKR LRD LSL MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR " +
+			"MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD PAB PEN PGK PHP PKR PLN QAR RON RSD RUB SAR SBD SCR SDG SEK SGD " +
+			"SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TOP TRY TTD TWD TZS UAH USD UYU UZS VED VES WST XCD YER " +
+			"ZAR ZMW ZWG",
+		"BHD IQD JOD KWD LYD OMR TND",
+	} {
+		for _, c := range strings.Fields(codes) {
+			m[c] = digits
+		}
+	}
+	return m
+}()
+
+// amountText is amount, in minor units, as a RETRY line names it: in
+// currency's major units when one is set ("12.50 EUR"), else as it is.
+func amountText(amount int64, currency string) string {
+	digits, ok := minorDigits[currency]
+	if !ok || amount < 0 {
+		return strconv.FormatInt(amount, 10) + " minor units"
+	}
+	s := fmt.Sprintf("%0*d", digits+1, amount)
+	if digits > 0 {
+		s = s[:len(s)-digits] + "." + s[len(s)-digits:]
+	}
+	return s + " " + currency
 }
 
 func newRetrier(ctx context.Context, eng *journal.Engine, gate *grants.Gate) *retrier {
@@ -180,7 +221,7 @@ func (r *retrier) items() []ownerch.Item {
 		items = append(items, l.Shown)
 	}
 	for _, s := range r.kernelParked(retryMax - len(items)) {
-		a := kernelAsk(s)
+		a := kernelAsk(s, r.currency)
 		lines[a.line.Shown.Ref] = a
 		items = append(items, a.line.Shown)
 	}
@@ -218,30 +259,34 @@ func (r *retrier) kernelParked(n int) []KernelStep {
 // SecretReveal as on the journal's path. A recipient the broker has not
 // looked up is high too (Classify), so only a reversible or low-class step
 // with neither money nor a recipient can be approved by a texted code. Its
-// outcome is unknown, so it may go twice, and the line says so (CH-12).
-// The kernel does not say when the step was first tried, so the line
-// cannot.
-func kernelItem(s KernelStep) ownerch.Item {
+// outcome is unknown, so it may go twice, and the line says so with when
+// it was first tried (CH-12, #3079).
+func kernelItem(s KernelStep, currency string) ownerch.Item {
 	cls, known := key.ClassOf(key.Verb(s.Verb))
 	low := known && cls != key.IrreversibleHigh
 	// A high or unknown verb's facts are left unverified (no recipient
 	// checked), which Classify reads as high, like the journal's
 	// unverified lines.
-	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient, Detail: "may go twice",
+	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient,
 		Facts: ownerch.Facts{Verb: s.Verb, NoRecipient: low && s.Recipient == ""}}
 	if key.Verb(s.Verb) == key.RevealOrCreateSecret {
 		it.Facts.Kind = ownerch.SecretReveal
 	}
+	if s.SentAt != 0 {
+		it.Retried = time.UnixMilli(s.SentAt) // "may go twice, first tried 14:02 Oct 13"
+	} else {
+		it.Detail = "may go twice"
+	}
 	if s.Money || s.Amount != 0 {
-		it.Amount = strconv.FormatInt(s.Amount, 10) + " minor units"
+		it.Amount = amountText(s.Amount, currency)
 		it.Facts.Kind, it.Facts.HasAmount, it.Facts.Amount = ownerch.MoneyRetry, true, s.Amount
 	}
 	return it
 }
 
 // kernelAsk is the ask about a parked kernel step, under a ref new to it.
-func kernelAsk(s KernelStep) retryAsk {
-	it := kernelItem(s)
+func kernelAsk(s KernelStep, currency string) retryAsk {
+	it := kernelItem(s, currency)
 	it.Ref = kernelRefPrefix + newNonce()
 	return retryAsk{id: s.Plan, line: grants.RetryLine{Shown: it, Base: it}, step: &s}
 }

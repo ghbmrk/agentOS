@@ -97,7 +97,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if from, ok, err := o.Granted(ver.Root()); err != nil || !ok || from == 0 {
 		t.Fatalf("the root's grant over the socket: %d %v %v", from, ok, err)
 	}
-	for _, a := range []func() error{func() error { return o.Unpause(id) }, func() error { return o.Resume() }, func() error { return o.Cancel("o1") }} {
+	for _, a := range []func() error{func() error { return o.Unpause(id) }, func() error { return o.Resume(1) /* the one STOP above */ }, func() error { return o.Cancel("o1") }} {
 		if err := a(); err != nil {
 			t.Fatal(err)
 		}
@@ -421,17 +421,17 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// A plan under a key capped at 100 a task, for the metering calls, and
 	// a second root whose capped key can release it once held.
 	issue := func(serial string, cv ...key.Caveat) (key.Key, key.Key, []key.Cosign) {
-		root := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: serial})
-		ck, err := key.ClerkKey(root, ownerPriv, holderPub, at, 1<<40, cv...)
+		root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: serial})
+		ck, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holderPub, at, 1<<40, cv...)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return root, ck, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}
+		return root, ck, []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(root, ck)), key.Approve(key.Ed25519Signer(sparePriv), kernel.BatchHash(root, ck))}
 	}
 	root, capped, cos := issue("m", key.LimitSpendTask(100))
 	eroot, ext, ecos := issue("e", key.LimitSpendTask(500))
-	other := key.Issue(ownerPriv, key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "x"})
-	ocos := []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(other)), key.Approve(sparePriv, kernel.BatchHash(other))}
+	other := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Post}, Serial: "x"})
+	ocos := []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(other)), key.Approve(key.Ed25519Signer(sparePriv), kernel.BatchHash(other))}
 	step := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "alice", "msg": "hi"}, Content: "text", Labels: []string{"public"}}
 	pm := kernel.SignPlan(kernel.Plan{ID: "m", Key: capped, Steps: []kernel.PlanStep{step}}, holderPriv)
 	p1 := kernel.SignPlan(kernel.Plan{ID: "p1", Key: direct.key, Steps: []kernel.PlanStep{step}}, holderPriv)
@@ -441,7 +441,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	phone, phonePriv := gen(8)
 	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
-	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(phonePriv, kernel.TaskHash("t1", 0, "shop.test", "r"))}
+	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(key.Ed25519Signer(phonePriv), kernel.TaskHash("t1", 0, "shop.test", "r"))}
 	for _, b := range []*box{direct, sock} {
 		if err := b.h.With(func(k *kernel.Kernel) error {
 			if err := k.Issue(at-kernel.GrantHold, cos, root, capped); err != nil {
@@ -482,7 +482,11 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "submit", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
 		{name: "issue", op: "issue", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
 		{name: "submit capped", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(pm) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), pm) }},
-		{name: "enroll", op: "enroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Enroll(key.Enroll(ownerPriv, phone)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Enroll(now(), key.Enroll(ownerPriv, phone)) }},
+		{name: "enroll", op: "enroll", sock: func(o Owner, _ Meter) (any, error) {
+			return nil, o.Enroll(key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
+		}, call: func(k *kernel.Kernel) (any, error) {
+			return nil, k.Enroll(now(), key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
+		}},
 		{name: "approvetask", op: "approvetask", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveTask("t1", approval) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveTask(now(), "t1", approval) }},
 		{name: "task", op: "task", read: func(v any) bool { return len(v.(kernel.Task).Approvals) > 0 },
 			sock: func(o Owner, _ Meter) (any, error) {
@@ -526,7 +530,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "unpause", op: "unpause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},
 		{name: "stop", op: "stop", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Stop() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(now()) }},
 		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
-		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now()) }},
+		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
 		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
 		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0) }},
 		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
@@ -556,14 +560,14 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				return grantRead{from, ok}, nil
 			}},
 		{name: "undo", op: "undo", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Undo("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(now(), "p1", 0) }},
-		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unenroll(phone) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unenroll(now(), phone) }},
+		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unenroll(key.Ed25519(phone)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unenroll(now(), key.Ed25519(phone)) }},
 		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
 		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
 		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
 		{name: "setup", op: "setup", sock: func(o Owner, _ Meter) (any, error) {
-			return nil, o.Setup(kernel.SignSetup(headPub, ownerPriv, sparePriv))
+			return nil, o.Setup(kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
 		}, call: func(k *kernel.Kernel) (any, error) {
-			return nil, k.Setup(now(), kernel.SignSetup(headPub, ownerPriv, sparePriv))
+			return nil, k.Setup(now(), kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
 		}},
 	}
 	// Refused on both kernels by design: the admission past the cap, the
