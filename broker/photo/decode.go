@@ -36,7 +36,7 @@ const (
 // a 4096-pixel square PNG that compresses badly, plus its thumbnail.
 const (
 	MemBytes     = 512 << 20
-	HEICMemBytes = 832 << 20
+	HEICMemBytes = 960 << 20
 	Timeout      = 30 * time.Second
 	MaxOutput    = 80 << 20
 	maxHeader    = 1 << 10
