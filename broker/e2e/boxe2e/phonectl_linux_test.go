@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/ghbmrk/agentos/broker/control"
 	"io"
 	"net/http"
 	"regexp"
@@ -10,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -33,10 +33,10 @@ func (c *fakeClock) sleep(d time.Duration) {
 
 type idleEngine struct{}
 
-func (idleEngine) Stop(context.Context) (journal.StopReport, error) { return journal.StopReport{}, nil }
+func (idleEngine) Stop(context.Context) (control.StopReport, error) { return control.StopReport{}, nil }
 func (idleEngine) Resume() error                                    { return nil }
 func (idleEngine) Stopped() bool                                    { return false }
-func (idleEngine) List() []journal.Status                           { return nil }
+func (idleEngine) List() []control.Status                           { return nil }
 
 // setupPage answers GET /setup as the setup page does: 303 to /status
 // once setup is done, the current step otherwise.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/daemon/journalowner"
 )
 
 // REQ: CH-2, KRN-7
@@ -340,7 +341,7 @@ func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
 	ctx := context.Background()
 	k := &fakeKernel{}
 	_, d := withKernelOwner(t, &fakeKernel{}, false)
-	b := &bothStops{Engine: failingResume{d.Engine()}, k: k}
+	b := &bothStops{Engine: failingResume{journalowner.Engine{Engine: d.Engine()}}, k: k}
 	if _, err := b.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +350,7 @@ func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
 	}
 	k2 := &fakeKernel{lost: true}
 	_, d = withKernelOwner(t, &fakeKernel{}, false)
-	b = &bothStops{Engine: failingResume{d.Engine()}, k: k2}
+	b = &bothStops{Engine: failingResume{journalowner.Engine{Engine: d.Engine()}}, k: k2}
 	if _, err := b.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}

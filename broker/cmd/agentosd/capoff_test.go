@@ -88,7 +88,7 @@ func (b *capBox) status() string {
 		}
 		return b.d.Admission().Summary()
 	}
-	h := &control.Handler{Engine: b.d.Engine(), Machines: machines, Notes: b.cfg.Notes}
+	h := &control.Handler{Engine: b.d.Owned(), Machines: machines, Notes: b.cfg.Notes}
 	return h.Status()
 }
 

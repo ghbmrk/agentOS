@@ -2,12 +2,12 @@ package localsrv
 
 import (
 	"context"
+	"github.com/ghbmrk/agentos/broker/control"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -28,15 +28,15 @@ type stillEngine struct {
 	stopped bool
 }
 
-func (e *stillEngine) Stop(context.Context) (journal.StopReport, error) {
+func (e *stillEngine) Stop(context.Context) (control.StopReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.stopped = true
-	return journal.StopReport{}, nil
+	return control.StopReport{}, nil
 }
 func (e *stillEngine) Resume() error          { e.mu.Lock(); defer e.mu.Unlock(); e.stopped = false; return nil }
 func (e *stillEngine) Stopped() bool          { e.mu.Lock(); defer e.mu.Unlock(); return e.stopped }
-func (e *stillEngine) List() []journal.Status { return nil }
+func (e *stillEngine) List() []control.Status { return nil }
 
 // heldLine holds texts while hold is set, telling entered of each held one.
 type heldLine struct {

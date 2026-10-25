@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,8 +15,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/guesterr"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // A guest asks the owner a question with a default and a wait (CAP-10).
@@ -440,7 +441,7 @@ func (b *Book) persist() error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(b.cfg.Path, raw, 0o600)
+	return privfile.WriteAtomic(filepath.Dir(b.cfg.Path), filepath.Base(b.cfg.Path), raw, nil)
 }
 
 // save persists after a change that has already taken effect (a text

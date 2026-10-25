@@ -26,7 +26,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/control"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
@@ -1033,7 +1032,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 	}
 	n := 0
 	for _, s := range c.cfg.Engine.List() {
-		if s.State == journal.Authorized || s.State == journal.NotApplied {
+		if s.Phase == control.Held {
 			n++
 		}
 	}

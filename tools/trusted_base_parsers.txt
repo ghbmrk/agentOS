@@ -21,6 +21,7 @@ inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own configuration
+inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its own records
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store

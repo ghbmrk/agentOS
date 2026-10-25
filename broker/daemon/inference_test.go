@@ -140,6 +140,11 @@ var netOK = map[string]allowance{
 	// swap is opened without following a link or blocking on a FIFO.
 	"loops": {"O_NOFOLLOW and O_NONBLOCK to open a guest-writable file safely; no network client",
 		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
+	// The atomic replace of the owner state, the setup record and the
+	// question book (#2778): a temporary opened without following a link,
+	// and the owner-only check's file owner.
+	"kernel/privfile": {"O_NOFOLLOW for its temporary and Stat_t for the owner-only check; no network client",
+		[]string{"syscall.O_NOFOLLOW", "syscall.Stat_t"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.

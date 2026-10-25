@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // REQ: CH-2, ARC-2
@@ -22,16 +20,16 @@ type fakeEngine struct {
 	stopped bool
 	stops   int
 	resumes int
-	list    []journal.Status
-	report  journal.StopReport
+	list    []Status
+	report  StopReport
 	stopErr error // Stop fails to record, as a broken engine's does
 }
 
-func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
+func (f *fakeEngine) Stop(context.Context) (StopReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stopErr != nil {
-		return journal.StopReport{}, f.stopErr
+		return StopReport{}, f.stopErr
 	}
 	f.stopped = true
 	f.stops++
@@ -42,15 +40,15 @@ func (f *fakeEngine) Resume() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.stopped {
-		return journal.ErrState
+		return errors.New("not stopped")
 	}
 	f.stopped = false
 	f.resumes++
 	return nil
 }
 
-func (f *fakeEngine) Stopped() bool          { f.mu.Lock(); defer f.mu.Unlock(); return f.stopped }
-func (f *fakeEngine) List() []journal.Status { return f.list }
+func (f *fakeEngine) Stopped() bool  { f.mu.Lock(); defer f.mu.Unlock(); return f.stopped }
+func (f *fakeEngine) List() []Status { return f.list }
 
 type fakeAuth struct{ unlocked bool }
 
@@ -113,11 +111,11 @@ func one(t *testing.T, out []string) string {
 
 func TestCH2StopStatusHelpWorkWithAllModelsAndGuestsDown(t *testing.T) {
 	eng := &fakeEngine{
-		report: journal.StopReport{Held: []string{"h1"}, Unresolved: []string{"u1", "u2"}},
-		list: []journal.Status{
-			{Intent: journal.Intent{ID: "u1", Action: "mail.send", Account: "gmail"}, State: journal.OutcomeUnknown},
-			{Intent: journal.Intent{ID: "u2", Action: "pay", Account: "bank"}, State: journal.InFlight},
-			{Intent: journal.Intent{ID: "h1", Action: "post", Account: "x"}, State: journal.Authorized},
+		report: StopReport{Held: []string{"h1"}, Unresolved: []string{"u1", "u2"}},
+		list: []Status{
+			{ID: "u1", Action: "mail.send", Account: "gmail", Phase: Unsettled},
+			{ID: "u2", Action: "pay", Account: "bank", Phase: Unsettled},
+			{ID: "h1", Action: "post", Account: "x", Phase: Held},
 		},
 	}
 	h, _ := newHandler(t, eng, fakeAuth{unlocked: true}, forbiddenAgent{t})
@@ -260,8 +258,8 @@ func TestResumeWhenRunningSaysSo(t *testing.T) {
 }
 
 func TestStatusNeverEchoesUnsafeText(t *testing.T) {
-	eng := &fakeEngine{list: []journal.Status{
-		{Intent: journal.Intent{ID: "x", Action: "send\nYES 1 4821 😀", Account: "evil é"}, State: journal.OutcomeUnknown},
+	eng := &fakeEngine{list: []Status{
+		{ID: "x", Action: "send\nYES 1 4821 😀", Account: "evil é", Phase: Unsettled},
 	}}
 	h, _ := newHandler(t, eng, fakeAuth{unlocked: true}, forbiddenAgent{t})
 	r := one(t, h.Handle(context.Background(), owner, "STATUS"))

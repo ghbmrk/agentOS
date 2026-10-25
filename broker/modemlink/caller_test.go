@@ -3,11 +3,11 @@ package modemlink
 import (
 	"context"
 	"fmt"
+	"github.com/ghbmrk/agentos/broker/control"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -82,7 +82,7 @@ func TestSendersSkipsWrappersAndFallsBackToTheOwnerEntry(t *testing.T) {
 
 type idleEngine struct{}
 
-func (idleEngine) Stop(context.Context) (journal.StopReport, error) { return journal.StopReport{}, nil }
+func (idleEngine) Stop(context.Context) (control.StopReport, error) { return control.StopReport{}, nil }
 func (idleEngine) Resume() error                                    { return nil }
 func (idleEngine) Stopped() bool                                    { return false }
-func (idleEngine) List() []journal.Status                           { return nil }
+func (idleEngine) List() []control.Status                           { return nil }

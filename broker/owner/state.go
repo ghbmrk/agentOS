@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // State is the owner channel's durable state. It survives restarts so that a
@@ -170,5 +171,5 @@ func (f FileStore) Save(s State) error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(f.Path, b, 0o600)
+	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, nil)
 }
