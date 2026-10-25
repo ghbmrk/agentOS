@@ -246,6 +246,8 @@ func main() {
 	var noticeSocket string
 	localUIUID, mailUID := -1, -1
 	var mailOwner string
+	kernelUID, kernelOwnerUID := -1, -1
+	var kernelOwner string
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
@@ -254,6 +256,9 @@ func main() {
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	flag.StringVar(&mailOwner, "mail-owner", "", "the mail clerk's owner socket (clerk/run MailOwnerSide), which the local UI's Connect page signs in to Gmail through (#3006); empty, the page's account ops are refused")
 	flag.IntVar(&mailUID, "mail-uid", -1, "uid of the mail clerk's process, the only peer -mail-owner is called on")
+	flag.StringVar(&kernelOwner, "kernel-owner", "", "the kernel's owner socket (agentos-kernel -owner-sock), which the broker calls the owner seam on (#2682); empty, there is no kernel to call")
+	flag.IntVar(&kernelUID, "kernel-uid", -1, "uid of the kernel's process, the only peer -kernel-owner is called on")
+	flag.IntVar(&kernelOwnerUID, "kernel-owner-uid", -1, "the owner side's uid (agentos-kernel -owner-uid), which every call on -kernel-owner is made as")
 	var updateStore, shippedRoot string
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
@@ -596,8 +601,15 @@ func main() {
 		log.Print("-update-store is set but the local page is not served (-localui-uid): updates keep their source")
 	}
 
+	seat, err := kernelFlags(kernelOwner, kernelUID, kernelOwnerUID, localUIUID, cfg.ModemUID, mailUID)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if seat != nil {
+		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)
+	}
 	// The local inference service runs beside the broker, never in its
 	// control path: it is started here and never waited on (INF-1, DEP-1).
 	startInference(ctx, inf, inferenceLeaf(boxMachines, mem.Budget.InferenceMB), log.Writer())

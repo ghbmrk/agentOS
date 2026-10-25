@@ -90,6 +90,10 @@ var netOK = map[string]allowance{
 	"checker/checkersock": {"dials only the checker's verify unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The Connect page's client of the mail clerk's owner socket (#3006), as modelroute.
 	"localsrv/accountsock": {"dials only the mail clerk's owner unix socket", []string{"net.Dialer"}},
+	// agentosd's client of the kernel's owner socket (#2682), as modelroute;
+	// it dials on a thread whose effective uid alone is the owner side's.
+	"owner/kernelsock": {"dials only the kernel's owner unix socket, as the owner side's uid on the calling thread",
+		[]string{"golang.org/x/sys/unix.RawSyscall", "golang.org/x/sys/unix.SYS_GETEUID", "golang.org/x/sys/unix.SYS_SETRESUID", "net.Dialer"}},
 	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
 	"netjoin": {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
 	// The local inference service's client and supervisor (INFER-SVC
@@ -164,6 +168,10 @@ var escapeOK = map[string]map[string]string{
 // pass to a raw Syscall, and why: a raw call could otherwise open a socket.
 var rawOK = map[string]map[string]string{
 	"quota": {"golang.org/x/sys/unix.SYS_QUOTACTL_FD": "reads and sets project quotas (RES-4)"},
+	"owner/kernelsock": {
+		"golang.org/x/sys/unix.SYS_SETRESUID": "sets one thread's effective uid to the owner side's and back to root's (#2682)",
+		"golang.org/x/sys/unix.SYS_GETEUID":   "checks the thread's effective uid took (#2682)",
+	},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
@@ -191,7 +199,7 @@ var socketPkgs = map[string]bool{
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process,
 // and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true, "localsrv/accountsock": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true, "localsrv/accountsock": true, "owner/kernelsock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set
