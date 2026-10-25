@@ -156,8 +156,15 @@ func Decode(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, RefuseDecode
 	}
-	if heif && cfg.ColorModel != color.NRGBAModel {
-		limit = MaxDeepPixels
+	deep := false
+	if heif {
+		var still bool
+		if deep, still = heifDepth(raw); !still {
+			return nil, RefuseDecode
+		}
+		if deep {
+			limit = MaxDeepPixels
+		}
 	}
 	pixels := int64(cfg.Width) * int64(cfg.Height)
 	if cfg.Width <= 0 || cfg.Height <= 0 || pixels > limit {
@@ -175,6 +182,9 @@ func Decode(raw []byte) ([]byte, error) {
 		return nil, RefuseDecode
 	}
 	b := src.Bounds()
+	if _, wide := src.(*image.NRGBA64); heif && wide && !deep {
+		return nil, RefuseDecode // its stream codes more bits than its hvcC says
+	}
 	if heif {
 		// irot may turn the picture and clap may crop it, so it fits the
 		// declared size either way up, never more.
@@ -204,6 +214,70 @@ func Decode(raw []byte) ([]byte, error) {
 	frame := make([]byte, 0, len(line)+1+out.Len()+tout.Len())
 	frame = append(append(append(append(frame, line...), '\n'), out.Bytes()...), tout.Bytes()...)
 	return frame, nil
+}
+
+// heifDepth reads a HEIF's meta box: deep is whether any hvcC property
+// in it (a still's, a grid's tiles', an alpha plane's) declares more
+// than 8 bits for luma or chroma, or is too short to say; still is
+// whether it names a primary item. A file with none is a picture
+// sequence, which h265 would decode frame by frame, so it is refused.
+func heifDepth(raw []byte) (deep, still bool) {
+	meta, ok := child(raw, "meta")
+	if !ok || len(meta) < 4 {
+		return false, false
+	}
+	meta = meta[4:] // version and flags
+	_, still = child(meta, "pitm")
+	iprp, _ := child(meta, "iprp")
+	ipco, _ := child(iprp, "ipco")
+	for b := ipco; len(b) > 0; {
+		typ, body, rest, ok := nextBox(b)
+		if !ok {
+			return true, still
+		}
+		if typ == "hvcC" && (len(body) < 19 || body[17]&7 != 0 || body[18]&7 != 0) {
+			deep = true
+		}
+		b = rest
+	}
+	return deep, still
+}
+
+// child is the body of b's first box of type typ.
+func child(b []byte, typ string) ([]byte, bool) {
+	for len(b) > 0 {
+		t, body, rest, ok := nextBox(b)
+		if !ok {
+			return nil, false
+		}
+		if t == typ {
+			return body, true
+		}
+		b = rest
+	}
+	return nil, false
+}
+
+// nextBox splits off b's first ISOBMFF box: its type, its body and what
+// follows it. A 64-bit size and a size of 0 (to the end) are read.
+func nextBox(b []byte) (typ string, body, rest []byte, ok bool) {
+	if len(b) < 8 {
+		return "", nil, nil, false
+	}
+	n, h := uint64(binary.BigEndian.Uint32(b)), uint64(8)
+	switch n {
+	case 0:
+		n = uint64(len(b))
+	case 1:
+		if len(b) < 16 {
+			return "", nil, nil, false
+		}
+		n, h = binary.BigEndian.Uint64(b[8:]), 16
+	}
+	if n < h || n > uint64(len(b)) {
+		return "", nil, nil, false
+	}
+	return string(b[4:8]), b[h:n], b[n:], true
 }
 
 // heifDecoder decodes a HEIC's primary image with its clap, irot and

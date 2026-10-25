@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"image"
 	"image/color"
+	"os"
 	"testing"
 
 	"github.com/gen2brain/h265/heic"
@@ -308,10 +309,56 @@ func TestDecodeHEICOver50MPRefused(t *testing.T) {
 	if _, err := decoder.Decode(withISPE(t, deep, 6000, 4001)); err != decoder.RefusePixels {
 		t.Fatalf("10-bit 6000x4001: got %v, want pixels", err)
 	}
+	// A grid's own item has no hvcC: the limit follows its tiles' depth.
+	deepGrid := heicPhoto(t, 64, 64, heic.EncodeOptions{BitDepth: 10, Tile: 32})
+	if _, err := decoder.Decode(withISPE(t, deepGrid, 5000, 5000)); err != decoder.RefusePixels {
+		t.Fatalf("10-bit grid 5000x5000: got %v, want pixels", err)
+	}
+	// An hvcC that says 8 bits over a 10-bit stream is refused.
+	if _, err := decoder.Decode(withHvcCDepth(t, deep, 0)); err != decoder.RefuseDecode {
+		t.Fatalf("10-bit stream declared 8-bit: got %v, want decode", err)
+	}
 	// An ispe that lies small cannot let a bigger coded picture through.
 	big := heicPhoto(t, 640, 640, heic.EncodeOptions{Quality: 30})
 	if _, err := decoder.Decode(withISPE(t, big, 64, 64)); err != decoder.RefuseDecode {
 		t.Fatalf("640x640 coded, 64x64 declared: got %v, want decode", err)
+	}
+}
+
+// withHvcCDepth returns raw with every hvcC declaring bit depth 8+d.
+func withHvcCDepth(t *testing.T, raw []byte, d byte) []byte {
+	t.Helper()
+	out := append([]byte{}, raw...)
+	_, mb := metaBoxes(t, out)
+	iprp := find(t, mb, "iprp")
+	ipco := find(t, children(t, out, iprp.start, iprp.end), "ipco")
+	for _, p := range children(t, out, ipco.start, ipco.end) {
+		if p.typ == "hvcC" {
+			out[p.start+17] = out[p.start+17]&^7 | d
+			out[p.start+18] = out[p.start+18]&^7 | d
+		}
+	}
+	return out
+}
+
+func TestDecodeHEICNeedsAPrimaryItem(t *testing.T) {
+	in := heicPhoto(t, 64, 64, heic.EncodeOptions{})
+	_, mb := metaBoxes(t, in)
+	pitm := find(t, mb, "pitm")
+	out := append([]byte{}, in...)
+	copy(out[pitm.start-4:], "free")
+	if word, code, frame := refusal(t, out); word != "decode" || code != 13 || len(frame) != 0 {
+		t.Fatalf("no pitm: got %q exit %d with %d bytes out; want decode, 13, none", word, code, len(frame))
+	}
+	// A picture sequence (moov, no meta), which h265 would decode frame
+	// by frame. testdata/sequence.heic is anim.heic from gen2brain/heic
+	// v0.7.2's testdata (MIT).
+	seq, err := os.ReadFile("testdata/sequence.heic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if word, code, frame := refusal(t, seq); word != "decode" || code != 13 || len(frame) != 0 {
+		t.Fatalf("sequence: got %q exit %d with %d bytes out; want decode, 13, none", word, code, len(frame))
 	}
 }
 
