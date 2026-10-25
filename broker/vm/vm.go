@@ -637,14 +637,15 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 			m.stopRuntime(ctx, mc)
 		}
 		if live == nil {
-			os.RemoveAll(m.machineDir(id))
+			live = retireDir(m.machineDir(id))
 		}
 	}
 	out := mc.Machine
 	mc.mu.Unlock()
 	if live != nil {
-		// Not known dead: it keeps its admission and its record, so a
-		// later Preempt or Destroy kills it again.
+		// Not known dead, or its directory not retired: it keeps its
+		// admission and its record, so a later Preempt or Destroy kills
+		// or removes it again (LOG-4).
 		return Machine{}, errors.Join(err, live)
 	}
 	if err != nil {
@@ -1692,9 +1693,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if err != nil {
 		// No fork will use the checkpoint, so it goes too: a refused fork
 		// leaves nothing behind.
-		m.dropSnapshot(src, s.ID, prevLast)
+		derr := m.dropSnapshot(src, s.ID, prevLast)
 		undo()
-		return Snapshot{}, fmt.Errorf("%s: fork(%d): %w", id, n, err)
+		return Snapshot{}, errors.Join(fmt.Errorf("%s: fork(%d): %w", id, n, err), derr)
 	}
 	for i, mc := range reserved {
 		mc.mu.Lock()
@@ -1713,14 +1714,15 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 				m.stopRuntime(ctx, mc)
 			}
 			if live == nil {
-				os.RemoveAll(m.machineDir(mc.ID))
+				live = retireDir(m.machineDir(mc.ID))
 			}
 		}
 		mc.mu.Unlock()
 		if err != nil {
-			// A fork not known dead keeps its admission and its record, so
-			// a later Preempt or Destroy kills it again; a destroyed one
-			// was released and left the table already.
+			// A fork not known dead, or not retired, keeps its admission
+			// and its record, so a later Preempt or Destroy kills or
+			// removes it again; a destroyed one was released and left the
+			// table already.
 			undone := reserved[i+1:]
 			if live == nil {
 				undone = append(undone, mc)
@@ -1744,19 +1746,21 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 
 // dropSnapshot deletes snapshot id, just taken of mc, that nothing uses;
 // mc's newest snapshot goes back to prev.
-func (m *Manager) dropSnapshot(mc *machine, id, prev string) {
-	m.mu.Lock()
-	delete(m.snaps, id)
-	m.mu.Unlock()
-	os.RemoveAll(m.snapDir(id))
+// Its record goes only once its meta.json is durably gone (removeSnapshot):
+// a failure keeps it listed, for a prune or erase to take, and is returned.
+func (m *Manager) dropSnapshot(mc *machine, id, prev string) error {
+	if err := m.removeSnapshot(id); err != nil {
+		return err
+	}
 	if mc.lockLive() != nil {
-		return
+		return nil
 	}
 	if mc.Last == id {
 		mc.Last = prev
 		m.saveMachine(mc)
 	}
 	mc.mu.Unlock()
+	return nil
 }
 
 // Diff lists file-system changes from snapshot a to snapshot b (REV-4).
@@ -2047,7 +2051,7 @@ func (m *Manager) destroy(ctx context.Context, mc *machine) error {
 	}
 	err := m.stopRuntime(ctx, mc)
 	if err == nil {
-		err = os.RemoveAll(m.machineDir(id))
+		err = retireDir(m.machineDir(id))
 	}
 	if err == nil && m.cfg.Quota != nil && mc.Project != 0 {
 		err = m.cfg.Quota.Clear(mc.Project)
@@ -2251,6 +2255,14 @@ func (m *Manager) load(ctx context.Context) error {
 				m.project = max(m.project, p)
 			}
 		}
+		if strings.HasPrefix(e.Name(), retiredPrefix) {
+			// Retired by a destroy or failed start whose removal did not
+			// finish: never loaded, swept here (LOG-4).
+			if err := removeAll(m.machineDir(e.Name())); err != nil {
+				log.Printf("vm: sweeping retired machine directory: %v", err)
+			}
+			continue
+		}
 		mc := &machine{}
 		if err := readJSON(filepath.Join(m.machineDir(e.Name()), "meta.json"), &mc.Machine); err != nil || mc.ID != e.Name() {
 			continue
@@ -2319,6 +2331,45 @@ func writeJSON(path string, v any) error {
 
 // writeFile is durable.WriteFile; a variable so a test can fail one save.
 var writeFile = durable.WriteFile
+
+// retiredPrefix starts the name of a retired machine directory. No ID
+// starts with a dot, so load never takes one back.
+const retiredPrefix = ".retired-"
+
+// retireDir takes a machine directory out of load's reach for good, then
+// removes it. It is out of reach once it is gone or renamed under
+// retiredPrefix, the rename synced; only then may its owner's record and
+// admission be released. An error means it may still load: the caller
+// keeps its owner, so a later Destroy or erase retries (LOG-4). A removal
+// that fails after the rename is logged and finished by load's sweep.
+func retireDir(dir string) error {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return err
+	}
+	to := filepath.Join(filepath.Dir(dir), retiredPrefix+filepath.Base(dir)+"-"+hex.EncodeToString(b[:]))
+	err := renameDir(dir, to)
+	if errors.Is(err, os.ErrNotExist) {
+		// Gone already, maybe by a rename whose sync failed: make that
+		// durable before saying so.
+		return durable.SyncDir(filepath.Dir(dir))
+	}
+	if err != nil {
+		return err
+	}
+	if err := removeAll(to); err != nil {
+		log.Printf("vm: removing retired %s (load sweeps it): %v", filepath.Base(dir), err)
+	}
+	return nil
+}
+
+// removeAll, renameDir and unlink are os.RemoveAll, durable.Rename and
+// os.Remove; variables so a test can fail a retirement part-way.
+var (
+	removeAll = os.RemoveAll
+	renameDir = durable.Rename
+	unlink    = os.Remove
+)
 
 // publishDir is durable.PublishDir; a variable so a test can cut a
 // publication short.
