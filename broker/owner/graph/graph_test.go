@@ -1131,6 +1131,12 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 		}
 	}
 	refused = append(refused, Proposal{Text: "owner witness", AddEdges: []Edge{e(Watch, "b.payee", "p.owner")}})
+	// A malformed edge is refused, not a panic, before any check reads it.
+	for _, k := range []EdgeKind{Reset, Copy, Act, Cutoff, Brake, Watch, "bogus"} {
+		for _, from := range [][]string{nil, {}, {"x.unknown"}, {"p.owner", "p.owner"}} {
+			refused = append(refused, Proposal{Text: "malformed", AddEdges: []Edge{{Kind: k, From: from, To: "a.registrar", Source: Shipped}}})
+		}
+	}
 	for _, p := range refused {
 		if _, err := g.Apply(p); err == nil {
 			t.Errorf("applied %s: %+v", p.Text, p.AddEdges)
@@ -1138,6 +1144,7 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 		if _, ok := g.Next([]Proposal{p}); ok {
 			t.Errorf("Next offered a refused %s proposal", p.Text)
 		}
+		g.Lines([]Proposal{p})
 	}
 	weak, fine := 0, 0
 	for i, p := range ps {

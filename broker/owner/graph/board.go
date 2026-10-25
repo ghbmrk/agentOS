@@ -57,7 +57,10 @@ func (g *Graph) Apply(p Proposal) (*Graph, error) {
 		// The owner cannot fail, so a new edge from the owner onto a node
 		// already there is free reach that could mask a lock-out. Only a
 		// node the proposal adds, such as a new key, may gain one.
-		if i, ok := g.index[e.From[0]]; ok && control(e.Kind) && len(e.From) == 1 && g.nodes[i].Owner && !added[e.To] {
+		if !control(e.Kind) || len(e.From) != 1 {
+			continue // New checks the rest
+		}
+		if i, ok := g.index[e.From[0]]; ok && g.nodes[i].Owner && !added[e.To] {
 			return nil, fmt.Errorf("graph: proposal adds an owner edge onto %q, which it does not add", e.To)
 		}
 	}
