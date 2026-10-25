@@ -4,7 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -89,5 +92,22 @@ func TestKernelFlags(t *testing.T) {
 		if k != nil && (k.Socket != c.sock || k.UID != c.kernelUID || k.As != c.ownerUID) {
 			t.Errorf("%+v: %+v", c, *k)
 		}
+	}
+}
+
+// With no sealed store no kernel can run, so the owner commands' kernel
+// reads as waiting for setup and is never called; once the store exists
+// the kernel itself answers, here not at all (#2783).
+func TestNoSealedStoreIsAKernelWaitingForSetup(t *testing.T) {
+	dir := t.TempDir()
+	k := storedKernel{kernelsock.Owner{Socket: filepath.Join(dir, "none.sock"), UID: 1, As: 2}, filepath.Join(dir, "store")}
+	if open, err := k.SetupOpen(context.Background()); err != nil || !open {
+		t.Fatalf("no store: %v, %v", open, err)
+	}
+	if err := os.WriteFile(k.store, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.SetupOpen(context.Background()); !errors.Is(err, kernelsock.ErrUnreachable) {
+		t.Fatalf("a store and no kernel: %v", err)
 	}
 }

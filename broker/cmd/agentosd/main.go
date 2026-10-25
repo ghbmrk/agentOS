@@ -247,7 +247,7 @@ func main() {
 	localUIUID, mailUID := -1, -1
 	var mailOwner string
 	kernelUID, kernelOwnerUID := -1, -1
-	var kernelOwner string
+	var kernelOwner, kernelStore string
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
@@ -259,6 +259,7 @@ func main() {
 	flag.StringVar(&kernelOwner, "kernel-owner", "", "the kernel's owner socket (agentos-kernel -owner-sock), which the broker calls the owner seam on (#2682); empty, there is no kernel to call")
 	flag.IntVar(&kernelUID, "kernel-uid", -1, "uid of the kernel's process, the only peer -kernel-owner is called on")
 	flag.IntVar(&kernelOwnerUID, "kernel-owner-uid", -1, "the owner side's uid (agentos-kernel -owner-uid), which every call on -kernel-owner is made as")
+	flag.StringVar(&kernelStore, "kernel-store", "/var/lib/agentos-store/store", "the kernel's sealed store (agentos-keeper-kernel.service ConditionPathExists): while it is absent no kernel can run, so STOP has nothing to reach there (#2783)")
 	var updateStore, shippedRoot string
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
@@ -608,6 +609,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if seat != nil {
+		cfg.Kernel = storedKernel{*seat, kernelStore}
 		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)
 	}
 	// The local inference service runs beside the broker, never in its

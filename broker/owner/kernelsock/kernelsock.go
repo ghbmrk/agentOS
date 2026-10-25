@@ -139,3 +139,23 @@ func (o Owner) SetupOpen(ctx context.Context) (bool, error) {
 	err := o.call(ctx, "setupinfo", nil, &i)
 	return i.Open, err
 }
+
+// Stop logs a STOP on the kernel and anchors it (KRN-7): nothing the
+// kernel holds runs again until a RESUME. A setup-only kernel refuses it.
+func (o Owner) Stop(ctx context.Context) error { return o.call(ctx, "stop", nil, nil) }
+
+// Resume logs a RESUME on the kernel and anchors it.
+func (o Owner) Resume(ctx context.Context) error { return o.call(ctx, "resume", nil, nil) }
+
+// changes is the part of kernel/key Changes read here.
+type changes struct {
+	Stopped bool
+}
+
+// Stopped reads whether a STOP is in force on the kernel (its log's
+// Changes view). A setup-only kernel refuses it.
+func (o Owner) Stopped(ctx context.Context) (bool, error) {
+	var c changes
+	err := o.call(ctx, "changes", nil, &c)
+	return c.Stopped, err
+}
