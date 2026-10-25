@@ -450,9 +450,13 @@ func (k *Kernel) Read(h Hash) ([]byte, error) {
 
 // Named lists the live subjects one of whose labels reads label, and
 // apart from them those with a label that could not be read (a missing key,
-// a store down), so one fault does not hide every other subject. The log
-// holds no name, so recall by name opens the labels.
-func (k *Kernel) Named(label string) (found, unread []string) {
+// a store down), so one fault does not hide every other subject. Before
+// OpenContent it returns ErrContentClosed and no subjects, since none could
+// be read. The log holds no name, so recall by name opens the labels.
+func (k *Kernel) Named(label string) (found, unread []string, err error) {
+	if k.keys == nil {
+		return nil, nil, ErrContentClosed
+	}
 	for _, sub := range k.s.liveSubjects() {
 		bad := false
 		for _, it := range k.s.subjects[sub].items {
@@ -474,7 +478,7 @@ func (k *Kernel) Named(label string) (found, unread []string) {
 			unread = append(unread, sub)
 		}
 	}
-	return found, unread
+	return found, unread, nil
 }
 
 // Confirmation is what an erase has reached.
@@ -498,7 +502,7 @@ type Confirmation struct {
 // that does. Once the entry is logged the subject is erased whatever fails
 // after: a narrowing entry that Open keeps, anchored or not, and re-applied
 // at every start. A key delete that fails is returned, leaves KeyTable
-// unconfirmed, and is retried by Tick and OpenContent. Before
+// unconfirmed, and is retried, with backoff, by Tick and OpenContent. Before
 // OpenContent the erase is logged and ErrContentClosed returned: the key
 // goes when OpenContent runs.
 func (k *Kernel) Erase(now int64, subject string) (Confirmation, error) {
@@ -531,12 +535,51 @@ func (k *Kernel) confirmation(subject string) Confirmation {
 	return c
 }
 
+// Retried deletes back off, per subject and store, from RetryMin doubling
+// to RetryMax, so a store that is down is not asked on every Tick. The
+// backoff is kernel memory, not state: a restart asks every store again,
+// and the erase stays in Unerased throughout.
+const (
+	RetryMin int64 = 1_000   // ms
+	RetryMax int64 = 600_000 // ms
+)
+
+type (
+	eraseRef struct{ subject, store string }
+	backoff  struct{ last, wait int64 } // the failed try's time and the wait after it
+)
+
+// held reports whether the delete of ref was tried and failed too recently.
+// A now before that try (a wall clock stepped back) holds nothing, so a
+// clock correction cannot keep a key on disk past RetryMax.
+func (k *Kernel) held(ref eraseRef, now int64) bool {
+	b, ok := k.retry[ref]
+	return ok && b.last <= now && now < b.last+b.wait
+}
+
+// failed pushes the next try of ref back, doubling its wait.
+func (k *Kernel) failed(ref eraseRef, now int64) {
+	if k.retry == nil {
+		k.retry = map[eraseRef]backoff{}
+	}
+	w := RetryMin
+	if b, ok := k.retry[ref]; ok {
+		w = min(2*b.wait, RetryMax)
+	}
+	k.retry[ref] = backoff{now, w}
+}
+
 // confirm deletes subject's key and its items in each store not yet
-// confirmed, and logs each that does. One that fails stays unconfirmed:
-// keyErr is the key delete's error, err a log error.
+// confirmed and not backing off, and logs each that does. One that fails
+// stays unconfirmed and backs off: keyErr is the key delete's error, err a
+// log error.
 func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 	st := k.s.subjects[subject]
 	for _, store := range st.unconfirmed() {
+		ref := eraseRef{subject, store}
+		if k.held(ref, now) {
+			continue
+		}
 		ok := true
 		if store == KeyTable {
 			keyErr = k.keys.Delete(subject)
@@ -552,8 +595,10 @@ func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 			}
 		}
 		if !ok {
+			k.failed(ref, now)
 			continue
 		}
+		delete(k.retry, ref)
 		if _, err := k.emit(now, TEraseConfirmed, eraseConfirmed{subject, store}); err != nil {
 			return keyErr, err
 		}
@@ -561,8 +606,8 @@ func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 	return keyErr, nil
 }
 
-// confirmErases retries every erase not yet confirmed. Only a log error is
-// returned.
+// confirmErases retries every erase not yet confirmed whose stores are not
+// backing off. Only a log error is returned.
 func (k *Kernel) confirmErases(now int64) error {
 	for _, u := range k.s.Unerased() {
 		if _, err := k.confirm(now, u.Subject); err != nil {
