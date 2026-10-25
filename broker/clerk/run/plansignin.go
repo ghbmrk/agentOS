@@ -34,14 +34,16 @@ import (
 // device-code sign-in.
 type SignInWorkers interface {
 	// Start runs the sign-in CLI as guest in a fresh sandbox whose only
-	// route out is guest's plan endpoint in this process (ServePlan).
+	// route out is guest's plan endpoint in this process (ServePlan). It
+	// returns once ctx ends.
 	Start(ctx context.Context, guest string) (SignInWorker, error)
 }
 
 // SignInWorker is one running sign-in CLI.
 type SignInWorker interface {
 	// Read returns what the CLI has printed so far and whether it has
-	// exited. Its text is the guest's: only the code is taken from it.
+	// exited, and returns once ctx ends. Its text is the guest's: only the
+	// code is taken from it.
 	Read(ctx context.Context) (printed string, exited bool)
 	// Stop destroys the sandbox.
 	Stop()
@@ -92,7 +94,8 @@ func (t SignInTimes) orDefault() SignInTimes {
 const (
 	DPlanNotAllowed = "plan-not-allowed" // the provider's terms bar the plan route: the API key route only
 	DPlanConsent    = "plan-consent"     // an unconfirmed route without the owner's consent; nothing sent
-	DSignInBusy     = "signin-busy"      // a sign-in already waits for the owner
+	DSignInBusy     = "signin-busy"      // a sign-in already waits for the owner, or planremove runs
+	DSignInCode     = "signin-code"      // the CLI printed another code than the provider gave it
 	DSignInFailed   = "signin-failed"    // the CLI did not start, or ended without the login
 	DSignInTimedOut = "signin-timed-out" // no code in time, or the owner did not approve it in time
 	DSignInStopped  = "signin-stopped"   // planremove ended the sign-in
@@ -137,9 +140,10 @@ type PlanHost struct {
 	Workers SignInWorkers
 	Times   SignInTimes
 
-	mu   sync.Mutex
-	cur  *planSignIn
-	last string // how the last sign-in ended, a D* detail
+	mu       sync.Mutex
+	cur      *planSignIn
+	removing int    // Removes running: a Begin waits them out (DSignInBusy)
+	last     string // how the last sign-in ended, a D* detail
 }
 
 // planSignIn is the sign-in that waits for the owner.
@@ -180,9 +184,11 @@ func signInGuest() string {
 }
 
 // Begin starts a sign-in and returns the provider's page and the CLI's
-// code once it has printed them, within Times.Link. The CLI then waits for
-// the owner, past this call, until it commits the login, exits, Wall
-// passes or Remove ends it; its sandbox is destroyed on every path.
+// code once it has printed them, within Times.Link. The code is shown only
+// if it is the user code the plan login clerk forwarded to this sign-in's
+// guest (plan.Login.UserCode). The CLI then waits for the owner, past this
+// call, until it commits the login, exits, Wall passes or Remove ends it;
+// its sandbox is destroyed on every path.
 func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 	if h.Login.Mode() == plan.NotAllowed {
 		return PlanBegun{Detail: DPlanNotAllowed}
@@ -191,7 +197,7 @@ func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 		return PlanBegun{Detail: plan.DStopped + " " + s}
 	}
 	h.mu.Lock()
-	if h.cur != nil {
+	if h.cur != nil || h.removing > 0 {
 		h.mu.Unlock()
 		return PlanBegun{Detail: DSignInBusy}
 	}
@@ -201,6 +207,11 @@ func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 	h.mu.Unlock()
 
 	t := h.Times.orDefault()
+	// The CLI's start and its link are bounded by Link and end with the
+	// sign-in, whatever ctx is.
+	lctx, lcancel := context.WithTimeout(bg, t.Link)
+	defer lcancel()
+	defer context.AfterFunc(ctx, lcancel)()
 	var w SignInWorker
 	var code string
 	detail := DSignInFailed
@@ -210,11 +221,22 @@ func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 		detail = plan.DStopped + " " + plan.StopUnswappable
 	case err != nil:
 	default:
-		if w, err = h.Workers.Start(ctx, s.guest); err == nil && w != nil {
-			code, detail = h.awaitCode(ctx, bg, w, t)
+		w, err = h.Workers.Start(lctx, s.guest)
+		switch {
+		case err == nil && w != nil:
+			code, detail = h.awaitCode(lctx, bg, w, t)
+		case lctx.Err() != nil:
+			detail = DSignInTimedOut
 		}
 	}
+	if code != "" && code != h.Login.UserCode(s.guest) {
+		code, detail = "", DSignInCode
+	}
 	h.mu.Lock()
+	if bg.Err() != nil {
+		// Remove ended the sign-in: its code is not shown.
+		code, detail = "", DSignInStopped
+	}
 	s.code = code
 	h.mu.Unlock()
 	if code == "" {
@@ -229,9 +251,8 @@ func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 }
 
 // awaitCode reads the CLI's output until it shows its link and code, the
-// CLI exits, t.Link passes or the sign-in is ended.
+// CLI exits, or ctx, bounded by t.Link, ends.
 func (h *PlanHost) awaitCode(ctx, bg context.Context, w SignInWorker, t SignInTimes) (string, string) {
-	deadline := time.Now().Add(t.Link)
 	for {
 		printed, exited := w.Read(ctx)
 		if code, ok := h.Prompt.Code(printed); ok {
@@ -240,14 +261,12 @@ func (h *PlanHost) awaitCode(ctx, bg context.Context, w SignInWorker, t SignInTi
 		if exited {
 			return "", DSignInFailed
 		}
-		if !time.Now().Before(deadline) {
-			return "", DSignInTimedOut
-		}
 		select {
 		case <-ctx.Done():
+			if bg.Err() != nil {
+				return "", DSignInStopped
+			}
 			return "", DSignInTimedOut
-		case <-bg.Done():
-			return "", DSignInStopped
 		case <-time.After(t.Poll):
 		}
 	}
@@ -285,9 +304,14 @@ func (h *PlanHost) await(ctx context.Context, s *planSignIn, w SignInWorker, t S
 	}
 }
 
-// end forgets the sign-in guest and records how its sign-in ended.
+// end forgets the sign-in guest and records how its sign-in ended. A code
+// exchange that committed before Forget wins over detail, and one that
+// answers after it is dropped (plan.DEnded), so a late approval is never
+// stored behind a timed-out sign-in.
 func (h *PlanHost) end(s *planSignIn, detail string) {
-	h.Login.Forget(s.guest)
+	if h.Login.Forget(s.guest) {
+		detail = DSignedIn
+	}
 	s.cancel()
 	h.mu.Lock()
 	if h.cur == s {
@@ -321,13 +345,21 @@ func (h *PlanHost) Resume() (string, error) {
 }
 
 // Remove ends any sign-in, waiting for its sandbox to go, and deletes the
-// login.
+// login. No sign-in begins while it runs.
 func (h *PlanHost) Remove() error {
 	h.mu.Lock()
 	s := h.cur
-	h.mu.Unlock()
 	if s != nil {
 		s.cancel()
+	}
+	h.removing++
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.removing--
+		h.mu.Unlock()
+	}()
+	if s != nil {
 		<-s.done
 	}
 	return h.Login.Remove()

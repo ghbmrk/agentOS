@@ -1,0 +1,17 @@
+[
+  {"id": "payment-card", "name": "Payment card", "kind": "money", "group": "payment", "route": "none"},
+  {"id": "payment-wallet", "name": "Payment wallet", "kind": "money", "group": "payment", "route": "none", "ongoing": true},
+  {"id": "mailbox", "name": "Give me an email address? About 1 minute.", "kind": "mail", "group": "mailbox", "route": "none", "ongoing": true, "at_home": true},
+  {"id": "bank", "name": "Fake bank", "kind": "money", "group": "account",
+   "domains": ["bank.test"], "signin": ["login.bank.test"], "narrower": true, "route": "oauth", "ongoing": true},
+  {"id": "shop", "name": "Fake shop", "kind": "shopping", "group": "account",
+   "domains": ["shop.test"], "signin": ["shop.test"], "route": "password"},
+  {"id": "mail-imap", "name": "Fake IMAP mail", "kind": "mail", "group": "account",
+   "domains": ["imapmail.test"], "route": "imap"},
+  {"id": "router", "name": "Fake router", "kind": "other", "group": "account",
+   "domains": ["router.test"], "route": "password", "at_home": true},
+  {"id": "power", "name": "Electric utility", "kind": "utility", "group": "account",
+   "domains": ["power.test"], "route": "none", "ongoing": true, "implied_by": ["ev-charger", "thermostat"]},
+  {"id": "airline", "name": "Fake airline", "kind": "travel", "group": "account",
+   "domains": ["air.test"], "route": "none", "implied_by": ["thermostat"]}
+]

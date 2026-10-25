@@ -1,0 +1,14 @@
+# broker/clerk/accounts: assumptions
+
+Setup's account plan (TN-account-plan, #3189 slice a; SPEC §12.1 step 7, CLK-9, CLK-14, DEV-8, PLN-3, PLN-7).
+
+| ID | Assumption | If wrong |
+|---|---|---|
+| TN-account-plan-a1 | **Pure, outside the trusted core.** The package does no I/O, imports only the standard library and decodes only its own embedded `known.json`. No root in `tools/trusted_core.txt` links it. | If the kernel or a clerk root comes to link it, the core's lines grow and `trusted_base.py` asks for a D-159 row. |
+| TN-account-plan-a2 | **Providers are data.** No provider name, domain or sign-in host appears in this package's Go code (`TestKnownTableLoadsAndValidates` checks the shipped table's account entries against it). New services are data-only PRs; #2860's new fields are added to `Entry` and `validate` on purpose, since unknown fields are refused. | A provider branch in code would grow the trusted base per provider and break A22's Scale clause. |
+| TN-account-plan-a3 | **Domains never nest across entries.** The brief requires that no domain sits in two entries; the validator also refuses a domain under another entry's domain, so an authenticated domain matches at most one entry and table order alone sets the plan's order. | Two entries matching one sender would make which one shows depend on table order rather than the sender. If a real provider pair needs nesting, the validator changes to longest-suffix match on purpose. |
+| TN-account-plan-a4 | **The card, wallet and mailbox are fixed ids** (`payment-card`, `payment-wallet`, `mailbox`) with groups `payment`, `payment`, `mailbox`. They always lead the plan (source `always`); the mailbox is never preselected, whatever its flags. | A table without them is refused at load. |
+| TN-account-plan-a5 | **IMAP is Full power in two places**: the validator refuses `route: imap` with `narrower: true`, and `item` labels an IMAP entry Full power even if handed one (A22 fence). | Either alone would be one edit from an IMAP account labelled *Narrower*. |
+| TN-account-plan-a6 | **Sign-in hosts are exact.** `SignInAllowed` takes only `https`, no user info, no port (an explicit `:443` too) and a host listed byte for byte (lower case). A subdomain of a listed host is refused. | A table that lists `bank.test` would not allow `login.bank.test`; the entry lists each sign-in host. |
+| TN-account-plan-a7 | **Device kinds** are the ONB-3 plan step's lower-case tokens. That step is not on main, so slice (b) passes none until it is; an unknown kind implies nothing. | A kind spelled differently there implies nothing until the table is updated. |
+| TN-account-plan-a8 | **`Unconnected` lists every plan item not connected**, the card, wallet and mailbox included, as name and kind with the one wording `NotConnected`. Serving it to guests through `resources` is the follow-up issue this slice files (PLN-3: private content). | — |
