@@ -151,9 +151,11 @@ func smtpHop(v string) (by string, ok bool) {
 	return by, smtpProtocols[proto]
 }
 
-// smtpProtocols are the "with" values of mail received over SMTP.
+// smtpProtocols are the "with" values of mail received over SMTP. SMTPS and
+// SMTPSA are not RFC 3848's but Gmail writes SMTPS on mail from Google's own
+// senders ("Google Transport Security").
 var smtpProtocols = map[string]bool{
-	"SMTP": true, "ESMTP": true, "ESMTPA": true, "ESMTPS": true, "ESMTPSA": true,
+	"SMTP": true, "ESMTP": true, "ESMTPA": true, "ESMTPS": true, "ESMTPSA": true, "SMTPS": true, "SMTPSA": true,
 	"UTF8SMTP": true, "UTF8SMTPA": true, "UTF8SMTPS": true, "UTF8SMTPSA": true,
 }
 

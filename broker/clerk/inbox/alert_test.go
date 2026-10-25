@@ -148,6 +148,7 @@ func TestTheSenderNetNeedsTheProvidersSMTPHop(t *testing.T) {
 		{"a hop above with no protocol", "Received: by 2002:a05:6a10::1 id z1" + date + forged, false},
 		{"a hop above with two protocols", "Received: by 2002:a05:6a10::1 with SMTP with POP3 id z1" + date + forged, false},
 		{"provider's internal SMTP hop above", "Received: by 2002:a05:6a10::1 with SMTP id z1" + date + forged, true},
+		{"Google's own sender over SMTPS", "Received: from mail-sor-f41.google.com (mail-sor-f41.google.com. [209.85.220.41])\r\n        by " + authServ + " with SMTPS id s1\r\n        for <owner@example.test>\r\n        (Google Transport Security)" + date + ar, true},
 		{"protocol in any case", "Received: from relay.sender.test by " + authServ + " with esmtps id a1" + date + ar, true},
 		{"field above the hop", ar + smtpRecv(authServ), false},
 		{"hop only in a comment", "Received: from relay.sender.test (by " + authServ + " with ESMTPS) by relay.test with ESMTP id r1" + date + ar, false},
