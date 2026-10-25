@@ -27,7 +27,7 @@ func TestPhotoImportsNoDecoder(t *testing.T) {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if strings.HasPrefix(dep, "golang.org/x/image") || contains(decoders, dep) {
+		if strings.HasPrefix(dep, "golang.org/x/image") || strings.HasPrefix(dep, "github.com/gen2brain/h265") || contains(decoders, dep) {
 			t.Errorf("photo or agentosd links %s", dep)
 		}
 	}

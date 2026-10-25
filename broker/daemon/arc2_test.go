@@ -134,9 +134,12 @@ var machinePlane = map[string]struct {
 	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc", "cgroup"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 	// photo re-encodes owner photos through agentos-photo in a one-shot
 	// sandbox (CH-23): no image decoder links into the broker, and the
-	// decoder package (photo/decoder) only into agentos-photo.
+	// decoder package (photo/decoder) only into agentos-photo. The decoder
+	// may import exactly one third-party package, the pure-Go HEIC decoder
+	// (CH-photo-heic, #3124): it runs only inside that sandbox, and
+	// photo's TestPhotoImportsNoDecoder keeps it out of the broker.
 	"photo":             {[]string{"vm/gvisor"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C", "image/jpeg", "image/png", "image/gif"}},
-	"photo/decoder":     {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os", "os/exec", "plugin", "unsafe", "C"}},
+	"photo/decoder":     {[]string{"github.com/gen2brain/h265/heic"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os", "os/exec", "plugin", "unsafe", "C"}},
 	"cmd/agentos-photo": {[]string{"photo/decoder"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
@@ -299,7 +302,7 @@ func checkImports(t *testing.T, pkg string, allowed, forbidden, exceptions []str
 				if !contains(allowed, strings.TrimPrefix(p, module)) && p != module+"durable" {
 					t.Errorf("%s imports %s, outside the control path", f, p)
 				}
-			case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):
+			case strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && !contains(allowed, p):
 				t.Errorf("%s imports third-party %s (DEP-1, ARC-2)", f, p)
 			case contains(exceptions, p):
 			case contains(forbidden, p):

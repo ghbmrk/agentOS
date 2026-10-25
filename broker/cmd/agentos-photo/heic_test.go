@@ -314,6 +314,10 @@ func TestDecodeHEICOver50MPRefused(t *testing.T) {
 	if _, err := decoder.Decode(withISPE(t, deepGrid, 5000, 5000)); err != decoder.RefusePixels {
 		t.Fatalf("10-bit grid 5000x5000: got %v, want pixels", err)
 	}
+	// Nor can an empty ipco ahead of the real one hide the tiles' depth.
+	if _, err := decoder.Decode(withIprpFirst(t, withISPE(t, deepGrid, 5000, 5000), []byte("\x00\x00\x00\x08ipco"))); err != decoder.RefusePixels {
+		t.Fatalf("10-bit grid behind an empty ipco: got %v, want pixels", err)
+	}
 	// An hvcC that says 8 bits over a 10-bit stream is refused.
 	if _, err := decoder.Decode(withHvcCDepth(t, deep, 0)); err != decoder.RefuseDecode {
 		t.Fatalf("10-bit stream declared 8-bit: got %v, want decode", err)
@@ -360,6 +364,36 @@ func TestDecodeHEICNeedsAPrimaryItem(t *testing.T) {
 	if word, code, frame := refusal(t, seq); word != "decode" || code != 13 || len(frame) != 0 {
 		t.Fatalf("sequence: got %q exit %d with %d bytes out; want decode, 13, none", word, code, len(frame))
 	}
+	// The same sequence with a still's meta after it, whose pitm names no
+	// item: h265 falls back to the track.
+	bad := append([]byte{}, in...)
+	meta, mb := metaBoxes(t, bad)
+	binary.BigEndian.PutUint16(bad[find(t, mb, "pitm").start+4:], 999)
+	withMeta := append(append([]byte{}, seq...), bad[meta.start-8:meta.end]...)
+	if word, code, frame := refusal(t, withMeta); word != "decode" || code != 13 || len(frame) != 0 {
+		t.Fatalf("sequence plus a meta naming no item: got %q exit %d with %d bytes out; want decode, 13, none", word, code, len(frame))
+	}
+}
+
+// withIprpFirst returns raw with box placed first in its iprp, the boxes
+// holding it grown and the iloc offsets past meta moved to match.
+func withIprpFirst(t *testing.T, raw, box []byte) []byte {
+	t.Helper()
+	meta, mb := metaBoxes(t, raw)
+	sized := func(typ string, b []byte) []byte {
+		return append(binary.BigEndian.AppendUint32(nil, uint32(8+len(b))), append([]byte(typ), b...)...)
+	}
+	metaBody := append([]byte{}, raw[meta.start:meta.start+4]...)
+	for _, m := range mb {
+		if m.typ == "iprp" {
+			metaBody = append(metaBody, sized("iprp", append(append([]byte{}, box...), raw[m.start:m.end]...))...)
+		} else {
+			metaBody = append(metaBody, raw[m.start-8:m.end]...)
+		}
+	}
+	out := append(append(append([]byte{}, raw[:meta.start-8]...), sized("meta", metaBody)...), raw[meta.end:]...)
+	shiftIloc(t, out, meta.end, len(box))
+	return out
 }
 
 func TestDecodeHEICTypes(t *testing.T) {

@@ -158,11 +158,10 @@ func Decode(raw []byte) ([]byte, error) {
 	}
 	deep := false
 	if heif {
-		var still bool
-		if deep, still = heifDepth(raw); !still {
+		if hasMovie(raw) {
 			return nil, RefuseDecode
 		}
-		if deep {
+		if deep = heifDeep(raw); deep {
 			limit = MaxDeepPixels
 		}
 	}
@@ -216,46 +215,44 @@ func Decode(raw []byte) ([]byte, error) {
 	return frame, nil
 }
 
-// heifDepth reads a HEIF's meta box: deep is whether any hvcC property
-// in it (a still's, a grid's tiles', an alpha plane's) declares more
-// than 8 bits for luma or chroma, or is too short to say; still is
-// whether it names a primary item. A file with none is a picture
-// sequence, which h265 would decode frame by frame, so it is refused.
-func heifDepth(raw []byte) (deep, still bool) {
-	meta, ok := child(raw, "meta")
-	if !ok || len(meta) < 4 {
-		return false, false
-	}
-	meta = meta[4:] // version and flags
-	_, still = child(meta, "pitm")
-	iprp, _ := child(meta, "iprp")
-	ipco, _ := child(iprp, "ipco")
-	for b := ipco; len(b) > 0; {
-		typ, body, rest, ok := nextBox(b)
-		if !ok {
-			return true, still
-		}
-		if typ == "hvcC" && (len(body) < 19 || body[17]&7 != 0 || body[18]&7 != 0) {
-			deep = true
+// hasMovie reports whether raw has a top-level moov box, or cannot be
+// split into top-level boxes the way h265 splits it. h265 decodes a
+// file's moov track frame by frame whenever its meta names no usable
+// primary item, so a file with one is refused: a photo is a still.
+func hasMovie(raw []byte) bool {
+	for b := raw; len(b) >= 8; {
+		typ, _, rest, ok := nextBox(b)
+		if !ok || typ == "moov" {
+			return true
 		}
 		b = rest
 	}
-	return deep, still
+	return false
 }
 
-// child is the body of b's first box of type typ.
-func child(b []byte, typ string) ([]byte, bool) {
-	for len(b) > 0 {
-		t, body, rest, ok := nextBox(b)
-		if !ok {
-			return nil, false
+// heifDeep reports whether any hvcC box in raw (a still's, a grid's
+// tiles', an alpha plane's, wherever its ipco sits) declares more than
+// 8 bits for luma or chroma, or is too short to say. It looks for the
+// box's type wherever it occurs, framed by a plausible size, rather
+// than walking meta as h265 does, so no arrangement of boxes h265 reads
+// can hide one; a false match only lowers the limit.
+func heifDeep(raw []byte) bool {
+	for i := 4; i+4 <= len(raw); i++ {
+		j := bytes.Index(raw[i:], []byte("hvcC"))
+		if j < 0 {
+			return false
 		}
-		if t == typ {
-			return body, true
+		i += j
+		n := int(binary.BigEndian.Uint32(raw[i-4:]))
+		if n < 8 || n > 1<<16 {
+			continue
 		}
-		b = rest
+		body := raw[i+4 : min(i-4+n, len(raw))]
+		if len(body) < 19 || body[17]&7 != 0 || body[18]&7 != 0 {
+			return true
+		}
 	}
-	return nil, false
+	return false
 }
 
 // nextBox splits off b's first ISOBMFF box: its type, its body and what

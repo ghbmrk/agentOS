@@ -18,7 +18,8 @@ import (
 // a few bytes can claim 50 MP, and the loop's leaf has a small memory cap.
 const fuzzPixels = 1 << 20
 
-// FuzzDecode feeds the decoder's input path arbitrary files. It must not
+// FuzzDecode feeds the decoder's input path arbitrary files, JPEG, PNG
+// and HEIC seeded. It must not
 // panic, must refuse with one of its four words, and every frame it
 // writes must be a new image whose header matches its bytes and limits.
 func FuzzDecode(f *testing.F) {
@@ -29,8 +30,21 @@ func FuzzDecode(f *testing.F) {
 	f.Add(j.Bytes())
 	f.Add(p.Bytes())
 	f.Add(append([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0, 16}, "Exif\x00\x00MM\x00\x2a\x00\x00\x00\x08"...))
+	// HEIC seeds the vendored encoder writes: a still, a grid, a 10-bit
+	// and a 4:4:4.
+	n := image.NewNRGBA(image.Rect(0, 0, 48, 32))
+	for i := range n.Pix {
+		n.Pix[i] = uint8(i * 7)
+	}
+	for _, o := range []heic.EncodeOptions{{}, {Tile: 16}, {BitDepth: 10}, {Chroma: heic.Chroma444}} {
+		var b bytes.Buffer
+		if err := heic.Encode(&b, n, o); err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b.Bytes())
+	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		for _, c := range []func([]byte) (image.Config, error){jpegConfig, pngConfig} {
+		for _, c := range []func([]byte) (image.Config, error){jpegConfig, pngConfig, heicConfig} {
 			if cfg, err := c(raw); err == nil && int64(cfg.Width)*int64(cfg.Height) > fuzzPixels {
 				return
 			}
@@ -78,36 +92,4 @@ func checkFrame(t *testing.T, frame []byte) {
 
 func jpegConfig(b []byte) (image.Config, error) { return jpeg.DecodeConfig(bytes.NewReader(b)) }
 func pngConfig(b []byte) (image.Config, error)  { return png.DecodeConfig(bytes.NewReader(b)) }
-
-// FuzzDecodeHEIC is FuzzDecode for the HEIC path, seeded with HEIC files
-// the vendored encoder writes: a still, a grid, a 10-bit and a 4:4:4.
-func FuzzDecodeHEIC(f *testing.F) {
-	img := image.NewNRGBA(image.Rect(0, 0, 48, 32))
-	for i := range img.Pix {
-		img.Pix[i] = uint8(i * 7)
-	}
-	for _, o := range []heic.EncodeOptions{{}, {Tile: 16}, {BitDepth: 10}, {Chroma: heic.Chroma444}} {
-		var b bytes.Buffer
-		if err := heic.Encode(&b, img, o); err != nil {
-			f.Fatal(err)
-		}
-		f.Add(b.Bytes())
-	}
-	f.Fuzz(func(t *testing.T, raw []byte) {
-		if !IsHEIC(raw) {
-			return
-		}
-		if cfg, err := heic.DecodeConfig(bytes.NewReader(raw)); err == nil && int64(cfg.Width)*int64(cfg.Height) > fuzzPixels {
-			return
-		}
-		frame, err := Decode(raw)
-		if err != nil {
-			var r Refusal
-			if !errors.As(err, &r) {
-				t.Fatalf("not a refusal: %v", err)
-			}
-			return
-		}
-		checkFrame(t, frame)
-	})
-}
+func heicConfig(b []byte) (image.Config, error) { return heic.DecodeConfig(bytes.NewReader(b)) }
