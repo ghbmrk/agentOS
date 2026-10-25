@@ -360,6 +360,19 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
                                                              arg(e, "passphrase-file").rsplit("/", 1)[0]}))
 
+    def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
+        # #3073: systemd chowns a RuntimeDirectory= to the unit's user, root here, at every command's
+        # spawn, so a chown in ExecStartPre= is undone before ExecStart and the kernel cannot bind.
+        k = exec_args(KERNEL)
+        kern = k[k.index("--") + 1:]
+        run = {arg(kern, "owner-sock").rsplit("/", 1)[0], arg(kern, "meter-sock").rsplit("/", 1)[0]}
+        self.assertEqual(run, {"/run/agentos-kernel"})
+        s = ini(KERNEL)["Service"]
+        self.assertNotIn("RuntimeDirectory", s)
+        self.assertNotIn("User", s)
+        self.assertEqual(s["ExecStartPre"],
+                         "/usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel /run/agentos-kernel")
+
     def test_the_users_exist_and_none_is_in_a_tpm_group(self):
         lines = [l.split() for l in SYSUSERS.read_text().splitlines() if l.strip() and not l.startswith("#")]
         users = {w[1] for w in lines if w[0] == "u"}
@@ -386,9 +399,12 @@ class KeeperUnitsTest(unittest.TestCase):
         report, ci = BOOT_REPORT.read_text(), CI_BOOT.read_text()
         self.assertIn("agentos-keeper:", report)
         self.assertIn("tmpfiles.extra", ci)
-        self.assertIn('"agentos-keeper: enroll=ran"', ci)
+        self.assertIn('"agentos-keeper: enroll=ran kernel=active"', ci)
         self.assertIn('"agentos-keeper: enroll=skipped"', ci)
-        self.assertIn("my store holds none of your hardware keys", ci)
+        # The kernel starts setup-only after both boots (#2996), on its own sockets (#3073).
+        self.assertIn("/agentos-keeper: enroll=skipped kernel=active/", ci)
+        self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
+        self.assertNotIn("my store holds none of your hardware keys", ci)
         self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
         # The CI units whose mounts outlive one command lift the main-side mask in a drop-in that
         # sorts after it.
