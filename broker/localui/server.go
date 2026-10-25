@@ -66,6 +66,11 @@ type Config struct {
 	// at /accounts/ behind sign-in (#2853, D-150). They go together.
 	Accounts Accounts
 	Connect  []ConnectDeclaration
+	// Passkeys, when set with PasskeyRPID (the owner page's name, the
+	// WebAuthn RP ID), serves the passkey page at /passkeys/ behind
+	// sign-in (#2779a). They go together.
+	Passkeys    Passkeys
+	PasskeyRPID string
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
@@ -101,7 +106,7 @@ type Config struct {
 	// missing on a claimed box; the status page says to restore it.
 	PageRestore bool
 	Now         func() time.Time
-	Rand    io.Reader
+	Rand        io.Reader
 }
 
 // Server is the local UI.
@@ -175,6 +180,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if (cfg.Accounts == nil) != (len(cfg.Connect) == 0) {
 		return nil, errors.New("localui: the accounts page needs its clerk and its declarations")
+	}
+	if (cfg.Passkeys == nil) != (cfg.PasskeyRPID == "") {
+		return nil, errors.New("localui: the passkey page needs agentosd's passkey ops and the RP ID")
 	}
 	seen := map[string]bool{}
 	for _, d := range cfg.Connect {
@@ -279,6 +287,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Accounts != nil {
 		s.Mount("/accounts", "Accounts", http.HandlerFunc(s.accountsPage))
+	}
+	if s.cfg.Passkeys != nil {
+		s.Mount("/passkeys", "Passkeys", http.HandlerFunc(s.passkeysPage))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)
