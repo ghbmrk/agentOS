@@ -22,7 +22,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-adapters | trusted-side routes, events and the private-data read side (`route`, `modelroute`, `routerule`, `infer`, `photo`, `events`, `e2e`, `test`, `pubid`, `maintain`, `recall`, `recalltool`, `provagent`, `cmd/agentos-photo`, `cmd/agentos-infer`, `evals/review/`): port to `Kernel.Submit` and the clerk interfaces, delete the old code in the same PR. Sub A, not Codex. | MIG-4-untrusted | queued (sub A, not Codex; tier A) |
 | MIG-3-17 | Narrow the standing planner key's unsubscribe verb to the sender handles the owner approved (from #2566). | #2566 | queued (later) |
 | MIG-4-exit-5 | Exit clerk reconnect: owner text and sign-in step, an owner-signed Reconnect, an atomic store write (release findings from #2642). | MIG-4-exit-4 (#2642); the clerk wired into the broker | queued (release; tier A) |
-| MIG-4-run | The process that runs the kernel, hosts each clerk and persists the sealed Secrets; parent of #2655, #2643, #2626 allowlist and #2572 Step C. | MIG-4-exit (#2571), MIG-4-mail-a (#2653), STO-2 for real secrets | building (sub A; tier A) |
+| MIG-4-run | The process that runs the kernel, hosts each clerk and persists the sealed Secrets; parent of #2655, #2643, #2626 allowlist and #2572 Step C. | MIG-4-exit (#2571), MIG-4-mail-a (#2653), STO-2 for real secrets | queued (sub A; tier A) |
 | MIG-4-untrusted-owner | The owner channel (`owner`, `control`, `question`, `localsrv`, `localapi`, `voice`) off `journal` and `durable`; STOP, STATUS, RETRY onto the kernel's owner seam (docs/LANES.md); agentosd chain 3. | MIG-4-untrusted-mail | building (sub B; tier A) |
 | MIG-4-untrusted-reconnect | Owner-side Enroll and Unenroll, browser approval cards (`Approval.Site`, `Approval.Secret`), the owner-approved Reconnect (ASSUMPTIONS MIG-4-run-u) and the `ErrAnchor` reply, on the kernel's owner seam; agentosd chain 4; unblocks #2643 (a), #2613, #2740, #2670 item 6. | MIG-4-untrusted-owner | queued (sub B; tier A) |
 | MIG-4-untrusted-exit | `cmd/agentosd` off `vault`, `egress`, `holder`, `checker` and `provagent` (main.go wiring, provider and sign-in pages, their tests), onto the clerk exit and the model clerk; agentosd chain 5; unblocks #2571 and #2579's provagent half. | MIG-4-untrusted-learn | queued (sub B; tier A) |
@@ -41,12 +41,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery | broker/recovery rebuilt on the kernel log and sealed store: restore as an install, passkeys cut, compromised switch with new keys and CA, erase hold, hybrid seal; split before starting (REC-2, REC-5, LOG-4, CH-9, BAK-1). | A21 passed; #2823, #2828, #2577, #2682 | queued (release; sub A; tier A; after A21; split first) |
 | TN-witness-key | Witness key: watch reads, own revocations and pauses, fixed security texts only; clerks' declared watch reads as effect projections; narrowing operations for proofs (KRN-10). | A21 and G2 passed; #2851, #2852; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21 and G2) |
 | STO-1-reanchor | Owner-approved re-anchor of the TPM-counter anchor after a detected rollback (STO-1, REC-1). | #2890, recovery slice | queued (sub A; tier A) |
-| STO-2c | STO-2c enrollment and units: first boot creates the sealed store, seals the tpm slot under a per-box policy key, writes the NV pins and the counter anchor; units for enroll/unlock/kernel with restart bounds, no extra descriptors and a TPM device allowlist; policy-key rotation and owner-auth decision. Row (d) of the #2682 start-up slice; folds in #2897 and #2899. | STO-2 | building (sub A row, cut under the 2026-10-23 widening; tier A, gate file) |
 | STO-2c-agentosd | agentosd.service gets neither the keeper mask nor DevicePolicy=closed; drop it from NOEXEC_EXEMPT when agentosd is deleted (from #2978). | #2978; agentosd's deletion | queued (later, recheck) |
 | STO-2c-caps | STO-2c-caps main-side root one-shots drop CAP_SYS_ADMIN/SYS_PTRACE/MKNOD so the keeper mask holds against root (found on #2978). | STO-2c-caps | queued (later) |
 | STO-2c-f1 later | Keeper tree check: socket units, host-wide mounts and symlinks that reach keeper paths outside a main-side service's settings (from #2981). | #2981 | queued (later, recheck) |
 | STO-2c-setup-f1 | Where a clerk main reads the owner's anchors on a box set up through the log (D-146), for the STO-2b clerk-main row (from #2996). | #2996; STO-2b clerk main | queued (later, recheck) |
-| STO-2c-restart | STO-2c-restart: after the unlock cap (#2977), a kernel restart in the same boot cannot unlock; make a spent restart reboot the box (or equivalent) so the trusted host still restarts unattended. | STO-2 | building (tier A) |
 | TB-parsers-2-launch | Launch the mail clerk's IMAP connection process once per session, confined: own uid, no network, none of the clerk's files (from TB-parsers-2). | #2995 clerk-main row | queued (release; tier A) |
 | KRN-2-msgparse | Move RFC 5322 header and Gmail JSON parsing out of the mail clerk's process; fix netguard_allow.txt's stale Store.sessionB (from TB-parsers-2). | #3018 | queued (later) |
 | MIG-4-exit-3-later | OAuth exit clerk: real no-token-in-log test, token timeout tests, transient-fault retry, error-code reading, provider tolerances (later items from #2638). | #2642 | queued (later) |
@@ -354,7 +352,6 @@ These open work-item issues are left off the board until their issue is fixed; e
 
 ```text
 issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
-issue #3073: 3 middle cells, its table has 2
 issue #3079: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #3082: body has no board-row block
 issue #3086: body has no board-row block
