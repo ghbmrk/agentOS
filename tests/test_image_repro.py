@@ -228,6 +228,15 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertIn("MISMATCH agentos/initrd", r.stdout)
         self.assertIn("etc/shadow: content", r.stdout)
 
+    def test_only_a_superseded_pr_run_is_cancelled(self):
+        # Same-PR cancellation; main and manual runs are grouped by run id, so none displaces another.
+        wf = WORKFLOW.read_text()
+        self.assertIn("\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && "
+                      "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}\n"
+                      "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n", wf)
+        # Cancellation is workflow-wide only: no job sets its own group.
+        self.assertEqual(wf.count("concurrency:"), 1)
+
     def test_no_report_only_path_left(self):
         step = compare_step()
         self.assertNotIn("::warning::", step)

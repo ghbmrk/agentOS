@@ -6,7 +6,9 @@
 # Once a month the reboot is a restore drill (#2932): first every block of the booted /usr is read
 # through dm-verity against the signed boot entry's usrhash=, then the reboot is the clean start, and
 # drill-report times it to the healthy boot (agentos-drill-report.service). A failed check still
-# reboots: the week's bound holds whatever the drill found.
+# reboots: the week's bound holds whatever the drill found. The check gets only the time left in the
+# week, so a stalled verifier cannot hold the reboot up; one cut off, or not started because the week
+# is already up, records image=incomplete, which drill-report reads as a failed drill.
 # AGENTOS_HEALTH_ROOT exists for tests/test_image_noexec.py and tests/test_image_drill.py.
 set -u
 R=${AGENTOS_HEALTH_ROOT:-}
@@ -25,9 +27,17 @@ if due; then
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')
 	hash=$(printf '%s\n' "$st" | sed -n 's/^ *hash device: *//p')
 	image=failed
+	left=$((WEEK - $(up)))
 	# verify reads both partitions, not the mapping, and checks the whole tree against the signed hash.
-	[ -n "$want" ] && [ -n "$data" ] && [ -n "$hash" ] &&
-		ionice -c 3 nice -n 19 veritysetup verify "$data" "$hash" "$want" >/dev/null 2>&1 && image=verified
+	# timeout 0 would mean no bound at all, so a week already up skips the check.
+	if [ -n "$want" ] && [ -n "$data" ] && [ -n "$hash" ]; then
+		if [ "$left" -le 0 ]; then
+			image=incomplete
+		else
+			timeout -k 10 "$left" ionice -c 3 nice -n 19 veritysetup verify "$data" "$hash" "$want" >/dev/null 2>&1
+			case $? in 0) image=verified ;; 124 | 137) image=incomplete ;; esac
+		fi
+	fi
 	secs=$(($(date +%s) - start))
 	mkdir -p -m 0700 "$D"
 	echo "agentos-reboot: drill image=$image in ${secs}s; the reboot is the clean start"

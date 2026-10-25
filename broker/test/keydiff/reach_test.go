@@ -421,6 +421,24 @@ func TestPredicateReach(t *testing.T) {
 			t.Fatalf("a disagreement planted at keycheck's answer %d went unseen:\n%s", at, tail(string(out), 20))
 		}
 	})
+	// A keycheck that answers the first questions and then breaks, by
+	// closing its output or by answering with something other than a
+	// verdict, fails the sweep and is never a kill.
+	t.Run("broken-checker-is-no-kill", func(t *testing.T) {
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{"eof", "garbage"} {
+			out, err := sweep("", cases, "KEYCHECK="+self, "KEYDIFF_PLANT_REAL="+os.Getenv("KEYCHECK"), "KEYDIFF_PLANT_AT=3", "KEYDIFF_PLANT_BREAK="+mode)
+			if err == nil {
+				t.Errorf("%s: the sweep passed with keycheck broken at its third answer", mode)
+			}
+			if killed, why := kill(out, err); killed || !strings.Contains(string(out), broken) {
+				t.Errorf("%s: keycheck broken at its third answer reads as %q:\n%s", mode, why, tail(string(out), 20))
+			}
+		}
+	})
 	if out, err := sweep("", cases); err != nil {
 		t.Fatalf("the unmutated library fails the sweep over the reach range, so no kill can be trusted:\n%s", tail(string(out), 20))
 	}
@@ -448,19 +466,31 @@ func TestPredicateReach(t *testing.T) {
 			if err := os.WriteFile(ov, overlay, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			out, err := sweep(ov, cases)
-			switch {
-			case err == nil:
-				t.Errorf("survived: no seed separates the library from keycheck once it lets through %s", m.why)
-			case !strings.Contains(string(out), "cases disagree"):
-				t.Errorf("failed without a disagreement (%s):\n%s", m.why, tail(string(out), 20))
-			default:
-				_, first, _ := strings.Cut(string(out), "seed ")
-				first, _, _ = strings.Cut(first, "\n")
-				t.Logf("killed at seed %s", first)
+			if killed, why := kill(sweep(ov, cases)); killed {
+				t.Log(why)
+			} else {
+				t.Errorf("%s (%s)", why, m.why)
 			}
 		})
 	}
+}
+
+// kill reads one mutant's sweep: killed only when it failed on a
+// disagreement, never when it passed, failed some other way, or keycheck
+// broke under it.
+func kill(out []byte, err error) (bool, string) {
+	o := string(out)
+	switch {
+	case err == nil:
+		return false, "survived: no seed separates the library from keycheck"
+	case strings.Contains(o, broken):
+		return false, "keycheck broke, so no kill:\n" + tail(o, 20)
+	case !strings.Contains(o, "cases disagree"):
+		return false, "failed without a disagreement:\n" + tail(o, 20)
+	}
+	_, first, _ := strings.Cut(o, "seed ")
+	first, _, _ = strings.Cut(first, "\n")
+	return true, "killed at seed " + first
 }
 
 // sweep runs TestKeyDiff over seeds 0..cases, stopping at the first
@@ -482,7 +512,7 @@ func sweep(ov, cases string, env ...string) ([]byte, error) {
 func TestMain(m *testing.M) {
 	if real := os.Getenv("KEYDIFF_PLANT_REAL"); real != "" && len(os.Args) == 1 {
 		at, _ := strconv.Atoi(os.Getenv("KEYDIFF_PLANT_AT"))
-		if err := plant(real, at); err != nil {
+		if err := plant(real, at, os.Getenv("KEYDIFF_PLANT_BREAK")); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -492,8 +522,10 @@ func TestMain(m *testing.M) {
 }
 
 // plant relays stdin to the real keycheck and its answers back, with the
-// verdict and the within flag of answer at (counted from 1) flipped.
-func plant(real string, at int) error {
+// verdict and the within flag of answer at (counted from 1) flipped; or,
+// with brk set, with keycheck broken at that answer: "eof" closes the
+// output, anything else answers a line that is no verdict.
+func plant(real string, at int, brk string) error {
 	cmd := exec.Command(real)
 	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
 	r, err := cmd.StdoutPipe()
@@ -508,7 +540,12 @@ func plant(real string, at int) error {
 	w := bufio.NewWriter(os.Stdout)
 	for n := 1; sc.Scan(); n++ {
 		line := sc.Bytes()
-		if n == at {
+		if n == at && brk == "eof" {
+			return cmd.Process.Kill()
+		}
+		if n == at && brk != "" {
+			line = []byte("keycheck: no verdict")
+		} else if n == at {
 			var v map[string]any
 			if err := json.Unmarshal(line, &v); err != nil {
 				return err

@@ -72,6 +72,12 @@ on:
       - "tests/test_slice_inbox_slice.py"
 permissions:
   contents: read
+# A newer push to the same PR cancels that PR's older run, both builds and every check after them,
+# so only the latest revision spends runner time. Pushes to main and manual runs each get a group of
+# their own (the run id), so they never cancel or displace one another and always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     strategy:
