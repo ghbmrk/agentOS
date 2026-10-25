@@ -364,14 +364,21 @@ func TestPLN5NoKeyNoPlan(t *testing.T) {
 	r := newRig(t, func(c *Config) {
 		keys := c.Keys
 		c.Keys = func(m string) (key.Key, ed25519.PrivateKey, bool) {
-			if m == "m2" {
+			switch m {
+			case "m2":
 				return key.Key{}, nil, false
+			case "m3": // #3087: a short holder is refused, never signed with
+				k, h, _ := keys(m)
+				return k, h[:ed25519.SeedSize], true
 			}
 			return keys(m)
 		}
 	})
 	if st, _ := r.tool("m2", "plan", send("r1")); st.State != "refused" || st.Reason != reasonNoKey || r.kern.plans() != 0 {
 		t.Fatalf("%+v, %d plans", st, r.kern.plans())
+	}
+	if st, _ := r.tool("m3", "plan", send("r1")); st.State != "refused" || st.Reason != reasonNoKey || r.kern.plans() != 0 {
+		t.Fatalf("short holder: %+v, %d plans", st, r.kern.plans())
 	}
 	nk := newRig(t, func(c *Config) { c.Kernel = nil })
 	if st, _ := nk.tool("m1", "plan", send("r1")); st.State != "refused" || st.Reason != reasonNoKernel {
