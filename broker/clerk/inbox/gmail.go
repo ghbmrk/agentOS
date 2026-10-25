@@ -115,6 +115,13 @@ func GmailCalls(base, slot string) []clerk.Call {
 	}
 }
 
+// GmailReadCalls is GmailCalls without a call that is not a GET: the shadow
+// week's declaration (TN-shadow, D-152). Label, trash, untrash, label create
+// and send are undeclared, so the exit refuses them before any request.
+func GmailReadCalls(base, slot string) []clerk.Call {
+	return slices.DeleteFunc(GmailCalls(base, slot), func(c clerk.Call) bool { return c.Method != "GET" })
+}
+
 // GmailDeclaration is the mail clerk's declaration for a Gmail account.
 func GmailDeclaration(base, token, slot string, guard *netguard.Policy, clock clerk.Clock) clerk.APIDeclaration {
 	return clerk.APIDeclaration{Name: Name, Calls: GmailCalls(base, slot), Guard: guard, Refresh: token, Clock: clock}
@@ -363,6 +370,34 @@ func (g *Gmail) labelsOf(ctx context.Context, id string) ([]string, error) {
 		return nil, errors.New("inbox: gmail: the read-back was refused")
 	}
 	return m.LabelIDs, err
+}
+
+// Owner reads what the owner has done with mail since the clerk read it
+// (TN-shadow): OwnerRemoved when it is in the trash or spam or gone,
+// OwnerArchived when it left the inbox, else OwnerRead or OwnerUnread. It is
+// a metadata get, which the read-only grant allows.
+func (g *Gmail) Owner(ctx context.Context, mail string) (string, error) {
+	id, ok := strings.CutPrefix(mail, "gmail-")
+	if !ok || !gmailID.MatchString(id) {
+		return "", nUnknown
+	}
+	var m gMessage
+	c, err := g.call(ctx, gMetadata, map[string]string{"id": id}, &m)
+	switch {
+	case c == http.StatusNotFound:
+		return OwnerRemoved, nil
+	case err != nil:
+		return "", err
+	case m.ID != id:
+		return "", errors.New("inbox: gmail: a read-back of another message")
+	case slices.Contains(m.LabelIDs, "TRASH") || slices.Contains(m.LabelIDs, "SPAM"):
+		return OwnerRemoved, nil
+	case !slices.Contains(m.LabelIDs, "INBOX"):
+		return OwnerArchived, nil
+	case slices.Contains(m.LabelIDs, "UNREAD"):
+		return OwnerUnread, nil
+	}
+	return OwnerRead, nil
 }
 
 // Label adds the agentOS/ label to the mail and reads it back. Only the
