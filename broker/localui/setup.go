@@ -490,7 +490,7 @@ func (u *setup) save(f func(*SetupState)) error {
 // phone returns the setup cookie hash of the requesting phone, issuing a
 // cookie when issue is set and it has none ("" otherwise).
 func (u *setup) phone(w http.ResponseWriter, r *http.Request, issue bool) string {
-	if c, err := r.Cookie(setupCookie); err == nil && len(c.Value) == 64 {
+	if c, err := readCookie(r, setupCookie); err == nil && len(c.Value) == 64 {
 		return tokenKey(c.Value)
 	}
 	if !issue {
@@ -501,7 +501,7 @@ func (u *setup) phone(w http.ResponseWriter, r *http.Request, issue bool) string
 		return ""
 	}
 	tok := hex.EncodeToString(b)
-	http.SetCookie(w, &http.Cookie{Name: setupCookie, Value: tok, Path: "/setup", MaxAge: int(SetupCookieFor / time.Second),
+	setCookie(w, r, &http.Cookie{Name: setupCookie, Value: tok, Path: "/setup", MaxAge: int(SetupCookieFor / time.Second),
 		HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	return tokenKey(tok)
 }

@@ -71,7 +71,7 @@ func (s *Server) claimGate(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) isClaimant(r *http.Request) bool {
-	c, err := r.Cookie(claimCookie)
+	c, err := readCookie(r, claimCookie)
 	return err == nil && s.cfg.Claim.Claimant(c.Value)
 }
 
@@ -96,7 +96,7 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 		tok, err := s.cfg.Claim.Claim(typed)
 		release()
 		if tok != "" {
-			http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: tok, Path: "/", MaxAge: int(SetupCookieFor.Seconds()),
+			setCookie(w, r, &http.Cookie{Name: claimCookie, Value: tok, Path: "/", MaxAge: int(SetupCookieFor.Seconds()),
 				HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		}
 		if err == nil && s.cfg.SetupWiFi != nil {

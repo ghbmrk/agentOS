@@ -26,6 +26,13 @@
 // opens setup later without it (#1270). Only the download's image passes
 // -download-box; on any other a box without a claim state is told to
 // reinstall, never served setup without the claim gate.
+//
+// The page is also served over HTTPS on its name (-page-name) on port 443
+// (OWN-page-https, #3153; CH-9): at start the page makes a serving key in
+// memory and asks agentosd to certify it under the page authority, and
+// renews it daily. agentosd holds the authority's key; with none (no
+// sealer before STO-2, or a claimed box that lost it) the page serves
+// plain HTTP only, with no redirect.
 package main
 
 import (
@@ -55,7 +62,7 @@ import (
 const memoryLimit = 384 << 20
 
 func main() {
-	var sock, vaultSock, held, iface, addr string
+	var sock, vaultSock, held, iface, addr, pageName string
 	var fb boxFiles
 	var port int
 	var connectGmail bool
@@ -68,6 +75,7 @@ func main() {
 	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
+	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
 	flag.BoolVar(&connectGmail, "connect-gmail", false, "serve the Connect page for Gmail at /accounts/ (#3006), through agentosd's account ops to the mail clerk; set only where agentosd runs with -mail-owner")
 	flag.Parse()
 	log.SetFlags(0)
@@ -79,7 +87,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fb.VaultSock = vaultSock
-	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock, held)
+	cfg := config(localui.APConfig{Iface: iface, Addr: ap, PageName: pageName}, port, sock, vaultSock, held)
 	cfg.Station = station(sysClassNet, iface)
 	if connectGmail {
 		connect(&cfg, sock)
@@ -183,6 +191,7 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 	if err != nil {
 		return err
 	}
+	pt := pageTLS(ctx, &cfg, localui.Socket{Path: sock}, nil)
 	s, err := localui.New(cfg)
 	if err != nil {
 		return err
@@ -196,19 +205,101 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 	}); ok {
 		go a.PairTexts(ctx, s, 5*time.Second)
 	}
-	ln, err := localui.Listen(ctx, cfg.AP, cfg.Port)
-	if err != nil {
-		return err
+	var lns []net.Listener
+	for _, p := range ports(cfg, pt) {
+		ln, err := localui.Listen(ctx, cfg.AP, p)
+		if err != nil {
+			for _, l := range lns {
+				l.Close()
+			}
+			return err
+		}
+		lns = append(lns, ln)
 	}
-	hs := newHTTPServer(s)
-	go func() {
-		<-ctx.Done()
-		sh, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	errs := make(chan error, len(lns))
+	var hss []*http.Server
+	for i, ln := range lns {
+		hs := newHTTPServer(s)
+		hss = append(hss, hs)
+		if i == 0 {
+			go func() { errs <- hs.Serve(ln) }()
+			continue
+		}
+		hs.TLSConfig = pt.Config()
+		go func() { errs <- hs.ServeTLS(ln, "", "") }()
+	}
+	if pt != nil {
+		go pt.Run(ctx)
+	}
+	var err1 error
+	select {
+	case <-ctx.Done():
+	case err1 = <-errs:
+	}
+	sh, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, hs := range hss {
 		hs.Shutdown(sh)
-	}()
-	if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	}
+	if err1 != nil && !errors.Is(err1, http.ErrServerClosed) {
+		return err1
+	}
+	return nil
+}
+
+// pageTLS asks agentosd for the HTTPS listener's first certificate and
+// sets cfg to match: HTTPS when one came back, PageRestore when agentosd
+// says the box's authority must be restored. nil is plain HTTP only, said
+// once in the log with a fixed line (logf; log.Print when nil).
+func pageTLS(ctx context.Context, cfg *localui.Config, o localui.Owner, logf func(string)) *localui.PageTLS {
+	if logf == nil {
+		logf = func(s string) { log.Print(s) }
+	}
+	name := cfg.AP.PageName
+	if name == "" {
+		name = localui.DefaultPageName
+	}
+	pt, err := localui.NewPageTLS(ctx, name, o, nil, logf)
+	switch {
+	case errors.Is(err, localui.ErrRestore):
+		logf(localui.LogRestore)
+		cfg.PageRestore = true
+		return nil
+	case err != nil:
+		logf(localui.LogNoHTTPS)
+		return nil
+	}
+	cfg.HTTPS = true
+	return pt
+}
+
+// ports are the listeners run serves: the plain page, then 443 only with
+// a certificate.
+func ports(cfg localui.Config, pt *localui.PageTLS) []int {
+	if pt == nil || !cfg.HTTPS {
+		return []int{cfg.Port}
+	}
+	return []int{cfg.Port, localui.HTTPSPort}
+}
+
+// errPasskeyRPID: a passkey RP ID other than the page name, or with no
+// HTTPS listener up.
+var errPasskeyRPID = errors.New("-passkey-rp-id must equal -page-name and needs the HTTPS listener up (a page authority from agentosd)")
+
+// checkPasskeyRPID is the start-up gate for #2779a's -passkey-rp-id
+// (#3153): a passkey runs only on the HTTPS page, under its name, as
+// WebAuthn needs a secure context and the kernel checks the assertion's
+// origin is https://<RP ID> (MIG-2-a). Empty is no passkey pages.
+func checkPasskeyRPID(rpID string, cfg localui.Config) error {
+	if rpID == "" {
+		return nil
+	}
+	name := cfg.AP.PageName
+	if name == "" {
+		name = localui.DefaultPageName
+	}
+	if rpID != name || !cfg.HTTPS {
+		return errPasskeyRPID
 	}
 	return nil
 }

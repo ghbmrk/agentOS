@@ -29,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -734,5 +735,122 @@ func TestConnectGmailGoesThroughAgentosd(t *testing.T) {
 	}
 	if _, err := localui.New(cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// refusingOwner answers every op with one refusal, as agentosd answers
+// OpCertify with no page authority.
+type refusingOwner string
+
+func (o refusingOwner) Call(context.Context, string, any, any) error { return localui.Refused(o) }
+
+// certifyingOwner answers OpCertify from a real authority.
+type certifyingOwner struct{ a *pageca.Authority }
+
+func (o certifyingOwner) Call(_ context.Context, op string, args, out any) error {
+	if op != localapi.OpCertify {
+		return localui.Refused(localapi.ErrBadArgs)
+	}
+	leaf, err := o.a.Issue(args.(localapi.CertifyArgs).Pub, time.Now(), nil)
+	if err != nil {
+		return err
+	}
+	b, _ := json.Marshal(localapi.Certified{Leaf: leaf, Authority: o.a.Certificate()})
+	return json.Unmarshal(b, out)
+}
+
+func pageAP() localui.APConfig {
+	return localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24"), PageName: localui.DefaultPageName}
+}
+
+// #3153, the lifecycle matrix's "No sealer" and "authority missing" rows:
+// no 443 listener, and port 80 serves the page name with no redirect.
+func TestNoAuthorityServesHTTPOnly(t *testing.T) {
+	for _, c := range []struct {
+		code    string
+		restore bool
+		line    string
+	}{
+		{localapi.ErrNoAuthority, false, localui.LogNoHTTPS},
+		{localapi.ErrRestore, true, localui.LogRestore},
+		{localapi.ErrFailed, false, localui.LogNoHTTPS},
+	} {
+		cfg := localui.Config{AP: pageAP(), Port: localui.UIPort}
+		var logged []string
+		pt := pageTLS(context.Background(), &cfg, refusingOwner(c.code), func(s string) { logged = append(logged, s) })
+		if pt != nil || cfg.HTTPS || cfg.PageRestore != c.restore {
+			t.Fatalf("%s: tls %v https %v restore %v", c.code, pt != nil, cfg.HTTPS, cfg.PageRestore)
+		}
+		if got := ports(cfg, pt); len(got) != 1 || got[0] != localui.UIPort {
+			t.Errorf("%s: listens on %v", c.code, got)
+		}
+		if len(logged) != 1 || logged[0] != c.line {
+			t.Errorf("%s: logged %q", c.code, logged)
+		}
+		s, err := localui.New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := httptest.NewRequest("GET", "http://"+localui.DefaultPageName+"/status", nil)
+		q.RemoteAddr = "10.42.0.23:5000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, q)
+		if w.Code != http.StatusOK || w.Header().Get("Location") != "" {
+			t.Errorf("%s: the page name on port 80: %d %q", c.code, w.Code, w.Header().Get("Location"))
+		}
+		if strings.Contains(w.Body.String(), "Restore me from my backup") != c.restore {
+			t.Errorf("%s: restore text shown %v", c.code, !c.restore)
+		}
+		if err := checkPasskeyRPID(localui.DefaultPageName, cfg); err == nil {
+			t.Errorf("%s: passkey pages allowed without HTTPS", c.code)
+		}
+	}
+	// With an authority: both listeners, and the name is sent to HTTPS.
+	a, err := pageca.New(localui.DefaultPageName, time.Now().Add(-48*time.Hour), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := localui.Config{AP: pageAP(), Port: localui.UIPort}
+	pt := pageTLS(context.Background(), &cfg, certifyingOwner{a}, func(string) {})
+	if pt == nil || !cfg.HTTPS || cfg.PageRestore {
+		t.Fatal("no HTTPS with an authority")
+	}
+	if got := ports(cfg, pt); len(got) != 2 || got[1] != localui.HTTPSPort {
+		t.Errorf("listens on %v", got)
+	}
+}
+
+// The page's name is the authority's (localui does not link pageca).
+func TestThePageNameIsTheAuthoritys(t *testing.T) {
+	if localui.DefaultPageName != pageca.DefaultName {
+		t.Fatalf("%q != %q", localui.DefaultPageName, pageca.DefaultName)
+	}
+}
+
+// #3153 replaces #2779a's plain-HTTP refusal: a passkey RP ID is accepted
+// only when it is the page name and the HTTPS listener is up.
+func TestPasskeyRPIDMustBeThePageNameOverHTTPS(t *testing.T) {
+	up := localui.Config{AP: pageAP(), HTTPS: true}
+	down := localui.Config{AP: pageAP()}
+	for _, c := range []struct {
+		rp  string
+		cfg localui.Config
+		ok  bool
+	}{
+		{"", down, true},
+		{localui.DefaultPageName, up, true},
+		{localui.DefaultPageName, down, false},
+		{"10.42.0.1", up, false},
+		{"x." + localui.DefaultPageName, up, false},
+		{"internal", up, false},
+	} {
+		if err := checkPasskeyRPID(c.rp, c.cfg); (err == nil) != c.ok {
+			t.Errorf("%q https %v: %v", c.rp, c.cfg.HTTPS, err)
+		}
+	}
+	other := localui.Config{AP: pageAP(), HTTPS: true}
+	other.AP.PageName = "box.internal"
+	if checkPasskeyRPID(localui.DefaultPageName, other) == nil || checkPasskeyRPID("box.internal", other) != nil {
+		t.Error("the RP ID is not held to -page-name")
 	}
 }

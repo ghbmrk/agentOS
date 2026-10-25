@@ -32,6 +32,10 @@ type APConfig struct {
 	// Passthrough lets Wi-Fi clients reach the internet through Uplink
 	// once the box has one, so phones stay joined (ONB-5).
 	Passthrough bool
+	// PageName is the owner page's name over HTTPS (OWN-page-https,
+	// #3153); DefaultPageName when empty. DNS answers it with the box's
+	// address in both modes.
+	PageName string
 }
 
 // AccessPoint is the hardware seam: a driver brings up the access point,
@@ -51,6 +55,24 @@ type AccessPoint interface {
 
 // UIPort is the local UI's TCP port.
 const UIPort = 80
+
+// HTTPSPort is the owner page's TCP port over HTTPS (#3153).
+const HTTPSPort = 443
+
+// DefaultPageName is the owner page's name (pageca.DefaultName, which this
+// package does not link): one leaf under ICANN's private-use TLD.
+const DefaultPageName = "agentos.internal"
+
+// pageNameRe is a lowercase DNS name of two or more labels.
+var pageNameRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// pageName is the page's name, DefaultPageName when unset.
+func (c APConfig) pageName() string {
+	if c.PageName == "" {
+		return DefaultPageName
+	}
+	return c.PageName
+}
 
 var (
 	ifaceRe   = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
@@ -105,8 +127,15 @@ func (c *APConfig) ValidateServe() error {
 		return errors.New("localui: access point subnet must be /16 to /30")
 	case c.Addr.Addr() == c.Addr.Masked().Addr():
 		return errors.New("localui: access point address is the network address")
+	case len(c.pageName()) > 253 || !pageNameRe.MatchString(c.pageName()) || isAddr(c.pageName()):
+		return errors.New("localui: page name")
 	}
 	return nil
+}
+
+func isAddr(s string) bool {
+	_, err := netip.ParseAddr(s)
+	return err == nil
 }
 
 func printable(s string) bool {
@@ -181,6 +210,8 @@ func DnsmasqConf(c APConfig) (string, error) {
 	line("dhcp-range=%s,%s,%s,1h", first, last, maskOf(subnet.Bits()))
 	line("dhcp-option=option:router,%s", box)
 	line("dhcp-option=option:dns-server,%s", box)
+	// The page's name is the box's in both modes, never forwarded (#3153).
+	line("address=/%s/%s", c.pageName(), box)
 	if c.Passthrough {
 		line("no-poll")
 	} else {
@@ -207,10 +238,12 @@ func NftRules(c APConfig) (string, error) {
 	line("  chain input {")
 	line("    type filter hook input priority filter; policy accept;")
 	line(`    iifname "%s" ip saddr %s ip daddr %s tcp dport %d accept`, ap, subnet, box, UIPort)
+	line(`    iifname "%s" ip saddr %s ip daddr %s tcp dport %d accept`, ap, subnet, box, HTTPSPort)
 	line(`    iifname "%s" udp dport { 53, 67 } accept`, ap)
 	line(`    iifname "%s" tcp dport 53 accept`, ap)
 	line(`    iifname "%s" drop`, ap)
 	line(`    iifname != "%s" tcp dport %d ip daddr %s drop`, ap, UIPort, box)
+	line(`    iifname != "%s" tcp dport %d ip daddr %s drop`, ap, HTTPSPort, box)
 	line("  }")
 	line("  chain forward {")
 	line("    type filter hook forward priority filter; policy accept;")

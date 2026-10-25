@@ -35,6 +35,7 @@ form { margin: .6em 0 1.2em; }
 <h1>AgentOS</h1>
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 <p>Box: <b>{{phase .Progress.Phase}}</b></p>
+{{if .Restore}}<p class="err">My secure page certificate is missing. Restore me from my backup to use the secure page and passkeys.</p>{{end}}
 {{if .HasOwner}}
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
 {{if or .Owner.Challenged .Owner.LowLocked}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
