@@ -18,8 +18,9 @@ type Proposal struct {
 }
 
 // Apply returns the graph with p applied. The receiver is never changed.
-// It refuses a dropped edge or a brake that is not in the graph, and any
-// added owner node: a proposal never changes who the owner is.
+// It refuses a dropped edge or a brake that is not in the graph, any added
+// owner node (a proposal never changes who the owner is), and an added
+// control edge from the owner onto a node the proposal does not add.
 func (g *Graph) Apply(p Proposal) (*Graph, error) {
 	nodes := g.Nodes()
 	for _, id := range p.SetBrakes {
@@ -43,11 +44,21 @@ func (g *Graph) Apply(p Proposal) (*Graph, error) {
 		}
 		edges = append(edges[:k], edges[k+1:]...)
 	}
+	added := map[string]bool{}
 	for _, n := range p.AddNodes {
 		if n.Owner {
 			// The owner set is what reach is measured from: a proposal that
 			// adds an owner could mask a lock-out of the real one.
 			return nil, fmt.Errorf("graph: proposal adds owner node %q", n.ID)
+		}
+		added[n.ID] = true
+	}
+	for _, e := range p.AddEdges {
+		// The owner cannot fail, so a new edge from the owner onto a node
+		// already there is free reach that could mask a lock-out. Only a
+		// node the proposal adds, such as a new key, may gain one.
+		if i, ok := g.index[e.From[0]]; ok && control(e.Kind) && len(e.From) == 1 && g.nodes[i].Owner && !added[e.To] {
+			return nil, fmt.Errorf("graph: proposal adds an owner edge onto %q, which it does not add", e.To)
 		}
 	}
 	nodes = append(nodes, p.AddNodes...)

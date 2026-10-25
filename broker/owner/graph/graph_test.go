@@ -1109,6 +1109,19 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 			refused = append(refused, owner)
 		}
 	}
+	// The owner alone onto any node already there: free reach that could
+	// mask a lock-out. Onto a node the proposal adds, it is allowed.
+	for _, x := range g.Nodes() {
+		if !x.Owner {
+			for _, k := range []EdgeKind{Reset, Copy, Act} {
+				refused = append(refused, Proposal{Text: "owner direct", AddEdges: []Edge{e(k, x.ID, "p.owner")}})
+			}
+		}
+	}
+	for _, a := range assets {
+		ps = append(ps, Proposal{Text: "new key", AddNodes: []Node{n("k.new", Key, "Key 3", nil)},
+			AddEdges: []Edge{e(Act, "k.new", "p.owner"), e(Act, a, "k.new")}})
+	}
 	// The owner as one member of an AND gate, or as a witness.
 	for _, ed := range g.Edges() {
 		if control(ed.Kind) && !contains(ed.From, "p.owner") {
@@ -1186,6 +1199,69 @@ func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
 	if weak == 0 || fine == 0 {
 		t.Fatalf("mutations not discriminating: %d weaken, %d pass", weak, fine)
 	}
+}
+
+// TN-graph-e: the class-floor rule (TN-graph-A16 (3)). From Ana with the
+// bank's money held at 3, a new money account weakens no asset (its own
+// domain is its floor) but drops the money class to 1, so Lowers must hold
+// and Next must refuse it; a new asset in a class already at 1 passes.
+// Removing the rule from Lowers or from Next fails this test.
+func TestClassFloorOverNewAssets(t *testing.T) {
+	g, err := household(t, true).Apply(both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowered, kept := 0, 0
+	for _, c := range Classes {
+		for _, d := range [][]string{nil, dom("provider:new"), dom("maker:yubico")} {
+			for _, from := range [][]string{{"p.owner"}, {"k.one"}, {"k.one", "k.two"}} {
+				p := Proposal{Text: "new " + string(c), Minutes: 1, Structural: true,
+					AddNodes: []Node{n("a.new", Account, "New account", d, c)},
+					AddEdges: []Edge{e(Act, "a.new", from...)}}
+				h, err := g.Apply(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				eff, err := g.Effect(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := false
+				for _, k := range Classes {
+					if naiveFloor(h, k) < naiveFloor(g, k) {
+						want = true
+					}
+				}
+				if eff.Lowers() != want {
+					t.Errorf("%s from %v under %v: Lowers %v, class floors say %v", c, from, d, eff.Lowers(), want)
+				}
+				if _, ok := g.Next([]Proposal{p}); ok && (want || eff.Weakens) {
+					t.Errorf("Next offered %s from %v under %v, which lowers a class", c, from, d)
+				}
+				if want {
+					lowered++
+				} else {
+					kept++
+				}
+			}
+		}
+	}
+	if lowered == 0 || kept == 0 {
+		t.Fatalf("not discriminating: %d lower, %d keep", lowered, kept)
+	}
+}
+
+// naiveFloor is a class's smallest cut across its assets, by brute force.
+func naiveFloor(g *Graph, c Class) int {
+	min := 3
+	for _, x := range g.Nodes() {
+		if hasClass(x, c) {
+			if m := smallestNaive(g, x.ID, c); m < min {
+				min = m
+			}
+		}
+	}
+	return min
 }
 
 func smallestNaive(g *Graph, asset string, c Class) int {
