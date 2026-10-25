@@ -203,8 +203,8 @@ func TestAStoreThatCannotDeleteStaysListed(t *testing.T) {
 		t.Fatalf("unerased after restart %+v", got)
 	}
 	r.notes.failDelete = false
-	must(t, r.k.Tick(5))
-	must(t, r.k.Tick(6))
+	must(t, r.k.Tick(kernel.RetryMin))
+	must(t, r.k.Tick(kernel.RetryMin+1))
 	if got := r.k.State().Unerased(); got != nil {
 		t.Fatalf("still unerased %+v", got)
 	}
@@ -254,7 +254,7 @@ func TestAKeyDeleteFailureIsReturned(t *testing.T) {
 	r.keys.failDelete = true
 	r.k.Erase(5, s2)
 	r.keys.failDelete = false
-	must(t, r.k.Tick(6))
+	must(t, r.k.Tick(5+kernel.RetryMin))
 	if _, ok, _ := r.keys.Get(s2); ok {
 		t.Fatal("Tick did not retry the key delete")
 	}
@@ -307,7 +307,7 @@ func TestRecallListsItemsThenOnlyTheErase(t *testing.T) {
 	if !ok || rc.Opened != 1 || rc.Erased || !reflect.DeepEqual(rc.Items, []kernel.Item{{Store: "mail", Hash: h, Class: kernel.ClassLabel, At: 2}}) {
 		t.Fatalf("recall %+v", rc)
 	}
-	if got, unread := r.k.Named("Alice"); !slices.Equal(got, []string{s}) || unread != nil {
+	if got, unread, err := r.k.Named("Alice"); err != nil || !slices.Equal(got, []string{s}) || unread != nil {
 		t.Fatalf("named %v %v", got, unread)
 	}
 	r.mail.failDelete = true
@@ -316,7 +316,7 @@ func TestRecallListsItemsThenOnlyTheErase(t *testing.T) {
 	if !reflect.DeepEqual(rc, kernel.Recall{Subject: s, Opened: 1, Erased: true, ErasedAt: 3, Count: 1, Unconfirmed: []string{"mail"}}) {
 		t.Fatalf("recall after erase %+v", rc)
 	}
-	if got, _ := r.k.Named("Alice"); got != nil {
+	if got, _, _ := r.k.Named("Alice"); got != nil {
 		t.Fatalf("an erased subject is still found by name: %v", got)
 	}
 	if _, ok := r.k.State().Recall("ffffffffffffffffffffffffffffffff"); ok {
@@ -375,7 +375,10 @@ func TestEraseStateRebuildsFromEmpty(t *testing.T) {
 		t.Fatalf("unerased %+v", re.Unerased())
 	}
 	r.notes.failDelete = false
-	must(t, r.k.Tick(4))
+	must(t, r.k.Tick(3+kernel.RetryMin))
+	if re := r.k.State().Unerased(); re != nil {
+		t.Fatalf("still unerased %+v", re)
+	}
 	r.replays()
 }
 
@@ -432,14 +435,96 @@ func TestContentIsClosedUntilOpenContent(t *testing.T) {
 }
 
 // Recall by name skips a subject whose label cannot be read and lists it
-// apart, so one missing key or store down hides no other subject.
+// apart, so one missing key or store down hides no other subject, whichever
+// way the subjects sort.
 func TestNamedSkipsAnUnreadableSubject(t *testing.T) {
-	r := newErig(t)
-	a, b := r.open(), r.open()
-	r.seal(a, "mail", kernel.ClassLabel, "Alice")
-	r.seal(b, "notes", kernel.ClassLabel, "Alice")
-	r.keys.MemKeys.Delete(a)
-	if got, unread := r.k.Named("Alice"); !slices.Equal(got, []string{b}) || !slices.Equal(unread, []string{a}) {
-		t.Fatalf("named %v, unread %v", got, unread)
+	for _, badFirst := range []bool{true, false} {
+		r := newErig(t)
+		a, b := r.open(), r.open()
+		r.seal(a, "mail", kernel.ClassLabel, "Alice")
+		r.seal(b, "notes", kernel.ClassLabel, "Alice")
+		bad, good := a, b
+		if (a < b) != badFirst {
+			bad, good = b, a
+		}
+		r.keys.MemKeys.Delete(bad)
+		got, unread, err := r.k.Named("Alice")
+		if err != nil || !slices.Equal(got, []string{good}) || !slices.Equal(unread, []string{bad}) {
+			t.Errorf("unreadable sorts first=%v: named %v, unread %v, %v", badFirst, got, unread, err)
+		}
 	}
+}
+
+// A subject whose earlier label cannot be read and whose later one matches
+// is found, and not also listed as unread.
+func TestNamedFindsALaterLabel(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	h := r.seal(s, "mail", kernel.ClassLabel, "Al")
+	r.seal(s, "notes", kernel.ClassLabel, "Alice")
+	delete(r.mail.M, h)
+	if got, unread, err := r.k.Named("Alice"); err != nil || !slices.Equal(got, []string{s}) || unread != nil {
+		t.Fatalf("named %v, unread %v, %v", got, unread, err)
+	}
+	if got, unread, err := r.k.Named("Bob"); err != nil || got != nil || !slices.Equal(unread, []string{s}) {
+		t.Fatalf("no match: named %v, unread %v, %v", got, unread, err)
+	}
+}
+
+// Before OpenContent, Named says content is closed rather than calling
+// every subject unreadable.
+func TestNamedBeforeOpenContentIsClosed(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "mail", kernel.ClassLabel, "Alice")
+	l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: r.rnd})
+	must(t, err)
+	k, err := kernel.Boot(l, nil, nil, 0)
+	must(t, err)
+	if got, unread, err := k.Named("Alice"); !errors.Is(err, kernel.ErrContentClosed) || got != nil || unread != nil {
+		t.Fatalf("named before OpenContent: %v, %v, %v", got, unread, err)
+	}
+}
+
+// A delete that fails is not asked again on every Tick: it waits RetryMin,
+// then twice as long each time up to RetryMax, stays in Unerased
+// throughout, and a restart asks at once (LOG-4).
+func TestARetriedDeleteBacksOff(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.notes.failDelete = true
+	r.keys.failDelete = true
+	r.k.Erase(10, s)
+	if r.notes.deletes != 1 {
+		t.Fatalf("%d deletes at the erase", r.notes.deletes)
+	}
+	keyGets := func() bool { _, ok, _ := r.keys.Get(s); return ok }
+	at, wait := int64(10), kernel.RetryMin
+	for n := 2; n < 14; n++ {
+		must(t, r.k.Tick(at+wait-1))
+		if r.notes.deletes != n-1 {
+			t.Fatalf("try %d: asked before its wait of %d ms", n, wait)
+		}
+		at += wait
+		must(t, r.k.Tick(at))
+		if r.notes.deletes != n {
+			t.Fatalf("try %d: not asked after its wait of %d ms (%d deletes)", n, wait, r.notes.deletes)
+		}
+		if len(r.k.State().Unerased()) != 1 {
+			t.Fatal("dropped from Unerased while backing off")
+		}
+		wait = min(2*wait, kernel.RetryMax)
+	}
+	if wait != kernel.RetryMax {
+		t.Fatalf("setup: the wait should have reached RetryMax, at %d", wait)
+	}
+	r.keys.failDelete = false
+	r.notes.failDelete = false
+	before := r.notes.deletes
+	r.boot()
+	if r.notes.deletes != before+1 || keyGets() || r.k.State().Unerased() != nil {
+		t.Fatalf("a restart did not ask again at once: %d deletes, unerased %+v", r.notes.deletes-before, r.k.State().Unerased())
+	}
+	r.replays()
 }

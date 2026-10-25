@@ -170,9 +170,11 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	// The erase phase: the owner erases, the box ticks, stores flake.
 	m.left, m.flaky = crashAt, true
 	var res EraseResult
-	settle := func() error {
+	// Ticks a step apart: RetryMin while the stores flake, so retries back
+	// off between them; then RetryMax, so every backoff has run out.
+	settle := func(step int64) error {
 		for range 8 {
-			now++
+			now += step
 			for _, s := range subs {
 				if rc, _ := k.State().Recall(s); gone[s] && !rc.Erased {
 					k.Erase(now, s) // the owner asks again: the first did not land
@@ -190,11 +192,11 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 		}
 		return nil
 	}
-	if err := settle(); err != nil {
+	if err := settle(kernel.RetryMin); err != nil {
 		return res, err
 	}
 	m.flaky = false
-	if err := settle(); err != nil {
+	if err := settle(kernel.RetryMax); err != nil {
 		return res, err
 	}
 	return res, judgeErase(k, keys, stores, subs, gone, items)
