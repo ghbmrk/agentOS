@@ -23,7 +23,7 @@ import (
 // (photo.HEICMemBytes).
 const (
 	softMemory     = 448 << 20
-	heicSoftMemory = 640 << 20
+	heicSoftMemory = 768 << 20
 )
 
 func main() {

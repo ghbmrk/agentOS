@@ -31,11 +31,12 @@ const (
 // The one-shot run's limits. MemBytes covers a 50-megapixel 16-bit PNG,
 // the costliest JPEG or PNG the decoder accepts (ASSUMPTIONS P-1);
 // HEICMemBytes, any ISOBMFF file's run, covers a 50-megapixel HEIC above
-// 8 bits, which decodes to 16-bit samples (CH-photo-heic-1); MaxOutput,
+// 8 bits, 4:4:4 with an alpha plane, which decodes to 16-bit samples
+// (CH-photo-heic-1); MaxOutput,
 // a 4096-pixel square PNG that compresses badly, plus its thumbnail.
 const (
 	MemBytes     = 512 << 20
-	HEICMemBytes = 704 << 20
+	HEICMemBytes = 832 << 20
 	Timeout      = 30 * time.Second
 	MaxOutput    = 80 << 20
 	maxHeader    = 1 << 10
