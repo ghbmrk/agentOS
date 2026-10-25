@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -33,9 +34,15 @@ type PlanGuest struct {
 	// Plan is the kernel plan its calls are charged to, and Route the
 	// model clerk's route for this login, which names its pool.
 	Plan, Route string
-	// MaxOut is the output tokens a call is admitted at, its worst case:
-	// the CLI sets no cap of its own.
-	MaxOut int64
+	// Context is the provider's declared context window in tokens: no
+	// call's input passes it. MaxOut is its declared most output tokens a
+	// call returns, reasoning included. The CLI sets no cap of its own, so
+	// these bound a call (MIG-4-plan-bound).
+	Context, MaxOut int64
+	// Consent reports whether the owner's logged consent to an unconfirmed
+	// plan route stands now (CLK-7); nil is no consent. It is read at each
+	// request, so a withdrawal stops the route before its next call.
+	Consent func() bool
 	// Clock is the model clerk process's wall clock in unix ms. It orders
 	// the clerk's own owed log writes (the kernel dates every one), and it
 	// dates a pool reading: a missing or past reset becomes Clock plus the
@@ -74,6 +81,10 @@ func ServePlan(ln net.Listener, g PlanGuest) error {
 var errCut = errors.New("run: the model call did not complete")
 
 func (g PlanGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if detail := g.gate(); detail != "" {
+		http.Error(w, "agentos: "+detail, planStatus(detail))
+		return
+	}
 	resp, detail := g.Login.Do(r.Context(), g.Guest, r, g.meter)
 	if detail != "" {
 		http.Error(w, "agentos: "+detail, planStatus(detail))
@@ -102,11 +113,31 @@ func (g PlanGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// meter admits one model call of g's at its checked body's size, and
+// gate is the CLK-7 mode gate, before anything is read or sent: a permitted
+// route is open; an unconfirmed one serves its sign-in guest, so the owner
+// can sign in before being asked, and runs only while consent stands; a
+// route the terms bar serves nothing.
+func (g PlanGuest) gate() string {
+	switch g.Login.Mode() {
+	case plan.Permitted:
+		return ""
+	case plan.Unconfirmed:
+		if g.Login.Signing(g.Guest) || g.Consent != nil && g.Consent() {
+			return ""
+		}
+		return DPlanConsent
+	}
+	return DPlanNotAllowed
+}
+
+// meter admits one model call of g's at the most its usage can be, and
 // settles it when it ends. An unrecorded settlement is the clerk's to retry:
 // it makes no further call until the log has it.
 func (g PlanGuest) meter(body []byte) (func(plan.Used), string) {
-	adm, err := g.Clerk.Admit(g.Clock(), g.Plan, g.Route, model.Count(int64(len(body))), g.MaxOut)
+	if g.Context <= 0 {
+		return nil, DPlanMeter
+	}
+	adm, err := g.Clerk.Admit(g.Clock(), g.Plan, g.Route, g.inBound(body), g.MaxOut)
 	if err != nil {
 		var rf *key.Refusal
 		if errors.As(err, &rf) && rf != nil {
@@ -115,8 +146,45 @@ func (g PlanGuest) meter(body []byte) (func(plan.Used), string) {
 		return nil, DPlanMeter
 	}
 	return func(u plan.Used) {
-		_ = adm.Settle(g.Clock(), usage(u), model.Count(u.Bytes), ended(u))
+		// The clerk's own count of a whole answer is its bytes at four a
+		// token, which its event framing inflates; the provider returns
+		// no more than MaxOut.
+		_ = adm.Settle(g.Clock(), usage(u), min(model.Count(u.Bytes), g.MaxOut), ended(u))
 	}, ""
+}
+
+// inBound is the most input tokens body can be: its bytes, since a token
+// is at least one byte of the text it encodes, whatever the text; or the
+// context window if smaller, or if body carries an image, whose tokens its
+// bytes do not bound.
+func (g PlanGuest) inBound(body []byte) int64 {
+	var v any
+	if json.Unmarshal(body, &v) != nil || hasImage(v) {
+		return g.Context
+	}
+	return min(int64(len(body)), g.Context)
+}
+
+// hasImage reports whether v holds an object typed input_image.
+func hasImage(v any) bool {
+	switch v := v.(type) {
+	case map[string]any:
+		if v["type"] == "input_image" {
+			return true
+		}
+		for _, e := range v {
+			if hasImage(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range v {
+			if hasImage(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // usage is what the call's answer reported, for the model clerk.
@@ -150,7 +218,7 @@ func planStatus(detail string) int {
 	switch {
 	case planHas(detail, DPlanRefused):
 		return http.StatusTooManyRequests
-	case planHas(detail, plan.DStopped), planHas(detail, DPlanMeter):
+	case planHas(detail, plan.DStopped), planHas(detail, DPlanMeter), planHas(detail, DPlanConsent), planHas(detail, DPlanNotAllowed):
 		return http.StatusServiceUnavailable
 	case planHas(detail, clerk.DBlocked), planHas(detail, clerk.DNoAnswer):
 		return http.StatusBadGateway

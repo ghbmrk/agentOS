@@ -185,3 +185,25 @@ func TestWakeLeftoverJournalsTheColdReason(t *testing.T) {
 		}
 	}
 }
+
+// rollbackAnswer is an answered recall rollback question
+// (VM-lineage-contained); journalAnswers puts it in the journal's form.
+// They live here because this file already imports the old journal,
+// which the old-core ratchet lets no further file import.
+type rollbackAnswer struct{ lineage, items, reason string }
+
+func ownerNo(lineage, items string) rollbackAnswer {
+	return rollbackAnswer{lineage, items, recallOwnerNo}
+}
+
+func journalAnswers(as []rollbackAnswer) []journal.Status {
+	var out []journal.Status
+	for _, a := range as {
+		out = append(out, journal.Status{
+			Intent:     journal.Intent{Action: journal.ActionRecallRollback, Params: map[string]any{"lineage": a.lineage, "items": a.items}},
+			State:      journal.Denied,
+			Permission: journal.Permission{Reason: a.reason},
+		})
+	}
+	return out
+}

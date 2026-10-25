@@ -49,6 +49,7 @@ jobs:
           - { pkg: browser, target: FuzzParse }
           - { pkg: modemlink, target: FuzzInbound }
           - { pkg: guest, target: FuzzMCP }
+          - { pkg: photo/decoder, target: FuzzDecode }
     name: fuzz ${{ matrix.pkg }} ${{ matrix.target }}
     defaults:
       run:
