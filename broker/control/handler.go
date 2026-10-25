@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // CodeTTL is how long a texted RESUME code stays valid (CH-10 default).
@@ -29,12 +27,37 @@ const (
 // DeliverTimeout bounds how long task chat waits on the agent.
 const DeliverTimeout = 5 * time.Second
 
-// Engine is the part of the journal engine that control words drive.
+// Engine is what control words drive: the box's STOP and its list of
+// unsettled actions, behind the owner seam (docs/LANES.md).
 type Engine interface {
-	Stop(ctx context.Context) (journal.StopReport, error)
+	Stop(ctx context.Context) (StopReport, error)
 	Resume() error
 	Stopped() bool
-	List() []journal.Status
+	List() []Status
+}
+
+// StopReport is what STOP tells the owner. It has no field for undone
+// effects: STOP never claims to undo a remote action (OP-6).
+type StopReport struct {
+	Held       []string // authorized but not sent; RESUME releases them
+	Unresolved []string // may have reached a service: sent, or outcome unknown
+	Cancels    int      // cancel requests sent to services that take them
+}
+
+// Phase is where one action stands as STATUS counts it (SPEC §10).
+type Phase int
+
+const (
+	Settled   Phase = iota // done, failed, denied or cancelled: not counted
+	Unsettled              // sent, or its outcome is unknown: it may have happened
+	Held                   // authorized, or proved not done: it waits to run
+	Open                   // waits for the owner's decision
+)
+
+// Status is one action in Engine.List.
+type Status struct {
+	ID, Action, Account string
+	Phase               Phase
 }
 
 // Auth answers CH-3's proofs. The owner channel (P1-5) supplies the real
@@ -244,7 +267,7 @@ const unlockText = "This needs an unlocked session. Send a code from your code g
 // STOP goes through it and reports done only when it returns nil, never on
 // an earlier STOP's record: a failed write since then (a RESUME whose fsync
 // failed) can replay on restart and lift it (CH-2).
-func (h *Handler) Stop(ctx context.Context) (journal.StopReport, error) {
+func (h *Handler) Stop(ctx context.Context) (StopReport, error) {
 	h.mu.Lock()
 	h.resume = nil // a code issued before STOP must not lift it
 	h.mu.Unlock()
@@ -257,17 +280,7 @@ func (h *Handler) stop(ctx context.Context) string {
 		return "STOP failed to record. Nothing new starts now; reply STOP again."
 	}
 	return fmt.Sprintf("Stopped. %d held, %d may have happened, %d cancel requests sent. Nothing was undone. Reply RESUME to restart.",
-		len(rep.Held), len(rep.Unresolved), accepted(rep.Cancels))
-}
-
-func accepted(cs []journal.CancelAttempt) int {
-	n := 0
-	for _, c := range cs {
-		if c.Supported {
-			n++
-		}
-	}
-	return n
+		len(rep.Held), len(rep.Unresolved), rep.Cancels)
 }
 
 func (h *Handler) resumeCmd(args []string) string {
@@ -353,13 +366,13 @@ func (h *Handler) status(max int) string {
 	}
 	var unresolved, held, open []string
 	for _, s := range h.Engine.List() {
-		label := safeToken(s.Intent.Action, 20) + "/" + safeToken(s.Intent.Account, 16)
-		switch s.State {
-		case journal.InFlight, journal.OutcomeUnknown:
+		label := safeToken(s.Action, 20) + "/" + safeToken(s.Account, 16)
+		switch s.Phase {
+		case Unsettled:
 			unresolved = append(unresolved, label)
-		case journal.Authorized, journal.NotApplied:
+		case Held:
 			held = append(held, label)
-		case journal.Pending:
+		case Open:
 			open = append(open, label)
 		}
 	}

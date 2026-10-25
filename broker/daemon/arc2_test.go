@@ -24,17 +24,24 @@ var controlPath = map[string][]string{
 	// The durable-write helper (SIM-fs) every package may import: file
 	// calls only, held to the control path's rules here.
 	"durable": {},
+	// The atomic replace of a process's own file (#2643 c), which the
+	// owner state, the setup record and the question book write through
+	// (#2778): file calls only, held to the control path's rules here.
+	"kernel/privfile": {},
 	// The journal checker (SIM-check): pure predicates over records.
 	"journal/check": {"journal"},
-	"control":       {"journal"},
-	"admission":     {},
-	"sockets":       {},
-	"cgroup":        {},
-	"budget":        {"admission", "cgroup"}, // RES-2 component budget (P2-5)
-	"accel":         {"admission"},           // RES-3 discovery from sysfs (P2-5)
-	"owner":         {"boxname", "control", "journal", "modem"},
-	"modem":         {},
-	"boxname":       {}, // CH-21 name check, for NAME
+	"control":       {},
+	// The journal engine as the owner commands drive it (#2778), until
+	// #2783 (c) leaves them to the kernel.
+	"daemon/journalowner": {"control", "journal"},
+	"admission":           {},
+	"sockets":             {},
+	"cgroup":              {},
+	"budget":              {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":               {"admission"},           // RES-3 discovery from sysfs (P2-5)
+	"owner":               {"boxname", "control", "kernel/privfile", "modem"},
+	"modem":               {},
+	"boxname":             {}, // CH-21 name check, for NAME
 	// The card's Wi-Fi network file (#1185): agentosd writes what the page
 	// reports for agentos-ap to serve; standard library only, so agentosd
 	// still links neither card nor claim.
@@ -47,7 +54,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"apnet", "localapi", "owner", "sockets"},
+	"localsrv": {"apnet", "kernel/privfile", "localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
@@ -61,7 +68,7 @@ var controlPath = map[string][]string{
 	// step is tiered by (#2783 b): a pure library, held to the control
 	// path's rules.
 	"kernel/key": {},
-	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet", "kernel/key"},
+	"daemon":     {"journal", "journal/check", "control", "daemon/journalowner", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet", "kernel/key"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -185,7 +192,7 @@ var guestPlane = map[string]struct {
 	"provagent": {[]string{"admission", "vm"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
-	"question": {[]string{"guesterr"}, forbiddenStd},
+	"question": {[]string{"guesterr", "kernel/privfile"}, forbiddenStd},
 	// The one filter on what a tool's error shows the guest (SR2-3g):
 	// fixed text passes, anything else is a ref and a broker-log line.
 	"guesterr": {nil, forbiddenStd},
@@ -219,10 +226,11 @@ var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec",
 // stdExceptions are the forbidden standard packages a control-path package
 // may still use, and why.
 var stdExceptions = map[string][]string{
-	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
-	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
-	"journal":      {"syscall"},        // flock on the journal file
-	"loops":        {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
+	"sockets":         {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
+	"cmd/agentosd":    {"syscall"},        // signal numbers for shutdown
+	"journal":         {"syscall"},        // flock on the journal file
+	"kernel/privfile": {"syscall"},        // O_NOFOLLOW and Stat_t for the owner-only check
+	"loops":           {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
 }
 
 // Never anywhere in the control path's transitive dependencies.

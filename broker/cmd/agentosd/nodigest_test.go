@@ -258,14 +258,14 @@ var statusNow = time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
 
 // statusEngine is an engine for control.Handler whose List is the effects
 // the unclear note's parked intents leave open.
-type statusEngine struct{ list []journal.Status }
+type statusEngine struct{ list []control.Status }
 
-func (statusEngine) Stop(context.Context) (journal.StopReport, error) {
-	return journal.StopReport{}, nil
+func (statusEngine) Stop(context.Context) (control.StopReport, error) {
+	return control.StopReport{}, nil
 }
 func (statusEngine) Resume() error            { return nil }
 func (statusEngine) Stopped() bool            { return false }
-func (e statusEngine) List() []journal.Status { return e.list }
+func (e statusEngine) List() []control.Status { return e.list }
 
 // statusOwner is the owner, unlocked.
 type statusOwner struct{}
@@ -297,12 +297,12 @@ func TestWireStatusNotes(t *testing.T) {
 	// no model socket, so the 99-byte model line is on too.
 	newCapLines(newCapState("")).wire(&cfg)
 
-	label := journal.Intent{Action: strings.Repeat("a", 20), Account: strings.Repeat("b", 16)}
+	label := control.Status{Action: strings.Repeat("a", 20), Account: strings.Repeat("b", 16), Phase: control.Unsettled}
 	var waiting []journal.ParkedIntent
-	var open []journal.Status
+	var open []control.Status
 	for i := 0; i < 4; i++ {
 		waiting = append(waiting, journal.ParkedIntent{Intent: journal.Intent{Executor: "sms"}})
-		open = append(open, journal.Status{Intent: label, State: journal.OutcomeUnknown})
+		open = append(open, label)
 	}
 	unclear.set(func() []journal.ParkedIntent { return waiting })
 	wifi := "2 waiting for you on my Wi-Fi page."

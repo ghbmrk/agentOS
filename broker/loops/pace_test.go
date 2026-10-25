@@ -2,12 +2,12 @@ package loops
 
 import (
 	"context"
+	"github.com/ghbmrk/agentos/broker/control"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
@@ -15,12 +15,12 @@ import (
 // paceEngine is the least control.Engine an owner channel needs.
 type paceEngine struct{}
 
-func (paceEngine) Stop(context.Context) (journal.StopReport, error) {
-	return journal.StopReport{}, nil
+func (paceEngine) Stop(context.Context) (control.StopReport, error) {
+	return control.StopReport{}, nil
 }
 func (paceEngine) Resume() error          { return nil }
 func (paceEngine) Stopped() bool          { return false }
-func (paceEngine) List() []journal.Status { return nil }
+func (paceEngine) List() []control.Status { return nil }
 
 // pacedGuard is a guard rig whose texts go through a real owner channel
 // with quiet hours 22 to 7, wired as agentosd wires it: urgent texts as

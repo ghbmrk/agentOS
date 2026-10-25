@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/control"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"os"
@@ -18,13 +17,13 @@ import (
 
 type fakeEngine struct{ stopped bool }
 
-func (f *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
+func (f *fakeEngine) Stop(context.Context) (control.StopReport, error) {
 	f.stopped = true
-	return journal.StopReport{}, nil
+	return control.StopReport{}, nil
 }
 func (f *fakeEngine) Resume() error          { f.stopped = false; return nil }
 func (f *fakeEngine) Stopped() bool          { return f.stopped }
-func (f *fakeEngine) List() []journal.Status { return nil }
+func (f *fakeEngine) List() []control.Status { return nil }
 
 type chatAgent struct{ got []string }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"github.com/ghbmrk/agentos/broker/control"
 	"html"
 	"io"
 	"math/rand"
@@ -21,7 +22,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -253,15 +253,15 @@ type fakeEngine struct {
 	stopped bool
 }
 
-func (e *fakeEngine) Stop(context.Context) (journal.StopReport, error) {
+func (e *fakeEngine) Stop(context.Context) (control.StopReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.stopped = true
-	return journal.StopReport{}, nil
+	return control.StopReport{}, nil
 }
 func (e *fakeEngine) Resume() error          { e.mu.Lock(); defer e.mu.Unlock(); e.stopped = false; return nil }
 func (e *fakeEngine) Stopped() bool          { e.mu.Lock(); defer e.mu.Unlock(); return e.stopped }
-func (e *fakeEngine) List() []journal.Status { return nil }
+func (e *fakeEngine) List() []control.Status { return nil }
 
 type rig struct {
 	t     *testing.T

@@ -26,11 +26,8 @@ cmd/agentosd debt debt:audit-2.7
 follow debt debt:#1947
 guest debt debt:#1947
 journal journal
-localsrv config
 meter debt debt:#1947
-owner debt debt:audit-2.2
 photo/keep content
-question debt debt:#1947
 recall content
 recovery debt debt:#1947
 update debt debt:audit-2.4

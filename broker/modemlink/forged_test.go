@@ -2,6 +2,7 @@ package modemlink_test
 
 import (
 	"context"
+	"github.com/ghbmrk/agentos/broker/control"
 	"regexp"
 	"strings"
 	"sync"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -19,10 +19,10 @@ import (
 
 type engine struct{}
 
-func (engine) Stop(context.Context) (journal.StopReport, error) { return journal.StopReport{}, nil }
+func (engine) Stop(context.Context) (control.StopReport, error) { return control.StopReport{}, nil }
 func (engine) Resume() error                                    { return nil }
 func (engine) Stopped() bool                                    { return false }
-func (engine) List() []journal.Status                           { return nil }
+func (engine) List() []control.Status                           { return nil }
 
 var _ = daemon.OwnerSocket // the daemon serves Link.Ops on this socket
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/daemon/journalowner"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/journal/check"
@@ -238,6 +239,7 @@ var FollowRefusedName = fmt.Sprintf("Not asked: use a name of at most %d charact
 // Daemon is a running broker.
 type Daemon struct {
 	engine *journal.Engine
+	owned  control.Engine
 	gate   *grants.Gate
 	store  *journal.FileStore
 	owner  *ownerch.Channel
@@ -384,9 +386,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	notes := append(append([]func() string{check.Note(eng)}, unconfirmedNotes(eng)...), cfg.Notes...)
 	// The owner commands drive the kernel's owner seam as well as the
 	// journal engine when a kernel is configured (#2783).
-	var owned control.Engine = eng
+	var owned control.Engine = journalowner.Engine{Engine: eng}
 	if cfg.Kernel != nil {
-		b := &bothStops{Engine: eng, k: cfg.Kernel}
+		b := &bothStops{Engine: journalowner.Engine{Engine: eng}, k: cfg.Kernel}
 		owned, notes = b, append([]func() string{b.note}, notes...)
 	}
 	h := &control.Handler{Engine: owned, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
@@ -519,7 +521,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if drain <= 0 {
 		drain = ownerch.SendDrain
 	}
-	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, retry: rt, done: make(chan struct{})}
+	d := &Daemon{engine: eng, owned: owned, gate: gate, store: store, srv: srv, adm: adm, owner: ch, retry: rt, done: make(chan struct{})}
 	if ch != nil {
 		go serveOwner(ctx, ch, cfg.Modem != nil)
 	}
@@ -636,6 +638,9 @@ func (d *Daemon) Gate() *grants.Gate { return d.gate }
 
 // Engine is the daemon's journal engine.
 func (d *Daemon) Engine() *journal.Engine { return d.engine }
+
+// Owned is what the owner commands drive: STOP, RESUME and STATUS.
+func (d *Daemon) Owned() control.Engine { return d.owned }
 
 // Admission is the daemon's admission controller, for the VM lifecycle
 // manager to admit and release machines through.
@@ -780,7 +785,7 @@ type bothStops struct {
 // only when both recorded it (CH-2). A kernel waiting for setup holds no
 // plan and runs nothing, so its refusal is not a failure; one that cannot
 // be reached is, since it may hold plans it runs again once it answers.
-func (b *bothStops) Stop(ctx context.Context) (journal.StopReport, error) {
+func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
 	rep, err := b.Engine.Stop(ctx)
 	return rep, errors.Join(err, b.kernel(ctx, b.k.Stop))
 }
@@ -844,7 +849,7 @@ func (b *bothStops) Stopped() bool {
 // it never acted. A kernel whose steps cannot be read adds none, and
 // STATUS names it (note), unless it is waiting for setup, as Stopped
 // reads it: a setup-only kernel, or a box with no sealed store, holds none.
-func (b *bothStops) List() []journal.Status {
+func (b *bothStops) List() []control.Status {
 	out := b.Engine.List()
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
@@ -858,14 +863,14 @@ func (b *bothStops) List() []journal.Status {
 	b.unlisted = unlisted
 	b.mu.Unlock()
 	for _, s := range steps {
-		st := journal.OutcomeUnknown
+		ph := control.Unsettled
 		if s.Phase == KernelUnsent {
 			if s.PlanStatus != KernelPlanActive {
 				continue
 			}
-			st = journal.NotApplied
+			ph = control.Held
 		}
-		out = append(out, journal.Status{Intent: journal.Intent{ID: s.Plan, Action: s.Verb, Account: s.Clerk}, State: st})
+		out = append(out, control.Status{ID: s.Plan, Action: s.Verb, Account: s.Clerk, Phase: ph})
 	}
 	return out
 }

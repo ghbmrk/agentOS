@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/ghbmrk/agentos/broker/control"
 	"log"
 	"regexp"
 	"strings"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
@@ -22,12 +22,12 @@ import (
 // pacingEngine is the least control.Engine an owner channel needs.
 type pacingEngine struct{}
 
-func (pacingEngine) Stop(context.Context) (journal.StopReport, error) {
-	return journal.StopReport{}, nil
+func (pacingEngine) Stop(context.Context) (control.StopReport, error) {
+	return control.StopReport{}, nil
 }
 func (pacingEngine) Resume() error          { return nil }
 func (pacingEngine) Stopped() bool          { return false }
-func (pacingEngine) List() []journal.Status { return nil }
+func (pacingEngine) List() []control.Status { return nil }
 
 // pacedOwnerRig is a real owner channel with a pacing setting saved, on a
 // fake carrier and a clock the test moves.

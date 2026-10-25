@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/daemon/journalowner"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -196,9 +197,8 @@ func TestAResumeTakesAFreshPageCode(t *testing.T) {
 	carrier.SetClock(r.now)
 	box, phone := carrier.Line(boxNum), carrier.Line(ownerNum)
 	ch, err := owner.New(owner.Config{
-		Owner: ownerNum, Modem: box, Engine: r.eng, Secrets: owner.Secrets{TOTPSeed: seed}, Store: unpaced(),
-		Limits: owner.Limits{AmountLimit: 50000}, Location: time.UTC, Now: r.now,
-		Decide: r.g.Decide, Narrow: r.g.Narrow,
+		Owner: ownerNum, Modem: box, Engine: journalowner.Engine{Engine: r.eng}, Secrets: owner.Secrets{TOTPSeed: seed}, Store: unpaced(),
+		Limits: owner.Limits{AmountLimit: 50000}, Location: time.UTC, Now: r.now, Decide: r.g.Decide, Narrow: r.g.Narrow,
 	})
 	if err != nil {
 		t.Fatal(err)
