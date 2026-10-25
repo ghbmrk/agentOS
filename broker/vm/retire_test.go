@@ -526,3 +526,43 @@ func TestCAP3RefusedForkCheckpointDropIsDurable(t *testing.T) {
 		t.Errorf("Last %q, want the kept checkpoint %s", mc.Last, s[0].ID)
 	}
 }
+
+// CAP-3: while a prune's unpublish is undecided, nothing looks the
+// snapshot up (a Diff or Merge from another machine would read a layer
+// the prune is about to delete); afterwards it is unknown.
+func TestCAP3PruneUnpublishHidesTheSnapshotUntilDecided(t *testing.T) {
+	e := pruneEnv(t)
+	e.create("m", admission.Accepted, 100)
+	old, err := e.m.Step(bg, "m")
+	must(t, err)
+	for i := 0; i < 3; i++ {
+		_, err := e.m.Step(bg, "m")
+		must(t, err)
+	}
+	real := syncSnapDir
+	var once sync.Once
+	looked := make(chan error, 1)
+	syncSnapDir = func(d string) error {
+		if filepath.Base(d) == old.ID {
+			once.Do(func() {
+				go func() {
+					_, err := e.m.Snapshot(old.ID)
+					looked <- err
+				}()
+				select {
+				case err := <-looked:
+					t.Errorf("snapshot looked up mid-unpublish: %v", err)
+					looked <- err
+				case <-time.After(50 * time.Millisecond):
+				}
+			})
+		}
+		return real(d)
+	}
+	t.Cleanup(func() { syncSnapDir = real })
+	_, err = e.m.Prune(PrunePolicy{KeepFS: 1, KeepFull: 1})
+	must(t, err)
+	if err := <-looked; !errors.Is(err, ErrUnknown) {
+		t.Errorf("after the unpublish: %v", err)
+	}
+}
