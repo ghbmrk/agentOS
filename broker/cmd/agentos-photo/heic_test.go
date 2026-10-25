@@ -583,3 +583,103 @@ func TestDecodeHEICItemOfManyPicturesHoldsOne(t *testing.T) {
 		t.Fatalf("64 pictures in one item: err %v, peak heap %d MiB; want a JPEG under 48 MiB", err, hi>>20)
 	}
 }
+
+// peakHeap runs f and returns the highest heap it saw, sampled each
+// millisecond.
+func peakHeap(f func()) uint64 {
+	runtime.GC()
+	stop, peak := make(chan struct{}), make(chan uint64)
+	go func() {
+		var m runtime.MemStats
+		var hi uint64
+		for {
+			select {
+			case <-stop:
+				peak <- hi
+				return
+			case <-time.After(time.Millisecond):
+				runtime.ReadMemStats(&m)
+				hi = max(hi, m.HeapAlloc)
+			}
+		}
+	}()
+	f()
+	close(stop)
+	return <-peak
+}
+
+// TestDecodeHEICGridTilesShareTheLimit: tiles that cover the output with
+// slack decode one at a time when two would not fit the image's limit
+// together, so four near-whole-image tiles are never live at once
+// (ASSUMPTIONS CH-photo-heic-5).
+func TestDecodeHEICGridTilesShareTheLimit(t *testing.T) {
+	in := heicPhoto(t, 4096, 4096, heic.EncodeOptions{Tile: 2048, Quality: 10})
+	slack := withGrid(t, in, 2, 2, 4096, 4096, 2049, 2049, map[[2]uint32][2]uint32{{4096, 4096}: {2049, 2049}})
+	var err error
+	hi := peakHeap(func() { _, err = decoder.Decode(slack) })
+	// One 2048x2048 tile is 6 MiB; serially the decode peaks near 45 MiB,
+	// four tiles at once near 107 MiB.
+	if err != nil || hi > 72<<20 {
+		t.Fatalf("slack 2x2 grid of 2048 tiles for 2049x2049: err %v, peak heap %d MiB; want a JPEG under 72 MiB", err, hi>>20)
+	}
+}
+
+// withTileISPE returns raw with item id's association to the ispe of
+// size from moved to the property to names: another ispe's size, or, when
+// to is zero, the pixi, so the item has no ispe.
+func withTileISPE(t *testing.T, raw []byte, id uint16, from, to [2]uint32) []byte {
+	t.Helper()
+	out := append([]byte{}, raw...)
+	_, mb := metaBoxes(t, out)
+	iprp := find(t, mb, "iprp")
+	pb := children(t, out, iprp.start, iprp.end)
+	ipco, ipma := find(t, pb, "ipco"), find(t, pb, "ipma")
+	idx := map[[2]uint32]int{}
+	for i, p := range children(t, out, ipco.start, ipco.end) {
+		switch p.typ {
+		case "ispe":
+			idx[[2]uint32{binary.BigEndian.Uint32(out[p.start+4:]), binary.BigEndian.Uint32(out[p.start+8:])}] = i + 1
+		case "pixi":
+			idx[[2]uint32{}] = i + 1
+		}
+	}
+	if idx[from] == 0 || idx[to] == 0 {
+		t.Fatalf("property %v or %v not found", from, to)
+	}
+	if out[ipma.start] != 0 || out[ipma.start+3]&1 != 0 {
+		t.Fatal("helper reads only ipma v0 with 7-bit indices")
+	}
+	p := ipma.start + 4
+	n := int(binary.BigEndian.Uint32(out[p:]))
+	p += 4
+	for range n {
+		item, k := binary.BigEndian.Uint16(out[p:]), int(out[p+2])
+		p += 3
+		for j := range k {
+			if item == id && int(out[p+j]&0x7f) == idx[from] {
+				out[p+j] = out[p+j]&0x80 | byte(idx[to])
+				return out
+			}
+		}
+		p += k
+	}
+	t.Fatalf("item %d has no ispe %v", id, from)
+	return nil
+}
+
+// TestDecodeHEICGridTilesNameOneSize: a grid one of whose tiles names no
+// ispe, or another size than the rest, is refused as decode, since the tiles' frame limit
+// is read from the one size they name (ASSUMPTIONS CH-photo-heic-5).
+func TestDecodeHEICGridTilesNameOneSize(t *testing.T) {
+	in := heicPhoto(t, 1024, 1024, heic.EncodeOptions{Tile: 512, Quality: 30})
+	tile, whole := [2]uint32{512, 512}, [2]uint32{1024, 1024}
+	// The encoder numbers the grid item 1 and its tiles from 2.
+	for name, b := range map[string][]byte{
+		"a tile with no ispe":    withTileISPE(t, in, 3, tile, [2]uint32{}),
+		"a tile of another size": withTileISPE(t, in, 3, tile, whole),
+	} {
+		if _, err := decoder.Decode(b); err != decoder.RefuseDecode {
+			t.Errorf("%s: got %v, want decode", name, err)
+		}
+	}
+}
