@@ -658,6 +658,12 @@ func (t *tally) add(code string, err error, admitted, spendOK bool) {
 	}
 }
 
+// broken starts the description of a case keycheck gave no verdict on: it
+// exited or answered with something other than a verdict. That is a broken
+// harness, never a disagreement, so the sweep stops on it and the
+// predicate-reach check never counts it as a kill.
+const broken = "keycheck broke: "
+
 // one builds and judges case seed; it returns a description of any
 // disagreement.
 func one(c *checker, seed int64, t *tally) string {
@@ -705,7 +711,7 @@ func one(c *checker, seed int64, t *tally) string {
 	}
 	got, jerr := c.judge(wc)
 	if jerr != nil {
-		return "keycheck: " + jerr.Error()
+		return broken + jerr.Error()
 	}
 	if (err == nil) != got.Valid {
 		return fmt.Sprintf("op %s: library chain err %v, keycheck valid %v (%s)", op, err, got.Valid, got.Bad)
@@ -789,7 +795,7 @@ func renewal(c *checker, seed int64, t *tally) string {
 	}
 	got, jerr := c.judge(renewCase{"within", renew, was})
 	if jerr != nil {
-		return "keycheck: " + jerr.Error()
+		return broken + jerr.Error()
 	}
 	nl, nerr := key.Fold(renew)
 	ol, oerr := key.Fold(was)
@@ -945,6 +951,9 @@ func TestKeyDiff(t *testing.T) {
 	bad := 0
 	for seed := from; seed < from+n && (bad == 0 || !stop); seed++ {
 		for _, d := range []string{one(c, seed, tl), renewal(c, seed, tl)} {
+			if strings.HasPrefix(d, broken) {
+				t.Fatalf("seed %d: %s", seed, d)
+			}
 			if d != "" {
 				bad++
 				if bad <= 20 {
