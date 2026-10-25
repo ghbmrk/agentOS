@@ -135,7 +135,7 @@ func (g *Graph) Lines(candidates []Proposal) []string {
 			done[k] = true
 			cause := "of " + g.domainNames(k[1])
 			switch {
-			case k[1] == SelfDomain(k[0]):
+			case k[1] == SelfDomain(k[0]) || g.onlyCarrier(k[1], k[0]):
 				cause = "of its own maker or provider"
 			case strings.Contains(cause, " and "):
 				cause = "shared by " + g.domainNames(k[1])
@@ -373,4 +373,14 @@ func Downtime(entries []time.Time, failed []Span, from, to time.Time, gap time.D
 		total += cur.To.Sub(cur.From)
 	}
 	return total
+}
+
+// onlyCarrier reports whether node id is the only node carrying domain d.
+func (g *Graph) onlyCarrier(d, id string) bool {
+	for _, n := range g.nodes {
+		if contains(n.Domains, d) && n.ID != id {
+			return false
+		}
+	}
+	return true
 }

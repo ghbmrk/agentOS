@@ -537,6 +537,12 @@ func TestStatusLines(t *testing.T) {
 			}
 		}
 	}
+	// An asset whose labelled domain no other node carries is lost to its
+	// own maker or provider, never "to one failure of Bank" (UX delta).
+	ownD := mustNew(t, []Node{n("a.b", Account, "Bank", dom("provider:bank"), Money)}, nil)
+	if got := ownD.Lines(nil); !reflect.DeepEqual(got, []string{"Bank (money) is lost to one failure of its own maker or provider."}) {
+		t.Errorf("own-domain line = %q", got)
+	}
 	// Ben has no pair of safeguards that fail together.
 	for _, s := range household(t, false).Lines(nil) {
 		if strings.Contains(s, "fail together") {
@@ -709,7 +715,8 @@ func TestProposalNeverWeakensAnAsset(t *testing.T) {
 		n("ph", Device, "Phone", dom("phone")), n("tb", Device, "Tablet", dom("tablet")),
 		n("bank", Account, "Bank", dom("provider:bank"), Money),
 		n("reg", Account, "Registrar", dom("provider:reg"), Identity),
-	}, []Edge{e(Act, "ph", "p"), e(Act, "tb", "p"), e(Reset, "reg", "ph"), e(Reset, "reg", "tb")})
+	}, []Edge{e(Act, "ph", "p"), e(Act, "tb", "p"), e(Reset, "reg", "ph"), e(Reset, "reg", "tb"),
+		e(Act, "reg", "ph", "tb")}) // the owner still signs in with both after the swap
 	swap := Proposal{Text: "Move device recovery to the bank", Minutes: 1, Structural: true,
 		DropEdges: []Edge{e(Reset, "reg", "ph"), e(Reset, "reg", "tb")},
 		AddEdges:  []Edge{e(Reset, "bank", "ph")}}
@@ -718,6 +725,53 @@ func TestProposalNeverWeakensAnAsset(t *testing.T) {
 	}
 	if p, ok := two.Next([]Proposal{swap}); ok {
 		t.Errorf("Next recommends %q, which opens a single thief path on the bank", p.Text)
+	}
+	// Locking the owner out is a regression, not progress: dropping the
+	// only path to the bank removes its thief cuts and its cut-off, yet the
+	// owner can no longer reach it (L3 and Security deltas on #3193).
+	locked := mustNew(t, []Node{own,
+		n("k1", Key, "Key A", dom("maker:a")),
+		n("mail", Account, "Mailbox", dom("google")),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+		n("cloud", Provider, "Cloud", dom("provider:cloud")),
+	}, []Edge{e(Act, "k1", "p"), e(Reset, "mail", "k1"), e(Reset, "bank", "mail"), e(Cutoff, "bank", "cloud")})
+	lockout := Proposal{Text: "Remove the bank's mail recovery", Minutes: 1, Structural: true,
+		DropEdges: []Edge{e(Reset, "bank", "mail")}}
+	if eff, _ := locked.Effect(lockout); !eff.Weakens || eff.Steps > 0 {
+		t.Errorf("lock-out: weakens %v steps %d; want true and no progress", eff.Weakens, eff.Steps)
+	}
+	if p, ok := locked.Next([]Proposal{lockout}); ok {
+		t.Errorf("Next recommends %q, which locks the owner out of the bank", p.Text)
+	}
+	for _, s := range locked.Lines([]Proposal{lockout}) {
+		if strings.Contains(s, "Fix:") {
+			t.Errorf("Lines offers a lock-out as a fix: %q", s)
+		}
+	}
+	// Replacing a one-device sign-in with two independent keys raises the
+	// bank from 1 failure to 2: the new pair is no regression (Potency and
+	// Security deltas). A new pair where nothing under three failures took
+	// the asset before still is.
+	world := mustNew(t, []Node{own,
+		n("ph", Device, "Phone", dom("phone")),
+		n("k1", Key, "Key A", dom("maker:a")), n("k2", Key, "Key B", dom("maker:b")),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+		n("vault", Account, "Vault", dom("provider:vault"), Money), brakeSet("b.v", "Vault hold"),
+		n("w1", NodeKind, "Watcher 1", dom("w1")), n("w2", NodeKind, "Watcher 2", dom("w2")),
+	}, []Edge{e(Act, "ph", "p"), e(Act, "k1", "p"), e(Act, "k2", "p"), e(Act, "bank", "ph"),
+		e(Brake, "vault", "b.v"), e(Watch, "b.v", "w1"), e(Watch, "b.v", "w2")})
+	keys := Proposal{Text: "Make bank sign-in need both keys", Minutes: 5, Structural: true,
+		DropEdges: []Edge{e(Act, "bank", "ph")}, AddEdges: []Edge{e(Act, "bank", "k1", "k2")}}
+	if eff, _ := world.Effect(keys); eff.Weakens {
+		t.Errorf("phone to both keys flagged as weakening: %+v", eff)
+	}
+	if p, ok := world.Next([]Proposal{keys}); !ok || p.Text != keys.Text {
+		t.Errorf("Next = %q, %v; want %q", p.Text, ok, keys.Text)
+	}
+	unwatch := Proposal{Text: "Stop the second watcher", Minutes: 1,
+		DropEdges: []Edge{e(Watch, "b.v", "w2")}}
+	if eff, _ := world.Effect(unwatch); !eff.Weakens {
+		t.Error("a vault no pair could take before now falls to a pair: must weaken")
 	}
 	// A second asset of a class already at 1 is still guarded: the class
 	// minimum does not move, but the bank gains a single cut.

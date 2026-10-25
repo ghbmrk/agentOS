@@ -98,53 +98,43 @@ func (g *Graph) Weakest() (Class, bool) { return g.Board().Weakest() }
 type Effect struct {
 	Before, After Board
 	Gain          int // the sum over classes of the rise in ThiefNeed and the fall in CutOff
-	// Weakens is set when some asset, in any class, ends up with a thief
-	// cut it did not have (a single domain, or a pair not covering an
-	// earlier single or pair) or a new cut-off provider. Next and the
-	// STATUS fixes never offer such a proposal, whatever its gain.
+	// Weakens is set when some asset, in any class, is worse off after:
+	// the owner reached it before and no longer does; a provider can now
+	// cut the owner off from it that could not before; a single domain now
+	// takes it that did not before; or a pair now takes it when nothing
+	// under three failures did before. A new pair beside an existing single
+	// or pair is no regression (the smallest cut does not shrink). Next and
+	// the STATUS fixes never offer a proposal that weakens, whatever its
+	// gain.
 	Weakens bool
 	// Steps is the fall in single-domain cuts across every asset and class
 	// plus the fall in assets some provider can cut off: progress the
 	// per-class minimum misses, such as removing one of two single cuts.
+	// An asset the proposal locks the owner out of counts on neither side.
 	Steps int
 }
 
-// steps counts the single-domain cuts and the cut-off assets in x.
-func (x exposure) steps() int {
-	n := 0
-	for _, v := range x {
-		for _, c := range v.cuts {
-			if len(c) == 1 {
-				n++
-			}
-		}
-		if len(v.cutBy) > 0 {
-			n++
-		}
-	}
-	return n
+// facts is one asset's exposure in one class.
+type facts struct {
+	cuts    [][]string
+	cutBy   map[string]bool
+	reached bool
 }
 
-// exposure is, per asset and class, its cuts and its cut-off providers.
-type exposure map[[2]string]struct {
-	cuts  [][]string
-	cutBy map[string]bool
-}
+// exposure is, per asset and class, its cuts, its cut-off providers and
+// whether the owner reaches it.
+type exposure map[[2]string]*facts
 
 func (g *Graph) exposure() exposure {
 	x := exposure{}
+	base := g.reach(make([]bool, len(g.nodes)))
 	for _, c := range Classes {
 		for _, a := range g.assets(c) {
-			x[[2]string{g.nodes[a].ID, string(c)}] = struct {
-				cuts  [][]string
-				cutBy map[string]bool
-			}{nil, map[string]bool{}}
+			x[[2]string{g.nodes[a].ID, string(c)}] = &facts{cutBy: map[string]bool{}, reached: base[a]}
 		}
 		for _, cut := range g.CutSets(c) {
-			k := [2]string{cut.Asset, string(c)}
-			v := x[k]
-			v.cuts = append(v.cuts, cut.Domains)
-			x[k] = v
+			f := x[[2]string{cut.Asset, string(c)}]
+			f.cuts = append(f.cuts, cut.Domains)
 		}
 		offs, _ := g.CutOffs(c)
 		for _, o := range offs {
@@ -156,15 +146,29 @@ func (g *Graph) exposure() exposure {
 	return x
 }
 
-// weakens reports whether after gives any asset of before a cut that no cut
-// of before is contained in, or a cut-off provider before lacked (KRN-11:
-// a change never opens a new thief path or a new way to be cut off).
+// smallest is the size of f's smallest cut: 1, 2, or 3 for none.
+func (f *facts) smallest() int {
+	n := 3
+	for _, c := range f.cuts {
+		if len(c) < n {
+			n = len(c)
+		}
+	}
+	return n
+}
+
+// weakens reports whether after leaves any asset of before worse off; see
+// Effect.Weakens (KRN-11, D-152).
 func (before exposure) weakens(after exposure) bool {
 	for k, a := range after {
 		b, ok := before[k]
 		if !ok {
 			continue // a new asset has nothing to regress from
 		}
+		if b.reached && !a.reached {
+			return true // locked out: cut off by nothing at all
+		}
+		min := b.smallest()
 		for _, cut := range a.cuts {
 			covered := false
 			for _, old := range b.cuts {
@@ -173,7 +177,7 @@ func (before exposure) weakens(after exposure) bool {
 					break
 				}
 			}
-			if !covered {
+			if !covered && (len(cut) == 1 || len(cut) < min) {
 				return true
 			}
 		}
@@ -184,6 +188,39 @@ func (before exposure) weakens(after exposure) bool {
 		}
 	}
 	return false
+}
+
+// steps is the fall in single cuts and cut-off assets from before to
+// after, leaving out any asset the owner reached before and not after.
+func (before exposure) steps(after exposure) int {
+	count := func(f *facts) int {
+		n := 0
+		for _, c := range f.cuts {
+			if len(c) == 1 {
+				n++
+			}
+		}
+		if len(f.cutBy) > 0 {
+			n++
+		}
+		return n
+	}
+	lockedOut := func(k [2]string) bool {
+		b, a := before[k], after[k]
+		return b != nil && a != nil && b.reached && !a.reached
+	}
+	n := 0
+	for k, b := range before {
+		if !lockedOut(k) {
+			n += count(b)
+		}
+	}
+	for k, a := range after {
+		if !lockedOut(k) {
+			n -= count(a)
+		}
+	}
+	return n
 }
 
 func subset(a, b []string) bool {
@@ -208,7 +245,7 @@ func (g *Graph) Effect(p Proposal) (Effect, error) {
 	}
 	before, after := g.exposure(), h.exposure()
 	e.Weakens = before.weakens(after)
-	e.Steps = before.steps() - after.steps()
+	e.Steps = before.steps(after)
 	return e, nil
 }
 
