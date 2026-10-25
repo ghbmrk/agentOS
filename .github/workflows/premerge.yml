@@ -47,7 +47,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
   cancel-in-progress: false
 jobs:
   premerge-gate:
@@ -141,13 +141,22 @@ jobs:
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
           # Every check run but this workflow's own jobs, and every status, must have passed.
           # Each read stops the run on its own failure: a failed read must never look like no checks.
-          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-            --jq '.check_runs[] | select(.name != "premerge-gate" and .name != "merge")
+          # A job has no check run until GitHub creates it (`needs: scope`), so the head's workflow
+          # runs must all have finished too (#3123 review). This workflow's own runs and this run's
+          # check suite are left out by path and id, not by a name another workflow could reuse.
+          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx '[0-9]+' \
+            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }
+          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
+            | jq -rs 'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)
+                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name') \
+            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
+          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs[]' \
+            | jq -r --argjson suite "$suite" 'select(.check_suite.id != $suite)
                   | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }
           stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq '.statuses[] | select(.state != "success") | .context') \
             || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }
-          if [ -n "$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $runs $stats; exit 0; fi
+          if [ -n "$wfs$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $wfs $runs $stats; exit 0; fi
           if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null; then
             echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0
           fi

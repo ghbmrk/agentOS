@@ -92,7 +92,7 @@ PREMERGE_LINES = [
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}',
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
@@ -181,13 +181,19 @@ PREMERGE_LINES = [
     '        run: |',
     '          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
-    '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \\',
-    '            --jq \'.check_runs[] | select(.name != "premerge-gate" and .name != "merge")',
+    '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
+    '            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }',
+    '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
+    '            | jq -rs \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
+    '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
+    '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
+    '            | jq -r --argjson suite "$suite" \'select(.check_suite.id != $suite)',
     '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
     '          stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq \'.statuses[] | select(.state != "success") | .context\') \\',
     '            || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }',
-    '          if [ -n "$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $runs $stats; exit 0; fi',
+    '          if [ -n "$wfs$runs$stats" ]; then echo "::notice::#$PR_NUMBER not merged yet, waiting on:" $wfs $runs $stats; exit 0; fi',
     '          if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=merge -f sha="$HEAD_SHA" > /dev/null; then',
     '            echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0',
     '          fi',
@@ -524,7 +530,10 @@ class WorkflowTest(unittest.TestCase):
                      ('IN("success", "skipped", "neutral")', 'IN("success", "skipped", "neutral", "failure")'),
                      ('select(.status != "completed" or ', 'select('),
                      ('.statuses[] | select(.state != "success")', '.statuses[] | select(.state == "failure")'),
-                     ('if [ -n "$runs$stats" ]; then', 'if false; then'),
+                     ('if [ -n "$wfs$runs$stats" ]; then', 'if [ -n "$runs$stats" ]; then'),
+                     ('startswith(".github/workflows/premerge.yml") | not', 'startswith(".github/workflows/") | not'),
+                     ("max_by(.id)", "min_by(.id)"),
+                     ("select(.check_suite.id != $suite)", "select(.name != \"merge\")"),
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
@@ -668,8 +677,11 @@ class PremergeRunTest(unittest.TestCase):
 STUB_MERGE_GH = r"""#!/bin/sh
 echo "$*" >> "$STUBS/calls"
 case "$*" in
-  "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq "*) [ "$READ" = fail ] && exit 1
-     printf '%s' "$RUNS" | "$REAL_JQ" -r "$5" ;;
+  "api repos/o/r/actions/runs/41 --jq .check_suite_id") [ "$READ" = suite ] && exit 1; echo 99 ;;
+  "api --paginate repos/o/r/actions/runs?head_sha="*"&per_page=100 --jq .workflow_runs[]") [ "$READ" = wfs ] && exit 1
+     printf '%s' "$WFS" | "$REAL_JQ" -c "$5" ;;
+  "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = fail ] && exit 1
+     printf '%s' "$RUNS" | "$REAL_JQ" -c "$5" ;;
   "api repos/o/r/commits/"*"/status?per_page=100 --jq "*) [ "$READ" = stat ] && exit 1; printf "%s" "$STATUSES" | "$REAL_JQ" -r "$4" ;;
   "api -X PUT "*) [ "$MERGE" = ok ] ;;
   *) exit 2 ;;
@@ -677,16 +689,25 @@ esac
 """
 
 
-def run_(name, status="completed", conclusion="success"):
-    return {"name": name, "status": status, "conclusion": conclusion}
+def run_(name, status="completed", conclusion="success", suite=1):
+    return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
+
+
+def wf_(name, id=1, status="completed", conclusion="success", path=None):
+    return {"name": name, "id": id, "workflow_id": hash(name) % 1000, "status": status, "conclusion": conclusion,
+            "path": path or ".github/workflows/%s.yml" % name}
 
 
 class MergeRunTest(unittest.TestCase):
     SHA = "b" * 40
-    GREEN = [run_("checks"), run_("count"), run_("formal", conclusion="skipped"), run_("premerge-gate"),
-             run_("merge", status="in_progress", conclusion=None)]
+    # This run's own jobs (suite 99) are left out whatever their state; an older premerge run's are green.
+    GREEN = [run_("checks"), run_("count"), run_("formal", conclusion="skipped"), run_("premerge-gate", suite=7),
+             run_("premerge-gate", status="completed", suite=99), run_("merge", status="in_progress", conclusion=None, suite=99)]
+    WF_GREEN = [wf_("ci"), wf_("vulncheck"), wf_("formal", conclusion="skipped"),
+                wf_("premerge", status="in_progress", conclusion=None)]
 
-    def run_merge(self, runs=GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok", token="synthetic-bot", sha=SHA):
+    def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
+                  token="synthetic-bot", sha=SHA):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -695,13 +716,34 @@ class MergeRunTest(unittest.TestCase):
             (stubs / "gh").chmod(0o755)
             (stubs / "run.sh").write_text(merge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
-                   "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha,
-                   "RUNS": json.dumps({"check_runs": list(runs)}),
+                   "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
+                   "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
                    "STATUSES": json.dumps({"statuses": [{"context": c, "state": st} for c, st in statuses]})}
             proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             calls = (stubs / "calls").read_text().splitlines() if (stubs / "calls").exists() else []
         return proc.returncode, [c for c in calls if c.startswith("api -X PUT")], proc.stdout
+
+    def test_unfinished_workflow_runs_never_merge(self):
+        # #3123 delta review: a job behind `needs: scope` has no check run yet, so an all-green check list
+        # is not finished CI; every workflow run on the head but premerge's own must have passed.
+        for bad in (wf_("vulncheck", status="queued", conclusion=None), wf_("assurance", status="in_progress", conclusion=None),
+                    wf_("ci", conclusion="failure"), wf_("keycheck", status="pending", conclusion=None),
+                    wf_("image", status="completed", conclusion="action_required")):
+            code, puts, out = self.run_merge(wfs=self.WF_GREEN + [bad])
+            self.assertEqual((code, puts), (0, []), bad)
+            self.assertIn(bad["name"], out)
+        # the newest run of a workflow counts: a green rerun clears an older red run, a red rerun holds
+        self.assertEqual(len(self.run_merge(wfs=self.WF_GREEN + [wf_("ci", id=0, conclusion="failure")])[1]), 1)
+        self.assertEqual(self.run_merge(wfs=self.WF_GREEN + [wf_("ci", id=2, conclusion="failure")])[:2], (0, []))
+        # premerge is left out by path, not name: a workflow named premerge elsewhere still counts
+        self.assertEqual(self.run_merge(wfs=self.WF_GREEN + [wf_("premerge", id=3, status="queued", conclusion=None,
+                                                                  path=".github/workflows/other.yml")])[:2], (0, []))
+
+    def test_only_this_runs_own_jobs_are_left_out(self):
+        # #3123 delta review 3: another workflow's red job named `merge` or `premerge-gate` holds the merge.
+        for bad in (run_("merge", conclusion="failure"), run_("premerge-gate", status="in_progress", conclusion=None, suite=7)):
+            self.assertEqual(self.run_merge(runs=self.GREEN + [bad])[:2], (0, []), bad)
 
     def test_all_green_merges_pinned_to_the_head(self):
         self.assertEqual(self.run_merge()[:2],
@@ -726,6 +768,8 @@ class MergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_merge(read="fail")[:2], (0, []))
         self.assertEqual(self.run_merge(read="fail", runs=[])[:2], (0, []))
         self.assertEqual(self.run_merge(read="stat", statuses=())[:2], (0, []))
+        self.assertEqual(self.run_merge(read="wfs", wfs=())[:2], (0, []))
+        self.assertEqual(self.run_merge(read="suite")[:2], (0, []))
 
     def test_no_token_or_bad_head_never_merges(self):
         self.assertEqual(self.run_merge(token="")[:2], (0, []))
