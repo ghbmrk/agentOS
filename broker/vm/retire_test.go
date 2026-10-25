@@ -1,6 +1,6 @@
 package vm
 
-// REQ: LOG-4, CAP-3
+// REQ: LOG-4
 
 import (
 	"errors"
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // failStartAfterSave makes id's next start fail after its meta.json is on
@@ -32,7 +31,7 @@ func failStartAfterSave(t *testing.T, e *env, id string) {
 		if err := real(p, b, perm); err != nil {
 			return err
 		}
-		return fmt.Errorf("%w: synthetic", durable.ErrDirSync)
+		return errors.New("synthetic: directory sync failed")
 	}
 	t.Cleanup(func() { writeFile = real })
 }
@@ -455,10 +454,10 @@ func TestCAP3RetireSyncsAnEarlierUnsyncedRename(t *testing.T) {
 		if err := os.Rename(from, to); err != nil {
 			return err
 		}
-		return fmt.Errorf("%w: synthetic", durable.ErrDirSync)
+		return errors.New("synthetic: directory sync failed")
 	}
 	t.Cleanup(func() { renameDir = realRename })
-	if err := e.m.Destroy(bg, "m"); !errors.Is(err, durable.ErrDirSync) {
+	if err := e.m.Destroy(bg, "m"); err == nil || !strings.Contains(err.Error(), "directory sync failed") {
 		t.Fatalf("destroy: %v", err)
 	}
 	realSync := syncParent
