@@ -28,6 +28,7 @@ Work item #3104, prerequisite for #2780(b). Tier A. Split into three slices on t
 - `TestPlanRefusedLoginStopsUntilResumeOrSignIn` (CLK-7): a declared refused code stops the route; `Resume` or a new sign-in lifts it. An undeclared 400 or a 500 is dropped and stops nothing.
 - `TestPlanSignInSetsTheLogin` (CLK-7, PLN-5): the device step carries no credential, the code exchange's redirect is rewritten, and only that sign-in guest is `SignedIn`.
 - `TestPlanStaleRefreshAnswerStopsNothing` (CLK-7, from the Security review): a refresh answer that arrives after `Remove` or a new sign-in (good, refused or out of shape) is dropped, not committed, and stops nothing.
+- `TestPlanCancelledRefreshStillCommits` and `TestPlanRefreshAnswerWithoutARefreshTokenKeepsTheStoredOne` (CLK-7, from the L3 review): a guest that cancels mid-refresh does not lose the rotated token, and an answer that omits the optional refresh token keeps the stored one.
 - `TestPlanClerkHoldsOneSlot` (CLK-1): a store sealed for another plan, or under another key, is refused.
 - `TestPlanStopHeldWhenTheSlotCannotRecordIt`: a failed slot write still stops the route.
 

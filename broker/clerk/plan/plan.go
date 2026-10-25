@@ -342,9 +342,14 @@ func (p *Login) validate() error {
 	if !contains(d.RefreshKeys, "grant_type") || !contains(d.RefreshKeys, fRefresh) {
 		return errors.New("clerk: a refresh declares grant_type and refresh_token")
 	}
-	for _, h := range append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...) {
+	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
 		if forbiddenHeader(http.CanonicalHeaderKey(h)) {
 			return fmt.Errorf("clerk: header %q may not pass", h)
+		}
+	}
+	for _, pre := range d.ResponsePrefixes {
+		if forbiddenPrefix(http.CanonicalHeaderKey(pre)) {
+			return fmt.Errorf("clerk: header prefix %q may pass a forbidden header", pre)
 		}
 	}
 	return nil
@@ -362,12 +367,27 @@ func contains(list []string, s string) bool {
 // forbiddenHeader is a header no plan route passes: credentials, framing,
 // hop-by-hop and request-reshaping headers. The clerk sets its own.
 func forbiddenHeader(c string) bool {
-	switch c {
-	case "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "Host", "Content-Length",
-		"Transfer-Encoding", "Connection", "Upgrade", "Te", "Trailer", "Keep-Alive", "Content-Encoding", "Accept-Encoding":
+	if contains(forbiddenNames, c) {
 		return true
 	}
 	return strings.HasPrefix(c, "X-Forwarded-") || strings.HasPrefix(c, "Proxy-")
+}
+
+var forbiddenNames = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "Host", "Content-Length",
+	"Transfer-Encoding", "Connection", "Upgrade", "Te", "Trailer", "Keep-Alive", "Content-Encoding", "Accept-Encoding"}
+
+// forbiddenPrefix reports whether a response prefix could pass a forbidden
+// header: one it begins, or one that begins it.
+func forbiddenPrefix(c string) bool {
+	if c == "" || forbiddenHeader(c) {
+		return true
+	}
+	for _, n := range append(append([]string{}, forbiddenNames...), "X-Forwarded-", "Proxy-") {
+		if strings.HasPrefix(n, c) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Login) load() (planState, error) {
@@ -921,10 +941,12 @@ func (p *Login) refresh(ctx context.Context, guest string, h http.Header, e Endp
 	ans, detail, done := p.share(ctx, func() (*planAnswer, string) {
 		// Resolved again inside the flight: one that ended since the check
 		// above may have committed a newer token. The login's generation is
-		// read first, so a sign-in between the two makes the answer stale,
-		// never fresh for a token it was not made from.
+		// read with the token, under the commit lock, so the answer is
+		// judged against exactly the login whose token it spent.
+		p.cmu.Lock()
 		gen := p.generation()
 		out, ok := p.checkRefresh(guest, body)
+		p.cmu.Unlock()
 		if !ok {
 			return nil, DPlaceholder
 		}

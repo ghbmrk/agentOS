@@ -498,6 +498,7 @@ func TestPlanUnmatchedAnswerStopsUntilRequalified(t *testing.T) {
 		"undeclared field":  `{"access_token":"real-access-9","refresh_token":"real-refresh-9","id_token":"` + idToken("acct-1") + `","session":"real-s"}`,
 		"no account":        `{"access_token":"real-access-9","refresh_token":"real-refresh-9","id_token":"` + jwt(map[string]string{"sub": "x"}) + `"}`,
 		"another account":   `{"access_token":"real-access-9","refresh_token":"real-refresh-9","id_token":"` + idToken("acct-2") + `"}`,
+		"number too long":   `{"access_token":"real-access-9","refresh_token":"real-refresh-9","id_token":"` + idToken("acct-1") + `","expires_in":123456789012345678901}`,
 		"text out of shape": `{"access_token":"real-access-9","refresh_token":"real-refresh-9","id_token":"` + idToken("acct-1") + `","token_type":"real-access-9"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -557,7 +558,8 @@ func TestPlanRefusedLoginStopsUntilResumeOrSignIn(t *testing.T) {
 	for _, a := range []struct {
 		status int
 		body   string
-	}{{400, `{"error":"invalid_grant"}`}, {500, `{"error":"server"}`}, {401, `{"error":{"code":"other"}}`}} {
+	}{{400, `{"error":"invalid_grant"}`}, {500, `{"error":"server"}`}, {401, `{"error":{"code":"other"}}`},
+		{500, `{"error":"refresh_token_expired"}`}, {403, `{"error":{"code":"refresh_token_reused"}}`}} {
 		f.answerWith(a.status, a.body)
 		if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || !strings.HasPrefix(d, plan.DExchange) {
 			t.Fatalf("error answer %d = %q", a.status, d)
@@ -613,6 +615,10 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 	}
 	if up, _ := f.last(); up.Header.Get("Authorization") != "" {
 		t.Fatal("a device step carried a credential")
+	}
+	long := `{"client_id":"` + strings.Repeat("a", 513) + `"}`
+	if resp, _ := p.Do(context.Background(), "s", req("POST", "/api/accounts/deviceauth/usercode", long, map[string]string{"Content-Type": "application/json"})); resp != nil {
+		t.Fatal("a device step with an over-long value was served")
 	}
 	before := f.hits()
 	for _, b := range []string{
@@ -680,6 +686,18 @@ func TestPlanClerkHoldsOneSlot(t *testing.T) {
 	d.RequestHeaders = append(d.RequestHeaders, "Cookie")
 	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
 		t.Fatal("a declaration passing Cookie was taken")
+	}
+	for _, mod := range []func(*plan.Declaration){
+		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "Set-Cookie") },
+		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Set-") },
+		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "X-") },
+		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Proxy-Auth") },
+	} {
+		d = f.decl(t)
+		mod(&d)
+		if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
+			t.Errorf("a declaration passing a forbidden answer header was taken: %v %v", d.ResponseHeaders, d.ResponsePrefixes)
+		}
 	}
 }
 
@@ -815,5 +833,71 @@ func TestPlanStaleRefreshAnswerStopsNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A refresh answer may omit the refresh token, which Codex declares
+// optional: the stored one is kept, and the route goes on.
+func TestPlanRefreshAnswerWithoutARefreshTokenKeepsTheStoredOne(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	f.answerWith(200, `{"access_token":"real-access-7","id_token":"`+idToken("acct-1")+`"}`)
+	resp, d := refreshReq(p, "g", g.Tokens["refresh_token"])
+	if d != "" {
+		t.Fatalf("refresh = %q", d)
+	}
+	out := read(t, resp)
+	noReal(t, "the refresh answer", out)
+	if strings.Contains(out, "refresh_token") || p.Stopped() != "" {
+		t.Fatalf("answer %q, Stopped %q", out, p.Stopped())
+	}
+	resp, _ = model(p, "g", g.Tokens["access_token"])
+	read(t, resp)
+	if up, _ := f.last(); up.Header.Get("Authorization") != "Bearer real-access-7" {
+		t.Fatalf("model call sent %q", up.Header.Get("Authorization"))
+	}
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); d != "" {
+		t.Fatalf("the kept refresh token was not used: %q", d)
+	} else {
+		read(t, resp)
+	}
+	if _, body := f.last(); !strings.Contains(body, `"refresh_token":"real-refresh-1"`) {
+		t.Fatalf("second refresh sent %q", body)
+	}
+}
+
+// A guest that cancels its refresh mid-exchange does not lose the answer:
+// the provider has already spent the single-use token, so the flight runs
+// on and commits the new one (ASSUMPTIONS a7; #3105 L3 1).
+func TestPlanCancelledRefreshStillCommits(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	f.exchanges.Store(0)
+	f.gate = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan string, 1)
+	go func() {
+		_, d := p.Do(ctx, "g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"}))
+		done <- d
+	}()
+	for f.exchanges.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+	close(f.gate)
+	<-done
+	f.gate = nil
+	resp, d := refreshReq(p, "g", g.Tokens["refresh_token"])
+	if resp == nil {
+		t.Fatalf("the rotated token was lost when the guest cancelled: next refresh = %q", d)
+	}
+	read(t, resp)
+	if _, body := f.last(); !strings.Contains(body, `"refresh_token":"real-refresh-2"`) {
+		t.Fatalf("the next refresh sent %q", body)
 	}
 }
