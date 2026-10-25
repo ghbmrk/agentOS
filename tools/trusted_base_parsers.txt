@@ -58,6 +58,7 @@ parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server resp
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- pre-auth lines and SMTP replies
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire -- typed frames from the IMAP connection process
 parser github.com/ghbmrk/agentos/broker/clerk/model -- model providers' replies
+parser github.com/ghbmrk/agentos/broker/clerk/plan -- a plan CLI guest's requests and its provider's answers, in the model clerk's process
 parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and mail sockets
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)

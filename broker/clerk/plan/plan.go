@@ -1,4 +1,6 @@
-package clerk
+// Package plan is the clerk of a provider's consumer plan login (CLK-7,
+// PLN-5; MIG-4-plan-login-a, #3104).
+package plan
 
 import (
 	"bytes"
@@ -19,45 +21,48 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
-// A plan login (CLK-7, PLN-5; MIG-4-plan-login-a, #3104) is a provider's
-// consumer plan sign-in, used only by that provider's official CLI running
-// as a guest. The guest holds placeholders; this clerk holds the login in its
-// one sealed slot, injects it into the CLI's declared requests, and swaps
-// every token answer back to that guest's placeholders. It is the old core's
-// plan route (egress, measured on Codex CLI 0.162.1, #809) moved into the
-// clerk, which alone opens a sealed slot (CLK-1).
+// A plan login is a provider's consumer plan sign-in, used only by that
+// provider's official CLI running as a guest. The guest holds placeholders;
+// this clerk holds the login in its one sealed store, injects it into the
+// CLI's declared requests, and swaps every token answer back to that guest's
+// placeholders. It is the old core's plan route (egress, measured on Codex
+// CLI 0.162.1, #809) moved onto the clerk. It is not package clerk, which
+// the kernel's process links for its check: a guest's traffic is parsed here,
+// in the model clerk's process only, so the trusted core does not grow
+// (KRN-2cap).
 
-// PlanKind is what a declared plan endpoint carries.
-type PlanKind string
+// Kind is what a declared plan endpoint carries.
+type Kind string
 
 const (
-	// PlanModel is a model call: the guest's access placeholder in
+	// Model is a model call: the guest's access placeholder in
 	// Authorization becomes the real token; the body passes as sent (its
 	// shape is the model clerk's to check, MIG-4-plan-login-b).
-	PlanModel PlanKind = "model"
-	// PlanRead is a bearer-authenticated GET with no body.
-	PlanRead PlanKind = "read"
-	// PlanRefresh is the CLI's token refresh: its JSON body carries the
+	Model Kind = "model"
+	// Read is a bearer-authenticated GET with no body.
+	Read Kind = "read"
+	// Refresh is the CLI's token refresh: its JSON body carries the
 	// guest's refresh placeholder, and its answer is a token exchange.
-	PlanRefresh PlanKind = "refresh"
-	// PlanDevice is a device-code step of the sign-in: a JSON object of
+	Refresh Kind = "refresh"
+	// Device is a device-code step of the sign-in: a JSON object of
 	// strings, with no credential this clerk holds either way.
-	PlanDevice PlanKind = "device"
-	// PlanCode is the sign-in's code exchange: a form whose answer is the
+	Device Kind = "device"
+	// Code is the sign-in's code exchange: a form whose answer is the
 	// first login.
-	PlanCode PlanKind = "code"
+	Code Kind = "code"
 )
 
-func (k PlanKind) signIn() bool { return k == PlanDevice || k == PlanCode }
+func (k Kind) signIn() bool { return k == Device || k == Code }
 
-// PlanEndpoint is one declared request (CLK-3). Sign-in endpoints answer a
+// Endpoint is one declared request (CLK-3). Sign-in endpoints answer a
 // sign-in guest only, the rest a run guest only.
-type PlanEndpoint struct {
+type Endpoint struct {
 	Name, Host, Method, Path string
-	Kind                     PlanKind
+	Kind                     Kind
 	// Query names the query keys the endpoint takes, each at most once.
 	Query []string
 }
@@ -72,10 +77,10 @@ const (
 	FieldText       FieldKind = "text" // at most 256 bytes matching Pattern whole
 )
 
-// PlanField is one declared top-level field of a token answer. A text
+// Field is one declared top-level field of a token answer. A text
 // field's Pattern is the declaration's statement that the value is no
 // credential, so it should admit only the provider's fixed words.
-type PlanField struct {
+type Field struct {
 	Name     string
 	Kind     FieldKind
 	Pattern  string
@@ -84,18 +89,18 @@ type PlanField struct {
 	re *regexp.Regexp
 }
 
-// PlanDeclaration is one plan's route, as measured on its CLI.
-type PlanDeclaration struct {
+// Declaration is one plan's route, as measured on its CLI.
+type Declaration struct {
 	// Name is the plan, and the clerk's one slot.
 	Name string
 	// Version is the declaration's; a release that requalifies the route
 	// after an unswappable answer gives it a new one.
 	Version   string
-	Endpoints []PlanEndpoint
+	Endpoints []Endpoint
 	// Token is the exact token answer: these fields and no others. It
 	// declares access_token as a credential; refresh_token and id_token,
 	// if declared, are credentials too.
-	Token []PlanField
+	Token []Field
 	// AccountClaim is the path, in the id_token's claims, to the account
 	// ID. Every token answer must name its account.
 	AccountClaim []string
@@ -129,25 +134,26 @@ const (
 
 // Plan details, beside the exit's D* ones, carrying no value (CLK-4).
 const (
-	DPlanUndeclared  = "plan-undeclared"  // no declared endpoint or request shape; nothing sent
-	DPlanPlaceholder = "plan-placeholder" // no placeholder of this guest; nothing sent
-	DPlanStopped     = "plan-stopped"     // the route is stopped; then the stop
-	DPlanUnswappable = "plan-unswappable" // the answer was out of shape: dropped, and the route stopped
-	DPlanExchange    = "plan-exchange"    // a token exchange answered with an error: dropped; then "http N"
-	DPlanSave        = "plan-save"        // the login could not be sealed: the answer was dropped
-	DPlanEncoded     = "plan-encoded"     // an encoded body either way
+	DUndeclared  = "plan-undeclared"  // no declared endpoint or request shape; nothing sent
+	DPlaceholder = "plan-placeholder" // no placeholder of this guest; nothing sent
+	DStopped     = "plan-stopped"     // the route is stopped; then the stop
+	DUnswappable = "plan-unswappable" // the answer was out of shape: dropped, and the route stopped
+	DExchange    = "plan-exchange"    // a token exchange answered with an error: dropped; then "http N"
+	DSave        = "plan-save"        // the login could not be sealed: the answer was dropped
+	DEncoded     = "plan-encoded"     // an encoded body either way
+	DStale       = "plan-stale"       // a refresh answered for a login since removed or replaced: dropped, nothing stopped
 )
 
 // ErrRequalify is Resume's answer for a route an unswappable answer
 // stopped: only a release with a new declaration version reopens it.
 var ErrRequalify = errors.New("clerk: the plan route stays stopped until a release requalifies it")
 
-// ErrNoPlanLogin is Guest's answer before the owner has signed in.
-var ErrNoPlanLogin = errors.New("clerk: no plan login")
+// ErrNoLogin is Guest's answer before the owner has signed in.
+var ErrNoLogin = errors.New("clerk: no plan login")
 
-// ErrPlanStopped is Guest's and BeginSignIn's answer while the route is
+// ErrStopped is Guest's and BeginSignIn's answer while the route is
 // stopped for them.
-var ErrPlanStopped = errors.New("clerk: the plan route is stopped")
+var ErrStopped = errors.New("clerk: the plan route is stopped")
 
 const (
 	maxExchange = 64 << 10 // a token exchange's request or answer, bytes
@@ -182,26 +188,31 @@ type planState struct {
 	Version string            `json:"version,omitempty"`
 }
 
-// PlanTokens is a guest's token set: placeholders only, and the account ID,
+// Tokens is a guest's token set: placeholders only, and the account ID,
 // which is no credential.
-type PlanTokens struct {
+type Tokens struct {
 	Account string
 	Tokens  map[string]string
 }
 
-// PlanLogin is the clerk of one plan login. Its methods are safe for
+// Login is the clerk of one plan login. Its methods are safe for
 // concurrent use.
-type PlanLogin struct {
-	d       PlanDeclaration
-	secrets *Secrets
+type Login struct {
+	d       Declaration
+	store   *Store
 	client  *http.Client
-	token   map[string]*PlanField
+	token   map[string]*Field
 	refused map[string]bool
 
 	mu      sync.Mutex
 	guests  map[string]*planGuest
 	signing map[string]bool // sign-in guests, true once one committed the login
 	held    string          // a stop the slot could not record (fail closed)
+	// gen counts the logins the store has held: Remove and every sign-in
+	// commit move it, under cmu. A refresh exchange records it before it
+	// resolves the token it sends, so its answer is judged only against the
+	// login it was made for.
+	gen uint64
 
 	cmu sync.Mutex // a commit or stop, from its load to its Put
 
@@ -223,6 +234,9 @@ type planAnswer struct {
 	status int
 	header http.Header
 	body   []byte
+	// refresh is set on a refresh answer, made from login gen.
+	refresh bool
+	gen     uint64
 }
 
 // planFlight is the one refresh exchange in flight (#1749): the login's
@@ -237,24 +251,22 @@ type planFlight struct {
 	members int
 }
 
-// NewPlanLogin validates the declaration; a bad one is an error, never a
-// runtime surprise. secrets is this clerk's own store: it holds the plan's
-// one slot or nothing (CLK-1). A stored unswappable stop recorded under
-// another declaration version is lifted: that release requalified the route.
-func NewPlanLogin(d PlanDeclaration, secrets *Secrets, roots *x509.CertPool) (*PlanLogin, error) {
+// New validates the declaration; a bad one is an error, never a
+// runtime surprise. store is this clerk's own: it holds this plan's login or
+// nothing, and one sealed for another plan does not open (CLK-1). A stored
+// unswappable stop recorded under another declaration version is lifted:
+// that release requalified the route.
+func New(d Declaration, store *Store, roots *x509.CertPool) (*Login, error) {
 	if !planPath.MatchString("/"+d.Name) || d.Version == "" {
 		return nil, errors.New("clerk: a plan declaration needs a plain name and a version")
 	}
 	if d.Guard == nil {
 		return nil, errors.New("clerk: a plan declaration needs the home-network policy (DEV-2)")
 	}
-	if secrets == nil {
-		return nil, errors.New("clerk: a plan login needs its secret store")
+	if store == nil {
+		return nil, errors.New("clerk: a plan login needs its sealed store")
 	}
-	if n := secrets.Len(); n > 1 || n == 1 && !secrets.Has(d.Name) {
-		return nil, errors.New("clerk: the secret store holds another account's secret (CLK-1)")
-	}
-	p := &PlanLogin{d: d, secrets: secrets, token: map[string]*PlanField{}, refused: map[string]bool{},
+	p := &Login{d: d, store: store, token: map[string]*Field{}, refused: map[string]bool{},
 		guests: map[string]*planGuest{}, signing: map[string]bool{}}
 	if err := p.validate(); err != nil {
 		return nil, err
@@ -264,11 +276,11 @@ func NewPlanLogin(d PlanDeclaration, secrets *Secrets, roots *x509.CertPool) (*P
 	}
 	st, err := p.load()
 	if err != nil {
-		return nil, errors.New("clerk: the plan login's slot does not open")
+		return nil, errors.New("clerk: the plan login's store does not open for this plan")
 	}
 	if st.Stop == StopUnswappable && st.Version != d.Version {
 		st.Stop, st.Version = "", ""
-		if err := p.store(st); err != nil {
+		if err := p.save(st); err != nil {
 			p.held = StopUnswappable // stays stopped until the lift is written
 		}
 	}
@@ -276,19 +288,19 @@ func NewPlanLogin(d PlanDeclaration, secrets *Secrets, roots *x509.CertPool) (*P
 	return p, nil
 }
 
-func (p *PlanLogin) validate() error {
+func (p *Login) validate() error {
 	d := p.d
 	seen := map[string]bool{}
 	for _, e := range d.Endpoints {
 		switch e.Kind {
-		case PlanModel, PlanRead, PlanRefresh, PlanDevice, PlanCode:
+		case Model, Read, Refresh, Device, Code:
 		default:
 			return fmt.Errorf("clerk: plan endpoint %q: kind %q", e.Name, e.Kind)
 		}
 		if e.Name == "" || !methRE.MatchString(e.Method) || !planPath.MatchString(e.Path) || !planHost.MatchString(e.Host) {
 			return fmt.Errorf("clerk: plan endpoint %q is out of shape", e.Name)
 		}
-		if (e.Kind == PlanRead) != (e.Method == http.MethodGet) {
+		if (e.Kind == Read) != (e.Method == http.MethodGet) {
 			return fmt.Errorf("clerk: plan endpoint %q: a read is a GET and only a read is", e.Name)
 		}
 		k := fmt.Sprint(e.Kind.signIn(), e.Method, e.Path)
@@ -358,22 +370,30 @@ func forbiddenHeader(c string) bool {
 	return strings.HasPrefix(c, "X-Forwarded-") || strings.HasPrefix(c, "Proxy-")
 }
 
-func (p *PlanLogin) load() (planState, error) {
+func (p *Login) load() (planState, error) {
 	var st planState
-	if !p.secrets.Has(p.d.Name) {
-		return st, nil
-	}
-	err := p.secrets.with(p.d.Name, KindGrant, func(b []byte) error { return json.Unmarshal(b, &st) })
+	err := p.store.open(p.d.Name, func(b []byte) error { return json.Unmarshal(b, &st) })
 	return st, err
 }
 
-func (p *PlanLogin) store(st planState) error {
+func (p *Login) save(st planState) error {
 	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
 	defer clear(b)
-	return p.secrets.Put(p.d.Name, KindGrant, b)
+	return p.store.put(p.d.Name, b)
+}
+
+func (p *Login) generation() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gen
+}
+
+// stale reports whether a is a refresh answer to a login no longer stored.
+func (p *Login) stale(a *planAnswer) bool {
+	return a != nil && a.refresh && a.gen != p.generation()
 }
 
 func higher(a, b string) string {
@@ -388,7 +408,7 @@ func higher(a, b string) string {
 
 // Stopped is why the route is down, or "". A slot that does not open reads
 // as unswappable.
-func (p *PlanLogin) Stopped() string {
+func (p *Login) Stopped() string {
 	st, err := p.load()
 	p.mu.Lock()
 	h := p.held
@@ -400,22 +420,30 @@ func (p *PlanLogin) Stopped() string {
 }
 
 // Signed reports whether a login is stored. It reads no token.
-func (p *PlanLogin) Signed() bool {
+func (p *Login) Signed() bool {
 	st, err := p.load()
 	return err == nil && st.Tokens[fAccess] != ""
 }
 
 // stop records cause in the slot, keeping a higher one; a stop the slot
 // cannot record is held here.
-func (p *PlanLogin) stop(cause string) {
+func (p *Login) stop(cause string) { p.stopFor(nil, cause) }
+
+// stopFor is stop for answer a: a refresh answer stops the route only while
+// the login it was made for is still the one stored. The answer to a login
+// the owner has since removed or replaced judges nothing.
+func (p *Login) stopFor(a *planAnswer, cause string) {
 	p.cmu.Lock()
 	defer p.cmu.Unlock()
+	if p.stale(a) {
+		return
+	}
 	if st, err := p.load(); err == nil {
 		if st.Stop == StopUnswappable {
 			return
 		}
 		st.Stop, st.Version = higher(st.Stop, cause), p.d.Version
-		if p.store(st) == nil {
+		if p.save(st) == nil {
 			return
 		}
 	}
@@ -427,7 +455,7 @@ func (p *PlanLogin) stop(cause string) {
 // Resume reopens a route the provider refused the login on: the owner's
 // PLAN <plan> ON, whose caller has proved the owner (CH-10). It does not
 // reopen an unswappable stop (ErrRequalify), nor one it cannot record.
-func (p *PlanLogin) Resume() error {
+func (p *Login) Resume() error {
 	p.cmu.Lock()
 	defer p.cmu.Unlock()
 	st, err := p.load()
@@ -442,7 +470,7 @@ func (p *PlanLogin) Resume() error {
 	}
 	if st.Stop != "" {
 		st.Stop, st.Version = "", ""
-		if err := p.store(st); err != nil {
+		if err := p.save(st); err != nil {
 			return err
 		}
 	}
@@ -454,14 +482,14 @@ func (p *PlanLogin) Resume() error {
 
 // Remove deletes the login and every placeholder. A stop goes with it
 // unless it is unswappable, which only a release lifts.
-func (p *PlanLogin) Remove() error {
+func (p *Login) Remove() error {
 	p.cmu.Lock()
 	defer p.cmu.Unlock()
 	st, err := p.load()
 	if err == nil && st.Stop == StopUnswappable {
-		err = p.store(planState{Stop: st.Stop, Version: st.Version})
+		err = p.save(planState{Stop: st.Stop, Version: st.Version})
 	} else {
-		err = p.secrets.Remove(p.d.Name)
+		err = p.store.put(p.d.Name, nil)
 	}
 	if err != nil {
 		return err
@@ -469,6 +497,7 @@ func (p *PlanLogin) Remove() error {
 	p.mu.Lock()
 	clear(p.guests)
 	clear(p.signing)
+	p.gen++
 	p.mu.Unlock()
 	return nil
 }
@@ -484,7 +513,7 @@ func rnd() string {
 // accountOf reads the account ID from an id_token's claims at the declared
 // path. The token is not verified: it is the provider's own answer on the
 // clerk's own connection.
-func (p *PlanLogin) accountOf(idToken string) string {
+func (p *Login) accountOf(idToken string) string {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
 		return ""
@@ -514,7 +543,7 @@ func (p *PlanLogin) accountOf(idToken string) string {
 // placeholderID is an unsigned id_token carrying the account ID at the
 // declared claim and nothing else: no email, no plan claims. The CLI reads
 // it without verifying it.
-func (p *PlanLogin) placeholderID(account string) string {
+func (p *Login) placeholderID(account string) string {
 	enc := func(v any) string {
 		b, _ := json.Marshal(v)
 		return base64.RawURLEncoding.EncodeToString(b)
@@ -530,7 +559,7 @@ func (p *PlanLogin) placeholderID(account string) string {
 	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." + enc(claims) + "." + rnd()
 }
 
-func (p *PlanLogin) mint(account string) *planGuest {
+func (p *Login) mint(account string) *planGuest {
 	g := &planGuest{account: account, field: map[string]string{}, byField: map[string]string{}}
 	for f := range p.token {
 		if p.token[f].Kind != FieldCredential {
@@ -547,7 +576,7 @@ func (p *PlanLogin) mint(account string) *planGuest {
 
 // guestFor returns guest's placeholders for account, minting them on first
 // use or for a new account. mu must be held.
-func (p *PlanLogin) guestFor(guest, account string) *planGuest {
+func (p *Login) guestFor(guest, account string) *planGuest {
 	g := p.guests[guest]
 	if g == nil || g.account != account {
 		g = p.mint(account)
@@ -558,27 +587,27 @@ func (p *PlanLogin) guestFor(guest, account string) *planGuest {
 
 // Guest returns guest's token set, for its auth file: placeholders only.
 // It refuses a sign-in guest, a stopped route and a box not signed in.
-func (p *PlanLogin) Guest(guest string) (PlanTokens, error) {
+func (p *Login) Guest(guest string) (Tokens, error) {
 	if guest == "" {
-		return PlanTokens{}, errors.New("clerk: a guest needs a name")
+		return Tokens{}, errors.New("clerk: a guest needs a name")
 	}
 	if p.Stopped() != "" {
-		return PlanTokens{}, ErrPlanStopped
+		return Tokens{}, ErrStopped
 	}
 	st, err := p.load()
 	if err != nil {
-		return PlanTokens{}, err
+		return Tokens{}, err
 	}
 	if st.Tokens[fAccess] == "" {
-		return PlanTokens{}, ErrNoPlanLogin
+		return Tokens{}, ErrNoLogin
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, ok := p.signing[guest]; ok {
-		return PlanTokens{}, errors.New("clerk: a sign-in guest holds no login")
+		return Tokens{}, errors.New("clerk: a sign-in guest holds no login")
 	}
 	g := p.guestFor(guest, st.Account)
-	out := PlanTokens{Account: st.Account, Tokens: map[string]string{}}
+	out := Tokens{Account: st.Account, Tokens: map[string]string{}}
 	for f, ph := range g.byField {
 		if st.Tokens[f] != "" || f == fID {
 			out.Tokens[f] = ph
@@ -592,12 +621,12 @@ func (p *PlanLogin) Guest(guest string) (PlanTokens, error) {
 // account. Its caller is the owner-started sign-in alone (CH-8); every other
 // guest only refreshes the stored login. It refuses a guest that already
 // holds placeholders and a route stopped as unswappable.
-func (p *PlanLogin) BeginSignIn(guest string) error {
+func (p *Login) BeginSignIn(guest string) error {
 	if guest == "" {
 		return errors.New("clerk: a guest needs a name")
 	}
 	if p.Stopped() == StopUnswappable {
-		return ErrPlanStopped
+		return ErrStopped
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -611,7 +640,7 @@ func (p *PlanLogin) BeginSignIn(guest string) error {
 // SignedIn reports whether guest's own sign-in committed the login. It is
 // the sign-in's only success signal: a login stored before it does not
 // count, and neither does anything the guest says about itself.
-func (p *PlanLogin) SignedIn(guest string) bool {
+func (p *Login) SignedIn(guest string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.signing[guest]
@@ -619,7 +648,7 @@ func (p *PlanLogin) SignedIn(guest string) bool {
 
 // Forget drops guest's placeholders and sign-in mark, when the guest is
 // destroyed.
-func (p *PlanLogin) Forget(guest string) {
+func (p *Login) Forget(guest string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.guests, guest)
@@ -628,7 +657,7 @@ func (p *PlanLogin) Forget(guest string) {
 
 // resolve maps guest's own placeholder for field to the value the slot
 // holds now. It never answers for another guest's placeholder.
-func (p *PlanLogin) resolve(guest, field, ph string) (string, bool) {
+func (p *Login) resolve(guest, field, ph string) (string, bool) {
 	if ph == "" {
 		return "", false
 	}
@@ -646,18 +675,18 @@ func (p *PlanLogin) resolve(guest, field, ph string) (string, bool) {
 	return st.Tokens[field], true
 }
 
-func (p *PlanLogin) match(method, path string, signIn bool) (PlanEndpoint, bool) {
+func (p *Login) match(method, path string, signIn bool) (Endpoint, bool) {
 	for _, e := range p.d.Endpoints {
 		if e.Method == method && e.Path == path && e.Kind.signIn() == signIn {
 			return e, true
 		}
 	}
-	return PlanEndpoint{}, false
+	return Endpoint{}, false
 }
 
 // declaredQuery accepts only the endpoint's keys, each once with a plain
 // value, and returns the clerk's own encoding.
-func declaredQuery(e PlanEndpoint, raw string) (string, bool) {
+func declaredQuery(e Endpoint, raw string) (string, bool) {
 	if raw == "" {
 		return "", true
 	}
@@ -697,56 +726,56 @@ func hasToken(h http.Header, name, token string) bool {
 // give the guest, or a detail with nothing for the guest. The request's
 // method, path and query pick a declared endpoint; its host is the
 // endpoint's, whatever the guest named. The caller closes the answer's body.
-func (p *PlanLogin) Do(ctx context.Context, guest string, r *http.Request) (*http.Response, string) {
+func (p *Login) Do(ctx context.Context, guest string, r *http.Request) (*http.Response, string) {
 	if r.Method == http.MethodConnect || r.Header.Get("Upgrade") != "" || hasToken(r.Header, "Connection", "upgrade") ||
 		r.URL.RawPath != "" || r.URL.Fragment != "" {
-		return nil, DPlanUndeclared
+		return nil, DUndeclared
 	}
 	p.mu.Lock()
 	_, signIn := p.signing[guest]
 	p.mu.Unlock()
 	e, ok := p.match(r.Method, r.URL.Path, signIn)
 	if !ok {
-		return nil, DPlanUndeclared
+		return nil, DUndeclared
 	}
 	if s := p.Stopped(); s == StopUnswappable || s != "" && !signIn {
-		return nil, DPlanStopped + " " + s
+		return nil, DStopped + " " + s
 	}
 	query, ok := declaredQuery(e, r.URL.RawQuery)
 	if !ok {
-		return nil, DPlanUndeclared
+		return nil, DUndeclared
 	}
 	if encoded(r.Header) {
-		return nil, DPlanEncoded
+		return nil, DEncoded
 	}
 	// A call that must carry the guest's placeholder is refused before its
 	// body is read, so a caller holding none cannot make the clerk buffer
 	// one.
 	var real string
-	if e.Kind == PlanModel || e.Kind == PlanRead {
+	if e.Kind == Model || e.Kind == Read {
 		if real, ok = p.bearer(guest, r.Header); !ok {
-			return nil, DPlanPlaceholder
+			return nil, DPlaceholder
 		}
 	}
 	limit := p.d.MaxBody
-	if e.Kind != PlanModel {
+	if e.Kind != Model {
 		limit = maxExchange
 	}
 	var body []byte
 	if r.Body != nil {
 		b, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 		if err != nil || int64(len(b)) > limit {
-			return nil, DPlanUndeclared
+			return nil, DUndeclared
 		}
 		body = b
 	}
 	switch e.Kind {
-	case PlanRefresh:
+	case Refresh:
 		return p.refresh(ctx, guest, r.Header, e, query, body)
-	case PlanCode:
+	case Code:
 		out, ok := p.checkCode(r.Header, body)
 		if !ok {
-			return nil, DPlanUndeclared
+			return nil, DUndeclared
 		}
 		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, out)
 		up.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -755,17 +784,17 @@ func (p *PlanLogin) Do(ctx context.Context, guest string, r *http.Request) (*htt
 			return nil, detail
 		}
 		return p.swap(ans, guest, true)
-	case PlanDevice:
+	case Device:
 		out, ok := stringObject(body)
 		if !ok {
-			return nil, DPlanUndeclared
+			return nil, DUndeclared
 		}
 		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, out)
 		up.Header.Set("Content-Type", "application/json")
 		return p.send(up, "")
-	case PlanRead:
+	case Read:
 		if len(body) != 0 {
-			return nil, DPlanUndeclared
+			return nil, DUndeclared
 		}
 	}
 	up := p.upstream(ctx, r.Header, e, query, p.d.RequestHeaders, body)
@@ -774,7 +803,7 @@ func (p *PlanLogin) Do(ctx context.Context, guest string, r *http.Request) (*htt
 }
 
 // bearer resolves the guest's own access placeholder from Authorization.
-func (p *PlanLogin) bearer(guest string, h http.Header) (string, bool) {
+func (p *Login) bearer(guest string, h http.Header) (string, bool) {
 	vs := h.Values("Authorization")
 	if len(vs) != 1 {
 		return "", false
@@ -788,8 +817,8 @@ func (p *PlanLogin) bearer(guest string, h http.Header) (string, bool) {
 
 // upstream is the provider request for e, carrying the named headers of the
 // guest's request and nothing else.
-func (p *PlanLogin) upstream(ctx context.Context, h http.Header, e PlanEndpoint, query string, pass []string, body []byte) *http.Request {
-	// The host and path are the declaration's, checked at NewPlanLogin.
+func (p *Login) upstream(ctx context.Context, h http.Header, e Endpoint, query string, pass []string, body []byte) *http.Request {
+	// The host and path are the declaration's, checked at New.
 	up, _ := http.NewRequestWithContext(ctx, e.Method, "https://"+e.Host+e.Path, nil)
 	up.URL.RawQuery = query
 	for _, k := range pass {
@@ -808,22 +837,22 @@ func (p *PlanLogin) upstream(ctx context.Context, h http.Header, e PlanEndpoint,
 
 func dialDetail(err error, host string) string {
 	if errors.Is(err, netguard.ErrDenied) {
-		return DBlocked
+		return clerk.DBlocked
 	}
-	return DNoAnswer + " " + host
+	return clerk.DNoAnswer + " " + host
 }
 
 // send makes a run or device request and returns its answer with only the
 // declared headers, and real, if any, redacted from them and from the
 // streamed body.
-func (p *PlanLogin) send(up *http.Request, real string) (*http.Response, string) {
+func (p *Login) send(up *http.Request, real string) (*http.Response, string) {
 	resp, err := p.client.Do(up)
 	if err != nil {
 		return nil, dialDetail(err, up.URL.Hostname())
 	}
 	if encoded(resp.Header) {
 		resp.Body.Close()
-		return nil, DPlanEncoded
+		return nil, DEncoded
 	}
 	out := &http.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: http.Header{}, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
 		ContentLength: -1, Body: resp.Body}
@@ -846,7 +875,7 @@ func (p *PlanLogin) send(up *http.Request, real string) (*http.Response, string)
 	return out, ""
 }
 
-func (p *PlanLogin) answerHeader(k string) bool {
+func (p *Login) answerHeader(k string) bool {
 	if forbiddenHeader(k) {
 		return false
 	}
@@ -864,18 +893,18 @@ func (p *PlanLogin) answerHeader(k string) bool {
 }
 
 // exchange makes a token request and reads its answer whole, bounded.
-func (p *PlanLogin) exchange(up *http.Request) (*planAnswer, string) {
+func (p *Login) exchange(up *http.Request) (*planAnswer, string) {
 	resp, err := p.client.Do(up)
 	if err != nil {
 		return nil, dialDetail(err, up.URL.Hostname())
 	}
 	defer resp.Body.Close()
 	if encoded(resp.Header) {
-		return nil, DPlanEncoded
+		return nil, DEncoded
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxExchange+1))
 	if err != nil {
-		return nil, DNoAnswer + " " + up.URL.Hostname()
+		return nil, clerk.DNoAnswer + " " + up.URL.Hostname()
 	}
 	if len(b) > maxExchange {
 		return &planAnswer{status: resp.StatusCode, header: resp.Header, body: nil}, ""
@@ -885,24 +914,30 @@ func (p *PlanLogin) exchange(up *http.Request) (*planAnswer, string) {
 
 // refresh forwards the guest's token refresh: one flight per login, each
 // joining guest's answer swapped to its own placeholders.
-func (p *PlanLogin) refresh(ctx context.Context, guest string, h http.Header, e PlanEndpoint, query string, body []byte) (*http.Response, string) {
+func (p *Login) refresh(ctx context.Context, guest string, h http.Header, e Endpoint, query string, body []byte) (*http.Response, string) {
 	if _, ok := p.checkRefresh(guest, body); !ok {
-		return nil, DPlanPlaceholder
+		return nil, DPlaceholder
 	}
 	ans, detail, done := p.share(ctx, func() (*planAnswer, string) {
 		// Resolved again inside the flight: one that ended since the check
-		// above may have committed a newer token.
+		// above may have committed a newer token. The login's generation is
+		// read first, so a sign-in between the two makes the answer stale,
+		// never fresh for a token it was not made from.
+		gen := p.generation()
 		out, ok := p.checkRefresh(guest, body)
 		if !ok {
-			return nil, DPlanPlaceholder
+			return nil, DPlaceholder
 		}
 		xctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exchangeFor)
 		defer cancel()
 		up := p.upstream(xctx, h, e, query, p.d.RequestHeaders, out)
 		up.Header.Set("Content-Type", "application/json")
 		ans, detail := p.exchange(up)
-		if detail == "" && p.refusedLogin(ans) {
-			p.stop(StopRefused)
+		if detail == "" {
+			ans.refresh, ans.gen = true, gen
+			if p.refusedLogin(ans) {
+				p.stopFor(ans, StopRefused)
+			}
 		}
 		return ans, detail
 	})
@@ -915,12 +950,12 @@ func (p *PlanLogin) refresh(ctx context.Context, guest string, h http.Header, e 
 
 // share runs exchange, or joins the one in flight and waits for its answer.
 // done must be called once the caller has committed or dropped the answer.
-func (p *PlanLogin) share(ctx context.Context, exchange func() (*planAnswer, string)) (*planAnswer, string, func()) {
+func (p *Login) share(ctx context.Context, exchange func() (*planAnswer, string)) (*planAnswer, string, func()) {
 	p.fmu.Lock()
 	fl := p.flight
 	leader := fl == nil
 	if leader {
-		fl = &planFlight{ready: make(chan struct{}), detail: DPlanExchange}
+		fl = &planFlight{ready: make(chan struct{}), detail: DExchange}
 		p.flight = fl
 	}
 	fl.members++
@@ -946,13 +981,13 @@ func (p *PlanLogin) share(ctx context.Context, exchange func() (*planAnswer, str
 	case <-fl.ready:
 		return fl.ans, fl.detail, done
 	case <-ctx.Done():
-		return nil, DPlanExchange, done
+		return nil, DExchange, done
 	}
 }
 
 // refusedLogin reports whether a refresh answer is the provider refusing the
 // login: 400 or 401 with a declared code.
-func (p *PlanLogin) refusedLogin(a *planAnswer) bool {
+func (p *Login) refusedLogin(a *planAnswer) bool {
 	if a.status != http.StatusBadRequest && a.status != http.StatusUnauthorized || a.body == nil {
 		return false
 	}
@@ -978,7 +1013,7 @@ func (p *PlanLogin) refusedLogin(a *planAnswer) bool {
 // checkRefresh holds a refresh body to its declared keys, all strings, with
 // grant_type refresh_token and the guest's own refresh placeholder, and
 // returns it with the real refresh token in its place.
-func (p *PlanLogin) checkRefresh(guest string, body []byte) ([]byte, bool) {
+func (p *Login) checkRefresh(guest string, body []byte) ([]byte, bool) {
 	obj, err := strictObject(body)
 	if err != nil {
 		return nil, false
@@ -1003,7 +1038,7 @@ func (p *PlanLogin) checkRefresh(guest string, body []byte) ([]byte, bool) {
 
 // checkCode admits the code exchange in its exact form, and rewrites the
 // CLI's callback to the one the provider bound the code to.
-func (p *PlanLogin) checkCode(h http.Header, body []byte) ([]byte, bool) {
+func (p *Login) checkCode(h http.Header, body []byte) ([]byte, bool) {
 	if mt, _, err := mime.ParseMediaType(h.Get("Content-Type")); err != nil || mt != "application/x-www-form-urlencoded" {
 		return nil, false
 	}
@@ -1063,7 +1098,7 @@ func encodeJSON(v any) ([]byte, error) {
 
 // tokenAnswer checks a 200 answer against the declared shape and returns
 // its object and credentials.
-func (p *PlanLogin) tokenAnswer(a *planAnswer) (map[string]any, map[string]string, bool) {
+func (p *Login) tokenAnswer(a *planAnswer) (map[string]any, map[string]string, bool) {
 	if mt, _, err := mime.ParseMediaType(a.header.Get("Content-Type")); err != nil || mt != "application/json" || a.body == nil {
 		return nil, nil, false
 	}
@@ -1089,7 +1124,7 @@ func (p *PlanLogin) tokenAnswer(a *planAnswer) (map[string]any, map[string]strin
 	return obj, creds, true
 }
 
-func (f *PlanField) admits(v any) bool {
+func (f *Field) admits(v any) bool {
 	switch f.Kind {
 	case FieldCredential:
 		s, ok := v.(string)
@@ -1111,10 +1146,15 @@ func (f *PlanField) admits(v any) bool {
 // every credential swapped for that guest's placeholder, and only after the
 // slot holds the login, since the provider's refresh tokens are single-use.
 // An error answer is dropped. An answer out of shape, with no account, or
-// naming another account on a refresh is dropped and stops the route.
-func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Response, string) {
+// naming another account on a refresh is dropped and stops the route. A
+// refresh answer to a login the owner has since removed or replaced is
+// dropped and stops nothing (DStale).
+func (p *Login) swap(a *planAnswer, guest string, signIn bool) (*http.Response, string) {
+	if p.stale(a) {
+		return nil, DStale
+	}
 	if a.status != http.StatusOK {
-		return nil, DPlanExchange + fmt.Sprintf(" http %d", a.status)
+		return nil, DExchange + fmt.Sprintf(" http %d", a.status)
 	}
 	obj, creds, ok := p.tokenAnswer(a)
 	acct := ""
@@ -1122,8 +1162,8 @@ func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Respon
 		acct = p.accountOf(creds[fID])
 	}
 	if acct == "" {
-		p.stop(StopUnswappable)
-		return nil, DPlanUnswappable
+		p.stopFor(a, StopUnswappable)
+		return nil, DUnswappable
 	}
 	p.cmu.Lock()
 	st, err := p.load()
@@ -1131,18 +1171,21 @@ func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Respon
 	held := p.held
 	p.mu.Unlock()
 	switch {
+	case p.stale(a):
+		p.cmu.Unlock()
+		return nil, DStale
 	case err != nil:
 		p.cmu.Unlock()
-		return nil, DPlanSave
+		return nil, DSave
 	case higher(st.Stop, held) == StopUnswappable:
 		p.cmu.Unlock()
-		return nil, DPlanStopped + " " + StopUnswappable
+		return nil, DStopped + " " + StopUnswappable
 	case !signIn && (st.Tokens[fAccess] == "" || acct != st.Account):
 		// A guest only refreshes: with no login stored this refuses a
 		// first sign-in as well as an account change.
 		p.cmu.Unlock()
-		p.stop(StopUnswappable)
-		return nil, DPlanUnswappable
+		p.stopFor(a, StopUnswappable)
+		return nil, DUnswappable
 	}
 	next := planState{Tokens: map[string]string{}, Account: acct, Stop: st.Stop, Version: st.Version}
 	if acct == st.Account {
@@ -1158,8 +1201,8 @@ func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Respon
 	}
 	if next.Tokens[fAccess] == "" || next.Tokens[fRefresh] == "" {
 		p.cmu.Unlock()
-		p.stop(StopUnswappable)
-		return nil, DPlanUnswappable
+		p.stopFor(a, StopUnswappable)
+		return nil, DUnswappable
 	}
 	p.mu.Lock()
 	g := p.guests[guest]
@@ -1172,19 +1215,20 @@ func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Respon
 		for _, v := range creds {
 			if ph == "" || strings.Contains(ph, v) {
 				p.cmu.Unlock()
-				return nil, DPlanUnswappable
+				return nil, DUnswappable
 			}
 		}
 		obj[k] = ph
 	}
-	if err := p.store(next); err != nil {
+	if err := p.save(next); err != nil {
 		p.cmu.Unlock()
-		return nil, DPlanSave
+		return nil, DSave
 	}
 	p.mu.Lock()
 	p.guests[guest] = g
 	if signIn {
 		p.signing[guest] = true
+		p.gen++
 		if p.held == StopRefused {
 			p.held = ""
 		}
@@ -1193,7 +1237,7 @@ func (p *PlanLogin) swap(a *planAnswer, guest string, signIn bool) (*http.Respon
 	p.cmu.Unlock()
 	out, err := encodeJSON(obj)
 	if err != nil {
-		return nil, DPlanUnswappable
+		return nil, DUnswappable
 	}
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -1247,24 +1291,24 @@ func partial(b, secret []byte) int {
 	return 0
 }
 
-// CodexPlan is the Codex CLI's plan route as measured on CLI 0.162.1 (#809):
+// Codex is the Codex CLI's plan route as measured on CLI 0.162.1 (#809):
 // the ChatGPT plan's model and models endpoints, the refresh, and the
 // device-code sign-in, with the CLI's local callback rewritten to the auth
 // host's. Its version moves with every release that requalifies it.
-func CodexPlan(guard *netguard.Policy) PlanDeclaration {
+func Codex(guard *netguard.Policy) Declaration {
 	const run, auth = "chatgpt.com", "auth.openai.com"
-	return PlanDeclaration{
+	return Declaration{
 		Name:    "codex",
 		Version: "codex-0.162.1-1",
-		Endpoints: []PlanEndpoint{
-			{Name: "responses", Host: run, Method: "POST", Path: "/backend-api/codex/responses", Kind: PlanModel},
-			{Name: "models", Host: run, Method: "GET", Path: "/backend-api/codex/models", Kind: PlanRead, Query: []string{"client_version"}},
-			{Name: "refresh", Host: auth, Method: "POST", Path: "/oauth/token", Kind: PlanRefresh},
-			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: PlanDevice},
-			{Name: "devicetoken", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/token", Kind: PlanDevice},
-			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: PlanCode},
+		Endpoints: []Endpoint{
+			{Name: "responses", Host: run, Method: "POST", Path: "/backend-api/codex/responses", Kind: Model},
+			{Name: "models", Host: run, Method: "GET", Path: "/backend-api/codex/models", Kind: Read, Query: []string{"client_version"}},
+			{Name: "refresh", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Refresh},
+			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: Device},
+			{Name: "devicetoken", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/token", Kind: Device},
+			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Code},
 		},
-		Token: []PlanField{
+		Token: []Field{
 			{Name: fAccess, Kind: FieldCredential},
 			{Name: fRefresh, Kind: FieldCredential, Optional: true},
 			{Name: fID, Kind: FieldCredential, Optional: true},

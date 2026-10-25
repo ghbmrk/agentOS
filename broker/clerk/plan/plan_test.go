@@ -1,14 +1,16 @@
-package clerk_test
+package plan_test
 
 // REQ: CLK-1, CLK-3, CLK-4, CLK-7, PLN-5
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -20,6 +22,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/plan"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // planFix is a plan login clerk over a fake provider under example.com. The
@@ -29,7 +33,7 @@ type planFix struct {
 	srv   *httptest.Server
 	roots *x509.CertPool
 	seal  clerk.Sealer
-	sec   *clerk.Secrets
+	sec   *plan.Store
 	host  string
 
 	mu      sync.Mutex
@@ -42,6 +46,26 @@ type planFix struct {
 	answer    func(w http.ResponseWriter, r *http.Request, body string) bool
 	exchanges atomic.Int32
 	gate      chan struct{} // if set, a refresh waits on it
+}
+
+func sealer(t *testing.T) clerk.Sealer {
+	t.Helper()
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		t.Fatal(err)
+	}
+	s, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// resolver answers every name with one address.
+type resolver netip.Addr
+
+func (r resolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return []netip.Addr{netip.Addr(r)}, nil
 }
 
 func jwt(claims any) string {
@@ -64,7 +88,7 @@ func newPlanFix(t *testing.T) *planFix {
 	f.roots = x509.NewCertPool()
 	f.roots.AddCert(f.srv.Certificate())
 	f.seal = sealer(t)
-	f.sec = clerk.NewSecrets(f.seal, nil)
+	f.sec = plan.NewStore(f.seal, nil)
 	f.host = "example.com:" + f.srv.URL[strings.LastIndex(f.srv.URL, ":")+1:]
 	return f
 }
@@ -133,17 +157,19 @@ func (f *planFix) hits() int {
 	return len(f.seen)
 }
 
-func (f *planFix) decl(t *testing.T) clerk.PlanDeclaration {
-	d := clerk.CodexPlan((&exitFix{srv: f.srv}).guard(netip.MustParseAddr("8.8.8.8")))
+func (f *planFix) decl(t *testing.T) plan.Declaration {
+	d := plan.Codex(netguard.New(netguard.Config{Resolver: resolver(netip.MustParseAddr("8.8.8.8")), Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, f.srv.Listener.Addr().String())
+	}}))
 	for i := range d.Endpoints {
 		d.Endpoints[i].Host = f.host
 	}
 	return d
 }
 
-func (f *planFix) login(t *testing.T) *clerk.PlanLogin {
+func (f *planFix) login(t *testing.T) *plan.Login {
 	t.Helper()
-	p, err := clerk.NewPlanLogin(f.decl(t), f.sec, f.roots)
+	p, err := plan.New(f.decl(t), f.sec, f.roots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +201,7 @@ func codeForm() string {
 }
 
 // signIn runs the owner's sign-in in guest and returns what the guest got.
-func signIn(t *testing.T, p *clerk.PlanLogin, guest string) map[string]any {
+func signIn(t *testing.T, p *plan.Login, guest string) map[string]any {
 	t.Helper()
 	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
@@ -194,7 +220,7 @@ func signIn(t *testing.T, p *clerk.PlanLogin, guest string) map[string]any {
 	return got
 }
 
-func model(p *clerk.PlanLogin, guest, bearer string) (*http.Response, string) {
+func model(p *plan.Login, guest, bearer string) (*http.Response, string) {
 	h := map[string]string{"Content-Type": "application/json", "Cookie": "c=1", "X-Forwarded-For": "1.2.3.4"}
 	if bearer != "" {
 		h["Authorization"] = "Bearer " + bearer
@@ -206,7 +232,7 @@ func refreshBody(ph string) string {
 	return `{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"` + ph + `"}`
 }
 
-func refreshReq(p *clerk.PlanLogin, guest, ph string) (*http.Response, string) {
+func refreshReq(p *plan.Login, guest, ph string) (*http.Response, string) {
 	return p.Do(context.Background(), guest, req("POST", "/oauth/token", refreshBody(ph), map[string]string{"Content-Type": "application/json"}))
 }
 
@@ -222,7 +248,7 @@ func noReal(t *testing.T, what, s string) {
 func TestPlanGuestHoldsOnlyPlaceholders(t *testing.T) {
 	f := newPlanFix(t)
 	p := f.login(t)
-	if _, err := p.Guest("g1"); !errors.Is(err, clerk.ErrNoPlanLogin) {
+	if _, err := p.Guest("g1"); !errors.Is(err, plan.ErrNoLogin) {
 		t.Fatalf("Guest before a sign-in = %v", err)
 	}
 	got := signIn(t, p, "signin")
@@ -355,7 +381,7 @@ func TestPlanRedactsTheInjectedToken(t *testing.T) {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Write([]byte("x"))
 	})
-	if resp, d := model(p, "g", g.Tokens["access_token"]); resp != nil || d != clerk.DPlanEncoded {
+	if resp, d := model(p, "g", g.Tokens["access_token"]); resp != nil || d != plan.DEncoded {
 		t.Fatalf("an encoded answer = %q", d)
 	}
 }
@@ -418,7 +444,7 @@ func TestPlanRefreshRunsOneFlight(t *testing.T) {
 	f.exchanges.Store(0)
 	f.gate = make(chan struct{})
 	guests := []string{"a", "b", "c"}
-	tok := map[string]clerk.PlanTokens{}
+	tok := map[string]plan.Tokens{}
 	for _, g := range guests {
 		tok[g], _ = p.Guest(g)
 	}
@@ -480,14 +506,14 @@ func TestPlanUnmatchedAnswerStopsUntilRequalified(t *testing.T) {
 			signIn(t, p, "signin")
 			g, _ := p.Guest("g")
 			f.answerWith(200, body)
-			if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != clerk.DPlanUnswappable {
+			if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DUnswappable {
 				t.Fatalf("refresh = %v %q", resp, d)
 			}
-			if p.Stopped() != clerk.StopUnswappable {
+			if p.Stopped() != plan.StopUnswappable {
 				t.Fatalf("Stopped = %q", p.Stopped())
 			}
 			before := f.hits()
-			if resp, d := model(p, "g", g.Tokens["access_token"]); resp != nil || !strings.HasPrefix(d, clerk.DPlanStopped) {
+			if resp, d := model(p, "g", g.Tokens["access_token"]); resp != nil || !strings.HasPrefix(d, plan.DStopped) {
 				t.Fatalf("model call on a stopped route = %q", d)
 			}
 			if err := p.BeginSignIn("s2"); err == nil {
@@ -496,25 +522,23 @@ func TestPlanUnmatchedAnswerStopsUntilRequalified(t *testing.T) {
 			if f.hits() != before {
 				t.Fatal("a stopped route sent a request")
 			}
-			if err := p.Resume(); !errors.Is(err, clerk.ErrRequalify) {
+			if err := p.Resume(); !errors.Is(err, plan.ErrRequalify) {
 				t.Fatalf("Resume = %v", err)
 			}
-			if err := p.Remove(); err != nil || p.Stopped() != clerk.StopUnswappable {
+			if err := p.Remove(); err != nil || p.Stopped() != plan.StopUnswappable {
 				t.Fatalf("Remove lifted the stop: %v %q", err, p.Stopped())
 			}
 			// A restart with the same declaration keeps it.
 			at, _ := f.sec.MarshalBinary()
-			sec := clerk.NewSecrets(f.seal, nil)
-			if err := sec.UnmarshalBinary(at); err != nil {
-				t.Fatal(err)
-			}
-			again, err := clerk.NewPlanLogin(f.decl(t), sec, f.roots)
-			if err != nil || again.Stopped() != clerk.StopUnswappable {
+			sec := plan.NewStore(f.seal, nil)
+			sec.Load(at)
+			again, err := plan.New(f.decl(t), sec, f.roots)
+			if err != nil || again.Stopped() != plan.StopUnswappable {
 				t.Fatalf("after a restart Stopped = %q (%v)", again.Stopped(), err)
 			}
 			d := f.decl(t)
 			d.Version = "codex-0.163.0-1"
-			next, err := clerk.NewPlanLogin(d, sec, f.roots)
+			next, err := plan.New(d, sec, f.roots)
 			if err != nil || next.Stopped() != "" {
 				t.Fatalf("a new declaration version did not requalify: %q (%v)", next.Stopped(), err)
 			}
@@ -535,7 +559,7 @@ func TestPlanRefusedLoginStopsUntilResumeOrSignIn(t *testing.T) {
 		body   string
 	}{{400, `{"error":"invalid_grant"}`}, {500, `{"error":"server"}`}, {401, `{"error":{"code":"other"}}`}} {
 		f.answerWith(a.status, a.body)
-		if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || !strings.HasPrefix(d, clerk.DPlanExchange) {
+		if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || !strings.HasPrefix(d, plan.DExchange) {
 			t.Fatalf("error answer %d = %q", a.status, d)
 		}
 		if p.Stopped() != "" {
@@ -546,13 +570,13 @@ func TestPlanRefusedLoginStopsUntilResumeOrSignIn(t *testing.T) {
 	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d == "" {
 		t.Fatal("a refused login was forwarded")
 	}
-	if p.Stopped() != clerk.StopRefused {
+	if p.Stopped() != plan.StopRefused {
 		t.Fatalf("Stopped = %q", p.Stopped())
 	}
 	if resp, _ := model(p, "g", g.Tokens["access_token"]); resp != nil {
 		t.Fatal("a refused route made a model call")
 	}
-	if _, err := p.Guest("h"); !errors.Is(err, clerk.ErrPlanStopped) {
+	if _, err := p.Guest("h"); !errors.Is(err, plan.ErrStopped) {
 		t.Fatalf("Guest on a refused route = %v", err)
 	}
 	if err := p.Resume(); err != nil || p.Stopped() != "" {
@@ -560,7 +584,7 @@ func TestPlanRefusedLoginStopsUntilResumeOrSignIn(t *testing.T) {
 	}
 	f.answerWith(400, `{"error":"refresh_token_reused"}`)
 	refreshReq(p, "g", g.Tokens["refresh_token"])
-	if p.Stopped() != clerk.StopRefused {
+	if p.Stopped() != plan.StopRefused {
 		t.Fatalf("Stopped = %q", p.Stopped())
 	}
 	signIn(t, p, "signin-2")
@@ -629,30 +653,32 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 	}
 }
 
-// The clerk holds its own login and no other account's secret.
+// The store holds this plan's login alone: one sealed for another plan, or
+// under another key, does not open.
 func TestPlanClerkHoldsOneSlot(t *testing.T) {
 	f := newPlanFix(t)
-	if err := f.sec.Put("gmail", clerk.KindGrant, []byte(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clerk.NewPlanLogin(f.decl(t), f.sec, f.roots); err == nil {
-		t.Fatal("a store holding another slot was taken")
-	}
-	sec := clerk.NewSecrets(sealer(t), nil)
-	if err := sec.Put("codex", clerk.KindStatic, []byte("k")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clerk.NewPlanLogin(f.decl(t), sec, f.roots); err == nil {
-		t.Fatal("a static slot opened as a plan login")
-	}
 	d := f.decl(t)
+	d.Name = "other"
+	other, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, other, "signin")
+	at, _ := f.sec.MarshalBinary()
+	for name, st := range map[string]*plan.Store{"another plan": plan.NewStore(f.seal, nil), "another key": plan.NewStore(sealer(t), nil)} {
+		st.Load(at)
+		if _, err := plan.New(f.decl(t), st, f.roots); err == nil {
+			t.Errorf("a store sealed for %s was taken", name)
+		}
+	}
+	d = f.decl(t)
 	d.Guard = nil
-	if _, err := clerk.NewPlanLogin(d, clerk.NewSecrets(sealer(t), nil), f.roots); err == nil {
+	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
 		t.Fatal("a declaration without the home-network policy was taken")
 	}
 	d = f.decl(t)
 	d.RequestHeaders = append(d.RequestHeaders, "Cookie")
-	if _, err := clerk.NewPlanLogin(d, clerk.NewSecrets(sealer(t), nil), f.roots); err == nil {
+	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
 		t.Fatal("a declaration passing Cookie was taken")
 	}
 }
@@ -661,7 +687,7 @@ func TestPlanClerkHoldsOneSlot(t *testing.T) {
 func TestPlanStopHeldWhenTheSlotCannotRecordIt(t *testing.T) {
 	f := newPlanFix(t)
 	var fail atomic.Bool
-	f.sec = clerk.NewSecrets(sealer(t), func([]byte) error {
+	f.sec = plan.NewStore(sealer(t), func([]byte) error {
 		if fail.Load() {
 			return errors.New("disk full")
 		}
@@ -675,19 +701,19 @@ func TestPlanStopHeldWhenTheSlotCannotRecordIt(t *testing.T) {
 	if resp, _ := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil {
 		t.Fatal("an unswappable answer was forwarded")
 	}
-	if p.Stopped() != clerk.StopUnswappable {
+	if p.Stopped() != plan.StopUnswappable {
 		t.Fatalf("Stopped = %q", p.Stopped())
 	}
 	if resp, _ := model(p, "g", g.Tokens["access_token"]); resp != nil {
 		t.Fatal("a held stop let a model call through")
 	}
-	if err := p.Resume(); !errors.Is(err, clerk.ErrRequalify) {
+	if err := p.Resume(); !errors.Is(err, plan.ErrRequalify) {
 		t.Fatalf("Resume = %v", err)
 	}
 	// A good answer that cannot be sealed is dropped too: the single-use
 	// token it replaces is not handed on.
 	f2 := newPlanFix(t)
-	f2.sec = clerk.NewSecrets(sealer(t), func([]byte) error {
+	f2.sec = plan.NewStore(sealer(t), func([]byte) error {
 		if fail.Load() {
 			return errors.New("disk full")
 		}
@@ -698,7 +724,96 @@ func TestPlanStopHeldWhenTheSlotCannotRecordIt(t *testing.T) {
 	signIn(t, p2, "signin")
 	g2, _ := p2.Guest("g")
 	fail.Store(true)
-	if resp, d := refreshReq(p2, "g", g2.Tokens["refresh_token"]); resp != nil || d != clerk.DPlanSave {
+	if resp, d := refreshReq(p2, "g", g2.Tokens["refresh_token"]); resp != nil || d != plan.DSave {
 		t.Fatalf("refresh with a failing store = %q", d)
+	}
+}
+
+// A refresh answer that arrives after the owner removed the login, or signed
+// in again, was made for a login no longer stored: it is dropped, never
+// committed, and stops nothing, whatever it says (#3105 Security 1).
+func TestPlanStaleRefreshAnswerStopsNothing(t *testing.T) {
+	for name, c := range map[string]struct {
+		status int
+		body   func() string
+		owner  func(t *testing.T, f *planFix, p *plan.Login)
+	}{
+		"removed, then a good answer": {200, nil, func(t *testing.T, f *planFix, p *plan.Login) {
+			if err := p.Remove(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		"signed in to another account, then the old account's answer": {200, nil, func(t *testing.T, f *planFix, p *plan.Login) {
+			f.mu.Lock()
+			f.acct = "acct-2"
+			f.mu.Unlock()
+			signIn(t, p, "signin-2")
+		}},
+		"signed in again, then a refused code": {401, func() string { return `{"error":"refresh_token_reused"}` }, func(t *testing.T, f *planFix, p *plan.Login) {
+			signIn(t, p, "signin-2")
+		}},
+		"removed, then an answer out of shape": {200, func() string { return `{"access_token":"real-access-9","extra":"x"}` }, func(t *testing.T, f *planFix, p *plan.Login) {
+			if err := p.Remove(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPlanFix(t)
+			p := f.login(t)
+			signIn(t, p, "signin")
+			g, _ := p.Guest("g")
+			entered, hold := make(chan struct{}), make(chan struct{})
+			f.answer = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+				if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+					return false // the owner's code exchange
+				}
+				close(entered)
+				<-hold
+				f.mu.Lock()
+				body := ""
+				if c.body != nil {
+					body = c.body()
+				} else {
+					f.acct = "acct-1"
+					b, _ := json.Marshal(f.tokens())
+					body = string(b)
+				}
+				f.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(c.status)
+				w.Write([]byte(body))
+				return true
+			}
+			done := make(chan string)
+			go func() {
+				resp, d := refreshReq(p, "g", g.Tokens["refresh_token"])
+				if resp != nil {
+					d = "forwarded: " + read(t, resp)
+				}
+				done <- d
+			}()
+			<-entered
+			f.answer = func(http.ResponseWriter, *http.Request, string) bool { return false }
+			c.owner(t, f, p)
+			close(hold)
+			if d := <-done; d != plan.DStale {
+				t.Fatalf("a stale refresh answer = %q", d)
+			}
+			if s := p.Stopped(); s != "" {
+				t.Fatalf("a stale answer stopped the route: %q", s)
+			}
+			if err := p.BeginSignIn("again"); err != nil {
+				t.Fatalf("BeginSignIn after a stale answer: %v", err)
+			}
+			if strings.HasPrefix(name, "removed") && p.Signed() {
+				t.Fatal("a stale answer was committed after Remove")
+			}
+			if strings.HasPrefix(name, "signed in to another") {
+				if now, err := p.Guest("h"); err != nil || now.Account != "acct-2" {
+					t.Fatalf("the stale answer replaced the new login: %+v %v", now, err)
+				}
+			}
+		})
 	}
 }
