@@ -366,14 +366,14 @@ func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 func TestStatusReadsTheKernelsFrame(t *testing.T) {
 	needRoot(t)
 	u := []kernel.Unsettled{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: kernel.PParked, Checks: 6,
-		Detail: "no answer", Retry: true, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
+		Detail: "no answer", Retry: true, SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
 	b, err := json.Marshal(map[string]any{"result": u})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := cannedKernel(t, string(b)).Status(context.Background())
 	want := []Step{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: PhaseParked, Detail: "no answer", Retry: true,
-		Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
+		SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("status reads %+v, %v; want %+v", got, err, want)
 	}

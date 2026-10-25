@@ -1155,3 +1155,28 @@ func TestDispatchedAnswersOnlyForTheLoggedPlanInFlight(t *testing.T) {
 		t.Fatalf("after the result: %v", got)
 	}
 }
+
+// A STATUS entry names when its step was first sent, which the owner's
+// RETRY line shows ("first tried 14:02 Oct 13"); a retry's resend does not
+// move it (#3079).
+func TestStatusNamesWhenTheStepWasFirstSent(t *testing.T) {
+	r := newRig(t)
+	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	const sent = 7
+	at := int64(sent)
+	for i := int64(0); i <= kernel.MaxChecks+1; i++ {
+		at = sent + i*kernel.ProbeEvery
+		must(t, r.tick(at))
+	}
+	if got := r.k.State().Status(); len(got) != 1 || got[0].Phase != kernel.PParked || got[0].SentAt != sent {
+		t.Fatalf("a parked step: %+v, want sent at %d", got, sent)
+	}
+	at += kernel.ProbeEvery
+	must(t, r.k.Retry(at, "p1", 0))
+	must(t, r.tick(at))
+	got := r.k.State().Status()
+	if len(got) != 1 || r.k.State().Plans["p1"].Steps[0].Attempt != 2 || got[0].SentAt != sent {
+		t.Fatalf("after a retry was sent: %+v, attempt %d; want sent at %d", got, r.k.State().Plans["p1"].Steps[0].Attempt, sent)
+	}
+}
