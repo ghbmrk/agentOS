@@ -38,10 +38,10 @@ Work item #3104, prerequisite for #2780(b). Tier A. Split into three slices on t
 3. **Listener** (`broker/clerk/run/plan.go`). `ListenPlan` and `ServePlan` serve one guest's provider API over HTTP on a socket that admits only its uid, charged to the plan and route it is built with.
 Also carries #3105's follow-ups: the `forbiddenPrefix` test case and the `gen` comment. #3110 (pin `client_id` and `scope`) needs a Codex capture and stays queued.
 
-**Scope (b):** `broker/clerk/plan/` (`plan.go`, new `body.go`, `meter.go`, `body_test.go`, `testdata/codex-0.162.1-codemode.json`, `plan_test.go`, `ASSUMPTIONS.md`), `broker/clerk/model/` (`model.go`, `model_test.go`, `ASSUMPTIONS.md`), `broker/clerk/run/` (new `plan.go`, `plan_test.go`, `ASSUMPTIONS.md`), this brief. No guard file changes: the three packages are already `parser` lines, and `clerk/run` is wiring in `core.txt`.
+**Scope (b):** `broker/clerk/plan/` (`plan.go`, new `body.go`, `meter.go`, `body_test.go`, `plan_test.go`, `ASSUMPTIONS.md`), `broker/clerk/model/` (`model.go`, `model_test.go`, `ASSUMPTIONS.md`), `broker/clerk/run/` (new `plan.go`, `plan_test.go`, `ASSUMPTIONS.md`), this brief. No guard file changes: the three packages are already `parser` lines, and `clerk/run` is wiring in `core.txt`.
 
 **Acceptance tests (b):**
-- `TestPlanModelBodyHeldToDeclaredShape` (PLN-5, CLK-7) in `broker/clerk/plan/body_test.go`: the measured Codex request passes with `store` forced off; each hosted, undeclared or remote shape is refused with nothing sent and nothing admitted.
+- `TestPlanModelBodyHeldToDeclaredShape` (PLN-5, CLK-7) in `broker/clerk/plan/body_test.go`: a request in the measured Codex shape (built in the test from the declaration, #809) passes with `store` forced off; each hosted, undeclared or remote shape is refused with nothing sent and nothing admitted.
 - `TestPlanDeclarationRefusesAHostedBody` (CLK-7, CLK-4): a hosted key or tool type, no body shape, or a response prefix that could pass a forbidden header is refused at `New`.
 - `TestPlanModelCallIsMeteredOnce` (LOG-7, RES-5): the meter sees the checked body before sending, is settled once with the reported usage and the pool reading, and a refused or missing meter sends nothing.
 - `TestPlanModelCallSettlesAsItEnded` (LOG-7): a cut stream, an error status, no figure, an unreadable or too-long event, an encoded answer and a refused dial each settle once, as they ended.

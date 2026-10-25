@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -18,18 +17,45 @@ import (
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
-// capture is the request Codex CLI 0.162.1 sent in code mode (#809).
+// capture is a request in the shape Codex CLI 0.162.1 sends in code mode
+// (#809): the top-level keys it sets, its declared tools in an
+// additional_tools item, developer and user messages, and a custom tool
+// call with its output. The tools come from the Codex declaration, grouped
+// by namespace; the text is synthetic.
 func capture(t *testing.T) map[string]any {
 	t.Helper()
-	b, err := os.ReadFile("testdata/codex-0.162.1-codemode.json")
-	if err != nil {
-		t.Fatal(err)
+	spaces := map[string][]any{}
+	var order []string
+	for _, tl := range plan.Codex(nil).Body.Tools {
+		tool := map[string]any{"type": tl.Type, "name": tl.Name, "description": "d"}
+		if tl.Type == "custom" {
+			tool["format"] = map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+		} else {
+			tool["parameters"] = map[string]any{"type": "object", "properties": map[string]any{"url": map[string]any{"type": "string"}}}
+		}
+		if _, ok := spaces[tl.Namespace]; !ok {
+			order = append(order, tl.Namespace)
+		}
+		spaces[tl.Namespace] = append(spaces[tl.Namespace], tool)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatal(err)
+	var tools []any
+	for _, ns := range order {
+		tools = append(tools, map[string]any{"type": "namespace", "name": ns, "description": "", "tools": spaces[ns]})
 	}
-	return m
+	text := func(s string) []any { return []any{map[string]any{"type": "input_text", "text": s}} }
+	return map[string]any{
+		"model": "gpt-m", "stream": true, "tool_choice": "auto", "parallel_tool_calls": false,
+		"reasoning": map[string]any{"effort": "low", "context": "all_turns"}, "store": false,
+		"include": []any{"reasoning.encrypted_content"}, "prompt_cache_key": "k", "text": map[string]any{"verbosity": "low"},
+		"client_metadata": map[string]any{"turn_id": "t1", "session_id": "s1", "thread_id": "th1"},
+		"input": []any{
+			map[string]any{"type": "additional_tools", "id": "at_1", "role": "developer", "tools": tools},
+			map[string]any{"type": "message", "id": "m1", "role": "developer", "content": text("instructions")},
+			map[string]any{"type": "message", "id": "m2", "role": "user", "content": text("brief")},
+			map[string]any{"type": "custom_tool_call", "call_id": "c0", "name": "exec", "input": "print(1)"},
+			map[string]any{"type": "custom_tool_call_output", "id": "o1", "call_id": "c0", "output": text("1")},
+		},
+	}
 }
 
 func callWith(p *plan.Login, guest, bearer, body string, m plan.Meter) (*http.Response, string) {

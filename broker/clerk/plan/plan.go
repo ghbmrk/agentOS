@@ -1422,8 +1422,8 @@ func Codex(guard *netguard.Policy) Declaration {
 			ToolTypes:    clientToolTypes,
 			Stream:       true,
 			// The tools CLI 0.162.1 declares in code mode under the image's
-			// managed config, as captured (egress/testdata/codex-0.162.1-
-			// codemode.json): all in an additional_tools item.
+			// managed config, as captured (#809): all in an additional_tools
+			// item.
 			Tools: []Tool{
 				{"functions", "exec", "custom"},
 				{"functions", "wait", "function"},
