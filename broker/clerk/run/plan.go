@@ -36,6 +36,10 @@ type PlanGuest struct {
 	// MaxOut is the output tokens a call is admitted at, its worst case:
 	// the CLI sets no cap of its own.
 	MaxOut int64
+	// Consent reports whether the owner's logged consent to an unconfirmed
+	// plan route stands now (CLK-7); nil is no consent. It is read at each
+	// request, so a withdrawal stops the route before its next call.
+	Consent func() bool
 	// Clock is the model clerk process's wall clock in unix ms. It orders
 	// the clerk's own owed log writes (the kernel dates every one), and it
 	// dates a pool reading: a missing or past reset becomes Clock plus the
@@ -74,6 +78,10 @@ func ServePlan(ln net.Listener, g PlanGuest) error {
 var errCut = errors.New("run: the model call did not complete")
 
 func (g PlanGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if detail := g.gate(); detail != "" {
+		http.Error(w, "agentos: "+detail, planStatus(detail))
+		return
+	}
 	resp, detail := g.Login.Do(r.Context(), g.Guest, r, g.meter)
 	if detail != "" {
 		http.Error(w, "agentos: "+detail, planStatus(detail))
@@ -100,6 +108,23 @@ func (g PlanGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// gate is the CLK-7 mode gate, before anything is read or sent: a permitted
+// route is open; an unconfirmed one serves its sign-in guest, so the owner
+// can sign in before being asked, and runs only while consent stands; a
+// route the terms bar serves nothing.
+func (g PlanGuest) gate() string {
+	switch g.Login.Mode() {
+	case plan.Permitted:
+		return ""
+	case plan.Unconfirmed:
+		if g.Login.Signing(g.Guest) || g.Consent != nil && g.Consent() {
+			return ""
+		}
+		return DPlanConsent
+	}
+	return DPlanNotAllowed
 }
 
 // meter admits one model call of g's at its checked body's size, and
@@ -150,7 +175,7 @@ func planStatus(detail string) int {
 	switch {
 	case planHas(detail, DPlanRefused):
 		return http.StatusTooManyRequests
-	case planHas(detail, plan.DStopped), planHas(detail, DPlanMeter):
+	case planHas(detail, plan.DStopped), planHas(detail, DPlanMeter), planHas(detail, DPlanConsent), planHas(detail, DPlanNotAllowed):
 		return http.StatusServiceUnavailable
 	case planHas(detail, clerk.DBlocked), planHas(detail, clerk.DNoAnswer):
 		return http.StatusBadGateway

@@ -45,7 +45,7 @@ func fakeJWT(acct string) string {
 // with usage 30 in and 40 out and a pool reading.
 func planProvider(t *testing.T, calls *atomic.Int32) (*plan.Login, *x509.CertPool) {
 	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	p, roots := planLoginAt(t, plan.Permitted, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth/token":
 			w.Header().Set("Content-Type", "application/json")
@@ -61,6 +61,14 @@ func planProvider(t *testing.T, calls *atomic.Int32) (*plan.Login, *x509.CertPoo
 			w.WriteHeader(404)
 		}
 	}))
+	codeExchange(t, p, "signin")
+	return p, roots
+}
+
+// planLoginAt is a plan login of mode, not signed in, whose provider is h.
+func planLoginAt(t *testing.T, mode plan.Mode, h http.Handler) (*plan.Login, *x509.CertPool) {
+	t.Helper()
+	srv := httptest.NewTLSServer(h)
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())
@@ -71,6 +79,7 @@ func planProvider(t *testing.T, calls *atomic.Int32) (*plan.Login, *x509.CertPoo
 	for i := range d.Endpoints {
 		d.Endpoints[i].Host = host
 	}
+	d.Mode = mode
 	k := make([]byte, 32)
 	rand.Read(k)
 	s, err := clerk.NewAESSealer(k)
@@ -81,19 +90,29 @@ func planProvider(t *testing.T, calls *atomic.Int32) (*plan.Login, *x509.CertPoo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.BeginSignIn("signin"); err != nil {
+	return p, roots
+}
+
+// codeExchange signs p in as the CLI of the sign-in guest would.
+func codeExchange(t *testing.T, p *plan.Login, guest string) {
+	t.Helper()
+	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
 	}
-	form := url.Values{"client_id": {"app_x"}, "code": {"ac"}, "code_verifier": {"v"}, "grant_type": {"authorization_code"},
-		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
-	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token", strings.NewReader(form))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, det := p.Do(context.Background(), "signin", r, nil)
+	resp, det := p.Do(context.Background(), guest, codeRequest(), nil)
 	if det != "" {
 		t.Fatalf("sign-in: %s", det)
 	}
 	resp.Body.Close()
-	return p, roots
+}
+
+// codeRequest is the CLI's code exchange.
+func codeRequest() *http.Request {
+	form := url.Values{"client_id": {"app_x"}, "code": {"ac"}, "code_verifier": {"v"}, "grant_type": {"authorization_code"},
+		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
+	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token", strings.NewReader(form))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return r
 }
 
 // A CLI guest reaches its provider's API only through its endpoint in the

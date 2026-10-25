@@ -1,0 +1,387 @@
+package run
+
+// REQ: CLK-7, PLN-5, CLK-4
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/clerk/plan"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
+)
+
+// fakeCLI is the guest host's sign-in sandbox: it prints what the test
+// sets, and its code exchange is the test's.
+type fakeCLI struct {
+	mu      sync.Mutex
+	printed string
+	exited  bool
+	starts  int
+	guest   string
+	stopped chan struct{}
+	err     error
+}
+
+func newFakeCLI(printed string) *fakeCLI {
+	return &fakeCLI{printed: printed, stopped: make(chan struct{})}
+}
+
+func (f *fakeCLI) Start(_ context.Context, guest string) (SignInWorker, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.starts++
+	f.guest = guest
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f, nil
+}
+
+func (f *fakeCLI) Read(context.Context) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.printed, f.exited
+}
+
+func (f *fakeCLI) Stop() { close(f.stopped) }
+
+func (f *fakeCLI) exit() {
+	f.mu.Lock()
+	f.exited = true
+	f.mu.Unlock()
+}
+
+func (f *fakeCLI) started() (int, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts, f.guest
+}
+
+func (f *fakeCLI) waitStopped(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sign-in sandbox was not destroyed")
+	}
+}
+
+const codexPrinted = "Welcome to Codex\n\x1b[94mhttp://127.0.0.1:18432/codex/device\x1b[0m\nEnter this one-time code \x1b[94mABCD-12345\x1b[0m\n"
+
+var quick = SignInTimes{Poll: time.Millisecond, Link: 200 * time.Millisecond, Wall: 5 * time.Second}
+
+// tokenProvider answers the code exchange with a login, a refresh with
+// refresh(), and the models read with 200, counting every request.
+func tokenProvider(calls *atomic.Int32, refresh func() map[string]any) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/oauth/token" && strings.Contains(string(body), "refresh_token\"") && refresh != nil:
+			json.NewEncoder(w).Encode(refresh())
+		case r.URL.Path == "/oauth/token":
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "real-access-1", "refresh_token": "real-refresh-1", "id_token": fakeJWT("acct-1")})
+		case r.URL.Path == "/backend-api/codex/models":
+			io.WriteString(w, `{"models":[]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	})
+}
+
+func until(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// serve answers one guest request at its endpoint.
+func serve(g PlanGuest, r *http.Request) (int, string) {
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, r)
+	return rec.Code, rec.Body.String()
+}
+
+func modelsRead(ph string) *http.Request {
+	r := httptest.NewRequest("GET", "http://127.0.0.1:18432/backend-api/codex/models?client_version=0.162.1", nil)
+	r.Header.Set("Authorization", "Bearer "+ph)
+	return r
+}
+
+// Use my plan (§12.1 step 6): the owner is shown the provider's own page,
+// never the link the CLI printed, and the code the CLI printed, labelled
+// with whom it is from. The CLI signs in through its own endpoint as the
+// sign-in guest; the login it commits is the clerk's, the sandbox is then
+// destroyed and the guest forgotten (PLN-5, CLK-7).
+func TestPlanSignInShowsTheProvidersPageAndCode(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	cli := newFakeCLI(codexPrinted)
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+
+	b := h.Begin(context.Background())
+	if b != (PlanBegun{Page: "https://auth.openai.com/codex/device", Code: "ABCD-12345", From: "OpenAI"}) {
+		t.Fatalf("begun: %+v", b)
+	}
+	st := h.State()
+	if !st.Signing || st.Page != b.Page || st.Code != b.Code || st.From != "OpenAI" || st.SignedIn || st.Mode != plan.Permitted {
+		t.Fatalf("while signing: %+v", st)
+	}
+	_, guest := cli.started()
+	if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest()); code != 200 || strings.Contains(body, "real-") {
+		t.Fatalf("the CLI's code exchange: %d %q", code, body)
+	}
+	cli.waitStopped(t)
+	until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+	if st := h.State(); st != (PlanState{Mode: plan.Permitted, SignedIn: true, Last: DSignedIn}) {
+		t.Fatalf("after the sign-in: %+v", st)
+	}
+	if login.Signing(guest) {
+		t.Fatal("the sign-in guest was not forgotten")
+	}
+	if _, err := login.Guest("run"); err != nil {
+		t.Fatalf("a run guest after the sign-in: %v", err)
+	}
+}
+
+// Success is the clerk's own record that this sign-in's code exchange
+// committed the login. A login stored before, a CLI that exits, prints an
+// undeclared link or no code, or is not approved in time does not sign in,
+// and its sandbox is destroyed on every path. One sign-in waits at a time
+// (CLK-7).
+func TestPlanSignInSucceedsOnlyByTheClerksRecord(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	codeExchange(t, login, "earlier")
+	login.Forget("earlier")
+
+	t.Run("the CLI exits", func(t *testing.T) {
+		cli := newFakeCLI(codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		if b := h.Begin(context.Background()); b.Detail != DSignInBusy {
+			t.Fatalf("a second sign-in: %+v", b)
+		}
+		if n, _ := cli.started(); n != 1 {
+			t.Fatalf("%d sandboxes started", n)
+		}
+		cli.exit()
+		cli.waitStopped(t)
+		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+		if st := h.State(); st.Last != DSignInFailed || st.Signing || !st.SignedIn {
+			t.Fatalf("after the exit: %+v", st)
+		}
+	})
+	t.Run("not approved in time", func(t *testing.T) {
+		cli := newFakeCLI(codexPrinted)
+		times := quick
+		times.Wall = 20 * time.Millisecond
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		cli.waitStopped(t)
+		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+		if st := h.State(); st.Last != DSignInTimedOut {
+			t.Fatalf("after the wall: %+v", st)
+		}
+	})
+	for name, c := range map[string]struct {
+		printed string
+		exited  bool
+		err     error
+		want    string
+	}{
+		"an undeclared link":         {printed: "https://auth.example.net/codex/device ABCD-12345", want: DSignInTimedOut},
+		"no code":                    {printed: "http://127.0.0.1:18432/codex/device enter abc", want: DSignInTimedOut},
+		"an exit before a code":      {printed: "error", exited: true, want: DSignInFailed},
+		"a sandbox that won't start": {err: errors.New("no image"), want: DSignInFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cli := newFakeCLI(c.printed)
+			cli.exited, cli.err = c.exited, c.err
+			h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+			if b := h.Begin(context.Background()); b != (PlanBegun{Detail: c.want}) {
+				t.Fatalf("begun: %+v", b)
+			}
+			if c.err == nil {
+				cli.waitStopped(t)
+			}
+			if st := h.State(); st.Signing || st.Last != c.want {
+				t.Fatalf("after: %+v", st)
+			}
+		})
+	}
+}
+
+// The CLK-7 mode gate. A route the terms bar starts no sign-in and serves
+// no request. An unconfirmed route lets the owner sign in, then runs only
+// while consent stands, read at each request, so a withdrawal stops it
+// before its next call. Nothing refused is sent.
+func TestPlanModeGate(t *testing.T) {
+	t.Run("not allowed", func(t *testing.T) {
+		var calls atomic.Int32
+		login, _ := planLoginAt(t, plan.NotAllowed, tokenProvider(&calls, nil))
+		cli := newFakeCLI(codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Detail != DPlanNotAllowed {
+			t.Fatalf("begun: %+v", b)
+		}
+		if n, _ := cli.started(); n != 0 {
+			t.Fatal("a sandbox was started")
+		}
+		codeExchange(t, login, "s") // a login from before the terms were re-read
+		login.Forget("s")
+		tok, err := login.Guest("g")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sent := calls.Load()
+		g := PlanGuest{Login: login, Guest: "g", Consent: func() bool { return true }}
+		if code, body := serve(g, modelsRead(tok.Tokens["access_token"])); code != 503 || !strings.Contains(body, DPlanNotAllowed) || calls.Load() != sent {
+			t.Fatalf("a request: %d %q", code, body)
+		}
+	})
+	t.Run("unconfirmed", func(t *testing.T) {
+		var calls atomic.Int32
+		login, _ := planLoginAt(t, plan.Unconfirmed, tokenProvider(&calls, nil))
+		cli := newFakeCLI(codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		_, guest := cli.started()
+		if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest()); code != 200 {
+			t.Fatalf("the sign-in without consent: %d %q", code, body)
+		}
+		cli.waitStopped(t)
+		tok, err := login.Guest("g")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var consent atomic.Bool
+		g := PlanGuest{Login: login, Guest: "g", Consent: consent.Load}
+		sent := calls.Load()
+		if code, body := serve(g, modelsRead(tok.Tokens["access_token"])); code != 503 || !strings.Contains(body, DPlanConsent) || calls.Load() != sent {
+			t.Fatalf("before consent: %d %q", code, body)
+		}
+		if code, body := serve(PlanGuest{Login: login, Guest: "g"}, modelsRead(tok.Tokens["access_token"])); code != 503 || calls.Load() != sent {
+			t.Fatalf("with no consent reader: %d %q", code, body)
+		}
+		consent.Store(true)
+		if code, body := serve(g, modelsRead(tok.Tokens["access_token"])); code != 200 || calls.Load() != sent+1 {
+			t.Fatalf("with consent: %d %q", code, body)
+		}
+		consent.Store(false)
+		if code, _ := serve(g, modelsRead(tok.Tokens["access_token"])); code != 503 || calls.Load() != sent+1 {
+			t.Fatalf("after a withdrawal: %d", code)
+		}
+	})
+}
+
+// The owner's calls cross only the owner socket: begin, state, remove
+// (which ends a waiting sign-in and destroys its sandbox) and resume, which
+// refuses a route an unswappable answer stopped; that route also starts no
+// sign-in until a release requalifies it (CLK-7, CLK-4).
+func TestPlanOwnerSocket(t *testing.T) {
+	var calls atomic.Int32
+	var bad atomic.Bool
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, func() map[string]any {
+		if bad.Load() {
+			return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1"), "debug": "x"}
+		}
+		return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1")}
+	}))
+	cli := newFakeCLI(codexPrinted)
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+	sock := filepath.Join(shortDir(t), "owner.sock")
+	ln, err := ListenPlanOwner(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go ServePlanOwner(ln, h)
+	o := PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}
+
+	b, err := o.Begin()
+	if err != nil || b.Code != "ABCD-12345" || b.Page != CodexSignIn().Page {
+		t.Fatalf("begin: %+v %v", b, err)
+	}
+	if st, err := o.State(); err != nil || !st.Signing || st.Code != b.Code {
+		t.Fatalf("state: %+v %v", st, err)
+	}
+	if err := o.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	cli.waitStopped(t)
+	if st, err := o.State(); err != nil || st != (PlanState{Mode: plan.Permitted, Last: DSignInStopped}) {
+		t.Fatalf("after remove: %+v %v", st, err)
+	}
+	if d, err := o.Resume(); err != nil || d != "" {
+		t.Fatalf("resume with nothing stopped: %q %v", d, err)
+	}
+
+	// An out-of-shape refresh answer stops the route as unswappable.
+	codeExchange(t, login, "s")
+	login.Forget("s")
+	tok, err := login.Guest("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.Store(true)
+	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token",
+		strings.NewReader(`{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"`+tok.Tokens["refresh_token"]+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	if code, body := serve(PlanGuest{Login: login, Guest: "g"}, r); code == 200 || strings.Contains(body, "real-") {
+		t.Fatalf("an unswappable refresh: %d %q", code, body)
+	}
+	if d, err := o.Resume(); err != nil || d != DRequalify {
+		t.Fatalf("resume after an unswappable answer: %q %v", d, err)
+	}
+	cli2 := newFakeCLI(codexPrinted)
+	h.Workers = cli2
+	if b, err := o.Begin(); err != nil || b.Detail != plan.DStopped+" "+plan.StopUnswappable {
+		t.Fatalf("begin while unswappable: %+v %v", b, err)
+	}
+	if n, _ := cli2.started(); n != 0 {
+		t.Fatal("a sandbox was started")
+	}
+	if st, err := o.State(); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn {
+		t.Fatalf("state while unswappable: %+v %v", st, err)
+	}
+}
+
+// The prompt reader takes a code only after a declared link, and never
+// past its bound.
+func TestPlanSignInPromptCode(t *testing.T) {
+	p := CodexSignIn()
+	for printed, want := range map[string]string{
+		codexPrinted: "ABCD-12345",
+		"https://auth.openai.com/codex/device\n  WXYZ-0001":                                 "WXYZ-0001",
+		"ABCD-12345 https://auth.openai.com/codex/device":                                   "",
+		"https://auth.openai.com/codex/device?x ABCD-12345":                                 "",
+		strings.Repeat(" ", maxPrinted) + "https://auth.openai.com/codex/device ABCD-12345": "",
+	} {
+		if got, _ := p.Code(printed); got != want {
+			t.Errorf("%.40q: %q, want %q", printed, got, want)
+		}
+	}
+}
