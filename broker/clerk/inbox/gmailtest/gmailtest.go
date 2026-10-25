@@ -69,6 +69,7 @@ type Server struct {
 	issued   int               // code exchanges redeemed
 	refused  []string
 	calls    []string
+	requests []string // every Gmail request answered, as "METHOD path?query"
 	lie      bool
 	echo     bool
 	fail     map[string]int
@@ -296,6 +297,14 @@ func (s *Server) Calls() []string {
 	return slices.Clone(s.calls)
 }
 
+// Requests lists every Gmail request the fake answered with its query, as
+// "METHOD path?query": what a declared call asked for, beyond its path.
+func (s *Server) Requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.requests)
+}
+
 // Tokens is how many access tokens the token endpoint issued.
 func (s *Server) Tokens() int {
 	s.mu.Lock()
@@ -430,6 +439,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.calls = append(s.calls, line)
+	s.requests = append(s.requests, r.Method+" "+r.URL.RequestURI())
 	switch {
 	case r.Method == "GET" && p == "/gmail/v1/users/me/messages":
 		if q.Has("q") && q.Get("q") != "-is:unread" {
