@@ -344,6 +344,11 @@ func TestLOG4OwnerKeptLineageNotRolledBack(t *testing.T) {
 	if !fresh.Contained(b.L) {
 		t.Fatal("L free before the journal was read")
 	}
+	// An unanswered question is no NO.
+	fresh.keep(recallNos(journalAnswers([]rollbackAnswer{other})))
+	if !fresh.Contained(b.L) {
+		t.Fatal("L kept by an expired question")
+	}
 
 	// Y, deleted after the NO, was read by L too.
 	b.write("recall/meta.jsonl", tomb("X"), tomb("Y"))
