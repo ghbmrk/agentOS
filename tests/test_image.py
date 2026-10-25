@@ -1794,6 +1794,22 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(used)
         self.assertEqual(sorted(set(used) - defined), [])
 
+    # REQ: CLK-1
+    def test_broker_calls_the_kernel_as_the_owner_side(self):
+        # #2682: the broker calls the kernel's owner socket as the one peer the kernel's unit admits
+        # there, and calls only the kernel's uid; ordered after the kernel's unit, never requiring it.
+        units = MK / "mkosi.extra/usr/lib/systemd/system"
+        broker = exec_args(units / "agentosd.service")
+        unlock = exec_args(units / "agentos-keeper-kernel.service")
+        kernel = unlock[unlock.index("--") + 1:]
+        self.assertEqual(arg(broker, "kernel-owner"), arg(kernel, "owner-sock"))
+        self.assertEqual(arg(broker, "kernel-owner-uid"), arg(kernel, "owner-uid"))
+        self.assertEqual(arg(broker, "kernel-uid"), arg(unlock, "uid"))
+        u = ini(units / "agentosd.service")["Unit"]
+        self.assertIn("agentos-keeper-kernel.service", u["After"].split())
+        for key in ("Requires", "Wants", "BindsTo", "Requisite"):
+            self.assertNotIn("agentos-keeper-kernel.service", u.get(key, "").split())
+
     def test_broker_starts_when_onboarding_writes_its_settings(self):
         p = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.path")
         self.assertEqual(p["Path"]["PathExists"], "/etc/agentos/agentosd.env")

@@ -31,6 +31,7 @@ inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's ow
 inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records
 inert  github.com/ghbmrk/agentos/broker/mail/mailsock -- socket between trusted processes (agentosd and agentos-egress)
 inert  github.com/ghbmrk/agentos/broker/netguard -- address policy over parsed netip values
+inert  github.com/ghbmrk/agentos/broker/owner/kernelsock -- socket between trusted processes (agentosd and the kernel); decodes only the kernel's bounded answer
 inert  github.com/ghbmrk/agentos/broker/owner/notice -- notice codes as data; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/owner/notice/noticesock -- socket between trusted processes (agentosd and agentos-egress)
 inert  github.com/ghbmrk/agentos/broker/kernel/privfile -- checks and replaces a process's own files; decodes nothing
