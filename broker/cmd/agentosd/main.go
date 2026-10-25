@@ -254,6 +254,7 @@ func main() {
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
 	flag.StringVar(&cfg.OwnerNumber, "owner", "", "owner's phone number, E.164")
+	flag.StringVar(&cfg.Currency, "currency", "", "the household's one currency, an ISO 4217 code such as EUR, which a RETRY line names a kernel step's amount in; empty, in minor units (#3079)")
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	flag.StringVar(&mailOwner, "mail-owner", "", "the mail clerk's owner socket (clerk/run MailOwnerSide), which the local UI's Connect page signs in to Gmail through (#3006); empty, the page's account ops are refused")
