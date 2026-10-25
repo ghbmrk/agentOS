@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // REQ: CH-2, KRN-7
@@ -17,6 +21,10 @@ type fakeKernel struct {
 	mu                    sync.Mutex
 	stopped, setup, down  bool
 	stops, resumes, reads int
+	// lost: RESUME takes effect but its answer is lost.
+	lost bool
+	// hang: STOP and RESUME are taken and never answered.
+	hang bool
 }
 
 var (
@@ -34,8 +42,13 @@ func (k *fakeKernel) refuse() error {
 	return nil
 }
 
-func (k *fakeKernel) Stop(context.Context) error {
+func (k *fakeKernel) Stop(ctx context.Context) error {
 	k.mu.Lock()
+	if k.hang {
+		k.mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	defer k.mu.Unlock()
 	if err := k.refuse(); err != nil {
 		return err
@@ -45,14 +58,22 @@ func (k *fakeKernel) Stop(context.Context) error {
 	return nil
 }
 
-func (k *fakeKernel) Resume(context.Context) error {
+func (k *fakeKernel) Resume(ctx context.Context) error {
 	k.mu.Lock()
+	if k.hang {
+		k.mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	defer k.mu.Unlock()
 	if err := k.refuse(); err != nil {
 		return err
 	}
 	k.resumes++
 	k.stopped = false
+	if k.lost {
+		return errors.New("lost")
+	}
 	return nil
 }
 
@@ -80,13 +101,26 @@ func (k *fakeKernel) set(f func(*fakeKernel)) {
 
 func withKernel(t *testing.T, k *fakeKernel) string {
 	t.Helper()
+	dir, _ := withKernelOwner(t, k, false)
+	return dir
+}
+
+// withKernelOwner starts the daemon with the kernel; with channel, through
+// the owner channel (-owner-state), as agentosd always runs it.
+func withKernelOwner(t *testing.T, k KernelOwner, channel bool) (string, *Daemon) {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "bk")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	startWith(t, dir, func(c *Config) { c.Kernel = k })
-	return dir
+	_, d := startWith(t, dir, func(c *Config) {
+		c.Kernel = k
+		if channel {
+			c.Auth, c.OwnerState = nil, filepath.Join(dir, "owner.json")
+		}
+	})
+	return dir, d
 }
 
 func resume(t *testing.T, dir string) string {
@@ -173,5 +207,122 @@ func TestAKernelWaitingForSetupHasNothingToStop(t *testing.T) {
 	}
 	if r := text(t, dir, owner, "STATUS")[0]; !strings.HasPrefix(r, "Running.") || strings.Contains(r, kernelUnreached) {
 		t.Fatalf("STATUS: %q", r)
+	}
+}
+
+// The owner channel, which agentosd always runs (-owner-state), drives the
+// kernel too: STOP by text and RESUME through its STOP-ordered resume
+// (resumeUnlessStopped, here from a signed-in page).
+func TestTheOwnerChannelsSTOPAndRESUMEReachTheKernel(t *testing.T) {
+	k := &fakeKernel{}
+	_, d := withKernelOwner(t, k, true)
+	ch := d.Owner()
+	if ch == nil {
+		t.Fatal("no owner channel")
+	}
+	if err := ch.LocalStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !k.stopped || k.stops != 1 {
+		t.Fatalf("the page's STOP did not reach the kernel: %+v", k)
+	}
+	if msg, err := ch.LocalResume(ch.LocalStatus().Locks, ch.StopGen()); err != nil || !strings.HasPrefix(msg, "Resumed.") {
+		t.Fatalf("RESUME: %q, %v", msg, err)
+	}
+	if k.stopped || k.resumes != 1 {
+		t.Fatalf("the page's RESUME did not reach the kernel: %+v", k)
+	}
+	k.set(func(k *fakeKernel) { k.down = true })
+	if err := ch.LocalStop(context.Background()); err == nil {
+		t.Fatal("the page's STOP reported done with no kernel")
+	}
+}
+
+// The owner's STOP by text through the owner channel reaches the kernel.
+func TestTheOwnerChannelsTextedSTOPReachesTheKernel(t *testing.T) {
+	k := &fakeKernel{}
+	dir, _ := withKernelOwner(t, k, true)
+	if r := text(t, dir, owner, "STOP"); len(r) == 0 || !strings.HasPrefix(r[0], "Stopped.") {
+		t.Fatalf("STOP: %q", r)
+	}
+	if !k.stopped || k.stops != 1 {
+		t.Fatalf("the texted STOP did not reach the kernel: %+v", k)
+	}
+}
+
+// A kernel that takes a RESUME and never answers holds the owner's next
+// STOP no longer than kernelFor per kernel call: RESUME fails, and the
+// STOP behind it is answered (CH-2).
+func TestAHungKernelHoldsSTOPOnlyBriefly(t *testing.T) {
+	defer func(d time.Duration) { kernelFor = d }(kernelFor)
+	kernelFor = 200 * time.Millisecond
+	for _, channel := range []bool{false, true} {
+		k := &fakeKernel{}
+		dir, d := withKernelOwner(t, k, channel)
+		if r := text(t, dir, owner, "STOP"); !strings.HasPrefix(r[0], "Stopped.") {
+			t.Fatalf("STOP: %q", r)
+		}
+		k.set(func(k *fakeKernel) { k.hang = true })
+		res := make(chan error, 1)
+		if channel {
+			go func() {
+				_, err := d.Owner().LocalResume(d.Owner().LocalStatus().Locks, d.Owner().StopGen())
+				res <- err
+			}()
+		} else {
+			go func() {
+				if r := resume(t, dir); !strings.HasPrefix(r, "RESUME failed") {
+					res <- errors.New(r)
+					return
+				}
+				res <- errors.New("failed")
+			}()
+		}
+		time.Sleep(50 * time.Millisecond)
+		start := time.Now()
+		r := text(t, dir, owner, "STOP")
+		if took := time.Since(start); took > 6*kernelFor {
+			t.Fatalf("channel %v: STOP waited %v behind a hung kernel", channel, took)
+		}
+		if len(r) == 0 || !strings.HasPrefix(r[0], "STOP failed") {
+			t.Fatalf("channel %v: STOP on a hung kernel: %q", channel, r)
+		}
+		if err := <-res; err == nil || strings.HasPrefix(err.Error(), "Resumed") {
+			t.Fatalf("channel %v: RESUME on a hung kernel: %v", channel, err)
+		}
+	}
+}
+
+// failingResume is a journal engine whose RESUME fails to record.
+type failingResume struct{ stopped bool }
+
+func (f *failingResume) Stop(context.Context) (journal.StopReport, error) {
+	f.stopped = true
+	return journal.StopReport{}, nil
+}
+func (f *failingResume) Resume() error          { return errors.New("fsync failed") }
+func (f *failingResume) Stopped() bool          { return f.stopped }
+func (f *failingResume) List() []journal.Status { return nil }
+
+// A RESUME that fails after the kernel took it leaves the kernel stopped
+// again, so "Still stopped." holds for both: the journal's write failing,
+// or the kernel's answer lost (#3077 Security release 1).
+func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
+	ctx := context.Background()
+	k := &fakeKernel{}
+	b := &bothStops{Engine: &failingResume{}, k: k}
+	if _, err := b.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resume(); err == nil || !k.stopped {
+		t.Fatalf("journal write failed: %v, kernel %+v", err, k)
+	}
+	k2 := &fakeKernel{lost: true}
+	b = &bothStops{Engine: &failingResume{}, k: k2}
+	if _, err := b.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resume(); err == nil || !k2.stopped || !b.Engine.Stopped() {
+		t.Fatalf("kernel answer lost: %v, kernel %+v", err, k2)
 	}
 }

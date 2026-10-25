@@ -22,3 +22,6 @@ Work item #2783 (MIG-4-untrusted-daemon), slice (a); serial `cmd/agentosd` chain
 - `kernelsock_test.go::TestARefusalAndAnUndecodableAnswer`: a refusal answer is `Refused` with code and detail; a result that does not decode, or a cut answer, is `ErrLost`. Kills #3072's surviving mutants M5b and M9.
 - `broker/daemon/kernelstop_test.go::TestSTOPReachesTheKernel`, `::TestSTOPFailsWhileTheKernelDoesNotAnswer`, `::TestAKernelWaitingForSetupHasNothingToStop`: over the owner socket, through `daemon.Run`.
 - `broker/cmd/agentosd/kernel_test.go::TestNoSealedStoreIsAKernelWaitingForSetup`.
+- `broker/daemon/kernelstop_test.go::TestTheOwnerChannelsSTOPAndRESUMEReachTheKernel`, `::TestTheOwnerChannelsTextedSTOPReachesTheKernel`: the owner channel agentosd always runs (`-owner-state`) drives the kernel (#3077 L3 blocker 2).
+- `kernelstop_test.go::TestAHungKernelHoldsSTOPOnlyBriefly`: on both paths, a kernel that never answers holds STOP no longer than the `kernelFor` bound (#3077 L3 blocker 1).
+- `kernelstop_test.go::TestAFailedRESUMELeavesTheKernelStopped`: a journal write failure or a lost kernel answer leaves the kernel stopped again (#3077 Security release 1).

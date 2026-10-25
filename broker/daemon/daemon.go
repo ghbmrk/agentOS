@@ -708,12 +708,15 @@ type KernelOwner interface {
 	SetupOpen(context.Context) (bool, error)
 }
 
-// kernelReadFor bounds STATUS's read of the kernel's stop, which runs on
-// the owner's reply path.
-const kernelReadFor = 2 * time.Second
+// kernelFor bounds each owner command's kernel leg (its call and the
+// setupinfo check after a refusal): STOP and RESUME run under the lock
+// that orders them (control.Handler mu, owner.Channel stopMu), so a kernel
+// that takes a call and never answers must not hold the owner's next STOP
+// longer than this. A timeout is a failed STOP or RESUME, the safe way.
+var kernelFor = 2 * time.Second
 
 // kernelUnreached is STATUS's note while the kernel's stop cannot be read.
-const kernelUnreached = "The kernel is not answering; a STOP may not reach it yet. Reply STOP again later."
+const kernelUnreached = "Part of the box is not answering, so a STOP may not have reached it. Reply STOP again later."
 
 // bothStops is control.Engine over the journal engine and the kernel.
 type bothStops struct {
@@ -734,21 +737,28 @@ func (b *bothStops) Stop(ctx context.Context) (journal.StopReport, error) {
 }
 
 // Resume lifts the kernel's STOP first: if that fails the journal stays
-// stopped too, so RESUME fails whole and is sent again. A STOP only the
-// kernel holds leaves the journal as it is.
+// stopped too, so RESUME fails whole and is sent again. A RESUME that
+// fails after the kernel may have taken it (its answer lost, or the
+// journal's write failed) STOPs the kernel again, so "Still stopped." holds
+// for both. A STOP only the kernel holds leaves the journal as it is.
 func (b *bothStops) Resume() error {
 	if err := b.kernel(context.Background(), b.k.Resume); err != nil {
-		return err
+		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 	}
 	if !b.Engine.Stopped() {
 		return nil
 	}
-	return b.Engine.Resume()
+	if err := b.Engine.Resume(); err != nil {
+		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
+	}
+	return nil
 }
 
 // kernel runs a STOP or RESUME on the kernel; a setup-only kernel's
 // refusal is nothing to stop or lift.
 func (b *bothStops) kernel(ctx context.Context, f func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, kernelFor)
+	defer cancel()
 	err := f(ctx)
 	if err != nil {
 		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
@@ -766,7 +776,7 @@ func (b *bothStops) Stopped() bool {
 		b.setUnread(false)
 		return true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), kernelReadFor)
+	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
 	stopped, err := b.k.Stopped(ctx)
 	if err != nil {
