@@ -5270,12 +5270,12 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("${TMO:-1800}", s)
 
     def test_no_console_may_carry_the_host_verdict(self):
-        # REQ: HW-10. #1764 (D27 follow-up): all four consoles, not only the e2e one, fail the run
+        # REQ: HW-10. #1764 (D27 follow-up): every console, not only the e2e one, fails the run
         # when the guest wrote the verdict text. Potency/UX 4 and Security 2 at d9cfaff: the check
         # runs in the e2e block after the e2e boot and its console check (so console-e2e.log is this
         # run's) and just before the verdict, once; Security 1: it reads the console raw and cleaned.
         s = (IMG / "ci_boot.sh").read_text()
-        loop = ('\tfor c in console console-reboot console-two-drives console-e2e; do\n'
+        loop = ('\tfor c in console console-reboot console-two-drives console-slice console-e2e; do\n'
                 '\t\t[ -f "$W/$c.log" ] || continue\n'
                 '\t\tfor v in "G1 PROVEN" "G1 NOT PROVEN"; do\n'
                 '\t\t\t{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; }'
