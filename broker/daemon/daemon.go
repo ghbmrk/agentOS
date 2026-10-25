@@ -716,7 +716,7 @@ type KernelOwner interface {
 var kernelFor = 2 * time.Second
 
 // kernelUnreached is STATUS's note while the kernel's stop cannot be read.
-const kernelUnreached = "Part of the box is not answering, so a STOP may not have reached it. Reply STOP again later."
+const kernelUnreached = "Part of me is not answering, so a STOP may not have reached it. Reply STOP again later."
 
 // bothStops is control.Engine over the journal engine and the kernel.
 type bothStops struct {
