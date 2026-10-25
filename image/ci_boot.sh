@@ -313,19 +313,23 @@ DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT"
 # only, reach /run/agentos-setup (the image makes it) through a tmpfiles.extra credential, so the
 # first of the two boots makes the sealed store on this QEMU's swtpm and the second, on the same
 # TPM, finds it. Each time the unlock step opens the store through its tpm slot under the boot's
-# PCRs, with the pins it reads from the TPM, and then refuses at the owner's hardware keys, which
-# onboarding has not enrolled (#2905 open point 2): the kernel answering is that point's to add here.
+# PCRs, with the pins it reads from the TPM, and with none of the owner's hardware keys enrolled
+# yet hands the kernel no anchors, so the kernel starts setup-only on its sockets (#2996, #3073).
 KEEPER_FACTORS='f /run/agentos-setup/passphrase 0600 root root - ci-synthetic-passphrase-not-a-secret\nf /run/agentos-setup/recovery 0600 root root - 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n'
 KEEPER_EXTRA="$(nm_cred tmpfiles.extra "$KEEPER_FACTORS")"
 # The drill's line comes before the boot report's (agentos-drill-report.service is ordered before it),
 # so the boot runs until the second boot's keeper line.
 EXTRA="$DRILL_EXTRA$KEEPER_EXTRA" UNTIL="agentos-keeper: enroll=skipped\|agentos-keeper: enroll=failed\|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
-has "$W/console-reboot.log" "agentos-keeper: enroll=ran"
+has "$W/console-reboot.log" "agentos-keeper: enroll=ran kernel=active"
 has "$W/console-reboot.log" "agentos-keeper: enroll=skipped"
-# After the drill's reboot too, so the tpm slot opened again on a second boot's PCRs.
-LC_ALL=C awk '/agentos-reboot: drill image=verified/ { r = 1 } r && /agentos-unlock: my store holds none of your hardware keys/ { f = 1 }
+# After the drill's reboot too, so the tpm slot opened again on a second boot's PCRs: the kernel runs
+# only once the unlock step has opened the store and exec'd it.
+LC_ALL=C awk '/agentos-reboot: drill image=verified/ { r = 1 } r && /agentos-keeper: enroll=skipped kernel=active/ { f = 1 }
 	END { exit !f }' "$W/console-reboot.log" && echo "ok   agentos-unlock opened the store again after the reboot" ||
 	{ echo "MISS agentos-unlock opened the store again after the reboot"; fail=1; }
+# The kernel made its sockets, and no start was refused (#3073).
+hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"
+hasnt "$W/console-reboot.log" "agentos-unlock: seal:"
 hasnt "$W/console-reboot.log" "agentos-keeper: enroll=failed"
 hasnt "$W/console-reboot.log" "agentos-unlock: my policy key and store anchor on this PC's TPM"
 has "$W/console-reboot.log" "agentos-reboot: drill image=verified"

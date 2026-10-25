@@ -98,8 +98,11 @@ var controlPath = map[string][]string{
 	// provagent links the model route's client. It asks the checker to
 	// verify owner codes through checker/checkersock, a dial-only client
 	// of the checker's verify socket, so agentosd links none of the
-	// checker that holds the seed (SIM-split-wire, CH-4).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock"},
+	// checker that holds the seed (SIM-split-wire, CH-4). It calls the
+	// kernel's owner socket through owner/kernelsock, a dial-only client
+	// that takes the owner side's uid on the calling thread (#2682); it
+	// imports golang.org/x/sys/unix, so like clock it has no entry below.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

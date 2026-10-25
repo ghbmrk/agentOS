@@ -1328,6 +1328,9 @@ START_LIMIT_MAX = 5
 # refused; the check models no other route.
 KERNEL_REBOOT = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" != success ] && [ -e /run/agentos-kernel/up ]; "
                  "then exec /usr/bin/systemd-run --on-boot=30min --unit=agentos-kernel-reboot /usr/bin/systemctl reboot; fi'")
+# Each start of that unit first removes the last start's "up" (#2998): /run/agentos-kernel outlives a stop
+# (#3073), so without this a start refused after a good one would ask for the reboot.
+KERNEL_UP_CLEAR = "/usr/bin/rm -f /run/agentos-kernel/up"
 REBOOT_WORDS = re.compile(r"(?<![\w-])(systemctl|systemd-run|busctl|dbus-send|reboot|shutdown|halt|poweroff|kexec|telinit)(?![\w-])")
 # The units that may open the TPM (#2889 Security later 2): the keeper's, and the old core's vault
 # process until it is deleted (D-139). Only through the resource manager.
@@ -1446,7 +1449,8 @@ def keeper_violations(root):
     - #2897: an UNLOCK_UNITS unit sets StartLimitBurst= (1 to START_LIMIT_MAX) and a non-zero
       StartLimitIntervalSec= in [Unit], and no failure or start-limit action that reboots, which would
       restart it on every boot. Its one reboot is ExecStopPost=KERNEL_REBOOT (#2998); it sets no
-      OnFailure= or OnSuccess=, and no other command names a REBOOT_WORDS tool."""
+      OnFailure= or OnSuccess=, and no other command names a REBOOT_WORDS tool. With that line, an
+      ExecStartPre= is KERNEL_UP_CLEAR."""
     root = str(root)
     dirs, out = unit_dirs(root)
     names, sockets = set(), []
@@ -1575,6 +1579,10 @@ def keeper_unit_violations(name, files):
                     out.append("%s: %s=%s can reboot the box; its one reboot is ExecStopPost=KERNEL_REBOOT, after a "
                                "kernel that came up and no sooner than 30 minutes into the boot (#2897, #2998)"
                                % (name, key, v.split()[0]))
+        if KERNEL_REBOOT in ini_entries(files, "Service", "ExecStopPost") and \
+                KERNEL_UP_CLEAR not in ini_entries(files, "Service", "ExecStartPre"):
+            out.append("%s: no ExecStartPre=%s; a start refused after a good one would find the last start's "
+                       "\"up\" and reboot the box (#2897, #2998)" % (name, KERNEL_UP_CLEAR))
     return out
 
 

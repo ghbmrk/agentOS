@@ -427,6 +427,20 @@ jobs:
             --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
             env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
             -test.run '^TestHostapdChildRunsAsItsOwnUser$'
+      - name: agentosd calls the kernel as the owner side (#2682)
+        # As agentosd.service runs: root with no_new_privs. Each call takes the owner side's uid on
+        # one thread and gives it back; the tests skip off root, so the step fails unless they ran.
+        working-directory: broker
+        run: |
+          rc=0
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            go test -count=1 -json -run '^(TestSpeaksTheKernelsWire|TestOnlyTheKernelsUIDIsCalled|TestNoThreadKeepsTheOwnerSidesUID)$' \
+            ./owner/kernelsock > /tmp/kernelsock-test.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/kernelsock-test.json \
+            github.com/ghbmrk/agentos/broker/owner/kernelsock.TestSpeaksTheKernelsWire \
+            github.com/ghbmrk/agentos/broker/owner/kernelsock.TestOnlyTheKernelsUIDIsCalled \
+            github.com/ghbmrk/agentos/broker/owner/kernelsock.TestNoThreadKeepsTheOwnerSidesUID || exit 1
+          [ "$rc" -eq 0 ]
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.

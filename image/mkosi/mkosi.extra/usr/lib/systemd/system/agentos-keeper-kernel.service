@@ -19,10 +19,12 @@ StartLimitBurst=3
 # capability or securebits setting carries any past the drop (mkosi.finalize refuses one).
 NoNewPrivileges=yes
 # The kernel's sockets, which its peers reach, and its "up" file (#2998): the directory holds only
-# them (0711), is the kernel's to make them in, and is made afresh for each start.
-RuntimeDirectory=agentos-kernel
-RuntimeDirectoryMode=0711
-ExecStartPre=/usr/bin/chown agentos-kernel:agentos-kernel /run/agentos-kernel
+# them (0711), and is the kernel's to make them in. Not RuntimeDirectory=: systemd chowns that to the
+# unit's user (root here) at every command's spawn, ExecStart's too, so the kernel could not bind in
+# it (#3073). The directory outlives a stop, so each start first removes the last start's "up": a
+# start refused after a good one must not read as a kernel that came up (#2998, ExecStopPost= below).
+ExecStartPre=/usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel /run/agentos-kernel
+ExecStartPre=/usr/bin/rm -f /run/agentos-kernel/up
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \
         -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
         -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \

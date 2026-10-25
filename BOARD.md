@@ -22,11 +22,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-adapters | trusted-side routes, events and the private-data read side (`route`, `modelroute`, `routerule`, `infer`, `photo`, `events`, `e2e`, `test`, `pubid`, `maintain`, `recall`, `recalltool`, `provagent`, `cmd/agentos-photo`, `cmd/agentos-infer`, `evals/review/`): port to `Kernel.Submit` and the clerk interfaces, delete the old code in the same PR. Sub A, not Codex. | MIG-4-untrusted | queued (sub A, not Codex; tier A) |
 | MIG-3-17 | Narrow the standing planner key's unsubscribe verb to the sender handles the owner approved (from #2566). | #2566 | queued (later) |
 | MIG-4-exit-5 | Exit clerk reconnect: owner text and sign-in step, an owner-signed Reconnect, an atomic store write (release findings from #2642). | MIG-4-exit-4 (#2642); the clerk wired into the broker | queued (release; tier A) |
-| MIG-4-run | The process that runs the kernel, hosts each clerk and persists the sealed Secrets; parent of #2655, #2643, #2626 allowlist and #2572 Step C. | MIG-4-exit (#2571), MIG-4-mail-a (#2653), STO-2 for real secrets | queued (sub A; tier A) |
+| MIG-4-run | The process that runs the kernel, hosts each clerk and persists the sealed Secrets; parent of #2655, #2643, #2626 allowlist and #2572 Step C. | MIG-4-exit (#2571), MIG-4-mail-a (#2653), STO-2 for real secrets | building (sub A; tier A) |
 | MIG-4-untrusted-owner | The owner channel (`owner`, `control`, `question`, `localsrv`, `localapi`, `voice`) off `journal` and `durable`; STOP, STATUS, RETRY onto the kernel's owner seam (docs/LANES.md); agentosd chain 3. | MIG-4-untrusted-mail | queued (sub B; tier A) |
 | MIG-4-untrusted-reconnect | Owner-side Enroll and Unenroll, browser approval cards (`Approval.Site`, `Approval.Secret`), the owner-approved Reconnect (ASSUMPTIONS MIG-4-run-u) and the `ErrAnchor` reply, on the kernel's owner seam; agentosd chain 4; unblocks #2643 (a), #2613, #2740, #2670 item 6. | MIG-4-untrusted-owner | queued (sub B; tier A) |
 | MIG-4-untrusted-exit | `cmd/agentosd` off `vault`, `egress`, `holder`, `checker` and `provagent` (main.go wiring, provider and sign-in pages, their tests), onto the clerk exit and the model clerk; agentosd chain 5; unblocks #2571 and #2579's provagent half. | MIG-4-untrusted-learn | queued (sub B; tier A) |
-| MIG-4-untrusted-daemon | `broker/daemon` off `grants` and `journal`: reconcile, RETRY and unknown outcomes move to the kernel; agentosd chain 7; unblocks #2576. | MIG-4-untrusted-owner | queued (sub B; tier A) |
+| MIG-4-untrusted-daemon | `broker/daemon` off `grants` and `journal`: reconcile, RETRY and unknown outcomes move to the kernel; agentosd chain 7; unblocks #2576. | MIG-4-untrusted-owner | building (sub B; tier A) |
 | MIG-4-untrusted-guest | Guests and workers (`guest`, `guesterr`, `fold`, `workers`, `skill`, `cmd/agentos-guest-bridge`) onto PLN-5's `plan` command and the model clerk, off `journal`, `durable` and `meter`; unblocks #2572's meter half. | MIG-3 | queued (sub B; tier A) |
 | MIG-4-untrusted-change | The change pipeline (`change`, `compile`) off `journal`, `durable` and `verb`, onto the replay gate in `broker/kernel/sim`, log-held outcomes and HLD-4's standing key; unblocks #2572's verb half. | MIG-3 | queued (sub B; tier A) |
 | MIG-4-untrusted-loops | The improvement loops (`loops`, `probecmd`, `machprobe`) off `journal`, `durable` and `meter`, onto the replay gate, log reads and model-clerk spend (HLD-4); unblocks #2572's meter half. | MIG-3 | queued (sub B; tier A) |
@@ -353,4 +353,5 @@ These open work-item issues are left off the board until their issue is fixed; e
 
 ```text
 issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
+issue #3073: 3 middle cells, its table has 2
 ```

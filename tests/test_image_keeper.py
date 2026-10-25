@@ -34,6 +34,11 @@ BOOT_REPORT = MK / "mkosi.extra/usr/lib/agentos/boot-report"
 CI_BOOT = ROOT / "image/ci_boot.sh"
 
 
+def exec_lines(path, key):
+    # Every KEY= line of PATH, in order: ini() keeps only the last of a repeated key.
+    return re.findall(r"(?m)^%s=(.*)$" % key, path.read_text())
+
+
 def go_flags(cmd):
     """The flag names cmd's main.go defines (fs.StringVar(&x, "name", ...) and the like)."""
     src = (ROOT / "broker/cmd" / cmd / "main.go").read_text()
@@ -325,11 +330,13 @@ class KeeperTreeTest(unittest.TestCase):
         k = exec_args(KERNEL)
         kern = k[k.index("--") + 1:]
         u = ini(KERNEL)
-        self.assertEqual(arg(kern, "up"), "/run/" + u["Service"]["RuntimeDirectory"] + "/up")
+        self.assertEqual(arg(kern, "up"), "/run/agentos-kernel/up")
         self.assertIn(arg(kern, "up"), check.KERNEL_REBOOT)
         self.assertEqual(u["Service"]["ExecStopPost"], check.KERNEL_REBOOT)
         self.assertEqual(u["Service"]["Restart"], "on-failure")
-        self.assertNotIn("RuntimeDirectoryPreserve", u["Service"])
+        # /run/agentos-kernel outlives a stop (#3073), so each start removes the last start's "up" first.
+        self.assertEqual(check.KERNEL_UP_CLEAR, "/usr/bin/rm -f " + arg(kern, "up"))
+        self.assertIn(check.KERNEL_UP_CLEAR, exec_lines(KERNEL, "ExecStartPre"))
 
     def test_the_reboot_follows_only_a_kernel_that_came_up(self):
         # The command as systemd runs it ($$ is one $), with the "up" file and systemd-run moved into a
@@ -377,6 +384,26 @@ class KeeperTreeTest(unittest.TestCase):
         self.edit(name, stop, "")
         self.assertEqual(self.v(), [])
 
+    def test_the_reboot_needs_each_start_to_clear_the_last_up(self):
+        # #3073 keeps /run/agentos-kernel across a stop: without the removal, a start refused after a good
+        # one finds that start's "up", and its ExecStopPost= asks for the reboot.
+        name = "agentos-keeper-kernel.service"
+        clear = "ExecStartPre=" + check.KERNEL_UP_CLEAR + "\n"
+        why = ("no ExecStartPre=%s; a start refused after a good one would find the last start's \"up\" and "
+               "reboot the box (#2897, #2998)" % check.KERNEL_UP_CLEAR)
+        for new in ("", clear.replace("=", "=-", 1), clear.replace("/up", "/up.old")):
+            with self.subTest(new):
+                good = self.unit(name).read_text()
+                self.edit(name, clear, new)
+                self.assertEqual(self.v(), [name + ": " + why])
+                self.unit(name).write_text(good)
+        # Without the reboot line the file reboots nothing, so its removal is not required.
+        good = self.unit(name).read_text()
+        self.edit(name, clear, "")
+        self.edit(name, "ExecStopPost=" + check.KERNEL_REBOOT + "\n", "")
+        self.assertEqual(self.v(), [])
+        self.unit(name).write_text(good)
+
     # UPD-10 (#2875) on the new units: noexec_violations covers every agentos unit.
 
     def test_the_keeper_s_units_run_nothing_from_writable_storage(self):
@@ -421,6 +448,20 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
                                                              arg(e, "passphrase-file").rsplit("/", 1)[0]}))
 
+    def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
+        # #3073: systemd chowns a RuntimeDirectory= to the unit's user, root here, at every command's
+        # spawn, so a chown in ExecStartPre= is undone before ExecStart and the kernel cannot bind.
+        k = exec_args(KERNEL)
+        kern = k[k.index("--") + 1:]
+        run = {arg(kern, "owner-sock").rsplit("/", 1)[0], arg(kern, "meter-sock").rsplit("/", 1)[0]}
+        self.assertEqual(run, {"/run/agentos-kernel"})
+        s = ini(KERNEL)["Service"]
+        self.assertNotIn("RuntimeDirectory", s)
+        self.assertNotIn("User", s)
+        self.assertEqual(exec_lines(KERNEL, "ExecStartPre"),
+                         ["/usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel /run/agentos-kernel",
+                          check.KERNEL_UP_CLEAR])
+
     def test_the_users_exist_and_none_is_in_a_tpm_group(self):
         lines = [l.split() for l in SYSUSERS.read_text().splitlines() if l.strip() and not l.startswith("#")]
         users = {w[1] for w in lines if w[0] == "u"}
@@ -447,9 +488,12 @@ class KeeperUnitsTest(unittest.TestCase):
         report, ci = BOOT_REPORT.read_text(), CI_BOOT.read_text()
         self.assertIn("agentos-keeper:", report)
         self.assertIn("tmpfiles.extra", ci)
-        self.assertIn('"agentos-keeper: enroll=ran"', ci)
+        self.assertIn('"agentos-keeper: enroll=ran kernel=active"', ci)
         self.assertIn('"agentos-keeper: enroll=skipped"', ci)
-        self.assertIn("my store holds none of your hardware keys", ci)
+        # The kernel starts setup-only after both boots (#2996), on its own sockets (#3073).
+        self.assertIn("/agentos-keeper: enroll=skipped kernel=active/", ci)
+        self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
+        self.assertNotIn("my store holds none of your hardware keys", ci)
         self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
         # The CI units whose mounts outlive one command lift the main-side mask in a drop-in that
         # sorts after it.
