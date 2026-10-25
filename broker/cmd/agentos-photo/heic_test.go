@@ -11,7 +11,9 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/gen2brain/h265/heic"
 
@@ -434,5 +436,150 @@ func TestSoftLimitFollowsType(t *testing.T) {
 		if rest, _ := io.ReadAll(in); !bytes.Equal(rest, c.in) {
 			t.Errorf("%s: reading the limit consumed input", name)
 		}
+	}
+}
+
+// withGrid returns raw with its grid's output size set to w x h, every
+// ispe of size from turned to size to, and the coded tiles unchanged. The
+// grid descriptor is found by its bytes: version 0, flags 1 (32-bit
+// sizes), the rows and columns, and the output size.
+func withGrid(t *testing.T, raw []byte, rows, cols int, ow, oh, w, h uint32, ispe map[[2]uint32][2]uint32) []byte {
+	t.Helper()
+	out := append([]byte{}, raw...)
+	desc := binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint32([]byte{0, 1, byte(rows - 1), byte(cols - 1)}, ow), oh)
+	if bytes.Count(out, desc) != 1 {
+		t.Fatalf("grid descriptor found %d times", bytes.Count(out, desc))
+	}
+	i := bytes.Index(out, desc)
+	binary.BigEndian.PutUint32(out[i+4:], w)
+	binary.BigEndian.PutUint32(out[i+8:], h)
+	_, mb := metaBoxes(t, out)
+	iprp := find(t, mb, "iprp")
+	ipco := find(t, children(t, out, iprp.start, iprp.end), "ipco")
+	n := 0
+	for _, p := range children(t, out, ipco.start, ipco.end) {
+		if p.typ != "ispe" {
+			continue
+		}
+		to, ok := ispe[[2]uint32{binary.BigEndian.Uint32(out[p.start+4:]), binary.BigEndian.Uint32(out[p.start+8:])}]
+		if ok {
+			binary.BigEndian.PutUint32(out[p.start+4:], to[0])
+			binary.BigEndian.PutUint32(out[p.start+8:], to[1])
+			n++
+		}
+	}
+	if n != len(ispe) {
+		t.Fatalf("rewrote %d ispe, want %d", n, len(ispe))
+	}
+	return out
+}
+
+// TestDecodeHEICGridTilesBoundedByCell: a grid's tiles decode under a
+// frame limit of their own ispe, not the whole image's, and a tile that
+// codes more than its cell is refused as decode before its picture is
+// allocated (ASSUMPTIONS CH-photo-heic-5, #3131).
+func TestDecodeHEICGridTilesBoundedByCell(t *testing.T) {
+	in := heicPhoto(t, 1024, 1024, heic.EncodeOptions{Tile: 512, Quality: 30})
+	if _, err := decoder.Decode(in); err != nil {
+		t.Fatalf("honest 2x2 grid: %v", err)
+	}
+	// Declared 512x512 in a 2x2 grid of 256x256 cells, so the image's own
+	// limit admits one 512x512 tile, but each tile codes four cells' worth.
+	lying := withGrid(t, in, 2, 2, 1024, 1024, 512, 512, map[[2]uint32][2]uint32{
+		{1024, 1024}: {512, 512}, {512, 512}: {256, 256},
+	})
+	word, code, out := refusal(t, lying)
+	if word != "decode" || code != 13 || len(out) != 0 {
+		t.Fatalf("tiles coding past their cell: got %q exit %d with %d bytes out; want decode, 13, none", word, code, len(out))
+	}
+	// Beyond what refusing a truncated file costs (the run's input buffer),
+	// the refusal allocates less than one 512x512 4:2:0 picture (384 KiB);
+	// the four tiles would take 1.5 MiB.
+	if n, base := allocated(t, lying), allocated(t, in[:400]); n > base+512*512 {
+		t.Fatalf("refusal allocated %d bytes (%d for a truncated file), past the declared 512x512 image", n, base)
+	}
+	// A tile row or column wholly past the output is refused too, so no
+	// tile is larger than the grid needs.
+	outside := withGrid(t, in, 2, 2, 1024, 1024, 512, 1024, map[[2]uint32][2]uint32{{1024, 1024}: {512, 1024}})
+	if _, err := decoder.Decode(outside); err != decoder.RefuseDecode {
+		t.Fatalf("a tile column wholly past the output: got %v, want decode", err)
+	}
+}
+
+// allocated is the bytes a run on in allocates.
+func allocated(t *testing.T, in []byte) uint64 {
+	t.Helper()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	refusal(t, in)
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// withRepeats returns raw with its last item's one extent, which ends the
+// file inside its final mdat, coded k times over: k pictures in one item.
+func withRepeats(t *testing.T, raw []byte, k int) []byte {
+	t.Helper()
+	_, mb := metaBoxes(t, raw)
+	il := find(t, mb, "iloc")
+	v, off, ln := raw[il.start], int(raw[il.start+4]>>4), int(raw[il.start+4]&15)
+	if v != 0 || off != 4 || ln != 4 {
+		t.Fatalf("helper does not read iloc v%d offset %d length %d", v, off, ln)
+	}
+	p := il.start + 6
+	items := int(binary.BigEndian.Uint16(raw[p:]))
+	p += 2
+	last := 0
+	for range items {
+		p += 4 // item ID, data reference index
+		extents := int(binary.BigEndian.Uint16(raw[p:]))
+		p += 2
+		for range extents {
+			last = p
+			p += 8
+		}
+	}
+	o, l := int(binary.BigEndian.Uint32(raw[last:])), int(binary.BigEndian.Uint32(raw[last+4:]))
+	top := children(t, raw, 0, len(raw))
+	if mdat := top[len(top)-1]; mdat.typ != "mdat" || o+l != len(raw) {
+		t.Fatalf("last item at %d+%d does not end the file's mdat (%d bytes)", o, l, len(raw))
+	}
+	out := append([]byte{}, raw...)
+	for range k - 1 {
+		out = append(out, raw[o:o+l]...)
+	}
+	binary.BigEndian.PutUint32(out[last+4:], uint32(l*k))
+	mdat := top[len(top)-1]
+	binary.BigEndian.PutUint32(out[mdat.start-8:], uint32(len(out)-(mdat.start-8)))
+	return out
+}
+
+// TestDecodeHEICItemOfManyPicturesHoldsOne: an item coding many pictures
+// (a few bytes each when flat) holds one at a time, not all of them, so
+// its decode stays near one picture's memory (ASSUMPTIONS CH-photo-heic-5).
+func TestDecodeHEICItemOfManyPicturesHoldsOne(t *testing.T) {
+	in := withRepeats(t, heicPhoto(t, 1024, 1024, heic.EncodeOptions{Quality: 10}), 64)
+	runtime.GC()
+	stop, peak := make(chan struct{}), make(chan uint64)
+	go func() {
+		var m runtime.MemStats
+		var hi uint64
+		for {
+			select {
+			case <-stop:
+				peak <- hi
+				return
+			case <-time.After(time.Millisecond):
+				runtime.ReadMemStats(&m)
+				hi = max(hi, m.HeapAlloc)
+			}
+		}
+	}()
+	_, err := decoder.Decode(in)
+	close(stop)
+	// One 1024x1024 picture is 1.5 MiB; holding all 64 takes over 100 MiB.
+	if hi := <-peak; err != nil || hi > 48<<20 {
+		t.Fatalf("64 pictures in one item: err %v, peak heap %d MiB; want a JPEG under 48 MiB", err, hi>>20)
 	}
 }
