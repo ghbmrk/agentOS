@@ -15,8 +15,10 @@
 # With E2E set to a directory holding a static box-e2e (broker/e2e/boxe2e), a last boot on a
 # fresh copy runs the end-to-end setup run inside the box (#1688): e2e/ holds its unit and drop-ins,
 # passed as SMBIOS credentials, which systemd honours only in a VM, so the image itself is unchanged.
+# With SLICE set to a directory holding a static cmd/slice, a boot runs the inbox slice's eval inside
+# the box (A21, #3117; see slice_run below).
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
-# console-two-drives.log, console-fallback.log, console-e2e.log.
+# console-two-drives.log, console-fallback.log, console-slice.log, console-e2e.log.
 set -eu
 HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
@@ -623,6 +625,46 @@ hasnt "$W/console-hwsim-reboot.log" "agentos-hwsim: FAIL"
 has "$W/console-hwsim-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
 rm -rf "$W/hwsim.raw" "$HS"
 
+# A21 in QEMU (#3117, broker/clerk/inbox/ASSUMPTIONS.md MIG-3-1). With SLICE set to a directory
+# holding a static cmd/slice, a fresh copy boots under Secure Boot and a CI-only unit, passed as an
+# SMBIOS credential like the hwsim units, runs the slice twice over every request slice_boot.py
+# wrote, from a read-only 9p share, with no network (PrivateNetwork=yes: the one-click POSTs are
+# recorded, never sent). Outcomes go to a second, writable share; the host then runs the eval
+# harness over them (slice_boot.py check), so the pass is the harness's, never the guest's word.
+# The unit mounts both shares and starts the run in one command, inside the mount namespace the
+# main-side mask gives every agentos-* unit (agentos-.service.d/50-main-side.conf).
+slice_run() {
+	cat <<'EOS'
+in=/run/agentos-slice/in out=/run/agentos-slice/out n=0 bad=0
+for r in "$in"/req/*.json; do
+	d=$(basename "$r" .json)
+	for i in 1 2; do
+		"$in/slice" <"$r" >"$out/$d.$i.json" 2>"$out/$d.$i.err" || { bad=$((bad + 1)); echo "agentos-slice: FAIL $d run $i"; }
+	done
+	n=$((n + 1))
+done
+echo "agentos-slice: DONE requests=$n failed=$bad"
+EOS
+}
+if [ -n "${SLICE:-}" ]; then
+	SS=$W/slice-share SO=$W/slice-out
+	rm -rf "$SS" "$SO"; mkdir -p "$SS/req" "$SO"
+	cp "$SLICE/slice" "$SS/slice" && echo "ok   slice binary for the slice boot" || { echo "MISS slice binary for the slice boot"; fail=1; }
+	python3 -I "$HERE/slice_boot.py" requests "$SS/req" || fail=1
+	slice_run >"$SS/run.sh"
+	P9="trans=virtio,version=9p2000.L"
+	SLICE_UNITS="$(nm_cred systemd.extra-unit.agentos-slice.service "[Unit]\nDescription=agentOS inbox slice eval (CI only)\nAfter=systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1200\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'mkdir -p /run/agentos-slice/in /run/agentos-slice/out && mount -t 9p -o $P9,ro slice /run/agentos-slice/in && mount -t 9p -o $P9 sliceout /run/agentos-slice/out && exec /bin/sh /run/agentos-slice/in/run.sh'\n")"
+	SLICE_UNITS="$SLICE_UNITS$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-slice.service\n')"
+	copy "$W/slice.raw"
+	TMO=2400 EXTRA="-virtfs local,path=$SS,mount_tag=slice,security_model=none,readonly=on -virtfs local,path=$SO,mount_tag=sliceout,security_model=none$SLICE_UNITS" \
+		UNTIL="agentos-slice: DONE\|agentos-health: FAIL" boot "$W/console-slice.log" "$W/slice.raw"
+	has "$W/console-slice.log" "agentos-slice: DONE"
+	has "$W/console-slice.log" " failed=0"
+	hasnt "$W/console-slice.log" "agentos-slice: FAIL"
+	python3 -I "$HERE/slice_boot.py" check "$SO" || fail=1
+	rm -rf "$W/slice.raw" "$SS" "$SO"
+fi
+
 # Prints "ci_boot: G1 PROVEN" (a prefix only the host script uses; the guest console is never given it,
 # and the run fails if the console shows the verdict text) only when $2, the run's $fail, is exactly 0
 # and the DONE line in $1 has pass>0 and fail, xfail, xpass and blocked all 0. A failed run prints
@@ -724,11 +766,11 @@ if [ -n "${E2E:-}" ]; then
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
-	# The verdict is the host's alone: no console, from any of the four boots, may carry its text,
+	# The verdict is the host's alone: no console, from any of the five boots, may carry its text,
 	# read both raw (text inside an OSC body, which cleaning deletes) and cleaned (text split by
 	# escape sequences), so a guest that writes it fails the run whichever boot it did it in
 	# (tools/ASSUMPTIONS.md D27).
-	for c in console console-reboot console-two-drives console-e2e; do
+	for c in console console-reboot console-two-drives console-slice console-e2e; do
 		[ -f "$W/$c.log" ] || continue
 		for v in "G1 PROVEN" "G1 NOT PROVEN"; do
 			{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"

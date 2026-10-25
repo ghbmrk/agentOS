@@ -32,6 +32,12 @@ on:
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
       - "broker/cmd/agentos-ap/**"
+      # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
+      # eval set (PLAN: A21 runs on every change to the kernel or clerks).
+      - "broker/kernel/**"
+      - "broker/clerk/**"
+      - "evals/slice-inbox/**"
+      - "tests/test_slice_inbox_slice.py"
   push:
     branches: [main]
     paths:
@@ -58,6 +64,12 @@ on:
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
       - "broker/cmd/agentos-ap/**"
+      # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
+      # eval set (PLAN: A21 runs on every change to the kernel or clerks).
+      - "broker/kernel/**"
+      - "broker/clerk/**"
+      - "evals/slice-inbox/**"
+      - "tests/test_slice_inbox_slice.py"
 permissions:
   contents: read
 jobs:
@@ -134,13 +146,17 @@ jobs:
       - name: Build the end-to-end vault process
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -tags agentos_e2e -trimpath -ldflags=-buildid= -o "$RUNNER_TEMP/e2e/agentos-egress" ./cmd/agentos-egress
-      - name: Boot test (Secure Boot on) and end-to-end run
+      # The inbox slice the slice boot runs inside the image (A21, #3117; image/slice_boot.py).
+      - name: Build the inbox slice
         if: matrix.run == 'a'
-        run: sudo env E2E="$RUNNER_TEMP/e2e" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/slice/slice" ./clerk/inbox/cmd/slice
+      - name: Boot test (Secure Boot on), inbox slice and end-to-end run
+        if: matrix.run == 'a'
+        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives console-fallback console-e2e; do
+          for l in console console-reboot console-two-drives console-fallback console-slice console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record
