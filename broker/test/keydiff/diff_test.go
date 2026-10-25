@@ -109,15 +109,15 @@ type wireCtx struct {
 }
 
 type wireCase struct {
-	Op     string              `json:"op"`
-	Key    key.Key             `json:"key"`
+	Op     string          `json:"op"`
+	Key    key.Key         `json:"key"`
 	Owners []key.PublicKey `json:"owners"`
-	Use    []byte              `json:"use"`
-	Sig    []byte              `json:"sig"`
-	Step   wireStep            `json:"step"`
-	Task   string              `json:"task"`
-	Amount int64               `json:"amount"`
-	Ctx    wireCtx             `json:"ctx"`
+	Use    []byte          `json:"use"`
+	Sig    []byte          `json:"sig"`
+	Step   wireStep        `json:"step"`
+	Task   string          `json:"task"`
+	Amount int64           `json:"amount"`
+	Ctx    wireCtx         `json:"ctx"`
 }
 
 // renewCase asks whether a renewal's first link is within the old one's.
