@@ -21,16 +21,51 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
 
-## 3. Snapshot, 2026-10-20 11:40Z (migration step 1 done)
-- Merged: freeze #2522 (docs/migration/cases.md) and spec #2523 (SPEC v1.0, merge d49cffd80eff). Old-core PRs #2513, #2519, #2499 closed.
-- In progress: BOARD cleanup #2524 (its thread owns BOARD.md; it closes the issues the design supersedes and re-sections the rest), then kernel #2525 (step 2).
-- The 165 harvested issues stay open until #2518 merges with its issue-close lines; then the freeze thread closes them.
-- Until step 4: sub A runs BOARD cleanup, kernel, first slice. Sub B runs only eval set #2527 (evals/slice-inbox/) and hardware (#935, #936, M6 chain); off limits: old-core broker/, the kernel, SPEC/PLAN/BOARD/LANES/OPERATING.
-- Kept: STOP/RESUME fixes (#2521, #2535 merged), CI flake fixes, Codex lane; #2292 parked.
+## 3. Snapshot, 2026-10-25 11:45Z (step 4 under way; for sub A on its return)
+Sub A paused on 2026-10-22 (#2578, comments 6340104703 and 6340351358). This is what sub B (the other project) did and learned since then that lives only in its chat. The rest is on the issues and PRs linked here. Recheck each line against GitHub before acting on it.
+
+**Lanes, from Mark in chat**
+- On 2026-10-22, sub B took the step-4 untrusted ports and the rows sub A handed off. On 2026-10-23, Mark widened that to any sub A row that fits in one session (#2578, 6365422670).
+- On 2026-10-25 at 11:14Z, Mark said sub A is back, and sub B keeps taking queued rows, sub A's included, unless they overlap ("you have usage they will be wasted if not used"; #2578, 6396935897). Each sub skips any row the other has claimed and any file scope an open PR touches (D-111). Kernel-lane rows (#2525) run one at a time across both subs. Claim with `state:building` plus a comment naming the branch. Every session posts as `ghbmrk`, so a label alone doesn't show which sub claimed a row; the claim comment does.
+
+**Merged from sub A's rows since the pause** (details on each issue)
+- STO-2 sealed store and keeper: #2905 (STO-2c), #2998 (restart), #3073 (rundir). Open follow-ups: #2995 and #2987.
+- #2682: its start-up slice merged as #3072. The rest is queued and yours (hand-off comment 6394347971).
+- Inbox: #2681, #2618, #2601, #2602, #2603 and #2604. Process: #2644, #2720 and #2697. Kernel: #2838 (KEY-spend-parent) and #2989 KEY-oracle-1. In #2989 Mark chose "Rust plus over time": the Rust checker and the formal model stay, and the Go reference model is retired.
+- Deletes: #2575 (replay) and #2781 (forget). `cmd/agentosd` chain: #2783 a and b (#3077, #3080), 2784a (#3090) and #2778 (#3093).
+- Decision rows: D-149 to D-161, read in DECISIONS.md. D-159 means trusted-core growth that builds an approved design needs no card, only full reviews and a cited decision.
+
+**Taps not yet on main**
+- Decisions card cmsg_01R91wiieBzMSvPKFsAJVvuKNMSJeYDwU83rpMEZjXrtfi, 11:36Z: "Yes, #3078 and #3079" (stop generation on RESUME, plus the RETRY line's first-tried time and currency). The D-162 row is PR #3106.
+- Card cmsg_01R91wiieBzMSvPKFsAJVvuKFLtE8GpJc4B8mRNgH5rtFs: agentosd's plan-signing holder key lives in agentosd's root-only state dir. This is recorded on #3087 only.
+
+**In flight at 11:45Z**
+- Open PRs: #3100 (#3099 BOARD-debounce, a gate file), #3102 (#3095), #3105 (#3104 slice a) and #3106 (D-162).
+- `state:building`: #3078, #3087, #3095, #3099 and #3104.
+- The `cmd/agentosd` chain slot is free. #2779 is next, but it is blocked (below).
+
+**Questions for sub A** (answer on the issue)
+- #2779: three of its items need a passkey to sign, and `kernel/key` takes only raw `ed25519` keys. The proposed split puts a kernel-lane prerequisite first: an external-signer seam plus the WebAuthn verifier (comment of 11:19Z). Sub A's call, since it is the kernel lane.
+- #935, piece 3: should the netjoin PSK hand-off reuse the #2682 clerk-main hand-off (recommended), or should the unlock step dial the helper itself? (Comment of 11:17Z.)
+- #2780(b) waits on #3104 (the model clerk's plan login), not on #2779 (comment of 11:21Z).
+
+**Process changes**
+- Until #3100 merges, every issue event re-renders BOARD.md onto main, which leaves every open PR behind main (#3099).
+- #3103: when L3 and Security post in parallel, each lists the other as owed, so neither arms. Until it is fixed, re-read the comments after posting an accept, and arm or merge if the set is complete. #3093 sat fully accepted for 4.5 hours this way.
+- Sub B's coordinator rotated overnight, and its hourly backstop lapsed from 06:40Z to 11:13Z. A fresh coordinator re-arms the backstop on its first turn.
+
+**Waiting on Mark, unverified from tools**
+- The PREMERGE App settings steps after #3031 (briefs/PREMERGE-source.md). The forged-`premerge` hole stays open until they're done; the card was posted on 2026-10-24 at 20:21Z, with no reply seen.
+- `count` and `vulncheck` added to main-checks (Mark tapped Done on 2026-10-23; rulesets can't be read from here).
+- The Gmail test account (#1021) is not needed yet. The hardware is bought and on its way.
+
+**Not approved: don't build**
+- Local-first model routing waits on a capability benchmark against the plan routes (Mark, 2026-10-24 00:02Z). Private planning on a Mac Studio would need a SPEC change (HW-7, HW-11).
+- These are proposals only: one case for all boards; a second-device confirm for high-value widenings; hardware-backdoor measures (chip-vendor diversity, the store key split across vendors); a flip phone plus two FIDO2 keys as root (compare D-146).
 
 ### Owed first
-1. Merge #2518, then close the 165.
-2. Finish #2524, then build #2525.
-3. Sub B: #2527 and hardware.
+1. Sub A: answer #935 and settle the #2779 signer seam. Both gate the next `cmd/agentosd` chain rows.
+2. Merge #3106, then build #3078 and #3079.
+3. Build #3104 (slices a, b and c), then #2780(b).
 
 Edit sections 1 and 2 only when a standing decision changes; replace the snapshot whole, never per batch. Where DECISIONS.md and this list differ, DECISIONS.md wins.

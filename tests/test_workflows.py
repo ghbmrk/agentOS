@@ -301,6 +301,14 @@ class WorkflowTest(unittest.TestCase):
         self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
         self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
 
+    def test_board_renders_on_a_schedule_not_per_issue_event(self):
+        # BOARD-debounce (#3099): a render per issue event merged one main commit per label burst,
+        # and main's strict up-to-date rule put every open PR behind each one. Renders run on a
+        # schedule, on dispatch, and on a push that touches BOARD.md, never on an issue event.
+        triggers = (WORKFLOWS / "board.yml").read_text().split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers), ["schedule", "push", "workflow_dispatch"])
+        self.assertRegex(triggers, r"(?m)^    - cron: '\d+ \*/\d+ \* \* \*'$")
+
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's
         # deadline race ("context deadline exceeded", no input), so no workflow passes one,

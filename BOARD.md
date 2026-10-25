@@ -51,7 +51,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | EVAL-alert-misclassed | Eval case: an alert the reader misclasses as spam is refused with reason alert (owed from #2604 / #2681). | #2835 | queued (later) |
 | CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
 | CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
-| KRN-resume-gen | RESUME carries the stop generation it lifts; the kernel refuses a stale one (#3077 Security release 1); needs a Trusted-core decision. | MIG-4-daemon-retry | queued (sub B; tier A) |
+| KRN-resume-gen | RESUME carries the stop generation it lifts; the kernel refuses a stale one (#3077 Security release 1); needs a Trusted-core decision. | MIG-4-daemon-retry | building (sub B; tier A) |
+| MIG-4-guest-keys | agentosd gives each guest machine a key narrowed from the owner's clerk-key grant: holder key in agentosd's state dir (Mark, A), `Keys` per machine, then the owner's KEY-4 passkey grant and a clerk. | MIG-4-untrusted-guest (2784a); the passkey signer seam (#2779 comment 6396976126) | building (tier A) |
 | MIG-4-owner-followups | Owner seam follow-ups from #3093: a test case for each journal state in `daemon/journalowner`, and a fail-visible `control.Phase` zero value, or both dropped with #2783 (c). | MIG-4-untrusted-owner | building (sub B; tier A) |
 | MIG-4-plan-login | Model clerk holds the plan login for its provider CLI guest: device-code sign-in in a worker, sealed login, placeholder in the guest, injection and refresh swap (CLK-7, PLN-5), hosted by `clerk/run` with an owner-socket sign-in call; prerequisite for #2780(b). | MIG-4-untrusted-guest | building (sub A; tier A; needs brief) |
 
@@ -358,5 +359,4 @@ issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.
 issue #3079: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #3082: body has no board-row block
 issue #3086: body has no board-row block
-issue #3087: body has no board-row block
 ```
