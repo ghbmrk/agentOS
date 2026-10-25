@@ -151,17 +151,16 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 	return gone, firstErr
 }
 
-// unpublishSnapshot unpublishes a snapshot: its record first, so nothing
-// new picks it, then its metadata, the unlink synced, so a crash leaves a
-// directory that load drops. Should either fail, the record is put back:
-// a snapshot whose meta.json may come back stays owned, for a later prune
-// or erase to take, never left for load to republish (LOG-4). The caller
-// deletes the directory.
+// unpublishSnapshot unpublishes a snapshot: its meta.json unlinked and the
+// unlink synced, so a crash leaves a directory that load drops, and only
+// then its record. The table lock is held throughout, so nothing picks the
+// snapshot meanwhile and an erase's lineage sweep (ForgetSince) waits for
+// the outcome: on a failure the record stays, listed for a later prune or
+// that erase, never left to a meta.json load would republish (LOG-4). The
+// caller deletes the directory.
 func (m *Manager) unpublishSnapshot(id string) error {
 	m.mu.Lock()
-	s, ok := m.snaps[id]
-	delete(m.snaps, id)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 	dir := m.snapDir(id)
 	err := unlink(filepath.Join(dir, "meta.json"))
 	if err == nil || os.IsNotExist(err) {
@@ -169,12 +168,11 @@ func (m *Manager) unpublishSnapshot(id string) error {
 			err = nil
 		}
 	}
-	if err != nil && ok {
-		m.mu.Lock()
-		m.snaps[id] = s
-		m.mu.Unlock()
+	if err != nil {
+		return err
 	}
-	return err
+	delete(m.snaps, id)
+	return nil
 }
 
 // RunPruner prunes by p every interval until stop is closed.

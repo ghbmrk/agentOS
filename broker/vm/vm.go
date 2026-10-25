@@ -630,8 +630,10 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 		}
 	}
 	var live error
-	if err != nil {
-		if tried && !mc.gone {
+	if err != nil && !mc.gone {
+		// A destroyed one was stopped and removed by Destroy, and its ID
+		// may name a new machine now: neither is touched.
+		if tried {
 			live = m.cleanStart(ctx, mc)
 		} else {
 			m.stopRuntime(ctx, mc)
@@ -1215,11 +1217,13 @@ func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (Snapshot
 }
 
 // withdrawLocked unpublishes snapshot id, just taken of mc, and deletes it;
-// mc.mu is held. Like a prune, the record goes first, then meta.json, so a
-// crash or a failed delete leaves a directory that load drops.
+// mc.mu is held. Like a prune, meta.json goes durably before the record,
+// so a crash or a failed delete leaves a directory that load drops; a
+// failed unpublish leaves the snapshot whole and listed.
 func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
 	if err := m.unpublishSnapshot(id); err != nil {
 		log.Printf("vm: %s: withdrawing snapshot %s: %v", mc.ID, id, err)
+		return
 	}
 	if err := os.RemoveAll(m.snapDir(id)); err != nil {
 		log.Printf("vm: %s: deleting withdrawn snapshot %s: %v", mc.ID, id, err)
@@ -1749,18 +1753,21 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 // Its record goes only once its meta.json is durably gone (removeSnapshot):
 // a failure keeps it listed, for a prune or erase to take, and is returned.
 func (m *Manager) dropSnapshot(mc *machine, id, prev string) error {
-	if err := m.removeSnapshot(id); err != nil {
+	err := m.removeSnapshot(id)
+	m.mu.Lock()
+	_, listed := m.snaps[id]
+	m.mu.Unlock()
+	if listed || mc.lockLive() != nil {
 		return err
 	}
-	if mc.lockLive() != nil {
-		return nil
-	}
+	// Its record is gone, even when a removal after it failed: mc's
+	// newest snapshot goes back.
 	if mc.Last == id {
 		mc.Last = prev
 		m.saveMachine(mc)
 	}
 	mc.mu.Unlock()
-	return nil
+	return err
 }
 
 // Diff lists file-system changes from snapshot a to snapshot b (REV-4).
@@ -2352,7 +2359,7 @@ func retireDir(dir string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		// Gone already, maybe by a rename whose sync failed: make that
 		// durable before saying so.
-		return durable.SyncDir(filepath.Dir(dir))
+		return syncParent(filepath.Dir(dir))
 	}
 	if err != nil {
 		return err
@@ -2363,12 +2370,14 @@ func retireDir(dir string) error {
 	return nil
 }
 
-// removeAll, renameDir and unlink are os.RemoveAll, durable.Rename and
-// os.Remove; variables so a test can fail a retirement part-way.
+// removeAll, renameDir, syncParent and unlink are os.RemoveAll,
+// durable.Rename, durable.SyncDir and os.Remove; variables so a test can
+// fail a retirement part-way.
 var (
-	removeAll = os.RemoveAll
-	renameDir = durable.Rename
-	unlink    = os.Remove
+	removeAll  = os.RemoveAll
+	renameDir  = durable.Rename
+	syncParent = durable.SyncDir
+	unlink     = os.Remove
 )
 
 // publishDir is durable.PublishDir; a variable so a test can cut a
