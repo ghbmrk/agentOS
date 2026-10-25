@@ -52,7 +52,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
 | CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
 | KRN-resume-gen | RESUME carries the stop generation it lifts; the kernel refuses a stale one (#3077 Security release 1); needs a Trusted-core decision. | MIG-4-daemon-retry | queued (sub B; tier A) |
-| MIG-4-owner-followups | Owner seam follow-ups from #3093: a test case for each journal state in `daemon/journalowner`, and a fail-visible `control.Phase` zero value, or both dropped with #2783 (c). | MIG-4-untrusted-owner | queued (sub B; tier A) |
+| MIG-4-owner-followups | Owner seam follow-ups from #3093: a test case for each journal state in `daemon/journalowner`, and a fail-visible `control.Phase` zero value, or both dropped with #2783 (c). | MIG-4-untrusted-owner | building (sub B; tier A) |
+| MIG-4-plan-login | Model clerk holds the plan login for its provider CLI guest: device-code sign-in in a worker, sealed login, placeholder in the guest, injection and refresh swap (CLK-7, PLN-5), hosted by `clerk/run` with an owner-socket sign-in call; prerequisite for #2780(b). | MIG-4-untrusted-guest | building (sub A; tier A; needs brief) |
 
 ## Harness and operating model
 
@@ -71,6 +72,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI | CI guard: fail when the guest's own npm would rewrite guest/openclaw/package-lock.json (from the #2909 review). | #2855 | queued (later) |
 | VULN-debian | Reduce the image's unfixed Debian advisories by dropping packages it does not need; rebuild when Debian ships fixes (EVL-5 findings from TN-vulncheck-2). | #2886 | in review (release; tier A) |
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
+| BOARD-debounce | Debounce board.yml: render on a schedule and on dispatch, not on every issue event, so label churn stops putting a main commit (and a strict-up-to-date CI round on every open PR) per change. | #3032 | building (release; tier A; gate file, Security accept) |
+| ARM-on-accept | Arm auto-merge from premerge.yml when premerge --check reads same, so parallel L3 and Security accepts can't both leave a PR unarmed (seen on #3100 and #3093). | #1819 | queued (release; tier A; gate file, Security accept) |
 
 ## Owner channel and approvals (SPEC §10)
 
