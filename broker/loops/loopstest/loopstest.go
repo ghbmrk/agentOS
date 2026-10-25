@@ -45,8 +45,8 @@ type Kernel struct {
 
 	t      testing.TB
 	now    func() time.Time
-	owner  ed25519.PrivateKey
-	second ed25519.PrivateKey
+	owner  key.Ed25519Signer // the passkeys, as the fake authenticator
+	second key.Ed25519Signer
 	root   key.Key
 	n      int
 }
@@ -61,9 +61,9 @@ func gen(seed byte) ed25519.PrivateKey {
 // the cap past EnvelopeCap goes through the owner's passkey (Widen).
 func New(t testing.TB, now func() time.Time) *Kernel {
 	t.Helper()
-	k := &Kernel{t: t, now: now, owner: gen(1), second: gen(12), Holder: gen(2)}
+	k := &Kernel{t: t, now: now, owner: key.Ed25519Signer(gen(1)), second: key.Ed25519Signer(gen(12)), Holder: gen(2)}
 	head := gen(3)
-	anchors := []ed25519.PublicKey{k.pub(k.owner), k.pub(k.second)}
+	anchors := []key.PublicKey{k.owner.Public(), k.second.Public()}
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{},
 		Pub: k.pub(head), Sign: head, Rand: rand.NewChaCha8([32]byte{1})})
 	k.must(err)

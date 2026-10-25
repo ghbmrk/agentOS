@@ -15,8 +15,8 @@ import (
 func TestAPasskeyNarrowsAClerkKeyAtOnce(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
-	ok, err := key.Narrow(r.ck, phone.priv, key.LimitUses(1), key.LimitExpires(hour))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	ok, err := key.Narrow(r.ck, phone.pass, key.LimitUses(1), key.LimitExpires(hour))
 	must(t, err)
 	v, err := key.Chain(ok, r.k.State().Passkeys())
 	must(t, err)
@@ -44,16 +44,16 @@ func TestAPasskeyNarrowsAClerkKeyAtOnce(t *testing.T) {
 func TestAPasskeysNarrowingKeepsItsHolderAndEndsAtCutOff(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	other := key.Extend(r.ck, phone.priv, key.Link{Caveats: []key.Caveat{key.LimitUses(1)}, Holder: gen(9).pub})
 	if _, err := key.Chain(other, r.k.State().Passkeys()); err == nil {
 		t.Fatal("a passkey's link to another holder is a grant, not a narrowing")
 	}
-	ok, err := key.Narrow(r.ck, phone.priv, key.LimitUses(1))
+	ok, err := key.Narrow(r.ck, phone.pass, key.LimitUses(1))
 	must(t, err)
 	below, err := key.Derive(ok, r.holder.priv, r.holder.pub, key.LimitUses(1))
 	must(t, err)
-	must(t, r.k.Unenroll(1, phone.pub))
+	must(t, r.k.Unenroll(1, phone.pk))
 	for _, k := range []key.Key{ok, below} {
 		p := r.sign(kernel.Plan{ID: "p1", Key: k, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 		if _, _, rf := kernel.Admit(r.k.State(), p, 2); rf == nil || rf.Code != kernel.CCutOff {

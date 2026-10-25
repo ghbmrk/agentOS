@@ -67,7 +67,7 @@ func (r *clerkRig) tapTask(t *testing.T, now int64, id string, a Approval) {
 	if !ok {
 		t.Fatalf("task %s is not live", id)
 	}
-	by := key.Approve(r.phone, kernel.TaskHash(id, task.Taps, a.Site, a.Print))
+	by := key.Approve(key.Ed25519Signer(r.phone), kernel.TaskHash(id, task.Taps, a.Site, a.Print))
 	if err := r.k.ApproveTask(now, id, kernel.TaskApproval{Site: a.Site, First: a.Print, By: by, N: task.Taps}); err != nil {
 		t.Fatal(err)
 	}

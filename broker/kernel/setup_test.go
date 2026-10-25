@@ -3,7 +3,6 @@ package kernel_test
 // REQ: KEY-4, LOG-2
 
 import (
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -33,7 +32,7 @@ func (s setupRig) reboot() {
 }
 
 func (s setupRig) first() kernel.FirstAnchors {
-	return kernel.SignSetup(s.k.Box(), s.owner.priv, s.spare.priv)
+	return kernel.SignSetup(s.k.Box(), s.owner.pass, s.spare.pass)
 }
 
 // A box with no anchors authorizes nothing, takes the owner's two hardware
@@ -44,13 +43,13 @@ func TestSetupTakesTheTwoHardwareKeysOnce(t *testing.T) {
 	if !s.k.State().SetupOpen() || len(s.k.State().Anchors) != 0 {
 		t.Fatal("a box with no anchors is not open for setup")
 	}
-	root := key.Issue(s.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r"})
+	root := key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "r"})
 	if err := s.k.Issue(0, approve([]key.Key{root}, s.owner, s.spare), root); err == nil {
 		t.Fatal("a grant was issued before setup")
 	}
 	must(t, s.k.Setup(1, s.first()))
 	es := s.k.Log().Entries()
-	if len(es) != 1 || es[0].Type != kernel.TAnchorsSet || !key.In(s.k.State().Anchors, s.owner.pub) || !key.In(s.k.State().Anchors, s.spare.pub) {
+	if len(es) != 1 || es[0].Type != kernel.TAnchorsSet || !key.In(s.k.State().Anchors, s.owner.pk) || !key.In(s.k.State().Anchors, s.spare.pk) {
 		t.Fatalf("setup logged %v, anchors %v", es, s.k.State().Anchors)
 	}
 	if err := s.k.Setup(2, s.first()); !errors.Is(err, kernel.ErrSetupClosed) {
@@ -75,10 +74,10 @@ func TestSetupRefusesAnythingButTwoSigningKeys(t *testing.T) {
 	short := s.first()
 	short.Sigs = short.Sigs[:1]
 	for name, f := range map[string]kernel.FirstAnchors{
-		"one key":     kernel.SignSetup(box, s.owner.priv),
-		"three keys":  kernel.SignSetup(box, s.owner.priv, s.spare.priv, other.priv),
-		"a duplicate": kernel.SignSetup(box, s.owner.priv, s.owner.priv),
-		"another box": kernel.SignSetup(other.pub, s.owner.priv, s.spare.priv),
+		"one key":     kernel.SignSetup(box, s.owner.pass),
+		"three keys":  kernel.SignSetup(box, s.owner.pass, s.spare.pass, other.pass),
+		"a duplicate": kernel.SignSetup(box, s.owner.pass, s.owner.pass),
+		"another box": kernel.SignSetup(other.pub, s.owner.pass, s.spare.pass),
 		"swapped":     swapped,
 		"one sig":     short,
 		"none":        {},
@@ -99,7 +98,7 @@ func TestSetupIsClosedOnAnyOtherBox(t *testing.T) {
 	if r.k.State().SetupOpen() {
 		t.Fatal("a box with anchors is open for setup")
 	}
-	if err := r.k.Setup(1, kernel.SignSetup(r.k.Box(), r.owner.priv, r.spare.priv)); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := r.k.Setup(1, kernel.SignSetup(r.k.Box(), r.owner.pass, r.spare.pass)); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("got %v, want ErrSetupClosed", err)
 	}
 	s := newSetupRig(t)
@@ -131,7 +130,7 @@ func TestASetupEntryOutOfPlaceIsCorrupt(t *testing.T) {
 	s := newSetupRig(t)
 	f := s.first()
 	setup := kernel.Entry{Seq: 1, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, f)}
-	if _, err := kernel.Replay([]ed25519.PublicKey{s.owner.pub}, []kernel.Entry{setup}); !errors.Is(err, kernel.ErrCorrupt) {
+	if _, err := kernel.Replay([]key.PublicKey{s.owner.pk}, []kernel.Entry{setup}); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("setup over the store's anchors: got %v, want ErrCorrupt", err)
 	}
 	st, err := kernel.Replay(nil, []kernel.Entry{setup})
@@ -147,7 +146,7 @@ func TestASetupEntryOutOfPlaceIsCorrupt(t *testing.T) {
 	if _, err := kernel.Replay(nil, []kernel.Entry{stop, {Seq: 2, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, f)}}); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("setup after a stop: got %v, want ErrCorrupt", err)
 	}
-	one := kernel.SignSetup(s.k.Box(), s.owner.priv)
+	one := kernel.SignSetup(s.k.Box(), s.owner.pass)
 	if _, err := kernel.Replay(nil, []kernel.Entry{{Seq: 1, Type: kernel.TAnchorsSet, V: 1, Body: mustJSON(t, one)}}); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("setup of one key: got %v, want ErrCorrupt", err)
 	}

@@ -13,7 +13,7 @@ import (
 
 // modelKey issues a root for the model clerk and derives a capped child.
 func modelKey(r *rig, serial string, c ...key.Caveat) key.Key {
-	ck := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial}), 1<<40)
+	ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial}), 1<<40)
 	if len(c) == 0 {
 		return ck
 	}
@@ -142,7 +142,7 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 	if rf := r.admit(3, "t1", 1); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("an ended plan spends nothing: %v", rf)
 	}
-	foreign := key.Issue(gen(9).priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
+	foreign := key.Issue(gen(9).pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
 	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
 	must(t, r.k.Submit(4, r.sign(kernel.Plan{ID: "t2", Key: foreign, Steps: []kernel.PlanStep{step}})))
 	if rf := r.admit(5, "t2", 1); rf == nil {

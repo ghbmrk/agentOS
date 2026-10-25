@@ -17,7 +17,7 @@ import (
 func approve(keys []key.Key, by ...pair) []key.Cosign {
 	var cos []key.Cosign
 	for _, p := range by {
-		cos = append(cos, key.Approve(p.priv, kernel.BatchHash(keys...)))
+		cos = append(cos, key.Approve(p.pass, kernel.BatchHash(keys...)))
 	}
 	return cos
 }
@@ -29,11 +29,11 @@ func approve(keys []key.Key, by ...pair) []key.Cosign {
 func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 	r := newRig(t)
 	phone, phone2 := gen(8), gen(9)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone2.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone2.pk)))
 	batch := func(serial string, by pair) []key.Key {
-		root := key.Issue(by.priv, key.Root{Clerk: "bank", Verbs: []key.Verb{key.Buy}, Serial: serial})
-		ck, err := key.ClerkKey(root, by.priv, r.holder.pub, 0, 10)
+		root := key.Issue(by.pass, key.Root{Clerk: "bank", Verbs: []key.Verb{key.Buy}, Serial: serial})
+		ck, err := key.ClerkKey(root, by.pass, r.holder.pub, 0, 10)
 		must(t, err)
 		return []key.Key{root, ck}
 	}
@@ -41,7 +41,7 @@ func TestABigGrantNeedsASecondPasskey(t *testing.T) {
 	// hardware key granted.
 	replayed := func(old key.Key) func(string, pair) []key.Key {
 		return func(string, pair) []key.Key {
-			ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.priv, gen(7).pub, 0, 1<<50)
+			ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.pass, gen(7).pub, 0, 1<<50)
 			must(t, err)
 			return []key.Key{old, ck}
 		}
@@ -92,12 +92,12 @@ func TestTheLineDecidesWhatIsBig(t *testing.T) {
 	r := newRig(t)
 	at := 10 * hour
 	ck := func(spendDay int64, c ...key.Caveat) key.Key {
-		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, spendDay, c...)
+		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, at, spendDay, c...)
 		must(t, err)
 		return k
 	}
 	ck2 := func(under key.Key, spendDay int64) key.Key {
-		k, err := key.ClerkKey(key.Key{Root: under.Root}, r.owner.priv, r.holder.pub, at, spendDay)
+		k, err := key.ClerkKey(key.Key{Root: under.Root}, r.owner.pass, r.holder.pub, at, spendDay)
 		must(t, err)
 		return k
 	}
@@ -111,20 +111,20 @@ func TestTheLineDecidesWhatIsBig(t *testing.T) {
 	if err := r.k.Issue(at, nil, ck(2*day+1)); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("past double the live cap: %v", err)
 	}
-	wide := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash, key.Send}, Serial: "w"})
+	wide := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash, key.Send}, Serial: "w"})
 	if err := r.k.Issue(at, nil, wide); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a verb the passkeys' one-offs lacked: %v", err)
 	}
-	narrow := key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "n"})
+	narrow := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "n"})
 	if err := r.k.Issue(at, nil, narrow); err != nil {
 		t.Fatalf("a root with verbs already granted: %v", err)
 	}
 	// A key narrowed to some of its root's verbs reaches only those.
-	both := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "shop", Verbs: []key.Verb{key.Buy, key.Read}, Serial: "s"}), 10, key.LimitVerbs(key.Read))
+	both := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "shop", Verbs: []key.Verb{key.Buy, key.Read}, Serial: "s"}), 10, key.LimitVerbs(key.Read))
 	if err := r.k.Issue(at, nil, ck2(both, 10)); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a verb the narrowed key lacked: %v", err)
 	}
-	nk, err := key.ClerkKey(narrow, r.owner.priv, gen(7).pub, at, 1)
+	nk, err := key.ClerkKey(narrow, r.owner.pass, gen(7).pub, at, 1)
 	must(t, err)
 	if err := r.k.Issue(at, nil, nk); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a first key to a new holder: %v", err)
@@ -138,7 +138,7 @@ func TestTheLineDecidesWhatIsBig(t *testing.T) {
 	} {
 		r := newRig(t)
 		now := f(r)
-		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, now, day)
+		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, now, day)
 		must(t, err)
 		if err := r.k.Issue(now, nil, k); !errors.Is(err, kernel.ErrNeedsCosign) {
 			t.Fatalf("the cap of a %s key again: %v", name, err)
@@ -154,7 +154,7 @@ func TestRaisingTheLineNeedsTwoPasskeys(t *testing.T) {
 	raise := func(n int, pct int64, by ...pair) []key.Cosign {
 		var cos []key.Cosign
 		for _, p := range by {
-			cos = append(cos, key.Approve(p.priv, kernel.LineHash(n, pct)))
+			cos = append(cos, key.Approve(p.pass, kernel.LineHash(n, pct)))
 		}
 		return cos
 	}
@@ -188,7 +188,7 @@ func TestRaisingTheLineNeedsTwoPasskeys(t *testing.T) {
 // daily cap alone; past it, a second passkey co-signs it (D-146).
 func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 	r := newRig(t)
-	buy := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "b"}), 100)
+	buy := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "b"}), 100)
 	bare := key.Key{Root: buy.Root}
 	plan := func(id, amount string, cos ...pair) kernel.Plan {
 		var steps []kernel.PlanStep
@@ -199,7 +199,7 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 		}
 		p := kernel.SignPlan(kernel.Plan{ID: id, Key: bare, Steps: steps}, r.owner.priv)
 		for _, c := range cos {
-			p.Cosigns = append(p.Cosigns, key.Approve(c.priv, kernel.PlanHash(p)))
+			p.Cosigns = append(p.Cosigns, key.Approve(c.pass, kernel.PlanHash(p)))
 		}
 		return p
 	}
@@ -245,12 +245,12 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 func TestNewRootsAddToTheBudgetTheLineMeasures(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
-	r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
 	at := 10 * hour
 	root := func(serial string) []key.Key {
-		root := key.Issue(phone.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial})
-		k, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, 100)
+		root := key.Issue(phone.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial})
+		k, err := key.ClerkKey(root, phone.pass, r.holder.pub, at, 100)
 		must(t, err)
 		return []key.Key{root, k}
 	}
@@ -258,7 +258,7 @@ func TestNewRootsAddToTheBudgetTheLineMeasures(t *testing.T) {
 	if err := r.k.Issue(at, approve(two, phone), two...); err != nil {
 		t.Fatalf("a second root doubles the budget, up to the line: %v", err)
 	}
-	renewal, err := key.ClerkKey(key.Key{Root: two[0].Root}, phone.priv, r.holder.pub, at+1, 100)
+	renewal, err := key.ClerkKey(key.Key{Root: two[0].Root}, phone.pass, r.holder.pub, at+1, 100)
 	must(t, err)
 	if err := r.k.Issue(at+1, approve([]key.Key{renewal}, phone), renewal); err != nil {
 		t.Fatalf("a renewal replaces its root's cap: %v", err)
@@ -280,11 +280,11 @@ func TestAHugeRootCapNeedsACosignInAnyOrder(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		r := newRig(t)
 		phone := gen(8)
-		must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
-		r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
+		must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+		r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
 		at := 10 * hour
-		root := key.Issue(phone.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m2"})
-		k, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, math.MaxInt64)
+		root := key.Issue(phone.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m2"})
+		k, err := key.ClerkKey(root, phone.pass, r.holder.pub, at, math.MaxInt64)
 		must(t, err)
 		if err := r.k.Issue(at, approve([]key.Key{root, k}, phone), root, k); !errors.Is(err, kernel.ErrNeedsCosign) {
 			t.Fatalf("round %d: a phone raised a 100/day holder to MaxInt64/day: %v", i, err)

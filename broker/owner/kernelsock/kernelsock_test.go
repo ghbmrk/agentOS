@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
@@ -184,13 +185,13 @@ func runningKernel(t *testing.T) Owner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var anchors []ed25519.PublicKey
+	var anchors []key.PublicKey
 	for range 2 {
 		a, _, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		anchors = append(anchors, a)
+		anchors = append(anchors, key.Ed25519(a))
 	}
 	h, err := proc.OpenKernel(proc.KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},

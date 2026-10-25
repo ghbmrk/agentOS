@@ -47,7 +47,7 @@ func TestFormalHoldRule(t *testing.T) {
 	for _, sc := range f.Scenarios {
 		t.Run(fmt.Sprintf("%v-%s-seen=%v-mid=%v", sc.Hold, sc.Verb, sc.Seen, sc.MidHold), func(t *testing.T) {
 			r := newRig(t)
-			ck := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "mail",
+			ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail",
 				Verbs: []key.Verb{key.Organize, key.Send}, Serial: "formal"}), 1<<40)
 			// One shape, three fingerprints: the duplicate guard (KRN-8) stays out of it.
 			step := func(msg string) kernel.PlanStep {

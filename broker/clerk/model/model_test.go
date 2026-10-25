@@ -38,7 +38,7 @@ func (f *fake) Call(route, prompt string, maxOut int64) (string, model.Usage, er
 func cosigned(keys ...key.Key) []key.Cosign {
 	_, o := seed(1)
 	_, b := seed(12)
-	return []key.Cosign{key.Approve(o, kernel.BatchHash(keys...)), key.Approve(b, kernel.BatchHash(keys...))}
+	return []key.Cosign{key.Approve(key.Ed25519Signer(o), kernel.BatchHash(keys...)), key.Approve(key.Ed25519Signer(b), kernel.BatchHash(keys...))}
 }
 
 func seed(b byte) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -88,12 +88,12 @@ func rig(t *testing.T, p model.Provider) (*model.Clerk, *kernel.Kernel, *flaky) 
 		t.Fatal(err)
 	}
 	bpub, _ := seed(12) // the second hardware key, which co-signs new power (D-146)
-	k, err := kernel.Boot(l, []ed25519.PublicKey{opub, bpub}, nil, 0)
+	k, err := kernel.Boot(l, []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
-	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	root := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
+	ky, err := key.ClerkKey(root, key.Ed25519Signer(opriv), hpub, 0, 1<<40, key.LimitSpendTask(100))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,8 +150,8 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	// the owner's envelope (another root), and an extension derived from it
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
-	env, err := key.ClerkKey(root, opriv, hpub, 0, 500, key.LimitSpendTask(500))
+	root := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
+	env, err := key.ClerkKey(root, key.Ed25519Signer(opriv), hpub, 0, 500, key.LimitSpendTask(500))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,8 +487,8 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	c, k, _ := rig(t, f)
 	_, opriv := seed(1)
 	hpub, hpriv := seed(2)
-	root := key.Issue(opriv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
-	ky, err := key.ClerkKey(root, opriv, hpub, 0, 1<<40, key.LimitSpendTask(100))
+	root := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "mail"})
+	ky, err := key.ClerkKey(root, key.Ed25519Signer(opriv), hpub, 0, 1<<40, key.LimitSpendTask(100))
 	if err != nil {
 		t.Fatal(err)
 	}

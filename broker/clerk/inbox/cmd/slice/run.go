@@ -112,7 +112,8 @@ func Run(in Input) (Outcome, error) {
 	headPub, headPriv := pair(3)
 	plannerPub, plannerPriv := pair(4)
 	sparePub, sparePriv := pair(5) // the owner's second hardware key
-	anchors := []ed25519.PublicKey{ownerPub, sparePub}
+	anchors := []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
+	owner, spare := key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)
 
 	verbs := []key.Verb{key.Organize, key.Trash, key.Unsubscribe}
 	if in.Standing != nil {
@@ -172,13 +173,13 @@ func Run(in Input) (Outcome, error) {
 	// batch, since it is new power (D-146). The clerk key spends nothing and
 	// lives 30 days; a tap renews it at the same limits before it lapses, so
 	// it covers a history longer than its life.
-	root := key.Issue(ownerPriv, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
+	root := key.Issue(owner, key.Root{Clerk: inbox.Name, Verbs: verbs, Serial: "inbox-1"})
 	setup := issued - kernel.GrantHold
-	ck, err := key.ClerkKey(root, ownerPriv, holderPub, setup, 0)
+	ck, err := key.ClerkKey(root, owner, holderPub, setup, 0)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := k.Issue(setup, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(root, ck)), key.Approve(sparePriv, kernel.BatchHash(root, ck))}, root, ck); err != nil {
+	if err := k.Issue(setup, []key.Cosign{key.Approve(owner, kernel.BatchHash(root, ck)), key.Approve(spare, kernel.BatchHash(root, ck))}, root, ck); err != nil {
 		return Outcome{}, err
 	}
 	if err := log.Anchor(); err != nil {
@@ -203,7 +204,7 @@ func Run(in Input) (Outcome, error) {
 	renewThrough := func(t int64) error {
 		for lapse <= t {
 			at := max(clock, lapse-dayMS)
-			if ck, err = key.ClerkKey(root, ownerPriv, holderPub, at, 0); err != nil {
+			if ck, err = key.ClerkKey(root, owner, holderPub, at, 0); err != nil {
 				return err
 			}
 			if err := k.Issue(at, nil, ck); err != nil {
@@ -362,7 +363,7 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, holder 
 // keyView is what the key lets its holder do, read from the key itself; the
 // holder signs, as any use of a key must.
 func keyView(k key.Key, holder ed25519.PrivateKey, owner ed25519.PublicKey, account string) (KeyView, error) {
-	v, err := key.Verify(k, []ed25519.PublicKey{owner}, nil, key.Sign(k, holder, nil))
+	v, err := key.Verify(k, []key.PublicKey{key.Ed25519(owner)}, nil, key.Sign(k, holder, nil))
 	if err != nil {
 		return KeyView{}, err
 	}
@@ -402,7 +403,7 @@ func rejectionCode(k *kernel.Kernel, plan string) string {
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.
 func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, planner ed25519.PrivateKey, owner ed25519.PublicKey, seeds map[string]bool) []Hold {
-	ver, err := key.Verify(unsub, []ed25519.PublicKey{owner}, nil, key.Sign(unsub, planner, nil))
+	ver, err := key.Verify(unsub, []key.PublicKey{key.Ed25519(owner)}, nil, key.Sign(unsub, planner, nil))
 	if err != nil {
 		return []Hold{}
 	}

@@ -96,7 +96,7 @@ type effect struct {
 // of. Every effect the clerk applies is judged on the spot, without trusting
 // the kernel or the clerk.
 type world struct {
-	anchors []ed25519.PublicKey
+	anchors []key.PublicKey
 	mutant  Mutant
 	rng     *rand.Rand
 	now     *int64 // the true time: the clerk's own clock
@@ -114,7 +114,7 @@ type world struct {
 	// cut is the passkeys the owner cut off, and dead the grants a cut
 	// cancelled while still in their hold: the world's own record, so an
 	// effect under either is judged without the kernel's word.
-	cut  []ed25519.PublicKey
+	cut  []key.PublicKey
 	dead map[key.ID]bool
 }
 
@@ -253,6 +253,8 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 type keyPair struct {
 	pub  ed25519.PublicKey
 	priv ed25519.PrivateKey
+	pk   key.PublicKey     // pub as a passkey
+	pass key.Ed25519Signer // priv as the fake authenticator (EVL-1)
 }
 
 func gen(r *rand.Rand) keyPair {
@@ -261,7 +263,7 @@ func gen(r *rand.Rand) keyPair {
 		seed[i] = byte(r.IntN(256))
 	}
 	p := ed25519.NewKeyFromSeed(seed)
-	return keyPair{p.Public().(ed25519.PublicKey), p}
+	return keyPair{p.Public().(ed25519.PublicKey), p, key.Ed25519(p.Public().(ed25519.PublicKey)), key.Ed25519Signer(p)}
 }
 
 type sim struct {
@@ -345,14 +347,14 @@ func (s *sim) newRoot() key.Key {
 	if len(vs) == 0 {
 		vs = append(vs, key.Trash)
 	}
-	r := key.Issue(s.owner.priv, key.Root{Clerk: "mail", Verbs: vs,
+	r := key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: vs,
 		Serial: fmt.Sprintf("r%d", len(s.roots))})
 	return r
 }
 
 // clerkKey is the passkey's grant of root to the home clerk (D-146), with a
 // spend cap no sim step reaches.
-func (s *sim) clerkKey(passkey ed25519.PrivateKey, root key.Key) key.Key {
+func (s *sim) clerkKey(passkey key.Signer, root key.Key) key.Key {
 	k, err := key.ClerkKey(root, passkey, s.holder.pub, s.now, 1<<40)
 	if err != nil {
 		panic(err)
@@ -424,9 +426,9 @@ func (s *sim) anyKey() key.Key {
 	switch s.pick(8) {
 	case 0:
 		foreign := gen(s.rng)
-		return s.clerkKey(foreign.priv, key.Issue(foreign.priv, key.Root{Clerk: "mail", Verbs: verbs, Serial: "x"}))
+		return s.clerkKey(foreign.pass, key.Issue(foreign.pass, key.Root{Clerk: "mail", Verbs: verbs, Serial: "x"}))
 	case 1:
-		return s.clerkKey(s.owner.priv, key.Issue(s.owner.priv, key.Root{Clerk: "mail", Verbs: verbs, Serial: "never-logged"}))
+		return s.clerkKey(s.owner.pass, key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: verbs, Serial: "never-logged"}))
 	case 2:
 		if len(s.pool) > 0 {
 			k := s.pool[s.pick(len(s.pool))]
@@ -596,7 +598,7 @@ func (s *sim) op() error {
 		}
 	case c == 15 && len(s.roots) > 0 && s.pick(2) == 0:
 		i := s.pick(len(s.roots))
-		k := s.clerkKey(s.owner.priv, s.roots[i])
+		k := s.clerkKey(s.owner.pass, s.roots[i])
 		s.logf("renew clerk key of root %d", i)
 		if err := s.grant(k); err != nil {
 			return s.refusedBig(err)
@@ -605,7 +607,7 @@ func (s *sim) op() error {
 		s.ids = append(s.ids, k.Tip())
 	case c == 15:
 		r := s.newRoot()
-		k := s.clerkKey(s.owner.priv, r)
+		k := s.clerkKey(s.owner.pass, r)
 		s.logf("grant root")
 		if err := s.grant(r, k); err != nil {
 			return s.refusedBig(err)
@@ -621,19 +623,19 @@ func (s *sim) op() error {
 // it narrowed.
 func (s *sim) phoneOp() error {
 	s.syncPhone()
-	if s.phone.pub == nil {
+	if !s.phone.pk.Valid() {
 		if len(s.cutPhones) > 0 && s.pick(2) == 0 {
 			s.cutSigns()
 			return nil
 		}
 		s.phone = gen(s.rng)
 		s.logf("enroll phone")
-		return s.widened(s.k.Enroll(s.kt(), key.Enroll(s.spare.priv, s.phone.pub)))
+		return s.widened(s.k.Enroll(s.kt(), key.Enroll(s.spare.pass, s.phone.pk)))
 	}
 	switch s.pick(4) {
 	case 0, 1:
 		s.logf("cut phone off")
-		if err := s.k.Unenroll(s.kt(), s.phone.pub); err != nil {
+		if err := s.k.Unenroll(s.kt(), s.phone.pk); err != nil {
 			return err
 		}
 		s.cut()
@@ -644,7 +646,7 @@ func (s *sim) phoneOp() error {
 		}
 	case 2:
 		if len(s.pool) > 0 {
-			k, err := key.Narrow(s.pool[s.pick(len(s.pool))], s.phone.priv, key.LimitUses(int64(1+s.pick(4))))
+			k, err := key.Narrow(s.pool[s.pick(len(s.pool))], s.phone.pass, key.LimitUses(int64(1+s.pick(4))))
 			if err == nil {
 				s.logf("phone narrows a clerk key")
 				s.pool, s.phoneKeys = append(s.pool, k), append(s.phoneKeys, k)
@@ -655,7 +657,7 @@ func (s *sim) phoneOp() error {
 			return nil
 		}
 		i := s.pick(len(s.roots))
-		k := s.clerkKey(s.phone.priv, s.roots[i])
+		k := s.clerkKey(s.phone.pass, s.roots[i])
 		s.logf("phone renews clerk key of root %d", i)
 		if err := s.grant(k); err != nil {
 			return s.refusedBig(err)
@@ -671,14 +673,14 @@ func (s *sim) phoneOp() error {
 // an enrollment or a cut-off short: cut if the log has it cut, gone if the
 // log never enrolled it.
 func (s *sim) syncPhone() {
-	if s.phone.pub == nil {
+	if !s.phone.pk.Valid() {
 		return
 	}
 	st := s.k.State()
 	switch {
-	case key.In(st.Unenrolled, s.phone.pub):
+	case key.In(st.Unenrolled, s.phone.pk):
 		s.cut()
-	case !key.In(st.Passkeys(), s.phone.pub):
+	case !key.In(st.Passkeys(), s.phone.pk):
 		s.phone, s.byPhone = keyPair{}, nil
 	}
 }
@@ -696,7 +698,7 @@ func (s *sim) cut() {
 			s.cutCancelled++
 		}
 	}
-	s.w.cut = append(s.w.cut, s.phone.pub)
+	s.w.cut = append(s.w.cut, s.phone.pk)
 	s.cutPhones = append(s.cutPhones, s.phone)
 	s.phone, s.byPhone = keyPair{}, nil
 }
@@ -708,7 +710,7 @@ func (s *sim) cutSigns() {
 		return
 	}
 	p := s.cutPhones[s.pick(len(s.cutPhones))]
-	k := s.clerkKey(p.priv, s.roots[s.pick(len(s.roots))])
+	k := s.clerkKey(p.pass, s.roots[s.pick(len(s.roots))])
 	s.logf("cut-off phone signs a grant")
 	err := s.k.Issue(s.kt(), approve([]key.Key{k}, s.owner, s.spare), k)
 	if _, taken := s.k.State().Grants[k.Tip()]; taken {
@@ -722,7 +724,7 @@ func (s *sim) cutSigns() {
 func approve(keys []key.Key, by ...keyPair) []key.Cosign {
 	var cos []key.Cosign
 	for _, p := range by {
-		cos = append(cos, key.Approve(p.priv, kernel.BatchHash(keys...)))
+		cos = append(cos, key.Approve(p.pass, kernel.BatchHash(keys...)))
 	}
 	return cos
 }
@@ -745,7 +747,7 @@ func (s *sim) grant(keys ...key.Key) error {
 	err := s.widened(s.k.Issue(s.kt(), cos, keys...))
 	if errors.Is(err, kernel.ErrNeedsCosign) {
 		for _, c := range cos {
-			if bytes.Equal(c.By, s.spare.pub) {
+			if c.By == s.spare.pk {
 				s.w.bad = append(s.w.bad, "a batch the second hardware key co-signed was refused")
 			}
 		}
@@ -852,7 +854,7 @@ func Run(c Config) (*Result, error) {
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.spare = gen(rng)
-	s.w = &world{anchors: []ed25519.PublicKey{s.owner.pub, s.spare.pub}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}, dead: map[key.ID]bool{}}
+	s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}, dead: map[key.ID]bool{}}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {
@@ -868,7 +870,7 @@ func Run(c Config) (*Result, error) {
 	}
 	for i := 0; i < 4; i++ { // set up a day ago, so past the hold
 		r := s.newRoot()
-		k := s.clerkKey(s.owner.priv, r)
+		k := s.clerkKey(s.owner.pass, r)
 		if err := s.k.Issue(-kernel.GrantHold, approve([]key.Key{r, k}, s.owner, s.spare), r, k); err != nil {
 			return nil, err
 		}

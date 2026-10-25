@@ -69,7 +69,7 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	plannerPub, plannerPriv := seed(4)
 	r := &rig{world: &w, plannerPriv: plannerPriv, now: t0}
 	var err error
-	r.acct, err = NewAccount([]ed25519.PublicKey{ownerPub}, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
+	r.acct, err = NewAccount([]key.PublicKey{key.Ed25519(ownerPub)}, []byte(secret), func() World { return *r.world }, ms, box, retention, "List-Unsubscribe=One-Click")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,14 +85,14 @@ func newRigOn(t *testing.T, w World, ms []Mail, box Mailbox, retention int, cave
 	r.acct.Bind(r.k.State())
 	r.acct.Clock = func() int64 { return r.now }
 	// The passkey granted the root and the home clerk's key at setup (D-146).
-	root, err := key.ClerkKey(key.Issue(ownerPriv, key.Root{Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey}),
-		ownerPriv, holderPub, t0-dayMS-kernel.GrantHold, 0)
+	root, err := key.ClerkKey(key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: Name, Verbs: []key.Verb{key.Organize, key.Trash, key.Unsubscribe}, Serial: mailKey}),
+		key.Ed25519Signer(ownerPriv), holderPub, t0-dayMS-kernel.GrantHold, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, backup := seed(12) // the second hardware key co-signs the setup grants (D-146)
 	batch := []key.Key{{Root: root.Root}, root}
-	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(ownerPriv, kernel.BatchHash(batch...)), key.Approve(backup, kernel.BatchHash(batch...))}, batch...); err != nil {
+	if err := r.k.Issue(t0-dayMS-kernel.GrantHold, []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(backup), kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
 	if err := log.Anchor(); err != nil {
@@ -190,10 +190,10 @@ func TestForcedUnsubscribeWithFakeViewPostsNothing(t *testing.T) {
 // refusingView answers no to everything a clerk asks of a view.
 type refusingView struct{ kernel.View }
 
-func (refusingView) Granted(key.ID) (int64, bool)                         { return 0, false }
-func (refusingView) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) { return nil, nil }
-func (refusingView) ChangesView() *key.Changes                            { return &key.Changes{} }
-func (refusingView) LedgerBefore(uint64) key.Ledger                       { return noUses{} }
+func (refusingView) Granted(key.ID) (int64, bool)                     { return 0, false }
+func (refusingView) Enrollments() ([]key.Enrollment, []key.PublicKey) { return nil, nil }
+func (refusingView) ChangesView() *key.Changes                        { return &key.Changes{} }
+func (refusingView) LedgerBefore(uint64) key.Ledger                   { return noUses{} }
 func (refusingView) Dispatched(kernel.Request) (kernel.Dispatch, bool) {
 	return kernel.Dispatch{}, false
 }
@@ -525,10 +525,10 @@ func TestPlansSpendTheCapOnTrashFirstAndCountWhatIsLeft(t *testing.T) {
 func seedPriv(b byte) ed25519.PrivateKey { _, p := seed(b); return p }
 
 // anchors are the kernel's: the owner's passkey and the second hardware key.
-func anchors() []ed25519.PublicKey {
+func anchors() []key.PublicKey {
 	o, _ := seed(1)
 	b, _ := seed(12)
-	return []ed25519.PublicKey{o, b}
+	return []key.PublicKey{key.Ed25519(o), key.Ed25519(b)}
 }
 
 // The inbox clerk judges a hold on its own clock: a kernel whose clock runs

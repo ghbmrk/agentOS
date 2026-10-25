@@ -97,7 +97,7 @@ func TestFormalKeyVerdict(t *testing.T) {
 	owner, ownerPriv := fParty(1)
 	holder, holderPriv := fParty(2)
 	_, strangerPriv := fParty(3)
-	owners := []ed25519.PublicKey{owner}
+	owners := []key.PublicKey{key.Ed25519(owner)}
 	signers := map[string]ed25519.PrivateKey{"holder": holderPriv, "passkey": ownerPriv, "stranger": strangerPriv}
 
 	type built struct {
@@ -115,8 +115,8 @@ func TestFormalKeyVerdict(t *testing.T) {
 		if !s.Root {
 			issuer = strangerPriv
 		}
-		root := key.Issue(issuer, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize, key.Unsubscribe}, Serial: "formal"})
-		k, err := key.ClerkKey(root, ownerPriv, holder, 0, 1<<40)
+		root := key.Issue(key.Ed25519Signer(issuer), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize, key.Unsubscribe}, Serial: "formal"})
+		k, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holder, 0, 1<<40)
 		if err != nil {
 			t.Fatalf("the grant: %v", err)
 		}

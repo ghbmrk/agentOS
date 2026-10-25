@@ -136,6 +136,10 @@ func (p Plan) use() []byte {
 	return b
 }
 
+// PlanMsg is the message p.Key's holder signs for p: for a bare root, a
+// passkey's challenge (key.Challenge).
+func PlanMsg(p Plan) []byte { return key.UseMsg(p.Key, p.use()) }
+
 // SignPlan signs p as the holder of p.Key.
 func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	p.Sig = key.Sign(p.Key, holder, p.use())
@@ -147,7 +151,7 @@ func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
 
 // VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
-func VerifyPlan(p Plan, owners []ed25519.PublicKey) (*key.Verified, error) {
+func VerifyPlan(p Plan, owners []key.PublicKey) (*key.Verified, error) {
 	if !p.text() {
 		return nil, ErrNotText
 	}
@@ -190,7 +194,7 @@ type (
 		Cosigns []key.Cosign `json:",omitempty"`
 	}
 	enrolled   struct{ Enrollment key.Enrollment }
-	unenrolled struct{ Passkey ed25519.PublicKey }
+	unenrolled struct{ Passkey key.PublicKey }
 	keyID      struct{ ID key.ID }
 	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
 	modelUsed struct {
@@ -395,9 +399,9 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 type State struct {
 	// The owner's passkeys (D-146): the anchors, the hardware keys; each
 	// passkey an anchor enrolled; less those revoked.
-	Anchors    []ed25519.PublicKey
+	Anchors    []key.PublicKey
 	Enrolled   []key.Enrollment
-	Unenrolled []ed25519.PublicKey
+	Unenrolled []key.PublicKey
 	Seq        uint64
 	Stopped    bool
 	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
@@ -428,7 +432,7 @@ type Grant struct {
 	From int64
 }
 
-func NewState(anchors []ed25519.PublicKey) *State {
+func NewState(anchors []key.PublicKey) *State {
 	return &State{
 		Anchors: anchors,
 		Changes: key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}},
@@ -440,7 +444,7 @@ func NewState(anchors []ed25519.PublicKey) *State {
 }
 
 // Replay folds a whole log.
-func Replay(anchors []ed25519.PublicKey, es []Entry) (*State, error) {
+func Replay(anchors []key.PublicKey, es []Entry) (*State, error) {
 	s := NewState(anchors)
 	for _, e := range es {
 		if err := s.Apply(e); err != nil {
@@ -530,12 +534,12 @@ func (s *State) ChangesView() *key.Changes { return &s.Changes }
 func (s *State) Granted(id key.ID) (int64, bool) { g, ok := s.Grants[id]; return g.From, ok }
 
 // Enrollments is what Passkeys reads, for a clerk to check with its own anchors.
-func (s *State) Enrollments() ([]key.Enrollment, []ed25519.PublicKey) {
+func (s *State) Enrollments() ([]key.Enrollment, []key.PublicKey) {
 	return s.Enrolled, s.Unenrolled
 }
 
 // Passkeys is the owner's set (D-146).
-func (s *State) Passkeys() []ed25519.PublicKey {
+func (s *State) Passkeys() []key.PublicKey {
 	return key.Passkeys(s.Anchors, s.Enrolled, s.Unenrolled)
 }
 
@@ -650,7 +654,7 @@ func lapse(cs []key.Caveat) *int64 {
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
 
 // owners is the passkey set a plan's key is verified against (PlanOwners).
-func (s *State) owners(k key.Key) []ed25519.PublicKey { return PlanOwners(s, s.Anchors, k) }
+func (s *State) owners(k key.Key) []key.PublicKey { return PlanOwners(s, s.Anchors, k) }
 
 // PlanOwners is the passkey set a plan's key is verified against, in the
 // kernel and the clerk alike, from the checker's own anchors. For a key
@@ -659,7 +663,7 @@ func (s *State) owners(k key.Key) []ed25519.PublicKey { return PlanOwners(s, s.A
 // grant itself was checked against the set at its entry. For a bare root it
 // is the set now: only a passkey's own tap uses a bare root, and a cut-off
 // phone taps nothing (D-146).
-func PlanOwners(v View, anchors []ed25519.PublicKey, k key.Key) []ed25519.PublicKey {
+func PlanOwners(v View, anchors []key.PublicKey, k key.Key) []key.PublicKey {
 	es, un := v.Enrollments()
 	if _, ok := v.Granted(rootOf(k)); ok && len(k.Links) > 0 {
 		un = nil

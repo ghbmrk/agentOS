@@ -77,7 +77,7 @@ var (
 	holderPub, holderPriv = gen(2)
 	headPub, headPriv     = gen(3)
 	sparePub, sparePriv   = gen(4)
-	anchors               = []ed25519.PublicKey{ownerPub, sparePub}
+	anchors               = []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 )
 
 // The one op the test clerk declares: a post to a recipient, with the secret
