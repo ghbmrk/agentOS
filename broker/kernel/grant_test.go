@@ -3,7 +3,6 @@ package kernel_test
 // REQ: KEY-1, KEY-4, KEY-6, KRN-7, CLK-2
 
 import (
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -22,7 +21,7 @@ func admits(r *rig, p kernel.Plan, now int64) string {
 }
 
 func trashRoot(r *rig, serial string, by pair) key.Key {
-	return key.Issue(by.priv, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: serial})
+	return key.Issue(by.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: serial})
 }
 
 // A grant waits GrantHold, listed for the owner's notice, and a revoke during
@@ -30,7 +29,7 @@ func trashRoot(r *rig, serial string, by pair) key.Key {
 func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 	r := newRig(t)
 	root := trashRoot(r, "r2", r.owner)
-	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
+	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, root, ck)) // one batch: one hold, one entry
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
@@ -49,7 +48,7 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 	if got := r.k.State().Pending(1); len(got) != 2 {
 		t.Fatalf("a cancelled grant is not pending: %d", len(got))
 	}
-	ock, err := key.ClerkKey(other, r.owner.priv, r.holder.pub, 0, 10)
+	ock, err := key.ClerkKey(other, r.owner.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(1, ock))
 	q := r.sign(kernel.Plan{ID: "p2", Key: ock, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
@@ -105,7 +104,7 @@ func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 		"shorter":  {[]key.Caveat{key.LimitUses(3), key.LimitHold(0, 0)}, false},
 		"narrowed": {[]key.Caveat{key.LimitUses(2), key.LimitHold(2*hour, 2*hour)}, true},
 	} {
-		k, err := key.ClerkKey(key.Key{Root: limited.Root}, r.owner.priv, r.holder.pub, at, 10, c.cs...)
+		k, err := key.ClerkKey(key.Key{Root: limited.Root}, r.owner.pass, r.holder.pub, at, 10, c.cs...)
 		must(t, err)
 		must(t, r.issue(at, k))
 		if from, _ := r.k.State().Granted(k.Tip()); (from == at) != c.live {
@@ -114,10 +113,10 @@ func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 	}
 	// A renewal of a grant still in its hold is not live at once either.
 	root := trashRoot(r, "r2", r.owner)
-	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, at, 10)
+	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, at, 10)
 	must(t, err)
 	must(t, r.issue(at, root, ck))
-	again, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, at+1, 10)
+	again, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, at+1, 10)
 	must(t, err)
 	must(t, r.issue(at+1, again))
 	if from, _ := r.k.State().Granted(again.Tip()); from < at+kernel.GrantHold {
@@ -149,15 +148,15 @@ func TestBareRootIsUsedOnlyByThePasskey(t *testing.T) {
 func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	r := newRig(t) // the rig's owner is the anchor, the hardware key
 	phone, stranger := gen(8), gen(9)
-	if err := r.k.Enroll(0, key.Enroll(stranger.priv, phone.pub)); !errors.Is(err, kernel.ErrNotEnrolled) {
+	if err := r.k.Enroll(0, key.Enroll(stranger.pass, phone.pk)); !errors.Is(err, kernel.ErrNotEnrolled) {
 		t.Fatalf("an enrollment no anchor signed: %v", err)
 	}
 	if err := r.issue(0, trashRoot(r, "early", phone)); err == nil {
 		t.Fatal("a passkey not yet enrolled grants nothing")
 	}
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	root := trashRoot(r, "phone", phone)
-	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 0, 10)
+	ck, err := key.ClerkKey(root, phone.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, root, ck))
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
@@ -166,20 +165,20 @@ func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	if c, d := admits(r, p, at), admits(r, oneOff, at); c != "" || d != "" {
 		t.Fatalf("the enrolled phone's grant %q and one-off %q", c, d)
 	}
-	must(t, r.k.Unenroll(at, phone.pub)) // the phone is lost
+	must(t, r.k.Unenroll(at, phone.pk)) // the phone is lost
 	if c := admits(r, p, at); c != "" {
 		t.Fatalf("a key under the lost phone's earlier grant runs until it lapses: %q", c)
 	}
 	if c := admits(r, oneOff, at); c != kernel.CKey {
 		t.Fatalf("the lost phone's one-off: %q", c)
 	}
-	renewal, err := key.ClerkKey(root, phone.priv, r.holder.pub, at, 10)
+	renewal, err := key.ClerkKey(root, phone.pass, r.holder.pub, at, 10)
 	must(t, err)
 	if err := r.issue(at, renewal); err == nil {
 		t.Fatal("the lost phone renews nothing")
 	}
-	if err := r.k.Enroll(at, key.Enroll(r.owner.priv, phone.pub)); !errors.Is(err, kernel.ErrNotEnrolled) ||
-		key.In(r.k.State().Passkeys(), phone.pub) {
+	if err := r.k.Enroll(at, key.Enroll(r.owner.pass, phone.pk)); !errors.Is(err, kernel.ErrNotEnrolled) ||
+		key.In(r.k.State().Passkeys(), phone.pk) {
 		t.Fatalf("a revoked passkey never comes back: %v", err)
 	}
 	if !kernel.Widening(kernel.TEnrolled) || kernel.Widening(kernel.TUnenrolled) {
@@ -192,12 +191,12 @@ func TestUnanchoredEnrollmentDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
 	r.anchor.down = true
-	if err := r.k.Enroll(1, key.Enroll(r.owner.priv, phone.pub)); err == nil {
+	if err := r.k.Enroll(1, key.Enroll(r.owner.pass, phone.pk)); err == nil {
 		t.Fatal("an unconfirmed enrollment must report it")
 	}
 	r.anchor.down = false
 	r.boot(2)
-	if key.In(r.k.State().Passkeys(), phone.pub) {
+	if key.In(r.k.State().Passkeys(), phone.pk) {
 		t.Fatal("an unconfirmed enrollment survived a reboot")
 	}
 }
@@ -207,7 +206,7 @@ func TestUnanchoredEnrollmentDoesNotSurviveReboot(t *testing.T) {
 func TestClerkKeepsTheGrantHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	r := newRig(t)
 	root := trashRoot(r, "r2", r.owner)
-	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
+	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, root, ck))
 	ahead := kernel.GrantHold + 1
@@ -226,7 +225,7 @@ func TestClerkKeepsTheGrantHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 // granted itself, confers nothing (D-146, KEY-1).
 func TestAFirstLinkNotGrantedConfersNothing(t *testing.T) {
 	r := newRig(t)
-	ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, 0, 1<<39)
+	ck, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, 0, 1<<39)
 	must(t, err)
 	if c := admits(r, r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}}), 0); c != kernel.CUngranted {
 		t.Fatalf("an ungranted first link: %q", c)
@@ -239,7 +238,7 @@ func TestAFirstLinkIsNeverLiveBeforeItsRoot(t *testing.T) {
 	r := newRig(t)
 	root := trashRoot(r, "r2", r.owner)
 	must(t, r.issue(10*hour, root))
-	ck, err := key.ClerkKey(root, r.owner.priv, r.holder.pub, 0, 10)
+	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, ck))
 	rf, _ := r.k.State().Granted(root.Tip())
@@ -253,13 +252,13 @@ func TestAFirstLinkIsNeverLiveBeforeItsRoot(t *testing.T) {
 func TestReplayGrantsNothingFromACutOffPasskey(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	root := trashRoot(r, "phone", phone)
-	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 0, 10)
+	ck, err := key.ClerkKey(root, phone.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, root, ck))
-	must(t, r.k.Unenroll(1, phone.pub))
-	again, err := key.ClerkKey(root, phone.priv, r.holder.pub, 2, 10)
+	must(t, r.k.Unenroll(1, phone.pk))
+	again, err := key.ClerkKey(root, phone.pass, r.holder.pub, 2, 10)
 	must(t, err)
 	es := r.k.Log().Entries()
 	body, _ := json.Marshal(struct{ Keys []key.Key }{[]key.Key{again}})
@@ -281,7 +280,7 @@ func TestARenewalOfAPausedLapsedOrPendingKeyWaits(t *testing.T) {
 	at := 10 * hour
 	renew := func(at int64) key.Key {
 		t.Helper()
-		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
+		k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, at, 1<<40)
 		must(t, err)
 		must(t, r.issue(at, k))
 		return k
@@ -297,10 +296,10 @@ func TestARenewalOfAPausedLapsedOrPendingKeyWaits(t *testing.T) {
 		t.Fatal("a renewal revived a lapsed key")
 	}
 	// A grant still in its hold, under a live root, renews nothing.
-	held, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at, 5)
+	held, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, gen(7).pub, at, 5)
 	must(t, err)
 	must(t, r.issue(at, held))
-	again, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, gen(7).pub, at+1, 5)
+	again, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, gen(7).pub, at+1, 5)
 	must(t, err)
 	must(t, r.issue(at+1, again))
 	if live(again, at+1) {
@@ -313,7 +312,7 @@ func TestARenewalOfARevokedKeyWaits(t *testing.T) {
 	r := newRig(t)
 	at := 10 * hour
 	must(t, r.k.Revoke(at, r.ck.Tip()))
-	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.priv, r.holder.pub, at, 1<<40)
+	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, at, 1<<40)
 	must(t, err)
 	must(t, r.issue(at, k))
 	if from, _ := r.k.State().Granted(k.Tip()); from == at {
@@ -327,10 +326,10 @@ func TestARenewalOfARevokedKeyWaits(t *testing.T) {
 func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
-	old := r.grant(key.Issue(r.owner.priv, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 15)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	old := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 15)
 	at := 10 * hour
-	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.priv, r.holder.pub, at, 15)
+	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.pass, r.holder.pub, at, 15)
 	must(t, err)
 	must(t, r.issue(at, k))
 	if from, _ := r.k.State().Granted(k.Tip()); from != at {
@@ -356,12 +355,12 @@ func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	root := trashRoot(r, "ph", phone)
-	ck, err := key.ClerkKey(root, phone.priv, r.holder.pub, 1, 10)
+	ck, err := key.ClerkKey(root, phone.pass, r.holder.pub, 1, 10)
 	must(t, err)
 	must(t, r.issue(1, root, ck))
-	must(t, r.k.Unenroll(2, phone.pub))
+	must(t, r.k.Unenroll(2, phone.pk))
 	if got := r.k.State().Pending(3); len(got) != 0 {
 		t.Fatalf("a cut-off passkey's grants still pending: %d", len(got))
 	}
@@ -377,12 +376,12 @@ func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 func TestUnenrollCancelsAPhonesLinkUnderAnAnchorsRoot(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.priv, phone.pub)))
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	at := 10 * hour
-	raise, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.priv, r.holder.pub, at, 2<<40)
+	raise, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.pass, r.holder.pub, at, 2<<40)
 	must(t, err)
 	must(t, r.k.Issue(at, nil, raise))
-	must(t, r.k.Unenroll(at+1, phone.pub))
+	must(t, r.k.Unenroll(at+1, phone.pk))
 	if got := r.k.State().Pending(at + 2); len(got) != 0 {
 		t.Fatalf("the phone's pending link still listed: %d", len(got))
 	}
@@ -391,7 +390,7 @@ func TestUnenrollCancelsAPhonesLinkUnderAnAnchorsRoot(t *testing.T) {
 	}
 	r = newRig(t)
 	other := trashRoot(r, "r2", r.owner)
-	ck, err := key.ClerkKey(other, r.owner.priv, r.holder.pub, at, 1)
+	ck, err := key.ClerkKey(other, r.owner.pass, r.holder.pub, at, 1)
 	must(t, err)
 	must(t, r.issue(at, other, ck))
 	must(t, r.k.Revoke(at+1, other.Tip()))
@@ -426,7 +425,7 @@ func TestAClerkKeyLivesAtMostClerkLifeOnceLive(t *testing.T) {
 // log entry that cuts one off changes nothing (#2670 item 3).
 func TestAnAnchorIsNotCutOff(t *testing.T) {
 	r := newRig(t)
-	if err := r.k.Unenroll(1, r.owner.pub); !errors.Is(err, kernel.ErrAnchor) {
+	if err := r.k.Unenroll(1, r.owner.pk); !errors.Is(err, kernel.ErrAnchor) {
 		t.Fatalf("Unenroll of an anchor: %v", err)
 	}
 	// What the anchor signed outlives a logged cut-off of it: its task
@@ -435,11 +434,11 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	held := trashRoot(r, "r2", r.owner)
 	must(t, r.issue(1, held))
-	_, err := r.k.Log().Append(2, kernel.TUnenrolled, 1, struct{ Passkey ed25519.PublicKey }{r.owner.pub})
+	_, err := r.k.Log().Append(2, kernel.TUnenrolled, 1, struct{ Passkey key.PublicKey }{r.owner.pk})
 	must(t, err)
 	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
 	must(t, err)
-	if !key.In(re.Passkeys(), r.owner.pub) {
+	if !key.In(re.Passkeys(), r.owner.pk) {
 		t.Fatal("a logged cut-off of an anchor took effect")
 	}
 	if tk, ok := re.Task("t1", 2); !ok || len(tk.Approvals) != 1 {

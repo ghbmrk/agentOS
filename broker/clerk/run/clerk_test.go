@@ -98,7 +98,9 @@ func newExitRigFor(t *testing.T, refresh string) *exitRig {
 	t.Cleanup(func() { oln.Close() })
 	go ServeExitOwner(oln, h)
 	b = newBoxFor(t, sock, "web", key.Post, key.ChangeAccount)
-	if err := b.h.With(func(k *kernel.Kernel) error { return k.Enroll(b.now, key.Enroll(ownerPriv, phonePub)) }); err != nil {
+	if err := b.h.With(func(k *kernel.Kernel) error {
+		return k.Enroll(b.now, key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phonePub)))
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return &exitRig{box: b, sec: sec, host: h, last: last, dir: dir, owner: ExitOwner{proc.Conn{Socket: osock, UID: os.Getuid(), Timeout: 20 * time.Second}}}
@@ -120,7 +122,7 @@ func (r *exitRig) narrow(cs ...key.Caveat) key.Key {
 
 func (r *exitRig) narrowBy(by ed25519.PrivateKey, cs ...key.Caveat) key.Key {
 	r.t.Helper()
-	k, err := key.Narrow(r.key, by, cs...)
+	k, err := key.Narrow(r.key, key.Ed25519Signer(by), cs...)
 	if err != nil {
 		r.t.Fatal(err)
 	}

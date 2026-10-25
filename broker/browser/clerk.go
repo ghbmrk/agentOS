@@ -2,7 +2,6 @@ package browser
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -28,7 +27,7 @@ type Clerk struct {
 	Name string
 	// Anchors are the owner's hardware keys, which every key is checked
 	// against (D-146).
-	Anchors []ed25519.PublicKey
+	Anchors []key.PublicKey
 	// Clock, when set, is the clerk's own time in unix ms; nil reads the
 	// wall clock.
 	Clock func() int64
@@ -51,7 +50,7 @@ type ran struct {
 }
 
 // NewClerk returns the clerk for one gate.
-func NewClerk(name string, anchors []ed25519.PublicKey, g *Gate) *Clerk {
+func NewClerk(name string, anchors []key.PublicKey, g *Gate) *Clerk {
 	return &Clerk{Name: name, Anchors: anchors, g: g, ran: map[string]ran{}}
 }
 

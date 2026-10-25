@@ -31,6 +31,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -432,23 +433,23 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
 	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
 	otherBox := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{13}, 32)).Public().(ed25519.PublicKey)
-	unsigned := kernel.SignSetup(box, hw1, hw2)
+	unsigned := kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))
 	unsigned.Sigs[1] = unsigned.Sigs[0]
 	for name, f := range map[string]kernel.FirstAnchors{
-		"one key":            kernel.SignSetup(box, hw1),
-		"the same key twice": kernel.SignSetup(box, hw1, hw1),
-		"another box":        kernel.SignSetup(otherBox, hw1, hw2),
+		"one key":            kernel.SignSetup(box, key.Ed25519Signer(hw1)),
+		"the same key twice": kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw1)),
+		"another box":        kernel.SignSetup(otherBox, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)),
 		"one key unsigned":   unsigned,
 	} {
 		if err := o.Setup(f); !errors.Is(err, kernel.ErrSetupKeys) {
 			t.Errorf("%s: got %v, want ErrSetupKeys", name, err)
 		}
 	}
-	must(t, o.Setup(kernel.SignSetup(box, hw1, hw2)))
+	must(t, o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
 	if info, err := o.SetupInfo(); err != nil || info.Open {
 		t.Fatalf("setup info after setup: %+v %v, want closed", info, err)
 	}
-	if err := o.Setup(kernel.SignSetup(box, hw2, hw1)); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw2), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("a second setup: got %v, want ErrSetupClosed", err)
 	}
 	must(t, o.Stop()) // the kernel now serves as any other
@@ -459,7 +460,7 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 	if c, err := r.owner().Changes(); err != nil || !c.Stopped {
 		t.Fatalf("the second boot: %v %v, want the first boot's STOP", c, err)
 	}
-	if err := r.owner().Setup(kernel.SignSetup(box, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32)), hw1)); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32))), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("setup on the second boot: got %v, want ErrSetupClosed", err)
 	}
 	r.shutdown(cmd, out)
@@ -524,7 +525,7 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	r := newRig(t, true)
 	other := proc.KernelConfig{
 		Log: r.mainConfig().Log, Anchor: &kernel.MemAnchor{}, Key: [32]byte{1},
-		Pub: r.keys.Head.Public().(ed25519.PublicKey), Sign: r.keys.Head, Anchors: []ed25519.PublicKey{gen(1), gen(2)},
+		Pub: r.keys.Head.Public().(ed25519.PublicKey), Sign: r.keys.Head, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))},
 	}
 	h, err := proc.OpenKernel(other, time.Now().UnixMilli())
 	must(t, err)

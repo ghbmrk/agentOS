@@ -2,7 +2,6 @@ package inbox
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -66,7 +65,7 @@ type Refusal struct {
 // synthetic one of the eval, or the owner's (Live). It is the only place a
 // mail is read, an effect applied or a request made.
 type Account struct {
-	anchors   []ed25519.PublicKey
+	anchors   []key.PublicKey
 	box       Mailbox
 	secret    []byte
 	world     func() World
@@ -112,7 +111,7 @@ func (a *Account) Handle(addr string) string {
 // world is read again when a step runs, so a verdict that has aged out is not
 // acted on. secret keys the handles and must hold at least 128 bits. box is
 // where the effects land, and must be the mailbox the mails were read from.
-func NewAccount(anchors []ed25519.PublicKey, secret []byte, world func() World, mails []Mail, box Mailbox, retentionDays int, oneClickBody string) (*Account, error) {
+func NewAccount(anchors []key.PublicKey, secret []byte, world func() World, mails []Mail, box Mailbox, retentionDays int, oneClickBody string) (*Account, error) {
 	if len(secret) < minSecret {
 		return nil, errors.New("inbox: handle secret shorter than 128 bits")
 	}

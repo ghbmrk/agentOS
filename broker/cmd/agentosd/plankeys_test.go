@@ -108,16 +108,16 @@ func newGrantRig(t *testing.T) *grantRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.k, err = kernel.Boot(l, []ed25519.PublicKey{pubOf(owner), pubOf(second)}, nil, r.at); err != nil {
+	if r.k, err = kernel.Boot(l, []key.PublicKey{key.Ed25519(pubOf(owner)), key.Ed25519(pubOf(second))}, nil, r.at); err != nil {
 		t.Fatal(err)
 	}
-	r.root = key.Issue(owner, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize}, Serial: "guest-1"})
+	r.root = key.Issue(key.Ed25519Signer(owner), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize}, Serial: "guest-1"})
 	setup := r.at - kernel.GrantHold
-	if r.clerk, err = key.ClerkKey(r.root, owner, pubOf(holder), setup, 0); err != nil {
+	if r.clerk, err = key.ClerkKey(r.root, key.Ed25519Signer(owner), pubOf(holder), setup, 0); err != nil {
 		t.Fatal(err)
 	}
 	h := kernel.BatchHash(r.root, r.clerk)
-	if err := r.k.Issue(setup, []key.Cosign{key.Approve(owner, h), key.Approve(second, h)}, r.root, r.clerk); err != nil {
+	if err := r.k.Issue(setup, []key.Cosign{key.Approve(key.Ed25519Signer(owner), h), key.Approve(key.Ed25519Signer(second), h)}, r.root, r.clerk); err != nil {
 		t.Fatal(err)
 	}
 	return r
@@ -183,7 +183,7 @@ func TestPlanKeysGiveNoKeyWithoutAGrantToTheHolder(t *testing.T) {
 	if _, _, ok := keys("a"); ok || len(r.logs) != 0 {
 		t.Fatalf("a key with no grant file (logs %v)", r.logs)
 	}
-	toOther, err := key.ClerkKey(r.root, r.owner, pubOf(seedKey(9)), r.at, 0)
+	toOther, err := key.ClerkKey(r.root, key.Ed25519Signer(r.owner), pubOf(seedKey(9)), r.at, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,6 @@
 package run
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -22,7 +21,7 @@ import (
 // dir, the process's own directory, durable there, and the declaration
 // checked as clerk.NewExit checks it. The sealer is the software AESSealer
 // until STO-2 releases the real store key; until then only tests run one.
-func OpenExit(dir string, s clerk.Sealer, d clerk.Declaration, anchors []ed25519.PublicKey, roots *x509.CertPool) (*clerk.Exit, error) {
+func OpenExit(dir string, s clerk.Sealer, d clerk.Declaration, anchors []key.PublicKey, roots *x509.CertPool) (*clerk.Exit, error) {
 	sec, err := OpenSecrets(dir, s)
 	if err != nil {
 		return nil, err
@@ -45,7 +44,7 @@ func OpenExit(dir string, s clerk.Sealer, d clerk.Declaration, anchors []ed25519
 type ExitHost struct {
 	x       *clerk.Exit
 	name    string
-	anchors []ed25519.PublicKey
+	anchors []key.PublicKey
 	clock   clerk.Clock
 	refresh bool // the clerk has a token endpoint, so it can take a new grant
 
@@ -63,7 +62,7 @@ type staged struct {
 }
 
 // NewExitHost serves x, declared as d, whose keys chain to anchors.
-func NewExitHost(x *clerk.Exit, d clerk.Declaration, anchors []ed25519.PublicKey) *ExitHost {
+func NewExitHost(x *clerk.Exit, d clerk.Declaration, anchors []key.PublicKey) *ExitHost {
 	return &ExitHost{x: x, name: d.Name, anchors: anchors, clock: d.Clock, refresh: d.Refresh != "", done: map[string]bool{}}
 }
 

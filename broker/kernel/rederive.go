@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 
@@ -45,7 +44,7 @@ func (d derived) String() string { return d.typ + " " + string(d.body) }
 // first that differs is returned as a *Divergence. A decision the kernel
 // should have logged and did not is not seen: a tick that logs nothing
 // leaves no entry.
-func Rederive(anchors []ed25519.PublicKey, es []Entry) (Rederived, error) {
+func Rederive(anchors []key.PublicKey, es []Entry) (Rederived, error) {
 	s := NewState(anchors)
 	out := Rederived{Checked: map[string]int{}, Recorded: map[string]int{}}
 	var refused *derived // the cancel a refused send may log next
