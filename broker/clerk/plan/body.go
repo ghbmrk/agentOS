@@ -23,6 +23,10 @@ type Body struct {
 	// Tools are the CLI's own tools, by namespace and name; any other
 	// tool, a hosted one above all, is refused.
 	Tools []Tool
+	// Stream requires "stream": true, so the answer is the event stream
+	// whose last event the clerk meters (#3128 Security 1): the guest does
+	// not choose how its call is metered.
+	Stream bool
 }
 
 // Tool is one declared tool. An empty Namespace is a tool outside any.
@@ -45,6 +49,7 @@ const (
 	bodyJSON    = "json"    // not a single JSON object
 	bodyKey     = "key"     // an undeclared top-level key
 	bodyStore   = "store"   // store set to anything but false
+	bodyStream  = "stream"  // a declared stream not set to true
 	bodyMeta    = "meta"    // client_metadata not an object of strings
 	bodyInput   = "input"   // an input item out of its declared types
 	bodyContent = "content" // a content part out of its declared types
@@ -59,6 +64,13 @@ const maxDepth = 32
 func (b *Body) validate() error {
 	if len(b.Keys) == 0 || len(b.InputTypes) == 0 || len(b.ContentTypes) == 0 {
 		return fmt.Errorf("clerk: a model body declares its keys, input types and content types")
+	}
+	// store is forced off on every call, so it is declared (#3128 L3 2).
+	if !contains(b.Keys, "store") {
+		return fmt.Errorf("clerk: a model body declares store, which the clerk forces off")
+	}
+	if b.Stream && !contains(b.Keys, "stream") {
+		return fmt.Errorf("clerk: a streamed body declares its stream key")
 	}
 	for _, k := range b.Keys {
 		if contains(hostedKeys, k) {
@@ -104,8 +116,9 @@ func (b *Body) check(body []byte) ([]byte, string) {
 	if s, ok := obj["store"]; ok && s != false {
 		return nil, bodyStore
 	}
-	if contains(b.Keys, "store") {
-		obj["store"] = false
+	obj["store"] = false
+	if b.Stream && obj["stream"] != true {
+		return nil, bodyStream
 	}
 	if m, ok := obj["client_metadata"]; ok {
 		meta, ok := m.(map[string]any)
@@ -298,8 +311,9 @@ func noTools(v any, depth int) string {
 }
 
 // remote refuses a content source given by address: a string under a
-// urlKeys key that is not a data: URL. A tool's JSON schema (parameters)
-// is the CLI's own declaration, not a fetch, so it is not looked inside.
+// urlKeys key that is not a data: URL. A function tool's JSON schema (its
+// parameters) is the CLI's own declaration, not a fetch, so it is not
+// looked inside; a parameters key anywhere else is (#3128 Security 3).
 func remote(v any, key string, depth int) string {
 	if depth > maxDepth {
 		return bodyDepth
@@ -307,7 +321,7 @@ func remote(v any, key string, depth int) string {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, c := range t {
-			if k == "parameters" {
+			if k == "parameters" && t["type"] == "function" {
 				continue
 			}
 			if r := remote(c, k, depth+1); r != "" {

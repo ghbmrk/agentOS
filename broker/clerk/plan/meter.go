@@ -28,7 +28,7 @@ type Used struct {
 	// Sent is false only when no byte of the request left (the dial was
 	// refused by the home-network policy).
 	Sent bool
-	// Done is a 2xx answer read to its end.
+	// Done is a 2xx event stream read to its end.
 	Done bool
 	// Reported is set when the stream's last event carried the usage.
 	Reported bool
@@ -131,7 +131,9 @@ func (m *meterReader) Close() error {
 
 func (m *meterReader) end(eof bool) {
 	m.once.Do(func() {
-		m.u.Done = eof && m.ok
+		// Only a stream is read for its usage, so only a stream read to its
+		// end is done; any other answer is metered at its worst case.
+		m.u.Done = eof && m.ok && m.stream
 		m.settle(m.u)
 	})
 }

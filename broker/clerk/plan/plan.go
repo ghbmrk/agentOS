@@ -1420,6 +1420,7 @@ func Codex(guard *netguard.Policy) Declaration {
 			},
 			ContentTypes: []string{"input_text", "output_text", "input_image"},
 			ToolTypes:    clientToolTypes,
+			Stream:       true,
 			// The tools CLI 0.162.1 declares in code mode under the image's
 			// managed config, as captured (egress/testdata/codex-0.162.1-
 			// codemode.json): all in an additional_tools item.

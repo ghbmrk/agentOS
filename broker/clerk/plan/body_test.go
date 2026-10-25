@@ -68,13 +68,13 @@ func TestPlanModelBodyHeldToDeclaredShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(sent), &got); err != nil || got["store"] != false || len(got) != len(capture(t)) {
 		t.Fatalf("upstream body: %v (%v)", got, err)
 	}
-	if b := encode(t, map[string]any{"model": "m"}); true {
+	if b := encode(t, map[string]any{"model": "m", "stream": true}); true {
 		if resp, d := callWith(p, "g", ph, b, free); d != "" {
 			t.Fatalf("a minimal body: %s", d)
 		} else {
 			read(t, resp)
 		}
-		if _, sent := f.last(); sent != `{"model":"m","store":false}` {
+		if _, sent := f.last(); sent != `{"model":"m","store":false,"stream":true}` {
 			t.Fatalf("store is not forced off: %s", sent)
 		}
 	}
@@ -87,9 +87,16 @@ func TestPlanModelBodyHeldToDeclaredShape(t *testing.T) {
 	item := func(m map[string]any, i int) map[string]any { return m["input"].([]any)[i].(map[string]any) }
 	before := f.hits()
 	for name, c := range map[string]struct{ body, rule string }{
-		"not an object":         {`[1]`, "json"},
-		"trailing data":         {`{"model":"m"} {}`, "json"},
-		"store on":              {mut(func(m map[string]any) { m["store"] = true }), "store"},
+		"not an object": {`[1]`, "json"},
+		"trailing data": {`{"model":"m"} {}`, "json"},
+		"store on":      {mut(func(m map[string]any) { m["store"] = true }), "store"},
+		// The guest does not choose how its call is metered (#3128 Security 1).
+		"stream off":     {mut(func(m map[string]any) { m["stream"] = false }), "stream"},
+		"stream absent":  {mut(func(m map[string]any) { delete(m, "stream") }), "stream"},
+		"stream as text": {mut(func(m map[string]any) { m["stream"] = "true" }), "stream"},
+		"a url under parameters outside a tool": {mut(func(m map[string]any) {
+			item(m, 1)["parameters"] = map[string]any{"image_url": "https://example.net/a.png"}
+		}), "remote"},
 		"background":            {mut(func(m map[string]any) { m["background"] = true }), "key"},
 		"previous_response_id":  {mut(func(m map[string]any) { m["previous_response_id"] = "r" }), "key"},
 		"conversation":          {mut(func(m map[string]any) { m["conversation"] = "c" }), "key"},
@@ -161,6 +168,12 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 	f := newPlanFix(t)
 	for name, edit := range map[string]func(d *plan.Declaration){
 		"no body shape": func(d *plan.Declaration) { d.Body = plan.Body{} },
+		"a stream with no stream key": func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "store"}
+		},
+		"no store key": func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "stream"}
+		},
 		"a hosted key":  func(d *plan.Declaration) { d.Body.Keys = append(d.Body.Keys, "mcp_servers") },
 		"background":    func(d *plan.Declaration) { d.Body.Keys = append(d.Body.Keys, "background") },
 		"a hosted type": func(d *plan.Declaration) { d.Body.ToolTypes = append(d.Body.ToolTypes, "web_search") },
@@ -272,10 +285,10 @@ func TestPlanModelCallIsMeteredOnce(t *testing.T) {
 
 	before := f.hits()
 	rec.refuse = "plan-refused spend-task"
-	if resp, d := callWith(p, "g", ph, `{"model":"m"}`, rec.meter); resp != nil || d != rec.refuse {
+	if resp, d := callWith(p, "g", ph, `{"model":"m","stream":true}`, rec.meter); resp != nil || d != rec.refuse {
 		t.Fatalf("a refused admission: %v %q", resp != nil, d)
 	}
-	if resp, d := callWith(p, "g", ph, `{"model":"m"}`, nil); resp != nil || d != plan.DUnmetered {
+	if resp, d := callWith(p, "g", ph, `{"model":"m","stream":true}`, nil); resp != nil || d != plan.DUnmetered {
 		t.Fatalf("no meter: %v %q", resp != nil, d)
 	}
 	if f.hits() != before {
@@ -311,7 +324,7 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 	one := func(name string, consume func(*http.Response)) plan.Used {
 		t.Helper()
 		rec := &recorder{}
-		resp, d := callWith(p, "g", ph, `{"model":"m"}`, rec.meter)
+		resp, d := callWith(p, "g", ph, `{"model":"m","stream":true}`, rec.meter)
 		if d != "" {
 			t.Fatalf("%s: %s", name, d)
 		}
@@ -360,6 +373,16 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 		t.Errorf("a last line with no newline: %+v", u)
 	}
 
+	// A 2xx answer that is not an event stream is not read for its usage,
+	// so it is never done: it is metered at its worst case (#3128 Security 1).
+	f.stream = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"usage":{"input_tokens":30,"output_tokens":40000}}`)
+	}
+	if u := one("a JSON answer", all); u.Done || u.Reported {
+		t.Errorf("a JSON answer: %+v, want neither done nor reported", u)
+	}
+
 	// An encoded answer, which the clerk cannot read, is refused, and the
 	// call was sent.
 	f.stream = func(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +391,7 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 		io.WriteString(w, "x")
 	}
 	rec := &recorder{}
-	if resp, det := callWith(p, "g", ph, `{"model":"m"}`, rec.meter); resp != nil || det != plan.DEncoded {
+	if resp, det := callWith(p, "g", ph, `{"model":"m","stream":true}`, rec.meter); resp != nil || det != plan.DEncoded {
 		t.Fatalf("an encoded answer: %v %q", resp != nil, det)
 	}
 	if u := rec.settled(); len(u) != 1 || !u[0].Sent || u[0].Done || u[0].Pool == nil || u[0].Pool.Used != 100 {
@@ -385,7 +408,7 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 	}
 	qg, _ := q.Guest("g")
 	rec = &recorder{}
-	if resp, det := callWith(q, "g", qg.Tokens["access_token"], `{"model":"m"}`, rec.meter); resp != nil || det == "" {
+	if resp, det := callWith(q, "g", qg.Tokens["access_token"], `{"model":"m","stream":true}`, rec.meter); resp != nil || det == "" {
 		t.Fatalf("a refused dial answered: %v %q", resp != nil, det)
 	}
 	if u := rec.settled(); len(u) != 1 || u[0].Sent {
@@ -435,7 +458,7 @@ func TestPlanPoolReading(t *testing.T) {
 		hdr = c.h
 		mu.Unlock()
 		rec := &recorder{}
-		resp, d := callWith(p, "g", g.Tokens["access_token"], `{"model":"m"}`, rec.meter)
+		resp, d := callWith(p, "g", g.Tokens["access_token"], `{"model":"m","stream":true}`, rec.meter)
 		if d != "" {
 			t.Fatalf("%s: %s", name, d)
 		}

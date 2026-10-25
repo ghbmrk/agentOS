@@ -231,7 +231,7 @@ func model(p *plan.Login, guest, bearer string) (*http.Response, string) {
 	if bearer != "" {
 		h["Authorization"] = "Bearer " + bearer
 	}
-	return p.Do(context.Background(), guest, req("POST", "/backend-api/codex/responses", `{"model":"m"}`, h), free)
+	return p.Do(context.Background(), guest, req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`, h), free)
 }
 
 // free admits every model call and records nothing.
@@ -305,7 +305,7 @@ func TestPlanInjectsOnlyAtDeclaredEndpoints(t *testing.T) {
 	}
 	read(t, resp)
 	up, body := f.last()
-	if up.Header.Get("Authorization") != "Bearer real-access-1" || body != `{"model":"m","store":false}` || up.Host != f.host {
+	if up.Header.Get("Authorization") != "Bearer real-access-1" || body != `{"model":"m","store":false,"stream":true}` || up.Host != f.host {
 		t.Fatalf("upstream got %q %q %q", up.Header.Get("Authorization"), body, up.Host)
 	}
 	if up.Header.Get("Cookie") != "" || up.Header.Get("X-Forwarded-For") != "" {

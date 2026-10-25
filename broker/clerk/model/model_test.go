@@ -685,11 +685,13 @@ func TestAdmittedCallIsSettledOnce(t *testing.T) {
 	}{
 		"reported":       {model.Usage{In: 3, Out: 4, Reported: true}, 50, errors.New("cut"), `"amount":7`, `"source":"provider"`},
 		"never left":     {model.Usage{}, 50, model.ErrNotSent, `"amount":0`, `"source":"clerk"`},
-		"ended":          {model.Usage{}, 6, nil, `"amount":16`, `"source":"clerk"`},
-		"cut off":        {model.Usage{}, 6, errors.New("cut"), `"amount":30`, `"source":"admitted"`},
-		"reported wrong": {model.Usage{In: -1, Out: 4, Reported: true}, 6, nil, `"amount":30`, `"source":"admitted"`},
+		"ended":          {model.Usage{}, 6, nil, `"amount":8`, `"source":"clerk"`},
+		"cut off":        {model.Usage{}, 6, errors.New("cut"), `"amount":10`, `"source":"admitted"`},
+		"reported wrong": {model.Usage{In: -1, Out: 4, Reported: true}, 6, nil, `"amount":10`, `"source":"admitted"`},
 	} {
-		adm, err := c.Admit(1, "t", "api", 10, 20)
+		// Worst case 2+8 = 10; all five settle within the cap of 100 in
+		// any order.
+		adm, err := c.Admit(1, "t", "api", 2, 8)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

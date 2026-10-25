@@ -36,8 +36,10 @@ type PlanGuest struct {
 	// MaxOut is the output tokens a call is admitted at, its worst case:
 	// the CLI sets no cap of its own.
 	MaxOut int64
-	// Clock is the model clerk process's; it only orders the clerk's own
-	// owed log writes, since the kernel dates every one.
+	// Clock is the model clerk process's wall clock in unix ms. It orders
+	// the clerk's own owed log writes (the kernel dates every one), and it
+	// dates a pool reading: a missing or past reset becomes Clock plus the
+	// pool's declared window, and an owed reading is dropped at its reset.
 	Clock func() int64
 }
 
