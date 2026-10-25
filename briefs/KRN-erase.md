@@ -21,6 +21,7 @@ Entry types `subject.opened`, `content.stored`, `subject.erased` and `erase.conf
 ## Not in this package
 
 - Restore re-applying erases newer than a backup, the no-anchor, rolled-back and disagreeing holds, sealed classes and the passkey unseal; subject keys inside a backup: #2865 (comment on #2823 records the split).
+- Backups taken before an erase. SPEC accepts that they keep the item: LOG-4 reaches "every backup still to be made", the confirmation names older backups that still hold it, and a restore from one re-applies newer erases from the anchors (or holds sealed) before reading it. BAK-1 says nothing on how backups carry subject keys, and SPEC has no backup retention or re-keying, so an older backup holds the item until the owner deletes that backup. The first is #2865's (it carries the key table in each backup, minus erased subjects); the second is a spec question, not this package's.
 - `broker/vm` durable retirement and the old recall lineages (#2823 comments 6374258303 and 6366173391): their own row, filed in the split.
 - Rolling back a planner session that read an erased item, and rebuilding procedures and indexes without it: these need planner and projection read tracking that the kernel does not have; the FORGET follow-up names them when it is filed.
 - The owner-seam entry in docs/LANES.md and the FORGET reply and page: the FORGET follow-up.
