@@ -61,7 +61,7 @@ const (
 
 // The guest's fixed texts for a plan that did not run.
 const (
-	reasonNoKernel = "the box's kernel is not reached yet; nothing was submitted. Repeat plan with the same request_id later"
+	reasonNoKernel = "the kernel is not reached yet; nothing was submitted. Repeat plan with the same request_id later"
 	reasonNoKey    = "no key is granted to this machine yet, so no plan can run; the owner grants keys (KEY-4)"
 	reasonRejected = "the kernel rejected this plan (its key check, or a STOP in force), and no step ran; a reworded plan is not tried again (PLN-4)"
 	reasonRepeat   = "this request_id was used before; nothing new was submitted, and this is that plan's state"

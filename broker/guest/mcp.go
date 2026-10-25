@@ -56,7 +56,7 @@ type rpcError struct {
 var tools = []map[string]any{
 	{
 		"name": PlanTool,
-		"description": "Submit a plan to the box's kernel: steps run in order, each a verb on one clerk (an account or device) with string arguments. " +
+		"description": "Submit a plan to the kernel: steps run in order, each a verb on one clerk (an account or device) with string arguments. " +
 			"The kernel checks every step against this machine's key before anything runs, and runs the plan at most once per request_id. " +
 			"Repeat the same request_id, with or without steps, to read the plan's state; a new request_id is a new plan. Returns the plan's state.",
 		"inputSchema": map[string]any{
