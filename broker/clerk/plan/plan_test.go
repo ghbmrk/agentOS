@@ -46,6 +46,8 @@ type planFix struct {
 	answer    func(w http.ResponseWriter, r *http.Request, body string) bool
 	exchanges atomic.Int32
 	gate      chan struct{} // if set, a refresh waits on it
+	// stream, if set, answers a model call instead of the fake's own.
+	stream func(w http.ResponseWriter, r *http.Request)
 }
 
 func sealer(t *testing.T) clerk.Sealer {
@@ -132,6 +134,10 @@ func (f *planFix) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(f.tokens())
 	case "/backend-api/codex/responses", "/backend-api/codex/models":
+		if f.stream != nil && r.URL.Path == "/backend-api/codex/responses" {
+			f.stream(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Codex-Primary-Used-Percent", "12")
 		w.Header().Set("Set-Cookie", "session=s")
@@ -206,7 +212,7 @@ func signIn(t *testing.T, p *plan.Login, guest string) map[string]any {
 	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
 	}
-	resp, d := p.Do(context.Background(), guest, req("POST", "/oauth/token", codeForm(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}))
+	resp, d := p.Do(context.Background(), guest, req("POST", "/oauth/token", codeForm(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
 	if d != "" {
 		t.Fatalf("code exchange: %s", d)
 	}
@@ -225,15 +231,18 @@ func model(p *plan.Login, guest, bearer string) (*http.Response, string) {
 	if bearer != "" {
 		h["Authorization"] = "Bearer " + bearer
 	}
-	return p.Do(context.Background(), guest, req("POST", "/backend-api/codex/responses", `{"model":"m"}`, h))
+	return p.Do(context.Background(), guest, req("POST", "/backend-api/codex/responses", `{"model":"m"}`, h), free)
 }
+
+// free admits every model call and records nothing.
+func free([]byte) (func(plan.Used), string) { return func(plan.Used) {}, "" }
 
 func refreshBody(ph string) string {
 	return `{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"` + ph + `"}`
 }
 
 func refreshReq(p *plan.Login, guest, ph string) (*http.Response, string) {
-	return p.Do(context.Background(), guest, req("POST", "/oauth/token", refreshBody(ph), map[string]string{"Content-Type": "application/json"}))
+	return p.Do(context.Background(), guest, req("POST", "/oauth/token", refreshBody(ph), map[string]string{"Content-Type": "application/json"}), nil)
 }
 
 func noReal(t *testing.T, what, s string) {
@@ -296,7 +305,7 @@ func TestPlanInjectsOnlyAtDeclaredEndpoints(t *testing.T) {
 	}
 	read(t, resp)
 	up, body := f.last()
-	if up.Header.Get("Authorization") != "Bearer real-access-1" || body != `{"model":"m"}` || up.Host != f.host {
+	if up.Header.Get("Authorization") != "Bearer real-access-1" || body != `{"model":"m","store":false}` || up.Host != f.host {
 		t.Fatalf("upstream got %q %q %q", up.Header.Get("Authorization"), body, up.Host)
 	}
 	if up.Header.Get("Cookie") != "" || up.Header.Get("X-Forwarded-For") != "" {
@@ -307,7 +316,7 @@ func TestPlanInjectsOnlyAtDeclaredEndpoints(t *testing.T) {
 	}
 	q := httptest.NewRequest("GET", "http://x/backend-api/codex/models?client_version=0.162.1", nil)
 	q.Header.Set("Authorization", "Bearer "+g1.Tokens["access_token"])
-	if resp, d := p.Do(context.Background(), "g1", q); d != "" {
+	if resp, d := p.Do(context.Background(), "g1", q, nil); d != "" {
 		t.Fatalf("read: %s", d)
 	} else {
 		read(t, resp)
@@ -315,27 +324,27 @@ func TestPlanInjectsOnlyAtDeclaredEndpoints(t *testing.T) {
 	before := f.hits()
 	for name, c := range map[string]func() (*http.Response, string){
 		"undeclared path": func() (*http.Response, string) {
-			return p.Do(context.Background(), "g1", req("POST", "/backend-api/files", "{}", map[string]string{"Authorization": "Bearer " + g1.Tokens["access_token"]}))
+			return p.Do(context.Background(), "g1", req("POST", "/backend-api/files", "{}", map[string]string{"Authorization": "Bearer " + g1.Tokens["access_token"]}), nil)
 		},
 		"another guest's placeholder": func() (*http.Response, string) { return model(p, "g1", g2.Tokens["access_token"]) },
 		"the refresh placeholder":     func() (*http.Response, string) { return model(p, "g1", g1.Tokens["refresh_token"]) },
 		"no bearer":                   func() (*http.Response, string) { return model(p, "g1", "") },
 		"the real token itself":       func() (*http.Response, string) { return model(p, "g1", "real-access-1") },
 		"a sign-in step from a run guest": func() (*http.Response, string) {
-			return p.Do(context.Background(), "g1", req("POST", "/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`, map[string]string{"Content-Type": "application/json"}))
+			return p.Do(context.Background(), "g1", req("POST", "/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`, map[string]string{"Content-Type": "application/json"}), nil)
 		},
 		"an undeclared query": func() (*http.Response, string) {
 			r := httptest.NewRequest("GET", "http://x/backend-api/codex/models?client_version=1&x=2", nil)
 			r.Header.Set("Authorization", "Bearer "+g1.Tokens["access_token"])
-			return p.Do(context.Background(), "g1", r)
+			return p.Do(context.Background(), "g1", r, nil)
 		},
 		"a read with a body": func() (*http.Response, string) {
 			r := httptest.NewRequest("GET", "http://x/backend-api/codex/models", strings.NewReader("x"))
 			r.Header.Set("Authorization", "Bearer "+g1.Tokens["access_token"])
-			return p.Do(context.Background(), "g1", r)
+			return p.Do(context.Background(), "g1", r, nil)
 		},
 		"an encoded body": func() (*http.Response, string) {
-			return p.Do(context.Background(), "g1", req("POST", "/backend-api/codex/responses", "x", map[string]string{"Authorization": "Bearer " + g1.Tokens["access_token"], "Content-Encoding": "gzip"}))
+			return p.Do(context.Background(), "g1", req("POST", "/backend-api/codex/responses", "x", map[string]string{"Authorization": "Bearer " + g1.Tokens["access_token"], "Content-Encoding": "gzip"}), free)
 		},
 	} {
 		if resp, d := c(); resp != nil || d == "" {
@@ -426,7 +435,7 @@ func TestPlanRefreshSwapsBackToPlaceholders(t *testing.T) {
 		`{"grant_type":"refresh_token","refresh_token":"` + g.Tokens["refresh_token"] + `","extra":"x"}`,
 		`{"grant_type":"refresh_token","refresh_token":"` + g.Tokens["refresh_token"] + `"} {}`,
 	} {
-		if resp, _ := p.Do(context.Background(), "g", req("POST", "/oauth/token", b, nil)); resp != nil {
+		if resp, _ := p.Do(context.Background(), "g", req("POST", "/oauth/token", b, nil), nil); resp != nil {
 			t.Errorf("refresh %s was served", b)
 		}
 	}
@@ -606,7 +615,7 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp, d := p.Do(context.Background(), "s", req("POST", "/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`,
-		map[string]string{"Content-Type": "application/json", "Authorization": "Bearer x"}))
+		map[string]string{"Content-Type": "application/json", "Authorization": "Bearer x"}), nil)
 	if d != "" {
 		t.Fatalf("device step: %s", d)
 	}
@@ -617,7 +626,7 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 		t.Fatal("a device step carried a credential")
 	}
 	long := `{"client_id":"` + strings.Repeat("a", 513) + `"}`
-	if resp, _ := p.Do(context.Background(), "s", req("POST", "/api/accounts/deviceauth/usercode", long, map[string]string{"Content-Type": "application/json"})); resp != nil {
+	if resp, _ := p.Do(context.Background(), "s", req("POST", "/api/accounts/deviceauth/usercode", long, map[string]string{"Content-Type": "application/json"}), nil); resp != nil {
 		t.Fatal("a device step with an over-long value was served")
 	}
 	before := f.hits()
@@ -626,7 +635,7 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 		codeForm() + "&scope=x",
 		strings.Replace(codeForm(), "authorization_code", "password", 1),
 	} {
-		if resp, _ := p.Do(context.Background(), "s", req("POST", "/oauth/token", b, map[string]string{"Content-Type": "application/x-www-form-urlencoded"})); resp != nil {
+		if resp, _ := p.Do(context.Background(), "s", req("POST", "/oauth/token", b, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil); resp != nil {
 			t.Errorf("code exchange %s was served", b)
 		}
 	}
@@ -881,7 +890,7 @@ func TestPlanCancelledRefreshStillCommits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan string, 1)
 	go func() {
-		_, d := p.Do(ctx, "g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"}))
+		_, d := p.Do(ctx, "g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"}), nil)
 		done <- d
 	}()
 	for f.exchanges.Load() == 0 {

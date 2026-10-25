@@ -40,8 +40,9 @@ type Kind string
 
 const (
 	// Model is a model call: the guest's access placeholder in
-	// Authorization becomes the real token; the body passes as sent (its
-	// shape is the model clerk's to check, MIG-4-plan-login-b).
+	// Authorization becomes the real token, the body is held to the
+	// declared Body, and the model clerk's Meter admits and settles it
+	// (MIG-4-plan-login-b).
 	Model Kind = "model"
 	// Read is a bearer-authenticated GET with no body.
 	Read Kind = "read"
@@ -122,6 +123,10 @@ type Declaration struct {
 	ResponseHeaders, ResponsePrefixes []string
 	// MaxBody bounds a model call's body; 0 is 16 MiB.
 	MaxBody int64
+	// Body is a model call's request shape, and Pool how its answer states
+	// the plan's usage pool (RES-5).
+	Body Body
+	Pool Pool
 	// Guard is the home-network policy every dial goes through (DEV-2).
 	Guard *netguard.Policy
 }
@@ -209,9 +214,9 @@ type Login struct {
 	signing map[string]bool // sign-in guests, true once one committed the login
 	held    string          // a stop the slot could not record (fail closed)
 	// gen counts the logins the store has held: Remove and every sign-in
-	// commit move it, under cmu. A refresh exchange records it before it
-	// resolves the token it sends, so its answer is judged only against the
-	// login it was made for.
+	// commit move it, under cmu. A refresh exchange reads it together with
+	// the token it sends, under cmu, so its answer is judged only against
+	// the login it was made for.
 	gen uint64
 
 	cmu sync.Mutex // a commit or stop, from its load to its Put
@@ -335,6 +340,14 @@ func (p *Login) validate() error {
 	}
 	if a := p.token[fAccess]; a == nil || a.Optional || p.token[fID] == nil || len(d.AccountClaim) == 0 {
 		return errors.New("clerk: a token answer declares an access token, an id_token and its account claim")
+	}
+	for _, e := range d.Endpoints {
+		if e.Kind == Model {
+			if err := d.Body.validate(); err != nil {
+				return err
+			}
+			break
+		}
 	}
 	for _, c := range d.Refused {
 		p.refused[c] = true
@@ -745,8 +758,10 @@ func hasToken(h http.Header, name, token string) bool {
 // Do serves one request a guest made of its plan, and returns the answer to
 // give the guest, or a detail with nothing for the guest. The request's
 // method, path and query pick a declared endpoint; its host is the
-// endpoint's, whatever the guest named. The caller closes the answer's body.
-func (p *Login) Do(ctx context.Context, guest string, r *http.Request) (*http.Response, string) {
+// endpoint's, whatever the guest named. A model call is admitted and
+// settled by meter, and is refused without one. The caller closes the
+// answer's body.
+func (p *Login) Do(ctx context.Context, guest string, r *http.Request, meter Meter) (*http.Response, string) {
 	if r.Method == http.MethodConnect || r.Header.Get("Upgrade") != "" || hasToken(r.Header, "Connection", "upgrade") ||
 		r.URL.RawPath != "" || r.URL.Fragment != "" {
 		return nil, DUndeclared
@@ -816,10 +831,44 @@ func (p *Login) Do(ctx context.Context, guest string, r *http.Request) (*http.Re
 		if len(body) != 0 {
 			return nil, DUndeclared
 		}
+	case Model:
+		if meter == nil {
+			return nil, DUnmetered
+		}
+		out, rule := p.d.Body.check(body)
+		if rule != "" {
+			return nil, DBody + " " + rule
+		}
+		settle, detail := meter(out)
+		if detail != "" {
+			return nil, detail
+		}
+		up := p.upstream(ctx, r.Header, e, query, p.d.RequestHeaders, out)
+		up.Header.Set("Authorization", "Bearer "+real)
+		return p.sendModel(up, real, settle)
 	}
 	up := p.upstream(ctx, r.Header, e, query, p.d.RequestHeaders, body)
 	up.Header.Set("Authorization", "Bearer "+real)
 	return p.send(up, real)
+}
+
+// sendModel sends a metered model call. Its answer is read for its usage as
+// it passes to the guest, and the call is settled once it ends; a call that
+// gets no answer to pass is settled at once.
+func (p *Login) sendModel(up *http.Request, real string, settle func(Used)) (*http.Response, string) {
+	resp, err := p.client.Do(up)
+	if err != nil {
+		settle(Used{Sent: !errors.Is(err, netguard.ErrDenied)})
+		return nil, dialDetail(err, up.URL.Hostname())
+	}
+	pool := p.d.Pool.reading(resp.Header)
+	if encoded(resp.Header) {
+		resp.Body.Close()
+		settle(Used{Sent: true, Pool: pool})
+		return nil, DEncoded
+	}
+	resp.Body = newMeterReader(resp, settle, pool)
+	return p.answer(resp, real), ""
 }
 
 // bearer resolves the guest's own access placeholder from Authorization.
@@ -874,6 +923,12 @@ func (p *Login) send(up *http.Request, real string) (*http.Response, string) {
 		resp.Body.Close()
 		return nil, DEncoded
 	}
+	return p.answer(resp, real), ""
+}
+
+// answer is resp as the guest gets it: the declared headers only, and
+// real, if any, redacted from them and from the streamed body.
+func (p *Login) answer(resp *http.Response, real string) *http.Response {
 	out := &http.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: http.Header{}, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
 		ContentLength: -1, Body: resp.Body}
 	for k, vs := range resp.Header {
@@ -892,7 +947,7 @@ func (p *Login) send(up *http.Request, real string) (*http.Response, string) {
 	} else if resp.ContentLength >= 0 {
 		out.ContentLength = resp.ContentLength
 	}
-	return out, ""
+	return out
 }
 
 func (p *Login) answerHeader(k string) bool {
@@ -1352,6 +1407,38 @@ func Codex(guard *netguard.Policy) Declaration {
 		SignInHeaders:    []string{"Accept", "Content-Type", "User-Agent", "Originator"},
 		ResponseHeaders:  []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model"},
 		ResponsePrefixes: []string{"X-Codex-"},
-		Guard:            guard,
+		// The CLI's request: #809 saw model, input, tool_choice, include
+		// and stream; the rest are the fields the CLI's request type sets.
+		Body: Body{
+			Keys: []string{
+				"model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls",
+				"reasoning", "store", "stream", "include", "prompt_cache_key", "text", "client_metadata",
+			},
+			InputTypes: []string{
+				"message", "reasoning", "function_call", "function_call_output",
+				"custom_tool_call", "custom_tool_call_output", "additional_tools",
+			},
+			ContentTypes: []string{"input_text", "output_text", "input_image"},
+			ToolTypes:    clientToolTypes,
+			// The tools CLI 0.162.1 declares in code mode under the image's
+			// managed config, as captured (egress/testdata/codex-0.162.1-
+			// codemode.json): all in an additional_tools item.
+			Tools: []Tool{
+				{"functions", "exec", "custom"},
+				{"functions", "wait", "function"},
+				{"functions", "request_user_input", "function"},
+				{"functions", "request_user_input_async", "function"},
+				{"clock", "sleep", "function"},
+				{"collaboration", "followup_task", "function"},
+				{"collaboration", "interrupt_agent", "function"},
+				{"collaboration", "list_agents", "function"},
+				{"collaboration", "send_message", "function"},
+				{"collaboration", "spawn_agent", "function"},
+				{"collaboration", "wait_agent", "function"},
+			},
+		},
+		// The 5-hour and weekly windows of the one Codex pool (#809).
+		Pool:  Pool{Windows: []string{"X-Codex-Primary-", "X-Codex-Secondary-"}, Reached: "X-Codex-Rate-Limit-Reached-Type"},
+		Guard: guard,
 	}
 }
