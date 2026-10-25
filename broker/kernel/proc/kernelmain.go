@@ -16,7 +16,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
-	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -77,15 +76,10 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		return err
 	}
 	clock := func() int64 { return time.Now().UnixMilli() }
-	// The handoff carries the hardware keys as Ed25519 ones (#3116 follow-up).
-	var anchors []key.PublicKey
-	for _, a := range keys.Anchors {
-		anchors = append(anchors, key.Ed25519(a))
-	}
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
-		Anchors: anchors, Clerks: cfg.Clerks,
+		Anchors: keys.Anchors, Clerks: cfg.Clerks,
 	}, clock())
 	if err != nil {
 		return err
