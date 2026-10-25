@@ -4,11 +4,12 @@
 // test), so a crafted file can at worst take over a process with no
 // network, no broker state and a read-only root.
 //
-// It accepts JPEG and PNG by magic bytes, refuses more than MaxInput
-// bytes or MaxPixels pixels before decoding any pixel, applies the EXIF
-// orientation, shrinks the long side to at most MaxSide, and encodes a
-// new image and a thumbnail from the decoded pixels only, so no EXIF,
-// GPS, XMP, ICC profile, comment or embedded thumbnail can survive.
+// It accepts JPEG, PNG and HEIC/HEIF by magic bytes, refuses more than
+// MaxInput bytes or MaxPixels pixels before decoding any pixel, applies the EXIF orientation (a
+// HEIC's irot and imir instead), shrinks the long side to at most
+// MaxSide, and encodes a new image and a thumbnail from the decoded
+// pixels only, so no EXIF, GPS, XMP, ICC profile, comment or embedded
+// thumbnail can survive. A HEIC comes out as a JPEG.
 package decoder
 
 import (
@@ -21,6 +22,9 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"math"
+
+	"github.com/gen2brain/h265/heic"
 )
 
 // Limits from CH-23 (first release, not owner-settable), and the
@@ -79,6 +83,36 @@ var (
 	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
 )
 
+// heicBrands are the ftyp brands of an HEVC-coded HEIF file. A file
+// whose brands are only the generic mif1 or msf1 (an AVIF, say) is not
+// one: it is refused as type, not tried.
+var heicBrands = map[string]bool{
+	"heic": true, "heix": true, "heim": true, "heis": true,
+	"hevc": true, "hevx": true, "hevm": true, "hevs": true,
+}
+
+// IsHEIC reports whether raw starts with an ftyp box naming an HEVC
+// HEIF brand, as its major brand or a compatible one. It reads only
+// that box.
+func IsHEIC(raw []byte) bool {
+	if len(raw) < 16 || string(raw[4:8]) != "ftyp" {
+		return false
+	}
+	n := int(binary.BigEndian.Uint32(raw))
+	if n < 16 || n > len(raw) {
+		return false
+	}
+	if heicBrands[string(raw[8:12])] {
+		return true
+	}
+	for i := 16; i+4 <= n; i += 4 {
+		if heicBrands[string(raw[i:i+4])] {
+			return true
+		}
+	}
+	return false
+}
+
 // Run reads one file from r and writes its frame to w. A refused file
 // writes nothing and returns a Refusal.
 func Run(r io.Reader, w io.Writer) error {
@@ -102,11 +136,14 @@ func Decode(raw []byte) ([]byte, error) {
 	var format string
 	var config func(io.Reader) (image.Config, error)
 	var decode func(io.Reader) (image.Image, error)
+	heif := false
 	switch {
 	case bytes.HasPrefix(raw, jpegMagic):
 		format, config, decode = "jpeg", jpeg.DecodeConfig, jpeg.Decode
 	case bytes.HasPrefix(raw, pngMagic):
 		format, config, decode = "png", png.DecodeConfig, png.Decode
+	case IsHEIC(raw):
+		format, config, heif = "jpeg", heic.DecodeConfig, true
 	default:
 		return nil, RefuseType
 	}
@@ -114,11 +151,18 @@ func Decode(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, RefuseDecode
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxPixels {
+	if heif && !still(raw) {
+		return nil, RefuseDecode
+	}
+	pixels := int64(cfg.Width) * int64(cfg.Height)
+	if cfg.Width <= 0 || cfg.Height <= 0 || pixels > MaxPixels {
 		return nil, RefusePixels
 	}
+	if heif {
+		decode = heifDecoder(pixels)
+	}
 	orient := 1
-	if format == "jpeg" {
+	if format == "jpeg" && !heif {
 		orient = Orientation(raw)
 	}
 	src, err := decode(bytes.NewReader(raw))
@@ -126,7 +170,13 @@ func Decode(raw []byte) ([]byte, error) {
 		return nil, RefuseDecode
 	}
 	b := src.Bounds()
-	if b.Dx() != cfg.Width || b.Dy() != cfg.Height {
+	if heif {
+		// irot may turn the picture and clap may crop it, so it fits the
+		// declared size either way up, never more.
+		if b.Dx() < 1 || b.Dy() < 1 || !(b.Dx() <= cfg.Width && b.Dy() <= cfg.Height || b.Dx() <= cfg.Height && b.Dy() <= cfg.Width) {
+			return nil, RefuseDecode
+		}
+	} else if b.Dx() != cfg.Width || b.Dy() != cfg.Height {
 		return nil, RefuseDecode
 	}
 	img := Orient(Shrink(src, MaxSide), orient)
@@ -149,6 +199,61 @@ func Decode(raw []byte) ([]byte, error) {
 	frame := make([]byte, 0, len(line)+1+out.Len()+tout.Len())
 	frame = append(append(append(append(frame, line...), '\n'), out.Bytes()...), tout.Bytes()...)
 	return frame, nil
+}
+
+// still reports whether raw has no top-level moov box and splits into
+// top-level boxes the way h265 splits them. h265 decodes a file's moov
+// track frame by frame whenever its meta names no usable primary item,
+// so a file with one is refused, as a photo is a still.
+func still(raw []byte) bool {
+	for b := raw; len(b) >= 8; {
+		typ, _, rest, framed := nextBox(b)
+		if !framed || typ == "moov" {
+			return false
+		}
+		b = rest
+	}
+	return true
+}
+
+// nextBox splits off b's first ISOBMFF box: its type, its body and what
+// follows it. A 64-bit size and a size of 0 (to the end) are read.
+func nextBox(b []byte) (typ string, body, rest []byte, ok bool) {
+	if len(b) < 8 {
+		return "", nil, nil, false
+	}
+	n, h := uint64(binary.BigEndian.Uint32(b)), uint64(8)
+	switch n {
+	case 0:
+		n = uint64(len(b))
+	case 1:
+		if len(b) < 16 {
+			return "", nil, nil, false
+		}
+		n, h = binary.BigEndian.Uint64(b[8:]), 16
+	}
+	if n < h || n > uint64(len(b)) {
+		return "", nil, nil, false
+	}
+	return string(b[4:8]), b[h:n], b[n:], true
+}
+
+// heicThreads bounds the goroutines one HEIC decode uses, so its peak
+// memory, measured on four cores against photo.HEICMemBytes (ASSUMPTIONS
+// CH-photo-heic-1), does not grow with the host's core count.
+const heicThreads = 4
+
+// heifDecoder decodes a HEIC's primary image with its clap, irot and
+// imir applied. Its coded frames may be no larger than the declared
+// size plus one 64-sample coding tree block of padding each way, so a
+// file whose ispe lies small cannot allocate past the limit; a picture
+// sequence's other frames and the file's Exif, XMP and ICC profile are
+// never decoded into the output.
+func heifDecoder(pixels int64) func(io.Reader) (image.Image, error) {
+	return func(r io.Reader) (image.Image, error) {
+		side := int64(math.Sqrt(float64(pixels))) + 1
+		return heic.Decode(r, heic.Options{AutoRotate: true, FrameSizeLimit: int(pixels + 2*64*side + 64*64), Threads: heicThreads})
+	}
 }
 
 func encode(w io.Writer, img *image.RGBA, format string) error {
@@ -237,6 +342,16 @@ func readRow(src image.Image, x0, y int, row []uint8) {
 	case *image.RGBA:
 		i := s.PixOffset(x0, y)
 		copy(row, s.Pix[i:i+4*n])
+	case *image.NRGBA:
+		i := s.PixOffset(x0, y)
+		for x := range n {
+			p := s.Pix[i+4*x : i+4*x+4]
+			a := uint32(p[3])
+			row[4*x] = uint8((uint32(p[0])*a + 127) / 255)
+			row[4*x+1] = uint8((uint32(p[1])*a + 127) / 255)
+			row[4*x+2] = uint8((uint32(p[2])*a + 127) / 255)
+			row[4*x+3] = p[3]
+		}
 	default:
 		for x := range n {
 			r, g, b, a := src.At(x0+x, y).RGBA()
