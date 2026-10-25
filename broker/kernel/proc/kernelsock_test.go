@@ -97,7 +97,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if from, ok, err := o.Granted(ver.Root()); err != nil || !ok || from == 0 {
 		t.Fatalf("the root's grant over the socket: %d %v %v", from, ok, err)
 	}
-	for _, a := range []func() error{func() error { return o.Unpause(id) }, func() error { return o.Resume() }, func() error { return o.Cancel("o1") }} {
+	for _, a := range []func() error{func() error { return o.Unpause(id) }, func() error { return o.Resume(1) /* the one STOP above */ }, func() error { return o.Cancel("o1") }} {
 		if err := a(); err != nil {
 			t.Fatal(err)
 		}
@@ -526,7 +526,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "unpause", op: "unpause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},
 		{name: "stop", op: "stop", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Stop() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(now()) }},
 		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
-		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now()) }},
+		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
 		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
 		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0) }},
 		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},

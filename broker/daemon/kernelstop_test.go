@@ -28,6 +28,9 @@ type fakeKernel struct {
 	lost bool
 	// hang: STOP and RESUME are taken and never answered.
 	hang bool
+	// queue: RESUME is taken and waits, unserved, in queued until serve.
+	queue  bool
+	queued []uint64
 	// steps are the unsettled steps; unlisted refuses their read alone.
 	steps    []KernelStep
 	unlisted bool
@@ -67,16 +70,27 @@ func (k *fakeKernel) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (k *fakeKernel) Resume(ctx context.Context) error {
+func (k *fakeKernel) Resume(ctx context.Context, stops uint64) error {
 	k.mu.Lock()
-	if k.hang {
+	if k.hang || k.queue {
+		if k.queue {
+			k.queued = append(k.queued, stops)
+		}
 		k.mu.Unlock()
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	defer k.mu.Unlock()
+	return k.resume(stops)
+}
+
+// resume is the kernel's RESUME: refused unless it names the last STOP.
+func (k *fakeKernel) resume(stops uint64) error {
 	if err := k.refuse(); err != nil {
 		return err
+	}
+	if stops != uint64(k.stops) {
+		return errors.New("refused: a STOP was logged after this RESUME was sent")
 	}
 	k.resumes++
 	k.stopped = false
@@ -86,11 +100,21 @@ func (k *fakeKernel) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (k *fakeKernel) Stopped(context.Context) (bool, error) {
+func (k *fakeKernel) Stopped(context.Context) (bool, uint64, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.reads++
-	return k.stopped, k.refuse()
+	return k.stopped, uint64(k.stops), k.refuse()
+}
+
+// serve serves the queued RESUMEs, after whatever was served since.
+func (k *fakeKernel) serve() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, n := range k.queued {
+		k.resume(n)
+	}
+	k.queued, k.queue = nil, false
 }
 
 func (k *fakeKernel) Status(context.Context) ([]KernelStep, error) {
@@ -356,5 +380,33 @@ func TestAFailedRESUMELeavesTheKernelStopped(t *testing.T) {
 	}
 	if err := b.Resume(); err == nil || !k2.stopped || !b.Engine.Stopped() {
 		t.Fatalf("kernel answer lost: %v, kernel %+v", err, k2)
+	}
+}
+
+// A RESUME agentosd gave up on, served by the kernel only after the
+// owner's next STOP, leaves the kernel stopped: it names the STOPs read
+// with it, and the kernel refuses it once a later STOP is logged (#3078,
+// CH-2).
+func TestAStaleRESUMEDoesNotLiftTheOwnersLaterSTOP(t *testing.T) {
+	defer func(d time.Duration) { kernelFor = d }(kernelFor)
+	kernelFor = 200 * time.Millisecond
+	k := &fakeKernel{}
+	dir := withKernel(t, k)
+	if r := text(t, dir, owner, "STOP"); !strings.HasPrefix(r[0], "Stopped.") {
+		t.Fatalf("STOP: %q", r)
+	}
+	k.set(func(k *fakeKernel) { k.queue = true })
+	if r := resume(t, dir); !strings.HasPrefix(r, "RESUME failed") {
+		t.Fatalf("RESUME the kernel never served: %q", r)
+	}
+	if r := text(t, dir, owner, "STOP"); !strings.HasPrefix(r[0], "Stopped.") {
+		t.Fatalf("the owner's next STOP: %q", r)
+	}
+	k.serve()
+	if r := text(t, dir, owner, "STATUS")[0]; !strings.HasPrefix(r, "Stopped.") || !k.stopped || k.resumes != 0 {
+		t.Fatalf("after the stale RESUME was served: %q, kernel %+v", r, k)
+	}
+	if r := resume(t, dir); !strings.HasPrefix(r, "Resumed.") || k.stopped {
+		t.Fatalf("a RESUME after the STOP: %q, kernel %+v", r, k)
 	}
 }

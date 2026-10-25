@@ -633,8 +633,20 @@ func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPa
 func (k *Kernel) Unpause(now int64, id key.ID) error {
 	return k.owner(now, TKeyResumed, keyID{id})
 }
-func (k *Kernel) Stop(now int64) error   { return k.owner(now, TStop, struct{}{}) }
-func (k *Kernel) Resume(now int64) error { return k.owner(now, TResume, struct{}{}) }
+func (k *Kernel) Stop(now int64) error { return k.owner(now, TStop, struct{}{}) }
+
+// ErrStaleResume refuses a RESUME sent before a STOP the kernel has since
+// logged: an owner told that STOP holds must not see it lifted (#3078).
+var ErrStaleResume = errors.New("kernel: a STOP was logged after this RESUME was sent")
+
+// Resume lifts the STOP whose count it names (State.Stops), and only that
+// one: a RESUME that waited behind a later STOP is refused, unlogged.
+func (k *Kernel) Resume(now int64, stops uint64) error {
+	if stops != k.s.Stops {
+		return ErrStaleResume
+	}
+	return k.owner(now, TResume, struct{}{})
+}
 
 // owner records an owner action and anchors the head at once, so a widening
 // the owner confirmed survives a restart (KRN-7, LOG-2). When the anchor

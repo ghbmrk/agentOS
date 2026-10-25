@@ -156,7 +156,7 @@ func (tk *testKernel) resume() {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
 	tk.at++
-	if err := tk.k.Resume(tk.at); err != nil {
+	if err := tk.k.Resume(tk.at, tk.k.State().Stops); err != nil {
 		tk.t.Fatal(err)
 	}
 }
