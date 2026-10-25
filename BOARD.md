@@ -53,6 +53,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | queued (later) |
 | CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
 | KRN-resume-gen | RESUME carries the stop generation it lifts; the kernel refuses a stale one (#3077 Security release 1); needs a Trusted-core decision. | MIG-4-daemon-retry | queued (sub B; tier A) |
+| MIG-4-owner-followups | Owner seam follow-ups from #3093: a test case for each journal state in `daemon/journalowner`, and a fail-visible `control.Phase` zero value, or both dropped with #2783 (c). | MIG-4-untrusted-owner | queued (sub B; tier A) |
 
 ## Harness and operating model
 
