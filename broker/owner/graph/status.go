@@ -142,7 +142,7 @@ func (g *Graph) Lines(candidates []Proposal) []string {
 			}
 			s := fmt.Sprintf("%s (%s) is lost to one failure %s.", g.name(k[0]), c, cause)
 			for i, r := range ranked {
-				if !r.weakens && !after[i][c][k] {
+				if r.acceptable() && !after[i][c][k] {
 					s += " Fix: " + r.p.Text
 					break
 				}

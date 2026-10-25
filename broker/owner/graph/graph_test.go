@@ -773,6 +773,68 @@ func TestProposalNeverWeakensAnAsset(t *testing.T) {
 	if eff, _ := world.Effect(unwatch); !eff.Weakens {
 		t.Error("a vault no pair could take before now falls to a pair: must weaken")
 	}
+	// Every asset of the after state is judged, new ones included, against
+	// the floor of its own maker or provider (round 2 on #3193).
+	newSingle := Proposal{Text: "Add a broker app on the phone", Minutes: 1,
+		AddNodes: []Node{n("brk", Account, "Broker", dom("phone"), Money)},
+		AddEdges: []Edge{e(Act, "brk", "ph")}}
+	if eff, _ := world.Effect(newSingle); !eff.Weakens {
+		t.Error("a new money account the phone alone takes is not flagged")
+	}
+	newCut := Proposal{Text: "Add a cloud wallet", Minutes: 1,
+		AddNodes: []Node{n("wal", Account, "Wallet", dom("provider:wal"), Money), n("v.c", Provider, "Cloud", dom("provider:cloud"))},
+		AddEdges: []Edge{e(Act, "wal", "k1", "k2"), e(Cutoff, "wal", "v.c")}}
+	if eff, _ := world.Effect(newCut); !eff.Weakens {
+		t.Error("a new asset the owner can be cut off from is not flagged")
+	}
+	ownOnly := Proposal{Text: "Add a savings account on both keys", Minutes: 1,
+		AddNodes: []Node{n("sav", Account, "Savings", dom("provider:sav"), Money)},
+		AddEdges: []Edge{e(Act, "sav", "k1", "k2")}}
+	if eff, _ := world.Effect(ownOnly); eff.Weakens {
+		t.Error("a new account only its own provider can take is flagged")
+	}
+	// A second pair beside an existing pair is at the old smallest cut.
+	pairWorld := mustNew(t, []Node{own,
+		n("ph", Device, "Phone", dom("phone")), n("k1", Key, "Key A", dom("maker:a")), n("k2", Key, "Key B", dom("maker:b")),
+		n("mail", Account, "Mailbox", dom("provider:mail")), brakeSet("hold", "Hold"),
+		n("bank", Account, "Bank", dom("provider:bank"), Money),
+	}, []Edge{e(Act, "ph", "p"), e(Act, "k1", "p"), e(Act, "k2", "p"), e(Act, "mail", "k2"), e(Act, "bank", "k1"),
+		e(Brake, "bank", "hold"), e(Watch, "bank", "mail")})
+	pairBeside := Proposal{Text: "Use the bank app on the phone", Minutes: 1, AddEdges: []Edge{e(Act, "bank", "ph")}}
+	if eff, _ := pairWorld.Effect(pairBeside); !eff.Weakens {
+		t.Errorf("a second pair beside a pair is not flagged: %v", pairWorld.CutSets(Money))
+	}
+	// A class may not fall even through an asset that clears its floor:
+	// money at 2 plus a new account its own provider takes is gain -1.
+	// It also drops the registrar's two device resets, so it has steps.
+	savings := mustNew(t, []Node{own, n("w", NodeKind, "Watcher", dom("w")), brakeSet("hold", "Hold"),
+		n("vault", Account, "Vault", dom("provider:vault"), Money),
+		n("ph", Device, "Phone", dom("phone")), n("tb", Device, "Tablet", dom("tablet")),
+		n("reg", Account, "Registrar", dom("provider:reg"), Identity)},
+		[]Edge{e(Act, "vault", "p"), e(Brake, "vault", "hold"), e(Watch, "vault", "w"),
+			e(Act, "ph", "p"), e(Act, "tb", "p"), e(Act, "reg", "p"), e(Reset, "reg", "ph"), e(Reset, "reg", "tb")})
+	connect := Proposal{Text: "Connect savings and drop device resets", Minutes: 1, Structural: true,
+		AddNodes:  []Node{n("sav", Account, "Savings", dom("provider:sav"), Money)},
+		AddEdges:  []Edge{e(Act, "sav", "p")},
+		DropEdges: []Edge{e(Reset, "reg", "ph"), e(Reset, "reg", "tb")}}
+	if eff, _ := savings.Effect(connect); eff.Weakens || eff.Gain >= 0 || eff.Steps <= 0 {
+		t.Errorf("connect: weakens %v gain %d steps %d; want unflagged, gain below 0, steps above 0", eff.Weakens, eff.Gain, eff.Steps)
+	}
+	if eff, _ := savings.Effect(connect); !eff.Lowers() {
+		t.Error("money from 2 to 1 not read as lowering a class")
+	}
+	if p, ok := savings.Next([]Proposal{connect}); ok {
+		t.Errorf("Next recommends %q, which takes money from 2 failures to 1", p.Text)
+	}
+	// A proposal never changes who the owner is.
+	ghost := n("p2", Person, "Me again", nil)
+	ghost.Owner = true
+	if _, err := world.Apply(Proposal{AddNodes: []Node{ghost}}); err == nil {
+		t.Error("Apply added a second owner, which could mask a lock-out")
+	}
+	if p, ok := world.Next([]Proposal{{Text: "ghost", Structural: true, AddNodes: []Node{ghost}, DropEdges: []Edge{e(Act, "bank", "ph")}}}); ok {
+		t.Errorf("Next recommends %q", p.Text)
+	}
 	// A second asset of a class already at 1 is still guarded: the class
 	// minimum does not move, but the bank gains a single cut.
 	second := Proposal{Text: "Let the phone reset the bank", Minutes: 1, AddEdges: []Edge{e(Reset, "bank", "ph")}}
@@ -795,4 +857,194 @@ func TestProposalNeverWeakensAnAsset(t *testing.T) {
 	if p, ok := probe.Next([]Proposal{trade}); ok {
 		t.Errorf("probe: Next recommends %q", p.Text)
 	}
+}
+
+// naiveCuts lists an asset's minimal cuts of size 1 and 2 by brute force.
+func naiveCuts(nodes []Node, edges []Edge, asset string, c Class, doms []string) [][]string {
+	var out [][]string
+	single := map[string]bool{}
+	for _, x := range doms {
+		if naiveTaken(nodes, edges, asset, c, map[string]bool{x: true}) {
+			single[x] = true
+			out = append(out, []string{x})
+		}
+	}
+	for i, x := range doms {
+		for _, y := range doms[i+1:] {
+			if !single[x] && !single[y] && naiveTaken(nodes, edges, asset, c, map[string]bool{x: true, y: true}) {
+				out = append(out, []string{x, y})
+			}
+		}
+	}
+	return out
+}
+
+// naiveWeakens restates the invariant of TN-graph-A16 from scratch: cuts by
+// brute force, reach and cut-off providers from CutOffs.
+func naiveWeakens(g, h *Graph) bool {
+	gn, ge, hn, he := g.Nodes(), g.Edges(), h.Nodes(), h.Edges()
+	gd, hd := g.Domains(), h.Domains()
+	offs := func(x *Graph, c Class) (map[string]map[string]bool, map[string]bool) {
+		cut, un := x.CutOffs(c)
+		m := map[string]map[string]bool{}
+		for _, o := range cut {
+			m[o.Asset] = map[string]bool{}
+			for _, p := range o.Providers {
+				m[o.Asset][p] = true
+			}
+		}
+		u := map[string]bool{}
+		for _, a := range un {
+			u[a] = true
+		}
+		return m, u
+	}
+	for _, c := range Classes {
+		gOff, gUn := offs(g, c)
+		hOff, hUn := offs(h, c)
+		for _, a := range hn {
+			if !hasClass(a, c) {
+				continue
+			}
+			var before [][]string
+			min := 1
+			old, existed := g.Node(a.ID)
+			if existed && hasClass(old, c) {
+				if !gUn[a.ID] && hUn[a.ID] {
+					return true
+				}
+				for p := range hOff[a.ID] {
+					if !gOff[a.ID][p] {
+						return true
+					}
+				}
+				before = naiveCuts(gn, ge, a.ID, c, gd)
+				min = 3
+				for _, cut := range before {
+					if len(cut) < min {
+						min = len(cut)
+					}
+				}
+			} else {
+				if len(hOff[a.ID]) > 0 {
+					return true
+				}
+				for _, d := range a.Domains {
+					only := true
+					for _, o := range hn {
+						if o.ID != a.ID && contains(o.Domains, d) {
+							only = false
+						}
+					}
+					if only {
+						before = append(before, []string{d})
+					}
+				}
+			}
+			for _, cut := range naiveCuts(hn, he, a.ID, c, hd) {
+				if len(cut) <= min && !hasCut(before, cut) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TN-graph-e: Effect.Weakens matches the invariant, restated from scratch,
+// over every one-step mutation of Ana's household: each edge dropped, new
+// single and AND edges onto each asset, a new cut-off onto each asset, the
+// card limit set, and a new money account under each kind of label.
+func TestWeakensInvariantOverFixtureMutations(t *testing.T) {
+	g := household(t, true)
+	var ps []Proposal
+	for _, ed := range g.Edges() {
+		ps = append(ps, Proposal{Text: "drop", DropEdges: []Edge{ed}})
+	}
+	var assets []string
+	for _, x := range g.Nodes() {
+		if len(x.Assets) > 0 {
+			assets = append(assets, x.ID)
+		}
+	}
+	for _, a := range assets {
+		for _, src := range []string{"k.one", "d.phone", "a.mail", "a.carrier", "n.core"} {
+			ps = append(ps, Proposal{Text: "add", AddEdges: []Edge{e(Act, a, src)}})
+		}
+		for _, and := range [][]string{{"k.one", "k.two"}, {"d.phone", "k.one"}, {"a.mail", "a.carrier"}} {
+			ps = append(ps, Proposal{Text: "and", AddEdges: []Edge{e(Act, a, and...)}})
+		}
+		ps = append(ps, Proposal{Text: "cutoff", AddEdges: []Edge{e(Cutoff, a, "v.google")}})
+	}
+	ps = append(ps, cardLimit, witness, both, carKey, bankReset)
+	for _, d := range [][]string{nil, dom("phone:ana"), dom("maker:yubico"), dom("provider:new")} {
+		for _, from := range [][]string{{"k.one"}, {"k.one", "k.two"}, {"d.phone", "k.one"}} {
+			ps = append(ps, Proposal{Text: "new account",
+				AddNodes: []Node{n("a.new", Account, "New account", d, Money)},
+				AddEdges: []Edge{e(Act, "a.new", from...)}})
+		}
+	}
+	for _, kind := range []Kind{Device, Account, Provider} {
+		ps = append(ps, Proposal{Text: "node", AddNodes: []Node{n("x.new", kind, "New thing", nil)},
+			AddEdges: []Edge{e(Act, "x.new", "p.owner"), e(Act, "a.bank", "x.new")}})
+		ps = append(ps, Proposal{Text: "node cuts", AddNodes: []Node{n("x.new", kind, "New thing", dom("provider:x"))},
+			AddEdges: []Edge{e(Cutoff, "a.registrar", "x.new")}})
+	}
+	// Changing the owner set is refused outright.
+	ghost := n("p.ghost", Person, "Ana again", nil)
+	ghost.Owner = true
+	if _, err := g.Apply(Proposal{AddNodes: []Node{ghost}, AddEdges: []Edge{e(Act, "a.mail", "p.ghost")}}); err == nil {
+		t.Error("a proposal added an owner node")
+	}
+	weak, fine := 0, 0
+	for i, p := range ps {
+		h, err := g.Apply(p)
+		if err != nil {
+			t.Fatalf("mutation %d: %v", i, err)
+		}
+		eff, err := g.Effect(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := naiveWeakens(g, h); eff.Weakens != want {
+			t.Errorf("mutation %d %+v: Weakens %v, invariant says %v", i, p, eff.Weakens, want)
+		}
+		if eff.Weakens {
+			weak++
+			continue
+		}
+		fine++
+		// What passes never locks the owner out of an asset.
+		for _, c := range Classes {
+			_, ub := g.CutOffs(c)
+			_, ua := h.CutOffs(c)
+			for _, x := range ua {
+				if x != "a.new" && !contains(ub, x) {
+					t.Errorf("mutation %d passed but locks the owner out of %s", i, x)
+				}
+			}
+		}
+		// What passes never shrinks an existing asset's smallest cut.
+		for _, c := range Classes {
+			for _, a := range assets {
+				x, _ := g.Node(a)
+				if hasClass(x, c) && smallestNaive(h, a, c) < smallestNaive(g, a, c) {
+					t.Errorf("mutation %d passed but shrank %s's %s cut", i, a, c)
+				}
+			}
+		}
+	}
+	if weak == 0 || fine == 0 {
+		t.Fatalf("mutations not discriminating: %d weaken, %d pass", weak, fine)
+	}
+}
+
+func smallestNaive(g *Graph, asset string, c Class) int {
+	min := 3
+	for _, cut := range naiveCuts(g.Nodes(), g.Edges(), asset, c, g.Domains()) {
+		if len(cut) < min {
+			min = len(cut)
+		}
+	}
+	return min
 }

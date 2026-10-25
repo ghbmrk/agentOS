@@ -18,7 +18,8 @@ type Proposal struct {
 }
 
 // Apply returns the graph with p applied. The receiver is never changed.
-// It refuses a dropped edge or a brake that is not in the graph.
+// It refuses a dropped edge or a brake that is not in the graph, and any
+// added owner node: a proposal never changes who the owner is.
 func (g *Graph) Apply(p Proposal) (*Graph, error) {
 	nodes := g.Nodes()
 	for _, id := range p.SetBrakes {
@@ -41,6 +42,13 @@ func (g *Graph) Apply(p Proposal) (*Graph, error) {
 			return nil, fmt.Errorf("graph: proposal drops a %s edge to %q that is not in the graph", d.Kind, d.To)
 		}
 		edges = append(edges[:k], edges[k+1:]...)
+	}
+	for _, n := range p.AddNodes {
+		if n.Owner {
+			// The owner set is what reach is measured from: a proposal that
+			// adds an owner could mask a lock-out of the real one.
+			return nil, fmt.Errorf("graph: proposal adds owner node %q", n.ID)
+		}
 	}
 	nodes = append(nodes, p.AddNodes...)
 	edges = append(edges, p.AddEdges...)
@@ -98,14 +106,15 @@ func (g *Graph) Weakest() (Class, bool) { return g.Board().Weakest() }
 type Effect struct {
 	Before, After Board
 	Gain          int // the sum over classes of the rise in ThiefNeed and the fall in CutOff
-	// Weakens is set when some asset, in any class, is worse off after:
-	// the owner reached it before and no longer does; a provider can now
-	// cut the owner off from it that could not before; a single domain now
-	// takes it that did not before; or a pair now takes it when nothing
-	// under three failures did before. A new pair beside an existing single
-	// or pair is no regression (the smallest cut does not shrink). Next and
-	// the STATUS fixes never offer a proposal that weakens, whatever its
-	// gain.
+	// Weakens is set when the proposal breaks the non-regression
+	// invariant for some asset in the after state, new assets included
+	// (TN-graph-A16): the owner must still reach every asset reached
+	// before; no asset may gain a cut-off provider; and no asset may gain a
+	// thief cut (a single domain or a pair) at or below its old smallest
+	// cut. A new asset's old state is its own maker or provider alone: one
+	// failure of a domain only it carries, no other cut, no cut-off
+	// provider. Next and the STATUS fixes never offer a proposal that
+	// weakens, whatever its gain.
 	Weakens bool
 	// Steps is the fall in single-domain cuts across every asset and class
 	// plus the fall in assets some provider can cut off: progress the
@@ -119,6 +128,7 @@ type facts struct {
 	cuts    [][]string
 	cutBy   map[string]bool
 	reached bool
+	owned   []string // domains no other node carries
 }
 
 // exposure is, per asset and class, its cuts, its cut-off providers and
@@ -130,7 +140,13 @@ func (g *Graph) exposure() exposure {
 	base := g.reach(make([]bool, len(g.nodes)))
 	for _, c := range Classes {
 		for _, a := range g.assets(c) {
-			x[[2]string{g.nodes[a].ID, string(c)}] = &facts{cutBy: map[string]bool{}, reached: base[a]}
+			f := &facts{cutBy: map[string]bool{}, reached: base[a]}
+			for _, d := range g.nodes[a].Domains {
+				if g.onlyCarrier(d, g.nodes[a].ID) {
+					f.owned = append(f.owned, d)
+				}
+			}
+			x[[2]string{g.nodes[a].ID, string(c)}] = f
 		}
 		for _, cut := range g.CutSets(c) {
 			f := x[[2]string{cut.Asset, string(c)}]
@@ -157,34 +173,54 @@ func (f *facts) smallest() int {
 	return n
 }
 
-// weakens reports whether after leaves any asset of before worse off; see
-// Effect.Weakens (KRN-11, D-152).
+// baseline is what a new asset is held to: its own maker or provider alone
+// can take it (a single cut of each domain only it carries, the floor any
+// asset has), nothing else, and no provider can cut the owner off from it.
+func baseline(a *facts) *facts {
+	b := &facts{cutBy: map[string]bool{}}
+	for _, d := range a.owned {
+		b.cuts = append(b.cuts, []string{d})
+	}
+	return b
+}
+
+// weakens checks the non-regression invariant (Effect.Weakens, TN-graph-A16)
+// over every asset and class in after:
+//
+//	reached(before) => reached(after)
+//	cutOffProviders(after) is a subset of cutOffProviders(before)
+//	every cut of after that before lacks is larger than before's smallest
+//
+// where a new asset's before is its baseline and its smallest is taken as 1.
 func (before exposure) weakens(after exposure) bool {
 	for k, a := range after {
-		b, ok := before[k]
-		if !ok {
-			continue // a new asset has nothing to regress from
+		b, min := before[k], 0
+		if b == nil {
+			b, min = baseline(a), 1
+		} else {
+			min = b.smallest()
 		}
 		if b.reached && !a.reached {
 			return true // locked out: cut off by nothing at all
-		}
-		min := b.smallest()
-		for _, cut := range a.cuts {
-			covered := false
-			for _, old := range b.cuts {
-				if subset(old, cut) {
-					covered = true
-					break
-				}
-			}
-			if !covered && (len(cut) == 1 || len(cut) < min) {
-				return true
-			}
 		}
 		for p := range a.cutBy {
 			if !b.cutBy[p] {
 				return true
 			}
+		}
+		for _, cut := range a.cuts {
+			if len(cut) <= min && !hasCut(b.cuts, cut) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasCut(cuts [][]string, c []string) bool {
+	for _, x := range cuts {
+		if len(x) == len(c) && subset(x, c) {
+			return true
 		}
 	}
 	return false
@@ -254,6 +290,7 @@ type ranked struct {
 	gain    int
 	steps   int
 	weakens bool
+	lowers  bool // some class's ThiefNeed falls or CutOff rises
 }
 
 func minutes(p Proposal) int {
@@ -272,7 +309,7 @@ func (g *Graph) rank(candidates []Proposal) []ranked {
 		if err != nil {
 			continue
 		}
-		rs = append(rs, ranked{p, e.Gain, e.Steps, e.Weakens})
+		rs = append(rs, ranked{p, e.Gain, e.Steps, e.Weakens, e.Lowers()})
 	}
 	sort.SliceStable(rs, func(i, j int) bool {
 		a, b := rs[i], rs[j]
@@ -290,13 +327,29 @@ func (g *Graph) rank(candidates []Proposal) []ranked {
 	return rs
 }
 
-// Next picks the next action among candidates that weaken no asset
-// (Effect.Weakens) and have gain or steps above zero: structural ones first,
-// then the highest gain per owner minute, then steps per minute, then by
-// Text. It returns false when none qualifies.
+// Lowers reports whether some class scores worse after: a lower ThiefNeed
+// or a higher CutOff. A gain summed across classes never hides one.
+func (e Effect) Lowers() bool {
+	for _, c := range Classes {
+		if e.After[c].ThiefNeed < e.Before[c].ThiefNeed || e.After[c].CutOff > e.Before[c].CutOff {
+			return true
+		}
+	}
+	return false
+}
+
+// acceptable is the bar every offered proposal clears: it weakens no asset
+// (Effect.Weakens) and lowers no class on the board (Effect.Lowers), so its
+// gain is at least zero.
+func (r ranked) acceptable() bool { return !r.weakens && !r.lowers }
+
+// Next picks the next action among acceptable candidates with gain or steps
+// above zero: structural ones first, then the highest gain per owner
+// minute, then steps per minute, then by Text. It returns false when none
+// qualifies.
 func (g *Graph) Next(candidates []Proposal) (Proposal, bool) {
 	for _, r := range g.rank(candidates) {
-		if (r.gain > 0 || r.steps > 0) && !r.weakens {
+		if r.acceptable() && (r.gain > 0 || r.steps > 0) {
 			return r.p, true
 		}
 	}
