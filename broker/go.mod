@@ -1,6 +1,6 @@
 module github.com/ghbmrk/agentos/broker
 
-go 1.26.0
+go 1.26.4
 
 toolchain go1.26.10
 
@@ -9,6 +9,7 @@ require (
 	github.com/emersion/go-message v0.15.0
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
 	github.com/emiago/sipgo v1.5.0
+	github.com/gen2brain/h265 v0.2.3
 	github.com/gobwas/ws v1.3.2
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/go-tpm v0.9.8

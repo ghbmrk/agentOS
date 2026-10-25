@@ -43,7 +43,7 @@ const (
 type Refusal string
 
 const (
-	RefuseType   Refusal = "type"   // not a JPEG or PNG
+	RefuseType   Refusal = "type"   // not a JPEG, PNG or HEIC
 	RefuseSize   Refusal = "size"   // over MaxInput bytes
 	RefusePixels Refusal = "pixels" // over 50 megapixels
 	RefuseDecode Refusal = "decode" // corrupt, too costly, or a bad frame
@@ -95,6 +95,11 @@ var (
 	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
 )
 
+// isoBMFF reports whether raw starts like an ISOBMFF file, as a HEIC
+// does. Which brands are a HEIC is the decoder's to say (it refuses the
+// rest as type), so the broker reads no more of the box than this.
+func isoBMFF(raw []byte) bool { return len(raw) >= 12 && string(raw[4:8]) == "ftyp" }
+
 // errNoCgroup refuses a run with no memory cap: gVisor enforces none of
 // its own (gvisor.OneShot.MemBytes).
 var errNoCgroup = errors.New("photo: no cgroup for the sandbox")
@@ -105,7 +110,7 @@ func (d *Decoder) Decode(ctx context.Context, raw []byte) (Photo, error) {
 	if len(raw) > MaxInput {
 		return Photo{}, RefuseSize
 	}
-	if !bytes.HasPrefix(raw, jpegMagic) && !bytes.HasPrefix(raw, pngMagic) {
+	if !bytes.HasPrefix(raw, jpegMagic) && !bytes.HasPrefix(raw, pngMagic) && !isoBMFF(raw) {
 		return Photo{}, RefuseType
 	}
 	if d.Cgroup == "" {

@@ -40,7 +40,6 @@ func TestDecodeRefusesTypes(t *testing.T) {
 		"mp4":   "\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom",
 		"vcard": "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Synthetic\r\nEND:VCARD\r\n",
 		"pdf":   "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
-		"heic":  "\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic",
 		"empty": "",
 	} {
 		word, code, out := refusal(t, []byte(in))

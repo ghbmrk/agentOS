@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 345 # under GitHub's 6h job limit
     strategy:
       fail-fast: false
-      max-parallel: 3 # leaves runners for pull-request CI (18 targets: six waves, about 18 h)
+      max-parallel: 3 # leaves runners for pull-request CI (19 targets: seven waves, about 21 h)
       matrix:
         include:
           - { pkg: owner, target: FuzzParseReply }
@@ -49,6 +49,8 @@ jobs:
           - { pkg: browser, target: FuzzParse }
           - { pkg: modemlink, target: FuzzInbound }
           - { pkg: guest, target: FuzzMCP }
+          - { pkg: photo/decoder, target: FuzzDecode }
+          - { pkg: photo/decoder, target: FuzzDecodeHEIC }
     name: fuzz ${{ matrix.pkg }} ${{ matrix.target }}
     defaults:
       run:
