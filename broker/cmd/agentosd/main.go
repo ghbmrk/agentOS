@@ -411,6 +411,10 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	// A lineage that read a record the owner deleted before the upgrade
+	// gets no fork, merge or pre-allowance until its rollback is settled
+	// below (VM-lineage-contained, LOG-4).
+	recallHeld := openRecallHeld(recallAtRest, filepath.Join(stateDir, recallSettledFile), log.Printf)
 	// A box with no -owner is set up by the local UI (P2-2w c2): only
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
@@ -441,6 +445,7 @@ func main() {
 				images: imgs, admit: cfg.Admission,
 				cgroups:       boxMachines,
 				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
+				contained: recallHeld.Contained,
 			}, pins)
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -544,6 +549,7 @@ func main() {
 	// Recall, FORGET and RENEW are deleted (#2781): memory across tasks is
 	// off on every box, and STATUS says so (OP-9).
 	caps.recallWired(false)
+	recallHeld.wire(&cfg)
 	// Approval requests follow the owner's pacing setting and spend its one
 	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
 	// QH-10). The channel is attached once the daemon runs.
@@ -663,6 +669,8 @@ func main() {
 			Admit:    d.Admission(),
 			Cgroups:  cg,
 			Services: services,
+			// Lineages held at upgrade (VM-lineage-contained).
+			Contained: recallHeld.Contained,
 
 			DiskReserveBytes: diskReserveMB << 20,
 			MachineDiskBytes: machineDiskMB << 20,
@@ -680,6 +688,9 @@ func main() {
 			caps.agentOff(agentNoMachines)
 		} else {
 			pre.m.Store(m)
+			// Held lineages go back before any machine is served or
+			// pruned; the journal has the owner's NOs by now.
+			recallHeld.settle(ctx, m, d.Engine().List(), informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
