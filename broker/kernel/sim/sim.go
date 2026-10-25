@@ -551,7 +551,7 @@ func (s *sim) op() error {
 	case c == 11:
 		if s.k.State().Stopped { // the owner resumes what a STOP held
 			s.logf("resume")
-			return s.widened(s.k.Resume(s.kt()))
+			return s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
 		}
 		if s.pick(3) == 0 {
 			s.logf("stop")

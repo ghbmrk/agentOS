@@ -125,6 +125,16 @@ type (
 		Status string   `json:"status"` // "": no such plan
 		Phases []string `json:"phases"`
 	}
+	// resumeArgs names the STOP a RESUME lifts (kernel.State.Stops, #3078).
+	resumeArgs struct {
+		Stops uint64 `json:"stops"`
+	}
+	// changesRead is the key's changes view and the STOPs logged, which a
+	// RESUME names.
+	changesRead struct {
+		key.Changes
+		Stops uint64 `json:"stops"`
+	}
 	grantRead struct {
 		From int64 `json:"from"`
 		OK   bool  `json:"ok"`
@@ -154,7 +164,7 @@ var OwnerSide = Side{"owner", map[string]op{
 	"pause":   act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Pause(now, id) }),
 	"unpause": act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
 	"stop":    act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
-	"resume":  act(func(k *kernel.Kernel, now int64, _ none) error { return k.Resume(now) }),
+	"resume":  act(func(k *kernel.Kernel, now int64, a resumeArgs) error { return k.Resume(now, a.Stops) }),
 	"setup":   act(func(k *kernel.Kernel, now int64, f kernel.FirstAnchors) error { return k.Setup(now, f) }),
 	"setupinfo": func(k *kernel.Kernel, _ int64, _ json.RawMessage) (any, error) {
 		return SetupInfo{Open: k.State().SetupOpen(), Box: k.Box()}, nil
@@ -168,7 +178,7 @@ var OwnerSide = Side{"owner", map[string]op{
 		es, un := s.Enrollments()
 		return enrolled{es, un}
 	}),
-	"changes": read(func(s *kernel.State, _ int64, _ none) key.Changes { return *s.ChangesView() }),
+	"changes": read(func(s *kernel.State, _ int64, _ none) changesRead { return changesRead{*s.ChangesView(), s.Stops} }),
 	"plan": read(func(s *kernel.State, _ int64, id string) planRead {
 		p := s.Plans[id]
 		if p == nil {
@@ -500,7 +510,9 @@ func (o Owner) Revoke(id key.ID) error  { return o.Call("revoke", id, nil) }
 func (o Owner) Pause(id key.ID) error   { return o.Call("pause", id, nil) }
 func (o Owner) Unpause(id key.ID) error { return o.Call("unpause", id, nil) }
 func (o Owner) Stop() error             { return o.Call("stop", nil, nil) }
-func (o Owner) Resume() error           { return o.Call("resume", nil, nil) }
+
+// Resume lifts the STOP whose count it names (Changes's stops).
+func (o Owner) Resume(stops uint64) error { return o.Call("resume", resumeArgs{stops}, nil) }
 
 // Setup logs the owner's first hardware keys on a setup-only kernel.
 func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }

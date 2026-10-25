@@ -711,8 +711,10 @@ func followNonce() string {
 // steps of both.
 type KernelOwner interface {
 	Stop(context.Context) error
-	Resume(context.Context) error
-	Stopped(context.Context) (bool, error)
+	// Resume names the count of STOPs it lifts, as Stopped read it; the
+	// kernel refuses it once a later STOP is logged (#3078).
+	Resume(ctx context.Context, stops uint64) error
+	Stopped(context.Context) (stopped bool, stops uint64, err error)
 	SetupOpen(context.Context) (bool, error)
 	Status(context.Context) ([]KernelStep, error)
 	// Retry returns KernelRefused for the kernel's refusal and
@@ -796,7 +798,7 @@ func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
 // journal's write failed) STOPs the kernel again, so "Still stopped." holds
 // for both. A STOP only the kernel holds leaves the journal as it is.
 func (b *bothStops) Resume() error {
-	if err := b.kernel(context.Background(), b.k.Resume); err != nil {
+	if err := b.kernel(context.Background(), b.resumeKernel); err != nil {
 		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 	}
 	if !b.Engine.Stopped() {
@@ -806,6 +808,17 @@ func (b *bothStops) Resume() error {
 		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 	}
 	return nil
+}
+
+// resumeKernel lifts the STOP the kernel holds now: the RESUME names the
+// count of STOPs read with it, so one given up on here and served after
+// the owner's next STOP is refused, and that STOP holds (#3078).
+func (b *bothStops) resumeKernel(ctx context.Context) error {
+	_, stops, err := b.k.Stopped(ctx)
+	if err != nil {
+		return err
+	}
+	return b.k.Resume(ctx, stops)
 }
 
 // kernel runs a STOP or RESUME on the kernel; a setup-only kernel's
@@ -830,7 +843,7 @@ func (b *bothStops) kernel(ctx context.Context, f func(context.Context) error) e
 func (b *bothStops) Stopped() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
-	stopped, err := b.k.Stopped(ctx)
+	stopped, _, err := b.k.Stopped(ctx)
 	unread := err != nil
 	if unread {
 		open, oerr := b.k.SetupOpen(ctx)
