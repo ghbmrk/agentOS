@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: CH-2, CH-10, CH-12, KRN-7
+// REQ: CH-2, CH-10, CH-12, KRN-4, KRN-7
 
 // The kernel's unsettled steps, as a running kernel lists them: an unknown
 // outcome, a parked one the owner may RETRY, an unsent step of a live plan,
@@ -20,7 +21,7 @@ import (
 func kernelSteps() []KernelStep {
 	return []KernelStep{
 		{Plan: "p1", Verb: "post", Clerk: "web", Phase: KernelUnknown, PlanStatus: KernelPlanActive},
-		{Plan: "p2", Index: 1, Verb: "archive", Clerk: "mail", Phase: KernelParked, Retry: true, PlanStatus: KernelPlanActive},
+		{Plan: "p2", Index: 1, Verb: "organize", Clerk: "mail", Phase: KernelParked, Retry: true, PlanStatus: KernelPlanActive},
 		{Plan: "p3", Verb: "send", Clerk: "mail", Phase: KernelUnsent, PlanStatus: KernelPlanActive},
 		{Plan: "p4", Verb: "send", Clerk: "mail", Phase: KernelUnsent, PlanStatus: "cancelled"},
 	}
@@ -33,7 +34,7 @@ func kernelSteps() []KernelStep {
 func TestSTATUSCountsTheKernelsUnsettledSteps(t *testing.T) {
 	k := &fakeKernel{steps: kernelSteps()}
 	dir := withKernel(t, k)
-	want := "Running. 2 may have happened (post/web, archive/mail), 1 waiting to run, 0 awaiting a decision."
+	want := "Running. 2 may have happened (post/web, organize/mail), 1 waiting to run, 0 awaiting a decision."
 	if r := text(t, dir, owner, "STATUS")[0]; !strings.HasPrefix(r, want) || strings.Contains(r, "Part of me") {
 		t.Fatalf("STATUS: %q, want it to start %q", r, want)
 	}
@@ -96,14 +97,14 @@ func TestRETRYRetriesTheKernelsParkedStep(t *testing.T) {
 	}
 	req := nextText(t, phone)
 	m := retryCodeRe.FindStringSubmatch(req)
-	if m == nil || !strings.Contains(req, "archive on mail") || !strings.Contains(req, "may go twice") || strings.Contains(req, "post") {
+	if m == nil || !strings.Contains(req, "organize on mail") || !strings.Contains(req, "may go twice") || strings.Contains(req, "post") {
 		t.Fatalf("request %q", req)
 	}
 	if got := d.Owner().Handle(ctx, owner, "YES "+m[1]+" "+m[2]); len(got) != 1 || got[0] != "Approved "+m[1]+"." {
 		t.Fatalf("approve: %q", got)
 	}
 	d.retry.running.Wait()
-	if got, want := nextText(t, phone), "Retry "+m[1]+": archive on mail will be tried again; it may go twice. Text STATUS to see how it ends."; got != want {
+	if got, want := nextText(t, phone), "Retry "+m[1]+": organize on mail will be tried again; it may go twice. Text STATUS to see how it ends."; got != want {
 		t.Fatalf("outcome %q, want %q", got, want)
 	}
 	k.mu.Lock()
@@ -147,11 +148,11 @@ func TestAKernelRETRYOnlyOnTheOwnersWord(t *testing.T) {
 		err  error
 		want string
 	}{
-		{KernelRefused{Text: "kernel: no parked step of a live plan there to retry"}, "Retry B1 refused: it is no longer waiting for a retry. Archive on mail was not tried again; text RETRY later."},
-		{KernelRefused{Text: "kernel: the step cannot be sent again now: stopped: stop is in force"}, "Retry B1 refused: STOP is on. Archive on mail was not tried again; text RETRY later."},
-		{KernelRefused{Text: "kernel: the step cannot be sent again now: revoked: x"}, "Retry B1 refused: my checks refused it. Archive on mail was not tried again; text RETRY later."},
-		{ErrKernelLost, "Retry B1: I could not tell whether archive on mail will be tried again. Text STATUS to see; text RETRY to ask again."},
-		{errors.New("unreachable"), "Retry B1 refused: it could not be started. Archive on mail was not tried again; text RETRY later."},
+		{KernelRefused{Text: "kernel: no parked step of a live plan there to retry"}, "Retry B1 refused: it is no longer waiting for a retry. Organize on mail was not tried again; text RETRY later."},
+		{KernelRefused{Text: "kernel: the step cannot be sent again now: stopped: stop is in force"}, "Retry B1 refused: STOP is on. Organize on mail was not tried again; text RETRY later."},
+		{KernelRefused{Text: "kernel: the step cannot be sent again now: revoked: x"}, "Retry B1 refused: my checks refused it. Organize on mail was not tried again; text RETRY later."},
+		{ErrKernelLost, "Retry B1: I could not tell whether organize on mail will be tried again. Text STATUS to see; text RETRY to ask again."},
+		{errors.New("unreachable"), "Retry B1 refused: it could not be started. Organize on mail was not tried again; text RETRY later."},
 	} {
 		k.retryErr = c.err
 		k.mu.Unlock()
@@ -176,8 +177,8 @@ func TestAKernelRETRYLineTakesItsStepsTier(t *testing.T) {
 		lim  ownerch.Limits
 		want ownerch.Tier
 	}{
-		{KernelStep{Verb: "archive", Clerk: "mail"}, low, ownerch.Low},
-		{KernelStep{Verb: "archive", Clerk: "mail"}, ownerch.Limits{AmountLimit: 1 << 40, ExcludedVerbs: []string{"archive"}}, ownerch.High},
+		{KernelStep{Verb: "organize", Clerk: "mail"}, low, ownerch.Low},
+		{KernelStep{Verb: "organize", Clerk: "mail"}, ownerch.Limits{AmountLimit: 1 << 40, ExcludedVerbs: []string{"organize"}}, ownerch.High},
 		{KernelStep{Verb: "send", Clerk: "mail", Recipient: "a@example.test"}, low, ownerch.High},
 		{KernelStep{Verb: "pay", Clerk: "bank", Money: true, Amount: 5}, low, ownerch.High},
 	} {
@@ -214,5 +215,31 @@ func TestAKernelRETRYOfALocalLineNeedsThePage(t *testing.T) {
 	d.retry.runKernel("C2", a, true)
 	if len(k.retried) != 1 || k.retried[0] != "p5/0" {
 		t.Fatalf("a page approval: retried %q", k.retried)
+	}
+}
+
+// Every verb's RETRY line takes at least its class's tier (KRN-4, CH-10):
+// with no money and no recipient, only a reversible or low-class verb may
+// be approved by a texted code; a high-class verb, or one key does not
+// know, takes the code generator's, and a secret's is a SecretReveal as on
+// the journal's path (#3080 Security blocker 1).
+func TestEveryKernelVerbsRETRYTakesItsClasssTier(t *testing.T) {
+	limits := ownerch.Limits{AmountLimit: 1 << 40}
+	verbs := []key.Verb{key.Read, key.Fetch, key.Draft, key.Organize, key.Trash, key.Unsubscribe, key.Send, key.Post,
+		key.Buy, key.Share, key.DeleteRemote, key.ChangeAccount, key.RevealOrCreateSecret, key.Actuate,
+		key.ActuatePhysical, key.Present, "no-such-verb"}
+	for _, v := range verbs {
+		cls, known := key.ClassOf(v)
+		want := ownerch.High
+		if known && cls != key.IrreversibleHigh {
+			want = ownerch.Low
+		}
+		it := kernelItem(KernelStep{Plan: "p", Verb: string(v), Clerk: "c", Phase: KernelParked, Retry: true})
+		if got := ownerch.Classify(it.Facts, limits, it.Facts.RecipientSince); got != want {
+			t.Errorf("%s (class %d, known %v): tier %v, want %v", v, cls, known, got, want)
+		}
+		if (v == key.RevealOrCreateSecret) != (it.Facts.Kind == ownerch.SecretReveal) {
+			t.Errorf("%s: kind %v", v, it.Facts.Kind)
+		}
 	}
 }

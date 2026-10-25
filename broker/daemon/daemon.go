@@ -764,7 +764,7 @@ const kernelUnreached = "Part of me is not answering, so a STOP may not have rea
 
 // kernelUnlisted is STATUS's note while the kernel's stop reads but its
 // unsettled steps do not: the counts may leave some out.
-const kernelUnlisted = "Part of me is not answering, so I may have left some actions out of this."
+const kernelUnlisted = "Part of me is not answering, so I may have left some actions out of this. Text STATUS again later."
 
 // bothStops is control.Engine over the journal engine and the kernel.
 type bothStops struct {
@@ -842,14 +842,20 @@ func (b *bothStops) Stopped() bool {
 // or not, may have happened; one whose clerk was not reached waits to run
 // while its plan is active, and is left out once the plan has ended, since
 // it never acted. A kernel whose steps cannot be read adds none, and
-// STATUS names it (note); a setup-only kernel holds none.
+// STATUS names it (note), unless it is waiting for setup, as Stopped
+// reads it: a setup-only kernel, or a box with no sealed store, holds none.
 func (b *bothStops) List() []journal.Status {
 	out := b.Engine.List()
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
 	steps, err := b.k.Status(ctx)
+	unlisted := err != nil
+	if unlisted {
+		open, oerr := b.k.SetupOpen(ctx)
+		unlisted = oerr != nil || !open
+	}
 	b.mu.Lock()
-	b.unlisted = err != nil
+	b.unlisted = unlisted
 	b.mu.Unlock()
 	for _, s := range steps {
 		st := journal.OutcomeUnknown

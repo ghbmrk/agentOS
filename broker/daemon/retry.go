@@ -13,6 +13,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -211,15 +212,26 @@ func (r *retrier) kernelParked(n int) []KernelStep {
 }
 
 // kernelItem is the line RETRY asks about for a parked kernel step, with
-// the tier its own facts give (CH-10, CH-11): a verb that moves money is
-// always the high tier, a code-generator code; a recipient the broker has
-// not looked up is high too (Classify), so only a step with neither money
-// nor a recipient can be approved by a texted code. Its outcome is
-// unknown, so it may go twice, and the line says so (CH-12). The kernel
-// does not say when the step was first tried, so the line cannot.
+// the tier its verb's class and its own facts give (CH-10, CH-11, KRN-4):
+// a verb that moves money is always the high tier, a code-generator code;
+// so is a verb key classes high, or does not know, and a secret's is a
+// SecretReveal as on the journal's path. A recipient the broker has not
+// looked up is high too (Classify), so only a reversible or low-class step
+// with neither money nor a recipient can be approved by a texted code. Its
+// outcome is unknown, so it may go twice, and the line says so (CH-12).
+// The kernel does not say when the step was first tried, so the line
+// cannot.
 func kernelItem(s KernelStep) ownerch.Item {
+	cls, known := key.ClassOf(key.Verb(s.Verb))
+	low := known && cls != key.IrreversibleHigh
+	// A high or unknown verb's facts are left unverified (no recipient
+	// checked), which Classify reads as high, like the journal's
+	// unverified lines.
 	it := ownerch.Item{Object: "on " + s.Clerk, Recipient: s.Recipient, Detail: "may go twice",
-		Facts: ownerch.Facts{Verb: s.Verb, NoRecipient: s.Recipient == ""}}
+		Facts: ownerch.Facts{Verb: s.Verb, NoRecipient: low && s.Recipient == ""}}
+	if key.Verb(s.Verb) == key.RevealOrCreateSecret {
+		it.Facts.Kind = ownerch.SecretReveal
+	}
 	if s.Money || s.Amount != 0 {
 		it.Amount = strconv.FormatInt(s.Amount, 10) + " minor units"
 		it.Facts.Kind, it.Facts.HasAmount, it.Facts.Amount = ownerch.MoneyRetry, true, s.Amount

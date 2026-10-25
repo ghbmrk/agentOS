@@ -57,7 +57,11 @@ var controlPath = map[string][]string{
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet"},
+	// The kernel's verb classes (KRN-4), which a RETRY of a parked kernel
+	// step is tiered by (#2783 b): a pure library, held to the control
+	// path's rules.
+	"kernel/key": {},
+	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet", "kernel/key"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.

@@ -101,7 +101,9 @@ func (k *fakeKernel) Status(context.Context) ([]KernelStep, error) {
 	case k.unlisted:
 		return nil, errors.New("status refused")
 	case k.setup:
-		return nil, nil // a setup-only kernel holds none
+		// As agentosd's kernel with no sealed store: the read fails, and
+		// SetupOpen says the kernel waits for setup.
+		return nil, errSetup
 	}
 	return slices.Clone(k.steps), nil
 }
