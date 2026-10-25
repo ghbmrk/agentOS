@@ -356,4 +356,5 @@ These open work-item issues are left off the board until their issue is fixed; e
 issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
 issue #3073: 3 middle cells, its table has 2
 issue #3079: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3082: body has no board-row block
 ```
