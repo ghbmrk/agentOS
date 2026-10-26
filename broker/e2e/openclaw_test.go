@@ -73,15 +73,15 @@ func (k *planKernel) Submit(_ context.Context, p kernel.Plan) error {
 	return nil
 }
 
-func (k *planKernel) Plan(_ context.Context, id string) (string, []string, bool, error) {
+func (k *planKernel) Plan(_ context.Context, id string) (kernel.PlanView, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for _, p := range k.plans {
 		if p.ID == id {
-			return kernel.SDone, []string{kernel.PDone}, true, nil
+			return kernel.PlanView{Status: kernel.SDone, Steps: []kernel.StepView{{Phase: kernel.PDone}}}, nil
 		}
 	}
-	return "", nil, false, nil
+	return kernel.PlanView{}, nil
 }
 
 // scriptedModel is an OpenAI-compatible model that, asked "SCENARIO:send",
@@ -359,7 +359,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	answered := time.Since(start)
 	t.Logf("machine started in %v; owner answer after %v: %q", created, answered, answer)
 
-	if !strings.Contains(answer, "done.") || !strings.Contains(answer, "phases") {
+	if !strings.Contains(answer, "done.") || !strings.Contains(answer, "steps") {
 		t.Fatalf("answer %q: want the broker's result for the plan", answer)
 	}
 	kern.mu.Lock()

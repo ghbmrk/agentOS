@@ -121,10 +121,6 @@ type (
 	taskRead struct {
 		Task *kernel.Task `json:"task"` // nil: not live
 	}
-	planRead struct {
-		Status string   `json:"status"` // "": no such plan
-		Phases []string `json:"phases"`
-	}
 	// resumeArgs names the STOP a RESUME lifts (kernel.State.Stops, #3078).
 	resumeArgs struct {
 		Stops uint64 `json:"stops"`
@@ -180,17 +176,7 @@ var OwnerSide = Side{"owner", map[string]op{
 		return enrolled{es, un}
 	}),
 	"changes": read(func(s *kernel.State, _ int64, _ none) changesRead { return changesRead{*s.ChangesView(), s.Stops} }),
-	"plan": read(func(s *kernel.State, _ int64, id string) planRead {
-		p := s.Plans[id]
-		if p == nil {
-			return planRead{}
-		}
-		r := planRead{Status: p.Status}
-		for _, st := range p.Steps {
-			r.Phases = append(r.Phases, st.Phase)
-		}
-		return r
-	}),
+	"plan":    read(func(s *kernel.State, _ int64, id string) kernel.PlanView { return s.PlanView(id) }),
 	"granted": read(func(s *kernel.State, _ int64, id key.ID) grantRead {
 		from, ok := s.Granted(id)
 		return grantRead{from, ok}
@@ -545,12 +531,11 @@ func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 // Changes is the revocations, pauses and STOP in force.
 func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
 
-// Plan is plan id's status and its steps' phases; ok is false when the log
-// has no such plan.
-func (o Owner) Plan(id string) (status string, phases []string, ok bool, err error) {
-	var r planRead
-	err = o.Call("plan", id, &r)
-	return r.Status, r.Phases, r.Status != "", err
+// Plan is plan id's view: its status, a rejection's code and its steps'
+// results (kernel.PlanView); ok is false when the log has no such plan.
+func (o Owner) Plan(id string) (v kernel.PlanView, ok bool, err error) {
+	err = o.Call("plan", id, &v)
+	return v, v.Status != "", err
 }
 
 // Granted is when key id's grant is live from, if it is granted.

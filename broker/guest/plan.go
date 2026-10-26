@@ -20,9 +20,10 @@ import (
 type Kernel interface {
 	// Submit logs p and has the kernel decide it at once.
 	Submit(ctx context.Context, p kernel.Plan) error
-	// Plan is plan id's status and its steps' phases; ok is false when the
-	// log holds no such plan.
-	Plan(ctx context.Context, id string) (status string, phases []string, ok bool, err error)
+	// Plan is plan id's view: its status, a rejected plan's failing check
+	// and each step's result. Its Status is empty when the log holds no
+	// such plan.
+	Plan(ctx context.Context, id string) (kernel.PlanView, error)
 }
 
 // Keys returns the key machine's plans run under and the private key of its
@@ -30,13 +31,23 @@ type Kernel interface {
 // credential (PLN-5, KEY-3). ok is false when no key is granted for it.
 type Keys func(machine string) (k key.Key, holder ed25519.PrivateKey, ok bool)
 
-// planState is what a guest learns about its plan: the kernel's status and
-// its steps' phases, never a clerk's evidence.
+// planState is what a guest learns about its plan: the kernel's status, a
+// rejected plan's failing check (PLN-4) and each step's typed result (PLN-5
+// (b)), never a clerk's evidence.
 type planState struct {
-	RequestID string   `json:"request_id"`
-	State     string   `json:"state"`
-	Phases    []string `json:"phases,omitempty"`
-	Reason    string   `json:"reason,omitempty"`
+	RequestID string       `json:"request_id"`
+	State     string       `json:"state"`
+	Code      string       `json:"code,omitempty"`
+	Steps     []stepResult `json:"steps,omitempty"`
+	Reason    string       `json:"reason,omitempty"`
+}
+
+// stepResult is one step's phase, its clerk's answer when that is a fixed
+// code, and whether the step was undone.
+type stepResult struct {
+	Phase  string `json:"phase"`
+	Result string `json:"result,omitempty"`
+	Undone bool   `json:"undone,omitempty"`
 }
 
 type planArgs struct {
@@ -63,7 +74,7 @@ const (
 const (
 	reasonNoKernel = "the kernel is not reached yet; nothing was submitted. Repeat plan with the same request_id later"
 	reasonNoKey    = "no key is granted to this machine yet, so no plan can run and nothing was submitted; repeating will not help until the owner grants one"
-	reasonRejected = "the kernel rejected this plan (its key check, or a STOP in force), and no step ran; a reworded plan is not tried again (PLN-4)"
+	reasonRejected = "the kernel rejected this plan, and no step ran; code names the check that failed (stopped: a STOP is in force, so wait for the owner; anything else: this machine's key does not allow it), and a reworded plan is not tried again (PLN-4)"
 	reasonRepeat   = "this request_id was used before; nothing new was submitted, and this is that plan's state"
 	reasonLost     = "the kernel did not answer; repeat plan with the same request_id to learn whether it was taken"
 )
@@ -206,15 +217,27 @@ func steps(ss []planStep, label string) []kernel.PlanStep {
 
 // read is plan id as the guest sees it.
 func (p *Plane) read(ctx context.Context, id string) (planState, bool, error) {
-	status, phases, ok, err := p.cfg.Kernel.Plan(ctx, id)
-	if err != nil || !ok {
+	v, err := p.cfg.Kernel.Plan(ctx, id)
+	if err != nil || v.Status == "" {
 		return planState{}, false, err
 	}
-	st := planState{State: status, Phases: phases}
-	if status == kernel.SRejected {
+	st := planState{State: v.Status, Code: code(v.Reject)}
+	for _, s := range v.Steps {
+		st.Steps = append(st.Steps, stepResult{s.Phase, code(s.Result), s.Undone})
+	}
+	if v.Status == kernel.SRejected {
 		st.Reason = reasonRejected
 	}
 	return st, true, nil
+}
+
+// code is s when it is a fixed code, a lowercase name; anything else, such
+// as a browser clerk's page snapshot, never reaches the guest (PLN-1).
+func code(s string) string {
+	if !nameRE.MatchString(s) {
+		return ""
+	}
+	return s
 }
 
 // label is the machine's data label, failing closed.
