@@ -157,6 +157,7 @@ allow broker/mail/
 allow broker/maintain/
 allow broker/meter/
 allow broker/pageca/
+allow broker/edgelink/
 allow broker/modelroute/
 allow broker/modem/
 allow broker/modemlink/
