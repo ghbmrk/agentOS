@@ -61,6 +61,10 @@ exempt-pr 2990
 # directory exists. Mark: "Exempt #3172" (Decisions tap 2026-10-25 17:23Z,
 # cmsg_01R91wiieBzMSvPKFsAJVvuKBN15sZhxZ7iBVWpmvHBDwx). Remove once it merges.
 exempt-pr 3172
+# #3212 (MIG-4-recovery-a, #3185): the first broker/backup/ build, which lands its own
+# `allow broker/backup/` line. Mark admitted broker/backup/ under the freeze (Decisions 8
+# tap A, cmsg_01R91wiieBzMSvPKFsAJVvuKHeytwuDnDg8cSgGwgDnRX6). Remove once it merges.
+exempt-pr 3212
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
