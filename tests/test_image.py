@@ -6334,6 +6334,37 @@ class HostDiskImageTest(unittest.TestCase):
         # The passthrough line counts at least the USB disk's node, so it cannot pass on none.
         self.assertIn('if [ "$c" -lt 1 ]; then say "FAIL no passthrough node found"', s)
 
+    # REQ: HW-8, ONB-2
+    def test_initrd_links_to_a_host_disk_are_removed(self):
+        # #3306's CI boot: the initrd, which has no host-disk rules, linked the host disks by label,
+        # partition label and disk sequence, and udev in the main system kept those links. The 59
+        # rule runs host-disk-unlink for each device it hides, which removes only links to it.
+        self.assertIn('RUN+="/usr/lib/agentos/host-disk-unlink %k"', (ROOT / "broker/hostdisk/udev" / HOSTDISK_RULES[0]).read_text())
+        with tempfile.TemporaryDirectory() as d:
+            dev, other = pathlib.Path(d) / "dev", pathlib.Path(d) / "other"
+            links = {"disk/by-label/HOSTLABEL": "../../vdb1", "disk/by-partlabel/hostdata": "../../vdb1",
+                     "disk/by-diskseq/10-part1": str(dev / "vdb1"), "disk/by-diskseq/10": "../../vdb",
+                     "disk/by-label/root": "../../vda2", "disk/by-id/usb-x-part1": "../../vdb11",
+                     "cciss/by-label/x": "../../vdb1"}
+            for rel, target in links.items():
+                link(dev, rel, target)
+            write(dev, "disk/by-label/plain")
+            other.mkdir()
+            link(other, "victim", "../../vdb1")
+            link(dev, "disk/by-elsewhere", other)
+            run = lambda name: subprocess.run(["sh", str(AGENTOS_LIB / "host-disk-unlink"), name],
+                                              env=dict(os.environ, AGENTOS_DEV=str(dev)), capture_output=True, text=True)
+            r = run("vdb1")
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+            gone = {"disk/by-label/HOSTLABEL", "disk/by-partlabel/hostdata", "disk/by-diskseq/10-part1"}
+            for rel in list(links) + ["disk/by-label/plain"]:
+                self.assertEqual(os.path.lexists(dev / rel), rel not in gone, rel)
+            self.assertTrue(os.path.lexists(other / "victim"))
+            for bad in ("", "../etc", "vdb1/../../etc", ".hidden", "vdb 1"):
+                self.assertEqual(run(bad).returncode, 1, bad)
+            self.assertTrue(os.path.lexists(dev / "disk/by-diskseq/10"))
+        self.assertTrue(os.access(AGENTOS_LIB / "host-disk-unlink", os.X_OK))
+
     # REQ: HW-1, HW-8
     def test_two_drives_boot_still_fails_with_the_copy_hidden(self):
         # The 59 rule hides the second copy's PARTUUIDs from udev; drive-id must still find both, so

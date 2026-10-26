@@ -32,7 +32,7 @@ usr/lib/systemd/system-generators/systemd-tpm2-generator	sha256:07dd5f254baa1f83
 usr/lib/udev/rules.d/50-firmware.rules	sha256:37895a6ae81ab0e8753eb97a7c11b7cf578549e06fbbf2d6b192d109bc2cd9a3
 usr/lib/udev/rules.d/50-udev-default.rules	sha256:2fc7f00aa36ea57400d14b9a765b7d26f39a004f9bf666f69283d9aa5aaa34d2
 usr/lib/udev/rules.d/55-dm.rules	sha256:106ec258d978828312aca9c5730a674811542e74f403d9971c07ff3195d857e5
-usr/lib/udev/rules.d/59-agentos-host-disks.rules	sha256:203ec4bcc4dafd069b01ee6d5ca26c8aaac4c4abb76d593cafc6226c16ff0c1c
+usr/lib/udev/rules.d/59-agentos-host-disks.rules	sha256:f270af64390c02f986acd8d5834d7ff3d090bb14fbea4d7c8ea31d6718282624
 usr/lib/udev/rules.d/60-agentos-tpm.rules	sha256:e87aea30414ef2b2aa3d508e456e28dc7e3d2946d6074ceac048c3d22325876f
 usr/lib/udev/rules.d/60-autosuspend.rules	sha256:ef171e3921df1aa26414a383bc62a9ba82995257e0601fd3d58eb75b93f5ab78
 usr/lib/udev/rules.d/60-block.rules	sha256:93ecc4fab045601b0eb16ef1d74eb82cd1d618fffb3de4bd6076b533f72b406a
