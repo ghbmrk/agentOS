@@ -60,6 +60,22 @@ const planConns = 16
 
 // ServePlan serves g's endpoint on ln until ln closes.
 func ServePlan(ln net.Listener, g PlanGuest) error {
+	// A model endpoint with no clerk, clock, window or output limit could
+	// meter no call: it is refused here, so a host's misconfiguration
+	// shows at start, not as every call's unrecorded-spend refusal.
+	if g.Clerk == nil || g.Clock == nil || g.Context <= 0 || g.MaxOut <= 0 {
+		ln.Close()
+		return errPlanBound
+	}
+	return servePlan(ln, g)
+}
+
+// errPlanBound is a PlanGuest declared without what bounds its calls.
+var errPlanBound = errors.New("run: a plan guest endpoint needs its model clerk, clock, context window and output limit")
+
+// servePlan serves g's endpoint on ln. A sign-in guest's endpoint meters no
+// call, so it is served with no clerk; a model call on it is refused.
+func servePlan(ln net.Listener, g PlanGuest) error {
 	srv := &http.Server{
 		Handler:           g,
 		ReadHeaderTimeout: 30 * time.Second,

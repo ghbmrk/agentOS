@@ -32,6 +32,7 @@ usr/lib/systemd/system-generators/systemd-tpm2-generator	sha256:07dd5f254baa1f83
 usr/lib/udev/rules.d/50-firmware.rules	sha256:37895a6ae81ab0e8753eb97a7c11b7cf578549e06fbbf2d6b192d109bc2cd9a3
 usr/lib/udev/rules.d/50-udev-default.rules	sha256:2fc7f00aa36ea57400d14b9a765b7d26f39a004f9bf666f69283d9aa5aaa34d2
 usr/lib/udev/rules.d/55-dm.rules	sha256:106ec258d978828312aca9c5730a674811542e74f403d9971c07ff3195d857e5
+usr/lib/udev/rules.d/59-agentos-host-disks.rules	sha256:f270af64390c02f986acd8d5834d7ff3d090bb14fbea4d7c8ea31d6718282624
 usr/lib/udev/rules.d/60-agentos-tpm.rules	sha256:e87aea30414ef2b2aa3d508e456e28dc7e3d2946d6074ceac048c3d22325876f
 usr/lib/udev/rules.d/60-autosuspend.rules	sha256:ef171e3921df1aa26414a383bc62a9ba82995257e0601fd3d58eb75b93f5ab78
 usr/lib/udev/rules.d/60-block.rules	sha256:93ecc4fab045601b0eb16ef1d74eb82cd1d618fffb3de4bd6076b533f72b406a
@@ -51,6 +52,7 @@ usr/lib/udev/rules.d/60-persistent-storage.rules	sha256:6ea07cd61b4a221ea219baee
 usr/lib/udev/rules.d/60-persistent-v4l.rules	sha256:d5a6c72c7c3a50e251f74c15672a47f63674aa12eda64086a7daffa49c4c55f8
 usr/lib/udev/rules.d/60-sensor.rules	sha256:0e8bbe52adaa173d3deba22f9c3a1c7447884ab5c625d3c3b4fdce60e52bd6d3
 usr/lib/udev/rules.d/60-serial.rules	sha256:50bb6f79da19b52e82d273b8e142d49905bc69bdf765bf0545f2a20349d7d0aa
+usr/lib/udev/rules.d/64-agentos-host-disks-assembly.rules	sha256:a0e975a8e91cfdaf72aba7755de1530b82c012bfcde3ae468d8e7e06c47e509e
 usr/lib/udev/rules.d/64-btrfs.rules	sha256:a4bc67740cd0988415907b0fdb5e9cd955be2626b5095b55c7eed4aa4e99bb53
 usr/lib/udev/rules.d/70-camera.rules	sha256:d59cd2dcf94925f2836191c4ce9445427edbd9ee122a775579ca312997b80aa8
 usr/lib/udev/rules.d/70-joystick.rules	sha256:199e72c162185b62c0888791c9b3cde2c8b180fae4e4ae3a29564f933d0adffd
@@ -61,6 +63,7 @@ usr/lib/udev/rules.d/70-touchpad.rules	sha256:8d81de6a6d5b5703098518f977c3b984bd
 usr/lib/udev/rules.d/70-uaccess.rules	sha256:813e56ac50b43393843c14b2bc654dc33325e807342720c83656d7b2d1c4a84b
 usr/lib/udev/rules.d/71-agentos-modem.rules	sha256:86a779452d6a3f4ab1e93176448d594ec6add041e4a1ebd9246d6082338f50ef
 usr/lib/udev/rules.d/71-seat.rules	sha256:b57a64ab6c973d0b734dea808e6caf9a49b40739c7c7649784d09bd6d90c36d3
+usr/lib/udev/rules.d/72-agentos-host-disks-late.rules	sha256:4c290748fa85c71f9900b6c5da6a046113c77b3d45d9e26ea0ec60bd78b97420
 usr/lib/udev/rules.d/73-seat-late.rules	sha256:959f9e5e3b149bdf01eeedf9950bbf526bdcb949993afda3a870ec200f6e9cc3
 usr/lib/udev/rules.d/73-special-net-names.rules	sha256:fcbf4bbd63bec2c63f9b9d11b90cac3a137f37cf69692033108426d44a8e6cea
 usr/lib/udev/rules.d/75-net-description.rules	sha256:877959a4597e1e9d30158773b7977f44b136c88a65225c7abe3cd52f4ecd096f

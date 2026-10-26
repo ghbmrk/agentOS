@@ -4,6 +4,8 @@
 //
 //	agentos-hostdisk classify NAME   udev helper: AGENTOS_DISK=drive|host|unknown
 //	agentos-hostdisk list            the host disks, described, as JSON
+//	agentos-hostdisk health          hostdisk=ok, or the listing's Health
+//	                                 and exit 1: the boot health item
 //
 // It only reads partition tables and volume signatures, opened read-only.
 // The image installs it root-owned at /usr/lib/agentos/agentos-hostdisk for
@@ -36,6 +38,18 @@ func run(args []string) int {
 		}
 		fmt.Print(s.ClassifyEnv(args[1]))
 		return 0
+	case len(args) == 1 && args[0] == "health":
+		// The image's health check fails the boot on any answer but ok.
+		h := hostdisk.Health("unknown")
+		if root {
+			h = s.DriveHealth()
+		}
+		if h == hostdisk.HealthOK {
+			fmt.Print("hostdisk=ok\n")
+			return 0
+		}
+		fmt.Printf("hostdisk=%s\n", h)
+		return 1
 	case len(args) == 1 && args[0] == "list":
 		if !root {
 			fmt.Fprintln(os.Stderr, "agentos-hostdisk: root only")
@@ -53,6 +67,6 @@ func run(args []string) int {
 		}
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: agentos-hostdisk classify NAME | list")
+	fmt.Fprintln(os.Stderr, "usage: agentos-hostdisk classify NAME | list | health")
 	return 2
 }

@@ -88,7 +88,7 @@ func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, erro
 		(&signInSockWorker{s: s, guest: guest}).Stop()
 		return nil, err
 	}
-	go ServePlan(ln, PlanGuest{Login: s.Login, Guest: guest})
+	go servePlan(ln, PlanGuest{Login: s.Login, Guest: guest})
 	w := &signInSockWorker{s: s, guest: guest, ln: ln}
 	if err := c.Call("signinstart", signInArgs{Guest: guest}, nil); err != nil {
 		// A lost answer may have started it: stop is idempotent.

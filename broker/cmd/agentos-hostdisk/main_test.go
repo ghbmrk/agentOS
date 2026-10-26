@@ -40,6 +40,10 @@ func TestClassifyAlwaysAnswers(t *testing.T) {
 	if out, code := capture(t, "list"); code != 1 || out != "" {
 		t.Errorf("non-root list: %q, %d", out, code)
 	}
+	// The health item is never ok without root's view of the disks.
+	if out, code := capture(t, "health"); code != 1 || out != "hostdisk=unknown\n" {
+		t.Errorf("non-root health: %q, %d", out, code)
+	}
 	if _, code := capture(t, "format", "sda"); code != 2 {
 		t.Errorf("unknown command exit %d", code)
 	}
