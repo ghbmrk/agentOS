@@ -60,6 +60,11 @@ func markUp(path string) {
 // nothing until the owner says what to do.
 var ErrLogKey = errors.New("run: the log does not open under my store's key; I start nothing until you choose what to do")
 
+// ErrNoRecipient: the unlock step handed no backup recipient, so no backup
+// can be sealed (BAK-1). The kernel runs on; the fix is a recovery-key
+// rotation, which stores one (REC-4).
+var ErrNoRecipient = errors.New("run: my store holds no backup recipient, so I take no backup until you rotate your recovery key")
+
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
@@ -82,6 +87,11 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	if err := checkLogKey(cfg.Log, keys.Log); err != nil {
 		return err
+	}
+	// The backup recipient is kept for the backup calls (MIG-4-recovery-e3);
+	// a store enrolled before it holds none, and no backup can be taken.
+	if len(keys.Recipient) == 0 {
+		fmt.Fprintln(os.Stderr, ErrNoRecipient)
 	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{

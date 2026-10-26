@@ -99,17 +99,24 @@ func TestAResealThatDidNotTakeIsStillHeld(t *testing.T) {
 
 // A backup that is down is retried with a content store's backoff: not
 // before RetryMin, then twice as long each time up to RetryMax, and a
-// restart asks at once. Once up, its table no longer gives the key.
+// restart asks at once. While it backs off an erase names it with the
+// error that failed, not asked again. Once up, its table no longer gives
+// the key.
 func TestADownBackupBacksOffLikeAStore(t *testing.T) {
 	r := newErig(t)
-	s := r.open()
-	b := newFakeBackups(map[string][]string{"b1": {s}})
+	s, s2 := r.open(), r.open()
+	b := newFakeBackups(map[string][]string{"b1": {s, s2}})
 	b.fail["b1"] = errDown
 	r.k.OpenBackups(b, 10)
 	c, err := r.k.Erase(10, s)
 	must(t, err)
 	if !reflect.DeepEqual(c.StillHeld, []kernel.BackupHold{{Backup: "b1", Why: errDown.Error()}}) || b.reseals["b1"] != 1 {
 		t.Fatalf("confirmation %+v after %d re-seals", c, b.reseals["b1"])
+	}
+	c, err = r.k.Erase(11, s2)
+	must(t, err)
+	if !reflect.DeepEqual(c.StillHeld, []kernel.BackupHold{{Backup: "b1", Why: errDown.Error()}}) || b.reseals["b1"] != 1 {
+		t.Fatalf("while backing off: confirmation %+v after %d re-seals", c, b.reseals["b1"])
 	}
 	at, wait := int64(10), kernel.RetryMin
 	for n := 2; n < 14; n++ {

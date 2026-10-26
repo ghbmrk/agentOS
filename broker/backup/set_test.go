@@ -28,6 +28,14 @@ func (s *saved) save(r Record) error {
 
 func newSaved() *saved { return &saved{recs: map[string]Record{}} }
 
+// held is backup's Record as set holds it.
+func held(set *Set, backup string) (Record, bool) {
+	if m := set.backups[backup]; m != nil {
+		return m.rec, true
+	}
+	return Record{}, false
+}
+
 // setRig is a rig with three live subjects and one backup of them on each
 // of the given targets, in a Set the kernel has open.
 func setRig(t *testing.T, tgs ...Target) (*rig, []string, *Set, *saved, []Record) {
@@ -57,7 +65,7 @@ func TestAnEraseResealsEveryBackupItCan(t *testing.T) {
 		!reflect.DeepEqual(c.StillHeld, []kernel.BackupHold{{Backup: recs[1].BackupID, Why: "append-only"}}) {
 		t.Fatalf("confirmation %+v", c)
 	}
-	next, ok := set.Record(recs[0].BackupID)
+	next, ok := held(set, recs[0].BackupID)
 	if !ok || next.Generation != recs[0].Generation+1 || slices.Contains(next.Subjects, subs[1]) || !reflect.DeepEqual(sv.recs[next.BackupID], next) {
 		t.Fatalf("record %+v, saved %+v", next, sv.recs[next.BackupID])
 	}
@@ -84,7 +92,7 @@ func TestADownDestinationIsResealedLater(t *testing.T) {
 	}
 	tg.failGet = false
 	must(t, r.k.Tick(3+kernel.RetryMin))
-	if rec, _ := set.Record(recs[0].BackupID); slices.Contains(rec.Subjects, subs[0]) {
+	if rec, _ := held(set, recs[0].BackupID); slices.Contains(rec.Subjects, subs[0]) {
 		t.Fatal("not re-sealed once the destination is back")
 	}
 	if g := tables(t, tg, recs[0].BackupID); len(g) != 1 {
@@ -114,7 +122,7 @@ func TestAnOldTableLeftKeepsTheBackupOwing(t *testing.T) {
 	set = NewSet(sv.save)
 	must(t, set.Add(tg, rec))
 	r.k.OpenBackups(set, 4)
-	rec, _ = set.Record(id)
+	rec, _ = held(set, id)
 	if slices.Contains(rec.Subjects, subs[2]) || len(tables(t, tg, id)) != 1 || !reflect.DeepEqual(sv.recs[id], rec) {
 		t.Fatalf("after the restart: %+v, tables %v", rec, tables(t, tg, id))
 	}
@@ -131,12 +139,12 @@ func TestAnUnsavedRecordIsNotUsed(t *testing.T) {
 	if len(c.StillHeld) != 1 || !strings.Contains(c.StillHeld[0].Why, "not saved") {
 		t.Fatalf("confirmation %+v", c)
 	}
-	if rec, _ := set.Record(recs[0].BackupID); !reflect.DeepEqual(rec, recs[0]) {
+	if rec, _ := held(set, recs[0].BackupID); !reflect.DeepEqual(rec, recs[0]) {
 		t.Fatal("the set uses a record it could not save")
 	}
 	sv.fail = false
 	must(t, r.k.Tick(3+kernel.RetryMin))
-	rec, _ := set.Record(recs[0].BackupID)
+	rec, _ := held(set, recs[0].BackupID)
 	if slices.Contains(rec.Subjects, subs[0]) || !slices.Equal(tables(t, tg, rec.BackupID), []uint64{rec.Generation}) {
 		t.Fatalf("after the retry: %+v, tables %v", rec, tables(t, tg, rec.BackupID))
 	}
