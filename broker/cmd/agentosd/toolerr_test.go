@@ -92,8 +92,8 @@ func (c canaryKernel) err() error {
 	return fmt.Errorf("kernelsock: dial %s/owner.sock: permission denied", c.dir)
 }
 func (c canaryKernel) Submit(context.Context, kernel.Plan) error { return c.err() }
-func (c canaryKernel) Plan(context.Context, string) (string, []string, bool, error) {
-	return "", nil, false, c.err()
+func (c canaryKernel) Plan(context.Context, string) (kernel.PlanView, error) {
+	return kernel.PlanView{}, c.err()
 }
 
 // anyKey gives every machine a key, so its plans reach the seam.

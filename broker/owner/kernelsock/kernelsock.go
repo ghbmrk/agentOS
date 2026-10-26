@@ -236,18 +236,12 @@ func (o Owner) Submit(ctx context.Context, p kernel.Plan) error {
 	return o.call(ctx, "submit", p, nil)
 }
 
-// planRead is kernel/proc's planRead.
-type planRead struct {
-	Status string   `json:"status"` // "": no such plan
-	Phases []string `json:"phases"`
-}
-
-// Plan reads plan id's status and its steps' phases; ok is false when the
+// Plan reads plan id's view (kernel.PlanView): its status, a rejected
+// plan's failing check and each step's result. Its Status is empty when the
 // kernel's log holds no such plan.
-func (o Owner) Plan(ctx context.Context, id string) (status string, phases []string, ok bool, err error) {
-	var r planRead
-	err = o.call(ctx, "plan", id, &r)
-	return r.Status, r.Phases, r.Status != "", err
+func (o Owner) Plan(ctx context.Context, id string) (v kernel.PlanView, err error) {
+	err = o.call(ctx, "plan", id, &v)
+	return v, err
 }
 
 // ErrAnchor is the kernel's refusal to cut off one of the owner's hardware

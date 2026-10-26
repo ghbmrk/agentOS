@@ -2,7 +2,7 @@
 
 package kernelsock
 
-// REQ: CLK-1, KRN-7, KEY-4, REC-3
+// REQ: CLK-1, KRN-7, KEY-4, REC-3, PLN-4
 
 import (
 	"bufio"
@@ -408,7 +408,8 @@ func TestStatusReadsTheKernelsFrame(t *testing.T) {
 
 // A guest's plan reaches a running kernel, which logs it and decides it at
 // once; Plan reads it back. A plan under a key the log never granted is
-// rejected, not dropped (PLN-4), and an unknown plan reads as absent.
+// rejected, not dropped, and its read names the failing check (PLN-4); an
+// unknown plan reads as absent.
 func TestSubmitAndPlanReachTheKernel(t *testing.T) {
 	needRoot(t)
 	ctx := context.Background()
@@ -422,11 +423,12 @@ func TestSubmitAndPlanReachTheKernel(t *testing.T) {
 	if err := o.Submit(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	if st, _, ok, err := o.Plan(ctx, "m1/r1"); err != nil || !ok || st != kernel.SRejected {
-		t.Fatalf("plan read %q %v %v", st, ok, err)
+	// The read names the failing check (PLN-4): the plan's key is no chain.
+	if v, err := o.Plan(ctx, "m1/r1"); err != nil || v.Status != kernel.SRejected || v.Reject != kernel.CKey {
+		t.Fatalf("plan read %+v %v", v, err)
 	}
-	if st, _, ok, err := o.Plan(ctx, "m1/none"); err != nil || ok {
-		t.Fatalf("an unknown plan reads %q %v %v", st, ok, err)
+	if v, err := o.Plan(ctx, "m1/none"); err != nil || v.Status != "" {
+		t.Fatalf("an unknown plan reads %+v %v", v, err)
 	}
 }
 

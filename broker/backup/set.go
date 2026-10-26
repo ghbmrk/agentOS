@@ -45,15 +45,6 @@ func (s *Set) Add(t Target, rec Record) error {
 	return nil
 }
 
-// Record is backup's Record as the set holds it.
-func (s *Set) Record(backup string) (Record, bool) {
-	m := s.backups[backup]
-	if m == nil {
-		return Record{}, false
-	}
-	return m.rec, true
-}
-
 func (s *Set) List() []string { return slices.Sorted(maps.Keys(s.backups)) }
 
 // Subjects is every subject a listed key table of backup may give.
@@ -80,7 +71,8 @@ func (s *Set) Reseal(backup string, keys kernel.Keys, st *kernel.State) error {
 	if out.Result == OldNotDeleted {
 		next.Subjects = slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(m.rec.Subjects), next.Subjects...))))
 	}
-	if !slices.Equal(next.Subjects, m.rec.Subjects) || next.Generation != m.rec.Generation || next.TableSum != m.rec.TableSum {
+	// Rewrap returns a new Record only with a new generation.
+	if next.Generation != m.rec.Generation {
 		if err := s.save(next); err != nil {
 			return fmt.Errorf("backup: the re-sealed backup's record is not saved: %w", err)
 		}
