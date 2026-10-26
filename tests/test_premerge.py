@@ -134,6 +134,27 @@ class PremergeTest(unittest.TestCase):
         self.resolve("DECISIONS.md", "| D-1 | pr edit |\n| D-1 | main edit |\n", base=False)
         self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
 
+    def chmod_commit(self, name):
+        (self.r / name).chmod(0o755)
+        return self.commit("chmod")
+
+    def test_assumptions_renumbering_with_a_mode_flip_is_changed(self):
+        # #3266: the exemption compared blob text only, so a chmod rode along as `same`.
+        git(self.r, "checkout", "-q", "main")
+        self.write("ASSUMPTIONS.md", "| # | A |\n|---|---|\n| N1 | first | basis |\n")
+        self.commit("assumptions")
+        reviewed = self.pr()
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| N1 |", "| N2 |"))
+        self.chmod_commit("ASSUMPTIONS.md")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_decisions_rows_kept_verbatim_with_a_mode_flip_is_changed(self):
+        # #3266: as above, for the appended-rows exemption.
+        reviewed = self.decisions_conflict()
+        self.resolve("DECISIONS.md", "| D-2 | main |\n| D-3 | mine |\n")
+        self.chmod_commit("DECISIONS.md")
+        self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
     def test_two_appended_rows_kept_in_another_file_are_changed(self):
         reviewed = self.decisions_conflict(name="NOTES.md")
         self.resolve("NOTES.md", "| D-2 | main |\n| D-3 | mine |\n")
