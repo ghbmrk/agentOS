@@ -6,6 +6,7 @@ import ast
 import base64
 import contextlib
 import errno
+import fnmatch
 import hashlib
 import json
 import configparser
@@ -6272,7 +6273,13 @@ class HostDiskImageTest(unittest.TestCase):
         for p in ("lvm2", "mdadm", "bcache-tools", "zfsutils-linux", "multipath-tools", "udisks2", "autofs", "dmraid"):
             self.assertNotIn(p, packages)
         # The initrd drops the lvm2 mkosi-initrd adds, and its tree check refuses the rest.
-        self.assertIn("lvm2", ini(MK / "initrd/mkosi.conf")["Content"]["RemovePackages"].split())
+        removed = ini(MK / "initrd/mkosi.conf")["Content"]["RemoveFiles"].split()
+        for f in ("/usr/sbin/lv*", "/usr/sbin/pv*", "/usr/sbin/vg*", "/usr/lib/udev/rules.d/*lvm*", "/usr/lib/systemd/system/lvm2-*"):
+            self.assertIn(f, removed)
+        # Every lvm2 command the tree check names is one of those globs.
+        for n in check.ASSEMBLY_TOOLS:
+            self.assertTrue(any(fnmatch.fnmatch("/usr/sbin/" + n, f) for f in removed if f.startswith("/usr/sbin/")) or
+                            not n.startswith(("lv", "pv", "vg")), n)
         initrd = load("initrd_finalize_hostdisk", MK / "initrd/mkosi.finalize")
         self.assertEqual(initrd.ASSEMBLY_TOOLS, check.ASSEMBLY_TOOLS)
         self.assertEqual(initrd.ASSEMBLY_RULES.pattern, check.ASSEMBLY_RULES.pattern)
