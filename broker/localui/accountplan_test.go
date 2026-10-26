@@ -185,6 +185,11 @@ func TestAccountPlanStopTextsNameOnlyStepsThatWork(t *testing.T) {
 		if tc.reason != "reconnect" && strings.Contains(text, "Sign in again") {
 			t.Errorf("%s: %q names the Gmail sign-in", tc.reason, text)
 		}
+		// A provider that allows only its own sign-in page cannot be used
+		// over IMAP; the owner is told so, as STATUS does (#3256, CH-12).
+		if caveat := "If your provider only allows signing in through its own page, I can't use this account yet."; (tc.reason == "no-sign-in") != strings.Contains(text, caveat) {
+			t.Errorf("%s: %q against the own-page caveat", tc.reason, text)
+		}
 		c.plan, c.err = localapi.AccountPlanned{Reason: tc.reason}, nil
 		p := html.UnescapeString(r.get("/account-plan/"))
 		if !strings.Contains(p, text) || strings.Contains(p, `href="/accounts/"`) != tc.button || strings.Contains(p, "Payment card") {
