@@ -556,7 +556,7 @@ func TestSignInStopDestroysTheMachine(t *testing.T) {
 // every provider worker and no other machine, and one that will not go
 // stops none of the rest (#3249, #3308).
 func TestStartSweepDestroysLeftoverProviderWorkers(t *testing.T) {
-	// REQ: CAP-8
+	// REQ: PLN-6
 	box := newSignInBox(func(string) string { return "" })
 	h := newSignInHost(t, box, nil)
 	left := []string{signInPrefix + "aaaaaa", vm.ProviderPrefix + "bbbbbb", signInPrefix + "cccccc", vm.ProviderPrefix + "dddddd"}
@@ -699,7 +699,7 @@ func TestSignInSockSpeaksTheHostsWire(t *testing.T) {
 // sign-in machines are closed before that manager opens, so no worker
 // it destroys has a live owner (#3308).
 func TestProviderSweepRunsBeforeAnyProviderWorker(t *testing.T) {
-	// REQ: CAP-8
+	// REQ: PLN-6
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatal(err)
