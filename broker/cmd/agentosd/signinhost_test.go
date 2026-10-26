@@ -48,7 +48,8 @@ type signInBox struct {
 	exited    map[string]bool
 	destroyed []string
 	createErr error
-	created   chan string // each create, once it returns
+	stuck     map[string]bool // machines whose destroy fails
+	created   chan string     // each create, once it returns
 }
 
 func newSignInBox(cli func(string) string) *signInBox {
@@ -113,6 +114,10 @@ func (b *signInBox) Exec(_ context.Context, id string, c vm.Command, _ time.Dura
 
 func (b *signInBox) Destroy(_ context.Context, id string) error {
 	b.mu.Lock()
+	if b.stuck[id] {
+		b.mu.Unlock()
+		return errors.New("the runtime did not stop")
+	}
 	_, ok := b.mounts[id]
 	if ok {
 		b.destroyed = append(b.destroyed, id)
@@ -124,6 +129,17 @@ func (b *signInBox) Destroy(_ context.Context, id string) error {
 	}
 	b.routes.Close(id)
 	return nil
+}
+
+func (b *signInBox) Machines() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for id := range b.mounts {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (b *signInBox) gone(id string) bool {
@@ -532,6 +548,41 @@ func TestSignInStopDestroysTheMachine(t *testing.T) {
 	// Every stopped guest's route is gone; signin-c never started.
 	if ents, _ := os.ReadDir(h.Routes); len(ents) != 1 || ents[0].Name() != "signin-c" {
 		t.Fatalf("routes left: %v", ents)
+	}
+}
+
+// A crash during a sign-in leaves its machine reloaded Stopped; the
+// sweep at start destroys every sign-in machine and no other, and one
+// that will not go stops none of the rest (#3249).
+func TestSignInSweepDestroysLeftoverSignInMachines(t *testing.T) {
+	box := newSignInBox(func(string) string { return "" })
+	h := newSignInHost(t, box, nil)
+	left := []string{signInPrefix + "aaaaaa", signInPrefix + "bbbbbb", signInPrefix + "cccccc"}
+	kept := []string{vm.ProviderPrefix + "codex-run", "agent-1", "signin-agent"}
+	box.mu.Lock()
+	for _, id := range append(slices.Clone(left), kept...) {
+		box.mounts[id] = ""
+	}
+	box.stuck = map[string]bool{left[1]: true}
+	box.mu.Unlock()
+
+	h.Sweep()
+	for _, id := range []string{left[0], left[2]} {
+		if !box.gone(id) {
+			t.Fatalf("the sweep left %s", id)
+		}
+	}
+	for _, id := range append([]string{left[1]}, kept...) {
+		if box.gone(id) {
+			t.Fatalf("the sweep destroyed %s", id)
+		}
+	}
+	box.mu.Lock()
+	delete(box.stuck, left[1])
+	box.mu.Unlock()
+	h.Sweep() // the next start takes the one that would not go
+	if !box.gone(left[1]) {
+		t.Fatal("a second sweep left the stuck machine")
 	}
 }
 
