@@ -30,8 +30,8 @@ parts=$(lsblk -rno NAME,PKNAME,PARTUUID)
 # lsblk reads udev's record. Each such disk's own table is read instead, read-only, so a second
 # AgentOS drive attached beside this one still counts. A partition is a row whose sysfs entry has a
 # partition number; a dm device's row names a partition as its parent and has none.
-for d in $(printf '%s\n' "$parts" | awk 'NF == 2 { print $1, $2 }' | while read -r p d; do
-	[ -r "$R/sys/class/block/$p/partition" ] && echo "$d"
+for d in $(printf '%s\n' "$parts" | awk 'NF == 2 { print $1, $2 }' | while read -r p pk; do
+	[ -r "$R/sys/class/block/$p/partition" ] && echo "$pk"
 done | sort -u); do
 	parts="$parts
 $(sfdisk -d "/dev/$d" 2>/dev/null | awk -v d="$d" '$2 == ":" && match($0, /uuid=[0-9A-Fa-f-]+/) {
