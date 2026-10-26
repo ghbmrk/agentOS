@@ -25,10 +25,10 @@ mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
 # The broker, the vault process, the Wi-Fi page, the access point loader,
-# the modem bridge, the home Wi-Fi helper, and the keeper: enrollment, the unlock step and the
-# kernel (STO-2c), static and path-free.
+# the modem bridge, the home Wi-Fi helper, the keeper: enrollment, the unlock step and the
+# kernel (STO-2c), and the host-disk helper the udev rules below run (HOST-1a), static and path-free.
 for cmd in agentosd agentos-egress agentos-localui agentos-ap agentos-modem agentos-netjoin \
-	agentos-enroll agentos-unlock agentos-kernel; do
+	agentos-enroll agentos-unlock agentos-kernel agentos-hostdisk; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
@@ -72,6 +72,11 @@ install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" "
 # Its system bus policy: NetworkManager sees only the helper's own calls.
 install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.conf" "$STAGE/usr/share/dbus-1/system.d/agentos-netjoin.conf"
 install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"
+# The host PC's disks stay hidden, unassembled and root-only (HW-8, HOST-1a; hostdisk ASSUMPTIONS
+# H8, H11): in the main system only, never the initrd.
+for r in 59-agentos-host-disks 64-agentos-host-disks-assembly 72-agentos-host-disks-late; do
+	install -D -m 0644 "$REPO/broker/hostdisk/udev/$r.rules" "$STAGE/usr/lib/udev/rules.d/$r.rules"
+done
 chmod -R u+w,go-w "$STAGE"
 
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
