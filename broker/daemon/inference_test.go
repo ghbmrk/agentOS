@@ -145,6 +145,11 @@ var netOK = map[string]allowance{
 	// and the owner-only check's file owner.
 	"kernel/privfile": {"O_NOFOLLOW for its temporary and Stat_t for the owner-only check; no network client",
 		[]string{"syscall.O_NOFOLLOW", "syscall.Stat_t"}},
+	// The owner page's authority (#3153): x509's name constraint takes its
+	// excluded address ranges as net.IPNet, and the sealed file is opened
+	// without following a link or blocking on a FIFO.
+	"pageca": {"net.IPNet values for x509's excluded IP ranges and ParseIP to refuse an address as the page name; O_NOFOLLOW, O_NONBLOCK and Stat_t to open the sealed authority file safely; no network client",
+		[]string{"net.CIDRMask", "net.IPNet", "net.IPv4zero", "net.IPv6zero", "net.ParseIP", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.Stat_t"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.

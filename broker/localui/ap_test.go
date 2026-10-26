@@ -149,3 +149,54 @@ func nftCheck(t *testing.T, rules string) {
 		}
 	}
 }
+
+// REQ: CH-9
+
+// The page's name resolves to the box in both modes, so it is never
+// forwarded upstream (#3153).
+func TestDnsmasqPinsThePageNameInBothModes(t *testing.T) {
+	for _, pass := range []bool{false, true} {
+		c := testAP()
+		c.Passthrough = pass
+		conf, err := DnsmasqConf(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(conf, "address=/agentos.internal/10.42.0.1\n") {
+			t.Errorf("passthrough %v: page name not pinned:\n%s", pass, conf)
+		}
+		c.PageName = "box.internal"
+		if conf, _ = DnsmasqConf(c); !strings.Contains(conf, "address=/box.internal/10.42.0.1\n") {
+			t.Errorf("passthrough %v: configured name not pinned", pass)
+		}
+	}
+	for _, bad := range []string{"10.42.0.1", "internal", "Agentos.internal", "a/b.internal", "x.internal\naddress=/#/1.2.3.4", "-a.internal", "a.internal."} {
+		c := testAP()
+		c.PageName = bad
+		if _, err := DnsmasqConf(c); err == nil {
+			t.Errorf("page name %q accepted", bad)
+		}
+	}
+}
+
+// 443 is admitted from the access point's subnet to the box beside 80, and
+// closed on every other interface; nothing else opens.
+func TestNftAdmits443FromTheAPOnly(t *testing.T) {
+	c := testAP()
+	rules, err := NftRules(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`iifname "wlan0" ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport 443 accept`,
+		`iifname != "wlan0" tcp dport 443 ip daddr 10.42.0.1 drop`,
+	} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("missing %q in:\n%s", want, rules)
+		}
+	}
+	if n := strings.Count(rules, "443"); n != 2 {
+		t.Errorf("443 appears %d times", n)
+	}
+	nftCheck(t, rules)
+}

@@ -54,7 +54,11 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"apnet", "kernel/privfile", "localapi", "owner", "sockets"},
+	"localsrv": {"apnet", "kernel/privfile", "localapi", "owner", "pageca", "sockets"},
+	// The owner page's authority (#3153): the standard library's crypto
+	// and the private-file helpers; its Sealer is clerk.Sealer's method
+	// set, so it links no clerk (which brings crypto/tls and net/http).
+	"pageca": {"kernel/privfile"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
@@ -235,6 +239,7 @@ var stdExceptions = map[string][]string{
 	"cmd/agentosd":    {"syscall"},        // signal numbers for shutdown
 	"journal":         {"syscall"},        // flock on the journal file
 	"kernel/privfile": {"syscall"},        // O_NOFOLLOW and Stat_t for the owner-only check
+	"pageca":          {"net", "syscall"}, // x509's excluded IP ranges are net.IPNet; O_NOFOLLOW and Stat_t for the sealed file
 	"loops":           {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
 }
 

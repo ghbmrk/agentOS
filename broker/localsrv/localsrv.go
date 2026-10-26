@@ -94,6 +94,10 @@ type Config struct {
 	// Accounts are the account clerks' sign-ins by account ID, the Connect
 	// page's (#3006); an account not listed refuses both ops.
 	Accounts map[string]AccountSignIn
+	// Page is the page authority (OpenPage) that certifies the page's
+	// serving key (OpCertify, #3153); nil is none, and the page serves
+	// HTTP only.
+	Page *Page
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -124,6 +128,7 @@ type Server struct {
 	plan     planKept    // the waiting plan sign-in the page started
 
 	planMu sync.Mutex // one plan sign-in start at a time
+	noPage sync.Once  // the no-authority line, logged once
 }
 
 // New returns a Server.
@@ -171,6 +176,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		// Connecting an account needs a session (#3006, §12.1 step 7).
 		localapi.OpAccountBegin:  s.accountBegin,
 		localapi.OpAccountFinish: s.accountFinish,
+		// A serving certificate for the page name needs no session: the
+		// page asks at start, and the leaf names only the page (#3153).
+		localapi.OpCertify: s.certify,
 	}
 }
 

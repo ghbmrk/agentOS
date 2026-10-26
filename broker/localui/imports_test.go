@@ -49,3 +49,22 @@ func TestDaemonAndVaultProcessLinkNoScanner(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CH-9
+
+// The page authority's key stays in agentosd (#3153): the web-facing page
+// links neither pageca nor the clerk sealer that opens the authority, so
+// it can only ask agentosd to certify its own serving key.
+func TestThePageLinksNoPageAuthority(t *testing.T) {
+	for _, pkg := range []string{".", "../cmd/agentos-localui"} {
+		out, err := exec.Command("go", "list", "-deps", pkg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("go list %s: %v\n%s", pkg, err, out)
+		}
+		for _, p := range strings.Fields(string(out)) {
+			if strings.HasSuffix(p, "/broker/pageca") || strings.HasSuffix(p, "/broker/localsrv") {
+				t.Errorf("%s links %s", pkg, p)
+			}
+		}
+	}
+}

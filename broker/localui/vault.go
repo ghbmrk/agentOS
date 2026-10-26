@@ -329,7 +329,7 @@ const shrinkJS = `(function () {
 // vaultCSP is pageCSP plus the hash of shrinkJS, the only script it runs.
 var vaultCSP = func() string {
 	h := sha256.Sum256([]byte(shrinkJS))
-	return pageCSP + "; script-src 'sha256-" + base64.StdEncoding.EncodeToString(h[:]) + "'"
+	return cspWith(base64.StdEncoding.EncodeToString(h[:]))
 }()
 
 // uploadWindow bounds how long one upload may take to arrive.
@@ -539,7 +539,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 	if !st.Expires.IsZero() {
 		c.Expires = st.Expires
 	}
-	http.SetCookie(w, c)
+	setCookie(w, r, c)
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }
 
@@ -599,7 +599,7 @@ func scanSafe(photo []byte) (pass string, err error) {
 }
 
 func vaultKey(r *http.Request) string {
-	c, err := r.Cookie(vaultCookie)
+	c, err := readCookie(r, vaultCookie)
 	if err != nil || c.Value == "" {
 		return "-"
 	}
