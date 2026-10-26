@@ -92,6 +92,7 @@ const (
 	errSignInRunning sockets.Code = "signin: a sign-in already runs for this guest"
 	errSignInNone    sockets.Code = "signin: no sign-in runs for this guest"
 	errSignInClosed  sockets.Code = "signin: agentosd is shutting down"
+	errSignInStopped sockets.Code = "signin: the sign-in was stopped as it started"
 	errSignInFailed  sockets.Code = "signin: the sign-in machine did not start"
 )
 
@@ -224,7 +225,13 @@ func (h *signInHost) Start(ctx context.Context, guest, route string) error {
 		// Stopped or shut down while it was created: its destroy may
 		// have come first.
 		h.destroy(guest, r.id)
-		return errSignInClosed
+		h.mu.Lock()
+		closed := h.closed
+		h.mu.Unlock()
+		if closed {
+			return errSignInClosed
+		}
+		return errSignInStopped
 	default:
 	}
 	if err != nil {
@@ -233,7 +240,14 @@ func (h *signInHost) Start(ctx context.Context, guest, route string) error {
 		h.stop(guest, r)
 		return errSignInFailed
 	}
-	go h.watch(guest, r)
+	lease, wall := h.Lease, h.Wall
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	if wall <= 0 {
+		wall = 20 * time.Minute
+	}
+	go h.watch(guest, r, lease, wall)
 	return nil
 }
 
@@ -310,15 +324,8 @@ func (h *signInHost) destroy(guest, id string) {
 	}
 }
 
-// watch destroys r once its caller stops reading for Lease, or at Wall.
-func (h *signInHost) watch(guest string, r *signInRun) {
-	lease, wall := h.Lease, h.Wall
-	if lease <= 0 {
-		lease = time.Minute
-	}
-	if wall <= 0 {
-		wall = 20 * time.Minute
-	}
+// watch destroys r once its caller stops reading for lease, or at wall.
+func (h *signInHost) watch(guest string, r *signInRun, lease, wall time.Duration) {
 	deadline := time.Now().Add(wall)
 	tick := time.NewTicker(min(lease/4, time.Second))
 	defer tick.Stop()
