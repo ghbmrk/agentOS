@@ -9,6 +9,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk/accounts"
@@ -178,6 +179,9 @@ func TestAccountPlanReportsGrantDeath(t *testing.T) {
 	}
 	if _, stop := h.clerk(); !errors.Is(stop, inbox.ErrReconnect) {
 		t.Fatalf("the clerk goes on calling Google: stop %v", stop)
+	}
+	if st, err := owner.Status(); err != nil || len(st.Lines) == 0 || !strings.Contains(st.Lines[0], "I stopped working in your mailbox") {
+		t.Fatalf("the clerk stopped but STATUS does not say so: %q %v", st.Lines, err)
 	}
 	n := len(srv.Requests())
 	if p, err = owner.AccountPlan(); err != nil || p.Reason != DReconnect || len(p.Items) != 0 || len(srv.Requests()) != n {

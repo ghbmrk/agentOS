@@ -87,7 +87,10 @@ func (h *MailHost) accountPlan() (AccountPlanned, error) {
 		if errors.Is(err, inbox.ErrReconnect) {
 			h.mu.Lock()
 			if h.changes == changes {
-				h.stop = err // as a read refused this way: nothing is sent until the owner signs in again
+				// As a step refused this way (Do): nothing is sent until the
+				// owner signs in again, and STATUS says so (#2708 item 2).
+				why, next := trouble(err, nil)
+				h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, err
 			}
 			h.mu.Unlock()
 			return AccountPlanned{Reason: DReconnect}, nil
