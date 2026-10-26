@@ -81,11 +81,11 @@ func BackupTargetHash(n int, t BackupTarget) [32]byte {
 
 // shape reports whether the kernel can carry t: a known kind, a short plain
 // name not led by a dot, and a locator of printable characters only, so the
-// page shows the anchor's signer what it signs (no bidi, zero-width or
-// separator characters), for a directory a clean absolute path.
+// page shows the anchor's signer what it signs (no bidi, zero-width,
+// separator or default-ignorable characters), for a directory a clean absolute path.
 func (t BackupTarget) shape() bool {
 	if len(t.Name) == 0 || len(t.Name) > MaxTargetName || len(t.Locator) == 0 || len(t.Locator) > MaxLocator ||
-		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), func(c rune) bool { return !unicode.IsPrint(c) }) || t.Name[0] == '.' {
+		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), invisible) || t.Name[0] == '.' {
 		return false
 	}
 	for _, c := range t.Name {
@@ -98,6 +98,12 @@ func (t BackupTarget) shape() bool {
 		return path.IsAbs(t.Locator) && path.Clean(t.Locator) == t.Locator
 	}
 	return false
+}
+
+// invisible reports a character the page cannot show: unprintable, or
+// printable but default-ignorable (a joiner, a variation selector, a filler).
+func invisible(c rune) bool {
+	return !unicode.IsPrint(c) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, c) || unicode.Is(unicode.Variation_Selector, c)
 }
 
 // TargetsAdded is how many targets have been added: an add's anchor signs
