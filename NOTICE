@@ -50,3 +50,9 @@ BSD-style dependencies (broker/vendor)
 - github.com/emiago/sipgo (BSD 2-Clause)
 - github.com/google/uuid, golang.org/x/{crypto,sync,sys,term,text,xerrors},
   google.golang.org/protobuf, rsc.io/qr (BSD 3-Clause)
+
+Protocol references (no code copied)
+- github.com/pierosavi/withings-local, MIT License, Copyright (c) 2026
+  pierosavi. broker/clerk/withings follows its protocol notes
+  (docs/protocol.md) and the shape of its read-only client
+  (src/withings_wpp), read at eab5a03 on 2026-10-26; the Go code is our own.
