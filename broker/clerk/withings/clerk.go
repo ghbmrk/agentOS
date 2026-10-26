@@ -169,7 +169,8 @@ const (
 type Stats struct {
 	Coalesced int // reads within the gap of the last one
 	Deferred  int // readings past MaxEvents, left for the next read
-	Others    int // readings of user slots that are not the owner's
+	Others    int // readings of slot 0 or of user slots not the owner's
+	Stale     int // owner readings at or below their slot's mark
 	Failed    int // reads that ended in an error
 }
 
@@ -245,8 +246,10 @@ func (c *Clerk) Read(ctx context.Context, link Link) (int, error) {
 		return 0, err
 	}
 	s := &Session{Link: link, Prover: p, Log: c.Log}
-	res, err := s.Read(ctx)
-	p.Close()
+	res, err := func() (Result, error) {
+		defer p.Close()
+		return s.Read(ctx)
+	}()
 	if err != nil {
 		c.mu.Lock()
 		c.stats.Failed++
@@ -259,11 +262,14 @@ func (c *Clerk) Read(ctx context.Context, link Link) (int, error) {
 // deliver emits the owner's readings newer than their slot's mark, oldest
 // first, whole weigh-ins only, up to MaxEvents. A mark moves past a
 // weigh-in only once all its readings are emitted, so a deferred or failed
-// one goes out at the next read.
+// one goes out at the next read: delivery is at least once, and the bus
+// dedupes on (device, user, time, measure).
 func (c *Clerk) deliver(rs []Reading) (int, error) {
-	max := c.MaxEvents
-	if max <= 0 {
-		max = DefaultMaxEvents
+	// One weigh-in has at most one reading per measure, so a smaller limit
+	// would stall.
+	limit := max(c.MaxEvents, len(measures))
+	if c.MaxEvents <= 0 {
+		limit = DefaultMaxEvents
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -273,10 +279,12 @@ func (c *Clerk) deliver(rs []Reading) (int, error) {
 	var fresh []Reading
 	for _, r := range rs {
 		switch {
-		case !c.Owner[r.User]:
+		case r.User == 0 || !c.Owner[r.User]:
 			c.stats.Others++
 		case r.Time > c.Marks[r.User]:
 			fresh = append(fresh, r)
+		default:
+			c.stats.Stale++
 		}
 	}
 	sent := 0
@@ -285,7 +293,7 @@ func (c *Clerk) deliver(rs []Reading) (int, error) {
 		for j < len(fresh) && fresh[j].Time == fresh[i].Time && fresh[j].User == fresh[i].User {
 			j++
 		}
-		if sent+(j-i) > max {
+		if sent+(j-i) > limit {
 			c.stats.Deferred += len(fresh) - i
 			break
 		}

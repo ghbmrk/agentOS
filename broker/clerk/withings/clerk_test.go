@@ -114,26 +114,91 @@ func TestClerkCoalescesAFloodOfReads(t *testing.T) {
 	}
 }
 
+// weighIn is one weigh-in at time t by slot 7 with the first n measures.
+func weighIn(t uint32, n int) []tlv {
+	codes := []uint16{1, 5, 6, 8, 11, 76, 77, 88, 170, 226, 227}
+	r := []tlv{meta(t, 1, 7)}
+	for _, c := range codes[:n] {
+		r = append(r, data(1, c, 0))
+	}
+	return r
+}
+
 // Past MaxEvents, whole weigh-ins wait for the next read, oldest first, and
-// none is lost.
+// none is lost: a weigh-in that exactly fills the limit goes, one that
+// overflows it by one waits. A limit below one weigh-in's size is raised to
+// it, so the clerk never stalls.
 func TestClerkDefersWholeWeighInsPastTheLimit(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		max         int
+		sizes       []int
+		first, rest int
+	}{
+		{"exact fill", len(measures), []int{6, 5, 1}, 11, 1},
+		{"over by one", len(measures), []int{6, 6}, 6, 6},
+		{"limit below a weigh-in", 2, []int{11, 1}, 11, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var logs []string
+			cl, b, clk := newClerk(t, &logs)
+			cl.MaxEvents = c.max
+			f := newScale()
+			for i, n := range c.sizes {
+				f.records = append(f.records, weighIn(uint32(100*(i+1)), n))
+			}
+			if n, err := readOnce(t, cl, f); err != nil || n != c.first {
+				t.Fatalf("first read sent %d, %v; want %d", n, err, c.first)
+			}
+			if st := cl.Stats(); st.Deferred != c.rest {
+				t.Fatalf("stats %+v", st)
+			}
+			clk.t = clk.t.Add(DefaultGap)
+			if n, _ := readOnce(t, cl, f); n != c.rest || len(b.got) != c.first+c.rest {
+				t.Fatalf("second read sent %d", n)
+			}
+			for i := 1; i < len(b.got); i++ {
+				if b.got[i].Reading.Time < b.got[i-1].Reading.Time {
+					t.Fatal("weigh-ins out of order")
+				}
+			}
+		})
+	}
+}
+
+// Slot 0 (the scale did not know whose weigh-in it was) never leaves, even
+// when a host lists it as the owner's.
+func TestClerkNeverEmitsSlotZero(t *testing.T) {
 	var logs []string
-	c, b, clk := newClerk(t, &logs)
-	c.MaxEvents = 2
+	c, b, _ := newClerk(t, &logs)
+	c.Owner[0] = true
 	f := newScale()
-	f.records = [][]tlv{
-		{meta(100, 1, 7), data(1, 1, 0), data(2, 6, 0)},
-		{meta(200, 1, 7), data(3, 1, 0), data(4, 6, 0)},
+	f.records = [][]tlv{{meta(1700007200, 1, 0), data(5000, 1, -2)}}
+	if _, err := readOnce(t, c, f); err != nil {
+		t.Fatal(err)
 	}
-	if n, _ := readOnce(t, c, f); n != 2 || b.got[0].Reading.Time != 100 {
-		t.Fatalf("first read sent %d", n)
+	if len(b.got) != 0 || c.Stats().Others != 1 {
+		t.Fatalf("slot 0 on the bus: %+v, stats %+v", b.got, c.Stats())
 	}
-	if st := c.Stats(); st.Deferred != 2 {
-		t.Fatalf("stats %+v", st)
+}
+
+// A weigh-in at or below its slot's mark (a scale clock set back) is
+// counted, not dropped silently; a failed read is counted too.
+func TestClerkCountsStaleAndFailedReads(t *testing.T) {
+	var logs []string
+	c, _, clk := newClerk(t, &logs)
+	c.Marks = map[uint32]int64{7: 1700000000}
+	f := newScale()
+	twoWeighIns(f)
+	if n, err := readOnce(t, c, f); err != nil || n != 0 {
+		t.Fatalf("sent %d, %v", n, err)
 	}
 	clk.t = clk.t.Add(DefaultGap)
-	if n, _ := readOnce(t, c, f); n != 2 || b.got[2].Reading.Time != 200 {
-		t.Fatalf("second read sent %d", n)
+	bad := newScale()
+	bad.badProof = true
+	_, _ = readOnce(t, c, bad)
+	if st := c.Stats(); st.Stale != 3 || st.Failed != 1 {
+		t.Fatalf("stats %+v", st)
 	}
 }
 
@@ -251,6 +316,14 @@ func TestKeeperIsNoReflectionOracle(t *testing.T) {
 		t.Fatal("checked twice")
 	}
 	p2.Close()
+	// A closed proof neither answers nor checks.
+	if _, err := (&Proof{k: k, closed: true}).Answer(scaleChallenge, mac); !errors.Is(err, ErrProofUsed) {
+		t.Fatalf("closed proof answered: %v", err)
+	}
+	p4 := &Proof{k: k, answered: scaleChallenge, closed: true}
+	if p4.Check(own, mac, sha(own, []byte(mac), []byte(klCanary))) {
+		t.Fatal("closed proof checked")
+	}
 	// A later session's peer offers our earlier challenge: not answered.
 	p3, _ := k.Prove(context.Background())
 	defer p3.Close()
