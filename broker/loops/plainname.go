@@ -47,6 +47,7 @@ var fuzzNames = map[string]string{
 	"vault.FuzzSlots":               "the check that opens the vault only for an enrolled key",
 	"update.FuzzParseAttestation":   "the check that reads update attestations",
 	"withings.FuzzReassemble":       "the check that reads your scale's Bluetooth replies",
+	"edgelink.FuzzReadFrame":        "the check that reads what the edge box sends",
 }
 
 // probePrefix starts the socket probe's subject ("socket.<machine>").
