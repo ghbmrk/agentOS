@@ -26,6 +26,7 @@ type fakePasskeys struct {
 	points   [][]byte
 	finished [][3][]byte
 	cut      []string
+	cutTaps  [][3][]byte
 	err      error // every op but List answers it
 }
 
@@ -46,15 +47,17 @@ func (f *fakePasskeys) Finish(_ context.Context, session string, ad, cd, sig []b
 	return f.err
 }
 
-func (f *fakePasskeys) CutOff(_ context.Context, session, id string) error {
+func (f *fakePasskeys) CutOff(_ context.Context, session, id string, ad, cd, sig []byte) error {
 	f.sessions = append(f.sessions, session)
 	f.cut = append(f.cut, id)
+	f.cutTaps = append(f.cutTaps, [3][]byte{ad, cd, sig})
 	return f.err
 }
 
 var (
 	anchorKey = localapi.Passkey{ID: strings.Repeat("a1", 32), Fingerprint: "a1a1 a1a1 a1a1", Alg: "es256"}
-	phoneKey  = localapi.Passkey{ID: strings.Repeat("b2", 32), Fingerprint: "b2b2 b2b2 b2b2", Alg: "es256", By: "a1a1 a1a1 a1a1"}
+	phoneKey  = localapi.Passkey{ID: strings.Repeat("b2", 32), Fingerprint: "b2b2 b2b2 b2b2", Alg: "es256", By: "a1a1 a1a1 a1a1",
+		CutChallenge: []byte("fedcba9876543210fedcba9876543210")}
 )
 
 // passkeyRig is a set-up box whose local UI serves the passkey page.
@@ -226,5 +229,35 @@ func TestPasskeyPageRendersOnlyFingerprints(t *testing.T) {
 	}
 	if strings.Contains(p, strings.Repeat("d4", 32)) || strings.Contains(p, "<b>d4") {
 		t.Fatal("a cut-off key is offered or unescaped")
+	}
+}
+
+// A phone passkey's cut-off asks for a hardware key's tap over its
+// CutChallenge, and posts that assertion as the enrol step does (#3209); a
+// hardware key's confirm has no tap, and a malformed tap reaches nothing.
+func TestCutOffAPhoneAsksForAHardwareKeyTap(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {phoneKey.ID}}).Body.String())
+	if !strings.Contains(p, `id="pk-tap"`) || !strings.Contains(p, `data-challenge="`+enc(phoneKey.CutChallenge)+`"`) ||
+		!strings.Contains(p, `id="pk-finish"`) || !strings.Contains(p, `name="step" value="cutoff"`) {
+		t.Fatalf("the phone's confirm asks for no hardware key tap:\n%s", p)
+	}
+	p = html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {anchorKey.ID}}).Body.String())
+	if strings.Contains(p, `id="pk-tap"`) {
+		t.Fatalf("a hardware key's confirm asks for a tap:\n%s", p)
+	}
+	tap := url.Values{"step": {"cutoff"}, "id": {phoneKey.ID}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
+	r.post("/passkeys/", tap)
+	if len(fp.cutTaps) != 1 || string(fp.cutTaps[0][0]) != "ad" || string(fp.cutTaps[0][1]) != "cd" || string(fp.cutTaps[0][2]) != "sig" {
+		t.Fatalf("the tap did not reach agentosd: %q", fp.cutTaps)
+	}
+	tap.Set("sig", "not base64!")
+	r.post("/passkeys/", tap)
+	tap.Set("sig", "")
+	r.post("/passkeys/", tap)
+	if len(fp.cut) != 1 {
+		t.Fatal("a malformed tap reached agentosd")
 	}
 }

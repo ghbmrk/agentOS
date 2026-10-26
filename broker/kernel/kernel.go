@@ -368,14 +368,21 @@ func (k *Kernel) Enroll(now int64, e key.Enrollment) error {
 	return k.owner(now, TEnrolled, enrolled{e})
 }
 
-// Unenroll cuts a passkey off for good, such as a lost phone's. Keys derived
-// from its grants in the log stand until they lapse; it signs no new grant
-// and no plan under a bare root.
-func (k *Kernel) Unenroll(now int64, pk key.PublicKey) error {
-	if key.In(k.s.Anchors, pk) {
+// ErrNotUnenrolled refuses a cut-off no hardware key signed (KEY-4, #3209).
+var ErrNotUnenrolled = errors.New("kernel: cut-off not signed by an anchor")
+
+// Unenroll cuts a passkey off for good, such as a lost phone's, on an
+// anchor's signature over key.UnenrollMsg; a phone passkey's, or none, logs
+// nothing. Keys derived from its grants in the log stand until they lapse;
+// it signs no new grant and no plan under a bare root.
+func (k *Kernel) Unenroll(now int64, u key.Unenrollment) error {
+	if key.In(k.s.Anchors, u.Passkey) {
 		return ErrAnchor
 	}
-	return k.owner(now, TUnenrolled, unenrolled{pk})
+	if !u.Signed(k.s.Anchors) {
+		return ErrNotUnenrolled
+	}
+	return k.owner(now, TUnenrolled, unenrolled{u})
 }
 
 // ErrAnchor refuses cutting off a hardware key: an anchor is replaced only

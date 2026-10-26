@@ -27,8 +27,10 @@ type Passkeys interface {
 	// Finish enrols session's kept point under the hardware key whose
 	// get() assertion this is.
 	Finish(ctx context.Context, session string, authData, clientData, sig []byte) error
-	// CutOff cuts the listed key id off.
-	CutOff(ctx context.Context, id string) error
+	// CutOff cuts the listed key id off under the hardware key whose
+	// get() assertion over its CutChallenge this is (#3209); with none,
+	// only an anchor's ErrPasskeyAnchor or an already cut key's nil.
+	CutOff(ctx context.Context, id string, authData, clientData, sig []byte) error
 }
 
 // PasskeyBeginsPerMinute bounds enrolment starts on the socket, as
@@ -115,10 +117,12 @@ func (s *Server) passkeyCutOff(ctx context.Context, _ sockets.Peer, args json.Ra
 	if !s.valid(in.Token) {
 		return nil, errUnauthorized
 	}
-	if err != nil || !passkeyID(in.ID) {
+	none := len(in.AuthenticatorData) == 0 && len(in.ClientDataJSON) == 0 && len(in.Signature) == 0
+	all := assertionPart(in.AuthenticatorData) && assertionPart(in.ClientDataJSON) && assertionPart(in.Signature)
+	if err != nil || !passkeyID(in.ID) || !(none || all) {
 		return nil, errBadArgs
 	}
-	if err := s.cfg.Passkeys.CutOff(ctx, in.ID); err != nil {
+	if err := s.cfg.Passkeys.CutOff(ctx, in.ID, in.AuthenticatorData, in.ClientDataJSON, in.Signature); err != nil {
 		return nil, passkeyErr(err)
 	}
 	return localapi.Text{}, nil

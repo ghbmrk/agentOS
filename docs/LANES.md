@@ -50,7 +50,7 @@ One owner per directory at a time (PLAN.md §3). A change another owner's direct
   - `Submit`: a plan;
   - `State().Status()`: STATUS;
   - `Retry`: RETRY of a parked step;
-  - `Enroll` and `Unenroll`: passkeys;
+  - `Enroll`, `Unenroll`: passkeys, anchor-signed;
   - `Extend`: a held plan's spend;
   - `SetLine`: the owner's line for a big change;
   - `Reserve`: the owner's share of a usage pool;

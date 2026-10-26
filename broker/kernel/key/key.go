@@ -21,7 +21,9 @@ const (
 	DomainUse  = "agentos.key.use.v1\x00"
 	// DomainEnroll signs a passkey into the owner's set (D-146).
 	DomainEnroll = "agentos.key.enroll.v1\x00"
-	domainID     = "agentos.key.id.v1\x00"
+	// DomainUnenroll signs a passkey out of it for good (KEY-4, #3209).
+	DomainUnenroll = "agentos.key.unenroll.v1\x00"
+	domainID       = "agentos.key.id.v1\x00"
 )
 
 // MaxLinks bounds a chain, so verification cost is bounded.
@@ -764,6 +766,28 @@ func EnrollMsg(pk PublicKey) []byte { return append([]byte(DomainEnroll), pk.Enc
 // Enroll is anchor's signature enrolling pk.
 func Enroll(anchor Signer, pk PublicKey) Enrollment {
 	return Enrollment{Passkey: pk, By: anchor.Public(), Sig: anchor.Sign(EnrollMsg(pk))}
+}
+
+// Unenrollment is an anchor's signature cutting a passkey, such as a lost
+// phone's, off for good (KEY-4, #3209). Only a hardware key signs one, so
+// no phone passkey and no owner-page session alone can cut another off.
+type Unenrollment struct {
+	Passkey PublicKey `json:"passkey"`
+	By      PublicKey `json:"by"`
+	Sig     []byte    `json:"sig"`
+}
+
+// UnenrollMsg is the message an anchor signs to cut pk off.
+func UnenrollMsg(pk PublicKey) []byte { return append([]byte(DomainUnenroll), pk.Encode()...) }
+
+// Unenroll is anchor's signature cutting pk off.
+func Unenroll(anchor Signer, pk PublicKey) Unenrollment {
+	return Unenrollment{Passkey: pk, By: anchor.Public(), Sig: anchor.Sign(UnenrollMsg(pk))}
+}
+
+// Signed reports whether one of anchors made u's signature.
+func (u Unenrollment) Signed(anchors []PublicKey) bool {
+	return u.Passkey.Valid() && In(anchors, u.By) && u.By.Verify(UnenrollMsg(u.Passkey), u.Sig)
 }
 
 // Passkeys is the owner's set: the anchors, then each passkey an anchor

@@ -15,13 +15,14 @@ import (
 // Passkeys is the owner's passkeys as the passkey page uses them
 // (#2779a; KEY-4, REC-3): agentosd lists them from the kernel's log,
 // enrols a phone passkey from the page's two WebAuthn ceremonies and cuts
-// one off. session is the phone's session token, which agentosd checks.
+// one off on a hardware key's tap (#3209). session is the phone's session
+// token, which agentosd checks.
 // A refusal is a Refused with one of localapi.PasskeyCodes.
 type Passkeys interface {
 	List(ctx context.Context, session string) (localapi.PasskeyList, error)
 	Begin(ctx context.Context, session string, point []byte) (challenge []byte, err error)
 	Finish(ctx context.Context, session string, authData, clientData, sig []byte) error
-	CutOff(ctx context.Context, session, id string) error
+	CutOff(ctx context.Context, session, id string, authData, clientData, sig []byte) error
 }
 
 // AgentosdPasskeys is Passkeys over agentosd's passkey ops on localui.sock.
@@ -50,10 +51,11 @@ func (a AgentosdPasskeys) Finish(ctx context.Context, session string, authData, 
 		AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig}, nil)
 }
 
-func (a AgentosdPasskeys) CutOff(ctx context.Context, session, id string) error {
+func (a AgentosdPasskeys) CutOff(ctx context.Context, session, id string, authData, clientData, sig []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	return a.Owner.Call(ctx, localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: session, ID: id}, nil)
+	return a.Owner.Call(ctx, localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: session, ID: id,
+		AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig}, nil)
 }
 
 // AnchorReply is the page's answer to cutting off a hardware key (#2740
@@ -69,7 +71,7 @@ func passkeyText(err error) string {
 	case localapi.ErrPasskeyAnchor:
 		return AnchorReply
 	case localapi.ErrPasskeyNotAnchor:
-		return "That tap was a phone passkey's. Only one of your hardware keys can add a passkey. Start again and tap a hardware key when asked."
+		return "That tap was a phone passkey's. Only one of your hardware keys can add or cut off a passkey. Start again and tap a hardware key when asked."
 	case localapi.ErrPasskeyBadAssertion:
 		return "That tap didn't match. Start again, and tap one of your hardware keys when asked."
 	case localapi.ErrPasskeyRefused:
@@ -90,7 +92,8 @@ func passkeyText(err error) string {
 // page's CSP (L6). It runs the two WebAuthn ceremonies and nothing else:
 // create() for the phone's new ES256 passkey, whose public point it puts
 // in the begin form, then get() on a hardware key over the challenge
-// agentosd returned, whose answer it puts in the finish form. It talks
+// agentosd returned, whose answer it puts in the finish form, the enrol
+// step's or the cut-off step's. It talks
 // only to this page's own forms, holds no secret, and shows only fixed
 // words.
 const passkeyJS = `(function () {
@@ -150,7 +153,8 @@ type passkeysView struct {
 	List localapi.PasskeyList
 	// Step is "", "tap" or "confirm".
 	Step string
-	// Challenge is the tap's challenge, base64.
+	// Challenge is the tap's challenge, base64: the enrolment's, or the
+	// confirmed phone passkey's CutChallenge.
 	Challenge string
 	Confirm   localapi.Passkey
 	Err, Done string
@@ -240,10 +244,24 @@ func (s *Server) passkeysPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.Get("step") == "confirm" {
 			v.Step, v.Confirm = "confirm", k
+			v.Challenge = base64.StdEncoding.EncodeToString(k.CutChallenge)
 			s.render(w, "passkeys", v)
 			return
 		}
-		if err := s.cfg.Passkeys.CutOff(ctx, tok, id); err != nil {
+		// A phone passkey's cut-off carries the hardware key's tap (#3209);
+		// a hardware key's carries none and is refused as one.
+		var ad, cd, sig []byte
+		if f.Get("ad") != "" || f.Get("cd") != "" || f.Get("sig") != "" {
+			var ok1, ok2, ok3 bool
+			ad, ok1 = formBytes(f.Get("ad"), localapi.MaxPasskeyAssertion)
+			cd, ok2 = formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
+			sig, ok3 = formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
+			if !ok1 || !ok2 || !ok3 {
+				v.Err = passkeyText(Refused(localapi.ErrPasskeyBadAssertion))
+				break
+			}
+		}
+		if err := s.cfg.Passkeys.CutOff(ctx, tok, id, ad, cd, sig); err != nil {
 			v.Err = passkeyText(err)
 			break
 		}
@@ -298,7 +316,10 @@ func init() {
 <p><a href="/passkeys/">Cancel</a></p>
 {{else if eq .Step "confirm"}}
 <p>Cut off key <strong>{{.Confirm.Fingerprint}}</strong> ({{algname .Confirm.Alg}})? It is cut off for good: it can't approve anything again, and can't be added back.</p>
-<form method="post" action="/passkeys/"><input type="hidden" name="step" value="cutoff"><input type="hidden" name="id" value="{{.Confirm.ID}}"><button>Cut off</button></form>
+{{if .Confirm.CutChallenge}}<p>To cut it off, tap one of your hardware keys. Nothing is cut off until it does.</p>
+<form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="cutoff"><input type="hidden" name="id" value="{{.Confirm.ID}}"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
+<p><button type="button" id="pk-tap">Tap a hardware key to cut it off</button></p>
+{{else}}<form method="post" action="/passkeys/"><input type="hidden" name="step" value="cutoff"><input type="hidden" name="id" value="{{.Confirm.ID}}"><button>Cut off</button></form>{{end}}
 <p><a href="/passkeys/">Cancel</a></p>
 {{else}}
 <h2>Hardware keys</h2>
