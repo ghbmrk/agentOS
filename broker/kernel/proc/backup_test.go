@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -594,4 +595,137 @@ func TestARestoreUnwrapsIntoFreshFileKeys(t *testing.T) {
 	if _, ok, _ := fk.Get(live); !ok {
 		t.Fatal("the live subject's key is gone")
 	}
+}
+
+// closeOnRead closes the kernel as the read-back starts: a stop partway
+// through a backup, after its key table went out.
+type closeOnRead struct {
+	backup.Target
+	h *Kernel
+}
+
+func (c closeOnRead) GetTable(id string, gen uint64) ([]byte, error) {
+	c.h.Close()
+	return c.Target.GetTable(id, gen)
+}
+
+// failAfterPut puts the table and then reports a failure, as a directory
+// sync that fails after the link does.
+type failAfterPut struct{ backup.Target }
+
+func (f failAfterPut) PutTable(id string, gen uint64, b []byte) error {
+	if err := f.Target.PutTable(id, gen, b); err != nil {
+		return err
+	}
+	return errors.New("sync dir: input/output error")
+}
+
+// tablesAt lists every backup ID with a key table in dir.
+func tablesAt(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, e := range es {
+		if id, _, ok := strings.Cut(e.Name(), ".table."); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// LOG-4 (Security fix-list 1 on #3311): a key table never reaches a target
+// without a kept Record. Whether the kernel stops partway through (a), the
+// table lands but its put reports a failure (b), or the records cannot be
+// saved (c), after a restart an erase either re-seals every table at the
+// target or none went out.
+func TestNoTableGoesOutWithoutAKeptRecord(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		wrap func(b *bbox) func(backup.Target) backup.Target
+	}{
+		{"stopped during read-back", func(b *bbox) func(backup.Target) backup.Target {
+			return func(t backup.Target) backup.Target { return closeOnRead{t, b.h} }
+		}},
+		{"table landed, put failed", func(*bbox) func(backup.Target) backup.Target {
+			return func(t backup.Target) backup.Target { return failAfterPut{t} }
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newBBox(t, recipientWire(t, testRK))
+			gone, live := b.subject(), b.subject()
+			dir := b.addTarget("drive", false)
+			b.h.bk.wrap = c.wrap(b)
+			b.h.Backup(b.now)
+			ids := tablesAt(t, dir)
+			if len(ids) != 1 {
+				t.Fatalf("tables at the target: %v", ids)
+			}
+			b.h.Close() // closed already when stopped during the read-back
+			b.open()
+			v, _ := b.h.Backups()
+			if len(v.Backups) != 1 || v.Backups[0].BackupID != ids[0] || v.Backups[0].Verified || !v.Backups[0].Pending {
+				t.Fatalf("kept after a restart: %+v", v.Backups)
+			}
+			var conf kernel.Confirmation
+			if err := b.h.With(func(k *kernel.Kernel) (err error) { conf, err = k.Erase(b.now, gone); return err }); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(conf.Resealed, ids) || len(conf.StillHeld) != 0 {
+				t.Fatalf("the erase's confirmation: %+v", conf)
+			}
+			tb, err := os.ReadFile(filepath.Join(dir, ids[0]+".table.2"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys := kernel.NewMemKeys()
+			if _, err := backup.UnwrapTable(bytes.NewReader(tb), testRK, ids[0], keys); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, _ := keys.Get(gone); ok {
+				t.Fatal("the re-sealed table still gives the erased subject's key")
+			}
+			if _, ok, _ := keys.Get(live); !ok {
+				t.Fatal("the re-sealed table lost a live subject's key")
+			}
+			if gens, _ := (backup.DirTarget{Dir: dir}).Tables(ids[0]); !slices.Equal(gens, []uint64{2}) {
+				t.Fatalf("tables left: %v", gens)
+			}
+		})
+	}
+	t.Run("records not saved", func(t *testing.T) {
+		b := newBBox(t, recipientWire(t, testRK))
+		b.subject()
+		dir := b.addTarget("drive", false)
+		b.h.bk.saveErr = func() error { return errors.New("no space left on device") }
+		taken := b.backup()
+		if len(taken) != 1 || taken[0].Backup != nil || !strings.Contains(taken[0].Error, "nothing went out") {
+			t.Fatalf("taken: %+v", taken)
+		}
+		if ids := tablesAt(t, dir); len(ids) != 0 {
+			t.Fatalf("a table went out with no saved record: %v", ids)
+		}
+		if v, _ := b.h.Backups(); len(v.Backups) != 0 || len(b.h.bk.set.List()) != 0 {
+			t.Fatalf("kept: %+v", v.Backups)
+		}
+		// A finish that cannot be saved leaves the saved pending record.
+		saves := 0
+		b.h.bk.saveErr = func() error {
+			if saves++; saves > 1 {
+				return errors.New("no space left on device")
+			}
+			return nil
+		}
+		taken = b.backup()
+		if len(taken) != 1 || taken[0].Backup == nil || !taken[0].Backup.Pending || taken[0].Error == "" {
+			t.Fatalf("a finish not saved: %+v", taken)
+		}
+		b.h.bk.saveErr = nil
+		b.restart()
+		if v, _ := b.h.Backups(); len(v.Backups) != 1 || !v.Backups[0].Pending || len(b.h.bk.set.List()) != 1 {
+			t.Fatalf("kept after a restart: %+v", v.Backups)
+		}
+	})
 }

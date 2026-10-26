@@ -323,6 +323,7 @@ type BackupView struct {
 	Created    int64  `json:"created"`
 	Generation uint64 `json:"generation"`
 	Verified   bool   `json:"verified"`
+	Pending    bool   `json:"pending,omitempty"` // its table may be out, but it never finished
 }
 
 // TargetView is a destination; Rewritable is false for an append-only one,

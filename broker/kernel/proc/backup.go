@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -66,10 +68,16 @@ const (
 func recordsAAD() []byte { return []byte("agentos.backup.records.v1") }
 
 // Kept is a backup as the kernel keeps it: its Record, the target it went
-// to, and whether the kernel read it back whole.
+// to, and whether the kernel read it back whole. Pending is a backup whose
+// key table was about to go out when it was saved: the kernel saves it
+// before the table leaves, so a table never reaches a target without a
+// kept Record (LOG-4); its Record lacks only the content and table sums,
+// which an erase does not use. One that never finished stays pending and
+// unverified, and in the Set.
 type Kept struct {
 	Target   string        `json:"target"`
 	Verified bool          `json:"verified"`
+	Pending  bool          `json:"pending,omitempty"`
 	Record   backup.Record `json:"record"`
 }
 
@@ -82,6 +90,7 @@ type BackupView struct {
 	Created    int64  `json:"created"`
 	Generation uint64 `json:"generation"`
 	Verified   bool   `json:"verified"`
+	Pending    bool   `json:"pending,omitempty"`
 }
 
 // TargetView is a destination as the owner side reads it. Rewritable is
@@ -116,7 +125,7 @@ type Taken struct {
 
 func (k Kept) view() BackupView {
 	return BackupView{Target: k.Target, BackupID: k.Record.BackupID, Recipient: k.Record.Recipient.ID(),
-		Created: k.Record.Created, Generation: k.Record.Generation, Verified: k.Verified}
+		Created: k.Record.Created, Generation: k.Record.Generation, Verified: k.Verified, Pending: k.Pending}
 }
 
 // backups is the kernel process's backup state. Every field but run, and
@@ -131,10 +140,11 @@ type backups struct {
 	kept      []Kept
 	set       *backup.Set
 	run       sync.Mutex // one backup at a time
-	// For tests only: hook runs as each section opens, and wrap, when
-	// set, wraps every target.
-	hook func()
-	wrap func(backup.Target) backup.Target
+	// For tests only: hook runs as each section opens, wrap, when set,
+	// wraps every target, and saveErr, when set, fails every save.
+	hook    func()
+	wrap    func(backup.Target) backup.Target
+	saveErr func() error
 }
 
 // openBackups opens the records in dir under logKey, made 0700 if missing,
@@ -227,6 +237,11 @@ func (bk *backups) load() ([]Kept, error) {
 
 // save seals and writes every kept record, atomically.
 func (bk *backups) save() error {
+	if bk.saveErr != nil {
+		if err := bk.saveErr(); err != nil {
+			return err
+		}
+	}
 	pt, err := json.Marshal(bk.kept)
 	if err != nil {
 		return err
@@ -243,11 +258,13 @@ func (bk *backups) save() error {
 }
 
 // saveRecord is the Set's save: the Record a re-seal returned replaces the
-// kept one of its backup.
+// kept one of its backup. A re-seal never changes the content object, so
+// the kept content sum stays (a pending Record has none yet).
 func (bk *backups) saveRecord(rec backup.Record) error {
 	for i := range bk.kept {
 		if bk.kept[i].Record.BackupID == rec.BackupID {
 			old := bk.kept[i].Record
+			rec.ContentSum = old.ContentSum
 			bk.kept[i].Record = rec
 			if err := bk.save(); err != nil {
 				bk.kept[i].Record = old
@@ -452,65 +469,99 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 	if err != nil {
 		return nil, err
 	}
-	var done []Kept
+	done := map[int]string{} // out's index: the backup ID written there
 	for _, t := range write {
-		kp, err := bk.writeOne(t, snap, now)
-		if kp == nil {
-			out = append(out, Taken{Target: t.Name, Error: err.Error()})
-			continue
-		}
-		done = append(done, *kp)
-		v := kp.view()
-		tk := Taken{Target: t.Name, Backup: &v}
+		id, err := h.writeOne(t, snap, now)
+		tk := Taken{Target: t.Name}
 		if err != nil {
 			tk.Error = err.Error()
+		}
+		if id != "" {
+			done[len(out)] = id
 		}
 		out = append(out, tk)
 	}
 	if len(done) == 0 {
 		return out, nil
 	}
+	// Each Taken shows its backup as kept now: a re-seal during the
+	// write, or a finish that did not land, shows as it is.
 	err = h.With(func(k *kernel.Kernel) error {
-		bk.kept = append(bk.kept, done...)
-		var errs []error
-		// Kept in memory even if the file write fails, so an erase this
-		// run still reaches the backup; the error says the restart may not.
-		if err := bk.save(); err != nil {
-			errs = append(errs, fmt.Errorf("run: a backup's record is not saved: %w", err))
+		for j, id := range done {
+			if i := bk.find(id); i >= 0 {
+				v := bk.kept[i].view()
+				out[j].Backup = &v
+			}
 		}
-		targets := map[string]kernel.BackupTarget{}
-		for _, t := range write {
-			targets[t.Name] = t
-		}
-		for _, kp := range done {
-			errs = append(errs, bk.set.Add(bk.target(targets[kp.Target]), kp.Record))
-		}
-		// A subject erased since the backupSnap is in a new table: re-seal
+		// A subject erased since the snapshot is in a new table: re-seal
 		// it at once (OpenBackups re-seals every backup giving an erased
 		// subject's key).
 		k.OpenBackups(bk.set, now)
-		return errors.Join(errs...)
+		return nil
 	})
 	return out, err
 }
 
+// find is the index in kept of backup id, -1 if none.
+func (bk *backups) find(id string) int {
+	for i := range bk.kept {
+		if bk.kept[i].Record.BackupID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// pendingPut is a target that, before a key table goes out, saves the
+// backup as pending under the kernel's lock and adds it to the Set, and
+// sends nothing when that save fails (Security fix-list 1 on #3311).
+type pendingPut struct {
+	backup.Target
+	h   *Kernel
+	t   kernel.BackupTarget
+	rec backup.Record // the pending Record, less its ID and generation
+	id  string        // set once the pending Record is saved
+}
+
+func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
+	bk := p.h.bk
+	err := p.h.With(func(*kernel.Kernel) error {
+		rec := p.rec
+		rec.BackupID, rec.Generation = id, gen
+		bk.kept = append(bk.kept, Kept{Target: p.t.Name, Pending: true, Record: rec})
+		if err := bk.save(); err != nil {
+			bk.kept = bk.kept[:len(bk.kept)-1]
+			return fmt.Errorf("run: the backup's record is not saved, so nothing went out: %w", err)
+		}
+		p.id = id
+		return bk.set.Add(bk.target(p.t), rec)
+	})
+	if err != nil {
+		return err
+	}
+	return p.Target.PutTable(id, gen, b)
+}
+
 // writeOne writes one backup of snap to t: the content object as
-// <id>.content beside its key tables, then reads both back. It returns the
-// Record whenever a key table may be at the target, so an erase can reach
-// it, verified only when both read back as written.
-func (bk *backups) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (*Kept, error) {
+// <id>.content beside its key tables, then reads both back, and keeps the
+// result. It returns the backup's ID once its pending Record is saved,
+// that is whenever a key table may be at the target, and "" otherwise.
+func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (string, error) {
+	bk := h.bk
 	dt, err := dirTarget{bk, t.Locator, t.AppendOnly}.dir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	f, err := os.CreateTemp(dt.Dir, ".tmp-content-*")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	tg := bk.target(t)
-	rec, err := backup.Write(f, tg, backup.Input{
+	pp := &pendingPut{Target: tg, h: h, t: t, rec: backup.Record{Recipient: *bk.recipient, Created: now,
+		Subjects: slices.Sorted(maps.Keys(snap.live))}}
+	rec, err := backup.Write(f, pp, backup.Input{
 		Recipient: *bk.recipient, Created: now, Sections: []backup.Source{bk.logSource(snap.n)},
 		Keys: snap.keys, State: snap.live,
 	})
@@ -520,21 +571,34 @@ func (bk *backups) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	if rec.BackupID == "" {
-		return nil, err
-	}
-	kp := &Kept{Target: t.Name, Record: rec}
-	if err != nil {
-		return kp, err
+	if pp.id == "" || err != nil {
+		return pp.id, err
 	}
 	if err := os.Link(tmp, filepath.Join(dt.Dir, rec.BackupID+contentExt)); err != nil {
-		return kp, err
+		return pp.id, err
 	}
 	if err := privfile.SyncDir(dt.Dir); err != nil {
-		return kp, err
+		return pp.id, err
 	}
-	kp.Verified = readBack(tg, dt.Dir, rec)
-	return kp, nil
+	verified := readBack(tg, dt.Dir, rec)
+	return pp.id, h.With(func(*kernel.Kernel) error {
+		i := bk.find(rec.BackupID)
+		if i < 0 {
+			return backup.ErrNoBackup
+		}
+		kp := &bk.kept[i]
+		old := *kp
+		kp.Pending, kp.Verified, kp.Record.ContentSum = false, verified, rec.ContentSum
+		// A re-seal during the write has a newer table and sum already.
+		if kp.Record.Generation == rec.Generation {
+			kp.Record.TableSum = rec.TableSum
+		}
+		if err := bk.save(); err != nil {
+			*kp = old
+			return fmt.Errorf("run: the backup was written but its record stays pending: %w", err)
+		}
+		return nil
+	})
 }
 
 // readBack reports whether t, at dir, gives back rec's content object and key
