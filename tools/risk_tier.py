@@ -81,6 +81,7 @@ TIER_A_BROKER = {
     "apnet",                      # the Owner Card's Wi-Fi password
     "browser", "netjoin", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
+    "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
     # Card's values and the code-generator seed, and its verdict proves G1.
     "e2e",
