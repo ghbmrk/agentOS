@@ -139,7 +139,8 @@ type backups struct {
 	guard     []string // the kernel's own data folders, resolved
 	kept      []Kept
 	set       *backup.Set
-	run       sync.Mutex // one backup at a time
+	inflight  map[string]bool // backups whose first key table is on its way
+	run       sync.Mutex      // one backup at a time
 	// For tests only: hook runs as each section opens, wrap, when set,
 	// wraps every target, and saveErr, when set, fails every save.
 	hook    func()
@@ -164,7 +165,7 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, st *kernel.State) (*backups
 	if err != nil {
 		return nil, err
 	}
-	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, keys: keys}
+	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, keys: keys, inflight: map[string]bool{}}
 	if len(cfg.Recipient) > 0 {
 		x, ek, err := handoff.SplitRecipient(cfg.Recipient)
 		if err != nil {
@@ -534,12 +535,77 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 			return fmt.Errorf("run: the backup's record is not saved, so nothing went out: %w", err)
 		}
 		p.id = id
-		return bk.set.Add(bk.target(p.t), rec)
+		bk.inflight[id] = true
+		return bk.set.Add(inFlight{bk.target(p.t), bk, id}, rec)
 	})
 	if err != nil {
 		return err
 	}
-	return p.Target.PutTable(id, gen, b)
+	perr := p.Target.PutTable(id, gen, b)
+	// An erase while the table was on its way named the backup held (the
+	// Set's target refused while in flight); now that the put is over,
+	// re-seal it at once, and Tick retries it if that fails (#3311 L3 and
+	// Security on 6ef6bef).
+	p.h.With(func(k *kernel.Kernel) error {
+		delete(bk.inflight, id)
+		if slices.ContainsFunc(bk.set.Subjects(id), func(s string) bool {
+			r, ok := k.State().Recall(s)
+			return !ok || r.Erased
+		}) {
+			bk.set.Reseal(id, bk.keys, k.State())
+		}
+		return nil
+	})
+	return perr
+}
+
+// inFlight is a Set member's target while its first key table is on its
+// way: every call refuses, so an erase then names the backup held instead
+// of re-sealing a table that is not there yet, which the put would then
+// land beside, still giving the erased key.
+type inFlight struct {
+	backup.Target
+	bk *backups
+	id string
+}
+
+// ErrInFlight: a backup's first key table is still on its way to its
+// target; the erase re-seals it once the put is over.
+var ErrInFlight = errors.New("run: this backup's key table is still on its way; I re-seal it once it lands")
+
+func (f inFlight) busy() error {
+	if f.bk.inflight[f.id] {
+		return ErrInFlight
+	}
+	return nil
+}
+
+func (f inFlight) PutTable(id string, gen uint64, b []byte) error {
+	if err := f.busy(); err != nil {
+		return err
+	}
+	return f.Target.PutTable(id, gen, b)
+}
+
+func (f inFlight) GetTable(id string, gen uint64) ([]byte, error) {
+	if err := f.busy(); err != nil {
+		return nil, err
+	}
+	return f.Target.GetTable(id, gen)
+}
+
+func (f inFlight) DeleteTable(id string, gen uint64) error {
+	if err := f.busy(); err != nil {
+		return err
+	}
+	return f.Target.DeleteTable(id, gen)
+}
+
+func (f inFlight) Tables(id string) ([]uint64, error) {
+	if err := f.busy(); err != nil {
+		return nil, err
+	}
+	return f.Target.Tables(id)
 }
 
 // writeOne writes one backup of snap to t: the content object as

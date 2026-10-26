@@ -729,3 +729,60 @@ func TestNoTableGoesOutWithoutAKeptRecord(t *testing.T) {
 		}
 	})
 }
+
+// eraseBeforePut runs an erase just before the key table goes out, after
+// the pending record is saved.
+type eraseBeforePut struct {
+	backup.Target
+	fire *func()
+}
+
+func (e eraseBeforePut) PutTable(id string, gen uint64, b []byte) error {
+	if f := *e.fire; f != nil {
+		*e.fire = nil
+		f()
+	}
+	return e.Target.PutTable(id, gen, b)
+}
+
+// LOG-4 (#3311 L3 and Security on 6ef6bef): an erase that runs while a
+// backup's first key table is on its way names the backup held, never
+// re-sealed, and the table that then lands is re-sealed at once, so no
+// table at the target gives the erased key.
+func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone, live := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	var conf kernel.Confirmation
+	var fire func()
+	fire = func() {
+		if err := b.h.With(func(k *kernel.Kernel) (err error) { conf, err = k.Erase(b.now, gone); return err }); err != nil {
+			t.Error(err)
+		}
+	}
+	b.h.bk.wrap = func(t backup.Target) backup.Target { return eraseBeforePut{t, &fire} }
+	taken := b.backup()
+	b.h.bk.wrap = nil
+	if fire != nil || len(taken) != 1 || taken[0].Backup == nil {
+		t.Fatalf("taken: %+v", taken)
+	}
+	id := taken[0].Backup.BackupID
+	if len(conf.Resealed) != 0 || len(conf.StillHeld) != 1 || conf.StillHeld[0].Backup != id || !strings.Contains(conf.StillHeld[0].Why, "on its way") {
+		t.Fatalf("the erase's confirmation while the table was on its way: %+v", conf)
+	}
+	gens, _ := (backup.DirTarget{Dir: dir}).Tables(id)
+	if len(gens) != 1 || gens[0] < 2 {
+		t.Fatalf("tables at the target: %v", gens)
+	}
+	_, keys := openBackup(t, dir, id, testRK)
+	if _, ok, _ := keys.Get(gone); ok {
+		t.Fatal("the table that landed still gives the erased subject's key")
+	}
+	if _, ok, _ := keys.Get(live); !ok {
+		t.Fatal("the re-sealed table lost a live subject's key")
+	}
+	b.restart()
+	if v, _ := b.h.Backups(); len(v.Backups) != 1 || v.Backups[0].Generation != gens[0] {
+		t.Fatalf("kept after a restart: %+v", v.Backups)
+	}
+}
