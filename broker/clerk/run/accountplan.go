@@ -6,13 +6,13 @@ import (
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk/accounts"
-	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
 
 // Setup's account plan on the owner's socket (TN-account-plan slice b, SPEC
 // §12.1 step 7): accountplan reads the senders of a Gmail account's newest
-// mail under its grant (inbox.PlanSenders), keeps only the domains the
-// provider's DKIM verdict authenticates, and answers accounts.Build's items
+// mail under its grant (inbox.Gmail.PlanSenders), or of an IMAP account's
+// (inbox.Live.PlanSenders), keeps only the domains the provider's DKIM
+// verdict authenticates, and answers accounts.Build's items
 // for them. Only plan items cross the socket: table IDs, the table's fixed
 // wording and a source tag, never a byte of mail (DEV-8). The plan is kept
 // in memory for this process's lifetime, for the account as it is now, and
@@ -49,11 +49,13 @@ type planState struct {
 
 // accountPlan is the plan for the account set up now: built once, then
 // served from memory until the account changes. With no account it holds
-// only the card, the wallet, the mailbox and the device-implied items. An
-// IMAP account adds none found in mail: this slice reads senders through
-// Gmail's declared metadata calls only (ASSUMPTIONS TN-account-plan-b2).
-// While a sign-in failure stops the clerk, or when Gmail refuses the grant
-// at refresh (grant death, A22), the answer is the typed reason alone.
+// only the card, the wallet, the mailbox and the device-implied items. A
+// Gmail account's senders are read through Gmail's declared metadata calls,
+// an IMAP account's through the same two header fields over IMAP (#3220),
+// both under PlanSender's rule and the world's authserv-id. While a sign-in
+// failure stops the clerk, or when the mailbox refuses the sign-in or Gmail
+// the grant at refresh (grant death, A22), the answer is the typed reason
+// alone.
 func (h *MailHost) accountPlan() (AccountPlanned, error) {
 	h.planned.mu.Lock()
 	defer h.planned.mu.Unlock()
@@ -78,13 +80,17 @@ func (h *MailHost) accountPlan() (AccountPlanned, error) {
 	case errors.Is(serr, ErrNoMailAccount):
 	case serr != nil:
 		return AccountPlanned{}, errMailUnreadable
-	case s.API == APIGmail:
-		connected = []string{APIGmail} // the table's Gmail entry has the API's own ID
-		box, err := gmailBox(h.sec, slotOf(s), h.cfg)
+	default:
+		if s.API == APIGmail {
+			connected = []string{APIGmail} // the table's Gmail entry has the API's own ID
+		}
+		// Over IMAP no item is marked connected: IMAP is Full power,
+		// whichever provider serves it (A22, DEP-3).
+		box, err := boxFor(s, h.sec, h.cfg)
 		if err == nil {
 			domains, err = box.PlanSenders(h.ctx, h.authServ())
 		}
-		if errors.Is(err, inbox.ErrReconnect) {
+		if stops(err) {
 			h.mu.Lock()
 			if h.changes == changes {
 				// As a step refused this way (Do): nothing is sent until the
@@ -93,7 +99,8 @@ func (h *MailHost) accountPlan() (AccountPlanned, error) {
 				h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, err
 			}
 			h.mu.Unlock()
-			return AccountPlanned{Reason: DReconnect}, nil
+			d, _ := stopped(err)
+			return AccountPlanned{Reason: d}, nil
 		}
 		if err != nil {
 			return AccountPlanned{}, err
