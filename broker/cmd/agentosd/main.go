@@ -250,6 +250,8 @@ func main() {
 	kernelUID, kernelOwnerUID := -1, -1
 	var kernelOwner, kernelStore, passkeyRPID string
 	var planHolder, planGrant string
+	var signInSock string
+	planUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
 	flag.StringVar(&cfg.SocketDir, "sockets", "/run/agentos", "socket directory (created 0700; 0711 once owner.sock, 0660 to the modem bridge's group, is up)")
@@ -288,6 +290,8 @@ func main() {
 	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&planHolder, "plan-holder", "/var/lib/agentos/plan-holder.key", "the key that holds the owner's clerk-key grant and signs guests' plans (#3087): made root-only at first start, kept across reboots; empty, no guest plan is signed")
+	flag.StringVar(&signInSock, "signin-sock", "", "where the model clerk's process starts, reads and stops its plan sign-in CLIs, each in a machine whose only mount out is its own endpoint (MIG-4-untrusted-exit-b1), in a directory of its own (such as /run/agentos-signin/signin.sock); empty, it is not served")
+	flag.IntVar(&planUID, "plan-uid", -1, "uid of the model clerk's process, the only peer -signin-sock admits and the owner of every sign-in route")
 	flag.StringVar(&planGrant, "plan-grant", "/var/lib/agentos/plan-grant.json", "the owner's clerk-key grant to -plan-holder, root-only; absent, every guest plan is refused for want of a key (KEY-4)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
@@ -618,6 +622,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	signInGID, err := signInFlags(signInSock, cfg.SocketDir, planUID, localUIUID, cfg.ModemUID, mailUID, kernelUID)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if passkeyRPID != "" {
@@ -684,10 +692,12 @@ func main() {
 			WorkerLayerBytes: workerLayerBytes(workerLayerMB),
 		}
 		var planRoutes *modelroute.RouteControl
+		signIns := &signInHost{Plan: signInPlans["codex"], UID: planUID, NewID: func() string { return randHex(6) }}
 		if workerRoutes != "" {
 			planRoutes = modelroute.NewRouteControl(workerRoutes)
-			vmc.ProviderRoutes = planRoutes
+			signIns.Fall = planRoutes
 		}
+		vmc.ProviderRoutes = signIns
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)
 		if err != nil {
@@ -699,6 +709,14 @@ func main() {
 			// pruned; the journal has the owner's NOs by now.
 			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
+			if signInSock != "" {
+				signIns.M = m
+				if stop, err := serveSignIns(signInSock, signInGID, signIns); err != nil {
+					log.Printf("plan sign-ins not served: %v", err)
+				} else {
+					defer stop()
+				}
+			}
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
