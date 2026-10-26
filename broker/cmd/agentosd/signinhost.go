@@ -87,6 +87,7 @@ type signInMachines interface {
 	CreateProviderWorker(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error)
 	Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error)
 	Destroy(ctx context.Context, id string) error
+	Machines() []string
 }
 
 // The host's refusals, sockets.Codes so the clerk gets their text.
@@ -454,6 +455,20 @@ func (h *signInHost) watch(guest string, r *signInRun, lease, wall time.Duration
 				h.stop(guest, r)
 				return
 			}
+		}
+	}
+}
+
+// Sweep destroys every sign-in machine the machine manager holds, before
+// any sign-in is served: a machine left by a crash during a sign-in is
+// reloaded Stopped, and nothing else ever destroys it (#3249, CAP-8). Its
+// route was emptied with -signin-routes (prepareSignInRoutes), and Open
+// gives it none, so it could not start again; only its disk is reclaimed.
+// A failed destroy is logged and the rest go on.
+func (h *signInHost) Sweep() {
+	for _, id := range h.M.Machines() {
+		if strings.HasPrefix(id, signInPrefix) {
+			h.destroy("sweep", id)
 		}
 	}
 }

@@ -710,8 +710,10 @@ func main() {
 			// pruned; the journal has the owner's NOs by now.
 			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
+			// Sign-in machines a crash left go first, served or not (#3249).
+			signIns.M = m
+			signIns.Sweep()
 			if signInSock != "" {
-				signIns.M = m
 				if err := prepareSignInRoutes(signInRoutes); err != nil {
 					log.Printf("plan sign-ins not served: %v", err)
 				} else if stop, err := serveSignIns(signInSock, signInGID, signIns); err != nil {
