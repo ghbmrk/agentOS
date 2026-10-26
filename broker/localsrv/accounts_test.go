@@ -3,6 +3,7 @@ package localsrv
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -114,5 +115,90 @@ func TestAnAccountClerkThatFailsIsAFixedFailure(t *testing.T) {
 	}
 	if _, err := r.call(localapi.OpAccountFinish, localapi.AccountFinish{Token: tok, Account: "gmail", Use: "watch", Pasted: "p"}); code(err) != localapi.ErrFailed {
 		t.Fatalf("finish: %v", err)
+	}
+}
+
+// REQ: TN-account-plan-6
+
+// fakePlanner is the mail clerk's sign-in that also prepares the plan.
+type fakePlanner struct {
+	fakeAccount
+	plan  localapi.AccountPlanned
+	err   error
+	calls int
+}
+
+func (f *fakePlanner) Plan(context.Context) (localapi.AccountPlanned, error) {
+	f.calls++
+	return f.plan, f.err
+}
+
+// planFixed is the plan with no mailbox read: the card, the wallet and the
+// mailbox, as clerk/run answers it.
+func planFixed() []localapi.AccountPlanItem {
+	return []localapi.AccountPlanItem{
+		{ID: "payment-card", Name: "Payment card", Kind: "money", Group: "payment", Source: "always", Preselected: true, Label: "Full power, same as yours"},
+		{ID: "payment-wallet", Name: "Payment wallet", Kind: "money", Group: "payment", Source: "always", Label: "Full power, same as yours"},
+		{ID: "mailbox", Name: "Give me an email address? About 1 minute.", Kind: "mail", Group: "mailbox", Source: "always", Label: "Full power, same as yours"},
+	}
+}
+
+// TN-account-plan-6 on agentosd's side, one case per lifecycle row: agentosd
+// relays the one planner's answer as it is, after a session, and refuses
+// an answer past the plan's bounds rather than pass it to the page.
+func TestAccountPlanLifecycle(t *testing.T) {
+	r := newRig(t)
+	gmail := append(planFixed(), localapi.AccountPlanItem{ID: "gmail", Name: "Gmail", Kind: "mail", Group: "account", Source: "mail",
+		Preselected: true, Label: "Narrower than you, watched", Advice: "narrower", Connected: true})
+	f := &fakePlanner{plan: localapi.AccountPlanned{Items: gmail}}
+	r.srv.cfg.Accounts = map[string]AccountSignIn{"gmail": f, "other": &fakeAccount{}}
+	if _, err := r.call(localapi.OpAccountPlan, localapi.Auth{}); code(err) != localapi.ErrUnauthorized || f.calls != 0 {
+		t.Fatalf("no session: %v, %d calls", err, f.calls)
+	}
+	tok := r.signIn()
+	for _, row := range []struct {
+		name string
+		plan localapi.AccountPlanned
+	}{
+		{"first setup, Gmail signed in under watch", localapi.AccountPlanned{Items: gmail}},
+		{"page reopened", localapi.AccountPlanned{Items: gmail}},
+		{"mail clerk restarted", localapi.AccountPlanned{Items: gmail}},
+		{"grant refused at refresh", localapi.AccountPlanned{Reason: "reconnect"}},
+		{"mailbox over IMAP", localapi.AccountPlanned{Items: planFixed()}},
+		{"no mailbox signed in", localapi.AccountPlanned{Items: planFixed()}},
+	} {
+		f.plan = row.plan
+		out, err := r.call(localapi.OpAccountPlan, localapi.Auth{Token: tok})
+		if err != nil || !reflect.DeepEqual(out, row.plan) {
+			t.Fatalf("%s: %+v %v, want %+v", row.name, out, err, row.plan)
+		}
+	}
+	for name, bad := range map[string]localapi.AccountPlanned{
+		"a reason with items":    {Items: planFixed(), Reason: "reconnect"},
+		"a reason not an ID":     {Reason: "Gmail said: no"},
+		"an ID not plain":        {Items: []localapi.AccountPlanItem{{ID: "Gmail", Name: "Gmail", Kind: "mail", Group: "account", Source: "mail"}}},
+		"a name on two lines":    {Items: []localapi.AccountPlanItem{{ID: "gmail", Name: "Gmail\nFrom: x", Kind: "mail", Group: "account", Source: "mail"}}},
+		"a label past its bound": {Items: []localapi.AccountPlanItem{{ID: "gmail", Name: "Gmail", Kind: "mail", Group: "account", Source: "mail", Label: strings.Repeat("a", localapi.MaxPlanText+1)}}},
+		"no name":                {Items: []localapi.AccountPlanItem{{ID: "gmail", Kind: "mail", Group: "account", Source: "mail"}}},
+		"too many items":         {Items: make([]localapi.AccountPlanItem, localapi.MaxPlanItems+1)},
+	} {
+		f.plan = bad
+		if _, err := r.call(localapi.OpAccountPlan, localapi.Auth{Token: tok}); code(err) != localapi.ErrFailed {
+			t.Fatalf("%s: %v, want failed", name, err)
+		}
+	}
+	f.plan, f.err = localapi.AccountPlanned{Items: gmail}, errors.New("no answer")
+	if _, err := r.call(localapi.OpAccountPlan, localapi.Auth{Token: tok}); code(err) != localapi.ErrFailed {
+		t.Fatalf("the clerk failed: %v", err)
+	}
+	// No clerk prepares a plan, or two would: nothing to choose by.
+	f.err = nil
+	r.srv.cfg.Accounts = map[string]AccountSignIn{"gmail": &fakeAccount{}}
+	if _, err := r.call(localapi.OpAccountPlan, localapi.Auth{Token: tok}); code(err) != localapi.ErrFailed {
+		t.Fatalf("no planner: %v", err)
+	}
+	r.srv.cfg.Accounts = map[string]AccountSignIn{"gmail": f, "mail2": &fakePlanner{}}
+	if _, err := r.call(localapi.OpAccountPlan, localapi.Auth{Token: tok}); code(err) != localapi.ErrFailed {
+		t.Fatalf("two planners: %v", err)
 	}
 }

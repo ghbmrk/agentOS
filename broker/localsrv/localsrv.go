@@ -93,7 +93,8 @@ type Config struct {
 	// nil offers nothing.
 	PlanSignIn PlanSignIn
 	// Accounts are the account clerks' sign-ins by account ID, the Connect
-	// page's (#3006); an account not listed refuses both ops.
+	// page's (#3006); an account not listed refuses both ops. The one that
+	// is also an AccountPlanner answers OpAccountPlan.
 	Accounts map[string]AccountSignIn
 	// Page is the page authority (OpenPage) that certifies the page's
 	// serving key (OpCertify, #3153); nil is none, and the page serves
@@ -190,6 +191,7 @@ func (s *Server) ops() map[string]sockets.Handler {
 		// Connecting an account needs a session (#3006, §12.1 step 7).
 		localapi.OpAccountBegin:  s.accountBegin,
 		localapi.OpAccountFinish: s.accountFinish,
+		localapi.OpAccountPlan:   s.accountPlan,
 		// A serving certificate for the page name needs no session: the
 		// page asks at start, and the leaf names only the page (#3153).
 		localapi.OpCertify: s.certify,
