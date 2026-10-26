@@ -6331,6 +6331,20 @@ class HostDiskImageTest(unittest.TestCase):
         self.assertIn('hasnt "$W/console.log" "agentos-hostdisk: FAIL"', s)
         self.assertIn("hostdisk=ok", s)
         self.assertIn("agentos-hostdisk-check.service", re.search(r"CHECKS_WANTED=.*", s).group(0))
+        # The passthrough line counts at least the USB disk's node, so it cannot pass on none.
+        self.assertIn('if [ "$c" -lt 1 ]; then say "FAIL no passthrough node found"', s)
+
+    # REQ: HW-1, HW-8
+    def test_two_drives_boot_still_fails_with_the_copy_hidden(self):
+        # The 59 rule hides the second copy's PARTUUIDs from udev; drive-id must still find both, so
+        # that boot fails health and is never blessed (L3 later finding on #3306).
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('UNTIL="agentos-fallback:" boot "$W/console-two-drives.log" "$W/two-a.raw" "$W/two-b.raw"', s)
+        for line in ('has "$W/console-two-drives.log" "agentos-drive-id: FAIL 2 partitions"',
+                     'has "$W/console-two-drives.log" "agentos-health: FAIL boot drive is ambiguous"',
+                     'hasnt "$W/console-two-drives.log" "agentos-boot: bless=good"',
+                     'hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"'):
+            self.assertIn(line, s)
 
 
 if __name__ == "__main__":

@@ -269,7 +269,10 @@ for x in /dev/sg* /dev/bsg/* /dev/ng* /dev/nvme[0-9] /dev/nvme[0-9][0-9]; do
 	c=$((c + 1))
 	[ "$(stat -c '%U:%G %a' "$x")" = "root:root 600" ] || open="$open $x:$(stat -c '%U:%G:%a' "$x")"
 done
-[ -z "$open" ] && say "passthrough nodes root-only ($c)" || say "FAIL passthrough nodes:$open"
+# At least the USB disk's own bsg node, so the line proves the 72 rule on a real udev.
+if [ "$c" -lt 1 ]; then say "FAIL no passthrough node found"
+elif [ -z "$open" ]; then say "passthrough nodes root-only ($c)"
+else say "FAIL passthrough nodes:$open"; fi
 say done
 EOS
 }
