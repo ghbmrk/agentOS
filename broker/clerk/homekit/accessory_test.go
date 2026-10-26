@@ -19,8 +19,9 @@ import (
 
 // fakeAccessory is a minimal synthetic HAP accessory built on this package's
 // own codec (TLV8, frames) and an SRP server written here. It serves a
-// thermostat like the T10 Pro's HomeKit profile. All keys are generated per
-// test; the setup code is the canary 111-22-333.
+// generic HomeKit thermostat profile. All keys are generated per
+// test; the setup code is the canary 111-22-333 and the accessory ID sits
+// in the RFC 7042 documentation range.
 type fakeAccessory struct {
 	mu        sync.Mutex
 	code      string
@@ -53,7 +54,7 @@ func newFakeAccessory(t *testing.T) *fakeAccessory {
 		t.Fatal(err)
 	}
 	return &fakeAccessory{
-		code: testCode, id: "AA:BB:CC:00:11:22", ltsk: sk, verifyKey: sk, verifyID: "AA:BB:CC:00:11:22",
+		code: testCode, id: "00:00:5E:00:53:01", ltsk: sk, verifyKey: sk, verifyID: "00:00:5E:00:53:01",
 		maxTries: 100, ctrls: map[string]ed25519.PublicKey{}, subs: map[ID]bool{},
 		values: map[ID]any{
 			{1, 9}: 1.0, {1, 10}: 1.0, {1, 11}: 20.5, {1, 12}: 21.0, {1, 13}: 0.0, {1, 14}: 25.0, {1, 15}: 18.0,

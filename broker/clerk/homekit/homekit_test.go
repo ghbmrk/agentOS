@@ -225,7 +225,7 @@ func TestWrongAccessoryKeyIsRefused(t *testing.T) {
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
 	for name, spoof := range map[string]func(){
 		"other key": func() { acc.verifyKey = other },
-		"other id":  func() { acc.verifyKey, acc.verifyID = acc.ltsk, "AA:BB:CC:99:99:99" },
+		"other id":  func() { acc.verifyKey, acc.verifyID = acc.ltsk, "00:00:5E:00:53:99" },
 	} {
 		spoof()
 		var logs []string
