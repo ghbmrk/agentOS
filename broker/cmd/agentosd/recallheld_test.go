@@ -629,3 +629,24 @@ func TestLOG4ReingestedItemNotHeld(t *testing.T) {
 		t.Fatal("unreadable segment read as nothing")
 	}
 }
+
+// LOG-4: a settled record that cannot be decoded is never told from or
+// rewritten, though Unmarshal keeps what it read before a type error, so
+// it stays unknown at the next start and nothing is rolled back again.
+func TestLOG4UndecodableRecordNotRewritten(t *testing.T) {
+	b := newHeldBox(t)
+	must(t, os.MkdirAll(b.state, 0o700))
+	p := filepath.Join(b.state, recallSettledFile)
+	bad := []byte(`{"` + b.L + `":{"ids":["X"],"since":"2026-01-01T00:00:00Z","told":false},"` + b.M + `":{"ids":5,"told":true}}`)
+	must(t, os.WriteFile(p, bad, 0o600))
+	for i := 0; i < 2; i++ {
+		fc := &forgetCalls{}
+		_, h, told := b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, nil)
+		if len(fc.calls) != 0 || len(told) != 0 || !h.Contained(b.M) {
+			t.Fatalf("start %d: rollbacks %v, told %q, M contained %v", i, fc.calls, told, h.Contained(b.M))
+		}
+		if got, _ := os.ReadFile(p); string(got) != string(bad) {
+			t.Fatalf("start %d: record rewritten to %s", i, got)
+		}
+	}
+}

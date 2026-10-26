@@ -319,8 +319,11 @@ func openRecallHeld(dir, settledPath string, logf func(string, ...any)) *recallH
 		h.unknown = true
 	default:
 		if err := json.Unmarshal(data, &h.settled); err != nil {
+			// Unmarshal keeps what it decoded before a type error: none of
+			// it is told or saved, so the record stays as it is.
 			logf("%s unreadable, every agent contained: %v", settledPath, err)
 			h.unknown = true
+			h.settled = map[string]recallSettled{}
 		}
 	}
 	return h
