@@ -1,6 +1,6 @@
 package main
 
-// REQ: PLN-5, CLK-7, CLK-1, ARC-2, CAP-8
+// REQ: PLN-5, CLK-7, CLK-1, PLN-6
 
 import (
 	"bytes"
