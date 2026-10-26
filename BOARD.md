@@ -380,5 +380,5 @@ issue #3082: body has no board-row block
 issue #3086: body has no board-row block
 issue #3129: body has no board-row block
 issue #3163: body has no board-row block
-issue #3196: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3196: body has no board-row block
 ```
