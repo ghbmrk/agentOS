@@ -4,29 +4,34 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #3291; SPEC
 
 ## Why
 
-Mark's four Honeywell T10 Pro thermostats are cloud-only today (Resideo). They speak HomeKit (Menu → Connect HomeKit; Installer Options → Reset → HomeKit, password = the date code under Thermostat Information). HomeKit pairing is local: once the box is the controller, the enforcer blocks Resideo and the thermostats keep their schedules on the device. D-182 made HomeKit (HAP) a device stack; this row builds it.
+Mark's four Honeywell T10 Pro thermostats are cloud-only today (Resideo). They speak HomeKit (Menu → Connect HomeKit; Installer Options → Reset → HomeKit, password = the date code under Thermostat Information) [Inference: from Honeywell's T10 manuals, unverified on Mark's units until part c]. HomeKit pairing is local: once the box is the controller, the enforcer blocks Resideo and the thermostats keep their schedules on the device. D-182 made HomeKit (HAP) a device stack; this row builds it.
 
 ## Protocol, as the spec now words it
 
 - **Connect (DEV-10):** the box pairs "HomeKit by its HomeKit code", typed on the local page at tier 4 (CH-3, CH-6). The code is the accessory's 8-digit code, never sent by text.
 - **Identity (DEV-3):** the device is pinned by "a HomeKit accessory key": the accessory's Ed25519 long-term public key (AccessoryLTPK) received at pair-setup. Every session starts with pair-verify, which proves that key; a mismatch is refused and logged, the device goes off with a KRN-7 line, and only the owner re-pins it.
 - **Custody (DEV-4, CLK-1):** the box's controller long-term key (iOSDeviceLTSK, Ed25519) is one of the "fabric, operational and HomeKit keys": sealed store, used only inside the clerk.
-- **Operations (DEV-4):** wire shapes are service and characteristic (type UUID, `aid`/`iid` resolved at connection from `/accessories`). The class table maps the HomeKit Thermostat service (current and target temperature, current and target heating/cooling state, display units, heating/cooling thresholds): reads are `read`; a target temperature inside the owner's confirmed bounds is `actuate` with the prior value as inverse; a value outside the bounds, and any target state that turns heat off, is `actuate-physical` under DEV-5's floor rule. Unmapped services follow DEV-4's conservative default.
+- **Operations (DEV-4):** wire shapes are service and characteristic (type UUID, `aid`/`iid` resolved at connection from `/accessories`, and re-resolved when the TXT configuration number `c#` changes). Every write is checked against the characteristic's UUID, permissions and declared range before it is framed. The class table is kernel-shipped (DEV-4); part (a) supplies its HomeKit Thermostat rows as data for the kernel table, never as clerk-side policy:
+  - all characteristics (current and target temperature, current and target heating/cooling state, heating and cooling thresholds, display units): reads are `read`;
+  - target temperature and the two thresholds inside the owner's confirmed bounds: `actuate`, the prior value as inverse; outside the bounds: `actuate-physical`;
+  - target heating/cooling state (off, heat, cool, auto): every value is `actuate-physical`, since any change can stop heating or start a heat or cool source (DEV-5's unsafe direction), so each write needs the code-generator code (CH-10);
+  - display units: `change-account` (configuration, DEV-4);
+  - anything unmapped: DEV-4's conservative default (every write `actuate-physical`).
 - **Canary (A16):** "a fabric or HomeKit key": the canary controller key never reaches a planner or guest.
 
 HAP facts the code rests on (HAP non-commercial spec, R2+): pair-setup is SRP-6a (3072-bit group, SHA-512, user "Pair-Setup") over TLV8, then Ed25519 long-term key exchange under ChaCha20-Poly1305 with HKDF-SHA-512 keys; pair-verify is X25519 plus Ed25519 signatures; the session is HTTP/1.1 framed in ChaCha20-Poly1305 blocks of at most 1024 bytes. Discovery is passive mDNS `_hap._tcp` (DEV-2); the TXT `sf` flag says whether the accessory is unpaired.
 
 ## Design points settled here (flagged for the reviews)
 
-1. **Reuse.** No maintained Go HAP *controller* is known [Inference; the builder confirms before writing one]: `aiohomekit` (Python) is the reference, `brutella/hap` (Go) is accessory-side only. The clerk is a small controller on the standard library (`crypto/ed25519`, `crypto/ecdh` X25519, `crypto/hkdf`, `crypto/sha512`) plus `golang.org/x/crypto/chacha20poly1305` (vendor it; `x/crypto` is already a dependency). SRP-6a with the RFC 5054 3072-bit group is the one hand-written primitive; test it against RFC 5054's test vectors (adapted to the 3072-bit group and SHA-512 by an independent implementation, e.g. aiohomekit's). `brutella/hap` serves as the synthetic accessory in tests only (check its licence; test-only import).
-2. **Bounded parsing.** TLV8, HTTP framing and JSON from the accessory are hostile input (risk 19): fixed maximum sizes, no redirects, no chunked bodies beyond a cap, one fuzz target per parser.
+1. **Reuse.** No maintained Go HAP *controller* is known [Inference; the builder confirms before writing one]: `aiohomekit` (Python) is the reference, `brutella/hap` (Go) is accessory-side only. The clerk is a small controller on the standard library (`crypto/ed25519`, `crypto/ecdh` X25519, `crypto/hkdf`, `crypto/sha512`) plus `golang.org/x/crypto/chacha20poly1305` (vendor it; `x/crypto` is already a dependency). SRP-6a with the RFC 5054 3072-bit group (g = 5) and SHA-512 is the one hand-written primitive. RFC 5054's own vectors use the 1024-bit group and SHA-1, so they cannot be adapted: pin vectors generated by aiohomekit, with the generating version and script recorded beside them. Vendoring `chacha20poly1305` also brings `golang.org/x/crypto/chacha20` and its internal packages. `brutella/hap` serves as the synthetic accessory in tests only (check its licence; test-only import). Vendoring it pulls in its own dependency tree; if that tree is large, use a minimal in-test accessory built from the clerk's own codec instead and say so in the PR.
+2. **Bounded parsing.** TLV8, HTTP framing and JSON from the accessory are hostile input (risk 19): fixed maximum sizes, no redirects, no chunked bodies beyond a cap, one fuzz target per parser. Accessory events arrive as `EVENT/1.0` responses, which `net/http` cannot parse, so the response framing is hand-written. TLV8 values over 255 bytes arrive as consecutive fragments of the same type and are joined up to a cap.
 3. **No multi-admin.** The box is the only admin. It never runs add-pairing for another controller and never lists pairings to a planner; `remove-pairing` is `delete-remote`, adding a controller is `reveal-or-create-secret` (DEV-4).
 4. **Unknown brand.** HAP has no attested vendor ID, so under DEV-2 the device lists as "unknown brand"; the owner guide says so.
 5. **Reach.** Only the pinned accessory's address and port; no internet; the enforcer drops the thermostats' Resideo traffic once each is paired (enforcer rules row, not this one).
 
 ## Split
 
-- **(a)** Protocol package `broker/clerk/homekit/`: TLV8 codec, SRP-6a, pair-setup and pair-verify against an injected key holder, the encrypted session, `/accessories` and `/characteristics` read and write, the thermostat class table, fuzz targets. Synthetic accessory in tests.
+- **(a)** Protocol package `broker/clerk/homekit/`: TLV8 codec, SRP-6a, pair-setup and pair-verify against an injected key holder, the encrypted session, `/accessories` and `/characteristics` read and write, the thermostat class rows, fuzz targets. Synthetic accessory in tests. If the session nears 150k tokens, cut at (a1) TLV8, SRP, pair-setup and pair-verify, and (a2) the session, characteristics and class rows.
 - **(b)** Core-side clerk: controller key in the sealed store (STO-2, CLK-1), the tier-4 local-page connect step taking the HomeKit code, pinning, bounds confirmation, events onto the bus. Needs STO-2 and the device-clerk host.
 - **(c)** Live: pair the four T10 Pros behind the enforcer and confirm they hold schedules with Resideo blocked. Needs the enforcer (Protectli V1410, not arrived).
 
@@ -34,20 +39,24 @@ HAP facts the code rests on (HAP non-commercial spec, R2+): pair-setup is SRP-6a
 
 Part (a), in `broker/clerk/homekit/`:
 
-- `TestSRPVectors`: SRP-6a matches the reference vectors named above.
+- `TestSRPVectors`: SRP-6a matches the pinned aiohomekit vectors.
+- `TestSRPRejectsBadInput`: a server value B with B mod N = 0, or a wrong server proof, is refused and nothing is pinned.
 - `TestPairSetupAndVerifyWithSyntheticAccessory`: pair-setup with the right code pins the accessory key; pair-verify succeeds on reconnect.
+- `TestWrongHomeKitCodePinsNothing`: a wrong code fails pair-setup, nothing is pinned, and repeated tries stop at the accessory's MaxTries error without retrying on their own.
 - `TestWrongAccessoryKeyIsRefused`: an accessory proving a different long-term key fails pair-verify, and nothing is read or written.
 - `TestControllerKeyNeverLeaves`: the canary controller key appears in no log line, error, event or written frame (A16).
-- `TestThermostatClasses`: in-bounds target temperature is `actuate` with its inverse; out-of-bounds and heat-off are `actuate-physical`; unmapped characteristics write as `actuate-physical`.
-- `TestOnlyDeclaredWrites`: a write to an undeclared `aid`/`iid` is refused before the session is written.
-- `FuzzTLV8`, `FuzzSessionFrame`: no panic, bounded buffers.
+- `TestThermostatClasses`: the rows above, each value of target heating/cooling state included.
+- `TestOnlyDeclaredWrites`: a write to an undeclared `aid`/`iid`, a read-only characteristic or an out-of-range value is refused before the session is written.
+- `TestTamperedOrReplayedFrameIsRefused`: a frame with a flipped byte or a repeated nonce ends the session.
+- `TestCheckPathDoesNotLinkHomeKit`: the KRN-2 link test shows the kernel's check path does not import `clerk/homekit`.
+- `FuzzTLV8`, `FuzzSessionFrame`, `FuzzResponse` (HTTP and `EVENT/1.0`): no panic, bounded buffers.
 
-Failure path: the controller key leaks, a spoofed accessory gets commands, or the heat is turned off without the owner's code.
+Failure path: the controller key leaks, a spoofed accessory gets commands, or the heating or cooling mode changes without the owner's code-generator code (CH-10).
 
 ## Scope
 
-`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305` and its `modules.txt` line, `NOTICE`, this brief.
+`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, any test-only vendored accessory and its tree, `NOTICE`, this brief.
 
 ## Estimate
 
-Part (a): one session, about 130k tokens, strongest model.
+Part (a): one session, about 130k tokens, strongest model; split at (a1)/(a2) above if it nears 150k.
