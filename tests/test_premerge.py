@@ -148,6 +148,20 @@ class PremergeTest(unittest.TestCase):
         self.chmod_commit("ASSUMPTIONS.md")
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    def test_assumptions_mode_is_read_from_the_literal_path(self):
+        # #3275 review: pathspec magic in a name made the mode check read X/ASSUMPTIONS.md instead.
+        table = "| # | A |\n|---|---|\n| N1 | first | basis |\n"
+        git(self.r, "checkout", "-q", "main")
+        for name in ("X/ASSUMPTIONS.md", ":(literal)X/ASSUMPTIONS.md"):
+            (self.r / name).parent.mkdir(exist_ok=True)
+            self.write(name, table)
+        self.commit("assumptions")
+        reviewed = self.pr()
+        name = ":(literal)X/ASSUMPTIONS.md"
+        self.write(name, self.read(name).replace("| N1 |", "| N2 |"))
+        self.chmod_commit(name)
+        self.assertEqual(self.check(reviewed), [name])
+
     def test_decisions_rows_kept_verbatim_with_a_mode_flip_is_changed(self):
         # #3266: as above, for the appended-rows exemption.
         reviewed = self.decisions_conflict()

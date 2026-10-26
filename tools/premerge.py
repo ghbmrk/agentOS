@@ -171,7 +171,7 @@ ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
 def _same_mode(cwd, tree, head, path):
     """True when `path` has the same mode and object type in `tree` and `head` (#3266: the row exemptions compare
     text, so they need this to keep a chmod or a symlink swap reading as changed)."""
-    a, b = (_git(cwd, "ls-tree", "--full-tree", t, "--", path).split(b" ", 2)[:2] for t in (tree, head))
+    a, b = (_git(cwd, "--literal-pathspecs", "ls-tree", "--full-tree", t, "--", path).split(b" ", 2)[:2] for t in (tree, head))
     return a == b
 
 
