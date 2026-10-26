@@ -105,6 +105,22 @@ func (pk PublicKey) Encode() []byte {
 	return []byte(pk.raw)
 }
 
+// DecodePublicKey is Encode's inverse: 32 bytes are an Ed25519 key; else
+// "es256", a NUL, the RP ID, a NUL, the 65-byte point and a final NUL. The
+// point can hold NULs, so it is taken by length from the end, not split on
+// NUL. Anything else is ErrMalformed.
+func DecodePublicKey(b []byte) (PublicKey, error) {
+	if len(b) == ed25519.PublicKeySize {
+		return Ed25519(b), nil
+	}
+	const pre, point = AlgES256 + "\x00", 65
+	end := len(b) - point - 2 // the NUL after the RP ID
+	if end <= len(pre) || string(b[:len(pre)]) != pre || b[end] != 0 || b[len(b)-1] != 0 {
+		return PublicKey{}, ErrMalformed
+	}
+	return ES256(string(b[len(pre):end]), b[end+1:len(b)-1])
+}
+
 // es256JSON is an ES256 key's JSON form.
 type es256JSON struct {
 	Alg   string `json:"alg"`

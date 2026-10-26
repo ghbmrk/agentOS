@@ -13,10 +13,14 @@ The kernel holds one data key per subject, seals content under it, lists what it
 3. **Content is sealed per subject and addressed by its ciphertext.** `Seal(now, subject, store, class, plaintext)` encrypts with the subject's key (AAD: subject ID and class, random nonce), names the result by SHA-256 of the ciphertext, hands it to the named `ContentStore` (`Put`, `Get`, `Delete`), and logs `content.stored {subject, store, hash, class}`. Addressing by ciphertext keeps a plaintext hash, which would let anyone confirm a guessed message, out of the log. `Read(hash)` refuses an erased or unknown subject before it touches a store.
 4. **Erase is one entry, then the key goes.** `Erase(now, subject)` is an owner act (the owner channel authenticates it, like `Stop`): it logs `subject.erased {subject, stores}` and anchors, then deletes the key, then asks each store that holds the subject's items to delete them, logging `erase.confirmed {subject, store}` for each store that confirms. `subject.erased` is a narrowing entry: `Open` keeps it whether or not an anchor covers it. A subject ID is never reopened, and `Seal` on an erased subject is refused.
 5. **Erase fails closed.** If the key delete fails, `Erase` returns the error and the subject is still erased in the log (re-applied at the next start, design 6). A store that does not confirm stays listed in a new `State().Unerased()` view (subject, item count, stores not confirmed) until it does; `Tick` retries the store deletes. `Unerased()` is a new view, not a change to `Status()`, which #3113 is changing. The returned `Confirmation` names the stores confirmed and not confirmed, and says older backups may still hold the content; naming those backups is the restore half's (#2865), since the kernel has no backup list yet.
-6. **Every start re-applies the erases.** `k.OpenContent(keys, stores, now)`, called after `Boot`, deletes the key of every erased subject still in the table, deletes keys no `subject.opened` names (a crash between `Put` and the log write), and lists any opened, unerased subject whose key is missing. `Seal` and `Read` refuse until it has run. It is a separate call so `Boot`'s signature and its callers do not change.
+6. **Every start re-applies the erases.** `k.OpenContent(keys, stores, now)`, called after `Boot`, deletes the key of every erased subject still in the table, lists, and keeps, keys no `subject.opened` names (a crash between `Put` and the log write, or a log older than the table; L3 on #3160), and lists any opened, unerased subject whose key is missing. `Seal` and `Read` refuse until it has run. It is a separate call so `Boot`'s signature and its callers do not change.
 7. **Recall.** `State().Recall(subject)` returns when the subject was opened, its items (store, hash, class, time), and, once erased, only the erase time, the item count and the stores not yet confirmed. Projections stay rebuildable: a state replayed from empty equals the live one (LOG-1).
 
 Entry types `subject.opened`, `content.stored`, `subject.erased` and `erase.confirmed` are version 1 and join the closed set in `state.go` (LOG-5). None is widening. Their fold can live in a new `erase.go`, as task entries live in `task.go`.
+
+## Decided (2026-10-25)
+
+Mark took every recommendation ("Do all recs", cmsg_01R91wiieBzMSvPKFsAJVvuK4RKum9HBG97vi7x4EN2yt9): the key table outside the log (card cmsg_01R91wiieBzMSvPKFsAJVvuKDAejf3f4MDFgLdQqe8UDkN), erase re-wrapping older backups' key tables (card cmsg_01R91wiieBzMSvPKFsAJVvuKQkoZWPG5XC9NWwtgaBTy5T), and rewinding sessions that read an erased item, telling the owner after (card cmsg_01R91wiieBzMSvPKFsAJVvuKTjvTbiZomrrfU1GfSTA8nx). Only the first is built here. The backup re-wrap needs a backup list and a kernel key per backup, so it is a separate slice with the backup half (#2865); the rewind is `cmd/agentosd`'s, in the FORGET follow-up. Until then the `Confirmation` says older backups may hold the items.
 
 ## Not in this package
 
@@ -35,9 +39,9 @@ Growth cites SPEC LOG-4, D-139 and Mark's card cmsg_01R91wiieBzMSvPKFsAJVvuKKsWF
 
 ## Scope
 
-- `broker/kernel/state.go` (entry constants and schema only), `broker/kernel/kernel.go` (`Erase`, `Seal`, `Read`, `OpenSubject`, `OpenContent`, the `Tick` retry), new `broker/kernel/erase.go`, new `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`.
+- `broker/kernel/state.go` (entry constants and schema only), `broker/kernel/rederive.go` (the four types join `recorded`, so `Rederive` reads them as inputs), `broker/kernel/kernel.go` (`Erase`, `Seal`, `Read`, `OpenSubject`, `OpenContent`, the `Tick` retry), new `broker/kernel/erase.go`, new `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`.
 - New `broker/kernel/proc/keytable.go` and `keytable_test.go`.
-- `broker/kernel/sim/sim.go`, `sim_test.go`.
+- `broker/kernel/sim/erase.go` (new), `sim_test.go`.
 - `briefs/KRN-erase.md`.
 
 Not `log.go`: `Open` already keeps non-widening entries. Waits for #3112, #3113 and #3116 to merge (D-111: they hold `state.go` and `kernel.go`).

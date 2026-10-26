@@ -68,7 +68,9 @@ var gPagesMax = searchMax / 500
 // full, raw), adding an agentOS/ label, trash and untrash, the agentOS/
 // labels, send, history, the reads of filters, forwarding and
 // auto-forwarding, and the profile; and the list of read mail that Opened
-// pages through, its query a constant (#2925). The grant gmail.modify allows more
+// pages through, its query a constant (#2925); and the account plan's list
+// of all mail but spam and trash and its get of From and
+// Authentication-Results (TN-account-plan). The grant gmail.modify allows more
 // (permanent deletion needs the full-mail scope and settings writes
 // gmail.settings.*, which the box never asks for); this list is narrower
 // still.
@@ -91,6 +93,8 @@ func GmailCalls(base, slot string) []clerk.Call {
 	history.Query = map[string]string{"startHistoryId": "start"}
 	readNext := get(gReadNext, gReadQuery, gPageMax, "page")
 	readNext.Query = map[string]string{"pageToken": "page"}
+	planNext := get(gPlanListNext, "/messages?maxResults="+gListLimit, gPageMax, "page")
+	planNext.Query = map[string]string{"pageToken": "page"}
 	label := post(gLabel, "/messages/{id}/modify", gSmallMax, map[string]string{"addLabelIds": "label"}, "id", "label")
 	label.Lists = []string{"addLabelIds"}
 	return []clerk.Call{
@@ -112,6 +116,9 @@ func GmailCalls(base, slot string) []clerk.Call {
 		get(gProfile, "/profile", gSmallMax),
 		get(gRead, gReadQuery, gPageMax),
 		readNext,
+		get(gPlanList, "/messages?maxResults="+gListLimit, gPageMax),
+		planNext,
+		get(gPlanMetadata, "/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results", gPageMax, "id"),
 	}
 }
 
@@ -198,6 +205,11 @@ var ErrReconnect error = nReconnect
 // it). Its error is NotDone when the call did nothing.
 func (g *Gmail) call(ctx context.Context, name string, args map[string]string, v any) (int, error) {
 	ans, bad := g.api.Call(ctx, name, args)
+	return g.answer(ans, bad, v)
+}
+
+// answer reads a call's answer as call does.
+func (g *Gmail) answer(ans clerk.Answer, bad string, v any) (int, error) {
 	switch {
 	case strings.HasPrefix(bad, clerk.DReconnect):
 		return 0, nReconnect

@@ -21,9 +21,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
-// fakeCLI is the guest host's sign-in sandbox: it prints what the test
-// sets, and its code exchange is the test's.
+// fakeCLI is the guest host's sign-in sandbox: it asks its endpoint for a
+// user code as the CLI does, prints what the test sets, and its code
+// exchange is the test's.
 type fakeCLI struct {
+	login   *plan.Login
 	mu      sync.Mutex
 	printed string
 	exited  bool
@@ -33,8 +35,8 @@ type fakeCLI struct {
 	err     error
 }
 
-func newFakeCLI(printed string) *fakeCLI {
-	return &fakeCLI{printed: printed, stopped: make(chan struct{})}
+func newFakeCLI(login *plan.Login, printed string) *fakeCLI {
+	return &fakeCLI{login: login, printed: printed, stopped: make(chan struct{})}
 }
 
 func (f *fakeCLI) Start(_ context.Context, guest string) (SignInWorker, error) {
@@ -45,7 +47,17 @@ func (f *fakeCLI) Start(_ context.Context, guest string) (SignInWorker, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.login != nil {
+		serve(PlanGuest{Login: f.login, Guest: guest}, usercodeRequest())
+	}
 	return f, nil
+}
+
+// usercodeRequest is the CLI's device step that gets its user code.
+func usercodeRequest() *http.Request {
+	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/api/accounts/deviceauth/usercode", strings.NewReader(`{"client_id":"app_x"}`))
+	r.Header.Set("Content-Type", "application/json")
+	return r
 }
 
 func (f *fakeCLI) Read(context.Context) (string, bool) {
@@ -93,6 +105,8 @@ func tokenProvider(calls *atomic.Int32, refresh func() map[string]any) http.Hand
 			json.NewEncoder(w).Encode(refresh())
 		case r.URL.Path == "/oauth/token":
 			json.NewEncoder(w).Encode(map[string]any{"access_token": "real-access-1", "refresh_token": "real-refresh-1", "id_token": fakeJWT("acct-1")})
+		case r.URL.Path == "/api/accounts/deviceauth/usercode":
+			io.WriteString(w, `{"device_auth_id":"dev-1","user_code":"ABCD-12345","interval":"5"}`)
 		case r.URL.Path == "/backend-api/codex/models":
 			io.WriteString(w, `{"models":[]}`)
 		default:
@@ -132,7 +146,7 @@ func modelsRead(ph string) *http.Request {
 func TestPlanSignInShowsTheProvidersPageAndCode(t *testing.T) {
 	var calls atomic.Int32
 	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
-	cli := newFakeCLI(codexPrinted)
+	cli := newFakeCLI(login, codexPrinted)
 	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 
 	b := h.Begin(context.Background())
@@ -172,7 +186,7 @@ func TestPlanSignInSucceedsOnlyByTheClerksRecord(t *testing.T) {
 	login.Forget("earlier")
 
 	t.Run("the CLI exits", func(t *testing.T) {
-		cli := newFakeCLI(codexPrinted)
+		cli := newFakeCLI(login, codexPrinted)
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 		if b := h.Begin(context.Background()); b.Code == "" {
 			t.Fatalf("begun: %+v", b)
@@ -191,7 +205,7 @@ func TestPlanSignInSucceedsOnlyByTheClerksRecord(t *testing.T) {
 		}
 	})
 	t.Run("not approved in time", func(t *testing.T) {
-		cli := newFakeCLI(codexPrinted)
+		cli := newFakeCLI(login, codexPrinted)
 		times := quick
 		times.Wall = 20 * time.Millisecond
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
@@ -216,7 +230,7 @@ func TestPlanSignInSucceedsOnlyByTheClerksRecord(t *testing.T) {
 		"a sandbox that won't start": {err: errors.New("no image"), want: DSignInFailed},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cli := newFakeCLI(c.printed)
+			cli := newFakeCLI(login, c.printed)
 			cli.exited, cli.err = c.exited, c.err
 			h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 			if b := h.Begin(context.Background()); b != (PlanBegun{Detail: c.want}) {
@@ -240,7 +254,7 @@ func TestPlanModeGate(t *testing.T) {
 	t.Run("not allowed", func(t *testing.T) {
 		var calls atomic.Int32
 		login, _ := planLoginAt(t, plan.NotAllowed, tokenProvider(&calls, nil))
-		cli := newFakeCLI(codexPrinted)
+		cli := newFakeCLI(login, codexPrinted)
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 		if b := h.Begin(context.Background()); b.Detail != DPlanNotAllowed {
 			t.Fatalf("begun: %+v", b)
@@ -263,7 +277,7 @@ func TestPlanModeGate(t *testing.T) {
 	t.Run("unconfirmed", func(t *testing.T) {
 		var calls atomic.Int32
 		login, _ := planLoginAt(t, plan.Unconfirmed, tokenProvider(&calls, nil))
-		cli := newFakeCLI(codexPrinted)
+		cli := newFakeCLI(login, codexPrinted)
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 		if b := h.Begin(context.Background()); b.Code == "" {
 			t.Fatalf("begun: %+v", b)
@@ -310,7 +324,7 @@ func TestPlanOwnerSocket(t *testing.T) {
 		}
 		return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1")}
 	}))
-	cli := newFakeCLI(codexPrinted)
+	cli := newFakeCLI(login, codexPrinted)
 	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 	sock := filepath.Join(shortDir(t), "owner.sock")
 	ln, err := ListenPlanOwner(sock, os.Getuid())
@@ -356,7 +370,7 @@ func TestPlanOwnerSocket(t *testing.T) {
 	if d, err := o.Resume(); err != nil || d != DRequalify {
 		t.Fatalf("resume after an unswappable answer: %q %v", d, err)
 	}
-	cli2 := newFakeCLI(codexPrinted)
+	cli2 := newFakeCLI(login, codexPrinted)
 	h.Workers = cli2
 	if b, err := o.Begin(); err != nil || b.Detail != plan.DStopped+" "+plan.StopUnswappable {
 		t.Fatalf("begin while unswappable: %+v %v", b, err)
@@ -384,4 +398,193 @@ func TestPlanSignInPromptCode(t *testing.T) {
 			t.Errorf("%.40q: %q, want %q", printed, got, want)
 		}
 	}
+}
+
+// gated holds the provider's code exchange until the test opens it.
+func gated(next http.Handler, reached chan<- struct{}, open <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" && strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+			reached <- struct{}{}
+			<-open
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// An approval that lands after the wall is not stored behind a sign-in the
+// owner was told timed out: the code exchange in flight when the wall
+// passes is dropped, and the guest is not re-added (#3149 item 1, CLK-7).
+func TestPlanSignInLateApprovalAfterTheWall(t *testing.T) {
+	var calls atomic.Int32
+	reached, open := make(chan struct{}, 1), make(chan struct{})
+	login, _ := planLoginAt(t, plan.Permitted, gated(tokenProvider(&calls, nil), reached, open))
+	cli := newFakeCLI(login, codexPrinted)
+	times := quick
+	times.Wall = 50 * time.Millisecond
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
+	if b := h.Begin(context.Background()); b.Code == "" {
+		t.Fatalf("begun: %+v", b)
+	}
+	_, guest := cli.started()
+	exchanged := make(chan int, 1)
+	go func() {
+		code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest())
+		exchanged <- code
+	}()
+	<-reached
+	cli.waitStopped(t)
+	until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+	close(open)
+	if code := <-exchanged; code == 200 {
+		t.Fatal("the late code exchange was answered")
+	}
+	if st := h.State(); st != (PlanState{Mode: plan.Permitted, Last: DSignInTimedOut}) {
+		t.Fatalf("after the late approval: %+v", st)
+	}
+	if login.Signing(guest) || login.SignedIn(guest) {
+		t.Fatal("the late approval re-added the sign-in guest")
+	}
+}
+
+// The code shown is the user code the clerk forwarded to this sign-in's
+// guest: a CLI that prints another, or that never asked for one, shows the
+// owner nothing and its sandbox is destroyed (#3149 item 3, CLK-7, PLN-5).
+func TestPlanSignInShowsOnlyTheForwardedCode(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	for name, cli := range map[string]*fakeCLI{
+		"another code":           newFakeCLI(login, strings.Replace(codexPrinted, "ABCD-12345", "WXYZ-0001", 1)),
+		"no device step":         newFakeCLI(nil, codexPrinted),
+		"the code before a link": newFakeCLI(login, "ABCD-12345 http://127.0.0.1:18432/codex/device WXYZ-0001"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+			if b := h.Begin(context.Background()); b != (PlanBegun{Detail: DSignInCode}) {
+				t.Fatalf("begun: %+v", b)
+			}
+			cli.waitStopped(t)
+			if st := h.State(); st.Signing || st.Last != DSignInCode {
+				t.Fatalf("after: %+v", st)
+			}
+		})
+	}
+}
+
+// stuckCLI is a sandbox whose start blocks until its context ends, or whose
+// reads wait for the test before printing the code.
+type stuckCLI struct {
+	*fakeCLI
+	stuck            bool
+	reading, release chan struct{}
+}
+
+func (s *stuckCLI) Start(ctx context.Context, guest string) (SignInWorker, error) {
+	if s.stuck {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if _, err := s.fakeCLI.Start(ctx, guest); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *stuckCLI) Read(ctx context.Context) (string, bool) {
+	select {
+	case s.reading <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return s.fakeCLI.Read(ctx)
+}
+
+// A sign-in is bounded by Link and ended by Remove even while the guest
+// host blocks, and a Remove that lands once the code is printed shows the
+// owner no code for the ended sign-in (#3149 item 2).
+func TestPlanSignInStuckHost(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+
+	t.Run("a start past Link", func(t *testing.T) {
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: &stuckCLI{fakeCLI: newFakeCLI(login, ""), stuck: true}, Times: quick}
+		begun := make(chan PlanBegun, 1)
+		go func() { begun <- h.Begin(context.Background()) }()
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInTimedOut}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Begin ran past Link")
+		}
+	})
+	t.Run("a remove during the start", func(t *testing.T) {
+		times := quick
+		times.Link = time.Minute
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: &stuckCLI{fakeCLI: newFakeCLI(login, ""), stuck: true}, Times: times}
+		begun := make(chan PlanBegun, 1)
+		go func() { begun <- h.Begin(context.Background()) }()
+		until(t, "the sign-in to start", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.cur != nil })
+		removed := make(chan error, 1)
+		go func() { removed <- h.Remove() }()
+		select {
+		case err := <-removed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Remove waited on a stuck start")
+		}
+		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
+			t.Fatalf("begun: %+v", b)
+		}
+	})
+	t.Run("a remove once the code is printed", func(t *testing.T) {
+		cli := &stuckCLI{fakeCLI: newFakeCLI(login, codexPrinted), reading: make(chan struct{}), release: make(chan struct{})}
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		begun := make(chan PlanBegun, 1)
+		go func() { begun <- h.Begin(context.Background()) }()
+		<-cli.reading
+		removed := make(chan error, 1)
+		go func() { removed <- h.Remove() }()
+		until(t, "the remove to begin", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.removing > 0 })
+		close(cli.release)
+		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
+			t.Fatalf("begun: %+v", b)
+		}
+		if err := <-removed; err != nil {
+			t.Fatal(err)
+		}
+		if st := h.State(); st.Signing || st.Code != "" || st.Last != DSignInStopped {
+			t.Fatalf("after: %+v", st)
+		}
+	})
+}
+
+// No sign-in begins while a remove runs, so the remove's clearing of the
+// sign-in guests cannot fail a sign-in begun after it (#3149 item 4).
+func TestPlanSignInWaitsOutARemove(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	cli := newFakeCLI(login, codexPrinted)
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+	h.mu.Lock()
+	h.removing++
+	h.mu.Unlock()
+	if b := h.Begin(context.Background()); b != (PlanBegun{Detail: DSignInBusy}) {
+		t.Fatalf("begun during a remove: %+v", b)
+	}
+	if n, _ := cli.started(); n != 0 {
+		t.Fatal("a sandbox was started during a remove")
+	}
+	h.mu.Lock()
+	h.removing--
+	h.mu.Unlock()
+	if b := h.Begin(context.Background()); b.Code == "" {
+		t.Fatalf("begun after the remove: %+v", b)
+	}
+	if err := h.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	cli.waitStopped(t)
 }

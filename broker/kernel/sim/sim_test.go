@@ -1,6 +1,6 @@
 package sim
 
-// REQ: EVL-1, KRN-1, KRN-5, KRN-6, KRN-7, KRN-8, CLK-2, LOG-2
+// REQ: EVL-1, KRN-1, KRN-5, KRN-6, KRN-7, KRN-8, CLK-2, LOG-2, LOG-4
 
 import (
 	"os"
@@ -106,4 +106,35 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 			t.Errorf("the sweep never reached: %s", name)
 		}
 	}
+}
+
+// SIM-erase (docs/migration/cases.md §4): for each seed, a crash at every
+// durable write of the erase phase in turn, until a run reaches no crash.
+// Each run ends with one subject.erased per erase, one erase.confirmed per
+// store that held an item, no erased key in the table, no erased item
+// readable or stored, every kept item readable, and a rebuilt state equal
+// to the live one (RunErase). The crashes must fall on each kind of write.
+func TestSimEraseReachesEveryViewOnce(t *testing.T) {
+	hits := map[string]int{}
+	for seed := 0; seed < seeds(); seed++ {
+		for at := 1; ; at++ {
+			r, err := RunErase(uint64(seed), at)
+			if err != nil {
+				t.Fatalf("seed %d crash at write %d: %v", seed, at, err)
+			}
+			if !r.Crashed {
+				break
+			}
+			hits[r.Hit]++
+		}
+		if _, err := RunErase(uint64(seed), 0); err != nil {
+			t.Fatalf("seed %d, no crash: %v", seed, err)
+		}
+	}
+	for _, kind := range []string{"log", "key", "store"} {
+		if hits[kind] == 0 {
+			t.Errorf("no crash fell on a %s write", kind)
+		}
+	}
+	t.Logf("crashes by write: %v", hits)
 }

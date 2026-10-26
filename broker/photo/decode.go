@@ -29,13 +29,17 @@ const (
 )
 
 // The one-shot run's limits. MemBytes covers a 50-megapixel 16-bit PNG,
-// the costliest file the decoder accepts (ASSUMPTIONS P-1); MaxOutput, a
-// 4096-pixel square PNG that compresses badly, plus its thumbnail.
+// the costliest JPEG or PNG the decoder accepts (ASSUMPTIONS P-1);
+// HEICMemBytes, any ISOBMFF file's run, covers a 50-megapixel HEIC above
+// 8 bits, 4:4:4 with an alpha plane, which decodes to 16-bit samples
+// (CH-photo-heic-1); MaxOutput,
+// a 4096-pixel square PNG that compresses badly, plus its thumbnail.
 const (
-	MemBytes  = 512 << 20
-	Timeout   = 30 * time.Second
-	MaxOutput = 80 << 20
-	maxHeader = 1 << 10
+	MemBytes     = 512 << 20
+	HEICMemBytes = 960 << 20
+	Timeout      = 30 * time.Second
+	MaxOutput    = 80 << 20
+	maxHeader    = 1 << 10
 )
 
 // Refusal is why a photo was not taken: one of the words below, which
@@ -43,7 +47,7 @@ const (
 type Refusal string
 
 const (
-	RefuseType   Refusal = "type"   // not a JPEG or PNG
+	RefuseType   Refusal = "type"   // not a JPEG, PNG or HEIC
 	RefuseSize   Refusal = "size"   // over MaxInput bytes
 	RefusePixels Refusal = "pixels" // over 50 megapixels
 	RefuseDecode Refusal = "decode" // corrupt, too costly, or a bad frame
@@ -95,6 +99,11 @@ var (
 	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
 )
 
+// isoBMFF reports whether raw starts like an ISOBMFF file, as a HEIC
+// does. Which brands are a HEIC is the decoder's to say (it refuses the
+// rest as type), so the broker reads no more of the box than this.
+func isoBMFF(raw []byte) bool { return len(raw) >= 12 && string(raw[4:8]) == "ftyp" }
+
 // errNoCgroup refuses a run with no memory cap: gVisor enforces none of
 // its own (gvisor.OneShot.MemBytes).
 var errNoCgroup = errors.New("photo: no cgroup for the sandbox")
@@ -105,15 +114,19 @@ func (d *Decoder) Decode(ctx context.Context, raw []byte) (Photo, error) {
 	if len(raw) > MaxInput {
 		return Photo{}, RefuseSize
 	}
-	if !bytes.HasPrefix(raw, jpegMagic) && !bytes.HasPrefix(raw, pngMagic) {
+	if !bytes.HasPrefix(raw, jpegMagic) && !bytes.HasPrefix(raw, pngMagic) && !isoBMFF(raw) {
 		return Photo{}, RefuseType
 	}
 	if d.Cgroup == "" {
 		return Photo{}, errNoCgroup
 	}
+	mem := int64(MemBytes)
+	if isoBMFF(raw) {
+		mem = HEICMemBytes
+	}
 	res, err := d.Runner.RunOnce(ctx, gvisor.OneShot{
 		Name: "photo", Root: d.Root, Argv: []string{"/agentos-photo"},
-		Stdin: raw, MaxOutput: MaxOutput, MemBytes: MemBytes, Timeout: Timeout, Cgroup: d.Cgroup,
+		Stdin: raw, MaxOutput: MaxOutput, MemBytes: mem, Timeout: Timeout, Cgroup: d.Cgroup,
 	})
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return Photo{}, RefuseDecode // the run's own deadline: too costly

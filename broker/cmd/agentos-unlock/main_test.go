@@ -11,7 +11,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -350,10 +354,29 @@ func (r *rig) shutdown(cmd *exec.Cmd, out *bytes.Buffer) {
 // socket. The process holds the store open nowhere, and a second boot reads
 // the first boot's log and anchor, so the log key and counter it was handed
 // are the store's.
+//
+// #3138: the store holds an ES256 hardware key beside an Ed25519 one, in
+// the versioned entry, and the kernel takes a line raise co-signed by both,
+// so the chain neither drops the hardware key nor rewraps it.
 func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	r := newRig(t, true)
+	hw := newWebAuthn(t)
+	ed := key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))) // gen(1)
+	v, err := handoff.EncodeAnchors([]key.PublicKey{hw.Public(), ed.Public()})
+	must(t, err)
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	must(t, err)
+	must(t, st.Put(handoff.AnchorsEntry, v))
+	st.Close()
 	cmd, out := r.boot()
 	r.up(cmd, out)
+	n, err := r.owner().LineChanges()
+	must(t, err)
+	what := kernel.LineHash(n, 300)
+	if err := r.owner().SetLine(300, key.Approve(ed, what)); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a raise with one anchor's cosign: got %v, want ErrNeedsCosign", err)
+	}
+	must(t, r.owner().SetLine(300, key.Approve(hw, what), key.Approve(ed, what)))
 	// #2998: once its sockets listen, the kernel marks itself up, as its
 	// own uid, for its unit to read when it exits.
 	if fi, err := os.Lstat(r.mainConfig().Up); err != nil || !fi.Mode().IsRegular() || fi.Size() != 0 {
@@ -661,7 +684,7 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
 	b, err := unlock(c, storePins(r.store))
 	must(t, err)
-	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []ed25519.PublicKey{gen(1), gen(2)}}.Marshal()
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}}.Marshal()
 	must(t, err)
 	if !bytes.Equal(b, want) {
 		t.Fatal("the hand-off is not the store's keys")
@@ -755,4 +778,33 @@ func TestNoCapsSeesCapabilities(t *testing.T) {
 	if os.Geteuid() != 0 && err != nil {
 		t.Fatalf("a plain user: %v", err)
 	}
+}
+
+// webauthn is a software WebAuthn passkey on box.example: it answers a get()
+// for Challenge(msg) as a browser and authenticator would.
+type webauthn struct{ p *ecdsa.PrivateKey }
+
+func newWebAuthn(t *testing.T) webauthn {
+	p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	must(t, err)
+	return webauthn{p}
+}
+
+func (w webauthn) Public() key.PublicKey {
+	b, _ := w.p.PublicKey.Bytes()
+	pk, _ := key.ES256("box.example", b)
+	return pk
+}
+
+func (w webauthn) Sign(msg []byte) []byte {
+	c := key.Challenge(msg)
+	cd, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": base64.RawURLEncoding.EncodeToString(c[:]),
+		"origin": "https://box.example"})
+	rp := sha256.Sum256([]byte("box.example"))
+	ad := append(rp[:], 0x05, 0, 0, 0, 0) // UP and UV
+	cdh := sha256.Sum256(cd)
+	h := sha256.Sum256(append(append([]byte{}, ad...), cdh[:]...))
+	s, _ := ecdsa.SignASN1(rand.Reader, w.p, h[:])
+	b, _ := key.AssertionSig(key.Assertion{AuthenticatorData: ad, ClientDataJSON: cd, Signature: s})
+	return b
 }
