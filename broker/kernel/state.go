@@ -87,6 +87,7 @@ var schema = map[string]int{
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1,
+	TBackupTarget: 1, TBackupUntarget: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -95,11 +96,11 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 // Widening entries grant power back: a resume, a key, a passkey, the first
 // anchors (setup), the owner's RETRY,
 // which lets an effect that may have happened run again, and the spend and
-// pool entries that reopen budget. Only one that an anchor covers counts
+// pool entries that reopen budget, and a backup destination. Only one that an anchor covers counts
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
-		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet
+		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet || typ == TBackupTarget
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -425,6 +426,7 @@ type State struct {
 	subjects map[string]*subjectState // erase.go
 	items    map[Hash]itemOf
 	owing    map[string]bool // erased subjects a store has not confirmed
+	targets  []KeptTarget    // backup destinations, in the order added (backuptarget.go)
 	Order    []string
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
@@ -1125,6 +1127,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyTask(e)
 	case TSubjectOpened, TContentStored, TSubjectErased, TEraseConfirmed:
 		return s.applyErase(e)
+	case TBackupTarget, TBackupUntarget:
+		return s.applyBackup(e)
 	default:
 		return ErrUnknown
 	}
