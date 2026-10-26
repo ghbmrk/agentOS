@@ -168,12 +168,20 @@ def bot_outside(cwd, ref, head="HEAD", base="origin/main"):
 ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
 
 
+def _same_mode(cwd, tree, head, path):
+    """True when `path` has the same mode and object type in `tree` and `head` (#3266: the row exemptions compare
+    text, so they need this to keep a chmod or a symlink swap reading as changed)."""
+    a, b = (_git(cwd, "--literal-pathspecs", "ls-tree", "--full-tree", t, "--", path).split(b" ", 2)[:2] for t in (tree, head))
+    return a == b
+
+
 def _renumbered_only(cwd, tree, head, path):
     """True when an ASSUMPTIONS.md differs between `tree` and `head` only in the first-cell row ids."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
-    return bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
+    return (bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
+            and _same_mode(cwd, tree, head, path))
 
 
 def _appends_kept(cwd, tree, head, path, reviewed, onto):
@@ -206,7 +214,8 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
             block[side // 2].append(line)
         else:
             return False
-    return block is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
+    return (block is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
+            and _same_mode(cwd, tree, head, path))
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
