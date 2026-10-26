@@ -158,6 +158,41 @@ func TestAccountPlanScreenSetUpAndLater(t *testing.T) {
 	}
 }
 
+// TN-account-plan-ux (#3226, CH-12): each stop text names only a step that
+// works and where to take it, as STATUS does (clerk/run seen.go). The
+// Accounts button shows only for reconnect: the Gmail Connect list cannot
+// fix an IMAP sign-in, which is set up again on the Wi-Fi page. A reason
+// the page does not know gets the fixed failure text and no button.
+func TestAccountPlanStopTextsNameOnlyStepsThatWork(t *testing.T) {
+	r, c := accountPlanRig(t, GmailConnect)
+	r.post("/unlock", url.Values{"code": {r.code()}})
+	for _, tc := range []struct {
+		reason, place string
+		button        bool
+	}{
+		{"reconnect", "on the Accounts page", true},
+		{"sign-in-refused", "on my Wi-Fi page", false},
+		{"no-sign-in", "On my Wi-Fi page", false},
+		{"something-new", "open this page again in a minute", false},
+	} {
+		text := planReason(tc.reason)
+		if !strings.Contains(text, tc.place) {
+			t.Errorf("%s: %q does not name %q", tc.reason, text, tc.place)
+		}
+		if tc.button != strings.Contains(text, "Accounts page") {
+			t.Errorf("%s: %q names the Accounts page against its button (%v)", tc.reason, text, tc.button)
+		}
+		if tc.reason != "reconnect" && strings.Contains(text, "Sign in again") {
+			t.Errorf("%s: %q names the Gmail sign-in", tc.reason, text)
+		}
+		c.plan, c.err = localapi.AccountPlanned{Reason: tc.reason}, nil
+		p := html.UnescapeString(r.get("/account-plan/"))
+		if !strings.Contains(p, text) || strings.Contains(p, `href="/accounts/"`) != tc.button || strings.Contains(p, "Payment card") {
+			t.Errorf("%s: page (button %v):\n%s", tc.reason, tc.button, p)
+		}
+	}
+}
+
 // TN-account-plan-6, TN-account-plan-5: Set up opens only a sign-in the
 // known-services table declares for the item. A Connect step whose consent
 // host is not one of the entry's sign-in hosts, or names a port, is refused

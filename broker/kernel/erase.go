@@ -109,6 +109,10 @@ func contentAAD(subject, class string) []byte { return []byte(subject + "\x00" +
 // name is a store or class name: short, plain text.
 func name(s string) bool { return s != "" && len(s) <= 64 && utf8.ValidString(s) && shown(s) }
 
+// ValidStore reports whether s can name a content store: a name, and never
+// the key table. A backup's content/<store> section names use it too.
+func ValidStore(s string) bool { return name(s) && s != KeyTable }
+
 // Item is one sealed item of a subject.
 type Item struct {
 	Store string `json:"store"`
@@ -195,7 +199,7 @@ func (s *State) applyErase(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if st := s.subjects[b.Subject]; st != nil && !st.erased && name(b.Store) && b.Store != KeyTable && name(b.Class) && s.items[b.Hash].subject == "" {
+		if st := s.subjects[b.Subject]; st != nil && !st.erased && ValidStore(b.Store) && name(b.Class) && s.items[b.Hash].subject == "" {
 			it := Item{Store: b.Store, Hash: b.Hash, Class: b.Class, At: e.At}
 			st.items = append(st.items, it)
 			s.items[b.Hash] = itemOf{b.Subject, it}
@@ -390,7 +394,7 @@ func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte)
 		return Hash{}, err
 	}
 	cs := k.stores[store]
-	if cs == nil || !name(store) || store == KeyTable || !name(class) {
+	if cs == nil || !ValidStore(store) || !name(class) {
 		return Hash{}, ErrStore
 	}
 	a, err := newAEAD(dk)
@@ -489,10 +493,45 @@ type Confirmation struct {
 	// destroyed. Unerased lists the unconfirmed ones and Tick retries them.
 	Confirmed   []string `json:"confirmed"`
 	Unconfirmed []string `json:"unconfirmed"`
-	// OlderBackups is always true: a backup taken before the erase may
-	// still hold its items. The kernel has no backup list to name them by;
-	// the backup slice names and re-wraps them (#2865).
-	OlderBackups bool `json:"olderBackups"`
+	// Resealed and StillHeld name the older backups whose key table gave
+	// the subject's key (D-168): Resealed now gives it no more at that
+	// destination, and StillHeld may still, each with why. A backup that
+	// never held the subject is in neither. Tick retries StillHeld.
+	Resealed  []string     `json:"resealed,omitempty"`
+	StillHeld []BackupHold `json:"stillHeld,omitempty"`
+	// BackupsUnknown: no backup list is open (OpenBackups), so any older
+	// backup may still hold the subject's items.
+	BackupsUnknown bool `json:"backupsUnknown,omitempty"`
+}
+
+// BackupHold is an older backup that may still hold an erased subject's
+// key, and why it was not re-sealed.
+type BackupHold struct {
+	Backup string `json:"backup"`
+	Why    string `json:"why"`
+}
+
+// Backups is every older backup the box keeps a record of (BAK-1, D-168);
+// broker/backup implements it. Subjects lists the subjects a backup's
+// current key table gives keys for. Reseal re-seals that table without
+// every subject the state has erased, and returns nil only once it is
+// confirmed at the destination; the kernel checks Subjects after. The
+// kernel calls them under its lock.
+type Backups interface {
+	List() []string
+	Subjects(backup string) []string
+	Reseal(backup string, keys Keys, s *State) error
+}
+
+// OpenBackups gives the kernel the box's backups: from then on an erase
+// re-seals each one that held the subject, and Tick retries those that
+// failed, with the same backoff as a content store. Once content is open
+// it re-seals at once every backup that gives an erased subject's key.
+func (k *Kernel) OpenBackups(b Backups, now int64) {
+	k.backups = b
+	if k.keys != nil {
+		k.resealBackups(now)
+	}
 }
 
 // Erase erases subject (LOG-4), an owner act the owner channel
@@ -518,22 +557,44 @@ func (k *Kernel) Erase(now int64, subject string) (Confirmation, error) {
 		return Confirmation{}, err
 	}
 	if k.keys == nil {
-		return k.confirmation(subject), errors.Join(err, ErrContentClosed)
+		return k.confirmation(now, subject), errors.Join(err, ErrContentClosed)
 	}
 	kerr, cerr := k.confirm(now, subject)
-	return k.confirmation(subject), errors.Join(err, kerr, cerr)
+	return k.confirmation(now, subject), errors.Join(err, kerr, cerr)
 }
 
-func (k *Kernel) confirmation(subject string) Confirmation {
+// confirmation is what the erase of subject has reached, after it asks
+// each backup that held the subject to re-seal.
+func (k *Kernel) confirmation(now int64, subject string) Confirmation {
 	st := k.s.subjects[subject]
-	c := Confirmation{Subject: subject, Unconfirmed: st.unconfirmed(), OlderBackups: true}
+	c := Confirmation{Subject: subject, Unconfirmed: st.unconfirmed()}
 	for _, s := range st.stores {
 		if st.confirmed[s] {
 			c.Confirmed = append(c.Confirmed, s)
 		}
 	}
+	if k.backups == nil {
+		c.BackupsUnknown = true
+		return c
+	}
+	for _, b := range k.backups.List() {
+		if !slices.Contains(k.backups.Subjects(b), subject) {
+			continue
+		}
+		err := k.reseal(now, b)
+		if err == nil && slices.Contains(k.backups.Subjects(b), subject) {
+			err = errStillGiven
+		}
+		if err != nil {
+			c.StillHeld = append(c.StillHeld, BackupHold{b, err.Error()})
+		} else {
+			c.Resealed = append(c.Resealed, b)
+		}
+	}
 	return c
 }
+
+var errStillGiven = errors.New("kernel: the backup's key table still gives the subject's key")
 
 // Retried deletes back off, per subject and store, from RetryMin doubling
 // to RetryMax, so a store that is down is not asked on every Tick. The
@@ -545,8 +606,13 @@ const (
 )
 
 type (
+	// eraseRef is one store's delete of one subject, or, with no subject,
+	// one backup's re-seal, which covers every erased subject at once.
 	eraseRef struct{ subject, store string }
-	backoff  struct{ last, wait int64 } // the failed try's time and the wait after it
+	backoff  struct {
+		last, wait int64 // the failed try's time and the wait after it
+		err        error // what failed
+	}
 )
 
 // held reports whether the delete of ref was tried and failed too recently.
@@ -558,7 +624,7 @@ func (k *Kernel) held(ref eraseRef, now int64) bool {
 }
 
 // failed pushes the next try of ref back, doubling its wait.
-func (k *Kernel) failed(ref eraseRef, now int64) {
+func (k *Kernel) failed(ref eraseRef, now int64, err error) {
 	if k.retry == nil {
 		k.retry = map[eraseRef]backoff{}
 	}
@@ -566,7 +632,7 @@ func (k *Kernel) failed(ref eraseRef, now int64) {
 	if b, ok := k.retry[ref]; ok {
 		w = min(2*b.wait, RetryMax)
 	}
-	k.retry[ref] = backoff{now, w}
+	k.retry[ref] = backoff{now, w, err}
 }
 
 // confirm deletes subject's key and its items in each store not yet
@@ -580,22 +646,24 @@ func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 		if k.held(ref, now) {
 			continue
 		}
-		ok := true
+		var derr error
 		if store == KeyTable {
 			keyErr = k.keys.Delete(subject)
-			ok = keyErr == nil
+			derr = keyErr
 		} else if cs := k.stores[store]; cs == nil {
-			ok = false
+			derr = ErrStore
 		} else {
 			for _, it := range st.items {
-				if it.Store == store && cs.Delete(it.Hash) != nil {
-					ok = false
+				if it.Store != store {
+					continue
+				}
+				if derr = cs.Delete(it.Hash); derr != nil {
 					break
 				}
 			}
 		}
-		if !ok {
-			k.failed(ref, now)
+		if derr != nil {
+			k.failed(ref, now, derr)
 			continue
 		}
 		delete(k.retry, ref)
@@ -607,12 +675,51 @@ func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 }
 
 // confirmErases retries every erase not yet confirmed whose stores are not
-// backing off. Only a log error is returned.
+// backing off, then every backup that still gives an erased subject's key.
+// Only a log error is returned.
 func (k *Kernel) confirmErases(now int64) error {
 	for _, u := range k.s.Unerased() {
 		if _, err := k.confirm(now, u.Subject); err != nil {
 			return err
 		}
 	}
+	k.resealBackups(now)
+	return nil
+}
+
+// resealBackups asks each backup that gives an erased subject's key, and
+// is not backing off, to re-seal. A failure backs off; nothing is logged.
+func (k *Kernel) resealBackups(now int64) {
+	if k.backups == nil {
+		return
+	}
+	for _, b := range k.backups.List() {
+		if slices.ContainsFunc(k.backups.Subjects(b), k.s.erased) {
+			k.reseal(now, b)
+		}
+	}
+}
+
+// erased reports whether the log has erased subject.
+func (s *State) erased(subject string) bool {
+	st := s.subjects[subject]
+	return st != nil && st.erased
+}
+
+// reseal asks backup to re-seal its key table without the erased subjects,
+// unless it failed too recently, when it returns what failed then.
+func (k *Kernel) reseal(now int64, backup string) error {
+	if k.keys == nil {
+		return ErrContentClosed
+	}
+	ref := eraseRef{store: backup}
+	if k.held(ref, now) {
+		return k.retry[ref].err
+	}
+	if err := k.backups.Reseal(backup, k.keys, k.s); err != nil {
+		k.failed(ref, now, err)
+		return err
+	}
+	delete(k.retry, ref)
 	return nil
 }

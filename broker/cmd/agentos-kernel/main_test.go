@@ -26,6 +26,7 @@ var good = []string{
 	"-meter-sock", "/run/agentos-kernel/meter.sock", "-meter-uid", "982",
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
 	"-clerk", "mail=/run/agentos-mail/kernel.sock,984",
+	"-keys-dir", "/var/lib/agentos-kernel/keys",
 }
 
 // CLK-1: the kernel process refuses to run as any of its peers: the owner
@@ -50,6 +51,20 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 		good[2:],
 		good[4:],
 	} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
+		}
+	}
+}
+
+// KRN-erase: the kernel never starts with its content closed, so the
+// subject-key table's directory is required, and absolute.
+func TestTheKernelNeedsItsKeyTable(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.KeyDir != "/var/lib/agentos-kernel/keys" {
+		t.Fatalf("parse: %q %v", c.KeyDir, err)
+	}
+	for _, bad := range [][]string{good[:len(good)-2], append(slices.Clone(good), "-keys-dir", "keys")} {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
 		}

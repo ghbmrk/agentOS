@@ -28,6 +28,7 @@ ExecStartPre=/usr/bin/rm -f /run/agentos-kernel/up
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \
         -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
         -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \
+        -keys-dir /var/lib/agentos-kernel/keys \
         -owner-sock /run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner \
         -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model -up /run/agentos-kernel/up
 # #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its

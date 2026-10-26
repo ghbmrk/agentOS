@@ -71,7 +71,7 @@ type Record struct {
 	Recipient  Recipient `json:"recipient"`
 	Created    int64     `json:"created"`
 	Generation uint64    `json:"generation"` // of the current key table
-	Subjects   []string  `json:"subjects"`   // sorted, in the current key table
+	Subjects   []string  `json:"subjects"`   // sorted: every subject a listed key table may give (Set.Reseal)
 	ContentSum string    `json:"content_sha256"`
 	TableSum   string    `json:"table_sha256"`
 }
@@ -90,17 +90,14 @@ var (
 )
 
 // validSection is the closed set of section names: log, and content/<store>
-// for a kernel content store name (lower-case letters, digits, '.', '_' and
-// '-', at most 64 bytes, never the key table).
+// for any name the kernel takes as a content store (kernel.ValidStore). A
+// section name is a label, never a file path.
 func validSection(n string) bool {
 	if n == "log" {
 		return true
 	}
 	s, ok := strings.CutPrefix(n, "content/")
-	if !ok || s == "" || len(s) > 64 || s == kernel.KeyTable || s == "." || s == ".." {
-		return false
-	}
-	return strings.Trim(s, "abcdefghijklmnopqrstuvwxyz0123456789._-") == ""
+	return ok && kernel.ValidStore(s)
 }
 
 func checkSections(names []string) error {
@@ -223,22 +220,30 @@ func Write(w io.Writer, t Target, in Input) (Record, error) {
 func sumHex(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 
 // Sections reads a content object's sections in manifest order, checking
-// each one's length and SHA-256 as it ends.
+// each one's length and SHA-256 as it ends. Its first error sticks: every
+// later Next returns it, so a caller that drops one never sees io.EOF.
 type Sections struct {
 	r    io.Reader
 	list []Section
 	i    int
 	cur  *sectionReader
+	err  error
 }
 
+// sectionReader keeps its first error other than io.EOF and returns it
+// from every later Read.
 type sectionReader struct {
 	s    Section
 	r    io.Reader
 	h    hash.Hash
 	left int64
+	err  error
 }
 
 func (s *sectionReader) Read(p []byte) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
 	if s.left == 0 {
 		return 0, io.EOF
 	}
@@ -248,14 +253,16 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	s.h.Write(p[:n])
 	s.left -= int64(n)
-	if errors.Is(err, io.EOF) && s.left > 0 {
-		return n, ErrSum
-	}
-	if s.left == 0 && hex.EncodeToString(s.h.Sum(nil)) != s.s.SHA256 {
-		return n, ErrSum
-	}
-	if s.left == 0 && err == nil {
+	switch {
+	case errors.Is(err, io.EOF) && s.left > 0:
+		err = ErrSum
+	case s.left == 0 && hex.EncodeToString(s.h.Sum(nil)) != s.s.SHA256:
+		err = ErrSum
+	case s.left == 0 && err == nil:
 		err = io.EOF
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.err = err
 	}
 	return n, err
 }
@@ -263,8 +270,19 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 // Next finishes the section before (reading what the caller left) and
 // returns the next one. After the last section it checks the object ends
 // there and returns io.EOF; a reader returns ErrSum, or the open error,
-// for a section that does not match.
+// for a section that does not match, and so does every later Next.
 func (s *Sections) Next() (Section, io.Reader, error) {
+	if s.err != nil {
+		return Section{}, nil, s.err
+	}
+	sec, r, err := s.next()
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.err = err
+	}
+	return sec, r, err
+}
+
+func (s *Sections) next() (Section, io.Reader, error) {
 	if s.cur != nil {
 		if _, err := io.Copy(io.Discard, s.cur); err != nil {
 			return Section{}, nil, err

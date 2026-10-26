@@ -163,6 +163,14 @@ func Handle(c *client.Client, q imapwire.Request) (r imapwire.Response) {
 		r.Marks, err = marks(c)
 	case imapwire.OpEnsure:
 		err = ensure(c, q.Folder)
+	case imapwire.OpDates:
+		if err = selectAt(c, q.Folder, true, q.Validity); err == nil {
+			r.Heads, err = dates(c, q.UIDs)
+		}
+	case imapwire.OpPlanHeads:
+		if err = selectAt(c, q.Folder, true, q.Validity); err == nil {
+			r.Heads, err = planHeads(c, q.UIDs)
+		}
 	case imapwire.OpAppend:
 		err = c.Append(q.Folder, q.Flags, q.Date, bytes.NewBuffer(q.Raw))
 	default:
@@ -347,6 +355,69 @@ func seenBatch(c *client.Client, folder string, uids []uint32) ([]imapwire.Head,
 		}
 	}
 	return out, nil, nil
+}
+
+// dates is the INTERNALDATE of each of uids in the selected folder: what
+// the account plan orders mails by across folders, read with no body.
+func dates(c *client.Client, uids []uint32) ([]imapwire.Head, error) {
+	return heads(c, uids, []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate}, nil)
+}
+
+// planHeads is the From and Authentication-Results header fields of each
+// of uids in the selected folder, with BODY.PEEK[HEADER.FIELDS (FROM
+// AUTHENTICATION-RESULTS)] so nothing is marked read: all the account plan
+// reads of a mail (TN-account-plan). A mail whose fields pass HeadMax is
+// left out, as is one gone since it was listed: the plan skips both.
+func planHeads(c *client.Client, uids []uint32) ([]imapwire.Head, error) {
+	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, HeadMax + 1},
+		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Authentication-Results"}}}
+	return heads(c, uids, []imap.FetchItem{imap.FetchUid, sec.FetchItem()}, sec)
+}
+
+// heads fetches items of uids in the selected folder: one Head per
+// requested UID, the first the server sends, so a server that repeats or
+// invents messages adds nothing. With sec, the one section items ask for, a
+// Head holds it, and a message that sent none, or more than HeadMax bytes
+// of it, has no Head.
+func heads(c *client.Client, uids []uint32, items []imap.FetchItem, sec *imap.BodySectionName) ([]imapwire.Head, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	set := new(imap.SeqSet)
+	set.AddNum(uids...)
+	want := make(map[uint32]bool, len(uids))
+	for _, u := range uids {
+		want[u] = true
+	}
+	ch := make(chan *imap.Message, 16)
+	done := make(chan error, 1)
+	go func() { done <- c.UidFetch(set, items, ch) }()
+	var out []imapwire.Head
+	for m := range ch {
+		if !want[m.Uid] {
+			continue
+		}
+		if sec == nil {
+			delete(want, m.Uid)
+			out = append(out, imapwire.Head{UID: m.Uid, Arrived: m.InternalDate})
+			continue
+		}
+		var l imap.Literal
+		for _, b := range m.Body {
+			if b != nil {
+				l = b
+				break
+			}
+		}
+		if l == nil {
+			continue
+		}
+		delete(want, m.Uid)
+		if h, _ := io.ReadAll(io.LimitReader(l, HeadMax+1)); len(h) <= HeadMax {
+			out = append(out, imapwire.Head{UID: m.Uid, Header: h})
+		}
+	}
+	return out, <-done
 }
 
 // subject is mail uid's Subject header, unfolded and decoded, read with

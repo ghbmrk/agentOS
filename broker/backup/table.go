@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -111,11 +112,12 @@ const (
 	ReadBackMismatch // the table read back is not what was put
 	OldNotDeleted    // the new table is up, but an older one remains
 	LiveKeyMissing   // refused: a live subject's key is missing
+	GenerationSpent  // refused: a listed generation is the last uint64; nothing was written
 )
 
 func (r Result) String() string {
 	return [...]string{"unchanged", "rewrote", "append-only", "offline", "read-back-mismatch",
-		"old-not-deleted", "live-key-missing"}[r]
+		"old-not-deleted", "live-key-missing", "generation-spent"}[r]
 }
 
 // Outcome is a Rewrap's result, and the error behind it if any.
@@ -161,7 +163,11 @@ func Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Out
 	if err != nil {
 		return rec, Outcome{LiveKeyMissing, err}
 	}
-	gen := max(rec.Generation, slices.Max(append(slices.Clone(gens), 0))) + 1
+	top := max(rec.Generation, slices.Max(append(slices.Clone(gens), 0)))
+	if top == math.MaxUint64 {
+		return rec, Outcome{GenerationSpent, fmt.Errorf("backup: generation %d is the last", top)}
+	}
+	gen := top + 1
 	tb, err := sealTable(rec.Recipient, id, gen, es)
 	if err != nil {
 		return rec, Outcome{Offline, err}
