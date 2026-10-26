@@ -48,6 +48,8 @@ type MailHost struct {
 
 	signMu  sync.Mutex
 	signing *gmailSignIn // the Gmail sign-in waiting for its paste; nil: none
+
+	planned planState // setup's account plan (accountPlan)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -444,6 +446,7 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		return h.gmailFinish(a.Use, a.Pasted)
 	},
 	"gmailrevoke": func(h *MailHost, _ json.RawMessage) (any, error) { return h.gmailRevoke() },
+	"accountplan": func(h *MailHost, _ json.RawMessage) (any, error) { return h.accountPlan() },
 	"status":      func(h *MailHost, _ json.RawMessage) (any, error) { return h.status(), nil },
 	"account":     func(h *MailHost, _ json.RawMessage) (any, error) { return h.account() },
 	"told": func(h *MailHost, raw json.RawMessage) (any, error) {
@@ -539,6 +542,13 @@ func (o MailOwner) GmailFinish(use, pasted string) (detail string, err error) {
 // the account: clerk.DRevoked, or a typed detail with the account kept.
 func (o MailOwner) GmailRevoke() (detail string, err error) {
 	err = o.Call("gmailrevoke", nil, &detail)
+	return
+}
+
+// AccountPlan is setup's account plan (TN-account-plan): its items, or
+// the typed reason the mailbox could not be read for them.
+func (o MailOwner) AccountPlan() (p AccountPlanned, err error) {
+	err = o.Call("accountplan", nil, &p)
 	return
 }
 func (o MailOwner) Status() (st OwnerStatus, err error) {

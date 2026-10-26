@@ -128,6 +128,8 @@ type Server struct {
 	owner  Owner
 	mounts []mount
 	setup  *setup
+	// plan is the owner's Set up and Later on the account plan.
+	plan planChoices
 	// vaultPend is the pending vault unlock this UI started, bound to the
 	// phone that sent the passphrase.
 	vaultPend *vaultPending
@@ -287,6 +289,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Accounts != nil {
 		s.Mount("/accounts", "Accounts", http.HandlerFunc(s.accountsPage))
+		if _, ok := s.cfg.Accounts.(AccountPlan); ok {
+			s.Mount("/account-plan", "Your accounts", http.HandlerFunc(s.accountPlanPage))
+		}
 	}
 	if s.cfg.Passkeys != nil {
 		s.Mount("/passkeys", "Passkeys", http.HandlerFunc(s.passkeysPage))
