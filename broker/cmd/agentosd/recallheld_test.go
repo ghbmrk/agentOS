@@ -76,15 +76,29 @@ func (b *recallBox) open(contained func(string) bool) *vm.Manager {
 // manager.
 func (b *recallBox) start(wrap func(*vm.Manager) lineageForgetter, intents []rollbackAnswer) (*vm.Manager, *recallHeld, []string) {
 	b.t.Helper()
+	var told []string
+	m, h := b.startWith(wrap, answersJournal{as: intents}, func(*recallHeld, string) error { return nil }, &told)
+	return m, h, told
+}
+
+// startWith is start reading the owner's NOs from j through ownerNos, with
+// tell sending each notice; the sent ones are appended to told.
+func (b *recallBox) startWith(wrap func(*vm.Manager) lineageForgetter, j answersJournal, tell func(*recallHeld, string) error, told *[]string) (*vm.Manager, *recallHeld) {
+	b.t.Helper()
 	h := openRecallHeld(b.recall, filepath.Join(b.state, recallSettledFile), b.t.Logf)
 	m := b.open(h.Contained)
 	var f lineageForgetter = m
 	if wrap != nil {
 		f = wrap(m)
 	}
-	var told []string
-	h.settle(context.Background(), f, recallNos(journalAnswers(intents)), func(s string) error { told = append(told, s); return nil })
-	return m, h, told
+	h.settle(context.Background(), f, func() ([]recallNo, error) { return ownerNos(j) }, func(s string) error {
+		if err := tell(h, s); err != nil {
+			return err
+		}
+		*told = append(*told, s)
+		return nil
+	})
+	return m, h
 }
 
 func (b *recallBox) guestWrite(id, s string) {
@@ -249,7 +263,7 @@ func TestLOG4UnsettledLineageStaysContained(t *testing.T) {
 	if !cfg.Grants.Contained(b.L) || cfg.Grants.Contained(b.M) {
 		t.Fatalf("grants contained: L %v M %v", cfg.Grants.Contained(b.L), cfg.Grants.Contained(b.M))
 	}
-	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge") {
+	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge until it goes back, which is tried again when the box restarts") {
 		t.Fatalf("STATUS %q", n)
 	}
 	if _, err := fork(m, "moss", []string{"moss2"}); err != nil {
@@ -500,4 +514,118 @@ func fork(m *vm.Manager, id string, ids []string) (vm.Snapshot, error) {
 		}
 	}
 	return m.Fork(context.Background(), id, ids)
+}
+
+// LOG-4: a journal that cannot be read may hide the owner's NO, so no
+// lineage is rolled back against it: a lineage the owner kept stays
+// contained, its work intact, until a start that reads the journal.
+func TestLOG4UnreadableJournalRollsBackNothing(t *testing.T) {
+	b := newHeldBox(t)
+	kept := []rollbackAnswer{ownerNo(b.L, "X")}
+	if _, err := ownerNos(answersJournal{as: kept, err: errors.New("disk failed")}); err == nil {
+		t.Fatal("ownerNos read an unreadable journal")
+	}
+	fc := &forgetCalls{}
+	var told []string
+	m, h := b.startWith(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc },
+		answersJournal{as: kept, err: errors.New("disk failed")}, func(*recallHeld, string) error { return nil }, &told)
+	if len(fc.calls) != 0 || len(told) != 0 || !h.Contained(b.L) || h.Contained(b.M) {
+		t.Fatalf("journal unread: rollbacks %v, told %q, L %v M %v", fc.calls, told, h.Contained(b.L), h.Contained(b.M))
+	}
+	if mc, _ := m.Get("lamp"); mc.Last != b.after.ID {
+		t.Fatalf("L moved to %s with the journal unread", mc.Last)
+	}
+	if _, err := fork(m, "lamp", []string{"lamp2"}); !errors.Is(err, vm.ErrContained) {
+		t.Fatalf("L fork with the journal unread: %v, want ErrContained", err)
+	}
+	m, h, told = b.start(nil, kept)
+	if mc, _ := m.Get("lamp"); mc.Last != b.after.ID || h.Contained(b.L) || len(told) != 0 {
+		t.Fatalf("journal read: L last %s contained %v told %q", mc.Last, h.Contained(b.L), told)
+	}
+}
+
+// LOG-4: a rollback whose notice failed is told at a later start, even
+// when the recall files can no longer be read or the journal cannot.
+func TestLOG4UntoldRollbackToldWhenFilesUnknown(t *testing.T) {
+	for _, why := range []string{"recall files", "journal"} {
+		b := newHeldBox(t)
+		var told []string
+		_, h := b.startWith(nil, answersJournal{}, func(*recallHeld, string) error { return errors.New("no owner channel") }, &told)
+		if len(told) != 0 || h.Contained(b.L) {
+			t.Fatalf("%s: first start told %q, L contained %v", why, told, h.Contained(b.L))
+		}
+		j := answersJournal{}
+		if why == "recall files" {
+			b.write("provenance.jsonl", "{not json")
+		} else {
+			j.err = errors.New("disk failed")
+		}
+		fc := &forgetCalls{}
+		_, h = b.startWith(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, j, func(*recallHeld, string) error { return nil }, &told)
+		if len(fc.calls) != 0 || len(told) != 1 || !strings.Contains(told[0], "Agent lamp") {
+			t.Fatalf("%s unknown: rollbacks %v, told %q, want one notice for L", why, fc.calls, told)
+		}
+		_, _ = b.startWith(nil, j, func(*recallHeld, string) error { return nil }, &told)
+		if len(told) != 1 {
+			t.Fatalf("%s unknown: told again %q", why, told)
+		}
+	}
+}
+
+// LOG-4: notices are sent outside the lock, so a slow owner channel never
+// holds up Contained, which machines and grants call meanwhile.
+func TestLOG4NoticeSentOutsideLock(t *testing.T) {
+	b := newHeldBox(t)
+	done := make(chan []string, 1)
+	go func() {
+		var told []string
+		b.startWith(nil, answersJournal{}, func(h *recallHeld, _ string) error {
+			c := make(chan bool, 1)
+			go func() { c <- h.Contained(b.M) }()
+			select {
+			case <-c:
+				return nil
+			case <-time.After(5 * time.Second):
+				return errors.New("Contained blocked while the notice was sent")
+			}
+		}, &told)
+		done <- told
+	}()
+	select {
+	case told := <-done:
+		if len(told) != 1 {
+			t.Fatalf("told %q, want one notice sent while Contained answered", told)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("settle did not finish")
+	}
+}
+
+// LOG-4: an item ingested again after its tombstone is live, as recall's
+// Index.Deleted saw it, so a lineage that read it is not held; a later
+// tombstone, or a copy received before the tombstone, holds it again.
+func TestLOG4ReingestedItemNotHeld(t *testing.T) {
+	b := newRecallBox(t)
+	t1 := time.Now().UTC().Add(-time.Hour)
+	at := t1.Add(time.Minute)
+	tombAt := func(id string, at time.Time) string { return rec(map[string]any{"op": "tomb", "id": id, "at": at}) }
+	item := func(id string, received time.Time) string {
+		return rec(map[string]any{"id": id, "label": "private", "received": received})
+	}
+	b.write("recall/meta.jsonl", tombAt("X", at))
+	b.write("provenance.jsonl", read(b.L, t1, "X"))
+	b.write("recall/seg-00000001.jsonl", item("X", at.Add(-time.Second)), "{not json")
+	wantHeld(t, "copy received before the tomb", heldOf(t, b), t1)
+	b.write("recall/seg-00000002.jsonl", item("X", at.Add(time.Second)))
+	wantHeld(t, "ingested again after the tomb", heldOf(t, b), time.Time{})
+	b.write("recall/meta.jsonl", tombAt("X", at), tombAt("X", at.Add(time.Minute)))
+	wantHeld(t, "deleted again", heldOf(t, b), t1)
+	b.write("recall/meta.jsonl", tombAt("X", at))
+	b.write("recall/seg-x.jsonl", item("X", at.Add(time.Hour)))
+	must(t, os.Remove(filepath.Join(b.recall, "recall", "seg-00000002.jsonl")))
+	wantHeld(t, "a file recall did not count as a segment", heldOf(t, b), t1)
+	must(t, os.Mkdir(filepath.Join(b.recall, "recall", "seg-00000003.jsonl"), 0o700))
+	if _, err := readRecallHeld(b.recall); err == nil {
+		t.Fatal("unreadable segment read as nothing")
+	}
 }

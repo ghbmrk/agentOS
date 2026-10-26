@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,8 +28,8 @@ import (
 // and for good when the files cannot be read, the lineage is contained:
 // no fork, no merge, no pre-allowance.
 const (
-	// recallSettledFile, under the machines directory, records each
-	// lineage rolled back, so a restart never rolls it back again.
+	// recallSettledFile, in the -machines directory (stateDir), records
+	// each lineage rolled back, so a restart never rolls it back again.
 	recallSettledFile = "recall-settled.json"
 )
 
@@ -164,22 +165,27 @@ func readRecallHeld(dir string) (map[string]heldLineage, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	tombs := map[string]bool{}
+	tombs := map[string]time.Time{}
 	meta, metaFound, err := recallLines(filepath.Join(dir, "recall", "meta.jsonl"))
 	if err != nil {
 		return nil, err
 	}
 	for i, line := range meta {
 		var r struct {
-			Op string `json:"op"`
-			ID string `json:"id"`
+			Op string    `json:"op"`
+			ID string    `json:"id"`
+			At time.Time `json:"at"`
 		}
 		if err := json.Unmarshal(line, &r); err != nil {
 			return nil, fmt.Errorf("recall/meta.jsonl line %d: %w", i+1, err)
 		}
 		if r.Op == "tomb" && r.ID != "" {
-			tombs[r.ID] = true
+			tombs[r.ID] = r.At
 		}
+	}
+	live, err := reingested(filepath.Join(dir, "recall"), tombs)
+	if err != nil {
+		return nil, err
 	}
 	p := recallReplay{}
 	// Backs first, as OpenProvenanceWithBacks: a back must be known when
@@ -204,7 +210,7 @@ func readRecallHeld(dir string) (map[string]heldLineage, error) {
 	for name, l := range p {
 		var h heldLineage
 		for id, t := range l.reads {
-			if !tombs[id] || l.undone(t) {
+			if _, gone := tombs[id]; !gone || live[id] || l.undone(t) {
 				continue
 			}
 			h.IDs = append(h.IDs, id)
@@ -227,6 +233,45 @@ func readRecallHeld(dir string) (map[string]heldLineage, error) {
 		}
 	}
 	return held, nil
+}
+
+// reingested finds the deleted IDs ingested again after their tombstone,
+// as recall's Index.Deleted saw them (c2c29e8): an item line in a segment
+// whose receipt is after the tomb is live, so its ID is not deleted. Lines
+// recall skipped (no id, or undecodable) are skipped here too; an
+// unreadable segment is an error.
+func reingested(dir string, tombs map[string]time.Time) (map[string]bool, error) {
+	if len(tombs) == 0 {
+		return nil, nil
+	}
+	names, err := filepath.Glob(filepath.Join(dir, "seg-*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	for _, p := range names {
+		n := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "seg-"), ".jsonl")
+		if _, err := strconv.ParseUint(n, 10, 32); err != nil {
+			continue
+		}
+		lines, _, err := recallLines(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range lines {
+			var it struct {
+				ID       string    `json:"id"`
+				Received time.Time `json:"received"`
+			}
+			if json.Unmarshal(line, &it) != nil {
+				continue
+			}
+			if t, gone := tombs[it.ID]; gone && it.Received.After(t) {
+				live[it.ID] = true
+			}
+		}
+	}
+	return live, nil
 }
 
 // recallSettled is one lineage's entry in recallSettledFile: rolled back
@@ -262,7 +307,8 @@ func openRecallHeld(dir, settledPath string, logf func(string, ...any)) *recallH
 		h.unknown = true
 	}
 	h.held = held
-	if len(held) == 0 {
+	// Unknown files still read the record, so its untold notices go out.
+	if len(held) == 0 && !h.unknown {
 		return h
 	}
 	data, err := os.ReadFile(settledPath)
@@ -343,7 +389,7 @@ func (h *recallHeld) Note() string {
 	}
 	var parts []string
 	if len(contained) > 0 {
-		parts = append(parts, holdLine(contained)+"; no fork or merge until it goes back")
+		parts = append(parts, holdLine(contained)+"; no fork or merge until it goes back, which is tried again when the box restarts")
 	}
 	if len(kept) > 0 {
 		parts = append(parts, holdLine(kept))
@@ -408,10 +454,21 @@ func (h *recallHeld) keep(nos []recallNo) {
 // served: it reads the owner's NOs, then rolls back each held lineage that
 // is neither kept nor settled, recording each success before the next, and
 // tells the owner of each rollback not yet told. A failed rollback leaves
-// its lineage contained until the next start; unknown files roll back
-// nothing.
-func (h *recallHeld) settle(ctx context.Context, m lineageForgetter, nos []recallNo, tell func(string) error) {
-	h.keep(nos)
+// its lineage contained until the next start. Unknown files, or a journal
+// that cannot be read (nos errs), roll back nothing; rollbacks settled at
+// an earlier start are still told.
+func (h *recallHeld) settle(ctx context.Context, m lineageForgetter, nos func() ([]recallNo, error), tell func(string) error) {
+	if got, err := nos(); err != nil {
+		h.logf("journal unreadable, agents holding a record the owner deleted stay contained: %v", err)
+	} else {
+		h.keep(got)
+		h.rollBack(ctx, m)
+	}
+	h.notify(tell)
+}
+
+// rollBack rolls back each contained held lineage, recording each.
+func (h *recallHeld) rollBack(ctx context.Context, m lineageForgetter) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.unknown {
@@ -439,24 +496,35 @@ func (h *recallHeld) settle(ctx context.Context, m lineageForgetter, nos []recal
 			return
 		}
 	}
-	var told []string
+}
+
+// notify tells the owner of each settled rollback not yet told. Sends run
+// outside mu, so a slow owner channel never stalls Contained.
+func (h *recallHeld) notify(tell func(string) error) {
+	h.mu.Lock()
+	var untold []string
+	since := map[string]time.Time{}
 	for l, s := range h.settled {
 		if !s.Told {
-			told = append(told, l)
+			untold = append(untold, l)
+			since[l] = s.Since
 		}
 	}
-	sort.Strings(told)
-	for _, l := range told {
-		s := h.settled[l]
-		if err := tell(recallBackNotice(l, s.Since)); err != nil {
+	h.mu.Unlock()
+	sort.Strings(untold)
+	for _, l := range untold {
+		if err := tell(recallBackNotice(l, since[l])); err != nil {
 			h.logf("rollback notice for agent %s not sent: %v", agentName(l), err)
 			continue
 		}
+		h.mu.Lock()
+		s := h.settled[l]
 		s.Told = true
 		h.settled[l] = s
 		if err := h.save(); err != nil {
 			h.logf("%s not written: %v", h.path, err)
 		}
+		h.mu.Unlock()
 	}
 }
 
