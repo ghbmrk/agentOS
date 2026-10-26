@@ -263,7 +263,7 @@ func TestLOG4UnsettledLineageStaysContained(t *testing.T) {
 	if !cfg.Grants.Contained(b.L) || cfg.Grants.Contained(b.M) {
 		t.Fatalf("grants contained: L %v M %v", cfg.Grants.Contained(b.L), cfg.Grants.Contained(b.M))
 	}
-	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge until it goes back, which is tried again when the box restarts") {
+	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge until it goes back, which I try again when I restart") {
 		t.Fatalf("STATUS %q", n)
 	}
 	if _, err := fork(m, "moss", []string{"moss2"}); err != nil {

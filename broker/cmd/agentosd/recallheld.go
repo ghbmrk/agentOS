@@ -389,7 +389,7 @@ func (h *recallHeld) Note() string {
 	}
 	var parts []string
 	if len(contained) > 0 {
-		parts = append(parts, holdLine(contained)+"; no fork or merge until it goes back, which is tried again when the box restarts")
+		parts = append(parts, holdLine(contained)+"; no fork or merge until it goes back, which I try again when I restart")
 	}
 	if len(kept) > 0 {
 		parts = append(parts, holdLine(kept))
