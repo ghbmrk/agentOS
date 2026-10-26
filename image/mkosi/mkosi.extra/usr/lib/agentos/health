@@ -32,6 +32,10 @@ case ,$(findmnt -no OPTIONS /usr), in
 esac
 # Root and the ESP are on the drive this PC booted, and no other disk carries its GUIDs.
 "$L/drive-id" check || fail "boot drive is ambiguous"
+# The host-disk rules found the drive (HW-8, HOST-1a; hostdisk ASSUMPTIONS H7, H11): with no drive
+# they cannot tell the box's own disk from a host PC's, so such a boot is never blessed.
+hd=$("$L/agentos-hostdisk" health 2>/dev/null) && [ "$hd" = hostdisk=ok ] ||
+	fail "the AgentOS drive is not found among the disks (${hd:-no answer})"
 [ -x "$L/agentosd" ] || fail "broker missing"
 "$L/agentosd" -h >/dev/null 2>&1 || fail "broker does not start"
 "$L/runsc" --version >/dev/null 2>&1 || fail "gVisor runsc does not start"
@@ -80,4 +84,4 @@ for f in "$R/proc/sys/net/ipv4/ip_forward" "$R/proc/sys/net/ipv4/conf/all/forwar
 	[ -e "$f" ] || fail "forwarding state unreadable (${f#"$R"})"
 	[ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
 done
-echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop swap=off dumps=off forward=off"
+echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop swap=off dumps=off forward=off $hd"

@@ -155,6 +155,19 @@ class TreeCheckTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    # REQ: HW-8, ONB-2
+    def test_disk_assembly_and_automount_tools_are_refused(self):
+        # HOST-1a part 2 (hostdisk H11): an LVM activation, an array's resync, a bcache registration or
+        # a ZFS import writes the disk, and zpool's import scan ignores udev; nothing automounts.
+        self.assertEqual(check.assembly_violations(self.root), [])
+        for rel in ("usr/sbin/lvm", "usr/sbin/mdadm", "usr/sbin/make-bcache", "usr/sbin/zpool", "usr/sbin/multipathd",
+                    "usr/libexec/udisks2/udisksd", "usr/sbin/automount", "usr/lib/udev/bcache-register"):
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, "", 0o755)
+                self.assertIn(rel + ": ", " | ".join(check.violations(self.root)))
+                f.unlink()
+        self.assertEqual(check.assembly_violations(self.root), [])
+
     # REQ: DEV-2, CH-9
     def test_distro_network_files_are_refused(self):
         # #1478: nothing may turn on forwarding (agentos_inbound's forward drop, #2824, is the other layer). Debian's
@@ -1010,6 +1023,7 @@ class HealthTest(unittest.TestCase):
         self.findmnt("/dev/mapper/usr", "ro,relatime")
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "drive-id", "exit 0")
+        stub(self.lib, "agentos-hostdisk", '[ "$*" = health ] && echo hostdisk=ok')
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
         stub(self.lib, "gvisor-bin/gvisor_sentry", "exit 0")
         self.nft("drop")
@@ -1053,6 +1067,23 @@ class HealthTest(unittest.TestCase):
         self.assertIn("inbound=drop", r.stdout)
         self.assertIn("swap=off dumps=off", r.stdout)
         self.assertIn("forward=off", r.stdout)
+
+    # REQ: HW-8
+    def test_the_drive_must_be_found_among_the_disks(self):
+        # HOST-1a part 2 (hostdisk H11): the health item is HostDisks().Health. With no drive the
+        # host-disk rules leave the disk under the root "unknown", so the boot is never blessed.
+        self.assertIn("hostdisk=ok", self.run_health().stdout)
+        for body in ("echo hostdisk=drive-mismatch; exit 1", "echo hostdisk=root-disk-unknown; exit 1",
+                     "echo hostdisk=ok; exit 1", "echo hostdisk=bad; exit 0", "exit 0"):
+            with self.subTest(helper=body):
+                stub(self.lib, "agentos-hostdisk", body)
+                r = self.run_health()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos-health: FAIL the AgentOS drive is not found among the disks", r.stdout)
+        (self.lib / "agentos-hostdisk").unlink()
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("(no answer)", r.stdout)
 
     def test_kernel_without_forced_forwarding_passes(self):
         # Kernels before 6.17 have no force_forwarding switch; its absence is not a failure.
@@ -1520,6 +1551,33 @@ class DriveIdTest(unittest.TestCase):
         r = self.run_id("check")
         self.assertEqual(r.returncode, 1)
         self.assertIn("agentos-drive-id: FAIL 2 partitions", r.stdout)
+
+    # REQ: HW-8
+    def test_a_hidden_host_disk_still_counts(self):
+        # HOST-1a part 2: the 59 host-disk rule keeps blkid off a host disk, so udev (and lsblk) has no
+        # PARTUUID for its partitions; drive-id reads that disk's table itself, read-only, and a
+        # second AgentOS drive attached as a host disk still fails the check.
+        self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006", "vdb1 vdb ", "vdb6 vdb "))
+        stub(self.bin, "sfdisk", 'echo "$*" >>"%s"; [ "$*" = "-d /dev/vdb" ] || exit 1; cat <<E\n'
+             'label: gpt\n/dev/vdb1 : start=2048, size=1024, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=%s\n'
+             '/dev/vdb6 : start=4096, size=1024, type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, uuid=BBBBBBBB-0000-4000-8000-000000000006\nE'
+             % (self.log, ESP_GUID.upper()))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("agentos-drive-id: FAIL 2 partitions", r.stdout)
+        self.assertEqual(self.sfdisk_calls(), ["-d /dev/vdb"])
+        # A host disk that is not a copy passes; one whose table cannot be read adds nothing.
+        stub(self.bin, "sfdisk", 'echo "$*" >>"%s"; echo "/dev/vdb1 : start=2048, size=1024, uuid=1234ABCD-0000-4000-8000-000000000001"'
+             % self.log)
+        self.assertEqual(self.run_id("check").returncode, 0)
+        stub(self.bin, "sfdisk", "exit 1")
+        self.assertEqual(self.run_id("check").returncode, 0)
+        # A dm device (its PKNAME a partition) is never read as a disk.
+        self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006"))
+        self.log.unlink()
+        stub(self.bin, "sfdisk", 'echo "$*" >>"%s"' % self.log)
+        self.assertEqual(self.run_id("check").returncode, 0)
+        self.assertEqual(self.sfdisk_calls(), [])
 
     def test_check_fails_when_root_is_on_another_disk(self):
         self.root_on("/dev/vdb6")
@@ -6119,6 +6177,153 @@ class CodexPinTest(unittest.TestCase):
         lines = (IMG / "build.sh").read_text().splitlines()
         build = lines.index('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"')
         self.assertEqual(lines[build + 1], 'sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"')
+
+
+HOSTDISK_RULES = ("59-agentos-host-disks.rules", "64-agentos-host-disks-assembly.rules",
+                  "72-agentos-host-disks-late.rules")
+# Every agentOS service the image ships, its user and its device policy (HOST-1a part 2, hostdisk
+# H11, Security ruling (c) on #172): a host disk's node is root:root 0600, and root can still open
+# it, so every unit that runs as root sets PrivateDevices=yes or DevicePolicy=closed, with
+# DeviceAllow= only where it needs a device. agentosd.service is the old core's broker, frozen while
+# the kernel replaces it (D-139); its hardening is IMG-4 (#917).
+UNIT_DEVICES = {
+    "agentos-ap-exempt@.service": ("root", "closed"),
+    "agentos-boot-report.service": ("root", "closed; block-* r"),
+    "agentos-drill-report.service": ("root", "closed"),
+    "agentos-drive-id.service": ("root", "closed; block-* rw"),
+    "agentos-egress-setup.service": ("root", "private"),
+    "agentos-egress.service": ("agentos-egress", "closed; /dev/tpmrm0 rw"),
+    "agentos-fallback.service": ("root", "closed"),
+    "agentos-health.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
+    "agentos-inbound.service": ("root", "closed"),
+    "agentos-keeper-enroll.service": ("root", "closed; /dev/tpmrm0 rw"),
+    "agentos-keeper-kernel.service": ("root", "closed; /dev/tpmrm0 rw"),
+    "agentos-modem-env.service": ("root", "private"),
+    "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
+    "agentosd.service": ("root", "none"),
+    "agentos-ap.service": ("root", "closed; /dev/rfkill rw"),
+    "agentos-localui-claim.service": ("root", "closed"),
+    "agentos-localui.service": ("agentos-localui", "private"),
+    "agentos-modem.service": ("agentos-modem", "closed; char-ttyUSB rw, char-alsa rw"),
+    "agentos-netjoin.service": ("agentos-netjoin", "private"),
+}
+DEVICE_POLICY_EXEMPT = {"agentosd.service": "IMG-4 (#917)"}
+
+
+def device_policy(unit):
+    """UNIT's (user, policy): "private", "closed" or "strict" with its DeviceAllow= list, or "none"."""
+    s = settings(unit)
+    user = (s.get("User") or ["root"])[-1]
+    if (s.get("PrivateDevices") or [""])[-1].lower() in check.TRUE_WORDS:
+        return user, "private"
+    policy = (s.get("DevicePolicy") or ["none"])[-1]
+    allows = ", ".join(s.get("DeviceAllow", []))
+    return user, policy + ("; " + allows if allows else "")
+
+
+class HostDiskImageTest(unittest.TestCase):
+    """HOST-1a part 2 (hostdisk H11, H12): the image installs the host-disk rules and helper, every
+    root unit has a device policy, nothing assembles or automounts a disk, the boot health check
+    finds the drive, and CI boots with a second internal disk and a USB disk beside the drive."""
+
+    def shipped_units(self):
+        build = (IMG / "build.sh").read_text()
+        units = {f.name: f for f in UNITS.glob("agentos*.service")}
+        for src, dst in re.findall(r'install -D -m 0644 "\$REPO/(broker/cmd/[^"]+\.service)" "\$STAGE/usr/lib/systemd/system/([^"]+)"', build):
+            units[dst] = ROOT / src
+        return units
+
+    # REQ: HW-8, ONB-2
+    def test_every_units_device_policy_is_listed(self):
+        units = self.shipped_units()
+        self.assertEqual({n: device_policy(f) for n, f in units.items()}, UNIT_DEVICES)
+        for name, (user, policy) in UNIT_DEVICES.items():
+            with self.subTest(unit=name):
+                if user == "root" and name not in DEVICE_POLICY_EXEMPT:
+                    self.assertRegex(policy, r"^(private|closed|strict)\b")
+        # A drop-in for every agentOS unit sets no device key that would widen one.
+        for d in UNITS.glob("agentos*.service.d"):
+            for f in d.glob("*.conf"):
+                self.assertFalse({"DevicePolicy", "DeviceAllow", "PrivateDevices"} & set(settings(f)), f)
+
+    # REQ: HW-8, ONB-2
+    def test_build_installs_the_rules_and_helper(self):
+        build = (IMG / "build.sh").read_text()
+        loop = re.search(r"for cmd in ([^;]+); do", build, re.S).group(1).split()
+        self.assertIn("agentos-hostdisk", loop)
+        m = re.search(r'for r in ([^;]+); do\n\tinstall -D -m 0644 "\$REPO/broker/hostdisk/udev/\$r\.rules" '
+                      r'"\$STAGE/usr/lib/udev/rules\.d/\$r\.rules"\ndone\n', build)
+        self.assertEqual(tuple(r + ".rules" for r in m.group(1).split()), HOSTDISK_RULES)
+        allowed = check.exec_allowed()
+        for name in HOSTDISK_RULES:
+            with self.subTest(rule=name):
+                data = (ROOT / "broker/hostdisk/udev" / name).read_bytes()
+                self.assertIn(("usr/lib/udev/rules.d/" + name, "sha256:" + hashlib.sha256(data).hexdigest()), allowed)
+        # The 59 file runs the helper where build.sh puts it, and the initrd carries neither.
+        self.assertIn("/usr/lib/agentos/agentos-hostdisk classify", (ROOT / "broker/hostdisk/udev" / HOSTDISK_RULES[0]).read_text())
+        self.assertEqual([p for p in (MK / "initrd").rglob("*") if "hostdisk" in p.name or "host-disks" in p.name], [])
+
+    # REQ: HW-8, ONB-2
+    def test_no_assembly_or_automount_rule_or_package_ships(self):
+        rules = [rel for rel, _ in check.exec_allowed() if "/udev/rules.d/" in rel]
+        self.assertTrue(rules)
+        self.assertEqual([r for r in rules if check.ASSEMBLY_RULES.search(r.rsplit("/", 1)[1])], [])
+        packages = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
+        for p in ("lvm2", "mdadm", "bcache-tools", "zfsutils-linux", "multipath-tools", "udisks2", "autofs", "dmraid"):
+            self.assertNotIn(p, packages)
+        # The initrd drops the lvm2 mkosi-initrd adds, and its tree check refuses the rest.
+        self.assertIn("lvm2", ini(MK / "initrd/mkosi.conf")["Content"]["RemovePackages"].split())
+        initrd = load("initrd_finalize_hostdisk", MK / "initrd/mkosi.finalize")
+        self.assertEqual(initrd.ASSEMBLY_TOOLS, check.ASSEMBLY_TOOLS)
+        self.assertEqual(initrd.ASSEMBLY_RULES.pattern, check.ASSEMBLY_RULES.pattern)
+
+    # REQ: HW-8, ONB-2
+    def test_initrd_check_refuses_assembly_tools(self):
+        initrd = load("initrd_finalize_hostdisk", MK / "initrd/mkosi.finalize")
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            write(root, "usr/lib/udev/rules.d/10-mkosi-initrd-md.rules")
+            write(root, "usr/lib/udev/rules.d/55-dm.rules")
+            write(root, "usr/sbin/veritysetup", "", 0o755)
+            self.assertEqual(initrd.assembly_tools(root), [])
+            write(root, "usr/sbin/lvm", "", 0o755)
+            write(root, "usr/lib/udev/rules.d/69-lvm.rules")
+            write(root, "usr/lib/udev/rules.d/64-md-raid-assembly.rules")
+            self.assertEqual(initrd.assembly_tools(root), ["usr/sbin/lvm", "usr/lib/udev/rules.d/64-md-raid-assembly.rules",
+                                                           "usr/lib/udev/rules.d/69-lvm.rules"])
+            env = dict(os.environ, BUILDROOT=d, SOURCE_DATE_EPOCH="86400")
+            r = subprocess.run([str(MK / "initrd/mkosi.finalize")], env=env, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("usr/sbin/lvm", r.stderr)
+
+    # REQ: HW-8, ONB-2
+    def test_fstab_and_gpt_auto_stay_on_the_drive(self):
+        # fstab mounts only API file systems; gpt-auto finds root by the loader's partition (no
+        # root=) and makes no swap unit; no unit mounts a block device by name.
+        for line in (MK / "mkosi.extra/etc/fstab").read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                src, _, fstype = line.split()[:3]
+                self.assertIn(fstype, ("devtmpfs", "tmpfs"), line)
+                self.assertFalse(src.startswith(("/dev/", "UUID=", "LABEL=", "PARTUUID=", "PARTLABEL=")), line)
+        cmdline = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()
+        self.assertFalse([w for w in cmdline if w.startswith(("root=", "systemd.gpt_auto", "rd.systemd.gpt_auto"))])
+        self.assertIn("systemd.swap=0", cmdline)
+        for f in list(UNITS.glob("*.mount")) + list(UNITS.glob("*.swap")) + list(UNITS.glob("*.automount")):
+            self.fail("%s: the image mounts nothing by unit" % f.name)
+
+    # REQ: HW-8, ONB-2
+    def test_ci_boots_with_an_internal_and_a_usb_host_disk(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn("-device usb-storage,bus=xhci.0,drive=usb,removable=on", s)
+        self.assertIn('boot "$W/console.log" "$D" "$H"', s)
+        self.assertIn('[ "$(sha256sum <"$U")" = "$usb_before" ]', s)
+        for want in ("agentos-hostdisk: drive is the root disk", "agentos-hostdisk: host disks usb virtio",
+                     "agentos-hostdisk: every host node hidden", "agentos-hostdisk: no label or link names a host disk",
+                     "agentos-hostdisk: passthrough nodes root-only", "agentos-hostdisk: done"):
+            self.assertIn('"%s"' % want, s)
+        self.assertIn('hasnt "$W/console.log" "agentos-hostdisk: FAIL"', s)
+        self.assertIn("hostdisk=ok", s)
+        self.assertIn("agentos-hostdisk-check.service", re.search(r"CHECKS_WANTED=.*", s).group(0))
 
 
 if __name__ == "__main__":

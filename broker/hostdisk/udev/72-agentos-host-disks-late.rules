@@ -2,13 +2,15 @@
 # Runs after 70-uaccess, which adds the uaccess tag to optical drives, and
 # before 73-seat-late, which would grant the seat user an ACL for it. Only
 # the drive keeps it; an unknown device loses it too.
-# The SCSI generic (sg) and NVMe generic (ng) character nodes reach the same
-# disks with commands that write (SG_IO, NVMe passthrough); the box needs
-# none of them, so every one is root:root 0600, the drive's included.
+# The SCSI generic (sg), block SCSI generic (bsg), NVMe generic (ng) and
+# NVMe controller (nvme0) character nodes reach the same disks with
+# commands that write (SG_IO, NVMe admin and I/O passthrough); the box
+# needs none of them, so every one is root:root 0600, the drive's included
+# (Security, optional, on #172).
 
 ACTION=="remove", GOTO="agentos_late_end"
 
 SUBSYSTEM=="block", ENV{AGENTOS_DISK}!="drive", TAG-="uaccess"
-SUBSYSTEM=="scsi_generic|nvme-generic", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
+SUBSYSTEM=="scsi_generic|bsg|nvme-generic|nvme", OWNER:="root", GROUP:="root", MODE:="0600", TAG-="uaccess"
 
 LABEL="agentos_late_end"
