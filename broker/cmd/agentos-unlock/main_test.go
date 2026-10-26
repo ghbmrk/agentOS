@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/go-tpm/tpm2/transport"
 
+	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
@@ -640,6 +641,77 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 		r.reboot()
 		if _, err := unlock(c, r.role(&r.policy.PublicKey, r.anchor).pins); err == nil || !strings.Contains(err.Error(), "counter") {
 			t.Errorf("%s counter: got %v", name, err)
+		}
+	}
+}
+
+// REQ: BAK-1
+// MIG-4-recovery-e1: the unlock step hands the kernel the store's backup
+// recipient, and the kernel it becomes holds it. A store enrolled before
+// e1 has none: it hands none and its kernel still starts, saying no backup
+// can be taken. An entry that does not read hands nothing.
+func TestUnlockHandsTheRecipient(t *testing.T) {
+	r := newRig(t, true)
+	rcp, err := backup.RecipientFor(r.recovery)
+	must(t, err)
+	v, err := handoff.EncodeRecipient(rcp.X, rcp.EK)
+	must(t, err)
+	want, err := handoff.ParseRecipient(v)
+	must(t, err)
+	put := func(v []byte) {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		if v == nil {
+			must(t, st.Delete(handoff.RecipientEntry))
+		} else {
+			must(t, st.Put(handoff.RecipientEntry, v))
+		}
+		st.Close()
+	}
+	handed := func() handoff.KernelKeys {
+		t.Helper()
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		b, err := unlock(role.Config(), role.pins)
+		must(t, err)
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		clear(b)
+		k, err := handoff.ReadKeys(pr)
+		must(t, err)
+		return k
+	}
+	put(v)
+	if k := handed(); !bytes.Equal(k.Recipient, want) || len(k.Anchors) != 2 {
+		t.Fatalf("the hand-off's recipient is not the store's: %x", k.Recipient)
+	}
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if strings.Contains(out.String(), proc.ErrNoRecipient.Error()) {
+		t.Fatalf("the kernel said it has no recipient:\n%s", out)
+	}
+
+	put(nil)
+	if k := handed(); k.Recipient != nil || len(k.Anchors) != 2 {
+		t.Fatalf("no entry: handed %x", k.Recipient)
+	}
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if !strings.Contains(out.String(), proc.ErrNoRecipient.Error()) {
+		t.Fatalf("a kernel without a recipient did not say so:\n%s", out)
+	}
+
+	for name, bad := range map[string][]byte{"untagged": want, "short": v[:len(v)-1]} {
+		put(bad)
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		if _, err := unlock(role.Config(), role.pins); err == nil || !strings.Contains(err.Error(), "backup recipient") {
+			t.Errorf("%s entry: got %v", name, err)
 		}
 	}
 }

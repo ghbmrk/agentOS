@@ -2,9 +2,11 @@ package handoff
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -107,7 +109,9 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	retag := bytes.Clone(good)
 	retag[len(handoffTag)-2] = '1' // a v1 hand-off, which carried no counter
 	v2 := bytes.Clone(good)
-	v2[len(handoffTag)-2] = '2'                          // a v2 hand-off, whose anchors were bare Ed25519 keys
+	v2[len(handoffTag)-2] = '2' // a v2 hand-off, whose anchors were bare Ed25519 keys
+	v3 := bytes.Clone(good)
+	v3[len(handoffTag)-2] = '3'                          // a v3 hand-off, which carried no recipient
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -137,7 +141,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -170,6 +174,7 @@ func TestAnchorsAreBounded(t *testing.T) {
 	}
 	k := testKeys()
 	k.Anchors = hw[:MaxAnchors]
+	k.Recipient = testRecipient(t)
 	b, err := k.Marshal()
 	if err != nil || len(b) > maxHandoff {
 		t.Fatalf("%d ES256 keys: %d bytes of %d, %v", MaxAnchors, len(b), maxHandoff, err)
@@ -290,6 +295,106 @@ func TestTheCounterIsWhole(t *testing.T) {
 		mut(&k.Counter)
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("%s: got %v, want ErrHandoff", name, err)
+		}
+	}
+}
+
+// testRecipient is a recipient in its wire form: an X25519 public key and an
+// ML-KEM-768 encapsulation key.
+func testRecipient(t *testing.T) []byte {
+	t.Helper()
+	x, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dk, err := mlkem.GenerateKey768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(x.PublicKey().Bytes(), dk.EncapsulationKey().Bytes()...)
+}
+
+// REQ: BAK-1
+// MIG-4-recovery-e1: the backup recipient crosses whole, and none crosses
+// as none. A recipient of the wrong size, or whose ML-KEM key does not
+// parse, is refused at both ends, so no read is sized by the wire.
+func TestKernelKeysCarryTheRecipient(t *testing.T) {
+	rcp := testRecipient(t)
+	keys := testKeys()
+	keys.Recipient = rcp
+	b, err := keys.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ReadKeys(pipeWith(t, b))
+	if err != nil || !bytes.Equal(k.Recipient, rcp) || len(k.Anchors) != len(anchors) || k.Counter.Handle != testCounter().Handle {
+		t.Fatalf("recipient did not survive the hand-off: %x %v", k.Recipient, err)
+	}
+	none, err := testKeys().Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, err := ReadKeys(pipeWith(t, none)); err != nil || k.Recipient != nil {
+		t.Fatalf("no recipient: %x %v", k.Recipient, err)
+	}
+
+	// The recipient's length sits after the counter's auth value.
+	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32
+	if binary.BigEndian.Uint16(b[o:]) != RecipientLen {
+		t.Fatalf("recipient length not at %d", o)
+	}
+	badEK := bytes.Clone(rcp)
+	for i := recipientXLen; i < recipientXLen+384; i++ {
+		badEK[i] = 0xff // coefficients past the ML-KEM modulus
+	}
+	wire := func(n int, r []byte) []byte {
+		w := bytes.Clone(b[:o])
+		w = binary.BigEndian.AppendUint16(w, uint16(n))
+		w = append(w, r...)
+		return append(w, b[o+2+RecipientLen:]...)
+	}
+	for name, w := range map[string][]byte{
+		"long":       wire(RecipientLen+1, append(bytes.Clone(rcp), 0)),
+		"short":      wire(RecipientLen-1, rcp[:RecipientLen-1]),
+		"huge":       wire(0xffff, rcp),
+		"bad ek":     wire(RecipientLen, badEK),
+		"truncated":  b[:o+2+100],
+		"no length":  b[:o+1],
+		"no anchors": b[:o+2+RecipientLen],
+	} {
+		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
+			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for name, r := range map[string][]byte{"long": append(bytes.Clone(rcp), 0), "short": rcp[:RecipientLen-1], "bad ek": badEK} {
+		k := testKeys()
+		k.Recipient = r
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+
+	// The store entry: tagged, and only a whole recipient reads.
+	x, ek, err := SplitRecipient(rcp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := EncodeRecipient(x, ek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ParseRecipient(v); err != nil || !bytes.Equal(got, rcp) {
+		t.Fatalf("entry round trip: %x %v", got, err)
+	}
+	if _, err := EncodeRecipient(x, badEK[recipientXLen:]); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("encode bad ek: got %v", err)
+	}
+	for name, e := range map[string][]byte{
+		"untagged": rcp, "short": v[:len(v)-1], "long": append(bytes.Clone(v), 0),
+		"v2": append([]byte("agentos-backup-recipient/v2\n"), rcp...),
+	} {
+		if _, err := ParseRecipient(e); !errors.Is(err, ErrHandoff) {
+			t.Errorf("entry %s: got %v, want ErrHandoff", name, err)
 		}
 	}
 }

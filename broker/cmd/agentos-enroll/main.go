@@ -55,6 +55,8 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 	"golang.org/x/sys/unix"
 
+	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -315,6 +317,9 @@ func enroll(c config, t transport.TPM) error {
 	if err := st.Put(policyKeyEntry, der); err != nil {
 		return err
 	}
+	if err := putRecipient(st, rec); err != nil {
+		return err
+	}
 	if err := c.step("slots"); err != nil {
 		return err
 	}
@@ -353,6 +358,21 @@ func enroll(c config, t transport.TPM) error {
 	}
 	st.Close()
 	return commit(c)
+}
+
+// putRecipient keeps the backup recipient the recovery key derives in the
+// store, for the unlock step to hand the kernel (BAK-1). Only its public
+// half: the recovery key itself stays in the recovery slot's wrap.
+func putRecipient(st *seal.Store, rk []byte) error {
+	r, err := backup.RecipientFor(rk)
+	if err != nil {
+		return err
+	}
+	v, err := handoff.EncodeRecipient(r.X, r.EK)
+	if err != nil {
+		return err
+	}
+	return st.Put(handoff.RecipientEntry, v)
 }
 
 // commit renames the staged store into place: from here the unlock step
