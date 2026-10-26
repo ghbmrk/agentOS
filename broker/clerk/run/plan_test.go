@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/model"
@@ -293,13 +294,74 @@ func TestPlanGuestOwnCountSettlesWithinItsAdmission(t *testing.T) {
 	}
 }
 
-// A guest endpoint with no declared context window admits nothing.
+// A model endpoint declared with no context window, output limit, clerk or
+// clock is refused at start and serves nothing, so a host's misconfiguration
+// is not read as unrecorded spend (MIG-4-plan-bound-b, #3148).
+func TestServePlanRefusesAnUnboundGuestAtStart(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planProvider(t, &calls)
+	whole := PlanGuest{Login: login, Clerk: &model.Clerk{}, Guest: "g", Plan: "t", Route: "codex",
+		Context: 100, MaxOut: 50, Clock: func() int64 { return 0 }}
+	for name, unbound := range map[string]func(*PlanGuest){
+		"no window":       func(g *PlanGuest) { g.Context = 0 },
+		"negative window": func(g *PlanGuest) { g.Context = -1 },
+		"no output limit": func(g *PlanGuest) { g.MaxOut = 0 },
+		"no clerk":        func(g *PlanGuest) { g.Clerk = nil },
+		"no clock":        func(g *PlanGuest) { g.Clock = nil },
+	} {
+		g := whole
+		unbound(&g)
+		sock := filepath.Join(shortDir(t), "plan.sock")
+		ln, err := ListenPlan(sock, os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- ServePlan(ln, g) }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("%s: ServePlan returned no error", name)
+			}
+		case <-time.After(5 * time.Second):
+			ln.Close()
+			t.Fatalf("%s: ServePlan served", name)
+		}
+		if c, err := net.Dial("unix", sock); err == nil {
+			c.Close()
+			t.Fatalf("%s: the refused endpoint still accepts", name)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("provider calls %d", calls.Load())
+	}
+}
+
+// A guest with no declared context window admits nothing, served by any
+// route that skips ServePlan's start check (a sign-in endpoint's model call).
 func TestPlanGuestNeedsAContextWindow(t *testing.T) {
 	var calls atomic.Int32
 	login, _ := planProvider(t, &calls)
-	_, call := planGuest(t, login, 1<<30, 0)
-	if st, body := call(`{"model":"m","stream":true}`); st != http.StatusServiceUnavailable || !strings.Contains(body, DPlanMeter) || calls.Load() != 0 {
-		t.Fatalf("no window: %d %q, provider calls %d", st, body, calls.Load())
+	g, err := login.Guest("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/backend-api/codex/responses", strings.NewReader(`{"model":"m","stream":true}`))
+	r.Header.Set("Authorization", "Bearer "+g.Tokens["access_token"])
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	PlanGuest{Login: login, Guest: "g", MaxOut: 50}.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), DPlanMeter) || calls.Load() != 0 {
+		t.Fatalf("no window: %d %q, provider calls %d", w.Code, w.Body.String(), calls.Load())
+	}
+}
+
+// A body that is not JSON cannot be searched for an image, so it is
+// admitted at the whole window. meter gets the clerk's own re-encoding, so
+// no call reaches this today; it is the safe default (#3148 item 3).
+func TestPlanInBoundOfAnUnreadableBodyIsTheWindow(t *testing.T) {
+	if got := (PlanGuest{Context: 100}).inBound([]byte("{")); got != 100 {
+		t.Fatalf("unreadable body admitted at %d input tokens, want the window 100", got)
 	}
 }
 
