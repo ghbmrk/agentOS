@@ -261,3 +261,72 @@ func TestCutOffAPhoneAsksForAHardwareKeyTap(t *testing.T) {
 		t.Fatal("a malformed tap reached agentosd")
 	}
 }
+
+// Picking the wrong passkey at the tap step keeps the owner there, with
+// the begun challenge, to tap again: the phone's own new passkey or another
+// phone's (#3175 item 2). Any other refusal goes back to the list.
+func TestAWrongTapStaysOnTheTapStep(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	ch := enc([]byte("0123456789abcdef0123456789abcdef"))
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"begin"}, "point": {enc(append([]byte{4}, make([]byte, 64)...))}}).Body.String())
+	if !strings.Contains(p, `name="ch" value="`+ch+`"`) {
+		t.Fatalf("the finish form lacks the challenge:\n%s", p)
+	}
+	tap := url.Values{"step": {"finish"}, "ch": {ch}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
+	for _, c := range []string{localapi.ErrPasskeyBadAssertion, localapi.ErrPasskeyNotAnchor} {
+		fp.err = Refused(c)
+		p = html.UnescapeString(r.post("/passkeys/", tap).Body.String())
+		if !strings.Contains(p, TapAgainText) || !strings.Contains(p, `id="pk-tap"`) || !strings.Contains(p, `data-challenge="`+ch+`"`) ||
+			!strings.Contains(p, `name="step" value="finish"`) {
+			t.Fatalf("%s: not back on the tap step:\n%s", c, p)
+		}
+	}
+	if !strings.Contains(TapAgainText, "choose your hardware key, not this phone's passkey") {
+		t.Fatal("the tap-again words changed")
+	}
+	// Another refusal, or a challenge that isn't one, goes back to the list.
+	fp.err = Refused(localapi.ErrPasskeyStale)
+	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
+		t.Fatal("a stale finish stayed on the tap step")
+	}
+	fp.err = Refused(localapi.ErrPasskeyBadAssertion)
+	tap.Set("ch", enc([]byte("short")))
+	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
+		t.Fatal("a bad challenge was shown back")
+	}
+	// The script asks the browser for a security key at the tap.
+	if !strings.Contains(passkeyJS, `hints: ["security-key"]`) || strings.Count(passkeyJS, "navigator.credentials.get(") != 1 {
+		t.Fatal("get() does not hint a security key")
+	}
+}
+
+// A phone passkey's cut-off tap that picks the wrong passkey stays on its
+// confirm step to tap again (#3175 item 2).
+func TestAWrongCutOffTapStaysOnTheConfirmStep(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	fp.err = Refused(localapi.ErrPasskeyNotAnchor)
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {phoneKey.ID},
+		"ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}).Body.String())
+	if !strings.Contains(p, TapAgainText) || !strings.Contains(p, `data-challenge="`+enc(phoneKey.CutChallenge)+`"`) ||
+		!strings.Contains(p, `name="step" value="cutoff"`) {
+		t.Fatalf("not back on the confirm step:\n%s", p)
+	}
+}
+
+// A hardware key's confirm step gives the recovery reply and offers no
+// cut-off: it never says "for good", which is untrue for one (#3175 item 3).
+func TestAHardwareKeysConfirmGivesTheRecoveryReply(t *testing.T) {
+	r, fp := passkeyRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {anchorKey.ID}}).Body.String())
+	if !strings.Contains(p, AnchorReply) || strings.Contains(p, "for good") || strings.Contains(p, `value="cutoff"`) {
+		t.Fatalf("a hardware key's confirm:\n%s", p)
+	}
+	if len(fp.cut) != 0 {
+		t.Fatal("the confirm cut something off")
+	}
+}
