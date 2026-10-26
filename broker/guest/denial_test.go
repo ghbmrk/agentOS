@@ -82,14 +82,15 @@ func TestOP2APlanUnderStopRunsNothing(t *testing.T) {
 
 // A rejection's sentence follows its code: a STOP says wait for the owner, a
 // check that lifts with time or the owner says send it again later under a
-// new request_id, and only what the key does not allow says waiting will not
-// help, so a planner reading the sentence alone neither gives up on a rate
-// cap nor waits on a verb its key lacks (PLN-4, #3261).
+// new request_id, a repeated irreversible effect says never send it again
+// (KRN-8), and only what the key does not allow says waiting will not help,
+// so a planner reading the sentence alone neither gives up on a rate cap,
+// waits on a verb its key lacks, nor repeats a payment (PLN-4, #3261).
 func TestPLN4RejectionSentenceTellsWaitFromKey(t *testing.T) {
 	for c, want := range map[string]string{
 		key.RStopped: reasonStopped,
 		key.RPaused:  reasonWait, kernel.CGrantHeld: reasonWait, key.RRate: reasonWait,
-		key.RSpendDay: reasonWait, kernel.CDuplicate: reasonWait, kernel.CPool: reasonWait,
+		key.RSpendDay: reasonWait, kernel.CPool: reasonWait, kernel.CDuplicate: reasonRepeat24,
 		key.RVerb: reasonRejected, key.RExpired: reasonRejected, key.RUses: reasonRejected,
 		key.RSpendTask: reasonRejected, kernel.CTask: reasonRejected, kernel.CUngranted: reasonRejected,
 	} {
@@ -101,7 +102,8 @@ func TestPLN4RejectionSentenceTellsWaitFromKey(t *testing.T) {
 			t.Errorf("%s: %+v %q", c, st, e)
 		}
 	}
-	if reasonWait == reasonRejected || reasonStopped == reasonWait || strings.Contains(reasonRejected, "later") {
+	if reasonWait == reasonRejected || reasonStopped == reasonWait || strings.Contains(reasonRejected, "later") ||
+		strings.Contains(reasonRepeat24, "later") || strings.Contains(reasonRepeat24, "new request_id") {
 		t.Fatal("the three sentences must read apart")
 	}
 }

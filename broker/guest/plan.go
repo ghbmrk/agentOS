@@ -75,7 +75,8 @@ const (
 	reasonNoKernel = "the kernel is not reached yet; nothing was submitted. Repeat plan with the same request_id later"
 	reasonNoKey    = "no key is granted to this machine yet, so no plan can run and nothing was submitted; repeating will not help until the owner grants one"
 	reasonStopped  = "the kernel rejected this plan because a STOP is in force, and no step ran; wait for the owner to lift it, then send the same plan under a new request_id, since this one stays rejected (PLN-4)"
-	reasonWait     = "the kernel rejected this plan for now, and no step ran; code names the check that failed (paused, grant-held, rate, spend-day, duplicate or pool), which lifts with time or the owner, so send the same plan later under a new request_id, since this one stays rejected and a reworded plan is not tried again (PLN-4)"
+	reasonWait     = "the kernel rejected this plan for now, and no step ran; code names the check that failed (paused, grant-held, rate, spend-day or pool), which lifts with time or the owner, so send the same plan later under a new request_id, since this one stays rejected and a reworded plan is not tried again (PLN-4)"
+	reasonRepeat24 = "the kernel rejected this plan because the same irreversible effect already ran, or is still unresolved, within a day, or appears twice in it, and no step ran; do not send it again: a repeat needs the owner's confirmation (KRN-8), and a reworded plan is not tried again (PLN-4)"
 	reasonRejected = "the kernel rejected this plan, and no step ran; code names the check that failed: this machine's key does not allow it, so waiting will not help and a reworded plan is not tried again (PLN-4)"
 	reasonRepeat   = "this request_id was used before; nothing new was submitted, and this is that plan's state"
 	reasonLost     = "the kernel did not answer; repeat plan with the same request_id to learn whether it was taken"
@@ -235,15 +236,17 @@ func (p *Plane) read(ctx context.Context, id string) (planState, bool, error) {
 
 // rejectReason is the fixed sentence for a rejection's code: a STOP, a check
 // that lifts with time or the owner (a paused key, a grant in its hold, a
-// rolling day's rate or spend cap, an effect repeated within a day or still
-// unreconciled, the pool at its reserve), or what the key itself does not
-// allow (PLN-4).
+// rolling day's rate or spend cap, the pool at its reserve), a repeated
+// irreversible effect, which only the owner can confirm and never a wait
+// (KRN-8), or what the key itself does not allow (PLN-4).
 func rejectReason(c string) string {
 	switch c {
 	case key.RStopped:
 		return reasonStopped
-	case key.RPaused, kernel.CGrantHeld, key.RRate, key.RSpendDay, kernel.CDuplicate, kernel.CPool:
+	case key.RPaused, kernel.CGrantHeld, key.RRate, key.RSpendDay, kernel.CPool:
 		return reasonWait
+	case kernel.CDuplicate:
+		return reasonRepeat24
 	}
 	return reasonRejected
 }
