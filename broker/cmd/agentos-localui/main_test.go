@@ -854,3 +854,24 @@ func TestPasskeyRPIDMustBeThePageNameOverHTTPS(t *testing.T) {
 		t.Error("the RP ID is not held to -page-name")
 	}
 }
+
+// #2779a: -passkey-rp-id wires the passkey page through agentosd, and run
+// refuses to start it while the page serves plain HTTP only.
+func TestPasskeyRPIDRefusedOverPlainHTTP(t *testing.T) {
+	dir := shortDir(t)
+	sock := filepath.Join(dir, "a.sock")
+	listenSock(t, sock)
+	cfg := config(pageAP(), 80, sock, "", heldFile(t))
+	cfg.Hooks = localui.AgentosdSetup{Owner: localui.InProcess{}}
+	passkeys(&cfg, sock, localui.DefaultPageName)
+	if p, ok := cfg.Passkeys.(localui.AgentosdPasskeys); !ok || p.Owner != (localui.Socket{Path: sock}) || cfg.PasskeyRPID != localui.DefaultPageName {
+		t.Fatalf("passkeys %#v %q", cfg.Passkeys, cfg.PasskeyRPID)
+	}
+	if err := run(context.Background(), cfg, sock, boxFiles{}); !errors.Is(err, errPasskeyRPID) {
+		t.Fatalf("run over plain HTTP: %v", err)
+	}
+	cfg.HTTPS = true
+	if _, err := localui.New(cfg); err != nil || checkPasskeyRPID(cfg.PasskeyRPID, cfg) != nil {
+		t.Fatalf("over HTTPS: %v", err)
+	}
+}

@@ -1,0 +1,230 @@
+package localui
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"html"
+	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/modem"
+)
+
+// REQ: KEY-4, CH-3, CH-7, REC-3
+
+// fakePasskeys stands in for agentosd's passkey ops.
+type fakePasskeys struct {
+	list     localapi.PasskeyList
+	sessions []string
+	points   [][]byte
+	finished [][3][]byte
+	cut      []string
+	err      error // every op but List answers it
+}
+
+func (f *fakePasskeys) List(_ context.Context, session string) (localapi.PasskeyList, error) {
+	f.sessions = append(f.sessions, session)
+	return f.list, nil
+}
+
+func (f *fakePasskeys) Begin(_ context.Context, session string, point []byte) ([]byte, error) {
+	f.sessions = append(f.sessions, session)
+	f.points = append(f.points, point)
+	return []byte("0123456789abcdef0123456789abcdef"), f.err
+}
+
+func (f *fakePasskeys) Finish(_ context.Context, session string, ad, cd, sig []byte) error {
+	f.sessions = append(f.sessions, session)
+	f.finished = append(f.finished, [3][]byte{ad, cd, sig})
+	return f.err
+}
+
+func (f *fakePasskeys) CutOff(_ context.Context, session, id string) error {
+	f.sessions = append(f.sessions, session)
+	f.cut = append(f.cut, id)
+	return f.err
+}
+
+var (
+	anchorKey = localapi.Passkey{ID: strings.Repeat("a1", 32), Fingerprint: "a1a1 a1a1 a1a1", Alg: "es256"}
+	phoneKey  = localapi.Passkey{ID: strings.Repeat("b2", 32), Fingerprint: "b2b2 b2b2 b2b2", Alg: "es256", By: "a1a1 a1a1 a1a1"}
+)
+
+// passkeyRig is a set-up box whose local UI serves the passkey page.
+func passkeyRig(t *testing.T) (*rig, *fakePasskeys) {
+	t.Helper()
+	r := newRig(t)
+	fp := &fakePasskeys{list: localapi.PasskeyList{Anchors: []localapi.Passkey{anchorKey}, Enrolled: []localapi.Passkey{phoneKey}}}
+	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+		Defaults: "spend cap $20 a day; payments need approval.", Passkeys: fp, PasskeyRPID: DefaultPageName,
+		Now: r.clock, Rand: rand.New(rand.NewSource(9))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.srv = s
+	r.runSetup()
+	r.startChannel(modem.NewCarrier().Line(boxNum))
+	return r, fp
+}
+
+// Without an RP ID the page is not mounted, and the page and its ops go
+// together.
+func TestPasskeyPageOffWithoutRPID(t *testing.T) {
+	r := newRig(t)
+	r.runSetup()
+	r.startChannel(modem.NewCarrier().Line(boxNum))
+	r.signIn()
+	if w := r.do("GET", "/passkeys/", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("passkey page without an RP ID: %d", w.Code)
+	}
+	if strings.Contains(r.get("/home"), "/passkeys/") {
+		t.Fatal("home links the passkey page")
+	}
+	if _, err := New(Config{AP: testAP(), Passkeys: &fakePasskeys{}}); err == nil {
+		t.Fatal("passkeys without an RP ID")
+	}
+	if _, err := New(Config{AP: testAP(), PasskeyRPID: DefaultPageName}); err == nil {
+		t.Fatal("an RP ID without passkeys")
+	}
+}
+
+// The page runs exactly one script, the one its CSP's hash admits; the
+// script reaches nothing but its own page, and other pages admit none.
+func TestPasskeyScriptMatchesItsCSPHash(t *testing.T) {
+	r, _ := passkeyRig(t)
+	r.signIn()
+	for _, w := range []*httptest.ResponseRecorder{r.do("GET", "/passkeys/", nil), r.post("/passkeys/", url.Values{"step": {"begin"},
+		"point": {base64.StdEncoding.EncodeToString(append([]byte{4}, make([]byte, 64)...))}})} {
+		page := w.Body.String()
+		m := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
+		if len(m) != 1 || strings.Count(strings.ToLower(page), "<script") != 1 {
+			t.Fatalf("scripts: %d", len(m))
+		}
+		h := sha256.Sum256([]byte(m[0][1]))
+		if csp := w.Header().Get("Content-Security-Policy"); csp != cspWith(base64.StdEncoding.EncodeToString(h[:])) || csp != passkeyCSP {
+			t.Fatalf("CSP %q does not admit exactly the page's script", csp)
+		}
+		for _, bad := range []string{"fetch", "XMLHttpRequest", "http", "eval", "Function(", "innerHTML", "cookie", "localStorage", "src"} {
+			if strings.Contains(m[0][1], bad) {
+				t.Fatalf("passkey script uses %q", bad)
+			}
+		}
+	}
+	if csp := r.do("GET", "/home", nil).Header().Get("Content-Security-Policy"); csp != pageCSP {
+		t.Fatalf("home's CSP %q", csp)
+	}
+}
+
+// Enrolling: the page's create() point goes to agentosd under the phone's
+// session, the tap step carries the challenge and the RP ID, and the
+// hardware key's answer goes back as sent.
+func TestPasskeyPageRunsTheCeremony(t *testing.T) {
+	r, fp := passkeyRig(t)
+	if w := r.post("/passkeys/", url.Values{"step": {"begin"}}); w.Code != http.StatusSeeOther || len(fp.points) != 0 {
+		t.Fatalf("a post without sign-in: %d", w.Code)
+	}
+	r.signIn()
+	point := append([]byte{4}, make([]byte, 64)...)
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"begin"}, "point": {base64.StdEncoding.EncodeToString(point)}}).Body.String())
+	if len(fp.points) != 1 || string(fp.points[0]) != string(point) {
+		t.Fatalf("points %v", fp.points)
+	}
+	for _, want := range []string{`id="pk-finish"`, `data-rp="` + DefaultPageName + `"`,
+		`data-challenge="` + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")) + `"`, `id="pk-tap"`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("tap step lacks %q", want)
+		}
+	}
+	enc := base64.StdEncoding.EncodeToString
+	p = r.post("/passkeys/", url.Values{"step": {"finish"}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}).Body.String()
+	if len(fp.finished) != 1 || string(fp.finished[0][2]) != "sig" || !strings.Contains(p, "passkey is added") {
+		t.Fatalf("finish %v\n%s", fp.finished, p)
+	}
+	for _, s := range fp.sessions {
+		if s == "" || len(s) != 2*localapi.TokenBytes {
+			t.Fatalf("session %q", s)
+		}
+	}
+	// A point or assertion past its bound never reaches agentosd.
+	big := enc(make([]byte, localapi.MaxPasskeyAssertion+1))
+	r.post("/passkeys/", url.Values{"step": {"begin"}, "point": {enc(make([]byte, 64))}})
+	r.post("/passkeys/", url.Values{"step": {"finish"}, "ad": {big}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}})
+	r.post("/passkeys/", url.Values{"step": {"finish"}, "ad": {"not base64!"}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}})
+	if len(fp.points) != 1 || len(fp.finished) != 1 {
+		t.Fatal("an unbounded frame reached agentosd")
+	}
+	// A cross-origin post is refused before anything runs.
+	w := r.do("POST", "/passkeys/", url.Values{"step": {"cutoff"}, "id": {phoneKey.ID}}, func(q *http.Request) {
+		q.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		q.Header.Set("Origin", "http://evil.example")
+	})
+	if w.Code != http.StatusForbidden || len(fp.cut) != 0 {
+		t.Fatalf("a cross-origin cut off: %d %v", w.Code, fp.cut)
+	}
+}
+
+// Cutting off a hardware key shows the recovery reply in its fixed words;
+// a phone passkey is confirmed first, then cut off.
+func TestCutOffAnAnchorShowsTheRecoveryReply(t *testing.T) {
+	if AnchorReply != "That is one of your hardware keys. A hardware key is replaced only through recovery, with your Owner Card. To stop a lost phone, cut off the phone's passkey instead." {
+		t.Fatal("the anchor reply's words changed")
+	}
+	r, fp := passkeyRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {phoneKey.ID}}).Body.String())
+	if len(fp.cut) != 0 || !strings.Contains(p, "cut off for good") || !strings.Contains(p, `name="step" value="cutoff"`) {
+		t.Fatalf("confirm:\n%s", p)
+	}
+	p = html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {phoneKey.ID}}).Body.String())
+	if len(fp.cut) != 1 || fp.cut[0] != phoneKey.ID || !strings.Contains(p, "cut off for good") {
+		t.Fatalf("cut off %v", fp.cut)
+	}
+	fp.err = Refused(localapi.ErrPasskeyAnchor)
+	p = html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {anchorKey.ID}}).Body.String())
+	if !strings.Contains(p, AnchorReply) {
+		t.Fatalf("no recovery reply:\n%s", p)
+	}
+	// Every refusal shows fixed words, never agentosd's.
+	for _, c := range append(append([]string{}, localapi.PasskeyCodes...), "kernel: an anchor is cut off only by recovery") {
+		fp.err = Refused(c)
+		p = r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {phoneKey.ID}}).Body.String()
+		if strings.Contains(p, "kernel") || strings.Contains(p, c) {
+			t.Errorf("%s shown as is", c)
+		}
+	}
+	// A key not listed is stale and reaches nothing.
+	n := len(fp.cut)
+	r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {strings.Repeat("c3", 32)}})
+	if len(fp.cut) != n {
+		t.Fatal("an unlisted key reached agentosd")
+	}
+}
+
+// The list shows each key's fingerprint and algorithm only; the ID goes
+// only in a form's hidden field, and listed text is escaped.
+func TestPasskeyPageRendersOnlyFingerprints(t *testing.T) {
+	r, fp := passkeyRig(t)
+	fp.list.CutOff = []localapi.Passkey{{ID: strings.Repeat("d4", 32), Fingerprint: "<b>d4</b>", Alg: "es256"}}
+	r.signIn()
+	p := r.get("/passkeys/")
+	for _, want := range []string{anchorKey.Fingerprint, phoneKey.Fingerprint, "added with hardware key " + phoneKey.By, "&lt;b&gt;d4&lt;/b&gt;"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("list lacks %q", want)
+		}
+	}
+	for _, id := range []string{anchorKey.ID, phoneKey.ID} {
+		if strings.Count(p, id) != 1 || !strings.Contains(p, `name="id" value="`+id+`"`) {
+			t.Errorf("ID %s shown outside its form", id)
+		}
+	}
+	if strings.Contains(p, strings.Repeat("d4", 32)) || strings.Contains(p, "<b>d4") {
+		t.Fatal("a cut-off key is offered or unescaped")
+	}
+}

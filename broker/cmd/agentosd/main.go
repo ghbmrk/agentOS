@@ -248,7 +248,7 @@ func main() {
 	localUIUID, mailUID := -1, -1
 	var mailOwner string
 	kernelUID, kernelOwnerUID := -1, -1
-	var kernelOwner, kernelStore string
+	var kernelOwner, kernelStore, passkeyRPID string
 	var planHolder, planGrant string
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -262,6 +262,7 @@ func main() {
 	flag.StringVar(&kernelOwner, "kernel-owner", "", "the kernel's owner socket (agentos-kernel -owner-sock), which the broker calls the owner seam on (#2682); empty, there is no kernel to call")
 	flag.IntVar(&kernelUID, "kernel-uid", -1, "uid of the kernel's process, the only peer -kernel-owner is called on")
 	flag.IntVar(&kernelOwnerUID, "kernel-owner-uid", -1, "the owner side's uid (agentos-kernel -owner-uid), which every call on -kernel-owner is made as")
+	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "the owner page's name as passkeys are bound to it (WebAuthn RP ID; agentos-localui -page-name): serves the page's passkey ops on the kernel's owner seam (#2779a), with -kernel-owner and -localui-uid; empty, they are not served")
 	flag.StringVar(&kernelStore, "kernel-store", "/var/lib/agentos-store/store", "the kernel's sealed store (agentos-keeper-kernel.service ConditionPathExists): while it is absent no kernel can run, so STOP has nothing to reach there (#2783)")
 	var updateStore, shippedRoot string
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
@@ -619,6 +620,12 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if passkeyRPID != "" {
+		if !validRPID(passkeyRPID) || seat == nil || cfg.PageSocket == nil {
+			log.Fatal("-passkey-rp-id must be the owner page's name, with -kernel-owner and -localui-uid")
+		}
+		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID)
+	}
 	if seat != nil {
 		cfg.Kernel = storedKernel{*seat, kernelStore}
 		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)

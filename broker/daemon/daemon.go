@@ -222,6 +222,9 @@ type PageSocket struct {
 	// Accounts are the account clerks' sign-ins the Connect page reaches,
 	// by account ID (#3006); nil refuses both ops.
 	Accounts map[string]localsrv.AccountSignIn
+	// Passkeys serves the page's passkey ops on the kernel's owner seam
+	// (#2779a); nil leaves them unregistered.
+	Passkeys localsrv.Passkeys
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -488,6 +491,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
 		lcfg.PlanSignIn = cfg.PageSocket.PlanSignIn
 		lcfg.Accounts = cfg.PageSocket.Accounts
+		lcfg.Passkeys = cfg.PageSocket.Passkeys
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}

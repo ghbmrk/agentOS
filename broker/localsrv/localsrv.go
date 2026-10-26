@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,9 @@ type Config struct {
 	// serving key (OpCertify, #3153); nil is none, and the page serves
 	// HTTP only.
 	Page *Page
+	// Passkeys, when set, serves the passkey ops (#2779a; agentosd's
+	// -passkey-rp-id); nil leaves them unregistered.
+	Passkeys Passkeys
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -119,13 +123,14 @@ type session struct {
 type Server struct {
 	cfg Config
 
-	mu       sync.Mutex
-	sessions map[[sha256.Size]byte]session // by the token's digest
-	minted   uint64
-	wrong    []time.Time
-	inFlight int
-	signins  []time.Time // plan sign-ins started in the last minute
-	plan     planKept    // the waiting plan sign-in the page started
+	mu            sync.Mutex
+	sessions      map[[sha256.Size]byte]session // by the token's digest
+	minted        uint64
+	wrong         []time.Time
+	inFlight      int
+	signins       []time.Time // plan sign-ins started in the last minute
+	plan          planKept    // the waiting plan sign-in the page started
+	passkeyBegins []time.Time // passkey enrolment starts in the last minute
 
 	planMu sync.Mutex // one plan sign-in start at a time
 	noPage sync.Once  // the no-authority line, logged once
@@ -142,8 +147,17 @@ func New(cfg Config) *Server {
 	return &Server{cfg: cfg, sessions: map[[sha256.Size]byte]session{}}
 }
 
-// Ops are localui.sock's ops, one for each of localapi.Ops.
+// Ops are localui.sock's ops, one for each of localapi.Ops, and the
+// passkey ops (localapi.PasskeyOps) when Config.Passkeys is set.
 func (s *Server) Ops() map[string]sockets.Handler {
+	ops := s.ops()
+	if s.cfg.Passkeys != nil {
+		maps.Copy(ops, s.passkeyOps())
+	}
+	return ops
+}
+
+func (s *Server) ops() map[string]sockets.Handler {
 	return map[string]sockets.Handler{
 		localapi.OpStatus:   s.status,
 		localapi.OpStop:     s.stop,

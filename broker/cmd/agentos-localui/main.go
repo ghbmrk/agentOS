@@ -62,7 +62,7 @@ import (
 const memoryLimit = 384 << 20
 
 func main() {
-	var sock, vaultSock, held, iface, addr, pageName string
+	var sock, vaultSock, held, iface, addr, pageName, passkeyRPID string
 	var fb boxFiles
 	var port int
 	var connectGmail bool
@@ -76,6 +76,7 @@ func main() {
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
+	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "serve the passkey page at /passkeys/ (#2779a) with this WebAuthn RP ID, through agentosd's passkey ops (agentosd -passkey-rp-id, the same name); it must be -page-name, and the page refuses to start unless the HTTPS listener is up")
 	flag.BoolVar(&connectGmail, "connect-gmail", false, "serve the Connect page for Gmail at /accounts/ (#3006), through agentosd's account ops to the mail clerk; set only where agentosd runs with -mail-owner")
 	flag.Parse()
 	log.SetFlags(0)
@@ -91,6 +92,9 @@ func main() {
 	cfg.Station = station(sysClassNet, iface)
 	if connectGmail {
 		connect(&cfg, sock)
+	}
+	if passkeyRPID != "" {
+		passkeys(&cfg, sock, passkeyRPID)
 	}
 	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
@@ -128,6 +132,13 @@ func config(ap localui.APConfig, port int, sock, vaultSock, held string) localui
 func connect(cfg *localui.Config, sock string) {
 	cfg.Accounts = localui.AgentosdAccounts{Owner: localui.Socket{Path: sock}}
 	cfg.Connect = []localui.ConnectDeclaration{localui.GmailConnect}
+}
+
+// passkeys serves the passkey page through agentosd's passkey ops
+// (#2779a); run refuses to start it without HTTPS (checkPasskeyRPID).
+func passkeys(cfg *localui.Config, sock, rpID string) {
+	cfg.Passkeys = localui.AgentosdPasskeys{Owner: localui.Socket{Path: sock}}
+	cfg.PasskeyRPID = rpID
 }
 
 // sysClassNet is the kernel's list of network interfaces; the unit's
@@ -192,6 +203,9 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 		return err
 	}
 	pt := pageTLS(ctx, &cfg, localui.Socket{Path: sock}, nil)
+	if err := checkPasskeyRPID(cfg.PasskeyRPID, cfg); err != nil {
+		return err
+	}
 	s, err := localui.New(cfg)
 	if err != nil {
 		return err

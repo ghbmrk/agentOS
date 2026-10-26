@@ -2,12 +2,15 @@
 
 package kernelsock
 
-// REQ: CLK-1, KRN-7
+// REQ: CLK-1, KRN-7, KEY-4, REC-3
 
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net"
@@ -181,10 +184,6 @@ func TestAnOwnerUIDThatCannotBeTakenSendsNothing(t *testing.T) {
 // two hardware keys, as setupKernel does.
 func runningKernel(t *testing.T) Owner {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var anchors []key.PublicKey
 	for range 2 {
 		a, _, err := ed25519.GenerateKey(nil)
@@ -192,6 +191,16 @@ func runningKernel(t *testing.T) Owner {
 			t.Fatal(err)
 		}
 		anchors = append(anchors, key.Ed25519(a))
+	}
+	return kernelWith(t, anchors)
+}
+
+// kernelWith is runningKernel with the given anchors.
+func kernelWith(t *testing.T, anchors []key.PublicKey) Owner {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 	h, err := proc.OpenKernel(proc.KernelConfig{
 		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
@@ -443,5 +452,120 @@ func TestSubmitAndPlanSendTheKernelsOwnCalls(t *testing.T) {
 	o.Plan(context.Background(), "m1/r1")
 	if got := <-lines; got != want {
 		t.Fatalf("plan sends %q; kernel/proc sends %q", got, want)
+	}
+}
+
+// anchorSigners are two software hardware keys, Ed25519 as setup takes
+// them today.
+func anchorSigners(t *testing.T) []key.Ed25519Signer {
+	t.Helper()
+	var out []key.Ed25519Signer
+	for range 2 {
+		_, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, key.Ed25519Signer(priv))
+	}
+	return out
+}
+
+func publics(ss []key.Ed25519Signer) []key.PublicKey {
+	var out []key.PublicKey
+	for _, s := range ss {
+		out = append(out, s.Public())
+	}
+	return out
+}
+
+// phoneKey is a phone passkey's ES256 public key on rp.
+func phoneKey(t *testing.T, rp string) key.PublicKey {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point, err := k.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := key.ES256(rp, point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pk
+}
+
+// An anchor-signed ES256 enrollment sent on the written-out wire is listed
+// by the real OwnerSide, then listed as cut off after Unenroll; the anchors
+// read back in setup order (#2779a).
+func TestEnrollAndUnenrollReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	as := anchorSigners(t)
+	o := kernelWith(t, publics(as))
+	if got, err := o.Anchors(ctx); err != nil || !reflect.DeepEqual(got, publics(as)) {
+		t.Fatalf("anchors %v, %v", got, err)
+	}
+	phone := phoneKey(t, "agentos.internal")
+	e := key.Enroll(as[1], phone)
+	if err := o.Enroll(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	es, un, err := o.Enrollments(ctx)
+	if err != nil || len(es) != 1 || es[0].Passkey != phone || es[0].By != as[1].Public() || len(un) != 0 {
+		t.Fatalf("enrolled %+v, cut off %v, %v", es, un, err)
+	}
+	if err := o.Unenroll(ctx, phone); err != nil {
+		t.Fatal(err)
+	}
+	if es, un, err = o.Enrollments(ctx); err != nil || len(es) != 1 || len(un) != 1 || un[0] != phone {
+		t.Fatalf("after cut off: %+v, %v, %v", es, un, err)
+	}
+	// An enrollment no anchor signed is the kernel's refusal, not a typed one.
+	other := phoneKey(t, "agentos.internal")
+	bad := key.Enroll(as[0], other)
+	bad.Sig[0] ^= 1
+	if err := o.Enroll(ctx, bad); !errors.As(err, new(Refused)) || errors.Is(err, ErrAnchor) {
+		t.Fatalf("a bad enrollment: %v", err)
+	}
+}
+
+// Cutting off an anchor comes back as ErrAnchor, never a generic refusal,
+// and changes nothing (#2740 item 2).
+func TestUnenrollingAnAnchorIsErrAnchor(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	as := anchorSigners(t)
+	o := kernelWith(t, publics(as))
+	if err := o.Unenroll(ctx, as[0].Public()); !errors.Is(err, ErrAnchor) {
+		t.Fatalf("cut off an anchor: %v", err)
+	}
+	es, un, err := o.Enrollments(ctx)
+	if err != nil || len(es) != 0 || len(un) != 0 {
+		t.Fatalf("the log changed: %v %v %v", es, un, err)
+	}
+	if got, err := o.Anchors(ctx); err != nil || len(got) != 2 {
+		t.Fatalf("anchors %v, %v", got, err)
+	}
+}
+
+// A setup-only kernel refuses every passkey call as ErrSetupOnly, matched
+// by kernel/proc's own words.
+func TestASetupOnlyKernelRefusesPasskeyOps(t *testing.T) {
+	if setupOnlyText != proc.ErrSetupOnly.Error() {
+		t.Fatalf("setupOnlyText drifted from kernel/proc: %q", proc.ErrSetupOnly.Error())
+	}
+	needRoot(t)
+	ctx := context.Background()
+	o := setupKernel(t)
+	as := anchorSigners(t)
+	phone := phoneKey(t, "agentos.internal")
+	_, _, err1 := o.Enrollments(ctx)
+	_, err2 := o.Anchors(ctx)
+	for i, err := range []error{o.Enroll(ctx, key.Enroll(as[0], phone)), o.Unenroll(ctx, phone), err1, err2} {
+		if !errors.Is(err, ErrSetupOnly) {
+			t.Errorf("call %d: %v", i, err)
+		}
 	}
 }
