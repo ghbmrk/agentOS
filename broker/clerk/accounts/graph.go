@@ -19,6 +19,10 @@ func ProviderNode(id string) string { return "prov." + id }
 // and STOP <name> resolves the account alone (TN-graph-A6).
 const ProviderSuffix = " provider"
 
+// MailboxName names the connected CLK-8 mailbox in the graph: the table's
+// name for it is the offer's question, which no owner would type to STOP it.
+const MailboxName = "Box mailbox"
+
 // assets is the asset class a table kind declares; other kinds declare none.
 var assets = map[string]graph.Class{"money": graph.Money, "identity": graph.Identity, "mail": graph.Data}
 
@@ -58,12 +62,16 @@ func Facts(t *Table, plan []Item, connected []string, devices []Device) ([]graph
 		if it.Source == FromMail || on {
 			src = graph.Observed
 		}
-		a := graph.Node{ID: acct, Kind: graph.Account, Name: e.Name, Source: src}
+		name := e.Name
+		if e.ID == MailboxID {
+			name = MailboxName
+		}
+		a := graph.Node{ID: acct, Kind: graph.Account, Name: name, Source: src}
 		if c, ok := assets[e.Kind]; ok {
 			a.Assets = []graph.Class{c}
 		}
 		nodes = append(nodes, a,
-			graph.Node{ID: prov, Kind: graph.Provider, Name: e.Name + ProviderSuffix, Source: graph.Shipped})
+			graph.Node{ID: prov, Kind: graph.Provider, Name: name + ProviderSuffix, Source: graph.Shipped})
 		edges = append(edges,
 			graph.Edge{Kind: graph.Act, From: []string{prov}, To: acct, Source: graph.Shipped},
 			graph.Edge{Kind: graph.Cutoff, From: []string{prov}, To: acct, Source: graph.Shipped})

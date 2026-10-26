@@ -156,3 +156,35 @@ func TestGraphHandOffUnansweredIsUnverified(t *testing.T) {
 		t.Errorf("safety cut-offs %v, want %v", cut, want)
 	}
 }
+
+// The connected mailbox is named by a fixed graph name, not the offer's
+// question, so STOP finds it by a name the owner would say (L3 on #3231).
+func TestGraphHandOffNamesConnectedMailbox(t *testing.T) {
+	tab, err := Known()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := Build(tab, nil, nil)
+	nodes, edges := Facts(tab, plan, []string{CardID, WalletID, MailboxID}, nil)
+	want := map[string]string{
+		AccountNode(MailboxID): MailboxName, ProviderNode(MailboxID): MailboxName + ProviderSuffix,
+		AccountNode(CardID): "Payment card", AccountNode(WalletID): "Payment wallet",
+	}
+	for id, name := range want {
+		if n, ok := node(nodes, id); !ok || n.Name != name {
+			t.Errorf("%s named %q, want %q", id, n.Name, name)
+		}
+	}
+	owner := graph.Node{ID: "p.owner", Kind: graph.Person, Name: "Ana", Owner: true, Source: graph.Shipped}
+	g, err := graph.New(append([]graph.Node{owner}, nodes...), edges)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := g.Resolve(MailboxName); !ok || id != AccountNode(MailboxID) {
+		t.Errorf("Resolve(%q) = %q, %v", MailboxName, id, ok)
+	}
+	m, _ := tab.Entry(MailboxID)
+	if _, ok := g.Resolve(m.Name); ok {
+		t.Errorf("the offer's question %q resolves", m.Name)
+	}
+}
