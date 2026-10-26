@@ -1080,7 +1080,7 @@ class HealthTest(unittest.TestCase):
                 stub(self.lib, "agentos-hostdisk", body)
                 r = self.run_health()
                 self.assertEqual(r.returncode, 1, r.stdout)
-                self.assertIn("agentos-health: FAIL the AgentOS drive is not found among the disks", r.stdout)
+                self.assertIn("agentos-health: FAIL the agentOS drive is not found among the disks", r.stdout)
         (self.lib / "agentos-hostdisk").unlink()
         r = self.run_health()
         self.assertEqual(r.returncode, 1, r.stdout)
@@ -1557,7 +1557,7 @@ class DriveIdTest(unittest.TestCase):
     def test_a_hidden_host_disk_still_counts(self):
         # HOST-1a part 2: the 59 host-disk rule keeps blkid off a host disk, so udev (and lsblk) has no
         # PARTUUID for its partitions; drive-id reads that disk's table itself, read-only, and a
-        # second AgentOS drive attached as a host disk still fails the check.
+        # second agentOS drive attached as a host disk still fails the check.
         self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006", "vdb1 vdb ", "vdb6 vdb "))
         stub(self.bin, "sfdisk", 'echo "$*" >>"%s"; [ "$*" = "-d /dev/vdb" ] || exit 1; cat <<E\n'
              'label: gpt\n/dev/vdb1 : start=2048, size=1024, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=%s\n'
