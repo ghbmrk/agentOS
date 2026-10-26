@@ -27,6 +27,7 @@ type MainConfig struct {
 	MeterSock string // MeterSide's socket
 	MeterUID  int    // the model clerk's uid, its only peer
 	Clerks    map[string]Remote
+	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
 	// Peers are the uids this process must not run as: every peer above
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
@@ -59,10 +60,22 @@ func markUp(path string) {
 // nothing until the owner says what to do.
 var ErrLogKey = errors.New("run: the log does not open under my store's key; I start nothing until you choose what to do")
 
+// ErrNoRecipient: the unlock step handed no backup recipient, so no backup
+// can be sealed (BAK-1). The kernel runs on; the fix is a recovery-key
+// rotation, which stores one (REC-4).
+var ErrNoRecipient = errors.New("run: my store holds no backup recipient, so I take no backup until you rotate your recovery key")
+
+// ErrNoKeyTable: the kernel process never starts with its content closed.
+var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
+
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
-// opens the log under keys, serves OwnerSide and MeterSide, and runs plans
-// every Tick until ctx ends. anchor is where signed heads go (LOG-2).
+// opens the log and the subject-key table under keys, serves OwnerSide and
+// MeterSide, and runs plans every Tick until ctx ends. anchor is where
+// signed heads go (LOG-2).
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
+	if cfg.KeyDir == "" {
+		return ErrNoKeyTable
+	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
 	}
@@ -75,16 +88,25 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err := checkLogKey(cfg.Log, keys.Log); err != nil {
 		return err
 	}
+	// The backup recipient is kept for the backup calls (MIG-4-recovery-e3);
+	// a store enrolled before it holds none, and no backup can be taken.
+	if len(keys.Recipient) == 0 {
+		fmt.Fprintln(os.Stderr, ErrNoRecipient)
+	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
-		Anchors: keys.Anchors, Clerks: cfg.Clerks,
+		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 	}, clock())
 	if err != nil {
 		return err
 	}
 	defer h.Close()
+	// Counts only, on stderr: no owner call reports the subjects yet.
+	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
+		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
+	}
 	sides := []struct {
 		path string
 		uid  int

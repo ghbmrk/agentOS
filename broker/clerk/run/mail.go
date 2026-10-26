@@ -459,6 +459,7 @@ type mailbox interface {
 	Read(ctx context.Context) ([]inbox.Mail, error)
 	Opened(ctx context.Context, today string, log inbox.SeenLog) (map[string]string, inbox.SeenLog, error)
 	Mark(ctx context.Context) (inbox.Mark, error)
+	PlanSenders(ctx context.Context, authServ string) ([]string, error)
 }
 
 // mailBox is the mailbox of the account in dir, chosen by its settings'
@@ -472,12 +473,17 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (mailbox, MailSetting
 	if err != nil {
 		return nil, s, err
 	}
+	b, err := boxFor(s, sec, c)
+	return b, s, err
+}
+
+// boxFor is the mailbox of the account set up as s.
+func boxFor(s MailSettings, sec *clerk.Secrets, c MailConfig) (mailbox, error) {
 	if c.Sealer == nil || c.World == nil {
-		return nil, s, errors.New("run: a mail clerk needs its sealer and its world")
+		return nil, errors.New("run: a mail clerk needs its sealer and its world")
 	}
 	if s.API == APIGmail {
-		g, err := gmailBox(sec, slotOf(s), c)
-		return g, s, err
+		return gmailBox(sec, slotOf(s), c)
 	}
 	login := sec.Login(slotOf(s), s.login())
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
@@ -493,11 +499,11 @@ func mailBox(dir string, sec *clerk.Secrets, c MailConfig) (mailbox, MailSetting
 	}
 	st, err := imapsmtp.New(cfg)
 	if err != nil {
-		return nil, s, err
+		return nil, err
 	}
 	// Live unsubscribes are on (#2841): a failing read keeps the read mail
 	// it found (lastOpened), so VRB-2 holds after the owner deletes it.
-	return inbox.NewLive(st).WithPoster(), s, nil
+	return inbox.NewLive(st).WithPoster(), nil
 }
 
 // gmailBox is a Gmail mailbox whose grant is sealed in slot of sec. Its

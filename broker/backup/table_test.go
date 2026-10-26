@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"encoding/json"
 	"errors"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -47,7 +49,9 @@ func (s *spyKeys) Get(sub string) (kernel.SubjectKey, bool, error) {
 type target struct {
 	MemTarget
 	failPut, failGet, corruptGet, failDelete bool
-	puts                                     int
+	// keepOnDelete makes DeleteTable report success and keep the table.
+	keepOnDelete bool
+	puts         int
 }
 
 func (t *target) PutTable(id string, gen uint64, b []byte) error {
@@ -72,6 +76,9 @@ func (t *target) GetTable(id string, gen uint64) ([]byte, error) {
 func (t *target) DeleteTable(id string, gen uint64) error {
 	if t.failDelete {
 		return errDown
+	}
+	if t.keepOnDelete {
+		return nil
 	}
 	return t.MemTarget.DeleteTable(id, gen)
 }
@@ -330,6 +337,43 @@ func TestRewrapOutcomes(t *testing.T) {
 			t.Fatalf("lists %v", g)
 		}
 	})
+	// A delete that reports success but keeps the table is caught by the
+	// list after it: never Rewrote, since slice d shows that to the owner.
+	t.Run("delete says done, table stays", func(t *testing.T) {
+		r, subs, tg, rec := setup(t)
+		r.erase(subs[1])
+		tg.keepOnDelete = true
+		next, out := Rewrap(tg, rec, r.keys, r.k.State())
+		if out.Result != OldNotDeleted || out.Err == nil || next.Generation != rec.Generation+1 {
+			t.Fatalf("%v %v, generation %d", out.Result, out.Err, next.Generation)
+		}
+		if !holdsErased(t, tg, rec, subs[1]) {
+			t.Fatal("fixture: the old table should still hold the subject")
+		}
+	})
+	t.Run("strays only, delete says done, stray stays", func(t *testing.T) {
+		r, _, tg, rec := setup(t)
+		stray, _ := tg.GetTable(rec.BackupID, rec.Generation)
+		must(t, tg.MemTarget.PutTable(rec.BackupID, rec.Generation+1, stray))
+		tg.keepOnDelete = true
+		if _, out := Rewrap(tg, rec, r.keys, r.k.State()); out.Result != OldNotDeleted || out.Err == nil {
+			t.Fatalf("%v %v", out.Result, out.Err)
+		}
+	})
+	t.Run("generation spent", func(t *testing.T) {
+		r, subs, tg, rec := setup(t)
+		stray, _ := tg.GetTable(rec.BackupID, rec.Generation)
+		must(t, tg.MemTarget.PutTable(rec.BackupID, math.MaxUint64, stray))
+		r.erase(subs[1])
+		puts := tg.puts
+		next, out := Rewrap(tg, rec, r.keys, r.k.State())
+		if out.Result != GenerationSpent || out.Err == nil || !sameRecord(next, rec) || tg.puts != puts {
+			t.Fatalf("%v %v, puts %d", out.Result, out.Err, tg.puts-puts)
+		}
+		if out.Result.String() != "generation-spent" {
+			t.Fatal(out.Result.String())
+		}
+	})
 	t.Run("strays only, delete fails", func(t *testing.T) {
 		r, _, tg, rec := setup(t)
 		stray, _ := tg.GetTable(rec.BackupID, rec.Generation)
@@ -434,5 +478,52 @@ func TestUnwrapIntoAFreshFileKeys(t *testing.T) {
 	other, _ := r.backup(recipient(t, rk1), DirTarget{Dir: t.TempDir()})
 	if _, err := UnwrapTable(bytes.NewReader(obj), rk1, other.BackupID, kernel.NewMemKeys()); !errors.Is(err, ErrOtherBackup) {
 		t.Fatalf("another backup's id: %v", err)
+	}
+}
+
+// tableObject seals a key table white-box: header generation gen, body
+// generation bodyGen.
+func tableObject(t *testing.T, rcp Recipient, id string, gen, bodyGen uint64, es []entry) []byte {
+	t.Helper()
+	bid, err := parseID(id)
+	must(t, err)
+	pt, err := json.Marshal(table{BackupID: id, Generation: bodyGen, Entries: es})
+	must(t, err)
+	return sealBytes(t, rcp, KindKeyTable, bid, gen, pt)
+}
+
+func TestUnwrapRefusesABadTable(t *testing.T) {
+	rcp := recipient(t, rk1)
+	id := strings.Repeat("cd", idLen)
+	a, b := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	es := []entry{{a, kernel.SubjectKey{1}}, {b, kernel.SubjectKey{2}}}
+	// The control: a well-formed table unwraps.
+	dst := kernel.NewMemKeys()
+	if n, err := UnwrapTable(bytes.NewReader(tableObject(t, rcp, id, 2, 2, es)), rk1, id, dst); err != nil || n != 2 {
+		t.Fatalf("control: %d, %v", n, err)
+	}
+	cases := []struct {
+		name         string
+		gen, bodyGen uint64
+		es           []entry
+		want         error
+	}{
+		{"body generation is not the header's", 2, 1, es, ErrOtherBackup},
+		{"header generation is not the body's", 1, 2, es, ErrOtherBackup},
+		{"subject not hex", 2, 2, []entry{{a, kernel.SubjectKey{1}}, {"NOT-A-SUBJECT", kernel.SubjectKey{2}}}, nil},
+		{"subject upper case", 2, 2, []entry{{strings.Repeat("A", 32), kernel.SubjectKey{1}}}, nil},
+		{"subject repeated", 2, 2, []entry{{a, kernel.SubjectKey{1}}, {a, kernel.SubjectKey{2}}}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := kernel.NewMemKeys()
+			n, err := UnwrapTable(bytes.NewReader(tableObject(t, rcp, id, c.gen, c.bodyGen, c.es)), rk1, id, dst)
+			if err == nil || n != 0 || (c.want != nil && !errors.Is(err, c.want)) {
+				t.Fatalf("%d, %v, want %v", n, err, c.want)
+			}
+			if have, _ := dst.List(); len(have) != 0 {
+				t.Fatalf("a refused table put %v", have)
+			}
+		})
 	}
 }

@@ -90,6 +90,90 @@ class PremergeTest(unittest.TestCase):
         self.commit("text edit")
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    def decisions_conflict(self, name="DECISIONS.md", main="| D-1 | base |\n| D-2 | main |\n",
+                           pr="| D-1 | base |\n| D-3 | mine |\n"):
+        """main and the PR each rewrite the row block of `name`; returns the reviewed head, with main's merge conflicted."""
+        git(self.r, "checkout", "-q", "main")
+        self.resolve(name, "", base=True)
+        git(self.r, "checkout", "-q", "-b", "pr")
+        reviewed = self.resolve(name, pr, base=False)
+        git(self.r, "checkout", "-q", "main")
+        self.resolve(name, main, base=False)
+        git(self.r, "checkout", "-q", "pr")
+        merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+        self.assertNotEqual(merge.returncode, 0, "the merge was meant to conflict")
+        return reviewed
+
+    def resolve(self, name, rows, base=True):
+        """Writes `name` with `rows` after D-1 (or, without `base`, as the whole row block) and commits."""
+        self.write(name, "| ID | Decision |\n|---|---|\n" + ("| D-1 | base |\n" if base else "") + rows + "\nPer-team section.\n")
+        return self.commit("rows")
+
+    def test_decisions_rows_both_appended_and_kept_verbatim_is_same(self):
+        # #3224, #3233: two PRs appending a DECISIONS row at one spot forced a delta review on every main-merge.
+        for rows in ("| D-2 | main |\n| D-3 | mine |\n", "| D-3 | mine |\n| D-2 | main |\n"):
+            with self.subTest(rows=rows):
+                self.setUp()
+                reviewed = self.decisions_conflict()
+                self.resolve("DECISIONS.md", rows)
+                self.assertEqual(self.check(reviewed), [])
+
+    def test_decisions_resolution_that_edits_drops_or_adds_a_row_is_changed(self):
+        for rows in ("| D-2 | main |\n| D-4 | mine |\n", "| D-2 | main |\n", "| D-3 | mine |\n",
+                     "| D-2 | main |\n| D-3 | mine |\n| D-5 | extra |\n", "| D-2 | main |\n| D-3 | mine |\n| D-2 | main |\n"):
+            with self.subTest(rows=rows):
+                self.setUp()
+                reviewed = self.decisions_conflict()
+                self.resolve("DECISIONS.md", rows)
+                self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
+    def test_decisions_conflict_on_an_edited_row_is_changed_even_if_both_kept(self):
+        # A non-empty base section: both sides changed D-1, so keeping both is not two appends.
+        reviewed = self.decisions_conflict(main="| D-1 | main edit |\n", pr="| D-1 | pr edit |\n")
+        self.resolve("DECISIONS.md", "| D-1 | pr edit |\n| D-1 | main edit |\n", base=False)
+        self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
+    def chmod_commit(self, name):
+        (self.r / name).chmod(0o755)
+        return self.commit("chmod")
+
+    def test_assumptions_renumbering_with_a_mode_flip_is_changed(self):
+        # #3266: the exemption compared blob text only, so a chmod rode along as `same`.
+        git(self.r, "checkout", "-q", "main")
+        self.write("ASSUMPTIONS.md", "| # | A |\n|---|---|\n| N1 | first | basis |\n")
+        self.commit("assumptions")
+        reviewed = self.pr()
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| N1 |", "| N2 |"))
+        self.chmod_commit("ASSUMPTIONS.md")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_assumptions_mode_is_read_from_the_literal_path(self):
+        # #3275 review: pathspec magic in a name made the mode check read X/ASSUMPTIONS.md instead.
+        table = "| # | A |\n|---|---|\n| N1 | first | basis |\n"
+        git(self.r, "checkout", "-q", "main")
+        for name in ("X/ASSUMPTIONS.md", ":(literal)X/ASSUMPTIONS.md"):
+            (self.r / name).parent.mkdir(exist_ok=True)
+            self.write(name, table)
+        self.commit("assumptions")
+        reviewed = self.pr()
+        name = ":(literal)X/ASSUMPTIONS.md"
+        self.write(name, self.read(name).replace("| N1 |", "| N2 |"))
+        self.chmod_commit(name)
+        self.assertEqual(self.check(reviewed), [name])
+
+    def test_decisions_rows_kept_verbatim_with_a_mode_flip_is_changed(self):
+        # #3266: as above, for the appended-rows exemption.
+        reviewed = self.decisions_conflict()
+        self.resolve("DECISIONS.md", "| D-2 | main |\n| D-3 | mine |\n")
+        self.chmod_commit("DECISIONS.md")
+        self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
+    def test_two_appended_rows_kept_in_another_file_are_changed(self):
+        reviewed = self.decisions_conflict(name="NOTES.md")
+        self.resolve("NOTES.md", "| D-2 | main |\n| D-3 | mine |\n")
+        self.assertEqual(self.check(reviewed), ["NOTES.md"])
+
     def test_main_merged_in_then_a_pr_line_changed_is_changed(self):
         reviewed = self.pr()
         self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))

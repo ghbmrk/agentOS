@@ -34,13 +34,19 @@ const (
 )
 
 // planReason is the owner's wording for the clerk's typed reason (clerk/run
-// DReconnect, DSignInRefused, DNoSignIn); each names the step that exists.
+// DReconnect, DSignInRefused, DNoSignIn); each names the step that exists
+// and where, as STATUS does (clerk/run seen.go). Only reconnect is fixed
+// on the Accounts page; an IMAP account is set up again on the Wi-Fi page,
+// which this page cannot link to (#3226). no-sign-in keeps STATUS's caveat
+// that an own-page-only provider cannot be used yet (#3256).
 func planReason(reason string) string {
 	switch reason {
 	case "reconnect":
 		return "Your mail sign-in ended, so I can't read who writes to you. Sign in again on the Accounts page, then open this page again."
-	case "sign-in-refused", "no-sign-in":
-		return "Your mail server stopped accepting my sign-in, so I can't read who writes to you. Set the mail account up again, then open this page again."
+	case "sign-in-refused":
+		return "Your mail server refused my sign-in, so I can't read who writes to you. Set up the mail account again on my Wi-Fi page, then open this page again. If your provider uses two-step sign-in, use an app password it gives for mail apps."
+	case "no-sign-in":
+		return "Your mail server doesn't accept a password sign-in with these settings, so I can't read who writes to you. On my Wi-Fi page, set up the mail account again with the server settings your provider gives for mail apps, then open this page again. If your provider only allows signing in through its own page, I can't use this account yet."
 	}
 	return planFailed
 }
@@ -79,6 +85,7 @@ type planRow struct {
 type planView struct {
 	Rows        []planRow
 	Err, Reason string
+	Reconnect   bool // the Accounts button: only reconnect is fixed there
 	Listed      string
 	Later       string
 }
@@ -108,7 +115,7 @@ func (s *Server) accountPlanPage(w http.ResponseWriter, r *http.Request) {
 	case !ok:
 		v.Err = planFailed
 	case p.Reason != "":
-		v.Reason = planReason(p.Reason)
+		v.Reason, v.Reconnect = planReason(p.Reason), p.Reason == "reconnect"
 	}
 	if r.Method == http.MethodPost && ok && p.Reason == "" {
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
@@ -183,7 +190,7 @@ func init() {
 <h1>Your accounts</h1>
 <p>Payments first, then a mailbox of my own, then the accounts your mail shows you use. Set up each one now, or later.</p>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
-{{with .Reason}}<p class="err">{{.}}</p><p><a class="button" href="/accounts/">Accounts</a></p>{{end}}
+{{with .Reason}}<p class="err">{{.}}</p>{{if $v.Reconnect}}<p><a class="button" href="/accounts/">Accounts</a></p>{{end}}{{end}}
 {{range .Rows}}<div class="card">
 <p><b>{{.Name}}</b>{{if .Preselected}} <span class="muted">Suggested</span>{{end}}</p>
 {{if .ShowLabel}}<p class="muted">{{.Label}}</p>{{end}}{{with .Advice}}<p>{{.}}</p>{{end}}

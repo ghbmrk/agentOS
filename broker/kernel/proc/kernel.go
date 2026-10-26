@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -18,8 +19,7 @@ import (
 )
 
 // KernelConfig is what the kernel process starts from. The log key and the
-// head key come from the sealed store (STO-2), which this slice does not
-// read: until it lands, only tests start a kernel process.
+// head key come from the unlock step (STO-2b, handoff.KernelKeys).
 type KernelConfig struct {
 	Log     string        // the log file
 	Anchor  kernel.Anchor // where signed heads go, off the log's disk (LOG-2)
@@ -28,6 +28,10 @@ type KernelConfig struct {
 	Sign    ed25519.PrivateKey
 	Anchors []key.PublicKey   // the owner's hardware keys (D-146); none starts setup-only
 	Clerks  map[string]Remote // every clerk the kernel runs, by name; a closed table
+	// KeyDir is the subject-key table's directory (FileKeys, sealed under
+	// Key), opened at start so content opens (KRN-erase). "" keeps content
+	// closed (kernel.ErrContentClosed); only tests start a kernel so.
+	KeyDir string
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -39,6 +43,8 @@ type Kernel struct {
 	k      *kernel.Kernel
 	store  *FileStore
 	clerks map[string]remote
+	// content is what the start found in the key table.
+	content kernel.ContentReport
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -46,6 +52,9 @@ type Kernel struct {
 // to be probed through their clerk (KRN-8). With no anchors from the store
 // and none in the log, the kernel is setup-only (kernel.Setup): its sockets
 // serve only the setup step until the owner's hardware keys are logged.
+// With a KeyDir it then opens the subject-key table, which re-applies every
+// logged erase to it; no content store exists yet, so an erase's stores
+// stay unconfirmed and Tick retries them.
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
@@ -72,8 +81,23 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	return &Kernel{k: k, store: st, clerks: clerks}, nil
+	h := &Kernel{k: k, store: st, clerks: clerks}
+	if cfg.KeyDir != "" {
+		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
+		if err == nil {
+			h.content, err = k.OpenContent(keys, map[string]kernel.ContentStore{}, now)
+		}
+		if err != nil {
+			st.Close()
+			return nil, fmt.Errorf("run: the subject-key table: %w", err)
+		}
+	}
+	return h, nil
 }
+
+// Content is what the start found in the subject-key table: subjects whose
+// key is missing, and keys no subject names.
+func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
 // Tick runs every plan as far as now allows. It takes the due calls under the
 // lock, then for each one, under the lock again, makes the kernel's last

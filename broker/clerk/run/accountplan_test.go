@@ -15,6 +15,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/accounts"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 )
 
 // planCanary is in every mail field the plan must drop.
@@ -189,21 +191,82 @@ func TestAccountPlanReportsGrantDeath(t *testing.T) {
 	}
 }
 
-// Over IMAP no sender is read in this slice, so the plan holds the card,
-// the wallet and the mailbox, the mailbox Full power, and no account is
-// marked connected.
-func TestAccountPlanOverIMAPIsTheFixedItems(t *testing.T) {
-	r := newMailRig(t, "<a@shop.test>")
+// imapPlanHost is a mail host over r's IMAP account, in a world whose
+// mailbox provider is declared with authServ.
+func imapPlanHost(t *testing.T, r *mailRig, authServ string) (*MailHost, MailOwner) {
 	c := mailConfig()
-	c.World = func() inbox.World { return inbox.World{Today: "2026-10-21", AuthServ: "mx.google.com"} }
-	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), r.dir, r.sec, c), MailOwnerSide)}
-	p, err := owner.AccountPlan()
-	if want := []string{accounts.CardID, accounts.WalletID, accounts.MailboxID}; err != nil || !slices.Equal(planIDs(p), want) {
-		t.Fatalf("IMAP: %v %v, want %v", planIDs(p), err, want)
-	}
-	for _, it := range p.Items {
-		if it.Connected || it.Label != accounts.LabelFull {
-			t.Fatalf("IMAP item %+v", it)
+	c.World = func() inbox.World { return inbox.World{Today: "2026-10-21", AuthServ: authServ} }
+	h := NewMailHost(context.Background(), r.dir, r.sec, c)
+	return h, MailOwner{serveMail(t, h, MailOwnerSide)}
+}
+
+// imapMail is m as the IMAP test server takes it (it writes each LF as CRLF).
+func imapMail(m []byte) string { return strings.ReplaceAll(string(m), "\r\n", "\n") }
+
+// The lifecycle's "Mailbox over IMAP" (#3220, A22): the same rule reads the
+// same two fields over IMAP. A sender the declared provider authenticated
+// adds its entry, found in mail, from any folder but spam and trash; a
+// verdict another server wrote, or any verdict with no authserv-id
+// declared, adds nothing; no byte of mail crosses; and no item is marked
+// connected, since an IMAP account is Full power whoever serves it.
+func TestAccountPlanReadsSendersOverIMAP(t *testing.T) {
+	fixed := []string{accounts.CardID, accounts.WalletID, accounts.MailboxID}
+	for _, c := range []struct {
+		name, authServ, folder, verdict string
+		want                            []string
+	}{
+		{"authenticated", "mx.google.com", "Archive", "mx.google.com", append(slices.Clone(fixed), "gmail")},
+		{"forged verdict", "mx.google.com", "INBOX", "mx.evil.test", fixed},
+		{"no authserv-id declared", "", "INBOX", "mx.google.com", fixed},
+		{"in spam", "mx.google.com", "Junk", "mx.google.com", fixed},
+		{"in trash", "mx.google.com", "Trash", "mx.google.com", fixed},
+	} {
+		r := newMailRig(t, "<a@shop.test>")
+		r.srv.Deliver(c.folder, imapMail(googleMail(c.verdict)))
+		_, owner := imapPlanHost(t, r, c.authServ)
+		var raw json.RawMessage
+		if err := owner.Call("accountplan", nil, &raw); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
 		}
+		if bytes.Contains(raw, []byte(planCanary)) || bytes.Contains(raw, []byte("shop.test")) {
+			t.Fatalf("%s: the plan carries mail bytes: %s", c.name, raw)
+		}
+		var p AccountPlanned
+		if err := json.Unmarshal(raw, &p); err != nil || p.Reason != "" || !slices.Equal(planIDs(p), c.want) {
+			t.Fatalf("%s: %v %q %v, want %v", c.name, planIDs(p), p.Reason, err, c.want)
+		}
+		for _, it := range p.Items {
+			if it.Connected {
+				t.Fatalf("%s: IMAP item %+v marked connected", c.name, it)
+			}
+			if it.ID == accounts.MailboxID && it.Label != accounts.LabelFull {
+				t.Fatalf("%s: the mailbox %+v", c.name, it)
+			}
+			if it.ID == "gmail" && it.Source != string(accounts.FromMail) {
+				t.Fatalf("%s: the Gmail item %+v", c.name, it)
+			}
+		}
+	}
+}
+
+// A sign-in the IMAP server refuses while the plan is read is that
+// account's grant death: the typed reason and no plan, and the clerk stops
+// signing in until the owner sets the account up again.
+func TestAccountPlanOverIMAPReportsARefusedSignIn(t *testing.T) {
+	r := newMailRig(t, "<a@shop.test>")
+	r.srv.Deliver("INBOX", imapMail(googleMail("mx.google.com")))
+	h, owner := imapPlanHost(t, r, "mx.google.com")
+	if _, stop := h.clerk(); stop != nil {
+		t.Fatalf("the account did not open: %v", stop)
+	}
+	if err := SetMail(r.dir, r.sec, MailSettings{Address: imaptest.User, IMAP: r.srv.IMAP, SMTP: r.srv.SMTP}, "a-wrong-password-1"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := owner.AccountPlan()
+	if err != nil || p.Reason != DSignInRefused || len(p.Items) != 0 {
+		t.Fatalf("sign-in refused: %+v %v", p, err)
+	}
+	if _, stop := h.clerk(); !errors.Is(stop, imapsmtp.ErrLoginRefused) {
+		t.Fatalf("the clerk goes on signing in: stop %v", stop)
 	}
 }
