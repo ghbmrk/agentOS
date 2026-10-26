@@ -786,3 +786,64 @@ func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
 		t.Fatalf("kept after a restart: %+v", v.Backups)
 	}
 }
+
+// failRewrap runs an erase just before the first key table goes out and
+// fails every later generation's put while fail is set.
+type failRewrap struct {
+	backup.Target
+	fire *func()
+	fail *bool
+}
+
+func (f failRewrap) PutTable(id string, gen uint64, b []byte) error {
+	if fn := *f.fire; fn != nil {
+		*f.fire = nil
+		fn()
+	}
+	if gen >= 2 && *f.fail {
+		return errors.New("the drive is busy")
+	}
+	return f.Target.PutTable(id, gen, b)
+}
+
+// LOG-4 (#3311 L3 on 6e14b28): when the re-seal after an in-flight put
+// fails, the kernel process's Tick retries it with its backoff until no
+// table at the target gives the erased key.
+func TestTickRetriesAFailedReseal(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone, live := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	var fire func()
+	fire = func() {
+		b.h.With(func(k *kernel.Kernel) (err error) { _, err = k.Erase(b.now, gone); return err })
+	}
+	fail := true
+	b.h.bk.wrap = func(tg backup.Target) backup.Target { return failRewrap{tg, &fire, &fail} }
+	id := b.backup()[0].Backup.BackupID
+	if gens, _ := (backup.DirTarget{Dir: dir}).Tables(id); !slices.Equal(gens, []uint64{1}) {
+		t.Fatalf("tables before the retry: %v", gens)
+	}
+	fail = false
+	for range 12 {
+		b.now += 3600
+		b.tick()
+	}
+	gens, _ := (backup.DirTarget{Dir: dir}).Tables(id)
+	if len(gens) != 1 || gens[0] < 2 {
+		t.Fatalf("tables after the process's ticks: %v", gens)
+	}
+	_, keys := openBackup(t, dir, id, testRK)
+	if _, ok, _ := keys.Get(gone); ok {
+		t.Fatal("the retried table still gives the erased subject's key")
+	}
+	if _, ok, _ := keys.Get(live); !ok {
+		t.Fatal("the retried table lost a live subject's key")
+	}
+}
+
+func (b *bbox) tick() {
+	b.t.Helper()
+	if err := b.h.Tick(b.now); err != nil {
+		b.t.Fatal(err)
+	}
+}

@@ -118,12 +118,22 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
-// Tick runs every plan as far as now allows. It takes the due calls under the
+// Tick retries the re-seals of backups that failed, then runs every plan
+// as far as now allows. It takes the due calls under the
 // lock, then for each one, under the lock again, makes the kernel's last
 // check (kernel.Send) and takes the call's view, makes the call without the
 // lock, and logs its answer under it. A STOP or revoke logged while an
 // earlier call hangs stops every later one (KRN-7).
 func (h *Kernel) Tick(now int64) error {
+	// A backup whose re-seal failed is retried here, with its backoff
+	// (kernel.OpenBackups re-seals every backup giving an erased subject's
+	// key): kernel.Tick, which would, runs clerk calls under the lock and
+	// is not this process's (#3311 L3 on 6e14b28).
+	if h.bk != nil {
+		if err := h.With(func(k *kernel.Kernel) error { k.OpenBackups(h.bk.set, now); return nil }); err != nil {
+			return err
+		}
+	}
 	for n := 0; n < 4*kernel.MaxSteps; n++ {
 		var due []kernel.Call
 		err := h.With(func(k *kernel.Kernel) (err error) {
