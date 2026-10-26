@@ -30,6 +30,8 @@ Deleting provagent first would take "Use my plan" (SPEC §12.1 step 6, ONB-3) of
 
 ## Requirements and acceptance tests (b1)
 
+**Acceptance tests:** the four below in `broker/cmd/agentosd/signinhost_test.go` (`REQ: PLN-5, CLK-7, CLK-1, ARC-2, CAP-8`), plus `TestSignInSockStartsOnTheGuestsRoute` in `broker/clerk/run/signinsock_test.go`. `TestSignInSockSpeaksTheHostsWire` lives in cmd/agentosd, not clerk/run: agentosd's handler is in a main package, which clerk/run cannot import (as accountsock's wire test does for the mail clerk).
+
 - PLN-5, CLK-7: `TestSignInWorkerRunsTheCLIOnTheGuestsRoute` (the machine runs the declared argv, from the plan's image, with the given route as its only mount out; `signinread` returns what it printed and when it exits).
 - CLK-1, ARC-2: `TestSignInHostAdmitsOnlyTheClerk` (another uid's call is refused before anything starts), `TestSignInRouteMustBeTheClerks` (a route not a directory, owned by another uid, or group- or world-writable starts nothing).
 - CAP-8: `TestSignInStopDestroysTheMachine` (stop, the caller's end and shutdown each destroy it; a second start for a running guest is refused).
