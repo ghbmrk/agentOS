@@ -20,6 +20,8 @@ import (
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 
+	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -247,6 +249,39 @@ func TestEnrollThenBoot(t *testing.T) {
 	f := get(seal.Pinned(b.sw.TPM(), b.c.storePath()))
 	if _, err := seal.Unlock(b.c.storePath(), f); err == nil {
 		t.Fatal("another boot path unlocked the store")
+	}
+}
+
+// REQ: BAK-1
+// MIG-4-recovery-e1: enrollment keeps the recovery key's backup recipient
+// in the store, and only its public half: the entry is exactly the tag and
+// the two public keys, holds no run of the recovery key, and names the
+// recipient the recovery key alone derives.
+func TestEnrollStoresTheBackupRecipient(t *testing.T) {
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	st := b.enrolled()
+	v, ok, err := st.Get(handoff.RecipientEntry)
+	if err != nil || !ok {
+		t.Fatalf("no backup recipient in the store: %v", err)
+	}
+	want := get(backup.RecipientFor(b.recovery))
+	if got := get(handoff.ParseRecipient(v)); !bytes.Equal(got, append(bytes.Clone(want.X), want.EK...)) {
+		t.Fatal("the store's recipient is not the recovery key's")
+	}
+	if len(v) != len(get(handoff.EncodeRecipient(want.X, want.EK))) {
+		t.Fatalf("the entry is %d bytes, more than the recipient", len(v))
+	}
+	for i := 0; i+8 <= len(b.recovery); i++ {
+		if bytes.Contains(v, b.recovery[i:i+8]) {
+			t.Fatalf("the entry holds the recovery key's bytes %d to %d", i, i+8)
+		}
+	}
+	// Another recovery key derives another recipient.
+	other := bytes.Clone(b.recovery)
+	other[0] ^= 1
+	if get(backup.RecipientFor(other)).ID() == want.ID() {
+		t.Fatal("two recovery keys share a recipient")
 	}
 }
 
