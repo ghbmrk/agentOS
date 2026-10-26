@@ -650,3 +650,27 @@ func TestLOG4UndecodableRecordNotRewritten(t *testing.T) {
 		}
 	}
 }
+
+// LOG-4: a settled record of exactly null decodes to a nil map with no
+// error; it is unknown like any undecodable record, so start-up does not
+// panic at the first rollback, every lineage stays contained, nothing is
+// rolled back or told, and the record is left as it is.
+func TestLOG4NullRecordContainsEveryLineage(t *testing.T) {
+	for _, bad := range []string{"null", " null\n"} {
+		b := newHeldBox(t)
+		must(t, os.MkdirAll(b.state, 0o700))
+		p := filepath.Join(b.state, recallSettledFile)
+		must(t, os.WriteFile(p, []byte(bad), 0o600))
+		fc := &forgetCalls{}
+		_, h, told := b.start(func(m *vm.Manager) lineageForgetter { fc.m = m; return fc }, nil)
+		if len(fc.calls) != 0 || len(told) != 0 || !h.Contained(b.L) || !h.Contained(b.M) || !h.Contained("anyone") {
+			t.Fatalf("%q: rollbacks %v, told %q, L %v M %v", bad, fc.calls, told, h.Contained(b.L), h.Contained(b.M))
+		}
+		if !strings.Contains(h.Note(), "could not be read") {
+			t.Fatalf("%q: STATUS %q", bad, h.Note())
+		}
+		if got, _ := os.ReadFile(p); string(got) != bad {
+			t.Fatalf("%q: record rewritten to %s", bad, got)
+		}
+	}
+}
