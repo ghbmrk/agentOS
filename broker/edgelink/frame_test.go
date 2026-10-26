@@ -43,7 +43,9 @@ func encode(t *testing.T, s Stream, f Frame) []byte {
 // stream it may travel on, and each bad field closes with its fixed error
 // having read no further than that field. Revert mutants: dropping the
 // direction check (ErrDirection cases pass), or `blen > spec.cap` becoming
-// `>=`/removed (the cap cases), or skipping printable (the origin cases).
+// `>=`/removed (the cap cases), or skipping printable (the origin cases), or
+// unseen narrowed to unicode.IsControl (the bidi, zero-width, separator and
+// tag cases).
 func TestFramesRoundTripAndRefuseEveryBadField(t *testing.T) {
 	sig := bytes.Repeat([]byte{7}, HelloLen)
 	good := []struct {
@@ -58,6 +60,7 @@ func TestFramesRoundTripAndRefuseEveryBadField(t *testing.T) {
 		{ToEdge, Frame{KindDevice, "living room tv", []byte("{}")}},
 		{Hello, Frame{KindHello, "", sig}},
 		{FromEdge, Frame{KindText, strings.Repeat("é", MaxOrigin/2), nil}},
+		{FromEdge, Frame{KindDevice, "family \U0001F468\u200d\U0001F469 tv", nil}}, // the joiners pass, as in the kernel's rule
 	}
 	for _, g := range good {
 		b := encode(t, g.s, g.f)
@@ -112,6 +115,10 @@ func TestFramesRoundTripAndRefuseEveryBadField(t *testing.T) {
 		{"newline in origin", FromEdge, append(header(1, KindText, 2, 0), 'a', '\n'), ErrOrigin, HeaderLen + 2},
 		{"DEL in origin", FromEdge, append(header(1, KindText, 1, 0), 0x7F), ErrOrigin, HeaderLen + 1},
 		{"C1 control in origin", FromEdge, append(header(1, KindText, 2, 0), 0xC2, 0x85), ErrOrigin, HeaderLen + 2},
+		{"bidi override in origin", FromEdge, append(header(1, KindText, 4, 0), append([]byte("1"), "\u202e"...)...), ErrOrigin, HeaderLen + 4},
+		{"zero-width space in origin", FromEdge, append(header(1, KindDevice, 4, 0), append([]byte("t"), "\u200b"...)...), ErrOrigin, HeaderLen + 4},
+		{"line separator in origin", FromEdge, append(header(1, KindText, 4, 0), append([]byte("1"), "\u2028"...)...), ErrOrigin, HeaderLen + 4},
+		{"tag character in origin", FromEdge, append(header(1, KindDevice, 5, 0), append([]byte("t"), "\U000e0041"...)...), ErrOrigin, HeaderLen + 5},
 	}
 	for _, c := range bad {
 		// Trailing bytes stand for whatever the peer sends next: none may be read.

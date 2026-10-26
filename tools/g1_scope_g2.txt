@@ -137,6 +137,7 @@ allow broker/clock/
 allow broker/control/
 allow broker/daemon/
 allow broker/durable/
+allow broker/edgelink/
 allow broker/egress/
 allow broker/events/
 allow broker/firstboot/
@@ -157,7 +158,6 @@ allow broker/mail/
 allow broker/maintain/
 allow broker/meter/
 allow broker/pageca/
-allow broker/edgelink/
 allow broker/modelroute/
 allow broker/modem/
 allow broker/modemlink/

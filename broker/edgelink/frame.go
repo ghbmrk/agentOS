@@ -131,18 +131,31 @@ func checkHeader(s Stream, v byte, k Kind, olen int, blen uint64) error {
 	return nil
 }
 
-// printable reports whether b is valid UTF-8 with no control character
-// (C0, DEL or C1).
+// printable reports whether b is valid UTF-8 with no rune that reshapes or
+// hides what the owner side later shows (HW-15 "treats every item from the
+// edge as untrusted"): the kernel's rule for a shown line (kernel/state.go
+// `unseen`, #2740), restated here because this package imports no kernel.
 func printable(b []byte) bool {
 	if !utf8.Valid(b) {
 		return false
 	}
 	for len(b) > 0 {
 		r, n := utf8.DecodeRune(b)
-		if unicode.IsControl(r) {
+		if unseen(r) {
 			return false
 		}
 		b = b[n:]
 	}
 	return true
+}
+
+// unseen is a control, a line or paragraph separator, or a format character
+// such as a bidi override, an invisible space or a tag. Only the two joiners
+// pass: U+200D builds an emoji from parts (a device named with one) and
+// U+200C shapes Persian and Indic words; neither reorders text.
+func unseen(r rune) bool {
+	if r == '\u200c' || r == '\u200d' {
+		return false
+	}
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
 }

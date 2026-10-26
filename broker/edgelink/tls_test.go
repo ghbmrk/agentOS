@@ -103,6 +103,22 @@ func TestHandshakeShape(t *testing.T) {
 		t.Fatalf("client's PeerKey = %x, %v; want the core's key", got, err)
 	}
 
+	// No resumption: a client that keeps a session cache still runs a full
+	// handshake each time, so each connection proves its key afresh
+	// (decision 5, ASSUMPTIONS EDGE-link-c1-6). Revert mutant: deleting
+	// SessionTicketsDisabled (connections 2 and 3 resume).
+	caching, _ := ClientConfig(edge, core.Public().(ed25519.PublicKey))
+	caching.ClientSessionCache = tls.NewLRUClientSessionCache(4)
+	for i := 0; i < 3; i++ {
+		ss, cs, serr, cerr := handshake(t, scfg, caching)
+		if serr != nil || cerr != nil {
+			t.Fatalf("caching client %d: server %v, client %v", i, serr, cerr)
+		}
+		if ss.DidResume || cs.DidResume {
+			t.Fatalf("caching client %d resumed", i)
+		}
+	}
+
 	// Any Ed25519 client key is accepted at the handshake: liveness is the kernel's answer.
 	other, _ := ClientConfig(newKey(t), core.Public().(ed25519.PublicKey))
 	if _, _, serr, cerr := handshake(t, scfg, other); serr != nil || cerr != nil {
