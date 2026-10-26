@@ -37,12 +37,14 @@ type KeyProver struct{ kl []byte }
 // NewKeyProver holds a copy of kl.
 func NewKeyProver(kl []byte) *KeyProver { return &KeyProver{append([]byte(nil), kl...)} }
 
+// answerFor hashes one scratch buffer and wipes it, so no digest state
+// keeps kl after the answer.
 func answerFor(challenge []byte, mac string, kl []byte) []byte {
-	h := sha1.New()
-	h.Write(challenge)
-	h.Write([]byte(mac))
-	h.Write(kl)
-	return h.Sum(nil)
+	b := make([]byte, 0, len(challenge)+len(mac)+len(kl))
+	b = append(append(append(b, challenge...), mac...), kl...)
+	sum := sha1.Sum(b)
+	clear(b)
+	return sum[:]
 }
 
 // Answer is SHA1(challenge ‖ mac ‖ kl).

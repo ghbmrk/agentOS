@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,40 @@ func TestSyntheticScaleReadingsParse(t *testing.T) {
 	}
 	if !bytes.Equal(ws[4], statusFrame) || !bytes.Equal(ws[5], allFrame) {
 		t.Fatal("STORED_MEASURE sent with an action other than status and all")
+	}
+}
+
+// A value whose exponent is outside -9..9 is dropped, so Float stays finite
+// (DEV-12).
+func TestOutOfRangeExponentIsDropped(t *testing.T) {
+	f := newScale()
+	f.records = [][]tlv{{meta(1700000000, 1, 7), data(1, 1, -10), data(1, 6, 10), data(5, 11, 9), data(5, 76, -9)}}
+	res, err := newRig(f, klCanary).read(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Readings) != 2 || res.Dropped != 2 {
+		t.Fatalf("readings %+v, dropped %d", res.Readings, res.Dropped)
+	}
+	for _, r := range res.Readings {
+		if v := r.Float(); math.IsInf(v, 0) || math.IsNaN(v) {
+			t.Fatalf("reading %+v is %v", r, v)
+		}
+	}
+}
+
+// A battery level outside 0..100 reads as unknown.
+func TestBatteryOutsideRangeReadsUnknown(t *testing.T) {
+	for _, c := range []struct {
+		v    []byte
+		want int
+	}{{u16(0), 0}, {u16(100), 100}, {u16(101), -1}, {u16(0xffff), -1}, {[]byte{55}, 55}, {[]byte{}, -1}} {
+		f := newScale()
+		f.battery = c.v
+		res, err := newRig(f, klCanary).read(t)
+		if err != nil || res.Battery != c.want {
+			t.Fatalf("battery %x read as %d, %v; want %d", c.v, res.Battery, err, c.want)
+		}
 	}
 }
 
