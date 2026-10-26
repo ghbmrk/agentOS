@@ -153,6 +153,14 @@ func TestTargetsReplay(t *testing.T) {
 		"name with slash":   {Name: "a/b", Kind: kernel.KindDir, Locator: "/mnt/x"},
 		"control in path":   {Name: "ctl", Kind: kernel.KindDir, Locator: "/mnt/x\n"},
 		"not text":          {Name: "bin", Kind: kernel.KindDir, Locator: "/mnt/\xff"},
+		"bidi override":     {Name: "bidi", Kind: kernel.KindDir, Locator: "/mnt/\u202ekcab"},
+		"zero-width":        {Name: "zw", Kind: kernel.KindDir, Locator: "/mnt/us\u200bb"},
+		"byte order mark":   {Name: "bom", Kind: kernel.KindDir, Locator: "/mnt/\ufeffusb"},
+		"line separator":    {Name: "ls", Kind: kernel.KindDir, Locator: "/mnt/usb\u2028x"},
+		"para separator":    {Name: "ps", Kind: kernel.KindDir, Locator: "/mnt/usb\u2029x"},
+		"dot name":          {Name: ".", Kind: kernel.KindDir, Locator: "/mnt/x"},
+		"dot-dot name":      {Name: "..", Kind: kernel.KindDir, Locator: "/mnt/x"},
+		"dot-led name":      {Name: ".hidden", Kind: kernel.KindDir, Locator: "/mnt/x"},
 	}
 	for name, bt := range bad {
 		n := r.k.Log().Len()

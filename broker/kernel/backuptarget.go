@@ -80,10 +80,12 @@ func BackupTargetHash(n int, t BackupTarget) [32]byte {
 }
 
 // shape reports whether the kernel can carry t: a known kind, a short plain
-// name, and for a directory a clean absolute path.
+// name not led by a dot, and a locator of printable characters only, so the
+// page shows the anchor's signer what it signs (no bidi, zero-width or
+// separator characters), for a directory a clean absolute path.
 func (t BackupTarget) shape() bool {
 	if len(t.Name) == 0 || len(t.Name) > MaxTargetName || len(t.Locator) == 0 || len(t.Locator) > MaxLocator ||
-		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), unicode.IsControl) {
+		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), func(c rune) bool { return !unicode.IsPrint(c) }) || t.Name[0] == '.' {
 		return false
 	}
 	for _, c := range t.Name {
