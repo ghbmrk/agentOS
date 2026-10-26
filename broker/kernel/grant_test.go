@@ -165,7 +165,7 @@ func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	if c, d := admits(r, p, at), admits(r, oneOff, at); c != "" || d != "" {
 		t.Fatalf("the enrolled phone's grant %q and one-off %q", c, d)
 	}
-	must(t, r.k.Unenroll(at, phone.pk)) // the phone is lost
+	must(t, r.k.Unenroll(at, key.Unenroll(r.owner.pass, phone.pk))) // the phone is lost
 	if c := admits(r, p, at); c != "" {
 		t.Fatalf("a key under the lost phone's earlier grant runs until it lapses: %q", c)
 	}
@@ -257,7 +257,7 @@ func TestReplayGrantsNothingFromACutOffPasskey(t *testing.T) {
 	ck, err := key.ClerkKey(root, phone.pass, r.holder.pub, 0, 10)
 	must(t, err)
 	must(t, r.issue(0, root, ck))
-	must(t, r.k.Unenroll(1, phone.pk))
+	must(t, r.k.Unenroll(1, key.Unenroll(r.owner.pass, phone.pk)))
 	again, err := key.ClerkKey(root, phone.pass, r.holder.pub, 2, 10)
 	must(t, err)
 	es := r.k.Log().Entries()
@@ -360,7 +360,7 @@ func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 	ck, err := key.ClerkKey(root, phone.pass, r.holder.pub, 1, 10)
 	must(t, err)
 	must(t, r.issue(1, root, ck))
-	must(t, r.k.Unenroll(2, phone.pk))
+	must(t, r.k.Unenroll(2, key.Unenroll(r.owner.pass, phone.pk)))
 	if got := r.k.State().Pending(3); len(got) != 0 {
 		t.Fatalf("a cut-off passkey's grants still pending: %d", len(got))
 	}
@@ -381,7 +381,7 @@ func TestUnenrollCancelsAPhonesLinkUnderAnAnchorsRoot(t *testing.T) {
 	raise, err := key.ClerkKey(key.Key{Root: r.ck.Root}, phone.pass, r.holder.pub, at, 2<<40)
 	must(t, err)
 	must(t, r.k.Issue(at, nil, raise))
-	must(t, r.k.Unenroll(at+1, phone.pk))
+	must(t, r.k.Unenroll(at+1, key.Unenroll(r.owner.pass, phone.pk)))
 	if got := r.k.State().Pending(at + 2); len(got) != 0 {
 		t.Fatalf("the phone's pending link still listed: %d", len(got))
 	}
@@ -425,7 +425,7 @@ func TestAClerkKeyLivesAtMostClerkLifeOnceLive(t *testing.T) {
 // log entry that cuts one off changes nothing (#2670 item 3).
 func TestAnAnchorIsNotCutOff(t *testing.T) {
 	r := newRig(t)
-	if err := r.k.Unenroll(1, r.owner.pk); !errors.Is(err, kernel.ErrAnchor) {
+	if err := r.k.Unenroll(1, key.Unenroll(r.owner.pass, r.owner.pk)); !errors.Is(err, kernel.ErrAnchor) {
 		t.Fatalf("Unenroll of an anchor: %v", err)
 	}
 	// What the anchor signed outlives a logged cut-off of it: its task
@@ -434,7 +434,7 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	held := trashRoot(r, "r2", r.owner)
 	must(t, r.issue(1, held))
-	_, err := r.k.Log().Append(2, kernel.TUnenrolled, 1, struct{ Passkey key.PublicKey }{r.owner.pk})
+	_, err := r.k.Log().Append(2, kernel.TUnenrolled, 1, struct{ key.Unenrollment }{key.Unenroll(r.owner.pass, r.owner.pk)})
 	must(t, err)
 	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
 	must(t, err)

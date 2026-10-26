@@ -19,8 +19,9 @@ const (
 	// assertion over that challenge and answers Text{} once the kernel
 	// has enrolled the point.
 	OpPasskeyFinish = "page_passkey_finish"
-	// OpPasskeyCutOff (PasskeyCutOff) cuts a listed phone passkey off for
-	// good and answers Text{}; a hardware key is ErrPasskeyAnchor.
+	// OpPasskeyCutOff (PasskeyCutOff) takes a hardware key's get()
+	// assertion over a listed phone passkey's CutChallenge, cuts it off for
+	// good and answers Text{}; a hardware key is ErrPasskeyAnchor (#3209).
 	OpPasskeyCutOff = "page_passkey_cut_off"
 )
 
@@ -35,10 +36,10 @@ const (
 	// only recovery replaces (REC-3).
 	ErrPasskeyAnchor = "passkey anchor"
 	// ErrPasskeyNotAnchor: the tap was a phone passkey's, and only a
-	// hardware key enrols another.
+	// hardware key enrols or cuts off another.
 	ErrPasskeyNotAnchor = "passkey not anchor"
 	// ErrPasskeyBadAssertion: no listed key made that tap over this
-	// enrolment's challenge.
+	// enrolment's or cut-off's challenge.
 	ErrPasskeyBadAssertion = "passkey bad assertion"
 	// ErrPasskeyRefused: the kernel refused what passed agentosd's checks.
 	ErrPasskeyRefused = "passkey refused"
@@ -82,6 +83,9 @@ type Passkey struct {
 	Alg string `json:"alg"`
 	// By is the enrolling hardware key's Fingerprint; "" for a hardware key.
 	By string `json:"by,omitempty"`
+	// CutChallenge is the challenge a hardware key signs to cut a live
+	// phone passkey off; absent for the others.
+	CutChallenge []byte `json:"cut_challenge,omitempty"`
 }
 
 // PasskeyList is the owner's keys as the kernel's log has them: the
@@ -113,8 +117,12 @@ type PasskeyFinish struct {
 	Signature         []byte `json:"signature"`
 }
 
-// PasskeyCutOff names a listed key by its ID.
+// PasskeyCutOff names a listed key by its ID, with the hardware key's
+// get() assertion over its CutChallenge as the browser returned it.
 type PasskeyCutOff struct {
-	Token string `json:"token"`
-	ID    string `json:"id"`
+	Token             string `json:"token"`
+	ID                string `json:"id"`
+	AuthenticatorData []byte `json:"authenticator_data,omitempty"`
+	ClientDataJSON    []byte `json:"client_data_json,omitempty"`
+	Signature         []byte `json:"signature,omitempty"`
 }

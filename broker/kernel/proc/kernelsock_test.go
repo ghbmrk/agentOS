@@ -561,7 +561,11 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				return grantRead{from, ok}, nil
 			}},
 		{name: "undo", op: "undo", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Undo("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(now(), "p1", 0) }},
-		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unenroll(key.Ed25519(phone)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unenroll(now(), key.Ed25519(phone)) }},
+		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) {
+			return nil, o.Unenroll(key.Unenroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
+		}, call: func(k *kernel.Kernel) (any, error) {
+			return nil, k.Unenroll(now(), key.Unenroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
+		}},
 		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
 		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
 		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
@@ -619,4 +623,32 @@ func logged(b *box, from int) string {
 		return nil
 	})
 	return strings.Join(out, "\n")
+}
+
+// A phone passkey is cut off over the owner socket only on a hardware key's
+// signature (#3209): the phone's own cut-off is refused as
+// kernel.ErrNotUnenrolled and logs nothing; the anchor's cuts it off.
+func TestOwnerSocketCutsAPhoneOffOnlyOnAHardwareKey(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	phone, phonePriv := gen(8)
+	pk := key.Ed25519(phone)
+	if err := o.Enroll(key.Enroll(key.Ed25519Signer(ownerPriv), pk)); err != nil {
+		t.Fatal(err)
+	}
+	n := b.entries()
+	for _, u := range []key.Unenrollment{{Passkey: pk}, key.Unenroll(key.Ed25519Signer(phonePriv), pk)} {
+		if err := o.Unenroll(u); !errors.Is(err, kernel.ErrNotUnenrolled) {
+			t.Fatalf("an unsigned or phone-signed cut-off: %v", err)
+		}
+	}
+	if b.entries() != n {
+		t.Fatal("a refused cut-off logged")
+	}
+	if err := o.Unenroll(key.Unenroll(key.Ed25519Signer(ownerPriv), pk)); err != nil {
+		t.Fatal(err)
+	}
+	if _, cut, err := o.Enrollments(); err != nil || !key.In(cut, pk) {
+		t.Fatalf("the hardware key's cut-off: %v %v", cut, err)
+	}
 }

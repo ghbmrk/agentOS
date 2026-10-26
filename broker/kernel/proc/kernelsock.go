@@ -150,8 +150,8 @@ var OwnerSide = Side{"owner", map[string]op{
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
 	"undo":   act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Undo(now, a.Plan, a.Index) }),
 	"enroll": act(func(k *kernel.Kernel, now int64, e key.Enrollment) error { return k.Enroll(now, e) }),
-	"unenroll": act(func(k *kernel.Kernel, now int64, pk key.PublicKey) error {
-		return k.Unenroll(now, pk)
+	"unenroll": act(func(k *kernel.Kernel, now int64, u key.Unenrollment) error {
+		return k.Unenroll(now, u)
 	}),
 	"extend":  act(func(k *kernel.Kernel, now int64, a extendArgs) error { return k.Extend(now, a.Ext, a.Plan) }),
 	"setline": act(func(k *kernel.Kernel, now int64, a lineArgs) error { return k.SetLine(now, a.Percent, a.Cosigns...) }),
@@ -372,6 +372,7 @@ var (
 func init() {
 	wireList = []error{
 		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
+		kernel.ErrNotUnenrolled,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
@@ -490,8 +491,10 @@ func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan
 func (o Owner) Undo(plan string, index int) error {
 	return o.Call("undo", stepArgs{plan, index}, nil)
 }
-func (o Owner) Enroll(e key.Enrollment) error   { return o.Call("enroll", e, nil) }
-func (o Owner) Unenroll(pk key.PublicKey) error { return o.Call("unenroll", pk, nil) }
+func (o Owner) Enroll(e key.Enrollment) error { return o.Call("enroll", e, nil) }
+func (o Owner) Unenroll(u key.Unenrollment) error {
+	return o.Call("unenroll", u, nil)
+}
 func (o Owner) Extend(ext key.Key, plan string) error {
 	return o.Call("extend", extendArgs{ext, plan}, nil)
 }

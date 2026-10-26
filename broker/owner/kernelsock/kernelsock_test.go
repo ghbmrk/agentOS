@@ -516,7 +516,10 @@ func TestEnrollAndUnenrollReachTheKernel(t *testing.T) {
 	if err != nil || len(es) != 1 || es[0].Passkey != phone || es[0].By != as[1].Public() || len(un) != 0 {
 		t.Fatalf("enrolled %+v, cut off %v, %v", es, un, err)
 	}
-	if err := o.Unenroll(ctx, phone); err != nil {
+	if err := o.Unenroll(ctx, key.Unenrollment{Passkey: phone, By: phone}); !errors.As(err, new(Refused)) || errors.Is(err, ErrAnchor) {
+		t.Fatalf("a cut-off no hardware key signed: %v", err) // #3209
+	}
+	if err := o.Unenroll(ctx, key.Unenroll(as[0], phone)); err != nil {
 		t.Fatal(err)
 	}
 	if es, un, err = o.Enrollments(ctx); err != nil || len(es) != 1 || len(un) != 1 || un[0] != phone {
@@ -538,7 +541,7 @@ func TestUnenrollingAnAnchorIsErrAnchor(t *testing.T) {
 	ctx := context.Background()
 	as := anchorSigners(t)
 	o := kernelWith(t, publics(as))
-	if err := o.Unenroll(ctx, as[0].Public()); !errors.Is(err, ErrAnchor) {
+	if err := o.Unenroll(ctx, key.Unenroll(as[0], as[0].Public())); !errors.Is(err, ErrAnchor) {
 		t.Fatalf("cut off an anchor: %v", err)
 	}
 	es, un, err := o.Enrollments(ctx)
@@ -563,7 +566,7 @@ func TestASetupOnlyKernelRefusesPasskeyOps(t *testing.T) {
 	phone := phoneKey(t, "agentos.internal")
 	_, _, err1 := o.Enrollments(ctx)
 	_, err2 := o.Anchors(ctx)
-	for i, err := range []error{o.Enroll(ctx, key.Enroll(as[0], phone)), o.Unenroll(ctx, phone), err1, err2} {
+	for i, err := range []error{o.Enroll(ctx, key.Enroll(as[0], phone)), o.Unenroll(ctx, key.Unenroll(as[0], phone)), err1, err2} {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("call %d: %v", i, err)
 		}

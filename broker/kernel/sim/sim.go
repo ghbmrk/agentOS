@@ -634,8 +634,12 @@ func (s *sim) phoneOp() error {
 	}
 	switch s.pick(4) {
 	case 0, 1:
+		s.logf("phone signs its own cut-off")
+		if err := s.k.Unenroll(s.kt(), key.Unenroll(s.phone.pass, s.phone.pk)); !errors.Is(err, kernel.ErrNotUnenrolled) {
+			s.w.bad = append(s.w.bad, "a cut-off no hardware key signed was taken")
+		}
 		s.logf("cut phone off")
-		if err := s.k.Unenroll(s.kt(), s.phone.pk); err != nil {
+		if err := s.k.Unenroll(s.kt(), key.Unenroll(s.owner.pass, s.phone.pk)); err != nil {
 			return err
 		}
 		s.cut()

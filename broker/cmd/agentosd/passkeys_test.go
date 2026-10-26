@@ -140,12 +140,12 @@ func (k *testKernel) Enroll(_ context.Context, e key.Enrollment) error {
 	return k.answer(k.k.Enroll(time.Now().UnixMilli(), e))
 }
 
-func (k *testKernel) Unenroll(_ context.Context, pk key.PublicKey) error {
+func (k *testKernel) Unenroll(_ context.Context, u key.Unenrollment) error {
 	k.unenrolls++
 	if err := k.answer(nil); err != nil {
 		return err
 	}
-	return k.answer(k.k.Unenroll(time.Now().UnixMilli(), pk))
+	return k.answer(k.k.Unenroll(time.Now().UnixMilli(), u))
 }
 
 // bootKernel boots a kernel over store with anchors (none: setup-only).
@@ -195,6 +195,15 @@ func (r *passkeyRig) enrol(session string, phone, by *authenticator) error {
 	}
 	ad, cd, sig := by.get(r.t, c)
 	return r.p.Finish(context.Background(), session, ad, cd, sig)
+}
+
+// cut cuts phone off on by's tap over its listed CutChallenge (#3209).
+func (r *passkeyRig) cut(phone, by *authenticator) error {
+	r.t.Helper()
+	id := keyID(phone.public(r.t))
+	c := key.Challenge(key.UnenrollMsg(phone.public(r.t)))
+	ad, cd, sig := by.get(r.t, c[:])
+	return r.p.CutOff(context.Background(), id, ad, cd, sig)
 }
 
 func (r *passkeyRig) enrolled() []key.Enrollment {
@@ -353,14 +362,14 @@ func TestTheAnchorThatSignedIsFound(t *testing.T) {
 // both agentosd and the kernel, and is listed so.
 func TestCutOffAnAnchorIsRefusedBeforeTheKernel(t *testing.T) {
 	r := newPasskeyRig(t)
-	if err := r.p.CutOff(context.Background(), keyID(r.anchors[0].public(t))); code(err) != localapi.ErrPasskeyAnchor {
+	if err := r.p.CutOff(context.Background(), keyID(r.anchors[0].public(t)), nil, nil, nil); code(err) != localapi.ErrPasskeyAnchor {
 		t.Fatalf("cut off an anchor: %v", err)
 	}
 	if r.k.unenrolls != 0 {
 		t.Fatal("unenroll sent for an anchor")
 	}
 	// The kernel's own refusal of an anchor maps to the same code.
-	if err := passkeyCode(r.k.Unenroll(context.Background(), r.anchors[0].public(t)), localapi.ErrPasskeyRefused); code(err) != localapi.ErrPasskeyAnchor {
+	if err := passkeyCode(r.k.Unenroll(context.Background(), key.Unenrollment{Passkey: r.anchors[0].public(t)}), localapi.ErrPasskeyRefused); code(err) != localapi.ErrPasskeyAnchor {
 		t.Fatalf("the kernel's ErrAnchor: %v", err)
 	}
 	phone := newAuthenticator(t)
@@ -368,16 +377,16 @@ func TestCutOffAnAnchorIsRefusedBeforeTheKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := keyID(phone.public(t))
-	if err := r.p.CutOff(context.Background(), id); err != nil {
+	if err := r.cut(phone, r.anchors[0]); err != nil {
 		t.Fatal(err)
 	}
 	if key.In(r.k.k.State().Passkeys(), phone.public(t)) {
 		t.Fatal("the phone is still in the owner's set")
 	}
-	if err := r.p.CutOff(context.Background(), id); err != nil {
+	if err := r.p.CutOff(context.Background(), id, nil, nil, nil); err != nil {
 		t.Fatalf("cutting off again: %v", err)
 	}
-	if err := r.p.CutOff(context.Background(), keyID(newAuthenticator(t).public(t))); code(err) != localapi.ErrPasskeyStale {
+	if err := r.p.CutOff(context.Background(), keyID(newAuthenticator(t).public(t)), nil, nil, nil); code(err) != localapi.ErrPasskeyStale {
 		t.Fatalf("a key not listed: %v", err)
 	}
 	// A phone cut off cannot be enrolled again.
@@ -461,7 +470,7 @@ func TestNoKernelTextReachesThePage(t *testing.T) {
 	if _, err := p.Begin(context.Background(), "s", phone.point(t)); code(err) != localapi.ErrPasskeySetup {
 		t.Fatalf("a setup-only kernel's begin: %v", err)
 	}
-	if err := p.CutOff(context.Background(), keyID(phone.public(t))); code(err) != localapi.ErrPasskeySetup {
+	if err := p.CutOff(context.Background(), keyID(phone.public(t)), nil, nil, nil); code(err) != localapi.ErrPasskeySetup {
 		t.Fatalf("a setup-only kernel's cut off: %v", err)
 	}
 	if _, err := p.Begin(context.Background(), "s", make([]byte, 65)); code(err) != localapi.ErrBadArgs {
@@ -479,7 +488,7 @@ func TestNoKernelTextReachesThePage(t *testing.T) {
 		check("list", err)
 		ad, cd, sig := r.anchors[0].get(t, c)
 		check("finish", r.p.Finish(context.Background(), "s", ad, cd, sig))
-		check("cut off", r.p.CutOff(context.Background(), keyID(phone.public(t))))
+		check("cut off", r.p.CutOff(context.Background(), keyID(phone.public(t)), nil, nil, nil))
 		_, err = r.p.Begin(context.Background(), "s", phone.point(t))
 		check("begin", err)
 	}
@@ -498,5 +507,52 @@ func TestRPIDIsADomain(t *testing.T) {
 		if validRPID(rp) != ok {
 			t.Errorf("%q: want %v", rp, ok)
 		}
+	}
+}
+
+// A phone passkey is cut off only on a hardware key's tap over its listed
+// CutChallenge (#3209): no tap, the phone's own, another phone's, a
+// stranger's, or a hardware key's over another key's challenge is refused
+// before the kernel; the hardware key's cuts it off.
+func TestCutOffAPhoneNeedsAHardwareKeyTap(t *testing.T) {
+	r := newPasskeyRig(t)
+	phone, other := newAuthenticator(t), newAuthenticator(t)
+	if err := r.enrol("s1", phone, r.anchors[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.enrol("s2", other, r.anchors[1]); err != nil {
+		t.Fatal(err)
+	}
+	l, err := r.p.List(context.Background())
+	c := key.Challenge(key.UnenrollMsg(phone.public(t)))
+	if err != nil || len(l.Enrolled) != 2 || string(l.Enrolled[0].CutChallenge) != string(c[:]) || l.Anchors[0].CutChallenge != nil {
+		t.Fatalf("listed cut-off challenges: %+v %v", l, err)
+	}
+	id := keyID(phone.public(t))
+	overOther := key.Challenge(key.UnenrollMsg(other.public(t)))
+	ad, cd, sig := r.anchors[0].get(t, overOther[:])
+	if err := r.p.CutOff(context.Background(), id, nil, nil, nil); code(err) != localapi.ErrPasskeyBadAssertion {
+		t.Fatalf("no tap: %v", err)
+	}
+	if err := r.cut(phone, phone); code(err) != localapi.ErrPasskeyNotAnchor {
+		t.Fatalf("the phone's own tap: %v", err)
+	}
+	if err := r.cut(phone, other); code(err) != localapi.ErrPasskeyNotAnchor {
+		t.Fatalf("another phone's tap: %v", err)
+	}
+	if err := r.cut(phone, newAuthenticator(t)); code(err) != localapi.ErrPasskeyBadAssertion {
+		t.Fatalf("a stranger's tap: %v", err)
+	}
+	if err := r.p.CutOff(context.Background(), id, ad, cd, sig); code(err) != localapi.ErrPasskeyBadAssertion {
+		t.Fatalf("a hardware key's tap over another key: %v", err)
+	}
+	if r.k.unenrolls != 0 || !key.In(r.k.k.State().Passkeys(), phone.public(t)) {
+		t.Fatal("a refused cut-off reached the kernel")
+	}
+	if err := r.cut(phone, r.anchors[1]); err != nil {
+		t.Fatal(err)
+	}
+	if key.In(r.k.k.State().Passkeys(), phone.public(t)) || !key.In(r.k.k.State().Passkeys(), other.public(t)) {
+		t.Fatal("the hardware key's tap: the phone stays, or the other phone went")
 	}
 }
