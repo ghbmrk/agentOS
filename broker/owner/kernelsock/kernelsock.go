@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -247,4 +248,68 @@ func (o Owner) Plan(ctx context.Context, id string) (status string, phases []str
 	var r planRead
 	err = o.call(ctx, "plan", id, &r)
 	return r.Status, r.Phases, r.Status != "", err
+}
+
+// ErrAnchor is the kernel's refusal to cut off one of the owner's hardware
+// keys (kernel.ErrAnchor): only recovery replaces one (REC-3, #2740). The
+// kernel's text is matched here and never passed on.
+var ErrAnchor = errors.New("kernelsock: the kernel refused: that key is an anchor")
+
+// ErrSetupOnly is a setup-only kernel's refusal of every call but setup's
+// (kernel/proc ErrSetupOnly, matched by its text).
+var ErrSetupOnly = errors.New("kernelsock: the kernel is waiting for setup")
+
+// setupOnlyText is kernel/proc ErrSetupOnly's text; TestASetupOnlyKernelRefusesPasskeyOps
+// keeps the two the same.
+const setupOnlyText = "run: I am waiting for setup; I take only your two hardware keys until then"
+
+// typed is err as ErrAnchor or ErrSetupOnly when the kernel's words are
+// exactly that refusal's, else err.
+func typed(err error) error {
+	var r Refused
+	if !errors.As(err, &r) {
+		return err
+	}
+	switch r.Text {
+	case kernel.ErrAnchor.Error():
+		return ErrAnchor
+	case setupOnlyText:
+		return ErrSetupOnly
+	}
+	return err
+}
+
+// Enroll logs an anchor-signed enrollment of a passkey, such as a new
+// phone's (D-146); the kernel checks By against its anchors and Sig
+// against EnrollMsg(Passkey), and refuses with ErrNotEnrolled's text
+// otherwise. A setup-only kernel refuses it (ErrSetupOnly).
+func (o Owner) Enroll(ctx context.Context, e key.Enrollment) error {
+	return typed(o.call(ctx, "enroll", e, nil))
+}
+
+// Unenroll cuts a passkey off for good. The kernel refuses an anchor
+// (ErrAnchor) and a setup-only kernel refuses it (ErrSetupOnly).
+func (o Owner) Unenroll(ctx context.Context, pk key.PublicKey) error {
+	return typed(o.call(ctx, "unenroll", pk, nil))
+}
+
+// enrolled is kernel/proc's enrollments frame.
+type enrolled struct {
+	Enrolled   []key.Enrollment `json:"enrolled"`
+	Unenrolled []key.PublicKey  `json:"unenrolled"`
+}
+
+// Enrollments reads the log's enrollments and the passkeys cut off, as the
+// kernel's Passkeys reads them.
+func (o Owner) Enrollments(ctx context.Context) ([]key.Enrollment, []key.PublicKey, error) {
+	var e enrolled
+	err := typed(o.call(ctx, "enrollments", nil, &e))
+	return e.Enrolled, e.Unenrolled, err
+}
+
+// Anchors reads the owner's hardware keys as setup logged them, in order.
+func (o Owner) Anchors(ctx context.Context) ([]key.PublicKey, error) {
+	var a []key.PublicKey
+	err := typed(o.call(ctx, "anchors", nil, &a))
+	return a, err
 }
