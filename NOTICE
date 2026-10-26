@@ -39,7 +39,7 @@ MIT dependencies (broker/vendor)
   rust_h265 and oxideav-h265, whose notices it carries in its LICENSE.
   It grants no HEVC patent rights; HEVC is covered by patent pools and
   unpooled holders, and a distributor of an image with it may need their
-  licences)
+  licences); broker/third_party/h265 is a patched copy of v0.2.3
 - github.com/gobwas/httphead, pool, ws
 - github.com/icholy/digest
 - github.com/makiuchi-d/gozxing

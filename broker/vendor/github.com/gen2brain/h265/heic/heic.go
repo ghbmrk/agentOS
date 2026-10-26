@@ -398,6 +398,9 @@ func isAlphaURN(s string) bool {
 type itemDecoder struct {
 	d   hevc.Decoder
 	cfg *hevcConfig
+	// agentos: limit, when set, bounds this decoder's frames in place of
+	// the file's limit, as a grid's tiles are bounded by their own size.
+	limit int
 }
 
 // use sets how many goroutines this decoder's wavefront may take.
@@ -432,7 +435,11 @@ func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
 		}
 	}
 
-	dec.d.FrameSizeLimit(f.limit())
+	if dec.limit > 0 {
+		dec.d.FrameSizeLimit(dec.limit)
+	} else {
+		dec.d.FrameSizeLimit(f.limit())
+	}
 
 	if dec.cfg != cfg.hvcC {
 		for _, nal := range cfg.hvcC.paramSets {
@@ -449,24 +456,39 @@ func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
 		dec.cfg = cfg.hvcC
 	}
 
-	var out []*hevc.Picture
+	// agentos: only the first picture is returned, so the others go back to
+	// the decoder as they come out, and an item coding many pictures holds
+	// one at a time instead of all of them.
+	var first *hevc.Picture
+
+	keep := func(pics []*hevc.Picture) {
+		for _, p := range pics {
+			if first == nil {
+				first = p
+			} else {
+				p.Release()
+			}
+		}
+	}
 
 	for _, u := range hevc.SplitHVCC(data, cfg.hvcC.lengthSize) {
 		pics, err := dec.d.DecodeNAL(u)
 		if err != nil {
+			first.Release()
+
 			return nil, wrap(err)
 		}
 
-		out = append(out, pics...)
+		keep(pics)
 	}
 
-	out = append(out, dec.d.Flush()...)
+	keep(dec.d.Flush())
 
-	if len(out) == 0 {
+	if first == nil {
 		return nil, ErrInvalid
 	}
 
-	return out[0], nil
+	return first, nil
 }
 
 func wrap(err error) error {

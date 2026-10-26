@@ -2,25 +2,50 @@ package handoff
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// REQ: STO-2, CLK-1
+// REQ: STO-2, CLK-1, KEY-4
 
 func gen(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	p := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
 	return p.Public().(ed25519.PublicKey), p
 }
 
+// es256 is a hardware key's credential on rpID.
+func es256(t *testing.T, rpID string) key.PublicKey {
+	t.Helper()
+	p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point, err := p.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := key.ES256(rpID, point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pk
+}
+
 var (
 	ownerPub, _ = gen(1)
 	_, headPriv = gen(3)
 	sparePub, _ = gen(4)
-	anchors     = []ed25519.PublicKey{ownerPub, sparePub}
+	anchors     = []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 )
 
 func testKeys() KernelKeys {
@@ -46,8 +71,12 @@ func pipeWith(t *testing.T, b []byte) *os.File {
 }
 
 // STO-2a-e: the kernel gets its keys from the unlock step's pipe, whole.
+// #3138: an ES256 hardware key crosses as itself, not misread as Ed25519.
 func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
-	b, err := testKeys().Marshal()
+	hw := es256(t, "box.example")
+	keys := testKeys()
+	keys.Anchors = []key.PublicKey{anchors[0], hw, anchors[1]}
+	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +85,7 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := testCounter()
-	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 2 || !k.Anchors[0].Equal(ownerPub) || !k.Anchors[1].Equal(sparePub) ||
+	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
 		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth, want.Auth) {
 		t.Fatalf("keys did not survive the hand-off: %+v", k)
 	}
@@ -77,9 +106,29 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	extra := append(bytes.Clone(good), 0)
 	retag := bytes.Clone(good)
 	retag[len(handoffTag)-2] = '1' // a v1 hand-off, which carried no counter
+	v2 := bytes.Clone(good)
+	v2[len(handoffTag)-2] = '2'                          // a v2 hand-off, whose anchors were bare Ed25519 keys
+	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
-	miscount[len(good)-2*ed25519.PublicKeySize-1] = 3
-	o := len(handoffTag) + 64 // the SRK name's length
+	miscount[count] = 3
+	zeroLen := bytes.Clone(good)
+	zeroLen[count+1], zeroLen[count+2] = 0, 0
+	pastEnd := bytes.Clone(good)
+	binary.BigEndian.PutUint16(pastEnd[len(good)-2-ed25519.PublicKeySize:], ed25519.PublicKeySize+1)
+	hw := es256(t, "box.example")
+	dup := testKeys()
+	dup.Anchors = []key.PublicKey{hw}
+	dupB, err := dup.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := hw.Encode()
+	dupB[len(dupB)-3-len(e)] = 2
+	dupB = binary.BigEndian.AppendUint16(dupB, uint16(len(e)))
+	dupB = append(dupB, e...)
+	ragged := append(bytes.Clone(good[:len(good)-ed25519.PublicKeySize-2]), 0, 31)
+	ragged = append(ragged, ownerPub[:31]...) // an entry that decodes to no key
+	o := len(handoffTag) + 64                 // the SRK name's length
 	srkLong := bytes.Clone(good)
 	srkLong[o] = maxName + 1
 	srkNone := bytes.Clone(good)
@@ -88,7 +137,8 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "long": extra, "tag": retag, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "count": miscount,
+		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
 	} {
@@ -110,11 +160,57 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	}
 }
 
-// D-146: the owner's anchors are 1 to MaxAnchors distinct keys.
+// D-146: the owner's anchors are 1 to MaxAnchors distinct keys, and
+// MaxAnchors ES256 keys on the longest RP ID fit the hand-off.
 func TestAnchorsAreBounded(t *testing.T) {
+	rp := strings.Repeat("a", 253)
+	var hw []key.PublicKey
+	for range MaxAnchors + 1 {
+		hw = append(hw, es256(t, rp))
+	}
+	k := testKeys()
+	k.Anchors = hw[:MaxAnchors]
+	b, err := k.Marshal()
+	if err != nil || len(b) > maxHandoff {
+		t.Fatalf("%d ES256 keys: %d bytes of %d, %v", MaxAnchors, len(b), maxHandoff, err)
+	}
+	if got, err := ReadKeys(pipeWith(t, b)); err != nil || len(got.Anchors) != MaxAnchors || got.Anchors[MaxAnchors-1] != hw[MaxAnchors-1] {
+		t.Fatalf("%d ES256 keys: read %v", MaxAnchors, err)
+	}
+	k.Anchors = hw
+	if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("%d keys: got %v, want ErrHandoff", MaxAnchors+1, err)
+	}
+	if _, err := EncodeAnchors(hw); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("%d keys encoded: got %v, want ErrHandoff", MaxAnchors+1, err)
+	}
+	// One more entry on the wire is refused by count, past maxHandoff too.
+	over := testKeys()
+	over.Anchors = hw[:1]
+	ob, err := over.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := hw[0].Encode()
+	ob[len(ob)-3-len(e)] = MaxAnchors + 1
+	for _, a := range hw[1:] {
+		ob = binary.BigEndian.AppendUint16(ob, uint16(len(a.Encode())))
+		ob = append(ob, a.Encode()...)
+	}
+	if _, err := parseKeys(ob); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("%d keys on the wire: got %v, want ErrHandoff", MaxAnchors+1, err)
+	}
+	if _, err := parseAnchors(ob[len(ob)-(MaxAnchors+1)*(2+len(e)):], MaxAnchors+1); !errors.Is(err, ErrHandoff) {
+		t.Fatalf("%d anchors: got %v, want ErrHandoff", MaxAnchors+1, err)
+	}
+}
+
+// #3138: a box enrolled before ES256 anchors keeps them: an entry of bare
+// 32-byte keys reads as Ed25519 keys. Damaged ones are refused.
+func TestAnOldAnchorsEntryStillReads(t *testing.T) {
 	one := []byte(ownerPub)
-	if a, err := ParseAnchors(one); err != nil || len(a) != 1 {
-		t.Fatalf("one key: %v %v", a, err)
+	if a, err := ParseAnchors(append(bytes.Clone(one), sparePub...)); err != nil || len(a) != 2 || a[0] != anchors[0] || a[1] != anchors[1] {
+		t.Fatalf("two keys: %v %v", a, err)
 	}
 	many := bytes.Repeat(make([]byte, ed25519.PublicKeySize), MaxAnchors+1)
 	for i := 0; i <= MaxAnchors; i++ {
@@ -125,6 +221,43 @@ func TestAnchorsAreBounded(t *testing.T) {
 	} {
 		if _, err := ParseAnchors(b); !errors.Is(err, ErrHandoff) {
 			t.Errorf("%s: got %v, want ErrHandoff", name, err)
+		}
+	}
+}
+
+// #3138: the tagged entry round-trips keys of both algorithms; a tag of
+// another version, or a damaged entry, is refused.
+func TestEncodeAnchorsRoundTrips(t *testing.T) {
+	want := []key.PublicKey{anchors[0], es256(t, "box.example"), anchors[1]}
+	b, err := EncodeAnchors(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseAnchors(b)
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("round trip: %v %v", got, err)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("anchor %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+	v2 := bytes.Clone(b)
+	v2[len(anchorsTag)-2] = '2'
+	zero := append([]byte(anchorsTag), 0)
+	for name, bad := range map[string][]byte{
+		"v2": v2, "tag only": []byte(anchorsTag), "count zero": zero, "short": b[:len(b)-1], "trailing": append(bytes.Clone(b), 0),
+		"miscount": append(append([]byte(anchorsTag), 2), b[len(anchorsTag)+1:]...),
+	} {
+		if _, err := ParseAnchors(bad); !errors.Is(err, ErrHandoff) {
+			t.Errorf("%s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for name, a := range map[string][]key.PublicKey{
+		"none": nil, "zero key": {{}}, "dup": {want[1], want[1]},
+	} {
+		if _, err := EncodeAnchors(a); !errors.Is(err, ErrHandoff) {
+			t.Errorf("encode %s: got %v, want ErrHandoff", name, err)
 		}
 	}
 }
@@ -140,7 +273,7 @@ func TestNoAnchorsStartsSetupOnly(t *testing.T) {
 	if err != nil || len(k.Anchors) != 0 || !k.Head.Equal(headPriv) {
 		t.Fatalf("no anchors: %v %v", k.Anchors, err)
 	}
-	if _, err := parseKeys(append(b, ownerPub...)); !errors.Is(err, ErrHandoff) {
+	if _, err := parseKeys(append(append(b, 0, 32), ownerPub...)); !errors.Is(err, ErrHandoff) {
 		t.Fatalf("a key after a count of none: got %v, want ErrHandoff", err)
 	}
 }

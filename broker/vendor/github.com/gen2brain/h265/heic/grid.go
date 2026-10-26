@@ -98,9 +98,20 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 
 	next.Store(1)
 
+	// agentos: each tile's frames are bounded by the tiles' own size, and
+	// the tiles decoding at once share the image's limit between them, so
+	// together they code no more than the declared picture.
+	tileLimit, err := f.tileLimit(g, tiles)
+	if err != nil {
+		return nil, err
+	}
+
 	// The tiles already spread across the budget, so each one's wavefront
 	// takes only what is left over rather than multiplying it.
 	tileWorkers := f.workers(len(tiles))
+	if n := f.limit(); n > 0 {
+		tileWorkers = max(min(tileWorkers, n/tileLimit), 1)
+	}
 	perTile := max(f.workers(0)/tileWorkers, 1)
 
 	for range tileWorkers - 1 {
@@ -109,7 +120,7 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 		go func() {
 			defer wg.Done()
 
-			var dec itemDecoder
+			dec := itemDecoder{limit: tileLimit}
 
 			dec.use(perTile)
 
@@ -148,7 +159,7 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 		}()
 	}
 
-	var dec itemDecoder
+	dec := itemDecoder{limit: tileLimit}
 
 	dec.use(perTile)
 
@@ -208,6 +219,39 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 	}
 
 	return out, nil
+}
+
+// tileLimit is the coded area each of a grid's tiles may take: the size
+// every tile's ispe names, plus one 64-sample coding tree block each way.
+// agentos: the tiles must name one size, which covers the grid's output
+// with no row or column of tiles wholly past it, so no tile is larger than
+// the grid needs.
+func (f *file) tileLimit(g gridInfo, tiles []uint32) (int, error) {
+	var tw, th int
+
+	for i, id := range tiles {
+		t := f.meta.items[id]
+		if t == nil {
+			return 0, ErrInvalid
+		}
+
+		p := f.meta.prop(t, "ispe")
+		if p == nil || p.w == 0 || p.h == 0 || i > 0 && (int(p.w) != tw || int(p.h) != th) {
+			return 0, ErrInvalid
+		}
+
+		tw, th = int(p.w), int(p.h)
+	}
+
+	if tw > 1<<16 || th > 1<<16 {
+		return 0, ErrUnsupported
+	}
+
+	if tw*g.cols < g.w || th*g.rows < g.h || tw*(g.cols-1) >= g.w || th*(g.rows-1) >= g.h {
+		return 0, ErrInvalid
+	}
+
+	return (tw + 64) * (th + 64), nil
 }
 
 func (f *file) decodeTile(dec *itemDecoder, id uint32) (*hevc.Picture, error) {
