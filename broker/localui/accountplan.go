@@ -37,7 +37,8 @@ const (
 // DReconnect, DSignInRefused, DNoSignIn); each names the step that exists
 // and where, as STATUS does (clerk/run seen.go). Only reconnect is fixed
 // on the Accounts page; an IMAP account is set up again on the Wi-Fi page,
-// which this page cannot link to (#3226).
+// which this page cannot link to (#3226). no-sign-in keeps STATUS's caveat
+// that an own-page-only provider cannot be used yet (#3256).
 func planReason(reason string) string {
 	switch reason {
 	case "reconnect":
@@ -45,7 +46,7 @@ func planReason(reason string) string {
 	case "sign-in-refused":
 		return "Your mail server refused my sign-in, so I can't read who writes to you. Set up the mail account again on my Wi-Fi page, then open this page again. If your provider uses two-step sign-in, use an app password it gives for mail apps."
 	case "no-sign-in":
-		return "Your mail server doesn't accept a password sign-in with these settings, so I can't read who writes to you. On my Wi-Fi page, set up the mail account again with the server settings your provider gives for mail apps, then open this page again."
+		return "Your mail server doesn't accept a password sign-in with these settings, so I can't read who writes to you. On my Wi-Fi page, set up the mail account again with the server settings your provider gives for mail apps, then open this page again. If your provider only allows signing in through its own page, I can't use this account yet."
 	}
 	return planFailed
 }
