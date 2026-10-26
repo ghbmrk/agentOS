@@ -40,3 +40,19 @@ func (a AgentosdAccounts) Finish(ctx context.Context, session, account, use, pas
 	}
 	return out.Detail
 }
+
+// planFor bounds Plan: a first plan reads the senders of the newest mail.
+// The clerk goes on to the end and keeps the plan, so the page opened again
+// gets it at once.
+const planFor = 30 * time.Second
+
+// Plan is setup's account plan over OpAccountPlan (AccountPlan).
+func (a AgentosdAccounts) Plan(ctx context.Context, session string) (localapi.AccountPlanned, bool) {
+	ctx, cancel := context.WithTimeout(ctx, planFor)
+	defer cancel()
+	var out localapi.AccountPlanned
+	if a.Owner.Call(ctx, localapi.OpAccountPlan, localapi.Auth{Token: session}, &out) != nil {
+		return localapi.AccountPlanned{}, false
+	}
+	return out, true
+}

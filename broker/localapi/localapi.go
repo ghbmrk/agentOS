@@ -91,6 +91,13 @@ const (
 	// bound; ErrFailed when the clerk did not answer.
 	OpAccountBegin  = "page_account_begin"
 	OpAccountFinish = "page_account_finish"
+	// OpAccountPlan (Auth) answers setup's account plan (AccountPlanned,
+	// TN-account-plan, SPEC §12.1 step 7) from the one account clerk that
+	// prepares it, the mail clerk: table IDs, the table's fixed wording and
+	// a source tag per item, or a typed reason and no items. It needs a
+	// session. ErrFailed when no clerk prepares a plan, it did not answer,
+	// or its answer is past AccountPlanned's bounds.
+	OpAccountPlan = "page_account_plan"
 	// OpCertify (CertifyArgs) certifies the page's own serving key for the
 	// page name under agentosd's page authority and answers a Certified
 	// (OWN-page-https, #3153; CH-9): the leaf and the authority's
@@ -103,7 +110,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpCertify}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpAccountPlan, OpCertify}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -140,6 +147,10 @@ const (
 	// OpAccountFinish).
 	MaxClientField = 512
 	MaxPasted      = 4 << 10
+	// MaxPlanItems bounds an account plan's items, MaxPlanText each of an
+	// item's strings (OpAccountPlan).
+	MaxPlanItems = 256
+	MaxPlanText  = 512
 	// MaxPub bounds a serving key to certify, PKIX DER (a P-256 key is 91
 	// bytes).
 	MaxPub = 256
@@ -453,4 +464,27 @@ type AccountFinish struct {
 // is sealed and the account set up, or a typed detail.
 type AccountFinished struct {
 	Detail string `json:"detail"`
+}
+
+// AccountPlanned is setup's account plan (OpAccountPlan): its items in the
+// plan's order, or no items and the clerk's typed reason (a reconnect or a
+// refused sign-in), which carries no value.
+type AccountPlanned struct {
+	Items  []AccountPlanItem `json:"items,omitempty"`
+	Reason string            `json:"reason,omitempty"`
+}
+
+// AccountPlanItem is one item (accounts.Item): every string is the known
+// services table's or a fixed constant, never mail's. Connected is set for
+// the account the clerk already has.
+type AccountPlanItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Group       string `json:"group"`
+	Source      string `json:"source"`
+	Preselected bool   `json:"preselected,omitempty"`
+	Label       string `json:"label"`
+	Advice      string `json:"advice,omitempty"`
+	Connected   bool   `json:"connected,omitempty"`
 }
