@@ -24,11 +24,11 @@ The source's client sends exactly these, and nothing else: PROBE (257, fixed `AP
 ## Split
 
 - **(a) this PR.** `broker/clerk/withings/`: codec and reassembler, the allowlist at the one write path, the read session over a `Link` and a `Prover`, the measure parser, the DEV-12 declaration (one operation, verb `read`), a synthetic scale, a fuzz target.
-- **(b)** Core-side clerk: `kl` in the sealed store (STO-2, CLK-1), the `Prover`, readings onto the bus as private, untrusted, unverified events (DEV-8), rate-limited. Needs STO-2 and the device clerk host.
-- **(c)** Enforcer-side BLE service on the enforcer's radio (BlueZ, confined radio stack, NET-2), and its channel messages. Needs the enforcer (Protectli V1410) and (s).
-- **(d)** One-time fetch of `kl` from Mark's Withings account (CLK-3 account clerk, CLK-1 custody).
-- **(e)** One-time export of the cloud history as private data on the core's store, after the first good local read.
-- **(s)** L1 spec-diff row, point 4.
+- **(b)** #3276. Core-side clerk: `kl` in the sealed store (STO-2, CLK-1), the `Prover`, readings onto the bus as private, untrusted, unverified events (DEV-8), rate-limited. Needs STO-2 and the device clerk host.
+- **(c)** #3277. Enforcer-side BLE service on the enforcer's radio (BlueZ, confined radio stack, NET-2), and its channel messages. Needs the enforcer (Protectli V1410) and (s).
+- **(d)** #3278. One-time fetch of `kl` from Mark's Withings account (CLK-3 account clerk, CLK-1 custody).
+- **(e)** #3279. One-time export of the cloud history as private data on the core's store, after the first good local read.
+- **(s)** #3280. L1 spec-diff row, point 4.
 
 ## Acceptance tests
 
