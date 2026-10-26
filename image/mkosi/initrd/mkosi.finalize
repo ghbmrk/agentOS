@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
-"""Pin the default initrd's /etc/shadow last-change day to the commit's (IMG-2).
+"""Pin the default initrd's /etc/shadow last-change day to the commit's (IMG-2), and refuse an initrd
+that could assemble a disk's volumes (HOST-1a).
 
 systemd-firstboot sets root's locked password (mkosi.conf's RootPassword=) and stamps the entry's
 last-change field with today's date, ignoring SOURCE_DATE_EPOCH (systemd v255 firstboot.c), so a
 build on another UTC day, or a pair of runners either side of midnight, gives a different initrd.
 mkosi runs this with the initrd's tree in $BUILDROOT after firstboot and before it writes the cpio.
 Every entry's third field becomes SOURCE_DATE_EPOCH's day; the other fields are kept byte for byte.
+
+The initrd has none of the host-disk udev rules (hostdisk ASSUMPTIONS H11), so it ships no tool or
+rule that assembles, activates or registers a disk's volumes: mkosi-initrd's lvm2 is removed
+(mkosi.conf), and this fails the build on any that is left. The lists are the image check's
+(../mkosi.finalize; tests/test_image.py checks they match).
 """
 import os
 import pathlib
+import re
 import sys
+
+ASSEMBLY_TOOLS = ("lvm", "pvscan", "vgchange", "lvchange", "mdadm", "mdmon", "dmraid", "make-bcache", "bcache-register",
+                  "probe-bcache", "zpool", "zfs", "multipath", "multipathd", "udisksd", "automount")
+ASSEMBLY_DIRS = ("usr/sbin", "usr/bin", "usr/lib/udev", "usr/libexec/udisks2", "usr/lib/udisks2")
+ASSEMBLY_RULES = re.compile(r"lvm|md-raid|mdadm|bcache|multipath|mpath|zfs|zvol|udisks|dmraid")
+RULE_DIRS = ("usr/lib/udev/rules.d", "etc/udev/rules.d")
 
 
 def pin(text, day):
@@ -27,6 +40,16 @@ def pin(text, day):
     return "".join(out)
 
 
+def assembly_tools(root):
+    """Every ASSEMBLY_TOOLS command and ASSEMBLY_RULES udev rule in the initrd tree at ROOT."""
+    out = [d + "/" + n for d in ASSEMBLY_DIRS for n in ASSEMBLY_TOOLS if os.path.lexists(os.path.join(root, d, n))]
+    for d in RULE_DIRS:
+        p = os.path.join(root, d)
+        if os.path.isdir(p):
+            out += [d + "/" + n for n in sorted(os.listdir(p)) if ASSEMBLY_RULES.search(n)]
+    return out
+
+
 def main(root, epoch):
     day = int(epoch) // 86400
     for name in ("shadow", "shadow-"):
@@ -42,3 +65,6 @@ if __name__ == "__main__":
         main(os.environ["BUILDROOT"], os.environ["SOURCE_DATE_EPOCH"])
     except ValueError as e:
         sys.exit("initrd /etc/shadow: %s" % e)
+    bad = assembly_tools(os.environ["BUILDROOT"])
+    if bad:
+        sys.exit("initrd: %s assemble a disk's volumes; the initrd ships none (HW-8, HOST-1a)" % ", ".join(bad))
