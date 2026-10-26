@@ -212,6 +212,24 @@ func (s *Secrets) Login(slot, user string) func(context.Context) (MailLogin, err
 	}
 }
 
+// DeviceSlots prefixes the only slots DeviceKey opens: a device's shared
+// key, such as a Withings scale's kl.
+const DeviceSlots = "device/"
+
+// DeviceKey opens a static slot under DeviceSlots for each call of the
+// function it returns, hands the key to fn and wipes it when fn returns;
+// any other slot does not open, so DeviceKey is no getter for another
+// clerk's secret. fn must not keep the key: the device clerk proves with it
+// and returns only the proof (CLK-1).
+func (s *Secrets) DeviceKey(slot string) func(fn func(key []byte) error) error {
+	return func(fn func(key []byte) error) error {
+		if !strings.HasPrefix(slot, DeviceSlots) {
+			return errors.New("clerk: DeviceKey opens only a device slot")
+		}
+		return s.with(slot, KindStatic, fn)
+	}
+}
+
 func (s *Secrets) Has(slot string) bool {
 	if s == nil {
 		return false
