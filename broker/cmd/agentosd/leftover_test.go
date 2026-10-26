@@ -196,6 +196,16 @@ func ownerNo(lineage, items string) rollbackAnswer {
 	return rollbackAnswer{lineage, items, recallOwnerNo}
 }
 
+// answersJournal is the engine part ownerNos reads: answers, and the
+// error a read of the journal gets.
+type answersJournal struct {
+	as  []rollbackAnswer
+	err error
+}
+
+func (j answersJournal) ReadTrail() ([]journal.Record, error) { return nil, j.err }
+func (j answersJournal) List() []journal.Status               { return journalAnswers(j.as) }
+
 func journalAnswers(as []rollbackAnswer) []journal.Status {
 	var out []journal.Status
 	for _, a := range as {

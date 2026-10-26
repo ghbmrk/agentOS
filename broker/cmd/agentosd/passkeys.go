@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,7 @@ type passkeyKernel interface {
 	Anchors(ctx context.Context) ([]key.PublicKey, error)
 	Enrollments(ctx context.Context) ([]key.Enrollment, []key.PublicKey, error)
 	Enroll(ctx context.Context, e key.Enrollment) error
-	Unenroll(ctx context.Context, pk key.PublicKey) error
+	Unenroll(ctx context.Context, u key.Unenrollment) error
 }
 
 // passkeyPending is how long a begun enrolment waits for the hardware
@@ -35,7 +37,8 @@ const maxPending = 16
 
 // passkeys is the owner side's passkey ops (#2779a; localsrv.Passkeys):
 // it lists the owner's keys from the kernel's log, builds an enrollment
-// from the page's two WebAuthn ceremonies, and cuts a phone passkey off.
+// from the page's two WebAuthn ceremonies, and cuts a phone passkey off
+// on a hardware key's tap (#3209).
 // It signs nothing and keeps nothing but the begun points: the kernel
 // checks every enrollment against its own anchors.
 type passkeys struct {
@@ -50,6 +53,14 @@ type passkeys struct {
 type pendingKey struct {
 	pk key.PublicKey
 	at time.Time
+	// f is the Finish under way on this point, nil when none is: a second
+	// Finish waits for it and takes its answer.
+	f *finishing
+}
+
+type finishing struct {
+	done chan struct{}
+	err  error // set before done is closed
 }
 
 func newPasskeys(k passkeyKernel, rpID string) *passkeys {
@@ -133,7 +144,10 @@ func (p *passkeys) List(ctx context.Context) (localapi.PasskeyList, error) {
 		l.Anchors = append(l.Anchors, listed(a, ""))
 	}
 	for _, e := range live {
-		l.Enrolled = append(l.Enrolled, listed(e.Passkey, fingerprint(e.By)))
+		k := listed(e.Passkey, fingerprint(e.By))
+		c := key.Challenge(key.UnenrollMsg(e.Passkey))
+		k.CutChallenge = c[:]
+		l.Enrolled = append(l.Enrolled, k)
 	}
 	for _, pk := range cut {
 		l.CutOff = append(l.CutOff, listed(pk, ""))
@@ -169,74 +183,111 @@ func (p *passkeys) Begin(ctx context.Context, session string, point []byte) ([]b
 		}
 		delete(p.pending, oldest)
 	}
-	p.pending[session] = pendingKey{pk, now}
+	p.pending[session] = pendingKey{pk: pk, at: now}
 	c := key.Challenge(key.EnrollMsg(pk))
 	return c[:], nil
 }
 
-// pendingFor is session's begun point while it has not lapsed.
-func (p *passkeys) pendingFor(session string) (key.PublicKey, bool) {
+// Finish enrols session's begun point under the anchor whose assertion
+// this is. One Finish runs per begun point: one posted while another is
+// under way waits for it and gets its answer, so the kernel is asked once
+// (#3175). A tap that is refused, or a kernel not reached, leaves the
+// point to tap again; the kernel's own answer spends it.
+func (p *passkeys) Finish(ctx context.Context, session string, authData, clientData, sig []byte) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	k, ok := p.pending[session]
 	if !ok || p.Now().Sub(k.at) >= passkeyPending {
 		delete(p.pending, session)
-		return key.PublicKey{}, false
-	}
-	return k.pk, true
-}
-
-// Finish enrols session's begun point under the anchor whose assertion
-// this is. The assertion is put in its one accepted encoding first
-// (KEY-7). The anchor is found by verifying against each; a tap by a live
-// phone passkey is ErrPasskeyNotAnchor, by no listed key
-// ErrPasskeyBadAssertion. These pre-checks only make the reply exact: the
-// kernel decides.
-func (p *passkeys) Finish(ctx context.Context, session string, authData, clientData, sig []byte) error {
-	pk, ok := p.pendingFor(session)
-	if !ok {
+		p.mu.Unlock()
 		return sockets.Code(localapi.ErrPasskeyStale)
 	}
-	canon, err := key.AssertionSig(key.Assertion{AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig})
-	if err != nil {
-		return sockets.Code(localapi.ErrPasskeyBadAssertion)
-	}
-	msg := key.EnrollMsg(pk)
-	anchors, live, _, err := p.keys(ctx)
-	if err != nil {
-		return passkeyCode(err, "")
-	}
-	var by key.PublicKey
-	for _, a := range anchors {
-		if a.Verify(msg, canon) {
-			by = a
-			break
+	if f := k.f; f != nil {
+		p.mu.Unlock()
+		select {
+		case <-f.done:
+			return f.err
+		case <-ctx.Done():
+			return sockets.Code(localapi.ErrPasskeyUnavailable)
 		}
 	}
-	if !by.Valid() {
-		for _, e := range live {
-			if e.Passkey.Verify(msg, canon) {
-				return sockets.Code(localapi.ErrPasskeyNotAnchor)
-			}
-		}
-		return sockets.Code(localapi.ErrPasskeyBadAssertion)
-	}
-	if err := p.K.Enroll(ctx, key.Enrollment{Passkey: pk, By: by, Sig: canon}); err != nil {
-		return passkeyCode(err, localapi.ErrPasskeyRefused)
-	}
+	f := &finishing{done: make(chan struct{})}
+	k.f = f
+	p.pending[session] = k
+	p.mu.Unlock()
+
+	spent, err := p.finish(ctx, k.pk, authData, clientData, sig)
 	p.mu.Lock()
-	if p.pending[session].pk == pk {
-		delete(p.pending, session)
+	if cur, ok := p.pending[session]; ok && cur.f == f {
+		if spent {
+			delete(p.pending, session)
+		} else {
+			cur.f = nil
+			p.pending[session] = cur
+		}
 	}
 	p.mu.Unlock()
-	return nil
+	f.err = err
+	close(f.done)
+	return err
 }
 
-// CutOff cuts the listed phone passkey id off for good. An anchor is
-// refused before the kernel is called (ErrPasskeyAnchor), and the kernel's
-// own refusal of one maps to the same code. A key cut off already is done;
-// one not listed is ErrPasskeyStale (the page's list is old).
-func (p *passkeys) CutOff(ctx context.Context, id string) error {
+// LogPasskeyRPID is logged when a page's tap is on another RP ID than
+// -passkey-rp-id.
+const LogPasskeyRPID = "passkeys: the page's RP ID is not -passkey-rp-id; nothing is enrolled"
+
+// finish is Finish's work on the begun point pk, and whether it spent pk.
+// The anchor is found by tapper; these pre-checks only make the reply
+// exact: the kernel decides.
+func (p *passkeys) finish(ctx context.Context, pk key.PublicKey, authData, clientData, sig []byte) (spent bool, err error) {
+	anchors, live, _, err := p.keys(ctx)
+	if err != nil {
+		return false, passkeyCode(err, "")
+	}
+	by, canon, err := tapper(key.EnrollMsg(pk), anchors, live, authData, clientData, sig)
+	if err != nil {
+		return false, err
+	}
+	// The tap verified, so authData names the page's RP ID. The phone's
+	// credential was made there, but pk is bound to agentosd's: on
+	// another, the kernel would log a passkey that never verifies.
+	if rp := sha256.Sum256([]byte(p.RPID)); !bytes.Equal(authData[:32], rp[:]) {
+		log.Print(LogPasskeyRPID)
+		return true, sockets.Code(localapi.ErrPasskeyUnavailable)
+	}
+	err = p.K.Enroll(ctx, key.Enrollment{Passkey: pk, By: by, Sig: canon})
+	var r kernelsock.Refused
+	answered := err == nil || errors.As(err, &r) || errors.Is(err, kernelsock.ErrSetupOnly) || errors.Is(err, kernelsock.ErrAnchor)
+	return answered, passkeyCode(err, localapi.ErrPasskeyRefused)
+}
+
+// tapper is the anchor whose assertion over msg this is, and the assertion
+// in its one accepted encoding (KEY-7). The anchor is found by verifying
+// against each; a tap by a live phone passkey is ErrPasskeyNotAnchor, by
+// no listed key ErrPasskeyBadAssertion.
+func tapper(msg []byte, anchors []key.PublicKey, live []key.Enrollment, authData, clientData, sig []byte) (key.PublicKey, []byte, error) {
+	canon, err := key.AssertionSig(key.Assertion{AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig})
+	if err != nil {
+		return key.PublicKey{}, nil, sockets.Code(localapi.ErrPasskeyBadAssertion)
+	}
+	for _, a := range anchors {
+		if a.Verify(msg, canon) {
+			return a, canon, nil
+		}
+	}
+	for _, e := range live {
+		if e.Passkey.Verify(msg, canon) {
+			return key.PublicKey{}, nil, sockets.Code(localapi.ErrPasskeyNotAnchor)
+		}
+	}
+	return key.PublicKey{}, nil, sockets.Code(localapi.ErrPasskeyBadAssertion)
+}
+
+// CutOff cuts the listed phone passkey id off for good on a hardware key's
+// assertion over key.UnenrollMsg of it (#3209), found by tapper. An anchor
+// is refused before the kernel is called (ErrPasskeyAnchor), and the
+// kernel's own refusal of one maps to the same code. A key cut off already
+// is done; one not listed is ErrPasskeyStale (the page's list is old).
+func (p *passkeys) CutOff(ctx context.Context, id string, authData, clientData, sig []byte) error {
 	anchors, live, cut, err := p.keys(ctx)
 	if err != nil {
 		return passkeyCode(err, "")
@@ -253,7 +304,12 @@ func (p *passkeys) CutOff(ctx context.Context, id string) error {
 	}
 	for _, e := range live {
 		if keyID(e.Passkey) == id {
-			return passkeyCode(p.K.Unenroll(ctx, e.Passkey), localapi.ErrPasskeyRefused)
+			by, canon, err := tapper(key.UnenrollMsg(e.Passkey), anchors, live, authData, clientData, sig)
+			if err != nil {
+				return err
+			}
+			u := key.Unenrollment{Passkey: e.Passkey, By: by, Sig: canon}
+			return passkeyCode(p.K.Unenroll(ctx, u), localapi.ErrPasskeyRefused)
 		}
 	}
 	return sockets.Code(localapi.ErrPasskeyStale)

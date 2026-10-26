@@ -27,7 +27,7 @@ import (
 )
 
 // callFor bounds one call: Finish redeems the code at Google and reads
-// the address.
+// the address, and a first Plan reads the senders of PlanMails mails.
 const callFor = time.Minute
 
 // maxAnswer bounds an answer: a consent address or a detail.
@@ -126,4 +126,14 @@ func (g Gmail) Begin(ctx context.Context, use string, reg *localapi.AccountRegis
 func (g Gmail) Finish(ctx context.Context, use, pasted string) (detail string, err error) {
 	err = g.call(ctx, "gmailfinish", finishArgs{use, pasted}, &detail)
 	return detail, err
+}
+
+// Plan is setup's account plan (clerk/run accountplan, TN-account-plan):
+// the mail clerk reads the senders under its grant and answers only plan
+// items, or a typed reason. Its frame is localapi.AccountPlanned's, which
+// clerk/run AccountPlanned keeps the same.
+func (g Gmail) Plan(ctx context.Context) (localapi.AccountPlanned, error) {
+	var p localapi.AccountPlanned
+	err := g.call(ctx, "accountplan", nil, &p)
+	return p, err
 }

@@ -26,6 +26,7 @@ type fakePasskeys struct {
 	points   [][]byte
 	finished [][3][]byte
 	cut      []string
+	cutTaps  [][3][]byte
 	err      error // every op but List answers it
 }
 
@@ -46,15 +47,17 @@ func (f *fakePasskeys) Finish(_ context.Context, session string, ad, cd, sig []b
 	return f.err
 }
 
-func (f *fakePasskeys) CutOff(_ context.Context, session, id string) error {
+func (f *fakePasskeys) CutOff(_ context.Context, session, id string, ad, cd, sig []byte) error {
 	f.sessions = append(f.sessions, session)
 	f.cut = append(f.cut, id)
+	f.cutTaps = append(f.cutTaps, [3][]byte{ad, cd, sig})
 	return f.err
 }
 
 var (
 	anchorKey = localapi.Passkey{ID: strings.Repeat("a1", 32), Fingerprint: "a1a1 a1a1 a1a1", Alg: "es256"}
-	phoneKey  = localapi.Passkey{ID: strings.Repeat("b2", 32), Fingerprint: "b2b2 b2b2 b2b2", Alg: "es256", By: "a1a1 a1a1 a1a1"}
+	phoneKey  = localapi.Passkey{ID: strings.Repeat("b2", 32), Fingerprint: "b2b2 b2b2 b2b2", Alg: "es256", By: "a1a1 a1a1 a1a1",
+		CutChallenge: []byte("fedcba9876543210fedcba9876543210")}
 )
 
 // passkeyRig is a set-up box whose local UI serves the passkey page.
@@ -226,5 +229,104 @@ func TestPasskeyPageRendersOnlyFingerprints(t *testing.T) {
 	}
 	if strings.Contains(p, strings.Repeat("d4", 32)) || strings.Contains(p, "<b>d4") {
 		t.Fatal("a cut-off key is offered or unescaped")
+	}
+}
+
+// A phone passkey's cut-off asks for a hardware key's tap over its
+// CutChallenge, and posts that assertion as the enrol step does (#3209); a
+// hardware key's confirm has no tap, and a malformed tap reaches nothing.
+func TestCutOffAPhoneAsksForAHardwareKeyTap(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {phoneKey.ID}}).Body.String())
+	if !strings.Contains(p, `id="pk-tap"`) || !strings.Contains(p, `data-challenge="`+enc(phoneKey.CutChallenge)+`"`) ||
+		!strings.Contains(p, `id="pk-finish"`) || !strings.Contains(p, `name="step" value="cutoff"`) {
+		t.Fatalf("the phone's confirm asks for no hardware key tap:\n%s", p)
+	}
+	p = html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {anchorKey.ID}}).Body.String())
+	if strings.Contains(p, `id="pk-tap"`) {
+		t.Fatalf("a hardware key's confirm asks for a tap:\n%s", p)
+	}
+	tap := url.Values{"step": {"cutoff"}, "id": {phoneKey.ID}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
+	r.post("/passkeys/", tap)
+	if len(fp.cutTaps) != 1 || string(fp.cutTaps[0][0]) != "ad" || string(fp.cutTaps[0][1]) != "cd" || string(fp.cutTaps[0][2]) != "sig" {
+		t.Fatalf("the tap did not reach agentosd: %q", fp.cutTaps)
+	}
+	tap.Set("sig", "not base64!")
+	r.post("/passkeys/", tap)
+	tap.Set("sig", "")
+	r.post("/passkeys/", tap)
+	if len(fp.cut) != 1 {
+		t.Fatal("a malformed tap reached agentosd")
+	}
+}
+
+// Picking the wrong passkey at the tap step keeps the owner there, with
+// the begun challenge, to tap again: the phone's own new passkey or another
+// phone's (#3175 item 2). Any other refusal goes back to the list.
+func TestAWrongTapStaysOnTheTapStep(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	ch := enc([]byte("0123456789abcdef0123456789abcdef"))
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"begin"}, "point": {enc(append([]byte{4}, make([]byte, 64)...))}}).Body.String())
+	if !strings.Contains(p, `name="ch" value="`+ch+`"`) {
+		t.Fatalf("the finish form lacks the challenge:\n%s", p)
+	}
+	tap := url.Values{"step": {"finish"}, "ch": {ch}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
+	for _, c := range []string{localapi.ErrPasskeyBadAssertion, localapi.ErrPasskeyNotAnchor} {
+		fp.err = Refused(c)
+		p = html.UnescapeString(r.post("/passkeys/", tap).Body.String())
+		if !strings.Contains(p, TapAgainText) || !strings.Contains(p, `id="pk-tap"`) || !strings.Contains(p, `data-challenge="`+ch+`"`) ||
+			!strings.Contains(p, `name="step" value="finish"`) {
+			t.Fatalf("%s: not back on the tap step:\n%s", c, p)
+		}
+	}
+	if !strings.Contains(TapAgainText, "choose your hardware key, not this phone's passkey") {
+		t.Fatal("the tap-again words changed")
+	}
+	// Another refusal, or a challenge that isn't one, goes back to the list.
+	fp.err = Refused(localapi.ErrPasskeyStale)
+	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
+		t.Fatal("a stale finish stayed on the tap step")
+	}
+	fp.err = Refused(localapi.ErrPasskeyBadAssertion)
+	tap.Set("ch", enc([]byte("short")))
+	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
+		t.Fatal("a bad challenge was shown back")
+	}
+	// The script asks the browser for a security key at the tap.
+	if !strings.Contains(passkeyJS, `hints: ["security-key"]`) || strings.Count(passkeyJS, "navigator.credentials.get(") != 1 {
+		t.Fatal("get() does not hint a security key")
+	}
+}
+
+// A phone passkey's cut-off tap that picks the wrong passkey stays on its
+// confirm step to tap again (#3175 item 2).
+func TestAWrongCutOffTapStaysOnTheConfirmStep(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	r, fp := passkeyRig(t)
+	r.signIn()
+	fp.err = Refused(localapi.ErrPasskeyNotAnchor)
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"cutoff"}, "id": {phoneKey.ID},
+		"ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}).Body.String())
+	if !strings.Contains(p, TapAgainText) || !strings.Contains(p, `data-challenge="`+enc(phoneKey.CutChallenge)+`"`) ||
+		!strings.Contains(p, `name="step" value="cutoff"`) {
+		t.Fatalf("not back on the confirm step:\n%s", p)
+	}
+}
+
+// A hardware key's confirm step gives the recovery reply and offers no
+// cut-off: it never says "for good", which is untrue for one (#3175 item 3).
+func TestAHardwareKeysConfirmGivesTheRecoveryReply(t *testing.T) {
+	r, fp := passkeyRig(t)
+	r.signIn()
+	p := html.UnescapeString(r.post("/passkeys/", url.Values{"step": {"confirm"}, "id": {anchorKey.ID}}).Body.String())
+	if !strings.Contains(p, AnchorReply) || strings.Contains(p, "for good") || strings.Contains(p, `value="cutoff"`) {
+		t.Fatalf("a hardware key's confirm:\n%s", p)
+	}
+	if len(fp.cut) != 0 {
+		t.Fatal("the confirm cut something off")
 	}
 }

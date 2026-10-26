@@ -195,7 +195,7 @@ type (
 		Cosigns []key.Cosign `json:",omitempty"`
 	}
 	enrolled   struct{ Enrollment key.Enrollment }
-	unenrolled struct{ Passkey key.PublicKey }
+	unenrolled struct{ key.Unenrollment } // an anchor's signed cut-off (#3209)
 	keyID      struct{ ID key.ID }
 	// modelUsed is usage a clerk metered itself, charged to the key it cites (LOG-7).
 	modelUsed struct {
@@ -851,8 +851,8 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if key.In(s.Anchors, b.Passkey) {
-			break // ErrAnchor
+		if key.In(s.Anchors, b.Passkey) || !b.Signed(s.Anchors) {
+			break // ErrAnchor, ErrNotUnenrolled
 		}
 		s.Unenrolled = append(s.Unenrolled, b.Passkey)
 		s.dropApprovals(b.Passkey)

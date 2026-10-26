@@ -287,10 +287,12 @@ func (o Owner) Enroll(ctx context.Context, e key.Enrollment) error {
 	return typed(o.call(ctx, "enroll", e, nil))
 }
 
-// Unenroll cuts a passkey off for good. The kernel refuses an anchor
-// (ErrAnchor) and a setup-only kernel refuses it (ErrSetupOnly).
-func (o Owner) Unenroll(ctx context.Context, pk key.PublicKey) error {
-	return typed(o.call(ctx, "unenroll", pk, nil))
+// Unenroll cuts a passkey off for good on a hardware key's signature over
+// key.UnenrollMsg (#3209); the kernel refuses one no anchor signed with
+// kernel.ErrNotUnenrolled's text. It refuses an anchor (ErrAnchor) and a
+// setup-only kernel refuses it (ErrSetupOnly).
+func (o Owner) Unenroll(ctx context.Context, u key.Unenrollment) error {
+	return typed(o.call(ctx, "unenroll", u, nil))
 }
 
 // enrolled is kernel/proc's enrollments frame.

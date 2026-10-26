@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -98,3 +99,43 @@ func TestGmailCallsOnlyTheMailProcess(t *testing.T) {
 		t.Fatalf("the clerk's own error: %v", err)
 	}
 }
+
+// REQ: TN-account-plan-6
+
+// The plan's frame is the one the mail process's owner socket answers: with
+// no account, the card, the wallet and the mailbox, each with its table
+// wording and source, and nothing the page's AccountPlanItem lacks.
+func TestPlanSpeaksTheMailProcesssWire(t *testing.T) {
+	p, err := Gmail{mailOwnerSocket(t), os.Getuid()}.Plan(context.Background())
+	if err != nil || p.Reason != "" || len(p.Items) != 3 {
+		t.Fatalf("plan %+v %v", p, err)
+	}
+	want := []localapi.AccountPlanItem{
+		{ID: "payment-card", Name: "Payment card", Kind: "money", Group: "payment", Source: "always", Preselected: true, Label: "Full power, same as yours"},
+		{ID: "payment-wallet", Name: "Payment wallet", Kind: "money", Group: "payment", Source: "always", Label: "Full power, same as yours"},
+		{ID: "mailbox", Name: "Give me an email address? About 1 minute.", Kind: "mail", Group: "mailbox", Source: "always", Label: "Full power, same as yours"},
+	}
+	if !reflect.DeepEqual(p.Items, want) {
+		t.Fatalf("items %+v, want %+v", p.Items, want)
+	}
+	// clerk/run's frame and the page's have the same fields, by JSON name.
+	names := func(v any) []string {
+		var out []string
+		ty := reflect.TypeOf(v)
+		for i := range ty.NumField() {
+			out = append(out, ty.Field(i).Tag.Get("json"))
+		}
+		return out
+	}
+	if a, b := names(run.PlanItem{}), names(localapi.AccountPlanItem{}); !reflect.DeepEqual(a, b) {
+		t.Fatalf("clerk/run's item %v, the page's %v", a, b)
+	}
+	if a, b := names(run.AccountPlanned{}), names(localapi.AccountPlanned{}); !reflect.DeepEqual(a, b) {
+		t.Fatalf("clerk/run's plan %v, the page's %v", a, b)
+	}
+}
+
+// Gmail is the mail clerk's planner as localsrv takes it.
+var _ interface {
+	Plan(context.Context) (localapi.AccountPlanned, error)
+} = Gmail{}

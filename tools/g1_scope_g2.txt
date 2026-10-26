@@ -40,31 +40,6 @@
 
 freeze on
 since 2026-10-17T17:06:19Z
-# #2198: in flight before the freeze began (opened 16:16:15Z); a base swap to refresh its
-# stale g1-freeze base logged base_ref_changed at 17:52:57Z, voiding the time exemption.
-exempt-pr 2198
-# #2319 (LOOP-0-nocap): Mark exempted it from the G2 freeze (Decisions tap 2026-10-17
-# 22:18:51Z; typed 2026-10-18 12:08:38Z, cmsg_01R63S2yrPkq32thy8WQCuvDFbgWfJAq8AyCQutcf8FxvF).
-exempt-pr 2319
-# #2399 (doclint ID renames, incl. one row in frozen broker/loops/ASSUMPTIONS.md) and #2327
-# (RES-5-membudget: the clean-room/loopbuild memory limit): Mark exempted both, typed
-# 2026-10-18 20:47:34Z, cmsg_01R63S2yrPkq32thy8WQCuvDX4TkwXSNydBjcLHtQWtPom (#2327 "Gate" tap
-# 20:06:12Z, cmsg_01R63S2yrPkq32thy8WQCuvDCAcgYTjGk8yLsmE8kFGFxK).
-exempt-pr 2399
-exempt-pr 2327
-# #2990 (RELIC-1): deletes relics of superseded designs, some outside this list (pubid,
-# evals/review/ and two spikes). Mark: "If deletion is reversible then delete" (2026-10-24
-# 12:11Z, cmsg_01R91wiieBzMSvPKFsAJVvuKAFtTNWiK8ju7sC8gNLP4PA). Remove once it merges.
-exempt-pr 2990
-# #3172 (OWN-page-https slice a): its new broker/pageca/ is linked by agentosd through
-# localsrv; #3172 itself adds `allow broker/pageca/`, which main cannot carry until the
-# directory exists. Mark: "Exempt #3172" (Decisions tap 2026-10-25 17:23Z,
-# cmsg_01R91wiieBzMSvPKFsAJVvuKBN15sZhxZ7iBVWpmvHBDwx). Remove once it merges.
-exempt-pr 3172
-# #3212 (MIG-4-recovery-a, #3185): the first broker/backup/ build, which lands its own
-# `allow broker/backup/` line. Mark admitted broker/backup/ under the freeze (Decisions 8
-# tap A, cmsg_01R91wiieBzMSvPKFsAJVvuKHeytwuDnDg8cSgGwgDnRX6). Remove once it merges.
-exempt-pr 3212
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.

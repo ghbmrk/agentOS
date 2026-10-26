@@ -697,7 +697,7 @@ func main() {
 			pre.m.Store(m)
 			// Held lineages go back before any machine is served or
 			// pruned; the journal has the owner's NOs by now.
-			recallHeld.settle(ctx, m, recallNos(d.Engine().List()), informOwner(d.Owner))
+			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d.Engine(), d.Admission(), "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
@@ -1222,6 +1222,21 @@ func recallNos(intents []journal.Status) []recallNo {
 		out = append(out, recallNo{l, items})
 	}
 	return out
+}
+
+// ownerNos reads the owner's NOs once the journal is known readable.
+// List cannot report a read failure: past the in-memory denials it
+// replays the journal and, if that fails, answers from memory without the
+// evicted ones, so an old NO would be missed and its lineage rolled back
+// against it (LOG-4). An unreadable journal errs instead.
+func ownerNos(e interface {
+	ReadTrail() ([]journal.Record, error)
+	List() []journal.Status
+}) ([]recallNo, error) {
+	if _, err := e.ReadTrail(); err != nil {
+		return nil, err
+	}
+	return recallNos(e.List()), nil
 }
 
 // informOwner sends the broker's fixed-wording notices (owner.Inform)

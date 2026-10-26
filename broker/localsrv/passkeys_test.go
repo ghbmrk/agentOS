@@ -5,6 +5,7 @@ package localsrv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -36,8 +37,8 @@ func (f *fakePasskeys) Finish(_ context.Context, session string, _, _, _ []byte)
 	return f.err
 }
 
-func (f *fakePasskeys) CutOff(_ context.Context, id string) error {
-	f.calls = append(f.calls, "cutoff "+id)
+func (f *fakePasskeys) CutOff(_ context.Context, id string, ad, cd, sig []byte) error {
+	f.calls = append(f.calls, fmt.Sprintf("cutoff %s %x %x %x", id, ad, cd, sig))
 	return f.err
 }
 
@@ -56,7 +57,7 @@ func passkeyArgs(tok string) map[string]any {
 		localapi.OpPasskeys:      localapi.Auth{Token: tok},
 		localapi.OpPasskeyBegin:  localapi.PasskeyBegin{Token: tok, Point: make([]byte, localapi.PasskeyPoint)},
 		localapi.OpPasskeyFinish: localapi.PasskeyFinish{Token: tok, AuthenticatorData: []byte{1}, ClientDataJSON: []byte{2}, Signature: []byte{3}},
-		localapi.OpPasskeyCutOff: localapi.PasskeyCutOff{Token: tok, ID: testID},
+		localapi.OpPasskeyCutOff: localapi.PasskeyCutOff{Token: tok, ID: testID, AuthenticatorData: []byte{4}, ClientDataJSON: []byte{5}, Signature: []byte{6}},
 	}
 }
 
@@ -84,7 +85,7 @@ func TestPasskeyOpsNeedALiveSession(t *testing.T) {
 			t.Errorf("%s: %v", op, err)
 		}
 	}
-	if len(f.calls) != 4 || f.calls[3] != "cutoff "+testID {
+	if len(f.calls) != 4 || f.calls[3] != "cutoff "+testID+" 04 05 06" {
 		t.Fatalf("calls %v", f.calls)
 	}
 	for _, s := range f.sessions {
@@ -122,6 +123,9 @@ func TestPasskeyFramesAreBounded(t *testing.T) {
 		{localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: tok, ID: strings.ToUpper(testID)}},
 		{localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: tok, ID: testID[:62]}},
 		{localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: tok, ID: strings.Repeat("g", 64)}},
+		// A cut-off's tap is whole or absent (#3209).
+		{localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: tok, ID: testID, AuthenticatorData: []byte{1}, ClientDataJSON: []byte{1}}},
+		{localapi.OpPasskeyCutOff, localapi.PasskeyCutOff{Token: tok, ID: testID, AuthenticatorData: []byte{1}, ClientDataJSON: []byte{1}, Signature: big}},
 	} {
 		if _, err := r.call(c.op, c.args); code(err) != localapi.ErrBadArgs {
 			t.Errorf("case %d (%s): %v", i, c.op, err)
