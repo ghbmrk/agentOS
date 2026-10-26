@@ -109,27 +109,19 @@ func (tk *testKernel) Submit(ctx context.Context, p kernel.Plan) error {
 	return nil
 }
 
-func (tk *testKernel) Plan(_ context.Context, id string) (string, []string, bool, error) {
+func (tk *testKernel) Plan(_ context.Context, id string) (kernel.PlanView, error) {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
 	if tk.readErr {
-		return "", nil, false, errors.New("owner socket: connection reset")
+		return kernel.PlanView{}, errors.New("owner socket: connection reset")
 	}
 	// The kernel process runs its plans on its own clock; here each read
 	// lets it.
 	tk.at++
 	if err := tk.k.Tick(tk.at); err != nil {
-		return "", nil, false, err
+		return kernel.PlanView{}, err
 	}
-	p := tk.k.State().Plans[id]
-	if p == nil {
-		return "", nil, false, nil
-	}
-	var phases []string
-	for _, st := range p.Steps {
-		phases = append(phases, st.Phase)
-	}
-	return p.Status, phases, true, nil
+	return tk.k.State().PlanView(id), nil
 }
 
 // Do and Probe are the mail clerk: every step it is sent is done once.

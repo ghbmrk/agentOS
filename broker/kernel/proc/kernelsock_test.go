@@ -88,10 +88,10 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if c, err := o.Changes(); err != nil || !c.Paused[id] || !c.Stopped {
 		t.Fatalf("changes over the socket: %+v, %v", c, err)
 	}
-	if status, phases, ok, err := o.Plan("o1"); err != nil || !ok || status != kernel.SActive || len(phases) != 1 {
-		t.Fatalf("plan over the socket: %q %v %v %v", status, phases, ok, err)
+	if v, ok, err := o.Plan("o1"); err != nil || !ok || v.Status != kernel.SActive || len(v.Steps) != 1 {
+		t.Fatalf("plan over the socket: %+v %v %v", v, ok, err)
 	}
-	if _, _, ok, err := o.Plan("none"); ok || err != nil {
+	if _, ok, err := o.Plan("none"); ok || err != nil {
 		t.Fatalf("a plan never submitted reads as found (%v)", err)
 	}
 	if from, ok, err := o.Granted(ver.Root()); err != nil || !ok || from == 0 {
@@ -468,14 +468,6 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	nonEmpty := func(v any) bool { b, _ := json.Marshal(v); return len(b) > 4 }
 	now := func() int64 { return clk.Load() }
-	plan := func(k *kernel.Kernel, id string) planRead {
-		p := k.State().Plans[id]
-		r := planRead{Status: p.Status}
-		for _, st := range p.Steps {
-			r.Phases = append(r.Phases, st.Phase)
-		}
-		return r
-	}
 
 	var admitted kernel.Admitted // the socket's admission, settled by both kernels' meter
 	cases := []twin{
@@ -545,12 +537,12 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				es, un := k.State().Enrollments()
 				return enrolled{es, un}, nil
 			}},
-		{name: "plan", op: "plan", read: func(v any) bool { return v.(planRead).Status != "" },
+		{name: "plan", op: "plan", read: func(v any) bool { return v.(kernel.PlanView).Status != "" },
 			sock: func(o Owner, _ Meter) (any, error) {
-				status, phases, _, err := o.Plan("p1")
-				return planRead{status, phases}, err
+				v, _, err := o.Plan("p1")
+				return v, err
 			},
-			call: func(k *kernel.Kernel) (any, error) { return plan(k, "p1"), nil }},
+			call: func(k *kernel.Kernel) (any, error) { return k.State().PlanView("p1"), nil }},
 		{name: "granted", op: "granted", read: func(v any) bool { return v.(grantRead).OK },
 			sock: func(o Owner, _ Meter) (any, error) {
 				from, ok, err := o.Granted(ver.Root())

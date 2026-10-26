@@ -342,6 +342,8 @@ type PlanState struct {
 	// Cancel is why a cancelled plan was cancelled, for STATUS: the code
 	// ("owner", a key refusal, or no-clerk) and its detail (OWN-17).
 	Cancel, CancelDetail string
+	// Reject is a rejected plan's failing check: its refusal code (PLN-4).
+	Reject string
 }
 
 // SpendHold is why a plan's spend is stopped. Root is the root of the key the
@@ -731,6 +733,34 @@ func (s *State) Status() []Unsettled {
 	return out
 }
 
+// PlanView is what the owner seam's plan read tells of a plan (PLN-4, PLN-5
+// (b)): its status, a rejected plan's failing check, and each step's phase,
+// its clerk's last answer and whether it was undone.
+type PlanView struct {
+	Status string     `json:"status"` // "": no such plan
+	Reject string     `json:"reject,omitempty"`
+	Steps  []StepView `json:"steps,omitempty"`
+}
+
+type StepView struct {
+	Phase  string `json:"phase"`
+	Result string `json:"result,omitempty"` // the clerk's last answer, as STATUS shows it
+	Undone bool   `json:"undone,omitempty"`
+}
+
+// PlanView is plan id's view; its Status is empty when the log has no such plan.
+func (s *State) PlanView(id string) PlanView {
+	p := s.Plans[id]
+	if p == nil {
+		return PlanView{}
+	}
+	v := PlanView{Status: p.Status, Reject: p.Reject}
+	for _, st := range p.Steps {
+		v.Steps = append(v.Steps, StepView{st.Phase, st.Detail, st.Undone})
+	}
+	return v
+}
+
 // MaxShown bounds a clerk's line in STATUS.
 const MaxShown = 256
 
@@ -971,7 +1001,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Seq == b.Cause && p.Status == SPending {
-			p.Status = SRejected
+			p.Status, p.Reject = SRejected, b.Code
 		}
 	case TPlanCancel:
 		b, err := body[planCancel](e)
