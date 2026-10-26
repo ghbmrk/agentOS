@@ -309,3 +309,78 @@ func (o Owner) Anchors(ctx context.Context) ([]key.PublicKey, error) {
 	err := typed(o.call(ctx, "anchors", nil, &a))
 	return a, err
 }
+
+// Backups (BAK-1, MIG-4-recovery-e3): the kernel holds the destinations and
+// writes, reads back and verifies each backup itself; the owner side
+// triggers, chooses and tells. The frames are kernel/proc's.
+
+// BackupView is a kept backup: its recipient only by ID, and whether the
+// kernel read it back whole.
+type BackupView struct {
+	Target     string `json:"target"`
+	BackupID   string `json:"backup_id"`
+	Recipient  string `json:"recipient"`
+	Created    int64  `json:"created"`
+	Generation uint64 `json:"generation"`
+	Verified   bool   `json:"verified"`
+}
+
+// TargetView is a destination; Rewritable is false for an append-only one,
+// where an erase cannot drop a key table.
+type TargetView struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Locator    string `json:"locator"`
+	AppendOnly bool   `json:"append_only"`
+	Removed    bool   `json:"removed"`
+	Rewritable bool   `json:"rewritable"`
+}
+
+// BackupsView is the current recipient's ID ("" when the store holds none,
+// so no backup can be taken), every destination and every kept backup.
+type BackupsView struct {
+	Recipient string       `json:"recipient"`
+	Targets   []TargetView `json:"targets"`
+	Backups   []BackupView `json:"backups"`
+}
+
+// Taken is one destination's outcome of a backup: the backup kept for it
+// (Reused when the last one was recent and verified), or why none was
+// written.
+type Taken struct {
+	Target string      `json:"target"`
+	Backup *BackupView `json:"backup,omitempty"`
+	Reused bool        `json:"reused,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
+
+// BackupTarget adds a destination on a hardware key's signature over
+// kernel.BackupTargetHash(n, t), n the destinations added so far.
+func (o Owner) BackupTarget(ctx context.Context, t kernel.BackupTarget, c key.Cosign) error {
+	return typed(o.call(ctx, "backuptarget", struct {
+		Target kernel.BackupTarget `json:"target"`
+		Cosign key.Cosign          `json:"cosign"`
+	}{t, c}, nil))
+}
+
+// Untarget stops new backups to a destination; its backups keep their
+// erase reach.
+func (o Owner) Untarget(ctx context.Context, name string) error {
+	return typed(o.call(ctx, "untarget", struct {
+		Name string `json:"name"`
+	}{name}, nil))
+}
+
+// Backup takes one backup now to every current destination.
+func (o Owner) Backup(ctx context.Context) ([]Taken, error) {
+	var t []Taken
+	err := typed(o.call(ctx, "backup", nil, &t))
+	return t, err
+}
+
+// Backups reads the recipient's ID, the destinations and the kept backups.
+func (o Owner) Backups(ctx context.Context) (BackupsView, error) {
+	var v BackupsView
+	err := typed(o.call(ctx, "backups", nil, &v))
+	return v, err
+}

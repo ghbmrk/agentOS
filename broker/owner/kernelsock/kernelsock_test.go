@@ -6,6 +6,7 @@ package kernelsock
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -572,5 +574,61 @@ func TestASetupOnlyKernelRefusesPasskeyOps(t *testing.T) {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("call %d: %v", i, err)
 		}
+	}
+}
+
+// Backups cross the owner socket in the kernel's frames: a destination
+// added on a hardware key's signature, a backup taken and verified by the
+// kernel, the kept backups read back, and a removal (MIG-4-recovery-e3).
+func TestBackupsReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	as := anchorSigners(t)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcp, err := backup.RecipientFor(bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(data, "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: pub, Sign: priv, Anchors: publics(as),
+		KeyDir: filepath.Join(data, "keys"), BackupDir: filepath.Join(data, "backups"), Recipient: append(rcp.X, rcp.EK...),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	tg := kernel.BackupTarget{Name: "drive", Kind: kernel.KindDir, Locator: t.TempDir()}
+	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(1, tg))); !errors.As(err, new(Refused)) {
+		t.Fatalf("a signature over another add: %v", err)
+	}
+	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(0, tg))); err != nil {
+		t.Fatal(err)
+	}
+	taken, err := o.Backup(ctx)
+	if err != nil || len(taken) != 1 || taken[0].Backup == nil || !taken[0].Backup.Verified || taken[0].Backup.Recipient != rcp.ID() {
+		t.Fatalf("backup: %+v %v", taken, err)
+	}
+	v, err := o.Backups(ctx)
+	if err != nil || v.Recipient != rcp.ID() || len(v.Targets) != 1 || !v.Targets[0].Rewritable || len(v.Backups) != 1 || *taken[0].Backup != v.Backups[0] {
+		t.Fatalf("backups: %+v %v", v, err)
+	}
+	if err := o.Untarget(ctx, "drive"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err = o.Backups(ctx); err != nil || !v.Targets[0].Removed || len(v.Backups) != 1 {
+		t.Fatalf("after the removal: %+v %v", v, err)
 	}
 }

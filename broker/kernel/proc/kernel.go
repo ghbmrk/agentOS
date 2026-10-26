@@ -32,6 +32,13 @@ type KernelConfig struct {
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
 	KeyDir string
+	// BackupDir is where the kernel keeps its backups' records, sealed
+	// under Key (MIG-4-recovery-e3); it needs a KeyDir. "" keeps backups
+	// off; only tests start a kernel so.
+	BackupDir string
+	// Recipient is the backup recipient in its wire form
+	// (handoff.KernelKeys.Recipient); none refuses every backup.
+	Recipient []byte
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -45,6 +52,8 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
+	// bk is the backups (backup.go); nil with no BackupDir.
+	bk *backups
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -91,6 +100,16 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			st.Close()
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
+		if cfg.BackupDir != "" {
+			if h.bk, err = openBackups(cfg, keys, k.State()); err != nil {
+				st.Close()
+				return nil, fmt.Errorf("run: the backups: %w", err)
+			}
+			k.OpenBackups(h.bk.set, now)
+		}
+	} else if cfg.BackupDir != "" {
+		st.Close()
+		return nil, errors.New("run: backups need the subject-key table")
 	}
 	return h, nil
 }

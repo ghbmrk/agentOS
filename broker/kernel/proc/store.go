@@ -64,6 +64,16 @@ func (s *FileStore) ReadAll() ([]byte, error) {
 	return b, nil
 }
 
+// Size is the log's length now: under the kernel's lock, the end of its
+// last whole entry.
+func (s *FileStore) Size() (int64, error) {
+	fi, err := s.f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
 func (s *FileStore) Truncate(n int) error {
 	fi, err := s.f.Stat()
 	if err != nil {

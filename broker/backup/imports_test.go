@@ -12,8 +12,8 @@ import (
 )
 
 // The package links only the standard library and broker/kernel: not
-// kernel/proc, broker/recovery, broker/card or any clerk. Tests may link
-// kernel/proc.
+// kernel/proc, broker/recovery, broker/card or any clerk. Tests cannot
+// link kernel/proc either: it links this package (MIG-4-recovery-e3).
 func TestBackupImportsOnlyKernelAndStd(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
