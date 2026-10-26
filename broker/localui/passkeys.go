@@ -62,6 +62,18 @@ func (a AgentosdPasskeys) CutOff(ctx context.Context, session, id string, authDa
 // item 2, REC-3).
 const AnchorReply = "That is one of your hardware keys. A hardware key is replaced only through recovery, with your Owner Card. To stop a lost phone, cut off the phone's passkey instead."
 
+// TapAgainText is the tap step's answer when the tap was not a hardware
+// key's, most often the phone's own new passkey, which get() offers too:
+// the begun point is still live, so the owner taps again (#3175 item 2).
+const TapAgainText = "That wasn't one of your hardware keys. Tap again, and choose your hardware key, not this phone's passkey."
+
+// wrongTap is a refusal of the tap itself, which tapping again can mend.
+func wrongTap(err error) bool {
+	var r Refused
+	errors.As(err, &r)
+	return string(r) == localapi.ErrPasskeyBadAssertion || string(r) == localapi.ErrPasskeyNotAnchor
+}
+
 // passkeyText is the owner's wording for each refusal; none carries a
 // value, and anything else reads as agentosd not answering.
 func passkeyText(err error) string {
@@ -93,7 +105,8 @@ func passkeyText(err error) string {
 // create() for the phone's new ES256 passkey, whose public point it puts
 // in the begin form, then get() on a hardware key over the challenge
 // agentosd returned, whose answer it puts in the finish form, the enrol
-// step's or the cut-off step's. It talks
+// step's or the cut-off step's; get() hints a security key, so the browser
+// leads with the hardware key rather than the phone's own passkey. It talks
 // only to this page's own forms, holds no secret, and shows only fixed
 // words.
 const passkeyJS = `(function () {
@@ -128,7 +141,7 @@ const passkeyJS = `(function () {
     var f = el("pk-finish");
     navigator.credentials.get({ publicKey: {
       challenge: unb64(f.dataset.challenge), rpId: f.dataset.rp,
-      allowCredentials: [], userVerification: "required"
+      allowCredentials: [], userVerification: "required", hints: ["security-key"]
     } }).then(function (c) {
       var r = c.response;
       f.elements.ad.value = b64(r.authenticatorData);
@@ -225,11 +238,19 @@ func (s *Server) passkeysPage(w http.ResponseWriter, r *http.Request) {
 		ad, ok1 := formBytes(f.Get("ad"), localapi.MaxPasskeyAssertion)
 		cd, ok2 := formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
 		sig, ok3 := formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
-		if !ok1 || !ok2 || !ok3 {
-			v.Err = passkeyText(Refused(localapi.ErrPasskeyBadAssertion))
-			break
+		var err error = Refused(localapi.ErrPasskeyBadAssertion)
+		if ok1 && ok2 && ok3 {
+			err = s.cfg.Passkeys.Finish(ctx, tok, ad, cd, sig)
 		}
-		if err := s.cfg.Passkeys.Finish(ctx, tok, ad, cd, sig); err != nil {
+		// A wrong tap stays on the tap step with the begun challenge, which
+		// the form carries back; agentosd still holds the point.
+		ch, ok := formBytes(f.Get("ch"), localapi.PasskeyChallenge)
+		if wrongTap(err) && ok && len(ch) == localapi.PasskeyChallenge {
+			v.Step, v.Challenge, v.Err = "tap", base64.StdEncoding.EncodeToString(ch), TapAgainText
+			s.render(w, "passkeys", v)
+			return
+		}
+		if err != nil {
 			v.Err = passkeyText(err)
 			break
 		}
@@ -251,17 +272,27 @@ func (s *Server) passkeysPage(w http.ResponseWriter, r *http.Request) {
 		// A phone passkey's cut-off carries the hardware key's tap (#3209);
 		// a hardware key's carries none and is refused as one.
 		var ad, cd, sig []byte
+		var err error
 		if f.Get("ad") != "" || f.Get("cd") != "" || f.Get("sig") != "" {
 			var ok1, ok2, ok3 bool
 			ad, ok1 = formBytes(f.Get("ad"), localapi.MaxPasskeyAssertion)
 			cd, ok2 = formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
 			sig, ok3 = formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
 			if !ok1 || !ok2 || !ok3 {
-				v.Err = passkeyText(Refused(localapi.ErrPasskeyBadAssertion))
-				break
+				err = Refused(localapi.ErrPasskeyBadAssertion)
 			}
 		}
-		if err := s.cfg.Passkeys.CutOff(ctx, tok, id, ad, cd, sig); err != nil {
+		if err == nil {
+			err = s.cfg.Passkeys.CutOff(ctx, tok, id, ad, cd, sig)
+		}
+		// A phone passkey's wrong tap stays on its confirm step.
+		if wrongTap(err) && k.CutChallenge != nil {
+			v.Step, v.Confirm, v.Err = "confirm", k, TapAgainText
+			v.Challenge = base64.StdEncoding.EncodeToString(k.CutChallenge)
+			s.render(w, "passkeys", v)
+			return
+		}
+		if err != nil {
 			v.Err = passkeyText(err)
 			break
 		}
@@ -304,22 +335,23 @@ func algName(alg string) string {
 }
 
 func init() {
-	tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }, "algname": algName})
+	tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }, "algname": algName,
+		"anchorreply": func() string { return AnchorReply }})
 	template.Must(tmpl.Parse(`{{define "passkeys"}}{{template "head" ""}}
 <h1>Passkeys</h1>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Done}}<p class="ok">{{.}}</p>{{end}}
 <p class="err" id="pk-msg"></p>
 {{if eq .Step "tap"}}
 <p>Now tap one of your hardware keys. It signs to add the new passkey; nothing is added until it does.</p>
-<form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="finish"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
+<form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="finish"><input type="hidden" name="ch" value="{{.Challenge}}"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key</button></p>
 <p><a href="/passkeys/">Cancel</a></p>
 {{else if eq .Step "confirm"}}
-<p>Cut off key <strong>{{.Confirm.Fingerprint}}</strong> ({{algname .Confirm.Alg}})? It is cut off for good: it can't approve anything again, and can't be added back.</p>
-{{if .Confirm.CutChallenge}}<p>To cut it off, tap one of your hardware keys. Nothing is cut off until it does.</p>
+{{if .Confirm.CutChallenge}}<p>Cut off key <strong>{{.Confirm.Fingerprint}}</strong> ({{algname .Confirm.Alg}})? It is cut off for good: it can't approve anything again, and can't be added back.</p>
+<p>To cut it off, tap one of your hardware keys. Nothing is cut off until it does.</p>
 <form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="cutoff"><input type="hidden" name="id" value="{{.Confirm.ID}}"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key to cut it off</button></p>
-{{else}}<form method="post" action="/passkeys/"><input type="hidden" name="step" value="cutoff"><input type="hidden" name="id" value="{{.Confirm.ID}}"><button>Cut off</button></form>{{end}}
+{{else}}<p>Key <strong>{{.Confirm.Fingerprint}}</strong> ({{algname .Confirm.Alg}}). {{anchorreply}}</p>{{end}}
 <p><a href="/passkeys/">Cancel</a></p>
 {{else}}
 <h2>Hardware keys</h2>

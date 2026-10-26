@@ -109,6 +109,10 @@ func contentAAD(subject, class string) []byte { return []byte(subject + "\x00" +
 // name is a store or class name: short, plain text.
 func name(s string) bool { return s != "" && len(s) <= 64 && utf8.ValidString(s) && shown(s) }
 
+// ValidStore reports whether s can name a content store: a name, and never
+// the key table. A backup's content/<store> section names use it too.
+func ValidStore(s string) bool { return name(s) && s != KeyTable }
+
 // Item is one sealed item of a subject.
 type Item struct {
 	Store string `json:"store"`
@@ -195,7 +199,7 @@ func (s *State) applyErase(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if st := s.subjects[b.Subject]; st != nil && !st.erased && name(b.Store) && b.Store != KeyTable && name(b.Class) && s.items[b.Hash].subject == "" {
+		if st := s.subjects[b.Subject]; st != nil && !st.erased && ValidStore(b.Store) && name(b.Class) && s.items[b.Hash].subject == "" {
 			it := Item{Store: b.Store, Hash: b.Hash, Class: b.Class, At: e.At}
 			st.items = append(st.items, it)
 			s.items[b.Hash] = itemOf{b.Subject, it}
@@ -390,7 +394,7 @@ func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte)
 		return Hash{}, err
 	}
 	cs := k.stores[store]
-	if cs == nil || !name(store) || store == KeyTable || !name(class) {
+	if cs == nil || !ValidStore(store) || !name(class) {
 		return Hash{}, ErrStore
 	}
 	a, err := newAEAD(dk)

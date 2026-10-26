@@ -4,10 +4,15 @@ package backup
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // readAll opens a content object and reads every section.
@@ -68,9 +73,10 @@ func TestManifestCarriesPageCAAndEdgeOnly(t *testing.T) {
 		}
 	}
 
-	// Sections outside log and content/<store> are refused.
-	for _, bad := range [][]string{{"keys"}, {"content/"}, {"content/key-table"}, {"content/../x"}, {"content/Mail"},
-		{"log", "log"}, {"holder"}, {"content/a/b"}} {
+	// Sections outside log and content/<store> are refused, as is a store
+	// name the kernel refuses.
+	for _, bad := range [][]string{{"keys"}, {"content/"}, {"content/key-table"}, {"log", "log"}, {"holder"},
+		{"content/" + strings.Repeat("a", 65)}, {"content/a\x01b"}, {"content/a\u202eb"}, {"content/\xff"}} {
 		in := r.input(rcp)
 		in.Sections = nil
 		for _, n := range bad {
@@ -89,5 +95,134 @@ func TestManifestCarriesPageCAAndEdgeOnly(t *testing.T) {
 	}}}
 	if _, err := Write(io.Discard, &MemTarget{}, in); !errors.Is(err, ErrChanged) {
 		t.Errorf("a changing section: %v, want ErrChanged", err)
+	}
+}
+
+// Every store name the kernel takes is a section name, so no store makes
+// Write refuse the backup.
+func TestSectionNamesMatchTheKernelsStoreNames(t *testing.T) {
+	r := newRig(t)
+	rcp := recipient(t, rk1)
+	for _, store := range []string{"mail", "Mail", "post box", "a/b", "..", "Ünïcode", strings.Repeat("a", 64)} {
+		if !kernel.ValidStore(store) {
+			t.Fatalf("fixture: the kernel refuses %q", store)
+		}
+		in := r.input(rcp)
+		in.Sections = []Source{src("log", []byte("l")), src("content/"+store, []byte("x"))}
+		var buf bytes.Buffer
+		if _, err := Write(&buf, &MemTarget{}, in); err != nil {
+			t.Errorf("store %q: %v", store, err)
+			continue
+		}
+		if _, got, _ := readAll(t, buf.Bytes(), rk1); string(got["content/"+store]) != "x" {
+			t.Errorf("store %q does not read back", store)
+		}
+	}
+	for _, store := range []string{"", kernel.KeyTable, strings.Repeat("a", 65), "a\nb", "a\u202eb"} {
+		if validSection("content/"+store) != kernel.ValidStore(store) {
+			t.Errorf("store %q: section %v, kernel %v", store, validSection("content/"+store), kernel.ValidStore(store))
+		}
+	}
+}
+
+// contentObject seals a content object white-box: m's sections are
+// followed by data and then trailing, whatever m says.
+func contentObject(t *testing.T, rcp Recipient, gen uint64, m Manifest, data, trailing []byte) []byte {
+	t.Helper()
+	id, err := parseID(m.BackupID)
+	must(t, err)
+	mb, err := json.Marshal(m)
+	must(t, err)
+	body := binary.BigEndian.AppendUint32(nil, uint32(len(mb)))
+	body = append(append(append(body, mb...), data...), trailing...)
+	return sealBytes(t, rcp, KindContent, id, gen, body)
+}
+
+func manifestFor(rcp Recipient, secs ...Section) Manifest {
+	return Manifest{Version: version, BackupID: strings.Repeat("ab", idLen), Recipient: rcp.ID(), Sections: secs}
+}
+
+func section(name string, b []byte) Section {
+	return Section{Name: name, Length: int64(len(b)), SHA256: sumHex(b)}
+}
+
+func TestASectionErrorSticks(t *testing.T) {
+	rcp := recipient(t, rk1)
+	t.Run("wrong sum", func(t *testing.T) {
+		bad := section("log", []byte("logged"))
+		bad.SHA256 = sumHex([]byte("other!"))
+		obj := contentObject(t, rcp, 0, manifestFor(rcp, bad), []byte("logged"), nil)
+		_, secs, err := Open(bytes.NewReader(obj), rk1)
+		must(t, err)
+		_, r, err := secs.Next()
+		must(t, err)
+		if _, err := io.ReadAll(r); !errors.Is(err, ErrSum) {
+			t.Fatalf("read: %v, want ErrSum", err)
+		}
+		// The caller drops that error: every later Read and Next still
+		// says ErrSum, never io.EOF.
+		if _, err := r.Read(make([]byte, 1)); !errors.Is(err, ErrSum) {
+			t.Fatalf("second read: %v, want ErrSum", err)
+		}
+		for range 2 {
+			if _, _, err := secs.Next(); !errors.Is(err, ErrSum) {
+				t.Fatalf("next: %v, want ErrSum", err)
+			}
+		}
+	})
+	t.Run("wrong sum, reader never read", func(t *testing.T) {
+		bad := section("log", []byte("logged"))
+		bad.SHA256 = sumHex(nil)
+		obj := contentObject(t, rcp, 0, manifestFor(rcp, bad), []byte("logged"), nil)
+		_, secs, err := Open(bytes.NewReader(obj), rk1)
+		must(t, err)
+		_, _, err = secs.Next()
+		must(t, err)
+		for range 2 {
+			if _, _, err := secs.Next(); !errors.Is(err, ErrSum) {
+				t.Fatalf("next: %v, want ErrSum", err)
+			}
+		}
+	})
+	t.Run("empty section, wrong sum", func(t *testing.T) {
+		bad := section("log", nil)
+		bad.SHA256 = sumHex([]byte("x"))
+		obj := contentObject(t, rcp, 0, manifestFor(rcp, bad), nil, nil)
+		_, secs, err := Open(bytes.NewReader(obj), rk1)
+		must(t, err)
+		for range 2 {
+			if _, _, err := secs.Next(); !errors.Is(err, ErrSum) {
+				t.Fatalf("next: %v, want ErrSum", err)
+			}
+		}
+	})
+}
+
+func TestOpenRefusesTrailingBytesAndATableGeneration(t *testing.T) {
+	rcp := recipient(t, rk1)
+	m := manifestFor(rcp, section("log", []byte("logged")))
+	// The control: the same object, well formed, reads to io.EOF.
+	ok := contentObject(t, rcp, 0, m, []byte("logged"), nil)
+	if _, got, _ := readAll(t, ok, rk1); string(got["log"]) != "logged" {
+		t.Fatalf("control: %q", got["log"])
+	}
+
+	_, secs, err := Open(bytes.NewReader(contentObject(t, rcp, 0, m, []byte("logged"), []byte{0})), rk1)
+	must(t, err)
+	_, r, err := secs.Next()
+	must(t, err)
+	_, err = io.ReadAll(r)
+	must(t, err)
+	for range 2 {
+		if _, _, err := secs.Next(); !errors.Is(err, ErrSum) {
+			t.Fatalf("a byte after the last section: %v, want ErrSum", err)
+		}
+	}
+
+	// A content object is generation 0; any other is refused.
+	for _, gen := range []uint64{1, firstGeneration + 1} {
+		if _, _, err := Open(bytes.NewReader(contentObject(t, rcp, gen, m, []byte("logged"), nil)), rk1); !errors.Is(err, ErrHeader) {
+			t.Errorf("generation %d: %v, want ErrHeader", gen, err)
+		}
 	}
 }

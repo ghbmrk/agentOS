@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,14 @@ type passkeys struct {
 type pendingKey struct {
 	pk key.PublicKey
 	at time.Time
+	// f is the Finish under way on this point, nil when none is: a second
+	// Finish waits for it and takes its answer.
+	f *finishing
+}
+
+type finishing struct {
+	done chan struct{}
+	err  error // set before done is closed
 }
 
 func newPasskeys(k passkeyKernel, rpID string) *passkeys {
@@ -173,48 +183,81 @@ func (p *passkeys) Begin(ctx context.Context, session string, point []byte) ([]b
 		}
 		delete(p.pending, oldest)
 	}
-	p.pending[session] = pendingKey{pk, now}
+	p.pending[session] = pendingKey{pk: pk, at: now}
 	c := key.Challenge(key.EnrollMsg(pk))
 	return c[:], nil
 }
 
-// pendingFor is session's begun point while it has not lapsed.
-func (p *passkeys) pendingFor(session string) (key.PublicKey, bool) {
+// Finish enrols session's begun point under the anchor whose assertion
+// this is. One Finish runs per begun point: one posted while another is
+// under way waits for it and gets its answer, so the kernel is asked once
+// (#3175). A tap that is refused, or a kernel not reached, leaves the
+// point to tap again; the kernel's own answer spends it.
+func (p *passkeys) Finish(ctx context.Context, session string, authData, clientData, sig []byte) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	k, ok := p.pending[session]
 	if !ok || p.Now().Sub(k.at) >= passkeyPending {
 		delete(p.pending, session)
-		return key.PublicKey{}, false
-	}
-	return k.pk, true
-}
-
-// Finish enrols session's begun point under the anchor whose assertion
-// this is. The anchor is found by tapper; these pre-checks only make the
-// reply exact: the kernel decides.
-func (p *passkeys) Finish(ctx context.Context, session string, authData, clientData, sig []byte) error {
-	pk, ok := p.pendingFor(session)
-	if !ok {
+		p.mu.Unlock()
 		return sockets.Code(localapi.ErrPasskeyStale)
 	}
+	if f := k.f; f != nil {
+		p.mu.Unlock()
+		select {
+		case <-f.done:
+			return f.err
+		case <-ctx.Done():
+			return sockets.Code(localapi.ErrPasskeyUnavailable)
+		}
+	}
+	f := &finishing{done: make(chan struct{})}
+	k.f = f
+	p.pending[session] = k
+	p.mu.Unlock()
+
+	spent, err := p.finish(ctx, k.pk, authData, clientData, sig)
+	p.mu.Lock()
+	if cur, ok := p.pending[session]; ok && cur.f == f {
+		if spent {
+			delete(p.pending, session)
+		} else {
+			cur.f = nil
+			p.pending[session] = cur
+		}
+	}
+	p.mu.Unlock()
+	f.err = err
+	close(f.done)
+	return err
+}
+
+// LogPasskeyRPID is logged when a page's tap is on another RP ID than
+// -passkey-rp-id.
+const LogPasskeyRPID = "passkeys: the page's RP ID is not -passkey-rp-id; nothing is enrolled"
+
+// finish is Finish's work on the begun point pk, and whether it spent pk.
+// The anchor is found by tapper; these pre-checks only make the reply
+// exact: the kernel decides.
+func (p *passkeys) finish(ctx context.Context, pk key.PublicKey, authData, clientData, sig []byte) (spent bool, err error) {
 	anchors, live, _, err := p.keys(ctx)
 	if err != nil {
-		return passkeyCode(err, "")
+		return false, passkeyCode(err, "")
 	}
 	by, canon, err := tapper(key.EnrollMsg(pk), anchors, live, authData, clientData, sig)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := p.K.Enroll(ctx, key.Enrollment{Passkey: pk, By: by, Sig: canon}); err != nil {
-		return passkeyCode(err, localapi.ErrPasskeyRefused)
+	// The tap verified, so authData names the page's RP ID. The phone's
+	// credential was made there, but pk is bound to agentosd's: on
+	// another, the kernel would log a passkey that never verifies.
+	if rp := sha256.Sum256([]byte(p.RPID)); !bytes.Equal(authData[:32], rp[:]) {
+		log.Print(LogPasskeyRPID)
+		return true, sockets.Code(localapi.ErrPasskeyUnavailable)
 	}
-	p.mu.Lock()
-	if p.pending[session].pk == pk {
-		delete(p.pending, session)
-	}
-	p.mu.Unlock()
-	return nil
+	err = p.K.Enroll(ctx, key.Enrollment{Passkey: pk, By: by, Sig: canon})
+	var r kernelsock.Refused
+	answered := err == nil || errors.As(err, &r) || errors.Is(err, kernelsock.ErrSetupOnly) || errors.Is(err, kernelsock.ErrAnchor)
+	return answered, passkeyCode(err, localapi.ErrPasskeyRefused)
 }
 
 // tapper is the anchor whose assertion over msg this is, and the assertion

@@ -222,17 +222,28 @@ func TestPlanCarriesNoMailBytes(t *testing.T) {
 }
 
 // A Listing is exactly a service name and a kind; Unconnected lists the
-// plan items not connected.
+// plan items not connected, and never an untaken card, wallet or mailbox
+// offer (Source Always, PLN-7, #3237): connected or not, none is listed.
 func TestUnconnectedCarriesOnlyNameAndKind(t *testing.T) {
 	ty := reflect.TypeOf(Listing{})
 	if ty.NumField() != 2 || ty.Field(0).Name != "Service" || ty.Field(1).Name != "Kind" {
 		t.Fatalf("Listing has fields %v", reflect.VisibleFields(ty))
 	}
 	plan := Build(household(t), []string{"bank.test", "shop.test"}, nil)
-	got := Unconnected(plan, []string{CardID, "bank"})
-	want := []Listing{{"Payment wallet", "money"}, {"Give me an email address? About 1 minute.", "mail"}, {"Fake shop", "shopping"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Unconnected = %v, want %v", got, want)
+	want := []Listing{{"Fake shop", "shopping"}}
+	for _, connected := range [][]string{{CardID, "bank"}, {"bank"}} {
+		if got := Unconnected(plan, connected); !reflect.DeepEqual(got, want) {
+			t.Fatalf("Unconnected(%v) = %v, want %v", connected, got, want)
+		}
+	}
+	var always int
+	for _, it := range plan {
+		if it.Source == Always {
+			always++
+		}
+	}
+	if always != 3 {
+		t.Fatalf("the plan holds %d Always offers, want the card, wallet and mailbox", always)
 	}
 	if NotConnected != "exists, not connected" {
 		t.Fatal("wording changed")
