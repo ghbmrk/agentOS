@@ -8,7 +8,9 @@
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
-bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same. Main merged into the branch therefore reads as same, even next
+bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
+and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
+keeping both sides' rows verbatim, either side first (#3224, #3233). Main merged into the branch therefore reads as same, even next
 to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
 in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
 neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
@@ -133,8 +135,11 @@ def _git(cwd, *args, ok=(0,)):
 
 
 def _replayed(cwd, reviewed, onto):
-    """Tree of the reviewed commit merged with `onto`; conflicts keep their markers, so they read as changed."""
-    out = _git(cwd, "merge-tree", "--write-tree", "--no-messages", reviewed, onto, ok=(0, 1))
+    """Tree of the reviewed commit merged with `onto`; conflicts keep their markers, so they read as changed.
+
+    diff3 markers, pinned, so `_appends_kept` can see that a conflict's base section is empty."""
+    out = _git(cwd, "-c", "merge.conflictStyle=diff3", "merge-tree", "--write-tree", "--no-messages", reviewed, onto,
+               ok=(0, 1))
     return out.split(b"\n", 1)[0].decode()
 
 
@@ -171,11 +176,45 @@ def _renumbered_only(cwd, tree, head, path):
     return bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
 
 
+def _appends_kept(cwd, tree, head, path, reviewed, onto):
+    """True when DECISIONS.md conflicted in the replay only where both sides appended table rows at one spot (an
+    empty base section), and `head` keeps both sides' rows verbatim, every conflict in the same order: the
+    reviewed rows first or main's first. Any other conflict, line or order reads as changed."""
+    if path != "DECISIONS.md":
+        return False
+    text, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
+    if not text or not want:
+        return False
+    out, block, side, conflicts = ([], []), None, 0, 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip(b"\n")
+        if block is None:
+            if bare == b"<<<<<<< " + reviewed.encode():
+                block, side = ([], []), 0
+            else:
+                for o in out:
+                    o.append(line)
+        elif side == 0 and bare.startswith(b"||||||| "):
+            side = 1  # base section: must stay empty
+        elif side == 1 and bare == b"=======":
+            side = 2
+        elif side == 2 and bare == b">>>>>>> " + onto.encode():
+            out[0].extend(block[0] + block[1])
+            out[1].extend(block[1] + block[0])
+            block, conflicts = None, conflicts + 1
+        elif side in (0, 2) and line.startswith(b"|"):
+            block[side // 2].append(line)
+        else:
+            return False
+    return block is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
+
+
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     tree = _replayed(cwd, reviewed, onto)
     out = _git(cwd, *DIFF, tree, head).decode(errors="surrogateescape")
-    return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
+    return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f)
+                  and not _appends_kept(cwd, tree, head, f, reviewed, onto))
 
 
 def _same(reviewed, head, base):
