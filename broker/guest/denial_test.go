@@ -68,7 +68,7 @@ func TestOP2APlanUnderStopRunsNothing(t *testing.T) {
 	st, e := r.tool("m1", "plan", send("r-held"))
 	// A STOP reads apart from a missing key, so the guest waits rather
 	// than rewording (#3086).
-	if e != "" || st.State != kernel.SRejected || st.Code != key.RStopped || r.kern.ran("m1/r-held") != 0 {
+	if e != "" || st.State != kernel.SRejected || st.Code != key.RStopped || st.Reason != reasonStopped || r.kern.ran("m1/r-held") != 0 {
 		t.Fatalf("under STOP: %+v %q", st, e)
 	}
 	r.kern.resume()
@@ -77,6 +77,32 @@ func TestOP2APlanUnderStopRunsNothing(t *testing.T) {
 	}
 	if st, e := r.tool("m1", "plan", send("r-after")); e != "" || st.State != kernel.SDone || r.kern.ran("m1/r-after") != 1 {
 		t.Fatalf("after RESUME: %+v %q", st, e)
+	}
+}
+
+// A rejection's sentence follows its code: a STOP says wait for the owner, a
+// check that lifts with time or the owner says send it again later under a
+// new request_id, and only what the key does not allow says waiting will not
+// help, so a planner reading the sentence alone neither gives up on a rate
+// cap nor waits on a verb its key lacks (PLN-4, #3261).
+func TestPLN4RejectionSentenceTellsWaitFromKey(t *testing.T) {
+	for c, want := range map[string]string{
+		key.RStopped: reasonStopped,
+		key.RPaused:  reasonWait, kernel.CGrantHeld: reasonWait, key.RRate: reasonWait,
+		key.RSpendDay: reasonWait, kernel.CDuplicate: reasonWait, kernel.CPool: reasonWait,
+		key.RVerb: reasonRejected, key.RExpired: reasonRejected, key.RUses: reasonRejected,
+		key.RSpendTask: reasonRejected, kernel.CTask: reasonRejected, kernel.CUngranted: reasonRejected,
+	} {
+		r := newRig(t, func(cf *Config) {
+			cf.Kernel = viewKernel{kernel.PlanView{Status: kernel.SRejected, Reject: c}}
+		})
+		st, e := r.tool("m1", "plan", map[string]any{"request_id": "r1"})
+		if e != "" || st.Code != c || st.Reason != want {
+			t.Errorf("%s: %+v %q", c, st, e)
+		}
+	}
+	if reasonWait == reasonRejected || reasonStopped == reasonWait || strings.Contains(reasonRejected, "later") {
+		t.Fatal("the three sentences must read apart")
 	}
 }
 
