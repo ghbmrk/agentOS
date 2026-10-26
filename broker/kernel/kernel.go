@@ -289,7 +289,9 @@ type Kernel struct {
 	// The subject-key table and content stores, from OpenContent (erase.go).
 	keys   Keys
 	stores map[string]ContentStore
-	retry  map[eraseRef]backoff // deletes backing off (erase.go)
+	retry  map[eraseRef]backoff // deletes and re-seals backing off (erase.go)
+	// The older backups, from OpenBackups (erase.go).
+	backups Backups
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")

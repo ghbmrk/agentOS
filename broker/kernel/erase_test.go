@@ -128,7 +128,7 @@ func TestEraseMakesContentUnreadable(t *testing.T) {
 	}
 	c, err := r.k.Erase(3, s)
 	must(t, err)
-	if !reflect.DeepEqual(c, kernel.Confirmation{Subject: s, Confirmed: []string{kernel.KeyTable, "mail", "notes"}, OlderBackups: true}) {
+	if !reflect.DeepEqual(c, kernel.Confirmation{Subject: s, Confirmed: []string{kernel.KeyTable, "mail", "notes"}, BackupsUnknown: true}) {
 		t.Fatalf("confirmation %+v", c)
 	}
 	for _, h := range []kernel.Hash{h1, h2} {
