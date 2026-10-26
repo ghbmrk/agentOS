@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -342,10 +343,33 @@ func TestSignInRouteMustBeTheClerks(t *testing.T) {
 	os.Mkdir(sub, 0o711)
 	link := filepath.Join(base, "link")
 	os.Symlink(h.Routes, link)
-	for name, dir := range map[string]string{"group-writable": open, "under a writable parent": sub, "a link": link, "relative": "routes", "unclean": h.Routes + "/"} {
+	// Sticky does not save the routes directory itself: the clerk owns
+	// its route, so it could still rename it there.
+	sticky := filepath.Join(base, "sticky")
+	os.Mkdir(sticky, 0o711)
+	os.Chmod(sticky, 0o777|os.ModeSticky)
+	for name, dir := range map[string]string{"group-writable": open, "under a writable parent": sub, "a link": link, "relative": "routes", "unclean": h.Routes + "/", "sticky and world-writable": sticky} {
 		if err := prepareSignInRoutes(dir); err == nil {
 			t.Errorf("-signin-routes %s: prepared", name)
 		}
+	}
+	// One left 0700 is made 0711, so the clerk can reach its route.
+	os.Chmod(h.Routes, 0o700)
+	if err := prepareSignInRoutes(h.Routes); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(h.Routes); err != nil || fi.Mode().Perm() != 0o711 {
+		t.Fatalf("routes left 0700: %v %v", fi, err)
+	}
+	// As root, each route is chowned to -plan-uid, not left root's.
+	if os.Geteuid() == 0 {
+		h.UID, h.GID = 65534, 65534
+		fi, err := os.Lstat(signInRoute(t, h, "signin-owner"))
+		if st, ok := fi.Sys().(*syscall.Stat_t); err != nil || !ok || st.Uid != 65534 || st.Gid != 65534 {
+			t.Fatalf("route owner: %+v %v", fi.Sys(), err)
+		}
+		h.Stop("signin-owner")
+		h.UID, h.GID = os.Getuid(), os.Getgid()
 	}
 
 	// signinstart mounts only agentosd's route for the guest: one the
@@ -598,9 +622,9 @@ func TestSignInSockSpeaksTheHostsWire(t *testing.T) {
 		ents, _ := os.ReadDir(dir)
 		return len(ents) == 0
 	})
-	if st := ph.State(); st.Last != run.DSignInTimedOut {
-		t.Fatalf("state: %+v", st)
-	}
+	// agentosd removes the route at signinstop, before the clerk records
+	// the timeout.
+	signInWait(t, "the clerk to record the timeout", func() bool { return ph.State().Last == run.DSignInTimedOut })
 	if _, err := h.Read(context.Background(), "x"); !errors.Is(err, errSignInNone) {
 		t.Fatal(err)
 	}

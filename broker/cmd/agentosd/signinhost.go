@@ -157,9 +157,9 @@ func checkRoute(route string, uid int) error {
 	return nil
 }
 
-// prepareSignInRoutes makes dir, -signin-routes, agentosd's own (0711,
-// so the clerk can reach its route but not list or change the rest), and
-// empties it, as no sign-in runs before agentosd serves them. It and every
+// prepareSignInRoutes makes dir, -signin-routes, agentosd's own, sets it
+// 0711 (so the clerk can reach its route but not list or change the
+// rest), and empties it, as no sign-in runs before agentosd serves them. It and every
 // directory above it must be owned by root or this process and writable
 // by no other uid, sticky directories aside, so no other uid can rename a
 // route agentosd made there.
@@ -190,6 +190,10 @@ func prepareSignInRoutes(dir string) error {
 		if d == "/" {
 			break
 		}
+	}
+	// A directory left 0700 would keep the clerk from its route.
+	if err := os.Chmod(dir, 0o711); err != nil {
+		return err
 	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
