@@ -158,3 +158,26 @@ func (g *Gmail) PlanSenders(ctx context.Context, authServ string) ([]string, err
 	slices.Sort(out)
 	return out, nil
 }
+
+// PlanSenders is Gmail.PlanSenders over IMAP (#3220): the From and
+// Authentication-Results of the newest PlanMails mails in every folder but
+// spam and trash (imapsmtp.Store.PlanHeads), each judged by PlanSender under
+// authServ, the same rule and the same declared authserv-id ("" matches
+// nothing). It returns only the set of domains, sorted; no name, local part,
+// subject or date leaves this function. A refused sign-in is the store's
+// error (imapsmtp.ErrLoginRefused, ErrNoSignIn) and any other failure an
+// error: never a part of the senders.
+func (l *Live) PlanSenders(ctx context.Context, authServ string) ([]string, error) {
+	var out []string
+	err := l.st.PlanHeads(ctx, PlanMails, func(h []byte) error {
+		if d := PlanSender(h, authServ); d != "" && !slices.Contains(out, d) {
+			out = append(out, d)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(out)
+	return out, nil
+}
