@@ -265,11 +265,14 @@ type Listing struct {
 	Kind    string
 }
 
-// Unconnected is every plan item whose id is not in connected.
+// Unconnected is every plan item whose id is not in connected, except the
+// card, wallet and mailbox (Source Always): those are offers, and nothing
+// shows the owner holds one, so listing them as "exists, not connected"
+// would hand a planner a false fact (PLN-7, #3237).
 func Unconnected(plan []Item, connected []string) []Listing {
 	var out []Listing
 	for _, it := range plan {
-		if !slices.Contains(connected, it.ID) {
+		if it.Source != Always && !slices.Contains(connected, it.ID) {
 			out = append(out, Listing{Service: it.Name, Kind: it.Kind})
 		}
 	}
