@@ -144,6 +144,9 @@ allow broker/admission/
 allow broker/apnet/
 allow broker/apply/
 allow broker/attest/
+# The backup chain (#2865: slices a, b, d, e), admitted under the freeze by Mark's Decisions 8
+# tap A (cmsg_01R91wiieBzMSvPKFsAJVvuKHeytwuDnDg8cSgGwgDnRX6). No G2 binary imports it yet.
+allow broker/backup/
 allow broker/boxname/
 allow broker/browser/
 allow broker/bridgeclient/

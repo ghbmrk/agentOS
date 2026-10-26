@@ -20,6 +20,7 @@ root cmd/agentos-kernel
 root clerk
 root clerk/seal
 root cmd/agentos-unlock
+root backup
 
 allow golang.org/x/sys/unix
 allow golang.org/x/sys/cpu
