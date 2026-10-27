@@ -15,6 +15,10 @@
 // pins (the policy public key and Store.Anchor) to the TPM, where the unlock
 // step reads them (STO-2a-k).
 //
+// It also makes the page authority (CH-9) and keeps it only in the store,
+// for the unlock step to hand the kernel, which certifies the owner page's
+// serving keys and writes it into every backup (MIG-4-recovery-f1).
+//
 // The store is built at a staging path and renamed into place last, so the
 // store at -state exists only once its pins, counter and slots agree. A rerun
 // after a crash finishes a staged store whose pins are locked (only the
@@ -45,10 +49,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
@@ -59,6 +65,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -107,6 +114,9 @@ type config struct {
 	pcrs                             []uint // nil on -rotate: keep the slot's
 	kernelUID, kernelGID             int
 	rotate, delete                   bool
+	// built is the image's build time, the page authority's NotBefore
+	// plus a day (pageca.New): never the first boot's clock.
+	built time.Time
 	// stop, for tests only, ends the run after the named step as a crash
 	// would; nil runs every step.
 	stop func(step string) bool
@@ -131,6 +141,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
+	c.built = buildTime()
 	if *pcrs == "" && !c.rotate {
 		*pcrs = defaultPCRs
 	}
@@ -320,6 +331,9 @@ func enroll(c config, t transport.TPM) error {
 	if err := putRecipient(st, rec); err != nil {
 		return err
 	}
+	if err := putPageCA(st, c.built); err != nil {
+		return err
+	}
 	if err := c.step("slots"); err != nil {
 		return err
 	}
@@ -373,6 +387,46 @@ func putRecipient(st *seal.Store, rk []byte) error {
 		return err
 	}
 	return st.Put(handoff.RecipientEntry, v)
+}
+
+// putPageCA makes the page authority and keeps it in the store, the only
+// place it is ever written on the box (CH-9, MIG-4-recovery-f1). A rerun
+// after a crash starts a new store, so it makes a new one: no Owner Card
+// carries its fingerprint before enrollment ends.
+func putPageCA(st *seal.Store, built time.Time) error {
+	a, err := pageca.New(pageca.DefaultName, built, nil)
+	if err != nil {
+		return err
+	}
+	v, err := pageca.Marshal(a)
+	if err != nil {
+		return err
+	}
+	defer clear(v)
+	return st.Put(handoff.PageCAEntry, v)
+}
+
+// buildTime is this binary's build time: its commit's time, which go build
+// stamps from the image build's checkout (image/build.sh takes
+// SOURCE_DATE_EPOCH from the same commit), or else the binary's own
+// modification time. Zero when neither reads, and enrollment then refuses
+// (pageca.New), changing nothing the rerun cannot redo.
+func buildTime() time.Time {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.time" {
+				if t, err := time.Parse(time.RFC3339, s.Value); err == nil {
+					return t
+				}
+			}
+		}
+	}
+	if p, err := os.Executable(); err == nil {
+		if fi, err := os.Stat(p); err == nil {
+			return fi.ModTime()
+		}
+	}
+	return time.Time{}
 }
 
 // commit renames the staged store into place: from here the unlock step

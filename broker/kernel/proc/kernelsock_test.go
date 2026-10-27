@@ -3,6 +3,11 @@ package proc
 // REQ: CLK-1, CLK-7, LOG-7, KRN-7
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +24,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // serveSide serves side of b's kernel on a fresh socket that admits uid, and
@@ -644,4 +650,111 @@ func TestOwnerSocketCutsAPhoneOffOnlyOnAHardwareKey(t *testing.T) {
 	if _, cut, err := o.Enrollments(); err != nil || !key.In(cut, pk) {
 		t.Fatalf("the hardware key's cut-off: %v %v", cut, err)
 	}
+}
+
+// testPageCA is a page authority in its sealed form, as the unlock step
+// hands it.
+func testPageCA(t *testing.T) ([]byte, *pageca.Authority) {
+	t.Helper()
+	a, err := pageca.New(pageca.DefaultName, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := pageca.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, a
+}
+
+// pageKey is a serving key of curve c in PKIX DER.
+func pageKey(t *testing.T, c elliptic.Curve) []byte {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(c, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+// REQ: CH-9
+// MIG-4-recovery-f1: the kernel signs the page's serving key over the
+// owner socket, for the page name only, with the authority the unlock
+// step handed it, also while setup is open; any key but a P-256 one is
+// refused. A kernel with no authority answers ErrNoAuthority before setup
+// and ErrPageRestore once claimed, never a new authority.
+func TestCertifyIssuesForThePageNameOnly(t *testing.T) {
+	ca, a := testPageCA(t)
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() int64 { return now.UnixMilli() }
+	open := func(pageCA []byte, anchors []key.PublicKey) Owner {
+		t.Helper()
+		logPath := filepath.Join(t.TempDir(), "log")
+		h, err := OpenKernel(KernelConfig{Log: logPath, Anchor: anchor(t, logPath), Key: [32]byte{7}, Pub: headPub, Sign: headPriv,
+			Anchors: anchors, PageCA: pageCA}, clock())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { h.Close() })
+		return serveOwner(t, h, clock)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(get(t, func() (*x509.Certificate, error) { return x509.ParseCertificate(a.Certificate()) }))
+	for name, o := range map[string]Owner{"claimed": open(ca, anchors), "setup": open(ca, nil)} {
+		c, err := o.Certify(pageKey(t, elliptic.P256()))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !bytes.Equal(c.Authority, a.Certificate()) {
+			t.Fatalf("%s: the answer's authority is not the handed one", name)
+		}
+		leaf, err := x509.ParseCertificate(c.Leaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{DNSName: pageca.DefaultName, Roots: pool, CurrentTime: now}); err != nil {
+			t.Fatalf("%s: the leaf does not verify for the page name: %v", name, err)
+		}
+		if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != pageca.DefaultName || leaf.IsCA {
+			t.Fatalf("%s: the leaf names %v", name, leaf.DNSNames)
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "other." + pageca.DefaultName, Roots: pool, CurrentTime: now}); err == nil {
+			t.Fatalf("%s: the leaf verifies for another name", name)
+		}
+		for what, k := range map[string][]byte{
+			"P-384": pageKey(t, elliptic.P384()), "oversized": append(pageKey(t, elliptic.P256()), make([]byte, 64)...),
+			"garbage": []byte("not a key"), "none": nil,
+		} {
+			if _, err := o.Certify(k); !errors.Is(err, pageca.ErrKey) {
+				t.Errorf("%s: %s key: got %v, want pageca.ErrKey", name, what, err)
+			}
+		}
+	}
+	if _, err := open(nil, nil).Certify(pageKey(t, elliptic.P256())); !errors.Is(err, ErrNoAuthority) {
+		t.Fatalf("no authority before setup: %v", err)
+	}
+	if _, err := open(nil, anchors).Certify(pageKey(t, elliptic.P256())); !errors.Is(err, ErrPageRestore) {
+		t.Fatalf("no authority on a claimed box: %v", err)
+	}
+	// An authority that does not open starts no kernel.
+	bad := bytes.Clone(ca)
+	bad[len(bad)/2] ^= 1
+	logPath := filepath.Join(t.TempDir(), "log")
+	if _, err := OpenKernel(KernelConfig{Log: logPath, Anchor: anchor(t, logPath), Key: [32]byte{7}, Pub: headPub, Sign: headPriv,
+		Anchors: anchors, PageCA: bad}, clock()); err == nil {
+		t.Fatal("a kernel opened with a damaged page authority")
+	}
+}
+
+func get[T any](t *testing.T, f func() (T, error)) T {
+	t.Helper()
+	v, err := f()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

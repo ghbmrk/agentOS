@@ -1,6 +1,7 @@
 package pageca
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/json"
@@ -59,14 +60,11 @@ func (s Store) Save(a *Authority) error {
 	if err := checkDir(s.Dir); err != nil {
 		return err
 	}
-	k, err := x509.MarshalPKCS8PrivateKey(a.key)
+	plain, err := Marshal(a)
 	if err != nil {
 		return err
 	}
-	plain, err := json.Marshal(sealed{Cert: a.cert.Raw, Key: k})
-	if err != nil {
-		return err
-	}
+	defer clear(plain)
 	blob, err := s.Sealer.Seal(plain, aad)
 	if err != nil {
 		return err
@@ -106,10 +104,48 @@ func (s Store) Open(name string) (*Authority, error) {
 	if err != nil {
 		return nil, err
 	}
-	var v sealed
-	if err := json.Unmarshal(plain, &v); err != nil {
+	defer clear(plain)
+	a, err := Unmarshal(plain)
+	if err != nil {
 		return nil, err
 	}
+	if a.name != name {
+		return nil, errors.New("pageca: not this page's authority")
+	}
+	return a, nil
+}
+
+// MaxSealed bounds Marshal's form: a P-256 certificate and its PKCS#8 key,
+// base64 in JSON, are under 2 KiB.
+const MaxSealed = 4 << 10
+
+// Marshal is the authority's sealed form, the plaintext Store seals and
+// the sealed store's handoff.PageCAEntry holds: its certificate and its
+// PKCS#8 key. The caller wipes it.
+func Marshal(a *Authority) ([]byte, error) {
+	k, err := x509.MarshalPKCS8PrivateKey(a.key)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(k)
+	return json.Marshal(sealed{Cert: a.cert.Raw, Key: k})
+}
+
+// Unmarshal reads Marshal's form, at most MaxSealed bytes, into the
+// authority for the one name its certificate admits. It refuses a key and
+// certificate that are not one pair made by New, a certificate that is not
+// self-signed, and any form but Marshal's own.
+func Unmarshal(b []byte) (*Authority, error) {
+	if len(b) > MaxSealed {
+		return nil, errors.New("pageca: the sealed authority is too large")
+	}
+	var v sealed
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return nil, errors.New("pageca: the sealed authority does not read")
+	}
+	defer clear(v.Key)
 	pk, err := x509.ParsePKCS8PrivateKey(v.Key)
 	if err != nil {
 		return nil, err
@@ -118,7 +154,27 @@ func (s Store) Open(name string) (*Authority, error) {
 	if !ok {
 		return nil, errors.New("pageca: not an ECDSA key")
 	}
-	return fromParts(name, v.Cert, key)
+	cert, err := x509.ParseCertificate(v.Cert)
+	if err != nil {
+		return nil, err
+	}
+	if len(cert.PermittedDNSDomains) != 1 || !ValidName(cert.PermittedDNSDomains[0]) {
+		return nil, errors.New("pageca: not a page authority")
+	}
+	if cert.CheckSignatureFrom(cert) != nil {
+		return nil, errors.New("pageca: the authority's certificate is not self-signed")
+	}
+	au, err := fromParts(cert.PermittedDNSDomains[0], v.Cert, key)
+	if err != nil {
+		return nil, err
+	}
+	// One encoding only: what reads is exactly what Marshal writes.
+	again, err := Marshal(au)
+	defer clear(again)
+	if err != nil || !bytes.Equal(again, b) {
+		return nil, errors.New("pageca: the sealed authority is not in its one form")
+	}
+	return au, nil
 }
 
 // OpenOrCreate opens the sealed authority, or, only when no file exists
