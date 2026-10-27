@@ -271,6 +271,7 @@ func (r *rig) mainConfig() proc.MainConfig {
 	c := proc.MainConfig{
 		Log:       filepath.Join(r.dir, "k", "log"),
 		KeyDir:    filepath.Join(r.dir, "k", "keys"),
+		BackupDir: filepath.Join(r.dir, "k", "backups"),
 		OwnerSock: filepath.Join(r.dir, "k", "owner.sock"), OwnerUID: r.ownerUID,
 		MeterSock: filepath.Join(r.dir, "k", "meter.sock"), MeterUID: r.meterUID,
 		Tick: 50 * time.Millisecond,

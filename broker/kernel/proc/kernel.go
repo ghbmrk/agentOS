@@ -32,6 +32,13 @@ type KernelConfig struct {
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
 	KeyDir string
+	// BackupDir is where the kernel keeps its backups' records, sealed
+	// under Key (MIG-4-recovery-e3); it needs a KeyDir. "" keeps backups
+	// off; only tests start a kernel so.
+	BackupDir string
+	// Recipient is the backup recipient in its wire form
+	// (handoff.KernelKeys.Recipient); none refuses every backup.
+	Recipient []byte
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -45,6 +52,8 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
+	// bk is the backups (backup.go); nil with no BackupDir.
+	bk *backups
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -91,6 +100,16 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			st.Close()
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
+		if cfg.BackupDir != "" {
+			if h.bk, err = openBackups(cfg, keys, k.State()); err != nil {
+				st.Close()
+				return nil, fmt.Errorf("run: the backups: %w", err)
+			}
+			k.OpenBackups(h.bk.set, now)
+		}
+	} else if cfg.BackupDir != "" {
+		st.Close()
+		return nil, errors.New("run: backups need the subject-key table")
 	}
 	return h, nil
 }
@@ -99,12 +118,22 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
-// Tick runs every plan as far as now allows. It takes the due calls under the
+// Tick retries the re-seals of backups that failed, then runs every plan
+// as far as now allows. It takes the due calls under the
 // lock, then for each one, under the lock again, makes the kernel's last
 // check (kernel.Send) and takes the call's view, makes the call without the
 // lock, and logs its answer under it. A STOP or revoke logged while an
 // earlier call hangs stops every later one (KRN-7).
 func (h *Kernel) Tick(now int64) error {
+	// A backup whose re-seal failed is retried here, with its backoff
+	// (kernel.OpenBackups re-seals every backup giving an erased subject's
+	// key): kernel.Tick, which would, runs clerk calls under the lock and
+	// is not this process's (#3311 L3 on 6e14b28).
+	if h.bk != nil {
+		if err := h.With(func(k *kernel.Kernel) error { k.OpenBackups(h.bk.set, now); return nil }); err != nil {
+			return err
+		}
+	}
 	for n := 0; n < 4*kernel.MaxSteps; n++ {
 		var due []kernel.Call
 		err := h.With(func(k *kernel.Kernel) (err error) {
