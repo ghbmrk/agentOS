@@ -169,7 +169,7 @@ func TestOwnerSettingsAndPreemptCarryTheirCause(t *testing.T) {
 		go func() { r.s.Tick(context.Background()); close(done) }()
 		<-src.started
 		req, _ := ParseText(text)
-		must(t, r.s.Set(context.Background(), req))
+		must(t, r.s.Set(context.Background(), req, true))
 		<-done
 		src.mu.Lock()
 		if !errors.Is(src.cause, change.ErrOwnerStop) {
