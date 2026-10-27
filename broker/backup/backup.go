@@ -71,7 +71,7 @@ type Record struct {
 	Recipient  Recipient `json:"recipient"`
 	Created    int64     `json:"created"`
 	Generation uint64    `json:"generation"` // of the current key table
-	Subjects   []string  `json:"subjects"`   // sorted: every subject a listed key table may give (Set.Reseal)
+	Subjects   []string  `json:"subjects"`   // sorted: every subject a listed key table may give (Set.Prepare)
 	ContentSum string    `json:"content_sha256"`
 	TableSum   string    `json:"table_sha256"`
 }
