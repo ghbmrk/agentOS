@@ -10,13 +10,10 @@ Usage: compare_manifests.py DIR_A DIR_B
        compare_manifests.py --initrd FILE_A FILE_B   (exit 0 only when the two initrds are the
                                              same bytes; otherwise print every cpio member that
                                              differs and how, so a runner-to-runner difference
-                                             names its file, IMG-2)
-       compare_manifests.py --polkitd DIR   (exit 0 when DIR's manifest has polkitd 0.106 or later:
-                                             the JavaScript rules the join permission needs, ONB-3)"""
+                                             names its file, IMG-2)"""
 import hashlib
 import json
 import pathlib
-import re
 import subprocess
 import sys
 
@@ -46,15 +43,6 @@ def packages(d):
             raise ValueError("%s: package entry without a name and version: %r" % (found[0], p))
         out.append((p["name"], p["version"], p.get("architecture", "")))
     return sorted(out)
-
-
-def polkitd_ok(d, want=(0, 106)):
-    """True when D's manifest lists polkitd at WANT or later. Debian numbers it 0.105-x, then 12x-x."""
-    for name, version, _ in packages(d):
-        if name == "polkitd":
-            m = re.match(r"(\d+)(?:\.(\d+))?", version)
-            return bool(m) and (int(m[1]), int(m[2] or 0)) >= want
-    return False
 
 
 def initrd_members(data):
@@ -169,11 +157,6 @@ def main(a, b):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--polkitd":
-        try:
-            sys.exit(0 if polkitd_ok(sys.argv[2]) else 1)
-        except ValueError as e:
-            sys.exit("MISMATCH package manifest: %s" % e)
     if len(sys.argv) == 4 and sys.argv[1] == "--initrd":
         sys.exit(compare_initrds(sys.argv[2], sys.argv[3]))
     if len(sys.argv) != 3:

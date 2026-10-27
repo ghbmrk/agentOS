@@ -20,10 +20,6 @@ import sys
 
 # package: (its Debian source, why the box does not need it)
 DROP = {
-    "libbluetooth3": ("bluez", "only NetworkManager's Bluetooth device plugin links it; the image ships no Bluetooth (#1415)"),
-    "libmm-glib0": ("modemmanager", "only NetworkManager's WWAN plugins link it; the image has no ModemManager"),
-    "libnewt0.52": ("newt", "only nmtui links it; the box has no console login"),
-    "libslang2": ("slang2", "only libnewt0.52 links it"),
     "initramfs-tools": ("initramfs-tools", "mkosi builds the initrd itself (InitrdInclude=); the kernel package depends on it"),
     "initramfs-tools-core": ("initramfs-tools", "as initramfs-tools"),
     "initramfs-tools-bin": ("initramfs-tools", "as initramfs-tools"),
@@ -54,10 +50,6 @@ PARTIAL = ("liblastlog2-2",)
 ESSENTIAL = ("tar", "diffutils", "perl-base")
 # Files a kept package ships that link a dropped one. Each pattern must match: a stale one fails.
 FILES = (
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-bluetooth.so",
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-wwan.so",
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-wwan.so",
-    "usr/bin/nmtui*",
     "usr/bin/ss",
     "usr/bin/lslogins",
     # dpkg's package unpacker, the last file linking libbz2; the box's dpkg database never changes.
