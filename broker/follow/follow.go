@@ -294,9 +294,11 @@ func (x *Executor) Switch(ctx context.Context, digest, name string) (Switched, s
 // restart nothing is held): SwitchedOK when the box trusts digest under
 // name. TrustedRoot first completes or forgets a switch a crash
 // interrupted, so when the box trusts neither the root nor the source,
-// the switch did not happen: the fence on the update store holds every
-// other switch, and a root rotation keeps the source (#1372). When only
-// one of them matches, it cannot tell.
+// this switch is not in place now: the journal's broker-account fence
+// holds every other switch while one is unresolved, and a root rotation
+// keeps the source (#1372). The kernel has no such fence, so the follow
+// clerk judges "not in place" against its own record of the step
+// (followclerk). When only one of them matches, it cannot tell.
 func (x *Executor) Settled(digest, name string) (Switched, string) {
 	cur, err := x.cfg.Store.TrustedRoot()
 	if err != nil {
@@ -328,3 +330,20 @@ func (x *Executor) Realert(ctx context.Context, name string) string {
 // Latest is the clock guard's latest trustworthy time, the follow clerk's
 // own clock (WF2).
 func (x *Executor) Latest(ctx context.Context) time.Time { return x.latest(ctx) }
+
+// Current is the root digest the box trusts and the name of the source it
+// follows ("" for the project's own root).
+func (x *Executor) Current() (digest, name string, err error) {
+	cur, err := x.cfg.Store.TrustedRoot()
+	if err != nil {
+		return "", "", err
+	}
+	if digest, err = update.RootDigest(cur); err != nil {
+		return "", "", err
+	}
+	src, err := x.cfg.Store.Following()
+	if err != nil {
+		return "", "", err
+	}
+	return digest, src.Name, nil
+}

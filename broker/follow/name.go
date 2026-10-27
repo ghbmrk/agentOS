@@ -19,12 +19,11 @@ const (
 )
 
 // lookAlike matches the project's name in any of the CH-12 folds (case,
-// accents, confusable skeletons, ignorable characters), with or without
-// its space, so a named follow never reads as switching back (#957).
-var lookAlike = []*regexp.Regexp{
-	regexp.MustCompile(owner.FoldPattern("agentos project")),
-	regexp.MustCompile(owner.FoldPattern("agentosproject")),
-}
+// accents, confusable skeletons, ignorable characters) once every
+// character that is not a letter or a digit is dropped, so no space,
+// punctuation or split word ("Agent OS-Project") hides it and a named
+// follow never reads as switching back (#957).
+var lookAlike = regexp.MustCompile(owner.FoldPattern("agentosproject"))
 
 // NameOK reports whether name is one a named follow may carry: the length,
 // character and digit rules above, and no look-alike of the project's own
@@ -44,13 +43,19 @@ func NameOK(name string) bool {
 		return false
 	}
 	for _, f := range append(owner.CheckFolds(name), strings.ToLower(name)) {
-		for _, re := range lookAlike {
-			if re.MatchString(f) {
-				return false
-			}
+		if lookAlike.MatchString(strings.Map(alnum, f)) {
+			return false
 		}
 	}
 	return true
+}
+
+// alnum keeps letters and digits and drops every other character.
+func alnum(r rune) rune {
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return r
+	}
+	return -1
 }
 
 // DigestOK reports whether s is a root summary's digest as Describe gives

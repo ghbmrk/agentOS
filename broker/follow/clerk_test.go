@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"go/parser"
 	"go/token"
 	mrand "math/rand/v2"
@@ -111,6 +112,7 @@ type clerkRig struct {
 	clk     *guardClock
 	alerts  []string
 	pending string
+	recs    string
 	x       *follow.Executor
 	c       *followclerk.Clerk
 	k       *kernel.Kernel
@@ -131,6 +133,10 @@ func newClerkRig(t *testing.T) *clerkRig {
 	}
 	r.store, r.st = st, &countStore{Store: st}
 	r.pending = filepath.Join(st.Dir, "follow-alert")
+	r.recs = t.TempDir()
+	if err := os.Chmod(r.recs, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	opub, opriv := seedKey(1)
 	bpub, bpriv := seedKey(12)
 	r.anchors = []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
@@ -159,7 +165,11 @@ func (r *clerkRig) restart() (*follow.Executor, *followclerk.Clerk) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	return x, followclerk.New(x, r.anchors)
+	c, err := followclerk.New(x, r.anchors, r.recs)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return x, c
 }
 
 func (r *clerkRig) now() int64 { return r.clk.at.UnixMilli() }
@@ -268,7 +278,7 @@ func TestLookAlikeProjectNameRefused(t *testing.T) {
 	for _, n := range []string{
 		follow.ProjectName, "THE AGENTOS PROJECT", "agentOS Project", "agentos project fork",
 		"the AgentÖS project", "the аgentOS project", // Cyrillic а
-		"the agentOS\u200bproject", "AgentOSProject", "the Agent0S project", "the ΑgentOS Ρroject", // Greek Α, Ρ
+		"the agentOS\u200bproject", "AgentOSProject", "agentOS-Project", "agentOS_Project", "agentOS.Project", "Agent OS Project", "agent-os project", "the Agent0S project", "the ΑgentOS Ρroject", // Greek Α, Ρ
 		"", " Acme", "Acme ", "Acme 123456", "Acme\nFork", "Acme‮Fork", strings.Repeat("a", follow.MaxName+1),
 	} {
 		if follow.NameOK(n) {
@@ -349,14 +359,14 @@ func TestFollowOnceAcrossCrash(t *testing.T) {
 	}
 }
 
-// KRN-8: power pulled before the switch was written leaves the old root and
-// source: the probe answers notdone, so the kernel may send it again, and
-// a root under a name the box does not hold it under is unknown.
+// KRN-8: the probe answers from the box and the clerk's record, not the
+// process. A step the clerk has no record of beginning is unknown, never
+// notdone, and so is a root under a name the box does not hold it under.
 func TestProbeReadsTheBoxNotTheProcess(t *testing.T) {
 	r := newClerkRig(t)
 	d := r.describe(r.fork)
 	req := kernel.Request{Plan: r.approved("p1", d, "Acme Fork")}
-	if res := r.c.Probe(req, nil); res.Outcome != "notdone" || len(r.alerts) != 0 {
+	if res := r.c.Probe(req, nil); res.Outcome != "unknown" || len(r.alerts) != 0 {
 		t.Fatalf("%+v", res)
 	}
 	if st := r.run(r.approved("p2", d, "Acme Fork")); st.Phase != kernel.PDone {
@@ -433,4 +443,188 @@ func TestOnlyTheExecutorImportsTheOldCore(t *testing.T) {
 			}
 		}
 	}
+}
+
+// lostAck runs the clerk but loses the answers to the plans named, as a
+// transport timeout would.
+type lostAck struct {
+	c    *followclerk.Clerk
+	lose map[string]bool
+}
+
+func (l *lostAck) Do(r kernel.Request, v kernel.View) kernel.Result {
+	res := l.c.Do(r, v)
+	if l.lose[r.Plan.ID] {
+		delete(l.lose, r.Plan.ID)
+		return kernel.Result{Outcome: "unknown", Detail: "lost"}
+	}
+	return res
+}
+
+func (l *lostAck) Probe(r kernel.Request, v kernel.View) kernel.Result { return l.c.Probe(r, v) }
+
+// probeAll advances the guard clock to each due probe of plan id and ticks.
+func (r *clerkRig) probeAll(id string) kernel.StepState {
+	r.t.Helper()
+	for i := 0; i < 2*kernel.MaxChecks; i++ {
+		s := r.k.State().Plans[id].Steps[0]
+		if s.NextProbe > r.now() {
+			r.clk.at = r.clk.at.Add(time.Duration(s.NextProbe-r.now()) * time.Millisecond)
+		}
+		if err := r.k.Tick(r.now()); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	return r.k.State().Plans[id].Steps[0]
+}
+
+// KRN-8, security 1 on #3444: a switch whose answer was lost is never run
+// again over a later switch the owner approved. The kernel fences only an
+// identical step, so the probe must not read "the box follows neither this
+// root nor this name" as "it never happened".
+func TestStaleSwitchNeverReplaysOverALaterOne(t *testing.T) {
+	r := newClerkRig(t)
+	r.boot(&lostAck{c: r.c, lose: map[string]bool{"p1": true}})
+	dA := r.describe(r.fork)
+	forkB := rootOf(t)
+	dB := r.describe(forkB)
+	if st := r.run(r.approved("p1", dA, "Acme Fork")); st.Phase == kernel.PDone {
+		t.Fatalf("answer not lost: %+v", st)
+	}
+	if st := r.run(r.approved("p3", dB, "Beta")); st.Phase != kernel.PDone || !r.trusts(forkB) {
+		t.Fatalf("p3 %+v", st)
+	}
+	if s := r.probeAll("p1"); s.Phase == kernel.PDone || s.Phase == kernel.PInflight {
+		t.Fatalf("p1 settled as %+v", s)
+	}
+	if !r.trusts(forkB) || r.st.switches != 2 {
+		t.Fatalf("the stale switch ran again: switches %d, trusts B %v", r.st.switches, r.trusts(forkB))
+	}
+	if src, _ := r.store.Following(); src.Name != "Beta" {
+		t.Fatalf("source %+v", src)
+	}
+}
+
+// flakyStore fails its first switch before writing anything, and cannot
+// read the trusted root once after, so the clerk cannot tell and answers
+// unknown.
+type flakyStore struct {
+	*countStore
+	fail, blind int
+}
+
+func (s *flakyStore) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error {
+	if s.fail > 0 {
+		s.fail--
+		s.switches++
+		return errors.New("power cut")
+	}
+	return s.countStore.FollowFork(root, links, shipped, approved, name, o)
+}
+
+func (s *flakyStore) TrustedRoot() ([]byte, error) {
+	if s.fail == 0 && s.blind > 0 {
+		s.blind--
+		return nil, errors.New("disk busy")
+	}
+	return s.countStore.TrustedRoot()
+}
+
+// KRN-8: the same when the clerk itself could not tell whether the first
+// switch landed: its record says what the box followed before, and a box
+// that has moved on since is unknown, never a reason to switch again.
+func TestUnknownSwitchNeverReplaysOverALaterOne(t *testing.T) {
+	r := newClerkRig(t)
+	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
+	if st := r.run(r.approved("p1", r.describe(r.fork), "Acme Fork")); st.Phase != kernel.PUnknown {
+		t.Fatalf("p1 %+v", st)
+	}
+	forkB := rootOf(t)
+	r.clk.at = r.clk.at.Add(time.Millisecond)
+	if st := r.run(r.approved("p3", r.describe(forkB), "Beta")); st.Phase != kernel.PDone || !r.trusts(forkB) {
+		t.Fatalf("p3 %+v", st)
+	}
+	if s := r.probeAll("p1"); s.Phase == kernel.PDone || s.Phase == kernel.PInflight {
+		t.Fatalf("p1 settled as %+v", s)
+	}
+	if !r.trusts(forkB) || r.st.switches != 2 {
+		t.Fatalf("the earlier switch ran again: switches %d", r.st.switches)
+	}
+}
+
+// flaky puts the clerk over st, restarted.
+func (r *clerkRig) flaky(st follow.Store) {
+	r.t.Helper()
+	var err error
+	r.x, err = follow.New(follow.Config{Store: st, Shipped: r.shipped, Clock: r.clk, Pending: r.pending,
+		Alert: func(_ context.Context, text string) error { r.alerts = append(r.alerts, text); return nil }})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if r.c, err = followclerk.New(r.x, r.anchors, r.recs); err != nil {
+		r.t.Fatal(err)
+	}
+	r.boot(r.c)
+}
+
+// KRN-8: a switch the clerk began but that never landed (the box still
+// follows what it did just before) is notdone, so the kernel sends it again
+// and it lands once.
+func TestSwitchThatNeverLandedIsSentAgain(t *testing.T) {
+	r := newClerkRig(t)
+	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
+	d := r.describe(r.fork)
+	if st := r.run(r.approved("p1", d, "Acme Fork")); st.Phase != kernel.PUnknown {
+		t.Fatalf("first try %+v", st)
+	}
+	if s := r.probeAll("p1"); s.Phase != kernel.PDone || !r.trusts(r.fork) || r.st.switches != 2 {
+		t.Fatalf("%+v switches %d", s, r.st.switches)
+	}
+}
+
+// UPD-2, WF1', security 2 on #3444: the switch back to the project's own
+// root runs through the kernel. Its value is ArgProject, which no named
+// follow can carry, and a root that is not the project's is refused.
+func TestSwitchBackThroughTheKernel(t *testing.T) {
+	if follow.NameOK(followclerk.ArgProject) {
+		t.Fatal("a named follow could carry the switch back's value")
+	}
+	r := newClerkRig(t)
+	if st := r.run(r.approved("p1", r.describe(r.fork), "Acme Fork")); st.Phase != kernel.PDone {
+		t.Fatalf("%+v", st)
+	}
+	// The fork is not the project's root, so it is no switch back.
+	if st := r.run(r.approved("p2", r.describe(r.fork), "")); st.Phase != kernel.PFailed || !strings.Contains(st.Detail, "switching back needs the project's own root") {
+		t.Fatalf("fork as the project: %+v", st)
+	}
+	st := r.run(r.approved("p3", r.describe(r.shipped), ""))
+	if st.Phase != kernel.PDone || !r.trusts(r.shipped) {
+		t.Fatalf("switch back %+v", st)
+	}
+	if src, err := r.store.Following(); err != nil || src.Name != "" {
+		t.Fatalf("source %+v %v", src, err)
+	}
+	if last := r.alerts[len(r.alerts)-1]; last != maintain.FollowAlert(follow.ProjectName, r.clk.at) {
+		t.Fatalf("alert %q", last)
+	}
+}
+
+// KRN-4: a root that also grants another verb on the follow clerk still
+// runs nothing but change-account.
+func TestOnlyChangeAccountRuns(t *testing.T) {
+	r := newClerkRig(t)
+	d := r.describe(r.fork)
+	_, opriv := seedKey(1)
+	_, bpriv := seedKey(12)
+	root := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: followclerk.Name, Verbs: []key.Verb{key.ChangeAccount, key.Send}, Serial: "r2"})
+	batch := []key.Key{root}
+	if err := r.k.Issue(r.now()-kernel.GrantHold, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
+		t.Fatal(err)
+	}
+	r.clk.at = r.clk.at.Add(time.Millisecond)
+	p := kernel.SignPlan(kernel.Plan{ID: "send", Key: root, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: followclerk.Name, Args: map[string]string{"to": d, "msg": "Acme"}}}}, r.phone)
+	if st := r.run(p); st.Phase != kernel.PFailed || st.Detail != followclerk.RVerb {
+		t.Fatalf("%+v", st)
+	}
+	r.unchanged()
 }
