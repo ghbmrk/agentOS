@@ -308,17 +308,27 @@ func waitUp(t *testing.T, owner run.MailOwner, done <-chan error) {
 // kernelCall sends the kernel's wire a do with an empty view.
 func kernelCall(t *testing.T, sock string) map[string]string {
 	t.Helper()
-	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
-	must(t, err)
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	_, err = conn.Write([]byte(`{"op":"do","req":{},"view":{}}` + "\n"))
+	line, err := kernelAnswer(sock)
 	must(t, err)
 	var a map[string]string
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
-	must(t, err)
 	must(t, json.Unmarshal(line, &a))
 	return a
+}
+
+// kernelAnswer sends the kernel's wire a do with an empty view and reads the
+// answer's line; a socket that closes unanswered gives no bytes and io.EOF,
+// or a reset when it closes with the call unread.
+func kernelAnswer(sock string) ([]byte, error) {
+	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write([]byte(`{"op":"do","req":{},"view":{}}` + "\n")); err != nil {
+		return nil, err
+	}
+	return bufio.NewReader(conn).ReadBytes('\n')
 }
 
 // D-154 rule 4: the keeper's mail process links no main-side code, and
@@ -373,6 +383,13 @@ func TestRealMailClerkAsRoot(t *testing.T) {
 	base := shortDir(t)
 	must(t, os.Chmod(base, 0o755))
 	_, ab := testAnchors(t)
+	// D-146: the file's owner is checked on its own. In root's own
+	// directory, a file the kernel's uid owns is refused.
+	theirs := anchorsFile(t, ab)
+	must(t, os.Chown(theirs, 65533, 65533))
+	if _, err := readAnchors(theirs, 0); err == nil {
+		t.Error("an anchors file another uid owns, in root's directory, was read")
+	}
 	ad := filepath.Join(base, "a")
 	must(t, os.Mkdir(ad, 0o755))
 	must(t, os.WriteFile(filepath.Join(ad, "anchors"), ab, 0o644))
@@ -424,11 +441,17 @@ func TestRealMailClerkAsRoot(t *testing.T) {
 		}
 	}
 	// Root is neither the kernel's nor the planner's uid: each socket
-	// closes on it unanswered.
-	for _, s := range []string{"k.sock", "p.sock"} {
-		if err := (proc.Conn{Socket: filepath.Join(sockets, s), UID: 65534, Timeout: 5 * time.Second}).Call("listing", nil, nil); err == nil {
-			t.Errorf("%s answered root", s)
-		}
+	// closes on it unanswered (ErrLost). An answered error, such as a
+	// socket bound to the owner side's uid answering no-account or "no
+	// call", is not a refusal.
+	if err := (proc.Conn{Socket: filepath.Join(sockets, "p.sock"), UID: 65534, Timeout: 5 * time.Second}).Call("listing", nil, nil); !errors.Is(err, proc.ErrLost) {
+		t.Errorf("the planner's socket did not close on root unanswered: %v", err)
+	}
+	// The kernel's wire answers a do it accepts (no-account here) and
+	// closes on any other call unanswered, so only a do tells the uid
+	// binding apart from the call table.
+	if a, err := kernelAnswer(filepath.Join(sockets, "k.sock")); len(a) != 0 || !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+		t.Errorf("the kernel's socket answered root's do: %q, %v", a, err)
 	}
 	st, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
 	must(t, err)
