@@ -884,9 +884,20 @@ func TestPageStopsWhenPort1Changes(t *testing.T) {
 		}
 	}
 	add("enp1s0", "pci0000:00/0000:00:1c.0/0000:01:00.0")
-	p, err := localui.Port1(sys)
+	p, err := settledPort1(sys, func() bool { return true })
 	if err != nil || p != "enp1s0" {
 		t.Fatalf("port 1: %q, %v", p, err)
+	}
+	// Security release 1 on e867557: a fixed port that appears while the
+	// page waits for the hardware to settle refuses before it listens.
+	if q, err := settledPort1(sys, func() bool { add("enp0s31f6", "pci0000:00/0000:00:1f.6"); return true }); err == nil {
+		t.Fatalf("a port that probed during start-up: chose %q", q)
+	}
+	if err := os.Remove(filepath.Join(sys, "class", "net", "enp0s31f6")); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := settledPort1(sys, func() bool { return false }); err == nil {
+		t.Fatalf("stopped while settling: chose %q", q)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

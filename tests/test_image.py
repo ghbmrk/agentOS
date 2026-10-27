@@ -5722,15 +5722,18 @@ class SetupServicesTest(unittest.TestCase):
         self.assertNotIn("User", ini(UNITS / "agentosd.service")["Service"])
         self.assertNotIn("-netjoin-sock", exec_args(UNITS / "agentosd.service"))
 
-    def test_the_access_point_serves_the_page_s_network(self):
-        # #825: the loader brings the access point up on the interface and address the page binds,
-        # and reads the latch the page writes.
+    def test_the_access_point_keeps_its_own_network_and_the_page_s_latch(self):
+        # #825 until WIFI-del-a3: the page now serves on port 1 (D-178), so the access point no
+        # longer serves the page's network. Until WIFI-del-b deletes it, it keeps its own flag
+        # defaults for interface and address, and reads the latch the page writes.
         ap, page = exec_args(AP_UNIT), exec_args(PAGE_UNIT)
         self.assertEqual(ap[0], "/usr/lib/agentos/agentos-ap")
-        for name in ("iface", "addr", "card-latch"):
+        for name in ("iface", "addr"):
             with self.subTest(name):
-                self.assertEqual(arg(ap, name), arg(page, name))
-                self.assertEqual(flag_default("agentos-ap", name), arg(page, name))
+                self.assertEqual(arg(ap, name), flag_default("agentos-ap", name))
+        with self.subTest("card-latch"):
+            self.assertEqual(arg(ap, "card-latch"), arg(page, "card-latch"))
+            self.assertEqual(flag_default("agentos-ap", "card-latch"), arg(page, "card-latch"))
         u = ini(AP_UNIT)
         # Root (nft, the exempt unit, the radio's address), with no dumps of the setup password.
         self.assertNotIn("User", u["Service"])

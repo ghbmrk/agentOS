@@ -72,7 +72,7 @@ func main() {
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
-	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the first PCI Ethernet port (localui.Port1)")
+	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the one fixed PCI Ethernet port (localui.Port1), and none if two or more")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
 	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "serve the passkey page at /passkeys/ (#2779a) with this WebAuthn RP ID, through agentosd's passkey ops (agentosd -passkey-rp-id, the same name); it must be -page-name, and the page refuses to start unless the HTTPS listener is up")
@@ -84,7 +84,7 @@ func main() {
 	defer stop()
 	if iface == "" {
 		// Port 1 from the hardware, never from routes a peer could set.
-		p, err := localui.Port1("/sys")
+		p, err := settledPort1("/sys", func() bool { return pause(ctx, port1Recheck) })
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -106,6 +106,37 @@ func main() {
 
 // port1Recheck is how often the page reads sysfs again for port 1.
 const port1Recheck = 10 * time.Second
+
+// settledPort1 is Port1 read twice, wait apart, and only when both reads
+// agree, so a port 1 whose driver probes after another port's within that
+// wait refuses instead of serving on the other port until the watcher's
+// first tick (Security release 1 on e867557). wait reports false when the
+// page is stopping.
+func settledPort1(sys string, wait func() bool) (string, error) {
+	p, err := localui.Port1(sys)
+	if err != nil {
+		return "", err
+	}
+	if !wait() {
+		return "", errors.New("stopped before port 1 settled")
+	}
+	if q, err := localui.Port1(sys); err != nil || q != p {
+		return "", errors.New("port 1 changed while the box started (" + p + "); the unit picks again")
+	}
+	return p, nil
+}
+
+// pause waits d, false if ctx ends first.
+func pause(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
 
 // watchPort1 stops the page once port 1 is no longer the one it chose:
 // a driver that probed after the page started, or a port hot-plugged

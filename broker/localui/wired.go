@@ -51,8 +51,8 @@ func (p Page) Validate() error {
 // HW-12). It reads only what the box's hardware fixes, never DHCP or route
 // state a peer on another port could set (WIFI-del-a3, CH-9). None, or
 // more than one, is an error: nothing in sysfs says which jack the owner
-// cabled to the enforcer, so a box with two fixed ports needs -iface (or a
-// board's .link name) and the page serves nothing rather than guess.
+// cabled to the enforcer, so a box with two fixed ports needs
+// AGENTOS_PAGE_IFACE, the unit's -iface (or a board's .link name) and the page serves nothing rather than guess.
 func Port1(sys string) (string, error) {
 	ents, err := os.ReadDir(filepath.Join(sys, "class", "net"))
 	if err != nil {
@@ -83,7 +83,7 @@ func Port1(sys string) (string, error) {
 	case 1:
 		return found[0], nil
 	}
-	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 with -iface")
+	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 with AGENTOS_PAGE_IFACE in a drop-in for agentos-localui.service (-iface)")
 }
 
 // removable: dev or a device above it says it is removable (the kernel's
