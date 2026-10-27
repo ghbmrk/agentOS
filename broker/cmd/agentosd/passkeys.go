@@ -21,8 +21,7 @@ import (
 // (kernelsock.Owner): the anchors and enrollments the log holds, and
 // Enroll and Unenroll, which the kernel decides.
 type passkeyKernel interface {
-	Anchors(ctx context.Context) ([]key.PublicKey, error)
-	Enrollments(ctx context.Context) ([]key.Enrollment, []key.PublicKey, error)
+	keyReader
 	Enroll(ctx context.Context, e key.Enrollment) error
 	Unenroll(ctx context.Context, u key.Unenrollment) error
 }
@@ -100,13 +99,25 @@ func listed(pk key.PublicKey, by string) localapi.Passkey {
 	return localapi.Passkey{ID: keyID(pk), Fingerprint: fingerprint(pk), Alg: pk.Alg(), By: by}
 }
 
+// keyReader is the reads ownerKeys makes (kernelsock.Owner).
+type keyReader interface {
+	Anchors(ctx context.Context) ([]key.PublicKey, error)
+	Enrollments(ctx context.Context) ([]key.Enrollment, []key.PublicKey, error)
+}
+
 // keys reads the anchors, the live phone passkeys with the anchor that
 // enrolled each, and the cut-off keys.
 func (p *passkeys) keys(ctx context.Context) (anchors []key.PublicKey, live []key.Enrollment, cut []key.PublicKey, err error) {
-	if anchors, err = p.K.Anchors(ctx); err != nil {
+	return ownerKeys(ctx, p.K)
+}
+
+// ownerKeys is passkeys.keys over any reader of the kernel's keys: the
+// Backups page's tap is found among the same keys (tapper).
+func ownerKeys(ctx context.Context, k keyReader) (anchors []key.PublicKey, live []key.Enrollment, cut []key.PublicKey, err error) {
+	if anchors, err = k.Anchors(ctx); err != nil {
 		return nil, nil, nil, err
 	}
-	es, un, err := p.K.Enrollments(ctx)
+	es, un, err := k.Enrollments(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
