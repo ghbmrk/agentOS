@@ -810,7 +810,7 @@ func crashed(err error) bool {
 // Each entry is in the log at some boot, so this sees every one; it runs only
 // there because it reverifies every plan.
 func (s *sim) rederive() error {
-	if _, err := kernel.Rederive(s.w.anchors, s.k.Log().Entries()); err != nil {
+	if _, err := kernel.Rederive(s.w.anchors, s.k.Box(), s.k.Log().Entries()); err != nil {
 		return fmt.Errorf("invariant: %w", err)
 	}
 	return nil

@@ -4,6 +4,7 @@ package kernel_test
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -26,10 +27,10 @@ func candidate(r *rig, now int64, edge pair, nonce byte) error {
 }
 
 // enrolSig is by's signature over enrolling edge as the next edge change,
-// replacing whatever is live at this head.
+// replacing the last enrolled key (a2 decision 3).
 func enrolSig(r *rig, by pair, edge pair) key.Cosign {
 	s := r.k.State()
-	return key.Approve(by.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), r.k.Box(), edge.pub, s.LiveEdge(r.k.Box())))
+	return key.Approve(by.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), r.k.Box(), edge.pub, r.k.EdgeReplaces(edge.pub)))
 }
 
 // enrol takes edge through the page step: its hello, then a hardware key's signature.
@@ -61,7 +62,7 @@ func reopen(r *rig, head pair, anchors []key.PublicKey) {
 // edgeReplays checks the rig's log re-derives every edge decision.
 func edgeReplays(r *rig, anchors []key.PublicKey) kernel.Rederived {
 	r.t.Helper()
-	got, err := kernel.Rederive(anchors, r.k.Log().Entries())
+	got, err := kernel.Rederive(anchors, r.k.Box(), r.k.Log().Entries())
 	must(r.t, err)
 	return got
 }
@@ -209,7 +210,7 @@ func TestRevokedNeverReturns(t *testing.T) {
 		forged := append(r.k.Log().Entries(),
 			entryAt(t, s.Seq+1, 300_000, kernel.TEdgeCandidate, helloBody(a, 9)),
 		)
-		replaced := s.LiveEdge(head.pub)
+		replaced := s.EdgeReplaces(a.pub)
 		forged = append(forged, entryAt(t, s.Seq+2, 300_000, kernel.TEdgeEnrolled, map[string]any{
 			"key": []byte(a.pub), "head": []byte(head.pub), "replaces": []byte(replaced),
 			"sig": key.Approve(r.owner.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), head.pub, a.pub, replaced)),
@@ -219,7 +220,7 @@ func TestRevokedNeverReturns(t *testing.T) {
 		if st.LiveEdge(head.pub).Equal(a.pub) {
 			t.Fatal("a forged re-enrolment of a revoked key folded")
 		}
-		if _, err := kernel.Rederive(r.anchors(), forged); err == nil {
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), forged); err == nil {
 			t.Fatal("rederive passed a revoked key's re-enrolment")
 		}
 	}
@@ -392,7 +393,7 @@ func TestEdgeDecisionsRederive(t *testing.T) {
 	}
 	st, err := kernel.Replay(r.anchors(), es)
 	must(t, err)
-	if st.LiveEdge(r.head.pub) != nil || !st.EdgeRevoked(b.pub) || st.EdgeRevoked(a.pub) {
+	if st.LiveEdge(r.head.pub) != nil || !st.EdgeRevoked(b.pub) || !st.EdgeRevoked(a.pub) {
 		t.Fatal("the replayed edge state differs")
 	}
 	// A refused enrolment and a refused candidate written past the kernel.
@@ -403,7 +404,7 @@ func TestEdgeDecisionsRederive(t *testing.T) {
 		"bad hello":      entryAt(t, n+1, 200_000, kernel.TEdgeCandidate, map[string]any{"key": []byte(a.pub), "nonce": make([]byte, 32), "sig": make([]byte, 64)}),
 	} {
 		var d *kernel.Divergence
-		if _, err := kernel.Rederive(r.anchors(), append(es[:len(es):len(es)], e)); !errors.As(err, &d) || d.Seq != n+1 {
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), append(es[:len(es):len(es)], e)); !errors.As(err, &d) || d.Seq != n+1 {
 			t.Errorf("%s: got %v, want a divergence at %d", name, err, n+1)
 		}
 	}
@@ -449,27 +450,159 @@ func entryAt(t *testing.T, seq uint64, at int64, typ string, body any) kernel.En
 }
 
 // An anchor-signed enrolment written past the kernel whose replaces is not
-// the live key folds to nothing and diverges, so a forged entry cannot
-// leave the old key live and unrevoked beside the new one (L3 probe on
-// #3341). Mutant: drop `!s.LiveEdge(b.Head).Equal(b.Replaces) ||` from
-// enrollOK and the forged enrolment folds.
-func TestEnrollReplacesOnlyTheLiveKey(t *testing.T) {
+// EdgeReplaces folds to nothing and diverges, so a forged entry cannot leave
+// the old key unrevoked beside the new one (L3 probe on #3341), under the
+// head it was enrolled at or after a restore (a2 decision 3). Mutant: drop
+// `!s.EdgeReplaces(b.Key).Equal(b.Replaces) ||` from enrollOK and the
+// forged enrolment folds.
+func TestEnrollReplacesOnlyTheLastKey(t *testing.T) {
 	r := newRig(t)
 	old, next := gen(41), gen(42)
 	enrol(r, 1, old, 1)
 	must(t, candidate(r, 70_000, next, 2))
-	s := r.k.State()
-	sig := key.Approve(r.owner.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), r.k.Box(), next.pub, nil))
+	for i, head := range []pair{r.head, gen(59)} {
+		if i == 1 {
+			reopen(r, head, r.anchors())
+		}
+		s := r.k.State()
+		sig := key.Approve(r.owner.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), head.pub, next.pub, nil))
+		es := r.k.Log().Entries()
+		forged := entryAt(t, s.Seq+1, 70_001, kernel.TEdgeEnrolled, map[string]any{"key": []byte(next.pub), "head": []byte(head.pub), "sig": sig})
+		all := append(es[:len(es):len(es)], forged)
+		st, err := kernel.Replay(r.anchors(), all)
+		must(t, err)
+		if st.LiveEdge(head.pub).Equal(next.pub) || st.EdgeRevoked(old.pub) {
+			t.Fatalf("head %d: an enrolment replacing nothing folded: live %x, old revoked %v", i, st.LiveEdge(head.pub), st.EdgeRevoked(old.pub))
+		}
+		var d *kernel.Divergence
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), all); !errors.As(err, &d) || d.Seq != s.Seq+1 {
+			t.Fatalf("head %d: got %v, want a divergence at %d", i, err, s.Seq+1)
+		}
+	}
+}
+
+// A candidate of the key live at the running head, written past the kernel
+// (which refuses it with ErrEdgeLive), diverges, so it cannot replace the
+// pending candidate unseen; the same log read under another head key, where
+// that key is not live, does not (Security P1 on #3341, a2 decision 1).
+// Mutant: drop `&& !s.LiveEdge(head).Equal(b.Key)` from edgeDecision and
+// the forged candidate passes.
+func TestRederiveCatchesALiveKeyCandidate(t *testing.T) {
+	r := newRig(t)
+	a, b := gen(60), gen(61)
+	enrol(r, 1, a, 1)
+	must(t, candidate(r, 70_000, b, 5))
+	if err := candidate(r, 200_000, a, 2); !errors.Is(err, kernel.ErrEdgeLive) {
+		t.Fatalf("the kernel took the live key's hello: %v", err)
+	}
 	es := r.k.Log().Entries()
-	forged := entryAt(t, s.Seq+1, 70_001, kernel.TEdgeEnrolled, map[string]any{"key": []byte(next.pub), "head": []byte(r.head.pub), "sig": sig})
-	all := append(es[:len(es):len(es)], forged)
-	st, err := kernel.Replay(r.anchors(), all)
-	must(t, err)
-	if !st.LiveEdge(r.head.pub).Equal(old.pub) || st.EdgeRevoked(old.pub) {
-		t.Fatalf("an enrolment replacing nothing folded: live %x, old revoked %v", st.LiveEdge(r.head.pub), st.EdgeRevoked(old.pub))
-	}
+	n := uint64(len(es))
+	forged := append(es[:len(es):len(es)], entryAt(t, n+1, 200_000, kernel.TEdgeCandidate, helloBody(a, 2)))
 	var d *kernel.Divergence
-	if _, err := kernel.Rederive(r.anchors(), all); !errors.As(err, &d) || d.Seq != s.Seq+1 {
-		t.Fatalf("got %v, want a divergence at %d", err, s.Seq+1)
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), forged); !errors.As(err, &d) || d.Seq != n+1 {
+		t.Fatalf("got %v, want a divergence at %d", err, n+1)
 	}
+	if _, err := kernel.Rederive(r.anchors(), gen(62).pub, forged); err != nil {
+		t.Fatalf("under another head key, where a is not live: %v", err)
+	}
+}
+
+// Rederive compares the bytes the kernel would write, re-encoded from the
+// decoded body, so an enrolment or a candidate carrying an extra field
+// diverges (Security P2 on #3341, a2 decision 2). Mutant: return
+// `derived{e.Type, e.Body}` from edgeDecision and both pass.
+func TestRederiveComparesCanonicalBodies(t *testing.T) {
+	r := newRig(t)
+	a, b := gen(63), gen(64)
+	enrol(r, 1, a, 1)
+	must(t, candidate(r, 70_000, b, 2))
+	es := r.k.Log().Entries()
+	edgeReplays(r, r.anchors())
+	for _, at := range []int{len(es) - 2, len(es) - 1} {
+		e := es[at]
+		if e.Type != kernel.TEdgeEnrolled && e.Type != kernel.TEdgeCandidate {
+			t.Fatalf("entry %d is %s", e.Seq, e.Type)
+		}
+		odd := append([]byte(`{"junk":"x",`), e.Body[1:]...)
+		bad := append(append([]kernel.Entry(nil), es[:at]...), kernel.Entry{Seq: e.Seq, At: e.At, Type: e.Type, V: e.V, Prev: e.Prev, Body: odd})
+		var d *kernel.Divergence
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != e.Seq {
+			t.Errorf("%s with an extra field: got %v, want a divergence at %d", e.Type, err, e.Seq)
+		}
+	}
+}
+
+// After a restore (a new head key), enrolling another edge B names the last
+// enrolled key A as replaced and revokes it, so a stolen old box's hello
+// never logs again and A is never pending (Security P3 on #3341, HW-15, a2
+// decision 3). Mutant: `Replaces: k.LiveEdge()` in EdgeEnroll and the
+// enrolment refuses (ErrEdgeSig), since enrollOK wants EdgeReplaces.
+func TestRestoreEnrolRevokesTheLastKey(t *testing.T) {
+	r := newRig(t)
+	a, b := gen(65), gen(66)
+	enrol(r, 1, a, 1)
+	reopen(r, gen(67), r.anchors())
+	must(t, candidate(r, 100_000, b, 2))
+	if got := r.k.EdgeReplaces(b.pub); !got.Equal(a.pub) {
+		t.Fatalf("enrolling b after a restore replaces %x, want a", got)
+	}
+	must(t, r.k.EdgeEnroll(100_000, b.pub, enrolSig(r, r.owner, b)))
+	es := r.k.Log().Entries()
+	var got struct{ Replaces []byte }
+	must(t, json.Unmarshal(es[len(es)-1].Body, &got))
+	if !ed25519.PublicKey(got.Replaces).Equal(a.pub) {
+		t.Fatalf("the enrolment names replaces %x, want a", got.Replaces)
+	}
+	if !r.k.State().EdgeRevoked(a.pub) || !live(r).Equal(b.pub) {
+		t.Fatal("a restore's enrolment of another edge left the old key unrevoked")
+	}
+	n := r.k.Log().Len()
+	if err := candidate(r, 300_000, a, 3); !errors.Is(err, kernel.ErrEdgeRevoked) || r.k.Log().Len() != n {
+		t.Fatalf("the old key's hello after a restore: %v", err)
+	}
+	if r.k.State().PendingEdge(r.k.Box()).Equal(a.pub) {
+		t.Fatal("the old key is pending")
+	}
+	edgeReplays(r, r.anchors())
+}
+
+// Re-enrolling the same edge after a restore, the usual restore visit,
+// names no replaces and revokes nothing (a2 decision 3). Mutant: drop
+// `&& !l.Key.Equal(k)` from State.EdgeReplaces and the edge revokes itself.
+func TestReenrolTheSameEdgeAfterRestore(t *testing.T) {
+	r := newRig(t)
+	a := gen(68)
+	enrol(r, 1, a, 1)
+	reopen(r, gen(69), r.anchors())
+	if !r.k.State().PendingEdge(r.k.Box()).Equal(a.pub) || r.k.EdgeReplaces(a.pub) != nil {
+		t.Fatalf("after a restore: pending %x, replaces %x", r.k.State().PendingEdge(r.k.Box()), r.k.EdgeReplaces(a.pub))
+	}
+	must(t, r.k.EdgeEnroll(100_000, a.pub, enrolSig(r, r.owner, a)))
+	es := r.k.Log().Entries()
+	var got struct{ Replaces []byte }
+	must(t, json.Unmarshal(es[len(es)-1].Body, &got))
+	if got.Replaces != nil || !live(r).Equal(a.pub) || r.k.State().EdgeRevoked(a.pub) {
+		t.Fatalf("re-enrolling the same edge: replaces %x, live %x, revoked %v", got.Replaces, live(r), r.k.State().EdgeRevoked(a.pub))
+	}
+	edgeReplays(r, r.anchors())
+}
+
+// After an edge.cut, enrolling another edge B names the cut key A as
+// replaced and revokes it, since a cut leaves A one tap from return too
+// (a2 decision 3). Mutant: set `s.edge.last = nil` in applyEdge's
+// TEdgeCut case and A stays unrevoked.
+func TestCutThenAnotherEdgeRevokesTheOld(t *testing.T) {
+	r := newRig(t)
+	a, b := gen(70), gen(71)
+	enrol(r, 1, a, 1)
+	must(t, r.k.EdgeCut(2, "passphrase"))
+	must(t, candidate(r, 70_000, b, 2))
+	must(t, r.k.EdgeEnroll(70_000, b.pub, enrolSig(r, r.owner, b)))
+	if !r.k.State().EdgeRevoked(a.pub) || !live(r).Equal(b.pub) {
+		t.Fatal("enrolling another edge after a cut left the old key unrevoked")
+	}
+	if err := candidate(r, 200_000, a, 3); !errors.Is(err, kernel.ErrEdgeRevoked) {
+		t.Fatalf("the cut key's hello: %v", err)
+	}
+	edgeReplays(r, r.anchors())
 }
