@@ -159,3 +159,87 @@ func TestRunKernelNeedsAKeyTable(t *testing.T) {
 		t.Fatalf("got %v, want ErrNoKeyTable", err)
 	}
 }
+
+// refusing is a content store that refuses every delete.
+type refusing struct{ *kernel.MemContent }
+
+func (refusing) Delete(kernel.Hash) error { return errors.New("store down") }
+
+// The owner finds a subject by name, sees its items, and erases it over
+// the owner socket: then nothing is left unerased, the item is unreadable
+// and the lineage that read it is named; a store that refuses its delete
+// stays listed in unerased (LOG-4).
+func TestEraseOverTheOwnerSocket(t *testing.T) {
+	dir := t.TempDir()
+	h := contentKernel(t, filepath.Join(dir, "log"), filepath.Join(dir, "keys"))
+	defer h.Close()
+	o := Owner{serveSide(t, &box{t: t, h: h}, OwnerSide, os.Getuid())}
+	var alice, bob string
+	var item kernel.Hash
+	if err := h.With(func(k *kernel.Kernel) (err error) {
+		stores := map[string]kernel.ContentStore{"mail": kernel.NewMemContent(), "notes": refusing{kernel.NewMemContent()}}
+		if _, err = k.OpenContent(kernel.NewMemKeys(), stores, 1000); err != nil {
+			return err
+		}
+		if alice, err = k.OpenSubject(1000); err != nil {
+			return err
+		}
+		if bob, err = k.OpenSubject(1000); err != nil {
+			return err
+		}
+		k.Seal(1000, alice, "mail", kernel.ClassLabel, []byte("Alice"))
+		if item, err = k.Seal(1000, alice, "mail", "message", []byte("lunch")); err != nil {
+			return err
+		}
+		k.Seal(1000, bob, "notes", kernel.ClassLabel, []byte("Bob"))
+		_, err = k.ReadFor(1001, item, "lin-1")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found, unread, err := o.Named("alice")
+	if err != nil || !slices.Equal(found, []string{alice}) || unread != nil {
+		t.Fatalf("named: %v %v %v", found, unread, err)
+	}
+	if r, ok, err := o.Recall(alice); err != nil || !ok || len(r.Items) != 2 {
+		t.Fatalf("recall: %+v %v %v", r, ok, err)
+	}
+	if _, ok, err := o.Recall("0123456789abcdef0123456789abcdef"); err != nil || ok {
+		t.Fatalf("recall of no subject: %v %v", ok, err)
+	}
+	c, err := o.Erase(alice)
+	if err != nil || c.Subject != alice || len(c.Unconfirmed) != 0 {
+		t.Fatalf("erase: %+v %v", c, err)
+	}
+	if u, err := o.Unerased(); err != nil || u != nil {
+		t.Fatalf("unerased after the erase: %+v %v", u, err)
+	}
+	if err := h.With(func(k *kernel.Kernel) error { _, err := k.Read(item); return err }); !errors.Is(err, kernel.ErrErased) {
+		t.Fatalf("read after the erase: %v", err)
+	}
+	if rs, err := o.ErasedReads(); err != nil || len(rs) != 1 || rs[0].Subject != alice || rs[0].Lineage != "lin-1" {
+		t.Fatalf("erased reads: %+v %v", rs, err)
+	}
+	if _, err := o.Erase(alice); !errors.Is(err, kernel.ErrErased) {
+		t.Fatalf("a second erase: %v", err)
+	}
+	if _, err := o.Erase("0123456789abcdef0123456789abcdef"); !errors.Is(err, kernel.ErrSubject) {
+		t.Fatalf("an erase of no subject: %v", err)
+	}
+	c, err = o.Erase(bob)
+	if err != nil || !slices.Equal(c.Unconfirmed, []string{"notes"}) {
+		t.Fatalf("erase with a store down: %+v %v", c, err)
+	}
+	if u, err := o.Unerased(); err != nil || len(u) != 1 || u[0].Subject != bob || !slices.Equal(u[0].Stores, []string{"notes"}) {
+		t.Fatalf("unerased with a store down: %+v %v", u, err)
+	}
+}
+
+// Before content opens, named says so over the socket, by the sentinel.
+func TestNamedOverTheSocketBeforeContentOpens(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	if _, _, err := o.Named("Alice"); !errors.Is(err, kernel.ErrContentClosed) {
+		t.Fatalf("named before content opens: %v", err)
+	}
+}

@@ -86,7 +86,7 @@ var schema = map[string]int{
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
-	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1,
+	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1,
 }
@@ -1128,7 +1128,7 @@ func (s *State) Apply(e Entry) error {
 		}
 	case TTaskOpened, TTaskApproved, TTaskEnded:
 		return s.applyTask(e)
-	case TSubjectOpened, TContentStored, TSubjectErased, TEraseConfirmed:
+	case TSubjectOpened, TContentStored, TSubjectErased, TEraseConfirmed, TContentRead:
 		return s.applyErase(e)
 	case TBackupTarget, TBackupUntarget, TBackupTaken:
 		return s.applyBackup(e)

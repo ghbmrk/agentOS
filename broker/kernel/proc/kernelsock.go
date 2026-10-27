@@ -153,6 +153,25 @@ type (
 		From int64 `json:"from"`
 		OK   bool  `json:"ok"`
 	}
+	// labelArgs is a name the owner looks for (kernel.Named).
+	labelArgs struct {
+		Label string `json:"label"`
+	}
+	// namedRead is the subjects a name found, and those whose labels could
+	// not be read: IDs only, never a label's text.
+	namedRead struct {
+		Found  []string `json:"found"`
+		Unread []string `json:"unread"`
+	}
+	recallRead struct {
+		Recall *kernel.Recall `json:"recall"` // nil: no such subject
+	}
+	// eraseRead is what an erase reached. Err is set when a step after the
+	// logged erase failed: the subject is erased all the same.
+	eraseRead struct {
+		Confirmation kernel.Confirmation `json:"confirmation"`
+		Err          string              `json:"err,omitempty"`
+	}
 	none struct{}
 )
 
@@ -205,6 +224,28 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return taskRead{}
 	}),
 	"untarget": act(func(k *kernel.Kernel, now int64, a untargetArgs) error { return k.Untarget(now, a.Name) }),
+
+	// Erase by name (LOG-4, KRN-forget): IDs, counts and stores cross, never
+	// sealed plaintext. No side has a read of content (CH-25).
+	"named": func(k *kernel.Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a labelArgs
+		if err := json.Unmarshal(raw, &a); err != nil || a.Label == "" || len(a.Label) > MaxLabel {
+			return nil, ErrArgs
+		}
+		found, unread, err := k.Named(a.Label)
+		if err != nil {
+			return nil, err
+		}
+		return namedRead{found, unread}, nil
+	},
+	"recall": read(func(s *kernel.State, _ int64, sub string) recallRead {
+		if r, ok := s.Recall(sub); ok {
+			return recallRead{&r}
+		}
+		return recallRead{}
+	}),
+	"unerased":    read(func(s *kernel.State, _ int64, _ none) []kernel.Unerased { return s.Unerased() }),
+	"erasedreads": read(func(s *kernel.State, _ int64, _ none) []kernel.ErasedRead { return s.ErasedReads() }),
 }, procOps: map[string]procOp{
 	"backuptarget": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a targetArgs
@@ -213,7 +254,23 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		}
 		return nil, h.AddBackupTarget(now, a.Target, a.Cosign)
 	},
-	"backup":  func(h *Kernel, now int64, _ json.RawMessage) (any, error) { return h.Backup(now) },
+	"backup": func(h *Kernel, now int64, _ json.RawMessage) (any, error) { return h.Backup(now) },
+	// erase waits for backup re-seals without the lock (Kernel.Erase).
+	"erase": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var sub string
+		if err := json.Unmarshal(raw, &sub); err != nil {
+			return nil, ErrArgs
+		}
+		c, err := h.Erase(now, sub)
+		if c.Subject == "" {
+			return nil, err
+		}
+		r := eraseRead{Confirmation: c}
+		if err != nil {
+			r.Err = err.Error()
+		}
+		return r, nil
+	},
 	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
 	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var f kernel.FirstAnchors
@@ -299,6 +356,9 @@ func ServeConns(ln net.Listener, n int, handle func(net.Conn)) error {
 		}()
 	}
 }
+
+// MaxLabel bounds the name a named call looks for, in bytes.
+const MaxLabel = 256
 
 // SetupInfo is what the setup page needs before the owner's keys sign:
 // whether setup is still open, and the box's head key they sign over.
@@ -421,6 +481,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
@@ -633,6 +694,50 @@ func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", ni
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {
 	err = o.Call("certify", certifyArgs{pub}, &c)
+	return
+}
+
+// Named is the live subjects a label reads as (kernel.Named): those found,
+// and those whose labels could not be read.
+func (o Owner) Named(label string) (found, unread []string, err error) {
+	var r namedRead
+	err = o.Call("named", labelArgs{label}, &r)
+	return r.Found, r.Unread, err
+}
+
+// Recall is what the box knows of subject; ok is false when it has none.
+func (o Owner) Recall(subject string) (kernel.Recall, bool, error) {
+	var r recallRead
+	if err := o.Call("recall", subject, &r); err != nil || r.Recall == nil {
+		return kernel.Recall{}, false, err
+	}
+	return *r.Recall, true, nil
+}
+
+// Erase erases subject. A Confirmation with its Subject set means the
+// erase is logged, even with an error: a step after it failed, and Tick
+// retries it.
+func (o Owner) Erase(subject string) (kernel.Confirmation, error) {
+	var r eraseRead
+	if err := o.Call("erase", subject, &r); err != nil {
+		return kernel.Confirmation{}, err
+	}
+	if r.Err == "" {
+		return r.Confirmation, nil
+	}
+	if e, ok := wireErrors[r.Err]; ok {
+		return r.Confirmation, e
+	}
+	return r.Confirmation, errors.New(r.Err)
+}
+
+// Unerased is every erase a store or the key table has not confirmed.
+func (o Owner) Unerased() (u []kernel.Unerased, err error) { err = o.Call("unerased", nil, &u); return }
+
+// ErasedReads is each lineage that read an erased subject's item, at its
+// first read: what agentosd rewinds (D-169).
+func (o Owner) ErasedReads() (r []kernel.ErasedRead, err error) {
+	err = o.Call("erasedreads", nil, &r)
 	return
 }
 

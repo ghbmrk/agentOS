@@ -603,6 +603,11 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			t.Fatalf("%s: the socket logged %s, the direct call %s", c.name, got, want)
 		}
 	}
+	// The content calls answer subject IDs drawn at random per kernel, so
+	// two kernels never read alike: TestEraseOverTheOwnerSocket covers them.
+	for _, op := range []string{"named", "recall", "unerased", "erasedreads"} {
+		served[op] = true
+	}
 	for _, side := range []Side{OwnerSide, MeterSide} {
 		for op := range side.ops {
 			if !served[op] {
@@ -757,4 +762,59 @@ func get[T any](t *testing.T, f func() (T, error)) T {
 		t.Fatal(err)
 	}
 	return v
+}
+
+// No socket hands sealed plaintext to anyone (CH-25, #3160 Security): no
+// side has read or readfor, only the owner side has the erase calls, and a
+// named answer carries subject IDs, never a label's text.
+func TestNoSideReadsSealedContent(t *testing.T) {
+	content := []string{"named", "recall", "erase", "unerased", "erasedreads"}
+	for _, side := range []Side{OwnerSide, MeterSide} {
+		for _, op := range []string{"read", "readfor", "open", "content"} {
+			_, a := side.ops[op]
+			_, b := side.procOps[op]
+			if a || b {
+				t.Fatalf("the %s side serves %s", side.name, op)
+			}
+		}
+		for _, op := range content {
+			_, a := side.ops[op]
+			_, b := side.procOps[op]
+			if (a || b) != (side.name == "owner") {
+				t.Fatalf("the %s side serves %s: %v", side.name, op, a || b)
+			}
+		}
+	}
+	dir := t.TempDir()
+	h := contentKernel(t, filepath.Join(dir, "log"), filepath.Join(dir, "keys"))
+	defer h.Close()
+	b := &box{t: t, h: h}
+	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	label := "Alice Canary-7f3e"
+	var sub string
+	if err := h.With(func(k *kernel.Kernel) error {
+		if _, err := k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 1000); err != nil {
+			return err
+		}
+		var err error
+		sub, err = k.OpenSubject(1000)
+		if err == nil {
+			_, err = k.Seal(1000, sub, "mail", kernel.ClassLabel, []byte(label))
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var raw json.RawMessage
+	if err := o.Call("named", labelArgs{"alice canary-7f3e"}, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bytes.ToLower(raw), []byte("canary")) || !bytes.Contains(raw, []byte(sub)) {
+		t.Fatalf("named answers %s", raw)
+	}
+	for _, bad := range []string{"", strings.Repeat("a", MaxLabel+1)} {
+		if _, _, err := o.Named(bad); !errors.Is(err, ErrArgs) {
+			t.Fatalf("a label of %d bytes: %v", len(bad), err)
+		}
+	}
 }
