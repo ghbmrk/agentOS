@@ -26,7 +26,7 @@ A private driver is all three things: trusted code, part of an image, and an enc
 3. **Shipping: drivers are in the image, named in its manifest.** The image build takes an optional drivers directory. Each driver binary goes under `/usr` (verity-covered, read-only), and `agentos_V.release.json` lists each driver as {name, repository, commit, SHA-256}. The public release build lists none, so HW-10's public image is unchanged. Mark's image is the same build with a drivers directory, signed by the same release key and updated under DEP-4 like any image. The host starts only the drivers in the manifest whose hash matches. The kernel logs the list at start, and STATUS names each driver by name and commit (KRN-2). Rejected alternative: a separately signed driver bundle. It would need a second artifact, a second verify path and a second update path, and it would add trusted-base code to replace work the image chain already does.
 4. **The residual is stated, not hidden.** An image with drivers can be rebuilt only by someone who holds the private repo. The reproducible-builds mitigation in risk 26 holds for the public image and for holders of both repos. The spec diff says so in one clause.
 5. **The review rules carry over by contract, not by trust.**
-   - This repo exports `broker/clerk/devslot/conformance`, a test suite every driver must pass. The suite checks that a declaration uses DEV-4 verbs only, that the driver writes nothing but declared shapes, that every parser is fuzzed with bounded buffers, and that a canary secret never leaves the driver.
+   - This repo exports `broker/clerk/devslot/conformance`, a test suite every driver must pass. The suite checks that a declaration uses DEV-4 verbs only, that the driver writes nothing but declared shapes, that every parser is fuzzed with bounded buffers, and that a canary secret never leaves the driver. Its source check (plain Go files only, allowlisted standard imports, nothing else from this repo) is a lint, not the boundary: Go code can still corrupt memory through a data race. The boundary is the driver's sealed process (part b).
    - The private repo's CI runs that suite at the pinned commit, plus `go vet`, the race detector and the fuzz targets.
    - Every private PR gets a fresh L3 review, and tier A PRs also get a Security review. Reviewers are sessions with ghbmrk/agentos-private added, using this repo's reviewer skill at the pinned commit.
    - The private repo keeps its own `trusted_base_parsers.txt`, and each parser it adds needs a `Trusted-base: parsers --` line, as here. The image manifest records each driver's parser count, so the KRN-2 measure covers drivers too.
@@ -42,7 +42,7 @@ A private driver is all three things: trusted code, part of an image, and an enc
 
 - **(s)** L1 spec diff with the text above. It starts once nothing else open touches SPEC.md (#3302 holds it). `Word-budget: D-189` per point 6, unless it retires as many words.
 - **(a)** `broker/clerk/devslot/`: the `Driver` interface, `Serve`, the declaration check, the `Link` kinds (GATT through the enforcer relay; TCP to a pinned endpoint), the one-slot `Secrets`, typed event output, the `conformance` suite, and a fixture driver under `testdata/`. Part (a) needs neither the image nor the host.
-- **(b)** The host and the image: start only manifest-listed drivers whose hash matches; the build's drivers directory and the `release.json` drivers list (`image/build.sh`, `image/finish_image.py`); the kernel's start-up log entry and the STATUS line. It needs the device clerk host. The device-agnostic parts of the dropped #3293 land here. It is serial with the agentosd chain (D-111), and the kernel log entry needs a `Trusted-core:` decision of its own.
+- **(b)** The host and the image: start only manifest-listed drivers whose hash matches; the build's drivers directory and the `release.json` drivers list (`image/build.sh`, `image/finish_image.py`); the kernel's start-up log entry and the STATUS line; and the sealed driver process: its own uid, non-dumpable, a seccomp filter with no socket, file open or exec, no standard output or error that leaves it, and a deadline per operation. No driver runs on the box before that. It needs the device clerk host. The device-agnostic parts of the dropped #3293 land here. It is serial with the agentosd chain (D-111), and the kernel log entry needs a `Trusted-core:` decision of its own.
 - **(c)** The rewritten #3277: the enforcer's generic GATT relay (point 2). It needs the enforcer hardware.
 - **(p)** The private repo's CI and review setup (point 5). It is built in ghbmrk/agentos-private by a session with that repo added, not from this repo.
 - Then **#3322** (DEVSLOT-withings-move) runs the former Withings tests through the slot.
@@ -70,3 +70,16 @@ This PR: this brief and the D-189 row in `DECISIONS.md`. Part (a): `broker/clerk
 ## Estimate
 
 Part (a): one session, about 100k tokens, strongest model. Part (b): one session, about 120k tokens, after the device clerk host.
+
+## Follow-up: DEVSLOT-shapes (#3363)
+
+Release findings from the #3356 reviews (L3 6433450345 point 4, Security 6433469158 point 4, Security 6433764278 points 1-3, L3 6434260250, Security 6434263759 points 1-3). Scope: `broker/clerk/devslot/` only. Tier A (the public contract, point 5).
+
+- **Wide shapes.** The suite fails a shape whose free tail (`Max - len(Prefix)`) is over `MaxFreeTail` (8 bytes, room for an argument or a short tag) unless the driver's tests name it in `Config.Wide`. The private review then sees each wide shape in the diff that adds its name. `Check` still accepts an empty prefix, because length-prefixed TCP framing needs a variable first byte.
+- **The listing names the driver.** The suite fails a listing that lacks the driver type's package, an entry with no import path, and an entry go list marked incomplete or in error. DEVSLOT-a-7 says a forged or partial listing still passes, so the private review checks the CI command that makes it.
+- **Directives.** The suite fails every `//go:` directive in driver Go files except `//go:build`. That covers `linkname`, `norace` (which hides races from the race detector) and `cgo_import_dynamic` (which loads a system library at exec).
+- **Standard input.** DEVSLOT-a-7 says `fmt` can read standard input, and that the sealed process gets none.
+
+Part b notes (L3 6, Security 7 and 8, Potency 1, the stdin point) go into part b's brief update, not this row.
+
+Acceptance tests: `TestConformanceReportsWideShapes`; `TestConformanceRejectsBadFixtures` cases "race detector hidden", "system library at exec", "listing of another package", "listing entry with no path", "null listing", "incomplete listing" and "wide shape".

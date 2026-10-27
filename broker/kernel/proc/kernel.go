@@ -43,6 +43,13 @@ type KernelConfig struct {
 	// PageCA is the page authority in pageca.Marshal's form
 	// (handoff.KernelKeys.PageCA); none certifies no page key (Certify).
 	PageCA []byte
+	// FirstEdge is the edge key the link port captured before the Owner
+	// Card confirm (handoff.KernelKeys.FirstEdge), which setup logs as the
+	// first edge key (Kernel.Setup); none logs none.
+	FirstEdge ed25519.PublicKey
+	// LinkKey is the core's link key (handoff.KernelKeys.LinkKey), which
+	// only the kernel holds (HW-15); none on a box enrolled before it.
+	LinkKey ed25519.PrivateKey
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -63,6 +70,11 @@ type Kernel struct {
 	// page is the page authority (CH-9); nil when the store holds none.
 	// Set at open and never changed, so it is read without the lock.
 	page *pageca.Authority
+	// firstEdge and link are KernelConfig's, set at open and never
+	// changed. Nothing reads link yet: the link's handshake signer is
+	// EDGE-link-core-c2's, and it never goes into a backup (BAK-1).
+	firstEdge ed25519.PublicKey
+	link      ed25519.PrivateKey
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -106,7 +118,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		if err == nil {
@@ -117,7 +129,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
 		if cfg.BackupDir != "" {
-			if h.bk, err = openBackups(cfg, keys, k.State()); err != nil {
+			if h.bk, err = openBackups(cfg, keys, k, now); err != nil {
 				st.Close()
 				return nil, fmt.Errorf("run: the backups: %w", err)
 			}

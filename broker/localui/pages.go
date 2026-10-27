@@ -385,7 +385,7 @@ func phaseText(p string) string {
 	return "starting"
 }
 
-// pagesFor returns the page set with this box's address in the footer, so
+// pagesFor returns the page set with the page's name in the footer, so
 // the owner always sees where the box page lives.
 func pagesFor(host string) *template.Template {
 	return template.Must(tmpl.Clone()).Funcs(template.FuncMap{"boxhost": func() string { return host }})

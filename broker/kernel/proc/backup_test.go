@@ -5,6 +5,7 @@ package proc
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -724,7 +725,10 @@ func TestNoTableGoesOutWithoutAKeptRecord(t *testing.T) {
 		}
 		b.h.bk.saveErr = nil
 		b.restart()
-		if v, _ := b.h.Backups(); len(v.Backups) != 1 || !v.Backups[0].Pending || len(b.h.bk.set.List()) != 1 {
+		// The first backup was logged before its save failed, so the
+		// start rebuilds it (#3316); nothing of it went out.
+		if v, _ := b.h.Backups(); len(v.Backups) != 2 || !v.Backups[0].Pending || v.Backups[0].Rebuilt ||
+			!v.Backups[1].Rebuilt || len(b.h.bk.set.List()) != 2 {
 			t.Fatalf("kept after a restart: %+v", v.Backups)
 		}
 	})
@@ -896,5 +900,477 @@ func TestBackupCarriesThePageCA(t *testing.T) {
 	defer nf.Close()
 	if nm, _, err := backup.Open(nf, testRK); err != nil || nm.PageCA != nil || n.h.bk.kept[0].Record.PageCA != "" {
 		t.Fatalf("a kernel with no authority wrote one: %v", err)
+	}
+}
+
+// REQ: BAK-1, HW-15
+// EDGE-link-core-b: a kernel holding the core's link key writes no part of
+// it into a backup: neither the manifest, the log section nor a key table
+// holds an 8-byte run of its seed or its private key (BAK-1 "never the
+// kernel's keys"; a restore enrolls again and makes a new one).
+// Mutant: writeOne's `PageCA: ca` as `PageCA: h.link.Seed()` (the manifest
+// then holds the seed).
+func TestBackupHoldsNoLinkKey(t *testing.T) {
+	_, link := gen(9)
+	b := newBBox(t, recipientWire(t, testRK))
+	b.cfg.LinkKey = link
+	b.restart()
+	b.subject()
+	dir := b.addTarget("drive", false)
+	taken := b.backup()
+	if len(taken) != 1 || taken[0].Backup == nil || !taken[0].Backup.Verified {
+		t.Fatalf("backup: %+v", taken)
+	}
+	id := taken[0].Backup.BackupID
+	f := mustOpen(t, filepath.Join(dir, id+".content"))
+	defer f.Close()
+	m, secs, err := backup.Open(f, testRK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain [][]byte
+	plain = append(plain, []byte(fmt.Sprintf("%+v", m)), m.PageCA)
+	for {
+		_, r, err := secs.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		sec, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain = append(plain, sec)
+	}
+	tables, err := filepath.Glob(filepath.Join(dir, id+".table.*"))
+	if err != nil || len(tables) == 0 {
+		t.Fatalf("tables: %v %v", tables, err)
+	}
+	for _, p := range append(tables, filepath.Join(dir, id+".content")) {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain = append(plain, raw)
+	}
+	_, keys := openBackup(t, dir, id, testRK)
+	for _, k := range keys.M {
+		plain = append(plain, k[:])
+	}
+	for _, raw := range plain {
+		for i := 0; i+8 <= len(link); i++ {
+			if bytes.Contains(raw, link[i:i+8]) {
+				t.Fatalf("the backup holds the link key's bytes %d to %d", i, i+8)
+			}
+		}
+	}
+}
+
+// #3316 (LOG-4, BAK-1): the log names every backup (backup.taken) before
+// its key table leaves, so a rolled-back or deleted records file hides
+// none from an erase.
+
+// newestTable is what backup id's newest key table at dir gives, opened
+// with rk; ok is false when it does not open with rk.
+func newestTable(t *testing.T, dir, id string, rk []byte) (*kernel.MemKeys, bool) {
+	t.Helper()
+	gens, err := backup.DirTarget{Dir: dir}.Tables(id)
+	if err != nil || len(gens) == 0 {
+		t.Fatalf("tables of %s: %v %v", id, gens, err)
+	}
+	tb, err := os.ReadFile(filepath.Join(dir, id+".table."+itoa(gens[len(gens)-1])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := kernel.NewMemKeys()
+	_, err = backup.UnwrapTable(bytes.NewReader(tb), rk, id, keys)
+	return keys, err == nil
+}
+
+func (b *bbox) records() string { return filepath.Join(b.cfg.BackupDir, recordsName) }
+
+func (b *bbox) taken() []kernel.BackupTaken {
+	var out []kernel.BackupTaken
+	b.h.With(func(k *kernel.Kernel) error { out = k.State().BackupsTaken(); return nil })
+	return out
+}
+
+func (b *bbox) kept(id string) *Kept {
+	for i := range b.h.bk.kept {
+		if b.h.bk.kept[i].Record.BackupID == id {
+			return &b.h.bk.kept[i]
+		}
+	}
+	return nil
+}
+
+// rolledBack takes B1, opens gone, takes B2, which gives gone, and then
+// hides B2 from the records file with lose (a rollback or a delete) and
+// restarts. B2 is the target's only backup that gives gone.
+func rolledBack(t *testing.T, b *bbox, lose func(old []byte)) (dir, b2, gone string) {
+	t.Helper()
+	dir = b.addTarget("drive", false)
+	b.backup()
+	old, err := os.ReadFile(b.records())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone = b.subject()
+	b.now += BackupEvery
+	b2 = b.backup()[0].Backup.BackupID
+	if keys, _ := newestTable(t, dir, b2, testRK); keys.M[gone] == (kernel.SubjectKey{}) {
+		t.Fatal("B2 does not give the subject to begin with")
+	}
+	b.h.Close()
+	lose(old)
+	b.open()
+	return dir, b2, gone
+}
+
+func rollRecords(t *testing.T, b *bbox) func([]byte) {
+	return func(old []byte) {
+		if err := os.WriteFile(b.records(), old, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func deleteRecords(t *testing.T, b *bbox) func([]byte) {
+	return func([]byte) {
+		if err := os.Remove(b.records()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// eraseReseals erases gone and checks b2 was re-sealed and its table at dir
+// gives gone no more.
+func eraseReseals(t *testing.T, b *bbox, dir, b2, gone string) {
+	t.Helper()
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(c.Resealed, b2) || len(c.StillHeld) != 0 {
+		t.Fatalf("the erase's confirmation: %+v, want %s resealed", c, b2)
+	}
+	keys, ok := newestTable(t, dir, b2, testRK)
+	if !ok {
+		t.Fatal("the re-sealed table does not open with the recovery key")
+	}
+	if _, has, _ := keys.Get(gone); has {
+		t.Fatal("the re-sealed table still gives the erased subject's key")
+	}
+}
+
+// LOG-4, the issue's failure path: B2 survives a records file put back to
+// before it, and an erase re-seals it.
+func TestRolledBackRecordsStillReachEveryBackup(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	dir, b2, gone := rolledBack(t, b, rollRecords(t, b))
+	kp := b.kept(b2)
+	if kp == nil || !kp.Rebuilt || !kp.Pending || kp.Verified || !slices.Contains(kp.Record.Subjects, gone) {
+		t.Fatalf("B2 after the rollback: %+v", kp)
+	}
+	if v, _ := b.h.Backups(); !slices.ContainsFunc(v.Backups, func(bv BackupView) bool { return bv.BackupID == b2 && bv.Rebuilt }) {
+		t.Fatal("the backups answer does not show B2 rebuilt")
+	}
+	eraseReseals(t, b, dir, b2, gone)
+}
+
+// LOG-4: the same with the records file deleted.
+func TestDeletedRecordsRebuildFromTheLog(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	dir, b2, gone := rolledBack(t, b, deleteRecords(t, b))
+	if len(b.h.bk.kept) != 2 || len(b.h.bk.set.List()) != 2 {
+		t.Fatalf("rebuilt %d backups, set %v; want both", len(b.h.bk.kept), b.h.bk.set.List())
+	}
+	if _, err := os.Stat(b.records()); err != nil {
+		t.Fatalf("the rebuilt records are not saved: %v", err)
+	}
+	eraseReseals(t, b, dir, b2, gone)
+}
+
+// LOG-4: a rebuilt backup whose target is unreachable is named held. If
+// the records are rolled back again after the erase, the next rebuild still
+// lists the erased subject, so once the target is back Tick re-seals it.
+func TestRebuiltBackupOffTargetIsNamedHeld(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	var old []byte
+	dir, b2, gone := rolledBack(t, b, func(o []byte) { old = o; rollRecords(t, b)(o) })
+	away := dir + ".away"
+	if err := os.Rename(dir, away); err != nil {
+		t.Fatal(err)
+	}
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(c.StillHeld, func(h kernel.BackupHold) bool { return h.Backup == b2 && h.Why != "" }) || slices.Contains(c.Resealed, b2) {
+		t.Fatalf("the erase's confirmation: %+v, want %s held", c, b2)
+	}
+	b.h.Close()
+	rollRecords(t, b)(old)
+	b.open()
+	if kp := b.kept(b2); kp == nil || !slices.Contains(kp.Record.Subjects, gone) {
+		t.Fatalf("rebuilt after the erase without the erased subject: %+v", kp)
+	}
+	if err := os.Rename(away, dir); err != nil {
+		t.Fatal(err)
+	}
+	b.tick()
+	if keys, ok := newestTable(t, dir, b2, testRK); !ok || keys.M[gone] != (kernel.SubjectKey{}) {
+		t.Fatal("Tick did not re-seal the rebuilt backup")
+	}
+}
+
+// failingAnchor is the test anchor, down while *down is set.
+type failingAnchor struct {
+	*kernel.MemAnchor
+	down *bool
+}
+
+func (a failingAnchor) Put(h kernel.Head) error {
+	if *a.down {
+		return errors.New("anchor down")
+	}
+	return a.MemAnchor.Put(h)
+}
+
+// LOG-4: no key table leaves without its backup.taken logged and anchored:
+// a failing log write, or a failing anchor, saves no record and sends no
+// table, and the Taken carries the error.
+func TestNoTableLeavesWithoutItsEntry(t *testing.T) {
+	for _, name := range []string{"log write fails", "anchor fails"} {
+		t.Run(name, func(t *testing.T) {
+			b := newBBox(t, recipientWire(t, testRK))
+			down := false
+			b.cfg.Anchor = failingAnchor{anchor(t, b.cfg.Log), &down}
+			b.restart()
+			b.subject()
+			dir := b.addTarget("drive", false)
+			var dirs []string
+			if name == "log write fails" {
+				// A widening whose anchor fails breaks the log: every
+				// later write fails until a restart.
+				down = true
+				spare := t.TempDir()
+				if err := b.add(kernel.BackupTarget{Name: "spare", Kind: kernel.KindDir, Locator: spare}); err == nil {
+					t.Fatal("an unanchored target must report the anchor")
+				}
+				down = false
+				dirs = append(dirs, spare)
+			} else {
+				down = true
+			}
+			n := len(b.logBytes())
+			taken := b.backup()
+			down = false
+			for _, tk := range taken {
+				if tk.Backup != nil || !strings.Contains(tk.Error, "not in my log") {
+					t.Fatalf("taken: %+v", taken)
+				}
+			}
+			for _, d := range append(dirs, dir) {
+				if ids := tablesAt(t, d); len(ids) != 0 {
+					t.Fatalf("a table went out with no anchored entry: %v", ids)
+				}
+			}
+			if len(b.h.bk.kept) != 0 || len(b.h.bk.set.List()) != 0 {
+				t.Fatalf("kept: %+v", b.h.bk.kept)
+			}
+			if name == "log write fails" && len(b.logBytes()) != n {
+				t.Fatal("a broken log took an entry")
+			}
+		})
+	}
+}
+
+// LOG-4: an entry logged whose record save failed is rebuilt at the next
+// start, and nothing is rebuilt or logged twice on the one after.
+func TestCrashBetweenEntryAndRecord(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone := b.subject()
+	dir := b.addTarget("drive", false)
+	b.h.bk.saveErr = func() error { return errors.New("no space left on device") }
+	taken := b.backup()
+	if len(taken) != 1 || taken[0].Backup != nil || len(tablesAt(t, dir)) != 0 {
+		t.Fatalf("taken: %+v, tables %v", taken, tablesAt(t, dir))
+	}
+	logged := b.taken()
+	if len(logged) != 1 {
+		t.Fatalf("logged %d backups, want 1", len(logged))
+	}
+	b.h.bk.saveErr = nil
+	b.restart()
+	kp := b.kept(logged[0].BackupID)
+	if len(b.h.bk.kept) != 1 || kp == nil || !kp.Rebuilt || !slices.Equal(kp.Record.Subjects, []string{gone}) {
+		t.Fatalf("after a restart: %+v", b.h.bk.kept)
+	}
+	n := len(b.logBytes())
+	b.restart()
+	if len(b.h.bk.kept) != 1 || len(b.taken()) != 1 || len(b.logBytes()) != n {
+		t.Fatalf("a second restart rebuilt or logged again: %d kept, %d logged", len(b.h.bk.kept), len(b.taken()))
+	}
+	// An erase over it acts as over a pending backup: nothing was at the
+	// target, and what the re-seal puts there gives no erased key.
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil || !slices.Contains(c.Resealed, kp.Record.BackupID) {
+		t.Fatalf("the erase's confirmation: %+v %v", c, err)
+	}
+	if keys, ok := newestTable(t, dir, kp.Record.BackupID, testRK); !ok || keys.M[gone] != (kernel.SubjectKey{}) || len(keys.M) != 0 {
+		t.Fatal("the re-sealed table gives the erased subject's key")
+	}
+}
+
+// LOG-4: a kept record whose entry the log lost (rolled back past it) is
+// logged once at start, with its Upto; a record from before this build,
+// with no Upto, is logged at the head.
+func TestRecordAheadOfLogIsLoggedAtStart(t *testing.T) {
+	for _, preBuild := range []bool{false, true} {
+		t.Run(fmt.Sprint("pre-build ", preBuild), func(t *testing.T) {
+			b := newBBox(t, recipientWire(t, testRK))
+			b.subject()
+			b.addTarget("drive", false)
+			oldLog, a := b.logBytes(), anchor(t, b.cfg.Log)
+			oldAnchor := *a
+			id := b.backup()[0].Backup.BackupID
+			upto := b.kept(id).Upto
+			if upto == 0 || upto != b.taken()[0].Upto {
+				t.Fatalf("kept upto %d, logged %+v", upto, b.taken())
+			}
+			if preBuild {
+				b.h.With(func(*kernel.Kernel) error { b.h.bk.kept[0].Upto = 0; return b.h.bk.save() })
+			}
+			b.h.Close()
+			if err := os.WriteFile(b.cfg.Log, oldLog, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			*a = oldAnchor
+			b.open()
+			got := b.taken()
+			if len(got) != 1 || got[0].BackupID != id {
+				t.Fatalf("logged at start: %+v", got)
+			}
+			if !preBuild && got[0].Upto != upto {
+				t.Fatalf("logged upto %d, want %d", got[0].Upto, upto)
+			}
+			if preBuild && (got[0].Upto < upto || b.kept(id).Upto != got[0].Upto) {
+				t.Fatalf("a pre-build record logged at %d, kept %d; want the head, at least %d", got[0].Upto, b.kept(id).Upto, upto)
+			}
+			if b.kept(id).Rebuilt {
+				t.Fatal("a kept record is marked rebuilt")
+			}
+			n := len(b.logBytes())
+			b.restart()
+			if len(b.taken()) != 1 || len(b.logBytes()) != n {
+				t.Fatal("a second start logged it again")
+			}
+		})
+	}
+}
+
+// BAK-1: after a recovery-key rotation, a rebuilt backup re-seals to its
+// own recipient, the one its content opens with, not the new one.
+func TestRebuiltBackupKeepsItsRecipient(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone, live := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	id := b.backup()[0].Backup.BackupID
+	rk2 := bytes.Repeat([]byte{0x6b}, 32)
+	b.cfg.Recipient = recipientWire(t, rk2)
+	b.restart()
+	b.h.Close()
+	if err := os.Remove(b.records()); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if kp := b.kept(id); kp == nil || !kp.Rebuilt {
+		t.Fatalf("not rebuilt: %+v", b.h.bk.kept)
+	}
+	if _, err := b.h.Erase(b.now, gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := newestTable(t, dir, id, rk2); ok {
+		t.Fatal("the re-sealed table opens with the new recovery key")
+	}
+	keys, ok := newestTable(t, dir, id, testRK)
+	if !ok {
+		t.Fatal("the re-sealed table does not open with the backup's own recovery key")
+	}
+	if _, has, _ := keys.Get(gone); has {
+		t.Fatal("the re-sealed table gives the erased subject")
+	}
+	if _, has, _ := keys.Get(live); !has {
+		t.Fatal("the re-sealed table lost a live subject")
+	}
+}
+
+// LOG-4: a rebuilt backup's subjects stop at its snapshot: a subject opened
+// after it is never put in its re-sealed table, so a rebuild hands no newer
+// key to an old recipient.
+func TestRebuiltSubjectsStopAtUpto(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	kept, gone := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	id := b.backup()[0].Backup.BackupID
+	later := b.subject()
+	b.h.Close()
+	if err := os.Remove(b.records()); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if kp := b.kept(id); kp == nil || !slices.Equal(kp.Record.Subjects, slices.Sorted(slices.Values([]string{kept, gone}))) {
+		t.Fatalf("rebuilt subjects: %+v", kp)
+	}
+	if _, err := b.h.Erase(b.now, gone); err != nil {
+		t.Fatal(err)
+	}
+	keys, ok := newestTable(t, dir, id, testRK)
+	if !ok {
+		t.Fatal("the re-sealed table does not open")
+	}
+	if _, has, _ := keys.Get(later); has {
+		t.Fatal("the re-sealed table gives a subject opened after the backup")
+	}
+	if _, has, _ := keys.Get(gone); has {
+		t.Fatal("the re-sealed table gives the erased subject")
+	}
+	if _, has, _ := keys.Get(kept); !has {
+		t.Fatal("the re-sealed table lost a subject the backup held")
+	}
+}
+
+// LOG-4 (#3367 L3 and Security blocker 1): the key files sit beside the
+// records, so deleting them with a rollback must not shrink a rebuilt
+// backup's subjects. The rebuild lists every subject opened by B2's
+// snapshot, and an erase whose re-seal then lacks a live key names B2 held
+// instead of skipping it.
+func TestRebuildIgnoresDeletedKeyFiles(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	other := b.subject()
+	_, b2, gone := rolledBack(t, b, func(old []byte) {
+		rollRecords(t, b)(old)
+		es, err := os.ReadDir(b.cfg.KeyDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range es {
+			if err := os.Remove(filepath.Join(b.cfg.KeyDir, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if kp := b.kept(b2); kp == nil || !kp.Rebuilt || !slices.Equal(kp.Record.Subjects, slices.Sorted(slices.Values([]string{other, gone}))) {
+		t.Fatalf("B2 rebuilt without its subjects: %+v", kp)
+	}
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(c.StillHeld, func(h kernel.BackupHold) bool { return h.Backup == b2 && h.Why != "" }) || slices.Contains(c.Resealed, b2) {
+		t.Fatalf("the erase's confirmation: %+v, want %s held", c, b2)
 	}
 }

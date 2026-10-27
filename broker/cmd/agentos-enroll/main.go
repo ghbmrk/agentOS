@@ -19,6 +19,13 @@
 // for the unlock step to hand the kernel, which certifies the owner page's
 // serving keys and writes it into every backup (MIG-4-recovery-f1).
 //
+// It makes the core's link key (HW-15) and keeps it only in the store, for
+// the unlock step to hand the kernel; it is never backed up (BAK-1). With
+// -first-edge it takes the edge key the link port captured before the
+// Owner Card confirm from that file, stores it for the kernel's setup step
+// to log, and removes the file once the store is in place; with -restore
+// (a restore's enrollment, REC-2) it stores none and only removes the file.
+//
 // The store is built at a staging path and renamed into place last, so the
 // store at -state exists only once its pins, counter and slots agree. A rerun
 // after a crash finishes a staged store whose pins are locked (only the
@@ -39,6 +46,7 @@ package main
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -64,6 +72,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -114,6 +123,10 @@ type config struct {
 	pcrs                             []uint // nil on -rotate: keep the slot's
 	kernelUID, kernelGID             int
 	rotate, delete                   bool
+	// firstEdge is the link port's capture file (agentos-link's pre-store
+	// mode), "" for none; restore takes no first key from it.
+	firstEdge string
+	restore   bool
 	// built is the image's build time, the page authority's NotBefore
 	// plus a day (pageca.New): never the first boot's clock.
 	built time.Time
@@ -138,6 +151,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.kernelGID, "kernel-gid", -1, "the kernel's gid")
 	fs.BoolVar(&c.rotate, "rotate", false, "rotate my policy key")
 	fs.BoolVar(&c.delete, "delete", false, "free the store's NV indexes and remove it")
+	fs.StringVar(&c.firstEdge, "first-edge", "", "the link port's capture file of the first edge's hello, which I remove")
+	fs.BoolVar(&c.restore, "restore", false, "a restore's enrollment: take no first edge key")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -165,6 +180,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-kernel-uid and -kernel-gid are required, and never root")
 	case c.passphrase == "" || c.recovery == "":
 		return c, errors.New("-passphrase-file and -recovery-file are required: a store never has only its tpm slot")
+	case c.firstEdge != "" && !filepath.IsAbs(c.firstEdge):
+		return c, errors.New("-first-edge must be absolute")
 	}
 	return c, nil
 }
@@ -265,7 +282,7 @@ func enroll(c config, t transport.TPM) error {
 	if stagedID != nil {
 		// Locked pins are the last TPM step: only the rename was left.
 		if _, err := tpmseal.ReadPins(t, srk, stagedID); err == nil {
-			return commit(c)
+			return c.commitAndDrop()
 		} else if !errors.Is(err, tpmseal.ErrNoPins) {
 			return err
 		}
@@ -334,6 +351,9 @@ func enroll(c config, t transport.TPM) error {
 	if err := putPageCA(st, c.built); err != nil {
 		return err
 	}
+	if err := putLinkKeys(c, st); err != nil {
+		return err
+	}
 	if err := c.step("slots"); err != nil {
 		return err
 	}
@@ -371,7 +391,93 @@ func enroll(c config, t transport.TPM) error {
 		return err
 	}
 	st.Close()
-	return commit(c)
+	return c.commitAndDrop()
+}
+
+// commitAndDrop puts the store in place, then removes the link port's
+// capture file, whose key the store now holds (or, at a restore, never
+// will). A crash between the two leaves the file, which no later
+// enrollment of this store reads: one never reruns over a store.
+func (c config) commitAndDrop() error {
+	if err := commit(c); err != nil {
+		return err
+	}
+	if c.firstEdge == "" {
+		return nil
+	}
+	if err := os.Remove(c.firstEdge); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("agentos-enroll: remove the first edge's capture: %w", err)
+	}
+	return nil
+}
+
+// putLinkKeys makes the core's link key and stores it, and stores the
+// first edge key from the link port's capture, unless this is a restore's
+// enrollment or there is no capture (HW-15, brief EDGE-link-core decisions
+// 3 and 4). A capture that does not read stores no first key and
+// enrollment goes on: the owner adds the edge in the page step.
+func putLinkKeys(c config, st *seal.Store) error {
+	seed := make([]byte, ed25519.SeedSize)
+	defer clear(seed)
+	if _, err := rand.Read(seed); err != nil {
+		return err
+	}
+	if err := st.Put(handoff.LinkKeyEntry, seed); err != nil {
+		return err
+	}
+	if c.firstEdge == "" || c.restore {
+		return nil
+	}
+	edge, err := readCapture(c.firstEdge)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-enroll: I take no first edge key: %v\n", err)
+		return nil
+	}
+	return st.Put(handoff.FirstEdgeEntry, edge)
+}
+
+// captureLen is the capture file: the edge's Ed25519 public key, the
+// hello's 32-byte nonce (the connection's exporter value), and the key's
+// signature over kernel.HelloMsg(nonce), as agentos-link's pre-store mode
+// writes the first valid hello (decision 3).
+const captureLen = ed25519.PublicKeySize + 32 + ed25519.SignatureSize
+
+var errCapture = errors.New("the first edge's capture is not one valid hello in a file only I can write")
+
+// readCapture reads the capture file at path and returns its key, once its
+// hello verifies. The file must be a regular file of root's (this
+// process's euid) that no one else can write, and exactly captureLen
+// bytes.
+func readCapture(path string) (ed25519.PublicKey, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, errCapture
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, errCapture
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.Mode().IsRegular() || int(st.Uid) != os.Geteuid() || fi.Mode().Perm()&0o022 != 0 {
+		return nil, errCapture
+	}
+	b, err := io.ReadAll(io.LimitReader(f, captureLen+1))
+	if err != nil || len(b) != captureLen {
+		return nil, errCapture
+	}
+	edge := ed25519.PublicKey(b[:ed25519.PublicKeySize])
+	nonce, sig := b[ed25519.PublicKeySize:ed25519.PublicKeySize+32], b[ed25519.PublicKeySize+32:]
+	if !ed25519.Verify(edge, kernel.HelloMsg(nonce), sig) {
+		return nil, errCapture
+	}
+	return edge, nil
 }
 
 // putRecipient keeps the backup recipient the recovery key derives in the

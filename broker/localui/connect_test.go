@@ -60,7 +60,7 @@ func connectRig(t *testing.T) (*rig, *fakeAccounts) {
 	t.Helper()
 	r := newRig(t)
 	fa := &fakeAccounts{consent: testConsent, finish: "signedin sort"}
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Accounts: fa, Connect: []ConnectDeclaration{GmailConnect},
 		Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
@@ -308,7 +308,7 @@ func TestConnectDeclarationsAreChecked(t *testing.T) {
 		{Accounts: &fakeAccounts{}, Connect: []ConnectDeclaration{noUse}},
 		{Accounts: &fakeAccounts{}, Connect: []ConnectDeclaration{GmailConnect, GmailConnect}},
 	} {
-		c.AP, c.Now = testAP(), time.Now
+		c.Page, c.Now = testPage(), time.Now
 		if _, err := New(c); err == nil {
 			t.Errorf("accepted %+v", c.Connect)
 		}
