@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +35,7 @@ import (
 // s3). It holds no setup secret and no Wi-Fi password.
 func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
 	held := heldFile(t)
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", held)
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "", held)
 	if h, ok := cfg.Hooks.(localui.AgentosdSetup); !ok || h.Owner != (localui.Socket{Path: "/run/agentos/localui.sock"}) {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
@@ -45,7 +44,7 @@ func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
 	} else if _, ok := st.Inner.(*localui.MemStore); !ok {
 		t.Fatalf("store %#v", cfg.Store)
 	}
-	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Providers != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
+	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Providers != nil || cfg.Vault != nil || cfg.Rotation != nil {
 		t.Fatalf("config %+v", cfg)
 	}
 	if _, err := localui.New(cfg); err != nil {
@@ -86,7 +85,7 @@ func TestThePageWaitsForAgentosd(t *testing.T) {
 // REC-4: with the vault process's socket the page serves the Owner Card
 // rotation over that same socket (ARC-2: the display lives here).
 func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
 		t.Fatalf("config %+v", cfg)
 	}
@@ -96,12 +95,12 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 // vault process allows it only between the code generator's confirmation
 // and finish; without the socket the step is not served.
 func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	h, ok := cfg.Hooks.(localui.AgentosdSetup)
 	if c, isClient := h.Vault.(*localui.UnlockClient); !ok || !isClient || c != cfg.Vault {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
-	cfg = config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
+	cfg = config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	if h := cfg.Hooks.(localui.AgentosdSetup); h.Vault != nil || h.TrustHost(true) == nil {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
@@ -110,7 +109,7 @@ func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
 // #1266 (CAP-9, CH-3): the same socket serves the AI providers page,
 // where the owner changes a provider's private-data answer after setup.
 func TestTheVaultSocketWiresTheProvidersPage(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	if _, ok := cfg.Providers.(*localui.UnlockClient); !ok {
 		t.Fatalf("config %+v", cfg)
 	}
@@ -167,7 +166,7 @@ func TestTheUnitIsHardened(t *testing.T) {
 		"ProtectHome":             {"yes"},
 		"PrivateDevices":          {"yes"},
 		"RestrictNamespaces":      {"yes"},
-		"IPAddressAllow":          {"10.42.0.0/24"},
+		"IPAddressAllow":          {"10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"},
 		"NoNewPrivileges":         {"yes"},
 		"CapabilityBoundingSet":   {"CAP_NET_BIND_SERVICE CAP_NET_RAW"},
 		"ProtectSystem":           {"strict"},
@@ -189,6 +188,55 @@ func TestTheUnitIsHardened(t *testing.T) {
 	}
 }
 
+// WIFI-del-a3 (CH-9, HW-15, D-178): the page serves on port 1, the core's
+// cable to the enforcer, never on the access point the core no longer runs:
+// the unit names no Wi-Fi interface or fixed address, leaves -iface to
+// localui.Port1 with no Environment= naming another, and admits only
+// private home sources. It catches a unit
+// still bound to wlan0 at 10.42.0.1, which serves nothing once the access
+// point is gone.
+// REQ: CH-9, HW-15
+func TestUnitServesThePageOnTheWiredPort(t *testing.T) {
+	b, err := os.ReadFile("agentos-localui.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exec []string
+	allow := ""
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\\\n", " "), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "#") {
+			continue
+		}
+		for _, bad := range []string{"wlan", "10.42.", "-addr"} {
+			if strings.Contains(l, bad) {
+				t.Errorf("unit line names %q: %s", bad, l)
+			}
+		}
+		if v, ok := strings.CutPrefix(l, "ExecStart="); ok {
+			exec = strings.Fields(v)
+		}
+		if v, ok := strings.CutPrefix(l, "IPAddressAllow="); ok {
+			allow = v
+		}
+		if strings.HasPrefix(l, "Environment") {
+			t.Errorf("the unit sets an environment, which could name another interface: %s", l)
+		}
+	}
+	iface := ""
+	for i, w := range exec {
+		if w == "-iface" && i+1 < len(exec) {
+			iface = exec[i+1]
+		}
+	}
+	if iface != "${AGENTOS_PAGE_IFACE}" {
+		t.Errorf("-iface %q, want ${AGENTOS_PAGE_IFACE} (empty on the image: localui.Port1)", iface)
+	}
+	if allow != "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" {
+		t.Errorf("IPAddressAllow=%q", allow)
+	}
+}
+
 // openSetup is agentosd's localui.sock while setup is open: progress
 // answers, so the page is not set up.
 var openSetup = localui.AgentosdSetup{Owner: localui.InProcess{
@@ -201,7 +249,7 @@ var openSetup = localui.AgentosdSetup{Owner: localui.InProcess{
 // -download-box.
 func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Config, firstboot.Route) {
 	t.Helper()
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	cfg.Hooks = openSetup
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
@@ -218,7 +266,14 @@ func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Con
 	return cfg, route
 }
 
-// get asks the page for path as a phone on the box's Wi-Fi.
+// onPort1 is q as the page's server sees it: its connection reached the
+// box at 10.42.0.1 on port 1.
+func onPort1(q *http.Request) *http.Request {
+	return q.WithContext(context.WithValue(q.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4(10, 42, 0, 1), Port: 80}))
+}
+
+// get asks the page for path as a phone on the Owner network whose
+// connection reached the box at 10.42.0.1 on port 1.
 func get(t *testing.T, cfg localui.Config, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	s, err := localui.New(cfg)
@@ -228,7 +283,7 @@ func get(t *testing.T, cfg localui.Config, path string) *httptest.ResponseRecord
 	req := httptest.NewRequest("GET", "http://10.42.0.1"+path, nil)
 	req.RemoteAddr = "10.42.0.23:51000"
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, req)
+	s.ServeHTTP(w, onPort1(req))
 	return w
 }
 
@@ -355,7 +410,7 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 	var calls atomic.Int32
 	fakeVault(t, vsock, &calls)
 	base := func(h localui.Hooks) localui.Config {
-		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "", heldFile(t))
+		cfg := config(localui.Page{Iface: "eth0"}, 80, sock, "", heldFile(t))
 		cfg.Hooks = h
 		return cfg
 	}
@@ -605,7 +660,7 @@ func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := func(o localui.Owner) localui.Config {
-		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "", heldFile(t))
+		cfg := config(localui.Page{Iface: "eth0"}, 80, sock, "", heldFile(t))
 		cfg.Hooks = localui.AgentosdSetup{Owner: o}
 		return cfg
 	}
@@ -652,7 +707,7 @@ func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
 // agentosd's localui.sock, the same socket as every other owner op; the
 // page is not served without it.
 func TestConnectGmailGoesThroughAgentosd(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
+	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	if cfg.Accounts != nil || cfg.Connect != nil {
 		t.Fatalf("accounts without -connect-gmail: %+v", cfg.Accounts)
 	}
@@ -689,8 +744,8 @@ func (o certifyingOwner) Call(_ context.Context, op string, args, out any) error
 	return json.Unmarshal(b, out)
 }
 
-func pageAP() localui.APConfig {
-	return localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24"), PageName: localui.DefaultPageName}
+func testPage() localui.Page {
+	return localui.Page{Iface: "eth0", PageName: localui.DefaultPageName}
 }
 
 // #3153, the lifecycle matrix's "No sealer" and "authority missing" rows:
@@ -705,7 +760,7 @@ func TestNoAuthorityServesHTTPOnly(t *testing.T) {
 		{localapi.ErrRestore, true, localui.LogRestore},
 		{localapi.ErrFailed, false, localui.LogNoHTTPS},
 	} {
-		cfg := localui.Config{AP: pageAP(), Port: localui.UIPort}
+		cfg := localui.Config{Page: testPage(), Port: localui.UIPort}
 		var logged []string
 		pt := pageTLS(context.Background(), &cfg, refusingOwner(c.code), func(s string) { logged = append(logged, s) })
 		if pt != nil || cfg.HTTPS || cfg.PageRestore != c.restore {
@@ -724,7 +779,7 @@ func TestNoAuthorityServesHTTPOnly(t *testing.T) {
 		q := httptest.NewRequest("GET", "http://"+localui.DefaultPageName+"/status", nil)
 		q.RemoteAddr = "10.42.0.23:5000"
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, q)
+		s.ServeHTTP(w, onPort1(q))
 		if w.Code != http.StatusOK || w.Header().Get("Location") != "" {
 			t.Errorf("%s: the page name on port 80: %d %q", c.code, w.Code, w.Header().Get("Location"))
 		}
@@ -740,7 +795,7 @@ func TestNoAuthorityServesHTTPOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := localui.Config{AP: pageAP(), Port: localui.UIPort}
+	cfg := localui.Config{Page: testPage(), Port: localui.UIPort}
 	pt := pageTLS(context.Background(), &cfg, certifyingOwner{a}, func(string) {})
 	if pt == nil || !cfg.HTTPS || cfg.PageRestore {
 		t.Fatal("no HTTPS with an authority")
@@ -760,8 +815,8 @@ func TestThePageNameIsTheAuthoritys(t *testing.T) {
 // #3153 replaces #2779a's plain-HTTP refusal: a passkey RP ID is accepted
 // only when it is the page name and the HTTPS listener is up.
 func TestPasskeyRPIDMustBeThePageNameOverHTTPS(t *testing.T) {
-	up := localui.Config{AP: pageAP(), HTTPS: true}
-	down := localui.Config{AP: pageAP()}
+	up := localui.Config{Page: testPage(), HTTPS: true}
+	down := localui.Config{Page: testPage()}
 	for _, c := range []struct {
 		rp  string
 		cfg localui.Config
@@ -778,8 +833,8 @@ func TestPasskeyRPIDMustBeThePageNameOverHTTPS(t *testing.T) {
 			t.Errorf("%q https %v: %v", c.rp, c.cfg.HTTPS, err)
 		}
 	}
-	other := localui.Config{AP: pageAP(), HTTPS: true}
-	other.AP.PageName = "box.internal"
+	other := localui.Config{Page: testPage(), HTTPS: true}
+	other.Page.PageName = "box.internal"
 	if checkPasskeyRPID(localui.DefaultPageName, other) == nil || checkPasskeyRPID("box.internal", other) != nil {
 		t.Error("the RP ID is not held to -page-name")
 	}
@@ -791,7 +846,7 @@ func TestPasskeyRPIDRefusedOverPlainHTTP(t *testing.T) {
 	dir := shortDir(t)
 	sock := filepath.Join(dir, "a.sock")
 	listenSock(t, sock)
-	cfg := config(pageAP(), 80, sock, "", heldFile(t))
+	cfg := config(testPage(), 80, sock, "", heldFile(t))
 	cfg.Hooks = localui.AgentosdSetup{Owner: localui.InProcess{}}
 	passkeys(&cfg, sock, localui.DefaultPageName)
 	if p, ok := cfg.Passkeys.(localui.AgentosdPasskeys); !ok || p.Owner != (localui.Socket{Path: sock}) || cfg.PasskeyRPID != localui.DefaultPageName {
@@ -803,5 +858,62 @@ func TestPasskeyRPIDRefusedOverPlainHTTP(t *testing.T) {
 	cfg.HTTPS = true
 	if _, err := localui.New(cfg); err != nil || checkPasskeyRPID(cfg.PasskeyRPID, cfg) != nil {
 		t.Fatalf("over HTTPS: %v", err)
+	}
+}
+
+// Security 4 on 713fd31: a fixed port that appears after the page chose
+// port 1 (a driver probing late) stops the page, so its restart refuses
+// rather than staying bound to a port chosen from half the hardware.
+// REQ: CH-9, HW-15
+func TestPageStopsWhenPort1Changes(t *testing.T) {
+	sys := t.TempDir()
+	add := func(name, dev string) {
+		t.Helper()
+		dir := filepath.Join(sys, "devices", dev, "net", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "type"), []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(sys, "class", "net"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "devices", dev, "net", name), filepath.Join(sys, "class", "net", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("enp1s0", "pci0000:00/0000:00:1c.0/0000:01:00.0")
+	p, err := settledPort1(sys, func() bool { return true })
+	if err != nil || p != "enp1s0" {
+		t.Fatalf("port 1: %q, %v", p, err)
+	}
+	// Security release 1 on e867557: a fixed port that appears while the
+	// page waits for the hardware to settle refuses before it listens.
+	if q, err := settledPort1(sys, func() bool { add("enp0s31f6", "pci0000:00/0000:00:1f.6"); return true }); err == nil {
+		t.Fatalf("a port that probed during start-up: chose %q", q)
+	}
+	if err := os.Remove(filepath.Join(sys, "class", "net", "enp0s31f6")); err != nil {
+		t.Fatal(err)
+	}
+	if q, err := settledPort1(sys, func() bool { return false }); err == nil {
+		t.Fatalf("stopped while settling: chose %q", q)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { watchPort1(ctx, cancel, sys, p, 5*time.Millisecond); close(done) }()
+	time.Sleep(30 * time.Millisecond)
+	if ctx.Err() != nil {
+		t.Fatal("the page stopped while port 1 was unchanged")
+	}
+	add("enp2s0", "pci0000:00/0000:00:1c.1/0000:02:00.0")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second fixed port did not stop the page")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the watcher returned without stopping the page")
 	}
 }

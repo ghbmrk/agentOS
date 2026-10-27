@@ -50,7 +50,7 @@ func (cr *claimRig) reopen() {
 	if err != nil {
 		cr.t.Fatal(err)
 	}
-	s, err := New(Config{AP: testAP(), Hooks: cr.hooks, SetupSecret: cr.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: cr.hooks, SetupSecret: cr.card.SetupSecret, Store: &MemStore{},
 		Claim: boxClaim{cl}, Now: cr.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		cr.t.Fatal(err)
@@ -189,8 +189,9 @@ func TestALockedScreenStillTakesTheStickersCode(t *testing.T) {
 }
 
 // Condition 1 of the brief: /claim is the setup server's own page, behind
-// its access-point and Host checks, so only a client on the box's Wi-Fi,
-// asking for the box by its address, reaches the counter.
+// its source and Host checks, so only a private home source, asking for
+// the box by its name or the address it reached, reaches the counter
+// (WIFI-del-a3).
 func TestClaimIsOnlyOnTheBoxsWiFi(t *testing.T) {
 	r := newClaimRig(t)
 	foreign := func(q *http.Request) { q.Host = "attacker.example" }
@@ -200,9 +201,9 @@ func TestClaimIsOnlyOnTheBoxsWiFi(t *testing.T) {
 	if w := r.do("POST", "/claim", url.Values{"code": {"AAAA-BBBB-CCCC-DDDD"}}, foreign); w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("POST with a foreign Host: %d", w.Code)
 	}
-	r.ip = "192.168.1.20:40000"
+	r.ip = "203.0.113.20:40000"
 	if w := r.post("/claim", url.Values{"code": {"AAAA-BBBB-CCCC-DDDD"}}); w.Code != 403 {
-		t.Fatalf("POST from off the Wi-Fi: %d", w.Code)
+		t.Fatalf("POST from a public source: %d", w.Code)
 	}
 	if st := r.srv.cfg.Claim.Status(); st.Claimed || st.TriesLeft != claim.MaxWrong {
 		t.Fatalf("a refused request reached the counter: %+v", st)
