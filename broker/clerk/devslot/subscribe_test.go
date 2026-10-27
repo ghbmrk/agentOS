@@ -159,6 +159,16 @@ func TestHomeRefusesTranslatedPrefixes(t *testing.T) {
 		{"64:ff9b:1::808:808", "64:ff9b:1::/56"},
 		{"2002:808:808::1", "2002:808:808::/56"},
 		{"2001:0:4136:e378::1", "2001:0:4136:e300::/56"},
+		// A /56 that holds NAT64's /96, with the pin outside the /96 (L3
+		// 6455017977 point 2 on #3509).
+		{"64:ff9b::1:0:0:1", "64:ff9b::/56"},
+		// Host bits set past /56 hide a home of ::/56, which holds the
+		// IPv4-compatible and IPv4-translated /96s (Security 6455038688
+		// point 1 on #3509).
+		{"::102:304", "::102:304/56"},
+		{"::ffff:0:102:304", "::ffff:0:0:0/56"},
+		// Outside 2000::/3: discard-only space.
+		{"100::5", "100::/56"},
 	}
 	for _, c := range cases {
 		p := devslot.Pin{Host: netip.MustParseAddr(c.host), Key: [32]byte{9}}
@@ -168,7 +178,9 @@ func TestHomeRefusesTranslatedPrefixes(t *testing.T) {
 	}
 	// A real home /56 next to them still holds home addresses.
 	p := devslot.Pin{Host: netip.MustParseAddr("2a02:1234:5678:abcd::5"), Key: [32]byte{9}}
-	if err := devslot.Check(tcpDecl(), p, netip.MustParsePrefix("2a02:1234:5678:ab00::/56")); err != nil {
-		t.Fatalf("a global home address was refused: %v", err)
+	for _, home := range []string{"2a02:1234:5678:ab00::/56", "2a02:1234:5678:abff::7/56"} {
+		if err := devslot.Check(tcpDecl(), p, netip.MustParsePrefix(home)); err != nil {
+			t.Fatalf("a global home address in %s was refused: %v", home, err)
+		}
 	}
 }

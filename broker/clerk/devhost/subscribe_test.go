@@ -338,3 +338,71 @@ func TestSubscriptionIsItsOwnCall(t *testing.T) {
 		t.Fatalf("a declaration with a subscription was accepted with no subscription deadline")
 	}
 }
+
+// TestSubscriptionYieldsToWaitingDo: a subscription that is already waiting
+// for the driver when a Do arrives lets that Do run first, rather than
+// starting an instance the Do would then wait out (L3 6455017977 point 1 on
+// #3509).
+func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
+	gate, started := make(chan struct{}), make(chan struct{})
+	gated := func(t *testing.T, c net.Conn) {
+		if !declareSub(t, c) {
+			return
+		}
+		close(started)
+		<-gate
+		send(t, c, devslot.Msg{T: devslot.MsgDone})
+	}
+	one := func(t *testing.T, c net.Conn) {
+		if !declareSub(t, c) {
+			return
+		}
+		send(t, c, reading("temperature", 0, okTime))
+		send(t, c, devslot.Msg{T: devslot.MsgDone})
+	}
+	// The subscription's instance may be cancelled before the host
+	// answers its declaration, so it checks nothing.
+	stays := func(t *testing.T, c net.Conn) {
+		b, _ := devslot.Canonical(subDecl())
+		send(t, c, devslot.Msg{T: devslot.MsgDeclare, B: b})
+		closed(c)
+	}
+	d := &dialer{t: t, scripts: []script{gated, one, stays}}
+	defer d.done.Wait()
+	h := subHost(t, d, &sink{}, time.Minute, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+	first := make(chan error, 1)
+	go func() { _, err := h.Do(context.Background(), "read-temperature"); first <- err }()
+	<-started
+	// The subscription passes its wait (no Do is pending) and queues for
+	// the driver behind the first Do.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub := make(chan error, 1)
+	go func() { _, err := h.Subscribe(ctx, "watch"); sub <- err }()
+	time.Sleep(100 * time.Millisecond)
+	// A second Do arrives while no instance runs, so there is nothing for
+	// it to preempt; it queues behind the subscription.
+	type res struct {
+		n   int
+		err error
+	}
+	second := make(chan res, 1)
+	go func() { n, err := h.Do(context.Background(), "read-temperature"); second <- res{n, err} }()
+	time.Sleep(100 * time.Millisecond)
+	close(gate)
+	if err := <-first; err != nil {
+		t.Fatalf("first Do: %v", err)
+	}
+	select {
+	case r := <-second:
+		if r.n != 1 || r.err != nil {
+			t.Fatalf("second Do: %d, %v; want it to run before the subscription's instance", r.n, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("second Do waited for a subscription instance that started after it")
+	}
+	cancel()
+	if err := <-sub; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Subscribe: %v", err)
+	}
+}

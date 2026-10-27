@@ -253,9 +253,9 @@ func checkPin(l LinkKind, p Pin, home netip.Prefix) error {
 // broadcast, a unique-local or link-local IPv6 address, or a global IPv6
 // address inside home, the uplink's enclosing /56. Never the internet, the
 // box itself, or a broadcast or multicast group. A v4-mapped address is
-// judged as its IPv4 address. A home that overlaps a prefix that carries
-// IPv4 addresses (NAT64, 6to4, Teredo) holds no home address, and neither
-// does such a prefix, since its addresses reach the IPv4 internet.
+// judged as its IPv4 address. A home outside 2000::/3, or inside a prefix
+// that carries IPv4 addresses (NAT64, 6to4, Teredo), holds no home address,
+// since such addresses reach the IPv4 internet.
 func homeAddr(a netip.Addr, home netip.Prefix) bool {
 	a = a.Unmap()
 	if !a.IsValid() || a.IsLoopback() || a.IsMulticast() || a.IsUnspecified() {
@@ -269,24 +269,28 @@ func homeAddr(a netip.Addr, home netip.Prefix) bool {
 	if a.IsPrivate() || a.IsLinkLocalUnicast() {
 		return true
 	}
-	if !home.IsValid() || home.Bits() != 56 || !home.Addr().Is6() || home.Addr().Is4In6() ||
-		!home.Addr().IsGlobalUnicast() || home.Addr().IsPrivate() || !a.IsGlobalUnicast() || !home.Contains(a.WithZone("")) {
+	// The /56 must lie in 2000::/3, the global unicast allocation, which
+	// its first three bits decide, whatever host bits a caller left set.
+	if !home.IsValid() || home.Bits() != 56 || !globalUnicast.Contains(home.Addr()) ||
+		!a.IsGlobalUnicast() || !home.Contains(a.WithZone("")) {
 		return false
 	}
 	for _, t := range translated {
-		if t.Overlaps(home) || t.Contains(a.WithZone("")) {
+		if t.Overlaps(home) {
 			return false
 		}
 	}
 	return true
 }
 
-// translated are the IPv6 prefixes whose addresses carry IPv4 ones: NAT64's
-// well-known and local-use prefixes (RFC 6052, RFC 8215), 6to4 (RFC 3056)
-// and Teredo (RFC 4380).
+// globalUnicast is IPv6's global unicast allocation (RFC 4291 §2.4).
+var globalUnicast = netip.MustParsePrefix("2000::/3")
+
+// translated are the prefixes inside 2000::/3 whose addresses carry IPv4
+// ones: 6to4 (RFC 3056) and Teredo (RFC 4380). NAT64's (64:ff9b::/96,
+// 64:ff9b:1::/48), the IPv4-compatible ::/96 and the IPv4-translated
+// ::ffff:0:0:0/96 lie outside 2000::/3.
 var translated = []netip.Prefix{
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
 	netip.MustParsePrefix("2002::/16"),
 	netip.MustParsePrefix("2001::/32"),
 }
