@@ -82,9 +82,11 @@ class KeeperTreeTest(unittest.TestCase):
 
     def test_the_keeper_is_listed_once(self):
         self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service",
-                                              "agentos-keeper-rotate@.service"))
+                                              "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
+                                              "agentos-keeper-setup@.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
-        # The recovery-key rotation is the keeper's but opens no TPM (MIG-4-recovery-r2).
+        # The recovery-key rotation, the page authority's staging and the card's hand-off are the
+        # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).
         self.assertEqual(check.TPM_UNITS, check.KEEPER_UNITS[:2] + ("agentos-egress.service",))
         for rel in KEEPER_FILES + tuple(SYSTEM + n for n in check.KEEPER_UNITS):
             self.assertTrue((MK / "mkosi.extra" / rel).is_file(), rel)
@@ -151,7 +153,9 @@ class KeeperTreeTest(unittest.TestCase):
         factors = [arg(e, "passphrase-file"), arg(e, "recovery-file")]
         self.assertEqual({f.rsplit("/", 1)[0] for f in factors}, {"/run/agentos-setup"})
         self.assertIn("/run/agentos-setup", check.KEEPER_PATHS)
-        self.assertEqual(ini(ENROLL)["Service"]["ExecStartPost"].split(), ["/usr/bin/rm", "-f"] + factors)
+        # The staged page authority and its published certificate go with them (OWN-card-flow).
+        self.assertEqual(ini(ENROLL)["Service"]["ExecStartPost"].replace("\\\n", " ").split(),
+                         ["/usr/bin/rm", "-f"] + factors + [arg(e, "page-ca-file"), arg(e, "page-ca-cert")])
 
     def test_permissions_start_only_is_refused(self):
         # #2981 (Security 3): it runs every command but ExecStart= with full privileges, as "+" does.
@@ -193,6 +197,40 @@ class KeeperTreeTest(unittest.TestCase):
                 d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
                 self.assertEqual(self.v(), [])
                 d.unlink()
+
+    # REQ: HW-1, STO-2
+    def test_a_keeper_path_unit_starts_only_the_keeper_from_its_state(self):
+        """OWN-card-flow decision 6: an agentos-keeper .path unit names only a keeper unit and watches only
+        the keeper's state."""
+        good = self.unit("agentos-keeper-enroll.path").read_text()
+        for old, new, want in (
+                ("Unit=agentos-keeper-enroll.service", "Unit=agentos-localui.service",
+                 "starts agentos-localui.service, not one of the keeper's units (D-154)"),
+                ("Unit=agentos-keeper-enroll.service\n", "",
+                 "starts agentos-keeper-enroll.service, not one of the keeper's units (D-154)"),
+                ("PathExists=/run/agentos-setup/recovery", "PathExists=/run/agentos-page-ca/authority.der",
+                 "PathExists=/run/agentos-page-ca/authority.der is outside the keeper's state (D-154)"),
+                ("PathExists=/run/agentos-setup/recovery", "PathChanged=/run/agentos-setup/../agentos-x",
+                 "PathChanged=/run/agentos-setup/../agentos-x is outside the keeper's state (D-154)"),
+                ("PathExists=/run/agentos-setup/recovery", "DirectoryNotEmpty=/run/agentos-setupx",
+                 "DirectoryNotEmpty=/run/agentos-setupx is outside the keeper's state (D-154)"),
+                ("PathExists=/run/agentos-setup/recovery\n", "", "watches nothing the tree check reads (D-154)")):
+            with self.subTest(new):
+                self.edit("agentos-keeper-enroll.path", old, new)
+                name = "agentos-keeper-enroll.path"
+                if not new.startswith("Unit") and old.startswith("Unit"):
+                    # With no Unit=, the path starts its own name's service, which is the enrollment's:
+                    # rename it so that default is not a keeper unit.
+                    self.unit(name).rename(self.unit("agentos-keeper-other.path"))
+                    name = "agentos-keeper-other.path"
+                    want = want.replace("agentos-keeper-enroll.service", "agentos-keeper-other.service")
+                self.assertEqual(self.v(), ["%s: %s" % (name, want)])
+                self.assertIn("%s: %s" % (name, want), check.violations(self.root))
+                self.unit(name).unlink()
+                self.unit("agentos-keeper-enroll.path").write_text(good)
+        # A main-side .path is not the keeper's to check.
+        write(self.root, SYSTEM + "agentos-x.path", "[Path]\nPathExists=/run/x\nUnit=agentos-localui.service\n")
+        self.assertEqual(self.v(), [])
 
     def test_only_the_keeper_s_units_are_in_its_slice(self):
         self.add("agentos-localui.service", "Service", "Slice=agentos-keeper.slice")
@@ -460,7 +498,7 @@ class KeeperUnitsTest(unittest.TestCase):
         # The store's path is the conditions'.
         store = arg(unlock, "store")
         conds = re.findall(r"^ConditionPathExists=(.*)$", ENROLL.read_text(), re.M)
-        self.assertEqual(conds, ["!" + store, arg(e, "passphrase-file"), arg(e, "recovery-file")])
+        self.assertEqual(conds, ["!" + store, arg(e, "passphrase-file"), arg(e, "recovery-file"), arg(e, "page-ca-file")])
         self.assertEqual(re.findall(r"^ConditionPathExists=(.*)$", KERNEL.read_text(), re.M), [store])
         # Enrollment comes first, and makes the kernel's state directory for the kernel's user.
         self.assertIn("agentos-keeper-enroll.service", ini(KERNEL)["Unit"]["After"].split())
@@ -508,8 +546,11 @@ class KeeperUnitsTest(unittest.TestCase):
         report, ci = BOOT_REPORT.read_text(), CI_BOOT.read_text()
         self.assertIn("agentos-keeper:", report)
         self.assertIn("tmpfiles.extra", ci)
-        self.assertIn('"agentos-keeper: enroll=ran kernel=active"', ci)
+        self.assertIn('"agentos-keeper: enroll=ran kernel=active pageca=staged"', ci)
         self.assertIn('"agentos-keeper: enroll=skipped"', ci)
+        # The page authority is staged on the first boot only (OWN-card-flow).
+        self.assertIn('"agentos-keeper: enroll=skipped kernel=active pageca=skipped"', ci)
+        self.assertIn("pageca=$p", report)
         # The kernel starts setup-only after both boots (#2996), on its own sockets (#3073).
         self.assertIn("/agentos-keeper: enroll=skipped kernel=active/", ci)
         self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
@@ -561,6 +602,83 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertRegex(users, r"(?m)^u agentos-owner ")
         # The socket's directory is outside the keeper's state, so the owner side can reach it.
         self.assertFalse(check.keeper_reach(sock["ListenStream"]))
+
+
+    # REQ: HW-1, CH-9, STO-2
+    def test_the_owner_card_flow_units(self):
+        """OWN-card-flow slice a: the page authority is staged before enrollment and the owner page; the
+        owner page reaches root's one-shot hand-off only through its socket, one connection at a time;
+        the factors it writes start enrollment through a path unit, never a command; none of these units
+        reaches the TPM or runs systemctl; and they all name the paths enrollment reads."""
+        pageca, setup, path = (UNITS / "agentos-keeper-pageca.service", UNITS / "agentos-keeper-setup@.service",
+                               UNITS / "agentos-keeper-enroll.path")
+        e, p, s = exec_args(ENROLL), exec_args(pageca), exec_args(setup)
+        store = arg(e, "state") + "/store"
+        # The staging: before enrollment and the owner page, only while no store exists, once a boot.
+        self.assertEqual(p[:2], ["/usr/lib/agentos/agentos-enroll", "-stage-page-ca"])
+        self.assertEqual((arg(p, "page-ca-file"), arg(p, "page-ca-cert")), (arg(e, "page-ca-file"), arg(e, "page-ca-cert")))
+        self.assertTrue(check.keeper_reach(arg(p, "page-ca-file")))
+        self.assertFalse(check.keeper_reach(arg(p, "page-ca-cert")))
+        pu, ps = ini(pageca)["Unit"], ini(pageca)["Service"]
+        self.assertEqual(re.findall(r"^ConditionPathExists=(.*)$", pageca.read_text(), re.M), ["!" + store])
+        self.assertEqual(set(pu["Before"].split()), {"agentos-keeper-enroll.service", "agentos-localui.service"})
+        self.assertEqual((ps["Type"], ps["RemainAfterExit"]), ("oneshot", "yes"))
+        self.assertEqual(ini(pageca)["Install"]["WantedBy"], "multi-user.target")
+        # Enrollment pulls the staging into its own transaction and orders after it, waits for its
+        # pair, pulls in the kernel, and bounds the path unit's retries.
+        eu = ini(ENROLL)["Unit"]
+        self.assertEqual(set(eu["Wants"].split()), {"agentos-keeper-pageca.service", "agentos-keeper-kernel.service"})
+        self.assertIn("agentos-keeper-pageca.service", eu["After"].split())
+        self.assertIn(arg(e, "page-ca-file"), re.findall(r"^ConditionPathExists=(.*)$", ENROLL.read_text(), re.M))
+        self.assertEqual((eu["StartLimitBurst"], eu["StartLimitIntervalSec"]), ("3", "infinity"))
+        # The published directory: root's, public, made at boot, not a keeper path.
+        made = {w[1]: w for w in (l.split() for l in TMPFILES.read_text().splitlines()) if w and w[0] == "d"}
+        cert_dir = arg(p, "page-ca-cert").rsplit("/", 1)[0]
+        self.assertEqual(made[cert_dir][2:5], ["0755", "root", "root"])
+        self.assertNotIn(cert_dir, check.KEEPER_PATHS)
+        # The hand-off's socket: root's and the owner page's group, 0660, one connection at a time.
+        sock = ini(UNITS / "agentos-keeper-setup.socket")["Socket"]
+        self.assertEqual({k: sock[k] for k in ("ListenStream", "SocketUser", "SocketGroup", "SocketMode", "Accept",
+                                               "MaxConnections")},
+                         {"ListenStream": "/run/agentos-keeper/setup.sock", "SocketUser": "root",
+                          "SocketGroup": "agentos-localui", "SocketMode": "0660", "Accept": "yes", "MaxConnections": "1"})
+        self.assertNotIn("Service", sock)
+        self.assertFalse(check.keeper_reach(sock["ListenStream"]))
+        self.assertRegex(SYSUSERS.read_text(), r"(?m)^u agentos-localui ")
+        # The hand-off: root's one-shot on the connection, journal for its reasons, no TPM, bounded.
+        svc = ini(setup)["Service"]
+        self.assertEqual((svc["StandardInput"], svc["StandardOutput"], svc["StandardError"]), ("socket", "socket", "journal"))
+        self.assertEqual(svc["Type"], "oneshot")
+        self.assertTrue(svc["TimeoutStartSec"].isdigit() and 0 < int(svc["TimeoutStartSec"]) <= 300)
+        self.assertNotIn("User", svc)
+        self.assertEqual(s[:2], ["/usr/lib/agentos/agentos-enroll", "-take-factors"])
+        self.assertEqual(arg(s, "setup-dir"), arg(e, "passphrase-file").rsplit("/", 1)[0])
+        self.assertEqual(arg(s, "setup-dir"), arg(e, "recovery-file").rsplit("/", 1)[0])
+        self.assertEqual((arg(s, "state"), arg(s, "page-ca-cert")), (arg(e, "state"), arg(e, "page-ca-cert")))
+        # The path unit: the recovery file, written last, starts enrollment.
+        pp = ini(path)
+        self.assertEqual((pp["Path"]["PathExists"], pp["Path"]["Unit"]), (arg(e, "recovery-file"), "agentos-keeper-enroll.service"))
+        self.assertEqual(pp["Install"]["WantedBy"], "paths.target")
+        # Not on a box with its store: left factors would run enrollment into its start limit.
+        self.assertEqual(re.findall(r"^ConditionPathExists=(.*)$", path.read_text(), re.M), ["!" + store])
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
+        self.assertIn("enable agentos-keeper-enroll.path", preset)
+        for unit in (pageca, setup):
+            body = unit.read_text()
+            with self.subTest(unit.name):
+                self.assertIn(unit.name, check.KEEPER_UNITS)
+                self.assertNotIn(unit.name, check.TPM_UNITS)
+                self.assertEqual(ini(unit)["Service"]["DevicePolicy"], "closed")
+                self.assertNotIn("DeviceAllow", ini(unit)["Service"])
+                self.assertNotIn("/dev/tpm", body.split("[Service]")[1])
+                for k, v in (("NoNewPrivileges", "yes"), ("LimitCORE", "0"), ("UMask", "0077"),
+                             ("PrivateNetwork", "yes"), ("RestrictAddressFamilies", "AF_UNIX")):
+                    self.assertEqual(ini(unit)["Service"][k], v, k)
+                self.assertTrue({w[1:] for w in exec_args(unit) if w.startswith("-")} <= go_flags("agentos-enroll"))
+        for unit in (pageca, setup, ENROLL, path, UNITS / "agentos-keeper-setup.socket"):
+            for line in unit.read_text().replace("\\\n", " ").splitlines():
+                if line.startswith("Exec"):
+                    self.assertIsNone(check.REBOOT_WORDS.search(line), "%s: %s" % (unit.name, line))
 
 
 if __name__ == "__main__":

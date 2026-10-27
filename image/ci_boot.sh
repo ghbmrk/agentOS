@@ -382,7 +382,10 @@ KEEPER_EXTRA="$(smbios_cred tmpfiles.extra "$KEEPER_FACTORS")"
 # The drill's line comes before the boot report's (agentos-drill-report.service is ordered before it),
 # so the boot runs until the second boot's keeper line.
 EXTRA="$DRILL_EXTRA$KEEPER_EXTRA" UNTIL="agentos-keeper: enroll=skipped\|agentos-keeper: enroll=failed\|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
-has "$W/console-reboot.log" "agentos-keeper: enroll=ran kernel=active"
+# The first boot staged the page authority before enrollment, which then stored it (OWN-card-flow);
+# the second, with a store, staged none.
+has "$W/console-reboot.log" "agentos-keeper: enroll=ran kernel=active pageca=staged"
+has "$W/console-reboot.log" "agentos-keeper: enroll=skipped kernel=active pageca=skipped"
 has "$W/console-reboot.log" "agentos-keeper: enroll=skipped"
 # After the drill's reboot too, so the tpm slot opened again on a second boot's PCRs: the kernel runs
 # only once the unlock step has opened the store and exec'd it.

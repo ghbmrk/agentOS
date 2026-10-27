@@ -19,6 +19,7 @@ usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos/ap 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-store 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-kernel 0700 agentos-kernel agentos-kernel -
 usr/lib/tmpfiles.d/agentos.conf	d /run/agentos-setup 0700 root root -
+usr/lib/tmpfiles.d/agentos.conf	d /run/agentos-page-ca 0755 root root -
 usr/lib/tmpfiles.d/credstore.conf	d /etc/credstore 0700 root root
 usr/lib/tmpfiles.d/credstore.conf	d /etc/credstore.encrypted 0700 root root
 usr/lib/tmpfiles.d/credstore.conf	z /run/credstore 0700 root root

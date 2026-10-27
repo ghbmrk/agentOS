@@ -1,15 +1,25 @@
 # Enrollment (STO-2c, cmd/agentos-enroll): the one-shot step on a trusted host that makes this box's
 # sealed store, its TPM pins and the log's counter anchor. It runs only while there is no store, and
-# only once setup has put the Owner Card's two factors in /run/agentos-setup (root-only files): the
-# store is never made with its tpm slot alone (#2905 open point 1). A rerun after a crash finishes or
-# redoes the attempt (ASSUMPTIONS STO-2c-a).
+# only once the Owner Card confirm has put the card's two factors in /run/agentos-setup (root-only
+# files; agentos-keeper-setup@.service), beside the page authority staged before the card was shown,
+# which it stores (brief OWN-card-flow decisions 6 and 7): the store is never made with its tpm slot
+# alone (#2905 open point 1). agentos-keeper-enroll.path starts it when the factors arrive. A rerun
+# after a crash finishes or redoes the attempt, with the same staged authority (ASSUMPTIONS STO-2c-a).
 [Unit]
 Description=agentOS enrollment
 ConditionPathExists=!/var/lib/agentos-store/store
 ConditionPathExists=/run/agentos-setup/passphrase
 ConditionPathExists=/run/agentos-setup/recovery
-After=local-fs.target systemd-sysusers.service
+ConditionPathExists=/run/agentos-setup/page-ca
+# Wants= as well as After=: when the path unit starts enrollment, the staging is in the same
+# transaction, so it is always ordered first. The kernel starts in the same boot once the store exists.
+Wants=agentos-keeper-pageca.service agentos-keeper-kernel.service
+After=local-fs.target systemd-sysusers.service agentos-keeper-pageca.service
 Before=agentos-keeper-kernel.service
+# A failed enrollment keeps the factors, so the path unit starts it again: three starts a boot, then
+# the path unit fails and a reboot starts the card over (#3492 L3 finding 2).
+StartLimitIntervalSec=infinity
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -22,9 +32,12 @@ ExecStartPre=/usr/bin/install -d -m 0700 -o agentos-kernel -g agentos-kernel /va
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state /var/lib/agentos-store \
         -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log \
         -kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel \
-        -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery
-# The factors are not kept once the store holds them (#2981); on a failure they stay for a retry.
-ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery
+        -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery \
+        -page-ca-file /run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der
+# The factors and the staged authority are not kept once the store holds them (#2981); on a failure
+# they stay for a retry.
+ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery \
+        /run/agentos-setup/page-ca /run/agentos-page-ca/authority.der
 StandardError=journal+console
 # The store key and the box's policy key live in this process's memory (IMG-nodump).
 LimitCORE=0

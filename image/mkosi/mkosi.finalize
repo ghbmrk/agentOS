@@ -1302,7 +1302,8 @@ def noexec_violations(root):
 # later VM or board deployment (#2943) replaces it and leaves the main side's rules alone.
 KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
-KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service")
+KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service",
+                "agentos-keeper-pageca.service", "agentos-keeper-setup@.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, and the Owner Card's factors that
 # setup leaves for enrollment. No main-side unit sees it; the image makes each at boot (tmpfiles.d).
 KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup")
@@ -1318,6 +1319,9 @@ MANAGER_DIRS = {"StateDirectory": "/var/lib", "RuntimeDirectory": "/run", "Cache
 # The bind settings, whose source is a view of the host's tree made in mount order, so a source
 # above the keeper's state can be bound before the mask is.
 BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
+# A .path unit's watches (systemd.path): an agentos-keeper .path watches only the keeper's state and
+# starts only a keeper unit (OWN-card-flow decision 6).
+PATH_WATCHES = ("PathExists", "PathExistsGlob", "PathChanged", "PathModified", "DirectoryNotEmpty")
 # The units that run agentos-unlock and so open the log's counter anchor (#2899, #2897).
 UNLOCK_UNITS = ("agentos-keeper-kernel.service",)
 # Starts of an unlock unit in one boot: each spends two of the counter's increments (LOG-anchor-tpm-b).
@@ -1461,11 +1465,13 @@ def keeper_violations(root):
       ExecStartPre= is KERNEL_UP_CLEAR."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    names, sockets = set(), []
+    names, sockets, paths = set(), [], []
     for d in dirs:
         for n in sorted(tree_listdir(root, d)):
             if n.endswith(".socket"):
                 sockets.append(n)
+            if n.startswith(KEEPER_PREFIX) and n.endswith(".path"):
+                paths.append(n)
             # noexec_violations refuses a link or an instance as an agentos unit.
             if NOEXEC_UNITS.match(n) and not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode) and (
                     "@" not in n or n.endswith("@.service")):
@@ -1482,7 +1488,30 @@ def keeper_violations(root):
         if svc.startswith("unreadable ") or svc in UNLOCK_UNITS or n[:-len(".socket")] + ".service" in UNLOCK_UNITS:
             out.append("%s: starts %s with its sockets; nothing reaches the unlock step past descriptor 2 (#2899)"
                        % (n, svc))
+    for n in sorted(set(paths)):
+        out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
     out += sysusers_tpm_violations(root)
+    return out
+
+
+def keeper_path_violations(name, files):
+    """OWN-card-flow decision 6: an agentos-keeper .path unit NAME starts only a KEEPER_UNITS unit and
+    watches only at or under a KEEPER_PATHS entry, with no '..' step, so the keeper's own state is all
+    that can start it."""
+    unit = ini_last(files, "Path", "Unit") or name[:-len(".path")] + ".service"
+    out = []
+    if unit not in KEEPER_UNITS:
+        out.append("%s: starts %s, not one of the keeper's units (D-154)" % (name, unit))
+    try:
+        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
+    except ValueError as e:
+        return out + ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
+    if not watches:
+        out.append("%s: watches nothing the tree check reads (D-154)" % name)
+    for k, v in watches:
+        norm = "/" + "/".join(x for x in v.split("/") if x not in ("", "."))
+        if not v.startswith("/") or ".." in norm.split("/") or not under(norm, KEEPER_PATHS):
+            out.append("%s: %s=%s is outside the keeper's state (D-154)" % (name, k, v))
     return out
 
 
