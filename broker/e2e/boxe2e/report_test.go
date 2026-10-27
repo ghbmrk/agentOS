@@ -62,7 +62,7 @@ func TestReportUnexpectedFailureFailsTheRun(t *testing.T) {
 // expected text; any other error from it is FAIL and fails the run. This
 // runs the production table, so a weaker text (empty, "at") is caught.
 func TestReportExpectedFailureMatchesItsText(t *testing.T) {
-	hostErr := `at "6. This PC": ` + hostHookLog + "localui: not served by agentosd yet"
+	hostErr := `at "5. This PC": ` + hostHookLog + "localui: not served by agentosd yet"
 	cases := []struct {
 		step, msg string
 		xfail     bool
@@ -70,12 +70,12 @@ func TestReportExpectedFailureMatchesItsText(t *testing.T) {
 		{"guest-task", notDriven + " needs a stub", false},    // off the list since #1701
 		{"phone-control", notDriven + " needs a text", false}, // off the list since #1714
 		// host is no longer listed (#1221 serves it): the old not-served
-		// error, and every other way to be stuck at "6. This PC", is FAIL.
+		// error, and every other way to be stuck at "5. This PC", is FAIL.
 		{"host", `after 1m0s: ` + hostErr, false},
-		{"host", `after 1m0s: at "6. This PC"`, false},
-		{"host", `after 1m0s: at "6. This PC" saying Could not save. Try again.`, false},
-		{"host", `after 1m0s: at "6. This PC" saying Finish the earlier steps first.`, false},
-		{"host", `after 1m0s: at "6. This PC": ` + hostHookLog + "localui: agentosd: 500", false},
+		{"host", `after 1m0s: at "5. This PC"`, false},
+		{"host", `after 1m0s: at "5. This PC" saying Could not save. Try again.`, false},
+		{"host", `after 1m0s: at "5. This PC" saying Finish the earlier steps first.`, false},
+		{"host", `after 1m0s: at "5. This PC": ` + hostHookLog + "localui: agentosd: 500", false},
 		{"host", "POST /setup/host 500 <nil>", false},
 		{"host", `after 1m0s: at "7. Done"`, false},
 		{"host", "", false},

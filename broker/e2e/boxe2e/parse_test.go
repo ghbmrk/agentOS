@@ -112,7 +112,7 @@ func TestSMSLinkAndOTPSeed(t *testing.T) {
 	if _, err := otpSeed([]byte(`<p>no link</p>`)); err == nil {
 		t.Fatal("no link parsed")
 	}
-	if _, _, ok := smsLink([]byte(`<h2>1. Home network</h2>`)); ok {
+	if _, _, ok := smsLink([]byte(`<h2>3. Owner Card</h2>`)); ok {
 		t.Fatal("no link parsed")
 	}
 }
@@ -120,9 +120,9 @@ func TestSMSLinkAndOTPSeed(t *testing.T) {
 // Details on the console carry headings only, never a value from a page.
 func TestHeadingIsSanitized(t *testing.T) {
 	for page, want := range map[string]string{
-		`<h1>Set up AgentOS</h1><h2>1. Home network</h2><p class="mono">SECRET</p>`: `"1. Home network"`,
-		`<h1>Claim <b>AgentOS</b></h1>`:                                             `"Claim AgentOS"`,
-		`<h1>Bad <script>&lt;x&gt;</script></h1>`:                                   `"Bad x"`,
+		`<h1>Set up agentOS</h1><h2>3. Owner Card</h2><p class="mono">SECRET</p>`: `"3. Owner Card"`,
+		`<h1>Claim <b>agentOS</b></h1>`:                                           `"Claim agentOS"`,
+		`<h1>Bad <script>&lt;x&gt;</script></h1>`:                                 `"Bad x"`,
 		`plain`: `"(no heading)"`,
 	} {
 		if got := heading([]byte(page)); got != want {
@@ -133,10 +133,10 @@ func TestHeadingIsSanitized(t *testing.T) {
 
 func TestLineState(t *testing.T) {
 	for page, want := range map[string]string{
-		`<h2>2. Text your box</h2><p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>`: "cannot-text",
-		`<h2>2. Text your box</h2><p>I do not know my own number yet, so you cannot text me first.</p>`:                               "number-unknown",
-		`<h2>2. Text your box</h2><p><a class="button" href="sms:+15550000100?&amp;body=PAIR%20123456">Text my box</a></p>`:           "link",
-		`<h2>1. Home network</h2>`: "other",
+		`<h2>1. Text your box</h2><p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>`: "cannot-text",
+		`<h2>1. Text your box</h2><p>I do not know my own number yet, so you cannot text me first.</p>`:                               "number-unknown",
+		`<h2>1. Text your box</h2><p><a class="button" href="sms:+15550000100?&amp;body=PAIR%20123456">Text my box</a></p>`:           "link",
+		`<h2>3. Owner Card</h2>`: "other",
 	} {
 		if got := lineState([]byte(page)); got != want {
 			t.Errorf("lineState(%q) = %q, want %q", page, got, want)
@@ -161,7 +161,7 @@ func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
 		}
 	}
 	page := []byte(`<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="codex"><button>`)
-	if !deviceOffer(page, "codex") || deviceOffer(page, "cod") || deviceOffer([]byte(`<h2>7. Connect AI</h2>`), "codex") {
+	if !deviceOffer(page, "codex") || deviceOffer(page, "cod") || deviceOffer([]byte(`<h2>6. Connect AI</h2>`), "codex") {
 		t.Fatal("deviceOffer")
 	}
 	link, code, ok := deviceLink([]byte(`<p>Open <a href="https://auth.openai.com/codex/device?a=1&amp;b=2">x</a> and enter <span class="mono">ABCD-EF23</span>.</p>`))
@@ -170,30 +170,5 @@ func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
 	}
 	if _, _, ok := deviceLink(page); ok {
 		t.Fatal("link parsed from the offer")
-	}
-}
-
-// The claim's Wi-Fi step parser matches localui's own template, so a
-// wording change there fails here rather than in the image run.
-func TestWiFiPasswordMatchesThePage(t *testing.T) {
-	src, err := os.ReadFile("../../localui/claimwifi.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, frag := range []string{
-		`New password: <span class="mono">{{.Password}}</span>`,
-		`<form method="post" action="/claim/wifi">`,
-		`<input name="last"`,
-	} {
-		if !bytes.Contains(src, []byte(frag)) {
-			t.Errorf("localui's Wi-Fi step no longer has %q", frag)
-		}
-	}
-	pw, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span><br>New password: <span class="mono">ZZZZ-YYYY-XXXX-WW&amp;W</span></p>`))
-	if !ok || pw != "ZZZZ-YYYY-XXXX-WW&W" {
-		t.Fatalf("%q %v", pw, ok)
-	}
-	if _, ok := wifiPassword([]byte(`<p>Wi-Fi name: <span class="mono">agentOS-Setup-AB2C</span></p>`)); ok {
-		t.Fatal("password parsed from a page without one")
 	}
 }

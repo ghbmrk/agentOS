@@ -28,12 +28,6 @@ const (
 	// private-data answer is owed to the vault it answers ErrAnswerOwed
 	// and seals nothing (#1544).
 	OpSetupFinish = "page_setup_finish"
-	// OpSetupJoin has agentosd's netjoin helper write the home Wi-Fi
-	// connection (P2-2w c3; Security L8 on the P2-2w plan) and answers
-	// once the helper does: success when it joined or saved the network,
-	// ErrJoinUnavailable when the box cannot join Wi-Fi at all, and
-	// ErrNotJoined otherwise. It is answered within JoinTimeout.
-	OpSetupJoin = "page_setup_join"
 	// OpSetupProviders lists the AI providers the vault process serves,
 	// whether each holds a key, and the owner's private-data answer
 	// (P2-2w c4e; CRED-5, CAP-9).
@@ -54,10 +48,6 @@ const (
 	// answered within DeviceCodeTimeout; ErrSignInBusy while that
 	// provider's last sign-in still waits for the owner.
 	OpSetupDeviceCode = "page_setup_device_code"
-	// OpSetupNetworks lists the home networks in range from agentosd's
-	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
-	// empty list when the helper has none or cannot be asked.
-	OpSetupNetworks = "page_setup_networks"
 	// OpSetupLine answers whether setup can text and the box's own number
 	// (P2-2w c4c; §8.1, CH-12): Ready while the modem bridge reports the
 	// line usable, Number when the bridge knows it.
@@ -78,21 +68,11 @@ const (
 	// replaces the last, as a reset card makes a new one. It is served
 	// in page mode.
 	OpSetupAPNet = "page_setup_ap_net"
-	// OpSetupWiFiName answers the setup network's name and whether the
-	// claim has rotated its password (SetupWiFiName, HW-10, #1692); never
-	// the password. ErrNoSetupWiFi when the box has none. Page mode only.
-	OpSetupWiFiName = "page_setup_wifi_name"
-	// OpSetupWiFi replaces the sticker's setup network password with the
-	// one the page showed the claimant (SetupWiFi, HW-10, #1692):
-	// agentosd writes it root-only for agentos-ap, which brings the
-	// network back up with it. Once only: ErrWiFiRotated after; a
-	// password the box would not make is ErrBadArgs. Page mode only.
-	OpSetupWiFi = "page_setup_wifi"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
-var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin,
-	OpSetupProviders, OpSetupAPIKey, OpSetupPrivateOK, OpSetupNetworks,
+var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish,
+	OpSetupProviders, OpSetupAPIKey, OpSetupPrivateOK,
 	OpSetupLine, OpSetupSend, OpSetupInbound, OpSetupDeviceCode}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
@@ -112,15 +92,6 @@ const (
 	// ErrNotEnrolled: Finish with no seed confirmed since the last new
 	// one.
 	ErrNotEnrolled = "not enrolled"
-	// ErrNotJoined: the helper did not join or save the network (wrong
-	// password, not in range, busy or refused), or no helper is
-	// configured. The page shows its one network error for all of them
-	// (Security L8.4).
-	ErrNotJoined = "not joined"
-	// ErrJoinUnavailable: the helper answered failed, a D-Bus or
-	// NetworkManager error such as NetworkManager being absent, so no
-	// password can help. The page points to Ethernet instead (#1429).
-	ErrJoinUnavailable = "join unavailable"
 	// ErrNotSent: the text did not go: no usable line, the bridge
 	// reported a failure, or no result came in time.
 	ErrNotSent = "not sent"
@@ -142,12 +113,6 @@ const (
 	// for the owner (OpSetupDeviceCode); a new one can start once that one
 	// is approved or its code expires.
 	ErrSignInBusy = "sign-in busy"
-	// ErrNoSetupWiFi: the box has no setup network: it was not preloaded
-	// with one, or the network was burned at the Owner Card confirm.
-	ErrNoSetupWiFi = "no setup wifi"
-	// ErrWiFiRotated: the claim already rotated the setup network's
-	// password (OpSetupWiFi).
-	ErrWiFiRotated = "wifi rotated"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -183,24 +148,6 @@ const SetupHostMax = 40
 // SetupText says text is one of setup's fixed texts.
 func SetupText(text string) bool { return setupTexts.MatchString(text) }
 
-// JoinTimeout bounds one OpSetupJoin call from the page. agentosd's own
-// call to the helper ends sooner (Security L8.4: each caller waits longer
-// than the one it calls).
-const JoinTimeout = 34 * time.Second
-
-// Join's shape bounds: an SSID is 1 to 32 bytes, a password 8 to 64.
-// The helper checks the exact rule (Security L8.5); agentosd checks shape
-// only (L8.8).
-const (
-	MaxSSID     = 32
-	MinPassword = 8
-	MaxPassword = 64
-)
-
-// MaxNetworks bounds OpSetupNetworks' list; each name is at most MaxSSID
-// bytes.
-const MaxNetworks = 20
-
 // MaxEnrollLink bounds an enrollment link (otpauth URI) in bytes.
 const MaxEnrollLink = 512
 
@@ -210,9 +157,6 @@ type SetupProgress struct {
 	Phase   string `json:"phase"`
 	Updated bool   `json:"updated"`
 	Online  bool   `json:"online"`
-	// NeverOnline: the last join was saved (netjoin L8.4) and the box has
-	// had no uplink for a while since (P2-2w c4).
-	NeverOnline bool `json:"never_online,omitempty"`
 }
 
 // EnrollLink is a new seed's otpauth link, shown once.
@@ -233,23 +177,6 @@ type Confirmed struct {
 	OK bool `json:"ok"`
 }
 
-// Join carries the home network's name and password. The password is
-// reusable authentication material (CRED-1): it goes only to the helper.
-type Join struct {
-	SSID     string `json:"ssid"`
-	Password string `json:"password"`
-}
-
-// String and GoString keep the password out of logs.
-func (Join) String() string   { return "[home Wi-Fi join]" }
-func (Join) GoString() string { return "[home Wi-Fi join]" }
-
-// Networks is OpSetupNetworks' answer: home network names, strongest
-// first. Names only (CRED-1).
-type Networks struct {
-	SSIDs []string `json:"ssids"`
-}
-
 // SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
 // the access point's (CRED-1): it goes only to agentos-ap's file.
 type SetupAPNet struct {
@@ -260,23 +187,6 @@ type SetupAPNet struct {
 // String and GoString keep the password out of logs.
 func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
 func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
-
-// SetupWiFiName is OpSetupWiFiName's answer: the setup network's name and
-// whether its password is rotated. It carries no password.
-type SetupWiFiName struct {
-	SSID    string `json:"ssid"`
-	Rotated bool   `json:"rotated"`
-}
-
-// SetupWiFi is OpSetupWiFi's argument: the setup network's new password
-// (CRED-1), which goes only to agentos-ap's file.
-type SetupWiFi struct {
-	Password string `json:"password"`
-}
-
-// String and GoString keep the password out of logs.
-func (SetupWiFi) String() string   { return "[setup Wi-Fi password]" }
-func (SetupWiFi) GoString() string { return "[setup Wi-Fi password]" }
 
 // Finish carries the owner's number, E.164, and Card, the page's report
 // that its Owner Card step is confirmed and provisioned (HW-1, #1115).

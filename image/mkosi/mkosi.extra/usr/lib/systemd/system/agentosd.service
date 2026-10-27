@@ -38,7 +38,6 @@ ExecStartPre=/usr/lib/agentos/drive-id check
 # no project quota on root agentosd keeps agent machines off. The off value is never passed (tests/test_image_quota.py).
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
-        -netjoin-sock /run/agentos-netjoin/netjoin.sock \
         -kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel \
         -kernel-owner-uid @uid:agentos-owner \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \

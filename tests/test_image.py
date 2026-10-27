@@ -5709,7 +5709,8 @@ class SetupServicesTest(unittest.TestCase):
         self.assertIn('defaultVault = "%s/vault"' % state, main)
 
     def test_the_modem_and_netjoin_sockets_are_where_agentosd_looks(self):
-        # #1388: the bridge dials agentosd's owner socket, and agentosd dials the helper's.
+        # #1388: the bridge dials agentosd's owner socket. agentosd no longer dials the netjoin
+        # helper (D-178, WIFI-del-a); the helper's unit goes with WIFI-del-b (#3235).
         self.assertEqual(arg(exec_args(MODEM_UNIT), "owner-sock"), flag_default("agentosd", "sockets") + "/owner.sock")
         self.assertEqual(flag_default("agentos-modem", "owner-sock"), arg(exec_args(MODEM_UNIT), "owner-sock"))
         nj = ini(NETJOIN_UNIT)["Service"]
@@ -5717,8 +5718,7 @@ class SetupServicesTest(unittest.TestCase):
         self.assertEqual(arg(exec_args(NETJOIN_UNIT), "dir"), run)
         self.assertEqual(arg(exec_args(NETJOIN_UNIT), "agentosd-uid"), "0")  # agentosd runs as root
         self.assertNotIn("User", ini(UNITS / "agentosd.service")["Service"])
-        sock = re.search(r'^const Socket = "([\w.-]+)"$', (ROOT / "broker/netjoin/netjoin.go").read_text(), re.M)
-        self.assertEqual(arg(exec_args(UNITS / "agentosd.service"), "netjoin-sock"), "%s/%s" % (run, sock.group(1)))
+        self.assertNotIn("-netjoin-sock", exec_args(UNITS / "agentosd.service"))
 
     def test_the_access_point_serves_the_page_s_network(self):
         # #825: the loader brings the access point up on the interface and address the page binds,
@@ -5823,7 +5823,7 @@ class SetupServicesTest(unittest.TestCase):
         words = exec_args(UNITS / "agentosd.service")
         self.assertEqual(arg(words, "modem-uid"), "@uid:agentos-modem")
         self.assertEqual(arg(words, "localui-uid"), "@uid:agentos-localui")
-        self.assertIn("-netjoin-sock", words)
+        self.assertNotIn("-netjoin-sock", words)  # the core joins no Wi-Fi (D-178)
         self.assertIn("agentos-egress.service", u["Unit"]["Wants"].split())
         self.assertIn("agentos-egress.service", u["Unit"]["After"].split())
         page = ini(PAGE_UNIT)["Unit"]

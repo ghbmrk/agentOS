@@ -154,7 +154,7 @@ func TestAPreloadedBoxServesOnlyTheClaimScreen(t *testing.T) {
 			t.Fatalf("GET %s before the claim: %d %q", p, w.Code, w.Header().Get("Location"))
 		}
 	}
-	if w := owner.do(t, cs.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {
+	if w := owner.do(t, cs.ui, "POST", "/setup/number", url.Values{"number": {"+15550100100"}}); w.Code != http.StatusForbidden {
 		t.Fatalf("setup post before the claim: %d", w.Code)
 	}
 	foreign := func(q *http.Request) { q.Host = "attacker.example" }
@@ -216,7 +216,7 @@ func TestALostClaimStateRoutesToReinstall(t *testing.T) {
 				t.Fatalf("GET %s on a reinstall box points at a claiming phone: %s", path, body)
 			}
 		}
-		if w := p.do(t, cs2.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {
+		if w := p.do(t, cs2.ui, "POST", "/setup/number", url.Values{"number": {"+15550100100"}}); w.Code != http.StatusForbidden {
 			t.Fatalf("setup post: %d", w.Code)
 		}
 		w := p.do(t, cs2.ui, "POST", "/claim", url.Values{"code": {b.code}})

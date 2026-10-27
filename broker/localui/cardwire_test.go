@@ -177,7 +177,7 @@ func (heldCard) Hold() error            { return firstboot.ErrCardPending }
 func TestFinishWaitsForTheCard(t *testing.T) {
 	r := newRig(t)
 	r.owned = heldCard{}
-	st := &MemStore{s: SetupState{Network: true, Owner: ownerNum, Device: "x", Codes: true, Recovery: true, Host: true}}
+	st := &MemStore{s: SetupState{Owner: ownerNum, Device: "x", Codes: true, Recovery: true, Host: true}}
 	r.srv = r.open(st)
 	r.hooks.connected = true
 	r.srv.setup.maybeFinish()

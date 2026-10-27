@@ -4,61 +4,21 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
-	"github.com/ghbmrk/agentos/broker/netjoin"
 )
 
-// neverOnlineAfter is how long a home network the helper answered saved
-// for (netjoin L8.4) may stay without an uplink before setup tells the
-// owner it never came online (P2-2w c4). The helper has already waited
-// its own 25 s; this covers a slow DHCP lease.
-const neverOnlineAfter = 90 * time.Second
-
-// uplink is the box's home-network state as setup's progress shows it
-// (ONB-4, P2-2w c4).
-type uplink struct {
-	online func() bool
-	now    func() time.Time
-
-	mu    sync.Mutex
-	saved time.Time // the last join answered saved and no uplink since; zero otherwise
-}
-
-func newUplink() *uplink { return &uplink{online: routeOnline, now: time.Now} }
-
-// progress is setup's progress: ready once the box has an uplink, offline
-// before. The first-boot update (UPD-3) is not wired into setup mode, so
-// Updated follows Online and AI waits for an uplink.
-func (u *uplink) progress() localapi.SetupProgress {
-	on := u.online()
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if on {
-		u.saved = time.Time{}
-		return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
-	}
-	p := localapi.SetupProgress{Phase: "offline"}
-	p.NeverOnline = !u.saved.IsZero() && u.now().Sub(u.saved) >= neverOnlineAfter
-	return p
-}
-
-// seen records a join's answer: saved starts the never-online wait,
-// joined ends it, and any other answer leaves it as it was. A nil uplink
-// records nothing.
-func (u *uplink) seen(code netjoin.Code) {
-	if u == nil {
-		return
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	switch code {
-	case netjoin.Saved:
-		u.saved = u.now()
-	case netjoin.Joined:
-		u.saved = time.Time{}
+// progressOf is setup's progress: ready once the box has an uplink,
+// offline before (ONB-4). The core's uplink is its cable to the enforcer
+// (HW-12, D-178); the box joins no Wi-Fi. The first-boot update (UPD-3)
+// is not wired into setup mode, so Updated follows Online and AI waits
+// for an uplink.
+func progressOf(online func() bool) func() localapi.SetupProgress {
+	return func() localapi.SetupProgress {
+		if online() {
+			return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
+		}
+		return localapi.SetupProgress{Phase: "offline"}
 	}
 }
 
