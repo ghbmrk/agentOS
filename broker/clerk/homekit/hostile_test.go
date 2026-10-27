@@ -483,3 +483,18 @@ func TestAccessoriesJSONBounds(t *testing.T) {
 		}
 	}
 }
+
+// A 1xx interim reply is refused, ending the session, instead of being
+// taken as the answer and knocking the stream out of step (#3325 item 7).
+// REQ: DEV-1, KRN-2
+func TestInterimReplyIsRefused(t *testing.T) {
+	s, _ := hostilePeer(t, Options{}, func(*http.Request, int) string {
+		return "HTTP/1.1 100 Continue\r\n\r\n" + hapResp(200, valuesBody(idEv))
+	})
+	if _, err := s.Read(idEv); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("1xx reply: %v", err)
+	}
+	if _, err := s.Read(idEv); !errors.Is(err, ErrClosed) {
+		t.Fatalf("session open after a 1xx reply: %v", err)
+	}
+}
