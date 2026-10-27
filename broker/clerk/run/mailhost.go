@@ -50,6 +50,10 @@ type MailHost struct {
 	signing *gmailSignIn // the Gmail sign-in waiting for its paste; nil: none
 
 	planned planState // setup's account plan (accountPlan)
+
+	stepping chan struct{} // the worker's step in flight (planSenders); setup and removal wait for it
+	kick     chan struct{} // wakes the worker; buffered, sent to without blocking
+	ws       worldState    // the host's own world's sources (world.go)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -118,12 +122,29 @@ func stopped(stop error) (detail string, planner error) {
 }
 
 // NewMailHost opens the account in dir, if there is one.
+// With no cfg.World the host builds its own (world.go) and starts the
+// worker that reads its alert senders; a given World is used unchanged.
 func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailConfig) *MailHost {
-	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg}
+	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg, kick: make(chan struct{}, 1)}
+	own := cfg.World == nil
+	if own {
+		h.cfg.World = h.world
+	}
 	h.mu.Lock()
 	h.refresh()
 	h.mu.Unlock()
+	if own {
+		go h.work()
+	}
 	return h
+}
+
+// wake kicks the worker without blocking; h.mu may be held.
+func (h *MailHost) wake() {
+	select {
+	case h.kick <- struct{}{}:
+	default:
+	}
 }
 
 // refresh reads the account again and waits for the read; h.mu is held, and
@@ -155,6 +176,7 @@ func (h *MailHost) refresh() {
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
+	h.wake() // a senders read that failed retries at the next refresh
 	if !read {
 		// The last read stands. A change check that failed, for any
 		// reason but a refused sign-in (which reads), is told until a
@@ -192,18 +214,22 @@ func (h *MailHost) refresh() {
 	}
 }
 
-// wait waits, with h.mu released, for the read in flight to end.
+// wait waits, with h.mu released, for the read in flight to end, or the
+// worker's step when no read is in flight.
 func (h *MailHost) wait() {
 	done := h.reading
+	if done == nil {
+		done = h.stepping
+	}
 	h.mu.Unlock()
 	<-done
 	h.mu.Lock()
 }
 
-// idle waits until no read is in flight; h.mu is held. While the caller
-// keeps h.mu, none starts.
+// idle waits until no read and no worker step is in flight; h.mu is held.
+// While the caller keeps h.mu, none starts.
 func (h *MailHost) idle() {
-	for h.reading != nil {
+	for h.reading != nil || h.stepping != nil {
 		h.wait()
 	}
 }
@@ -212,6 +238,8 @@ func (h *MailHost) idle() {
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
 	h.changes++
+	h.ws.reset(h.changes)
+	h.wake()
 	h.cur, h.why, h.checkWhy, h.stop = nil, "", "", nil
 	h.mark, h.day = nil, ""
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })

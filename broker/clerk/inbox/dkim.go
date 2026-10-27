@@ -162,8 +162,11 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	if r.X, ok = unixTag(t, "x"); !ok || (r.T >= 0 && r.X >= 0 && r.X <= r.T) {
 		return r
 	}
-	// RFC 8616 section 4: a d= in U-labels is looked up as its A-labels.
-	rec, ok := keys[t["s"]+"._domainkey."+alabel(r.D)]
+	name := dkimName(t)
+	if name == "" {
+		return r
+	}
+	rec, ok := keys[name]
 	if !ok {
 		return r
 	}
@@ -197,6 +200,38 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	sum := sha256.Sum256(in)
 	r.Pass = rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) == nil
 	return r
+}
+
+// dkimName is the key record name a signature's tags t look up,
+// "<s>._domainkey.<d>" with d in A-labels (RFC 8616 section 4), or "" when
+// either is missing. verifyOne and DKIMNames both use it, so the name looked
+// up in DNS is the name the key is read under.
+func dkimName(t map[string]string) string {
+	s, d := t["s"], alabel(strings.ToLower(t["d"]))
+	if s == "" || d == "" {
+		return ""
+	}
+	return s + "._domainkey." + d
+}
+
+// DKIMNames is the key record name of each DKIM-Signature of raw that parses,
+// in header order, each once: the keys VerifyDKIM reads for raw.
+func DKIMNames(raw []byte) []string {
+	hs, _ := splitMessage(raw)
+	var out []string
+	for _, h := range hs {
+		if h.key() != "dkim-signature" {
+			continue
+		}
+		t, err := sigTags(h.value)
+		if err != nil {
+			continue
+		}
+		if n := dkimName(t); n != "" && !contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 var digits = regexp.MustCompile(`^[0-9]{1,12}$`)
