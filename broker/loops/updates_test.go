@@ -4,14 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
 // REQ: UPD-4, UPD-5
 //
 // The update channel and cadence are owner settings (UPD-4, UPD-5):
-// texted like the loop settings, journaled like them, and read by Loop 3.
+// texted and applied like the loop settings, and read by Loop 3.
 
 func TestUpdateTextsParse(t *testing.T) {
 	for msg, want := range map[string]Request{
@@ -83,19 +81,7 @@ func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
 	if r.s.Settings().Updates.Soak() != 9 {
 		t.Fatalf("%+v", r.s.Settings().Updates)
 	}
-	// Journaled like the loop settings, and kept across a restart.
-	var ids []string
-	for _, st := range r.eng.List() {
-		if strings.Contains(st.Intent.ID, ":channel:") || strings.Contains(st.Intent.ID, ":soak:") || strings.Contains(st.Intent.ID, ":security:") {
-			if st.Intent.Action != ActionUpdates || st.State != journal.Succeeded {
-				t.Fatalf("%s: %s %s", st.Intent.ID, st.Intent.Action, st.State)
-			}
-			ids = append(ids, st.Intent.ID)
-		}
-	}
-	if len(ids) != 8 {
-		t.Fatalf("journaled %q", ids)
-	}
+	// Kept across a restart.
 	r.restart()
 	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 9 {
 		t.Fatalf("after restart: %+v", u)
@@ -157,7 +143,7 @@ func TestSavedUpdateSettingsAreClampedOnLoad(t *testing.T) {
 		{`{"channel":"pinned","soak_days":400}`, ChannelPinned, MaxSoakDays},
 		{`{"soak_days":-3}`, ChannelStable, DefaultSoakDays},
 	} {
-		must(t, r.store.Save([]byte(`{"seq":1,"settings":{"spare_calls":100,"updates":`+c.saved+`},"applied":{}}`)))
+		must(t, r.store.Save([]byte(`{"settings":{"spare_calls":100,"updates":`+c.saved+`}}`)))
 		r.restart()
 		if u := r.s.Settings().Updates; u.ChannelName() != c.channel || u.Soak() != c.soak {
 			t.Fatalf("%s: %s %d", c.saved, u.ChannelName(), u.Soak())
@@ -165,7 +151,7 @@ func TestSavedUpdateSettingsAreClampedOnLoad(t *testing.T) {
 	}
 	// Set refuses a soak outside the bounds, whatever Text let through.
 	for _, d := range []int{MinSoakDays - 1, MaxSoakDays + 1} {
-		if err := r.s.Set(context.Background(), Request{Kind: KindSoak, Days: d}); err == nil {
+		if err := r.s.Set(context.Background(), Request{Kind: KindSoak, Days: d}, true); err == nil {
 			t.Fatalf("soak %d set", d)
 		}
 	}
@@ -182,30 +168,5 @@ func TestHelpUpdatesFitsOneSegment(t *testing.T) {
 	}
 	if len(HelpUpdates) > 153 || len(HelpText) > 153 {
 		t.Fatalf("HELP UPDATES is %d characters", len(HelpUpdates))
-	}
-}
-
-// Only the owner changes update settings, and the action must match.
-func TestUpdateSettingIntentsAreOwnerOnly(t *testing.T) {
-	r := newRig(t)
-	ctx := context.Background()
-	ok := journal.Intent{ID: "loops:n9:channel:fast", Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionUpdates, Executor: Executor}
-	if err := r.s.Check(ctx, journal.PhaseAuthorize, ok); err != nil {
-		t.Fatal(err)
-	}
-	for _, in := range []journal.Intent{
-		{ID: ok.ID, Origin: "loop:improve", Account: ok.Account, Action: ok.Action, Executor: ok.Executor},
-		{ID: ok.ID, Origin: "guest:m1", Account: ok.Account, Action: ok.Action, Executor: ok.Executor},
-		{ID: ok.ID, Origin: ok.Origin, Account: ok.Account, Action: ActionOn, Executor: ok.Executor},
-		{ID: "loops:n9:on:all", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-		{ID: "loops:n9:channel:slow", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-		{ID: "loops:n9:soak:6", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-		{ID: "loops:n9:soak:61", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-		{ID: "loops:n9:soak:014", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-		{ID: "loops:n9:security:maybe", Origin: ok.Origin, Account: ok.Account, Action: ActionUpdates, Executor: ok.Executor},
-	} {
-		if err := r.s.Check(ctx, journal.PhaseAuthorize, in); err == nil {
-			t.Fatalf("%s from %s as %s allowed", in.ID, in.Origin, in.Action)
-		}
 	}
 }

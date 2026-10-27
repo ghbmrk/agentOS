@@ -59,6 +59,8 @@ parser github.com/ghbmrk/agentos/broker/checker -- owner codes and approval requ
 parser github.com/ghbmrk/agentos/broker/claim -- the claim code a phone presents
 parser github.com/ghbmrk/agentos/broker/clerk -- a clerk's sealed Secrets file and its providers' replies
 inert github.com/ghbmrk/agentos/broker/clerk/check -- checks a request the kernel already decoded against the key chain; decodes no bytes itself
+parser github.com/ghbmrk/agentos/broker/clerk/devhost -- a device driver's wire messages and the device's frames (DEVSLOT-drivers b2a)
+parser github.com/ghbmrk/agentos/broker/clerk/devslot -- the driver wire's messages, from the host or a driver's process (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server responses, in the mail clerk's connection process (go-imap; #2937 gap 2)
@@ -70,6 +72,7 @@ parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and ma
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-link -- the edge's TLS handshakes and hellos, and the consumer's JSON lines
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)

@@ -227,8 +227,8 @@ func TestRewrapSealsToTheBackupsOwnRecipient(t *testing.T) {
 	}
 	b, err := tg.GetTable(next.BackupID, next.Generation)
 	must(t, err)
-	if _, err := UnwrapTable(bytes.NewReader(b), rk2, next.BackupID, kernel.NewMemKeys()); !errors.Is(err, ErrRecipient) {
-		t.Fatalf("the new recovery key: %v, want ErrRecipient", err)
+	if _, err := UnwrapTable(bytes.NewReader(b), rk2, next.BackupID, kernel.NewMemKeys()); !errors.Is(err, ErrOpen) {
+		t.Fatalf("the new recovery key: %v, want ErrOpen", err)
 	}
 	if n, err := UnwrapTable(bytes.NewReader(b), rk1, next.BackupID, kernel.NewMemKeys()); err != nil || n != 2 {
 		t.Fatalf("the backup's own recovery key: %d, %v", n, err)

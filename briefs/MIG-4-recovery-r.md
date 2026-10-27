@@ -49,6 +49,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 **Guard files:** none (no new package). **Gate:** a D-159 row citing D-201, if `trusted-base` grows.
 **Estimate:** 80k tokens.
 
+**As built (r1, for r2 to r4b):** `handoff.Approval{Route, Old, Next, Expires}` (milliseconds), `handoff.RouteCard` (`a`) and `RouteLost` (`b`), `SignApproval(head, a)` and `VerifyApproval(head.Public(), b, now)`, which checks shape, signature and `now < Expires`; the caller checks the route and `Old`. Expiry constants are `handoff.CardApprovalFor` and `LostApprovalFor`; the encoded form is at most `handoff.MaxApproval` bytes, so r2's 8 KiB request bound holds it. Kernel calls: `recoveryrotate {next, cosign}` answers `{approval}`; `recipient {recipient (wire), approval}` answers nothing, and a retry once switched succeeds. Owner client: `owner/kernelsock` `RotateMsg(old, next)`, `RecoveryRotate`, `SwitchRecipient`, refusals `ErrRotateSig`, `ErrApprovalStale`, `ErrApprovalExpired`.
+
 ## r2: the keeper's one-shot (#3407)
 
 **Scope:** `broker/clerk/seal/seal.go` (+test: `ReplaceAndPut`), `broker/cmd/agentos-enroll/main.go` (+test: `-rotate-recovery`, reading the request on stdin), the two unit files of decision 7 under `image/mkosi/mkosi.extra/usr/lib/systemd/system/`, the units' image test if one lists keeper units, ASSUMPTIONS rows, this brief.
@@ -62,6 +64,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 - `::TestRotateRecoveryIsSerial`: a second run while the lock is held answers `busy`.
 **Needs:** r1 for the approval's form (start on r1's branch once its interface is review-accepted, OPERATING §5). **Gate:** D-159 row; the unit files may make it a gate-file PR (`premerge.py --needs-mark`).
 **Estimate:** 70k tokens.
+
+**As built (r2, for r3 to r4b):** `seal.Store.ReplaceAndPut(slotID, f, name, value)` returns the new slot's ID like `Replace`. The units are `agentos-keeper-rotate.socket` and `agentos-keeper-rotate@.service`: the `agentos-keeper-` prefix is what lifts the main side's mask on the store. The socket is at `/run/agentos-keeper/rotate.sock`. The request is one JSON object read to the end of the connection, so the client ends its write half: `{"factor": "passphrase"|"recovery", "secret": base64 of the factor's bytes, "next": 64 hex digits, "approval": base64}`. The answer is one line: `ok`, `request`, `factor`, `approval`, `stale`, `busy` or `store`. The serial lock is a `flock` on the `-state` directory, which `-rotate` also takes (ASSUMPTIONS MIG-4-recovery-r2-2).
 
 ## r3: the lost-card route at boot (#3408)
 

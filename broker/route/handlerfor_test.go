@@ -9,15 +9,16 @@ import (
 
 // REQ: CAP-9, REV-5, OP-8
 //
-// HandlerFor takes the label, the egress handler, and an auditor per
-// request, as the vault process gets them from the forwarding broker.
+// HandlerFor takes the label, the upstream handler, and an auditor per
+// request, as the process holding the keys gets them from the forwarding
+// broker.
 
 func (r *rig) doFor(t *testing.T, machine, label string, audit func(Decision)) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(simpleChat))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	r.router.HandlerFor(machine, label, r.px.HandlerFor(machine, label, r), audit).ServeHTTP(w, anyAttempt(req))
+	r.router.HandlerFor(machine, label, r.px.HandlerFor(machine, label), audit).ServeHTTP(w, anyAttempt(req))
 	return w
 }
 
@@ -56,7 +57,7 @@ func TestHandlerForTakesLabelPerRequest(t *testing.T) {
 	}
 }
 
-// The egress handler given per request is the one called, so its own
+// The upstream handler given per request is the one called, so its own
 // denials (here the grant, checked again by the proxy) reach the guest
 // and the per-request audit.
 func TestHandlerForUsesGivenUpstream(t *testing.T) {

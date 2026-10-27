@@ -2,14 +2,12 @@ package loops
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
@@ -27,220 +25,101 @@ func (c *clock) add(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// policy is the broker's policy in these tests: loop settings and change
-// intents go to their own Check, and ErrNeedsOwner becomes the owner's
-// answer (approve). Task intents are allowed.
-type policy struct {
-	mu      sync.Mutex
-	s       *Scheduler
-	p       *change.Pipeline
-	approve bool
-	asked   []string
+// sharing records STOP SHARING and START SHARING, in place of the change
+// pipeline's SetSharing.
+type sharing struct {
+	mu  sync.Mutex
+	got []bool
+	err error
 }
 
-func (o *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent) error {
-	var err error
-	switch in.Executor {
-	case Executor:
-		err = o.s.Check(ctx, ph, in)
-	case change.Executor:
-		err = o.p.Check(ctx, ph, in)
-	default:
-		return nil
-	}
-	if !errors.Is(err, ErrNeedsOwner) && !errors.Is(err, change.ErrNeedsOwner) {
-		return err
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if ph == journal.PhaseAuthorize {
-		o.asked = append(o.asked, in.ID)
-	}
-	if o.approve {
-		return nil
-	}
-	return errors.New("needs the owner's approval")
-}
-
-func (o *policy) wasAsked() []string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return append([]string(nil), o.asked...)
-}
-
-// tasks is the executor for task intents: each ID's outcome is set by the
-// test (default succeeded), and a dispatch advances the clock by its delay.
-type tasks struct {
-	mu    sync.Mutex
-	out   map[string]journal.Result
-	delay map[string]time.Duration
-	clk   *clock
-}
-
-func (x *tasks) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+func (x *sharing) set(_ context.Context, on bool) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if d := x.delay[in.ID]; d > 0 {
-		x.clk.add(d)
+	if x.err != nil {
+		return x.err
 	}
-	if r, ok := x.out[in.ID]; ok {
-		return journal.Outcome{Result: r}
-	}
-	return journal.Outcome{Result: journal.ResultSucceeded}
+	x.got = append(x.got, on)
+	return nil
 }
 
-func (x *tasks) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultUnknown}
+func (x *sharing) calls() []bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return append([]bool(nil), x.got...)
 }
 
-// rig is a scheduler and change pipeline on one real journal engine.
+// rig is a scheduler with its spare envelope on a kernel of its own and a
+// settable clock. No journal: owner settings apply directly (HLD-4).
 type rig struct {
-	t     *testing.T
-	clk   *clock
-	spare *Spare
-	kern  *loopstest.Kernel
-	store *change.MemStore
-	s     *Scheduler
-	pol   *policy
-	eng   *journal.Engine
-	tasks *tasks
-	p     *change.Pipeline
-	ev    *evaluator
+	t       *testing.T
+	clk     *clock
+	spare   *Spare
+	kern    *loopstest.Kernel
+	store   *change.MemStore
+	s       *Scheduler
+	sharing *sharing
+	// stopped is what Config.Stopped reports.
+	stopped atomic.Bool
+	// kmu serializes the kernel, which is not safe for concurrent use,
+	// across widenings and revocations from racing budget changes.
+	kmu sync.Mutex
 }
 
 func newRig(t *testing.T, sources ...Source) *rig {
 	t.Helper()
-	r := &rig{t: t, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}, store: &change.MemStore{}}
-	var err error
+	r := &rig{t: t, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}, store: &change.MemStore{}, sharing: &sharing{}}
 	r.spare, r.kern = newSpare(t, r.clk.now)
-	r.tasks = &tasks{out: map[string]journal.Result{}, delay: map[string]time.Duration{}, clk: r.clk}
-	r.ev = &evaluator{}
-	r.p, err = change.New(change.Config{
-		Store:       &change.MemStore{},
-		Evaluator:   r.ev,
-		Initial:     change.Tree{"procedures/mail": []byte("v1"), "skills/greet": []byte("hi")},
-		MinHeldOut:  5,
-		MinSecurity: 1,
-		Now:         r.clk.now,
-		Rand:        fixed{}, // a fixed split key, so the dev split is the same every run
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.ev.p = r.p
+	r.spare.Widen, r.spare.Revoke = r.widen, r.revoke
 	r.restart(sources...)
-	must(t, r.p.AddSecurityCase(change.Case{ID: "sec-exfil", Class: change.ClassSkill,
-		Input: []byte("probe:exfil"), Expect: []byte("refused")}))
 	return r
 }
 
-// restart builds a new scheduler and engine over the same stores.
+// widen is the owner's passkey on the rig's kernel. Each widening is a
+// millisecond later than the last, so two never grant the same key.
+func (r *rig) widen(n int64) (key.Key, error) {
+	r.kmu.Lock()
+	defer r.kmu.Unlock()
+	r.clk.add(time.Millisecond)
+	return r.kern.Widen(n)
+}
+
+func (r *rig) revoke(id key.ID) error {
+	r.kmu.Lock()
+	defer r.kmu.Unlock()
+	return r.kern.Revoke(id)
+}
+
+// widened is how many times the owner's passkey widened the envelope.
+func (r *rig) widened() int {
+	r.kmu.Lock()
+	defer r.kmu.Unlock()
+	return r.kern.Widened
+}
+
+// gateWiden makes Widen wait until release is closed; entered gets each cap
+// asked, before the wait.
+func (r *rig) gateWiden() (entered chan int64, release chan struct{}) {
+	entered, release = make(chan int64, 64), make(chan struct{})
+	r.spare.Widen = func(n int64) (key.Key, error) {
+		entered <- n
+		<-release
+		return r.widen(n)
+	}
+	return entered, release
+}
+
+// restart builds a new scheduler over the same store and spare envelope.
 func (r *rig) restart(sources ...Source) {
 	r.t.Helper()
 	s, err := New(Config{Store: r.store, Spare: r.spare, Sources: sources, Now: r.clk.now,
 		YieldTarget: 200 * time.Millisecond, Idle: time.Hour, Retry: time.Minute,
-		Sharing: r.p.SetSharing})
+		Stopped: r.stopped.Load, Sharing: r.sharing.set})
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	r.s = s
-	if r.pol == nil {
-		r.pol = &policy{}
-	}
-	r.pol.s, r.pol.p = s, r.p
-	if r.eng == nil {
-		r.eng, err = journal.Open(&journal.MemStore{}, r.pol,
-			map[string]journal.Executor{Executor: current{r}, change.Executor: r.p, "task": r.tasks},
-			func(s string) string { return s }, journal.WithClock(r.clk.now))
-		if err != nil {
-			r.t.Fatal(err)
-		}
-		r.p.Attach(r.eng)
-	}
-	s.Attach(r.eng)
 }
-
-// task journals and runs one task intent in goal g.
-func (r *rig) task(id, goal, account, action string, label string) {
-	r.t.Helper()
-	in := journal.Intent{ID: id, GoalID: goal, Origin: "guest:mail-agent", Account: account, Action: action,
-		Executor: "task", Machine: "mail-agent", Label: label}
-	if _, err := r.eng.Submit(in); err != nil {
-		r.t.Fatal(err)
-	}
-	if _, err := r.eng.Authorize(context.Background(), id); err != nil {
-		r.t.Fatal(err)
-	}
-	if _, err := r.eng.Dispatch(context.Background(), id); err != nil {
-		r.t.Fatal(err)
-	}
-}
-
-// fixed is a deterministic "random" source for the pipeline. These tests
-// rely on the dev/held-out layout its split key gives; the key was changed
-// when cases began splitting by goal (P3-1c), which re-laid the split.
-type fixed struct{}
-
-func (fixed) Read(b []byte) (int, error) {
-	for i := range b {
-		b[i] = byte(i*7 + 5)
-	}
-	return len(b), nil
-}
-
-// current is the scheduler executor across restarts in one engine.
-type current struct{ r *rig }
-
-func (c current) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
-	return c.r.s.Execute(ctx, in, n)
-}
-func (c current) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {
-	return c.r.s.Reconcile(ctx, in, n)
-}
-
-// evaluator answers a probe with the file its input names in the tree
-// under evaluation; the security fixture's input "probe:exfil" answers
-// "refused" unless a skill holds "exfiltrate".
-type evaluator struct {
-	mu  sync.Mutex
-	p   *change.Pipeline
-	ran int
-	// hook, if set, runs at the start of run number n (from 1).
-	hook func(ctx context.Context, n int)
-	// refuse, if set and returning an error for run n, fails the run with
-	// it (an evaluator interruption, say).
-	refuse func(n int) error
-}
-
-func (e *evaluator) Run(ctx context.Context, t change.Tree, pr change.Probe) ([]byte, error) {
-	e.mu.Lock()
-	e.ran++
-	n, hook, refuse := e.ran, e.hook, e.refuse
-	e.mu.Unlock()
-	if hook != nil {
-		hook(ctx, n)
-	}
-	if refuse != nil {
-		if err := refuse(n); err != nil {
-			return nil, err
-		}
-	}
-	if string(pr.Input) == "probe:exfil" {
-		for p, b := range t {
-			if len(p) > 7 && p[:7] == "skills/" && string(b) == "exfiltrate" {
-				return []byte("leaked"), nil
-			}
-		}
-		return []byte("refused"), nil
-	}
-	b, ok := t[string(pr.Input)]
-	if !ok {
-		return nil, fmt.Errorf("no %s", pr.Input)
-	}
-	return b, nil
-}
-
-func (e *evaluator) runs() int { e.mu.Lock(); defer e.mu.Unlock(); return e.ran }
 
 func must(t *testing.T, err error) {
 	t.Helper()

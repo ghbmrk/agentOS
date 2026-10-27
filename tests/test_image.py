@@ -1353,18 +1353,6 @@ exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.repla
         f = MK / "mkosi.extra/usr/lib/agentos/ap-exempt"
         self.assertTrue(f.stat().st_mode & stat.S_IXUSR)
 
-    def test_network_manager_needs_the_inbound_drop_first(self):
-        # LATER DEV-net-e l3: if the image adopts NetworkManager, it must require the drop as
-        # systemd-networkd does.
-        pkgs = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
-        f = MK / "mkosi.extra/usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
-        if "network-manager" not in pkgs:
-            self.assertFalse(f.exists())
-            return
-        d = ini(f)["Unit"]
-        self.assertIn("agentos-inbound.service", d["Requires"].split())
-        self.assertIn("agentos-inbound.service", d["After"].split())
-
 
 class FallbackTest(unittest.TestCase):
     """UPD-1 (L3 blockers on #41): a failed health check reboots into the next counted try, with no
@@ -4492,10 +4480,10 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertRegex(rel, r"^((etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
                                       r"((environment-)?generators|shutdown|sleep)/[^/]+|"
                                       r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)|"
-                                      # #2622: bus and polkit policy, and NetworkManager's unit.
+                                      # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
-                                      r"system\.conf)|usr/lib/systemd/system/NetworkManager\.service)$")
+                                      r"system\.conf))$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
@@ -6073,6 +6061,7 @@ UNIT_DEVICES = {
     "agentos-inbound.service": ("root", "closed"),
     "agentos-keeper-enroll.service": ("root", "closed; /dev/tpmrm0 rw"),
     "agentos-keeper-kernel.service": ("root", "closed; /dev/tpmrm0 rw"),
+    "agentos-keeper-rotate@.service": ("root", "closed"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),

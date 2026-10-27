@@ -32,7 +32,7 @@ var QuickStart = []string{
 	"Put the SIM in the modem. Plug the modem into the PC, and the PC's cable into the enforcer.",
 	"Turn the PC on. Often no screen or keyboard is needed. Your PC's own disks are left untouched.",
 	fmt.Sprintf("Wait %d minutes, then point your phone's camera at the setup Wi-Fi code on the claim sticker or the flasher, and join the enforcer's setup network.", WaitMinutes),
-	"The enforcer's page opens by itself and gives you your Owner network. Rejoin on the Owner network, then scan the claim code; the setup page opens by itself; follow it.",
+	"Rejoin on the Owner network the enforcer's page gives you, then scan the claim code and follow the setup page.",
 	"Done. Text your box any time. Text HELP for commands.",
 }
 
@@ -138,7 +138,7 @@ type rotView struct {
 
 var rotationTmpl = template.Must(template.New("rotation").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>AgentOS new card parts</title>
+<title>agentOS new card parts</title>
 <style>
 @page { margin: 12mm; }
 body { font-family: system-ui, sans-serif; color: #000; background: #fff; margin: 0; }
@@ -157,9 +157,9 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 
 <section class="sheet">
 <div class="card">
-<h1>AgentOS Owner Card: new parts</h1>
+<h1>agentOS Owner Card: new parts</h1>
 <p class="note">These replace the same parts of your Owner Card. The parts not on this page stay as on your current card. Keep it like a passport, apart from the drive.</p>
-<p class="note">Box page: <span class="mono">{{.BoxPage}}</span></p>
+<p class="note">Wi-Fi page: <span class="mono">{{.BoxPage}}</span></p>
 </div>
 {{if .Parts.Setup}}<div class="card">
 <h2>Setup code</h2>
@@ -198,7 +198,7 @@ I cannot print this again; keep the card.</p></div>
 
 var cardTmpl = template.Must(template.New("card").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>AgentOS Owner Card</title>
+<title>agentOS Owner Card</title>
 <style>
 @page { margin: 12mm; }
 body { font-family: system-ui, sans-serif; color: #000; background: #fff; margin: 0; }
@@ -219,9 +219,9 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 
 <section class="sheet">
 <div class="card">
-<h1>AgentOS Owner Card</h1>
+<h1>agentOS Owner Card</h1>
 <p class="note">Keep this card like a passport, apart from the drive. Anyone with both can read your data.</p>
-<p>Box page: <span class="mono">{{.BoxPage}}</span></p>
+<p>Wi-Fi page: <span class="mono">{{.BoxPage}}</span></p>
 <h2>Quick start</h2>
 <ol>{{range .QuickStart}}<li>{{.}}</li>{{end}}</ol>
 </div>
@@ -242,7 +242,7 @@ If the setup page never opens, the PC did not start from the drive. For this one
 <div class="row">
 {{.PassQR}}
 <div><p class="mono big">{{.VaultPassphrase}}</p>
-<p class="note">Only for starting me on a PC I do not know: type it on my box page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
+<p class="note">Only for starting me on a PC I do not know: type it on my Wi-Fi page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
 If this drive was out of your hands, unlock it only on your trusted PC.
 I cannot print this again; keep the card.</p></div>
 </div>

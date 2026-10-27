@@ -394,11 +394,11 @@ class RiskTierTest(unittest.TestCase):
     # core write path is itself a core write path, so it is tier A)
     def test_allow_line_packages_are_a(self):
         allowed = rt.core_list()[2]
-        # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
+        # change holds journal.Engine.Authorize/Dispatch and grants.Gate.Authorize/Dispatch.
         self.assertIn("recall", allowed)
-        self.assertIn("recalltool", allowed)
-        self.assertEqual(rt.tier_of("broker/recalltool/tool.go"),
-                         ("A", "core list: broker/recalltool/"))
+        self.assertIn("change", allowed)
+        self.assertEqual(rt.tier_of("broker/change/change.go"),
+                         ("A", "core list: broker/change/"))
         # recall also meets criterion (a) (CRED-1 custody), so TIER_A_BROKER
         # names it and its reason shows first.
         self.assertEqual(rt.tier_of("broker/recall/recall.go"), ("A", "broker/recall/"))

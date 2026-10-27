@@ -8,7 +8,8 @@ on that owner's drive. A planted socket file could look like a broker socket ins
 It also refuses a tree that could write the broker's memory to disk (IMG-nodump): the Owner Card
 passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
 there must be no swap. And it refuses a tree that could turn Wi-Fi on (D-178): the radio's firmware,
-the regulatory database, hostapd, dnsmasq, or the access point and join commands and units; or one
+the regulatory database, hostapd, dnsmasq, NetworkManager, wpa_supplicant, or the access point and
+join commands and units; or one
 that lets the controller chip's Bluetooth half load.
 It refuses a tree whose networkd could forward or masquerade (#1478): the inbound drop has no
 forward hook, so the wired uplink file is the only live .network file, it holds exactly the shipped
@@ -21,12 +22,15 @@ reach into a directory anyone on the box can write (#1543). Every udev rules fil
 modules-load.d file must be on exec.allow by its hash (#1556). And nothing writable may execute
 (UPD-10): every agentos service sets NoExecPaths=/ with ExecPaths= on /usr alone, and every fstab line
 and mount unit is noexec. The keeper (STO-2c, D-154): only its units reach the TPM or its state, and
-its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897).
+its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897). A device driver
+(DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
+DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import stat
@@ -72,13 +76,15 @@ RADIO_FIRMWARE = ("usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
                   "usr/lib/firmware/regulatory.db", "usr/lib/firmware/regulatory.db.p7s")
 # The kernel's firmware loader also tries these suffixes (Debian's kernel enables both).
 FIRMWARE_SUFFIXES = ("", ".xz", ".zst")
-# Nor what serves or joins a network: Debian's access point and its DHCP and DNS server, wherever
-# the box would run them from, and the former access point loader and home Wi-Fi helper (#825, #1388)
-# with their units.
-WIFI_COMMANDS = ("hostapd", "hostapd_cli", "dnsmasq")
+# Nor what serves or joins a network: Debian's access point and its DHCP and DNS server, its Wi-Fi
+# clients (NetworkManager and wpa_supplicant, #3387; systemd-networkd is the only network manager),
+# wherever the box would run them from, and the former access point loader and home Wi-Fi helper
+# (#825, #1388) with their units.
+WIFI_COMMANDS = ("hostapd", "hostapd_cli", "dnsmasq", "NetworkManager", "nmcli", "wpa_supplicant", "wpa_cli")
 WIFI_COMMAND_DIRS = ("usr/sbin", "usr/bin")
 WIFI_AGENTOS = ("usr/lib/agentos/agentos-ap", "usr/lib/agentos/agentos-netjoin")
-WIFI_UNITS = ("agentos-ap.service", "agentos-netjoin.service", "hostapd.service")
+WIFI_UNITS = ("agentos-ap.service", "agentos-netjoin.service", "hostapd.service", "NetworkManager.service",
+              "wpa_supplicant.service", "wpa_supplicant@.service")
 # The same chip's Bluetooth half, which nothing uses: these modules must never load (#1415).
 BLOCKED_MODULES = ("btusb", "btmtk")
 # kmod 34's modprobe.d directories (default_config_paths in libkmod/libkmod.c), highest precedence
@@ -100,39 +106,6 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
 # class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
-# #936 (r4a): NetworkManager manages only the station r4b creates. Everything it reads at start is
-# pinned here: NM_ROOTS are the places it reads configuration from (main file, conf.d, the state
-# directory's intern file), and the only file that may exist in them is NM_FILES, whose keys are
-# NM_KEYS (each set once, to exactly this value) and a keyfile path under /run only (STO-2). A closed
-# list (dispatcher scripts too), so a file NetworkManager reads under another name (nm-system-settings.conf, NetworkManager-
-# intern.conf) is refused too. No connection location, and the unit passes no --config flag.
-NM_PRESENT = ("usr/sbin/NetworkManager", "usr/lib/NetworkManager/conf.d")
-NM_ROOTS = ("etc/NetworkManager", "usr/lib/NetworkManager/conf.d", "usr/lib/NetworkManager/dispatcher.d",
-            "run/NetworkManager/conf.d", "var/lib/NetworkManager")
-NM_FILES = ("usr/lib/NetworkManager/conf.d/50-agentos.conf",)
-NM_CONNECTIONS = ("etc/NetworkManager/system-connections", "run/NetworkManager/system-connections",
-                  "usr/lib/NetworkManager/system-connections")
-# The unit is closed the same way: after systemd's lookup (every unit directory, every name that
-# links to it, every drop-in directory) the only drop-in is NM_DROPIN with exactly NM_DROPIN_TEXT,
-# ExecStart is NM_EXEC and nothing sets Environment or EnvironmentFile, so no flag, plugin or
-# expanded variable reaches NetworkManager. tests/test_image_nm.py holds the shipped file to the text.
-NM_UNIT = "NetworkManager.service"
-NM_EXEC = "/usr/sbin/NetworkManager --no-daemon"
-NM_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
-NM_DROPIN_TEXT = (b"# Never without the inbound drop (DEV-net-e 2a): if it failed to load, this does not start.\n"
-                  b"[Unit]\nRequires=agentos-inbound.service\nAfter=agentos-inbound.service\n")
-# #2622: NetworkManager's state directory (DHCP leases, seen BSSIDs, timestamps, secret_key,
-# NetworkManager.state) is a tmpfs in its own mount namespace, so none of it reaches the drive.
-NM_STATE_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-state.conf"
-NM_STATE_TEXT = (b"# NetworkManager's state stays in RAM, never on the drive (#2622): leases, seen BSSIDs and\n"
-                 b"# secret_key are gone at every stop.\n"
-                 b"[Service]\nTemporaryFileSystem=/var/lib/NetworkManager:mode=0700,nosuid,nodev,noexec\n")
-NM_DROPINS = {NM_DROPIN: NM_DROPIN_TEXT, NM_STATE_DROPIN: NM_STATE_TEXT}
-NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
-           ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
-           ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
-           ("connectivity", "enabled"): "false"}
-NM_PATH = ("keyfile", "path")
 
 FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
 GLOB = re.compile(r"[*?\[]")
@@ -316,10 +289,11 @@ def _violations(root):
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
-            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root))
+            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root)
+            + driver_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1222,6 +1196,8 @@ def namespace_mount_violations(name, files):
                 parts = w.lstrip("-+").split(":")
                 target = parts[1] if key in ("BindPaths", "BindReadOnlyPaths", "MountImages") and len(parts) > 1 else parts[0]
                 norm = "/" + "/".join(x for x in target.split("/") if x not in ("", "."))
+                if key == "BindReadOnlyPaths" and self_bind(files, w):
+                    continue
                 if ".." in norm.split("/") or any(norm == u or norm.startswith(u + "/") for u in (EXEC_ONLY,) + USR_ALIASES):
                     out.append("%s: %s=%s mounts under %s, which executes (UPD-10)" % (name, key, w, EXEC_ONLY))
                 if key == "TemporaryFileSystem":
@@ -1233,6 +1209,21 @@ def namespace_mount_violations(name, files):
         out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
     return out
 
+
+def self_bind(files, word):
+    """DEVSLOT-image: whether BindReadOnlyPaths= WORD binds a regular file under /usr onto itself, every
+    step to it a directory and the file not a link, so the mount shows the verity file where it already
+    is and adds nothing that executes (a driver's binary inside its TemporaryFileSystem=/:ro)."""
+    if word[:1] in "-+" or ":" in word or not word.startswith(EXEC_ONLY + "/") or not files:
+        return False
+    rel = word.lstrip("/")
+    if rel != "/".join(x for x in rel.split("/") if x not in ("", ".", "..")):
+        return False
+    try:
+        st = tree_lstat(files[0].root, rel)
+    except OSError:
+        return False
+    return st is not None and stat.S_ISREG(st.st_mode)
 
 def noexec_violations(root):
     """UPD-10: each agentos service the tree ships but NOEXEC_EXEMPT, with every drop-in systemd
@@ -1311,7 +1302,7 @@ def noexec_violations(root):
 # later VM or board deployment (#2943) replaces it and leaves the main side's rules alone.
 KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
-KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service")
+KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, and the Owner Card's factors that
 # setup leaves for enrollment. No main-side unit sees it; the image makes each at boot (tmpfiles.d).
 KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup")
@@ -1341,9 +1332,10 @@ KERNEL_REBOOT = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" != success ] && [ -e
 # (#3073), so without this a start refused after a good one would ask for the reboot.
 KERNEL_UP_CLEAR = "/usr/bin/rm -f /run/agentos-kernel/up"
 REBOOT_WORDS = re.compile(r"(?<![\w-])(systemctl|systemd-run|busctl|dbus-send|reboot|shutdown|halt|poweroff|kexec|telinit)(?![\w-])")
-# The units that may open the TPM (#2889 Security later 2): the keeper's, and the old core's vault
-# process until it is deleted (D-139). Only through the resource manager.
-TPM_UNITS = KEEPER_UNITS + ("agentos-egress.service",)
+# The units that may open the TPM (#2889 Security later 2): the keeper's but its recovery-key rotation,
+# which needs none, and the old core's vault process until it is deleted (D-139). Only through the
+# resource manager.
+TPM_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-egress.service")
 TPM_DEVICE = "/dev/tpmrm0"
 # Groups that can open a TPM node: tpm-udev's, and the resource manager's (60-agentos-tpm.rules).
 TPM_GROUPS = ("tss", "agentos-egress")
@@ -1528,6 +1520,11 @@ def keeper_unit_violations(name, files):
                 out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
             elif keeper_reach(p, above=True):
                 out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+    # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
+    # ignores it); its bound is TimeoutStartSec=.
+    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+        out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
+                   % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
     start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
@@ -2395,7 +2392,7 @@ def exec_entries(root):
     that wins its name: a generator that is not executable is skipped without taking the name, so a
     winner-only list could miss the one that runs. A directory is resolved inside the image (lib is
     usr/lib's link), and each file is listed once under its in-image path. Then every entry under
-    POLICY_DIRS, each of POLICY_FILES, and NetworkManager's unit file as systemd resolves it (#2622)."""
+    POLICY_DIRS and each of POLICY_FILES (#2622)."""
     root, seen = str(root), set()
     for f in exec_files(root):
         if f.rel in seen:
@@ -2426,7 +2423,7 @@ def exec_files(root):
             yield Conf(root, d, "not a directory; the tree check reads only a directory")
             continue
         out = []
-        for rel, st in nm_walk(root, path, out):
+        for rel, st in policy_walk(root, path, out):
             if not stat.S_ISDIR(st.st_mode):
                 yield Conf(root, rel)
         for e in out:
@@ -2434,10 +2431,6 @@ def exec_files(root):
     for rel in POLICY_FILES:
         if entry_mode(root, rel):
             yield Conf(root, rel)
-    if any(entry_mode(root, rel) for rel in NM_PRESENT):
-        unit = nm_unit(root)
-        if unit is not None:
-            yield unit
 
 
 def exec_allowed(path=None):
@@ -2481,9 +2474,8 @@ EXEC_ALLOW_HEADER = """\
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
-# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, the
-# D-Bus system.conf, system.d and system-services files, and NetworkManager's unit file as systemd
-# resolves it. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
+# D-Bus system.conf, system.d and system-services files. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -2573,9 +2565,9 @@ def uplink_violations(up):
     return out
 
 
-def nm_walk(root, rel, out):
+def policy_walk(root, rel, out):
     """tree_walk over directory REL (an in-image path), but a directory that cannot be listed is
-    refused in OUT, never skipped: what NetworkManager would read there is unknown."""
+    refused in OUT, never skipped: what polkitd or dbus-daemon would read there is unknown."""
     try:
         names = sorted(tree_listdir(root, rel))
     except OSError as e:
@@ -2592,128 +2584,7 @@ def nm_walk(root, rel, out):
             continue
         yield r, st
         if stat.S_ISDIR(st.st_mode):
-            yield from nm_walk(root, r, out)
-
-
-def nm_unit(root):
-    """NetworkManager's unit file as systemd resolves it: NM_UNIT in the first unit directory that
-    holds one, or None. exec.allow pins it by hash (#2622)."""
-    root = str(root)
-    return next((Conf(root, d + "/" + NM_UNIT) for d in unit_dirs(root)[0] if tree_lstat(root, d + "/" + NM_UNIT)),
-                None)
-
-
-def nm_unit_violations(root):
-    """The NetworkManager unit as systemd 257.13 resolves it (see NM_EXEC): the unit file, its
-    drop-ins under its own name, any name that links to it (dbus-org.freedesktop.NetworkManager) and
-    each name's prefixes, in every unit directory and in service.d. The unit file itself is also on
-    exec.allow by its hash (#2622), so a key these checks do not name (ExecStartPre, BindPaths) is
-    reviewed too."""
-    root = str(root)
-    dirs, out = unit_dirs(root)
-    unit = nm_unit(root)
-    if unit is None:
-        return out + ["%s: missing; NetworkManager must start from the shipped unit" % NM_UNIT]
-    if unit.is_link():
-        return out + ["%s: a link; the tree check reads only a regular unit file" % unit.rel]
-    names = {NM_UNIT}
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            try:
-                if stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode) and \
-                        tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1] == NM_UNIT:
-                    names.add(n)
-            except OSError:
-                continue
-    files = {}
-    for n in sorted(names):
-        for f in conf_files(root, ["%s/%s.d" % (d, m) for d in UNIT_PATHS for m in unit_dropin_names(n)]
-                            + ["%s/service.d" % d for d in UNIT_PATHS]):
-            files[f.rel] = f
-    for rel, f in sorted(files.items()):
-        if rel not in NM_DROPINS:
-            out.append("%s: a drop-in for %s; the only ones are %s" % (rel, NM_UNIT, " and ".join(sorted(NM_DROPINS))))
-        else:
-            try:
-                if f.content() != NM_DROPINS[rel]:
-                    out.append("%s: not the shipped drop-in" % rel)
-            except OSError as e:
-                out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, e.strerror))
-    if NM_DROPIN not in files:
-        out.append("%s: missing; NetworkManager must not start without the inbound drop" % NM_DROPIN)
-    if NM_STATE_DROPIN not in files:
-        out.append("%s: missing; NetworkManager's state would reach the drive (#2622)" % NM_STATE_DROPIN)
-    execs = []
-    for f in [unit] + [f for r, f in sorted(files.items())]:
-        try:
-            lines = config_lines(f.content())
-        except (OSError, Unparsable) as e:
-            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e))
-            continue
-        for s, k, v in lines:
-            if k in ("Environment", "EnvironmentFile"):
-                out.append("%s: %s is set; NetworkManager reads only the shipped configuration" % (f.rel, k))
-            elif (s, k) == ("Service", "ExecStart"):
-                execs = execs + [v] if v else []
-    if execs != [NM_EXEC]:
-        out.append("%s: ExecStart is %s; must be exactly %s" % (NM_UNIT, execs, NM_EXEC))
-    return out
-
-
-def networkmanager_violations(root):
-    """#936: what NetworkManager reads at start is NM_FILES and nothing else: any other entry under
-    NM_ROOTS is refused (a closed list), the shipped file holds NM_KEYS and a keyfile path under /run,
-    no connection location exists, and the unit is held to NM_EXEC and NM_DROPIN (nm_unit_violations). Skipped where the
-    tree has no NetworkManager. A file the check cannot read, or that byte_violations refuses, is
-    refused and never skipped."""
-    if not any(entry_mode(root, rel) for rel in NM_PRESENT):
-        return []
-    out = []
-    shipped = set()
-    for rel in NM_FILES:
-        try:
-            shipped.add(tree_entry(root, rel)[0])
-        except OSError:
-            pass
-    for d in NM_ROOTS:
-        mode = entry_mode(root, d)
-        if mode and not stat.S_ISDIR(mode):
-            out.append("%s: not a directory; the tree check reads only a directory" % d)
-        if not stat.S_ISDIR(mode):
-            continue
-        for rel, st in nm_walk(root, tree_entry(root, d)[0], out):
-            if not stat.S_ISDIR(st.st_mode) and rel not in shipped:
-                out.append("%s: not a file the image ships; NetworkManager would read it" % rel)
-    seen = {}
-    for rel in NM_FILES:
-        f = Conf(str(root), rel)
-        bad = byte_violations(f)
-        out += bad
-        if bad:
-            continue
-        try:
-            lines = config_lines(f.content())
-        except Unparsable as e:
-            out.append("%s: %s; the tree check never passes a file it cannot parse" % (f.rel, e))
-            continue
-        for s, k, v in lines:
-            seen.setdefault((s, k), []).append((f.rel, v))
-    for (s, k), vals in sorted(seen.items()):
-        if (s, k) not in NM_KEYS and (s, k) != NM_PATH:
-            out.append("%s: [%s] %s is %s; not a key the image ships" % (vals[-1][0], s, k, vals[-1][1]))
-        elif len(vals) > 1:
-            out.append("%s: [%s] %s is set %d times; must be set once" % (vals[-1][0], s, k, len(vals)))
-    for (s, k), want in sorted(NM_KEYS.items()):
-        v = seen.get((s, k), [(None, None)])[0][1]
-        if v != want:
-            out.append("NetworkManager: [%s] %s is %s; must be %s" % (s, k, v, want))
-    path = seen.get(NM_PATH, [(None, None)])[0][1]
-    if path is None or not path.startswith("/run/") or ".." in path.split("/"):
-        out.append("NetworkManager: [keyfile] path is %s; must be under /run, never the drive (STO-2)" % path)
-    for d in NM_CONNECTIONS:
-        if entry_mode(root, d):
-            out.append("%s: a NetworkManager connection location; it must not exist (no join before STO-2)" % d)
-    return out + nm_unit_violations(root)
+            yield from policy_walk(root, r, out)
 
 
 def forward_key(k):
@@ -2778,6 +2649,213 @@ def resolved_violations(root):
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
         for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
+
+
+# DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a
+# private repository. It ships only under /usr (verity), listed in drivers.json with its hash, and it
+# runs only under units rendered from DRIVER_TEMPLATE for its name: one socket-activated, sandboxed
+# process per operation (briefs/DEVSLOT-drivers.md, part b, point 1). The public build lists none.
+DRIVERS_JSON = "usr/lib/agentos/drivers.json"
+DRIVERS_DIR = "usr/lib/agentos/drivers"
+# The driver's name: devslot's name alphabet, short enough that agentos-drv-NAME is a valid user name
+# (systemd's limit is 31 bytes).
+DRIVER_NAME = re.compile(r"[a-z][a-z0-9-]{0,18}\Z")
+DRIVER_KEYS = ("name", "repository", "commit", "sha256", "declaration", "classes", "measure")
+DRIVER_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\Z")
+HEX40, HEX64 = re.compile(r"[0-9a-f]{40}\Z"), re.compile(r"[0-9a-f]{64}\Z")
+# tools/trusted_base.py's measure of the driver's tree at its pinned commit (KRN-2, part b point 5).
+DRIVER_MEASURE = ("lines", "deps", "parsers")
+# What only the template may name: the drivers' users and their sockets.
+DRIVER_MARKS = (b"agentos-drv-", b"/run/agentos-drivers")
+# The one public template, rendered for each listed driver by image/finish_image.py and re-rendered
+# here to compare. The caps are within RES-2: MemoryMax times MaxConnections is the driver's whole
+# memory, so systemd's default of 64 connections is never relied on; RuntimeMaxSec is the backstop
+# for the host's operation deadline, so PID 1 kills a hung operation.
+DRIVER_TEMPLATE = (
+    ("usr/lib/systemd/system/agentos-driver-{name}.socket", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+[Unit]
+Description=agentOS device driver {name}: one connection per operation
+
+[Socket]
+ListenStream=/run/agentos-drivers/{name}.sock
+Accept=yes
+SocketUser=agentos-devices
+SocketGroup=agentos-devices
+SocketMode=0600
+DirectoryMode=0711
+MaxConnections=2
+"""),
+    ("usr/lib/systemd/system/agentos-driver-{name}@.service", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+# systemd seals the process before exec, so no driver code (a package init included) runs outside it.
+# The operation's connection is descriptor 3.
+[Unit]
+Description=agentOS device driver {name}: one operation
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/lib/agentos/drivers/{name}/driver
+User=agentos-drv-{name}
+Group=agentos-drv-{name}
+StandardInput=null
+StandardOutput=null
+StandardError=null
+RestrictAddressFamilies=none
+PrivateNetwork=yes
+IPAddressDeny=any
+TemporaryFileSystem=/:ro
+BindReadOnlyPaths=/usr/lib/agentos/drivers/{name}/driver
+ProcSubset=pid
+ProtectProc=invisible
+PrivateDevices=yes
+NoExecPaths=/
+ExecPaths=/usr/lib/agentos/drivers/{name}/driver
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged @resources
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+LimitCORE=0
+MemoryMax=48M
+TasksMax=16
+CPUQuota=25%
+RuntimeMaxSec=120
+"""),
+    ("usr/lib/sysusers.d/agentos-driver-{name}.conf", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+u agentos-drv-{name} - "agentOS device driver {name}" - -
+"""),
+)
+
+
+def driver_units(name):
+    """{path in the tree: content} of DRIVER_TEMPLATE rendered for driver NAME."""
+    return {rel.replace("{name}", name): text.replace("{name}", name) for rel, text in DRIVER_TEMPLATE}
+
+
+def driver_entry_refusal(e):
+    """Why drivers.json entry E is malformed, or None: exactly DRIVER_KEYS; a name on DRIVER_NAME; the
+    private repository as owner/name; a full commit; the binary's SHA-256; the canonical declaration;
+    the class row, one DEV-4 class per declared operation and no other (part b point 4); and the
+    measure's three counts. The declaration's meaning is devslot.Check's, run at build."""
+    if not isinstance(e, dict) or sorted(e) != sorted(DRIVER_KEYS):
+        return "an entry has exactly the keys %s" % ", ".join(DRIVER_KEYS)
+    if not isinstance(e["name"], str) or not DRIVER_NAME.match(e["name"]):
+        return "driver name %r is off the alphabet %s" % (e["name"], DRIVER_NAME.pattern)
+    n = e["name"]
+    for k, pat in (("repository", DRIVER_REPO), ("commit", HEX40), ("sha256", HEX64)):
+        if not isinstance(e[k], str) or not pat.match(e[k]):
+            return "driver %s: %s %r is not %s" % (n, k, e[k], pat.pattern)
+    d = e["declaration"]
+    ops = d.get("Operations") if isinstance(d, dict) else None
+    if not isinstance(ops, list) or not all(isinstance(o, dict) and isinstance(o.get("Name"), str) for o in ops):
+        return "driver %s: the declaration lists no operations" % n
+    c = e["classes"]
+    if (not isinstance(c, dict) or sorted(c) != sorted(o["Name"] for o in ops)
+            or not all(isinstance(v, str) and v for v in c.values())):
+        return "driver %s: the class row names one class for each declared operation and no other" % n
+    m = e["measure"]
+    if (not isinstance(m, dict) or sorted(m) != sorted(DRIVER_MEASURE)
+            or not all(type(v) is int and v >= 0 for v in m.values())):
+        return "driver %s: the measure is the counts %s" % (n, ", ".join(DRIVER_MEASURE))
+    return None
+
+
+def driver_entries(root):
+    """(drivers.json's entries, refusals). No drivers.json is no drivers."""
+    try:
+        if tree_lstat(root, DRIVERS_JSON) is None:
+            return [], []
+        doc = json.loads(Conf(root, DRIVERS_JSON).content())
+    except (OSError, ValueError) as e:
+        return [], ["%s: unreadable (%s); the tree check never passes what it cannot read (DEVSLOT-image)"
+                    % (DRIVERS_JSON, e.strerror if isinstance(e, OSError) else e)]
+    if not isinstance(doc, dict) or sorted(doc) != ["drivers"] or not isinstance(doc["drivers"], list):
+        return [], ['%s: must be {"drivers": [...]} (DEVSLOT-image)' % DRIVERS_JSON]
+    entries, out, seen = [], [], set()
+    for e in doc["drivers"]:
+        bad = driver_entry_refusal(e)
+        if bad is None and e["name"] in seen:
+            bad = "driver %s is listed twice" % e["name"]
+        if bad:
+            out.append("%s: %s (DEVSLOT-image)" % (DRIVERS_JSON, bad))
+            continue
+        seen.add(e["name"])
+        entries.append(e)
+    return entries, out
+
+
+def driver_violations(root):
+    """DEVSLOT-image: every file under DRIVERS_DIR is a listed driver's binary with its listed hash
+    (mode 0755), every listed driver's binary and units are there, each unit is the template rendered
+    for its name, and no other file in a unit or sysusers.d directory names a driver unit, a driver's
+    user or the drivers' sockets."""
+    root = str(root)
+    entries, out = driver_entries(root)
+    bins = {"%s/%s/driver" % (DRIVERS_DIR, e["name"]): e["sha256"] for e in entries}
+    dirs = {DRIVERS_DIR} | {"%s/%s" % (DRIVERS_DIR, e["name"]) for e in entries}
+    rendered = {}
+    for e in entries:
+        rendered.update(driver_units(e["name"]))
+    try:
+        top = tree_lstat(root, DRIVERS_DIR)
+    except OSError as e:
+        top = None
+        out.append("%s: unreadable (%s) (DEVSLOT-image)" % (DRIVERS_DIR, e.strerror))
+    found = set()
+    if top is not None and not stat.S_ISDIR(top.st_mode):
+        out.append("%s: not a directory (DEVSLOT-image)" % DRIVERS_DIR)
+    elif top is not None:
+        for rel, st in tree_walk(root, DRIVERS_DIR):
+            if rel in dirs and stat.S_ISDIR(st.st_mode):
+                continue
+            if rel not in bins or not stat.S_ISREG(st.st_mode):
+                out.append("%s: not a driver drivers.json lists with its hash (DEVSLOT-image)" % rel)
+                continue
+            found.add(rel)
+            try:
+                got = hashlib.sha256(Conf(root, rel).content()).hexdigest()
+            except OSError as e:
+                out.append("%s: unreadable (%s) (DEVSLOT-image)" % (rel, e.strerror))
+                continue
+            if got != bins[rel]:
+                out.append("%s: sha256 %s, but drivers.json lists %s (DEVSLOT-image)" % (rel, got, bins[rel]))
+            if stat.S_IMODE(st.st_mode) != 0o755:
+                out.append("%s: mode %04o; a driver is 0755 (DEVSLOT-image)" % (rel, stat.S_IMODE(st.st_mode)))
+    out += ["%s: listed in drivers.json but not in the image (DEVSLOT-image)" % rel for rel in sorted(set(bins) - found)]
+    for rel, text in sorted(rendered.items()):
+        try:
+            got = Conf(root, rel).content() if tree_lstat(root, rel) is not None else None
+        except OSError as e:
+            out.append("%s: unreadable (%s) (DEVSLOT-image)" % (rel, e.strerror))
+            continue
+        if got != text.encode():
+            out.append("%s: %s the template rendered for its name (DEVSLOT-image)"
+                       % (rel, "missing; must be" if got is None else "differs from"))
+    for d in UNIT_PATHS + conf_paths("sysusers.d"):
+        try:
+            if tree_lstat(root, d) is None:
+                continue
+        except OSError:
+            continue
+        for rel, st in tree_walk(root, d):
+            if rel in rendered or stat.S_ISDIR(st.st_mode):
+                continue
+            if rel.rsplit("/", 1)[-1].startswith("agentos-driver-") or "/agentos-driver-" in rel[len(d):]:
+                out.append("%s: a driver unit, drop-in or user file outside the template (DEVSLOT-image)" % rel)
+                continue
+            try:
+                path, tst = tree_chase(root, rel)
+                data = Conf(root, path).content() if tst is not None and stat.S_ISREG(tst.st_mode) else b""
+            except OSError:
+                continue
+            if any(m in data for m in DRIVER_MARKS):
+                out.append("%s: names a driver's user or the drivers' sockets outside the template (DEVSLOT-image)" % rel)
+    return out
 
 
 def has_key(root, rel):

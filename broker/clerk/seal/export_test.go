@@ -10,3 +10,11 @@ func FailDirSync(err error) (restore func()) {
 	syncDir = func(string) error { return err }
 	return func() { syncDir = old }
 }
+
+// FailWrite makes every write fail before its rename until the returned
+// func runs.
+func FailWrite(err error) (restore func()) {
+	old := writeTemp
+	writeTemp = func(string, []byte) (string, error) { return "", err }
+	return func() { writeTemp = old }
+}
