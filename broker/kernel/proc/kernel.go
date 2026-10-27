@@ -51,6 +51,10 @@ type KernelConfig struct {
 	// LinkKey is the core's link key (handoff.KernelKeys.LinkKey), which
 	// only the kernel holds (HW-15); none on a box enrolled before it.
 	LinkKey ed25519.PrivateKey
+	// Clock is the kernel process's clock, read when a backup re-seal
+	// finishes, so a failure backs off from then (#3339); nil reads the
+	// time it was handed out.
+	Clock func() int64
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -82,6 +86,7 @@ type Kernel struct {
 	// EDGE-link-core-c2's, and it never goes into a backup (BAK-1).
 	firstEdge ed25519.PublicKey
 	link      ed25519.PrivateKey
+	clock     func() int64 // KernelConfig's
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -125,7 +130,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		if err == nil {
@@ -236,10 +241,14 @@ func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
 		wg.Go(func() {
 			defer h.reseals.Done()
 			r.Run()
+			end := now
+			if h.clock != nil {
+				end = max(now, h.clock())
+			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			if h.k != nil {
-				h.k.Resealed(now, r)
+				h.k.Resealed(end, r)
 			}
 			delete(h.running, r.Backup)
 			close(over[i])

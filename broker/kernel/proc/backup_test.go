@@ -798,6 +798,36 @@ func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
 	}
 }
 
+// LOG-4 (#3378 Security finding 1, its probe P1): the process's Erase
+// while a backup's first key table is on its way waits for the write and
+// names the backup, Resealed only once no table at the target gives the
+// erased key, and leaves no re-seal or write behind.
+func TestTheProcessEraseWhileATableIsOnItsWay(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone, live := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	var cs <-chan kernel.Confirmation
+	var fire func()
+	fire = func() { cs, _ = erasing(t, b, gone) }
+	b.h.bk.wrap = func(t backup.Target) backup.Target { return eraseBeforePut{t, &fire} }
+	taken := b.backup()
+	b.h.bk.wrap = nil
+	id := taken[0].Backup.BackupID
+	if c := reply(t, cs); !slices.Equal(c.Resealed, []string{id}) || len(c.StillHeld) != 0 {
+		t.Fatalf("the erase's reply: %+v", c)
+	}
+	if gives(t, dir, id, gone) || !gives(t, dir, id, live) {
+		t.Fatal("the table at the target is wrong")
+	}
+	b.h.reseals.Wait()
+	b.h.With(func(*kernel.Kernel) error {
+		if len(b.h.running) != 0 || b.h.bk.writing != nil {
+			t.Errorf("left behind: running %v, writing %+v", b.h.running, b.h.bk.writing)
+		}
+		return nil
+	})
+}
+
 // failRewrap runs an erase just before the first key table goes out and
 // fails every later generation's put while fail is set.
 type failRewrap struct {
