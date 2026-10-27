@@ -1,0 +1,17 @@
+# The Owner Card confirm starts enrollment (HW-1, STO-2; brief OWN-card-flow decision 6): the hand-off
+# writes the recovery file last, and PID 1, watching it, starts the enrollment unit. No main-side
+# unit and no systemctl is involved. A failed enrollment keeps the factors, so the path starts it
+# again at once, until the enrollment unit's start limit; the box then needs a reboot, whose empty
+# tmpfs starts the card over (#3492 L3 finding 2). A start whose condition fails counts towards that
+# limit too, so on a box that already has its store the path unit does not run at all: factors left
+# there (CI's boot test writes them on every boot) would otherwise run enrollment into its limit.
+[Unit]
+Description=agentOS enrollment on the Owner Card's factors
+ConditionPathExists=!/var/lib/agentos-store/store
+
+[Path]
+PathExists=/run/agentos-setup/recovery
+Unit=agentos-keeper-enroll.service
+
+[Install]
+WantedBy=paths.target

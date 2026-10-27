@@ -15,9 +15,15 @@
 // pins (the policy public key and Store.Anchor) to the TPM, where the unlock
 // step reads them (STO-2a-k).
 //
-// It also makes the page authority (CH-9) and keeps it only in the store,
-// for the unlock step to hand the kernel, which certifies the owner page's
-// serving keys and writes it into every backup (MIG-4-recovery-f1).
+// It also keeps the page authority (CH-9) in the store, for the unlock step
+// to hand the kernel, which certifies the owner page's serving keys and
+// writes it into every backup (MIG-4-recovery-f1). At first boot that is the
+// authority -stage-page-ca staged before the Owner Card was shown, whose
+// fingerprint the card printed (-page-ca-file, -page-ca-cert; stage.go).
+//
+// -take-factors is the Owner Card confirm's hand-off: the keeper's setup
+// socket runs it once per connection, as root, with no TPM, and it writes
+// the card's factors where enrollment reads them (take.go).
 //
 // It makes the core's link key (HW-15) and keeps it only in the store, for
 // the unlock step to hand the kernel; it is never backed up (BAK-1). With
@@ -91,7 +97,12 @@ func main() {
 	if err == nil && c.rotateRecovery {
 		os.Exit(rotateRecoveryMain(c, os.Stdin, os.Stdout))
 	}
-	if err == nil {
+	if err == nil && c.takeFactors {
+		os.Exit(takeFactorsMain(c, os.Stdin, os.Stdout, os.Stderr))
+	}
+	if err == nil && c.stagePageCA {
+		err = stagePageCA(c.pageCAFile, c.pageCACert, c.built)
+	} else if err == nil {
 		err = runMode(c)
 	}
 	if err != nil {
@@ -134,6 +145,12 @@ type config struct {
 	kernelUID, kernelGID             int
 	rotate, delete                   bool
 	rotateRecovery                   bool
+	stagePageCA, takeFactors         bool
+	// pageCAFile is the staged page authority (-stage-page-ca writes it,
+	// enrollment stores it), "" for enrollment to make its own;
+	// pageCACert is its published certificate. setupDir is where
+	// -take-factors writes the Owner Card's factors.
+	pageCAFile, pageCACert, setupDir string
 	// firstEdge is the link port's capture file (agentos-link's pre-store
 	// mode), "" for none; restore takes no first key from it.
 	firstEdge string
@@ -168,6 +185,11 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&c.rotateRecovery, "rotate-recovery", false, "replace the recovery key: one request on stdin, one word on stdout")
 	fs.StringVar(&c.firstEdge, "first-edge", "", "the link port's capture file of the first edge's hello, which I remove")
 	fs.BoolVar(&c.restore, "restore", false, "a restore's enrollment: take no first edge key")
+	fs.BoolVar(&c.stagePageCA, "stage-page-ca", false, "make the first-boot page authority: -page-ca-file and -page-ca-cert")
+	fs.BoolVar(&c.takeFactors, "take-factors", false, "take the confirmed Owner Card's factors: one request on stdin, one word on stdout")
+	fs.StringVar(&c.pageCAFile, "page-ca-file", "", "the staged page authority, a root-only file")
+	fs.StringVar(&c.pageCACert, "page-ca-cert", "", "the staged page authority's published certificate")
+	fs.StringVar(&c.setupDir, "setup-dir", "", "the directory -take-factors writes the Owner Card's factors in")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -181,14 +203,27 @@ func parse(args []string, stderr io.Writer) (config, error) {
 			return c, err
 		}
 	}
+	modes := 0
+	for _, m := range []bool{c.rotate, c.delete, c.rotateRecovery, c.stagePageCA, c.takeFactors} {
+		if m {
+			modes++
+		}
+	}
 	switch {
 	case fs.NArg() != 0:
 		return c, fmt.Errorf("unexpected arguments: %q", fs.Args())
+	case modes > 1:
+		return c, errors.New("-rotate, -rotate-recovery, -delete, -stage-page-ca and -take-factors are separate runs")
+	case c.stagePageCA:
+		if !filepath.IsAbs(c.pageCAFile) || !filepath.IsAbs(c.pageCACert) {
+			return c, errors.New("-stage-page-ca needs absolute -page-ca-file and -page-ca-cert")
+		}
+		return c, nil
 	case !filepath.IsAbs(c.state):
 		return c, errors.New("an absolute -state is required")
-	case c.rotate && c.delete, c.rotateRecovery && (c.rotate || c.delete):
-		return c, errors.New("-rotate, -rotate-recovery and -delete are separate runs")
-	case c.rotate || c.delete || c.rotateRecovery:
+	case c.takeFactors && (!filepath.IsAbs(c.setupDir) || !filepath.IsAbs(c.pageCACert)):
+		return c, errors.New("-take-factors needs absolute -setup-dir and -page-ca-cert")
+	case c.rotate || c.delete || c.rotateRecovery || c.takeFactors:
 	case !filepath.IsAbs(c.anchorDir) || !filepath.IsAbs(c.log):
 		return c, errors.New("absolute -anchor-dir and -log are required")
 	case c.kernelUID <= 0 || c.kernelGID <= 0:
@@ -197,6 +232,9 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-passphrase-file and -recovery-file are required: a store never has only its tpm slot")
 	case c.firstEdge != "" && !filepath.IsAbs(c.firstEdge):
 		return c, errors.New("-first-edge must be absolute")
+	case (c.pageCAFile == "") != (c.pageCACert == ""),
+		c.pageCAFile != "" && (!filepath.IsAbs(c.pageCAFile) || !filepath.IsAbs(c.pageCACert)):
+		return c, errors.New("-page-ca-file and -page-ca-cert go together, both absolute")
 	}
 	return c, nil
 }
@@ -276,6 +314,16 @@ func enroll(c config, t transport.TPM) error {
 		} else if ok {
 			return r.err
 		}
+	}
+	// The staged authority binds before anything changes: a refusal leaves
+	// the TPM and the state as they were.
+	var pca []byte
+	if c.pageCAFile != "" {
+		var err error
+		if pca, err = readStaged(c.pageCAFile, c.pageCACert); err != nil {
+			return err
+		}
+		defer clear(pca)
 	}
 	srk, err := tpmseal.Identity(t)
 	if err != nil {
@@ -363,7 +411,7 @@ func enroll(c config, t transport.TPM) error {
 	if err := putRecipient(st, rec); err != nil {
 		return err
 	}
-	if err := putPageCA(st, c.built); err != nil {
+	if err := putPageCA(st, c.built, pca); err != nil {
 		return err
 	}
 	if err := putLinkKeys(c, st); err != nil {
@@ -511,11 +559,17 @@ func putRecipient(st *seal.Store, rk []byte) error {
 	return st.Put(handoff.RecipientEntry, v)
 }
 
-// putPageCA makes the page authority and keeps it in the store, the only
-// place it is ever written on the box (CH-9, MIG-4-recovery-f1). A rerun
-// after a crash starts a new store, so it makes a new one: no Owner Card
-// carries its fingerprint before enrollment ends.
-func putPageCA(st *seal.Store, built time.Time) error {
+// putPageCA keeps the page authority in the store, for the unlock step to
+// hand the kernel (CH-9, MIG-4-recovery-f1). At first boot it is staged,
+// the authority whose fingerprint the Owner Card printed (brief
+// OWN-card-flow decision 7): enrollment stores those bytes as read, after
+// readStaged's checks, so a rerun after a crash stores the same authority.
+// With none staged (a restore's enrollment, whose authority the backup
+// brings), it makes one, and the store is the only place it is written.
+func putPageCA(st *seal.Store, built time.Time, staged []byte) error {
+	if staged != nil {
+		return st.Put(handoff.PageCAEntry, staged)
+	}
 	a, err := pageca.New(pageca.DefaultName, built, nil)
 	if err != nil {
 		return err
@@ -654,7 +708,11 @@ func factors(c config) (pass, rec []byte, err error) {
 	return pass, rec, nil
 }
 
-func readSecret(path string) ([]byte, error) {
+func readSecret(path string) ([]byte, error) { return readSecretMax(path, 4<<10) }
+
+// readSecretMax reads path as readSecret does, and refuses a file over max
+// bytes rather than reading part of it.
+func readSecretMax(path string, max int) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -668,7 +726,15 @@ func readSecret(path string) ([]byte, error) {
 	if !ok || !fi.Mode().IsRegular() || int(st.Uid) != os.Geteuid() || fi.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("agentos-enroll: %s is not a file only I can read", path)
 	}
-	return io.ReadAll(io.LimitReader(f, 4<<10))
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > max {
+		clear(b)
+		return nil, fmt.Errorf("agentos-enroll: %s is over %d bytes", path, max)
+	}
+	return b, nil
 }
 
 // counterRec is counterEntry's value.

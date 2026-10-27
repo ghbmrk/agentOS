@@ -1,0 +1,18 @@
+# The Owner Card confirm's hand-off (HW-1, STO-2; brief OWN-card-flow decision 5): the owner page
+# connects as agentos-localui, and each connection starts one agentos-keeper-setup@.service, root's
+# one-shot, with the connection as its stdin and stdout. One at a time. The card's factors cross only
+# this socket and the one-shot's memory on their way to /run/agentos-setup.
+[Unit]
+Description=agentOS Owner Card hand-off socket
+
+[Socket]
+ListenStream=/run/agentos-keeper/setup.sock
+SocketUser=root
+SocketGroup=agentos-localui
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=1
+
+[Install]
+WantedBy=sockets.target

@@ -15,9 +15,13 @@ enable agentos-drive-id.service
 enable agentos-reboot.timer
 # The monthly restore drill's report, after the drill's reboot (#2932).
 enable agentos-drill-report.service
-# The keeper (STO-2c): enrollment, then the unlock step that becomes the kernel; each waits on its
-# own conditions (the Owner Card's factors, the store).
+# The keeper (STO-2c): the first-boot page authority, enrollment, then the unlock step that becomes
+# the kernel; each waits on its own conditions (no store, the Owner Card's factors, the store).
+enable agentos-keeper-pageca.service
 enable agentos-keeper-enroll.service
+# The Owner Card confirm's hand-off socket, and the path unit that starts enrollment on its factors.
+enable agentos-keeper-setup.socket
+enable agentos-keeper-enroll.path
 enable agentos-keeper-kernel.service
 # The recovery-key rotation's socket (REC-4): its one-shot runs per connection.
 enable agentos-keeper-rotate.socket

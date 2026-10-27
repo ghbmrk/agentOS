@@ -1,0 +1,34 @@
+# The first-boot page authority (HW-1, CH-9; brief OWN-card-flow decision 2, cmd/agentos-enroll
+# -stage-page-ca): before the Owner Card is shown, the keeper makes the page authority whose
+# fingerprint the card prints. Its sealed pair stays root's in /run/agentos-setup, where enrollment
+# reads and stores it; its certificate alone goes to /run/agentos-page-ca, public, for the owner page
+# to print. A rerun publishes a pair a crash left, and refuses a certificate without its pair. Only
+# while no store exists; a reboot before the confirm starts over on an empty tmpfs.
+[Unit]
+Description=agentOS page authority staging
+ConditionPathExists=!/var/lib/agentos-store/store
+After=local-fs.target
+Before=agentos-keeper-enroll.service agentos-localui.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/agentos-enroll -stage-page-ca -page-ca-file /run/agentos-setup/page-ca \
+        -page-ca-cert /run/agentos-page-ca/authority.der
+StandardError=journal+console
+# The authority's key lives in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# No device but the standard pseudo-devices, and no TPM (#2889).
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+WantedBy=multi-user.target

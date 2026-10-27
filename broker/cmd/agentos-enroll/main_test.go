@@ -337,6 +337,117 @@ func TestEnrollStoresThePageAuthority(t *testing.T) {
 	}
 }
 
+// staged gives b a first-boot staging (-stage-page-ca) and points
+// enrollment at it, as the image's unit does.
+func (b *box) staged() staging {
+	b.t.Helper()
+	s := newStaging(b.t)
+	noErr(b.t, s.stage())
+	b.c.pageCAFile, b.c.pageCACert = s.staged, s.published
+	return s
+}
+
+// storedPageCA is the page authority entry of the enrolled store.
+func (b *box) storedPageCA() []byte {
+	b.t.Helper()
+	v, ok, err := b.enrolled().Get(handoff.PageCAEntry)
+	if err != nil || !ok {
+		b.t.Fatalf("no page authority in the store: %v", err)
+	}
+	return v
+}
+
+// REQ: STO-2, CH-9, HW-1
+// OWN-card-flow decision 7: with a staged authority, enrollment stores the
+// staged bytes as read, whose fingerprint is the published certificate's,
+// the one the Owner Card printed; it makes no authority of its own.
+func TestEnrollStoresTheStagedAuthority(t *testing.T) {
+	b := newBox(t)
+	s := b.staged()
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	v := b.storedPageCA()
+	if !bytes.Equal(v, get(os.ReadFile(s.staged))) {
+		t.Fatal("the store's authority is not the staged bytes")
+	}
+	a := get(pageca.Unmarshal(get(handoff.ParsePageCA(v))))
+	if a.Fingerprint() != pageca.Fingerprint(get(os.ReadFile(s.published))) {
+		t.Fatal("the stored authority's fingerprint is not the published certificate's")
+	}
+}
+
+// A staged pair that is not one authority, or not the published one, or a
+// published certificate others could have written, is refused before
+// anything changes: no staged store, no NV index, no file.
+func TestEnrollRefusesAMismatchedAuthority(t *testing.T) {
+	other := newStaging(t)
+	noErr(t, other.stage())
+	otherPair := get(os.ReadFile(other.staged))
+	for _, c := range []struct {
+		name string
+		bend func(s staging)
+		want error
+	}{
+		{"a key that is not the certificate's", func(s staging) {
+			var mine, theirs struct{ Cert, Key []byte }
+			noErr(t, json.Unmarshal(get(os.ReadFile(s.staged)), &mine))
+			noErr(t, json.Unmarshal(otherPair, &theirs))
+			v, _ := json.Marshal(map[string][]byte{"cert": mine.Cert, "key": theirs.Key})
+			rewrite(t, s.staged, v, 0o600)
+		}, errPageCARead},
+		{"a published certificate one byte off", func(s staging) {
+			v := get(os.ReadFile(s.published))
+			v[len(v)-1] ^= 1
+			rewrite(t, s.published, v, 0o644)
+		}, errPageCAPair},
+		{"another authority's pair", func(s staging) { rewrite(t, s.staged, otherPair, 0o600) }, errPageCAPair},
+		{"a pair that fails pageca's load checks", func(s staging) { rewrite(t, s.staged, []byte(`{"cert":"","key":""}`), 0o600) }, errPageCARead},
+		{"a group-writable certificate", func(s staging) { noErr(t, os.Chmod(s.published, 0o664)) }, errPublished},
+		{"a certificate that is not root's", func(s staging) {
+			if os.Geteuid() != 0 {
+				t.Skip("needs root to give the file away")
+			}
+			noErr(t, os.Chown(s.published, 1, 1))
+		}, errPublished},
+		{"no published certificate", func(s staging) { noErr(t, os.Remove(s.published)) }, os.ErrNotExist},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newBox(t)
+			c.bend(b.staged())
+			files, idx := b.files(), nv(t, b.sw.TPM())
+			if err := enroll(b.c, b.sw.TPM()); !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+			if !sameMap(files, b.files()) || len(idx) != 0 || len(nv(t, b.sw.TPM())) != 0 {
+				t.Fatal("a refused enrollment changed something")
+			}
+		})
+	}
+}
+
+// rewrite replaces path's bytes and mode, as a tampered staging would.
+func rewrite(t *testing.T, path string, v []byte, m os.FileMode) {
+	t.Helper()
+	noErr(t, os.Remove(path))
+	noErr(t, os.WriteFile(path, v, m))
+}
+
+// A crash after the store's entries and a rerun store the same authority:
+// the card's fingerprint survives the crash (the old "a rerun makes a new
+// one" is gone).
+func TestEnrollRerunKeepsTheFingerprint(t *testing.T) {
+	b := newBox(t)
+	s := b.staged()
+	c := b.c
+	c.stop = func(step string) bool { return step == "slots" }
+	if err := enroll(c, b.sw.TPM()); !errors.Is(err, errCrash) {
+		t.Fatalf("got %v, want the crash", err)
+	}
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	if !bytes.Equal(b.storedPageCA(), get(os.ReadFile(s.staged))) {
+		t.Fatal("the rerun stored another authority")
+	}
+}
+
 // A second enrollment over a store, a log or another store's locked pins
 // refuses and changes nothing, byte for byte and NV for NV.
 func TestEnrollRefusesAndChangesNothing(t *testing.T) {
@@ -654,7 +765,25 @@ func TestParse(t *testing.T) {
 	if _, err := parse([]string{"-state", "/s", "-rotate"}, io.Discard); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
+	if c, err := parse([]string{"-stage-page-ca", "-page-ca-file", "/s/p", "-page-ca-cert", "/c/a"}, io.Discard); err != nil || !c.stagePageCA {
+		t.Fatalf("stage: %+v %v", c, err)
+	}
+	if c, err := parse([]string{"-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-cert", "/c/a"}, io.Discard); err != nil || !c.takeFactors {
+		t.Fatalf("take: %+v %v", c, err)
+	}
+	if c, err := parse(append(append([]string{}, good...), "-page-ca-file", "/p2", "-page-ca-cert", "/c/a"), io.Discard); err != nil || c.pageCAFile != "/p2" {
+		t.Fatalf("enroll with a staged authority: %+v %v", c, err)
+	}
 	for _, bad := range [][]string{
+		{"-stage-page-ca", "-page-ca-file", "/s/p"},
+		{"-stage-page-ca", "-page-ca-file", "p", "-page-ca-cert", "/c/a"},
+		{"-stage-page-ca", "-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-file", "/s/p", "-page-ca-cert", "/c/a"},
+		{"-take-factors", "-state", "/s", "-page-ca-cert", "/c/a"},
+		{"-take-factors", "-state", "/s", "-setup-dir", "/d"},
+		{"-take-factors", "-rotate-recovery", "-state", "/s", "-setup-dir", "/d", "-page-ca-cert", "/c/a"},
+		append(append([]string{}, good...), "-page-ca-file", "/p2"),
+		append(append([]string{}, good...), "-page-ca-cert", "/c/a"),
+		append(append([]string{}, good...), "-page-ca-file", "p2", "-page-ca-cert", "/c/a"),
 		good[:len(good)-2],
 		append(append([]string{}, good[:6]...), "-kernel-uid", "0", "-kernel-gid", "980", "-passphrase-file", "/p", "-recovery-file", "/r"),
 		{"-state", "s", "-rotate"},
