@@ -1,6 +1,7 @@
 package loops
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"testing"
 	"time"
@@ -260,5 +261,94 @@ func TestWidenRunsOutsideTheSpareLock(t *testing.T) {
 	sp.Widen = nil
 	if err := sp.SetCap(8 * one); !errors.Is(err, ErrNoWiden) || sp.Cap() != 5*one {
 		t.Fatalf("a re-raise under the envelope's cap without the passkey: %v, cap %d", err, sp.Cap())
+	}
+}
+
+// Prepare refuses a widened envelope that sits under one already held (its
+// spend would count twice in Used) or that does not hold exactly the cap
+// asked, and Commit refuses when the envelope moved even though the cap is
+// back where Prepare saw it (KEY-6).
+func TestAWidenedEnvelopeIsFreshAndExact(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	one := SpareCap(1, loopstest.OutPerM)
+	must(t, sp.SetCap(10*one))
+	env := sp.Envelope
+	sp.Widen = func(n int64) (key.Key, error) {
+		return key.Derive(env, sp.Holder, sp.Holder.Public().(ed25519.PublicKey), key.LowerSpendDay(n))
+	}
+	if err := sp.SetCap(20 * one); err == nil || sp.Cap() != 10*one {
+		t.Fatalf("a derivation of the held envelope was taken as a widening: %v, cap %d", err, sp.Cap())
+	}
+	sp.Widen = func(n int64) (key.Key, error) { return k.Widen(n + 1) }
+	if err := sp.SetCap(20 * one); err == nil || sp.Cap() != 10*one {
+		t.Fatalf("an envelope over the cap asked was taken: %v, cap %d", err, sp.Cap())
+	}
+	sp.Widen = k.Widen
+	p, err := sp.Prepare(10 * one)
+	must(t, err)
+	clk.add(time.Millisecond)
+	must(t, sp.SetCap(20*one))
+	must(t, sp.SetCap(10*one))
+	if err := sp.Commit(p); !errors.Is(err, ErrMoved) {
+		t.Fatalf("a commit after the envelope moved, at the same cap: %v", err)
+	}
+}
+
+// The rest of Prepare's and Commit's refusals, one case each.
+func TestPrepareAndCommitRefuse(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	one := SpareCap(1, loopstest.OutPerM)
+	// Commit refuses when the first cap was set after Prepare, even at
+	// the same cap and envelope.
+	p, err := sp.Prepare(5 * one)
+	must(t, err)
+	must(t, sp.SetCap(0))
+	if err := sp.Commit(p); !errors.Is(err, ErrMoved) || sp.Cap() != 0 {
+		t.Fatalf("a commit prepared before the first cap: %v, cap %d", err, sp.Cap())
+	}
+	if err := sp.SetCap(-1); err == nil {
+		t.Fatal("a negative cap")
+	}
+	// Without widen, a cap above the current one is refused and the
+	// passkey is never asked.
+	asked := 0
+	sp.Widen = func(n int64) (key.Key, error) { asked++; return k.Widen(n) }
+	if _, err := sp.prepare(5*one, false); !errors.Is(err, ErrNoWiden) || asked != 0 {
+		t.Fatalf("prepare without widening: %v, asked %d", err, asked)
+	}
+	// A passkey that fails is the refusal.
+	fail := errors.New("passkey dismissed")
+	sp.Widen = func(int64) (key.Key, error) { return key.Key{}, fail }
+	if err := sp.SetCap(5 * one); !errors.Is(err, fail) {
+		t.Fatalf("a failed passkey: %v", err)
+	}
+	// An envelope swapped in outside Commit is refused.
+	held := sp.Envelope
+	other, err := key.Derive(held, sp.Holder, sp.Holder.Public().(ed25519.PublicKey), key.LowerSpendDay(loopstest.EnvelopeCap-1))
+	must(t, err)
+	sp.Envelope = other
+	if err := sp.SetCap(0); err == nil {
+		t.Fatal("an envelope changed outside Commit was used")
+	}
+	sp.Envelope = held
+}
+
+// A passkey that hands back an envelope already held is that envelope, not
+// a second one: its spend counts once in Used.
+func TestAWidenedEnvelopeAlreadyHeldCountsOnce(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	must(t, sp.SetCap(loopstest.EnvelopeCap))
+	if rf := k.Call(sp.Key(), 100); rf != nil {
+		t.Fatal(rf)
+	}
+	must(t, sp.SetCap(10))
+	env := sp.Envelope
+	sp.Widen = func(int64) (key.Key, error) { return env, nil }
+	must(t, sp.SetCap(loopstest.EnvelopeCap))
+	if used := sp.Used(clk.now().UnixMilli()); used != 100 {
+		t.Fatalf("used %d, want the 100 spent counted once", used)
 	}
 }

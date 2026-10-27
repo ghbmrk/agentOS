@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,5 +436,105 @@ func TestALockedLowerCannotBecomeARaise(t *testing.T) {
 	}
 	if r.s.Settings().SpareCalls != 100 || r.spare.Cap() != SpareCap(100, loopstest.OutPerM) {
 		t.Fatalf("budget %d, cap %d", r.s.Settings().SpareCalls, r.spare.Cap())
+	}
+}
+
+// STOP set while a raise waits on the passkey: the raise is refused when
+// it comes back, under budgetMu, and nothing changes (HLD-4, KEY-6).
+func TestARaiseThatWaitedIntoStopIsRefused(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	must(t, r.s.Set(ctx, Request{Kind: KindBudget, Calls: 100}, true))
+	entered, release := r.gateWiden()
+	got := make(chan string, 1)
+	go func() {
+		reply, _ := r.s.Text(ctx, "SPARE BUDGET 2000", true)
+		got <- reply
+	}()
+	<-entered
+	r.stopped.Store(true)
+	close(release)
+	if reply := <-got; reply != "Everything is stopped, so only pauses and lower limits apply now." {
+		t.Fatalf("a raise that waited into STOP: %q", reply)
+	}
+	if r.s.Settings().SpareCalls != 100 || r.spare.Cap() != SpareCap(100, loopstest.OutPerM) {
+		t.Fatalf("budget %d, cap %d", r.s.Settings().SpareCalls, r.spare.Cap())
+	}
+}
+
+// An unlocked "SPARE BUDGET 400" read as a lower against 1500 becomes a
+// raise when a lower to 100 lands first. The passkey was never asked, so it
+// is refused and the owner is asked to send it again (KEY-6).
+func TestALowerThatBecameARaiseIsSentAgain(t *testing.T) {
+	r := newRig(t)
+	r.s.budgetMu.Lock()
+	got := make(chan string, 1)
+	go func() {
+		reply, _ := r.s.Text(context.Background(), "SPARE BUDGET 400", true)
+		got <- reply
+	}()
+	time.Sleep(100 * time.Millisecond)
+	must(t, r.spare.SetCap(SpareCap(100, loopstest.OutPerM)))
+	r.s.mu.Lock()
+	r.s.st.Settings.SpareCalls = 100
+	r.s.mu.Unlock()
+	r.s.budgetMu.Unlock()
+	if reply := <-got; reply != "The spare budget changed while I waited for your passkey. Nothing changed; send it again." {
+		t.Fatalf("%q", reply)
+	}
+	if r.s.Settings().SpareCalls != 100 || r.spare.Cap() != SpareCap(100, loopstest.OutPerM) || r.widened() != 0 {
+		t.Fatalf("budget %d, cap %d, widened %d", r.s.Settings().SpareCalls, r.spare.Cap(), r.widened())
+	}
+}
+
+// A raise whose save fails and whose rollback to the old cap also fails
+// leaves the raised cap in force; the setting stays matched to it and the
+// reply says the raise is in effect but not saved, so a later raise is
+// judged against the cap the passkey approved (KEY-6, RES-5).
+func TestAFailedRollbackKeepsTheSettingMatchedToTheCap(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	must(t, r.s.Set(ctx, Request{Kind: KindBudget, Calls: 100}, true))
+	r.s.cfg.Store = &saveFails{MemStore: r.store, early: true}
+	var failRevoke atomic.Bool
+	revoke := r.spare.Revoke
+	r.spare.Revoke = func(id key.ID) error {
+		if failRevoke.Load() {
+			return errors.New("revocation not anchored")
+		}
+		return revoke(id)
+	}
+	widen := r.spare.Widen
+	r.spare.Widen = func(n int64) (key.Key, error) { failRevoke.Store(true); return widen(n) }
+	want := "Spare-time work may now use up to 400 AI calls a day. " + unsavedReply
+	if got, _ := r.s.Text(ctx, "SPARE BUDGET 400", true); got != want {
+		t.Fatalf("%q", got)
+	}
+	if r.s.Settings().SpareCalls != 400 || r.spare.Cap() != SpareCap(400, loopstest.OutPerM) {
+		t.Fatalf("budget %d, cap %d: the setting does not match the cap", r.s.Settings().SpareCalls, r.spare.Cap())
+	}
+	r.spare.Widen = nil
+	if got, _ := r.s.Text(ctx, "SPARE BUDGET 500", true); !strings.Contains(got, "passkey") {
+		t.Fatalf("a raise past the cap in force without the passkey: %q", got)
+	}
+}
+
+// Set refuses a request no owner text makes, whatever Text let through.
+func TestSetRefusesMalformedRequests(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	for _, req := range []Request{
+		{Kind: KindLoops, Loop: "dream"},
+		{Kind: KindBudget, Calls: MaxSpareCalls + 1},
+		{Kind: KindBudget, Calls: -1},
+		{Kind: KindChannel, Channel: "nightly"},
+		{Kind: "volume"},
+	} {
+		if err := r.s.Set(ctx, req, true); err == nil {
+			t.Fatalf("%+v set", req)
+		}
+	}
+	if set := r.s.Settings(); set.SpareCalls != NoSpareBudget || len(set.Paused) != 0 || set.Updates.ChannelName() != ChannelStable {
+		t.Fatalf("%+v", set)
 	}
 }

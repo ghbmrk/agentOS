@@ -101,16 +101,13 @@ func (s *Spare) Prepare(n int64) (Prepared, error) { return s.prepare(n, true) }
 // prepare is Prepare; with widen false, a cap that needs the passkey is
 // refused with ErrNoWiden instead of asking for it.
 func (s *Spare) prepare(n int64, widen bool) (Prepared, error) {
-	if n < 0 {
-		return Prepared{}, errors.New("loops: negative spare cap")
-	}
 	s.mu.Lock()
 	p := Prepared{n: n, set: s.set, tip: s.Envelope.Tip(), cap: s.cap}
 	envCap, ok := dayCap(s.Envelope)
+	// Before the first cap there is nothing held to check against, and a
+	// widening is above the envelope's cap, which no derivation of it can
+	// hold exactly.
 	held := append([]key.ID{}, s.envs...)
-	if !s.set {
-		held = []key.ID{p.tip}
-	}
 	widenFn := s.Widen
 	s.mu.Unlock()
 	if !ok {

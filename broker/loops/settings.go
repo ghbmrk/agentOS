@@ -601,19 +601,14 @@ func (s *Scheduler) setBudget(r Request, unlocked bool) error {
 	switch {
 	case !narrow && !unlocked:
 		return errWidens
-	case !narrow && !raise:
-		// A lower when Set read the budget, a raise now: the passkey was
-		// never asked.
-		return ErrMoved
 	case !narrow && s.cfg.Stopped():
 		return errStopped
 	}
 	if !raise {
-		p, err := sp.prepare(n, false)
-		if err != nil {
-			return err
-		}
-		prep = p
+		// A lower when the budget was read needs no passkey. If a racing
+		// lower made it a raise, prepare refuses to widen, and its zero
+		// Prepared makes Commit refuse with ErrMoved: send it again.
+		prep, _ = sp.prepare(n, false)
 	}
 	if err := sp.Commit(prep); err != nil {
 		return err
@@ -622,17 +617,25 @@ func (s *Scheduler) setBudget(r Request, unlocked bool) error {
 	s.st.Settings.SpareCalls = r.Calls
 	err := s.saveLocked()
 	if err != nil && !narrow {
-		s.st.Settings.SpareCalls = prev.SpareCalls
 		s.mu.Unlock()
 		// Back to the cap before the raise: a lowering, which revokes the
-		// raise's keys.
+		// raise's keys. budgetMu keeps every other budget change out.
 		back, perr := sp.prepare(SpareCap(prev.SpareCalls, sp.OutPerM), false)
 		if perr == nil {
 			perr = sp.Commit(back)
 		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if perr != nil {
+			// The raised cap stays in force, so the setting stays matched
+			// to it: the next raise is judged against the cap the passkey
+			// approved, and the owner hears the raise is in effect but not
+			// saved.
 			s.cfg.Logf("loops: the spare cap stayed raised after a failed save: %v", perr)
+			s.wakeLocked()
+			return fmt.Errorf("%w: %w", errUnsaved, err)
 		}
+		s.st.Settings.SpareCalls = prev.SpareCalls
 		return err
 	}
 	s.wakeLocked()
