@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -84,6 +85,28 @@ func Port1(sys string) (string, error) {
 		return found[0], nil
 	}
 	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 with AGENTOS_PAGE_IFACE in a drop-in for agentos-localui.service (-iface)")
+}
+
+// Wired says why name, a port 1 named on the unit (-iface), is not a link
+// the page's firewall rule may open: it must exist in the sysfs tree at sys
+// and be Ethernet (type 1) with no radio, so a drop-in cannot open the
+// page's ports on a radio or an access point (HW12-port1-set, CH-9). A
+// root-made link, such as the harness's veth, qualifies.
+func Wired(sys, name string) error {
+	if !ifaceRe.MatchString(name) || name == "lo" {
+		return errors.New("localui: " + strconv.Quote(name) + " is not an interface name")
+	}
+	dir := filepath.Join(sys, "class", "net", name)
+	t, err := os.ReadFile(filepath.Join(dir, "type"))
+	switch {
+	case err != nil:
+		return errors.New("localui: port 1 " + name + " is not a link on this box")
+	case strings.TrimSpace(string(t)) != "1":
+		return errors.New("localui: port 1 " + name + " is not Ethernet")
+	case exists(filepath.Join(dir, "wireless")) || exists(filepath.Join(dir, "phy80211")):
+		return errors.New("localui: port 1 " + name + " is a radio; the page is never served on Wi-Fi")
+	}
+	return nil
 }
 
 // removable: dev or a device above it says it is removable (the kernel's

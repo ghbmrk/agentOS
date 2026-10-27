@@ -283,8 +283,8 @@ HD_EXTRA="$(nm_cred systemd.extra-unit.agentos-hostdisk-check.service "$HD_UNIT"
 CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service agentos-hostdisk-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
-# dropped (I11, I19), except the owner page's 80 and 443, which the inbound table admits from
-# private sources such as QEMU's 10.0.2.2 (CH-9, D-178, WIFI-del-a3). The LAN NIC carries the same
+# dropped (I11, I19). The owner page's 80 and 443 open only on port 1 once the page's unit names it
+# (CH-9, D-178, HW12-port1-set), and with two NICs here it names none. The LAN NIC carries the same
 # probe over IPv6 (#1457), where every port is dropped.
 EXTRA="$NM_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
@@ -340,16 +340,12 @@ if grep -a "agentos-uplink: " "$W/console.log" | grep -qF " 10.0.2.15/"; then
 else
 	echo "MISS agentos-uplink: <if> 10.0.2.15/ (the forwards' target)"; fail=1
 fi
-# The host's connections through the forwards reach the box's leased address and get no answer,
-# but on the page's ports, which answer (a listener, or a reset while the page has none): the
-# in-boot positive control that the probe reaches a port the box holds open.
+# The host's connections through the forwards reach the box's leased address and get no answer.
+# The page's ports too: this boot has two fixed NICs, so the page names no port 1 and the inbound
+# table's page set stays empty (HW12-port1-set); boxe2e shows the page served through the set.
 cat "$W/console.log.probe" 2>/dev/null || true
-for port in 22 18789; do
+for port in 22 80 443 18789 5355; do
 	has "$W/console.log.probe" "agentos-probe: $port dropped"
-done
-has "$W/console.log.probe" "agentos-probe: 5355 dropped"
-for port in 80 443; do
-	has "$W/console.log.probe" "agentos-probe: $port answered"
 done
 # Over IPv6 on the LAN NIC: the box answers neighbour discovery at its link-local and SLAAC
 # addresses (the probe reaches it there), and no port answers at either.
