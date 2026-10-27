@@ -115,6 +115,11 @@ func derive(s *State, e Entry, refused *derived) ([]derived, bool) {
 			return []derived{entry(TPoolReset, poolReset{ref.Pool})}, true
 		}
 		return nil, true
+	case TEdgeEnrolled, TEdgeCandidate:
+		if s.edgeDecision(e) {
+			return []derived{{e.Type, e.Body}}, true
+		}
+		return nil, true
 	}
 	// A type the kernel adds is a decision with no derivation until it is
 	// listed here or derived above, so none is folded unchecked by default.
@@ -131,7 +136,7 @@ var recorded = map[string]bool{
 	TSpendExtend: true, TPoolRead: true, TReserveUp: true, TReserveDown: true,
 	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
 	TSubjectOpened: true, TContentStored: true, TSubjectErased: true, TEraseConfirmed: true,
-	TBackupTarget: true, TBackupUntarget: true,
+	TBackupTarget: true, TBackupUntarget: true, TEdgeRevoked: true, TEdgeCut: true,
 }
 
 // decision is decide's entry for a pending plan.
