@@ -49,6 +49,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 **Guard files:** none (no new package). **Gate:** a D-159 row citing D-201, if `trusted-base` grows.
 **Estimate:** 80k tokens.
 
+**As built (r1, for r2 to r4b):** `handoff.Approval{Route, Old, Next, Expires}` (milliseconds), `handoff.RouteCard` (`a`) and `RouteLost` (`b`), `SignApproval(head, a)` and `VerifyApproval(head.Public(), b, now)`, which checks shape, signature and `now < Expires`; the caller checks the route and `Old`. Expiry constants are `handoff.CardApprovalFor` and `LostApprovalFor`; the encoded form is at most `handoff.MaxApproval` bytes, so r2's 8 KiB request bound holds it. Kernel calls: `recoveryrotate {next, cosign}` answers `{approval}`; `recipient {recipient (wire), approval}` answers nothing, and a retry once switched succeeds. Owner client: `owner/kernelsock` `RotateMsg(old, next)`, `RecoveryRotate`, `SwitchRecipient`, refusals `ErrRotateSig`, `ErrApprovalStale`, `ErrApprovalExpired`.
+
 ## r2: the keeper's one-shot (#3407)
 
 **Scope:** `broker/clerk/seal/seal.go` (+test: `ReplaceAndPut`), `broker/cmd/agentos-enroll/main.go` (+test: `-rotate-recovery`, reading the request on stdin), the two unit files of decision 7 under `image/mkosi/mkosi.extra/usr/lib/systemd/system/`, the units' image test if one lists keeper units, ASSUMPTIONS rows, this brief.

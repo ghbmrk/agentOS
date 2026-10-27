@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -849,4 +850,91 @@ func (h *Kernel) AddBackupTarget(now int64, t kernel.BackupTarget, c key.Cosign)
 		}
 	}
 	return h.With(func(k *kernel.Kernel) error { return k.BackupTarget(now, t, c) })
+}
+
+// Recovery-key rotation (REC-4, BAK-1, MIG-4-recovery-r1, D-201): the
+// kernel checks the anchor's tap and signs an approval the root steps
+// verify with the store's head key; once the keeper has written the new
+// recipient, the kernel switches to it only on that approval.
+
+var (
+	// ErrApprovalStale: the approval names a recipient other than the one
+	// the kernel holds, so it was used already or is another rotation's.
+	ErrApprovalStale = errors.New("run: that recovery-key approval is for another recipient than mine; ask again")
+	// ErrNotApproved: the recipient is not the one the approval names, or
+	// the approval is not one for switching to it (the lost-card route's).
+	ErrNotApproved = errors.New("run: that backup recipient is not the one the recovery-key approval names")
+)
+
+// current is the recipient's ID the kernel holds, "" when none.
+func (bk *backups) current() string {
+	if bk.recipient == nil {
+		return ""
+	}
+	return bk.recipient.ID()
+}
+
+// RecoveryRotate logs an anchor's signature c over
+// kernel.RecoveryRotateHash(old, next), old the recipient the kernel holds
+// now, and returns an approval signed with the head key: on the card route
+// (next the new key's recipient ID) for handoff.CardApprovalFor, on the
+// lost-card route (next "") for handoff.LostApprovalFor. Nothing is
+// signed unless the entry is logged and anchored.
+func (h *Kernel) RecoveryRotate(now int64, next string, c key.Cosign) ([]byte, error) {
+	if h.bk == nil {
+		return nil, ErrBackupsOff
+	}
+	var out []byte
+	err := h.With(func(k *kernel.Kernel) error {
+		a := handoff.Approval{Route: handoff.RouteCard, Old: h.bk.current(), Next: next, Expires: now + handoff.CardApprovalFor}
+		if next == "" {
+			a.Route, a.Expires = handoff.RouteLost, now+handoff.LostApprovalFor
+		}
+		if err := k.RecoveryRotate(now, a.Old, a.Next, c); err != nil {
+			return err
+		}
+		var err error
+		out, err = handoff.SignApproval(h.head, a)
+		return err
+	})
+	return out, err
+}
+
+// SwitchRecipient makes r, in its wire form, the recipient every later
+// backup seals to, on a card-route approval naming the recipient the
+// kernel holds as Old and r's ID as Next. It logs nothing: the store is
+// the recipient's record and the approval was logged. From then no kept
+// backup counts (MIG-4-recovery-e decision 6), so the next backup call
+// writes one to every target. A retry once switched, or after a start
+// that read r from the store, succeeds and changes nothing. It waits for a
+// running backup call, so a backup is sealed to one recipient throughout.
+func (h *Kernel) SwitchRecipient(now int64, r, approval []byte) error {
+	if h.bk == nil {
+		return ErrBackupsOff
+	}
+	x, ek, err := handoff.SplitRecipient(r)
+	if err != nil {
+		return ErrArgs
+	}
+	next := backup.Recipient{X: x, EK: ek}
+	a, err := handoff.VerifyApproval(h.head.Public().(ed25519.PublicKey), approval, now)
+	if err != nil {
+		return err
+	}
+	if a.Route != handoff.RouteCard || a.Next != next.ID() {
+		return ErrNotApproved
+	}
+	bk := h.bk
+	bk.run.Lock()
+	defer bk.run.Unlock()
+	return h.With(func(*kernel.Kernel) error {
+		switch bk.current() {
+		case a.Next: // switched already, or a start read it from the store
+			return nil
+		case a.Old:
+			bk.recipient = &next
+			return nil
+		}
+		return ErrApprovalStale
+	})
 }
