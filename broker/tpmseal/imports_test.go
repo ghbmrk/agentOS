@@ -12,8 +12,12 @@ import (
 // they alone open or make what the sealed key opens (vault V2, STO-2b,
 // STO-2c). The kernel links it for the log anchor's counter alone (LOG-2,
 // STO-1), over the one connection the unlock step hands it; it never sees
-// the store or a sealed blob. No other broker binary links this package.
+// the store or a sealed blob. A8's at-rest scan links it only through the
+// sealed store, which it opens with the recovery factor alone and never
+// with a TPM (its TestTakesNoTPMFactor). No other broker binary links
+// this package.
 var linksTPM = map[string]bool{
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan":        true,
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-egress":        true,
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-enroll":        true,
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel":        true,

@@ -2,80 +2,16 @@ package loops
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
-// REQ: LOOP-0, CH-10, CH-11, OP-5, CHG-1, OP-4, CH-12
+// REQ: HLD-4, CH-14
 //
-// What the grants gate and the owner channel use: the sentinel the gate
-// recognizes, the broker-rendered line for a budget raise, the owner text
-// hook, and the review follow-ups from #49.
-
-func TestNeedsOwnerIsRecognizedWithoutImportingLoops(t *testing.T) {
-	no, ok := ErrNeedsOwner.(interface{ NeedsOwner() bool })
-	if !ok || !no.NeedsOwner() {
-		t.Fatal("ErrNeedsOwner does not report NeedsOwner")
-	}
-	if !errors.Is(ErrNeedsOwner, ErrNeedsOwner) {
-		t.Fatal("ErrNeedsOwner is not comparable")
-	}
-}
-
-func TestABudgetRaiseIsALowTierLineFromBrokerState(t *testing.T) {
-	r := newRig(t)
-	// No fixed budget (LOOP-0) still has the paid-route cap (OP-8): a
-	// budget above it is a raise from it, a large one by code generator.
-	it, err := r.s.Line(journal.Intent{ID: "loops:n7:budget:4000", Action: ActionBudget})
-	must(t, err)
-	if it.Detail != "from 1500 to 4000 paid AI calls a day" || it.Facts.Kind != owner.GrantChange {
-		t.Fatalf("raise from no fixed budget: %+v", it)
-	}
-	if q, err := r.s.BudgetAsk(journal.Intent{ID: "loops:n7:budget:4000", Action: ActionBudget}); err != nil || q != "Raise spare-time AI use from 1500 to 4000 calls a day?" {
-		t.Fatalf("raise ask from no fixed budget: %q %v", q, err)
-	}
-	if got, ok := r.s.Text(context.Background(), "SPARE BUDGET 100", true); !ok || r.s.Settings().SpareCalls != 100 {
-		t.Fatalf("setting a budget from none: %q %v", got, ok)
-	}
-	it, err = r.s.Line(journal.Intent{ID: "loops:n7:budget:400", Action: ActionBudget})
-	must(t, err)
-	want := owner.Item{Object: "spare-time AI use", Detail: "from 100 to 400 paid AI calls a day", UndoBy: "SPARE BUDGET 100 any time",
-		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "raise", NoRecipient: true}}
-	if it != want {
-		t.Fatalf("%+v", it)
-	}
-	// Only a small step is low tier: at most twice the budget and at most
-	// LowTierRaiseMax; anything else needs the code generator (security B1
-	// on #57).
-	for id, low := range map[string]bool{
-		"loops:n8:budget:200":  true,
-		"loops:n8:budget:201":  false,
-		"loops:n8:budget:5000": false,
-	} {
-		it, err := r.s.Line(journal.Intent{ID: id, Action: ActionBudget})
-		must(t, err)
-		if got := owner.Classify(it.Facts, owner.Limits{}, time.Now()) == owner.Low; got != low {
-			t.Fatalf("%s: low tier %v, want %v", id, got, low)
-		}
-	}
-
-	for _, in := range []journal.Intent{
-		{ID: "loops:n7:budget:40", Action: ActionBudgetLower},
-		{ID: "loops:n7:off:all", Action: ActionOff},
-		{ID: "loops:n7:budget:400x", Action: ActionBudget},
-	} {
-		if _, err := r.s.Line(in); err == nil {
-			t.Fatalf("%s: a line for an intent that never asks", in.ID)
-		}
-	}
-}
+// What the owner channel uses: the owner text hook, what a locked session
+// takes, the replies when a setting fails, and old saved state.
 
 func TestOwnerTextChangesSettingsAndLeavesTaskChatAlone(t *testing.T) {
 	r := newRig(t)
@@ -92,55 +28,8 @@ func TestOwnerTextChangesSettingsAndLeavesTaskChatAlone(t *testing.T) {
 	if got, ok := r.s.Text(ctx, "SPARE BUDGET 100", true); !ok || r.s.Settings().SpareCalls != 100 {
 		t.Fatalf("setting a budget from none: %q %v", got, ok)
 	}
-	// The rig's policy refuses a raise outright; the reply says so.
-	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400", true); !ok || got != "Not allowed: needs the owner's approval." {
-		t.Fatalf("%q %v", got, ok)
-	}
-	// The gate leaves it pending for the owner's approval instead.
-	r.s.Attach(pending{r.eng})
-	if got, ok := r.s.Text(ctx, "SPARE BUDGET 400", true); !ok || got != "Raising spare-time AI use needs your approval; a request follows." {
-		t.Fatalf("%q %v", got, ok)
-	}
-	r.s.Attach(r.eng)
-	if r.s.Settings().SpareCalls != 100 {
-		t.Fatal("a raise took effect without approval")
-	}
 	if got, ok := r.s.Text(ctx, "help loops", true); !ok || got != HelpText {
 		t.Fatalf("%q %v", got, ok)
-	}
-}
-
-// L3 R2 on #49: settings are pruned by apply order, so one applied after
-// many newer submissions (an approval that waited) is still reconciled.
-func TestASettingAppliedLateIsKeptForReconcile(t *testing.T) {
-	r := newRig(t)
-	ctx := context.Background()
-	for i := 0; i < keepApplied+20; i++ {
-		msg := "LOOPS OFF"
-		if i%2 == 1 {
-			msg = "LOOPS ON"
-		}
-		r1, _ := ParseText(msg)
-		must(t, r.s.Set(ctx, r1))
-	}
-	late := journal.Intent{ID: "loops:n0:budget:400", Origin: OriginOwner, Account: journal.BrokerAccount,
-		Action: ActionBudget, Executor: Executor}
-	if o := r.s.Execute(ctx, late, 1); o.Result != journal.ResultSucceeded {
-		t.Fatalf("%+v", o)
-	}
-	if o := r.s.Reconcile(ctx, late, 1); o.Result != journal.ResultSucceeded {
-		t.Fatalf("a setting just applied was pruned: %+v", o)
-	}
-	r.s.mu.Lock()
-	n, m := len(r.s.st.Applied), len(r.s.st.Order)
-	r.s.mu.Unlock()
-	if n != keepApplied || m != keepApplied {
-		t.Fatalf("kept %d applied, %d in order; want %d", n, m, keepApplied)
-	}
-	// After a restart the order is what was saved.
-	r.restart()
-	if o := r.s.Reconcile(ctx, late, 1); o.Result != journal.ResultSucceeded {
-		t.Fatalf("after restart: %+v", o)
 	}
 }
 
@@ -157,51 +46,38 @@ func TestPluralLoopNamesReadAsPlural(t *testing.T) {
 	}
 }
 
-// pending is a journal whose policy, like the grants gate's, leaves an
-// intent that needs the owner pending.
-type pending struct{ Journal }
-
-// fenced is the journal while a restart fence holds the broker account.
-type fenced struct{ Journal }
-
-func (fenced) Dispatch(context.Context, string) (journal.Status, error) {
-	return journal.Status{}, fmt.Errorf("%w: %s", journal.ErrUnreconciled, journal.BrokerAccount)
-}
-
-// held is the journal while the same change, sent this boot, is not
-// confirmed (A2): a hold, not a restart fence.
-type held struct{ Journal }
-
-func (held) Dispatch(_ context.Context, id string) (journal.Status, error) {
-	return journal.Status{}, &journal.HeldError{ID: id, BlockedBy: "loops:earlier"}
-}
-
-func (pending) Submit(in journal.Intent) (journal.Status, error) {
-	return journal.Status{Intent: in, State: journal.Pending}, nil
-}
-
-func (pending) Authorize(_ context.Context, id string) (journal.Status, error) {
-	return journal.Status{State: journal.Pending}, nil
-}
-
-// UX-57-1: a locked session takes only settings whose worst case is a
-// pause; turning work on and raising the budget wait for the unlock.
+// UX-57-1, CH-14: a session not unlocked with an approval code takes only
+// settings whose worst case is a pause. Turning work on, a raise and
+// faster updates wait for the unlock, on Text and on Set alike.
 func TestALockedSessionTakesOnlyPauses(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	if got, ok := r.s.Text(ctx, "LEARNING OFF", false); !ok || got != "Learning is off until you reply LEARNING ON." {
 		t.Fatalf("%q %v", got, ok)
 	}
+	if got, ok := r.s.Text(ctx, "LOOPS OFF", false); !ok || !r.s.Settings().Off {
+		t.Fatalf("LOOPS OFF while locked: %q %v", got, ok)
+	}
 	if got, ok := r.s.Text(ctx, "spare budget 50", false); !ok || r.s.Settings().SpareCalls != 50 {
 		t.Fatalf("lowering while locked: %q %v", got, ok)
 	}
-	for _, msg := range []string{"LEARNING ON", "LOOPS ON", "SPARE BUDGET 60", "START SHARING"} {
+	refused := []string{"LEARNING ON", "LOOPS ON", "SPARE BUDGET 60", "START SHARING", "UPDATES FAST", "UPDATE SOAK 7"}
+	must(t, r.s.Set(ctx, Request{Kind: KindSoak, Days: 14}, true))
+	for _, msg := range refused {
 		if _, ok := r.s.Text(ctx, msg, false); ok {
 			t.Fatalf("%s taken in a locked session", msg)
 		}
+		req, _ := ParseText(msg)
+		if err := r.s.Set(ctx, req, false); err == nil {
+			t.Fatalf("Set took %s in a locked session", msg)
+		}
 	}
-	if !r.s.Settings().Paused[Improve] || r.s.Settings().SpareCalls != 50 {
-		t.Fatalf("%+v", r.s.Settings())
+	set := r.s.Settings()
+	if !set.Off || !set.Paused[Improve] || set.SpareCalls != 50 || set.Updates.ChannelName() != ChannelStable || set.Updates.Soak() != 14 {
+		t.Fatalf("%+v", set)
+	}
+	if r.widened() != 0 || len(r.sharing.calls()) != 0 {
+		t.Fatalf("a locked session reached the passkey (%d) or sharing (%v)", r.widened(), r.sharing.calls())
 	}
 	if got, ok := r.s.Text(ctx, "HELP LOOPS", false); !ok || got != HelpText {
 		t.Fatalf("%q %v", got, ok)
@@ -227,57 +103,33 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 	if got, _ := r.s.Text(ctx, "STOP SHARING", true); got != "Sharing is not available yet." {
 		t.Fatalf("%q", got)
 	}
-	// A restart fence does not lift by trying later: the reply says it is
-	// on hold and where to see it (OP-4, CH-12; #1373).
-	r.s.Attach(fenced{r.eng})
-	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != fencedReply {
-		t.Fatalf("%q", got)
-	}
-	// A same-effect hold also matches ErrUnreconciled, but no restart is
-	// involved and STATUS does not list it (S5 on #1382).
-	r.s.Attach(held{r.eng})
-	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != heldReply || strings.Contains(got, "restart") || strings.Contains(got, "STATUS") {
-		t.Fatalf("%q", got)
-	}
-	r.s.cfg.Journal = nil
-	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != "I could not save that setting. Try again later." {
+	r.s.cfg.Store = &saveFails{MemStore: r.store, early: true}
+	if got, _ := r.s.Text(ctx, "UPDATES FAST", true); got != "I could not save that setting. Try again later." {
 		t.Fatalf("%q", got)
 	}
 }
 
-// L3 on #57: state saved before Order existed is ordered by submission on
-// load, malformed IDs first, and the next apply prunes to keepApplied.
-func TestOldStateIsOrderedOnLoad(t *testing.T) {
+// State saved while settings went through the journal still has seq,
+// applied and order; it loads its settings (HLD-4).
+func TestOldSavedStateLoads(t *testing.T) {
 	r := newRig(t)
-	old := state{Seq: 300, Settings: Settings{SpareCalls: 100}, Applied: map[string]bool{"bad": true}}
-	for n := 300; n > 300-keepApplied-5; n-- {
-		old.Applied[fmt.Sprintf("loops:n%d:off:all", n)] = true
-	}
-	b, err := json.Marshal(old)
-	must(t, err)
-	must(t, r.store.Save(b))
+	must(t, r.store.Save([]byte(`{"seq":301,"settings":{"off":true,"paused":{"secure":true},"spare_calls":100,"updates":{"channel":"pinned"}},`+
+		`"applied":{"loops:n300:off:all":true,"bad":true},"order":["bad","loops:n300:off:all"]}`)))
 	r.restart()
-	r.s.mu.Lock()
-	order := append([]string(nil), r.s.st.Order...)
-	r.s.mu.Unlock()
-	if len(order) != keepApplied+6 || order[0] != "bad" || order[1] != "loops:n40:off:all" || order[len(order)-1] != "loops:n300:off:all" {
-		t.Fatalf("order after load: %d, first %q %q, last %q", len(order), order[0], order[1], order[len(order)-1])
+	set := r.s.Settings()
+	if !set.Off || !set.Paused[Secure] || set.SpareCalls != 100 || set.Updates.ChannelName() != ChannelPinned {
+		t.Fatalf("old state loaded as %+v", set)
 	}
-	in := journal.Intent{ID: "loops:n301:on:all", Origin: OriginOwner, Account: journal.BrokerAccount, Action: ActionOn, Executor: Executor}
-	if o := r.s.Execute(context.Background(), in, 1); o.Result != journal.ResultSucceeded {
-		t.Fatalf("%+v", o)
+	if r.spare.Cap() != SpareCap(100, loopstest.OutPerM) {
+		t.Fatalf("old budget not applied to the spare key: %d", r.spare.Cap())
 	}
-	r.s.mu.Lock()
-	defer r.s.mu.Unlock()
-	if len(r.s.st.Applied) != keepApplied || len(r.s.st.Order) != keepApplied {
-		t.Fatalf("kept %d applied, %d in order", len(r.s.st.Applied), len(r.s.st.Order))
+	// The next save writes the settings only.
+	if _, ok := r.s.Text(context.Background(), "LOOP 1 OFF", true); !ok {
+		t.Fatal("LOOP 1 OFF")
 	}
-	for _, gone := range []string{"bad", "loops:n40:off:all", "loops:n45:off:all"} {
-		if r.s.st.Applied[gone] {
-			t.Fatalf("%s was not pruned first", gone)
-		}
-	}
-	if !r.s.st.Applied["loops:n46:off:all"] || !r.s.st.Applied[in.ID] {
-		t.Fatal("pruned past the oldest")
+	b, err := r.store.Load()
+	must(t, err)
+	if strings.Contains(string(b), "applied") || strings.Contains(string(b), "seq") {
+		t.Fatalf("saved %s", b)
 	}
 }
