@@ -508,18 +508,54 @@ func TestStaleSwitchNeverReplaysOverALaterOne(t *testing.T) {
 // flakyStore fails its first switch before writing anything, and cannot
 // read the trusted root once after, so the clerk cannot tell and answers
 // unknown.
+// With land set, the failing switch is written first, so it lands though
+// the clerk cannot tell.
 type flakyStore struct {
 	*countStore
 	fail, blind int
+	land        bool
 }
 
 func (s *flakyStore) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error {
 	if s.fail > 0 {
 		s.fail--
+		if s.land {
+			if err := s.countStore.FollowFork(root, links, shipped, approved, name, o); err != nil {
+				return err
+			}
+			return errors.New("power cut after the write")
+		}
 		s.switches++
 		return errors.New("power cut")
 	}
 	return s.countStore.FollowFork(root, links, shipped, approved, name, o)
+}
+
+// KRN-8, security 1 round 2 on #3444: the box goes to fork A but the clerk
+// cannot tell, so p1 is unknown with its record saying the box followed the
+// project before. The owner then switches back to the project. The box now
+// follows what it did before p1 began, yet p1 must not be sent again: the
+// switch back dropped p1's record, so p1 stays unknown and the box stays
+// on the project.
+func TestSwitchBackIsNeverUndoneByAnEarlierSwitch(t *testing.T) {
+	r := newClerkRig(t)
+	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1, land: true})
+	if st := r.run(r.approved("p1", r.describe(r.fork), "Acme Fork")); st.Phase != kernel.PUnknown || !r.trusts(r.fork) {
+		t.Fatalf("p1 %+v", st)
+	}
+	r.clk.at = r.clk.at.Add(time.Millisecond)
+	if st := r.run(r.approved("p2", r.describe(r.shipped), "")); st.Phase != kernel.PDone || !r.trusts(r.shipped) {
+		t.Fatalf("switch back %+v", st)
+	}
+	if s := r.probeAll("p1"); s.Phase == kernel.PDone || s.Phase == kernel.PInflight {
+		t.Fatalf("p1 settled as %+v", s)
+	}
+	if !r.trusts(r.shipped) || r.st.switches != 2 {
+		t.Fatalf("the earlier switch ran again: switches %d, trusts the project %v", r.st.switches, r.trusts(r.shipped))
+	}
+	if src, _ := r.store.Following(); src != (update.Followed{}) {
+		t.Fatalf("source %+v", src)
+	}
 }
 
 func (s *flakyStore) TrustedRoot() ([]byte, error) {

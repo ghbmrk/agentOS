@@ -108,8 +108,12 @@ func (c *Clerk) records() (map[string]before, error) {
 	return m, nil
 }
 
-// record sets idem's record, or with b nil drops it, on disk before it
-// returns.
+// record makes b idem's record and drops every other step's, or with b
+// nil drops idem's, on disk before it returns. A switch beginning drops
+// the records of the switches begun before it: once the box may have
+// moved again, what it followed before an earlier switch no longer tells
+// whether that switch landed (it may have landed and been switched back,
+// security 1 round 2 on #3444), so the earlier step can only be unknown.
 func (c *Clerk) record(idem string, b *before) error {
 	m, err := c.records()
 	if err != nil {
@@ -121,7 +125,7 @@ func (c *Clerk) record(idem string, b *before) error {
 		}
 		delete(m, idem)
 	} else {
-		m[idem] = *b
+		m = map[string]before{idem: *b}
 	}
 	out, err := json.Marshal(m)
 	if err != nil {
