@@ -32,7 +32,9 @@ HAP facts the code rests on (HAP non-commercial spec, R2+): pair-setup is SRP-6a
 ## Split
 
 - **(a)** Protocol package `broker/clerk/homekit/`: TLV8 codec, SRP-6a, pair-setup and pair-verify against an injected key holder, the encrypted session, `/accessories` and `/characteristics` read and write, the thermostat class rows, fuzz targets. Synthetic accessory in tests. If the session nears 150k tokens, cut at (a1) TLV8, SRP, pair-setup and pair-verify, and (a2) the session, characteristics and class rows.
-- **(b)** Core-side clerk: controller key in the sealed store (STO-2, CLK-1), the tier-4 local-page connect step taking the HomeKit code, pinning, bounds confirmation, events onto the bus. Needs STO-2 and the device-clerk host.
+- **(b)** Core-side clerk: controller key in the sealed store (STO-2, CLK-1), the tier-4 local-page connect step taking the HomeKit code, pinning, bounds confirmation, events onto the bus. No device-clerk host is on main, so (b) splits at the host:
+  - **(b1)** The clerk as a library in `broker/clerk/homekit/`: `SealedKeyHolder` over `clerk.Secrets.DeviceKey`, `Clerk.Connect` (one pair-setup by code, then the thermostats behind the pin), `Clerk.Open` (pinned pair-verify, a mismatch turns the device off with a KRN-7 line), `Link.ConfirmBounds`, events through `Emit`, local-only dials and bounded steps, and #3325 items 1 to 5.
+  - **(b2)** The host that runs it as its own clerk (CLK-1), the tier-4 local-page step that calls `Connect`, `Device` kept across restarts, and the bus wiring. Needs the device-clerk host (DEVSLOT-drivers part b, #3321); serial with the agentosd chain (D-111).
 - **(c)** Live: pair the four T10 Pros behind the enforcer and confirm they hold schedules with Resideo blocked. Needs the enforcer (Protectli V1410, not arrived).
 
 ## Acceptance tests
@@ -51,11 +53,19 @@ Part (a), in `broker/clerk/homekit/`:
 - `TestCheckPathDoesNotLinkHomeKit`: the KRN-2 link test shows the kernel's check path does not import `clerk/homekit`.
 - `FuzzTLV8`, `FuzzSessionFrame`, `FuzzResponse` (HTTP and `EVENT/1.0`): no panic, bounded buffers.
 
+Part (b1), in `broker/clerk/homekit/clerk_test.go`:
+
+- `TestSealedKeyHolderSignsWithoutHoldingTheKey`: the holder signs through the sealed store's lending, a replaced slot signs nothing, and no non-device slot gives a holder.
+- `TestConnectPinsAndOpensThermostat`: connect by code pins the accessory key; open subscribes, polls typed private events and writes only declared values.
+- `TestConnectWithWrongCodePinsNothing`: one dial, one try, nothing paired.
+- `TestIdentityMismatchTurnsDeviceOff`: a spoofed key turns the device off with a KRN-7 line; nothing is read or written and the device is not dialed again.
+- `TestOnlyLocalAddressesAreDialed`, `TestHungAccessoryTimesOut`, `TestEventHandlerMayCallBackIntoSession`, `TestBridgeThermostatsResolveByAID`, `TestFindRefusesAmbiguousService`, `TestOwnerConfirmsBounds`, `TestBusRefusalIsCounted`, `TestControllerKeyNeverLeavesClerk`, `TestConcurrentStepsAreEachBounded`, `TestEmitMayCallBackIntoLink`, `TestDroppedEventsAreCounted`, `TestDialsGoThroughTheGuard`, `TestConnectKeepsThePinWhenResolveFails`, `FuzzSessionRoundTrip`.
+
 Failure path: the controller key leaks, a spoofed accessory gets commands, or the heating or cooling mode changes without the owner's code-generator code (CH-10).
 
 ## Scope
 
-`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, any test-only vendored accessory and its tree, `NOTICE`, this brief.
+`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, `broker/loops/plainname.go` (one owner-words line per fuzz target), any test-only vendored accessory and its tree, `NOTICE`, this brief.
 
 ## Estimate
 

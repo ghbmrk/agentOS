@@ -51,6 +51,7 @@ var fuzzNames = map[string]string{
 	"homekit.FuzzSessionFrame":      "the check that reads a HomeKit device's encrypted messages",
 	"homekit.FuzzResponse":          "the check that reads a HomeKit device's answers and alerts",
 	"homekit.FuzzAccessoriesJSON":   "the check that reads a HomeKit device's list of controls",
+	"homekit.FuzzSessionRoundTrip":  "the check that reads a HomeKit device's messages end to end",
 }
 
 // probePrefix starts the socket probe's subject ("socket.<machine>").
