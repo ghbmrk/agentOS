@@ -10,7 +10,9 @@ Replays the reviewed commit onto the base content `head` carries (`git merge-tre
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
-keeping both sides' rows verbatim, either side first (#3224, #3233). Main merged into the branch therefore reads as same, even next
+keeping both sides' rows verbatim, either side first (#3224, #3233). A replay file that fails a cheap gate never reads same as is:
+a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row `merge=union` brought back
+(in the merge base and main, not in the reviewed commit); a head that drops exactly those rows, or moves the PR's row of that ID to main's spot, reads same (#3400). Main merged into the branch therefore reads as same, even next
 to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
 in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
 neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
@@ -175,12 +177,76 @@ def _same_mode(cwd, tree, head, path):
     return a == b
 
 
-def _renumbered_only(cwd, tree, head, path):
-    """True when an ASSUMPTIONS.md differs between `tree` and `head` only in the first-cell row ids."""
+def _renumbered_only(cwd, tree, head, path, reviewed, onto):
+    """True when an ASSUMPTIONS.md differs between `tree` and `head` only in the first-cell row ids, and the
+    replay resurrected no row (a renumbered stale row is still a stale row, #3400)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     return (bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
+            and not _stale(cwd, a, path, reviewed, onto) and _same_mode(cwd, tree, head, path))
+
+
+FIRST_CELL = re.compile(rb"^\|[ \t]*([^|\s][^|]*?)[ \t]*\|")
+
+
+def _duplicate_id(text):
+    """True when a table of `text` repeats a first-cell row ID: doclint's assumption_ids rule (tools/doclint.py)."""
+    seen, in_table = set(), False
+    for line in text.decode(errors="surrogateescape").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not line.startswith("|"):
+            in_table = False
+        elif cells[0] in ("ID", "#"):
+            in_table = True
+        elif in_table and not set(cells[0]) <= set("-: "):
+            if cells[0] in seen:
+                return True
+            seen.add(cells[0])
+    return False
+
+
+def _stale(cwd, text, path, reviewed, onto):
+    """The table rows of an ASSUMPTIONS.md replay `text` that `merge=union` (.gitattributes) brought back: each is
+    in the merge base and in `onto` verbatim but not in the reviewed commit, so the PR edited or deleted it and
+    main left it alone (#3369, #1912). Empty for any other file or a criss-cross merge."""
+    if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
+        return set()
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1:
+        return set()
+    mb, kept, pr = (set(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines()) for t in (bases[0], onto, reviewed))
+    return {line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb and line in kept
+            and line not in pr}
+
+
+def _broken(cwd, tree, path, reviewed, onto):
+    """True when the replay's `path` fails a cheap gate, so a head that keeps it never reads same (#3400): a
+    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), or a row `merge=union` brought back."""
+    if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
+        return False
+    text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
+    return _duplicate_id(text) or bool(_stale(cwd, text, path, reviewed, onto))
+
+
+def _stale_dropped(cwd, tree, head, path, reviewed, onto):
+    """True when an ASSUMPTIONS.md replay brought rows back (`_stale`) and `head` is the replay with exactly those
+    rows dropped, or each replaced by the replay's other row of its ID (the PR's edit, moved to main's spot), with
+    no duplicate ID left: the three-way merge `merge=union` should have made (#3400; e842a58 on #3369 moved it)."""
+    if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
+        return False
+    text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
+    stale = _stale(cwd, text, path, reviewed, onto)
+    if not stale:
+        return False
+    lines = text.splitlines(keepends=True)
+    key = lambda line: FIRST_CELL.match(line) and FIRST_CELL.match(line).group(1)
+    dropped = [line for line in lines if line.rstrip(b"\r\n") not in stale]
+    edits = {key(line): line for line in dropped if key(line) in {key(s) for s in stale}}
+    moved = [edits.get(key(line), b"") if line.rstrip(b"\r\n") in stale else line
+             for line in lines if line not in edits.values()]
+    want = _git(cwd, "show", f"{head}:{path}", ok=(0, 128))
+    return (want in (b"".join(dropped), b"".join(moved)) and not _duplicate_id(want)
             and _same_mode(cwd, tree, head, path))
 
 
@@ -222,8 +288,14 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     tree = _replayed(cwd, reviewed, onto)
     out = _git(cwd, *DIFF, tree, head).decode(errors="surrogateescape")
-    return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f)
-                  and not _appends_kept(cwd, tree, head, f, reviewed, onto))
+    differ = {f for f in out.split("\0") if f}
+    # The files the PR or the replay touched: a union can undo a PR's change, leaving tree equal to onto (#1912).
+    pr = _git(cwd, "merge-base", reviewed, onto).decode().strip()
+    touched = (_git(cwd, *DIFF, onto, tree) + b"\0" + _git(cwd, *DIFF, pr, reviewed)).decode(errors="surrogateescape")
+    kept = {f for f in touched.split("\0") if f and f not in differ and _broken(cwd, tree, f, reviewed, onto)}
+    return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
+                          and not _appends_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
 
 def _same(reviewed, head, base):
