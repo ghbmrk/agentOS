@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
@@ -472,7 +473,7 @@ func TestAReconnectClaimingAnotherGrantIsRefused(t *testing.T) {
 	approved := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
 	digest := r.stage("claim", grant)
 	st, changed := r.reconnectClaiming("claim", r.approve(approved), "web", digest, grantPrint(approved))
-	if changed || st.Detail != clerk.RClaim {
+	if changed || st.Detail != check.RClaim {
 		t.Fatalf("step %s %q, store changed %v", st.Phase, st.Detail, changed)
 	}
 }

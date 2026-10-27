@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -797,7 +798,7 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
 		}
 		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
-		if rf := clerk.Check(r.anchors(), "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+		if rf := check.Check(r.anchors(), "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
 			t.Fatalf("%s: clerk check %v", id, rf)
 		}
 	}
@@ -1115,8 +1116,8 @@ func TestClerkKeepsTheHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
 		t.Fatalf("status %s, %d effects: the clerk released a hold on the kernel's clock", r.status("p1"), len(r.mail.Effects()))
 	}
-	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != clerk.RHold {
-		t.Fatalf("detail %q, want %q", d, clerk.RHold)
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold {
+		t.Fatalf("detail %q, want %q", d, check.RHold)
 	}
 }
 

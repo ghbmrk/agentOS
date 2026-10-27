@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
@@ -37,7 +38,7 @@ func OpenExit(dir string, s clerk.Sealer, d clerk.Declaration, anchors []key.Pub
 // side stages it on this process's owner socket for one plan, and the step
 // names it by its SHA-256 digest (arg "value", and content its print;
 // "target" is the clerk). The
-// proof is the step's own key, checked by clerk.Verify against the kernel's
+// proof is the step's own key, checked by check.Verify against the kernel's
 // view like every step: its last link is a passkey's exact approval of that
 // step (exactApproval). Any other caller, a key the owner did not give for
 // this grant, another plan, or a grant not staged leaves the slot unchanged.
@@ -91,7 +92,7 @@ func (h *ExitHost) facts(s key.Step) (string, []string, int64) {
 	return h.x.Facts(s)
 }
 
-// exactApproval reports whether ver, the plan key as clerk.Verify checked
+// exactApproval reports whether ver, the plan key as check.Verify checked
 // it, is the owner's approval of exactly this reconnect (OWN-9), the way the
 // browser's submit approvals are (CLK-3): its last link is one a passkey
 // signed for the key's holder (key.Narrow), and that link itself allows
@@ -127,7 +128,7 @@ func (h *ExitHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return h.x.Do(r, v)
 	}
 	now := h.clock.Now()
-	vk, rf := clerk.Verify(h.anchors, h.name, h.facts, now, r, v)
+	vk, rf := check.Verify(h.anchors, h.name, h.facts, now, r, v)
 	if rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}

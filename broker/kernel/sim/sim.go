@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -174,7 +175,7 @@ func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
 	if len(m.Effects()) > n {
 		w.judge(r, v)
 	}
-	if res.Outcome == "failed" && res.Detail == clerk.RHold {
+	if res.Outcome == "failed" && res.Detail == check.RHold {
 		w.held++
 	}
 	return res

@@ -9,7 +9,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/follow"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -34,7 +34,7 @@ const (
 // follow can carry it.
 const ArgProject = follow.ProjectName
 
-// Refusal details beside clerk.Check's codes.
+// Refusal details beside check.Check's codes.
 const (
 	RVerb      = "verb"      // the step is not change-account
 	ROwner     = "owner"     // the plan is not the owner's own approval of this switch
@@ -87,7 +87,7 @@ func (c *Clerk) Facts(key.Step) (string, []string, int64) { return "", nil, 0 }
 // again, so an answer lost after the switch never switches twice (KRN-8).
 func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	ctx := context.Background()
-	if rf := clerk.Check(c.anchors, Name, c.Facts, c.x.Latest(ctx).UnixMilli(), r, v); rf != nil {
+	if rf := check.Check(c.anchors, Name, c.Facts, c.x.Latest(ctx).UnixMilli(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}
 	}
 	st := step(r)
@@ -143,7 +143,7 @@ func (c *Clerk) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	return kernel.Result{Outcome: "done", Detail: ev + c.x.Realert(context.Background(), name)}
 }
 
-// step is the request's step as clerk.Check reads it, through the core's
+// step is the request's step as check.Check reads it, through the core's
 // open kernel.Normalize.
 func step(r kernel.Request) key.Step {
 	if r.Index < 0 || r.Index >= len(r.Plan.Steps) {

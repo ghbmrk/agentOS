@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -207,7 +208,7 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if a.done[r.Idem()] {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
-	if rf := clerk.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, view); rf != nil {
+	if rf := check.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, view); rf != nil {
 		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
 	}
 	switch s.Verb {
@@ -279,7 +280,7 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 // Facts is the clerk's reading of a step's claims: slice 1 keys set no
 // content or label caveats, so a mail step claims none, and no inbox verb
 // has an amount. Class, VRB-2 and retention are judged in Do (KEY-2).
-func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, clerk.Amount(s) }
+func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, check.Amount(s) }
 
 // Probe answers from the clerk's memory, never by acting (KRN-8). It says
 // notdone, inviting a resend, only for organize and trash, whose mailbox
