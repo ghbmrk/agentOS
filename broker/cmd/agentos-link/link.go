@@ -22,7 +22,28 @@ const (
 	trailFor     = 200 * time.Millisecond // how long a hello connection is watched for a second frame
 	recheckEvery = 250 * time.Millisecond // a revoke or cut closes a served connection within a second
 	recheckFor   = 500 * time.Millisecond // a recheck the kernel has not answered by then reads as not live
+	handshakeCap = 16                     // handshakes in flight at once; a connection over it is refused (#3462)
 )
+
+// slots bounds the handshakes in flight on one listener: a connection takes
+// a slot before its handshake and gives it back once it is served or
+// closed, so a hostile edge opening connections without limit costs the
+// kernel at most handshakeCap linksign and edgekey calls at a time.
+type slots chan struct{}
+
+func newSlots() slots { return make(slots, handshakeCap) }
+
+// take takes a slot, or reports false when every slot is held.
+func (s slots) take() bool {
+	select {
+	case s <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s slots) give() { <-s }
 
 // errFault is every reason a connection closes that the edge caused. It
 // carries nothing the edge sent.
@@ -100,10 +121,12 @@ type server struct {
 	items  chan Item // to the consumer; unbuffered, so a slow consumer slows the edge
 	log    io.Writer // counts only, never content
 
-	faults atomic.Int64
-	wait   time.Duration // helloFor, shorter in tests
-	every  time.Duration // recheckEvery, shorter in tests
-	limit  time.Duration // recheckFor
+	faults  atomic.Int64
+	refused atomic.Int64 // connections refused over handshakeCap
+	slots   slots
+	wait    time.Duration // helloFor, shorter in tests
+	every   time.Duration // recheckEvery, shorter in tests
+	limit   time.Duration // recheckFor
 
 	mu   sync.Mutex
 	live *served // the connection outbound frames go to
@@ -133,7 +156,7 @@ func newServer(k Kernel, log io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{kernel: k, cfg: cfg, items: make(chan Item), log: log, wait: helloFor, every: recheckEvery, limit: recheckFor}, nil
+	return &server{kernel: k, cfg: cfg, items: make(chan Item), log: log, slots: newSlots(), wait: helloFor, every: recheckEvery, limit: recheckFor}, nil
 }
 
 // serve handles each connection ln accepts until ln closes.
@@ -147,6 +170,12 @@ func (s *server) serve(ln net.Listener) error {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
+		if !s.slots.take() {
+			raw.Close()
+			n := s.refused.Add(1)
+			fmt.Fprintf(s.log, "agentos-link: refused a connection over the handshake cap (%d so far)\n", n)
+			continue
+		}
 		go s.handle(raw)
 	}
 }
@@ -157,7 +186,17 @@ func (s *server) fault() {
 	fmt.Fprintf(s.log, "agentos-link: closed a connection on a fault (%d so far)\n", n)
 }
 
+// handle runs one connection, which holds a slot (serve) until it is
+// served live or closed.
 func (s *server) handle(raw net.Conn) {
+	held := true
+	release := func() {
+		if held {
+			held = false
+			s.slots.give()
+		}
+	}
+	defer release()
 	conn, key, err := handshake(raw, s.cfg)
 	if err != nil {
 		conn.Close()
@@ -172,6 +211,7 @@ func (s *server) handle(raw net.Conn) {
 		return
 	}
 	if e.Live {
+		release() // a served connection is no longer a handshake
 		s.serveLive(conn, key)
 		return
 	}
