@@ -223,7 +223,7 @@ func dump(t *testing.T, img string, off int64, path string) []byte {
 	return b
 }
 
-var codeLineRe = regexp.MustCompile(`(?m)^AgentOS claim code: ([A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4})$`)
+var codeLineRe = regexp.MustCompile(`(?m)^agentOS claim code: ([A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4})$`)
 
 // Acceptance 1: an image that fails a check gets no box image and no
 // sticker.

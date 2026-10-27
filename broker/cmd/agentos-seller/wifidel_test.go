@@ -205,7 +205,7 @@ func TestStickerStepOneIsTheEnforcers(t *testing.T) {
 	ie := strings.Index(strings.ToLower(txt), "enforcer")
 	io, ic2 := -1, -1
 	if ip >= 0 {
-		io, ic2 = strings.Index(txt[ip:], "Owner network"), strings.Index(txt[ip:], "AgentOS claim code: "+code)
+		io, ic2 = strings.Index(txt[ip:], "Owner network"), strings.Index(txt[ip:], "agentOS claim code: "+code)
 	}
 	if ie < 0 || in < 0 || ip < 0 || io < 0 || ic2 < 0 || !(ie < in && in < ip && io < ic2) {
 		t.Fatalf("sticker.txt order wrong: %q", txt)
