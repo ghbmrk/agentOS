@@ -120,8 +120,12 @@ func settledPort1(sys string, wait func() bool) (string, error) {
 	if !wait() {
 		return "", errors.New("stopped before port 1 settled")
 	}
-	if q, err := localui.Port1(sys); err != nil || q != p {
-		return "", errors.New("port 1 changed while the box started (" + p + "); the unit picks again")
+	q, err := localui.Port1(sys)
+	if err != nil {
+		return "", err
+	}
+	if q != p {
+		return "", errors.New("port 1 moved from " + p + " to " + q + " while starting; the unit picks again")
 	}
 	return p, nil
 }
