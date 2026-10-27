@@ -11,11 +11,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/netip"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -296,13 +299,17 @@ func (h *harness) leak(err error) string {
 	return ""
 }
 
-// slotSide is the public code a driver links on purpose; everything else
-// it links is held to allowedStd.
+// slotSide is the only code from this repository a driver may link: the
+// slot and the key library. Everything else it links is held to the rules
+// in bannedImports. This package is not on it: it runs go list, so drivers
+// use it from their _test.go files only, which go list -deps does not walk.
 var slotSide = map[string]bool{
-	"github.com/ghbmrk/agentos/broker/clerk/devslot":             true,
-	"github.com/ghbmrk/agentos/broker/clerk/devslot/conformance": true,
-	"github.com/ghbmrk/agentos/broker/kernel/key":                true,
+	"github.com/ghbmrk/agentos/broker/clerk/devslot": true,
+	"github.com/ghbmrk/agentos/broker/kernel/key":    true,
 }
+
+// thisRepo prefixes this repository's packages.
+const thisRepo = "github.com/ghbmrk/agentos/"
 
 // allowedStd is every standard package driver code may import: framing,
 // encoding, hashing and crypto primitives, and the language's own helpers.
@@ -324,38 +331,76 @@ func init() {
 	}
 }
 
-// bannedImports lists each standard import off allowedStd made by pkg's own
-// code or any non-standard package it links, except the slot's own, and any
-// such package with Go files the build skipped: a file under a build tag or
-// for another target could import anything once built for the box.
+// listed is the part of go list's JSON the check reads.
+type listed struct {
+	ImportPath string
+	Standard   bool
+	Dir        string
+	GoFiles    []string
+	Imports    []string
+	// Every other source kind: none is allowed in driver code.
+	CgoFiles, CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles, SwigFiles, SwigCXXFiles, SysoFiles,
+	IgnoredGoFiles, IgnoredOtherFiles, EmbedFiles []string
+}
+
+func (p listed) other() []string {
+	var o []string
+	for _, fs := range [][]string{p.CgoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles,
+		p.SwigFiles, p.SwigCXXFiles, p.SysoFiles, p.IgnoredGoFiles, p.IgnoredOtherFiles, p.EmbedFiles} {
+		o = append(o, fs...)
+	}
+	return o
+}
+
+// bannedImports is a lint over the driver's source, not its boundary: the
+// boundary is the sealed per-driver process (part b). For pkg and every
+// non-standard package it links, other than slotSide, it fails:
+//   - any source but plain Go files: assembly, syso objects, C and the other
+//     cgo kinds, and Go or other files the build skipped (a build tag or
+//     another target), since each can reach the kernel with no import;
+//   - a //go:linkname directive in a Go file;
+//   - a standard import off allowedStd;
+//   - an import of any other package of this repository (its tooling, this
+//     package among them, can run processes).
 func bannedImports(pkg string) []string {
-	out, err := exec.Command("go", "list", "-deps", "-f",
-		"{{.ImportPath}}|{{.Standard}}|{{join .Imports \" \"}}|{{join .IgnoredGoFiles \" \"}}{{join .CgoFiles \" \"}}", pkg).CombinedOutput()
+	out, err := exec.Command("go", "list", "-deps", "-json", pkg).Output()
 	if err != nil {
 		return []string{fmt.Sprintf("go list %s: %v", pkg, err)}
 	}
-	type entry struct{ path, imports, ignored string }
+	var pkgs []listed
 	std := map[string]bool{}
-	var own []entry
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.SplitN(line, "|", 4)
-		if len(f) != 4 {
-			continue
+	for d := json.NewDecoder(bytes.NewReader(out)); d.More(); {
+		var p listed
+		if err := d.Decode(&p); err != nil {
+			return []string{fmt.Sprintf("go list %s: %v", pkg, err)}
 		}
-		if f[1] == "true" {
-			std[f[0]] = true
-		} else if !slotSide[f[0]] {
-			own = append(own, entry{f[0], f[2], f[3]})
+		if p.Standard {
+			std[p.ImportPath] = true
+		} else if !slotSide[p.ImportPath] {
+			pkgs = append(pkgs, p)
 		}
 	}
 	var bad []string
-	for _, e := range own {
-		if strings.TrimSpace(e.ignored) != "" {
-			bad = append(bad, e.path+" has files the build skipped or cgo files: "+e.ignored)
+	for _, p := range pkgs {
+		if o := p.other(); len(o) > 0 {
+			bad = append(bad, p.ImportPath+" has source other than plain Go files: "+strings.Join(o, ", "))
 		}
-		for _, imp := range strings.Fields(e.imports) {
-			if (std[imp] || imp == "C" || !strings.Contains(strings.SplitN(imp, "/", 2)[0], ".")) && !allowedStd[imp] {
-				bad = append(bad, e.path+" imports "+imp)
+		for _, f := range p.GoFiles {
+			b, err := os.ReadFile(filepath.Join(p.Dir, f))
+			if err != nil {
+				bad = append(bad, p.ImportPath+": "+f+" unreadable")
+				continue
+			}
+			if bytes.Contains(b, []byte("//go:linkname")) {
+				bad = append(bad, p.ImportPath+": "+f+" has a //go:linkname directive")
+			}
+		}
+		for _, imp := range p.Imports {
+			switch {
+			case strings.HasPrefix(imp, thisRepo) && !slotSide[imp]:
+				bad = append(bad, p.ImportPath+" imports "+imp+", which is not the slot")
+			case (std[imp] || imp == "C" || !strings.Contains(strings.SplitN(imp, "/", 2)[0], ".")) && !allowedStd[imp]:
+				bad = append(bad, p.ImportPath+" imports "+imp)
 			}
 		}
 	}

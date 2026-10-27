@@ -590,20 +590,27 @@ func TestConformanceRejectsBadFixtures(t *testing.T) {
 		drv  devslot.Driver
 		pkgs []string
 		want string
+		// detail, if set, must be in the problem's detail.
+		detail string
 	}{
-		{"undeclared shape", extra{[]byte{0x05, 1}}, nil, "undeclared-write"},
-		{"canary leak", leaker{}, nil, "canary"},
-		{"panicking parser", trusting{}, nil, "panic"},
-		{"unchecked index after the opcode", peeking{}, nil, "panic"},
-		{"canary base64 at another alignment, split", shifted{}, nil, "canary"},
-		{"tls socket", fixture.Driver{}, []string{pkg + "/testdata/tlsdriver"}, "imports"},
-		{"file read through a template", fixture.Driver{}, []string{pkg + "/testdata/filedriver"}, "imports"},
-		{"socket under a build tag", fixture.Driver{}, []string{pkg + "/testdata/tagdriver"}, "imports"},
-		{"own socket", fixture.Driver{}, []string{pkg + "/testdata/netdriver"}, "imports"},
+		{"undeclared shape", extra{[]byte{0x05, 1}}, nil, "undeclared-write", ""},
+		{"canary leak", leaker{}, nil, "canary", ""},
+		{"panicking parser", trusting{}, nil, "panic", ""},
+		{"unchecked index after the opcode", peeking{}, nil, "panic", ""},
+		{"canary base64 at another alignment, split", shifted{}, nil, "canary", ""},
+		{"tls socket", fixture.Driver{}, []string{pkg + "/testdata/tlsdriver"}, "imports", "crypto/tls"},
+		{"file read through a template", fixture.Driver{}, []string{pkg + "/testdata/filedriver"}, "imports", "text/template"},
+		{"socket under a build tag", fixture.Driver{}, []string{pkg + "/testdata/tagdriver"}, "imports", "tagdriver has source other than plain Go files"},
+		{"assembly", fixture.Driver{}, []string{pkg + "/testdata/asmdriver"}, "imports", "trap_amd64.s"},
+		{"linkname", fixture.Driver{}, []string{pkg + "/testdata/linkdriver"}, "imports", "//go:linkname"},
+		{"repository tooling", fixture.Driver{}, []string{pkg + "/testdata/confexec"}, "imports", "conformance, which is not the slot"},
+		{"own socket", fixture.Driver{}, []string{pkg + "/testdata/netdriver"}, "imports", "imports net"},
 	}
 	for _, c := range cases {
 		ps := conformance.Check(c.drv, config(c.pkgs...))
-		if !slices.ContainsFunc(ps, func(p conformance.Problem) bool { return p.Kind == c.want }) {
+		if !slices.ContainsFunc(ps, func(p conformance.Problem) bool {
+			return p.Kind == c.want && strings.Contains(p.Detail, c.detail)
+		}) {
 			t.Errorf("%s: problems %v; want a %s problem", c.name, ps, c.want)
 		}
 	}
