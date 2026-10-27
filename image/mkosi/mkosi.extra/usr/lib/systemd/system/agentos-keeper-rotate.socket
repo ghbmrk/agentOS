@@ -1,0 +1,18 @@
+# The recovery-key rotation's channel (REC-4, route A of D-201; brief MIG-4-recovery-r decision 7): the
+# owner side connects as agentos-owner, and each connection starts one agentos-keeper-rotate@.service,
+# root's one-shot, with the connection as its stdin and stdout. One at a time; the one-shot also takes
+# the store's lock. The card factors cross only this socket and the one-shot's memory.
+[Unit]
+Description=agentOS recovery-key rotation socket
+
+[Socket]
+ListenStream=/run/agentos-keeper/rotate.sock
+SocketUser=root
+SocketGroup=agentos-owner
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=1
+
+[Install]
+WantedBy=sockets.target

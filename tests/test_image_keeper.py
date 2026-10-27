@@ -27,6 +27,8 @@ KEEPER_FILES = tuple("usr/lib/systemd/system/" + n for n in (
     "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf"))
 ENROLL = UNITS / "agentos-keeper-enroll.service"
 KERNEL = UNITS / "agentos-keeper-kernel.service"
+ROTATE = UNITS / "agentos-keeper-rotate@.service"
+ROTATE_SOCKET = UNITS / "agentos-keeper-rotate.socket"
 SYSUSERS = MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf"
 WITH_UIDS = MK / "mkosi.extra/usr/lib/agentos/with-uids"
 TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
@@ -79,9 +81,11 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
 
     def test_the_keeper_is_listed_once(self):
-        self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service"))
+        self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service",
+                                              "agentos-keeper-rotate@.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
-        self.assertEqual(check.TPM_UNITS, check.KEEPER_UNITS + ("agentos-egress.service",))
+        # The recovery-key rotation is the keeper's but opens no TPM (MIG-4-recovery-r2).
+        self.assertEqual(check.TPM_UNITS, check.KEEPER_UNITS[:2] + ("agentos-egress.service",))
         for rel in KEEPER_FILES + tuple(SYSTEM + n for n in check.KEEPER_UNITS):
             self.assertTrue((MK / "mkosi.extra" / rel).is_file(), rel)
         drop = ini(UNITS / "agentos-keeper-.service.d/90-keeper.conf")["Service"]
@@ -512,7 +516,42 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertLess("50-main-side.conf", "99-ci-unmask.conf")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
         for n in check.KEEPER_UNITS:
-            self.assertIn("enable " + n, preset)
+            # A template starts from its socket.
+            self.assertIn("enable " + n.replace("@.service", ".socket"), preset)
+
+    # REQ: REC-4, STO-2
+    def test_the_recovery_rotation_is_one_root_one_shot_per_connection(self):
+        """MIG-4-recovery-r2 (brief decision 7): the owner's group reaches root's one-shot only through its
+        socket, one connection at a time; the one-shot answers on the connection, logs to the journal, has
+        no TPM, and runs a flag the main defines on the store the other keeper units use."""
+        sock = ini(ROTATE_SOCKET)["Socket"]
+        self.assertEqual({k: sock[k] for k in ("ListenStream", "SocketUser", "SocketGroup", "SocketMode", "Accept",
+                                               "MaxConnections")},
+                         {"ListenStream": "/run/agentos-keeper/rotate.sock", "SocketUser": "root",
+                          "SocketGroup": "agentos-owner", "SocketMode": "0660", "Accept": "yes", "MaxConnections": "1"})
+        self.assertNotIn("Service", sock)
+        svc = ini(ROTATE)["Service"]
+        self.assertEqual((svc["StandardInput"], svc["StandardOutput"], svc["StandardError"]),
+                         ("socket", "socket", "journal"))
+        self.assertNotIn("User", svc)
+        self.assertEqual(svc["DevicePolicy"], "closed")
+        self.assertNotIn("DeviceAllow", svc)
+        self.assertNotIn("/dev/tpm", ROTATE.read_text().split("[Service]")[1])
+        for k, v in (("NoNewPrivileges", "yes"), ("LimitCORE", "0"), ("UMask", "0077"), ("PrivateNetwork", "yes"),
+                     ("RestrictAddressFamilies", "AF_UNIX")):
+            self.assertEqual(svc[k], v, k)
+        self.assertTrue(svc["RuntimeMaxSec"].isdigit() and 0 < int(svc["RuntimeMaxSec"]) <= 300)
+        r = exec_args(ROTATE)
+        self.assertEqual(r[:2], ["/usr/lib/agentos/agentos-enroll", "-rotate-recovery"])
+        self.assertEqual(arg(r, "state"), arg(exec_args(ENROLL), "state"))
+        self.assertEqual([w for w in r[1:] if w.startswith("-")], ["-rotate-recovery", "-state"])
+        self.assertTrue({"rotate-recovery", "state"} <= go_flags("agentos-enroll"))
+        self.assertEqual(re.findall(r"^ConditionPathExists=(.*)$", ROTATE.read_text(), re.M),
+                         [arg(r, "state") + "/store"])
+        users = SYSUSERS.read_text()
+        self.assertRegex(users, r"(?m)^u agentos-owner ")
+        # The socket's directory is outside the keeper's state, so the owner side can reach it.
+        self.assertFalse(check.keeper_reach(sock["ListenStream"]))
 
 
 if __name__ == "__main__":

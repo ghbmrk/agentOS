@@ -6073,6 +6073,7 @@ UNIT_DEVICES = {
     "agentos-inbound.service": ("root", "closed"),
     "agentos-keeper-enroll.service": ("root", "closed; /dev/tpmrm0 rw"),
     "agentos-keeper-kernel.service": ("root", "closed; /dev/tpmrm0 rw"),
+    "agentos-keeper-rotate@.service": ("root", "closed"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),

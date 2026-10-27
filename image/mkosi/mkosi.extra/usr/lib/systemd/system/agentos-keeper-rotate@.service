@@ -1,0 +1,31 @@
+# The recovery-key rotation (REC-4, route A of D-201; cmd/agentos-enroll -rotate-recovery): one request
+# from the owner side on the connection, the store opened with the Owner Card factor it carries, the
+# kernel's approval checked with the store's head key, the new recovery slot and backup recipient put in
+# place in one write, and one word back. It needs no TPM: on a running box the tpm slot unseals nothing
+# (#2977), and it never asks it to.
+[Unit]
+Description=agentOS recovery-key rotation
+ConditionPathExists=/var/lib/agentos-store/store
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/agentos-enroll -rotate-recovery -state /var/lib/agentos-store
+StandardInput=socket
+StandardOutput=socket
+# The reasons go to the journal, never to the socket, which gets only the word.
+StandardError=journal
+# A peer that never ends its request holds the one connection no longer than this.
+RuntimeMaxSec=60
+# The store key and the factors live in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# No device but the standard pseudo-devices, and no TPM (#2889).
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
