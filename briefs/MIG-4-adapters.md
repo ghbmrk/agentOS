@@ -1,6 +1,6 @@
 # MIG-4-adapters: the remaining trusted-side ports, cut into one-session rows
 
-Work item: #2579 (sub A row; ours under Mark's 2026-10-25 note on #2578, comment 6396935897). Tier A. This file is the brief for every slice below; each slice is its own work item and its own session. A builder reads **Shared rules** and its own section, nothing else here.
+Work item: #2579 (sub A row; ours under Mark's 2026-10-25 note on #2578, comment 6396935897). Tier A. This file is the brief for every slice below; each slice is its own work item and its own session (a #3424, b #3425, c #3426, d #3427, e #3428, f1 #3429, f2 #3430, g #3431, h #3432, i #3433). A builder reads **Shared rules** and its own section, nothing else here.
 
 ## What is left (main at 90dd141)
 
@@ -44,7 +44,7 @@ Generated from `broker/` with the LANES.md importer command, reduced to director
 - `cmd/agentosd` edits run in the serial agentosd slot (D-111); the coordinator gives the slot.
 - A finding you cannot place in your slice is asked on its issue, not guessed.
 
-## a: delete the dead read side and port route's tests
+## a (#3424): delete the dead read side and port route's tests
 
 **Scope:** `broker/photo/keep/` (delete), `broker/recalltool/` (delete), `broker/recall/backs_append_test.go` (drop its `recalltool` use; if the test only proves recalltool's behaviour, delete it), `broker/route/route_test.go`, `broker/photo/ASSUMPTIONS.md` (rows naming `keep`), `broker/durable/stores.txt`, `tools/g1_scope_g2.txt`, `tools/assumptions_legacy_ids.txt`.
 **Needs:** none. Conflict guard: `tools/g1_scope_g2.txt` is held while an open PR touches it.
@@ -54,7 +54,7 @@ Generated from `broker/` with the LANES.md importer command, reduced to director
 **Acceptance tests:** `broker/route/route_test.go::TestServesFromFirstRouteThroughEgress` (renamed `...ThroughUpstream`) and the failover tests pass with no old-core import in `route` (catches a port that dropped the upstream's key check); `broker/durable/lifecycle_guard_test.go::TestStaleManifestEntryFails` passes (catches a stale `photo/keep` line); `go list -deps ./... | grep -c 'broker/recalltool'` prints 0.
 **Size:** S (mostly deletion; about 9k lines removed).
 
-## b: delete recall and events
+## b (#3425): delete recall and events
 
 **Scope:** `broker/recall/` and `broker/events/` (delete), `broker/durable/stores.txt`, `tools/g1_scope_g2.txt`, `tools/assumptions_legacy_ids.txt`, `tools/risk_tier.py` and `tools/ci_split.py` entries naming them, `tools/old_core.txt` (drop `recall` and `recalltool`).
 **Needs:** a; #2574 (MIG-4-mail deletes `mail`, which imports both) and #2571 (MIG-4-exit deletes `vault`, whose test imports `recall`). If either is still open when the rest is ready, ask on its issue whether its builder drops the import first.
@@ -63,7 +63,7 @@ Generated from `broker/` with the LANES.md importer command, reduced to director
 **Acceptance tests:** none new: `go build ./...` and `go vet ./...` in `broker/` with both directories gone, and `tools/trace.py --ratchet` passing, are the proof (a missed importer fails the build).
 **Size:** S.
 
-## c: the recall directory at rest ends safely
+## c (#3426): the recall directory at rest ends safely
 
 The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd ASSUMPTIONS FD-3, VLC-1, VLC-5, VLC-6). agentosd reads `/var/lib/agentos/recall` at each start to find agent lineages still holding a record the owner deleted, rolls them back and records each in `<machines>/recall-settled.json`.
 
@@ -86,7 +86,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** the six in the matrix, in `broker/cmd/agentosd/recallheld_test.go`, each failing on main's code (main never removes the directory and has no retire step).
 **Size:** M.
 
-## d: modelroute stops writing denials to the journal
+## d (#3427): modelroute stops writing denials to the journal
 
 `modelroute.Journal` turns each denial the model router reports into a `journal.EgressNote`, rate-gated by `journal.EgressGate`; agentosd wires it at `cmd/agentosd/main.go` (`Denied: modelroute.Journal(eng, log.Printf)`). SPEC v1.0 has no denial-audit requirement, and denials are not kernel-admitted steps.
 **Scope:** `broker/modelroute/journal.go` and `journal_test.go` (delete), `broker/modelroute/` files using `egress.ErrNoLogin`, `egress.DeniedHeader`, `egress.CodexAuthFile` (take the constant into `modelroute`, keeping the wire value), `broker/cmd/agentosd/main.go` (the `Denied` hook becomes a coalesced log line: same coalescing rule, written to the service log), `broker/modelroute/ASSUMPTIONS.md`.
@@ -96,7 +96,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** `broker/modelroute/denied_test.go::TestDeniedCoalescedPerMachine` (a guest looping on a refused request logs once per window; catches a hook that floods the service log); `broker/modelroute`: `go list -deps` shows no `journal` or `egress`.
 **Size:** S.
 
-## e: apply activates a release through the kernel
+## e (#3428): apply activates a release through the kernel
 
 `apply` hands a verified release to the A/B activator through a journaled intent (`journal.ActionReleaseActivate`), and commits or drops it after the restart's health check. It is not wired in production yet (#888 wires first-boot; nothing calls `apply.New` outside tests).
 **Scope:** `broker/apply/` (and `apply/activatortest/`), `broker/firstboot/firstboot.go` (+test) only if `Scheduler`'s signature changes, `broker/daemon/arc2_test.go` allowlist (apply may import `broker/kernel` and `broker/clerk`), `broker/apply/ASSUMPTIONS.md`.
@@ -108,7 +108,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** `broker/apply/clerk_test.go::TestActivateOnceAcrossCrash` (catches a second activation after an unknown result), `::TestBusyBoxHoldsActivation` (catches activation during a call, UPD-6), `::TestFallbackAnswersFellBack` (UPD-1), `::TestStepWithoutKeyRefused` (KRN-4); no `journal` in `go list -deps ./apply/...`.
 **Size:** M to L (4.4k lines, about half tests). If the read shows L, split the commit/fallback half off before building.
 
-## f1: follow becomes a clerk
+## f1 (#3429): follow becomes a clerk
 
 `follow` switches the update root of trust to one the owner approved on the local page (by digest of the bytes shown), with an alert at once. Today the approval is a tier-4 `grants.FollowIntent` executed through the journal.
 **Scope:** `broker/follow/` only, `broker/daemon/arc2_test.go` allowlist, `broker/follow/ASSUMPTIONS.md` (if absent, create).
@@ -119,7 +119,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** `broker/follow/clerk_test.go::TestFollowsOnlyTheShownDigest` (catches bytes swapped after the owner saw them), `::TestLookAlikeProjectNameRefused` (#957), `::TestExpiredRootRefusedByGuardClock` (WF2), `::TestFollowOnceAcrossCrash` (KRN-8); no `grants` or `journal` in `go list -deps ./follow/...`.
 **Size:** M.
 
-## f2: the owner's follow approval reaches the kernel
+## f2 (#3430): the owner's follow approval reaches the kernel
 
 **Scope:** `broker/localsrv/localsrv.go` (+test: the follow approval submits a plan whose one step the owner approves at tier 4, instead of a `grants.FollowIntent`), `broker/cmd/agentosd/follow.go` (+test: hosts the follow clerk instead of `cfg.BrokerExecutors[grants.FollowExecutor]`), `broker/daemon/daemon.go`, `unconfirmed.go`, `follow_test.go`, `settle_guard_test.go` (drop the follow executor route).
 **Needs:** f1; the agentosd slot; no open PR on `localsrv` or `daemon` (D-111); the kernel's start-up slice in agentosd (#2682's, merged as #3072).
@@ -128,7 +128,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** `broker/cmd/agentosd/follow_test.go::TestOwnerApprovedFollowRunsOnce` (page approval, kernel admits, clerk switches, owner alerted), `::TestUnapprovedFollowRefused` (catches a follow without the owner's tier-4 approval); `grep -c FollowIntent` over `broker/` prints 0 outside `grants`.
 **Size:** M.
 
-## g: the box e2e off egress
+## g (#3431): the box e2e off egress
 
 `e2e/boxe2e` is the in-image end-to-end run (`image/ci_boot.sh`, `E2E`); `codexstub` stands in for Codex behind `egress.PlanLogins`, `egress.NewWorkerRoute` and `egress.Codex` constants.
 **Scope:** `broker/e2e/boxe2e/` and `broker/e2e/boxe2e/codexstub/`, the e2e unit and drop-ins under `image/` that name egress sockets (only those), `broker/e2e/boxe2e/ASSUMPTIONS.md` if present.
@@ -139,7 +139,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** the image job's e2e boot (`console-e2e.log` verdict line) passes; `broker/e2e/boxe2e/codexstub/stub_test.go` passes with no old-core import (catches a stub that still speaks the old login store).
 **Size:** M.
 
-## h: A5 and A14 rebuilt on the kernel; provagent deleted
+## h (#3432): A5 and A14 rebuilt on the kernel; provagent deleted
 
 `broker/e2e` composes broker packages the way the box does: A5 canary and A14 egress proof (`a14_test.go`), OP-8 routed settlement (`routed_test.go`), Codex containment (`codex_contain_test.go`), and a journal SIM-check (`journal_check_test.go`).
 **Scope:** `broker/e2e/` (all files), `broker/provagent/` (delete), `tools/g1_scope_g2.txt`, `tools/assumptions_legacy_ids.txt`, `tools/risk_tier.py` and `tools/ci_split.py` entries for `provagent`, `broker/durable/stores.txt` if listed.
@@ -150,7 +150,7 @@ The carried release finding (#2579 comments 6365347287 and 6399643797; agentosd 
 **Acceptance tests:** `broker/e2e/a14_test.go::TestA14CanaryThroughTheGuestSocket` rebuilt (catches a canary in any reply, log line or clerk request), `::TestA14PrivatePlannerOffAllowlistRefused` (new; direct, DNS and via a clerk); `broker/e2e/codex_contain_test.go::TestIntegrationCodexContainment` with no old-core import.
 **Size:** L. If the read shows it over one session, split A14 off into its own slice before building.
 
-## i: a8scan scans for the sealed store's secrets
+## i (#3433): a8scan scans for the sealed store's secrets
 
 `cmd/agentos-a8scan` is A8's at-rest check on real hardware: it opens the vault with the recovery key and scans the drive for the vault data key and every secret, in every encoding and alignment.
 **Scope:** `broker/cmd/agentos-a8scan/` (+test), `broker/recovery/A8-SESSION.md` (the command line only).
