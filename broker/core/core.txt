@@ -43,6 +43,10 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The core's end of the edge link (EDGE-link-core c2, #3297; HW-15, HW-16): the
+# link port's process, which asks the kernel about each edge key and signs its
+# handshakes through the kernel; it holds no key.
+wiring cmd/agentos-link
 # The kernel's process (MIG-4-run, #2682): it opens the log, boots the
 # kernel, and carries each call to a clerk's socket. It links no clerk's code
 # (KRN-2 split, #2892).
@@ -63,6 +67,10 @@ wiring cmd/agentos-kernel
 # store, its slots, the log's counter anchor and the TPM pins, and rotates the
 # policy key or deletes the store later.
 wiring cmd/agentos-enroll
+# The mail clerk's process (MAIL-main-a, #3417): its key from the kernel on
+# descriptor 3, the owner's anchors from a file only root writes (D-146), and
+# the kernel's, the owner side's and the planner's sockets.
+wiring cmd/agentos-clerk-mail
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -72,6 +80,10 @@ open clerk.Verify
 # A pure read of the log's view: the live approval of the task a key serves
 # on one site, for a clerk to cover a request with (CLK-3, #2711).
 open kernel.TaskApproved
+# A pure hash naming one backup-destination add (BAK-1, MIG-4-recovery-e4b):
+# the owner side builds the challenge a hardware key signs; the kernel
+# recomputes it and checks the cosign against its own anchors.
+open kernel.BackupTargetHash
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.

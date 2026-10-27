@@ -18,8 +18,7 @@ func newRotRig(t *testing.T, p Parts) *rig {
 	t.Helper()
 	x := &rig{}
 	d, err := NewDisplay(DisplayConfig{
-		Rotate:   &p,
-		WiFiName: rotWiFiName,
+		Rotate: &p,
 		Generate: func(r io.Reader) (*Card, error) {
 			c, err := Generate(r)
 			if err == nil {
@@ -62,9 +61,6 @@ func (x *rig) rotAnswers(p Parts) Answers {
 	}
 	if !p.Passphrase && !p.Recovery {
 		switch {
-		case p.WiFi:
-			n := Normalize(x.gen.WiFiPassword)
-			a.Check = n[len(n)-4:]
 		case p.Setup:
 			a.Check = x.gen.SetupCode
 		case p.Grid:
@@ -84,7 +80,6 @@ func partSecrets(c *Card, p Parts) (in, out map[string]string) {
 			out[name] = v
 		}
 	}
-	put(p.WiFi, "wifi", c.WiFiPassword)
 	put(p.Setup, "setup secret", c.SetupSecret)
 	put(p.Setup, "setup code", c.SetupCode)
 	put(p.Passphrase, "passphrase", c.VaultPassphrase)
@@ -97,11 +92,10 @@ var rotations = []Parts{
 	{Recovery: true},
 	{Passphrase: true},
 	{Passphrase: true, Recovery: true},
-	{WiFi: true},
 	{Setup: true},
 	{Grid: true},
-	{WiFi: true, Grid: true},
-	{WiFi: true, Setup: true, Passphrase: true, Grid: true, Recovery: true},
+	{Setup: true, Grid: true},
+	{Setup: true, Passphrase: true, Grid: true, Recovery: true},
 }
 
 // REC-4 under HW-1's confirm-then-erase: a rotation display shows the new
@@ -129,9 +123,6 @@ func TestRotationDisplayConfirmThenErase(t *testing.T) {
 			}
 			if !bytes.Contains(page, []byte("stay as on your current card")) {
 				t.Fatal("page does not say the other parts stay")
-			}
-			if p.WiFi && !bytes.Contains(page, []byte(rotWiFiName)) {
-				t.Fatal("new Wi-Fi password not shown beside the box's name")
 			}
 
 			w, g := x.d.Asks()
@@ -170,9 +161,6 @@ func TestRotationDisplayConfirmThenErase(t *testing.T) {
 				t.Fatalf("confirmed %v, provisioned %d times", x.d.Confirmed(), len(x.got))
 			}
 			got := x.got[0]
-			if got.WiFiName != rotWiFiName {
-				t.Fatal("provisioned card does not carry the box's Wi-Fi name")
-			}
 			gin, gout := partSecrets(got, p)
 			for name, v := range in {
 				if gin[name] != v {
@@ -218,7 +206,6 @@ func TestRotationPrompt(t *testing.T) {
 		{Recovery: true}:                   "Type group %[2]d of your new recovery key.",
 		{Passphrase: true}:                 "Type word %[1]d of your new vault passphrase.",
 		{Passphrase: true, Recovery: true}: "Type word %[1]d of your new vault passphrase and group %[2]d of your new recovery key.",
-		{WiFi: true}:                       "Type the last four characters of your new Wi-Fi password.",
 		{Setup: true}:                      "Type your new setup code.",
 		{Grid: true}:                       "Type the check code printed under your new grid.",
 	} {
@@ -336,26 +323,17 @@ func contains(ss []string, s string) bool {
 	return false
 }
 
-// rotWiFiName is a synthetic access point name standing for the box's.
-const rotWiFiName = "AGENTOS-TEST1"
-
 func TestRotationNeedsAPart(t *testing.T) {
 	_, err := NewDisplay(DisplayConfig{Rotate: &Parts{}, Provision: func(*Card) error { return nil }})
 	if err == nil {
 		t.Fatal("rotation of nothing shown")
-	}
-	// A new Wi-Fi password is printed beside the box's own name, never a
-	// freshly generated one the access point does not use.
-	_, err = NewDisplay(DisplayConfig{Rotate: &Parts{WiFi: true}, Provision: func(*Card) error { return nil }})
-	if err == nil {
-		t.Fatal("Wi-Fi rotation shown without the box's name")
 	}
 }
 
 // The rotation page posts the check field when neither factor rotates,
 // and its gone page after a discard does not claim a confirm.
 func TestRotationHandler(t *testing.T) {
-	p := Parts{WiFi: true}
+	p := Parts{Setup: true}
 	x := newRotRig(t, p)
 	h := x.d.Handler(paired, "/home")
 	w := do(t, h, "GET", "/rotate/card", nil, true, nil)
@@ -418,23 +396,4 @@ func must(b []byte, err error) []byte {
 		panic(err)
 	}
 	return b
-}
-
-// #1191: a rotation of the Wi-Fi password warns before the confirm that
-// the box's Wi-Fi switches to it, and how to rejoin; a rotation without
-// it does not.
-func TestRotationDisplayWarnsOfTheWiFiSwitch(t *testing.T) {
-	const warn = "my Wi-Fi switches to the new password on this card"
-	for _, tc := range []struct {
-		p    Parts
-		want bool
-	}{{Parts{WiFi: true}, true}, {Parts{WiFi: true, Recovery: true}, true}, {Parts{Recovery: true}, false}} {
-		page, err := newRotRig(t, tc.p).d.Page()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Contains(string(page), warn); got != tc.want {
-			t.Fatalf("%+v: warning shown %v", tc.p, got)
-		}
-	}
 }

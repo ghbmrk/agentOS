@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -45,13 +46,26 @@ func (f *flakyContent) Delete(h kernel.Hash) error {
 	return f.MemContent.Delete(h)
 }
 
+// downLog is a log store whose writes can be made to fail.
+type downLog struct {
+	kernel.MemStore
+	down bool
+}
+
+func (d *downLog) Append(b []byte) error {
+	if d.down {
+		return errDown
+	}
+	return d.MemStore.Append(b)
+}
+
 // erig is a kernel with a key table and two content stores, whose log
 // survives a reboot. Its nonce stream runs on across boots, so a subject
 // opened after a reboot is not drawn again.
 type erig struct {
 	t      *testing.T
 	head   pair
-	log    *kernel.MemStore
+	log    *downLog
 	anchor *flakyAnchor
 	rnd    *rand.ChaCha8
 	keys   *flakyKeys
@@ -61,7 +75,7 @@ type erig struct {
 }
 
 func newErig(t *testing.T) *erig {
-	r := &erig{t: t, head: gen(3), log: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}},
+	r := &erig{t: t, head: gen(3), log: &downLog{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}},
 		rnd: rand.NewChaCha8([32]byte{9}), keys: &flakyKeys{MemKeys: kernel.NewMemKeys()},
 		mail: &flakyContent{MemContent: kernel.NewMemContent()}, notes: &flakyContent{MemContent: kernel.NewMemContent()}}
 	r.boot()
@@ -543,4 +557,133 @@ func TestARetryAfterTheClockStepsBack(t *testing.T) {
 		t.Fatalf("held after the clock stepped back: %+v", u)
 	}
 	r.replays()
+}
+
+// ReadFor logs content.read before it opens the item, so a failing log
+// write returns no plaintext; after the erase, ErasedReads names each
+// reader at its first read, and a later read does not move it. A delivery
+// that leaves no record fails here (LOG-4, D-169).
+func TestReadForLogsBeforeItOpens(t *testing.T) {
+	r := newErig(t)
+	s, kept := r.open(), r.open()
+	h := r.seal(s, "mail", "message", "lunch on Tuesday")
+	h2 := r.seal(s, "notes", "message", "dinner")
+	k2 := r.seal(kept, "notes", "message", "kept")
+	r.log.down = true
+	if pt, err := r.k.ReadFor(5, h, "lin-a"); err == nil || pt != nil {
+		t.Fatalf("a read whose entry was not written: %q, %v", pt, err)
+	}
+	r.log.down = false
+	r.boot() // a failed write needs a reopen
+	if r.count(kernel.TContentRead) != 0 {
+		t.Fatal("a failed write left a content.read")
+	}
+	if pt, err := r.k.ReadFor(6, h, "lin-a"); err != nil || string(pt) != "lunch on Tuesday" {
+		t.Fatalf("read for lin-a: %q, %v", pt, err)
+	}
+	if _, err := r.k.ReadFor(7, h2, "lin-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.k.ReadFor(8, h2, "lin-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.k.ReadFor(8, k2, "lin-c"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.k.State().ErasedReads(); got != nil {
+		t.Fatalf("reads of live subjects are listed: %+v", got)
+	}
+	for _, bad := range []string{"", strings.Repeat("l", 129), "a\nb"} {
+		if _, err := r.k.ReadFor(9, h, bad); !errors.Is(err, kernel.ErrLineage) {
+			t.Fatalf("lineage %q: %v", bad, err)
+		}
+	}
+	if _, err := r.k.ReadFor(9, kernel.Hash{1}, "lin-a"); !errors.Is(err, kernel.ErrItem) {
+		t.Fatalf("an unknown item: %v", err)
+	}
+	if _, err := r.k.Erase(10, s); err != nil {
+		t.Fatal(err)
+	}
+	n := r.count(kernel.TContentRead)
+	if _, err := r.k.ReadFor(11, h, "lin-d"); !errors.Is(err, kernel.ErrErased) || r.count(kernel.TContentRead) != n {
+		t.Fatalf("a read after the erase: %v, logged %d", err, r.count(kernel.TContentRead)-n)
+	}
+	want := []kernel.ErasedRead{{Subject: s, Lineage: "lin-a", First: 6}, {Subject: s, Lineage: "lin-b", First: 8}}
+	if got := r.k.State().ErasedReads(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("erased reads %+v, want %+v", got, want)
+	}
+	r.replays()
+	r.boot()
+	if got := r.k.State().ErasedReads(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("after a restart %+v, want %+v", got, want)
+	}
+}
+
+// A replayed state equals the live one, ErasedReads included, also for
+// reads that were not anchored (LOG-1).
+func TestErasedReadsRebuildFromEmpty(t *testing.T) {
+	r := newErig(t)
+	a, b := r.open(), r.open()
+	ha := r.seal(a, "mail", "message", "a")
+	hb := r.seal(b, "notes", "message", "b")
+	for _, c := range []struct {
+		h kernel.Hash
+		l string
+	}{{ha, "x"}, {hb, "x"}, {ha, "y"}, {ha, "x"}} {
+		if _, err := r.k.ReadFor(4, c.h, c.l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(t, r.k.Log().Anchor())
+	if _, err := r.k.ReadFor(5, hb, "z"); err != nil {
+		t.Fatal(err)
+	}
+	r.k.Erase(6, a)
+	r.k.Erase(7, b)
+	r.replays()
+	re, err := kernel.Replay(nil, r.k.Log().Entries())
+	must(t, err)
+	want := []kernel.ErasedRead{{Subject: a, Lineage: "x", First: 4}, {Subject: a, Lineage: "y", First: 4},
+		{Subject: b, Lineage: "x", First: 4}, {Subject: b, Lineage: "z", First: 5}}
+	slices.SortFunc(want, func(p, q kernel.ErasedRead) int { return strings.Compare(p.Subject+p.Lineage, q.Subject+q.Lineage) })
+	if got := re.ErasedReads(); !reflect.DeepEqual(got, want) || !reflect.DeepEqual(got, r.k.State().ErasedReads()) {
+		t.Fatalf("replayed %+v, live %+v, want %+v", got, r.k.State().ErasedReads(), want)
+	}
+}
+
+// content.read is known at version 1, does not widen, and Rederive folds
+// it as given (LOG-5).
+func TestContentReadIsKnownAndNarrowing(t *testing.T) {
+	if !kernel.Known(kernel.TContentRead, 1) || kernel.Known(kernel.TContentRead, 2) || kernel.Widening(kernel.TContentRead) {
+		t.Fatal("content.read is not a known narrowing entry at version 1")
+	}
+	r := newErig(t)
+	s := r.open()
+	h := r.seal(s, "mail", "message", "a")
+	if _, err := r.k.ReadFor(3, h, "lin"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := kernel.Rederive(nil, r.k.Box(), r.k.Log().Entries())
+	must(t, err)
+	if got.Recorded[kernel.TContentRead] != 1 {
+		t.Fatalf("rederive %+v", got)
+	}
+}
+
+// Named folds case and collapses whitespace: "alice  smith" finds "Alice
+// Smith", and "Alicia" does not.
+func TestNamedFoldsCaseAndSpace(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "mail", kernel.ClassLabel, "Alice Smith")
+	for _, q := range []string{"alice  smith", " ALICE\tSmith ", "Alice Smith"} {
+		if got, _, err := r.k.Named(q); err != nil || !slices.Equal(got, []string{s}) {
+			t.Errorf("named %q: %v, %v", q, got, err)
+		}
+	}
+	for _, q := range []string{"Alicia", "Alice", "alicesmith"} {
+		if got, _, err := r.k.Named(q); err != nil || got != nil {
+			t.Errorf("named %q found %v, %v", q, got, err)
+		}
+	}
 }

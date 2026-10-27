@@ -40,7 +40,7 @@ func synthCard(t *testing.T, rk recovery.RecoveryKey) recovery.Card {
 	t.Helper()
 	seed := make([]byte, 32)
 	rand.Read(seed)
-	return recovery.Card{WiFiName: "AgentOS-TEST", WiFiPassword: synthetic(t, "wifi-canary-"),
+	return recovery.Card{
 		SetupSecret: synthetic(t, "setup-canary-"), SetupCode: "TEST-CODE", GridSeed: seed, RecoveryKey: rk.Text()}
 }
 
@@ -151,46 +151,52 @@ func (x *cardRig) commit(t *testing.T, next rotateCommit) (int, map[string]any) 
 	return x.call("POST", "/rotate/commit", next)
 }
 
-// nextWiFiGrid is a new card's Wi-Fi password and grid.
-func nextWiFiGrid(t *testing.T) rotateCommit {
-	seed := make([]byte, 32)
-	rand.Read(seed)
-	return rotateCommit{WiFiPassword: synthetic(t, "wifi-next-"), GridSeed: seed}
+// nextSetup is a new card's setup secret and code.
+func nextSetup(t *testing.T) rotateCommit {
+	return rotateCommit{SetupSecret: synthetic(t, "setup-next-"), SetupCode: "NEXT-CODE"}
+}
+
+// nextSetupGrid is a new card's setup secret and code, and grid.
+func nextSetupGrid(t *testing.T) rotateCommit {
+	n := nextSetup(t)
+	n.GridSeed = make([]byte, 32)
+	rand.Read(n.GridSeed)
+	return n
 }
 
 // REC-4, CH-3: with the vault open and a fresh approval code, the vault
 // process rotates the chosen parts through the recovery package; the
 // stored card changes only once the commit arrives.
-func TestRotateWiFiAndGridOverTheSocket(t *testing.T) {
+func TestRotateSetupAndGridOverTheSocket(t *testing.T) {
 	x := newCardRig(t)
 	x.open(t)
-	code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi", "grid"}})
+	code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup", "grid"}})
 	if code != http.StatusOK {
 		t.Fatalf("begin: %d %v", code, out)
 	}
-	if out["wifi_name"] != x.card.WiFiName || out["expires"] == nil {
+	if out["wifi_name"] != nil || out["expires"] == nil {
 		t.Fatalf("begin reply: %v", out)
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != x.card.SetupSecret {
 		t.Fatal("begin changed the card")
 	}
-	next := nextWiFiGrid(t)
+	next := nextSetupGrid(t)
 	code, out = x.commit(t, next)
 	if code != http.StatusOK {
 		t.Fatalf("commit: %d %v", code, out)
 	}
 	got := x.stored(t, x.rk)
-	if got.WiFiPassword != next.WiFiPassword || string(got.GridSeed) != string(next.GridSeed) || got.SetupSecret != x.card.SetupSecret {
+	if got.SetupSecret != next.SetupSecret || got.SetupCode != next.SetupCode || string(got.GridSeed) != string(next.GridSeed) {
 		t.Fatal("the stored card is not the new one")
 	}
 	if notes, _ := out["notes"].([]any); len(notes) == 0 {
 		t.Fatalf("no done notes: %v", out)
 	}
 	if _, ok := out["enrollment"]; ok {
-		t.Fatal("a Wi-Fi and grid rotation replaced the code generator")
+		t.Fatal("a setup and grid rotation replaced the code generator")
 	}
 	// The pending rotation is spent.
-	if code, _ := x.commit(t, nextWiFiGrid(t)); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetupGrid(t)); code != http.StatusGone {
 		t.Fatalf("second commit: %d", code)
 	}
 }
@@ -199,12 +205,12 @@ func TestRotateWiFiAndGridOverTheSocket(t *testing.T) {
 // refused, counted and told to the owner; a code works once.
 func TestRotateBeginNeedsTheOpenVaultAndACode(t *testing.T) {
 	x := newCardRig(t)
-	if code, _ := x.begin(t, map[string]any{"code": x.code(), "parts": []string{"wifi"}}); code != http.StatusConflict {
+	if code, _ := x.begin(t, map[string]any{"code": x.code(), "parts": []string{"setup"}}); code != http.StatusConflict {
 		t.Fatalf("locked: %d", code)
 	}
 	x.open(t)
 	x.notes = nil
-	if code, _ := x.begin(t, map[string]any{"code": "000000", "parts": []string{"wifi"}}); code != http.StatusForbidden {
+	if code, _ := x.begin(t, map[string]any{"code": "000000", "parts": []string{"setup"}}); code != http.StatusForbidden {
 		t.Fatalf("wrong code: %d", code)
 	}
 	if len(x.notes) != 1 || !strings.Contains(x.notes[0], "card rotation") {
@@ -214,13 +220,13 @@ func TestRotateBeginNeedsTheOpenVaultAndACode(t *testing.T) {
 		t.Fatalf("wrong code not counted: %v", x.c.st.Wrong)
 	}
 	c := x.next()
-	if code, _ := x.begin(t, map[string]any{"code": c, "parts": []string{"wifi"}}); code != http.StatusOK {
+	if code, _ := x.begin(t, map[string]any{"code": c, "parts": []string{"setup"}}); code != http.StatusOK {
 		t.Fatalf("good code: %d", code)
 	}
-	if code, _ := x.begin(t, map[string]any{"code": c, "parts": []string{"wifi"}}); code == http.StatusOK {
+	if code, _ := x.begin(t, map[string]any{"code": c, "parts": []string{"setup"}}); code == http.StatusOK {
 		t.Fatal("a code was used twice")
 	}
-	for _, parts := range [][]string{nil, {"wifi", "keyboard"}} {
+	for _, parts := range [][]string{nil, {"wifi"}, {"setup", "keyboard"}} {
 		if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": parts}); code != http.StatusBadRequest {
 			t.Fatalf("parts %v: %d", parts, code)
 		}
@@ -234,21 +240,21 @@ func TestRotateBeginNeedsTheOpenVaultAndACode(t *testing.T) {
 func TestRotateCommitOutcomes(t *testing.T) {
 	x := newCardRig(t)
 	x.open(t)
-	if code, _ := x.commit(t, nextWiFiGrid(t)); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetupGrid(t)); code != http.StatusGone {
 		t.Fatalf("no rotation: %d", code)
 	}
 	begin := func() {
 		t.Helper()
-		if code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi", "grid"}}); code != http.StatusOK {
+		if code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup", "grid"}}); code != http.StatusOK {
 			t.Fatalf("begin: %d %v", code, out)
 		}
 	}
 	// A card that does not fit: kept for a retry.
 	begin()
-	if code, _ := x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")}); code != http.StatusBadRequest {
+	if code, _ := x.commit(t, nextSetup(t)); code != http.StatusBadRequest {
 		t.Fatalf("misfit: %d", code)
 	}
-	if code, _ := x.commit(t, nextWiFiGrid(t)); code != http.StatusOK {
+	if code, _ := x.commit(t, nextSetupGrid(t)); code != http.StatusOK {
 		t.Fatalf("retry after misfit: %d", code)
 	}
 	// Cancelled.
@@ -256,16 +262,16 @@ func TestRotateCommitOutcomes(t *testing.T) {
 	if code := x.cancel(t); code != http.StatusNoContent {
 		t.Fatalf("cancel: %d", code)
 	}
-	if code, _ := x.commit(t, nextWiFiGrid(t)); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetupGrid(t)); code != http.StatusGone {
 		t.Fatalf("after cancel: %d", code)
 	}
 	// Lapsed by the clock (Pending's own expiry).
 	begin()
 	x.clk.add(recovery.PendingTTL + time.Second)
-	if code, out := x.commit(t, nextWiFiGrid(t)); code != http.StatusGone || !strings.Contains(out["error"].(string), "lapsed") {
+	if code, out := x.commit(t, nextSetupGrid(t)); code != http.StatusGone || !strings.Contains(out["error"].(string), "lapsed") {
 		t.Fatalf("lapsed: %d %v", code, out)
 	}
-	if code, _ := x.commit(t, nextWiFiGrid(t)); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetupGrid(t)); code != http.StatusGone {
 		t.Fatal("a lapsed rotation stayed")
 	}
 }
@@ -282,7 +288,7 @@ func (x *cardRig) cancel(t *testing.T) int {
 func TestRotateTimerAndLockDropThePendingRotation(t *testing.T) {
 	x := newCardRig(t)
 	x.open(t)
-	if code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+	if code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup"}}); code != http.StatusOK {
 		t.Fatalf("begin: %d %v", code, out)
 	}
 	if len(x.fires) != 1 || x.ttls[0] != recovery.PendingTTL {
@@ -299,12 +305,12 @@ func TestRotateTimerAndLockDropThePendingRotation(t *testing.T) {
 	if _, err := p.Commit(&recovery.Box{V: nil}, recovery.Card{}, x.clk.now()); !errors.Is(err, recovery.ErrPendingLapsed) {
 		t.Fatalf("dropped Pending: %v", err)
 	}
-	if code, _ := x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")}); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetup(t)); code != http.StatusGone {
 		t.Fatalf("after timer: %d", code)
 	}
 
 	// A timer from an earlier rotation does not drop a later one.
-	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup"}}); code != http.StatusOK {
 		t.Fatal("begin again")
 	}
 	x.fires[0]()
@@ -318,7 +324,7 @@ func TestRotateTimerAndLockDropThePendingRotation(t *testing.T) {
 	}
 	x.clk.add(30 * time.Second) // a new code step: each code opens once
 	x.open(t)
-	if code, _ := x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")}); code != http.StatusGone {
+	if code, _ := x.commit(t, nextSetup(t)); code != http.StatusGone {
 		t.Fatalf("after lock: %d", code)
 	}
 }
@@ -429,7 +435,7 @@ func TestRotateCommitPartWayIsInEffect(t *testing.T) {
 	x.c.host = nil
 	x.c.mu.Unlock()
 	// The next rotation must replace what is owed.
-	code, out = x.begin(t, map[string]any{"recovery": nk.Text(), "parts": []string{"wifi"}})
+	code, out = x.begin(t, map[string]any{"recovery": nk.Text(), "parts": []string{"setup"}})
 	if code != http.StatusConflict || !strings.Contains(out["error"].(string), "also replace") {
 		t.Fatalf("owed: %d %v", code, out)
 	}
@@ -443,7 +449,7 @@ func TestRotateWithoutACard(t *testing.T) {
 	if err := r.c.confirm(tk, r.code()); err != nil {
 		t.Fatal(err)
 	}
-	code, out := handlerCall(t, r.c)("POST", "/rotate/begin", map[string]any{"id": newRotationID(), "code": r.next(), "parts": []string{"wifi"}})
+	code, out := handlerCall(t, r.c)("POST", "/rotate/begin", map[string]any{"id": newRotationID(), "code": r.next(), "parts": []string{"setup"}})
 	if code != http.StatusConflict {
 		t.Fatalf("no card: %d %v", code, out)
 	}
@@ -467,7 +473,7 @@ func TestRotateOpsCarryTheirRotationID(t *testing.T) {
 	x := newCardRig(t)
 	x.open(t)
 	for _, id := range []any{nil, "", "short", strings.Repeat("G", 32), strings.Repeat("A", 32)} {
-		body := map[string]any{"code": x.next(), "parts": []string{"wifi"}}
+		body := map[string]any{"code": x.next(), "parts": []string{"setup"}}
 		if id != nil {
 			body["id"] = id
 		}
@@ -476,21 +482,21 @@ func TestRotateOpsCarryTheirRotationID(t *testing.T) {
 			t.Fatalf("begin with id %v: %d", id, code)
 		}
 	}
-	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup"}}); code != http.StatusOK {
 		t.Fatal("begin A")
 	}
 	a := x.id
-	code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}})
+	code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup"}})
 	if code != http.StatusOK || out["id"] != x.id {
 		t.Fatalf("begin B: %d %v", code, out)
 	}
 	b := x.id
-	late := nextWiFiGrid(t)
-	late.ID, late.GridSeed = a, nil
+	late := nextSetup(t)
+	late.ID = a
 	if code, _ := x.commit(t, late); code != http.StatusGone {
 		t.Fatalf("late commit: %d", code)
 	}
-	if code, _ := x.commit(t, rotateCommit{ID: strings.Repeat("0", 32), WiFiPassword: synthetic(t, "wifi-next-")}); code != http.StatusGone {
+	if code, _ := x.commit(t, rotateCommit{ID: strings.Repeat("0", 32), SetupSecret: synthetic(t, "setup-next-"), SetupCode: "NEXT-CODE"}); code != http.StatusGone {
 		t.Fatalf("unknown id commit: %d", code)
 	}
 	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{"id": a}); code != http.StatusGone {
@@ -499,21 +505,21 @@ func TestRotateOpsCarryTheirRotationID(t *testing.T) {
 	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{}); code != http.StatusGone {
 		t.Fatalf("cancel without id: %d", code)
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != x.card.SetupSecret {
 		t.Fatal("a stale op changed the card")
 	}
 	// B still waits, and its own commit lands B's values.
-	next := rotateCommit{ID: b, WiFiPassword: synthetic(t, "wifi-next-")}
+	next := rotateCommit{ID: b, SetupSecret: synthetic(t, "setup-next-"), SetupCode: "NEXT-CODE"}
 	if code, out := x.commit(t, next); code != http.StatusOK {
 		t.Fatalf("commit B: %d %v", code, out)
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != next.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != next.SetupSecret {
 		t.Fatal("B's commit did not land")
 	}
 
 	// The page gave up on begin D and cancelled it before D arrived; C
 	// is waiting. D must not drop C.
-	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"setup"}}); code != http.StatusOK {
 		t.Fatal("begin C")
 	}
 	c := x.id
@@ -521,7 +527,7 @@ func TestRotateOpsCarryTheirRotationID(t *testing.T) {
 	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{"id": d}); code != http.StatusGone {
 		t.Fatalf("early cancel: %d", code)
 	}
-	if code, out := x.begin(t, map[string]any{"id": d, "code": x.next(), "parts": []string{"wifi"}}); code != http.StatusGone {
+	if code, out := x.begin(t, map[string]any{"id": d, "code": x.next(), "parts": []string{"setup"}}); code != http.StatusGone {
 		t.Fatalf("begin after its cancel: %d %v", code, out)
 	}
 	x.c.rot.mu.Lock()

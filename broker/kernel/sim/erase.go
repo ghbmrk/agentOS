@@ -1,21 +1,25 @@
 package sim
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"slices"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // SIM-erase (docs/migration/cases.md §4): a forget reaches every derived
 // view exactly once. RunErase opens subjects, seals their items into two
-// stores, then erases some of them with a crash at the nth durable write of
+// stores, has agent lineages read some of them (ReadFor), then erases some of them with a crash at the nth durable write of
 // the erase phase (the log, the key table or a store), reboots, lets the
 // owner erase again whatever the crash left unlogged, and ticks until done.
-// Stores also fail deletes now and then, for a while.
+// Stores also fail deletes now and then, for a while, and lineages keep
+// reading throughout, so a crash also falls on a read's entry.
 
 // machine counts durable writes and crashes at the armed one: that write
 // does not land, and none does until the reboot.
@@ -142,6 +146,7 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 
 	subs := make([]string, 2+rng.IntN(3))
 	items := map[kernel.Hash]simItem{}
+	var order []kernel.Hash // items in the order sealed, for a seeded pick
 	for i := range subs {
 		now++
 		s, err := k.OpenSubject(now)
@@ -157,6 +162,32 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 				return EraseResult{}, err
 			}
 			items[h] = simItem{text, s, store}
+			order = append(order, h)
+		}
+	}
+	// firsts is each lineage's first read of a subject that returned its
+	// plaintext: every one must be in the log, so ErasedReads names it.
+	firsts := map[[2]string]int64{}
+	readOne := func() error {
+		h := order[rng.IntN(len(order))]
+		l := fmt.Sprintf("lineage-%d", rng.IntN(3))
+		pt, err := k.ReadFor(now, h, l)
+		if err != nil {
+			return nil
+		}
+		if string(pt) != items[h].text {
+			return errors.New("invariant: a read gave another item's text")
+		}
+		key := [2]string{items[h].subject, l}
+		if _, ok := firsts[key]; !ok {
+			firsts[key] = now
+		}
+		return nil
+	}
+	for range len(order) {
+		now++
+		if err := readOne(); err != nil {
+			return EraseResult{}, err
 		}
 	}
 	gone := map[string]bool{}
@@ -180,6 +211,9 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 					k.Erase(now, s) // the owner asks again: the first did not land
 				}
 			}
+			if err := readOne(); err != nil {
+				return err
+			}
 			if err := k.Tick(now); err != nil && !errors.Is(err, errCrash) {
 				return err
 			}
@@ -199,7 +233,28 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	if err := settle(kernel.RetryMax); err != nil {
 		return res, err
 	}
-	return res, judgeErase(k, keys, stores, subs, gone, items)
+	if err := judgeErase(k, keys, stores, subs, gone, items); err != nil {
+		return res, err
+	}
+	return res, judgeReads(k, gone, firsts)
+}
+
+// judgeReads checks that ErasedReads names each lineage that read an
+// erased subject exactly once, at its first read, and nothing else.
+func judgeReads(k *kernel.Kernel, gone map[string]bool, firsts map[[2]string]int64) error {
+	var want []kernel.ErasedRead
+	for c, at := range firsts {
+		if gone[c[0]] {
+			want = append(want, kernel.ErasedRead{Subject: c[0], Lineage: c[1], First: at})
+		}
+	}
+	slices.SortFunc(want, func(a, b kernel.ErasedRead) int {
+		return cmp.Or(strings.Compare(a.Subject, b.Subject), strings.Compare(a.Lineage, b.Lineage))
+	})
+	if got := k.State().ErasedReads(); !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("invariant: erased reads %+v, want %+v", got, want)
+	}
+	return nil
 }
 
 // judgeErase checks the end state against the log and the stores, without

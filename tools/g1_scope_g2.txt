@@ -47,6 +47,9 @@ exempt-pr 3310
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
+# #3460 (EDGE-link-core c2a, #3297): its new broker/cmd/agentos-link/ is added here by #3460
+# itself, which main cannot carry until the directory exists (D-198). Remove once it merges.
+exempt-pr 3460
 
 # Project machinery and records.
 allow .claude/
@@ -98,6 +101,7 @@ allow broker/vendor/
 # and the sealed store's kernel, unlock and enrollment steps (STO-2b-1 #2896, STO-2c-i #2957).
 allow broker/cmd/agentos-ap/
 allow broker/cmd/agentos-checker/
+allow broker/cmd/agentos-clerk-mail/
 allow broker/cmd/agentos-clock-boot/
 allow broker/cmd/agentos-egress/
 allow broker/cmd/agentos-enroll/
@@ -106,6 +110,7 @@ allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/
 allow broker/cmd/agentos-infer/
 allow broker/cmd/agentos-kernel/
+allow broker/cmd/agentos-link/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
 allow broker/cmd/agentos-netjoin/
@@ -140,6 +145,7 @@ allow broker/clock/
 allow broker/control/
 allow broker/daemon/
 allow broker/durable/
+allow broker/edgelink/
 allow broker/egress/
 allow broker/events/
 allow broker/firstboot/

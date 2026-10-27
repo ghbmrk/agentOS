@@ -8,7 +8,8 @@ on that owner's drive. A planted socket file could look like a broker socket ins
 It also refuses a tree that could write the broker's memory to disk (IMG-nodump): the Owner Card
 passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
 there must be no swap. And it refuses a tree that could turn Wi-Fi on (D-178): the radio's firmware,
-the regulatory database, hostapd, dnsmasq, or the access point and join commands and units; or one
+the regulatory database, hostapd, dnsmasq, NetworkManager, wpa_supplicant, or the access point and
+join commands and units; or one
 that lets the controller chip's Bluetooth half load.
 It refuses a tree whose networkd could forward or masquerade (#1478): the inbound drop has no
 forward hook, so the wired uplink file is the only live .network file, it holds exactly the shipped
@@ -72,13 +73,15 @@ RADIO_FIRMWARE = ("usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
                   "usr/lib/firmware/regulatory.db", "usr/lib/firmware/regulatory.db.p7s")
 # The kernel's firmware loader also tries these suffixes (Debian's kernel enables both).
 FIRMWARE_SUFFIXES = ("", ".xz", ".zst")
-# Nor what serves or joins a network: Debian's access point and its DHCP and DNS server, wherever
-# the box would run them from, and the former access point loader and home Wi-Fi helper (#825, #1388)
-# with their units.
-WIFI_COMMANDS = ("hostapd", "hostapd_cli", "dnsmasq")
+# Nor what serves or joins a network: Debian's access point and its DHCP and DNS server, its Wi-Fi
+# clients (NetworkManager and wpa_supplicant, #3387; systemd-networkd is the only network manager),
+# wherever the box would run them from, and the former access point loader and home Wi-Fi helper
+# (#825, #1388) with their units.
+WIFI_COMMANDS = ("hostapd", "hostapd_cli", "dnsmasq", "NetworkManager", "nmcli", "wpa_supplicant", "wpa_cli")
 WIFI_COMMAND_DIRS = ("usr/sbin", "usr/bin")
 WIFI_AGENTOS = ("usr/lib/agentos/agentos-ap", "usr/lib/agentos/agentos-netjoin")
-WIFI_UNITS = ("agentos-ap.service", "agentos-netjoin.service", "hostapd.service")
+WIFI_UNITS = ("agentos-ap.service", "agentos-netjoin.service", "hostapd.service", "NetworkManager.service",
+              "wpa_supplicant.service", "wpa_supplicant@.service")
 # The same chip's Bluetooth half, which nothing uses: these modules must never load (#1415).
 BLOCKED_MODULES = ("btusb", "btmtk")
 # kmod 34's modprobe.d directories (default_config_paths in libkmod/libkmod.c), highest precedence
@@ -100,39 +103,6 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
 # class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
-# #936 (r4a): NetworkManager manages only the station r4b creates. Everything it reads at start is
-# pinned here: NM_ROOTS are the places it reads configuration from (main file, conf.d, the state
-# directory's intern file), and the only file that may exist in them is NM_FILES, whose keys are
-# NM_KEYS (each set once, to exactly this value) and a keyfile path under /run only (STO-2). A closed
-# list (dispatcher scripts too), so a file NetworkManager reads under another name (nm-system-settings.conf, NetworkManager-
-# intern.conf) is refused too. No connection location, and the unit passes no --config flag.
-NM_PRESENT = ("usr/sbin/NetworkManager", "usr/lib/NetworkManager/conf.d")
-NM_ROOTS = ("etc/NetworkManager", "usr/lib/NetworkManager/conf.d", "usr/lib/NetworkManager/dispatcher.d",
-            "run/NetworkManager/conf.d", "var/lib/NetworkManager")
-NM_FILES = ("usr/lib/NetworkManager/conf.d/50-agentos.conf",)
-NM_CONNECTIONS = ("etc/NetworkManager/system-connections", "run/NetworkManager/system-connections",
-                  "usr/lib/NetworkManager/system-connections")
-# The unit is closed the same way: after systemd's lookup (every unit directory, every name that
-# links to it, every drop-in directory) the only drop-in is NM_DROPIN with exactly NM_DROPIN_TEXT,
-# ExecStart is NM_EXEC and nothing sets Environment or EnvironmentFile, so no flag, plugin or
-# expanded variable reaches NetworkManager. tests/test_image_nm.py holds the shipped file to the text.
-NM_UNIT = "NetworkManager.service"
-NM_EXEC = "/usr/sbin/NetworkManager --no-daemon"
-NM_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
-NM_DROPIN_TEXT = (b"# Never without the inbound drop (DEV-net-e 2a): if it failed to load, this does not start.\n"
-                  b"[Unit]\nRequires=agentos-inbound.service\nAfter=agentos-inbound.service\n")
-# #2622: NetworkManager's state directory (DHCP leases, seen BSSIDs, timestamps, secret_key,
-# NetworkManager.state) is a tmpfs in its own mount namespace, so none of it reaches the drive.
-NM_STATE_DROPIN = "usr/lib/systemd/system/NetworkManager.service.d/agentos-state.conf"
-NM_STATE_TEXT = (b"# NetworkManager's state stays in RAM, never on the drive (#2622): leases, seen BSSIDs and\n"
-                 b"# secret_key are gone at every stop.\n"
-                 b"[Service]\nTemporaryFileSystem=/var/lib/NetworkManager:mode=0700,nosuid,nodev,noexec\n")
-NM_DROPINS = {NM_DROPIN: NM_DROPIN_TEXT, NM_STATE_DROPIN: NM_STATE_TEXT}
-NM_KEYS = {("main", "plugins"): "keyfile", ("main", "no-auto-default"): "*",
-           ("main", "dns"): "systemd-resolved", ("main", "auth-polkit"): "true",
-           ("keyfile", "unmanaged-devices"): "*,except:interface-name:wlsta0",
-           ("connectivity", "enabled"): "false"}
-NM_PATH = ("keyfile", "path")
 
 FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
 GLOB = re.compile(r"[*?\[]")
@@ -316,7 +286,7 @@ def _violations(root):
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
-            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + noexec_violations(root) + keeper_violations(root) + assembly_violations(root))
@@ -2395,7 +2365,7 @@ def exec_entries(root):
     that wins its name: a generator that is not executable is skipped without taking the name, so a
     winner-only list could miss the one that runs. A directory is resolved inside the image (lib is
     usr/lib's link), and each file is listed once under its in-image path. Then every entry under
-    POLICY_DIRS, each of POLICY_FILES, and NetworkManager's unit file as systemd resolves it (#2622)."""
+    POLICY_DIRS and each of POLICY_FILES (#2622)."""
     root, seen = str(root), set()
     for f in exec_files(root):
         if f.rel in seen:
@@ -2426,7 +2396,7 @@ def exec_files(root):
             yield Conf(root, d, "not a directory; the tree check reads only a directory")
             continue
         out = []
-        for rel, st in nm_walk(root, path, out):
+        for rel, st in policy_walk(root, path, out):
             if not stat.S_ISDIR(st.st_mode):
                 yield Conf(root, rel)
         for e in out:
@@ -2434,10 +2404,6 @@ def exec_files(root):
     for rel in POLICY_FILES:
         if entry_mode(root, rel):
             yield Conf(root, rel)
-    if any(entry_mode(root, rel) for rel in NM_PRESENT):
-        unit = nm_unit(root)
-        if unit is not None:
-            yield unit
 
 
 def exec_allowed(path=None):
@@ -2481,9 +2447,8 @@ EXEC_ALLOW_HEADER = """\
 # Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
-# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, the
-# D-Bus system.conf, system.d and system-services files, and NetworkManager's unit file as systemd
-# resolves it. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
+# D-Bus system.conf, system.d and system-services files. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -2573,9 +2538,9 @@ def uplink_violations(up):
     return out
 
 
-def nm_walk(root, rel, out):
+def policy_walk(root, rel, out):
     """tree_walk over directory REL (an in-image path), but a directory that cannot be listed is
-    refused in OUT, never skipped: what NetworkManager would read there is unknown."""
+    refused in OUT, never skipped: what polkitd or dbus-daemon would read there is unknown."""
     try:
         names = sorted(tree_listdir(root, rel))
     except OSError as e:
@@ -2592,128 +2557,7 @@ def nm_walk(root, rel, out):
             continue
         yield r, st
         if stat.S_ISDIR(st.st_mode):
-            yield from nm_walk(root, r, out)
-
-
-def nm_unit(root):
-    """NetworkManager's unit file as systemd resolves it: NM_UNIT in the first unit directory that
-    holds one, or None. exec.allow pins it by hash (#2622)."""
-    root = str(root)
-    return next((Conf(root, d + "/" + NM_UNIT) for d in unit_dirs(root)[0] if tree_lstat(root, d + "/" + NM_UNIT)),
-                None)
-
-
-def nm_unit_violations(root):
-    """The NetworkManager unit as systemd 257.13 resolves it (see NM_EXEC): the unit file, its
-    drop-ins under its own name, any name that links to it (dbus-org.freedesktop.NetworkManager) and
-    each name's prefixes, in every unit directory and in service.d. The unit file itself is also on
-    exec.allow by its hash (#2622), so a key these checks do not name (ExecStartPre, BindPaths) is
-    reviewed too."""
-    root = str(root)
-    dirs, out = unit_dirs(root)
-    unit = nm_unit(root)
-    if unit is None:
-        return out + ["%s: missing; NetworkManager must start from the shipped unit" % NM_UNIT]
-    if unit.is_link():
-        return out + ["%s: a link; the tree check reads only a regular unit file" % unit.rel]
-    names = {NM_UNIT}
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            try:
-                if stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode) and \
-                        tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1] == NM_UNIT:
-                    names.add(n)
-            except OSError:
-                continue
-    files = {}
-    for n in sorted(names):
-        for f in conf_files(root, ["%s/%s.d" % (d, m) for d in UNIT_PATHS for m in unit_dropin_names(n)]
-                            + ["%s/service.d" % d for d in UNIT_PATHS]):
-            files[f.rel] = f
-    for rel, f in sorted(files.items()):
-        if rel not in NM_DROPINS:
-            out.append("%s: a drop-in for %s; the only ones are %s" % (rel, NM_UNIT, " and ".join(sorted(NM_DROPINS))))
-        else:
-            try:
-                if f.content() != NM_DROPINS[rel]:
-                    out.append("%s: not the shipped drop-in" % rel)
-            except OSError as e:
-                out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, e.strerror))
-    if NM_DROPIN not in files:
-        out.append("%s: missing; NetworkManager must not start without the inbound drop" % NM_DROPIN)
-    if NM_STATE_DROPIN not in files:
-        out.append("%s: missing; NetworkManager's state would reach the drive (#2622)" % NM_STATE_DROPIN)
-    execs = []
-    for f in [unit] + [f for r, f in sorted(files.items())]:
-        try:
-            lines = config_lines(f.content())
-        except (OSError, Unparsable) as e:
-            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e))
-            continue
-        for s, k, v in lines:
-            if k in ("Environment", "EnvironmentFile"):
-                out.append("%s: %s is set; NetworkManager reads only the shipped configuration" % (f.rel, k))
-            elif (s, k) == ("Service", "ExecStart"):
-                execs = execs + [v] if v else []
-    if execs != [NM_EXEC]:
-        out.append("%s: ExecStart is %s; must be exactly %s" % (NM_UNIT, execs, NM_EXEC))
-    return out
-
-
-def networkmanager_violations(root):
-    """#936: what NetworkManager reads at start is NM_FILES and nothing else: any other entry under
-    NM_ROOTS is refused (a closed list), the shipped file holds NM_KEYS and a keyfile path under /run,
-    no connection location exists, and the unit is held to NM_EXEC and NM_DROPIN (nm_unit_violations). Skipped where the
-    tree has no NetworkManager. A file the check cannot read, or that byte_violations refuses, is
-    refused and never skipped."""
-    if not any(entry_mode(root, rel) for rel in NM_PRESENT):
-        return []
-    out = []
-    shipped = set()
-    for rel in NM_FILES:
-        try:
-            shipped.add(tree_entry(root, rel)[0])
-        except OSError:
-            pass
-    for d in NM_ROOTS:
-        mode = entry_mode(root, d)
-        if mode and not stat.S_ISDIR(mode):
-            out.append("%s: not a directory; the tree check reads only a directory" % d)
-        if not stat.S_ISDIR(mode):
-            continue
-        for rel, st in nm_walk(root, tree_entry(root, d)[0], out):
-            if not stat.S_ISDIR(st.st_mode) and rel not in shipped:
-                out.append("%s: not a file the image ships; NetworkManager would read it" % rel)
-    seen = {}
-    for rel in NM_FILES:
-        f = Conf(str(root), rel)
-        bad = byte_violations(f)
-        out += bad
-        if bad:
-            continue
-        try:
-            lines = config_lines(f.content())
-        except Unparsable as e:
-            out.append("%s: %s; the tree check never passes a file it cannot parse" % (f.rel, e))
-            continue
-        for s, k, v in lines:
-            seen.setdefault((s, k), []).append((f.rel, v))
-    for (s, k), vals in sorted(seen.items()):
-        if (s, k) not in NM_KEYS and (s, k) != NM_PATH:
-            out.append("%s: [%s] %s is %s; not a key the image ships" % (vals[-1][0], s, k, vals[-1][1]))
-        elif len(vals) > 1:
-            out.append("%s: [%s] %s is set %d times; must be set once" % (vals[-1][0], s, k, len(vals)))
-    for (s, k), want in sorted(NM_KEYS.items()):
-        v = seen.get((s, k), [(None, None)])[0][1]
-        if v != want:
-            out.append("NetworkManager: [%s] %s is %s; must be %s" % (s, k, v, want))
-    path = seen.get(NM_PATH, [(None, None)])[0][1]
-    if path is None or not path.startswith("/run/") or ".." in path.split("/"):
-        out.append("NetworkManager: [keyfile] path is %s; must be under /run, never the drive (STO-2)" % path)
-    for d in NM_CONNECTIONS:
-        if entry_mode(root, d):
-            out.append("%s: a NetworkManager connection location; it must not exist (no join before STO-2)" % d)
-    return out + nm_unit_violations(root)
+            yield from policy_walk(root, r, out)
 
 
 def forward_key(k):

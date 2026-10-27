@@ -160,17 +160,16 @@ class NeededTest(unittest.TestCase):
         self.assertIn("usr/bin/lslogins", drop.FILES)
         self.assertEqual(set(drop.PARTIAL), {"liblastlog2-2"})
 
-    def test_shadow_goes_with_its_tools_and_bzip2_with_dpkg_deb(self):
-        # passwd and login.defs are shadow's only packages in the image; useradd, userdel and usermod
-        # are libsemanage2's only users, and libsemanage2 and dpkg-deb are libbz2's (traced in trixie
-        # with the image's own package list). adduser only drives useradd, so its perl goes too.
-        self.assertEqual({drop.DROP[p][0] for p in ("passwd", "login.defs")}, {"shadow"})
-        self.assertEqual({drop.DROP[p][0] for p in ("libsemanage2", "libsemanage-common", "libsepol2", "libbz2-1.0")},
-                         {"libsemanage", "libsepol", "bzip2"})
-        self.assertIn("adduser", drop.DROP)
+    def test_bzip2_goes_with_dpkg_deb(self):
+        # dpkg-deb is libbz2's only user (traced in trixie with the image's own package list). The
+        # account tools (passwd, login.defs, adduser and libsemanage2's chain) came only with polkitd,
+        # which the image no longer installs (#3387), so they are not installed to drop.
+        self.assertEqual(drop.DROP["libbz2-1.0"][0], "bzip2")
+        for p in ("passwd", "login.defs", "adduser", "libsemanage2", "libsemanage-common", "libsepol2"):
+            self.assertNotIn(p, drop.DROP)
         self.assertNotIn("adduser", drop.PERL_TOOLS)
         self.assertIn("usr/bin/dpkg-deb", drop.FILES)
-        self.assertTrue({"shadow", "bzip2"}.isdisjoint(drop.DROP[p][0] for p in drop.PARTIAL))
+        self.assertNotIn("bzip2", {drop.DROP[p][0] for p in drop.PARTIAL})
 
 
 class InterpreterTest(unittest.TestCase):

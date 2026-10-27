@@ -110,6 +110,8 @@ type testKernel struct {
 	mu      sync.Mutex
 	entered chan struct{} // when set, Enroll signals it on entry
 	gate    chan struct{} // when set, Enroll waits for it to close
+
+	taken []kernelsock.BackupView // the backups Backup took (backupchoice_test.go)
 }
 
 func (k *testKernel) setupOnly() bool { return len(k.k.State().Anchors) == 0 }

@@ -71,6 +71,11 @@ type Config struct {
 	// sign-in (#2779a). They go together.
 	Passkeys    Passkeys
 	PasskeyRPID string
+	// Backups, when set with Passkeys, serves the Backups page at
+	// /backups/ behind sign-in (BAK-1, e4b): its add is a hardware key's
+	// tap on the passkey page's name. When unset, Passkeys that also serve
+	// the backup ops (AgentosdPasskeys, on the same socket) serve it.
+	Backups Backups
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
@@ -170,6 +175,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if (cfg.Passkeys == nil) != (cfg.PasskeyRPID == "") {
 		return nil, errors.New("localui: the passkey page needs agentosd's passkey ops and the RP ID")
+	}
+	if b, ok := cfg.Passkeys.(Backups); ok && cfg.Backups == nil {
+		cfg.Backups = b
+	}
+	if cfg.Backups != nil && cfg.Passkeys == nil {
+		return nil, errors.New("localui: the Backups page needs the passkey page's name")
 	}
 	seen := map[string]bool{}
 	for _, d := range cfg.Connect {
@@ -272,6 +283,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Passkeys != nil {
 		s.Mount("/passkeys", "Passkeys", http.HandlerFunc(s.passkeysPage))
+	}
+	if s.cfg.Backups != nil {
+		s.Mount("/backups", "Backups", http.HandlerFunc(s.backupsPage))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)
@@ -540,6 +554,8 @@ type statusView struct {
 	AskCode bool
 	// Restore: the box's page authority is missing (Config.PageRestore).
 	Restore bool
+	// Backups: the Backups page is served.
+	Backups bool
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.statusPage(w, r, msgText(r)) }
@@ -550,7 +566,7 @@ func (s *Server) statusPage(w http.ResponseWriter, r *http.Request, msg string) 
 
 func (s *Server) statusPageWith(w http.ResponseWriter, r *http.Request, msg string, askCode bool) {
 	v := statusView{Progress: s.progress(r), SignedIn: s.isSignedIn(r), Done: s.setupDone(r), Msg: msg, AskCode: askCode,
-		Restore: s.cfg.PageRestore}
+		Restore: s.cfg.PageRestore, Backups: s.cfg.Backups != nil}
 	if v.Progress.Phase != "ready" {
 		v.Refresh = "10"
 	}

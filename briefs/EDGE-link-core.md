@@ -1,6 +1,6 @@
 # EDGE-link-core: the core side of the edge link, with edge keys as kernel log entries (HW-15, HW-17, REC-2, BAK-1), split into a to d
 
-Work item: #3290, found designing #3253 (the f brief on #3269, `briefs/MIG-4-recovery-f.md` once it merges, decisions 4 and 5). Tier A. The row crosses four trust zones (the kernel log, enrollment and unlock, a new process that parses bytes from another box, the owner side), so it splits here. Each slice is its own work item and session: a (#3290), a2 (#3345, the follow-up of a), b (#3295), b2 (#3364, the follow-up of b), c1 (#3296), c2 (#3297) and d (#3298). This file is the brief for all of them; each builder reads the shared part and its own section.
+Work item: #3290, found designing #3253 (the f brief on #3269, `briefs/MIG-4-recovery-f.md` once it merges, decisions 4 and 5). Tier A. The row crosses four trust zones (the kernel log, enrollment and unlock, a new process that parses bytes from another box, the owner side), so it splits here. Each slice is its own work item and session: a (#3290), a2 (#3345, the follow-up of a), b (#3295), b2 (#3364, the follow-up of b), c1 (#3296), c2 (#3297, built as c2a, c2b #3458 and c2c #3459) and d (#3298). This file is the brief for all of them; each builder reads the shared part and its own section.
 
 **Decided (Mark, 2026-10-26, Decisions 8 card, "A"):** a hardware key's assertion signs a later or replacement edge key; it is live at once, with no KEY-4 hold, and the old key is cut in the same step, as `Enroll` and e2's backup target already work. The other options were a phone passkey with KEY-4's hold, or a phone passkey at once. KEY-4 names no such case, so an L1 spec-diff owes the exception ("SPEC change owed" below); slices a and d wait on it.
 
@@ -134,20 +134,42 @@ Follow-up of b, from its reviews on #3359: L3 points 1 and 2 (comment 6433663497
 **Needs:** nothing; it can start now. **Guard files:** `tools/risk_tier.py` (`edgelink` in `TIER_A_BROKER`), `tools/trusted_base_parsers.txt` (`parser .../broker/edgelink -- frames and handshakes from the edge`), `broker/daemon/arc2_test.go` (stdlib only). **Gate:** gate-file PR (`risk_tier.py`): the separate Security accept; body line `Trusted-base: parsers -- edgelink decodes the edge's frames`.
 **Estimate:** 80k tokens.
 
-## c2: the link process on the core (#3297)
+## c2: the link process on the core (#3297), split into c2a, c2b and c2c
 
-**Scope:** new `broker/cmd/agentos-link` (+tests): the pre-store mode (decision 3's capture), the served mode (the listener bound to the link interface, the handshake through `edgelink`, `edgekey` at each handshake and on the close ticker, the candidate of decision 8, the consumer socket of decision 7); the kernel calls `linksign`, `edgekey`, `edgecandidate` (reported by the link uid only) and `edgeenroll`, `edgerevoke` (owner socket) in `kernel/proc/kernelsock.go` (+test) and their client methods in `broker/owner/kernelsock`; the link unit and its interface's input rule in the image's unit files; `broker/core/core.txt` (`wiring cmd/agentos-link`).
+Split at its build (2026-10-27). The kernel socket files were held by open PRs (#3438, #3450; D-111), and the image's files by #3440. The unit, the user and the input rule were also more than the 100k estimate held. Each slice is its own session.
+
+### c2a: agentos-link (#3297)
+
+**Scope:** new `broker/cmd/agentos-link` (+tests, ASSUMPTIONS.md). It has the pre-store mode (decision 3's capture: a root parent writes, a child under the link's uid reads) and the served mode. The served mode covers the listener bound to the link interface, the handshake through `edgelink`, `edgekey` at each handshake and on the close ticker, the hello reported as decision 8's candidate, and the consumer socket of decision 7. It also holds the client of the kernel's link socket (`linkkey`, `linksign`, `edgekey`, `edgecandidate`; ASSUMPTIONS EDGE-link-c2-3). Also `broker/core/core.txt` (`wiring cmd/agentos-link`), `broker/daemon/arc2_test.go`, `tools/trusted_base_parsers.txt` and `tools/g1_scope_g2.txt`.
 **Requirement IDs:** HW-15, HW-16 (no other connection from the edge), HW-17.
 **Acceptance tests:**
-- `cmd/agentos-link/capture_test.go::TestFirstHelloWinsOnlyBeforeTheStore`: the first valid hello is written, as root with mode 0600 (b2 decision 2: enrollment takes no other); a second, a badly signed one, a small-order key's, or any hello once the store exists, is not.
-- `cmd/agentos-link/link_test.go::TestOnlyTheLiveEdgeIsServed`: the live key's items arrive on the consumer socket with the kind's label; any other key gets one hello read, reported and closed, with no item delivered; a non-hello frame from it, a second frame, or no hello within 5 seconds closes with a fault count; a revoked key's hello is not reported; `edgekey` is asked on every connection.
-- `::TestRevokeClosesTheConnection`: an `edge.revoked` closes an open connection within a second.
+- `cmd/agentos-link/capture_test.go::TestFirstHelloWinsOnlyBeforeTheStore`: the first valid hello is written, owned by the writer's euid (root in the unit) with mode 0600 (b2 decision 2: enrollment takes no other). None of these is written: a second hello, a badly signed one, a small-order key's, or any hello once the store exists.
+- `cmd/agentos-link/link_test.go::TestOnlyTheLiveEdgeIsServed`: the live key's items arrive on the consumer socket with the kind's label. Any other key gets one hello read, reported and closed, with no item delivered. A non-hello frame from it, a second frame, or no hello within 5 seconds closes with a fault count. A revoked key's hello is not reported. `edgekey` is asked on every connection. The core's outbound frames reach the live edge.
+- `::TestRevokeClosesTheConnection`: the kernel no longer naming the key live closes an open connection within a second.
 - `::TestBadFrameClosesAndCounts`: a bad frame from the live edge closes the connection and adds one fault count, with no content in the log.
-- `::TestListensOnTheLinkInterfaceOnly` (the bind and the input rule's rendering).
+- `::TestListensOnTheLinkInterfaceOnly`: the socket is bound to the named interface (`SO_BINDTODEVICE`); a bad or missing interface refuses.
+**Guard files:** `broker/core/core.txt` (wiring line), `broker/daemon/arc2_test.go` (`cmd/agentos-link` imports `edgelink`, `kernel`'s pure edge helpers and `sockets` only), `tools/trusted_base_parsers.txt` (the parser line). **Gate:** gate-file PR: the separate Security accept; a D-198 `exempt-pr` companion for the G2 freeze. The trusted core does not grow (agentos-link is no root of `tools/trusted_core.txt`).
+
+### c2b: the kernel's link socket and the owner's edge calls (#3458)
+
+**Scope:** `kernel/proc/kernelsock.go` (+test). A `LinkSide` serves `linkkey`, `linksign`, `edgekey` and `edgecandidate`. Its socket admits the link's uid alone. `edgekey` answers `{live, revoked}` from `LiveEdge` and `EdgeRevoked`. The owner side gains `edgeenroll` and `edgerevoke`, and the edge errors cross as wire errors. Also `kernel/proc/kernelmain.go` (`LinkSock`, `LinkUID`, a peer), `cmd/agentos-kernel` (`-link-sock`, `-link-uid`), and the owner client methods `EdgeEnroll` and `EdgeRevoke` in `broker/owner/kernelsock`. `cmd/agentos-link/main.go` is unchanged; its test serves the real side.
+**Requirement IDs:** HW-15, HW-16.
+**Acceptance tests:**
 - `kernel/proc/kernelsock_test.go::TestLinksignSignsOnlyCertificateVerify`: any other input refuses; a kernel with no link key answers a fixed refusal.
-- `kernel/proc/kernelsock_test.go::TestEdgecandidateOnlyFromTheLinkUid`: `edgecandidate` from any uid but the link's refuses and logs nothing; `edgeenroll` for a key that is not the logged candidate refuses.
-**Needs:** a, b, c1. e3 (#3251) and f1 (#3253) edit `kernelsock.go` (D-111). **Guard files:** `broker/core/core.txt` (wiring line), `broker/daemon/arc2_test.go` (`cmd/agentos-link` imports `edgelink` and `owner/kernelsock` only). **Gate:** gate-file PR: the separate Security accept; D-159 row for the kernel lines.
-**Estimate:** 100k tokens.
+- `kernel/proc/kernelsock_test.go::TestEdgecandidateOnlyFromTheLinkUid`: `edgecandidate` from any uid but the link's refuses and logs nothing, and the owner and meter sides have no link call. `edgeenroll` for a key that is not the logged candidate refuses.
+- `cmd/agentos-link/kernel_test.go::TestSpeaksTheKernelsLinkWire`: the link's client against the real `LinkSide`, so the two cannot drift.
+**Needs:** c2a; #3438 and #3450 merged (D-111). **Guard files:** none. **Gate:** D-159 row for the kernel lines (the trusted core grows), merged first.
+**Estimate:** 50k tokens.
+
+### c2c: agentos-link in the image (#3459)
+
+**Scope:** the capture unit (root, `ConditionPathExists=!` the store, stopped by enrollment's unit before it runs) and the served unit (the link's uid, after the kernel, `-kernel-sock` and `-consumer-sock`). Also the link's user (`sysusers.d`), `image/build.sh`, and enrollment's `-first-edge` with the capture path. The input rule is a `link` set in `broker/netguard` `InboundRules` and `inbound.nft`. The rule admits the link port on that interface only; the served unit adds its interface as root, as the page's unit does for the page set. Plus the finalize allowlists these need.
+**Requirement IDs:** HW-15, HW-16.
+**Acceptance tests:**
+- `netguard/inbound_test.go::TestInboundLinkPortOnTheLinkOnly`: the link port is accepted only on the interface in the link set, and nothing else on that interface is (the rule's rendering, from c2's `TestListensOnTheLinkInterfaceOnly`).
+- `tests/test_image.py`: the units' commands, users and ordering (capture before enrollment, never with a store; served after the kernel).
+**Needs:** c2a, c2b; #3440 merged (D-111). **Guard files:** the image's allowlists. **Gate:** as the image's tests require.
+**Estimate:** 50k tokens.
 
 ## d: the owner side (#3298)
 

@@ -20,10 +20,6 @@ import sys
 
 # package: (its Debian source, why the box does not need it)
 DROP = {
-    "libbluetooth3": ("bluez", "only NetworkManager's Bluetooth device plugin links it; the image ships no Bluetooth (#1415)"),
-    "libmm-glib0": ("modemmanager", "only NetworkManager's WWAN plugins link it; the image has no ModemManager"),
-    "libnewt0.52": ("newt", "only nmtui links it; the box has no console login"),
-    "libslang2": ("slang2", "only libnewt0.52 links it"),
     "initramfs-tools": ("initramfs-tools", "mkosi builds the initrd itself (InitrdInclude=); the kernel package depends on it"),
     "initramfs-tools-core": ("initramfs-tools", "as initramfs-tools"),
     "initramfs-tools-bin": ("initramfs-tools", "as initramfs-tools"),
@@ -38,13 +34,7 @@ DROP = {
     "liblastlog2-2": ("util-linux", "only lslogins links it, an account-listing tool for a person at a shell; the box has no login"),
     "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
     "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
-    "passwd": ("shadow", "useradd and the other account tools; only maintainer scripts run them, and systemd-sysusers makes the box's users"),
-    "login.defs": ("shadow", "the account tools' settings; without it systemd-sysusers keeps its built-in id ranges, and the box has no login"),
-    "adduser": ("adduser", "a front end to useradd that only maintainer scripts run"),
-    "libsemanage2": ("libsemanage", "only useradd, userdel and usermod link it"),
-    "libsemanage-common": ("libsemanage", "only libsemanage2 reads it"),
-    "libsepol2": ("libsepol", "only libsemanage2 links it"),
-    "libbz2-1.0": ("bzip2", "only libsemanage2 and dpkg-deb link it; the box unpacks no package"),
+    "libbz2-1.0": ("bzip2", "only dpkg-deb links it; the box unpacks no package"),
 }
 # Dropped packages whose source the box still runs other packages of, so the source's image
 # records stay (tests/test_image_drop.py).
@@ -54,10 +44,6 @@ PARTIAL = ("liblastlog2-2",)
 ESSENTIAL = ("tar", "diffutils", "perl-base")
 # Files a kept package ships that link a dropped one. Each pattern must match: a stale one fails.
 FILES = (
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-bluetooth.so",
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-device-plugin-wwan.so",
-    "usr/lib/x86_64-linux-gnu/NetworkManager/*/libnm-wwan.so",
-    "usr/bin/nmtui*",
     "usr/bin/ss",
     "usr/bin/lslogins",
     # dpkg's package unpacker, the last file linking libbz2; the box's dpkg database never changes.
@@ -76,8 +62,6 @@ PERL_TOOLS = {
     "libpam-runtime": "pam-auth-update, pam_getenv",
     "linux-base": "the kernel package's install hooks",
     "openssl": "c_rehash, CA.pl, tsget.pl",
-    "sgml-base": "SGML catalog tools (maintainer scripts)",
-    "xml-core": "XML catalog tools (maintainer scripts)",
 }
 ET_EXEC, ET_DYN, EM_X86_64 = 2, 3, 62
 PT_LOAD, PT_DYNAMIC = 1, 2

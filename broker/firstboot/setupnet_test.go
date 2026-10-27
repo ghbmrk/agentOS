@@ -128,7 +128,7 @@ func TestReinstallKeepsTheSetupNetwork(t *testing.T) {
 	if err != nil || fb.Route != RouteReinstall {
 		t.Fatalf("setup file without a claim state: %+v %v", fb, err)
 	}
-	if b2.resets != 0 || b2.shown.WiFiName != "" {
+	if b2.resets != 0 || b2.shown.SetupSecret != "" {
 		t.Fatal("reset or drew a card")
 	}
 	if got := network(t, fb); got == nil || *got != n2 {

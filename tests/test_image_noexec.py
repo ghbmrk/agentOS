@@ -352,13 +352,13 @@ class BootProbeTest(unittest.TestCase):
         # systemd reads a credential name once: two multi-user.target drop-ins on one boot would drop one
         # check unseen (#2875 L3, build (a) at b2a9007). One drop-in wants every check (the host-disk
         # one too, HOST-1a); $USB adds a disk, no credential.
-        self.assertIn('EXTRA="$NM_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB"', sh)
-        self.assertIn("Wants=agentos-nm-check.service agentos-noexec-check.service", sh)
+        self.assertIn('EXTRA="$UNITS_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB"', sh)
+        self.assertIn("Wants=agentos-units-check.service agentos-noexec-check.service", sh)
         # No credential name repeats on the first boot, whose EXTRA these variables and REPORT_FIRST make up.
         names = []
-        for var in ("NM_EXTRA", "NX_EXTRA", "HD_EXTRA", "CHECKS_WANTED", "REPORT_FIRST"):
+        for var in ("UNITS_EXTRA", "NX_EXTRA", "HD_EXTRA", "CHECKS_WANTED", "REPORT_FIRST"):
             line = re.search(r"^%s=.*$" % var, sh, re.M).group(0)
-            names += re.findall(r"(?:nm_cred |credential\.binary:)([\w.@-]+)", line)
+            names += re.findall(r"(?:smbios_cred |credential\.binary:)([\w.@-]+)", line)
         self.assertEqual(len(names), 5, names)
         self.assertEqual(len(names), len(set(names)), names)
         probe = re.search(r"noexec_check\(\) \{\n\tcat <<'EOS'\n(.*?)\nEOS\n", sh, re.S).group(1)

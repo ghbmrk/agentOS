@@ -163,34 +163,30 @@ host_disk "$U"
 usb_before=$(sha256sum <"$U")
 USB=" -device qemu-xhci,id=xhci -drive if=none,id=usb,format=raw,file=$U -device usb-storage,bus=xhci.0,drive=usb,removable=on"
 before=$(stat -c %s "$IMG")
-# NetworkManager runs and manages nothing, and polkit lets no one write a connection (#936, I21;
-# the join helper is gone, D-178). The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
+# No unit failed, and no Wi-Fi client is on the box (D-178, #3387): systemd-networkd is the only
+# network manager. The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
 # boot report so its lines are on the console by then; the image itself is unchanged. The script
 # rides inside the unit as base64, which holds no character systemd or the shell would expand.
-nm_check() {
+units_check() {
 	cat <<'EOS'
-say() { echo "agentos-nm: $*"; }
-n=0
-until nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -q . || [ $n -ge 30 ]; do n=$((n + 1)); sleep 1; done
-systemctl is-active --quiet NetworkManager.service && say "NetworkManager.service active" || say "FAIL NetworkManager.service not active"
-dev=$(nmcli -t -f DEVICE,STATE device 2>/dev/null)
-if [ -n "$dev" ] && [ -z "$(echo "$dev" | grep -v ':unmanaged$')" ]; then say "every device unmanaged"; else say "FAIL a device is managed: $dev"; fi
+say() { echo "agentos-units: $*"; }
 if [ -z "$(systemctl --failed --no-legend)" ]; then say "no failed units"; else say "FAIL failed units: $(systemctl --failed --no-legend | cut -d' ' -f1-2)"; fi
-if [ -z "$(ls -A /etc/NetworkManager/system-connections 2>/dev/null)" ]; then say "no connection file on the drive"; else say "FAIL a connection file is on the drive"; fi
-act=org.freedesktop.NetworkManager.settings.modify.system
-runuser -u nobody -- sh -c "exec pkcheck --action-id $act --process \$\$" && say "FAIL pkcheck yes for nobody" || say "pkcheck no for nobody"
+for u in NetworkManager.service wpa_supplicant.service; do systemctl cat "$u" >/dev/null 2>&1 && say "FAIL $u is installed"; done
+for c in NetworkManager nmcli wpa_supplicant wpa_cli; do command -v "$c" >/dev/null 2>&1 && say "FAIL $c is installed"; done
+say "Wi-Fi client checked"
+systemctl is-active --quiet systemd-networkd.service && say "systemd-networkd.service active" || say "FAIL systemd-networkd.service not active"
 say done
 EOS
 }
-nm_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
-NM_UNIT="[Unit]\nDescription=agentOS NetworkManager check (CI only)\nAfter=NetworkManager.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(nm_check | base64 -w0) | base64 -d | sh'\n"
-NM_EXTRA="$(nm_cred systemd.extra-unit.agentos-nm-check.service "$NM_UNIT")"
+smbios_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
+UNITS_UNIT="[Unit]\nDescription=agentOS unit check (CI only)\nAfter=systemd-networkd.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(units_check | base64 -w0) | base64 -d | sh'\n"
+UNITS_EXTRA="$(smbios_cred systemd.extra-unit.agentos-units-check.service "$UNITS_UNIT")"
 # No code from writable storage (UPD-10): the first boot plants a copy of /usr/bin/true, mode 0755,
 # in each writable mount (root and so /etc and /var/tmp, /tmp, /run, /dev/shm, /dev and the ESP, which
 # gpt-auto mounts at the empty /boot when there is no XBOOTLDR) and must find every one refused, each
 # but root's directories on its own mount; a transient unit with the image units' NoExecPaths=/ and ExecPaths=/usr
 # finds the same in its private /tmp and /var/tmp, its StateDirectory= and a TemporaryFileSystem= it mounts
-# noexec; and the weekly reboot timer is armed. Passed the same way as the NetworkManager check.
+# noexec; and the weekly reboot timer is armed. Passed the same way as the unit check.
 # systemd 257 leaves every namespace mount out of NoExecPaths=/'s recursive remount (apply_mounts' noexec
 # deny list keeps all entries), so a unit's binds stay noexec only through the host mounts they bind, and
 # its own tmpfs only through its noexec option, which mkosi.finalize requires (build (a) at 9d00e6b ran
@@ -223,12 +219,12 @@ say done
 EOS
 }
 NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
-NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
+NX_EXTRA="$(smbios_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
 # The host disks stay hidden (HW-8, HOST-1a; hostdisk ASSUMPTIONS H8, H11): the rules classed the
 # root's disk as the drive and every other disk, the USB one included, as a host disk; no host node
 # is ready for a mount unit or open to any uid but root, and udev recorded no label, UUID or
 # partition name for one, so no /dev/disk link names it; the helper lists both disks by bus; every
-# SCSI and NVMe passthrough node is root-only. Passed the same way as the NetworkManager check.
+# SCSI and NVMe passthrough node is root-only. Passed the same way as the unit check.
 hostdisk_check() {
 	cat <<'EOS'
 say() { echo "agentos-hostdisk: $*"; }
@@ -276,16 +272,16 @@ say done
 EOS
 }
 HD_UNIT="[Unit]\nDescription=agentOS host disk check (CI only)\nAfter=systemd-udev-trigger.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=180\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(hostdisk_check | base64 -w0) | base64 -d | sh'\n"
-HD_EXTRA="$(nm_cred systemd.extra-unit.agentos-hostdisk-check.service "$HD_UNIT")"
+HD_EXTRA="$(smbios_cred systemd.extra-unit.agentos-hostdisk-check.service "$HD_UNIT")"
 # One multi-user.target drop-in starts every check: systemd reads a credential name once, so a
 # second systemd.unit-dropin.multi-user.target would be dropped, and its check never run (#2875).
-CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service agentos-hostdisk-check.service\n')"
+CHECKS_WANTED="$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-units-check.service agentos-noexec-check.service agentos-hostdisk-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
 # dropped (I11, I19). The owner page's 80 and 443 open only on port 1 once the page's unit names it
 # (CH-9, D-178, HW12-port1-set), and with two NICs here it names none. The LAN NIC carries the same
 # probe over IPv6 (#1457), where every port is dropped.
-EXTRA="$NM_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+EXTRA="$UNITS_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off hostdisk=ok" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
@@ -297,14 +293,13 @@ for want in "agentos-hostdisk: drive is the root disk" "agentos-hostdisk: host d
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-hostdisk: FAIL"
-# NetworkManager is up and manages no device; polkit lets no user write system connections;
-# nothing is on the drive. The health line above still reads forward=off
+# No unit failed and no Wi-Fi client is on the box. The health line above still reads forward=off
 # inbound=drop, and the probes below find every port dropped (DEV-2).
-for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every device unmanaged" "agentos-nm: no failed units" \
-	"agentos-nm: no connection file on the drive" "agentos-nm: pkcheck no for nobody" "agentos-nm: done"; do
+for want in "agentos-units: no failed units" "agentos-units: Wi-Fi client checked" \
+	"agentos-units: systemd-networkd.service active" "agentos-units: done"; do
 	has "$W/console.log" "$want"
 done
-hasnt "$W/console.log" "agentos-nm: FAIL"
+hasnt "$W/console.log" "agentos-units: FAIL"
 for d in / /var/tmp /etc /tmp /run /dev/shm /dev /boot; do
 	has "$W/console.log" "agentos-noexec: $d refused"
 done
@@ -313,12 +308,6 @@ for want in "agentos-noexec: unit tmp refused" "agentos-noexec: unit var-tmp ref
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-noexec: FAIL"
-# polkitd is 0.106 or later (JS rules), read from the package manifest mkosi wrote beside the image.
-if python3 "$HERE/compare_manifests.py" --polkitd "$(dirname "$IMG")"; then
-	echo "ok   polkitd 0.106 or later"
-else
-	echo "MISS polkitd 0.106 or later in the manifest beside $IMG"; fail=1
-fi
 # The host disk is not the boot drive (drive-id saw one boot partition), nothing wrote to it, and
 # the guest reports no mount or swap on it (a read-only mount leaves the bytes unchanged, IMG-1-1).
 [ "$(sha256sum <"$H")" = "$host_before" ] && echo "ok   host disk unchanged" || { echo "MISS host disk unchanged"; fail=1; }
@@ -381,7 +370,7 @@ done
 # /usr through verity against usrhash= and reboots in the guest, and the next healthy boot reports
 # the time to a clean core. The unit is skipped once a drill is on record, so the second boot stays up.
 DRILL_UNIT="[Unit]\nDescription=agentOS restore drill start (CI only)\nAfter=agentos-boot-report.service\nConditionPathExists=!/var/lib/agentos/drill/last.json\n[Service]\nType=oneshot\nExecStart=systemctl start --no-block agentos-reboot.service\n"
-DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT")$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-drill-ci.service\n')"
+DRILL_EXTRA="$(smbios_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT")$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-drill-ci.service\n')"
 # The same boots enroll the keeper (STO-2c, #2905): setup's Owner Card factors, synthetic and CI's
 # only, reach /run/agentos-setup (the image makes it) through a tmpfiles.extra credential, so the
 # first of the two boots makes the sealed store on this QEMU's swtpm and the second, on the same
@@ -389,7 +378,7 @@ DRILL_EXTRA="$(nm_cred systemd.extra-unit.agentos-drill-ci.service "$DRILL_UNIT"
 # PCRs, with the pins it reads from the TPM, and with none of the owner's hardware keys enrolled
 # yet hands the kernel no anchors, so the kernel starts setup-only on its sockets (#2996, #3073).
 KEEPER_FACTORS='f /run/agentos-setup/passphrase 0600 root root - ci-synthetic-passphrase-not-a-secret\nf /run/agentos-setup/recovery 0600 root root - 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n'
-KEEPER_EXTRA="$(nm_cred tmpfiles.extra "$KEEPER_FACTORS")"
+KEEPER_EXTRA="$(smbios_cred tmpfiles.extra "$KEEPER_FACTORS")"
 # The drill's line comes before the boot report's (agentos-drill-report.service is ordered before it),
 # so the boot runs until the second boot's keeper line.
 EXTRA="$DRILL_EXTRA$KEEPER_EXTRA" UNTIL="agentos-keeper: enroll=skipped\|agentos-keeper: enroll=failed\|agentos-health: FAIL" TMO=600 boot "$W/console-reboot.log" "$D"
@@ -466,7 +455,7 @@ base=${new%+3.conf}
 mtype -i "$F@@$(esp "$F")" "::/loader/entries/$new" | sed 's/^version .*/version 0/' >"$W/prev.conf"
 mcopy -i "$F@@$(esp "$F")" "$W/prev.conf" ::/loader/entries/agentos_0.conf
 FORCED_UNIT="[Service]\nExecStartPre=/bin/sh -c 'echo $(forced_fail | base64 -w0) | base64 -d | sh'\n"
-EXTRA="$(nm_cred systemd.unit-dropin.agentos-health.service "$FORCED_UNIT")" \
+EXTRA="$(smbios_cred systemd.unit-dropin.agentos-health.service "$FORCED_UNIT")" \
 	UNTIL="agentos-boot: bless=clean\|agentos-fallback: this boot entry is not counted\|agentos-fallback: no tries left on this boot entry and no other release" \
 	boot "$W/console-fallback.log" "$F"
 # Three tries, each failed with the counter one lower, each followed by the fallback's reboot.
@@ -523,8 +512,8 @@ if [ -n "${SLICE:-}" ]; then
 	python3 -I "$HERE/slice_boot.py" requests "$SS/req" || fail=1
 	slice_run >"$SS/run.sh"
 	P9="trans=virtio,version=9p2000.L"
-	SLICE_UNITS="$(nm_cred systemd.extra-unit.agentos-slice.service "[Unit]\nDescription=agentOS inbox slice eval (CI only)\nAfter=systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1200\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'mkdir -p /run/agentos-slice/in /run/agentos-slice/out && mount -t 9p -o $P9,ro slice /run/agentos-slice/in && mount -t 9p -o $P9 sliceout /run/agentos-slice/out && exec /bin/sh /run/agentos-slice/in/run.sh'\n")"
-	SLICE_UNITS="$SLICE_UNITS$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-slice.service\n')"
+	SLICE_UNITS="$(smbios_cred systemd.extra-unit.agentos-slice.service "[Unit]\nDescription=agentOS inbox slice eval (CI only)\nAfter=systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1200\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'mkdir -p /run/agentos-slice/in /run/agentos-slice/out && mount -t 9p -o $P9,ro slice /run/agentos-slice/in && mount -t 9p -o $P9 sliceout /run/agentos-slice/out && exec /bin/sh /run/agentos-slice/in/run.sh'\n")"
+	SLICE_UNITS="$SLICE_UNITS$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-slice.service\n')"
 	copy "$W/slice.raw"
 	TMO=2400 EXTRA="-virtfs local,path=$SS,mount_tag=slice,security_model=none,readonly=on -virtfs local,path=$SO,mount_tag=sliceout,security_model=none$SLICE_UNITS" \
 		UNTIL="agentos-slice: DONE\|agentos-health: FAIL" boot "$W/console-slice.log" "$W/slice.raw"
@@ -620,7 +609,7 @@ if [ -n "${E2E:-}" ]; then
 	H2=$W/host-e2e.raw
 	host_disk "$H2"
 	host2_before=$(sha256sum <"$H2")
-	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(nm_cred 'systemd.unit-dropin.agentos-e2e-seal.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(smbios_cred 'systemd.unit-dropin.agentos-e2e-seal.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw" "$H2"
 	[ "$(sha256sum <"$H2")" = "$host2_before" ] && echo "ok   host disk unchanged (e2e boot)" || { echo "MISS host disk unchanged (e2e boot)"; fail=1; }
 	disks_none "$W/console-e2e.log" "agentos-disks:"

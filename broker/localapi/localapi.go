@@ -175,6 +175,10 @@ type Status struct {
 	// LineNote is the owner line's note, empty while the line is fine
 	// (Potency R2): fixed text, shown on the home page.
 	LineNote string `json:"line_note,omitempty"`
+	// Backups is the only-copy notice's lines (BAK-1, BAK-2), empty once
+	// verified backups on two append-only places count: fixed text with
+	// no count, date or name.
+	Backups []string `json:"backups,omitempty"`
 }
 
 // SignIn carries a code-generator code or the grid cell's answer.

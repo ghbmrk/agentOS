@@ -21,9 +21,13 @@ inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup bu
 inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup files
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
+parser github.com/ghbmrk/agentos/broker/clerk/accounts -- senders from the owner's mail provider, for the account plan (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/clerk/clerkkey -- a clerk's key hand-off on descriptor 3
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail -- process entry; reads its key hand-off and the anchors file (uncertain; classed parser)
 inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own configuration
 inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
+parser github.com/ghbmrk/agentos/broker/edgelink -- frames and handshakes from the edge
 inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its own records
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
 inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
@@ -33,6 +37,7 @@ inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's ow
 inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records
 inert  github.com/ghbmrk/agentos/broker/mail/mailsock -- socket between trusted processes (agentosd and agentos-egress)
 inert  github.com/ghbmrk/agentos/broker/netguard -- address policy over parsed netip values
+parser github.com/ghbmrk/agentos/broker/owner/graph -- the account plan's facts, from the mail clerk's reads (uncertain; classed parser)
 inert  github.com/ghbmrk/agentos/broker/owner/kernelsock -- socket between trusted processes (agentosd and the kernel); decodes only the kernel's bounded answer
 inert  github.com/ghbmrk/agentos/broker/owner/notice -- notice codes as data; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/owner/notice/noticesock -- socket between trusted processes (agentosd and agentos-egress)
@@ -64,6 +69,7 @@ parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and ma
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-link -- the edge's TLS handshakes and hellos, and the consumer's JSON lines
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)

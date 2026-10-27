@@ -511,6 +511,19 @@ func config(t *testing.T, pkgs ...string) conformance.Config {
 	}
 }
 
+// listNoDeps is the slip a driver repository's CI can make: go list without
+// -deps, so the listing holds the driver's package and none of its imports.
+func listNoDeps(t *testing.T, p string) []byte {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-json", p)
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list %s: %v", p, err)
+	}
+	return out
+}
+
 // The bad fixtures.
 
 // extra writes one frame after the fixture's own run.
@@ -630,6 +643,8 @@ func TestConformanceRejectsBadFixtures(t *testing.T) {
 		{"incomplete listing", fixture.Driver{}, nil, "imports", "could not load " + pkg + "/testdata/fixture",
 			`{"ImportPath": "` + pkg + `/testdata/fixture", "Incomplete": true}`},
 		{"wide shape", leaker{}, nil, "wide-shape", "dump leaves 63 bytes free", ""},
+		{"listing without -deps", fixture.Driver{}, nil, "imports", "lacks " + pkg + ", which " + pkg + "/testdata/fixture imports",
+			string(listNoDeps(t, pkg+"/testdata/fixture"))},
 	}
 	for _, c := range cases {
 		cfg := config(t, c.pkgs...)
@@ -649,15 +664,26 @@ func TestConformanceRejectsBadFixtures(t *testing.T) {
 // whole write range, under the read operation.
 type wildcard struct{ fixture.Driver }
 
-func (wildcard) Declare() devslot.Declaration {
+func (wildcard) Declare() devslot.Declaration { return withShape("any", devslot.CapWrite) }
+
+// short declares the shape the #3371 reviews found: no prefix and only
+// MaxFreeTail bytes, under the read operation, which still admits any short
+// command, an actuate one included.
+type short struct{ fixture.Driver }
+
+func (short) Declare() devslot.Declaration { return withShape("short", conformance.MaxFreeTail) }
+
+// withShape is the fixture's declaration plus an unprefixed control shape of
+// up to max bytes, allowed under its read operation.
+func withShape(name string, max int) devslot.Declaration {
 	d := fixture.Declaration()
-	d.Shapes = append(d.Shapes, devslot.Shape{Name: "any", Channel: "control", Kind: devslot.GATTWrite, Min: 1, Max: devslot.CapWrite})
-	d.Operations[0].Shapes = append(d.Operations[0].Shapes, "any")
+	d.Shapes = append(d.Shapes, devslot.Shape{Name: name, Channel: "control", Kind: devslot.GATTWrite, Min: 1, Max: max})
+	d.Operations[0].Shapes = append(d.Operations[0].Shapes, name)
 	return d
 }
 
-// A shape that leaves more than MaxFreeTail bytes free after its prefix fails
-// the suite until the driver's tests name it as reviewed, and naming it
+// A shape with no prefix, or one that leaves more than MaxFreeTail bytes free
+// after its prefix, fails the suite until the driver's tests name it as reviewed, and naming it
 // clears only that shape (DEV-4, DEVSLOT-a-4).
 func TestConformanceReportsWideShapes(t *testing.T) {
 	cfg := config(t, pkg+"/testdata/fixture")
@@ -670,8 +696,13 @@ func TestConformanceReportsWideShapes(t *testing.T) {
 		}
 		return ds
 	}
-	ds := wide(conformance.Check(wildcard{}, cfg))
-	if len(ds) != 1 || !strings.HasPrefix(ds[0], fmt.Sprintf("any leaves %d bytes free after its 0-byte prefix", devslot.CapWrite)) {
+	// No prefix is wide at any length: the free-tail bound does not clear it.
+	ds := wide(conformance.Check(short{}, cfg))
+	if len(ds) != 1 || !strings.HasPrefix(ds[0], fmt.Sprintf("short has no prefix, so any frame of up to %d bytes passes", conformance.MaxFreeTail)) {
+		t.Errorf("unprefixed %d-byte shape: wide-shape problems %q; want one naming short", conformance.MaxFreeTail, ds)
+	}
+	ds = wide(conformance.Check(wildcard{}, cfg))
+	if len(ds) != 1 || !strings.HasPrefix(ds[0], fmt.Sprintf("any has no prefix, so any frame of up to %d bytes passes", devslot.CapWrite)) {
 		t.Fatalf("wildcard shape: wide-shape problems %q; want one naming any", ds)
 	}
 	// The fixture's answer shape leaves exactly MaxFreeTail bytes: at the
@@ -683,9 +714,12 @@ func TestConformanceReportsWideShapes(t *testing.T) {
 	if ds := wide(conformance.Check(wildcard{}, cfg)); len(ds) != 1 {
 		t.Errorf("naming another shape cleared any: %q", ds)
 	}
-	cfg.Wide = []string{"any"}
+	cfg.Wide = []string{"any", "short"}
 	if ds := wide(conformance.Check(wildcard{}, cfg)); len(ds) != 0 {
 		t.Errorf("reviewed wildcard still fails: %q", ds)
+	}
+	if ds := wide(conformance.Check(short{}, cfg)); len(ds) != 0 {
+		t.Errorf("reviewed unprefixed shape still fails: %q", ds)
 	}
 }
 

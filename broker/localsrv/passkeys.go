@@ -138,19 +138,25 @@ func passkeyID(id string) bool {
 // allowPasskeyBegin counts one begin unless PasskeyBeginsPerMinute were
 // made in the last minute.
 func (s *Server) allowPasskeyBegin() bool {
+	return s.allowPerMinute(&s.passkeyBegins, PasskeyBeginsPerMinute)
+}
+
+// allowPerMinute counts one try in *ts unless n were made in the last
+// minute.
+func (s *Server) allowPerMinute(ts *[]time.Time, n int) bool {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	kept := s.passkeyBegins[:0]
-	for _, t := range s.passkeyBegins {
+	kept := (*ts)[:0]
+	for _, t := range *ts {
 		if now.Sub(t) < time.Minute {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= PasskeyBeginsPerMinute {
-		s.passkeyBegins = kept
+	if len(kept) >= n {
+		*ts = kept
 		return false
 	}
-	s.passkeyBegins = append(kept, now)
+	*ts = append(kept, now)
 	return true
 }

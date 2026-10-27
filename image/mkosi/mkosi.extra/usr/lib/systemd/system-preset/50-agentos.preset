@@ -21,8 +21,3 @@ enable agentos-keeper-enroll.service
 enable agentos-keeper-kernel.service
 # Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
 disable nftables.service
-# NetworkManager runs for the station only (50-agentos.conf); no join is enabled before the sealed store.
-enable NetworkManager.service
-# Nothing waits on a Wi-Fi join to finish booting, and no dispatcher script ships.
-disable NetworkManager-wait-online.service
-disable NetworkManager-dispatcher.service
