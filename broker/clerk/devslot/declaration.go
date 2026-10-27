@@ -129,8 +129,9 @@ func refuse(format string, a ...any) error {
 
 // Check is whether d and p may run: only DEV-4 verbs, only known link and
 // shape kinds, names from a closed alphabet (so no device text reaches an
-// event), bounded frames, and a pin on the home network only (DEV-2).
-func Check(d Declaration, p Pin) error {
+// event), bounded frames, and a pin on the home network only (DEV-2). The
+// host passes home, the uplink's enclosing /56, for global IPv6 pins.
+func Check(d Declaration, p Pin, home ...netip.Prefix) error {
 	if !nameRe.MatchString(d.Device) {
 		return refuse("device name")
 	}
@@ -138,7 +139,13 @@ func Check(d Declaration, p Pin) error {
 	if !ok {
 		return refuse("unknown link kind %q", d.Link)
 	}
-	if err := checkPin(d.Link, p); err != nil {
+	var h netip.Prefix
+	if len(home) > 1 {
+		return refuse("one home prefix")
+	} else if len(home) == 1 {
+		h = home[0]
+	}
+	if err := checkPin(d.Link, p, h); err != nil {
 		return err
 	}
 	if d.MaxRead < 1 || d.MaxRead > CapRead {
@@ -214,14 +221,14 @@ func Check(d Declaration, p Pin) error {
 	return nil
 }
 
-func checkPin(l LinkKind, p Pin) error {
+func checkPin(l LinkKind, p Pin, home netip.Prefix) error {
 	switch l {
 	case GATT:
 		if !macRe.MatchString(p.Address) || p.Host.IsValid() {
 			return refuse("a gatt pin is one Bluetooth address")
 		}
 	case TCP:
-		if p.Address != "" || !homeAddr(p.Host) {
+		if p.Address != "" || !homeAddr(p.Host, home) {
 			return refuse("a tcp pin is a home-network address")
 		}
 		if p.Key == ([32]byte{}) {
@@ -231,11 +238,32 @@ func checkPin(l LinkKind, p Pin) error {
 	return nil
 }
 
-// homeAddr is a private or link-local unicast address: never the internet,
-// the box itself, or a broadcast or multicast group (DEV-1, DEV-2).
-func homeAddr(a netip.Addr) bool {
-	return a.IsValid() && (a.IsPrivate() || a.IsLinkLocalUnicast()) && !a.IsLoopback()
+// homeAddr is a home-network unicast address (DEV-1, DEV-2): a private,
+// shared (100.64.0.0/10) or link-local IPv4 address that is not a directed
+// broadcast, a unique-local or link-local IPv6 address, or a global IPv6
+// address inside home, the uplink's enclosing /56. Never the internet, the
+// box itself, or a broadcast or multicast group. A v4-mapped address is
+// judged as its IPv4 address.
+func homeAddr(a netip.Addr, home netip.Prefix) bool {
+	a = a.Unmap()
+	if !a.IsValid() || a.IsLoopback() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	if a.Is4() {
+		// Every broadcast of a /24 or wider ends in .255; a narrower home
+		// subnet's broadcast is not caught here (DEVSLOT-host-lib-3).
+		return (a.IsPrivate() || a.IsLinkLocalUnicast() || shared.Contains(a)) && a.As4()[3] != 255
+	}
+	if a.IsPrivate() || a.IsLinkLocalUnicast() {
+		return true
+	}
+	return home.IsValid() && home.Bits() == 56 && home.Addr().Is6() && !home.Addr().Is4In6() &&
+		home.Addr().IsGlobalUnicast() && !home.Addr().IsPrivate() && a.IsGlobalUnicast() && home.Contains(a.WithZone(""))
 }
+
+// shared is RFC 6598's shared address space, which a carrier-grade NAT or
+// a home router's own segment may use.
+var shared = netip.MustParsePrefix("100.64.0.0/10")
 
 // match is whether frame on ch is one of op's declared shapes.
 func (d *Declaration) match(op Operation, ch string, frame []byte) bool {
