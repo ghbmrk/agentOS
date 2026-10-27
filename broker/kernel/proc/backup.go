@@ -82,7 +82,7 @@ func recordsAAD() []byte { return []byte("agentos.backup.records.v1") }
 // the backup's snapshot, as its backup.taken names it. Rebuilt is a
 // pending backup the start rebuilt from its backup.taken because the
 // records file lacked it: its Subjects are every subject opened at or
-// below Upto that is erased or still has a key.
+// below Upto, whatever the key table holds.
 type Kept struct {
 	Target   string        `json:"target"`
 	Verified bool          `json:"verified"`
@@ -263,10 +263,11 @@ func (bk *backups) union(k *kernel.Kernel, now int64) error {
 		if have[b.BackupID] {
 			continue
 		}
-		subs, err := rebuiltSubjects(st, bk.keys, b.Upto)
-		if err != nil {
-			return err
-		}
+		// Every subject opened by the snapshot, whatever the key table
+		// holds now: the key files sit beside records and may be deleted
+		// with it, and a live one whose key is missing makes the re-seal
+		// fail, so an erase names the backup held instead of skipping it.
+		subs := st.SubjectsUpto(b.Upto)
 		bk.kept = append(bk.kept, Kept{Target: b.Target, Pending: true, Rebuilt: true, Upto: b.Upto, Record: backup.Record{
 			BackupID: b.BackupID, Recipient: backup.Recipient{X: b.Recipient.X, EK: b.Recipient.EK},
 			Created: b.Created, Subjects: subs}})
@@ -277,25 +278,6 @@ func (bk *backups) union(k *kernel.Kernel, now int64) error {
 		_ = bk.save()
 	}
 	return nil
-}
-
-// rebuiltSubjects is every subject a backup whose snapshot is at upto may
-// give: opened at or below upto, and erased or still holding a key. One
-// whose key is missing and which is not erased cannot be in its table and
-// does not matter to an erase.
-func rebuiltSubjects(st *kernel.State, keys kernel.Keys, upto uint64) ([]string, error) {
-	var out []string
-	for _, sub := range st.SubjectsUpto(upto) {
-		if r, _ := st.Recall(sub); !r.Erased {
-			if _, ok, err := keys.Get(sub); err != nil {
-				return nil, err
-			} else if !ok {
-				continue
-			}
-		}
-		out = append(out, sub)
-	}
-	return out, nil
 }
 
 func (bk *backups) load() ([]Kept, error) {

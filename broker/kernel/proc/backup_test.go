@@ -1342,3 +1342,35 @@ func TestRebuiltSubjectsStopAtUpto(t *testing.T) {
 		t.Fatal("the re-sealed table lost a subject the backup held")
 	}
 }
+
+// LOG-4 (#3367 L3 and Security blocker 1): the key files sit beside the
+// records, so deleting them with a rollback must not shrink a rebuilt
+// backup's subjects. The rebuild lists every subject opened by B2's
+// snapshot, and an erase whose re-seal then lacks a live key names B2 held
+// instead of skipping it.
+func TestRebuildIgnoresDeletedKeyFiles(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	other := b.subject()
+	_, b2, gone := rolledBack(t, b, func(old []byte) {
+		rollRecords(t, b)(old)
+		es, err := os.ReadDir(b.cfg.KeyDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range es {
+			if err := os.Remove(filepath.Join(b.cfg.KeyDir, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if kp := b.kept(b2); kp == nil || !kp.Rebuilt || !slices.Equal(kp.Record.Subjects, slices.Sorted(slices.Values([]string{other, gone}))) {
+		t.Fatalf("B2 rebuilt without its subjects: %+v", kp)
+	}
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(c.StillHeld, func(h kernel.BackupHold) bool { return h.Backup == b2 && h.Why != "" }) || slices.Contains(c.Resealed, b2) {
+		t.Fatalf("the erase's confirmation: %+v, want %s held", c, b2)
+	}
+}
