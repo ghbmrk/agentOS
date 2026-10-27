@@ -45,7 +45,7 @@ const MaxApproval = len(approvalTag) + 2 + 2*(1+recipientIDLen) + 8 + ed25519.Si
 var (
 	// ErrApproval: the bytes are not an approval the head key signed, or
 	// one out of shape.
-	ErrApproval = errors.New("handoff: not a recovery-key approval from this box's kernel")
+	ErrApproval = errors.New("handoff: not a recovery-key approval from my kernel")
 	// ErrApprovalExpired: the approval verifies but its time is over.
 	ErrApprovalExpired = errors.New("handoff: the recovery-key approval has expired; ask again")
 )
