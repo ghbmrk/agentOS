@@ -41,13 +41,18 @@ const (
 	backupCheckEvery = time.Minute
 )
 
-// The STATUS lines (ownerWorded). Steps the owner page does not serve
-// yet say a later box version adds them, as modelNoGrant does; the
-// choice page (e4b) rewords them to name itself.
+// backupStartGrace is how long after agentosd starts a kernel not yet
+// read is only starting, not a failure the owner restarts me for.
+const backupStartGrace = 2 * time.Minute
+
+// The STATUS lines (ownerWorded). The owner adds a destination on the
+// Backups page (e4b, backupchoice.go); the recipient comes only with a
+// recovery-key rotation, which no page here serves yet.
 const (
+	backupStarting = "Backups: I cannot check them yet, so I may hold the only copy of your data; I keep trying."
 	backupUnread   = "Backups: I cannot check them now, so I may hold the only copy of your data; restart me."
 	backupNoKey    = "Backups: cannot start, I have no backup key yet; a later box version adds it."
-	backupNoTarget = "Backups: none, so I hold the only copy of your data; a later box version adds this."
+	backupNoTarget = "Backups: none, so I hold the only copy of your data; add a drive on the Backups page."
 	backupNotYet   = "Backups: none checked yet, so I hold the only copy of your data; I keep trying."
 	backupFailed   = "Backups: the last one failed, so I hold the only copy of your data; check the drive."
 	backupOnePlace = "Backups: only one place holds them, so one fire or theft can take all; add a second."
@@ -62,10 +67,26 @@ func backupWipeable(n int) string {
 	return "Backups: " + strconv.Itoa(n) + " places keep no old copies, so a hacked box could wipe them; use ones that do."
 }
 
+// backupLastFailed is the line when the last backup call failed but an
+// older backup still counts, from the day at (kernel ms).
+func backupLastFailed(at int64) string {
+	return "Backups: the last one failed, so the newest is from " + time.UnixMilli(at).Format("2 Jan 2006") + "; check the drive."
+}
+
+// The status page's forms of the lines that carry a count or a date: it
+// is served before sign-in, so it shows fixed words only (Security D1 on
+// the P2-2w plan); the Backups page, behind sign-in, names the places.
+const (
+	backupPageLastFailed = "Backups: the last one failed, but an older one still counts; check the drive."
+	backupPageWipeable   = "Backups: a place keeps no old copies, so a hacked box could wipe it; the Backups page names it."
+)
+
 // backupSchedule is the schedule and the lines it feeds STATUS.
 type backupSchedule struct {
 	K   backupKernel
 	Now func() time.Time
+
+	started time.Time // when agentosd started (backupStartGrace)
 
 	mu        sync.Mutex
 	view      *kernelsock.BackupsView // the last read; nil until one answers
@@ -76,12 +97,12 @@ type backupSchedule struct {
 }
 
 func newBackupSchedule(k backupKernel) *backupSchedule {
-	return &backupSchedule{K: k, Now: time.Now}
+	return &backupSchedule{K: k, Now: time.Now, started: time.Now()}
 }
 
 // wire puts the lines into STATUS's notes, before daemon.Run.
 func (s *backupSchedule) wire(cfg *daemon.Config) {
-	cfg.Notes = append(cfg.Notes, s.onlyCopyNote, s.onePlaceNote, s.wipeableNote)
+	cfg.Notes = append(cfg.Notes, s.onlyCopyNote, s.lastFailedNote, s.onePlaceNote, s.wipeableNote)
 }
 
 // run checks every interval until ctx ends, starting at once.
@@ -164,28 +185,20 @@ func backoff(fails int) time.Duration {
 }
 
 // tick reads the kernel and takes a backup when one is owed and no
-// backoff holds it.
+// backoff holds it. The backoff resets only when every destination took a
+// verified backup and the read after the call shows none owed, so a call
+// that claims success while the kernel's view disagrees still backs off.
 func (s *backupSchedule) tick(ctx context.Context) {
 	defer s.logLines()
-	if !s.read(ctx) {
-		return
-	}
+	s.read(ctx)
 	now := s.Now()
 	s.mu.Lock()
-	owed := due(*s.view, now) && !now.Before(s.next)
+	owed := s.view != nil && due(*s.view, now) && !now.Before(s.next)
 	s.mu.Unlock()
 	if !owed {
 		return
 	}
 	taken, err := s.K.Backup(ctx)
-	s.mu.Lock()
-	if err == nil && tookAll(taken) {
-		s.fails, s.next = 0, time.Time{}
-	} else {
-		s.fails++
-		s.next = now.Add(backoff(s.fails))
-	}
-	s.mu.Unlock()
 	if err != nil {
 		log.Printf("backups: the kernel took none: %v", err)
 	}
@@ -194,13 +207,23 @@ func (s *backupSchedule) tick(ctx context.Context) {
 			log.Printf("backups: destination %q: %s", t.Target, t.Error)
 		}
 	}
-	s.read(ctx)
+	read := s.read(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil && tookAll(taken) && read == nil && !due(*s.view, now) {
+		s.fails, s.next = 0, time.Time{}
+	} else {
+		s.fails++
+		s.next = now.Add(backoff(s.fails))
+	}
 }
 
-// read keeps the kernel's view, and reports whether one is kept. A kernel
+// read keeps the kernel's view and returns the read's error. A kernel
 // not answering keeps the last view: the kernel's own state is unchanged
-// by agentosd failing to read it.
-func (s *backupSchedule) read(ctx context.Context) bool {
+// by agentosd failing to read it. Only a setup-only answer clears it, and
+// any other error ends a setup-only state, so a kernel that answered
+// setup-only and then went unreachable reads as unread, not as silence.
+func (s *backupSchedule) read(ctx context.Context) error {
 	v, err := s.K.Backups(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,8 +232,20 @@ func (s *backupSchedule) read(ctx context.Context) bool {
 		s.view, s.setupOnly = &v, false
 	case errors.Is(err, kernelsock.ErrSetupOnly):
 		s.view, s.setupOnly = nil, true
+	default:
+		s.setupOnly = false
 	}
-	return s.view != nil
+	return err
+}
+
+// snapshot is the last view and whether one is kept.
+func (s *backupSchedule) snapshot() (kernelsock.BackupsView, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.view == nil {
+		return kernelsock.BackupsView{}, false
+	}
+	return *s.view, true
 }
 
 // onlyCopyNote is the only-copy notice, "" once a backup counts.
@@ -220,6 +255,8 @@ func (s *backupSchedule) onlyCopyNote() string {
 	switch {
 	case s.setupOnly:
 		return ""
+	case s.view == nil && s.Now().Sub(s.started) < backupStartGrace:
+		return backupStarting
 	case s.view == nil:
 		return backupUnread
 	case s.view.Recipient == "":
@@ -236,6 +273,35 @@ func (s *backupSchedule) onlyCopyNote() string {
 		return backupFailed
 	}
 	return backupNotYet
+}
+
+// lastFailedNote says when the last backup call failed while an older
+// backup still counts, so the only-copy notice is gone but STATUS is not
+// silent about the failure.
+func (s *backupSchedule) lastFailedNote() string {
+	at, ok := s.failedSince()
+	if !ok {
+		return ""
+	}
+	return backupLastFailed(at)
+}
+
+// failedSince is the newest counting backup's Created when the last call
+// failed and one counts.
+func (s *backupSchedule) failedSince() (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.view == nil || s.fails == 0 {
+		return 0, false
+	}
+	var at int64
+	ok := false
+	for _, t := range current(*s.view) {
+		if b, has := newest(*s.view, t.Name); has && (!ok || b > at) {
+			at, ok = b, true
+		}
+	}
+	return at, ok
 }
 
 // onePlaceNote says when only one destination holds a backup that counts
@@ -258,29 +324,53 @@ func (s *backupSchedule) onePlaceNote() string {
 	return ""
 }
 
-// wipeableNote names how many current destinations are not append-only.
-func (s *backupSchedule) wipeableNote() string {
+// wipeable is the names of the current destinations not append-only.
+func (s *backupSchedule) wipeable() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.view == nil {
-		return ""
+		return nil
 	}
-	n := 0
+	var out []string
 	for _, t := range current(*s.view) {
 		if !t.AppendOnly {
-			n++
+			out = append(out, t.Name)
 		}
 	}
-	if n == 0 {
-		return ""
+	return out
+}
+
+// wipeableNote says how many current destinations are not append-only;
+// STATUS's 100 characters leave no room for their names, which the
+// Backups page shows (BAK-2).
+func (s *backupSchedule) wipeableNote() string {
+	if n := len(s.wipeable()); n > 0 {
+		return backupWipeable(n)
 	}
-	return backupWipeable(n)
+	return ""
 }
 
 // lines is every standing line, in STATUS's order.
 func (s *backupSchedule) lines() []string {
+	return nonEmpty(s.onlyCopyNote(), s.lastFailedNote(), s.onePlaceNote(), s.wipeableNote())
+}
+
+// pageLines is the lines as the status page shows them before sign-in:
+// the same notice, in fixed words with no count, date or name.
+func (s *backupSchedule) pageLines() []string {
+	failed, wipe := "", ""
+	if _, ok := s.failedSince(); ok {
+		failed = backupPageLastFailed
+	}
+	if len(s.wipeable()) > 0 {
+		wipe = backupPageWipeable
+	}
+	return nonEmpty(s.onlyCopyNote(), failed, s.onePlaceNote(), wipe)
+}
+
+func nonEmpty(ls ...string) []string {
 	var out []string
-	for _, l := range []string{s.onlyCopyNote(), s.onePlaceNote(), s.wipeableNote()} {
+	for _, l := range ls {
 		if l != "" {
 			out = append(out, l)
 		}

@@ -641,6 +641,14 @@ func main() {
 		// only-copy notice until the kernel verifies one.
 		bs := newBackupSchedule(*seat)
 		bs.wire(&cfg)
+		if cfg.PageSocket != nil {
+			// The status page's notice, and the Backups page (e4b), whose
+			// add is a tap on the passkey page's name.
+			cfg.PageSocket.BackupNotes = bs.pageLines
+			if cfg.PageSocket.Passkeys != nil {
+				cfg.PageSocket.Backups = &backupChoice{K: *seat, S: bs}
+			}
+		}
 		go bs.run(ctx, backupCheckEvery)
 	}
 	// The local inference service runs beside the broker, never in its
