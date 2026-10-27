@@ -62,12 +62,12 @@ Slices a and b do not depend on the answer: b exposes `find` and `confirm` that 
 ## Scope
 
 - **a:** `broker/kernel/erase.go`, `broker/kernel/state.go` (the entry type), `broker/kernel/rederive.go` (`content.read` joins `recorded`), `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`, `broker/kernel/proc/kernelsock.go`, `broker/kernel/proc/kernelsock_test.go`, `broker/kernel/proc/content_test.go`, `broker/kernel/sim/erase.go` and `sim_test.go` (reads in the sim's crash run).
-- **b:** `broker/owner/kernelsock/kernelsock.go` and its test (the client calls), new `broker/cmd/agentosd/forget.go` and `forget_test.go`, `broker/cmd/agentosd/main.go` (wiring and the start-up pass), `capoff.go`, `capoff_test.go`, `recallheld.go` (the composed `Contained` only), `broker/cmd/agentosd/ASSUMPTIONS.md`.
+- **b:** `broker/owner/kernelsock/kernelsock.go` and its test (the client calls), new `broker/cmd/agentosd/forget.go` and `forget_test.go`, `broker/cmd/agentosd/main.go` (wiring and the start-up pass), `capoff.go`, `capoff_test.go`, `learnstate.go` and `learnstate_test.go` (the `forgetNotRunning` note it appends at start goes; `forgetOffText` stays for c), `recallheld.go` (the composed `Contained` only), `broker/cmd/agentosd/ASSUMPTIONS.md`.
 - **c (under A):** `broker/localapi`, `broker/localsrv`, `broker/localui` (a Forget page and its tests), `broker/daemon/daemon.go` (a `PageSocket` field), `broker/cmd/agentosd/learnstate.go` and its test.
 
 **Guard files:** none (no new broker package). Slice a grows the trusted core (kernel and kernel/proc): before its build PR, a one-row DECISIONS.md PR under D-159 cites LOG-4 and D-169 (Mark's card cmsg_01R91wiieBzMSvPKFsAJVvuKTjvTbiZomrrfU1GfSTA8nx), and the PR carries its `Trusted-core:` line.
 
-**Order (D-111).** No open PR touches slice a's files at 90dd141, so a can start now. b touches `cmd/agentosd` and `owner/kernelsock`, which #3403 holds, so it takes the serial agentosd slot after #3403. c follows b, and the decision.
+**Order (D-111).** No open PR touches slice a's files at 90dd141, so a can start now. b touches `cmd/agentosd` and `owner/kernelsock`, which #3403 holds, so it takes the serial agentosd slot after #3403. c follows b and the decision, and waits for #3403 and #3402, which hold `localui` files.
 
 ## Acceptance tests
 
