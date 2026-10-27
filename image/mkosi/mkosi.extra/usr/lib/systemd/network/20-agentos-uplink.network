@@ -1,6 +1,6 @@
 # The wired uplink (P2-1, #1416): any physical Ethernet port takes an address by DHCP and IPv6
 # router advertisement, so plugging a cable into the home router is all it takes to go online.
-# Type=ether never matches the radio (Type=wlan: the access point and the home Wi-Fi station);
+# Type=ether never matches a radio (Type=wlan; the box turns no Wi-Fi on, D-178);
 # Kind=!* leaves out every virtual link (veth, bridge, ...). Inbound stays dropped (I11).
 [Match]
 Type=ether

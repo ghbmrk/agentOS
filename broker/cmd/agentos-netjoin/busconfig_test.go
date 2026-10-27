@@ -93,18 +93,6 @@ func TestTheBusPolicyAllowsOnlyTheHelpersCalls(t *testing.T) {
 	}
 }
 
-// The image installs the policy where the system bus reads it.
-func TestTheImageInstallsTheBusPolicy(t *testing.T) {
-	b, err := os.ReadFile("../../../image/build.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.conf" "$STAGE/usr/share/dbus-1/system.d/agentos-netjoin.conf"`
-	if !strings.Contains(string(b), want) {
-		t.Fatalf("image/build.sh lacks\n%s", want)
-	}
-}
-
 func attrs(r busRule) map[string]string {
 	m := map[string]string{}
 	for _, a := range r.Attrs {

@@ -72,7 +72,6 @@
   {"id": "DEBIAN-CVE-2026-11856", "issue": 2919, "where": "image", "package": "curl", "why": "Image package curl 8.14.1-2+deb13u7; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-12064", "issue": 2919, "where": "image", "package": "curl", "why": "Image package curl 8.14.1-2+deb13u7; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-12216", "issue": 2919, "where": "image", "package": "duktape", "why": "Image package duktape 2.7.0-2+b2; Debian 13 has no fix. Fails again once Debian ships one."},
-  {"id": "DEBIAN-CVE-2026-13002", "issue": 2919, "where": "image", "package": "dnsmasq", "why": "Image package dnsmasq 2.91-1+deb13u2; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-13608", "issue": 2919, "where": "image", "package": "curl", "why": "Image package curl 8.14.1-2+deb13u7; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-13757", "issue": 2919, "where": "image", "package": "p11-kit", "why": "Image package p11-kit 0.25.5-3; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-15059", "issue": 2919, "where": "image", "package": "systemd", "why": "Image package systemd 257.13-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},

@@ -80,17 +80,6 @@ func TestTheUnitIsBounded(t *testing.T) {
 	if _, ok := set["User"]; ok {
 		t.Error("the loader needs root for nft, systemctl and ip")
 	}
-	// The image creates hostapd's user (#1426); newHostapd fails closed
-	// without it.
-	su, err := os.ReadFile("../../../image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.ContainsFunc(strings.Split(string(su), "\n"), func(l string) bool {
-		return strings.HasPrefix(l, "u "+hostapdUser+" - ")
-	}) {
-		t.Errorf("sysusers.d declares no %s user", hostapdUser)
-	}
 }
 
 // The mask on /run/agentos-egress is a mount over that directory; if egress's
