@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // REQ: CH-9, ONB-5, HW-10
@@ -35,8 +37,10 @@ func TestSetupServesNoWiFiOp(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	for _, op := range []string{"page_setup_join", "page_setup_networks", "page_setup_wifi_name", "page_setup_wifi"} {
-		if call(op) == nil {
-			t.Errorf("%s is served", op)
+		// Only the unknown-op refusal proves the op is gone: a served op
+		// also refuses these nil args (bad args, no setup wifi).
+		if err := call(op); err == nil || !strings.HasSuffix(err.Error(), ": "+string(sockets.ErrUnknownOp)) {
+			t.Errorf("%s: %v, want %q", op, err, sockets.ErrUnknownOp)
 		}
 	}
 	for _, op := range localapi.SetupOps {
