@@ -67,6 +67,13 @@ func writeCapture(path, store string, b []byte) error {
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		return errTaken
 	}
+	return linkCapture(path, b)
+}
+
+// linkCapture writes b to a new 0600 file beside path and links it to path,
+// which link(2) refuses when path exists, so even a capture that passed the
+// checks above at the same time as another never replaces it.
+func linkCapture(path string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".first-edge-*")
 	if err != nil {
 		return err

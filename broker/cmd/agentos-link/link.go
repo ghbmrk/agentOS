@@ -21,6 +21,7 @@ const (
 	helloFor     = 5 * time.Second        // an edge that is not live sends its hello within this
 	trailFor     = 200 * time.Millisecond // how long a hello connection is watched for a second frame
 	recheckEvery = 250 * time.Millisecond // a revoke or cut closes a served connection within a second
+	recheckFor   = 500 * time.Millisecond // a recheck the kernel has not answered by then reads as not live
 )
 
 // errFault is every reason a connection closes that the edge caused. It
@@ -102,6 +103,7 @@ type server struct {
 	faults atomic.Int64
 	wait   time.Duration // helloFor, shorter in tests
 	every  time.Duration // recheckEvery, shorter in tests
+	limit  time.Duration // recheckFor
 
 	mu   sync.Mutex
 	live *served // the connection outbound frames go to
@@ -131,7 +133,7 @@ func newServer(k Kernel, log io.Writer) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{kernel: k, cfg: cfg, items: make(chan Item), log: log, wait: helloFor, every: recheckEvery}, nil
+	return &server{kernel: k, cfg: cfg, items: make(chan Item), log: log, wait: helloFor, every: recheckEvery, limit: recheckFor}, nil
 }
 
 // serve handles each connection ln accepts until ln closes.
@@ -239,11 +241,28 @@ func (s *server) recheck(c *served, key ed25519.PublicKey) {
 		case <-c.done:
 			return
 		case <-t.C:
-			if e, err := s.kernel.EdgeKey(key); err != nil || !e.Live {
+			if !s.stillLive(key) {
 				c.close()
 				return
 			}
 		}
+	}
+}
+
+// stillLive asks the kernel whether key is live, and reads an answer not
+// given within s.limit as no: a slow kernel never keeps a revoked edge
+// served past the second (decision 5).
+func (s *server) stillLive(key ed25519.PublicKey) bool {
+	ans := make(chan bool, 1)
+	go func() {
+		e, err := s.kernel.EdgeKey(key)
+		ans <- err == nil && e.Live
+	}()
+	select {
+	case ok := <-ans:
+		return ok
+	case <-time.After(s.limit):
+		return false
 	}
 }
 

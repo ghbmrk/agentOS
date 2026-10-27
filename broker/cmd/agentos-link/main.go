@@ -35,11 +35,11 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -141,11 +141,11 @@ func run(args []string, stderr io.Writer) error {
 // starts the hello reader under c.uid with the listener, and writes the one
 // capture it hands back.
 func runCapture(ctx context.Context, c config, stderr io.Writer) error {
-	if os.Geteuid() != 0 {
-		return errors.New("agentos-link: before the store I run as root, so enrollment takes the capture")
+	if err := captureAs(os.Geteuid()); err != nil {
+		return err
 	}
 	if err := writeable(c); err != nil {
-		fmt.Fprintf(stderr, "%v; I capture nothing\n", err)
+		fmt.Fprintf(stderr, "%v; no capture is taken\n", err)
 		return nil
 	}
 	ln, err := listenLink(c.iface, c.port)
@@ -161,14 +161,8 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, self, "-hello-child")
-	cmd.Env = []string{}
-	cmd.ExtraFiles = []*os.File{f}
-	cmd.Stderr = stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uint32(c.uid), Gid: uint32(c.gid), Groups: []uint32{}},
-		Pdeathsig:  syscall.SIGKILL,
-	}
+	env, opts := helloSpec(c, f, stderr)
+	cmd := childproc.Command(ctx, env, opts, self, "-hello-child")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -179,7 +173,7 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	f.Close()
 	ln.Close()
 	err = takeCapture(out, c.capture, c.store)
-	cmd.Process.Kill()
+	cmd.Kill()
 	cmd.Wait()
 	if ctx.Err() != nil {
 		return nil
@@ -195,6 +189,39 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	return nil
 }
 
+// captureAs refuses the pre-store mode at any euid but root's: enrollment
+// takes only a capture root owns (b2 decision 2).
+func captureAs(euid int) error {
+	if euid != 0 {
+		return errors.New("agentos-link: before the store, agentos-link must run as root, so enrollment takes the capture")
+	}
+	return nil
+}
+
+// servedAs refuses the served mode at root's euid: the process that parses
+// the edge's bytes holds no privilege (HW-16).
+func servedAs(euid int) error {
+	if euid == 0 {
+		return errors.New("agentos-link: served, agentos-link never runs as root")
+	}
+	return nil
+}
+
+// helloSpec is the hello reader child's start: no environment, only the
+// listener (descriptor 3), the link's uid and gid with no supplementary
+// groups, so the TLS and frame parsing never run as root, and killed with
+// its parent.
+func helloSpec(c config, ln *os.File, stderr io.Writer) (childproc.Env, childproc.Options) {
+	return childproc.NewEnv(), childproc.Options{
+		Stderr:     stderr,
+		ExtraFiles: []*os.File{ln},
+		SysProcAttr: &syscall.SysProcAttr{
+			Credential: &syscall.Credential{Uid: uint32(c.uid), Gid: uint32(c.gid), Groups: []uint32{}},
+			Pdeathsig:  syscall.SIGKILL,
+		},
+	}
+}
+
 // writeable is nil while a capture can still be written.
 func writeable(c config) error {
 	if _, err := os.Lstat(c.store); !errors.Is(err, os.ErrNotExist) {
@@ -208,8 +235,8 @@ func writeable(c config) error {
 
 // runServed is the served mode, under the link's own uid.
 func runServed(ctx context.Context, c config, stderr io.Writer) error {
-	if os.Geteuid() == 0 {
-		return errors.New("agentos-link: served, I never run as root")
+	if err := servedAs(os.Geteuid()); err != nil {
+		return err
 	}
 	s, err := newServer(kernelConn{c.kernelSock, c.kernelUID}, stderr)
 	if err != nil {

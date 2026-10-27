@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/edgelink"
 )
@@ -34,6 +35,7 @@ func (s *server) serveConsumer(ln net.Listener) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		s.consume(conn)
