@@ -10,8 +10,8 @@ import (
 // is one lowercase word taken from a mail or a page has the shape of a code,
 // so shape alone cannot keep content from the planner. The kernel's and the
 // key's refusal codes are named here; the clerks' are written out, since
-// this package does not import the clerks, and codes_test.go holds each to
-// the constant or literal its clerk answers with. A code not listed is
+// this package does not import the clerks, and codes_test.go reads the
+// clerks' sources and holds the list to the codes found there, both ways. A code not listed is
 // dropped: a new clerk code reaches the guest only once it is added here.
 var codes = set(
 	// The kernel's refusal codes: a rejected plan, or a step a clerk
@@ -48,6 +48,8 @@ var codes = set(
 	"unconfirmed", "unclassified", "not-dispatched", "unknown-mail", "bad-label",
 	"not-trashable", "no-alert-guard", "alert", "trash-not-restorable", "unknown-sender",
 	"no-longer-eligible", "outside-key",
+	"renumbered", "no-move", "no-trash-folder", "no-poster", "bad-flag", "no-uidnext",
+	"bad-unsubscribe-url", "egress-refused", "post-not-sent", "gmail-not-sent",
 
 	// broker/browser and broker/follow/followclerk.
 	"unapproved", "verb", "owner", "malformed",
