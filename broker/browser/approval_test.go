@@ -610,7 +610,7 @@ func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
 		t.Fatalf("phase %s", s.Phase)
 	}
 	now := 3 + int64(kernel.MaxChecks+2)*kernel.ProbeEvery
-	if err := r.k.Retry(now, "buy", 0); err != nil {
+	if err := r.k.Retry(now, "buy", 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.k.Tick(now); err != nil {

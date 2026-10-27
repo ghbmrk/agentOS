@@ -97,9 +97,9 @@ func (k storedKernel) Status(ctx context.Context) ([]daemon.KernelStep, error) {
 	return out, kernelErr(err)
 }
 
-// Retry retries a parked step on the kernel.
-func (k storedKernel) Retry(ctx context.Context, plan string, index int) error {
-	return kernelErr(k.Owner.Retry(ctx, plan, index))
+// Retry retries a parked step on the kernel, at the attempt its ask read.
+func (k storedKernel) Retry(ctx context.Context, plan string, index, attempt int) error {
+	return kernelErr(k.Owner.Retry(ctx, plan, index, attempt))
 }
 
 // kernelErr is err in the owner commands' terms: the kernel's refusal in

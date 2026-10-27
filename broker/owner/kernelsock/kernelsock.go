@@ -188,6 +188,9 @@ type Step struct {
 	Detail string // the clerk's last answer, which the kernel bounds
 	Retry  bool   // the owner may RETRY it
 	SentAt int64  // when it was first sent (unix ms), which RETRY names
+	// Attempt is the step's dispatch attempt; a RETRY sends it back, and
+	// the kernel refuses one asked about an attempt since sent again (CH-10).
+	Attempt int
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount    int64
@@ -215,17 +218,19 @@ func (o Owner) Status(ctx context.Context) ([]Step, error) {
 	return s, err
 }
 
-// stepArgs is kernel/proc's stepArgs.
-type stepArgs struct {
-	Plan  string `json:"plan"`
-	Index int    `json:"index"`
+// retryArgs is kernel/proc's retryArgs.
+type retryArgs struct {
+	Plan    string `json:"plan"`
+	Index   int    `json:"index"`
+	Attempt int    `json:"attempt"`
 }
 
 // Retry logs the owner's RETRY of a parked step and anchors it (KRN-7): the
 // kernel sends it again on a later tick, under every check it would make
-// now. It refuses a step that is not parked, or one it would not send now.
-func (o Owner) Retry(ctx context.Context, plan string, index int) error {
-	return o.call(ctx, "retry", stepArgs{plan, index}, nil)
+// now. It refuses a step that is not parked, one it would not send now, or
+// one sent again since the ask that read attempt (kernel.ErrRetryMoved).
+func (o Owner) Retry(ctx context.Context, plan string, index, attempt int) error {
+	return o.call(ctx, "retry", retryArgs{plan, index, attempt}, nil)
 }
 
 // Submit logs a guest's plan on the kernel, which decides it at once (PLN-5

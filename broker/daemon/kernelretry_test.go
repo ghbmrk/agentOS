@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ import (
 func kernelSteps() []KernelStep {
 	return []KernelStep{
 		{Plan: "p1", Verb: "post", Clerk: "web", Phase: KernelUnknown, PlanStatus: KernelPlanActive},
-		{Plan: "p2", Index: 1, Verb: "organize", Clerk: "mail", Phase: KernelParked, Retry: true, PlanStatus: KernelPlanActive},
+		{Plan: "p2", Index: 1, Verb: "organize", Clerk: "mail", Phase: KernelParked, Retry: true, Attempt: 1, PlanStatus: KernelPlanActive},
 		{Plan: "p3", Verb: "send", Clerk: "mail", Phase: KernelUnsent, PlanStatus: KernelPlanActive},
 		{Plan: "p4", Verb: "send", Clerk: "mail", Phase: KernelUnsent, PlanStatus: "cancelled"},
 	}
@@ -116,6 +117,86 @@ func TestRETRYRetriesTheKernelsParkedStep(t *testing.T) {
 	}
 }
 
+// listed is items without its error, for tests of what RETRY offers.
+func (r *retrier) listed() []ownerch.Item {
+	items, _ := r.items()
+	return items
+}
+
+// Two RETRY asks about one parked step each name the attempt they read
+// (CH-10): approving the first retries it; once it has been sent again and
+// re-parked, approving the second, older ask sends the attempt that ask
+// read, the kernel refuses it, nothing is retried, and the owner is told
+// in fixed words. Revert mutant: re-read the attempt at approval time
+// (from Status), and the older ask retries the step a third time.
+func TestAnOlderKernelRETRYAskRetriesNothing(t *testing.T) {
+	k := &fakeKernel{steps: kernelSteps()}
+	d, phone := withKernelChannel(t, k)
+	var told []string
+	d.retry.mu.Lock()
+	d.retry.inform = func(s string) error { told = append(told, s); return nil }
+	d.retry.mu.Unlock()
+	ctx := context.Background()
+	var asks [][]string
+	for range 2 {
+		if got := d.Owner().Handle(ctx, owner, "RETRY"); len(got) != 0 {
+			t.Fatalf("RETRY replies %q", got)
+		}
+		asks = append(asks, retryCodeRe.FindStringSubmatch(nextText(t, phone)))
+	}
+	if asks[0] == nil || asks[1] == nil || asks[0][1] == asks[1][1] {
+		t.Fatalf("two asks: %q", asks)
+	}
+	d.Owner().Handle(ctx, owner, "YES "+asks[0][1]+" "+asks[0][2])
+	d.retry.running.Wait()
+	if len(told) != 1 || !strings.Contains(told[0], "will be tried again") {
+		t.Fatalf("first approval: %q", told)
+	}
+	// The redo is sent, fails its checks and parks again at attempt 2.
+	k.set(func(k *fakeKernel) { k.steps[1].Attempt = 2 })
+	if got := d.Owner().Handle(ctx, owner, "YES "+asks[1][1]+" "+asks[1][2]); len(got) != 1 || got[0] != "Approved "+asks[1][1]+"." {
+		t.Fatalf("second approve: %q", got)
+	}
+	d.retry.running.Wait()
+	want := "Retry " + asks[1][1] + " refused: it was sent again since I asked you. Organize on mail was not tried again; text RETRY later."
+	if len(told) != 2 || told[1] != want {
+		t.Fatalf("older approval: %q, want %q", told, want)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.retried) != 1 || !slices.Equal(k.attempts, []int{1, 1}) {
+		t.Fatalf("retried %q with attempts %v, want one retry and both asks at attempt 1", k.retried, k.attempts)
+	}
+}
+
+// A kernel whose steps cannot be read is named on RETRY, never answered
+// "Nothing to retry." (KRN-7); a kernel waiting for setup holds no steps,
+// as STATUS reads it, so it is not named. Revert mutants: drop the Status
+// error, and the unread kernel answers "Nothing to retry."; drop the
+// setup check, and a setup-only box says part of it is not answering.
+func TestRETRYNamesAKernelThatCannotBeRead(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		set    func(*fakeKernel)
+		unread bool
+	}{
+		{"steps unread", func(k *fakeKernel) { k.unlisted = true }, true},
+		{"down", func(k *fakeKernel) { k.down = true }, true},
+		{"waiting for setup", func(k *fakeKernel) { k.setup = true }, false},
+	} {
+		k := &fakeKernel{}
+		c.set(k)
+		d, _ := withKernelChannel(t, k)
+		if _, err := d.retry.items(); (err != nil) != c.unread {
+			t.Fatalf("%s: items error %v", c.name, err)
+		}
+		got := d.Owner().Handle(context.Background(), owner, "RETRY")
+		if len(got) != 1 || strings.HasPrefix(got[0], "Part of me is not answering") != c.unread || (!c.unread && got[0] != "Nothing to retry.") {
+			t.Fatalf("%s: RETRY replies %q", c.name, got)
+		}
+	}
+}
+
 // Every answer but an approval retries nothing; a refusal or a lost answer
 // is told as such, never as a retry under way, and is listed again.
 func TestAKernelRETRYOnlyOnTheOwnersWord(t *testing.T) {
@@ -128,7 +209,7 @@ func TestAKernelRETRYOnlyOnTheOwnersWord(t *testing.T) {
 	relisted := 0
 	d.OnRetryRefused(func() { relisted++ })
 	ref := func() string {
-		for _, it := range d.retry.items() {
+		for _, it := range d.retry.listed() {
 			if strings.HasPrefix(it.Ref, kernelRefPrefix) {
 				return it.Ref
 			}

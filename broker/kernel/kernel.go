@@ -699,14 +699,24 @@ var ErrNotParked = errors.New("kernel: no parked step of a live plan there to re
 // now (a STOP, a revoke, an expiry, a limit); the step stays parked.
 var ErrRetryRefused = errors.New("kernel: the step cannot be sent again now")
 
+// ErrRetryMoved refuses a RETRY asked about an earlier dispatch attempt: the
+// step was sent again since, so the owner's approval was not given for this
+// send (CH-10).
+var ErrRetryMoved = errors.New("kernel: the step was retried since that ask")
+
 // Retry is the owner's RETRY of a parked step (KRN-8, CH-11): the owner
 // accepts that its effect may happen twice. The step is sent again under its
 // own idempotency key and only after the same checks as any dispatch. Like
-// every widening it anchors before it counts.
-func (k *Kernel) Retry(now int64, plan string, index int) error {
+// every widening it anchors before it counts. attempt is the dispatch
+// attempt the owner was asked about (Unsettled.Attempt); a RETRY of a step
+// sent again since is refused.
+func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 	p, st := k.s.step(stepRef{plan, index})
 	if st == nil || !retryable(p, st) {
 		return ErrNotParked
+	}
+	if st.Attempt != attempt {
+		return ErrRetryMoved
 	}
 	// A redo that Next would refuse now (a STOP, a revoke, an expiry, a
 	// limit) would cancel the plan: refuse the RETRY instead and leave the

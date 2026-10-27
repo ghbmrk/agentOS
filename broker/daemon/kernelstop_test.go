@@ -34,8 +34,11 @@ type fakeKernel struct {
 	// steps are the unsettled steps; unlisted refuses their read alone.
 	steps    []KernelStep
 	unlisted bool
-	// retried are the steps RETRY reached; retryErr is its answer.
+	// retried are the steps RETRY reached and attempts the attempt each
+	// named; retryErr is its answer. A RETRY naming an attempt other than
+	// its step's is refused as the kernel refuses it (ErrRetryMoved).
 	retried  []string
+	attempts []int
 	retryErr error
 }
 
@@ -133,11 +136,17 @@ func (k *fakeKernel) Status(context.Context) ([]KernelStep, error) {
 	return slices.Clone(k.steps), nil
 }
 
-func (k *fakeKernel) Retry(_ context.Context, plan string, index int) error {
+func (k *fakeKernel) Retry(_ context.Context, plan string, index, attempt int) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.refuse(); err != nil {
 		return err
+	}
+	k.attempts = append(k.attempts, attempt)
+	for _, s := range k.steps {
+		if s.Plan == plan && s.Index == index && s.Attempt != attempt {
+			return KernelRefused{Text: "kernel: the step was retried since that ask"} // kernel.ErrRetryMoved
+		}
 	}
 	k.retried = append(k.retried, fmt.Sprintf("%s/%d", plan, index))
 	return k.retryErr
