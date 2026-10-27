@@ -664,3 +664,42 @@ func TestConnectKeepsThePinWhenResolveFails(t *testing.T) {
 		t.Fatalf("%d pair-setup attempts, want 1", tries)
 	}
 }
+
+// An Emit hook that writes back to the same Link while an accessory event is
+// delivered inside a step (#3335 L3 probe,
+// /mnt/project-files/builds/2026-10-27-pr3335-emit-reentry-probe_test.go).
+func TestEmitMayCallBackIntoLink(t *testing.T) {
+	acc := newFakeAccessory(t)
+	c, _ := newClerk(t, acc, &bus{})
+	dev := connectOne(t, c)
+	l, err := c.Open(context.Background(), dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	c.Timeout = 300 * time.Millisecond
+	fired := false
+	emitted := 0
+	c.Emit = func(e Event) error {
+		emitted++
+		if !fired {
+			fired = true
+			l.Write(CharTargetTemperature, 21.0)
+		}
+		return nil
+	}
+	acc.mu.Lock()
+	acc.eventsOn = true
+	acc.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { _, err := l.Poll(); done <- err }()
+	select {
+	case err := <-done:
+		// Seven read values and the one event the accessory sent first.
+		if err != nil || !fired || emitted != 8 {
+			t.Fatalf("poll: %v, hook fired: %v, %d emitted", err, fired, emitted)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("deadlock: Emit calling back into the Link during event delivery")
+	}
+}

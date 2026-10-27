@@ -243,7 +243,8 @@ type Link struct {
 	stepMu sync.Mutex
 
 	mu     sync.Mutex
-	failed int // events the bus refused
+	queue  []Value // events waiting for flush
+	failed int     // events the bus refused
 }
 
 // Close ends the session; a blocked exchange ends at once.
@@ -253,11 +254,15 @@ func (l *Link) Close() error { return l.s.Close() }
 // a step waits at most for the one before it, which its own deadline
 // bounds. Every exchange on a Link goes through step.
 func (l *Link) step(fn func() error) error {
-	l.stepMu.Lock()
-	defer l.stepMu.Unlock()
-	l.conn.SetDeadline(time.Now().Add(l.c.timeout()))
-	defer l.conn.SetDeadline(time.Time{})
-	return fn()
+	err := func() error {
+		l.stepMu.Lock()
+		defer l.stepMu.Unlock()
+		l.conn.SetDeadline(time.Now().Add(l.c.timeout()))
+		defer l.conn.SetDeadline(time.Time{})
+		return fn()
+	}()
+	l.flush()
+	return err
 }
 
 func (l *Link) find(typ string) (Characteristic, error) {
@@ -345,10 +350,30 @@ func (l *Link) ConfirmBounds(typ string, lo, hi float64) error {
 	return nil
 }
 
-// onEvent is the session's event hook. It runs after the session's lock is
-// released, so it may look the characteristic up (#3325 item 1); values of
-// another accessory on a bridge are dropped (#3325 item 2).
-func (l *Link) onEvent(vals []Value) { l.emit(vals) }
+// onEvent is the session's event hook. Events arrive inside a step, so they
+// are queued (at most maxPending values) and emitted by flush once the step
+// lock is released: an Emit hook may call back into the Link (#3335 L3).
+func (l *Link) onEvent(vals []Value) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, v := range vals {
+		if len(l.queue) < maxPending {
+			l.queue = append(l.queue, v)
+		}
+	}
+}
+
+// flush emits the queued events. Values of another accessory on a bridge
+// are dropped (#3325 item 2).
+func (l *Link) flush() {
+	l.mu.Lock()
+	q := l.queue
+	l.queue = nil
+	l.mu.Unlock()
+	if len(q) > 0 {
+		l.emit(q)
+	}
+}
 
 func (l *Link) emit(vals []Value) int {
 	sent := 0
