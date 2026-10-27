@@ -104,6 +104,9 @@ func TestSRPRejectsBadInput(t *testing.T) {
 		"2N":       new(big.Int).Lsh(srpN, 1).Bytes(),
 		"empty":    nil,
 		"too-long": make([]byte, srpLen+1),
+		// Non-zero modulo N, so only the length check can refuse them.
+		"too-long nonzero":      append([]byte{1}, srpPad(big.NewInt(7))...),
+		"too-long leading zero": append([]byte{0}, srpPad(big.NewInt(7))...),
 	} {
 		if _, err := srpClient(testCode, salt, B, a); err == nil {
 			t.Errorf("B %s accepted", name)
@@ -223,11 +226,22 @@ func TestWrongAccessoryKeyIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	for name, spoof := range map[string]func(){
-		"other key": func() { acc.verifyKey = other },
-		"other id":  func() { acc.verifyKey, acc.verifyID = acc.ltsk, "00:00:5E:00:53:99" },
+	// A slice, and every case sets both fields: "other key" proves a
+	// different key under the pinned ID, so only the signature check can
+	// refuse it, whatever ran before.
+	for _, tc := range []struct {
+		name string
+		key  ed25519.PrivateKey
+		id   string
+	}{
+		{"other key", other, acc.id},
+		{"other id", acc.ltsk, "00:00:5E:00:53:99"},
+		{"other key again", other, acc.id},
 	} {
-		spoof()
+		name := tc.name
+		acc.mu.Lock()
+		acc.verifyKey, acc.verifyID = tc.key, tc.id
+		acc.mu.Unlock()
 		var logs []string
 		s, err := Verify(acc.connect(t), host, pin, kh, Options{Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }})
 		if !errors.Is(err, ErrIdentity) || s != nil {
@@ -323,26 +337,43 @@ func TestThermostatClasses(t *testing.T) {
 			t.Errorf("%s with unconfirmed bounds is not actuate-physical", r.Name)
 		}
 	}
+	// Every non-setpoint row is checked with each value both inside
+	// confirmed bounds that contain it and outside them, so an in-bounds
+	// verb on the row cannot pass unseen.
 	mode := ClassFor(ServiceThermostat, CharTargetHeatingCoolingState)
+	if mode.Inverse != NoInverse {
+		t.Errorf("target heating/cooling state has inverse %q", mode.Inverse)
+	}
 	for v := 0.0; v <= 3; v++ { // off, heat, cool, auto
-		if mode.WriteVerb(v, b) != key.ActuatePhysical || mode.Inverse != NoInverse {
-			t.Errorf("target heating/cooling state %v: %s", v, mode.WriteVerb(v, b))
+		for _, mb := range []Bounds{{Min: 0, Max: 3, Confirmed: true}, {Min: v, Max: v, Confirmed: true}, b} {
+			if got := mode.WriteVerb(v, mb); got != key.ActuatePhysical {
+				t.Errorf("target heating/cooling state %v under %+v: %s", v, mb, got)
+			}
 		}
 	}
 	units := ClassFor(ServiceThermostat, CharTemperatureDisplayUnits)
 	for v := 0.0; v <= 1; v++ {
-		if units.WriteVerb(v, b) != key.ChangeAccount {
-			t.Errorf("display units %v: %s", v, units.WriteVerb(v, b))
+		for _, ub := range []Bounds{{Min: 0, Max: 1, Confirmed: true}, b} {
+			if got := units.WriteVerb(v, ub); got != key.ChangeAccount {
+				t.Errorf("display units %v under %+v: %s", v, ub, got)
+			}
 		}
 	}
 	for _, c := range []string{CharCurrentTemperature, CharCurrentHeatingCoolingState, "10", "ABCD"} {
 		r := ClassFor(ServiceThermostat, c)
-		if r.Read != key.Read || r.WriteVerb(21, b) != key.ActuatePhysical {
-			t.Errorf("%s: read %s write %s", c, r.Read, r.WriteVerb(21, b))
+		for _, v := range []float64{21, 1, 40} {
+			if r.Read != key.Read || r.WriteVerb(v, b) != key.ActuatePhysical ||
+				r.WriteVerb(v, Bounds{Min: v, Max: v, Confirmed: true}) != key.ActuatePhysical {
+				t.Errorf("%s %v: read %s write %s", c, v, r.Read, r.WriteVerb(v, b))
+			}
 		}
 	}
-	if r := ClassFor("43", "25"); r.Read != key.Read || r.WriteVerb(1, b) != key.ActuatePhysical {
-		t.Error("unmapped service is not conservative")
+	for _, v := range []float64{1, 21} {
+		r := ClassFor("43", "25")
+		if r.Read != key.Read || r.WriteVerb(v, b) != key.ActuatePhysical ||
+			r.WriteVerb(v, Bounds{Min: v, Max: v, Confirmed: true}) != key.ActuatePhysical {
+			t.Errorf("unmapped service is not conservative at %v", v)
+		}
 	}
 	if AdminRows["remove-pairing"] != key.DeleteRemote || AdminRows["add-pairing"] != key.RevealOrCreateSecret {
 		t.Error("admin rows")

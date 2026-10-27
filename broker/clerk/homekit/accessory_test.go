@@ -43,6 +43,14 @@ type fakeAccessory struct {
 	accReqs   int
 	writes    []string
 	vs        verifyState
+	// Hostile modes (all synthetic): the state of the pair-setup M2 reply,
+	// the identifier, key and signing key of M6, and bytes sent after the
+	// pair-verify M4 reply in the same write.
+	setupState  byte
+	m6ID        string
+	m6LTPK      []byte
+	m6SignKey   ed25519.PrivateKey
+	afterVerify []byte
 }
 
 const testCode = "111-22-333"
@@ -180,7 +188,11 @@ func (a *fakeAccessory) pairSetup(w io.Writer, m tlvMap, st *srpServerState) err
 		if a.badB {
 			bb = srpPad(srpN)
 		}
-		return tlvResp(w, tb(tlvState, 2), tv(tlvSalt, st.salt), tv(tlvPublicKey, bb))
+		state := byte(2)
+		if a.setupState != 0 {
+			state = a.setupState
+		}
+		return tlvResp(w, tb(tlvState, state), tv(tlvSalt, st.salt), tv(tlvPublicKey, bb))
 	case 3:
 		A := new(big.Int).SetBytes(m[tlvPublicKey])
 		pA, pB := srpPad(A), srpPad(st.B)
@@ -212,9 +224,18 @@ func (a *fakeAccessory) pairSetup(w io.Writer, m tlvMap, st *srpServerState) err
 		}
 		a.ctrls[string(c[tlvIdentifier])] = pk
 		ax := hkdfKey(st.K, "Pair-Setup-Accessory-Sign-Salt", "Pair-Setup-Accessory-Sign-Info")
-		ltpk := a.ltsk.Public().(ed25519.PublicKey)
-		sig := ed25519.Sign(a.ltsk, catBytes(ax, []byte(a.id), ltpk))
-		sub := encodeTLV(ts(tlvIdentifier, a.id), tv(tlvPublicKey, ltpk), tv(tlvSignature, sig))
+		id, ltpk, sk := a.id, []byte(a.ltsk.Public().(ed25519.PublicKey)), a.ltsk
+		if a.m6ID != "" {
+			id = a.m6ID
+		}
+		if a.m6LTPK != nil {
+			ltpk = a.m6LTPK
+		}
+		if a.m6SignKey != nil {
+			sk = a.m6SignKey
+		}
+		sig := ed25519.Sign(sk, catBytes(ax, []byte(id), ltpk))
+		sub := encodeTLV(ts(tlvIdentifier, id), tv(tlvPublicKey, ltpk), tv(tlvSignature, sig))
 		return tlvResp(w, tb(tlvState, 6), tv(tlvEncryptedData, sealMsg(encKey, "PS-Msg06", sub)))
 	}
 	return fmt.Errorf("bad state")
@@ -253,7 +274,11 @@ func (a *fakeAccessory) pairVerify(w io.Writer, m tlvMap) ([]byte, error) {
 		if pk == nil || !ed25519.Verify(pk, catBytes(vs.ctrl, c[tlvIdentifier], vs.eph.PublicKey().Bytes()), c[tlvSignature]) {
 			return nil, tlvResp(w, tb(tlvState, 4), tb(tlvError, 2))
 		}
-		return vs.shared, tlvResp(w, tb(tlvState, 4))
+		var b bytes.Buffer
+		tlvResp(&b, tb(tlvState, 4))
+		b.Write(a.afterVerify) // one write, so the bytes arrive with M4
+		_, err = w.Write(b.Bytes())
+		return vs.shared, err
 	}
 	return nil, fmt.Errorf("bad state")
 }
