@@ -1529,6 +1529,11 @@ def keeper_unit_violations(name, files):
                 out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
             elif keeper_reach(p, above=True):
                 out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+    # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
+    # ignores it); its bound is TimeoutStartSec=.
+    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+        out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
+                   % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
     start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:

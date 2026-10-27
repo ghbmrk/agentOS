@@ -198,6 +198,12 @@ class KeeperTreeTest(unittest.TestCase):
         self.add("agentos-localui.service", "Service", "Slice=agentos-keeper.slice")
         self.assertEqual(self.v(), ["agentos-localui.service: in agentos-keeper.slice but not one of the keeper's units (D-154)"])
 
+    def test_a_run_limit_on_a_oneshot_is_refused(self):
+        """#3477: systemd ignores RuntimeMaxSec= on a oneshot, so finalize refuses that vacuous bound."""
+        self.add("agentos-keeper-rotate@.service", "Service", "RuntimeMaxSec=60")
+        self.assertEqual(self.v(), ["agentos-keeper-rotate@.service: RuntimeMaxSec= has no effect on a Type=oneshot "
+                                    "unit; bound it with TimeoutStartSec= (#3477)"])
+
     def test_an_unlisted_keeper_unit_is_refused(self):
         write(self.root, SYSTEM + "agentos-keeper-extra.service", self.unit("agentos-boot-report.service").read_text())
         v = self.v()
@@ -540,7 +546,10 @@ class KeeperUnitsTest(unittest.TestCase):
         for k, v in (("NoNewPrivileges", "yes"), ("LimitCORE", "0"), ("UMask", "0077"), ("PrivateNetwork", "yes"),
                      ("RestrictAddressFamilies", "AF_UNIX")):
             self.assertEqual(svc[k], v, k)
-        self.assertTrue(svc["RuntimeMaxSec"].isdigit() and 0 < int(svc["RuntimeMaxSec"]) <= 300)
+        # A oneshot is starting until it exits: its time bound is the start timeout (#3477).
+        self.assertEqual(svc["Type"], "oneshot")
+        self.assertTrue(svc["TimeoutStartSec"].isdigit() and 0 < int(svc["TimeoutStartSec"]) <= 300)
+        self.assertNotIn("RuntimeMaxSec", svc)
         r = exec_args(ROTATE)
         self.assertEqual(r[:2], ["/usr/lib/agentos/agentos-enroll", "-rotate-recovery"])
         self.assertEqual(arg(r, "state"), arg(exec_args(ENROLL), "state"))

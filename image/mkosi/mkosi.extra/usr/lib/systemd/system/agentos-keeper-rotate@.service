@@ -14,8 +14,10 @@ StandardInput=socket
 StandardOutput=socket
 # The reasons go to the journal, never to the socket, which gets only the word.
 StandardError=journal
-# A peer that never ends its request holds the one connection no longer than this.
-RuntimeMaxSec=60
+# A peer that never ends its request holds the one connection no longer than this. A oneshot is
+# starting until it exits, so this is its start timeout (off by default for a oneshot); RuntimeMaxSec=
+# does nothing on one.
+TimeoutStartSec=60
 # The store key and the factors live in this process's memory (IMG-nodump).
 LimitCORE=0
 UMask=0077
