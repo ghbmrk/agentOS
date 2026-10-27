@@ -864,7 +864,13 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/vcard; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="AgentOS.vcf"`)
-	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:AgentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+s.cfg.Page.pageName()+"/\r\nEND:VCARD\r\n")
+	// The page's name may not resolve on a home network yet; until HTTPS is
+	// up, the card links the address this phone reached (WIFI-del-a3).
+	page := s.cfg.Page.pageName()
+	if h := reachedHost(r); !s.cfg.HTTPS && r.TLS == nil && h != "" {
+		page = h
+	}
+	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:agentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
 }
 
 var msgs = map[string]string{

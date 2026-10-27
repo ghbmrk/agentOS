@@ -25,15 +25,16 @@ Group=agentos-localui
 StateDirectory=agentos-localui
 StateDirectoryMode=0700
 # The page serves on port 1, the core's cable to the enforcer (CH-9, HW-12, D-178): an empty
-# -iface is the interface of the one IPv4 default route. AGENTOS_PAGE_IFACE, unset on the
-# image, lets a test harness name another (broker/e2e/boxe2e).
+# -iface is the PCI Ethernet port at the lowest device path, read from sysfs, never from routes
+# a peer could set (localui.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
+# name another (broker/e2e/boxe2e).
 ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface ${AGENTOS_PAGE_IFACE} \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \
         -card-latch /var/lib/agentos-localui/card-latch.json
 Restart=always
 RestartSec=5
-# DHCP may give port 1 its default route after the page starts: the page
-# exits until it has one, and the unit restarts it.
+# A box with no PCI Ethernet port serves no page: it exits, and the unit
+# restarts it.
 
 # Port 80, and SO_BINDTODEVICE to port 1's interface (CH-9).
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW

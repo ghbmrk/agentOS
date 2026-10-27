@@ -190,8 +190,9 @@ func TestTheUnitIsHardened(t *testing.T) {
 
 // WIFI-del-a3 (CH-9, HW-15, D-178): the page serves on port 1, the core's
 // cable to the enforcer, never on the access point the core no longer runs:
-// the unit names no Wi-Fi interface or fixed address, leaves -iface to the
-// default route, and admits only private home sources. It catches a unit
+// the unit names no Wi-Fi interface or fixed address, leaves -iface to
+// localui.Port1 with no Environment= naming another, and admits only
+// private home sources. It catches a unit
 // still bound to wlan0 at 10.42.0.1, which serves nothing once the access
 // point is gone.
 // REQ: CH-9, HW-15
@@ -218,6 +219,9 @@ func TestUnitServesThePageOnTheWiredPort(t *testing.T) {
 		if v, ok := strings.CutPrefix(l, "IPAddressAllow="); ok {
 			allow = v
 		}
+		if strings.HasPrefix(l, "Environment") {
+			t.Errorf("the unit sets an environment, which could name another interface: %s", l)
+		}
 	}
 	iface := ""
 	for i, w := range exec {
@@ -226,7 +230,7 @@ func TestUnitServesThePageOnTheWiredPort(t *testing.T) {
 		}
 	}
 	if iface != "${AGENTOS_PAGE_IFACE}" {
-		t.Errorf("-iface %q, want ${AGENTOS_PAGE_IFACE} (empty on the image: the default route)", iface)
+		t.Errorf("-iface %q, want ${AGENTOS_PAGE_IFACE} (empty on the image: localui.Port1)", iface)
 	}
 	if allow != "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" {
 		t.Errorf("IPAddressAllow=%q", allow)

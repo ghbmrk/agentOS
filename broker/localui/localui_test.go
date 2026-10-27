@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -35,7 +36,20 @@ const (
 	apiCanary = "sk-synthetic-CANARY-9f3b2c71d0e44a8b"
 )
 
+func testAP() APConfig {
+	return APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
+		SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"}
+}
+
 func testPage() Page { return Page{Iface: "eth0"} }
+
+// The box's own addresses in these tests: the one the phone reaches and
+// another on a second port.
+func init() {
+	boxAddrs = func() ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("192.168.50.2"), netip.MustParseAddr("172.20.0.9")}, nil
+	}
+}
 
 // boxReached is the address a phone's connection reaches on the box's
 // port 1.
@@ -1100,15 +1114,16 @@ func TestSetupClosesAfterLateFinishErrorAndStaysClosed(t *testing.T) {
 }
 
 // The owner can always find the box page: its name is in every page's
-// footer and in the contact card (WIFI-del-a3: the core's wired address
-// comes from DHCP, so no fixed address is shown).
+// footer, and the contact card links it (WIFI-del-a3).
 func TestBoxPageAddressIsShown(t *testing.T) {
 	r := newRig(t)
 	if !strings.Contains(r.get("/status"), "http://"+DefaultPageName+"/") {
 		t.Fatal("no box page name in the footer")
 	}
-	if !strings.Contains(r.get("/box.vcf"), "URL:http://"+DefaultPageName+"/") {
-		t.Fatal("no box page name in the contact card")
+	// Until HTTPS is up the name may not resolve, so the card links the
+	// address the phone reached.
+	if !strings.Contains(r.get("/box.vcf"), "URL:http://10.42.0.1/") {
+		t.Fatal("no reached address in the contact card")
 	}
 }
 

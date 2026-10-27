@@ -5,43 +5,88 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // REQ: CH-9, HW-15
 
-// route is one /proc/net/route line.
-func route(iface, dst, flags, mask string) string {
-	return iface + "\t" + dst + "\t0101A8C0\t" + flags + "\t0\t0\t100\t" + mask + "\t0\t0\t0\n"
+// sysNet builds a sysfs tree under a temporary root: one interface per
+// entry, at its device path, with its type and, for a radio, a phy80211
+// link; class/net links to each as the kernel's does.
+func sysNet(t *testing.T, ifaces map[string]struct {
+	dev, typ string
+	radio    bool
+}) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "class", "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, i := range ifaces {
+		dir := filepath.Join(root, "devices", i.dev, "net", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "type"), []byte(i.typ+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if i.radio {
+			if err := os.Mkdir(filepath.Join(dir, "phy80211"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "devices", i.dev, "net", name), filepath.Join(root, "class", "net", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }
 
-const routeHead = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
-
-// WIFI-del-a3 (D-178): the page serves on port 1, the one interface with
-// the box's IPv4 default route (HW-12); a link route, a down or reject
-// default, or loopback names nothing, and default routes on two
-// interfaces are refused rather than guessed. It catches a page that
-// serves on a guessed interface, such as the edge's cable (HW-15).
-func TestUplinkIsTheOneDefaultRoute(t *testing.T) {
-	link := route("enp2s0", "0032A8C0", "0001", "00FFFFFF")
-	for name, c := range map[string]struct {
-		routes, want string
-	}{
-		"one default":      {routeHead + link + route("enp1s0", "00000000", "0003", "00000000"), "enp1s0"},
-		"two on one iface": {routeHead + route("enp1s0", "00000000", "0003", "00000000") + route("enp1s0", "00000000", "0003", "00000000"), "enp1s0"},
-		"none":             {routeHead + link, ""},
-		"down default":     {routeHead + route("enp1s0", "00000000", "0002", "00000000"), ""},
-		"reject default":   {routeHead + route("enp1s0", "00000000", "0201", "00000000"), ""},
-		"loopback default": {routeHead + route("lo", "00000000", "0003", "00000000"), ""},
-		"two interfaces":   {routeHead + route("enp1s0", "00000000", "0003", "00000000") + route("enp2s0", "00000000", "0003", "00000000"), ""},
-		"bad flags":        {routeHead + route("enp1s0", "00000000", "zz", "00000000"), ""},
-		"empty table":      {"", ""},
-		"default, not /0":  {routeHead + route("enp1s0", "00000000", "0003", "000000FF"), ""},
-	} {
-		got, err := UplinkIface(c.routes)
-		if got != c.want || (c.want == "") != (err != nil) {
-			t.Errorf("%s: %q, %v", name, got, err)
-		}
+// WIFI-del-a3 (CH-9, HW-15; L3, Security and Potency blocker on f778fcf):
+// port 1 is chosen from what the hardware fixes, never from DHCP or the
+// routes, so the edge's USB cable or port 2 cannot become the page's port
+// by handing the box the only default route while port 1 has no lease.
+// It is the PCI Ethernet port at the lowest device path; USB adapters,
+// Thunderbolt networking, radios, virtual links and non-Ethernet links are
+// never it. It catches a page that serves on a port a peer picked.
+func TestPort1IsFixedByHardwareNotRoutes(t *testing.T) {
+	type nic = struct {
+		dev, typ string
+		radio    bool
+	}
+	edge := nic{"pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", "1", false}
+	port2 := nic{"pci0000:00/0000:00:1c.4/0000:03:00.0", "1", false}
+	port1 := nic{"pci0000:00/0000:00:1c.0/0000:02:00.0", "1", false}
+	full := map[string]nic{
+		"enx001122334455": edge,
+		"enp3s0":          port2,
+		"enp2s0":          port1,
+		"thunderbolt0":    {"pci0000:00/0000:00:0d.2/domain0/0-0/0-1/0-1.0", "1", false},
+		"wlan0":           {"pci0000:00/0000:00:14.3", "1", true},
+		"veth9":           {"virtual", "1", false},
+		"lo":              {"virtual", "772", false},
+		"wwan0":           {"pci0000:00/0000:00:1b.0/0000:01:00.0", "65534", false},
+	}
+	if got, err := Port1(sysNet(t, full)); got != "enp2s0" || err != nil {
+		t.Fatalf("port 1: %q, %v", got, err)
+	}
+	// With only the edge's USB adapter and a radio, there is no port 1.
+	if got, err := Port1(sysNet(t, map[string]nic{"enx001122334455": edge, "wlan0": full["wlan0"]})); err == nil {
+		t.Fatalf("a USB adapter or a radio became port 1: %q", got)
+	}
+	if got, err := Port1(t.TempDir()); err == nil {
+		t.Fatalf("no sysfs tree named %q", got)
+	}
+	// The page's start-up reads sysfs, not the route table.
+	src, err := os.ReadFile("../cmd/agentos-localui/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(src), "/proc/net/route") || !strings.Contains(string(src), "localui.Port1(") {
+		t.Fatal("agentos-localui does not pick port 1 with Port1")
 	}
 }
 
@@ -58,8 +103,9 @@ func reachedOn(target, from string, box *net.TCPAddr) *http.Request {
 
 // WIFI-del-a3 (CH-9): the enforcer routes the Owner network to port 1
 // from another subnet, so any private IPv4 source is served; nothing
-// public, loopback, IPv6 or malformed is, nor the box's own address, nor a
-// request whose server says nothing of the address it reached.
+// public, loopback, IPv6 or malformed is, nor any of the box's own
+// addresses (the reached one or another port's), nor a request whose
+// server says nothing of the address it reached.
 func TestPageAdmitsOnlyPrivateHomeSources(t *testing.T) {
 	r := newRig(t)
 	box := &net.TCPAddr{IP: net.IPv4(192, 168, 50, 2), Port: 80}
@@ -74,7 +120,7 @@ func TestPageAdmitsOnlyPrivateHomeSources(t *testing.T) {
 		}
 	}
 	for _, from := range []string{"8.8.8.8:4000", "203.0.113.5:4000", "100.64.0.9:4000", "169.254.1.1:4000", "127.0.0.1:4000",
-		"[::1]:4000", "[fd00::5]:4000", "192.168.50.2:4000", "garbage", ""} {
+		"[::1]:4000", "[fd00::5]:4000", "192.168.50.2:4000", "172.20.0.9:4000", "[::ffff:10.42.0.1]:4000", "garbage", ""} {
 		if c := serve(reachedOn("http://192.168.50.2/status", from, box)); c != http.StatusForbidden {
 			t.Errorf("source %q: %d", from, c)
 		}

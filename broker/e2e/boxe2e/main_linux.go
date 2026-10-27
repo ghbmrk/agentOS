@@ -144,8 +144,8 @@ func run(name string, args ...string) error {
 // owner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
 // namespace. The page reaches it only through the image's inbound rule for
 // the page's ports from private sources (WIFI-del-a3); a drop-in names
-// owner0 as the page's interface, since QEMU's own link holds the default
-// route, and the page restarts on it. agentos-ap, which the image still
+// owner0 as the page's interface, since Port1 picks QEMU's own PCI NIC,
+// and the page restarts on it. agentos-ap, which the image still
 // ships until WIFI-del-b, is stopped first. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {

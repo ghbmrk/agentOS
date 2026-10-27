@@ -5,7 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,7 +16,7 @@ import (
 // core's address there comes from DHCP, so the page binds no fixed address
 // and admits no subnet (WIFI-del-a3).
 type Page struct {
-	// Iface is port 1's interface (UplinkIface on the image).
+	// Iface is port 1's interface (Port1 on the image).
 	Iface string
 	// PageName is the owner page's name over HTTPS (OWN-page-https,
 	// #3153); DefaultPageName when empty.
@@ -42,40 +43,64 @@ func (p Page) Validate() error {
 	return nil
 }
 
-// Route flags (linux/route.h).
-const (
-	rtfUp     = 0x0001
-	rtfReject = 0x0200
-)
-
-// UplinkIface is port 1's interface, read from /proc/net/route's text: the
-// interface of the box's one up, non-reject IPv4 default route. Only port 1
-// carries the box's internet access (HW-12), so no other port (port 2, the
-// edge's cable, a USB tether) has one. None, or default routes on two
-// interfaces, is an error: the page serves nothing rather than guess.
-func UplinkIface(routes string) (string, error) {
-	found := ""
-	for _, l := range strings.Split(routes, "\n") {
-		f := strings.Fields(l)
-		// Iface Destination Gateway Flags RefCnt Use Metric Mask ...
-		if len(f) < 8 || f[0] == "lo" || f[1] != "00000000" || f[7] != "00000000" {
+// Port1 is port 1's interface, read from the sysfs tree at sys (/sys on
+// the box): the Ethernet interface (type 1, no radio) whose device sits on
+// the PCI bus at the lowest device path, leaving out virtual links, USB
+// adapters (the edge's link cable, HW-15) and Thunderbolt or USB4
+// networking (port 2's alternative, HW-12). It reads only what the box's
+// hardware fixes, never DHCP or route state a peer on another port could
+// set (WIFI-del-a3, CH-9). None is an error: the page serves nothing
+// rather than guess.
+func Port1(sys string) (string, error) {
+	ents, err := os.ReadDir(filepath.Join(sys, "class", "net"))
+	if err != nil {
+		return "", err
+	}
+	found, at := "", ""
+	for _, e := range ents {
+		dir := filepath.Join(sys, "class", "net", e.Name())
+		path, err := filepath.EvalSymlinks(dir)
+		if err != nil {
 			continue
 		}
-		n, err := strconv.ParseUint(f[3], 16, 32)
-		if err != nil || n&rtfUp == 0 || n&rtfReject != 0 {
+		dev := filepath.Dir(filepath.Dir(path)) // .../<device>/net/<name>
+		if !onPCIOnly(dev) {
 			continue
 		}
-		switch {
-		case found == "":
-			found = f[0]
-		case found != f[0]:
-			return "", errors.New("localui: default routes on two interfaces; name port 1 with -iface")
+		if t, err := os.ReadFile(filepath.Join(dir, "type")); err != nil || strings.TrimSpace(string(t)) != "1" {
+			continue
+		}
+		if exists(filepath.Join(dir, "wireless")) || exists(filepath.Join(dir, "phy80211")) {
+			continue
+		}
+		if found == "" || dev < at {
+			found, at = e.Name(), dev
 		}
 	}
 	if found == "" {
-		return "", errors.New("localui: no default route yet, so no uplink to serve the page on")
+		return "", errors.New("localui: no PCI Ethernet port to serve the page on")
 	}
 	return found, nil
+}
+
+// onPCIOnly: dev is under a PCI root and under no USB, Thunderbolt or
+// virtual device.
+func onPCIOnly(dev string) bool {
+	pci := false
+	for _, seg := range strings.Split(filepath.ToSlash(dev), "/") {
+		switch {
+		case seg == "virtual", strings.HasPrefix(seg, "usb"), strings.HasPrefix(seg, "thunderbolt"), strings.HasPrefix(seg, "domain"):
+			return false
+		case strings.HasPrefix(seg, "pci"):
+			pci = true
+		}
+	}
+	return pci
+}
+
+func exists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
 }
 
 // reached is the address r's connection reached on the box, from the
@@ -92,9 +117,11 @@ func reached(r *http.Request) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
-// homeSource: r comes from a private IPv4 address (RFC 1918) other than
-// the one it reached (CH-9). The listener is already bound to port 1; the
-// enforcer routes only the Owner network and its admin port there.
+// homeSource: r comes from a private IPv4 address (RFC 1918) that is none
+// of the box's own, the one it reached included (CH-9), so no process on
+// the box reaches the page by steering a connection onto port 1. The
+// listener is already bound to port 1; the enforcer routes only the Owner
+// network and its admin port there.
 func homeSource(r *http.Request) bool {
 	box := reached(r)
 	from, err := netip.ParseAddrPort(r.RemoteAddr)
@@ -102,7 +129,34 @@ func homeSource(r *http.Request) bool {
 		return false
 	}
 	a := from.Addr().Unmap()
-	return a.Is4() && a.IsPrivate() && a != box.Addr()
+	if !a.Is4() || !a.IsPrivate() || a == box.Addr() {
+		return false
+	}
+	own, err := boxAddrs()
+	if err != nil {
+		return false
+	}
+	for _, o := range own {
+		if o.Unmap() == a {
+			return false
+		}
+	}
+	return true
+}
+
+// boxAddrs lists the box's own addresses; a test replaces it.
+var boxAddrs = func() ([]netip.Addr, error) {
+	as, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Addr, 0, len(as))
+	for _, a := range as {
+		if p, err := netip.ParsePrefix(a.String()); err == nil {
+			out = append(out, p.Addr())
+		}
+	}
+	return out, nil
 }
 
 // reachedHost is the plain listener's IP-literal host for r: the address

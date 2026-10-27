@@ -1,18 +1,10 @@
 package localui
 
 import (
-	"net/netip"
 	"os/exec"
 	"strings"
 	"testing"
 )
-
-// testAP is an access point for agentos-ap's code, which stays until
-// WIFI-del-b (#3235); the page itself is served on port 1 (testPage).
-func testAP() APConfig {
-	return APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-		SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"}
-}
 
 // REQ: CH-7, CH-9, ONB-5
 

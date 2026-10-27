@@ -72,7 +72,7 @@ func main() {
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
-	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the interface of the one IPv4 default route (localui.UplinkIface)")
+	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the first PCI Ethernet port (localui.Port1)")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
 	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "serve the passkey page at /passkeys/ (#2779a) with this WebAuthn RP ID, through agentosd's passkey ops (agentosd -passkey-rp-id, the same name); it must be -page-name, and the page refuses to start unless the HTTPS listener is up")
@@ -81,14 +81,12 @@ func main() {
 	log.SetFlags(0)
 	debug.SetMemoryLimit(memoryLimit)
 	if iface == "" {
-		routes, err := os.ReadFile("/proc/net/route")
+		// Port 1 from the hardware, never from routes a peer could set.
+		p, err := localui.Port1("/sys")
 		if err != nil {
 			log.Fatal(err)
 		}
-		// No uplink yet: the unit restarts the page until DHCP gives one.
-		if iface, err = localui.UplinkIface(string(routes)); err != nil {
-			log.Fatal(err)
-		}
+		iface = p
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
