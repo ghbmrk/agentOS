@@ -13,8 +13,8 @@
 //
 // Loop model calls (counterfactual replay, the clean-room builder) are
 // charged to one dedicated key, the spare envelope, separate from every work budget (LOOP-2, OP-8). Its day cap is an
-// owner setting, changed only by an owner-origin intent; nothing a loop
-// runs can raise it (LOOP-6, CHG-2).
+// owner setting, applied directly with no journal (HLD-4); every raise needs
+// the owner's passkey (KEY-6), so nothing a loop runs can raise it.
 //
 // Loop 1, which mined the journal for hypotheses, and its Harvester were
 // deleted (#2786 part a, HLD-4: off until it beats the baseline); its

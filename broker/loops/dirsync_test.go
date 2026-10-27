@@ -5,21 +5,24 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
-// REQ: OP-4, LOOP-0
+// REQ: HLD-4, KEY-6, RES-5
 //
-// A settings save that published the new state but failed only at the
-// directory sync (#1320) is what a restart loads, so the setting is
-// applied and reported so; a save that failed before publishing still
-// rolls back.
+// A settings save that put the new state in place but failed only at the
+// directory sync (privfile.ErrUnsynced, #1320) is what a restart loads, so
+// the setting is applied and logged. A save that failed before that rolls
+// back only a widening: a narrowing stays in effect (KEY-6), unsaved.
 
 // saveFails stores and then fails at the directory sync, as
-// durable.WriteFile does after the rename, or (early) fails before
+// privfile.WriteAtomic does after the rename, or (early) fails before
 // storing anything.
 type saveFails struct {
 	*change.MemStore
@@ -33,20 +36,19 @@ func (f *saveFails) Save(b []byte) error {
 	if err := f.MemStore.Save(b); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: sync /var/lib/agentos: input/output error", durable.ErrDirSync)
+	return fmt.Errorf("%w: sync /var/lib/agentos: input/output error", privfile.ErrUnsynced)
 }
 
-func TestPublishedSettingIsReportedApplied(t *testing.T) {
+func TestAnUnsyncedSaveCountsAsApplied(t *testing.T) {
 	r := newRig(t)
 	var logged []string
 	r.s.cfg.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
 	r.s.cfg.Store = &saveFails{MemStore: r.store}
-	req, _ := ParseText("LOOP 1 OFF")
-	if err := r.s.Set(context.Background(), req); err != nil {
-		t.Fatalf("published setting reported failed: %v", err)
+	if got, ok := r.s.Text(context.Background(), "LOOP 1 OFF", true); !ok || got != "Learning is off until you reply LEARNING ON." {
+		t.Fatalf("an unsynced setting reported failed: %q %v", got, ok)
 	}
 	if r.s.Settings().On(Improve) {
-		t.Fatal("published LOOP 1 OFF rolled back in memory")
+		t.Fatal("unsynced LOOP 1 OFF rolled back in memory")
 	}
 	if len(logged) == 0 || strings.Contains(strings.Join(logged, "\n"), "/var/") {
 		t.Fatalf("logged %q", logged)
@@ -57,27 +59,65 @@ func TestPublishedSettingIsReportedApplied(t *testing.T) {
 	}
 }
 
-func TestUnpublishedSettingStillRollsBack(t *testing.T) {
-	r := newRig(t)
+func TestAFailedSaveRollsBackOnlyAWidening(t *testing.T) {
 	ctx := context.Background()
-	req, _ := ParseText("LOOP 1 OFF")
-	must(t, r.s.Set(ctx, req))
-	// Fail only the setting's own save: Set's sequence save goes first.
-	bad := &saveFails{MemStore: r.store}
-	r.s.cfg.Store = bad
-	r.s.mu.Lock()
-	r.s.st.Seq++
-	r.s.mu.Unlock()
-	bad.early = true
-	req, _ = ParseText("LOOP 1 ON")
-	if err := r.s.Set(ctx, req); err == nil {
-		t.Fatal("an unsaved setting reported applied")
-	}
-	if r.s.Settings().On(Improve) {
-		t.Fatal("an unsaved LOOP 1 ON stayed in memory")
-	}
-	r.restart()
-	if r.s.Settings().On(Improve) {
-		t.Fatal("an unsaved LOOP 1 ON took effect on restart")
+	one := SpareCap(1, loopstest.OutPerM)
+	for _, passkey := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passkey %v", passkey), func(t *testing.T) {
+			r := newRig(t)
+			var asked atomic.Int32
+			widen := r.spare.Widen
+			r.spare.Widen = func(n int64) (key.Key, error) { asked.Add(1); return widen(n) }
+			if !passkey {
+				r.spare.Widen = nil
+			}
+			must(t, r.s.Set(ctx, Request{Kind: KindBudget, Calls: 100}, true))
+			must(t, r.s.Set(ctx, Request{Kind: KindLoops, Loop: Secure}, true))
+			bad := &saveFails{MemStore: r.store, early: true}
+			r.s.cfg.Store = bad
+
+			// Widenings that fail to save leave everything as it was.
+			if passkey {
+				if got, _ := r.s.Text(ctx, "SPARE BUDGET 400", true); got != "I could not save that setting. Try again later." {
+					t.Fatalf("an unsaved raise: %q", got)
+				}
+				if asked.Load() != 1 {
+					t.Fatalf("passkey asked %d times", asked.Load())
+				}
+			} else if got, _ := r.s.Text(ctx, "SPARE BUDGET 400", true); !strings.Contains(got, "passkey") {
+				t.Fatalf("a raise with no passkey: %q", got)
+			}
+			if r.s.Settings().SpareCalls != 100 || r.spare.Cap() != SpareCap(100, loopstest.OutPerM) || capOf(t, r.spare.Key()) != SpareCap(100, loopstest.OutPerM) {
+				t.Fatalf("a raise that did not save: budget %d, cap %d", r.s.Settings().SpareCalls, r.spare.Cap())
+			}
+			for _, msg := range []string{"LOOP 2 ON", "UPDATES FAST"} {
+				if got, _ := r.s.Text(ctx, msg, true); got != "I could not save that setting. Try again later." {
+					t.Fatalf("%s unsaved: %q", msg, got)
+				}
+			}
+			if set := r.s.Settings(); set.On(Secure) || set.Updates.ChannelName() != ChannelStable {
+				t.Fatalf("an unsaved widening stayed: %+v", set)
+			}
+
+			// Narrowings that fail to save stand, and say they lapse on
+			// restart.
+			before := asked.Load()
+			old := r.spare.Key()
+			if got, _ := r.s.Text(ctx, "SPARE BUDGET 20", false); !strings.HasSuffix(got, unsavedReply) {
+				t.Fatalf("an unsaved lower: %q", got)
+			}
+			if r.s.Settings().SpareCalls != 20 || r.spare.Cap() != SpareCap(20, loopstest.OutPerM) {
+				t.Fatalf("an unsaved lower rolled back: budget %d, cap %d", r.s.Settings().SpareCalls, r.spare.Cap())
+			}
+			if rf := r.kern.Call(old, one); rf == nil {
+				t.Fatal("a key at the old cap is live after an unsaved lower")
+			}
+			if got, _ := r.s.Text(ctx, "LOOPS OFF", false); !strings.HasSuffix(got, unsavedReply) || !r.s.Settings().Off {
+				t.Fatalf("an unsaved LOOPS OFF: %q, %+v", got, r.s.Settings())
+			}
+			if asked.Load() != before {
+				t.Fatal("a narrowing asked the passkey")
+			}
+		})
 	}
 }

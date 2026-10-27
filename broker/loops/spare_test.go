@@ -10,6 +10,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/loops/loopstest"
 )
 
+// REQ: KEY-6, RES-5
+//
 // The spare envelope on the kernel (MIG-4-spend-m): a lower cap is a
 // derivation of the envelope the kernel enforces, a higher one a fresh
 // envelope from the owner's passkey, and the day's spend counts across every
@@ -208,5 +210,55 @@ func TestTheSpareCapCountsTheDaysEarlierSpend(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("%d calls under a 2-call cap set twice", calls)
+	}
+}
+
+// While Widen waits on the owner's passkey, Spare holds no lock: Cap, Key,
+// Used and a lowering return. The raise's Commit then finds the cap moved
+// and refuses with ErrMoved, and the lowering stands (KEY-6). A re-raise
+// after a lowering needs the passkey even under the envelope's own cap.
+func TestWidenRunsOutsideTheSpareLock(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)}
+	sp, k := newSpare(t, clk.now)
+	one := SpareCap(1, loopstest.OutPerM)
+	must(t, sp.SetCap(10*one))
+	entered, release := make(chan struct{}), make(chan struct{})
+	sp.Widen = func(n int64) (key.Key, error) {
+		close(entered)
+		<-release
+		return k.Widen(n)
+	}
+	prepared := make(chan error, 1)
+	go func() {
+		p, err := sp.Prepare(2 * loopstest.EnvelopeCap)
+		if err == nil {
+			err = sp.Commit(p)
+		}
+		prepared <- err
+	}()
+	<-entered
+	done := make(chan error, 1)
+	go func() {
+		_, _ = sp.Cap(), sp.Key()
+		_ = sp.Used(clk.now().UnixMilli())
+		done <- sp.SetCap(5 * one)
+	}()
+	select {
+	case err := <-done:
+		must(t, err)
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the spare lock was held across the passkey wait")
+	}
+	close(release)
+	if err := <-prepared; !errors.Is(err, ErrMoved) {
+		t.Fatalf("a raise prepared before a lowering committed: %v", err)
+	}
+	if sp.Cap() != 5*one || capOf(t, sp.Key()) != 5*one {
+		t.Fatalf("the lowering did not stand: cap %d", sp.Cap())
+	}
+	sp.Widen = nil
+	if err := sp.SetCap(8 * one); !errors.Is(err, ErrNoWiden) || sp.Cap() != 5*one {
+		t.Fatalf("a re-raise under the envelope's cap without the passkey: %v, cap %d", err, sp.Cap())
 	}
 }

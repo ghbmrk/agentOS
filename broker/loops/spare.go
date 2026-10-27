@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"slices"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -28,9 +29,9 @@ type Spare struct {
 	Envelope key.Key
 	Holder   ed25519.PrivateKey
 	// Widen is the owner's passkey (KEY-6): it returns a fresh envelope,
-	// held by Holder, with day cap n. Raising the cap past the envelope's
-	// is a widening no derivation can make. Nil: the cap is never raised
-	// past the envelope's.
+	// held by Holder, with day cap n. Raising the cap past the current one
+	// is a widening (KEY-6), even back up to a cap held before a lowering.
+	// Nil: the cap is never raised.
 	Widen func(n int64) (key.Key, error)
 	// Revoke is the owner's revocation (Kernel.Revoke), a narrowing: a
 	// lowering revokes every key handed out before it, so none stays live
@@ -48,7 +49,8 @@ type Spare struct {
 	out  []key.ID // every key handed out and not yet revoked; EvalKey's are their children
 }
 
-// ErrNoWiden refuses a cap above the envelope's when no passkey can widen it.
+// ErrNoWiden refuses a cap above the current one when no passkey can widen
+// it.
 var ErrNoWiden = errors.New("loops: raising the spare cap needs the owner's passkey")
 
 // ErrNoRevoke refuses a lowering when keys handed out at the old cap cannot
@@ -74,44 +76,98 @@ func dayCap(k key.Key) (int64, bool) {
 	return n, ok
 }
 
-// SetCap makes n the day cap of the key loop plans cite: a derivation of the
-// envelope, or, for a cap above the envelope's, of a fresh envelope from
-// Widen. A lowering first revokes every key handed out before it, Key's and
+// ErrMoved refuses a Commit whose envelope or cap changed after Prepare: a
+// lowering landed while the owner's passkey was asked, and it stands.
+var ErrMoved = errors.New("loops: the spare cap changed while the passkey was asked")
+
+// Prepared is a cap change Prepare checked, for Commit: the cap asked, the
+// envelope and cap Prepare saw, and the widened envelope when the change
+// needed the owner's passkey.
+type Prepared struct {
+	n       int64
+	set     bool
+	tip     key.ID
+	cap     int64
+	widened key.Key
+}
+
+// Prepare checks that n can be the day cap. A cap above the current one is a
+// widening (KEY-6): Prepare asks Widen for a fresh envelope with day cap n,
+// with no lock held, so Cap, Key, EvalKey, Used and a lowering never wait on
+// the passkey. Before the first cap is set, the current cap is the
+// envelope's.
+func (s *Spare) Prepare(n int64) (Prepared, error) { return s.prepare(n, true) }
+
+// prepare is Prepare; with widen false, a cap that needs the passkey is
+// refused with ErrNoWiden instead of asking for it.
+func (s *Spare) prepare(n int64, widen bool) (Prepared, error) {
+	if n < 0 {
+		return Prepared{}, errors.New("loops: negative spare cap")
+	}
+	s.mu.Lock()
+	p := Prepared{n: n, set: s.set, tip: s.Envelope.Tip(), cap: s.cap}
+	envCap, ok := dayCap(s.Envelope)
+	held := append([]key.ID{}, s.envs...)
+	if !s.set {
+		held = []key.ID{p.tip}
+	}
+	widenFn := s.Widen
+	s.mu.Unlock()
+	if !ok {
+		return Prepared{}, errors.New("loops: the spare envelope has no day spend cap")
+	}
+	base := envCap
+	if p.set {
+		base = p.cap
+	}
+	if n <= base {
+		return p, nil
+	}
+	if !widen || widenFn == nil {
+		return Prepared{}, ErrNoWiden
+	}
+	w, err := widenFn(n)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if c, ok := dayCap(w); !ok || c != n {
+		return Prepared{}, errors.New("loops: the widened spare envelope does not hold the cap asked")
+	}
+	// A fresh envelope sits under none already held, so no spend under it
+	// counts twice in Used.
+	for i := range w.Links {
+		if slices.Contains(held, (key.Key{Root: w.Root, Links: w.Links[:i]}).Tip()) {
+			return Prepared{}, errors.New("loops: the widened spare envelope is under one already held")
+		}
+	}
+	p.widened = w
+	return p, nil
+}
+
+// Commit makes p's cap the day cap of the key loop plans cite: a derivation
+// of the envelope, or of the fresh envelope Prepare widened to. It refuses
+// with ErrMoved when the envelope or the cap changed since Prepare. A
+// lowering first revokes every key handed out before it, Key's and
 // EvalKey's, so the kernel holds every plan to the new cap at once (L3 on
 // #2837). On an error the cap and key do not change; keys already revoked
 // stay revoked, which only refuses calls.
-func (s *Spare) SetCap(n int64) error {
-	if n < 0 {
-		return errors.New("loops: negative spare cap")
-	}
+func (s *Spare) Commit(p Prepared) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	env := s.Envelope
+	if p.set != s.set || p.tip != s.Envelope.Tip() || p.cap != s.cap {
+		return ErrMoved
+	}
+	n, env, envs := p.n, s.Envelope, s.envs
 	if !s.set {
-		s.envs = []key.ID{env.Tip()}
-	} else if len(s.envs) > 0 && s.envs[len(s.envs)-1] != env.Tip() {
-		return errors.New("loops: the spare envelope changed outside SetCap")
+		envs = []key.ID{env.Tip()}
+	} else if len(envs) > 0 && envs[len(envs)-1] != env.Tip() {
+		return errors.New("loops: the spare envelope changed outside Commit")
 	}
-	envCap, ok := dayCap(env)
-	if !ok {
-		return errors.New("loops: the spare envelope has no day spend cap")
-	}
-	envs := s.envs
-	if n > envCap {
-		if s.Widen == nil {
-			return ErrNoWiden
+	if w := p.widened; len(w.Links) > 0 {
+		env = w
+		if !slices.Contains(envs, w.Tip()) {
+			envs = append(append([]key.ID{}, envs...), w.Tip())
 		}
-		w, err := s.Widen(n)
-		if err != nil {
-			return err
-		}
-		// A chain never loosens, so an envelope with the higher cap
-		// cannot sit under one already held, and no spend counts twice.
-		if c, ok := dayCap(w); !ok || c != n {
-			return errors.New("loops: the widened spare envelope does not hold the cap asked")
-		}
-		env, envCap = w, n
-		envs = append(append([]key.ID{}, s.envs...), w.Tip())
 	}
 	nonce, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64/2))
 	if err != nil {
@@ -141,6 +197,17 @@ func (s *Spare) SetCap(n int64) error {
 	s.Envelope, s.envs, s.cur, s.cap, s.set = env, envs, cur, n, true
 	s.out = append(s.out, cur.Tip())
 	return nil
+}
+
+// SetCap is Prepare then Commit, for callers that do not race. Every raise
+// past the current cap needs the owner's passkey, a re-raise after a
+// lowering included (KEY-6).
+func (s *Spare) SetCap(n int64) error {
+	p, err := s.Prepare(n)
+	if err != nil {
+		return err
+	}
+	return s.Commit(p)
 }
 
 // Key is the key loop plans cite now. A lowering revokes it, so a plan cites

@@ -214,7 +214,7 @@ func TestSpareBudgetIsNeverExceeded(t *testing.T) {
 	localWork := &source{loop: Secure, clk: r.clk, queue: -1, value: 1}
 	r.restart(modelWork, localWork)
 	req, _ := ParseText("spare budget 2")
-	must(t, r.s.Set(context.Background(), req))
+	must(t, r.s.Set(context.Background(), req, true))
 	// Two replay calls use the budget up; the third is refused by the
 	// kernel itself, on the spare key's day cap, whoever makes it.
 	for i := 0; i < 2; i++ {
@@ -268,7 +268,7 @@ func TestTurningALoopOffStopsItsWork(t *testing.T) {
 	go func() { r.s.Tick(context.Background()); close(done) }()
 	<-src.started
 	req, _ := ParseText("LOOP 1 OFF")
-	must(t, r.s.Set(context.Background(), req))
+	must(t, r.s.Set(context.Background(), req, true))
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -279,7 +279,7 @@ func TestTurningALoopOffStopsItsWork(t *testing.T) {
 		t.Fatalf("after LOOP 1 OFF: loop 1 runs %d, loop 3 runs %d", src.count(), other.count())
 	}
 	req, _ = ParseText("LOOPS OFF")
-	must(t, r.s.Set(context.Background(), req))
+	must(t, r.s.Set(context.Background(), req, true))
 	if ran, _ := r.s.Tick(context.Background()); ran {
 		t.Fatal("work ran with every loop off")
 	}
@@ -333,7 +333,7 @@ func TestEvaluationKeyHoldsItsShareOfTheSpareBudget(t *testing.T) {
 	src := &evalSource{}
 	r.restart(src)
 	req, _ := ParseText("spare budget 10")
-	must(t, r.s.Set(context.Background(), req))
+	must(t, r.s.Set(context.Background(), req, true))
 	ek, err := r.s.EvalKey()
 	must(t, err)
 	one := SpareCap(1, loopstest.OutPerM)
