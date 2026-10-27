@@ -68,7 +68,9 @@ func readResponse(br *bufio.Reader) (*response, error) {
 		}
 	}
 	r.status, _ = strconv.Atoi(string(rest[:3]))
-	if r.status < 100 || r.status >= 600 {
+	// A 1xx interim reply is refused: the controller never asks for one, and
+	// taking it as the answer would put the stream out of step (#3325 item 7).
+	if r.status < 200 || r.status >= 600 {
 		return nil, fmt.Errorf("%w: status %d", ErrProtocol, r.status)
 	}
 	length, chunked := -1, false
@@ -112,7 +114,7 @@ func readResponse(br *bufio.Reader) (*response, error) {
 	case length >= 0:
 		r.body = make([]byte, length)
 		_, err = io.ReadFull(br, r.body)
-	case r.status == 204 || r.status == 304 || r.status < 200:
+	case r.status == 204 || r.status == 304:
 	default:
 		return nil, fmt.Errorf("%w: body without a length", ErrProtocol)
 	}

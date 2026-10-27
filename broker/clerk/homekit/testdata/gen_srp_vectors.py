@@ -83,6 +83,27 @@ CASES = [
     ("other-code", "999-88-777", "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5", 0x42, 0x4242),
 ]
 
+
+
+def first_zero_led(start, value):
+    """The first counter from start whose value's 384-byte form starts 0x00."""
+    n = start
+    while pad(value(n))[0] != 0:
+        n += 1
+    return n
+
+
+# A vector whose B starts with a zero byte, so PAD() is exercised on the
+# value the accessory sends (#3325 item 8; "other-code" already has an A
+# that starts with zero bytes). The private value is found by counting up
+# from a fixed start, so the search is reproducible.
+ZL_CODE, ZL_SALT = "222-33-444", bytes.fromhex("0f0e0d0c0b0a09080706050403020100")
+ZL_X = num(H(ZL_SALT, H(USER + b":" + ZL_CODE.encode())))
+ZL_B = first_zero_led(0x5000, lambda b: (K_MUL * pow(G, ZL_X, N) + pow(G, b, N)) % N)
+CASES += [
+    ("zero-led-B", ZL_CODE, ZL_SALT.hex(), 0x1234, ZL_B),
+]
+
 json.dump({
     "generator": "gen_srp_vectors.py (independent; formulas cross-read against aiohomekit 4.0.1 srp.py)",
     "vectors": [vector(n, c, bytes.fromhex(s), a, b) for n, c, s, a, b in CASES],

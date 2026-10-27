@@ -54,6 +54,7 @@ func FuzzResponse(f *testing.F) {
 	f.Add([]byte("EVENT/1.0 200 OK\r\nContent-Length: 47\r\n\r\n{\"characteristics\":[{\"aid\":1,\"iid\":2,\"value\":1}]}"))
 	f.Add([]byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"))
 	f.Add([]byte("HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 302 Found\r\nLocation: x\r\n\r\n"))
+	f.Add([]byte("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"))
 	f.Add([]byte("HTTP/1.1 200 OK\r\nContent-Length: 9999999\r\n\r\n"))
 	f.Add([]byte(thermostatJSON))
 	f.Fuzz(func(t *testing.T, b []byte) {
