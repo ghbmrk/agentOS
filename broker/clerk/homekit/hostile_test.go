@@ -337,7 +337,7 @@ func TestSessionRefusesHostileResponses(t *testing.T) {
 	t.Run("event flood", func(t *testing.T) { // session.go events-before-a-response cap
 		var mu sync.Mutex
 		events := 0
-		s, _ := hostilePeer(t, Options{OnEvent: func([]Value) { mu.Lock(); events++; mu.Unlock() }}, func(req *http.Request, n int) string {
+		s, _ := hostilePeer(t, Options{OnEvent: func(v []Value) { mu.Lock(); events += len(v); mu.Unlock() }}, func(req *http.Request, n int) string {
 			return strings.Repeat(hapEvent(valuesBody(idEv)), maxEventsWait) + hapResp(200, valuesBody(idEv))
 		})
 		if _, err := s.Read(idEv); !errors.Is(err, ErrProtocol) {

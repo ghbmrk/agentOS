@@ -85,3 +85,32 @@ func FuzzAccessoriesJSON(f *testing.F) {
 		}
 	})
 }
+
+// FuzzSessionRoundTrip frames the fuzzed bytes as an accessory would, so
+// every input passes AEAD and reaches the response parser through the frame
+// reader (#3325 item 5).
+func FuzzSessionRoundTrip(f *testing.F) {
+	key := bytes.Repeat([]byte{0x5a}, 32)
+	f.Add([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"))
+	f.Add([]byte("EVENT/1.0 200 OK\r\nContent-Length: 47\r\n\r\n{\"characteristics\":[{\"aid\":1,\"iid\":2,\"value\":1}]}HTTP/1.1 204 No Content\r\n\r\n"))
+	f.Add(append([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n"), bytes.Repeat([]byte("a"), 2000)...))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		var wire bytes.Buffer
+		wc, _ := newFrameCipher(key)
+		if _, err := (&frameWriter{w: &wire, c: wc}).Write(b); err != nil {
+			t.Fatal(err)
+		}
+		rc, _ := newFrameCipher(key)
+		br := bufio.NewReaderSize(&frameReader{r: &wire, c: rc}, readBufSize)
+		for i := 0; i < 4; i++ {
+			r, err := readResponse(br)
+			if err != nil {
+				return
+			}
+			if len(r.body) > maxBody || len(r.body) > len(b) {
+				t.Fatalf("body of %d bytes from %d", len(r.body), len(b))
+			}
+			parseValues(r.body)
+		}
+	})
+}

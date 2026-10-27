@@ -51,6 +51,10 @@ type fakeAccessory struct {
 	m6LTPK      []byte
 	m6SignKey   ed25519.PrivateKey
 	afterVerify []byte
+	// accJSON replaces the thermostat profile (a bridge, for one); hang,
+	// when set, holds every characteristics read until it is closed.
+	accJSON string
+	hang    chan struct{}
 }
 
 const testCode = "111-22-333"
@@ -319,6 +323,13 @@ func (a *fakeAccessory) session(conn net.Conn, shared []byte) {
 		}
 		body, _ := io.ReadAll(req.Body)
 		a.mu.Lock()
+		h := a.hang
+		a.mu.Unlock()
+		if h != nil && req.Method == "GET" && req.URL.Path == "/characteristics" {
+			<-h
+			return
+		}
+		a.mu.Lock()
 		a.sessReqs++
 		err = a.handle(fw, req, body)
 		a.mu.Unlock()
@@ -347,6 +358,9 @@ func (a *fakeAccessory) handle(w io.Writer, req *http.Request, body []byte) erro
 	switch {
 	case req.Method == "GET" && req.URL.Path == "/accessories":
 		a.accReqs++
+		if a.accJSON != "" {
+			return writeResp(w, 200, hj, []byte(a.accJSON))
+		}
 		return writeResp(w, 200, hj, []byte(thermostatJSON))
 	case req.Method == "GET" && req.URL.Path == "/characteristics":
 		var ids []ID
