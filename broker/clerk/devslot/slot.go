@@ -34,14 +34,17 @@ type Target struct {
 }
 
 // Transport is the host's raw link to the device (part b): the enforcer's
-// GATT relay, or a TCP stream whose key it checked against the pin.
+// GATT relay, or a TCP stream whose key it checked against the pin. Its calls
+// return once ctx ends, which is how the slot ends a call still in flight
+// when an operation finishes.
 type Transport interface {
 	Write(ctx context.Context, t Target, frame []byte) error
 	Read(ctx context.Context) (Target, []byte, error)
 }
 
 // Reading is one value the driver reports: a declared kind, a decimal
-// (Value × 10^Exp) and when the device took it. It carries no device text.
+// (Value × 10^Exp) and when the device took it. It carries no device text:
+// the slot emits Time in UTC, whatever zone the driver gave it.
 type Reading struct {
 	Kind  string
 	Value int64
@@ -76,20 +79,26 @@ type Env struct {
 }
 
 // Secrets is the driver's custody handle: Open lends its one device key for
-// one call (CLK-1). It names no slot, so it opens no other.
-type Secrets struct {
-	lend func(fn func(key []byte) error) error
-}
+// one call (CLK-1). It names no slot, so it opens no other, and it works only
+// while its operation runs.
+type Secrets struct{ l *link }
 
 // ErrNoKey is a device with no key.
 var ErrNoKey = errors.New("devslot: device has no key")
 
+// ErrClosed is a link or key handle used after its operation ended.
+var ErrClosed = errors.New("devslot: operation ended, handle closed")
+
 // Open lends the key to fn and wipes it after fn returns.
 func (s Secrets) Open(fn func(key []byte) error) error {
-	if s.lend == nil {
+	if s.l == nil || s.l.env.Lend == nil {
 		return ErrNoKey
 	}
-	return s.lend(fn)
+	if err := s.l.enter(); err != nil {
+		return err
+	}
+	defer s.l.inflight.Done()
+	return s.l.env.Lend(fn)
 }
 
 // Format prints no field, whatever the verb.
@@ -166,11 +175,13 @@ func (s *Slot) Do(ctx context.Context, op string) (int, error) {
 		return 0, ErrUnknownOp
 	}
 	o := s.d.Operations[i]
-	l := &link{d: &s.d, op: o, env: &s.env}
+	runCtx, cancel := context.WithCancel(ctx)
+	l := &link{d: &s.d, op: o, env: &s.env, run: runCtx}
 	rs, err := s.run(ctx, o.Name, l)
-	if l.refused != nil {
-		s.log("devslot: " + s.d.Device + " " + o.Name + ": " + l.refused.Error())
-		return 0, l.refused
+	refused := l.close(cancel)
+	if refused != nil {
+		s.log("devslot: " + s.d.Device + " " + o.Name + ": " + refused.Error())
+		return 0, refused
 	}
 	if err != nil {
 		s.log("devslot: " + s.d.Device + " " + o.Name + ": " + err.Error())
@@ -182,6 +193,8 @@ func (s *Slot) Do(ctx context.Context, op string) (int, error) {
 	}
 	unverified := s.d.Link != TCP
 	for n, r := range rs {
+		// UTC drops the driver's *time.Location, whose name is free text.
+		r.Time = r.Time.UTC().Round(0)
 		ev := Event{Device: s.d.Device, Op: o.Name, Label: Label, Unverified: unverified, Reading: r}
 		if err := s.env.Emit(ev); err != nil {
 			return n, err
@@ -197,7 +210,7 @@ func (s *Slot) run(ctx context.Context, op string, l *link) (rs []Reading, err e
 			rs, err = nil, ErrPanic
 		}
 	}()
-	rs, err = s.drv.Run(ctx, op, l, Secrets{s.env.Lend})
+	rs, err = s.drv.Run(ctx, op, l, Secrets{l})
 	if err != nil {
 		return nil, ErrDriver
 	}
@@ -216,15 +229,52 @@ func (s *Slot) checkReadings(rs []Reading) error {
 	return nil
 }
 
-// link is the driver's Link for one operation.
+// link is the driver's Link and key handle for one operation. When Run
+// returns, close revokes it: a driver that kept it, or a goroutine it left,
+// gets ErrClosed, so it can neither replay the operation's shapes with no
+// operation running nor open the key again (CLK-1, DEV-4).
 type link struct {
-	d       *Declaration
-	op      Operation
-	env     *Env
-	refused error // the first refusal; the operation then fails with it
+	d   *Declaration
+	op  Operation
+	env *Env
+	// run ends when the operation does; every transport call runs under it.
+	run      context.Context
+	inflight sync.WaitGroup
+	mu       sync.Mutex
+	done     bool
+	refused  error // the first refusal; the operation then fails with it
+}
+
+// enter admits one call while the operation runs.
+func (l *link) enter() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return ErrClosed
+	}
+	if l.refused != nil {
+		return l.refused
+	}
+	l.inflight.Add(1)
+	return nil
+}
+
+// close revokes the link, ends calls still in flight through cancel, waits
+// for them, and returns the first refusal.
+func (l *link) close(cancel context.CancelFunc) error {
+	l.mu.Lock()
+	l.done = true
+	l.mu.Unlock()
+	cancel()
+	l.inflight.Wait()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.refused
 }
 
 func (l *link) refuse(err error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.refused == nil {
 		l.refused = err
 	}
@@ -239,14 +289,24 @@ func (l *link) channel(name string) (Channel, bool) {
 	return l.d.Channels[i], true
 }
 
+// ctx is the driver's ctx, also ended when the operation ends.
+func (l *link) ctx(ctx context.Context) (context.Context, func()) {
+	c, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(l.run, cancel)
+	return c, func() { stop(); cancel() }
+}
+
 func (l *link) Write(ctx context.Context, ch string, frame []byte) error {
-	if l.refused != nil {
-		return l.refused
+	if err := l.enter(); err != nil {
+		return err
 	}
+	defer l.inflight.Done()
 	c, ok := l.channel(ch)
 	if !ok || !l.d.match(l.op, ch, frame) {
 		return l.refuse(ErrUndeclared)
 	}
+	ctx, end := l.ctx(ctx)
+	defer end()
 	if err := l.env.Transport.Write(ctx, Target{l.env.Pin, c}, slices.Clone(frame)); err != nil {
 		return ErrDriver
 	}
@@ -254,9 +314,12 @@ func (l *link) Write(ctx context.Context, ch string, frame []byte) error {
 }
 
 func (l *link) Read(ctx context.Context) (string, []byte, error) {
-	if l.refused != nil {
-		return "", nil, l.refused
+	if err := l.enter(); err != nil {
+		return "", nil, err
 	}
+	defer l.inflight.Done()
+	ctx, end := l.ctx(ctx)
+	defer end()
 	t, frame, err := l.env.Transport.Read(ctx)
 	if err != nil {
 		return "", nil, err

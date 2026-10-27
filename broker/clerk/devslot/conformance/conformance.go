@@ -3,7 +3,7 @@
 // the declaration passes devslot.Check, a clean run against the driver's fake
 // device writes only declared shapes, a canary key never leaves the driver,
 // every parser survives bounded, mutated and random replies, and the driver's
-// code imports no socket, file, process or unsafe package.
+// code imports only allowed standard packages (allowedStd).
 package conformance
 
 import (
@@ -238,22 +238,47 @@ func (h *harness) Read(context.Context) (devslot.Target, []byte, error) {
 	return devslot.Target{Pin: h.pin, Channel: h.d.Channels[i]}, f.Bytes, nil
 }
 
-// leak names where the canary showed up, raw or encoded, if anywhere.
+// forms are the canary as raw bytes, hex, and base64 at each of its three
+// alignments (the characters fixed by the key alone), standard and URL.
+func forms() [][]byte {
+	fs := [][]byte{Canary, []byte(hex.EncodeToString(Canary)), []byte(strings.ToUpper(hex.EncodeToString(Canary)))}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
+		for a := range 3 {
+			e := enc.EncodeToString(append(make([]byte, a), Canary...))
+			if a > 0 {
+				e = e[4:]
+			}
+			fs = append(fs, []byte(e[:len(e)-4]))
+		}
+	}
+	return fs
+}
+
+// leak names where the canary showed up, raw or encoded, if anywhere. The
+// written frames are also searched as one stream, with and without their
+// shapes' prefixes, so a key split across frames is found.
 func (h *harness) leak(err error) string {
-	forms := [][]byte{Canary, []byte(hex.EncodeToString(Canary)), []byte(strings.ToUpper(hex.EncodeToString(Canary))),
-		[]byte(base64.StdEncoding.EncodeToString(Canary)), []byte(base64.RawURLEncoding.EncodeToString(Canary))}
+	fs := forms()
 	has := func(b []byte) bool {
-		for _, f := range forms {
+		for _, f := range fs {
 			if bytes.Contains(b, f) {
 				return true
 			}
 		}
 		return false
 	}
+	var tails [][]byte
 	for _, w := range h.writes {
-		if has(w) {
-			return "a written frame"
+		cut := 0
+		for _, sh := range h.d.Shapes {
+			if bytes.HasPrefix(w, sh.Prefix) {
+				cut = max(cut, len(sh.Prefix))
+			}
 		}
+		tails = append(tails, w[cut:])
+	}
+	if has(bytes.Join(h.writes, nil)) || has(bytes.Join(tails, nil)) {
+		return "a written frame"
 	}
 	if err != nil && has([]byte(err.Error())) {
 		return "an error"
@@ -271,45 +296,66 @@ func (h *harness) leak(err error) string {
 	return ""
 }
 
-// banned is what driver code may not import: sockets, files, processes,
-// unsafe memory, cgo, plugins and logs. Its one reach is the Link.
-func banned(p string) bool {
-	switch {
-	case p == "net/netip":
-		return false
-	case p == "net", strings.HasPrefix(p, "net/"), p == "os", strings.HasPrefix(p, "os/"),
-		p == "syscall", p == "unsafe", p == "plugin", p == "C", p == "runtime/cgo",
-		p == "io/ioutil", p == "path/filepath", p == "log", strings.HasPrefix(p, "log/"):
-		return true
-	}
-	return false
-}
-
 // slotSide is the public code a driver links on purpose; everything else
-// it links is held to the ban.
+// it links is held to allowedStd.
 var slotSide = map[string]bool{
 	"github.com/ghbmrk/agentos/broker/clerk/devslot":             true,
 	"github.com/ghbmrk/agentos/broker/clerk/devslot/conformance": true,
 	"github.com/ghbmrk/agentos/broker/kernel/key":                true,
 }
 
-// bannedImports lists each banned import of pkg's own code and of every
-// non-standard package it links, except the slot's own.
+// allowedStd is every standard package driver code may import: framing,
+// encoding, hashing and crypto primitives, and the language's own helpers.
+// Anything else (sockets, TLS and certificate pools, files, templates that
+// read files, archives, processes, unsafe memory, cgo, plugins, logs, heap
+// dumps) fails, so a driver's one reach is its Link.
+var allowedStd = map[string]bool{}
+
+func init() {
+	for _, p := range strings.Fields(`bufio bytes cmp container/heap container/list container/ring context
+		crypto crypto/aes crypto/cipher crypto/des crypto/ecdh crypto/ecdsa crypto/ed25519 crypto/elliptic
+		crypto/hkdf crypto/hmac crypto/md5 crypto/mlkem crypto/pbkdf2 crypto/rand crypto/rsa crypto/sha1
+		crypto/sha256 crypto/sha3 crypto/sha512 crypto/subtle
+		encoding encoding/asn1 encoding/base32 encoding/base64 encoding/binary encoding/hex encoding/json encoding/pem
+		errors fmt hash hash/adler32 hash/crc32 hash/crc64 hash/fnv hash/maphash io iter maps
+		math math/big math/bits math/rand/v2 net/netip regexp slices sort strconv strings sync sync/atomic
+		time unicode unicode/utf16 unicode/utf8`) {
+		allowedStd[p] = true
+	}
+}
+
+// bannedImports lists each standard import off allowedStd made by pkg's own
+// code or any non-standard package it links, except the slot's own, and any
+// such package with Go files the build skipped: a file under a build tag or
+// for another target could import anything once built for the box.
 func bannedImports(pkg string) []string {
 	out, err := exec.Command("go", "list", "-deps", "-f",
-		"{{.ImportPath}}|{{.Standard}}|{{join .Imports \" \"}}", pkg).CombinedOutput()
+		"{{.ImportPath}}|{{.Standard}}|{{join .Imports \" \"}}|{{join .IgnoredGoFiles \" \"}}{{join .CgoFiles \" \"}}", pkg).CombinedOutput()
 	if err != nil {
 		return []string{fmt.Sprintf("go list %s: %v", pkg, err)}
 	}
-	var bad []string
+	type entry struct{ path, imports, ignored string }
+	std := map[string]bool{}
+	var own []entry
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.SplitN(line, "|", 3)
-		if len(f) != 3 || f[1] == "true" || slotSide[f[0]] {
+		f := strings.SplitN(line, "|", 4)
+		if len(f) != 4 {
 			continue
 		}
-		for _, imp := range strings.Fields(f[2]) {
-			if banned(imp) {
-				bad = append(bad, f[0]+" imports "+imp)
+		if f[1] == "true" {
+			std[f[0]] = true
+		} else if !slotSide[f[0]] {
+			own = append(own, entry{f[0], f[2], f[3]})
+		}
+	}
+	var bad []string
+	for _, e := range own {
+		if strings.TrimSpace(e.ignored) != "" {
+			bad = append(bad, e.path+" has files the build skipped or cgo files: "+e.ignored)
+		}
+		for _, imp := range strings.Fields(e.imports) {
+			if (std[imp] || imp == "C" || !strings.Contains(strings.SplitN(imp, "/", 2)[0], ".")) && !allowedStd[imp] {
+				bad = append(bad, e.path+" imports "+imp)
 			}
 		}
 	}
