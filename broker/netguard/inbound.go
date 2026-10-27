@@ -48,7 +48,13 @@ type Inbound struct {
 	Devices []DeviceAllow
 	// Discovery is the passive-discovery allow hook.
 	Discovery []DiscoveryPort
+	// Page admits the owner page's TCP 80 and 443 from RFC 1918 sources on
+	// en* (Ethernet) interfaces only, not ap0 (CH-9, D-178; WIFI-del-a3-1).
+	Page bool
 }
+
+// Image is what the image loads at boot: the zero value and the page.
+var Image = Inbound{Page: true}
 
 // Validate says why the configuration cannot be rendered.
 func (c Inbound) Validate() error {
@@ -106,8 +112,8 @@ func InboundExemptRemove(iface string) (string, error) {
 // DEV-2 does not count as connections (router advertisements from a
 // link-local source, neighbour solicitations and advertisements from any
 // source as RFC 4861 allows, all with hop limit 255 so none was routed in;
-// DHCPv4 and DHCPv6 replies from their server ports); the listed devices
-// and discovery ports; and drops everything else.
+// DHCPv4 and DHCPv6 replies from their server ports); the page's ports
+// (Page); the listed devices and discovery ports; and drops the rest.
 //
 // The box routes nothing (image I21), so the table also drops every
 // forwarded packet, IPv4 and IPv6, unless it enters or leaves an exempt
@@ -144,6 +150,9 @@ func InboundRules(c Inbound) (string, error) {
 	line("    ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept")
 	line("    udp sport 67 udp dport 68 accept")
 	line("    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept")
+	if c.Page {
+		line(`    iifname "en*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept`)
+	}
 	for _, d := range c.Devices {
 		ports := make([]string, len(d.TCPPorts))
 		for i, p := range d.TCPPorts {

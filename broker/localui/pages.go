@@ -31,10 +31,13 @@ form { margin: .6em 0 1.2em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
+{{define "offline"}}{{if eq .Progress.Phase "offline"}}<p>I can reach your home control box but not the internet. Check the cable from your home control box to your router, and that your internet works.</p>{{end}}{{end}}
+
 {{define "status"}}{{template "head" .Refresh}}
 <h1>AgentOS</h1>
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 <p>Box: <b>{{phase .Progress.Phase}}</b></p>
+{{template "offline" .}}
 {{if .Restore}}<p class="err">My secure page certificate is missing. Restore me from my backup to use the secure page and passkeys.</p>{{end}}
 {{if .HasOwner}}
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
@@ -298,6 +301,7 @@ form { margin: .6em 0 1.2em; }
 {{define "setup"}}{{template "head" .Refresh}}
 <h1>Set up AgentOS</h1>
 <p class="muted">Box: {{phase .Progress.Phase}}</p>
+{{template "offline" .}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 
 {{if eq .Step "number"}}
@@ -385,7 +389,7 @@ func phaseText(p string) string {
 	return "starting"
 }
 
-// pagesFor returns the page set with this box's address in the footer, so
+// pagesFor returns the page set with the page's name in the footer, so
 // the owner always sees where the box page lives.
 func pagesFor(host string) *template.Template {
 	return template.Must(tmpl.Clone()).Funcs(template.FuncMap{"boxhost": func() string { return host }})

@@ -11,8 +11,9 @@ import (
 )
 
 // claimURL is the box's claim page with the code, which the page prefills
-// (localui's GET /claim?code=).
-func claimURL(code string) string { return "http://" + card.BoxAddr + "/claim?code=" + code }
+// (localui's GET /claim?code=), on the page's name over HTTPS: the plain
+// listener's redirect to HTTPS drops the query (ASSUMPTIONS A8).
+func claimURL(code string) string { return card.BoxPage + "claim?code=" + code }
 
 var stickerPage = template.Must(template.New("sticker").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>AgentOS claim sticker</title>
@@ -58,7 +59,7 @@ func writeSticker(dir, code string, net claim.SetupNet) error {
 	if err := stickerPage.Execute(&b, struct {
 		QR, WiFiQR                 template.HTML
 		Code, Page, SSID, Password string
-	}{qr, wifi, code, "http://" + card.BoxAddr + "/claim", net.SSID, net.Password}); err != nil {
+	}{qr, wifi, code, card.BoxPage + "claim", net.SSID, net.Password}); err != nil {
 		return err
 	}
 	if err := writeNew(filepath.Join(dir, "sticker.html"), b.Bytes()); err != nil {

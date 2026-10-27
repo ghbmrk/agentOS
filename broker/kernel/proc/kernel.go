@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -65,8 +66,14 @@ type Kernel struct {
 	content kernel.ContentReport
 	// bk is the backups (backup.go); nil with no BackupDir.
 	bk *backups
-	// reseals is every backup re-seal running (reseal).
+	// reseals is every backup re-seal running (reseal), and running each
+	// one's channel by its backup, closed once it is over, whether or not
+	// its commit ran; guarded by mu.
 	reseals sync.WaitGroup
+	running map[string]chan struct{}
+	// betweenWaits, for tests only, runs in Erase between its wait for the
+	// re-seals running at the erase and its own.
+	betweenWaits func()
 	// page is the page authority (CH-9); nil when the store holds none.
 	// Set at open and never changed, so it is read without the lock.
 	page *pageca.Authority
@@ -129,7 +136,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
 		if cfg.BackupDir != "" {
-			if h.bk, err = openBackups(cfg, keys, k.State()); err != nil {
+			if h.bk, err = openBackups(cfg, keys, k, now); err != nil {
 				st.Close()
 				return nil, fmt.Errorf("run: the backups: %w", err)
 			}
@@ -203,37 +210,126 @@ func (h *Kernel) Tick(now int64) error {
 // on its own goroutine: its I/O at the target without the lock, so a hung
 // target holds only its own re-seal, never STOP or another backup (KRN-7,
 // #3317), then its commit under the lock. The WaitGroup is done once they
-// are.
+// are. Each is in running until it is over; a commit that finds the kernel
+// closed is dropped, but the re-seal is still over, so no erase waits on it
+// after Close.
 func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
 	var due []*kernel.Reseal
-	if err := h.With(func(k *kernel.Kernel) error { due = k.Reseals(now); return nil }); err != nil {
+	var over []chan struct{}
+	err := h.With(func(k *kernel.Kernel) error {
+		due = k.Reseals(now)
+		if h.running == nil {
+			h.running = map[string]chan struct{}{}
+		}
+		for _, r := range due {
+			over = append(over, make(chan struct{}))
+			h.running[r.Backup] = over[len(over)-1]
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	wg := new(sync.WaitGroup)
-	for _, r := range due {
+	for i, r := range due {
 		h.reseals.Add(1)
 		wg.Go(func() {
 			defer h.reseals.Done()
 			r.Run()
-			h.With(func(k *kernel.Kernel) error { k.Resealed(now, r); return nil })
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.k != nil {
+				h.k.Resealed(now, r)
+			}
+			delete(h.running, r.Backup)
+			close(over[i])
 		})
 	}
 	return wg, nil
 }
 
-// Erase erases subject (kernel.Erase), then re-seals every backup that
-// gave its key and waits for those re-seals, which run without the lock,
-// so a hung target delays this reply but never STOP. It returns what the
-// erase has reached then.
+// runningFor is the channel of each re-seal running of a backup in names.
+// The caller holds mu.
+func (h *Kernel) runningFor(names []string) []chan struct{} {
+	var out []chan struct{}
+	for _, b := range names {
+		if ch, ok := h.running[b]; ok {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// named is every backup c names.
+func named(c kernel.Confirmation) []string {
+	out := slices.Clone(c.Resealed)
+	for _, b := range c.StillHeld {
+		out = append(out, b.Backup)
+	}
+	return out
+}
+
+func waitAll(chs []chan struct{}) {
+	for _, ch := range chs {
+		<-ch
+	}
+}
+
+// Erase erases subject (kernel.Erase) and replies once every backup that
+// gave its key has had a re-seal prepared after the erase (#3338). It
+// names each backup the Set lists with the subject, and each that a
+// backup write whose snapshot holds the subject adds, once that write is
+// over. It waits for a re-seal of a named backup running at the erase,
+// whose table was prepared before it and so still gives the key, then
+// re-seals every backup due, then waits for any re-seal of a named
+// backup that a Tick took in between. Every wait is without the lock, so
+// a hung target delays this reply but never STOP. It returns what the
+// erase has reached then: a backup whose re-seal failed is StillHeld with
+// the failure, and Tick retries it after its backoff.
 func (h *Kernel) Erase(now int64, subject string) (kernel.Confirmation, error) {
-	var c kernel.Confirmation
-	err := h.With(func(k *kernel.Kernel) (err error) { c, err = k.Erase(now, subject); return err })
+	var (
+		c     kernel.Confirmation
+		waits []chan struct{}
+		w     *backupWrite
+	)
+	err := h.With(func(k *kernel.Kernel) (err error) {
+		c, err = k.Erase(now, subject)
+		waits = h.runningFor(named(c))
+		if h.bk != nil && h.bk.writing != nil && h.bk.writing.live[subject] {
+			w = h.bk.writing
+		}
+		return err
+	})
 	if c.Subject == "" {
 		return c, err
 	}
-	wg, rerr := h.reseal(now)
+	var rerr error
+	if w != nil {
+		<-w.done
+		rerr = h.With(func(*kernel.Kernel) error {
+			have := named(c)
+			for _, id := range w.ids {
+				if !slices.Contains(have, id) {
+					c.StillHeld = append(c.StillHeld, kernel.BackupHold{Backup: id})
+				}
+			}
+			waits = append(waits, h.runningFor(w.ids)...)
+			return nil
+		})
+	}
 	if rerr == nil {
-		wg.Wait()
+		waitAll(waits)
+		if h.betweenWaits != nil {
+			h.betweenWaits()
+		}
+		var wg *sync.WaitGroup
+		if wg, rerr = h.reseal(now); rerr == nil {
+			wg.Wait()
+			rerr = h.With(func(*kernel.Kernel) error { waits = h.runningFor(named(c)); return nil })
+		}
+	}
+	if rerr == nil {
+		waitAll(waits)
 		rerr = h.With(func(k *kernel.Kernel) error { c = k.Confirm(c); return nil })
 	}
 	return c, errors.Join(err, rerr)
@@ -250,7 +346,12 @@ func (h *Kernel) With(fn func(*kernel.Kernel) error) error {
 	return fn(h.k)
 }
 
-// Close releases the log; the kernel is unusable after.
+// Close releases the log; the kernel is unusable after. It does not wait
+// for a backup re-seal still running: one hung at its target would only
+// delay shutdown behind a dying drive. Such a re-seal loses only its
+// commit, as a crash after its put does, and the next start recovers:
+// Rewrap takes the highest listed generation, and Tick re-seals again
+// (#3338). An erase waiting on it returns, the kernel closed.
 func (h *Kernel) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

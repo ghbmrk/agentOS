@@ -7,18 +7,19 @@ import (
 	"syscall"
 )
 
-// Listen opens the local UI's listener on the access point only (CH-9):
-// bound to the box's access point address and, with SO_BINDTODEVICE, to the
-// access point interface, so a packet for that address arriving on any
-// other interface (the home network, an agent machine's link) is never
-// accepted, whatever the routing table says. The server also checks every
-// request's source (Server.ServeHTTP) and the firewall drops it first
-// (NftRules).
-func Listen(ctx context.Context, c APConfig, port int) (net.Listener, error) {
-	if err := c.ValidateServe(); err != nil {
+// Listen opens the page's listener on port 1 only (CH-9, D-178): bound to
+// every address of p's interface and, with SO_BINDTODEVICE, to that
+// interface alone, so a packet arriving on any other interface (port 2,
+// the edge's cable, a USB tether) is never accepted, whatever the routing
+// table says (HW-15). The core's address there comes from DHCP and may
+// change, so no address is bound. The server also checks every request's
+// source (homeSource) and the inbound table admits the page's ports only
+// from private sources (netguard.InboundRules).
+func Listen(ctx context.Context, p Page, port int) (net.Listener, error) {
+	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	return listenOn(ctx, c.Iface, net.JoinHostPort(c.Addr.Addr().String(), strconv.Itoa(port)))
+	return listenOn(ctx, p.Iface, net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
 }
 
 // listenOn listens on addr, bound to the interface iface.

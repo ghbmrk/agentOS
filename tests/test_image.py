@@ -5295,7 +5295,9 @@ class UplinkTest(unittest.TestCase):
             fwd = "%d:%d" % (18000 + guest % 1000, guest)
             self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
             self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
-        self.assertTrue("for port in 22 80 443 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+        self.assertTrue("for port in 22 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+        # The owner page's ports answer from QEMU's private 10.0.2.2 (CH-9, D-178, WIFI-del-a3).
+        self.assertTrue("for port in 80 443; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port answered\"" in s)
 
     def test_boot_test_plugs_in_a_cable_once(self):
         s = (IMG / "ci_boot.sh").read_text()
@@ -5720,15 +5722,18 @@ class SetupServicesTest(unittest.TestCase):
         self.assertNotIn("User", ini(UNITS / "agentosd.service")["Service"])
         self.assertNotIn("-netjoin-sock", exec_args(UNITS / "agentosd.service"))
 
-    def test_the_access_point_serves_the_page_s_network(self):
-        # #825: the loader brings the access point up on the interface and address the page binds,
-        # and reads the latch the page writes.
+    def test_the_access_point_keeps_its_own_network_and_the_page_s_latch(self):
+        # #825 until WIFI-del-a3: the page now serves on port 1 (D-178), so the access point no
+        # longer serves the page's network. Until WIFI-del-b deletes it, it keeps its own flag
+        # defaults for interface and address, and reads the latch the page writes.
         ap, page = exec_args(AP_UNIT), exec_args(PAGE_UNIT)
         self.assertEqual(ap[0], "/usr/lib/agentos/agentos-ap")
-        for name in ("iface", "addr", "card-latch"):
+        for name in ("iface", "addr"):
             with self.subTest(name):
-                self.assertEqual(arg(ap, name), arg(page, name))
-                self.assertEqual(flag_default("agentos-ap", name), arg(page, name))
+                self.assertEqual(arg(ap, name), flag_default("agentos-ap", name))
+        with self.subTest("card-latch"):
+            self.assertEqual(arg(ap, "card-latch"), arg(page, "card-latch"))
+            self.assertEqual(flag_default("agentos-ap", "card-latch"), arg(page, "card-latch"))
         u = ini(AP_UNIT)
         # Root (nft, the exempt unit, the radio's address), with no dumps of the setup password.
         self.assertNotIn("User", u["Service"])
