@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -739,5 +740,36 @@ func TestCheckPathDoesNotLinkDevslot(t *testing.T) {
 				t.Errorf("%s links %s", p, d)
 			}
 		}
+	}
+}
+
+// A driver binary's main links the slot's process entry, and the suite
+// accepts it as the slot's own. The fixture's main is in this repository,
+// so its own entry is dropped from the listing, as a private repository's
+// main would not match this repository's path.
+func TestConformanceAcceptsProcEntry(t *testing.T) {
+	cfg := config(t, pkg+"/testdata/fixturemain")
+	var kept bytes.Buffer
+	proc := false
+	for d := json.NewDecoder(bytes.NewReader(cfg.Listing)); d.More(); {
+		var p map[string]any
+		if err := d.Decode(&p); err != nil {
+			t.Fatal(err)
+		}
+		switch p["ImportPath"] {
+		case pkg + "/testdata/fixturemain":
+			continue
+		case pkg + "/proc":
+			proc = true
+		}
+		b, _ := json.Marshal(p)
+		kept.Write(append(b, '\n'))
+	}
+	if !proc {
+		t.Fatalf("the listing has no proc entry; the check proves nothing")
+	}
+	cfg.Listing = kept.Bytes()
+	if ps := conformance.Check(fixture.Driver{}, cfg); len(ps) != 0 {
+		t.Errorf("a driver binary with proc.Main fails the suite: %v", ps)
 	}
 }

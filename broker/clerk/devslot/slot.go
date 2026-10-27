@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -67,7 +68,10 @@ type Event struct {
 
 // Env is what the host gives the slot. The driver sees none of it.
 type Env struct {
-	Pin       Pin
+	Pin Pin
+	// Home is the uplink's enclosing /56, inside which a global IPv6 pin is
+	// on the home network (DEV-2); unset, no global address is.
+	Home      netip.Prefix
 	Transport Transport
 	// Lend is clerk.Secrets.DeviceKey for the device/ slot pinned at pairing
 	// (D-184), or nil for a device with no key.
@@ -129,7 +133,7 @@ type Slot struct {
 // A refused declaration never reaches Run.
 func New(drv Driver, env Env) (*Slot, error) {
 	d := drv.Declare()
-	if err := Check(d, env.Pin); err != nil {
+	if err := Check(d, env.Pin, env.Home); err != nil {
 		return nil, err
 	}
 	if env.Transport == nil || env.Emit == nil {
