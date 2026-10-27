@@ -98,6 +98,7 @@ allow broker/vendor/
 # and the sealed store's kernel, unlock and enrollment steps (STO-2b-1 #2896, STO-2c-i #2957).
 allow broker/cmd/agentos-ap/
 allow broker/cmd/agentos-checker/
+allow broker/cmd/agentos-clerk-mail/
 allow broker/cmd/agentos-clock-boot/
 allow broker/cmd/agentos-egress/
 allow broker/cmd/agentos-enroll/
