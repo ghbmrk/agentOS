@@ -327,7 +327,7 @@ func (s *Sections) next() (Section, io.Reader, error) {
 // Open opens a content object with the recovery key and reads its
 // manifest. The sections follow through the returned Sections.
 func Open(r io.Reader, rk []byte) (Manifest, *Sections, error) {
-	h, body, err := openFrom(r, rk, KindContent)
+	h, rcp, body, err := openFrom(r, rk, KindContent)
 	if err != nil {
 		return Manifest{}, nil, err
 	}
@@ -347,7 +347,7 @@ func Open(r io.Reader, rk []byte) (Manifest, *Sections, error) {
 	if err != nil {
 		return Manifest{}, nil, err
 	}
-	if m.Version != manifestVersion && m.Version != 1 || m.BackupID != hex.EncodeToString(h.backupID[:]) || m.Recipient != hex.EncodeToString(h.recipient[:]) || h.gen != 0 {
+	if m.Version != manifestVersion && m.Version != 1 || m.BackupID != hex.EncodeToString(h.backupID[:]) || m.Recipient != rcp.ID() || h.gen != 0 {
 		return Manifest{}, nil, ErrHeader
 	}
 	names := make([]string, len(m.Sections))
