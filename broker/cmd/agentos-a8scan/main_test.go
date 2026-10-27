@@ -163,3 +163,36 @@ func TestLinksNoVault(t *testing.T) {
 		t.Error("agentos-a8scan does not link the sealed store")
 	}
 }
+
+// The sealed store links the TPM seal (tpmseal's import test lists this
+// binary), but the scan opens the store with the recovery factor alone:
+// it links no TPM device transport and names no TPM factor.
+func TestTakesNoTPMFactor(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if strings.HasPrefix(dep, "github.com/google/go-tpm/tpm2/transport/") {
+			t.Errorf("agentos-a8scan links the TPM transport %s", dep)
+		}
+	}
+	src, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range src {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{"seal.TPM", "seal.Pinned", "tpmseal", "go-tpm"} {
+			if bytes.Contains(b, []byte(bad)) {
+				t.Errorf("%s names %s", f, bad)
+			}
+		}
+	}
+}
