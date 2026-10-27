@@ -99,9 +99,9 @@ func verdict(t *testing.T, rules string, p pkt) string {
 				f := strings.Fields(body)
 				ok = p.proto == "udp" && f[2] == strconv.Itoa(int(p.dport))
 				body = strings.TrimSpace(strings.TrimPrefix(body, "udp dport "+f[2]))
-			case strings.HasPrefix(body, `iifname != "wl*"`):
-				ok = !strings.HasPrefix(p.iif, "wl")
-				body = strings.TrimSpace(strings.TrimPrefix(body, `iifname != "wl*"`))
+			case strings.HasPrefix(body, `iifname "en*"`):
+				ok = strings.HasPrefix(p.iif, "en")
+				body = strings.TrimSpace(strings.TrimPrefix(body, `iifname "en*"`))
 			case strings.HasPrefix(body, "ip saddr { "):
 				set, rest, _ := strings.Cut(strings.TrimPrefix(body, "ip saddr { "), " }")
 				ok = false
@@ -444,10 +444,11 @@ func TestInboundDropsEveryForwardedPacket(t *testing.T) {
 }
 
 // WIFI-del-a3 (CH-9, D-178): with Page, the inbound table admits the owner
-// page's two ports from private IPv4 sources on any wired interface, since
-// the enforcer routes the Owner network to port 1 from another subnet; a
-// public, IPv6 or CGNAT source, a radio, another TCP port and UDP to those
-// ports are still dropped, and the zero value admits none of it.
+// page's two ports from private IPv4 sources on Ethernet interfaces (en*),
+// since the enforcer routes the Owner network to port 1 from another
+// subnet; a public, IPv6 or CGNAT source, the access point (ap0), a radio,
+// a link without a systemd Ethernet name, another TCP port and UDP to
+// those ports are still dropped, and the zero value admits none of it.
 // REQ: CH-9
 func TestInboundAdmitsThePagePortsFromPrivateSources(t *testing.T) {
 	r := render(t, Inbound{Page: true})
@@ -466,6 +467,11 @@ func TestInboundAdmitsThePagePortsFromPrivateSources(t *testing.T) {
 		{pkt{iif: "enp1s0", src: netip.MustParseAddr("10.8.0.23"), proto: "tcp", dport: 22}, "drop"},
 		{pkt{iif: "wlsta0", src: netip.MustParseAddr("192.168.77.1"), proto: "tcp", dport: 80}, "drop"},
 		{pkt{iif: "wlan0", src: netip.MustParseAddr("10.42.0.23"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "ap0", src: netip.MustParseAddr("10.42.0.23"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "ap0", src: netip.MustParseAddr("192.168.4.2"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "eth0", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "usb0", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "eno1", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: 443}, "accept"},
 		{pkt{iif: "enp1s0", src: netip.MustParseAddr("10.8.0.23"), proto: "udp", dport: 443}, "drop"},
 	} {
 		if v := verdict(t, r, c.p); v != c.want {

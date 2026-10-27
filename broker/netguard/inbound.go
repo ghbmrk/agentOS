@@ -49,7 +49,7 @@ type Inbound struct {
 	// Discovery is the passive-discovery allow hook.
 	Discovery []DiscoveryPort
 	// Page admits the owner page's TCP 80 and 443 from RFC 1918 sources on
-	// wired interfaces (CH-9, D-178; ASSUMPTIONS WIFI-del-a3-1).
+	// en* (Ethernet) interfaces only, not ap0 (CH-9, D-178; WIFI-del-a3-1).
 	Page bool
 }
 
@@ -151,7 +151,7 @@ func InboundRules(c Inbound) (string, error) {
 	line("    udp sport 67 udp dport 68 accept")
 	line("    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept")
 	if c.Page {
-		line(`    iifname != "wl*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept`)
+		line(`    iifname "en*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept`)
 	}
 	for _, d := range c.Devices {
 		ports := make([]string, len(d.TCPPorts))

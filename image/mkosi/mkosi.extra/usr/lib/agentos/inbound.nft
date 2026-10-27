@@ -14,7 +14,7 @@ table inet agentos_inbound {
     ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
     udp sport 67 udp dport 68 accept
     ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
-    iifname != "wl*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept
+    iifname "en*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept
     drop
   }
   chain forward {

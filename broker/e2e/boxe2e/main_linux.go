@@ -141,10 +141,10 @@ func run(name string, args ...string) error {
 }
 
 // harness puts the phone on the Owner network: a veth pair whose box end,
-// owner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
+// enowner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
 // namespace. The page reaches it only through the image's inbound rule for
-// the page's ports from private sources (WIFI-del-a3); a drop-in names
-// owner0 as the page's interface, since Port1 takes only a fixed PCI port,
+// the page's ports from private sources on en* links (WIFI-del-a3); a drop-in names
+// enowner0 as the page's interface, since Port1 takes only a fixed PCI port,
 // and the page restarts on it. agentos-ap, which the image still
 // ships until WIFI-del-b, is stopped first. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
@@ -160,9 +160,9 @@ func (d *driver) harness() error {
 	for _, c := range [][]string{
 		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},
-		{"ip", "link", "add", "owner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
-		{"ip", "addr", "add", "10.42.0.1/24", "dev", "owner0"},
-		{"ip", "link", "set", "owner0", "up"},
+		{"ip", "link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
+		{"ip", "addr", "add", "10.42.0.1/24", "dev", "enowner0"},
+		{"ip", "link", "set", "enowner0", "up"},
 		{"ip", "-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
 		{"ip", "-n", netns, "link", "set", "phone0", "up"},
 		{"ip", "-n", netns, "link", "set", "lo", "up"},
@@ -174,7 +174,7 @@ func (d *driver) harness() error {
 	if err := os.MkdirAll(filepath.Dir(pageDropIn), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=owner0\n"), 0o644); err != nil {
+	if err := os.WriteFile(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
 		return err
 	}
 	for _, c := range [][]string{{"systemctl", "daemon-reload"}, {"systemctl", "restart", "agentos-localui.service"}} {
