@@ -73,8 +73,9 @@ type Mark struct {
 }
 
 // Head is one read mail's From and Message-ID headers and its INTERNALDATE,
-// as a Seen batch answers them; a Dates answer's carries no header, and a
-// PlanHeads answer's no date and its From and Authentication-Results.
+// as a Seen batch answers them; a Dates answer's carries no header, a
+// PlanHeads answer's no date and its From and Authentication-Results, and an
+// AddrHeads answer's its From, To and Cc.
 type Head struct {
 	UID     uint32
 	Header  []byte
@@ -99,6 +100,7 @@ const (
 	OpAppend     = "append"      // store Raw in Folder (the old core only)
 	OpDates      = "dates"       // the INTERNALDATE of UIDs of Folder at Validity
 	OpPlanHeads  = "plan-heads"  // the From and Authentication-Results of UIDs of Folder at Validity
+	OpAddrHeads  = "addr-heads"  // the From, To and Cc and INTERNALDATE of UIDs of Folder at Validity
 )
 
 // Request is one typed call from the clerk.

@@ -1081,6 +1081,10 @@ func TestALyingConnectionIsBounded(t *testing.T) {
 	seen := func(s *Store) error {
 		return s.Seen(context.Background(), "INBOX", func([]byte, time.Time) error { return nil })
 	}
+	addr := func(s *Store) error {
+		return s.AddrHeads(context.Background(), "INBOX", 7, []uint32{1, 2}, func([]byte, time.Time) error { return nil })
+	}
+	head := func(uid uint32) imapwire.Head { return imapwire.Head{UID: uid, Header: []byte("From: a")} }
 	type answerFn func(ctrl *net.UnixConn, q imapwire.Request)
 	frame := func(r imapwire.Response) answerFn {
 		return func(ctrl *net.UnixConn, _ imapwire.Request) { answer(ctrl, r) }
@@ -1127,6 +1131,14 @@ func TestALyingConnectionIsBounded(t *testing.T) {
 			}
 			answer(ctrl, imapwire.Response{Err: "longheader", Long: &imapwire.LongHeaderError{UID: 9}})
 		}, errLied},
+		{"addr: a header past headMax", addr, frame(imapwire.Response{Heads: []imapwire.Head{{UID: 1, Header: bytes.Repeat([]byte("x"), headMax+1)}, head(2)}}), errLied},
+		{"addr: a UID not asked for", addr, frame(imapwire.Response{Heads: []imapwire.Head{head(1), head(2), head(3)}}), errLied},
+		{"addr: a UID twice", addr, frame(imapwire.Response{Heads: []imapwire.Head{head(1), head(1)}}), errLied},
+		{"addr: whole, with a UID missing", addr, frame(imapwire.Response{Heads: []imapwire.Head{head(1)}}), errLied},
+		{"addr: whole, with none", addr, frame(imapwire.Response{}), errLied},
+		{"addr: a long header not in the batch", addr, frame(imapwire.Response{Err: "longheader", Heads: []imapwire.Head{head(1)}, Long: &imapwire.LongHeaderError{UID: 9}}), errLied},
+		{"addr: a long header already answered", addr, frame(imapwire.Response{Err: "longheader", Heads: []imapwire.Head{head(1)}, Long: &imapwire.LongHeaderError{UID: 1}}), errLied},
+		{"addr: a long header named by none", addr, frame(imapwire.Response{Err: "longheader"}), errLied},
 		{"an unknown role", func(s *Store) error { _, err := s.Folders(context.Background()); return err },
 			frame(imapwire.Response{Folders: []imapwire.Folder{{Name: "INBOX", Role: "owner"}}}), errLied},
 		{"unsorted marks", func(s *Store) error { _, err := s.Marks(context.Background()); return err },
