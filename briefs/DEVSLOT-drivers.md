@@ -83,3 +83,12 @@ Release findings from the #3356 reviews (L3 6433450345 point 4, Security 6433469
 Part b notes (L3 6, Security 7 and 8, Potency 1, the stdin point) go into part b's brief update, not this row.
 
 Acceptance tests: `TestConformanceReportsWideShapes`; `TestConformanceRejectsBadFixtures` cases "race detector hidden", "system library at exec", "listing of another package", "listing entry with no path", "null listing", "incomplete listing" and "wide shape".
+
+## Follow-up: DEVSLOT-tails (#3375)
+
+Release findings from the #3371 reviews (L3 6439861920 point 1, Security 6439373630 points 1 and 3). Scope: `broker/clerk/devslot/` only. Tier A.
+
+- **Unprefixed shapes are wide.** The suite fails every shape with no prefix, whatever its `Max`, unless `Config.Wide` names it: it admits any short command (an actuate one under a `read`), and on TCP its writes join into any stream. DEVSLOT-a-4 says the limit is per write.
+- **A listing missing a dependency fails.** The suite fails a listing that lacks any import of a listed non-standard package outside the slot, so a listing made without `-deps` reads as a failure.
+
+Acceptance tests: `TestConformanceReportsWideShapes` (the unprefixed `short` shape of `MaxFreeTail` bytes); `TestConformanceRejectsBadFixtures` case "listing without -deps".
