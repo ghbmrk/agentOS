@@ -18,7 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// REQ: CLK-1, LOG-2, KRN-2
+// REQ: CLK-1, LOG-2, KRN-2, BAK-1
 
 var good = []string{
 	"-log", "/var/lib/agentos-kernel/log", "-anchor-dir", "/var/lib/agentos-kernel/anchor",
@@ -26,6 +26,7 @@ var good = []string{
 	"-meter-sock", "/run/agentos-kernel/meter.sock", "-meter-uid", "982",
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
 	"-clerk", "mail=/run/agentos-mail/kernel.sock,984",
+	"-backup-dir", "/var/lib/agentos-kernel/backups",
 	"-keys-dir", "/var/lib/agentos-kernel/keys",
 }
 
@@ -65,6 +66,21 @@ func TestTheKernelNeedsItsKeyTable(t *testing.T) {
 		t.Fatalf("parse: %q %v", c.KeyDir, err)
 	}
 	for _, bad := range [][]string{good[:len(good)-2], append(slices.Clone(good), "-keys-dir", "keys")} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
+		}
+	}
+}
+
+// BAK-1, LOG-4 (MIG-4-recovery-e3): an erase must reach every backup taken
+// before, so the backups' records directory is required, and absolute.
+func TestTheKernelNeedsItsBackupDir(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.BackupDir != "/var/lib/agentos-kernel/backups" {
+		t.Fatalf("parse: %q %v", c.BackupDir, err)
+	}
+	i := slices.Index(good, "-backup-dir")
+	for _, bad := range [][]string{slices.Delete(slices.Clone(good), i, i+2), append(slices.Clone(good), "-backup-dir", "backups")} {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
 		}

@@ -710,7 +710,7 @@ func main() {
 			// pruned; the journal has the owner's NOs by now.
 			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
-			// Sign-in machines a crash left go first, served or not (#3249).
+			// Provider workers a crash left go first, served or not (#3249, #3308).
 			signIns.M = m
 			signIns.Sweep()
 			if signInSock != "" {

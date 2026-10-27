@@ -560,6 +560,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		}},
 		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
 		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
+		{name: "untarget", op: "untarget", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Untarget("none") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Untarget(now(), "none") }},
 		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
 		{name: "setup", op: "setup", sock: func(o Owner, _ Meter) (any, error) {
 			return nil, o.Setup(kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
@@ -570,7 +571,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// Refused on both kernels by design: the admission past the cap, the
 	// pool at its reserve, and setup on a box that has its anchors (the
 	// setup-only tests take it on a fresh one). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {

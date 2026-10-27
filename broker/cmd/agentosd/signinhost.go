@@ -459,15 +459,18 @@ func (h *signInHost) watch(guest string, r *signInRun, lease, wall time.Duration
 	}
 }
 
-// Sweep destroys every sign-in machine the machine manager holds, before
-// any sign-in is served: a machine left by a crash during a sign-in is
-// reloaded Stopped, and nothing else ever destroys it (#3249, CAP-8). Its
-// route was emptied with -signin-routes (prepareSignInRoutes), and Open
-// gives it none, so it could not start again; only its disk is reclaimed.
-// A failed destroy is logged and the rest go on.
+// Sweep destroys every provider worker the machine manager holds, sign-in
+// and plan-run alike, before any sign-in is served or plan run starts: a
+// worker left by a crash is reloaded Stopped with its placeholder seed,
+// and nothing else ever destroys it (#3249, #3308, CAP-8). None has a
+// live owner yet: setup's sign-in machines are closed before agentosd
+// opens its own, and the provider runner is wired after the sweep
+// (TestProviderSweepRunsBeforeAnyProviderWorker). Destroying one closes
+// its route, if it has one. A failed destroy is logged and the rest go
+// on; the next start retries it.
 func (h *signInHost) Sweep() {
 	for _, id := range h.M.Machines() {
-		if strings.HasPrefix(id, signInPrefix) {
+		if strings.HasPrefix(id, vm.ProviderPrefix) {
 			h.destroy("sweep", id)
 		}
 	}

@@ -30,9 +30,15 @@ const maxKernelAnswer = 4 << 20
 type Side struct {
 	name string
 	ops  map[string]op
+	// procOps are calls the kernel process makes itself, taking its lock
+	// only for their kernel steps: the backup calls write to a target
+	// outside it, so STOP never waits on one (backup.go).
+	procOps map[string]procOp
 }
 
 type op func(k *kernel.Kernel, now int64, args json.RawMessage) (any, error)
+
+type procOp func(h *Kernel, now int64, args json.RawMessage) (any, error)
 
 type kernelCall struct {
 	Op   string          `json:"op"`
@@ -131,6 +137,13 @@ type (
 		key.Changes
 		Stops uint64 `json:"stops"`
 	}
+	targetArgs struct {
+		Target kernel.BackupTarget `json:"target"`
+		Cosign key.Cosign          `json:"cosign"`
+	}
+	untargetArgs struct {
+		Name string `json:"name"`
+	}
 	grantRead struct {
 		From int64 `json:"from"`
 		OK   bool  `json:"ok"`
@@ -140,7 +153,7 @@ type (
 
 // OwnerSide is the owner side's table (sub B: owner, localui, localsrv,
 // control, question, cmd/agentosd): the owner seam's actions and its reads.
-var OwnerSide = Side{"owner", map[string]op{
+var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"submit": act(func(k *kernel.Kernel, now int64, p kernel.Plan) error { return k.Submit(now, p) }),
 	"retry":  act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Retry(now, a.Plan, a.Index) }),
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
@@ -187,11 +200,22 @@ var OwnerSide = Side{"owner", map[string]op{
 		}
 		return taskRead{}
 	}),
+	"untarget": act(func(k *kernel.Kernel, now int64, a untargetArgs) error { return k.Untarget(now, a.Name) }),
+}, procOps: map[string]procOp{
+	"backuptarget": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a targetArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		return nil, h.AddBackupTarget(now, a.Target, a.Cosign)
+	},
+	"backup":  func(h *Kernel, now int64, _ json.RawMessage) (any, error) { return h.Backup(now) },
+	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
 }}
 
 // MeterSide is the model clerk's table (clerk/model, #2572): the metering
 // seam and nothing else.
-var MeterSide = Side{"meter", map[string]op{
+var MeterSide = Side{name: "meter", ops: map[string]op{
 	"admitspend": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a spendArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -276,6 +300,21 @@ var ErrSetupOnly = errors.New("run: I am waiting for setup; I take only your two
 func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
 	ServeOne(conn, func(name string, args json.RawMessage) (out json.RawMessage, err error) {
 		f, ok := side.ops[name]
+		if p, own := side.procOps[name]; own {
+			if err := h.With(func(k *kernel.Kernel) error {
+				if len(k.State().Anchors) == 0 && !setupOps[side.name+"/"+name] {
+					return ErrSetupOnly
+				}
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			res, err := p(h, clock(), args)
+			if err != nil || res == nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		}
 		if !ok {
 			return nil, errors.New("run: the " + side.name + " socket has no call " + name)
 		}
@@ -362,6 +401,8 @@ func init() {
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
+		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
+		ErrNoRecipient, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
 		wireErrors[e.Error()] = e
@@ -553,6 +594,22 @@ func (o Owner) Task(id string) (kernel.Task, bool, error) {
 	}
 	return *t.Task, true, nil
 }
+
+// BackupTarget adds a backup destination on an anchor's signature over
+// kernel.BackupTargetHash.
+func (o Owner) BackupTarget(t kernel.BackupTarget, c key.Cosign) error {
+	return o.Call("backuptarget", targetArgs{t, c}, nil)
+}
+
+// Untarget stops new backups to a destination; its backups keep their
+// erase reach.
+func (o Owner) Untarget(name string) error { return o.Call("untarget", untargetArgs{name}, nil) }
+
+// Backup takes one backup now to every current destination.
+func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t); return }
+
+// Backups is the recipient's ID, every destination and every kept backup.
+func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
 
 // Meter is the metering seam over the kernel process's meter socket: a
 // model.Ledger for the model clerk's process. The now each method takes is

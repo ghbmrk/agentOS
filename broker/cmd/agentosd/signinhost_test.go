@@ -551,14 +551,16 @@ func TestSignInStopDestroysTheMachine(t *testing.T) {
 	}
 }
 
-// A crash during a sign-in leaves its machine reloaded Stopped; the
-// sweep at start destroys every sign-in machine and no other, and one
-// that will not go stops none of the rest (#3249).
-func TestSignInSweepDestroysLeftoverSignInMachines(t *testing.T) {
+// A crash during a sign-in or a plan run leaves its provider worker
+// reloaded Stopped with its placeholder seed; the sweep at start destroys
+// every provider worker and no other machine, and one that will not go
+// stops none of the rest (#3249, #3308).
+func TestStartSweepDestroysLeftoverProviderWorkers(t *testing.T) {
+	// REQ: PLN-6
 	box := newSignInBox(func(string) string { return "" })
 	h := newSignInHost(t, box, nil)
-	left := []string{signInPrefix + "aaaaaa", signInPrefix + "bbbbbb", signInPrefix + "cccccc"}
-	kept := []string{vm.ProviderPrefix + "codex-run", "agent-1", "signin-agent"}
+	left := []string{signInPrefix + "aaaaaa", vm.ProviderPrefix + "bbbbbb", signInPrefix + "cccccc", vm.ProviderPrefix + "dddddd"}
+	kept := []string{vm.WorkerPrefix + "0a1b2c3d-pw-x", "agent-1", "signin-agent", "xpw-a1b2c3"}
 	box.mu.Lock()
 	for _, id := range append(slices.Clone(left), kept...) {
 		box.mounts[id] = ""
@@ -567,7 +569,7 @@ func TestSignInSweepDestroysLeftoverSignInMachines(t *testing.T) {
 	box.mu.Unlock()
 
 	h.Sweep()
-	for _, id := range []string{left[0], left[2]} {
+	for _, id := range []string{left[0], left[2], left[3]} {
 		if !box.gone(id) {
 			t.Fatalf("the sweep left %s", id)
 		}
@@ -688,5 +690,33 @@ func TestSignInSockSpeaksTheHostsWire(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("a refused start left %v", ents)
+	}
+}
+
+// The provider-worker sweep is pinned in main.go: it runs once the
+// manager is open and given to the host, before -signin-sock is served
+// and before the provider runner can start a plan run, and setup's
+// sign-in machines are closed before that manager opens, so no worker
+// it destroys has a live owner (#3308).
+func TestProviderSweepRunsBeforeAnyProviderWorker(t *testing.T) {
+	// REQ: PLN-6
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	sweep := strings.Index(s, "\t\t\tsignIns.Sweep()\n")
+	if sweep < 0 || strings.Count(s, "signIns.Sweep()") != 1 {
+		t.Fatal("main.go does not call signIns.Sweep() exactly once")
+	}
+	for _, before := range []string{"\tsignInHost.Close(cctx)\n", "\tm, err := vm.Open(ctx, vmc)\n", "\tsignIns.M = m\n"} {
+		if i := strings.Index(s, before); i < 0 || i > sweep {
+			t.Fatalf("%q at %d, not before the sweep at %d", before, i, sweep)
+		}
+	}
+	for _, later := range []string{"serveSignIns(", "providerRunner(m,"} {
+		if i := strings.Index(s, later); i < 0 || i < sweep {
+			t.Fatalf("%q at %d, not after the sweep at %d", later, i, sweep)
+		}
 	}
 }
