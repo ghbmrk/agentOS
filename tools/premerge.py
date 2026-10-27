@@ -13,7 +13,8 @@ and so does a DECISIONS.md whose only replay conflicts are table rows both sides
 keeping both sides' rows verbatim, either side first (#3224, #3233). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
-hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401). Main merged into the branch therefore reads as same, even next
+hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
+aligns the file unlike the replay: then every head reads changed and is resolved by hand. Main merged into the branch therefore reads as same, even next
 to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
 in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
 neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
@@ -235,8 +236,9 @@ def _broken(cwd, tree, path, reviewed, onto):
 def _stale_dropped(cwd, tree, head, path, reviewed, onto):
     """True when an ASSUMPTIONS.md replay conflicts without `merge=union` (.gitattributes) only in hunks of table
     rows, and `head` is that merge with each hunk resolved as the PR's rows plus main's, less each row the merge base
-    and main share but the PR dropped (the stale rows the union kept, #3369, #1912), or as main's rows with each such
-    row replaced by the PR's row of its ID, the rest of the PR's rows after them (e842a58 on #3369). Every hunk the
+    shares with one side only (main deleted it, or the PR dropped it: the stale rows the union kept, #3369, #1912),
+    or as main's rows with each stale row replaced by the PR's row of its ID, the rest of the PR's rows after them
+    (e842a58 on #3369). Every hunk the
     same way, no duplicate ID left. A row never leaves its hunk, so nothing moves to another table (#3401)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
@@ -252,7 +254,7 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
         merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)), *map(str, names)],
                                 capture_output=True).stdout
     key = lambda line: FIRST_CELL.match(line) and FIRST_CELL.match(line).group(1)
-    out, hunk, side, conflicts = ([], []), None, 0, 0
+    out, hunk, side, conflicts = ([], [], []), None, 0, 0  # resolutions 0 and 1; 2 is the union, to match the replay
     for line in merged.splitlines(keepends=True):
         bare = line.rstrip(b"\r\n")
         if hunk is None:
@@ -268,17 +270,21 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
         elif bare == f">>>>>>> {mark}2".encode() and side == 2:
             pr, base, main = hunk
             gone = {x for x in base if x in main and x not in pr}
+            cut = {x for x in base if x in pr and x not in main}  # main deleted it: the union kept it too (#3401 L3)
             edit = {key(x): x for x in pr if key(x) in {key(g) for g in gone}}
-            out[0].extend(pr + [x for x in main if x not in gone])
+            out[0].extend([x for x in pr if x not in cut] + [x for x in main if x not in gone])
             moved = [edit.get(key(x), b"") if x in gone else x for x in main]
-            out[1].extend(moved + [x for x in pr if x not in edit.values()])
+            out[1].extend(moved + [x for x in pr if x not in edit.values() and x not in cut])
+            out[2].extend(pr + main)
             hunk, conflicts = None, conflicts + 1
         elif FIRST_CELL.match(line):
             hunk[side].append(line)
         else:
             return False  # a hunk that is not all table rows, or a marker out of order
     want = _git(cwd, "show", f"{head}:{path}", ok=(0, 128))
-    return (hunk is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
+    # merge-file's diff can align the file unlike merge-tree's: the union of its hunks must be the replay (#3401)
+    replay = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
+    return (hunk is None and conflicts > 0 and b"".join(out[2]) == replay and want in (b"".join(out[0]), b"".join(out[1]))
             and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
 
 

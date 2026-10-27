@@ -243,6 +243,43 @@ class PremergeTest(unittest.TestCase):
         self.chmod_commit("ASSUMPTIONS.md")
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    def test_a_row_main_deleted_in_the_union_hunk_stays_deleted(self):
+        # #3401 L3 delta: main deleted L-2 next to the PR's edit; the union kept it, and so did the exemption.
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| L-1 | edge new |\n| L-2 | b |\n",
+                                    base_rows="| L-1 | edge old |\n| L-2 | b |\n")
+        for rows, want in (("| L-1 | edge new |\n| B-1 | bak |\n", []),
+                           ("| L-1 | edge new |\n| L-2 | b |\n| B-1 | bak |\n", ["ASSUMPTIONS.md"])):
+            with self.subTest(rows=rows):
+                self.write("ASSUMPTIONS.md", self.UNION + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), want)
+
+    def test_a_stale_row_kept_after_main_rows_or_a_prose_line_dropped_is_changed(self):
+        # #3401 lens delta: pins the moved form's drop of a stale row with no PR edit, and the all-rows hunk guard.
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| N-1 | new |\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n| L-1 | edge old |\n| N-1 | new |\n")
+        self.commit("keep the deleted row")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        self.setUp()
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| L-1 | edge new |\nL-1 only holds on x86.\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge new |\n| B-1 | bak |\n")
+        self.commit("drop the PR's prose line")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_head_built_from_another_diff_alignment_is_changed(self):
+        # #3401 Security P7: merge-file (Myers) and merge-tree (histogram) merge this file differently outside the
+        # union hunk; a head copying merge-file's merge read `same` though it differs from the replay there.
+        top = "\n\n## Notes\n\n"
+        b = "| B |\n\n| C |\n| D |\n| A |\nx\nx\nx\n"
+        p = "| B |\n\n| D |\n| A |\n\nx\nx\nx\n"
+        m = "| C |\n| B |\n\n| C |\n| D |\n| D |\n| A |\nx\n| A |\nx\nx\n"
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |" + top + m, "| L-1 | edge new |" + top + p,
+                                    base_rows="| L-1 | edge old |" + top + b)
+        merge_file = "| C |\n| B |\n\n| D |\n| D |\n| A |\n\nx\n| A |\nx\nx\n"
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge new |\n| B-1 | bak |" + top + merge_file)
+        self.commit("merge-file's merge, stale dropped")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
     def test_decisions_rows_both_appended_under_one_id_are_changed(self):
         # #3401 L3: the appended-rows exemption kept two D-9 rows as `same`; doclint fails that head.
         reviewed = self.decisions_conflict(main="| D-1 | base |\n| D-9 | main |\n", pr="| D-1 | base |\n| D-9 | mine |\n")
