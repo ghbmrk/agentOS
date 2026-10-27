@@ -266,22 +266,22 @@ func TestFollowsOnlyTheShownDigest(t *testing.T) {
 // refuses the step itself, not only the page.
 func TestLookAlikeProjectNameRefused(t *testing.T) {
 	for _, n := range []string{
-		"the AgentOS project", "THE AGENTOS PROJECT", "AgentOS Project", "agentos project fork",
+		follow.ProjectName, "THE AGENTOS PROJECT", "agentOS Project", "agentos project fork",
 		"the AgentÖS project", "the аgentOS project", // Cyrillic а
-		"the AgentOS​project", "AgentOSProject", "the Agent0S project", "the ΑgentOS Ρroject", // Greek Α, Ρ
+		"the agentOS\u200bproject", "AgentOSProject", "the Agent0S project", "the ΑgentOS Ρroject", // Greek Α, Ρ
 		"", " Acme", "Acme ", "Acme 123456", "Acme\nFork", "Acme‮Fork", strings.Repeat("a", follow.MaxName+1),
 	} {
 		if follow.NameOK(n) {
 			t.Errorf("%q admitted", n)
 		}
 	}
-	for _, n := range []string{"Acme Fork", "AgentOS Community", "My builds 2026", "Projet Agé", strings.Repeat("a", follow.MaxName)} {
+	for _, n := range []string{"Acme Fork", "agentOS Community", "My builds 2026", "Projet Agé", strings.Repeat("a", follow.MaxName)} {
 		if !follow.NameOK(n) {
 			t.Errorf("%q refused", n)
 		}
 	}
 	r := newClerkRig(t)
-	if st := r.run(r.approved("p1", r.describe(r.fork), "The AgentOS Project")); st.Phase != kernel.PFailed || st.Detail != followclerk.RMalformed {
+	if st := r.run(r.approved("p1", r.describe(r.fork), "The agentOS Project")); st.Phase != kernel.PFailed || st.Detail != followclerk.RMalformed {
 		t.Fatalf("%+v", st)
 	}
 	r.unchanged()
