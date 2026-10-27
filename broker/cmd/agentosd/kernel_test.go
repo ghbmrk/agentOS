@@ -3,9 +3,12 @@ package main
 // REQ: CLK-1
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,5 +141,49 @@ func TestTheKernelsAnswersInTheOwnerCommandsTerms(t *testing.T) {
 	}
 	if err := kernelErr(kernelsock.Refused{Text: kernel.ErrRetryMoved.Error()}); !errors.As(err, &r) || !strings.Contains(r.Text, "retried since that ask") {
 		t.Fatalf("a moved retry: %v", err)
+	}
+}
+
+// agentosd's RETRY sends the kernel the attempt the ask read, not another
+// (CH-10). Revert mutant: storedKernel.Retry passes a constant attempt (1),
+// and the kernel reads attempt 1 for an ask about attempt 3.
+func TestRetrySendsTheAttemptTheAskRead(t *testing.T) {
+	// The call is made as this process's own uid, which needs no root, and
+	// only this process's uid is called.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	lines := make(chan string, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		l, _ := bufio.NewReader(c).ReadString('\n')
+		lines <- l
+		c.Write([]byte("{\"result\":null}\n"))
+	}()
+	k := storedKernel{kernelsock.Owner{Socket: path, UID: os.Getuid(), As: os.Geteuid()}, filepath.Join(dir, "store")}
+	if err := k.Retry(context.Background(), "plan:7", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	var call struct {
+		Op   string
+		Args struct {
+			Plan    string
+			Index   int
+			Attempt int
+		}
+	}
+	if err := json.Unmarshal([]byte(<-lines), &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Op != "retry" || call.Args.Plan != "plan:7" || call.Args.Index != 2 || call.Args.Attempt != 3 {
+		t.Fatalf("RETRY sent %+v, want retry of plan:7 step 2 at attempt 3", call)
 	}
 }
