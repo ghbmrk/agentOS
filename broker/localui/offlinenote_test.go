@@ -6,11 +6,13 @@ import (
 )
 
 // REQ: ONB-4, CH-12
-// WIFI-del-offline-note (#3327): the core's only uplink is its cable to
-// the enforcer (HW-12, D-178), so an offline core names that one step on
-// every page that says it is offline, from the first setup step on.
-func TestOfflineNamesTheCableToTheEnforcer(t *testing.T) {
-	const step = "Check the cable from my port 1 to your home control box."
+// WIFI-del-offline-note (#3327): the core's only uplink runs through the
+// enforcer (HW-12, D-178), and the page answers only on that same cable,
+// so an offline core that the owner can read names the step past the
+// enforcer, on every page that says it is offline, from the first setup
+// step on.
+func TestOfflineNamesTheStepPastTheEnforcer(t *testing.T) {
+	const step = "I can reach your home control box but not the internet. Check the cable from your home control box to your router, and that your internet works."
 	r := newRig(t)
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "offline"}
@@ -32,8 +34,10 @@ func TestOfflineNamesTheCableToTheEnforcer(t *testing.T) {
 		r.hooks.mu.Lock()
 		r.hooks.progress = Progress{Phase: phase, Online: true}
 		r.hooks.mu.Unlock()
-		if strings.Contains(r.get("/setup"), "cable") {
-			t.Fatalf("%s page mentions the cable", phase)
+		for _, path := range []string{"/setup", "/status"} {
+			if strings.Contains(r.get(path), "cable") {
+				t.Fatalf("%s %s mentions the cable", phase, path)
+			}
 		}
 	}
 }

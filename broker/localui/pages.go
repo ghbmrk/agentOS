@@ -31,7 +31,7 @@ form { margin: .6em 0 1.2em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
-{{define "offline"}}{{if eq .Progress.Phase "offline"}}<p>Check the cable from my port 1 to your home control box.</p>{{end}}{{end}}
+{{define "offline"}}{{if eq .Progress.Phase "offline"}}<p>I can reach your home control box but not the internet. Check the cable from your home control box to your router, and that your internet works.</p>{{end}}{{end}}
 
 {{define "status"}}{{template "head" .Refresh}}
 <h1>AgentOS</h1>
