@@ -160,7 +160,7 @@ func vaultRig(t *testing.T) (*rig, *fakeVault) {
 	t.Helper()
 	r := newRig(t)
 	fv := newFakeVault(r.card.VaultPassphrase)
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Vault: fv, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		t.Fatal(err)

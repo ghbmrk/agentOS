@@ -99,6 +99,18 @@ func verdict(t *testing.T, rules string, p pkt) string {
 				f := strings.Fields(body)
 				ok = p.proto == "udp" && f[2] == strconv.Itoa(int(p.dport))
 				body = strings.TrimSpace(strings.TrimPrefix(body, "udp dport "+f[2]))
+			case strings.HasPrefix(body, `iifname != "wl*"`):
+				ok = !strings.HasPrefix(p.iif, "wl")
+				body = strings.TrimSpace(strings.TrimPrefix(body, `iifname != "wl*"`))
+			case strings.HasPrefix(body, "ip saddr { "):
+				set, rest, _ := strings.Cut(strings.TrimPrefix(body, "ip saddr { "), " }")
+				ok = false
+				for _, e := range strings.Split(set, ",") {
+					if pre := netip.MustParsePrefix(strings.TrimSpace(e)); p.src.Is4() && pre.Contains(p.src) {
+						ok = true
+					}
+				}
+				body = strings.TrimSpace(rest)
 			case strings.HasPrefix(body, "ip saddr "), strings.HasPrefix(body, "ip6 saddr "):
 				f := strings.Fields(body)
 				ok = p.src == netip.MustParseAddr(f[2])
@@ -286,6 +298,7 @@ func TestInboundRulesAreValidNft(t *testing.T) {
 		Exempt:    []string{"wlan0"},
 		Devices:   []DeviceAllow{{Addr: netip.MustParseAddr("192.168.1.60"), TCPPorts: []uint16{8443, 8444}}, {Addr: netip.MustParseAddr("2001:db8::60"), TCPPorts: []uint16{80}}},
 		Discovery: []DiscoveryPort{DiscoverMDNS, DiscoverSSDP, DiscoverMatter},
+		Page:      true,
 	})
 	f := filepath.Join(t.TempDir(), "in.nft")
 	if err := os.WriteFile(f, []byte(r), 0o600); err != nil {
@@ -302,13 +315,17 @@ func TestInboundRulesAreValidNft(t *testing.T) {
 // imageRules is the file the image loads at boot (agentos-inbound.service).
 const imageRules = "../../image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 
-// DEV-net-e 2a: the image loads exactly the zero-value rules, after its
-// header comment. Regenerate with AGENTOS_WRITE_INBOUND=1 go test ./netguard.
+// DEV-net-e 2a: the image loads exactly the rules of Image (the zero value
+// and the owner page's ports, WIFI-del-a3), after its header comment.
+// Regenerate with AGENTOS_WRITE_INBOUND=1 go test ./netguard.
 func TestInboundImageFileIsTheDefault(t *testing.T) {
-	want := render(t, Inbound{})
+	if Image.Devices != nil || Image.Discovery != nil || Image.Exempt != nil || !Image.Page {
+		t.Fatalf("the image's rules are not the zero value and the page: %+v", Image)
+	}
+	want := render(t, Image)
 	if os.Getenv("AGENTOS_WRITE_INBOUND") == "1" {
 		hdr := "#!/usr/sbin/nft -f\n" +
-			"# Generated from broker/netguard InboundRules(Inbound{}); TestInboundImageFileIsTheDefault\n" +
+			"# Generated from broker/netguard InboundRules(Image); TestInboundImageFileIsTheDefault\n" +
 			"# checks it. agentos-inbound.service loads it before any network or listener (DEV-net-e 2a).\n"
 		if err := os.WriteFile(imageRules, []byte(hdr+want), 0o644); err != nil {
 			t.Fatal(err)
@@ -326,7 +343,7 @@ func TestInboundImageFileIsTheDefault(t *testing.T) {
 		body = append(body, ln)
 	}
 	if got := strings.Join(body, ""); got != want {
-		t.Errorf("%s differs from InboundRules(Inbound{}); regenerate it.\ngot:\n%s\nwant:\n%s", imageRules, got, want)
+		t.Errorf("%s differs from InboundRules(Image); regenerate it.\ngot:\n%s\nwant:\n%s", imageRules, got, want)
 	}
 }
 
@@ -422,6 +439,42 @@ func TestInboundDropsEveryForwardedPacket(t *testing.T) {
 	for _, l := range [][2]string{{"ap0", "eth0"}, {"eth0", "ap0"}} {
 		if v := forwardVerdict(t, ap, "bridge", l[0], l[1]); v != "drop" {
 			t.Errorf("exempt ap0, bridge %s -> %s: %s, want drop (nothing on the box bridges)", l[0], l[1], v)
+		}
+	}
+}
+
+// WIFI-del-a3 (CH-9, D-178): with Page, the inbound table admits the owner
+// page's two ports from private IPv4 sources on any wired interface, since
+// the enforcer routes the Owner network to port 1 from another subnet; a
+// public, IPv6 or CGNAT source, a radio, another TCP port and UDP to those
+// ports are still dropped, and the zero value admits none of it.
+// REQ: CH-9
+func TestInboundAdmitsThePagePortsFromPrivateSources(t *testing.T) {
+	r := render(t, Inbound{Page: true})
+	zero := render(t, Inbound{})
+	for _, c := range []struct {
+		p    pkt
+		want string
+	}{
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("10.8.0.23"), proto: "tcp", dport: 80}, "accept"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("172.16.4.9"), proto: "tcp", dport: 443}, "accept"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("192.168.50.77"), proto: "tcp", dport: 443}, "accept"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("172.32.0.1"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("100.64.0.9"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("203.0.113.5"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("fd00::5"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("10.8.0.23"), proto: "tcp", dport: 22}, "drop"},
+		{pkt{iif: "wlsta0", src: netip.MustParseAddr("192.168.77.1"), proto: "tcp", dport: 80}, "drop"},
+		{pkt{iif: "wlan0", src: netip.MustParseAddr("10.42.0.23"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "enp1s0", src: netip.MustParseAddr("10.8.0.23"), proto: "udp", dport: 443}, "drop"},
+	} {
+		if v := verdict(t, r, c.p); v != c.want {
+			t.Errorf("%+v: %s, want %s", c.p, v, c.want)
+		}
+		if c.want == "accept" {
+			if v := verdict(t, zero, c.p); v != "drop" {
+				t.Errorf("zero value admits %+v: %s", c.p, v)
+			}
 		}
 	}
 }

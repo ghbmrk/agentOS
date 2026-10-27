@@ -72,7 +72,7 @@ func TestThePageCallsAgentosdOverItsSocket(t *testing.T) {
 // until setup moves into agentosd), every setup route is refused with the
 // fixed not-ready page, and nothing pairs in this process.
 func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
-	s, err := New(Config{AP: testAP()})
+	s, err := New(Config{Page: testPage()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 		req.RemoteAddr = "10.42.0.20:5000"
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, req)
+		s.ServeHTTP(w, reaching(req))
 		return w
 	}
 	for _, path := range []string{"/setup", "/setup/", "/setup/number", "/setup/number-code", "/setup/claim",
@@ -115,7 +115,7 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 // UX-2wb-1: when agentosd does not answer, the Approvals page says the box
 // isn't answering and that nothing was decided, naming no internal part.
 func TestApprovalsSayWhenTheBoxIsNotAnswering(t *testing.T) {
-	s, err := New(Config{AP: testAP()})
+	s, err := New(Config{Page: testPage()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestApprovalsSayWhenTheBoxIsNotAnswering(t *testing.T) {
 	req.RemoteAddr = "10.42.0.20:5000"
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, req)
+	s.ServeHTTP(w, reaching(req))
 	if body := w.Body.String(); w.Code != 200 || !strings.Contains(body, html.EscapeString(unreachableText)) || strings.Contains(body, "owner channel") {
 		t.Fatalf("%d %s", w.Code, body)
 	}
@@ -166,7 +166,7 @@ func TestNoTriesLeftShowBeforeSignIn(t *testing.T) {
 		{2, wrongCodeText},
 		{0, lockedText},
 	} {
-		s, err := New(Config{AP: testAP()})
+		s, err := New(Config{Page: testPage()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +176,7 @@ func TestNoTriesLeftShowBeforeSignIn(t *testing.T) {
 			req.RemoteAddr = "10.42.0.20:5000"
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			w := httptest.NewRecorder()
-			s.ServeHTTP(w, req)
+			s.ServeHTTP(w, reaching(req))
 			return w.Body.String()
 		}
 		body := do("POST", "/unlock", "code=000000")
@@ -197,7 +197,7 @@ func TestAnAnswerWithNoReplyDoesNotClaimNothingHappened(t *testing.T) {
 	if strings.Contains(answerUnreachableText, "Nothing was") || answerUnreachableText == unreachableText {
 		t.Fatalf("answer wording %q", answerUnreachableText)
 	}
-	s, err := New(Config{AP: testAP()})
+	s, err := New(Config{Page: testPage()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestAFailedListingAfterAnAnswerKeepsTheAnswersMessage(t *testing.T) {
 			return localapi.Answered{Text: "Approved Q2. Your agent can go ahead."}, nil
 		}, "Approved Q2."},
 	} {
-		s, err := New(Config{AP: testAP()})
+		s, err := New(Config{Page: testPage()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -254,7 +254,7 @@ func TestAFailedListingAfterAnAnswerKeepsTheAnswersMessage(t *testing.T) {
 		req.RemoteAddr = "10.42.0.20:5000"
 		req.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, req)
+		s.ServeHTTP(w, reaching(req))
 		body := w.Body.String()
 		if w.Code != 200 || !strings.Contains(body, html.EscapeString(c.want)) || strings.Contains(body, "Nothing was approved or denied") {
 			t.Fatalf("%s: %d %s", c.name, w.Code, body)

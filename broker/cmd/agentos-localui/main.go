@@ -1,11 +1,12 @@
-// Command agentos-localui serves the box's Wi-Fi page (P2-2w; CH-7 to
+// Command agentos-localui serves the box's owner page (P2-2w; CH-7 to
 // CH-10, ARC-2, L15). It runs as its own user, agentos-localui, and
-// decodes untrusted input (forms and photos from any phone on the access
-// point), so it holds no authority: every owner action goes to agentosd's
+// decodes untrusted input (forms and photos from any phone on the Owner
+// network), so it holds no authority: every owner action goes to agentosd's
 // localui.sock, which admits only this uid, mints and checks the session
 // tokens and counts wrong codes (localapi; Security L1, L2 on the P2-2w
-// plan). It listens on the access point's address and interface only
-// (Security L5) and logs no request or form field.
+// plan). It listens on port 1's interface only, the core's cable to the
+// enforcer (CH-9, HW-12, D-178; Security L5), and logs no request or form
+// field.
 //
 // Setup runs through agentosd (P2-2w c4; Security L6): the page asks
 // localui.sock's setup ops, which agentosd serves only until setup's
@@ -43,7 +44,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -62,7 +62,7 @@ import (
 const memoryLimit = 384 << 20
 
 func main() {
-	var sock, vaultSock, held, iface, addr, pageName, passkeyRPID string
+	var sock, vaultSock, held, iface, pageName, passkeyRPID string
 	var fb boxFiles
 	var port int
 	var connectGmail bool
@@ -72,8 +72,7 @@ func main() {
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
-	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
-	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
+	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the interface of the one IPv4 default route (localui.UplinkIface)")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
 	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "serve the passkey page at /passkeys/ (#2779a) with this WebAuthn RP ID, through agentosd's passkey ops (agentosd -passkey-rp-id, the same name); it must be -page-name, and the page refuses to start unless the HTTPS listener is up")
@@ -81,14 +80,20 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 	debug.SetMemoryLimit(memoryLimit)
-	ap, err := netip.ParsePrefix(addr)
-	if err != nil {
-		log.Fatalf("-addr: %v", err)
+	if iface == "" {
+		routes, err := os.ReadFile("/proc/net/route")
+		if err != nil {
+			log.Fatal(err)
+		}
+		// No uplink yet: the unit restarts the page until DHCP gives one.
+		if iface, err = localui.UplinkIface(string(routes)); err != nil {
+			log.Fatal(err)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fb.VaultSock = vaultSock
-	cfg := config(localui.APConfig{Iface: iface, Addr: ap, PageName: pageName}, port, sock, vaultSock, held)
+	cfg := config(localui.Page{Iface: iface, PageName: pageName}, port, sock, vaultSock, held)
 	if connectGmail {
 		connect(&cfg, sock)
 	}
@@ -107,9 +112,9 @@ func main() {
 // The vault process's unlock socket serves both the unlock page and the
 // Owner Card rotation (REC-4), the AI providers page and setup's host
 // step (P2-2w c4d); ARC-2 keeps the card's display here, not in agentosd.
-func config(ap localui.APConfig, port int, sock, vaultSock, held string) localui.Config {
+func config(page localui.Page, port int, sock, vaultSock, held string) localui.Config {
 	hooks := localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}
-	cfg := localui.Config{AP: ap, Port: port, Store: localui.HeldStore{Inner: &localui.MemStore{}, Path: held}}
+	cfg := localui.Config{Page: page, Port: port, Store: localui.HeldStore{Inner: &localui.MemStore{}, Path: held}}
 	if vaultSock != "" {
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
@@ -195,7 +200,7 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 	}
 	var lns []net.Listener
 	for _, p := range ports(cfg, pt) {
-		ln, err := localui.Listen(ctx, cfg.AP, p)
+		ln, err := localui.Listen(ctx, cfg.Page, p)
 		if err != nil {
 			for _, l := range lns {
 				l.Close()
@@ -243,7 +248,7 @@ func pageTLS(ctx context.Context, cfg *localui.Config, o localui.Owner, logf fun
 	if logf == nil {
 		logf = func(s string) { log.Print(s) }
 	}
-	name := cfg.AP.PageName
+	name := cfg.Page.PageName
 	if name == "" {
 		name = localui.DefaultPageName
 	}
@@ -282,7 +287,7 @@ func checkPasskeyRPID(rpID string, cfg localui.Config) error {
 	if rpID == "" {
 		return nil
 	}
-	name := cfg.AP.PageName
+	name := cfg.Page.PageName
 	if name == "" {
 		name = localui.DefaultPageName
 	}

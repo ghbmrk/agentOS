@@ -81,7 +81,7 @@ func providerRig(t *testing.T) (*rig, *fakeVault, *fakeProviders) {
 	fv.state = "open"
 	fp := &fakeProviders{code: "246810", ps: []ProviderStatus{
 		{ID: "openai", Name: "OpenAI", Connected: true}, {ID: "anthropic", Name: "Anthropic"}}}
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Vault: fv, Providers: fp, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestNoProvidersPageWithoutItsSocket(t *testing.T) {
 	if w := r.do("GET", "/providers/", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("page served: %d", w.Code)
 	}
-	if _, err := New(Config{AP: testAP(), Hooks: r.hooks, Store: &MemStore{}, Providers: &fakeProviders{}, Now: time.Now}); err == nil {
+	if _, err := New(Config{Page: testPage(), Hooks: r.hooks, Store: &MemStore{}, Providers: &fakeProviders{}, Now: time.Now}); err == nil {
 		t.Fatal("a providers page without the vault socket")
 	}
 }

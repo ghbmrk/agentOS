@@ -48,7 +48,32 @@ type Inbound struct {
 	Devices []DeviceAllow
 	// Discovery is the passive-discovery allow hook.
 	Discovery []DiscoveryPort
+	// Page admits the owner page's ports, TCP 80 and 443, from private
+	// IPv4 sources (RFC 1918) on any wired interface (CH-9, D-178): the
+	// enforcer routes the Owner network and its admin port to the core's
+	// port 1 from another subnet, and the page's socket, bound to port 1
+	// alone (localui.Listen), picks the interface (WIFI-del-a3). A radio
+	// (wlan*, and the station wlsta0 while agentos-ap ships) never carries
+	// the page, since the core never turns Wi-Fi on.
+	Page bool
 }
+
+// PageSources are the sources Page admits: RFC 1918's three ranges.
+var PageSources = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"),
+}
+
+// radioIfaces matches the kernel's names for wireless interfaces, which
+// 10-agentos-wlan.link keeps (wlanN) and the access point's loader uses
+// (wlsta0).
+const radioIfaces = "wl*"
+
+// PagePorts are the owner page's TCP ports: plain HTTP and HTTPS.
+var PagePorts = []uint16{80, 443}
+
+// Image is what the image loads at boot (agentos-inbound.service): the
+// zero value and the owner page's ports.
+var Image = Inbound{Page: true}
 
 // Validate says why the configuration cannot be rendered.
 func (c Inbound) Validate() error {
@@ -106,8 +131,9 @@ func InboundExemptRemove(iface string) (string, error) {
 // DEV-2 does not count as connections (router advertisements from a
 // link-local source, neighbour solicitations and advertisements from any
 // source as RFC 4861 allows, all with hop limit 255 so none was routed in;
-// DHCPv4 and DHCPv6 replies from their server ports); the listed devices
-// and discovery ports; and drops everything else.
+// DHCPv4 and DHCPv6 replies from their server ports); the owner page's
+// ports from private sources when Page is set; the listed devices and
+// discovery ports; and drops everything else.
 //
 // The box routes nothing (image I21), so the table also drops every
 // forwarded packet, IPv4 and IPv6, unless it enters or leaves an exempt
@@ -144,6 +170,17 @@ func InboundRules(c Inbound) (string, error) {
 	line("    ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept")
 	line("    udp sport 67 udp dport 68 accept")
 	line("    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept")
+	if c.Page {
+		src := make([]string, len(PageSources))
+		for i, p := range PageSources {
+			src[i] = p.String()
+		}
+		ports := make([]string, len(PagePorts))
+		for i, p := range PagePorts {
+			ports[i] = fmt.Sprint(p)
+		}
+		line("    iifname != %q ip saddr { %s } tcp dport { %s } accept", radioIfaces, strings.Join(src, ", "), strings.Join(ports, ", "))
+	}
 	for _, d := range c.Devices {
 		ports := make([]string, len(d.TCPPorts))
 		for i, p := range d.TCPPorts {

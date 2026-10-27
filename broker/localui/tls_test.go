@@ -226,9 +226,9 @@ func TestHTTPSRefusesOtherSNIAndHost(t *testing.T) {
 		}
 	}
 	// The source check still applies first.
-	r.ip = "192.168.1.5:5000"
+	r.ip = "203.0.113.5:5000"
 	if w := r.do("GET", "/status", nil, tlsReq(DefaultPageName)); w.Code != http.StatusForbidden {
-		t.Errorf("off the access point: %d", w.Code)
+		t.Errorf("from a public source: %d", w.Code)
 	}
 }
 
@@ -332,7 +332,7 @@ func TestHTTPSCSPAdmitsOnlyHashedScript(t *testing.T) {
 
 func TestHTTPRedirectsThePageNameToHTTPS(t *testing.T) {
 	for _, up := range []bool{true, false} {
-		s, err := New(Config{AP: testAP(), HTTPS: up, PageRestore: !up})
+		s, err := New(Config{Page: testPage(), HTTPS: up, PageRestore: !up})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -340,7 +340,7 @@ func TestHTTPRedirectsThePageNameToHTTPS(t *testing.T) {
 			q := httptest.NewRequest(method, "http://"+host+path, nil)
 			q.RemoteAddr = phoneIP
 			w := httptest.NewRecorder()
-			s.ServeHTTP(w, q)
+			s.ServeHTTP(w, reaching(q))
 			return w
 		}
 		w := do("GET", DefaultPageName, "/status")

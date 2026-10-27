@@ -6,9 +6,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -87,8 +87,7 @@ func startClaimSetup(t *testing.T, b *claimBox) *claimSetup {
 	fb := <-cs.fb
 	setupCall(t, cs.m)
 	ui, err := localui.New(localui.Config{
-		AP: localui.APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-			SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"},
+		Page:  localui.Page{Iface: "eth0"},
 		Port:  80,
 		Hooks: localui.AgentosdSetup{Owner: localui.Socket{Path: filepath.Join(cs.m.Dir, localapi.Socket)}},
 		Store: &localui.MemStore{},
@@ -123,6 +122,8 @@ func (p *phone) do(t *testing.T, s *localui.Server, method, path string, form ur
 	}
 	req := httptest.NewRequest(method, "http://10.42.0.1"+path, body)
 	req.RemoteAddr = p.ip
+	// The connection reached the box at 10.42.0.1 on port 1 (WIFI-del-a3).
+	req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4(10, 42, 0, 1), Port: 80}))
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}

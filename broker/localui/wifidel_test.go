@@ -69,7 +69,7 @@ func TestCoreAnswersNoCaptiveCheck(t *testing.T) {
 			req := httptest.NewRequest(m, u, nil)
 			req.RemoteAddr = phoneIP
 			w := httptest.NewRecorder()
-			r.srv.ServeHTTP(w, req)
+			r.srv.ServeHTTP(w, reaching(req))
 			if w.Code != http.StatusMisdirectedRequest || w.Header().Get("Location") != "" {
 				t.Errorf("%s %s: %d %q", m, u, w.Code, w.Header().Get("Location"))
 			}

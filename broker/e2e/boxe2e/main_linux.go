@@ -5,7 +5,7 @@
 // one-shot unit and reads its console lines (report.go).
 //
 // It changes the booted system only in ways a test VM allows: a veth pair
-// stands in for the access point's wlan0 with the phone in its own network
+// stands in for the core's port 1 with the phone in its own network
 // namespace, and agentos-modem is pointed (by a drop-in from ci_boot.sh) at
 // a sysfs tree whose AT port is a pseudo-terminal behind the AT simulator.
 // It prints no claim code, card value, recovery key, code-generator seed,
@@ -54,6 +54,9 @@ const (
 	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
+	// pageDropIn names the page's interface (agentos-localui.service's
+	// AGENTOS_PAGE_IFACE).
+	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
 )
 
 func main() {
@@ -137,10 +140,13 @@ func run(name string, args ...string) error {
 	return nil
 }
 
-// harness puts the phone on the box's Wi-Fi: a veth pair whose box end is
-// wlan0 at the access point's address, its other end in the phone's
-// namespace, and wlan0 in the inbound exempt set as ap-exempt would add it.
-// QEMU has no radio, so agentos-ap is stopped first. It also serves the
+// harness puts the phone on the Owner network: a veth pair whose box end,
+// owner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
+// namespace. The page reaches it only through the image's inbound rule for
+// the page's ports from private sources (WIFI-del-a3); a drop-in names
+// owner0 as the page's interface, since QEMU's own link holds the default
+// route, and the page restarts on it. agentos-ap, which the image still
+// ships until WIFI-del-b, is stopped first. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
 	if err := checkVaultBuild(); err != nil {
@@ -154,14 +160,24 @@ func (d *driver) harness() error {
 	for _, c := range [][]string{
 		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},
-		{"ip", "link", "add", "wlan0", "type", "veth", "peer", "name", "phone0", "netns", netns},
-		{"ip", "addr", "add", "10.42.0.1/24", "dev", "wlan0"},
-		{"ip", "link", "set", "wlan0", "up"},
+		{"ip", "link", "add", "owner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
+		{"ip", "addr", "add", "10.42.0.1/24", "dev", "owner0"},
+		{"ip", "link", "set", "owner0", "up"},
 		{"ip", "-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
 		{"ip", "-n", netns, "link", "set", "phone0", "up"},
 		{"ip", "-n", netns, "link", "set", "lo", "up"},
-		{"nft", "add", "element", "inet", "agentos_inbound", "exempt", `{ "wlan0" }`},
 	} {
+		if err := run(c[0], c[1:]...); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(pageDropIn), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=owner0\n"), 0o644); err != nil {
+		return err
+	}
+	for _, c := range [][]string{{"systemctl", "daemon-reload"}, {"systemctl", "restart", "agentos-localui.service"}} {
 		if err := run(c[0], c[1:]...); err != nil {
 			return err
 		}

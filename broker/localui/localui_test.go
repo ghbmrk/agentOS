@@ -10,10 +10,10 @@ import (
 	"html"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -35,9 +35,16 @@ const (
 	apiCanary = "sk-synthetic-CANARY-9f3b2c71d0e44a8b"
 )
 
-func testAP() APConfig {
-	return APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-		SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"}
+func testPage() Page { return Page{Iface: "eth0"} }
+
+// boxReached is the address a phone's connection reaches on the box's
+// port 1.
+var boxReached = &net.TCPAddr{IP: net.IPv4(10, 42, 0, 1), Port: 80}
+
+// reaching is r as the server sees it on port 1: its connection reached
+// boxReached.
+func reaching(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, boxReached))
 }
 
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
@@ -292,7 +299,7 @@ func (r *rig) open(st SetupStore) *Server {
 	if r.via != nil {
 		h = r.via
 	}
-	s, err := New(Config{AP: testAP(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned, Rotation: r.rot,
+	s, err := New(Config{Page: testPage(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned, Rotation: r.rot,
 		Defaults: "spend cap $20 a day; payments need approval.", Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		r.t.Fatal(err)
@@ -323,7 +330,7 @@ func (r *rig) do(method, path string, form url.Values, mod ...func(*http.Request
 		m(req)
 	}
 	w := httptest.NewRecorder()
-	r.srv.ServeHTTP(w, req)
+	r.srv.ServeHTTP(w, reaching(req))
 	r.jar.SetCookies(u, w.Result().Cookies())
 	r.mu.Lock()
 	r.seen = append(r.seen, w.Body.String())
@@ -707,29 +714,8 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 
 // REQ: CH-9, CH-7
 
-// CH-9: the local UI answers only clients on the access point's subnet.
-func TestOnlyAccessPointClientsReachTheUI(t *testing.T) {
-	r := newRig(t)
-	for _, from := range []string{"192.168.1.50:4000", "10.42.1.5:4000", "8.8.8.8:4000", "10.42.0.1:4000", "[::1]:4000", "garbage"} {
-		w := r.do("GET", "/status", nil, func(q *http.Request) { q.RemoteAddr = from })
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("request from %s: %d", from, w.Code)
-		}
-	}
-	for _, bad := range []APConfig{
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("0.0.0.0/0"), SSID: "x", Password: "12345678"},
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("203.0.113.1/24"), SSID: "x", Password: "12345678"},
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/8"), SSID: "x", Password: "12345678"},
-		{Iface: "", Addr: netip.MustParsePrefix("10.42.0.1/24"), SSID: "x", Password: "12345678"},
-	} {
-		if _, err := New(Config{AP: bad, Hooks: r.hooks, Store: &MemStore{}}); err == nil {
-			t.Fatalf("accepted %+v", bad)
-		}
-	}
-}
-
-// The listener is bound to the access point interface: binding to an
-// interface that does not exist fails rather than falling back to every
+// The listener is bound to port 1's interface: binding to an interface
+// that does not exist fails rather than falling back to every
 // interface.
 func TestListenerIsBoundToTheInterface(t *testing.T) {
 	if _, err := listenOn(context.Background(), "agentosnope0", "127.0.0.1:0"); err == nil {
@@ -749,8 +735,8 @@ func TestListenerIsBoundToTheInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if _, err := Listen(context.Background(), APConfig{Iface: "lo", Addr: netip.MustParsePrefix("127.0.0.1/8")}, 0); err == nil {
-		t.Fatal("Listen accepted a loopback access point")
+	if _, err := Listen(context.Background(), Page{Iface: "lo"}, 0); err == nil {
+		t.Fatal("Listen accepted loopback as port 1")
 	}
 }
 
@@ -762,7 +748,7 @@ func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 		req := httptest.NewRequest("GET", u, nil)
 		req.RemoteAddr = phoneIP
 		w := httptest.NewRecorder()
-		r.srv.ServeHTTP(w, req)
+		r.srv.ServeHTTP(w, reaching(req))
 		if w.Code != http.StatusMisdirectedRequest || w.Header().Get("Location") != "" {
 			t.Fatalf("%s: %d %s", u, w.Code, w.Header().Get("Location"))
 		}
@@ -770,7 +756,7 @@ func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 	req := httptest.NewRequest("POST", "http://evil.example/stop", nil)
 	req.RemoteAddr = phoneIP
 	w := httptest.NewRecorder()
-	r.srv.ServeHTTP(w, req)
+	r.srv.ServeHTTP(w, reaching(req))
 	if w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("foreign-host POST: %d", w.Code)
 	}
@@ -1113,18 +1099,16 @@ func TestSetupClosesAfterLateFinishErrorAndStaysClosed(t *testing.T) {
 	}
 }
 
-// The owner can always find the box page: its address is in every page's
-// footer and in the contact card.
+// The owner can always find the box page: its name is in every page's
+// footer and in the contact card (WIFI-del-a3: the core's wired address
+// comes from DHCP, so no fixed address is shown).
 func TestBoxPageAddressIsShown(t *testing.T) {
 	r := newRig(t)
-	if !strings.Contains(r.get("/status"), "http://10.42.0.1/") {
-		t.Fatal("no box page address in the footer")
+	if !strings.Contains(r.get("/status"), "http://"+DefaultPageName+"/") {
+		t.Fatal("no box page name in the footer")
 	}
-	if !strings.Contains(r.get("/box.vcf"), "URL:http://10.42.0.1/") {
-		t.Fatal("no box page address in the contact card")
-	}
-	if card.BoxPage != "http://"+testAP().Addr.Addr().String()+"/" {
-		t.Fatal("card and access point disagree on the box page")
+	if !strings.Contains(r.get("/box.vcf"), "URL:http://"+DefaultPageName+"/") {
+		t.Fatal("no box page name in the contact card")
 	}
 }
 

@@ -65,7 +65,7 @@ func passkeyRig(t *testing.T) (*rig, *fakePasskeys) {
 	t.Helper()
 	r := newRig(t)
 	fp := &fakePasskeys{list: localapi.PasskeyList{Anchors: []localapi.Passkey{anchorKey}, Enrolled: []localapi.Passkey{phoneKey}}}
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Passkeys: fp, PasskeyRPID: DefaultPageName,
 		Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
@@ -90,10 +90,10 @@ func TestPasskeyPageOffWithoutRPID(t *testing.T) {
 	if strings.Contains(r.get("/home"), "/passkeys/") {
 		t.Fatal("home links the passkey page")
 	}
-	if _, err := New(Config{AP: testAP(), Passkeys: &fakePasskeys{}}); err == nil {
+	if _, err := New(Config{Page: testPage(), Passkeys: &fakePasskeys{}}); err == nil {
 		t.Fatal("passkeys without an RP ID")
 	}
-	if _, err := New(Config{AP: testAP(), PasskeyRPID: DefaultPageName}); err == nil {
+	if _, err := New(Config{Page: testPage(), PasskeyRPID: DefaultPageName}); err == nil {
 		t.Fatal("an RP ID without passkeys")
 	}
 }
