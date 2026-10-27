@@ -2,6 +2,7 @@ package homekit
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ const (
 	maxServices    = 64
 	maxChars       = 64
 	maxEventsWait  = 1024
+	maxPending     = 1024
 )
 
 // ID names one characteristic instance on the accessory.
@@ -57,6 +59,9 @@ type Session struct {
 	opt    Options
 	chars  map[ID]*Characteristic
 	config int
+	// pending holds event values until the lock is released, so OnEvent
+	// may call back into the session (#3325 item 1).
+	pending []Value
 }
 
 func newSession(conn io.ReadWriter, host string, shared []byte, opt Options) (*Session, error) {
@@ -77,10 +82,14 @@ func newSession(conn io.ReadWriter, host string, shared []byte, opt Options) (*S
 	}, nil
 }
 
-// Close ends the session.
+// Close ends the session. It closes the connection before taking the lock,
+// so a read blocked inside another call ends at once (#3325 item 3).
 func (s *Session) Close() error {
+	if c, ok := s.raw.(io.Closer); ok {
+		c.Close()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	s.fail(ErrClosed)
 	return nil
 }
@@ -130,18 +139,27 @@ func (s *Session) do(method, path string, body []byte) (*response, error) {
 	return nil, err
 }
 
-// deliver passes an event's values for resolved characteristics on.
+// deliver queues an event's values for resolved characteristics that offer
+// events, up to maxPending; unlock passes them on.
 func (s *Session) deliver(body []byte) {
 	vals, err := parseValues(body)
 	if err != nil || s.opt.OnEvent == nil {
 		return
 	}
-	var out []Value
 	for _, v := range vals {
-		if c := s.chars[v.ID]; c != nil && c.can("ev") {
-			out = append(out, v)
+		if c := s.chars[v.ID]; c != nil && c.can("ev") && len(s.pending) < maxPending {
+			s.pending = append(s.pending, v)
 		}
 	}
+}
+
+// unlock releases the session and only then passes queued events to
+// OnEvent, so a callback that calls back into the session does not
+// deadlock. Two callers' events may reach OnEvent in either order.
+func (s *Session) unlock() {
+	out := s.pending
+	s.pending = nil
+	s.mu.Unlock()
 	if len(out) > 0 {
 		s.opt.OnEvent(out)
 	}
@@ -150,7 +168,7 @@ func (s *Session) deliver(body []byte) {
 // Resolve reads /accessories and replaces the resolved characteristics.
 func (s *Session) Resolve() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	return s.resolve()
 }
 
@@ -173,7 +191,7 @@ func (s *Session) resolve() error {
 // ConfigNumber takes the TXT record's c# and re-resolves when it changed.
 func (s *Session) ConfigNumber(c int) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	if s.chars != nil && c == s.config {
 		return nil
 	}
@@ -187,7 +205,7 @@ func (s *Session) ConfigNumber(c int) error {
 // Characteristic returns the resolved characteristic, if any.
 func (s *Session) Characteristic(id ID) (Characteristic, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil {
 		return Characteristic{}, false
@@ -195,22 +213,61 @@ func (s *Session) Characteristic(id ID) (Characteristic, bool) {
 	return *c, true
 }
 
-// Find returns the resolved characteristic of type typ in service svc.
-func (s *Session) Find(svc, typ string) (Characteristic, bool) {
+// Find returns the resolved characteristic of type typ in service svc of
+// accessory aid. A bridge exposes one accessory per thermostat, so the aid
+// names which (#3325 item 2); a service type repeated within one accessory
+// is ambiguous and not found.
+func (s *Session) Find(aid uint64, svc, typ string) (Characteristic, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
+	var found *Characteristic
 	for _, c := range s.chars {
-		if c.Service == svc && c.Type == typ {
-			return *c, true
+		if c.AID == aid && c.Service == svc && c.Type == typ {
+			if found != nil {
+				return Characteristic{}, false
+			}
+			found = c
 		}
 	}
+	if found != nil {
+		return *found, true
+	}
 	return Characteristic{}, false
+}
+
+// Accessories returns the resolved accessory IDs that hold service svc.
+func (s *Session) Accessories(svc string) []uint64 {
+	s.mu.Lock()
+	defer s.unlock()
+	var out []uint64
+	for _, c := range s.chars {
+		if c.Service == svc && !slices.Contains(out, c.AID) {
+			out = append(out, c.AID)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Of returns the resolved characteristics of service svc in accessory aid,
+// ordered by iid.
+func (s *Session) Of(aid uint64, svc string) []Characteristic {
+	s.mu.Lock()
+	defer s.unlock()
+	var out []Characteristic
+	for _, c := range s.chars {
+		if c.AID == aid && c.Service == svc {
+			out = append(out, *c)
+		}
+	}
+	slices.SortFunc(out, func(a, b Characteristic) int { return cmp.Compare(a.IID, b.IID) })
+	return out
 }
 
 // Read reads resolved, readable characteristics.
 func (s *Session) Read(ids ...ID) ([]Value, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	if len(ids) == 0 || len(ids) > maxChars {
 		return nil, fmt.Errorf("%w: read of %d characteristics", ErrRefused, len(ids))
 	}
@@ -246,7 +303,7 @@ func (s *Session) Read(ids ...ID) ([]Value, error) {
 // format and declared range or enumeration, and only then frames it.
 func (s *Session) Write(id ID, value any) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil {
 		return fmt.Errorf("%w: %d.%d is not a resolved characteristic", ErrRefused, id.AID, id.IID)
@@ -264,7 +321,7 @@ func (s *Session) Write(id ID, value any) error {
 // Subscribe asks for events on a resolved characteristic that offers them.
 func (s *Session) Subscribe(id ID) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil || !c.can("ev") {
 		return fmt.Errorf("%w: %d.%d offers no events", ErrRefused, id.AID, id.IID)
