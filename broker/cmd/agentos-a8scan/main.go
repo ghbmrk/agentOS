@@ -1,28 +1,38 @@
 // Command agentos-a8scan is A8's at-rest check for an owner session on real
-// hardware (broker/recovery/A8-SESSION.md): it scans a drive's plaintext
-// partitions, or any files and directories, for the vault data key and
-// every secret the vault holds, in raw, hex, base64 and base32 forms at
-// every alignment, and checks that the key-slot file holds only the TPM,
-// passphrase and recovery slots.
+// hardware (broker/recovery/A8-SESSION.md): it opens the sealed store
+// (STO-2) with the recovery key, as the unlock path does, and scans a
+// drive's plaintext partitions, or any files and directories, for the
+// store's data key, the keys derived from it (the log key, the head key,
+// the MAC and entries keys) and every sealed secret, in raw, hex, base64
+// and base32 forms at every alignment. It also checks that the store holds
+// only TPM, passphrase and recovery slots.
 //
-//	agentos-a8scan -vault DIR/vault -keys DIR/vault.keys TARGET...
+//	agentos-a8scan -store /var/lib/agentos-store/store TARGET...
 //
-// The recovery key, and optionally the vault passphrase, are read from
-// standard input with echo off, never from the command line; the vault
-// holds neither, so the scan learns them only from the card. Each TARGET is a block device or file (scanned raw, start to end)
-// or a directory (every regular file, no symlinks followed). Before
-// scanning, it plants every needle in a scratch blob and stops unless the
-// scan finds all of them, so a clean result means something. It prints
-// findings by name, place and encoding, never values, and exits 1 on any
-// finding.
+// The recovery key (64 hex digits, the store's recovery factor) and
+// optionally the passphrase are read from standard input with echo off,
+// never from the command line; the store holds neither, so the scan
+// learns them only from the owner. Each TARGET is a block device or file
+// (scanned raw, start to end) or a directory (every regular file, no
+// symlinks followed). Before scanning, it plants every needle in a scratch
+// blob and stops unless the scan finds all of them, so a clean result
+// means something. It prints findings by name, place and encoding, never
+// values, and exits 1 on any finding.
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,26 +42,25 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/ghbmrk/agentos/broker/recovery"
-	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
 func main() {
 	log.SetFlags(0)
-	vp := flag.String("vault", "", "the drive's vault file")
-	kp := flag.String("keys", "", "the drive's key-slot file")
+	sp := flag.String("store", "", "the drive's sealed store file")
 	flag.Parse()
-	if *vp == "" || *kp == "" || flag.NArg() == 0 {
-		log.Fatal("usage: agentos-a8scan -vault FILE -keys FILE TARGET... (recovery key on stdin)")
+	if *sp == "" || flag.NArg() == 0 {
+		log.Fatal("usage: agentos-a8scan -store FILE TARGET... (recovery key on stdin)")
 	}
 	in := bufio.NewReader(os.Stdin)
-	line := readSecret(in, "Recovery key: ")
-	rk, err := recovery.ParseRecoveryKey(line)
-	if err != nil {
-		log.Fatal(err)
+	line := strings.TrimSpace(readSecret(in, "Recovery key: "))
+	rk, err := hex.DecodeString(line)
+	if err != nil || len(rk) != seal.RecoveryLen {
+		log.Fatalf("the recovery key is not %d bytes of hex", seal.RecoveryLen)
 	}
-	pass := strings.TrimRight(readSecret(in, "Vault passphrase (Enter to skip): "), "\r\n")
-	n, err := run(*vp, *kp, rk, pass, flag.Args(), os.Stdout)
+	pass := strings.TrimRight(readSecret(in, "Passphrase (Enter to skip): "), "\r\n")
+	n, err := run(*sp, rk, line, pass, flag.Args(), os.Stdout)
+	clear(rk)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -79,27 +88,29 @@ func readSecret(in *bufio.Reader, prompt string) string {
 	return line
 }
 
-func run(vp, kp string, rk recovery.RecoveryKey, passphrase string, targets []string, out io.Writer) (int, error) {
-	raw, err := os.ReadFile(kp)
+// run opens the store at sp with the recovery key rk (typed as rkText),
+// plants and checks every needle, and scans targets. It returns the number
+// of findings; an error means no scan result.
+func run(sp string, rk []byte, rkText, passphrase string, targets []string, out io.Writer) (int, error) {
+	st, err := seal.Unlock(sp, seal.Recovery{Key: rk})
+	if err != nil {
+		return 0, fmt.Errorf("the recovery key does not open this store: %w", err)
+	}
+	defer st.Close()
+	for _, s := range st.Slots() {
+		switch s.Kind {
+		case seal.KindTPM, seal.KindPassphrase, seal.KindRecovery:
+		default:
+			fmt.Fprintf(out, "FAIL store slots: slot %s is of kind %q\n", s.ID, s.Kind)
+			return 1, nil
+		}
+	}
+	fmt.Fprintln(out, "ok   store slots: only TPM, passphrase and recovery")
+	needles, err := storeNeedles(sp, st, rk, rkText, passphrase, out)
 	if err != nil {
 		return 0, err
 	}
-	if err := recovery.CheckKeys(raw); err != nil {
-		fmt.Fprintf(out, "FAIL key-slot file: %v\n", err)
-		return 1, nil
-	}
-	fmt.Fprintln(out, "ok   key-slot file holds only TPM, passphrase and recovery slots")
-	v, err := vault.OpenSealed(vp, kp, recovery.Factor(rk))
-	if err != nil {
-		return 0, fmt.Errorf("the recovery key does not open this vault: %w", err)
-	}
-	b := &recovery.Box{VaultPath: vp, KeysPath: kp, V: v}
-	needles, err := recovery.AuditNeedles(b, rk, passphrase)
-	v.Close()
-	if err != nil {
-		return 0, err
-	}
-	s, err := recovery.NewScanner(needles)
+	s, err := NewScanner(needles)
 	if err != nil {
 		return 0, err
 	}
@@ -113,7 +124,7 @@ func run(vp, kp string, rk recovery.RecoveryKey, passphrase string, targets []st
 		if err != nil {
 			return found, err
 		}
-		var got []recovery.Finding
+		var got []Finding
 		if fi.IsDir() {
 			var skipped []string
 			got, skipped, err = s.Tree(t)
@@ -141,9 +152,126 @@ func run(vp, kp string, rk recovery.RecoveryKey, passphrase string, targets []st
 	return found, nil
 }
 
+// storeNeedles lists every secret A8's scan must not find in plaintext: the
+// store's data key (unwrapped from the recovery slot by this tool's own
+// reading of the file format, so the scan does not take the key from the
+// code it audits) and the keys derived from it, every sealed secret, and
+// the factors the store never holds, as typed: the recovery key and, when
+// given, the passphrase.
+func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase string, out io.Writer) ([]Needle, error) {
+	raw, err := os.ReadFile(sp)
+	if err != nil {
+		return nil, err
+	}
+	key, id, err := unwrapRecovery(raw, rk)
+	if err != nil {
+		return nil, err
+	}
+	lk, err := st.LogKey()
+	if err != nil {
+		return nil, err
+	}
+	// The log key is derived from the data key; if this reading of the
+	// format unwrapped anything else, the needle list would be wrong.
+	if subtle.ConstantTimeCompare(derive(key, id, "log"), lk[:]) != 1 {
+		return nil, errors.New("the store's recovery slot unwraps to a key the store does not use; refusing to scan")
+	}
+	hk, err := st.HeadKey()
+	if err != nil {
+		return nil, err
+	}
+	ns := []Needle{
+		{Name: "store data key", Value: key},
+		{Name: "store MAC key", Value: derive(key, id, "mac")},
+		{Name: "store entries key", Value: derive(key, id, "entries")},
+		{Name: "log key", Value: lk[:]},
+		{Name: "head key", Value: hk.Seed()},
+	}
+	for _, name := range st.Entries() {
+		v, ok, err := st.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if len(v) < minPattern {
+			fmt.Fprintf(out, "skip store entry %s (shorter than %d bytes)\n", name, minPattern)
+			continue
+		}
+		ns = append(ns, Needle{Name: "store entry " + name, Value: v, Text: true})
+	}
+	ns = append(ns, Needle{Name: "recovery key", Value: append([]byte(nil), rk...)})
+	// Typed as hex, the key's text is already among its hex forms.
+	if !strings.EqualFold(rkText, hex.EncodeToString(rk)) {
+		ns = append(ns, Needle{Name: "recovery key text", Value: []byte(rkText), Text: true})
+	}
+	if len(passphrase) >= minPattern {
+		ns = append(ns, Needle{Name: "passphrase", Value: []byte(passphrase), Text: true})
+	}
+	return ns, nil
+}
+
+// storeLabel is seal's HKDF and associated-data prefix (seal.go, label).
+const storeLabel = "agentos-store/v1/"
+
+func derive(key, id []byte, purpose string) []byte {
+	k, err := hkdf.Key(sha256.New, key, id, storeLabel+purpose, 32)
+	if err != nil {
+		panic(err)
+	}
+	return k
+}
+
+// recoverySlot is a recovery slot as the store file holds it (seal.go,
+// slot); its JSON with Wrap null is the wrap's associated data.
+type recoverySlot struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	Salt []byte `json:"salt"`
+	Wrap []byte `json:"wrap"`
+}
+
+// unwrapRecovery opens the store's data key from the file format alone and
+// returns it with the store's ID.
+func unwrapRecovery(raw, rk []byte) (key, id []byte, err error) {
+	var f struct {
+		ID    []byte            `json:"id"`
+		Slots []json.RawMessage `json:"slots"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, nil, err
+	}
+	err = errors.New("the store has no recovery slot this key opens")
+	for _, m := range f.Slots {
+		var s recoverySlot
+		if json.Unmarshal(m, &s) != nil || s.Kind != string(seal.KindRecovery) || len(s.Wrap) < 12 {
+			continue
+		}
+		wrap := s.Wrap
+		s.Wrap = nil
+		ad, merr := json.Marshal(s)
+		if merr != nil {
+			return nil, nil, merr
+		}
+		ad = append(append([]byte(storeLabel+"slot\x00"), f.ID...), ad...)
+		kek, kerr := hkdf.Key(sha256.New, rk, s.Salt, storeLabel+"recovery-slot", 32)
+		if kerr != nil {
+			return nil, nil, kerr
+		}
+		b, _ := aes.NewCipher(kek)
+		clear(kek)
+		g, _ := cipher.NewGCM(b)
+		if k, oerr := g.Open(nil, wrap[:12], wrap[12:], ad); oerr == nil {
+			return k, f.ID, nil
+		}
+	}
+	return nil, nil, err
+}
+
 // control plants each needle, hex-encoded and inside base64, in random
 // data and requires the scanner to find every one.
-func control(s *recovery.Scanner, needles []recovery.Needle) error {
+func control(s *Scanner, needles []Needle) error {
 	for _, n := range needles {
 		for _, form := range [][]byte{n.Value, []byte(hex.EncodeToString(n.Value)), []byte(base64.StdEncoding.EncodeToString(append([]byte("x"), n.Value...)))} {
 			pad := make([]byte, 4096)
