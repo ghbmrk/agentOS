@@ -423,7 +423,7 @@ func TestPrepSealsOneState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	qr, err := card.QRSVG("http://" + card.BoxAddr + "/claim?code=" + code)
+	qr, err := card.QRSVG(card.BoxPage + "claim?code=" + code)
 	if err != nil {
 		t.Fatal(err)
 	}
