@@ -1,11 +1,11 @@
-// Package follow is the executor for meta.update.follow (OSS-10, GR26): it
+// Package follow is the follow clerk (clerk.go; UPD-2, UPD-8, CH-10): it
 // switches the root of trust the box takes updates from to the root the
 // owner approved on the local page, and alerts the owner at once.
 //
 // The page shows a root's summary (Describe) and holds its bytes under the
-// summary's digest; the owner's tier-4 intent names only that digest and
-// the owner's name for the fork (grants.FollowIntent), so the executor
-// follows exactly the bytes the owner saw. Expiry is judged by the clock
+// summary's digest; the owner's tier-4 approval names only that digest and
+// the owner's name for the fork, so the clerk follows exactly the bytes the
+// owner saw. Expiry is judged by the clock
 // guard's Latest, never the wall clock (WF2). An empty name, switching
 // back, is admitted only for the project's own root (WF1'): one with the
 // root keys of the newest project root the box trusted (the image's, until
@@ -24,8 +24,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/durable"
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/maintain"
 	"github.com/ghbmrk/agentos/broker/update"
 )
@@ -71,6 +70,9 @@ type Config struct {
 	// Pending is the file that holds an alert not yet sent, so a restart
 	// before it goes out neither drops it nor hides it from STATUS.
 	Pending string
+	// Anchors are the owner's hardware keys, the follow clerk's own trust
+	// root for the plans it runs (D-146). The journal executor ignores them.
+	Anchors []key.PublicKey
 }
 
 // Executor follows held roots. It is safe for concurrent use.
@@ -191,19 +193,6 @@ func (x *Executor) project(h held, now time.Time) error {
 	return update.ProjectRoot(anchor, h.root, h.chain, x.options(now))
 }
 
-// parse reads what an intent asks for: the digest and the name. why is set
-// when the intent is not a well-formed follow.
-func parse(in journal.Intent) (digest, name, why string) {
-	if in.Action != journal.ActionUpdateFollow {
-		return "", "", "not a request to change where updates come from"
-	}
-	digest, name, ok := grants.FollowOf(in.ID)
-	if !ok {
-		return "", "", "malformed request to change where updates come from"
-	}
-	return digest, name, ""
-}
-
 func (x *Executor) alert(ctx context.Context, name string, at time.Time) string {
 	if name == "" {
 		name = ProjectName
@@ -260,17 +249,24 @@ func (x *Executor) Note() string {
 	return UnsentPrefix + x.unsent
 }
 
-// Execute switches to the held root the intent's digest names.
-func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
-	digest, name, why := parse(in)
-	if why != "" {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: why}
-	}
+// switched is how a switch ended.
+type switched int
+
+const (
+	notSwitched     switched = iota // nothing changed
+	switchedOK                      // the box follows the root under the name
+	switchedUnknown                 // the root may be in place with the switch unfinished
+)
+
+// switchTo switches to the held root digest names, under name ("" switches
+// back to the project's own root), judging expiry at Latest. The text is
+// the plain-words evidence either way.
+func (x *Executor) switchTo(ctx context.Context, digest, name string) (switched, string) {
 	x.mu.Lock()
 	h, ok := x.held[digest]
 	x.mu.Unlock()
 	if !ok {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "the page no longer holds the root that was approved; show it again"}
+		return notSwitched, "the page no longer holds the root that was approved; show it again"
 	}
 	root := h.root
 	now := x.latest(ctx)
@@ -280,92 +276,48 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 		// moment of the switch (security 4a on #667).
 		err = x.cfg.Store.FollowProject(root, h.chain, x.cfg.Shipped, digest, x.options(now))
 		if errors.Is(err, update.ErrNotProject) {
-			return journal.Outcome{Result: journal.ResultNotApplied,
-				Evidence: "switching back needs the project's own root: its root keys, or the root files that rotate to it from the last project root I trusted (" + err.Error() + ")"}
+			return notSwitched, "switching back needs the project's own root: its root keys, or the root files that rotate to it from the last project root I trusted (" + err.Error() + ")"
 		}
 	} else {
 		err = x.cfg.Store.FollowFork(root, h.chain, x.cfg.Shipped, digest, name, x.options(now))
 		if errors.Is(err, update.ErrIsProject) {
-			return journal.Outcome{Result: journal.ResultNotApplied,
-				Evidence: "this is the project's own root: switch back to the project instead of following it under a name"}
+			return notSwitched, "this is the project's own root: switch back to the project instead of following it under a name"
 		}
 	}
 	if err != nil {
 		if cur, rerr := x.cfg.Store.TrustedRoot(); rerr != nil || bytes.Equal(cur, root) {
-			// The root may be in place with the switch unfinished:
-			// Reconcile decides.
-			return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+			return switchedUnknown, err.Error()
 		}
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
+		return notSwitched, err.Error()
 	}
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, now)}
+	return switchedOK, "now following root " + digest + x.alert(ctx, name, now)
 }
 
-// Reconcile reports a switch done when the box trusts the root the intent
-// approved, under the intent's name, and alerts again (at least once). It
-// reads the box's own trusted root, not the held one: after a restart
-// nothing is held. TrustedRoot first completes or forgets a switch a crash
-// interrupted, so when the box trusts neither the intent's root nor its
-// source, the switch did not happen: the fence on the broker account holds
-// every other switch, and a root rotation keeps the source (#1372). When
-// only one of them matches, it cannot tell, and answers unknown.
-func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
-	digest, name, why := parse(in)
-	if why != "" {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: why}
-	}
+// settled reads the box's own trusted root, not the held one (after a
+// restart nothing is held): switchedOK when the box trusts digest under
+// name. TrustedRoot first completes or forgets a switch a crash
+// interrupted, so when the box trusts neither the root nor the source,
+// the switch did not happen: the fence on the update store holds every
+// other switch, and a root rotation keeps the source (#1372). When only
+// one of them matches, it cannot tell.
+func (x *Executor) settled(digest, name string) (switched, string) {
 	cur, err := x.cfg.Store.TrustedRoot()
 	if err != nil {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+		return switchedUnknown, err.Error()
 	}
 	d, err := update.RootDigest(cur)
 	if err != nil {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+		return switchedUnknown, err.Error()
 	}
 	src, err := x.cfg.Store.Following()
 	if err != nil {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+		return switchedUnknown, err.Error()
 	}
-	if d != digest && src.Name != name {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "I trust neither that root nor that source now"}
+	switch {
+	case d == digest && src.Name == name:
+		return switchedOK, "now following root " + digest
+	case d != digest && src.Name != name:
+		return notSwitched, "I trust neither that root nor that source now"
 	}
-	if d != digest || src.Name != name {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "I do not trust that root under that name"}
-	}
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, x.latest(ctx))}
-}
-
-// Route shares the "update" executor name between following and release
-// activation (apply): follows go to f, everything else to other. Without
-// other, nothing but a follow runs.
-func Route(f *Executor, other journal.Executor) journal.Executor {
-	return router{f, other}
-}
-
-type router struct {
-	f     *Executor
-	other journal.Executor
-}
-
-func (r router) pick(in journal.Intent) journal.Executor {
-	if in.Action == journal.ActionUpdateFollow {
-		return r.f
-	}
-	return r.other
-}
-
-func (r router) Execute(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
-	x := r.pick(in)
-	if x == nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no executor for " + in.Action}
-	}
-	return x.Execute(ctx, in, attempt)
-}
-
-func (r router) Reconcile(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
-	x := r.pick(in)
-	if x == nil {
-		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "no executor for " + in.Action}
-	}
-	return x.Reconcile(ctx, in, attempt)
+	return switchedUnknown, "I do not trust that root under that name"
 }
