@@ -1,6 +1,6 @@
 package seal_test
 
-// REQ: STO-2, A8, HW-5a, CLK-1
+// REQ: STO-2, A8, HW-5a, CLK-1, REC-4, BAK-1
 
 import (
 	"bytes"
@@ -469,4 +469,58 @@ func TestAWholeStoreUnderTheBoxsPolicyKeyDoesNotOpen(t *testing.T) {
 	if !errors.Is(err, seal.ErrTampered) {
 		t.Fatalf("got %v, want ErrTampered", err)
 	}
+}
+
+// MIG-4-recovery-r2 (REC-4, BAK-1): the recovery slot and the backup
+// recipient change in one write. A write that fails before the rename
+// leaves the old slot opening and the old entry, in the file and in the
+// open store; a write that succeeds leaves only the new.
+func TestReplaceAndPutIsOneWrite(t *testing.T) {
+	old := recovery(t)
+	path, s := create(t, old)
+	if err := s.Put("backup/recipient", []byte("old recipient")); err != nil {
+		t.Fatal(err)
+	}
+	id := s.Slots()[0].ID
+	next := recovery(t)
+	restore := seal.FailWrite(errors.New("disk full"))
+	_, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
+	restore()
+	if err == nil {
+		t.Fatal("ReplaceAndPut hid the write's error")
+	}
+	for _, st := range []*seal.Store{s, unlock(t, path, old)} {
+		if v, _, _ := st.Get("backup/recipient"); string(v) != "old recipient" {
+			t.Fatalf("after a failed write the entry is %q", v)
+		}
+		if got := st.Slots(); len(got) != 1 || got[0].ID != id {
+			t.Fatalf("after a failed write the slots are %v", got)
+		}
+	}
+	if _, err := seal.Unlock(path, next); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("the new key after a failed write: got %v, want ErrWrongFactor", err)
+	}
+
+	nid, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
+	if err != nil || nid == "" || nid == id {
+		t.Fatalf("ReplaceAndPut: %q, %v", nid, err)
+	}
+	if _, err := seal.Unlock(path, old); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("the old key after the write: got %v, want ErrWrongFactor", err)
+	}
+	for _, st := range []*seal.Store{s, unlock(t, path, next)} {
+		if v, _, _ := st.Get("backup/recipient"); string(v) != "new recipient" {
+			t.Fatalf("after the write the entry is %q", v)
+		}
+		if got := st.Slots(); len(got) != 1 || got[0].ID != nid {
+			t.Fatalf("after the write the slots are %v", got)
+		}
+	}
+	if _, err := s.ReplaceAndPut("0123456789abcdef", recovery(t), "backup/recipient", nil); !errors.Is(err, seal.ErrNoSlot) {
+		t.Fatalf("an unknown slot: got %v, want ErrNoSlot", err)
+	}
+	if _, err := s.ReplaceAndPut(nid, recovery(t), "Bad Name", nil); err == nil {
+		t.Fatal("a bad entry name was taken")
+	}
+	unlock(t, path, next)
 }

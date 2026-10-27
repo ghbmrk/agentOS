@@ -826,8 +826,44 @@ func (s *Store) Put(name string, value []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	e, err := s.withEntry(name, value)
+	if err != nil {
+		return err
+	}
+	return s.commit(s.f.Slots, e)
+}
+
+// ReplaceAndPut is Replace and Put in one write: a new recovery key's slot
+// in place of slot id, and its backup recipient as entry name (REC-4,
+// BAK-1, MIG-4-recovery-r2). A crash leaves the old slot and old entry, or
+// the new slot and new entry, never one without the other.
+func (s *Store) ReplaceAndPut(id string, f Factor, name string, value []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.live(); err != nil {
+		return "", err
+	}
+	i := s.find(id)
+	if i < 0 {
+		return "", ErrNoSlot
+	}
+	e, err := s.withEntry(name, value)
+	if err != nil {
+		return "", err
+	}
+	sl, err := makeSlot(s.f.ID, s.key, f)
+	if err != nil {
+		return "", err
+	}
+	slots := slices.Clone(s.f.Slots)
+	slots[i] = sl
+	return s.committed(sl.ID, s.commit(slots, e))
+}
+
+// withEntry is the store's entries with name set to a copy of value.
+func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) {
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
-		return errors.New("seal: bad entry name or value too long")
+		return nil, errors.New("seal: bad entry name or value too long")
 	}
 	e := make(map[string][]byte, len(s.entries)+1)
 	for k, v := range s.entries {
@@ -835,9 +871,9 @@ func (s *Store) Put(name string, value []byte) error {
 	}
 	e[name] = slices.Clone(value)
 	if len(e) > MaxEntries {
-		return fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
+		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
 	}
-	return s.commit(s.f.Slots, e)
+	return e, nil
 }
 
 // Get returns a copy of an entry.
@@ -973,7 +1009,8 @@ func writeNew(path string, b []byte) error {
 	return syncDir(filepath.Dir(path))
 }
 
-func writeTemp(path string, b []byte) (string, error) {
+// writeTemp is a variable so a test can make a write fail before the rename.
+var writeTemp = func(path string, b []byte) (string, error) {
 	fh, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return "", err

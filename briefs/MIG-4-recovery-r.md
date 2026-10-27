@@ -65,6 +65,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 **Needs:** r1 for the approval's form (start on r1's branch once its interface is review-accepted, OPERATING §5). **Gate:** D-159 row; the unit files may make it a gate-file PR (`premerge.py --needs-mark`).
 **Estimate:** 70k tokens.
 
+**As built (r2, for r3 to r4b):** `seal.Store.ReplaceAndPut(slotID, f, name, value)` returns the new slot's ID like `Replace`. The units are `agentos-keeper-rotate.socket` and `agentos-keeper-rotate@.service`: the `agentos-keeper-` prefix is what lifts the main side's mask on the store. The socket is at `/run/agentos-keeper/rotate.sock`. The request is one JSON object read to the end of the connection, so the client ends its write half: `{"factor": "passphrase"|"recovery", "secret": base64 of the factor's bytes, "next": 64 hex digits, "approval": base64}`. The answer is one line: `ok`, `request`, `factor`, `approval`, `stale`, `busy` or `store`. The serial lock is a `flock` on the `-state` directory, which `-rotate` also takes (ASSUMPTIONS MIG-4-recovery-r2-2).
+
 ## r3: the lost-card route at boot (#3408)
 
 **Scope:** `broker/cmd/agentos-unlock/main.go` (+test: `-recovery-request PATH`), `broker/clerk/handoff` (`KernelKeys.NewRecovery`, handoff tag v7), `broker/kernel/proc` (`kernelmain.go` keeps it; `kernelsock.go`: `recoverycard` returns it, `recoverycarddone` wipes it), `broker/owner/kernelsock` (client), `agentos-keeper-kernel.service` (the flag), ASSUMPTIONS rows, this brief.

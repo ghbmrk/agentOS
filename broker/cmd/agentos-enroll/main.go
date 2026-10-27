@@ -37,6 +37,13 @@
 // paths the slot was enrolled with (never this boot's PCRs, which the unlock
 // step capped), and rewrites the pins (ASSUMPTIONS STO-2c-b); -delete frees a store's NV indexes and removes it.
 //
+// -rotate-recovery replaces the recovery key on a running box (REC-4, route
+// A of D-201). The keeper's socket unit runs it once per connection, as
+// root, with no TPM: it reads one request on stdin, opens the store with the
+// Owner Card factor the request carries, checks the kernel's head-signed
+// approval, puts the new key's slot and backup recipient in place in one
+// write, and answers one word on stdout (rotateWord).
+//
 // Enrollment runs as root, and -anchor-dir's parent may be the kernel uid's
 // to write. So the anchor's directory is removed, made and handed to the
 // kernel through descriptors on that parent, never by path: a symlink
@@ -81,6 +88,9 @@ import (
 func main() {
 	log.SetFlags(0)
 	c, err := parse(os.Args[1:], os.Stderr)
+	if err == nil && c.rotateRecovery {
+		os.Exit(rotateRecoveryMain(c, os.Stdin, os.Stdout))
+	}
 	if err == nil {
 		err = runMode(c)
 	}
@@ -123,6 +133,7 @@ type config struct {
 	pcrs                             []uint // nil on -rotate: keep the slot's
 	kernelUID, kernelGID             int
 	rotate, delete                   bool
+	rotateRecovery                   bool
 	// firstEdge is the link port's capture file (agentos-link's pre-store
 	// mode), "" for none; restore takes no first key from it.
 	firstEdge string
@@ -133,6 +144,9 @@ type config struct {
 	// stop, for tests only, ends the run after the named step as a crash
 	// would; nil runs every step.
 	stop func(step string) bool
+	// now, for tests only, is the clock -rotate-recovery checks an
+	// approval's expiry by; nil is the system's.
+	now func() time.Time
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -151,6 +165,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.kernelGID, "kernel-gid", -1, "the kernel's gid")
 	fs.BoolVar(&c.rotate, "rotate", false, "rotate my policy key")
 	fs.BoolVar(&c.delete, "delete", false, "free the store's NV indexes and remove it")
+	fs.BoolVar(&c.rotateRecovery, "rotate-recovery", false, "replace the recovery key: one request on stdin, one word on stdout")
 	fs.StringVar(&c.firstEdge, "first-edge", "", "the link port's capture file of the first edge's hello, which I remove")
 	fs.BoolVar(&c.restore, "restore", false, "a restore's enrollment: take no first edge key")
 	if err := fs.Parse(args); err != nil {
@@ -171,9 +186,9 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	case !filepath.IsAbs(c.state):
 		return c, errors.New("an absolute -state is required")
-	case c.rotate && c.delete:
-		return c, errors.New("-rotate and -delete are separate runs")
-	case c.rotate || c.delete:
+	case c.rotate && c.delete, c.rotateRecovery && (c.rotate || c.delete):
+		return c, errors.New("-rotate, -rotate-recovery and -delete are separate runs")
+	case c.rotate || c.delete || c.rotateRecovery:
 	case !filepath.IsAbs(c.anchorDir) || !filepath.IsAbs(c.log):
 		return c, errors.New("absolute -anchor-dir and -log are required")
 	case c.kernelUID <= 0 || c.kernelGID <= 0:
@@ -728,6 +743,14 @@ func open(c config, t transport.TPM) (*seal.Store, error) {
 // do; after, the new pins and slot. A rerun resumes where a crash stopped,
 // with the same next key.
 func rotate(c config, t transport.TPM) error {
+	// The runs that rewrite a running box's store (-rotate,
+	// -rotate-recovery) take its lock, so neither writes back what the
+	// other just replaced.
+	unlock, err := lockStore(c, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	st, err := open(c, t)
 	if err != nil {
 		return err
@@ -903,4 +926,223 @@ func deleteStore(c config, t transport.TPM) error {
 		return err
 	}
 	return os.Remove(c.storePath())
+}
+
+// maxRotateRequest bounds -rotate-recovery's request (brief decision 7).
+const maxRotateRequest = 8 << 10
+
+// rotateWords are -rotate-recovery's refusals, each a fixed word that the
+// owner side reads; any other error answers "store". Each changed nothing.
+var rotateWords = []struct {
+	err  error
+	word string
+}{
+	{errRequest, "request"},
+	{errFactor, "factor"},
+	{errApproval, "approval"},
+	{errStale, "stale"},
+	{errBusy, "busy"},
+}
+
+// rotateWord is the answer for rotateRecovery's err.
+func rotateWord(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	for _, w := range rotateWords {
+		if errors.Is(err, w.err) {
+			return w.word
+		}
+	}
+	return "store"
+}
+
+var (
+	errRequest   = errors.New("agentos-enroll: the request does not read")
+	errFactor    = errors.New("agentos-enroll: the factor does not open my store")
+	errApproval  = errors.New("agentos-enroll: the approval is not my kernel's for this key on the card route, or has expired")
+	errStale     = errors.New("agentos-enroll: the approval is for a recipient my store no longer holds")
+	errBusy      = errors.New("agentos-enroll: another rotation is running")
+	errStoreOpen = errors.New("agentos-enroll: my store does not take the new key")
+)
+
+// rotateRequest is -rotate-recovery's request, read to the end of stdin:
+// the owner side ends its write half once it has sent it. Secret is the factor's
+// bytes: the store passphrase, or the current recovery key's 32 bytes. Next
+// is the new recovery key, hex; Approval is the kernel's (handoff.Approval).
+type rotateRequest struct {
+	Factor   string `json:"factor"` // "passphrase" or "recovery"
+	Secret   []byte `json:"secret"`
+	Next     hexKey `json:"next"`
+	Approval []byte `json:"approval"`
+}
+
+// hexKey decodes a hex string into bytes the caller can wipe: json hands
+// UnmarshalJSON a slice of the request, which rotateRecoveryMain wipes too,
+// and no string copy is made.
+type hexKey []byte
+
+func (k *hexKey) UnmarshalJSON(b []byte) error {
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return errRequest
+	}
+	b = b[1 : len(b)-1]
+	*k = make([]byte, hex.DecodedLen(len(b)))
+	if _, err := hex.Decode(*k, b); err != nil {
+		return errRequest
+	}
+	return nil
+}
+
+func (r *rotateRequest) wipe() {
+	clear(r.Secret)
+	clear(r.Next)
+}
+
+// rotateRecoveryMain runs -rotate-recovery on in and out and returns the
+// exit status. The word goes to out; the reason, which never holds a
+// secret, to stderr (the unit's journal).
+func rotateRecoveryMain(c config, in io.Reader, out io.Writer) int {
+	err := rotateRecovery(c, in)
+	fmt.Fprintln(out, rotateWord(err))
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	return 0
+}
+
+// rotateRecovery replaces the store's recovery slot with the request's new
+// key and its backup recipient with that key's, in one write, under the
+// kernel's approval (brief MIG-4-recovery-r, r2). It opens the store with
+// the request's factor only: on a running box nothing else opens it. Every
+// refusal is a rotateWords error and changes nothing.
+func rotateRecovery(c config, in io.Reader) error {
+	raw, err := io.ReadAll(io.LimitReader(in, maxRotateRequest+1))
+	defer clear(raw)
+	if err != nil || len(raw) > maxRotateRequest {
+		return errRequest
+	}
+	var r rotateRequest
+	defer r.wipe()
+	if json.Unmarshal(raw, &r) != nil || len(r.Next) != seal.RecoveryLen || len(r.Approval) > handoff.MaxApproval {
+		return errRequest
+	}
+	var f seal.Factor
+	switch r.Factor {
+	case "passphrase":
+		f = seal.Passphrase{Phrase: r.Secret}
+	case "recovery":
+		if len(r.Secret) != seal.RecoveryLen {
+			return errFactor
+		}
+		f = seal.Recovery{Key: r.Secret}
+	default:
+		return errRequest
+	}
+	unlock, err := lockStore(c, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	st, err := seal.Unlock(c.storePath(), f)
+	if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
+		return errFactor
+	} else if err != nil {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	defer st.Close()
+	head, err := st.HeadKey()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	pub := head.Public().(ed25519.PublicKey)
+	clear(head)
+	now := time.Now
+	if c.now != nil {
+		now = c.now
+	}
+	a, err := handoff.VerifyApproval(pub, r.Approval, now().UnixMilli())
+	if err != nil || a.Route != handoff.RouteCard {
+		return errApproval
+	}
+	old, err := storeRecipientID(st)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	if a.Old != old {
+		return errStale
+	}
+	next, err := backup.RecipientFor(r.Next)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	if next.ID() != a.Next {
+		return errApproval
+	}
+	v, err := handoff.EncodeRecipient(next.X, next.EK)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	var slot []string
+	for _, sl := range st.Slots() {
+		if sl.Kind == seal.KindRecovery {
+			slot = append(slot, sl.ID)
+		}
+	}
+	if len(slot) != 1 {
+		return fmt.Errorf("%w: it holds %d recovery slots, not one", errStoreOpen, len(slot))
+	}
+	// A directory sync that fails after the rename still leaves the new
+	// slot and recipient in place (seal.Store.commit): the store opens only
+	// with the new key, so the answer is ok, and the reason goes to the
+	// journal.
+	id, err := st.ReplaceAndPut(slot[0], seal.Recovery{Key: r.Next}, handoff.RecipientEntry, v)
+	if id == "" {
+		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	if err != nil {
+		log.Printf("agentos-enroll: the new key is in place; the store's directory sync failed: %v", err)
+	}
+	return nil
+}
+
+// storeRecipientID is the ID of the backup recipient st holds, or "" for a
+// store enrolled before MIG-4-recovery-e1, which holds none.
+func storeRecipientID(st *seal.Store) (string, error) {
+	v, ok, err := st.Get(handoff.RecipientEntry)
+	if err != nil || !ok {
+		return "", err
+	}
+	w, err := handoff.ParseRecipient(v)
+	if err != nil {
+		return "", err
+	}
+	x, ek, err := handoff.SplitRecipient(w)
+	if err != nil {
+		return "", err
+	}
+	return backup.Recipient{X: x, EK: ek}.ID(), nil
+}
+
+// lockStore takes the store's write lock, a lock on the -state directory
+// itself, so it leaves nothing on disk: it waits for it, or, unless wait,
+// answers errBusy while another run holds it.
+func lockStore(c config, wait bool) (func(), error) {
+	fd, err := unix.Open(c.state, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errStoreOpen, &os.PathError{Op: "open", Path: c.state, Err: err})
+	}
+	how := unix.LOCK_EX
+	if !wait {
+		how |= unix.LOCK_NB
+	}
+	if err := unix.Flock(fd, how); err != nil {
+		unix.Close(fd)
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errBusy
+		}
+		return nil, fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	return func() { unix.Close(fd) }, nil
 }

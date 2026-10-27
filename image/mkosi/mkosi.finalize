@@ -1302,7 +1302,7 @@ def noexec_violations(root):
 # later VM or board deployment (#2943) replaces it and leaves the main side's rules alone.
 KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
-KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service")
+KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, and the Owner Card's factors that
 # setup leaves for enrollment. No main-side unit sees it; the image makes each at boot (tmpfiles.d).
 KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup")
@@ -1332,9 +1332,10 @@ KERNEL_REBOOT = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" != success ] && [ -e
 # (#3073), so without this a start refused after a good one would ask for the reboot.
 KERNEL_UP_CLEAR = "/usr/bin/rm -f /run/agentos-kernel/up"
 REBOOT_WORDS = re.compile(r"(?<![\w-])(systemctl|systemd-run|busctl|dbus-send|reboot|shutdown|halt|poweroff|kexec|telinit)(?![\w-])")
-# The units that may open the TPM (#2889 Security later 2): the keeper's, and the old core's vault
-# process until it is deleted (D-139). Only through the resource manager.
-TPM_UNITS = KEEPER_UNITS + ("agentos-egress.service",)
+# The units that may open the TPM (#2889 Security later 2): the keeper's but its recovery-key rotation,
+# which needs none, and the old core's vault process until it is deleted (D-139). Only through the
+# resource manager.
+TPM_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-egress.service")
 TPM_DEVICE = "/dev/tpmrm0"
 # Groups that can open a TPM node: tpm-udev's, and the resource manager's (60-agentos-tpm.rules).
 TPM_GROUPS = ("tss", "agentos-egress")
@@ -1519,6 +1520,11 @@ def keeper_unit_violations(name, files):
                 out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
             elif keeper_reach(p, above=True):
                 out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+    # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
+    # ignores it); its bound is TimeoutStartSec=.
+    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+        out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
+                   % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
     start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
