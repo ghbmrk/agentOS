@@ -23,20 +23,30 @@ type Recaller interface {
 	Recall(subject string) (kernel.Recall, bool)
 }
 
-// Manifest begins a content object's plaintext. It carries the page CA and
-// the edge key with the revoked-edge-key record as opaque data (CH-9,
-// HW-15), and has no field for a kernel or holder key. Restore trusts none
-// of it until the owner-page step (slice b).
+// Manifest begins a content object's plaintext. It carries the page CA as
+// opaque data (CH-9), and has no field for a kernel or holder key. The
+// edge key and its revocations are log entries, so the log section carries
+// them (HW-15, KRN-1; MIG-4-recovery-f1 decision 4), never a second copy
+// here. Restore trusts none of it until the owner-page step (slice b).
 type Manifest struct {
-	Version     int       `json:"version"`
-	BackupID    string    `json:"backup_id"`
-	Created     int64     `json:"created"`
-	Recipient   string    `json:"recipient"`
-	PageCA      []byte    `json:"page_ca"`
-	EdgeKey     []byte    `json:"edge_key"`
-	RevokedEdge [][]byte  `json:"revoked_edge"`
-	Sections    []Section `json:"sections"`
+	Version   int       `json:"version"`
+	BackupID  string    `json:"backup_id"`
+	Created   int64     `json:"created"`
+	Recipient string    `json:"recipient"`
+	PageCA    []byte    `json:"page_ca"`
+	Sections  []Section `json:"sections"`
 }
+
+// manifestV1 is the first manifest, which also had edge-key fields; a
+// backup written with it still opens, and the fields are dropped unread.
+type manifestV1 struct {
+	Manifest
+	EdgeKey     []byte   `json:"edge_key"`
+	RevokedEdge [][]byte `json:"revoked_edge"`
+}
+
+// manifestVersion is the manifest Write writes; Open also reads version 1.
+const manifestVersion = 2
 
 // Section is one stretch of the content object after the manifest.
 type Section struct {
@@ -54,14 +64,15 @@ type Source struct {
 
 // Input is what one backup holds.
 type Input struct {
-	Recipient   Recipient
-	Created     int64
-	PageCA      []byte
-	EdgeKey     []byte
-	RevokedEdge [][]byte
-	Sections    []Source
-	Keys        kernel.Keys // read only through List and Get
-	State       Recaller
+	Recipient Recipient
+	Created   int64
+	PageCA    []byte // the page authority's sealed form, opaque here
+	// PageCAFingerprint is PageCA's certificate fingerprint (as the Owner
+	// Card prints it), kept in the Record; the caller gives both.
+	PageCAFingerprint string
+	Sections          []Source
+	Keys              kernel.Keys // read only through List and Get
+	State             Recaller
 }
 
 // Record is what the box keeps about a backup: public and opaque only, no
@@ -74,6 +85,10 @@ type Record struct {
 	Subjects   []string  `json:"subjects"`   // sorted: every subject a listed key table may give (Set.Prepare)
 	ContentSum string    `json:"content_sha256"`
 	TableSum   string    `json:"table_sha256"`
+	// PageCA is the fingerprint of the page authority the backup carries,
+	// public: restore refuses a backup whose authority is not this one,
+	// and the owner checks it against the Owner Card (CH-9). Empty: none.
+	PageCA string `json:"page_ca_fingerprint,omitempty"`
 }
 
 const (
@@ -159,8 +174,8 @@ func Write(w io.Writer, t Target, in Input) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	m := Manifest{Version: version, BackupID: hex.EncodeToString(id[:]), Created: in.Created,
-		Recipient: in.Recipient.ID(), PageCA: in.PageCA, EdgeKey: in.EdgeKey, RevokedEdge: in.RevokedEdge}
+	m := Manifest{Version: manifestVersion, BackupID: hex.EncodeToString(id[:]), Created: in.Created,
+		Recipient: in.Recipient.ID(), PageCA: in.PageCA}
 	for _, s := range in.Sections {
 		n, sum, err := hashSource(s, io.Discard)
 		if err != nil {
@@ -205,7 +220,7 @@ func Write(w io.Writer, t Target, in Input) (Record, error) {
 	}
 
 	rec := Record{BackupID: m.BackupID, Recipient: in.Recipient, Created: in.Created,
-		Generation: firstGeneration, ContentSum: hex.EncodeToString(sum.Sum(nil))}
+		Generation: firstGeneration, ContentSum: hex.EncodeToString(sum.Sum(nil)), PageCA: in.PageCAFingerprint}
 	tb, err := sealTable(in.Recipient, id, firstGeneration, entries)
 	if err != nil {
 		return Record{}, err
@@ -328,13 +343,11 @@ func Open(r io.Reader, rk []byte) (Manifest, *Sections, error) {
 	if _, err := io.ReadFull(body, mb); err != nil {
 		return Manifest{}, nil, ErrOpen
 	}
-	var m Manifest
-	dec := json.NewDecoder(bytes.NewReader(mb))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
-		return Manifest{}, nil, fmt.Errorf("backup: manifest: %w", err)
+	m, err := decodeManifest(mb)
+	if err != nil {
+		return Manifest{}, nil, err
 	}
-	if m.Version != version || m.BackupID != hex.EncodeToString(h.backupID[:]) || m.Recipient != hex.EncodeToString(h.recipient[:]) || h.gen != 0 {
+	if m.Version != manifestVersion && m.Version != 1 || m.BackupID != hex.EncodeToString(h.backupID[:]) || m.Recipient != hex.EncodeToString(h.recipient[:]) || h.gen != 0 {
 		return Manifest{}, nil, ErrHeader
 	}
 	names := make([]string, len(m.Sections))
@@ -348,4 +361,26 @@ func Open(r io.Reader, rk []byte) (Manifest, *Sections, error) {
 		return Manifest{}, nil, err
 	}
 	return m, &Sections{r: body, list: slices.Clone(m.Sections)}, nil
+}
+
+// decodeManifest reads a manifest of either version, each with only its own
+// fields; a version 1 manifest's edge-key fields are dropped.
+func decodeManifest(mb []byte) (Manifest, error) {
+	var v struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(mb, &v); err != nil {
+		return Manifest{}, fmt.Errorf("backup: manifest: %w", err)
+	}
+	var m manifestV1
+	var into any = &m.Manifest
+	if v.Version == 1 {
+		into = &m
+	}
+	dec := json.NewDecoder(bytes.NewReader(mb))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		return Manifest{}, fmt.Errorf("backup: manifest: %w", err)
+	}
+	return m.Manifest, nil
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -881,4 +882,75 @@ func (w webauthn) Sign(msg []byte) []byte {
 	s, _ := ecdsa.SignASN1(rand.Reader, w.p, h[:])
 	b, _ := key.AssertionSig(key.Assertion{AuthenticatorData: ad, ClientDataJSON: cd, Signature: s})
 	return b
+}
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: the unlock step hands the kernel the store's page
+// authority, and the kernel it becomes holds it. A store enrolled before
+// f1 has none: it hands none and its kernel still starts, saying it
+// certifies no page key. An entry that does not read hands nothing.
+func TestUnlockHandsThePageCA(t *testing.T) {
+	r := newRig(t, true)
+	a, err := pageca.New(pageca.DefaultName, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	must(t, err)
+	v, err := pageca.Marshal(a)
+	must(t, err)
+	put := func(v []byte) {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		if v == nil {
+			must(t, st.Delete(handoff.PageCAEntry))
+		} else {
+			must(t, st.Put(handoff.PageCAEntry, v))
+		}
+		st.Close()
+	}
+	handed := func() handoff.KernelKeys {
+		t.Helper()
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		b, err := unlock(role.Config(), role.pins)
+		must(t, err)
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		clear(b)
+		k, err := handoff.ReadKeys(pr)
+		must(t, err)
+		return k
+	}
+	put(v)
+	if k := handed(); !bytes.Equal(k.PageCA, v) || len(k.Anchors) != 2 {
+		t.Fatal("the hand-off's page authority is not the store's")
+	}
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if strings.Contains(out.String(), proc.ErrNoAuthority.Error()) {
+		t.Fatalf("the kernel said it has no page authority:\n%s", out)
+	}
+
+	put(nil)
+	if k := handed(); k.PageCA != nil || len(k.Anchors) != 2 {
+		t.Fatal("no entry: handed an authority")
+	}
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if !strings.Contains(out.String(), proc.ErrNoAuthority.Error()) {
+		t.Fatalf("a kernel without a page authority did not say so:\n%s", out)
+	}
+
+	bad := bytes.Clone(v)
+	bad[len(bad)/2] ^= 1
+	for name, e := range map[string][]byte{"damaged": bad, "short": v[:len(v)-1], "spaced": append(bytes.Clone(v), ' ')} {
+		put(e)
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		if _, err := unlock(role.Config(), role.pins); err == nil || !strings.Contains(err.Error(), "page authority") {
+			t.Errorf("%s entry: got %v", name, err)
+		}
+	}
 }

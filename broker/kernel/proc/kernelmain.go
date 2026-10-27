@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -66,6 +67,51 @@ var ErrLogKey = errors.New("run: the log does not open under my store's key; I s
 // rotation, which stores one (REC-4).
 var ErrNoRecipient = errors.New("run: my store holds no backup recipient, so I take no backup until you rotate your recovery key")
 
+// ErrNoAuthority: the unlock step handed no page authority, so the kernel
+// certifies no page key and the page serves HTTP only (CH-9). On a box not
+// yet set up the fix is a new enrollment; on a claimed one, ErrPageRestore.
+var ErrNoAuthority = errors.New("run: my store holds no page authority, so I certify no page key")
+
+// ErrPageRestore: a claimed box has no page authority. A new one is never
+// made, since the Owner Card carries the old fingerprint: the box must be
+// restored from a backup, which carries it (CH-9, BAK-1).
+var ErrPageRestore = errors.New("run: I am claimed but hold no page authority; restore me from a backup")
+
+// maxPageKey bounds a page key to certify: a P-256 key in PKIX DER is 91
+// bytes.
+const maxPageKey = 128
+
+// Certified is the certify call's answer: the page's serving certificate
+// and the authority's, both DER.
+type Certified struct {
+	Leaf      []byte `json:"leaf"`
+	Authority []byte `json:"authority"`
+}
+
+// Certify signs the page's serving key (PKIX DER, ECDSA P-256 only) for the
+// page name only (pageca.Authority.Issue) at now, Unix milliseconds. With
+// no authority it answers ErrNoAuthority, or ErrPageRestore once setup has
+// logged the owner's keys. The key the authority signs with never leaves
+// the kernel process; the call takes the lock only to read the claim.
+func (h *Kernel) Certify(now int64, pub []byte) (Certified, error) {
+	if h.page == nil {
+		claimed := false
+		h.With(func(k *kernel.Kernel) error { claimed = len(k.State().Anchors) > 0; return nil })
+		if claimed {
+			return Certified{}, ErrPageRestore
+		}
+		return Certified{}, ErrNoAuthority
+	}
+	if len(pub) == 0 || len(pub) > maxPageKey {
+		return Certified{}, pageca.ErrKey
+	}
+	leaf, err := h.page.Issue(pub, time.UnixMilli(now), nil)
+	if err != nil {
+		return Certified{}, err
+	}
+	return Certified{Leaf: leaf, Authority: h.page.Certificate()}, nil
+}
+
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
@@ -97,12 +143,17 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if len(keys.Recipient) == 0 {
 		fmt.Fprintln(os.Stderr, ErrNoRecipient)
 	}
+	// One enrolled before the page authority holds none, and certify
+	// refuses (MIG-4-recovery-f1).
+	if len(keys.PageCA) == 0 {
+		fmt.Fprintln(os.Stderr, ErrNoAuthority)
+	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
-		BackupDir: cfg.BackupDir, Recipient: keys.Recipient,
+		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
 	}, clock())
 	if err != nil {
 		return err

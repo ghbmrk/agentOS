@@ -14,8 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // REQ: STO-2, CLK-1, KEY-4
@@ -111,7 +113,9 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	v2 := bytes.Clone(good)
 	v2[len(handoffTag)-2] = '2' // a v2 hand-off, whose anchors were bare Ed25519 keys
 	v3 := bytes.Clone(good)
-	v3[len(handoffTag)-2] = '3'                          // a v3 hand-off, which carried no recipient
+	v3[len(handoffTag)-2] = '3' // a v3 hand-off, which carried no recipient
+	v4 := bytes.Clone(good)
+	v4[len(handoffTag)-2] = '4'                          // a v4 hand-off, which carried no page authority
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -141,7 +145,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -397,4 +401,106 @@ func TestKernelKeysCarryTheRecipient(t *testing.T) {
 			t.Errorf("entry %s: got %v, want ErrHandoff", name, err)
 		}
 	}
+}
+
+// testPageCA is a page authority's sealed form.
+func testPageCA(t *testing.T) []byte {
+	t.Helper()
+	a, err := pageca.New(pageca.DefaultName, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := pageca.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: the page authority crosses whole beside the
+// recipient, and none crosses as none. One that is oversized or does not
+// open as an authority is refused at both ends and as a store entry.
+func TestKernelKeysCarryThePageCA(t *testing.T) {
+	ca := testPageCA(t)
+	keys := testKeys()
+	keys.Recipient, keys.PageCA = testRecipient(t), ca
+	b, err := keys.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ReadKeys(pipeWith(t, b))
+	if err != nil || !bytes.Equal(k.PageCA, ca) || !bytes.Equal(k.Recipient, keys.Recipient) || len(k.Anchors) != len(anchors) {
+		t.Fatalf("the page authority did not survive the hand-off: %v", err)
+	}
+	if a, err := pageca.Unmarshal(k.PageCA); err != nil || a.Name() != pageca.DefaultName {
+		t.Fatalf("the handed authority does not open: %v", err)
+	}
+	k.Wipe()
+	if k.PageCA != nil {
+		t.Fatal("Wipe left the page authority")
+	}
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.PageCA != nil {
+		t.Fatalf("no authority: %x %v", k.PageCA, err)
+	}
+
+	// The authority's length sits after the recipient.
+	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + RecipientLen
+	if int(binary.BigEndian.Uint16(b[o:])) != len(ca) {
+		t.Fatalf("authority length not at %d", o)
+	}
+	wire := func(n int, r []byte) []byte {
+		w := bytes.Clone(b[:o])
+		w = binary.BigEndian.AppendUint16(w, uint16(n))
+		w = append(w, r...)
+		return append(w, b[o+2+len(ca):]...)
+	}
+	bad := bytes.Clone(ca)
+	bad[len(bad)/2] ^= 1
+	big := append(bytes.Clone(ca), bytes.Repeat([]byte{' '}, pageca.MaxSealed)...)
+	for name, w := range map[string][]byte{
+		"long":       wire(len(ca)+1, append(bytes.Clone(ca), ' ')),
+		"short":      wire(len(ca)-1, ca[:len(ca)-1]),
+		"huge":       wire(0xffff, ca),
+		"garbage":    wire(len(ca), bad),
+		"oversized":  wire(len(big), big),
+		"truncated":  b[:o+2+100],
+		"no length":  b[:o+1],
+		"no anchors": b[:o+2+len(ca)],
+	} {
+		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
+			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	other, err := pageca.New("other.internal", time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, v := range map[string][]byte{"garbage": bad, "oversized": big, "not json": []byte("cert"), "no key": []byte(`{"cert":null,"key":null}`)} {
+		k := testKeys()
+		k.PageCA = v
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
+		}
+		if _, err := ParsePageCA(v); !errors.Is(err, ErrHandoff) {
+			t.Errorf("entry %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	// The entry is the authority's sealed form as is, for any page name it
+	// admits; the kernel serves only the name its certificate names.
+	if got, err := ParsePageCA(get(t, func() ([]byte, error) { return pageca.Marshal(other) })); err != nil || len(got) == 0 {
+		t.Fatalf("another name's authority: %v", err)
+	}
+	if got, err := ParsePageCA(ca); err != nil || !bytes.Equal(got, ca) || &got[0] == &ca[0] {
+		t.Fatalf("the entry does not read as a copy: %v", err)
+	}
+}
+
+func get(t *testing.T, f func() ([]byte, error)) []byte {
+	t.Helper()
+	b, err := f()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

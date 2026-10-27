@@ -18,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // MIG-4-recovery-e3 (#3251): the kernel process takes, writes and verifies
@@ -847,4 +848,53 @@ func (b *bbox) tick() {
 		b.t.Fatal(err)
 	}
 	b.h.reseals.Wait()
+}
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: every backup carries the page authority the kernel
+// holds, so a restore brings back the fingerprint the Owner Card prints,
+// and its kept Record names that fingerprint, also after a restart. A
+// kernel with no authority writes none and names none.
+func TestBackupCarriesThePageCA(t *testing.T) {
+	ca, a := testPageCA(t)
+	b := newBBox(t, recipientWire(t, testRK))
+	b.cfg.PageCA = ca
+	b.restart()
+	b.subject()
+	dir := b.addTarget("drive", false)
+	taken := b.backup()
+	if len(taken) != 1 || taken[0].Backup == nil || !taken[0].Backup.Verified {
+		t.Fatalf("backup: %+v", taken)
+	}
+	id := taken[0].Backup.BackupID
+	f := mustOpen(t, filepath.Join(dir, id+".content"))
+	defer f.Close()
+	m, _, err := backup.Open(f, testRK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pageca.Unmarshal(m.PageCA)
+	if err != nil || !bytes.Equal(got.Certificate(), a.Certificate()) || got.Fingerprint() != a.Fingerprint() {
+		t.Fatalf("the backup's page authority is not the kernel's: %v", err)
+	}
+	if !bytes.Equal(m.PageCA, ca) {
+		t.Fatal("the backup's page authority is not in its sealed form")
+	}
+	b.restart()
+	if i := b.h.bk.find(id); i < 0 || b.h.bk.kept[i].Record.PageCA != a.Fingerprint() {
+		t.Fatalf("the kept record does not name the authority's fingerprint: %+v", b.h.bk.kept)
+	}
+
+	n := newBBox(t, recipientWire(t, testRK))
+	n.subject()
+	ndir := n.addTarget("drive", false)
+	nt := n.backup()
+	if len(nt) != 1 || nt[0].Backup == nil {
+		t.Fatalf("backup without an authority: %+v", nt)
+	}
+	nf := mustOpen(t, filepath.Join(ndir, nt[0].Backup.BackupID+".content"))
+	defer nf.Close()
+	if nm, _, err := backup.Open(nf, testRK); err != nil || nm.PageCA != nil || n.h.bk.kept[0].Record.PageCA != "" {
+		t.Fatalf("a kernel with no authority wrote one: %v", err)
+	}
 }
