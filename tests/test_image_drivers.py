@@ -52,8 +52,9 @@ class DriversTest(unittest.TestCase):
     def setUpClass(cls):
         cls.bin_dir = tempfile.TemporaryDirectory()
         cls.checker = pathlib.Path(cls.bin_dir.name) / "drivercheck"
-        subprocess.run(["go", "build", "-trimpath", "-o", str(cls.checker), "."], cwd=IMG / "drivercheck",
-                       env=dict(os.environ, CGO_ENABLED="0"), check=True)
+        # As image/build.sh builds it: one file, in the broker's module.
+        subprocess.run(["go", "build", "-trimpath", "-o", str(cls.checker), "../image/drivercheck/main.go"],
+                       cwd=IMG.parent / "broker", env=dict(os.environ, CGO_ENABLED="0"), check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -140,6 +141,10 @@ class DriversTest(unittest.TestCase):
             "declaration fails Check": (lambda: self.driver(entry=dict(ENTRY_JSON, declaration=bad_decl)), "DEV-4"),
             "declaration with an unknown field": (lambda: self.driver(entry=dict(ENTRY_JSON, declaration=dict(
                 DECL, Host="203.0.113.1"))), "unknown field"),
+            "unknown link kind": (lambda: self.driver(entry=dict(ENTRY_JSON, declaration=dict(DECL, Link="udp"))),
+                                  "link kind"),
+            "tcp channel on a gatt link": (lambda: self.driver(entry=dict(ENTRY_JSON, declaration=dict(
+                DECL, Link="gatt"))), "gatt"),
             "name off the alphabet": (lambda: self.driver("Scale_1"), "alphabet"),
             "name too long for its user": (lambda: self.driver("s" * 20), "alphabet"),
             "dynamically linked (PT_INTERP)": (lambda: self.driver(data=elf([1, 3])), "dynamically linked"),

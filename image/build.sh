@@ -74,11 +74,11 @@ install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/u
 for r in 59-agentos-host-disks 64-agentos-host-disks-assembly 72-agentos-host-disks-late; do
 	install -D -m 0644 "$REPO/broker/hostdisk/udev/$r.rules" "$STAGE/usr/lib/udev/rules.d/$r.rules"
 done
-# Device drivers (DEVSLOT-image): each declaration passes devslot.Check (image/drivercheck, built
-# for this step and never shipped), each binary is static, and each gets the units and user that
+# Device drivers (DEVSLOT-image): each declaration passes devslot.Check (image/drivercheck, one file
+# built in the broker's module for this step and never shipped), each binary is static, and each gets the units and user that
 # mkosi.finalize's template renders for its name; drivers.json lists them, and mkosi.finalize
 # refuses a tree that differs from it.
-(cd "$HERE/drivercheck" && CGO_ENABLED=0 go build -trimpath -o "$OUT/drivercheck" .)
+(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -o "$OUT/drivercheck" ../image/drivercheck/main.go)
 python3 "$HERE/finish_image.py" --stage-drivers "$DRIVERS" "$STAGE" "$OUT/drivercheck"
 rm -f "$OUT/drivercheck"
 chmod -R u+w,go-w "$STAGE"

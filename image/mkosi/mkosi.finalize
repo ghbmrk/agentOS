@@ -2767,7 +2767,7 @@ def driver_entries(root):
         doc = json.loads(Conf(root, DRIVERS_JSON).content())
     except (OSError, ValueError) as e:
         return [], ["%s: unreadable (%s); the tree check never passes what it cannot read (DEVSLOT-image)"
-                    % (DRIVERS_JSON, getattr(e, "strerror", None) or e)]
+                    % (DRIVERS_JSON, e.strerror if isinstance(e, OSError) else e)]
     if not isinstance(doc, dict) or sorted(doc) != ["drivers"] or not isinstance(doc["drivers"], list):
         return [], ['%s: must be {"drivers": [...]} (DEVSLOT-image)' % DRIVERS_JSON]
     entries, out, seen = [], [], set()

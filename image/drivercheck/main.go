@@ -3,7 +3,9 @@
 // refuses a declaration the slot would refuse or a class row that is not one DEV-4 class per
 // declared operation, and prints the declaration in canonical form (encoding/json of
 // devslot.Declaration), which the image's drivers.json carries and the host compares byte for byte.
-// It runs on the build host only and ships in no image.
+// It runs on the build host only and ships in no image. It is one file with no module of its own:
+// image/build.sh builds it inside the broker's module (go build ../image/drivercheck/main.go), so
+// it links this checkout's devslot.
 package main
 
 import (
